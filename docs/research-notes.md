@@ -56,21 +56,50 @@ llm-router 的 5 段流水线里第 2 段 "probe" 就是一个经济型 LLM 预�
 
 ## 协议互译实现参考（Protocol translation）
 
-调研开源的 OpenAI / Anthropic / Responses / Gemini 协议互译实现（含流式 SSE），用于设计 Protocol Adapter。
+调研开源的 OpenAI / Anthropic / Responses / Gemini 协议互译实现（含流式 SSE），用于设计 Protocol Adapter。**我们不抄代码，自己重写——参考其实现思路与架构**（授权问题另行处理，不作为选型约束）。以"完整度 + 正确性 + 架构清晰度"为标尺做了覆盖矩阵对比。
 
-最值得借鉴的三个（按可借鉴度排序）：
+### 👑 参考标杆：musistudio/llms
 
-1. **musistudio/llms**（TypeScript，**MIT**）——设计最干净、最可直接借鉴。一个 `Transformer` 接口（`requestIn / requestOut / responseIn / responseOut` 四方法）+ OpenAI 形态的统一中枢 `UnifiedChatRequest`，并有一套完整的 OpenAI↔Anthropic 流式状态机。claude-code-router 的翻译引擎。
-2. **Portkey-AI/gateway**（TypeScript，**Apache-2.0**）——最经生产打磨。声明式请求配置与响应 transformer 分离，通用 `readStream` SSE 切分器（按协议用不同 split pattern），以及缓存命中时的 JSON→流合成器。
-3. **maxnowack/anthropic-proxy**（JS，**MIT**，已归档）——最小可读参考，单文件展示 Anthropic SSE 事件序列。
+`https://github.com/musistudio/llms`（TypeScript，claude-code-router 的翻译引擎）。它是唯一**存在意义就是协议互译**的项目，契约最干净、双向、且已是我们的目标语言。
 
-避免直接抄：**new-api**（AGPLv3，法律负担重，只研究不抄）；Vercel AI SDK 归一到自己的 part 流而非 wire 格式，只作状态机参考；Cloudflare AI Gateway 闭源，仅作 API 面参考。
+为什么它在"我们这个具体问题"上完整度最高：
 
-**推荐结构（musistudio + Portkey 混合）**：
+- 每个协议 = 一个类，实现 **5 方法契约**：`transformRequestOut`（native 入站 → 统一 IR）、`transformRequestIn`（IR → native 出站）、`transformResponseIn`、`transformResponseOut`、`endPoint`（它负责的入站路由，如 `/v1/messages`、`/v1beta/models/:modelAndAction`）。入站与出站翻译在同一个文件里，一个协议一处描述完——这正是它"可重写"的原因。
+- 统一中枢 = **OpenAI Chat Completions 形态**。litellm / Portkey / new-api / one-api / Bifrost 五个独立实现都收敛到同一个 IR，所以这是事实标准；选它意味着遇到边界 case 还能交叉参考其他五个实现。
+- **流式状态机最值得啃**且很成熟：`anthropic.transformer.ts` 的 `convertOpenAIStreamToAnthropic` 用单调 `contentIndex` 分配器 + `toolCallIndexToContentBlockIndex` 映射（并行/流式工具调用的正确解法）+ 临时 id 后补升级 + `safeClose/safeEnqueue` 幂等关闭守卫。这恰好是 litellm 踩错的那类 bug（Gemini `input_json_delta` 丢失 #25561）的正面参照。
 
-- **统一中枢用 OpenAI Chat 形态**，扩展可选字段：thinking/推理块、多部件 typed content（图像/文档）、tool-call ID、cache-control、`provider_raw` 透传袋（装上游原生 `stop_reason`/`usage`）。
-- **每个协议一对 transformer，按路由归属**：N 个 client adapter + M 个 provider adapter，请求 `clientWire → requestIn → Unified → requestOut → providerWire`，响应反向。是 **N+M 而非 N×M**，这是扩展的关键。
-- **流式统一走中枢**：provider `responseIn` 产出统一 chunk 迭代器，client `responseOut` 消费并发各自 SSE；维护每流状态对象（block index、`openai_index → anthropic_block_index` 映射、累加器、`started/finished/closed` 守卫）；为"客户端要流式但上游是单 JSON（缓存命中/非流式 provider）"提供 JSON→SSE 合成器。
+弱点：Responses API 比 litellm 浅、文档稀疏（要读源码）、单人维护（靠 claude-code-router 用户量实战）。
+
+### 🥈 正确性规范：BerriAI/litellm
+
+`https://github.com/BerriAI/litellm`（Python）。架构耦合进大框架不适合当模板，但**边界 case 的正确性最全**，当"checklist"用：
+
+- 唯一有**真正完整的 Responses API 翻译深度**：Anthropic `/v1/messages` → `/responses` 的 item 展开、`tool_use`/`tool_result` 提升为顶层 item、`budget_tokens`→effort、reasoning item、compaction 形状映射（doc: `anthropic_unified/messages_to_responses_mapping`）。即便我们用 TS 实现，也要照它的 spec 级清单补齐。
+- 正确性 helper：`truncate_tool_name`（OpenAI 64 字符上限 vs Anthropic 无限制，SHA-256 防碰撞截断 + 响应时还原）、`_add_additional_properties_false`（递归强制 OpenAI strict-mode JSON schema）、按模型族 gate `cache_control`。
+
+第三参照：**QuantumNous/new-api**（Go），其 adaptor 显式暴露 `ConvertOpenAIRequest`/`ConvertClaudeRequest`/`ConvertGeminiRequest`，验证 any-to-any 入站矩阵。
+
+### 要啃的源码（musistudio/llms，`src/transformer/`）
+
+- `anthropic.transformer.ts` — 核心。`transformRequestOut`（system 数组→system 消息、`tool_result`→`role:"tool"`、`tool_use`→`tool_calls`、thinking+signature）、`convertOpenAIResponseToAnthropic`（finish-reason 映射、usage 拆分 `input = prompt − cached`）、`convertOpenAIStreamToAnthropic`（流式状态机）。
+- `gemini.transformer.ts` + `utils/gemini.util.ts` — `alt=sse`、`x-goog-api-key`、无 tool-call ID、schema `format` 限制。
+- `openai.transformer.ts` + `openai.responses.transformer.ts` — 中枢恒等变换 + Responses 面。
+- `tooluse / reasoning / maxtoken / streamoptions ...transformer.ts` — **可叠加的横切行为 transformer** 管线模式。
+- `index.ts`（transformer 注册表）、`server.ts`（`endPoint` 如何挂成入站路由）。
+
+### 要 lift 的架构模式（思路，非代码）
+
+1. **唯一 IR = OpenAI Chat 形态**（5 个独立实现共同验证）。
+2. **每协议一个类、5 方法契约**，入站+出站同处一文件。
+3. **翻译永远走 `nativeIn → IR → nativeOut`**，绝不做 N×N 直连对：N 个协议 = **2N 个变换函数,不是 N² 个适配器**——这是最重要的设计决策。
+4. **流式 = 显式的每方向状态机**（不是透传）：维护 content-block index 分配器、tool-call-index→block-index 映射、临时 id→真 id 升级、幂等关闭守卫；确定性地发 `message_start → content_block_start/delta/stop → message_delta → message_stop`。
+5. **横切关注点做成可叠加的行为 transformer**（max-token 钳制、tool-use 归一、reasoning 注入）叠在协议 transformer 之上。
+
+补充要点（在上述 5 点之上）：
+
+- 统一 IR 在 OpenAI Chat 形态基础上**扩展可选字段**：thinking/推理块、多部件 typed content（图像/文档）、tool-call ID、cache-control、`provider_raw` 透传袋（装上游原生 `stop_reason`/`usage`，供 agent 客户端还原）。
+- 若一个协议既可作入站（client）又可作出站（provider），就是 2N 变换函数；若入站集合与出站集合分开，则是 N+M 适配器——本质都是"经中枢中转，绝不 N×N 直连"。
+- 为"客户端要流式但上游是单 JSON（缓存命中 / 非流式 provider）"准备 **JSON→SSE 合成器**。
 
 **必须处理的 5 个流式 / 边界坑**：
 

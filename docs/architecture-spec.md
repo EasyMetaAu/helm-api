@@ -38,12 +38,14 @@ API 网关（API Gateway）。职责：
 - 将提供方的响应转换回客户端所请求的协议。
 - 保持流式语义（SSE 事件跨协议映射）。
 
-设计（参考 musistudio/llms + Portkey，详见研究笔记）：
+设计（以 **musistudio/llms** 为架构蓝本，**litellm** 作正确性规范；不抄代码，自行重写，详见研究笔记）：
 
-- **统一中枢用 OpenAI Chat 形态**，扩展 thinking/推理块、多部件 content、tool-call ID、`provider_raw` 透传袋（装上游原生 `stop_reason`/`usage`）。
-- **每协议一对 transformer**：client 侧 `requestIn / responseOut`，provider 侧 `requestOut / responseIn`；规模是 **N+M 而非 N×M**。
-- **流式统一走中枢**：provider `responseIn` 产出统一 chunk 迭代器，client `responseOut` 发各自 SSE；维护每流状态（block index、`openai_index→block_index` 映射、`started/finished/closed` 守卫）；为缓存命中/非流式上游提供 JSON→SSE 合成器。
-- 已知必处理坑：finish_reason/stop_reason 枚举错配、usage 字段翻译与缓存计费、tool-call 流式 index/ID 协调、block/role 一致性、system 与多模态结构错配。
+- **统一中枢（IR）用 OpenAI Chat 形态**，扩展 thinking/推理块、多部件 content、tool-call ID、`provider_raw` 透传袋（装上游原生 `stop_reason`/`usage`）。
+- **每协议一个类、5 方法契约**（`transformRequestOut/In`、`transformResponseOut/In`、`endPoint`），入站+出站同处一文件。
+- **翻译永远 `nativeIn → IR → nativeOut`**，绝不 N×N 直连（N 协议 = 2N 变换函数）。
+- **流式 = 显式状态机**：content-block index 分配器、tool-call-index→block-index 映射、临时 id→真 id 升级、幂等关闭守卫；为缓存命中/非流式上游提供 JSON→SSE 合成器。
+- **横切关注点做成可叠加 transformer**（max-token 钳制、tool-use 归一、reasoning 注入）。
+- 已知必处理坑：finish_reason/stop_reason 枚举错配、usage 字段翻译与缓存计费、tool-call 流式 index/ID 协调、block/role 一致性、system 与多模态结构错配、Responses API item 展开（照 litellm 补齐）。
 
 ### Auth Resolver
 
