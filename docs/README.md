@@ -15,7 +15,7 @@
 
 ## 一段话讲清 Helm 是什么
 
-Helm API 是一个可配置的智能模型网关。它接收标准的 AI API 请求（OpenAI Chat、Anthropic Messages、OpenAI Responses，后续支持 Gemini），按任务类型和复杂度对每个请求进行分类，将其路由到一个可配置的 **lane** 而非裸的 provider 别名，通过主用和 fallback provider 执行，并记录每一次路由决策以便调试。客户端只需更改 `base_url` 和 API key。
+Helm API 是 **LLM 的 nginx**：一个声明式的智能模型网关。它接收标准的 AI API 请求（OpenAI Chat、Anthropic Messages、OpenAI Responses，后续支持 Gemini），用确定性规则（必要时辅以默认关闭的小模型评估）按任务类型和复杂度分类，将其路由到一个可配置的 **lane** 而非裸的 provider 别名，通过主用和 fallback provider 执行，并记录每一次路由决策以便调试。客户端只需更改 `base_url` 和 API key。
 
 ## 核心产品闭环
 

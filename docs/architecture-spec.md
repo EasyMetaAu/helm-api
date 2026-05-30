@@ -5,17 +5,19 @@
 ```text
 Client
   -> API Gateway
+  -> Auth Resolver               # 强制 API key（启动时引导生成）
   -> Protocol Adapter
-  -> Auth Resolver
-  -> Optional Memory Middleware
-  -> Task Classifier
+  -> Task Classifier             # 三层级联：rules -> eval -> balanced
   -> Policy Engine
   -> Lane Resolver
   -> Capability Filter
   -> Circuit Breaker
   -> Provider Executor
   -> Telemetry / Request Log
+  -> (Memory Middleware)         # MVP 之后；MVP 不接入
 ```
+
+定位：Helm 是 **LLM 的 nginx**——声明式配置驱动的模型网关。客户端只见统一标准与输出，模型分配/调度全部由 YAML 配置和上述流水线完成。
 
 ## 组件
 
@@ -34,7 +36,14 @@ API 网关（API Gateway）。职责：
 
 - 将 OpenAI / Anthropic / Responses / 未来的 Gemini 请求归一化为统一的内部请求结构。
 - 将提供方的响应转换回客户端所请求的协议。
-- 保持流式语义。
+- 保持流式语义（SSE 事件跨协议映射）。
+
+设计（参考 musistudio/llms + Portkey，详见研究笔记）：
+
+- **统一中枢用 OpenAI Chat 形态**，扩展 thinking/推理块、多部件 content、tool-call ID、`provider_raw` 透传袋（装上游原生 `stop_reason`/`usage`）。
+- **每协议一对 transformer**：client 侧 `requestIn / responseOut`，provider 侧 `requestOut / responseIn`；规模是 **N+M 而非 N×M**。
+- **流式统一走中枢**：provider `responseIn` 产出统一 chunk 迭代器，client `responseOut` 发各自 SSE；维护每流状态（block index、`openai_index→block_index` 映射、`started/finished/closed` 守卫）；为缓存命中/非流式上游提供 JSON→SSE 合成器。
+- 已知必处理坑：finish_reason/stop_reason 枚举错配、usage 字段翻译与缓存计费、tool-call 流式 index/ID 协调、block/role 一致性、system 与多模态结构错配。
 
 ### Auth Resolver
 
@@ -44,22 +53,48 @@ API 网关（API Gateway）。职责：
 - 附加账户、组织、用户和权限元数据。
 - 绝不在遥测中存储明文 API key。
 - 记录 key 来源和 key ID，使每个请求都能追溯到对应的 key。
+- **强制鉴权**：`require_api_key: true`，不允许匿名访问。
+
+**启动引导（bootstrap）**：服务启动时若不存在任何 key，自动生成一把 root key，仅在首次打印到启动日志/持久化一次（`generate_if_missing` + `print_once`）。这保证 Helm 装好即有一把可用的 key，而不暴露给匿名流量。
 
 ### Task Classifier
 
-任务分类器（Task Classifier）。职责：
+任务分类器（Task Classifier）。它是一个**三层级联**，命中即停：
 
-- 计算 `task_type`、`complexity` 和 `constraints`。
-- 优先使用确定性的本地启发式规则。
-- 允许未来在功能开关后接入基于 LLM/嵌入的分类器。
-- 为调试 UI 返回可解释的信号。
+```text
+第 1 层 rules（确定性规则，始终开启）
+  命中且 confidence ≥ 阈值 → 输出 lane
+第 2 层 eval（小模型评估，默认关闭，带缓存）
+  小模型判出 complexity / task_type → 输出 lane
+第 3 层 default → balanced lane（分类兜底终点）
+```
 
-初始分类器的信号来源：
+职责：
 
-- 类清单式（manifest-style）的本地复杂度评分。
-- 针对特定任务的关键词/工具检测。
-- 请求字段，例如 tools、response format、attachments、max tokens。
-- 启用 memory 时可选的 memory 摘要。
+- 计算 `task_type`、`complexity`、`confidence` 和 `constraints`。
+- 第 1 层优先：确定性的本地加权评分，零成本、零额外延迟。
+- 第 1 层不确定（confidence 低于阈值）时，可选地进入第 2 层小模型评估。
+- 都判不出来则落到 balanced。
+- 为调试 UI 返回可解释的信号（命中的维度、置信度、决策层级、是否命中 eval 缓存）。
+
+**第 1 层：确定性规则引擎（参考开源 Manifest）**
+
+- 加权维度评分：关键词 / 结构 / 上下文维度，各有权重与方向，累加成 `rawScore`。
+- 四档复杂度边界：`simple | standard | complex | reasoning`。
+- 任务检测：关键词集合 + 工具名前缀 + 结构信号（URL、代码块、文件路径、堆栈）。
+- 会话动量：短的后续消息按历史倾向加权。
+- 硬覆盖：心跳直判 simple；形式逻辑直判 reasoning；带 tools 下限 standard；超长上下文下限 complex。
+- 置信度闸门：`sigmoid(到最近边界的距离)`，低于阈值进入第 2 层。
+- 维度/权重/关键词/边界/阈值是**数据**，放进 `classifier.yaml`；结构信号正则与控制流是代码。
+
+**第 2 层：小模型评估（eval，默认关闭）**
+
+- 借鉴 llm-router 的 probe 管线（strict-JSON、`temperature:0`、非流式、双超时、fail-open），但改为**可决策**：输出 `{ complexity, task_type, confidence }` 直接选 lane。
+- 缓存按 **content-hash**（规范化"最后用户消息 + tools 签名"）+ TTL，网关无状态友好。
+- 加 `max_tokens` 上限封顶成本；超时/解析失败 → fail-open 到 `balanced`。
+- 评估调用经过一个内部小模型 provider，不属于对外三条 lane。
+
+请求字段信号：tools、response format、attachments、max tokens 等可被两层共用。
 
 ### Policy Engine
 
@@ -138,6 +173,7 @@ max_tokens: number | null
 stream: boolean
 metadata:
   conversation_id: string | null
+  # 以下 memory 字段在 MVP 中仅预留，不接入（见 memory-middleware-spec.md）
   thread_id: string | null
   resource_id: string | null
   project_id: string | null
@@ -153,6 +189,9 @@ requested_model: string
 classifier:
   task_type: string
   complexity: string
+  confidence: number
+  decided_by: rules | eval | default   # 哪一层定的 lane
+  eval_cache_hit: boolean | null       # 触发 eval 时是否命中缓存
   constraints: object
   explanation: array
 policy:
@@ -184,9 +223,11 @@ final:
 config/
   lanes.yaml           # 默认 lane 与任务 lane 的定义
   policies.yaml        # 服务端路由策略
+  classifier.yaml      # 分类器：rules 维度/权重/阈值 + eval 小模型与缓存
   providers.yaml       # 提供方别名与凭证引用
   capabilities.yaml    # 模型/提供方能力元数据
   pricing.yaml         # 定价元数据与覆盖项
+  auth.yaml            # require_api_key + 启动引导 key（或经环境变量/DB）
 ```
 
 ## 安全规则
