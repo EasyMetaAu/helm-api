@@ -34,12 +34,27 @@ export const ProviderConfigSchema = z.object({
   api_key_env: z.string().min(1), // credential reference: env var name, not plaintext
 });
 
+// A single quota dimension pair. 0 = that dimension is unlimited (skip the check).
+export const RateLimitQuotaSchema = z.object({
+  rpm: z.number().int().nonnegative().default(0), // 0 = unlimited
+  tpm: z.number().int().nonnegative().default(0),
+});
+
+// Per-key partial override: a key may override rpm and/or tpm; absent dimensions
+// fall back to `default`. Invalid (negative / non-int) values are fail-closed at
+// load time (principle 2) — the limiter never runs on a malformed quota.
+export const RateLimitQuotaOverrideSchema = z
+  .object({
+    rpm: z.number().int().nonnegative().optional(),
+    tpm: z.number().int().nonnegative().optional(),
+  })
+  .strict(); // an override pointing at a non-existent dimension is rejected
+
 export const RateLimitConfigSchema = z.object({
   enabled: z.boolean().default(false), // off by default, zero friction
-  default: z.object({
-    rpm: z.number().int().nonnegative().default(0), // 0 = unlimited
-    tpm: z.number().int().nonnegative().default(0),
-  }),
+  default: RateLimitQuotaSchema,
+  // key_id -> partial quota override. Missing dimensions fall back to default.
+  overrides: z.record(z.string(), RateLimitQuotaOverrideSchema).default({}),
 });
 
 export const RuntimeConfigSchema = z.object({
@@ -74,6 +89,8 @@ export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 export type BootstrapConfig = z.infer<typeof BootstrapConfigSchema>;
 export type AuthConfig = z.infer<typeof AuthConfigSchema>;
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
+export type RateLimitQuota = z.infer<typeof RateLimitQuotaSchema>;
+export type RateLimitQuotaOverride = z.infer<typeof RateLimitQuotaOverrideSchema>;
 export type RateLimitConfig = z.infer<typeof RateLimitConfigSchema>;
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 export type HelmConfig = z.infer<typeof HelmConfigSchema>;

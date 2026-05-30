@@ -1,4 +1,49 @@
-import type { ApiKeyRecord, DecisionRecord } from "@helm/shared";
+import type {
+  ApiKeyRecord,
+  DecisionRecord,
+  MemoryMessageInput,
+  MemoryObservationInput,
+  MemoryThreadInput,
+  Observation,
+  RawMessage,
+  Reflection,
+  ReflectionScope,
+  ReflectionUpsertInput,
+  RoutingSignal,
+} from "@helm/shared";
+
+import type { BucketState } from "../ratelimit/token-bucket.js";
+
+// Lifecycle status of a background memory job (docs/08 memory_jobs.status).
+export type MemoryJobStatus = "pending" | "running" | "done" | "failed";
+
+// Persistence for the per-key rate-limit token buckets. The limiter is a
+// security/quota boundary: this port is fail-CLOSED — a read/write failure must
+// propagate (the limiter then rejects), NEVER degrade into "unlimited". One row
+// per (keyId, dim). `consume` does the atomic read-modify-write (sqlite via a
+// transaction; supabase via a single upsert/row-level update) so concurrent
+// requests cannot both spend the last token. Keys are key_id only — never a
+// plaintext key (principle 7).
+export interface RateLimitConsumeResult {
+  state: BucketState;
+  ok: boolean;
+  remaining: number;
+  resetSeconds: number;
+}
+
+export interface RateLimitStore {
+  // Atomically refill + try to consume `cost` tokens from the (keyId, dim)
+  // bucket. `state` is the caller's last-known state hint; adapters that persist
+  // their own copy (sqlite/supabase) ignore it and read the row inside the txn.
+  consume(
+    keyId: string,
+    dim: "rpm" | "tpm",
+    state: BucketState | null,
+    capacityPerMin: number,
+    cost: number,
+    nowMs: number,
+  ): Promise<RateLimitConsumeResult>;
+}
 
 // Store ports (repository pattern). core depends ONLY on these interfaces; the
 // sqlite and supabase adapters each implement the same contract. This file is
@@ -42,6 +87,62 @@ export interface TelemetryStore {
   insert(input: InsertTelemetryInput): Promise<{ id: string }>;
   queryRecent(limit: number): Promise<DecisionRecord[]>; // most recent N, createdAt desc
   getByRequestId(requestId: string): Promise<DecisionRecord | null>;
+  // POST-MVP Agentic Signals (docs/02). Read every decision record whose
+  // createdAt falls in [startMs, endMs) so the background Signal Collector can
+  // aggregate a window AFTER the fact. Half-open interval keeps adjacent windows
+  // non-overlapping → idempotent re-collect. NEVER called on the request path.
+  queryWindow(startMs: number, endMs: number): Promise<DecisionRecord[]>;
+}
+
+// SignalStore — persistence for the POST-MVP Agentic Signals feedback layer
+// (docs/02; research-notes「Plano」). A signal is an aggregated, REDACTED
+// observation rolled up by (taskType, lane). This is an OBSERVABILITY artifact:
+// the collector writes it asynchronously off the request path, and (this task)
+// nothing reads it back into routing — `getSignal` exists for a FUTURE
+// consumption task. One logical row per (taskType, lane); `upsertSignals`
+// overwrites so re-collecting a window never double-counts. Pure types — no SQL.
+export interface SignalStore {
+  // Idempotent upsert keyed by (taskType, lane). Overwrites the prior signal for
+  // each pair; a failure here is fail-open (the collector logs, never 5xx).
+  upsertSignals(signals: readonly RoutingSignal[]): Promise<void>;
+  // Read the latest signal for a (taskType, lane), or null if none yet. Reserved
+  // for the future routing-feedback consumer; unused by the MVP route.
+  getSignal(taskType: string, lane: string): Promise<RoutingSignal | null>;
+}
+
+// Memory middleware store (docs/08 "存储模型"). POST-MVP persistence floor: this
+// phase only ensures threads + appends raw messages (observe writes originals).
+// Read/inject/compress methods are added by the observe/inject tasks. Memory is
+// a MIDDLEWARE — these methods never touch routing/lane state. Input types come
+// from @helm/shared via z.infer (single source of truth).
+export interface MemoryStore {
+  // Idempotent upsert of a thread; safe to call on every observed request.
+  ensureThread(input: MemoryThreadInput): Promise<void>;
+  // Persist one raw message; returns the generated message id.
+  appendMessage(input: MemoryMessageInput): Promise<string>;
+  // POST-MVP 阶段 2 (Observer). Read a thread's raw messages oldest-first so the
+  // background Observer can compress the older ones into an observation. Returns
+  // the persisted rows (with ids + createdAt) for an auditable source range.
+  listMessages(threadId: string): Promise<RawMessage[]>;
+  // Persist one compressed observation; returns its generated id. source range
+  // is REQUIRED on the input (docs/08) so memory can be audited against originals.
+  appendObservation(input: MemoryObservationInput): Promise<string>;
+  // POST-MVP 阶段 2 (Reflector). Read a scope's ACTIVE observations so the
+  // background Reflector can merge them into a stable reflection. Scope is
+  // project / resource / thread (one or more levels); never cross-project.
+  listObservations(scope: ReflectionScope): Promise<Observation[]>;
+  // Read the current (latest) reflection for a scope, or null if none yet. The
+  // Reflector compares the freshly merged text against this to decide whether
+  // to bump the version (stable / slowly-changing).
+  getReflection(scope: ReflectionScope): Promise<Reflection | null>;
+  // Persist a NEW reflection version (version+1) when the merged text actually
+  // changed. Returns its generated id. Never called when the text is unchanged
+  // (keeps the injected prefix cache-friendly).
+  upsertReflection(input: ReflectionUpsertInput): Promise<string>;
+  // Update a background job's lifecycle status (+ optional error on failure).
+  // The Observer/Reflector mark their job done/failed; failure is recorded here,
+  // never bubbled to the main request path (fail-open).
+  updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void>;
 }
 
 // Optional config persistence (MVP is yaml-first; reserved for admin write-back).

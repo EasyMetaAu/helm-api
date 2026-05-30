@@ -23,7 +23,11 @@ function fullConfig() {
     runtime: {
       max_request_bytes: 1_000_000,
       request_timeout_ms: 30_000,
-      rate_limit: { enabled: false, default: { rpm: 0, tpm: 0 } },
+      rate_limit: {
+        enabled: false,
+        default: { rpm: 0, tpm: 0 },
+        overrides: {} as Record<string, { rpm?: number; tpm?: number }>,
+      },
     },
   };
 }
@@ -99,6 +103,35 @@ describe("HelmConfigSchema", () => {
         res.error.issues.some((i) => i.path.join(".") === "runtime.rate_limit.default.rpm"),
       ).toBe(true);
     }
+  });
+
+  it("rejects a negative override rpm (fail-closed) with a precise path", () => {
+    const bad = fullConfig();
+    bad.runtime.rate_limit.overrides = { k_app1: { rpm: -1 } };
+    const res = HelmConfigSchema.safeParse(bad);
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(
+        res.error.issues.some(
+          (i) => i.path.join(".") === "runtime.rate_limit.overrides.k_app1.rpm",
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects an override pointing at a non-existent dimension (strict)", () => {
+    const bad = fullConfig();
+    bad.runtime.rate_limit.overrides = { k_app1: { rps: 5 } as Record<string, number> };
+    const res = HelmConfigSchema.safeParse(bad);
+    expect(res.success).toBe(false);
+  });
+
+  it("accepts a partial override (only rpm) and defaults overrides to {}", () => {
+    const ok = fullConfig();
+    ok.runtime.rate_limit.overrides = { k_app1: { rpm: 100 } };
+    const parsed = HelmConfigSchema.parse(ok);
+    expect(parsed.runtime.rate_limit.overrides.k_app1?.rpm).toBe(100);
+    expect(parsed.runtime.rate_limit.overrides.k_app1?.tpm).toBeUndefined();
   });
 
   it("does not coerce a string require_api_key", () => {

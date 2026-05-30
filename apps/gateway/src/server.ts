@@ -8,6 +8,8 @@ import {
   createCircuitBreaker,
   createOpenAIClient,
   createProviderRegistry,
+  createRateLimiter,
+  createSignalCollector,
   createSqliteDb,
   DEFAULT_LANES,
   generateKey,
@@ -25,7 +27,10 @@ import {
   redact,
   routeRequest,
   SqliteKeyStore,
+  SqliteRateLimitStore,
+  SqliteSignalStore,
   SqliteTelemetryStore,
+  startSignalScheduler,
 } from "@helm/core";
 import type { CatalogEntry, InternalRequest } from "@helm/shared";
 import { createApp } from "./app.js";
@@ -33,6 +38,7 @@ import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { basicAuth, resolveAdminAuth } from "./middleware/basic-auth.js";
+import { rateLimitMiddleware } from "./middleware/rate-limit.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
@@ -47,6 +53,9 @@ export interface ServerHandle {
   app: ReturnType<typeof createApp>;
   port: number;
   host: string;
+  // Stop background workers (e.g. the Agentic Signals scheduler). Optional and
+  // safe to skip — the timers are unref'd so they never block process exit.
+  dispose?: () => void;
 }
 
 // Build a provider registry that maps every DEFAULT_LANES model alias to the
@@ -79,6 +88,24 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
   const db = createSqliteDb(join(dataDir, "helm.db"));
   const keyStore = new SqliteKeyStore(db);
   const telemetry = new SqliteTelemetryStore(db);
+  // Agentic Signals (POST-MVP feedback layer, docs/02). The collector consumes
+  // ALREADY-persisted telemetry and writes aggregated, REDACTED signals — it is
+  // started as a BACKGROUND interval below (NEVER on the request path), so it
+  // adds zero latency to any served request. Observe-only this phase: nothing
+  // reads these signals back into routing.
+  const signalCollector = createSignalCollector({
+    telemetry,
+    signals: new SqliteSignalStore(db),
+    now: () => Date.now(),
+    log: (level, msg, fields) => logger.log(level, msg, fields),
+  });
+  // Per-key rate limiter (docs/06). Default OFF (config.runtime.rate_limit.enabled)
+  // -> zero-overhead pass-through. Counters persist in the SAME sqlite file so
+  // windows survive restarts / span instances. Sits AFTER auth, BEFORE routing.
+  const rateLimiter = createRateLimiter({
+    config: config.runtime.rate_limit,
+    store: new SqliteRateLimitStore(db),
+  });
 
   // Bootstrap root key on first start (idempotent; prints once).
   void bootstrapRootKey({
@@ -146,6 +173,9 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
     "/v1/chat/*",
     authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
   );
+  // Rate limit AFTER auth (needs the resolved key_id) and BEFORE classify/route
+  // (cut off cost before classification/eval). No-op when disabled (docs/06).
+  app.use("/v1/chat/*", rateLimitMiddleware({ limiter: rateLimiter }));
 
   // The per-request `route`: bind a fresh `execute` to the request's abort
   // signal (client disconnect), then run the framework-agnostic orchestrator.
@@ -276,5 +306,27 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
     pipeline: messagesPipeline,
   });
 
-  return { app, port: config.server.port, host: config.server.host };
+  // Start the Agentic Signals background scheduler — the OFF-the-request-path
+  // trigger. It periodically asks the collector to aggregate the just-elapsed
+  // window. The timer is unref'd (never blocks exit) and fail-open (a tick error
+  // is logged, never thrown). DELIBERATELY started here, OUTSIDE every middleware
+  // / route registration, so no request ever touches signal code (zero added
+  // latency). Disabled when HELM_SIGNALS_DISABLED is set (e.g. unit/e2e runs).
+  let signalScheduler: { stop: () => void } | null = null;
+  if (process.env.HELM_SIGNALS_DISABLED !== "1") {
+    const intervalMs = Number(process.env.HELM_SIGNALS_INTERVAL_MS ?? 60_000);
+    signalScheduler = startSignalScheduler({
+      collector: signalCollector,
+      intervalMs: Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 60_000,
+      now: () => Date.now(),
+      log: (level, msg, fields) => logger.log(level, msg, fields),
+    });
+  }
+
+  return {
+    app,
+    port: config.server.port,
+    host: config.server.host,
+    dispose: () => signalScheduler?.stop(),
+  };
 }

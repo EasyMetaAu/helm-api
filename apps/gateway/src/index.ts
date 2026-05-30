@@ -14,6 +14,11 @@ export { type AuthDeps, type AuthIdentity, authMiddleware } from "./middleware/a
 export { HelmHttpError } from "./middleware/error-handler.js";
 export { bodyLimit, type LimitsConfig, timeout } from "./middleware/limits.js";
 export { normalizeHeaders } from "./middleware/normalize-headers.js";
+export {
+  type RateLimiterPort,
+  type RateLimitMiddlewareDeps,
+  rateLimitMiddleware,
+} from "./middleware/rate-limit.js";
 export { type ChatRouteDeps, registerChatRoutes } from "./routes/chat.js";
 export { type HealthDeps, registerHealthRoutes } from "./routes/health.js";
 export {

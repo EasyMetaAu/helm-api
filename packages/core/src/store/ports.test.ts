@@ -53,6 +53,12 @@ class InMemoryTelemetryStore implements TelemetryStore {
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {
     return this.rows.find((r) => r.rec.request_id === requestId)?.rec ?? null;
   }
+  async queryWindow(startMs: number, endMs: number): Promise<DecisionRecord[]> {
+    return [...this.rows]
+      .filter((r) => r.at.getTime() >= startMs && r.at.getTime() < endMs)
+      .sort((a, b) => a.at.getTime() - b.at.getTime())
+      .map((r) => r.rec);
+  }
 }
 
 describe("Store ports are implementable contracts", () => {

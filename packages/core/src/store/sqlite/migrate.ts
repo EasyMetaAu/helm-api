@@ -50,6 +50,113 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_telemetry_created_at ON telemetry (created_at DESC);
     `,
   },
+  {
+    // Memory middleware tables (docs/08 "存储模型"). POST-MVP persistence floor:
+    // build only — no read/inject. Deliberately ISOLATED from routing/key
+    // tables (no FK to lanes/policies/api_keys); memory_messages references
+    // memory_threads ONLY. source_message_range is NOT NULL so compressed
+    // observations stay auditable against originals (docs/08).
+    version: 2,
+    sql: `
+      CREATE TABLE IF NOT EXISTS memory_threads (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        resource_id TEXT,
+        owner_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS memory_messages (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL REFERENCES memory_threads (id),
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        token_estimate INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS memory_observations (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL REFERENCES memory_threads (id),
+        source_message_range TEXT NOT NULL,
+        observation_text TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        referenced_at INTEGER,
+        priority INTEGER,
+        tags TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS memory_reflections (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        resource_id TEXT,
+        thread_id TEXT,
+        reflection_text TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        token_estimate INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS memory_jobs (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_messages_thread ON memory_messages (thread_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_memory_observations_thread ON memory_observations (thread_id, observed_at);
+    `,
+  },
+  {
+    // Per-key rate-limit token buckets (docs/06 "限流与配额"). One row per
+    // (key_id, dim); tokens is REAL so fractional refill survives reads. key_id
+    // only — NEVER a plaintext/hashed key (principle 7). Counters live here (not
+    // process memory) so windows survive restarts and span instances.
+    version: 3,
+    sql: `
+      CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+        key_id TEXT NOT NULL,
+        dim TEXT NOT NULL,
+        tokens REAL NOT NULL,
+        last_refill_ms INTEGER NOT NULL,
+        PRIMARY KEY (key_id, dim)
+      );
+    `,
+  },
+  {
+    // Agentic Signals (POST-MVP feedback layer; docs/02, research-notes「Plano」).
+    // One row per (task_type, lane): the latest rolled-up, REDACTED observation,
+    // written ASYNCHRONOUSLY by the background collector — never on the request
+    // path. NO key/payload column (principle 7); only aggregate dimensions. Two
+    // fallback rates are SEPARATE columns (principle 5): fallback_rate =
+    // execution (in-chain swap), classifier_fallback_rate = classification
+    // (→ balanced). PRIMARY KEY makes upsert idempotent so re-collecting a window
+    // never double-counts.
+    version: 4,
+    sql: `
+      CREATE TABLE IF NOT EXISTS routing_signals (
+        task_type TEXT NOT NULL,
+        lane TEXT NOT NULL,
+        window_start INTEGER NOT NULL,
+        window_end INTEGER NOT NULL,
+        samples INTEGER NOT NULL,
+        success_rate REAL NOT NULL,
+        fallback_rate REAL NOT NULL,
+        classifier_fallback_rate REAL NOT NULL,
+        error_rate REAL NOT NULL,
+        p50_latency_ms REAL NOT NULL,
+        p95_latency_ms REAL NOT NULL,
+        avg_cost_usd REAL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (task_type, lane)
+      );
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

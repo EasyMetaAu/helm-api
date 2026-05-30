@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
-import { desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lt } from "drizzle-orm";
 import type { InsertTelemetryInput, TelemetryStore } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
 import { telemetry } from "./schema.js";
@@ -52,6 +52,22 @@ export class SqliteTelemetryStore implements TelemetryStore {
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {
     const row = this.db.select().from(telemetry).where(eq(telemetry.requestId, requestId)).get();
     return row ? this.toDecision(row) : null;
+  }
+
+  // POST-MVP Agentic Signals (docs/02): records whose createdAt is in
+  // [startMs, endMs). Half-open so adjacent windows never overlap → the
+  // background collector's re-runs stay idempotent. Read-only; never on the
+  // request path. createdAt is stored as epoch-ms (timestamp_ms) → compare ms.
+  async queryWindow(startMs: number, endMs: number): Promise<DecisionRecord[]> {
+    return this.db
+      .select()
+      .from(telemetry)
+      .where(
+        and(gte(telemetry.createdAt, new Date(startMs)), lt(telemetry.createdAt, new Date(endMs))),
+      )
+      .orderBy(asc(telemetry.createdAt))
+      .all()
+      .map((r) => this.toDecision(r));
   }
 
   // Row -> DecisionRecord. Re-validates through the shared schema so a corrupted

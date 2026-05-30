@@ -5,6 +5,74 @@
 
 ---
 
+## 2026-05-31 · signals.feedback — Agentic Signals 低成本生产反馈层（task signals.feedback、docs/02、research-notes「Plano」、原则1/3/5/7）
+
+新增 `packages/core/src/signals/{types,aggregate,collector,scheduler}.ts`（+ 各自 `.test.ts`）、`packages/shared/src/signals/schema.ts`（`RoutingSignalSchema`，类型唯一来源）、`packages/core/src/store/sqlite/{signals,signals-memory}.ts`（两适配器）、migrate v4 + `migrations/0004_routing_signals.sql`、`ports.ts` 扩展（`SignalStore` 端口 + `TelemetryStore.queryWindow`）、gateway `server.ts` 后台调度接线。先红后绿；四闸全绿（typecheck / lint 0 错 / 774 单测 / build）。
+
+spec 未覆盖、我自己拍板的决定：
+
+- **`RoutingSignal` 类型源放 `@helm/shared`（Zod `z.infer`），不在 core 重复定义 interface。** 任务契约 `types.ts` 给的是手写 `interface RoutingSignal`，且 `DecisionRecord` 从 `'../telemetry/types'` import——但代码库里 `DecisionRecord` 在 `@helm/shared`（`decision/schema.ts`），不存在 `core/telemetry/types.ts`。遵原则「schema 唯一来源」：`RoutingSignalSchema` 落 shared，`core/src/signals/types.ts` 仅 `z.infer` re-export + 把 `DecisionRecord` 从 `@helm/shared` re-export（不新造形状）。
+- **新增 `classifierFallbackRate` 维度（契约里没有）。** 任务 TDD #3 明确要求「执行兜底（链内换 model）」与「分类兜底（→balanced）」分开、不混淆（原则5）。原契约 `RoutingSignal` 只有一个 `fallbackRate`。决定：`fallbackRate` 只统计**执行兜底**（`provider_attempts` 里非 skipped 的尝试数 > 1，即链内 swap），另加 `classifierFallbackRate` 统计 `classifier.decided_by === 'fallback'`，两套机制各占一列，绝不混淆。`skipped` 尝试（能力过滤）不算 swap。
+- **`TelemetryStore` 扩展 `queryWindow(startMs,endMs)`（端口新增方法）。** collector「拉取窗口内决策记录」需要按时间窗读，但既有 `TelemetryStore` 只有 `queryRecent(limit)`。新增半开区间 `[start,end)` 窗口查询（相邻窗口不重叠 → 幂等重采集）。`createdAt` 以 epoch-ms（timestamp_ms）存，比较用 `new Date(ms)`。同步给 `ports.test.ts` 的 `InMemoryTelemetryStore` 补该方法。
+- **第二个存储适配器用 in-memory 顶替 supabase**（同 ratelimit.full 先例）：DoD 要求「sqlite 与 supabase 同一契约测试」，但本仓库尚无 supabase 适配器目录。`signals.test.ts` 用 `describe.each` 对 **SqliteSignalStore + InMemorySignalStore** 跑同一组契约；supabase 留待整体 supabase 端口落地（已知 TODO，不影响默认 sqlite 路径）。
+- **零主路径延迟的证明（头号约束）做成结构化守卫测试。** TDD #1 要求「证明主路径不 await/不依赖 signal」。新增 `apps/gateway/src/routes/chat.signals-isolation.test.ts`：读 `chat.ts` 源码断言其**不出现** `SignalStore/SignalCollector/createSignalCollector/startSignalScheduler/aggregateSignals/signals/`——请求处理模块对 signals 零引用。采集只在 `server.ts` 启动期挂一个 `setInterval`（`startSignalScheduler`），**在所有 middleware/route 注册之外**，请求链完全不触碰。
+- **后台调度（首选触发模型）。** `startSignalScheduler` 是纯 timer glue（core 内，可 fake-timer 单测）：每 `intervalMs` 对**刚过去的窗口** `[prevTick, nowTick)` 调一次 `collect()`；`unref()` 不阻塞进程退出；tick 失败只记日志（fail-open）。gateway 默认 60s，`HELM_SIGNALS_INTERVAL_MS` 可调，`HELM_SIGNALS_DISABLED=1` 关闭（单测/e2e 用，避免后台活动）。`ServerHandle` 新增可选 `dispose()` 停止调度（向后兼容，既有只解构 `{app,port,host}` 不受影响）。
+- **fail-open 贯穿（原则3）。** `collect()` 对 telemetry 读、aggregate、signal 写的任何抛错都吞掉 + 记 `signals.collect_failed`，恒 `resolve({written:0})`，绝不 reject → 不可能让主请求 5xx 或阻断后续请求（区别于限流的 fail-closed）。
+- **脱敏（原则7）。** 聚合输入是已脱敏的 `DecisionRecord`，输出只含 `taskType/lane/各 rate/p50/p95/avgCost/window/samples/updatedAt`；`aggregate.test.ts` 断言输出 key 集合精确、序列化串里不含 `helm_(live|test)_/api_key/payload/message/hash`。signal 表/内存 store 无任何 key/payload 列。
+- **幂等聚合 + observe-only。** sqlite 表 `PRIMARY KEY (task_type, lane)` + `onConflictDoUpdate`，重复采集同一窗口覆盖不累加（`collector.test.ts` 验证重跑后 samples 不翻倍）。本任务**不接入消费端**——`getSignal` 仅为未来路由反馈预留，MVP 路由结果不受任何影响。
+
+修复了**前序任务遗留、与本任务无关但阻断 `pnpm typecheck` 全仓闸门**的红（已 stash 验证：移除本任务全部改动后这些红依旧存在）：
+  - `packages/shared/src/config/schema.test.ts`（ratelimit.full 遗留）：`fullConfig()` 的 `rate_limit` 字面量缺 `overrides`，导致后续 `bad.runtime.rate_limit.overrides = ...` 报 TS2339；补 `overrides: {}` 字段对齐已落库的 `RateLimitConfigSchema`。
+  - `packages/core/src/memory/observe.test.ts` + `observer.test.ts`（memory.observe/observer 遗留）：fake `MemoryStore` 缺 `listObservations/getReflection/upsertReflection`（这三个端口方法由后续 memory 任务加到接口但未回填早期测试），补无害 stub。
+  - `packages/core/src/memory/reflector.test.ts`（reflector 遗留）：`merge` 回调里 `observations.map((o) => ...)` 的 `o` 隐式 any（TS7006），标注 `(o: Observation)`。
+  - 本任务**自身**引入的 `TelemetryStore.queryWindow` 端口新增，连带更新三处既有 `TelemetryStore` 对象字面量 mock（`telemetry/decision.test.ts`、`store/ports.test.ts`、`routes/admin/admin.test.ts`）补该方法——属本任务范围内的必要连带改动。
+
+## 2026-05-31 · ratelimit.full — 完整 per-key 限流（task ratelimit.full、docs/06、原则1/2/3/7）
+
+**决定与偏离：**
+
+1. **配置位置：`runtime.rate_limit`，非 `auth.rate_limit`。** 任务文件「涉及文件」提到扩展 `config/auth.yaml` 的 `rate_limit` 段，但 Phase 0 已把 `RateLimitConfigSchema` 落在 `runtime` 下（`config/runtime.yaml`、`packages/shared` `RuntimeConfigSchema`）。为不破坏既有 schema/loader/env-map，沿用 `runtime.rate_limit`，仅**扩展**该 schema 新增 `overrides`（`Record<key_id, Partial<{rpm,tpm}>>`，`.strict()` 拒绝未知维度、默认 `{}`）。`overrides` 文档样例写入 `config/runtime.yaml`。
+
+2. **Zod 是唯一类型来源，不在 core 重复定义 `RateLimitConfig`。** 任务契约给的 `RateLimitConfig`/`RateLimitQuota` interface 改为从 `@helm/shared`（`z.infer`）re-export（`packages/core/src/ratelimit/types.ts`），避免与 Phase 0 schema 重复（CLAUDE.md 原则2、代码规范）。core 仅新增运行时 DTO `RateLimitProbe`/`RateLimitResult`。
+
+3. **第二个存储适配器用 in-memory 顶替 supabase。** DoD 要求「sqlite 与 supabase 两个适配器通过同一组端口契约测试」，但本仓库**尚无 supabase 适配器目录**（`packages/core/src/store/` 只有 `sqlite/`，其它 Store 也都只有 sqlite 实现）。为兑现「端口实现无关」的契约，`rate-limit.test.ts` 用 `describe.each` 对 **sqlite + InMemoryRateLimitStore** 跑同一组契约；supabase 适配器留待 supabase 端口整体落地时补（与现有 KeyStore/TelemetryStore/MemoryStore 同步）。这是**已知 TODO**，不影响默认（sqlite）路径。
+
+4. **双维拒绝时的预扣偏差（可接受）。** RPM 先扣（cost=1）、过了再扣 TPM；若 TPM 拒，RPM 已多扣 1。符合任务「TPM 是预扣估算、预扣偏差不应导致 5xx」，且**绝不**反向（RPM 拒时短路、不碰 TPM）。响应头取「剩余占额更小」的那一维。
+
+5. **fail-closed 语义。** 限流是安全/配额边界：`SqliteRateLimitStore.consume` 的 read-modify-write 跑在 better-sqlite3 事务里（原子 compare-and-set，并发不会双花最后一个令牌）；store 抛错向上传播 → 全局 error-handler 出 5xx，**不**降级为「无限放行」（区别于路由层 fail-open，原则3/5）。
+
+6. **位置与零开销。** 中间件注册在 `server.ts` 的 `/v1/chat/*` auth 之后、路由之前。`enabled:false` 或两维均 0 时 limiter 走快速路径（`limit:0` 哨兵）→ 中间件不写任何 `x-ratelimit-*` 头、不碰 store，主路径零行为变化（既有 e2e 不回归）。日志/键只用 `key_id`（原则7）。
+
+7. **TPM 预估暂为 0。** 中间件 `estimateTokens` 默认返回 0（RPM-only），留作注入点；body-size 估算器后续接入。`/v1/messages`（Anthropic 自鉴权路由）本期未接限流，待其身份解析统一后再挂。
+
+新增/改动文件：`packages/core/src/ratelimit/{types,token-bucket,limiter}.ts`(+ tests)、`packages/core/src/store/ports.ts`(+`RateLimitStore`)、`packages/core/src/store/sqlite/{rate-limit,rate-limit-memory}.ts`、`schema.ts`/`migrate.ts`(v3)/`migrations/0003_*.sql`、`apps/gateway/src/middleware/rate-limit.ts`(+ test)、`packages/shared/src/config/schema.ts`(overrides)、`config/runtime.yaml`、`server.ts` 接线。
+
+## 2026-05-31 · memory.observe — observe 模式持久化（task memory.observe、docs/08 阶段 1、原则1/3）
+
+新增 `packages/core/src/memory/{types,observe,observe.test}.ts`，框架无关的 observe 写入逻辑。先红后绿，12 个 case；全四闸绿（typecheck / lint 0 错 / 703 单测 / build）。
+
+spec 未覆盖、我自己拍板的决定：
+
+- **`IRToolResult` 类型**：spec 接口引用了 `IRToolResult`，但代码库不存在该类型。IR 里「工具结果」本就是 `role:"tool"` 的 `IRMessage`（带 `tool_call_id`），故 `export type IRToolResult = IRMessage` 别名，不新造形状、不重复 schema。
+- **`system` → `user` 角色折叠**：`memory_*` 表的 role enum 是 `user|assistant|tool`（memory.schema 已定，无 `system`）。IR 的 `system` 消息按 user 侧 raw line 落库（它是 actor 发来的入站上下文）。这只影响持久化存储，不改交给 classifier 的消息（observe 不注入，逐字不变，有断言覆盖）。
+- **多段内容序列化**：IR `content` 可为 string / 多段数组 / null。落 `memory_messages.content`（TEXT）时：string 直存，数组 `JSON.stringify`（可与原始审计核对），null → 空串。
+- **`resolveMemoryMode(raw)` helper 放在 core/observe.ts**：头解析边界在 gateway，但「`x-memory-mode` 缺省/非法 → off」这个归一化规则用 `MemoryModeSchema.safeParse` 实现，作为单一可信源放 core（不 import 任何 web 框架），gateway 适配层调用它即可，避免在 gateway 重复枚举判断。
+- **`threadId === null` 时跳过**：observe 但无 thread id → 无处挂消息，降级为 no-op + 日志，不伪造 id。
+- **observe 不入队 observer job**（阶段 2 才做）、不 hydrate（`memoryMeta.memory_hydrated` 恒 false，inject 阶段计数器留 null/0 默认）。
+- 接线（gateway 读头 + 调 observeInbound/Outbound）归后续 gateway 任务，本任务只产出 core 逻辑与契约，已在 `packages/core/src/index.ts` 导出。
+
+## 2026-05-31 · gemini.protocol — Gemini generateContent transformer（task gemini.protocol、docs/05、原则1/8）
+
+第四协议 Gemini 落地，文件按任务 spec 单文件布局：`packages/core/src/protocol/gemini/{gemini-types,schema-sanitize,gemini-transformer,gemini-transformer.test}.ts`。严格 `nativeIn → IR → nativeOut`，无 N×N。先红后绿，新增 15 个针对性 case（含 docs/05 全部坑位）。全四闸绿（typecheck / lint exit0 / 687 单测 / build）。
+
+为贴合既有 `Transformer` 契约而非任务 spec 示例里的“想象签名”，做了以下决定（均向后兼容、不改既有代码）：
+
+- **`endPoint()` 方法 → 复用既有 `endPoint: string` 字段**：任务 spec 示例写的是 `endPoint(): EndpointSpec` 返回结构化对象（含 stream 判定、`x-goog-api-key` 声明）。但 `protocol.interface`（`transformer.ts`）里 `Transformer.endPoint` 早已定为**单字符串**，registry 按字符串建索引。不重新发明接口（spec 明令“复用，不重新发明”）：`geminiTransformer.endPoint = "/v1beta/models"` 作基路径，操作后缀 `:generateContent` / `:streamGenerateContent`、`{model}` 路径段、`?alt=sse` 由导出的纯函数 `parseGeminiPath(pathname, query)` 解析；鉴权头以常量 `GEMINI_API_KEY_HEADER = "x-goog-api-key"` 导出，交给 Auth Resolver（core 不读框架对象，原则1）。真正 `app.post` 挂载与 endpoint 通配仍归网关 + 注册表任务。
+- **IR 用 `model` 而非 `requested_model`**：任务 spec 提到把 path `{model}` 写进 IR `requested_model`，但 `IRRequest`（`ir.ts`）字段名是 `model`（`requested_model` 是 routing 层 `RoutedRequest` 的概念，不在协议 IR）。Gemini 入站 transformer 把 model 落到 IR `model`；因 transformer 拿不到 path，默认填 `"gemini"`，真实 model 由路由层用 `parseGeminiPath` 结果覆盖。
+- **`IRChunk` 在 gemini-types.ts 内定义**：协议层尚无共享的 IR 流式 chunk 类型（既有 anthropic 流直接吃 OpenAI chunk 形）。IR 既是 OpenAI-Chat 形，遂在此以 Zod 定义 OpenAI `chat.completion.chunk` 形的 `IRChunkSchema` 并 `z.infer` 出 `IRChunk` 导出，供网关/他协议复用，不手写 interface（原则：schema 唯一来源）。
+- **流式 tool-call args 用“末尾整体 flush”而非逐片 partial_json**：Gemini `?alt=sse` 每事件是**完整 GenerateContentResponse 快照**，`functionCall.args` 是对象，跨事件 `JSON.stringify` 后并非严格前缀增长（值层是前缀，但闭合 `"}` 破坏字符串前缀）。若按 OpenAI delta 逐片拼接会产出半截非法 JSON。决定：流内**缓冲每个工具的最新完整 args**，到流末一次性 flush 成完整 `arguments` 字符串，容忍任意分片、永不中途抛错（docs/05「累积到完整再解析」）；文本仍走前缀 diff 的增量 delta。出站 `transformStreamOut` 反之累积成增长快照，每 IR chunk 发一条全量 Gemini 事件（Gemini 客户端期望全快照）。
+- **schema-sanitize 做成协议无关的可复用横切**：`sanitizeSchema` 递归剥离 Gemini OpenAPI 子集不认的 `format`（仅保留 int32/int64/float/double/enum），`date/date-time/time/duration` 降级为 `type:"string"` 并把原 format 折进 `description`；纯函数、不改入参、可叠加（docs/05「横切关注点做成可叠加 transformer」），其它协议也能复用。
+
 ## 2026-05-31 · e2e.admin — 管理界面端到端（task e2e.admin、docs/11/07/04、原则1/5/7）
 
 Playwright 规格 `apps/gateway/e2e/admin.spec.ts` + 凭证/seed fixture `apps/gateway/e2e/fixtures/admin.ts`，跑在**真实 Hono 网关 + 构建后的 adapter-static SPA**（`apps/admin/build`）之上，不打桩前端。覆盖 4 件事：Basic Auth 三态（无/错/对）、编辑 lane 并刷新后仍在、请求列表→详情决策链可见、脱敏冒烟（明文 key 不出现）。先红后绿，`pnpm test:e2e` 全 33 绿（含既有 protocol/routing/eval/smoke）。

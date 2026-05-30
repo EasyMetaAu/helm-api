@@ -86,6 +86,9 @@ function makeTelemetry(seed: DecisionRecord[] = []): TelemetryStore {
     async getByRequestId(id) {
       return rows.find((r) => r.request_id === id) ?? null;
     },
+    async queryWindow() {
+      return [...rows];
+    },
   };
 }
 

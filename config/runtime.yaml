@@ -7,3 +7,10 @@ rate_limit:
   default:
     rpm: 0 # 0 = unlimited
     tpm: 0
+  # Per-key overrides keyed by key_id. Partial overrides fall back to `default`
+  # for any unset dimension. Counters persist in the store (survive restarts).
+  # Example:
+  #   overrides:
+  #     k_app1: { rpm: 600 }          # only rpm overridden; tpm falls back
+  #     k_batch: { rpm: 0, tpm: 0 }   # unlimited for this key
+  overrides: {}

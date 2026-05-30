@@ -139,6 +139,40 @@ export {
   LanesConfigSchema,
   parseLanesConfig,
 } from "./lanes/schema.js";
+// Memory middleware — inject phase (docs/08 阶段 2). Synchronous on the request
+// path: load + assemble a budgeted, cache-friendly context prefix in the fixed
+// docs/08 order, enqueue write-back, fail-open. Framework-agnostic; never touches
+// routing/lane state.
+export {
+  assembleInjectedContext,
+  type InjectDeps,
+  type InjectInput,
+  type InjectResult,
+} from "./memory/inject.js";
+// Memory middleware — observe phase (docs/08 阶段 1). Framework-agnostic
+// write-only persistence; never injects memory or changes routing.
+export {
+  type IRToolResult,
+  type ObserveDeps,
+  observeInbound,
+  observeOutbound,
+  resolveMemoryMode,
+} from "./memory/observe.js";
+// Memory middleware — background Reflector (docs/08 阶段 2). Periodically merges a
+// scope's observations into a stable, versioned reflection; off the main request
+// path, fail-open. Framework-agnostic; never touches routing/lane state.
+export {
+  type ReflectorDeps,
+  type ReflectorJob,
+  type ReflectorResult,
+  runReflectorJob,
+} from "./memory/reflector.js";
+export {
+  type MemoryMeta,
+  MemoryMetaSchema,
+  type MemoryScope,
+  MemoryScopeSchema,
+} from "./memory/types.js";
 // Anthropic Messages transformer — the second client-presentation surface
 // (docs/05). Inbound native->IR, outbound IR->native (+ stream state machine +
 // error translation). Reimplemented from the docs, not copied from upstream.
@@ -244,6 +278,23 @@ export {
   type ResolveResult,
 } from "./provider/registry.js";
 export {
+  createRateLimiter,
+  type RateLimiterDeps,
+} from "./ratelimit/limiter.js";
+export {
+  type BucketState,
+  type ConsumeResult,
+  refill,
+  tryConsume,
+} from "./ratelimit/token-bucket.js";
+export type {
+  RateLimitConfig,
+  RateLimitProbe,
+  RateLimitQuota,
+  RateLimitQuotaOverride,
+  RateLimitResult,
+} from "./ratelimit/types.js";
+export {
   type Classification as LaneResolverClassification,
   type LaneDecision,
   type PolicyOutcome as LaneResolverPolicyOutcome,
@@ -276,11 +327,32 @@ export {
   type RouteOptions,
   routeRequest,
 } from "./routing/route-request.js";
+// Agentic Signals — POST-MVP low-cost production feedback layer (docs/02,
+// research-notes「Plano」). Pure aggregator + background collector that distill
+// REDACTED routing signals from already-persisted decision records, ASYNCHRONOUS
+// and OFF the request path. Observe-only: this task never feeds signals back into
+// routing. Framework-agnostic; fail-open.
+export { aggregateSignals } from "./signals/aggregate.js";
+export {
+  createSignalCollector,
+  type SignalCollector,
+  type SignalCollectorDeps,
+} from "./signals/collector.js";
+export {
+  type SignalSchedulerDeps,
+  type SignalSchedulerHandle,
+  startSignalScheduler,
+} from "./signals/scheduler.js";
+export type { RoutingSignal } from "./signals/types.js";
 export {
   createSqliteDb,
+  InMemoryRateLimitStore,
+  InMemorySignalStore,
   runMigrations,
   type SqliteDb,
   SqliteKeyStore,
+  SqliteRateLimitStore,
+  SqliteSignalStore,
   SqliteTelemetryStore,
 } from "./store/index.js";
 export type {
@@ -288,6 +360,9 @@ export type {
   CreateKeyInput,
   InsertTelemetryInput,
   KeyStore,
+  RateLimitConsumeResult,
+  RateLimitStore,
+  SignalStore,
   TelemetryStore,
 } from "./store/ports.js";
 export {

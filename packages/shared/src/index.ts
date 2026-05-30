@@ -68,6 +68,10 @@ export {
   ProviderConfigSchema,
   type RateLimitConfig,
   RateLimitConfigSchema,
+  type RateLimitQuota,
+  type RateLimitQuotaOverride,
+  RateLimitQuotaOverrideSchema,
+  RateLimitQuotaSchema,
   type RuntimeConfig,
   RuntimeConfigSchema,
   type ServerConfig,
@@ -110,6 +114,31 @@ export {
   type KeyRole,
   KeyRoleSchema,
 } from "./key/schema.js";
+// Memory middleware storage contracts (docs/08) — POST-MVP persistence floor.
+export {
+  type AssembledMessage,
+  AssembledMessageSchema,
+  type AssembledMessageSource,
+  AssembledMessageSourceSchema,
+  type MemoryMessageInput,
+  MemoryMessageInputSchema,
+  type MemoryObservationInput,
+  MemoryObservationInputSchema,
+  type MemoryRole,
+  MemoryRoleSchema,
+  type MemoryThreadInput,
+  MemoryThreadInputSchema,
+  type Observation,
+  ObservationSchema,
+  type RawMessage,
+  RawMessageSchema,
+  type Reflection,
+  ReflectionSchema,
+  type ReflectionScope,
+  ReflectionScopeSchema,
+  type ReflectionUpsertInput,
+  ReflectionUpsertInputSchema,
+} from "./memory/schema.js";
 // Internal request structure (docs/02).
 export {
   type InternalRequest,
@@ -121,4 +150,6 @@ export {
   type RequestMetadata,
   RequestMetadataSchema,
 } from "./request/schema.js";
+// Routing signal (POST-MVP Agentic Signals feedback layer; docs/02 telemetry).
+export { type RoutingSignal, RoutingSignalSchema } from "./signals/schema.js";
 export { version } from "./version.js";

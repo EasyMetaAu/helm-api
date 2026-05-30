@@ -258,6 +258,7 @@ describe("persistDecision", () => {
       insert,
       queryRecent: async () => [],
       getByRequestId: async () => null,
+      queryWindow: async () => [],
     };
   }
 
