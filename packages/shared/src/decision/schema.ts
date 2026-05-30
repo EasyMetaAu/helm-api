@@ -10,7 +10,12 @@ import { z } from "zod";
 // CLAUDE.md principle 5: classification fallback (classifier.decided_by) and
 // execution fallback (provider_attempts) are SEPARATE fields, never conflated.
 
-export const DecidedBySchema = z.enum(["rules", "eval", "default"]);
+// decided_by names the CLASSIFICATION-stage decision source (principle 5; never
+// conflated with the execution-stage provider fallback). `fallback` is the
+// Layer-3 balanced sink — distinct from the legacy `default` (the orchestrator's
+// hard fail-open when classify itself throws); both are kept so the two paths
+// stay observable.
+export const DecidedBySchema = z.enum(["rules", "eval", "default", "fallback"]);
 export const AttemptStatusSchema = z.enum(["ok", "error"]);
 
 export const ClassifierDecisionSchema = z.object({
@@ -19,6 +24,12 @@ export const ClassifierDecisionSchema = z.object({
   confidence: z.number().min(0).max(1),
   decided_by: DecidedBySchema,
   eval_cache_hit: z.boolean().nullable(), // null when eval was not triggered
+  // Present (non-null) ONLY when decided_by === "fallback": WHY we fell open to
+  // balanced — `eval_disabled` (uncertain but eval off) vs `eval_<reason>` (eval
+  // ran and failed). Null/absent on rules/eval/default paths. Optional so
+  // pre-eval records (Phase 0 / passthrough) validate without it. Distinct from
+  // the execution-stage fallback (provider_attempts), per principle 5.
+  fallback_reason: z.string().nullable().optional(),
   constraints: z.record(z.string(), z.unknown()), // docs/03 constraint bitmap; not deep-validated in MVP
   explanation: z.array(z.unknown()), // matched dimensions / signals
 });

@@ -32,7 +32,15 @@ export interface Classification {
   task_type: string;
   complexity: "simple" | "medium" | "complex";
   confidence: number;
-  decided_by: "rules" | "eval" | "default";
+  // `fallback` = Layer-3 cascade balanced sink (eval disabled / failed open);
+  // `default` = the orchestrator's hard fail-open when classify itself throws.
+  decided_by: "rules" | "eval" | "default" | "fallback";
+  // Layer-2 eval observability (principle 5; never the execution fallback):
+  //   eval_cache_hit — true on a Layer-2 cache hit; null when eval did not run.
+  //   fallback_reason — set ONLY on decided_by==="fallback" (eval_disabled /
+  //     eval_<reason>); null otherwise.
+  eval_cache_hit?: boolean | null;
+  fallback_reason?: string | null;
   constraints: {
     needs_json?: boolean;
     needs_tools?: boolean;
@@ -220,6 +228,7 @@ async function plan(
         confidence: 1,
         decided_by: "default",
         eval_cache_hit: null,
+        fallback_reason: null,
         constraints: {},
         explanation: [],
       },
@@ -249,7 +258,11 @@ async function plan(
       complexity: cls.complexity,
       confidence: cls.confidence,
       decided_by: cls.decided_by,
-      eval_cache_hit: null,
+      // Thread Layer-2 eval observability straight from the classify adapter
+      // (cascade). null/undefined collapse to null so the record never carries
+      // an ambiguous undefined (principle 5: classification fields only).
+      eval_cache_hit: cls.eval_cache_hit ?? null,
+      fallback_reason: cls.fallback_reason ?? null,
       constraints: cls.constraints as Record<string, unknown>,
       explanation: cls.explanation,
     },

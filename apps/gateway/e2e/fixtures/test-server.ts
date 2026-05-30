@@ -30,7 +30,11 @@ await keyStore.createKey({
 (seedDb as unknown as { $sqlite: Database.Database }).$sqlite.close();
 
 const { buildServer } = await import("../../src/server.js");
-// Resolve the repo-root config dir regardless of cwd.
+// Resolve the repo-root config dir regardless of cwd. The eval e2e raises the
+// effective Layer-1 confidence threshold PER REQUEST via the e2e-only
+// `x-helm-rules-threshold` header (gated by HELM_E2E) so it reaches Layer-2 eval
+// WITHOUT mutating the checked-in config — other specs (routing) keep the spec
+// default 0.45. See implementation-notes (2026-05-31 · e2e.eval).
 const configDir = new URL("../../../../config", import.meta.url).pathname;
 const { app, port, host } = buildServer({ configDir });
 serve({ fetch: app.fetch, port, hostname: host });

@@ -11,6 +11,10 @@ const e2eEnv = {
   HELM_TEST_KEY: "helm_live_e2e_testkey",
   OPENAI_API_KEY: "sk-upstream-mock-key",
   HELM_PROVIDER_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`,
+  // e2e-only: lets the `x-helm-eval` request header toggle Layer-2 eval per
+  // request so e2e.eval can black-box the cascade without a config reload.
+  // Production never sets this (eval stays config-driven, fail-closed).
+  HELM_E2E: "1",
 };
 
 export default defineConfig({

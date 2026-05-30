@@ -19,7 +19,10 @@ import type { LanesConfig } from "../lanes/schema.js";
 export interface Classification {
   task_type: string; // e.g. "coding" | "vision" | "general"
   complexity: "simple" | "medium" | "complex";
-  decided_by: "rules" | "eval" | "default";
+  // `fallback` is the Layer-3 classification sink (eval disabled / failed open);
+  // like `default` it pins `balanced` directly (principle 5). `eval`/`rules`
+  // resolve normally via task/complexity.
+  decided_by: "rules" | "eval" | "default" | "fallback";
   constraints: {
     needs_json?: boolean;
     needs_tools?: boolean;
@@ -71,13 +74,14 @@ function has(lanes: LanesConfig, name: string): boolean {
 export function resolveLane(input: ResolveLaneInput): LaneDecision {
   const { classification, policy, lanes } = input;
 
-  // The classifier already fell back to its own default — do not re-derive a
-  // lane from task/complexity; go straight to the classification terminal.
-  if (classification.decided_by === "default") {
+  // The classifier already fell back to its terminal (hard fail-open `default`,
+  // or Layer-3 cascade `fallback`) — do not re-derive a lane from
+  // task/complexity; go straight to the classification terminal `balanced`.
+  if (classification.decided_by === "default" || classification.decided_by === "fallback") {
     return {
       selected_lane: BALANCED,
       decided_by: "complexity_fallback",
-      reason: "classifier fell back (decided_by=default) -> balanced",
+      reason: `classifier fell back (decided_by=${classification.decided_by}) -> balanced`,
     };
   }
 

@@ -5,6 +5,55 @@
 
 ---
 
+## 2026-05-31 · e2e.eval — 把 eval 三层级联接进网关并端到端验证（docs/03、原则 3/4/5/7、task e2e.eval）
+
+`apps/gateway/e2e/eval.spec.ts` 7 场景全绿。本任务发现 `eval.cascade` 模块（core 内 `classifier/cascade.ts`）虽已存在，但**从未接进网关**——`server.ts` 的 `buildClassify` 只跑 Layer-1 `scoreRequest`，eval/缓存/兜底字段从未暴露。因此本任务做了「接线 + e2e」两件事。关键决定与偏离：
+
+- **接线落点 `apps/gateway/src/routes/classify.ts`（新建 `buildClassifyAdapter`）**：把 core 的 `classifyCascade` + `runEvalCached`（eval client/cache）+ `resolveLane` 组装成 routeRequest 的 `classify` 适配器，holds 一个进程内 eval cache（content-hash 键、TTL+LRU）。eval 小模型经**同一个 provider**、用 eval alias（`deepseek/deepseek-v4-flash`，config 默认）非流式调用——alias 是内部供应链细节（原则 6），不进 lane 抽象。`server.ts` 的旧 `buildClassify`/`mapComplexity`/`approxTokens`/`hasNoTextContent` 整体迁入此模块。
+- **决策可观测面 = 响应头**（沿用 e2e.routing 的 `x-helm-*` 既有约定）：`chat.ts` 新增 `x-helm-decided-by`（rules|eval|fallback|default）、`x-helm-eval-cache-hit`（仅 eval 真跑时出现）、`x-helm-fallback-reason`（仅 `decided_by=fallback` 出现：`eval_disabled` / `eval_<timeout|provider_error|...>`）。缓存命中断言以**mock eval 端点调用计数**为最硬证据（`/__eval_count` + `/__eval_reset`），辅以 `eval-cache-hit` 头。所有头只载路由/决策元数据，绝不含明文 key/payload（原则 7）。
+- **schema 扩展（最小）**：`@helm/shared` 的 `DecidedBySchema` 加 `"fallback"`（与既有 `"default"` 并存：`default`=classify 自身抛错的硬 fail-open；`fallback`=Layer-3 级联兜底，两路各自可观测）；`ClassifierDecisionSchema` 加 `fallback_reason: z.string().nullable().optional()`（optional 以免 Phase 0/passthrough 既有记录失效）。`routing/route-request.ts` 的 `Classification` 与 `routing/lane-resolver.ts` 同步加 `"fallback"`（resolver 把 `fallback` 与 `default` 一样直接钉 balanced），并把 `eval_cache_hit`/`fallback_reason` 透传进决策记录。
+- **e2e 触发 eval 的硬约束 — 必须抬高 Layer-1 阈值**：Layer-1 的 `sigmoidConfidence` 落域是 **[0.5,1)**（仅 NaN 退化态返回 0），故在默认阈值 0.45 下**任何自然 prompt 都不会 uncertain**，eval 层在黑盒下根本无法触达。解决：新增 e2e-only 请求头 `x-helm-rules-threshold`（与 `x-helm-eval` 一样受 `HELM_E2E` 网关侧开关 gating），按请求抬高 Layer-1 阈值到 0.7——AMBIGUOUS prompt（rules conf ~0.53）落到 eval，STRONG prompt（~0.98）仍命中即停。**不改签入的 `config/classifier.yaml`（保持 spec 默认 0.45）**，也不全局改阈值（否则会打破 `routing.spec` 的 economy/premium 期望，其 simple prompt conf≈0.585）。生产从不设 `HELM_E2E`，分类仍 config 驱动、fail-closed（原则 2）。
+- **eval 开关同样走 per-request 头 `x-helm-eval`**（HELM_E2E gated），免去「改 yaml + 重启」才能切 eval——Playwright 单进程双 webServer 模型下无法每用例重载 config。默认（无头）= eval OFF（原则 4）。
+- **缓存跨用例不串台**：网关的 eval cache 是进程级、跨用例存活；mock 的计数器每用例 `beforeEach` 重置。两者一旦错位，"first 调用"会被上一个用例的缓存命中污染。解决：每个缓存敏感用例用 `ambiguous(tag)` 生成**内容唯一但仍低置信**的 prompt（content-hash 键天然区分），场景 3 的「相同重发」两请求共用同一 tag。
+- **桩上游扩展**：`mock-upstream.ts` 的 `createMockUpstream` 内加 eval 小模型替身——识别 `model===EVAL_MODEL` 后**先计数再**按 `EVAL_SLOW_SENTINEL` 决定正常/慢（慢延迟 2s > eval 双超时 300/250ms）；正常返回严格 JSON `{complexity:"reasoning",task_type:"math",confidence:0.91}`→驱动 premium（**刻意不同于 balanced 兜底**，证明「eval 真改了 lane」）。eval 调用不进 `CAPTURE_PATH`（捕获只跟主路由请求）。
+- **顺手修复阻塞 typecheck 的邻接 eval 模块遗留错误**（这些文件由 eval.config/contract/client/cache/cascade 等前置任务新增、未提交且未跑组合 typecheck）：`eval/client.ts` 的 `CircuitOpenError.name` 加 `override`；`cascade.test.ts` 把 `ClassifierInput` 的 `tools/response_format/attachments` 由 `undefined` 改 `null`（Pick 字段可空非可选）；`cache-key.test.ts` 的 `makeInput` 入参类型 `Partial<ClassifierInput>`→`Partial<InternalRequest>`（测试要传 request_id 等易变字段证明不影响键）；`client.test.ts` 的 mock 补 `(_req,_signal)` 形参以让 `mock.calls[0]` 有类型 + `!`。纯类型/防御修复，零行为变更。core `index.ts` 新增导出：cascade（`classifyCascade`/`CascadeResult`/...）、eval cache/client/cache-key、`resolveLane`（别名 `LaneResolver*` 避免与 route-request 的 `Classification` 撞名）。
+- **门禁（全绿）**：`pnpm typecheck`=0、`pnpm lint`=0（仅 14 条既有 warning）、`pnpm test`=564/564（含 eval 模块单测随类型修复转绿，552→564）、`pnpm build`=0、`pnpm test:e2e`=27/27（含本任务 7 例）。
+- **TODO / 坑**：(1) eval 默认阈值 0.45 下级联第 2 层**实际不可达**（sigmoid 下限 0.5）——这是 docs/03 阈值口径与 Layer-1 打分实现之间的张力，需后续要么降 Layer-1 下限、要么把「uncertain」改由 rawScore 边界距离判定而非置信度阈值，本任务用 e2e 头规避但未根治。(2) eval 小模型 alias 当前不在 provider registry 里（直接经 `provider.chatCompletion` 打到同一 base_url）——多 provider/多模型 registry 落地后应把 eval alias 纳入正式解析。
+
+## 2026-05-31 · eval.cascade — 三层分类级联总装（docs/03 分类级联、原则 3/4/5、task eval.cascade）
+
+- **`CascadeDeps.resolveLane` 用「理想化签名」`(complexity, taskType, input) => LaneId`，而非真实 `routing.lane-resolver` 的 `resolveLane(ResolveLaneInput): LaneDecision`。** 理由：cascade 只需「给我一个 lane 字符串」，不应感知 policy/lanes 配置或 LaneDecision 的 `decided_by`（那是 lane 解析自己的内部来源，与分类级的 `decided_by` 是两回事，硬塞会混淆原则 5）。真实 resolver 的适配（构造 ResolveLaneInput、把 LaneDecision.selected_lane 取出）留给后续的 pipeline 接线任务，cascade 通过注入保持纯净可测。
+- **`ClassificationResult` 名称与 `classifier.engine` 已导出的同名类型冲突**，故在 `classifier/index.ts` 桶里把 cascade 的导出别名为 `CascadeResult`（文件内仍按 task 契约叫 `ClassificationResult`）。两者形状不同：engine 的是 Layer-1 富结果（含 constraints/explanation/uncertain），cascade 的是接线后的决策记录（含 lane/decided_by/eval_*）。
+- **`LaneId` 定义为 `string`**：仓库无现成 LaneId 类型，lane 是 lanes.yaml 的开放键（`balanced` 保证存在）。
+- **fail-open 复用下层语义**：cascade 自身不 try/catch——rules 是纯函数、`runEvalCached` 已在 client 层 fail-open 永不抛；最坏落 balanced。`eval_cache_hit` 仅在 `eval_used===true` 有意义，未用 eval 恒 `false`（不留 undefined 含糊态）。
+- **`fallback_reason` 口径**：`eval_disabled`（开关关）vs `eval_${reason}`（开启但失败，reason ∈ timeout/provider_error/circuit_open/not_json/schema_invalid），两种兜底各自可观测、绝不混 provider 执行兜底字段。
+
+## 2026-05-31 · eval.cache — content-hash 缓存键 + TTL/LRU 容器（docs/03 Layer 2、原则 1/3/4、task eval.cache）
+
+把 `runEval` 包成 `runEvalCached`，用规范化 content-hash 作键、带 TTL + LRU。决定与权衡：
+
+- **`turn_count` 口径钉为「`role==="user"` 的消息条数」**：task 给了两个口径选项（user 条数 / messages 全量）。这里选 user 条数并在 `cache-key.ts` 处注释清楚，与 `last_user_message` 同源（都遍历 user 消息），避免与 `dimensions.ts` 里 `turnCount = messages.length`（那是 Layer-1 打分的归一化输入，语义不同）混淆。注意：本任务的缓存键口径与 `dimensions.ts` **有意不同**，因为缓存键要的是「逻辑相同请求」的稳定指纹，全量 messages 含 system/assistant 噪声会降命中率。
+- **`ClassifierInput` 落为 `Pick<InternalRequest, "messages"|"tools"|"response_format"|"attachments">`**：spec 用 `ClassifierInput` 作 `buildEvalCacheKey` 入参类型，但仓内此前无此类型；沿用 `dimensions.ts`/`taskdetect.ts` 的 `Pick<InternalRequest, ...>` 既有约定，不新造重复接口（schema-first）。提取 tool 名 / attachment 判定 / response_format JSON 判定均复用与 `taskdetect.ts` 一致的防御式实现（开放 MVP shape，不抛）。
+- **`runEvalCached` 的 deps 增 `nowMs`（注入时钟）与可选 `runEval` 覆盖**：容器内绝不调 `Date.now()`（TTL 可测）；`runEval` 默认指向真实 client，测试注入 stub。只有 `decided:true` 才写缓存——fail-open（timeout/抖动/circuit-open）不缓存，否则一次瞬时故障会被钉住 300s（原则 3）。命中返回 `latency_ms:0` + `cache_hit:true`。
+- **LRU 用 `Map` 插入序实现**：`get` 命中与 `set` 均「delete + 重插」把键移到最近端，超容时淘汰迭代序首项（最久未用）。`get` 命中先查 `expireAt <= nowMs` 过期即删并 miss。
+- **命中率观测（DoD 要求「实现后验命中率」）**：单测 `cache.test.ts` 实测——首次 miss 调 `runEval` 一次并写缓存；第二次「仅 trace_id/account/user/model/stream/conversation_id 不同」的逻辑相同请求 → `cache_hit:true` 且 `runEval` 不再被调（即同一逻辑请求命中率 100%）。`cache-key.test.ts` 进一步背书：tool 顺序无关、末条消息 trim 不 lowercase、5 字段任一语义变化即换键。真实流量命中率需上线后用遥测的 `eval_cache_hit` 字段观测；若偏低，按 `eval.config` 的可配字段集回调并在此追记。
+- **门禁（全绿）**：`pnpm typecheck`=0、`pnpm lint`=0（仅 13 条既有 warning，非本任务文件）、`pnpm test`=552/552（含新增 19 例：`cache-key.test.ts` 14 + `cache.test.ts` 5）、`pnpm build`=0。core 不 import 任何 web 框架（纯内存 + node:crypto）。
+
+---
+
+## 2026-05-31 · eval.config — 硬化 eval 配置块 schema（docs/03 Layer 2、原则 2/4、task eval.config）
+
+把 Layer-2（小模型 eval）配置块从「松」收紧为「硬」，并钉为下游 eval 模块的唯一类型来源。决定与偏离：
+
+- **文件落点偏离 task 给的 `packages/shared/src/classifier/eval-config.schema.ts`，改用 `packages/shared/src/config/eval-config.schema.ts`**：本仓 shared 既有约定是所有 config schema 集中在 `config/`（`classifier-schema.ts`/`schema.ts` 等），不存在 `classifier/` 目录。遵从既有约定避免目录碎片，语义/契约不变。
+- **复用而非新增 mount 点**：`ClassifierEvalConfigSchema` 此前已存在于 `classifier-schema.ts`（松定义：`temperature: z.number()`、`on_failure: z.string()`、`cache.key: z.string()`、无 `outer_timeout_ms`/`max_entries`、无 `max_tokens` 上限）。本任务把硬定义集中到新 `eval-config.schema.ts`（`EvalConfigSchema`/`EvalCacheConfigSchema`），并令 `ClassifierEvalConfigSchema = EvalConfigSchema`（别名再导出，保持既有 import 不破）。**绝不两处定义**（防默认值漂移）。
+- **硬化点**：`enabled` 显式 `.default(false)`；`temperature`/`on_failure`/`cache.key` 用 `z.literal` 锁死（typo 即 fail-closed，不带病运行）；`max_tokens` 加 `.max(1024)`（research-notes：无上限是规模化成本风险）；新增 `outer_timeout_ms`（consumer 外层 race，双超时硬化）与 `cache.max_entries`（LRU 容量，留给 eval.cache）。
+- **`model` 改为必填（`z.string().min(1)`，去掉原 `.default`）**：enabled eval 无 model 是「配置说谎」。代价：`ClassifierConfigSchema.eval` 与 `schema.ts` 的 `classifier` 两处 `prefault` 现需显式带默认 model 才能在 block 缺省时解析——已在 `classifier-schema.ts` 的 eval prefault 注入默认 model，并把 `schema.ts` 里多余的 `eval: {}` 删除（让内层 prefault 接管）。
+- **`config/classifier.yaml` 补全**：eval 块新增 `outer_timeout_ms: 250` 与 `cache.max_entries: 5000`，并把 cache 从内联展开为块。`loadConfig({configDir:"config"})` 实测加载并通过校验（DoD）。
+- **门禁（全绿）**：`pnpm typecheck`=0、`pnpm lint`=0（仅 warnings，core 既有）、`pnpm test`=514/514（含本任务新增 9 例 `eval-config.schema.test.ts`）、`pnpm build`=0。同步更新 `classifier-schema.test.ts` 既有 eval 用例与 `index.ts` 导出（新增 `EvalConfig`/`EvalCacheConfig`/`EvalConfigSchema`/`EvalCacheConfigSchema`）。
+
+---
+
 ## 2026-05-31 · e2e.protocol — 接线 `/v1/messages`、桩上游 tool-call/捕获、修复邻接任务遗留的类型错误（docs/05、task e2e.protocol）
 
 把 `e2e.protocol` 的双向（Anthropic/OpenAI 客户端）× 三路径（非流式/流式/tool-call）端到端打通。`apps/gateway/e2e/protocol.spec.ts` 8 个用例全绿（含「双向同构」：两协议归一化到同一上游请求形态）。关键决定：

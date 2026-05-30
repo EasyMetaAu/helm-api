@@ -120,6 +120,41 @@ export const TOOL_CALL_STREAM_CHUNKS = [
   "data: [DONE]\n\n",
 ];
 
+// —— Layer-2 eval small-model stand-in (e2e.eval) ————————————————————————————
+// The same mock doubles as the internal "eval small-model". The gateway routes
+// Layer-2 eval calls to the SAME upstream base_url but with the EVAL_MODEL alias
+// (an internal supply-chain detail, NOT one of the three public lanes — CLAUDE.md
+// principle 6). The mock recognizes that model and behaves as a controllable
+// judge:
+//   • NORMAL  → returns a valid strict-JSON EvalOutput that drives a specific
+//     lane. We emit complexity:"reasoning" so the cascade resolves the PREMIUM
+//     lane — deliberately DIFFERENT from the `balanced` fail-open default, so the
+//     e2e can prove "eval really changed the lane".
+//   • SLOW    → when the prompt carries EVAL_SLOW_SENTINEL, the judge delays past
+//     the eval timeout, exercising the double-timeout fail-open (→ balanced).
+//   • COUNTING→ every eval call increments a counter the spec reads back
+//     (EVAL_CALL_COUNT_PATH) — the hardest external evidence for cache hits
+//     (a hit must NOT increment) and hit-stop (rules-confident must not call).
+// The judge NEVER sees a plaintext key/payload echoed (principle 7); it only
+// reads the prompt text to decide normal vs slow.
+export const EVAL_MODEL = "deepseek/deepseek-v4-flash";
+export const EVAL_SLOW_SENTINEL = "__HELM_EVAL_SLOW__";
+// Delay (ms) the slow judge sleeps before answering — comfortably past the e2e
+// eval timeout_ms / outer_timeout_ms so the fail-open path is deterministic.
+const EVAL_SLOW_DELAY_MS = 2_000;
+// Strict EvalOutput the NORMAL judge returns → complexity:reasoning → premium.
+const EVAL_OUTPUT_JSON = JSON.stringify({
+  complexity: "reasoning",
+  task_type: "math",
+  confidence: 0.91,
+});
+// Counter read-back + reset endpoints (spec drives these on the mock, not the
+// gateway baseURL).
+export const EVAL_CALL_COUNT_PATH = "/__eval_count";
+export const EVAL_RESET_PATH = "/__eval_reset";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 // —— upstream request capture (e2e.protocol) —————————————————————————————————
 // The path the spec GETs to read back the LAST request the gateway forwarded
 // upstream. Lets the e2e assert the NORMALIZED (OpenAI-Chat IR) request shape
@@ -136,11 +171,21 @@ export function createMockUpstream() {
   // The last request the gateway forwarded upstream + a monotonic counter. Lets
   // the e2e read back the NORMALIZED request shape (CAPTURE_PATH).
   let lastCapture: UpstreamCapture = { body: { messages: [] }, count: 0 };
+  // Layer-2 eval call counter (e2e.eval). Incremented on EVERY eval-model call,
+  // BEFORE any slow-path delay, so a timed-out call still counts (the spec
+  // asserts a fail-open is re-called, not cached).
+  let evalCallCount = 0;
 
   // Readiness probe for Playwright's webServer wait.
   app.get("/", (c) => c.text("mock upstream ok"));
   // Read back the last normalized upstream request (e2e.protocol assertions).
   app.get(CAPTURE_PATH, (c) => c.json(lastCapture));
+  // Eval-endpoint call count read-back + reset (e2e.eval).
+  app.get(EVAL_CALL_COUNT_PATH, (c) => c.json({ count: evalCallCount }));
+  app.post(EVAL_RESET_PATH, (c) => {
+    evalCallCount = 0;
+    return c.json({ ok: true });
+  });
 
   app.post("/chat/completions", async (c) => {
     const body = (await c.req.json()) as {
@@ -149,13 +194,37 @@ export function createMockUpstream() {
       messages?: unknown;
     };
     const model = typeof body.model === "string" ? body.model : "mock-model";
+
+    const promptText = messagesText(body);
+
+    // ── Layer-2 eval branch: the request targets the internal eval small-model.
+    //    Steered by the EVAL_MODEL alias (not a public lane). Returns a strict
+    //    JSON judgment; the slow sentinel makes it exceed the eval timeout.
+    if (model === EVAL_MODEL) {
+      evalCallCount += 1; // count BEFORE any delay so timed-out calls still count
+      if (promptText.includes(EVAL_SLOW_SENTINEL)) {
+        await sleep(EVAL_SLOW_DELAY_MS);
+      }
+      return c.json({
+        id: "chatcmpl-eval",
+        object: "chat.completion",
+        model,
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: EVAL_OUTPUT_JSON },
+            finish_reason: "stop",
+          },
+        ],
+      });
+    }
+
     // Record the normalized request so the e2e can assert nativeIn → IR → nativeOut.
+    // (eval calls are excluded — capture tracks the MAIN routed request only.)
     lastCapture = {
       body: body as UpstreamCapture["body"],
       count: lastCapture.count + 1,
     };
-
-    const promptText = messagesText(body);
 
     // Error injection (prompt-steered): a sentinel in the prompt fails ONLY the
     // economy head (primary candidate) so the gateway falls forward to the next

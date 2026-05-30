@@ -61,11 +61,19 @@ classifier:
       short_message_max_chars: 30
       disable_above_chars: 100
       max_history_weight: 0.6
+  # Layer-2 (small-model eval) — OPTIONAL, costed, OFF by default. Validated by
+  # EvalConfigSchema (@helm/shared): temperature/on_failure/cache.key are locked,
+  # max_tokens capped at 1024. Downstream eval modules read this parsed object.
   eval:
-    enabled: false
+    enabled: false                 # default OFF (non-negotiable)
     model: deepseek/deepseek-v4-flash
     temperature: 0
     max_tokens: 256
-    timeout_ms: 300
+    timeout_ms: 300                # inner (runner) timeout
+    outer_timeout_ms: 250          # outer (consumer) timeout — double-race hardening
     on_failure: balanced
-    cache: { enabled: true, key: content_hash, ttl_sec: 300 }
+    cache:
+      enabled: true
+      key: content_hash
+      ttl_sec: 300
+      max_entries: 5000            # LRU capacity (eval.cache)

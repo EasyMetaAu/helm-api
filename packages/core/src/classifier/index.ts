@@ -3,6 +3,15 @@
 // injected momentum soft-state), zero-network, deterministic (CLAUDE.md
 // principle 4). See engine.ts for the orchestration contract.
 
+export {
+  type CascadeDeps,
+  type ClassificationResult as CascadeResult,
+  classify,
+  type DecidedBy,
+  type EvalDecisionResult,
+  type LaneId,
+  type RulesResult,
+} from "./cascade.js";
 export { type DimensionHit, type DimensionScore, scoreDimensions } from "./dimensions.js";
 export {
   type ClassificationResult,

@@ -3,8 +3,6 @@ import {
   type AnthropicSSEEvent,
   anthropicTransformer,
   bootstrapRootKey,
-  type Classification,
-  type Complexity,
   createCircuitBreaker,
   createOpenAIClient,
   createProviderRegistry,
@@ -25,14 +23,14 @@ import {
   routeRequest,
   SqliteKeyStore,
   SqliteTelemetryStore,
-  scoreRequest,
 } from "@helm/core";
-import type { CatalogEntry, ClassifierRulesConfig, InternalRequest } from "@helm/shared";
+import type { CatalogEntry, InternalRequest } from "@helm/shared";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { registerChatRoutes } from "./routes/chat.js";
+import { buildClassifyAdapter } from "./routes/classify.js";
 import { createExecute } from "./routes/execute.js";
 import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
@@ -42,82 +40,6 @@ export interface ServerHandle {
   app: ReturnType<typeof createApp>;
   port: number;
   host: string;
-}
-
-// classifier complexity (simple|standard|complex|reasoning) -> routing
-// complexity (simple|medium|complex). See implementation-notes 2026-05-31.
-function mapComplexity(c: Complexity): Classification["complexity"] {
-  switch (c) {
-    case "standard":
-      return "medium";
-    case "reasoning":
-      return "complex";
-    case "complex":
-      return "complex";
-    default:
-      return "simple";
-  }
-}
-
-// Cheap prompt-token estimate (~4 chars/token) for the classifier's context gate.
-function approxTokens(req: InternalRequest): number {
-  let chars = 0;
-  for (const m of req.messages) {
-    const content = (m as { content?: unknown }).content;
-    if (typeof content === "string") chars += content.length;
-  }
-  return Math.ceil(chars / 4);
-}
-
-// Build the classify adapter: Layer-1 rule engine (fail-open internally) mapped
-// to the routing Classification contract. classifier failures degrade upstream
-// to balanced (routeRequest's classifySafe), so this never needs to throw.
-// True when no message carries any non-whitespace text — a genuinely
-// unclassifiable request. The Layer-1 scorer is hardened to always commit to a
-// lane, so an empty/contentless prompt must be detected HERE and surfaced as a
-// classification failure so routeRequest's classifySafe degrades to `balanced`
-// (CLAUDE.md principle 3 fail-open + principle 5 classification fallback).
-function hasNoTextContent(req: InternalRequest): boolean {
-  for (const m of req.messages) {
-    const content = (m as { content?: unknown }).content;
-    if (typeof content === "string" && content.trim().length > 0) return false;
-    if (Array.isArray(content)) {
-      for (const part of content) {
-        if (typeof part === "string" && part.trim().length > 0) return false;
-        if (
-          part &&
-          typeof part === "object" &&
-          typeof (part as { text?: unknown }).text === "string" &&
-          (part as { text: string }).text.trim().length > 0
-        ) {
-          return false;
-        }
-      }
-    }
-  }
-  return true;
-}
-
-function buildClassify(rules: ClassifierRulesConfig) {
-  return async (req: InternalRequest): Promise<Classification> => {
-    // Unclassifiable input → throw so the orchestrator falls open to balanced.
-    if (hasNoTextContent(req)) {
-      throw new Error("classifier: no classifiable text content");
-    }
-    const r = scoreRequest(req, { cfg: rules, approxTokens: approxTokens(req) });
-    return {
-      task_type: r.task_type,
-      complexity: mapComplexity(r.complexity),
-      confidence: r.confidence,
-      decided_by: r.decided_by,
-      constraints: {
-        needs_json: r.constraints.needs_json,
-        needs_tools: r.constraints.needs_tools,
-        needs_vision: r.constraints.needs_vision,
-      },
-      explanation: r.explanation,
-    };
-  };
 }
 
 // Build a provider registry that maps every DEFAULT_LANES model alias to the
@@ -176,7 +98,17 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
   // Routing pipeline building blocks (framework-agnostic core).
   const lanes: LanesConfig = parseLanesConfig(DEFAULT_LANES);
   const policies: PoliciesConfig = { policies: [] };
-  const classify = buildClassify(config.classifier.rules);
+  // Three-layer cascade classify adapter: Layer-1 rules + Layer-2 eval (OFF by
+  // default; per-request override threaded from the chat route) + Layer-3
+  // balanced fail-open. The eval small-model is invoked via the same provider
+  // (eval alias). Holds one process-local eval cache (content-hash keyed).
+  const classify = buildClassifyAdapter({
+    classifierConfig: config.classifier,
+    lanes,
+    provider,
+    now: () => Date.now(),
+    log: (level, msg, fields) => logger.log(level as "info", msg, fields),
+  });
   const registry = buildRegistry(first.alias, baseUrl, first.api_key_env);
   const breaker = createCircuitBreaker({
     config: { failureThreshold: 5, cooldownMs: 30_000 },
@@ -208,11 +140,19 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
 
   // The per-request `route`: bind a fresh `execute` to the request's abort
   // signal (client disconnect), then run the framework-agnostic orchestrator.
-  const route = (req: InternalRequest, routeOpts: RouteOptions, signal: AbortSignal) =>
+  // `evalEnabled` is the per-request Layer-2 toggle (default OFF); it is bound
+  // into the classify closure here so the orchestrator's `classify(req)` contract
+  // stays single-arg and core remains unaware of the eval knob.
+  const route = (
+    req: InternalRequest,
+    routeOpts: RouteOptions,
+    signal: AbortSignal,
+    classifyOverrides?: { evalEnabled?: boolean; rulesThreshold?: number },
+  ) =>
     routeRequest(
       req,
       {
-        classify,
+        classify: (r) => classify(r, classifyOverrides),
         policies,
         lanes,
         execute: createExecute({
@@ -234,6 +174,10 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
     telemetry,
     redact: (payload) => redact(payload),
     now: () => Date.now(),
+    // e2e-only: allow the `x-helm-eval` header to toggle Layer-2 eval per request
+    // so the eval cascade can be black-boxed without a config reload. Production
+    // leaves HELM_E2E unset → eval stays config-driven (fail-closed, principle 2).
+    evalHeaderOverride: process.env.HELM_E2E === "1",
   });
 
   // Anthropic Messages route (/v1/messages). It reuses the SAME routing core via

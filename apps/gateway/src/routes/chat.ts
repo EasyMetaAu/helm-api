@@ -28,10 +28,16 @@ export interface ChatRouteDeps {
     req: InternalRequest,
     opts: RouteOptions,
     signal: AbortSignal,
+    classifyOverrides?: { evalEnabled?: boolean; rulesThreshold?: number },
   ) => Promise<ExecutionResult>;
   telemetry: TelemetryStore;
   redact: (payload: unknown) => unknown;
   now: () => number;
+  /** When true, honor the e2e-only `x-helm-eval` / `x-helm-rules-threshold`
+   *  headers to toggle Layer-2 eval and raise the Layer-1 gate per request.
+   *  Gated by HELM_E2E in the composition root; production never sets this so
+   *  classification stays config-driven (fail-closed). */
+  evalHeaderOverride?: boolean;
 }
 
 // Minimal identity shape the adapter reads (subset of middleware/auth's
@@ -118,10 +124,31 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       }
     };
 
+    // e2e-only classification overrides: honor `x-helm-eval` (Layer-2 toggle) and
+    // `x-helm-rules-threshold` (raise the Layer-1 gate so the cascade reaches
+    // eval) ONLY when the composition root opted in (HELM_E2E). Production leaves
+    // `evalHeaderOverride` false so classification stays config-driven
+    // (fail-closed, principle 2). Absent → defaults (eval OFF, config threshold).
+    let classifyOverrides: { evalEnabled?: boolean; rulesThreshold?: number } | undefined;
+    if (deps.evalHeaderOverride) {
+      const evalHeader = c.req.header("x-helm-eval");
+      const evalEnabled =
+        evalHeader === "on" || evalHeader === "1" || evalHeader === "true"
+          ? true
+          : evalHeader === undefined
+            ? undefined
+            : false;
+      const thresholdHeader = c.req.header("x-helm-rules-threshold");
+      const parsed = thresholdHeader === undefined ? Number.NaN : Number(thresholdHeader);
+      const rulesThreshold = Number.isFinite(parsed) ? parsed : undefined;
+      classifyOverrides = { evalEnabled, rulesThreshold };
+    }
+
     const result = await deps.route(
       internal,
       { allowCustomModel: identity.caps?.allowCustomModel === true },
       c.req.raw.signal,
+      classifyOverrides,
     );
 
     // Routing-signal debug headers (read by e2e + operators): the lane the
@@ -135,6 +162,20 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       const fin = result.decision.final;
       if (fin.model_alias !== null) c.header("x-helm-final-model", fin.model_alias);
       if (fin.provider_model !== null) c.header("x-helm-provider-model", fin.provider_model);
+    }
+
+    // Classification-decision headers (e2e.eval): expose the cascade's decision
+    // SOURCE so the two fallback kinds stay observable (principle 5). decided_by
+    // (rules|eval|default|fallback), the eval cache-hit flag (only meaningful when
+    // eval ran), and the precise fallback reason (eval_disabled / eval_<reason>).
+    // These carry only routing/decision metadata — never key/payload (principle 7).
+    const cls = result.decision.classifier;
+    c.header("x-helm-decided-by", cls.decided_by);
+    if (cls.eval_cache_hit !== null) {
+      c.header("x-helm-eval-cache-hit", String(cls.eval_cache_hit));
+    }
+    if (cls.fallback_reason !== null && cls.fallback_reason !== undefined) {
+      c.header("x-helm-fallback-reason", cls.fallback_reason);
     }
 
     // --- streaming branch (stream:true): forward the executor's SSE handle

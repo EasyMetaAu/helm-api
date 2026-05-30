@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EvalConfigSchema } from "./eval-config.schema.js";
 
 // Classifier config — the Layer-1 classifier's full tunable surface as DATA, not
 // code: dimension names/weights, keyword lists, four-tier boundaries, sigmoid
@@ -58,23 +59,11 @@ export const ClassifierRulesConfigSchema = z.object({
   }),
 });
 
-export const ClassifierEvalConfigSchema = z.object({
-  enabled: z.boolean().default(false), // Layer-2 eval is OFF by default.
-  model: z.string().default("deepseek/deepseek-v4-flash"),
-  temperature: z.number().default(0),
-  max_tokens: z.number().int().positive().default(256),
-  timeout_ms: z.number().int().positive().default(300),
-  on_failure: z.string().default("balanced"), // fail-open target tier
-  cache: z
-    .object({
-      enabled: z.boolean().default(true),
-      key: z.string().default("content_hash"),
-      ttl_sec: z.number().int().positive().default(300),
-    })
-    // prefault (not default) so the omitted object is parsed through inner
-    // field defaults instead of being used as a bare {}.
-    .prefault({}),
-});
+// Layer-2 eval block — the hardened schema is the single source of truth, defined
+// once in eval-config.schema.ts (z.literal locks, max_tokens cap, outer_timeout_ms,
+// cache.max_entries). Re-exported under the classifier-scoped name for back-compat
+// with existing consumers; do NOT redefine the eval shape here (default drift).
+export const ClassifierEvalConfigSchema = EvalConfigSchema;
 
 export const ClassifierConfigSchema = z.object({
   // prefault: parse the omitted block through inner defaults rather than using a
@@ -87,7 +76,10 @@ export const ClassifierConfigSchema = z.object({
     overrides: {},
     momentum: {},
   }),
-  eval: ClassifierEvalConfigSchema.prefault({}),
+  // prefault with the default model: the eval schema requires `model` (an enabled
+  // eval with no model is a lie), so an omitted block must still carry one to
+  // parse through inner defaults. enabled stays false regardless.
+  eval: ClassifierEvalConfigSchema.prefault({ model: "deepseek/deepseek-v4-flash" }),
 });
 
 export type Tier = z.infer<typeof TierSchema>;

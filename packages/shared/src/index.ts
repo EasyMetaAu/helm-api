@@ -24,6 +24,16 @@ export {
   PricingSchema,
 } from "./catalog/schema.js";
 
+// Layer-2 eval output model (docs/03 §任务分类) — strict JSON the eval model
+// emits; validated as untrusted external input, fail-open on any failure.
+export {
+  type Complexity,
+  ComplexitySchema,
+  type EvalOutput,
+  EvalOutputSchema,
+  type TaskType,
+  TaskTypeSchema,
+} from "./classifier/eval-output.schema.js";
 // Classifier config model (docs/03, research-notes Manifest) — DATA-driven
 // Layer-1 classifier surface + eval block. Schema is the single type source.
 export {
@@ -38,6 +48,14 @@ export {
   type Tier,
   TierSchema,
 } from "./config/classifier-schema.js";
+// Hardened Layer-2 eval config block — single source of truth for the eval
+// shape consumed by eval.contract/client/cache/cascade (docs/03 Layer 2).
+export {
+  type EvalCacheConfig,
+  EvalCacheConfigSchema,
+  type EvalConfig,
+  EvalConfigSchema,
+} from "./config/eval-config.schema.js";
 // Config model (docs/02, 06).
 export {
   type AuthConfig,

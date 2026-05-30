@@ -65,7 +65,8 @@ export const HelmConfigSchema = z.object({
       overrides: {},
       momentum: {},
     },
-    eval: {},
+    // eval omitted: let ClassifierConfigSchema's own eval prefault supply the
+    // default model (the hardened eval schema requires `model`).
   }),
 });
 

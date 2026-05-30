@@ -33,6 +33,15 @@ export {
   createCircuitBreaker,
 } from "./circuit/breaker.js";
 export {
+  type CascadeDeps,
+  type ClassificationResult as CascadeResult,
+  classify as classifyCascade,
+  type DecidedBy as CascadeDecidedBy,
+  type EvalDecisionResult,
+  type LaneId,
+  type RulesResult,
+} from "./classifier/cascade.js";
+export {
   type DimensionHit,
   type DimensionScore,
   scoreDimensions,
@@ -45,6 +54,28 @@ export {
   type ScoreRequestDeps,
   scoreRequest,
 } from "./classifier/engine.js";
+export {
+  createEvalCache,
+  type EvalCache,
+  type EvalCachedDeps,
+  runEvalCached,
+} from "./classifier/eval/cache.js";
+export {
+  buildEvalCacheKey,
+  type CanonicalEvalInput,
+  type ClassifierInput,
+  toCanonicalInput,
+} from "./classifier/eval/cache-key.js";
+export {
+  CircuitOpenError as EvalCircuitOpenError,
+  type EvalClientDeps,
+  type EvalDecision,
+  type EvalFailReason,
+  type EvalLogEvent,
+  type EvalModelRequest,
+  type EvalModelResponse,
+  runEval,
+} from "./classifier/eval/client.js";
 export {
   applyMomentum,
   type MomentumDeps,
@@ -212,6 +243,13 @@ export {
   type ResolveError,
   type ResolveResult,
 } from "./provider/registry.js";
+export {
+  type Classification as LaneResolverClassification,
+  type LaneDecision,
+  type PolicyOutcome as LaneResolverPolicyOutcome,
+  type ResolveLaneInput,
+  resolveLane,
+} from "./routing/lane-resolver.js";
 export {
   applyCaps,
   evaluatePolicies,
