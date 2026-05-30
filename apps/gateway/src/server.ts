@@ -1,5 +1,7 @@
 import { join } from "node:path";
 import {
+  type AnthropicSSEEvent,
+  anthropicTransformer,
   bootstrapRootKey,
   type Classification,
   type Complexity,
@@ -9,8 +11,11 @@ import {
   createSqliteDb,
   DEFAULT_LANES,
   generateKey,
+  hashKey,
+  type IRResponse,
   type LanesConfig,
   loadConfig,
+  makeAnthropicError,
   type PoliciesConfig,
   type ProviderConfig,
   parseLanesConfig,
@@ -29,6 +34,9 @@ import { createJsonLogger, type Logger } from "./logging.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { createExecute } from "./routes/execute.js";
+import type { MessagesIdentity, RouteError } from "./routes/messages.js";
+import { registerMessagesRoute } from "./routes/messages.js";
+import { createMessagesPipeline } from "./routes/messages-pipeline.js";
 
 export interface ServerHandle {
   app: ReturnType<typeof createApp>;
@@ -190,9 +198,11 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
     },
   });
 
-  // Mandatory auth on /v1/*, then the routing-pipeline chat route.
+  // Mandatory auth for the OpenAI chat surface (Hono middleware -> HelmError on
+  // failure). The Anthropic /v1/messages route self-authenticates so its errors
+  // are translated to the Anthropic envelope (docs/07) — see registerMessagesRoute.
   app.use(
-    "/v1/*",
+    "/v1/chat/*",
     authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
   );
 
@@ -224,6 +234,50 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
     telemetry,
     redact: (payload) => redact(payload),
     now: () => Date.now(),
+  });
+
+  // Anthropic Messages route (/v1/messages). It reuses the SAME routing core via
+  // `route`, behind a pipeline adapter that bridges IR ↔ the OpenAI executor and
+  // produces the native Anthropic response / SSE events (docs/05). Self-auth so a
+  // missing key is rejected as an Anthropic error envelope (docs/07).
+  const messagesPipeline = createMessagesPipeline(route);
+  registerMessagesRoute(app, {
+    auth: {
+      resolve: async (credential): Promise<MessagesIdentity | null> => {
+        if (credential === null) return null;
+        const record = await keyStore.getByHash(hashKey(credential));
+        if (record === null || record.disabled) return null;
+        return {
+          keyId: record.key_id,
+          accountId: record.account_id,
+          orgId: null,
+          userId: null,
+          role: record.role,
+          caps: { allowCustomModel: record.allow_custom_model },
+        };
+      },
+    },
+    transformers: {
+      anthropic: {
+        transformRequestOut: (native) => anthropicTransformer.transformRequestOut(native),
+        // `collect()` contractually returns an IRResponse; the route hands it back
+        // as `unknown`, so narrow at this single boundary.
+        transformResponseOut: (ir) => anthropicTransformer.transformResponseOut(ir as IRResponse),
+        // The pipeline already produced Anthropic SSE events; here we only
+        // serialize ONE event into its wire event/data pair.
+        transformStreamOut: (event) => {
+          const ev = event as AnthropicSSEEvent & { type: string };
+          return { event: ev.type, data: JSON.stringify(ev) };
+        },
+        transformErrorOut: (err: RouteError) =>
+          makeAnthropicError({
+            error_class: err.error_class === "auth_error" ? "auth_error" : "upstream_error",
+            message: err.message,
+            trace_id: err.trace_id,
+          }),
+      },
+    },
+    pipeline: messagesPipeline,
   });
 
   return { app, port: config.server.port, host: config.server.host };

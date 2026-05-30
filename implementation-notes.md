@@ -5,6 +5,57 @@
 
 ---
 
+## 2026-05-31 · e2e.protocol — 接线 `/v1/messages`、桩上游 tool-call/捕获、修复邻接任务遗留的类型错误（docs/05、task e2e.protocol）
+
+把 `e2e.protocol` 的双向（Anthropic/OpenAI 客户端）× 三路径（非流式/流式/tool-call）端到端打通。`apps/gateway/e2e/protocol.spec.ts` 8 个用例全绿（含「双向同构」：两协议归一化到同一上游请求形态）。关键决定：
+
+- **实装 `gateway.anthropic-route` 留下的 pipeline 适配 TODO**：新增 `apps/gateway/src/routes/messages-pipeline.ts`（`createMessagesPipeline(route)`），桥接 `IR → InternalRequest → route() → OpenAI body/stream → Anthropic transformer`。`collect()` 把上游 OpenAI body 投影成 `IRResponse`（`openAIBodyToIR`）；`streamIR()` 把 provider 的**原始 OpenAI SSE 文本流**按空行边界解析成 chunk 对象（`parseOpenAISSE`，跨 chunk 缓冲、跳过 `[DONE]`、坏帧 fail-open）再喂给 core 的 `convertOpenAIStreamToAnthropic` 状态机，产出 Anthropic SSE 事件。`server.ts` 现已注册 `registerMessagesRoute`——上一个任务里「`app.ts` 暂未默认注册」的状态到此结束。
+- **auth 中间件改挂 `/v1/chat/*`（原 `/v1/*`）**：全局 `authMiddleware` 返回 HelmError 形态；若它覆盖 `/v1/messages`，缺 key 用例就拿不到 Anthropic 错误信封。故把中间件收窄到 chat 面，`/v1/messages` 由路由内 `deps.auth.resolve`（命中 keyStore.getByHash）自鉴权，401 经 `makeAnthropicError` 翻成 `{type:"error",error:{type:"authentication_error"}}`。
+- **桩上游扩展**：`mock-upstream.ts` 新增 `TOOL_CALL_SENTINEL`（prompt 触发 OpenAI function tool_call，流式版把 arguments 拆帧、id/name 只在首帧给，逼真考验 docs/05 坑#3 的 index/id 协调与残缺 JSON 累积）与 `CAPTURE_PATH=/__captured`（回读「Helm 发给上游的归一化请求」，证明 `nativeIn→IR→nativeOut`）。spec 经**绝对 URL**（`MOCK_PORT`，默认 8181）读捕获端点——它在桩上游而非网关 baseURL 上。
+- **修复邻接任务（gateway.anthropic-route，#14）遗留、阻塞 `pnpm typecheck` 的 Zod v4 / `noUncheckedIndexedAccess` 类型错误**（这些文件当时未提交、基线 stash 后才暴露）：`anthropic/stream.ts` 的 `z.record(z.unknown())`→`z.record(z.string(), z.unknown())`（Zod v4 record 需双参）；`responses.ts` 迭代可空 content 前判空；`streaming.ts` `synthesizeSSE` 取帧判 undefined；多个 `*.test.ts` 的下标访问加 `!`。纯类型/防御性修复，零行为变更，全部 505 单测仍绿。这是为让本任务的 gate 全绿而做的最小越界——本任务运行时正依赖这条 Anthropic stream 链路。
+
+---
+
+## 2026-05-31 · gateway.anthropic-route 的依赖契约与错误翻译落点（docs/02、docs/05、task gateway.anthropic-route）
+
+`apps/gateway/src/routes/messages.ts` 实装 `POST /v1/messages`。相对 task 给的伪代码做了几处明确决定，记录在此：
+
+- **依赖以 `MessagesRouteDeps` 注入，auth 进 route 而非中间件**：task 伪代码写 `deps.auth.resolve(...)` 在路由内。现有 `authMiddleware`（chat 路由用）返回的是 **OpenAI** 错误形态，无法满足本任务"401 必须是 Anthropic 错误形态"的用例。因此 `/v1/messages` 的鉴权由路由内 `deps.auth.resolve` 完成，401 经 `transformErrorOut` 翻成 Anthropic 形态。代价：`/v1/messages` 不复用全局 auth 中间件，composition root 需单独给它注入 `auth`。仍满足"鉴权在翻译/路由之前、不得匿名穿透"。
+- **`pipeline.run(ir, identity, signal)` 多了第三参 `signal`**：task 伪代码是两参。为满足"客户端断连(abort)不触发熔断"用例，路由把 `c.req.raw.signal` 透传给 pipeline，让 executor 把 abort 当非 provider 故障。这是对 task 契约的最小扩展，与 chat 路由把 signal 传给 `route()` 的既有约定一致。
+- **`pipeline` 返回 `{ collect(), streamIR() }` 抽象，而非直接复用 `routeRequest`/`ExecutionResult`**：本任务范围只接线 Anthropic 一面，pipeline 的具体 IR 适配（IR→executor→IR）属其它任务。路由对结果只读这两个访问器，保持纯胶水；production composition root 负责把 `routeRequest` 的 `ExecutionResult` 适配成该形态。**该适配器尚未实装（TODO，留给 routing.pipeline 接线任务）**——故 `app.ts` 暂未默认注册该路由，`registerMessagesRoute` 已从 `@helm/gateway` 导出供 composition root 接线，gateway 仍可 headless 起。
+- **Anthropic 错误翻译落在 core**：新增 `packages/core/src/protocol/anthropic/error.ts`（`transformErrorOut` / `makeAnthropicError`），`error_class → Anthropic error.type` 映射穷尽 `ErrorClass`，HTTP 状态复用 `ERROR_CLASS_HTTP_STATUS`。路由不手拼错误字符串（docs/05/07）。
+- **新增 anthropic barrel** `packages/core/src/protocol/anthropic/index.ts`：导出已有的 `transformRequestOut`/`transformResponseIn`/`convert*Stream*`/`synthesizeSSEFromJSON` + 新错误函数，并组装 `anthropicTransformer`（`name:"anthropic"`、`endPoint:"/v1/messages"`、含 `transformRequestOut`/`transformResponseOut`）。注意 response 模块的 IR→native 函数沿用其原名 `transformResponseIn`（其文件头注释如此命名），在 barrel 里映射到 `Transformer.transformResponseOut`。
+
+---
+
+## 2026-05-31 · protocol.anthropic-stream：OpenAI-chunk → Anthropic SSE 流式状态机
+
+所属：protocol.anthropic-stream、docs/05 流式互译、原则 1/8、research-notes 坑 #2/#3/#4
+
+- **状态机产出 `AsyncIterable<AnthropicSSEEvent>` 事件对象，未耦合 Hono `streamSSE`**：契约要求纯逻辑（原则 1）。`convertOpenAIStreamToAnthropic(chunks)` 是 async generator，gateway 侧再把事件序列化上 SSE 线（接线不在本任务）。本任务**未复用** `streaming.ts` 现成的 `Controller`/`safeEnqueue`/`safeClose`（那套是 controller 推送模型）；generator 的"只 yield 一次"天然就是幂等关闭守卫，`openBlocks` 集合 + `delete` 保证每个 `content_block_stop` 只发一次、末事件只 yield 一次，等价覆盖 pit #4，无需 controller。
+- **tool-block START 延迟到首个参数分片（偏离伪代码"首见即 start"）**：spec 伪代码在首次见到某 tool index 时立刻 `emit content_block_start`，但同时又要"临时 id 后补升级 / 已发出的用 message 修正"。为彻底规避"对外发出临时 id、客户端可能据其行动"的隐患，改为**首见只建 slot 不发 start**；待第一个 `arguments` 分片到达（或流结束兜底）时，id/name 已大概率落定，才发 `content_block_start`。这正是 task 测试 3 断言的"对外发出的 id 与最终真 id 一致"策略（settle-before-emit），比"先发临时再修正"更稳，且仍满足"delta 前必有同 index 的 start"（测试 6，无孤儿 delta）。代价：纯 name 无参数的 tool 调用，其 start 在流末兜底发出——可接受（Anthropic 客户端按 start→stop 配对即可）。
+- **本地 `StreamState` 而非复用 `streaming.ts` 的共享 `StreamState`**：task「状态对象」给的字段（`nextBlockIndex`/`textBlockIndex`/`toolIndexToBlock` 带富 slot：blockIndex/id/name/argBuffer）比 `streaming.ts` 的通用 `StreamState`（`contentIndex`/`openaiIndexToBlockIndex`/`toolCallIdUpgrade`）更贴合 Anthropic 方向，故就近在 `stream.ts` 定义私有 state。通用 `streaming.ts` 仍是其它方向/字节层 splitter 的基础，两者不冲突。
+- **`synthesizeSSEFromJSON` 复用主状态机**：把单个 IR 响应合成成"单 chunk feed"喂给 `convertOpenAIStreamToAnthropic`，从而与真流式**同构**（测试 7）——而非另写一套合成逻辑，杜绝两条路径漂移。
+- **末事件 usage 复用 `response.ts` 的 `mapUsage`/`mapStopReason`**：`input = prompt − cached`（IR.prompt_tokens 已是非缓存输入），中途 chunk 的 usage 只 buffer 不发（测试 5），缓存读不双算（pit #2）；stop_reason 恒落合法 Anthropic enum。
+- **门禁（全绿）**：`pnpm typecheck`=0、`pnpm lint`=0、`pnpm test`=481/481（含本任务 8 例）、`pnpm build`=0。
+
+---
+
+## 2026-05-31 · protocol.responses：OpenAI Responses 呈现面（item 展开）
+
+所属：protocol.responses、docs/05 协议互译、原则 1/2/3
+
+- **transformer 形态偏离 spec 的 `class`，改用对象字面量**：task 接口给的是 `class ResponsesTransformer implements Transformer`，但现行代码库（`openaiTransformer`、`anthropic`）一律用导出的对象字面量实现 `Transformer` 接口、`name`/`endPoint` 为只读字段。为保持一致与可注册性（`TransformerRegistry.register` 按 `name`/`endPoint` 索引），实现为 `export const responsesTransformer: Transformer`。语义等价，五方法契约不变。
+- **`name = "openai-responses"`**：spec 未指定 transformer 名，仅给了 `endPoint=/v1/responses`。取 `openai-responses` 以与 `openai`（Chat）区分、且 registry 不冲突（endpoint 隔离用例覆盖）。
+- **Zod schema 落在 core 而非 shared**：task「涉及文件」写 schema 落 `packages/shared`，但既有 anthropic transformer 把协议 native schema 全部 colocate 在 `packages/core/src/protocol/`（仅 IR/请求/错误等跨层模型进 shared）。Responses 的 native item schema 只服务于本 transformer，遵从既有约定就近放在 `responses.ts`，避免 shared 膨胀；IR 类型仍复用 `@helm/core` 的 `ir.ts`（z.infer，无重复手写类型）。
+- **finish_reason → Responses `status` 映射**：Responses 终态合法值取 `completed`/`incomplete`；`length`/`max_tokens`/`content_filter` → `incomplete`（命中输出上限/截断），其余（`stop`/`tool_calls`/…）→ `completed`，未知值兜底 `completed`，**原值恒入 `provider_raw.stop_reason`**（pit #1，绝不丢原值）。
+- **reasoning item `status` 剥离（litellm 已知坑）**：入站把 `reasoning` item 收成 IR thinking 块时**剔除 `status`**（OpenAI 报 `Unknown parameter: 'input[X].status'`），整条原始 item（含 status）存 `provider_raw.reasoning` 以便无损重建。
+- **容错策略**：`function_call` 缺 `call_id` 时按 `id` → 合成 `call_<n>_<name>` 升级，绝不静默丢工具调用；未识别 item 类型进 `provider_raw.unknown_items`（fail-open，不崩请求）；`developer` 角色折叠为 `system`（IR 无 developer 角色）。
+- **`transformRequestIn`（IR→Responses 请求）做了对称展开**而非恒等钳制：把 IR messages 摊回 `input[]` item 流（首条 system→`instructions`、tool→`function_call_output`、assistant.tool_calls→`function_call`），保持双向无损；MVP 上游多为 Chat，此向通常不走，但实现完整以备 Responses 上游。
+- **门禁（全绿）**：`pnpm typecheck`=0、`pnpm lint`=0、`pnpm test`=473/473（含本任务 14 例）、`pnpm build`=0。
+
+---
+
 ## 2026-05-31 · e2e.routing 收尾：修正 4 个陈旧 core 测试 fixture（typecheck 转绿）
 
 所属：e2e.routing、原则 8（CI 全绿方可合并）、docs/07 error_class

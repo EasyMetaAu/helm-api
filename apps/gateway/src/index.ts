@@ -16,6 +16,15 @@ export { bodyLimit, type LimitsConfig, timeout } from "./middleware/limits.js";
 export { normalizeHeaders } from "./middleware/normalize-headers.js";
 export { type ChatRouteDeps, registerChatRoutes } from "./routes/chat.js";
 export { type HealthDeps, registerHealthRoutes } from "./routes/health.js";
+export {
+  type AnthropicErrorOut,
+  type AnthropicSSEFrame,
+  type MessagesIdentity,
+  type MessagesRouteDeps,
+  type PipelineRunResult,
+  type RouteError,
+  registerMessagesRoute,
+} from "./routes/messages.js";
 export { buildServer, type ServerHandle } from "./server.js";
 
 export function buildDefaultApp() {

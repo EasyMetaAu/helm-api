@@ -67,15 +67,81 @@ function messagesText(body: { messages?: unknown }): string {
 }
 
 export const STREAM_CHUNKS = [
+  'data: {"id":"chatcmpl-mock","choices":[{"delta":{"role":"assistant"}}]}\n\n',
   'data: {"id":"chatcmpl-mock","choices":[{"delta":{"content":"hel"}}]}\n\n',
-  'data: {"id":"chatcmpl-mock","choices":[{"delta":{"content":"lo"}}]}\n\n',
+  'data: {"id":"chatcmpl-mock","choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}\n\n',
   "data: [DONE]\n\n",
 ];
 
+// —— tool-call scripts (e2e.protocol) ————————————————————————————————————————
+// A prompt carrying TOOL_CALL_SENTINEL makes the mock answer with an OpenAI
+// function tool_call instead of plain text — exercising the tool-call branch of
+// both protocol directions. The stream variant FRAGMENTS the arguments across
+// chunks and supplies the id/name only on the FIRST fragment, so the gateway's
+// streaming state machine (docs/05 pit #3) has to coordinate index/id and
+// accumulate partial JSON. Kept here so the spec and the mock stay in lockstep.
+export const TOOL_CALL_SENTINEL = "__HELM_TOOL_CALL__";
+const TOOL_CALL_ID = "call_mock_weather";
+const TOOL_CALL_NAME = "get_weather";
+
+// Non-stream OpenAI tool_call completion.
+function toolCallResponse(model: string) {
+  return {
+    id: "chatcmpl-mock-tool",
+    object: "chat.completion",
+    model,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: TOOL_CALL_ID,
+              type: "function",
+              function: { name: TOOL_CALL_NAME, arguments: '{"city":"Paris"}' },
+            },
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+  };
+}
+
+// Streamed OpenAI tool_call chunks: id+name on the FIRST fragment, then the JSON
+// arguments split across two fragments, then finish_reason + [DONE].
+export const TOOL_CALL_STREAM_CHUNKS = [
+  'data: {"id":"chatcmpl-mock-tool","choices":[{"delta":{"role":"assistant"}}]}\n\n',
+  `data: {"id":"chatcmpl-mock-tool","choices":[{"delta":{"tool_calls":[{"index":0,"id":"${TOOL_CALL_ID}","type":"function","function":{"name":"${TOOL_CALL_NAME}","arguments":"{\\"city\\":"}}]}}]}\n\n`,
+  'data: {"id":"chatcmpl-mock-tool","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"Paris\\"}"}}]}}]}\n\n',
+  'data: {"id":"chatcmpl-mock-tool","choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+  "data: [DONE]\n\n",
+];
+
+// —— upstream request capture (e2e.protocol) —————————————————————————————————
+// The path the spec GETs to read back the LAST request the gateway forwarded
+// upstream. Lets the e2e assert the NORMALIZED (OpenAI-Chat IR) request shape
+// for BOTH client directions — proving nativeIn → IR → nativeOut.
+export const CAPTURE_PATH = "/__captured";
+
+export interface UpstreamCapture {
+  body: { model?: string; messages: unknown[]; [k: string]: unknown };
+  count: number;
+}
+
 export function createMockUpstream() {
   const app = new Hono();
+  // The last request the gateway forwarded upstream + a monotonic counter. Lets
+  // the e2e read back the NORMALIZED request shape (CAPTURE_PATH).
+  let lastCapture: UpstreamCapture = { body: { messages: [] }, count: 0 };
+
   // Readiness probe for Playwright's webServer wait.
   app.get("/", (c) => c.text("mock upstream ok"));
+  // Read back the last normalized upstream request (e2e.protocol assertions).
+  app.get(CAPTURE_PATH, (c) => c.json(lastCapture));
+
   app.post("/chat/completions", async (c) => {
     const body = (await c.req.json()) as {
       stream?: boolean;
@@ -83,15 +149,32 @@ export function createMockUpstream() {
       messages?: unknown;
     };
     const model = typeof body.model === "string" ? body.model : "mock-model";
+    // Record the normalized request so the e2e can assert nativeIn → IR → nativeOut.
+    lastCapture = {
+      body: body as UpstreamCapture["body"],
+      count: lastCapture.count + 1,
+    };
+
+    const promptText = messagesText(body);
 
     // Error injection (prompt-steered): a sentinel in the prompt fails ONLY the
     // economy head (primary candidate) so the gateway falls forward to the next
     // candidate in the chain (EXECUTION fallback).
-    if (messagesText(body).includes(FAIL_PRIMARY_SENTINEL) && model === FAIL_PRIMARY_MODEL) {
+    if (promptText.includes(FAIL_PRIMARY_SENTINEL) && model === FAIL_PRIMARY_MODEL) {
       return c.json(
         { error: { message: "mock injected upstream error", type: "server_error" } },
         500,
       );
+    }
+
+    // Tool-call branch (prompt-steered): emit an OpenAI function tool_call.
+    if (promptText.includes(TOOL_CALL_SENTINEL)) {
+      if (body.stream === true) {
+        return streamSSE(c, async (sse) => {
+          for (const chunk of TOOL_CALL_STREAM_CHUNKS) await sse.write(chunk);
+        });
+      }
+      return c.json(toolCallResponse(model));
     }
 
     if (body.stream === true) {

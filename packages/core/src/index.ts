@@ -108,6 +108,89 @@ export {
   LanesConfigSchema,
   parseLanesConfig,
 } from "./lanes/schema.js";
+// Anthropic Messages transformer — the second client-presentation surface
+// (docs/05). Inbound native->IR, outbound IR->native (+ stream state machine +
+// error translation). Reimplemented from the docs, not copied from upstream.
+export {
+  type AnthropicErrorEnvelope,
+  type AnthropicMessagesRequest,
+  type AnthropicMessagesResponse,
+  AnthropicMessagesResponseSchema,
+  type AnthropicSSEEvent,
+  AnthropicSSEEventSchema,
+  type AnthropicStopReason,
+  AnthropicStopReasonSchema,
+  type AnthropicUsage,
+  AnthropicUsageSchema,
+  anthropicTransformer,
+  convertOpenAIStreamToAnthropic,
+  makeAnthropicError,
+  mapStopReason,
+  mapUsage,
+  type OpenAIChunk,
+  OpenAIChunkSchema,
+  synthesizeSSEFromJSON,
+  transformErrorOut as anthropicTransformErrorOut,
+  transformRequestOut as anthropicTransformRequestOut,
+  transformResponseIn as anthropicTransformResponseIn,
+} from "./protocol/anthropic/index.js";
+// Protocol IR — the single central representation (docs/05). All translation
+// goes nativeIn -> IR -> nativeOut. Types are z.infer of these schemas.
+export {
+  type IRChoice,
+  IRChoiceSchema,
+  type IRContentPart,
+  IRContentPartSchema,
+  IRImagePartSchema,
+  type IRMessage,
+  IRMessageSchema,
+  type IRRequest,
+  IRRequestSchema,
+  type IRResponse,
+  IRResponseSchema,
+  IRTextPartSchema,
+  IRThinkingPartSchema,
+  type IRToolCall,
+  IRToolCallSchema,
+  type IRUsage,
+  IRUsageSchema,
+  type ProviderRaw,
+  ProviderRawSchema,
+} from "./protocol/ir.js";
+// OpenAI Chat transformer — the hub identity transform (docs/05); correctness
+// anchor for the protocol layer (nativeIn -> IR -> nativeOut, isomorphic).
+export { openaiTransformer } from "./protocol/openai.js";
+// Protocol transformer contract + registry + framework-agnostic endpoint mount
+// (docs/05). 5-method contract per protocol; the gateway wires real routes.
+export {
+  DuplicateEndpointError,
+  DuplicateTransformerError,
+  mountEndpoints,
+  TransformerRegistry,
+} from "./protocol/registry.js";
+// OpenAI Responses transformer — the third client presentation surface (docs/05);
+// folds the flat input[] item stream into the IR and explodes it back out.
+export { mapResponsesStatus, responsesTransformer } from "./protocol/responses.js";
+// Streaming primitives (docs/05): generic SSE splitter, shared per-direction
+// state machine + idempotent close guards, and the JSON->SSE synthesizer for
+// cache hits / non-streaming upstreams. Framework-agnostic (Web ReadableStream).
+export {
+  type Controller,
+  createStreamState,
+  parseSSEData,
+  readSSE,
+  type SSEFrame,
+  type StreamState,
+  safeClose,
+  safeEnqueue,
+  synthesizeSSE,
+} from "./protocol/streaming.js";
+export type {
+  BehaviorTransformer,
+  NativeRequest,
+  NativeResponse,
+  Transformer,
+} from "./protocol/transformer.js";
 export {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
