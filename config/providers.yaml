@@ -1,0 +1,8 @@
+# Upstream provider(s). Credentials are referenced by env var NAME only
+# (api_key_env) — never a plaintext key in the repo (docs/10, principle 7).
+# Phase 0 uses the first configured OpenAI-compatible provider.
+providers:
+  - alias: openai
+    type: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY

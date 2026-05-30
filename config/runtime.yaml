@@ -1,0 +1,9 @@
+# Runtime limits + rate limiting. Rate limiting is OFF by default (zero friction).
+# Env overrides: HELM_MAX_REQUEST_BYTES, HELM_REQUEST_TIMEOUT_MS, HELM_RATE_LIMIT_ENABLED.
+max_request_bytes: 2000000 # 2 MB
+request_timeout_ms: 60000
+rate_limit:
+  enabled: false
+  default:
+    rpm: 0 # 0 = unlimited
+    tpm: 0

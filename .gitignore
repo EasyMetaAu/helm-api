@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+.svelte-kit/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+test-results/
+playwright-report/
+
+# Runtime data & secrets
+data/
+*.sqlite
+*.sqlite3
+*.db
+.env
+.env.*
+!.env.example
+
+# Local tooling / agent scaffolding (not project files)
+.claude/
+.codex/
+
+# OS / editor
+.DS_Store
+*.log
+
+# ralph-dev temp orchestration state
+.ralph-dev/
+
+# e2e artifacts
+apps/gateway/.e2e-data/
+apps/gateway/test-results/
+apps/gateway/playwright-report/

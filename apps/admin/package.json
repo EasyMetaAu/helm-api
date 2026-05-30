@@ -1,0 +1,7 @@
+{
+  "name": "@helm/admin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Placeholder. SvelteKit + Tailwind admin UI is wired in Phase 4 (out of Phase 0 scope)."
+}

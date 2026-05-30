@@ -1,0 +1,30 @@
+services:
+  helm:
+    # Default to the published image; for local dev uncomment `build: .`.
+    image: ghcr.io/easymetaau/helm-api:latest
+    # build: .
+    container_name: helm
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config # lanes/policies/classifier/providers... (config-as-code)
+      - ./data:/app/data # telemetry, keys, sqlite — persisted
+    environment:
+      # Admin UI (docs/11; consumed in Phase 4)
+      HELM_ADMIN_USER: ${HELM_ADMIN_USER:-admin}
+      HELM_ADMIN_PASSWORD: ${HELM_ADMIN_PASSWORD:?set HELM_ADMIN_PASSWORD in .env}
+      # Upstream provider credential (env-injected, never in the repo)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
