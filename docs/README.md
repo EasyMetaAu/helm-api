@@ -1,23 +1,23 @@
-# Helm API Documentation
+# Helm API 文档
 
-This directory holds the product and technical specifications for Helm API. The repository is **spec-first**: these documents define the MVP scope and architecture, and implementation follows once the scope is locked.
+本目录存放 Helm API 的产品与技术规范。本仓库采用 **spec-first（规范先行）** 模式：这些文档定义了 MVP 的范围与架构，待范围锁定后再开始实现。
 
-## Reading order
+## 阅读顺序
 
-Start at the top and move down. Each document assumes you have read the ones above it.
+从最上方开始，依次向下阅读。每篇文档都假定你已经读过它上面的文档。
 
-| # | Document | What it answers |
+| # | Document | 它回答了什么 |
 |---|---|---|
-| 1 | [Product Specification](product-spec.md) | What Helm is, who it serves, what is in and out of the MVP. |
-| 2 | [Architecture Specification](architecture-spec.md) | How the request flows through components, the internal request shape, and config layout. |
-| 3 | [Memory Middleware Specification](memory-middleware-spec.md) | The optional memory layer that sits beside routing, not inside it. |
-| 4 | [Research Notes](research-notes.md) | Prior art (Manifest, Plano, Portkey, Tingly Box, Mastra) and what to borrow vs. avoid. |
+| 1 | [Product Specification](product-spec.md) | Helm 是什么、服务于谁、哪些内容在 MVP 之内、哪些在之外。 |
+| 2 | [Architecture Specification](architecture-spec.md) | 请求如何在各组件之间流转、内部的请求形态，以及配置布局。 |
+| 3 | [Memory Middleware Specification](memory-middleware-spec.md) | 紧贴路由、但不在路由内部的可选记忆层。 |
+| 4 | [Research Notes](research-notes.md) | 现有方案（Manifest、Plano、Portkey、Tingly Box、Mastra）以及哪些值得借鉴、哪些应当规避。 |
 
-## What Helm is in one paragraph
+## 一段话讲清 Helm 是什么
 
-Helm API is a configurable intelligent model gateway. It accepts standard AI API requests (OpenAI Chat, Anthropic Messages, OpenAI Responses, Gemini later), classifies each request by task type and complexity, routes it through a configurable **lane** instead of a raw provider alias, executes through primary and fallback providers, and records every routing decision for debugging. Clients only change `base_url` and API key.
+Helm API 是一个可配置的智能模型网关。它接收标准的 AI API 请求（OpenAI Chat、Anthropic Messages、OpenAI Responses，后续支持 Gemini），按任务类型和复杂度对每个请求进行分类，将其路由到一个可配置的 **lane** 而非裸的 provider 别名，通过主用和 fallback provider 执行，并记录每一次路由决策以便调试。客户端只需更改 `base_url` 和 API key。
 
-## Core product loop
+## 核心产品闭环
 
 ```text
 Client request
@@ -29,23 +29,23 @@ Client request
   -> Request Log / Debug UI
 ```
 
-## Design principles
+## 设计原则
 
-These keep Helm narrower than its predecessor (`llm-router`), which grew too broad:
+这些原则让 Helm 比它的前身（`llm-router`）更聚焦——后者扩张得过于宽泛：
 
-- **Sell lanes, not a model marketplace.** Users pick `economy / balanced / premium`. Provider aliases are internal supply-chain detail.
-- **Routing core stays small and explainable.** Policy is explicit and inspectable; no black-box model scoring in the runtime decision path.
-- **Memory is middleware, not policy.** It helps the request be understood; it never rewrites lane rules.
-- **Deterministic classification first.** Local heuristics decide the first routing layer; an LLM/embedding classifier stays behind a feature flag.
-- **Every unexpected provider choice must be explainable** from the request log.
+- **售卖 lane，而非一个模型集市。** 用户选择 `economy / balanced / premium`。provider 别名是内部的供应链细节。
+- **路由内核保持精简且可解释。** 策略是显式且可检视的；运行时的决策路径中没有黑盒式的模型打分。
+- **记忆是中间件，而非策略。** 它帮助请求被理解；它绝不重写 lane 规则。
+- **确定性分类优先。** 由本地启发式规则决定第一层路由；LLM／嵌入分类器则置于 feature flag 之后。
+- **每一个出人意料的 provider 选择都必须可解释**，依据来自请求日志。
 
-## Out of scope for the MVP
+## MVP 范围之外
 
-A model marketplace, hundreds of public provider aliases, a full RAG product, memory inside routing policy, and agent orchestration. See [Product Specification → Non-goals](product-spec.md#non-goals) for the full list.
+模型集市、数百个公开的 provider 别名、完整的 RAG 产品、置于路由策略内部的记忆，以及 agent 编排。完整清单见 [产品规格 → 非目标](product-spec.md#非目标)。
 
-## Configuration layout
+## 配置布局
 
-Runtime behavior is driven by config, not code changes:
+运行时行为由配置驱动，而非靠改代码：
 
 ```text
 config/
@@ -56,12 +56,12 @@ config/
   pricing.yaml       # pricing metadata and overrides
 ```
 
-See the [Architecture Specification](architecture-spec.md) for how each file feeds the pipeline.
+关于每个文件如何馈入流水线，见 [Architecture Specification](architecture-spec.md)。
 
-## Status
+## 状态
 
-| Stage | State |
+| Stage | 状态 |
 |---|---|
-| Specifications | Drafted (these documents) |
-| MVP scope lock | Pending |
-| Implementation | Not started |
+| Specifications | 已起草（即这些文档） |
+| MVP scope lock | 待定 |
+| Implementation | 尚未开始 |

@@ -1,8 +1,8 @@
-# Helm API Memory Middleware Specification
+# Helm API 记忆中间件规范
 
-## Positioning
+## 定位
 
-Memory is not part of the MVP routing core. Memory is an optional middleware that gives requests enough context before classification and execution.
+记忆并不属于 MVP 路由核心。记忆是一个可选的中间件，它在分类和执行之前为请求提供足够的上下文。
 
 ```text
 Memory helps the request be understood.
@@ -11,25 +11,25 @@ Provider executes.
 Logs explain what happened.
 ```
 
-## Source issue
+## 来源 issue
 
-This spec is based on llm-router issue #362: Memory Gateway / Observational Memory.
+本规范基于 llm-router issue #362：Memory Gateway / Observational Memory（记忆网关 / 观察式记忆）。
 
 Issue: https://github.com/EasyMetaAu/llm-router/issues/362
 
-## Core idea
+## 核心思路
 
-Use a gateway-level memory layer inspired by Mastra Observational Memory:
+采用受 Mastra Observational Memory 启发的网关级记忆层：
 
-- Client passes stable IDs such as `x-thread-id`, `x-resource-id`, and `x-project-id`.
-- Gateway stores raw messages and tool results.
-- Background Observer compresses old raw history into dated observations.
-- Background Reflector merges observations into stable reflections.
-- Provider context is assembled from reflection, observations, recent raw messages, and the current message.
+- 客户端传入稳定的 ID，例如 `x-thread-id`、`x-resource-id` 和 `x-project-id`。
+- 网关存储原始消息和工具结果。
+- 后台 Observer 将旧的原始历史压缩为带日期的观察记录。
+- 后台 Reflector 将观察记录合并为稳定的反思。
+- Provider 上下文由反思、观察记录、近期原始消息以及当前消息组装而成。
 
-This is not dynamic RAG in the MVP direction. The target is a stable, cache-friendly context prefix.
+在 MVP 方向上这并不是动态 RAG。目标是构建一个稳定、对缓存友好的上下文前缀。
 
-## Request headers
+## 请求头
 
 ```http
 x-thread-id: current conversation or task thread
@@ -38,19 +38,19 @@ x-project-id: project-level memory scope
 x-memory-mode: off | observe | inject
 ```
 
-Default:
+默认值：
 
 ```text
 x-memory-mode = off
 ```
 
-Modes:
+模式：
 
-- `off`: no memory read/write; current routing behavior.
-- `observe`: record messages and tool outputs, but do not inject memory.
-- `inject`: load memory context, assemble prompt, and enqueue writeback.
+- `off`：不进行记忆读写；保持当前路由行为。
+- `observe`：记录消息和工具输出，但不注入记忆。
+- `inject`：加载记忆上下文、组装 prompt，并将回写任务入队。
 
-## Pipeline
+## 流水线
 
 ```text
 Request comes in
@@ -66,7 +66,7 @@ Request comes in
   -> reflector periodically merges observations into reflection
 ```
 
-## Context assembly order
+## 上下文组装顺序
 
 ```text
 system prompt
@@ -77,17 +77,17 @@ system prompt
 + current user message
 ```
 
-Rules:
+规则：
 
-- Reflection should be stable and slow-changing.
-- Recent raw messages must remain available to avoid compression loss.
-- Observation text should include time anchors.
-- Memory injection should stay within a token budget.
-- If memory loading fails, the main request should continue without memory and log the failure.
+- 反思应当稳定且缓慢变化。
+- 必须保留近期原始消息，以避免压缩造成信息丢失。
+- 观察记录文本应包含时间锚点。
+- 记忆注入应保持在 token 预算范围内。
+- 如果记忆加载失败，主请求应在无记忆的情况下继续执行，并记录该失败。
 
-## Storage model
+## 存储模型
 
-Minimum tables:
+最小表集合：
 
 ```text
 memory_threads
@@ -108,18 +108,18 @@ memory_jobs
   id, type, scope_id, status, error, created_at, updated_at
 ```
 
-`source_message_range` is mandatory so compressed memories can be audited against original messages.
+`source_message_range` 是必填字段，这样压缩后的记忆才能与原始消息进行审计核对。
 
-## Router integration
+## 路由集成
 
-Classifier may use:
+分类器可以使用：
 
-- Current message.
-- Recent raw turns.
-- Short memory summary.
-- Tool/request metadata.
+- 当前消息。
+- 近期的原始对话轮次。
+- 简短的记忆摘要。
+- 工具/请求元数据。
 
-Router output remains:
+路由输出保持不变：
 
 ```text
 task_type
@@ -128,11 +128,11 @@ constraints
 lane
 ```
 
-Memory must not directly rewrite lane rules. For example, user entitlement routing belongs in Policy Engine, not Memory.
+记忆不得直接改写 lane 规则。例如，用户权益路由应归属于 Policy Engine，而非记忆。
 
-## Debug UI fields
+## 调试 UI 字段
 
-Add request-level memory metadata:
+新增请求级别的记忆元数据：
 
 ```text
 memory_mode
@@ -147,47 +147,47 @@ observer_job_id
 memory_writeback_status
 ```
 
-Request detail may show memory metadata by default. Full memory content should require explicit permission and should be audited.
+请求详情默认可以展示记忆元数据。完整的记忆内容应需要显式授权，并且应被审计。
 
-## Cost accounting
+## 成本核算
 
-Separate token/cost buckets:
+独立的 token/成本分桶：
 
-- Actor request tokens.
-- Actor response tokens.
-- Memory hydrate tokens.
-- Observer tokens.
-- Reflector tokens.
+- Actor 请求 token。
+- Actor 响应 token。
+- 记忆补水（hydrate）token。
+- Observer token。
+- Reflector token。
 
-Memory maintenance must be visible in cost reports and should not be hidden inside provider execution cost.
+记忆维护必须在成本报告中可见，且不应隐藏在 Provider 执行成本之中。
 
-## Phase plan
+## 阶段计划
 
-### Phase 1: Memory-ready
+### 阶段 1：记忆就绪（Memory-ready）
 
-- Accept memory headers.
-- Persist raw messages in observe mode.
-- Show memory metadata in request logs.
-- Do not inject memory yet.
+- 接受记忆请求头。
+- 在 observe 模式下持久化原始消息。
+- 在请求日志中展示记忆元数据。
+- 暂不注入记忆。
 
-### Phase 2: Observational Memory MVP
+### 阶段 2：观察式记忆 MVP（Observational Memory MVP）
 
-- Implement Observer: raw messages -> observations.
-- Implement Reflector: observations -> reflection.
-- Implement context assembly for inject mode.
-- Run on explicit `x-memory-mode=inject` only.
+- 实现 Observer：原始消息 -> 观察记录。
+- 实现 Reflector：观察记录 -> 反思。
+- 实现 inject 模式的上下文组装。
+- 仅在显式设置 `x-memory-mode=inject` 时运行。
 
-### Phase 3: Project memory
+### 阶段 3：项目记忆（Project memory）
 
-- Project/resource/thread scope hierarchy.
-- Structured facts and asset graph.
-- Creative/project workspace support.
+- 项目/资源/线程的作用域层级。
+- 结构化事实与资产图谱。
+- 创意/项目工作区支持。
 
-## Non-goals
+## 非目标
 
-- No full RAG product in the router core.
-- No per-turn dynamic retrieval by default.
-- No cross-project memory sharing.
-- No global user profile in the first version.
-- No synchronous Observer in the main request path.
-- No agent orchestration in Memory Middleware.
+- 不在路由核心中构建完整的 RAG 产品。
+- 默认不进行逐轮的动态检索。
+- 不进行跨项目的记忆共享。
+- 首个版本中不引入全局用户画像。
+- 不在主请求路径中引入同步的 Observer。
+- 不在记忆中间件中进行 agent 编排。

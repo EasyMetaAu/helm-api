@@ -1,6 +1,6 @@
-# Helm API Architecture Specification
+# Helm API 架构规范
 
-## Architecture overview
+## 架构概览
 
 ```text
 Client
@@ -17,110 +17,110 @@ Client
   -> Telemetry / Request Log
 ```
 
-## Components
+## 组件
 
 ### API Gateway
 
-Responsibilities:
+API 网关（API Gateway）。职责：
 
-- Accept standard API requests.
-- Normalize headers and request IDs.
-- Apply request size and timeout limits.
-- Forward to the correct protocol adapter.
+- 接收标准 API 请求。
+- 规范化请求头和请求 ID。
+- 施加请求大小和超时限制。
+- 转发到正确的协议适配器。
 
 ### Protocol Adapter
 
-Responsibilities:
+协议适配器（Protocol Adapter）。职责：
 
-- Normalize OpenAI / Anthropic / Responses / future Gemini requests into one internal request shape.
-- Convert provider responses back into the requested client protocol.
-- Preserve streaming semantics.
+- 将 OpenAI / Anthropic / Responses / 未来的 Gemini 请求归一化为统一的内部请求结构。
+- 将提供方的响应转换回客户端所请求的协议。
+- 保持流式语义。
 
 ### Auth Resolver
 
-Responsibilities:
+鉴权解析器（Auth Resolver）。职责：
 
-- Resolve API key identity.
-- Attach account, org, user, and permission metadata.
-- Never store plaintext API keys in telemetry.
-- Record key source and key ID so each request can be traced back to a key.
+- 解析 API key 身份。
+- 附加账户、组织、用户和权限元数据。
+- 绝不在遥测中存储明文 API key。
+- 记录 key 来源和 key ID，使每个请求都能追溯到对应的 key。
 
 ### Task Classifier
 
-Responsibilities:
+任务分类器（Task Classifier）。职责：
 
-- Compute `task_type`, `complexity`, and `constraints`.
-- Use deterministic local heuristics first.
-- Allow future LLM/embedding-based classifier behind a feature flag.
-- Return explainable signals for debug UI.
+- 计算 `task_type`、`complexity` 和 `constraints`。
+- 优先使用确定性的本地启发式规则。
+- 允许未来在功能开关后接入基于 LLM/嵌入的分类器。
+- 为调试 UI 返回可解释的信号。
 
-Initial classifier sources:
+初始分类器的信号来源：
 
-- Manifest-style local complexity scoring.
-- Task-specific keyword/tool detection.
-- Request fields such as tools, response format, attachments, max tokens.
-- Optional memory summary when memory is enabled.
+- 类清单式（manifest-style）的本地复杂度评分。
+- 针对特定任务的关键词/工具检测。
+- 请求字段，例如 tools、response format、attachments、max tokens。
+- 启用 memory 时可选的 memory 摘要。
 
 ### Policy Engine
 
-Responsibilities:
+策略引擎（Policy Engine）。职责：
 
-- Apply explicit server-side policy rules.
-- Resolve org/user/project overrides.
-- Enforce caps such as `max_lane` or allowed lanes.
-- Produce a single matched policy record for telemetry.
+- 应用明确的服务端策略规则。
+- 解析组织/用户/项目级别的覆盖项。
+- 强制执行上限，例如 `max_lane` 或允许的 lane。
+- 为遥测生成单条匹配的策略记录。
 
 ### Lane Resolver
 
-Responsibilities:
+Lane 解析器（Lane Resolver）。职责：
 
-- Select the target lane.
-- Use default lanes when task-specific lanes are absent.
-- Preserve declared primary/fallback order.
-- Avoid scoring `*/auto` provider aliases above explicit primary models.
+- 选择目标 lane。
+- 当缺少特定任务的 lane 时使用默认 lane。
+- 保持声明的 primary/fallback 顺序。
+- 避免将 `*/auto` 提供方别名的评分排在明确指定的 primary 模型之上。
 
 ### Capability Filter
 
-Responsibilities:
+能力过滤器（Capability Filter）。职责：
 
-- Check tools support.
-- Check JSON / structured output support.
-- Check vision / multimodal support.
-- Check context length.
-- Check streaming support.
-- Return explicit skip reasons.
+- 检查 tools 支持情况。
+- 检查 JSON / 结构化输出支持情况。
+- 检查视觉/多模态支持情况。
+- 检查上下文长度。
+- 检查流式支持情况。
+- 返回明确的跳过原因。
 
 ### Circuit Breaker
 
-Responsibilities:
+熔断器（Circuit Breaker）。职责：
 
-- Track per-provider/model health.
-- Skip `OPEN` circuits.
-- Use `HALF_OPEN` probe lock before real calls.
-- Record failures before first valid provider chunk.
-- Record success only after a valid response/chunk.
-- Treat client abort as non-provider failure.
+- 跟踪每个提供方/模型的健康状况。
+- 跳过处于 `OPEN` 状态的熔断电路。
+- 在真实调用前使用 `HALF_OPEN` 探测锁。
+- 在收到首个有效的提供方数据块之前记录失败。
+- 仅在收到有效响应/数据块之后记录成功。
+- 将客户端中止视为非提供方故障。
 
 ### Provider Executor
 
-Responsibilities:
+提供方执行器（Provider Executor）。职责：
 
-- Execute providers in lane order.
-- Translate requests to provider-native protocol.
-- Handle streaming and non-streaming paths consistently.
-- Return structured attempt records.
+- 按 lane 顺序执行各提供方。
+- 将请求转换为提供方原生协议。
+- 一致地处理流式和非流式路径。
+- 返回结构化的尝试记录。
 
 ### Telemetry / Request Log
 
-Responsibilities:
+遥测 / 请求日志（Telemetry / Request Log）。职责：
 
-- Persist request-level routing decisions.
-- Persist provider attempt chain.
-- Persist auth/key identity metadata.
-- Persist cost and latency information.
-- Redact secrets and private payload fields.
+- 持久化请求级别的路由决策。
+- 持久化提供方尝试链。
+- 持久化鉴权/key 身份元数据。
+- 持久化成本和延迟信息。
+- 脱敏密钥和私有载荷字段。
 
-## Internal request shape
+## 内部请求结构
 
 ```yaml
 request_id: string
@@ -144,7 +144,7 @@ metadata:
   memory_mode: off | observe | inject
 ```
 
-## Decision record
+## 决策记录
 
 ```yaml
 request_id: string
@@ -176,24 +176,24 @@ final:
   error_reason: string | null
 ```
 
-## Configuration files
+## 配置文件
 
-Expected config split:
+预期的配置拆分：
 
 ```text
 config/
-  lanes.yaml           # default and task lane definitions
-  policies.yaml        # server-side routing policies
-  providers.yaml       # provider aliases and credentials references
-  capabilities.yaml    # model/provider capability metadata
-  pricing.yaml         # pricing metadata and overrides
+  lanes.yaml           # 默认 lane 与任务 lane 的定义
+  policies.yaml        # 服务端路由策略
+  providers.yaml       # 提供方别名与凭证引用
+  capabilities.yaml    # 模型/提供方能力元数据
+  pricing.yaml         # 定价元数据与覆盖项
 ```
 
-## Safety rules
+## 安全规则
 
-- Production routing only uses active lanes and active allowlists.
-- Catalog metadata never directly enters runtime selection.
-- Provider auto aliases are fallback tails unless explicitly configured otherwise.
-- Generated catalogs are supply-chain input, not policy.
-- Debug UI must explain why a provider was selected or skipped.
-- Secrets must never be logged in plaintext.
+- 生产环境路由仅使用激活的 lane 和激活的允许列表（allowlist）。
+- 目录（catalog）元数据绝不直接进入运行时选择。
+- 提供方 auto 别名是 fallback 末端，除非另有明确配置。
+- 生成的目录属于供应链输入，而非策略。
+- 调试 UI 必须解释某个提供方为何被选中或被跳过。
+- 密钥绝不能以明文记录。

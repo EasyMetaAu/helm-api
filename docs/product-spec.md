@@ -1,35 +1,35 @@
-# Helm API Product Specification
+# Helm API 产品规格说明
 
-## One-line definition
+## 一句话定义
 
-Helm API is a configurable intelligent model gateway: it accepts standard AI API requests, detects task type and complexity, routes each request to the right lane, executes through provider adapters, and records complete request logs for debugging.
+Helm API 是一个可配置的智能模型网关：它接收标准的 AI API 请求，识别任务类型与复杂度，将每个请求路由到合适的 lane，通过 provider 适配器执行，并记录完整的请求日志以便调试。
 
-## Problem
+## 问题
 
-AI application developers do not want to manage hundreds of models, provider quirks, fallback behavior, cost tradeoffs, and long-term routing decisions in every client. They want one API that is cheap, reliable, good enough by default, and debuggable when something goes wrong.
+AI 应用开发者不想在每个客户端里管理上百个模型、各家 provider 的怪癖、fallback 行为、成本权衡以及长期的路由决策。他们想要的是一个 API：足够便宜、足够可靠、默认就够用，并且在出问题时可以调试。
 
-The previous llm-router direction became too broad: too many provider aliases, too much model-market thinking, and too much logic in the routing core. Helm API should be narrower.
+之前的 llm-router 方向变得过于宽泛：provider 别名太多、太偏向于模型市场的思路，而且路由核心里塞了太多逻辑。Helm API 应该更聚焦、更收敛。
 
-## MVP goals
+## MVP 目标
 
-1. Support standard client APIs with minimal migration cost.
-2. Classify each request by task type, complexity, and constraints.
-3. Route requests through configurable lanes instead of exposing raw provider aliases.
-4. Execute each lane through primary and fallback providers.
-5. Record every routing decision and provider attempt for debugging.
-6. Keep Memory, Guardrails, Signals, agent orchestration, and IM control outside the MVP core.
+1. 以最小的迁移成本支持标准客户端 API。
+2. 按任务类型、复杂度和约束对每个请求进行分类。
+3. 通过可配置的 lane 路由请求，而不是直接暴露原始的 provider 别名。
+4. 通过主用和 fallback provider 执行每条 lane。
+5. 记录每一次路由决策和每一次 provider 尝试，以便调试。
+6. 将 Memory、Guardrails、Signals、agent 编排以及 IM 控制保持在 MVP 核心之外。
 
-## Non-goals
+## 非目标
 
-- Do not build a model marketplace.
-- Do not expose hundreds of provider aliases as the product surface.
-- Do not implement a full RAG product in the routing core.
-- Do not put Memory directly inside routing policy.
-- Do not build a full agent orchestration platform in MVP.
-- Do not depend on a black-box LLM classifier for the first routing layer.
-- Do not make provider benchmarking the main runtime decision mechanism.
+- 不构建模型市场。
+- 不把上百个 provider 别名作为产品对外的呈现面。
+- 不在路由核心中实现完整的 RAG 产品。
+- 不把 Memory 直接放进路由策略里。
+- 不在 MVP 中构建完整的 agent 编排平台。
+- 第一层路由不依赖黑盒 LLM 分类器。
+- 不把 provider 基准测试作为主要的运行时决策机制。
 
-## Core product loop
+## 核心产品闭环
 
 ```text
 Client request
@@ -41,33 +41,33 @@ Client request
   -> Request Log / Debug UI
 ```
 
-## Client API surface
+## 客户端 API 呈现面
 
-Helm should support standard AI API shapes:
+Helm 应当支持标准的 AI API 形态：
 
 - OpenAI Chat Completions
 - Anthropic Messages
 - OpenAI Responses
-- Gemini API, later
+- Gemini API（后续支持）
 
-Clients should only need to change `base_url` and API key. The client should not need to know which provider or model executes the request.
+客户端应当只需要修改 `base_url` 和 API key。客户端无需知道实际由哪个 provider 或模型来执行请求。
 
-## Provider surface
+## Provider 呈现面
 
-Provider adapters can support:
+Provider 适配器可以支持：
 
-- OpenAI-compatible providers: OpenRouter, ZenMux, vLLM, DeepSeek, Qwen, local models, custom endpoints
-- Anthropic-native
-- Gemini-native
-- Future OAuth providers such as Claude Code, Codex, Copilot, or similar subscription-backed providers
+- OpenAI 兼容的 provider：OpenRouter、ZenMux、vLLM、DeepSeek、Qwen、本地模型、自定义 endpoint
+- Anthropic 原生
+- Gemini 原生
+- 未来的 OAuth provider，例如 Claude Code、Codex、Copilot，或类似的基于订阅的 provider
 
-Provider aliases are internal supply-chain details. They are not the primary user-facing product.
+Provider 别名属于内部的供应链细节。它们不是面向用户的主要产品呈现面。
 
-## Routing concepts
+## 路由概念
 
-### Task classification
+### 任务分类
 
-Classifier output:
+分类器输出：
 
 ```yaml
 complexity: simple | standard | complex | reasoning
@@ -81,19 +81,19 @@ constraints:
   low_cost: boolean
 ```
 
-Classifier input may use:
+分类器的输入可以使用：
 
-- Current user message
-- Recent messages
-- Tool definitions
-- Response format
-- Max token target
-- Attachments / multimodal metadata
-- Optional memory summary when Memory Middleware is enabled
+- 当前用户消息
+- 最近的若干条消息
+- 工具定义
+- 响应格式
+- 最大 token 目标
+- 附件 / 多模态元数据
+- 当 Memory Middleware 启用时，可选的 memory 摘要
 
-### Lane routing
+### Lane 路由
 
-Routing order:
+路由优先级顺序：
 
 ```text
 explicit model/lane
@@ -102,9 +102,9 @@ explicit model/lane
   > complexity fallback lane
 ```
 
-Default lanes should be small and understandable.
+默认 lane 应当数量少且易于理解。
 
-### Default lanes
+### 默认 lane
 
 ```yaml
 economy:
@@ -123,7 +123,7 @@ premium:
   fallback: [balanced_model]
 ```
 
-### Optional task lanes
+### 可选的任务 lane
 
 ```yaml
 coding:
@@ -143,13 +143,13 @@ json:
   fallback: [balanced]
 ```
 
-If a task-specific lane is not configured, the router falls back to the three default lanes.
+如果没有配置任务专属的 lane，路由器会回退到三条默认 lane。
 
-## Policy configuration
+## 策略配置
 
-Policies provide server-side customization without changing client code.
+策略（Policy）让你在不修改客户端代码的情况下进行服务端定制。
 
-Example:
+示例：
 
 ```yaml
 policies:
@@ -171,11 +171,11 @@ policies:
     max_lane: balanced
 ```
 
-Policy must remain explicit and inspectable. It should not hide hard-to-debug model scoring behind magic.
+策略必须保持显式且可检视。它不应把难以调试的模型打分行为藏在某种魔法背后。
 
-## Execution model
+## 执行模型
 
-Each lane has a declared ordered chain:
+每条 lane 都有一条声明好的有序链路：
 
 ```yaml
 lane:
@@ -189,48 +189,48 @@ lane:
     max_latency_ms: 30000
 ```
 
-Execution rules:
+执行规则：
 
-1. Try primary first.
-2. Skip candidates that fail capability constraints.
-3. On provider error, timeout, rate limit, or circuit-open state, try next fallback.
-4. If all candidates fail, return a structured error.
-5. Log every attempt with reason and timing.
+1. 先尝试 primary。
+2. 跳过不满足能力约束（capability constraints）的候选。
+3. 当遇到 provider 错误、超时、限流，或熔断器处于打开状态时，尝试下一个 fallback。
+4. 如果所有候选都失败，返回一个结构化错误。
+5. 记录每一次尝试，包含原因和耗时。
 
-## Debug UI requirements
+## Debug UI 需求
 
-Request list should show:
+请求列表应当展示：
 
-- Time
-- API key / user / org
-- Requested model
-- Route mode: shadow / real
-- Classified task type
-- Complexity
-- Selected lane
-- Final model
-- Fallback count
-- Status
-- Latency
-- Cost
-- Error reason
+- 时间
+- API key / 用户 / 组织
+- 请求的模型
+- 路由模式：shadow / real
+- 分类得到的任务类型
+- 复杂度
+- 选中的 lane
+- 最终模型
+- fallback 次数
+- 状态
+- 延迟
+- 成本
+- 错误原因
 
-Request detail should show:
+请求详情应当展示：
 
-- Raw request metadata and redacted payload summary
-- Classifier output
-- Matched policy
-- Lane candidate chain
-- Provider attempts
-- Final response metadata or structured error
-- Cost breakdown
+- 原始请求元数据，以及脱敏后的 payload 摘要
+- 分类器输出
+- 命中的策略
+- lane 候选链路
+- provider 尝试记录
+- 最终响应元数据，或结构化错误
+- 成本拆分
 - Trace ID
-- Memory metadata if memory is enabled
+- 当 memory 启用时的 memory 元数据
 
-## MVP success criteria
+## MVP 成功标准
 
-- A new client can point an OpenAI-compatible SDK at Helm and get usable routing without custom config.
-- Default economy / balanced / premium lanes work out of the box.
-- A coding request can route to a coding lane if configured, otherwise fall back to premium or balanced.
-- A JSON-constrained request never silently routes to a model that ignores JSON constraints.
-- Every unexpected provider choice can be explained from the request log.
+- 新客户端可以把一个 OpenAI 兼容的 SDK 指向 Helm，无需自定义配置即可获得可用的路由。
+- 默认的 economy / balanced / premium lane 开箱即用。
+- 一个 coding 请求在配置了 coding lane 时能路由到该 lane，否则回退到 premium 或 balanced。
+- 一个带 JSON 约束的请求绝不会悄无声息地被路由到一个会忽略 JSON 约束的模型。
+- 任何出乎意料的 provider 选择都能从请求日志中得到解释。
