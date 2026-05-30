@@ -4,11 +4,11 @@
 
 按"每阶段都能独立跑起来"的顺序推进，不追求一次到位：
 
-- **Phase 0 — 骨架**：HTTP 网关 + Auth（启动引导 key、强制鉴权）+ 单协议直通（OpenAI Chat）+ 遥测落库。能鉴权、能转发、能记日志。
+- **Phase 0 — 骨架**：HTTP 网关 + Auth（启动引导 key、强制鉴权）+ 单协议直通（OpenAI Chat）+ 遥测落库 + **Docker 部署**（配置/数据挂载卷）。能鉴权、能转发、能记日志、能容器化跑起来。
 - **Phase 1 — 路由核心**：第 1 层确定性规则分类器 + 三条默认 lane + Provider 执行器 + 能力过滤 + 熔断器 + fallback 链。可服务真实流量；分类不确定落 balanced。
 - **Phase 2 — 协议互译**：Protocol Adapter（OpenAI ↔ Anthropic 双向 + 流式），按 musistudio 蓝本重写。客户端可混用 SDK。
 - **Phase 3 — eval 层**：第 2 层小模型评估 + content-hash 缓存（默认关闭）。开启后判定能选 lane。
-- **Phase 4 — Debug UI**：请求列表 + 详情 + 决策链可视化。
+- **Phase 4 — 管理界面**：Web 控制台（HTTP Basic 认证）= 基本规则管理（lane / policy / classifier / key）+ 请求调试（列表/详情/决策链）。
 - **MVP 之后**：Gemini 协议、Memory 中间件、限流/配额完整化、Signals 反馈层。
 
 ## MVP 成功标准

@@ -4,7 +4,7 @@
 
 ## 一段话讲清 Helm 是什么
 
-Helm API 是 **LLM 的 nginx**：一个声明式的智能模型网关。它接收标准的 AI API 请求（OpenAI Chat、Anthropic Messages、OpenAI Responses，后续支持 Gemini），用确定性规则（必要时辅以默认关闭的小模型评估）按任务类型和复杂度分类，将其路由到一个可配置的 **lane** 而非裸的 provider 别名，通过主用和 fallback provider 执行，并记录每一次路由决策以便调试。客户端只需更改 `base_url` 和 API key。
+Helm API 是一个**开源、自托管**的 LLM 路由网关（MIT 协议，Docker 部署）——可以理解成"LLM 世界的 nginx"。它接收标准的 AI API 请求（OpenAI Chat、Anthropic Messages、OpenAI Responses，后续支持 Gemini），用确定性规则（必要时辅以默认关闭的小模型评估）按任务类型和复杂度分类，将其路由到一个可配置的 **lane** 而非裸的 provider 别名，通过主用和 fallback provider 执行，并记录每一次路由决策以便调试。客户端只需更改 `base_url` 和 API key。启动后自带管理界面，做基本规则管理。
 
 ## 阅读顺序
 
@@ -19,13 +19,16 @@ Helm API 是 **LLM 的 nginx**：一个声明式的智能模型网关。它接�
 | 07 | [错误模型与可观测性](07-observability.md) | 结构化错误、错误分类表、Debug UI。 |
 | 08 | [记忆中间件](08-memory-middleware.md) | MVP 之后的可选记忆层（不在 MVP 内）。 |
 | 09 | [MVP 路线图与成功标准](09-roadmap.md) | 分阶段路线图与验收标准。 |
+| 10 | [部署（自托管 / Docker）](10-deployment.md) | Docker 部署、配置来源、启动行为、升级。 |
+| 11 | [管理界面（Admin UI）](11-admin-ui.md) | Web 控制台、规则管理、HTTP Basic 认证。 |
 | — | [调研笔记](research-notes.md) | 附录：Manifest、协议互译、probe 等开源参考与对比。 |
 
 ## 设计原则
 
 让 Helm 比前身 `llm-router` 更聚焦：
 
-- **售卖 lane，而非模型市场。** 用户选 `economy / balanced / premium`；provider 别名是内部供应链细节。
+- **开源自托管，不做 SaaS。** MIT 协议，Docker 自部署，内部使用。
+- **对外暴露 lane 抽象，而非模型市场。** 用户选 `economy / balanced / premium`；provider 别名是内部供应链细节。
 - **路由内核精简且可解释。** 策略显式可检视，运行时无黑盒打分。
 - **确定性分类优先。** 本地规则定第一层，小模型评估默认关闭、置于其后。
 - **记忆是中间件，不进 MVP。** 它帮请求被理解，绝不重写 lane 规则。
