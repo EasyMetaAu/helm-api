@@ -1,0 +1,71 @@
+# classifier.yaml — Layer-1 classifier tunable surface (DATA, not code).
+# Validated by ClassifierConfigSchema (@helm/shared). Change keywords / boundaries
+# / toggle eval here WITHOUT touching code (CLAUDE.md principle 2). The Layer-1
+# scorer is a pure function fed by this already-parsed config (principle 4).
+classifier:
+  rules:
+    enabled: true
+    confidence_threshold: 0.45
+    sigmoid_k: 8
+    tier_boundaries: { standard: -0.10, complex: 0.08, reasoning: 0.35 }
+    dimensions:
+      # —— keyword dimensions (weight sign = direction) —— 14 total
+      reasoning_kw: { weight: 0.35, keywords: ["prove", "derive", "theorem", "step by step", "reason about"] }
+      coding_kw: { weight: 0.20, keywords: ["refactor", "debug", "stack trace", "function", "compile"] }
+      math_kw: { weight: 0.18, keywords: ["integral", "matrix", "equation", "probability"] }
+      planning_kw: { weight: 0.16, keywords: ["plan", "architecture", "design doc", "trade-off", "strategy"] }
+      analysis_kw: { weight: 0.14, keywords: ["analyze", "compare", "evaluate", "implications", "root cause"] }
+      writing_kw: { weight: 0.10, keywords: ["essay", "rewrite", "draft", "tone", "polish"] }
+      extraction_kw: { weight: 0.08, keywords: ["extract", "parse", "json from", "fields", "schema"] }
+      data_kw: { weight: 0.12, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot"] }
+      vision_kw: { weight: 0.10, keywords: ["image", "screenshot", "this picture", "diagram", "chart"] }
+      multistep_kw: { weight: 0.15, keywords: ["first", "then", "finally", "and then", "after that"] }
+      translation_kw: { weight: -0.05, keywords: ["translate", "in french", "in chinese", "to spanish"] }
+      lookup_kw: { weight: -0.10, keywords: ["what is", "who is", "define", "meaning of"] }
+      chitchat_kw: { weight: -0.20, keywords: ["how are you", "good morning", "lol", "haha"] }
+      simple_kw: { weight: -0.25, keywords: ["hi", "thanks", "ok", "ping"] }
+      # —— structural / context dimensions (keywords empty; code feeds the score) —— 9 total
+      has_code_block: { weight: 0.20 }
+      has_url: { weight: 0.05 }
+      has_stack: { weight: 0.15 }
+      has_math_notation: { weight: 0.12 }
+      has_table: { weight: 0.08 }
+      has_attachment: { weight: 0.10 }
+      msg_length: { weight: 0.10 }
+      turn_count: { weight: 0.06 }
+      tool_count: { weight: 0.08 }
+    task_keywords:
+      coding: ["function", "class", "bug", "compile", "npm", "git"]
+      math: ["integral", "matrix", "equation"]
+      writing: ["essay", "rewrite", "draft", "tone"]
+      extraction: ["extract", "parse", "json from", "fields"]
+      web: ["search the web", "browse", "look up online"]
+      data: ["csv", "dataframe", "aggregate", "sql"]
+      vision: ["image", "screenshot", "this picture"]
+    tool_prefixes:
+      web: ["browser_", "web_"]
+      coding: ["code_", "shell_", "fs_"]
+      data: ["sql_", "sheet_"]
+    task_activation: { web: 3.0 } # web task activation raised to avoid false hits
+    overrides:
+      heartbeat_tokens: ["HEARTBEAT_OK"]
+      formal_logic_keywords: ["⊢", "∴", "modus ponens", "first-order logic"]
+      tools_floor: standard
+      long_context_token_threshold: 50000
+      long_context_floor: complex
+      short_message_max_chars: 50
+    momentum:
+      enabled: true
+      ttl_sec: 1800
+      history_size: 5
+      short_message_max_chars: 30
+      disable_above_chars: 100
+      max_history_weight: 0.6
+  eval:
+    enabled: false
+    model: deepseek/deepseek-v4-flash
+    temperature: 0
+    max_tokens: 256
+    timeout_ms: 300
+    on_failure: balanced
+    cache: { enabled: true, key: content_hash, ttl_sec: 300 }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ClassifierConfigSchema } from "./classifier-schema.js";
 
 // Config-as-code: behavior is driven by config/*.yaml + env, not code changes.
 // These schemas validate server / auth / providers / runtime. Per CLAUDE.md
@@ -52,6 +53,20 @@ export const HelmConfigSchema = z.object({
   auth: AuthConfigSchema,
   providers: z.array(ProviderConfigSchema).min(1),
   runtime: RuntimeConfigSchema,
+  // classifier config (config/classifier.yaml). Defaulted so the existing
+  // server/auth/providers/runtime yaml load is not broken if classifier.yaml is
+  // absent; schema lives in its own module (classifier-schema.ts).
+  classifier: ClassifierConfigSchema.prefault({
+    rules: {
+      tier_boundaries: {},
+      dimensions: {},
+      task_keywords: {},
+      tool_prefixes: {},
+      overrides: {},
+      momentum: {},
+    },
+    eval: {},
+  }),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;

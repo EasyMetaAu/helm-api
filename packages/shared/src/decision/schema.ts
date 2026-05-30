@@ -52,6 +52,10 @@ export const FinalDecisionSchema = z.object({
 
 export const DecisionRecordSchema = z.object({
   request_id: z.string().min(1),
+  // Threaded end-to-end from the request context for cross-system correlation
+  // (Debug UI Trace ID column, structured logs). In the current pipeline this
+  // equals request_id (the orchestrator uses request_id as the trace id).
+  trace_id: z.string().min(1),
   requested_model: z.string(),
   classifier: ClassifierDecisionSchema,
   policy: PolicyDecisionSchema,

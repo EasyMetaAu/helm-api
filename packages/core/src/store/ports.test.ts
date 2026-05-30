@@ -77,6 +77,7 @@ describe("Store ports are implementable contracts", () => {
     const store = new InMemoryTelemetryStore();
     const decision = {
       request_id: "req_1",
+      trace_id: "req_1",
       requested_model: "m",
       classifier: {
         task_type: "passthrough",

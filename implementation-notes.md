@@ -5,6 +5,187 @@
 
 ---
 
+## 2026-05-31 · e2e.routing 收尾：修正 4 个陈旧 core 测试 fixture（typecheck 转绿）
+
+所属：e2e.routing、原则 8（CI 全绿方可合并）、docs/07 error_class
+
+- **诊断**：上一轮把 `pnpm typecheck` 的 RED 归因为「并发 core 重构、与本任务无关」。实查并非如此——是 `packages/core` 4 个 `*.test.ts` 的 fixture 没跟上现行 schema/编译选项，是**可直接修复**的真实类型错误，必须修而非搁置（CI 第 1 gate 要求整仓 typecheck 绿）。
+- **`routing/route-request.test.ts`（232）**：「all providers failed」用例里手搓 `final.error` 字面量缺 `http_status`/`provider_raw`，不匹配现行 `HelmErrorSchema`（已增这两个必填字段）。改为调用工厂 `makeHelmError({...})`——既补齐字段又保证 `http_status` 与 error_class 映射一致（schema 单一真源），断言不变。
+- **`telemetry/decision.test.ts`（269-271）**：`vi.fn(async () => ({id}))` 推断入参为 `[]`，导致 `insert.mock.calls[0][0]` 被收窄成 `never`。给 mock 显式签名 `vi.fn<TelemetryStore["insert"]>(...)`，恢复入参类型，断言不变。
+- **`classifier/engine.test.ts`（298）、`classifier/momentum.test.ts`（227-231）**：`noUncheckedIndexedAccess:true` 下 `hist[0]` 是 `T | undefined`。改为 `const [entry] = hist` 解构 + 可选链 `entry?.x`（`Object.keys(entry ?? {})`），在已 `toHaveLength(1)` 的前提下语义不变，仅补类型收窄。
+- **门禁现状（最终，全绿）**：`pnpm typecheck`=0、`pnpm lint`=0、`pnpm test`=390/390、`pnpm build`=0、`pnpm test:e2e`=12/12。注：`pnpm -r typecheck` 仅跑 4/5 包（admin 无 typecheck script，符合预期）。
+
+---
+
+## 2026-05-31 · e2e.routing：五场景端到端路由验证（Playwright）
+
+所属：e2e.routing、docs/02 流水线/决策记录、docs/07 error_class、原则 3/5/7
+
+- **路由信号经调试响应头暴露**：`chat.ts` 在 `c.json`/`streamSSE` 之前从 `result.decision` 打三个头——`x-helm-lane`（`lane.selected_lane`）、`x-helm-final-model`（`final.model_alias`）、`x-helm-provider-model`（`final.provider_model`）。只含路由别名，绝不含 key/payload（原则 7）。这是 spec「按 routing.pipeline 实际暴露」里给的备选方案；DecisionRecord 之前只进遥测，HTTP 侧不可观测，e2e 黑盒断言需要它。
+- **`execute.ts` 修正：上游收到的 `model` 改为解析后的 `providerModel`**（原先发的是 `req.requested_model`）。网关既然把 alias 解析成 provider model，就该告诉上游跑哪个；这也让 mock 能回声出 final model、并按 model 注错触发执行兜底。`stripInternal`/`peekStream` 增加 `providerModel` 入参。既有 `execute.test.ts` 直接 mock provider、不校验所发 model，无回归。
+- **mock 上游扩展**（`e2e/fixtures/mock-upstream.ts`）：① 回声模式——把收到的 `model` 原样回到响应体 `model`；② 注错模式——因网关只转发 `model`+`messages`（不转发任意 client header），故障经**提示词哨兵** `__HELM_FAIL_PRIMARY__` 引导：消息含该哨兵时只对 economy 头 `cheap_model`（首选候选）返 500，其余 model 正常 → 网关链内换到下一候选（执行兜底）。自洽、确定、可重复。
+- **smoke 非流断言调整**：因 mock 现回声 model，原 `toEqual(NONSTREAM_RESPONSE)` 改为「除 `model` 外字段全等 + `model` 为字符串」（e2e key `allow_custom_model=false`，发上游的是路由出的 alias，非客户端请求的 id）。
+- **场景 5（分类兜底→balanced）的确定性触发**：Layer-1 规则评分器被刻意硬化为永远 commit 一个 lane（`decided_by` 恒为 `"rules"`，`uncertain` 因 sigmoid 下限+边界几乎恒 false），eval 默认关——故**仅靠请求内容无法走到 `decided_by:"default"`→balanced**。在 `server.ts` 的 `buildClassify` 增加 `hasNoTextContent` 守卫：当所有消息都无非空白文本时，判定为「无法分类」并 throw，由 `routeRequest` 的 `classifySafe` 接住 → `defaultClassification`（decided_by=default）→ resolver 终点 `balanced`。这是真实失败模式（空/退化 prompt），确定可重复，且严格落在 fail-open（原则 3）+ 分类兜底（原则 5）路径上，不污染正常分类。e2e 用 `content:"   "` 触发。
+- **场景 4 ≠ 场景 5 已分别校验**：场景 4 断言 lane 仍为 `economy`、final model 为链内下一候选 `default_good_model`（执行兜底，lane 不变）；场景 5 断言 lane 变 `balanced`（分类兜底）。互不混淆（原则 5）。
+- **场景 3（json lane）按实际暴露收敛**：`DEFAULT_LANES` 只有 economy/balanced/premium，**无 `json` lane**，且无 `json`/`extraction` task lane；带 `response_format:json_object` 的请求经 extraction task → 按复杂度落 economy。故场景 3 不断言「进 json lane」，改断言**正确路由（落在合法 lane）+ 不 5xx + 响应为合法 chat.completion JSON 形态**（能力过滤目前空 catalog、fail-open 跳过）。待 json 专用 lane/catalog 接线后可加强。TODO。
+- **并发 core API 迁移的对齐修正**：并发任务把 `InternalRequest` 从 `@helm/core` re-export 中移除（迁到 `@helm/shared`），并把 registry 的 `ProviderConfig` 重命名导出为 `ProviderRegistryConfig`。这破坏了 gateway 的 `chat.ts`/`execute.ts`/`server.ts` 及其 `*.test.ts`（`InternalRequest` 找不到、`ProviderConfig as RegistryProviderConfig` 取错类型）。在本任务编辑半径内做了机械对齐：上述文件 `InternalRequest` 改从 `@helm/shared` 导入；`server.ts` 的 `type ProviderConfig as RegistryProviderConfig` 改为 `type ProviderRegistryConfig as RegistryProviderConfig`。Vitest（不做类型检查、type-only import 运行时擦除）此前未暴露此问题，仅 `tsc` 捕获。
+- **门禁现状（最终）**：`pnpm test:e2e`（5 路由场景 + 原 smoke 共 12 例）、`pnpm test`（390 单测）、`pnpm lint`、`pnpm build` **均全绿**。`pnpm typecheck` 仍**红（exit 2）**——剩余 9 处错误**全部**落在 `packages/core` 的 4 个 `*.test.ts`（`classifier/engine.test.ts`、`classifier/momentum.test.ts`、`routing/route-request.test.ts`、`telemetry/decision.test.ts`），系并发进行中的 classifier/telemetry 重构所致（`HelmError` schema 新增 `http_status`/`provider_raw` 等），**与本 e2e 任务文件无关**（`apps/gateway` 单独 typecheck 干净、build 通过）。`tsconfig.build.json` 排除测试文件，故 build 绿。待并发 core 任务落定后整仓 typecheck 自然恢复。
+
+---
+
+## 2026-05-31 · telemetry.decision-full：决策记录组装/持久化 + schema 增加 trace_id
+
+所属：telemetry.decision-full、docs/02 决策记录、docs/07 可观测性、原则 3/7
+
+- **`DecisionRecordSchema` 新增必填字段 `trace_id`（`z.string().min(1)`）**：原 schema 只有
+  `request_id`，但本任务契约（测试 7）与 docs/07 Debug UI 的 Trace ID 列要求记录显式带
+  `trace_id`。当前流水线把 `request_id` 当作 trace id 用（`route-request.ts`/`fallback.ts` 给
+  `makeHelmError({ trace_id: req.request_id })`），故 `buildDecisionRecord` 设
+  `trace_id = request.request_id`。同步更新了 `route-request.ts` 的记录组装与所有既有
+  DecisionRecord 测试 fixture（schema/ports/sqlite-telemetry）。权衡：未在 `InternalRequest`
+  另立 trace_id 字段——避免引入第二个相关 id；若将来需要独立链路 id，再扩 request schema。
+- **`persistDecision(store, record, opts?)` 偏离纯 `(store, record)` 契约**：`InsertTelemetryInput`
+  需要 `apiKeyId`，而 DecisionRecord 按原则 7 不携带 key。故签名加可选
+  `opts.apiKeyId`（仅 key_id，绝非明文/hash），缺省回落到 `request_id` 作关联 id。
+- **脱敏作为离开 core 前的最后一道闸**：`buildDecisionRecord` 整条记录过 `redact`，即使上游某段
+  误带明文 key/私有 payload 也不会落库（原则 7）。
+- **fail-open 持久化**：`store.insert` 抛错只发结构化 `telemetry.persist_failed` 告警（带
+  trace_id），绝不上抛——最坏丢一条记录，不让请求 5xx（原则 3）。
+
+---
+
+## 2026-05-31 · routing.pipeline 实现：编排核心 + 网关接线取舍
+
+所属：routing.pipeline、docs/02 架构概览、docs/04 Lane 路由、原则 1/3/5/8
+
+- **`routeRequest` 放 `packages/core/src/routing/route-request.ts`，框架无关（原则 1）**：
+  `classify`/`execute`/`policies`/`lanes`/`now`/`log` 全部依赖注入。`execute` 抽象成回调（能力过滤+熔断+按链执行），
+  本任务 core 单测全 mock 它；真实 `execute` 适配器在网关侧 `apps/gateway/src/routes/execute.ts`，
+  因为它要 import provider/registry/breaker/catalog，是组合根的职责，不属于框架无关 core 的纯编排。
+
+- **classifier 复杂度词表与路由复杂度词表不一致，必须在 `classify` 适配器里映射（spec 未点明的接缝）**：
+  `classifier/tiers.ts` 的 `Complexity = simple|standard|complex|reasoning`，而 `lane-resolver`/`policy-engine`
+  契约的复杂度是 `simple|medium|complex`（docs/04）。我在网关 `buildClassify` 里映射：
+  `standard→medium`、`reasoning→complex`、`simple→simple`、`complex→complex`。`task_type` 同理：classifier 的
+  `chat` 等任务名直接透传给 policy/resolver（resolver 找不到同名 lane 时回落到 complexity，原则 3）。
+  取舍：映射放适配器、不动两套既有纯函数的词表，范围最小且二者各自的测试不回归。
+
+- **`stream:true` 的执行兜底 + 首个有效 chunk 语义（原则 8 + docs/02 熔断）**：`execute` 适配器对流式候选先
+  `peek` 第一个 chunk——首个 chunk 前抛错 = pre-first-chunk 故障（记熔断失败、试下一个候选）；拿到首个 chunk =
+  成功（healing 熔断），随后把「首个 chunk + 其余」原样重组成新生成器交还，**不缓冲整流**、SSE 边界/顺序字节级不变。
+  客户端 abort 走 `recordAbort`（非 provider 故障、不触发熔断、终止全链、不算 all_providers_failed）。
+
+- **Phase 0 直通测试被删除并替换**：`chat.nonstream.test.ts` / `chat.stream.test.ts` 测的是 Phase 0 常量直通
+  （旧 `ChatRouteDeps{provider,...}`），本任务已用真实流水线替换，故删除，新增 `chat.route.test.ts`（经流水线，
+  断言 classify/execute 被调用而非旁路常量）+ `execute.test.ts`（执行兜底/能力跳过/流式 peek/abort）。
+
+- **网关默认 lanes/policies 接线（config loader 暂未加载 lanes.yaml/policies.yaml）**：`config/loader.ts` 目前只
+  load server/auth/providers/runtime/classifier（其自身注释声明 lanes/policies 属各自模块任务，尚未并入
+  `HelmConfigSchema`）。为让流水线在 e2e 跑通，`buildServer` 暂用 core 的 `DEFAULT_LANES` + 空 policies，并按
+  默认 lane 别名建一个把它们全部解析到唯一配置 provider 的 registry（mock upstream 忽略 model）。catalog 暂传空
+  Map → 能力过滤被跳过（fail-open）。**TODO**：等 `config.lanes`/`config.policies`/真实 catalog 接入 loader 后，
+  把这段硬编码换成 config 驱动（原则 2）。
+
+## 2026-05-31 · classifier.engine 实现：编排取舍（momentum 压过 short_message 捷径；sessionKey 来源；fail-open 包裹）
+
+所属：classifier.engine、docs/03 §第 1 层「会话动量 / 硬覆盖与捷径」、原则 3/4/5
+
+- **`momentum` 应用时抑制 `short_message` 捷径（spec 未明说的编排取舍，本任务定）**：
+  docs/03 把「会话动量」与「硬覆盖与捷径」列为并列要点，没说同时命中谁赢。问题：一条短的后续消息（如
+  "yes"）会**同时**触发 momentum（需要短消息才有高权重）和 `short_message` 捷径（< 50 字符且无复杂信号 → set→simple）。
+  若按 overrides 既定的「set 即终」语义，`short_message` 会把 momentum 拉高的结果重新钉回 simple——
+  而 momentum 的**全部存在意义**正是「避免单条短消息把分类带偏」（docs/03 原文）。二者目标直接冲突。
+  我定：**engine 在 `momentumApplied===true` 时丢弃 `short_message` 这一条 override hit**，让 momentum 生效。
+  高确定性的 `set` 信号（心跳精确 token、形式逻辑关键词）**仍然照常压过一切**——它们是精确信号，不是弱启发式，
+  心跳/形式逻辑该赢就赢。取舍：只豁免 `short_message` 这条弱捷径，范围最小、最可解释。
+  测试钉死：`engine.test.ts` 用例 5（注入 reasoning 历史 + "yes" → 被拉高且不被 simple 钉回；不注入 momentum 时不拉高）。
+- **`sessionKey` 取自 `req.metadata.conversation_id`**：spec 契约写 momentum「若提供 deps.momentum 且有 sessionKey」，
+  但没说 sessionKey 从哪来。第 1 层是纯函数、不读 header（header 解析在 gateway 层），engine 只能从已规范化的
+  `InternalRequest` 取——`metadata.conversation_id` 是会话维度的稳定标识，正合「session-dimension key」语义
+  （见 momentum.ts 的 cache-key 契约注释）。gateway 接线时需把 `x-session-key` 映射进 `metadata.conversation_id`。
+  **TODO**：确认 protocol adapter 把会话标识落到 `conversation_id`；否则 momentum 在生产里恒不触发（fail-open 到无动量，安全但失能）。
+- **每个子环节用 `safe(fn, fallback)` 包裹（原则 3 fail-open）**：dimensions/momentum/tiers/overrides/taskdetect/写回
+  任一抛错都被吸收为安全默认（standard / chat / 低 confidence），绝不冒泡成 5xx。子函数本身已大多防御，这里是
+  纵深防御的最后一道，确保「分类失败 → 上层降级 balanced」而非异常。
+- **constraints 派生**：`needs_tools/json/vision` 直接读规范化请求；`long_context` 用 `approxTokens > overrides.long_context_token_threshold`
+  （阈值复用 overrides cfg，避免再引一个阈值）；`low_latency`/`low_cost` 由心跳/短消息捷径命中推断，`low_cost` 另含 `complexity==="simple"`。
+- **`decided_by` 恒 `"rules"`、`uncertain` 仅置标记**：engine **不**调用 eval、不查 catalog、不碰 provider（第 1 层零网络）。
+  `eval_cache_hit` 由级联编排器在触发 eval 时写；本任务产出的 result 映射进 `ClassifierDecisionSchema` 时 `eval_cache_hit:null`（测试 6 验证 parse 通过）。
+- **momentum 写回不破坏确定性**：`recordMomentum` 在定档后回写历史，但用注入的 `now()` 重新打戳；测试 7 用两个独立 store
+  播同一快照连调两次，断言结果 `toEqual`——写回只影响**下一**条请求，不影响本条的确定性。
+
+---
+
+## 2026-05-31 · classifier.overrides 实现：set 压过 floor 的优先级取舍（spec 未明说，已拍板）
+
+所属：classifier.overrides、docs/03 §第 1 层「硬覆盖与捷径」、docs/research-notes.md §Manifest、原则 4
+
+- **`set` 绝对压过 `floor`（spec 未明说的取舍，本任务定）**：spec 列了两类覆盖但没说同时命中谁赢。
+  我定：`applyOverrides` 中**任一 `set` 命中即终**，直接返回该 `set` 档，忽略所有 `floor`。理由——
+  `set`（心跳 `HEARTBEAT_OK`、形式逻辑关键词）是**高确定性的精确信号**：心跳整条消息就是一个固定 token，
+  形式逻辑是明确的领域标记；而 `floor`（带 tools→≥standard、超长→≥complex）只是「下限保护」，
+  是弱得多的启发式。让强信号压过弱下限，符合「确定、可解释、不被噪声带偏」的 Manifest 意图。
+  典型：心跳 + tools 同时存在 → simple 终胜（心跳确定是探活，不该因为请求恰好带了 tools 就抬到 standard）。
+  测试钉死：`overrides.test.ts` 「set beats floor」用例。
+  **取舍**：代价是带 tools 的心跳被判 simple——可接受，因为心跳本就不该消耗推理资源；若未来出现「探活也要走 tool」
+  的真实场景，再引入「set 后仍取 floor 上限」的合并语义。当前 set 即终，最简单也最可解释。
+- **多个 `floor` 取最高档**：tools(standard) + 超长(complex) 同时命中 → complex（`RANK` 取大）。`floor` 只抬不降。
+- **心跳用「整条末条 user 消息 trim 后等于某 token」判定，而非子串**：避免 `"explain HEARTBEAT_OK protocol"`
+  （实为 coding 问题）被误判 simple。形式逻辑关键词则用全对话子串匹配（关键词可能出现在任意一轮）。
+- **短消息捷径的「无复杂信号」复用 `signals.ts` 的 `detectCodeBlock`/`detectStackTrace`**，不另写正则——
+  与 dimensions/taskdetect 同一实现，避免漂移（与既有 signals 共享原则一致）。判定 = 末条 user 消息 trim 后
+  `< short_message_max_chars` **且**无代码块/堆栈。长度上限本身就排除「超长」，故不再单测长度信号。
+- **`approxTokens` 由 engine 注入**：本纯函数不做任何 token 编码/网络（保持零依赖、确定性，原则 4）。
+  超长判定用严格 `>`（`approxTokens > threshold`），阈值由 cfg 驱动（测试：阈值调 10k、approxTokens=12k 即触发）。
+- **空数组即 no-op**：无任何命中 → `[]`，`applyOverrides(base, [])===base` 原样返回，不抛错（fail-open 精神）。
+
+---
+
+## 2026-05-31 · classifier.tiers 实现：sigmoid 闸门与默认阈值 0.45 的内在矛盾（spec 不一致，已记录）
+
+所属：classifier.tiers、docs/03 §第 1 层置信度闸门、docs/research-notes.md §Manifest、原则 4
+
+- **公式与默认阈值矛盾（spec 自相矛盾，按字面公式实现）**：spec 三处给定
+  `confidence = sigmoid(k=8 · 到最近边界的距离)`，且 task 测试 5 钉死 `sigmoidConfidence(0,8)===0.5`。
+  因 distance≥0，故 `confidence ∈ [0.5, 1)`——**永远不会 < 0.5**。但 task 测试 4 / docs 又称
+  「贴边界 → confidence < 0.45 → uncertain」。在该公式下 confidence 在边界处只能逼近 0.5（下确界），
+  **不可能 < 0.45**，故默认阈值 `0.45` 实际上**永不触发** uncertain。这是 spec 内部矛盾。
+  取舍：我**忠实字面公式**（测试 3/5/6 都依赖 sigmoid(0)=0.5 这一点），把 task 测试 4 改写为断言
+  「贴边界时 confidence 收敛到下确界 0.5、且远小于远离边界时的 ~1」——保留其**意图**（贴边界=最不确定），
+  但不再断言「< 0.45」这一与公式冲突的数值。uncertain 的真正触发由测试 6 证明：阈值调到 0.7 即翻 true。
+  **TODO（待 engine/eval 任务拍板）**：若希望默认 0.45 能真正触发级联，需把置信度改成
+  `2·sigmoid(k·d) − 1`（边界→0、远处→1），或把默认阈值上调到 (0.5, 1)。本任务只产纯函数标记，不擅自改公式语义，
+  把抉择留给级联控制流的 engine 任务。
+- **NaN/Inf 防御**：非法上游分数不抛错，归 `standard` 档、`confidence=0`、`uncertain=true`
+  （原则 3 fail-open 精神；0 < 任何合法阈值，确保降级信号一致）。`nearestBoundaryDistance=0`。
+- **最近边界距离**：对 simple/reasoning 单侧取唯一相邻边界；中间档取两侧较近者。三档边界
+  `standard/-0.10、complex/0.08、reasoning/0.35`、`sigmoid_k=8`、`confidence_threshold=0.45` 全由 cfg 驱动，
+  有「改 cfg 即改行为」测试佐证（边界改 complex=0.20、阈值改 0.7）。
+
+---
+
+## 2026-05-31 · provider.registry 实现：ProviderConfig 命名分歧 + 样例不入 schema
+
+所属：provider.registry、docs/02、原则 6/7/2/1
+
+- **registry 的 `ProviderConfig` ≠ `@helm/shared` 的 `ProviderConfig`（命名分歧，刻意保留）**：
+  task 契约规定 registry 接收的配置形如 `{ name, base_url, api_key_env, models[{alias, provider_model}] }`，
+  但 Phase-0 的 `@helm/shared` `ProviderConfigSchema` 形如 `{ alias, type, base_url?, api_key_env }`（无 models[]，
+  描述的是 OpenAI 兼容直通 provider）。二者语义不同：shared 那个是直通客户端的最小配置，registry 这个是
+  「别名→具体 model」的多 model 映射。为不破坏既有 Phase-0 加载/测试，registry 在 `packages/core/src/provider/registry.ts`
+  **自带** task 指定的 `ProviderConfig` 接口（按契约逐字段），不复用 shared 那个、也不改 shared schema。
+  待 lane/executor 任务接线时，再决定是否扩 `HelmConfigSchema` 引入 `models[]`（届时让 registry 消费 shared 类型）。
+- **core index 导出改名避撞**：core 已从 `provider/openai.ts` 导出 `ProviderConfig`（直通客户端配置）。registry 的同名类型
+  在 index 处 **aliased 为 `ProviderRegistryConfig`** 再 re-export，避免重复导出符号冲突。
+- **`config/providers.yaml` 样例不动既有校验项**：把 registry 的多 provider/多 model 形态作为**注释样例**追加，
+  不改动当前被 `HelmConfigSchema` 校验的 `providers[0]` 条目（否则可能破坏 `loadConfig` 测试）。真正把该 shape 入 schema
+  归 lane/executor 任务。
+- **错误形态**：未知别名走 Result `{ ok:false, error:{ kind:"unknown_alias" } }`，**不 throw**（fail-open 信号）；
+  重复别名在 `createProviderRegistry` 构建期 **throw `RegistryBuildError`**（携带结构化 `{ kind:"duplicate_alias", alias }`），
+  fail-closed（原则 2）。结果对象只含 `apiKeyEnv`（env 名），无任何明文凭证字段（原则 7）。
+
+---
+
 ## 2026-05-30 · catalog.sync 实现 + ralph-dev 索引格式修复
 
 所属：catalog.sync、CLAUDE.md 实现约定「能力与定价数据源」、docs/02 安全规则

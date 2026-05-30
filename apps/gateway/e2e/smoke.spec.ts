@@ -1,6 +1,12 @@
 import { expect, test } from "@playwright/test";
 import { NONSTREAM_RESPONSE } from "./fixtures/mock-upstream.js";
 
+// The mock echoes the gateway's RESOLVED provider model back as `model`. The
+// non-stream body is otherwise the canonical fixture, so we compare every field
+// except `model` (which legitimately reflects the routed alias, not the
+// client's requested id, since the e2e key has allow_custom_model=false).
+const { model: _ignored, ...NONSTREAM_RESPONSE_NO_MODEL } = NONSTREAM_RESPONSE;
+
 const TEST_KEY = "helm_live_e2e_testkey";
 const CHAT_BODY = { model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] };
 
@@ -44,7 +50,10 @@ test("non-stream passthrough returns the upstream completion unchanged", async (
   });
   expect(res.status()).toBe(200);
   const body = await res.json();
-  expect(body).toEqual(NONSTREAM_RESPONSE);
+  const { model: _m, ...rest } = body;
+  expect(rest).toEqual(NONSTREAM_RESPONSE_NO_MODEL);
+  // the echoed model is a routed alias (the e2e key cannot pass custom models).
+  expect(typeof body.model).toBe("string");
 });
 
 test("stream passthrough yields SSE delta chunks ending in [DONE]", async ({ request }) => {

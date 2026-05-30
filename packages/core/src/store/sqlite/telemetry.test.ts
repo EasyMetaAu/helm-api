@@ -6,6 +6,7 @@ import { SqliteTelemetryStore } from "./telemetry.js";
 function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): DecisionRecord {
   return {
     request_id: requestId,
+    trace_id: requestId,
     requested_model: "gpt-4o",
     classifier: {
       task_type: "coding",

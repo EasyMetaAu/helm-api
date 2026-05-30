@@ -26,11 +26,20 @@ export interface LoadConfigOptions {
 }
 
 // The yaml files that compose a HelmConfig and the top-level key each maps to.
-const CONFIG_FILES: ReadonlyArray<{ file: string; key: keyof Config | null }> = [
+// `optional: true` files may be absent (the schema default fills them in); a
+// present-but-broken optional file still fails closed (YAML/validation errors).
+const CONFIG_FILES: ReadonlyArray<{
+  file: string;
+  key: keyof Config | null;
+  optional?: boolean;
+}> = [
   { file: "server.yaml", key: "server" },
   { file: "auth.yaml", key: "auth" },
   { file: "providers.yaml", key: null }, // providers.yaml has a top-level `providers:` key
   { file: "runtime.yaml", key: "runtime" },
+  // classifier.yaml has a top-level `classifier:` key; optional for back-compat
+  // so existing deployments without it still start (defaults apply).
+  { file: "classifier.yaml", key: null, optional: true },
 ];
 
 type Mutable = Record<string, unknown>;
@@ -62,12 +71,13 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
 
   const tree: Mutable = {};
 
-  for (const { file, key } of CONFIG_FILES) {
+  for (const { file, key, optional } of CONFIG_FILES) {
     const path = join(configDir, file);
     let text: string;
     try {
       text = read(path);
     } catch {
+      if (optional) continue; // absent optional file → schema default applies
       throw new ConfigError(`failed to read config file: ${path}`, []);
     }
 

@@ -24,6 +24,20 @@ export {
   PricingSchema,
 } from "./catalog/schema.js";
 
+// Classifier config model (docs/03, research-notes Manifest) — DATA-driven
+// Layer-1 classifier surface + eval block. Schema is the single type source.
+export {
+  type ClassifierConfig,
+  ClassifierConfigSchema,
+  type ClassifierEvalConfig,
+  ClassifierEvalConfigSchema,
+  type ClassifierRulesConfig,
+  ClassifierRulesConfigSchema,
+  type DimensionConfig,
+  DimensionConfigSchema,
+  type Tier,
+  TierSchema,
+} from "./config/classifier-schema.js";
 // Config model (docs/02, 06).
 export {
   type AuthConfig,

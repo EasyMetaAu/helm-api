@@ -4,6 +4,7 @@ import { type DecisionRecord, DecisionRecordSchema } from "./schema.js";
 function fullRecord(): DecisionRecord {
   return {
     request_id: "req_1",
+    trace_id: "req_1",
     requested_model: "gpt-4o",
     classifier: {
       task_type: "coding",
@@ -49,6 +50,7 @@ function fullRecord(): DecisionRecord {
 function passthroughRecord(model = "gpt-4o-mini") {
   return {
     request_id: "req_2",
+    trace_id: "req_2",
     requested_model: model,
     classifier: {
       task_type: "passthrough",

@@ -6,3 +6,28 @@ providers:
     type: openai
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
+
+# Provider Registry sample (provider.registry) — the richer per-model shape the
+# registry resolves. lane/policy reference only the internal `alias` (e.g.
+# cheap_model, openai/auto); `provider_model` is the provider's real id and an
+# internal supply-chain detail (principle 6). Credentials stay env-NAME-only via
+# `api_key_env` — never a plaintext key (principle 7). A duplicate alias across
+# providers is rejected at build time (fail-closed, principle 2). Wiring this
+# shape into HelmConfigSchema belongs to the lane/executor tasks; kept as a
+# reference until then.
+#
+# providers:
+#   - name: openai
+#     base_url: https://api.openai.com/v1
+#     api_key_env: OPENAI_API_KEY
+#     models:
+#       - alias: cheap_model
+#         provider_model: gpt-4o-mini
+#       - alias: openai/auto        # `*/auto` is the fallback tail (Lane Resolver)
+#         provider_model: gpt-4o
+#   - name: anthropic
+#     base_url: https://api.anthropic.com/v1
+#     api_key_env: ANTHROPIC_API_KEY
+#     models:
+#       - alias: best_reasoning_model
+#         provider_model: claude-opus-4
