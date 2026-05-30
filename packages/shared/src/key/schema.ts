@@ -21,3 +21,18 @@ export const ApiKeyRecordSchema = z.object({
 
 export type KeyRole = z.infer<typeof KeyRoleSchema>;
 export type ApiKeyRecord = z.infer<typeof ApiKeyRecordSchema>;
+
+// Admin-facing create-key request (docs/06 Key 管理). The plaintext is minted
+// server-side; the operator only specifies role + per-key caps. `.strict()` so an
+// unknown field fails closed (原则2). role defaults to "user" — root keys are not
+// minted casually through the admin UI.
+export const CreateKeyRequestSchema = z
+  .object({
+    role: KeyRoleSchema.default("user"),
+    max_lane: z.string().min(1).optional(),
+    allowed_lanes: z.array(z.string().min(1)).optional(),
+    allow_custom_model: z.boolean().optional(),
+  })
+  .strict();
+
+export type CreateKeyRequest = z.infer<typeof CreateKeyRequestSchema>;

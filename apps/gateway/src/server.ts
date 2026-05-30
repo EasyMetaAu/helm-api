@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   type AnthropicSSEEvent,
@@ -11,6 +13,7 @@ import {
   generateKey,
   hashKey,
   type IRResponse,
+  type Lane,
   type LanesConfig,
   loadConfig,
   makeAnthropicError,
@@ -29,6 +32,10 @@ import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { authMiddleware } from "./middleware/auth.js";
+import { basicAuth, resolveAdminAuth } from "./middleware/basic-auth.js";
+import { registerAdminApi } from "./routes/admin/index.js";
+import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
+import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
 import { createExecute } from "./routes/execute.js";
@@ -95,9 +102,11 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
   };
   const provider = createOpenAIClient({ config: providerConfig });
 
-  // Routing pipeline building blocks (framework-agnostic core).
-  const lanes: LanesConfig = parseLanesConfig(DEFAULT_LANES);
-  const policies: PoliciesConfig = { policies: [] };
+  // Routing pipeline building blocks (framework-agnostic core). `let` so admin
+  // rule edits (via the runtime RuleStore below) re-bind the live config the
+  // `route` closure reads — changes apply without a restart.
+  let lanes: LanesConfig = parseLanesConfig(DEFAULT_LANES);
+  let policies: PoliciesConfig = { policies: [] };
   // Three-layer cascade classify adapter: Layer-1 rules + Layer-2 eval (OFF by
   // default; per-request override threaded from the chat route) + Layer-3
   // balanced fail-open. The eval small-model is invoked via the same provider
@@ -184,6 +193,49 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
   // `route`, behind a pipeline adapter that bridges IR ↔ the OpenAI executor and
   // produces the native Anthropic response / SSE events (docs/05). Self-auth so a
   // missing key is rejected as an Anthropic error envelope (docs/07).
+  // Admin API (/admin/api/*) behind HTTP Basic (admin.auth). DELIBERATELY separate
+  // from API-key auth (different credential source, no RBAC). Rule edits go through
+  // a runtime RuleStore that re-binds the live `lanes`/`policies` the router reads;
+  // keys/requests go to the Store. The plaintext of a freshly minted key is the
+  // ONLY secret ever returned, once (原则7).
+  const adminAuth = resolveAdminAuth(config as { admin?: Record<string, unknown> }, process.env);
+  const ruleStore = createRuntimeRuleStore({
+    lanes: lanes as Record<string, Lane>,
+    policies,
+    classifier: config.classifier,
+    onLanes: (next) => {
+      lanes = next as LanesConfig;
+    },
+    onPolicies: (next) => {
+      policies = next;
+    },
+  });
+  app.use("/admin/api/*", basicAuth(adminAuth));
+  registerAdminApi(app, {
+    rules: ruleStore,
+    keyStore,
+    telemetry,
+    genKey: () => {
+      const k = generateKey();
+      return { plaintext: k.plaintext, hash: k.hash, prefix: k.prefix };
+    },
+    genKeyId: () => randomUUID(),
+    accountId: "default",
+  });
+
+  // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so
+  // the more-specific /admin/api/* routes win (Hono matches in registration
+  // order); the static catch-all would otherwise return index.html for them. The
+  // sub-app re-applies basicAuth so the page + assets are also gated. We never run
+  // SvelteKit here — just serve the adapter-static build (CLAUDE.md 原则1).
+  if (!existsSync(ADMIN_BUILD_ROOT)) {
+    logger.log("warn", "admin.static_missing", {
+      dir: ADMIN_BUILD_ROOT,
+      line: `admin SPA build not found at ${ADMIN_BUILD_ROOT}; /admin will 404 until 'pnpm build' produces it`,
+    });
+  }
+  app.route("/admin", mountAdminStatic(adminAuth));
+
   const messagesPipeline = createMessagesPipeline(route);
   registerMessagesRoute(app, {
     auth: {

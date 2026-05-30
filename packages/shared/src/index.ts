@@ -105,6 +105,8 @@ export {
 export {
   type ApiKeyRecord,
   ApiKeyRecordSchema,
+  type CreateKeyRequest,
+  CreateKeyRequestSchema,
   type KeyRole,
   KeyRoleSchema,
 } from "./key/schema.js";

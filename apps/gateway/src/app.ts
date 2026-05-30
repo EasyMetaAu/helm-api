@@ -37,7 +37,7 @@ export type AppEnv = {
 //   4. [limits]     (gateway.limits mounts here)
 //   5. [auth]       (auth mounts here)
 //   6. routes       (/healthz /version, then /v1/*)
-//   7. /admin/*     (static placeholder, isolated from /v1 and /healthz)
+//   7. /admin/*     (admin API + static SPA; wired in server.ts, not here)
 export function createApp(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   const genTraceId = deps.genTraceId ?? randomUUID;
@@ -64,9 +64,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   };
   registerHealthRoutes(app, health);
 
-  // /admin static placeholder (Phase 4 serves the SvelteKit SPA build here).
-  app.get("/admin", (c) => c.text("Helm admin UI (placeholder)"));
-  app.get("/admin/*", (c) => c.text("Helm admin UI (placeholder)"));
+  // /admin (admin API + static SPA) is wired by server.ts (it needs the resolved
+  // adminAuth config + Store deps). createApp stays framework-glue only and does
+  // NOT mount admin so headless callers can opt out entirely (CLAUDE.md 原则1).
 
   app.onError((err, c) => handleError(err, c));
 

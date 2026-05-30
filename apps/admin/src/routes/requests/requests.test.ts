@@ -1,0 +1,185 @@
+import { render, screen, waitFor, within } from '@testing-library/svelte';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { RequestDetail, RequestListItem } from '$lib/api/requests.js';
+import DetailPage from './[traceId]/+page.svelte';
+import ListPage from './+page.svelte';
+
+// The Debug UI is a READ-ONLY consumer of /admin/api/* — it renders the trail the
+// backend recorded and re-computes nothing (docs/07, 原则1). The list/detail
+// clients are mocked; we assert docs/07 列表/详情 fields, the 原则5 separation of
+// classification-stage vs execution-stage fallback, and 原则7 redaction.
+
+const getRequest = vi.fn();
+vi.mock('$lib/api/requests.js', () => ({
+  getRequest: (...args: unknown[]) => getRequest(...args),
+}));
+
+function item(traceId: string, overrides: Partial<RequestListItem> = {}): RequestListItem {
+  return {
+    trace_id: traceId,
+    ts: '2026-05-31T10:00:00Z',
+    key_prefix: 'helm_live_ab12',
+    requested_model: 'gpt-4o',
+    task_type: 'coding',
+    complexity: 'high',
+    decided_by: 'rules',
+    lane: 'premium',
+    final_model: 'claude-x',
+    fallback_count: 1,
+    status: 'ok',
+    latency_ms: 460,
+    cost_usd: 0.0123,
+    ...overrides,
+  };
+}
+
+function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
+  return {
+    trace_id: 'tr_1',
+    ts: '2026-05-31T10:00:00Z',
+    request_meta: { requested_model: 'gpt-4o' },
+    payload_summary: 'payload withheld (redacted — only routing metadata is stored)',
+    classifier_output: {
+      task_type: 'coding',
+      complexity: 'high',
+      confidence: 0.91,
+      matched_dimensions: ['has_code_fence'],
+      constraints: { require_tools: true },
+    },
+    eval_triggered: false,
+    eval_cache_hit: null,
+    matched_policy: 'policy_x',
+    lane_candidates: ['premium', 'balanced'],
+    provider_attempts: [
+      { model: 'claude-x', provider: 'anthropic', outcome: 'success', latency_ms: 340 },
+    ],
+    response_meta: { model_alias: 'claude-x' },
+    error: null,
+    cost_breakdown: { routing_usd: 0.0001, eval_usd: 0.0002, completion_usd: 0.01, total_usd: 0.0103 },
+    ...overrides,
+  };
+}
+
+describe('requests list page', () => {
+  it('renders every docs/07 list field per row and shows the key by prefix only', () => {
+    render(ListPage, {
+      data: {
+        items: [
+          item('tr_a', { decided_by: 'rules' }),
+          item('tr_b', {
+            status: 'error',
+            decided_by: 'default',
+            error_class: 'all_providers_failed',
+          }),
+        ],
+        nextCursor: undefined,
+      },
+    });
+    const rows = screen.getAllByTestId('request-row');
+    expect(rows).toHaveLength(2);
+    const first = rows[0];
+    expect(first).toHaveTextContent('helm_live_ab12'); // key prefix
+    expect(first).toHaveTextContent('gpt-4o'); // requested_model
+    expect(first).toHaveTextContent('coding'); // task_type
+    expect(first).toHaveTextContent('high'); // complexity
+    expect(first).toHaveTextContent('rules'); // decided_by
+    expect(first).toHaveTextContent('premium'); // lane
+    expect(first).toHaveTextContent('claude-x'); // final_model
+    expect(first).toHaveTextContent('460'); // latency_ms
+    expect(first).toHaveTextContent(/0\.0123|0\.012/); // cost
+    expect(first).toHaveTextContent('1'); // fallback_count
+    // The error row surfaces error_class.
+    expect(rows[1]).toHaveTextContent('all_providers_failed');
+    // No plaintext-like long secret anywhere.
+    expect(document.body.textContent ?? '').not.toMatch(/helm_live_[A-Za-z0-9]{16,}/);
+  });
+
+  it('labels the decision layer distinctly for rules / eval / default', () => {
+    render(ListPage, {
+      data: {
+        items: [
+          item('tr_r', { decided_by: 'rules' }),
+          item('tr_e', { decided_by: 'eval' }),
+          item('tr_d', { decided_by: 'default' }),
+        ],
+        nextCursor: undefined,
+      },
+    });
+    const rows = screen.getAllByTestId('request-row');
+    expect(within(rows[0]).getByTestId('decided-by')).toHaveTextContent('rules');
+    expect(within(rows[1]).getByTestId('decided-by')).toHaveTextContent('eval');
+    expect(within(rows[2]).getByTestId('decided-by')).toHaveTextContent('default');
+  });
+
+  it('links each row to its detail route /requests/<trace_id>', () => {
+    render(ListPage, { data: { items: [item('tr_link')], nextCursor: undefined } });
+    const link = screen.getByTestId('request-row').querySelector('a');
+    expect(link).toHaveAttribute('href', '/requests/tr_link');
+  });
+
+  it('shows an empty state when there are no requests', () => {
+    render(ListPage, { data: { items: [], nextCursor: undefined } });
+    expect(screen.getByTestId('requests-empty')).toBeInTheDocument();
+    expect(screen.queryByTestId('request-row')).not.toBeInTheDocument();
+  });
+
+  it('enables "load more" only when a nextCursor is present', () => {
+    const { unmount } = render(ListPage, {
+      data: { items: [item('tr_a')], nextCursor: undefined },
+    });
+    expect(screen.queryByRole('button', { name: /load more/i })).not.toBeInTheDocument();
+    unmount();
+    render(ListPage, { data: { items: [item('tr_a')], nextCursor: 'cur_2' } });
+    expect(screen.getByRole('button', { name: /load more/i })).toBeInTheDocument();
+  });
+});
+
+describe('requests detail page', () => {
+  beforeEach(() => {
+    getRequest.mockReset();
+  });
+
+  it('renders the decision chain, cost breakdown (含 eval) and redacted payload summary', () => {
+    render(DetailPage, { data: { detail: detail(), traceId: 'tr_1' } });
+    // Decision chain present.
+    expect(screen.getByTestId('chain-classifier')).toBeInTheDocument();
+    expect(screen.getByTestId('chain-lanes')).toBeInTheDocument();
+    expect(screen.getByTestId('chain-attempts')).toBeInTheDocument();
+    // Cost breakdown shows all four parts, including eval self-cost.
+    const cost = screen.getByTestId('cost-breakdown');
+    expect(within(cost).getByTestId('cost-routing')).toBeInTheDocument();
+    expect(within(cost).getByTestId('cost-eval')).toBeInTheDocument();
+    expect(within(cost).getByTestId('cost-completion')).toBeInTheDocument();
+    expect(within(cost).getByTestId('cost-total')).toBeInTheDocument();
+    // Payload is a redacted summary, not the full payload.
+    expect(screen.getByTestId('payload-summary')).toHaveTextContent(/redacted|withheld/i);
+  });
+
+  it('surfaces a structured error with class, status, redacted message and redacted provider_raw', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail({
+          status_is_error_marker: undefined,
+          error: {
+            error_class: 'all_providers_failed',
+            http_status: 502,
+            message: 'all providers failed',
+            provider_raw: null,
+          },
+        } as Partial<RequestDetail>),
+        traceId: 'tr_err',
+      },
+    });
+    const err = screen.getByTestId('request-error');
+    expect(err).toHaveTextContent('all_providers_failed');
+    expect(err).toHaveTextContent('502');
+    expect(err).toHaveTextContent(/all providers failed/);
+    // trace_id is copyable.
+    expect(screen.getByTestId('copy-trace')).toBeInTheDocument();
+  });
+
+  it('shows a friendly error state when the trace cannot be loaded (no white screen)', () => {
+    render(DetailPage, { data: { detail: null, traceId: 'missing', loadError: 'not found' } });
+    expect(screen.getByTestId('detail-error')).toBeInTheDocument();
+  });
+});

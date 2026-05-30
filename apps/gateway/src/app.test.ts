@@ -124,13 +124,15 @@ describe("createApp: trace_id, logging, error handling", () => {
     expect(JSON.stringify(lines)).not.toContain("helm_live_PLAINTEXT");
   });
 
-  it("serves /admin placeholder without intercepting other routes", async () => {
+  it("does not mount /admin in createApp (server.ts wires it) nor shadow other routes", async () => {
     const { logger } = fakeLogger();
     const app = createApp({ logger });
     app.get("/v1/ping", (c) => c.text("pong"));
-    expect((await app.request("/admin")).status).toBe(200);
+    // createApp no longer mounts /admin; it is wired by server.ts with the
+    // resolved adminAuth + static SPA. So a bare app has no admin handler.
+    expect((await app.request("/admin")).status).toBe(404);
     expect(await (await app.request("/v1/ping")).text()).toBe("pong");
-    // the built-in /healthz is not shadowed by the /admin placeholder
+    // the built-in /healthz is still reachable.
     expect((await app.request("/healthz")).status).toBe(200);
   });
 });
