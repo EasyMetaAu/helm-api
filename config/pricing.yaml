@@ -1,0 +1,12 @@
+# Manual pricing overrides (layer 2), USD per 1M tokens. Keyed by modelKey.
+# Manual entries ALWAYS WIN over generated pricing (per-field).
+# Used for cost telemetry only — pricing never drives runtime model selection.
+# Validated by PricingOverrideSchema — illegal values fail-closed.
+
+# "openai/gpt-4o":
+#   inputPerMTokUsd: 2.5
+#   outputPerMTokUsd: 10.0
+
+# "local/llama-3.1-70b":
+#   inputPerMTokUsd: 0.0
+#   outputPerMTokUsd: 0.0

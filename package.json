@@ -15,12 +15,15 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "lint:fix": "biome check --write .",
-    "build": "pnpm -r build"
+    "build": "pnpm -r build",
+    "sync:catalog": "tsx scripts/sync-catalog.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",
+    "@helm/shared": "workspace:*",
     "@types/node": "^22.10.0",
     "@vitest/coverage-v8": "^2.1.9",
+    "tsx": "^4.22.3",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"
   },

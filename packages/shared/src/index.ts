@@ -3,6 +3,27 @@
 
 export const SHARED_PACKAGE = "@helm/shared" as const;
 
+// Catalog model — capabilities + pricing, generated (supply-chain) + override
+// (manual wins). See CLAUDE.md 实现约定, docs/02 安全规则.
+export {
+  type Capabilities,
+  type CapabilitiesOverride,
+  CapabilitiesOverrideSchema,
+  CapabilitiesSchema,
+  type CatalogEntry,
+  CatalogEntrySchema,
+  type CatalogSource,
+  CatalogSourceSchema,
+  type GeneratedCatalog,
+  type GeneratedCatalogEntry,
+  GeneratedCatalogEntrySchema,
+  GeneratedCatalogSchema,
+  type Pricing,
+  type PricingOverride,
+  PricingOverrideSchema,
+  PricingSchema,
+} from "./catalog/schema.js";
+
 // Config model (docs/02, 06).
 export {
   type AuthConfig,

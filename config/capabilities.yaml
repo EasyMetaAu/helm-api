@@ -1,0 +1,18 @@
+# Manual capability overrides (layer 2). Keyed by modelKey.
+# Manual entries ALWAYS WIN over the generated catalog (per-field).
+# Only list fields you want to override; the rest fall through to generated.
+# Validated by CapabilitiesOverrideSchema — illegal values fail-closed.
+#
+# Example: force-enable vision on a model the upstream catalog marks false,
+# or register a brand-new self-hosted model the upstream doesn't know about.
+
+# "openai/gpt-4o":
+#   supportsVision: true
+
+# "local/llama-3.1-70b":
+#   supportsTools: true
+#   supportsJsonMode: false
+#   supportsVision: false
+#   supportsStreaming: true
+#   maxContextTokens: 131072
+#   maxOutputTokens: 4096

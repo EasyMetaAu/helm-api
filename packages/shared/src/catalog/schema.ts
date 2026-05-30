@@ -1,0 +1,66 @@
+import { z } from "zod";
+
+// Catalog metadata = per-model capabilities + pricing. Two layers:
+//   1. generated  — synced from LiteLLM's model_prices_and_context_window.json
+//                   via `pnpm sync:catalog`, checked into the repo. Supply-chain
+//                   INPUT, never read at request time to pick a model.
+//   2. override   — manual config/capabilities.yaml + config/pricing.yaml.
+//                   Manual entries ALWAYS WIN (CLAUDE.md 实现约定).
+// Invalid override → fail-closed (principle 2). See docs/02 安全规则.
+
+export const CapabilitiesSchema = z.object({
+  supportsTools: z.boolean(),
+  supportsJsonMode: z.boolean(),
+  supportsVision: z.boolean(),
+  supportsStreaming: z.boolean(),
+  maxContextTokens: z.number().int().nonnegative(),
+  maxOutputTokens: z.number().int().nonnegative().nullable(),
+});
+
+export const PricingSchema = z.object({
+  inputPerMTokUsd: z.number().nonnegative().nullable(),
+  outputPerMTokUsd: z.number().nonnegative().nullable(),
+});
+
+export const CatalogSourceSchema = z.enum(["generated", "override"]);
+
+export const CatalogEntrySchema = z.object({
+  modelKey: z.string().min(1),
+  capabilities: CapabilitiesSchema,
+  pricing: PricingSchema,
+  source: CatalogSourceSchema,
+});
+
+// A single generated-catalog file: a checked-in supply-chain artifact.
+export const GeneratedCatalogEntrySchema = z.object({
+  modelKey: z.string().min(1),
+  capabilities: CapabilitiesSchema,
+  pricing: PricingSchema,
+});
+
+export const GeneratedCatalogSchema = z.object({
+  generatedAt: z.string().min(1),
+  source: z.string().min(1), // upstream provenance, e.g. "litellm:model_prices_and_context_window.json"
+  models: z.array(GeneratedCatalogEntrySchema),
+});
+
+// Override files (capabilities.yaml / pricing.yaml). Both are maps keyed by
+// modelKey. Every field is optional so a manual entry can override a single
+// field (e.g. just supportsVision) without restating the whole record.
+export const CapabilitiesOverrideEntrySchema = CapabilitiesSchema.partial();
+export const PricingOverrideEntrySchema = PricingSchema.partial();
+
+export const CapabilitiesOverrideSchema = z.record(
+  z.string().min(1),
+  CapabilitiesOverrideEntrySchema,
+);
+export const PricingOverrideSchema = z.record(z.string().min(1), PricingOverrideEntrySchema);
+
+export type Capabilities = z.infer<typeof CapabilitiesSchema>;
+export type Pricing = z.infer<typeof PricingSchema>;
+export type CatalogSource = z.infer<typeof CatalogSourceSchema>;
+export type CatalogEntry = z.infer<typeof CatalogEntrySchema>;
+export type GeneratedCatalogEntry = z.infer<typeof GeneratedCatalogEntrySchema>;
+export type GeneratedCatalog = z.infer<typeof GeneratedCatalogSchema>;
+export type CapabilitiesOverride = z.infer<typeof CapabilitiesOverrideSchema>;
+export type PricingOverride = z.infer<typeof PricingOverrideSchema>;

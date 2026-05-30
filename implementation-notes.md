@@ -5,6 +5,34 @@
 
 ---
 
+## 2026-05-30 · catalog.sync 实现 + ralph-dev 索引格式修复
+
+所属：catalog.sync、CLAUDE.md 实现约定「能力与定价数据源」、docs/02 安全规则
+
+- **ralph-dev `index.json` schema 不兼容（已修，关键阻塞）**：`.ralph-dev/tasks/index.json` 里 `tasks`
+  是**数组**，但已安装的 ralph-dev CLI 0.5.0 期望 `tasks` 为**以 taskId 为键的对象**
+  （`findById`/`updateIndex` 用 `index.tasks[id]`）。后果：`state set/update`、`tasks start/done`
+  全部以 `FILE_SYSTEM_ERROR` 失败，`tasks get <id>` 报 TASK_NOT_FOUND，整个 implement 循环卡死，
+  而 state 却被标成 `complete`（实际仅 26/79 完成）。修复：把 `tasks` 由数组转为对象，键 =
+  `module + "." + basename(filePath, ".md")`（已校验 79 条全部与各 `.md` frontmatter `id` 一致）。
+  备份留在 `.ralph-dev/tasks/index.json.array-backup`。**TODO**：上游 breakdown 产物与 CLI 版本须对齐，
+  否则下次仍会卡。
+- **catalog 数据流**：`scripts/sync-catalog.ts`（构建期，tsx 运行，**不属运行时**）读 LiteLLM 本地快照 →
+  规范化 → 写**签入** `packages/core/src/catalog/generated/catalog.json`（带 `generatedAt`、按 modelKey
+  稳定排序）。运行时 `packages/core/src/catalog/index.ts` 的 `loadCatalog()` 合并 generated +
+  `capabilities.yaml`/`pricing.yaml` 手动覆盖，**手动逐字段 WIN** 且可新增全新 modelKey，命中覆盖的条目
+  `source` 标 `"override"` 供调试 UI 解释来源。
+- **定价单位**：上游是 per-token USD，规范化为 per-MTok USD（×1e6），并 `Math.round(...*1e6)/1e6`
+  去除 IEEE-754 误差（否则 `0.0000008*1e6 = 0.7999999999999999` 进签入产物）。
+- **被迫的工具链改动**：根 `package.json` 加 `sync:catalog` 脚本 + `tsx`/`@helm/shared` 到 devDeps；
+  `vitest.config.ts` 的 `include` 增加 `scripts/**/*.test.ts`。`scripts/` 不是 workspace 包，故
+  **不被 `pnpm -r typecheck` 覆盖**（仅 vitest 经 esbuild 跑，不类型检查）——**TODO**：后续若 scripts 变多，
+  考虑给它独立 tsconfig 纳入 typecheck。
+- **fixture**：`scripts/fixtures/model_prices_and_context_window.json` 是最小**示例**快照（6 条，1 条
+  无 ctx 故被跳过 → 产出 5 条），非真实全量 LiteLLM 数据。**TODO**：接真实上游快照来源（手动下载/CI 拉取后签入）。
+
+---
+
 ## 2026-05-30 · Phase 0 实现：e2e 冒烟 + auth 错误形态不一致（TODO）
 
 所属：e2e.smoke、auth.middleware、docs/05、docs/07
