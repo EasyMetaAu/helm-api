@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { type Policy, savePolicies, TASK_TYPE_OPTIONS } from '$lib/api/policies.js';
   import PolicyRow from '$lib/components/PolicyRow.svelte';
+  import { t } from '$lib/i18n';
 
   // Data comes from `+page.ts`'s load (mocked via the `data` prop in tests).
   // The page owns the ORDERED working list — order IS the match priority
@@ -57,10 +58,11 @@
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <header>
-    <h1 class="text-2xl font-semibold text-slate-900">Policies</h1>
+    <h1 class="text-2xl font-semibold text-slate-900">{$t('Policies')}</h1>
     <p class="text-sm text-slate-500">
-      Server-side routing rules. Each is a condition → action (force or cap a lane). Policies
-      override task lanes but never the execution fallback chain.
+      {$t(
+        'Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.',
+      )}
     </p>
     <p
       class="mt-2 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600"

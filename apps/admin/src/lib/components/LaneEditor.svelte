@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { Lane } from '$lib/api/lanes.js';
+  import { t } from '$lib/i18n';
 
   // Single-lane editor. Pure form: it owns NO routing/classification logic
   // (that lives in headless core) — only client-side form validation:
@@ -101,12 +102,12 @@
   </header>
 
   <label class="flex flex-col gap-1 text-sm">
-    <span class="font-medium text-slate-700">Primary</span>
+    <span class="font-medium text-slate-700">{$t('Primary')}</span>
     <input name="primary" class="rounded border border-slate-300 px-2 py-1" bind:value={primary} />
   </label>
 
   <fieldset class="flex flex-col gap-1">
-    <legend class="text-sm font-medium text-slate-700">Fallback (ordered)</legend>
+    <legend class="text-sm font-medium text-slate-700">{$t('Fallback (ordered)')}</legend>
     <ul class="flex flex-col gap-1">
       {#each fallback as f, i (i + ':' + f)}
         <li
@@ -132,7 +133,7 @@
             type="button"
             class="text-xs text-red-600"
             aria-label={`remove ${f}`}
-            onclick={() => removeFallback(i)}>Remove</button
+            onclick={() => removeFallback(i)}>{$t('Remove')}</button
           >
         </li>
       {/each}
@@ -140,12 +141,12 @@
     <div class="flex gap-2">
       <input
         class="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
-        placeholder="model alias"
+        placeholder={$t('model alias')}
         data-testid="fallback-add-input"
         bind:value={newFallback}
       />
       <button type="button" class="rounded bg-slate-200 px-2 py-1 text-sm" onclick={addFallback}
-        >Add fallback</button
+        >{$t('Add fallback')}</button
       >
     </div>
   </fieldset>
@@ -153,14 +154,14 @@
   <div class="flex flex-wrap gap-4 text-sm">
     <label class="flex items-center gap-2">
       <input type="checkbox" bind:checked={requireTools} />
-      <span>Require tools</span>
+      <span>{$t('Require tools')}</span>
     </label>
     <label class="flex items-center gap-2">
       <input type="checkbox" bind:checked={requireJson} />
-      <span>Require JSON</span>
+      <span>{$t('Require JSON')}</span>
     </label>
     <label class="flex items-center gap-2">
-      <span>Max latency ms</span>
+      <span>{$t('Max latency ms')}</span>
       <input
         type="number"
         min="1"
@@ -189,13 +190,13 @@
     <button
       type="submit"
       class="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-      disabled={!valid}>Save</button
+      disabled={!valid}>{$t('Save')}</button
     >
     {#if saved}
       <span
         data-testid="lane-saved"
         role="status"
-        class="text-sm font-medium text-emerald-600">Saved</span
+        class="text-sm font-medium text-emerald-600">{$t('Saved')}</span
       >
     {/if}
   </div>

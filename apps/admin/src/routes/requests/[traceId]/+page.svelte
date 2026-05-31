@@ -1,6 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { RequestDetail } from '$lib/api/requests.js';
+  import { t } from '$lib/i18n';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
 
@@ -25,7 +26,7 @@
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <a href={`${base}/requests`} class="text-sm text-sky-600 hover:underline"
-    >&larr; Back to requests</a
+    >&larr; {$t('Back to requests')}</a
   >
 
   {#if !data.detail}
@@ -40,7 +41,7 @@
     {@const d = data.detail}
     <header class="flex flex-wrap items-center justify-between gap-2">
       <div>
-        <h1 class="text-2xl font-semibold text-slate-900">Request trail</h1>
+        <h1 class="text-2xl font-semibold text-slate-900">{$t('Request trail')}</h1>
         <p class="text-sm text-slate-500">{d.ts || 'time not recorded'}</p>
       </div>
       <div class="flex items-center gap-2">

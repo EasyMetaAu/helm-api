@@ -1,9 +1,17 @@
 <script lang="ts">
   import '../app.css';
+  import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
+  import LocaleSwitcher from '$lib/components/LocaleSwitcher.svelte';
+  import { initI18n, t } from '$lib/i18n';
 
   let { children } = $props();
+
+  // Resolve the saved/browser language once on the client (SPA — no SSR).
+  onMount(() => {
+    void initI18n();
+  });
 
   // Mobile slide-over state. Desktop (md+) keeps the sidebar pinned.
   let navOpen = $state(false);
@@ -63,7 +71,7 @@
   {#if navOpen}
     <button
       class="fixed inset-0 z-20 bg-slate-900/30 md:hidden"
-      aria-label="Close navigation"
+      aria-label={$t('Close navigation')}
       onclick={() => (navOpen = false)}
     ></button>
   {/if}
@@ -81,7 +89,7 @@
       >
       <div class="leading-tight">
         <div class="text-sm font-semibold tracking-tight">Helm</div>
-        <div class="text-[11px] text-slate-400">LLM Gateway</div>
+        <div class="text-[11px] text-slate-400">{$t('LLM Gateway')}</div>
       </div>
     </div>
 
@@ -109,15 +117,16 @@
           >
             <path stroke-linecap="round" stroke-linejoin="round" d={item.icon} />
           </svg>
-          {item.label}
+          {$t(item.label)}
         </a>
       {/each}
     </nav>
 
-    <div class="border-t border-slate-100 px-5 py-4">
-      <div class="flex items-center gap-2 text-xs text-slate-400">
+    <div class="space-y-3 border-t border-slate-100 px-4 py-4">
+      <LocaleSwitcher />
+      <div class="flex items-center gap-2 px-1 text-xs text-slate-400">
         <span class="h-2 w-2 rounded-full bg-emerald-500"></span>
-        Connected
+        {$t('Connected')}
       </div>
     </div>
   </aside>
@@ -130,7 +139,7 @@
     >
       <button
         class="-ml-1 rounded-lg p-2 text-slate-500 hover:bg-slate-100 md:hidden"
-        aria-label="Open navigation"
+        aria-label={$t('Open navigation')}
         onclick={() => (navOpen = true)}
       >
         <svg
@@ -147,7 +156,7 @@
           />
         </svg>
       </button>
-      <h1 class="text-base font-semibold tracking-tight text-slate-900">{activeLabel}</h1>
+      <h1 class="text-base font-semibold tracking-tight text-slate-900">{$t(activeLabel)}</h1>
     </header>
 
     <main class="flex-1 overflow-y-auto">

@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { type ApiKeyView, revokeKey } from '$lib/api/keys.js';
   import CreateKeyDialog from '$lib/components/CreateKeyDialog.svelte';
+  import { t } from '$lib/i18n';
 
   // API key management view. HARD security line (CLAUDE.md 原则7 / docs/06): the
   // list shows ONLY the display prefix + sha256-backed reference — never plaintext.
@@ -56,10 +57,11 @@
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <header class="flex items-center justify-between">
     <div>
-      <h1 class="text-2xl font-semibold text-slate-900">API Keys</h1>
+      <h1 class="text-2xl font-semibold text-slate-900">{$t('API Keys')}</h1>
       <p class="text-sm text-slate-500">
-        Keys are stored as a hash plus a short display prefix — the full key is shown only once, at
-        creation.
+        {$t(
+          'Keys are stored as a hash plus a short display prefix — the full key is shown only once, at creation.',
+        )}
       </p>
     </div>
     <button

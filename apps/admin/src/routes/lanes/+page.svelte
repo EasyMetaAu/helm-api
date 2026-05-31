@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { saveLane, type Lane } from '$lib/api/lanes.js';
   import LaneEditor from '$lib/components/LaneEditor.svelte';
+  import { t } from '$lib/i18n';
 
   // Data comes from `+page.ts`'s load (mocked via the `data` prop in tests).
   let { data }: { data: { lanes: Lane[] } } = $props();
@@ -35,9 +36,9 @@
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <header>
-    <h1 class="text-2xl font-semibold text-slate-900">Lanes</h1>
+    <h1 class="text-2xl font-semibold text-slate-900">{$t('Lanes')}</h1>
     <p class="text-sm text-slate-500">
-      View and fine-tune each lane's primary → fallback chain and constraints.
+      {$t("View and fine-tune each lane's primary → fallback chain and constraints.")}
     </p>
   </header>
 

@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { base } from '$app/paths';
   import { listRequests, type RequestListItem } from '$lib/api/requests.js';
+  import { t } from '$lib/i18n';
 
   // Request debug list (docs/07 列表). READ-ONLY consumer of /admin/api/* — every
   // column is a field the backend recorded; nothing is recomputed (原则1). 原则7:
@@ -47,10 +48,11 @@
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <header>
-    <h1 class="text-2xl font-semibold text-slate-900">Requests</h1>
+    <h1 class="text-2xl font-semibold text-slate-900">{$t('Requests')}</h1>
     <p class="text-sm text-slate-500">
-      Routing trail for each request — classification layer, lane, final model, fallbacks, cost and
-      errors. Keys are shown by prefix only.
+      {$t(
+        'Routing trail for each request — classification layer, lane, final model, fallbacks, cost and errors. Keys are shown by prefix only.',
+      )}
     </p>
   </header>
 
@@ -65,26 +67,26 @@
       data-testid="requests-empty"
       class="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500"
     >
-      No requests recorded yet.
+      {$t('No requests recorded yet.')}
     </div>
   {:else}
     <div class="overflow-x-auto rounded-lg border border-slate-200">
       <table class="w-full text-left text-sm">
         <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
           <tr>
-            <th class="px-3 py-2">Time</th>
-            <th class="px-3 py-2">Key</th>
-            <th class="px-3 py-2">Requested</th>
-            <th class="px-3 py-2">Task</th>
-            <th class="px-3 py-2">Complexity</th>
-            <th class="px-3 py-2">Decided by</th>
-            <th class="px-3 py-2">Lane</th>
-            <th class="px-3 py-2">Final model</th>
-            <th class="px-3 py-2">Fallbacks</th>
-            <th class="px-3 py-2">Status</th>
-            <th class="px-3 py-2">Latency</th>
-            <th class="px-3 py-2">Cost</th>
-            <th class="px-3 py-2">Error</th>
+            <th class="px-3 py-2">{$t('Time')}</th>
+            <th class="px-3 py-2">{$t('Key')}</th>
+            <th class="px-3 py-2">{$t('Requested')}</th>
+            <th class="px-3 py-2">{$t('Task')}</th>
+            <th class="px-3 py-2">{$t('Complexity')}</th>
+            <th class="px-3 py-2">{$t('Decided by')}</th>
+            <th class="px-3 py-2">{$t('Lane')}</th>
+            <th class="px-3 py-2">{$t('Final model')}</th>
+            <th class="px-3 py-2">{$t('Fallbacks')}</th>
+            <th class="px-3 py-2">{$t('Status')}</th>
+            <th class="px-3 py-2">{$t('Latency')}</th>
+            <th class="px-3 py-2">{$t('Cost')}</th>
+            <th class="px-3 py-2">{$t('Error')}</th>
           </tr>
         </thead>
         <tbody>
@@ -124,7 +126,7 @@
               <td class="px-3 py-2 text-red-600">{r.error_class ?? '—'}</td>
               <td class="px-3 py-2">
                 <a class="text-sky-600 hover:underline" href={`${base}/requests/${r.trace_id}`}
-                  >view</a
+                  >{$t('view')}</a
                 >
               </td>
             </tr>
@@ -140,7 +142,7 @@
         type="button"
         class="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
         disabled={loading}
-        onclick={loadMore}>{loading ? 'Loading…' : 'Load more'}</button
+        onclick={loadMore}>{loading ? $t('Loading…') : $t('Load more')}</button
       >
     </div>
   {/if}

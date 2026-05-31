@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { saveClassifier, type ClassifierConfig } from '$lib/api/classifier.js';
   import DimensionTable from '$lib/components/DimensionTable.svelte';
+  import { t } from '$lib/i18n';
 
   // Data comes from `+page.ts`'s load (mocked via the `data` prop in tests). The
   // page runs NO classification logic (原则1): it only flips eval on/off, edits
@@ -55,10 +56,11 @@
 
 <section class="flex w-full flex-col gap-6 px-4 py-6 md:px-8">
   <header>
-    <h1 class="text-2xl font-semibold text-slate-900">Classifier</h1>
+    <h1 class="text-2xl font-semibold text-slate-900">{$t('Classifier')}</h1>
     <p class="text-sm text-slate-500">
-      Layer-1 rules are always on (deterministic, zero-cost). Toggle the optional Layer-2 eval and
-      tune the confidence threshold below it.
+      {$t(
+        'Layer-1 rules are always on (deterministic, zero-cost). Toggle the optional Layer-2 eval and tune the confidence threshold below it.',
+      )}
     </p>
   </header>
 
