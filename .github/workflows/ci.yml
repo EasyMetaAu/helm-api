@@ -20,8 +20,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
-      - run: pnpm test
+      # build BEFORE test: admin-static.test.ts serves apps/admin/build, which is
+      # gitignored and therefore absent on a fresh CI checkout (would 404 → test fail).
       - run: pnpm build
+      - run: pnpm test
 
   # Builds and smoke-tests the real gateway Docker image (docs/10). Kept fully
   # independent of `verify` (no `needs`) so the unit gates run on their own and
@@ -34,12 +36,14 @@ jobs:
         run: docker build -t helm-api:ci .
       - name: Run container with required env
         # The provider credential is referenced by env NAME only (principle 7);
-        # /healthz never calls upstream, so a dummy value is enough to boot.
+        # /healthz never calls upstream, so a dummy value is enough to boot. Config
+        # is baked into the image (see Dockerfile) — no host bind-mount, which would
+        # not resolve against the self-hosted runner's Docker daemon (DinD).
         run: |
+          docker rm -f helm-ci 2>/dev/null || true
           docker run -d --name helm-ci \
             -p 8080:8080 \
             -e OPENAI_API_KEY=sk-ci-smoke-test \
-            -v "$PWD/config:/app/config" \
             helm-api:ci
       - name: Wait for /healthz to be healthy
         run: |

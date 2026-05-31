@@ -35,6 +35,10 @@ COPY --from=builder --chown=helm:helm /app/out ./
 # (ADMIN_BUILD_ROOT = ./apps/admin/build, resolved from /app) expects — otherwise
 # /admin 404s while /admin/api works.
 COPY --from=builder --chown=helm:helm /app/apps/admin/build ./apps/admin/build
+# Ship the default config/*.yaml so the image boots standalone (CI smoke + first run).
+# Safe to bake: providers.yaml references credentials by env-var NAME only, never a
+# plaintext key (principle 7). Operators still override by mounting a volume at /app/config.
+COPY --from=builder --chown=helm:helm /app/config ./config
 USER helm
 EXPOSE 8080
 
