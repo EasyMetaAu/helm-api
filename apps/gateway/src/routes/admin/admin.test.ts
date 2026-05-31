@@ -150,6 +150,7 @@ function buildDeps(over: Partial<AdminApiDeps> = {}): AdminApiDeps {
     }),
     genKeyId: () => `key_${++n}`,
     accountId: "acct_default",
+    modelAliases: ["openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro", "zenmux/auto"],
     ...over,
   };
 }
@@ -225,6 +226,25 @@ describe("admin.api lanes", () => {
     const res = await app.request("/admin/api/lanes/economy", { method: "DELETE" });
     expect(res.status).toBe(200);
     expect((await rules.getLanes()).economy).toBeUndefined();
+  });
+});
+
+describe("admin.api models", () => {
+  it("GET /models returns the injected alias catalog as a JSON array", async () => {
+    const deps = buildDeps({
+      modelAliases: ["zenmux/auto", "openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro"],
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/admin/api/models");
+    expect(res.status).toBe(200);
+    const list = (await res.json()) as string[];
+    expect(list).toEqual(["zenmux/auto", "openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro"]);
+  });
+
+  it("is gated behind admin basicAuth like every sibling endpoint", async () => {
+    const app = buildApp(buildDeps(), true);
+    const res = await app.request("/admin/api/models");
+    expect(res.status).toBe(401);
   });
 });
 

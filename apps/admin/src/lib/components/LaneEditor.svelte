@@ -7,8 +7,20 @@
   // (that lives in headless core) — only client-side form validation:
   // non-empty primary, numeric latency, and the `balanced` guard from docs/04
   // (the classification-fallback terminal must always have a primary).
-  let { lane, onsave }: { lane: Lane; onsave: (name: string, body: Lane) => void | Promise<void> } =
-    $props();
+  // `models` is the routable-alias catalog (config.providers[].models[].alias),
+  // offered as combobox suggestions on the primary + fallback inputs so the
+  // operator picks a real alias instead of hand-typing one (a typo would silently
+  // break a fallback chain). Defaulted to [] — when empty the inputs degrade to
+  // plain text, so the editor never depends on the catalog being present.
+  let {
+    lane,
+    models = [],
+    onsave,
+  }: {
+    lane: Lane;
+    models?: string[];
+    onsave: (name: string, body: Lane) => void | Promise<void>;
+  } = $props();
 
   // Local editable copy so a failed save never dirties the parent's data. We
   // intentionally seed from the prop's INITIAL value only (untrack) — the editor
@@ -25,6 +37,9 @@
   let saved = $state(false);
 
   const isBalanced = initial.name === 'balanced';
+  // Per-card <datalist> id (each lane renders its own editor). Drives the
+  // combobox on both the primary and fallback-add inputs.
+  const modelsListId = `lane-models-${initial.name}`;
 
   // Validation. `balanced` must keep a primary (docs/04 红线); other lanes also
   // need a non-empty primary to be coherent. The hint text differs so ops sees
@@ -101,8 +116,21 @@
 
   <label class="flex flex-col gap-1 text-sm">
     <span class="font-medium text-slate-700">{$t('Primary')}</span>
-    <input name="primary" class="rounded border border-slate-300 px-2 py-1" bind:value={primary} />
+    <input
+      name="primary"
+      class="rounded border border-slate-300 px-2 py-1"
+      list={modelsListId}
+      bind:value={primary}
+    />
   </label>
+
+  <!-- Shared alias catalog for the primary + fallback comboboxes. Empty when no
+       catalog was loaded → the inputs behave as plain text fields. -->
+  <datalist id={modelsListId}>
+    {#each models as alias (alias)}
+      <option value={alias}></option>
+    {/each}
+  </datalist>
 
   <fieldset class="flex flex-col gap-1">
     <legend class="text-sm font-medium text-slate-700">{$t('Fallback (ordered)')}</legend>
@@ -140,6 +168,7 @@
       <input
         class="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
         placeholder={$t('model alias')}
+        list={modelsListId}
         data-testid="fallback-add-input"
         bind:value={newFallback}
       />

@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-05-31 · Lanes admin combobox — `GET /admin/api/models` 别名目录 + datalist 选择器 (docs/11、原则 1/6)
+
+**动机**：`/admin/lanes` 页的「主用」与 fallback「添加」框是裸 text input，运维必须手敲 `provider/model` 别名（如 `deepseek-crs/deepseek-pro`）。一个 typo 会让 lane 指向不存在的 model，**静默打断 fallback 链**。可选别名集合本就已知——`config/providers.yaml → providers[].models[].alias`（即路由 key）。
+
+**实现（combobox，非原生 select；用户确认）**：用 `<input list>` + `<datalist>`——既给下拉建议，又保留手敲逃生口（providers.yaml 里还没有的 model 仍可输入）。选 combobox 而非 `<select>` 的关键收益：① 目录为空/拉取失败时退化为纯文本输入；② 元素仍是 `<input>`，**既有 LaneEditor/lanes 测试零改动通过**。
+
+- **后端**：新增只读端点 `GET /admin/api/models`（`apps/gateway/src/routes/admin/models.ts`），返回注入的 `modelAliases: string[]`（`AdminApiDeps` 新字段）。纯 HTTP 胶水（原则1），不碰 config/DB——别名在 `server.ts` wire 时一次性算出：`[...new Set(config.providers.flatMap(p => p.models.map(m => m.alias)))].sort()`。继承 `/admin/api/*` 的 basicAuth，对 API 客户端不可见（原则6 供应链细节）。
+- **前端**：`$lib/api/models.ts` 的 `listModels()`——**永不抛**，任何失败 resolve `[]`（UI 便利而非安全边界，目录缺失不能拖垮编辑器）。`lanes/+page.ts` 用 `Promise.all` 并行加载 lanes+models；`LaneEditor.svelte` 加 `models: string[] = []` prop（默认空，旧调用/测试仍兼容）+ 每卡一个 `<datalist id="lane-models-${name}">`，primary 与 fallback-add 两个 input 都 `list=` 之。
+- **测试**：admin route 契约（返回排序去重别名 + 401 鉴权）；models client（[]-on-error/网络错/非字符串过滤）；LaneEditor（datalist 选项 = models prop、两 input 带匹配 `list`、空 models 仍可纯文本输入）；lanes page（目录 thread 进每卡）。全绿 992/992。
+- **坑/边界**：① datalist id 按 lane name 区分（每卡独立编辑器）；② lane 现存的「未在目录中的」别名不会丢——combobox 仍显示并可保存（保存语义/PUT body 完全不变）；③ 别名在进程生命周期内不可变（config 不热改 providers），故 wire 时算一次即可。
+- **无关噪声**：编辑器 LSP 对 `packages/core/src/store/postgres/rate-limit.ts:25` 报 drizzle 类型不匹配——是 pglite 与 better-sqlite3 各装一份 `drizzle-orm` 导致 LSP 解析到错误副本的**假阳性**；`tsc` 实测 0 错，未改动。
+
+---
+
 ## 2026-05-31 · port-eval-v2-routing Phase 2 — `security` task_type + complexity-conditioned steering + long_context 锚点 (docs/03、docs/04，原则 2/4/6)
 
 **承接** Phase 0（golden + cross-ref 测试）/ Phase 1（complexity-conditioned policies + matrix）。本阶段把 llm-router eval-v2 §5.1 `task_type × complexity → lane` 决策表里**仅剩的增量**移植进 Helm。绝大部分价值（complexity→lane、task_type→同名 lane）Phase 1 已落地，故 Phase 2 只做三件小事：

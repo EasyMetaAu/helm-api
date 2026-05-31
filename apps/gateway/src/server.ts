@@ -400,10 +400,17 @@ export async function buildServer(
       },
     });
     app.use("/admin/api/*", basicAuth(adminAuth));
+    // Routable alias catalog for the Lanes admin combobox: every
+    // providers[].models[].alias, deduped + sorted. Computed once at wire time
+    // (config is immutable for the process lifetime).
+    const modelAliases = [
+      ...new Set(config.providers.flatMap((p) => p.models.map((m) => m.alias))),
+    ].sort();
     registerAdminApi(app, {
       rules: ruleStore,
       keyStore,
       telemetry,
+      modelAliases,
       genKey: () => {
         const k = generateKey();
         return { plaintext: k.plaintext, hash: k.hash, prefix: k.prefix };

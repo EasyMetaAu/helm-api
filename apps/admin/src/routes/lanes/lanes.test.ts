@@ -21,8 +21,8 @@ function lane(name: string, overrides: Partial<Lane> = {}): Lane {
   };
 }
 
-function renderPage(lanes: Lane[]) {
-  return render(LanesPage, { data: { lanes } });
+function renderPage(lanes: Lane[], models: string[] = []) {
+  return render(LanesPage, { data: { lanes, models } });
 }
 
 describe('lanes page', () => {
@@ -38,6 +38,17 @@ describe('lanes page', () => {
     expect(screen.getByText('economy')).toBeInTheDocument();
     expect(screen.getByText('balanced')).toBeInTheDocument();
     expect(screen.getByText('premium')).toBeInTheDocument();
+  });
+
+  it('threads the model catalog into each lane card as combobox suggestions', () => {
+    const models = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro'];
+    const { container } = renderPage([lane('economy'), lane('balanced')], models);
+    // Every card gets a populated <datalist> sourced from data.models.
+    const lists = Array.from(container.querySelectorAll('datalist'));
+    expect(lists).toHaveLength(2);
+    for (const dl of lists) {
+      expect(Array.from(dl.querySelectorAll('option')).map((o) => o.value)).toEqual(models);
+    }
   });
 
   it('shows fallback in declared order (premium before economy)', () => {

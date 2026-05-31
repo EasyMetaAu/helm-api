@@ -4,6 +4,7 @@ import { registerClassifierRoutes } from "./classifier.js";
 import type { AdminApiDeps } from "./deps.js";
 import { registerKeysRoutes } from "./keys.js";
 import { registerLanesRoutes } from "./lanes.js";
+import { registerModelsRoutes } from "./models.js";
 import { registerPoliciesRoutes } from "./policies.js";
 import { registerRequestsRoutes } from "./requests.js";
 
@@ -17,6 +18,7 @@ import { registerRequestsRoutes } from "./requests.js";
 
 export function registerAdminApi(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   registerLanesRoutes(app, deps);
+  registerModelsRoutes(app, deps);
   registerPoliciesRoutes(app, deps);
   registerClassifierRoutes(app, deps);
   registerKeysRoutes(app, deps);

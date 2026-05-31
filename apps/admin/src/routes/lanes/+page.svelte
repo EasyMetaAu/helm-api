@@ -5,7 +5,10 @@
   import { t } from '$lib/i18n';
 
   // Data comes from `+page.ts`'s load (mocked via the `data` prop in tests).
-  let { data }: { data: { lanes: Lane[] } } = $props();
+  // `models` is the routable-alias catalog the editor offers as combobox
+  // suggestions; it defaults to [] so older callers/tests without it still work.
+  let { data }: { data: { lanes: Lane[]; models?: string[] } } = $props();
+  const models = $derived(data.models ?? []);
 
   // Seed the working list from the loaded data once; thereafter the page owns it.
   let lanes = $state<Lane[]>(untrack(() => data.lanes));
@@ -50,7 +53,7 @@
 
   <div class="flex flex-col gap-4">
     {#each lanes as lane (lane.name)}
-      <LaneEditor {lane} onsave={handleSave} />
+      <LaneEditor {lane} {models} onsave={handleSave} />
     {/each}
   </div>
 </section>
