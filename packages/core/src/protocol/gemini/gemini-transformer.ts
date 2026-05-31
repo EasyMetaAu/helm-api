@@ -465,7 +465,6 @@ interface StreamToolSlot {
 async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIterable<IRChunk> {
   let started = false;
   let emittedText = "";
-  let finishEmitted = false;
   let lastModel: string | undefined;
   let pendingFinish: string | null = null;
   let lastUsage: IRChunk["usage"];
@@ -507,12 +506,19 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
     const finish = mapFinishReasonToIR(candidate?.finishReason);
     if (finish !== null) pendingFinish = finish;
     if (event.usageMetadata !== undefined) {
+      const um = event.usageMetadata;
+      // promptTokenCount is the FULL prompt incl. cached; subtract cached so the IR
+      // prompt is the non-cached input and never double-billed (matches the non-stream
+      // transformResponseIn path). cached is re-exposed when present.
       lastUsage = {
-        ...(event.usageMetadata.promptTokenCount !== undefined
-          ? { prompt_tokens: event.usageMetadata.promptTokenCount }
+        ...(um.promptTokenCount !== undefined
+          ? { prompt_tokens: Math.max(0, um.promptTokenCount - (um.cachedContentTokenCount ?? 0)) }
           : {}),
-        ...(event.usageMetadata.candidatesTokenCount !== undefined
-          ? { completion_tokens: event.usageMetadata.candidatesTokenCount }
+        ...(um.candidatesTokenCount !== undefined
+          ? { completion_tokens: um.candidatesTokenCount }
+          : {}),
+        ...(um.cachedContentTokenCount !== undefined
+          ? { cached_tokens: um.cachedContentTokenCount }
           : {}),
       };
     }
@@ -555,14 +561,13 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
     };
   }
 
-  if (!finishEmitted) {
-    finishEmitted = true;
-    yield {
-      ...(lastModel !== undefined ? { model: lastModel } : {}),
-      choices: [{ index: 0, delta: {}, finish_reason: pendingFinish ?? "stop" }],
-      ...(lastUsage !== undefined ? { usage: lastUsage } : {}),
-    };
-  }
+  // Terminal finish chunk, emitted exactly once after the tool flush (idempotent
+  // close, docs/05 pit #4). No guard flag is needed — this runs once post-loop.
+  yield {
+    ...(lastModel !== undefined ? { model: lastModel } : {}),
+    choices: [{ index: 0, delta: {}, finish_reason: pendingFinish ?? "stop" }],
+    ...(lastUsage !== undefined ? { usage: lastUsage } : {}),
+  };
 }
 
 // —— Streaming outbound: IR chunks -> Gemini snapshot events. ——————————————————————
@@ -570,14 +575,43 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
 // chunk (Gemini clients expect full-snapshot events). The final chunk's
 // finish_reason is mapped onto the candidate.
 
+interface OutToolSlot {
+  index: number;
+  name: string;
+  argBuffer: string; // accumulated argument fragments across chunks
+}
+
 async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<GeminiSSEEvent> {
   let text = "";
+  // Tool-call fragments arrive split across chunks (id/name early, arguments later);
+  // buffer per IR tool index — mirroring the inbound side — and re-serialize the
+  // accumulated args into functionCall parts on every cumulative snapshot.
+  const toolIndexToSlot = new Map<number, OutToolSlot>();
+
   for await (const chunk of src) {
     const choice = chunk.choices?.[0];
     const content = choice?.delta?.content;
     if (typeof content === "string") text += content;
 
+    for (const tc of choice?.delta?.tool_calls ?? []) {
+      let slot = toolIndexToSlot.get(tc.index);
+      if (slot === undefined) {
+        slot = { index: tc.index, name: tc.function?.name ?? "", argBuffer: "" };
+        toolIndexToSlot.set(tc.index, slot);
+      } else if (tc.function?.name !== undefined && tc.function.name !== "") {
+        slot.name = tc.function.name; // backfill a late-arriving name
+      }
+      if (tc.function?.arguments !== undefined) slot.argBuffer += tc.function.arguments;
+    }
+
     const parts: GeminiPart[] = text !== "" ? [{ text }] : [];
+    // Emit functionCall parts in allocation order; tolerate partial JSON via parseArgs
+    // so a mid-stream snapshot never throws (complete args land on the finish chunk).
+    for (const slot of [...toolIndexToSlot.values()].sort((a, b) => a.index - b.index)) {
+      if (slot.name === "") continue;
+      parts.push({ functionCall: { name: slot.name, args: parseArgs(slot.argBuffer) } });
+    }
+
     const candidate: GeminiCandidate = {
       content: { role: "model", parts },
       ...(choice?.finish_reason != null

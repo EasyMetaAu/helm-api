@@ -168,6 +168,35 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // Relax telemetry.cost_usd from INTEGER -> REAL so fractional USD costs are
+    // not truncated, mirroring the pg adapter's DOUBLE PRECISION (cost_usd
+    // dialect divergence). SQLite can't ALTER a column's declared type, so we
+    // rebuild the table: copy rows into a REAL-typed clone, swap names, restore
+    // the index. v1 ships untouched — this is a NEW forward step so the
+    // _migrations ledger stays honest.
+    version: 6,
+    sql: `
+      CREATE TABLE telemetry_new (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        api_key_id TEXT NOT NULL,
+        decision_json TEXT NOT NULL,
+        final_status TEXT,
+        cost_usd REAL,
+        created_at INTEGER NOT NULL
+      );
+
+      INSERT INTO telemetry_new (id, request_id, api_key_id, decision_json, final_status, cost_usd, created_at)
+        SELECT id, request_id, api_key_id, decision_json, final_status, cost_usd, created_at FROM telemetry;
+
+      DROP TABLE telemetry;
+
+      ALTER TABLE telemetry_new RENAME TO telemetry;
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_created_at ON telemetry (created_at DESC);
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

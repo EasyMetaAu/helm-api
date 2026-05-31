@@ -47,6 +47,27 @@ export type RouteFn = (
   signal: AbortSignal,
 ) => Promise<ExecutionResult>;
 
+// Protocol-NEUTRAL structured failure raised across the pipeline seam (collect /
+// streamIR / run). The routing core returns an error WITHOUT throwing (final.
+// status:"error", body/stream:null) — if the pipeline blindly projected that it
+// would synthesize an empty assistant message (non-stream) or an empty event
+// iterator (stream), i.e. a silent 200. Instead it throws this so each protocol
+// route maps it to the correct envelope: the Anthropic route → transformErrorOut,
+// the OpenAI/Responses routes → HelmHttpError via onError. It carries the same
+// {error_class, message, trace_id} the error transformers consume. NOT a 5xx by
+// itself — the class decides the status (all_providers_failed → 502,
+// invalid_request → 400).
+export class PipelineError extends Error {
+  readonly error_class: string;
+  readonly trace_id: string;
+  constructor(error_class: string, message: string, trace_id: string) {
+    super(message);
+    this.name = "PipelineError";
+    this.error_class = error_class;
+    this.trace_id = trace_id;
+  }
+}
+
 // —— IR request → normalized InternalRequest (Protocol Adapter, anthropic_messages).
 // Mirrors chat.ts's toInternalRequest but sources the loose normalized fields
 // from the Anthropic-derived IR. The IR messages are already OpenAI-shaped, so
@@ -57,10 +78,9 @@ function toInternalRequest(
   traceId: string,
   protocol: Protocol,
 ): InternalRequest {
-  const messages =
-    Array.isArray(ir.messages) && ir.messages.length > 0
-      ? (ir.messages as InternalRequest["messages"])
-      : [{ role: "user", content: "" }];
+  // `run` already rejected an empty/non-array messages with invalid_request, so
+  // this is a non-empty array here (no placeholder synthesis — see PipelineError).
+  const messages = ir.messages as InternalRequest["messages"];
   const model = typeof ir.model === "string" && ir.model.length > 0 ? ir.model : "auto";
   const accountId = typeof identity.accountId === "string" ? identity.accountId : "";
   const keyId = typeof identity.keyId === "string" ? identity.keyId : "";
@@ -194,22 +214,59 @@ export function createMessagesPipeline(
     async run(ir, identity, signal) {
       const meta = ir.metadata;
       const traceId = meta && typeof meta.trace_id === "string" ? meta.trace_id : "anthropic-req";
+      // Empty/missing messages is a CLIENT error → invalid_request (mirrors the
+      // OpenAI chat schema's messages.min(1)). Throw BEFORE routing so an empty
+      // request is never billed or sent upstream as a synthesized placeholder
+      // (principle 2 fail-closed); the route maps it to a 400 in the right
+      // protocol envelope. Raised here (not in toInternalRequest) so it carries
+      // the request trace_id.
+      if (!Array.isArray(ir.messages) || ir.messages.length === 0) {
+        throw new PipelineError("invalid_request", "messages must be a non-empty array", traceId);
+      }
       const internal = toInternalRequest(ir, identity, traceId, protocol);
-      const caps = identity.caps as { allowCustomModel?: unknown } | undefined;
+      const caps = identity.caps as
+        | { allowCustomModel?: unknown; maxLane?: unknown; allowedLanes?: unknown }
+        | undefined;
       const allowCustomModel = caps?.allowCustomModel === true;
       // Display prefix only (never the plaintext key, principle 7) for the Debug
       // UI key column; null when this identity carries none.
       const keyPrefix = typeof identity.keyPrefix === "string" ? identity.keyPrefix : null;
+      // Per-key lane caps from the auth record (docs/04): the OUTER, non-negotiable
+      // bound the core applies LAST (after policy caps). Thread it straight from
+      // identity.caps so a key confined to e.g. maxLane:"economy" is honored on the
+      // Anthropic/Responses surfaces too (not just /v1/chat). Each axis null =
+      // unconstrained; an identity with no caps yields {null,null} (no-op).
+      const keyCaps = {
+        maxLane: typeof caps?.maxLane === "string" ? caps.maxLane : null,
+        allowedLanes: Array.isArray(caps?.allowedLanes) ? (caps.allowedLanes as string[]) : null,
+      };
 
-      const result = await route(internal, { allowCustomModel, keyPrefix }, signal);
+      const result = await route(internal, { allowCustomModel, keyPrefix, keyCaps }, signal);
+
+      // Routing returned a structured failure WITHOUT throwing (final.status:
+      // "error"). Capture it so the failure surfaces through whichever accessor
+      // the route consumes — never as an empty 200 (principle 3: only "all
+      // providers failed" returns an error, and it must actually return one).
+      const failure =
+        result.final.status === "error"
+          ? new PipelineError(
+              result.error?.error_class ?? "all_providers_failed",
+              result.error?.message ?? "all providers failed",
+              traceId,
+            )
+          : null;
 
       return {
         async collect(): Promise<unknown> {
+          if (failure !== null) throw failure;
           // The route surfaces the OpenAI body; project it into the IR the
           // outbound Anthropic transformer expects.
           return openAIBodyToIR(result.body);
         },
         async *streamIR(): AsyncIterable<{ type: string; [k: string]: unknown }> {
+          // Surface a routing failure BEFORE any event is emitted, so the route
+          // can write a terminal error frame instead of an empty (silent) stream.
+          if (failure !== null) throw failure;
           if (result.stream === null) return;
           const chunks = parseOpenAISSE(result.stream);
           for await (const ev of convertOpenAIStreamToAnthropic(chunks as AsyncIterable<never>)) {

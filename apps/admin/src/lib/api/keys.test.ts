@@ -53,9 +53,16 @@ describe('keys api client', () => {
 
   it('createKey POSTs caps to /admin/api/keys and returns the one-time plaintext', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response(JSON.stringify({ key_id: 'key_1', plaintext: 'helm_live_SECRET_ONCE' }), {
-        status: 201,
-      }),
+      new Response(
+        JSON.stringify({
+          key_id: 'key_1',
+          plaintext: 'helm_live_SECRET_ONCE',
+          prefix: 'helm_live_SECR',
+        }),
+        {
+          status: 201,
+        },
+      ),
     );
 
     const result = await createKey({
@@ -73,6 +80,9 @@ describe('keys api client', () => {
     expect(body.allow_custom_model).toBe(false);
     expect(result.key_id).toBe('key_1');
     expect(result.plaintext).toBe('helm_live_SECRET_ONCE');
+    // Server-minted non-sensitive prefix is carried so the UI never slices the
+    // plaintext to build a redacted display value.
+    expect(result.prefix).toBe('helm_live_SECR');
   });
 
   it('createKey omits empty optional caps so the strict server schema accepts it', async () => {

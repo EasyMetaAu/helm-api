@@ -1,6 +1,8 @@
 # 08 · 记忆中间件（MVP 之后）
 
 > 状态：**不在 MVP 内**。本章描述 MVP 之后的可选中间件设计；MVP 不实现记忆的读写与注入。
+>
+> **实现状态（2026-05-31）**：core 侧逻辑已实现并单测覆盖（`packages/core/src/memory/` 的 `observeInbound`/`observeOutbound`/`assembleInjectedContext`/`resolveMemoryMode`，并从 `@helm/core` 导出），但**尚未接入网关请求路径**——`chat.ts` / `messages-pipeline.ts` 仍把 `memory_mode` 硬编码为 `"off"`、scope id 全为 null，故 observe/inject 在运行时**不可达（dead at runtime）**。对比之下 signals 子系统已接线。**接线工作已延后**为独立任务：解析 `x-thread-id`/`x-resource-id`/`x-project-id`/`x-memory-mode`（经 `resolveMemoryMode`）入 `metadata`，在路由前后调用 observe、在分类前调用 inject，并补路由级测试。见 `implementation-notes.md` 的「全模块审计 + 41 项修复」条目与本仓 TODO。
 
 ## 定位
 

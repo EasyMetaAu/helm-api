@@ -52,6 +52,12 @@ const CONFIG_FILES: ReadonlyArray<{
 
 type Mutable = Record<string, unknown>;
 
+// A YAML document root must be a mapping for our merge/assign to be meaningful.
+// Arrays and scalars are valid YAML but not valid config-file roots here.
+function isPlainObject(v: unknown): v is Mutable {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 function setPath(root: Mutable, path: ConfigPath, value: unknown): void {
   let node = root;
   for (let i = 0; i < path.length - 1; i++) {
@@ -96,6 +102,12 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
       throw new ConfigError(`failed to parse YAML: ${path}`, []);
     }
 
+    // A top-level scalar/array would spread/assign confusingly into the tree and
+    // surface as an opaque downstream Zod error. Guard the shape here so the
+    // diagnostic names the file and the actual problem (still fail-closed).
+    if (parsed !== undefined && parsed !== null && !isPlainObject(parsed)) {
+      throw new ConfigError(`${path}: expected a mapping at the top level`, []);
+    }
     const obj = (parsed ?? {}) as Mutable;
     if (key === null) {
       // providers.yaml: merge its top-level keys (e.g. `providers`) into the tree

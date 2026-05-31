@@ -26,7 +26,7 @@ describe("checked-in classifier.yaml sample", () => {
     const cfg = loadConfig({ configDir, env: {} });
     expect(cfg.classifier.eval.enabled).toBe(false);
     expect(cfg.classifier.eval.max_tokens).toBe(256);
-    expect(cfg.classifier.eval.timeout_ms).toBe(300);
+    expect(cfg.classifier.eval.timeout_ms).toBe(250);
     expect(cfg.classifier.eval.on_failure).toBe("balanced");
     expect(cfg.classifier.eval.cache.ttl_sec).toBe(300);
   });

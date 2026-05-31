@@ -171,6 +171,32 @@ describe("basicAuth middleware", () => {
     expect(downstream).not.toHaveBeenCalled();
   });
 
+  it("rejects credentials that differ in length from the configured ones", async () => {
+    const { app, downstream } = buildApp({ enabled: true, username: "admin", password: SECRET });
+    // attacker password is both shorter and longer than the real one
+    for (const attempt of ["s", `${SECRET}-and-then-some-extra`]) {
+      const res = await app.request("/admin", {
+        headers: { Authorization: basic("admin", attempt) },
+      });
+      expect(res.status).toBe(401);
+    }
+    expect(downstream).not.toHaveBeenCalled();
+  });
+
+  it("accepts a correct password whose length differs from the username", async () => {
+    // guards against a fixed-length-digest comparison accidentally truncating
+    const { app, downstream } = buildApp({
+      enabled: true,
+      username: "u",
+      password: "a-much-longer-password-than-the-username",
+    });
+    const res = await app.request("/admin", {
+      headers: { Authorization: basic("u", "a-much-longer-password-than-the-username") },
+    });
+    expect(res.status).toBe(200);
+    expect(downstream).toHaveBeenCalledOnce();
+  });
+
   it("never echoes the plaintext password in the 401 response body", async () => {
     const { app } = buildApp({ enabled: true, username: "admin", password: SECRET });
     const res = await app.request("/admin", {

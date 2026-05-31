@@ -26,9 +26,7 @@ describe('models api client', () => {
   });
 
   it('returns [] (no throw) on a non-2xx response', async () => {
-    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response('nope', { status: 500 }),
-    );
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(new Response('nope', { status: 500 }));
     await expect(listModels()).resolves.toEqual([]);
   });
 

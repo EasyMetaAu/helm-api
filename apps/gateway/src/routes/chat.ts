@@ -54,7 +54,7 @@ interface ChatIdentity {
   accountId: string;
   orgId: string | null;
   userId: string | null;
-  caps: { allowCustomModel: boolean };
+  caps: { allowCustomModel: boolean; maxLane?: string | null; allowedLanes?: string[] | null };
 }
 
 // Map the OpenAI chat request body to the normalized InternalRequest (Protocol
@@ -206,6 +206,14 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         // Thread the resolved key's DISPLAY PREFIX into the decision record for the
         // Debug UI key column. Prefix only — never the plaintext key (principle 7).
         keyPrefix: identity.keyPrefix ?? null,
+        // Per-key lane caps (docs/04): the OUTER, non-negotiable bound the core
+        // applies LAST (after policy caps), so a key confined to e.g. maxLane
+        // 'economy' is honored even over a policy use_lane pin. Each axis null =
+        // unconstrained on that axis.
+        keyCaps: {
+          maxLane: identity.caps?.maxLane ?? null,
+          allowedLanes: identity.caps?.allowedLanes ?? null,
+        },
       },
       c.req.raw.signal,
       classifyOverrides,

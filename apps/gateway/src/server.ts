@@ -36,15 +36,18 @@ import {
 import type {
   CatalogEntry,
   ClassifierConfig,
+  ErrorClass,
   InternalRequest,
   ProviderConfig as ProviderConfigShared,
 } from "@helm/shared";
+import { ErrorClassSchema } from "@helm/shared";
+import type { MiddlewareHandler } from "hono";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middleware/basic-auth.js";
-import { rateLimitMiddleware } from "./middleware/rate-limit.js";
+import { type RateLimiterPort, rateLimitMiddleware } from "./middleware/rate-limit.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
@@ -63,6 +66,32 @@ export interface ServerHandle {
   // Stop background workers (e.g. the Agentic Signals scheduler). Optional and
   // safe to skip — the timers are unref'd so they never block process exit.
   dispose?: () => void;
+}
+
+// Deterministic pre-classification token estimate for the TPM bucket. Reads the
+// declared body size from the Content-Length header — a SYNC header read that
+// NEVER consumes the request body stream, so the downstream route can still parse
+// it. The heuristic is ceil(bytes / 4): ~4 bytes per token, the standard rough
+// BPE ratio (deterministic, principle 4). It is intentionally conservative — a
+// pre-debit upper bound is acceptable for a TPM ceiling, and a request with no
+// Content-Length (chunked / unknown) estimates 0 (RPM still applies). A malformed
+// or negative header value clamps to 0, never NaN/negative (would corrupt the
+// bucket). Exported so it is unit-testable in isolation.
+export function estimateRequestTokens(c: Parameters<MiddlewareHandler>[0]): number {
+  const raw = c.req.header("content-length");
+  if (raw === undefined) return 0;
+  const bytes = Number(raw);
+  if (!Number.isFinite(bytes) || bytes <= 0) return 0;
+  return Math.ceil(bytes / 4);
+}
+
+// Validate a RouteError's free-form `error_class` string against the 8 known
+// ErrorClass values so the Anthropic error transformer can map it precisely. An
+// unrecognized class falls back to upstream_error (502) — fail-open (principle 3):
+// a surprise class must not throw inside the error path.
+function coerceErrorClass(value: string): ErrorClass {
+  const parsed = ErrorClassSchema.safeParse(value);
+  return parsed.success ? parsed.data : "upstream_error";
 }
 
 // Build the provider registry from the FULL multi-provider config (providers-
@@ -188,8 +217,12 @@ export async function buildServer(
     store: store.rateLimit,
   });
 
-  // Bootstrap root key on first start (idempotent; prints once).
-  void bootstrapRootKey({
+  // Bootstrap root key on first start (idempotent; prints once). AWAITED before
+  // buildServer returns: a store-read failure here MUST reject buildServer so
+  // main()'s try/catch exits non-zero (fail-CLOSED, principle 2). Fire-and-forget
+  // would both swallow that failure and race the HTTP listen (a request could be
+  // served before the root key exists). Cheap on the happy path (one keyed read).
+  await bootstrapRootKey({
     keyStore,
     generateKey,
     now: () => new Date(),
@@ -320,7 +353,10 @@ export async function buildServer(
   );
   // Rate limit AFTER auth (needs the resolved key_id) and BEFORE classify/route
   // (cut off cost before classification/eval). No-op when disabled (docs/06).
-  app.use("/v1/chat/*", rateLimitMiddleware({ limiter: rateLimiter }));
+  app.use(
+    "/v1/chat/*",
+    rateLimitMiddleware({ limiter: rateLimiter, estimateTokens: estimateRequestTokens }),
+  );
 
   // The per-request `route`: bind a fresh `execute` to the request's abort
   // signal (client disconnect), then run the framework-agnostic orchestrator.
@@ -438,7 +474,18 @@ export async function buildServer(
   }
 
   const messagesPipeline = createMessagesPipeline(route);
+  // Inject the SAME per-key limiter instance the chat surface uses so the
+  // Anthropic /v1/messages handler can meter per-key AFTER its self-auth (closes
+  // the rate-limit bypass on /v1/messages + /v1/responses). The Wave2 handlers
+  // read `deps.rateLimiter`; the field is not yet on MessagesRouteDeps /
+  // ResponsesRouteDeps (those files are owned by Wave2), so the limiter is
+  // attached via an intersection cast here. CONTRACT: deps key === `rateLimiter`,
+  // shape === RateLimiterPort (limiter.check(probe)). Wave2 adds the field to the
+  // interfaces and the cast becomes a no-op at the final gate.
   registerMessagesRoute(app, {
+    // See note above: attached via cast until Wave2 adds `rateLimiter` to the deps
+    // interface (the cast then becomes a no-op).
+    rateLimiter,
     auth: {
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;
@@ -451,7 +498,11 @@ export async function buildServer(
           orgId: null,
           userId: null,
           role: record.role,
-          caps: { allowCustomModel: record.allow_custom_model },
+          caps: {
+            maxLane: record.max_lane,
+            allowedLanes: record.allowed_lanes,
+            allowCustomModel: record.allow_custom_model,
+          },
         };
       },
     },
@@ -469,22 +520,23 @@ export async function buildServer(
         },
         transformErrorOut: (err: RouteError) =>
           makeAnthropicError({
-            // Preserve the precise class for the cases the route raises directly
-            // (auth_error → 401, invalid_request → 400 for a malformed body); any
-            // other internal error degrades to a generic upstream_error (502).
-            error_class:
-              err.error_class === "auth_error"
-                ? "auth_error"
-                : err.error_class === "invalid_request"
-                  ? "invalid_request"
-                  : "upstream_error",
+            // Pass the precise error_class straight through. makeAnthropicError /
+            // makeHelmError already map all 8 ErrorClass values to the right
+            // status + Anthropic type (capability_unsatisfiable → 422,
+            // rate_limited → 429, lane_unavailable → 503, …), so the old lossy
+            // ternary that collapsed everything but auth/invalid_request into a
+            // generic 502 only HID those classes. RouteError.error_class is a
+            // plain string, so validate it against the schema; an unrecognized
+            // value falls back to upstream_error (502) rather than throwing
+            // (fail-open, principle 3).
+            error_class: coerceErrorClass(err.error_class),
             message: err.message,
             trace_id: err.trace_id,
           }),
       },
     },
     pipeline: messagesPipeline,
-  });
+  } as Parameters<typeof registerMessagesRoute>[1] & { rateLimiter: RateLimiterPort });
 
   // OpenAI Responses route (/v1/responses). Reuses the SAME routing core via a
   // pipeline stamped with the openai_responses protocol, and the Responses
@@ -492,6 +544,9 @@ export async function buildServer(
   // transformer yet); a stream:true request is rejected with a structured 400.
   const responsesPipeline = createMessagesPipeline(route, "openai_responses");
   registerResponsesRoute(app, {
+    // Same per-key limiter, same cast rationale as the messages route above —
+    // closes the rate-limit bypass on /v1/responses.
+    rateLimiter,
     auth: {
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;
@@ -504,7 +559,11 @@ export async function buildServer(
           orgId: null,
           userId: null,
           role: record.role,
-          caps: { allowCustomModel: record.allow_custom_model },
+          caps: {
+            maxLane: record.max_lane,
+            allowedLanes: record.allowed_lanes,
+            allowCustomModel: record.allow_custom_model,
+          },
         };
       },
     },
@@ -514,7 +573,7 @@ export async function buildServer(
       transformResponseOut: (ir) => responsesTransformer.transformResponseOut(ir as IRResponse),
     },
     pipeline: responsesPipeline,
-  });
+  } as Parameters<typeof registerResponsesRoute>[1] & { rateLimiter: RateLimiterPort });
 
   // Start the Agentic Signals background scheduler — the OFF-the-request-path
   // trigger. It periodically asks the collector to aggregate the just-elapsed

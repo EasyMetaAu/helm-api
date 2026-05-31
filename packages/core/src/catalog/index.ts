@@ -1,10 +1,24 @@
 import {
+  type Capabilities,
   CapabilitiesOverrideSchema,
   type CatalogEntry,
+  CatalogEntrySchema,
   type GeneratedCatalog,
   PricingOverrideSchema,
 } from "@helm/shared";
 import type { z } from "zod";
+
+// Default capability set for a brand-new modelKey introduced by an override that
+// patches only a subset of fields. Single source of truth so blocks 2 (caps) and
+// 3 (pricing) can't drift apart and leave a required field undefined.
+const EMPTY_CAPABILITIES: Capabilities = {
+  supportsTools: false,
+  supportsJsonMode: false,
+  supportsVision: false,
+  supportsStreaming: false,
+  maxContextTokens: 0,
+  maxOutputTokens: null,
+};
 
 // Runtime catalog assembly: generated (supply-chain input) + manual overrides.
 // Merge rule: manual entries WIN — per-field override of capabilities/pricing,
@@ -70,15 +84,7 @@ export function loadCatalog(deps: LoadCatalogDeps): Map<string, CatalogEntry> {
     } else {
       result.set(modelKey, {
         modelKey,
-        capabilities: {
-          supportsTools: false,
-          supportsJsonMode: false,
-          supportsVision: false,
-          supportsStreaming: false,
-          maxContextTokens: 0,
-          maxOutputTokens: null,
-          ...caps,
-        },
+        capabilities: { ...EMPTY_CAPABILITIES, ...caps },
         pricing: { inputPerMTokUsd: null, outputPerMTokUsd: null },
         source: "override",
       });
@@ -94,14 +100,7 @@ export function loadCatalog(deps: LoadCatalogDeps): Map<string, CatalogEntry> {
     } else {
       result.set(modelKey, {
         modelKey,
-        capabilities: {
-          supportsTools: false,
-          supportsJsonMode: false,
-          supportsVision: false,
-          supportsStreaming: false,
-          maxContextTokens: 0,
-          maxOutputTokens: null,
-        },
+        capabilities: { ...EMPTY_CAPABILITIES },
         pricing: {
           inputPerMTokUsd: null,
           outputPerMTokUsd: null,
@@ -118,6 +117,19 @@ export function loadCatalog(deps: LoadCatalogDeps): Map<string, CatalogEntry> {
   for (const modelKey of overriddenKeys) {
     const entry = result.get(modelKey);
     if (entry) entry.source = "override";
+  }
+
+  // 5. Re-validate the merge OUTPUT fail-closed (principle 2): the per-field
+  //    merge could drift from the schema as fields are added, so the assembled
+  //    catalog must conform before it reaches the routing pipeline.
+  for (const entry of result.values()) {
+    const validated = CatalogEntrySchema.safeParse(entry);
+    if (!validated.success) {
+      throw new CatalogError(
+        `invalid merged catalog entry: ${entry.modelKey}`,
+        validated.error.issues,
+      );
+    }
   }
 
   return result;

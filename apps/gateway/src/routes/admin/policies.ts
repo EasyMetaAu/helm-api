@@ -27,12 +27,29 @@ export function registerPoliciesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     return c.json(parsed.data.policies);
   });
 
-  // DELETE /policies/:id — drop the policy whose explicit id matches.
+  // DELETE /policies/:id — EXPLICIT-ID ONLY: drop the policy whose explicit id
+  // matches. `id` is optional in the schema, so id-less policies are NOT
+  // addressable here (the UI mutates the set via whole-set PUT anyway). When no
+  // policy carries an explicit id we return 422 (not a misleading 404) to make it
+  // clear the operation requires an explicit policy id rather than implying the
+  // target merely doesn't exist.
   app.delete("/admin/api/policies/:id", async (c) => {
     const id = c.req.param("id");
     const cfg = await deps.rules.getPolicies();
     const remaining = cfg.policies.filter((p) => p.id !== id);
     if (remaining.length === cfg.policies.length) {
+      // Distinguish "no policy has any explicit id" (DELETE-by-id is unusable;
+      // 422) from "ids exist but none match" (genuine 404).
+      const anyHasId = cfg.policies.some((p) => p.id !== undefined);
+      if (!anyHasId) {
+        return c.json(
+          {
+            error:
+              "DELETE requires an explicit policy id; no policy carries one — edit the set via PUT /admin/api/policies instead",
+          },
+          422,
+        );
+      }
       return c.json({ error: "policy not found" }, 404);
     }
     await deps.rules.setPolicies({ policies: remaining });

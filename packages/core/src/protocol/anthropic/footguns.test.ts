@@ -138,7 +138,10 @@ describe("footgun #2 — cached tokens are never double-billed as full-price inp
             model: "m",
             choices: [{ index: 0, delta: {}, finish_reason: null }],
             usage: {
-              prompt_tokens: NON_CACHED_INPUT,
+              // RAW upstream usage: prompt_tokens is the FULL prompt (incl cached).
+              // The streaming converter normalizes it to non-cached input (=200),
+              // matching the non-stream mapUsage() path — no double-counting.
+              prompt_tokens: NON_CACHED_INPUT + CACHE_READ,
               completion_tokens: OUTPUT,
               cached_tokens: CACHE_READ,
             },
@@ -175,7 +178,10 @@ describe("footgun #2 — cached tokens are never double-billed as full-price inp
             model: "m",
             choices: [{ index: 0, delta: {}, finish_reason: null }],
             usage: {
-              prompt_tokens: NON_CACHED_INPUT,
+              // RAW upstream usage: prompt_tokens is the FULL prompt (incl cached).
+              // The streaming converter normalizes it to non-cached input (=200),
+              // matching the non-stream mapUsage() path — no double-counting.
+              prompt_tokens: NON_CACHED_INPUT + CACHE_READ,
               completion_tokens: OUTPUT,
               cached_tokens: CACHE_READ,
             },

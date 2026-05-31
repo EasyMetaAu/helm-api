@@ -28,10 +28,23 @@ const GENERATED_CATALOG_PATH = join(
 export interface LoadRuntimeCatalogOptions {
   /** Directory holding capabilities.yaml / pricing.yaml (defaults to ./config). */
   configDir?: string;
-  /** Injected reader (tests). Defaults to fs.readFileSync(utf8). A throw is
-   *  treated as "file absent" for the OPTIONAL override yamls (schema default
-   *  applies); the REQUIRED generated catalog re-throws as a CatalogError. */
+  /** Injected reader (tests). Defaults to fs.readFileSync(utf8). For the OPTIONAL
+   *  override yamls ONLY an ENOENT throw means "file absent" (schema default
+   *  applies); every other error (EACCES/EIO/broken-symlink/wrong-CWD) re-throws
+   *  as a CatalogError, fail-closed (principle 2). The REQUIRED generated catalog
+   *  re-throws on ANY read failure. */
   readFile?: (path: string) => string;
+  /** Optional structured logger; defaults to a no-op so core stays framework-free.
+   *  Emits 'catalog.override_absent' {file} when an override resolves absent so an
+   *  accidental wrong-CWD wipe of the override layer is observable. */
+  log?: (level: "warn" | "info", msg: string, fields?: Record<string, unknown>) => void;
+}
+
+// Narrow a thrown value to its `code` (Node fs errors carry e.g. 'ENOENT').
+function errCode(err: unknown): string | undefined {
+  return typeof err === "object" && err !== null && "code" in err
+    ? String((err as { code: unknown }).code)
+    : undefined;
 }
 
 // Read + validate the generated catalog (fail-closed: a missing/corrupt
@@ -56,15 +69,19 @@ function readGenerated(read: (path: string) => string): unknown {
   return result.data;
 }
 
-// Read an OPTIONAL override yaml: absent (read throws) → undefined so the merge
-// applies the schema default ({}). A present-but-broken yaml STILL fails closed
-// inside loadCatalog's per-field validation (principle 2).
+// Read an OPTIONAL override yaml: an ENOENT read failure → undefined so the merge
+// applies the schema default ({}). EVERY other read error (EACCES/EIO/broken
+// symlink/wrong CWD) re-throws as a CatalogError — swallowing those would
+// silently wipe relay-model capabilities+pricing (they live ONLY in this override
+// layer), a principle-2 fail-closed inversion. A present-but-broken yaml STILL
+// fails closed inside loadCatalog's per-field validation.
 function readOverride(read: (path: string) => string, path: string): unknown {
   let text: string;
   try {
     text = read(path);
-  } catch {
-    return undefined;
+  } catch (err) {
+    if (errCode(err) === "ENOENT") return undefined;
+    throw new CatalogError(`failed to read override: ${path} (${errCode(err) ?? "unknown error"})`);
   }
   try {
     return parseYaml(text);
@@ -78,10 +95,23 @@ export function loadRuntimeCatalog(
 ): Map<string, CatalogEntry> {
   const configDir = opts.configDir ?? "./config";
   const read = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
+  const log = opts.log ?? (() => {});
 
   const generated = readGenerated(read);
-  const capabilitiesOverride = readOverride(read, join(configDir, "capabilities.yaml"));
-  const pricingOverride = readOverride(read, join(configDir, "pricing.yaml"));
+
+  // An override resolving to undefined means the file is genuinely absent
+  // (ENOENT) — log it so an accidental wrong-CWD wipe of the override layer is
+  // observable rather than silently fail-open.
+  const capabilitiesPath = join(configDir, "capabilities.yaml");
+  const pricingPath = join(configDir, "pricing.yaml");
+  const capabilitiesOverride = readOverride(read, capabilitiesPath);
+  if (capabilitiesOverride === undefined) {
+    log("info", "catalog.override_absent", { file: capabilitiesPath });
+  }
+  const pricingOverride = readOverride(read, pricingPath);
+  if (pricingOverride === undefined) {
+    log("info", "catalog.override_absent", { file: pricingPath });
+  }
 
   return loadCatalog({
     // GeneratedCatalogSchema already validated the shape in readGenerated.

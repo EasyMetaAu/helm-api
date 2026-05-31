@@ -227,6 +227,19 @@ describe("admin.api lanes", () => {
     expect(res.status).toBe(200);
     expect((await rules.getLanes()).economy).toBeUndefined();
   });
+
+  it("refuses to DELETE the `balanced` fallback terminal (409) and writes nothing", async () => {
+    // 原则5: `balanced` is the classification-fallback terminal; deleting it would
+    // leave LanesConfigSchema unsatisfiable. The whole-map re-validation must catch
+    // this and leave config untouched (fail-closed).
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const before = await rules.getLanes();
+    const res = await app.request("/admin/api/lanes/balanced", { method: "DELETE" });
+    expect(res.status).toBe(409);
+    expect(await rules.getLanes()).toEqual(before); // nothing written
+    expect((await rules.getLanes()).balanced).toBeDefined();
+  });
 });
 
 describe("admin.api models", () => {
@@ -293,6 +306,21 @@ describe("admin.api policies", () => {
     expect(res.status).toBe(200);
     expect((await rules.getPolicies()).policies).toHaveLength(0);
   });
+
+  it("DELETE returns 422 (not a silent 404) when no policy carries the given id", async () => {
+    // id is optional in the schema; explicit-id DELETE cannot target an id-less
+    // policy. Surface a clear 422 instead of a misleading 404 + no-op filter.
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/policies", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify([{ match: { task_type: "coding" }, use_lane: "premium" }]),
+    });
+    const res = await app.request("/admin/api/policies/p1", { method: "DELETE" });
+    expect(res.status).toBe(422);
+    expect((await rules.getPolicies()).policies).toHaveLength(1); // unchanged
+  });
 });
 
 describe("admin.api classifier", () => {
@@ -358,9 +386,12 @@ describe("admin.api keys", () => {
       body: JSON.stringify({ role: "user", max_lane: "balanced" }),
     });
     expect(created.status).toBe(201);
-    const body = (await created.json()) as { key_id: string; plaintext: string };
+    const body = (await created.json()) as { key_id: string; plaintext: string; prefix: string };
     expect(body.plaintext).toBe("helm_live_PLAINTEXT_SECRET");
     expect(body.key_id).toBe("key_1");
+    // The server-minted non-sensitive prefix is returned so the SPA need not slice
+    // the plaintext (a redaction footgun); it is the same display prefix stored.
+    expect(body.prefix).toBe("helm_live_PLAI");
     // Stored as hash + prefix only — never the plaintext.
     expect(keyStore.rows[0]?.hash).toBe("hash_of_plaintext_full");
     expect(JSON.stringify(keyStore.rows[0])).not.toContain("PLAINTEXT_SECRET");

@@ -5,6 +5,26 @@
 
 ---
 
+## 2026-05-31 · 全模块审计 + 41 项修复（workflow 驱动，全原则）
+
+**背景**：用 workflow 对 10 个模块做对抗式审计（finder → 逐条 verify against real code），得 **42 条确认发现**（22 bug / 5 incomplete / 15 improvement，4 条误报驳回）。随后用第二个 workflow（文件不相交并行波 + 依赖串行）TDD 修复 **41 条**（记忆中间件接线 1 条 incomplete 单列为 Task，本轮不接——属请求路径全新行为）。
+
+**修复要点（按根因聚类）**：
+1. **非 chat 端面拉齐 chat.ts**：`/v1/messages` 结构非法 body → 400 Anthropic 信封（原 502）；all-providers-failed → 结构化错误（原静默空 200，`messages-pipeline.ts` 新增 `PipelineError` 贯穿 collect/streamIR seam）；空 messages → 400（不再塞占位）；Anthropic 流式加 error/abort 守卫；`/v1/messages`+`/v1/responses` 接入限流。
+2. **执行层 :free/状态**：`UpstreamError` 新增 `upstreamStatus`（原硬编码 502）；execute.ts 补 `:free` 429 跳过（不记熔断失败）；abort 判定去掉 `message.includes('aborted')`。**未**统一 runFallback/createExecute（按指示不做大重构），改为给 live path 补直测。
+3. **流式 usage/缓存**：Anthropic 流式归一化 `prompt_tokens -= cached`（消除重复计费）；OpenAIChunkUsageSchema 补 `prompt_tokens_details.cached_tokens` 嵌套读取；Gemini streamIn 补缓存扣减；Gemini streamOut 补 tool_call functionCall 发射。
+4. **上限/配额生效**：`RouteOptions.keyCaps` + 第二道 applyCaps（key 上限为最外层，最后施加）；policy first-match PIN 不变但**累积所有命中策略的 cap**（allowed_lanes 交集、max_lane 取最严）；server.ts 两处 messages/responses 鉴权闭包补 `maxLane/allowedLanes`；TPM 接 `estimateRequestTokens`（Content-Length/4）。
+5. **韧性/安全**：动量 store 写时 per-key 裁剪 + LRU key 上限；PG 限流冷桶先 `INSERT ON CONFLICT DO NOTHING` 再 `FOR UPDATE`（消除双花）；root-key bootstrap 改 `await`（fail-closed）；admin lanes PUT/DELETE 整图 `LanesConfigSchema.safeParse`（不能删 `balanced`）；catalog override 读错误只吞 ENOENT、余者 fail-closed；basicAuth sha256 双哈希定长比较；loader 非 mapping 根 fail-closed。
+6. **eval 超时**：默认 `timeout_ms 250 / outer_timeout_ms 350` + 跨字段 refine（outer>inner，否则 fail-closed）。
+
+**门禁**：typecheck 0 / lint exit 0（15 warning，均 test 文件 noNonNullAssertion，沿用基线容忍）/ **单测 1070 全绿** / admin 78 全绿 / build（admin SPA + core + gateway）全绿。
+
+**坑与取舍**：
+- 跨批次加性类型（`upstreamStatus`/`keyCaps`/`rateLimiter`/catalog `log`/eval 250-350）由各 agent 加在自有文件，vitest 不做 typecheck 故 agent 自测全绿但留下少量 fixture 漂移（footguns 流式 usage 应送 RAW 全量 prompt=NON_CACHED+CACHE_READ;classifier 300/250→250/350 的若干 out-of-lane fixture）——已在终态门禁逐条对齐。
+- **预存 e2e 失败（非本次引入，3 条）**：`routing.spec.ts` 的 `expect(body.model).toBe(<alias>)` 在 `fix-upstream-model-id`（9c64fea，本会话前）解耦 alias/wire-id 后即失效——mock 回声的是网关实发的**裸 wire id**（`gpt-5.4-mini`），`x-helm-final-model` 头才是 alias（该断言仍过）。`routing.spec.ts`/`mock-upstream.ts`/chat.ts 响应模型处理均**未被本次改动**，故确证为预存。待定：要么把 3 条断言改成裸 wire id（对齐现行设计），要么实现 `body.model→alias/lane` 回写（原则6 隐藏供应链）——交用户定夺。
+
+---
+
 ## 2026-05-31 · Admin UX overhaul — Tailwind v4 token 层 + 全页面 design-token 化 + 易用性文案 (docs/11、原则 1)
 
 **动机**：用户反馈管理界面"有点乱、看不太懂"。根因审计（10-agent workflow）查明两条系统性原因：① **无 token 层**——`app.css` 只有三条 `@tailwind` 指令、`tailwind.config` 的 `theme.extend` 为空，每个页面各自硬编码 slate/indigo 色阶、圆角、间距 → 视觉漂移；② **裸网关术语直出**——snake_case 字段（`max_lane`/`needs_json`/`use_lane`）与隐晦枚举（`decided_by: rules/eval/fallback`）当作标签直接渲染，自托管运维（非网关专家）读不懂一行、也不会写规则。

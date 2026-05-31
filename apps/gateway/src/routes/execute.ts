@@ -77,8 +77,24 @@ function approxPromptTokens(req: InternalRequest): number {
 }
 
 function isAbort(err: unknown, signal: AbortSignal): boolean {
+  // Mirror executor/fallback isAbort: rely ONLY on signal.aborted and the raw
+  // AbortError name. A message merely containing "aborted" is NOT an abort (an
+  // upstream error string can say "aborted upstream"); openai.ts rethrows the
+  // raw AbortError on a real client disconnect, so the name check is sufficient.
   if (signal.aborted) return true;
-  return err instanceof Error && (err.name === "AbortError" || err.message.includes("aborted"));
+  return err instanceof Error && err.name === "AbortError";
+}
+
+// :free candidates may be throttled (429) by the upstream's free tier. That is
+// NOT a provider-health signal (principle 5), so it skips to the next candidate
+// WITHOUT recording a breaker failure. Reads the real upstream status (not the
+// client-facing httpStatus 502) added on UpstreamError.upstreamStatus.
+function isFreeAlias(alias: string): boolean {
+  return alias.endsWith(":free");
+}
+
+function upstreamStatusOf(err: unknown): number | null {
+  return err instanceof UpstreamError ? err.upstreamStatus : null;
 }
 
 function errorClassOf(err: unknown): string {
@@ -185,7 +201,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       //    picked this model, so the upstream must be told which one to run.
       try {
         if (req.stream) {
-          const stream = await peekStream(provider, req, signal, providerModel);
+          const stream = await peekStream(provider, req, signal, providerModel, alias, log);
           breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null (not measured).
           attempts.push(okRow(alias, elapsed(), null));
@@ -234,6 +250,23 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             stream: null,
           };
         }
+        // `:free` candidate 429 — ported llm-router semantics (principle 5):
+        // skip to the next candidate, do NOT record a breaker failure (free-tier
+        // throttling is not a provider-health signal). Distinct log field from
+        // execution-fallback: skip_reason 'free_429', error_class 'rate_limited'.
+        if (isFreeAlias(alias) && upstreamStatusOf(err) === 429) {
+          attempts.push({
+            alias,
+            skipped: true,
+            skip_reason: "free_429",
+            status: "error",
+            error_class: "rate_limited",
+            latency_ms: elapsed(),
+            cost_usd: null,
+          });
+          continue;
+        }
+
         // Genuine pre-first-chunk failure: record on the breaker, try next.
         breaker.recordFailure(alias);
         attempts.push({
@@ -289,6 +322,8 @@ async function peekStream(
   req: InternalRequest,
   signal: AbortSignal,
   providerModel: string,
+  alias: string,
+  log?: (level: string, msg: string, fields: Record<string, unknown>) => void,
 ): Promise<AsyncIterable<string>> {
   const iterable = provider.chatCompletionStream(stripInternal(req, providerModel), { signal });
   const iterator = iterable[Symbol.asyncIterator]();
@@ -296,10 +331,19 @@ async function peekStream(
 
   return (async function* relay(): AsyncGenerator<string> {
     if (!first.done && first.value !== undefined) yield first.value;
-    while (true) {
-      const next = await iterator.next();
-      if (next.done) break;
-      if (next.value !== undefined) yield next.value;
+    try {
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) break;
+        if (next.value !== undefined) yield next.value;
+      }
+    } catch (err) {
+      // Truncated stream: the attempt was already recorded ok (success fires on
+      // the first chunk — breaker semantics unchanged). Emit a structured log so
+      // the truncation is observable despite the clean telemetry row. Safe fields
+      // only — alias + error_class, NEVER key/payload/raw error (principle 7).
+      log?.("warn", "stream.truncated", { alias, error_class: errorClassOf(err) });
+      throw err;
     }
   })();
 }

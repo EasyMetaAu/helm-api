@@ -73,6 +73,20 @@ describe("createOpenAIClient (Phase 0 passthrough)", () => {
     }
   });
 
+  it("carries the real upstream status on UpstreamError.upstreamStatus (e.g. 429)", async () => {
+    // httpStatus stays 502 for back-compat (client-facing mapping), but the raw
+    // upstream status must be preserved so the executor can apply :free 429-skip.
+    const fetch = vi
+      .fn()
+      .mockImplementation(async () => jsonResponse({ error: { message: "slow down" } }, 429));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+    await expect(client.chatCompletion({ model: "m" })).rejects.toMatchObject({
+      errorClass: "upstream_error",
+      httpStatus: 502,
+      upstreamStatus: 429,
+    });
+  });
+
   it("maps a timeout to UpstreamError(timeout, 504)", async () => {
     // fetch that rejects with an AbortError when its signal aborts
     const fetch = vi.fn().mockImplementation(

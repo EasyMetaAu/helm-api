@@ -376,6 +376,18 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       const third = await ctx.stores.rateLimit.consume("k1", "rpm", null, 2, 1, 0);
       expect(third.ok).toBe(false);
     });
+
+    it("N parallel consumes on a fresh capacity=1 bucket grant exactly one", async () => {
+      ctx = await make();
+      // Cold bucket (no row yet): concurrent transactions must serialize so the
+      // first sighting cannot be seeded twice and over-spent. capacity=1, cost=1
+      // => exactly one of N parallel consume()s may succeed.
+      const N = 8;
+      const results = await Promise.all(
+        Array.from({ length: N }, () => ctx.stores.rateLimit.consume("hot", "rpm", null, 1, 1, 0)),
+      );
+      expect(results.filter((r) => r.ok)).toHaveLength(1);
+    });
   });
 
   // --- SignalStore --------------------------------------------------------

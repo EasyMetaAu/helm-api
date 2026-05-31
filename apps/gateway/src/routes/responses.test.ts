@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
+import { PipelineError } from "./messages-pipeline.js";
 import { type ResponsesRouteDeps, registerResponsesRoute } from "./responses.js";
 
 // POST /v1/responses contract: auth → translate(out) → route → translate(back),
@@ -13,10 +14,12 @@ function makeDeps(
     authed?: boolean;
     transformRequestOut?: (n: unknown) => { stream?: boolean; metadata?: Record<string, unknown> };
     collect?: () => Promise<unknown>;
+    rateLimiter?: ResponsesRouteDeps["rateLimiter"];
   } = {},
 ): { deps: ResponsesRouteDeps; order: string[] } {
   const order: string[] = [];
   const deps: ResponsesRouteDeps = {
+    rateLimiter: over.rateLimiter,
     auth: {
       resolve: async (cred) => {
         order.push("auth");
@@ -131,6 +134,63 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe("invalid_request");
+    expect(order).not.toContain("route");
+  });
+
+  it("surfaces an all-providers-failed pipeline error as an OpenAI envelope (not an empty 200)", async () => {
+    const { deps } = makeDeps({
+      collect: async () => {
+        throw new PipelineError("all_providers_failed", "all providers failed", "trace-1");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("all_providers_failed");
+  });
+
+  it("maps an invalid_request pipeline error (empty request) to a 400 OpenAI envelope", async () => {
+    const { deps } = makeDeps({
+      collect: async () => {
+        throw new PipelineError("invalid_request", "messages must be a non-empty array", "trace-1");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("invalid_request");
+  });
+
+  it("429s a throttled key on /v1/responses (OpenAI rate_limited envelope), never routes", async () => {
+    const limiter: ResponsesRouteDeps["rateLimiter"] = {
+      check: async () => ({
+        allowed: false,
+        limitedBy: "tpm",
+        limit: 100,
+        remaining: 0,
+        resetSeconds: 12,
+        retryAfterSeconds: 12,
+      }),
+    };
+    const { deps, order } = makeDeps({ rateLimiter: limiter });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("12");
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("rate_limited");
     expect(order).not.toContain("route");
   });
 });

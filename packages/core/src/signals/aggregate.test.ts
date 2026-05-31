@@ -194,6 +194,46 @@ describe("aggregateSignals", () => {
     expect(aggregateSignals([], WS, WE)).toEqual([]);
   });
 
+  it("uses the canonical latency_total_ms / fallback_count when the enriched record carries them", () => {
+    const rec = makeRecord({
+      taskType: "chat",
+      lane: "balanced",
+      finalStatus: "ok",
+      // Two non-skipped attempts → recompute path would say execution fallback,
+      // and would sum the attempt latencies to 30. The enriched canonical fields
+      // disagree on purpose so we can prove the aggregator trusts them.
+      attempts: [
+        { latencyMs: 10, costUsd: null },
+        { latencyMs: 20, costUsd: null },
+      ],
+    });
+    rec.latency_total_ms = 999;
+    rec.fallback_count = 0; // canonical says NO execution fallback
+    const [s] = aggregateSignals([rec], WS, WE);
+    expect(s?.p50LatencyMs).toBe(999); // trusts canonical latency, not Σattempts (30)
+    expect(s?.fallbackRate).toBe(0); // trusts canonical fallback_count, not Σattempts
+  });
+
+  it("falls back to recomputation for legacy records (canonical fields default 0)", () => {
+    // Pre-enrichment record: latency_total_ms/fallback_count left at their 0 default
+    // even though the attempts clearly carry latency and an in-chain swap. The
+    // aggregator must NOT read those zeros as truth — it recomputes from attempts.
+    const rec = makeRecord({
+      taskType: "chat",
+      lane: "balanced",
+      finalStatus: "ok",
+      attempts: [
+        { latencyMs: 10, costUsd: null },
+        { latencyMs: 20, costUsd: null },
+      ],
+    });
+    rec.latency_total_ms = 0;
+    rec.fallback_count = 0;
+    const [s] = aggregateSignals([rec], WS, WE);
+    expect(s?.p50LatencyMs).toBe(30); // recomputed Σattempts
+    expect(s?.fallbackRate).toBe(1); // recomputed in-chain swap
+  });
+
   it("output carries ONLY redacted aggregate dimensions (no key/payload fields)", () => {
     const records = [
       makeRecord({

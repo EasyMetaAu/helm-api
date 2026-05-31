@@ -25,12 +25,23 @@ export class PgRateLimitStore implements RateLimitStore {
     const where = and(eq(rateLimitBuckets.keyId, keyId), eq(rateLimitBuckets.dim, dim));
 
     return this.db.transaction(async (tx): Promise<RateLimitConsumeResult> => {
+      // Seed a FULL bucket FIRST (no-op if the row already exists). A cold
+      // (key_id, dim) has no row, so `SELECT ... FOR UPDATE` would lock NOTHING
+      // and two concurrent txns would both seed + spend a full bucket
+      // (double-spend). Inserting the seed up front guarantees a row exists, so
+      // the subsequent FOR UPDATE always has something to serialize on.
+      await tx
+        .insert(rateLimitBuckets)
+        .values({ keyId, dim, tokens: capacityPerMin, lastRefillMs: nowMs })
+        .onConflictDoNothing({ target: [rateLimitBuckets.keyId, rateLimitBuckets.dim] });
+
       // FOR UPDATE serializes concurrent consumers of the same bucket; the second
       // txn blocks until the first commits, then reads the updated row.
       const rows = await tx.select().from(rateLimitBuckets).where(where).limit(1).for("update");
       const row = rows[0];
 
-      // First sighting seeds a FULL bucket (capacity tokens) at `nowMs`.
+      // Row is guaranteed present (seeded above); fall back defensively just in
+      // case (mirrors the seed: a FULL bucket at `nowMs`).
       const current: BucketState = row
         ? { tokens: row.tokens, lastRefillMs: row.lastRefillMs }
         : { tokens: capacityPerMin, lastRefillMs: nowMs };

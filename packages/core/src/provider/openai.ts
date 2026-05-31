@@ -33,16 +33,23 @@ export interface ProviderClient {
 export class UpstreamError extends Error {
   readonly errorClass: "upstream_error" | "timeout";
   readonly httpStatus: number;
+  // Real upstream HTTP status (e.g. 429), preserved separately from the
+  // client-facing `httpStatus` (which stays 502/504 for back-compat). null when
+  // there is no upstream response status (timeout/network error). The executor
+  // reads this for the `:free` 429-skip rule (docs/04, principle 5).
+  readonly upstreamStatus: number | null;
   readonly providerRaw: unknown | null;
   constructor(
     errorClass: "upstream_error" | "timeout",
     message: string,
     providerRaw: unknown | null = null,
+    upstreamStatus: number | null = null,
   ) {
     super(message);
     this.name = "UpstreamError";
     this.errorClass = errorClass;
     this.httpStatus = errorClass === "timeout" ? 504 : 502;
+    this.upstreamStatus = upstreamStatus;
     this.providerRaw = providerRaw;
   }
 }
@@ -122,7 +129,12 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
           .json()
           .catch(() => null)
           .then(scrub);
-        throw new UpstreamError("upstream_error", `upstream returned ${res.status}`, providerRaw);
+        throw new UpstreamError(
+          "upstream_error",
+          `upstream returned ${res.status}`,
+          providerRaw,
+          res.status,
+        );
       }
       return (await res.json()) as ChatCompletionResponse;
     },
@@ -134,7 +146,12 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
           .json()
           .catch(() => null)
           .then(scrub);
-        throw new UpstreamError("upstream_error", `upstream returned ${res.status}`, providerRaw);
+        throw new UpstreamError(
+          "upstream_error",
+          `upstream returned ${res.status}`,
+          providerRaw,
+          res.status,
+        );
       }
       const body = res.body;
       if (!body) return;
