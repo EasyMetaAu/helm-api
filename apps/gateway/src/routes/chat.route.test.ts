@@ -321,6 +321,29 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     expect(harness.execute).not.toHaveBeenCalled();
   });
 
+  it("threads per-key maxLane caps: an economy key routes a would-be-balanced request down to economy", async () => {
+    // No policies + default classification resolve to `balanced`; the key's
+    // max_lane:'economy' cap (the OUTER bound) must clamp the selected lane to
+    // economy end-to-end, so the executor's chain starts with economy's primary.
+    const { deps: d, harness } = deps();
+    harness.execute.mockResolvedValue({
+      ...nonStreamOutcome({ ok: true }),
+      final: { status: "ok", alias: "cheap_model", providerModel: "cheap" },
+    });
+    const app = buildApp(d, { record: { max_lane: "economy" } });
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    const plan = harness.execute.mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+    expect(plan.candidate_chain[0]).toBe("cheap_model");
+  });
+
   it("a stream client disconnect does not break the response (no provider fault)", async () => {
     // The execute() layer already records abort; the route must not 5xx mid-stream.
     const { deps: d, harness } = deps();

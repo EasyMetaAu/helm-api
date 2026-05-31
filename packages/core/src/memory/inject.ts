@@ -68,10 +68,17 @@ function currentMessage(current: RawMessage): AssembledMessage {
 // Enqueue the write-back observer job. Best-effort: a queue failure must NOT fail
 // the request (fail-open) — it degrades the writeback status to "failed" and is
 // logged, while the assembled context is still returned to the caller.
+//
+// When there is no writeback TARGET (no threadId — observations/messages are
+// thread-anchored, so nothing can be written back), we do NOT enqueue and report
+// "skipped" — distinct from a "failed" enqueue.
 async function enqueueWriteback(
   input: InjectInput,
   deps: InjectDeps,
-): Promise<{ observerJobId: string | null; status: "queued" | "failed" }> {
+): Promise<{ observerJobId: string | null; status: "queued" | "skipped" | "failed" }> {
+  if (input.scope.threadId === undefined) {
+    return { observerJobId: null, status: "skipped" };
+  }
   try {
     const observerJobId = await deps.enqueueObserverJob(input.scope);
     return { observerJobId, status: "queued" };
@@ -103,14 +110,12 @@ async function loadMemory(
     scope.resourceId !== undefined
       ? await store.getReflection({ resourceId: scope.resourceId })
       : null;
+  // Observations are THREAD-ANCHORED by schema: both store adapters return []
+  // unless threadId is set and ignore project/resource. Gate on threadId only and
+  // pass threadId alone — aligned with the store contract (no cross-thread
+  // retrieval; there is no schema support for it).
   const observations =
-    scope.threadId !== undefined || scope.projectId !== undefined || scope.resourceId !== undefined
-      ? await store.listObservations({
-          ...(scope.projectId !== undefined ? { projectId: scope.projectId } : {}),
-          ...(scope.resourceId !== undefined ? { resourceId: scope.resourceId } : {}),
-          ...(scope.threadId !== undefined ? { threadId: scope.threadId } : {}),
-        })
-      : [];
+    scope.threadId !== undefined ? await store.listObservations({ threadId: scope.threadId }) : [];
   const recentMessages =
     scope.threadId !== undefined ? await store.listMessages(scope.threadId) : [];
   return { projectReflection, resourceReflection, observations, recentMessages };
@@ -153,9 +158,10 @@ export async function assembleInjectedContext(
         memory_tokens_injected: 0,
         observer_job_id: writeback.observerJobId,
         // Memory load failed → the whole memory step is a degraded path; mark the
-        // writeback status as failed regardless of whether the enqueue itself went
-        // through (docs/08「合理降级」 + record the failure).
-        memory_writeback_status: "failed",
+        // writeback status as failed (docs/08「合理降级」 + record the failure).
+        // EXCEPT when there was no writeback target at all (no threadId): nothing
+        // could be enqueued, so it stays an honest "skipped", not "failed".
+        memory_writeback_status: writeback.status === "skipped" ? "skipped" : "failed",
       },
     };
   }
@@ -169,21 +175,17 @@ export async function assembleInjectedContext(
     (a, b) => a.observedAt.getTime() - b.observedAt.getTime(),
   );
 
-  const reflectionMessages: AssembledMessage[] = [];
-  if (projectReflection !== null) {
-    reflectionMessages.push({
-      role: "user",
-      content: projectReflection.reflectionText,
-      source: "project_reflection",
-    });
-  }
-  if (resourceReflection !== null) {
-    reflectionMessages.push({
-      role: "user",
-      content: resourceReflection.reflectionText,
-      source: "resource_reflection",
-    });
-  }
+  // Reflections in priority order: project is kept before resource, so under
+  // budget pressure we sacrifice the resource reflection FIRST, then the project
+  // reflection. (Assembly order below still emits project → resource.)
+  const projectReflectionMessage: AssembledMessage | null =
+    projectReflection !== null
+      ? { role: "user", content: projectReflection.reflectionText, source: "project_reflection" }
+      : null;
+  const resourceReflectionMessage: AssembledMessage | null =
+    resourceReflection !== null
+      ? { role: "user", content: resourceReflection.reflectionText, source: "resource_reflection" }
+      : null;
 
   const observationMessages: AssembledMessage[] = sortedObservations.map((o) => ({
     role: "user" as const,
@@ -199,19 +201,54 @@ export async function assembleInjectedContext(
   }));
 
   // ── budget trim ──────────────────────────────────────────────────────────
-  // Hard cap on INJECTED tokens. system + current are excluded from the budget.
-  // Trim strategy: drop the OLDEST observations first; reflections and recent raw
-  // are preserved (recent raw must survive — docs/08). We keep a running total of
-  // the injected tokens we actually emit.
+  // HARD cap on INJECTED tokens (system + current are excluded from the budget).
+  // Priority — recent raw is spec-mandated and ALWAYS survives (docs/08「必须保留
+  // 近期原始消息」). Everything else yields to the budget in this order:
+  //   1. resource reflection (sacrificed first under pressure),
+  //   2. project reflection,
+  //   3. observations (oldest-first) get whatever remains.
+  // If recent raw alone already overflows, we still keep it (mandated) but emit a
+  // structured overflow signal so the breach is never silent.
   const tokensOf = (m: AssembledMessage) => deps.estimateTokens(m.content);
 
-  // Non-observation injected layers are mandatory-keep within memory; budget for
-  // observations is whatever is left after them. Recent raw is never sacrificed.
-  const fixedInjected = [...reflectionMessages, ...recentRawMessages];
-  const fixedTokens = fixedInjected.reduce((sum, m) => sum + tokensOf(m), 0);
+  // Recent raw is the non-negotiable floor; it consumes its tokens unconditionally.
+  const recentRawTokens = recentRawMessages.reduce((sum, m) => sum + tokensOf(m), 0);
 
-  // Observations get the remaining budget; drop oldest-first until they fit.
-  let observationBudget = Math.max(0, input.tokenBudget - fixedTokens);
+  // Reflections compete for what's left after recent raw. Keep project first, then
+  // resource — i.e. drop resource BEFORE project when only one (or none) fits.
+  let reflectionBudget = input.tokenBudget - recentRawTokens;
+  const keptReflections: { project: boolean; resource: boolean } = {
+    project: false,
+    resource: false,
+  };
+  if (projectReflectionMessage !== null) {
+    const cost = tokensOf(projectReflectionMessage);
+    if (cost <= reflectionBudget) {
+      keptReflections.project = true;
+      reflectionBudget -= cost;
+    }
+  }
+  if (resourceReflectionMessage !== null) {
+    const cost = tokensOf(resourceReflectionMessage);
+    if (cost <= reflectionBudget) {
+      keptReflections.resource = true;
+      reflectionBudget -= cost;
+    }
+  }
+
+  // Emitted reflections, in docs/08 order (project → resource), after trimming.
+  const reflectionMessages: AssembledMessage[] = [];
+  if (keptReflections.project && projectReflectionMessage !== null) {
+    reflectionMessages.push(projectReflectionMessage);
+  }
+  if (keptReflections.resource && resourceReflectionMessage !== null) {
+    reflectionMessages.push(resourceReflectionMessage);
+  }
+  const reflectionTokens = reflectionMessages.reduce((sum, m) => sum + tokensOf(m), 0);
+
+  // Observations get whatever the budget has left after recent raw + kept
+  // reflections; drop oldest-first until they fit.
+  let observationBudget = Math.max(0, input.tokenBudget - recentRawTokens - reflectionTokens);
   const keptObservations: AssembledMessage[] = [];
   // Newest-first so we add the most recent observations until the budget is spent,
   // then re-sort to oldest-first for the assembled order.
@@ -224,6 +261,23 @@ export async function assembleInjectedContext(
     // else: skip this (older) observation — it's been trimmed for budget.
   }
   keptObservations.reverse(); // restore oldest-first order for the prefix
+
+  // Signal a budget breach whenever the un-trimmed fixed layers (all reflections +
+  // recent raw) would have exceeded the cap — i.e. the budget actually forced a
+  // reflection drop, or recent raw alone overflows. Surfacing it keeps the "hard
+  // cap" meaningful: an overflow is observable, never silent.
+  const fixedTokens =
+    recentRawTokens +
+    (projectReflectionMessage !== null ? tokensOf(projectReflectionMessage) : 0) +
+    (resourceReflectionMessage !== null ? tokensOf(resourceReflectionMessage) : 0);
+  if (fixedTokens > input.tokenBudget) {
+    deps.log("memory.inject.budget_overflow", {
+      scope: input.scope,
+      token_budget: input.tokenBudget,
+      fixed_tokens: fixedTokens,
+      recent_raw_tokens: recentRawTokens,
+    });
+  }
 
   // Assemble the final ordered prefix: STRICT docs/08 order.
   const messages: AssembledMessage[] = [

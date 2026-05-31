@@ -12,21 +12,21 @@
 </script>
 
 <dl data-testid="cost-breakdown" class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm">
-  <dt class="text-slate-500">{$t('Routing')}</dt>
-  <dd data-testid="cost-routing" class="text-right font-mono text-slate-800">
+  <dt class="text-ink-muted">{$t('Routing')}</dt>
+  <dd data-testid="cost-routing" class="text-right font-mono text-ink-strong">
     {usd(cost.routing_usd)}
   </dd>
 
-  <dt class="text-slate-500">{$t('Eval (self-cost)')}</dt>
-  <dd data-testid="cost-eval" class="text-right font-mono text-slate-800">{usd(cost.eval_usd)}</dd>
+  <dt class="text-ink-muted">{$t('Eval (self-cost)')}</dt>
+  <dd data-testid="cost-eval" class="text-right font-mono text-ink-strong">{usd(cost.eval_usd)}</dd>
 
-  <dt class="text-slate-500">{$t('Completion')}</dt>
-  <dd data-testid="cost-completion" class="text-right font-mono text-slate-800">
+  <dt class="text-ink-muted">{$t('Completion')}</dt>
+  <dd data-testid="cost-completion" class="text-right font-mono text-ink-strong">
     {usd(cost.completion_usd)}
   </dd>
 
-  <dt class="font-medium text-slate-700">{$t('Total')}</dt>
-  <dd data-testid="cost-total" class="text-right font-mono font-semibold text-slate-900">
+  <dt class="font-medium text-ink-body">{$t('Total')}</dt>
+  <dd data-testid="cost-total" class="text-right font-mono font-semibold text-ink-strong">
     {usd(cost.total_usd)}
   </dd>
 </dl>

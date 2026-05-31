@@ -13,6 +13,9 @@ vi.mock('$lib/api/keys.js', () => ({
 }));
 
 const PLAINTEXT = 'helm_live_PLAINTEXT_ONLY_ONCE';
+// Deliberately NOT equal to PLAINTEXT.slice(0,14) so the test fails if the dialog
+// reverts to slicing the plaintext instead of using the server-minted prefix.
+const PREFIX = 'helm_live_ab12';
 
 function setup() {
   const oncreated = vi.fn();
@@ -25,7 +28,7 @@ function setup() {
 describe('CreateKeyDialog', () => {
   beforeEach(() => {
     createKey.mockReset();
-    createKey.mockResolvedValue({ key_id: 'key_1', plaintext: PLAINTEXT });
+    createKey.mockResolvedValue({ key_id: 'key_1', plaintext: PLAINTEXT, prefix: PREFIX });
   });
 
   it('submits the chosen caps (max_lane + allow_custom_model) to createKey', async () => {
@@ -62,6 +65,8 @@ describe('CreateKeyDialog', () => {
     // The dialog bubbles the redacted view up (prefix only) and asks to close.
     expect(oncreated).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(oncreated.mock.calls[0][0])).not.toContain(PLAINTEXT);
+    // The bubbled view uses the server-minted prefix, NOT a slice of the plaintext.
+    expect(oncreated.mock.calls[0][0].prefix).toBe(PREFIX);
     expect(onclose).toHaveBeenCalled();
   });
 

@@ -120,6 +120,12 @@ export interface RouteOptions {
    *  UI key column. PREFIX ONLY — never the plaintext key (principle 7). The
    *  gateway threads it from the auth identity; null/undefined when unknown. */
   keyPrefix?: string | null;
+  /** Per-key lane caps from the API key's auth record (docs/04). The OUTER,
+   *  non-negotiable bound: applied LAST (after policy caps) so they win even over
+   *  a policy use_lane pin. Each sub-field null = unconstrained on that axis;
+   *  keyCaps itself undefined = no-op (existing callers unaffected). The gateway
+   *  handlers thread it from the auth identity (Wave 2). */
+  keyCaps?: { maxLane: string | null; allowedLanes: string[] | null };
 }
 
 // Fail-open classification default (principle 3 + 5): a degraded classifier
@@ -242,6 +248,11 @@ async function plan(
     return {
       plan: { selected_lane: model, candidate_chain: [model], explicit_model: model },
       classifier: {
+        // task_type:"passthrough" (NOT decided_by) is the disambiguator here:
+        // explicit passthrough and the classifier-crash fail-open BOTH record
+        // decided_by:"default", so do not read decided_by to tell them apart —
+        // passthrough is uniquely identified by task_type/complexity:"passthrough"
+        // (crash fail-open uses task_type:"general", complexity:"medium").
         task_type: "passthrough",
         complexity: "passthrough",
         confidence: 1,
@@ -268,7 +279,22 @@ async function plan(
     },
     lanes: deps.lanes,
   });
-  const cappedLane = applyCaps(laneDecision.selected_lane, outcome);
+  // Policy caps first (the resolver's lane choice, narrowed by matched policies).
+  const policyCappedLane = applyCaps(laneDecision.selected_lane, outcome);
+  // Per-key lane caps LAST: the OUTER, non-negotiable bound from the API key's
+  // auth record. Applied after policy caps so the key wins even over a policy
+  // use_lane pin (principle 6: lanes are the user-facing abstraction; a key may
+  // be confined to a subset). keyCaps undefined => no-op.
+  const cappedLane =
+    opts.keyCaps === undefined
+      ? policyCappedLane
+      : applyCaps(policyCappedLane, {
+          matched_policy_id: null,
+          use_lane: null,
+          max_lane: opts.keyCaps.maxLane,
+          allowed_lanes: opts.keyCaps.allowedLanes,
+          reason: "key caps",
+        });
   const chain = expandChain(cappedLane, deps.lanes);
 
   return {

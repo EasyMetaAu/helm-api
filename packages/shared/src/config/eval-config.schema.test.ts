@@ -14,8 +14,8 @@ function fullEval() {
     model: "deepseek/deepseek-v4-flash",
     temperature: 0,
     max_tokens: 256,
-    timeout_ms: 300,
-    outer_timeout_ms: 250,
+    timeout_ms: 250,
+    outer_timeout_ms: 350,
     on_failure: "balanced",
     cache: {
       enabled: true,
@@ -32,8 +32,8 @@ describe("EvalConfigSchema", () => {
     expect(parsed.enabled).toBe(false);
     expect(parsed.temperature).toBe(0);
     expect(parsed.max_tokens).toBe(256);
-    expect(parsed.timeout_ms).toBe(300);
-    expect(parsed.outer_timeout_ms).toBe(250);
+    expect(parsed.timeout_ms).toBe(250);
+    expect(parsed.outer_timeout_ms).toBe(350);
     expect(parsed.on_failure).toBe("balanced");
     expect(parsed.cache.enabled).toBe(true);
     expect(parsed.cache.key).toBe("content_hash");
@@ -47,8 +47,8 @@ describe("EvalConfigSchema", () => {
     expect(parsed.model).toBe("deepseek/deepseek-v4-flash");
     expect(parsed.temperature).toBe(0);
     expect(parsed.max_tokens).toBe(256);
-    expect(parsed.timeout_ms).toBe(300);
-    expect(parsed.outer_timeout_ms).toBe(250);
+    expect(parsed.timeout_ms).toBe(250);
+    expect(parsed.outer_timeout_ms).toBe(350);
     expect(parsed.on_failure).toBe("balanced");
     expect(parsed.cache).toEqual({
       enabled: true,
@@ -91,6 +91,25 @@ describe("EvalConfigSchema", () => {
     if (!res.success) {
       expect(res.error.issues.some((i) => i.path.join(".") === "max_tokens")).toBe(true);
     }
+  });
+
+  it("defaults the outer timeout strictly above the inner (backstop ordering)", () => {
+    const parsed = EvalConfigSchema.parse({ model: "deepseek-flash" });
+    expect(parsed.outer_timeout_ms).toBeGreaterThan(parsed.timeout_ms);
+  });
+
+  it("rejects outer_timeout_ms <= timeout_ms (fail-closed; outer must back-stop inner)", () => {
+    const bad = { ...fullEval(), timeout_ms: 300, outer_timeout_ms: 250 };
+    const res = EvalConfigSchema.safeParse(bad);
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues.some((i) => i.path.join(".") === "outer_timeout_ms")).toBe(true);
+    }
+  });
+
+  it("rejects outer_timeout_ms equal to timeout_ms (strict ordering, no tie)", () => {
+    const bad = { ...fullEval(), timeout_ms: 300, outer_timeout_ms: 300 };
+    expect(EvalConfigSchema.safeParse(bad).success).toBe(false);
   });
 
   it("rejects a cache.key other than content_hash (tighten against misconfig)", () => {

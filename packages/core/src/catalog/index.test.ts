@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { GeneratedCatalog } from "@helm/shared";
+import { CatalogEntrySchema, type GeneratedCatalog } from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import { CatalogError, loadCatalog } from "./index.js";
 
@@ -83,6 +83,25 @@ describe("loadCatalog", () => {
     expect(entry?.source).toBe("override");
     expect(entry?.capabilities.supportsTools).toBe(true);
     expect(entry?.capabilities.supportsVision).toBe(false); // defaulted
+  });
+
+  it("re-validates every merged entry against CatalogEntrySchema (fail-closed on drift)", () => {
+    // Exercise all three entry shapes: generated, capability-override-new,
+    // pricing-override-new. The final merge pass must leave each conforming to
+    // the schema (a brand-new override key must default EVERY required field).
+    const cat = loadCatalog({
+      generated,
+      capabilitiesOverride: { "local/caps-only": { supportsTools: true } },
+      pricingOverride: { "local/price-only": { inputPerMTokUsd: 1 } },
+    });
+    for (const entry of cat.values()) {
+      expect(() => CatalogEntrySchema.parse(entry)).not.toThrow();
+    }
+    // The pricing-only new key must carry fully-defaulted capabilities (incl.
+    // the nullable-but-required maxOutputTokens).
+    const priceOnly = cat.get("local/price-only");
+    expect(priceOnly?.capabilities.maxOutputTokens).toBeNull();
+    expect(priceOnly?.capabilities.maxContextTokens).toBe(0);
   });
 });
 

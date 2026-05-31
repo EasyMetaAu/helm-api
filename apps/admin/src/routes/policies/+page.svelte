@@ -17,6 +17,7 @@
 
   let error = $state<string | null>(null);
   let saving = $state(false);
+  let saved = $state(false);
 
   function updateRow(index: number, next: Policy): void {
     policies = policies.map((p, i) => (i === index ? next : p));
@@ -44,10 +45,12 @@
   // On failure: fail-closed — surface the error, keep the current working list.
   async function handleSave(): Promise<void> {
     error = null;
+    saved = false;
     saving = true;
     try {
-      const saved = await savePolicies(policies);
-      policies = saved.map((p) => ({ ...p }));
+      const result = await savePolicies(policies);
+      policies = result.map((p) => ({ ...p }));
+      saved = true;
     } catch (e) {
       error = e instanceof Error ? e.message : $t('Failed to save policies');
     } finally {
@@ -58,16 +61,13 @@
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <header>
-    <h1 class="text-2xl font-semibold text-slate-900">{$t('Policies')}</h1>
-    <p class="text-sm text-slate-500">
+    <h1 class="page-title">{$t('Policies')}</h1>
+    <p class="section-desc">
       {$t(
         'Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.',
       )}
     </p>
-    <p
-      class="mt-2 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600"
-      data-testid="first-match-explainer"
-    >
+    <p class="mt-2 card text-sm text-ink-body" data-testid="first-match-explainer">
       {$t('Rules are evaluated top to bottom; the')}
       <strong>{$t('first matching')}</strong>
       {$t(
@@ -77,9 +77,20 @@
   </header>
 
   {#if error}
-    <p class="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+    <p class="alert-error" role="alert">
       {error}
     </p>
+  {/if}
+
+  {#if policies.length === 0}
+    <div class="empty-state" data-testid="policies-empty">
+      <p class="font-medium text-ink-body">{$t('No policies yet')}</p>
+      <p class="mt-1 text-sm text-ink-muted">
+        {$t(
+          'Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.',
+        )}
+      </p>
+    </div>
   {/if}
 
   <div class="flex flex-col gap-4">
@@ -96,17 +107,13 @@
     {/each}
   </div>
 
-  <div class="flex gap-2">
-    <button
-      type="button"
-      class="rounded bg-slate-200 px-3 py-1.5 text-sm font-medium text-slate-800"
-      onclick={addRow}>{$t('Add policy')}</button
+  <div class="flex items-center gap-2">
+    <button type="button" class="btn-secondary" onclick={addRow}>{$t('Add policy')}</button>
+    <button type="button" class="btn-primary" onclick={handleSave} disabled={saving}
+      >{$t('Save policies')}</button
     >
-    <button
-      type="button"
-      class="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
-      onclick={handleSave}
-      disabled={saving}>{$t('Save policies')}</button
-    >
+    {#if saved}
+      <span class="badge-ok" data-testid="policies-saved" role="status">{$t('Saved')}</span>
+    {/if}
   </div>
 </section>

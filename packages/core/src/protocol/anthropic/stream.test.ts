@@ -251,11 +251,72 @@ describe("convertOpenAIStreamToAnthropic — usage buffering", () => {
     const md = events.find((e) => e.type === "message_delta");
     expect(md?.type).toBe("message_delta");
     if (md?.type === "message_delta") {
-      // input = prompt − cached: IR.prompt_tokens is already non-cached (= 100), cached re-exposed.
-      expect(md.usage.input_tokens).toBe(100);
+      // input = prompt − cached: raw upstream prompt_tokens (100) is the FULL prompt
+      // incl. cached, so we normalize to 100 − 30 = 70 before buffering (matching the
+      // non-stream openai.ts path); cached (30) is re-exposed as cache_read.
+      expect(md.usage.input_tokens).toBe(70);
       expect(md.usage.output_tokens).toBe(20);
       expect(md.usage.cache_read_input_tokens).toBe(30);
     }
+  });
+
+  it("reads cached from prompt_tokens_details.cached_tokens (real OpenAI nesting)", async () => {
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([
+          textChunk("x"),
+          {
+            id: "c",
+            model: "m",
+            choices: [{ index: 0, delta: {}, finish_reason: null }],
+            usage: {
+              prompt_tokens: 100,
+              completion_tokens: 20,
+              prompt_tokens_details: { cached_tokens: 30 },
+            },
+          },
+          textChunk("", "stop"),
+        ]),
+      ),
+    );
+
+    const md = events.find((e) => e.type === "message_delta");
+    if (md?.type === "message_delta") {
+      expect(md.usage.input_tokens).toBe(70);
+      expect(md.usage.cache_read_input_tokens).toBe(30);
+    }
+  });
+});
+
+// —— 5b. empty-named end-of-stream tool block is dropped entirely ——————————————
+
+describe("convertOpenAIStreamToAnthropic — empty-named tool block", () => {
+  it("does not emit a content_block_start/stop for a tool index that had no name and no args", async () => {
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([
+          // upstream announced a tool index/id but never sent a name or any arguments.
+          {
+            id: "c",
+            model: "m",
+            choices: [
+              {
+                index: 0,
+                delta: { tool_calls: [{ index: 0, id: "call_x", function: {} }] },
+                finish_reason: null,
+              },
+            ],
+          },
+          { id: "c", model: "m", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+        ]),
+      ),
+    );
+
+    // No tool_use block at all: neither a start nor an orphan stop (pit #4).
+    expect(events.filter((e) => e.type === "content_block_start")).toHaveLength(0);
+    expect(events.filter((e) => e.type === "content_block_stop")).toHaveLength(0);
+    // The terminal events are still well-formed.
+    expect(events.map((e) => e.type)).toEqual(["message_start", "message_delta", "message_stop"]);
   });
 });
 

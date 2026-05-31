@@ -180,6 +180,47 @@ describe("loadConfig", () => {
     ).toThrow(ConfigError);
   });
 
+  it("fail-closed with a clear diagnostic when a key:null file has a non-mapping root (scalar)", () => {
+    const bad = { ...VALID_YAML, "config/providers.yaml": "just-a-string\n" };
+    try {
+      loadConfig({ configDir: "config", env: {}, readFile: fakeReadFile(bad) });
+      throw new Error("expected loadConfig to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigError);
+      if (e instanceof ConfigError) {
+        expect(e.message).toContain("config/providers.yaml");
+        expect(e.message).toContain("expected a mapping");
+      }
+    }
+  });
+
+  it("fail-closed with a clear diagnostic when a key:null file has an array root", () => {
+    const bad = { ...VALID_YAML, "config/providers.yaml": "- a\n- b\n" };
+    try {
+      loadConfig({ configDir: "config", env: {}, readFile: fakeReadFile(bad) });
+      throw new Error("expected loadConfig to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigError);
+      if (e instanceof ConfigError) {
+        expect(e.message).toContain("expected a mapping");
+      }
+    }
+  });
+
+  it("fail-closed with a clear diagnostic when a keyed file has a non-mapping root", () => {
+    const bad = { ...VALID_YAML, "config/server.yaml": "- 1\n- 2\n" };
+    try {
+      loadConfig({ configDir: "config", env: {}, readFile: fakeReadFile(bad) });
+      throw new Error("expected loadConfig to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigError);
+      if (e instanceof ConfigError) {
+        expect(e.message).toContain("config/server.yaml");
+        expect(e.message).toContain("expected a mapping");
+      }
+    }
+  });
+
   it("never echoes plaintext secrets in error messages", () => {
     const invalid = {
       ...VALID_YAML,

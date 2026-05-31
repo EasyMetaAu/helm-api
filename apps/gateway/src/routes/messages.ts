@@ -1,6 +1,9 @@
-import type { Hono } from "hono";
+import type { RateLimitProbe, RateLimitResult } from "@helm/core";
+import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { PipelineError } from "./messages-pipeline.js";
 
 // POST /v1/messages — Anthropic Messages inbound, translated to IR, routed, and
 // translated back to the Anthropic wire shape (docs/02 §API Gateway, docs/05).
@@ -54,7 +57,17 @@ export interface PipelineRunResult {
   streamIR(): AsyncIterable<{ type: string; [k: string]: unknown }>;
 }
 
+/** Per-key rate limiter (core, framework-agnostic). Same instance the OpenAI
+ *  chat middleware uses; injected here so the self-authenticating Anthropic route
+ *  meters the resolved key AFTER auth (closing the rate-limit bypass on
+ *  /v1/messages). Optional — omitted = no metering (the limiter itself no-ops
+ *  when rate limiting is disabled). */
+export interface MessagesRateLimiterPort {
+  check(probe: RateLimitProbe): Promise<RateLimitResult>;
+}
+
 export interface MessagesRouteDeps {
+  rateLimiter?: MessagesRateLimiterPort;
   auth: {
     /** Resolve the request credential to an identity, or null when invalid.
      *  Mandatory auth: a null result short-circuits to a 401 (no anonymous
@@ -100,8 +113,21 @@ function extractCredential(apiKey: string | undefined, auth: string | undefined)
   return null;
 }
 
+// Client disconnect / abort detection — mirrors chat.ts. Used to suppress a
+// terminal error frame for a benign disconnect (NOT a provider fault, docs/02).
+function isAbort(err: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted) return true;
+  return err instanceof Error && (err.name === "AbortError" || err.message.includes("aborted"));
+}
+
 export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps): void {
   const { anthropic } = deps.transformers;
+
+  // Map a structured internal error → Anthropic envelope + status, then send it.
+  const sendError = (c: Context<AppEnv>, err: RouteError): Response => {
+    const out = anthropic.transformErrorOut(err);
+    return c.json(out.body as Record<string, unknown>, out.status as ContentfulStatusCode);
+  };
 
   app.post("/v1/messages", async (c) => {
     const traceId = c.get("trace_id");
@@ -111,12 +137,37 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     const credential = extractCredential(c.req.header("x-api-key"), c.req.header("Authorization"));
     const identity = await deps.auth.resolve(credential);
     if (identity === null) {
-      const out = anthropic.transformErrorOut({
+      return sendError(c, {
         error_class: "auth_error",
         message: "missing or invalid API key",
         trace_id: traceId,
       });
-      return c.json(out.body as Record<string, unknown>, out.status as 401);
+    }
+
+    // 1b) Rate limit AFTER auth (needs the resolved key_id) and BEFORE translate/
+    //     route (cut off cost before classification/eval). Mirrors the OpenAI chat
+    //     middleware but emits the ANTHROPIC envelope. No-op when the limiter
+    //     reports limit 0 (disabled / both dimensions unlimited). A store failure
+    //     in check() propagates (fail-CLOSED) → onError, never an unmetered pass.
+    if (deps.rateLimiter !== undefined) {
+      const rl = await deps.rateLimiter.check({
+        keyId: identity.keyId,
+        estimatedTokens: 0,
+        now: Date.now(),
+      });
+      if (!(rl.allowed && rl.limit === 0)) {
+        c.header("x-ratelimit-limit", String(rl.limit));
+        c.header("x-ratelimit-remaining", String(rl.remaining));
+        c.header("x-ratelimit-reset", String(rl.resetSeconds));
+        if (!rl.allowed) {
+          c.header("retry-after", String(rl.retryAfterSeconds));
+          return sendError(c, {
+            error_class: "rate_limited",
+            message: `rate limit exceeded (${rl.limitedBy})`,
+            trace_id: traceId,
+          });
+        }
+      }
     }
 
     // 2) Protocol Adapter (inbound): native Anthropic → IR, then stamp trace_id
@@ -128,14 +179,23 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     try {
       native = await c.req.json();
     } catch {
-      const out = anthropic.transformErrorOut({
+      return sendError(c, {
         error_class: "invalid_request",
         message: "malformed JSON request body",
         trace_id: traceId,
       });
-      return c.json(out.body as Record<string, unknown>, out.status as 400);
     }
-    const ir = await anthropic.transformRequestOut(native);
+    // The REAL Anthropic transformer Zod-validates and THROWS on a structurally
+    // invalid body (e.g. {messages:[]}). Wrap it so that throw becomes a 400 in the
+    // ANTHROPIC envelope here, instead of escaping to onError → an OpenAI-shaped
+    // 502 (principle 2 fail-closed; mirrors how responses.ts guards its transform).
+    let ir: IRLike;
+    try {
+      ir = await anthropic.transformRequestOut(native);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "invalid Anthropic request";
+      return sendError(c, { error_class: "invalid_request", message: detail, trace_id: traceId });
+    }
     ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
 
     // Map the `x-session-key` request header into the conversation-dimension key
@@ -154,7 +214,21 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     //    rides along so a client disconnect is a non-provider fault, not a breaker
     //    trip (CLAUDE.md / docs/02). Auxiliary failures (classify/eval/cache) are
     //    already fail-open inside core — the route surfaces whatever it returns.
-    const result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
+    //    `run` itself throws a PipelineError(invalid_request) for an empty request
+    //    (no placeholder synthesis) — map it to a 400 in the Anthropic envelope.
+    let result: PipelineRunResult;
+    try {
+      result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
+    } catch (err) {
+      if (err instanceof PipelineError) {
+        return sendError(c, {
+          error_class: err.error_class,
+          message: err.message,
+          trace_id: traceId,
+        });
+      }
+      throw err;
+    }
 
     // 4) Protocol Adapter (outbound): stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
@@ -162,14 +236,44 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         // Every IR event is mapped by the transformer's explicit state machine;
         // we NEVER forward a raw upstream chunk (CLAUDE.md principle 8). The
         // transformer already guards start-before-delta and idempotent close.
-        for await (const event of result.streamIR()) {
-          const frame = anthropic.transformStreamOut(event);
-          await sse.writeSSE({ event: frame.event, data: frame.data });
+        try {
+          for await (const event of result.streamIR()) {
+            const frame = anthropic.transformStreamOut(event);
+            await sse.writeSSE({ event: frame.event, data: frame.data });
+          }
+        } catch (err) {
+          // A client disconnect / abort is a benign non-provider fault (docs/02):
+          // emit NO error frame. Any other throw — incl. a PipelineError when all
+          // providers failed before the stream started — emits a TERMINAL Anthropic
+          // error event so the client never sees a silently truncated stream.
+          if (!isAbort(err, c.req.raw.signal)) {
+            const re: RouteError =
+              err instanceof PipelineError
+                ? { error_class: err.error_class, message: err.message, trace_id: traceId }
+                : { error_class: "upstream_error", message: "upstream error", trace_id: traceId };
+            const out = anthropic.transformErrorOut(re);
+            await sse.writeSSE({ event: "error", data: JSON.stringify(out.body) });
+          }
         }
       });
     }
 
-    const body = await anthropic.transformResponseOut(await result.collect());
+    // Non-stream: collect() throws a PipelineError when routing failed (all
+    // providers failed) — surface it as the Anthropic envelope instead of the
+    // empty 200 a synthesized placeholder body would produce.
+    let body: unknown;
+    try {
+      body = await anthropic.transformResponseOut(await result.collect());
+    } catch (err) {
+      if (err instanceof PipelineError) {
+        return sendError(c, {
+          error_class: err.error_class,
+          message: err.message,
+          trace_id: traceId,
+        });
+      }
+      throw err;
+    }
     return c.json(body as Record<string, unknown>);
   });
 }

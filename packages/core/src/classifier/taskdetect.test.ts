@@ -198,6 +198,50 @@ describe("detectTask", () => {
     expect(res.task_type).toBe("chat");
   });
 
+  it("breaks an exact-score tie stably, not by config key order (no silent demote)", () => {
+    // coding and security tie on score (1.0 each), both cleared their threshold.
+    // Whichever loses must NOT depend on Map insertion (= config key) order: the
+    // result must be identical regardless of which key is declared first.
+    const keywordsCodingFirst = {
+      coding: ["alpha"],
+      security: ["beta"],
+    };
+    const keywordsSecurityFirst = {
+      security: ["beta"],
+      coding: ["alpha"],
+    };
+    const activation = { web: 3.0, coding: 1.0, security: 1.0 };
+    const req = makeReq("alpha beta"); // exactly one hit each → score 1.0 each
+
+    const a = detectTask(
+      makeReq("alpha beta"),
+      makeConfig({ task_keywords: keywordsCodingFirst, task_activation: activation }),
+    );
+    const b = detectTask(
+      req,
+      makeConfig({ task_keywords: keywordsSecurityFirst, task_activation: activation }),
+    );
+    // Stable: the winner does not flip when the config key order flips.
+    expect(a.task_type).toBe(b.task_type);
+    // The gated security task is not silently demoted by a tie.
+    expect(a.task_type).toBe("security");
+  });
+
+  it("prefers the higher-margin candidate on an exact-score tie", () => {
+    // Both score 2.0 and clear their thresholds, but `extraction` (activation 1.0)
+    // cleared by a wider margin than `data` (activation 1.5) — margin wins the tie
+    // independent of declaration order.
+    const cfg = makeConfig({
+      task_keywords: {
+        extraction: ["aa", "bb"],
+        data: ["cc", "dd"],
+      },
+      task_activation: { web: 3.0, extraction: 1.0, data: 1.5 },
+    });
+    const res = detectTask(makeReq("aa bb cc dd"), cfg);
+    expect(res.task_type).toBe("extraction");
+  });
+
   it("is pure & deterministic with no side effects", () => {
     const cfg = makeConfig();
     const req = makeReq("refactor this function, see https://example.com/page");

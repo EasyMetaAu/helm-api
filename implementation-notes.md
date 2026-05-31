@@ -5,6 +5,55 @@
 
 ---
 
+## 2026-05-31 · 全模块审计 + 41 项修复（workflow 驱动，全原则）
+
+**背景**：用 workflow 对 10 个模块做对抗式审计（finder → 逐条 verify against real code），得 **42 条确认发现**（22 bug / 5 incomplete / 15 improvement，4 条误报驳回）。随后用第二个 workflow（文件不相交并行波 + 依赖串行）TDD 修复 **41 条**（记忆中间件接线 1 条 incomplete 单列为 Task，本轮不接——属请求路径全新行为）。
+
+**修复要点（按根因聚类）**：
+1. **非 chat 端面拉齐 chat.ts**：`/v1/messages` 结构非法 body → 400 Anthropic 信封（原 502）；all-providers-failed → 结构化错误（原静默空 200，`messages-pipeline.ts` 新增 `PipelineError` 贯穿 collect/streamIR seam）；空 messages → 400（不再塞占位）；Anthropic 流式加 error/abort 守卫；`/v1/messages`+`/v1/responses` 接入限流。
+2. **执行层 :free/状态**：`UpstreamError` 新增 `upstreamStatus`（原硬编码 502）；execute.ts 补 `:free` 429 跳过（不记熔断失败）；abort 判定去掉 `message.includes('aborted')`。**未**统一 runFallback/createExecute（按指示不做大重构），改为给 live path 补直测。
+3. **流式 usage/缓存**：Anthropic 流式归一化 `prompt_tokens -= cached`（消除重复计费）；OpenAIChunkUsageSchema 补 `prompt_tokens_details.cached_tokens` 嵌套读取；Gemini streamIn 补缓存扣减；Gemini streamOut 补 tool_call functionCall 发射。
+4. **上限/配额生效**：`RouteOptions.keyCaps` + 第二道 applyCaps（key 上限为最外层，最后施加）；policy first-match PIN 不变但**累积所有命中策略的 cap**（allowed_lanes 交集、max_lane 取最严）；server.ts 两处 messages/responses 鉴权闭包补 `maxLane/allowedLanes`；TPM 接 `estimateRequestTokens`（Content-Length/4）。
+5. **韧性/安全**：动量 store 写时 per-key 裁剪 + LRU key 上限；PG 限流冷桶先 `INSERT ON CONFLICT DO NOTHING` 再 `FOR UPDATE`（消除双花）；root-key bootstrap 改 `await`（fail-closed）；admin lanes PUT/DELETE 整图 `LanesConfigSchema.safeParse`（不能删 `balanced`）；catalog override 读错误只吞 ENOENT、余者 fail-closed；basicAuth sha256 双哈希定长比较；loader 非 mapping 根 fail-closed。
+6. **eval 超时**：默认 `timeout_ms 250 / outer_timeout_ms 350` + 跨字段 refine（outer>inner，否则 fail-closed）。
+
+**门禁**：typecheck 0 / lint exit 0（15 warning，均 test 文件 noNonNullAssertion，沿用基线容忍）/ **单测 1070 全绿** / admin 78 全绿 / build（admin SPA + core + gateway）全绿。
+
+**坑与取舍**：
+- 跨批次加性类型（`upstreamStatus`/`keyCaps`/`rateLimiter`/catalog `log`/eval 250-350）由各 agent 加在自有文件，vitest 不做 typecheck 故 agent 自测全绿但留下少量 fixture 漂移（footguns 流式 usage 应送 RAW 全量 prompt=NON_CACHED+CACHE_READ;classifier 300/250→250/350 的若干 out-of-lane fixture）——已在终态门禁逐条对齐。
+- **预存 e2e 失败（非本次引入，3 条）**：`routing.spec.ts` 的 `expect(body.model).toBe(<alias>)` 在 `fix-upstream-model-id`（9c64fea，本会话前）解耦 alias/wire-id 后即失效——mock 回声的是网关实发的**裸 wire id**（`gpt-5.4-mini`），`x-helm-final-model` 头才是 alias（该断言仍过）。`routing.spec.ts`/`mock-upstream.ts`/chat.ts 响应模型处理均**未被本次改动**，故确证为预存。待定：要么把 3 条断言改成裸 wire id（对齐现行设计），要么实现 `body.model→alias/lane` 回写（原则6 隐藏供应链）——交用户定夺。
+
+---
+
+## 2026-05-31 · Admin UX overhaul — Tailwind v4 token 层 + 全页面 design-token 化 + 易用性文案 (docs/11、原则 1)
+
+**动机**：用户反馈管理界面"有点乱、看不太懂"。根因审计（10-agent workflow）查明两条系统性原因：① **无 token 层**——`app.css` 只有三条 `@tailwind` 指令、`tailwind.config` 的 `theme.extend` 为空，每个页面各自硬编码 slate/indigo 色阶、圆角、间距 → 视觉漂移；② **裸网关术语直出**——snake_case 字段（`max_lane`/`needs_json`/`use_lane`）与隐晦枚举（`decided_by: rules/eval/fallback`）当作标签直接渲染，自托管运维（非网关专家）读不懂一行、也不会写规则。
+
+**做法（三阶段）**：
+- **A · Tailwind v3→v4 迁移 + token 层**（commit 8ba7623）：升级到 `tailwindcss@4` + 一方 `@tailwindcss/vite` 插件；删除 `postcss.config.js`/`tailwind.config.ts`/`autoprefixer`（v4 自带）。`app.css` 用 `@theme` 定义语义色角色（`--color-brand` 仅品牌+激活导航、`--color-action` 主按钮、ink 文本阶、status、两级圆角）+ `@layer components` 组件配方（`.card`/`.btn-*`/`.input`/`.select`/`.badge-*`/`.table-*`/`.section-header`/`.section-desc`/`.alert-*`/`.empty-state`/`.link-inline`）。v4 的 `@apply` 不能组合组件类（component-on-component），故每个 `.badge-*` 内联自包含。
+- **B · 8 个界面 design-token 化 + 文案**（commit 7115e5a）：全部改用配方类；移除 `rounded-xl`；夺回 indigo 只给品牌/激活导航（链接→sky、chip→中性 slate）；把裸 schema 词汇改成大白话并加 `.field-help` 行内说明；补空状态 + "已保存"确认；Dashboard/Requests/Request-detail 加 `decided_by` 图例（rules/eval/fallback 三色 + 一句话）；导航项加 plain-language 副标题/tooltip；LocaleSwitcher 归一到 `.select` 配方；页脚 "Connected"→"网关在线"。**纯表现 + 文案，零逻辑改动**，78 个 admin 测试 + svelte-check 全绿。
+- **C · i18n**：97 条新简体中文（`zh-hans.json`，264 键）；`en.json` 留空（key 即英文，缺失回退到 key）。
+
+**坑（重要，影响未来 workflow 用法）**：用 **Workflow 工具的子 agent 做文件写入，在本环境不持久化**——子 agent 的 Edit/Write 落在一个临时沙箱，workflow 完成后**异步清理会把 `apps/admin` 下所有未提交的被跟踪文件回滚到 HEAD**，连我在主会话用 Bash-node 写的 `zh-hans.json` 合并也被一并清掉（只有已 commit 的 Phase A 和 `.git` 幸存）。**主会话直接用 Edit/Write/commit 才持久**。补救：从 workflow 子 agent 的 transcript（`subagents/workflows/<run>/agent-*.jsonl`）里提取 38 个 Edit 的 old/new_string **原样重放**到主仓库（0 失配，因为文件已被回滚回 agent 当初读到的原始基线），再立即 commit 锁定。**结论**：Workflow 适合并行**审查/只读分析**（第一个审计 workflow 完美）；要并行**改文件**时，要么主会话直接改，要么用完立刻从 transcript 重放 + commit，别指望子 agent 的写盘直接落到主树。
+
+- **遗留**：`en.json` 为空（靠回退）；ja/ko/zh-hant 新键未译（回退到英文）；编辑器对 `vite.config.ts` 报 vite7-vs-vite8 transitive 类型噪声（LSP 假阳性，build/tsc 均 0）。
+
+---
+
+## 2026-05-31 · Lanes admin combobox — `GET /admin/api/models` 别名目录 + datalist 选择器 (docs/11、原则 1/6)
+
+**动机**：`/admin/lanes` 页的「主用」与 fallback「添加」框是裸 text input，运维必须手敲 `provider/model` 别名（如 `deepseek-crs/deepseek-pro`）。一个 typo 会让 lane 指向不存在的 model，**静默打断 fallback 链**。可选别名集合本就已知——`config/providers.yaml → providers[].models[].alias`（即路由 key）。
+
+**实现（combobox，非原生 select；用户确认）**：用 `<input list>` + `<datalist>`——既给下拉建议，又保留手敲逃生口（providers.yaml 里还没有的 model 仍可输入）。选 combobox 而非 `<select>` 的关键收益：① 目录为空/拉取失败时退化为纯文本输入；② 元素仍是 `<input>`，**既有 LaneEditor/lanes 测试零改动通过**。
+
+- **后端**：新增只读端点 `GET /admin/api/models`（`apps/gateway/src/routes/admin/models.ts`），返回注入的 `modelAliases: string[]`（`AdminApiDeps` 新字段）。纯 HTTP 胶水（原则1），不碰 config/DB——别名在 `server.ts` wire 时一次性算出：`[...new Set(config.providers.flatMap(p => p.models.map(m => m.alias)))].sort()`。继承 `/admin/api/*` 的 basicAuth，对 API 客户端不可见（原则6 供应链细节）。
+- **前端**：`$lib/api/models.ts` 的 `listModels()`——**永不抛**，任何失败 resolve `[]`（UI 便利而非安全边界，目录缺失不能拖垮编辑器）。`lanes/+page.ts` 用 `Promise.all` 并行加载 lanes+models；`LaneEditor.svelte` 加 `models: string[] = []` prop（默认空，旧调用/测试仍兼容）+ 每卡一个 `<datalist id="lane-models-${name}">`，primary 与 fallback-add 两个 input 都 `list=` 之。
+- **测试**：admin route 契约（返回排序去重别名 + 401 鉴权）；models client（[]-on-error/网络错/非字符串过滤）；LaneEditor（datalist 选项 = models prop、两 input 带匹配 `list`、空 models 仍可纯文本输入）；lanes page（目录 thread 进每卡）。全绿 992/992。
+- **坑/边界**：① datalist id 按 lane name 区分（每卡独立编辑器）；② lane 现存的「未在目录中的」别名不会丢——combobox 仍显示并可保存（保存语义/PUT body 完全不变）；③ 别名在进程生命周期内不可变（config 不热改 providers），故 wire 时算一次即可。
+- **无关噪声**：编辑器 LSP 对 `packages/core/src/store/postgres/rate-limit.ts:25` 报 drizzle 类型不匹配——是 pglite 与 better-sqlite3 各装一份 `drizzle-orm` 导致 LSP 解析到错误副本的**假阳性**；`tsc` 实测 0 错，未改动。
+
+---
+
 ## 2026-05-31 · port-eval-v2-routing Phase 2 — `security` task_type + complexity-conditioned steering + long_context 锚点 (docs/03、docs/04，原则 2/4/6)
 
 **承接** Phase 0（golden + cross-ref 测试）/ Phase 1（complexity-conditioned policies + matrix）。本阶段把 llm-router eval-v2 §5.1 `task_type × complexity → lane` 决策表里**仅剩的增量**移植进 Helm。绝大部分价值（complexity→lane、task_type→同名 lane）Phase 1 已落地，故 Phase 2 只做三件小事：

@@ -29,7 +29,7 @@
     id="locale-switcher"
     value={$locale}
     onchange={onChange}
-    class="w-full cursor-pointer appearance-none rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-7 text-xs font-medium text-slate-600 transition hover:border-slate-300 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+    class="select cursor-pointer appearance-none pl-8 pr-7"
   >
     {#each SUPPORTED_LANGUAGES as language (language.code)}
       <option value={language.code}>{language.native}</option>

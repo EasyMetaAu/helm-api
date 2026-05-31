@@ -27,14 +27,21 @@ export function computeCostUsd(pricing: Pricing | undefined, usage: TokenUsage):
 }
 
 // Extract OpenAI-shaped token usage from a raw upstream response body. Defensive:
-// any non-numeric/missing field collapses to undefined (→ treated as 0 by
-// computeCostUsd). Never throws, never touches message content (principle 7).
+// any missing/non-numeric/NaN/negative field collapses to undefined (→ treated as
+// 0 by computeCostUsd). A NaN or negative count would otherwise propagate to a NaN
+// cost that serializes to null — masquerading as "not measured" without the
+// pricing_missing log, and corrupting aggregation. Never throws, never touches
+// message content (principle 7).
+function finiteNonNegative(x: unknown): number | undefined {
+  return typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : undefined;
+}
+
 export function usageFromBody(body: unknown): TokenUsage {
   const usage = (body as { usage?: unknown } | null | undefined)?.usage;
   if (!usage || typeof usage !== "object") return {};
   const u = usage as { prompt_tokens?: unknown; completion_tokens?: unknown };
   return {
-    promptTokens: typeof u.prompt_tokens === "number" ? u.prompt_tokens : undefined,
-    completionTokens: typeof u.completion_tokens === "number" ? u.completion_tokens : undefined,
+    promptTokens: finiteNonNegative(u.prompt_tokens),
+    completionTokens: finiteNonNegative(u.completion_tokens),
   };
 }

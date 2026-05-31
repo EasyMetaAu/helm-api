@@ -57,8 +57,10 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       allowedLanes: parsed.data.allowed_lanes,
       allowCustomModel: parsed.data.allow_custom_model ?? false,
     });
-    // The ONLY place plaintext is ever returned.
-    return c.json({ key_id: keyId, plaintext: minted.plaintext }, 201);
+    // The ONLY place plaintext is ever returned. `prefix` is the server-minted
+    // non-sensitive display prefix (already persisted) — returned so the SPA need
+    // not slice the plaintext to build a redacted view (a redaction footgun).
+    return c.json({ key_id: keyId, plaintext: minted.plaintext, prefix: minted.prefix }, 201);
   });
 
   // DELETE /keys/:id — soft revoke (disabled:true). 404 when the id is unknown.

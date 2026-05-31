@@ -5,6 +5,7 @@ import {
   type MessagesRouteDeps,
   registerMessagesRoute,
 } from "./messages.js";
+import { PipelineError } from "./messages-pipeline.js";
 
 // POST /v1/messages — Anthropic Messages inbound. These tests pin the route's
 // CONTRACT: auth → translate(out) → route → translate(back), with all business
@@ -53,6 +54,8 @@ function makeDeps(
     failOpen?: boolean;
     abort?: boolean;
     authed?: boolean;
+    transformRequestOut?: (native: unknown) => unknown;
+    rateLimiter?: MessagesRouteDeps["rateLimiter"];
   } = {},
 ): { deps: MessagesRouteDeps; harness: Harness } {
   const harness: Harness = {
@@ -63,6 +66,7 @@ function makeDeps(
   };
 
   const deps: MessagesRouteDeps = {
+    rateLimiter: over.rateLimiter,
     auth: {
       resolve: async (_key: string | null) => {
         harness.order.push("auth");
@@ -73,6 +77,10 @@ function makeDeps(
       anthropic: {
         transformRequestOut: (native: unknown) => {
           harness.order.push("translate-out");
+          // The override may throw (structurally-invalid body case); when it
+          // returns, narrow its loose shape to the IR the route threads onward.
+          if (over.transformRequestOut)
+            return over.transformRequestOut(native) as Record<string, unknown>;
           const ir = fakeIR(over.isStream === true);
           // carry a marker so we can assert the SAME object reached the pipeline
           (ir as { __native?: unknown }).__native = native;
@@ -87,18 +95,25 @@ function makeDeps(
           data: JSON.stringify(ev),
         }),
         transformErrorOut: (err: { error_class: string; message: string; trace_id: string }) => {
+          // Mirror makeAnthropicError's class→status/type mapping for the classes
+          // the route emits (auth_error/invalid_request/rate_limited/…); the rest
+          // collapse to api_error(502).
           const status =
             err.error_class === "auth_error"
               ? 401
               : err.error_class === "invalid_request"
                 ? 400
-                : 502;
+                : err.error_class === "rate_limited"
+                  ? 429
+                  : 502;
           const type =
             err.error_class === "auth_error"
               ? "authentication_error"
               : err.error_class === "invalid_request"
                 ? "invalid_request_error"
-                : "api_error";
+                : err.error_class === "rate_limited"
+                  ? "rate_limit_error"
+                  : "api_error";
           return { status, body: { type: "error", error: { type, message: err.message } } };
         },
       },
@@ -333,5 +348,113 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
 
     const meta = (harness.pipelineSawIR?.metadata ?? {}) as Record<string, unknown>;
     expect(meta.conversation_id).toBeUndefined();
+  });
+
+  it("maps a structurally invalid body (transformRequestOut throws) to a 400 Anthropic error", async () => {
+    // The REAL Anthropic transformer throws a ZodError on e.g. {messages:[]}. The
+    // route must wrap transformRequestOut and return the ANTHROPIC envelope (400),
+    // not let the throw escape to onError → an OpenAI-shaped 502.
+    const { deps, harness } = makeDeps({
+      transformRequestOut: () => {
+        throw new Error("messages: too_small");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, messages: [] }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { type: string; error: { type: string } };
+    expect(body.type).toBe("error");
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(harness.order).not.toContain("route");
+  });
+
+  it("surfaces an all-providers-failed pipeline error as an Anthropic envelope (not an empty 200)", async () => {
+    const { deps } = makeDeps({
+      collect: async () => {
+        throw new PipelineError("all_providers_failed", "all providers failed", "trace-1");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { type: string; error: { type: string } };
+    expect(body.type).toBe("error");
+    expect(body.error.type).toBe("api_error");
+  });
+
+  it("emits a terminal Anthropic error event when the stream throws (non-abort)", async () => {
+    async function* events(): AsyncIterable<{ type: string }> {
+      yield { type: "message_start" };
+      throw new Error("upstream blew up mid-stream");
+    }
+    const { deps } = makeDeps({ isStream: true, streamEvents: events });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("event: message_start");
+    // A terminal Anthropic error frame must follow the partial stream.
+    expect(text).toContain("event: error");
+  });
+
+  it("429s a throttled key on /v1/messages with an Anthropic rate_limited envelope", async () => {
+    const limiter: MessagesRouteDeps["rateLimiter"] = {
+      check: async () => ({
+        allowed: false,
+        limitedBy: "rpm",
+        limit: 10,
+        remaining: 0,
+        resetSeconds: 30,
+        retryAfterSeconds: 30,
+      }),
+    };
+    const { deps, harness } = makeDeps({ rateLimiter: limiter });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect(res.headers.get("x-ratelimit-limit")).toBe("10");
+    const body = (await res.json()) as { type: string; error: { type: string } };
+    expect(body.type).toBe("error");
+    // Anthropic rate-limit envelope, and routing never ran.
+    expect(harness.order).not.toContain("route");
+  });
+
+  it("does not 429 when the limiter allows the key", async () => {
+    const limiter: MessagesRouteDeps["rateLimiter"] = {
+      check: async () => ({
+        allowed: true,
+        limitedBy: null,
+        limit: 10,
+        remaining: 9,
+        resetSeconds: 30,
+        retryAfterSeconds: 0,
+      }),
+    };
+    const { deps, harness } = makeDeps({ rateLimiter: limiter });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(res.status).toBe(200);
+    expect(harness.order).toContain("route");
   });
 });

@@ -78,6 +78,34 @@ describe('LaneEditor', () => {
     expect(onsave.mock.calls[0][1].constraints.require_json).toBe(true);
   });
 
+  it('offers the model catalog as combobox suggestions on primary + fallback inputs', () => {
+    const models = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro', 'zenmux/auto'];
+    const { container } = render(LaneEditor, { lane: makeLane(), models, onsave: vi.fn() });
+
+    // A <datalist> with one <option> per alias is rendered…
+    const datalist = container.querySelector('datalist');
+    expect(datalist).not.toBeNull();
+    const options = Array.from(datalist?.querySelectorAll('option') ?? []).map((o) => o.value);
+    expect(options).toEqual(models);
+
+    // …and both inputs reference it via `list`, turning them into comboboxes.
+    const primary = container.querySelector("input[name='primary']") as HTMLInputElement;
+    const fallbackAdd = screen.getByTestId('fallback-add-input') as HTMLInputElement;
+    const listId = datalist?.id;
+    expect(listId).toBeTruthy();
+    expect(primary.getAttribute('list')).toBe(listId);
+    expect(fallbackAdd.getAttribute('list')).toBe(listId);
+  });
+
+  it('still works as a plain text input when no models are provided (graceful default)', () => {
+    const { container } = render(LaneEditor, { lane: makeLane(), onsave: vi.fn() });
+    const datalist = container.querySelector('datalist');
+    // datalist exists but is empty; the input is still typeable (combobox falls back to text).
+    expect(datalist?.querySelectorAll('option')).toHaveLength(0);
+    const primary = screen.getByLabelText(/primary/i) as HTMLInputElement;
+    expect(primary.value).toBe('best_code_model');
+  });
+
   it('balanced guard: clearing primary disables save and shows a validation hint', async () => {
     const onsave = vi.fn();
     render(LaneEditor, {

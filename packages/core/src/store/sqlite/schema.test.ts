@@ -1,10 +1,12 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { eq } from "drizzle-orm";
+import { getTableConfig } from "drizzle-orm/sqlite-core";
 import { describe, expect, it } from "vitest";
 import { createSqliteDb, runMigrations } from "./migrate.js";
-import { apiKeys } from "./schema.js";
+import { apiKeys, rateLimitBuckets, routingSignals } from "./schema.js";
 
 describe("sqlite schema + migrations", () => {
   it("applies cleanly to a fresh db and is idempotent on re-run", () => {
@@ -60,6 +62,82 @@ describe("sqlite schema + migrations", () => {
     ]) {
       expect(telCols).toContain(c);
     }
+    raw.close();
+  });
+
+  it("v6 rebuild relaxes cost_usd to REAL and preserves existing rows", () => {
+    // Simulate an OLD database already migrated through v5 (INTEGER cost_usd)
+    // carrying a telemetry row, then let runMigrations apply only v6.
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v6-"));
+    const path = join(dir, "helm.db");
+    try {
+      const seed = new Database(path);
+      seed.exec(
+        "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);",
+      );
+      seed.exec(
+        `CREATE TABLE telemetry (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL UNIQUE,
+          api_key_id TEXT NOT NULL,
+          decision_json TEXT NOT NULL,
+          final_status TEXT,
+          cost_usd INTEGER,
+          created_at INTEGER NOT NULL
+        );`,
+      );
+      const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
+      for (const v of [1, 2, 3, 4, 5]) rec.run(v, Date.now());
+      seed
+        .prepare(
+          "INSERT INTO telemetry (id, request_id, api_key_id, decision_json, cost_usd, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run("t1", "req_old", "k1", "{}", 0.00321, Date.now());
+      seed.close();
+
+      runMigrations(path);
+
+      const after = new Database(path);
+      const type = (
+        after.prepare("PRAGMA table_info(telemetry)").all() as Array<{
+          name: string;
+          type: string;
+        }>
+      ).find((c) => c.name === "cost_usd")?.type;
+      expect(type).toBe("REAL");
+      const row = after.prepare("SELECT cost_usd FROM telemetry WHERE id = ?").get("t1") as {
+        cost_usd: number;
+      };
+      expect(row.cost_usd).toBeCloseTo(0.00321, 5);
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("declares the composite PK on rate_limit_buckets (key_id, dim) — matches pg + onConflict target", () => {
+    const cfg = getTableConfig(rateLimitBuckets);
+    const pk = cfg.primaryKeys[0];
+    expect(pk).toBeDefined();
+    expect(pk?.columns.map((c) => c.name)).toEqual(["key_id", "dim"]);
+  });
+
+  it("declares the composite PK on routing_signals (task_type, lane) — matches pg", () => {
+    const cfg = getTableConfig(routingSignals);
+    const pk = cfg.primaryKeys[0];
+    expect(pk).toBeDefined();
+    expect(pk?.columns.map((c) => c.name)).toEqual(["task_type", "lane"]);
+  });
+
+  it("declares cost_usd as REAL (mirrors pg doublePrecision; no float truncation)", () => {
+    const db = createSqliteDb(":memory:");
+    const raw = db.$sqlite;
+    const cols = raw.prepare("PRAGMA table_info(telemetry)").all() as Array<{
+      name: string;
+      type: string;
+    }>;
+    const costUsd = cols.find((c) => c.name === "cost_usd");
+    expect(costUsd?.type).toBe("REAL");
     raw.close();
   });
 

@@ -68,7 +68,13 @@ const OpenAIChunkUsageSchema = z
   .object({
     prompt_tokens: z.number().int().nonnegative().optional(),
     completion_tokens: z.number().int().nonnegative().optional(),
+    // Some upstreams flatten cached here; real OpenAI nests it under
+    // prompt_tokens_details.cached_tokens (matching the non-stream openai.ts shape).
     cached_tokens: z.number().int().nonnegative().optional(),
+    prompt_tokens_details: z
+      .object({ cached_tokens: z.number().int().nonnegative().optional() })
+      .passthrough()
+      .optional(),
   })
   .partial();
 
@@ -335,21 +341,43 @@ export async function* convertOpenAIStreamToAnthropic(
       }
     }
 
-    if (chunk.usage) state.usage = chunk.usage; // buffer; never billed mid-stream
+    // Buffer usage; never billed mid-stream (pit #2). Raw upstream `prompt_tokens` is
+    // the FULL prompt (cached + fresh), but mapUsage() expects IR usage where prompt
+    // has ALREADY had cached subtracted (the non-stream openai.ts path does the same).
+    // Normalize here: prompt = max(0, prompt − cached), carry cached separately. Read
+    // cached from the flat field OR the real OpenAI prompt_tokens_details nesting.
+    if (chunk.usage) {
+      const u = chunk.usage;
+      const cached = u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+      state.usage = {
+        ...(u.prompt_tokens !== undefined
+          ? { prompt_tokens: Math.max(0, u.prompt_tokens - cached) }
+          : {}),
+        ...(u.completion_tokens !== undefined ? { completion_tokens: u.completion_tokens } : {}),
+        ...(cached > 0 ? { cached_tokens: cached } : {}),
+      };
+    }
     if (choice?.finish_reason != null) state.finishReason = choice.finish_reason;
   }
 
   // —— Stream end: flush any tool block that never saw an argument fragment, close
   // every open block exactly once, then the terminal events. ——
   for (const slot of state.toolIndexToBlock.values()) {
-    if (!slot.started) {
-      slot.started = true;
-      yield {
-        type: "content_block_start",
-        index: slot.blockIndex,
-        content_block: { type: "tool_use", id: slot.id, name: slot.name, input: {} },
-      };
+    if (slot.started) continue;
+    // A slot that never produced a name AND never produced an argument fragment is an
+    // empty husk (upstream announced an index/id then dropped it). Emitting it would
+    // produce a name:'' tool_use block AND — worse — an orphan content_block_stop
+    // (pit #4). Skip ALLOCATION entirely: drop its block from the close set, never start.
+    if (slot.name === "" && slot.argBuffer === "") {
+      state.openBlocks.delete(slot.blockIndex);
+      continue;
     }
+    slot.started = true;
+    yield {
+      type: "content_block_start",
+      index: slot.blockIndex,
+      content_block: { type: "tool_use", id: slot.id, name: slot.name, input: {} },
+    };
   }
 
   // Close blocks in allocation order; the openBlocks set guarantees each fires once.

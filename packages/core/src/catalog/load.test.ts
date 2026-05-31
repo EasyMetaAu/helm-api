@@ -18,13 +18,19 @@ function reader(over: (path: string) => string): (path: string) => string {
   };
 }
 
+// An absent OPTIONAL override is signalled by an ENOENT throw (fs.readFileSync's
+// behaviour for a missing file); only `code === 'ENOENT'` is treated as absent.
+function enoent(): never {
+  throw Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" });
+}
+
 describe("loadRuntimeCatalog", () => {
   it("loads the checked-in generated catalog with no overrides (absent yamls)", () => {
     // readFile that throws for every override file → both treated as absent.
     const catalog = loadRuntimeCatalog({
       configDir: "/cfg",
       readFile: reader(() => {
-        throw new Error("ENOENT");
+        enoent();
       }),
     });
     // The generated catalog ships known model keys — at least one real entry.
@@ -43,7 +49,7 @@ describe("loadRuntimeCatalog", () => {
           // claude-3-5-haiku is generated with supportsVision:false — flip it.
           return '"claude-3-5-haiku-20241022":\n  supportsVision: true\n';
         }
-        throw new Error("ENOENT");
+        enoent();
       }),
     });
     const haiku = catalog.get("claude-3-5-haiku-20241022");
@@ -69,7 +75,7 @@ describe("loadRuntimeCatalog", () => {
             "",
           ].join("\n");
         }
-        throw new Error("ENOENT");
+        enoent();
       }),
     });
     const local = catalog.get("local/llama-3.1-70b");
@@ -98,9 +104,54 @@ describe("loadRuntimeCatalog", () => {
             // supportsTools must be a boolean → schema rejects.
             return '"x/y":\n  supportsTools: "yes"\n';
           }
-          throw new Error("ENOENT");
+          enoent();
         }),
       }),
     ).toThrow(CatalogError);
+  });
+
+  it("fails CLOSED when an override read throws a NON-ENOENT error (EACCES etc.)", () => {
+    // EACCES/EIO/broken-symlink must NOT be swallowed as "absent": that would
+    // silently wipe relay-model capabilities+pricing (they live ONLY in the
+    // override layer) — a principle-2 fail-closed inversion.
+    expect(() =>
+      loadRuntimeCatalog({
+        configDir: "/cfg",
+        readFile: reader((p) => {
+          if (p.endsWith("capabilities.yaml")) {
+            throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+          }
+          enoent();
+        }),
+      }),
+    ).toThrow(CatalogError);
+  });
+
+  it("re-throws an error with no .code as fail-closed (not treated as absent)", () => {
+    expect(() =>
+      loadRuntimeCatalog({
+        configDir: "/cfg",
+        readFile: reader((p) => {
+          if (p.endsWith("pricing.yaml")) {
+            throw new Error("unexpected reader failure");
+          }
+          enoent();
+        }),
+      }),
+    ).toThrow(CatalogError);
+  });
+
+  it("emits a structured 'catalog.override_absent' log per absent override (wrong-CWD observability)", () => {
+    const logs: Array<{ level: string; msg: string; fields?: Record<string, unknown> }> = [];
+    loadRuntimeCatalog({
+      configDir: "/cfg",
+      readFile: reader(() => enoent()),
+      log: (level, msg, fields) => logs.push({ level, msg, fields }),
+    });
+    const absent = logs.filter((l) => l.msg === "catalog.override_absent");
+    expect(absent).toHaveLength(2); // capabilities.yaml + pricing.yaml
+    const files = absent.map((l) => l.fields?.file);
+    expect(files.some((f) => String(f).endsWith("capabilities.yaml"))).toBe(true);
+    expect(files.some((f) => String(f).endsWith("pricing.yaml"))).toBe(true);
   });
 });

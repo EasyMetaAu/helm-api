@@ -184,7 +184,11 @@ function splitStatements(block: string): string[] {
 // Apply pending migrations against an open drizzle pg handle. Idempotent: a
 // `_migrations` ledger records applied versions so re-running is a no-op. Throws
 // on failure so the caller fails-closed at startup. Statements run one at a time
-// (the pg wire protocol forbids multi-command prepared statements).
+// (the pg wire protocol forbids multi-command prepared statements), but EACH
+// migration's statements + its ledger INSERT are wrapped in a single
+// BEGIN/COMMIT (rolled back on error) — mirroring the sqlite adapter's
+// db.transaction — so a partial failure can never leave the ledger lying about a
+// half-applied version.
 export async function runPgMigrations(db: RawExecutor): Promise<void> {
   await db.execute(
     sql.raw(
@@ -198,12 +202,21 @@ export async function runPgMigrations(db: RawExecutor): Promise<void> {
   const have = new Set(rows.map((r) => Number(r.version)));
   for (const m of MIGRATIONS) {
     if (have.has(m.version)) continue;
-    for (const stmt of splitStatements(m.sql)) {
-      await db.execute(sql.raw(stmt));
+    await db.execute(sql.raw("BEGIN"));
+    try {
+      for (const stmt of splitStatements(m.sql)) {
+        await db.execute(sql.raw(stmt));
+      }
+      await db.execute(
+        sql.raw(
+          `INSERT INTO _migrations (version, applied_at) VALUES (${m.version}, ${Date.now()})`,
+        ),
+      );
+      await db.execute(sql.raw("COMMIT"));
+    } catch (err) {
+      await db.execute(sql.raw("ROLLBACK"));
+      throw err;
     }
-    await db.execute(
-      sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${m.version}, ${Date.now()})`),
-    );
   }
 }
 

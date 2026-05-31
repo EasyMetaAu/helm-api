@@ -5,7 +5,10 @@
   import { t } from '$lib/i18n';
 
   // Data comes from `+page.ts`'s load (mocked via the `data` prop in tests).
-  let { data }: { data: { lanes: Lane[] } } = $props();
+  // `models` is the routable-alias catalog the editor offers as combobox
+  // suggestions; it defaults to [] so older callers/tests without it still work.
+  let { data }: { data: { lanes: Lane[]; models?: string[] } } = $props();
+  const models = $derived(data.models ?? []);
 
   // Seed the working list from the loaded data once; thereafter the page owns it.
   let lanes = $state<Lane[]>(untrack(() => data.lanes));
@@ -36,21 +39,29 @@
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <header>
-    <h1 class="text-2xl font-semibold text-slate-900">{$t('Lanes')}</h1>
-    <p class="text-sm text-slate-500">
-      {$t("View and fine-tune each lane's primary → fallback chain and constraints.")}
+    <h1 class="page-title">{$t('Lanes')}</h1>
+    <p class="section-desc">
+      {$t(
+        'A lane is a quality/cost tier (like economy, balanced, or premium). Each lane has one primary model and an ordered fallback chain that is tried when the primary is unavailable.',
+      )}
     </p>
   </header>
 
   {#if error}
-    <p class="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+    <p class="alert-error" role="alert">
       {error}
     </p>
   {/if}
 
-  <div class="flex flex-col gap-4">
-    {#each lanes as lane (lane.name)}
-      <LaneEditor {lane} onsave={handleSave} />
-    {/each}
-  </div>
+  {#if lanes.length === 0}
+    <div class="empty-state">
+      {$t('No lanes are configured yet.')}
+    </div>
+  {:else}
+    <div class="flex flex-col gap-4">
+      {#each lanes as lane (lane.name)}
+        <LaneEditor {lane} {models} onsave={handleSave} />
+      {/each}
+    </div>
+  {/if}
 </section>

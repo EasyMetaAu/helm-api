@@ -281,6 +281,40 @@ describe("routeRequest — orchestration", () => {
     expect(plan.candidate_chain).toContain("best_reasoning_model");
   });
 
+  it("keyCaps clamp a premium policy/lane result down to the key's maxLane (OUTER bound, wins over use_lane pin)", async () => {
+    // A policy pins `premium`, but the key's caps allow at most `economy`.
+    // Key caps are the non-negotiable outer bound and must win.
+    const d = deps({
+      classify: vi.fn(async () => classification({ task_type: "chat" })),
+      policies: { policies: [{ id: "pin-premium", match: {}, use_lane: "premium" }] },
+    });
+    await routeRequest(req(), d, { keyCaps: { maxLane: "economy", allowedLanes: null } });
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+  });
+
+  it("keyCaps allowedLanes narrows the resolved lane to the permitted set", async () => {
+    const d = deps({
+      classify: vi.fn(async () => classification({ task_type: "chat" })),
+      policies: { policies: [{ id: "pin-premium", match: {}, use_lane: "premium" }] },
+    });
+    await routeRequest(req(), d, {
+      keyCaps: { maxLane: null, allowedLanes: ["economy", "balanced"] },
+    });
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    // premium not allowed -> highest allowed <= premium = balanced.
+    expect(plan.selected_lane).toBe("balanced");
+  });
+
+  it("keyCaps undefined is a no-op (existing callers unaffected)", async () => {
+    const d = deps();
+    await routeRequest(req(), d);
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("coding");
+  });
+
   it("populates the rich telemetry fields (latency total, fallback_count, cost split, key_prefix)", async () => {
     const d = deps({
       classify: vi.fn(async () => classification({ eval_usd: 0.00003 })),

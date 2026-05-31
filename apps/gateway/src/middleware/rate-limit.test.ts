@@ -56,6 +56,32 @@ describe("rateLimitMiddleware", () => {
     expect(blocked.headers.get("x-ratelimit-remaining")).toBe("0");
   });
 
+  it("enforces the TPM bucket via the injected estimateTokens (not a silent 0)", async () => {
+    // A TPM-only key (rpm:0 unlimited, tpm:100). With a real estimator that
+    // pre-debits each request's token estimate, the SECOND request that pushes
+    // the window past 100 tokens is blocked by tpm — proving the estimator is
+    // wired and TPM is no longer admit-everything.
+    const limiter = createRateLimiter({
+      config: cfg({ default: { rpm: 0, tpm: 100 } }),
+      store: new InMemoryRateLimitStore(),
+    });
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      // biome-ignore lint/suspicious/noExplicitAny: minimal identity stub
+      (c as any).set("identity", { keyId: "k1" });
+      await next();
+    });
+    // Fixed 60-token estimate per request: 1st (60) allowed, 2nd (120>100) blocked.
+    app.use("*", rateLimitMiddleware({ limiter, now: () => 0, estimateTokens: () => 60 }));
+    app.get("/v1/chat/completions", (c) => c.json({ ok: true }));
+
+    expect((await app.request("/v1/chat/completions")).status).toBe(200);
+    const blocked = await app.request("/v1/chat/completions");
+    expect(blocked.status).toBe(429);
+    const body = (await blocked.json()) as { error: { limited_by: string } };
+    expect(body.error.limited_by).toBe("tpm");
+  });
+
   it("is a no-op pass-through when disabled (no headers, always allowed)", async () => {
     const app = buildApp(cfg({ enabled: false, default: { rpm: 1, tpm: 0 } }));
     for (let i = 0; i < 5; i++) {

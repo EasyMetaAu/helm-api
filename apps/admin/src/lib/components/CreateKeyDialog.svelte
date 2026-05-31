@@ -72,9 +72,9 @@
     if (revealed) {
       const view: ApiKeyView = {
         key_id: revealed.key_id,
-        // The create response does not include the prefix; show a redacted
-        // placeholder until the next list load fills it in. NEVER the plaintext.
-        prefix: revealed.plaintext.slice(0, 14),
+        // Server-minted display prefix (non-sensitive), carried on the create
+        // response. NEVER a slice of the plaintext.
+        prefix: revealed.prefix,
         role,
         max_lane: maxLane || null,
         allowed_lanes: null,
@@ -90,13 +90,9 @@
   }
 </script>
 
-<div
-  class="rounded-lg border border-slate-300 bg-white p-5 shadow-sm"
-  role="dialog"
-  aria-label={$t('Create API key')}
->
+<div class="dialog" role="dialog" aria-label={$t('Create API key')}>
   {#if revealed}
-    <h2 class="text-lg font-semibold text-slate-900">{$t('Your new API key')}</h2>
+    <h2 class="section-header">{$t('Your new API key')}</h2>
     <p class="mt-1 text-sm text-amber-700">
       {$t(
         'Copy it now — this is the only time it will be shown. We store only a hash, so it cannot be recovered later.',
@@ -105,45 +101,37 @@
     <div class="mt-3 flex items-center gap-2">
       <code
         data-testid="plaintext-reveal"
-        class="flex-1 break-all rounded bg-slate-100 px-3 py-2 font-mono text-sm text-slate-900"
+        class="flex-1 break-all rounded bg-slate-100 px-3 py-2 font-mono text-sm text-ink-strong"
         >{revealed.plaintext}</code
       >
-      <button
-        type="button"
-        class="rounded bg-slate-800 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700"
-        onclick={copyPlaintext}>{copied ? $t('Copied') : $t('Copy')}</button
+      <button type="button" class="btn-primary-sm" onclick={copyPlaintext}
+        >{copied ? $t('Copied') : $t('Copy')}</button
       >
     </div>
     <div class="mt-4 flex justify-end">
-      <button
-        type="button"
-        class="rounded bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
-        onclick={confirmSaved}>{$t('I saved it')}</button
-      >
+      <button type="button" class="btn-success" onclick={confirmSaved}>{$t('I saved it')}</button>
     </div>
   {:else}
-    <h2 class="text-lg font-semibold text-slate-900">{$t('Create API key')}</h2>
+    <h2 class="section-header">{$t('Create API key')}</h2>
 
     {#if error}
-      <p
-        class="mt-2 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
-        role="alert"
-      >
+      <p class="alert-error mt-2" role="alert">
         {error}
       </p>
     {/if}
 
     <div class="mt-3 flex flex-col gap-3">
       <label class="flex flex-col gap-1 text-sm">
-        <span class="font-medium text-slate-700">{$t('Role')}</span>
-        <select
-          bind:value={role}
-          aria-label={$t('role')}
-          class="rounded border border-slate-300 px-2 py-1.5 text-sm"
-        >
+        <span class="field-label">{$t('Role')}</span>
+        <select bind:value={role} aria-label={$t('role')} class="select">
           <option value="user">user</option>
           <option value="root">root</option>
         </select>
+        <span class="field-help"
+          >{$t(
+            'user keys authenticate normal client traffic. root keys are for the management plane only.',
+          )}</span
+        >
         {#if role === 'root'}
           <span class="text-xs text-amber-700"
             >{$t(
@@ -154,17 +142,18 @@
       </label>
 
       <label class="flex flex-col gap-1 text-sm">
-        <span class="font-medium text-slate-700">{$t('Max lane (cap)')}</span>
-        <select
-          bind:value={maxLane}
-          aria-label={$t('max lane')}
-          class="rounded border border-slate-300 px-2 py-1.5 text-sm"
-        >
+        <span class="field-label">{$t('Max lane (cap)')}</span>
+        <select bind:value={maxLane} aria-label={$t('max lane')} class="select">
           <option value="">{$t('— no cap —')}</option>
           {#each lanes as lane (lane)}
             <option value={lane}>{lane}</option>
           {/each}
         </select>
+        <span class="field-help"
+          >{$t(
+            'The highest lane this key may reach. Requests asking for a richer lane are capped down to this one. Leave unset for no cap.',
+          )}</span
+        >
       </label>
 
       <label class="flex items-center gap-2 text-sm">
@@ -173,22 +162,19 @@
           bind:checked={allowCustomModel}
           aria-label={$t('allow custom model')}
         />
-        <span class="text-slate-700">{$t('Allow explicit client-specified model passthrough')}</span
-        >
+        <span class="text-ink-body">{$t('Allow explicit client-specified model passthrough')}</span>
       </label>
+      <span class="field-help"
+        >{$t(
+          'Lets this client bypass lanes and target a specific model by name. Leave off to keep every request routed through lanes.',
+        )}</span
+      >
     </div>
 
     <div class="mt-4 flex justify-end gap-2">
-      <button
-        type="button"
-        class="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
-        onclick={onclose}>{$t('Cancel')}</button
-      >
-      <button
-        type="button"
-        class="rounded bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
-        disabled={creating}
-        onclick={handleCreate}>{$t('Create key')}</button
+      <button type="button" class="btn-secondary" onclick={onclose}>{$t('Cancel')}</button>
+      <button type="button" class="btn-primary" disabled={creating} onclick={handleCreate}
+        >{$t('Create key')}</button
       >
     </div>
   {/if}

@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 
 // Admin-UI authentication. This is DELIBERATELY separate from API-key auth
@@ -61,17 +61,14 @@ export function warnIfAdminUnconfigured(auth: AdminAuthConfig, log: (line: strin
 }
 
 // Constant-time string comparison to avoid leaking length/content via timing.
-// Hashing both sides to a fixed-length digest keeps timingSafeEqual happy even
-// when the inputs differ in length.
+// Both sides are reduced to a fixed-length sha256 digest first, so the inputs
+// fed to timingSafeEqual are always equal-length (32 bytes) regardless of the
+// raw credential lengths — no length branch, and timing does not vary with the
+// attacker-supplied length. (Pre-hash collisions are infeasible for sha256.)
 function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a, "utf8");
-  const bufB = Buffer.from(b, "utf8");
-  if (bufA.length !== bufB.length) {
-    // Still run a comparison of equal-length buffers to keep timing flat.
-    timingSafeEqual(bufA, bufA);
-    return false;
-  }
-  return timingSafeEqual(bufA, bufB);
+  const digA = createHash("sha256").update(a, "utf8").digest();
+  const digB = createHash("sha256").update(b, "utf8").digest();
+  return timingSafeEqual(digA, digB);
 }
 
 // Parse `Authorization: Basic base64(user:pass)`. Returns null for any other

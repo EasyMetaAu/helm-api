@@ -12,9 +12,11 @@ export interface RateLimitMiddlewareDeps {
   limiter: RateLimiterPort;
   // Injected clock (ms) so e2e/unit tests are deterministic; defaults to wall.
   now?: () => number;
-  // Pre-classification token estimate for TPM pre-debit. Defaults to 0 (RPM-only
-  // until a body-size estimator is wired). Kept injectable so it can grow without
-  // touching the middleware contract.
+  // Pre-classification token estimate for TPM pre-debit. The composition root
+  // (server.ts) injects a deterministic Content-Length/4 estimator so the TPM
+  // bucket actually meters; it defaults to 0 (RPM-only) ONLY when an injector
+  // omits it — a TPM-only key with no estimator would otherwise admit everything.
+  // Kept injectable so the heuristic can grow without touching this contract.
   estimateTokens?: (c: Parameters<MiddlewareHandler>[0]) => number;
 }
 

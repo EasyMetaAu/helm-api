@@ -28,6 +28,42 @@ describe("evaluatePolicies — first-match", () => {
     expect(out.use_lane).toBe("coding");
   });
 
+  it("PINs the first use_lane but ACCUMULATES caps from later matching policies", () => {
+    // First-match wins the PIN (use_lane), but a later matching cap policy
+    // (e.g. the shipped budget_org_cap, placed last) must NOT be discarded.
+    const c = cfg([
+      { id: "chat_complex_to_premium", match: { task_type: "coding" }, use_lane: "premium" },
+      { id: "budget_org_cap", match: { complexity: "complex" }, max_lane: "balanced" },
+    ]);
+    const out = evaluatePolicies(baseCtx, c);
+    expect(out.matched_policy_id).toBe("chat_complex_to_premium");
+    expect(out.use_lane).toBe("premium");
+    // the later cap policy's max_lane is accumulated.
+    expect(out.max_lane).toBe("balanced");
+  });
+
+  it("intersects allowed_lanes and takes the strictest max_lane across matches", () => {
+    const c = cfg([
+      {
+        id: "pin",
+        match: { task_type: "coding" },
+        use_lane: "premium",
+        allowed_lanes: ["economy", "balanced", "premium"],
+        max_lane: "premium",
+      },
+      {
+        id: "narrow",
+        match: { complexity: "complex" },
+        allowed_lanes: ["economy", "balanced"],
+        max_lane: "balanced",
+      },
+    ]);
+    const out = evaluatePolicies(baseCtx, c);
+    expect(out.use_lane).toBe("premium");
+    expect(out.max_lane).toBe("balanced"); // strictest (lowest LANE_RANK)
+    expect(out.allowed_lanes).toEqual(["economy", "balanced"]); // intersection
+  });
+
   it("returns all-null outcome when nothing matches", () => {
     const c = cfg([{ id: "p", match: { task_type: "writing" }, use_lane: "balanced" }]);
     const out = evaluatePolicies(baseCtx, c);

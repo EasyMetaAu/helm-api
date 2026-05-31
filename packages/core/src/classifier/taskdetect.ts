@@ -111,18 +111,58 @@ export function detectTask(req: DetectInput, cfg: ClassifierRulesConfig): TaskDe
   }
 
   // ── fuse: pick the highest score that clears its activation threshold ─────
+  // Tie-break is EXPLICIT and stable so an exact-score tie can never silently
+  // demote a gated task by config (Map insertion) order. Among activated
+  // candidates we order by, in turn:
+  //   1. score                    desc — the primary signal;
+  //   2. margin (score-activation) desc — clearing a higher bar by more wins;
+  //   3. a fixed task priority         — last-resort deterministic seed-ordering
+  //      (gated/high-risk tasks like `security` rank first so a true tie keeps
+  //      them rather than dropping to an alphabetically/insertion-earlier peer).
   const scores = [...acc.values()];
+  const activated = scores.filter((s) => s.score >= activationFor(s.task, cfg));
   let best: TaskScore | undefined;
-  for (const s of scores) {
-    const threshold = activationFor(s.task, cfg);
-    if (s.score < threshold) continue;
-    if (best === undefined || s.score > best.score) best = s;
+  for (const s of activated) {
+    if (best === undefined || tieBreakBetter(s, best, cfg)) best = s;
   }
 
   return {
     task_type: best?.task ?? "chat",
     scores,
   };
+}
+
+// Fixed, deterministic last-resort priority over the closed task vocabulary —
+// only consulted when score AND margin are exactly equal. `security` (and other
+// gated/high-consequence tasks) rank first so a true tie resolves toward the
+// safer classification rather than whichever key the config happened to list
+// earlier. Earlier in this list = higher priority.
+const TASK_TIE_PRIORITY: TaskType[] = [
+  "security",
+  "coding",
+  "math",
+  "data",
+  "extraction",
+  "vision",
+  "web",
+  "tool_use",
+  "writing",
+  "chat",
+];
+
+function tiePriority(task: TaskType): number {
+  const i = TASK_TIE_PRIORITY.indexOf(task);
+  return i === -1 ? TASK_TIE_PRIORITY.length : i;
+}
+
+/** True iff candidate `a` should beat the current `best` under the stable
+ *  (score desc, margin desc, fixed-priority) ordering. */
+function tieBreakBetter(a: TaskScore, best: TaskScore, cfg: ClassifierRulesConfig): boolean {
+  if (a.score !== best.score) return a.score > best.score;
+  const marginA = a.score - activationFor(a.task, cfg);
+  const marginBest = best.score - activationFor(best.task, cfg);
+  if (marginA !== marginBest) return marginA > marginBest;
+  return tiePriority(a.task) < tiePriority(best.task);
 }
 
 function activationFor(task: TaskType, cfg: ClassifierRulesConfig): number {

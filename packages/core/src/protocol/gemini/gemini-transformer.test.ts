@@ -319,6 +319,27 @@ describe("streaming alt=sse (snapshot events -> IR chunks)", () => {
       .filter(Boolean);
     expect(toolNames).toContain("search");
   });
+
+  // test #3: streaming usage subtracts cachedContentTokenCount (matches non-stream).
+  it("subtracts cachedContentTokenCount from prompt_tokens and exposes cached_tokens", async () => {
+    const events: GeminiSSEEvent[] = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "hi" }] } }] },
+      {
+        candidates: [{ content: { role: "model", parts: [{ text: "" }] }, finishReason: "STOP" }],
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 5,
+          totalTokenCount: 105,
+          cachedContentTokenCount: 30,
+        },
+      },
+    ];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const final = chunks.find((c) => c.choices?.[0]?.finish_reason != null);
+    expect(final?.usage?.prompt_tokens).toBe(70);
+    expect(final?.usage?.cached_tokens).toBe(30);
+    expect(final?.usage?.completion_tokens).toBe(5);
+  });
 });
 
 describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
@@ -338,6 +359,54 @@ describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
       .map((p) => ("text" in p ? p.text : ""))
       .join("");
     expect(text).toBe("Hi there");
+    expect(last?.candidates?.[0]?.finishReason).toBe("STOP");
+  });
+
+  // test #4: outbound streaming must surface tool calls as functionCall parts.
+  it("emits a functionCall part in the cumulative snapshot from streamed tool_calls", async () => {
+    const chunks: IRChunk[] = [
+      {
+        id: "c",
+        model: "m",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              tool_calls: [{ index: 0, id: "call_0", function: { name: "get_weather" } }],
+            },
+          },
+        ],
+      },
+      {
+        id: "c",
+        model: "m",
+        choices: [
+          { index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"ci' } }] } },
+        ],
+      },
+      {
+        id: "c",
+        model: "m",
+        choices: [
+          {
+            index: 0,
+            delta: { tool_calls: [{ index: 0, function: { arguments: 'ty":"SF"}' } }] },
+            finish_reason: "tool_calls",
+          },
+        ],
+      },
+    ];
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(chunks)));
+    const last = events[events.length - 1];
+    const parts = last?.candidates?.[0]?.content?.parts ?? [];
+    const fcPart = parts.find((p) => "functionCall" in p) as
+      | { functionCall: { name: string; args: Record<string, unknown> } }
+      | undefined;
+    expect(fcPart).toBeDefined();
+    expect(fcPart?.functionCall.name).toBe("get_weather");
+    // complete args flushed on the finish chunk
+    expect(fcPart?.functionCall.args).toEqual({ city: "SF" });
     expect(last?.candidates?.[0]?.finishReason).toBe("STOP");
   });
 });

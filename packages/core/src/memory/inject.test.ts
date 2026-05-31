@@ -244,6 +244,93 @@ describe("assembleInjectedContext", () => {
     }
   });
 
+  it("only reads observations from the thread (thread-anchored store contract)", async () => {
+    // With no threadId, listObservations must NOT be called — observations are
+    // thread-anchored by schema; project/resource-only scopes return nothing.
+    const store = makeFakeStore({
+      observations: [makeObservation("o1", "should not load", "2026-05-20T00:00:00.000Z")],
+    });
+    const deps = makeDeps(store);
+    const out = await assembleInjectedContext(
+      baseInput({ scope: { projectId: "proj-1", resourceId: "res-1" } }),
+      deps,
+    );
+
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(out.metadata.observation_count).toBe(0);
+  });
+
+  it("queries listObservations with the threadId only (no project/resource spread)", async () => {
+    const store = makeFakeStore({
+      observations: [makeObservation("o1", "obs", "2026-05-20T00:00:00.000Z")],
+      recentMessages: [],
+    });
+    const deps = makeDeps(store);
+    await assembleInjectedContext(baseInput(), deps);
+
+    // Aligned with the thread-only store contract: project/resource are NOT spread
+    // into the observation lookup (the adapters ignore them anyway).
+    expect(store.listObservations).toHaveBeenCalledWith({ threadId: "thread-1" });
+  });
+
+  it("reports 'skipped' writeback and does NOT enqueue when there is no thread target", async () => {
+    const store = makeFakeStore({});
+    const enqueueObserverJob = vi.fn(async () => "observer-job-1");
+    const deps = makeDeps(store, { enqueueObserverJob });
+    const out = await assembleInjectedContext(baseInput({ scope: { projectId: "proj-1" } }), deps);
+
+    expect(enqueueObserverJob).not.toHaveBeenCalled();
+    expect(out.metadata.memory_writeback_status).toBe("skipped");
+    expect(out.metadata.observer_job_id).toBeNull();
+  });
+
+  it("honors the token budget as a hard cap: trims reflections under pressure (resource first) before observations and signals overflow", async () => {
+    // fixedTokens (reflections + recent raw) alone exceed the budget. recent raw is
+    // spec-mandated and survives; reflections are trimmed resource-first, then
+    // project; an overflow must be signalled via the log.
+    const store = makeFakeStore({
+      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "proj reflection" }),
+      resourceReflection: makeReflection({
+        resourceId: "res-1",
+        reflectionText: "resource reflection text",
+      }),
+      observations: [makeObservation("o1", "an observation", "2026-05-20T00:00:00.000Z")],
+      recentMessages: [makeRaw("r1", "user", "recent raw must survive")],
+    });
+    const log = vi.fn();
+    // recent raw alone = 4 tokens; allow only 4 → both reflections + observations must go.
+    const deps = makeDeps(store, { log });
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 4 }), deps);
+
+    const contents = out.messages.map((m) => m.content);
+    // recent raw is NEVER sacrificed.
+    expect(contents).toContain("recent raw must survive");
+    // both reflections trimmed away under hard budget pressure.
+    expect(contents).not.toContain("resource reflection text");
+    expect(contents).not.toContain("proj reflection");
+    // hard cap honored.
+    expect(out.metadata.memory_tokens_injected).toBeLessThanOrEqual(4);
+    // overflow must be SIGNALLED.
+    const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toMatch(/memory.inject.*overflow/i);
+  });
+
+  it("trims resource reflection before project reflection when only one fits", async () => {
+    const store = makeFakeStore({
+      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "PROJ" }),
+      resourceReflection: makeReflection({ resourceId: "res-1", reflectionText: "RES" }),
+      recentMessages: [],
+    });
+    // Budget fits exactly one 1-token reflection → project (higher priority) kept,
+    // resource dropped first.
+    const deps = makeDeps(store);
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), deps);
+
+    const contents = out.messages.map((m) => m.content);
+    expect(contents).toContain("PROJ");
+    expect(contents).not.toContain("RES");
+  });
+
   it("does not emit any lane / routing field — only context text", async () => {
     const store = makeFakeStore({
       projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "x" }),

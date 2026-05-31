@@ -42,8 +42,8 @@ function fullClassifier() {
       model: "deepseek/deepseek-v4-flash",
       temperature: 0,
       max_tokens: 256,
-      timeout_ms: 300,
-      outer_timeout_ms: 250,
+      timeout_ms: 250,
+      outer_timeout_ms: 350,
       on_failure: "balanced",
       cache: { enabled: true, key: "content_hash", ttl_sec: 300, max_entries: 5000 },
     },
@@ -61,8 +61,8 @@ describe("ClassifierConfigSchema", () => {
     const parsed = ClassifierEvalConfigSchema.parse({ model: "deepseek/deepseek-v4-flash" });
     expect(parsed.enabled).toBe(false);
     expect(parsed.max_tokens).toBe(256);
-    expect(parsed.timeout_ms).toBe(300);
-    expect(parsed.outer_timeout_ms).toBe(250);
+    expect(parsed.timeout_ms).toBe(250);
+    expect(parsed.outer_timeout_ms).toBe(350);
     expect(parsed.on_failure).toBe("balanced");
     expect(parsed.temperature).toBe(0);
     expect(parsed.cache.enabled).toBe(true);

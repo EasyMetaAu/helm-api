@@ -1,4 +1,4 @@
-import { LaneSchema } from "@helm/core";
+import { LaneSchema, LanesConfigSchema } from "@helm/core";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps } from "./deps.js";
@@ -33,6 +33,14 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       return c.json({ error: "invalid lane", issues: parsed.error.issues }, 400);
     }
     const lanes = { ...(await deps.rules.getLanes()), [name]: parsed.data };
+    // Re-validate the WHOLE map before writing: a single-lane edit can still break
+    // the map-level invariant (LanesConfigSchema requires `balanced`, the
+    // classification-fallback terminal — 原则5). Fail-closed: nothing written on a
+    // violation (原则2).
+    const map = LanesConfigSchema.safeParse(lanes);
+    if (!map.success) {
+      return c.json({ error: "invalid lanes config", issues: map.error.issues }, 400);
+    }
     await deps.rules.setLanes(lanes);
     return c.json(parsed.data);
   });
@@ -43,6 +51,13 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const lanes = { ...(await deps.rules.getLanes()) };
     if (!(name in lanes)) return c.json({ error: "lane not found" }, 404);
     delete lanes[name];
+    // Re-validate the mutated map BEFORE writing. Deleting `balanced` (or any edit
+    // that breaks the map-level invariant) must be rejected with nothing written —
+    // it is the classification-fallback terminal (原则5, fail-closed 原则2).
+    const map = LanesConfigSchema.safeParse(lanes);
+    if (!map.success) {
+      return c.json({ error: "invalid lanes config", issues: map.error.issues }, 409);
+    }
     await deps.rules.setLanes(lanes);
     return c.json({ deleted: name });
   });

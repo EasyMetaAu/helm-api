@@ -34,10 +34,13 @@ export interface CreateKeyInput {
   allow_custom_model?: boolean;
 }
 
-// The ONLY shape that ever carries plaintext, returned once by POST.
+// The ONLY shape that ever carries plaintext, returned once by POST. `prefix` is
+// the server-minted non-sensitive display prefix (same value stored + listed) —
+// carried so the UI builds the redacted view from it instead of slicing plaintext.
 export interface CreatedKey {
   key_id: string;
   plaintext: string;
+  prefix: string;
 }
 
 // DELETE response (soft revoke). The server echoes the revoked id; it does NOT

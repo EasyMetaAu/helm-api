@@ -38,6 +38,12 @@ export interface AdminApiDeps {
   rules: RuleStore;
   keyStore: KeyStore;
   telemetry: TelemetryStore;
+  // The catalog of routable model aliases (config.providers[].models[].alias),
+  // deduped + sorted at startup. Read-only: the Lanes admin UI offers these as
+  // combobox suggestions so an operator picks a real alias instead of hand-typing
+  // one (a typo would silently break a fallback chain). A supply-chain detail
+  // (原则6) exposed only to the authenticated admin surface, never to API clients.
+  modelAliases: string[];
   // Mint a fresh key (crypto). Injected for testability + single-source plaintext.
   genKey: () => GeneratedKeyParts;
   // Generate a key_id for a new key. Injected so tests get deterministic ids.

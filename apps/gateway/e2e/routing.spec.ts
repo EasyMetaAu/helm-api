@@ -32,6 +32,15 @@ const BALANCED_HEAD = "deepseek-crs/deepseek-pro";
 // serves when the head is fault-injected (scenario 4, EXECUTION fallback).
 const ECONOMY_NEXT = "deepseek-crs/deepseek-flash";
 
+// The upstream WIRE model ids the gateway actually sends (config/providers.yaml
+// `provider_model`), which the mock echoes back verbatim in the response `model`
+// field. Since fix-upstream-model-id decoupled alias from wire id, body.model is
+// the bare wire id; the routing ALIAS is surfaced separately via the
+// `x-helm-final-model` header (asserted above each body.model check).
+const ECONOMY_HEAD_WIRE = "gpt-5.4-mini";
+const PREMIUM_HEAD_WIRE = "gpt-5.5";
+const ECONOMY_NEXT_WIRE = "deepseek-flash";
+
 function chat(content: string, extra: Record<string, unknown> = {}) {
   return {
     model: "gpt-4o-mini",
@@ -55,7 +64,7 @@ test.describe("routing e2e", () => {
     // final model is the economy head and is echoed back by the mock.
     expect(res.headers()["x-helm-final-model"]).toBe(ECONOMY_HEAD);
     const body = await res.json();
-    expect(body.model).toBe(ECONOMY_HEAD);
+    expect(body.model).toBe(ECONOMY_HEAD_WIRE);
   });
 
   // ── Scenario 2: complex prompt → premium lane ───────────────────────────────
@@ -70,7 +79,7 @@ test.describe("routing e2e", () => {
     expect(res.headers()["x-helm-lane"]).toBe("premium");
     expect(res.headers()["x-helm-final-model"]).toBe(PREMIUM_HEAD);
     const body = await res.json();
-    expect(body.model).toBe(PREMIUM_HEAD);
+    expect(body.model).toBe(PREMIUM_HEAD_WIRE);
   });
 
   // ── Scenario 3: response_format=json_object → json lane + valid JSON shape ───
@@ -122,7 +131,7 @@ test.describe("routing e2e", () => {
     expect(finalModel).not.toBe(ECONOMY_HEAD);
     expect(finalModel).toBe(ECONOMY_NEXT);
     const body = await res.json();
-    expect(body.model).toBe(ECONOMY_NEXT);
+    expect(body.model).toBe(ECONOMY_NEXT_WIRE);
   });
 
   // ── Scenario 5: unclassifiable prompt → balanced (classification fallback) ──

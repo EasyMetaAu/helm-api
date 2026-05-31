@@ -82,7 +82,7 @@ function project(server: Record<string, unknown>): ClassifierConfig {
       model: typeof evalCfg.model === 'string' ? evalCfg.model : '',
       temperature: num(evalCfg.temperature, 0),
       max_tokens: num(evalCfg.max_tokens, 256),
-      timeout_ms: num(evalCfg.timeout_ms, 300),
+      timeout_ms: num(evalCfg.timeout_ms, 250),
       on_failure: typeof evalCfg.on_failure === 'string' ? evalCfg.on_failure : 'balanced',
       cache: { enabled: cache.enabled === true, ttl_sec: num(cache.ttl_sec, 300) },
     },

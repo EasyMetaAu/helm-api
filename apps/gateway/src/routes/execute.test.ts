@@ -192,6 +192,56 @@ describe("createExecute — gateway execution adapter", () => {
     expect(seen).toEqual(chunks);
   });
 
+  it("logs a structured truncated-stream event when the relay throws AFTER the first chunk", async () => {
+    // peekStream records success after the first chunk (breaker semantics kept).
+    // If the upstream stream then dies mid-flight, telemetry already shows ok —
+    // so at minimum a structured log must make the truncation observable. Safe
+    // fields only (alias + error_class), NEVER key/payload (principle 7).
+    async function* dies(): AsyncGenerator<string> {
+      yield 'data: {"a":1}\n\n';
+      throw new Error("connection reset mid-stream");
+    }
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn().mockReturnValue(dies()),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const recordSuccess = vi.spyOn(cb, "recordSuccess");
+    const logs: Array<{ level: string; msg: string; fields: Record<string, unknown> }> = [];
+    const execute = createExecute({
+      defaultProvider: provider,
+      registry: registry({ a: "m-a" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      log: (level, msg, fields) => logs.push({ level, msg, fields }),
+    });
+
+    const out = await execute(plan(["a"]), req({ stream: true }));
+    expect(out.final.status).toBe("ok");
+    expect(recordSuccess).toHaveBeenCalledTimes(1);
+    // Breaker semantics unchanged: a post-first-chunk failure is NOT a failure.
+    expect(recordFailure).not.toHaveBeenCalled();
+
+    const seen: string[] = [];
+    let threw = false;
+    try {
+      for await (const ch of out.stream as AsyncIterable<string>) seen.push(ch);
+    } catch {
+      threw = true;
+    }
+    expect(seen).toEqual(['data: {"a":1}\n\n']);
+    expect(threw).toBe(true);
+    const truncated = logs.find((l) => l.msg === "stream.truncated");
+    expect(truncated).toBeDefined();
+    expect(truncated?.fields.alias).toBe("a");
+    // Safe fields only — no key/payload/raw error object leaked.
+    const serialized = JSON.stringify(truncated?.fields);
+    expect(serialized).not.toContain("connection reset");
+  });
+
   it("crosses providers: a fallback chain spanning two providers invokes both in order", async () => {
     // Registry resolves each alias to a DISTINCT provider. The executor must
     // invoke provider-A's client for the head candidate, then provider-B's client
@@ -315,6 +365,98 @@ describe("createExecute — gateway execution adapter", () => {
     if (out.final.status === "error") {
       expect(out.final.error.error_class).not.toBe("all_providers_failed");
     }
+  });
+
+  // ── ported execution semantics on the LIVE path (drift fix) ────────────────
+
+  it("skips a :free candidate on upstream 429 (free_429) WITHOUT a breaker failure", async () => {
+    // Free-tier throttling is NOT a provider-health signal (principle 5): the
+    // candidate is skipped to the next, no breaker.recordFailure, and the row
+    // carries skip_reason 'free_429' / error_class 'rate_limited'.
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(new UpstreamError("upstream_error", "429", null, 429))
+        .mockResolvedValueOnce({ id: "paid" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      registry: registry({ "free-model:free": "m-free", paid: "m-paid" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["free-model:free", "paid"]), req());
+    expect(out.attempts[0]?.skipped).toBe(true);
+    expect(out.attempts[0]?.skip_reason).toBe("free_429");
+    expect(out.attempts[0]?.error_class).toBe("rate_limited");
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(out.final.status).toBe("ok");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("paid");
+  });
+
+  it("a real upstream error (non-free, or free non-429) still records a breaker failure", async () => {
+    // A :free candidate failing with a NON-429 status is a genuine provider
+    // fault — it must record on the breaker (no free_429 escape hatch).
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(new UpstreamError("upstream_error", "500", null, 500))
+        .mockResolvedValueOnce({ id: "second" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      registry: registry({ "free-model:free": "m-free", b: "m-b" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["free-model:free", "b"]), req());
+    expect(out.attempts[0]?.skipped).toBe(false);
+    expect(out.attempts[0]?.skip_reason).toBeNull();
+    expect(out.attempts[0]?.error_class).toBe("upstream_error");
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith("free-model:free");
+    expect(out.final.status).toBe("ok");
+  });
+
+  it("does NOT treat a generic 'aborted' message as a client abort (only signal/name)", async () => {
+    // Over-broad heuristic fix: an upstream error whose message merely contains
+    // 'aborted' must be a normal provider failure (breaker.recordFailure), NOT a
+    // client-abort termination — the signal is not aborted and name != AbortError.
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(new UpstreamError("upstream_error", "request was aborted upstream"))
+        .mockResolvedValueOnce({ id: "second" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      registry: registry({ a: "m-a", b: "m-b" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["a", "b"]), req());
+    expect(out.attempts[0]?.error_class).toBe("upstream_error");
+    expect(out.attempts[0]?.error_class).not.toBe("client_abort");
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(out.final.status).toBe("ok");
   });
 
   // ── capability-wire: the real catalog feeds the capability filter ──────────

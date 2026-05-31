@@ -81,10 +81,19 @@ function policyId(policy: Policy, index: number): string {
   return policy.id ?? `policy[${index}]`;
 }
 
-// first-match: in declaration order, the first policy whose `match` is fully
-// satisfied wins and evaluation STOPS. No match => all-null outcome so the
-// resolver falls back to task/complexity routing.
+// first-match PIN + caps ACCUMULATION: in declaration order, the FIRST policy
+// whose `match` is satisfied wins the lane PIN (matched_policy_id / use_lane /
+// reason) and STOPS pinning. But caps (max_lane / allowed_lanes) are NOT
+// abandoned at the first match — they accumulate across EVERY matching policy so
+// a cap policy placed after a use_lane policy (e.g. the shipped budget_org_cap,
+// last in config) still binds. Accumulation rules: intersect allowed_lanes
+// (strictest whitelist wins), keep the strictest max_lane by LANE_RANK (lowest).
+// No match => all-null outcome so the resolver falls back to task/complexity.
 export function evaluatePolicies(ctx: PolicyContext, cfg: PoliciesConfig): PolicyOutcome {
+  let pinned: { id: string; use_lane: string | null; reason: string } | null = null;
+  let maxLane: string | null = null;
+  let allowedLanes: string[] | null = null;
+
   for (let i = 0; i < cfg.policies.length; i++) {
     const policy = cfg.policies[i];
     if (policy === undefined) continue;
@@ -92,16 +101,50 @@ export function evaluatePolicies(ctx: PolicyContext, cfg: PoliciesConfig): Polic
     if (hits === null) continue;
 
     const id = policyId(policy, i);
-    const trigger = hits.length > 0 ? `match on [${hits.join(", ")}]` : "no match constraints";
-    return {
-      matched_policy_id: id,
-      use_lane: policy.use_lane ?? null,
-      max_lane: policy.max_lane ?? null,
-      allowed_lanes: policy.allowed_lanes ?? null,
-      reason: `policy '${id}' ${trigger}`,
-    };
+
+    // PIN: first match wins the lane intent + telemetry id/reason.
+    if (pinned === null) {
+      const trigger = hits.length > 0 ? `match on [${hits.join(", ")}]` : "no match constraints";
+      pinned = { id, use_lane: policy.use_lane ?? null, reason: `policy '${id}' ${trigger}` };
+    }
+
+    // ACCUMULATE caps from this match (regardless of whether it was the pin).
+    if (policy.max_lane != null) {
+      maxLane = strictestMaxLane(maxLane, policy.max_lane);
+    }
+    if (policy.allowed_lanes != null) {
+      allowedLanes = intersectAllowed(allowedLanes, policy.allowed_lanes);
+    }
   }
-  return { ...EMPTY_OUTCOME };
+
+  if (pinned === null) return { ...EMPTY_OUTCOME };
+  return {
+    matched_policy_id: pinned.id,
+    use_lane: pinned.use_lane,
+    max_lane: maxLane,
+    allowed_lanes: allowedLanes,
+    reason: pinned.reason,
+  };
+}
+
+// Strictest (lowest LANE_RANK) of two max_lane caps. An unrankable lane is
+// treated as least-strict (it cannot tighten a rankable cap); two unrankables
+// keep the incumbent.
+function strictestMaxLane(current: string | null, next: string): string {
+  if (current === null) return next;
+  const cur = LANE_RANK[current];
+  const nxt = LANE_RANK[next];
+  if (nxt === undefined) return current;
+  if (cur === undefined) return next;
+  return nxt < cur ? next : current;
+}
+
+// Intersect two allowed_lanes whitelists, preserving the incumbent's order. The
+// intersection is the strictest constraint (only lanes BOTH policies permit).
+function intersectAllowed(current: string[] | null, next: string[]): string[] {
+  if (current === null) return [...next];
+  const allow = new Set(next);
+  return current.filter((lane) => allow.has(lane));
 }
 
 function lowestRankedLane(lanes: string[]): string {
