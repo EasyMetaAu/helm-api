@@ -42,7 +42,7 @@ import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { authMiddleware } from "./middleware/auth.js";
-import { basicAuth, resolveAdminAuth } from "./middleware/basic-auth.js";
+import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middleware/basic-auth.js";
 import { rateLimitMiddleware } from "./middleware/rate-limit.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
@@ -374,48 +374,59 @@ export async function buildServer(
   // keys/requests go to the Store. The plaintext of a freshly minted key is the
   // ONLY secret ever returned, once (原则7).
   const adminAuth = resolveAdminAuth(config as { admin?: Record<string, unknown> }, process.env);
-  const ruleStore = createRuntimeRuleStore({
-    lanes: lanes as Record<string, Lane>,
-    policies,
-    classifier: classifierConfig,
-    onLanes: (next) => {
-      lanes = next as LanesConfig;
-    },
-    onPolicies: (next) => {
-      policies = next;
-    },
-    // Re-bind the live classifier config so the classify adapter (which reads it
-    // per request) observes the admin edit on the very next classification — no
-    // restart, no stale eval verdict (the adapter drops its cache on change).
-    onClassifier: (next) => {
-      classifierConfig = next;
-    },
-  });
-  app.use("/admin/api/*", basicAuth(adminAuth));
-  registerAdminApi(app, {
-    rules: ruleStore,
-    keyStore,
-    telemetry,
-    genKey: () => {
-      const k = generateKey();
-      return { plaintext: k.plaintext, hash: k.hash, prefix: k.prefix };
-    },
-    genKeyId: () => randomUUID(),
-    accountId: "default",
-  });
+  warnIfAdminUnconfigured(adminAuth, (line) => logger.log("warn", "admin.auth", { line }));
+  // SECURITY: only mount the admin surface (API + SPA) when admin is enabled — i.e.
+  // when credentials are configured (auto-enable) or HELM_ADMIN_ENABLED is set.
+  // Otherwise it is NOT mounted at all (/admin and /admin/api → 404), so the
+  // key-management + telemetry endpoints can never be reached unauthenticated.
+  if (adminAuth.enabled) {
+    const ruleStore = createRuntimeRuleStore({
+      lanes: lanes as Record<string, Lane>,
+      policies,
+      classifier: classifierConfig,
+      onLanes: (next) => {
+        lanes = next as LanesConfig;
+      },
+      onPolicies: (next) => {
+        policies = next;
+      },
+      // Re-bind the live classifier config so the classify adapter (which reads it
+      // per request) observes the admin edit on the very next classification — no
+      // restart, no stale eval verdict (the adapter drops its cache on change).
+      onClassifier: (next) => {
+        classifierConfig = next;
+      },
+    });
+    app.use("/admin/api/*", basicAuth(adminAuth));
+    registerAdminApi(app, {
+      rules: ruleStore,
+      keyStore,
+      telemetry,
+      genKey: () => {
+        const k = generateKey();
+        return { plaintext: k.plaintext, hash: k.hash, prefix: k.prefix };
+      },
+      genKeyId: () => randomUUID(),
+      accountId: "default",
+    });
 
-  // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so
-  // the more-specific /admin/api/* routes win (Hono matches in registration
-  // order); the static catch-all would otherwise return index.html for them. The
-  // sub-app re-applies basicAuth so the page + assets are also gated. We never run
-  // SvelteKit here — just serve the adapter-static build (CLAUDE.md 原则1).
-  if (!existsSync(ADMIN_BUILD_ROOT)) {
-    logger.log("warn", "admin.static_missing", {
-      dir: ADMIN_BUILD_ROOT,
-      line: `admin SPA build not found at ${ADMIN_BUILD_ROOT}; /admin will 404 until 'pnpm build' produces it`,
+    // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so
+    // the more-specific /admin/api/* routes win (Hono matches in registration
+    // order); the static catch-all would otherwise return index.html for them. The
+    // sub-app re-applies basicAuth so the page + assets are also gated. We never run
+    // SvelteKit here — just serve the adapter-static build (CLAUDE.md 原则1).
+    if (!existsSync(ADMIN_BUILD_ROOT)) {
+      logger.log("warn", "admin.static_missing", {
+        dir: ADMIN_BUILD_ROOT,
+        line: `admin SPA build not found at ${ADMIN_BUILD_ROOT}; /admin will 404 until 'pnpm build' produces it`,
+      });
+    }
+    app.route("/admin", mountAdminStatic(adminAuth));
+  } else {
+    logger.log("info", "admin.disabled", {
+      line: "admin surface not mounted (no credentials / not enabled); set HELM_ADMIN_USER + HELM_ADMIN_PASSWORD to enable",
     });
   }
-  app.route("/admin", mountAdminStatic(adminAuth));
 
   const messagesPipeline = createMessagesPipeline(route);
   registerMessagesRoute(app, {

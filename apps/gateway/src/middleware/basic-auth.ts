@@ -35,8 +35,14 @@ export function resolveAdminAuth(
   const enabledEnv = envFlag(env.HELM_ADMIN_ENABLED);
   const username = env.HELM_ADMIN_USER ?? admin.username ?? null;
   const password = env.HELM_ADMIN_PASSWORD ?? admin.password ?? null;
+  // SECURITY: configuring credentials AUTO-ENABLES the admin surface. Setting
+  // HELM_ADMIN_USER/PASSWORD is the obvious "protect admin" action; the old default
+  // (`?? false`) left admin (incl. /admin/api/keys) open whenever the separate
+  // HELM_ADMIN_ENABLED flag was forgotten. Precedence: explicit env flag > explicit
+  // config flag > "credentials present".
+  const credsPresent = username !== null && password !== null;
   return {
-    enabled: enabledEnv ?? admin.enabled ?? false,
+    enabled: enabledEnv ?? admin.enabled ?? credsPresent,
     username,
     password,
   };

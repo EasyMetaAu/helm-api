@@ -30,6 +30,11 @@ RUN useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin helm \
  && mkdir -p /app/config /app/data && chown -R helm:helm /app
 
 COPY --from=builder --chown=helm:helm /app/out ./
+# Admin SPA static assets. `pnpm deploy` only flattens the gateway package, so the
+# built admin SPA must be copied explicitly to the path the gateway's static root
+# (ADMIN_BUILD_ROOT = ./apps/admin/build, resolved from /app) expects — otherwise
+# /admin 404s while /admin/api works.
+COPY --from=builder --chown=helm:helm /app/apps/admin/build ./apps/admin/build
 USER helm
 EXPOSE 8080
 
