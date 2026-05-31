@@ -326,4 +326,38 @@ describe("gateway.chat.memory — observe persists request/response", () => {
     // The accumulated assistant text was persisted after the stream finished.
     expect(messages.some((m) => m.role === "assistant" && m.content === "Hello")).toBe(true);
   });
+
+  it("streaming: captures assistant text even when SSE frames are split across transport chunks", async () => {
+    // The provider client yields ARBITRARY transport chunks (openai.ts reader.read()),
+    // not whole SSE events. These deliberately split a single `data: {...}` frame
+    // across the chunk boundary; a per-chunk parser would JSON.parse-fail and drop
+    // the split content. The buffered accumulator must still reconstruct it fully.
+    const chunks = [
+      'data: {"choices":[{"index":0,"delta":{"content":"Hel',
+      'lo"}}]}\n\ndata: {"choices":[{"index":0,"delta":{"content":" wor',
+      'ld"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    async function* upstream(): AsyncIterable<string> {
+      for (const c of chunks) yield c;
+    }
+    const { store, messages } = makeFakeStore();
+    const { deps } = captureRouteDeps({
+      stream: upstream(),
+      memory: { observe: observeDeps(store) },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { ...AUTH, ...MEM_HEADERS },
+      body: JSON.stringify({ ...BODY, stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    // Forwarded bytes are byte-identical to the upstream chunks (principle 8).
+    expect(await res.text()).toBe(chunks.join(""));
+    // Despite the split frames, the FULL assistant text was reconstructed.
+    expect(messages.some((m) => m.role === "assistant" && m.content === "Hello world")).toBe(true);
+  });
 });

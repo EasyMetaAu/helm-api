@@ -127,6 +127,35 @@ describe("routeRequest — orchestration", () => {
     expect(rec.final.model_alias).toBe("coder_a");
   });
 
+  it("ignores a spoofed x-project-id (memory scope) for routing — a project_id policy does NOT match", async () => {
+    // A client sets x-project-id to a value a server-side project_id policy targets.
+    // The memory header rides metadata.project_id, but routing must NOT trust it
+    // (docs/08: memory must not rewrite routing) — policyContext.project_id is
+    // sourced trusted (null), so the policy cannot fire. Pre-fix this pinned premium.
+    const d = deps({
+      policies: {
+        policies: [{ id: "proj-spoof", match: { project_id: "proj_secret" }, use_lane: "premium" }],
+      },
+    });
+    const result = await routeRequest(
+      req({
+        metadata: {
+          conversation_id: null,
+          thread_id: "th_1",
+          resource_id: null,
+          project_id: "proj_secret",
+          memory_mode: "observe",
+        },
+      }),
+      d,
+    );
+
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.policy.matched_policy_id).toBeNull();
+    expect(rec.lane.selected_lane).not.toBe("premium");
+    expect(result.final.status).toBe("ok");
+  });
+
   it("passes the stream handle through unbuffered for stream:true", async () => {
     const order: string[] = [];
     async function* upstream(): AsyncGenerator<string> {

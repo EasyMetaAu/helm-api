@@ -183,12 +183,18 @@ function outboundFromOpenAIBody(body: unknown): {
   return { responseMessages, toolResults };
 }
 
-// Accumulate assistant delta text across OpenAI SSE frames for observeOutbound.
-// Parses ONE already-split SSE event; a malformed/`[DONE]` frame is swallowed
-// (fail-open) so it never disturbs the bytes forwarded to the client (principle
-// 8 — the caller writes the chunk FIRST, then feeds it here).
-function accumulateOpenAIChunk(buffer: { text: string }, chunk: string): void {
-  for (const line of chunk.split("\n")) {
+// Buffer for reconstructing the assistant turn from a forwarded OpenAI SSE stream.
+// `text` is the accumulated assistant content; `pending` holds bytes of an event
+// not yet terminated by the `\n\n` SSE delimiter.
+interface SSEAccumulator {
+  text: string;
+  pending: string;
+}
+
+// Parse ONE complete SSE event and append any assistant delta content. A
+// malformed/`[DONE]` frame is swallowed (fail-open).
+function parseOpenAIEvent(buffer: SSEAccumulator, event: string): void {
+  for (const line of event.split("\n")) {
     const trimmed = line.trimStart();
     if (!trimmed.startsWith("data:")) continue;
     const payload = trimmed.slice(5).trim();
@@ -203,6 +209,31 @@ function accumulateOpenAIChunk(buffer: { text: string }, chunk: string): void {
     } catch {
       // malformed frame: skip (fail-open) — never alters the forwarded stream.
     }
+  }
+}
+
+// Accumulate assistant delta text across OpenAI SSE frames for observeOutbound.
+// The provider client yields ARBITRARY transport chunks (openai.ts reader.read()),
+// NOT whole SSE events, so a single `data: {...}` frame can be split across two
+// chunks. We append to `pending` and parse only COMPLETE events (delimited by
+// `\n\n`), holding the trailing partial for the next chunk — otherwise a split
+// JSON frame would JSON.parse-fail and silently drop assistant content. Never
+// disturbs the bytes forwarded to the client (principle 8 — the caller writes the
+// chunk FIRST, then feeds a copy here).
+function accumulateOpenAIChunk(buffer: SSEAccumulator, chunk: string): void {
+  buffer.pending += chunk;
+  const events = buffer.pending.split("\n\n");
+  // The last segment may be an incomplete event — keep it for the next chunk.
+  buffer.pending = events.pop() ?? "";
+  for (const event of events) parseOpenAIEvent(buffer, event);
+}
+
+// Flush the final buffered event at stream end (the last frame may arrive without
+// a trailing `\n\n`). Clears pending so it is idempotent.
+function flushOpenAIChunk(buffer: SSEAccumulator): void {
+  if (buffer.pending !== "") {
+    parseOpenAIEvent(buffer, buffer.pending);
+    buffer.pending = "";
   }
 }
 
@@ -341,7 +372,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       const stream = result.stream;
       // Accumulate the assistant text for observeOutbound WITHOUT touching the
       // forwarded bytes (principle 8): write the chunk first, then parse a copy.
-      const assistant = { text: "" };
+      const assistant: SSEAccumulator = { text: "", pending: "" };
       return streamSSE(c, async (sse) => {
         try {
           for await (const chunk of stream) {
@@ -363,11 +394,16 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           await persist(result.decision);
           // Memory observe (outbound, streamed): persist the reconstructed
           // assistant turn AFTER the bytes were forwarded. Fail-open inside core.
-          if (deps.memory !== undefined && assistant.text.length > 0) {
-            await observeOutbound(deps.memory.observe, memoryScope, {
-              responseMessages: [{ role: "assistant", content: assistant.text }],
-              toolResults: [],
-            });
+          if (deps.memory !== undefined) {
+            // Flush the last partial event the \n\n-split loop held back, so a
+            // final frame without a trailing \n\n is not dropped.
+            flushOpenAIChunk(assistant);
+            if (assistant.text.length > 0) {
+              await observeOutbound(deps.memory.observe, memoryScope, {
+                responseMessages: [{ role: "assistant", content: assistant.text }],
+                toolResults: [],
+              });
+            }
           }
         }
       });

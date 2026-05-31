@@ -61,7 +61,6 @@ describe("createMessagesPipeline — failure surfaces", () => {
     const pipeline = createMessagesPipeline(route);
     const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
     const iterate = async () => {
-      // biome-ignore lint/correctness/noUnusedVariables: draining the iterator to trigger the throw
       for await (const _ of run.streamIR()) {
         // should never yield — the failure must throw before any event
       }

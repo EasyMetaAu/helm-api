@@ -203,7 +203,13 @@ function policyContext(req: InternalRequest, cls: Classification): PolicyContext
     needs_vision: cls.constraints.needs_vision === true,
     user_id: req.user_id,
     org_id: req.org_id,
-    project_id: req.metadata.project_id,
+    // project_id is a MEMORY-scope field (client-controlled via the x-project-id
+    // header, docs/08), NOT a trusted routing attribute. Sourcing the client value
+    // here would let any caller spoof a project_id policy to change lane/cost/caps
+    // — memory must never rewrite routing (docs/08). user_id/org_id come from the
+    // trusted auth identity; project-scoped routing needs an equivalent trusted
+    // source (auth/account), which does not exist yet, so it is null.
+    project_id: null,
   };
 }
 
