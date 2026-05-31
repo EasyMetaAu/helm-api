@@ -1,45 +1,99 @@
 # Upstream providers (providers-multi). Credentials are referenced by env var
 # NAME only (api_key_env) — never a plaintext key in the repo (docs/10,
-# principle 7). lane/policy reference only the internal `alias`; `provider_model`
+# principle 7). lane/policy reference only the internal ALIAS; `provider_model`
 # is the provider's real id and an internal supply-chain detail (principle 6).
 #
-# Unified shape (HelmConfigSchema.ProviderConfig — the SINGLE schema config-loader
-# AND the provider registry agree on; the old two-shape divergence is resolved):
-#   - name (or legacy `alias`): the provider id the registry/executor key on.
-#   - type: openai | anthropic | ...  (defaults to openai)
-#   - base_url?: per-provider; the test/e2e harness overrides every provider via
-#     HELM_PROVIDER_BASE_URL so the mock upstream serves all of them.
-#   - api_key_env: credential REFERENCE (env var name).
-#   - models[]: { alias -> provider_model }. A provider WITHOUT models[] is a
-#     Phase-0 passthrough provider whose lane aliases are back-filled against it.
+# ─────────────────────────────────────────────────────────────────────────────
+# ALIAS-NAMESPACE ALIGNMENT (2026-05-31, task config-align — see
+# implementation-notes). Everything is now keyed by ONE universal alias of the
+# form `provider/model` (borrowed from the sibling llm-router project's
+# conventions): the SAME string is the key across providers (here), lanes
+# (config/lanes.yaml candidates), the capability+pricing catalog
+# (packages/core/src/catalog/generated/catalog.json), and pricing overrides.
 #
-# The registry resolves each alias to a SPECIFIC provider + model, and the
-# executor invokes THAT provider's client — so a lane's fallback chain can CROSS
-# providers. A duplicate alias across providers is rejected at build time
-# (fail-closed, principle 2).
+#   alias  ==  provider_model  ==  catalog modelKey  ==  pricing key
+#
+# Why alias == provider_model: the executor (apps/gateway/src/routes/execute.ts)
+# resolves a lane candidate alias through the registry, then looks up the catalog
+# by the RESOLVED `provider_model` and sends that string upstream as `model`.
+# Keeping it identical to the alias makes the capability filter + cost path
+# resolve by the lane candidate alias at runtime (no more "unknown -> fail-open").
+# The provider's TRUE upstream model id (e.g. gpt-5.5, deepseek-chat) is recorded
+# in the comment beside each entry; to pin a lane to a different upstream id,
+# change only that entry's `provider_model` AND add a matching catalog key — no
+# code change (principle 2, config-as-code).
+#
+# Unified shape (HelmConfigSchema.ProviderConfig): name, type (openai|anthropic),
+# base_url?, api_key_env (env-var NAME), models[] { alias -> provider_model }.
+# A duplicate alias across providers is rejected at build time (fail-closed,
+# principle 2). The test/e2e harness overrides every provider's base_url via
+# HELM_PROVIDER_BASE_URL so the mock upstream serves all of them.
 providers:
-  # PRIMARY provider (providers[0]). Backs the default path and the Phase-0
-  # passthrough; its credential (OPENAI_API_KEY) is mandatory. The quality/cost &
-  # per-task lane aliases (cheap_model, default_good_model, best_reasoning_model,
-  # coding_capable_model, strict_json_model, vision_model, tool_use_model) are
-  # NOT listed here, so the registry back-fills them against THIS provider
-  # (provider_model == alias) — the single-provider passthrough still works. List
-  # them under `models[]` to pin each to a specific upstream model id when ready.
-  - name: openai
+  # PRIMARY provider (providers[0]). Backs the default path, the Layer-2 eval
+  # call, and the Phase-0 passthrough; its credential (OPENAI_API_KEY) is
+  # mandatory (fail-closed if unset). Self-built OpenAI-compatible relay; it
+  # fronts the openai-crs/* + deepseek-crs/* model families (the deepseek-crs
+  # relay speaks the Anthropic wire upstream but is reached through the same
+  # credential, mirroring llm-router's providers.yaml). real upstream ids in
+  # comments.
+  - name: openai-crs
     type: openai
-    base_url: https://api.openai.com/v1
+    base_url: https://la.atmy.work/ai/openai/v1
     api_key_env: OPENAI_API_KEY
-
-  # SECONDARY provider — a genuinely DIFFERENT upstream with its own credential.
-  # The Layer-2 eval small-model alias (classifier.yaml eval.model =
-  # deepseek/deepseek-v4-flash) resolves HERE, proving aliases map to the correct
-  # provider+model rather than all collapsing onto the single primary. Add more
-  # models[] entries to route specific lanes to this provider (cross-provider
-  # fallback then spans openai <-> deepseek in chain order).
-  - name: deepseek
-    type: openai
-    base_url: https://api.deepseek.com/v1
-    api_key_env: DEEPSEEK_API_KEY
     models:
+      # real_model: gpt-5.5 — premium primary (json-capable, multimodal:image).
+      - alias: openai-crs/gpt-5.5
+        provider_model: openai-crs/gpt-5.5
+      # real_model: gpt-5.4-mini — economy/cheap, json-capable.
+      - alias: openai-crs/gpt-5.4-mini
+        provider_model: openai-crs/gpt-5.4-mini
+      # real_model: gpt-5.3-codex-spark — coding-capable, json-capable.
+      - alias: openai-crs/gpt-5.3-codex-spark
+        provider_model: openai-crs/gpt-5.3-codex-spark
+      # real_model: deepseek-pro — balanced primary, json-capable, big context.
+      - alias: deepseek-crs/deepseek-pro
+        provider_model: deepseek-crs/deepseek-pro
+      # real_model: deepseek-flash — fast/cheap fallback, json-capable.
+      - alias: deepseek-crs/deepseek-flash
+        provider_model: deepseek-crs/deepseek-flash
+      # Layer-2 eval small-model (classifier.yaml eval.model). NOT a public lane
+      # (principle 6) — an internal supply-chain detail. The eval client sends
+      # this id upstream as `model:` directly (it bypasses the registry), and the
+      # catalog prices it so eval_usd can be computed. Kept resolvable so the
+      # eval e2e (mock recognizes `deepseek/deepseek-v4-flash`) stays meaningful.
       - alias: deepseek/deepseek-v4-flash
-        provider_model: deepseek-chat
+        provider_model: deepseek/deepseek-v4-flash
+
+  # SECONDARY provider — ZenMux aggregator. A genuinely DIFFERENT upstream with
+  # its own credential, proving a fallback chain can CROSS providers. Carries the
+  # vision-capable model used by the `vision` task lane plus a json-INCAPABLE
+  # auto-route fallback.
+  - name: zenmux
+    type: openai
+    base_url: https://zenmux.ai/api/v1
+    api_key_env: ZENMUX_API_KEY
+    models:
+      # real_model: anthropic/claude-opus-4.7 — premium fallback, vision+json.
+      - alias: zenmux/claude-opus-4.7
+        provider_model: zenmux/claude-opus-4.7
+      # real_model: google/gemini-3.5-flash — vision lane primary (multimodal).
+      - alias: zenmux/gemini-3.5-flash
+        provider_model: zenmux/gemini-3.5-flash
+      # real_model: auto — platform auto-route. JSON-INCAPABLE on purpose (see
+      # catalog supports_json_schema:false): the capability filter skips it for
+      # strict-JSON requests so the `json` lane prunes to a deterministic model.
+      # Tail fallback only.
+      - alias: zenmux/auto
+        provider_model: zenmux/auto
+
+  # TERTIARY provider — OpenRouter aggregator. Final dual-platform auto-route
+  # fallback. Its `*/auto` alias is likewise JSON-INCAPABLE (see catalog).
+  - name: openrouter
+    type: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    models:
+      # real_model: openrouter/auto — platform auto-route, JSON-INCAPABLE. The
+      # last-resort tail fallback shared by every lane.
+      - alias: openrouter/auto
+        provider_model: openrouter/auto

@@ -40,9 +40,11 @@ const AUTH = {
   "Content-Type": "application/json",
 };
 
-// DEFAULT_LANES candidate heads.
-const BALANCED_HEAD = "default_good_model";
-const PREMIUM_HEAD = "best_reasoning_model";
+// Shipped config/lanes.yaml candidate heads (alias-namespace alignment,
+// 2026-05-31). Keep in lockstep with config/lanes.yaml `balanced`/`premium`
+// primaries.
+const BALANCED_HEAD = "deepseek-crs/deepseek-pro";
+const PREMIUM_HEAD = "openai-crs/gpt-5.5";
 
 // An intentionally ambiguous prompt: no strong Layer-1 keyword signal, so rules
 // stay UNCERTAIN (confidence below the DEFAULT 0.45 threshold) and the cascade

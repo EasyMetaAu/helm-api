@@ -19,12 +19,18 @@ import { FAIL_PRIMARY_SENTINEL } from "./fixtures/mock-upstream.js";
 const TEST_KEY = "helm_live_e2e_testkey";
 const AUTH = { Authorization: `Bearer ${TEST_KEY}`, "Content-Type": "application/json" };
 
-// DEFAULT_LANES candidate aliases per lane (post chain-expansion head). The
-// router resolves an alias which the executor sends to the upstream; the mock
-// echoes it back as `model`.
-const ECONOMY_HEAD = "cheap_model";
-const PREMIUM_HEAD = "best_reasoning_model";
-const BALANCED_HEAD = "default_good_model";
+// Shipped config/lanes.yaml candidate aliases per lane (post chain-expansion
+// head). The router resolves an alias which the executor sends to the upstream
+// (the resolved provider_model == the alias, by the alias-namespace convention);
+// the mock echoes it back as `model`. Keep these in lockstep with the lane
+// primaries in config/lanes.yaml.
+const ECONOMY_HEAD = "openai-crs/gpt-5.4-mini";
+const PREMIUM_HEAD = "openai-crs/gpt-5.5";
+const BALANCED_HEAD = "deepseek-crs/deepseek-pro";
+// economy chain = [openai-crs/gpt-5.4-mini, deepseek-crs/deepseek-flash,
+// balanced...]; the in-chain candidate AFTER the economy head is the one that
+// serves when the head is fault-injected (scenario 4, EXECUTION fallback).
+const ECONOMY_NEXT = "deepseek-crs/deepseek-flash";
 
 function chat(content: string, extra: Record<string, unknown> = {}) {
   return {
@@ -94,15 +100,15 @@ test.describe("routing e2e", () => {
   });
 
   // ── Scenario 4: primary provider error → EXECUTION fallback serves ──────────
-  // Mock injects a one-shot 5xx for the economy head (`cheap_model`); the chain's
-  // NEXT candidate (`default_good_model`, via economy→balanced) must serve. Lane
+  // Mock injects a one-shot 5xx for the economy head (`openai-crs/gpt-5.4-mini`);
+  // the chain's NEXT candidate (`deepseek-crs/deepseek-flash`) must serve. Lane
   // stays `economy` (execution fallback ≠ classification fallback, principle 5).
   test("primary provider error -> fallback model serves (execution fallback)", async ({
     request,
   }) => {
     // The prompt routes to economy (simple) AND carries the fail sentinel so the
-    // mock 5xxs the economy head (`cheap_model`). The gateway only forwards
-    // model+messages upstream, so the fault is steered through the prompt.
+    // mock 5xxs the economy head. The gateway only forwards model+messages
+    // upstream, so the fault is steered through the prompt.
     const res = await request.post("/v1/chat/completions", {
       // Same clearly-simple economy prompt as scenario 1, plus the fail sentinel.
       data: chat(`hi thanks, translate to spanish: ok ${FAIL_PRIMARY_SENTINEL}`),
@@ -114,9 +120,9 @@ test.describe("routing e2e", () => {
     // final model is the in-chain NEXT candidate, not the failed primary.
     const finalModel = res.headers()["x-helm-final-model"];
     expect(finalModel).not.toBe(ECONOMY_HEAD);
-    expect(finalModel).toBe(BALANCED_HEAD);
+    expect(finalModel).toBe(ECONOMY_NEXT);
     const body = await res.json();
-    expect(body.model).toBe(BALANCED_HEAD);
+    expect(body.model).toBe(ECONOMY_NEXT);
   });
 
   // ── Scenario 5: unclassifiable prompt → balanced (classification fallback) ──

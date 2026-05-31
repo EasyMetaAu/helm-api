@@ -41,8 +41,14 @@ export function echoResponse(model: string) {
 // the mock 5xx ONLY the economy lane head (the primary candidate), forcing the
 // gateway to fall forward to the next in-chain candidate. Exported so the spec
 // and the mock stay in lockstep.
+//
+// alias-namespace alignment (2026-05-31): the economy lane head is now the real
+// `provider/model` alias `openai-crs/gpt-5.4-mini`. The gateway sends the
+// RESOLVED provider_model (== the alias, by config convention) upstream as
+// `model`, so the mock matches on it. Keep this in lockstep with
+// config/lanes.yaml `economy.primary`.
 export const FAIL_PRIMARY_SENTINEL = "__HELM_FAIL_PRIMARY__";
-export const FAIL_PRIMARY_MODEL = "cheap_model";
+export const FAIL_PRIMARY_MODEL = "openai-crs/gpt-5.4-mini";
 
 function messagesText(body: { messages?: unknown }): string {
   if (!Array.isArray(body.messages)) return "";

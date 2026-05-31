@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-05-31 · config-align — 统一别名命名空间（`provider/model`），让能力过滤 + 成本换算在 SHIPPED 默认配置上真正点火（task config-align、docs/02/04/07、原则 1/2/3/6）
+
+**关闭的 gap（capability-wire / cost-wire 的残留 TODO，本条标记为 RESOLVED）**：能力过滤器与成本换算的装配 + 单测**早已就位**，但对**默认配置 INERT**——`config/lanes.yaml` 的 lane 候选用占位别名（`cheap_model`/`default_good_model`/…），回填到 primary 时 `provider_model===alias`，而 generated catalog 的 key 是裸 LiteLLM id（`gpt-4o` 等），**两个命名空间不相交**：运行时 `execute.ts` 的 `catalog.get(providerModel)` 恒 `undefined` → 每个候选 unknown → fail-open 跳过过滤、成本恒 null。本任务**统一命名空间**让其点火，复用 sibling 项目 `llm-router/config` 的真实 provider/lane/pricing/capability 数据与约定，未重写任何运行时装配逻辑。
+
+**采用的约定（borrowed from llm-router）**：一切以单一通用别名 `provider/model` 为 key（`openai-crs/gpt-5.5`、`deepseek-crs/deepseek-flash`、`zenmux/auto`、`openrouter/auto` …）。**同一别名字符串**贯穿 providers 条目、lane 候选、capability catalog key、pricing key 四处。关键接缝：`execute.ts` 按 RESOLVED `provider_model` 查 catalog 并据此发上游 `model`，故令 **`alias == provider_model == catalog modelKey == pricing key`**——registry 解析后 `providerModel===alias`，catalog 命中、能力过滤 + 成本按 lane 候选别名解析（不再 unknown→fail-open）。`*/auto` 兜底 alias 显式 `supportsJsonMode:false`，结构化 JSON 请求被能力过滤跳过，链推进到确定性模型。provider 真实上游 model id（`gpt-5.5`/`deepseek-chat`…）记在 yaml 注释里，是内部供应链细节（原则6），改它只需动该条目 `provider_model` + 补 catalog key，无需改代码（原则2）。
+
+**改动文件**：
+- `config/providers.yaml`：重写为 openai-crs（primary，`OPENAI_API_KEY`）+ zenmux + openrouter 三 provider，`models[]` 全部 `alias===provider_model` 的 `provider/model` 串；保留 eval 模型 `deepseek/deepseek-v4-flash`（eval client 直发该 id，绕过 registry，e2e mock 认它）。
+- `config/lanes.yaml`：保留 Helm 自有 lane 名（economy/balanced/premium + coding/json/vision/tool_use）与 constraints；候选填真实别名。`json.primary=openai-crs/gpt-5.4-mini`（json-capable），链尾经 balanced 落到 `*/auto`（json-incapable，被剪）。
+- `packages/core/src/catalog/generated/catalog.json`：**新增** 10 条 `provider/model` 别名条目（capability + pricing，pricing 取 llm-router `pricing-overrides.yaml` 的 per-MTok 值），与原 5 条裸 LiteLLM key **并存**（保 `catalog/load.test.ts`/`index.test.ts` 绿）。`zenmux/auto`、`openrouter/auto` 标 `supportsJsonMode:false`。
+- `apps/gateway/e2e/fixtures/mock-upstream.ts`：`FAIL_PRIMARY_MODEL` 由 `cheap_model` → `openai-crs/gpt-5.4-mini`（economy 头的真实 providerModel）。
+- `apps/gateway/e2e/routing.spec.ts`：ECONOMY/PREMIUM/BALANCED 头改真实别名；场景 4 执行兜底断言链内下一候选 `deepseek-crs/deepseek-flash`（economy 链 = [gpt-5.4-mini, deepseek-flash, balanced…]）。
+- `apps/gateway/e2e/eval.spec.ts`：BALANCED/PREMIUM 头改真实别名。
+- `apps/gateway/src/routes/execute.default-config.test.ts`（**新增 proving test**，见下）。
+- `.env.example`：补 `ZENMUX_API_KEY`/`OPENROUTER_API_KEY`（次级 provider 凭证；未设则该 provider 被 `buildProviderClients` 跳过，其别名回落到 primary client——e2e 即如此，仅 `OPENAI_API_KEY` 注入）。
+
+**proving test（默认配置点火实证，`execute.default-config.test.ts`，5 例全绿）**：用真实 loaders（`loadConfig`+`loadRuntimeCatalog`+ 与 server.ts 同构的 registry 装配）驱动生产 `createExecute`：① catalog 现按 lane 用的 `provider/model` 别名 key（json-capable vs json-incapable）；② needs_json 请求把 json-incapable `zenmux/auto` **剪除**（`skip_reason=no_json_support`）并落到 json-capable 模型，被剪 alias 从不发上游；③ 真实 `json` lane 链含 `*/auto` 尾；④ 仅含 incapable 候选的链 → `capability_unsatisfiable`（422），全 skip、零 invoke；⑤ 成功 attempt 从对齐 pricing 算出 `cost_usd=0.003`（非 null，usage 1000/500 × 0.75/4.5 per-MTok）。
+
+**RESOLVED（此前条目的命名空间 TODO）**：capability-wire 残留 TODO (3)「generated catalog 裸 id 命名空间 vs provider 别名 `provider/model` 未统一映射层」、cost-wire 残留 TODO (2) 同一项、以及 capability-wire 正文「catalog key 与运行时 providerModel 匹配现状：lane 别名都不在 catalog → 每候选 fail-open」——均经本次命名空间统一**解决**：默认配置下 lane 候选别名即 catalog key，能力过滤 + 成本真正按候选解析点火。
+
+**残留 TODO**：(1) 流式 completion attempt 仍无成本（usage 在流尾，peek 时不可得）——承自 cost-wire，需协议层累加流式 usage 回填，另立任务。(2) eval 仍用注入的单 `provider` 直发 `config.eval.model`（绕过 registry），未经 registry-resolved provider 发起——承自 providers-multi 的 eval-path TODO；现已为该 eval id 在 catalog 备 pricing，故 eval_usd 可计。(3) 次级 provider（zenmux/openrouter）凭证未设时其别名回落 primary client：生产部署须为每个 provider 注入对应 `api_key_env`，否则跨 provider 兜底退化为单 primary（fail-open，非错误）。
+
+---
+
 ## 2026-05-31 · cost-wire — 用 provider usage × catalog pricing 算出真实成本，填满 cost_usd/eval_usd/cost_breakdown（task cost-wire、docs/07，原则 1/2/3/5）
 
 **关闭的 gap**：`admin.requests-richfields` 时期落下的残留——`cost_usd`/`eval_usd` 多数为 null：决策记录的成本字段管线**早已就位**（`route-request.ts` 已把 `Σ attempts.cost_usd → completion_usd`、`evalUsd → eval_usd`、`total = completion+eval`，且 route-request.test 已钉死 total 不变式），但**两个源头从不产数**——`execute.ts` 的 `okRow` 恒写 `cost_usd:null`（从不读 usage×pricing），eval 的 `invokeModel` 只认上游极少回传的 inline `cost_usd`。`capability-wire` 刚把真实 catalog（含 pricing）接进运行时，本任务复用它做**成本换算接线 + 测试**，未重写任何装配逻辑。
