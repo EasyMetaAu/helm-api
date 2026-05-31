@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { base } from '$app/paths';
   import { listRequests, type RequestListItem } from '$lib/api/requests.js';
 
   // Request debug list (docs/07 列表). READ-ONLY consumer of /admin/api/* — every
@@ -122,7 +123,9 @@
               <td class="px-3 py-2 font-mono text-slate-700">${r.cost_usd.toFixed(4)}</td>
               <td class="px-3 py-2 text-red-600">{r.error_class ?? '—'}</td>
               <td class="px-3 py-2">
-                <a class="text-sky-600 hover:underline" href={`/requests/${r.trace_id}`}>view</a>
+                <a class="text-sky-600 hover:underline" href={`${base}/requests/${r.trace_id}`}
+                  >view</a
+                >
               </td>
             </tr>
           {/each}

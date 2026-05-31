@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import type { RequestDetail } from '$lib/api/requests.js';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
@@ -23,7 +24,9 @@
 </script>
 
 <section class="mx-auto flex max-w-4xl flex-col gap-4 p-6">
-  <a href="/requests" class="text-sm text-sky-600 hover:underline">&larr; Back to requests</a>
+  <a href={`${base}/requests`} class="text-sm text-sky-600 hover:underline"
+    >&larr; Back to requests</a
+  >
 
   {#if !data.detail}
     <div

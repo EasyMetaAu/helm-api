@@ -13,6 +13,10 @@ export default defineConfig({
     alias: {
       // SvelteKit normally injects $lib; the standalone test config must too.
       $lib: fileURLToPath(new URL('./src/lib', import.meta.url)),
+      // SvelteKit's virtual $app/* modules are not available without the kit
+      // vite plugin — stub the ones our components import (base path, page store).
+      '$app/paths': fileURLToPath(new URL('./src/lib/test/app-paths.mock.ts', import.meta.url)),
+      '$app/stores': fileURLToPath(new URL('./src/lib/test/app-stores.mock.ts', import.meta.url)),
     },
   },
   test: {
