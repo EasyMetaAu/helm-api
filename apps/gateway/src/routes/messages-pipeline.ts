@@ -5,7 +5,7 @@ import {
   type IRResponse,
   type RouteOptions,
 } from "@helm/core";
-import type { InternalRequest } from "@helm/shared";
+import type { InternalRequest, Protocol } from "@helm/shared";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 
 // The loose IR the route hands us: the inbound transformer's IRRequest, augmented
@@ -55,6 +55,7 @@ function toInternalRequest(
   ir: PipelineIR,
   identity: MessagesIdentity,
   traceId: string,
+  protocol: Protocol,
 ): InternalRequest {
   const messages =
     Array.isArray(ir.messages) && ir.messages.length > 0
@@ -72,7 +73,7 @@ function toInternalRequest(
 
   return {
     request_id: traceId,
-    protocol: "anthropic_messages",
+    protocol,
     account_id: accountId,
     api_key_id: keyId,
     user_id: typeof identity.userId === "string" ? identity.userId : null,
@@ -180,14 +181,20 @@ function parseFrame(event: string): Record<string, unknown> | null {
 // Build the pipeline the Anthropic route consumes. `run` returns the two-accessor
 // PipelineRunResult: `collect` (non-stream IR response) and `streamIR` (Anthropic
 // SSE events). The route picks exactly one based on the IR's stream flag.
-export function createMessagesPipeline(route: RouteFn): {
+export function createMessagesPipeline(
+  route: RouteFn,
+  // The InternalRequest protocol stamped on every request through this pipeline.
+  // Default anthropic_messages (the /v1/messages caller); /v1/responses passes
+  // openai_responses so telemetry attributes the surface correctly (principle 5).
+  protocol: Protocol = "anthropic_messages",
+): {
   run(ir: PipelineIR, identity: MessagesIdentity, signal: AbortSignal): Promise<PipelineRunResult>;
 } {
   return {
     async run(ir, identity, signal) {
       const meta = ir.metadata;
       const traceId = meta && typeof meta.trace_id === "string" ? meta.trace_id : "anthropic-req";
-      const internal = toInternalRequest(ir, identity, traceId);
+      const internal = toInternalRequest(ir, identity, traceId, protocol);
       const caps = identity.caps as { allowCustomModel?: unknown } | undefined;
       const allowCustomModel = caps?.allowCustomModel === true;
       // Display prefix only (never the plaintext key, principle 7) for the Debug

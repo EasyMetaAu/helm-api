@@ -82,6 +82,17 @@ export const ClassifierConfigSchema = z.object({
   eval: ClassifierEvalConfigSchema.prefault({ model: "deepseek/deepseek-v4-flash" }),
 });
 
+// Strict full-replace variant for the admin PUT /admin/api/classifier endpoint.
+// Unlike ClassifierConfigSchema (whose rules/eval are prefaulted so an omitted —
+// or wrong-shaped — block silently parses to all-defaults), this REQUIRES both
+// blocks and rejects unknown keys (`strictObject`). A config-replacing write must
+// fail closed on a partial/mis-shaped body (principle 2), not overwrite the live
+// config with defaults. The admin UI PUTs the whole fetched object, so it passes.
+export const ClassifierConfigStrictSchema = z.strictObject({
+  rules: ClassifierRulesConfigSchema,
+  eval: ClassifierEvalConfigSchema,
+});
+
 export type Tier = z.infer<typeof TierSchema>;
 export type DimensionConfig = z.infer<typeof DimensionConfigSchema>;
 export type ClassifierRulesConfig = z.infer<typeof ClassifierRulesConfigSchema>;

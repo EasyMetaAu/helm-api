@@ -276,6 +276,51 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     expect(harness.execute).not.toHaveBeenCalled();
   });
 
+  // ── Input validation (docs/07: invalid_request → 400, fail-closed BEFORE routing).
+  //    A malformed body or an obviously-invalid request must never reach the
+  //    classifier/executor — it is a client error (400), not an upstream 5xx, and
+  //    must not burn a provider fallback chain (cost + latency).
+  it("rejects a malformed JSON body with 400 invalid_request and never routes", async () => {
+    const { deps: d, harness } = deps();
+    const app = buildApp(d);
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: "{not valid json",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; type: string } };
+    expect(body.error.code).toBe("invalid_request");
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(harness.classify).not.toHaveBeenCalled();
+    expect(harness.execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty messages array with 400 before burning the fallback chain", async () => {
+    const { deps: d, harness } = deps();
+    const app = buildApp(d);
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "auto", messages: [] }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("invalid_request");
+    expect(harness.execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing messages field with 400", async () => {
+    const { deps: d, harness } = deps();
+    const app = buildApp(d);
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "auto" }),
+    });
+    expect(res.status).toBe(400);
+    expect(harness.execute).not.toHaveBeenCalled();
+  });
+
   it("a stream client disconnect does not break the response (no provider fault)", async () => {
     // The execute() layer already records abort; the route must not 5xx mid-stream.
     const { deps: d, harness } = deps();

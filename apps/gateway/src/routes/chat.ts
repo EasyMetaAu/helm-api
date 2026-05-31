@@ -5,7 +5,12 @@ import type {
   RouteOptions,
   TelemetryStore,
 } from "@helm/core";
-import { type HelmError, type InternalRequest, makeHelmError } from "@helm/shared";
+import {
+  type HelmError,
+  type InternalRequest,
+  makeHelmError,
+  OpenAIChatRequestSchema,
+} from "@helm/shared";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
@@ -112,6 +117,14 @@ function structuredError(error: HelmError, traceId: string): HelmHttpError {
   return new HelmHttpError({ ...error, trace_id: traceId });
 }
 
+// A 400 invalid_request for a client-side request error (bad JSON / bad shape).
+// Thrown before routing; the error-handler maps invalid_request → 400.
+function invalidRequest(message: string, traceId: string): HelmHttpError {
+  return new HelmHttpError(
+    makeHelmError({ error_class: "invalid_request", message, trace_id: traceId }),
+  );
+}
+
 // Client disconnect / abort detection — mirrors the executor + error-handler
 // semantics. Used only to suppress an error frame for a benign disconnect.
 function isAbort(err: unknown, signal: AbortSignal): boolean {
@@ -123,7 +136,25 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
   app.post("/v1/chat/completions", async (c) => {
     const traceId = c.get("trace_id");
     const identity = c.get("identity") as unknown as ChatIdentity;
-    const body = (await c.req.json()) as ChatCompletionRequest;
+
+    // Boundary validation (docs/07, principle 2 fail-closed): a malformed JSON
+    // body or an invalid request (e.g. empty `messages`) is a CLIENT error → 400
+    // invalid_request, raised BEFORE classify/route so it never 5xx's as an
+    // upstream fault nor burns a provider fallback chain. Parse errors and schema
+    // violations both map to the same structured invalid_request.
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      throw invalidRequest("malformed JSON request body", traceId);
+    }
+    const parsed = OpenAIChatRequestSchema.safeParse(raw);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const where = issue?.path.length ? `${issue.path.join(".")}: ` : "";
+      throw invalidRequest(`${where}${issue?.message ?? "invalid request"}`, traceId);
+    }
+    const body = parsed.data as ChatCompletionRequest;
 
     // `x-session-key` is the conversation-dimension key clients send to opt into
     // session momentum; it maps into metadata.conversation_id (never logged — it

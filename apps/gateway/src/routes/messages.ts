@@ -120,8 +120,21 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     }
 
     // 2) Protocol Adapter (inbound): native Anthropic → IR, then stamp trace_id
-    //    so it propagates through the whole pipeline (CLAUDE.md / docs/02).
-    const native = await c.req.json();
+    //    so it propagates through the whole pipeline (CLAUDE.md / docs/02). A
+    //    malformed JSON body is a CLIENT error → 400 invalid_request (docs/07,
+    //    principle 2 fail-closed), raised after auth but before translate/route so
+    //    it never 5xx's as an upstream fault.
+    let native: unknown;
+    try {
+      native = await c.req.json();
+    } catch {
+      const out = anthropic.transformErrorOut({
+        error_class: "invalid_request",
+        message: "malformed JSON request body",
+        trace_id: traceId,
+      });
+      return c.json(out.body as Record<string, unknown>, out.status as 400);
+    }
     const ir = await anthropic.transformRequestOut(native);
     ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
 

@@ -86,16 +86,21 @@ function makeDeps(
           event: ev.type,
           data: JSON.stringify(ev),
         }),
-        transformErrorOut: (err: { error_class: string; message: string; trace_id: string }) => ({
-          status: err.error_class === "auth_error" ? 401 : 502,
-          body: {
-            type: "error",
-            error: {
-              type: err.error_class === "auth_error" ? "authentication_error" : "api_error",
-              message: err.message,
-            },
-          },
-        }),
+        transformErrorOut: (err: { error_class: string; message: string; trace_id: string }) => {
+          const status =
+            err.error_class === "auth_error"
+              ? 401
+              : err.error_class === "invalid_request"
+                ? 400
+                : 502;
+          const type =
+            err.error_class === "auth_error"
+              ? "authentication_error"
+              : err.error_class === "invalid_request"
+                ? "invalid_request_error"
+                : "api_error";
+          return { status, body: { type: "error", error: { type, message: err.message } } };
+        },
       },
     },
     pipeline: {
@@ -174,6 +179,24 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(body.error.type).toBe("authentication_error");
     // Pipeline must never be reached for an unauthenticated request.
     expect(harness.order).not.toContain("route");
+  });
+
+  it("rejects a malformed JSON body with 400 invalid_request, after auth, without routing", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: "{not valid json",
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { type: string; error: { type: string } };
+    expect(body.type).toBe("error");
+    expect(body.error.type).toBe("invalid_request_error");
+    // Auth ran first (contract), but the request never reached translate/route.
+    expect(harness.order).toEqual(["auth"]);
   });
 
   it("stream: returns text/event-stream with a legal message_start … message_stop sequence", async () => {

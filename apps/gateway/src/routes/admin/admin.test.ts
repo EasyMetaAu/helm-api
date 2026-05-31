@@ -294,6 +294,23 @@ describe("admin.api classifier", () => {
     expect(got.eval.enabled).toBe(false);
   });
 
+  it("rejects a wrong-shaped patch body with 400 instead of silently writing defaults", async () => {
+    // Footgun guard (principle 2 fail-closed): a sparse/mis-keyed patch like
+    // {eval_enabled, confidence_threshold} must NOT parse to an all-defaults
+    // config and overwrite the live one — the strict full-replace schema rejects
+    // it (unknown keys + missing rules/eval) and leaves config untouched.
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const before = structuredClone(await rules.getClassifier());
+    const res = await app.request("/admin/api/classifier", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ eval_enabled: true, confidence_threshold: 0.5 }),
+    });
+    expect(res.status).toBe(400);
+    expect(await rules.getClassifier()).toEqual(before);
+  });
+
   it("rejects an out-of-range confidence_threshold with 400", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);

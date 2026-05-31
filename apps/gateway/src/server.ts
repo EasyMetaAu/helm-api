@@ -27,6 +27,7 @@ import {
   type ProviderRegistryConfig as RegistryProviderConfig,
   type RouteOptions,
   redact,
+  responsesTransformer,
   routeRequest,
   type StoreSet,
   startSignalScheduler,
@@ -53,6 +54,7 @@ import { createExecute } from "./routes/execute.js";
 import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
+import { registerResponsesRoute } from "./routes/responses.js";
 
 export interface ServerHandle {
   app: ReturnType<typeof createApp>;
@@ -460,13 +462,51 @@ export async function buildServer(
         },
         transformErrorOut: (err: RouteError) =>
           makeAnthropicError({
-            error_class: err.error_class === "auth_error" ? "auth_error" : "upstream_error",
+            // Preserve the precise class for the cases the route raises directly
+            // (auth_error → 401, invalid_request → 400 for a malformed body); any
+            // other internal error degrades to a generic upstream_error (502).
+            error_class:
+              err.error_class === "auth_error"
+                ? "auth_error"
+                : err.error_class === "invalid_request"
+                  ? "invalid_request"
+                  : "upstream_error",
             message: err.message,
             trace_id: err.trace_id,
           }),
       },
     },
     pipeline: messagesPipeline,
+  });
+
+  // OpenAI Responses route (/v1/responses). Reuses the SAME routing core via a
+  // pipeline stamped with the openai_responses protocol, and the Responses
+  // transformer for IR↔native translation. Non-streaming only (no Responses SSE
+  // transformer yet); a stream:true request is rejected with a structured 400.
+  const responsesPipeline = createMessagesPipeline(route, "openai_responses");
+  registerResponsesRoute(app, {
+    auth: {
+      resolve: async (credential): Promise<MessagesIdentity | null> => {
+        if (credential === null) return null;
+        const record = await keyStore.getByHash(hashKey(credential));
+        if (record === null || record.disabled) return null;
+        return {
+          keyId: record.key_id,
+          keyPrefix: record.prefix,
+          accountId: record.account_id,
+          orgId: null,
+          userId: null,
+          role: record.role,
+          caps: { allowCustomModel: record.allow_custom_model },
+        };
+      },
+    },
+    transformer: {
+      transformRequestOut: (native) =>
+        responsesTransformer.transformRequestOut(native) as { metadata?: Record<string, unknown> },
+      transformResponseOut: (ir) => responsesTransformer.transformResponseOut(ir as IRResponse),
+    },
+    pipeline: responsesPipeline,
   });
 
   // Start the Agentic Signals background scheduler — the OFF-the-request-path

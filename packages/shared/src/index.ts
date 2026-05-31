@@ -39,6 +39,7 @@ export {
 export {
   type ClassifierConfig,
   ClassifierConfigSchema,
+  ClassifierConfigStrictSchema,
   type ClassifierEvalConfig,
   ClassifierEvalConfigSchema,
   type ClassifierRulesConfig,
@@ -173,6 +174,8 @@ export {
   InternalRequestSchema,
   type MemoryMode,
   MemoryModeSchema,
+  type OpenAIChatRequest,
+  OpenAIChatRequestSchema,
   type Protocol,
   ProtocolSchema,
   type RequestMetadata,

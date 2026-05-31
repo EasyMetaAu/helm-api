@@ -46,6 +46,24 @@ export const InternalRequestSchema = z.object({
   metadata: RequestMetadataSchema,
 });
 
+// ── Inbound OpenAI Chat Completions request validation (boundary guard) ─────────
+// The gateway must reject a malformed/invalid OpenAI request with 400
+// invalid_request BEFORE normalization + routing (docs/07, principle 2: fail-
+// closed). This validates only what makes a request well-formed enough to route:
+// `messages` must be a non-empty array of role-bearing objects. Everything else
+// (model, tools, response_format, temperature, …) is passed through loosely — we
+// do NOT prematurely lock per-provider fields here. `model` is optional (absent →
+// "auto"). Loose objects so unknown OpenAI fields never break parsing.
+const OpenAIChatMessageSchema = z.looseObject({ role: z.string().min(1), content: z.unknown() });
+
+export const OpenAIChatRequestSchema = z.looseObject({
+  model: z.string().optional(),
+  messages: z.array(OpenAIChatMessageSchema).min(1),
+  stream: z.boolean().optional(),
+});
+
+export type OpenAIChatRequest = z.infer<typeof OpenAIChatRequestSchema>;
+
 // Single source of truth: types via z.infer — no duplicate interfaces.
 export type Protocol = z.infer<typeof ProtocolSchema>;
 export type MemoryMode = z.infer<typeof MemoryModeSchema>;
