@@ -110,7 +110,7 @@
     >
     <button
       type="button"
-      class="btn-icon text-red-600"
+      class="rounded px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
       aria-label={$t('remove')}
       onclick={() => onremove(index)}>{$t('Remove')}</button
     >
