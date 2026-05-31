@@ -1,0 +1,81 @@
+{
+  "generatedAt": "2026-05-31T00:00:00.000Z",
+  "source": "litellm:model_prices_and_context_window.json",
+  "models": [
+    {
+      "modelKey": "claude-3-5-haiku-20241022",
+      "capabilities": {
+        "supportsTools": true,
+        "supportsJsonMode": false,
+        "supportsVision": false,
+        "supportsStreaming": true,
+        "maxContextTokens": 200000,
+        "maxOutputTokens": 8192
+      },
+      "pricing": {
+        "inputPerMTokUsd": 0.8,
+        "outputPerMTokUsd": 4
+      }
+    },
+    {
+      "modelKey": "claude-3-5-sonnet-20241022",
+      "capabilities": {
+        "supportsTools": true,
+        "supportsJsonMode": false,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "maxContextTokens": 200000,
+        "maxOutputTokens": 8192
+      },
+      "pricing": {
+        "inputPerMTokUsd": 3,
+        "outputPerMTokUsd": 15
+      }
+    },
+    {
+      "modelKey": "gemini-1.5-pro",
+      "capabilities": {
+        "supportsTools": true,
+        "supportsJsonMode": false,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "maxContextTokens": 2097152,
+        "maxOutputTokens": 8192
+      },
+      "pricing": {
+        "inputPerMTokUsd": 1.25,
+        "outputPerMTokUsd": 5
+      }
+    },
+    {
+      "modelKey": "gpt-4o",
+      "capabilities": {
+        "supportsTools": true,
+        "supportsJsonMode": true,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "maxContextTokens": 128000,
+        "maxOutputTokens": 16384
+      },
+      "pricing": {
+        "inputPerMTokUsd": 2.5,
+        "outputPerMTokUsd": 10
+      }
+    },
+    {
+      "modelKey": "gpt-4o-mini",
+      "capabilities": {
+        "supportsTools": true,
+        "supportsJsonMode": true,
+        "supportsVision": true,
+        "supportsStreaming": true,
+        "maxContextTokens": 128000,
+        "maxOutputTokens": 16384
+      },
+      "pricing": {
+        "inputPerMTokUsd": 0.15,
+        "outputPerMTokUsd": 0.6
+      }
+    }
+  ]
+}

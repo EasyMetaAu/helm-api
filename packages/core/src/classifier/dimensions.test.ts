@@ -1,0 +1,167 @@
+import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
+import { ClassifierRulesConfigSchema } from "@helm/shared";
+import { describe, expect, it, vi } from "vitest";
+import { scoreDimensions } from "./dimensions.js";
+
+// A minimal but representative classifier rules config mirroring config/classifier
+// .yaml: keyword dimensions (sign = direction) + structural dimensions whose
+// signal is fed by code, not data.
+function makeConfig(
+  overrides: Record<string, { weight: number; keywords?: string[] }> = {},
+): ClassifierRulesConfig {
+  const dimensions = {
+    reasoning_kw: { weight: 0.35, keywords: ["prove", "theorem", "step by step"] },
+    coding_kw: { weight: 0.2, keywords: ["refactor", "stack trace"] },
+    simple_kw: { weight: -0.25, keywords: ["hi", "thanks", "ok"] },
+    has_code_block: { weight: 0.2, keywords: [] },
+    has_url: { weight: 0.05, keywords: [] },
+    has_stack: { weight: 0.15, keywords: [] },
+    has_file_path: { weight: 0.1, keywords: [] },
+    has_attachment: { weight: 0.1, keywords: [] },
+    has_json_format: { weight: 0.08, keywords: [] },
+    msg_length: { weight: 0.1, keywords: [] },
+    ...overrides,
+  };
+  // Parse through the real schema so defaults / shape stay honest.
+  return ClassifierRulesConfigSchema.parse({
+    dimensions,
+    task_keywords: {},
+    tool_prefixes: {},
+    tier_boundaries: {},
+    overrides: {},
+    momentum: {},
+  });
+}
+
+type ReqInput = Pick<
+  InternalRequest,
+  "messages" | "tools" | "response_format" | "attachments" | "max_tokens"
+>;
+
+function makeReq(text: string, extra: Partial<ReqInput> = {}): ReqInput {
+  return {
+    messages: [{ role: "user", content: text }],
+    tools: null,
+    response_format: null,
+    attachments: null,
+    max_tokens: null,
+    ...extra,
+  };
+}
+
+describe("scoreDimensions", () => {
+  it("scores a positive keyword dimension (reasoning) above zero", () => {
+    const cfg = makeConfig();
+    const res = scoreDimensions(makeReq("prove the theorem step by step"), cfg);
+    const hit = res.hits.find((h) => h.dimension === "reasoning_kw");
+    expect(hit).toBeDefined();
+    expect(hit?.contribution).toBeGreaterThan(0);
+    expect(res.rawScore).toBeGreaterThan(0);
+  });
+
+  it("scores a negative keyword dimension (simple) below zero", () => {
+    const cfg = makeConfig();
+    const res = scoreDimensions(makeReq("hi thanks"), cfg);
+    const hit = res.hits.find((h) => h.dimension === "simple_kw");
+    expect(hit).toBeDefined();
+    expect(hit?.contribution).toBeLessThan(0);
+    expect(res.rawScore).toBeLessThan(0);
+  });
+
+  it("detects a fenced code block (>=40 chars) but not short inline code", () => {
+    const cfg = makeConfig();
+    const long = "```ts\nconst answer = computeTheUltimateMeaningOfLife(42);\n```";
+    const res = scoreDimensions(makeReq(long), cfg);
+    expect(res.hits.find((h) => h.dimension === "has_code_block")?.signal).toBe(1);
+
+    const inline = scoreDimensions(makeReq("use `x` here"), cfg);
+    expect(inline.hits.find((h) => h.dimension === "has_code_block")).toBeUndefined();
+  });
+
+  it("isolates structural signals: stack / file-path / url do not cross-talk", () => {
+    const cfg = makeConfig();
+
+    const stack = scoreDimensions(
+      makeReq("Traceback (most recent call last):\n  at foo (bar.js:10)"),
+      cfg,
+    );
+    expect(stack.hits.find((h) => h.dimension === "has_stack")?.signal).toBe(1);
+    expect(stack.hits.find((h) => h.dimension === "has_url")).toBeUndefined();
+
+    const path = scoreDimensions(makeReq("look at src/app/main.ts please"), cfg);
+    expect(path.hits.find((h) => h.dimension === "has_file_path")?.signal).toBe(1);
+    expect(path.hits.find((h) => h.dimension === "has_url")).toBeUndefined();
+
+    const url = scoreDimensions(makeReq("see https://x.com for info"), cfg);
+    expect(url.hits.find((h) => h.dimension === "has_url")?.signal).toBe(1);
+    expect(url.hits.find((h) => h.dimension === "has_file_path")).toBeUndefined();
+  });
+
+  it("is pure & deterministic with no side effects", () => {
+    const cfg = makeConfig();
+    const req = makeReq("prove the theorem step by step, see https://x.com");
+    const a = scoreDimensions(req, cfg);
+    const b = scoreDimensions(req, cfg);
+    expect(a.rawScore).toBe(b.rawScore);
+    expect(a).toEqual(b);
+
+    const dateSpy = vi.spyOn(Date, "now");
+    const randSpy = vi.spyOn(Math, "random");
+    scoreDimensions(req, cfg);
+    expect(dateSpy).not.toHaveBeenCalled();
+    expect(randSpy).not.toHaveBeenCalled();
+    dateSpy.mockRestore();
+    randSpy.mockRestore();
+  });
+
+  it("returns zero score and no hits for blank input", () => {
+    const cfg = makeConfig();
+    const res = scoreDimensions(makeReq("   \n  \t "), cfg);
+    expect(res.rawScore).toBe(0);
+    expect(res.hits).toEqual([]);
+  });
+
+  it("is config-driven: doubling a weight doubles the contribution", () => {
+    const base = makeConfig();
+    const doubled = makeConfig({
+      reasoning_kw: { weight: 0.7, keywords: ["prove", "theorem", "step by step"] },
+    });
+    const req = makeReq("prove the theorem step by step");
+    const baseHit = scoreDimensions(req, base).hits.find((h) => h.dimension === "reasoning_kw");
+    const dblHit = scoreDimensions(req, doubled).hits.find((h) => h.dimension === "reasoning_kw");
+    expect(baseHit).toBeDefined();
+    expect(dblHit).toBeDefined();
+    expect(dblHit?.contribution).toBeCloseTo((baseHit?.contribution ?? 0) * 2, 10);
+  });
+
+  it("feeds context signals from attachments and JSON response_format", () => {
+    const cfg = makeConfig();
+    const att = scoreDimensions(
+      makeReq("describe this", { attachments: [{ type: "image" }] }),
+      cfg,
+    );
+    expect(att.hits.find((h) => h.dimension === "has_attachment")?.signal).toBe(1);
+
+    const json = scoreDimensions(
+      makeReq("give me data", { response_format: { type: "json_object" } }),
+      cfg,
+    );
+    expect(json.hits.find((h) => h.dimension === "has_json_format")?.signal).toBe(1);
+  });
+
+  it("skips dimensions absent from the config without throwing", () => {
+    // cfg has no `has_url` dimension; a URL message must not error or invent a hit.
+    const cfg = makeConfig();
+    const partial = ClassifierRulesConfigSchema.parse({
+      dimensions: { reasoning_kw: cfg.dimensions.reasoning_kw },
+      task_keywords: {},
+      tool_prefixes: {},
+      tier_boundaries: {},
+      overrides: {},
+      momentum: {},
+    });
+    const res = scoreDimensions(makeReq("see https://x.com and prove the theorem"), partial);
+    expect(res.hits.find((h) => h.dimension === "has_url")).toBeUndefined();
+    expect(res.hits.find((h) => h.dimension === "reasoning_kw")).toBeDefined();
+  });
+});

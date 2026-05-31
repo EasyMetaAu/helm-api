@@ -1,0 +1,4 @@
+# Server binding. Env overrides: HELM_HOST, HELM_PORT, HELM_BASE_PATH (env wins).
+host: 0.0.0.0
+port: 8080
+base_path: /

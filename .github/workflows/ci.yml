@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    # Self-hosted runners (EasyMetaAu org, docker-runner-*); GitHub-hosted minutes
+    # are not used. All 9 runners carry these labels.
+    runs-on: [self-hosted, Linux, X64, docker]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      # build BEFORE test: admin-static.test.ts serves apps/admin/build, which is
+      # gitignored and therefore absent on a fresh CI checkout (would 404 → test fail).
+      - run: pnpm build
+      - run: pnpm test
+
+  # Builds and smoke-tests the real gateway Docker image (docs/10). Kept fully
+  # independent of `verify` (no `needs`) so the unit gates run on their own and
+  # neither job blocks the other.
+  docker:
+    runs-on: [self-hosted, Linux, X64, docker]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build gateway image
+        run: docker build -t helm-api:ci .
+      - name: Run container with required env
+        # The provider credential is referenced by env NAME only (principle 7);
+        # /healthz never calls upstream, so a dummy value is enough to boot. Config
+        # is baked into the image (see Dockerfile) — no host bind-mount, which would
+        # not resolve against the self-hosted runner's Docker daemon (DinD).
+        run: |
+          docker rm -f helm-ci 2>/dev/null || true
+          docker run -d --name helm-ci \
+            -p 8080:8080 \
+            -e OPENAI_API_KEY=sk-ci-smoke-test \
+            helm-api:ci
+      - name: Wait for /healthz to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz; then
+              echo "healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::gateway did not become healthy within 30s"
+          docker logs helm-ci
+          exit 1
+      - name: Stop container
+        if: always()
+        continue-on-error: true
+        run: docker stop helm-ci && docker rm helm-ci

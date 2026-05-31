@@ -1,0 +1,67 @@
+# lanes.yaml — the lane abstraction operators expose to clients (docs/04).
+# A lane is a declarative chain: primary -> fallback[] (EXECUTION fallback, the
+# in-chain next-model swap — distinct from the classification fallback that ends
+# at `balanced`; principle 5). Each primary/fallback element is a model ALIAS
+# (`provider/model`, resolved via providers.yaml) OR another lane name.
+# `constraints` drives the Capability Filter (require_* gates).
+#
+# Validated by LanesConfigSchema (@helm/shared) at load time — invalid => the
+# gateway refuses to boot (fail-closed, principle 2). `balanced` is REQUIRED: it
+# is the terminal of the classification fallback.
+#
+# ALIAS-NAMESPACE ALIGNMENT (2026-05-31): every candidate below is a
+# `provider/model` alias that ALSO keys providers.yaml, the capability+pricing
+# catalog, and pricing — so the capability filter + cost path resolve by the lane
+# candidate alias at runtime (no more "unknown -> fail-open"). Each lane ends in a
+# `*/auto` tail fallback; those auto aliases are deliberately JSON-INCAPABLE
+# (catalog supports_json_schema:false), so a strict-JSON request prunes them and
+# lands on a deterministic json-capable model (docs/02 security rule: `*/auto`
+# only at the tail).
+
+# —— quality/cost lanes ——
+economy:
+  purpose: Cheap and fast for simple tasks
+  primary: openai-crs/gpt-5.4-mini
+  fallback: [deepseek-crs/deepseek-flash, balanced]
+
+balanced:
+  purpose: Default quality/cost tradeoff (classification fallback terminal)
+  primary: deepseek-crs/deepseek-pro
+  fallback: [openai-crs/gpt-5.4-mini, zenmux/auto, openrouter/auto]
+
+premium:
+  purpose: Strong reasoning and high quality
+  primary: openai-crs/gpt-5.5
+  fallback: [zenmux/claude-opus-4.7, zenmux/auto, openrouter/auto]
+
+# —— task lanes (named after detected task_type; the lane resolver maps a
+#    classified task_type onto a same-named lane — docs/04) ——
+coding:
+  purpose: Coding-capable models for code generation / editing
+  primary: openai-crs/gpt-5.3-codex-spark
+  fallback: [premium, balanced]
+
+json:
+  purpose: Strict structured-output (JSON) responses
+  # Primary is json-capable (catalog supports_json_schema:true) so a strict-JSON
+  # request lands deterministically. The chain then drops through balanced, whose
+  # tail `*/auto` aliases are json-INCAPABLE and get PRUNED by the capability
+  # filter — proving the filter fires on the default config.
+  primary: openai-crs/gpt-5.4-mini
+  fallback: [balanced]
+  constraints:
+    require_json: true
+
+vision:
+  purpose: Multimodal / image understanding
+  primary: zenmux/gemini-3.5-flash
+  fallback: [premium]
+  constraints:
+    require_vision: true
+
+tool_use:
+  purpose: Reliable function / tool calling
+  primary: openai-crs/gpt-5.5
+  fallback: [premium]
+  constraints:
+    require_tools: true

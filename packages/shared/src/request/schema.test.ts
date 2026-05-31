@@ -1,0 +1,101 @@
+import { describe, expect, it } from "vitest";
+import { InternalRequestSchema } from "./schema.js";
+
+// Minimal valid normalized request: every optional field is explicitly present
+// (nullable, not omitted) per the "fields always present" contract.
+function validRequest() {
+  return {
+    request_id: "req_1",
+    protocol: "openai_chat",
+    account_id: "acct_1",
+    api_key_id: "key_1",
+    user_id: null,
+    org_id: null,
+    requested_model: "gpt-4o-mini",
+    messages: [{ role: "user", content: "hi" }],
+    tools: null,
+    response_format: null,
+    attachments: null,
+    max_tokens: null,
+    stream: false,
+    metadata: {
+      conversation_id: null,
+      thread_id: null,
+      resource_id: null,
+      project_id: null,
+      memory_mode: "off",
+    },
+  };
+}
+
+describe("InternalRequestSchema", () => {
+  it("accepts a minimal valid normalized request", () => {
+    const input = validRequest();
+    const parsed = InternalRequestSchema.parse(input);
+    expect(parsed.request_id).toBe("req_1");
+    expect(parsed.protocol).toBe("openai_chat");
+    expect(parsed.tools).toBeNull();
+    expect(parsed.metadata.memory_mode).toBe("off");
+  });
+
+  it.each([
+    "request_id",
+    "protocol",
+    "account_id",
+    "api_key_id",
+    "requested_model",
+    "messages",
+    "stream",
+    "metadata",
+  ])("rejects when required field %s is missing", (field) => {
+    const input = validRequest() as Record<string, unknown>;
+    delete input[field];
+    const res = InternalRequestSchema.safeParse(input);
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues.some((i) => i.path[0] === field)).toBe(true);
+    }
+  });
+
+  it("enforces the protocol enum", () => {
+    expect(InternalRequestSchema.safeParse(validRequest()).success).toBe(true);
+    const bad = { ...validRequest(), protocol: "cohere" };
+    const res = InternalRequestSchema.safeParse(bad);
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues[0]?.path).toEqual(["protocol"]);
+    }
+  });
+
+  it("enforces the memory_mode enum", () => {
+    const ok = validRequest();
+    ok.metadata.memory_mode = "inject";
+    expect(InternalRequestSchema.safeParse(ok).success).toBe(true);
+
+    const bad = validRequest();
+    (bad.metadata as Record<string, unknown>).memory_mode = "on";
+    const res = InternalRequestSchema.safeParse(bad);
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues[0]?.path).toEqual(["metadata", "memory_mode"]);
+    }
+  });
+
+  it("treats nullable fields as present-but-nullable (null ok, missing rejected)", () => {
+    const withNull = validRequest();
+    expect(InternalRequestSchema.safeParse(withNull).success).toBe(true);
+
+    const missing = validRequest() as Record<string, unknown>;
+    delete missing.tools;
+    expect(InternalRequestSchema.safeParse(missing).success).toBe(false);
+  });
+
+  it("rejects an empty messages array", () => {
+    const bad = { ...validRequest(), messages: [] };
+    const res = InternalRequestSchema.safeParse(bad);
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues[0]?.path).toEqual(["messages"]);
+    }
+  });
+});

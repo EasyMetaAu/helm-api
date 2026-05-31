@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+.git
+.github
+data
+*.md
+**/*.test.ts
+.ralph-dev
+.claude
+.env
+.env.*
+!.env.example
+coverage
+*.log

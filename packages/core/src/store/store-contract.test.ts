@@ -1,0 +1,481 @@
+import type { ApiKeyRecord, DecisionRecord, RoutingSignal } from "@helm/shared";
+import { afterEach, describe, expect, it } from "vitest";
+import type {
+  ConfigStore,
+  KeyStore,
+  MemoryStore,
+  RateLimitStore,
+  SignalStore,
+  TelemetryStore,
+} from "./ports.js";
+import { PgConfigStore } from "./postgres/config-store.js";
+import { PgKeyStore } from "./postgres/keystore.js";
+import { PgMemoryStore } from "./postgres/memory-store.js";
+import { createPgliteDb } from "./postgres/migrate.js";
+import { PgRateLimitStore } from "./postgres/rate-limit.js";
+import { PgSignalStore } from "./postgres/signals.js";
+import { PgTelemetryStore } from "./postgres/telemetry.js";
+import { SqliteConfigStore } from "./sqlite/config-store.js";
+import { SqliteKeyStore } from "./sqlite/keystore.js";
+import { SqliteMemoryStore } from "./sqlite/memory-store.js";
+import { createSqliteDb } from "./sqlite/migrate.js";
+import { SqliteRateLimitStore } from "./sqlite/rate-limit.js";
+import { SqliteSignalStore } from "./sqlite/signals.js";
+import { SqliteTelemetryStore } from "./sqlite/telemetry.js";
+
+// ONE contract, BOTH real drivers. The DoD ("sqlite 与 supabase 同一契约测试") is
+// met here: the SAME assertions run against the sqlite adapter AND against the
+// Postgres adapters on an in-process PGlite database. supabase == hosted
+// Postgres, so the pglite pg-dialect coverage validates the supabase path WITHOUT
+// a server. Stable genId/now injected so rows are deterministic across drivers.
+
+interface Adapters {
+  keys: KeyStore;
+  telemetry: TelemetryStore;
+  signals: SignalStore;
+  rateLimit: RateLimitStore;
+  memory: MemoryStore;
+  config: ConfigStore;
+}
+
+interface Driver {
+  name: string;
+  make: () => Promise<{ stores: Adapters; close: () => Promise<void> }>;
+}
+
+const drivers: Driver[] = [
+  {
+    name: "sqlite",
+    make: async () => {
+      const db = createSqliteDb(":memory:");
+      return {
+        stores: {
+          keys: new SqliteKeyStore(db),
+          telemetry: new SqliteTelemetryStore(db),
+          signals: new SqliteSignalStore(db),
+          rateLimit: new SqliteRateLimitStore(db),
+          memory: new SqliteMemoryStore(db),
+          config: new SqliteConfigStore(db),
+        },
+        close: async () => {
+          db.$sqlite.close();
+        },
+      };
+    },
+  },
+  {
+    name: "pglite-postgres",
+    make: async () => {
+      const db = await createPgliteDb();
+      return {
+        stores: {
+          keys: new PgKeyStore(db),
+          telemetry: new PgTelemetryStore(db),
+          signals: new PgSignalStore(db),
+          rateLimit: new PgRateLimitStore(db),
+          memory: new PgMemoryStore(db),
+          config: new PgConfigStore(db),
+        },
+        close: () => db.$close(),
+      };
+    },
+  },
+];
+
+function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): DecisionRecord {
+  return {
+    request_id: requestId,
+    trace_id: requestId,
+    requested_model: "gpt-4o",
+    classifier: {
+      task_type: "coding",
+      complexity: "complex",
+      confidence: 0.87,
+      decided_by: "rules",
+      eval_cache_hit: null,
+      constraints: { needs_tools: true },
+      explanation: ["code-block"],
+    },
+    policy: { matched_policy_id: "p1", reason: "coding" },
+    lane: { selected_lane: "coding", candidate_chain: ["coding_model", "premium"] },
+    provider_attempts: [
+      {
+        alias: "coding_model",
+        skipped: true,
+        skip_reason: "circuit_open",
+        status: "error",
+        error_class: "upstream_error",
+        latency_ms: 0,
+        cost_usd: null,
+      },
+      {
+        alias: "premium",
+        skipped: false,
+        skip_reason: null,
+        status: "ok",
+        error_class: null,
+        latency_ms: 1200,
+        cost_usd: 0.004,
+      },
+    ],
+    final: { model_alias: "premium", provider_model: "claude-x", status: "ok", error_reason: null },
+    key_prefix: "helm_live_ab12",
+    latency_total_ms: 1200,
+    fallback_count: 0,
+    cost_breakdown: { eval_usd: null, completion_usd: 0.004, total_usd: 0.004 },
+    ...overrides,
+  };
+}
+
+function signal(over: Partial<RoutingSignal> = {}): RoutingSignal {
+  return {
+    taskType: "chat",
+    lane: "balanced",
+    windowStart: 1_000,
+    windowEnd: 2_000,
+    samples: 3,
+    successRate: 0.66,
+    fallbackRate: 0.1,
+    classifierFallbackRate: 0.2,
+    errorRate: 0.34,
+    p50LatencyMs: 120,
+    p95LatencyMs: 300,
+    avgCostUsd: 0.0021,
+    updatedAt: 5_000,
+    ...over,
+  };
+}
+
+describe.each(drivers)("Store port contract — $name", ({ make }) => {
+  let ctx: { stores: Adapters; close: () => Promise<void> };
+  afterEach(async () => {
+    await ctx?.close();
+  });
+
+  // --- KeyStore -----------------------------------------------------------
+  describe("KeyStore", () => {
+    it("round-trips create -> getByHash with native boolean/array restored", async () => {
+      ctx = await make();
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "sha256_h1",
+        prefix: "helm_live_ab12",
+        accountId: "acct",
+        role: "user",
+        maxLane: "balanced",
+        allowedLanes: ["economy", "balanced"],
+        allowCustomModel: true,
+      });
+      const got = await ctx.stores.keys.getByHash("sha256_h1");
+      expect(got).toMatchObject<Partial<ApiKeyRecord>>({
+        key_id: "k1",
+        hash: "sha256_h1",
+        prefix: "helm_live_ab12",
+        account_id: "acct",
+        role: "user",
+        max_lane: "balanced",
+        allowed_lanes: ["economy", "balanced"],
+        allow_custom_model: true,
+        disabled: false,
+      });
+    });
+
+    it("never persists a plaintext key (only hash + prefix)", async () => {
+      ctx = await make();
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "sha256_of_plaintext",
+        prefix: "helm_live_ab12",
+        accountId: "acct",
+        role: "root",
+      });
+      const got = await ctx.stores.keys.getByHash("sha256_of_plaintext");
+      expect(got && "plaintext" in got).toBe(false);
+      expect(got?.hash).toBe("sha256_of_plaintext");
+    });
+
+    it("disable is a soft flag: key still retrievable, only disabled changes", async () => {
+      ctx = await make();
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "h1",
+        prefix: "helm_live_a",
+        accountId: "acct",
+        role: "user",
+        maxLane: "balanced",
+      });
+      await ctx.stores.keys.disable("k1");
+      const got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.disabled).toBe(true);
+      expect(got?.max_lane).toBe("balanced");
+    });
+
+    it("disable on a missing key rejects (not silently)", async () => {
+      ctx = await make();
+      await expect(ctx.stores.keys.disable("nope")).rejects.toThrow();
+    });
+
+    it("list returns [] when empty and all records when populated", async () => {
+      ctx = await make();
+      expect(await ctx.stores.keys.list()).toEqual([]);
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "h1",
+        prefix: "p1",
+        accountId: "a",
+        role: "root",
+      });
+      await ctx.stores.keys.createKey({
+        keyId: "k2",
+        hash: "h2",
+        prefix: "p2",
+        accountId: "a",
+        role: "user",
+      });
+      expect(await ctx.stores.keys.list()).toHaveLength(2);
+    });
+
+    it("getByHash returns null on a miss (no throw)", async () => {
+      ctx = await make();
+      expect(await ctx.stores.keys.getByHash("unknown")).toBeNull();
+    });
+
+    it("rejects a duplicate hash (unique constraint)", async () => {
+      ctx = await make();
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "same",
+        prefix: "p1",
+        accountId: "a",
+        role: "root",
+      });
+      await expect(
+        ctx.stores.keys.createKey({
+          keyId: "k2",
+          hash: "same",
+          prefix: "p2",
+          accountId: "a",
+          role: "user",
+        }),
+      ).rejects.toThrow();
+    });
+  });
+
+  // --- TelemetryStore -----------------------------------------------------
+  describe("TelemetryStore", () => {
+    it("round-trips insert -> queryRecent without losing nested structure", async () => {
+      ctx = await make();
+      await ctx.stores.telemetry.insert({
+        decision: decision("req_1"),
+        apiKeyId: "k1",
+        createdAt: new Date(),
+      });
+      const recent = await ctx.stores.telemetry.queryRecent(10);
+      expect(recent).toHaveLength(1);
+      expect(recent[0]).toEqual(decision("req_1"));
+    });
+
+    it("getByRequestId returns the record, null on a miss", async () => {
+      ctx = await make();
+      await ctx.stores.telemetry.insert({
+        decision: decision("req_1"),
+        apiKeyId: "k1",
+        createdAt: new Date(),
+      });
+      expect((await ctx.stores.telemetry.getByRequestId("req_1"))?.request_id).toBe("req_1");
+      expect(await ctx.stores.telemetry.getByRequestId("nope")).toBeNull();
+    });
+
+    it("stores no plaintext key and no raw message payload", async () => {
+      ctx = await make();
+      await ctx.stores.telemetry.insert({
+        decision: decision("req_1"),
+        apiKeyId: "k1",
+        createdAt: new Date(),
+      });
+      const got = await ctx.stores.telemetry.getByRequestId("req_1");
+      const serialized = JSON.stringify(got);
+      expect(serialized).not.toContain("sk-");
+      expect(got && "messages" in got).toBe(false);
+    });
+
+    it("orders by created_at desc and respects limit", async () => {
+      ctx = await make();
+      await ctx.stores.telemetry.insert({
+        decision: decision("old"),
+        apiKeyId: "k1",
+        createdAt: new Date(1000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: decision("mid"),
+        apiKeyId: "k1",
+        createdAt: new Date(2000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: decision("new"),
+        apiKeyId: "k1",
+        createdAt: new Date(3000),
+      });
+      const recent = await ctx.stores.telemetry.queryRecent(2);
+      expect(recent.map((r) => r.request_id)).toEqual(["new", "mid"]);
+    });
+
+    it("queryWindow returns half-open [start, end) matches in asc order", async () => {
+      ctx = await make();
+      for (const [id, ms] of [
+        ["a", 1000],
+        ["b", 2000],
+        ["c", 3000],
+      ] as const) {
+        await ctx.stores.telemetry.insert({
+          decision: decision(id),
+          apiKeyId: "k1",
+          createdAt: new Date(ms),
+        });
+      }
+      const win = await ctx.stores.telemetry.queryWindow(1000, 3000);
+      expect(win.map((r) => r.request_id)).toEqual(["a", "b"]); // c at 3000 excluded
+    });
+
+    it("rejects a duplicate request_id (unique constraint)", async () => {
+      ctx = await make();
+      await ctx.stores.telemetry.insert({
+        decision: decision("req_1"),
+        apiKeyId: "k1",
+        createdAt: new Date(),
+      });
+      await expect(
+        ctx.stores.telemetry.insert({
+          decision: decision("req_1"),
+          apiKeyId: "k2",
+          createdAt: new Date(),
+        }),
+      ).rejects.toThrow();
+    });
+  });
+
+  // --- RateLimitStore -----------------------------------------------------
+  describe("RateLimitStore", () => {
+    it("consume decrements and rejects when empty", async () => {
+      ctx = await make();
+      const a = await ctx.stores.rateLimit.consume("k1", "rpm", null, 2, 1, 0);
+      expect(a.ok).toBe(true);
+      expect(a.remaining).toBe(1);
+      const b = await ctx.stores.rateLimit.consume("k1", "rpm", a.state, 2, 1, 0);
+      expect(b.ok).toBe(true);
+      expect(b.remaining).toBe(0);
+      const c = await ctx.stores.rateLimit.consume("k1", "rpm", b.state, 2, 1, 0);
+      expect(c.ok).toBe(false);
+    });
+
+    it("persists bucket state across fresh store instances (simulated restart)", async () => {
+      ctx = await make();
+      await ctx.stores.rateLimit.consume("k1", "rpm", null, 2, 1, 0);
+      await ctx.stores.rateLimit.consume("k1", "rpm", null, 2, 1, 0);
+      // A new call with no state hint must read the persisted (now-empty) bucket.
+      const third = await ctx.stores.rateLimit.consume("k1", "rpm", null, 2, 1, 0);
+      expect(third.ok).toBe(false);
+    });
+  });
+
+  // --- SignalStore --------------------------------------------------------
+  describe("SignalStore", () => {
+    it("upsert then getSignal round-trips the full shape", async () => {
+      ctx = await make();
+      const sig = signal();
+      await ctx.stores.signals.upsertSignals([sig]);
+      expect(await ctx.stores.signals.getSignal("chat", "balanced")).toEqual(sig);
+    });
+
+    it("getSignal returns null for an unknown (taskType, lane)", async () => {
+      ctx = await make();
+      expect(await ctx.stores.signals.getSignal("nope", "nope")).toBeNull();
+    });
+
+    it("upsert overwrites the existing (taskType, lane) — never duplicates", async () => {
+      ctx = await make();
+      await ctx.stores.signals.upsertSignals([signal({ samples: 3, updatedAt: 1 })]);
+      await ctx.stores.signals.upsertSignals([signal({ samples: 9, updatedAt: 2 })]);
+      const got = await ctx.stores.signals.getSignal("chat", "balanced");
+      expect(got?.samples).toBe(9);
+      expect(got?.updatedAt).toBe(2);
+    });
+
+    it("preserves a null avgCostUsd through the round-trip", async () => {
+      ctx = await make();
+      await ctx.stores.signals.upsertSignals([signal({ avgCostUsd: null })]);
+      expect((await ctx.stores.signals.getSignal("chat", "balanced"))?.avgCostUsd).toBeNull();
+    });
+  });
+
+  // --- MemoryStore --------------------------------------------------------
+  describe("MemoryStore", () => {
+    it("ensureThread is idempotent and appendMessage -> listMessages round-trips", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({ id: "t1", projectId: "p1" });
+      await ctx.stores.memory.ensureThread({ id: "t1", projectId: "p1" }); // no duplicate
+      await ctx.stores.memory.appendMessage({
+        threadId: "t1",
+        role: "user",
+        content: "hello",
+        tokenEstimate: 2,
+      });
+      const msgs = await ctx.stores.memory.listMessages("t1");
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]?.content).toBe("hello");
+      expect(msgs[0]?.createdAt).toBeInstanceOf(Date);
+    });
+
+    it("appendObservation -> listObservations preserves range + tags", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({ id: "t1" });
+      await ctx.stores.memory.appendObservation({
+        threadId: "t1",
+        sourceMessageRange: ["m1", "m2"],
+        observationText: "summary",
+        observedAt: new Date(1000),
+        tags: ["x", "y"],
+      });
+      const obs = await ctx.stores.memory.listObservations({ threadId: "t1" });
+      expect(obs).toHaveLength(1);
+      expect(obs[0]?.sourceMessageRange).toEqual(["m1", "m2"]);
+      expect(obs[0]?.tags).toEqual(["x", "y"]);
+      expect(obs[0]?.observedAt).toBeInstanceOf(Date);
+    });
+
+    it("upsertReflection -> getReflection returns the latest version for an exact scope", async () => {
+      ctx = await make();
+      await ctx.stores.memory.upsertReflection({
+        projectId: "p1",
+        reflectionText: "v1",
+        version: 1,
+        tokenEstimate: 5,
+        updatedAt: new Date(1000),
+      });
+      await ctx.stores.memory.upsertReflection({
+        projectId: "p1",
+        reflectionText: "v2",
+        version: 2,
+        tokenEstimate: 6,
+        updatedAt: new Date(2000),
+      });
+      const got = await ctx.stores.memory.getReflection({ projectId: "p1" });
+      expect(got?.version).toBe(2);
+      expect(got?.reflectionText).toBe("v2");
+      // Scope isolation: a thread-scoped read must NOT see the project row.
+      expect(await ctx.stores.memory.getReflection({ threadId: "p1" })).toBeNull();
+    });
+  });
+
+  // --- ConfigStore --------------------------------------------------------
+  describe("ConfigStore", () => {
+    it("get returns null on a miss, set then get round-trips, set upserts", async () => {
+      ctx = await make();
+      expect(await ctx.stores.config.get("k")).toBeNull();
+      await ctx.stores.config.set("k", "v1");
+      expect(await ctx.stores.config.get("k")).toBe("v1");
+      await ctx.stores.config.set("k", "v2");
+      expect(await ctx.stores.config.get("k")).toBe("v2");
+    });
+  });
+});

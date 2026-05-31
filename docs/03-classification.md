@@ -55,7 +55,7 @@ constraints:
 - **任务检测**：按关键词集合、工具名前缀、结构信号（URL、代码块、文件路径、堆栈）识别 `coding / web / data / vision` 等任务类型。
 - **会话动量（momentum）**：短的后续消息按历史会话倾向加权，避免单条短消息把分类带偏。
 - **硬覆盖与捷径**：心跳类（如 `HEARTBEAT_OK`）直接判 simple；形式逻辑关键词直接判 reasoning；带 tools 的请求下限为 standard；超长上下文（如 > 50k token）下限为 complex。
-- **置信度闸门**：`confidence = sigmoid(到最近边界的距离)`；低于阈值（默认 `0.45`）视为"不确定"，进入第 2 层。
+- **置信度闸门**：`confidence = 2·sigmoid(k·到最近边界的距离) − 1`，归一化到 `[0,1)`——贴边界（距离→0）≈0（最不确定），远离边界≈1（最确定）；低于阈值（默认 `0.45`）视为"不确定"，进入第 2 层。（注：旧实现用裸 `sigmoid`，落域 `[0.5,1)`，默认阈值 0.45 永不触发——已由 `classifier.confidence-fix` 修正，见 implementation-notes。）
 
 可移植性：维度名/权重/关键词列表/边界/阈值都是**数据**，应当放进 `classifier.yaml`，可调而不需改代码；少量结构信号正则和控制流是代码实现。具体维度/阈值见 [调研笔记](research-notes.md)。
 

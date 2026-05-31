@@ -1,0 +1,53 @@
+# Manual pricing overrides (layer 2), USD per 1M tokens. Keyed by modelKey.
+# Manual entries ALWAYS WIN over generated pricing (per-field).
+# Used for cost telemetry only — pricing never drives runtime model selection.
+# Validated by PricingOverrideSchema — illegal values fail-closed.
+
+# "openai/gpt-4o":
+#   inputPerMTokUsd: 2.5
+#   outputPerMTokUsd: 10.0
+
+# "local/llama-3.1-70b":
+#   inputPerMTokUsd: 0.0
+#   outputPerMTokUsd: 0.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RELAY / SELF-HOSTED MODEL PRICING (catalog-reuse 2026-05-31). Keyed by the
+# routing ALIAS (== catalog modelKey). Values from the sibling **llm-router**
+# (`llm-router/config/pricing-overrides.yaml` representative_text_pricing),
+# USD per 1M tokens. Lives in this manual layer, not the generated catalog (see
+# capabilities.yaml header). Cost telemetry only — never drives selection.
+openai-crs/gpt-5.5:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 30.0
+openai-crs/gpt-5.4-mini:
+  inputPerMTokUsd: 0.75
+  outputPerMTokUsd: 4.5
+openai-crs/gpt-5.3-codex-spark:
+  inputPerMTokUsd: 1.75
+  outputPerMTokUsd: 14.0
+deepseek-crs/deepseek-pro:
+  inputPerMTokUsd: 0.435
+  outputPerMTokUsd: 0.87
+deepseek-crs/deepseek-flash:
+  inputPerMTokUsd: 0.1
+  outputPerMTokUsd: 0.2
+zenmux/claude-opus-4.7:
+  inputPerMTokUsd: 30.0
+  outputPerMTokUsd: 150.0
+zenmux/gemini-3.5-flash:
+  inputPerMTokUsd: 1.5
+  outputPerMTokUsd: 9.0
+zenmux/auto:
+  inputPerMTokUsd: 2.5
+  outputPerMTokUsd: 15.0
+openrouter/auto:
+  inputPerMTokUsd: 2.5
+  outputPerMTokUsd: 15.0
+# Bare upstream id keyed for the Layer-2 EVAL self-cost (eval_usd): the eval
+# client (classifier.yaml `eval.model`) bypasses the registry and sends the wire
+# id `deepseek-flash` directly, so eval_usd resolves via this bare key (same
+# numbers as deepseek-crs/deepseek-flash). See classify.ts / route-request eval_usd.
+deepseek-flash:
+  inputPerMTokUsd: 0.1
+  outputPerMTokUsd: 0.2

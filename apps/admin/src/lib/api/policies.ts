@@ -1,0 +1,114 @@
+// Admin policy API client. The admin UI is a pure consumer of the gateway's
+// /admin/api/* HTTP surface — it imports NO core/gateway business logic and does
+// NO matching (first-match resolution lives in headless core). The Policy shape
+// mirrors the gateway's Zod schema (the single source of truth; @helm/core
+// PolicySchema) — duplicated here as a UI-facing type only because admin must
+// not import core (CLAUDE.md 原则1). Per docs/04 the policy list is ORDERED and
+// the order IS the match priority, so the client preserves order on the wire and
+// the gateway PUTs the whole set (no per-item patch that could lose priority).
+
+export interface PolicyMatch {
+  task_type?: string; // enum: docs/03 task_type set (TASK_TYPE_OPTIONS)
+  complexity?: string; // enum: server PolicyMatchSchema set (COMPLEXITY_OPTIONS)
+  needs_json?: boolean;
+  user_id?: string;
+  org_id?: string;
+}
+
+export interface Policy {
+  id?: string;
+  match: PolicyMatch; // all written fields AND together; empty match = catch-all
+  use_lane?: string; // force lane (mutually exclusive with max_lane)
+  max_lane?: string; // cap lane (mutually exclusive with use_lane)
+}
+
+// Dropdown enums. task_type mirrors docs/03 (@helm/core TaskType). complexity
+// mirrors the SERVER PolicyMatchSchema enum (simple|medium|complex) — the gateway
+// fail-closes (400) on any other value, so the UI must offer exactly that set to
+// avoid writing config the gateway would reject. See implementation-notes.md.
+export const TASK_TYPE_OPTIONS = [
+  'chat',
+  'coding',
+  'math',
+  'writing',
+  'extraction',
+  'tool_use',
+  'vision',
+  'web',
+  'data',
+] as const;
+
+export const COMPLEXITY_OPTIONS = ['simple', 'medium', 'complex'] as const;
+
+const BASE = '/admin/api/policies';
+
+async function asJson<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    let detail = '';
+    try {
+      detail = JSON.stringify(await res.json());
+    } catch {
+      // body not JSON; keep the status only
+    }
+    throw new Error(`policies api ${res.status}${detail ? `: ${detail}` : ''}`);
+  }
+  return (await res.json()) as T;
+}
+
+function normalizeMatch(raw: Record<string, unknown> | undefined): PolicyMatch {
+  const m = raw ?? {};
+  const out: PolicyMatch = {};
+  if (typeof m.task_type === 'string') out.task_type = m.task_type;
+  if (typeof m.complexity === 'string') out.complexity = m.complexity;
+  if (typeof m.needs_json === 'boolean') out.needs_json = m.needs_json;
+  if (typeof m.user_id === 'string') out.user_id = m.user_id;
+  if (typeof m.org_id === 'string') out.org_id = m.org_id;
+  return out;
+}
+
+function normalizePolicy(raw: Record<string, unknown>): Policy {
+  const p: Policy = {
+    match: normalizeMatch(raw.match as Record<string, unknown> | undefined),
+  };
+  if (typeof raw.id === 'string') p.id = raw.id;
+  if (typeof raw.use_lane === 'string') p.use_lane = raw.use_lane;
+  // use_lane wins if both somehow present (mutually exclusive); never send both.
+  if (p.use_lane == null && typeof raw.max_lane === 'string') p.max_lane = raw.max_lane;
+  return p;
+}
+
+// Drop empty/undefined match fields and send exactly one action. The server
+// PolicyMatchSchema is `.strict()`, so unknown/empty noise must not be sent.
+function toServerBody(p: Policy): Record<string, unknown> {
+  const match: Record<string, unknown> = {};
+  if (p.match.task_type) match.task_type = p.match.task_type;
+  if (p.match.complexity) match.complexity = p.match.complexity;
+  if (p.match.needs_json === true) match.needs_json = true;
+  if (p.match.user_id) match.user_id = p.match.user_id;
+  if (p.match.org_id) match.org_id = p.match.org_id;
+
+  const out: Record<string, unknown> = { match };
+  if (p.id) out.id = p.id;
+  // Mutually exclusive: prefer use_lane, else max_lane.
+  if (p.use_lane) out.use_lane = p.use_lane;
+  else if (p.max_lane) out.max_lane = p.max_lane;
+  return out;
+}
+
+// GET /admin/api/policies -> Policy[] (ordered).
+export async function listPolicies(): Promise<Policy[]> {
+  const res = await fetch(BASE, { headers: { accept: 'application/json' } });
+  const rows = await asJson<Record<string, unknown>[]>(res);
+  return rows.map(normalizePolicy);
+}
+
+// PUT /admin/api/policies <- Policy[] (whole ordered set; order = priority).
+export async function savePolicies(list: Policy[]): Promise<Policy[]> {
+  const res = await fetch(BASE, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(list.map(toServerBody)),
+  });
+  const saved = await asJson<Record<string, unknown>[]>(res);
+  return saved.map(normalizePolicy);
+}

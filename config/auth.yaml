@@ -1,0 +1,7 @@
+# Authentication. Anonymous access is never allowed (docs/06).
+require_api_key: true
+bootstrap:
+  # On first start, if no key exists, generate a root key and print it once.
+  generate_if_missing: true
+  persist_to: ./data/helm-keys.json # persisted to the mounted ./data volume
+  print_once: true

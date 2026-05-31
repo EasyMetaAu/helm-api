@@ -1,0 +1,22 @@
+{
+  "name": "@helm/gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@helm/core": "workspace:*",
+    "@helm/shared": "workspace:*",
+    "@hono/node-server": "^2.0.4",
+    "hono": "^4.12.23"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "tsx": "^4.22.3"
+  }
+}

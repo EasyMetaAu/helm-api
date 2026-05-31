@@ -1,0 +1,93 @@
+# classifier.yaml — Layer-1 classifier tunable surface (DATA, not code).
+# Validated by ClassifierConfigSchema (@helm/shared). Change keywords / boundaries
+# / toggle eval here WITHOUT touching code (CLAUDE.md principle 2). The Layer-1
+# scorer is a pure function fed by this already-parsed config (principle 4).
+classifier:
+  rules:
+    enabled: true
+    confidence_threshold: 0.45
+    sigmoid_k: 8
+    tier_boundaries: { standard: -0.10, complex: 0.08, reasoning: 0.35 }
+    dimensions:
+      # —— keyword dimensions (weight sign = direction) —— 15 total
+      reasoning_kw: { weight: 0.35, keywords: ["prove", "derive", "theorem", "step by step", "reason about"] }
+      coding_kw: { weight: 0.20, keywords: ["refactor", "debug", "stack trace", "function", "compile"] }
+      math_kw: { weight: 0.18, keywords: ["integral", "matrix", "equation", "probability"] }
+      planning_kw: { weight: 0.16, keywords: ["plan", "architecture", "design doc", "trade-off", "strategy"] }
+      analysis_kw: { weight: 0.14, keywords: ["analyze", "compare", "evaluate", "implications", "root cause"] }
+      writing_kw: { weight: 0.10, keywords: ["essay", "rewrite", "draft", "tone", "polish"] }
+      security_kw: { weight: 0.16, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf"] }
+      extraction_kw: { weight: 0.08, keywords: ["extract", "parse", "json from", "fields", "schema"] }
+      data_kw: { weight: 0.12, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot"] }
+      vision_kw: { weight: 0.10, keywords: ["image", "screenshot", "this picture", "diagram", "chart"] }
+      multistep_kw: { weight: 0.15, keywords: ["first", "then", "finally", "and then", "after that"] }
+      translation_kw: { weight: -0.05, keywords: ["translate", "in french", "in chinese", "to spanish"] }
+      lookup_kw: { weight: -0.10, keywords: ["what is", "who is", "define", "meaning of"] }
+      chitchat_kw: { weight: -0.20, keywords: ["how are you", "good morning", "lol", "haha"] }
+      simple_kw: { weight: -0.25, keywords: ["hi", "thanks", "ok", "ping"] }
+      # —— structural / context dimensions (keywords empty; code feeds the score) —— 9 total
+      has_code_block: { weight: 0.20 }
+      has_url: { weight: 0.05 }
+      has_stack: { weight: 0.15 }
+      has_math_notation: { weight: 0.12 }
+      has_table: { weight: 0.08 }
+      has_attachment: { weight: 0.10 }
+      msg_length: { weight: 0.10 }
+      turn_count: { weight: 0.06 }
+      tool_count: { weight: 0.08 }
+    task_keywords:
+      coding: ["function", "class", "bug", "compile", "npm", "git"]
+      math: ["integral", "matrix", "equation"]
+      writing: ["essay", "rewrite", "draft", "tone"]
+      extraction: ["extract", "parse", "json from", "fields"]
+      web: ["search the web", "browse", "look up online"]
+      data: ["csv", "dataframe", "aggregate", "sql"]
+      vision: ["image", "screenshot", "this picture"]
+      # security (eval-v2 cybersecurity domain). Conservative, multi-word
+      # keywords; paired with a raised task_activation.security (>= 2.0) so a
+      # single lone hit (e.g. "explain what XSS is") does NOT false-activate.
+      security: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf"]
+    tool_prefixes:
+      web: ["browser_", "web_"]
+      coding: ["code_", "shell_", "fs_"]
+      data: ["sql_", "sheet_"]
+    # web raised to 3.0 (a lone URL must not false-trigger); security raised to
+    # 2.0 (a single lone keyword like "xss" must not false-trigger — needs >= 2
+    # keyword hits, i.e. a clearly security-laden request).
+    task_activation: { web: 3.0, security: 2.0 }
+    overrides:
+      heartbeat_tokens: ["HEARTBEAT_OK"]
+      formal_logic_keywords: ["⊢", "∴", "modus ponens", "first-order logic"]
+      tools_floor: standard
+      long_context_token_threshold: 64000  # capability signal (NOT a task_type); bumped 50k->64k to match llm-router lanes.yaml long_context anchor
+      long_context_floor: complex
+      short_message_max_chars: 50
+    momentum:
+      enabled: true
+      ttl_sec: 1800
+      history_size: 5
+      short_message_max_chars: 30
+      disable_above_chars: 100
+      max_history_weight: 0.6
+  # Layer-2 (small-model eval) — OPTIONAL, costed, OFF by default. Validated by
+  # EvalConfigSchema (@helm/shared): temperature/on_failure/cache.key are locked,
+  # max_tokens capped at 1024. Downstream eval modules read this parsed object.
+  eval:
+    enabled: false                 # default OFF (non-negotiable)
+    # The eval client sends this id DIRECTLY on the wire to the primary provider
+    # (the crs relay), bypassing the registry — so it MUST be a real bare upstream
+    # id the relay accepts (fix-upstream-model-id 2026-05-31). `deepseek-flash` is
+    # the relay's cheap/fast tier (non-stream OK, json-capable); its eval_usd is
+    # priced via the bare `deepseek-flash` key in pricing.yaml. The old
+    # `deepseek/deepseek-v4-flash` was an OpenRouter id and 500'd on this relay.
+    model: deepseek-flash
+    temperature: 0
+    max_tokens: 256
+    timeout_ms: 300                # inner (runner) timeout
+    outer_timeout_ms: 250          # outer (consumer) timeout — double-race hardening
+    on_failure: balanced
+    cache:
+      enabled: true
+      key: content_hash
+      ttl_sec: 300
+      max_entries: 5000            # LRU capacity (eval.cache)

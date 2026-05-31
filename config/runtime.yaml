@@ -1,0 +1,26 @@
+# Runtime limits + rate limiting. Rate limiting is OFF by default (zero friction).
+# Env overrides: HELM_MAX_REQUEST_BYTES, HELM_REQUEST_TIMEOUT_MS, HELM_RATE_LIMIT_ENABLED.
+max_request_bytes: 2000000 # 2 MB
+request_timeout_ms: 60000
+rate_limit:
+  enabled: false
+  default:
+    rpm: 0 # 0 = unlimited
+    tpm: 0
+  # Per-key overrides keyed by key_id. Partial overrides fall back to `default`
+  # for any unset dimension. Counters persist in the store (survive restarts).
+  # Example:
+  #   overrides:
+  #     k_app1: { rpm: 600 }          # only rpm overridden; tpm falls back
+  #     k_batch: { rpm: 0, tpm: 0 }   # unlimited for this key
+  overrides: {}
+
+# Storage driver (DB abstraction layer). 'sqlite' (default, local file under
+# HELM_DATA_DIR) or 'supabase' (hosted Postgres). For supabase, set `url_env` to
+# the NAME of the env var holding the Postgres connection string — never the DSN
+# itself (credentials stay out of the repo). Env overrides: HELM_STORE_DRIVER,
+# HELM_STORE_URL_ENV. An unknown driver fails closed at startup.
+store:
+  driver: sqlite
+  # driver: supabase
+  # url_env: HELM_STORE_URL
