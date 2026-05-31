@@ -51,8 +51,8 @@ export {
   type TaskType,
 } from "./taskdetect.js";
 export {
+  boundaryConfidence,
   type Complexity,
   classifyTier,
-  sigmoidConfidence,
   type TierResult,
 } from "./tiers.js";

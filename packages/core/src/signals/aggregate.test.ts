@@ -42,6 +42,10 @@ function makeRecord(over: {
       status: over.finalStatus,
       error_reason: over.finalStatus === "error" ? "upstream_error" : null,
     },
+    key_prefix: null,
+    latency_total_ms: 0,
+    fallback_count: 0,
+    cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
   };
 }
 

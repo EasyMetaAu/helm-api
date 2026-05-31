@@ -82,6 +82,6 @@ const { buildServer } = await import("../../src/server.js");
 // WITHOUT mutating the checked-in config — other specs (routing) keep the spec
 // default 0.45. See implementation-notes (2026-05-31 · e2e.eval).
 const configDir = new URL("../../../../config", import.meta.url).pathname;
-const { app, port, host } = buildServer({ configDir });
+const { app, port, host } = await buildServer({ configDir });
 serve({ fetch: app.fetch, port, hostname: host });
 process.stdout.write(`e2e gateway listening on ${host}:${port}\n`);

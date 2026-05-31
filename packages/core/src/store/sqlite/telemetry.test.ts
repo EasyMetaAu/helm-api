@@ -40,6 +40,10 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
       },
     ],
     final: { model_alias: "premium", provider_model: "claude-x", status: "ok", error_reason: null },
+    key_prefix: "helm_live_ab12",
+    latency_total_ms: 1200,
+    fallback_count: 0,
+    cost_breakdown: { eval_usd: null, completion_usd: 0.004, total_usd: 0.004 },
     ...overrides,
   };
 }

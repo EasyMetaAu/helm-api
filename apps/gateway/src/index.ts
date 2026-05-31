@@ -37,10 +37,10 @@ export function buildDefaultApp() {
 }
 
 // Start the server when run directly (e.g. `node dist/index.js` in the image).
-function main(): void {
+async function main(): Promise<void> {
   const logger = createJsonLogger();
   try {
-    const { app, port, host } = buildServer({ logger });
+    const { app, port, host } = await buildServer({ logger });
     serve({ fetch: app.fetch, port, hostname: host });
     logger.log("info", "gateway.listening", { host, port });
   } catch (err) {
@@ -53,5 +53,5 @@ function main(): void {
 
 // Detect "run as the main module" under Node ESM.
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
-  main();
+  void main();
 }

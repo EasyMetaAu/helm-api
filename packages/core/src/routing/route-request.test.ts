@@ -263,4 +263,45 @@ describe("routeRequest — orchestration", () => {
     // premium's primary appears via the lane reference expansion.
     expect(plan.candidate_chain).toContain("best_reasoning_model");
   });
+
+  it("populates the rich telemetry fields (latency total, fallback_count, cost split, key_prefix)", async () => {
+    const d = deps({
+      classify: vi.fn(async () => classification({ eval_usd: 0.00003 })),
+      execute: vi.fn(
+        async (): Promise<ExecuteOutcome> => ({
+          attempts: [
+            {
+              alias: "coder_a",
+              skipped: false,
+              skip_reason: null,
+              status: "error",
+              error_class: "upstream_error",
+              latency_ms: 300,
+              cost_usd: null,
+            },
+            {
+              alias: "coder_b",
+              skipped: false,
+              skip_reason: null,
+              status: "ok",
+              error_class: null,
+              latency_ms: 950,
+              cost_usd: 0.004,
+            },
+          ],
+          final: { status: "ok", alias: "coder_b", providerModel: "coder-b-model" },
+          body: { id: "x", choices: [] },
+          stream: null,
+        }),
+      ),
+    });
+    const result = await routeRequest(req(), d, { keyPrefix: "helm_live_ab12" });
+    const rec = result.decision;
+    expect(rec.latency_total_ms).toBe(1250);
+    expect(rec.fallback_count).toBe(1); // two served attempts -> one execution swap
+    expect(rec.cost_breakdown.eval_usd).toBeCloseTo(0.00003);
+    expect(rec.cost_breakdown.completion_usd).toBeCloseTo(0.004);
+    expect(rec.cost_breakdown.total_usd).toBeCloseTo(0.00403);
+    expect(rec.key_prefix).toBe("helm_live_ab12");
+  });
 });

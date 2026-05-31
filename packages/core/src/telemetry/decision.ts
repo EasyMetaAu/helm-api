@@ -73,6 +73,30 @@ export interface DecisionParts {
   /** Straight from executor.fallback — includes skipped candidates, in order. */
   attempts: AttemptRecord[];
   final: FinalOutcome;
+  /** Display prefix of the resolved auth key (e.g. helm_live_ab12). PREFIX ONLY
+   *  — never the plaintext key (principle 7). Null/undefined when unknown. */
+  keyPrefix?: string | null;
+  /** Layer-2 eval self-cost in USD, known ONLY when eval actually ran (the eval
+   *  client surfaces it from the small-model usage). Null/undefined when eval was
+   *  skipped/disabled — kept SEPARATE from completion cost (docs/07; principle 5). */
+  evalUsd?: number | null;
+}
+
+// completion_usd = Σ of the served attempts' cost. Null (not a measured 0) when
+// no attempt carried a cost — so "unknown" stays distinct from "free".
+function sumCompletionCost(attempts: AttemptRecord[]): number | null {
+  return attempts.reduce<number | null>((acc, a) => {
+    if (a.cost_usd === null) return acc;
+    return (acc ?? 0) + a.cost_usd;
+  }, null);
+}
+
+// EXECUTION-stage fallback count (principle 5; NOT the classification fallback):
+// number of real (non-skipped) attempts beyond the first, clamped ≥0. Skipped
+// candidates (capability filter / circuit-open) are not swaps.
+function executionFallbackCount(attempts: AttemptRecord[]): number {
+  const served = attempts.filter((a) => !a.skipped).length;
+  return Math.max(0, served - 1);
 }
 
 // Assemble the complete DecisionRecord, every field filled (explicit null where
@@ -83,10 +107,19 @@ export interface DecisionParts {
 export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
   const { request, classification, policy, lane, attempts, final } = parts;
 
+  const keyPrefix = parts.keyPrefix ?? null;
+  const completionUsd = sumCompletionCost(attempts);
+  const evalUsd = parts.evalUsd ?? null;
+  // total = eval + completion, but null when BOTH are unknown (preserve "not
+  // measured"); a measured side still contributes when the other is unknown.
+  const totalUsd =
+    evalUsd === null && completionUsd === null ? null : (evalUsd ?? 0) + (completionUsd ?? 0);
+
   const record: DecisionRecord = {
     request_id: request.request_id,
     trace_id: request.request_id,
     requested_model: request.requested_model,
+    key_prefix: keyPrefix,
     classifier: {
       task_type: classification.task_type,
       complexity: classification.complexity,
@@ -121,10 +154,22 @@ export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
       status: final.status,
       error_reason: final.error_reason,
     },
+    latency_total_ms: attempts.reduce((acc, a) => acc + a.latency_ms, 0),
+    fallback_count: executionFallbackCount(attempts),
+    cost_breakdown: {
+      eval_usd: evalUsd,
+      completion_usd: completionUsd,
+      total_usd: totalUsd,
+    },
   };
 
   // Last gate before the record leaves core: irreversibly fingerprint any
   // plaintext key and summarize any private payload that slipped into a field.
+  // `key_prefix` does NOT match the secret pattern (api[_-]?key | … — there is no
+  // standalone `key` alternative), so the prefix-only display value survives the
+  // pass verbatim (principle 7: prefix only, no plaintext — and no useless
+  // double-fingerprinting that would blank the Debug UI key column). The
+  // redaction test pins this.
   return redact(record);
 }
 

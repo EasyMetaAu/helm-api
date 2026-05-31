@@ -14,7 +14,7 @@ export type Complexity = "simple" | "standard" | "complex" | "reasoning";
 export interface TierResult {
   /** The tier `rawScore` falls into (half-open [lower, upper) intervals). */
   complexity: Complexity;
-  /** sigmoid(k · distance-to-nearest-boundary) ∈ [0.5, 1]. */
+  /** Normalized boundary confidence ∈ [0, 1): 1 - e^(-k · distance-to-boundary). */
   confidence: number;
   /** confidence < confidence_threshold → cascade into Layer-2 eval. */
   uncertain: boolean;
@@ -22,11 +22,18 @@ export interface TierResult {
   nearestBoundaryDistance: number;
 }
 
-// confidence = 1 / (1 + e^(-k·distance)). distance ≥ 0, so the result lives in
-// [0.5, 1): exactly at a boundary (distance 0) confidence is 0.5 (maximally
-// uncertain); far from any boundary it approaches 1.
-export function sigmoidConfidence(distance: number, k: number): number {
-  return 1 / (1 + Math.exp(-k * distance));
+// confidence = 2·sigmoid(k·distance) - 1  ( = tanh(k·distance/2) ). distance ≥ 0,
+// so the result lives in [0, 1): exactly at a boundary (distance 0) confidence is
+// 0 (maximally uncertain — boundary-hugging), far from any boundary it approaches
+// 1 (certain). This is the rescaled half of the logistic curve: it takes the old
+// [0.5, 1) sigmoid output and stretches it back onto the full [0, 1) range.
+//
+// This normalization is what lets the DEFAULT confidence_threshold (0.45) actually
+// cascade: a score inside the boundary band now dips below 0.45 → uncertain →
+// Layer-2 eval (the old [0.5, 1) sigmoid never could). See implementation-notes
+// (classifier.confidence-fix) and docs/03 §Layer 1.
+export function boundaryConfidence(distance: number, k: number): number {
+  return 2 / (1 + Math.exp(-k * distance)) - 1;
 }
 
 // Pure tier classifier. Half-open intervals, left-closed:
@@ -52,7 +59,7 @@ export function classifyTier(rawScore: number, cfg: ClassifierRulesConfig): Tier
 
   const complexity = tierFor(rawScore, standard, complex, reasoning);
   const nearestBoundaryDistance = nearestDistance(rawScore, boundaries);
-  const confidence = sigmoidConfidence(nearestBoundaryDistance, cfg.sigmoid_k);
+  const confidence = boundaryConfidence(nearestBoundaryDistance, cfg.sigmoid_k);
   const uncertain = confidence < cfg.confidence_threshold;
 
   return { complexity, confidence, uncertain, nearestBoundaryDistance };

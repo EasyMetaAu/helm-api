@@ -1,0 +1,54 @@
+# lanes.yaml — the lane abstraction operators expose to clients (docs/04).
+# A lane is a declarative chain: primary -> fallback[] (EXECUTION fallback, the
+# in-chain next-model swap — distinct from the classification fallback that ends
+# at `balanced`; principle 5). Each primary/fallback element is a model alias OR
+# another lane name. `constraints` drives the Capability Filter (require_* gates).
+#
+# Validated by LanesConfigSchema (@helm/shared) at load time — invalid => the
+# gateway refuses to boot (fail-closed, principle 2). `balanced` is REQUIRED: it
+# is the terminal of the classification fallback. Model aliases below are
+# placeholders resolved via providers.yaml.
+
+# —— quality/cost lanes ——
+economy:
+  purpose: Cheap and fast for simple tasks
+  primary: cheap_model
+  fallback: [balanced]
+
+balanced:
+  purpose: Default quality/cost tradeoff (classification fallback terminal)
+  primary: default_good_model
+  fallback: [premium, economy]
+
+premium:
+  purpose: Strong reasoning and high quality
+  primary: best_reasoning_model
+  fallback: [balanced]
+
+# —— task lanes (named after detected task_type; the lane resolver maps a
+#    classified task_type onto a same-named lane — docs/04) ——
+coding:
+  purpose: Coding-capable models for code generation / editing
+  primary: coding_capable_model
+  fallback: [premium, balanced]
+
+json:
+  purpose: Strict structured-output (JSON) responses
+  primary: strict_json_model
+  fallback: [balanced]
+  constraints:
+    require_json: true
+
+vision:
+  purpose: Multimodal / image understanding
+  primary: vision_model
+  fallback: [premium]
+  constraints:
+    require_vision: true
+
+tool_use:
+  purpose: Reliable function / tool calling
+  primary: tool_use_model
+  fallback: [premium]
+  constraints:
+    require_tools: true

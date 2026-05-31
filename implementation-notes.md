@@ -5,6 +5,177 @@
 
 ---
 
+## 2026-05-31 · 修复合并后 typecheck 失败：测试 fixture 与 z.input/z.output 不一致（docs/02、03、04、07）
+
+**症状**：合并任务后 `pnpm typecheck` 退出码 2（lint/test/build 均通过）。报错先出现在
+`packages/shared/src/decision/schema.test.ts`，修复后又依次暴露 `@helm/core`、`@helm/gateway`
+里同类的失败——这是一次跨包的合并回归，单看首条报错会漏修。
+
+**根因（两类，都是测试 fixture 陈旧，生产代码无误）**：
+
+1. **`DecisionRecord` 的 `z.input` vs `z.output` 错配**。`DecisionRecordSchema` 给
+   `key_prefix`(.default)、`latency_total_ms`(.default)、`fallback_count`(.default)、
+   `cost_breakdown`(.prefault) 加了默认值。Zod 语义下这些字段在**输入**(`z.input`)是可选、在
+   **输出**(`z.infer`/`z.output`)是必填。多个 fixture 把对象注解成 `DecisionRecord`（输出类型）
+   却省略这四个字段 → TS2739/TS1360。运行时 `safeParse` 仍通过（默认值会补上），所以只有
+   typecheck 抓得到。
+   - `shared/.../schema.test.ts`：fixture 本质是**未解析的输入**，且下方用例正是断言「parse 后默认值
+     存在」，故把 `fullRecord()` 注解从 `DecisionRecord` 改为 `z.input<typeof DecisionRecordSchema>`，
+     省略默认字段是合法的、也契合测试意图。
+   - `core/.../signals/aggregate.test.ts`、`signals/collector.test.ts`、`store/ports.test.ts`、
+     `gateway/.../routes/admin/admin.test.ts`：这些 fixture 是直接喂给消费者（期望输出类型）的完整
+     `DecisionRecord`，故显式补齐四个字段（`key_prefix:null`、按场景算出的 `latency_total_ms`/
+     `fallback_count`、对应的 `cost_breakdown`）。
+
+2. **eval 成本字段下沉**。合并把 `cost_usd` 加进 `EvalDecision`/`EvalDecisionResult`、把
+   `eval_usd` 加进 `ClassificationResult`（生产代码 `cascade.ts`/`eval/cache.ts`/`eval/client.ts`
+   均已填充），但 `core/.../classifier/cascade.test.ts`、`eval/cache.test.ts` 的桩与类型级 fixture
+   未跟上。按语义补：缓存命中 `cost_usd:null`（无增量自费）、实跑给小额正数、fallback/rules 路径
+   `eval_usd:null`。
+
+**结论**：未改任何生产代码，未删任何测试；只把陈旧 fixture 对齐已合并的 schema/类型。
+四道闸全绿（typecheck 0、lint 0（14 条既有 warning）、test 889/889、build 0）。
+
+---
+
+## 2026-05-31 · CI 真·Docker 构建 + 烟测 job（关闭「本环境无 Docker」TODO）
+
+所属：ci.docker、docs/10、2026-05-30「Phase 0 实现：gateway 服务入口 + Docker」条目
+
+- **关闭的 gap**：先前条目记「⚠️ 本环境无 Docker，`docker build`/`compose up` 无法在此跑……真正的
+  build/run 烟测需在有 Docker 的 CI 上跑」。本次把这一真实验证搬到 CI——`Dockerfile` 契约不再只靠静态断言。
+- **`.github/workflows/ci.yml` 新增独立 `docker` job**（与单测门禁 `verify` job **并列、无 `needs`**，
+  互不阻塞，单测门禁照旧独立跑）：`docker build -t helm-api:ci .` → `docker run -d` 挂 `config/` 卷、
+  注入 `OPENAI_API_KEY=sk-ci-smoke-test`（凭证只用 env 名引用，principle 7；`/healthz` 不打上游，
+  dummy 值即可启动）→ `curl -fsS /healthz` 轮询 30s 超时（不健康则 `docker logs` 后 `exit 1`）→
+  `docker stop && docker rm` 清理（`if: always()` + `continue-on-error` 保证清理不掩盖烟测结果）。
+- **测试 `packages/shared/src/ci-workflow.test.ts` 同步扩展**：新增两例钉死「有独立 docker job 做
+  build+run+`/healthz`+stop」与「docker job 不含 `needs`（保持独立）」。原「不吞错」断言**收窄到 `verify` job
+  片段**——单测门禁必须硬失败，而 docker 清理步骤用 `continue-on-error` 属合理，不应被全局禁词命中。
+- **未改任何应用代码**，仅 CI YAML + 该测试（schema-first 不涉及；纯 workflow 形状断言）。
+- **残留 TODO**：(1) 仅烟测 `/healthz`，未测 `/version` 或 docker-compose 形态；可后续加 compose up 的
+  端到端轮询。(2) better-sqlite3 在 CI 的原生编译已由 runtime 镜像 `pnpm deploy --prod` 携带二进制承接
+  （见 2026-05-30 SQLite 条目），docker job 直接跑构建好的镜像，无需在 job 内装工具链。
+
+---
+
+## 2026-05-31 · admin.requests-richfields — 把 admin requests Debug UI 的占位字段做成真·遥测字段（task admin.requests-richfields、docs/07/02/11、原则 1/5/7）
+
+**关闭的 gap**：admin.requests-ui 当时后端 `DecisionRecord` 不记 `key_prefix`/延迟合计/`fallback_count`/`cost_breakdown`，requests-ui 只能把 `key_prefix` 显 `'—'`、`eval_usd`/`routing_usd` 恒 `0`、`ts` 留空——Debug UI 的 key 列、成本拆分、延迟全是占位。本任务把 docs/07 列表/详情里「可行得到」的几项做成真字段，贯穿 schema(@helm/shared) → 决策记录组装(core telemetry/routing) → eval 成本链(classifier eval/cascade) → 网关接线(auth/chat/messages) → 持久化(sqlite/pg telemetry) → admin 路由 → requests-ui 映射，**替换**了 admin.requests-ui 条目里那批占位 TODO（已就地标注 RESOLVED）。
+
+落地（先红后绿；五闸全绿 typecheck=0 / lint=0（14 条 pre-existing warning，均不在改动文件）/ test 887（+~16，原 774 基线无回归）/ build / e2e 34）：
+
+- **schema 扩展（唯一来源，z.infer）**：`DecisionRecordSchema` 新增 `key_prefix: string|null .default(null)`、`latency_total_ms: number≥0 .default(0)`、`fallback_count: int≥0 .default(0)`、`cost_breakdown: {eval_usd,completion_usd,total_usd}`（各 `number|null`，`.prefault` 全 null）。`.default/.prefault` 让**既有(预富化)记录**仍校验通过（向后兼容），新代码填真值。新增 `CostBreakdownSchema`/`CostBreakdown` 导出。
+- **决策记录组装填真值**（`core/telemetry/decision.ts` 的 `buildDecisionRecord` + `routing/route-request.ts` 的内联组装两处对齐）：`latency_total_ms = Σ attempts.latency_ms`；`fallback_count = (非 skipped attempts) − 1, clamp≥0`（**执行兜底**计数，原则5：与分类层 `decided_by` 严格不混淆；skipped 候选=能力过滤/熔断，不算 swap）；`completion_usd = Σ attempts.cost_usd`（全 null→null，保留「未测量」≠「0」）；`eval_usd` 来自 eval 链；`total_usd` = 两者之和（两者皆 null 才 null）。
+- **eval 自身成本链（docs/07「含 eval 评估自身的成本」）**：`EvalModelResponse` 加可选 `cost_usd`；`EvalDecision`（decided 分支）携带 `cost_usd:number|null`；`runEvalCached` **缓存命中**返回 `cost_usd:null`（无新调用＝无增量成本，非陈旧值）；cascade `ClassificationResult` 加 `eval_usd:number|null`（仅 eval-decided 分支取 `e.cost_usd`，rules 命中/eval_disabled/eval 失败开 均 null）→ 经 `route-request` 的 `Classification.eval_usd` → 记录 `cost_breakdown.eval_usd`。网关 classify 适配器的 `invokeModel` 从 OpenAI 形响应的 `usage.cost_usd`/顶层 `cost_usd` 取费（多数上游不内联回费→null，未测量）。
+- **key_prefix 接线（前缀only，原则7）**：`AuthIdentity` + `MessagesIdentity` 加 `keyPrefix`（取 `ApiKeyRecord.prefix`，**绝非明文**）；`RouteOptions` 加 `keyPrefix`；`chat.ts` 与 `messages-pipeline.ts` 把 identity.keyPrefix 传进 `route(req,{keyPrefix})`；server.ts 两处身份构造补 `keyPrefix: record.prefix`。
+- **脱敏验证（原则7）**：`key_prefix` **不**命中 redact 的密钥正则（`api[_-]?key|…`，无独立 `key` 分支），故前缀原样透传、不被二次 sha256（否则 Debug UI key 列被抹成 `sha256:…`无意义）。新增 redaction 单测钉死此点；`provider_raw` 仍合成 null（详情错误块），无 payload。
+- **requests-ui 读真字段**：`apps/admin/.../lib/api/requests.ts` 的 `toListItem` 读 `raw.key_prefix`（缺→`'—'`，永不明文）、`raw.latency_total_ms`、`raw.fallback_count`（缺则派生）；`toDetail` 经新 `buildCostBreakdown` 读 `raw.cost_breakdown`（eval 与 completion 分列；null 部分渲 0 仍可见；legacy 无 `cost_breakdown` 回退用 Σattempts 当 completion、eval=0）。新增 `lib/api/requests.test.ts`（4 例）钉死映射。
+
+spec 未覆盖 / 自己拍板的取舍：
+
+- **`routing_usd` 仍恒 0（无独立 routing 自身成本）**：docs/07 详情列了 routing/eval/completion/total 四项，但路由决策(Layer-1 规则)是**纯函数零网络**(原则4)，没有可计费的自身成本；唯一的「路由侧」成本就是 Layer-2 eval，已单列 `eval_usd`。故后端不记 `routing_usd`，requests-ui 该项保持 0（四行齐全可见）。若未来引入计费型路由辅助再补。
+- **cost「null=未测量」语义贯穿**：MVP 的 provider 执行层 `cost_usd` 多为 null（定价/usage 尚未全接），故 completion/eval/total 用 `null` 表达「未测量」而非伪造 0；只有真正测到才出数。requests-ui 在**展示层**把 null 渲 0（保证四行可见），但**数据层**保留 null（不污染聚合）。
+- **builder 与 orchestrator 两处各算一份富字段（非抽公共函数）**：`route-request.ts` 内联组装记录(主路径)、`telemetry/decision.ts` 的 `buildDecisionRecord`(另一组装入口) 都需算这几项。两者口径完全一致（同公式），但分处两个包/两种调用约定；本任务在两处各落一份 + 各自单测钉死，未强抽公共函数（避免 core 内跨模块耦合，且两处输入形状略异：AttemptRecord vs orchestrator ProviderAttempt）。若未来漂移，单测会同时报红。
+- **store 契约/round-trip 测试 fixture 补富字段**：`store-contract.test.ts` 与 `sqlite/telemetry.test.ts` 的 canonical `decision()` fixture 补齐四个新字段——因为读回经 `DecisionRecordSchema.parse` 会注入 default，插入的字面量若不含富字段则 round-trip `toEqual` 不等。这是 fixture 维护（canonical 完整记录现含富字段），非行为回归。
+
+**残留 TODO**：(1) `cost_usd`/`eval_usd` 的真实计费依赖 provider 执行层接入 usage→定价换算（catalog/pricing 已签入但运行时换算未全通），当前生产多落 null；接通后这些字段即自动出真数，无需再改本链路。(2) `ts`(时间戳)仍未进 `DecisionRecord`（仅 telemetry 行有 `createdAt`）；requests-ui 的 `ts` 仍空——属另一字段，本任务未含（docs/07 列表「时间」列待后续把 createdAt 投影进详情/列表 DTO）。(3) `user_id`/`org_id` 列表列后端仍未记（identity 有但未进记录），同属后续。
+
+---
+
+## 2026-05-31 · admin.classifier-hotapply — admin 改 classifier 热生效于路由（task admin.classifier-hotapply、docs/03/11、原则 1/2/3/4）
+
+**关闭的 gap**：`buildClassifyAdapter` 启动时用 `config.classifier` 一次性构建闭包 + 一份进程内 eval 缓存；admin 经 RuleStore 改 classifier 虽能持久 + GET 回读，但 classify 闭包从不重读，且 `server.ts` 的 `createRuntimeRuleStore` **未接 `onClassifier`**——两段断路使「admin 改 classifier 不热生效」。本任务接通两段，**替换**了 `## 2026-05-31 · admin.api` 条目里「classifier 编辑暂不热生效于路由」那条 TODO（已就地标注 RESOLVED）。
+
+落地（先红后绿；五闸全绿 typecheck / lint(exit 0，15 条 pre-existing warning，均不在改动文件) / test 870（+2）/ build / e2e 34（+1））：
+
+- **classify 适配器改为每请求读当前配置**：`ClassifyAdapterDeps.classifierConfig: ClassifierConfig` 换成 `getClassifierConfig: () => ClassifierConfig`（`apps/gateway/src/routes/classify.ts`）。所有配置派生量（`evalCfg`/`rulesCfg`/`confidence_threshold`/`eval.enabled`）从「构建期常量」移进**每请求闭包**，每次 `classify(req)` 先 `getClassifierConfig()` 取 RuleStore 当前值——admin PUT 后下一次分类即按新配置走（原则2：配置驱动行为）。
+- **eval 缓存按配置指纹重建（防陈旧裁决）**：适配器持有 `cache` + `cacheFingerprint = JSON.stringify(cfg)`；每请求 `syncCache(cfg)` 比对指纹，**变了就 `createEvalCache` 重建一份**（沿用新配置的 `ttl_sec`/`max_entries`），指纹不变则复用。于是配置一改，旧配置下算出的 verdict 全部失效、下一个相同 prompt 重新评估——绝不服务陈旧裁决（原则3：缓存只是优化、非真相源）。语义相等的重解析（同值新对象）指纹一致，不会无谓清空。
+- **server.ts 接通 onClassifier**：新增 `let classifierConfig = config.classifier`，`buildClassifyAdapter({ getClassifierConfig: () => classifierConfig, ... })`；`createRuntimeRuleStore` 补 `onClassifier: (next) => { classifierConfig = next; }`，并把 seed 从 `config.classifier` 改为该 `let`。admin `PUT /admin/api/classifier` → `RuleStore.setClassifier` → `onClassifier` 回调 re-bind live 值 → getter 下次读到。与既有 lanes/policies 的 `let`+`onLanes`/`onPolicies` 热生效机制完全同构（原则1：core 不知 admin 旋钮）。
+- **TDD 钉死**：单测 `apps/gateway/src/routes/classify.test.ts`（2 例）——(1) eval.enabled 经 getter 翻转后下一次分类 `decided_by` 由 `fallback`→`eval`、无重建适配器；(2) 同 prompt 命中缓存后改 classifier（`sigmoid_k`），缓存失效、eval 重跑、`eval_cache_hit:false`。e2e `eval.spec.ts` 新增 Scenario 8——经真·admin API（Basic auth）PUT `eval.enabled:true` → 不带 `x-helm-eval` 头的请求（纯配置驱动）落 `decided_by=eval`/`premium`；再 PUT `false` → 同 prompt 落 `balanced`/`fallback`/`eval_disabled`（同时验证热生效双向 + 缓存失效，端到端经真网关）。
+
+spec 未覆盖、自己拍板的取舍：
+
+- **缓存失效用「整配置指纹」而非「只比 eval 块」**：rules 权重/阈值/sigmoid_k 改动同样会改变 Layer-1 confidence 进而改变是否级联到 eval、以及 eval 输入语境，故任何 classifier 字段变动都应清缓存；`JSON.stringify(cfg)` 是稳定且零依赖的指纹（ClassifierConfig 是纯 plain object）。代价：每请求一次序列化（classifier 配置体量小，可忽略）；若未来成热点可缓存上次 getter 引用做 identity 短路。
+- **e2e Scenario 8 末尾恢复 `eval.enabled:false` 基线**：playwright `workers:1, fullyParallel:false` 串行执行，但该用例改的是**全局**配置；为不污染共享网关的后续 spec（Scenario 1 依赖配置默认 eval OFF），用例结束显式 PUT 回 OFF。其余 eval 用例都用 `x-helm-eval` 头逐请求覆盖（头存在即优先于配置），不受影响。
+
+**残留 TODO**：classifier 热生效目前只回写**进程内** live 值（与 lanes/policies 同）；多实例部署时一实例的 admin 改动不广播到其它实例（需 RuleStore 落 ConfigStore + 各实例订阅/轮询），属既有 admin.api「YAML/ConfigStore 写回」TODO 范畴，不在本任务。
+
+---
+
+## 2026-05-31 · store.supabase — 把 DB 抽象层做实，让网关按 config 切换 sqlite / supabase(Postgres)（task store.supabase、CLAUDE.md「DB 抽象层」、docs/06/02/08、原则 1/2/3/7）
+
+**关闭的 gap**：此前所有 Store 端口（KeyStore / TelemetryStore / ConfigStore / MemoryStore / RateLimitStore / SignalStore）**只有 sqlite 适配器**；ratelimit.full 与 signals.feedback 两条笔记都把「sqlite 与 supabase 同一契约测试」用 **in-memory 顶替 supabase**，留了已知 TODO。本任务落地 supabase(Postgres) 适配器 + 驱动选择工厂 + 用**真·进程内 Postgres**（PGlite）跑同一契约，**替换**了下方两条「第二个存储适配器用 in-memory 顶替 supabase」TODO（均已就地标注 RESOLVED）。
+
+落地（先红后绿；五闸全绿 typecheck / lint(exit 0，14 条 pre-existing warning，均不在改动文件) / test 868（+55）/ build / e2e 33）：
+
+- **Postgres 适配器（= supabase）**：新增 `packages/core/src/store/postgres/{schema,migrate,keystore,telemetry,rate-limit,signals,memory-store,config-store}.ts`，逐端口实现与 sqlite **同一接口**，经 Drizzle `pg-core` 方言。每个 sqlite 同名表都有 pg 对等：原生 `boolean`/`jsonb`（取代 sqlite 的「JSON 文本编码 array、integer 当 boolean」方言）、`double precision`（小数令牌/速率）、**epoch-ms 一律 `bigint`（mode:number）** 以与 sqlite 的 `timestamp_ms` 取值空间逐位对齐——故 `queryWindow` 半开区间、动量时间戳跨驱动行为完全一致。
+- **pg DDL + `runPgMigrations`**：`migrate.ts` 自带签入 DDL（与 sqlite migrate 同版本号 1–5，新增 v5 `config_kv`），`_migrations` 账本幂等。**坑（已解决）**：Postgres wire 协议禁止「一个 prepared statement 多条命令」，PGlite/postgres-js 经 drizzle `.execute()` 都会因此报 `42601 cannot insert multiple commands`——故 `runPgMigrations` 把每个迁移块按 `;` 切成单条逐条执行（我们的 DDL 除语句结束符外无分号，切分安全）。
+- **真·Postgres 契约测试（DoD 核心）**：新增 `store-contract.test.ts`，用 `describe.each([sqlite, pglite-postgres])` 对**全部 6 个端口**跑**同一组断言**。`@electric-sql/pglite`（devDep）是进程内 WASM Postgres；**supabase == 托管 Postgres**，故 pglite 的 pg-dialect 覆盖**无需起服务器**即验证 supabase 路径。sqlite 23 例 + pglite-postgres 23 例全绿。
+- **驱动选择工厂 + 接线**：`StoreConfigSchema`（`runtime.store.driver: 'sqlite'|'supabase'` 默认 sqlite、`url_env` 凭证引用）+ env `HELM_STORE_DRIVER`/`HELM_STORE_URL_ENV`；`createStore(config)` 返回整套适配器（`StoreSet`），**未知驱动 / supabase 缺连接串一律 fail-closed throw**（原则2，工厂内 `never` 穷尽守卫做 defense-in-depth）。`server.ts` 的 `buildServer` 改为 **async** 经 `createStore` 取 store（默认 sqlite，行为不变；index.ts/e2e fixture 同步加 `await`）。
+- **凭证安全（原则7）**：supabase 连接串经 `runtime.store.url_env` **按环境变量名引用**（仿 `providers[].api_key_env`），yaml 里**绝不出现明文 DSN**，启动期由 `server.ts` 解析、全程不入日志。Schema 测试钉死「`url` 字段不存在、只存 `url_env`」。
+
+spec 未覆盖、自己拍板的取舍：
+
+- **`postgres`(postgres-js) 进 runtime deps、`@electric-sql/pglite` 进 devDeps**：生产 supabase 走 postgres-js（运行时必需）；pglite 仅测试用。`createPgliteDb`/`createPgDb` 都用动态 `import()`，故未装 pglite 的生产镜像不受影响（`createPgliteDb` 仅测试调用）。
+- **新增 `ConfigStore` 的两个适配器 + `config_kv` 表**：此前 `ConfigStore` 端口**无任何实现**。为让契约测试六端口齐跑，sqlite/pg 各补一个 `config_kv` 单表实现（admin write-back 预留，MVP 仍 yaml-first；无密钥列）。sqlite migrate 同步加 v5。
+- **rate-limit 原子性跨方言**：sqlite 用 better-sqlite3 同步事务；pg 用 `db.transaction` + `SELECT … FOR UPDATE` 行锁，保证并发不双花最后一个令牌（fail-closed 语义不变）。
+- **`buildServer` 由同步改 async**：supabase 驱动开连接是异步的，sqlite 默认在 `await` 下同步解析。无单测直接调 `buildServer`，仅 index.ts `main()` 与 e2e fixture 两处加 `await`；`dispose()` 现额外 `store.close()`（best-effort）。
+
+**残留 TODO**：(1) 工厂的 supabase 分支用真·托管 Postgres 的端到端测试缺位——单测只覆盖「缺连接串 fail-closed」，Pg* 适配器本体由 pglite 契约钉死；接 CI Postgres service 后可补一例真连接 smoke。(2) `createPgDb` 的连接池/超时用 postgres-js 默认值（MVP 单进程）；多实例部署再调。(3) supabase 的 schema/迁移与 sqlite 各维护一份 DDL（方言差异封在各适配器，core 只依赖接口）——若未来表结构频繁变动，可考虑 drizzle-kit 统一生成。
+
+---
+
+## 2026-05-31 · gateway.session-key — 把 `x-session-key` 请求头映射进 metadata.conversation_id，让会话动量在生产真正触发（task gateway.session-key、docs/02 §API Gateway、docs/03 §第 1 层会话动量、原则 1/3/7）
+
+所属：gateway.session-key —— 关闭 classifier.engine 条目里那条 TODO（"gateway 接线时需把 `x-session-key` 映射进 `metadata.conversation_id`；否则 momentum 在生产里恒不触发"）。
+
+- **闭环的缺口**：classifier engine 用 `req.metadata?.conversation_id` 当 momentum 的 sessionKey；但两条入站映射（`chat.ts` 的 `toInternalRequest`、`messages-pipeline.ts` 的 `toInternalRequest`）都把 `conversation_id` 硬编码成 `null`，于是 `applyMomentum` 在 `sessionKey===null` 直接 off——动量在生产恒不触发（fail-open 到无动量：安全但失能）。本任务把入站头接进来，缺口闭合。
+- **映射优先级（本任务定）**：**body 里显式的 `metadata.conversation_id` 优先**，否则才取 `x-session-key` 头。理由：客户端若已在 body 给出会话标识，那是更强的意图，头只是便捷入口。仅当 conversation_id 未设时才回填头（spec 原文："only if conversation_id not already set"）。
+- **两条协议路径各自落点**：
+  - OpenAI `/v1/chat/completions`：route handler 读 `c.req.header("x-session-key")`，传给 `toInternalRequest(body, traceId, identity, sessionKey)`；body metadata 优先，否则用头。
+  - Anthropic `/v1/messages`：头解析仍属 gateway 层（core 不读 header，原则 1）。在 `registerMessagesRoute` 把头 stamp 进 `ir.metadata.conversation_id`（仅当 IR 未携带时），`messages-pipeline.ts` 的 `toInternalRequest` 从 metadata bag 读出落进 `InternalRequest.metadata.conversation_id`。
+- **日志洁净（原则 7）**：`x-session-key` 是不透明会话 id（非凭证、非 payload），全程不进日志；request-logger 不 dump header/metadata，已核对。
+- **未触碰 momentum store 在 server.ts 的接线**：本任务只闭合"头→conversation_id"这一段。**残留 TODO**：composition root（`server.ts`）目前未把 `createMemoryMomentumStore()` 注入级联编排器的 `scoreRequest` deps.momentum——即便 conversation_id 现已正确填充，生产 cascade 仍需把 momentum store 接进 classify deps 才能真正读写历史。端到端"两条短跟随消息共享动量"已用真实 `scoreRequest` + 真实 memory store 在单测里钉死（`chat.session-key.test.ts`），但 server 级注入另立任务。
+- **TDD 钉死**：`apps/gateway/src/routes/chat.session-key.test.ts`（头映射、无头则 null、body 优先于头、两条短跟随共享动量的端到端断言）+ `messages.test.ts` 新增两例（头映射进 ir.metadata.conversation_id、无头则不设）。门禁全绿：typecheck / lint(exit 0) / test（813 passing）/ build / e2e（33 passing）。
+
+---
+
+## 2026-05-31 · classifier.confidence-fix — 置信度归一化，让默认阈值 0.45 真正级联到 eval（task classifier.confidence-fix、docs/03 §第 1 层、原则 2/3/4/5）
+
+**关闭的 gap**：旧实现 `confidence = sigmoid(k·d)` 落域 `[0.5, 1)`，永远 ≥ 0.5，故默认 `confidence_threshold = 0.45` **永不触发** uncertain——tier-2 eval 在默认配置下**不可达**，docs/03 阈值口径与 Layer-1 打分实现互相矛盾。本任务**替换**了下方两条 TODO（均已就地标注 RESOLVED）：`## 2026-05-31 · classifier.tiers …sigmoid 闸门与默认阈值 0.45 的内在矛盾` 的「TODO：改成 2·sigmoid−1 或上调阈值」，以及 `## 2026-05-31 · e2e.eval …` 条目里「(1) eval 默认阈值 0.45 下级联第 2 层实际不可达」那条坑。
+
+落地（先红后绿；四闸全绿 typecheck/lint 0 错（14 条 pre-existing warning，均不在改动文件）/807 单测（+1）/build；e2e 33 全绿）：
+
+- **公式归一化（tiers）**：`sigmoidConfidence` 重命名为 `boundaryConfidence`，实现改为 `2·sigmoid(k·d) − 1`（= `tanh(k·d/2)`），落域归一化到 `[0, 1)`：贴边界（d→0）→ 0（最不确定），远离边界 → ~1（确定）。改了 `packages/core/src/classifier/tiers.ts` 及两处 re-export（`classifier/index.ts`、`core/src/index.ts`）。
+- **公式选择（spec 内部不一致，已记录）**：task 给的两个表达式 `2·sigmoid(k·d) − 1` 与 `1 − e^(−k·d)` **数学上并不相等**（前者 = `tanh(k·d/2)`，后者是另一条曲线；两者只是都满足「0→0、∞→1、[0,1)」）。**取舍：采用 task 列在最前的主式 `2·sigmoid(k·d) − 1`**——它是把旧 `[0.5,1)` 的 sigmoid 输出线性拉回 `[0,1)`，与既有 `sigmoid_k=8` 标定一脉相承，且 e2e prompt 的置信度（economy≈0.65 命中即停、ambiguous≈0.06 级联）都按此式验证。文档/注释据此澄清，不再宣称两式等价。
+- **默认阈值不变（0.45）**：`confidence_threshold` / `sigmoid_k` 仍全由 `config/classifier.yaml` 驱动（原则 2），本任务**不动配置默认值**。现在贴边界分数 conf<0.45 → uncertain → eval 开则级联、关则 `balanced`（原则 3/5），正是 spec 期望。
+- **消费方/测试同步**：`tiers.test.ts` 全量改写到新语义（贴边界→<0.45→uncertain；clearly-typed→>0.45）；新增「默认 0.45 闸门下 boundary-band 即 uncertain」用例。cascade/engine/route-request 等测试用的是抽象 confidence 值（0.1/0.9），与打分公式解耦，无需改。docs/03 §置信度闸门公式更新。
+- **e2e（关键）**：`e2e/eval.spec.ts` **删除** `x-helm-rules-threshold: 0.7` 头——ambiguous prompt 现在在**签入默认 0.45** 下自然落到 eval（这就是本修复的标志性结果）。`x-helm-rules-threshold` 头作为 HELM_E2E test affordance 保留（不再为跑通 eval 所必需）。`e2e/routing.spec.ts` 的 economy/json/execution-fallback 三个场景换成 clearly-typed prompt（强 simple 信号 `hi thanks ok`，conf>0.45 命中即停）——否则旧 prompt（`translate this sentence…` conf 新式≈0.17）会落进 boundary band → `decided_by=fallback` → resolver 短路到 `balanced`，打破 economy/json 期望。complex→premium prompt（conf≈0.96）不受影响。
+
+**残留 TODO**：e2e.eval 条目里的第 (2) 条坑仍在——eval 小模型 alias 当前不进 provider registry（直接经 `provider.chatCompletion` 打同一 base_url），多 provider/多模型 registry 落地后应把 eval alias 纳入正式解析。本任务不涉及。
+
+---
+
+## 2026-05-31 · config.load-rules — lanes/policies 从 YAML 接入校验配置与运行网关（task config.load-rules、docs/04、原则1/2/5/6）
+
+**关闭的 gap**：此前 `config/loader.ts` 不加载 `lanes.yaml`/`policies.yaml`，`HelmConfigSchema` 也没有 `lanes`/`policies` 段；`buildServer` 硬编码 core 的 `DEFAULT_LANES` + 空 policies，没有任务 lane。本任务把 lanes/policies 接入「校验配置 → 运行网关」全链，**替换**了下方 `## 2026-05-31 · gateway-default-lanes/policies 接线` 那条 TODO（已就地标注为 RESOLVED）。
+
+落地（先红后绿；四闸全绿 typecheck/lint 0 错/806 单测（+32）/build；e2e 33 全绿）：
+
+- **schema 唯一来源迁到 `@helm/shared`**：lane/policy 的 Zod schema 原在 `packages/core`（`lanes/schema.ts`、`routing/policy-schema.ts`），但 `@helm/core` 依赖 `@helm/shared`、不可反向，故 `HelmConfigSchema` 无法引用它们。决定：把 schema **搬到** `packages/shared/src/config/{lanes-schema,policy-schema}.ts` 作单一可信源，`HelmConfigSchema` 直接 compose；core 两个旧文件改为**纯 re-export**（保留相对 import `../lanes/schema.js`/`./policy-schema.js` 与 `@helm/core` 对外导出名不变，零下游改动）。`DEFAULT_LANES` 仍留在 core（它是「首启基线/兜底」的 core 常量，不是配置形状）。
+- **`HelmConfigSchema` 扩展**：`lanes: LanesConfigSchema.optional()`（**不** default：用 `undefined` 表达「配置没给 lanes」，让网关回退 `DEFAULT_LANES`——这是本任务里 `DEFAULT_LANES` 仅剩的用途）；`policies: PoliciesConfigSchema.prefault({ policies: [] })`（缺省即空 = no-op）。非法（缺 `balanced`、strict 未知字段、policy 无 action）一律 fail-closed（原则2）。
+- **loader 接线**：`CONFIG_FILES` 新增 `lanes.yaml`（扁平 map → 整文件落 `lanes` 键）与 `policies.yaml`（本身就是 `{policies:[...]}` 形 → 整文件落 `policies` 键），二者 `optional:true`（缺省走 schema 默认/undefined；present-but-broken 仍 fail-closed）。env 优先级不变。
+- **默认配置签入**：`config/lanes.yaml` = economy/balanced/premium + 任务 lane coding（primary `coding_capable_model`，fallback `[premium, balanced]`）、json（`require_json`，fallback `[balanced]`）、vision（`require_vision`，fallback `[premium]`）、tool_use（`require_tools`，fallback `[premium]`）；`config/policies.yaml` = 3 条 first-match 样例（`coding+complex→coding`、`needs_json→json`、`org budget_org` 限到 `max_lane:balanced`）。
+- **网关接线**：`buildServer` 现读 `config.lanes ?? parseLanesConfig(DEFAULT_LANES)` 与 `config.policies`；registry 改由**活动 lanes** 的所有 primary+fallback（非 lane 名的终端 alias）建索引（之前只取 `DEFAULT_LANES.primary`），保证 coding/json 等任务 lane 的 primary 可解析到那唯一 mock provider。
+
+偏离 / 取舍 / 坑：
+
+- **e2e routing scenario 3 断言更新（非回归，是新正确行为）**：`response_format=json_object` 之前因「无 json lane」落 economy/balanced/premium 三者之一；现 `needs_json→json` 策略生效，**正确**落 `json` lane。e2e test-server 用真实 repo `config` 目录，故端到端验证了 TDD #3。已把断言从 `toContain([economy,balanced,premium])` 改为 `toBe("json")` 并更新陈旧注释。
+- **registry 仍是「全 alias → 同一 mock provider」**：多 provider / providers.yaml `models[]` 真实映射、真实 catalog 接入仍是既有 TODO（见下方 catalog/registry 笔记），不在本任务范围；本任务只把**lane 来源**从硬编码换成 config 驱动。
+- **policies.yaml 用 `key:"policies"` 而非 `key:null` 合并**：起初按「有顶层 key 就 merge」用 `null`，结果 `Object.assign` 把数组直接塞到 `tree.policies`（应是 `{policies:[...]}`），schema 报「expected object received array」。改为整文件落 `policies` 键即对齐 `PoliciesConfigSchema` 形（policies.yaml 本身就是该形）。
+- **shared 侧补 canonical 测试**：`packages/shared/src/config/{lanes-schema,policy-schema}.test.ts`（从 core 复制；去掉 core-only 的 `DEFAULT_LANES` 用例），core 旧测试保留（验证 re-export 名不丢）。
+
 ## 2026-05-31 · signals.feedback — Agentic Signals 低成本生产反馈层（task signals.feedback、docs/02、research-notes「Plano」、原则1/3/5/7）
 
 新增 `packages/core/src/signals/{types,aggregate,collector,scheduler}.ts`（+ 各自 `.test.ts`）、`packages/shared/src/signals/schema.ts`（`RoutingSignalSchema`，类型唯一来源）、`packages/core/src/store/sqlite/{signals,signals-memory}.ts`（两适配器）、migrate v4 + `migrations/0004_routing_signals.sql`、`ports.ts` 扩展（`SignalStore` 端口 + `TelemetryStore.queryWindow`）、gateway `server.ts` 后台调度接线。先红后绿；四闸全绿（typecheck / lint 0 错 / 774 单测 / build）。
@@ -14,7 +185,7 @@ spec 未覆盖、我自己拍板的决定：
 - **`RoutingSignal` 类型源放 `@helm/shared`（Zod `z.infer`），不在 core 重复定义 interface。** 任务契约 `types.ts` 给的是手写 `interface RoutingSignal`，且 `DecisionRecord` 从 `'../telemetry/types'` import——但代码库里 `DecisionRecord` 在 `@helm/shared`（`decision/schema.ts`），不存在 `core/telemetry/types.ts`。遵原则「schema 唯一来源」：`RoutingSignalSchema` 落 shared，`core/src/signals/types.ts` 仅 `z.infer` re-export + 把 `DecisionRecord` 从 `@helm/shared` re-export（不新造形状）。
 - **新增 `classifierFallbackRate` 维度（契约里没有）。** 任务 TDD #3 明确要求「执行兜底（链内换 model）」与「分类兜底（→balanced）」分开、不混淆（原则5）。原契约 `RoutingSignal` 只有一个 `fallbackRate`。决定：`fallbackRate` 只统计**执行兜底**（`provider_attempts` 里非 skipped 的尝试数 > 1，即链内 swap），另加 `classifierFallbackRate` 统计 `classifier.decided_by === 'fallback'`，两套机制各占一列，绝不混淆。`skipped` 尝试（能力过滤）不算 swap。
 - **`TelemetryStore` 扩展 `queryWindow(startMs,endMs)`（端口新增方法）。** collector「拉取窗口内决策记录」需要按时间窗读，但既有 `TelemetryStore` 只有 `queryRecent(limit)`。新增半开区间 `[start,end)` 窗口查询（相邻窗口不重叠 → 幂等重采集）。`createdAt` 以 epoch-ms（timestamp_ms）存，比较用 `new Date(ms)`。同步给 `ports.test.ts` 的 `InMemoryTelemetryStore` 补该方法。
-- **第二个存储适配器用 in-memory 顶替 supabase**（同 ratelimit.full 先例）：DoD 要求「sqlite 与 supabase 同一契约测试」，但本仓库尚无 supabase 适配器目录。`signals.test.ts` 用 `describe.each` 对 **SqliteSignalStore + InMemorySignalStore** 跑同一组契约；supabase 留待整体 supabase 端口落地（已知 TODO，不影响默认 sqlite 路径）。
+- **第二个存储适配器用 in-memory 顶替 supabase**（同 ratelimit.full 先例）：DoD 要求「sqlite 与 supabase 同一契约测试」，但本仓库尚无 supabase 适配器目录。`signals.test.ts` 用 `describe.each` 对 **SqliteSignalStore + InMemorySignalStore** 跑同一组契约；supabase 留待整体 supabase 端口落地（已知 TODO，不影响默认 sqlite 路径）。**[RESOLVED 2026-05-31 store.supabase]** supabase(Postgres) 适配器已落地，`PgSignalStore` 现与 `SqliteSignalStore` 在 `store-contract.test.ts` 经真·PGlite Postgres 跑同一组契约；`InMemorySignalStore` 保留作零依赖临时实现。
 - **零主路径延迟的证明（头号约束）做成结构化守卫测试。** TDD #1 要求「证明主路径不 await/不依赖 signal」。新增 `apps/gateway/src/routes/chat.signals-isolation.test.ts`：读 `chat.ts` 源码断言其**不出现** `SignalStore/SignalCollector/createSignalCollector/startSignalScheduler/aggregateSignals/signals/`——请求处理模块对 signals 零引用。采集只在 `server.ts` 启动期挂一个 `setInterval`（`startSignalScheduler`），**在所有 middleware/route 注册之外**，请求链完全不触碰。
 - **后台调度（首选触发模型）。** `startSignalScheduler` 是纯 timer glue（core 内，可 fake-timer 单测）：每 `intervalMs` 对**刚过去的窗口** `[prevTick, nowTick)` 调一次 `collect()`；`unref()` 不阻塞进程退出；tick 失败只记日志（fail-open）。gateway 默认 60s，`HELM_SIGNALS_INTERVAL_MS` 可调，`HELM_SIGNALS_DISABLED=1` 关闭（单测/e2e 用，避免后台活动）。`ServerHandle` 新增可选 `dispose()` 停止调度（向后兼容，既有只解构 `{app,port,host}` 不受影响）。
 - **fail-open 贯穿（原则3）。** `collect()` 对 telemetry 读、aggregate、signal 写的任何抛错都吞掉 + 记 `signals.collect_failed`，恒 `resolve({written:0})`，绝不 reject → 不可能让主请求 5xx 或阻断后续请求（区别于限流的 fail-closed）。
@@ -35,7 +206,7 @@ spec 未覆盖、我自己拍板的决定：
 
 2. **Zod 是唯一类型来源，不在 core 重复定义 `RateLimitConfig`。** 任务契约给的 `RateLimitConfig`/`RateLimitQuota` interface 改为从 `@helm/shared`（`z.infer`）re-export（`packages/core/src/ratelimit/types.ts`），避免与 Phase 0 schema 重复（CLAUDE.md 原则2、代码规范）。core 仅新增运行时 DTO `RateLimitProbe`/`RateLimitResult`。
 
-3. **第二个存储适配器用 in-memory 顶替 supabase。** DoD 要求「sqlite 与 supabase 两个适配器通过同一组端口契约测试」，但本仓库**尚无 supabase 适配器目录**（`packages/core/src/store/` 只有 `sqlite/`，其它 Store 也都只有 sqlite 实现）。为兑现「端口实现无关」的契约，`rate-limit.test.ts` 用 `describe.each` 对 **sqlite + InMemoryRateLimitStore** 跑同一组契约；supabase 适配器留待 supabase 端口整体落地时补（与现有 KeyStore/TelemetryStore/MemoryStore 同步）。这是**已知 TODO**，不影响默认（sqlite）路径。
+3. **第二个存储适配器用 in-memory 顶替 supabase。** DoD 要求「sqlite 与 supabase 两个适配器通过同一组端口契约测试」，但本仓库**尚无 supabase 适配器目录**（`packages/core/src/store/` 只有 `sqlite/`，其它 Store 也都只有 sqlite 实现）。为兑现「端口实现无关」的契约，`rate-limit.test.ts` 用 `describe.each` 对 **sqlite + InMemoryRateLimitStore** 跑同一组契约；supabase 适配器留待 supabase 端口整体落地时补（与现有 KeyStore/TelemetryStore/MemoryStore 同步）。这是**已知 TODO**，不影响默认（sqlite）路径。**[RESOLVED 2026-05-31 store.supabase]** `packages/core/src/store/postgres/` 已落地全部端口的 Postgres 适配器，`store-contract.test.ts` 经真·PGlite Postgres 跑 `describe.each([sqlite, pglite-postgres])` 同一组契约；`InMemoryRateLimitStore` 保留作零依赖临时实现。
 
 4. **双维拒绝时的预扣偏差（可接受）。** RPM 先扣（cost=1）、过了再扣 TPM；若 TPM 拒，RPM 已多扣 1。符合任务「TPM 是预扣估算、预扣偏差不应导致 5xx」，且**绝不**反向（RPM 拒时短路、不碰 TPM）。响应头取「剩余占额更小」的那一维。
 
@@ -94,6 +265,7 @@ SvelteKit 路由 `apps/admin/src/routes/requests/`（列表 `+page.svelte`/`+pag
 
 **对齐真实后端契约的偏离（DoD：admin 仅经 `/admin/api/*`，后端是唯一真相源；前端只读渲染，绝不重算）**：
 
+- **[RESOLVED 2026-05-31 admin.requests-richfields]** 下面这些「后端尚未记录、客户端置 `'—'`/`0`/占位」的字段已落地为真·`DecisionRecord` 字段：`key_prefix`（前缀only，来自解析后的 auth 身份 `ApiKeyRecord.prefix`）、`latency_total_ms`（Σ attempts）、`fallback_count`（非 skipped attempts − 1，clamp≥0）、`cost_breakdown{eval_usd,completion_usd,total_usd}`（eval 自身成本与 completion 成本分列）。requests-ui 现读真字段（见下方 admin.requests-richfields 条目），仅对 legacy(无富字段)记录回退派生。原 `key_prefix:'—'`/`eval_usd:0` 仅作 legacy 兜底，不再是常态占位。
 - **后端实测形状远薄于 task 的理想契约**：`apps/gateway/src/routes/admin/requests.ts` 列表返回 `RequestSummary = { trace_id, lane, status, cost }`（仅 4 字段），详情返回**原始 `DecisionRecord`**（`@helm/shared`，字段：`request_id/trace_id/requested_model/classifier{task_type,complexity,confidence,decided_by,eval_cache_hit,fallback_reason?,constraints,explanation}/policy{matched_policy_id,reason}/lane{selected_lane,candidate_chain}/provider_attempts[]{alias,skipped,skip_reason,status,error_class,latency_ms,cost_usd}/final{model_alias,provider_model,status,error_reason}`）。task 接口块里的 `ts/key_prefix/user_id/org_id/task_type/complexity/decided_by/final_model/fallback_count/latency_ms/error_class`（列表）与 `request_meta/payload_summary/matched_dimensions/eval_triggered/response_meta/error{http_status,message,provider_raw}/cost_breakdown{routing/eval/completion/total}`（详情）**后端尚未记录**。
 - **决定：API 客户端在 HTTP 边界把真实后端形状映射成 task 的 UI 契约类型，缺失字段以 `DecisionRecord` 现有字段派生或安全默认**，而非伪造数据：
   - 列表 `RequestListItem`：`decided_by ← classifier.decided_by`、`task_type/complexity ← classifier`、`final_model ← final.model_alias`、`fallback_count ← provider_attempts 里非 skipped 的尝试数 - 1`（执行兜底次数，clamp≥0）、`status ← final.status`、`cost_usd ← Σ provider_attempts.cost_usd`、`error_class ← final.status==='error' 时取 final.error_reason / 末次 attempt.error_class`。`ts/latency_ms ← Σ attempts.latency_ms`；`key_prefix` 后端未记录 → 客户端置 `'—'`（绝不显明文，原则7）。
@@ -154,7 +326,7 @@ SvelteKit 路由 `apps/admin/src/routes/lanes/`（`+page.svelte`/`+page.ts`）+ 
 ## 2026-05-31 · admin.api — 管理 API 端点（task admin.api、docs/11、docs/06、docs/07）
 
 - **rule 配置落点 = 运行时 ConfigStore，非 YAML 写回（MVP）**：task 允许「config/*.yaml 或运行时 ConfigStore」。lanes/policies/classifier 写入走新建的 `apps/gateway/src/routes/admin/rule-store.ts`（`createRuntimeRuleStore`）——更新进程内活配置，路由的 `route` 闭包按 `let` 绑定即时读到新值，无需重启。未做 YAML 文件写回：当前 `server.ts` 的 lanes 来自 `DEFAULT_LANES`、policies 为空数组，本就未从 yaml 加载；做文件写回需改 config-loader（超出本 task）。路由只依赖 `RuleStore` 接口，后续替换为 YAML 适配器不动路由（原则1）。
-- **classifier 编辑暂不热生效于路由**：`buildClassifyAdapter` 在启动时用 `config.classifier` 构建一次；admin 改 classifier 经 RuleStore 保存并可回读，但重建 classify 闭包未接线（需要重新实例化 eval cache 等）。MVP 取舍：classifier 写入可持久于 store、GET 反映改动，路由层热加载留 TODO。
+- **classifier 编辑暂不热生效于路由**：`buildClassifyAdapter` 在启动时用 `config.classifier` 构建一次；admin 改 classifier 经 RuleStore 保存并可回读，但重建 classify 闭包未接线（需要重新实例化 eval cache 等）。MVP 取舍：classifier 写入可持久于 store、GET 反映改动，路由层热加载留 TODO。**[RESOLVED 2026-05-31 admin.classifier-hotapply]** classify 适配器改为**每请求读 RuleStore 当前 classifier 配置**（`getClassifierConfig` getter），并在配置指纹变化时**重建 eval 缓存**——admin PUT 后下一次分类即生效、绝不服务旧缓存裁决，无需重启（见下条目）。
 - **新增 `CreateKeyRequestSchema` 到 `@helm/shared`（key/schema.ts）**：admin 建 key 的请求体（`role`+`max_lane?`+`allowed_lanes?`+`allow_custom_model?`，`.strict()` fail-closed）。放 shared 是因 gateway 未直接依赖 zod，且「schema 是类型唯一来源」——校验 schema 应在 shared，不在路由里手写。
 - **routes 为纯 HTTP glue + 注入依赖**：沿用 `messages.ts` 的模式，`AdminApiDeps`（`apps/gateway/src/routes/admin/deps.ts`）注入 RuleStore/KeyStore/TelemetryStore/genKey/genKeyId/accountId。测试用内存 fake，零 IO，core 不 import Hono。
 - **basicAuth 由 caller 挂在 `/admin/api/*`**：`registerAdminApi` 只注册端点；`index.ts` 不自带中间件，鉴权隔离由 `server.ts`（`app.use("/admin/api/*", basicAuth(resolveAdminAuth(...)))`）保证。`resolveAdminAuth` 读 `config.admin`，但 HelmConfig schema 尚无 `admin` 块（属 admin.auth task），此处 `config as { admin?: ... }` 收窄，env（HELM_ADMIN_USER/PASSWORD）仍可注入凭证。
@@ -185,7 +357,7 @@ SvelteKit 路由 `apps/admin/src/routes/lanes/`（`+page.svelte`/`+page.ts`）+ 
 - **桩上游扩展**：`mock-upstream.ts` 的 `createMockUpstream` 内加 eval 小模型替身——识别 `model===EVAL_MODEL` 后**先计数再**按 `EVAL_SLOW_SENTINEL` 决定正常/慢（慢延迟 2s > eval 双超时 300/250ms）；正常返回严格 JSON `{complexity:"reasoning",task_type:"math",confidence:0.91}`→驱动 premium（**刻意不同于 balanced 兜底**，证明「eval 真改了 lane」）。eval 调用不进 `CAPTURE_PATH`（捕获只跟主路由请求）。
 - **顺手修复阻塞 typecheck 的邻接 eval 模块遗留错误**（这些文件由 eval.config/contract/client/cache/cascade 等前置任务新增、未提交且未跑组合 typecheck）：`eval/client.ts` 的 `CircuitOpenError.name` 加 `override`；`cascade.test.ts` 把 `ClassifierInput` 的 `tools/response_format/attachments` 由 `undefined` 改 `null`（Pick 字段可空非可选）；`cache-key.test.ts` 的 `makeInput` 入参类型 `Partial<ClassifierInput>`→`Partial<InternalRequest>`（测试要传 request_id 等易变字段证明不影响键）；`client.test.ts` 的 mock 补 `(_req,_signal)` 形参以让 `mock.calls[0]` 有类型 + `!`。纯类型/防御修复，零行为变更。core `index.ts` 新增导出：cascade（`classifyCascade`/`CascadeResult`/...）、eval cache/client/cache-key、`resolveLane`（别名 `LaneResolver*` 避免与 route-request 的 `Classification` 撞名）。
 - **门禁（全绿）**：`pnpm typecheck`=0、`pnpm lint`=0（仅 14 条既有 warning）、`pnpm test`=564/564（含 eval 模块单测随类型修复转绿，552→564）、`pnpm build`=0、`pnpm test:e2e`=27/27（含本任务 7 例）。
-- **TODO / 坑**：(1) eval 默认阈值 0.45 下级联第 2 层**实际不可达**（sigmoid 下限 0.5）——这是 docs/03 阈值口径与 Layer-1 打分实现之间的张力，需后续要么降 Layer-1 下限、要么把「uncertain」改由 rawScore 边界距离判定而非置信度阈值，本任务用 e2e 头规避但未根治。(2) eval 小模型 alias 当前不在 provider registry 里（直接经 `provider.chatCompletion` 打到同一 base_url）——多 provider/多模型 registry 落地后应把 eval alias 纳入正式解析。
+- **TODO / 坑**：(1) eval 默认阈值 0.45 下级联第 2 层**实际不可达**（sigmoid 下限 0.5）——这是 docs/03 阈值口径与 Layer-1 打分实现之间的张力，需后续要么降 Layer-1 下限、要么把「uncertain」改由 rawScore 边界距离判定而非置信度阈值，本任务用 e2e 头规避但未根治。**【RESOLVED 2026-05-31 · classifier.confidence-fix】**：已把 Layer-1 置信度改为归一化 `2·sigmoid(k·d) − 1`（落域 `[0,1)`，边界→0），默认 0.45 现真正级联；`e2e/eval.spec.ts` 已**移除** `x-helm-rules-threshold:0.7` 头，在签入默认下跑通 eval。详见顶部条目。(2) eval 小模型 alias 当前不在 provider registry 里（直接经 `provider.chatCompletion` 打到同一 base_url）——多 provider/多模型 registry 落地后应把 eval alias 纳入正式解析（仍未根治）。
 
 ## 2026-05-31 · eval.cascade — 三层分类级联总装（docs/03 分类级联、原则 3/4/5、task eval.cascade）
 
@@ -346,12 +518,12 @@ SvelteKit 路由 `apps/admin/src/routes/lanes/`（`+page.svelte`/`+page.ts`）+ 
   （旧 `ChatRouteDeps{provider,...}`），本任务已用真实流水线替换，故删除，新增 `chat.route.test.ts`（经流水线，
   断言 classify/execute 被调用而非旁路常量）+ `execute.test.ts`（执行兜底/能力跳过/流式 peek/abort）。
 
-- **网关默认 lanes/policies 接线（config loader 暂未加载 lanes.yaml/policies.yaml）**：`config/loader.ts` 目前只
-  load server/auth/providers/runtime/classifier（其自身注释声明 lanes/policies 属各自模块任务，尚未并入
-  `HelmConfigSchema`）。为让流水线在 e2e 跑通，`buildServer` 暂用 core 的 `DEFAULT_LANES` + 空 policies，并按
-  默认 lane 别名建一个把它们全部解析到唯一配置 provider 的 registry（mock upstream 忽略 model）。catalog 暂传空
-  Map → 能力过滤被跳过（fail-open）。**TODO**：等 `config.lanes`/`config.policies`/真实 catalog 接入 loader 后，
-  把这段硬编码换成 config 驱动（原则 2）。
+- **网关默认 lanes/policies 接线（config loader 暂未加载 lanes.yaml/policies.yaml）**：~~`config/loader.ts` 目前只
+  load server/auth/providers/runtime/classifier……`buildServer` 暂用 core 的 `DEFAULT_LANES` + 空 policies……~~
+  **RESOLVED（2026-05-31 · config.load-rules，见顶部条目）**：`lanes`/`policies` 已并入 `HelmConfigSchema`、loader 加载
+  `config/lanes.yaml`+`config/policies.yaml`（fail-closed），`buildServer` 改为 config 驱动（`config.lanes ?? DEFAULT_LANES`，
+  policies 取 `config.policies`）。**残留 TODO**：catalog 仍传空 Map（能力过滤 fail-open 跳过）、registry 仍是「全 lane alias
+  → 唯一 mock provider」——真实 catalog 与 providers.yaml `models[]` 多 provider 映射另立任务。
 
 ## 2026-05-31 · classifier.engine 实现：编排取舍（momentum 压过 short_message 捷径；sessionKey 来源；fail-open 包裹）
 
@@ -423,6 +595,8 @@ SvelteKit 路由 `apps/admin/src/routes/lanes/`（`+page.svelte`/`+page.ts`）+ 
   **TODO（待 engine/eval 任务拍板）**：若希望默认 0.45 能真正触发级联，需把置信度改成
   `2·sigmoid(k·d) − 1`（边界→0、远处→1），或把默认阈值上调到 (0.5, 1)。本任务只产纯函数标记，不擅自改公式语义，
   把抉择留给级联控制流的 engine 任务。
+  **【RESOLVED 2026-05-31 · classifier.confidence-fix】**：已采用 `2·sigmoid(k·d) − 1`（落域 `[0,1)`，边界→0）。
+  默认阈值 0.45 现真正触发 uncertain → eval 级联。tiers.test.ts 已改回断言「贴边界 conf<0.45 → uncertain」。详见顶部条目。
 - **NaN/Inf 防御**：非法上游分数不抛错，归 `standard` 档、`confidence=0`、`uncertain=true`
   （原则 3 fail-open 精神；0 < 任何合法阈值，确保降级信号一致）。`nearestBoundaryDistance=0`。
 - **最近边界距离**：对 simple/reasoning 单侧取唯一相邻边界；中间档取两侧较近者。三档边界

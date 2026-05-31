@@ -122,7 +122,11 @@ export interface ProviderForEval {
 }
 
 export interface ClassifyAdapterDeps {
-  classifierConfig: ClassifierConfig;
+  /** Read the CURRENT classifier config — invoked ONCE per request so an admin
+   *  edit (via the RuleStore) hot-applies to routing WITHOUT a restart. The
+   *  adapter rebuilds its eval cache whenever the returned config changes, so a
+   *  verdict computed under an old config is never served after the change. */
+  getClassifierConfig: () => ClassifierConfig;
   lanes: LanesConfig;
   /** Provider used to invoke the internal eval small-model (same upstream, eval
    *  alias). Only its non-stream `chatCompletion` is used. */
@@ -133,10 +137,11 @@ export interface ClassifyAdapterDeps {
 }
 
 // Per-request classify overrides (composition-root concern; defaults come from
-// config). `rulesThreshold` is an e2e-only knob (HELM_E2E) to force Layer-1
-// uncertainty so the cascade reaches Layer-2 eval — the deterministic Layer-1
-// sigmoid never dips below 0.5, so the only way to exercise eval in a black-box
-// test is to raise the gate. Production never sets these.
+// config). `rulesThreshold` is an e2e-only knob (HELM_E2E) to override the
+// Layer-1 gate per request. Since classifier.confidence-fix the default 0.45
+// threshold already cascades on boundary-hugging prompts, so it is no longer
+// REQUIRED to exercise eval — it remains as a test affordance for forcing
+// specific gate values. Production never sets these.
 export interface ClassifyOverrides {
   evalEnabled?: boolean;
   rulesThreshold?: number;
@@ -154,12 +159,30 @@ export type ClassifyFn = (
  * collapse onto a single eval call (the cache-hit invariant). Never throws.
  */
 export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
-  const { classifierConfig, lanes, provider, now, log } = deps;
-  const evalCfg = classifierConfig.eval;
-  const cache: EvalCache = createEvalCache({
-    ttlSec: evalCfg.cache.ttl_sec,
-    maxEntries: evalCfg.cache.max_entries,
-  });
+  const { getClassifierConfig, lanes, provider, now, log } = deps;
+
+  // The eval cache is content-hash keyed and shared across requests so identical
+  // prompts collapse onto one eval call. But a cached verdict is only valid under
+  // the config that produced it — when the admin edits the classifier (eval block,
+  // thresholds, weights), a stale verdict must NOT be served. We rebuild the cache
+  // whenever the live config's identity changes, keyed by a stable fingerprint so a
+  // semantically-equal re-parse (same values, new object) does NOT needlessly drop
+  // it. Holds the current cache + the fingerprint it was built for.
+  let cache: EvalCache = createEvalCache({ ttlSec: 300, maxEntries: 5000 });
+  let cacheFingerprint = "";
+  // Sync the cache to a (possibly new) config: rebuild it if the config changed.
+  // Returns the eval block of the now-current config.
+  const syncCache = (cfg: ClassifierConfig) => {
+    const fingerprint = JSON.stringify(cfg);
+    if (fingerprint !== cacheFingerprint) {
+      cache = createEvalCache({
+        ttlSec: cfg.eval.cache.ttl_sec,
+        maxEntries: cfg.eval.cache.max_entries,
+      });
+      cacheFingerprint = fingerprint;
+    }
+    return cfg.eval;
+  };
 
   // Map a cascade lane resolution through the REAL routing lane-resolver so the
   // cascade's internal `lane` field is consistent (routeRequest re-resolves from
@@ -201,12 +224,32 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
       const msg = (choices[0] as { message?: { content?: unknown } }).message;
       if (msg && typeof msg.content === "string") text = msg.content;
     }
-    return { text };
+    // Surface the eval self-cost if the provider reported one (OpenAI-shaped
+    // `usage.cost_usd` / top-level `cost_usd`). Many upstreams do not bill a cost
+    // back inline → null (unknown, not a measured 0). Kept SEPARATE from
+    // completion cost downstream (docs/07; principle 5). NEVER a key/payload.
+    const usage = (res as { usage?: { cost_usd?: unknown } }).usage;
+    const inlineCost = (res as { cost_usd?: unknown }).cost_usd;
+    const costUsd =
+      typeof usage?.cost_usd === "number"
+        ? usage.cost_usd
+        : typeof inlineCost === "number"
+          ? inlineCost
+          : null;
+    return { text, cost_usd: costUsd };
   };
 
-  const rulesCfg: ClassifierRulesConfig = classifierConfig.rules;
-
   return async (req: InternalRequest, overrides?: ClassifyOverrides): Promise<Classification> => {
+    // Read the LIVE classifier config (the RuleStore-backed value an admin may
+    // have just edited) and re-key/rebuild the eval cache if it changed — this is
+    // what makes admin edits hot-apply without a restart, while never serving a
+    // verdict computed under the previous config (principle 2: config drives
+    // behavior; principle 3: fail-open, the cache is an optimization not a source
+    // of truth).
+    const classifierConfig = getClassifierConfig();
+    const evalCfg = syncCache(classifierConfig);
+    const rulesCfg: ClassifierRulesConfig = classifierConfig.rules;
+
     // Genuinely contentless request → throw so classifySafe degrades to balanced.
     if (hasNoTextContent(req)) {
       throw new Error("classifier: no classifiable text content");
@@ -260,6 +303,9 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
       confidence: result.confidence,
       decided_by: result.decided_by,
       eval_cache_hit: result.eval_used ? result.eval_cache_hit : null,
+      // Layer-2 self-cost, threaded into cost_breakdown.eval_usd (separate from
+      // completion cost; docs/07). Non-null only when a fresh eval call billed it.
+      eval_usd: result.eval_usd,
       fallback_reason: result.fallback_reason ?? null,
       constraints: {
         needs_json: req.response_format !== null,

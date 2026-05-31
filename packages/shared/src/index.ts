@@ -56,6 +56,28 @@ export {
   type EvalConfig,
   EvalConfigSchema,
 } from "./config/eval-config.schema.js";
+// Lane model (config/lanes.yaml, docs/04) — single source of truth for the lane
+// abstraction, composed into HelmConfigSchema and re-exported by @helm/core.
+export {
+  type Lane,
+  type LaneConstraints,
+  LaneConstraintsSchema,
+  LaneSchema,
+  type LanesConfig,
+  LanesConfigSchema,
+  parseLanesConfig,
+} from "./config/lanes-schema.js";
+// Policy model (config/policies.yaml, docs/04) — server-side first-match routing
+// rules; composed into HelmConfigSchema and re-exported by @helm/core.
+export {
+  type PoliciesConfig,
+  PoliciesConfigSchema,
+  type Policy,
+  type PolicyMatch,
+  PolicyMatchSchema,
+  PolicySchema,
+  parsePoliciesConfig,
+} from "./config/policy-schema.js";
 // Config model (docs/02, 06).
 export {
   type AuthConfig,
@@ -76,6 +98,8 @@ export {
   RuntimeConfigSchema,
   type ServerConfig,
   ServerConfigSchema,
+  type StoreConfig,
+  StoreConfigSchema,
 } from "./config/schema.js";
 // Decision record (docs/02, 03, 04, 07).
 export {
@@ -83,6 +107,8 @@ export {
   AttemptStatusSchema,
   type ClassifierDecision,
   ClassifierDecisionSchema,
+  type CostBreakdown,
+  CostBreakdownSchema,
   type DecidedBy,
   DecidedBySchema,
   type DecisionRecord,

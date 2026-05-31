@@ -58,6 +58,7 @@ function makeDeps(over: {
         decided: true,
         output: EVAL_OUTPUT,
         latency_ms: 1,
+        cost_usd: 0.00002,
         cache_hit: false,
       }),
     );
@@ -133,6 +134,8 @@ describe("classify — cascade control flow", () => {
         decided: true,
         output: EVAL_OUTPUT,
         latency_ms: 0,
+        // Cache hit → no new model call, so no incremental eval self-cost.
+        cost_usd: null,
         cache_hit: true,
       }),
     );
@@ -147,6 +150,37 @@ describe("classify — cascade control flow", () => {
     expect(res.decided_by).toBe("eval");
     expect(res.eval_used).toBe(true);
     expect(res.eval_cache_hit).toBe(true);
+  });
+
+  it("4b. eval self-cost (eval_usd) surfaces from a decided eval", async () => {
+    const runEvalCached = vi.fn(
+      async (): Promise<EvalDecisionResult> => ({
+        decided: true,
+        output: EVAL_OUTPUT,
+        latency_ms: 3,
+        cost_usd: 0.00002,
+        cache_hit: false,
+      }),
+    );
+    const { deps } = makeDeps({
+      rules: rules({ confidence: 0.1 }),
+      config: makeConfig({ evalEnabled: true }),
+      runEvalCached,
+    });
+
+    const res = await classify(INPUT, deps);
+    expect(res.decided_by).toBe("eval");
+    expect(res.eval_usd).toBeCloseTo(0.00002);
+  });
+
+  it("4c. eval_usd is null when eval did not run (rules hit-stop)", async () => {
+    const { deps } = makeDeps({
+      rules: rules({ confidence: 0.9 }),
+      config: makeConfig({ evalEnabled: true }),
+    });
+    const res = await classify(INPUT, deps);
+    expect(res.decided_by).toBe("rules");
+    expect(res.eval_usd).toBeNull();
   });
 
   it("5. eval fail-open -> balanced (eval_<reason>)", async () => {
@@ -294,5 +328,7 @@ const _typecheck: ClassificationResult = {
   eval_used: false,
   eval_cache_hit: false,
   fallback_reason: "eval_disabled",
+  // Fallback/rules path: eval did not produce an isolable self-cost.
+  eval_usd: null,
 };
 void _typecheck;

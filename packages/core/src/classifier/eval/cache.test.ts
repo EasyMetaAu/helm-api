@@ -54,7 +54,9 @@ function makeConfig(over: Partial<EvalConfig> = {}): EvalConfig {
 
 // Deps for runEvalCached: real EvalClientDeps<ClassifierInput> wiring whose
 // invokeModel returns a canned successful eval JSON, plus a controllable clock.
-function makeDeps(decision: EvalDecision = { decided: true, output: OUTPUT, latency_ms: 5 }) {
+function makeDeps(
+  decision: EvalDecision = { decided: true, output: OUTPUT, latency_ms: 5, cost_usd: null },
+) {
   let nowMs = 1_000;
   const invokeModel = vi.fn();
   const deps: EvalClientDeps<ClassifierInput> = {

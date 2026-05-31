@@ -42,9 +42,13 @@ export interface EvalModelRequest {
   max_tokens: number;
 }
 
-/** Raw, unparsed completion text from the small model. */
+/** Raw, unparsed completion text from the small model, plus its self-cost when
+ *  the provider surfaced usage/pricing. `cost_usd` is the Layer-2 eval self-cost
+ *  (kept SEPARATE from completion cost downstream; docs/07). null/undefined when
+ *  the upstream did not report a cost. */
 export interface EvalModelResponse {
   text: string;
+  cost_usd?: number | null;
 }
 
 /** Reason an eval call did not yield a decision — all fail-open to balanced
@@ -57,7 +61,7 @@ export type EvalFailReason =
   | "schema_invalid";
 
 export type EvalDecision =
-  | { decided: true; output: EvalOutput; latency_ms: number }
+  | { decided: true; output: EvalOutput; latency_ms: number; cost_usd: number | null }
   | { decided: false; reason: EvalFailReason; latency_ms: number };
 
 /** Structured telemetry event — safe fields ONLY (principle 7). Never extend
@@ -156,5 +160,12 @@ export async function runEval<TInput>(
   if (!parsed.ok) {
     return finish({ decided: false, reason: parsed.reason, latency_ms: elapsed() });
   }
-  return finish({ decided: true, output: parsed.value, latency_ms: elapsed() });
+  return finish({
+    decided: true,
+    output: parsed.value,
+    latency_ms: elapsed(),
+    // Layer-2 self-cost from the model response when the provider reported it;
+    // null otherwise (unknown, not a measured 0). Kept separate from completion.
+    cost_usd: typeof raced.cost_usd === "number" ? raced.cost_usd : null,
+  });
 }

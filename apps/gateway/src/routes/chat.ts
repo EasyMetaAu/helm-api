@@ -44,6 +44,8 @@ export interface ChatRouteDeps {
 // AuthIdentity — kept local so chat.ts doesn't depend on the middleware type).
 interface ChatIdentity {
   keyId: string;
+  /** Display prefix only (helm_live_ab12) — never the plaintext key (principle 7). */
+  keyPrefix: string;
   accountId: string;
   orgId: string | null;
   userId: string | null;
@@ -57,11 +59,26 @@ function toInternalRequest(
   body: ChatCompletionRequest,
   traceId: string,
   identity: ChatIdentity,
+  sessionKey: string | null,
 ): InternalRequest {
   const messages = Array.isArray(body.messages)
     ? (body.messages as InternalRequest["messages"])
     : [{ role: "user", content: "" }];
   const model = typeof body.model === "string" && body.model.length > 0 ? body.model : "auto";
+
+  // Session momentum keys off metadata.conversation_id (classifier engine). An
+  // explicit conversation_id in the body wins; otherwise the `x-session-key`
+  // request header maps in so momentum actually fires in production. Without this
+  // the store is keyed null and momentum never engages (fail-open to no momentum).
+  const bodyMeta =
+    body.metadata && typeof body.metadata === "object"
+      ? (body.metadata as Record<string, unknown>)
+      : null;
+  const bodyConversationId =
+    typeof bodyMeta?.conversation_id === "string" && bodyMeta.conversation_id.length > 0
+      ? bodyMeta.conversation_id
+      : null;
+  const conversationId = bodyConversationId ?? sessionKey;
 
   return {
     request_id: traceId,
@@ -81,7 +98,7 @@ function toInternalRequest(
     max_tokens: typeof body.max_tokens === "number" ? body.max_tokens : null,
     stream: body.stream === true,
     metadata: {
-      conversation_id: null,
+      conversation_id: conversationId,
       thread_id: null,
       resource_id: null,
       project_id: null,
@@ -108,7 +125,14 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     const identity = c.get("identity") as unknown as ChatIdentity;
     const body = (await c.req.json()) as ChatCompletionRequest;
 
-    const internal = toInternalRequest(body, traceId, identity);
+    // `x-session-key` is the conversation-dimension key clients send to opt into
+    // session momentum; it maps into metadata.conversation_id (never logged — it
+    // is an opaque session id, not a credential/payload).
+    const headerSessionKey = c.req.header("x-session-key");
+    const sessionKey =
+      headerSessionKey !== undefined && headerSessionKey.length > 0 ? headerSessionKey : null;
+
+    const internal = toInternalRequest(body, traceId, identity, sessionKey);
 
     // Persist a (redacted) telemetry record. Fail-open: a telemetry failure must
     // never turn a successful request into a 5xx or break an in-flight stream.
@@ -146,7 +170,12 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
 
     const result = await deps.route(
       internal,
-      { allowCustomModel: identity.caps?.allowCustomModel === true },
+      {
+        allowCustomModel: identity.caps?.allowCustomModel === true,
+        // Thread the resolved key's DISPLAY PREFIX into the decision record for the
+        // Debug UI key column. Prefix only — never the plaintext key (principle 7).
+        keyPrefix: identity.keyPrefix ?? null,
+      },
       c.req.raw.signal,
       classifyOverrides,
     );

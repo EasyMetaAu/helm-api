@@ -1,13 +1,17 @@
 import { z } from "zod";
 import { ClassifierConfigSchema } from "./classifier-schema.js";
+import { LanesConfigSchema } from "./lanes-schema.js";
+import { PoliciesConfigSchema } from "./policy-schema.js";
 
 // Config-as-code: behavior is driven by config/*.yaml + env, not code changes.
-// These schemas validate server / auth / providers / runtime. Per CLAUDE.md
-// principle 2, invalid config is fail-closed (the loader parse()s and refuses to
-// start on failure). Single source of truth via z.infer. See docs/02, 06.
+// These schemas validate server / auth / providers / runtime / classifier /
+// lanes / policies. Per CLAUDE.md principle 2, invalid config is fail-closed
+// (the loader parse()s and refuses to start on failure). Single source of truth
+// via z.infer. See docs/02, 04, 06.
 //
-// Scope: this task covers server/auth/providers/runtime only. lanes/policies/
-// classifier/capabilities/pricing schemas belong to their own module tasks.
+// lanes/policies validate against the SAME LanesConfigSchema/PoliciesConfigSchema
+// the router consumes (re-exported by @helm/core) — schema-first, no duplicate
+// shapes.
 
 export const ServerConfigSchema = z.object({
   host: z.string().default("0.0.0.0"),
@@ -57,10 +61,26 @@ export const RateLimitConfigSchema = z.object({
   overrides: z.record(z.string(), RateLimitQuotaOverrideSchema).default({}),
 });
 
+// DB abstraction layer (CLAUDE.md "DB 抽象层"). The gateway switches its Store
+// adapter set by config: `sqlite` (default, local file) or `supabase` (hosted
+// Postgres). The connection string is referenced by ENV VAR NAME (`url_env`) —
+// NEVER a plaintext DSN in config/yaml (mirrors providers[].api_key_env,
+// principle 7: no credentials in the repo). An unknown driver is fail-closed
+// (the enum rejects it) so a typo can never silently fall back to a wrong store.
+export const StoreConfigSchema = z.object({
+  driver: z.enum(["sqlite", "supabase"]).default("sqlite"),
+  // env var name holding the Postgres connection string (supabase driver). A
+  // reference only — the loader/factory resolves it at startup, never logged.
+  url_env: z.string().min(1).optional(),
+});
+
 export const RuntimeConfigSchema = z.object({
   max_request_bytes: z.number().int().positive().default(2_000_000),
   request_timeout_ms: z.number().int().positive().default(60_000),
   rate_limit: RateLimitConfigSchema,
+  // Store driver selection. Defaulted so an absent runtime.store stays on sqlite
+  // (back-compat); overridable via HELM_STORE_DRIVER (see env-map).
+  store: StoreConfigSchema.prefault({ driver: "sqlite" }),
 });
 
 export const HelmConfigSchema = z.object({
@@ -83,6 +103,17 @@ export const HelmConfigSchema = z.object({
     // eval omitted: let ClassifierConfigSchema's own eval prefault supply the
     // default model (the hardened eval schema requires `model`).
   }),
+  // Lanes (config/lanes.yaml). OPTIONAL at the config level: when lanes.yaml is
+  // absent the gateway falls back to core's DEFAULT_LANES (principle 6, the lane
+  // abstraction is always present). When PRESENT, it must be a valid LanesConfig
+  // (with a `balanced` terminal) or the loader fails closed (principle 2). Not
+  // defaulted here so the server can distinguish "config provided none" (use
+  // DEFAULT_LANES) from "config provided lanes".
+  lanes: LanesConfigSchema.optional(),
+  // Policies (config/policies.yaml). Defaulted to an empty list so an absent
+  // policies.yaml is a no-op (the router runs on lanes alone). A present-but-
+  // invalid file still fails closed.
+  policies: PoliciesConfigSchema.prefault({ policies: [] }),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -92,5 +123,6 @@ export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type RateLimitQuota = z.infer<typeof RateLimitQuotaSchema>;
 export type RateLimitQuotaOverride = z.infer<typeof RateLimitQuotaOverrideSchema>;
 export type RateLimitConfig = z.infer<typeof RateLimitConfigSchema>;
+export type StoreConfig = z.infer<typeof StoreConfigSchema>;
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 export type HelmConfig = z.infer<typeof HelmConfigSchema>;

@@ -40,6 +40,14 @@ const CONFIG_FILES: ReadonlyArray<{
   // classifier.yaml has a top-level `classifier:` key; optional for back-compat
   // so existing deployments without it still start (defaults apply).
   { file: "classifier.yaml", key: null, optional: true },
+  // lanes.yaml is a FLAT map (lane name -> lane), so the whole file becomes the
+  // `lanes` key. Optional: absent -> config.lanes undefined -> gateway falls
+  // back to DEFAULT_LANES (principle 6). A present-but-invalid file fails closed.
+  { file: "lanes.yaml", key: "lanes", optional: true },
+  // policies.yaml IS a `{ policies: [...] }` object — exactly the
+  // PoliciesConfigSchema shape — so the whole file becomes the `policies` key.
+  // Optional: absent -> the schema default ({ policies: [] }) applies (no-op).
+  { file: "policies.yaml", key: "policies", optional: true },
 ];
 
 type Mutable = Record<string, unknown>;

@@ -1,0 +1,30 @@
+# policies.yaml — server-side routing policies (docs/04 "策略配置"). Operators
+# customize routing WITHOUT touching client code. Each policy is a FIRST-MATCH
+# rule: the policy engine walks the list top-to-bottom and the FIRST policy whose
+# `match` fully holds (AND of every written field) wins. A policy must declare at
+# least one action: pin a lane (`use_lane`) and/or cap the candidate (`max_lane` /
+# `allowed_lanes`). `.strict()`-validated by PoliciesConfigSchema (@helm/shared):
+# a typo in a field name fails the gateway boot (fail-closed, principle 2).
+#
+# These are SAMPLES — adjust to your own lane set / org structure.
+
+policies:
+  # Complex coding work -> the coding task lane (coding-capable primary).
+  - id: coding_complex_to_coding_lane
+    match:
+      task_type: coding
+      complexity: complex
+    use_lane: coding
+
+  # Any request constrained to JSON output -> the strict-json lane.
+  - id: json_constrained_to_json_lane
+    match:
+      needs_json: true
+    use_lane: json
+
+  # Example cost cap: a budget org is never routed above `balanced` (caps-only;
+  # the lane is still chosen by classification, just clamped). Illustrative.
+  - id: budget_org_cap
+    match:
+      org_id: budget_org
+    max_lane: balanced

@@ -61,6 +61,18 @@ export const FinalDecisionSchema = z.object({
   error_reason: z.string().nullable(),
 });
 
+// Cost split (docs/07 「成本拆分（含 eval 评估自身的成本）」). `eval_usd` isolates the
+// Layer-2 small-model self-cost (non-null ONLY when eval actually ran; null when
+// eval was skipped/disabled) from `completion_usd` (Σ of the served provider
+// attempts' cost). `total_usd` is their sum. Each is nullable because upstream
+// usage/pricing can be unknown in the MVP — null means "not measured", distinct
+// from a measured 0.
+export const CostBreakdownSchema = z.object({
+  eval_usd: z.number().nullable(),
+  completion_usd: z.number().nullable(),
+  total_usd: z.number().nullable(),
+});
+
 export const DecisionRecordSchema = z.object({
   request_id: z.string().min(1),
   // Threaded end-to-end from the request context for cross-system correlation
@@ -68,11 +80,31 @@ export const DecisionRecordSchema = z.object({
   // equals request_id (the orchestrator uses request_id as the trace id).
   trace_id: z.string().min(1),
   requested_model: z.string(),
+  // Display-only key fingerprint for the Debug UI key column (docs/07
+  // 「API key / 用户 / 组织」). PREFIX ONLY — the resolved auth identity's
+  // ApiKeyRecord.prefix (e.g. helm_live_ab12), NEVER the plaintext key
+  // (principle 7). Null when the key/prefix is unknown. `.default(null)` keeps
+  // pre-existing (pre-enrichment) records valid.
+  key_prefix: z.string().nullable().default(null),
   classifier: ClassifierDecisionSchema,
   policy: PolicyDecisionSchema,
   lane: LaneDecisionSchema,
   provider_attempts: z.array(ProviderAttemptSchema),
   final: FinalDecisionSchema,
+  // Total served latency = Σ provider_attempts.latency_ms (docs/07 延迟).
+  // `.default(0)` so legacy records validate; the builder computes the real sum.
+  latency_total_ms: z.number().nonnegative().default(0),
+  // EXECUTION-stage fallback count (principle 5; NEVER the classification
+  // fallback): non-skipped attempts minus 1, clamped ≥0. `.default(0)` for
+  // legacy records; the builder computes the real value.
+  fallback_count: z.number().int().nonnegative().default(0),
+  // Cost split incl. eval self-cost (docs/07). `.prefault` so legacy records
+  // validate as "not measured"; the builder fills the real split.
+  cost_breakdown: CostBreakdownSchema.prefault({
+    eval_usd: null,
+    completion_usd: null,
+    total_usd: null,
+  }),
 });
 
 export type DecidedBy = z.infer<typeof DecidedBySchema>;
@@ -82,4 +114,5 @@ export type PolicyDecision = z.infer<typeof PolicyDecisionSchema>;
 export type LaneDecision = z.infer<typeof LaneDecisionSchema>;
 export type ProviderAttempt = z.infer<typeof ProviderAttemptSchema>;
 export type FinalDecision = z.infer<typeof FinalDecisionSchema>;
+export type CostBreakdown = z.infer<typeof CostBreakdownSchema>;
 export type DecisionRecord = z.infer<typeof DecisionRecordSchema>;

@@ -35,6 +35,13 @@ export const ENV_MAPPINGS: readonly EnvMapping[] = [
     path: ["runtime", "rate_limit", "enabled"],
     kind: "boolean",
   },
+  // Store driver selection (DB 抽象层). HELM_STORE_DRIVER picks the adapter set
+  // ('sqlite' | 'supabase'); an unknown value is fail-closed by the enum. The
+  // connection string itself is referenced indirectly via HELM_STORE_URL_ENV
+  // (the NAME of the env var holding the DSN) so no plaintext DSN lands in
+  // config — mirrors providers[].api_key_env (principle 7).
+  { env: "HELM_STORE_DRIVER", path: ["runtime", "store", "driver"], kind: "string" },
+  { env: "HELM_STORE_URL_ENV", path: ["runtime", "store", "url_env"], kind: "string" },
 ];
 
 // Coerce a string env value into the declared kind. Returns the original string

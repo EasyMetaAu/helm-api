@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { ADMIN_PASSWORD, ADMIN_USER, basicHeader } from "./fixtures/admin.js";
 import {
   EVAL_CALL_COUNT_PATH,
   EVAL_RESET_PATH,
@@ -19,23 +20,24 @@ import {
 // is toggled per-request via the e2e-only `x-helm-eval` header (gated by
 // HELM_E2E in the test-server; production config stays fail-closed). The
 // "ambiguous" prompt is chosen so Layer-1 rules are UNCERTAIN (confidence below
-// threshold) — that is what lets Layer-2 eval (or its disabled/timeout fallback)
-// decide. See task e2e.eval + implementation-notes.
+// the DEFAULT 0.45 threshold) — that is what lets Layer-2 eval (or its
+// disabled/timeout fallback) decide. After classifier.confidence-fix the
+// boundary-hugging confidence dips below 0.45 on its own, so this spec NO LONGER
+// raises the gate with `x-helm-rules-threshold`; it runs at the shipped default.
+// See task e2e.eval + implementation-notes.
 
 const TEST_KEY = "helm_live_e2e_testkey";
 const MOCK_PORT = process.env.MOCK_PORT ?? "8181";
 const MOCK_BASE = `http://127.0.0.1:${MOCK_PORT}`;
 
-// Raise the Layer-1 gate so the deliberately AMBIGUOUS prompts (rules confidence
-// ~0.53) fall BELOW it and reach Layer-2 eval, while the STRONG prompt (~0.98)
-// still hit-stops. The deterministic Layer-1 sigmoid never dips below 0.5, so a
-// black-box eval test MUST raise the gate. e2e-only header (HELM_E2E); production
-// classification stays config-driven. Sent on EVERY eval-spec request so the
-// shared gateway's other specs (routing) keep the config default 0.45.
+// The deliberately AMBIGUOUS prompts hug a tier boundary, so after
+// classifier.confidence-fix their normalized confidence (≈0.06) sits BELOW the
+// shipped DEFAULT 0.45 gate and reaches Layer-2 eval, while the STRONG prompt
+// (≈0.96) still hit-stops. No `x-helm-rules-threshold` override is needed — this
+// is the headline of the fix: the default threshold now actually cascades.
 const AUTH = {
   Authorization: `Bearer ${TEST_KEY}`,
   "Content-Type": "application/json",
-  "x-helm-rules-threshold": "0.7",
 };
 
 // DEFAULT_LANES candidate heads.
@@ -43,9 +45,9 @@ const BALANCED_HEAD = "default_good_model";
 const PREMIUM_HEAD = "best_reasoning_model";
 
 // An intentionally ambiguous prompt: no strong Layer-1 keyword signal, so rules
-// stay UNCERTAIN (confidence below the e2e threshold) and the cascade must
-// consult Layer 2 (when enabled) or fall open to balanced (when disabled / on
-// timeout). The gateway's eval cache is process-local and persists ACROSS tests,
+// stay UNCERTAIN (confidence below the DEFAULT 0.45 threshold) and the cascade
+// must consult Layer 2 (when enabled) or fall open to balanced (when disabled /
+// on timeout). The gateway's eval cache is process-local and persists ACROSS tests,
 // so each test mints a UNIQUE-but-still-ambiguous prompt (via `ambiguous(tag)`)
 // to avoid cross-test cache bleed — content-hash keying keeps them distinct.
 const AMBIGUOUS = "Hmm, I was wondering about that thing we mentioned earlier, what do you reckon?";
@@ -185,6 +187,60 @@ test.describe("eval cascade e2e", () => {
     expect(res.headers()["x-helm-lane"]).toBe("premium");
     // hit-stop saved the cost: eval endpoint never called even though eval is ON.
     expect(await evalCalls(request)).toBe(0);
+  });
+
+  // ── Scenario 8: admin classifier edit HOT-APPLIES to routing (no restart) ──
+  // The headline of admin.classifier-hotapply: flip eval.enabled via the admin API
+  // and a SUBSEQUENT classification (sent WITHOUT the e2e x-helm-eval header, so it
+  // is purely config-driven) reflects the change. Flipping it back proves the eval
+  // cache is invalidated too (a previously-evaluated prompt is re-decided under the
+  // new config instead of serving the stale verdict).
+  test("PUT classifier via admin -> next classification reflects eval toggle without restart", async ({
+    request,
+  }) => {
+    const ADMIN = { Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD) };
+    // Read the live classifier config, then PUT it back with eval ENABLED.
+    const current = await (await request.get("/admin/api/classifier", { headers: ADMIN })).json();
+    const enableRes = await request.put("/admin/api/classifier", {
+      headers: { ...ADMIN, "Content-Type": "application/json" },
+      data: { ...current, eval: { ...current.eval, enabled: true } },
+    });
+    expect(enableRes.status()).toBe(200);
+
+    const prompt = ambiguous("s8");
+    // No x-helm-eval header -> eval enablement comes purely from the (hot-applied)
+    // config. eval now decides -> premium lane.
+    const afterEnable = await request.post("/v1/chat/completions", {
+      data: chat(prompt),
+      headers: AUTH,
+    });
+    expect(afterEnable.status()).toBe(200);
+    expect(afterEnable.headers()["x-helm-decided-by"]).toBe("eval");
+    expect(afterEnable.headers()["x-helm-lane"]).toBe("premium");
+
+    // Now DISABLE eval via the admin API. The cache built under the prior config
+    // must be dropped: the SAME prompt must re-decide and fall open to balanced.
+    const disableRes = await request.put("/admin/api/classifier", {
+      headers: { ...ADMIN, "Content-Type": "application/json" },
+      data: { ...current, eval: { ...current.eval, enabled: false } },
+    });
+    expect(disableRes.status()).toBe(200);
+
+    const afterDisable = await request.post("/v1/chat/completions", {
+      data: chat(prompt),
+      headers: AUTH,
+    });
+    expect(afterDisable.status()).toBe(200);
+    // eval is OFF now -> uncertain falls open to balanced (NOT the stale premium).
+    expect(afterDisable.headers()["x-helm-lane"]).toBe("balanced");
+    expect(afterDisable.headers()["x-helm-decided-by"]).toBe("fallback");
+    expect(afterDisable.headers()["x-helm-fallback-reason"]).toBe("eval_disabled");
+
+    // Restore eval OFF baseline for any later specs sharing this gateway.
+    await request.put("/admin/api/classifier", {
+      headers: { ...ADMIN, "Content-Type": "application/json" },
+      data: { ...current, eval: { ...current.eval, enabled: false } },
+    });
   });
 
   // ── Scenario 7: fail-open does NOT poison the cache ────────────────────────

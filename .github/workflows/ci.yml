@@ -20,3 +20,38 @@ jobs:
       - run: pnpm lint
       - run: pnpm test
       - run: pnpm build
+
+  # Builds and smoke-tests the real gateway Docker image (docs/10). Kept fully
+  # independent of `verify` (no `needs`) so the unit gates run on their own and
+  # neither job blocks the other.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build gateway image
+        run: docker build -t helm-api:ci .
+      - name: Run container with required env
+        # The provider credential is referenced by env NAME only (principle 7);
+        # /healthz never calls upstream, so a dummy value is enough to boot.
+        run: |
+          docker run -d --name helm-ci \
+            -p 8080:8080 \
+            -e OPENAI_API_KEY=sk-ci-smoke-test \
+            -v "$PWD/config:/app/config" \
+            helm-api:ci
+      - name: Wait for /healthz to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz; then
+              echo "healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::gateway did not become healthy within 30s"
+          docker logs helm-ci
+          exit 1
+      - name: Stop container
+        if: always()
+        continue-on-error: true
+        run: docker stop helm-ci && docker rm helm-ci

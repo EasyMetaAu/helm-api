@@ -283,4 +283,32 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     // executor can treat the disconnect as a non-provider fault.
     expect(harness.pipelineSawAbort).toBe(true);
   });
+
+  it("maps the x-session-key header into ir.metadata.conversation_id (session momentum)", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+
+    await app.request("/v1/messages", {
+      method: "POST",
+      headers: { ...AUTH, "x-session-key": "sess-xyz" },
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    const meta = (harness.pipelineSawIR?.metadata ?? {}) as Record<string, unknown>;
+    expect(meta.conversation_id).toBe("sess-xyz");
+  });
+
+  it("leaves conversation_id unset when no x-session-key header is present", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+
+    await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    const meta = (harness.pipelineSawIR?.metadata ?? {}) as Record<string, unknown>;
+    expect(meta.conversation_id).toBeUndefined();
+  });
 });

@@ -122,7 +122,10 @@ importers:
         version: 12.10.0
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)
+        version: 0.45.2(@electric-sql/pglite@0.4.6)(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)(postgres@3.4.9)
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
@@ -130,6 +133,9 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.4.6
+        version: 0.4.6
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13
@@ -265,6 +271,9 @@ packages:
   '@csstools/css-tokenizer@3.0.4':
     resolution: {integrity: sha512-Vd/9EVDiu6PPJt9yAh6roZP6El1xHrdvIVGjyBsHR0RYwNHgL7FJPyIIW4fANJNG6FtyZfvlRPpFI4ZM/lubvw==}
     engines: {node: '>=18'}
+
+  '@electric-sql/pglite@0.4.6':
+    resolution: {integrity: sha512-qmlmfN8UyKCee35qkV0r/MBp+Znl8FjBz7OpoglNvww3GJpw0/DLP0o1ZymvLNmcD5DTLOQdzKPtF8Hd3mdl1w==}
 
   '@esbuild/aix-ppc64@0.27.7':
     resolution: {integrity: sha512-EKX3Qwmhz1eMdEJokhALr0YiD0lhQNwDqkPYyPhiSwKrh7/4KRjQc04sZ8db+5DVVnZ1LmbNDI1uAMPEUBnQPg==}
@@ -1821,6 +1830,10 @@ packages:
     resolution: {integrity: sha512-FfR8sjd4em2T6fb3I2MwAJU7HWVMr9zba+enmQeeWFfCbm+UOC/0X4DS8XtpUTMwWMGbjKYP7xjfNekzyGmB3A==}
     engines: {node: ^10 || ^12 || >=14}
 
+  postgres@3.4.9:
+    resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
+    engines: {node: '>=12'}
+
   prebuild-install@7.1.3:
     resolution: {integrity: sha512-8Mf2cbV7x1cXPUILADGI3wuhfqWvtiLA1iclTDbFRZkgRQS0NqsPZphna9V+HyTEadheuPmjaJMsbzKQFOzLug==}
     engines: {node: '>=10'}
@@ -2364,6 +2377,8 @@ snapshots:
       '@csstools/css-tokenizer': 3.0.4
 
   '@csstools/css-tokenizer@3.0.4': {}
+
+  '@electric-sql/pglite@0.4.6': {}
 
   '@esbuild/aix-ppc64@0.27.7':
     optional: true
@@ -3030,10 +3045,12 @@ snapshots:
 
   dom-accessibility-api@0.6.3: {}
 
-  drizzle-orm@0.45.2(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0):
+  drizzle-orm@0.45.2(@electric-sql/pglite@0.4.6)(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)(postgres@3.4.9):
     optionalDependencies:
+      '@electric-sql/pglite': 0.4.6
       '@types/better-sqlite3': 7.6.13
       better-sqlite3: 12.10.0
+      postgres: 3.4.9
 
   dunder-proto@1.0.1:
     dependencies:
@@ -3589,6 +3606,8 @@ snapshots:
       nanoid: 3.3.12
       picocolors: 1.1.1
       source-map-js: 1.2.1
+
+  postgres@3.4.9: {}
 
   prebuild-install@7.1.3:
     dependencies:

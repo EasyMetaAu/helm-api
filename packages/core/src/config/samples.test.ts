@@ -50,6 +50,42 @@ describe("checked-in config samples", () => {
     expect(cfg.providers[0]?.api_key_env).toBe("OPENAI_API_KEY");
   });
 
+  it("loads the shipped lanes.yaml (economy/balanced/premium + task lanes)", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const lanes = cfg.lanes;
+    if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
+    // quality/cost lanes (balanced is the classification fallback terminal)
+    expect(lanes.economy).toBeDefined();
+    expect(lanes.balanced).toBeDefined();
+    expect(lanes.premium).toBeDefined();
+    // task lanes
+    expect(lanes.coding?.fallback).toEqual(["premium", "balanced"]);
+    expect(lanes.json?.constraints.require_json).toBe(true);
+    expect(lanes.vision?.constraints.require_vision).toBe(true);
+    expect(lanes.tool_use?.constraints.require_tools).toBe(true);
+  });
+
+  it("loads the shipped policies.yaml as first-match rules", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const ids = cfg.policies.policies.map((p) => p.id);
+    expect(ids).toContain("coding_complex_to_coding_lane");
+    expect(ids).toContain("json_constrained_to_json_lane");
+    // first-match ordering: the coding rule precedes the json rule
+    expect(cfg.policies.policies[0]?.use_lane).toBe("coding");
+  });
+
+  it("lanes.yaml is genuinely schema-constrained (a bad lane fails the merge)", () => {
+    const lanes = readYaml("lanes.yaml") as Record<string, unknown>;
+    const broken = {
+      server: readYaml("server.yaml"),
+      auth: readYaml("auth.yaml"),
+      ...(readYaml("providers.yaml") as Record<string, unknown>),
+      runtime: readYaml("runtime.yaml"),
+      lanes: { ...lanes, broken_lane: { primary: "" } }, // empty primary -> invalid
+    };
+    expect(HelmConfigSchema.safeParse(broken).success).toBe(false);
+  });
+
   it("the samples are genuinely schema-constrained (breaking one fails)", () => {
     const broken = {
       server: readYaml("server.yaml"),

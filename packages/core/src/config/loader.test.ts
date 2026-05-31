@@ -47,6 +47,28 @@ describe("loadConfig", () => {
     expect(cfg.server.host).toBe("127.0.0.1"); // untouched file value
   });
 
+  it("defaults runtime.store.driver to sqlite and lets HELM_STORE_DRIVER override it", () => {
+    const dflt = loadConfig({ configDir: "config", env: {}, readFile: fakeReadFile(VALID_YAML) });
+    expect(dflt.runtime.store.driver).toBe("sqlite");
+    const cfg = loadConfig({
+      configDir: "config",
+      env: { HELM_STORE_DRIVER: "supabase", HELM_STORE_URL_ENV: "HELM_STORE_URL" },
+      readFile: fakeReadFile(VALID_YAML),
+    });
+    expect(cfg.runtime.store.driver).toBe("supabase");
+    expect(cfg.runtime.store.url_env).toBe("HELM_STORE_URL");
+  });
+
+  it("fails closed when HELM_STORE_DRIVER is an unknown driver", () => {
+    expect(() =>
+      loadConfig({
+        configDir: "config",
+        env: { HELM_STORE_DRIVER: "mysql" },
+        readFile: fakeReadFile(VALID_YAML),
+      }),
+    ).toThrow(ConfigError);
+  });
+
   it("throws ConfigError with issues on invalid config (fail-closed)", () => {
     const invalid = {
       ...VALID_YAML,
@@ -85,6 +107,76 @@ describe("loadConfig", () => {
     const broken = { ...VALID_YAML, "config/server.yaml": "port: : : bad\n" };
     expect(() =>
       loadConfig({ configDir: "config", env: {}, readFile: fakeReadFile(broken) }),
+    ).toThrow(ConfigError);
+  });
+
+  // —— lanes.yaml / policies.yaml (config.load-rules) ——
+
+  const LANES_YAML =
+    "balanced:\n  primary: default_good_model\n  fallback: [premium, economy]\n" +
+    "premium:\n  primary: best_reasoning_model\n  fallback: [balanced]\n" +
+    "coding:\n  primary: coding_model\n  fallback: [premium, balanced]\n  constraints:\n    require_tools: true\n";
+  const POLICIES_YAML =
+    "policies:\n  - id: coding_complex\n    match:\n      task_type: coding\n      complexity: complex\n    use_lane: coding\n  - id: json_strict\n    match:\n      needs_json: true\n    use_lane: json\n";
+
+  it("loads lanes.yaml into config.lanes (validated, with task lanes)", () => {
+    const cfg = loadConfig({
+      configDir: "config",
+      env: {},
+      readFile: fakeReadFile({ ...VALID_YAML, "config/lanes.yaml": LANES_YAML }),
+    });
+    expect(cfg.lanes?.balanced?.primary).toBe("default_good_model");
+    expect(cfg.lanes?.coding?.fallback).toEqual(["premium", "balanced"]);
+    expect(cfg.lanes?.coding?.constraints.require_tools).toBe(true);
+  });
+
+  it("loads policies.yaml into config.policies (first-match rules)", () => {
+    const cfg = loadConfig({
+      configDir: "config",
+      env: {},
+      readFile: fakeReadFile({ ...VALID_YAML, "config/policies.yaml": POLICIES_YAML }),
+    });
+    expect(cfg.policies.policies).toHaveLength(2);
+    expect(cfg.policies.policies[0]?.match.task_type).toBe("coding");
+    expect(cfg.policies.policies[0]?.use_lane).toBe("coding");
+  });
+
+  it("lanes.yaml is optional: absent -> config.lanes is undefined (server falls back to DEFAULT_LANES)", () => {
+    const cfg = loadConfig({ configDir: "config", env: {}, readFile: fakeReadFile(VALID_YAML) });
+    expect(cfg.lanes).toBeUndefined();
+    expect(cfg.policies.policies).toEqual([]);
+  });
+
+  it("fail-closed: a lanes.yaml missing the balanced terminal throws ConfigError", () => {
+    const badLanes = "economy:\n  primary: cheap_model\n  fallback: [premium]\n";
+    expect(() =>
+      loadConfig({
+        configDir: "config",
+        env: {},
+        readFile: fakeReadFile({ ...VALID_YAML, "config/lanes.yaml": badLanes }),
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("fail-closed: a policy with no action field throws ConfigError", () => {
+    const badPolicies = "policies:\n  - match:\n      task_type: coding\n";
+    expect(() =>
+      loadConfig({
+        configDir: "config",
+        env: {},
+        readFile: fakeReadFile({ ...VALID_YAML, "config/policies.yaml": badPolicies }),
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("fail-closed: an unknown field in a lane (strict) throws ConfigError", () => {
+    const badLanes = "balanced:\n  primary: default_good_model\n  weight: 5\n";
+    expect(() =>
+      loadConfig({
+        configDir: "config",
+        env: {},
+        readFile: fakeReadFile({ ...VALID_YAML, "config/lanes.yaml": badLanes }),
+      }),
     ).toThrow(ConfigError);
   });
 

@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
 import {
   type AnthropicSSEEvent,
   anthropicTransformer,
@@ -10,7 +9,7 @@ import {
   createProviderRegistry,
   createRateLimiter,
   createSignalCollector,
-  createSqliteDb,
+  createStore,
   DEFAULT_LANES,
   generateKey,
   hashKey,
@@ -26,13 +25,10 @@ import {
   type RouteOptions,
   redact,
   routeRequest,
-  SqliteKeyStore,
-  SqliteRateLimitStore,
-  SqliteSignalStore,
-  SqliteTelemetryStore,
+  type StoreSet,
   startSignalScheduler,
 } from "@helm/core";
-import type { CatalogEntry, InternalRequest } from "@helm/shared";
+import type { CatalogEntry, ClassifierConfig, InternalRequest } from "@helm/shared";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
@@ -58,14 +54,25 @@ export interface ServerHandle {
   dispose?: () => void;
 }
 
-// Build a provider registry that maps every DEFAULT_LANES model alias to the
-// single configured upstream (Phase 1: one OpenAI-compatible provider; the mock
-// upstream ignores the model id). TODO: replace with config-driven multi-model
-// registry once providers.yaml grows the models[] mapping (see impl-notes).
-function buildRegistry(providerName: string, baseUrl: string, apiKeyEnv: string) {
+// Build a provider registry that maps every model alias referenced by the active
+// lanes (each lane's primary + fallback elements that are NOT themselves lane
+// names) to the single configured upstream (Phase 1: one OpenAI-compatible
+// provider; the mock upstream ignores the model id). Driven by config.lanes so a
+// task lane's primary (e.g. coding_capable_model) is resolvable. TODO: replace
+// with a real multi-model registry once providers.yaml grows models[] (impl-notes).
+function buildRegistry(
+  providerName: string,
+  baseUrl: string,
+  apiKeyEnv: string,
+  lanes: LanesConfig,
+) {
   const aliases = new Set<string>();
-  for (const lane of Object.values(DEFAULT_LANES)) {
-    aliases.add(lane.primary);
+  for (const [, lane] of Object.entries(lanes)) {
+    for (const el of [lane.primary, ...lane.fallback]) {
+      // Skip lane references (resolved during chain expansion); register only
+      // terminal model aliases.
+      if (!Object.hasOwn(lanes, el)) aliases.add(el);
+    }
   }
   const cfg: RegistryProviderConfig = {
     name: providerName,
@@ -78,16 +85,32 @@ function buildRegistry(providerName: string, baseUrl: string, apiKeyEnv: string)
 
 // Full wiring: config -> store -> bootstrap key -> provider -> routing pipeline.
 // Fail-closed: an invalid config throws (caller exits non-zero). The HTTP listen
-// is performed by the caller (index.ts) so this stays testable.
-export function buildServer(opts: { logger?: Logger; configDir?: string } = {}): ServerHandle {
+// is performed by the caller (index.ts) so this stays testable. Async because the
+// Store factory may open a remote Postgres (supabase driver); the sqlite default
+// resolves synchronously under the await.
+export async function buildServer(
+  opts: { logger?: Logger; configDir?: string } = {},
+): Promise<ServerHandle> {
   const logger = opts.logger ?? createJsonLogger();
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });
 
-  // Store: SQLite (default). dataDir from the key persist path's directory.
+  // Store adapter set, chosen by config (CLAUDE.md "DB 抽象层"): sqlite (default,
+  // local file) or supabase (hosted Postgres). The factory fails CLOSED on an
+  // unknown driver / a missing supabase credential (principle 2). The supabase
+  // connection string is referenced by env-var NAME (runtime.store.url_env) and
+  // resolved HERE — never read from yaml, never logged (principle 7).
   const dataDir = process.env.HELM_DATA_DIR ?? "./data";
-  const db = createSqliteDb(join(dataDir, "helm.db"));
-  const keyStore = new SqliteKeyStore(db);
-  const telemetry = new SqliteTelemetryStore(db);
+  const storeCfg = config.runtime.store;
+  const connectionString =
+    storeCfg.driver === "supabase" && storeCfg.url_env ? process.env[storeCfg.url_env] : undefined;
+  if (storeCfg.driver === "supabase" && !connectionString) {
+    throw new Error(
+      `store.driver=supabase but no connection string: set runtime.store.url_env to an env var holding the Postgres DSN`,
+    );
+  }
+  const store: StoreSet = await createStore({ store: storeCfg, dataDir, connectionString });
+  const keyStore = store.keys;
+  const telemetry = store.telemetry;
   // Agentic Signals (POST-MVP feedback layer, docs/02). The collector consumes
   // ALREADY-persisted telemetry and writes aggregated, REDACTED signals — it is
   // started as a BACKGROUND interval below (NEVER on the request path), so it
@@ -95,16 +118,16 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
   // reads these signals back into routing.
   const signalCollector = createSignalCollector({
     telemetry,
-    signals: new SqliteSignalStore(db),
+    signals: store.signals,
     now: () => Date.now(),
     log: (level, msg, fields) => logger.log(level, msg, fields),
   });
   // Per-key rate limiter (docs/06). Default OFF (config.runtime.rate_limit.enabled)
-  // -> zero-overhead pass-through. Counters persist in the SAME sqlite file so
-  // windows survive restarts / span instances. Sits AFTER auth, BEFORE routing.
+  // -> zero-overhead pass-through. Counters persist in the SAME store so windows
+  // survive restarts / span instances. Sits AFTER auth, BEFORE routing.
   const rateLimiter = createRateLimiter({
     config: config.runtime.rate_limit,
-    store: new SqliteRateLimitStore(db),
+    store: store.rateLimit,
   });
 
   // Bootstrap root key on first start (idempotent; prints once).
@@ -132,20 +155,33 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
   // Routing pipeline building blocks (framework-agnostic core). `let` so admin
   // rule edits (via the runtime RuleStore below) re-bind the live config the
   // `route` closure reads — changes apply without a restart.
-  let lanes: LanesConfig = parseLanesConfig(DEFAULT_LANES);
-  let policies: PoliciesConfig = { policies: [] };
+  //
+  // Lanes/policies come from the Zod-validated config (config/lanes.yaml +
+  // config/policies.yaml). config.lanes is undefined only when lanes.yaml is
+  // absent; in that case fall back to core's DEFAULT_LANES so the lane
+  // abstraction is always present (principle 6, config-as-code principle 2 —
+  // an invalid lanes.yaml already failed the load above). policies default to []
+  // via the schema, so an absent policies.yaml is a no-op.
+  let lanes: LanesConfig = config.lanes ?? parseLanesConfig(DEFAULT_LANES);
+  let policies: PoliciesConfig = config.policies;
+  // Live classifier config. `let` so an admin edit (via the runtime RuleStore's
+  // onClassifier callback below) re-binds the value the classify adapter reads
+  // per request — classifier changes hot-apply WITHOUT a restart (closes the
+  // admin.api TODO: "admin 改 classifier 不热生效"). The adapter rebuilds its eval
+  // cache when this value changes, so a verdict from the old config is never served.
+  let classifierConfig: ClassifierConfig = config.classifier;
   // Three-layer cascade classify adapter: Layer-1 rules + Layer-2 eval (OFF by
   // default; per-request override threaded from the chat route) + Layer-3
   // balanced fail-open. The eval small-model is invoked via the same provider
-  // (eval alias). Holds one process-local eval cache (content-hash keyed).
+  // (eval alias). Reads the CURRENT classifier config per request via the getter.
   const classify = buildClassifyAdapter({
-    classifierConfig: config.classifier,
+    getClassifierConfig: () => classifierConfig,
     lanes,
     provider,
     now: () => Date.now(),
     log: (level, msg, fields) => logger.log(level as "info", msg, fields),
   });
-  const registry = buildRegistry(first.alias, baseUrl, first.api_key_env);
+  const registry = buildRegistry(first.alias, baseUrl, first.api_key_env, lanes);
   const breaker = createCircuitBreaker({
     config: { failureThreshold: 5, cooldownMs: 30_000 },
     now: () => Date.now(),
@@ -232,12 +268,18 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
   const ruleStore = createRuntimeRuleStore({
     lanes: lanes as Record<string, Lane>,
     policies,
-    classifier: config.classifier,
+    classifier: classifierConfig,
     onLanes: (next) => {
       lanes = next as LanesConfig;
     },
     onPolicies: (next) => {
       policies = next;
+    },
+    // Re-bind the live classifier config so the classify adapter (which reads it
+    // per request) observes the admin edit on the very next classification — no
+    // restart, no stale eval verdict (the adapter drops its cache on change).
+    onClassifier: (next) => {
+      classifierConfig = next;
     },
   });
   app.use("/admin/api/*", basicAuth(adminAuth));
@@ -275,6 +317,7 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
         if (record === null || record.disabled) return null;
         return {
           keyId: record.key_id,
+          keyPrefix: record.prefix,
           accountId: record.account_id,
           orgId: null,
           userId: null,
@@ -327,6 +370,11 @@ export function buildServer(opts: { logger?: Logger; configDir?: string } = {}):
     app,
     port: config.server.port,
     host: config.server.host,
-    dispose: () => signalScheduler?.stop(),
+    dispose: () => {
+      signalScheduler?.stop();
+      // Close the underlying DB connection (sqlite file handle / pg pool). Best
+      // effort: a close error must not mask a clean shutdown.
+      void store.close().catch(() => {});
+    },
   };
 }

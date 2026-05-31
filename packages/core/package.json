@@ -16,10 +16,12 @@
     "@helm/shared": "workspace:*",
     "better-sqlite3": "^12.10.0",
     "drizzle-orm": "^0.45.2",
+    "postgres": "^3.4.9",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.4.6",
     "@types/better-sqlite3": "^7.6.13"
   }
 }

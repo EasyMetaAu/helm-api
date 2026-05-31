@@ -250,6 +250,60 @@ describe("buildDecisionRecord", () => {
     expect(record.trace_id).toBe("trace_xyz");
     expect(record.request_id).toBe("trace_xyz");
   });
+
+  it("9. latency_total_ms is the sum of every attempt's latency", () => {
+    const attempts: AttemptRecord[] = [
+      { ...okAttempt("a"), latency_ms: 300 },
+      { ...okAttempt("b"), latency_ms: 950 },
+    ];
+    const record = buildDecisionRecord(parts({ attempts }));
+    expect(record.latency_total_ms).toBe(1250);
+  });
+
+  it("10. fallback_count = non-skipped attempts - 1, clamped >= 0", () => {
+    // one served attempt -> 0
+    expect(buildDecisionRecord(parts({ attempts: [okAttempt("a")] })).fallback_count).toBe(0);
+    // two served + one skipped -> skipped does NOT count -> 2 - 1 = 1
+    const mixed: AttemptRecord[] = [
+      { ...okAttempt("skip"), skipped: true, skip_reason: "circuit_open", latency_ms: 0 },
+      { ...okAttempt("a"), status: "error", error_class: "upstream_error" },
+      okAttempt("b"),
+    ];
+    expect(buildDecisionRecord(parts({ attempts: mixed })).fallback_count).toBe(1);
+    // zero served (all skipped) -> clamp at 0
+    const allSkipped: AttemptRecord[] = [
+      { ...okAttempt("s1"), skipped: true, skip_reason: "circuit_open", latency_ms: 0 },
+    ];
+    expect(buildDecisionRecord(parts({ attempts: allSkipped })).fallback_count).toBe(0);
+  });
+
+  it("11. cost_breakdown separates eval_usd from completion_usd (eval ran)", () => {
+    const attempts: AttemptRecord[] = [
+      { ...okAttempt("a"), cost_usd: 0.004 },
+      { ...okAttempt("b"), cost_usd: 0.001 },
+    ];
+    const record = buildDecisionRecord(parts({ attempts, evalUsd: 0.00002 }));
+    expect(record.cost_breakdown.eval_usd).toBeCloseTo(0.00002);
+    expect(record.cost_breakdown.completion_usd).toBeCloseTo(0.005);
+    expect(record.cost_breakdown.total_usd).toBeCloseTo(0.00502);
+  });
+
+  it("12. completion_usd is null when no attempt carried a cost; eval_usd null when eval did not run", () => {
+    const attempts: AttemptRecord[] = [{ ...okAttempt("a"), cost_usd: null }];
+    const record = buildDecisionRecord(parts({ attempts }));
+    expect(record.cost_breakdown.completion_usd).toBeNull();
+    expect(record.cost_breakdown.eval_usd).toBeNull();
+    expect(record.cost_breakdown.total_usd).toBeNull();
+  });
+
+  it("13. key_prefix is carried prefix-only (never plaintext) and defaults to null", () => {
+    expect(buildDecisionRecord(parts()).key_prefix).toBeNull();
+    const withPrefix = buildDecisionRecord(parts({ keyPrefix: "helm_live_ab12" }));
+    expect(withPrefix.key_prefix).toBe("helm_live_ab12");
+    // The prefix is NOT hashed by the redaction gate — it must survive verbatim.
+    expect(JSON.stringify(withPrefix)).toContain("helm_live_ab12");
+    expect(withPrefix.key_prefix).not.toMatch(/^sha256:/);
+  });
 });
 
 describe("persistDecision", () => {

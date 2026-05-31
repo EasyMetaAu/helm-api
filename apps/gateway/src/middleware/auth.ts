@@ -7,6 +7,9 @@ import type { MiddlewareHandler } from "hono";
 // (rate limit / classify / route) consumers.
 export interface AuthIdentity {
   keyId: string;
+  /** Display prefix of the key (e.g. helm_live_ab12). PREFIX ONLY — never the
+   *  plaintext key (principle 7). Surfaced in the Debug UI key column. */
+  keyPrefix: string;
   accountId: string;
   orgId: string | null;
   userId: string | null;
@@ -74,6 +77,7 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler {
 
     const identity: AuthIdentity = {
       keyId: record.key_id,
+      keyPrefix: record.prefix,
       accountId: record.account_id,
       orgId: null,
       userId: null,

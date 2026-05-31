@@ -57,6 +57,17 @@ describe("redact", () => {
     expect(redact(input)).toEqual(input);
   });
 
+  it("preserves key_prefix verbatim (display prefix only — never hashed)", () => {
+    // `key_prefix` matches the secret-key pattern ("key"), but it is ALREADY a
+    // safe display prefix (helm_live_ab12), not the plaintext key — it must pass
+    // through unchanged (principle 7: prefix only, no plaintext, but also no
+    // double-fingerprinting that would make the Debug UI key column useless).
+    const input = { key_prefix: "helm_live_ab12", trace_id: "t1" };
+    expect(redact(input)).toEqual(input);
+    // A real secret field is still fingerprinted.
+    expect((redact({ api_key: "sk-secret" }) as { api_key: string }).api_key).toMatch(/^sha256:/);
+  });
+
   it("is pure: does not mutate the input", () => {
     const input = { api_key: "sk-xxx", messages: [{ content: "hi" }], trace_id: "t1" };
     const clone = structuredClone(input);

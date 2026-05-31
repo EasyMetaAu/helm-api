@@ -52,6 +52,10 @@ export interface ClassificationResult {
   decided_by: DecidedBy; // observable; never conflated with provider fallback
   eval_used: boolean; // did this request actually invoke/hit Layer-2 eval
   eval_cache_hit: boolean; // eval cache hit (always false when eval unused)
+  // Layer-2 eval self-cost (USD). Non-null ONLY when a fresh eval call ran and the
+  // provider reported a cost; null when eval was skipped/disabled or served from
+  // cache. Kept SEPARATE from completion cost downstream (docs/07; principle 5).
+  eval_usd: number | null;
   // Present ONLY when decided_by === "fallback". Distinguishes WHY we fell back:
   //   eval_disabled            — uncertain but eval is off (no Layer 2 ran)
   //   eval_<timeout|provider_error|circuit_open|not_json|schema_invalid>
@@ -100,6 +104,7 @@ export async function classify(
       decided_by: "rules",
       eval_used: false,
       eval_cache_hit: false,
+      eval_usd: null,
     };
   }
 
@@ -121,6 +126,7 @@ export async function classify(
       decided_by: "eval",
       eval_used: true,
       eval_cache_hit: e.cache_hit,
+      eval_usd: e.cost_usd,
     };
   }
 
@@ -147,6 +153,9 @@ function balancedFallback(
     decided_by: "fallback",
     eval_used: evalState.eval_used,
     eval_cache_hit: evalState.eval_cache_hit,
+    // No successful eval verdict to attribute a self-cost to (eval was off, or it
+    // ran and failed open). Treat as unmeasured.
+    eval_usd: null,
     fallback_reason: fallbackReason,
   };
 }

@@ -98,6 +98,10 @@ describe("Store ports are implementable contracts", () => {
       lane: { selected_lane: "passthrough", candidate_chain: ["m"] },
       provider_attempts: [],
       final: { model_alias: "m", provider_model: "m", status: "ok", error_reason: null },
+      key_prefix: null,
+      latency_total_ms: 0,
+      fallback_count: 0,
+      cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
     } satisfies DecisionRecord;
     await store.insert({ decision, apiKeyId: "k1", createdAt: new Date() });
     expect(await store.queryRecent(10)).toHaveLength(1);

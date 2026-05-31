@@ -106,9 +106,9 @@ export {
   type TaskType,
 } from "./classifier/taskdetect.js";
 export {
+  boundaryConfidence,
   type Complexity,
   classifyTier,
-  sigmoidConfidence,
   type TierResult,
 } from "./classifier/tiers.js";
 export {
@@ -345,21 +345,38 @@ export {
 } from "./signals/scheduler.js";
 export type { RoutingSignal } from "./signals/types.js";
 export {
+  type CreateStoreOptions,
+  createPgDb,
+  createPgliteDb,
   createSqliteDb,
+  createStore,
   InMemoryRateLimitStore,
   InMemorySignalStore,
+  PgConfigStore,
+  type PgDb,
+  PgKeyStore,
+  PgMemoryStore,
+  PgRateLimitStore,
+  PgSignalStore,
+  PgTelemetryStore,
   runMigrations,
+  runPgMigrations,
+  SqliteConfigStore,
   type SqliteDb,
   SqliteKeyStore,
+  SqliteMemoryStore,
   SqliteRateLimitStore,
   SqliteSignalStore,
   SqliteTelemetryStore,
+  type StoreSet,
 } from "./store/index.js";
 export type {
   ConfigStore,
   CreateKeyInput,
   InsertTelemetryInput,
   KeyStore,
+  MemoryJobStatus,
+  MemoryStore,
   RateLimitConsumeResult,
   RateLimitStore,
   SignalStore,

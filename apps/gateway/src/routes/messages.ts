@@ -125,6 +125,18 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     const ir = await anthropic.transformRequestOut(native);
     ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
 
+    // Map the `x-session-key` request header into the conversation-dimension key
+    // session momentum keys off (metadata.conversation_id) — only when the IR did
+    // not already carry one. Without this the momentum store is keyed null and
+    // never fires in production. The session id is opaque (not a credential): it
+    // rides the metadata bag and is never logged here.
+    if (ir.metadata.conversation_id == null) {
+      const sessionKey = c.req.header("x-session-key");
+      if (sessionKey !== undefined && sessionKey.length > 0) {
+        ir.metadata.conversation_id = sessionKey;
+      }
+    }
+
     // 3) Routing pipeline (framework-agnostic core). The per-request abort signal
     //    rides along so a client disconnect is a non-provider fault, not a breaker
     //    trip (CLAUDE.md / docs/02). Auxiliary failures (classify/eval/cache) are

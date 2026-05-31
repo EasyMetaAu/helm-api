@@ -63,6 +63,12 @@ function toInternalRequest(
   const model = typeof ir.model === "string" && ir.model.length > 0 ? ir.model : "auto";
   const accountId = typeof identity.accountId === "string" ? identity.accountId : "";
   const keyId = typeof identity.keyId === "string" ? identity.keyId : "";
+  // conversation_id (session-momentum key) is stamped onto the IR metadata bag by
+  // the route from the `x-session-key` header (or carried by the inbound IR).
+  const conversationId =
+    typeof ir.metadata?.conversation_id === "string" && ir.metadata.conversation_id.length > 0
+      ? ir.metadata.conversation_id
+      : null;
 
   return {
     request_id: traceId,
@@ -82,7 +88,7 @@ function toInternalRequest(
     max_tokens: typeof ir.max_tokens === "number" ? ir.max_tokens : null,
     stream: ir.stream === true,
     metadata: {
-      conversation_id: null,
+      conversation_id: conversationId,
       thread_id: null,
       resource_id: null,
       project_id: null,
@@ -184,8 +190,11 @@ export function createMessagesPipeline(route: RouteFn): {
       const internal = toInternalRequest(ir, identity, traceId);
       const caps = identity.caps as { allowCustomModel?: unknown } | undefined;
       const allowCustomModel = caps?.allowCustomModel === true;
+      // Display prefix only (never the plaintext key, principle 7) for the Debug
+      // UI key column; null when this identity carries none.
+      const keyPrefix = typeof identity.keyPrefix === "string" ? identity.keyPrefix : null;
 
-      const result = await route(internal, { allowCustomModel }, signal);
+      const result = await route(internal, { allowCustomModel, keyPrefix }, signal);
 
       return {
         async collect(): Promise<unknown> {

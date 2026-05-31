@@ -63,7 +63,16 @@ export const routingSignals = sqliteTable("routing_signals", {
   updatedAt: integer("updated_at").notNull(),
 });
 
+// Optional config key/value persistence (ConfigStore port; admin write-back).
+// MVP is yaml-first; this is reserved for runtime overrides. No secrets stored
+// here (config references credentials by env-var name, never plaintext).
+export const configKv = sqliteTable("config_kv", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
 export type RoutingSignalsTable = typeof routingSignals;
+export type ConfigKvTable = typeof configKv;

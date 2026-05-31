@@ -157,6 +157,17 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // Optional config key/value persistence (ConfigStore port; admin write-back).
+    // MVP is yaml-first; reserved for runtime overrides. No secrets stored here.
+    version: 5,
+    sql: `
+      CREATE TABLE IF NOT EXISTS config_kv (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

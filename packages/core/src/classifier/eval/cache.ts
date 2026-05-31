@@ -96,7 +96,9 @@ export async function runEvalCached(
 
   const cached = cache.get(key, nowMs);
   if (cached !== undefined) {
-    return { decided: true, output: cached, latency_ms: 0, cache_hit: true };
+    // Cache hit → no new model call, so NO incremental eval self-cost (cost_usd
+    // null, not a stale figure: the cost was already counted when first run).
+    return { decided: true, output: cached, latency_ms: 0, cost_usd: null, cache_hit: true };
   }
 
   const decision = await runEvalImpl(input, clientDeps);

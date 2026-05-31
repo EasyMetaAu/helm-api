@@ -150,4 +150,34 @@ describe("HelmConfigSchema", () => {
     expect(provider?.api_key_env).toBe("OPENAI_API_KEY");
     expect(provider && "api_key" in provider).toBe(false);
   });
+
+  it("defaults runtime.store.driver to sqlite when store is absent", () => {
+    const parsed = HelmConfigSchema.parse(fullConfig());
+    expect(parsed.runtime.store.driver).toBe("sqlite");
+  });
+
+  it("accepts driver=supabase with a url_env credential reference", () => {
+    const ok = fullConfig() as Record<string, unknown> & { runtime: Record<string, unknown> };
+    ok.runtime.store = { driver: "supabase", url_env: "HELM_STORE_URL" };
+    const parsed = HelmConfigSchema.parse(ok);
+    expect(parsed.runtime.store.driver).toBe("supabase");
+    expect(parsed.runtime.store.url_env).toBe("HELM_STORE_URL");
+  });
+
+  it("fails closed on an unknown store driver", () => {
+    const bad = fullConfig() as Record<string, unknown> & { runtime: Record<string, unknown> };
+    bad.runtime.store = { driver: "mysql" };
+    const res = HelmConfigSchema.safeParse(bad);
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues[0]?.path).toEqual(["runtime", "store", "driver"]);
+    }
+  });
+
+  it("never stores a plaintext DB connection string (url_env reference only)", () => {
+    const ok = fullConfig() as Record<string, unknown> & { runtime: Record<string, unknown> };
+    ok.runtime.store = { driver: "supabase", url_env: "HELM_STORE_URL" };
+    const parsed = HelmConfigSchema.parse(ok);
+    expect("url" in parsed.runtime.store).toBe(false);
+  });
 });

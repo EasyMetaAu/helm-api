@@ -8,17 +8,20 @@
 //                                     { trace_id, lane, status, cost })
 //   GET /admin/api/requests/:trace -> raw DecisionRecord (@helm/shared) | 404
 //
-// The docs/07 列表/详情字段are richer than what the DecisionRecord currently
-// records. We map the real shape -> the UI contract at this boundary, DERIVING
-// fields from what the record carries and safely DEFAULTING the rest (never
-// fabricating data). See implementation-notes.md (2026-05-31) for the field map.
+// Since admin.requests-richfields the DecisionRecord records the real telemetry
+// fields (key_prefix, latency_total_ms, fallback_count, cost_breakdown{eval/
+// completion}); we map the recorded shape -> the docs/07 UI contract at this
+// boundary, reading the real fields and only DERIVING/DEFAULTING for legacy
+// (pre-enrichment) records — never fabricating data. See implementation-notes.md
+// for the field map.
 //
 // CLAUDE.md 原则5: classification fallback (`decided_by`) and execution fallback
 // (`provider_attempts`/`fallback_count`) are SEPARATE — they are surfaced as
 // distinct UI concepts here and never conflated.
-// CLAUDE.md 原则7: redaction — `key_prefix` is prefix-only (the record carries no
-// key, so it surfaces as '—', NEVER plaintext); `payload_summary` is a summary
-// placeholder, never the full private payload; `provider_raw` is redacted.
+// CLAUDE.md 原则7: redaction — `key_prefix` is prefix-only (the recorded display
+// prefix, e.g. helm_live_ab12, NEVER the plaintext key; '—' when absent);
+// `payload_summary` is a summary placeholder, never the full private payload;
+// `provider_raw` is redacted.
 
 // ── UI-facing contract (docs/07) ─────────────────────────────────────────────
 
@@ -68,7 +71,12 @@ export interface RequestDetail {
   lane_candidates: string[]; // primary + fallback[]
   provider_attempts: ProviderAttempt[];
   response_meta: Record<string, unknown> | null;
-  error: { error_class: string; http_status: number; message: string; provider_raw: unknown } | null;
+  error: {
+    error_class: string;
+    http_status: number;
+    message: string;
+    provider_raw: unknown;
+  } | null;
   cost_breakdown: {
     routing_usd: number;
     eval_usd: number;
@@ -95,6 +103,18 @@ interface RawDecisionRecord {
   request_id?: string;
   trace_id?: string;
   requested_model?: string;
+  // Display prefix only (helm_live_ab12) — the record NEVER carries the plaintext
+  // key (原则7). Null/absent on legacy (pre-enrichment) records.
+  key_prefix?: string | null;
+  // Enriched telemetry (admin.requests-richfields): Σ attempt latency, execution
+  // fallback count, and the eval/completion cost split. Absent on legacy records.
+  latency_total_ms?: number;
+  fallback_count?: number;
+  cost_breakdown?: {
+    eval_usd?: number | null;
+    completion_usd?: number | null;
+    total_usd?: number | null;
+  };
   classifier?: {
     task_type?: string;
     complexity?: string;
@@ -140,7 +160,10 @@ function sumCost(attempts: RawAttempt[]): number {
 }
 
 function sumLatency(attempts: RawAttempt[]): number {
-  return attempts.reduce((acc, a) => acc + (typeof a.latency_ms === 'number' ? a.latency_ms : 0), 0);
+  return attempts.reduce(
+    (acc, a) => acc + (typeof a.latency_ms === 'number' ? a.latency_ms : 0),
+    0,
+  );
 }
 
 // Execution-stage fallback count = real (non-skipped) attempts beyond the first.
@@ -176,16 +199,23 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
   return {
     trace_id: String(raw.trace_id ?? raw.request_id ?? ''),
     ts: '', // backend does not record a timestamp yet (placeholder, no fabrication)
-    key_prefix: '—', // record carries no key; NEVER plaintext (原则7)
+    // Real display prefix from the recorded auth identity — PREFIX ONLY, never the
+    // plaintext key (原则7). '—' when the record carries none (legacy / unknown).
+    key_prefix:
+      typeof raw.key_prefix === 'string' && raw.key_prefix.length > 0 ? raw.key_prefix : '—',
     requested_model: raw.requested_model ?? null,
     task_type: raw.classifier?.task_type ?? '',
     complexity: raw.classifier?.complexity ?? '',
     decided_by: normalizeDecidedBy(raw.classifier?.decided_by),
     lane: raw.lane?.selected_lane ?? '',
     final_model: raw.final?.model_alias ?? null,
-    fallback_count: fallbackCount(attempts),
+    // Prefer the recorded value; fall back to deriving from attempts for legacy
+    // records (原则5: execution-stage count, distinct from decided_by).
+    fallback_count:
+      typeof raw.fallback_count === 'number' ? raw.fallback_count : fallbackCount(attempts),
     status,
-    latency_ms: sumLatency(attempts),
+    latency_ms:
+      typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : sumLatency(attempts),
     cost_usd: sumCost(attempts),
     error_class: errorClass ?? undefined,
   };
@@ -205,6 +235,23 @@ function buildRequestMeta(raw: RawDecisionRecord): Record<string, unknown> {
     requested_model: raw.requested_model ?? null,
     policy_reason: raw.policy?.reason ?? null,
   };
+}
+
+// Map the recorded cost split -> the docs/07 cost breakdown. eval self-cost stays
+// SEPARATE from completion (原则5). null parts render as 0 (visible, not hidden);
+// `completionFallback` is the summed attempt cost for legacy records that predate
+// the recorded cost_breakdown.
+function buildCostBreakdown(
+  raw: RawDecisionRecord,
+  completionFallback: number,
+): RequestDetail['cost_breakdown'] {
+  const cb = raw.cost_breakdown;
+  const completion =
+    typeof cb?.completion_usd === 'number' ? cb.completion_usd : completionFallback;
+  const evalUsd = typeof cb?.eval_usd === 'number' ? cb.eval_usd : 0;
+  const total = typeof cb?.total_usd === 'number' ? cb.total_usd : evalUsd + completion;
+  // The backend does not bill a separate routing self-cost in the MVP.
+  return { routing_usd: 0, eval_usd: evalUsd, completion_usd: completion, total_usd: total };
 }
 
 export function toDetail(raw: RawDecisionRecord): RequestDetail {
@@ -242,7 +289,10 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     })),
     response_meta:
       status === 'ok'
-        ? { model_alias: raw.final?.model_alias ?? null, provider_model: raw.final?.provider_model ?? null }
+        ? {
+            model_alias: raw.final?.model_alias ?? null,
+            provider_model: raw.final?.provider_model ?? null,
+          }
         : null,
     error:
       status === 'error'
@@ -253,14 +303,12 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
             provider_raw: null, // redacted — never surface raw upstream bodies (原则7)
           }
         : null,
-    // The backend does not yet split routing/eval self-cost; all recorded cost is
-    // completion cost. Fields are kept present + visible (docs/07「含 eval 成本」).
-    cost_breakdown: {
-      routing_usd: 0,
-      eval_usd: 0,
-      completion_usd: completion,
-      total_usd: completion,
-    },
+    // Cost split from the record (docs/07「成本拆分（含 eval 成本）」): eval self-cost is
+    // SEPARATE from completion cost (原则5). Unknown (null) parts render as 0 so all
+    // four lines stay visible; legacy records (no cost_breakdown) fall back to the
+    // summed attempts as completion. The backend does not bill a separate routing
+    // self-cost, so routing_usd stays 0.
+    cost_breakdown: buildCostBreakdown(raw, completion),
   };
 }
 

@@ -39,8 +39,12 @@ export interface Classification {
   //   eval_cache_hit — true on a Layer-2 cache hit; null when eval did not run.
   //   fallback_reason — set ONLY on decided_by==="fallback" (eval_disabled /
   //     eval_<reason>); null otherwise.
+  //   eval_usd — Layer-2 small-model self-cost, known ONLY when eval actually
+  //     ran (the eval client surfaces it). Null when eval did not run; kept
+  //     SEPARATE from completion cost in cost_breakdown (docs/07; principle 5).
   eval_cache_hit?: boolean | null;
   fallback_reason?: string | null;
+  eval_usd?: number | null;
   constraints: {
     needs_json?: boolean;
     needs_tools?: boolean;
@@ -112,6 +116,10 @@ export interface RouteDeps {
 export interface RouteOptions {
   /** From the API key's caps (auth). Gates explicit-model passthrough (docs/04). */
   allowCustomModel?: boolean;
+  /** Display prefix of the resolved auth key (e.g. helm_live_ab12) for the Debug
+   *  UI key column. PREFIX ONLY — never the plaintext key (principle 7). The
+   *  gateway threads it from the auth identity; null/undefined when unknown. */
+  keyPrefix?: string | null;
 }
 
 // Fail-open classification default (principle 3 + 5): a degraded classifier
@@ -207,6 +215,9 @@ interface PlanDecision {
   plan: ExecutionPlan;
   classifier: DecisionRecord["classifier"];
   policy: DecisionRecord["policy"];
+  /** Layer-2 eval self-cost (USD), non-null ONLY when eval ran. Threaded into
+   *  cost_breakdown.eval_usd, kept separate from completion cost (principle 5). */
+  evalUsd: number | null;
 }
 
 // Compute the execution plan + the classifier/policy decision segments. Explicit
@@ -233,6 +244,7 @@ async function plan(
         explanation: [],
       },
       policy: { matched_policy_id: null, reason: "explicit model passthrough" },
+      evalUsd: null,
     };
   }
 
@@ -267,6 +279,7 @@ async function plan(
       explanation: cls.explanation,
     },
     policy: { matched_policy_id: outcome.matched_policy_id, reason: outcome.reason },
+    evalUsd: cls.eval_usd ?? null,
   };
 }
 
@@ -275,7 +288,7 @@ export async function routeRequest(
   deps: RouteDeps,
   opts: RouteOptions = {},
 ): Promise<ExecutionResult> {
-  const { plan: execPlan, classifier, policy } = await plan(req, deps, opts);
+  const { plan: execPlan, classifier, policy, evalUsd } = await plan(req, deps, opts);
 
   const outcome = await deps.execute(execPlan, req);
 
@@ -294,15 +307,36 @@ export async function routeRequest(
           error_reason: outcome.final.error.error_class,
         };
 
+  // completion_usd = Σ served attempts' cost; null (not 0) when none measured so
+  // "unknown" stays distinct from "free". eval_usd is the Layer-2 self-cost.
+  const completionUsd = outcome.attempts.reduce<number | null>((acc, a) => {
+    if (a.cost_usd === null) return acc;
+    return (acc ?? 0) + a.cost_usd;
+  }, null);
+  const totalUsd =
+    evalUsd === null && completionUsd === null ? null : (evalUsd ?? 0) + (completionUsd ?? 0);
+  // EXECUTION-stage fallback count (principle 5): non-skipped attempts beyond the
+  // first, clamped ≥0. Skipped candidates (capability filter / circuit-open) are
+  // not swaps and never counted.
+  const servedAttempts = outcome.attempts.filter((a) => !a.skipped).length;
+
   const decision: DecisionRecord = {
     request_id: req.request_id,
     trace_id: req.request_id,
     requested_model: req.requested_model,
+    key_prefix: opts.keyPrefix ?? null,
     classifier,
     policy,
     lane: { selected_lane: execPlan.selected_lane, candidate_chain: execPlan.candidate_chain },
     provider_attempts: outcome.attempts,
     final: finalRecord,
+    latency_total_ms: outcome.attempts.reduce((acc, a) => acc + a.latency_ms, 0),
+    fallback_count: Math.max(0, servedAttempts - 1),
+    cost_breakdown: {
+      eval_usd: evalUsd,
+      completion_usd: completionUsd,
+      total_usd: totalUsd,
+    },
   };
 
   deps.log(decision);
