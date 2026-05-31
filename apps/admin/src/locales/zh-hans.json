@@ -22,6 +22,8 @@
   "Decided by": "决策层",
   "Lane": "通道",
   "Final model": "最终模型",
+  "Requested model": "请求模型",
+  "Served model": "最终模型",
   "Status": "状态",
   "Latency": "延迟",
   "Cost": "成本",
