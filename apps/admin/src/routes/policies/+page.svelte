@@ -60,14 +60,27 @@
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
-  <header>
-    <h1 class="page-title">{$t('Policies')}</h1>
-    <p class="section-desc">
-      {$t(
-        'Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.',
-      )}
-    </p>
-    <p class="mt-2 card text-sm text-ink-body" data-testid="first-match-explainer">
+  <header class="flex flex-col gap-2">
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h1 class="page-title">{$t('Policies')}</h1>
+        <p class="section-desc">
+          {$t(
+            'Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.',
+          )}
+        </p>
+      </div>
+      <div class="flex shrink-0 items-center gap-2">
+        <button type="button" class="btn-secondary" onclick={addRow}>{$t('Add policy')}</button>
+        <button type="button" class="btn-primary" onclick={handleSave} disabled={saving}
+          >{$t('Save policies')}</button
+        >
+        {#if saved}
+          <span class="badge-ok" data-testid="policies-saved" role="status">{$t('Saved')}</span>
+        {/if}
+      </div>
+    </div>
+    <p class="card text-sm text-ink-body" data-testid="first-match-explainer">
       {$t('Rules are evaluated top to bottom; the')}
       <strong>{$t('first matching')}</strong>
       {$t(
@@ -105,15 +118,5 @@
         onmove={moveRow}
       />
     {/each}
-  </div>
-
-  <div class="flex items-center gap-2">
-    <button type="button" class="btn-secondary" onclick={addRow}>{$t('Add policy')}</button>
-    <button type="button" class="btn-primary" onclick={handleSave} disabled={saving}
-      >{$t('Save policies')}</button
-    >
-    {#if saved}
-      <span class="badge-ok" data-testid="policies-saved" role="status">{$t('Saved')}</span>
-    {/if}
   </div>
 </section>
