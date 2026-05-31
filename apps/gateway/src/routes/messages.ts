@@ -3,6 +3,7 @@ import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
 
 // POST /v1/messages — Anthropic Messages inbound, translated to IR, routed, and
@@ -209,6 +210,18 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         ir.metadata.conversation_id = sessionKey;
       }
     }
+
+    // Memory scope (docs/08 阶段 1): parse the four memory headers at this HTTP
+    // boundary and stamp them onto the IR metadata bag (mirrors conversation_id),
+    // so the framework-agnostic pipeline can read the scope off ir.metadata
+    // without ever touching HTTP (CLAUDE.md principle 1). Absent/illegal headers
+    // → off + null (default-safe). The ids are opaque (not credentials) and are
+    // never logged here.
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name));
+    ir.metadata.thread_id = memoryScope.threadId;
+    ir.metadata.resource_id = memoryScope.resourceId;
+    ir.metadata.project_id = memoryScope.projectId;
+    ir.metadata.memory_mode = memoryScope.mode;
 
     // 3) Routing pipeline (framework-agnostic core). The per-request abort signal
     //    rides along so a client disconnect is a non-provider fault, not a breaker
