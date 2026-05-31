@@ -5,6 +5,21 @@
 
 ---
 
+## 2026-05-31 · Admin UX overhaul — Tailwind v4 token 层 + 全页面 design-token 化 + 易用性文案 (docs/11、原则 1)
+
+**动机**：用户反馈管理界面"有点乱、看不太懂"。根因审计（10-agent workflow）查明两条系统性原因：① **无 token 层**——`app.css` 只有三条 `@tailwind` 指令、`tailwind.config` 的 `theme.extend` 为空，每个页面各自硬编码 slate/indigo 色阶、圆角、间距 → 视觉漂移；② **裸网关术语直出**——snake_case 字段（`max_lane`/`needs_json`/`use_lane`）与隐晦枚举（`decided_by: rules/eval/fallback`）当作标签直接渲染，自托管运维（非网关专家）读不懂一行、也不会写规则。
+
+**做法（三阶段）**：
+- **A · Tailwind v3→v4 迁移 + token 层**（commit 8ba7623）：升级到 `tailwindcss@4` + 一方 `@tailwindcss/vite` 插件；删除 `postcss.config.js`/`tailwind.config.ts`/`autoprefixer`（v4 自带）。`app.css` 用 `@theme` 定义语义色角色（`--color-brand` 仅品牌+激活导航、`--color-action` 主按钮、ink 文本阶、status、两级圆角）+ `@layer components` 组件配方（`.card`/`.btn-*`/`.input`/`.select`/`.badge-*`/`.table-*`/`.section-header`/`.section-desc`/`.alert-*`/`.empty-state`/`.link-inline`）。v4 的 `@apply` 不能组合组件类（component-on-component），故每个 `.badge-*` 内联自包含。
+- **B · 8 个界面 design-token 化 + 文案**（commit 7115e5a）：全部改用配方类；移除 `rounded-xl`；夺回 indigo 只给品牌/激活导航（链接→sky、chip→中性 slate）；把裸 schema 词汇改成大白话并加 `.field-help` 行内说明；补空状态 + "已保存"确认；Dashboard/Requests/Request-detail 加 `decided_by` 图例（rules/eval/fallback 三色 + 一句话）；导航项加 plain-language 副标题/tooltip；LocaleSwitcher 归一到 `.select` 配方；页脚 "Connected"→"网关在线"。**纯表现 + 文案，零逻辑改动**，78 个 admin 测试 + svelte-check 全绿。
+- **C · i18n**：97 条新简体中文（`zh-hans.json`，264 键）；`en.json` 留空（key 即英文，缺失回退到 key）。
+
+**坑（重要，影响未来 workflow 用法）**：用 **Workflow 工具的子 agent 做文件写入，在本环境不持久化**——子 agent 的 Edit/Write 落在一个临时沙箱，workflow 完成后**异步清理会把 `apps/admin` 下所有未提交的被跟踪文件回滚到 HEAD**，连我在主会话用 Bash-node 写的 `zh-hans.json` 合并也被一并清掉（只有已 commit 的 Phase A 和 `.git` 幸存）。**主会话直接用 Edit/Write/commit 才持久**。补救：从 workflow 子 agent 的 transcript（`subagents/workflows/<run>/agent-*.jsonl`）里提取 38 个 Edit 的 old/new_string **原样重放**到主仓库（0 失配，因为文件已被回滚回 agent 当初读到的原始基线），再立即 commit 锁定。**结论**：Workflow 适合并行**审查/只读分析**（第一个审计 workflow 完美）；要并行**改文件**时，要么主会话直接改，要么用完立刻从 transcript 重放 + commit，别指望子 agent 的写盘直接落到主树。
+
+- **遗留**：`en.json` 为空（靠回退）；ja/ko/zh-hant 新键未译（回退到英文）；编辑器对 `vite.config.ts` 报 vite7-vs-vite8 transitive 类型噪声（LSP 假阳性，build/tsc 均 0）。
+
+---
+
 ## 2026-05-31 · Lanes admin combobox — `GET /admin/api/models` 别名目录 + datalist 选择器 (docs/11、原则 1/6)
 
 **动机**：`/admin/lanes` 页的「主用」与 fallback「添加」框是裸 text input，运维必须手敲 `provider/model` 别名（如 `deepseek-crs/deepseek-pro`）。一个 typo 会让 lane 指向不存在的 model，**静默打断 fallback 链**。可选别名集合本就已知——`config/providers.yaml → providers[].models[].alias`（即路由 key）。
