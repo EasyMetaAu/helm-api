@@ -18,6 +18,7 @@
 
   let error = $state<string | null>(null);
   let saving = $state(false);
+  let saved = $state(false);
 
   // Validation: threshold must parse to a finite number in [0,1] (fail-closed,
   // 原则2 — the UI never guesses a legal value for the operator).
@@ -36,15 +37,17 @@
   async function handleSave(): Promise<void> {
     if (!thresholdValid) return; // hard guard: never write an out-of-range value
     error = null;
+    saved = false;
     saving = true;
     try {
-      const saved = await saveClassifier({
+      const result = await saveClassifier({
         eval_enabled: evalEnabled,
         confidence_threshold: thresholdValue,
       });
       // Reflect the persisted view.
-      evalEnabled = saved.eval.enabled;
-      thresholdText = String(saved.rules.confidence_threshold);
+      evalEnabled = result.eval.enabled;
+      thresholdText = String(result.rules.confidence_threshold);
+      saved = true;
     } catch (e) {
       // fail-closed: surface the error and leave the displayed config unchanged.
       error = e instanceof Error ? e.message : $t('Failed to save classifier config');
@@ -54,10 +57,13 @@
   }
 </script>
 
-<section class="flex w-full flex-col gap-6 px-4 py-6 md:px-8">
-  <header>
-    <h1 class="text-2xl font-semibold text-slate-900">{$t('Classifier')}</h1>
-    <p class="text-sm text-slate-500">
+<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
+  <header class="flex flex-col gap-1">
+    <h1 class="page-title">{$t('Classifier')}</h1>
+    <p class="section-desc">
+      {$t('The classifier decides which lane each request is routed to.')}
+    </p>
+    <p class="section-desc">
       {$t(
         'Layer-1 rules are always on (deterministic, zero-cost). Toggle the optional Layer-2 eval and tune the confidence threshold below it.',
       )}
@@ -65,23 +71,33 @@
   </header>
 
   {#if error}
-    <p class="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+    <p class="alert-error" role="alert">
       {error}
     </p>
   {/if}
 
   <!-- Editable knobs -->
-  <div class="flex flex-col gap-4 rounded border border-slate-200 p-4">
+  <div class="card flex flex-col gap-4">
+    <div class="flex flex-col gap-1">
+      <h2 class="section-header">{$t('Classifier settings')}</h2>
+      <p class="section-desc">
+        {$t('These two settings are saved to the gateway when you click Save.')}
+      </p>
+    </div>
+
     <label class="flex items-center gap-3">
       <input type="checkbox" name="eval_enabled" bind:checked={evalEnabled} />
-      <span class="text-sm font-medium text-slate-800">{$t('Enable Layer-2 eval')}</span>
-      <span class="text-xs text-slate-500"
-        >{$t('(off by default; cached; fails open to balanced)')}</span
-      >
+      <span class="field-label">{$t('Enable Layer-2 eval')}</span>
+      <span class="badge-eval">{$t('Layer-2')}</span>
     </label>
+    <p class="field-help">
+      {$t(
+        'Layer-2 runs a small model to classify requests that Layer-1 rules cannot decide confidently. Off by default. Results are cached, and if it fails the request falls back to the balanced lane.',
+      )}
+    </p>
 
     <label class="flex flex-col gap-1">
-      <span class="text-sm font-medium text-slate-800">{$t('Confidence threshold')}</span>
+      <span class="field-label">{$t('Confidence threshold')}</span>
       <input
         type="number"
         name="confidence_threshold"
@@ -89,13 +105,15 @@
         min="0"
         max="1"
         bind:value={thresholdText}
-        class="w-32 rounded border border-slate-300 px-2 py-1 text-sm"
-        class:border-red-400={!thresholdValid}
+        class="input w-32"
+        class:border-red-300={!thresholdValid}
         aria-invalid={!thresholdValid}
       />
-      <span class="text-xs text-slate-500"
-        >{$t('Below this, requests fall through to Layer-2.')}</span
-      >
+      <span class="field-help">
+        {$t(
+          'A value between 0 and 1. When Layer-1 rules are less confident than this, the request is passed to Layer-2 eval (if enabled).',
+        )}
+      </span>
       {#if !thresholdValid}
         <span class="text-xs text-red-600" role="alert">
           {$t('Threshold must be a number between 0 and 1.')}
@@ -103,29 +121,34 @@
       {/if}
     </label>
 
-    <div>
+    <div class="flex items-center gap-3">
       <button
         type="button"
         onclick={handleSave}
         disabled={!thresholdValid || saving}
-        class="rounded bg-slate-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+        class="btn-primary"
       >
         {saving ? $t('Saving…') : $t('Save')}
       </button>
+      {#if saved}
+        <span class="badge-ok" role="status">{$t('Saved')}</span>
+      {/if}
     </div>
   </div>
 
   <!-- Read-only: rule dimensions -->
-  <div class="flex flex-col gap-2">
-    <h2 class="text-lg font-semibold text-slate-900">{$t('Rule dimensions')}</h2>
-    <p class="text-xs text-slate-500">
-      {$t('Read-only. Weights/boundaries are data in')}
-      <code>classifier.yaml</code>{$t('; edit there and restart to retune.')}
-    </p>
+  <div class="card flex flex-col gap-2">
+    <div class="flex flex-col gap-1">
+      <h2 class="section-header">{$t('Rule dimensions')}</h2>
+      <p class="section-desc">
+        {$t('How Layer-1 scores each request. Read-only here — these weights are data in')}
+        <code>classifier.yaml</code>{$t('; edit that file and restart the gateway to retune.')}
+      </p>
+    </div>
     <DimensionTable dimensions={cfg.rules.dimensions} />
     {#if cfg.rules.boundaries}
-      <div data-testid="boundaries" class="mt-2 text-sm text-slate-600">
-        <span class="font-medium text-slate-700">{$t('Tier boundaries:')}</span>
+      <div data-testid="boundaries" class="mt-2 text-sm text-ink-body">
+        <span class="field-label">{$t('Tier boundaries:')}</span>
         {#each Object.entries(cfg.rules.boundaries) as [tier, value] (tier)}
           <span class="ml-2 font-mono">{tier}={value}</span>
         {/each}
@@ -134,21 +157,27 @@
   </div>
 
   <!-- Read-only: eval details -->
-  <div class="flex flex-col gap-2">
-    <h2 class="text-lg font-semibold text-slate-900">{$t('Eval details')}</h2>
-    <dl data-testid="eval-details" class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm">
-      <dt class="text-slate-500">{$t('Model')}</dt>
-      <dd class="font-mono text-slate-800">{cfg.eval.model}</dd>
-      <dt class="text-slate-500">{$t('Temperature')}</dt>
-      <dd class="tabular-nums text-slate-800">{cfg.eval.temperature}</dd>
-      <dt class="text-slate-500">{$t('Max tokens')}</dt>
-      <dd class="tabular-nums text-slate-800">{cfg.eval.max_tokens}</dd>
-      <dt class="text-slate-500">{$t('Timeout (ms)')}</dt>
-      <dd class="tabular-nums text-slate-800">{cfg.eval.timeout_ms}</dd>
-      <dt class="text-slate-500">{$t('On failure')}</dt>
-      <dd class="text-slate-800">{cfg.eval.on_failure}</dd>
-      <dt class="text-slate-500">{$t('Cache')}</dt>
-      <dd class="text-slate-800">
+  <div class="card flex flex-col gap-2">
+    <div class="flex flex-col gap-1">
+      <h2 class="section-header">{$t('Eval details')}</h2>
+      <p class="section-desc">
+        {$t('The Layer-2 model and its limits. Read-only — configured in')}
+        <code>classifier.yaml</code>.
+      </p>
+    </div>
+    <dl data-testid="eval-details" class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+      <dt class="text-ink-muted">{$t('Model')}</dt>
+      <dd class="font-mono text-ink-strong">{cfg.eval.model}</dd>
+      <dt class="text-ink-muted">{$t('Temperature')}</dt>
+      <dd class="tabular-nums text-ink-strong">{cfg.eval.temperature}</dd>
+      <dt class="text-ink-muted">{$t('Max tokens')}</dt>
+      <dd class="tabular-nums text-ink-strong">{cfg.eval.max_tokens}</dd>
+      <dt class="text-ink-muted">{$t('Timeout (ms)')}</dt>
+      <dd class="tabular-nums text-ink-strong">{cfg.eval.timeout_ms}</dd>
+      <dt class="text-ink-muted">{$t('On failure')}</dt>
+      <dd class="text-ink-strong">{cfg.eval.on_failure}</dd>
+      <dt class="text-ink-muted">{$t('Cache')}</dt>
+      <dd class="text-ink-strong">
         {cfg.eval.cache.enabled ? $t('on') : $t('off')} · ttl {cfg.eval.cache.ttl_sec}s
       </dd>
     </dl>

@@ -12,24 +12,26 @@
   const arrow = (d: RuleDimension['direction']) => (d === 'up' ? '↑' : d === 'down' ? '↓' : '·');
 </script>
 
-<table data-testid="dimension-table" class="w-full text-sm">
-  <thead>
-    <tr class="border-b border-slate-200 text-left text-slate-500">
-      <th class="py-2 pr-4 font-medium">{$t('Dimension')}</th>
-      <th class="py-2 pr-4 font-medium">{$t('Weight')}</th>
-      <th class="py-2 font-medium">{$t('Direction')}</th>
-    </tr>
-  </thead>
-  <tbody>
-    {#each dimensions as dim (dim.name)}
-      <tr class="border-b border-slate-100" data-testid="dimension-row">
-        <td class="py-1.5 pr-4 font-mono text-slate-800">{dim.name}</td>
-        <td class="py-1.5 pr-4 tabular-nums text-slate-700">{dim.weight}</td>
-        <td class="py-1.5 text-slate-600">
-          <span aria-hidden="true">{arrow(dim.direction)}</span>
-          {$t(dim.direction)}
-        </td>
+<div class="table-wrap">
+  <table data-testid="dimension-table" class="table-base">
+    <thead class="table-head">
+      <tr>
+        <th class="px-3 py-2 font-medium">{$t('Dimension')}</th>
+        <th class="px-3 py-2 font-medium">{$t('Weight')}</th>
+        <th class="px-3 py-2 font-medium">{$t('Direction')}</th>
       </tr>
-    {/each}
-  </tbody>
-</table>
+    </thead>
+    <tbody>
+      {#each dimensions as dim (dim.name)}
+        <tr class="table-row" data-testid="dimension-row">
+          <td class="px-3 py-2 font-mono text-ink-strong">{dim.name}</td>
+          <td class="px-3 py-2 tabular-nums text-ink-body">{dim.weight}</td>
+          <td class="px-3 py-2 text-ink-body">
+            <span aria-hidden="true">{arrow(dim.direction)}</span>
+            {$t(dim.direction)}
+          </td>
+        </tr>
+      {/each}
+    </tbody>
+  </table>
+</div>

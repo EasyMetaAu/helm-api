@@ -100,7 +100,7 @@
 </script>
 
 <form
-  class="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4"
+  class="card flex flex-col gap-3"
   data-testid="lane-card"
   onsubmit={(e) => {
     e.preventDefault();
@@ -108,20 +108,18 @@
   }}
 >
   <header class="flex items-baseline justify-between">
-    <h2 class="text-lg font-semibold text-slate-900">{lane.name}</h2>
+    <h2 class="section-header">{lane.name}</h2>
     {#if lane.purpose}
-      <span class="text-xs text-slate-500">{lane.purpose}</span>
+      <span class="badge-neutral">{lane.purpose}</span>
     {/if}
   </header>
 
-  <label class="flex flex-col gap-1 text-sm">
-    <span class="font-medium text-slate-700">{$t('Primary')}</span>
-    <input
-      name="primary"
-      class="rounded border border-slate-300 px-2 py-1"
-      list={modelsListId}
-      bind:value={primary}
-    />
+  <label class="flex flex-col gap-1">
+    <span class="field-label">{$t('Primary')}</span>
+    <input name="primary" class="input" list={modelsListId} bind:value={primary} />
+    <span class="field-help">
+      {$t('The model this lane uses first. Tried before any fallback.')}
+    </span>
   </label>
 
   <!-- Shared alias catalog for the primary + fallback comboboxes. Empty when no
@@ -133,77 +131,91 @@
   </datalist>
 
   <fieldset class="flex flex-col gap-1">
-    <legend class="text-sm font-medium text-slate-700">{$t('Fallback (ordered)')}</legend>
+    <legend class="field-label">{$t('Fallback (ordered)')}</legend>
+    <span class="field-help">
+      {$t('Tried top to bottom when the primary fails. Order is the try order.')}
+    </span>
     <ul class="flex flex-col gap-1">
       {#each fallback as f, i (i + ':' + f)}
         <li
           class="flex items-center gap-2 rounded bg-slate-50 px-2 py-1 text-sm"
           data-testid="fallback-item"
         >
+          <span class="badge-fallback">{i + 1}</span>
           <span class="flex-1">{f}</span>
           <button
             type="button"
-            class="text-xs text-slate-500"
+            class="btn-icon"
             aria-label={`move ${f} up`}
             onclick={() => moveUp(i)}
             disabled={i === 0}>↑</button
           >
           <button
             type="button"
-            class="text-xs text-slate-500"
+            class="btn-icon"
             aria-label={`move ${f} down`}
             onclick={() => moveDown(i)}
             disabled={i === fallback.length - 1}>↓</button
           >
           <button
             type="button"
-            class="text-xs text-red-600"
+            class="btn-icon"
             aria-label={`remove ${f}`}
-            onclick={() => removeFallback(i)}>{$t('Remove')}</button
+            onclick={() => removeFallback(i)}>✕</button
           >
         </li>
       {/each}
+      {#if fallback.length === 0}
+        <li class="text-sm text-ink-muted">
+          {$t('No fallback models yet. Add one below.')}
+        </li>
+      {/if}
     </ul>
     <div class="flex gap-2">
       <input
-        class="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
+        class="input flex-1"
         placeholder={$t('model alias')}
         list={modelsListId}
         data-testid="fallback-add-input"
         bind:value={newFallback}
       />
-      <button type="button" class="rounded bg-slate-200 px-2 py-1 text-sm" onclick={addFallback}
-        >{$t('Add fallback')}</button
+      <button type="button" class="btn-secondary" onclick={addFallback}>{$t('Add fallback')}</button
       >
     </div>
   </fieldset>
 
-  <div class="flex flex-wrap gap-4 text-sm">
-    <label class="flex items-center gap-2">
-      <input type="checkbox" bind:checked={requireTools} />
-      <span>{$t('Require tools')}</span>
-    </label>
-    <label class="flex items-center gap-2">
-      <input type="checkbox" bind:checked={requireJson} />
-      <span>{$t('Require JSON')}</span>
-    </label>
-    <label class="flex items-center gap-2">
-      <span>{$t('Max latency ms')}</span>
-      <input
-        type="number"
-        min="1"
-        class="w-24 rounded border border-slate-300 px-2 py-1"
-        value={maxLatency ?? ''}
-        oninput={(e) => {
-          const v = (e.currentTarget as HTMLInputElement).value;
-          maxLatency = v === '' ? null : Number(v);
-        }}
-      />
-    </label>
+  <div class="flex flex-col gap-1">
+    <span class="field-label">{$t('Constraints')}</span>
+    <span class="field-help">
+      {$t('Optional requirements a model must meet for this lane to use it.')}
+    </span>
+    <div class="flex flex-wrap items-center gap-4 text-sm">
+      <label class="flex items-center gap-2">
+        <input type="checkbox" bind:checked={requireTools} />
+        <span>{$t('Require tools')}</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" bind:checked={requireJson} />
+        <span>{$t('Require JSON')}</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <span>{$t('Max latency (ms)')}</span>
+        <input
+          type="number"
+          min="1"
+          class="input w-24"
+          value={maxLatency ?? ''}
+          oninput={(e) => {
+            const v = (e.currentTarget as HTMLInputElement).value;
+            maxLatency = v === '' ? null : Number(v);
+          }}
+        />
+      </label>
+    </div>
   </div>
 
   {#if primaryEmpty}
-    <p class="text-sm text-red-600" role="alert">
+    <p class="alert-error" role="alert">
       {#if isBalanced}
         {$t('The')}
         <strong>balanced</strong>
@@ -217,15 +229,9 @@
   {/if}
 
   <div class="flex items-center gap-3">
-    <button
-      type="submit"
-      class="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-      disabled={!valid}>{$t('Save')}</button
-    >
+    <button type="submit" class="btn-primary" disabled={!valid}>{$t('Save')}</button>
     {#if saved}
-      <span data-testid="lane-saved" role="status" class="text-sm font-medium text-emerald-600"
-        >{$t('Saved')}</span
-      >
+      <span data-testid="lane-saved" role="status" class="badge-ok">{$t('Saved')}</span>
     {/if}
   </div>
 </form>
