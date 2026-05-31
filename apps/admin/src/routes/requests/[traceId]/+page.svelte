@@ -23,7 +23,7 @@
   }
 </script>
 
-<section class="mx-auto flex max-w-4xl flex-col gap-4 p-6">
+<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <a href={`${base}/requests`} class="text-sm text-sky-600 hover:underline"
     >&larr; Back to requests</a
   >

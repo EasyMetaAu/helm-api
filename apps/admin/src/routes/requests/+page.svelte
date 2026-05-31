@@ -45,7 +45,7 @@
   }
 </script>
 
-<section class="mx-auto flex max-w-6xl flex-col gap-4 p-6">
+<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <header>
     <h1 class="text-2xl font-semibold text-slate-900">Requests</h1>
     <p class="text-sm text-slate-500">

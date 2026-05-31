@@ -55,7 +55,7 @@
   }
 </script>
 
-<section class="mx-auto flex max-w-3xl flex-col gap-4 p-6">
+<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <header>
     <h1 class="text-2xl font-semibold text-slate-900">Policies</h1>
     <p class="text-sm text-slate-500">

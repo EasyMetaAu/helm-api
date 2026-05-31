@@ -38,7 +38,7 @@
   ];
 </script>
 
-<div class="mx-auto w-full max-w-6xl px-4 py-6 md:px-8 md:py-8">
+<div class="w-full px-4 py-6 md:px-8 md:py-8">
   <header class="mb-6">
     <h2 class="text-xl font-semibold tracking-tight text-slate-900">Overview</h2>
     <p class="mt-1 text-sm text-slate-500">
