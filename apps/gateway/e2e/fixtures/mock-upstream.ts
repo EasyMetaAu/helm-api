@@ -42,13 +42,14 @@ export function echoResponse(model: string) {
 // gateway to fall forward to the next in-chain candidate. Exported so the spec
 // and the mock stay in lockstep.
 //
-// alias-namespace alignment (2026-05-31): the economy lane head is now the real
-// `provider/model` alias `openai-crs/gpt-5.4-mini`. The gateway sends the
-// RESOLVED provider_model (== the alias, by config convention) upstream as
-// `model`, so the mock matches on it. Keep this in lockstep with
-// config/lanes.yaml `economy.primary`.
+// The economy lane head is the alias `openai-crs/gpt-5.4-mini`, whose RESOLVED
+// provider_model is the BARE upstream id `gpt-5.4-mini` (fix-upstream-model-id
+// 2026-05-31: alias != provider_model — the relay only accepts the bare id). The
+// gateway forwards that resolved provider_model upstream as `model`, so the mock
+// must match on the BARE id. Keep in lockstep with config/providers.yaml's
+// `provider_model` for config/lanes.yaml `economy.primary`.
 export const FAIL_PRIMARY_SENTINEL = "__HELM_FAIL_PRIMARY__";
-export const FAIL_PRIMARY_MODEL = "openai-crs/gpt-5.4-mini";
+export const FAIL_PRIMARY_MODEL = "gpt-5.4-mini";
 
 function messagesText(body: { messages?: unknown }): string {
   if (!Array.isArray(body.messages)) return "";
@@ -128,10 +129,11 @@ export const TOOL_CALL_STREAM_CHUNKS = [
 
 // —— Layer-2 eval small-model stand-in (e2e.eval) ————————————————————————————
 // The same mock doubles as the internal "eval small-model". The gateway routes
-// Layer-2 eval calls to the SAME upstream base_url but with the EVAL_MODEL alias
-// (an internal supply-chain detail, NOT one of the three public lanes — CLAUDE.md
-// principle 6). The mock recognizes that model and behaves as a controllable
-// judge:
+// Layer-2 eval calls to the SAME upstream base_url with the configured eval model
+// id. The mock recognizes an eval call by the eval SYSTEM-PROMPT marker (the
+// classify instruction), NOT by the model id — the eval model may be a real model
+// that also backs a lane (fix-upstream-model-id 2026-05-31). It then behaves as a
+// controllable judge:
 //   • NORMAL  → returns a valid strict-JSON EvalOutput that drives a specific
 //     lane. We emit complexity:"reasoning" so the cascade resolves the PREMIUM
 //     lane — deliberately DIFFERENT from the `balanced` fail-open default, so the
@@ -143,7 +145,10 @@ export const TOOL_CALL_STREAM_CHUNKS = [
 //     (a hit must NOT increment) and hit-stop (rules-confident must not call).
 // The judge NEVER sees a plaintext key/payload echoed (principle 7); it only
 // reads the prompt text to decide normal vs slow.
-export const EVAL_MODEL = "deepseek/deepseek-v4-flash";
+// Stable substring of the eval system prompt (apps/gateway/src/routes/classify.ts
+// buildEvalPrompt). Only the Layer-2 classify call sends it, so the mock can
+// discriminate eval calls without coupling to the model id.
+export const EVAL_PROMPT_MARKER = "Classify the request.";
 export const EVAL_SLOW_SENTINEL = "__HELM_EVAL_SLOW__";
 // Delay (ms) the slow judge sleeps before answering — comfortably past the e2e
 // eval timeout_ms / outer_timeout_ms so the fail-open path is deterministic.
@@ -203,10 +208,14 @@ export function createMockUpstream() {
 
     const promptText = messagesText(body);
 
-    // ── Layer-2 eval branch: the request targets the internal eval small-model.
-    //    Steered by the EVAL_MODEL alias (not a public lane). Returns a strict
-    //    JSON judgment; the slow sentinel makes it exceed the eval timeout.
-    if (model === EVAL_MODEL) {
+    // ── Layer-2 eval branch: the request is the internal classify call. We key
+    //    on the eval SYSTEM-PROMPT marker ("Classify the request.", see
+    //    apps/gateway/src/routes/classify.ts) — NOT the model id — so the eval
+    //    model can be a real model that ALSO serves a lane (e.g. deepseek-flash)
+    //    without the mock mistaking a normal routed request for an eval call
+    //    (fix-upstream-model-id 2026-05-31). Returns a strict JSON judgment; the
+    //    slow sentinel makes it exceed the eval timeout.
+    if (promptText.includes(EVAL_PROMPT_MARKER)) {
       evalCallCount += 1; // count BEFORE any delay so timed-out calls still count
       if (promptText.includes(EVAL_SLOW_SENTINEL)) {
         await sleep(EVAL_SLOW_DELAY_MS);

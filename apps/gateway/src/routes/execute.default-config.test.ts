@@ -20,12 +20,11 @@ import { describe, expect, it, vi } from "vitest";
 import { createExecute } from "./execute.js";
 
 // execute.default-config — PROVES the capability filter + cost path FIRE on the
-// SHIPPED default config (config/*.yaml + the checked-in generated catalog),
-// after the alias-namespace alignment (2026-05-31). Before alignment the lane
-// candidate aliases (`cheap_model` …) had NO catalog entry, so every candidate
-// was unknown → fail-open-skip → the filter pruned nothing and cost was null.
-// Now lane candidates, providers entries, capability + pricing catalog keys are
-// ALL the same `provider/model` alias string, so:
+// SHIPPED default config (config/*.yaml + the checked-in generated catalog).
+// The lane candidate ALIAS is the catalog/pricing modelKey AND the breaker key;
+// the resolved `provider_model` (a possibly-different bare upstream id, see
+// fix-upstream-model-id 2026-05-31) is only sent on the wire. The generated
+// catalog is keyed by the alias, so a lookup by the candidate alias resolves and:
 //   • a json-incapable `*/auto` candidate is PRUNED with a skip_reason and the
 //     chain lands on a json-capable model;
 //   • a chain of ONLY json-incapable candidates → capability_unsatisfiable;
@@ -197,8 +196,9 @@ describe("default config activates capability filter + cost (alias-namespace ali
     expect(out.attempts[0]?.skip_reason).toBe("no_json_support");
     expect(out.final.status).toBe("ok");
     if (out.final.status === "ok") expect(out.final.alias).toBe("openai-crs/gpt-5.4-mini");
-    // The pruned auto must NEVER have been invoked upstream.
-    expect(calls).toEqual(["openai-crs/gpt-5.4-mini"]);
+    // The pruned auto must NEVER have been invoked upstream. The upstream `model`
+    // is the RESOLVED bare provider_model (`gpt-5.4-mini`), not the alias.
+    expect(calls).toEqual(["gpt-5.4-mini"]);
   });
 
   it("the shipped `json` lane chain prunes its */auto tail for a needs_json request", async () => {

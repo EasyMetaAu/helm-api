@@ -91,14 +91,17 @@ export function createExecute(deps: ExecuteAdapterDeps) {
   const { defaultProvider, providers, registry, breaker, catalog, now, signal, log } = deps;
 
   // Cost of one served attempt = provider usage × catalog pricing (docs/07).
+  // Keyed by the candidate ALIAS — the catalog/pricing modelKey is the routing
+  // alias (e.g. `openai-crs/gpt-5.4-mini`), NOT the bare upstream model id we send
+  // on the wire (`gpt-5.4-mini`). See the resolve block below.
   // Missing pricing (no catalog entry, or a half-filled pricing row) → null
   // ("not measured", distinct from a measured 0) and a logged miss, NEVER a
   // crash (principle 3). Streaming attempts have no usage at peek time → null.
-  const costOf = (providerModel: string, body: unknown): number | null => {
-    const pricing = catalog.get(providerModel)?.pricing;
+  const costOf = (alias: string, body: unknown): number | null => {
+    const pricing = catalog.get(alias)?.pricing;
     const cost = computeCostUsd(pricing, usageFromBody(body));
     if (cost === null) {
-      log?.("info", "cost.pricing_missing", { provider_model: providerModel });
+      log?.("info", "cost.pricing_missing", { alias });
     }
     return cost;
   };
@@ -129,27 +132,35 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       const startedAt = now();
       const elapsed = () => Math.max(0, now() - startedAt);
 
-      // Resolve alias -> { provider name, upstream model }. An unknown alias is a
-      // config gap: keep the alias as the model id and use the default provider
-      // (fail-open — never substitute a different model silently). A resolved
-      // alias selects BOTH the upstream model id AND the provider client (so the
-      // fallback chain can cross providers). When the resolved provider has no
-      // registered client, fall back to the default provider too.
+      // Resolve alias -> { provider name, upstream model }. Two DISTINCT ids come
+      // out and must not be conflated (fix-upstream-model-id 2026-05-31):
+      //   • alias        — the ROUTING key. The catalog/pricing modelKey, the
+      //     circuit-breaker key, and the decision-record id are ALL the alias
+      //     (e.g. `openai-crs/gpt-5.4-mini`). This is what the rest of the system
+      //     keys on; the generated catalog is keyed by it.
+      //   • providerModel — the provider's REAL upstream model id (e.g.
+      //     `gpt-5.4-mini`). The ONLY thing it is used for is the wire `model`
+      //     field we send upstream. The relay rejects anything else with a 500.
+      // An unknown alias is a config gap: keep the alias as the upstream model id
+      // too and use the default provider (fail-open — never substitute a different
+      // model silently). A resolved alias selects BOTH the upstream model id AND
+      // the provider client (so the fallback chain can cross providers). When the
+      // resolved provider has no registered client, fall back to the default too.
       const resolved = registry.resolve(alias);
       const providerModel = resolved.ok ? resolved.value.providerModel : alias;
       const provider =
         (resolved.ok ? providers?.get(resolved.value.providerName) : undefined) ?? defaultProvider;
 
-      // 1) Circuit breaker gate.
-      const gate = breaker.canAttempt(providerModel);
+      // 1) Circuit breaker gate (keyed by alias — the routing unit).
+      const gate = breaker.canAttempt(alias);
       if (!gate.allow) {
         circuitSkipped = true;
         attempts.push(skipRow(alias, gate.reason ?? "circuit_open", elapsed()));
         continue;
       }
 
-      // 2) Capability filter (only when we have catalog data for the model).
-      const caps = catalog.get(providerModel)?.capabilities;
+      // 2) Capability filter (only when we have catalog data for the alias).
+      const caps = catalog.get(alias)?.capabilities;
       if (caps) {
         const verdict = checkCapability(caps, {
           needsTools: Array.isArray(req.tools) && req.tools.length > 0,
@@ -175,7 +186,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       try {
         if (req.stream) {
           const stream = await peekStream(provider, req, signal, providerModel);
-          breaker.recordSuccess(providerModel);
+          breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null (not measured).
           attempts.push(okRow(alias, elapsed(), null));
           return {
@@ -187,8 +198,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         }
         const bodyReq = stripInternal(req, providerModel);
         const body = await provider.chatCompletion(bodyReq, { signal });
-        breaker.recordSuccess(providerModel);
-        attempts.push(okRow(alias, elapsed(), costOf(providerModel, body)));
+        breaker.recordSuccess(alias);
+        attempts.push(okRow(alias, elapsed(), costOf(alias, body)));
         return {
           attempts,
           final: { status: "ok", alias, providerModel },
@@ -199,7 +210,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // Client abort: non-provider fault. Terminate the chain WITHOUT marking a
         // breaker failure or counting it as all_providers_failed.
         if (isAbort(err, signal)) {
-          breaker.recordAbort(providerModel);
+          breaker.recordAbort(alias);
           attempts.push({
             alias,
             skipped: false,
@@ -224,7 +235,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           };
         }
         // Genuine pre-first-chunk failure: record on the breaker, try next.
-        breaker.recordFailure(providerModel);
+        breaker.recordFailure(alias);
         attempts.push({
           alias,
           skipped: false,

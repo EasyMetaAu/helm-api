@@ -142,7 +142,7 @@ describe("createExecute — gateway execution adapter", () => {
       chatCompletionStream: vi.fn(),
     } as unknown as ProviderClient;
     const noTools: CatalogEntry = {
-      modelKey: "m-a",
+      modelKey: "a",
       capabilities: {
         supportsTools: false,
         supportsJsonMode: true,
@@ -158,7 +158,7 @@ describe("createExecute — gateway execution adapter", () => {
       defaultProvider: provider,
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: breaker(),
-      catalog: new Map([["m-a", noTools]]),
+      catalog: new Map([["a", noTools]]),
       now: clock(),
       signal: new AbortController().signal,
     });
@@ -347,9 +347,11 @@ describe("createExecute — gateway execution adapter", () => {
       defaultProvider: provider,
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: breaker(),
+      // Catalog is keyed by the candidate ALIAS (the modelKey), not the resolved
+      // upstream model id (fix-upstream-model-id 2026-05-31).
       catalog: new Map([
-        ["m-a", entry("m-a", { supportsJsonMode: false })],
-        ["m-b", entry("m-b", { supportsJsonMode: true })],
+        ["a", entry("a", { supportsJsonMode: false })],
+        ["b", entry("b", { supportsJsonMode: true })],
       ]),
       now: clock(),
       signal: new AbortController().signal,
@@ -375,8 +377,8 @@ describe("createExecute — gateway execution adapter", () => {
       registry: registry({ text: "m-text", vis: "m-vis" }),
       breaker: breaker(),
       catalog: new Map([
-        ["m-text", entry("m-text", { supportsVision: false })],
-        ["m-vis", entry("m-vis", { supportsVision: true })],
+        ["text", entry("text", { supportsVision: false })],
+        ["vis", entry("vis", { supportsVision: true })],
       ]),
       now: clock(),
       signal: new AbortController().signal,
@@ -404,8 +406,8 @@ describe("createExecute — gateway execution adapter", () => {
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: breaker(),
       catalog: new Map([
-        ["m-a", entry("m-a", { supportsJsonMode: false })],
-        ["m-b", entry("m-b", { supportsJsonMode: false })],
+        ["a", entry("a", { supportsJsonMode: false })],
+        ["b", entry("b", { supportsJsonMode: false })],
       ]),
       now: clock(),
       signal: new AbortController().signal,
@@ -434,7 +436,7 @@ describe("createExecute — gateway execution adapter", () => {
       defaultProvider: provider,
       registry: registry({ a: "m-a", u: "m-unknown" }),
       breaker: breaker(),
-      catalog: new Map([["m-a", entry("m-a", { supportsJsonMode: false })]]),
+      catalog: new Map([["a", entry("a", { supportsJsonMode: false })]]),
       now: clock(),
       signal: new AbortController().signal,
     });
@@ -476,9 +478,7 @@ describe("createExecute — gateway execution adapter", () => {
       defaultProvider: provider,
       registry: registry({ good: "gpt-4o" }),
       breaker: breaker(),
-      catalog: new Map([
-        ["gpt-4o", priced("gpt-4o", { inputPerMTokUsd: 2.5, outputPerMTokUsd: 10 })],
-      ]),
+      catalog: new Map([["good", priced("good", { inputPerMTokUsd: 2.5, outputPerMTokUsd: 10 })]]),
       now: clock(),
       signal: new AbortController().signal,
     });

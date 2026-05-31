@@ -16,3 +16,82 @@
 #   supportsStreaming: true
 #   maxContextTokens: 131072
 #   maxOutputTokens: 4096
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RELAY / SELF-HOSTED MODELS (fix-upstream-model-id+catalog-reuse 2026-05-31).
+# These live HERE (the manual override layer), NOT in the generated catalog:
+# they are crs/aggregator relay aliases the LiteLLM-sourced `pnpm sync:catalog`
+# artifact cannot know about, so a sync would wipe them. Keyed by the routing
+# ALIAS (== the catalog modelKey the executor looks up; see execute.ts). Values
+# are the curated, battle-tested data from the sibling **llm-router** project
+# (`llm-router/config/providers.yaml` inline capabilities + provider-capabilities
+# .generated.yaml) — single source of truth; keep in step when llm-router changes.
+#
+# NOTE: gpt-5.x on the la.atmy.work relay are STREAM-ONLY (non-stream → 400). That
+# is a relay request constraint, NOT a capability gap — `supportsStreaming` stays
+# true (the model DOES stream; it merely requires it). Default API usage streams.
+openai-crs/gpt-5.5:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  maxContextTokens: 1050000
+  maxOutputTokens: 128000
+openai-crs/gpt-5.4-mini:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  maxContextTokens: 400000
+  maxOutputTokens: 128000
+openai-crs/gpt-5.3-codex-spark:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  maxContextTokens: 400000
+  maxOutputTokens: 128000
+deepseek-crs/deepseek-pro:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 1048576
+  maxOutputTokens: 384000
+deepseek-crs/deepseek-flash:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 1048576
+  maxOutputTokens: 16384
+zenmux/claude-opus-4.7:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
+zenmux/gemini-3.5-flash:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  maxContextTokens: 1048576
+  maxOutputTokens: 65536
+# */auto aggregators: JSON-INCAPABLE on purpose — the capability filter prunes
+# them for strict-JSON requests so a json lane lands on a deterministic model.
+zenmux/auto:
+  supportsTools: true
+  supportsJsonMode: false
+  supportsVision: true
+  supportsStreaming: true
+  maxContextTokens: 200000
+  maxOutputTokens: 8192
+openrouter/auto:
+  supportsTools: true
+  supportsJsonMode: false
+  supportsVision: true
+  supportsStreaming: true
+  maxContextTokens: 200000
+  maxOutputTokens: 8192

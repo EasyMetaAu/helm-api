@@ -5,6 +5,80 @@
 
 ---
 
+## 2026-05-31 · catalog-reuse — 复用 llm-router 的能力/价格数据 + 修正 eval 模型（docs/02、原则 2/6）
+
+**承接** fix-upstream-model-id。两个后续问题：
+
+**Q1 — 数据放错层**：crs/zenmux/openrouter 等中继模型的 capability+pricing 被**手塞进生成目录** `packages/core/src/catalog/generated/catalog.json`。该文件本应是 `pnpm sync:catalog` 从 LiteLLM 生成的纯产物——而 LiteLLM 根本不认识这些中继别名，sync 脚本里也无 crs 逻辑，故下次 sync 会**静默抹掉**这些条目。与此同时，专为「上游目录不认识的自托管模型」设计的手动覆盖层 `config/capabilities.yaml` / `config/pricing.yaml` **是空的**。实测：Helm 目录里的数值与 sibling **llm-router** 的 `provider-capabilities.generated.yaml` / `pricing-overrides.yaml` **逐项一致**——数据本就抄自 llm-router，只是塞错了地方。
+
+**Q2 — eval（任务难度评估）模型 id 错**：`classifier.yaml` 的 `eval.model: deepseek/deepseek-v4-flash`。eval 客户端（`classify.ts` → `server.ts:284` 的 primary client）把该 id **直接当 wire `model` 发给 primary（crs relay `/ai/openai/v1`）**、绕过 registry。`deepseek-v4-flash` 是 **OpenRouter** 模型、relay 上不存在 → 500。eval 默认关故潜伏。
+
+**修法**：
+1. **数据迁层**：把 9 个中继模型的 capability+pricing（值取自 llm-router，注明 source-of-truth）写进 `config/capabilities.yaml` + `config/pricing.yaml`，按**别名**作 key（== 执行器查 catalog 的 key）。`loadCatalog`（`catalog/index.ts`）本就支持「override-only modelKey」（manual can add，非仅 patch），full entry 即生成完整 `CatalogEntry`。
+2. **生成目录复原**：从 `catalog.json` 删掉 10 条手塞中继条目，只留 5 个真实 LiteLLM 模型 → 重新成为纯 sync 产物。`source` 字段去掉 `+ helm:provider-aliases`。
+3. **eval 模型**：`eval.model` → `deepseek-flash`（relay 真实存在的 cheap/fast 档；非流式 OK、json-capable）。eval_usd 由 `catalog.get(eval.model)` 计价——故在 pricing.yaml **额外加一条裸 `deepseek-flash` key**（eval 走 wire 裸 id，与按别名计价的 lane 路径分离）。
+4. **mock 解耦**：`mock-upstream.ts` 改用 eval **系统提示词标记**（`"Classify the request."`，见 `classify.ts:115`）识别 eval 调用，不再按 model 字符串——这样 eval 模型可与某条 lane 复用同一真实模型（如 deepseek-flash）而不在 mock 里撞车。`EVAL_MODEL` 常量 → `EVAL_PROMPT_MARKER`。
+5. **清理**：删掉 providers.yaml 里已无用的 `deepseek/deepseek-v4-flash` 条目（eval 不再经 registry、它也非 lane 候选）。
+
+**实证**：933 单测 + typecheck + lint 全绿。本地起网关 + 真实 relay：`auto` 流式/json_object → 200（capability/pricing 覆盖层正常解析加载，否则 fail-closed 拒启动）；**eval 开启** → 200、`decided_by=fallback` + `fallback_reason=eval_timeout`（**关键**：是 timeout 不是 `eval_provider_error`/500——证明 relay 已接受 `deepseek-flash` 并开始响应，只是没在 250ms 远端超时内完成）。`decided_by=eval` 需放宽远端 eval 超时（`timeout_ms`/`outer_timeout_ms` 现按同机小模型调的 300/250，对远端模型偏紧——沿用上一条 live sweep 的已知调优坑，与本次无关）。
+
+**遗留/follow-up**：
+- **deepseek-crs 协议/端点分叉**：llm-router 把 deepseek-crs 当 `kind: anthropic` + `base_url: /ai/api`；Helm 现走 openai 端点 `/ai/openai/v1`（relay 也接受，live 200）。已确认延后；若 deepseek 工具调用/流式出现异常再处理（需把 Helm 的 Anthropic provider client 接进执行器 + 独立 provider 条目）。
+- **自动化导入**：本次为一次性人工抄录到覆盖层；未来可让 `scripts/sync-catalog.ts` 直接从 llm-router 导入（已评估，本次未做）。
+
+---
+
+## 2026-05-31 · fix-upstream-model-id — 推翻 config-align：alias ≠ provider_model（docs/02/04、原则 6）
+
+**症状**：`openai-crs/gpt-5.4-mini`、`deepseek-crs/deepseek-pro` 等所有 crs lane 模型上游 **500**（`la.atmy.work` relay `Internal server error`）。在 sibling llm-router 里同样的模型测试成功、生产可用。
+
+**根因（实测确证）**：同一把 key、同一端点，只改 `model` 字段——
+- `model=openai-crs/gpt-5.4-mini`（带前缀） → relay **500**
+- `model=gpt-5.4-mini`（裸 id） → relay **200**（或 gpt-5.x 非流式 400「Stream must be set to true」）
+
+罪魁是上一条 **config-align 2026-05-31** 决定：它故意令 `provider_model == alias`（带前缀），而 `execute.ts` 把 `provider_model` 原样当作 wire `model` 发上游。relay 只认裸 id（真实 id 本就写在 providers.yaml 注释里），遇到带前缀的未知 model 即抛笼统 500。llm-router 之所以能跑，正因为它的 `provider_model` 是裸 id。Helm 自身永远不会产生 500（`ERROR_CLASS_HTTP_STATUS` 全是 4xx/502/503/504）——这个 500 是上游透出的。
+
+**为何 config-align 的理由不成立**：它声称「令 alias==provider_model 好让 catalog/pricing 按 alias 命中」。但 **catalog 本就以 alias 形态作 modelKey**（`packages/core/src/catalog/generated/catalog.json` 的 `modelKey` 即 `openai-crs/gpt-5.4-mini`），并不需要 `provider_model` 也等于它。真正缺陷是 `execute.ts` 用**同一个字符串**既做 wire `model` 又做 catalog/breaker/cost 的 key——把两个本应分离的标识符耦合了。
+
+**修法（解耦 routing-id 与 wire-id）**：
+1. `config/providers.yaml`：所有 `provider_model` 改回真实**裸 id**（`gpt-5.4-mini`/`deepseek-pro`/`gpt-5.5`/`gpt-5.3-codex-spark`/`deepseek-flash`；zenmux 用其真实 id `anthropic/claude-opus-4.7`/`google/gemini-3.5-flash`/`auto`；`openrouter/auto` 本就正确）。`alias` 保持带前缀（它是 lane 候选/决策记录/catalog 的 routing key）。
+2. `apps/gateway/src/routes/execute.ts`：**catalog 能力过滤、cost、circuit-breaker 一律按 `alias` 取键**；`provider_model` 仅用于 `stripInternal` 的 wire `model` 与决策记录 `final.provider_model`（即真实上游 id，更准确）。
+3. 测试同步：`execute.test.ts` 的 catalog Map 从 providerModel 改 key 为 alias；`execute.default-config.test.ts` 的 `calls` 断言改为裸 id（stub 记录的是 wire `model`）；e2e `mock-upstream.ts` 的 `FAIL_PRIMARY_MODEL` 改为裸 `gpt-5.4-mini`（mock 匹配的是 gateway 实际转发的 model）。
+4. 实证：本地起网关 + 真实 relay，`auto`（流式+非流式）与显式 `openai-crs/gpt-5.4-mini`/`deepseek-crs/deepseek-pro`（流式）全部 **200**；`x-helm-final-model`=alias、`x-helm-provider-model`=裸 id。933 单测 + typecheck + lint 全绿。
+
+**遗留坑（已知，未在本次修复）**：
+- **gpt-5.x 仅支持流式**：`gpt-5.5`/`gpt-5.4-mini`/`gpt-5.3-codex-spark` 在该 relay 上非流式返回 400「Stream must be set to true」；deepseek-pro/flash 两种模式皆可。按用户决策「默认以流式调用」，保留 gpt-5.x 作各 lane 主模型、不重排 lane；providers.yaml 注释已标 `STREAM-ONLY`。**影响**：若客户端非流式且请求落到 gpt-5.x 主模型，会 400→502 再 fallback 到 deepseek，多烧一跳。
+- **eval 模型 id 错误**：`classifier.yaml` 的 `eval.model: deepseek/deepseek-v4-flash` 在该 relay 上不存在（裸 `deepseek-v4-flash` 同样 500）。eval 默认关闭故潜伏。真实 deepseek id（`deepseek-pro`/`deepseek-flash`）又都与某条 lane 在 e2e mock 里**撞 model 字符串**（mock 以 model 字符串区分 eval 调用），故彻底修复需先让 mock 的 eval 判别脱离 model 字符串。本次未动，已在 providers.yaml 该条目加 ⚠️ 注释。
+
+---
+
+## 2026-05-31 · live integration sweep — 修复 4 个缺陷 + 覆盖 5 个盲区（docs/05/06/07、原则 2/3/8）
+
+**新增**：`scripts/integration-live.mjs`——针对**运行中的真实容器 + 真实上游**的 42 项穷举集成套件（健康/鉴权/OpenAI Chat/流式/工具调用/Anthropic 互译/Responses/路由分类/能力过滤/错误处理/遥测脱敏/Admin/限流）。非单测，CI 之外手动/烟囱用，env 注入 `BASE/KEY/AUSER/APASS`。
+
+**修复的真实缺陷（TDD，全部红→绿）**：
+1. **#2 畸形 JSON body → 502** → 现 **400 invalid_request**。`chat.ts` 的 `c.req.json()` 无 try/catch，解析抛错被 error-handler 兜成 `upstream_error(502)`——客户端错误报成上游错误。
+2. **#3 空 `messages:[]` → 502 all_providers_failed** → 现 **400**。路由前无请求校验，空消息跑完整条 fallback 链才失败（白烧成本+延迟）。
+   - 修法（#2+#3 同根因）：新增 `OpenAIChatRequestSchema`（@helm/shared，`messages` 非空数组 + role 必填，loose 透传其余 OpenAI 字段），`chat.ts` 先 try/catch 解析、再 `safeParse`，失败即 `invalid_request` 400，**进路由前 fail-closed**（原则2）。
+   - **孪生修复**：`/v1/messages` 同样无 guard（畸形 JSON → 500/502）。`messages.ts` 加 try/catch → Anthropic envelope 400。**并修 `server.ts` 的 `transformErrorOut` 接线**——原把一切非 auth 错误塌缩成 `upstream_error`，导致 `invalid_request` 在生产被映射成 502；改为保留 `invalid_request`（`makeAnthropicError` 本就支持 → 400）。
+3. **#4 classifier PUT 静默写默认值**：`ClassifierConfigSchema` 顶层 `rules`/`eval` 均 prefault，错形状 patch（`{eval_enabled, confidence_threshold}`）被 strip+默认填充后以 200 **覆盖**线上配置（fail-OPEN 写，违原则2）。新增 `ClassifierConfigStrictSchema = z.strictObject({rules, eval})`（二者必填 + 拒未知键），PUT 改用它 → 错形状 400、配置不动；admin UI 的「取全量配置→改→PUT 整对象」流程照常 round-trip。
+
+**澄清的两个"假阳性"（非缺陷，已实证）**：
+- Anthropic 流式「无 content_block_delta」：`openrouter/auto` 选了**推理模型**，小 `max_tokens` 全烧在 `reasoning`、`finish_reason:length`、`content` 真空——OpenAI 穿透流同样 0 内容。`max_tokens=400` 后完整输出 `content_block_start→text_delta→stop`。互译状态机正确。
+- classifier PUT「不生效」：套件原发了错形状 patch（见 #4），现已实证全量 round-trip 热更新生效。
+
+**新增功能 — `/v1/responses` 路由接线（盲区，原 404）**：transformer 早已存在但未挂载。新增 `apps/gateway/src/routes/responses.ts`（OpenAI 错误信封，复用核心路由管线），`messages-pipeline.ts` 的 `createMessagesPipeline` 加 `protocol` 参数（默认 `anthropic_messages`，Responses 传 `openai_responses`，遥测正确归因）。**MVP 仅非流式**：Responses 流式协议（`response.*` SSE 事件）无 transformer，`stream:true` 返回结构化 400（不静默降级，原则2）。**TODO**：实现 Responses SSE transformer 以支持流式。
+
+**盲区实测覆盖（独立容器 + 改配置，不动持久化的 helm-test）**：
+- **限流开启**（:8081，`HELM_RATE_LIMIT_ENABLED=true` + `rpm:3`）：`limit/remaining` 计数正确（限流器在校验**之前**跑），超限 **429 + `Retry-After:20` + `x-ratelimit-*`**。**小瑕疵**：429 body 形状（`{error:{type,message,limited_by,retry_after_seconds}}`）与标准 OpenAI envelope 略不同（缺 `code`/`trace_id`）——结构化、合规，但可考虑统一。
+- **eval 第2层级联**（:8082，openrouter 置 providers[0] + `eval.enabled` + 高 threshold 强制级联）：实测 **`decided_by=eval`**（llama-3.3-70b 判定 → premium lane）+ **`eval-cache-hit=true`**（重复请求不二次调模型）。**三条 fail-open 路径全部实测**：`eval_timeout`（默认 `outer_timeout_ms:250` 对远端模型太紧）、`eval_provider_error`（openrouter key 对 `openai/*` 模型 403 ToS）、`eval_schema_invalid`（deepseek/mistral 把 `task_type` 填成 `reasoning`，不在枚举）——均降级 balanced（原则3）。**坑**：eval 默认超时按"同机小模型"调（250/300ms），远端模型需放宽；eval 模型须 (a) 该 key 可访问 (b) 严格遵守 `{complexity,task_type∈枚举,confidence}` JSON。
+- **Supabase/Postgres 驱动**（:8083 本机容器 → dev box `192.168.199.19:5435` 会话池 supavisor，租户 `stub` → 用户 `postgres.stub`，DB `helm_test`）：迁移建全 11 表、root key/telemetry/config 全落 PG，**同一 42 项套件全绿**——与 SQLite 完全等价。dev box x86_64（本机 arm64 镜像不能直跑那边，故本机容器跨 LAN 连池）。`helm_test` 库留存待查。
+- **韧性**（单测层，52 例全绿，确定性故障注入唯一可靠层）：熔断 CLOSED→OPEN→冷却→HALF_OPEN 探测→成功 CLOSED/失败 OPEN、探测锁互斥、**abort 非故障**（状态不变）、per-model 隔离；**工具调用分片流式**（litellm #25561：交错 index 不串块、temp-id→real-id、无孤儿 delta、容忍截断 `partial_json`）。Gemini transformer 有单测但未挂路由、Memory 中间件 post-MVP，均按设计延后。
+
+**门禁**：typecheck 0 / lint 0 / 单测 933 全绿 / build 0。镜像 `helm-api:local` 已重建，`helm-test` 容器以原挂载（`docker-data`+`config`）重建，数据零丢失。
+
+---
+
 ## 2026-05-31 · config-align — 统一别名命名空间（`provider/model`），让能力过滤 + 成本换算在 SHIPPED 默认配置上真正点火（task config-align、docs/02/04/07、原则 1/2/3/6）
 
 **关闭的 gap（capability-wire / cost-wire 的残留 TODO，本条标记为 RESOLVED）**：能力过滤器与成本换算的装配 + 单测**早已就位**，但对**默认配置 INERT**——`config/lanes.yaml` 的 lane 候选用占位别名（`cheap_model`/`default_good_model`/…），回填到 primary 时 `provider_model===alias`，而 generated catalog 的 key 是裸 LiteLLM id（`gpt-4o` 等），**两个命名空间不相交**：运行时 `execute.ts` 的 `catalog.get(providerModel)` 恒 `undefined` → 每个候选 unknown → fail-open 跳过过滤、成本恒 null。本任务**统一命名空间**让其点火，复用 sibling 项目 `llm-router/config` 的真实 provider/lane/pricing/capability 数据与约定，未重写任何运行时装配逻辑。
