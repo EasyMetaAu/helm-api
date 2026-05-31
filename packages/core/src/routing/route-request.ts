@@ -229,7 +229,15 @@ async function plan(
   opts: RouteOptions,
 ): Promise<PlanDecision> {
   // 1) Explicit passthrough — bypass the whole routing brain.
-  if (opts.allowCustomModel === true && req.requested_model.length > 0) {
+  //    `auto` is the canonical "let the router decide" sentinel and must NEVER be
+  //    treated as an explicit model, even for an allow_custom_model key — otherwise
+  //    it short-circuits classify/lane-resolve and gets sent upstream as the literal
+  //    model "auto" (the llm-router #391 regression). Fall through to classify.
+  if (
+    opts.allowCustomModel === true &&
+    req.requested_model.length > 0 &&
+    req.requested_model !== "auto"
+  ) {
     const model = req.requested_model;
     return {
       plan: { selected_lane: model, candidate_chain: [model], explicit_model: model },

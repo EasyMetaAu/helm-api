@@ -37,3 +37,6 @@ data/
 apps/gateway/.e2e-data/
 apps/gateway/test-results/
 apps/gateway/playwright-report/
+
+# local docker test data
+docker-data/

@@ -6,11 +6,15 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').cpSync('src/catalog/generated','dist/catalog/generated',{recursive:true})\""
   },
   "dependencies": {
     "@helm/shared": "workspace:*",

@@ -176,6 +176,23 @@ describe("routeRequest — orchestration", () => {
     expect(result.final.status).toBe("ok");
   });
 
+  it("does NOT passthrough model='auto' even with allow_custom_model — routes normally (llm-router #391)", async () => {
+    const d = deps();
+    const result = await routeRequest(req({ requested_model: "auto" }), d, {
+      allowCustomModel: true,
+    });
+
+    // `auto` is the "let the router decide" sentinel: classify must run and a real
+    // lane chain must be expanded — never a [`auto`] passthrough candidate.
+    expect(d.classify).toHaveBeenCalledOnce();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.explicit_model).toBeNull();
+    expect(plan.selected_lane).not.toBe("auto");
+    expect(plan.candidate_chain).not.toEqual(["auto"]);
+    expect(plan.candidate_chain[0]).toBe("coder_a");
+    expect(result.final.status).toBe("ok");
+  });
+
   it("does NOT passthrough when allow_custom_model is false — routes normally", async () => {
     const d = deps();
     await routeRequest(req({ requested_model: "gpt-4o" }), d, { allowCustomModel: false });
