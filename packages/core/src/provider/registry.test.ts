@@ -1,5 +1,6 @@
+import type { ProviderConfig as SharedProviderConfig } from "@helm/shared";
 import { describe, expect, it } from "vitest";
-import { createProviderRegistry, type ProviderConfig } from "./registry.js";
+import { createProviderRegistry, type ProviderConfig, toRegistryProviders } from "./registry.js";
 
 // Provider Registry — turns validated multi-provider config into a lookup table
 // keyed by internal ALIAS, and resolves alias -> { provider, model, base_url,
@@ -127,5 +128,55 @@ describe("createProviderRegistry / resolve", () => {
     expect(reg.list().sort()).toEqual(
       ["best_reasoning_model", "cheap_model", "openai/auto"].sort(),
     );
+  });
+});
+
+describe("toRegistryProviders — adapt the unified shared ProviderConfig", () => {
+  // The shared HelmConfigSchema's ProviderConfig (the SINGLE schema config-loader
+  // validates) is the registry's input source. toRegistryProviders bridges it so
+  // there is no second shape: { name, base_url, api_key_env, models[] }.
+  function shared(over: Partial<SharedProviderConfig> = {}): SharedProviderConfig {
+    return {
+      name: "openai",
+      alias: "openai",
+      type: "openai",
+      base_url: "https://api.openai.com/v1",
+      api_key_env: "OPENAI_API_KEY",
+      models: [{ alias: "cheap_model", provider_model: "gpt-4o-mini" }],
+      ...over,
+    } as SharedProviderConfig;
+  }
+
+  it("resolves distinct aliases to distinct providers + upstream models", () => {
+    const providers = toRegistryProviders([
+      shared(),
+      shared({
+        name: "deepseek",
+        alias: "deepseek",
+        base_url: "https://api.deepseek.com/v1",
+        api_key_env: "DEEPSEEK_API_KEY",
+        models: [{ alias: "deepseek/deepseek-v4-flash", provider_model: "deepseek-chat" }],
+      }),
+    ]);
+    const reg = createProviderRegistry(providers);
+
+    const a = reg.resolve("cheap_model");
+    const b = reg.resolve("deepseek/deepseek-v4-flash");
+    expect(a.ok && a.value.providerName).toBe("openai");
+    expect(a.ok && a.value.providerModel).toBe("gpt-4o-mini");
+    expect(a.ok && a.value.apiKeyEnv).toBe("OPENAI_API_KEY");
+    expect(b.ok && b.value.providerName).toBe("deepseek");
+    expect(b.ok && b.value.providerModel).toBe("deepseek-chat");
+    expect(b.ok && b.value.baseUrl).toBe("https://api.deepseek.com/v1");
+    expect(b.ok && b.value.apiKeyEnv).toBe("DEEPSEEK_API_KEY");
+  });
+
+  it("uses a fallback base_url when a provider omits one", () => {
+    const providers = toRegistryProviders([shared({ base_url: undefined })], {
+      fallbackBaseUrl: "https://fallback.example/v1",
+    });
+    const reg = createProviderRegistry(providers);
+    const r = reg.resolve("cheap_model");
+    expect(r.ok && r.value.baseUrl).toBe("https://fallback.example/v1");
   });
 });

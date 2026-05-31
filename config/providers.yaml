@@ -1,33 +1,45 @@
-# Upstream provider(s). Credentials are referenced by env var NAME only
-# (api_key_env) — never a plaintext key in the repo (docs/10, principle 7).
-# Phase 0 uses the first configured OpenAI-compatible provider.
+# Upstream providers (providers-multi). Credentials are referenced by env var
+# NAME only (api_key_env) — never a plaintext key in the repo (docs/10,
+# principle 7). lane/policy reference only the internal `alias`; `provider_model`
+# is the provider's real id and an internal supply-chain detail (principle 6).
+#
+# Unified shape (HelmConfigSchema.ProviderConfig — the SINGLE schema config-loader
+# AND the provider registry agree on; the old two-shape divergence is resolved):
+#   - name (or legacy `alias`): the provider id the registry/executor key on.
+#   - type: openai | anthropic | ...  (defaults to openai)
+#   - base_url?: per-provider; the test/e2e harness overrides every provider via
+#     HELM_PROVIDER_BASE_URL so the mock upstream serves all of them.
+#   - api_key_env: credential REFERENCE (env var name).
+#   - models[]: { alias -> provider_model }. A provider WITHOUT models[] is a
+#     Phase-0 passthrough provider whose lane aliases are back-filled against it.
+#
+# The registry resolves each alias to a SPECIFIC provider + model, and the
+# executor invokes THAT provider's client — so a lane's fallback chain can CROSS
+# providers. A duplicate alias across providers is rejected at build time
+# (fail-closed, principle 2).
 providers:
-  - alias: openai
+  # PRIMARY provider (providers[0]). Backs the default path and the Phase-0
+  # passthrough; its credential (OPENAI_API_KEY) is mandatory. The quality/cost &
+  # per-task lane aliases (cheap_model, default_good_model, best_reasoning_model,
+  # coding_capable_model, strict_json_model, vision_model, tool_use_model) are
+  # NOT listed here, so the registry back-fills them against THIS provider
+  # (provider_model == alias) — the single-provider passthrough still works. List
+  # them under `models[]` to pin each to a specific upstream model id when ready.
+  - name: openai
     type: openai
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
 
-# Provider Registry sample (provider.registry) — the richer per-model shape the
-# registry resolves. lane/policy reference only the internal `alias` (e.g.
-# cheap_model, openai/auto); `provider_model` is the provider's real id and an
-# internal supply-chain detail (principle 6). Credentials stay env-NAME-only via
-# `api_key_env` — never a plaintext key (principle 7). A duplicate alias across
-# providers is rejected at build time (fail-closed, principle 2). Wiring this
-# shape into HelmConfigSchema belongs to the lane/executor tasks; kept as a
-# reference until then.
-#
-# providers:
-#   - name: openai
-#     base_url: https://api.openai.com/v1
-#     api_key_env: OPENAI_API_KEY
-#     models:
-#       - alias: cheap_model
-#         provider_model: gpt-4o-mini
-#       - alias: openai/auto        # `*/auto` is the fallback tail (Lane Resolver)
-#         provider_model: gpt-4o
-#   - name: anthropic
-#     base_url: https://api.anthropic.com/v1
-#     api_key_env: ANTHROPIC_API_KEY
-#     models:
-#       - alias: best_reasoning_model
-#         provider_model: claude-opus-4
+  # SECONDARY provider — a genuinely DIFFERENT upstream with its own credential.
+  # The Layer-2 eval small-model alias (classifier.yaml eval.model =
+  # deepseek/deepseek-v4-flash) resolves HERE, proving aliases map to the correct
+  # provider+model rather than all collapsing onto the single primary. Add more
+  # models[] entries to route specific lanes to this provider (cross-provider
+  # fallback then spans openai <-> deepseek in chain order).
+  - name: deepseek
+    type: openai
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    models:
+      - alias: deepseek/deepseek-v4-flash
+        provider_model: deepseek-chat

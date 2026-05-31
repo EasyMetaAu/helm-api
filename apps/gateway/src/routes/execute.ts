@@ -6,19 +6,26 @@ import type {
   ProviderRegistry,
   RouteProviderAttempt,
 } from "@helm/core";
-import { checkCapability, UpstreamError } from "@helm/core";
+import { checkCapability, computeCostUsd, UpstreamError, usageFromBody } from "@helm/core";
 import type { CatalogEntry, InternalRequest } from "@helm/shared";
 import { makeHelmError } from "@helm/shared";
 
 // Gateway execution adapter — the `execute` injected into routeRequest. It walks
 // the resolved candidate chain (ExecutionPlan.candidate_chain) honoring the
 // EXECUTION-fallback rules (CLAUDE.md principle 5, docs/04):
-//   resolve alias (registry) -> circuit breaker gate (OPEN => skip) ->
-//   capability filter (incompatible => skip) -> provider invoke. First success
-//   wins; failures BEFORE the first valid chunk record a breaker failure and try
-//   the next candidate; a client abort is a NON-provider fault (no breaker
-//   failure, terminates the chain); chain exhaustion => structured
-//   `all_providers_failed`.
+//   resolve alias (registry) -> pick the RESOLVED provider's client (so a chain
+//   can CROSS providers) -> circuit breaker gate (OPEN => skip) -> capability
+//   filter (incompatible => skip) -> provider invoke. First success wins;
+//   failures BEFORE the first valid chunk record a breaker failure and try the
+//   next candidate; a client abort is a NON-provider fault (no breaker failure,
+//   terminates the chain); chain exhaustion => structured `all_providers_failed`.
+//
+// Multi-provider (providers-multi): each candidate alias resolves (via registry)
+// to a provider name + upstream model id. The executor invokes THAT provider's
+// client — so a fallback chain like [deepseek/.., openai/..] hits two different
+// upstreams in order. When the alias is unknown to the registry, or no client is
+// registered for the resolved provider, it falls back to `defaultProvider` (the
+// Phase-0 single-provider passthrough: lane aliases map 1:1 to the one upstream).
 //
 // Streaming (principle 8): for stream:true the provider stream is forwarded
 // UNBUFFERED. We peek the FIRST chunk to decide success vs. pre-first-chunk
@@ -26,7 +33,13 @@ import { makeHelmError } from "@helm/shared";
 // re-emits that first chunk followed by the rest — byte-for-byte, in order.
 
 export interface ExecuteAdapterDeps {
-  provider: ProviderClient;
+  /** Default/fallback provider client: used for an unknown alias OR a resolved
+   *  provider with no registered client (Phase-0 single-provider passthrough). */
+  defaultProvider: ProviderClient;
+  /** Per-provider clients keyed by provider NAME (registry providerName). When a
+   *  candidate resolves to one of these, its client is used → chains cross
+   *  providers. Optional: absent/empty => everything uses defaultProvider. */
+  providers?: Map<string, ProviderClient>;
   registry: ProviderRegistry;
   breaker: CircuitBreaker;
   /** modelKey -> capabilities; missing entry => capability filter is skipped. */
@@ -34,6 +47,10 @@ export interface ExecuteAdapterDeps {
   now: () => number;
   /** Abort signal for the current request (client disconnect). */
   signal: AbortSignal;
+  /** Structured log sink (safe fields only — NEVER key/payload, principle 7).
+   *  Optional: used to record a MISSING-pricing miss (cost left null, not a
+   *  crash). Absent → the miss is silent. */
+  log?: (level: string, msg: string, fields: Record<string, unknown>) => void;
 }
 
 function approxPromptTokens(req: InternalRequest): number {
@@ -71,26 +88,62 @@ function errorClassOf(err: unknown): string {
 
 // Build the `execute` callback bound to a single request's deps.
 export function createExecute(deps: ExecuteAdapterDeps) {
-  const { provider, registry, breaker, catalog, now, signal } = deps;
+  const { defaultProvider, providers, registry, breaker, catalog, now, signal, log } = deps;
+
+  // Cost of one served attempt = provider usage × catalog pricing (docs/07).
+  // Missing pricing (no catalog entry, or a half-filled pricing row) → null
+  // ("not measured", distinct from a measured 0) and a logged miss, NEVER a
+  // crash (principle 3). Streaming attempts have no usage at peek time → null.
+  const costOf = (providerModel: string, body: unknown): number | null => {
+    const pricing = catalog.get(providerModel)?.pricing;
+    const cost = computeCostUsd(pricing, usageFromBody(body));
+    if (cost === null) {
+      log?.("info", "cost.pricing_missing", { provider_model: providerModel });
+    }
+    return cost;
+  };
 
   return async function execute(
     plan: ExecutionPlan,
     req: InternalRequest,
   ): Promise<ExecuteOutcome> {
     const attempts: RouteProviderAttempt[] = [];
+    // Chain-exhaustion bookkeeping so we can tell apart the two "nobody served"
+    // outcomes (docs/07): a HARD capability mismatch (no candidate could ever
+    // satisfy the request → capability_unsatisfiable / 422) vs. transient
+    // provider failures (all_providers_failed / 502).
+    //   • capabilityPruned — at least one candidate was skipped by the capability
+    //     filter (known-incompatible).
+    //   • attemptedAny — at least one candidate actually reached the upstream
+    //     invoke (so a failure here is a provider fault, not a capability gap).
+    //     A model with NO catalog entry is fail-open: it is attempted, so it
+    //     counts here and never yields capability_unsatisfiable (don't over-prune).
+    //   • circuitSkipped — at least one candidate was skipped only because its
+    //     breaker was OPEN; that is a transient health signal, not a capability
+    //     gap, so it must NOT be reported as capability_unsatisfiable.
+    let capabilityPruned = false;
+    let attemptedAny = false;
+    let circuitSkipped = false;
 
     for (const alias of plan.candidate_chain) {
       const startedAt = now();
       const elapsed = () => Math.max(0, now() - startedAt);
 
-      // Resolve alias -> provider model. Unknown alias is a config gap; skip it
-      // (fail-open: never substitute a different model silently).
+      // Resolve alias -> { provider name, upstream model }. An unknown alias is a
+      // config gap: keep the alias as the model id and use the default provider
+      // (fail-open — never substitute a different model silently). A resolved
+      // alias selects BOTH the upstream model id AND the provider client (so the
+      // fallback chain can cross providers). When the resolved provider has no
+      // registered client, fall back to the default provider too.
       const resolved = registry.resolve(alias);
       const providerModel = resolved.ok ? resolved.value.providerModel : alias;
+      const provider =
+        (resolved.ok ? providers?.get(resolved.value.providerName) : undefined) ?? defaultProvider;
 
       // 1) Circuit breaker gate.
       const gate = breaker.canAttempt(providerModel);
       if (!gate.allow) {
+        circuitSkipped = true;
         attempts.push(skipRow(alias, gate.reason ?? "circuit_open", elapsed()));
         continue;
       }
@@ -107,10 +160,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           maxTokens: req.max_tokens,
         });
         if (!verdict.ok) {
+          capabilityPruned = true;
           attempts.push(skipRow(alias, verdict.skipReason ?? "capability", elapsed()));
           continue;
         }
       }
+      // Past the gates → this candidate is attempted against the upstream. A
+      // failure from here on is a PROVIDER fault, not a capability gap.
+      attemptedAny = true;
 
       // 3) Invoke the provider (stream or non-stream). We send the RESOLVED
       //    provider model (not the originally-requested alias) — the gateway
@@ -119,7 +176,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         if (req.stream) {
           const stream = await peekStream(provider, req, signal, providerModel);
           breaker.recordSuccess(providerModel);
-          attempts.push(okRow(alias, elapsed()));
+          // Streamed usage is not known at peek time → cost null (not measured).
+          attempts.push(okRow(alias, elapsed(), null));
           return {
             attempts,
             final: { status: "ok", alias, providerModel },
@@ -130,7 +188,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         const bodyReq = stripInternal(req, providerModel);
         const body = await provider.chatCompletion(bodyReq, { signal });
         breaker.recordSuccess(providerModel);
-        attempts.push(okRow(alias, elapsed()));
+        attempts.push(okRow(alias, elapsed(), costOf(providerModel, body)));
         return {
           attempts,
           final: { status: "ok", alias, providerModel },
@@ -179,21 +237,32 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       }
     }
 
-    // Chain exhausted (or empty) — the ONLY place all_providers_failed surfaces.
-    const errorClass =
-      plan.candidate_chain.length === 0 ? "lane_unavailable" : "all_providers_failed";
+    // Chain exhausted (or empty). Pick the structured terminal error (docs/07):
+    //   • empty chain                     → lane_unavailable (503)
+    //   • NO candidate was ever attempted AND ≥1 was capability-pruned AND none
+    //     was merely circuit-open         → capability_unsatisfiable (422): the
+    //     request's hard constraints (json/vision/tools/context) could not be met
+    //     by any known-incompatible candidate. A circuit-open skip is transient
+    //     (retryable), so its presence keeps us on all_providers_failed.
+    //   • otherwise                       → all_providers_failed (502): at least
+    //     one candidate was attempted and failed, or skips were transient.
+    let errorClass: "lane_unavailable" | "capability_unsatisfiable" | "all_providers_failed";
+    let message: string;
+    if (plan.candidate_chain.length === 0) {
+      errorClass = "lane_unavailable";
+      message = "lane has no candidates";
+    } else if (!attemptedAny && capabilityPruned && !circuitSkipped) {
+      errorClass = "capability_unsatisfiable";
+      message = "no candidate satisfies the request's capability constraints";
+    } else {
+      errorClass = "all_providers_failed";
+      message = "all providers in the candidate chain failed";
+    }
     return {
       attempts,
       final: {
         status: "error",
-        error: makeHelmError({
-          error_class: errorClass,
-          message:
-            errorClass === "lane_unavailable"
-              ? "lane has no candidates"
-              : "all providers in the candidate chain failed",
-          trace_id: req.request_id,
-        }),
+        error: makeHelmError({ error_class: errorClass, message, trace_id: req.request_id }),
       },
       body: null,
       stream: null,
@@ -257,7 +326,7 @@ function skipRow(alias: string, reason: string, latencyMs: number): RouteProvide
   };
 }
 
-function okRow(alias: string, latencyMs: number): RouteProviderAttempt {
+function okRow(alias: string, latencyMs: number, costUsd: number | null): RouteProviderAttempt {
   return {
     alias,
     skipped: false,
@@ -265,6 +334,6 @@ function okRow(alias: string, latencyMs: number): RouteProviderAttempt {
     status: "ok",
     error_class: null,
     latency_ms: latencyMs,
-    cost_usd: null,
+    cost_usd: costUsd,
   };
 }

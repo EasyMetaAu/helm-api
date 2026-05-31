@@ -88,6 +88,8 @@ export {
   HelmConfigSchema,
   type ProviderConfig,
   ProviderConfigSchema,
+  type ProviderModel,
+  ProviderModelSchema,
   type RateLimitConfig,
   RateLimitConfigSchema,
   type RateLimitQuota,

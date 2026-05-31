@@ -4,16 +4,24 @@ import {
   type ClassifierInput,
   type Complexity,
   classifyCascade,
+  computeCostUsd,
   createEvalCache,
   type EvalCache,
   type EvalModelRequest,
   type EvalModelResponse,
   type LanesConfig,
+  type MomentumStore,
   resolveLane as resolveLaneCore,
   runEvalCached,
   scoreRequest,
+  usageFromBody,
 } from "@helm/core";
-import type { ClassifierConfig, ClassifierRulesConfig, InternalRequest } from "@helm/shared";
+import type {
+  CatalogEntry,
+  ClassifierConfig,
+  ClassifierRulesConfig,
+  InternalRequest,
+} from "@helm/shared";
 
 // gateway.classify — the COMPOSITION ROOT that wires the framework-agnostic
 // three-layer cascade (classifier.cascade) into the routing orchestrator. The
@@ -134,6 +142,21 @@ export interface ClassifyAdapterDeps {
   now: () => number;
   /** Structured log sink (safe fields only). */
   log: (level: string, msg: string, fields: Record<string, unknown>) => void;
+  /** Session-momentum soft-state, injected by the composition root (server.ts) as
+   *  a process-wide SINGLETON so history persists across requests. The adapter
+   *  threads it into Layer-1 `scoreRequest` so momentum reads/writes history keyed
+   *  by `metadata.conversation_id` (mapped from `x-session-key`). OPTIONAL and
+   *  fail-open (CLAUDE.md principle 3): absent → momentum simply does not apply,
+   *  never an error; the engine ALSO no-ops when there is no session key. Only the
+   *  store port is supplied here — the clock and config come from the adapter's
+   *  own `now`/per-request `rulesCfg`, keeping TTL deterministic and config-driven. */
+  momentum?: { store: MomentumStore };
+  /** Capability/pricing catalog (modelKey → entry), injected by the composition
+   *  root so the eval call's OWN token usage is converted to a USD self-cost
+   *  (eval_usd, docs/07) when the upstream does not bill it inline. OPTIONAL and
+   *  fail-open (principle 3): absent entry / missing pricing → eval_usd null (not
+   *  measured, distinct from a measured 0), NEVER a crash. */
+  catalog?: Map<string, CatalogEntry>;
 }
 
 // Per-request classify overrides (composition-root concern; defaults come from
@@ -159,7 +182,7 @@ export type ClassifyFn = (
  * collapse onto a single eval call (the cache-hit invariant). Never throws.
  */
 export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
-  const { getClassifierConfig, lanes, provider, now, log } = deps;
+  const { getClassifierConfig, lanes, provider, now, log, momentum, catalog } = deps;
 
   // The eval cache is content-hash keyed and shared across requests so identical
   // prompts collapse onto one eval call. But a cached verdict is only valid under
@@ -224,18 +247,21 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
       const msg = (choices[0] as { message?: { content?: unknown } }).message;
       if (msg && typeof msg.content === "string") text = msg.content;
     }
-    // Surface the eval self-cost if the provider reported one (OpenAI-shaped
-    // `usage.cost_usd` / top-level `cost_usd`). Many upstreams do not bill a cost
-    // back inline → null (unknown, not a measured 0). Kept SEPARATE from
-    // completion cost downstream (docs/07; principle 5). NEVER a key/payload.
+    // Eval self-cost (docs/07; SEPARATE from completion cost, principle 5; NEVER
+    // a key/payload). Prefer an inline cost the upstream billed back (OpenAI-shaped
+    // `usage.cost_usd` / top-level `cost_usd`); otherwise convert the eval call's
+    // OWN token usage × the catalog pricing for the eval model. Missing pricing
+    // (no entry / half-filled row) → null (unknown, not a measured 0), no crash.
     const usage = (res as { usage?: { cost_usd?: unknown } }).usage;
     const inlineCost = (res as { cost_usd?: unknown }).cost_usd;
-    const costUsd =
+    const billed =
       typeof usage?.cost_usd === "number"
         ? usage.cost_usd
         : typeof inlineCost === "number"
           ? inlineCost
           : null;
+    const costUsd =
+      billed ?? computeCostUsd(catalog?.get(modelReq.model)?.pricing, usageFromBody(res));
     return { text, cost_usd: costUsd };
   };
 
@@ -270,7 +296,16 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
 
     const result: CascadeResult = await classifyCascade(input, {
       runRules: () => {
-        const r = scoreRequest(req, { cfg: rulesCfg, approxTokens: tokens });
+        // Thread the injected momentum store into Layer-1 so the engine reads/
+        // writes session history keyed by metadata.conversation_id. The clock and
+        // momentum config come from the adapter's own `now` and the LIVE rulesCfg
+        // (TTL/window stay config-driven, principle 2). Absent store → omit deps
+        // .momentum so the engine skips momentum entirely (fail-open, principle 3).
+        const r = scoreRequest(req, {
+          cfg: rulesCfg,
+          approxTokens: tokens,
+          momentum: momentum ? { store: momentum.store, now, cfg: rulesCfg } : undefined,
+        });
         return { complexity: r.complexity, task_type: r.task_type, confidence: r.confidence };
       },
       runEvalCached: (cacheInput) =>

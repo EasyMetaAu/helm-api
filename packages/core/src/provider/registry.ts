@@ -15,11 +15,12 @@
 //    (principle 2), rather than letting a later provider silently shadow an
 //    earlier one at runtime.
 
-// A single provider's config (post-validation). Note the NAME divergence from
-// `@helm/shared`'s ProviderConfig (`alias`/`type`, no models[]): that Phase-0
-// schema describes the OpenAI-compatible passthrough provider; this registry
-// shape is the richer per-model mapping the spec contracts. The two are kept
-// distinct on purpose — see implementation-notes 2026-05-31.
+import type { ProviderConfig as SharedProviderConfig } from "@helm/shared";
+
+// A single provider's config (post-validation). This is structurally a SUBSET of
+// `@helm/shared`'s unified ProviderConfig (which now also carries name + models[]
+// — the divergence noted in implementation-notes provider.registry is RESOLVED:
+// one schema validates config, `toRegistryProviders` adapts it to this shape).
 export interface ProviderConfig {
   name: string; // provider id, e.g. "openai" / "anthropic" / "openrouter"
   base_url: string;
@@ -99,4 +100,32 @@ export function createProviderRegistry(providers: ProviderConfig[]): ProviderReg
       return [...byAlias.keys()];
     },
   };
+}
+
+// Adapt the unified shared ProviderConfig[] (validated by HelmConfigSchema, the
+// SINGLE source of truth config-loader uses) into the registry's ProviderConfig[].
+// This is the bridge that removes the old two-shape divergence: config-loader and
+// the registry now agree on one schema; this only re-keys it for build.
+//
+// - Provider id := shared `name` (the schema already derives it from `alias` when
+//   `name` is absent — Phase-0 back-compat).
+// - `base_url` := the provider's own base_url, else the injected fallback (e.g.
+//   the HELM_PROVIDER_BASE_URL the e2e/test harness points at the mock upstream),
+//   else "" (a provider with models[] but no resolvable base_url is a config gap
+//   the caller surfaces).
+// - Credentials stay env-NAME only (api_key_env) — never a plaintext key.
+// - Providers WITHOUT models[] (the Phase-0 passthrough provider) contribute no
+//   aliases here; their aliases come from the active lanes (mapped 1:1 to the
+//   primary provider by the caller). Passing them through with empty models[] is
+//   harmless (no aliases registered).
+export function toRegistryProviders(
+  providers: ReadonlyArray<SharedProviderConfig>,
+  opts: { fallbackBaseUrl?: string } = {},
+): ProviderConfig[] {
+  return providers.map((p) => ({
+    name: p.name,
+    base_url: p.base_url ?? opts.fallbackBaseUrl ?? "",
+    api_key_env: p.api_key_env,
+    models: p.models.map((m) => ({ alias: m.alias, provider_model: m.provider_model })),
+  }));
 }

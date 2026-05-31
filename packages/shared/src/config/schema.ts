@@ -30,13 +30,51 @@ export const AuthConfigSchema = z.object({
   bootstrap: BootstrapConfigSchema,
 });
 
-// Credentials are stored as a REFERENCE (env var name) only — never plaintext.
-export const ProviderConfigSchema = z.object({
+// One alias -> provider_model mapping inside a provider. The internal `alias`
+// is what lanes/policies reference (principle 6); `provider_model` is the
+// provider's real model id (internal supply-chain detail). Both required so a
+// half-specified mapping fails closed (principle 2).
+export const ProviderModelSchema = z.object({
   alias: z.string().min(1),
-  type: z.string().min(1), // openai | anthropic | ... (not locked in MVP)
-  base_url: z.url().optional(),
-  api_key_env: z.string().min(1), // credential reference: env var name, not plaintext
+  provider_model: z.string().min(1),
 });
+
+// Unified provider config — the SINGLE shape both config-loader and the provider
+// registry agree on (reconciles the two divergent ProviderConfig shapes noted in
+// implementation-notes provider.registry). A provider carries:
+//   - a stable id: `name` (preferred) OR the legacy `alias` (Phase-0 passthrough
+//     used `alias`); when only `alias` is given, `name` is derived from it so the
+//     registry always has a provider id.
+//   - `type` (openai | anthropic | ...): optional, defaults to "openai".
+//   - `base_url?`, `api_key_env` (credential REFERENCE — env var NAME, never a
+//     plaintext key, principle 7).
+//   - `models[]`: per-model alias mapping. OPTIONAL (defaults to []) so the
+//     Phase-0 OpenAI-compatible passthrough provider (no models[]) keeps working.
+// Credentials are stored as a REFERENCE (env var name) only — never plaintext.
+export const ProviderConfigSchema = z
+  .object({
+    // At least one of name/alias identifies the provider. `alias` is the legacy
+    // Phase-0 field; `name` is the registry-facing id. Kept optional individually
+    // and reconciled by the transform below (refine guards "neither given").
+    name: z.string().min(1).optional(),
+    alias: z.string().min(1).optional(),
+    type: z.string().min(1).default("openai"), // openai | anthropic | ... (not locked in MVP)
+    base_url: z.url().optional(),
+    api_key_env: z.string().min(1), // credential reference: env var name, not plaintext
+    models: z.array(ProviderModelSchema).default([]),
+  })
+  .refine((p) => p.name !== undefined || p.alias !== undefined, {
+    message: "provider requires `name` or `alias`",
+    path: ["name"],
+  })
+  .transform((p) => ({
+    // Single source of truth for the provider id: prefer `name`, fall back to the
+    // legacy `alias`. Both are kept so existing consumers (auth/server) that read
+    // `alias` still work, while the registry reads `name`.
+    ...p,
+    name: p.name ?? (p.alias as string),
+    alias: p.alias ?? (p.name as string),
+  }));
 
 // A single quota dimension pair. 0 = that dimension is unlimited (skip the check).
 export const RateLimitQuotaSchema = z.object({
@@ -119,6 +157,7 @@ export const HelmConfigSchema = z.object({
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 export type BootstrapConfig = z.infer<typeof BootstrapConfigSchema>;
 export type AuthConfig = z.infer<typeof AuthConfigSchema>;
+export type ProviderModel = z.infer<typeof ProviderModelSchema>;
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type RateLimitQuota = z.infer<typeof RateLimitQuotaSchema>;
 export type RateLimitQuotaOverride = z.infer<typeof RateLimitQuotaOverrideSchema>;

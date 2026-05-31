@@ -24,6 +24,9 @@ export {
   type FilterResult,
   type SkipReason,
 } from "./capability/filter.js";
+export { computeCostUsd, type TokenUsage, usageFromBody } from "./catalog/cost.js";
+export { CatalogError, type LoadCatalogDeps, loadCatalog } from "./catalog/index.js";
+export { type LoadRuntimeCatalogOptions, loadRuntimeCatalog } from "./catalog/load.js";
 export {
   type AttemptDecision,
   type BreakerDeps,
@@ -276,6 +279,7 @@ export {
   type ResolvedProvider,
   type ResolveError,
   type ResolveResult,
+  toRegistryProviders,
 } from "./provider/registry.js";
 export {
   createRateLimiter,

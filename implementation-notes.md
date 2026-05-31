@@ -5,6 +5,106 @@
 
 ---
 
+## 2026-05-31 · cost-wire — 用 provider usage × catalog pricing 算出真实成本，填满 cost_usd/eval_usd/cost_breakdown（task cost-wire、docs/07，原则 1/2/3/5）
+
+**关闭的 gap**：`admin.requests-richfields` 时期落下的残留——`cost_usd`/`eval_usd` 多数为 null：决策记录的成本字段管线**早已就位**（`route-request.ts` 已把 `Σ attempts.cost_usd → completion_usd`、`evalUsd → eval_usd`、`total = completion+eval`，且 route-request.test 已钉死 total 不变式），但**两个源头从不产数**——`execute.ts` 的 `okRow` 恒写 `cost_usd:null`（从不读 usage×pricing），eval 的 `invokeModel` 只认上游极少回传的 inline `cost_usd`。`capability-wire` 刚把真实 catalog（含 pricing）接进运行时，本任务复用它做**成本换算接线 + 测试**，未重写任何装配逻辑。
+
+**落地（先红后绿；四闸全绿 typecheck=0 / lint=exit0（14 条 pre-existing warning，均不在改动文件）/ test 917（无回归基线）/ build=0）**：
+
+- **新增 IO-free 成本换算 `packages/core/src/catalog/cost.ts`（`computeCostUsd` + `usageFromBody`）**：pricing 按**每百万 token** 报价，`cost = prompt/1e6*input + completion/1e6*output`。**缺 pricing → null**（无 catalog 条目、或 input/output 任一为 null 的半填行）——「未测量」，与「测量得 0」严格区分（原则3 fail-open，绝不抛）。`usageFromBody` 防御性抽取 OpenAI 形 `usage.prompt_tokens/completion_tokens`，缺字段→0。framework-/network-free（原则1）。从 `@helm/core` barrel 导出。
+- **`execute.ts`（completion 成本接缝）**：非流式成功路径上，按 resolved `providerModel` 查 `catalog.get(...)?.pricing`，`computeCostUsd(pricing, usageFromBody(body))` 写进 `okRow` 的 `cost_usd`；缺 pricing → null + 记一条 `cost.pricing_missing` 日志（新增可选 `log` dep，安全字段 only，原则7）。**流式 attempt 在 peek 时拿不到 usage → cost null**（已注释）。`okRow` 增 `costUsd` 形参。
+- **`classify.ts`（eval 自费接缝）**：`buildClassifyAdapter` 增可选 `catalog` dep；`invokeModel` 现**优先**上游 inline `cost_usd`（罕见），否则 `computeCostUsd(catalog?.get(modelReq.model)?.pricing, usageFromBody(res))`——eval 模型 id（`config.model`，即发上游的 `model:`）就是 catalog key。缺 pricing → eval_usd null，不崩。该值经既有 cascade → `Classification.eval_usd` → `cost_breakdown.eval_usd` 透出（与 completion 分离，原则5、docs/07）。
+- **`server.ts`（composition root，原则1）**：catalog 加载上移到 `buildClassifyAdapter` 之前，**同一个 catalog 实例**既注入 `createExecute`（completion 成本 + 能力过滤）又注入 `buildClassifyAdapter`（eval 成本）；`createExecute` 也接上 `log`。Debug UI 现显示真实数字。
+
+**TDD 钉死**：
+- `packages/core/src/catalog/cost.test.ts`（4 例）：1000prompt+500completion×($2.5,$10)/MTok=0.0075（手算）；缺 token 当 0；pricing undefined→null；input/output 任一 null→null。
+- `apps/gateway/src/routes/execute.test.ts`（+2 例）：已完成请求 usage×pricing 记 `cost_usd≈0.0075`；无 pricing 条目的模型 `cost_usd:null` 不崩。
+- `apps/gateway/src/routes/classify.cost.test.ts`（新文件，2 例）：跑了 eval（`decided_by:"eval"`）的请求把 eval usage(400/100)×($0.15,$0.60)/MTok 记成 `eval_usd≈0.00012`（手算，与 completion 分离）；eval 模型无 pricing → `eval_usd:null` 不崩。
+- `cost_breakdown.total = completion+eval` 不变式由既有 `route-request.test.ts` 钉死（eval 0.00003 + completion 0.004 = 0.00403），本任务只补全其两个数字来源。
+
+**spec 未覆盖 / 自己拍板的取舍**：
+
+- **`routing_usd` 不入 schema**：spec 文案提「routing_usd stays 0（纯 Layer-1 无 billable cost）」，但 `CostBreakdownSchema` 只有 `eval_usd`/`completion_usd`/`total_usd`（admin.requests-richfields 定的契约）。纯 Layer-1 路由确无独立计费源——它要么落在 completion（被路由的那次 attempt），要么落在 eval（Layer-2）。引入恒为 0 的 `routing_usd` 字段只会让 `total = completion+eval+0` 多一个噪音项并需改 schema+UI+既有测试。故**按既有 schema 落地，`routing_usd` 隐含为 0**（不存在独立路由计费），不新增字段（不回归 admin.requests-richfields 契约）。
+- **inline cost 优先于换算**：若上游真回传了 `usage.cost_usd`/顶层 `cost_usd`（如某些聚合网关），那是**实际计费**，比按 catalog 名义价换算更准——故 eval 路径保留「inline 优先，缺则换算」。completion 路径上游一般不回 inline cost，直接换算。
+- **流式 completion 成本恒 null**：`peekStream` 只 peek 首 chunk 判成败，不消费整流（原则8 不缓冲），故 usage（在末尾 chunk）在 attempt 记录时不可得 → `cost_usd:null`。要给流式算成本需在协议层累加流式 usage 并回填决策记录（见 TODO）。
+- **eval catalog key 命名空间**：eval 成本命中 pricing 取决于 `config.eval.model`（发上游的裸 model id）等于 catalog key。当前 repo `config/` 的 eval alias 经 registry 解析到 `deepseek-chat` 等，未必在 generated catalog 里 → 真实部署下 eval_usd 可能仍 null（fail-open），要计费只需在 `pricing.yaml` 为该 eval model 加条目（原则2 config 驱动），无需改代码。同 capability-wire 条目记的「catalog key 命名空间未统一映射层」TODO。
+
+**残留 TODO**：(1) 流式 completion attempt 无成本（usage 在流尾，peek 时不可得）——需协议层累加流式 usage 回填 `provider_attempts[].cost_usd`，另立任务。(2) catalog key（裸 model id）与 provider 别名（`provider/model`）命名空间未统一映射层（承自 capability-wire），跨 provider 同名模型的 pricing 命中靠 `providerModel` 精确等于 catalog key。(3) eval 经 registry-resolved provider 发起 + 按其 pricing 计费（承自 providers-multi 的 eval-path TODO）——当前 eval 用注入的单 `provider`，catalog key 取 `config.eval.model`，若该 id 不在 catalog 则 eval_usd null。
+
+---
+
+## 2026-05-31 · capability-wire — 把真实 catalog 接进能力过滤器，让不兼容候选被真正剪除（task capability-wire、docs/02/04/07、原则 1/2/3/5/6）
+
+**关闭的 gap**：`## 2026-05-31 · providers-multi` 条目残留 TODO (1) ——「catalog 仍传空 Map（能力过滤 fail-open 跳过）」。`server.ts` 之前在 `createExecute({ ..., catalog })` 处传 `new Map<string, CatalogEntry>()`，于是 `execute.ts` 的能力过滤分支 `const caps = catalog.get(providerModel)?.capabilities` 恒 `undefined` → 每个候选都「无 catalog 数据」→ fail-open 跳过过滤。**building blocks 早已就位**（`capability/filter.ts` 的 `checkCapability`、`catalog/index.ts` 的 `loadCatalog` 纯合并、`execute.ts` 已写好整套 per-candidate 过滤 + 显式 skip_reason、`capability_unsatisfiable`/422 已在 error schema + 两个 protocol adapter 全链路就绪）——本任务只做**正确接线 + 终态错误区分 + 测试**，复用既有件，未重写任何逻辑。
+
+**落地（先红后绿；五闸全绿 typecheck=0 / lint=exit0（14 条 pre-existing warning，均不在改动文件）/ test 909（+20，原 889 基线无回归）/ build=0 / e2e 34）**：
+
+- **新增 catalog 文件加载器 `packages/core/src/catalog/load.ts`（`loadRuntimeCatalog`）**：读签入的 generated catalog（`generated/catalog.json`，经 `import.meta.url` 相对定位，故 core 从 src 跑（tsx/测试）或从 deploy 出的 src 入口跑都能找到）+ 读 `configDir` 下的 `capabilities.yaml`/`pricing.yaml`，喂给既有的 IO-free `loadCatalog` 合并（manual 覆盖 generated，新 modelKey 可由 override 引入）。**fail-closed**：generated 缺失/损坏或任一 override 非法 → 抛 `CatalogError`（principle 2）；override 文件缺失 → 当作 absent（schema 默认 `{}`）。IO 用 `readFile` 注入（测试控 override yaml、读真实 generated）。schema-first：generated 用 `GeneratedCatalogSchema` 校验，无重复类型。core 可读文件（同 `config/loader.ts`），只是不 import 框架（principle 1）。
+- **`@helm/core` index 导出** `loadRuntimeCatalog`/`loadCatalog`/`CatalogError`/types（此前 catalog 模块完全未从 barrel 导出）。
+- **`server.ts`（composition root，原则1）**：把第 283-285 行的空 Map 换成 `loadRuntimeCatalog({ configDir: opts.configDir ?? "./config" })`，并 import `loadRuntimeCatalog`。catalog 现注入 `createExecute`，能力过滤真正生效。
+- **`execute.ts` 终态错误区分（docs/07）**：原本链耗尽恒返回 `all_providers_failed`(502)。新增三个 bookkeeping 标志——`capabilityPruned`（≥1 候选被能力过滤剪除）、`attemptedAny`（≥1 候选真正 invoke 了上游；**无 catalog 条目的 unknown 模型走到 invoke，故计入 → 永不被过度剪除**）、`circuitSkipped`（≥1 候选仅因熔断 OPEN 跳过——瞬时健康信号，可重试，不算能力缺口）。链耗尽时：空链→`lane_unavailable`(503)；`!attemptedAny && capabilityPruned && !circuitSkipped`→`capability_unsatisfiable`(422)；否则→`all_providers_failed`(502)。
+
+**TDD 钉死**：
+- `packages/core/src/catalog/load.test.ts`（5 例）：无 override 加载 generated（known key 能力齐全、source=generated）；capabilities.yaml 单字段覆盖（manual 赢、未覆盖字段透传、source 变 override）；override 引入全新 modelKey；**真实 repo `config/` 端到端**（无注入，跑 `buildServer` 实际调用的那条 `configDir:"config"` 路径，断言 `gpt-4o` 能力非空）；非法 override fail-closed 抛 `CatalogError`。
+- `apps/gateway/src/routes/execute.test.ts`（+4 例，对齐 spec TDD）：needs_json 跳过缺 json 的 A（记 `skip_reason:"no_json_support"`）落到 B；vision 请求剪除非 vision 模型落到 vision 模型；全部被能力剪除 → `capability_unsatisfiable` 且 `http_status:422`、上游从未被调；unknown-to-catalog 模型不被过度剪除（known-incompatible 的 A 跳过，无条目的 u 仍被 attempt 且成功）。
+
+**spec 未覆盖 / 自己拍板的取舍**：
+
+- **skip_reason 仍是裸 `SkipReason`（`no_json_support` 等），不是 spec 文案的 `capability:...` 前缀形**：`execute.ts` 直接用 core `checkCapability` 返回的 `SkipReason` 枚举写入 `provider_attempts[].skip_reason`，且既有通过测试（providers-multi 时期）正断言裸值 `no_tool_support`。spec 的 `capability:...` 是示意；既有测试 + `SkipReason` 枚举是权威契约（不回归原则）。`FallbackDeps.CapabilityVerdict` 注释里的 `capability:json` 是 core executor.fallback 另一条（未走生产路径的）适配器形态，与 gateway `execute.ts` 无关。
+- **`capability_unsatisfiable` 仅当「全部候选被能力剪除且无任何 invoke 且无熔断跳过」**：若链里混入一个 `circuit_open` 跳过（瞬时、可重试），即便其余被能力剪除，也返回 `all_providers_failed`(502) 而非 422——因为那个熔断候选**本可能**满足能力，把它报成「能力不可满足」会误导客户端去改请求而非重试。这是 spec「no candidate qualifies」的保守落地：只在确实**纯能力缺口**时报 422。
+- **catalog key 与运行时 providerModel 的匹配现状**：generated catalog 的 key 是裸 model id（`gpt-4o`/`claude-3-5-*`/`gemini-1.5-pro`），而当前 repo `config/` 的 lane 别名（`cheap_model` 等）回填到 primary 时 `provider_model===alias`、唯一显式 model 是 `deepseek-chat`——**都不在 generated catalog 里**，故运行时每个候选都 unknown→fail-open→不剪除，**e2e 路由行为完全不变**（已实测 e2e 34 全绿）。要让某 lane 真正受能力过滤约束，只需在 `providers.yaml` 的 `models[].provider_model` 用 catalog 里的真实 model id（如 `gpt-4o`），或在 `capabilities.yaml` 为该 provider_model 加条目即可，无需改代码（原则2：config 驱动）。
+
+**残留 TODO**：(1) 上条 providers-multi 的 (2)(3) TODO（duplicate-alias 启动诊断、eval alias 经 registry-resolved provider 发起）未变，仍在。(2) 能力过滤的 skip_reason 未带 `capability:` 命名空间前缀；若 Debug UI 想把「能力类跳过」与「熔断/free_429」在视觉上聚类，可在 schema 层引入带前缀的稳定枚举（需同步 UI + 既有测试，另立任务）。(3) generated catalog 的 model key 命名空间（裸 id）与 provider 别名命名空间（`provider/model`）未统一映射层；现状靠 `provider_model` 精确等于 catalog key 才命中过滤，跨 provider 同名/带前缀模型的 key 归一（如 `openai/gpt-4o` ↔ `gpt-4o`）留待 catalog 命名规范任务。
+
+## 2026-05-31 · providers-multi — provider registry 做实、多 provider 别名解析到正确 provider+model（task providers-multi、docs/02/04，原则 1/2/5/6/7）
+
+**关闭的 gap**：`## 2026-05-31 · provider.registry` 条目记的两条残留——(a) registry 的 `ProviderConfig` 与 `@helm/shared` 的 `ProviderConfig` **命名分歧**（shared 是 `{alias,type,无 models[]}` 直通形，registry 是 `{name,base_url,api_key_env,models[]}` 多 model 形）；(b) `server.ts` 的 `buildRegistry` 把**所有** lane 别名映射到**同一个** mock provider（`provider_model === alias`，全部走唯一上游）。本任务统一 schema 并把 registry 接进生产执行路径，让别名解析到正确的 provider+model，**替换**了上述条目里的两条 TODO（命名分歧、全 alias→单一 mock）以及 `routing.pipeline` 条目里「registry 仍是『全 lane alias → 唯一 mock provider』」的残留。
+
+**落地（先红后绿；五闸全绿 typecheck=0 / lint=exit0（14 条 pre-existing warning，均不在改动文件）/ test 900（+9，原 891 基线无回归）/ build=0 / e2e 34）**：
+
+- **统一 schema（唯一来源，z.infer）**：`@helm/shared` 的 `ProviderConfigSchema` 扩展为**一个**两者都认的形状——`name`(或 legacy `alias`，二选一必填，refine 守卫「都没给」)、`type`(默认 openai)、`base_url?`、`api_key_env`(凭证按 env 名引用，原则7)、`models[]`(`{alias,provider_model}`，**默认 `[]`** 以让 Phase-0 无 `models[]` 的直通 provider 仍通过)。`.transform` 派生 `name := name ?? alias`、`alias := alias ?? name`，故既有读 `alias` 的消费方（auth/server）不破，registry 读 `name`。新增 `ProviderModelSchema`/`ProviderModel` 导出。**config-loader 与 registry 现共用这一个 schema，命名分歧消除。**
+- **registry 消费 shared 形**：`packages/core/src/provider/registry.ts` 的 `ProviderConfig` 接口现是 shared 形的**结构子集**；新增 `toRegistryProviders(shared[], {fallbackBaseUrl?})` 把 `HelmConfigSchema` 校验出的 `ProviderConfig[]` 桥接成 registry 输入（`name`、`base_url ?? fallbackBaseUrl ?? ""`、env 名、`models[]`）。`createProviderRegistry` 行为不变（distinct alias→distinct provider/model；unknown alias→结构化 `{ok:false,unknown_alias}` 不抛；duplicate alias 建期 `RegistryBuildError` fail-closed）。
+- **executor 跨 provider（executor.fallback）**：`apps/gateway/src/routes/execute.ts` 的 `ExecuteAdapterDeps` 由单 `provider` 改为 `defaultProvider` + 可选 `providers: Map<providerName, ProviderClient>`。每个候选别名经 registry 解析出 `{providerName, providerModel}`，executor **按 providerName 选对应 provider 客户端**（拿不到则回落 `defaultProvider`），并把 `providerModel` 发上游——于是 fallback 链可**跨 provider**（如 `[deepseek/.., openai/..]` 先后打两个上游）。TDD 钉死「两-provider fallback 链按序各调一次」+「unknown→default」（Phase-0 直通不回归）。
+- **server.ts 接线（composition root，原则1）**：`buildProviderClients(providers, fallbackBaseUrl, timeoutMs)` 为**每个**配置 provider 建一个 OpenAI 兼容客户端、按 `name` 入 Map，凭证仅取各自 `api_key_env` 指向的 env（缺凭证则跳过该 provider，不阻塞其它；primary 缺凭证仍 fatal）。`buildRegistry` 改为消费**全部** `config.providers`：(1) 显式 `models[]` 别名 + (2) 活动 lanes 里**未被显式映射**的别名**回填**到 primary（`provider_model===alias`，保 Phase-0 直通）。`createExecute` 现收 `defaultProvider` + `providers`。
+- **config 样例**：`config/providers.yaml` 改成统一多-provider 形——primary `openai`（无 `models[]`，per-task lane 别名回填到它）+ secondary `deepseek`（自带 `api_key_env: DEEPSEEK_API_KEY` 与 `deepseek/deepseek-v4-flash → deepseek-chat`，即 classifier eval 小模型 alias）。
+
+**spec 未覆盖 / 自己拍板的取舍**：
+
+- **未把 e2e 用的 quality/cost 别名（`cheap_model`/`default_good_model`/…）remap 到真实 model id**：e2e routing 用真实 repo `config/`，且断言 `body.model === alias`（mock 回声 executor 发的 `providerModel`），mock 的故障注入哨兵也按 `FAIL_PRIMARY_MODEL="cheap_model"` 匹配。若把这些别名 remap，`body.model` 会变 `gpt-4o-mini` 且哨兵失配 → e2e 回归。故这些别名**保持回填到 primary**（`provider_model===alias`），多-provider 能力用 secondary `deepseek` provider + eval alias 实证（e2e 不回声断言它）。要把具体 lane 钉到具体上游 model，只需在 `providers.yaml` 的对应 provider `models[]` 增条目即可，registry/executor 自动跨 provider。
+- **eval 小模型路径仍直连 primary provider，不走 registry/executor**：`buildClassifyAdapter` 的 eval 仍经注入的单 `provider`（同 base_url）调用（见 e2e.eval 条目）。本任务把 eval alias 纳入了 registry 解析（resolve 得到 deepseek），但执行路径未改——eval 是分类层旁路、非候选链成员，无 lane 引用它，故不进 execute；保持非回归。**残留 TODO**：若要 eval 也经 registry 解析到的 provider 客户端发起（真正按 provider 计费/熔断），需在 classify 适配器注入 registry+provider Map，另立任务。
+- **`HELM_PROVIDER_BASE_URL` 覆盖所有 provider**：test/e2e 该 env 一旦设置，server.ts 把**每个** provider 的 base_url 都改写成它（+ 作为 `fallbackBaseUrl`），让 mock 上游服务所有 provider；生产不设则各 provider 用自己的 base_url。
+- **缺凭证的 secondary provider 启动期跳过而非 fail-closed**：principle 2 的 fail-closed 是针对**非法配置**；一个未注入凭证的 secondary（如 e2e 下 `DEEPSEEK_API_KEY` 未设）是**部署期凭证缺失**，跳过它只让其别名在 resolve/execute 时回落 default（fail-open 信号），不阻塞其余 provider 启动。primary 缺凭证仍 fatal（它背书 default 路径）。
+
+**残留 TODO**：(1) catalog 仍传空 Map（能力过滤 fail-open 跳过）——真实 catalog 接入运行时换算另立任务。(2) duplicate-alias 跨 provider 在建期抛 `RegistryBuildError`，server.ts 未捕获翻译成更友好的启动诊断（当前直接冒泡 → 进程退出，符合 fail-closed，但诊断可更具体）。(3) eval alias 经 registry-resolved provider 发起（见上）。
+
+---
+
+## 2026-05-31 · momentum-wire — 把会话动量 store 注入生产 classify 路径，让动量端到端读写历史（task momentum-wire、docs/03 §第 1 层会话动量、docs/02、原则 1/2/3/4/7）
+
+**关闭的 gap**：`## 2026-05-31 · gateway.session-key` 条目末尾的残留 TODO —— "composition root（`server.ts`）目前未把 `createMemoryMomentumStore()` 注入级联编排器的 `scoreRequest` deps.momentum；即便 conversation_id 现已正确填充，生产 cascade 仍需把 momentum store 接进 classify deps 才能真正读写历史"。本任务接通这一段（已就地标注 RESOLVED）。
+
+**根因（两段断路中的第二段）**：gateway.session-key 已把 `x-session-key` → `metadata.conversation_id` 接通（第一段），但 `buildClassifyAdapter` 从不构造 momentum store，`runRules` 里 `scoreRequest(req, { cfg, approxTokens })` **不传 `momentum`** → `ScoreRequestDeps.momentum` 恒 undefined → engine 跳过 `applyMomentum`/`recordMomentum`。于是即便 sessionKey 正确流入，生产 Layer-1 动量仍是死代码（fail-open 到无动量：安全但失能）。
+
+**落地（先红后绿；四闸全绿 typecheck=0 / lint=exit0（14 条 pre-existing warning，均不在改动文件）/ test 891（+2，原 889 基线无回归）/ build=0）**：
+
+- **`apps/gateway/src/routes/classify.ts`（classify 适配器，唯一改动的接缝）**：
+  - `ClassifyAdapterDeps` 新增可选 `momentum?: { store: MomentumStore }`（从 `@helm/core` 导入 `MomentumStore` 类型）。**只注入 store 端口**——时钟用适配器自己的 `now`、动量配置用每请求的 live `rulesCfg`（即 `config.classifier.rules.momentum`），所以 TTL/window 仍由配置驱动（原则2），且热生效（admin 改 classifier → getter 下次读到新 momentum 块）。
+  - `runRules` 闭包里把 `momentum` 接进 `scoreRequest`：`momentum: momentum ? { store: momentum.store, now, cfg: rulesCfg } : undefined`。store 缺失 → 传 `undefined` → engine 完全跳过动量（fail-open，原则3）。engine 自身在 `sessionKey===null`（无 x-session-key）时也 no-op，双重 fail-open。
+- **`apps/gateway/src/server.ts`（composition root）**：`buildServer()` 里 `const momentumStore = createMemoryMomentumStore()` —— **进程级单例，绝不每请求重建**（在 `classify` 适配器构造之前实例化一次），注入 `buildClassifyAdapter({ ..., momentum: { store: momentumStore } })`。core 定义端口 + 出 in-memory Map 实现，server.ts 注入（原则1：core 不 import 框架、不绑具体 DB）。
+
+**TDD 钉死（`apps/gateway/src/routes/classify.momentum.test.ts`，2 例）**：
+- **同 session 两条短跟随共享动量**：用 REAL `createMemoryMomentumStore` + REAL 适配器（server.ts 接的那段），schema 解析的真配置（动量默认值＝生产值：enabled、ttl_sec 1800＝30 分钟、history_size 5＝last-5、max_history_weight 0.6）。先发一条 reasoning 重 turn（写回历史），再在**同一 conversation_id** 下发短消息 "yes"（动量把它拉高）；对照组：**无 session key**（`conversation_id:null`）下同样的 "yes" —— 断言共享 session 的跟随被拉到比无 key 对照**更高**的 complexity 档（`rank[withHistory] > rank[withoutHistory]`）。这正是 spec 要求的"第二轮 lean on momentum / 无 session key 不受影响"。
+- **无 store 仍 fail-open**：不传 `momentum` dep，适配器照常分类、绝不抛错；短跟随凭自身判 `simple`（历史无法跨请求承接）。
+
+**spec 未覆盖 / 自己拍板的取舍**：
+
+- **server 级断言落在 `buildClassifyAdapter` 这个接缝，而非走完整 HTTP `buildServer`**：spec 文案提"buildServer + seed a deterministic key"。但完整 HTTP 路径的确定性断言代价高且脆：`bootstrapRootKey` 随机生成根 key（无确定性 seed 入口）、`ServerHandle` 不暴露 `keyStore`/`telemetry`、还需 mock 上游 fetch；且 classify 适配器返回的 `Classification.explanation` 当前恒 `[]`（动量解释未透出到决策记录），所以"决策记录里显式标 momentum applied"在 HTTP 层不可直接观测。**`buildClassifyAdapter` 正是 `buildServer` 构造并注入 momentum store 的那一个组合单元**——在此断言既确定、又抗重构、且不与已存在的 engine 级单测（`chat.session-key.test.ts` 用真 `scoreRequest`+真 store 钉死 engine 行为）重复。可观测信号选"复杂度档位被动量拉高"（端到端经真适配器），而非内部 explanation 标记。若未来要全链路 HTTP 验证，需先给 `buildServer` 加确定性 key seed 入口 + 把动量信号透出到 `DecisionRecord`（见下 TODO）。
+- **未碰 e2e**：本次是 composition-root 内部注入，不新增/改动任何 e2e 路径；现有 routing e2e 已隐式经过被改的 `classify` 适配器（动量默认开但需 `x-session-key`+短消息才触发，e2e 用例未带该头，行为不变）。故未跑 `test:e2e`（未触 e2e 路径）。
+
+**残留 TODO**：(1) 动量信号未透出到 `DecisionRecord`/遥测——`classify` 适配器把 engine 的 `explanation`（含 `source:"momentum"` 项）丢弃为 `[]`，故 Debug UI / 遥测看不到"本轮动量是否生效、history weight 多少"。若要在决策记录里显式体现 momentum applied，需把 engine 的动量 explanation/标记经 cascade 透传进 `Classification` → `DecisionRecord`（另立任务）。(2) in-memory Map store 是进程本地软状态：多实例 / 重启即丢（fail-open 到无动量，符合 docs/02 stateless gateway 语义）；若要跨实例共享动量，需出一个 Store 适配器实现（core 已留 `MomentumStore` 端口，DB 抽象层就位，只差适配器）。(3) 当前无显式 TTL 清扫——过期 entry 在 `applyMomentum` 读时按 `ttl_sec` 过滤，但 Map 不主动驱逐，长寿进程下久未访问的 session key 会驻留；MVP 可接受（条目仅存 complexity/rawScore/at，无 payload，原则7），未来可加惰性清扫或带上限的 LRU。
+
+---
+
 ## 2026-05-31 · 修复合并后 typecheck 失败：测试 fixture 与 z.input/z.output 不一致（docs/02、03、04、07）
 
 **症状**：合并任务后 `pnpm typecheck` 退出码 2（lint/test/build 均通过）。报错先出现在
@@ -136,7 +236,7 @@ spec 未覆盖、自己拍板的取舍：
   - OpenAI `/v1/chat/completions`：route handler 读 `c.req.header("x-session-key")`，传给 `toInternalRequest(body, traceId, identity, sessionKey)`；body metadata 优先，否则用头。
   - Anthropic `/v1/messages`：头解析仍属 gateway 层（core 不读 header，原则 1）。在 `registerMessagesRoute` 把头 stamp 进 `ir.metadata.conversation_id`（仅当 IR 未携带时），`messages-pipeline.ts` 的 `toInternalRequest` 从 metadata bag 读出落进 `InternalRequest.metadata.conversation_id`。
 - **日志洁净（原则 7）**：`x-session-key` 是不透明会话 id（非凭证、非 payload），全程不进日志；request-logger 不 dump header/metadata，已核对。
-- **未触碰 momentum store 在 server.ts 的接线**：本任务只闭合"头→conversation_id"这一段。**残留 TODO**：composition root（`server.ts`）目前未把 `createMemoryMomentumStore()` 注入级联编排器的 `scoreRequest` deps.momentum——即便 conversation_id 现已正确填充，生产 cascade 仍需把 momentum store 接进 classify deps 才能真正读写历史。端到端"两条短跟随消息共享动量"已用真实 `scoreRequest` + 真实 memory store 在单测里钉死（`chat.session-key.test.ts`），但 server 级注入另立任务。
+- **未触碰 momentum store 在 server.ts 的接线**：本任务只闭合"头→conversation_id"这一段。**残留 TODO（已于 2026-05-31 RESOLVED，见顶部 `momentum-wire` 条目）**：composition root（`server.ts`）目前未把 `createMemoryMomentumStore()` 注入级联编排器的 `scoreRequest` deps.momentum——即便 conversation_id 现已正确填充，生产 cascade 仍需把 momentum store 接进 classify deps 才能真正读写历史。端到端"两条短跟随消息共享动量"已用真实 `scoreRequest` + 真实 memory store 在单测里钉死（`chat.session-key.test.ts`），但 server 级注入另立任务。
 - **TDD 钉死**：`apps/gateway/src/routes/chat.session-key.test.ts`（头映射、无头则 null、body 优先于头、两条短跟随共享动量的端到端断言）+ `messages.test.ts` 新增两例（头映射进 ir.metadata.conversation_id、无头则不设）。门禁全绿：typecheck / lint(exit 0) / test（813 passing）/ build / e2e（33 passing）。
 
 ---

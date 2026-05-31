@@ -5,6 +5,7 @@ import {
   anthropicTransformer,
   bootstrapRootKey,
   createCircuitBreaker,
+  createMemoryMomentumStore,
   createOpenAIClient,
   createProviderRegistry,
   createRateLimiter,
@@ -17,8 +18,10 @@ import {
   type Lane,
   type LanesConfig,
   loadConfig,
+  loadRuntimeCatalog,
   makeAnthropicError,
   type PoliciesConfig,
+  type ProviderClient,
   type ProviderConfig,
   parseLanesConfig,
   type ProviderRegistryConfig as RegistryProviderConfig,
@@ -27,8 +30,14 @@ import {
   routeRequest,
   type StoreSet,
   startSignalScheduler,
+  toRegistryProviders,
 } from "@helm/core";
-import type { CatalogEntry, ClassifierConfig, InternalRequest } from "@helm/shared";
+import type {
+  CatalogEntry,
+  ClassifierConfig,
+  InternalRequest,
+  ProviderConfig as ProviderConfigShared,
+} from "@helm/shared";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
@@ -54,33 +63,80 @@ export interface ServerHandle {
   dispose?: () => void;
 }
 
-// Build a provider registry that maps every model alias referenced by the active
-// lanes (each lane's primary + fallback elements that are NOT themselves lane
-// names) to the single configured upstream (Phase 1: one OpenAI-compatible
-// provider; the mock upstream ignores the model id). Driven by config.lanes so a
-// task lane's primary (e.g. coding_capable_model) is resolvable. TODO: replace
-// with a real multi-model registry once providers.yaml grows models[] (impl-notes).
+// Build the provider registry from the FULL multi-provider config (providers-
+// multi). It is the union of two alias sources, in priority order:
+//
+//  1. Explicit per-model aliases from config.providers[].models[] — these map a
+//     lane/policy alias (e.g. 'deepseek/deepseek-v4-flash') to a SPECIFIC provider
+//     + upstream model id (the registry providerName then selects that provider's
+//     client in the executor, so a fallback chain can CROSS providers).
+//
+//  2. Phase-0 PASSTHROUGH back-fill: any alias referenced by the active lanes
+//     that is NOT already mapped by (1) is registered against the PRIMARY provider
+//     with provider_model === alias (the single OpenAI-compatible upstream the
+//     mock/e2e harness points at; the upstream ignores the exact model id). This
+//     keeps single-provider deployments working with lanes that name bare aliases.
+//
+// A duplicate alias ACROSS providers in (1) fails closed at build time inside
+// createProviderRegistry (principle 2); back-fill (2) never overrides (1).
 function buildRegistry(
-  providerName: string,
-  baseUrl: string,
-  apiKeyEnv: string,
+  providers: ReadonlyArray<ProviderConfigShared>,
+  primaryName: string,
+  primaryBaseUrl: string,
+  primaryApiKeyEnv: string,
   lanes: LanesConfig,
+  fallbackBaseUrl: string,
 ) {
-  const aliases = new Set<string>();
+  // (1) Explicit per-model providers (drop those with no models[] — passthrough).
+  const explicit = toRegistryProviders(
+    providers.filter((p) => p.models.length > 0),
+    { fallbackBaseUrl },
+  );
+  const mapped = new Set<string>();
+  for (const p of explicit) for (const m of p.models) mapped.add(m.alias);
+
+  // (2) Back-fill the remaining lane aliases against the primary provider.
+  const backfill = new Set<string>();
   for (const [, lane] of Object.entries(lanes)) {
     for (const el of [lane.primary, ...lane.fallback]) {
-      // Skip lane references (resolved during chain expansion); register only
-      // terminal model aliases.
-      if (!Object.hasOwn(lanes, el)) aliases.add(el);
+      // Skip lane references (resolved during chain expansion) and aliases already
+      // mapped explicitly; register only the remaining terminal model aliases.
+      if (!Object.hasOwn(lanes, el) && !mapped.has(el)) backfill.add(el);
     }
   }
-  const cfg: RegistryProviderConfig = {
-    name: providerName,
-    base_url: baseUrl,
-    api_key_env: apiKeyEnv,
-    models: [...aliases].map((alias) => ({ alias, provider_model: alias })),
-  };
-  return createProviderRegistry([cfg]);
+  const cfgs: RegistryProviderConfig[] = [...explicit];
+  if (backfill.size > 0) {
+    cfgs.push({
+      name: primaryName,
+      base_url: primaryBaseUrl,
+      api_key_env: primaryApiKeyEnv,
+      models: [...backfill].map((alias) => ({ alias, provider_model: alias })),
+    });
+  }
+  return createProviderRegistry(cfgs);
+}
+
+// Build one OpenAI-compatible client per configured provider, keyed by provider
+// NAME, so the executor can dispatch each resolved candidate to the right
+// upstream (cross-provider fallback). Credentials come ONLY from the env var each
+// provider's api_key_env points at (principle 7 — never plaintext in config). A
+// provider whose credential env is unset is SKIPPED (it cannot be invoked); its
+// aliases will fail open at resolve/execute time rather than blocking startup of
+// the others. The PRIMARY provider's missing credential is still fatal (handled
+// by the caller) since it backs the default path.
+function buildProviderClients(
+  providers: ReadonlyArray<ProviderConfigShared>,
+  fallbackBaseUrl: string,
+  timeoutMs: number,
+): Map<string, ProviderClient> {
+  const clients = new Map<string, ProviderClient>();
+  for (const p of providers) {
+    const apiKey = process.env[p.api_key_env];
+    if (!apiKey) continue; // no credential → cannot build a client; skip.
+    const baseUrl = p.base_url ?? fallbackBaseUrl;
+    clients.set(p.name, createOpenAIClient({ config: { baseUrl, apiKey, timeoutMs } }));
+  }
+  return clients;
 }
 
 // Full wiring: config -> store -> bootstrap key -> provider -> routing pipeline.
@@ -138,19 +194,39 @@ export async function buildServer(
     log: (line) => logger.log("warn", "bootstrap.root_key", { line }),
   });
 
-  // Provider: the first configured OpenAI-compatible upstream.
+  // Provider(s): the configured upstreams (providers-multi). The PRIMARY provider
+  // (providers[0]) backs the default/eval path and the Phase-0 passthrough; its
+  // credential is mandatory (fail-closed). Additional providers each get their own
+  // OpenAI-compatible client so a fallback chain can CROSS providers. Credentials
+  // come ONLY from the env var each api_key_env names (principle 7). The e2e/test
+  // harness points every provider at the mock via HELM_PROVIDER_BASE_URL (used as
+  // the shared fallback base_url when a provider omits one).
   const first = config.providers[0];
   if (!first) throw new Error("no provider configured");
   const apiKey = process.env[first.api_key_env];
   if (!apiKey) throw new Error(`missing provider credential env: ${first.api_key_env}`);
-  const baseUrl =
-    process.env.HELM_PROVIDER_BASE_URL ?? first.base_url ?? "https://api.openai.com/v1";
-  const providerConfig: ProviderConfig = {
-    baseUrl,
-    apiKey,
-    timeoutMs: config.runtime.request_timeout_ms,
-  };
+  // HELM_PROVIDER_BASE_URL (test/e2e) overrides EVERY provider's base_url so the
+  // mock upstream serves all of them; otherwise each provider uses its own.
+  const baseUrlOverride = process.env.HELM_PROVIDER_BASE_URL;
+  const fallbackBaseUrl = baseUrlOverride ?? "https://api.openai.com/v1";
+  const baseUrl = baseUrlOverride ?? first.base_url ?? fallbackBaseUrl;
+  const timeoutMs = config.runtime.request_timeout_ms;
+  const providerConfig: ProviderConfig = { baseUrl, apiKey, timeoutMs };
+  // The default/primary client (eval + passthrough + back-fill aliases).
   const provider = createOpenAIClient({ config: providerConfig });
+  // Per-provider clients keyed by provider NAME. When HELM_PROVIDER_BASE_URL is
+  // set (test/e2e), force the override so cross-provider candidates still hit the
+  // mock; in production each provider keeps its own base_url.
+  const providerClients = buildProviderClients(
+    baseUrlOverride
+      ? config.providers.map((p) => ({ ...p, base_url: baseUrlOverride }))
+      : config.providers,
+    fallbackBaseUrl,
+    timeoutMs,
+  );
+  // Ensure the primary client is registered under its name (it is built above with
+  // the resolved baseUrl, which already honors the override).
+  providerClients.set(first.name, provider);
 
   // Routing pipeline building blocks (framework-agnostic core). `let` so admin
   // rule edits (via the runtime RuleStore below) re-bind the live config the
@@ -170,26 +246,57 @@ export async function buildServer(
   // admin.api TODO: "admin 改 classifier 不热生效"). The adapter rebuilds its eval
   // cache when this value changes, so a verdict from the old config is never served.
   let classifierConfig: ClassifierConfig = config.classifier;
+  // Session-momentum soft-state. Instantiated ONCE here (process-wide singleton,
+  // NEVER per request) so the Layer-1 classifier's history survives across
+  // requests under the same x-session-key (→ metadata.conversation_id). This is
+  // the composition-root wiring that makes momentum live: core defines the port +
+  // ships this in-memory Map impl, server.ts injects it. Best-effort SOFT STATE
+  // (principle 3): a stateless gateway may lose it on restart, which only degrades
+  // to "no momentum", never an error; no session key → the engine no-ops. TTL
+  // (30 min) + last-5 window are applied at read time from config.classifier.rules
+  // .momentum (principle 2: config-driven). Holds only complexity/rawScore/at —
+  // never plaintext message content (principle 7).
+  const momentumStore = createMemoryMomentumStore();
+  // Capability/pricing catalog: the checked-in GENERATED catalog (supply-chain
+  // input, never fetched at runtime) merged with the manual capabilities.yaml /
+  // pricing.yaml overrides (manual wins per-field). This is what makes the
+  // capability filter LIVE: the executor looks up each candidate's resolved
+  // providerModel here and prunes known-incompatible candidates (needs_json /
+  // needs_vision / needs_tools / context) with explicit skip reasons; a model
+  // with NO entry stays fail-open (not over-pruned). It is ALSO the pricing
+  // source for cost conversion (cost-wire, docs/07): the executor converts each
+  // served attempt's usage → cost_usd, and the classify adapter converts the
+  // eval call's usage → eval_usd. An invalid override yaml fails closed
+  // (principle 2) — loadRuntimeCatalog throws, the process exits.
+  const catalog: Map<string, CatalogEntry> = loadRuntimeCatalog({
+    configDir: opts.configDir ?? "./config",
+  });
   // Three-layer cascade classify adapter: Layer-1 rules + Layer-2 eval (OFF by
   // default; per-request override threaded from the chat route) + Layer-3
   // balanced fail-open. The eval small-model is invoked via the same provider
   // (eval alias). Reads the CURRENT classifier config per request via the getter.
+  // The catalog is injected so the eval call's usage becomes eval_usd (docs/07).
   const classify = buildClassifyAdapter({
     getClassifierConfig: () => classifierConfig,
     lanes,
     provider,
     now: () => Date.now(),
     log: (level, msg, fields) => logger.log(level as "info", msg, fields),
+    momentum: { store: momentumStore },
+    catalog,
   });
-  const registry = buildRegistry(first.alias, baseUrl, first.api_key_env, lanes);
+  const registry = buildRegistry(
+    config.providers,
+    first.name,
+    baseUrl,
+    first.api_key_env,
+    lanes,
+    fallbackBaseUrl,
+  );
   const breaker = createCircuitBreaker({
     config: { failureThreshold: 5, cooldownMs: 30_000 },
     now: () => Date.now(),
   });
-  // Empty catalog → the capability filter is skipped (fail-open) until catalog
-  // data is wired into the loader (see impl-notes TODO).
-  const catalog = new Map<string, CatalogEntry>();
-
   const app = createApp({
     logger,
     health: {
@@ -231,12 +338,14 @@ export async function buildServer(
         policies,
         lanes,
         execute: createExecute({
-          provider,
+          defaultProvider: provider,
+          providers: providerClients,
           registry,
           breaker,
           catalog,
           now: () => Date.now(),
           signal,
+          log: (level, msg, fields) => logger.log(level as "info", msg, fields),
         }),
         now: () => new Date(),
         log: (record) => logger.log("info", "route.decision", { trace_id: record.request_id }),

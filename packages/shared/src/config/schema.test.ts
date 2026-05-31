@@ -180,4 +180,89 @@ describe("HelmConfigSchema", () => {
     const parsed = HelmConfigSchema.parse(ok);
     expect("url" in parsed.runtime.store).toBe(false);
   });
+
+  // --- providers-multi: unified provider shape (alias/name, type, base_url?,
+  // api_key_env, models[]) — one schema both config-loader and registry agree on.
+
+  it("accepts a multi-provider config with per-model aliases (models[])", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "openai",
+        type: "openai",
+        base_url: "https://api.openai.com/v1",
+        api_key_env: "OPENAI_API_KEY",
+        models: [
+          { alias: "cheap_model", provider_model: "gpt-4o-mini" },
+          { alias: "openai/auto", provider_model: "gpt-4o" },
+        ],
+      },
+      {
+        name: "deepseek",
+        type: "openai",
+        base_url: "https://api.deepseek.com/v1",
+        api_key_env: "DEEPSEEK_API_KEY",
+        models: [{ alias: "deepseek/deepseek-v4-flash", provider_model: "deepseek-chat" }],
+      },
+    ];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(true);
+    if (res.success) {
+      const p0 = res.data.providers[0];
+      expect(p0?.models?.[0]).toEqual({ alias: "cheap_model", provider_model: "gpt-4o-mini" });
+      expect(res.data.providers[1]?.name).toBe("deepseek");
+    }
+  });
+
+  it("keeps the Phase-0 passthrough provider working (alias, no models[])", () => {
+    // The existing config-samples/providers.yaml shape: { alias, type, base_url,
+    // api_key_env } with NO models[]. Must still parse (models defaults to []).
+    const parsed = HelmConfigSchema.parse(fullConfig());
+    const p0 = parsed.providers[0];
+    expect(p0?.api_key_env).toBe("OPENAI_API_KEY");
+    expect(p0?.models).toEqual([]); // absent models[] -> empty (passthrough)
+  });
+
+  it("derives a provider id from alias when name is absent (back-compat)", () => {
+    const parsed = HelmConfigSchema.parse(fullConfig());
+    // fullConfig uses `alias: "openai"`; the unified shape exposes `name` for the
+    // registry, derived from alias when `name` is not given.
+    expect(parsed.providers[0]?.name).toBe("openai");
+  });
+
+  it("rejects a model entry missing provider_model (fail-closed)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "openai",
+        type: "openai",
+        base_url: "https://api.openai.com/v1",
+        api_key_env: "OPENAI_API_KEY",
+        models: [{ alias: "cheap_model" }],
+      },
+    ];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(
+        res.error.issues.some((i) => i.path.join(".") === "providers.0.models.0.provider_model"),
+      ).toBe(true);
+    }
+  });
+
+  it("never carries a plaintext key on a model-bearing provider (api_key_env only)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "openai",
+        type: "openai",
+        base_url: "https://api.openai.com/v1",
+        api_key_env: "OPENAI_API_KEY",
+        models: [{ alias: "cheap_model", provider_model: "gpt-4o-mini" }],
+      },
+    ];
+    const parsed = HelmConfigSchema.parse(cfg);
+    expect(JSON.stringify(parsed.providers)).not.toMatch(/sk-/);
+    expect(parsed.providers[0] && "api_key" in parsed.providers[0]).toBe(false);
+  });
 });
