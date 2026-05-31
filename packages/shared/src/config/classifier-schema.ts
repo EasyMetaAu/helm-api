@@ -45,7 +45,7 @@ export const ClassifierRulesConfigSchema = z.object({
     heartbeat_tokens: z.array(z.string()).default(["HEARTBEAT_OK"]),
     formal_logic_keywords: z.array(z.string()).default([]),
     tools_floor: TierSchema.default("standard"),
-    long_context_token_threshold: z.number().int().positive().default(50_000),
+    long_context_token_threshold: z.number().int().positive().default(64_000),
     long_context_floor: TierSchema.default("complex"),
     short_message_max_chars: z.number().int().positive().default(50),
   }),

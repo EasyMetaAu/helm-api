@@ -115,7 +115,7 @@ function buildEvalPrompt(req: InternalRequest): EvalModelRequest["messages"] {
       content:
         "Classify the request. Reply with ONLY strict JSON " +
         '{"complexity":"simple|standard|complex|reasoning",' +
-        '"task_type":"chat|coding|math|writing|extraction|tool_use|vision|web|data",' +
+        '"task_type":"chat|coding|math|writing|extraction|tool_use|vision|web|data|security",' +
         '"confidence":0..1}.',
     },
     { role: "user", content: lastUser },

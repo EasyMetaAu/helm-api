@@ -108,6 +108,57 @@ describe("detectTask", () => {
     expect(res.task_type).toBe("chat");
   });
 
+  // ── security task_type (eval-v2 cybersecurity domain, Phase 2). The
+  // security_kw weight is modest (~0.16) and task_activation.security is raised
+  // to >= 2.0 so a single weak keyword cannot false-trigger it — "explain what
+  // XSS is" must stay its natural type, only a clearly security-laden request
+  // (multiple keywords) crosses the threshold. We exercise against the SHIPPED
+  // security keyword set so the four-file lockstep stays honest.
+  const SECURITY_KEYWORDS = [
+    "cve-",
+    "buffer overflow",
+    "sql injection",
+    "exploit",
+    "privilege escalation",
+    "xss",
+    "reverse engineer",
+    "cryptanalysis",
+    "ctf",
+  ];
+
+  it("detects security from a clear exploit-writing prompt (multiple keywords)", () => {
+    const cfg = makeConfig({
+      task_keywords: { security: SECURITY_KEYWORDS },
+      task_activation: { web: 3.0, security: 2.0 },
+    });
+    const res = detectTask(
+      makeReq(
+        "write an exploit for this buffer overflow to achieve privilege escalation against the CVE-2024-1234 target",
+      ),
+      cfg,
+    );
+    expect(res.task_type).toBe("security");
+    const sec = res.scores.find((s) => s.task === "security");
+    expect(sec?.score).toBeGreaterThanOrEqual(2.0);
+  });
+
+  it("does NOT activate security from a LONE single security keyword (false-positive guard)", () => {
+    const cfg = makeConfig({
+      task_keywords: {
+        coding: ["refactor", "function", "bug", "compile"],
+        security: SECURITY_KEYWORDS,
+      },
+      task_activation: { web: 3.0, security: 2.0 },
+    });
+    // A benign explainer that contains exactly one security keyword (xss) and no
+    // other security evidence must NOT become security — it stays its natural
+    // type (here `chat`, no other signal clears its threshold).
+    const res = detectTask(makeReq("can you explain what xss is in simple terms?"), cfg);
+    expect(res.task_type).not.toBe("security");
+    const sec = res.scores.find((s) => s.task === "security");
+    expect(sec ? sec.score : 0).toBeLessThan(2.0);
+  });
+
   it("is data-driven: adding a data keyword reclassifies to data", () => {
     const text = "please tabulate the widgets";
     const baseline = detectTask(makeReq(text), makeConfig());

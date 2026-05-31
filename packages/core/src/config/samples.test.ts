@@ -70,8 +70,14 @@ describe("checked-in config samples", () => {
     const ids = cfg.policies.policies.map((p) => p.id);
     expect(ids).toContain("coding_complex_to_coding_lane");
     expect(ids).toContain("json_constrained_to_json_lane");
-    // first-match ordering: the coding rule precedes the json rule
-    expect(cfg.policies.policies[0]?.use_lane).toBe("coding");
+    // first-match ordering (eval-v2 port 2026-05-31): the JSON output contract
+    // dominates the soft cost/quality steering rules, so json_constrained is the
+    // FIRST policy. Specific-before-general within a task: coding_complex precedes
+    // the coding_simple→economy rule so complex coding is never down-routed.
+    expect(cfg.policies.policies[0]?.use_lane).toBe("json");
+    expect(ids.indexOf("coding_complex_to_coding_lane")).toBeLessThan(
+      ids.indexOf("coding_simple_to_economy"),
+    );
   });
 
   it("lanes.yaml is genuinely schema-constrained (a bad lane fails the merge)", () => {

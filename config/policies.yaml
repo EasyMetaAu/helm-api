@@ -9,6 +9,26 @@
 # These are SAMPLES — adjust to your own lane set / org structure.
 
 policies:
+  # Any request constrained to JSON output -> the strict-json lane. Kept at the
+  # TOP because JSON is a HARD OUTPUT CONTRACT that dominates every soft
+  # cost/quality steering preference below: a request that MUST return valid JSON
+  # can never be silently steered to a non-json lane (e.g. a chat+simple JSON
+  # request must still land on `json`, not `economy`). It is a 1-field rule but
+  # its precedence is by CONTRACT, not by field count.
+  - id: json_constrained_to_json_lane
+    match:
+      needs_json: true
+    use_lane: json
+
+  # ── complexity-CONDITIONED steering (docs/04; ported from llm-router eval-v2
+  #    §5.1 task_type × complexity → lane). These OVERRIDE the lane-resolver's
+  #    defaults (task_type→same-named lane; simple→economy / medium→balanced /
+  #    complex→premium). All are 2-field (task_type × complexity), ordered
+  #    most-specific-first within each task. We add NO web/vision/tool_use rule
+  #    (the task-lane default already routes them; a rule would only shadow it)
+  #    and NO `default` catch-all (it would match everything first and shadow the
+  #    task lanes).
+
   # Complex coding work -> the coding task lane (coding-capable primary).
   - id: coding_complex_to_coding_lane
     match:
@@ -16,11 +36,54 @@ policies:
       complexity: complex
     use_lane: coding
 
-  # Any request constrained to JSON output -> the strict-json lane.
-  - id: json_constrained_to_json_lane
+  # Trivial code must NOT hit a premium/coding-grade model (llm-router MBPP fix):
+  # without this the `coding` TASK LANE would catch it; pin it to economy.
+  - id: coding_simple_to_economy
     match:
-      needs_json: true
-    use_lane: json
+      task_type: coding
+      complexity: simple
+    use_lane: economy
+
+  # Math is never economy — even a "simple" math task gets balanced.
+  - id: math_simple_to_balanced
+    match:
+      task_type: math
+      complexity: simple
+    use_lane: balanced
+
+  # Hard math -> premium reasoning.
+  - id: math_complex_to_premium
+    match:
+      task_type: math
+      complexity: complex
+    use_lane: premium
+
+  # Knowledge_qa simple chit-chat / lookups -> the cheapest lane.
+  - id: chat_simple_to_economy
+    match:
+      task_type: chat
+      complexity: simple
+    use_lane: economy
+
+  # GPQA/HLE-level knowledge questions -> premium.
+  - id: chat_complex_to_premium
+    match:
+      task_type: chat
+      complexity: complex
+    use_lane: premium
+
+  # Hard cybersecurity work (eval-v2 §5.1 security domain) -> premium. There is
+  # NO `security` lane and Helm has NO raise-only floor (only use_lane PIN /
+  # max_lane cap), so we cannot express "security raises the floor to premium"
+  # without a hard pin. A FLAT pin would over-route benign security Q&A
+  # ("what is XSS?") to premium, so we CONDITION on complexity: only complex
+  # security is pinned; simple/medium security fall through to the normal
+  # complexity fallback (economy / balanced).
+  - id: security_complex_to_premium
+    match:
+      task_type: security
+      complexity: complex
+    use_lane: premium
 
   # Example cost cap: a budget org is never routed above `balanced` (caps-only;
   # the lane is still chosen by classification, just clamped). Illustrative.

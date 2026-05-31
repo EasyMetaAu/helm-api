@@ -27,7 +27,7 @@ function serverConfig(): Record<string, unknown> {
         heartbeat_tokens: ['HEARTBEAT_OK'],
         formal_logic_keywords: [],
         tools_floor: 'standard',
-        long_context_token_threshold: 50000,
+        long_context_token_threshold: 64000,
         long_context_floor: 'complex',
         short_message_max_chars: 50,
       },

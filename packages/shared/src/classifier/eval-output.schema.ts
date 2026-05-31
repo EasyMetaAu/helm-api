@@ -24,6 +24,7 @@ export const TaskTypeSchema = z.enum([
   "vision",
   "web",
   "data",
+  "security",
 ]);
 export type TaskType = z.infer<typeof TaskTypeSchema>;
 

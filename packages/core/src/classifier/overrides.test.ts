@@ -121,7 +121,7 @@ describe("evaluateOverrides — long context (floor → complex)", () => {
     const hits = evaluateOverrides(
       req({ content: "Summarize the key findings across all of the attached source documents." }),
       cfg,
-      60_000,
+      70_000, // above the default 64k long_context threshold
     );
     expect(hits).toContainEqual({ rule: "long_context", kind: "floor", complexity: "complex" });
     expect(applyOverrides("standard", hits)).toBe("complex");
@@ -212,7 +212,7 @@ describe("applyOverrides — multiple floors take the highest", () => {
         tools: [{ name: "x" }],
       }),
       cfg,
-      60_000,
+      70_000, // above the default 64k long_context threshold
     );
     // tools→standard and long_context→complex both present; highest wins.
     expect(applyOverrides("simple", hits)).toBe("complex");

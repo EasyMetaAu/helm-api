@@ -9,13 +9,14 @@ classifier:
     sigmoid_k: 8
     tier_boundaries: { standard: -0.10, complex: 0.08, reasoning: 0.35 }
     dimensions:
-      # —— keyword dimensions (weight sign = direction) —— 14 total
+      # —— keyword dimensions (weight sign = direction) —— 15 total
       reasoning_kw: { weight: 0.35, keywords: ["prove", "derive", "theorem", "step by step", "reason about"] }
       coding_kw: { weight: 0.20, keywords: ["refactor", "debug", "stack trace", "function", "compile"] }
       math_kw: { weight: 0.18, keywords: ["integral", "matrix", "equation", "probability"] }
       planning_kw: { weight: 0.16, keywords: ["plan", "architecture", "design doc", "trade-off", "strategy"] }
       analysis_kw: { weight: 0.14, keywords: ["analyze", "compare", "evaluate", "implications", "root cause"] }
       writing_kw: { weight: 0.10, keywords: ["essay", "rewrite", "draft", "tone", "polish"] }
+      security_kw: { weight: 0.16, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf"] }
       extraction_kw: { weight: 0.08, keywords: ["extract", "parse", "json from", "fields", "schema"] }
       data_kw: { weight: 0.12, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot"] }
       vision_kw: { weight: 0.10, keywords: ["image", "screenshot", "this picture", "diagram", "chart"] }
@@ -42,16 +43,23 @@ classifier:
       web: ["search the web", "browse", "look up online"]
       data: ["csv", "dataframe", "aggregate", "sql"]
       vision: ["image", "screenshot", "this picture"]
+      # security (eval-v2 cybersecurity domain). Conservative, multi-word
+      # keywords; paired with a raised task_activation.security (>= 2.0) so a
+      # single lone hit (e.g. "explain what XSS is") does NOT false-activate.
+      security: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf"]
     tool_prefixes:
       web: ["browser_", "web_"]
       coding: ["code_", "shell_", "fs_"]
       data: ["sql_", "sheet_"]
-    task_activation: { web: 3.0 } # web task activation raised to avoid false hits
+    # web raised to 3.0 (a lone URL must not false-trigger); security raised to
+    # 2.0 (a single lone keyword like "xss" must not false-trigger — needs >= 2
+    # keyword hits, i.e. a clearly security-laden request).
+    task_activation: { web: 3.0, security: 2.0 }
     overrides:
       heartbeat_tokens: ["HEARTBEAT_OK"]
       formal_logic_keywords: ["⊢", "∴", "modus ponens", "first-order logic"]
       tools_floor: standard
-      long_context_token_threshold: 50000
+      long_context_token_threshold: 64000  # capability signal (NOT a task_type); bumped 50k->64k to match llm-router lanes.yaml long_context anchor
       long_context_floor: complex
       short_message_max_chars: 50
     momentum:

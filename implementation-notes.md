@@ -5,6 +5,24 @@
 
 ---
 
+## 2026-05-31 · port-eval-v2-routing Phase 2 — `security` task_type + complexity-conditioned steering + long_context 锚点 (docs/03、docs/04，原则 2/4/6)
+
+**承接** Phase 0（golden + cross-ref 测试）/ Phase 1（complexity-conditioned policies + matrix）。本阶段把 llm-router eval-v2 §5.1 `task_type × complexity → lane` 决策表里**仅剩的增量**移植进 Helm。绝大部分价值（complexity→lane、task_type→同名 lane）Phase 1 已落地，故 Phase 2 只做三件小事：
+
+**1) 新增唯一一个真·新 task_type `security`（eval-v2 网络安全域）——四文件 lockstep**。Helm 的 task_type 是**闭合 TS union**（`taskdetect.ts` 的 `TaskType` + `ALL_TASKS`），只在 `config/classifier.yaml` 加关键词会被 `isTaskType()` **静默丢弃**。必须同改四处：① `taskdetect.ts`（union + ALL_TASKS）；② `config/classifier.yaml`（`task_keywords.security` 保守多词关键词 + `security_kw` 评分维度 weight 0.16 + `task_activation.security: 2.0`）；③ `eval-output.schema.ts` 的 `TaskTypeSchema`（Layer-1/Layer-2 enum 对齐）；④ `classify.ts` 的 eval system-prompt enum 串。
+   - **误报闸门**：`task_activation.security = 2.0`，而 taskdetect 的每个命中关键词权重 1.0 → **单个孤立关键词（如「explain what XSS is」）不激活 security**，需 ≥2 个关键词命中（明显安全意图）才越过阈值。与 `web: 3.0` 同思路。测试逐条覆盖：清晰的写 exploit 提示 → security；孤立单关键词 → 保持自然类型。
+   - `security_kw` 作为**复杂度评分维度**（正权重 0.16）顺带让安全请求 complexity 略升——符合「安全工作通常更复杂」的直觉，无测试回归。
+
+**2) security 路由——complexity-CONDITIONED，而非平铺 pin**。Helm **没有 raise-only floor**（min_lane），只有 `use_lane`（硬 PIN）/ `max_lane`（向下 cap）。也**没有 `security` lane**。若给 security 平铺 `use_lane: premium`，会把良性安全问答（"what is XSS?"）也钉到 premium——过度路由。故只加一条 `security_complex_to_premium`（`task_type: security + complexity: complex → premium`），让 **simple/medium security 落回正常 complexity 兜底**（economy / balanced）。matrix 测试三行覆盖（complex=policy/premium；simple=fallback/economy；medium=fallback/balanced）。**这正是 spec 里「无 min_lane 故用 complexity 条件化代替 floor」的取舍。**
+
+**3) long_context 阈值 50000 → 64000**，对齐 llm-router `config/routing/lanes.yaml` 的 long_context 锚点。改 `classifier-schema.ts` 的 schema 默认 + `config/classifier.yaml` + 相关测试（两处 overrides 测试的 token 实参 60k→70k 以保持「越过阈值」的本意）。**long_context 仍是 capability 信号（context-window），绝不做成 task_type。**
+
+**保留 reasoning→complex 折叠**：classifier 出 4 档（simple|standard|complex|reasoning），`classify.ts` 的 `mapComplexity()` 把 standard→medium、**complex & reasoning 都→complex**。Phase 2 **不拓宽 policy 的 complexity enum**（仍 simple|medium|complex），沿用此折叠。
+
+**未移植（违反 Helm 原则或缺信号）**：order_by / quality_score（模型市场，原则 6）、budget.max_usd_per_call、code_depth / risk_level / probe.*、short_circuit（Helm 已是 first-match-wins）、`default` 全匹配 policy（会 shadow task-lane）、long_context 当 task_type。
+
+---
+
 ## 2026-05-31 · catalog-reuse — 复用 llm-router 的能力/价格数据 + 修正 eval 模型（docs/02、原则 2/6）
 
 **承接** fix-upstream-model-id。两个后续问题：

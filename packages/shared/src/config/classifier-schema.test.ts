@@ -24,7 +24,7 @@ function fullClassifier() {
         heartbeat_tokens: ["HEARTBEAT_OK"],
         formal_logic_keywords: ["⊢"],
         tools_floor: "standard",
-        long_context_token_threshold: 50000,
+        long_context_token_threshold: 64000,
         long_context_floor: "complex",
         short_message_max_chars: 50,
       },
@@ -89,7 +89,7 @@ describe("ClassifierConfigSchema", () => {
     expect(parsed.momentum.ttl_sec).toBe(1800);
     expect(parsed.momentum.history_size).toBe(5);
     expect(parsed.momentum.max_history_weight).toBe(0.6);
-    expect(parsed.overrides.long_context_token_threshold).toBe(50000);
+    expect(parsed.overrides.long_context_token_threshold).toBe(64000);
     expect(parsed.overrides.heartbeat_tokens).toEqual(["HEARTBEAT_OK"]);
     expect(parsed.overrides.tools_floor).toBe("standard");
   });

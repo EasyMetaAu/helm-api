@@ -23,7 +23,8 @@ export type TaskType =
   | "tool_use"
   | "vision"
   | "web"
-  | "data";
+  | "data"
+  | "security";
 
 export interface TaskScore {
   task: TaskType;
@@ -45,7 +46,10 @@ const TOOL_PREFIX_WEIGHT = 2.0; // a matching tool prefix is strong evidence
 const STRUCTURAL_WEIGHT = 1.0; // a present structural signal
 const DEFAULT_ACTIVATION = 1.0;
 
-const ALL_TASKS: TaskType[] = [
+// Exported as the single source of truth for the closed task vocabulary so the
+// policy cross-reference guard (policy-crossref.test.ts) can assert every
+// policies.yaml match.task_type is one the classifier can actually emit.
+export const ALL_TASKS: TaskType[] = [
   "chat",
   "coding",
   "math",
@@ -55,6 +59,7 @@ const ALL_TASKS: TaskType[] = [
   "vision",
   "web",
   "data",
+  "security",
 ];
 
 export function detectTask(req: DetectInput, cfg: ClassifierRulesConfig): TaskDetectResult {
