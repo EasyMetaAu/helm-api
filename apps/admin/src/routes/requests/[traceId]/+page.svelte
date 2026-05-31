@@ -34,15 +34,15 @@
       data-testid="detail-error"
       class="rounded-lg border border-amber-300 bg-amber-50 p-8 text-center text-sm text-amber-800"
     >
-      <p class="font-medium">Could not load this request.</p>
-      <p class="mt-1">{data.loadError ?? 'The trace may not exist or has expired.'}</p>
+      <p class="font-medium">{$t('Could not load this request.')}</p>
+      <p class="mt-1">{data.loadError ?? $t('The trace may not exist or has expired.')}</p>
     </div>
   {:else}
     {@const d = data.detail}
     <header class="flex flex-wrap items-center justify-between gap-2">
       <div>
         <h1 class="text-2xl font-semibold text-slate-900">{$t('Request trail')}</h1>
-        <p class="text-sm text-slate-500">{d.ts || 'time not recorded'}</p>
+        <p class="text-sm text-slate-500">{d.ts || $t('time not recorded')}</p>
       </div>
       <div class="flex items-center gap-2">
         <code class="rounded bg-slate-100 px-2 py-1 font-mono text-xs text-slate-700"
@@ -52,14 +52,16 @@
           type="button"
           data-testid="copy-trace"
           class="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
-          onclick={copyTrace}>{copied ? 'Copied' : 'Copy trace ID'}</button
+          onclick={copyTrace}>{copied ? $t('Copied') : $t('Copy trace ID')}</button
         >
       </div>
     </header>
 
     <!-- Request metadata + redacted payload summary (原则7) -->
     <section class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
-      <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Request</h3>
+      <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+        {$t('Request')}
+      </h3>
       <pre class="overflow-x-auto rounded bg-slate-50 p-2 text-xs text-slate-700">{JSON.stringify(
           d.request_meta,
           null,
@@ -73,7 +75,9 @@
 
     <!-- Cost breakdown incl. eval self-cost -->
     <section class="rounded-lg border border-slate-200 bg-white p-4">
-      <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Cost</h3>
+      <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+        {$t('Cost')}
+      </h3>
       <CostBreakdown cost={d.cost_breakdown} />
     </section>
 
@@ -83,19 +87,23 @@
         data-testid="request-error"
         class="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800"
       >
-        <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-red-600">Error</h3>
+        <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-red-600">
+          {$t('Error')}
+        </h3>
         <div>error_class: <span class="font-mono">{d.error.error_class}</span></div>
         <div>http_status: <span class="font-mono">{d.error.http_status}</span></div>
         <div>message: {d.error.message}</div>
         <div class="mt-1 text-xs text-red-500">
           provider_raw: {d.error.provider_raw === null
-            ? 'redacted'
+            ? $t('redacted')
             : JSON.stringify(d.error.provider_raw)}
         </div>
       </section>
     {:else if d.response_meta}
       <section class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
-        <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Response</h3>
+        <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+          {$t('Response')}
+        </h3>
         <pre class="overflow-x-auto rounded bg-slate-50 p-2 text-xs text-slate-700">{JSON.stringify(
             d.response_meta,
             null,

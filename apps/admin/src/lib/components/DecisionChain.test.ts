@@ -30,9 +30,21 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     matched_policy: 'policy_coding_premium',
     lane_candidates: ['premium', 'balanced', 'economy'],
     provider_attempts: [
-      { model: 'gpt-x', provider: 'openai', outcome: 'error', latency_ms: 120, error_class: 'upstream_error' },
+      {
+        model: 'gpt-x',
+        provider: 'openai',
+        outcome: 'error',
+        latency_ms: 120,
+        error_class: 'upstream_error',
+      },
       { model: 'claude-x', provider: 'anthropic', outcome: 'success', latency_ms: 340 },
-      { model: 'small-x', provider: 'local', outcome: 'skipped', skip_reason: 'capability_unsatisfiable', latency_ms: 0 },
+      {
+        model: 'small-x',
+        provider: 'local',
+        outcome: 'skipped',
+        skip_reason: 'capability_unsatisfiable',
+        latency_ms: 0,
+      },
     ],
     response_meta: { model_alias: 'claude-x' },
     error: null,

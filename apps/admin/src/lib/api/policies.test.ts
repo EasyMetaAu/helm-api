@@ -1,25 +1,25 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Policy } from "./policies.js";
-import { listPolicies, savePolicies } from "./policies.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Policy } from './policies.js';
+import { listPolicies, savePolicies } from './policies.js';
 
 // The admin UI talks to the gateway ONLY over /admin/api/* HTTP (DoD: no core
 // import). These tests pin the client contract against a mocked fetch. The wire
 // shape is a bare ordered Policy[]; the server validates the whole set and the
 // order IS the match priority (first-match), so the client must preserve it.
 
-describe("policies api client", () => {
+describe('policies api client', () => {
   beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal('fetch', vi.fn());
   });
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("listPolicies GETs /admin/api/policies and returns the ordered array", async () => {
+  it('listPolicies GETs /admin/api/policies and returns the ordered array', async () => {
     const rows: Policy[] = [
-      { match: { task_type: "coding" }, use_lane: "coding" },
-      { match: { complexity: "complex" }, max_lane: "premium" },
-      { match: {}, use_lane: "balanced" },
+      { match: { task_type: 'coding' }, use_lane: 'coding' },
+      { match: { complexity: 'complex' }, max_lane: 'premium' },
+      { match: {}, use_lane: 'balanced' },
     ];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify(rows), { status: 200 }),
@@ -27,17 +27,17 @@ describe("policies api client", () => {
 
     const policies = await listPolicies();
 
-    expect(fetch).toHaveBeenCalledWith("/admin/api/policies", expect.objectContaining({}));
+    expect(fetch).toHaveBeenCalledWith('/admin/api/policies', expect.objectContaining({}));
     expect(policies).toHaveLength(3);
-    expect(policies[0].match.task_type).toBe("coding");
-    expect(policies[0].use_lane).toBe("coding");
+    expect(policies[0].match.task_type).toBe('coding');
+    expect(policies[0].use_lane).toBe('coding');
     expect(policies[2].match).toEqual({}); // empty match = catch-all
   });
 
-  it("savePolicies PUTs /admin/api/policies with the ordered list as the body", async () => {
+  it('savePolicies PUTs /admin/api/policies with the ordered list as the body', async () => {
     const list: Policy[] = [
-      { match: { user_id: "u1" }, use_lane: "premium" },
-      { match: { needs_json: true }, max_lane: "balanced" },
+      { match: { user_id: 'u1' }, use_lane: 'premium' },
+      { match: { needs_json: true }, max_lane: 'balanced' },
     ];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify(list), { status: 200 }),
@@ -46,27 +46,25 @@ describe("policies api client", () => {
     await savePolicies(list);
 
     const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(url).toBe("/admin/api/policies");
-    expect(init.method).toBe("PUT");
+    expect(url).toBe('/admin/api/policies');
+    expect(init.method).toBe('PUT');
     const body = JSON.parse(init.body as string);
     expect(Array.isArray(body)).toBe(true);
     expect(body).toHaveLength(2);
     // order preserved (= priority)
-    expect(body[0].match.user_id).toBe("u1");
+    expect(body[0].match.user_id).toBe('u1');
     expect(body[1].match.needs_json).toBe(true);
   });
 
-  it("savePolicies drops the action field NOT chosen (use_lane/max_lane mutually exclusive)", async () => {
+  it('savePolicies drops the action field NOT chosen (use_lane/max_lane mutually exclusive)', async () => {
     // A policy carrying both must be normalized; the client never sends both.
-    const list: Policy[] = [{ match: {}, use_lane: "balanced", max_lane: "premium" }];
+    const list: Policy[] = [{ match: {}, use_lane: 'balanced', max_lane: 'premium' }];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify(list), { status: 200 }),
     );
 
     await savePolicies(list);
-    const body = JSON.parse(
-      (fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string,
-    );
+    const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
     const sent = body[0];
     // exactly one action present
     const hasUse = sent.use_lane != null;
@@ -74,10 +72,10 @@ describe("policies api client", () => {
     expect(hasUse !== hasMax).toBe(true);
   });
 
-  it("savePolicies rejects when the server returns a non-2xx (fail-closed)", async () => {
+  it('savePolicies rejects when the server returns a non-2xx (fail-closed)', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response(JSON.stringify({ error: "invalid policies" }), { status: 400 }),
+      new Response(JSON.stringify({ error: 'invalid policies' }), { status: 400 }),
     );
-    await expect(savePolicies([{ match: {}, use_lane: "balanced" }])).rejects.toThrow();
+    await expect(savePolicies([{ match: {}, use_lane: 'balanced' }])).rejects.toThrow();
   });
 });

@@ -6,6 +6,7 @@
     type PolicyMatch,
     TASK_TYPE_OPTIONS,
   } from '$lib/api/policies.js';
+  import { t } from '$lib/i18n';
 
   // Single ordered policy row: a pure "condition → action" editor. It owns NO
   // matching logic (first-match resolution lives in headless core, 原则1/原则5);
@@ -90,29 +91,31 @@
     <span
       class="flex h-6 w-6 items-center justify-center rounded-full bg-slate-900 text-xs font-semibold text-white"
       data-testid="policy-index"
-      aria-label="priority">{index + 1}</span
+      aria-label={$t('priority')}>{index + 1}</span
     >
-    <span class="text-xs text-slate-500">first match wins — lower number = higher priority</span>
+    <span class="text-xs text-slate-500"
+      >{$t('first match wins — lower number = higher priority')}</span
+    >
     <span class="flex-1"></span>
     <button
       type="button"
       class="text-xs text-slate-500 disabled:opacity-30"
-      aria-label="move up"
+      aria-label={$t('move up')}
       onclick={() => onmove(index, index - 1)}
       disabled={index === 0}>↑</button
     >
     <button
       type="button"
       class="text-xs text-slate-500 disabled:opacity-30"
-      aria-label="move down"
+      aria-label={$t('move down')}
       onclick={() => onmove(index, index + 1)}
       disabled={index === total - 1}>↓</button
     >
     <button
       type="button"
       class="text-xs text-red-600"
-      aria-label="remove"
-      onclick={() => onremove(index)}>Remove</button
+      aria-label={$t('remove')}
+      onclick={() => onremove(index)}>{$t('Remove')}</button
     >
   </header>
 
@@ -122,36 +125,37 @@
       data-testid="catch-all-warning"
       role="note"
     >
-      Empty match = catch-all. It matches every request and, by first-match order, swallows any rule
-      below it — keep it last.
+      {$t(
+        'Empty match = catch-all. It matches every request and, by first-match order, swallows any rule below it — keep it last.',
+      )}
     </p>
   {/if}
 
   <fieldset class="grid grid-cols-2 gap-3 sm:grid-cols-3">
-    <legend class="sr-only">Match conditions (AND)</legend>
+    <legend class="sr-only">{$t('Match conditions (AND)')}</legend>
 
     <label class="flex flex-col gap-1 text-sm">
-      <span class="font-medium text-slate-700">Task type</span>
+      <span class="font-medium text-slate-700">{$t('Task type')}</span>
       <select
         class="rounded border border-slate-300 px-2 py-1"
         value={match.task_type ?? ''}
         onchange={(e) => emitMatch({ task_type: e.currentTarget.value })}
       >
-        <option value="">(any)</option>
-        {#each TASK_TYPE_OPTIONS as t (t)}
-          <option value={t}>{t}</option>
+        <option value="">{$t('(any)')}</option>
+        {#each TASK_TYPE_OPTIONS as opt (opt)}
+          <option value={opt}>{opt}</option>
         {/each}
       </select>
     </label>
 
     <label class="flex flex-col gap-1 text-sm">
-      <span class="font-medium text-slate-700">Complexity</span>
+      <span class="font-medium text-slate-700">{$t('Complexity')}</span>
       <select
         class="rounded border border-slate-300 px-2 py-1"
         value={match.complexity ?? ''}
         onchange={(e) => emitMatch({ complexity: e.currentTarget.value })}
       >
-        <option value="">(any)</option>
+        <option value="">{$t('(any)')}</option>
         {#each COMPLEXITY_OPTIONS as c (c)}
           <option value={c}>{c}</option>
         {/each}
@@ -187,23 +191,24 @@
   </fieldset>
 
   <fieldset class="flex flex-wrap items-center gap-6">
-    <legend class="text-sm font-medium text-slate-700">Action (use_lane OR max_lane)</legend>
+    <legend class="text-sm font-medium text-slate-700">{$t('Action (use_lane OR max_lane)')}</legend
+    >
 
     <label class="flex flex-col gap-1 text-sm">
       <span
         class="font-medium"
         class:text-slate-700={action === 'use_lane'}
-        class:text-slate-400={action !== 'use_lane'}>use_lane (force)</span
+        class:text-slate-400={action !== 'use_lane'}>{$t('use_lane (force)')}</span
       >
       <select
-        aria-label="use lane"
+        aria-label={$t('use lane')}
         class="rounded border border-slate-300 px-2 py-1 disabled:bg-slate-100 disabled:opacity-50"
         disabled={action !== 'use_lane'}
         value={useLane}
         onclick={() => setAction('use_lane')}
         onchange={(e) => setLane('use_lane', e.currentTarget.value)}
       >
-        <option value="">(select lane)</option>
+        <option value="">{$t('(select lane)')}</option>
         {#each lanes as l (l)}
           <option value={l}>{l}</option>
         {/each}
@@ -214,17 +219,17 @@
       <span
         class="font-medium"
         class:text-slate-700={action === 'max_lane'}
-        class:text-slate-400={action !== 'max_lane'}>max_lane (cap)</span
+        class:text-slate-400={action !== 'max_lane'}>{$t('max_lane (cap)')}</span
       >
       <select
-        aria-label="max lane"
+        aria-label={$t('max lane')}
         class="rounded border border-slate-300 px-2 py-1 disabled:bg-slate-100 disabled:opacity-50"
         disabled={action !== 'max_lane'}
         value={maxLane}
         onclick={() => setAction('max_lane')}
         onchange={(e) => setLane('max_lane', e.currentTarget.value)}
       >
-        <option value="">(select lane)</option>
+        <option value="">{$t('(select lane)')}</option>
         {#each lanes as l (l)}
           <option value={l}>{l}</option>
         {/each}

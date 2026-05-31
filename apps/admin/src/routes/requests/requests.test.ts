@@ -55,7 +55,12 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     ],
     response_meta: { model_alias: 'claude-x' },
     error: null,
-    cost_breakdown: { routing_usd: 0.0001, eval_usd: 0.0002, completion_usd: 0.01, total_usd: 0.0103 },
+    cost_breakdown: {
+      routing_usd: 0.0001,
+      eval_usd: 0.0002,
+      completion_usd: 0.01,
+      total_usd: 0.0103,
+    },
     ...overrides,
   };
 }

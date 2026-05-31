@@ -47,7 +47,7 @@
       thresholdText = String(saved.rules.confidence_threshold);
     } catch (e) {
       // fail-closed: surface the error and leave the displayed config unchanged.
-      error = e instanceof Error ? e.message : 'Failed to save classifier config';
+      error = e instanceof Error ? e.message : $t('Failed to save classifier config');
     } finally {
       saving = false;
     }
@@ -74,12 +74,14 @@
   <div class="flex flex-col gap-4 rounded border border-slate-200 p-4">
     <label class="flex items-center gap-3">
       <input type="checkbox" name="eval_enabled" bind:checked={evalEnabled} />
-      <span class="text-sm font-medium text-slate-800">Enable Layer-2 eval</span>
-      <span class="text-xs text-slate-500">(off by default; cached; fails open to balanced)</span>
+      <span class="text-sm font-medium text-slate-800">{$t('Enable Layer-2 eval')}</span>
+      <span class="text-xs text-slate-500"
+        >{$t('(off by default; cached; fails open to balanced)')}</span
+      >
     </label>
 
     <label class="flex flex-col gap-1">
-      <span class="text-sm font-medium text-slate-800">Confidence threshold</span>
+      <span class="text-sm font-medium text-slate-800">{$t('Confidence threshold')}</span>
       <input
         type="number"
         name="confidence_threshold"
@@ -91,10 +93,12 @@
         class:border-red-400={!thresholdValid}
         aria-invalid={!thresholdValid}
       />
-      <span class="text-xs text-slate-500">Below this, requests fall through to Layer-2.</span>
+      <span class="text-xs text-slate-500"
+        >{$t('Below this, requests fall through to Layer-2.')}</span
+      >
       {#if !thresholdValid}
         <span class="text-xs text-red-600" role="alert">
-          Threshold must be a number between 0 and 1.
+          {$t('Threshold must be a number between 0 and 1.')}
         </span>
       {/if}
     </label>
@@ -106,22 +110,22 @@
         disabled={!thresholdValid || saving}
         class="rounded bg-slate-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50"
       >
-        {saving ? 'Saving…' : 'Save'}
+        {saving ? $t('Saving…') : $t('Save')}
       </button>
     </div>
   </div>
 
   <!-- Read-only: rule dimensions -->
   <div class="flex flex-col gap-2">
-    <h2 class="text-lg font-semibold text-slate-900">Rule dimensions</h2>
+    <h2 class="text-lg font-semibold text-slate-900">{$t('Rule dimensions')}</h2>
     <p class="text-xs text-slate-500">
-      Read-only. Weights/boundaries are data in <code>classifier.yaml</code>; edit there and restart
-      to retune.
+      {$t('Read-only. Weights/boundaries are data in')}
+      <code>classifier.yaml</code>{$t('; edit there and restart to retune.')}
     </p>
     <DimensionTable dimensions={cfg.rules.dimensions} />
     {#if cfg.rules.boundaries}
       <div data-testid="boundaries" class="mt-2 text-sm text-slate-600">
-        <span class="font-medium text-slate-700">Tier boundaries:</span>
+        <span class="font-medium text-slate-700">{$t('Tier boundaries:')}</span>
         {#each Object.entries(cfg.rules.boundaries) as [tier, value] (tier)}
           <span class="ml-2 font-mono">{tier}={value}</span>
         {/each}
@@ -131,21 +135,21 @@
 
   <!-- Read-only: eval details -->
   <div class="flex flex-col gap-2">
-    <h2 class="text-lg font-semibold text-slate-900">Eval details</h2>
+    <h2 class="text-lg font-semibold text-slate-900">{$t('Eval details')}</h2>
     <dl data-testid="eval-details" class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm">
-      <dt class="text-slate-500">Model</dt>
+      <dt class="text-slate-500">{$t('Model')}</dt>
       <dd class="font-mono text-slate-800">{cfg.eval.model}</dd>
-      <dt class="text-slate-500">Temperature</dt>
+      <dt class="text-slate-500">{$t('Temperature')}</dt>
       <dd class="tabular-nums text-slate-800">{cfg.eval.temperature}</dd>
-      <dt class="text-slate-500">Max tokens</dt>
+      <dt class="text-slate-500">{$t('Max tokens')}</dt>
       <dd class="tabular-nums text-slate-800">{cfg.eval.max_tokens}</dd>
-      <dt class="text-slate-500">Timeout (ms)</dt>
+      <dt class="text-slate-500">{$t('Timeout (ms)')}</dt>
       <dd class="tabular-nums text-slate-800">{cfg.eval.timeout_ms}</dd>
-      <dt class="text-slate-500">On failure</dt>
+      <dt class="text-slate-500">{$t('On failure')}</dt>
       <dd class="text-slate-800">{cfg.eval.on_failure}</dd>
-      <dt class="text-slate-500">Cache</dt>
+      <dt class="text-slate-500">{$t('Cache')}</dt>
       <dd class="text-slate-800">
-        {cfg.eval.cache.enabled ? 'on' : 'off'} · ttl {cfg.eval.cache.ttl_sec}s
+        {cfg.eval.cache.enabled ? $t('on') : $t('off')} · ttl {cfg.eval.cache.ttl_sec}s
       </dd>
     </dl>
   </div>

@@ -27,30 +27,30 @@ export interface Policy {
 // fail-closes (400) on any other value, so the UI must offer exactly that set to
 // avoid writing config the gateway would reject. See implementation-notes.md.
 export const TASK_TYPE_OPTIONS = [
-  "chat",
-  "coding",
-  "math",
-  "writing",
-  "extraction",
-  "tool_use",
-  "vision",
-  "web",
-  "data",
+  'chat',
+  'coding',
+  'math',
+  'writing',
+  'extraction',
+  'tool_use',
+  'vision',
+  'web',
+  'data',
 ] as const;
 
-export const COMPLEXITY_OPTIONS = ["simple", "medium", "complex"] as const;
+export const COMPLEXITY_OPTIONS = ['simple', 'medium', 'complex'] as const;
 
-const BASE = "/admin/api/policies";
+const BASE = '/admin/api/policies';
 
 async function asJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
-    let detail = "";
+    let detail = '';
     try {
       detail = JSON.stringify(await res.json());
     } catch {
       // body not JSON; keep the status only
     }
-    throw new Error(`policies api ${res.status}${detail ? `: ${detail}` : ""}`);
+    throw new Error(`policies api ${res.status}${detail ? `: ${detail}` : ''}`);
   }
   return (await res.json()) as T;
 }
@@ -58,11 +58,11 @@ async function asJson<T>(res: Response): Promise<T> {
 function normalizeMatch(raw: Record<string, unknown> | undefined): PolicyMatch {
   const m = raw ?? {};
   const out: PolicyMatch = {};
-  if (typeof m.task_type === "string") out.task_type = m.task_type;
-  if (typeof m.complexity === "string") out.complexity = m.complexity;
-  if (typeof m.needs_json === "boolean") out.needs_json = m.needs_json;
-  if (typeof m.user_id === "string") out.user_id = m.user_id;
-  if (typeof m.org_id === "string") out.org_id = m.org_id;
+  if (typeof m.task_type === 'string') out.task_type = m.task_type;
+  if (typeof m.complexity === 'string') out.complexity = m.complexity;
+  if (typeof m.needs_json === 'boolean') out.needs_json = m.needs_json;
+  if (typeof m.user_id === 'string') out.user_id = m.user_id;
+  if (typeof m.org_id === 'string') out.org_id = m.org_id;
   return out;
 }
 
@@ -70,10 +70,10 @@ function normalizePolicy(raw: Record<string, unknown>): Policy {
   const p: Policy = {
     match: normalizeMatch(raw.match as Record<string, unknown> | undefined),
   };
-  if (typeof raw.id === "string") p.id = raw.id;
-  if (typeof raw.use_lane === "string") p.use_lane = raw.use_lane;
+  if (typeof raw.id === 'string') p.id = raw.id;
+  if (typeof raw.use_lane === 'string') p.use_lane = raw.use_lane;
   // use_lane wins if both somehow present (mutually exclusive); never send both.
-  if (p.use_lane == null && typeof raw.max_lane === "string") p.max_lane = raw.max_lane;
+  if (p.use_lane == null && typeof raw.max_lane === 'string') p.max_lane = raw.max_lane;
   return p;
 }
 
@@ -97,7 +97,7 @@ function toServerBody(p: Policy): Record<string, unknown> {
 
 // GET /admin/api/policies -> Policy[] (ordered).
 export async function listPolicies(): Promise<Policy[]> {
-  const res = await fetch(BASE, { headers: { accept: "application/json" } });
+  const res = await fetch(BASE, { headers: { accept: 'application/json' } });
   const rows = await asJson<Record<string, unknown>[]>(res);
   return rows.map(normalizePolicy);
 }
@@ -105,8 +105,8 @@ export async function listPolicies(): Promise<Policy[]> {
 // PUT /admin/api/policies <- Policy[] (whole ordered set; order = priority).
 export async function savePolicies(list: Policy[]): Promise<Policy[]> {
   const res = await fetch(BASE, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(list.map(toServerBody)),
   });
   const saved = await asJson<Record<string, unknown>[]>(res);

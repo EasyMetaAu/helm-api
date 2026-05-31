@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { RuleDimension } from '$lib/api/classifier.js';
+  import { t } from '$lib/i18n';
 
   // READ-ONLY scoring-dimension table. Dimensions/weights are DATA in
   // classifier.yaml; tuning them risks skewing classification, so the UI shows
@@ -14,9 +15,9 @@
 <table data-testid="dimension-table" class="w-full text-sm">
   <thead>
     <tr class="border-b border-slate-200 text-left text-slate-500">
-      <th class="py-2 pr-4 font-medium">Dimension</th>
-      <th class="py-2 pr-4 font-medium">Weight</th>
-      <th class="py-2 font-medium">Direction</th>
+      <th class="py-2 pr-4 font-medium">{$t('Dimension')}</th>
+      <th class="py-2 pr-4 font-medium">{$t('Weight')}</th>
+      <th class="py-2 font-medium">{$t('Direction')}</th>
     </tr>
   </thead>
   <tbody>
@@ -26,7 +27,7 @@
         <td class="py-1.5 pr-4 tabular-nums text-slate-700">{dim.weight}</td>
         <td class="py-1.5 text-slate-600">
           <span aria-hidden="true">{arrow(dim.direction)}</span>
-          {dim.direction}
+          {$t(dim.direction)}
         </td>
       </tr>
     {/each}

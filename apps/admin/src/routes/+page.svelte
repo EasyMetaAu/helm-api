@@ -82,7 +82,10 @@
   <section class="mt-8">
     <div class="mb-3 flex items-center justify-between">
       <h3 class="text-sm font-semibold text-slate-900">{$t('Recent requests')}</h3>
-      <a class="text-sm font-medium text-indigo-600 hover:text-indigo-700" href={`${base}/requests`}>
+      <a
+        class="text-sm font-medium text-indigo-600 hover:text-indigo-700"
+        href={`${base}/requests`}
+      >
         {$t('View all')} →
       </a>
     </div>
@@ -91,7 +94,9 @@
       <div
         class="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-500"
       >
-        {$t('No requests recorded yet. Point a client at the gateway to see routing activity here.')}
+        {$t(
+          'No requests recorded yet. Point a client at the gateway to see routing activity here.',
+        )}
       </div>
     {:else}
       <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white">
@@ -122,12 +127,12 @@
                 <td class="px-4 py-2.5">
                   {#if r.status === 'error'}
                     <span class="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700"
-                      >error</span
+                      >{$t('error')}</span
                     >
                   {:else}
                     <span
                       class="rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700"
-                      >ok</span
+                      >{$t('ok')}</span
                     >
                   {/if}
                 </td>

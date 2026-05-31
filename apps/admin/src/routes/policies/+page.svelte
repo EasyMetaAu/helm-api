@@ -49,7 +49,7 @@
       const saved = await savePolicies(policies);
       policies = saved.map((p) => ({ ...p }));
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to save policies';
+      error = e instanceof Error ? e.message : $t('Failed to save policies');
     } finally {
       saving = false;
     }
@@ -68,9 +68,11 @@
       class="mt-2 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600"
       data-testid="first-match-explainer"
     >
-      Rules are evaluated top to bottom; the <strong>first matching</strong> rule wins (first-match).
-      Order is the priority — drag a rule up to give it precedence. Rules apply in plain order, not by
-      any weighting.
+      {$t('Rules are evaluated top to bottom; the')}
+      <strong>{$t('first matching')}</strong>
+      {$t(
+        'rule wins (first-match). Order is the priority — drag a rule up to give it precedence. Rules apply in plain order, not by any weighting.',
+      )}
     </p>
   </header>
 
@@ -98,13 +100,13 @@
     <button
       type="button"
       class="rounded bg-slate-200 px-3 py-1.5 text-sm font-medium text-slate-800"
-      onclick={addRow}>Add policy</button
+      onclick={addRow}>{$t('Add policy')}</button
     >
     <button
       type="button"
       class="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
       onclick={handleSave}
-      disabled={saving}>Save policies</button
+      disabled={saving}>{$t('Save policies')}</button
     >
   </div>
 </section>

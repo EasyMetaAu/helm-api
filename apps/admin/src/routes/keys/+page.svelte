@@ -47,7 +47,7 @@
       keys = keys.map((k) => (k.key_id === keyId ? { ...k, disabled: true } : k));
       confirmingRevoke = null;
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to revoke key';
+      error = e instanceof Error ? e.message : $t('Failed to revoke key');
     } finally {
       revoking = null;
     }
@@ -67,7 +67,7 @@
     <button
       type="button"
       class="rounded bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
-      onclick={() => (showCreate = true)}>New key</button
+      onclick={() => (showCreate = true)}>{$t('New key')}</button
     >
   </header>
 
@@ -85,10 +85,10 @@
     <table class="w-full text-left text-sm">
       <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
         <tr>
-          <th class="px-4 py-2">Key (prefix)</th>
-          <th class="px-4 py-2">Role</th>
-          <th class="px-4 py-2">Caps</th>
-          <th class="px-4 py-2">Status</th>
+          <th class="px-4 py-2">{$t('Key (prefix)')}</th>
+          <th class="px-4 py-2">{$t('Role')}</th>
+          <th class="px-4 py-2">{$t('Caps')}</th>
+          <th class="px-4 py-2">{$t('Status')}</th>
           <th class="px-4 py-2"></th>
         </tr>
       </thead>
@@ -102,24 +102,24 @@
               <span class="text-slate-700">{key.role}</span>
               {#if key.role === 'root'}
                 <p data-testid="root-warning" class="mt-1 text-xs text-amber-700">
-                  Management plane only — do not feed production traffic.
+                  {$t('Management plane only — do not feed production traffic.')}
                 </p>
               {/if}
             </td>
             <td class="px-4 py-3 text-slate-600">
               <div>max_lane: {key.max_lane ?? '—'}</div>
               <div>allowed_lanes: {key.allowed_lanes?.join(', ') || '—'}</div>
-              <div>allow_custom_model: {key.allow_custom_model ? 'yes' : 'no'}</div>
+              <div>allow_custom_model: {key.allow_custom_model ? $t('yes') : $t('no')}</div>
             </td>
             <td class="px-4 py-3">
               {#if key.disabled}
                 <span class="rounded bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600"
-                  >disabled</span
+                  >{$t('disabled')}</span
                 >
               {:else}
                 <span
                   class="rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700"
-                  >active</span
+                  >{$t('active')}</span
                 >
               {/if}
             </td>
@@ -129,7 +129,7 @@
                   type="button"
                   class="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50"
                   disabled={revoking === key.key_id}
-                  onclick={() => askRevoke(key.key_id)}>Revoke</button
+                  onclick={() => askRevoke(key.key_id)}>{$t('Revoke')}</button
                 >
               {/if}
             </td>
@@ -143,22 +143,23 @@
     <div
       class="rounded-lg border border-amber-300 bg-amber-50 p-4"
       role="dialog"
-      aria-label="Confirm revoke"
+      aria-label={$t('Confirm revoke')}
     >
       <p class="text-sm text-amber-800">
-        Revoke this key? It will be disabled (kept for audit, not deleted). Mint a fresh key to
-        rotate.
+        {$t(
+          'Revoke this key? It will be disabled (kept for audit, not deleted). Mint a fresh key to rotate.',
+        )}
       </p>
       <div class="mt-3 flex justify-end gap-2">
         <button
           type="button"
           class="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-white"
-          onclick={cancelRevoke}>Cancel</button
+          onclick={cancelRevoke}>{$t('Cancel')}</button
         >
         <button
           type="button"
           class="rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
-          onclick={confirmRevoke}>Confirm revoke</button
+          onclick={confirmRevoke}>{$t('Confirm revoke')}</button
         >
       </div>
     </div>

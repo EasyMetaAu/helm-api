@@ -5,6 +5,7 @@
     createKey,
     type CreatedKey,
   } from '$lib/api/keys.js';
+  import { t } from '$lib/i18n';
 
   // Create-key dialog: owns the caps form AND the ONE-TIME plaintext reveal.
   // CLAUDE.md 原则7 / docs/06: the plaintext is returned by the create response
@@ -45,7 +46,7 @@
     try {
       revealed = await createKey(input);
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to create key';
+      error = e instanceof Error ? e.message : $t('Failed to create key');
     } finally {
       creating = false;
     }
@@ -92,13 +93,14 @@
 <div
   class="rounded-lg border border-slate-300 bg-white p-5 shadow-sm"
   role="dialog"
-  aria-label="Create API key"
+  aria-label={$t('Create API key')}
 >
   {#if revealed}
-    <h2 class="text-lg font-semibold text-slate-900">Your new API key</h2>
+    <h2 class="text-lg font-semibold text-slate-900">{$t('Your new API key')}</h2>
     <p class="mt-1 text-sm text-amber-700">
-      Copy it now — this is the only time it will be shown. We store only a hash, so it cannot be
-      recovered later.
+      {$t(
+        'Copy it now — this is the only time it will be shown. We store only a hash, so it cannot be recovered later.',
+      )}
     </p>
     <div class="mt-3 flex items-center gap-2">
       <code
@@ -109,18 +111,18 @@
       <button
         type="button"
         class="rounded bg-slate-800 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700"
-        onclick={copyPlaintext}>{copied ? 'Copied' : 'Copy'}</button
+        onclick={copyPlaintext}>{copied ? $t('Copied') : $t('Copy')}</button
       >
     </div>
     <div class="mt-4 flex justify-end">
       <button
         type="button"
         class="rounded bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
-        onclick={confirmSaved}>I saved it</button
+        onclick={confirmSaved}>{$t('I saved it')}</button
       >
     </div>
   {:else}
-    <h2 class="text-lg font-semibold text-slate-900">Create API key</h2>
+    <h2 class="text-lg font-semibold text-slate-900">{$t('Create API key')}</h2>
 
     {#if error}
       <p
@@ -133,10 +135,10 @@
 
     <div class="mt-3 flex flex-col gap-3">
       <label class="flex flex-col gap-1 text-sm">
-        <span class="font-medium text-slate-700">Role</span>
+        <span class="font-medium text-slate-700">{$t('Role')}</span>
         <select
           bind:value={role}
-          aria-label="role"
+          aria-label={$t('role')}
           class="rounded border border-slate-300 px-2 py-1.5 text-sm"
         >
           <option value="user">user</option>
@@ -144,19 +146,21 @@
         </select>
         {#if role === 'root'}
           <span class="text-xs text-amber-700"
-            >Root keys are for the bootstrap/management plane only — do not feed production traffic.</span
+            >{$t(
+              'Root keys are for the bootstrap/management plane only — do not feed production traffic.',
+            )}</span
           >
         {/if}
       </label>
 
       <label class="flex flex-col gap-1 text-sm">
-        <span class="font-medium text-slate-700">Max lane (cap)</span>
+        <span class="font-medium text-slate-700">{$t('Max lane (cap)')}</span>
         <select
           bind:value={maxLane}
-          aria-label="max lane"
+          aria-label={$t('max lane')}
           class="rounded border border-slate-300 px-2 py-1.5 text-sm"
         >
-          <option value="">— no cap —</option>
+          <option value="">{$t('— no cap —')}</option>
           {#each lanes as lane (lane)}
             <option value={lane}>{lane}</option>
           {/each}
@@ -164,8 +168,13 @@
       </label>
 
       <label class="flex items-center gap-2 text-sm">
-        <input type="checkbox" bind:checked={allowCustomModel} aria-label="allow custom model" />
-        <span class="text-slate-700">Allow explicit client-specified model passthrough</span>
+        <input
+          type="checkbox"
+          bind:checked={allowCustomModel}
+          aria-label={$t('allow custom model')}
+        />
+        <span class="text-slate-700">{$t('Allow explicit client-specified model passthrough')}</span
+        >
       </label>
     </div>
 
@@ -173,13 +182,13 @@
       <button
         type="button"
         class="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
-        onclick={onclose}>Cancel</button
+        onclick={onclose}>{$t('Cancel')}</button
       >
       <button
         type="button"
         class="rounded bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
         disabled={creating}
-        onclick={handleCreate}>Create key</button
+        onclick={handleCreate}>{$t('Create key')}</button
       >
     </div>
   {/if}

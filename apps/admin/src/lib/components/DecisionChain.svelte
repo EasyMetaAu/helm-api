@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { RequestDetail } from '$lib/api/requests.js';
+  import { t } from '$lib/i18n';
 
   // Visualises the recorded decision trail in order:
   //   classifier output -> eval -> matched policy -> lane candidates -> provider
@@ -27,7 +28,7 @@
   <!-- 1. Classification stage (原则5: NOT execution fallback) -->
   <section data-testid="chain-classifier" class="rounded-lg border border-slate-200 bg-white p-4">
     <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-      Classifier (classification stage)
+      {$t('Classifier (classification stage)')}
     </h3>
     <div class="flex flex-wrap items-center gap-2 text-sm">
       <span class="rounded bg-slate-100 px-2 py-0.5 font-medium text-slate-800"
@@ -36,7 +37,7 @@
       <span class="rounded bg-slate-100 px-2 py-0.5 font-medium text-slate-800"
         >{cls.complexity}</span
       >
-      <span class="text-slate-500">confidence {cls.confidence.toFixed(2)}</span>
+      <span class="text-slate-500">{$t('confidence')} {cls.confidence.toFixed(2)}</span>
     </div>
     {#if cls.matched_dimensions.length > 0}
       <div class="mt-2 flex flex-wrap gap-1">
@@ -47,9 +48,9 @@
     {/if}
     {#if Object.keys(cls.constraints).length > 0}
       <div class="mt-2 text-xs text-slate-500">
-        constraints:
+        {$t('constraints:')}
         {#each Object.entries(cls.constraints) as [name, on] (name)}
-          <span class="ml-1">{name}={on ? 'yes' : 'no'}</span>
+          <span class="ml-1">{name}={on ? $t('yes') : $t('no')}</span>
         {/each}
       </div>
     {/if}
@@ -57,16 +58,21 @@
 
   <!-- 2. Eval stage -->
   <section data-testid="chain-eval" class="rounded-lg border border-slate-200 bg-white p-4 text-sm">
-    <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Eval</h3>
+    <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">{$t('Eval')}</h3>
     {#if detail.eval_triggered}
       <span class="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800"
-        >triggered</span
+        >{$t('triggered')}</span
       >
       <span class="ml-2 text-slate-600">
-        cache: {detail.eval_cache_hit === null ? 'n/a' : detail.eval_cache_hit ? 'hit' : 'miss'}
+        {$t('cache:')}
+        {detail.eval_cache_hit === null
+          ? $t('n/a')
+          : detail.eval_cache_hit
+            ? $t('hit')
+            : $t('miss')}
       </span>
     {:else}
-      <span class="text-slate-500">not triggered</span>
+      <span class="text-slate-500">{$t('not triggered')}</span>
     {/if}
   </section>
 
@@ -76,15 +82,15 @@
     class="rounded-lg border border-slate-200 bg-white p-4 text-sm"
   >
     <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-      Matched policy
+      {$t('Matched policy')}
     </h3>
-    <span class="font-mono text-slate-800">{detail.matched_policy ?? '— none'}</span>
+    <span class="font-mono text-slate-800">{detail.matched_policy ?? $t('— none')}</span>
   </section>
 
   <!-- 4. Lane candidate chain -->
   <section data-testid="chain-lanes" class="rounded-lg border border-slate-200 bg-white p-4">
     <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-      Lane candidate chain
+      {$t('Lane candidate chain')}
     </h3>
     <ol class="flex flex-wrap items-center gap-1 text-sm">
       {#each detail.lane_candidates as lane, i (lane)}
@@ -99,7 +105,7 @@
   <!-- 5. Execution stage: provider attempts (原则5: distinct from classification) -->
   <section data-testid="chain-attempts" class="rounded-lg border border-slate-200 bg-white p-4">
     <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-      Provider attempts (execution fallback)
+      {$t('Provider attempts (execution fallback)')}
     </h3>
     <ul class="flex flex-col gap-2">
       {#each detail.provider_attempts as a, i (i)}
@@ -111,7 +117,7 @@
           >
           <span class="text-slate-500">{a.latency_ms}ms</span>
           {#if a.error_class}<span class="text-red-600">{a.error_class}</span>{/if}
-          {#if a.skip_reason}<span class="text-slate-500">skip: {a.skip_reason}</span>{/if}
+          {#if a.skip_reason}<span class="text-slate-500">{$t('skip:')} {a.skip_reason}</span>{/if}
         </li>
       {/each}
     </ul>

@@ -26,7 +26,7 @@
     } catch (e) {
       // Surface a page-level alert AND re-throw so the editor leaves its per-card
       // "Saved" flag off (fail-closed: no false success on a rejected write).
-      error = e instanceof Error ? e.message : 'Failed to save lane';
+      error = e instanceof Error ? e.message : $t('Failed to save lane');
       throw e;
     } finally {
       savingName = null;

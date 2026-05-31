@@ -7,10 +7,8 @@
   // (that lives in headless core) — only client-side form validation:
   // non-empty primary, numeric latency, and the `balanced` guard from docs/04
   // (the classification-fallback terminal must always have a primary).
-  let {
-    lane,
-    onsave,
-  }: { lane: Lane; onsave: (name: string, body: Lane) => void | Promise<void> } = $props();
+  let { lane, onsave }: { lane: Lane; onsave: (name: string, body: Lane) => void | Promise<void> } =
+    $props();
 
   // Local editable copy so a failed save never dirties the parent's data. We
   // intentionally seed from the prop's INITIAL value only (untrack) — the editor
@@ -178,10 +176,13 @@
   {#if primaryEmpty}
     <p class="text-sm text-red-600" role="alert">
       {#if isBalanced}
-        The <strong>balanced</strong> lane is the classification fallback terminal — its primary is required
-        and cannot be empty.
+        {$t('The')}
+        <strong>balanced</strong>
+        {$t(
+          'lane is the classification fallback terminal — its primary is required and cannot be empty.',
+        )}
       {:else}
-        Primary is required and cannot be empty.
+        {$t('Primary is required and cannot be empty.')}
       {/if}
     </p>
   {/if}
@@ -193,10 +194,8 @@
       disabled={!valid}>{$t('Save')}</button
     >
     {#if saved}
-      <span
-        data-testid="lane-saved"
-        role="status"
-        class="text-sm font-medium text-emerald-600">{$t('Saved')}</span
+      <span data-testid="lane-saved" role="status" class="text-sm font-medium text-emerald-600"
+        >{$t('Saved')}</span
       >
     {/if}
   </div>

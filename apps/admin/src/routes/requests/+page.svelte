@@ -39,7 +39,7 @@
       items = [...items, ...res.items];
       nextCursor = res.nextCursor;
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to load more requests';
+      error = e instanceof Error ? e.message : $t('Failed to load more requests');
     } finally {
       loading = false;
     }
@@ -112,12 +112,12 @@
               <td class="px-3 py-2">
                 {#if r.status === 'error'}
                   <span class="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700"
-                    >error</span
+                    >{$t('error')}</span
                   >
                 {:else}
                   <span
                     class="rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700"
-                    >ok</span
+                    >{$t('ok')}</span
                   >
                 {/if}
               </td>
