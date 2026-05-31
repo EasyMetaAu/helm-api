@@ -7,7 +7,9 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Self-hosted runners (EasyMetaAu org, docker-runner-*); GitHub-hosted minutes
+    # are not used. All 9 runners carry these labels.
+    runs-on: [self-hosted, Linux, X64, docker]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -25,7 +27,7 @@ jobs:
   # independent of `verify` (no `needs`) so the unit gates run on their own and
   # neither job blocks the other.
   docker:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, docker]
     steps:
       - uses: actions/checkout@v4
       - name: Build gateway image
