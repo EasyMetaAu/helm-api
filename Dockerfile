@@ -25,6 +25,17 @@ FROM node:22-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
+# Build info surfaced by GET /version (docs/10) and the admin header status cluster.
+# Read at runtime by readBuildInfo() from these env vars; injected here at build
+# time via --build-arg (CI passes the package version + commit + timestamp; see
+# .github/workflows/ci.yml). Defaults keep a bare `docker build` working.
+ARG HELM_VERSION=unknown
+ARG HELM_GIT_SHA=unknown
+ARG HELM_BUILT_AT=unknown
+ENV HELM_VERSION=$HELM_VERSION \
+    HELM_GIT_SHA=$HELM_GIT_SHA \
+    HELM_BUILT_AT=$HELM_BUILT_AT
+
 # Non-root user; pre-create the mount dirs it must read/write.
 RUN useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin helm \
  && mkdir -p /app/config /app/data && chown -R helm:helm /app

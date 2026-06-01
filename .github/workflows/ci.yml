@@ -33,7 +33,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build gateway image
-        run: docker build -t helm-api:ci .
+        # Inject build info (docs/10) so GET /version reports real values instead
+        # of "unknown": app version from package.json, the commit, and a UTC stamp.
+        run: |
+          docker build -t helm-api:ci \
+            --build-arg HELM_VERSION="$(node -p "require('./package.json').version")" \
+            --build-arg HELM_GIT_SHA="$(git rev-parse --short HEAD)" \
+            --build-arg HELM_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            .
       - name: Run container with required env
         # The provider credential is referenced by env NAME only (principle 7);
         # /healthz never calls upstream, so a dummy value is enough to boot. Config
@@ -57,6 +64,17 @@ jobs:
           echo "::error::gateway did not become healthy within 30s"
           docker logs helm-ci
           exit 1
+      - name: Verify /version reports injected build info
+        # Guards the build-arg wiring above: a regression that drops the args
+        # would make /version fall back to "unknown" and fail here.
+        run: |
+          body=$(curl -fsS http://127.0.0.1:8080/version)
+          echo "$body"
+          expected=$(node -p "require('./package.json').version")
+          echo "$body" | grep -q "\"version\":\"${expected}\"" \
+            || { echo "::error::/version did not report injected version ${expected}"; exit 1; }
+          echo "$body" | grep -q '"gitSha":"unknown"' \
+            && { echo "::error::/version gitSha was not injected"; exit 1; } || true
       - name: Stop container
         if: always()
         continue-on-error: true

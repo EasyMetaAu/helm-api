@@ -106,7 +106,10 @@ never runs in a half-broken state (Principle 2).
   `503` when degraded (fail-closed: a probe failure reports not-ready, never a
   hang or 500). The container `HEALTHCHECK` hits this endpoint.
 - `GET /version` — unauthenticated build info (`version`, `gitSha`, `builtAt`),
-  injected at build time. No config or credentials are exposed.
+  injected at build time via the `HELM_VERSION` / `HELM_GIT_SHA` / `HELM_BUILT_AT`
+  Docker build-args (CI fills them from the package version, commit, and a UTC
+  stamp; for a local `build: .` see the commented `args` in `docker-compose.yml`).
+  Defaults to `unknown` when unset. No config or credentials are exposed.
 
 ## Upgrading
 
