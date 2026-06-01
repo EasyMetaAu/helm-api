@@ -47,8 +47,25 @@ describe('lanes page', () => {
     const lists = Array.from(container.querySelectorAll('datalist'));
     expect(lists).toHaveLength(2);
     for (const dl of lists) {
-      expect(Array.from(dl.querySelectorAll('option')).map((o) => o.value)).toEqual(models);
+      const values = Array.from(dl.querySelectorAll('option')).map((o) => o.value);
+      expect(values).toEqual(expect.arrayContaining(models));
     }
+  });
+
+  it('threads the other lane names into each card as targets, never the card’s own lane', () => {
+    renderPage([lane('economy'), lane('balanced'), lane('premium')]);
+    const cards = screen.getAllByTestId('lane-card');
+    const values = (card: HTMLElement) =>
+      Array.from(card.querySelectorAll('datalist option')).map(
+        (o) => (o as HTMLOptionElement).value,
+      );
+
+    // economy may target balanced/premium but not itself…
+    expect(values(cards[0])).toEqual(expect.arrayContaining(['balanced', 'premium']));
+    expect(values(cards[0])).not.toContain('economy');
+    // …and premium may target economy/balanced but not itself.
+    expect(values(cards[2])).toEqual(expect.arrayContaining(['economy', 'balanced']));
+    expect(values(cards[2])).not.toContain('premium');
   });
 
   it('shows fallback in declared order (premium before economy)', () => {

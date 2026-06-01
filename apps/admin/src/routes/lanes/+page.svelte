@@ -12,6 +12,10 @@
 
   // Seed the working list from the loaded data once; thereafter the page owns it.
   let lanes = $state<Lane[]>(untrack(() => data.lanes));
+  // Every lane name, so each card can offer the OTHERS as chain targets (a chain
+  // element may reference another lane, not just a model). Names are immutable in
+  // this editor (saves map by name), so this stays stable across edits.
+  const laneNames = $derived(lanes.map((l) => l.name));
   let error = $state<string | null>(null);
   let savingName = $state<string | null>(null);
 
@@ -60,7 +64,7 @@
   {:else}
     <div class="flex flex-col gap-4">
       {#each lanes as lane (lane.name)}
-        <LaneEditor {lane} {models} onsave={handleSave} />
+        <LaneEditor {lane} {models} {laneNames} onsave={handleSave} />
       {/each}
     </div>
   {/if}

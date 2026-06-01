@@ -5,6 +5,23 @@
 
 ---
 
+## 2026-06-01 · Lanes editor: offer other lanes (not just models) as chain targets (docs/04, Principle 6)
+
+**Context**: the lanes admin page (`/admin/lanes`) only suggested **model aliases** in the primary/fallback comboboxes. But a chain element may be a **model alias OR another lane name** — core's `expandChain` (`packages/core/src/routing/route-request.ts`) already flattens lane refs recursively with a cycle guard, and the default lanes ship with lane-to-lane fallbacks (`balanced.fallback: ["premium", "economy"]`). The capability existed end-to-end; only the UI hid it.
+
+**What changed** (admin-only, no core/schema change needed):
+- `LaneEditor.svelte` gained a `laneNames?: string[]` prop. A `$derived` `laneOptions = laneNames.filter(n => n !== initial.name)` excludes the card's **own** lane — a lane targeting itself is meaningless (the expander would just dedupe it). The `<datalist>` now renders `laneOptions` (each `<option>` carries `label={$t('lane')}` so they read distinctly from models) **before** the model aliases.
+- `lanes/+page.svelte` derives `laneNames` from the loaded lanes and threads it into every `LaneEditor`. Names are immutable in this editor (saves map by name), so the derived list is stable across edits.
+- Fallback-add placeholder `"model alias"` → `"model or lane"`. New i18n keys `lane` / `model or lane` added+translated across all 5 locales; the orphaned `"model alias"` key was removed (only consumer was this input).
+
+**Decisions / trade-offs**:
+- **No new validation of lane refs in the UI** — kept the input permissive (free text + suggestions), matching the existing model-alias behaviour. The schema already validates only non-empty strings; real cycle/typo safety lives in core (`expandChain` cycle guard + execution fallback). Adding UI-side graph validation would duplicate core logic for little gain.
+- **Self-exclusion only, not full cycle prevention in the picker** — the requirement was "can't pick its own lane". Deeper cycles (a→b→a) are already neutralised by `expandChain`'s `visited` set, so the picker intentionally still lets you build them (they're harmless and sometimes intended as "try the other tier then stop").
+
+**Gate**: admin Vitest 149/149 (2 new lane tests); `svelte-check` 0 errors (1 pre-existing warning in `settings/+page.svelte`, untouched); Prettier clean. Biome ignores `apps/admin` by design.
+
+---
+
 ## 2026-06-01 · Unified admin status cluster in the header top-right (docs/11, Principle 3 & 7)
 
 **Context**: operator-facing meta was scattered in the sidebar footer — a `LocaleSwitcher`, a **hardcoded** "Gateway online" badge (static green dot that never reflected real health), and a GitHub link with no star count — and there was no version display despite the gateway already exposing `GET /version`. Consolidated all of it into one designed cluster in the previously-empty **header top-right**, and made the signals live.
