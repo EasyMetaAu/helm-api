@@ -188,9 +188,9 @@ describe("default config activates capability filter + cost (alias-namespace ali
     // A chain that puts the json-INCAPABLE auto FIRST, then a json-capable model.
     // A needs_json request must SKIP the auto (skip_reason no_json_support) and
     // land on the capable model — proving the filter prunes on the real catalog.
-    // The capable model is deepseek-crs/deepseek-pro: json-capable AND non-stream-
-    // capable, so a non-stream request lands on it cleanly (the openai-crs heads
-    // are stream-only — see the dedicated no_nonstream_support test).
+    // The landing model is deepseek-crs/deepseek-pro (json + non-stream capable);
+    // the gpt-5.x relay heads are stream-ONLY (requiresStreaming) so a non-stream
+    // request would skip them too (covered by the json-lane test below).
     const chain = ["zenmux/auto", "deepseek-crs/deepseek-pro"];
     const out = await execute(plan(chain), req({ response_format: { type: "json_object" } }));
 
@@ -217,15 +217,19 @@ describe("default config activates capability filter + cost (alias-namespace ali
     // Expand the REAL shipped `json` lane: primary openai-crs/gpt-5.4-mini, then
     // balanced (whose tail is zenmux/auto + openrouter/auto, both json-incapable).
     const chain = expandChain("json");
+    expect(chain).toContain("openai-crs/gpt-5.4-mini");
     expect(chain).toContain("zenmux/auto");
     expect(chain).toContain("openrouter/auto");
     const out = await execute(plan(chain), req({ response_format: { type: "json_object" } }));
     expect(out.final.status).toBe("ok");
-    // The json lane primary (openai-crs/gpt-5.4-mini) is stream-only, so this
-    // NON-stream request skips it (no_nonstream_support) and lands on the next
-    // json-capable candidate — balanced's primary deepseek-crs/deepseek-pro. The
-    // auto tails are never reached, but the chain demonstrably CONTAINS json-
-    // incapable candidates the filter would prune (proven head-on by the prior test).
+    // The json primary openai-crs/gpt-5.4-mini is stream-ONLY (requiresStreaming),
+    // so a non-stream request SKIPS it (no_nonstream_support) without invoking it,
+    // and the chain lands on the next json + non-stream capable model,
+    // deepseek-crs/deepseek-pro. The json-incapable */auto tails are pruned too
+    // (no_json_support, proven head-on by the previous test) but are never reached.
+    const primary = out.attempts.find((a) => a.alias === "openai-crs/gpt-5.4-mini");
+    expect(primary?.skipped).toBe(true);
+    expect(primary?.skip_reason).toBe("no_nonstream_support");
     if (out.final.status === "ok") expect(out.final.alias).toBe("deepseek-crs/deepseek-pro");
   });
 
@@ -265,9 +269,9 @@ describe("default config activates capability filter + cost (alias-namespace ali
       now: clock(),
       signal: new AbortController().signal,
     });
-    // Serve a plain (non-stream) request on a non-stream-capable model. The
-    // openai-crs heads are stream-only (skipped on non-stream), so use balanced's
-    // primary deepseek-crs/deepseek-pro, which serves and prices deterministically.
+    // Serve a plain (non-stream) request on the balanced json head
+    // deepseek-crs/deepseek-pro. The gpt-5.x relay heads are stream-ONLY
+    // (requiresStreaming) so they can't serve this non-stream request.
     const out = await execute(plan(["deepseek-crs/deepseek-pro"]), req());
     expect(out.final.status).toBe("ok");
     const served = out.attempts.find((a) => a.status === "ok");

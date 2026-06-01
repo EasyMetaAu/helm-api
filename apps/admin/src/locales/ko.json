@@ -274,6 +274,7 @@
   "Raw": "원본",
   "Expand": "펼치기",
   "Collapse": "접기",
+  "Show all {count} dimensions": "전체 {count}개 차원 보기",
   "Show remaining {count} items": "나머지 {count}개 표시",
   "Max depth reached": "최대 깊이에 도달했습니다",
   "(empty object)": "(빈 객체)",

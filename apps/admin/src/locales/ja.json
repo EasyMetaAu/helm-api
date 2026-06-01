@@ -274,6 +274,7 @@
   "Raw": "生データ",
   "Expand": "展開",
   "Collapse": "折りたたむ",
+  "Show all {count} dimensions": "全 {count} 件のディメンションを表示",
   "Show remaining {count} items": "残り {count} 件を表示",
   "Max depth reached": "最大の深さに到達しました",
   "(empty object)": "（空のオブジェクト）",
