@@ -17,6 +17,9 @@ export default defineConfig({
       // vite plugin — stub the ones our components import (base path, page store).
       '$app/paths': fileURLToPath(new URL('./src/lib/test/app-paths.mock.ts', import.meta.url)),
       '$app/stores': fileURLToPath(new URL('./src/lib/test/app-stores.mock.ts', import.meta.url)),
+      '$app/navigation': fileURLToPath(
+        new URL('./src/lib/test/app-navigation.mock.ts', import.meta.url),
+      ),
     },
   },
   test: {

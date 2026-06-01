@@ -55,11 +55,15 @@ function freshStore() {
 describe("SqliteTelemetryStore", () => {
   it("round-trips insert -> queryRecent without losing nested structure", async () => {
     const store = freshStore();
-    await store.insert({ decision: decision("req_1"), apiKeyId: "k1", createdAt: new Date() });
+    const at = new Date(1717155600000);
+    await store.insert({ decision: decision("req_1"), apiKeyId: "k1", createdAt: at });
     const recent = await store.queryRecent(10);
     expect(recent).toHaveLength(1);
-    expect(recent[0]).toEqual(decision("req_1"));
-    expect(recent[0]?.provider_attempts).toHaveLength(2);
+    expect(recent[0]?.record).toEqual(decision("req_1"));
+    expect(recent[0]?.record.provider_attempts).toHaveLength(2);
+    // queryRecent surfaces the recorded timestamp alongside the record so the
+    // Debug UI can render the 「时间」 column without fabricating it.
+    expect(recent[0]?.createdAt.getTime()).toBe(at.getTime());
   });
 
   it("getByRequestId returns the record, null on a miss", async () => {
@@ -100,7 +104,7 @@ describe("SqliteTelemetryStore", () => {
       createdAt: new Date(3000),
     });
     const recent = await store.queryRecent(2);
-    expect(recent.map((r) => r.request_id)).toEqual(["new", "mid"]);
+    expect(recent.map((r) => r.record.request_id)).toEqual(["new", "mid"]);
   });
 
   it("rejects a duplicate request_id (unique constraint)", async () => {

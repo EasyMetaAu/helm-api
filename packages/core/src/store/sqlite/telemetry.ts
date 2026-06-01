@@ -4,6 +4,7 @@ import { and, asc, desc, eq, gte, lt } from "drizzle-orm";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
+  RecentDecisionRecord,
   RequestPayload,
   TelemetryStore,
 } from "../ports.js";
@@ -44,14 +45,14 @@ export class SqliteTelemetryStore implements TelemetryStore {
     return { id };
   }
 
-  async queryRecent(limit: number): Promise<DecisionRecord[]> {
+  async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
     return this.db
       .select()
       .from(telemetry)
       .orderBy(desc(telemetry.createdAt))
       .limit(limit)
       .all()
-      .map((r) => this.toDecision(r));
+      .map((r) => ({ record: this.toDecision(r), createdAt: r.createdAt }));
   }
 
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {
