@@ -62,11 +62,7 @@ export class PgKeyStore implements KeyStore {
 
   // Edit ONLY the two rate-limit columns (null clears back to inherit). Other
   // fields untouched — no in-place rewrite of role/caps. Throws on unknown id.
-  async updateRateLimit(
-    keyId: string,
-    rpm: number | null,
-    tpm: number | null,
-  ): Promise<void> {
+  async updateRateLimit(keyId: string, rpm: number | null, tpm: number | null): Promise<void> {
     const res = await this.db
       .update(apiKeys)
       .set({ rateLimitRpm: rpm, rateLimitTpm: tpm })
