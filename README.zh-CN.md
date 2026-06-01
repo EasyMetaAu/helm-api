@@ -4,7 +4,7 @@
 
 [English](README.md) · **简体中文**
 
-### 一个网关，挡在你所有大模型供应商前面——用配置选模型，而不是改代码。
+### 一个网关，挡在你所有 LLM 供应商前面 —— 用配置而非代码来选模型。
 
 开源 · 自托管 · MIT
 
@@ -16,82 +16,107 @@
 
 </div>
 
-**痛点。** 你的应用写死了一个模型。等哪天你想给简单的请求换个更便宜的模型、给难的请求上更强的模型，或者在某个供应商挂掉时自动切到备用——你都得改代码、重新部署。
+Helm API 是一个开源、自托管的 **LLM 路由网关** —— 可以把它理解成 **“LLM 世界的 nginx”**。你的应用照常向 Helm 发一个 OpenAI 或 Anthropic 请求，剩下的交给一份声明式 YAML 配置：由它决定该用哪个模型、调用对应供应商（失败就自动切到备用）、按需做协议互译，并把每一次决策都记录下来。客户端始终面对同一套接口和同一种输出格式，只需改 `base_url` 和 API key —— 所有路由逻辑都在你自己掌控的配置里。
 
-**Helm 做的事。** Helm 站在你的应用和各家模型供应商中间。应用照常把 OpenAI 或 Anthropic 请求发给 Helm；Helm 判断这条请求该用哪个模型，调用对应的供应商（失败就自动换备用），并记录每一次决策。你的应用始终只需要设置 `base_url` 和 API key——所有路由逻辑都放在一份你自己掌控的配置文件里。
-
-模型不用你来选。应用发 `model: "auto"`，Helm 就把这条请求归入一条 **lane**（车道）——比如 `economy`、`balanced`、`premium` 这样的档位。每条 lane 对应哪个真实模型，由你在配置里说了算，所以换模型、调成本、改回退链，都不用动应用代码。（某次调用就想用某个具体模型？给 key 开了权限就能直接点名——见下方“怎么调用”。）
+> **把流量当配置来管，而不是当代码来改。**
 
 ```python
-# 你的应用：还是同一个 OpenAI 客户端，只换 base_url 和 key。
+# 你的应用：还是那个 OpenAI 客户端，只换 base_url 和 key。
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="<helm-key>")
-client.chat.completions.create(model="auto", messages=[...])   # 交给 Helm 分类并路由
+client.chat.completions.create(model="auto", messages=[...])   # Helm 负责分类与路由
 ```
 
 ---
 
-## 为什么用它
+## 为什么用 Helm
 
-- **换模型不用改代码。** 在配置文件里把某条 lane 指到另一个模型即可，客户端完全无感。
-- **不会无故报错。** 万一某个可选环节出问题（分类、打分、缓存），请求会自动退回 `balanced` 这条 lane 继续跑。只有当所有供应商都真的不可用时，才会返回错误。
-- **默认就是安全的。** 配置不合法就拒绝启动；API key 只保存哈希值；限流和那个可选的打分模型默认都关着，需要时你再打开。
-- **每一次决策都看得见。** 每条请求都会记录走了哪条 lane、最终用了哪个模型、为什么、花了多少钱，在控制台里都能查到。
-- **跑在你自己的机器上。** MIT 协议、Docker 部署，不做 SaaS，数据不会离开你的服务器。
+AI 应用开发者不想在每个客户端里维护成百上千个模型、各家供应商的怪癖、兜底逻辑、成本权衡和路由判断。他们要的是**一个接口：足够便宜、足够可靠、默认就够聪明，出问题时还查得清楚。** Helm 给的正是这些：
 
-## 它能做什么
+- **换模型不用改代码。** 在配置文件里把某条 lane 指向另一个模型即可，应用毫无感知。
+- **天生 fail-open。** 任何可选环节出岔子（分类、打分、缓存），请求会悄悄降级到 `balanced` lane，而不是直接报错。只有**所有**供应商都真的挂了，你才会拿到一个结构化错误。
+- **默认就安全。** 配置非法则拒绝启动（fail-closed）；API key 只存 SHA-256 哈希，明文绝不进日志或遥测；限流和可选的打分模型默认关闭，要用才开。
+- **决策可观测。** 每个请求都会落一条脱敏的决策记录 —— 走了哪条 lane、最终哪个模型应答、为什么、有没有兜底、花了多少 —— 都能在管理界面里翻查。完整的请求/响应正文会单独存到本地一张表（默认开启，带保留期），方便调试。
+- **跑在你自己的机器上。** MIT 许可、Docker 部署。没有 SaaS、没有多租户云，任何数据都不出你的服务器。
 
-- 接收 **OpenAI Chat Completions**、**Anthropic Messages**、**OpenAI Responses** 请求——前两者支持流式。
-- 在不同协议之间互译，一个客户端就能对接多家后端。
-- 用内置的快速规则挑选 lane（还可以加一个小模型做二次确认，默认关闭）。
-- 自动在多个供应商之间回退，会先检查每个候选模型的能力（JSON、工具、视觉、上下文长度），并跳过正在故障的。
-- 默认用 SQLite 存储，规模上来了可以换成 Postgres/Supabase。
-- 自带网页控制台，用来管理 key、lane、策略和排查请求——支持 5 种语言。
+## 核心概念
 
-## 一条请求是怎么流动的
+- **Lane（车道）** —— 请求走的是可配置的 *lane*（质量/成本档位如 `economy`、`balanced`、`premium`，或任务档位如 `coding`、`json`、`vision`），而不是裸的供应商名。每条 lane 如何映射到「一个主模型 + 一条兜底链」，由你在配置里定。供应商别名只是内部供应链细节，从不暴露给客户端。
+- **分类级联** —— 用三层级联挑 lane：**①** 确定性规则（纯函数、零网络、有单测，常驻开启）；**②** 可选的小模型「二次意见」eval（`temperature: 0`、带缓存、**默认关闭**）；**③** 都没定下来就兜底到 `balanced` lane。
+- **协议互译** —— 进来的 OpenAI / Anthropic 请求会被归一成一套内部表示，于是一个客户端就能触达多种后端，并拿到一致的输出格式（含流式 SSE）。
+- **fail-open 路由** —— 辅助环节失败只做优雅降级，唯有「所有供应商都失败」才浮出错误。注意这里有**两套互不混淆的兜底**：**分类兜底**（→ `balanced` lane）和**执行兜底**（→ 链里的下一个模型），它们记在不同字段里，绝不混为一谈。
+- **配置即代码** —— 行为都写在 `config/*.yaml` 里，启动时用 Zod 校验。非法配置 fail-closed，网关拒绝启动。
+- **无头内核** —— 整个路由大脑（分类、路由、provider 执行、协议互译、存储）都在 `packages/core` 里，不 import 任何 Web 框架。Hono 网关和 SvelteKit 管理界面只是薄薄一层外壳。
+
+## 项目状态
+
+Helm API 目前是 **0.1**、尚处早期，但它是一套真实实现，而非空架子 —— 完整链路（配置 → 鉴权 → 分类 → 路由 → 执行（含熔断与兜底）→ 协议互译 → 遥测）已端到端打通，背后有一套相当完整的 Vitest 单测和 Playwright e2e 用例兜底。具体哪些已上线、哪些还只在路线图上，见 [功能](#功能)。
+
+## 功能
+
+**已上线：**
+
+- **三种客户端协议** —— `POST /v1/chat/completions`（OpenAI Chat，流式 + 非流式）、`POST /v1/messages`（Anthropic Messages，流式 + 非流式）、`POST /v1/responses`（OpenAI Responses，仅非流式）。
+- **跨协议互译** —— 归一到一套内部 IR；跨后端输出格式一致，chat 与 messages 两个面支持 SSE 流式。
+- **三层分类** —— 确定性规则常驻；不确定时走可选的小模型 eval（默认关闭）；最后兜底到 `balanced` lane。
+- **Lane + 策略路由** —— 首条命中的策略可以钉死、设上限或限定 lane；内置默认 lane：`economy`、`balanced`、`premium`，外加任务 lane `coding`、`json`、`vision`、`tool_use`（`balanced` 是必须存在、永远兜底的那条）。
+- **带兜底的 provider 执行** —— 在多个 OpenAI 兼容上游之间走「主 + 兜底」链，配有熔断器（OPEN/HALF_OPEN）、能力过滤（缺 JSON / 工具 / 视觉 / 上下文长度的候选会被显式跳过并记原因）、以及 `:free` 档 429 跳过。客户端断连不算 provider 故障。
+- **强制 API key 鉴权** —— key 只存 SHA-256 哈希；首次启动会生成并打印一次 root key。支持按 key 设权限（`max_lane`、`allowed_lanes`、是否允许自定义模型），以及可选的按 key RPM/TPM 限流。
+- **可观测性** —— 每个请求一条脱敏决策记录（分类、策略、lane、各次 provider 尝试、延迟、兜底次数、成本拆分），外加可选的正文逐字捕获（单独存表、按保留期清理）。
+- **管理面板** —— 一个 SvelteKit + Tailwind 的 SPA，挂在 `/admin`、用 HTTP Basic 保护：实时概览、API key 增删改（含按 key 限额）、lane 与策略编辑器、分类器设置、可下钻的请求日志。支持 5 种语言（默认英文，简繁中文、日文、韩文）。改动会重新绑定到运行中的配置，下一个请求即生效，无需重启。
+- **存储** —— 默认 SQLite（本地文件）；可选 Postgres / Supabase，通过统一的 Store 端口抽象切换。
+
+**路线图 / 尚未接通：**
+
+- **Gemini** —— core 里有 transformer，但还没接到任何端点；Google/Gemini 格式的客户端目前还打不进网关。
+- **`/v1/responses` 的流式** —— 0.1 里 `stream: true` 会被一个结构化 `400` 拒掉。
+- **Memory 中间件** —— observe（写入）阶段已接通；inject（把记忆读回 prompt）和 reflector 阶段在 core 里已实现，但运行中的网关还触达不到。
+- 更细粒度的配额 / 计费，以及 OAuth 订阅类供应商，都属于后续工作。
+
+详见 [09 路线图](docs/09-roadmap.md)。
+
+## 架构
 
 ```
-        ┌──────────────────────────── Helm API 网关 (Hono) ───────────────────────────────┐
-        │                                                                                  │
-客户端 ─┤  /v1/chat/completions ─┐                                                          │
-(OpenAI/ │  /v1/messages ─────────┼─▶ 鉴权 ─▶ 限流 ─▶ 分类 ─▶ 路由 ─▶ 执行 ───────────────┼─▶ 上游
- Anthropic) /v1/responses ────────┘     │        │        │        │        │              │   provider
-        │                               │        │        │        │        │              │  (openai-crs,
-        │   /admin (SPA, HTTP Basic) ───┘  per-key RPM/TPM 选一条 lane 应用策略 逐个尝试，   │   zenmux,
-        │   /admin/api/*                                                  失败就回退        │   openrouter…)
-        │   /healthz  /version                                                              │
-        │                                                                                   │
-        └──────────────────────────── 存储（默认 SQLite · 可选 Postgres）────────────────────┘
-              key · 决策日志 · 请求正文 · 限流计数 · 记忆
+helm-api/
+├─ apps/
+│  ├─ gateway/   # Hono API + 托管面板 + /healthz、/version
+│  └─ admin/     # SvelteKit + Tailwind 面板（静态 SPA）
+├─ packages/
+│  ├─ core/      # 路由、分类、provider、协议互译、存储端口（不依赖框架）
+│  └─ shared/    # Zod schema + 共享类型（类型唯一来源）
+├─ config/       # 默认 lanes / policies / classifier / providers / … YAML
+├─ docs/         # 文档（按 01 → 11 顺序读）
+└─ scripts/      # sync:catalog 等构建期工具
 ```
 
-路由逻辑都在 `packages/core` 里，不依赖任何 Web 框架；`apps/gateway` 只是一层很薄的 Hono，顺带托管控制台。
+一个请求的流向：**鉴权 → 限流 → 分类 → 路由 → 执行（含兜底）**，随后落遥测。`packages/core` 里的路由逻辑不依赖任何 Web 框架 —— 有一条架构测试专门盯着 core 和 shared 不许 import Hono 或 Svelte —— 所以这颗大脑能 headless 独立运行。`apps/gateway` 只是薄薄一层 Hono 外壳，顺带托管面板。
 
-## 快速开始
+## 快速上手
 
-三条命令把网关跑起来：
+**前置条件：** [Docker](https://docs.docker.com/get-docker/)（最快的起步方式），或 **Node ≥ 22** 加 **pnpm 10** 从源码构建。
 
 ```bash
-# 1. 克隆并准备 env 文件
+# 1. 克隆并创建环境变量文件
 git clone https://github.com/EasyMetaAu/helm-api.git && cd helm-api
 cp .env.example .env
-#    在 .env 里设置 HELM_ADMIN_PASSWORD，并至少填上 OPENAI_API_KEY
+#    在 .env 里至少设好 HELM_ADMIN_PASSWORD 和 OPENAI_API_KEY
 
 # 2. 启动
 docker compose up -d
 
-# 3. 复制 root API key——它只在首次启动时打印一次
-docker compose logs helm | grep -i "root key"
+# 3. 复制 root API key —— 首次启动时生成并只打印一次
+docker compose logs helm | grep -i "root API key"
 ```
 
 - **网关** → `http://localhost:8080`
-- **控制台** → `http://localhost:8080/admin`（用 `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` 登录）
+- **面板** → `http://localhost:8080/admin`（用 `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` 登录）
 - **健康 / 版本** → `GET /healthz`、`GET /version`
 
-`docker-compose.yml` 把 `./config` 和 `./data` 挂成卷，所以配置和数据库重启后都还在。凭证只通过环境变量传入，不会打进镜像。
+`docker-compose.yml` 挂载了 `./config` 和 `./data`，所以配置和数据库都能跨重启保留。凭证只通过环境变量注入，绝不打进镜像。
 
-## 怎么调用
+### 调用网关
 
-任何 OpenAI 兼容的客户端都行。把地址指向 Helm，用 Helm 的 key 即可：
+任何 OpenAI 兼容客户端都能用。把它指向 Helm，再带上一把 Helm API key：
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
@@ -104,129 +129,97 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-三个端点，都用 Helm 的 API key 鉴权：
-
 | 端点 | 协议 | 流式 |
 |---|---|---|
 | `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ |
 | `POST /v1/messages` | Anthropic Messages | ✅ |
-| `POST /v1/responses` | OpenAI Responses | ❌ 暂不支持（0.1） |
+| `POST /v1/responses` | OpenAI Responses | ❌ 暂未支持（0.1） |
 
-**`model` 字段填什么：**
+**`model` 字段里填什么：**
 
-| 取值 | Helm 怎么处理 |
+| 取值 | Helm 的行为 |
 |---|---|
-| `auto`（推荐） | 自动分类这条请求，并路由到最合适的 lane。 |
-| 某个模型别名，例如 `openai-crs/gpt-5.5` | 跳过路由，直接用这个模型——仅限被授予自定义模型权限的 key。 |
+| `auto`（推荐） | 对请求做分类，自动路由到最合适的 lane。 |
+| 模型别名，如 `openai-crs/gpt-5.5` | 精确使用该模型、跳过路由 —— 仅对获授「自定义模型」权限的 key 有效。 |
 
-> 用普通 key 时，不管填什么都会自动路由，所以直接填 `auto` 就行。lane 本身（`economy`、`balanced`、`premium`、`coding`……）由运维在 `lanes.yaml` 和控制台里配置——Helm 负责把每条请求归入某条 lane，客户端不用逐次去选。核心里已经有 Gemini 适配器，只是还没接成路由——见[路线图](docs/09-roadmap.md)。
-
-### 看清一条请求是怎么路由的
-
-每个 `/v1/chat/completions` 响应都会带上能解释这次决策的头部，不打开控制台也能快速排查：
-
-| 头部 | 含义 |
-|---|---|
-| `x-helm-lane` | 请求最终落在哪条 lane |
-| `x-helm-final-model` | 真正应答的模型别名 |
-| `x-helm-provider-model` | 实际发给上游的模型 id |
-| `x-helm-decided-by` | lane 是怎么定下来的（`rules`、`eval`、`fallback`……） |
-| `x-helm-fallback-reason` | 如果发生了回退，原因是什么 |
-
-开启限流后，响应还会带上 `x-ratelimit-limit`、`x-ratelimit-remaining`、`x-ratelimit-reset`（429 时再加 `retry-after`）。
+> 用普通 key 时，无论你发什么，路由都是自动的 —— 直接用 `auto` 即可。Lane 由运维方在 `lanes.yaml` 和面板里配置，客户端不在单次调用里挑 lane。
 
 ## 配置
 
-所有配置都在 `config/*.yaml` 里。文件加载时会校验，配置不合法就不让网关启动。其中 lane、策略、分类器还能直接在控制台里改。
+一切都配在 `config/*.yaml` 里。文件加载时经 Zod 校验，**非法配置会让网关无法启动（fail-closed）**。Lane、策略和分类器还能在面板里实时编辑，下一个请求即生效。
 
-| 文件 | 管什么 | 可热改 |
+| 文件 | 控制什么 | 可实时改 |
 |---|---|---|
 | `server.yaml` | 主机 / 端口 / base path | — |
-| `auth.yaml` | 是否强制 API key + 首次启动生成 root key | — |
-| `runtime.yaml` | 请求上限、限流默认值、存储驱动 | 部分 |
-| `providers.yaml` | 上游供应商 + 模型别名（凭证只填环境变量**名**） | — |
-| `lanes.yaml` | lane——每条 lane 的主模型和它的备用链 | ✅ |
-| `policies.yaml` | 选择或封顶 lane 的规则 | ✅ |
-| `classifier.yaml` | 内置规则 + 可选的打分模型 | ✅ |
-| `capabilities.yaml` / `pricing.yaml` | 对模型目录的手动覆盖 | — |
+| `auth.yaml` | 是否要求 API key + 首次的 root key | — |
+| `runtime.yaml` | 请求限额、限流默认值、存储驱动 | 部分 |
+| `providers.yaml` | 上游供应商 + 模型别名（凭证只引用环境变量**名**） | — |
+| `lanes.yaml` | Lane —— 每条 lane 的主模型及其兜底链 | ✅ |
+| `policies.yaml` | 首条命中、用来挑选或封顶 lane 的规则 | ✅ |
+| `classifier.yaml` | 内置规则与可选的 eval 模型 | ✅ |
+| `capabilities.yaml` / `pricing.yaml` | 对模型目录的手动覆盖项 | — |
 
-最常用的环境变量（完整清单见 [`.env.example`](.env.example)）：
+最常用的环境变量（env 优先于 YAML；完整列表见 [`.env.example`](.env.example)）：
 
 | 变量 | 用途 |
 |---|---|
 | `OPENAI_API_KEY` | 主供应商凭证（**必填**） |
-| `ZENMUX_API_KEY`、`OPENROUTER_API_KEY` | 备用供应商凭证（选填） |
-| `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | 控制台登录 |
-| `HELM_PORT` / `HELM_HOST` | 服务绑定（默认 `0.0.0.0:8080`） |
+| `ZENMUX_API_KEY`、`OPENROUTER_API_KEY`、`ANTHROPIC_API_KEY` | 可选供应商凭证（缺失则跳过该供应商） |
+| `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | 面板登录（Basic auth） |
+| `HELM_HOST` / `HELM_PORT` | 服务绑定（默认 `0.0.0.0:8080`） |
 | `HELM_STORE_DRIVER` | `sqlite`（默认）或 `supabase` |
+| `HELM_STORE_URL_ENV` | 用 `supabase` 时：存放 Postgres DSN 的那个环境变量的**名字** |
 | `HELM_RATE_LIMIT_ENABLED` | 打开限流（默认关闭） |
 
-Helm 自带 **economy**、**balanced**、**premium** 三条 lane，外加任务 lane **coding**、**json**、**vision**、**tool_use**。`balanced` 是每条请求都能安全退回的那条 lane。
+> **存储。** 默认 SQLite（`better-sqlite3`，`./data` 下的本地文件）。要用 Postgres/Supabase，把 `HELM_STORE_DRIVER` 设成 `supabase`，再让 `HELM_STORE_URL_ENV` 指向存放 DSN 的环境变量。未知驱动在启动时 fail-closed。
+>
+> **凭证。** 供应商 key 在 `providers.yaml` 里只按环境变量*名*引用 —— 绝不以明文写进仓库或镜像。
 
-## 控制台
+## 管理面板
 
-在 `/admin`，用账号密码（HTTP Basic）登录后：实时概览、API key 管理（创建、吊销、设置单个 key 的限额）、lane 与策略编辑器、分类器设置，以及一份能逐条下钻、看清每个请求是怎么被路由的请求日志。支持英文（默认）、简体与繁体中文、日语、韩语。
+挂在 `/admin`、由 HTTP Basic auth 把守：实时概览、API key（创建、吊销、设按 key 限额）、lane 与策略编辑器、分类器设置，以及可下钻的请求日志 —— 点进去就能看每个请求是怎么被路由的。支持英文（默认）、简体中文、繁体中文、日文、韩文。**仅当**设置了 `HELM_ADMIN_USER` 和 `HELM_ADMIN_PASSWORD` 时面板才挂载，否则 `/admin` 和 `/admin/api/*` 返回 `404`。
 
-## 仓库结构
+## 开发
 
-```
-helm-api/
-├─ apps/
-│  ├─ gateway/   # Hono API + 托管控制台 + /healthz、/version
-│  └─ admin/     # SvelteKit + Tailwind 控制台（静态 SPA）
-├─ packages/
-│  ├─ core/      # 路由、分类、provider、协议互译、存储端口（不依赖框架）
-│  └─ shared/    # Zod schema + 共享类型（类型唯一来源）
-├─ config/       # 默认 lanes / policies / classifier / providers / … YAML
-├─ docs/         # 文档（按 01 → 11 阅读）
-└─ scripts/      # sync:catalog 等构建期工具
-```
-
-## 本地开发
-
-需要 **Node ≥ 22** 和 **pnpm**。
+需要 **Node ≥ 22** 和 **pnpm 10**。
 
 ```bash
 pnpm install
-pnpm dev          # 控制台开发服务器
-pnpm test         # Vitest 单测
+pnpm dev          # 管理面板开发服务器（Vite）—— 见下方说明
+pnpm test         # Vitest 单元测试
 pnpm test:e2e     # Playwright 端到端测试
-pnpm typecheck    # 全仓 tsc --noEmit
+pnpm typecheck    # 全仓库 tsc --noEmit
 pnpm lint         # Biome
-pnpm build        # 构建网关 + 控制台
+pnpm build        # 构建网关 + 面板
 pnpm sync:catalog # 刷新生成的模型目录（能力 + 定价）
 ```
 
-测试先行（核心用 Vitest，完整链路用 Playwright）。完整规格见 [`docs/`](docs/README.md)，设计决策记录在 [`implementation-notes.md`](implementation-notes.md)。文档正文是英文（开源社区通用语），本页提供中文导览。
+> `pnpm dev` 只起 admin SPA。网关没有 watch 脚本；要么构建后运行（`pnpm build` 再 `node apps/gateway/dist/index.js`），要么用 Docker。
+>
+> 文档目前仅有英文版。
+
+测试先行（core 用 Vitest，完整链路用 Playwright）。设计决策记录在 [`implementation-notes.md`](implementation-notes.md)。开 PR 前，先确认所有检查通过：
+
+```bash
+pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
+```
 
 ## 文档
 
-建议按顺序读，从 [`docs/README.md`](docs/README.md) 开始：
+从 [`docs/README.md`](docs/README.md) 开始，按顺序读：
 
-[01 总览](docs/01-overview.md) ·
+[01 概览](docs/01-overview.md) ·
 [02 架构](docs/02-architecture.md) ·
 [03 分类](docs/03-classification.md) ·
 [04 路由与 Lane](docs/04-routing-and-lanes.md) ·
 [05 协议互译](docs/05-protocol-translation.md) ·
 [06 鉴权与限流](docs/06-auth-and-rate-limits.md) ·
 [07 可观测性](docs/07-observability.md) ·
-[08 记忆中间件](docs/08-memory-middleware.md) ·
+[08 Memory 中间件](docs/08-memory-middleware.md) ·
 [09 路线图](docs/09-roadmap.md) ·
 [10 部署](docs/10-deployment.md) ·
 [11 管理界面](docs/11-admin-ui.md)
 
-## 路线图
-
-**0.1** 包含完整的路由网关、三种客户端协议、多供应商回退、控制台，以及记忆功能的前半部分（observe，观察）。接下来：Gemini 路由、`/v1/responses` 流式、记忆的后半部分（inject，注入），以及更细的配额控制。详见 [09 路线图](docs/09-roadmap.md)。
-
-## 参与贡献
-
-欢迎提 issue 和 PR。请在分支上开发，开 PR 前先确保各项检查通过：
-
-```bash
-pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
-```
-
-## 许可证
+## 许可
 
 [MIT](LICENSE) © 2026 EasyMeta AU
