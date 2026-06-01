@@ -2,39 +2,66 @@
 # Validated by ClassifierConfigSchema (@helm/shared). Change keywords / boundaries
 # / toggle eval here WITHOUT touching code (CLAUDE.md principle 2). The Layer-1
 # scorer is a pure function fed by this already-parsed config (principle 4).
+#
+# CALIBRATION (2026-06-01, classifier.lane-calibration): the shipped defaults made
+# Layer-1 confidence NEVER clear the threshold for normal prompts, so with eval OFF
+# (the default) EVERY request degraded to `decided_by=fallback` → `balanced` and the
+# lane system was inert. Root cause: tightly-packed boundaries + heavily-attenuated
+# keyword signal kept rawScores in a permanent low-confidence band. Fix (config-only,
+# plus a word-boundary fix to keywordSignal): spread keyword/structural weights so
+# tiers separate, re-place boundaries into the score gaps, raise sigmoid_k, and lower
+# the threshold. Tuned against the golden prompt set (scripts/calibrate-classifier.ts):
+# 29/29 prompts now reach decided_by=rules and route to their intended lanes, with a
+# healthy confidence spread (~0.44–0.91) so the gate still expresses uncertainty.
 classifier:
   rules:
     enabled: true
-    confidence_threshold: 0.45
-    sigmoid_k: 8
-    tier_boundaries: { standard: -0.10, complex: 0.08, reasoning: 0.35 }
+    # Lowered 0.45 -> 0.42: the rescaled boundary-confidence (see tiers.ts) combined
+    # with the spread below lets clear prompts clear the gate while boundary-huggers
+    # stay uncertain (→ eval when enabled, else balanced).
+    confidence_threshold: 0.42
+    # Raised 8 -> 12: steeper sigmoid → confident zones reach far enough into each
+    # tier band that a mid-band score is decisively classified.
+    sigmoid_k: 12
+    # Re-placed into the gaps of the real score distribution. `reasoning` and `complex`
+    # both collapse to "complex" downstream (classify.ts mapComplexity), so `reasoning`
+    # is parked high (0.85) purely to keep the high-score cluster far from any boundary
+    # (it does not change lane routing).
+    tier_boundaries: { standard: -0.06, complex: 0.30, reasoning: 0.85 }
     dimensions:
-      # —— keyword dimensions (weight sign = direction) —— 15 total
-      reasoning_kw: { weight: 0.35, keywords: ["prove", "derive", "theorem", "step by step", "reason about"] }
-      coding_kw: { weight: 0.20, keywords: ["refactor", "debug", "stack trace", "function", "compile"] }
+      # —— keyword dimensions (weight sign = direction) —— magnitudes raised vs the
+      #    original ship to SPREAD rawScores out of the boundary band (calibration). ——
+      reasoning_kw: { weight: 0.55, keywords: ["prove", "derive", "theorem", "step by step", "reason about"] }
+      coding_kw: { weight: 0.42, keywords: ["refactor", "debug", "stack trace", "function", "compile"] }
       math_kw: { weight: 0.18, keywords: ["integral", "matrix", "equation", "probability"] }
-      planning_kw: { weight: 0.16, keywords: ["plan", "architecture", "design doc", "trade-off", "strategy"] }
-      analysis_kw: { weight: 0.14, keywords: ["analyze", "compare", "evaluate", "implications", "root cause"] }
-      writing_kw: { weight: 0.10, keywords: ["essay", "rewrite", "draft", "tone", "polish"] }
-      security_kw: { weight: 0.16, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf"] }
-      extraction_kw: { weight: 0.08, keywords: ["extract", "parse", "json from", "fields", "schema"] }
-      data_kw: { weight: 0.12, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot"] }
-      vision_kw: { weight: 0.10, keywords: ["image", "screenshot", "this picture", "diagram", "chart"] }
-      multistep_kw: { weight: 0.15, keywords: ["first", "then", "finally", "and then", "after that"] }
-      translation_kw: { weight: -0.05, keywords: ["translate", "in french", "in chinese", "to spanish"] }
-      lookup_kw: { weight: -0.10, keywords: ["what is", "who is", "define", "meaning of"] }
-      chitchat_kw: { weight: -0.20, keywords: ["how are you", "good morning", "lol", "haha"] }
-      simple_kw: { weight: -0.25, keywords: ["hi", "thanks", "ok", "ping"] }
-      # —— structural / context dimensions (keywords empty; code feeds the score) —— 9 total
-      has_code_block: { weight: 0.20 }
-      has_url: { weight: 0.05 }
-      has_stack: { weight: 0.15 }
-      has_math_notation: { weight: 0.12 }
-      has_table: { weight: 0.08 }
-      has_attachment: { weight: 0.10 }
-      msg_length: { weight: 0.10 }
-      turn_count: { weight: 0.06 }
-      tool_count: { weight: 0.08 }
+      planning_kw: { weight: 0.34, keywords: ["plan", "architecture", "design doc", "trade-off", "strategy"] }
+      analysis_kw: { weight: 0.45, keywords: ["analyze", "compare", "evaluate", "implications", "root cause"] }
+      writing_kw: { weight: 0.14, keywords: ["essay", "rewrite", "draft", "tone", "polish"] }
+      security_kw: { weight: 0.40, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf"] }
+      extraction_kw: { weight: 0.12, keywords: ["extract", "parse", "json from", "fields", "schema"] }
+      data_kw: { weight: 0.20, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot"] }
+      vision_kw: { weight: 0.16, keywords: ["image", "screenshot", "this picture", "diagram", "chart"] }
+      multistep_kw: { weight: 0.26, keywords: ["first", "then", "finally", "and then", "after that"] }
+      translation_kw: { weight: -0.30, keywords: ["translate", "in french", "in chinese", "to spanish"] }
+      lookup_kw: { weight: -0.40, keywords: ["what is", "who is", "define", "meaning of"] }
+      chitchat_kw: { weight: -0.45, keywords: ["how are you", "good morning", "lol", "haha"] }
+      simple_kw: { weight: -0.55, keywords: ["hi", "thanks", "ok", "ping"] }
+      # —— structural / context dimensions (keywords empty; code feeds the score) ——
+      has_code_block: { weight: 0.34 }
+      has_url: { weight: 0.06 }
+      has_stack: { weight: 0.26 }
+      has_math_notation: { weight: 0.22 }
+      has_table: { weight: 0.12 }
+      has_attachment: { weight: 0.16 }
+      # NEW (calibration): a json-constrained request (response_format json_object/
+      # json_schema) carries a real complexity signal and must score clearly off the
+      # `standard` boundary so it reaches decided_by=rules → the needs_json policy
+      # pins the `json` lane. Kept light so json+keyword requests don't overshoot into
+      # the `complex` boundary. Detector already exists in dimensions.ts.
+      has_json_format: { weight: 0.12 }
+      msg_length: { weight: 0.16 }
+      turn_count: { weight: 0.08 }
+      tool_count: { weight: 0.10 }
     task_keywords:
       coding: ["function", "class", "bug", "compile", "npm", "git"]
       math: ["integral", "matrix", "equation"]

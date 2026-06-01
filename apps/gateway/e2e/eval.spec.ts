@@ -18,27 +18,31 @@ import {
 //
 // Determinism (CI-safe): the mock is offline/fixed, the key is pre-seeded, eval
 // is toggled per-request via the e2e-only `x-helm-eval` header (gated by
-// HELM_E2E in the test-server; production config stays fail-closed). The
-// "ambiguous" prompt is chosen so Layer-1 rules are UNCERTAIN (confidence below
-// the DEFAULT 0.45 threshold) — that is what lets Layer-2 eval (or its
-// disabled/timeout fallback) decide. After classifier.confidence-fix the
-// boundary-hugging confidence dips below 0.45 on its own, so this spec NO LONGER
-// raises the gate with `x-helm-rules-threshold`; it runs at the shipped default.
-// See task e2e.eval + implementation-notes.
+// HELM_E2E in the test-server; production config stays fail-closed). These
+// scenarios exercise the EVAL CASCADE (disabled→fallback / enabled→eval-decides /
+// timeout→fallback), NOT the exact Layer-1 calibration — so the uncertain-path
+// requests FORCE Layer-1 uncertainty with the e2e-only `x-helm-rules-threshold`
+// header (UNCERTAIN below). This decouples the eval tests from the classifier
+// weights: the lane-calibration (2026-06-01) raised the ambiguous prompt's
+// confidence to ~0.41 — still under the shipped 0.42 gate, but too thin a margin
+// to depend on. The STRONG prompt (scenario 6, ~1.0) still hit-stops at the
+// default threshold. See implementation-notes (classifier.lane-calibration).
 
 const TEST_KEY = "helm_live_e2e_testkey";
 const MOCK_PORT = process.env.MOCK_PORT ?? "8181";
 const MOCK_BASE = `http://127.0.0.1:${MOCK_PORT}`;
 
-// The deliberately AMBIGUOUS prompts hug a tier boundary, so after
-// classifier.confidence-fix their normalized confidence (≈0.06) sits BELOW the
-// shipped DEFAULT 0.45 gate and reaches Layer-2 eval, while the STRONG prompt
-// (≈0.96) still hit-stops. No `x-helm-rules-threshold` override is needed — this
-// is the headline of the fix: the default threshold now actually cascades.
 const AUTH = {
   Authorization: `Bearer ${TEST_KEY}`,
   "Content-Type": "application/json",
 };
+
+// Eval-cascade scenarios force Layer-1 to be UNCERTAIN (rules threshold raised to
+// 0.99 via the e2e-only header) so the cascade MUST fall through to Layer-2 (or
+// its disabled/timeout fallback). This keeps the eval tests deterministic and
+// independent of the classifier calibration. Scenario 6 (STRONG, rules hit-stop)
+// deliberately omits this and runs at the shipped default threshold.
+const UNCERTAIN = { ...AUTH, "x-helm-rules-threshold": "0.99" };
 
 // Shipped config/lanes.yaml candidate heads (alias-namespace alignment,
 // 2026-05-31). Keep in lockstep with config/lanes.yaml `balanced`/`premium`
@@ -46,10 +50,10 @@ const AUTH = {
 const BALANCED_HEAD = "deepseek-crs/deepseek-pro";
 const PREMIUM_HEAD = "openai-crs/gpt-5.5";
 
-// An intentionally ambiguous prompt: no strong Layer-1 keyword signal, so rules
-// stay UNCERTAIN (confidence below the DEFAULT 0.45 threshold) and the cascade
-// must consult Layer 2 (when enabled) or fall open to balanced (when disabled /
-// on timeout). The gateway's eval cache is process-local and persists ACROSS tests,
+// An intentionally ambiguous prompt: no strong Layer-1 keyword signal. Paired
+// with the UNCERTAIN header (rules threshold 0.99) the cascade is guaranteed to
+// stay uncertain and must consult Layer 2 (when enabled) or fall open to balanced
+// (when disabled / on timeout). The gateway's eval cache is process-local and persists ACROSS tests,
 // so each test mints a UNIQUE-but-still-ambiguous prompt (via `ambiguous(tag)`)
 // to avoid cross-test cache bleed — content-hash keying keeps them distinct.
 const AMBIGUOUS = "Hmm, I was wondering about that thing we mentioned earlier, what do you reckon?";
@@ -87,7 +91,7 @@ test.describe("eval cascade e2e", () => {
   }) => {
     const res = await request.post("/v1/chat/completions", {
       data: chat(ambiguous("s1")),
-      headers: AUTH, // no x-helm-eval header → eval stays OFF (default)
+      headers: UNCERTAIN, // no x-helm-eval header → eval stays OFF (default)
     });
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("balanced");
@@ -103,7 +107,7 @@ test.describe("eval cascade e2e", () => {
   }) => {
     const res = await request.post("/v1/chat/completions", {
       data: chat(ambiguous("s2")),
-      headers: { ...AUTH, "x-helm-eval": "on" },
+      headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(res.status()).toBe(200);
     // the eval stand-in returns complexity=reasoning -> premium lane (NOT balanced).
@@ -121,7 +125,7 @@ test.describe("eval cascade e2e", () => {
     const prompt = ambiguous("s3");
     const first = await request.post("/v1/chat/completions", {
       data: chat(prompt),
-      headers: { ...AUTH, "x-helm-eval": "on" },
+      headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(first.status()).toBe(200);
     expect(first.headers()["x-helm-eval-cache-hit"]).toBe("false");
@@ -129,7 +133,7 @@ test.describe("eval cascade e2e", () => {
 
     const second = await request.post("/v1/chat/completions", {
       data: chat(prompt),
-      headers: { ...AUTH, "x-helm-eval": "on" },
+      headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(second.status()).toBe(200);
     expect(second.headers()["x-helm-lane"]).toBe("premium");
@@ -143,14 +147,14 @@ test.describe("eval cascade e2e", () => {
   test("different content -> cache miss, eval endpoint count increments", async ({ request }) => {
     const first = await request.post("/v1/chat/completions", {
       data: chat(ambiguous("s4a")),
-      headers: { ...AUTH, "x-helm-eval": "on" },
+      headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(first.status()).toBe(200);
     expect(await evalCalls(request)).toBe(1);
 
     const second = await request.post("/v1/chat/completions", {
       data: chat(ambiguous("s4b")),
-      headers: { ...AUTH, "x-helm-eval": "on" },
+      headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(second.status()).toBe(200);
     expect(second.headers()["x-helm-eval-cache-hit"]).toBe("false");
@@ -163,7 +167,7 @@ test.describe("eval cascade e2e", () => {
     const res = await request.post("/v1/chat/completions", {
       // the slow sentinel makes the eval stand-in delay past timeout_ms.
       data: chat(`${ambiguous("s5")} ${EVAL_SLOW_SENTINEL}`),
-      headers: { ...AUTH, "x-helm-eval": "on" },
+      headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     // fail-open: the main path is NEVER dragged down to a 5xx.
     expect(res.status()).toBe(200);
@@ -182,7 +186,7 @@ test.describe("eval cascade e2e", () => {
       data: chat(
         "Prove step by step the theorem and derive the integral, reason about the matrix equation and analyze the implications first then finally compile the proof.",
       ),
-      headers: { ...AUTH, "x-helm-eval": "on" }, // eval ON, but rules win first
+      headers: { ...AUTH, "x-helm-eval": "on" }, // eval ON at DEFAULT threshold, but rules win first
     });
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-decided-by"]).toBe("rules");
@@ -214,7 +218,7 @@ test.describe("eval cascade e2e", () => {
     // config. eval now decides -> premium lane.
     const afterEnable = await request.post("/v1/chat/completions", {
       data: chat(prompt),
-      headers: AUTH,
+      headers: UNCERTAIN,
     });
     expect(afterEnable.status()).toBe(200);
     expect(afterEnable.headers()["x-helm-decided-by"]).toBe("eval");
@@ -230,7 +234,7 @@ test.describe("eval cascade e2e", () => {
 
     const afterDisable = await request.post("/v1/chat/completions", {
       data: chat(prompt),
-      headers: AUTH,
+      headers: UNCERTAIN,
     });
     expect(afterDisable.status()).toBe(200);
     // eval is OFF now -> uncertain falls open to balanced (NOT the stale premium).
@@ -252,7 +256,7 @@ test.describe("eval cascade e2e", () => {
     const slowPrompt = `${ambiguous("s7")} ${EVAL_SLOW_SENTINEL}`;
     const first = await request.post("/v1/chat/completions", {
       data: chat(slowPrompt),
-      headers: { ...AUTH, "x-helm-eval": "on" },
+      headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(first.status()).toBe(200);
     expect(first.headers()["x-helm-fallback-reason"]).toBe("eval_timeout");
@@ -261,7 +265,7 @@ test.describe("eval cascade e2e", () => {
 
     const second = await request.post("/v1/chat/completions", {
       data: chat(slowPrompt),
-      headers: { ...AUTH, "x-helm-eval": "on" },
+      headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(second.status()).toBe(200);
     expect(second.headers()["x-helm-fallback-reason"]).toBe("eval_timeout");

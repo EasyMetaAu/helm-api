@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
 import { and, asc, desc, eq, gte, lt } from "drizzle-orm";
-import type { InsertTelemetryInput, TelemetryStore } from "../ports.js";
+import type {
+  InsertPayloadInput,
+  InsertTelemetryInput,
+  RecentDecisionRecord,
+  RequestPayload,
+  TelemetryStore,
+} from "../ports.js";
 import type { PgDb } from "./migrate.js";
-import { telemetry } from "./schema.js";
+import { requestPayloads, telemetry } from "./schema.js";
 
 type TelemetryRow = typeof telemetry.$inferSelect;
 
@@ -36,13 +42,15 @@ export class PgTelemetryStore implements TelemetryStore {
     return { id };
   }
 
-  async queryRecent(limit: number): Promise<DecisionRecord[]> {
+  async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
     const rows = await this.db
       .select()
       .from(telemetry)
       .orderBy(desc(telemetry.createdAt))
       .limit(limit);
-    return rows.map((r) => this.toDecision(r));
+    // createdAt is stored as epoch ms (bigint) here — wrap it back to a Date so
+    // the port contract matches the sqlite adapter exactly.
+    return rows.map((r) => ({ record: this.toDecision(r), createdAt: new Date(r.createdAt) }));
   }
 
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {
@@ -65,6 +73,48 @@ export class PgTelemetryStore implements TelemetryStore {
       .where(and(gte(telemetry.createdAt, startMs), lt(telemetry.createdAt, endMs)))
       .orderBy(asc(telemetry.createdAt));
     return rows.map((r) => this.toDecision(r));
+  }
+
+  // Full-payload capture. Upsert by request_id; verbatim bytes (TEXT), no
+  // redaction. createdAt stored as epoch-ms bigint to match the sqlite adapter.
+  async insertPayload(input: InsertPayloadInput): Promise<void> {
+    await this.db
+      .insert(requestPayloads)
+      .values({
+        requestId: input.requestId,
+        requestJson: input.requestJson,
+        responseJson: input.responseJson,
+        createdAt: input.createdAt.getTime(),
+      })
+      .onConflictDoUpdate({
+        target: requestPayloads.requestId,
+        set: {
+          requestJson: input.requestJson,
+          responseJson: input.responseJson,
+          createdAt: input.createdAt.getTime(),
+        },
+      });
+  }
+
+  async getPayload(requestId: string): Promise<RequestPayload | null> {
+    const rows = await this.db
+      .select()
+      .from(requestPayloads)
+      .where(eq(requestPayloads.requestId, requestId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      requestId: row.requestId,
+      requestJson: row.requestJson,
+      responseJson: row.responseJson,
+      createdAt: new Date(row.createdAt), // epoch-ms bigint → Date
+    };
+  }
+
+  // Retention auto-prune: drop rows strictly older than the cutoff (epoch ms).
+  async prunePayloads(olderThanMs: number): Promise<void> {
+    await this.db.delete(requestPayloads).where(lt(requestPayloads.createdAt, olderThanMs));
   }
 
   // Row -> DecisionRecord. Re-validates through the shared schema so a corrupted

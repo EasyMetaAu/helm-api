@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
 import { and, asc, desc, eq, gte, lt } from "drizzle-orm";
-import type { InsertTelemetryInput, TelemetryStore } from "../ports.js";
+import type {
+  InsertPayloadInput,
+  InsertTelemetryInput,
+  RecentDecisionRecord,
+  RequestPayload,
+  TelemetryStore,
+} from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
-import { telemetry } from "./schema.js";
+import { requestPayloads, telemetry } from "./schema.js";
 
 type TelemetryRow = typeof telemetry.$inferSelect;
 
@@ -39,14 +45,14 @@ export class SqliteTelemetryStore implements TelemetryStore {
     return { id };
   }
 
-  async queryRecent(limit: number): Promise<DecisionRecord[]> {
+  async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
     return this.db
       .select()
       .from(telemetry)
       .orderBy(desc(telemetry.createdAt))
       .limit(limit)
       .all()
-      .map((r) => this.toDecision(r));
+      .map((r) => ({ record: this.toDecision(r), createdAt: r.createdAt }));
   }
 
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {
@@ -68,6 +74,53 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .orderBy(asc(telemetry.createdAt))
       .all()
       .map((r) => this.toDecision(r));
+  }
+
+  // Full-payload capture. Upsert by request_id so the stream path can write the
+  // request first then backfill the assembled response. Verbatim bytes — no
+  // redaction (the table holds no plaintext key; see schema/ports comments).
+  async insertPayload(input: InsertPayloadInput): Promise<void> {
+    this.db
+      .insert(requestPayloads)
+      .values({
+        requestId: input.requestId,
+        requestJson: input.requestJson,
+        responseJson: input.responseJson,
+        createdAt: input.createdAt,
+      })
+      .onConflictDoUpdate({
+        target: requestPayloads.requestId,
+        set: {
+          requestJson: input.requestJson,
+          responseJson: input.responseJson,
+          createdAt: input.createdAt,
+        },
+      })
+      .run();
+  }
+
+  async getPayload(requestId: string): Promise<RequestPayload | null> {
+    const row = this.db
+      .select()
+      .from(requestPayloads)
+      .where(eq(requestPayloads.requestId, requestId))
+      .get();
+    if (!row) return null;
+    return {
+      requestId: row.requestId,
+      requestJson: row.requestJson,
+      responseJson: row.responseJson,
+      createdAt: row.createdAt, // timestamp_ms mode → Date
+    };
+  }
+
+  // Retention auto-prune: drop rows strictly older than the cutoff. The
+  // created_at index keeps this cheap enough to call opportunistically.
+  async prunePayloads(olderThanMs: number): Promise<void> {
+    this.db
+      .delete(requestPayloads)
+      .where(lt(requestPayloads.createdAt, new Date(olderThanMs)))
+      .run();
   }
 
   // Row -> DecisionRecord. Re-validates through the shared schema so a corrupted

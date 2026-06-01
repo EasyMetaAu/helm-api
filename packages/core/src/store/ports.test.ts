@@ -1,6 +1,14 @@
 import type { ApiKeyRecord, DecisionRecord } from "@helm/shared";
 import { describe, expect, expectTypeOf, it } from "vitest";
-import type { CreateKeyInput, InsertTelemetryInput, KeyStore, TelemetryStore } from "./ports.js";
+import type {
+  CreateKeyInput,
+  InsertPayloadInput,
+  InsertTelemetryInput,
+  KeyStore,
+  RecentDecisionRecord,
+  RequestPayload,
+  TelemetryStore,
+} from "./ports.js";
 
 // A minimal in-memory KeyStore proves the KeyStore contract is implementable and
 // self-consistent (if it compiles, the signatures line up). It also exercises
@@ -44,11 +52,11 @@ class InMemoryTelemetryStore implements TelemetryStore {
     this.rows.push({ at: input.createdAt, rec: input.decision });
     return { id: String(this.rows.length) };
   }
-  async queryRecent(limit: number): Promise<DecisionRecord[]> {
+  async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
     return [...this.rows]
       .sort((a, b) => b.at.getTime() - a.at.getTime())
       .slice(0, limit)
-      .map((r) => r.rec);
+      .map((r) => ({ record: r.rec, createdAt: r.at }));
   }
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {
     return this.rows.find((r) => r.rec.request_id === requestId)?.rec ?? null;
@@ -58,6 +66,18 @@ class InMemoryTelemetryStore implements TelemetryStore {
       .filter((r) => r.at.getTime() >= startMs && r.at.getTime() < endMs)
       .sort((a, b) => a.at.getTime() - b.at.getTime())
       .map((r) => r.rec);
+  }
+  private readonly payloads = new Map<string, RequestPayload>();
+  async insertPayload(input: InsertPayloadInput): Promise<void> {
+    this.payloads.set(input.requestId, { ...input });
+  }
+  async getPayload(requestId: string): Promise<RequestPayload | null> {
+    return this.payloads.get(requestId) ?? null;
+  }
+  async prunePayloads(olderThanMs: number): Promise<void> {
+    for (const [id, p] of this.payloads) {
+      if (p.createdAt.getTime() < olderThanMs) this.payloads.delete(id);
+    }
   }
 }
 

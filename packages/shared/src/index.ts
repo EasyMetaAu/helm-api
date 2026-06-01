@@ -79,6 +79,14 @@ export {
   PolicySchema,
   parsePoliciesConfig,
 } from "./config/policy-schema.js";
+// Runtime-mutable settings (admin "System Settings" page) — operator-facing
+// config changeable at runtime without a restart. See packages/core settings.
+export {
+  type LogLevel,
+  LogLevelSchema,
+  type RuntimeSettings,
+  RuntimeSettingsSchema,
+} from "./config/runtime-settings.schema.js";
 // Config model (docs/02, 06).
 export {
   type AuthConfig,

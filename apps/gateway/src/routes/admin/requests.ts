@@ -17,10 +17,15 @@ import type { AdminApiDeps } from "./deps.js";
 const DEFAULT_LIMIT = 100;
 
 export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
-  // GET /requests -> DecisionRecord[] (most recent first; already redacted).
+  // GET /requests -> (DecisionRecord & { created_at })[] (most recent first;
+  // already redacted). The store pairs each record with its recorded timestamp
+  // (a separate column, kept out of the redacted record); we flatten it onto the
+  // row as `created_at` (epoch ms) so the Debug UI can render the 「时间」 column
+  // without recomputing or fabricating it (原则1). created_at is a routing
+  // timestamp — it carries no plaintext key/payload (原则7).
   app.get("/admin/api/requests", async (c) => {
     const records = await deps.telemetry.queryRecent(DEFAULT_LIMIT);
-    return c.json(records);
+    return c.json(records.map((r) => ({ ...r.record, created_at: r.createdAt.getTime() })));
   });
 
   // GET /requests/:traceId -> RequestDetail (full decision trail) | 404.
@@ -29,4 +34,31 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     if (!rec) return c.json({ error: "request not found" }, 404);
     return c.json(rec);
   });
+
+  // GET /requests/:traceId/payload -> the captured full request/response bodies
+  // (admin "System Settings" → capture_payloads). 200 with { captured:true, ... }
+  // when present; 200 with { captured:false } when this request was served while
+  // capture was OFF (or rows were pruned). The bodies are stored as JSON TEXT;
+  // parse them back so the SPA renders structured JSON, falling back to the raw
+  // string if it was a non-JSON stream (assembled SSE).
+  app.get("/admin/api/requests/:traceId/payload", async (c) => {
+    const p = await deps.telemetry.getPayload(c.req.param("traceId"));
+    if (!p) return c.json({ captured: false });
+    return c.json({
+      captured: true,
+      request: parseMaybeJson(p.requestJson),
+      response: p.responseJson === null ? null : parseMaybeJson(p.responseJson),
+      created_at: p.createdAt.getTime(),
+    });
+  });
+}
+
+// Parse stored JSON text back to a value; if it isn't valid JSON (e.g. assembled
+// raw SSE for a streamed response), surface the raw string unchanged.
+function parseMaybeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }

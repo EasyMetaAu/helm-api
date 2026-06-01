@@ -124,11 +124,19 @@
   }
 
   /* — Tables — */
+  /* `relative` makes this the containing block for any absolutely-positioned
+     descendant (e.g. an `sr-only` <th> label). Without it such a child escapes to
+     <html> and, sitting at the far edge of a wide table, forces a phantom
+     page-wide horizontal scroll on small screens. */
   .table-wrap {
-    @apply overflow-x-auto rounded-lg border border-slate-200;
+    @apply relative overflow-x-auto rounded-lg border border-slate-200;
   }
+  /* whitespace-nowrap keeps every cell on one line so the table holds its natural
+     width and .table-wrap (overflow-x-auto) scrolls cleanly on small screens,
+     instead of cramming columns and soft-wrapping into a mess. Explicit block
+     lines inside a cell (e.g. the keys "Caps" stack) are unaffected. */
   .table-base {
-    @apply w-full text-left text-sm;
+    @apply w-full whitespace-nowrap text-left text-sm;
   }
   .table-head {
     @apply bg-slate-50 text-xs font-medium uppercase tracking-wide text-slate-500;

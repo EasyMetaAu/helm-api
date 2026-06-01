@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { type Policy, savePolicies, TASK_TYPE_OPTIONS } from '$lib/api/policies.js';
   import PolicyRow from '$lib/components/PolicyRow.svelte';
   import { t } from '$lib/i18n';
@@ -35,10 +35,17 @@
     policies = next;
   }
 
-  function addRow(): void {
+  async function addRow(): Promise<void> {
     // New rule defaults to a concrete action so it is never a silent no-op
-    // (server requires at least one of use_lane/max_lane).
+    // (server requires at least one of use_lane/max_lane). Appended LAST so it
+    // gets the lowest priority (first-match order) and can't shadow existing rules.
     policies = [...policies, { match: { task_type: TASK_TYPE_OPTIONS[0] }, use_lane: lanes[0] }];
+    // The Add button lives in the header; with a long list the new row lands far
+    // below the fold, so the click looks like a no-op. Scroll it into view for
+    // immediate feedback.
+    await tick();
+    const rows = document.querySelectorAll('[data-testid="policy-row"]');
+    rows[rows.length - 1]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
   // Whole-set PUT (preserves priority order; avoids per-item patch losing it).
@@ -60,14 +67,27 @@
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
-  <header>
-    <h1 class="page-title">{$t('Policies')}</h1>
-    <p class="section-desc">
-      {$t(
-        'Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.',
-      )}
-    </p>
-    <p class="mt-2 card text-sm text-ink-body" data-testid="first-match-explainer">
+  <header class="flex flex-col gap-2">
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h1 class="page-title">{$t('Policies')}</h1>
+        <p class="section-desc">
+          {$t(
+            'Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.',
+          )}
+        </p>
+      </div>
+      <div class="flex shrink-0 items-center gap-2">
+        <button type="button" class="btn-secondary" onclick={addRow}>{$t('Add policy')}</button>
+        <button type="button" class="btn-primary" onclick={handleSave} disabled={saving}
+          >{$t('Save policies')}</button
+        >
+        {#if saved}
+          <span class="badge-ok" data-testid="policies-saved" role="status">{$t('Saved')}</span>
+        {/if}
+      </div>
+    </div>
+    <p class="card text-sm text-ink-body" data-testid="first-match-explainer">
       {$t('Rules are evaluated top to bottom; the')}
       <strong>{$t('first matching')}</strong>
       {$t(
@@ -105,15 +125,5 @@
         onmove={moveRow}
       />
     {/each}
-  </div>
-
-  <div class="flex items-center gap-2">
-    <button type="button" class="btn-secondary" onclick={addRow}>{$t('Add policy')}</button>
-    <button type="button" class="btn-primary" onclick={handleSave} disabled={saving}
-      >{$t('Save policies')}</button
-    >
-    {#if saved}
-      <span class="badge-ok" data-testid="policies-saved" role="status">{$t('Saved')}</span>
-    {/if}
   </div>
 </section>

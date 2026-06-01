@@ -83,8 +83,22 @@ export const configKv = sqliteTable("config_kv", {
   value: text("value").notNull(),
 });
 
+// Full request/response body capture (admin "System Settings" → capture_payloads,
+// default ON). Stored SEPARATELY from telemetry so it can be pruned independently
+// (payload_retention_days) and never bloats the decision JSON. Unlike telemetry
+// this is NOT redacted — it is the verbatim client request + assembled provider
+// response. This holds NO plaintext API key: the bearer lives in the request's
+// Authorization header, which is never part of the chat body stored here.
+export const requestPayloads = sqliteTable("request_payloads", {
+  requestId: text("request_id").primaryKey(),
+  requestJson: text("request_json").notNull(), // verbatim client request body (JSON text)
+  responseJson: text("response_json"), // assembled full response (null on error/unknown)
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
 export type RoutingSignalsTable = typeof routingSignals;
 export type ConfigKvTable = typeof configKv;
+export type RequestPayloadsTable = typeof requestPayloads;

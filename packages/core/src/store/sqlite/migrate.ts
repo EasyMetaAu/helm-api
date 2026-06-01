@@ -197,6 +197,25 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_telemetry_created_at ON telemetry (created_at DESC);
     `,
   },
+  {
+    // Full request/response body capture (admin "System Settings" →
+    // capture_payloads, default ON). SEPARATE table so it prunes independently
+    // (payload_retention_days) and never bloats the decision JSON. NOT redacted
+    // — verbatim client request + assembled response. NO plaintext key (the
+    // bearer lives in the Authorization header, never in the stored chat body).
+    // The created_at index drives the retention auto-prune.
+    version: 7,
+    sql: `
+      CREATE TABLE IF NOT EXISTS request_payloads (
+        request_id TEXT PRIMARY KEY,
+        request_json TEXT NOT NULL,
+        response_json TEXT,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_request_payloads_created_at ON request_payloads (created_at);
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

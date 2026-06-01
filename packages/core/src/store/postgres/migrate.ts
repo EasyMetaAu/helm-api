@@ -161,6 +161,24 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // Full request/response body capture (admin "System Settings" →
+    // capture_payloads). SEPARATE from telemetry so it prunes independently
+    // (payload_retention_days). NOT redacted — verbatim request + assembled
+    // response; NO plaintext key (bearer is an HTTP header, not body). Stored as
+    // TEXT to round-trip exact bytes. created_at BIGINT epoch-ms matches sqlite.
+    version: 6,
+    sql: `
+      CREATE TABLE IF NOT EXISTS request_payloads (
+        request_id TEXT PRIMARY KEY,
+        request_json TEXT NOT NULL,
+        response_json TEXT,
+        created_at BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_request_payloads_created_at ON request_payloads (created_at);
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

@@ -13,12 +13,15 @@ describe("checked-in classifier.yaml sample", () => {
   it("loadConfig merges classifier.yaml into a typed HelmConfig", () => {
     const cfg = loadConfig({ configDir, env: {} });
     expect(cfg.classifier).toBeDefined();
-    expect(cfg.classifier.rules.confidence_threshold).toBe(0.45);
-    expect(cfg.classifier.rules.sigmoid_k).toBe(8);
+    // Values pinned to the 2026-06-01 lane-calibration (see config/classifier.yaml
+    // header): the original ship (0.45 / k=8 / -0.10,0.08,0.35) made the Layer-1
+    // confidence gate unreachable, collapsing every request to balanced.
+    expect(cfg.classifier.rules.confidence_threshold).toBe(0.42);
+    expect(cfg.classifier.rules.sigmoid_k).toBe(12);
     expect(cfg.classifier.rules.tier_boundaries).toEqual({
-      standard: -0.1,
-      complex: 0.08,
-      reasoning: 0.35,
+      standard: -0.06,
+      complex: 0.3,
+      reasoning: 0.85,
     });
   });
 

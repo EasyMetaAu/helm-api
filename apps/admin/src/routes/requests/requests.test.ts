@@ -1,5 +1,6 @@
-import { render, screen, waitFor, within } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { goto } from '$app/navigation';
 import type { RequestDetail, RequestListItem } from '$lib/api/requests.js';
 import DetailPage from './[traceId]/+page.svelte';
 import ListPage from './+page.svelte';
@@ -122,6 +123,29 @@ describe('requests list page', () => {
     expect(link).toHaveAttribute('href', '/requests/tr_link');
   });
 
+  it('shows the request ID as the first column and the recorded time, with no separate "view" action', () => {
+    render(ListPage, {
+      data: {
+        items: [item('tr_first', { ts: '2026-05-31T10:00:00Z' })],
+        nextCursor: undefined,
+      },
+    });
+    const cells = screen.getByTestId('request-row').querySelectorAll('td');
+    // Request ID is the FIRST column.
+    expect(cells[0]).toHaveTextContent('tr_first');
+    // The time column (second) renders the recorded timestamp (year is locale-stable).
+    expect(cells[1]).toHaveTextContent('2026');
+    // The trailing "view" link is gone — the whole row is the link now.
+    expect(screen.queryByText('view')).not.toBeInTheDocument();
+  });
+
+  it('navigates to the detail page when the row itself is clicked', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, { data: { items: [item('tr_go')], nextCursor: undefined } });
+    await fireEvent.click(screen.getByTestId('request-row'));
+    expect(goto).toHaveBeenCalledWith('/requests/tr_go');
+  });
+
   it('shows an empty state when there are no requests', () => {
     render(ListPage, { data: { items: [], nextCursor: undefined } });
     expect(screen.getByTestId('requests-empty')).toBeInTheDocument();
@@ -144,8 +168,10 @@ describe('requests detail page', () => {
     getRequest.mockReset();
   });
 
-  it('renders the decision chain, cost breakdown (含 eval) and redacted payload summary', () => {
-    render(DetailPage, { data: { detail: detail(), traceId: 'tr_1' } });
+  it('renders the decision chain, cost breakdown (含 eval) and a not-recorded notice when capture is off', () => {
+    render(DetailPage, {
+      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
+    });
     // Decision chain present.
     expect(screen.getByTestId('chain-classifier')).toBeInTheDocument();
     expect(screen.getByTestId('chain-lanes')).toBeInTheDocument();
@@ -156,8 +182,20 @@ describe('requests detail page', () => {
     expect(within(cost).getByTestId('cost-eval')).toBeInTheDocument();
     expect(within(cost).getByTestId('cost-completion')).toBeInTheDocument();
     expect(within(cost).getByTestId('cost-total')).toBeInTheDocument();
-    // Payload is a redacted summary, not the full payload.
-    expect(screen.getByTestId('payload-summary')).toHaveTextContent(/redacted|withheld/i);
+    // Capture was off → a clear not-recorded notice instead of the full body.
+    expect(screen.getByTestId('payload-summary')).toHaveTextContent(/not recorded/i);
+  });
+
+  it('renders the full captured request and response bodies when capture is on', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: { captured: true, request: { model: 'auto' }, response: { ok: true } },
+        traceId: 'tr_1',
+      },
+    });
+    expect(screen.getByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
+    expect(screen.getByTestId('response-body')).toHaveTextContent(/"ok": true/);
   });
 
   it('surfaces a structured error with class, status, redacted message and redacted provider_raw', () => {
@@ -172,6 +210,7 @@ describe('requests detail page', () => {
             provider_raw: null,
           },
         } as Partial<RequestDetail>),
+        payload: { captured: false },
         traceId: 'tr_err',
       },
     });
@@ -184,7 +223,9 @@ describe('requests detail page', () => {
   });
 
   it('shows a friendly error state when the trace cannot be loaded (no white screen)', () => {
-    render(DetailPage, { data: { detail: null, traceId: 'missing', loadError: 'not found' } });
+    render(DetailPage, {
+      data: { detail: null, payload: { captured: false }, traceId: 'missing', loadError: 'not found' },
+    });
     expect(screen.getByTestId('detail-error')).toBeInTheDocument();
   });
 });

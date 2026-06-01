@@ -139,6 +139,19 @@ export const configKv = pgTable("config_kv", {
   value: text("value").notNull(),
 });
 
+// Full request/response body capture (admin "System Settings" → capture_payloads).
+// SEPARATE from telemetry so it prunes independently (payload_retention_days) and
+// never bloats the decision JSON. NOT redacted — verbatim client request +
+// assembled response; holds NO plaintext key (bearer is an HTTP header, not body).
+// Stored as TEXT (not jsonb) to round-trip the exact bytes the client/provider
+// sent. createdAt is epoch-ms bigint to match the sqlite value space.
+export const requestPayloads = pgTable("request_payloads", {
+  requestId: text("request_id").primaryKey(),
+  requestJson: text("request_json").notNull(),
+  responseJson: text("response_json"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
@@ -149,3 +162,4 @@ export type MemoryObservationsTable = typeof memoryObservations;
 export type MemoryReflectionsTable = typeof memoryReflections;
 export type MemoryJobsTable = typeof memoryJobs;
 export type ConfigKvTable = typeof configKv;
+export type RequestPayloadsTable = typeof requestPayloads;

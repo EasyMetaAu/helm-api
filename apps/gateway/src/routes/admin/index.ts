@@ -7,6 +7,7 @@ import { registerLanesRoutes } from "./lanes.js";
 import { registerModelsRoutes } from "./models.js";
 import { registerPoliciesRoutes } from "./policies.js";
 import { registerRequestsRoutes } from "./requests.js";
+import { registerSettingsRoutes } from "./settings.js";
 
 // /admin/api/* — the gateway management API. All endpoints are registered here
 // and MUST sit behind the admin basicAuth middleware (mounted by the caller on
@@ -23,6 +24,7 @@ export function registerAdminApi(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   registerClassifierRoutes(app, deps);
   registerKeysRoutes(app, deps);
   registerRequestsRoutes(app, deps);
+  registerSettingsRoutes(app, deps);
 }
 
 export type { AdminApiDeps, RuleStore } from "./deps.js";

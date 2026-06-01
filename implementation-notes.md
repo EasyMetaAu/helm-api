@@ -24,6 +24,84 @@
 **门禁**：`pnpm typecheck` 0 error；`pnpm lint` exit 0（15 个预存 warning，均他人 test 文件 noNonNullAssertion，未涉新文件）；`pnpm test`（node 套件）新增 22 测试全绿、无回归。
 **预存失败（非本轮引入）**：`admin-static.test.ts` 4 条失败——依赖 `pnpm build` 产出的 admin SPA 静态目录（本 worktree 未 build → 404）；stash 掉本轮改动后同样 4 条失败，确证与记忆接线无关，留给编排者终态 build 门禁。
 
+---
+
+## 2026-06-01 · 请求列表：行点击进详情 + 显示请求 ID/时间（docs/07，原则 1/7）
+
+**用户反馈（管理界面 `/admin/requests`）**：① 行尾的「view」按钮多余——希望**点整行**直接进详情；② **请求时间**没显示；③ **请求 ID** 没显示，且应作为**第一列**。
+
+**实现**：
+- **请求 ID（trace_id）**：早已在 `DecisionRecord` 里，纯前端改动——`+page.svelte` 新增第一列（`<a href>` 保留真链接，支持中键/新标签页/键盘），并删掉行尾 view 单元格。整行 `onclick → goto(detail)`，点内层 ID 链接时让锚点自处理（`closest('a')` 短路，避免双跳转）。a11y：因给 `<tr>` 挂 click 加了 `svelte-ignore`，键盘可达性由首列锚点承担。
+- **请求时间**：这是真正的后端缺口。时间戳存于 telemetry 表独立的 `created_at` 列，**不在**（脱敏的）`DecisionRecord` schema 里，而 `queryRecent` 只返回 `DecisionRecord[]` → UI 拿不到时间（原 `ts` 硬编码 `''`，注释写「backend does not record a timestamp yet」其实是没**透出**）。
+  - **决定**：让 recent-list 端口把时间和记录**配对**透出，而非塞进 `DecisionRecord`（保持脱敏 schema 干净，原则 7）。新增 `RecentDecisionRecord { record; createdAt }`，`queryRecent(): Promise<RecentDecisionRecord[]>`；sqlite/postgres 两个适配器同步（pg 的 `createdAt` 存 epoch ms→`new Date()` 包回，对齐 sqlite 的 `Date`）。
+  - 路由 `GET /admin/api/requests` 把配对拍平成 `{...record, created_at: ms}`（epoch ms，路由时间戳、非密钥/正文，原则 7）。前端 `toListItem` 据此填 `ts`（ISO，确定性/可排序），视图 `formatTs` 本地化展示；缺失（legacy 行）→ `'—'`，绝不伪造（原则 1）。
+- **范围**：仅列表页。详情页（`getByRequestId`）仍不透出时间（其 header 显示「time not recorded」），本次不动以收敛改动面；后续如需可同法扩 `getByRequestId`。
+
+**端口签名变更波及**：`ports.ts` + sqlite/pg 适配器 + 三处 store 测试（`ports.test`/`sqlite/telemetry.test`/`store-contract.test` 改读 `.record`）+ 路由 `admin.test`（mock 返回配对、断言 `created_at`）。`queryWindow`（Signal Collector）不受影响。
+
+**TDD/门禁**：先改测后实现。typecheck 0 / lint 0 error（仅历史 warning）/ svelte-check 0 error / 全套 **1134** 全绿 / admin build 通过。新增 i18n key `Request ID` 等（运行时缺失回退英文键）。
+
+**坑**：worktree 是干净 checkout——需先 `pnpm install` 且 `apps/admin` 跑 `svelte-kit sync`（生成 `.svelte-kit/tsconfig.json`，否则 admin vitest 解析 tsconfig 失败）；`admin-static.test` 依赖 `apps/admin/build`，须先 `pnpm --filter @helm/admin build`。全量 `pnpm test` 并行下 PGlite 偶发超时，隔离重跑即过。
+
+---
+
+## 2026-06-01 · 管理界面：规则维度卡片默认折叠 + 根 `dev` 脚本（docs/11，devx）
+
+**UI**：分类器页「规则维度」只读表很长，改为 `<details>/<summary>` **默认折叠、点击展开**（原生、可键盘操作、无额外 state；隐藏默认 marker，自绘旋转 chevron）。复用已有 i18n key，5 个 locale 无需新增。
+
+**devx 偏离（须知）**：CLAUDE.md「常用命令」把 `pnpm dev` 定义为「起网关 + admin」，但 `@helm/gateway` **目前没有 `dev` 脚本/入口**，无法真正并起。故根 `package.json` 先加 `dev` = `pnpm --filter @helm/admin dev`（admin-only，当前唯一能调试的部分），并留 `dev:admin` 别名；待 gateway 有 dev 入口后把 `dev` 升级为并跑二者（`pnpm -r --parallel dev` 或 concurrently），别名保证肌肉记忆不变。
+
+---
+
+## 2026-06-01 · 分类器车道校准（classifier.lane-calibration）—— 修「所有请求都落到 balanced」（docs/03，原则 2/3/4/5）
+
+**症状（用户在 Docker 实测发现）**：每一条 `model:auto` 请求的遥测都是 `decided_by=fallback` / `fallback_reason=eval_disabled` / `lane=balanced`。lane 体系（economy/coding/premium/json/vision）**形同虚设**——无论提示词是打招呼、写代码还是深度推理，全部走 balanced。
+
+**根因（校准失配，非崩溃）**：级联本身代码正确，坏在 **Layer-1 置信度闸**。
+- 置信度 = 到最近 tier 边界的距离过 `2/(1+e^(-k·d))-1`（k=8）。要过 0.45 阈值需 `d ≥ 0.121`。
+- 边界挤在 `{-0.10, 0.08, 0.35}`，`standard` 带仅 0.18 宽——带内任何分数都**永远到不了 0.45**（死区）。
+- 关键词信号本就被强衰减（1 个关键词→0.33 信号 ×~0.2 权重≈0.067），rawScore 全挤在 0 附近的死区。
+- 于是 Layer-1 永远「不确定」→ 想升 Layer-2 eval → **eval 默认关** → 100% 降级 balanced。
+
+**测试为何没抓到**：`golden-routing.test.ts` 直接调 `scoreRequest` 并**把 `decided_by` 硬编码成 `"rules"`**再喂给路由器——它验证了「给定 rules 决策，lane 解析正确」，却从没验证「真实提示词能让级联**到达** `decided_by=rules`」。这个盲区放跑了整个回归。
+
+**附带挖出的真 bug（已修，用户批准扩范围）**：`keywordSignal` 用裸 `includes()` 子串匹配 → `"hi"` 命中 `"t·hi·s"`、`"ok"` 命中 `"lo·ok"`，给大量无关提示词注入了 `simple_kw` 的假负分，污染 rawScore。**修法**：`dimensions.ts` 改为词/词元边界匹配——仅在关键词自身边缘是字母数字时加边界（故 `"step by step"`、结尾带标点的 `"cve-"` 仍照常命中）；编译正则带缓存避免每请求重编。TDD：先红（`dimensions.test.ts` 新增边界用例）后绿。
+
+**校准（纯配置，原则 2）**：建了离线校准夹具 `scripts/calibrate-classifier.ts`（跑真实 `scoreRequest`+闸+`routeRequest`，对 golden 提示集打分→输出 lane 对错矩阵）。据真实分布迭代：拉开关键词/结构权重把分数撑出死区、把边界重置到分布空隙（`{-0.06, 0.30, 0.85}`）、`sigmoid_k 8→12`、阈值 `0.45→0.42`。结果 golden 提示集 **29/29 命中目标 lane、0 降级**，且置信度健康散布（~0.44–0.91，闸仍能表达不确定）。新增 `has_json_format` 维度（探测器早已在 `dimensions.ts`，配置里没接）让 JSON 约束请求离开 `standard` 边界→稳定经 needs_json 策略落 `json` lane。
+
+**关键数据点**：`reasoning` 与 `complex` 下游都塌成 `complex`（classify.ts mapComplexity），故 `reasoning` 边界（0.85）只为把高分簇推离边界、不影响 lane 选择。lane-resolver 在 `decided_by=fallback` 时**短路直接 balanced**（绕过 task/complexity/policy），所以「到达 rules」是一切差异化的前提。
+
+**新增回归守卫**：`packages/core/src/classifier/cascade-gate.test.ts`——跑**真实闸**（eval off），断言代表性提示词 `decided_by=rules` 且落到各自 lane、且整组横跨 ≥4 个 lane（不再全 balanced）。这正是原套件缺的那个测试。
+
+**e2e 解耦**：`eval.spec.ts` 原本依赖 ambiguous 提示词置信度 <0.45。校准后它升到 ~0.41（仍 <0.42 但 margin 太薄）。改为用 e2e-only 的 `x-helm-rules-threshold:0.99` 头**强制**不确定（eval 级联测试本就该测级联、不该耦合权重）；STRONG/hit-stop 场景（scenario 6）保持默认阈值。
+
+**门禁全绿**：typecheck 0 / lint 0 error / 单测 **1089**（含新 cascade-gate 13 + dimensions 边界 6）/ admin 78 / **e2e 34** / build 全绿。Docker 重建镜像（带 matcher 修复，config 走 bind-mount 实时生效）+ 重启容器后**线上实测**：greeting→economy、coding→coding、reasoning/analysis→premium、json→json，全部 `decided_by=rules`；integration-live.mjs 42/42。
+
+**坑/TODO**：
+- 关键词表非穷举（如 `"hello"` 不在 `simple_kw`，故「hello there」这类无强信号短语仍 fallback→balanced，属正确的「不确定」行为）。要更激进的 rules 差异化可继续加关键词或开 eval。
+- 校准对着 golden 提示集调，是有限样本；生产真实分布可能偏移，建议后续按线上遥测的 `decided_by` 占比复核（fallback 占比应显著下降）。
+- `scripts/calibrate-classifier.ts` 为签入的调参工具，改权重后重跑它即可回归。
+## 2026-06-01 · 完整正文记录 + 系统设置页（payload-capture + system-settings）（docs/06、07，原则 7/8；修 #6 成本=0、#7 正文不可见）
+
+**用户决定**：删除原则 7 的「私有 payload 禁条」，**默认记录完整 request/response 正文**；**保留** API key 只存 sha256（两者本不冲突——key 在 Authorization 头，不在 chat 正文里）。同时新增独立的管理界面「系统设置」页承载可运行时修改的设置。
+
+**做了什么**：
+- **运行时设置基础设施**：新增 `RuntimeSettingsSchema`（shared）+ `loadRuntimeSettings/saveRuntimeSettings/defaultSettingsFromConfig`（core/settings），复用已存在但闲置的 `config_kv`/`ConfigStore`。设置项：`capture_payloads`(默认 true)、`payload_retention_days`(默认 30)、`rate_limit_enabled`、`log_level`。读取 fail-OPEN（损坏 blob 回落默认），写入 fail-CLOSED（Zod 校验，非法 400）。
+- **正文存储**：新增独立表 `request_payloads`（sqlite v7 / pg v6 迁移），`TelemetryStore` 扩展 `insertPayload/getPayload/prunePayloads`。**与 `DecisionRecord` 解耦**：DecisionRecord 仍走 `redact()` 脱敏（纵深防御），完整正文走全新的可关闭捕获路径。正文以 TEXT 原样存储（round-trip 精确字节）。
+- **捕获 + 成本回填（一处改动修两个 issue）**：`chat.ts` 流式转发循环（:256）累计 chunk，`finally`（与 persist 同处）用 `usageFromSSE` 解析末尾 usage → `costOf`(catalog 定价) 回填 `decision.cost_breakdown` 与 ok attempt 的 `cost_usd`（#6）；同时 `insertPayload` 存完整正文 + 机会式 `prunePayloads`。非流式分支同样捕获 `result.body`。全部 fail-open。
+- **`stream_options.include_usage` 注入**：`execute.ts` 的 `stripInternal` 在 `stream:true` 时注入，否则 OpenAI 兼容上游不会发末尾 usage 帧 → 流式成本永远算不出。**坑/限制**：极少数不认 `stream_options` 的上游可能报错；本期按「OpenAI 兼容上游普遍支持」处理，未做 per-provider 开关（如遇不兼容上游，后续可加 provider 能力位）。
+- **运行时联动**：`server.ts` 启动 `loadRuntimeSettings` → `applySettings` 回调重绑 `settings`、`logger.setLevel`、可变 `rateLimitConfig.enabled`（限流器每次 check 读 `.enabled`，故运行时切换即时生效，无需重启）。`logging.ts` 加可变 level + 按级别门控。
+- **管理界面**：新增 `/settings` 页 + `lib/api/settings.ts` + 导航/i18n anchors；请求详情页用完整 request/response 替换原「payload withheld」占位（捕获关时显示「未记录」）；列表/仪表盘成本区分 `null`(未测量→`—`) 与数字（不再把未测量误显为 `$0.0000`）。
+
+**取舍/坑**：
+- **`/v1/messages`（Anthropic）路径当前不持久化 telemetry**（既有缺口，非本次引入），故该路径也未接入正文捕获——只有 `/v1/chat/completions` 落库+捕获。后续若给 messages 接 telemetry，应同处接 `persistPayload`。
+- **隐私**：`capture_payloads` 默认开 = 明文正文落库。已在设置页加醒目提示，并提供 `payload_retention_days` 自动清理；自托管场景数据在运营者自己机器上，用户已确认接受。
+- **保留清理**：采用「insert 时机会式 prune」（route 内调 `prunePayloads(now - retentionMs)`），靠 `created_at` 索引保持低成本；未引入独立定时器。
+- **i18n**：已跑 `i18n:extract`+`i18n:update`，新串进了各 locale（未跑 `i18n:translate`，新串暂为英文回退，待后续翻译）。
+- **预存在 flake（非本次引入）**：`policies/+page.svelte` 的 `scrollIntoView`（commit 51974fc）在 jsdom 下抛 unhandled rejection，使 `pnpm test` 退出码非 0（1131 tests 全过）。与本功能无关，未处理。
+
+---
+
 ## 2026-05-31 · 全模块审计 + 41 项修复（workflow 驱动，全原则）
 
 **背景**：用 workflow 对 10 个模块做对抗式审计（finder → 逐条 verify against real code），得 **42 条确认发现**（22 bug / 5 incomplete / 15 improvement，4 条误报驳回）。随后用第二个 workflow（文件不相交并行波 + 依赖串行）TDD 修复 **41 条**（记忆中间件接线 1 条 incomplete 单列为 Task，本轮不接——属请求路径全新行为）。

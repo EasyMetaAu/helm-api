@@ -58,8 +58,8 @@
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
-  <header class="flex items-center justify-between">
-    <div>
+  <header class="flex items-start justify-between gap-3">
+    <div class="min-w-0">
       <h1 class="page-title">{$t('API Keys')}</h1>
       <p class="section-desc">
         {$t(
@@ -67,7 +67,7 @@
         )}
       </p>
     </div>
-    <button type="button" class="btn-primary" onclick={() => (showCreate = true)}
+    <button type="button" class="btn-primary shrink-0" onclick={() => (showCreate = true)}
       >{$t('New key')}</button
     >
   </header>
@@ -107,7 +107,10 @@
               <td class="px-3 py-2">
                 <span class="text-ink-body">{key.role}</span>
                 {#if key.role === 'root'}
-                  <p data-testid="root-warning" class="mt-1 text-xs text-amber-700">
+                  <p
+                    data-testid="root-warning"
+                    class="mt-1 w-44 whitespace-normal text-xs text-amber-700"
+                  >
                     {$t('Management plane only — do not feed production traffic.')}
                   </p>
                 {/if}

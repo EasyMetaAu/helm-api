@@ -133,16 +133,39 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 // ── keyword signal ────────────────────────────────────────────────────────────
 
-// Case-insensitive substring match; signal = normalized hit count over keywords.
-// Per implementation-notes we do NOT lowercase the original text for storage —
-// matching folds case locally without mutating the source for any other use.
+// Case-insensitive, WORD/TOKEN-boundary aware match; signal = normalized hit
+// count over keywords. We do NOT lowercase the original text for storage — the
+// `i` flag folds case locally without mutating the source for any other use.
+//
+// Boundaries are enforced ONLY on a keyword edge that is itself a word char
+// (alnum/underscore). This is what stops a naive `includes` from firing "hi"
+// inside "t·hi·s" or "ok" inside "lo·ok"/"bo·ok" (a real regression: those
+// false hits silently poisoned the rawScore of unrelated prompts). Keywords
+// that contain spaces ("step by step") or END in punctuation ("cve-", meant to
+// match "cve-2021") keep matching, because the non-word edge gets NO boundary.
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const WORD = /[\p{L}\p{N}_]/u; // unicode letter/number/underscore
+const keywordMatcherCache = new Map<string, RegExp>();
+function keywordMatcher(kw: string): RegExp {
+  let re = keywordMatcherCache.get(kw);
+  if (re === undefined) {
+    const left = WORD.test(kw[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
+    const right = WORD.test(kw[kw.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
+    re = new RegExp(left + escapeRegExp(kw) + right, "iu");
+    keywordMatcherCache.set(kw, re);
+  }
+  return re;
+}
+
 function keywordSignal(text: string, keywords: string[]): number {
   if (text.trim().length === 0) return 0;
-  const haystack = text.toLowerCase();
   let hits = 0;
   for (const kw of keywords) {
     if (kw.length === 0) continue;
-    if (haystack.includes(kw.toLowerCase())) hits += 1;
+    if (keywordMatcher(kw).test(text)) hits += 1;
   }
   if (hits === 0) return 0;
   // Saturating: 1 keyword ~ moderate, multiple keywords approach full signal.

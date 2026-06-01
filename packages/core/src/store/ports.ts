@@ -83,15 +83,53 @@ export interface InsertTelemetryInput {
   createdAt: Date;
 }
 
+// Full request/response body capture (admin "System Settings" → capture_payloads).
+// Stored in a SEPARATE table from the decision record so it prunes independently
+// (payload_retention_days) and never bloats the decision JSON. Unlike telemetry,
+// this is NOT redacted — it is the verbatim client request body + the assembled
+// provider response. It carries NO plaintext API key: the bearer lives in the
+// request's Authorization HEADER, which is never part of the chat body stored here.
+export interface InsertPayloadInput {
+  requestId: string;
+  requestJson: string; // verbatim client request body, serialized
+  responseJson: string | null; // assembled full response (null on error / unknown)
+  createdAt: Date;
+}
+
+export interface RequestPayload {
+  requestId: string;
+  requestJson: string;
+  responseJson: string | null;
+  createdAt: Date;
+}
+
+// A recent decision row paired with the time the gateway recorded it. `createdAt`
+// is STORE metadata (a separate column), deliberately kept OUT of the redacted
+// DecisionRecord schema; the Debug UI list needs it for the 「时间」 column, so the
+// recent-list port surfaces it alongside the record instead of forcing the UI to
+// fabricate a timestamp (原则1: UI re-computes nothing).
+export interface RecentDecisionRecord {
+  record: DecisionRecord;
+  createdAt: Date;
+}
+
 export interface TelemetryStore {
   insert(input: InsertTelemetryInput): Promise<{ id: string }>;
-  queryRecent(limit: number): Promise<DecisionRecord[]>; // most recent N, createdAt desc
+  queryRecent(limit: number): Promise<RecentDecisionRecord[]>; // most recent N, createdAt desc
   getByRequestId(requestId: string): Promise<DecisionRecord | null>;
   // POST-MVP Agentic Signals (docs/02). Read every decision record whose
   // createdAt falls in [startMs, endMs) so the background Signal Collector can
   // aggregate a window AFTER the fact. Half-open interval keeps adjacent windows
   // non-overlapping → idempotent re-collect. NEVER called on the request path.
   queryWindow(startMs: number, endMs: number): Promise<DecisionRecord[]>;
+  // Full-payload capture (opt-out via runtime settings capture_payloads). Upsert
+  // by request_id (idempotent: the stream path may write the request first, then
+  // backfill the assembled response). Stores verbatim bodies — never redacted.
+  insertPayload(input: InsertPayloadInput): Promise<void>;
+  getPayload(requestId: string): Promise<RequestPayload | null>;
+  // Delete payloads with createdAt strictly older than the cutoff (epoch ms).
+  // Drives payload_retention_days auto-prune; safe to call opportunistically.
+  prunePayloads(olderThanMs: number): Promise<void>;
 }
 
 // SignalStore — persistence for the POST-MVP Agentic Signals feedback layer

@@ -2,12 +2,14 @@ export { type CreateStoreOptions, createStore, type StoreSet } from "./factory.j
 export type {
   ConfigStore,
   CreateKeyInput,
+  InsertPayloadInput,
   InsertTelemetryInput,
   KeyStore,
   MemoryJobStatus,
   MemoryStore,
   RateLimitConsumeResult,
   RateLimitStore,
+  RequestPayload,
   SignalStore,
   TelemetryStore,
 } from "./ports.js";

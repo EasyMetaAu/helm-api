@@ -165,3 +165,50 @@ describe("scoreDimensions", () => {
     expect(res.hits.find((h) => h.dimension === "reasoning_kw")).toBeDefined();
   });
 });
+
+// Keyword matching must be WORD/TOKEN-boundary aware, not a naive substring
+// `includes`. A naive matcher fires `simple_kw` ("hi"/"ok") inside ordinary
+// words — "this" contains "hi", "look"/"book" contain "ok" — which silently
+// poisons the rawScore of unrelated prompts (regression discovered during the
+// 2026-06-01 classifier recalibration). These pin the intended semantics.
+describe("scoreDimensions keyword matching is word-boundary aware", () => {
+  it("does NOT match 'hi' inside 'this' (no spurious simple_kw hit)", () => {
+    const cfg = makeConfig();
+    const res = scoreDimensions(makeReq("fix this function in the codebase"), cfg);
+    expect(res.hits.find((h) => h.dimension === "simple_kw")).toBeUndefined();
+  });
+
+  it("does NOT match 'ok' inside 'look'/'book'", () => {
+    const cfg = makeConfig();
+    const res = scoreDimensions(makeReq("look at the book on the shelf"), cfg);
+    expect(res.hits.find((h) => h.dimension === "simple_kw")).toBeUndefined();
+  });
+
+  it("STILL matches a standalone keyword token ('hi' as a word)", () => {
+    const cfg = makeConfig();
+    const res = scoreDimensions(makeReq("hi there"), cfg);
+    expect(res.hits.find((h) => h.dimension === "simple_kw")).toBeDefined();
+  });
+
+  it("STILL matches multi-word keywords ('step by step')", () => {
+    const cfg = makeConfig();
+    const res = scoreDimensions(makeReq("solve it step by step please"), cfg);
+    expect(res.hits.find((h) => h.dimension === "reasoning_kw")).toBeDefined();
+  });
+
+  it("STILL matches a keyword ending in punctuation ('cve-' in 'CVE-2021-1234')", () => {
+    const cfg = makeConfig({ security_kw: { weight: 0.16, keywords: ["cve-", "exploit"] } });
+    const res = scoreDimensions(makeReq("patch the CVE-2021-1234 issue"), cfg);
+    expect(res.hits.find((h) => h.dimension === "security_kw")).toBeDefined();
+  });
+
+  it("matches a keyword at the very start/end of the text", () => {
+    const cfg = makeConfig();
+    expect(
+      scoreDimensions(makeReq("ok"), cfg).hits.find((h) => h.dimension === "simple_kw"),
+    ).toBeDefined();
+    expect(
+      scoreDimensions(makeReq("please say hi"), cfg).hits.find((h) => h.dimension === "simple_kw"),
+    ).toBeDefined();
+  });
+});
