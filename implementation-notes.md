@@ -24,6 +24,14 @@
 
 ---
 
+## 2026-06-01 · 管理界面：规则维度卡片默认折叠 + 根 `dev` 脚本（docs/11，devx）
+
+**UI**：分类器页「规则维度」只读表很长，改为 `<details>/<summary>` **默认折叠、点击展开**（原生、可键盘操作、无额外 state；隐藏默认 marker，自绘旋转 chevron）。复用已有 i18n key，5 个 locale 无需新增。
+
+**devx 偏离（须知）**：CLAUDE.md「常用命令」把 `pnpm dev` 定义为「起网关 + admin」，但 `@helm/gateway` **目前没有 `dev` 脚本/入口**，无法真正并起。故根 `package.json` 先加 `dev` = `pnpm --filter @helm/admin dev`（admin-only，当前唯一能调试的部分），并留 `dev:admin` 别名；待 gateway 有 dev 入口后把 `dev` 升级为并跑二者（`pnpm -r --parallel dev` 或 concurrently），别名保证肌肉记忆不变。
+
+---
+
 ## 2026-06-01 · 分类器车道校准（classifier.lane-calibration）—— 修「所有请求都落到 balanced」（docs/03，原则 2/3/4/5）
 
 **症状（用户在 Docker 实测发现）**：每一条 `model:auto` 请求的遥测都是 `decided_by=fallback` / `fallback_reason=eval_disabled` / `lane=balanced`。lane 体系（economy/coding/premium/json/vision）**形同虚设**——无论提示词是打招呼、写代码还是深度推理，全部走 balanced。
