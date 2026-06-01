@@ -86,7 +86,7 @@
     </div>
 
     <label class="flex items-center gap-3">
-      <input type="checkbox" name="eval_enabled" bind:checked={evalEnabled} />
+      <input type="checkbox" class="checkbox" name="eval_enabled" bind:checked={evalEnabled} />
       <span class="field-label">{$t('Enable Layer-2 eval')}</span>
       <span class="badge-eval">{$t('Layer-2')}</span>
     </label>
@@ -121,7 +121,10 @@
       {/if}
     </label>
 
-    <div class="flex items-center gap-3">
+    <div class="card-actions">
+      {#if saved}
+        <span class="badge-ok" role="status">{$t('Saved')}</span>
+      {/if}
       <button
         type="button"
         onclick={handleSave}
@@ -130,9 +133,6 @@
       >
         {saving ? $t('Saving…') : $t('Save')}
       </button>
-      {#if saved}
-        <span class="badge-ok" role="status">{$t('Saved')}</span>
-      {/if}
     </div>
   </div>
 

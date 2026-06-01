@@ -167,9 +167,10 @@
         >
       </label>
 
-      <label class="flex items-center gap-2 text-sm">
+      <label class="checkbox-field">
         <input
           type="checkbox"
+          class="checkbox"
           bind:checked={allowCustomModel}
           aria-label={$t('allow custom model')}
         />
@@ -190,7 +191,7 @@
             step="1"
             aria-label={$t('Requests per minute (RPM)')}
             placeholder={$t('Default')}
-            class="select"
+            class="input"
             bind:value={rpmInput}
           />
         </label>
@@ -202,7 +203,7 @@
             step="1"
             aria-label={$t('Tokens per minute (TPM)')}
             placeholder={$t('Default')}
-            class="select"
+            class="input"
             bind:value={tpmInput}
           />
         </label>

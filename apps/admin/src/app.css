@@ -79,14 +79,40 @@
   .input {
     @apply w-full rounded border border-slate-300 px-2 py-1.5 text-sm text-slate-900 transition-colors placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200;
   }
+  /* Compact variant of .input for inline/table use (per-key rate limits, the
+     latency cap). Same border + focus ring as .input — ONLY the padding is
+     tighter — so every text/number field shares one height + one focus state.
+     Width is set by the caller (e.g. `input-sm w-24`). */
+  .input-sm {
+    @apply rounded border border-slate-300 px-2 py-1 text-sm text-slate-900 transition-colors placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200;
+  }
   .select {
     @apply w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 transition-colors focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200;
+  }
+  /* Native checkbox, sized + brand-neutral accent + matching focus ring so every
+     checkbox reads the same across pages (was raw browser default before). */
+  .checkbox {
+    @apply h-4 w-4 rounded border-slate-300 accent-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400;
+  }
+  /* "[box] label" inline group. Pair with .checkbox on the input. */
+  .checkbox-field {
+    @apply flex items-center gap-2 text-sm text-slate-700;
+  }
+  /* Vertical label → control → help group. The canonical form field stack. */
+  .field {
+    @apply flex flex-col gap-1;
   }
   .field-label {
     @apply text-sm font-medium text-slate-700;
   }
   .field-help {
     @apply text-xs text-slate-500;
+  }
+  /* Standard card footer: a right-aligned action row (Save / Cancel) divided from
+     the fields above. Used at the bottom of every editable card so the primary
+     action sits in one consistent place app-wide. */
+  .card-actions {
+    @apply mt-1 flex items-center justify-end gap-3 border-t border-slate-100 pt-3;
   }
 
   /* — Badges / pills (self-contained, single class) — */

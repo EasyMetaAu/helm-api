@@ -180,7 +180,7 @@
                         step="1"
                         aria-label={$t('RPM')}
                         placeholder={$t('Default')}
-                        class="w-24 rounded border border-slate-300 px-2 py-1"
+                        class="input-sm w-24"
                         bind:value={editRpm}
                       />
                     </label>
@@ -192,7 +192,7 @@
                         step="1"
                         aria-label={$t('TPM')}
                         placeholder={$t('Default')}
-                        class="w-24 rounded border border-slate-300 px-2 py-1"
+                        class="input-sm w-24"
                         bind:value={editTpm}
                       />
                     </label>
@@ -214,7 +214,7 @@
                   {#if !key.disabled}
                     <button
                       type="button"
-                      class="mt-1 text-xs text-indigo-600 hover:underline"
+                      class="link-inline mt-1 text-xs"
                       onclick={() => startEditLimits(key)}>{$t('Edit limits')}</button
                     >
                   {/if}
