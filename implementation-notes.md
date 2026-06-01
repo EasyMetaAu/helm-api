@@ -26,6 +26,22 @@
 
 ---
 
+## 2026-06-01 · 策略编辑器「任务类型」下拉缺 `security`（admin，原则 1/7 之 schema 唯一来源精神）
+
+**症状（用户在 `/admin/policies` 实测发现）**：第 8 条策略（`security_complex_to_premium`，`config/policies.yaml`）的「任务类型」下拉**渲染为空白**——既不显示 `security`，也不回退到「(任意)」。
+
+**根因（UI 枚举与网关 canonical 枚举漂移）**：`apps/admin/src/lib/api/policies.ts` 的 `TASK_TYPE_OPTIONS` 是**硬编码**数组，且只有 9 项（缺 `security`）。网关 canonical 来源 `TaskTypeSchema`（`packages/shared/src/classifier/eval-output.schema.ts`，亦即 `@helm/core` `TaskType`）有 **10** 项含 `security`。`PolicyRow.svelte` 的 `<select value={match.task_type ?? ''}>` 拿到 `"security"` 却找不到对应 `<option>`，浏览器遂渲染空白（经典「select 值无匹配 option」症状）。后果：operator 无法新建 `security` 策略，且既有 `security` 策略一旦在 UI 误操作保存即可能丢值。
+
+**为何会漂移**：admin 不得 import core/shared（原则 1），故该枚举只能在 admin 侧复制一份 → 与 schema 唯一来源天然脱钩、无编译期保护。原注释虽写「mirrors @helm/core TaskType」，但 `security` 加入 schema 时这份副本没同步。
+
+**修法（TDD，红→绿）**：
+- 先红：`apps/admin/src/lib/api/policies.test.ts` 新增 `task_type dropdown contract` 用例，显式钉住完整 10 项集合并断言含 `security`（因 admin 不能 import shared，期望集合以字面量镜像 `TaskTypeSchema`，由测试充当契约守卫）。
+- 后绿：`TASK_TYPE_OPTIONS` 补 `'security'`，并加强注释说明它必须与网关 `TaskTypeSchema` 保持 lockstep。
+
+**坑 / TODO**：admin 侧两处枚举副本（`TASK_TYPE_OPTIONS` / `COMPLEXITY_OPTIONS`）与 shared schema 无自动同步，全靠这条契约测试兜底。若后续 `TaskTypeSchema` 再增删 task_type，需同时更新 `TASK_TYPE_OPTIONS` 与该测试的期望集合——可考虑用代码生成把 shared 枚举导出成 admin 可消费的纯数据常量，根除手抄漂移。
+
+---
+
 ## 2026-06-01 · 请求列表：行点击进详情 + 显示请求 ID/时间（docs/07，原则 1/7）
 
 **用户反馈（管理界面 `/admin/requests`）**：① 行尾的「view」按钮多余——希望**点整行**直接进详情；② **请求时间**没显示；③ **请求 ID** 没显示，且应作为**第一列**。
