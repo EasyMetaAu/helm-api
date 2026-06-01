@@ -9,6 +9,8 @@ const FULL: RuntimeSettings = {
   capture_payloads: false,
   payload_retention_days: 7,
   rate_limit_enabled: true,
+  rate_limit_default_rpm: 60,
+  rate_limit_default_tpm: 90000,
   log_level: 'debug',
 };
 
@@ -38,6 +40,8 @@ describe('settings api client', () => {
       capture_payloads: true,
       payload_retention_days: 30,
       rate_limit_enabled: false,
+      rate_limit_default_rpm: 0,
+      rate_limit_default_tpm: 0,
       log_level: 'info',
     });
   });

@@ -278,5 +278,18 @@
   "Max depth reached": "최대 깊이에 도달했습니다",
   "(empty object)": "(빈 객체)",
   "(empty array)": "(빈 배열)",
-  "(null)": "(null)"
+  "(null)": "(null)",
+  "Requests per minute (RPM)": "분당 요청 수 (RPM)",
+  "Tokens per minute (TPM)": "분당 토큰 수 (TPM)",
+  "Default": "기본값",
+  "Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.": "키별 속도 제한입니다. 비워 두면 시스템 기본값을 사용합니다. 0은 해당 항목이 무제한임을 의미합니다.",
+  "Rate limit": "속도 제한",
+  "RPM": "RPM",
+  "TPM": "TPM",
+  "Unlimited": "무제한",
+  "Edit limits": "제한 편집",
+  "Failed to update rate limit": "속도 제한 업데이트에 실패했습니다",
+  "Default requests per minute (RPM)": "기본 분당 요청 수 (RPM)",
+  "Default tokens per minute (TPM)": "기본 분당 토큰 수 (TPM)",
+  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "키별 값이 없는 키에 적용되는 대체 제한입니다. 0은 무제한을 의미합니다."
 }

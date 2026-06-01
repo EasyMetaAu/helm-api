@@ -27,6 +27,11 @@
   let role = $state<Role>('user');
   let maxLane = $state<string>('');
   let allowCustomModel = $state<boolean>(false);
+  // Per-key rate limits. null = leave unset → inherit the system default; a number
+  // (0 = unlimited) sets an explicit override. A number input binds to number|null
+  // (empty field => null), so no string parsing is needed.
+  let rpmInput = $state<number | null>(null);
+  let tpmInput = $state<number | null>(null);
 
   let error = $state<string | null>(null);
   let creating = $state<boolean>(false);
@@ -43,6 +48,10 @@
       allow_custom_model: allowCustomModel,
     };
     if (maxLane) input.max_lane = maxLane;
+    // Send a rate limit only when the operator set one; blank => inherit default.
+    // `!= null` also catches the `undefined` Svelte 5 gives an emptied number input.
+    if (rpmInput != null) input.rate_limit_rpm = rpmInput;
+    if (tpmInput != null) input.rate_limit_tpm = tpmInput;
     try {
       revealed = await createKey(input);
     } catch (e) {
@@ -80,6 +89,8 @@
         allowed_lanes: null,
         allow_custom_model: allowCustomModel,
         disabled: false,
+        rate_limit_rpm: rpmInput ?? null,
+        rate_limit_tpm: tpmInput ?? null,
       };
       oncreated(view);
     }
@@ -167,6 +178,38 @@
       <span class="field-help"
         >{$t(
           'Lets this client bypass lanes and target a specific model by name. Leave off to keep every request routed through lanes.',
+        )}</span
+      >
+
+      <div class="grid grid-cols-2 gap-3">
+        <label class="flex flex-col gap-1 text-sm">
+          <span class="field-label">{$t('Requests per minute (RPM)')}</span>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            aria-label={$t('Requests per minute (RPM)')}
+            placeholder={$t('Default')}
+            class="select"
+            bind:value={rpmInput}
+          />
+        </label>
+        <label class="flex flex-col gap-1 text-sm">
+          <span class="field-label">{$t('Tokens per minute (TPM)')}</span>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            aria-label={$t('Tokens per minute (TPM)')}
+            placeholder={$t('Default')}
+            class="select"
+            bind:value={tpmInput}
+          />
+        </label>
+      </div>
+      <span class="field-help"
+        >{$t(
+          'Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.',
         )}</span
       >
     </div>

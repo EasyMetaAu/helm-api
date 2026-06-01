@@ -56,6 +56,7 @@ function makeDeps(
     authed?: boolean;
     transformRequestOut?: (native: unknown) => unknown;
     rateLimiter?: MessagesRouteDeps["rateLimiter"];
+    identity?: MessagesIdentity;
   } = {},
 ): { deps: MessagesRouteDeps; harness: Harness } {
   const harness: Harness = {
@@ -70,7 +71,7 @@ function makeDeps(
     auth: {
       resolve: async (_key: string | null) => {
         harness.order.push("auth");
-        return over.authed === false ? null : IDENTITY;
+        return over.authed === false ? null : (over.identity ?? IDENTITY);
       },
     },
     transformers: {
@@ -434,6 +435,34 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(body.type).toBe("error");
     // Anthropic rate-limit envelope, and routing never ran.
     expect(harness.order).not.toContain("route");
+  });
+
+  it("threads the key's per-key rate-limit override into the limiter probe", async () => {
+    let capturedOverride: unknown;
+    const limiter: MessagesRouteDeps["rateLimiter"] = {
+      check: async (probe) => {
+        capturedOverride = probe.override;
+        return {
+          allowed: true,
+          limitedBy: null,
+          limit: 1,
+          remaining: 0,
+          resetSeconds: 30,
+          retryAfterSeconds: 0,
+        };
+      },
+    };
+    const { deps } = makeDeps({
+      rateLimiter: limiter,
+      identity: { keyId: "k1", accountId: "acct", caps: { rateLimit: { rpm: 1, tpm: null } } },
+    });
+    const app = buildApp(deps);
+    await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(capturedOverride).toEqual({ rpm: 1, tpm: null });
   });
 
   it("does not 429 when the limiter allows the key", async () => {

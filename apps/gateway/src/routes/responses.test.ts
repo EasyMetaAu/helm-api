@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
+import type { MessagesIdentity } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
 import { type ResponsesRouteDeps, registerResponsesRoute } from "./responses.js";
 
@@ -15,6 +16,7 @@ function makeDeps(
     transformRequestOut?: (n: unknown) => { stream?: boolean; metadata?: Record<string, unknown> };
     collect?: () => Promise<unknown>;
     rateLimiter?: ResponsesRouteDeps["rateLimiter"];
+    identity?: MessagesIdentity;
   } = {},
 ): { deps: ResponsesRouteDeps; order: string[] } {
   const order: string[] = [];
@@ -23,7 +25,8 @@ function makeDeps(
     auth: {
       resolve: async (cred) => {
         order.push("auth");
-        return over.authed === false || cred === null ? null : { keyId: "k1", accountId: "acct" };
+        if (over.authed === false || cred === null) return null;
+        return over.identity ?? { keyId: "k1", accountId: "acct" };
       },
     },
     transformer: {
@@ -192,5 +195,33 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(res.headers.get("retry-after")).toBe("12");
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe("rate_limited");
     expect(order).not.toContain("route");
+  });
+
+  it("threads the key's per-key rate-limit override into the limiter probe", async () => {
+    let capturedOverride: unknown;
+    const limiter: ResponsesRouteDeps["rateLimiter"] = {
+      check: async (probe) => {
+        capturedOverride = probe.override;
+        return {
+          allowed: true,
+          limitedBy: null,
+          limit: 1,
+          remaining: 0,
+          resetSeconds: 30,
+          retryAfterSeconds: 0,
+        };
+      },
+    };
+    const { deps } = makeDeps({
+      rateLimiter: limiter,
+      identity: { keyId: "k1", accountId: "acct", caps: { rateLimit: { rpm: 1, tpm: null } } },
+    });
+    const app = buildApp(deps);
+    await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(capturedOverride).toEqual({ rpm: 1, tpm: null });
   });
 });

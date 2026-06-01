@@ -5,6 +5,7 @@ import type {
   InsertPayloadInput,
   InsertTelemetryInput,
   KeyStore,
+  RateLimitPatch,
   RecentDecisionRecord,
   RequestPayload,
   TelemetryStore,
@@ -27,6 +28,8 @@ class InMemoryKeyStore implements KeyStore {
       allowed_lanes: input.allowedLanes ?? null,
       allow_custom_model: input.allowCustomModel ?? false,
       disabled: false,
+      rate_limit_rpm: input.rateLimitRpm ?? null,
+      rate_limit_tpm: input.rateLimitTpm ?? null,
     };
     this.byId.set(record.key_id, record);
     return record;
@@ -43,6 +46,14 @@ class InMemoryKeyStore implements KeyStore {
   async disable(keyId: string): Promise<void> {
     const r = this.byId.get(keyId);
     if (r) this.byId.set(keyId, { ...r, disabled: true });
+  }
+  async updateRateLimit(keyId: string, patch: RateLimitPatch): Promise<void> {
+    const r = this.byId.get(keyId);
+    if (!r) return;
+    const next = { ...r };
+    if (patch.rpm !== undefined) next.rate_limit_rpm = patch.rpm;
+    if (patch.tpm !== undefined) next.rate_limit_tpm = patch.tpm;
+    this.byId.set(keyId, next);
   }
 }
 
@@ -143,6 +154,8 @@ describe("port type contracts", () => {
       | "maxLane"
       | "allowedLanes"
       | "allowCustomModel"
+      | "rateLimitRpm"
+      | "rateLimitTpm"
     >();
   });
 

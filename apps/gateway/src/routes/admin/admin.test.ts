@@ -67,6 +67,8 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         allowed_lanes: input.allowedLanes ?? null,
         allow_custom_model: input.allowCustomModel ?? false,
         disabled: false,
+        rate_limit_rpm: input.rateLimitRpm ?? null,
+        rate_limit_tpm: input.rateLimitTpm ?? null,
       };
       rows.push(rec);
       return rec;
@@ -82,6 +84,13 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       if (!row) throw new Error(`key not found: ${keyId}`);
       // Soft revoke: flip disabled ONLY, never rewrite other fields in place.
       row.disabled = true;
+    },
+    async updateRateLimit(keyId, patch) {
+      const row = rows.find((r) => r.key_id === keyId);
+      if (!row) throw new Error(`key not found: ${keyId}`);
+      // PARTIAL: only supplied dims change; absent dims untouched (never role/caps).
+      if (patch.rpm !== undefined) row.rate_limit_rpm = patch.rpm;
+      if (patch.tpm !== undefined) row.rate_limit_tpm = patch.tpm;
     },
   };
 }
@@ -428,6 +437,91 @@ describe("admin.api keys", () => {
     expect(list[0]?.prefix).toBe("helm_live_PLAI");
     expect(list[0]).not.toHaveProperty("hash");
     expect(list[0]).not.toHaveProperty("plaintext");
+  });
+
+  it("POST persists per-key rate limits and the list surfaces them", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const created = await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user", rate_limit_rpm: 60, rate_limit_tpm: 0 }),
+    });
+    expect(created.status).toBe(201);
+    expect(keyStore.rows[0]?.rate_limit_rpm).toBe(60);
+    expect(keyStore.rows[0]?.rate_limit_tpm).toBe(0);
+    const list = (await (await app.request("/admin/api/keys")).json()) as Array<
+      Record<string, unknown>
+    >;
+    expect(list[0]?.rate_limit_rpm).toBe(60);
+    expect(list[0]?.rate_limit_tpm).toBe(0);
+  });
+
+  it("POST without rate limits leaves them null (inherit system default)", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user" }),
+    });
+    expect(keyStore.rows[0]?.rate_limit_rpm).toBeNull();
+    expect(keyStore.rows[0]?.rate_limit_tpm).toBeNull();
+  });
+
+  it("PATCH edits a key's rate limits (number sets, null clears) without touching caps", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user", max_lane: "balanced" }),
+    });
+    const set = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ rate_limit_rpm: 120, rate_limit_tpm: 5000 }),
+    });
+    expect(set.status).toBe(200);
+    expect(keyStore.rows[0]?.rate_limit_rpm).toBe(120);
+    expect(keyStore.rows[0]?.rate_limit_tpm).toBe(5000);
+    expect(keyStore.rows[0]?.max_lane).toBe("balanced"); // caps untouched
+    // null clears one dimension back to inheriting the system default.
+    const clear = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ rate_limit_rpm: null, rate_limit_tpm: 5000 }),
+    });
+    expect(clear.status).toBe(200);
+    expect(keyStore.rows[0]?.rate_limit_rpm).toBeNull();
+    expect(keyStore.rows[0]?.rate_limit_tpm).toBe(5000);
+  });
+
+  it("PATCH rejects an unknown field with 400 (fail-closed, strict)", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user" }),
+    });
+    const res = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "root" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("PATCH on an unknown key id returns 404", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const res = await app.request("/admin/api/keys/nope", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ rate_limit_rpm: 10 }),
+    });
+    expect(res.status).toBe(404);
   });
 
   it("DELETE revokes (disabled:true) without removing or rewriting the row", async () => {

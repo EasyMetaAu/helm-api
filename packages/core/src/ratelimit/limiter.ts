@@ -11,14 +11,31 @@ interface ResolvedQuota {
   tpm: number;
 }
 
-// Resolve the effective quota for a key: per-key override (partial) layered over
-// `default`. A missing override dimension falls back to default — overrides only
-// affect the dimensions they name, and only for their own key.
-function resolveQuota(config: RateLimitConfig, keyId: string): ResolvedQuota {
-  const override = config.overrides[keyId];
+// Resolve the effective quota for a probe.
+//
+// When the request carries a per-key override object (`probe.override`, set by
+// Auth from the key's DB record), THAT is the authoritative per-key layer: each
+// dimension resolves `probe.override.<dim> ?? config.default.<dim>`. A null/
+// undefined dimension means "inherit the SYSTEM DEFAULT" — it deliberately does
+// NOT fall through to a yaml `config.overrides[keyId]` entry, so clearing a key's
+// limit in the admin UI truly returns it to the fleet default (the UI's "Default"
+// label stays honest even if a stale yaml override exists). 0 is a real value
+// (explicitly unlimited), NOT "inherit".
+//
+// When NO per-key override is carried (e.g. a config-only / headless caller that
+// never resolved a key record), fall back to a yaml `config.overrides[keyId]`
+// entry, then the default — preserving the original yaml-driven behavior.
+function resolveQuota(config: RateLimitConfig, probe: RateLimitProbe): ResolvedQuota {
+  if (probe.override !== undefined) {
+    return {
+      rpm: probe.override.rpm ?? config.default.rpm,
+      tpm: probe.override.tpm ?? config.default.tpm,
+    };
+  }
+  const keyOverride = config.overrides[probe.keyId];
   return {
-    rpm: override?.rpm ?? config.default.rpm,
-    tpm: override?.tpm ?? config.default.tpm,
+    rpm: keyOverride?.rpm ?? config.default.rpm,
+    tpm: keyOverride?.tpm ?? config.default.tpm,
   };
 }
 
@@ -45,7 +62,7 @@ export function createRateLimiter(deps: RateLimiterDeps): {
 
   async function check(probe: RateLimitProbe): Promise<RateLimitResult> {
     if (!config.enabled) return ALLOWED;
-    const quota = resolveQuota(config, probe.keyId);
+    const quota = resolveQuota(config, probe);
     const rpmOn = quota.rpm > 0;
     const tpmOn = quota.tpm > 0;
     if (!rpmOn && !tpmOn) return ALLOWED;

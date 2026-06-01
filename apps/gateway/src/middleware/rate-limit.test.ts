@@ -82,6 +82,29 @@ describe("rateLimitMiddleware", () => {
     expect(body.error.limited_by).toBe("tpm");
   });
 
+  it("applies the per-key override carried on identity.caps.rateLimit (tighter than default)", async () => {
+    // System default is rpm:5, but this key carries its OWN override rpm:1 (from
+    // its ApiKeyRecord, surfaced by Auth). The middleware must thread that into
+    // the probe so the key is blocked on its 2nd request, not the 6th.
+    const limiter = createRateLimiter({
+      config: cfg({ default: { rpm: 5, tpm: 0 } }),
+      store: new InMemoryRateLimitStore(),
+    });
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      // biome-ignore lint/suspicious/noExplicitAny: minimal identity stub for the test
+      (c as any).set("identity", { keyId: "k1", caps: { rateLimit: { rpm: 1, tpm: null } } });
+      await next();
+    });
+    app.use("*", rateLimitMiddleware({ limiter, now: () => 0, estimateTokens: () => 0 }));
+    app.get("/v1/chat/completions", (c) => c.json({ ok: true }));
+
+    expect((await app.request("/v1/chat/completions")).status).toBe(200);
+    const blocked = await app.request("/v1/chat/completions");
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("x-ratelimit-limit")).toBe("1");
+  });
+
   it("is a no-op pass-through when disabled (no headers, always allowed)", async () => {
     const app = buildApp(cfg({ enabled: false, default: { rpm: 1, tpm: 0 } }));
     for (let i = 0; i < 5; i++) {

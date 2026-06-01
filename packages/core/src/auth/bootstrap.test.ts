@@ -71,6 +71,7 @@ describe("bootstrapRootKey", () => {
       createKey: vi.fn(),
       getByHash: vi.fn(),
       disable: vi.fn(),
+      updateRateLimit: vi.fn(),
     };
     await expect(
       bootstrapRootKey({ keyStore: failing, generateKey, now: () => new Date(), log: () => {} }),

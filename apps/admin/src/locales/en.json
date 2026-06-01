@@ -280,5 +280,18 @@
   "Max depth reached": "Max depth reached",
   "(empty object)": "(empty object)",
   "(empty array)": "(empty array)",
-  "(null)": "(null)"
+  "(null)": "(null)",
+  "Requests per minute (RPM)": "Requests per minute (RPM)",
+  "Tokens per minute (TPM)": "Tokens per minute (TPM)",
+  "Default": "Default",
+  "Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.": "Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.",
+  "Rate limit": "Rate limit",
+  "RPM": "RPM",
+  "TPM": "TPM",
+  "Unlimited": "Unlimited",
+  "Edit limits": "Edit limits",
+  "Failed to update rate limit": "Failed to update rate limit",
+  "Default requests per minute (RPM)": "Default requests per minute (RPM)",
+  "Default tokens per minute (TPM)": "Default tokens per minute (TPM)",
+  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "The fallback limit for any key without its own per-key value. 0 means unlimited."
 }

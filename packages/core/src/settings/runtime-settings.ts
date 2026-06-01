@@ -13,12 +13,16 @@ export type SettingsLog = (
   fields?: Record<string, unknown>,
 ) => void;
 
-// Seed the factory defaults from the boot config: rate_limit_enabled mirrors
-// runtime.rate_limit.enabled so the admin toggle starts in sync with yaml/env.
-// All other fields take their schema defaults (capture_payloads:true etc).
+// Seed the factory defaults from the boot config: rate_limit_enabled and the
+// default rpm/tpm quota mirror runtime.rate_limit.{enabled,default} so the admin
+// "System Settings" surface starts in sync with yaml/env (the operator can then
+// tune the fleet-wide fallback live without a restart). All other fields take
+// their schema defaults (capture_payloads:true etc).
 export function defaultSettingsFromConfig(config: HelmConfig): RuntimeSettings {
   return RuntimeSettingsSchema.parse({
     rate_limit_enabled: config.runtime.rate_limit.enabled,
+    rate_limit_default_rpm: config.runtime.rate_limit.default.rpm,
+    rate_limit_default_tpm: config.runtime.rate_limit.default.tpm,
   });
 }
 

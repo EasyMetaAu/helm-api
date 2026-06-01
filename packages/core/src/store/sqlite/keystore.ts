@@ -1,6 +1,6 @@
 import type { ApiKeyRecord } from "@helm/shared";
 import { eq } from "drizzle-orm";
-import type { CreateKeyInput, KeyStore } from "../ports.js";
+import type { CreateKeyInput, KeyStore, RateLimitPatch } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
 import { apiKeys } from "./schema.js";
 
@@ -28,6 +28,9 @@ export class SqliteKeyStore implements KeyStore {
       allowedLanes: input.allowedLanes ? JSON.stringify(input.allowedLanes) : null,
       allowCustomModel: input.allowCustomModel ?? false,
       disabled: false,
+      // Per-key rate-limit override: undefined input => NULL => inherit system default.
+      rateLimitRpm: input.rateLimitRpm ?? null,
+      rateLimitTpm: input.rateLimitTpm ?? null,
       createdAt: this.now(),
     };
     this.db.insert(apiKeys).values(row).run();
@@ -58,6 +61,25 @@ export class SqliteKeyStore implements KeyStore {
     }
   }
 
+  // Edit ONLY the rate-limit columns PRESENT in `patch` (null clears back to
+  // inherit). Omitted dims are left untouched, so a partial PATCH never rewrites
+  // the sibling column (no concurrent-clobber). Throws on unknown id.
+  async updateRateLimit(keyId: string, patch: RateLimitPatch): Promise<void> {
+    const set: Partial<Pick<ApiKeyRow, "rateLimitRpm" | "rateLimitTpm">> = {};
+    if (patch.rpm !== undefined) set.rateLimitRpm = patch.rpm;
+    if (patch.tpm !== undefined) set.rateLimitTpm = patch.tpm;
+    if (Object.keys(set).length === 0) {
+      // No-op patch: still verify the key exists (fail-loud on unknown id).
+      const row = this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).get();
+      if (row === undefined) throw new Error(`key not found: ${keyId}`);
+      return;
+    }
+    const res = this.db.update(apiKeys).set(set).where(eq(apiKeys.keyId, keyId)).run();
+    if (res.changes === 0) {
+      throw new Error(`key not found: ${keyId}`);
+    }
+  }
+
   // Row -> port record. Restores dialect encodings; exposes hash + prefix only.
   private toRecord(row: ApiKeyRow): ApiKeyRecord {
     return {
@@ -70,6 +92,8 @@ export class SqliteKeyStore implements KeyStore {
       allowed_lanes: row.allowedLanes ? (JSON.parse(row.allowedLanes) as string[]) : null,
       allow_custom_model: row.allowCustomModel,
       disabled: row.disabled,
+      rate_limit_rpm: row.rateLimitRpm ?? null,
+      rate_limit_tpm: row.rateLimitTpm ?? null,
     };
   }
 }

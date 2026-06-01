@@ -11,6 +11,10 @@ export interface RuntimeSettings {
   capture_payloads: boolean;
   payload_retention_days: number;
   rate_limit_enabled: boolean;
+  // System DEFAULT quota any key without its own per-key override falls back to.
+  // 0 = unlimited (mirrors the quota convention). Runtime-editable here.
+  rate_limit_default_rpm: number;
+  rate_limit_default_tpm: number;
   log_level: LogLevel;
 }
 
@@ -40,6 +44,10 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
     payload_retention_days:
       typeof raw.payload_retention_days === 'number' ? raw.payload_retention_days : 30,
     rate_limit_enabled: raw.rate_limit_enabled === true,
+    rate_limit_default_rpm:
+      typeof raw.rate_limit_default_rpm === 'number' ? raw.rate_limit_default_rpm : 0,
+    rate_limit_default_tpm:
+      typeof raw.rate_limit_default_tpm === 'number' ? raw.rate_limit_default_tpm : 0,
     log_level: (LOG_LEVEL_OPTIONS as readonly string[]).includes(level as string)
       ? (level as LogLevel)
       : 'info',

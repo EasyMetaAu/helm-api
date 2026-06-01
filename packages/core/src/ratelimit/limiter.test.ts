@@ -68,6 +68,67 @@ describe("createRateLimiter — per-key overrides", () => {
   });
 });
 
+describe("createRateLimiter — probe override (per-key quota carried by Auth)", () => {
+  it("probe.override.rpm wins over both config.overrides and default", async () => {
+    const store = new InMemoryRateLimitStore();
+    const limiter = createRateLimiter({
+      // default rpm:1 AND a config override of rpm:2 — the probe asks for rpm:5,
+      // which must win (highest precedence).
+      config: cfg({ default: { rpm: 1, tpm: 0 }, overrides: { k1: { rpm: 2 } } }),
+      store,
+    });
+    const probe = { keyId: "k1", estimatedTokens: 0, now: 0, override: { rpm: 5 } };
+    for (let i = 0; i < 5; i++) {
+      expect((await limiter.check(probe)).allowed).toBe(true);
+    }
+    expect((await limiter.check(probe)).allowed).toBe(false); // 6th over rpm:5
+  });
+
+  it("an absent probe dimension falls through to the system default", async () => {
+    const store = new InMemoryRateLimitStore();
+    const limiter = createRateLimiter({ config: cfg({ default: { rpm: 2, tpm: 0 } }), store });
+    // override names only tpm (null) -> rpm inherits default:2
+    const probe = { keyId: "k1", estimatedTokens: 0, now: 0, override: { tpm: null } };
+    expect((await limiter.check(probe)).allowed).toBe(true);
+    expect((await limiter.check(probe)).allowed).toBe(true);
+    expect((await limiter.check(probe)).allowed).toBe(false); // 3rd over default rpm:2
+  });
+
+  it("a null probe dimension inherits the system DEFAULT, bypassing a yaml config.override", async () => {
+    const store = new InMemoryRateLimitStore();
+    // A stale yaml override (rpm:1) exists for k1, but the key's DB override was
+    // CLEARED (probe.override present, rpm:null). Clearing must return the key to
+    // the system default (rpm:5), NOT silently fall back to the yaml override —
+    // otherwise the admin UI's "Default" label would lie.
+    const limiter = createRateLimiter({
+      config: cfg({ default: { rpm: 5, tpm: 0 }, overrides: { k1: { rpm: 1 } } }),
+      store,
+    });
+    const probe = { keyId: "k1", estimatedTokens: 0, now: 0, override: { rpm: null, tpm: null } };
+    for (let i = 0; i < 5; i++) {
+      expect((await limiter.check(probe)).allowed).toBe(true);
+    }
+    expect((await limiter.check(probe)).allowed).toBe(false); // 6th over default rpm:5
+  });
+
+  it("probe override of 0 means explicitly UNLIMITED for that dimension", async () => {
+    const consume = vi.fn();
+    const store: RateLimitStore = { consume };
+    // default would meter rpm:1, but this key overrides rpm:0 AND tpm:0 -> the
+    // unmetered fast path: store is never touched.
+    const limiter = createRateLimiter({ config: cfg({ default: { rpm: 1, tpm: 5 } }), store });
+    const r = await limiter.check({
+      keyId: "k1",
+      estimatedTokens: 999,
+      now: 0,
+      override: { rpm: 0, tpm: 0 },
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.limit).toBe(0);
+    expect(consume).not.toHaveBeenCalled();
+  });
+});
+
 describe("createRateLimiter — headers / fields", () => {
   it("remaining decreases with consumption", async () => {
     const store = new InMemoryRateLimitStore();

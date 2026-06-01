@@ -26,6 +26,8 @@ function keyRecord(over: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     allowed_lanes: null,
     allow_custom_model: false,
     disabled: false,
+    rate_limit_rpm: null,
+    rate_limit_tpm: null,
     ...over,
   };
 }

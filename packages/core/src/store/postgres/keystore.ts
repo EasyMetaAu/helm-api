@@ -1,6 +1,6 @@
 import type { ApiKeyRecord } from "@helm/shared";
 import { eq } from "drizzle-orm";
-import type { CreateKeyInput, KeyStore } from "../ports.js";
+import type { CreateKeyInput, KeyStore, RateLimitPatch } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import { apiKeys } from "./schema.js";
 
@@ -29,6 +29,9 @@ export class PgKeyStore implements KeyStore {
       allowedLanes: input.allowedLanes ?? null,
       allowCustomModel: input.allowCustomModel ?? false,
       disabled: false,
+      // Per-key rate-limit override: undefined input => NULL => inherit system default.
+      rateLimitRpm: input.rateLimitRpm ?? null,
+      rateLimitTpm: input.rateLimitTpm ?? null,
       createdAt: this.now().getTime(),
     };
     await this.db.insert(apiKeys).values(row);
@@ -57,6 +60,25 @@ export class PgKeyStore implements KeyStore {
     }
   }
 
+  // Edit ONLY the rate-limit columns PRESENT in `patch` (null clears back to
+  // inherit). Omitted dims are left untouched, so a partial PATCH never rewrites
+  // the sibling column (no concurrent-clobber). Throws on unknown id.
+  async updateRateLimit(keyId: string, patch: RateLimitPatch): Promise<void> {
+    const set: Partial<Pick<ApiKeyRow, "rateLimitRpm" | "rateLimitTpm">> = {};
+    if (patch.rpm !== undefined) set.rateLimitRpm = patch.rpm;
+    if (patch.tpm !== undefined) set.rateLimitTpm = patch.tpm;
+    if (Object.keys(set).length === 0) {
+      // No-op patch: still verify the key exists (fail-loud on unknown id).
+      const rows = await this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).limit(1);
+      if (rows.length === 0) throw new Error(`key not found: ${keyId}`);
+      return;
+    }
+    const res = await this.db.update(apiKeys).set(set).where(eq(apiKeys.keyId, keyId)).returning();
+    if (res.length === 0) {
+      throw new Error(`key not found: ${keyId}`);
+    }
+  }
+
   // Row -> port record. Native jsonb/boolean restored directly; exposes hash +
   // prefix only.
   private toRecord(row: ApiKeyRow): ApiKeyRecord {
@@ -70,6 +92,8 @@ export class PgKeyStore implements KeyStore {
       allowed_lanes: row.allowedLanes ?? null,
       allow_custom_model: row.allowCustomModel,
       disabled: row.disabled,
+      rate_limit_rpm: row.rateLimitRpm ?? null,
+      rate_limit_tpm: row.rateLimitTpm ?? null,
     };
   }
 }

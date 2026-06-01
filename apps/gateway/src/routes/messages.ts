@@ -3,6 +3,7 @@ import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
 
@@ -25,6 +26,13 @@ import { PipelineError } from "./messages-pipeline.js";
 export interface MessagesIdentity {
   keyId: string;
   accountId: string;
+  /** Per-key caps resolved from the ApiKeyRecord. `rateLimit` carries the key's
+   *  own RPM/TPM override (null = inherit the system default) so this self-auth
+   *  path enforces per-key limits, mirroring the OpenAI chat middleware. */
+  caps?: {
+    rateLimit?: { rpm: number | null; tpm: number | null };
+    [k: string]: unknown;
+  };
   [k: string]: unknown;
 }
 
@@ -153,8 +161,14 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     if (deps.rateLimiter !== undefined) {
       const rl = await deps.rateLimiter.check({
         keyId: identity.keyId,
-        estimatedTokens: 0,
+        // Same Content-Length/4 estimate the chat middleware uses, so per-key TPM
+        // is actually metered here (not the old hard-coded 0 that left TPM open).
+        estimatedTokens: estimateRequestTokens(c),
         now: Date.now(),
+        // Per-key override carried by the resolver (null dims inherit the default).
+        override: identity.caps?.rateLimit
+          ? { rpm: identity.caps.rateLimit.rpm, tpm: identity.caps.rateLimit.tpm }
+          : undefined,
       });
       if (!(rl.allowed && rl.limit === 0)) {
         c.header("x-ratelimit-limit", String(rl.limit));

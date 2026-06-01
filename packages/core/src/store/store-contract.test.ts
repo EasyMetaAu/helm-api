@@ -261,6 +261,53 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         }),
       ).rejects.toThrow();
     });
+
+    it("per-key rate limits: omitted -> null, set at create round-trips, updateRateLimit edits", async () => {
+      ctx = await make();
+      // omitted -> null (inherit system default)
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "h1",
+        prefix: "p1",
+        accountId: "a",
+        role: "user",
+      });
+      let got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.rate_limit_rpm).toBeNull();
+      expect(got?.rate_limit_tpm).toBeNull();
+      // set at create (0 = explicit unlimited for that dimension)
+      await ctx.stores.keys.createKey({
+        keyId: "k2",
+        hash: "h2",
+        prefix: "p2",
+        accountId: "a",
+        role: "user",
+        rateLimitRpm: 60,
+        rateLimitTpm: 0,
+      });
+      got = await ctx.stores.keys.getByHash("h2");
+      expect(got?.rate_limit_rpm).toBe(60);
+      expect(got?.rate_limit_tpm).toBe(0);
+      // edit + clear back to inherit
+      await ctx.stores.keys.updateRateLimit("k1", { rpm: 100, tpm: 5000 });
+      got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.rate_limit_rpm).toBe(100);
+      expect(got?.rate_limit_tpm).toBe(5000);
+      // PARTIAL: patching only rpm leaves tpm untouched (no concurrent-clobber).
+      await ctx.stores.keys.updateRateLimit("k1", { rpm: 7 });
+      got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.rate_limit_rpm).toBe(7);
+      expect(got?.rate_limit_tpm).toBe(5000);
+      await ctx.stores.keys.updateRateLimit("k1", { rpm: null, tpm: null });
+      got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.rate_limit_rpm).toBeNull();
+      expect(got?.rate_limit_tpm).toBeNull();
+    });
+
+    it("updateRateLimit on a missing key rejects (not silently)", async () => {
+      ctx = await make();
+      await expect(ctx.stores.keys.updateRateLimit("nope", { rpm: 1, tpm: 1 })).rejects.toThrow();
+    });
   });
 
   // --- TelemetryStore -----------------------------------------------------

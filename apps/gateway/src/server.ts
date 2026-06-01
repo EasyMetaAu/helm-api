@@ -46,12 +46,12 @@ import type {
   RuntimeSettings,
 } from "@helm/shared";
 import { ErrorClassSchema } from "@helm/shared";
-import type { MiddlewareHandler } from "hono";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middleware/basic-auth.js";
+import { estimateRequestTokens } from "./middleware/estimate-tokens.js";
 import { type RateLimiterPort, rateLimitMiddleware } from "./middleware/rate-limit.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
@@ -73,22 +73,10 @@ export interface ServerHandle {
   dispose?: () => void;
 }
 
-// Deterministic pre-classification token estimate for the TPM bucket. Reads the
-// declared body size from the Content-Length header — a SYNC header read that
-// NEVER consumes the request body stream, so the downstream route can still parse
-// it. The heuristic is ceil(bytes / 4): ~4 bytes per token, the standard rough
-// BPE ratio (deterministic, principle 4). It is intentionally conservative — a
-// pre-debit upper bound is acceptable for a TPM ceiling, and a request with no
-// Content-Length (chunked / unknown) estimates 0 (RPM still applies). A malformed
-// or negative header value clamps to 0, never NaN/negative (would corrupt the
-// bucket). Exported so it is unit-testable in isolation.
-export function estimateRequestTokens(c: Parameters<MiddlewareHandler>[0]): number {
-  const raw = c.req.header("content-length");
-  if (raw === undefined) return 0;
-  const bytes = Number(raw);
-  if (!Number.isFinite(bytes) || bytes <= 0) return 0;
-  return Math.ceil(bytes / 4);
-}
+// Pre-classification TPM token estimator. Extracted to middleware/estimate-tokens
+// so the chat middleware AND the self-authenticating /v1/messages + /v1/responses
+// routes share ONE heuristic. Re-exported here for back-compat (server.test.ts).
+export { estimateRequestTokens };
 
 // Validate a RouteError's free-form `error_class` string against the 8 known
 // ErrorClass values so the Anthropic error transformer can map it precisely. An
@@ -215,17 +203,30 @@ export async function buildServer(
     logger.log(lvl, msg, fields),
   );
   logger.setLevel?.(settings.log_level);
-  // A MUTABLE copy of the rate-limit config: the limiter reads `.enabled` fresh on
-  // every check(), so flipping this field live applies the rate_limit_enabled
-  // toggle without a restart (seeded from settings, which seeded from yaml/env).
-  const rateLimitConfig = { ...config.runtime.rate_limit, enabled: settings.rate_limit_enabled };
+  // A MUTABLE copy of the rate-limit config: the limiter reads `.enabled` and
+  // `.default` fresh on every check(), so flipping the master switch OR retuning
+  // the system-default quota applies live without a restart (seeded from settings,
+  // which seeded from yaml/env). Per-key overrides ride in on the request probe
+  // (Auth → identity.caps.rateLimit), so they never need a re-bind here.
+  const rateLimitConfig = {
+    ...config.runtime.rate_limit,
+    enabled: settings.rate_limit_enabled,
+    default: {
+      rpm: settings.rate_limit_default_rpm,
+      tpm: settings.rate_limit_default_tpm,
+    },
+  };
   // Apply a new settings object live: re-bind `settings`, push the log level into
-  // the logger, and flip the rate-limit master switch. Called by the admin settings
-  // route after it validates + persists (see registerAdminApi below).
+  // the logger, flip the rate-limit master switch, and retune the system-default
+  // quota. Called by the admin settings route after it validates + persists.
   const applySettings = (next: RuntimeSettings): void => {
     settings = next;
     logger.setLevel?.(next.log_level);
     rateLimitConfig.enabled = next.rate_limit_enabled;
+    rateLimitConfig.default = {
+      rpm: next.rate_limit_default_rpm,
+      tpm: next.rate_limit_default_tpm,
+    };
   };
   // Agentic Signals (POST-MVP feedback layer, docs/02). The collector consumes
   // ALREADY-persisted telemetry and writes aggregated, REDACTED signals — it is
@@ -576,6 +577,10 @@ export async function buildServer(
             maxLane: record.max_lane,
             allowedLanes: record.allowed_lanes,
             allowCustomModel: record.allow_custom_model,
+            // Per-key rate-limit override (docs/06): carried so the self-auth
+            // /v1/messages + /v1/responses paths enforce per-key limits too, not
+            // just the OpenAI chat middleware.
+            rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
           },
         };
       },
@@ -637,6 +642,10 @@ export async function buildServer(
             maxLane: record.max_lane,
             allowedLanes: record.allowed_lanes,
             allowCustomModel: record.allow_custom_model,
+            // Per-key rate-limit override (docs/06): carried so the self-auth
+            // /v1/messages + /v1/responses paths enforce per-key limits too, not
+            // just the OpenAI chat middleware.
+            rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
           },
         };
       },
