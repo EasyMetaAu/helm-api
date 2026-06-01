@@ -268,5 +268,15 @@
   "Which classification layer chose the lane.": "Which classification layer chose the lane.",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.",
   "yes": "yes",
-  "Your new API key": "Your new API key"
+  "Your new API key": "Your new API key",
+  "Tree": "Tree",
+  "Formatted": "Formatted",
+  "Raw": "Raw",
+  "Expand": "Expand",
+  "Collapse": "Collapse",
+  "Show remaining {count} items": "Show remaining {count} items",
+  "Max depth reached": "Max depth reached",
+  "(empty object)": "(empty object)",
+  "(empty array)": "(empty array)",
+  "(null)": "(null)"
 }

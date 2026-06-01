@@ -266,5 +266,15 @@
   "Which classification layer chose the lane.": "어느 분류 계층이 레인을 선택했는지입니다.",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "정책이 없으면 요청은 작업 레인에 의해서만 라우팅됩니다. 일치하는 요청에 대해 레인을 강제하거나 제한하려면 정책을 추가하세요.",
   "yes": "예",
-  "Your new API key": "새 API 키"
+  "Your new API key": "새 API 키",
+  "Tree": "트리",
+  "Formatted": "서식",
+  "Raw": "원본",
+  "Expand": "펼치기",
+  "Collapse": "접기",
+  "Show remaining {count} items": "나머지 {count}개 표시",
+  "Max depth reached": "최대 깊이에 도달했습니다",
+  "(empty object)": "(빈 객체)",
+  "(empty array)": "(빈 배열)",
+  "(null)": "(null)"
 }

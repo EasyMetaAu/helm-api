@@ -266,5 +266,15 @@
   "Which classification layer chose the lane.": "由哪一分類層選定了通道。",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "沒有策略時，請求僅按其任務車道路由。新增策略可為符合的請求強制使用或限制車道上限。",
   "yes": "是",
-  "Your new API key": "你的新 API 金鑰"
+  "Your new API key": "你的新 API 金鑰",
+  "Tree": "樹狀",
+  "Formatted": "格式化",
+  "Raw": "原始",
+  "Expand": "展開",
+  "Collapse": "收起",
+  "Show remaining {count} items": "展開剩餘 {count} 項",
+  "Max depth reached": "已達最大深度",
+  "(empty object)": "（空物件）",
+  "(empty array)": "（空陣列）",
+  "(null)": "（空值 null）"
 }
