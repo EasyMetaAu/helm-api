@@ -5,6 +5,23 @@
 
 ---
 
+## 2026-06-01 · stream-only 上游：能力过滤新增 `no_nonstream_support` 门（docs/03/07，原则 3/5）
+
+**背景**：`la.atmy.work` relay 的 `gpt-5.x`（gpt-5.5 / gpt-5.4-mini / gpt-5.3-codex-spark）是 **STREAM-ONLY**——非流式请求被上游 400 `"Stream must be set to true"`。而 `gpt-5.4-mini` 是 economy/balanced 的 **primary**，故每个**非流式**请求都在第一跳 400 后才 fail-over。客户端拿到 200（fail-over 有效），但每次 400 都 `breaker.recordFailure`，**持续非流式流量会把该 alias 的熔断器打到 OPEN**，进而连**流式**请求也被 `circuit_open` 跳过——一个被非流式流量误伤流式可用性的隐患（实弹集成测试 + 遥测 `error_detail` 排查发现）。
+
+**做了什么（严格 TDD，红→绿）**：
+1. **shared schema**（`catalog/schema.ts`）：`CapabilitiesSchema` 加 **可选** `requiresStreaming: z.boolean().optional()`。**选 `.optional()` 不选 `.default(false)`**——`.default` 会让 `z.infer` 输出类型变为必填，强行波及所有以输出类型标注的 generated-catalog fixture（编译破裂）；`.optional()` 向后兼容（absent ⇒ 非 stream-only），零 fixture 改动。
+2. **filter**（`capability/filter.ts`）：新增 `SkipReason "no_nonstream_support"` + 第 6 门 `if (!req.needsStreaming && caps.requiresStreaming === true) skip`。把"必然失败的一跳"变成"干净跳过"——**不发起 invoke ⇒ 不记熔断失败**；流式请求仍走第 5 门正常使用该模型。
+3. **config**（`capabilities.yaml`）：三个 relay 模型加 `requiresStreaming: true`，并更新 NOTE 注释说明语义。
+
+**关键前置已验证**：`loadCatalog`（`catalog/index.ts` 步骤 2）对**仅存在于 override 的 modelKey**会建条目，故 `catalog.get("openai-crs/gpt-5.4-mini").capabilities` 在运行时确有数据，executor 的 `if (caps)` 门会执行——`providers.yaml` 里"catalog 没有这些模型"的旧注释已过时（capabilities.yaml 现在补全了这些条目）。
+
+**坑（排查时踩到，值得记）**：遥测持久化在挂载的 `./data` 卷，**跨重部署保留**。`/admin/api/requests` 会把**旧镜像写的旧 schema 行**与新行混在一起返回——调试"字段缺失/error_detail 为 null"时极易误判成当前代码 bug。**排查持久化遥测必须先按容器启动时间过滤**，只看重部署后的行。
+
+**门禁**：`pnpm typecheck` 0 error（含 gateway）；`pnpm lint` exit 0（14 预存 warning，他人 test 文件 noNonNullAssertion）；`pnpm test` 全 908 绿，新增 filter 4 测试 + catalog 2 测试。
+
+---
+
 ## 2026-05-31 · 记忆中间件 observe 接线（docs/08 阶段 1，原则 1/3/7/8）
 
 **背景**：记忆 core（`packages/core/src/memory/`）已实现 + 单测齐全并从 `@helm/core` 导出，但运行时死代码——`chat.ts` / `messages-pipeline.ts` 硬编码 `memory_mode:"off"` + null scope，无人调用 observe。本轮把 **observe 半边**接进网关请求路径（inject 半边的 `enqueueObserverJob` 后端未实现，**本轮不接**）。

@@ -13,6 +13,14 @@ export const CapabilitiesSchema = z.object({
   supportsJsonMode: z.boolean(),
   supportsVision: z.boolean(),
   supportsStreaming: z.boolean(),
+  // Some upstream relays (e.g. la.atmy.work gpt-5.x) REQUIRE stream:true and 400 a
+  // non-stream request ("Stream must be set to true"). That is a request-SHAPE
+  // constraint, NOT a capability gap — the model DOES stream (supportsStreaming
+  // stays true). Optional: absent ⇒ false (model serves non-stream fine). When
+  // true, the capability filter skips this candidate for NON-stream requests
+  // (no_nonstream_support) so it never burns an attempt nor poisons the breaker;
+  // streaming requests still use it normally.
+  requiresStreaming: z.boolean().optional(),
   maxContextTokens: z.number().int().nonnegative(),
   maxOutputTokens: z.number().int().nonnegative().nullable(),
 });

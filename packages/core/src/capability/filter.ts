@@ -22,7 +22,8 @@ export type SkipReason =
   | "no_json_support" // request needs strict JSON, candidate has no JSON mode
   | "no_vision_support" // request has images/attachments, candidate is text-only
   | "context_too_small" // prompt(+max_tokens) exceeds candidate's window
-  | "no_streaming_support"; // request wants stream, candidate can't stream
+  | "no_streaming_support" // request wants stream, candidate can't stream
+  | "no_nonstream_support"; // request is non-stream, candidate is stream-ONLY (relay requires stream:true)
 
 export interface CapabilityRequest {
   needsTools: boolean;
@@ -71,6 +72,15 @@ export function checkCapability(
   if (req.needsStreaming && !caps.supportsStreaming) {
     return skip("no_streaming_support");
   }
-  // 6. all gates passed
+  // 6. stream-ONLY candidate vs non-stream request. Some relays (la.atmy.work
+  //    gpt-5.x) 400 a non-stream call ("Stream must be set to true"). Skipping
+  //    here turns that guaranteed failure into a clean fail-over: the attempt is
+  //    never made, so no breaker failure is recorded (a stream-only primary can
+  //    no longer be tripped OPEN by non-stream traffic and then wrongly skipped
+  //    for streaming traffic). Absent flag ⇒ false ⇒ not stream-only.
+  if (!req.needsStreaming && caps.requiresStreaming === true) {
+    return skip("no_nonstream_support");
+  }
+  // 7. all gates passed
   return PASS;
 }
