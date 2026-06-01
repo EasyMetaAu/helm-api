@@ -54,8 +54,11 @@
   async function saveLimits(keyId: string): Promise<void> {
     error = null;
     savingLimits = keyId;
-    const rpm = editRpm;
-    const tpm = editTpm;
+    // Svelte 5 binds an emptied number input to `undefined` (not null); normalize
+    // so a cleared field is sent as an explicit null (clear → inherit default),
+    // never omitted by JSON.stringify (which would silently keep the old value).
+    const rpm = editRpm ?? null;
+    const tpm = editTpm ?? null;
     try {
       await updateKeyRateLimit(keyId, { rpm, tpm });
       keys = keys.map((k) =>

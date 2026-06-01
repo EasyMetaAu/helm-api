@@ -122,6 +122,18 @@ describe('keys page', () => {
     );
   });
 
+  it('clearing an inline rate-limit field sends null (clear → inherit), not undefined', async () => {
+    renderPage([key('k1', { rate_limit_rpm: 120, rate_limit_tpm: null })]);
+    const row = screen.getByTestId('key-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /edit limits/i }));
+    // Clear the pre-filled RPM field; an emptied number input binds to undefined.
+    await fireEvent.input(within(row).getByLabelText(/rpm/i), { target: { value: '' } });
+    await fireEvent.click(within(row).getByRole('button', { name: /save/i }));
+    await waitFor(() =>
+      expect(updateKeyRateLimit).toHaveBeenCalledWith('k1', { rpm: null, tpm: null }),
+    );
+  });
+
   it('on revoke failure shows an error and leaves the row unchanged (fail-closed)', async () => {
     revokeKey.mockRejectedValue(new Error('404 key not found'));
     renderPage([key('k1')]);

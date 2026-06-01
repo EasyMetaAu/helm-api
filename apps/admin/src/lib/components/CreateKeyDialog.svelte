@@ -48,9 +48,10 @@
       allow_custom_model: allowCustomModel,
     };
     if (maxLane) input.max_lane = maxLane;
-    // Send a rate limit only when the operator set one; blank (null) => inherit default.
-    if (rpmInput !== null) input.rate_limit_rpm = rpmInput;
-    if (tpmInput !== null) input.rate_limit_tpm = tpmInput;
+    // Send a rate limit only when the operator set one; blank => inherit default.
+    // `!= null` also catches the `undefined` Svelte 5 gives an emptied number input.
+    if (rpmInput != null) input.rate_limit_rpm = rpmInput;
+    if (tpmInput != null) input.rate_limit_tpm = tpmInput;
     try {
       revealed = await createKey(input);
     } catch (e) {
@@ -88,8 +89,8 @@
         allowed_lanes: null,
         allow_custom_model: allowCustomModel,
         disabled: false,
-        rate_limit_rpm: rpmInput,
-        rate_limit_tpm: tpmInput,
+        rate_limit_rpm: rpmInput ?? null,
+        rate_limit_tpm: tpmInput ?? null,
       };
       oncreated(view);
     }
