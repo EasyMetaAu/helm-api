@@ -184,34 +184,34 @@
     </div>
   </fieldset>
 
-  <div class="flex flex-col gap-1">
+  <div class="flex flex-col gap-2">
     <span class="field-label">{$t('Constraints')}</span>
     <span class="field-help">
       {$t('Optional requirements a model must meet for this lane to use it.')}
     </span>
-    <div class="flex flex-wrap items-center gap-4 text-sm">
-      <label class="flex items-center gap-2">
-        <input type="checkbox" bind:checked={requireTools} />
+    <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
+      <label class="checkbox-field">
+        <input type="checkbox" class="checkbox" bind:checked={requireTools} />
         <span>{$t('Require tools')}</span>
       </label>
-      <label class="flex items-center gap-2">
-        <input type="checkbox" bind:checked={requireJson} />
+      <label class="checkbox-field">
+        <input type="checkbox" class="checkbox" bind:checked={requireJson} />
         <span>{$t('Require JSON')}</span>
       </label>
-      <label class="flex items-center gap-2">
-        <span>{$t('Max latency (ms)')}</span>
-        <input
-          type="number"
-          min="1"
-          class="input w-24"
-          value={maxLatency ?? ''}
-          oninput={(e) => {
-            const v = (e.currentTarget as HTMLInputElement).value;
-            maxLatency = v === '' ? null : Number(v);
-          }}
-        />
-      </label>
     </div>
+    <label class="field">
+      <span class="field-label">{$t('Max latency (ms)')}</span>
+      <input
+        type="number"
+        min="1"
+        class="input-sm w-32"
+        value={maxLatency ?? ''}
+        oninput={(e) => {
+          const v = (e.currentTarget as HTMLInputElement).value;
+          maxLatency = v === '' ? null : Number(v);
+        }}
+      />
+    </label>
   </div>
 
   {#if primaryEmpty}
@@ -228,10 +228,10 @@
     </p>
   {/if}
 
-  <div class="flex items-center gap-3">
-    <button type="submit" class="btn-primary" disabled={!valid}>{$t('Save')}</button>
+  <div class="card-actions">
     {#if saved}
       <span data-testid="lane-saved" role="status" class="badge-ok">{$t('Saved')}</span>
     {/if}
+    <button type="submit" class="btn-primary" disabled={!valid}>{$t('Save')}</button>
   </div>
 </form>

@@ -40,8 +40,8 @@
     // (server requires at least one of use_lane/max_lane). Appended LAST so it
     // gets the lowest priority (first-match order) and can't shadow existing rules.
     policies = [...policies, { match: { task_type: TASK_TYPE_OPTIONS[0] }, use_lane: lanes[0] }];
-    // The Add button lives in the header; with a long list the new row lands far
-    // below the fold, so the click looks like a no-op. Scroll it into view for
+    // The new row appends to the end of a potentially long list, so the click can
+    // land below the fold and look like a no-op. Scroll it into view for
     // immediate feedback.
     await tick();
     const rows = document.querySelectorAll('[data-testid="policy-row"]');
@@ -68,24 +68,13 @@
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
   <header class="flex flex-col gap-2">
-    <div class="flex flex-wrap items-start justify-between gap-3">
-      <div class="min-w-0">
-        <h1 class="page-title">{$t('Policies')}</h1>
-        <p class="section-desc">
-          {$t(
-            'Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.',
-          )}
-        </p>
-      </div>
-      <div class="flex shrink-0 items-center gap-2">
-        <button type="button" class="btn-secondary" onclick={addRow}>{$t('Add policy')}</button>
-        <button type="button" class="btn-primary" onclick={handleSave} disabled={saving}
-          >{$t('Save policies')}</button
-        >
-        {#if saved}
-          <span class="badge-ok" data-testid="policies-saved" role="status">{$t('Saved')}</span>
-        {/if}
-      </div>
+    <div class="min-w-0">
+      <h1 class="page-title">{$t('Policies')}</h1>
+      <p class="section-desc">
+        {$t(
+          'Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.',
+        )}
+      </p>
     </div>
     <p class="card text-sm text-ink-body" data-testid="first-match-explainer">
       {$t('Rules are evaluated top to bottom; the')}
@@ -125,5 +114,17 @@
         onmove={moveRow}
       />
     {/each}
+  </div>
+
+  <div class="flex items-center justify-between gap-3">
+    <button type="button" class="btn-secondary" onclick={addRow}>{$t('Add policy')}</button>
+    <div class="flex items-center gap-3">
+      {#if saved}
+        <span class="badge-ok" data-testid="policies-saved" role="status">{$t('Saved')}</span>
+      {/if}
+      <button type="button" class="btn-primary" onclick={handleSave} disabled={saving}
+        >{$t('Save policies')}</button
+      >
+    </div>
   </div>
 </section>
