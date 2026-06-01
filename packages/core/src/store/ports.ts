@@ -61,6 +61,10 @@ export interface CreateKeyInput {
   maxLane?: string;
   allowedLanes?: string[];
   allowCustomModel?: boolean;
+  // Per-key rate-limit override (docs/06). Omitted => stored NULL => inherit the
+  // system default at check time. 0 => explicitly unlimited for that dimension.
+  rateLimitRpm?: number;
+  rateLimitTpm?: number;
 }
 
 export interface KeyStore {
@@ -73,6 +77,11 @@ export interface KeyStore {
   // Soft revoke: set disabled=true. Never physically deletes, never rewrites
   // other fields in place ("轮转吊销不就地改写").
   disable(keyId: string): Promise<void>;
+  // Edit a key's per-key rate-limit override (docs/06). A number sets an explicit
+  // override for that dimension (0 = unlimited); null CLEARS it back to inheriting
+  // the system default. Touches ONLY the two rate-limit columns — never role/caps.
+  // Throws if the key id is unknown (mirrors `disable`, fail-loud not silent).
+  updateRateLimit(keyId: string, rpm: number | null, tpm: number | null): Promise<void>;
 }
 
 // Telemetry insert input: decision record + a redacted key reference. Never

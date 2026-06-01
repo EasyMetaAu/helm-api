@@ -29,6 +29,9 @@ export class PgKeyStore implements KeyStore {
       allowedLanes: input.allowedLanes ?? null,
       allowCustomModel: input.allowCustomModel ?? false,
       disabled: false,
+      // Per-key rate-limit override: undefined input => NULL => inherit system default.
+      rateLimitRpm: input.rateLimitRpm ?? null,
+      rateLimitTpm: input.rateLimitTpm ?? null,
       createdAt: this.now().getTime(),
     };
     await this.db.insert(apiKeys).values(row);
@@ -57,6 +60,23 @@ export class PgKeyStore implements KeyStore {
     }
   }
 
+  // Edit ONLY the two rate-limit columns (null clears back to inherit). Other
+  // fields untouched — no in-place rewrite of role/caps. Throws on unknown id.
+  async updateRateLimit(
+    keyId: string,
+    rpm: number | null,
+    tpm: number | null,
+  ): Promise<void> {
+    const res = await this.db
+      .update(apiKeys)
+      .set({ rateLimitRpm: rpm, rateLimitTpm: tpm })
+      .where(eq(apiKeys.keyId, keyId))
+      .returning();
+    if (res.length === 0) {
+      throw new Error(`key not found: ${keyId}`);
+    }
+  }
+
   // Row -> port record. Native jsonb/boolean restored directly; exposes hash +
   // prefix only.
   private toRecord(row: ApiKeyRow): ApiKeyRecord {
@@ -70,6 +90,8 @@ export class PgKeyStore implements KeyStore {
       allowed_lanes: row.allowedLanes ?? null,
       allow_custom_model: row.allowCustomModel,
       disabled: row.disabled,
+      rate_limit_rpm: row.rateLimitRpm ?? null,
+      rate_limit_tpm: row.rateLimitTpm ?? null,
     };
   }
 }

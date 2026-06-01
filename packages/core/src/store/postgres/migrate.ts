@@ -179,6 +179,19 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_request_payloads_created_at ON request_payloads (created_at);
     `,
   },
+  {
+    // Per-key rate-limit OVERRIDE columns on api_keys (docs/06 "限流与配额"). Two
+    // nullable integer columns: NULL = inherit the system default at check time;
+    // a value (0 = unlimited) overrides that one dimension for this key. Additive
+    // — existing rows get NULL and keep inheriting the default. Mirrors the sqlite
+    // v8 migration (different ledger, same logical change). Distinct from
+    // rate_limit_buckets (v3, the runtime counters); these are config.
+    version: 7,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rate_limit_rpm INTEGER;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rate_limit_tpm INTEGER;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

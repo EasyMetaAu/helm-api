@@ -27,6 +27,8 @@ class InMemoryKeyStore implements KeyStore {
       allowed_lanes: input.allowedLanes ?? null,
       allow_custom_model: input.allowCustomModel ?? false,
       disabled: false,
+      rate_limit_rpm: input.rateLimitRpm ?? null,
+      rate_limit_tpm: input.rateLimitTpm ?? null,
     };
     this.byId.set(record.key_id, record);
     return record;
@@ -43,6 +45,10 @@ class InMemoryKeyStore implements KeyStore {
   async disable(keyId: string): Promise<void> {
     const r = this.byId.get(keyId);
     if (r) this.byId.set(keyId, { ...r, disabled: true });
+  }
+  async updateRateLimit(keyId: string, rpm: number | null, tpm: number | null): Promise<void> {
+    const r = this.byId.get(keyId);
+    if (r) this.byId.set(keyId, { ...r, rate_limit_rpm: rpm, rate_limit_tpm: tpm });
   }
 }
 
@@ -143,6 +149,8 @@ describe("port type contracts", () => {
       | "maxLane"
       | "allowedLanes"
       | "allowCustomModel"
+      | "rateLimitRpm"
+      | "rateLimitTpm"
     >();
   });
 

@@ -75,6 +75,23 @@ describe("sqlite schema + migrations", () => {
       seed.exec(
         "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);",
       );
+      // The seed marks versions 1-5 as applied, so the v1 api_keys table must
+      // exist for the honest "old DB" simulation — later migrations (e.g. v8's
+      // ALTER TABLE api_keys) depend on it.
+      seed.exec(
+        `CREATE TABLE api_keys (
+          key_id TEXT PRIMARY KEY,
+          hash TEXT NOT NULL UNIQUE,
+          prefix TEXT NOT NULL,
+          account_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          max_lane TEXT,
+          allowed_lanes TEXT,
+          allow_custom_model INTEGER NOT NULL DEFAULT 0,
+          disabled INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL
+        );`,
+      );
       seed.exec(
         `CREATE TABLE telemetry (
           id TEXT PRIMARY KEY,

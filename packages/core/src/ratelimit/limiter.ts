@@ -11,14 +11,19 @@ interface ResolvedQuota {
   tpm: number;
 }
 
-// Resolve the effective quota for a key: per-key override (partial) layered over
-// `default`. A missing override dimension falls back to default — overrides only
-// affect the dimensions they name, and only for their own key.
-function resolveQuota(config: RateLimitConfig, keyId: string): ResolvedQuota {
-  const override = config.overrides[keyId];
+// Resolve the effective quota for a probe. Per-dimension precedence (highest
+// first): the probe's OWN per-key override (from the key record, carried by Auth)
+// → a config.overrides[keyId] entry (yaml-configured) → config.default (the live
+// system default). A null/undefined dimension at one level falls through to the
+// next, so a key overriding only rpm still inherits the system tpm. 0 is a real
+// value (explicitly unlimited), NOT "inherit" — only null/undefined inherit.
+function resolveQuota(config: RateLimitConfig, probe: RateLimitProbe): ResolvedQuota {
+  const keyOverride = config.overrides[probe.keyId];
+  const probeRpm = probe.override?.rpm;
+  const probeTpm = probe.override?.tpm;
   return {
-    rpm: override?.rpm ?? config.default.rpm,
-    tpm: override?.tpm ?? config.default.tpm,
+    rpm: probeRpm ?? keyOverride?.rpm ?? config.default.rpm,
+    tpm: probeTpm ?? keyOverride?.tpm ?? config.default.tpm,
   };
 }
 
@@ -45,7 +50,7 @@ export function createRateLimiter(deps: RateLimiterDeps): {
 
   async function check(probe: RateLimitProbe): Promise<RateLimitResult> {
     if (!config.enabled) return ALLOWED;
-    const quota = resolveQuota(config, probe.keyId);
+    const quota = resolveQuota(config, probe);
     const rpmOn = quota.rpm > 0;
     const tpmOn = quota.tpm > 0;
     if (!rpmOn && !tpmOn) return ALLOWED;

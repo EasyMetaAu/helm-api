@@ -28,6 +28,9 @@ export class SqliteKeyStore implements KeyStore {
       allowedLanes: input.allowedLanes ? JSON.stringify(input.allowedLanes) : null,
       allowCustomModel: input.allowCustomModel ?? false,
       disabled: false,
+      // Per-key rate-limit override: undefined input => NULL => inherit system default.
+      rateLimitRpm: input.rateLimitRpm ?? null,
+      rateLimitTpm: input.rateLimitTpm ?? null,
       createdAt: this.now(),
     };
     this.db.insert(apiKeys).values(row).run();
@@ -58,6 +61,23 @@ export class SqliteKeyStore implements KeyStore {
     }
   }
 
+  // Edit ONLY the two rate-limit columns (null clears back to inherit). Other
+  // fields untouched — no in-place rewrite of role/caps. Throws on unknown id.
+  async updateRateLimit(
+    keyId: string,
+    rpm: number | null,
+    tpm: number | null,
+  ): Promise<void> {
+    const res = this.db
+      .update(apiKeys)
+      .set({ rateLimitRpm: rpm, rateLimitTpm: tpm })
+      .where(eq(apiKeys.keyId, keyId))
+      .run();
+    if (res.changes === 0) {
+      throw new Error(`key not found: ${keyId}`);
+    }
+  }
+
   // Row -> port record. Restores dialect encodings; exposes hash + prefix only.
   private toRecord(row: ApiKeyRow): ApiKeyRecord {
     return {
@@ -70,6 +90,8 @@ export class SqliteKeyStore implements KeyStore {
       allowed_lanes: row.allowedLanes ? (JSON.parse(row.allowedLanes) as string[]) : null,
       allow_custom_model: row.allowCustomModel,
       disabled: row.disabled,
+      rate_limit_rpm: row.rateLimitRpm ?? null,
+      rate_limit_tpm: row.rateLimitTpm ?? null,
     };
   }
 }

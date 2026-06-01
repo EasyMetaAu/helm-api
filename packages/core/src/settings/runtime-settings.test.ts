@@ -22,9 +22,11 @@ function fakeConfigStore(seed: Record<string, string> = {}): ConfigStore & {
   };
 }
 
-// Only `runtime.rate_limit.enabled` is read by the seeder; cast a minimal tree.
-function cfg(rateLimitEnabled: boolean): HelmConfig {
-  return { runtime: { rate_limit: { enabled: rateLimitEnabled } } } as unknown as HelmConfig;
+// The seeder reads runtime.rate_limit.{enabled,default}; cast a minimal tree.
+function cfg(rateLimitEnabled: boolean, dflt: { rpm: number; tpm: number } = { rpm: 0, tpm: 0 }) {
+  return {
+    runtime: { rate_limit: { enabled: rateLimitEnabled, default: dflt } },
+  } as unknown as HelmConfig;
 }
 
 describe("defaultSettingsFromConfig", () => {
@@ -33,9 +35,17 @@ describe("defaultSettingsFromConfig", () => {
       capture_payloads: true,
       payload_retention_days: 30,
       rate_limit_enabled: true,
+      rate_limit_default_rpm: 0,
+      rate_limit_default_tpm: 0,
       log_level: "info",
     });
     expect(defaultSettingsFromConfig(cfg(false)).rate_limit_enabled).toBe(false);
+  });
+
+  it("seeds the default rpm/tpm quota from runtime.rate_limit.default", () => {
+    const seeded = defaultSettingsFromConfig(cfg(true, { rpm: 60, tpm: 90000 }));
+    expect(seeded.rate_limit_default_rpm).toBe(60);
+    expect(seeded.rate_limit_default_tpm).toBe(90000);
   });
 });
 
@@ -86,6 +96,8 @@ describe("saveRuntimeSettings", () => {
       capture_payloads: false,
       payload_retention_days: 7,
       rate_limit_enabled: true,
+      rate_limit_default_rpm: 0,
+      rate_limit_default_tpm: 0,
       log_level: "warn",
     });
     expect(saved.payload_retention_days).toBe(7);
