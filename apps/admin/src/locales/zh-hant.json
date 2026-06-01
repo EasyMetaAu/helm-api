@@ -291,5 +291,11 @@
   "Failed to update rate limit": "更新速率限制失敗",
   "Default requests per minute (RPM)": "預設每分鐘請求數 (RPM)",
   "Default tokens per minute (TPM)": "預設每分鐘權杖數 (TPM)",
-  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "未單獨設定速率的金鑰的兜底限制。0 表示不限。"
+  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "未單獨設定速率的金鑰的兜底限制。0 表示不限。",
+  "Edit": "編輯",
+  "Edit key": "編輯密鑰",
+  "Save changes": "儲存變更",
+  "Failed to update key": "更新密鑰失敗",
+  "Role is fixed for the life of a key — rotate by revoking and minting a new one.": "角色在密鑰的生命週期內無法變更——如需更換，請先吊銷再重新建立。",
+  "Restrict this key to a specific set of lanes. Leave all unchecked to allow any lane (no whitelist).": "將此密鑰限制在指定的若干 lane 內。全部不勾選則允許任意 lane（不設白名單）。"
 }

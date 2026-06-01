@@ -77,22 +77,27 @@ export interface KeyStore {
   // Soft revoke: set disabled=true. Never physically deletes, never rewrites
   // other fields in place ("轮转吊销不就地改写").
   disable(keyId: string): Promise<void>;
-  // Edit a key's per-key rate-limit override (docs/06). PARTIAL: only the
-  // dimensions PRESENT in `patch` are written; an omitted dimension is left
-  // untouched, so two concurrent partial PATCHes on different dimensions cannot
-  // clobber each other (no read-modify-write of the sibling column). A value of
-  // null CLEARS that dimension back to inheriting the system default; a number
-  // (0 = unlimited) sets an explicit override. Touches ONLY the rate-limit
-  // columns — never role/caps. Throws if the key id is unknown (fail-loud).
-  updateRateLimit(keyId: string, patch: RateLimitPatch): Promise<void>;
+  // Edit a key's per-key caps (docs/06). PARTIAL: only the fields PRESENT in
+  // `patch` are written; an omitted field is left untouched, so two concurrent
+  // partial PATCHes on different fields cannot clobber each other (no
+  // read-modify-write of the sibling columns). For the nullable fields a value of
+  // null CLEARS that column (rate limit → inherit the system default; max_lane /
+  // allowed_lanes → no cap); a number/array/boolean sets an explicit value.
+  // Touches ONLY the editable cap columns — NEVER role or the immutable identity
+  // (key_id/hash/prefix/account_id). Throws if the key id is unknown (fail-loud).
+  updateKey(keyId: string, patch: KeyPatch): Promise<void>;
 }
 
-// Partial per-key rate-limit edit. A dimension PRESENT (even as null) is written;
-// an ABSENT dimension is left untouched. Empty patch = no-op (still validates the
-// key exists, throwing on an unknown id).
-export interface RateLimitPatch {
-  rpm?: number | null;
-  tpm?: number | null;
+// Partial per-key cap edit. A field PRESENT (even as null) is written; an ABSENT
+// field is left untouched. Empty patch = no-op (still validates the key exists,
+// throwing on an unknown id). Mirrors the editable subset of the key record —
+// role and the immutable identity are deliberately absent.
+export interface KeyPatch {
+  maxLane?: string | null;
+  allowedLanes?: string[] | null;
+  allowCustomModel?: boolean;
+  rateLimitRpm?: number | null;
+  rateLimitTpm?: number | null;
 }
 
 // Telemetry insert input: decision record + a redacted key reference. Never

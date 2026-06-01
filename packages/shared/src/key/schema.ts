@@ -48,14 +48,22 @@ export const CreateKeyRequestSchema = z
 
 export type CreateKeyRequest = z.infer<typeof CreateKeyRequestSchema>;
 
-// Admin-facing update-key request (docs/06). MVP scope: only the per-key rate
-// limits are editable after mint (role/caps are fixed at creation; rotate by
-// revoking + re-minting). `.strict()` so an unknown field fails closed. Each
-// dimension is OPTIONAL (omit = leave unchanged) and NULLABLE (null = clear the
-// override back to inheriting the system default); a number sets an explicit
-// override (0 = unlimited for that dimension).
+// Admin-facing update-key request (docs/06). Every per-key cap is editable after
+// mint EXCEPT the immutable identity (key_id/hash/prefix/account_id) and `role`
+// — role stays fixed so the edit path can never escalate a user key to root
+// (rotate role by revoking + re-minting). `.strict()` so an unknown field fails
+// closed (Principle 2). Every field is OPTIONAL (omit = leave unchanged); the
+// nullable ones accept null to CLEAR the cap/override back to the default/no-cap:
+//   - max_lane:             null = remove the lane cap.
+//   - allowed_lanes:        null = remove the whitelist.
+//   - rate_limit_{rpm,tpm}: null = inherit the system default; a number sets an
+//     explicit override (0 = unlimited for that dimension).
+// allow_custom_model is a plain boolean (not nullable): present = set, omit = leave.
 export const UpdateKeyRequestSchema = z
   .object({
+    max_lane: z.string().min(1).nullable().optional(),
+    allowed_lanes: z.array(z.string().min(1)).nullable().optional(),
+    allow_custom_model: z.boolean().optional(),
     rate_limit_rpm: z.number().int().nonnegative().nullable().optional(),
     rate_limit_tpm: z.number().int().nonnegative().nullable().optional(),
   })

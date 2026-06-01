@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiKeyView } from './keys.js';
-import { createKey, listKeys, revokeKey, updateKeyRateLimit } from './keys.js';
+import { createKey, listKeys, revokeKey, updateKey } from './keys.js';
 
 // The admin UI talks to the gateway ONLY over /admin/api/* HTTP (DoD: no core
 // import). These tests pin the client contract against a mocked fetch. The
@@ -136,26 +136,44 @@ describe('keys api client', () => {
     expect(body).not.toHaveProperty('rate_limit_tpm');
   });
 
-  it('updateKeyRateLimit PATCHes /admin/api/keys/:id with the rpm/tpm (null clears)', async () => {
+  it('updateKey PATCHes /admin/api/keys/:id with caps + rate limits (null clears)', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response(JSON.stringify({ key_id: 'key_1', rate_limit_rpm: null, rate_limit_tpm: 100 }), {
-        status: 200,
-      }),
+      new Response(JSON.stringify({ key_id: 'key_1' }), { status: 200 }),
     );
-    await updateKeyRateLimit('key_1', { rpm: null, tpm: 100 });
+    await updateKey('key_1', {
+      max_lane: 'balanced',
+      allowed_lanes: ['economy', 'balanced'],
+      allow_custom_model: true,
+      rate_limit_rpm: null,
+      rate_limit_tpm: 100,
+    });
     const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(url).toBe('/admin/api/keys/key_1');
     expect(init.method).toBe('PATCH');
     const body = JSON.parse(init.body as string);
-    expect(body.rate_limit_rpm).toBeNull();
+    expect(body.max_lane).toBe('balanced');
+    expect(body.allowed_lanes).toEqual(['economy', 'balanced']);
+    expect(body.allow_custom_model).toBe(true);
+    expect(body.rate_limit_rpm).toBeNull(); // explicit null = clear
     expect(body.rate_limit_tpm).toBe(100);
   });
 
-  it('updateKeyRateLimit rejects on a non-2xx response (404)', async () => {
+  it('updateKey forwards null to clear a cap (max_lane / allowed_lanes)', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify({ key_id: 'key_1' }), { status: 200 }),
+    );
+    await updateKey('key_1', { max_lane: null, allowed_lanes: null });
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body.max_lane).toBeNull();
+    expect(body.allowed_lanes).toBeNull();
+  });
+
+  it('updateKey rejects on a non-2xx response (404)', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ error: 'key not found' }), { status: 404 }),
     );
-    await expect(updateKeyRateLimit('nope', { rpm: 1, tpm: null })).rejects.toThrow();
+    await expect(updateKey('nope', { rate_limit_rpm: 1 })).rejects.toThrow();
   });
 
   it('revokeKey DELETEs /admin/api/keys/:id and resolves to the revoked id', async () => {

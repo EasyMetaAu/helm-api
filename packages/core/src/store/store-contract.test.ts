@@ -262,7 +262,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       ).rejects.toThrow();
     });
 
-    it("per-key rate limits: omitted -> null, set at create round-trips, updateRateLimit edits", async () => {
+    it("per-key rate limits: omitted -> null, set at create round-trips, updateKey edits", async () => {
       ctx = await make();
       // omitted -> null (inherit system default)
       await ctx.stores.keys.createKey({
@@ -289,24 +289,53 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(got?.rate_limit_rpm).toBe(60);
       expect(got?.rate_limit_tpm).toBe(0);
       // edit + clear back to inherit
-      await ctx.stores.keys.updateRateLimit("k1", { rpm: 100, tpm: 5000 });
+      await ctx.stores.keys.updateKey("k1", { rateLimitRpm: 100, rateLimitTpm: 5000 });
       got = await ctx.stores.keys.getByHash("h1");
       expect(got?.rate_limit_rpm).toBe(100);
       expect(got?.rate_limit_tpm).toBe(5000);
       // PARTIAL: patching only rpm leaves tpm untouched (no concurrent-clobber).
-      await ctx.stores.keys.updateRateLimit("k1", { rpm: 7 });
+      await ctx.stores.keys.updateKey("k1", { rateLimitRpm: 7 });
       got = await ctx.stores.keys.getByHash("h1");
       expect(got?.rate_limit_rpm).toBe(7);
       expect(got?.rate_limit_tpm).toBe(5000);
-      await ctx.stores.keys.updateRateLimit("k1", { rpm: null, tpm: null });
+      await ctx.stores.keys.updateKey("k1", { rateLimitRpm: null, rateLimitTpm: null });
       got = await ctx.stores.keys.getByHash("h1");
       expect(got?.rate_limit_rpm).toBeNull();
       expect(got?.rate_limit_tpm).toBeNull();
     });
 
-    it("updateRateLimit on a missing key rejects (not silently)", async () => {
+    it("updateKey edits caps (max_lane / allowed_lanes / allow_custom_model) and clears with null", async () => {
       ctx = await make();
-      await expect(ctx.stores.keys.updateRateLimit("nope", { rpm: 1, tpm: 1 })).rejects.toThrow();
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "h1",
+        prefix: "p1",
+        accountId: "a",
+        role: "user",
+      });
+      await ctx.stores.keys.updateKey("k1", {
+        maxLane: "balanced",
+        allowedLanes: ["economy", "balanced"],
+        allowCustomModel: true,
+      });
+      let got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.max_lane).toBe("balanced");
+      expect(got?.allowed_lanes).toEqual(["economy", "balanced"]);
+      expect(got?.allow_custom_model).toBe(true);
+      expect(got?.role).toBe("user"); // never rewritten by updateKey
+      // null clears the caps back to "no cap"; an omitted field is left untouched.
+      await ctx.stores.keys.updateKey("k1", { maxLane: null, allowedLanes: null });
+      got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.max_lane).toBeNull();
+      expect(got?.allowed_lanes).toBeNull();
+      expect(got?.allow_custom_model).toBe(true);
+    });
+
+    it("updateKey on a missing key rejects (not silently)", async () => {
+      ctx = await make();
+      await expect(
+        ctx.stores.keys.updateKey("nope", { rateLimitRpm: 1, rateLimitTpm: 1 }),
+      ).rejects.toThrow();
     });
   });
 
