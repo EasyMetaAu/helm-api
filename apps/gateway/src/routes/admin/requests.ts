@@ -29,4 +29,31 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     if (!rec) return c.json({ error: "request not found" }, 404);
     return c.json(rec);
   });
+
+  // GET /requests/:traceId/payload -> the captured full request/response bodies
+  // (admin "System Settings" → capture_payloads). 200 with { captured:true, ... }
+  // when present; 200 with { captured:false } when this request was served while
+  // capture was OFF (or rows were pruned). The bodies are stored as JSON TEXT;
+  // parse them back so the SPA renders structured JSON, falling back to the raw
+  // string if it was a non-JSON stream (assembled SSE).
+  app.get("/admin/api/requests/:traceId/payload", async (c) => {
+    const p = await deps.telemetry.getPayload(c.req.param("traceId"));
+    if (!p) return c.json({ captured: false });
+    return c.json({
+      captured: true,
+      request: parseMaybeJson(p.requestJson),
+      response: p.responseJson === null ? null : parseMaybeJson(p.responseJson),
+      created_at: p.createdAt.getTime(),
+    });
+  });
+}
+
+// Parse stored JSON text back to a value; if it isn't valid JSON (e.g. assembled
+// raw SSE for a streamed response), surface the raw string unchanged.
+function parseMaybeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }

@@ -1,5 +1,5 @@
 import type { CreateKeyInput, KeyStore, Lane, PoliciesConfig, TelemetryStore } from "@helm/core";
-import type { ClassifierConfig, DecisionRecord } from "@helm/shared";
+import type { ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/shared";
 
 // Injected dependency contracts for the admin API. Per CLAUDE.md principle 1 the
 // route files are PURE HTTP glue — they own no business logic and never touch the
@@ -23,6 +23,17 @@ export interface RuleStore {
   setPolicies(policies: PoliciesConfig): Promise<void>;
   getClassifier(): Promise<ClassifierConfig>;
   setClassifier(cfg: ClassifierConfig): Promise<void>;
+}
+
+// Read/write seam for runtime-mutable settings (admin "System Settings" page).
+// `get` returns the LIVE value; `save` validates + persists to the config_kv
+// store + applies live (logger level, rate-limit switch) — all wired in server.ts.
+// The route Zod-validates the inbound body against RuntimeSettingsSchema BEFORE
+// calling save (fail-closed, 原则2), so an invalid object is rejected (400) and
+// never persisted nor applied.
+export interface SettingsAccess {
+  get(): RuntimeSettings;
+  save(next: RuntimeSettings): Promise<RuntimeSettings>;
 }
 
 // Key creation needs to mint a plaintext + hash + prefix. We inject the generator
@@ -50,6 +61,9 @@ export interface AdminApiDeps {
   genKeyId: () => string;
   // The account a newly-created admin key belongs to (MVP: single account).
   accountId: string;
+  // Runtime-mutable settings access (admin "System Settings"). Read/write seam
+  // wired in server.ts; the route validates the body before save (fail-closed).
+  settings: SettingsAccess;
 }
 
 // Re-exported for route signatures.

@@ -144,8 +144,10 @@ describe('requests detail page', () => {
     getRequest.mockReset();
   });
 
-  it('renders the decision chain, cost breakdown (含 eval) and redacted payload summary', () => {
-    render(DetailPage, { data: { detail: detail(), traceId: 'tr_1' } });
+  it('renders the decision chain, cost breakdown (含 eval) and a not-recorded notice when capture is off', () => {
+    render(DetailPage, {
+      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
+    });
     // Decision chain present.
     expect(screen.getByTestId('chain-classifier')).toBeInTheDocument();
     expect(screen.getByTestId('chain-lanes')).toBeInTheDocument();
@@ -156,8 +158,20 @@ describe('requests detail page', () => {
     expect(within(cost).getByTestId('cost-eval')).toBeInTheDocument();
     expect(within(cost).getByTestId('cost-completion')).toBeInTheDocument();
     expect(within(cost).getByTestId('cost-total')).toBeInTheDocument();
-    // Payload is a redacted summary, not the full payload.
-    expect(screen.getByTestId('payload-summary')).toHaveTextContent(/redacted|withheld/i);
+    // Capture was off → a clear not-recorded notice instead of the full body.
+    expect(screen.getByTestId('payload-summary')).toHaveTextContent(/not recorded/i);
+  });
+
+  it('renders the full captured request and response bodies when capture is on', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: { captured: true, request: { model: 'auto' }, response: { ok: true } },
+        traceId: 'tr_1',
+      },
+    });
+    expect(screen.getByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
+    expect(screen.getByTestId('response-body')).toHaveTextContent(/"ok": true/);
   });
 
   it('surfaces a structured error with class, status, redacted message and redacted provider_raw', () => {
@@ -172,6 +186,7 @@ describe('requests detail page', () => {
             provider_raw: null,
           },
         } as Partial<RequestDetail>),
+        payload: { captured: false },
         traceId: 'tr_err',
       },
     });
@@ -184,7 +199,9 @@ describe('requests detail page', () => {
   });
 
   it('shows a friendly error state when the trace cannot be loaded (no white screen)', () => {
-    render(DetailPage, { data: { detail: null, traceId: 'missing', loadError: 'not found' } });
+    render(DetailPage, {
+      data: { detail: null, payload: { captured: false }, traceId: 'missing', loadError: 'not found' },
+    });
     expect(screen.getByTestId('detail-error')).toBeInTheDocument();
   });
 });

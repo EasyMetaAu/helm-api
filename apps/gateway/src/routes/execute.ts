@@ -360,6 +360,11 @@ function stripInternal(req: InternalRequest, providerModel: string): Record<stri
   if (req.tools) body.tools = req.tools;
   if (req.response_format) body.response_format = req.response_format;
   if (req.max_tokens !== null) body.max_tokens = req.max_tokens;
+  // Streamed usage (cost #6): OpenAI-compatible upstreams only emit a trailing
+  // `usage` chunk when asked. Opt in so the gateway can price streamed calls
+  // (the route parses that chunk to backfill completion cost). Harmless to the
+  // client — it is the standard final usage frame.
+  if (req.stream) body.stream_options = { include_usage: true };
   return body;
 }
 

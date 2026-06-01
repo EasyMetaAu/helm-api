@@ -20,6 +20,7 @@
 {#if false}
   <!-- nav + quick-link labels -->
   {$t('Dashboard')}{$t('Requests')}{$t('Lanes')}{$t('Policies')}{$t('Classifier')}{$t('API Keys')}
+  {$t('Settings')}
   <!-- sidebar nav subtitles -->
   {$t('Traffic and health at a glance')}
   {$t('Every request and the lane it took')}
@@ -27,6 +28,7 @@
   {$t('Rules that override or cap the lane')}
   {$t('How a request is matched to a lane')}
   {$t('Client keys and their lane limits')}
+  {$t('System Settings')}
   <!-- dashboard quick-link descriptions -->
   {$t('See the full decision trail for every request the gateway handled.')}
   {$t('Set the primary model and fallback chain for each quality and cost tier.')}

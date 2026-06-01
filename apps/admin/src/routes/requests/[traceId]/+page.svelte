@@ -1,16 +1,25 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import type { RequestDetail } from '$lib/api/requests.js';
+  import type { RequestDetail, RequestPayloadView } from '$lib/api/requests.js';
   import { t } from '$lib/i18n';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
 
   // Request detail (docs/07 详情). READ-ONLY consumer — renders the recorded trail
-  // and recomputes nothing (原则1). 原则7 redaction: payload is shown as a summary
-  // placeholder only, provider_raw is redacted, the key never appears in plaintext.
+  // and recomputes nothing (原则1). When capture_payloads is on, the full request +
+  // response bodies are shown; when off, a clear "not recorded" notice. The key
+  // never appears in plaintext (it lives in the Authorization header, not the body).
   // 原则5: classification vs execution fallback stay separate (DecisionChain).
-  let { data }: { data: { detail: RequestDetail | null; traceId: string; loadError?: string } } =
-    $props();
+  let {
+    data,
+  }: {
+    data: {
+      detail: RequestDetail | null;
+      payload: RequestPayloadView;
+      traceId: string;
+      loadError?: string;
+    };
+  } = $props();
 
   let copied = $state(false);
 
@@ -20,6 +29,17 @@
       copied = true;
     } catch {
       // clipboard unavailable — degrade silently, never surface secrets in errors
+    }
+  }
+
+  // Pretty-print a captured body: a parsed JSON object/array → indented JSON; a
+  // raw string (e.g. assembled SSE for a stream) → shown verbatim.
+  function show(value: unknown): string {
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
     }
   }
 </script>
@@ -52,18 +72,31 @@
       </div>
     </header>
 
-    <!-- Request metadata + redacted payload summary (原则7) -->
+    <!-- Request: full captured body when capture_payloads is on, else metadata. -->
     <section class="card text-sm">
       <h2 class="section-header">{$t('Request')}</h2>
-      <p class="field-help mb-2">
-        {$t('Request metadata recorded for this call (redacted — no message content or secrets).')}
-      </p>
-      <pre class="overflow-x-auto rounded bg-slate-50 p-2 text-xs text-slate-700">{JSON.stringify(
-          d.request_meta,
-          null,
-          2,
-        )}</pre>
-      <p data-testid="payload-summary" class="mt-2 italic text-ink-muted">{d.payload_summary}</p>
+      {#if data.payload?.captured}
+        <p class="field-help mb-2">
+          {$t('Full request body recorded for this call.')}
+        </p>
+        <pre
+          data-testid="request-body"
+          class="max-h-96 overflow-auto rounded bg-slate-50 p-2 text-xs text-slate-700">{show(
+            data.payload.request,
+          )}</pre>
+      {:else}
+        <p class="field-help mb-2">
+          {$t('Request metadata recorded for this call (redacted — no message content or secrets).')}
+        </p>
+        <pre class="overflow-x-auto rounded bg-slate-50 p-2 text-xs text-slate-700">{JSON.stringify(
+            d.request_meta,
+            null,
+            2,
+          )}</pre>
+        <p data-testid="payload-summary" class="mt-2 italic text-ink-muted">
+          {$t('Full request/response not recorded (payload capture was off for this request).')}
+        </p>
+      {/if}
     </section>
 
     <!-- Decision chain (classification -> eval -> policy -> lanes -> attempts) -->
@@ -95,6 +128,16 @@
             ? $t('redacted')
             : JSON.stringify(d.error.provider_raw)}
         </div>
+      </section>
+    {:else if data.payload?.captured && data.payload?.response != null}
+      <section class="card text-sm">
+        <h2 class="section-header">{$t('Response')}</h2>
+        <p class="field-help mb-2">{$t('Full response body recorded for this call.')}</p>
+        <pre
+          data-testid="response-body"
+          class="max-h-96 overflow-auto rounded bg-slate-50 p-2 text-xs text-slate-700">{show(
+            data.payload.response,
+          )}</pre>
       </section>
     {:else if d.response_meta}
       <section class="card text-sm">
