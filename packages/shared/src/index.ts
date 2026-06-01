@@ -114,6 +114,8 @@ export {
 } from "./config/schema.js";
 // Decision record (docs/02, 03, 04, 07).
 export {
+  type AttemptErrorDetail,
+  AttemptErrorDetailSchema,
   type AttemptStatus,
   AttemptStatusSchema,
   type ClassifierDecision,

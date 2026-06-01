@@ -66,6 +66,7 @@
   "End-to-end response time in milliseconds.": "End-to-end response time in milliseconds.",
   "error": "error",
   "Error": "Error",
+  "Error detail": "Error detail",
   "Error type": "Error type",
   "Errors: {count}": "Errors: {count}",
   "Estimated cost of the request in US dollars.": "Estimated cost of the request in US dollars.",
@@ -150,6 +151,7 @@
   "No fallback models yet. Add one below.": "No fallback models yet. Add one below.",
   "No lanes are configured yet.": "No lanes are configured yet.",
   "No policies yet": "No policies yet",
+  "No raw upstream body recorded.": "No raw upstream body recorded.",
   "No requests recorded yet.": "No requests recorded yet.",
   "No requests recorded yet. Point a client at the gateway to see routing activity here.": "No requests recorded yet. Point a client at the gateway to see routing activity here.",
   "No rule matched, so it defaulted to the balanced lane.": "No rule matched, so it defaulted to the balanced lane.",
@@ -268,5 +270,15 @@
   "Which classification layer chose the lane.": "Which classification layer chose the lane.",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.",
   "yes": "yes",
-  "Your new API key": "Your new API key"
+  "Your new API key": "Your new API key",
+  "Tree": "Tree",
+  "Formatted": "Formatted",
+  "Raw": "Raw",
+  "Expand": "Expand",
+  "Collapse": "Collapse",
+  "Show remaining {count} items": "Show remaining {count} items",
+  "Max depth reached": "Max depth reached",
+  "(empty object)": "(empty object)",
+  "(empty array)": "(empty array)",
+  "(null)": "(null)"
 }

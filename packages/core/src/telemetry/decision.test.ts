@@ -78,6 +78,7 @@ function okAttempt(alias: string): AttemptRecord {
     error_class: null,
     latency_ms: 1200,
     cost_usd: 0.004,
+    error_detail: null,
   };
 }
 
@@ -163,6 +164,7 @@ describe("buildDecisionRecord", () => {
         error_class: null,
         latency_ms: 0,
         cost_usd: null,
+        error_detail: null,
       },
       {
         alias: "b_error",
@@ -172,6 +174,7 @@ describe("buildDecisionRecord", () => {
         error_class: "upstream_error",
         latency_ms: 300,
         cost_usd: null,
+        error_detail: null,
       },
       {
         alias: "c_ok",
@@ -181,6 +184,7 @@ describe("buildDecisionRecord", () => {
         error_class: null,
         latency_ms: 950,
         cost_usd: 0.002,
+        error_detail: null,
       },
     ];
     const record = buildDecisionRecord(
@@ -208,6 +212,11 @@ describe("buildDecisionRecord", () => {
             error_class: "upstream_error",
             latency_ms: 200,
             cost_usd: null,
+            error_detail: {
+              upstream_status: 502,
+              message: "upstream returned 502",
+              provider_raw: null,
+            },
           },
         ],
         final: {
@@ -241,6 +250,37 @@ describe("buildDecisionRecord", () => {
     const serialized = JSON.stringify(record);
     expect(serialized).not.toContain("sk-live-PLAINTEXT-SECRET-123");
     expect(serialized).not.toContain("my secret diary entry");
+  });
+
+  it("6b. redaction: a secret echoed in a per-attempt error_detail.provider_raw is fingerprinted, status/message survive", () => {
+    const failed: AttemptRecord = {
+      alias: "openai-crs/gpt-5.4-mini",
+      skipped: false,
+      skip_reason: null,
+      status: "error",
+      error_class: "upstream_error",
+      latency_ms: 306,
+      cost_usd: null,
+      error_detail: {
+        upstream_status: 401,
+        message: "upstream returned 401",
+        // A pathological upstream body that echoed the caller's credential.
+        provider_raw: {
+          error: { message: "invalid api key" },
+          authorization: "Bearer sk-live-PLAINTEXT-SECRET-123",
+        },
+      },
+    };
+    const record = buildDecisionRecord(parts({ attempts: [failed, okAttempt("deepseek-crs")] }));
+    const serialized = JSON.stringify(record);
+    // The leaked key is gone; the diagnostic status + message are preserved.
+    expect(serialized).not.toContain("sk-live-PLAINTEXT-SECRET-123");
+    const detail = record.provider_attempts[0]?.error_detail;
+    expect(detail?.upstream_status).toBe(401);
+    expect(detail?.message).toBe("upstream returned 401");
+    expect((detail?.provider_raw as { error?: { message?: string } })?.error?.message).toBe(
+      "invalid api key",
+    );
   });
 
   it("7. trace_id is threaded from the request context", () => {

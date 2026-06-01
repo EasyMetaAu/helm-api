@@ -47,6 +47,15 @@ export interface RequestListItem {
   error_class?: string;
 }
 
+// Redacted per-attempt upstream failure detail (admin-debug-error-detail).
+// Present only for an attempt that failed at the upstream; the backend has
+// already key-scrubbed `provider_raw` (原则7), so this is safe to display.
+export interface AttemptErrorDetail {
+  upstream_status: number | null; // real upstream HTTP status (e.g. 429); null for timeout/network
+  message: string; // redacted, human-readable
+  provider_raw: unknown; // upstream error body (redacted), or null
+}
+
 export interface ProviderAttempt {
   model: string;
   provider: string;
@@ -54,6 +63,9 @@ export interface ProviderAttempt {
   skip_reason?: string;
   latency_ms: number;
   error_class?: string;
+  // Expandable upstream detail for a failed attempt — null when none recorded
+  // (ok/skipped rows, or legacy records from before this was captured).
+  error_detail: AttemptErrorDetail | null;
 }
 
 export interface RequestDetail {
@@ -100,6 +112,13 @@ interface RawAttempt {
   latency_ms?: number;
   cost_usd?: number | null;
   provider_model?: string | null;
+  // Redacted upstream failure detail (admin-debug-error-detail). Null/absent on
+  // ok/skipped rows and on legacy records.
+  error_detail?: {
+    upstream_status?: number | null;
+    message?: string;
+    provider_raw?: unknown;
+  } | null;
 }
 
 interface RawDecisionRecord {
@@ -187,6 +206,19 @@ function sumLatency(attempts: RawAttempt[]): number {
 function fallbackCount(attempts: RawAttempt[]): number {
   const tried = attempts.filter((a) => a.skipped !== true).length;
   return Math.max(0, tried - 1);
+}
+
+// Normalize the recorded error_detail -> the UI shape. Absent/null (ok, skipped,
+// or legacy records) maps to null. The backend has already redacted the body
+// (原则7); the UI only displays it, never recomputes.
+function attemptErrorDetail(a: RawAttempt): AttemptErrorDetail | null {
+  const d = a.error_detail;
+  if (!d) return null;
+  return {
+    upstream_status: typeof d.upstream_status === 'number' ? d.upstream_status : null,
+    message: typeof d.message === 'string' ? d.message : '',
+    provider_raw: d.provider_raw ?? null,
+  };
 }
 
 function attemptOutcome(a: RawAttempt): ProviderAttempt['outcome'] {
@@ -305,6 +337,7 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
       skip_reason: a.skip_reason ?? undefined,
       latency_ms: typeof a.latency_ms === 'number' ? a.latency_ms : 0,
       error_class: a.error_class ?? undefined,
+      error_detail: attemptErrorDetail(a),
     })),
     response_meta:
       status === 'ok'

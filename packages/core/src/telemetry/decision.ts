@@ -147,6 +147,10 @@ export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
       error_class: a.error_class,
       latency_ms: a.latency_ms,
       cost_usd: a.cost_usd,
+      // Per-attempt upstream failure detail (admin-debug-error-detail). The whole
+      // record is run through `redact` below, so any key echoed in provider_raw
+      // is irreversibly fingerprinted before persistence (principle 7).
+      error_detail: a.error_detail,
     })),
     final: {
       model_alias: final.model_alias,

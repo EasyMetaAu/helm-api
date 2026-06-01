@@ -22,10 +22,14 @@ export interface Policy {
   max_lane?: string; // cap lane (mutually exclusive with use_lane)
 }
 
-// Dropdown enums. task_type mirrors docs/03 (@helm/core TaskType). complexity
-// mirrors the SERVER PolicyMatchSchema enum (simple|medium|complex) — the gateway
-// fail-closes (400) on any other value, so the UI must offer exactly that set to
-// avoid writing config the gateway would reject. See implementation-notes.md.
+// Dropdown enums. task_type MUST mirror the gateway's canonical TaskTypeSchema
+// (@helm/shared classifier/eval-output.schema.ts — also @helm/core TaskType);
+// admin can't import it (原则1), so it is duplicated here and guarded by a test.
+// A config policy whose task_type is absent here renders the <select> blank
+// (e.g. a `security` policy showed empty). complexity mirrors the SERVER
+// PolicyMatchSchema enum (simple|medium|complex) — the gateway fail-closes (400)
+// on any other value, so the UI must offer exactly that set to avoid writing
+// config the gateway would reject. See implementation-notes.md.
 export const TASK_TYPE_OPTIONS = [
   'chat',
   'coding',
@@ -36,6 +40,7 @@ export const TASK_TYPE_OPTIONS = [
   'vision',
   'web',
   'data',
+  'security',
 ] as const;
 
 export const COMPLEXITY_OPTIONS = ['simple', 'medium', 'complex'] as const;

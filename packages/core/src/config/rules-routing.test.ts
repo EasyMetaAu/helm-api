@@ -72,6 +72,7 @@ function okExecute(plan: ExecutionPlan): ExecuteOutcome {
         error_class: null,
         latency_ms: 1,
         cost_usd: 0,
+        error_detail: null,
       },
     ],
     final: { status: "ok", alias: head, providerModel: head },

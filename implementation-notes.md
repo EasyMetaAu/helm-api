@@ -25,6 +25,62 @@
 
 ---
 
+## 2026-06-01 · 每次供应商尝试的失败详情（admin-debug-error-detail）（docs/07，原则 3/5/7/8）
+
+**起因（用户在管理界面发现）**：请求详情页「供应商尝试（执行回退）」里，失败的尝试只显示一个 `error_class`（如 `upstream_error`）红字，看不到**为什么**失败。当首选 model 失败但回退 model 成功时（请求整体 200），那条失败尝试的详细原因**在任何地方都没有记录**——`DecisionRecord` 的每条 `provider_attempts` 只存 `error_class`，详细信息（上游状态码、报文体）只在「整链全失败」的终态 `final` 里才保留。所以这类「失败后被回退救回」的请求，其失败原因彻底丢失（日志里也没有——`execute.ts` 只记 `stream.truncated`/`cost.pricing_missing`，不记每次尝试的上游错误）。
+
+**做法（新增 per-attempt `error_detail`，全链路 TDD 红→绿）**：
+- **shared**：`ProviderAttemptSchema` 增 `error_detail`（`AttemptErrorDetailSchema`：`{ upstream_status: number|null, message: string, provider_raw: record|null }`，镜像 `HelmError` 的脱敏形态）。`.nullable().default(null)` ——**旧记录零迁移**：存量 `decisionJson` 反序列化时自动补 `null`，永不 `undefined`。
+- **core/gateway 捕获**：`UpstreamError` 早已携带 `upstreamStatus` + `message` + 已脱敏的 `providerRaw`（openai.ts 的 `scrub` 抹 key），但 `execute.ts`/`fallback.ts` 在记录失败尝试行时把它们**全丢了**。新增 `errorDetailOf(err)`/`detailOf(err)` 从 `UpstreamError`/`InvokeFailure` 提取，填进失败行；ok/skipped/abort 行一律 `null`；`:free` 429 跳过行也带 detail（它本就是一次上游响应）。`InvokeFailure` 增 `detail_message`/`provider_raw` 字段透传。
+- **持久化**：**无需 SQL 迁移**——telemetry store 把整个 record 存成 JSON 文本（`decisionJson`），读回经 `DecisionRecordSchema.parse` 即带上新字段。
+- **脱敏（原则 7）**：`buildDecisionRecord` 末尾的 `redact()` 是递归的、按 key 名脱敏——`error_detail.provider_raw` 里任何 `authorization`/`api_key` 等键会被再次指纹化（纵深防御，即便上游报文回显了 key 也不落库）。新增测试 `decision.test.ts` 6b 锁这条：泄漏的 key 被指纹化、`upstream_status`/`message` 完整保留。
+- **admin UI**：`requests.ts` 的 `RawAttempt`/`ProviderAttempt` 增 `error_detail` + `attemptErrorDetail()` 归一化；`DecisionChain.svelte` 每条失败尝试下渲染一个可展开 `<details>`（summary 显示 `HTTP <status> — <message>`，展开显示脱敏后的 `provider_raw` JSON）。i18n 新增 `Error detail`/`No raw upstream body recorded.`，5 语言齐全。
+
+**重要限制（已告知用户）**：本特性**前向**——它只让**今后**的失败尝试可展开。**存量请求（含用户最初排查的 `a1948cc3`）不会追溯出现详情**，因为它们是在 schema 变更前记录的，且原始失败原因当时未落库、日志中也无。
+
+**「捕获深度」的决策**：用户在三选项里选了「状态码 + message + 原始报文体」（镜像终态 error 的处理），而非「仅状态码+message」或「报文体随 `capture_payloads` 开关」。理由：复用既有 `redact` 脱敏路径，最利调试，泄漏面由 openai.ts 的 `scrub` + 递归 `redact` 双重兜底。`provider_raw` 经 `toRawRecord()` 归一：纯对象直通，数组/字符串/原始值包成 `{ raw }` 以免丢信息又满足 `z.record` 形态。
+
+**门禁**：typecheck 0 / lint 0 error（15 个 warning 均为存量、不在本次文件）/ 单测 **1142 全绿**（新增 shared 3 + execute 2 + decision 1 + store-contract 1 + admin map 2 + DecisionChain 1）/ admin svelte-check 0 error / admin build 绿。改动只触遥测**记录**与 UI **展示**，不改路由/回退/熔断语义。
+
+---
+
+## 2026-06-01 · 请求详情正文改为可折叠树形查看器（admin.json-tree-viewer）（docs/07，原则 1/7）
+
+**动机（用户实测）**：请求详情页 `/admin/requests/:traceId` 的「请求 / 响应」正文（以及 capture 关闭时的 `request_meta`/`response_meta` 兜底）都是扁平 `<pre>` + `JSON.stringify(…, 2)`，长正文（如组装后的 SSE 响应）一堵到底、无法折叠分支，难以审阅。
+
+**做法（移植，不引依赖）**：参考 `llm-router/src/api/admin/views/detail.ts`（约 266–408 行）的「树形 / 格式化 / 原始」三标签查看器。那段是服务端 HTML 字符串里的原生 JS，无法 import；helm-api admin 是 SvelteKit 5（runes）。故**把同一行为重写成两个惯用 Svelte 组件**：
+- `apps/admin/src/lib/components/JsonTree.svelte`：递归节点（组件自引用 `import Self from './JsonTree.svelte'`）。对象/数组用原生 `<details>`，默认展开到 `DEFAULT_DEPTH=2`；子节点**惰性渲染**（`{#if open}`，闭合即不入 DOM），分页 `VISIBLE_LIMIT=200`（「展开剩余 N 项」按钮）；超长字符串 `STRING_LIMIT=512` 截断 + 展开/收起；`MAX_RENDER_DEPTH=24` 兜底。常量与上游一致。
+- `apps/admin/src/lib/components/JsonViewer.svelte`：三标签壳（Tree 默认 / Formatted / Raw）。
+
+**自己拍板的决定（spec 未覆盖）**：
+1. **正文形态归一**：`RequestPayloadView.request/response` 类型是 `unknown`——可能是已解析对象，也可能是原始字符串（组装后的 SSE 流）。JsonViewer 先尝试 `JSON.parse(string)`：成功→树形/格式化用解析结果；失败→**原样展示**（树形当作单个字符串标量，Raw 逐字），绝不因非法 JSON 白屏（fail-soft，呼应原则 3 的健壮性取向）。
+2. **应用范围**：把详情页 4 处 JSON `<pre>` 全部换成 `<JsonViewer>`（请求正文、`request_meta`、响应正文、`response_meta`），并保留 `data-testid="request-body"/"response-body"` 以免动到既有 e2e 选择器。错误区里的 `provider_raw` 是内联渲染、非 JSON 面板，保持原样。删除页面里不再用到的 `show()` 辅助函数。
+3. **样式用语义 token**（`bg-canvas`/`text-ink-body`/`border-border`/`text-link`/`bg-action`），不照搬上游的 `bg-panel`/`text-accent` 字面类。
+4. **i18n**：键即英文源串，新增 `Tree/Formatted/Raw/Expand/Collapse/Show remaining {count} items/Max depth reached/(empty object)/(empty array)/(null)` 到全部 5 个 locale（en 恒等 + zh-hans/zh-hant/ja/ko 译文），各 +10 键→278。（注：`easyi18n` 抽取会重排键序，本次手填以免大 diff；如后续跑 `pnpm i18n:sync` 顺带规整。）
+5. **`untrack` 消警告**：`let open = $state(untrack(() => depth < DEFAULT_DEPTH))`——`depth` 是 prop 但节点被 key 固定、其值终生不变，捕获初值是有意为之；用 `untrack` 静音 svelte 的 `state_referenced_locally` 误报。
+
+**TDD**：先写 `JsonTree.test.ts`(6) + `JsonViewer.test.ts`(7) 红，再实现转绿。覆盖：默认展开到深度 2 / 深层折叠不入 DOM、`Object(n)`/`Array(n)` 计数、数组按下标、超长串截断+展开、200 分页+「展开剩余 50 项」、三标签切换、Formatted 缩进、非法 JSON 原样、空对象/空数组/null 占位、`testid` 透传。
+
+**门禁**：admin 单测 **96 全绿**（新增 13）、`svelte-check` 0 error（仅 1 个**既有** `settings/+page.svelte` 警告）、`biome check .` exit 0（admin 被 biome 忽略，由 svelte-check 兜底；15 个警告均为 core/gateway 既有）。**坑/TODO**：纯组件单测已覆盖行为；尚未跑浏览器视觉确认与 Playwright e2e（worktree 无用户那条 captured 请求的 SQLite 数据，无法本地复现该 traceId）。
+
+---
+
+## 2026-06-01 · 策略编辑器「任务类型」下拉缺 `security`（admin，原则 1/7 之 schema 唯一来源精神）
+
+**症状（用户在 `/admin/policies` 实测发现）**：第 8 条策略（`security_complex_to_premium`，`config/policies.yaml`）的「任务类型」下拉**渲染为空白**——既不显示 `security`，也不回退到「(任意)」。
+
+**根因（UI 枚举与网关 canonical 枚举漂移）**：`apps/admin/src/lib/api/policies.ts` 的 `TASK_TYPE_OPTIONS` 是**硬编码**数组，且只有 9 项（缺 `security`）。网关 canonical 来源 `TaskTypeSchema`（`packages/shared/src/classifier/eval-output.schema.ts`，亦即 `@helm/core` `TaskType`）有 **10** 项含 `security`。`PolicyRow.svelte` 的 `<select value={match.task_type ?? ''}>` 拿到 `"security"` 却找不到对应 `<option>`，浏览器遂渲染空白（经典「select 值无匹配 option」症状）。后果：operator 无法新建 `security` 策略，且既有 `security` 策略一旦在 UI 误操作保存即可能丢值。
+
+**为何会漂移**：admin 不得 import core/shared（原则 1），故该枚举只能在 admin 侧复制一份 → 与 schema 唯一来源天然脱钩、无编译期保护。原注释虽写「mirrors @helm/core TaskType」，但 `security` 加入 schema 时这份副本没同步。
+
+**修法（TDD，红→绿）**：
+- 先红：`apps/admin/src/lib/api/policies.test.ts` 新增 `task_type dropdown contract` 用例，显式钉住完整 10 项集合并断言含 `security`（因 admin 不能 import shared，期望集合以字面量镜像 `TaskTypeSchema`，由测试充当契约守卫）。
+- 后绿：`TASK_TYPE_OPTIONS` 补 `'security'`，并加强注释说明它必须与网关 `TaskTypeSchema` 保持 lockstep。
+
+**坑 / TODO**：admin 侧两处枚举副本（`TASK_TYPE_OPTIONS` / `COMPLEXITY_OPTIONS`）与 shared schema 无自动同步，全靠这条契约测试兜底。若后续 `TaskTypeSchema` 再增删 task_type，需同时更新 `TASK_TYPE_OPTIONS` 与该测试的期望集合——可考虑用代码生成把 shared 枚举导出成 admin 可消费的纯数据常量，根除手抄漂移。
+
+---
+
 ## 2026-06-01 · 请求列表：行点击进详情 + 显示请求 ID/时间（docs/07，原则 1/7）
 
 **用户反馈（管理界面 `/admin/requests`）**：① 行尾的「view」按钮多余——希望**点整行**直接进详情；② **请求时间**没显示；③ **请求 ID** 没显示，且应作为**第一列**。
