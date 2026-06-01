@@ -42,7 +42,9 @@ export function rateLimitMiddleware(deps: RateLimitMiddlewareDeps): MiddlewareHa
   const estimateTokens = deps.estimateTokens ?? (() => 0);
 
   return async (c, next) => {
-    const identity = c.get("identity") as { keyId?: string } | undefined;
+    const identity = c.get("identity") as
+      | { keyId?: string; caps?: { rateLimit?: { rpm: number | null; tpm: number | null } } }
+      | undefined;
     const keyId = identity?.keyId;
     // No resolved identity (e.g. an unauthenticated route slipped in) — nothing
     // to meter; let downstream handle auth. Never invents a key.
@@ -51,10 +53,15 @@ export function rateLimitMiddleware(deps: RateLimitMiddlewareDeps): MiddlewareHa
       return;
     }
 
+    // Thread the key's OWN quota (resolved by Auth from its ApiKeyRecord) into the
+    // probe so the limiter applies it WITHOUT a second store read. Glue only —
+    // precedence/inheritance live in the limiter's resolveQuota (principle 1).
+    const keyQuota = identity?.caps?.rateLimit;
     const result = await deps.limiter.check({
       keyId,
       estimatedTokens: estimateTokens(c),
       now: now(),
+      override: keyQuota ? { rpm: keyQuota.rpm, tpm: keyQuota.tpm } : undefined,
     });
 
     // Unmetered fast path (disabled / both dimensions unlimited): the limiter

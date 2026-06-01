@@ -215,17 +215,30 @@ export async function buildServer(
     logger.log(lvl, msg, fields),
   );
   logger.setLevel?.(settings.log_level);
-  // A MUTABLE copy of the rate-limit config: the limiter reads `.enabled` fresh on
-  // every check(), so flipping this field live applies the rate_limit_enabled
-  // toggle without a restart (seeded from settings, which seeded from yaml/env).
-  const rateLimitConfig = { ...config.runtime.rate_limit, enabled: settings.rate_limit_enabled };
+  // A MUTABLE copy of the rate-limit config: the limiter reads `.enabled` and
+  // `.default` fresh on every check(), so flipping the master switch OR retuning
+  // the system-default quota applies live without a restart (seeded from settings,
+  // which seeded from yaml/env). Per-key overrides ride in on the request probe
+  // (Auth → identity.caps.rateLimit), so they never need a re-bind here.
+  const rateLimitConfig = {
+    ...config.runtime.rate_limit,
+    enabled: settings.rate_limit_enabled,
+    default: {
+      rpm: settings.rate_limit_default_rpm,
+      tpm: settings.rate_limit_default_tpm,
+    },
+  };
   // Apply a new settings object live: re-bind `settings`, push the log level into
-  // the logger, and flip the rate-limit master switch. Called by the admin settings
-  // route after it validates + persists (see registerAdminApi below).
+  // the logger, flip the rate-limit master switch, and retune the system-default
+  // quota. Called by the admin settings route after it validates + persists.
   const applySettings = (next: RuntimeSettings): void => {
     settings = next;
     logger.setLevel?.(next.log_level);
     rateLimitConfig.enabled = next.rate_limit_enabled;
+    rateLimitConfig.default = {
+      rpm: next.rate_limit_default_rpm,
+      tpm: next.rate_limit_default_tpm,
+    };
   };
   // Agentic Signals (POST-MVP feedback layer, docs/02). The collector consumes
   // ALREADY-persisted telemetry and writes aggregated, REDACTED signals — it is

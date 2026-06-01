@@ -18,6 +18,10 @@ export interface AuthIdentity {
     maxLane: string | null;
     allowedLanes: string[] | null;
     allowCustomModel: boolean;
+    /** Per-key rate-limit override (docs/06). null = inherit the system default
+     *  for that dimension; a number (0 = unlimited) overrides it. Read by the
+     *  rate-limit middleware so the limiter needs no extra KeyStore lookup. */
+    rateLimit: { rpm: number | null; tpm: number | null };
   };
 }
 
@@ -86,6 +90,7 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler {
         maxLane: record.max_lane,
         allowedLanes: record.allowed_lanes,
         allowCustomModel: record.allow_custom_model,
+        rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
       },
     };
     c.set("identity", identity);
