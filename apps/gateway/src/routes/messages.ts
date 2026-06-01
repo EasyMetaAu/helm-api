@@ -225,7 +225,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       }
     }
 
-    // Memory scope (docs/08 阶段 1): parse the four memory headers at this HTTP
+    // Memory scope (docs/08 Phase 1): parse the four memory headers at this HTTP
     // boundary and stamp them onto the IR metadata bag (mirrors conversation_id),
     // so the framework-agnostic pipeline can read the scope off ir.metadata
     // without ever touching HTTP (CLAUDE.md principle 1). Absent/illegal headers

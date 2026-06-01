@@ -3,7 +3,7 @@
 // NO matching (first-match resolution lives in headless core). The Policy shape
 // mirrors the gateway's Zod schema (the single source of truth; @helm/core
 // PolicySchema) — duplicated here as a UI-facing type only because admin must
-// not import core (CLAUDE.md 原则1). Per docs/04 the policy list is ORDERED and
+// not import core (CLAUDE.md Principle 1). Per docs/04 the policy list is ORDERED and
 // the order IS the match priority, so the client preserves order on the wire and
 // the gateway PUTs the whole set (no per-item patch that could lose priority).
 
@@ -24,7 +24,7 @@ export interface Policy {
 
 // Dropdown enums. task_type MUST mirror the gateway's canonical TaskTypeSchema
 // (@helm/shared classifier/eval-output.schema.ts — also @helm/core TaskType);
-// admin can't import it (原则1), so it is duplicated here and guarded by a test.
+// admin can't import it (Principle 1), so it is duplicated here and guarded by a test.
 // A config policy whose task_type is absent here renders the <select> blank
 // (e.g. a `security` policy showed empty). complexity mirrors the SERVER
 // PolicyMatchSchema enum (simple|medium|complex) — the gateway fail-closes (400)

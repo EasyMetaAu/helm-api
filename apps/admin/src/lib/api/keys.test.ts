@@ -7,7 +7,7 @@ import { createKey, listKeys, revokeKey, updateKey } from './keys.js';
 // backend is the single source of truth: GET returns a redacted KeySummary[]
 // (prefix only, no hash/plaintext), POST returns { key_id, plaintext } ONCE, and
 // revoke is a soft DELETE that returns { revoked: id } — the UI marks the row
-// disabled locally (轮转语义: generate-new + old disabled, never in-place rewrite).
+// disabled locally (rotation semantics: generate-new + old disabled, never in-place rewrite).
 
 function summaryRow(
   keyId: string,

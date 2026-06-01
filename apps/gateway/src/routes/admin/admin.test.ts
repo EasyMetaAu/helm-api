@@ -10,9 +10,10 @@ import type { AdminApiDeps, RuleStore, SettingsAccess } from "./deps.js";
 import { registerAdminApi } from "./index.js";
 
 // admin.api — the gateway management API. These tests pin the CONTRACT (DoD
-// scenarios 1-8): CRUD lanes/policies/classifier落到 config; keys/requests落到
-// Store; invalid input -> 400 不落地; keys绝不回显明文/hash全文; 吊销不就地改写;
-// requests只读含 trace_id; all端点 behind basicAuth.
+// scenarios 1-8): CRUD lanes/policies/classifier persist to config; keys/requests
+// persist to the Store; invalid input -> 400 with nothing written; keys never echo
+// plaintext/full hash; revocation does not rewrite in place; requests are read-only
+// and include trace_id; all endpoints behind basicAuth.
 
 // ── In-memory fakes (no IO; routes are pure glue) ────────────────────────────
 
@@ -265,7 +266,7 @@ describe("admin.api lanes", () => {
   });
 
   it("refuses to DELETE the `balanced` fallback terminal (409) and writes nothing", async () => {
-    // 原则5: `balanced` is the classification-fallback terminal; deleting it would
+    // Principle 5: `balanced` is the classification-fallback terminal; deleting it would
     // leave LanesConfigSchema unsatisfiable. The whole-map re-validation must catch
     // this and leave config untouched (fail-closed).
     const deps = buildDeps();
@@ -595,7 +596,7 @@ describe("admin.api requests", () => {
 
     // The list returns the full (already-redacted) DecisionRecord per row so the
     // SPA can surface the classification stage / candidate chain / cost without
-    // recomputing them (原则1, 原则5). It carries no plaintext key/payload (原则7).
+    // recomputing them (Principle 1, Principle 5). It carries no plaintext key/payload (Principle 7).
     const list = (await (await app.request("/admin/api/requests")).json()) as Array<
       DecisionRecord & { created_at: number }
     >;
@@ -604,16 +605,16 @@ describe("admin.api requests", () => {
     expect(list[0]?.lane.selected_lane).toBe("premium");
     expect(list[0]?.classifier.decided_by).toBe("rules");
     expect(list[0]?.provider_attempts[0]?.cost_usd).toBeCloseTo(0.002);
-    // Each row carries the recorded timestamp (epoch ms) for the UI 「时间」 column.
+    // Each row carries the recorded timestamp (epoch ms) for the UI "Time" column.
     expect(typeof list[0]?.created_at).toBe("number");
 
     const detail = (await (
       await app.request("/admin/api/requests/trace-1")
     ).json()) as DecisionRecord;
     expect(detail.trace_id).toBe("trace-1");
-    expect(detail.classifier.task_type).toBe("coding"); // 分类层级
-    expect(detail.lane.candidate_chain).toEqual(["premium", "balanced"]); // lane 候选链
-    expect(detail.provider_attempts).toHaveLength(1); // provider 尝试
+    expect(detail.classifier.task_type).toBe("coding"); // classification stage
+    expect(detail.lane.candidate_chain).toEqual(["premium", "balanced"]); // lane candidate chain
+    expect(detail.provider_attempts).toHaveLength(1); // provider attempts
   });
 
   it("returns 404 for an unknown trace id", async () => {

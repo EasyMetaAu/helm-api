@@ -66,7 +66,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   // /admin (admin API + static SPA) is wired by server.ts (it needs the resolved
   // adminAuth config + Store deps). createApp stays framework-glue only and does
-  // NOT mount admin so headless callers can opt out entirely (CLAUDE.md 原则1).
+  // NOT mount admin so headless callers can opt out entirely (CLAUDE.md Principle 1).
 
   app.onError((err, c) => handleError(err, c));
 

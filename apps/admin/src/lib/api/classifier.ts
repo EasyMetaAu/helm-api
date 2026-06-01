@@ -1,6 +1,6 @@
 // Admin classifier API client. The admin UI is a pure consumer of the gateway's
 // /admin/api/* HTTP surface — it imports NO core/gateway business logic and runs
-// NO classification (CLAUDE.md 原则1). The server round-trips the FULL classifier
+// NO classification (CLAUDE.md Principle 1). The server round-trips the FULL classifier
 // config (ClassifierConfigSchema, the single source of truth); this client
 // projects that into a small read-only UI view and, on save, merges the two
 // editable knobs (eval on/off, rules.confidence_threshold) back onto the current
@@ -98,7 +98,7 @@ export async function getClassifier(): Promise<ClassifierConfig> {
 
 // PUT /admin/api/classifier <- the FULL config. The server schema is the source
 // of truth and validates the whole object (out-of-range threshold -> 400, config
-// unchanged: fail-closed, 原则2). We re-read the current config, apply only the
+// unchanged: fail-closed, Principle 2). We re-read the current config, apply only the
 // two editable knobs, and write the merged object back so no server-only field is
 // lost. Returns the projected, persisted view.
 export async function saveClassifier(patch: {

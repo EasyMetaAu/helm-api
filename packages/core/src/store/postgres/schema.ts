@@ -14,7 +14,7 @@ import {
 // schema.ts) — supabase == hosted Postgres — but expressed with native pg types:
 // real booleans, jsonb for arrays/objects, double precision for fractional
 // counters. Dialect quirks are encapsulated HERE so core and the sqlite adapter
-// never see them (CLAUDE.md "DB 抽象层"). Epoch-millisecond timestamps are stored
+// never see them (CLAUDE.md "DB abstraction layer"). Epoch-millisecond timestamps are stored
 // as bigint (mode: "number") so the value space matches the sqlite timestamp_ms
 // columns exactly and the port contract is byte-for-byte identical across
 // drivers. Per principle 7: NO plaintext column anywhere — only hash + prefix.

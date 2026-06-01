@@ -1,14 +1,14 @@
 // Admin API key client. The admin UI is a pure consumer of the gateway's
 // /admin/api/* HTTP surface — it imports NO core/gateway business logic and owns
-// NO auth logic (CLAUDE.md 原则1). The backend (apps/gateway admin/keys.ts) is the
-// single source of truth and enforces CLAUDE.md 原则7 / docs/06:
+// NO auth logic (CLAUDE.md Principle 1). The backend (apps/gateway admin/keys.ts) is the
+// single source of truth and enforces CLAUDE.md Principle 7 / docs/06:
 //   - keys are stored as sha256 hash + display prefix ONLY; the list view
 //     projects to a redacted KeySummary (prefix only — NEVER hash full-text or
 //     plaintext);
 //   - the plaintext is minted server-side and returned EXACTLY ONCE in the POST
 //     response, never persisted or echoed again;
 //   - revocation is a soft DELETE (disabled:true), never a physical delete or
-//     in-place rewrite (轮转/吊销语义).
+//     in-place rewrite (rotation/revocation semantics).
 // We define UI-facing types here rather than depend on @helm/core (admin must not
 // import core); the role enum mirrors the server KeyRoleSchema (root | user).
 
@@ -102,7 +102,7 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
 }
 
 // Send only the caps the operator set. The server CreateKeyRequestSchema is
-// `.strict()`, so empty/undefined optional fields must be omitted (原则2 fail-closed).
+// `.strict()`, so empty/undefined optional fields must be omitted (Principle 2 fail-closed).
 function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   const out: Record<string, unknown> = { role: input.role ?? 'user' };
   if (input.max_lane) out.max_lane = input.max_lane;

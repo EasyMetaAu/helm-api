@@ -1,7 +1,7 @@
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 // SQLite (Drizzle) table definitions for the memory middleware (docs/08
-// "存储模型"). POST-MVP persistence floor: build + migrate only — no read /
+// "storage model"). POST-MVP persistence floor: build + migrate only — no read /
 // inject / compress here. These tables are deliberately ISOLATED from the
 // routing/key tables (lanes/policies/api_keys): memory is a MIDDLEWARE, not a
 // routing strategy, and must never reach into lane rules (docs/08, CLAUDE.md).

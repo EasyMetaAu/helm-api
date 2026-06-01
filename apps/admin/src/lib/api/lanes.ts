@@ -3,7 +3,7 @@
 // lane shape mirrors the gateway's Zod schema (the single source of truth);
 // these UI-facing types match docs/04 + the admin.lanes-ui contract. Extra
 // server-only constraint fields (e.g. require_vision, min_context_tokens) are
-// round-tripped untouched so a PUT never drops them (CLAUDE.md 原则1, 原则6).
+// round-tripped untouched so a PUT never drops them (CLAUDE.md Principle 1, Principle 6).
 
 // Server constraint shape uses optional/omitted for "unset". The UI prefers an
 // explicit `max_latency_ms: number | null` (null = cleared); we translate at

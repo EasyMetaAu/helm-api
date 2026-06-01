@@ -26,7 +26,7 @@ import { SqliteTelemetryStore } from "./sqlite/telemetry.js";
 // The full set of Store-port implementations the gateway needs, plus a `close`
 // lifecycle hook. The driver (sqlite vs supabase) is chosen ONCE here by config;
 // every caller depends only on the port interfaces, never on a concrete adapter
-// (CLAUDE.md "DB 抽象层": core depends on interfaces, not a specific DB).
+// (CLAUDE.md "DB abstraction layer": core depends on interfaces, not a specific DB).
 export interface StoreSet {
   readonly keys: KeyStore;
   readonly telemetry: TelemetryStore;

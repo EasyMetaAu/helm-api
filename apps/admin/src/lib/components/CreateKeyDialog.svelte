@@ -8,7 +8,7 @@
   import { t } from '$lib/i18n';
 
   // Create-key dialog: owns the caps form AND the ONE-TIME plaintext reveal.
-  // CLAUDE.md 原则7 / docs/06: the plaintext is returned by the create response
+  // CLAUDE.md Principle 7 / docs/06: the plaintext is returned by the create response
   // exactly once, shown once, then wiped from component state on close — it is
   // never persisted, re-fetchable, or surfaced anywhere else. The dialog bubbles
   // the redacted view (prefix only, NO plaintext) up via `oncreated`.
@@ -167,9 +167,10 @@
         >
       </label>
 
-      <label class="flex items-center gap-2 text-sm">
+      <label class="checkbox-field">
         <input
           type="checkbox"
+          class="checkbox"
           bind:checked={allowCustomModel}
           aria-label={$t('allow custom model')}
         />
@@ -190,7 +191,7 @@
             step="1"
             aria-label={$t('Requests per minute (RPM)')}
             placeholder={$t('Default')}
-            class="select"
+            class="input"
             bind:value={rpmInput}
           />
         </label>
@@ -202,7 +203,7 @@
             step="1"
             aria-label={$t('Tokens per minute (TPM)')}
             placeholder={$t('Default')}
-            class="select"
+            class="input"
             bind:value={tpmInput}
           />
         </label>

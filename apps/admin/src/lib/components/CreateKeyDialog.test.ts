@@ -5,7 +5,7 @@ import CreateKeyDialog from './CreateKeyDialog.svelte';
 // The dialog owns the create form + the ONE-TIME plaintext reveal. It calls the
 // injected `createKey` and bubbles the new key view up via `oncreated`. The
 // plaintext is shown exactly once and wiped from component state on close
-// (CLAUDE.md 原则7 / docs/06: plaintext returns once, never re-viewable).
+// (CLAUDE.md Principle 7 / docs/06: plaintext returns once, never re-viewable).
 
 const createKey = vi.fn();
 vi.mock('$lib/api/keys.js', () => ({

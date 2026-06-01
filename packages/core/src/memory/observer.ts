@@ -1,7 +1,7 @@
 import type { RawMessage } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
 
-// Background Observer (docs/08 阶段 2「观察式记忆 MVP」). This is an OFF-the-main-
+// Background Observer (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
 // request-path job: the request path only persists raw messages and enqueues an
 // observer job; this function runs LATER, in a background worker, compressing a
 // thread's OLDER raw messages into a single time-anchored observation. It never
@@ -12,7 +12,7 @@ import type { MemoryStore } from "../store/ports.js";
 // touches routing/lane state (memory is a MIDDLEWARE).
 
 // How many of the most recent raw messages are PRESERVED uncompressed, so inject
-// can still serve them verbatim (docs/08「必须保留近期原始消息，以避免压缩造成信息丢失」).
+// can still serve them verbatim (docs/08 "recent raw messages must be preserved, to avoid information loss from compression").
 const RECENT_KEEP = 2;
 
 // A background job: a pointer to the thread whose older history should be
@@ -31,7 +31,7 @@ export interface ObserverDeps {
     messages: RawMessage[];
     now: Date;
   }) => Promise<{ observationText: string; priority?: number; tags?: string[] }>;
-  // Observer tokens are a SEPARATE cost bucket (docs/08「成本核算」): they must
+  // Observer tokens are a SEPARATE cost bucket (docs/08 "cost accounting"): they must
   // NOT be hidden inside actor/provider execution cost.
   costSink: (bucket: "observer", tokens: number) => void;
   // Injected clock — observed_at + the summary's time anchor come from here.

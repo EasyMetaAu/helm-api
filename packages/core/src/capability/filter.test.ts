@@ -106,6 +106,37 @@ describe("checkCapability", () => {
     expect(result).toEqual({ ok: false, skipReason: "no_streaming_support" });
   });
 
+  it("skips with no_nonstream_support when a stream-only candidate gets a non-stream request", () => {
+    const result = checkCapability(
+      caps({ requiresStreaming: true }),
+      req({ needsStreaming: false }),
+    );
+    expect(result).toEqual({ ok: false, skipReason: "no_nonstream_support" });
+  });
+
+  it("lets a stream-only candidate serve a streaming request (requiresStreaming met)", () => {
+    const result = checkCapability(
+      caps({ requiresStreaming: true }),
+      req({ needsStreaming: true }),
+    );
+    expect(result).toEqual({ ok: true, skipReason: null });
+  });
+
+  it("does not gate non-stream requests against models that are not stream-only", () => {
+    const result = checkCapability(
+      caps({ requiresStreaming: false }),
+      req({ needsStreaming: false }),
+    );
+    expect(result).toEqual({ ok: true, skipReason: null });
+  });
+
+  it("treats an absent requiresStreaming as not stream-only (back-compat)", () => {
+    // caps() never sets requiresStreaming (mirrors a generated-catalog entry); a
+    // non-stream request must pass, not be wrongly skipped.
+    const result = checkCapability(caps(), req());
+    expect(result).toEqual({ ok: true, skipReason: null });
+  });
+
   it("passes when every required capability is satisfied", () => {
     const result = checkCapability(
       caps(),

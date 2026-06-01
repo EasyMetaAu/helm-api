@@ -3,12 +3,12 @@ import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps, KeySummary } from "./deps.js";
 
-// /admin/api/keys — manage API keys (KeyStore, NEVER yaml). CLAUDE.md 原则7: keys
+// /admin/api/keys — manage API keys (KeyStore, NEVER yaml). CLAUDE.md Principle 7: keys
 // are stored as sha256 hash + display prefix ONLY. The plaintext is minted here,
 // returned EXACTLY ONCE in the POST response, and never persisted or echoed again.
 // The list view projects to a redacted KeySummary — no hash full-text, no plaintext.
 // Revocation is a soft disable (disabled:true), never a physical delete or in-place
-// rewrite (docs/06 轮转吊销).
+// rewrite (docs/06 key rotation/revocation).
 
 // Redact a stored record to the summary the list view exposes. Deliberately omits
 // `hash` and `account_id` internals beyond what the UI needs; NEVER plaintext.

@@ -1,23 +1,75 @@
-# 09 · MVP 路线图与成功标准
+# 09 · Roadmap
 
-## MVP 路线图（分阶段）
+> Status: **0.1 is implemented.** Phases 0–4 are done; the gateway routes real
+> traffic, translates protocols, classifies and routes with fallback and circuit
+> breaking, supports optional eval, and ships an admin UI. The "remaining" list
+> below is what is deferred past 0.1.
 
-按"每阶段都能独立跑起来"的顺序推进，不追求一次到位：
+## Delivered in 0.1 (phases 0–4)
 
-- **Phase 0 — 骨架**：HTTP 网关 + Auth（启动引导 key、强制鉴权）+ 单协议直通（OpenAI Chat）+ 遥测落库 + **Docker 部署**（配置/数据挂载卷）。能鉴权、能转发、能记日志、能容器化跑起来。
-- **Phase 1 — 路由核心**：第 1 层确定性规则分类器 + 三条默认 lane + Provider 执行器 + 能力过滤 + 熔断器 + fallback 链。可服务真实流量；分类不确定落 balanced。
-- **Phase 2 — 协议互译**：Protocol Adapter（OpenAI ↔ Anthropic 双向 + 流式），按 musistudio 蓝本重写。客户端可混用 SDK。
-- **Phase 3 — eval 层**：第 2 层小模型评估 + content-hash 缓存（默认关闭）。开启后判定能选 lane。
-- **Phase 4 — 管理界面**：Web 控制台（HTTP Basic 认证）= 基本规则管理（lane / policy / classifier / key）+ 请求调试（列表/详情/决策链）。
-- **MVP 之后**：Gemini 协议、Memory 中间件、限流/配额完整化、Signals 反馈层。
+The build followed an order where each phase runs on its own.
 
-## MVP 成功标准
+- **Phase 0 — Skeleton · done.** HTTP gateway + mandatory API-key auth (with
+  root-key bootstrap) + single-protocol passthrough (OpenAI Chat) + telemetry
+  persistence + Docker deployment (config/data volumes). It authenticates,
+  forwards, logs, and runs in a container. See
+  [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md) and
+  [10 · Deployment](10-deployment.md).
+- **Phase 1 — Routing core · done.** Layer-1 deterministic rule classifier + the
+  default lanes + the provider executor + capability filtering + circuit breaker +
+  the in-chain fallback. It serves real traffic; an uncertain classification falls
+  open to `balanced`. See [03 · Classification Cascade](03-classification.md) and
+  [04 · Routing & Lanes](04-routing-and-lanes.md).
+- **Phase 2 — Protocol translation · done.** The Protocol Adapter translates
+  OpenAI Chat, Anthropic Messages, and OpenAI Responses (with streaming for Chat
+  and Messages), rewritten with musistudio/llms as the architecture blueprint and
+  litellm as the correctness spec. Clients can mix SDKs. See
+  [05 · Protocol Translation](05-protocol-translation.md).
+- **Phase 3 — Eval layer · done.** The Layer-2 small-model evaluator with a
+  content-hash cache (disabled by default). When enabled, its verdict selects a
+  lane; identical requests hit the cache instead of re-evaluating.
+- **Phase 4 — Admin UI · done.** A web console (HTTP Basic auth) for basic rule
+  management (lanes / policies / classifier / keys / system settings) plus request
+  debugging (list / detail / decision trail). See [11 · Admin UI](11-admin-ui.md).
 
-- 新客户端可以把一个 OpenAI 兼容的 SDK 指向 Helm，无需自定义配置即可获得可用的路由。
-- 默认的 economy / balanced / premium lane 开箱即用，且 LLM 评估默认关闭。
-- 启动时若无 key，自动生成一把 root key；无 key 的请求被拒绝。
-- 第 1 层规则能确定分类时直接进对应 lane；不确定且 eval 关闭时落到 balanced。
-- 开启 eval 后，小模型的判定能选 lane，且相同请求命中缓存不重复评估。
-- 一个 coding 请求在配置了 coding lane 时能路由到该 lane，否则回退到 premium 或 balanced。
-- 一个带 JSON 约束的请求绝不会悄无声息地被路由到一个会忽略 JSON 约束的模型。
-- 任何出乎意料的 provider 选择都能从请求日志中得到解释（包括是哪一层、哪条规则、哪个 provider 尝试导致的）。
+## Remaining / deferred past 0.1
+
+Verified against the code and `implementation-notes.md`:
+
+- **Gemini client route.** The Gemini protocol transformer exists and is
+  unit-tested (`packages/core/src/protocol/gemini/`), but it is **not mounted as
+  an inbound route** yet — there is no `/v1beta/models/...` endpoint. A
+  `parseGeminiPath` helper and the `x-goog-api-key` header constant are in place;
+  the gateway wiring is the remaining work.
+- **OpenAI Responses streaming.** The Responses route is wired for non-streaming
+  only. A `stream: true` Responses request returns a structured 400 (it does not
+  silently downgrade, per Principle 2) because the `response.*` SSE transformer
+  is not implemented yet.
+- **Memory inject phase.** The `observe` phase is wired; the `inject` phase
+  (`assembleInjectedContext`) and the background Observer/Reflector jobs are not.
+  See [08 · Memory Middleware](08-memory-middleware.md).
+- **Fuller quota / rate-limit features.** Per-key RPM/TPM limiting ships
+  (disabled by default); full quota / billing / credit accounting is deferred. See
+  [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
+- **Agentic Signals feedback layer.** The store ports and the redacted
+  `RoutingSignal` shape exist, but nothing reads signals back into routing yet.
+
+## Success criteria (met by 0.1)
+
+- A new client can point an OpenAI-compatible SDK at Helm and get usable routing
+  with no custom config.
+- The default economy / balanced / premium lanes work out of the box, with LLM
+  evaluation off by default.
+- On first start with no key, a root key is generated; requests without a key are
+  rejected.
+- Layer-1 rules route directly to the matching lane when classification is
+  certain; an uncertain request with eval off falls to `balanced`.
+- With eval on, the small model's verdict selects a lane, and an identical request
+  hits the cache instead of re-evaluating.
+- A coding request routes to a coding lane when one is configured, otherwise it
+  falls back to premium or balanced.
+- A request with a JSON constraint is never silently routed to a model that would
+  ignore that constraint.
+- Any surprising provider choice can be explained from the request log (which
+  layer, which rule, which provider attempt). See [07 · Error Model &
+  Observability](07-observability.md).

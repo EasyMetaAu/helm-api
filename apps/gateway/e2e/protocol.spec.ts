@@ -10,7 +10,7 @@ import {
 // tests prove each transformer in isolation; only this spec proves the seams
 // hold once stitched end-to-end, in BOTH client directions, across the two
 // high-risk paths the docs call out: streaming SSE and tool-calls (CLAUDE.md
-// §测试要求 / docs/05).
+// §Testing Requirements / docs/05 Protocol Translation).
 //
 // We assert BOTH sides of the translation:
 //   (a) the client RESPONSE matches its own protocol shape (Anthropic vs OpenAI);
@@ -40,7 +40,7 @@ async function lastUpstreamRequest(request: {
 }
 
 // ── Anthropic client → Helm → upstream ──────────────────────────────────────
-test.describe("Anthropic 客户端 → 上游", () => {
+test.describe("Anthropic client → upstream", () => {
   test("non-stream: messages round-trip + normalized upstream request", async ({ request }) => {
     const res = await request.post("/v1/messages", {
       headers: ANTHROPIC_AUTH,
@@ -122,7 +122,7 @@ test.describe("Anthropic 客户端 → 上游", () => {
 });
 
 // ── OpenAI client → Helm → upstream ─────────────────────────────────────────
-test.describe("OpenAI 客户端 → 上游", () => {
+test.describe("OpenAI client → upstream", () => {
   test("non-stream: chat.completions round-trip", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
       headers: OPENAI_AUTH,
@@ -186,7 +186,7 @@ test.describe("OpenAI 客户端 → 上游", () => {
 
 // ── Bidirectional isomorphism: same logical chat, two client protocols, ONE
 //    normalized upstream shape (proves a unified IR hub, not N×N direct). ─────
-test.describe("双向同构", () => {
+test.describe("bidirectional isomorphism", () => {
   test("both client protocols normalize to the same upstream request shape", async ({
     request,
   }) => {

@@ -1,86 +1,124 @@
-# 01 · 总览与定位
+# 01 · Overview & Positioning
 
-## 一句话定义
+## One-line definition
 
-Helm API 是一个**开源、自托管**的 LLM 路由网关（MIT 协议，Docker 部署）。你可以把它理解成"**LLM 世界的 nginx**"：用简单的 YAML 配置完成模型的分配与调度，对客户端则始终是统一的标准与输出。
+Helm API is an **open-source, self-hosted** LLM routing gateway (MIT license,
+deployed with Docker). Think of it as "**nginx for the LLM world**": simple YAML
+configuration drives how models are assigned and dispatched, while clients always
+see one standard interface and output shape.
 
-它接收标准的 AI API 请求，识别任务类型与复杂度，将每个请求路由到合适的 lane，通过 provider 适配器执行，并记录完整的请求日志以便调试。启动后还自带一个管理界面，做基本规则管理。
+It accepts standard AI API requests, identifies each request's task type and
+complexity, routes it to the appropriate lane, executes it through a provider
+adapter, and records full request logs for debugging. A management interface
+ships alongside the gateway for basic rule management.
 
-把流量当**配置**来管，而不是当**代码**来写。
+Manage traffic as **configuration**, not as **code**.
 
-## 问题
+## The problem
 
-AI 应用开发者不想在每个客户端里管理上百个模型、各家 provider 的怪癖、fallback 行为、成本权衡以及长期的路由决策。他们想要的是一个 API：足够便宜、足够可靠、默认就够用，并且在出问题时可以调试。
+AI application developers do not want to manage hundreds of models, the quirks of
+each provider, fallback behavior, cost trade-offs, and long-term routing
+decisions inside every client. They want one API that is cheap enough, reliable
+enough, sensible by default, and debuggable when something goes wrong.
 
-之前的 llm-router 方向变得过于宽泛：provider 别名太多、太偏向于模型市场的思路，而且路由核心里塞了太多逻辑。Helm API 应该更聚焦、更收敛。
+The earlier `llm-router` project drifted too broad: too many provider aliases, a
+model-marketplace mindset, and too much logic stuffed into the routing core. Helm
+API is deliberately more focused and convergent.
 
-## 类比：LLM 世界的 nginx
+## Analogy: nginx for the LLM world
 
-这个类比帮助理解 Helm 是什么、不是什么——它约束了产品边界：
+This analogy explains what Helm is and is not — it constrains the product
+boundary:
 
-- nginx 不托管内容 → Helm **不拥有模型**，对外暴露的是 lane 抽象，不是模型市场。
-- nginx 配置是声明式的 → 一切都在 `lanes.yaml` / `policies.yaml`，不写代码。
-- nginx 有 upstream + 健康检查 + 故障转移 → lane 的 `primary + fallback[]` + 熔断器。
-- nginx 是你自己部署的"无聊但可靠"的基础设施 → Helm 同样**开源自托管**，不是 SaaS、不是平台。
+- nginx does not host content → Helm **does not own models**; it exposes a lane
+  abstraction, not a model marketplace.
+- nginx configuration is declarative → everything lives in `lanes.yaml` /
+  `policies.yaml`; no code changes.
+- nginx has upstreams + health checks + failover → a lane has `primary +
+  fallback[]` plus a circuit breaker.
+- nginx is the "boring but reliable" infrastructure you deploy yourself → Helm is
+  likewise **open-source and self-hosted**, not a SaaS or platform.
 
-如果你不熟悉 nginx 也没关系：把 Helm 当成"一个你自己跑的、用配置管理模型流量的 API 网关"即可。
+If you are not familiar with nginx, that is fine: treat Helm as "an API gateway
+you run yourself that manages model traffic through configuration".
 
-## 客户端 API 呈现面
+## Client-facing API surface
 
-Helm 应当支持标准的 AI API 形态：
+Helm exposes standard AI API shapes. Three client protocols are wired and routed
+today:
 
-- OpenAI Chat Completions
-- Anthropic Messages
-- OpenAI Responses
-- Gemini API（后续支持）
+- **OpenAI Chat Completions** — `POST /v1/chat/completions` (streaming and
+  non-streaming).
+- **Anthropic Messages** — `POST /v1/messages` (streaming and non-streaming).
+- **OpenAI Responses** — `POST /v1/responses` (**non-streaming only** in 0.1; a
+  `stream:true` request is rejected with a structured 400).
 
-客户端应当只需要修改 `base_url` 和 API key。客户端无需知道实际由哪个 provider 或模型来执行请求。各协议之间的互译见 [05 · 协议互译](05-protocol-translation.md)。
+A **Gemini** transformer exists in the codebase but is not yet routed to an
+endpoint; native Gemini support is on the roadmap (see
+[09 · Roadmap](09-roadmap.md)), not a usable endpoint today.
 
-## Provider 呈现面
+Clients should only need to change their `base_url` and API key. A client never
+needs to know which provider or model actually executed the request.
+Cross-protocol translation is described in
+[05 · Protocol Translation](05-protocol-translation.md).
 
-Provider 适配器可以支持：
+## Provider-facing surface
 
-- OpenAI 兼容的 provider：OpenRouter、ZenMux、vLLM、DeepSeek、Qwen、本地模型、自定义 endpoint
-- Anthropic 原生
-- Gemini 原生
-- 未来的 OAuth provider，例如 Claude Code、Codex、Copilot，或类似的基于订阅的 provider
+Provider adapters can target:
 
-Provider 别名属于内部的供应链细节。它们不是面向用户的主要产品呈现面。
+- OpenAI-compatible providers: OpenRouter, ZenMux, vLLM, DeepSeek, Qwen, local
+  models, custom endpoints.
+- Anthropic native.
+- Gemini native (future).
+- Future OAuth/subscription providers such as Claude Code, Codex, or Copilot.
 
-## MVP 目标
+Provider aliases are an internal supply-chain detail. They are not the primary
+user-facing surface.
 
-1. 以最小的迁移成本支持标准客户端 API（只改 `base_url` 和 API key）。
-2. 用确定性规则对每个请求做第一层分类；规则不确定时，可选地用小模型评估；都判不出来则落到 balanced。
-3. 通过可配置的 lane 路由请求，而不是直接暴露原始的 provider 别名。
-4. 通过主用和 fallback provider 执行每条 lane。
-5. 记录每一次路由决策和每一次 provider 尝试，以便调试。
-6. 开箱即用：默认三条 lane，默认**不开启** LLM 评估。
-7. 启动时强制存在 API key；不允许匿名访问。
-8. 开源、自托管：Docker 一键部署，配置即代码，不强依赖外部服务（见 [10 · 部署](10-deployment.md)）。
-9. 启动后自带管理界面，做基本规则管理，认证用 HTTP Basic 账号密码（见 [11 · 管理界面](11-admin-ui.md)）。
-10. 将 Memory、Guardrails、Signals、agent 编排以及 IM 控制保持在 MVP 之外。
+## Goals
 
-## 非目标
+1. Support the standard client APIs with minimal migration cost (change only
+   `base_url` and the API key).
+2. Classify every request with deterministic rules (Layer 1); when the rules are
+   uncertain, optionally consult a small-model eval (Layer 2); if nothing decides,
+   fall back to `balanced` (Layer 3).
+3. Route requests through configurable lanes rather than exposing raw provider
+   aliases.
+4. Execute each lane through a primary plus fallback providers.
+5. Record every routing decision and every provider attempt for debugging.
+6. Work out of the box: three default lanes shipped, and the LLM eval **off** by
+   default.
+7. Enforce that an API key exists at startup; no anonymous access.
+8. Open-source and self-hosted: one-command Docker deployment, config-as-code, no
+   hard dependency on external services (see [10 · Deployment](10-deployment.md)).
+9. Ship a management interface for basic rule management, authenticated with HTTP
+   Basic credentials (see [11 · Admin UI](11-admin-ui.md)).
+10. Keep memory as opt-in middleware (see [08 · Memory Middleware](08-memory-middleware.md)).
 
-- 不构建模型市场。
-- 不把上百个 provider 别名作为产品对外的呈现面。
-- 不在路由核心中实现完整的 RAG 产品。
-- 不在 MVP 中实现 Memory（它是 MVP 之后的中间件，见 [08 · 记忆中间件](08-memory-middleware.md)）。
-- 不在 MVP 中构建完整的 agent 编排平台。
-- 第一层路由不依赖黑盒 LLM 分类器（确定性规则优先）。
-- 不把 provider 基准测试作为主要的运行时决策机制。
-- 不做 SaaS、不售卖、不做托管多租户平台（开源自托管，MIT 协议）。
+## Non-goals
 
-## 核心产品闭环
+- Do not build a model marketplace.
+- Do not make hundreds of provider aliases the user-facing surface.
+- Do not implement a full RAG product inside the routing core.
+- Do not make the first routing layer depend on a black-box LLM classifier
+  (deterministic rules come first).
+- Do not use provider benchmarks as the primary runtime decision mechanism.
+- Do not become a SaaS, a hosted multi-tenant platform, or a commercial product
+  (open-source, self-hosted, MIT).
+
+## The core product loop
 
 ```text
 Client request
-  -> Protocol Adapter        # 协议归一化
-  -> Auth / API Key          # 鉴权，启动时强制有 key
-  -> Task Classifier         # 三层分类级联
-  -> Policy / Lane Router     # 选择 lane
-  -> Provider Adapter + Fallback   # 执行 + 链内回退
-  -> Request Log / Debug UI   # 全量遥测
+  -> Protocol Adapter        # normalize the client protocol to the internal IR
+  -> Auth / API Key          # mandatory; a key must exist at startup
+  -> Task Classifier         # the three-layer classification cascade
+  -> Policy / Lane Router    # select a lane
+  -> Provider Adapter + Fallback   # execute + in-chain fallback
+  -> Request Log / Debug UI  # full telemetry
 ```
 
-各组件的职责与数据结构见 [02 · 架构](02-architecture.md)；分类见 [03](03-classification.md)，路由与 lane 见 [04](04-routing-and-lanes.md)。
+Component responsibilities and data structures are in
+[02 · Architecture](02-architecture.md); classification is in
+[03 · Classification Cascade](03-classification.md); routing and lanes are in
+[04 · Routing & Lanes](04-routing-and-lanes.md).

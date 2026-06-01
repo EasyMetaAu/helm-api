@@ -4,7 +4,7 @@ import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps } from "./deps.js";
 
 // /admin/api/lanes — CRUD over the lane config (config/lanes.yaml via RuleStore,
-// NEVER the DB; CLAUDE.md 原则2 配置即代码). Pure HTTP glue: every read/write goes
+// NEVER the DB; CLAUDE.md Principle 2, config-as-code). Pure HTTP glue: every read/write goes
 // through the injected RuleStore; the route only validates the body against the
 // shared LaneSchema and translates to HTTP. Invalid body -> 400, nothing written
 // (fail-closed). LaneSchema is the single type source (z.infer); no duplicate shape.
@@ -35,8 +35,8 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const lanes = { ...(await deps.rules.getLanes()), [name]: parsed.data };
     // Re-validate the WHOLE map before writing: a single-lane edit can still break
     // the map-level invariant (LanesConfigSchema requires `balanced`, the
-    // classification-fallback terminal — 原则5). Fail-closed: nothing written on a
-    // violation (原则2).
+    // classification-fallback terminal — Principle 5). Fail-closed: nothing written on a
+    // violation (Principle 2).
     const map = LanesConfigSchema.safeParse(lanes);
     if (!map.success) {
       return c.json({ error: "invalid lanes config", issues: map.error.issues }, 400);
@@ -53,7 +53,7 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     delete lanes[name];
     // Re-validate the mutated map BEFORE writing. Deleting `balanced` (or any edit
     // that breaks the map-level invariant) must be rejected with nothing written —
-    // it is the classification-fallback terminal (原则5, fail-closed 原则2).
+    // it is the classification-fallback terminal (Principle 5, fail-closed Principle 2).
     const map = LanesConfigSchema.safeParse(lanes);
     if (!map.success) {
       return c.json({ error: "invalid lanes config", issues: map.error.issues }, 409);

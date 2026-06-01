@@ -1,113 +1,185 @@
-# 04 · 路由与 Lane
+# 04 · Routing & Lanes
 
-分类（见 [03](03-classification.md)）产出 `task_type`/`complexity`/`constraints` 后，路由层据此选出一条 lane，再按 lane 的有序链路执行。
+Once classification ([03](03-classification.md)) has produced `task_type` /
+`complexity` / `constraints`, the routing layer selects one lane and then executes
+its ordered chain. The framework-agnostic orchestrator is `routeRequest`
+(`packages/core/src/routing/route-request.ts`); lane selection is in
+`routing/lane-resolver.ts` and policy evaluation in `routing/policy-engine.ts`.
 
-## Lane 路由优先级
-
-路由优先级顺序：
+## Lane routing priority
 
 ```text
-explicit model/lane           # 客户端显式指定，跳过一切规则
-  > server-side custom policy  # 服务端策略
-  > task-specific lane         # 任务专属 lane
-  > complexity fallback lane   # 复杂度兜底 lane
+explicit model/lane           # client specified a concrete model; skips all rules
+  > server-side policy         # a policy pin (use_lane)
+  > task-specific lane         # a lane named after the detected task_type
+  > complexity-fallback lane   # simple→economy / medium→balanced / complex→premium
 ```
 
-默认 lane 应当数量少且易于理解。
+Default lanes are deliberately few and easy to reason about. Any selected lane
+name that does not exist is skipped (fail-open); the terminal `balanced` is
+guaranteed to exist.
 
-## 默认 lane
+### Explicit client model has the highest priority
+
+When a client specifies a concrete model, classification and policy are skipped
+and the model is executed directly (the nginx pass-through equivalent). Whether
+this is allowed is controlled by the key's `allow_custom_model` capability (see
+[06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md)). The sentinel
+value `auto` is never treated as an explicit model — it means "let the router
+decide" and falls through to classification.
+
+## Lanes
+
+Lanes are defined in [`config/lanes.yaml`](../config/lanes.yaml) and validated by
+`LanesConfigSchema` at load time — an invalid file fails the gateway boot
+(principle 2). A lane is a declarative chain: a `primary` plus an ordered
+`fallback[]`, where each element is either a model **alias** (`provider/model`,
+resolved via `config/providers.yaml`) or the name of another lane (expanded
+recursively, deduped, cycle-safe). Optional `constraints` drive the Capability
+Filter (`require_tools` / `require_json` / `require_vision`).
+
+The shipped quality/cost lanes:
 
 ```yaml
 economy:
   purpose: Cheap and fast for simple tasks
-  primary: cheap_model
-  fallback: [balanced_model]
+  primary: openai-crs/gpt-5.4-mini
+  fallback: [deepseek-crs/deepseek-flash, balanced]
 
 balanced:
-  purpose: Default quality/cost tradeoff
-  primary: default_good_model
-  fallback: [premium_model, economy_model]
+  purpose: Default quality/cost tradeoff (classification fallback terminal)
+  primary: deepseek-crs/deepseek-pro
+  fallback: [openai-crs/gpt-5.4-mini, zenmux/auto, openrouter/auto]
 
 premium:
   purpose: Strong reasoning and high quality
-  primary: best_reasoning_model
-  fallback: [balanced_model]
+  primary: openai-crs/gpt-5.5
+  fallback: [zenmux/claude-opus-4.7, zenmux/auto, openrouter/auto]
 ```
 
-`balanced` 永远必须配置且健康——它是分类兜底的终点。
+`balanced` is **required** and must be healthy — it is the terminal of the
+classification fallback.
 
-## 可选的任务 lane
+The shipped task lanes (the lane resolver maps a classified `task_type` onto a
+same-named lane):
 
 ```yaml
 coding:
-  primary: coding_model
+  purpose: Coding-capable models for code generation / editing
+  primary: openai-crs/gpt-5.3-codex-spark
   fallback: [premium, balanced]
 
+json:
+  purpose: Strict structured-output (JSON) responses
+  primary: openai-crs/gpt-5.4-mini
+  fallback: [balanced]
+  constraints:
+    require_json: true
+
 vision:
-  primary: vision_model
+  purpose: Multimodal / image understanding
+  primary: zenmux/gemini-3.5-flash
   fallback: [premium]
+  constraints:
+    require_vision: true
 
 tool_use:
-  primary: tool_capable_model
+  purpose: Reliable function / tool calling
+  primary: openai-crs/gpt-5.5
   fallback: [premium]
-
-json:
-  primary: strict_json_model
-  fallback: [balanced]
+  constraints:
+    require_tools: true
 ```
 
-如果没有配置任务专属的 lane，路由器会回退到三条默认 lane。
+If no task-specific lane is configured, the resolver falls back to the three
+default lanes by complexity (`simple → economy`, `medium → balanced`, `complex →
+premium`).
 
-## 策略配置
+Note the deliberate design where each lane's tail fallback is a `*/auto` alias
+(e.g. `zenmux/auto`, `openrouter/auto`). Those auto aliases are intentionally
+JSON-incapable in the catalog, so a strict-JSON request prunes them via the
+Capability Filter and lands on a deterministic JSON-capable model — proving the
+filter fires on the default config. `*/auto` aliases live only at the tail.
 
-策略（Policy）让你在不修改客户端代码的情况下进行服务端定制。
+## Policies
 
-示例：
+Policies (`config/policies.yaml`) let operators customize routing server-side
+without touching client code. Each policy is a **first-match** rule: the engine
+walks the list top-to-bottom, and the first policy whose `match` fully holds (an
+AND of every written field) wins the lane pin. A policy must declare at least one
+action — a pin (`use_lane`) and/or a cap (`max_lane` / `allowed_lanes`). The file
+is `.strict()`-validated, so a typo in a field name fails the gateway boot.
+
+Caps behave differently from pins: while the **first** matching policy wins the
+pin, caps **accumulate** across every matching policy (intersect `allowed_lanes`,
+keep the strictest `max_lane`), so a cap policy placed after a pin policy still
+binds.
+
+The shipped policies illustrate the pattern (`task_type × complexity → lane`,
+plus a JSON-contract pin and a budget-org cap):
 
 ```yaml
 policies:
-  - match:
-      task_type: coding
-      complexity: complex
-    use_lane: coding
-
-  - match:
-      needs_json: true
+  - id: json_constrained_to_json_lane     # JSON is a hard output contract; kept first
+    match: { needs_json: true }
     use_lane: json
 
-  - match:
-      user_id: vip_user
+  - id: coding_complex_to_coding_lane
+    match: { task_type: coding, complexity: complex }
+    use_lane: coding
+
+  - id: math_complex_to_premium
+    match: { task_type: math, complexity: complex }
     use_lane: premium
 
-  - match:
-      org_id: low_cost_org
+  - id: chat_simple_to_economy
+    match: { task_type: chat, complexity: simple }
+    use_lane: economy
+
+  - id: budget_org_cap                     # caps-only; clamps the classified lane
+    match: { org_id: budget_org }
     max_lane: balanced
 ```
 
-策略必须保持显式且可检视。它不应把难以调试的模型打分行为藏在某种魔法背后。
+Policies must stay explicit and inspectable; there is no hidden, hard-to-debug
+model scoring behind them. Note that the policy `complexity` field uses the
+collapsed routing tiers (`simple | medium | complex`), matching the classifier's
+mapped output (see [03](03-classification.md)).
 
-**客户端显式指定模型**优先级最高：当客户端直接指定一个具体模型时，跳过分类与策略，直接执行（等价于 nginx 的直通）。是否允许由 key 的 `allow_custom_model` 控制，见 [06](06-auth-and-rate-limits.md)。
+## Caps: policy then key
 
-## 执行模型
+Two cap layers apply, in order:
 
-每条 lane 都有一条声明好的有序链路：
+1. **Policy caps** narrow the resolver's lane choice (`max_lane` /
+   `allowed_lanes`).
+2. **Per-key caps** apply **last** as the outer, non-negotiable bound from the
+   API key's auth record, so a key confined to (for example) `maxLane: economy`
+   is honored even over a policy `use_lane` pin. See
+   [06](06-auth-and-rate-limits.md).
 
-```yaml
-lane:
-  primary: model_a
-  fallback:
-    - model_b
-    - model_c
-  constraints:
-    require_tools: true
-    require_json: false
-    max_latency_ms: 30000
-```
+## Execution model and the two fallbacks
 
-执行规则：
+The selected lane is expanded into an ordered candidate chain (primary →
+fallback[], with lane references expanded recursively). The executor
+(`packages/core/src/executor/fallback.ts`) then walks the chain:
 
-1. 先尝试 primary。
-2. 跳过不满足能力约束（capability constraints）的候选。
-3. 当遇到 provider 错误、超时、限流，或熔断器处于打开状态时，尝试下一个 fallback。
-4. 如果所有候选都失败，返回一个结构化错误（见 [07 · 可观测性](07-observability.md)）。
-5. 记录每一次尝试，包含原因和耗时。
+1. Try the primary.
+2. Skip a candidate the Capability Filter rejects (with an explicit skip reason).
+3. Skip a candidate whose circuit breaker is `OPEN`.
+4. On a provider error, timeout, or rate limit before the first valid chunk,
+   record the failure on the breaker and try the next candidate.
+5. A `:free` alias that returns 429 is skipped without recording a breaker failure
+   (free-tier throttling is not a health signal).
+6. A client abort terminates the chain as a non-provider fault — it records
+   neither a failure nor a success and is **not** counted as
+   `all_providers_failed`.
+7. If every candidate fails, return a structured `all_providers_failed` error; an
+   empty chain returns `lane_unavailable` (see
+   [07 · Error Model & Observability](07-observability.md)).
+8. Record every attempt with its reason and latency.
+
+This in-chain model swap is the **execution fallback** — it never rewrites the
+lane. The **classification fallback** (→ `balanced`) is the separate mechanism
+from [03](03-classification.md). Their fields in the decision record are distinct:
+classification fallback shows up as `classifier.decided_by` / `fallback_reason`,
+while execution fallback shows up as `provider_attempts` / `fallback_count`.

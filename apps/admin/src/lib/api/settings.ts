@@ -1,5 +1,5 @@
 // Admin System Settings API client. The admin UI is a PURE consumer of the
-// gateway's /admin/api/settings surface (CLAUDE.md 原则1) — it imports NO core
+// gateway's /admin/api/settings surface (CLAUDE.md Principle 1) — it imports NO core
 // logic. The RuntimeSettings shape mirrors the gateway's Zod schema (@helm/shared
 // RuntimeSettingsSchema, the single source of truth), duplicated here as a
 // UI-facing type only because admin must not import core. The gateway validates

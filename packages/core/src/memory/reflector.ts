@@ -1,7 +1,7 @@
 import type { Observation, Reflection, ReflectionScope } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
 
-// Background Reflector (docs/08 阶段 2「观察式记忆 MVP」). This is an OFF-the-main-
+// Background Reflector (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
 // request-path job: a scheduler triggers it PERIODICALLY to merge a scope's many
 // observations into ONE stable, slowly-changing, VERSIONED reflection — the
 // cache-friendly "stable layer" the inject phase prefixes onto context. It never
@@ -30,7 +30,7 @@ export interface ReflectorDeps {
     previousReflection: Reflection | null;
     now: Date;
   }) => Promise<{ reflectionText: string; tokenEstimate: number }>;
-  // Reflector tokens are a SEPARATE cost bucket (docs/08「成本核算」): they must
+  // Reflector tokens are a SEPARATE cost bucket (docs/08 "cost accounting"): they must
   // NOT be hidden inside actor/observer/provider execution cost.
   costSink: (bucket: "reflector", tokens: number) => void;
   // Injected clock — the new reflection's updated_at + the merge's time anchor
@@ -48,7 +48,7 @@ export interface ReflectorResult {
 // Take a scope's active observations + the current reflection, merge them, and —
 // ONLY when the merged text actually changed — write a version+1 reflection. If
 // the text is identical the version is NOT bumped and no row is written, keeping
-// the injected prefix stable + cache-friendly (docs/08「反思应当稳定且缓慢变化」).
+// the injected prefix stable + cache-friendly (docs/08 "reflections should be stable and slow-changing").
 // Reflector tokens are booked into the 'reflector' bucket. Success OR failure both
 // update memory_jobs.status; failure is recorded + logged and NEVER thrown
 // (fail-open — Reflector failure never affects any in-flight request).

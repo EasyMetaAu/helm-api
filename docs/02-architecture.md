@@ -1,117 +1,149 @@
-# 02 · 架构
+# 02 · Architecture
 
-## 架构概览
+## Overview
 
 ```text
 Client
-  -> API Gateway
-  -> Auth Resolver               # 强制 API key（启动时引导生成）
-  -> Rate Limiter                # 可选，默认关闭
+  -> API Gateway (Hono)
+  -> Auth Resolver               # mandatory API key (bootstrapped at first start)
+  -> Rate Limiter                # per-key; off by default
   -> Protocol Adapter
-  -> Task Classifier             # 三层级联：rules -> eval -> balanced
+  -> Task Classifier             # three-layer cascade: rules -> eval -> balanced
   -> Policy Engine
   -> Lane Resolver
   -> Capability Filter
   -> Circuit Breaker
   -> Provider Executor
   -> Telemetry / Request Log
-  -> (Memory Middleware)         # MVP 之后；MVP 不接入
+  -> (Memory Middleware)         # observe phase wired on every surface
 ```
 
-定位：Helm 是 **LLM 的 nginx**——声明式配置驱动的模型网关。客户端只见统一标准与输出，模型分配/调度全部由 YAML 配置和上述流水线完成。
+Positioning: Helm is **nginx for LLMs** — a declaratively-configured model
+gateway. Clients see one standard interface and output shape; model assignment
+and dispatch are driven entirely by the YAML configuration and the pipeline above.
 
-## 组件
+The gateway (`apps/gateway`) is a thin Hono adaptation layer. The entire routing
+brain lives in `packages/core` and imports no web framework: `routeRequest` (in
+`packages/core/src/routing/route-request.ts`) is the single framework-agnostic
+orchestrator, so the core can run headless. This separation is principle 1.
 
-各组件此处只列**职责概要**；深入设计见对应专章。
+## Components
+
+Each component is summarized here; deeper design lives in its own chapter.
 
 ### API Gateway
 
-API 网关。职责：
+Built on Hono. Responsibilities:
 
-- 接收标准 API 请求。
-- 规范化请求头和请求 ID。
-- 施加请求大小和超时限制。
-- 转发到正确的协议适配器。
+- Accept the standard API requests on `/v1/chat/completions`, `/v1/messages`, and
+  `/v1/responses`.
+- Normalize request headers and the request/trace id.
+- Apply request-size and timeout limits (`runtime.max_request_bytes`,
+  `runtime.request_timeout_ms`).
+- Dispatch to the correct protocol adapter.
+
+It also serves `/healthz` and `/version`, and (when admin credentials are
+configured) mounts the Admin UI and admin API under `/admin`.
 
 ### Protocol Adapter
 
-协议适配器。职责：归一化各客户端协议为内部请求结构，并把响应转换回客户端协议，保持流式语义。详见 [05 · 协议互译](05-protocol-translation.md)。
+Normalizes each client protocol into the internal IR and translates responses
+back to the client protocol, preserving streaming semantics. See
+[05 · Protocol Translation](05-protocol-translation.md).
 
 ### Auth Resolver
 
-鉴权解析器。职责：解析 API key 身份，附加账户/组织/用户/权限元数据，强制鉴权，遥测中绝不存明文 key。详见 [06 · 鉴权与限流](06-auth-and-rate-limits.md)。
+Resolves an API key to an identity, attaches account/org/user/role and capability
+metadata, and enforces authentication. API keys are stored only as a sha256 hash;
+the plaintext key never appears in telemetry or logs. See
+[06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
 
 ### Rate Limiter
 
-限流器（可选，默认关闭）。位于 Auth 之后、分类之前；触发即返回 `rate_limited`。详见 [06](06-auth-and-rate-limits.md)。
+Per-key limiter (`packages/core/src/ratelimit`). Off by default
+(`runtime.rate_limit.enabled`) — a zero-overhead pass-through when disabled. It
+sits **after** auth (it needs the resolved `key_id`) and **before** classification
+(so cost is cut off before any classify/eval call). It enforces both the system
+default and any per-key RPM/TPM override on all three request surfaces. See
+[06](06-auth-and-rate-limits.md).
 
 ### Task Classifier
 
-任务分类器。三层级联（rules → eval → balanced），计算 `task_type`/`complexity`/`confidence`/`constraints`。详见 [03 · 分类级联](03-classification.md)。
+The three-layer classification cascade (rules → optional eval → balanced),
+producing `task_type` / `complexity` / `confidence` / `constraints`. See
+[03 · Classification Cascade](03-classification.md).
 
 ### Policy Engine
 
-策略引擎。职责：
+Applies explicit server-side policies. Responsibilities:
 
-- 应用明确的服务端策略规则。
-- 解析组织/用户/项目级别的覆盖项。
-- 强制执行上限，例如 `max_lane` 或允许的 lane。
-- 为遥测生成单条匹配的策略记录。
+- Walk the policy list in declaration order; the **first** policy whose `match`
+  fully holds wins the lane pin (`use_lane`).
+- Accumulate caps (`max_lane` / `allowed_lanes`) across **every** matching policy,
+  so a cap policy placed after a pin policy still binds.
+- Produce a single matched-policy record for telemetry.
 
 ### Lane Resolver
 
-Lane 解析器。职责：
+Collapses the classifier + policy outcome into exactly one lane. Responsibilities:
 
-- 选择目标 lane。
-- 当缺少特定任务的 lane 时使用默认 lane。
-- 保持声明的 primary/fallback 顺序。
-- 避免将 `*/auto` 提供方别名的评分排在明确指定的 primary 模型之上。
+- Apply the routing priority (policy pin → task lane → complexity-fallback lane).
+- Fall back to `balanced` when the classifier itself fell back, or when no lane
+  resolves.
+- Preserve the lane's declared primary/fallback order (chain expansion happens in
+  the orchestrator, not here).
+
+The resolver itself never trips circuit breakers or calls providers; that is the
+execution stage's job.
 
 ### Capability Filter
 
-能力过滤器。职责：
-
-- 检查 tools 支持情况。
-- 检查 JSON / 结构化输出支持情况。
-- 检查视觉/多模态支持情况。
-- 检查上下文长度。
-- 检查流式支持情况。
-- 返回明确的跳过原因。
+Prunes candidates that cannot satisfy the request (`packages/core/src/capability`).
+It checks tool support, JSON / structured-output support, vision / multimodal
+support, and context length, returning an explicit skip reason. A candidate with
+no catalog entry stays fail-open (it is not over-pruned).
 
 ### Circuit Breaker
 
-熔断器。职责：
+Tracks per-provider-model health (`packages/core/src/circuit`). Responsibilities:
 
-- 跟踪每个提供方/模型的健康状况。
-- 跳过处于 `OPEN` 状态的熔断电路。
-- 在真实调用前使用 `HALF_OPEN` 探测锁。
-- 在收到首个有效的提供方数据块之前记录失败。
-- 仅在收到有效响应/数据块之后记录成功。
-- 将客户端中止视为非提供方故障。
+- Skip a circuit in the `OPEN` state.
+- Use a `HALF_OPEN` probe lock before a real call.
+- Record a failure only **before** the first valid provider chunk; record success
+  only **after** a valid chunk/response.
+- Treat a client abort as a non-provider fault (it never trips the breaker).
 
 ### Provider Executor
 
-提供方执行器。职责：
+Executes candidates in lane order (`packages/core/src/executor`,
+`apps/gateway/src/routes/execute.ts`). Responsibilities:
 
-- 按 lane 顺序执行各提供方。
-- 将请求转换为提供方原生协议。
-- 一致地处理流式和非流式路径。
-- 返回结构化的尝试记录。
+- Walk the candidate chain (primary → fallback[]), in declaration order.
+- Translate the request to the provider's native protocol.
+- Handle streaming and non-streaming paths consistently.
+- Return a structured attempt record per candidate.
 
 ### Telemetry / Request Log
 
-遥测 / 请求日志。职责：持久化路由决策、提供方尝试链、鉴权/key 身份、成本与延迟；脱敏密钥与私有载荷。错误模型与 Debug UI 见 [07 · 可观测性](07-observability.md)。
+Persists the routing decision, the provider-attempt chain, the auth/key identity,
+and cost & latency. Secrets are redacted; the decision record carries no message
+bodies. Full request/response payloads are captured separately (governed by the
+`capture_payloads` runtime setting, on by default) into a dedicated payload store
+and aged out per `payload_retention_days`. The error model and Debug UI are in
+[07 · Error Model & Observability](07-observability.md).
 
-## 内部请求结构
+## Internal request shape
+
+The normalized `InternalRequest` that every protocol adapter produces:
 
 ```yaml
 request_id: string
-protocol: openai_chat | anthropic_messages | openai_responses | gemini
+protocol: openai_chat | anthropic_messages | openai_responses
 account_id: string
 api_key_id: string
 user_id: string | null
 org_id: string | null
-requested_model: string
+requested_model: string         # "auto" means "let the router decide"
 messages: array
 tools: array | null
 response_format: object | null
@@ -119,25 +151,35 @@ attachments: array | null
 max_tokens: number | null
 stream: boolean
 metadata:
-  conversation_id: string | null
-  # 以下 memory 字段在 MVP 中仅预留，不接入（见 08-memory-middleware.md）
+  conversation_id: string | null   # from x-session-key; drives session momentum
+  # memory-scope fields (docs/08), parsed from request headers:
   thread_id: string | null
   resource_id: string | null
   project_id: string | null
   memory_mode: off | observe | inject
 ```
 
-## 决策记录
+> Note: `protocol` is one of the three wired protocols. A Gemini value is not
+> emitted today (the Gemini transformer is unrouted; see
+> [01 · Overview](01-overview.md)).
+
+## Decision record
+
+Every routed request produces a redacted `DecisionRecord` (no message bodies),
+which feeds telemetry and the Debug UI:
 
 ```yaml
 request_id: string
+trace_id: string
 requested_model: string
+key_prefix: string | null          # display prefix only, never the plaintext key
 classifier:
   task_type: string
   complexity: string
   confidence: number
-  decided_by: rules | eval | default   # 哪一层定的 lane
-  eval_cache_hit: boolean | null       # 触发 eval 时是否命中缓存
+  decided_by: rules | eval | default | fallback   # which layer picked the lane
+  eval_cache_hit: boolean | null     # only meaningful when eval ran
+  fallback_reason: string | null     # eval_disabled / eval_<reason> (only on "fallback")
   constraints: object
   explanation: array
 policy:
@@ -145,48 +187,80 @@ policy:
   reason: string
 lane:
   selected_lane: string
-  candidate_chain: array
+  candidate_chain: array             # expanded primary + fallback aliases
 provider_attempts:
   - alias: string
     skipped: boolean
-    skip_reason: string | null
+    skip_reason: string | null       # circuit_open | capability:<reason> | free_429 | ...
     status: ok | error
     error_class: string | null
     latency_ms: number
     cost_usd: number | null
+    error_detail: object | null      # redacted upstream failure detail
 final:
   model_alias: string | null
   provider_model: string | null
   status: ok | error
   error_reason: string | null
+latency_total_ms: number
+fallback_count: number               # EXECUTION-stage swaps (served attempts - 1)
+cost_breakdown:
+  eval_usd: number | null            # Layer-2 small-model self-cost
+  completion_usd: number | null      # sum of served attempts' cost
+  total_usd: number | null
 ```
 
-## 配置文件
+`decided_by` describes **only** the classification stage. The execution-stage
+provider fallback is a separate mechanism recorded under `provider_attempts` /
+`fallback_count`; the two fallbacks are never conflated (principle 5). See
+[04 · Routing & Lanes](04-routing-and-lanes.md).
 
-预期的配置拆分：
+## Configuration files
+
+Configuration lives in `config/` and is loaded and Zod-validated at startup. An
+invalid file fails closed: the gateway refuses to boot (principle 2).
 
 ```text
 config/
-  lanes.yaml           # 默认 lane 与任务 lane 的定义
-  policies.yaml        # 服务端路由策略
-  classifier.yaml      # 分类器：rules 维度/权重/阈值 + eval 小模型与缓存
-  providers.yaml       # 提供方别名与凭证引用
-  capabilities.yaml    # 模型/提供方能力元数据
-  pricing.yaml         # 定价元数据与覆盖项
-  auth.yaml            # require_api_key + 启动引导 key（或经环境变量/DB）
+  lanes.yaml           # default lanes + task lanes (the lane abstraction)
+  policies.yaml        # server-side routing policies
+  classifier.yaml      # Layer-1 rule dimensions/weights/boundaries + Layer-2 eval + cache
+  providers.yaml       # provider aliases and credential (env-var) references
+  capabilities.yaml    # manual capability overrides over the generated catalog
+  pricing.yaml         # manual pricing overrides over the generated catalog
+  auth.yaml            # require_api_key + admin auth source
+  runtime.yaml         # store driver, rate limit, timeouts, request size, payload capture
+  server.yaml          # host / port
 ```
 
-## 安全规则
+Capability and pricing data originate from a checked-in **generated catalog**
+(`packages/core/src/catalog/generated/catalog.json`), synced from upstream and
+treated as a supply-chain input. At runtime, manual entries in `capabilities.yaml`
+/ `pricing.yaml` override the generated catalog per field. The catalog is never
+fetched at runtime.
 
-- 生产环境路由仅使用激活的 lane 和激活的允许列表（allowlist）。
-- 目录（catalog）元数据绝不直接进入运行时选择。
-- 提供方 auto 别名是 fallback 末端，除非另有明确配置。
-- 生成的目录属于供应链输入，而非策略。
-- 调试 UI 必须解释某个提供方为何被选中或被跳过。
-- 密钥绝不能以明文记录。
+## Security rules
 
-## 管理面与部署
+- Production routing uses only active lanes and active allowlists.
+- Generated catalog metadata never directly drives runtime selection.
+- Provider `*/auto` aliases sit only at the tail of a fallback chain unless
+  explicitly configured otherwise.
+- The generated catalog is a supply-chain input, not policy.
+- The Debug UI must explain why a provider was selected or skipped.
+- Secrets are never logged in plaintext; API keys are stored as a sha256 hash.
 
-除请求流水线外，Helm 还有一个**管理面**（Admin UI）：一个 Web 控制台，做基本规则管理（lane / policy / classifier / key）与请求调试。它独立于 API 流量，认证用 HTTP Basic 账号密码（配置文件 / 环境变量）。详见 [11 · 管理界面](11-admin-ui.md)。
+## Admin surface and deployment
 
-部署形态：**开源、自托管，Docker 一键部署**，配置即代码，默认本地存储、不强依赖外部服务。详见 [10 · 部署](10-deployment.md)。
+Beyond the request pipeline, Helm has a **management plane** (Admin UI): a web
+console for basic rule management (lanes / policies / classifier / keys) and
+request debugging, plus a "System Settings" page for runtime-mutable settings
+(payload capture, retention, the rate-limit switch, log level) that apply without
+a restart. It is independent of API traffic and authenticated with HTTP Basic
+credentials (file / environment). The admin surface is mounted **only** when
+credentials are configured; otherwise `/admin` and `/admin/api` return 404. See
+[11 · Admin UI](11-admin-ui.md).
+
+Deployment: **open-source, self-hosted, one-command Docker**, config-as-code,
+local storage by default (SQLite), no hard dependency on external services. A
+Supabase/Postgres store driver is also supported. See
+[10 · Deployment](10-deployment.md).

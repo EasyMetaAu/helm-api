@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Memory middleware storage contracts (docs/08 "存储模型"). POST-MVP: these
+// Memory middleware storage contracts (docs/08 "storage model"). POST-MVP: these
 // shapes back the persistence floor for the observe/inject phases — this layer
 // only models thread + message inputs (no read/inject/compress here). Per
 // CLAUDE.md the Zod schema is the single source of truth; types come from
@@ -11,7 +11,7 @@ export const MemoryRoleSchema = z.enum(["user", "assistant", "tool"]);
 
 // Input to create/ensure a thread. project/resource/owner are optional so a
 // thread can be scoped at request time without forcing a global user profile
-// (docs/08 非目标: no cross-project / global profile).
+// (docs/08 non-goals: no cross-project / global profile).
 export const MemoryThreadInputSchema = z.object({
   id: z.string().min(1),
   projectId: z.string().min(1).optional(),
@@ -27,7 +27,7 @@ export const MemoryMessageInputSchema = z.object({
   tokenEstimate: z.number().int().nonnegative(),
 });
 
-// A persisted raw message row read back from the store (docs/08 阶段 2 Observer
+// A persisted raw message row read back from the store (docs/08 Phase 2 Observer
 // reads originals to compress). Distinct from MemoryMessageInput: it carries the
 // generated id + createdAt the store assigned, so the Observer can record a
 // precise, auditable source_message_range against the originals.
@@ -40,7 +40,7 @@ export const RawMessageSchema = z.object({
   createdAt: z.date(),
 });
 
-// Input to persist one compressed observation (docs/08 阶段 2). source_message_range
+// Input to persist one compressed observation (docs/08 Phase 2). source_message_range
 // is REQUIRED so compressed memory is auditable against its originals; observedAt
 // is the time anchor; priority/tags are optional ranking hints.
 export const MemoryObservationInputSchema = z.object({
@@ -53,7 +53,7 @@ export const MemoryObservationInputSchema = z.object({
   tags: z.array(z.string()).optional(),
 });
 
-// A persisted observation row read back from the store (docs/08 阶段 2). The
+// A persisted observation row read back from the store (docs/08 Phase 2). The
 // background Reflector reads a scope's active observations to merge them into a
 // stable reflection; distinct from MemoryObservationInput it carries the
 // generated id the store assigned. observedAt is the time anchor.
@@ -67,11 +67,11 @@ export const ObservationSchema = z.object({
   tags: z.array(z.string()).optional(),
 });
 
-// A persisted reflection row read back from the store (docs/08 "存储模型":
+// A persisted reflection row read back from the store (docs/08 "storage model":
 // memory_reflections). Reflections are VERSIONED + slowly-changing: the
 // Reflector only bumps `version` when the merged text actually changes, keeping
 // the injected prefix cache-friendly. Scoped at project / resource / thread
-// level (no global / cross-project profile — docs/08 非目标).
+// level (no global / cross-project profile — docs/08 non-goals).
 export const ReflectionSchema = z.object({
   id: z.string().min(1),
   projectId: z.string().min(1).nullable(),
@@ -102,13 +102,13 @@ export const ReflectionUpsertInputSchema = ReflectionScopeSchema.extend({
   updatedAt: z.date(),
 });
 
-// The fixed layers of the inject-phase context prefix (docs/08 「上下文组装顺序」).
+// The fixed layers of the inject-phase context prefix (docs/08 "context assembly order").
 // The order of these literals is LOAD-BEARING: the inject assembler emits messages
 // strictly in this sequence — system → project reflection → resource reflection →
 // thread observations → recent raw → current. `source` tags which memory layer a
 // message came from so the debug UI + tests can assert the order/provenance, and
 // so budget trimming can target the oldest observations first while NEVER dropping
-// recent raw / current (docs/08 「必须保留近期原始消息」).
+// recent raw / current (docs/08 "recent raw messages must be retained").
 export const AssembledMessageSourceSchema = z.enum([
   "system",
   "project_reflection",

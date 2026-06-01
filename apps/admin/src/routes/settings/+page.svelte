@@ -10,7 +10,7 @@
 
   // System Settings — runtime-mutable config that applies WITHOUT a restart
   // (capture_payloads, payload_retention_days, rate_limit_enabled, log_level).
-  // Pure consumer (原则1): edits a local working copy, PUTs the whole object on Save;
+  // Pure consumer (Principle 1): edits a local working copy, PUTs the whole object on Save;
   // the gateway validates + applies it live.
   let { data }: { data: { settings: RuntimeSettings | null; loadError?: string } } = $props();
 
@@ -51,14 +51,6 @@
     <p class="section-desc">
       {$t('Runtime settings that take effect immediately — no restart needed.')}
     </p>
-    <div class="flex items-center gap-2">
-      <button class="btn-primary" onclick={handleSave} disabled={saving || !data.settings}>
-        {$t('Save settings')}
-      </button>
-      {#if saved}
-        <span class="badge-ok" role="status">{$t('Saved')}</span>
-      {/if}
-    </div>
   </header>
 
   {#if error}
@@ -74,7 +66,7 @@
         <input
           type="checkbox"
           data-testid="capture-payloads"
-          class="mt-1"
+          class="checkbox mt-0.5"
           bind:checked={form.capture_payloads}
         />
         <span>
@@ -99,7 +91,7 @@
           min="1"
           max="3650"
           data-testid="retention-days"
-          class="w-32 rounded border border-slate-300 px-2 py-1"
+          class="input-sm w-32"
           bind:value={form.payload_retention_days}
         />
         <span class="field-help">{$t('Older bodies are deleted automatically.')}</span>
@@ -114,7 +106,7 @@
         <input
           type="checkbox"
           data-testid="rate-limit-enabled"
-          class="mt-1"
+          class="checkbox mt-0.5"
           bind:checked={form.rate_limit_enabled}
         />
         <span>
@@ -133,7 +125,7 @@
             min="0"
             step="1"
             data-testid="rate-limit-default-rpm"
-            class="w-32 rounded border border-slate-300 px-2 py-1"
+            class="input-sm w-32"
             bind:value={form.rate_limit_default_rpm}
           />
         </label>
@@ -144,7 +136,7 @@
             min="0"
             step="1"
             data-testid="rate-limit-default-tpm"
-            class="w-32 rounded border border-slate-300 px-2 py-1"
+            class="input-sm w-32"
             bind:value={form.rate_limit_default_tpm}
           />
         </label>
@@ -157,11 +149,7 @@
 
       <label class="flex flex-col gap-1">
         <span class="font-medium">{$t('Log level')}</span>
-        <select
-          data-testid="log-level"
-          class="w-40 rounded border border-slate-300 px-2 py-1"
-          bind:value={form.log_level}
-        >
+        <select data-testid="log-level" class="select w-40" bind:value={form.log_level}>
           {#each LOG_LEVEL_OPTIONS as level (level)}
             <option value={level}>{level}</option>
           {/each}
@@ -169,5 +157,14 @@
         <span class="field-help">{$t('How much detail the gateway writes to its logs.')}</span>
       </label>
     </section>
+
+    <div class="card-actions border-t-0 pt-0">
+      {#if saved}
+        <span class="badge-ok" role="status">{$t('Saved')}</span>
+      {/if}
+      <button class="btn-primary" onclick={handleSave} disabled={saving || !data.settings}>
+        {$t('Save settings')}
+      </button>
+    </div>
   {/if}
 </section>

@@ -264,7 +264,7 @@ export function createMessagesPipeline(
   // Default anthropic_messages (the /v1/messages caller); /v1/responses passes
   // openai_responses so telemetry attributes the surface correctly (principle 5).
   protocol: Protocol = "anthropic_messages",
-  // Memory observe-phase wiring (docs/08 阶段 1). Optional — absent = no-op (the
+  // Memory observe-phase wiring (docs/08 Phase 1). Optional — absent = no-op (the
   // pipeline's existing tests run unchanged). When present, observeInbound
   // persists the request before routing and observeOutbound persists the
   // assistant turn after; both self-gate on the resolved MemoryScope and are
@@ -290,7 +290,7 @@ export function createMessagesPipeline(
       const internal = toInternalRequest(ir, identity, traceId, protocol);
 
       // Memory observe (inbound): persist the request's raw messages BEFORE
-      // routing (docs/08 阶段 1). observe is write-only — it never mutates the
+      // routing (docs/08 Phase 1). observe is write-only — it never mutates the
       // messages nor changes routing, self-gates to a no-op on off/null-thread,
       // and never throws (fail-open inside core). The scope rides ir.metadata,
       // already stamped by the route from the request headers.

@@ -1,8 +1,13 @@
 services:
   helm:
-    # Default to the published image; for local dev uncomment `build: .`.
+    # Default to the published image; for local dev uncomment the `build` block.
     image: ghcr.io/easymetaau/helm-api:latest
-    # build: .
+    # build:
+    #   context: .
+    #   args: # surfaced by GET /version + the admin header (docs/10)
+    #     HELM_VERSION: ${HELM_VERSION:-dev}
+    #     HELM_GIT_SHA: ${HELM_GIT_SHA:-dev}
+    #     HELM_BUILT_AT: ${HELM_BUILT_AT:-dev}
     container_name: helm
     ports:
       - "8080:8080"

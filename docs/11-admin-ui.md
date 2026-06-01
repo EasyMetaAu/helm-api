@@ -1,50 +1,118 @@
-# 11 · 管理界面（Admin UI）
+# 11 · Admin UI
 
-启动后，Helm 自带一个**管理界面**（Web 控制台），用于做基本的规则管理与请求调试。它面向**内部使用**，认证用简单的 HTTP Basic 账号密码即可。
+> Status: **implemented (0.1).** A SvelteKit + Tailwind SPA (`adapter-static`),
+> built into `apps/admin/build` and served by the gateway under `/admin`.
 
-## 认证：HTTP Basic（账号密码）
+After it boots, Helm ships a web console for basic rule management and request
+debugging. It is meant for **internal** use and is gated by HTTP Basic
+credentials.
 
-管理界面的认证**独立于 API 流量的 API key**（见 [06](06-auth-and-rate-limits.md)）：
+## Authentication: HTTP Basic
 
-- 用 **HTTP Basic** 认证（浏览器原生弹窗即可）。
-- 账号密码在**配置文件或环境变量**里配，内部使用，不做复杂权限体系。
-- 环境变量优先（容器化注入）。
+The admin UI's authentication is **deliberately separate** from the API-key auth
+used for API traffic (see [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md)):
+a different header (Basic vs. Bearer), a different credential source (config/env
+vs. the KeyStore), and no RBAC. The admin path never consults the KeyStore, and
+API traffic never consults these credentials.
+
+Credentials are resolved by `resolveAdminAuth`
+(`apps/gateway/src/middleware/basic-auth.ts`), with environment variables taking
+priority over config:
 
 ```yaml
-# config/auth.yaml （或用环境变量覆盖）
+# config/auth.yaml — optional admin block (env overrides take priority)
 admin:
   enabled: true
-  username: admin                 # 或环境变量 HELM_ADMIN_USER
-  password: change-me             # 或环境变量 HELM_ADMIN_PASSWORD
+  username: admin       # or HELM_ADMIN_USER
+  password: change-me   # or HELM_ADMIN_PASSWORD
 ```
 
 ```bash
-# 环境变量形态（推荐用于 Docker）
+# Environment form (recommended for Docker)
 HELM_ADMIN_USER=admin
 HELM_ADMIN_PASSWORD=change-me
+HELM_ADMIN_ENABLED=true   # optional explicit toggle
 ```
 
-- 未配置账号密码且 `admin.enabled: true` 时，启动应给出明确告警（避免裸奔）。
-- 管理界面建议只监听内网 / 反代后访问。
+Enable / mount rules:
 
-## 管理界面能做什么
+- **Configuring credentials auto-enables the admin surface.** Setting
+  `HELM_ADMIN_USER` + `HELM_ADMIN_PASSWORD` is the obvious "protect admin" action,
+  so it turns the surface on. Precedence: an explicit env flag
+  (`HELM_ADMIN_ENABLED`) > an explicit config flag (`admin.enabled`) > "credentials
+  present".
+- **When admin is not enabled, it is not mounted at all** — both `/admin` and
+  `/admin/api/*` return 404, so the key-management and telemetry endpoints can
+  never be reached unauthenticated.
+- **When enabled but credentials are missing**, the gateway still boots but emits
+  a single explicit warning, and every admin request fails closed (401) — never
+  silently open.
+- Credentials are compared in constant time and the password is never logged.
+- The Basic gate covers both the API (`/admin/api/*`) and the SPA page + assets
+  (`/admin`). Run the admin UI behind a reverse proxy / on an internal network.
 
-### 规则管理（基本）
+## Internationalization
 
-- **Lane 管理**：查看/编辑默认与任务 lane 的 `primary + fallback[]`（见 [04](04-routing-and-lanes.md)）。
-- **策略管理**：查看/编辑 policies 匹配规则（task_type / complexity / user / org → lane）。
-- **分类器配置**：开关 eval、调 `confidence_threshold`、看 rules 维度/权重（见 [03](03-classification.md)）。
-- **Provider / 凭证**：查看 provider 别名与健康（凭证只读引用，不回显明文）。
-- **API Key 管理**：新建 / 吊销 key，设置每 key 上限（见 [06](06-auth-and-rate-limits.md)）。
+The SPA ships in five languages, English by default
+(`apps/admin/src/lib/config/languages.ts`): English (`en`), Simplified Chinese
+(`zh-hans`), Traditional Chinese (`zh-hant`), Japanese (`ja`), and Korean (`ko`).
+An unrecognized browser/stored language tag falls back to `en`.
 
-改动落到 `config/*.yaml`（或运行时配置存储），保持"配置即代码"，可被版本管理。
+## What the admin UI can do
 
-### 请求调试（Debug）
+The SPA pages (`apps/admin/src/routes/`) are pure consumers of the gateway's
+`/admin/api/*` endpoints.
 
-复用 [07 · 可观测性](07-observability.md) 定义的请求列表与详情：分类层级、命中策略、lane 候选链、provider 尝试、成本、错误与 `trace_id`。
+### Dashboard
 
-## 边界（MVP）
+The landing page (`/`) gives an at-a-glance overview.
 
-- 只做**基本**规则管理 + 请求查看，不做多租户、不做细粒度 RBAC。
-- 不在管理界面里放 Memory / agent 编排（MVP 之外）。
-- 复杂的配置仍可直接改 `config/*.yaml` 后重启——管理界面是便利层，不是唯一入口。
+### Rule management
+
+- **Keys** (`/keys`) — create and revoke API keys and set per-key rate limits.
+  Backed by the KeyStore (`/admin/api/keys` `GET` / `POST` / `PATCH` / `DELETE`),
+  never YAML. The plaintext of a freshly minted key is returned exactly once
+  (Principle 7); revocation is a soft disable. See [06 · Auth, API Keys & Rate
+  Limits](06-auth-and-rate-limits.md).
+- **Lanes** (`/lanes`) — view/edit each lane's `primary + fallback[]`
+  (`/admin/api/lanes` CRUD). The model combobox is populated from a read-only
+  catalog of routable aliases (`/admin/api/models`). See [04 · Routing &
+  Lanes](04-routing-and-lanes.md).
+- **Policies** (`/policies`) — view/edit the policy matching rules
+  (`task_type` / `complexity` / `user` / `org` → lane) via `/admin/api/policies`.
+- **Classifier** (`/classifier`) — toggle eval, tune `confidence_threshold`, and
+  inspect the rule dimensions/weights (`/admin/api/classifier`). See [03 ·
+  Classification Cascade](03-classification.md).
+
+Rule edits go through a runtime rule store that re-binds the live `lanes` /
+`policies` / `classifier` config the router reads — applied on the very next
+request, no restart. Changes are persisted, keeping "config-as-code".
+
+### System settings
+
+- **Settings** (`/settings`) — the runtime-mutable settings the operator can
+  change without a restart (`/admin/api/settings`, validated against
+  `RuntimeSettingsSchema`, fail-closed on an invalid body): `capture_payloads`
+  (default on), `payload_retention_days`, the rate-limit master switch
+  (`rate_limit_enabled`) and system default quota
+  (`rate_limit_default_rpm`/`_tpm`), and `log_level`. See [07 · Error Model &
+  Observability](07-observability.md) and [06 · Auth, API Keys & Rate
+  Limits](06-auth-and-rate-limits.md).
+
+### Request debugging
+
+- **Requests** (`/requests`) — the request list, plus a per-request detail page
+  (`/requests/[traceId]`), reading the read-only `/admin/api/requests` endpoints.
+  This reuses the observability surface from [07 · Error Model &
+  Observability](07-observability.md): classification stage, matched policy, lane
+  candidate chain, provider attempts, cost, error, and `trace_id`. When
+  `capture_payloads` is on, the detail can load the full captured request/response
+  bodies (`/admin/api/requests/:traceId/payload`).
+
+## Boundaries (0.1)
+
+- Basic rule management and request inspection only — no multi-tenancy and no
+  fine-grained RBAC.
+- No Memory / agent orchestration in the admin UI.
+- Complex configuration can still be edited directly in `config/*.yaml` and
+  reloaded — the admin UI is a convenience layer, not the only entry point.

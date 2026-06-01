@@ -48,7 +48,7 @@ export interface RateLimitStore {
 // Store ports (repository pattern). core depends ONLY on these interfaces; the
 // sqlite and supabase adapters each implement the same contract. This file is
 // pure types — no SQL, no Drizzle import, no web framework. All structured data
-// types come from @helm/shared via z.infer. See CLAUDE.md "DB 抽象层".
+// types come from @helm/shared via z.infer. See CLAUDE.md "DB abstraction layer".
 
 // Input for creating a key: accepts hash + prefix only — NO plaintext field, so
 // the port layer cannot persist a plaintext key (principle 7).
@@ -75,7 +75,7 @@ export interface KeyStore {
   // Used for bootstrap emptiness check / admin display. Never includes plaintext.
   list(): Promise<ApiKeyRecord[]>;
   // Soft revoke: set disabled=true. Never physically deletes, never rewrites
-  // other fields in place ("轮转吊销不就地改写").
+  // other fields in place ("rotation/revocation never mutates in place").
   disable(keyId: string): Promise<void>;
   // Edit a key's per-key caps (docs/06). PARTIAL: only the fields PRESENT in
   // `patch` are written; an omitted field is left untouched, so two concurrent
@@ -130,9 +130,9 @@ export interface RequestPayload {
 
 // A recent decision row paired with the time the gateway recorded it. `createdAt`
 // is STORE metadata (a separate column), deliberately kept OUT of the redacted
-// DecisionRecord schema; the Debug UI list needs it for the 「时间」 column, so the
+// DecisionRecord schema; the Debug UI list needs it for the "Time" column, so the
 // recent-list port surfaces it alongside the record instead of forcing the UI to
-// fabricate a timestamp (原则1: UI re-computes nothing).
+// fabricate a timestamp (Principle 1: UI re-computes nothing).
 export interface RecentDecisionRecord {
   record: DecisionRecord;
   createdAt: Date;
@@ -158,7 +158,7 @@ export interface TelemetryStore {
 }
 
 // SignalStore — persistence for the POST-MVP Agentic Signals feedback layer
-// (docs/02; research-notes「Plano」). A signal is an aggregated, REDACTED
+// (docs/02; research-notes "Plano"). A signal is an aggregated, REDACTED
 // observation rolled up by (taskType, lane). This is an OBSERVABILITY artifact:
 // the collector writes it asynchronously off the request path, and (this task)
 // nothing reads it back into routing — `getSignal` exists for a FUTURE
@@ -173,7 +173,7 @@ export interface SignalStore {
   getSignal(taskType: string, lane: string): Promise<RoutingSignal | null>;
 }
 
-// Memory middleware store (docs/08 "存储模型"). POST-MVP persistence floor: this
+// Memory middleware store (docs/08 "storage model"). POST-MVP persistence floor: this
 // phase only ensures threads + appends raw messages (observe writes originals).
 // Read/inject/compress methods are added by the observe/inject tasks. Memory is
 // a MIDDLEWARE — these methods never touch routing/lane state. Input types come
@@ -183,14 +183,14 @@ export interface MemoryStore {
   ensureThread(input: MemoryThreadInput): Promise<void>;
   // Persist one raw message; returns the generated message id.
   appendMessage(input: MemoryMessageInput): Promise<string>;
-  // POST-MVP 阶段 2 (Observer). Read a thread's raw messages oldest-first so the
+  // POST-MVP Phase 2 (Observer). Read a thread's raw messages oldest-first so the
   // background Observer can compress the older ones into an observation. Returns
   // the persisted rows (with ids + createdAt) for an auditable source range.
   listMessages(threadId: string): Promise<RawMessage[]>;
   // Persist one compressed observation; returns its generated id. source range
   // is REQUIRED on the input (docs/08) so memory can be audited against originals.
   appendObservation(input: MemoryObservationInput): Promise<string>;
-  // POST-MVP 阶段 2 (Reflector). Read a scope's ACTIVE observations so the
+  // POST-MVP Phase 2 (Reflector). Read a scope's ACTIVE observations so the
   // background Reflector can merge them into a stable reflection. Scope is
   // project / resource / thread (one or more levels); never cross-project.
   listObservations(scope: ReflectionScope): Promise<Observation[]>;

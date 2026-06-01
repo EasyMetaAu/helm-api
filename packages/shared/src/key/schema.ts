@@ -28,9 +28,9 @@ export const ApiKeyRecordSchema = z.object({
 export type KeyRole = z.infer<typeof KeyRoleSchema>;
 export type ApiKeyRecord = z.infer<typeof ApiKeyRecordSchema>;
 
-// Admin-facing create-key request (docs/06 Key 管理). The plaintext is minted
+// Admin-facing create-key request (docs/06 Key management). The plaintext is minted
 // server-side; the operator only specifies role + per-key caps. `.strict()` so an
-// unknown field fails closed (原则2). role defaults to "user" — root keys are not
+// unknown field fails closed (Principle 2). role defaults to "user" — root keys are not
 // minted casually through the admin UI.
 export const CreateKeyRequestSchema = z
   .object({
@@ -39,7 +39,7 @@ export const CreateKeyRequestSchema = z
     allowed_lanes: z.array(z.string().min(1)).optional(),
     allow_custom_model: z.boolean().optional(),
     // Optional per-key rate limits at mint time. Omitted => inherit the system
-    // default. 0 => explicitly unlimited for that dimension (原则2 fail-closed on
+    // default. 0 => explicitly unlimited for that dimension (Principle 2 fail-closed on
     // a negative/non-int value).
     rate_limit_rpm: z.number().int().nonnegative().optional(),
     rate_limit_tpm: z.number().int().nonnegative().optional(),

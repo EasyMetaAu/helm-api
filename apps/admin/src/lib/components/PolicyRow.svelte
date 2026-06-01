@@ -9,7 +9,7 @@
   import { t } from '$lib/i18n';
 
   // Single ordered policy row: a pure "condition → action" editor. It owns NO
-  // matching logic (first-match resolution lives in headless core, 原则1/原则5);
+  // matching logic (first-match resolution lives in headless core, Principle 1/Principle 5);
   // it only enforces enum constraints (no free text) and the use_lane/max_lane
   // mutual exclusion, then bubbles changes up so the parent owns the ordered list.
   let {
@@ -110,9 +110,9 @@
     >
     <button
       type="button"
-      class="rounded px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+      class="btn-icon hover:bg-red-50 hover:text-red-600"
       aria-label={$t('remove')}
-      onclick={() => onremove(index)}>{$t('Remove')}</button
+      onclick={() => onremove(index)}>✕</button
     >
   </header>
 
@@ -127,8 +127,8 @@
   <fieldset class="flex flex-col gap-3">
     <legend class="field-label">{$t('When a request matches ALL of:')}</legend>
 
-    <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
-      <label class="flex flex-col gap-1 text-sm">
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <label class="field">
         <span class="field-label">{$t('Task type')}</span>
         <select
           class="select"
@@ -142,7 +142,7 @@
         </select>
       </label>
 
-      <label class="flex flex-col gap-1 text-sm">
+      <label class="field">
         <span class="field-label">{$t('Complexity')}</span>
         <select
           class="select"
@@ -156,20 +156,7 @@
         </select>
       </label>
 
-      <label class="flex items-start gap-2 text-sm">
-        <input
-          type="checkbox"
-          class="mt-0.5"
-          checked={match.needs_json === true}
-          onchange={(e) => emitMatch({ needs_json: e.currentTarget.checked ? true : undefined })}
-        />
-        <span class="flex flex-col">
-          <span class="field-label">{$t('Requires JSON output')}</span>
-          <span class="field-help">{$t('Match requests that ask for a JSON response.')}</span>
-        </span>
-      </label>
-
-      <label class="flex flex-col gap-1 text-sm">
+      <label class="field">
         <span class="field-label">{$t('User ID')}</span>
         <input
           class="input"
@@ -179,7 +166,7 @@
         <span class="field-help">{$t('Match a single end-user by their ID.')}</span>
       </label>
 
-      <label class="flex flex-col gap-1 text-sm">
+      <label class="field">
         <span class="field-label">{$t('Organization ID')}</span>
         <input
           class="input"
@@ -189,6 +176,19 @@
         <span class="field-help">{$t('Match every request from one organization.')}</span>
       </label>
     </div>
+
+    <label class="checkbox-field items-start">
+      <input
+        type="checkbox"
+        class="checkbox mt-0.5"
+        checked={match.needs_json === true}
+        onchange={(e) => emitMatch({ needs_json: e.currentTarget.checked ? true : undefined })}
+      />
+      <span class="flex flex-col">
+        <span class="field-label">{$t('Requires JSON output')}</span>
+        <span class="field-help">{$t('Match requests that ask for a JSON response.')}</span>
+      </span>
+    </label>
   </fieldset>
 
   <fieldset class="flex flex-col gap-2">
@@ -199,8 +199,8 @@
       )}
     </p>
 
-    <div class="flex flex-wrap items-start gap-6">
-      <label class="flex flex-col gap-1 text-sm">
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <label class="field">
         <span
           class="field-label"
           class:text-ink-strong={action === 'use_lane'}
@@ -221,7 +221,7 @@
         </select>
       </label>
 
-      <label class="flex flex-col gap-1 text-sm">
+      <label class="field">
         <span
           class="field-label"
           class:text-ink-strong={action === 'max_lane'}

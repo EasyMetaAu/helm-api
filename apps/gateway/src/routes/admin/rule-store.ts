@@ -3,9 +3,9 @@ import type { ClassifierConfig } from "@helm/shared";
 import type { RuleStore } from "./deps.js";
 
 // Runtime (in-process) RuleStore — the MVP backing for the admin rule-config
-// endpoints. The task explicitly permits "config/*.yaml 或运行时 ConfigStore";
+// endpoints. The task explicitly permits "config/*.yaml or a runtime ConfigStore";
 // this is the latter: edits update the live in-memory config the router reads, so
-// changes take effect without a restart. Per CLAUDE.md 原则2 the canonical落点 is
+// changes take effect without a restart. Per CLAUDE.md Principle 2 the canonical persistence target is
 // still the rule config (NOT the DB). A future YAML write-back adapter can replace
 // this without touching the routes (they depend only on the RuleStore interface).
 //

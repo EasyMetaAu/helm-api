@@ -27,14 +27,18 @@
 # (`llm-router/config/providers.yaml` inline capabilities + provider-capabilities
 # .generated.yaml) — single source of truth; keep in step when llm-router changes.
 #
-# NOTE: gpt-5.x on the la.atmy.work relay are STREAM-ONLY (non-stream → 400). That
-# is a relay request constraint, NOT a capability gap — `supportsStreaming` stays
-# true (the model DOES stream; it merely requires it). Default API usage streams.
+# NOTE: gpt-5.x on the la.atmy.work relay are STREAM-ONLY (non-stream → 400 "Stream
+# must be set to true"). That is a relay request constraint, NOT a capability gap —
+# `supportsStreaming` stays true (the model DOES stream; it merely requires it).
+# `requiresStreaming: true` makes the capability filter SKIP these for a non-stream
+# request (skip_reason no_nonstream_support) instead of letting the attempt 400 and
+# poison the circuit breaker; streaming requests still use them normally.
 openai-crs/gpt-5.5:
   supportsTools: true
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
+  requiresStreaming: true
   maxContextTokens: 1050000
   maxOutputTokens: 128000
 openai-crs/gpt-5.4-mini:
@@ -42,6 +46,7 @@ openai-crs/gpt-5.4-mini:
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
+  requiresStreaming: true
   maxContextTokens: 400000
   maxOutputTokens: 128000
 openai-crs/gpt-5.3-codex-spark:
@@ -49,6 +54,7 @@ openai-crs/gpt-5.3-codex-spark:
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
+  requiresStreaming: true
   maxContextTokens: 400000
   maxOutputTokens: 128000
 deepseek-crs/deepseek-pro:

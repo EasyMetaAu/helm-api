@@ -5,14 +5,22 @@ import { z } from "zod";
 //                   via `pnpm sync:catalog`, checked into the repo. Supply-chain
 //                   INPUT, never read at request time to pick a model.
 //   2. override   — manual config/capabilities.yaml + config/pricing.yaml.
-//                   Manual entries ALWAYS WIN (CLAUDE.md 实现约定).
-// Invalid override → fail-closed (principle 2). See docs/02 安全规则.
+//                   Manual entries ALWAYS WIN (CLAUDE.md implementation conventions).
+// Invalid override → fail-closed (principle 2). See docs/02 security rules.
 
 export const CapabilitiesSchema = z.object({
   supportsTools: z.boolean(),
   supportsJsonMode: z.boolean(),
   supportsVision: z.boolean(),
   supportsStreaming: z.boolean(),
+  // Some upstream relays (e.g. la.atmy.work gpt-5.x) REQUIRE stream:true and 400 a
+  // non-stream request ("Stream must be set to true"). That is a request-SHAPE
+  // constraint, NOT a capability gap — the model DOES stream (supportsStreaming
+  // stays true). Optional: absent ⇒ false (model serves non-stream fine). When
+  // true, the capability filter skips this candidate for NON-stream requests
+  // (no_nonstream_support) so it never burns an attempt nor poisons the breaker;
+  // streaming requests still use it normally.
+  requiresStreaming: z.boolean().optional(),
   maxContextTokens: z.number().int().nonnegative(),
   maxOutputTokens: z.number().int().nonnegative().nullable(),
 });

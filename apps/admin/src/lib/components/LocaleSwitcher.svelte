@@ -2,6 +2,10 @@
   import { SUPPORTED_LANGUAGES, type LocaleCode } from '$lib/config/languages';
   import { locale, setLocale, t } from '$lib/i18n';
 
+  // `compact` renders a narrow, auto-width pill for the header status cluster;
+  // the default block variant is the full-width control used in forms/sidebars.
+  let { compact = false }: { compact?: boolean } = $props();
+
   function onChange(event: Event): void {
     const next = (event.currentTarget as HTMLSelectElement).value as LocaleCode;
     void setLocale(next);
@@ -12,7 +16,9 @@
   <label class="sr-only" for="locale-switcher">{$t('Language')}</label>
   <!-- Globe icon -->
   <svg
-    class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+    class="pointer-events-none absolute top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 {compact
+      ? 'left-2'
+      : 'left-2.5'}"
     fill="none"
     viewBox="0 0 24 24"
     stroke-width="1.6"
@@ -29,7 +35,9 @@
     id="locale-switcher"
     value={$locale}
     onchange={onChange}
-    class="select cursor-pointer appearance-none pl-8 pr-7"
+    class="cursor-pointer appearance-none {compact
+      ? 'w-auto rounded-control border border-slate-200 bg-white py-1.5 pl-8 pr-7 text-sm text-slate-600 transition-colors hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/40'
+      : 'select pl-8 pr-7'}"
   >
     {#each SUPPORTED_LANGUAGES as language (language.code)}
       <option value={language.code}>{language.native}</option>

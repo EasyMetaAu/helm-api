@@ -1,42 +1,121 @@
-# 10 · 部署（自托管 / Docker）
+# 10 · Deployment (Self-Hosted / Docker)
 
-Helm 是**开源、自托管**项目（MIT 协议）。不提供 SaaS、不售卖，任何人都可以自己部署、修改、商用。部署方式以 **Docker** 为主。
+Helm is an **open-source, self-hosted** project (MIT). There is no SaaS and
+nothing to buy — anyone can deploy, modify, and run it commercially. The primary
+deployment is **Docker**.
 
-## 设计原则
+## Design principles
 
-- **单容器、配置即代码**：一个镜像 + 一份配置目录即可跑起来；像 nginx 一样改配置、重启生效。
-- **轻量、可自托管**：默认用本地存储（如 SQLite / 本地文件）落遥测与 key，不强依赖外部数据库。
-- **零额外服务**：MVP 不依赖 Redis / 消息队列；限流、缓存先用进程内实现。
+- **Single container, config-as-code.** One image plus one config directory boots
+  the gateway; you change configuration and restart, like nginx.
+- **Lightweight, self-hostable.** The default store is SQLite (a local file under
+  the data volume), so there is no hard dependency on an external database.
+  Postgres/Supabase is available via the same store abstraction (see [02 ·
+  Architecture](02-architecture.md)).
+- **No extra services required.** 0.1 needs no Redis or message queue; rate
+  limiting and caches are in-process / store-backed.
 
-## Docker 部署
+## Docker
+
+The published image is `ghcr.io/easymetaau/helm-api`. It is built on **Node 22**
+(`node:22-slim`), runs as a non-root `helm` user, and exposes port `8080`.
 
 ```bash
 docker run -d --name helm \
   -p 8080:8080 \
-  -v $(pwd)/config:/app/config \   # lanes/policies/classifier/providers...
-  -v $(pwd)/data:/app/data \       # 遥测、key 等持久化
-  -e HELM_ADMIN_USER=admin \       # 管理界面账号（见 11）
+  -v "$(pwd)/config:/app/config" \   # lanes/policies/classifier/providers/...
+  -v "$(pwd)/data:/app/data" \       # telemetry, keys, sqlite — persisted
+  -e HELM_ADMIN_USER=admin \         # admin UI Basic auth (see 11)
   -e HELM_ADMIN_PASSWORD=change-me \
-  -e OPENAI_API_KEY=sk-... \       # 上游 provider 凭证
+  -e OPENAI_API_KEY=sk-... \         # upstream provider credential
   ghcr.io/easymetaau/helm-api:latest
 ```
 
-也提供 `docker-compose.yml` 形态，便于挂载配置与持久化卷。
+The image bakes the default `config/*.yaml` so it boots standalone on first run.
+That is safe because `providers.yaml` references credentials by **env-var name
+only**, never a plaintext key (Principle 7). Operators override the defaults by
+mounting their own directory at `/app/config`.
 
-## 配置来源
+### docker-compose
 
-配置可来自**文件**或**环境变量**，环境变量优先（便于容器化与密钥注入）：
+A `docker-compose.yml` is provided. It defaults to the published image (uncomment
+`build: .` for local builds), mounts the two volumes, and injects credentials from
+a `.env` file. `HELM_ADMIN_PASSWORD` and `OPENAI_API_KEY` are required (compose
+fails fast if they are unset):
 
-- `config/*.yaml`：lanes、policies、classifier、providers、capabilities、pricing、auth（见 [02 · 架构](02-architecture.md)）。
-- 环境变量：provider 凭证、管理界面账号密码、可选的存储/端口覆盖。
+```yaml
+services:
+  helm:
+    image: ghcr.io/easymetaau/helm-api:latest
+    # build: .
+    container_name: helm
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+    environment:
+      HELM_ADMIN_USER: ${HELM_ADMIN_USER:-admin}
+      HELM_ADMIN_PASSWORD: ${HELM_ADMIN_PASSWORD:?set HELM_ADMIN_PASSWORD in .env}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
+    restart: unless-stopped
+```
 
-## 启动行为
+## Volumes
 
-1. 加载配置（文件 + 环境变量）。
-2. 若不存在任何 API key，**生成一把 root key 并打印一次**（见 [06](06-auth-and-rate-limits.md)）。
-3. 启动 HTTP 服务（API + 管理界面，见 [11 · 管理界面](11-admin-ui.md)）。
-4. 健康检查端点就绪后开始服务流量。
+- `/app/config` — the YAML config tree: `lanes`, `policies`, `classifier`,
+  `providers`, `capabilities`, `pricing`, `auth`, `runtime`, `server`.
+- `/app/data` — persisted state: SQLite database, telemetry, captured payloads,
+  and the bootstrapped key file (`./data/helm-keys.json`).
 
-## 升级
+## Configuration sources
 
-像 llm-router 的 SOP 一样：拉新镜像 → 重建容器 → 校验 `/healthz` 与版本；保留挂载的 `config/` 与 `data/`，不覆盖。
+Configuration comes from **files** and **environment variables**, and env vars
+**win** (this is what makes containerized deployment and secret injection clean):
+
+- `config/*.yaml` — lanes, policies, classifier, providers, capabilities,
+  pricing, auth, runtime, server (see [02 · Architecture](02-architecture.md)).
+- Environment variables — upstream provider credentials, the admin Basic-auth
+  user/password, the store driver, and optional bind/limit overrides. See
+  `.env.example` for the full list, including:
+  - `HELM_HOST`, `HELM_PORT`, `HELM_BASE_PATH`
+  - `HELM_ADMIN_USER`, `HELM_ADMIN_PASSWORD`, `HELM_ADMIN_ENABLED`
+  - `HELM_RATE_LIMIT_ENABLED`, `HELM_REQUEST_TIMEOUT_MS`, `HELM_MAX_REQUEST_BYTES`
+  - `HELM_STORE_DRIVER` (`sqlite` | `supabase`), `HELM_STORE_URL_ENV`
+  - `HELM_KEYS_PERSIST_TO`
+  - Upstream credentials such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+    `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` — each maps to a `providers.yaml`
+    entry's `api_key_env`. `OPENAI_API_KEY` is the primary credential and is
+    required; the others are optional (their providers are skipped if absent).
+
+Invalid configuration is rejected at startup (Zod-validated, fail-closed) — Helm
+never runs in a half-broken state (Principle 2).
+
+## Startup behavior
+
+1. Load configuration (files + environment variables, env wins).
+2. If no API key exists, **mint a root key and print it once** (see [06 · Auth,
+   API Keys & Rate Limits](06-auth-and-rate-limits.md)).
+3. Start the HTTP server (the API plus the admin UI when admin credentials are
+   configured; see [11 · Admin UI](11-admin-ui.md)).
+4. Begin serving once the health endpoint reports ready.
+
+## Health & version
+
+- `GET /healthz` — unauthenticated readiness probe. Returns `200` when ready,
+  `503` when degraded (fail-closed: a probe failure reports not-ready, never a
+  hang or 500). The container `HEALTHCHECK` hits this endpoint.
+- `GET /version` — unauthenticated build info (`version`, `gitSha`, `builtAt`),
+  injected at build time via the `HELM_VERSION` / `HELM_GIT_SHA` / `HELM_BUILT_AT`
+  Docker build-args (CI fills them from the package version, commit, and a UTC
+  stamp; for a local `build: .` see the commented `args` in `docker-compose.yml`).
+  Defaults to `unknown` when unset. No config or credentials are exposed.
+
+## Upgrading
+
+Pull the new image → recreate the container → verify `/healthz` and `/version`.
+Keep the mounted `config/` and `data/` directories; they are not overwritten.
+
+> Note: telemetry and captured payloads persist on the `data` volume across
+> redeploys. When debugging, filter the request log by the container's start time
+> so rows written by an older image are not mistaken for current behavior.

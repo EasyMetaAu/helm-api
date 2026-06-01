@@ -27,6 +27,122 @@
 
 ---
 
+## 2026-06-01 · Lanes editor: offer other lanes (not just models) as chain targets (docs/04, Principle 6)
+
+**Context**: the lanes admin page (`/admin/lanes`) only suggested **model aliases** in the primary/fallback comboboxes. But a chain element may be a **model alias OR another lane name** — core's `expandChain` (`packages/core/src/routing/route-request.ts`) already flattens lane refs recursively with a cycle guard, and the default lanes ship with lane-to-lane fallbacks (`balanced.fallback: ["premium", "economy"]`). The capability existed end-to-end; only the UI hid it.
+
+**What changed** (admin-only, no core/schema change needed):
+- `LaneEditor.svelte` gained a `laneNames?: string[]` prop. A `$derived` `laneOptions = laneNames.filter(n => n !== initial.name)` excludes the card's **own** lane — a lane targeting itself is meaningless (the expander would just dedupe it). The `<datalist>` now renders `laneOptions` (each `<option>` carries `label={$t('lane')}` so they read distinctly from models) **before** the model aliases.
+- `lanes/+page.svelte` derives `laneNames` from the loaded lanes and threads it into every `LaneEditor`. Names are immutable in this editor (saves map by name), so the derived list is stable across edits.
+- Fallback-add placeholder `"model alias"` → `"model or lane"`. New i18n keys `lane` / `model or lane` added+translated across all 5 locales; the orphaned `"model alias"` key was removed (only consumer was this input).
+
+**Decisions / trade-offs**:
+- **No new validation of lane refs in the UI** — kept the input permissive (free text + suggestions), matching the existing model-alias behaviour. The schema already validates only non-empty strings; real cycle/typo safety lives in core (`expandChain` cycle guard + execution fallback). Adding UI-side graph validation would duplicate core logic for little gain.
+- **Self-exclusion only, not full cycle prevention in the picker** — the requirement was "can't pick its own lane". Deeper cycles (a→b→a) are already neutralised by `expandChain`'s `visited` set, so the picker intentionally still lets you build them (they're harmless and sometimes intended as "try the other tier then stop").
+
+**Gate**: admin Vitest 149/149 (2 new lane tests); `svelte-check` 0 errors (1 pre-existing warning in `settings/+page.svelte`, untouched); Prettier clean. Biome ignores `apps/admin` by design.
+
+---
+
+## 2026-06-01 · Inject build info into the Docker image so /version is real (docs/10)
+
+**Context**: follow-up to the status cluster. After deploying, the header's **version pill never showed** and the gateway reported `GET /version → {"version":"unknown",...}`. Root cause: `readBuildInfo()` reads `HELM_VERSION`/`HELM_GIT_SHA`/`HELM_BUILT_AT` from env, but the **`Dockerfile` never set them** — so the docs' claim that build info is "injected at build time" was aspirational. (The status-cluster component intentionally hides a `"unknown"` version, which is why the pill was blank — correct behavior, missing data.)
+
+**Fix**:
+- `Dockerfile` (runtime stage): declare `ARG HELM_VERSION/HELM_GIT_SHA/HELM_BUILT_AT` (default `unknown`) → `ENV`. A bare `docker build` still works; values come from `--build-arg`.
+- `.github/workflows/ci.yml` (docker job): pass the args — `HELM_VERSION` from `package.json`, `HELM_GIT_SHA` from `git rev-parse --short HEAD`, `HELM_BUILT_AT` from a UTC stamp — and a new step asserts `/version` reports the injected version (and a non-`unknown` gitSha), guarding the wiring.
+- `docker-compose.yml`: documented the same args under a commented `build` block for local `build: .`.
+- Root `package.json` version `0.0.0` → **`0.1.0`** so the injected value is meaningful (matches the "0.1 release" framing across README/docs). This is the single source of truth the build reads.
+
+**Sibling decision (GitHub stars)**: the star count was *also* blank, but for an unrelated reason — `EasyMetaAu/helm-api` was **private**, so the unauthenticated GitHub API returned 404 and the client fail-silently hid the count. Resolved by **making the repo public** (the intended open-source state); the existing client-side fetch now shows `★ N` with no code change. The earlier "stars client-side, not gateway-proxied" decision stands.
+
+**Local deploy**: rebuilt `ghcr.io/easymetaau/helm-api:latest` with the three `--build-arg`s and recreated the compose container; `/version` now returns `0.1.0` + short sha + timestamp, and the pill renders.
+
+---
+
+## 2026-06-01 · Unified admin status cluster in the header top-right (docs/11, Principle 3 & 7)
+
+**Context**: operator-facing meta was scattered in the sidebar footer — a `LocaleSwitcher`, a **hardcoded** "Gateway online" badge (static green dot that never reflected real health), and a GitHub link with no star count — and there was no version display despite the gateway already exposing `GET /version`. Consolidated all of it into one designed cluster in the previously-empty **header top-right**, and made the signals live.
+
+**What was added**:
+- `apps/admin/src/lib/api/gateway.ts` — `getVersion()` (parses `/version`) and `getHealth()` → `'online' | 'degraded' | 'offline'`. `getHealth` is the fail-open primitive: 200→online, reachable-but-!ok (e.g. 503)→degraded, **network/throw caught→offline** (never rejects), so the 30s poll caller needs no guard.
+- `apps/admin/src/lib/api/github.ts` — `formatStars()` (`1234`→`1.2k`, `12345`→`12.3k`, `1.5M`) + `getStarCount()`.
+- `apps/admin/src/lib/components/StatusCluster.svelte` — health dot+label, version pill, GitHub stars link, compact locale switcher. Polls health every 30s (`onMount`/`onDestroy`), fetches version+stars once; each signal try/caught independently so one failure never breaks the shell.
+- `LocaleSwitcher.svelte` gained a `compact` prop (narrow header pill) instead of a duplicate component — its only prior consumer (the footer) was removed.
+- Wired into `+layout.svelte` header (`ml-auto`); removed the sidebar footer trio. New i18n keys (`Online`/`Degraded`/`Offline`/`Checking…`/`Gateway status`/`GitHub repository`) added + translated across all 5 locales. The now-unused `"Gateway online"` key was left in the JSONs (harmless; will drop on next `i18n:extract`).
+
+**Decisions / trade-offs**:
+- **GitHub stars fetched client-side, NOT proxied through the gateway** — keeps the headless core free of outbound calls (Principle 6 / minimal runtime). Mitigates GitHub's ~60 req/hr unauth limit with a **localStorage cache** (key `helm_admin_gh_stars`, 6h TTL) and is **fail-silent**: any failure (network/CORS/rate-limit/parse) returns `null` and the count simply hides. On a failed refetch it falls back to the stale cached value.
+- **Version pill hidden when `/version` returns `"unknown"`** (the dev default — `HELM_VERSION` unset in `build-info.ts`), so dev doesn't show a meaningless `vunknown`.
+- **`/healthz` + `/version` are origin-root & unauthenticated**, so the SPA (served under `/admin`) reaches them with a plain relative `fetch` — no auth/CORS handling needed.
+- **TODO / future**: if a CSP is ever added, `api.github.com` must be allowed in `connect-src`.
+
+**Gate**: admin Vitest 147/147 (27 new across `gateway.test.ts`, `github.test.ts`, `StatusCluster.test.ts`); `svelte-check` 0 errors (1 pre-existing warning in `settings/+page.svelte`, untouched).
+
+---
+
+## 2026-06-01 · Reconcile stream-only capability gate with routing/cost tests (docs/03/04/07, Principle 5)
+
+**Context**: the stream-only capability gate (commit `3eb15ab`, `no_nonstream_support`) left **6 tests red on `main`** — they predated the gate and asserted that the `openai-crs/*` heads (gpt-5.4-mini, gpt-5.5; `requiresStreaming: true` in `capabilities.yaml`) serve **non-stream** requests. They no longer can: a non-stream request correctly SKIPS them and falls forward. Surfaced during the 0.1 doc-audit verification run.
+
+**Root cause (not a product bug — the gateway is behaving correctly)**: `capability/filter.ts` gate 6 skips a `requiresStreaming` model when `req.stream !== true`. So a non-stream economy request lands on `deepseek-crs/deepseek-flash`; a non-stream premium request lands on `zenmux/claude-opus-4.7`. The tests, not the runtime, were stale.
+
+**Fix (tests only — zero runtime change)**:
+- `apps/gateway/e2e/routing.spec.ts` scenarios 1/2/4 + `eval.spec.ts` scenario 2: send the requests as **streaming** (`stream: true`) so the stream-only lane HEAD is eligible and actually serves, preserving each test's "lane → its head model" intent. Assertions now read the debug headers (`x-helm-lane` / `x-helm-final-model` / `x-helm-provider-model`), which the gateway emits before the SSE body, instead of parsing a JSON body. Scenario 4 now genuinely exercises EXECUTION fallback: streaming means the head is actually invoked, 5xxs on the fail sentinel (the mock's injection runs before its stream branch), and the chain falls forward to `deepseek-flash` — previously it passed only because the non-stream head was skip-not-failed. Also corrected a stale `0.45` → `0.42` gate reference in the file header.
+- `apps/gateway/src/routes/execute.default-config.test.ts` (3 cases): these isolate JSON capability filtering + cost on the SHIPPED config and used `openai-crs/gpt-5.4-mini` as the "json-capable model that serves" — incidental, and now stream-only. Kept them NON-stream (the cost path backfills streamed cost in the route, not in `execute()`, so a non-stream served attempt is the right cost oracle) and switched the landing model to `deepseek-crs/deepseek-pro` (json-capable AND non-stream-capable). Cost expectation updated to deepseek-pro pricing (0.435/0.87 → `0.00087` for 1000+500 tokens).
+
+**Gate**: `pnpm test` 1255/1255; `pnpm test:e2e` 36/36; `pnpm typecheck` clean; `pnpm lint` exit 0.
+
+---
+
+## 2026-06-01 · 0.1 release — doc/code audit & English-ization (README, docs/01–11, all code comments)
+
+**Context**: preparing the 0.1 open-source release. The README and every `docs/*.md` were Chinese and **stale** (several still claimed the project was spec-first / not yet implemented), and ~93 source files carried Chinese in comments and test names. This pass produced an English-default bilingual README, rewrote all docs into English with **code as the source of truth**, and translated the codebase to 100% English. **No runtime behavior changed** — edits were limited to docs, comments, test-description strings, and two dead regex branches.
+
+**What was done**:
+- **README**: rewrote `README.md` (English, standard MIT-OSS layout) + new `README.zh-CN.md`, cross-linked with a language switch. Accurate to code: 3 wired client protocols, Responses non-streaming, default lanes, eval off by default, SQLite default.
+- **docs/**: rewrote `docs/README.md` + `01`–`11` + `research-notes.md` into English, corrected against code. Status tables updated from "not started" to "implemented / 0.1".
+- **Code**: translated Chinese → English in comments and test descriptions across `packages/shared`, `packages/core`, `apps/gateway`, `apps/admin`. Confirmed **zero hard-coded user-facing Chinese** — all admin UI text already flows through the i18n system (`apps/admin/src/locales/*.json`), which is left untouched, as are the `native` language display names in `apps/admin/src/lib/config/languages.ts`.
+
+**Doc ↔ code discrepancies found & corrected** (code is authoritative):
+1. **Stale status** (README, docs/README, docs/09): "spec-first / 尚未开始 / 待定" → the gateway, admin UI, core and stores are fully implemented and tested.
+2. **Client protocols** (docs/01, 05): only **3** are routed — `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses). A Gemini transformer exists in `packages/core/src/protocol/gemini/` but is **not mounted** (no route in `apps/gateway/src/server.ts`) → documented as roadmap.
+3. **Responses is non-streaming only** (docs/05): `stream:true` on `/v1/responses` returns a structured 400 (`apps/gateway/src/routes/responses.ts`). Chat + Messages stream via SSE.
+4. **Memory middleware** (docs/08): old doc said `memory_mode` was hardcoded `off` / dead. Reality: the **observe** phase is wired & active (`resolveMemoryScope` + `observeInbound`/`observeOutbound` in `chat.ts`, `messages-pipeline.ts`, `messages.ts`, `responses.ts`); only the **inject** phase (`assembleInjectedContext`) is never called → observe = implemented, inject = roadmap.
+5. **Classifier calibration drift** (docs/03): live `config/classifier.yaml` is `confidence_threshold 0.42`, `sigmoid_k 12`, tier boundaries `standard:-0.06 / complex:0.30 / reasoning:0.85`; eval model id is `deepseek-flash` (old docs said `deepseek/deepseek-v4-flash`). Docs now describe the mechanism and point at the YAML rather than hardcoding drift-prone numbers.
+6. **Complexity tier collapse 4 → 3**: classifier emits `simple | standard | complex | reasoning`, but routing only understands `simple | medium | complex` via `mapComplexity` (`apps/gateway/src/routes/classify.ts`); `reasoning` collapses to `complex` and is routing-inert. Documented in 03/04.
+7. **Explicit `auto` is not a passthrough model**: `routing/route-request.ts` excludes `requested_model === "auto"` from explicit passthrough (falls through to classification). Documented in 04.
+8. **Per-key lane cap beats policy `use_lane` pin** (`route-request.ts`): key caps apply after policy caps. Documented in 04.
+9. **`security` task type without a `security` lane**: `taskdetect.ts` can emit `task_type: security`, but `policies.yaml` pins complex security to `premium` instead. Documented in 03.
+10. **Decision record fields** (docs/02, 07): reconciled to the real `DecisionRecord` (`trace_id`, `key_prefix`, `fallback_reason`, `provider_attempts[].error_detail`, `latency_total_ms`, `fallback_count`, `cost_breakdown`).
+11. **Admin config shape** (docs/06, 11): `config/auth.yaml` ships only `require_api_key` + `bootstrap` — there is **no `admin:` block**, yet `resolveAdminAuth` (`apps/gateway/src/middleware/basic-auth.ts`) reads `cfg.admin.{enabled,username,password}`. In practice admin is configured via env (`HELM_ADMIN_USER`/`HELM_ADMIN_PASSWORD`), and **credentials being present auto-enables the admin surface** (when disabled, `/admin` + `/admin/api/*` are not mounted → 404). Docs treat the `admin:` block as optional and emphasize the env path. *Open item for maintainer: either add an `admin:` block to `auth.yaml` or document admin config as env-only.*
+
+**Decisions / notes**:
+- **This file (`implementation-notes.md`) stays in Chinese** for its historical entries — it is an internal engineering log, not in `docs/`, and 227k of retro-translation is out of scope/risk for 0.1. New entries (like this one) are written in English going forward.
+- **`apps/admin/src/routes/policies/policies.test.ts`**: removed the now-dead Chinese alternation branches from two regexes (`|自上而下|首条命中`, `|打分`); tests run under the `en` locale so the English branches already match.
+- **Kept verbatim**: i18n locale JSON, `native` language names (`简体中文` etc.), and the Chinese legal-entity name in the MIT copyright line (matches `LICENSE`).
+
+**Gate**: see the same-day verification run (typecheck / lint / test / e2e) below in the session; residual-CJK grep over tracked `*.ts`/`*.svelte`/`*.js` returns only the intentional `languages.ts` native names.
+
+---
+
+## 2026-06-01 · stream-only 上游：能力过滤新增 `no_nonstream_support` 门（docs/03/07，原则 3/5）
+
+**背景**：`la.atmy.work` relay 的 `gpt-5.x`（gpt-5.5 / gpt-5.4-mini / gpt-5.3-codex-spark）是 **STREAM-ONLY**——非流式请求被上游 400 `"Stream must be set to true"`。而 `gpt-5.4-mini` 是 economy/balanced 的 **primary**，故每个**非流式**请求都在第一跳 400 后才 fail-over。客户端拿到 200（fail-over 有效），但每次 400 都 `breaker.recordFailure`，**持续非流式流量会把该 alias 的熔断器打到 OPEN**，进而连**流式**请求也被 `circuit_open` 跳过——一个被非流式流量误伤流式可用性的隐患（实弹集成测试 + 遥测 `error_detail` 排查发现）。
+
+**做了什么（严格 TDD，红→绿）**：
+1. **shared schema**（`catalog/schema.ts`）：`CapabilitiesSchema` 加 **可选** `requiresStreaming: z.boolean().optional()`。**选 `.optional()` 不选 `.default(false)`**——`.default` 会让 `z.infer` 输出类型变为必填，强行波及所有以输出类型标注的 generated-catalog fixture（编译破裂）；`.optional()` 向后兼容（absent ⇒ 非 stream-only），零 fixture 改动。
+2. **filter**（`capability/filter.ts`）：新增 `SkipReason "no_nonstream_support"` + 第 6 门 `if (!req.needsStreaming && caps.requiresStreaming === true) skip`。把"必然失败的一跳"变成"干净跳过"——**不发起 invoke ⇒ 不记熔断失败**；流式请求仍走第 5 门正常使用该模型。
+3. **config**（`capabilities.yaml`）：三个 relay 模型加 `requiresStreaming: true`，并更新 NOTE 注释说明语义。
+
+**关键前置已验证**：`loadCatalog`（`catalog/index.ts` 步骤 2）对**仅存在于 override 的 modelKey**会建条目，故 `catalog.get("openai-crs/gpt-5.4-mini").capabilities` 在运行时确有数据，executor 的 `if (caps)` 门会执行——`providers.yaml` 里"catalog 没有这些模型"的旧注释已过时（capabilities.yaml 现在补全了这些条目）。
+
+**坑（排查时踩到，值得记）**：遥测持久化在挂载的 `./data` 卷，**跨重部署保留**。`/admin/api/requests` 会把**旧镜像写的旧 schema 行**与新行混在一起返回——调试"字段缺失/error_detail 为 null"时极易误判成当前代码 bug。**排查持久化遥测必须先按容器启动时间过滤**，只看重部署后的行。
+
+**门禁**：`pnpm typecheck` 0 error（含 gateway）；`pnpm lint` exit 0（14 预存 warning，他人 test 文件 noNonNullAssertion）；`pnpm test` 全 908 绿，新增 filter 4 测试 + catalog 2 测试。
+
+---
+
 ## 2026-05-31 · 记忆中间件 observe 接线（docs/08 阶段 1，原则 1/3/7/8）
 
 **背景**：记忆 core（`packages/core/src/memory/`）已实现 + 单测齐全并从 `@helm/core` 导出，但运行时死代码——`chat.ts` / `messages-pipeline.ts` 硬编码 `memory_mode:"off"` + null scope，无人调用 observe。本轮把 **observe 半边**接进网关请求路径（inject 半边的 `enqueueObserverJob` 后端未实现，**本轮不接**）。

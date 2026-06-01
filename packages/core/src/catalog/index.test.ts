@@ -85,6 +85,23 @@ describe("loadCatalog", () => {
     expect(entry?.capabilities.supportsVision).toBe(false); // defaulted
   });
 
+  it("propagates a requiresStreaming override into the merged catalog entry", () => {
+    // The stream-only relay flag (capabilities.yaml) must survive the merge so the
+    // executor's capability filter can read it (catalog.get(alias).capabilities).
+    const cat = loadCatalog({
+      generated,
+      capabilitiesOverride: { "openai-crs/gpt-5.4-mini": { requiresStreaming: true } },
+      pricingOverride: {},
+    });
+    const entry = cat.get("openai-crs/gpt-5.4-mini");
+    expect(entry?.capabilities.requiresStreaming).toBe(true);
+  });
+
+  it("leaves requiresStreaming absent for entries that never set it (back-compat)", () => {
+    const cat = loadCatalog({ generated, capabilitiesOverride: {}, pricingOverride: {} });
+    expect(cat.get("openai/gpt-4o")?.capabilities.requiresStreaming).toBeUndefined();
+  });
+
   it("re-validates every merged entry against CatalogEntrySchema (fail-closed on drift)", () => {
     // Exercise all three entry shapes: generated, capability-override-new,
     // pricing-override-new. The final merge pass must leave each conforming to

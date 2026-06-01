@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
-  import LocaleSwitcher from '$lib/components/LocaleSwitcher.svelte';
+  import StatusCluster from '$lib/components/StatusCluster.svelte';
   import { initI18n, t } from '$lib/i18n';
 
   let { children } = $props();
@@ -139,14 +139,6 @@
         </a>
       {/each}
     </nav>
-
-    <div class="space-y-3 border-t border-slate-100 px-4 py-4">
-      <LocaleSwitcher />
-      <div class="flex items-center gap-2 px-1 text-xs text-slate-400">
-        <span class="h-2 w-2 rounded-full bg-emerald-500"></span>
-        {$t('Gateway online')}
-      </div>
-    </div>
   </aside>
 
   <!-- Main column -->
@@ -175,6 +167,9 @@
         </svg>
       </button>
       <h1 class="text-base font-semibold tracking-tight text-slate-900">{$t(activeLabel)}</h1>
+      <div class="ml-auto flex items-center">
+        <StatusCluster />
+      </div>
     </header>
 
     <main class="flex-1 overflow-y-auto">

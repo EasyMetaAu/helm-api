@@ -4,7 +4,7 @@
 export const SHARED_PACKAGE = "@helm/shared" as const;
 
 // Catalog model — capabilities + pricing, generated (supply-chain) + override
-// (manual wins). See CLAUDE.md 实现约定, docs/02 安全规则.
+// (manual wins). See CLAUDE.md implementation conventions, docs/02 security rules.
 export {
   type Capabilities,
   type CapabilitiesOverride,
@@ -24,7 +24,7 @@ export {
   PricingSchema,
 } from "./catalog/schema.js";
 
-// Layer-2 eval output model (docs/03 §任务分类) — strict JSON the eval model
+// Layer-2 eval output model (docs/03 §Task classification) — strict JSON the eval model
 // emits; validated as untrusted external input, fail-open on any failure.
 export {
   type Complexity,
