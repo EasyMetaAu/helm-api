@@ -208,6 +208,32 @@ export {
   transformRequestOut as anthropicTransformRequestOut,
   transformResponseIn as anthropicTransformResponseIn,
 } from "./protocol/anthropic/index.js";
+// Gemini generateContent transformer — the FOURTH client-presentation surface
+// (docs/05). Inbound native->IR, outbound IR->native (+ snapshot stream state
+// machines + error translation + the framework-agnostic path parser the gateway
+// turns into routes). Reimplemented from the public Gemini docs, NOT copied from a
+// vendor SDK.
+export {
+  type GeminiErrorEnvelope,
+  makeGeminiError,
+  transformErrorOut as geminiTransformErrorOut,
+} from "./protocol/gemini/error.js";
+export {
+  GEMINI_API_KEY_HEADER,
+  GEMINI_ENDPOINT,
+  type GeminiRoute,
+  geminiTransformer,
+  parseGeminiPath,
+} from "./protocol/gemini/gemini-transformer.js";
+export {
+  type GeminiGenerateContentRequest,
+  GeminiGenerateContentRequestSchema,
+  type GeminiGenerateContentResponse,
+  GeminiGenerateContentResponseSchema,
+  type GeminiSSEEvent,
+  GeminiSSEEventSchema,
+  type IRChunk,
+} from "./protocol/gemini/gemini-types.js";
 // Protocol IR — the single central representation (docs/05). All translation
 // goes nativeIn -> IR -> nativeOut. Types are z.infer of these schemas.
 export {

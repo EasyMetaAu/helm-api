@@ -5,6 +5,28 @@
 
 ---
 
+## 2026-06-01 · Gemini protocol endpoint (`/v1beta/models/{model}:generateContent`) (docs/05, issue #34)
+
+**Context**: the `geminiTransformer` (the 4th protocol) was fully implemented + unit-tested in core but never **exported** from `@helm/core` and never **routed**. Gemini clients literally could not reach the gateway. This wires the existing translation pipeline into a real inbound surface.
+
+**What was added**:
+- `packages/core/src/protocol/gemini/error.ts` — `makeGeminiError` / `transformErrorOut`: the 8 `ErrorClass` values → the native Gemini envelope `{ error: { code, message, status } }` (`code` = HTTP status, `status` = Google's canonical enum: `UNAUTHENTICATED` / `INVALID_ARGUMENT` / `RESOURCE_EXHAUSTED` / `UNAVAILABLE` / `DEADLINE_EXCEEDED`). Mirrors `anthropic/error.ts`; HTTP status comes from the shared table via `makeHelmError` so status and `code` cannot drift.
+- `packages/core/src/index.ts` — exported `geminiTransformer`, `parseGeminiPath`, `GEMINI_ENDPOINT`, `GEMINI_API_KEY_HEADER`, `GeminiRoute`, the wire schemas/types, `IRChunk`, and `makeGeminiError` (+ `geminiTransformErrorOut`).
+- `apps/gateway/src/routes/gemini.ts` — `registerGeminiRoute`: thin HTTP↔IR glue mirroring `messages.ts`.
+- `apps/gateway/src/routes/messages-pipeline.ts` — `streamIR()` now branches on the stamped `protocol`: `gemini` feeds `parseOpenAISSE(result.stream)` straight into `geminiTransformer.transformStreamOut` (its `IRChunk` **is** the OpenAI chat.completion.chunk, so no Anthropic adapter is needed), everything else keeps `convertOpenAIStreamToAnthropic`.
+- `apps/gateway/src/server.ts` — wires a `gemini`-stamped pipeline + the route (auth resolver, rate limiter, error envelope).
+
+**Decisions / trade-offs**:
+- **Hono can't match the literal `:` in `{model}:generateContent`** with a named param, so the route is a single catch-all `app.post("/v1beta/models/:rest{.+}")` that hands the full `URL.pathname` + query to the core pure function `parseGeminiPath`. `null` → a **404** Gemini envelope (`status: "NOT_FOUND"`) — never a silent 200 on a mis-routed `/v1beta/*` path. `NOT_FOUND` is deliberately **not** one of the 8 routing `ErrorClass`es (it is an HTTP-routing concern), so that one body is assembled inline.
+- **Gemini SSE has no `event:` names and no `[DONE]`** (unlike OpenAI/Anthropic): each event is a **full response snapshot**. The route writes `sse.writeSSE({ data: JSON.stringify(snapshot) })` only — guarded by a stream e2e + unit test (CLAUDE.md principle 8).
+- **Auth header is `x-goog-api-key`** (Gemini SDK default), with `Authorization: Bearer` as a fallback for own clients (decision #9 in the issue).
+- **Model backfill**: `transformRequestOut` defaults `model:"gemini"` (the path model is the route layer's job). The route writes `ir.model = route.model` + `ir.stream = route.stream` before routing, or the router would always see `"gemini"` and degrade. Guarded by a dedicated test.
+- **`PipelineRunResult.streamIR()` return type widened** from `AsyncIterable<{ type: string; … }>` to `AsyncIterable<Record<string, unknown>>` — Gemini snapshots have no `type` field; the Anthropic route still reads `.type` off each object at runtime (it already casts).
+
+**Worktree note (重要)**: the e2e launcher resolves `@helm/core` via the package `exports` **`default` → `dist/index.js`** condition (tsx does not apply the `development` condition), so after changing core exports you MUST `pnpm --filter @helm/shared build && pnpm --filter @helm/core build` before `pnpm test:e2e`, or the gateway boots against a stale `dist` and throws `does not provide an export named 'geminiTransformer'`.
+
+---
+
 ## 2026-06-01 · Pagination + error/role filters for the admin requests list (docs/07, Principle 1)
 
 **Context**: `/admin/requests` fetched a hardcoded `queryRecent(100)` and rendered all rows at once; the UI had dead cursor/"Load more" plumbing that never fired. No way to page past 100 requests or isolate errors / a time window — unusable for real debugging. Added numbered pagination (time DESC) plus Date-range / Status / Decided-by / Lane / Model filters, all applied at the SQL layer so totals stay correct.
