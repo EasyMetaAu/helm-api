@@ -5,6 +5,28 @@
 
 ---
 
+## 2026-06-01 · Pagination + error/role filters for the admin requests list (docs/07, Principle 1)
+
+**Context**: `/admin/requests` fetched a hardcoded `queryRecent(100)` and rendered all rows at once; the UI had dead cursor/"Load more" plumbing that never fired. No way to page past 100 requests or isolate errors / a time window — unusable for real debugging. Added numbered pagination (time DESC) plus Date-range / Status / Decided-by / Lane / Model filters, all applied at the SQL layer so totals stay correct.
+
+**What was added**:
+- `packages/shared/src/decision/requests-query.ts` — `RequestsQuerySchema` (single source of truth). **Fail-open**: every field is `.catch(default)` so a malformed querystring (stale bookmark, hand-typed param) coerces to a safe default instead of 5xx-ing a read endpoint. `pageSize` is clamped to `[1, 200]` post-coercion so `?pageSize=100000` can't request an unbounded scan.
+- `TelemetryStore.queryPage(query)` port + both adapters. Returns `{ rows, total }` where `total` reflects the **same filters** (a second `count(*)` with the shared WHERE) so the UI renders "Page X of Y" without a second round-trip. `queryRecent` kept as-is (still a tested primitive).
+- Route `GET /admin/api/requests` now returns an envelope `{ items, total, page, pageSize }` (was a bare array). Detail/payload routes unchanged.
+- Admin: `listRequests(params)` builds the querystring (`decidedBy`→`decided_by`) and parses the envelope; URL-driven filters in `requests-filters.ts` (parse/serialize + date-preset→window); filter bar + numbered pager in `+page.svelte`.
+
+**Decisions / trade-offs**:
+- **JSON-path filtering split by where the data lives**: `status` rides the denormalized `final_status` column (cheap); `decided_by`/`lane`/`model` are extracted from the decision blob per dialect — SQLite `json_extract(decision_json, '$.classifier.decided_by')`, Postgres jsonb `decision_json -> 'classifier' ->> 'decided_by'`. No DB migration (no new columns/indexes); ordering rides the existing `created_at DESC` index. A compound/`final_status` index is a future optimization if telemetry volume grows.
+- **`model` matches requested OR served**, substring, case-insensitive (SQLite `LIKE`, Postgres `ILIKE`). User input is escaped via `store/sql-like.ts` (`%`/`_`/`\` → `ESCAPE '\'`) so a literal `%` in the search box is not a wildcard.
+- **Date-range preset resolved client-side** (`+page.ts`, `Date.now()` in local time) into an absolute half-open `[start, end)` window passed as epoch-ms — the gateway stays timezone-agnostic. `today` = local midnight→now; `24h`/`7d`/`30d` = now−Δ; `all` = unbounded. `end` is left open so requests arriving after page load still count.
+- **Offset pagination** (not keyset): the user asked for numbered page-turning with a total; offset+`count(*)` is the simplest correct fit for a self-hosted gateway's modest volume.
+- **Filters live in the URL** (loader re-reads `url.searchParams`): shareable links, back-button, and SPA-static compatible. Changing any filter resets to page 1.
+- The `queryPage` contract test runs against **both** sqlite and pglite-postgres in `store-contract.test.ts`, so the dialect-specific JSON SQL is verified against real engines, not just mocks.
+
+**Worktree note**: a fresh git worktree needs `pnpm install`, `svelte-kit sync` (admin), and `pnpm build` (workspace `dist/` for the e2e webserver + `apps/admin/build` for `admin-static.test.ts`) before tests/e2e pass.
+
+---
+
 ## 2026-06-01 · Unified admin status cluster in the header top-right (docs/11, Principle 3 & 7)
 
 **Context**: operator-facing meta was scattered in the sidebar footer — a `LocaleSwitcher`, a **hardcoded** "Gateway online" badge (static green dot that never reflected real health), and a GitHub link with no star count — and there was no version display despite the gateway already exposing `GET /version`. Consolidated all of it into one designed cluster in the previously-empty **header top-right**, and made the signals live.

@@ -111,6 +111,50 @@ test.describe("admin request debugging", () => {
   });
 });
 
+// ── 3b. Filter + paginate the request list (real gateway SQL) ────────────────
+test.describe("admin request list filtering + pagination", () => {
+  test("filters narrow the list and the pager reflects the filtered total", async ({ page }) => {
+    await page.goto(`${BASE}/admin/requests`);
+
+    const seededRow = page
+      .getByTestId("request-row")
+      .filter({ has: page.locator(`a[href$="/requests/${SEED_TRACE_ID}"]`) });
+    await expect(seededRow).toBeVisible();
+
+    // Filter controls + numbered pager are present.
+    await expect(page.getByTestId("filter-status")).toBeVisible();
+    await expect(page.getByTestId("filter-range")).toBeVisible();
+    // Only the one seeded row exists → single page, Next disabled.
+    await expect(page.getByTestId("pager-status")).toContainText("1 requests");
+    await expect(page.getByTestId("pager-next")).toBeDisabled();
+
+    // Status=error excludes the seeded ok row → empty state (filtered at the SQL
+    // layer; the URL carries the filter).
+    await page.getByTestId("filter-status").selectOption("error");
+    await expect(page).toHaveURL(/status=error/);
+    await expect(page.getByTestId("requests-empty")).toBeVisible();
+    await expect(seededRow).toHaveCount(0);
+
+    // Reset clears every filter → the row returns.
+    await page.getByTestId("filter-reset").click();
+    await expect(seededRow).toBeVisible();
+
+    // decided_by=eval excludes the rules-decided seeded row (JSON-path filter).
+    await page.getByTestId("filter-decided-by").selectOption("eval");
+    await expect(page.getByTestId("requests-empty")).toBeVisible();
+    await page.getByTestId("filter-reset").click();
+    await expect(seededRow).toBeVisible();
+
+    // Model search matches the served/requested model substring; a miss empties it.
+    await page.getByTestId("filter-model").fill("gpt-4o");
+    await page.getByTestId("filter-model").press("Enter");
+    await expect(seededRow).toBeVisible(); // requested_model = gpt-4o-mini
+    await page.getByTestId("filter-model").fill("does-not-exist");
+    await page.getByTestId("filter-model").press("Enter");
+    await expect(page.getByTestId("requests-empty")).toBeVisible();
+  });
+});
+
 // ── 4. Redaction smoke: no plaintext API key on the request views ────────────
 test.describe("admin redaction smoke", () => {
   test("request list and detail never render a plaintext API key", async ({ page }) => {

@@ -117,6 +117,109 @@ describe("SqliteTelemetryStore", () => {
     ).rejects.toThrow();
   });
 
+  // ── queryPage: filtered + paginated Debug list (createdAt DESC) ──────────────
+  // Seed helper: insert a record at a given time with the fields queryPage filters on.
+  async function seed(
+    store: SqliteTelemetryStore,
+    id: string,
+    atMs: number,
+    fields: {
+      status?: "ok" | "error";
+      decidedBy?: DecisionRecord["classifier"]["decided_by"];
+      lane?: string;
+      requestedModel?: string;
+      servedModel?: string;
+    } = {},
+  ): Promise<void> {
+    const base = decision(id);
+    const d: DecisionRecord = {
+      ...base,
+      requested_model: fields.requestedModel ?? base.requested_model,
+      classifier: {
+        ...base.classifier,
+        decided_by: fields.decidedBy ?? base.classifier.decided_by,
+      },
+      lane: { ...base.lane, selected_lane: fields.lane ?? base.lane.selected_lane },
+      final: {
+        ...base.final,
+        status: fields.status ?? base.final.status,
+        model_alias: fields.servedModel ?? base.final.model_alias,
+        error_reason: (fields.status ?? base.final.status) === "error" ? "upstream_error" : null,
+      },
+    };
+    await store.insert({ decision: d, apiKeyId: "k1", createdAt: new Date(atMs) });
+  }
+
+  it("paginates createdAt DESC with offset/limit and reports the full total", async () => {
+    const store = freshStore();
+    for (let i = 0; i < 5; i++) await seed(store, `r${i}`, 1000 + i * 1000);
+    const page1 = await store.queryPage({ limit: 2, offset: 0 });
+    expect(page1.total).toBe(5);
+    expect(page1.rows.map((r) => r.record.request_id)).toEqual(["r4", "r3"]);
+    const page2 = await store.queryPage({ limit: 2, offset: 2 });
+    expect(page2.rows.map((r) => r.record.request_id)).toEqual(["r2", "r1"]);
+    const page3 = await store.queryPage({ limit: 2, offset: 4 });
+    expect(page3.rows.map((r) => r.record.request_id)).toEqual(["r0"]);
+  });
+
+  it("filters by status using the denormalized final_status column", async () => {
+    const store = freshStore();
+    await seed(store, "ok1", 1000, { status: "ok" });
+    await seed(store, "err1", 2000, { status: "error" });
+    await seed(store, "ok2", 3000, { status: "ok" });
+    const page = await store.queryPage({ limit: 50, offset: 0, status: "error" });
+    expect(page.total).toBe(1);
+    expect(page.rows.map((r) => r.record.request_id)).toEqual(["err1"]);
+  });
+
+  it("filters by decided_by (classification stage, from JSON)", async () => {
+    const store = freshStore();
+    await seed(store, "rules1", 1000, { decidedBy: "rules" });
+    await seed(store, "eval1", 2000, { decidedBy: "eval" });
+    await seed(store, "fb1", 3000, { decidedBy: "fallback" });
+    const page = await store.queryPage({ limit: 50, offset: 0, decidedBy: "eval" });
+    expect(page.rows.map((r) => r.record.request_id)).toEqual(["eval1"]);
+    expect(page.total).toBe(1);
+  });
+
+  it("filters by lane (selected_lane, from JSON)", async () => {
+    const store = freshStore();
+    await seed(store, "a", 1000, { lane: "premium" });
+    await seed(store, "b", 2000, { lane: "balanced" });
+    const page = await store.queryPage({ limit: 50, offset: 0, lane: "premium" });
+    expect(page.rows.map((r) => r.record.request_id)).toEqual(["a"]);
+  });
+
+  it("filters by model substring across requested OR served, case-insensitive", async () => {
+    const store = freshStore();
+    await seed(store, "req", 1000, { requestedModel: "gpt-4o-mini", servedModel: "claude-x" });
+    await seed(store, "srv", 2000, { requestedModel: "auto", servedModel: "GPT-4o" });
+    await seed(store, "none", 3000, { requestedModel: "auto", servedModel: "claude-x" });
+    const page = await store.queryPage({ limit: 50, offset: 0, model: "gpt-4o" });
+    expect(page.rows.map((r) => r.record.request_id).sort()).toEqual(["req", "srv"]);
+    expect(page.total).toBe(2);
+  });
+
+  it("filters by half-open date window [startMs, endMs)", async () => {
+    const store = freshStore();
+    await seed(store, "before", 1000);
+    await seed(store, "in", 2000);
+    await seed(store, "edge", 3000); // == endMs → excluded (half-open)
+    const page = await store.queryPage({ limit: 50, offset: 0, startMs: 2000, endMs: 3000 });
+    expect(page.rows.map((r) => r.record.request_id)).toEqual(["in"]);
+    expect(page.total).toBe(1);
+  });
+
+  it("combines filters and counts the full filtered total (not just the page)", async () => {
+    const store = freshStore();
+    for (let i = 0; i < 4; i++) await seed(store, `e${i}`, 1000 + i * 1000, { status: "error" });
+    await seed(store, "ok", 9000, { status: "ok" });
+    const page = await store.queryPage({ limit: 2, offset: 0, status: "error" });
+    expect(page.total).toBe(4);
+    expect(page.rows).toHaveLength(2);
+    expect(page.rows.map((r) => r.record.request_id)).toEqual(["e3", "e2"]);
+  });
+
   it("preserves number/boolean|null/array types through JSON round-trip", async () => {
     const store = freshStore();
     const d = decision("req_1", {

@@ -2,21 +2,81 @@
   import { untrack } from 'svelte';
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
-  import { listRequests, type RequestListItem } from '$lib/api/requests.js';
+  import type { RequestListItem } from '$lib/api/requests.js';
   import { formatUsd } from '$lib/format.js';
+  import {
+    DEFAULT_FILTERS,
+    filtersToSearch,
+    type RangeKey,
+    type RequestsFilters,
+  } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
 
   // Request debug list (docs/07 list). READ-ONLY consumer of /admin/api/* — every
   // column is a field the backend recorded; nothing is recomputed (Principle 1). Principle 7:
   // the key is shown by display prefix only, never plaintext. Principle 5: `decided_by`
   // (classification stage) is shown distinctly from `fallback_count` (execution
-  // stage).
-  let { data }: { data: { items: RequestListItem[]; nextCursor?: string } } = $props();
+  // stage). Filters + pagination live in the URL (the loader re-reads them), so the
+  // view is a thin projection of the current querystring.
+  let {
+    data,
+  }: {
+    data: {
+      items: RequestListItem[];
+      total: number;
+      page: number;
+      pageSize: number;
+      filters: RequestsFilters;
+    };
+  } = $props();
 
-  let items = $state<RequestListItem[]>(untrack(() => data.items));
-  let nextCursor = $state<string | undefined>(untrack(() => data.nextCursor));
-  let loading = $state(false);
-  let error = $state<string | null>(null);
+  // Control state, seeded from the loaded filters and re-synced after every
+  // navigation (filter change / pager / Reset / back-button) so the inputs always
+  // mirror the URL truth. Empty string = "no filter" for the selects/inputs.
+  let range = $state<RangeKey>(untrack(() => data.filters.range));
+  let status = $state<'' | RequestListItem['status']>(untrack(() => data.filters.status ?? ''));
+  let decidedBy = $state<'' | RequestListItem['decided_by']>(
+    untrack(() => data.filters.decidedBy ?? ''),
+  );
+  let lane = $state(untrack(() => data.filters.lane ?? ''));
+  let model = $state(untrack(() => data.filters.model ?? ''));
+
+  $effect(() => {
+    const f = data.filters;
+    range = f.range;
+    status = f.status ?? '';
+    decidedBy = f.decidedBy ?? '';
+    lane = f.lane ?? '';
+    model = f.model ?? '';
+  });
+
+  const totalPages = $derived(Math.max(1, Math.ceil(data.total / Math.max(1, data.pageSize))));
+
+  // Navigate to the same route with the updated querystring. Changing any filter
+  // resets to page 1 (default); the pager passes an explicit `page` to override.
+  // The loader re-runs on the URL change and refetches that filtered page.
+  function go(next: Partial<RequestsFilters> = {}): void {
+    const f: RequestsFilters = {
+      range,
+      status: status || undefined,
+      decidedBy: decidedBy || undefined,
+      lane: lane.trim() || undefined,
+      model: model.trim() || undefined,
+      page: 1,
+      ...next,
+    };
+    const search = filtersToSearch(f);
+    void goto(search ? `?${search}` : '?', { keepFocus: true, noScroll: true });
+  }
+
+  function reset(): void {
+    range = DEFAULT_FILTERS.range;
+    status = '';
+    decidedBy = '';
+    lane = '';
+    model = '';
+    go();
+  }
 
   // Detail route for a row. The whole row is clickable (below); we also keep a
   // real <a> on the request-id cell so middle-click / open-in-new-tab / keyboard
@@ -26,8 +86,7 @@
   }
 
   // Navigate when the row is clicked, EXCEPT when the click originates on the
-  // inner request-id link — there the anchor handles its own navigation (so a
-  // plain click never fires twice, and modifier/middle clicks still open tabs).
+  // inner request-id link — there the anchor handles its own navigation.
   function onRowClick(event: MouseEvent, traceId: string): void {
     if ((event.target as HTMLElement).closest('a')) return;
     void goto(detailHref(traceId));
@@ -54,21 +113,6 @@
         return 'badge-neutral';
     }
   }
-
-  async function loadMore(): Promise<void> {
-    if (!nextCursor) return;
-    loading = true;
-    error = null;
-    try {
-      const res = await listRequests({ cursor: nextCursor });
-      items = [...items, ...res.items];
-      nextCursor = res.nextCursor;
-    } catch (e) {
-      error = e instanceof Error ? e.message : $t('Failed to load more requests');
-    } finally {
-      loading = false;
-    }
-  }
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
@@ -80,6 +124,81 @@
       )}
     </p>
   </header>
+
+  <!-- Filter bar. Selects apply immediately; the lane/model text inputs apply on
+       Enter (form submit). Changing any filter resets to page 1. -->
+  <form
+    class="card flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-end"
+    onsubmit={(e) => {
+      e.preventDefault();
+      go();
+    }}
+  >
+    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
+      {$t('Date range')}
+      <select data-testid="filter-range" class="select" bind:value={range} onchange={() => go()}>
+        <option value="all">{$t('All time')}</option>
+        <option value="today">{$t('Today')}</option>
+        <option value="24h">{$t('Last 24 hours')}</option>
+        <option value="7d">{$t('Last 7 days')}</option>
+        <option value="30d">{$t('Last 30 days')}</option>
+      </select>
+    </label>
+
+    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
+      {$t('Status')}
+      <select data-testid="filter-status" class="select" bind:value={status} onchange={() => go()}>
+        <option value="">{$t('All')}</option>
+        <option value="ok">{$t('ok')}</option>
+        <option value="error">{$t('error')}</option>
+      </select>
+    </label>
+
+    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
+      {$t('Decided by')}
+      <select
+        data-testid="filter-decided-by"
+        class="select"
+        bind:value={decidedBy}
+        onchange={() => go()}
+      >
+        <option value="">{$t('All')}</option>
+        <option value="rules">{$t('rules')}</option>
+        <option value="eval">{$t('eval')}</option>
+        <option value="default">{$t('default')}</option>
+        <option value="fallback">{$t('fallback')}</option>
+      </select>
+    </label>
+
+    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
+      {$t('Lane')}
+      <input
+        data-testid="filter-lane"
+        class="input"
+        type="text"
+        bind:value={lane}
+        placeholder={$t('e.g. premium')}
+      />
+    </label>
+
+    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
+      {$t('Model')}
+      <input
+        data-testid="filter-model"
+        class="input"
+        type="text"
+        bind:value={model}
+        placeholder={$t('Search model')}
+      />
+    </label>
+
+    <div class="flex items-center gap-2">
+      <button type="submit" class="btn-secondary">{$t('Apply')}</button>
+      <button type="button" data-testid="filter-reset" class="btn-secondary" onclick={reset}
+        >{$t('Reset')}</button
+      >
+    </div>
+  </form>
 
   <div class="card flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
     <span class="text-xs font-medium uppercase tracking-wide text-ink-muted"
@@ -99,17 +218,11 @@
     </span>
   </div>
 
-  {#if error}
-    <p class="alert-error" role="alert">
-      {error}
-    </p>
-  {/if}
-
-  {#if items.length === 0}
+  {#if data.items.length === 0}
     <div data-testid="requests-empty" class="empty-state">
-      <p class="font-medium text-ink-body">{$t('No requests recorded yet.')}</p>
+      <p class="font-medium text-ink-body">{$t('No requests match these filters.')}</p>
       <p class="mt-1 text-ink-muted">
-        {$t('Once clients send traffic through the gateway, every routing decision shows up here.')}
+        {$t('Try widening the date range or clearing filters.')}
       </p>
     </div>
   {:else}
@@ -170,7 +283,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each items as r (r.trace_id)}
+          {#each data.items as r (r.trace_id)}
             <!-- The whole row links to the detail page; the request-id cell keeps a
                  real <a> for keyboard / open-in-new-tab. -->
             <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -218,13 +331,30 @@
         </tbody>
       </table>
     </div>
-  {/if}
 
-  {#if nextCursor}
-    <div class="flex justify-center">
-      <button type="button" class="btn-secondary" disabled={loading} onclick={loadMore}
-        >{loading ? $t('Loading…') : $t('Load more')}</button
-      >
+    <!-- Pagination footer: time-desc numbered pages. `total` reflects the active
+         filters so "Page X of Y" is consistent with the rows shown. -->
+    <div class="flex items-center justify-between gap-3 text-sm text-ink-muted">
+      <span data-testid="pager-status">
+        {$t('Page {page} of {pages}', { page: data.page, pages: totalPages })} ·
+        {$t('{total} requests', { total: data.total })}
+      </span>
+      <div class="flex items-center gap-2">
+        <button
+          type="button"
+          data-testid="pager-prev"
+          class="btn-secondary"
+          disabled={data.page <= 1}
+          onclick={() => go({ page: data.page - 1 })}>{$t('Previous')}</button
+        >
+        <button
+          type="button"
+          data-testid="pager-next"
+          class="btn-secondary"
+          disabled={data.page >= totalPages}
+          onclick={() => go({ page: data.page + 1 })}>{$t('Next')}</button
+        >
+      </div>
     </div>
   {/if}
 </section>

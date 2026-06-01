@@ -133,9 +133,36 @@ export interface RecentDecisionRecord {
   createdAt: Date;
 }
 
+// Filter + page request for the admin Debug list (docs/07). `limit`/`offset` drive
+// numbered pagination (createdAt DESC); the rest are optional filters. `startMs`/
+// `endMs` bound createdAt as a half-open window [startMs, endMs) — same convention
+// as queryWindow. `status` matches the denormalized final_status column; `decidedBy`
+// / `lane` / `model` are extracted from the decision JSON by the adapter (`model`
+// matches the requested OR served model, substring, case-insensitive).
+export interface TelemetryPageQuery {
+  limit: number;
+  offset: number;
+  startMs?: number;
+  endMs?: number;
+  status?: DecisionRecord["final"]["status"];
+  decidedBy?: DecisionRecord["classifier"]["decided_by"];
+  lane?: string;
+  model?: string;
+}
+
+// One page of decision rows + the TOTAL matching the same filters (NOT just this
+// page) so the UI can render "Page X of Y" without a second round-trip.
+export interface TelemetryPage {
+  rows: RecentDecisionRecord[];
+  total: number;
+}
+
 export interface TelemetryStore {
   insert(input: InsertTelemetryInput): Promise<{ id: string }>;
   queryRecent(limit: number): Promise<RecentDecisionRecord[]>; // most recent N, createdAt desc
+  // Filtered + paginated recent list for the admin Debug UI. Same createdAt DESC
+  // ordering as queryRecent; returns the page plus the full filtered total.
+  queryPage(query: TelemetryPageQuery): Promise<TelemetryPage>;
   getByRequestId(requestId: string): Promise<DecisionRecord | null>;
   // POST-MVP Agentic Signals (docs/02). Read every decision record whose
   // createdAt falls in [startMs, endMs) so the background Signal Collector can

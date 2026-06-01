@@ -109,6 +109,36 @@ function makeTelemetry(seed: DecisionRecord[] = []): TelemetryStore {
         .slice(0, limit)
         .map((record, i) => ({ record, createdAt: new Date(1_700_000_000_000 - i * 1000) }));
     },
+    async queryPage(query) {
+      // Faithful in-memory mirror of the SQL adapters so the route's filter +
+      // pagination passthrough is exercised. Seed order is treated as most-recent
+      // first (descending deterministic timestamps).
+      const stamped = rows.map((record, i) => ({
+        record,
+        createdAt: new Date(1_700_000_000_000 - i * 1000),
+      }));
+      const m = query.model?.toLowerCase();
+      const matched = stamped.filter(({ record, createdAt }) => {
+        const ms = createdAt.getTime();
+        if (query.startMs !== undefined && ms < query.startMs) return false;
+        if (query.endMs !== undefined && ms >= query.endMs) return false;
+        if (query.status !== undefined && record.final.status !== query.status) return false;
+        if (query.decidedBy !== undefined && record.classifier.decided_by !== query.decidedBy)
+          return false;
+        if (query.lane !== undefined && record.lane.selected_lane !== query.lane) return false;
+        if (m !== undefined) {
+          const hit =
+            record.requested_model.toLowerCase().includes(m) ||
+            (record.final.model_alias ?? "").toLowerCase().includes(m);
+          if (!hit) return false;
+        }
+        return true;
+      });
+      return {
+        rows: matched.slice(query.offset, query.offset + query.limit),
+        total: matched.length,
+      };
+    },
     async getByRequestId(id) {
       return rows.find((r) => r.request_id === id) ?? null;
     },
@@ -548,13 +578,20 @@ describe("admin.api requests", () => {
     const seed = [decision("trace-1", "premium"), decision("trace-2", "economy")];
     const app = buildApp(buildDeps({ telemetry: makeTelemetry(seed) }));
 
-    // The list returns the full (already-redacted) DecisionRecord per row so the
-    // SPA can surface the classification stage / candidate chain / cost without
-    // recomputing them (Principle 1, Principle 5). It carries no plaintext key/payload (Principle 7).
-    const list = (await (await app.request("/admin/api/requests")).json()) as Array<
-      DecisionRecord & { created_at: number }
-    >;
-    expect(list).toHaveLength(2);
+    // The list returns a paginated envelope; each item is the full (already-
+    // redacted) DecisionRecord so the SPA can surface the classification stage /
+    // candidate chain / cost without recomputing them (Principle 1, Principle 5).
+    // It carries no plaintext key/payload (Principle 7).
+    const page = (await (await app.request("/admin/api/requests")).json()) as {
+      items: Array<DecisionRecord & { created_at: number }>;
+      total: number;
+      page: number;
+      pageSize: number;
+    };
+    expect(page.total).toBe(2);
+    expect(page.page).toBe(1);
+    expect(page.items).toHaveLength(2);
+    const list = page.items;
     expect(list[0]?.trace_id).toBe("trace-1");
     expect(list[0]?.lane.selected_lane).toBe("premium");
     expect(list[0]?.classifier.decided_by).toBe("rules");
@@ -569,6 +606,43 @@ describe("admin.api requests", () => {
     expect(detail.classifier.task_type).toBe("coding"); // classification stage
     expect(detail.lane.candidate_chain).toEqual(["premium", "balanced"]); // lane candidate chain
     expect(detail.provider_attempts).toHaveLength(1); // provider attempts
+  });
+
+  it("forwards filters + pagination to the store and returns the page envelope", async () => {
+    const ok1 = decision("ok-1", "premium");
+    const err = decision("err-1", "balanced");
+    err.final = { ...err.final, status: "error", error_reason: "upstream_error" };
+    const ok2 = decision("ok-2", "economy");
+    const app = buildApp(buildDeps({ telemetry: makeTelemetry([ok1, err, ok2]) }));
+
+    // status filter narrows to the single error row (total reflects the filter).
+    const filtered = (await (await app.request("/admin/api/requests?status=error")).json()) as {
+      items: Array<{ trace_id: string }>;
+      total: number;
+    };
+    expect(filtered.total).toBe(1);
+    expect(filtered.items.map((r) => r.trace_id)).toEqual(["err-1"]);
+
+    // pageSize=2 page=2 → the 3rd row only; total stays the full unfiltered count.
+    const p2 = (await (await app.request("/admin/api/requests?pageSize=2&page=2")).json()) as {
+      items: Array<{ trace_id: string }>;
+      total: number;
+      page: number;
+      pageSize: number;
+    };
+    expect(p2.total).toBe(3);
+    expect(p2.page).toBe(2);
+    expect(p2.pageSize).toBe(2);
+    expect(p2.items.map((r) => r.trace_id)).toEqual(["ok-2"]);
+  });
+
+  it("fails open on a malformed query (never 5xx) and serves page 1", async () => {
+    const app = buildApp(buildDeps({ telemetry: makeTelemetry([decision("t", "premium")]) }));
+    const res = await app.request("/admin/api/requests?page=abc&pageSize=-9&status=bogus");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { total: number; page: number };
+    expect(body.page).toBe(1);
+    expect(body.total).toBe(1);
   });
 
   it("returns 404 for an unknown trace id", async () => {

@@ -431,6 +431,106 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(win.map((r) => r.request_id)).toEqual(["a", "b"]); // c at 3000 excluded
     });
 
+    // queryPage drives the admin Debug list: numbered pagination + the error/role
+    // filters. This runs against BOTH adapters so the JSON-path filtering (sqlite
+    // json_extract vs postgres jsonb ->>) is verified against real engines.
+    it("queryPage paginates createdAt DESC and reports the full filtered total", async () => {
+      ctx = await make();
+      for (let i = 0; i < 5; i++) {
+        await ctx.stores.telemetry.insert({
+          decision: decision(`r${i}`),
+          apiKeyId: "k1",
+          createdAt: new Date(1000 + i * 1000),
+        });
+      }
+      const page1 = await ctx.stores.telemetry.queryPage({ limit: 2, offset: 0 });
+      expect(page1.total).toBe(5);
+      expect(page1.rows.map((r) => r.record.request_id)).toEqual(["r4", "r3"]);
+      const page3 = await ctx.stores.telemetry.queryPage({ limit: 2, offset: 4 });
+      expect(page3.rows.map((r) => r.record.request_id)).toEqual(["r0"]);
+    });
+
+    it("queryPage filters by status, decided_by, lane, model and date window", async () => {
+      ctx = await make();
+      const mk = (
+        id: string,
+        ms: number,
+        f: {
+          status?: "ok" | "error";
+          decidedBy?: DecisionRecord["classifier"]["decided_by"];
+          lane?: string;
+          requested?: string;
+          served?: string;
+        },
+      ) => {
+        const base = decision(id);
+        return ctx.stores.telemetry.insert({
+          apiKeyId: "k1",
+          createdAt: new Date(ms),
+          decision: {
+            ...base,
+            requested_model: f.requested ?? base.requested_model,
+            classifier: {
+              ...base.classifier,
+              decided_by: f.decidedBy ?? base.classifier.decided_by,
+            },
+            lane: { ...base.lane, selected_lane: f.lane ?? base.lane.selected_lane },
+            final: {
+              ...base.final,
+              status: f.status ?? base.final.status,
+              model_alias: f.served ?? base.final.model_alias,
+              error_reason: (f.status ?? base.final.status) === "error" ? "upstream_error" : null,
+            },
+          },
+        });
+      };
+      // ok_rules uses non-gpt models so the "gpt-4o" search below excludes it
+      // (the shared decision() default requested_model is "gpt-4o").
+      await mk("ok_rules", 1000, {
+        status: "ok",
+        decidedBy: "rules",
+        lane: "balanced",
+        requested: "claude-3",
+        served: "claude-x",
+      });
+      await mk("err_eval", 2000, {
+        status: "error",
+        decidedBy: "eval",
+        lane: "premium",
+        served: "GPT-4o",
+      });
+      await mk("ok_eval", 3000, {
+        status: "ok",
+        decidedBy: "eval",
+        lane: "premium",
+        requested: "gpt-4o-mini",
+      });
+
+      expect(
+        (await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, status: "error" })).rows.map(
+          (r) => r.record.request_id,
+        ),
+      ).toEqual(["err_eval"]);
+      expect(
+        (await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, decidedBy: "eval" })).total,
+      ).toBe(2);
+      expect(
+        (await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, lane: "premium" })).total,
+      ).toBe(2);
+      // model matches requested OR served, case-insensitive
+      expect(
+        (await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, model: "gpt-4o" })).rows
+          .map((r) => r.record.request_id)
+          .sort(),
+      ).toEqual(["err_eval", "ok_eval"]);
+      // half-open [start, end)
+      expect(
+        (
+          await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, startMs: 2000, endMs: 3000 })
+        ).rows.map((r) => r.record.request_id),
+      ).toEqual(["err_eval"]);
+    });
+
     it("rejects a duplicate request_id (unique constraint)", async () => {
       ctx = await make();
       await ctx.stores.telemetry.insert({
