@@ -276,6 +276,7 @@
   "Raw": "Raw",
   "Expand": "Expand",
   "Collapse": "Collapse",
+  "Show all {count} dimensions": "Show all {count} dimensions",
   "Show remaining {count} items": "Show remaining {count} items",
   "Max depth reached": "Max depth reached",
   "(empty object)": "(empty object)",

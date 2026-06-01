@@ -274,6 +274,7 @@
   "Raw": "原始",
   "Expand": "展開",
   "Collapse": "收起",
+  "Show all {count} dimensions": "展開查看全部 {count} 項",
   "Show remaining {count} items": "展開剩餘 {count} 項",
   "Max depth reached": "已達最大深度",
   "(empty object)": "（空物件）",
