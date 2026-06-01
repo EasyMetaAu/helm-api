@@ -20,12 +20,12 @@
 
 **Helm 做的事。** Helm 站在你的应用和各家模型供应商中间。应用照常把 OpenAI 或 Anthropic 请求发给 Helm；Helm 判断这条请求该用哪个模型，调用对应的供应商（失败就自动换备用），并记录每一次决策。你的应用始终只需要设置 `base_url` 和 API key——所有路由逻辑都放在一份你自己掌控的配置文件里。
 
-你填的不再是某个模型名，而是一条 **lane**（车道）——比如 `economy`、`balanced`、`premium` 这样的档位。Helm 会在背后把每条 lane 对应到真实的模型，所以你换模型的时候，应用一行都不用改。
+模型不用你来选。应用发 `model: "auto"`，Helm 就把这条请求归入一条 **lane**（车道）——比如 `economy`、`balanced`、`premium` 这样的档位。每条 lane 对应哪个真实模型，由你在配置里说了算，所以换模型、调成本、改回退链，都不用动应用代码。（某次调用就想用某个具体模型？给 key 开了权限就能直接点名——见下方“怎么调用”。）
 
 ```python
 # 你的应用：还是同一个 OpenAI 客户端，只换 base_url 和 key。
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="<helm-key>")
-client.chat.completions.create(model="balanced", messages=[...])   # 用哪个模型，交给 Helm
+client.chat.completions.create(model="auto", messages=[...])   # 交给 Helm 分类并路由
 ```
 
 ---
@@ -98,13 +98,13 @@ curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $HELM_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "balanced",
+    "model": "auto",
     "messages": [{"role": "user", "content": "用两句话解释一致性哈希。"}],
     "stream": true
   }'
 ```
 
-`model` 字段填的是 **lane** 名，而不是某家厂商的具体型号：
+三个端点，都用 Helm 的 API key 鉴权：
 
 | 端点 | 协议 | 流式 |
 |---|---|---|
@@ -112,7 +112,28 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ❌ 暂不支持（0.1） |
 
-> 可以填 `economy`、`balanced`、`premium`，或者像 `coding` 这样的任务 lane。留空（或填一个 Helm 不认识的名字），Helm 就自己替你选一条 lane。核心里已经有 Gemini 适配器，只是还没接成路由——见[路线图](docs/09-roadmap.md)。
+**`model` 字段填什么：**
+
+| 取值 | Helm 怎么处理 |
+|---|---|
+| `auto`（推荐） | 自动分类这条请求，并路由到最合适的 lane。 |
+| 某个模型别名，例如 `openai-crs/gpt-5.5` | 跳过路由，直接用这个模型——仅限被授予自定义模型权限的 key。 |
+
+> 用普通 key 时，不管填什么都会自动路由，所以直接填 `auto` 就行。lane 本身（`economy`、`balanced`、`premium`、`coding`……）由运维在 `lanes.yaml` 和控制台里配置——Helm 负责把每条请求归入某条 lane，客户端不用逐次去选。核心里已经有 Gemini 适配器，只是还没接成路由——见[路线图](docs/09-roadmap.md)。
+
+### 看清一条请求是怎么路由的
+
+每个 `/v1/chat/completions` 响应都会带上能解释这次决策的头部，不打开控制台也能快速排查：
+
+| 头部 | 含义 |
+|---|---|
+| `x-helm-lane` | 请求最终落在哪条 lane |
+| `x-helm-final-model` | 真正应答的模型别名 |
+| `x-helm-provider-model` | 实际发给上游的模型 id |
+| `x-helm-decided-by` | lane 是怎么定下来的（`rules`、`eval`、`fallback`……） |
+| `x-helm-fallback-reason` | 如果发生了回退，原因是什么 |
+
+开启限流后，响应还会带上 `x-ratelimit-limit`、`x-ratelimit-remaining`、`x-ratelimit-reset`（429 时再加 `retry-after`）。
 
 ## 配置
 

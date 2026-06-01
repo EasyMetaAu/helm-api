@@ -20,12 +20,12 @@ Open-source · self-hosted · MIT
 
 **What Helm does.** Helm sits between your app and the model providers. Your app sends a normal OpenAI or Anthropic request to Helm; Helm decides which model should handle it, calls that provider (and switches to a backup if it fails), and records every decision. Your app only ever sets its `base_url` and API key — all the routing lives in a config file you control.
 
-Instead of naming a model, you name a **lane** — a tier like `economy`, `balanced`, or `premium`. Helm maps each lane to a real model behind the scenes, so you can change models without changing your app.
+You don't pick the model. Your app sends `model: "auto"`, and Helm sorts the request into a **lane** — a tier like `economy`, `balanced`, or `premium`. You decide in config how each lane maps to a real model, so you can change models, costs, and fallbacks without touching your app. (Need a specific model for one call? A key with the right permission can name it directly — see [Calling the gateway](#calling-the-gateway).)
 
 ```python
 # Your app: the same OpenAI client, just a new base_url and key.
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="<helm-key>")
-client.chat.completions.create(model="balanced", messages=[...])   # Helm picks the model
+client.chat.completions.create(model="auto", messages=[...])   # Helm classifies and routes
 ```
 
 ---
@@ -98,13 +98,13 @@ curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $HELM_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "balanced",
+    "model": "auto",
     "messages": [{"role": "user", "content": "Explain consistent hashing in two sentences."}],
     "stream": true
   }'
 ```
 
-Put a **lane** name in the `model` field, not a vendor model id:
+Three endpoints, all authenticated with a Helm API key:
 
 | Endpoint | Protocol | Streaming |
 |---|---|---|
@@ -112,7 +112,28 @@ Put a **lane** name in the `model` field, not a vendor model id:
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ❌ not yet (0.1) |
 
-> Use `economy`, `balanced`, `premium`, or a task lane like `coding`. Leave it blank (or send a name Helm doesn't know) and Helm picks a lane for you. A Gemini adapter exists in the core but isn't exposed as a route yet — see the [roadmap](docs/09-roadmap.md).
+**What to put in the `model` field:**
+
+| Value | What Helm does |
+|---|---|
+| `auto` *(recommended)* | Classifies the request and routes it to the best lane automatically. |
+| a model alias, e.g. `openai-crs/gpt-5.5` | Uses exactly that model and skips routing — only for API keys granted custom-model permission. |
+
+> With a standard key the routing is automatic no matter what you send, so just use `auto`. The lanes themselves (`economy`, `balanced`, `premium`, `coding`, …) are configured by the operator in `lanes.yaml` and the dashboard — Helm assigns each request to one; clients don't choose a lane per call. A Gemini adapter exists in the core but isn't routed yet — see the [roadmap](docs/09-roadmap.md).
+
+### Seeing how a request was routed
+
+Every `/v1/chat/completions` response carries headers that explain the decision — quick debugging without opening the dashboard:
+
+| Header | Meaning |
+|---|---|
+| `x-helm-lane` | The lane the request landed in |
+| `x-helm-final-model` | The model alias that actually answered |
+| `x-helm-provider-model` | The upstream model id sent on the wire |
+| `x-helm-decided-by` | How the lane was chosen (`rules`, `eval`, `fallback`, …) |
+| `x-helm-fallback-reason` | Why it fell back, when it did |
+
+When rate limiting is on, responses also include `x-ratelimit-limit`, `x-ratelimit-remaining`, and `x-ratelimit-reset` (plus `retry-after` on a 429).
 
 ## Configuration
 
