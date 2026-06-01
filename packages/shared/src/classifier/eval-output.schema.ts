@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Layer-2 eval output schema (docs/03 §「任务分类」). The small eval model emits
+// Layer-2 eval output schema (docs/03 §Task classification). The small eval model emits
 // a strict JSON object judging the request's lane. This output is UNTRUSTED
 // external input — it is validated here and, on any failure, the consumer
 // (eval.cascade) fails open to balanced (CLAUDE.md principle 3). Zod is the

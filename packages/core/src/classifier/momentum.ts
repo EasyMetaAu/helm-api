@@ -1,7 +1,7 @@
 import type { ClassifierRulesConfig } from "@helm/shared";
 import type { Complexity } from "./tiers.js";
 
-// Session momentum — a single short follow-up ("yes", "go on", "再写一段") would,
+// Session momentum — a single short follow-up ("yes", "go on", "write another paragraph") would,
 // if classified in isolation, get scored `simple` and drag a complex/reasoning
 // conversation off-course. Momentum maintains a short, TTL'd classification
 // history per `x-session-key` and, when THIS message is short, blends the

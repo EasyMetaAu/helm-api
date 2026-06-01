@@ -3,16 +3,16 @@ import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps } from "./deps.js";
 
 // /admin/api/requests — request debugging (TelemetryStore, READ-ONLY). Surfaces
-// the docs/07 decision fields: 分类层级, 命中策略, lane 候选链, provider 尝试, 成本,
-// 错误, trace_id.
+// the docs/07 decision fields: classification stage, matched policy, lane candidate
+// chain, provider attempts, cost, error, trace_id.
 //
 // Both the list and the detail return the full (already-redacted) DecisionRecord:
-// it carries NO plaintext key or private payload (原则7), so there is nothing to
+// it carries NO plaintext key or private payload (Principle 7), so there is nothing to
 // strip. The list view in the SPA needs the per-row classification stage
 // (`decided_by`), candidate lane, fallback count and cost — all of which live in
 // the record — so projecting to a 4-field summary here would force the UI to
 // recompute/guess them (and conflate classification vs execution fallback,
-// breaking 原则5). Returning the records keeps the UI a pure consumer (原则1).
+// breaking Principle 5). Returning the records keeps the UI a pure consumer (Principle 1).
 
 const DEFAULT_LIMIT = 100;
 
@@ -20,9 +20,9 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   // GET /requests -> (DecisionRecord & { created_at })[] (most recent first;
   // already redacted). The store pairs each record with its recorded timestamp
   // (a separate column, kept out of the redacted record); we flatten it onto the
-  // row as `created_at` (epoch ms) so the Debug UI can render the 「时间」 column
-  // without recomputing or fabricating it (原则1). created_at is a routing
-  // timestamp — it carries no plaintext key/payload (原则7).
+  // row as `created_at` (epoch ms) so the Debug UI can render the "Time" column
+  // without recomputing or fabricating it (Principle 1). created_at is a routing
+  // timestamp — it carries no plaintext key/payload (Principle 7).
   app.get("/admin/api/requests", async (c) => {
     const records = await deps.telemetry.queryRecent(DEFAULT_LIMIT);
     return c.json(records.map((r) => ({ ...r.record, created_at: r.createdAt.getTime() })));

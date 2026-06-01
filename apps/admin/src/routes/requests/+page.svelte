@@ -6,9 +6,9 @@
   import { formatUsd } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
-  // Request debug list (docs/07 列表). READ-ONLY consumer of /admin/api/* — every
-  // column is a field the backend recorded; nothing is recomputed (原则1). 原则7:
-  // the key is shown by display prefix only, never plaintext. 原则5: `decided_by`
+  // Request debug list (docs/07 list). READ-ONLY consumer of /admin/api/* — every
+  // column is a field the backend recorded; nothing is recomputed (Principle 1). Principle 7:
+  // the key is shown by display prefix only, never plaintext. Principle 5: `decided_by`
   // (classification stage) is shown distinctly from `fallback_count` (execution
   // stage).
   let { data }: { data: { items: RequestListItem[]; nextCursor?: string } } = $props();
@@ -33,7 +33,7 @@
     void goto(detailHref(traceId));
   }
 
-  // Recorded time for the 「时间」 column: format the ISO ts for the local locale;
+  // Recorded time for the "timestamp" column: format the ISO ts for the local locale;
   // '—' when the record carried none (legacy row).
   function formatTs(ts: string): string {
     if (!ts) return '—';
@@ -41,7 +41,7 @@
     return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
   }
 
-  // Distinct label styling per classification-stage decision layer (原则5).
+  // Distinct label styling per classification-stage decision layer (Principle 5).
   function decidedByClass(d: RequestListItem['decided_by']): string {
     switch (d) {
       case 'rules':

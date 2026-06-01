@@ -10,7 +10,7 @@ import { type ResponsesRouteDeps, registerResponsesRoute } from "./responses.js"
 // stamp the four memory headers onto ir.metadata before pipeline.run. Without that
 // stamping the observe deps were wired (server.ts) yet never received a scope, so
 // `x-memory-mode: observe` persisted nothing on this surface (CLAUDE.md principle 8
-// observability gap / docs/08 阶段 1 dead on /v1/responses).
+// observability gap / docs/08 Phase 1 dead on /v1/responses).
 
 const AUTH = { Authorization: "Bearer helm_live_secret", "Content-Type": "application/json" };
 const MEM_HEADERS = {

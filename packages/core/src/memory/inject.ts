@@ -1,7 +1,7 @@
 import type { AssembledMessage, Observation, RawMessage, Reflection } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
 
-// Memory middleware — INJECT phase (docs/08 阶段 2「观察式记忆 MVP」). When
+// Memory middleware — INJECT phase (docs/08 Phase 2 "observational-memory MVP"). When
 // x-memory-mode=inject, this runs SYNCHRONOUSLY on the main request path, BEFORE
 // classification/execution, and does three things:
 //   1. load memory (project/resource reflections + thread observations + recent
@@ -35,7 +35,7 @@ export interface InjectDeps {
   // Enqueue the background observer job; returns observer_job_id. Inject NEVER
   // awaits the compression itself — it only enqueues (Observer stays background).
   enqueueObserverJob: (scope: InjectInput["scope"]) => Promise<string>;
-  // Hydrate tokens are a SEPARATE cost bucket (docs/08「成本核算」): they must NOT
+  // Hydrate tokens are a SEPARATE cost bucket (docs/08 "cost accounting"): they must NOT
   // be mixed into the actor / observer / reflector buckets.
   costSink: (bucket: "hydrate", tokens: number) => void;
   now: () => Date;
@@ -158,7 +158,7 @@ export async function assembleInjectedContext(
         memory_tokens_injected: 0,
         observer_job_id: writeback.observerJobId,
         // Memory load failed → the whole memory step is a degraded path; mark the
-        // writeback status as failed (docs/08「合理降级」 + record the failure).
+        // writeback status as failed (docs/08 "graceful degradation" + record the failure).
         // EXCEPT when there was no writeback target at all (no threadId): nothing
         // could be enqueued, so it stays an honest "skipped", not "failed".
         memory_writeback_status: writeback.status === "skipped" ? "skipped" : "failed",
@@ -193,7 +193,7 @@ export async function assembleInjectedContext(
     source: "thread_observation" as const,
   }));
 
-  // Recent raw messages are kept verbatim, in order (docs/08「必须保留近期原始消息」).
+  // Recent raw messages are kept verbatim, in order (docs/08 "recent raw messages must be preserved").
   const recentRawMessages: AssembledMessage[] = recentMessages.map((m) => ({
     role: m.role,
     content: m.content,
@@ -202,8 +202,8 @@ export async function assembleInjectedContext(
 
   // ── budget trim ──────────────────────────────────────────────────────────
   // HARD cap on INJECTED tokens (system + current are excluded from the budget).
-  // Priority — recent raw is spec-mandated and ALWAYS survives (docs/08「必须保留
-  // 近期原始消息」). Everything else yields to the budget in this order:
+  // Priority — recent raw is spec-mandated and ALWAYS survives (docs/08 "recent raw
+  // messages must be preserved"). Everything else yields to the budget in this order:
   //   1. resource reflection (sacrificed first under pressure),
   //   2. project reflection,
   //   3. observations (oldest-first) get whatever remains.

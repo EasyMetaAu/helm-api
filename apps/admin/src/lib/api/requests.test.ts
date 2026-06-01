@@ -4,7 +4,7 @@ import { toDetail, toListItem } from './requests.js';
 // The API client maps the backend DecisionRecord -> the docs/07 UI contract. Since
 // admin.requests-richfields the record carries the real telemetry fields
 // (key_prefix, latency_total_ms, fallback_count, cost_breakdown{eval/completion}),
-// so the client now reads them instead of placeholders. 原则7: key_prefix is
+// so the client now reads them instead of placeholders. Principle 7: key_prefix is
 // prefix-only, never the plaintext key; provider_raw stays redacted.
 
 function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {

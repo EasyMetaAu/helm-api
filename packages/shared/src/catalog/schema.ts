@@ -5,8 +5,8 @@ import { z } from "zod";
 //                   via `pnpm sync:catalog`, checked into the repo. Supply-chain
 //                   INPUT, never read at request time to pick a model.
 //   2. override   — manual config/capabilities.yaml + config/pricing.yaml.
-//                   Manual entries ALWAYS WIN (CLAUDE.md 实现约定).
-// Invalid override → fail-closed (principle 2). See docs/02 安全规则.
+//                   Manual entries ALWAYS WIN (CLAUDE.md implementation conventions).
+// Invalid override → fail-closed (principle 2). See docs/02 security rules.
 
 export const CapabilitiesSchema = z.object({
   supportsTools: z.boolean(),

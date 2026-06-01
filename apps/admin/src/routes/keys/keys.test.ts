@@ -4,7 +4,7 @@ import type { ApiKeyView } from '$lib/api/keys.js';
 import KeysPage from './+page.svelte';
 
 // The page consumes data from `load` (mocked via the `data` prop) and writes
-// through the keys API client (mocked). Hard security line (原则7 / docs/06):
+// through the keys API client (mocked). Hard security line (Principle 7 / docs/06):
 // list & detail expose ONLY the prefix + sha256 reference — never plaintext.
 
 const createKey = vi.fn();

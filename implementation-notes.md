@@ -5,6 +5,51 @@
 
 ---
 
+## 2026-06-01 · Reconcile stream-only capability gate with routing/cost tests (docs/03/04/07, Principle 5)
+
+**Context**: the stream-only capability gate (commit `3eb15ab`, `no_nonstream_support`) left **6 tests red on `main`** — they predated the gate and asserted that the `openai-crs/*` heads (gpt-5.4-mini, gpt-5.5; `requiresStreaming: true` in `capabilities.yaml`) serve **non-stream** requests. They no longer can: a non-stream request correctly SKIPS them and falls forward. Surfaced during the 0.1 doc-audit verification run.
+
+**Root cause (not a product bug — the gateway is behaving correctly)**: `capability/filter.ts` gate 6 skips a `requiresStreaming` model when `req.stream !== true`. So a non-stream economy request lands on `deepseek-crs/deepseek-flash`; a non-stream premium request lands on `zenmux/claude-opus-4.7`. The tests, not the runtime, were stale.
+
+**Fix (tests only — zero runtime change)**:
+- `apps/gateway/e2e/routing.spec.ts` scenarios 1/2/4 + `eval.spec.ts` scenario 2: send the requests as **streaming** (`stream: true`) so the stream-only lane HEAD is eligible and actually serves, preserving each test's "lane → its head model" intent. Assertions now read the debug headers (`x-helm-lane` / `x-helm-final-model` / `x-helm-provider-model`), which the gateway emits before the SSE body, instead of parsing a JSON body. Scenario 4 now genuinely exercises EXECUTION fallback: streaming means the head is actually invoked, 5xxs on the fail sentinel (the mock's injection runs before its stream branch), and the chain falls forward to `deepseek-flash` — previously it passed only because the non-stream head was skip-not-failed. Also corrected a stale `0.45` → `0.42` gate reference in the file header.
+- `apps/gateway/src/routes/execute.default-config.test.ts` (3 cases): these isolate JSON capability filtering + cost on the SHIPPED config and used `openai-crs/gpt-5.4-mini` as the "json-capable model that serves" — incidental, and now stream-only. Kept them NON-stream (the cost path backfills streamed cost in the route, not in `execute()`, so a non-stream served attempt is the right cost oracle) and switched the landing model to `deepseek-crs/deepseek-pro` (json-capable AND non-stream-capable). Cost expectation updated to deepseek-pro pricing (0.435/0.87 → `0.00087` for 1000+500 tokens).
+
+**Gate**: `pnpm test` 1255/1255; `pnpm test:e2e` 36/36; `pnpm typecheck` clean; `pnpm lint` exit 0.
+
+---
+
+## 2026-06-01 · 0.1 release — doc/code audit & English-ization (README, docs/01–11, all code comments)
+
+**Context**: preparing the 0.1 open-source release. The README and every `docs/*.md` were Chinese and **stale** (several still claimed the project was spec-first / not yet implemented), and ~93 source files carried Chinese in comments and test names. This pass produced an English-default bilingual README, rewrote all docs into English with **code as the source of truth**, and translated the codebase to 100% English. **No runtime behavior changed** — edits were limited to docs, comments, test-description strings, and two dead regex branches.
+
+**What was done**:
+- **README**: rewrote `README.md` (English, standard MIT-OSS layout) + new `README.zh-CN.md`, cross-linked with a language switch. Accurate to code: 3 wired client protocols, Responses non-streaming, default lanes, eval off by default, SQLite default.
+- **docs/**: rewrote `docs/README.md` + `01`–`11` + `research-notes.md` into English, corrected against code. Status tables updated from "not started" to "implemented / 0.1".
+- **Code**: translated Chinese → English in comments and test descriptions across `packages/shared`, `packages/core`, `apps/gateway`, `apps/admin`. Confirmed **zero hard-coded user-facing Chinese** — all admin UI text already flows through the i18n system (`apps/admin/src/locales/*.json`), which is left untouched, as are the `native` language display names in `apps/admin/src/lib/config/languages.ts`.
+
+**Doc ↔ code discrepancies found & corrected** (code is authoritative):
+1. **Stale status** (README, docs/README, docs/09): "spec-first / 尚未开始 / 待定" → the gateway, admin UI, core and stores are fully implemented and tested.
+2. **Client protocols** (docs/01, 05): only **3** are routed — `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses). A Gemini transformer exists in `packages/core/src/protocol/gemini/` but is **not mounted** (no route in `apps/gateway/src/server.ts`) → documented as roadmap.
+3. **Responses is non-streaming only** (docs/05): `stream:true` on `/v1/responses` returns a structured 400 (`apps/gateway/src/routes/responses.ts`). Chat + Messages stream via SSE.
+4. **Memory middleware** (docs/08): old doc said `memory_mode` was hardcoded `off` / dead. Reality: the **observe** phase is wired & active (`resolveMemoryScope` + `observeInbound`/`observeOutbound` in `chat.ts`, `messages-pipeline.ts`, `messages.ts`, `responses.ts`); only the **inject** phase (`assembleInjectedContext`) is never called → observe = implemented, inject = roadmap.
+5. **Classifier calibration drift** (docs/03): live `config/classifier.yaml` is `confidence_threshold 0.42`, `sigmoid_k 12`, tier boundaries `standard:-0.06 / complex:0.30 / reasoning:0.85`; eval model id is `deepseek-flash` (old docs said `deepseek/deepseek-v4-flash`). Docs now describe the mechanism and point at the YAML rather than hardcoding drift-prone numbers.
+6. **Complexity tier collapse 4 → 3**: classifier emits `simple | standard | complex | reasoning`, but routing only understands `simple | medium | complex` via `mapComplexity` (`apps/gateway/src/routes/classify.ts`); `reasoning` collapses to `complex` and is routing-inert. Documented in 03/04.
+7. **Explicit `auto` is not a passthrough model**: `routing/route-request.ts` excludes `requested_model === "auto"` from explicit passthrough (falls through to classification). Documented in 04.
+8. **Per-key lane cap beats policy `use_lane` pin** (`route-request.ts`): key caps apply after policy caps. Documented in 04.
+9. **`security` task type without a `security` lane**: `taskdetect.ts` can emit `task_type: security`, but `policies.yaml` pins complex security to `premium` instead. Documented in 03.
+10. **Decision record fields** (docs/02, 07): reconciled to the real `DecisionRecord` (`trace_id`, `key_prefix`, `fallback_reason`, `provider_attempts[].error_detail`, `latency_total_ms`, `fallback_count`, `cost_breakdown`).
+11. **Admin config shape** (docs/06, 11): `config/auth.yaml` ships only `require_api_key` + `bootstrap` — there is **no `admin:` block**, yet `resolveAdminAuth` (`apps/gateway/src/middleware/basic-auth.ts`) reads `cfg.admin.{enabled,username,password}`. In practice admin is configured via env (`HELM_ADMIN_USER`/`HELM_ADMIN_PASSWORD`), and **credentials being present auto-enables the admin surface** (when disabled, `/admin` + `/admin/api/*` are not mounted → 404). Docs treat the `admin:` block as optional and emphasize the env path. *Open item for maintainer: either add an `admin:` block to `auth.yaml` or document admin config as env-only.*
+
+**Decisions / notes**:
+- **This file (`implementation-notes.md`) stays in Chinese** for its historical entries — it is an internal engineering log, not in `docs/`, and 227k of retro-translation is out of scope/risk for 0.1. New entries (like this one) are written in English going forward.
+- **`apps/admin/src/routes/policies/policies.test.ts`**: removed the now-dead Chinese alternation branches from two regexes (`|自上而下|首条命中`, `|打分`); tests run under the `en` locale so the English branches already match.
+- **Kept verbatim**: i18n locale JSON, `native` language names (`简体中文` etc.), and the Chinese legal-entity name in the MIT copyright line (matches `LICENSE`).
+
+**Gate**: see the same-day verification run (typecheck / lint / test / e2e) below in the session; residual-CJK grep over tracked `*.ts`/`*.svelte`/`*.js` returns only the intentional `languages.ts` native names.
+
+---
+
 ## 2026-06-01 · stream-only 上游：能力过滤新增 `no_nonstream_support` 门（docs/03/07，原则 3/5）
 
 **背景**：`la.atmy.work` relay 的 `gpt-5.x`（gpt-5.5 / gpt-5.4-mini / gpt-5.3-codex-spark）是 **STREAM-ONLY**——非流式请求被上游 400 `"Stream must be set to true"`。而 `gpt-5.4-mini` 是 economy/balanced 的 **primary**，故每个**非流式**请求都在第一跳 400 后才 fail-over。客户端拿到 200（fail-over 有效），但每次 400 都 `breaker.recordFailure`，**持续非流式流量会把该 alias 的熔断器打到 OPEN**，进而连**流式**请求也被 `circuit_open` 跳过——一个被非流式流量误伤流式可用性的隐患（实弹集成测试 + 遥测 `error_detail` 排查发现）。

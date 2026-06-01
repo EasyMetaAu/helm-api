@@ -180,7 +180,7 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Per-key rate-limit OVERRIDE columns on api_keys (docs/06 "限流与配额"). Two
+    // Per-key rate-limit OVERRIDE columns on api_keys (docs/06 "rate limits & quotas"). Two
     // nullable integer columns: NULL = inherit the system default at check time;
     // a value (0 = unlimited) overrides that one dimension for this key. Additive
     // — existing rows get NULL and keep inheriting the default. Mirrors the sqlite

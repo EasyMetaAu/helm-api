@@ -8,7 +8,7 @@ import type { CatalogEntry } from "@helm/shared";
 // policy). For each candidate it walks the gates in a fixed order; the first
 // unmet gate short-circuits and returns a structured skip reason. That reason
 // is written into the decision record's `provider_attempts[].skip_reason` so
-// the debug UI can explain why a provider was skipped (docs/02 安全规则).
+// the debug UI can explain why a provider was skipped (docs/02 security rules).
 //
 // Framework-/network-/IO-free, deterministic: same input → same output
 // (principle 1 + principle 4). Capability data comes solely from `catalog.sync`

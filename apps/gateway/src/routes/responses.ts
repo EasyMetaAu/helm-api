@@ -149,7 +149,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       const detail = err instanceof Error ? err.message : "invalid Responses request";
       throw helmError("invalid_request", detail, traceId);
     }
-    // Memory scope (docs/08 阶段 1): parse the four memory headers at this HTTP
+    // Memory scope (docs/08 Phase 1): parse the four memory headers at this HTTP
     // boundary and stamp them onto the IR metadata bag (mirrors /v1/messages), so
     // the SHARED pipeline's observe phase can read the scope off ir.metadata
     // without touching HTTP (principle 1). Without this, /v1/responses was wired

@@ -21,7 +21,7 @@ export const MemoryScopeSchema = z.object({
 export type MemoryScope = z.infer<typeof MemoryScopeSchema>;
 
 // Request-level memory metadata surfaced to the request log / debug UI (docs/08
-// "调试 UI 字段"). observe NEVER hydrates, so memory_hydrated is always false and
+// "debug-UI field"). observe NEVER hydrates, so memory_hydrated is always false and
 // the hydrate/observer/reflector counters stay at their null/zero defaults until
 // the inject phase lights them up. This object carries NO injectable prompt.
 export const MemoryMetaSchema = z.object({

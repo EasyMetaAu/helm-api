@@ -6,11 +6,11 @@
   import DecisionChain from '$lib/components/DecisionChain.svelte';
   import JsonViewer from '$lib/components/JsonViewer.svelte';
 
-  // Request detail (docs/07 详情). READ-ONLY consumer — renders the recorded trail
-  // and recomputes nothing (原则1). When capture_payloads is on, the full request +
+  // Request detail (docs/07 detail). READ-ONLY consumer — renders the recorded trail
+  // and recomputes nothing (Principle 1). When capture_payloads is on, the full request +
   // response bodies are shown; when off, a clear "not recorded" notice. The key
   // never appears in plaintext (it lives in the Authorization header, not the body).
-  // 原则5: classification vs execution fallback stay separate (DecisionChain).
+  // Principle 5: classification vs execution fallback stay separate (DecisionChain).
   let {
     data,
   }: {

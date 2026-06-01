@@ -17,7 +17,7 @@ export const ADMIN_PASSWORD = "e2e-admin-pw";
 
 // A test-only API-key PREFIX we expect to see (prefix-only) in the request
 // debug views. The full plaintext below must NEVER appear in any admin page
-// (原则7 脱敏冒烟) — only its prefix may.
+// (Principle 7 redaction smoke test) — only its prefix may.
 export const SEED_KEY_PREFIX = "helm_live_seed";
 export const SEED_KEY_PLAINTEXT = "helm_live_seed_PLAINTEXT_MUST_NOT_LEAK_abcdef";
 

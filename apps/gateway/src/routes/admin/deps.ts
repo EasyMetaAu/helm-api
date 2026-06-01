@@ -3,8 +3,8 @@ import type { ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/sh
 
 // Injected dependency contracts for the admin API. Per CLAUDE.md principle 1 the
 // route files are PURE HTTP glue — they own no business logic and never touch the
-// filesystem or DB directly. Two落点 are deliberately separate (CLAUDE.md 原则2
-// 配置即代码):
+// filesystem or DB directly. The two persistence targets are deliberately separate
+// (CLAUDE.md Principle 2, config-as-code):
 //   - RULE config (lanes / policies / classifier) -> RuleStore (config/*.yaml or
 //     a runtime ConfigStore). Versionable, never the DB.
 //   - RUNTIME state (keys / telemetry) -> KeyStore / TelemetryStore. Never yaml.
@@ -14,7 +14,7 @@ import type { ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/sh
 // A typed read/write seam for the rule configs. Each accessor returns/accepts an
 // already-validated config object — the routes Zod-validate the inbound body
 // BEFORE calling `set*` so an invalid config is rejected (400) and never written
-// (fail-closed, 原则2). `lanes` is a name->Lane map matching LanesConfig minus the
+// (fail-closed, Principle 2). `lanes` is a name->Lane map matching LanesConfig minus the
 // `balanced`-required refinement concern (the route enforces shape via LaneSchema).
 export interface RuleStore {
   getLanes(): Promise<Record<string, Lane>>;
@@ -29,7 +29,7 @@ export interface RuleStore {
 // `get` returns the LIVE value; `save` validates + persists to the config_kv
 // store + applies live (logger level, rate-limit switch) — all wired in server.ts.
 // The route Zod-validates the inbound body against RuntimeSettingsSchema BEFORE
-// calling save (fail-closed, 原则2), so an invalid object is rejected (400) and
+// calling save (fail-closed, Principle 2), so an invalid object is rejected (400) and
 // never persisted nor applied.
 export interface SettingsAccess {
   get(): RuntimeSettings;
@@ -53,7 +53,7 @@ export interface AdminApiDeps {
   // deduped + sorted at startup. Read-only: the Lanes admin UI offers these as
   // combobox suggestions so an operator picks a real alias instead of hand-typing
   // one (a typo would silently break a fallback chain). A supply-chain detail
-  // (原则6) exposed only to the authenticated admin surface, never to API clients.
+  // (Principle 6) exposed only to the authenticated admin surface, never to API clients.
   modelAliases: string[];
   // Mint a fresh key (crypto). Injected for testability + single-source plaintext.
   genKey: () => GeneratedKeyParts;
@@ -72,7 +72,7 @@ export type { CreateKeyInput };
 // ── Wire shapes (admin-API-only response/request projections) ────────────────
 
 // A redacted key summary for the list view: prefix only, NEVER hash full-text or
-// plaintext (原则7, docs/06). `key_id` identifies the row for revocation.
+// plaintext (Principle 7, docs/06). `key_id` identifies the row for revocation.
 export interface KeySummary {
   key_id: string;
   prefix: string;
@@ -96,7 +96,8 @@ export interface CreatedKey {
 
 // Request-debug detail: the full decision trail (docs/07). BOTH the list and the
 // detail endpoints return the whole DecisionRecord — it already carries
-// classification层级, 命中策略, lane 候选链, provider 尝试, 成本, 错误, trace_id and
-// contains NO plaintext key/payload, so the SPA stays a pure consumer (原则1) and
-// the two fallback stages stay distinct (原则5) without backend re-projection.
+// the classification stage, matched policy, lane candidate chain, provider attempts,
+// cost, error, and trace_id, and contains NO plaintext key/payload, so the SPA stays
+// a pure consumer (Principle 1) and the two fallback stages stay distinct (Principle 5)
+// without backend re-projection.
 export type RequestDetail = DecisionRecord;

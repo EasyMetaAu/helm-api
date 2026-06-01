@@ -3,7 +3,7 @@
   import type { RequestDetail } from '$lib/api/requests.js';
   import { t } from '$lib/i18n';
 
-  // Cost breakdown for one request (docs/07「成本拆分，含 eval 评估自身的成本」).
+  // Cost breakdown for one request (docs/07 "cost breakdown, including eval's own cost").
   // Read-only: renders exactly the figures the backend recorded — no re-computation.
   let { cost }: { cost: RequestDetail['cost_breakdown'] } = $props();
 

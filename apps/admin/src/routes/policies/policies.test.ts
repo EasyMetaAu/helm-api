@@ -41,8 +41,8 @@ describe('policies page', () => {
   it('makes the first-match semantics visible (no scoring language)', () => {
     renderPage([policy()]);
     const explainer = screen.getByTestId('first-match-explainer');
-    expect(explainer.textContent ?? '').toMatch(/first[- ]?match|top to bottom|自上而下|首条命中/i);
-    expect(explainer.textContent ?? '').not.toMatch(/score|scoring|打分/i);
+    expect(explainer.textContent ?? '').toMatch(/first[- ]?match|top to bottom/i);
+    expect(explainer.textContent ?? '').not.toMatch(/score|scoring/i);
   });
 
   it("editing a row's match and saving PUTs the whole ordered list", async () => {

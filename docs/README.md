@@ -1,43 +1,63 @@
-# Helm API 文档
+# Helm API Documentation
 
-本目录存放 Helm API 的产品与技术规范。本仓库采用 **spec-first（规范先行）** 模式：这些文档定义了 MVP 的范围与架构，待范围锁定后再开始实现。文档按编号排序，建议按顺序阅读。
+This directory holds the product and technical specification for Helm API. The
+project is **implemented and at the 0.1 release**: the gateway, routing brain,
+classifier, protocol translation, store layer, and Admin UI are all built and
+covered by tests. The numbered documents below describe the system as it ships;
+read them in order.
 
-## 一段话讲清 Helm 是什么
+## Helm in one paragraph
 
-Helm API 是一个**开源、自托管**的 LLM 路由网关（MIT 协议，Docker 部署）——可以理解成"LLM 世界的 nginx"。它接收标准的 AI API 请求（OpenAI Chat、Anthropic Messages、OpenAI Responses，后续支持 Gemini），用确定性规则（必要时辅以默认关闭的小模型评估）按任务类型和复杂度分类，将其路由到一个可配置的 **lane** 而非裸的 provider 别名，通过主用和 fallback provider 执行，并记录每一次路由决策以便调试。客户端只需更改 `base_url` 和 API key。启动后自带管理界面，做基本规则管理。
+Helm API is an **open-source, self-hosted** LLM routing gateway (MIT license,
+deployed with Docker) — think of it as "**nginx for the LLM world**". It accepts
+standard AI API requests (OpenAI Chat Completions, Anthropic Messages, and
+OpenAI Responses today; Gemini is on the roadmap), uses deterministic rules
+(optionally aided by a small-model evaluation that is **off by default**) to
+classify each request by task type and complexity, and routes it to a
+configurable **lane** rather than to a bare provider alias. It executes the lane
+through a primary plus fallback providers and records every routing decision for
+debugging. Clients only change their `base_url` and API key. A management
+interface ships with the gateway for basic rule management.
 
-## 阅读顺序
+## Reading order
 
-| # | 文档 | 内容 |
-|---|---|---|
-| 01 | [总览与定位](01-overview.md) | Helm 是什么、nginx 定位、MVP 目标与非目标、核心闭环。 |
-| 02 | [架构](02-architecture.md) | 流水线、组件职责、内部请求结构、决策记录、配置布局、安全规则。 |
-| 03 | [分类级联](03-classification.md) | 三层级联（rules → eval → balanced）、任务分类、Manifest 规则引擎、小模型评估。 |
-| 04 | [路由与 Lane](04-routing-and-lanes.md) | 路由优先级、默认/任务 lane、策略、执行与回退。 |
-| 05 | [协议互译](05-protocol-translation.md) | Protocol Adapter 设计、统一 IR、流式状态机、必处理的坑。 |
-| 06 | [鉴权、API Key 与限流](06-auth-and-rate-limits.md) | 强制鉴权、启动引导 key、Key 管理、per-key 限流。 |
-| 07 | [错误模型与可观测性](07-observability.md) | 结构化错误、错误分类表、Debug UI。 |
-| 08 | [记忆中间件](08-memory-middleware.md) | MVP 之后的可选记忆层（不在 MVP 内）。 |
-| 09 | [MVP 路线图与成功标准](09-roadmap.md) | 分阶段路线图与验收标准。 |
-| 10 | [部署（自托管 / Docker）](10-deployment.md) | Docker 部署、配置来源、启动行为、升级。 |
-| 11 | [管理界面（Admin UI）](11-admin-ui.md) | Web 控制台、规则管理、HTTP Basic 认证。 |
-| — | [调研笔记](research-notes.md) | 附录：Manifest、协议互译、probe 等开源参考与对比。 |
+| # | Document | Contents |
+|---|----------|----------|
+| 01 | [Overview & Positioning](01-overview.md) | What Helm is, the nginx analogy, goals & non-goals, the core product loop. |
+| 02 | [Architecture](02-architecture.md) | Pipeline, component responsibilities, internal request shape, decision record, config layout, security rules. |
+| 03 | [Classification Cascade](03-classification.md) | The three-layer cascade (rules → optional eval → balanced fallback), task detection, the rule engine, small-model eval. |
+| 04 | [Routing & Lanes](04-routing-and-lanes.md) | Routing priority, default & task lanes, policies, execution and the two fallbacks. |
+| 05 | [Protocol Translation](05-protocol-translation.md) | Protocol Adapter design, the unified IR, the streaming state machine, the footguns that are handled. |
+| 06 | [Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md) | Mandatory auth, the bootstrap key, key management, per-key rate limits. |
+| 07 | [Error Model & Observability](07-observability.md) | Structured errors, the error-class table, the Debug UI. |
+| 08 | [Memory Middleware](08-memory-middleware.md) | The optional memory layer (observe / inject). |
+| 09 | [Roadmap](09-roadmap.md) | Phased roadmap and success criteria. |
+| 10 | [Deployment (Self-hosted / Docker)](10-deployment.md) | Docker deployment, configuration sources, startup behavior, upgrades. |
+| 11 | [Admin UI](11-admin-ui.md) | Web console, rule management, HTTP Basic auth. |
+| — | [Research Notes](research-notes.md) | Appendix: open-source references and comparisons for the rule engine, protocol translation, probes, etc. |
 
-## 设计原则
+## Design principles
 
-让 Helm 比前身 `llm-router` 更聚焦：
+These keep Helm more focused than its predecessor `llm-router`:
 
-- **开源自托管，不做 SaaS。** MIT 协议，Docker 自部署，内部使用。
-- **对外暴露 lane 抽象，而非模型市场。** 用户选 `economy / balanced / premium`；provider 别名是内部供应链细节。
-- **路由内核精简且可解释。** 策略显式可检视，运行时无黑盒打分。
-- **确定性分类优先。** 本地规则定第一层，小模型评估默认关闭、置于其后。
-- **记忆是中间件，不进 MVP。** 它帮请求被理解，绝不重写 lane 规则。
-- **任何出人意料的 provider 选择都能从日志解释。**
+- **Open-source and self-hosted, not SaaS.** MIT-licensed, deployed by Docker,
+  for internal use.
+- **Expose the lane abstraction, not a model marketplace.** Users choose
+  `economy / balanced / premium`; provider aliases are an internal supply-chain
+  detail.
+- **A small, explainable routing core.** Policies are explicit and inspectable;
+  there is no black-box scoring at runtime.
+- **Deterministic classification first.** Local rules form Layer 1; the
+  small-model eval is off by default and sits behind them.
+- **Memory is middleware.** It helps a request be understood; it never rewrites
+  lane rules.
+- **Every surprising provider choice is explainable from the logs.**
 
-## 状态
+## Status
 
-| 阶段 | 状态 |
-|---|---|
-| 规格 | 已起草（即这些文档） |
-| MVP 范围锁定 | 待定 |
-| 实现 | 尚未开始 |
+| Stage | Status |
+|-------|--------|
+| Specification | Implemented (these documents describe the shipping system) |
+| Core gateway (routing, classification, protocol translation, store) | Implemented |
+| Admin UI | Implemented |
+| Release | 0.1 |

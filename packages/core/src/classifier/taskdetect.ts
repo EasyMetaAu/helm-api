@@ -4,7 +4,7 @@ import { detectCodeBlock, detectFilePath, detectStackTrace, detectUrl } from "./
 // Task-type detection — orthogonal to complexity tiers (this module produces NO
 // rawScore and reads none). It fuses three independent evidence paths, borrowing
 // Manifest's "dimension→category mapping + tool-name prefix + structural signal"
-// approach (docs/03 §第1层任务检测, research-notes §Manifest):
+// approach (docs/03 §Layer-1 task detection, research-notes §Manifest):
 //   1. keyword sets       — DATA in cfg.task_keywords
 //   2. tool-name prefixes — DATA in cfg.tool_prefixes (browser_/code_/sql_…)
 //   3. structural signals — CODE here (shared regexes from ./signals.ts)
@@ -200,7 +200,7 @@ function collectStrings(content: unknown, out: string[]): void {
 
 // Tool name lives at tools[].function.name (OpenAI shape) or tools[].name. The
 // MVP keeps `tools` an open array, so every access is defensive: malformed /
-// missing entries are simply skipped (no throw — task spec 边界).
+// missing entries are simply skipped (no throw — task spec boundary).
 function extractToolNames(tools: DetectInput["tools"]): string[] {
   if (!Array.isArray(tools)) return [];
   const names: string[] = [];

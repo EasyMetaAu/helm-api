@@ -7,7 +7,7 @@ import type { AdminApiDeps } from "./deps.js";
 // RuleStore, NEVER the DB). The wire shape is a bare Policy[] (the editor edits a
 // list); we wrap/unwrap the `{ policies: [...] }` config envelope at this seam and
 // validate the whole set with the shared PoliciesConfigSchema. An unknown `match`
-// field (strict schema) -> 400, config unchanged (fail-closed, 原则2).
+// field (strict schema) -> 400, config unchanged (fail-closed, Principle 2).
 
 export function registerPoliciesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   // GET /policies -> Policy[]

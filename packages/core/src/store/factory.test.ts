@@ -7,7 +7,7 @@ import { createStore } from "./factory.js";
 import { SqliteKeyStore } from "./sqlite/keystore.js";
 
 // The factory is the single config-driven switch point: core depends only on the
-// Store ports, the factory binds the concrete driver ONCE (CLAUDE.md "DB 抽象层").
+// Store ports, the factory binds the concrete driver ONCE (CLAUDE.md "DB abstraction layer").
 // Fail-closed is the contract: an unknown driver, or a supabase driver with no
 // resolved connection string, must THROW — never silently fall back to a wrong
 // store (principle 2). The Pg* adapters themselves are exercised end-to-end by

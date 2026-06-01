@@ -106,7 +106,11 @@ test.describe("eval cascade e2e", () => {
     request,
   }) => {
     const res = await request.post("/v1/chat/completions", {
-      data: chat(ambiguous("s2")),
+      // Stream: the premium head (openai-crs/gpt-5.5) is stream-only, so a
+      // non-stream request would skip it (no_nonstream_support) and serve a
+      // fallback; streaming keeps the asserted final model the lane head. The
+      // internal eval call is a separate non-stream classify request, unaffected.
+      data: chat(ambiguous("s2"), { stream: true }),
       headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(res.status()).toBe(200);

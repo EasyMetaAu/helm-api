@@ -10,7 +10,7 @@ import { CatalogError, loadCatalog } from "./index.js";
 // with the two manual OVERRIDE yamls (capabilities.yaml / pricing.yaml). The pure
 // merge lives in `loadCatalog` (IO-free); this thin module only does the file IO
 // (mirrors config/loader.ts — core may read files, it just may not import a web
-// framework, principle 1). Manual entries win per-field (CLAUDE.md 实现约定); an
+// framework, principle 1). Manual entries win per-field (CLAUDE.md implementation conventions); an
 // invalid override fails closed (principle 2). Capability metadata flows from here
 // into the routing pipeline's capability filter — replacing the empty Map that
 // made the filter fail-open-skip every candidate.

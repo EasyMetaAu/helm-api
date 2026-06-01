@@ -64,7 +64,7 @@ describe("SqliteTelemetryStore", () => {
     expect(recent[0]?.record).toEqual(decision("req_1"));
     expect(recent[0]?.record.provider_attempts).toHaveLength(2);
     // queryRecent surfaces the recorded timestamp alongside the record so the
-    // Debug UI can render the 「时间」 column without fabricating it.
+    // Debug UI can render the "Time" column without fabricating it.
     expect(recent[0]?.createdAt.getTime()).toBe(at.getTime());
   });
 

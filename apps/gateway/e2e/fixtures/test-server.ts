@@ -32,7 +32,7 @@ await keyStore.createKey({
 // a pre-built, redacted DecisionRecord — NOT a live upstream call — so the admin
 // request list/detail have a deterministic row with a trace_id, a classified
 // lane, a candidate chain, a provider attempt, and a cost. The record carries no
-// plaintext key/payload (原则7); the views surface key by prefix only.
+// plaintext key/payload (Principle 7); the views surface key by prefix only.
 const telemetry = new SqliteTelemetryStore(seedDb);
 await telemetry.insert({
   apiKeyId: "k_e2e",

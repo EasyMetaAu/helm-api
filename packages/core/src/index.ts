@@ -148,7 +148,7 @@ export {
   LanesConfigSchema,
   parseLanesConfig,
 } from "./lanes/schema.js";
-// Memory middleware — inject phase (docs/08 阶段 2). Synchronous on the request
+// Memory middleware — inject phase (docs/08 Phase 2). Synchronous on the request
 // path: load + assemble a budgeted, cache-friendly context prefix in the fixed
 // docs/08 order, enqueue write-back, fail-open. Framework-agnostic; never touches
 // routing/lane state.
@@ -158,7 +158,7 @@ export {
   type InjectInput,
   type InjectResult,
 } from "./memory/inject.js";
-// Memory middleware — observe phase (docs/08 阶段 1). Framework-agnostic
+// Memory middleware — observe phase (docs/08 Phase 1). Framework-agnostic
 // write-only persistence; never injects memory or changes routing.
 export {
   type IRToolResult,
@@ -167,7 +167,7 @@ export {
   observeOutbound,
   resolveMemoryMode,
 } from "./memory/observe.js";
-// Memory middleware — background Reflector (docs/08 阶段 2). Periodically merges a
+// Memory middleware — background Reflector (docs/08 Phase 2). Periodically merges a
 // scope's observations into a stable, versioned reflection; off the main request
 // path, fail-open. Framework-agnostic; never touches routing/lane state.
 export {
@@ -347,7 +347,7 @@ export {
   saveRuntimeSettings,
 } from "./settings/runtime-settings.js";
 // Agentic Signals — POST-MVP low-cost production feedback layer (docs/02,
-// research-notes「Plano」). Pure aggregator + background collector that distill
+// research-notes "Plano"). Pure aggregator + background collector that distill
 // REDACTED routing signals from already-persisted decision records, ASYNCHRONOUS
 // and OFF the request path. Observe-only: this task never feeds signals back into
 // routing. Framework-agnostic; fail-open.

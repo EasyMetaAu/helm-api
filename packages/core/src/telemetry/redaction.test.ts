@@ -36,12 +36,12 @@ describe("redact", () => {
 
   it("summarizes private payload fields", () => {
     const out = redact({
-      messages: [{ role: "user", content: "私密内容" }],
+      messages: [{ role: "user", content: "private content" }],
       attachments: ["blobdata"],
     });
     expect(out.messages).toEqual({ redacted: true, kind: "array", itemCount: 1 });
     expect(out.attachments).toEqual({ redacted: true, kind: "array", itemCount: 1 });
-    expect(JSON.stringify(out)).not.toContain("私密内容");
+    expect(JSON.stringify(out)).not.toContain("private content");
     expect(JSON.stringify(out)).not.toContain("blobdata");
   });
 

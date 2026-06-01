@@ -3,13 +3,13 @@ import type { IRMessage } from "../protocol/ir.js";
 import type { MemoryStore } from "../store/ports.js";
 import type { MemoryMeta, MemoryScope } from "./types.js";
 
-// observe mode (docs/08 阶段 1). Persists raw request/response/tool messages into
+// observe mode (docs/08 Phase 1). Persists raw request/response/tool messages into
 // the memory_* tables but NEVER injects memory or changes routing — observe is a
 // write-only middleware. Framework-agnostic: this module receives an already
 // resolved MemoryScope (the gateway parses the HTTP headers); it imports no web
 // framework (CLAUDE.md principle 1). Persistence is fail-open: a store failure
 // degrades to "continue without memory" + a logged failure, never a 5xx
-// (CLAUDE.md principle 3; docs/08 "记忆加载失败，主请求应在无记忆的情况下继续").
+// (CLAUDE.md principle 3; docs/08 "if memory load fails, the main request must continue without memory").
 
 // A tool result in the IR is just an IRMessage with role="tool" (carrying
 // tool_call_id). Aliased for a readable outbound contract.
@@ -20,7 +20,7 @@ export interface ObserveDeps {
   now: () => Date;
   estimateTokens: (text: string) => number;
   // Structured logger; callers thread trace_id through meta. Must not log full
-  // memory content verbatim (docs/08 完整记忆需显式授权并审计).
+  // memory content verbatim (docs/08 full memory requires explicit authorization and auditing).
   log: (line: string, meta?: object) => void;
 }
 
@@ -51,7 +51,7 @@ function serializeContent(content: IRMessage["content"]): string {
 
 function memoryMeta(scope: MemoryScope): MemoryMeta {
   // observe NEVER hydrates — memory_hydrated is always false and every
-  // inject-phase counter stays at its null/zero default (docs/08 调试 UI 字段).
+  // inject-phase counter stays at its null/zero default (docs/08 debug-UI field).
   return {
     memory_mode: scope.mode,
     thread_id: scope.threadId,
@@ -115,7 +115,7 @@ export async function observeInbound(
 
 // Outbound: on observe/inject, persist the response messages + tool results. off
 // is a no-op. Fail-open — a store failure is logged, never thrown. observe does
-// NOT enqueue an observer job (that is docs/08 阶段 2).
+// NOT enqueue an observer job (that is docs/08 Phase 2).
 export async function observeOutbound(
   deps: ObserveDeps,
   scope: MemoryScope,
@@ -146,7 +146,7 @@ export async function observeOutbound(
 
 // Gateway boundary helper: normalize a raw x-memory-mode header value to a legal
 // MemoryMode. Missing / illegal / wrong-case values fail safe to "off" (docs/08
-// 默认 x-memory-mode = off; default-safe). Kept here so the gateway adapter has
+// default x-memory-mode = off; default-safe). Kept here so the gateway adapter has
 // one source of truth without importing a web framework into core.
 export function resolveMemoryMode(raw: string | null | undefined): MemoryScope["mode"] {
   const parsed = MemoryModeSchema.safeParse(raw);

@@ -2,7 +2,7 @@
 // Layer-1 structural regexes. Both `dimensions.ts` (complexity scoring) and
 // `taskdetect.ts` (task_type detection) consume THESE functions so the two
 // paths can never drift apart with two copies of the same regex (task spec:
-// "结构信号函数与 dimensions 共享同一实现"). Pure: same input => same output,
+// "structural-signal functions share one implementation with dimensions"). Pure: same input => same output,
 // zero I/O, no clock, no randomness (CLAUDE.md principle 4). Each detector
 // returns a [0,1] signal — 1 when the structure is present, 0 otherwise.
 

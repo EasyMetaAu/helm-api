@@ -11,10 +11,10 @@ import { registerSettingsRoutes } from "./settings.js";
 
 // /admin/api/* — the gateway management API. All endpoints are registered here
 // and MUST sit behind the admin basicAuth middleware (mounted by the caller on
-// the `/admin/api/*` path; see app/server wiring). Two落点 stay separate by file:
+// the `/admin/api/*` path; see app/server wiring). The two persistence targets stay separate by file:
 //   - rules (lanes/policies/classifier) -> RuleStore (config/*.yaml)
 //   - runtime (keys/requests)           -> KeyStore / TelemetryStore
-// The route files own ONLY HTTP↔domain glue (CLAUDE.md 原则1); no business logic,
+// The route files own ONLY HTTP↔domain glue (CLAUDE.md Principle 1); no business logic,
 // no IO — every dependency is injected via AdminApiDeps.
 
 export function registerAdminApi(app: Hono<AppEnv>, deps: AdminApiDeps): void {

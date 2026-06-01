@@ -1,6 +1,6 @@
 // Admin request-debug API client. The admin UI is a PURE consumer of the
 // gateway's /admin/api/* HTTP surface — it imports NO core/gateway business logic
-// and re-computes NO classification/routing/cost (CLAUDE.md 原则1). It only renders
+// and re-computes NO classification/routing/cost (CLAUDE.md Principle 1). It only renders
 // the trail the backend already recorded.
 //
 // Real backend contract (apps/gateway/src/routes/admin/requests.ts):
@@ -15,10 +15,10 @@
 // (pre-enrichment) records — never fabricating data. See implementation-notes.md
 // for the field map.
 //
-// CLAUDE.md 原则5: classification fallback (`decided_by`) and execution fallback
+// CLAUDE.md Principle 5: classification fallback (`decided_by`) and execution fallback
 // (`provider_attempts`/`fallback_count`) are SEPARATE — they are surfaced as
 // distinct UI concepts here and never conflated.
-// CLAUDE.md 原则7: redaction — `key_prefix` is prefix-only (the recorded display
+// CLAUDE.md Principle 7: redaction — `key_prefix` is prefix-only (the recorded display
 // prefix, e.g. helm_live_ab12, NEVER the plaintext key; '—' when absent);
 // `payload_summary` is a summary placeholder, never the full private payload;
 // `provider_raw` is redacted.
@@ -27,17 +27,17 @@
 
 export interface RequestListItem {
   trace_id: string;
-  ts: string; // 时间
+  ts: string; // timestamp
   key_prefix: string; // display prefix only — NEVER plaintext
   user_id?: string;
   org_id?: string;
   requested_model: string | null;
   task_type: string;
   complexity: string;
-  decided_by: 'rules' | 'eval' | 'default' | 'fallback'; // 决策层级 (分类阶段)
+  decided_by: 'rules' | 'eval' | 'default' | 'fallback'; // decision layer (classification stage)
   lane: string;
   final_model: string | null;
-  fallback_count: number; // 执行兜底次数 (provider attempts - 1)
+  fallback_count: number; // execution fallback count (provider attempts - 1)
   status: 'ok' | 'error';
   latency_ms: number;
   // null = NOT measured (no pricing / usage unknown — e.g. an unpriced model),
@@ -49,7 +49,7 @@ export interface RequestListItem {
 
 // Redacted per-attempt upstream failure detail (admin-debug-error-detail).
 // Present only for an attempt that failed at the upstream; the backend has
-// already key-scrubbed `provider_raw` (原则7), so this is safe to display.
+// already key-scrubbed `provider_raw` (Principle 7), so this is safe to display.
 export interface AttemptErrorDetail {
   upstream_status: number | null; // real upstream HTTP status (e.g. 429); null for timeout/network
   message: string; // redacted, human-readable
@@ -129,7 +129,7 @@ interface RawDecisionRecord {
   created_at?: number;
   requested_model?: string;
   // Display prefix only (helm_live_ab12) — the record NEVER carries the plaintext
-  // key (原则7). Null/absent on legacy (pre-enrichment) records.
+  // key (Principle 7). Null/absent on legacy (pre-enrichment) records.
   key_prefix?: string | null;
   // Enriched telemetry (admin.requests-richfields): Σ attempt latency, execution
   // fallback count, and the eval/completion cost split. Absent on legacy records.
@@ -202,7 +202,7 @@ function sumLatency(attempts: RawAttempt[]): number {
 }
 
 // Execution-stage fallback count = real (non-skipped) attempts beyond the first.
-// Distinct from classification `decided_by` (原则5).
+// Distinct from classification `decided_by` (Principle 5).
 function fallbackCount(attempts: RawAttempt[]): number {
   const tried = attempts.filter((a) => a.skipped !== true).length;
   return Math.max(0, tried - 1);
@@ -210,7 +210,7 @@ function fallbackCount(attempts: RawAttempt[]): number {
 
 // Normalize the recorded error_detail -> the UI shape. Absent/null (ok, skipped,
 // or legacy records) maps to null. The backend has already redacted the body
-// (原则7); the UI only displays it, never recomputes.
+// (Principle 7); the UI only displays it, never recomputes.
 function attemptErrorDetail(a: RawAttempt): AttemptErrorDetail | null {
   const d = a.error_detail;
   if (!d) return null;
@@ -233,7 +233,7 @@ function attemptOutcome(a: RawAttempt): ProviderAttempt['outcome'] {
   return 'error';
 }
 
-// Project the raw DecisionRecord -> the list row (docs/07 列表字段). Fields the
+// Project the raw DecisionRecord -> the list row (docs/07 list fields). Fields the
 // record does not carry are derived or safely defaulted; NEVER fabricated.
 export function toListItem(raw: RawDecisionRecord): RequestListItem {
   const attempts = Array.isArray(raw.provider_attempts) ? raw.provider_attempts : [];
@@ -251,7 +251,7 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     // display. '' when the record carries none (legacy) — never fabricated.
     ts: typeof raw.created_at === 'number' ? new Date(raw.created_at).toISOString() : '',
     // Real display prefix from the recorded auth identity — PREFIX ONLY, never the
-    // plaintext key (原则7). '—' when the record carries none (legacy / unknown).
+    // plaintext key (Principle 7). '—' when the record carries none (legacy / unknown).
     key_prefix:
       typeof raw.key_prefix === 'string' && raw.key_prefix.length > 0 ? raw.key_prefix : '—',
     requested_model: raw.requested_model ?? null,
@@ -261,7 +261,7 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     lane: raw.lane?.selected_lane ?? '',
     final_model: raw.final?.model_alias ?? null,
     // Prefer the recorded value; fall back to deriving from attempts for legacy
-    // records (原则5: execution-stage count, distinct from decided_by).
+    // records (Principle 5: execution-stage count, distinct from decided_by).
     fallback_count:
       typeof raw.fallback_count === 'number' ? raw.fallback_count : fallbackCount(attempts),
     status,
@@ -280,7 +280,7 @@ function normalizeConstraints(raw: Record<string, unknown> | undefined): Record<
 }
 
 // Redacted, non-sensitive request metadata for the detail header. We DELIBERATELY
-// expose only routing-relevant fields — never any private payload (原则7).
+// expose only routing-relevant fields — never any private payload (Principle 7).
 function buildRequestMeta(raw: RawDecisionRecord): Record<string, unknown> {
   return {
     requested_model: raw.requested_model ?? null,
@@ -289,7 +289,7 @@ function buildRequestMeta(raw: RawDecisionRecord): Record<string, unknown> {
 }
 
 // Map the recorded cost split -> the docs/07 cost breakdown. eval self-cost stays
-// SEPARATE from completion (原则5). null parts render as 0 (visible, not hidden);
+// SEPARATE from completion (Principle 5). null parts render as 0 (visible, not hidden);
 // `completionFallback` is the summed attempt cost for legacy records that predate
 // the recorded cost_breakdown.
 function buildCostBreakdown(
@@ -315,7 +315,7 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     ts: '',
     request_meta: buildRequestMeta(raw),
     // The backend does not persist a payload; we render a redaction placeholder so
-    // the operator knows it was intentionally withheld (原则7).
+    // the operator knows it was intentionally withheld (Principle 7).
     payload_summary: 'payload withheld (redacted — only routing metadata is stored)',
     classifier_output: {
       task_type: raw.classifier?.task_type ?? '',
@@ -352,11 +352,11 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
             error_class: String(raw.final?.error_reason ?? 'upstream_error'),
             http_status: 0, // backend does not record the upstream http status yet
             message: String(raw.final?.error_reason ?? 'request failed'), // already redacted
-            provider_raw: null, // redacted — never surface raw upstream bodies (原则7)
+            provider_raw: null, // redacted — never surface raw upstream bodies (Principle 7)
           }
         : null,
-    // Cost split from the record (docs/07「成本拆分（含 eval 成本）」): eval self-cost is
-    // SEPARATE from completion cost (原则5). Unknown (null) parts render as 0 so all
+    // Cost split from the record (docs/07 "cost breakdown (incl. eval cost)"): eval self-cost is
+    // SEPARATE from completion cost (Principle 5). Unknown (null) parts render as 0 so all
     // four lines stay visible; legacy records (no cost_breakdown) fall back to the
     // summed attempts as completion. The backend does not bill a separate routing
     // self-cost, so routing_usd stays 0.

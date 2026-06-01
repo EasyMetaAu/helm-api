@@ -95,7 +95,7 @@ describe('classifier page', () => {
     await fireEvent.input(threshold, { target: { value: '-0.1' } });
     await waitFor(() => expect(save.disabled).toBe(true));
 
-    // Even a forced click does not fire the API call (fail-closed, 原则2).
+    // Even a forced click does not fire the API call (fail-closed, Principle 2).
     await fireEvent.click(save);
     expect(saveClassifier).not.toHaveBeenCalled();
   });

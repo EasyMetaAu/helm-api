@@ -4,12 +4,12 @@ import type { RequestDetail } from '$lib/api/requests.js';
 import DecisionChain from './DecisionChain.svelte';
 
 // DecisionChain visualises, in order, the trail the backend recorded:
-//   classifier output (含 confidence + matched_dimensions)
+//   classifier output (incl. confidence + matched_dimensions)
 //   -> eval (triggered / cache hit)
 //   -> matched policy
 //   -> lane candidate chain
-//   -> provider attempts (含 outcome / skip_reason / latency)
-// CLAUDE.md 原则5: the classification-stage decision (`decided_by`) and the
+//   -> provider attempts (incl. outcome / skip_reason / latency)
+// CLAUDE.md Principle 5: the classification-stage decision (`decided_by`) and the
 // execution-stage provider fallback are shown in SEPARATE sections.
 
 function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
@@ -122,7 +122,7 @@ describe('DecisionChain', () => {
     expect(within(rows[1]).queryByTestId('attempt-error-detail')).toBeNull();
   });
 
-  it('keeps classification-stage and execution-stage fallback in separate sections (原则5)', () => {
+  it('keeps classification-stage and execution-stage fallback in separate sections (Principle 5)', () => {
     render(DecisionChain, { detail: detail() });
     // Two clearly distinct regions exist; the classifier section is not the
     // attempts section.

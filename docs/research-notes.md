@@ -1,210 +1,324 @@
-# 调研笔记
+# Research Notes
+
+> Appendix / reference material: open-source projects studied while designing
+> Helm, with what to borrow and what to avoid. We do not copy code — we study the
+> approach and architecture and rewrite.
 
 ## Manifest
 
-GitHub: https://github.com/mnfst/manifest
+GitHub: <https://github.com/mnfst/manifest>
 
-Manifest 是一个面向智能体和 AI 应用的智能模型路由器。它会把每个请求路由到能够处理它的最便宜的模型上。
+Manifest is an intelligent model router for agents and AI applications. It routes
+each request to the cheapest model that can handle it.
 
-有价值的思路：
+Valuable ideas:
 
-- 本地、确定性的复杂度打分。
-- 23 个维度：关键词、结构以及上下文信号。
-- 四个层级：简单、标准、复杂、推理。
-- 针对具体任务的检测，涵盖编程、网页浏览、数据分析、图像生成、视频生成、社交媒体、邮件、日历以及交易。
-- 针对简短后续消息的会话惯性（session momentum）。
+- Local, deterministic complexity scoring.
+- 23 dimensions: keyword, structural, and contextual signals.
+- Four tiers: simple, standard, complex, reasoning.
+- Task-specific detection covering coding, web browsing, data analysis, image
+  generation, video generation, social media, email, calendar, and transactions.
+- Session momentum for short follow-up messages.
 
-值得借鉴：
+Worth borrowing:
 
-- 廉价的本地分类器。
-- 可解释的复杂度与任务信号。
-- 针对简短后续消息的惯性机制。
+- A cheap local classifier.
+- Explainable complexity and task signals.
+- Momentum for short follow-up messages.
 
-不要盲目照搬：
+Do not copy blindly:
 
-- 模型市场（model-market）的定位。
-- 把广泛的供应商接入作为产品的主要呈现面。
+- The model-market positioning.
+- Making broad provider coverage the product's primary surface.
 
-落地补充（扫描源码后确认）：
+Landing notes (confirmed after scanning the source):
 
-- 仓库确认即 `mnfst/manifest`（TypeScript，NestJS + SolidJS，**MIT**，可借鉴）。companion 测试器在 `mnfst/wingman`。
-- "23 维" = 14 个关键词维度 + 9 个结构/上下文维度；关键词通过一棵 trie 一次性匹配。
-- 四档边界（`scoring/config.ts`）：`simple < -0.10 ≤ standard < 0.08 ≤ complex < 0.35 ≤ reasoning`。
-- 置信度：`confidence = sigmoid(k=8 · 到最近边界的距离)`；< 0.45 视为不确定，降级到 standard。
-- 硬覆盖：`HEARTBEAT_OK` → simple；形式逻辑关键词 → reasoning；带 tools → 下限 standard；> 50k token → 下限 complex；< 50 字符且无复杂信号 → simple。
-- 会话动量：按 `x-session-key` 存最近 5 条、30 分钟 TTL；短消息（< 30 字符）历史权重最高可达 60%，> 100 字符则关闭动量。
-- 任务检测：维度→类目映射 + 工具名前缀（`browser_`/`code_`/`gmail_`…）+ 结构信号（URL、≥40 字符代码块、文件路径、堆栈）；`web_browsing` 激活阈值特意调高到 3.0。
-- **可移植边界**：维度名/权重/关键词/边界/阈值都是数据，可直接搬成 `classifier.yaml`（约 90% 调参面）；约 9 个结构打分函数、正则信号、覆盖控制流需要用代码实现。
+- The repo is `mnfst/manifest` (TypeScript, NestJS + SolidJS, **MIT**, usable as
+  reference). The companion tester is `mnfst/wingman`.
+- The "23 dimensions" = 14 keyword dimensions + 9 structural/contextual
+  dimensions; keywords are matched in one pass via a trie.
+- Four-tier boundaries (`scoring/config.ts`):
+  `simple < -0.10 ≤ standard < 0.08 ≤ complex < 0.35 ≤ reasoning`.
+- Confidence: `confidence = sigmoid(k=8 · distance to the nearest boundary)`;
+  `< 0.45` is treated as uncertain and degrades to standard.
+- Hard overrides: `HEARTBEAT_OK` → simple; formal-logic keywords → reasoning;
+  presence of tools → floor of standard; `> 50k` tokens → floor of complex;
+  `< 50` characters with no complexity signal → simple.
+- Session momentum: keeps the last 5 messages per `x-session-key` with a 30-minute
+  TTL; for short messages (`< 30` chars) history weight can reach 60%, and for
+  `> 100` chars momentum is turned off.
+- Task detection: dimension → category mapping + tool-name prefixes
+  (`browser_` / `code_` / `gmail_` …) + structural signals (URLs, code blocks
+  `≥ 40` chars, file paths, stack traces); the `web_browsing` activation threshold
+  is intentionally raised to 3.0.
+- **Portable surface**: dimension names/weights/keywords/boundaries/thresholds are
+  all data and can be lifted straight into a `classifier.yaml` (~90% of the tuning
+  surface); roughly 9 structural scoring functions, regex signals, and override
+  control flow need to be implemented in code.
 
-## llm-router probe（评估小模型的来源）
+## llm-router probe (origin of the eval small model)
 
-llm-router 的 5 段流水线里第 2 段 "probe" 就是一个经济型 LLM 预分类器，是 Helm 第 2 层 eval 的直接参考。
+In llm-router's 5-stage pipeline, the second stage — "probe" — is an economy LLM
+pre-classifier, and it is the direct reference for Helm's Layer-2 eval.
 
-复用的设计：
+Designs reused:
 
-- strict-JSON 输出 + Zod 校验；`temperature:0`、非流式。
-- 双超时硬化：runner 内 `Promise.race`（500/300ms）+ consumer 独立外层 `Promise.race`（250ms）。
-- fail-open：超时/provider 错误/熔断/解析失败一律 → `advisory=null`，主路径继续。
-- L1 缓存：按 `conversation_id`、60s TTL、LRU 5000 条。
+- Strict-JSON output + Zod validation; `temperature:0`, non-streaming.
+- Double-timeout hardening: a runner-internal `Promise.race` (500/300ms) + an
+  independent outer consumer `Promise.race` (250ms).
+- Fail-open: a timeout / provider error / circuit-open / parse failure all yield
+  `advisory=null`, and the main path continues.
+- L1 cache: keyed by `conversation_id`, 60s TTL, LRU of 5000 entries.
 
-为 Helm 要改的点：
+What Helm changes:
 
-- probe 是**仅咨询**（不改路由）；Helm 的 eval 改为**可决策**，输出直接选 lane。
-- 缓存键从 `conversation_id` 改为 **content-hash**（无状态网关更合适）。
-- probe 调用**无 `max_tokens` 上限**（规模化成本风险）→ Helm 必须加上限。
-- probe 的 `fallbacks` / `production_timeout_ms` 是"配了但没接线"→ Helm 要么实现要么删掉，不要让配置说谎。
+- The probe is **advisory only** (it does not change routing); Helm's eval is
+  **decision-making** — its output selects a lane directly.
+- The cache key moves from `conversation_id` to a **content hash** (better for a
+  stateless gateway).
+- The probe call has **no `max_tokens` cap** (a cost risk at scale) → Helm must
+  add a cap.
+- The probe's `fallbacks` / `production_timeout_ms` are "configured but not wired"
+  → Helm must either implement them or drop them; configuration must not lie.
 
-## 协议互译实现参考（Protocol translation）
+## Protocol translation references
 
-调研开源的 OpenAI / Anthropic / Responses / Gemini 协议互译实现（含流式 SSE），用于设计 Protocol Adapter。**我们不抄代码，自己重写——参考其实现思路与架构**（授权问题另行处理，不作为选型约束）。以"完整度 + 正确性 + 架构清晰度"为标尺做了覆盖矩阵对比。
+Survey of open-source OpenAI / Anthropic / Responses / Gemini protocol
+translators (including streaming SSE), used to design the Protocol Adapter. **We do
+not copy code — we rewrite, referencing the approach and architecture** (licensing
+is handled separately and is not a selection constraint). A coverage matrix was
+compared on "completeness + correctness + architectural clarity".
 
-### 👑 参考标杆：musistudio/llms
+### Reference benchmark: musistudio/llms
 
-`https://github.com/musistudio/llms`（TypeScript，claude-code-router 的翻译引擎）。它是唯一**存在意义就是协议互译**的项目，契约最干净、双向、且已是我们的目标语言。
+`https://github.com/musistudio/llms` (TypeScript, the translation engine behind
+claude-code-router). It is the only project whose entire reason to exist is
+protocol translation — the cleanest contract, bidirectional, and already in our
+target language.
 
-为什么它在"我们这个具体问题"上完整度最高：
+Why it is the most complete for our specific problem:
 
-- 每个协议 = 一个类，实现 **5 方法契约**：`transformRequestOut`（native 入站 → 统一 IR）、`transformRequestIn`（IR → native 出站）、`transformResponseIn`、`transformResponseOut`、`endPoint`（它负责的入站路由，如 `/v1/messages`、`/v1beta/models/:modelAndAction`）。入站与出站翻译在同一个文件里，一个协议一处描述完——这正是它"可重写"的原因。
-- 统一中枢 = **OpenAI Chat Completions 形态**。litellm / Portkey / new-api / one-api / Bifrost 五个独立实现都收敛到同一个 IR，所以这是事实标准；选它意味着遇到边界 case 还能交叉参考其他五个实现。
-- **流式状态机最值得啃**且很成熟：`anthropic.transformer.ts` 的 `convertOpenAIStreamToAnthropic` 用单调 `contentIndex` 分配器 + `toolCallIndexToContentBlockIndex` 映射（并行/流式工具调用的正确解法）+ 临时 id 后补升级 + `safeClose/safeEnqueue` 幂等关闭守卫。这恰好是 litellm 踩错的那类 bug（Gemini `input_json_delta` 丢失 #25561）的正面参照。
+- Each protocol = one class implementing a **5-method contract**:
+  `transformRequestOut` (native inbound → unified IR), `transformRequestIn` (IR →
+  native outbound), `transformResponseIn`, `transformResponseOut`, and `endPoint`
+  (the inbound route it owns, e.g. `/v1/messages`,
+  `/v1beta/models/:modelAndAction`). Inbound and outbound translation live in the
+  same file — one protocol fully described in one place — which is exactly why it
+  is rewritable.
+- The unified hub = the **OpenAI Chat Completions** shape. Five independent
+  implementations (litellm, Portkey, new-api, one-api, Bifrost) all converge on
+  the same IR, so this is the de facto standard; choosing it means edge cases can
+  be cross-referenced against the other five.
+- The **streaming state machine** is the most worth studying and is mature:
+  `anthropic.transformer.ts`'s `convertOpenAIStreamToAnthropic` uses a monotonic
+  `contentIndex` allocator + a `toolCallIndexToContentBlockIndex` map (the correct
+  solution for parallel / streamed tool calls) + temporary-id upgrade-on-arrival +
+  idempotent `safeClose/safeEnqueue` guards. This is exactly the class of bug
+  litellm got wrong (Gemini `input_json_delta` loss, #25561).
 
-弱点：Responses API 比 litellm 浅、文档稀疏（要读源码）、单人维护（靠 claude-code-router 用户量实战）。
+Weaknesses: the Responses API is shallower than litellm and thinly documented
+(read the source); single-maintainer (battle-tested via claude-code-router's user
+base).
 
-### 🥈 正确性规范：BerriAI/litellm
+### Correctness spec: BerriAI/litellm
 
-`https://github.com/BerriAI/litellm`（Python）。架构耦合进大框架不适合当模板，但**边界 case 的正确性最全**，当"checklist"用：
+`https://github.com/BerriAI/litellm` (Python). Its architecture is coupled into a
+large framework and is unsuitable as a template, but its **edge-case correctness is
+the most complete** — use it as the "checklist":
 
-- 唯一有**真正完整的 Responses API 翻译深度**：Anthropic `/v1/messages` → `/responses` 的 item 展开、`tool_use`/`tool_result` 提升为顶层 item、`budget_tokens`→effort、reasoning item、compaction 形状映射（doc: `anthropic_unified/messages_to_responses_mapping`）。即便我们用 TS 实现，也要照它的 spec 级清单补齐。
-- 正确性 helper：`truncate_tool_name`（OpenAI 64 字符上限 vs Anthropic 无限制，SHA-256 防碰撞截断 + 响应时还原）、`_add_additional_properties_false`（递归强制 OpenAI strict-mode JSON schema）、按模型族 gate `cache_control`。
+- The only one with **truly complete Responses API translation depth**: Anthropic
+  `/v1/messages` → `/responses` item expansion, promoting `tool_use` / `tool_result`
+  to top-level items, `budget_tokens` → effort, reasoning items, and compaction
+  shape mapping (doc: `anthropic_unified/messages_to_responses_mapping`). Even
+  implementing in TS, match its spec-level checklist.
+- Correctness helpers: `truncate_tool_name` (OpenAI's 64-char limit vs. Anthropic's
+  unlimited — SHA-256 collision-safe truncation + restore on response),
+  `_add_additional_properties_false` (recursively forcing OpenAI strict-mode JSON
+  schema), and gating `cache_control` by model family.
 
-第三参照：**QuantumNous/new-api**（Go），其 adaptor 显式暴露 `ConvertOpenAIRequest`/`ConvertClaudeRequest`/`ConvertGeminiRequest`，验证 any-to-any 入站矩阵。
+Third reference: **QuantumNous/new-api** (Go), whose adaptor explicitly exposes
+`ConvertOpenAIRequest` / `ConvertClaudeRequest` / `ConvertGeminiRequest`,
+validating the any-to-any inbound matrix.
 
-### 要啃的源码（musistudio/llms，`src/transformer/`）
+### Source to study (musistudio/llms, `src/transformer/`)
 
-- `anthropic.transformer.ts` — 核心。`transformRequestOut`（system 数组→system 消息、`tool_result`→`role:"tool"`、`tool_use`→`tool_calls`、thinking+signature）、`convertOpenAIResponseToAnthropic`（finish-reason 映射、usage 拆分 `input = prompt − cached`）、`convertOpenAIStreamToAnthropic`（流式状态机）。
-- `gemini.transformer.ts` + `utils/gemini.util.ts` — `alt=sse`、`x-goog-api-key`、无 tool-call ID、schema `format` 限制。
-- `openai.transformer.ts` + `openai.responses.transformer.ts` — 中枢恒等变换 + Responses 面。
-- `tooluse / reasoning / maxtoken / streamoptions ...transformer.ts` — **可叠加的横切行为 transformer** 管线模式。
-- `index.ts`（transformer 注册表）、`server.ts`（`endPoint` 如何挂成入站路由）。
+- `anthropic.transformer.ts` — the core. `transformRequestOut` (system array →
+  system message, `tool_result` → `role:"tool"`, `tool_use` → `tool_calls`,
+  thinking + signature), `convertOpenAIResponseToAnthropic` (finish-reason mapping,
+  usage split `input = prompt − cached`), `convertOpenAIStreamToAnthropic` (the
+  streaming state machine).
+- `gemini.transformer.ts` + `utils/gemini.util.ts` — `alt=sse`, `x-goog-api-key`,
+  no tool-call IDs, schema `format` restrictions.
+- `openai.transformer.ts` + `openai.responses.transformer.ts` — the hub identity
+  transform + the Responses surface.
+- `tooluse / reasoning / maxtoken / streamoptions ...transformer.ts` — the
+  **stackable cross-cutting behavior transformer** pipeline pattern.
+- `index.ts` (the transformer registry) and `server.ts` (how `endPoint` is mounted
+  as an inbound route).
 
-### 要 lift 的架构模式（思路，非代码）
+### Architecture patterns to lift (the approach, not the code)
 
-1. **唯一 IR = OpenAI Chat 形态**（5 个独立实现共同验证）。
-2. **每协议一个类、5 方法契约**，入站+出站同处一文件。
-3. **翻译永远走 `nativeIn → IR → nativeOut`**，绝不做 N×N 直连对：N 个协议 = **2N 个变换函数,不是 N² 个适配器**——这是最重要的设计决策。
-4. **流式 = 显式的每方向状态机**（不是透传）：维护 content-block index 分配器、tool-call-index→block-index 映射、临时 id→真 id 升级、幂等关闭守卫；确定性地发 `message_start → content_block_start/delta/stop → message_delta → message_stop`。
-5. **横切关注点做成可叠加的行为 transformer**（max-token 钳制、tool-use 归一、reasoning 注入）叠在协议 transformer 之上。
+1. **One IR = the OpenAI Chat shape** (validated by five independent
+   implementations).
+2. **One class per protocol, a 5-method contract**, inbound + outbound in one
+   file.
+3. **Translation always goes `nativeIn → IR → nativeOut`**, never N×N direct
+   pairs: N protocols = **2N transform functions, not N²** — the single most
+   important design decision.
+4. **Streaming = an explicit per-direction state machine** (not passthrough):
+   maintain a content-block index allocator, a tool-call-index → block-index map,
+   temporary-id → real-id upgrades, and idempotent close guards; deterministically
+   emit `message_start → content_block_start/delta/stop → message_delta →
+   message_stop`.
+5. **Cross-cutting concerns as stackable behavior transformers** (max-token
+   clamping, tool-use normalization, reasoning injection) layered on top of the
+   protocol transformers.
 
-补充要点（在上述 5 点之上）：
+Additional points (on top of the five above):
 
-- 统一 IR 在 OpenAI Chat 形态基础上**扩展可选字段**：thinking/推理块、多部件 typed content（图像/文档）、tool-call ID、cache-control、`provider_raw` 透传袋（装上游原生 `stop_reason`/`usage`，供 agent 客户端还原）。
-- 若一个协议既可作入站（client）又可作出站（provider），就是 2N 变换函数；若入站集合与出站集合分开，则是 N+M 适配器——本质都是"经中枢中转，绝不 N×N 直连"。
-- 为"客户端要流式但上游是单 JSON（缓存命中 / 非流式 provider）"准备 **JSON→SSE 合成器**。
+- The unified IR extends the OpenAI Chat shape with **optional fields**: thinking /
+  reasoning blocks, multipart typed content (image / document), tool-call IDs,
+  cache-control, and a `provider_raw` passthrough bag (carrying the upstream native
+  `stop_reason` / `usage` so agent clients can reconstruct them).
+- If a protocol can act as both inbound (client) and outbound (provider), it is 2N
+  transform functions; if the inbound and outbound sets are disjoint, it is N+M
+  adapters — either way, everything routes through the hub, never N×N direct.
+- Provide a **JSON → SSE synthesizer** for "the client wants streaming but the
+  upstream returned a single JSON" (cache hit / non-streaming provider).
 
-**必须处理的 5 个流式 / 边界坑**：
+**Five streaming / edge-case pitfalls that must be handled:**
 
-1. **finish_reason / stop_reason 枚举错配**：OpenAI SDK 对非法枚举会丢弃整个响应（含已生成内容）；全塌成 `stop` 又会让 agent 静默误判。→ 映射成合法枚举**并**把原始值存进 `provider_raw`。
-2. **token usage 字段翻译与缓存重复计费**：Anthropic 的 `input_tokens/cache_read_input_tokens` vs OpenAI 的 `prompt_tokens/prompt_tokens_details.cached_tokens`；流式下曾把缓存读当全价输入导致 ~10× 成本错误。→ 显式翻译、`input = prompt − cached`、流式末事件 buffer usage。
-3. **tool-call 流式的 index/ID 协调**：OpenAI 按整数 index 流、id/name 可能只在首片、参数分片到达；Anthropic 需先 `tool_use` 块带 id+name 再 `input_json_delta`。→ 维护 index→block 映射、合成临时 id/name 后覆盖、容忍残缺 JSON（jsonrepair）。
-4. **流式 block/part ID 与 role 一致性**：每个块必须先 start 再 delta 后 stop，缺 start 的 delta 会被严格消费方静默丢弃；OpenAI 首片 delta 必须带 `role:"assistant"` 否则 LangChain 检测不到工具调用。→ 跟踪开块状态 + 关闭守卫防"controller already closed"。
-5. **system 提示与多模态结构错配**：OpenAI 把 system 放 `messages[0]`，Anthropic 用顶层 `system` 且禁止连续同角色消息（需合并连续 user/tool_result）；图像 `image_url` vs `source:{base64}` 要拆字段；Gemini 无 tool-call ID 需合成、`format` 仅支持 date/date-time。
+1. **finish_reason / stop_reason enum mismatch**: the OpenAI SDK discards the
+   entire response (including already-generated content) on an illegal enum;
+   collapsing everything to `stop` makes agents silently misjudge. → Map to a legal
+   enum **and** store the original value in `provider_raw`.
+2. **Token-usage field translation and cache double-billing**: Anthropic's
+   `input_tokens` / `cache_read_input_tokens` vs. OpenAI's `prompt_tokens` /
+   `prompt_tokens_details.cached_tokens`; in streaming, cache reads were once
+   counted as full-price input, causing a ~10× cost error. → Translate explicitly,
+   `input = prompt − cached`, and buffer usage in the final streaming event.
+3. **Tool-call streaming index/ID coordination**: OpenAI streams by integer index,
+   id/name may appear only in the first chunk, and arguments arrive in fragments;
+   Anthropic needs a `tool_use` block carrying id + name first, then
+   `input_json_delta`. → Maintain an index → block map, synthesize a temporary
+   id/name and overwrite it later, and tolerate incomplete JSON (jsonrepair).
+4. **Streaming block/part ID and role consistency**: every block must be started
+   before delta and stopped after; a delta with no start is silently dropped by
+   strict consumers; the first OpenAI delta must carry `role:"assistant"` or
+   LangChain will not detect the tool call. → Track open-block state + a close
+   guard to prevent "controller already closed".
+5. **System prompt and multimodal structure mismatch**: OpenAI puts system in
+   `messages[0]`, Anthropic uses a top-level `system` and forbids consecutive
+   same-role messages (merge consecutive user/tool_result); image `image_url` vs.
+   `source:{base64}` must be split; Gemini has no tool-call IDs (synthesize them)
+   and `format` only supports date/date-time.
 
-参考源：
-- https://github.com/musistudio/llms — `src/transformer/anthropic.transformer.ts`
-- https://github.com/Portkey-AI/gateway — `src/handlers/streamHandler.ts`、`src/handlers/responseHandlers.ts`
-- https://github.com/BerriAI/litellm — usage/finish_reason 坑的 issue 来源
-- https://github.com/maxnowack/anthropic-proxy
+References:
+
+- <https://github.com/musistudio/llms> — `src/transformer/anthropic.transformer.ts`
+- <https://github.com/Portkey-AI/gateway> — `src/handlers/streamHandler.ts`,
+  `src/handlers/responseHandlers.ts`
+- <https://github.com/BerriAI/litellm> — source of the usage / finish_reason pitfall
+  issues
+- <https://github.com/maxnowack/anthropic-proxy>
 
 ## Plano
 
-GitHub: https://github.com/katanemo/plano
+GitHub: <https://github.com/katanemo/plano>
 
-Plano 是一个面向智能体应用、AI 原生的代理与数据平面。它包含智能体编排、模型路由、过滤链、可观测性以及信号（signals）。
+Plano is an AI-native proxy and data plane for agentic applications. It includes
+agent orchestration, model routing, filter chains, observability, and signals.
 
-有价值的思路：
+Valuable ideas:
 
-- 智能体 / 数据平面的框架视角。
-- 把过滤链作为中间件。
-- 语义别名与偏好感知的路由。
-- 用 Agentic Signals 实现低成本的生产环境反馈。
+- An agent / data-plane framing.
+- Filter chains as middleware.
+- Semantic aliases and preference-aware routing.
+- Low-cost production feedback via Agentic Signals.
 
-值得借鉴：
+Worth borrowing:
 
-- 为 Memory / Guardrails 设立的中间件边界。
-- 把 Signals 作为未来的反馈层。
-- 通道（lane）/ 别名抽象。
+- A middleware boundary for Memory / Guardrails.
+- Signals as a future feedback layer.
+- The lane / alias abstraction.
 
-不要盲目照搬：
+Do not copy blindly:
 
-- 庞大的平台范围。
-- 在 MVP 阶段就内置智能体编排。
+- The sprawling platform scope.
+- Building in agent orchestration at the MVP stage.
 
 ## Portkey
 
-Website: https://portkey.ai/
+Website: <https://portkey.ai/>
 
-Portkey 是一个企业级 AI 网关 / LLMOps 平台。
+Portkey is an enterprise AI gateway / LLMOps platform.
 
-有价值的思路：
+Valuable ideas:
 
-- 统一的供应商网关。
-- 重试、回退、负载均衡、条件路由。
-- 可观测性、成本、护栏以及密钥管理。
+- A unified provider gateway.
+- Retries, fallbacks, load balancing, conditional routing.
+- Observability, cost, guardrails, and key management.
 
-值得借鉴：
+Worth borrowing:
 
-- 请求追踪与成本看板。
-- 虚拟密钥管理。
-- 回退策略的相关概念。
+- Request tracing and a cost dashboard.
+- Virtual key management.
+- The concepts behind fallback strategies.
 
-不要盲目照搬：
+Do not copy blindly:
 
-- 在 MVP 阶段就铺开企业级控制平面。
+- Rolling out an enterprise control plane at the MVP stage.
 
 ## Tingly Box
 
-GitHub: https://github.com/tingly-dev/tingly-box
+GitHub: <https://github.com/tingly-dev/tingly-box>
 
-Tingly Box 是一个本地 / 自托管的 Agent Gateway 与控制盒。它把模型代理、OAuth 供应商复用、Web UI、远程 IM 控制、智能体配置档（agent profiles）、护栏以及用量分析结合在一起。
+Tingly Box is a local / self-hosted Agent Gateway and control box. It combines a
+model proxy, OAuth provider reuse, a web UI, remote IM control, agent profiles,
+guardrails, and usage analytics.
 
-有价值的思路：
+Valuable ideas:
 
-- 复用 OAuth 订阅配额。
-- 智能体配置档管理。
-- 用户 token 与模型 token 的分离。
-- 用于管理供应商、路由、别名和 token 的 Web UI。
+- Reusing OAuth subscription quotas.
+- Agent profile management.
+- Separation of user tokens and model tokens.
+- A web UI to manage providers, routing, aliases, and tokens.
 
-值得借鉴：
+Worth borrowing:
 
-- OAuth 供应商集成的模式。
-- 本地控制平面的交互体验思路。
-- token 分离。
+- The OAuth provider integration pattern.
+- The UX ideas for a local control plane.
+- Token separation.
 
-不要盲目照搬：
+Do not copy blindly:
 
-- IM 远程控制以及完整的智能体控制盒范围。
-- 在 MVP 阶段就引入庞大的安全面。
+- IM remote control and the full agent-control-box scope.
+- Introducing a large security surface at the MVP stage.
 
 ## Mastra Observational Memory
 
-Issue: https://github.com/EasyMetaAu/llm-router/issues/362
-Docs: https://mastra.ai/docs/memory/observational-memory
-Research: https://mastra.ai/research/observational-memory
+- Issue: <https://github.com/EasyMetaAu/llm-router/issues/362>
+- Docs: <https://mastra.ai/docs/memory/observational-memory>
+- Research: <https://mastra.ai/research/observational-memory>
 
-有价值的思路：
+Valuable ideas:
 
-- 网关层的记忆。
-- Observer 与 Reflector 后台智能体。
-- 稳定、对缓存友好的记忆上下文。
-- 用观测（observations）与反思（reflections）代替完整的原始历史。
+- Gateway-level memory.
+- Observer and Reflector background agents.
+- A stable, cache-friendly memory context.
+- Replacing the full raw history with observations and reflections.
 
-值得借鉴：
+Worth borrowing:
 
-- 把记忆作为可选的中间件。
-- `thread/resource/project` 记忆作用域。
-- 观测 + 反思的流水线。
+- Memory as an optional middleware.
+- `thread` / `resource` / `project` memory scopes.
+- The observation + reflection pipeline.
 
-不要盲目照搬：
+Do not copy blindly:
 
-- 在 MVP 的核心路径中引入记忆。
-- 把动态 RAG 作为默认的记忆策略。
+- Putting memory in the MVP core path.
+- Making dynamic RAG the default memory strategy.
+
+> See [08 · Memory Middleware](08-memory-middleware.md) for how these ideas map to
+> Helm: the observe phase is implemented, the inject phase / Observer / Reflector
+> are on the roadmap.
