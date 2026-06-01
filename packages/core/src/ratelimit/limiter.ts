@@ -11,19 +11,31 @@ interface ResolvedQuota {
   tpm: number;
 }
 
-// Resolve the effective quota for a probe. Per-dimension precedence (highest
-// first): the probe's OWN per-key override (from the key record, carried by Auth)
-// → a config.overrides[keyId] entry (yaml-configured) → config.default (the live
-// system default). A null/undefined dimension at one level falls through to the
-// next, so a key overriding only rpm still inherits the system tpm. 0 is a real
-// value (explicitly unlimited), NOT "inherit" — only null/undefined inherit.
+// Resolve the effective quota for a probe.
+//
+// When the request carries a per-key override object (`probe.override`, set by
+// Auth from the key's DB record), THAT is the authoritative per-key layer: each
+// dimension resolves `probe.override.<dim> ?? config.default.<dim>`. A null/
+// undefined dimension means "inherit the SYSTEM DEFAULT" — it deliberately does
+// NOT fall through to a yaml `config.overrides[keyId]` entry, so clearing a key's
+// limit in the admin UI truly returns it to the fleet default (the UI's "Default"
+// label stays honest even if a stale yaml override exists). 0 is a real value
+// (explicitly unlimited), NOT "inherit".
+//
+// When NO per-key override is carried (e.g. a config-only / headless caller that
+// never resolved a key record), fall back to a yaml `config.overrides[keyId]`
+// entry, then the default — preserving the original yaml-driven behavior.
 function resolveQuota(config: RateLimitConfig, probe: RateLimitProbe): ResolvedQuota {
+  if (probe.override !== undefined) {
+    return {
+      rpm: probe.override.rpm ?? config.default.rpm,
+      tpm: probe.override.tpm ?? config.default.tpm,
+    };
+  }
   const keyOverride = config.overrides[probe.keyId];
-  const probeRpm = probe.override?.rpm;
-  const probeTpm = probe.override?.tpm;
   return {
-    rpm: probeRpm ?? keyOverride?.rpm ?? config.default.rpm,
-    tpm: probeTpm ?? keyOverride?.tpm ?? config.default.tpm,
+    rpm: keyOverride?.rpm ?? config.default.rpm,
+    tpm: keyOverride?.tpm ?? config.default.tpm,
   };
 }
 

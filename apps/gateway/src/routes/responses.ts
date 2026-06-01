@@ -3,6 +3,7 @@ import { type ErrorClass, ErrorClassSchema, makeHelmError } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
+import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
@@ -107,8 +108,13 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     if (deps.rateLimiter !== undefined) {
       const rl = await deps.rateLimiter.check({
         keyId: identity.keyId,
-        estimatedTokens: 0,
+        // Content-Length/4 estimate so per-key TPM is metered here too.
+        estimatedTokens: estimateRequestTokens(c),
         now: Date.now(),
+        // Per-key override carried by the resolver (null dims inherit the default).
+        override: identity.caps?.rateLimit
+          ? { rpm: identity.caps.rateLimit.rpm, tpm: identity.caps.rateLimit.tpm }
+          : undefined,
       });
       if (!(rl.allowed && rl.limit === 0)) {
         c.header("x-ratelimit-limit", String(rl.limit));

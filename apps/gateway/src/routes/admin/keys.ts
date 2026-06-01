@@ -72,35 +72,29 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
   // PATCH /keys/:id — edit a key's per-key rate-limit override (docs/06). Only the
   // two rate-limit dimensions are editable after mint (role/caps are fixed; rotate
   // by revoking + re-minting). The body is validated with .strict() so an unknown
-  // field is rejected (400, fail-closed). An omitted dimension keeps its current
-  // value; an explicit null clears the override back to inheriting the system
-  // default. A number (0 = unlimited) sets an explicit override. 404 on unknown id.
+  // field is rejected (400, fail-closed). The patch is PARTIAL: an omitted
+  // dimension is left untouched at the store layer (no read-modify-write, so
+  // concurrent partial PATCHes can't clobber each other); an explicit null clears
+  // the override back to inheriting the system default; a number (0 = unlimited)
+  // sets an explicit override. 404 on unknown id.
   app.patch("/admin/api/keys/:id", async (c) => {
     const parsed = UpdateKeyRequestSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: "invalid key update", issues: parsed.error.issues }, 400);
     }
     const id = c.req.param("id");
-    // Read the current record so an omitted dimension is preserved (the store's
-    // updateRateLimit overwrites BOTH columns). list() is the only read seam.
-    const current = (await deps.keyStore.list()).find((k) => k.key_id === id);
-    if (!current) {
-      return c.json({ error: "key not found" }, 404);
-    }
-    const rpm =
-      parsed.data.rate_limit_rpm === undefined
-        ? current.rate_limit_rpm
-        : parsed.data.rate_limit_rpm;
-    const tpm =
-      parsed.data.rate_limit_tpm === undefined
-        ? current.rate_limit_tpm
-        : parsed.data.rate_limit_tpm;
+    // Forward ONLY the dimensions the client supplied (present, possibly null).
+    // Zod leaves an omitted field as `undefined`, so this distinguishes
+    // "clear to inherit" (null) from "leave unchanged" (absent).
+    const patch: { rpm?: number | null; tpm?: number | null } = {};
+    if (parsed.data.rate_limit_rpm !== undefined) patch.rpm = parsed.data.rate_limit_rpm;
+    if (parsed.data.rate_limit_tpm !== undefined) patch.tpm = parsed.data.rate_limit_tpm;
     try {
-      await deps.keyStore.updateRateLimit(id, rpm, tpm);
+      await deps.keyStore.updateRateLimit(id, patch);
     } catch {
       return c.json({ error: "key not found" }, 404);
     }
-    return c.json({ key_id: id, rate_limit_rpm: rpm, rate_limit_tpm: tpm });
+    return c.json({ key_id: id, ...parsed.data });
   });
 
   // DELETE /keys/:id — soft revoke (disabled:true). 404 when the id is unknown.

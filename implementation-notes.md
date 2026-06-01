@@ -113,8 +113,13 @@
 - **编辑已有 key**：新增 `KeyStore.updateRateLimit(keyId, rpm, tpm)`（只改两列，不就地改写 role/caps，未知 id 抛错）+ `PATCH /admin/api/keys/:id`（`UpdateKeyRequestSchema.strict()`，未知字段 400，未知 id 404）。
 - **迁移**：additive 新版本——sqlite v8、postgres v7，给 `api_keys` 加两个 nullable INTEGER 列；老行得 NULL 即继承默认。注意是两套 ledger（sqlite/pg 版本号各自独立）。
 
+**Codex review 后续修复（同日）**：
+- **（High）`/v1/messages` + `/v1/responses` 也要执行 per-key 限流**：这两条自认证路径有各自的 auth resolver + 直接调 limiter，最初没带 override，导致 per-key 只在 `/v1/chat/*` 生效。修复：两处 resolver 的 `caps` 补 `rateLimit`，`MessagesIdentity` 类型加可选 `caps.rateLimit`，路由把它作为 `probe.override` 传入；同时把硬编码的 `estimatedTokens: 0` 换成共享的 `estimateRequestTokens(c)`（Content-Length/4），否则 per-key TPM 在这两条路径上根本不计量。估算器抽到 `middleware/estimate-tokens.ts`（server.ts 再 re-export，避免 route→server 循环依赖）。
+- **（Medium）PATCH 并发丢更新**：原实现 read(list)-modify-write 两列，两个并发 partial PATCH 会互相覆盖。改为 `KeyStore.updateRateLimit(keyId, patch)` 只写 `patch` 中**出现**的列（`undefined`=不动，`null`=清空继承）；route 不再读当前行。
+- **（Medium）"Default" 文案误导**：`resolveQuota` 原本 `probe.override ?? config.overrides[keyId] ?? default`，清空 DB override（null）会回落到 YAML `config.overrides`，与 UI「Default」不符。改为：**只要带了 `probe.override`（即解析到了 key 记录），DB 即权威**——null 维度直接落到 `config.default`，绕过 YAML override；仅在完全没有 probe override 的 headless 路径才用 YAML override 兜底。
+
 **坑/提醒**：
-- Svelte 5 里 `<input type="number" bind:value>` 绑定值是 `number | null`（空 = null），不是字符串——一开始按 string 写 `parseLimit().trim()` 直接 crash。最终把状态直接定为 `number | null`，省掉解析。
+- Svelte 5 里 `<input type="number" bind:value>` 绑定值是 `number | null`（空 = null/undefined），不是字符串——一开始按 string 写 `parseLimit().trim()` 直接 crash。最终把状态直接定为 `number | null`；清空时 `?? null` 归一化（空 number input 其实给的是 `undefined`，不归一化会被 `JSON.stringify` 省略 → 后端保留旧值，清不掉）。
 - 本任务一开始**误在共享检出里开发**，被另一个 worktree 的并发 `git rebase` 连带 reset 冲掉过未提交改动。教训：本仓库多 worktree 并存，务必在独立 worktree 里干活（已迁到 `.claude/worktrees/per-key-rate-limits`，逐层提交）。
 ---
 

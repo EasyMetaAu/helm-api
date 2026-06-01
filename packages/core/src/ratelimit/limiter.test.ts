@@ -94,6 +94,23 @@ describe("createRateLimiter — probe override (per-key quota carried by Auth)",
     expect((await limiter.check(probe)).allowed).toBe(false); // 3rd over default rpm:2
   });
 
+  it("a null probe dimension inherits the system DEFAULT, bypassing a yaml config.override", async () => {
+    const store = new InMemoryRateLimitStore();
+    // A stale yaml override (rpm:1) exists for k1, but the key's DB override was
+    // CLEARED (probe.override present, rpm:null). Clearing must return the key to
+    // the system default (rpm:5), NOT silently fall back to the yaml override —
+    // otherwise the admin UI's "Default" label would lie.
+    const limiter = createRateLimiter({
+      config: cfg({ default: { rpm: 5, tpm: 0 }, overrides: { k1: { rpm: 1 } } }),
+      store,
+    });
+    const probe = { keyId: "k1", estimatedTokens: 0, now: 0, override: { rpm: null, tpm: null } };
+    for (let i = 0; i < 5; i++) {
+      expect((await limiter.check(probe)).allowed).toBe(true);
+    }
+    expect((await limiter.check(probe)).allowed).toBe(false); // 6th over default rpm:5
+  });
+
   it("probe override of 0 means explicitly UNLIMITED for that dimension", async () => {
     const consume = vi.fn();
     const store: RateLimitStore = { consume };

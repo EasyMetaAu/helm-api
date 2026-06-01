@@ -156,7 +156,7 @@ describe("SqliteKeyStore", () => {
       role: "user",
       maxLane: "balanced",
     });
-    await store.updateRateLimit("k1", 100, 5000);
+    await store.updateRateLimit("k1", { rpm: 100, tpm: 5000 });
     let got = await store.getByHash("h1");
     expect(got?.rate_limit_rpm).toBe(100);
     expect(got?.rate_limit_tpm).toBe(5000);
@@ -164,14 +164,38 @@ describe("SqliteKeyStore", () => {
     expect(got?.max_lane).toBe("balanced");
     expect(got?.disabled).toBe(false);
     // null clears the override back to inheriting the system default
-    await store.updateRateLimit("k1", null, null);
+    await store.updateRateLimit("k1", { rpm: null, tpm: null });
     got = await store.getByHash("h1");
     expect(got?.rate_limit_rpm).toBeNull();
     expect(got?.rate_limit_tpm).toBeNull();
   });
 
-  it("updateRateLimit on a missing key rejects (not silently)", async () => {
+  it("updateRateLimit is PARTIAL: an omitted dimension is left untouched", async () => {
     const store = freshStore();
-    await expect(store.updateRateLimit("nope", 1, 1)).rejects.toThrow();
+    await store.createKey({
+      keyId: "k1",
+      hash: "h1",
+      prefix: "p1",
+      accountId: "a",
+      role: "user",
+      rateLimitRpm: 10,
+      rateLimitTpm: 20,
+    });
+    // Patch only rpm; tpm must survive unchanged (no read-modify-write clobber).
+    await store.updateRateLimit("k1", { rpm: 99 });
+    let got = await store.getByHash("h1");
+    expect(got?.rate_limit_rpm).toBe(99);
+    expect(got?.rate_limit_tpm).toBe(20);
+    // Patch only tpm to null (clear); rpm must survive.
+    await store.updateRateLimit("k1", { tpm: null });
+    got = await store.getByHash("h1");
+    expect(got?.rate_limit_rpm).toBe(99);
+    expect(got?.rate_limit_tpm).toBeNull();
+  });
+
+  it("updateRateLimit on a missing key rejects — both with a patch and an empty patch", async () => {
+    const store = freshStore();
+    await expect(store.updateRateLimit("nope", { rpm: 1, tpm: 1 })).rejects.toThrow();
+    await expect(store.updateRateLimit("nope", {})).rejects.toThrow();
   });
 });

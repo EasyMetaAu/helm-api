@@ -1,6 +1,6 @@
 import type { ApiKeyRecord } from "@helm/shared";
 import { eq } from "drizzle-orm";
-import type { CreateKeyInput, KeyStore } from "../ports.js";
+import type { CreateKeyInput, KeyStore, RateLimitPatch } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
 import { apiKeys } from "./schema.js";
 
@@ -61,14 +61,20 @@ export class SqliteKeyStore implements KeyStore {
     }
   }
 
-  // Edit ONLY the two rate-limit columns (null clears back to inherit). Other
-  // fields untouched — no in-place rewrite of role/caps. Throws on unknown id.
-  async updateRateLimit(keyId: string, rpm: number | null, tpm: number | null): Promise<void> {
-    const res = this.db
-      .update(apiKeys)
-      .set({ rateLimitRpm: rpm, rateLimitTpm: tpm })
-      .where(eq(apiKeys.keyId, keyId))
-      .run();
+  // Edit ONLY the rate-limit columns PRESENT in `patch` (null clears back to
+  // inherit). Omitted dims are left untouched, so a partial PATCH never rewrites
+  // the sibling column (no concurrent-clobber). Throws on unknown id.
+  async updateRateLimit(keyId: string, patch: RateLimitPatch): Promise<void> {
+    const set: Partial<Pick<ApiKeyRow, "rateLimitRpm" | "rateLimitTpm">> = {};
+    if (patch.rpm !== undefined) set.rateLimitRpm = patch.rpm;
+    if (patch.tpm !== undefined) set.rateLimitTpm = patch.tpm;
+    if (Object.keys(set).length === 0) {
+      // No-op patch: still verify the key exists (fail-loud on unknown id).
+      const row = this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).get();
+      if (row === undefined) throw new Error(`key not found: ${keyId}`);
+      return;
+    }
+    const res = this.db.update(apiKeys).set(set).where(eq(apiKeys.keyId, keyId)).run();
     if (res.changes === 0) {
       throw new Error(`key not found: ${keyId}`);
     }

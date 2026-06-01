@@ -289,11 +289,16 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(got?.rate_limit_rpm).toBe(60);
       expect(got?.rate_limit_tpm).toBe(0);
       // edit + clear back to inherit
-      await ctx.stores.keys.updateRateLimit("k1", 100, 5000);
+      await ctx.stores.keys.updateRateLimit("k1", { rpm: 100, tpm: 5000 });
       got = await ctx.stores.keys.getByHash("h1");
       expect(got?.rate_limit_rpm).toBe(100);
       expect(got?.rate_limit_tpm).toBe(5000);
-      await ctx.stores.keys.updateRateLimit("k1", null, null);
+      // PARTIAL: patching only rpm leaves tpm untouched (no concurrent-clobber).
+      await ctx.stores.keys.updateRateLimit("k1", { rpm: 7 });
+      got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.rate_limit_rpm).toBe(7);
+      expect(got?.rate_limit_tpm).toBe(5000);
+      await ctx.stores.keys.updateRateLimit("k1", { rpm: null, tpm: null });
       got = await ctx.stores.keys.getByHash("h1");
       expect(got?.rate_limit_rpm).toBeNull();
       expect(got?.rate_limit_tpm).toBeNull();
@@ -301,7 +306,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
 
     it("updateRateLimit on a missing key rejects (not silently)", async () => {
       ctx = await make();
-      await expect(ctx.stores.keys.updateRateLimit("nope", 1, 1)).rejects.toThrow();
+      await expect(ctx.stores.keys.updateRateLimit("nope", { rpm: 1, tpm: 1 })).rejects.toThrow();
     });
   });
 

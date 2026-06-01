@@ -77,11 +77,22 @@ export interface KeyStore {
   // Soft revoke: set disabled=true. Never physically deletes, never rewrites
   // other fields in place ("轮转吊销不就地改写").
   disable(keyId: string): Promise<void>;
-  // Edit a key's per-key rate-limit override (docs/06). A number sets an explicit
-  // override for that dimension (0 = unlimited); null CLEARS it back to inheriting
-  // the system default. Touches ONLY the two rate-limit columns — never role/caps.
-  // Throws if the key id is unknown (mirrors `disable`, fail-loud not silent).
-  updateRateLimit(keyId: string, rpm: number | null, tpm: number | null): Promise<void>;
+  // Edit a key's per-key rate-limit override (docs/06). PARTIAL: only the
+  // dimensions PRESENT in `patch` are written; an omitted dimension is left
+  // untouched, so two concurrent partial PATCHes on different dimensions cannot
+  // clobber each other (no read-modify-write of the sibling column). A value of
+  // null CLEARS that dimension back to inheriting the system default; a number
+  // (0 = unlimited) sets an explicit override. Touches ONLY the rate-limit
+  // columns — never role/caps. Throws if the key id is unknown (fail-loud).
+  updateRateLimit(keyId: string, patch: RateLimitPatch): Promise<void>;
+}
+
+// Partial per-key rate-limit edit. A dimension PRESENT (even as null) is written;
+// an ABSENT dimension is left untouched. Empty patch = no-op (still validates the
+// key exists, throwing on an unknown id).
+export interface RateLimitPatch {
+  rpm?: number | null;
+  tpm?: number | null;
 }
 
 // Telemetry insert input: decision record + a redacted key reference. Never

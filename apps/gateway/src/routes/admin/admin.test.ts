@@ -85,12 +85,12 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       // Soft revoke: flip disabled ONLY, never rewrite other fields in place.
       row.disabled = true;
     },
-    async updateRateLimit(keyId, rpm, tpm) {
+    async updateRateLimit(keyId, patch) {
       const row = rows.find((r) => r.key_id === keyId);
       if (!row) throw new Error(`key not found: ${keyId}`);
-      // Edit ONLY the two rate-limit columns — never role/caps.
-      row.rate_limit_rpm = rpm;
-      row.rate_limit_tpm = tpm;
+      // PARTIAL: only supplied dims change; absent dims untouched (never role/caps).
+      if (patch.rpm !== undefined) row.rate_limit_rpm = patch.rpm;
+      if (patch.tpm !== undefined) row.rate_limit_tpm = patch.tpm;
     },
   };
 }
