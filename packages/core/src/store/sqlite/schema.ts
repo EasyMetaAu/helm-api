@@ -119,6 +119,35 @@ export const oauthTokens = sqliteTable(
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );
 
+// Account credit quotas / billing (Issue #37). One ACCOUNT : N keys. The live
+// running balance + tri-state quota (NULL inherit / 0 unlimited / number cap,
+// mirroring the rate-limit quota convention). USD as REAL (mirrors pg double
+// precision); disabled as INTEGER boolean (sqlite has no native bool).
+export const accounts = sqliteTable("accounts", {
+  accountId: text("account_id").primaryKey(),
+  name: text("name"),
+  creditBalanceUsd: real("credit_balance_usd").notNull().default(0),
+  creditQuotaUsd: real("credit_quota_usd"), // NULL inherit / 0 unlimited / number cap
+  disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+// Append-only credit ledger — the audit trail for every balance change. api_key_id
+// is key_id ONLY (principle 7). cost_measured distinguishes a real 0 from "pricing
+// unknown" (null cost → debit 0 + cost_measured=false, D4). request_id/api_key_id
+// are NULL for topups/adjustments (no originating call).
+export const creditLedger = sqliteTable("credit_ledger", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  requestId: text("request_id"),
+  apiKeyId: text("api_key_id"), // key_id only — never plaintext/hash
+  amountUsd: real("amount_usd").notNull(), // signed: negative=debit, positive=topup
+  balanceAfterUsd: real("balance_after_usd").notNull(),
+  kind: text("kind").notNull(), // 'debit' | 'topup' | 'adjustment'
+  costMeasured: integer("cost_measured", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
@@ -126,3 +155,5 @@ export type RoutingSignalsTable = typeof routingSignals;
 export type ConfigKvTable = typeof configKv;
 export type RequestPayloadsTable = typeof requestPayloads;
 export type OAuthTokensTable = typeof oauthTokens;
+export type AccountsTable = typeof accounts;
+export type CreditLedgerTable = typeof creditLedger;

@@ -9,6 +9,7 @@ import {
   createAnthropicClient,
   createCircuitBreaker,
   createCodexResponsesClient,
+  createCreditGate,
   createMemoryMomentumStore,
   createOAuthPoolClient,
   createOpenAIClient,
@@ -18,7 +19,9 @@ import {
   createStore,
   createTokenManager,
   DEFAULT_LANES,
+  debitForDecision,
   discoverOAuthModels,
+  ensureSeedAccounts,
   type GeminiGenerateContentResponse,
   geminiTransformer,
   generateKey,
@@ -68,6 +71,7 @@ import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middleware/basic-auth.js";
+import { creditGateMiddleware } from "./middleware/credit-gate.js";
 import { estimateRequestTokens } from "./middleware/estimate-tokens.js";
 import { type RateLimiterPort, rateLimitMiddleware } from "./middleware/rate-limit.js";
 import {
@@ -560,6 +564,7 @@ export async function buildServer(
   const store: StoreSet = await createStore({ store: storeCfg, dataDir, connectionString });
   const keyStore = store.keys;
   const telemetry = store.telemetry;
+  const creditStore = store.credit;
 
   // OAuth subscription runtime (issue #38). PRESET providers store their (rotating)
   // credentials encrypted at rest, so an at-rest key is REQUIRED when any preset is
@@ -610,9 +615,20 @@ export async function buildServer(
       tpm: settings.rate_limit_default_tpm,
     },
   };
+  // A MUTABLE copy of the credit-gate config (Issue #37), mirroring rateLimitConfig
+  // above: the gate reads `enabled` / `defaultQuotaUsd` / `overQuotaBehavior` fresh
+  // on every check(), so flipping the master switch, retuning the default quota, or
+  // switching reject↔alert applies LIVE without a restart (re-bound in applySettings
+  // below). NOT yaml-seeded — takes the RuntimeSettings schema default at boot.
+  const creditConfig = {
+    enabled: settings.credits_enabled,
+    defaultQuotaUsd: settings.credit_default_quota_usd,
+    overQuotaBehavior: settings.over_quota_behavior,
+  };
   // Apply a new settings object live: re-bind `settings`, push the log level into
-  // the logger, flip the rate-limit master switch, and retune the system-default
-  // quota. Called by the admin settings route after it validates + persists.
+  // the logger, flip the rate-limit master switch, retune the system-default
+  // quota, and rebuild the credit-gate config. Called by the admin settings route
+  // after it validates + persists.
   const applySettings = (next: RuntimeSettings): void => {
     settings = next;
     logger.setLevel?.(next.log_level);
@@ -621,6 +637,11 @@ export async function buildServer(
       rpm: next.rate_limit_default_rpm,
       tpm: next.rate_limit_default_tpm,
     };
+    // Credit gate hot-reload (acceptance #5): mutate IN PLACE so the gate's live
+    // reference sees the new values on the very next request — no restart.
+    creditConfig.enabled = next.credits_enabled;
+    creditConfig.defaultQuotaUsd = next.credit_default_quota_usd;
+    creditConfig.overQuotaBehavior = next.over_quota_behavior;
   };
   // Agentic Signals (POST-MVP feedback layer, docs/02). The collector consumes
   // ALREADY-persisted telemetry and writes aggregated, REDACTED signals — it is
@@ -640,6 +661,13 @@ export async function buildServer(
     config: rateLimitConfig,
     store: store.rateLimit,
   });
+  // Pre-request credit gate (Issue #37). Default OFF (settings.credits_enabled) ->
+  // zero-touch pass-through (the store is never read). Reads the LIVE creditConfig
+  // each check so admin toggles apply without a restart. Sits AFTER auth + rate
+  // limit, BEFORE routing. Covers all three protocol faces (the gate is registered
+  // on /v1/chat, /v1/messages, /v1/responses below); the post-served DEBIT is
+  // OpenAI-only (D8).
+  const creditGate = createCreditGate({ config: creditConfig, store: creditStore });
 
   // Memory observe-phase deps (docs/08 Phase 1), built ONCE process-wide and shared
   // by every request surface (chat / messages / responses). store.memory is the
@@ -666,6 +694,13 @@ export async function buildServer(
     now: () => new Date(),
     log: (line) => logger.log("warn", "bootstrap.root_key", { line }),
   });
+
+  // Provision the bootstrap account rows (Issue #37). Seeds BOTH legacy literals
+  // (acct_default from the root key + default from admin-minted keys) so every
+  // existing key resolves to a real account row for the credit gate. Idempotent
+  // (ensureAccount inserts-if-absent, never resets a balance). AWAITED before the
+  // listen for the same fail-closed reason as bootstrapRootKey.
+  await ensureSeedAccounts(creditStore, () => Date.now());
 
   // Provider(s): the configured upstreams (providers-multi). The PRIMARY provider
   // (providers[0]) backs the default/eval path and the Phase-0 passthrough; its
@@ -906,6 +941,18 @@ export async function buildServer(
     "/v1/chat/*",
     rateLimitMiddleware({ limiter: rateLimiter, estimateTokens: estimateRequestTokens }),
   );
+  // Credit gate AFTER rate limit, BEFORE classify/route (Issue #37). Fail-CLOSED;
+  // no-op when credits disabled. The OpenAI face uses the auth-middleware identity
+  // (identity.accountId). The Anthropic/Responses faces self-authenticate, so the
+  // gate is applied INSIDE those routes' own auth path (see registerMessagesRoute/
+  // registerResponsesRoute deps below) rather than as a /v1/* middleware here.
+  app.use(
+    "/v1/chat/*",
+    creditGateMiddleware({
+      gate: creditGate,
+      log: (msg, fields) => logger.log("warn", msg, fields),
+    }),
+  );
 
   // The per-request `route`: bind a fresh `execute` to the request's abort
   // signal (client disconnect), then run the framework-agnostic orchestrator.
@@ -955,6 +1002,19 @@ export async function buildServer(
     capturePayloads: () => settings.capture_payloads,
     payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
     costOf,
+    // Post-served account-credit debit (Issue #37, fail-OPEN, OpenAI-chat-only D8).
+    // No-op when credits are disabled so a billing-off deployment never touches the
+    // credit store (zero-overhead main path). Charges the SETTLED total_usd carried
+    // on the decision (debitForDecision never recomputes cost, D6).
+    creditDebit: async (decision, accountId, apiKeyId) => {
+      if (!creditConfig.enabled) return;
+      await debitForDecision(creditStore, {
+        decision,
+        accountId,
+        apiKeyId,
+        nowMs: Date.now(),
+      });
+    },
     // e2e-only: allow the `x-helm-eval` header to toggle Layer-2 eval per request
     // so the eval cascade can be black-boxed without a config reload. Production
     // leaves HELM_E2E unset → eval stays config-driven (fail-closed, principle 2).
@@ -1027,6 +1087,9 @@ export async function buildServer(
       },
       genKeyId: () => randomUUID(),
       accountId: "default",
+      // Account credit store (Issue #37) — backs the /admin/api/accounts balance +
+      // window-spend (authoritative credit_ledger) + topup routes.
+      creditStore,
       // System Settings: read the live value; on save, validate+persist to the
       // config_kv store then apply live (logger level, rate-limit switch). The
       // route layer (admin/settings.ts) validates against RuntimeSettingsSchema.
@@ -1088,6 +1151,9 @@ export async function buildServer(
     // See note above: attached via cast until Wave2 adds `rateLimiter` to the deps
     // interface (the cast then becomes a no-op).
     rateLimiter,
+    // Credit gate on the Anthropic face (Issue #37, all-faces gate). D8: GATE only;
+    // the post-served debit is OpenAI-chat-only.
+    creditGate,
     auth: {
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;
@@ -1152,6 +1218,8 @@ export async function buildServer(
     // Same per-key limiter, same cast rationale as the messages route above —
     // closes the rate-limit bypass on /v1/responses.
     rateLimiter,
+    // Credit gate on the Responses face (Issue #37). D8: GATE only.
+    creditGate,
     auth: {
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;

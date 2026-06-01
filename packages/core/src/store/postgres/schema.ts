@@ -173,10 +173,37 @@ export const oauthTokens = pgTable(
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );
 
+// Account credit quotas / billing (Issue #37). Same LOGICAL schema as the sqlite
+// adapter — native double precision for USD, native boolean, epoch-ms bigint for
+// timestamps (value space matches sqlite). credit_ledger.api_key_id is key_id ONLY
+// (principle 7). credit_quota_usd tri-state: NULL inherit / 0 unlimited / number cap.
+export const accounts = pgTable("accounts", {
+  accountId: text("account_id").primaryKey(),
+  name: text("name"),
+  creditBalanceUsd: doublePrecision("credit_balance_usd").notNull().default(0),
+  creditQuotaUsd: doublePrecision("credit_quota_usd"),
+  disabled: boolean("disabled").notNull().default(false),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(), // epoch ms
+});
+
+export const creditLedger = pgTable("credit_ledger", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  requestId: text("request_id"),
+  apiKeyId: text("api_key_id"), // key_id only — never plaintext/hash
+  amountUsd: doublePrecision("amount_usd").notNull(),
+  balanceAfterUsd: doublePrecision("balance_after_usd").notNull(),
+  kind: text("kind").notNull(),
+  costMeasured: boolean("cost_measured").notNull().default(true),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(), // epoch ms
+});
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
 export type RoutingSignalsTable = typeof routingSignals;
+export type AccountsTable = typeof accounts;
+export type CreditLedgerTable = typeof creditLedger;
 export type MemoryThreadsTable = typeof memoryThreads;
 export type MemoryMessagesTable = typeof memoryMessages;
 export type MemoryObservationsTable = typeof memoryObservations;

@@ -2,6 +2,7 @@ import { join } from "node:path";
 import type { StoreConfig } from "@helm/shared";
 import type {
   ConfigStore,
+  CreditStore,
   KeyStore,
   MemoryStore,
   OAuthTokenStore,
@@ -10,6 +11,7 @@ import type {
   TelemetryStore,
 } from "./ports.js";
 import { PgConfigStore } from "./postgres/config-store.js";
+import { PgCreditStore } from "./postgres/credit.js";
 import { PgKeyStore } from "./postgres/keystore.js";
 import { PgMemoryStore } from "./postgres/memory-store.js";
 import { createPgDb } from "./postgres/migrate.js";
@@ -18,6 +20,7 @@ import { PgRateLimitStore } from "./postgres/rate-limit.js";
 import { PgSignalStore } from "./postgres/signals.js";
 import { PgTelemetryStore } from "./postgres/telemetry.js";
 import { SqliteConfigStore } from "./sqlite/config-store.js";
+import { SqliteCreditStore } from "./sqlite/credit.js";
 import { SqliteKeyStore } from "./sqlite/keystore.js";
 import { SqliteMemoryStore } from "./sqlite/memory-store.js";
 import { createSqliteDb } from "./sqlite/migrate.js";
@@ -35,6 +38,7 @@ export interface StoreSet {
   readonly telemetry: TelemetryStore;
   readonly signals: SignalStore;
   readonly rateLimit: RateLimitStore;
+  readonly credit: CreditStore;
   readonly memory: MemoryStore;
   readonly config: ConfigStore;
   readonly oauthTokens: OAuthTokenStore;
@@ -68,6 +72,7 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         telemetry: new SqliteTelemetryStore(db),
         signals: new SqliteSignalStore(db),
         rateLimit: new SqliteRateLimitStore(db),
+        credit: new SqliteCreditStore(db),
         memory: new SqliteMemoryStore(db),
         config: new SqliteConfigStore(db),
         oauthTokens: new SqliteOAuthTokenStore(db),
@@ -89,6 +94,7 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         telemetry: new PgTelemetryStore(db),
         signals: new PgSignalStore(db),
         rateLimit: new PgRateLimitStore(db),
+        credit: new PgCreditStore(db),
         memory: new PgMemoryStore(db),
         config: new PgConfigStore(db),
         oauthTokens: new PgOAuthTokenStore(db),

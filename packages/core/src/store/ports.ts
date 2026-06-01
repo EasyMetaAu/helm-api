@@ -1,5 +1,8 @@
 import type {
+  AccountRecord,
   ApiKeyRecord,
+  CreditLedgerEntry,
+  CreditLedgerKind,
   DecisionRecord,
   MemoryMessageInput,
   MemoryObservationInput,
@@ -43,6 +46,67 @@ export interface RateLimitStore {
     cost: number,
     nowMs: number,
   ): Promise<RateLimitConsumeResult>;
+}
+
+// Account credit balance + tri-state quota, read by the pre-request credit gate
+// (Issue #37). `quota` mirrors the rate-limit convention: null = inherit the
+// system default; 0 = unlimited; a number = the hard cap. The gate compares the
+// LIVE balance against zero (D5: a pure sign check, no cost pre-estimate).
+export interface AccountBalance {
+  balance: number;
+  quota: number | null;
+  disabled: boolean;
+}
+
+// One credit movement: the SIGNED amount (negative=debit, positive=topup) plus
+// the audit metadata persisted to credit_ledger. api_key_id is key_id ONLY
+// (principle 7). request_id/api_key_id are null for operator topups/adjustments.
+// `costMeasured` distinguishes a measured 0 from "pricing unknown" (D4).
+export interface CreditMovementInput {
+  accountId: string;
+  requestId: string | null;
+  apiKeyId: string | null;
+  amountUsd: number; // signed
+  kind: CreditLedgerKind;
+  costMeasured: boolean;
+  nowMs: number;
+}
+
+export interface CreditMovementResult {
+  balanceAfter: number;
+  ok: boolean;
+}
+
+// Persistence for account credit balances + the append-only ledger (Issue #37).
+// Two OPPOSITE failure modes share this port (CLAUDE.md principle 3/5): the gate
+// READS balance fail-CLOSED (a getBalance error propagates → the gate rejects,
+// never "unlimited"); the post-served DEBIT is called inside a fail-OPEN envelope
+// by the caller (a debit failure is logged, never 5xx's a served request). The
+// balance update + ledger insert run in ONE atomic transaction (sqlite better-
+// sqlite3 txn / pg UPDATE…RETURNING row lock) so concurrent debits/topups cannot
+// double-spend the last credit or lose an update (D7). Keys are key_id only.
+export interface CreditStore {
+  // Read the account's live balance + tri-state quota + disabled flag, or null if
+  // the account row does not exist yet. Errors PROPAGATE (fail-closed at the gate).
+  getBalance(accountId: string): Promise<AccountBalance | null>;
+  // Atomically apply a negative movement (post-served cost) + append the ledger
+  // row, in one transaction. Auto-provisions a missing account row (balance 0)
+  // so a never-seen account never crashes the debit. `ok` is true once persisted.
+  debit(input: CreditMovementInput): Promise<CreditMovementResult>;
+  // Atomically apply a positive movement (operator topup) or a signed adjustment
+  // + append the ledger row. Same single-transaction atomicity as debit.
+  topup(input: CreditMovementInput): Promise<CreditMovementResult>;
+  // Idempotent account provisioning: insert the row if absent, leave it untouched
+  // if present (never clobbers an existing balance). Called at bootstrap / mint.
+  ensureAccount(account: { accountId: string; name?: string | null; nowMs: number }): Promise<void>;
+  // All accounts (admin balance panel). Never includes any key/payload.
+  listAccounts(): Promise<AccountRecord[]>;
+  // Sum of ledger DEBIT amounts (absolute USD) for an account in the half-open
+  // window [fromMs, toMs). Authoritative per-account spend source for the admin
+  // window-spend panel (telemetry is OpenAI-face only, so cannot answer this).
+  spendByAccount(accountId: string, fromMs: number, toMs: number): Promise<number>;
+  // Recent ledger entries for an account (admin audit view), newest first.
+  recentLedger(accountId: string, limit: number): Promise<CreditLedgerEntry[]>;
 }
 
 // Store ports (repository pattern). core depends ONLY on these interfaces; the

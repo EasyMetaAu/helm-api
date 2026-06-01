@@ -262,6 +262,42 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys DROP COLUMN max_lane;
     `,
   },
+  {
+    // Account credit quotas / billing (Issue #37). Two NEW tables — additive,
+    // existing rows untouched (append-only forward step; never edits a published
+    // migration, see the v6 rebuild note above). `accounts` holds the live running
+    // balance + tri-state quota (NULL inherit / 0 unlimited / number cap, mirroring
+    // the rate-limit quota convention). `credit_ledger` is the append-only audit
+    // trail; api_key_id is key_id ONLY (principle 7 — never plaintext/hashed). USD
+    // columns are REAL (mirrors pg DOUBLE PRECISION); booleans are INTEGER (sqlite
+    // has no native bool). NO telemetry.account_id column is added — credit_ledger
+    // is the authoritative per-account spend source (telemetry is OpenAI-face only).
+    version: 11,
+    sql: `
+      CREATE TABLE IF NOT EXISTS accounts (
+        account_id TEXT PRIMARY KEY,
+        name TEXT,
+        credit_balance_usd REAL NOT NULL DEFAULT 0,
+        credit_quota_usd REAL,
+        disabled INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS credit_ledger (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        request_id TEXT,
+        api_key_id TEXT,
+        amount_usd REAL NOT NULL,
+        balance_after_usd REAL NOT NULL,
+        kind TEXT NOT NULL,
+        cost_measured INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_credit_ledger_account ON credit_ledger (account_id, created_at DESC);
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

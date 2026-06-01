@@ -38,6 +38,10 @@ describe("defaultSettingsFromConfig", () => {
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
       log_level: "info",
+      // Credit/billing fields take their schema defaults (NOT yaml-seeded, Issue #37).
+      credits_enabled: false,
+      credit_default_quota_usd: 0,
+      over_quota_behavior: "reject",
     });
     expect(defaultSettingsFromConfig(cfg(false)).rate_limit_enabled).toBe(false);
   });
@@ -99,6 +103,9 @@ describe("saveRuntimeSettings", () => {
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
       log_level: "warn",
+      credits_enabled: false,
+      credit_default_quota_usd: 0,
+      over_quota_behavior: "reject",
     });
     expect(saved.payload_retention_days).toBe(7);
     expect(JSON.parse(store.map.get(RUNTIME_SETTINGS_KEY) ?? "{}")).toEqual(saved);

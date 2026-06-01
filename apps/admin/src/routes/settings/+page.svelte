@@ -3,6 +3,7 @@
   import {
     LOG_LEVEL_OPTIONS,
     type LogLevel,
+    OVER_QUOTA_BEHAVIOR_OPTIONS,
     type RuntimeSettings,
     saveSettings,
   } from '$lib/api/settings.js';
@@ -21,6 +22,9 @@
     rate_limit_default_rpm: 0,
     rate_limit_default_tpm: 0,
     log_level: 'info' as LogLevel,
+    credits_enabled: false,
+    credit_default_quota_usd: 0,
+    over_quota_behavior: 'reject',
   };
   // Local working copy (snapshot the loaded settings into a NEW object so the
   // $state initializer doesn't capture the reactive `data` prop reference).
@@ -155,6 +159,57 @@
           {/each}
         </select>
         <span class="field-help">{$t('How much detail the gateway writes to its logs.')}</span>
+      </label>
+    </section>
+
+    <!-- Billing / account credits (Issue #37) -->
+    <section class="card flex flex-col gap-3 text-sm">
+      <h2 class="section-header">{$t('Account credits')}</h2>
+
+      <label class="flex items-start gap-3">
+        <input
+          type="checkbox"
+          data-testid="credits-enabled"
+          class="checkbox mt-0.5"
+          bind:checked={form.credits_enabled}
+        />
+        <span>
+          <span class="font-medium">{$t('Enable account credits')}</span>
+          <span class="field-help block"
+            >{$t('Charge each account for the cost it serves and stop it when it runs out.')}</span
+          >
+        </span>
+      </label>
+
+      <label class="flex flex-col gap-1 border-l-2 border-slate-100 pl-3">
+        <span class="font-medium">{$t('Default credit quota (USD)')}</span>
+        <input
+          type="number"
+          min="0"
+          step="0.01"
+          data-testid="credit-default-quota"
+          class="input-sm w-32"
+          bind:value={form.credit_default_quota_usd}
+        />
+        <span class="field-help"
+          >{$t('The default for any account without its own quota. 0 means unlimited.')}</span
+        >
+      </label>
+
+      <label class="flex flex-col gap-1 border-l-2 border-slate-100 pl-3">
+        <span class="font-medium">{$t('When over quota')}</span>
+        <select
+          data-testid="over-quota-behavior"
+          class="select w-40"
+          bind:value={form.over_quota_behavior}
+        >
+          {#each OVER_QUOTA_BEHAVIOR_OPTIONS as behavior (behavior)}
+            <option value={behavior}>{behavior}</option>
+          {/each}
+        </select>
+        <span class="field-help"
+          >{$t('Reject blocks the request (429); alert serves it and flags the overage.')}</span
+        >
       </label>
     </section>
 

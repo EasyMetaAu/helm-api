@@ -1,4 +1,4 @@
-import type { RateLimitProbe, RateLimitResult } from "@helm/core";
+import type { CreditCheckResult, CreditProbe, RateLimitProbe, RateLimitResult } from "@helm/core";
 import { type ErrorClass, ErrorClassSchema, makeHelmError } from "@helm/shared";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -39,8 +39,16 @@ export interface ResponsesRateLimiterPort {
   check(probe: RateLimitProbe): Promise<RateLimitResult>;
 }
 
+/** Pre-request credit gate (core, framework-agnostic; Issue #37). Same instance
+ *  the OpenAI chat middleware uses; applies the account-credit gate AFTER auth on
+ *  this self-authenticating face. Optional. D8: gate applies here, debit does NOT. */
+export interface ResponsesCreditGatePort {
+  check(probe: CreditProbe): Promise<CreditCheckResult>;
+}
+
 export interface ResponsesRouteDeps {
   rateLimiter?: ResponsesRateLimiterPort;
+  creditGate?: ResponsesCreditGatePort;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   transformer: {
     /** native Responses request → IR (throws on a structurally invalid body). */
@@ -163,6 +171,22 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             }),
           );
         }
+      }
+    }
+
+    // 1c) Credit gate AFTER rate limit (Issue #37). OpenAI surface → structured
+    //     rate_limited (429) via onError. No-op when credits disabled; a store
+    //     failure propagates (fail-CLOSED). D8: gate applies, debit does not.
+    if (deps.creditGate !== undefined) {
+      const cg = await deps.creditGate.check({ accountId: identity.accountId });
+      if (!cg.allowed) {
+        throw new HelmHttpError(
+          makeHelmError({
+            error_class: "rate_limited",
+            message: "insufficient account credit",
+            trace_id: traceId,
+          }),
+        );
       }
     }
 

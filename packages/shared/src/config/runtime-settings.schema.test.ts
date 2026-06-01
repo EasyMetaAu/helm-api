@@ -15,6 +15,11 @@ describe("RuntimeSettingsSchema", () => {
     expect(parsed.rate_limit_default_rpm).toBe(0);
     expect(parsed.rate_limit_default_tpm).toBe(0);
     expect(parsed.log_level).toBe("info");
+    // Credit/billing defaults (Issue #37): OFF, reject-on-over-quota, unlimited
+    // default quota (0). Mirrors capture_payloads: schema-default seeded, not yaml.
+    expect(parsed.credits_enabled).toBe(false);
+    expect(parsed.over_quota_behavior).toBe("reject");
+    expect(parsed.credit_default_quota_usd).toBe(0);
   });
 
   it("parses a full settings object field-by-field", () => {
@@ -25,6 +30,9 @@ describe("RuntimeSettingsSchema", () => {
       rate_limit_default_rpm: 60,
       rate_limit_default_tpm: 90000,
       log_level: "debug",
+      credits_enabled: true,
+      over_quota_behavior: "alert",
+      credit_default_quota_usd: 25,
     });
     expect(parsed).toEqual({
       capture_payloads: false,
@@ -33,7 +41,36 @@ describe("RuntimeSettingsSchema", () => {
       rate_limit_default_rpm: 60,
       rate_limit_default_tpm: 90000,
       log_level: "debug",
+      credits_enabled: true,
+      over_quota_behavior: "alert",
+      credit_default_quota_usd: 25,
     });
+  });
+
+  it("rejects an unknown over_quota_behavior (fail-closed)", () => {
+    const res = RuntimeSettingsSchema.safeParse({ over_quota_behavior: "degrade-lane" });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues.some((i) => i.path.join(".") === "over_quota_behavior")).toBe(true);
+    }
+  });
+
+  it("accepts both over_quota_behavior values", () => {
+    for (const b of ["reject", "alert"] as const) {
+      expect(RuntimeSettingsSchema.safeParse({ over_quota_behavior: b }).success).toBe(true);
+    }
+  });
+
+  it("rejects a negative / non-finite default credit quota (fail-closed)", () => {
+    expect(RuntimeSettingsSchema.safeParse({ credit_default_quota_usd: -1 }).success).toBe(false);
+    expect(
+      RuntimeSettingsSchema.safeParse({ credit_default_quota_usd: Number.POSITIVE_INFINITY })
+        .success,
+    ).toBe(false);
+  });
+
+  it("accepts 0 as the default credit quota (0 = unlimited)", () => {
+    expect(RuntimeSettingsSchema.safeParse({ credit_default_quota_usd: 0 }).success).toBe(true);
   });
 
   it("rejects a negative / non-integer default rate limit (fail-closed)", () => {

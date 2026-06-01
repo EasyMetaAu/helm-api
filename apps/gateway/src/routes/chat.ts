@@ -56,6 +56,15 @@ export interface ChatRouteDeps {
   capturePayloads?: PayloadCaptureDeps["capturePayloads"];
   payloadRetentionMs?: PayloadCaptureDeps["payloadRetentionMs"];
   costOf?: PayloadCaptureDeps["costOf"];
+  /** Post-served account-credit debit (Issue #37, fail-OPEN). Optional — absent =
+   *  no billing (existing tests run unchanged). When present, it is called inside
+   *  the SAME try/catch fail-open envelope as telemetry `persist` (a debit failure
+   *  is logged, NEVER 5xx's a served request). It charges the account the EXACT
+   *  cost_breakdown.total_usd already computed (D6 — never recomputed); on the
+   *  streaming path it runs in the finally block AFTER backfillCompletionCost has
+   *  settled total_usd (#2 e2e — the highest-risk case). This is the ONLY surface
+   *  that debits (D8): /v1/messages + /v1/responses gate but do not bill. */
+  creditDebit?: (decision: DecisionRecord, accountId: string, apiKeyId: string) => Promise<void>;
   /** When true, honor the e2e-only `x-helm-eval` / `x-helm-rules-threshold`
    *  headers to toggle Layer-2 eval and raise the Layer-1 gate per request.
    *  Gated by HELM_E2E in the composition root; production never sets this so
@@ -303,6 +312,21 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       }
     };
 
+    // Post-served credit debit (Issue #37). Fail-OPEN — mirrors `persist`: a debit
+    // failure is logged, never turns a served request into a 5xx or breaks an
+    // in-flight stream. Self-gates: no-op when no debit dep is wired or the request
+    // has no resolved account/key. Charges the SETTLED total_usd carried on the
+    // decision (D6 — never recomputed here).
+    const debitLedger = async (decision: DecisionRecord) => {
+      if (deps.creditDebit === undefined) return;
+      if (identity.accountId === undefined || identity.keyId === undefined) return;
+      try {
+        await deps.creditDebit(decision, identity.accountId, identity.keyId);
+      } catch {
+        c.get("logger").log("error", "credit.debit_failed", { trace_id: traceId });
+      }
+    };
+
     // e2e-only classification overrides: honor `x-helm-eval` (Layer-2 toggle) and
     // `x-helm-rules-threshold` (raise the Layer-1 gate so the cascade reaches
     // eval) ONLY when the composition root opted in (HELM_E2E). Production leaves
@@ -436,6 +460,11 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
           );
           await persist(result.decision);
+          // Credit debit (Issue #37, streamed): runs HERE — after the usage
+          // backfill above settled cost_breakdown.total_usd — so the streamed
+          // request is billed its real cost, not the null peek-time value (#2
+          // e2e, the highest-risk case). Fail-open (own try/catch inside).
+          await debitLedger(result.decision);
           // Memory observe (outbound, streamed): persist the reconstructed
           // assistant turn AFTER the bytes were forwarded. Fail-open inside core.
           if (deps.memory !== undefined) {
@@ -465,6 +494,11 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
     );
     await persist(result.decision);
+    // Credit debit (Issue #37, non-stream): the non-stream path's total_usd is
+    // already settled on the decision by route-request, so we bill right after
+    // persist. Fail-open. A failed/errored request carries total_usd null → debits
+    // 0 (D4), so this is safe to call before the error branch below.
+    await debitLedger(result.decision);
     if (result.final.status === "error" || result.body === null) {
       const error =
         result.error ??

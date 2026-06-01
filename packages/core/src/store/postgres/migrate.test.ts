@@ -1,6 +1,8 @@
-import type { sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createPgliteDb, runPgMigrations } from "./migrate.js";
+
+const sqlRaw = sql.raw;
 
 // A statement-recording RawExecutor stand-in. `failOn` makes one matching
 // statement throw, simulating a mid-migration failure so we can assert the
@@ -49,6 +51,23 @@ describe("runPgMigrations — per-migration atomicity", () => {
     const db = await createPgliteDb();
     // Re-running is a no-op (ledger already full); must not throw.
     await runPgMigrations(db);
+    await db.$close();
+  });
+
+  it("creates accounts + credit_ledger and records pg version 8 (Issue #37)", async () => {
+    const db = await createPgliteDb();
+    const tables = (await db.execute(
+      sqlRaw("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"),
+    )) as { rows?: Array<{ table_name: string }> } | Array<{ table_name: string }>;
+    const rows = Array.isArray(tables) ? tables : (tables.rows ?? []);
+    const names = new Set(rows.map((r) => r.table_name));
+    expect(names.has("accounts")).toBe(true);
+    expect(names.has("credit_ledger")).toBe(true);
+    const ver = (await db.execute(sqlRaw("SELECT version FROM _migrations"))) as
+      | { rows?: Array<{ version: number }> }
+      | Array<{ version: number }>;
+    const vrows = Array.isArray(ver) ? ver : (ver.rows ?? []);
+    expect(vrows.map((r) => Number(r.version))).toContain(8);
     await db.$close();
   });
 });

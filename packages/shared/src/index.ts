@@ -3,6 +3,19 @@
 
 export const SHARED_PACKAGE = "@helm/shared" as const;
 
+// Account + credit ledger model (Issue #37) — account-level credit quotas /
+// billing. Ledger carries key_id ONLY (principle 7). Schema = single type source.
+export {
+  type AccountRecord,
+  AccountRecordSchema,
+  type CreditAdjustRequest,
+  CreditAdjustRequestSchema,
+  type CreditLedgerEntry,
+  CreditLedgerEntrySchema,
+  type CreditLedgerKind,
+  CreditLedgerKindSchema,
+} from "./account/schema.js";
+
 // Catalog model — capabilities + pricing, generated (supply-chain) + override
 // (manual wins). See CLAUDE.md implementation conventions, docs/02 security rules.
 export {
@@ -84,6 +97,8 @@ export {
 export {
   type LogLevel,
   LogLevelSchema,
+  type OverQuotaBehavior,
+  OverQuotaBehaviorSchema,
   type RuntimeSettings,
   RuntimeSettingsSchema,
 } from "./config/runtime-settings.schema.js";

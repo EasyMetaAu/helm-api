@@ -1,4 +1,4 @@
-import type { RateLimitProbe, RateLimitResult } from "@helm/core";
+import type { CreditCheckResult, CreditProbe, RateLimitProbe, RateLimitResult } from "@helm/core";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -77,8 +77,19 @@ export interface MessagesRateLimiterPort {
   check(probe: RateLimitProbe): Promise<RateLimitResult>;
 }
 
+/** Pre-request credit gate (core, framework-agnostic; Issue #37). Same instance
+ *  the OpenAI chat middleware uses; injected here so the self-authenticating
+ *  Anthropic route applies the account-credit gate AFTER auth. Optional — omitted
+ *  = no gate (the gate itself no-ops when credits are disabled). NOTE (D8): the
+ *  GATE applies here, but the post-served DEBIT does NOT (the Anthropic pipeline
+ *  has no telemetry-persist + cost-backfill envelope to hook). */
+export interface MessagesCreditGatePort {
+  check(probe: CreditProbe): Promise<CreditCheckResult>;
+}
+
 export interface MessagesRouteDeps {
   rateLimiter?: MessagesRateLimiterPort;
+  creditGate?: MessagesCreditGatePort;
   auth: {
     /** Resolve the request credential to an identity, or null when invalid.
      *  Mandatory auth: a null result short-circuits to a 401 (no anonymous
@@ -184,6 +195,22 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             trace_id: traceId,
           });
         }
+      }
+    }
+
+    // 1c) Credit gate AFTER rate limit (Issue #37). Mirrors the OpenAI chat
+    //     middleware but emits the ANTHROPIC envelope on rejection. No-op when
+    //     credits are disabled (the gate never reads the store). A store failure in
+    //     check() propagates (fail-CLOSED) → onError, never an over-quota pass. D8:
+    //     the gate applies on this face; the post-served debit does NOT.
+    if (deps.creditGate !== undefined) {
+      const cg = await deps.creditGate.check({ accountId: identity.accountId });
+      if (!cg.allowed) {
+        return sendError(c, {
+          error_class: "rate_limited",
+          message: "insufficient account credit",
+          trace_id: traceId,
+        });
       }
     }
 

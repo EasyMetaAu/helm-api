@@ -1,7 +1,11 @@
 export { type CreateStoreOptions, createStore, type StoreSet } from "./factory.js";
 export type {
+  AccountBalance,
   ConfigStore,
   CreateKeyInput,
+  CreditMovementInput,
+  CreditMovementResult,
+  CreditStore,
   InsertPayloadInput,
   InsertTelemetryInput,
   KeyStore,
@@ -19,6 +23,7 @@ export type {
 // reached via postgres-js; the same adapters run against in-process PGlite in
 // tests (drizzle pg dialect), validating the supabase path without a server.
 export { PgConfigStore } from "./postgres/config-store.js";
+export { PgCreditStore } from "./postgres/credit.js";
 export { PgKeyStore } from "./postgres/keystore.js";
 export { PgMemoryStore } from "./postgres/memory-store.js";
 export {
@@ -32,6 +37,7 @@ export { PgRateLimitStore } from "./postgres/rate-limit.js";
 export { PgSignalStore } from "./postgres/signals.js";
 export { PgTelemetryStore } from "./postgres/telemetry.js";
 export { SqliteConfigStore } from "./sqlite/config-store.js";
+export { SqliteCreditStore } from "./sqlite/credit.js";
 export { SqliteKeyStore } from "./sqlite/keystore.js";
 export { SqliteMemoryStore } from "./sqlite/memory-store.js";
 export { createSqliteDb, runMigrations, type SqliteDb } from "./sqlite/migrate.js";

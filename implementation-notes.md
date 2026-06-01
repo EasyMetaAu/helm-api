@@ -338,6 +338,38 @@ protocol + gateway routes 406 tests green; typecheck clean; `pnpm lint` exit 0.
 
 ---
 
+## 2026-06-02 · Account credit quotas / billing (Issue #37; docs/06:97-102, docs/09:51-52 — capability previously DEFERRED)
+
+**Context**: the gateway had only per-key token-bucket rate limiting + per-request cost telemetry — no account/balance/ledger entity and no account-level budget enforcement. This builds account-level credit billing (1 account : N keys) on top of those primitives so an operator can top accounts up, debit real served cost, and reject/alert when over quota.
+
+**Two OPPOSITE failure modes (Principle 3/5 — do NOT conflate)**:
+- **Pre-request gate = fail-CLOSED**: `packages/core/src/credit/gate.ts` + `apps/gateway/src/middleware/credit-gate.ts`. A `getBalance` store error PROPAGATES → the request 5xx's; it is NEVER an "unlimited" pass. Runs after auth + rate limit, before classify/route. Covers ALL THREE protocol faces (OpenAI middleware on `/v1/chat/*`; Anthropic `/v1/messages` + Responses `/v1/responses` apply the gate inside their own self-auth path via an injected `creditGate` port).
+- **Post-served debit = fail-OPEN**: `packages/core/src/credit/ledger.ts` called inside the SAME try/catch envelope as telemetry `persist` in `chat.ts`. A debit failure is logged (`credit.debit_failed`), never 5xx's a served request.
+
+**Maintainer decisions (from the issue, chosen v1)**:
+- **D1** account-only quota subject (org_id/user_id are always null — no trustworthy org resolution exists).
+- **D2** running-balance row (`accounts.credit_balance_usd`) + append-only `credit_ledger`; monthly rolling quota deferred.
+- **D3** over-quota default `reject` (429); `alert` (soft, serve + flag) runtime-switchable; `degrade-lane` deferred (needs a new cap through routing).
+- **D4** null cost (`total_usd===null` = "not measured", distinct from a measured 0) → debit 0 + `cost_measured=false`; NEVER blocks (would break the fail-open envelope).
+- **D5** v1 is POST-debit only, no reservation. The gate does a PURE BALANCE SIGN CHECK (balance > 0 ⇒ serve) — NO per-request cost pre-estimate (unlike the limiter's TPM pre-debit). A single in-flight request may push the balance slightly negative; settled by the post-served debit (bounded, same tolerance class as the limiter's Content-Length/4 estimate).
+- **D6** debit uses the SAME `cost_breakdown.total_usd` the telemetry pipeline already computed (`resolveCostUsd`, billed-over-estimate) — NEVER recomputes cost.
+- **D7** atomic single-row update: better-sqlite3 sync txn (sqlite) / `SELECT … FOR UPDATE` row lock (pg). Concurrency tests assert no double-spend + no lost update on debit×topup interleave, on BOTH adapters.
+- **D8 ⚠️ SCOPE CUT — billing is OpenAI-`/v1/chat`-ONLY**: the gate covers all 3 faces, but the post-served DEBIT runs ONLY on `chat.ts`. **`messages.ts` / `responses.ts` / `messages-pipeline.ts` have no telemetry-persist + cost-backfill envelope to hook** — building one for them is a separate, larger change out of this issue's scope. **Consequence: requests served via Anthropic `/v1/messages` and `/v1/responses` are GATED but NOT billed** (a "consume-without-charge" hole on those two faces). Tracked here so this is not mistaken for full billing coverage.
+
+**Error class (chose A)**: REUSED the closed-contract `rate_limited` ErrorClass (already 429) with a distinguishing `limited_by: "credit"` body field, rather than adding a 9th `ErrorClass` enum value. No change to the docs/07 error contract / exhaustive switches.
+
+**Settings seeding (chose A)**: `credits_enabled` / `credit_default_quota_usd` / `over_quota_behavior` take their RuntimeSettings SCHEMA defaults (OFF / 0 / reject) — NOT yaml-seeded (mirrors `capture_payloads`). `defaultSettingsFromConfig` was left untouched. Hot-reload works because `server.ts` rebuilds a mutable `creditConfig` object IN PLACE inside the `applySettings`/`onSettings` closure (mirrors `rateLimitConfig`), so the admin settings PUT applies live with no restart (acceptance #5, verified by e2e).
+
+**Migrations (dialect version numbers DIVERGE — by design)**: `accounts` + `credit_ledger` land at **sqlite migration v11** but **pg migration v10** — the two dialects keep INDEPENDENT migration ledgers, so the next free version differs per dialect for the SAME logical change. (Rebased onto main after issues #35/#38 landed their own migrations — oauth_tokens sqlite v9/pg v8, drop max_lane sqlite v10/pg v9 — so the credit tables were renumbered to the next free slot per dialect.) A later commit adds a partial UNIQUE index `idx_credit_ledger_debit_request (account_id, request_id) WHERE kind='debit' AND request_id IS NOT NULL` in the SAME migration block for debit idempotency. Append-only; existing rows untouched. **No `telemetry.account_id` column was added** — `credit_ledger` is the AUTHORITATIVE per-account spend source (telemetry is OpenAI-face-only, so denormalizing account_id there could never be correct cross-face).
+
+**Dual account-literal gotcha (现状第 6 条)**: production already has TWO account-id literals — `acct_default` (bootstrap root key) and `default` (admin-minted keys). `ensureSeedAccounts` (core/auth/seed-accounts.ts) seeds BOTH at boot so every existing key resolves to a real account row; we did NOT migrate/rewrite existing `key.account_id` values (riskier). New deploys can standardize on `acct_default`.
+
+**Telemetry-persistence gotcha**: `telemetry.insert` is called in exactly ONE place repo-wide (`chat.ts`). The Anthropic/Responses faces only `log(decision)`, never persist telemetry nor settle streamed cost — which is precisely why D8 limits billing to `chat.ts`.
+
+**Tests**: gate decision matrix (enable/disable, tri-state quota inherit, sign check, alert, fast-path-no-store-read, fail-closed propagate); atomic debit double-spend + debit×topup interleave on sqlite AND pg; null-cost (debit 0 + flag); no-recompute debit; fail-mode split (gate propagates / debit swallowed); admin accounts API; admin settings normalize. e2e (`credit.spec.ts`, 4 cases): over-quota 429, topup→served, alert→served, disabled→pass-through — all flip credits live via the admin API (no restart). **NOTE**: the mock upstream emits no usage chunk, so the e2e streamed cost settles to null → 0-amount debit; the per-amount settlement (debit uses settled `total_usd` after `backfillCompletionCost`) is covered by the UNIT tests (chat.credit.test + ledger.test), the highest-risk SSE-finally path.
+
+---
+
 ## 2026-06-01 · Pagination + error/role filters for the admin requests list (docs/07, Principle 1)
 
 **Context**: `/admin/requests` fetched a hardcoded `queryRecent(100)` and rendered all rows at once; the UI had dead cursor/"Load more" plumbing that never fired. No way to page past 100 requests or isolate errors / a time window — unusable for real debugging. Added numbered pagination (time DESC) plus Date-range / Status / Decided-by / Lane / Model filters, all applied at the SQL layer so totals stay correct.

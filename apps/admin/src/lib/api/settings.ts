@@ -6,6 +6,7 @@
 // the whole object on PUT and fail-closes (400) on any invalid field.
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type OverQuotaBehavior = 'reject' | 'alert';
 
 export interface RuntimeSettings {
   capture_payloads: boolean;
@@ -16,9 +17,15 @@ export interface RuntimeSettings {
   rate_limit_default_rpm: number;
   rate_limit_default_tpm: number;
   log_level: LogLevel;
+  // Account credit/billing (Issue #37). Master switch + system default credit
+  // quota (USD; 0 = unlimited) + over-quota behavior (reject = 429, alert = soft).
+  credits_enabled: boolean;
+  credit_default_quota_usd: number;
+  over_quota_behavior: OverQuotaBehavior;
 }
 
 export const LOG_LEVEL_OPTIONS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
+export const OVER_QUOTA_BEHAVIOR_OPTIONS: readonly OverQuotaBehavior[] = ['reject', 'alert'];
 
 const BASE = '/admin/api/settings';
 
@@ -51,6 +58,14 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
     log_level: (LOG_LEVEL_OPTIONS as readonly string[]).includes(level as string)
       ? (level as LogLevel)
       : 'info',
+    credits_enabled: raw.credits_enabled === true,
+    credit_default_quota_usd:
+      typeof raw.credit_default_quota_usd === 'number' ? raw.credit_default_quota_usd : 0,
+    over_quota_behavior: (OVER_QUOTA_BEHAVIOR_OPTIONS as readonly string[]).includes(
+      raw.over_quota_behavior as string,
+    )
+      ? (raw.over_quota_behavior as OverQuotaBehavior)
+      : 'reject',
   };
 }
 

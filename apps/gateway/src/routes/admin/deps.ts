@@ -1,4 +1,11 @@
-import type { CreateKeyInput, KeyStore, Lane, PoliciesConfig, TelemetryStore } from "@helm/core";
+import type {
+  CreateKeyInput,
+  CreditStore,
+  KeyStore,
+  Lane,
+  PoliciesConfig,
+  TelemetryStore,
+} from "@helm/core";
 import type { ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/shared";
 import type { ModelOption } from "../../oauth/effective-models.js";
 
@@ -203,6 +210,11 @@ export interface AdminApiDeps {
   // a false 204, honoring the Save == applied contract. Optional: absent in unit tests
   // (treated as applied).
   onOAuthMutation?: () => Promise<{ applied: boolean }>;
+  // Account credit store (Issue #37). Optional so existing admin tests that don't
+  // exercise billing can omit it; when present, the accounts routes expose
+  // per-account balance + window spend (from the authoritative credit_ledger) and
+  // operator topup/adjustment. Never carries any key material (principle 7).
+  creditStore?: CreditStore;
 }
 
 // Re-exported for route signatures.

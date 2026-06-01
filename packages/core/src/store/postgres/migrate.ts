@@ -221,6 +221,36 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys DROP COLUMN IF EXISTS max_lane;
     `,
   },
+  {
+    // Account credit quotas / billing (Issue #37). NOTE: the version NUMBER differs
+    // from the sqlite adapter (sqlite v11) — the two dialects keep INDEPENDENT
+    // migration ledgers, so the next free pg version is 10 for the SAME logical
+    // change. USD as DOUBLE PRECISION, booleans native. credit_ledger.api_key_id is
+    // key_id ONLY (principle 7).
+    version: 10,
+    sql: `
+      CREATE TABLE IF NOT EXISTS accounts (
+        account_id TEXT PRIMARY KEY,
+        name TEXT,
+        credit_balance_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        credit_quota_usd DOUBLE PRECISION,
+        disabled BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS credit_ledger (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        request_id TEXT,
+        api_key_id TEXT,
+        amount_usd DOUBLE PRECISION NOT NULL,
+        balance_after_usd DOUBLE PRECISION NOT NULL,
+        kind TEXT NOT NULL,
+        cost_measured BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at BIGINT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_credit_ledger_account ON credit_ledger (account_id, created_at DESC);
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

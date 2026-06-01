@@ -5,7 +5,13 @@
 export const CORE_PACKAGE = "@helm/core" as const;
 
 // Re-export shared types that gateway/adapters need alongside core ports.
-export type { ApiKeyRecord, DecisionRecord } from "@helm/shared";
+export type {
+  AccountRecord,
+  ApiKeyRecord,
+  CreditLedgerEntry,
+  CreditLedgerKind,
+  DecisionRecord,
+} from "@helm/shared";
 export {
   type BootstrapDeps,
   type BootstrapResult,
@@ -18,6 +24,7 @@ export {
   hashKey,
   KEY_PREFIX,
 } from "./auth/keygen.js";
+export { BOOTSTRAP_ACCOUNT_IDS, ensureSeedAccounts } from "./auth/seed-accounts.js";
 export {
   type CapabilityRequest,
   checkCapability,
@@ -127,6 +134,18 @@ export {
   type LoadConfigOptions,
   loadConfig,
 } from "./config/loader.js";
+// Account credit quotas / billing (Issue #37) — pre-request fail-CLOSED gate +
+// post-served fail-OPEN ledger debit. Framework-agnostic (principle 1).
+export {
+  type CreditCheckResult,
+  type CreditConfig,
+  type CreditGateDeps,
+  type CreditProbe,
+  createCreditGate,
+  type DebitForDecisionInput,
+  debitForDecision,
+  type OverQuotaBehavior,
+} from "./credit/index.js";
 export {
   type AttemptRecord,
   type Candidate,
@@ -501,6 +520,7 @@ export {
   InMemoryRateLimitStore,
   InMemorySignalStore,
   PgConfigStore,
+  PgCreditStore,
   type PgDb,
   PgKeyStore,
   PgMemoryStore,
@@ -511,6 +531,7 @@ export {
   runMigrations,
   runPgMigrations,
   SqliteConfigStore,
+  SqliteCreditStore,
   type SqliteDb,
   SqliteKeyStore,
   SqliteMemoryStore,
@@ -521,8 +542,12 @@ export {
   type StoreSet,
 } from "./store/index.js";
 export type {
+  AccountBalance,
   ConfigStore,
   CreateKeyInput,
+  CreditMovementInput,
+  CreditMovementResult,
+  CreditStore,
   InsertPayloadInput,
   InsertTelemetryInput,
   KeyStore,

@@ -12,6 +12,9 @@ const FULL: RuntimeSettings = {
   rate_limit_default_rpm: 60,
   rate_limit_default_tpm: 90000,
   log_level: 'debug',
+  credits_enabled: true,
+  credit_default_quota_usd: 25,
+  over_quota_behavior: 'alert',
 };
 
 describe('settings api client', () => {
@@ -43,6 +46,9 @@ describe('settings api client', () => {
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
       log_level: 'info',
+      credits_enabled: false,
+      credit_default_quota_usd: 0,
+      over_quota_behavior: 'reject',
     });
   });
 
