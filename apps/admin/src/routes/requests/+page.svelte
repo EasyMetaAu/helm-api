@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import { listRequests, type RequestListItem } from '$lib/api/requests.js';
   import { t } from '$lib/i18n';
@@ -15,6 +16,29 @@
   let nextCursor = $state<string | undefined>(untrack(() => data.nextCursor));
   let loading = $state(false);
   let error = $state<string | null>(null);
+
+  // Detail route for a row. The whole row is clickable (below); we also keep a
+  // real <a> on the request-id cell so middle-click / open-in-new-tab / keyboard
+  // still work, and the row click is a mouse convenience on top.
+  function detailHref(traceId: string): string {
+    return `${base}/requests/${traceId}`;
+  }
+
+  // Navigate when the row is clicked, EXCEPT when the click originates on the
+  // inner request-id link — there the anchor handles its own navigation (so a
+  // plain click never fires twice, and modifier/middle clicks still open tabs).
+  function onRowClick(event: MouseEvent, traceId: string): void {
+    if ((event.target as HTMLElement).closest('a')) return;
+    void goto(detailHref(traceId));
+  }
+
+  // Recorded time for the 「时间」 column: format the ISO ts for the local locale;
+  // '—' when the record carried none (legacy row).
+  function formatTs(ts: string): string {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
+  }
 
   // Distinct label styling per classification-stage decision layer (原则5).
   function decidedByClass(d: RequestListItem['decided_by']): string {
@@ -92,6 +116,9 @@
       <table class="table-base">
         <thead class="table-head">
           <tr>
+            <th class="px-3 py-2" title={$t('The unique trace ID recorded for this request.')}
+              >{$t('Request ID')}</th
+            >
             <th class="px-3 py-2" title={$t('When the gateway received the request.')}
               >{$t('Time')}</th
             >
@@ -139,13 +166,26 @@
             <th class="px-3 py-2" title={$t('The error class, if the request failed.')}
               >{$t('Error')}</th
             >
-            <th class="px-3 py-2"><span class="sr-only">{$t('Details')}</span></th>
           </tr>
         </thead>
         <tbody>
           {#each items as r (r.trace_id)}
-            <tr data-testid="request-row" class="table-row">
-              <td class="px-3 py-2 text-ink-body">{r.ts || '—'}</td>
+            <!-- The whole row links to the detail page; the request-id cell keeps a
+                 real <a> for keyboard / open-in-new-tab. -->
+            <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+            <tr
+              data-testid="request-row"
+              class="table-row cursor-pointer"
+              onclick={(e) => onRowClick(e, r.trace_id)}
+            >
+              <td class="px-3 py-2">
+                <a
+                  class="link-inline font-mono text-ink-strong"
+                  href={detailHref(r.trace_id)}
+                  title={r.trace_id}>{r.trace_id}</a
+                >
+              </td>
+              <td class="px-3 py-2 text-ink-body">{formatTs(r.ts)}</td>
               <td class="px-3 py-2">
                 <code class="font-mono text-ink-strong">{r.key_prefix}</code>
               </td>
@@ -174,9 +214,6 @@
               <td class="px-3 py-2 {r.error_class ? 'text-red-600' : 'text-ink-muted'}"
                 >{r.error_class ?? '—'}</td
               >
-              <td class="px-3 py-2">
-                <a class="link-inline" href={`${base}/requests/${r.trace_id}`}>{$t('view')}</a>
-              </td>
             </tr>
           {/each}
         </tbody>

@@ -93,7 +93,11 @@ function makeTelemetry(seed: DecisionRecord[] = []): TelemetryStore {
       return { id: "x" };
     },
     async queryRecent(limit) {
-      return rows.slice(0, limit);
+      // Pair each seeded record with a deterministic timestamp so the route's
+      // created_at projection is exercised (most-recent-first → descending ms).
+      return rows
+        .slice(0, limit)
+        .map((record, i) => ({ record, createdAt: new Date(1_700_000_000_000 - i * 1000) }));
     },
     async getByRequestId(id) {
       return rows.find((r) => r.request_id === id) ?? null;
@@ -451,12 +455,16 @@ describe("admin.api requests", () => {
     // The list returns the full (already-redacted) DecisionRecord per row so the
     // SPA can surface the classification stage / candidate chain / cost without
     // recomputing them (原则1, 原则5). It carries no plaintext key/payload (原则7).
-    const list = (await (await app.request("/admin/api/requests")).json()) as DecisionRecord[];
+    const list = (await (await app.request("/admin/api/requests")).json()) as Array<
+      DecisionRecord & { created_at: number }
+    >;
     expect(list).toHaveLength(2);
     expect(list[0]?.trace_id).toBe("trace-1");
     expect(list[0]?.lane.selected_lane).toBe("premium");
     expect(list[0]?.classifier.decided_by).toBe("rules");
     expect(list[0]?.provider_attempts[0]?.cost_usd).toBeCloseTo(0.002);
+    // Each row carries the recorded timestamp (epoch ms) for the UI 「时间」 column.
+    expect(typeof list[0]?.created_at).toBe("number");
 
     const detail = (await (
       await app.request("/admin/api/requests/trace-1")
