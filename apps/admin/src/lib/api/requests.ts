@@ -364,23 +364,65 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
   };
 }
 
-// GET /admin/api/requests -> { items, nextCursor? }. The backend currently returns
-// a flat most-recent-first array (no cursor); we keep the paginated UI contract
-// and leave nextCursor undefined until the backend supports it.
-export async function listRequests(_params?: {
-  limit?: number;
-  cursor?: string;
-}): Promise<{ items: RequestListItem[]; nextCursor?: string }> {
-  const res = await fetch(BASE, { headers: { accept: 'application/json' } });
-  const body = await asJson<unknown>(res);
-  const rows = Array.isArray(body)
-    ? (body as RawDecisionRecord[])
-    : ((body as { items?: RawDecisionRecord[] }).items ?? []);
-  const nextCursor =
-    !Array.isArray(body) && typeof (body as { nextCursor?: unknown }).nextCursor === 'string'
-      ? (body as { nextCursor: string }).nextCursor
-      : undefined;
-  return { items: rows.map(toListItem), nextCursor };
+// Filters + pagination for the request-debug list. `start`/`end` are epoch ms
+// (the date-range preset is resolved to an absolute window in the page loader so
+// the gateway stays timezone-agnostic); `decidedBy` is the classification-stage
+// layer (Principle 5). All fields optional — an omitted field is simply not sent.
+export interface RequestsQueryParams {
+  page?: number;
+  pageSize?: number;
+  status?: RequestListItem['status'];
+  decidedBy?: RequestListItem['decided_by'];
+  lane?: string;
+  model?: string;
+  start?: number;
+  end?: number;
+}
+
+// One page of mapped rows + the full filtered total, so the view can render
+// "Page X of Y" without a second request.
+export interface RequestsPage {
+  items: RequestListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+// Serialize the filter/pagination params to a querystring, skipping anything
+// undefined/empty. `decidedBy` -> `decided_by` to match the backend schema.
+function buildRequestsQuery(params: RequestsQueryParams): string {
+  const qs = new URLSearchParams();
+  if (params.page !== undefined) qs.set('page', String(params.page));
+  if (params.pageSize !== undefined) qs.set('pageSize', String(params.pageSize));
+  if (params.status) qs.set('status', params.status);
+  if (params.decidedBy) qs.set('decided_by', params.decidedBy);
+  if (params.lane) qs.set('lane', params.lane);
+  if (params.model) qs.set('model', params.model);
+  if (params.start !== undefined) qs.set('start', String(params.start));
+  if (params.end !== undefined) qs.set('end', String(params.end));
+  return qs.toString();
+}
+
+// GET /admin/api/requests -> { items, total, page, pageSize }. The backend applies
+// the filters + numbered pagination at the SQL layer (time DESC); we map each row
+// to the docs/07 UI contract and pass the totals straight through.
+export async function listRequests(params: RequestsQueryParams = {}): Promise<RequestsPage> {
+  const query = buildRequestsQuery(params);
+  const url = query ? `${BASE}?${query}` : BASE;
+  const res = await fetch(url, { headers: { accept: 'application/json' } });
+  const body = await asJson<{
+    items?: RawDecisionRecord[];
+    total?: number;
+    page?: number;
+    pageSize?: number;
+  }>(res);
+  const rows = Array.isArray(body.items) ? body.items : [];
+  return {
+    items: rows.map(toListItem),
+    total: typeof body.total === 'number' ? body.total : rows.length,
+    page: typeof body.page === 'number' ? body.page : (params.page ?? 1),
+    pageSize: typeof body.pageSize === 'number' ? body.pageSize : rows.length,
+  };
 }
 
 // GET /admin/api/requests/:traceId -> RequestDetail (full trail) | throws on 404.

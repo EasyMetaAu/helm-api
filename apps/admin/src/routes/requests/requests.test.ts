@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { goto } from '$app/navigation';
 import type { RequestDetail, RequestListItem } from '$lib/api/requests.js';
+import { DEFAULT_FILTERS, type RequestsFilters } from '$lib/requests-filters.js';
 import DetailPage from './[traceId]/+page.svelte';
 import ListPage from './+page.svelte';
 
@@ -31,6 +32,21 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     latency_ms: 460,
     cost_usd: 0.0123,
     ...overrides,
+  };
+}
+
+// Build the loader's page envelope (items + totals + filters). Defaults to a
+// single unfiltered page so the common case stays terse.
+function listData(
+  items: RequestListItem[],
+  over: { total?: number; page?: number; pageSize?: number; filters?: RequestsFilters } = {},
+) {
+  return {
+    items,
+    total: over.total ?? items.length,
+    page: over.page ?? 1,
+    pageSize: over.pageSize ?? 50,
+    filters: over.filters ?? DEFAULT_FILTERS,
   };
 }
 
@@ -75,17 +91,14 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
 describe('requests list page', () => {
   it('renders every docs/07 list field per row and shows the key by prefix only', () => {
     render(ListPage, {
-      data: {
-        items: [
-          item('tr_a', { decided_by: 'rules' }),
-          item('tr_b', {
-            status: 'error',
-            decided_by: 'default',
-            error_class: 'all_providers_failed',
-          }),
-        ],
-        nextCursor: undefined,
-      },
+      data: listData([
+        item('tr_a', { decided_by: 'rules' }),
+        item('tr_b', {
+          status: 'error',
+          decided_by: 'default',
+          error_class: 'all_providers_failed',
+        }),
+      ]),
     });
     const rows = screen.getAllByTestId('request-row');
     expect(rows).toHaveLength(2);
@@ -108,14 +121,11 @@ describe('requests list page', () => {
 
   it('labels the decision layer distinctly for rules / eval / default', () => {
     render(ListPage, {
-      data: {
-        items: [
-          item('tr_r', { decided_by: 'rules' }),
-          item('tr_e', { decided_by: 'eval' }),
-          item('tr_d', { decided_by: 'default' }),
-        ],
-        nextCursor: undefined,
-      },
+      data: listData([
+        item('tr_r', { decided_by: 'rules' }),
+        item('tr_e', { decided_by: 'eval' }),
+        item('tr_d', { decided_by: 'default' }),
+      ]),
     });
     const rows = screen.getAllByTestId('request-row');
     expect(within(rows[0]).getByTestId('decided-by')).toHaveTextContent('rules');
@@ -124,17 +134,14 @@ describe('requests list page', () => {
   });
 
   it('links each row to its detail route /requests/<trace_id>', () => {
-    render(ListPage, { data: { items: [item('tr_link')], nextCursor: undefined } });
+    render(ListPage, { data: listData([item('tr_link')]) });
     const link = screen.getByTestId('request-row').querySelector('a');
     expect(link).toHaveAttribute('href', '/requests/tr_link');
   });
 
   it('shows the request ID as the first column and the recorded time, with no separate "view" action', () => {
     render(ListPage, {
-      data: {
-        items: [item('tr_first', { ts: '2026-05-31T10:00:00Z' })],
-        nextCursor: undefined,
-      },
+      data: listData([item('tr_first', { ts: '2026-05-31T10:00:00Z' })]),
     });
     const cells = screen.getByTestId('request-row').querySelectorAll('td');
     // Request ID is the FIRST column.
@@ -147,25 +154,60 @@ describe('requests list page', () => {
 
   it('navigates to the detail page when the row itself is clicked', async () => {
     vi.mocked(goto).mockClear();
-    render(ListPage, { data: { items: [item('tr_go')], nextCursor: undefined } });
+    render(ListPage, { data: listData([item('tr_go')]) });
     await fireEvent.click(screen.getByTestId('request-row'));
     expect(goto).toHaveBeenCalledWith('/requests/tr_go');
   });
 
   it('shows an empty state when there are no requests', () => {
-    render(ListPage, { data: { items: [], nextCursor: undefined } });
+    render(ListPage, { data: listData([], { total: 0 }) });
     expect(screen.getByTestId('requests-empty')).toBeInTheDocument();
     expect(screen.queryByTestId('request-row')).not.toBeInTheDocument();
   });
 
-  it('enables "load more" only when a nextCursor is present', () => {
+  it('renders the pager status (page X of Y · N requests) from the totals', () => {
+    render(ListPage, { data: listData([item('tr_a')], { total: 120, page: 2, pageSize: 50 }) });
+    const status = screen.getByTestId('pager-status');
+    expect(status).toHaveTextContent('2'); // current page
+    expect(status).toHaveTextContent('3'); // ceil(120/50) = 3 pages
+    expect(status).toHaveTextContent('120'); // total
+  });
+
+  it('disables Previous on page 1 and Next on the last page', () => {
     const { unmount } = render(ListPage, {
-      data: { items: [item('tr_a')], nextCursor: undefined },
+      data: listData([item('tr_a')], { total: 120, page: 1, pageSize: 50 }),
     });
-    expect(screen.queryByRole('button', { name: /load more/i })).not.toBeInTheDocument();
+    expect(screen.getByTestId('pager-prev')).toBeDisabled();
+    expect(screen.getByTestId('pager-next')).not.toBeDisabled();
     unmount();
-    render(ListPage, { data: { items: [item('tr_a')], nextCursor: 'cur_2' } });
-    expect(screen.getByRole('button', { name: /load more/i })).toBeInTheDocument();
+    render(ListPage, { data: listData([item('tr_a')], { total: 120, page: 3, pageSize: 50 }) });
+    expect(screen.getByTestId('pager-next')).toBeDisabled();
+    expect(screen.getByTestId('pager-prev')).not.toBeDisabled();
+  });
+
+  it('paging Next navigates with the page in the querystring', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, { data: listData([item('tr_a')], { total: 120, page: 1, pageSize: 50 }) });
+    await fireEvent.click(screen.getByTestId('pager-next'));
+    expect(goto).toHaveBeenCalledWith('?page=2', expect.anything());
+  });
+
+  it('changing a filter navigates with the filter in the querystring (resets to page 1)', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, { data: listData([item('tr_a')], { total: 120, page: 2, pageSize: 50 }) });
+    await fireEvent.change(screen.getByTestId('filter-status'), { target: { value: 'error' } });
+    expect(goto).toHaveBeenCalledWith('?status=error', expect.anything());
+  });
+
+  it('Reset clears the querystring back to defaults', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, {
+      data: listData([item('tr_a')], {
+        filters: { range: '7d', status: 'error', page: 1 },
+      }),
+    });
+    await fireEvent.click(screen.getByTestId('filter-reset'));
+    expect(goto).toHaveBeenCalledWith('?', expect.anything());
   });
 });
 

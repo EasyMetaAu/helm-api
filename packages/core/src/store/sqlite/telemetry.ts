@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
-import { and, asc, desc, eq, gte, lt } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, lt, type SQL, sql } from "drizzle-orm";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
   RecentDecisionRecord,
   RequestPayload,
+  TelemetryPage,
+  TelemetryPageQuery,
   TelemetryStore,
 } from "../ports.js";
+import { likeContains } from "../sql-like.js";
 import type { SqliteDb } from "./migrate.js";
 import { requestPayloads, telemetry } from "./schema.js";
 
@@ -53,6 +56,52 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .limit(limit)
       .all()
       .map((r) => ({ record: this.toDecision(r), createdAt: r.createdAt }));
+  }
+
+  // Filtered + paginated Debug list. `final_status` is the denormalized column;
+  // `decided_by`/`lane`/`model` are pulled from the JSON-TEXT blob via json_extract
+  // (no native jsonb in SQLite). Same WHERE drives both the page and the total, so
+  // "Page X of Y" stays consistent with the rows shown.
+  async queryPage(query: TelemetryPageQuery): Promise<TelemetryPage> {
+    const where = this.pageWhere(query);
+    const rows = this.db
+      .select()
+      .from(telemetry)
+      .where(where)
+      .orderBy(desc(telemetry.createdAt))
+      .limit(query.limit)
+      .offset(query.offset)
+      .all()
+      .map((r) => ({ record: this.toDecision(r), createdAt: r.createdAt }));
+    const totalRow = this.db.select({ value: count() }).from(telemetry).where(where).get();
+    return { rows, total: totalRow?.value ?? 0 };
+  }
+
+  // Build the shared WHERE for queryPage (rows + count). Undefined filters are
+  // dropped; an empty list yields `and()` === undefined (no filter). LIKE matches
+  // are escaped (sql-like) so a user-typed `%` is a literal, not a wildcard.
+  private pageWhere(query: TelemetryPageQuery): SQL | undefined {
+    const conds: SQL[] = [];
+    if (query.startMs !== undefined) conds.push(gte(telemetry.createdAt, new Date(query.startMs)));
+    if (query.endMs !== undefined) conds.push(lt(telemetry.createdAt, new Date(query.endMs)));
+    if (query.status !== undefined) conds.push(eq(telemetry.finalStatus, query.status));
+    if (query.decidedBy !== undefined) {
+      conds.push(
+        sql`json_extract(${telemetry.decisionJson}, '$.classifier.decided_by') = ${query.decidedBy}`,
+      );
+    }
+    if (query.lane !== undefined) {
+      conds.push(
+        sql`json_extract(${telemetry.decisionJson}, '$.lane.selected_lane') = ${query.lane}`,
+      );
+    }
+    if (query.model !== undefined) {
+      const pat = likeContains(query.model);
+      conds.push(
+        sql`(json_extract(${telemetry.decisionJson}, '$.requested_model') LIKE ${pat} ESCAPE '\\' OR json_extract(${telemetry.decisionJson}, '$.final.model_alias') LIKE ${pat} ESCAPE '\\')`,
+      );
+    }
+    return and(...conds);
   }
 
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {

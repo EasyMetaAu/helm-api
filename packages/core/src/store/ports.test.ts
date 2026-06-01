@@ -8,6 +8,8 @@ import type {
   KeyStore,
   RecentDecisionRecord,
   RequestPayload,
+  TelemetryPage,
+  TelemetryPageQuery,
   TelemetryStore,
 } from "./ports.js";
 
@@ -71,6 +73,29 @@ class InMemoryTelemetryStore implements TelemetryStore {
       .sort((a, b) => b.at.getTime() - a.at.getTime())
       .slice(0, limit)
       .map((r) => ({ record: r.rec, createdAt: r.at }));
+  }
+  async queryPage(query: TelemetryPageQuery): Promise<TelemetryPage> {
+    const m = query.model?.toLowerCase();
+    const matched = this.rows.filter(({ at, rec }) => {
+      if (query.startMs !== undefined && at.getTime() < query.startMs) return false;
+      if (query.endMs !== undefined && at.getTime() >= query.endMs) return false;
+      if (query.status !== undefined && rec.final.status !== query.status) return false;
+      if (query.decidedBy !== undefined && rec.classifier.decided_by !== query.decidedBy)
+        return false;
+      if (query.lane !== undefined && rec.lane.selected_lane !== query.lane) return false;
+      if (m !== undefined) {
+        const hit =
+          rec.requested_model.toLowerCase().includes(m) ||
+          (rec.final.model_alias ?? "").toLowerCase().includes(m);
+        if (!hit) return false;
+      }
+      return true;
+    });
+    const rows = matched
+      .sort((a, b) => b.at.getTime() - a.at.getTime())
+      .slice(query.offset, query.offset + query.limit)
+      .map((r) => ({ record: r.rec, createdAt: r.at }));
+    return { rows, total: matched.length };
   }
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {
     return this.rows.find((r) => r.rec.request_id === requestId)?.rec ?? null;

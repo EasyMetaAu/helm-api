@@ -112,6 +112,13 @@ export {
   type StoreConfig,
   StoreConfigSchema,
 } from "./config/schema.js";
+// Admin request-debug list query model (pagination + error/role filters, docs/07).
+export {
+  REQUESTS_PAGE_SIZE_DEFAULT,
+  REQUESTS_PAGE_SIZE_MAX,
+  type RequestsQuery,
+  RequestsQuerySchema,
+} from "./decision/requests-query.js";
 // Decision record (docs/02, 03, 04, 07).
 export {
   type AttemptErrorDetail,

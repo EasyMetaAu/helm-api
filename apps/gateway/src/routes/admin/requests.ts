@@ -1,3 +1,4 @@
+import { RequestsQuerySchema } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps } from "./deps.js";
@@ -14,18 +15,35 @@ import type { AdminApiDeps } from "./deps.js";
 // recompute/guess them (and conflate classification vs execution fallback,
 // breaking Principle 5). Returning the records keeps the UI a pure consumer (Principle 1).
 
-const DEFAULT_LIMIT = 100;
-
 export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
-  // GET /requests -> (DecisionRecord & { created_at })[] (most recent first;
-  // already redacted). The store pairs each record with its recorded timestamp
-  // (a separate column, kept out of the redacted record); we flatten it onto the
-  // row as `created_at` (epoch ms) so the Debug UI can render the "Time" column
-  // without recomputing or fabricating it (Principle 1). created_at is a routing
-  // timestamp — it carries no plaintext key/payload (Principle 7).
+  // GET /requests -> { items: (DecisionRecord & { created_at })[], total, page,
+  // pageSize } — a filtered + numbered page, most recent first, already redacted.
+  // The query (page/pageSize + date-window/status/decided_by/lane/model filters)
+  // is parsed through the shared schema, which is FAIL-OPEN: a malformed param
+  // (stale bookmark, hand-typed) coerces to a safe default rather than 5xx-ing a
+  // read endpoint. The store pairs each record with its recorded timestamp (a
+  // separate column kept out of the redacted record); we flatten it onto the row
+  // as `created_at` (epoch ms) for the Debug UI "Time" column (Principle 1).
+  // `total` reflects the SAME filters so the UI renders "Page X of Y" without a
+  // second round-trip.
   app.get("/admin/api/requests", async (c) => {
-    const records = await deps.telemetry.queryRecent(DEFAULT_LIMIT);
-    return c.json(records.map((r) => ({ ...r.record, created_at: r.createdAt.getTime() })));
+    const q = RequestsQuerySchema.parse(c.req.query());
+    const { rows, total } = await deps.telemetry.queryPage({
+      limit: q.pageSize,
+      offset: (q.page - 1) * q.pageSize,
+      startMs: q.start,
+      endMs: q.end,
+      status: q.status,
+      decidedBy: q.decided_by,
+      lane: q.lane,
+      model: q.model,
+    });
+    return c.json({
+      items: rows.map((r) => ({ ...r.record, created_at: r.createdAt.getTime() })),
+      total,
+      page: q.page,
+      pageSize: q.pageSize,
+    });
   });
 
   // GET /requests/:traceId -> RequestDetail (full decision trail) | 404.

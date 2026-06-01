@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { toDetail, toListItem } from './requests.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { listRequests, toDetail, toListItem } from './requests.js';
 
 // The API client maps the backend DecisionRecord -> the docs/07 UI contract. Since
 // admin.requests-richfields the record carries the real telemetry fields
@@ -119,5 +119,63 @@ describe('toDetail', () => {
   it('maps a missing error_detail to null (legacy records)', () => {
     const d = toDetail(rawRecord());
     expect(d.provider_attempts[0]?.error_detail ?? null).toBeNull();
+  });
+});
+
+describe('listRequests', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function stubFetch(body: unknown): { url: () => string } {
+    let captured = '';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        captured = input;
+        return { ok: true, json: async () => body } as Response;
+      }),
+    );
+    return { url: () => captured };
+  }
+
+  it('builds the querystring from filters + pagination (decidedBy -> decided_by)', async () => {
+    const f = stubFetch({ items: [], total: 0, page: 2, pageSize: 25 });
+    await listRequests({
+      page: 2,
+      pageSize: 25,
+      status: 'error',
+      decidedBy: 'eval',
+      lane: 'premium',
+      model: 'gpt-4o',
+      start: 1000,
+      end: 2000,
+    });
+    const url = new URL(f.url(), 'http://x');
+    expect(url.pathname).toBe('/admin/api/requests');
+    expect(url.searchParams.get('page')).toBe('2');
+    expect(url.searchParams.get('pageSize')).toBe('25');
+    expect(url.searchParams.get('status')).toBe('error');
+    expect(url.searchParams.get('decided_by')).toBe('eval');
+    expect(url.searchParams.get('lane')).toBe('premium');
+    expect(url.searchParams.get('model')).toBe('gpt-4o');
+    expect(url.searchParams.get('start')).toBe('1000');
+    expect(url.searchParams.get('end')).toBe('2000');
+  });
+
+  it('omits unset params and hits the bare endpoint', async () => {
+    const f = stubFetch({ items: [], total: 0, page: 1, pageSize: 50 });
+    await listRequests();
+    expect(f.url()).toBe('/admin/api/requests');
+  });
+
+  it('maps the envelope rows and passes the totals through', async () => {
+    stubFetch({ items: [rawRecord({ created_at: 1717155600000 })], total: 7, page: 3, pageSize: 2 });
+    const res = await listRequests({ page: 3, pageSize: 2 });
+    expect(res.total).toBe(7);
+    expect(res.page).toBe(3);
+    expect(res.pageSize).toBe(2);
+    expect(res.items).toHaveLength(1);
+    expect(res.items[0]?.trace_id).toBe('tr_1');
   });
 });

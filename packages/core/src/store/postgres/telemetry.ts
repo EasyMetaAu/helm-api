@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
-import { and, asc, desc, eq, gte, lt } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, lt, type SQL, sql } from "drizzle-orm";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
   RecentDecisionRecord,
   RequestPayload,
+  TelemetryPage,
+  TelemetryPageQuery,
   TelemetryStore,
 } from "../ports.js";
+import { likeContains } from "../sql-like.js";
 import type { PgDb } from "./migrate.js";
 import { requestPayloads, telemetry } from "./schema.js";
 
@@ -51,6 +54,52 @@ export class PgTelemetryStore implements TelemetryStore {
     // createdAt is stored as epoch ms (bigint) here — wrap it back to a Date so
     // the port contract matches the sqlite adapter exactly.
     return rows.map((r) => ({ record: this.toDecision(r), createdAt: new Date(r.createdAt) }));
+  }
+
+  // Filtered + paginated Debug list. `final_status` is the denormalized column;
+  // `decided_by`/`lane`/`model` are read from native jsonb via the ->/->> path
+  // operators. createdAt is epoch-ms bigint, so the window compares ms numbers
+  // directly (matching the sqlite adapter's [startMs, endMs) semantics). Same WHERE
+  // drives the page and the total so "Page X of Y" stays consistent.
+  async queryPage(query: TelemetryPageQuery): Promise<TelemetryPage> {
+    const where = this.pageWhere(query);
+    const rows = await this.db
+      .select()
+      .from(telemetry)
+      .where(where)
+      .orderBy(desc(telemetry.createdAt))
+      .limit(query.limit)
+      .offset(query.offset);
+    const totalRows = await this.db.select({ value: count() }).from(telemetry).where(where);
+    return {
+      rows: rows.map((r) => ({ record: this.toDecision(r), createdAt: new Date(r.createdAt) })),
+      total: totalRows[0]?.value ?? 0,
+    };
+  }
+
+  // Shared WHERE for queryPage (rows + count). Undefined filters dropped; empty →
+  // and() === undefined (no filter). ILIKE patterns are escaped (sql-like) so a
+  // user-typed `%`/`_` is literal, not a wildcard.
+  private pageWhere(query: TelemetryPageQuery): SQL | undefined {
+    const conds: SQL[] = [];
+    if (query.startMs !== undefined) conds.push(gte(telemetry.createdAt, query.startMs));
+    if (query.endMs !== undefined) conds.push(lt(telemetry.createdAt, query.endMs));
+    if (query.status !== undefined) conds.push(eq(telemetry.finalStatus, query.status));
+    if (query.decidedBy !== undefined) {
+      conds.push(
+        sql`${telemetry.decisionJson} -> 'classifier' ->> 'decided_by' = ${query.decidedBy}`,
+      );
+    }
+    if (query.lane !== undefined) {
+      conds.push(sql`${telemetry.decisionJson} -> 'lane' ->> 'selected_lane' = ${query.lane}`);
+    }
+    if (query.model !== undefined) {
+      const pat = likeContains(query.model);
+      conds.push(
+        sql`(${telemetry.decisionJson} ->> 'requested_model' ILIKE ${pat} ESCAPE '\\' OR ${telemetry.decisionJson} -> 'final' ->> 'model_alias' ILIKE ${pat} ESCAPE '\\')`,
+      );
+    }
+    return and(...conds);
   }
 
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {
