@@ -1,6 +1,6 @@
 import type { ApiKeyRecord } from "@helm/shared";
 import { eq } from "drizzle-orm";
-import type { CreateKeyInput, KeyStore, RateLimitPatch } from "../ports.js";
+import type { CreateKeyInput, KeyPatch, KeyStore } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
 import { apiKeys } from "./schema.js";
 
@@ -61,13 +61,25 @@ export class SqliteKeyStore implements KeyStore {
     }
   }
 
-  // Edit ONLY the rate-limit columns PRESENT in `patch` (null clears back to
-  // inherit). Omitted dims are left untouched, so a partial PATCH never rewrites
-  // the sibling column (no concurrent-clobber). Throws on unknown id.
-  async updateRateLimit(keyId: string, patch: RateLimitPatch): Promise<void> {
-    const set: Partial<Pick<ApiKeyRow, "rateLimitRpm" | "rateLimitTpm">> = {};
-    if (patch.rpm !== undefined) set.rateLimitRpm = patch.rpm;
-    if (patch.tpm !== undefined) set.rateLimitTpm = patch.tpm;
+  // Edit ONLY the cap columns PRESENT in `patch` (null clears: rate limit →
+  // inherit, max_lane/allowed_lanes → no cap). Omitted fields are left untouched,
+  // so a partial PATCH never rewrites a sibling column (no concurrent-clobber).
+  // NEVER touches role or the immutable identity. Throws on unknown id.
+  async updateKey(keyId: string, patch: KeyPatch): Promise<void> {
+    const set: Partial<
+      Pick<
+        ApiKeyRow,
+        "maxLane" | "allowedLanes" | "allowCustomModel" | "rateLimitRpm" | "rateLimitTpm"
+      >
+    > = {};
+    if (patch.maxLane !== undefined) set.maxLane = patch.maxLane;
+    // SQLite has no native array: store the whitelist as JSON text (null = no cap).
+    if (patch.allowedLanes !== undefined) {
+      set.allowedLanes = patch.allowedLanes === null ? null : JSON.stringify(patch.allowedLanes);
+    }
+    if (patch.allowCustomModel !== undefined) set.allowCustomModel = patch.allowCustomModel;
+    if (patch.rateLimitRpm !== undefined) set.rateLimitRpm = patch.rateLimitRpm;
+    if (patch.rateLimitTpm !== undefined) set.rateLimitTpm = patch.rateLimitTpm;
     if (Object.keys(set).length === 0) {
       // No-op patch: still verify the key exists (fail-loud on unknown id).
       const row = this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).get();

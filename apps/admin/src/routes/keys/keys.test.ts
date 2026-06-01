@@ -9,11 +9,11 @@ import KeysPage from './+page.svelte';
 
 const createKey = vi.fn();
 const revokeKey = vi.fn();
-const updateKeyRateLimit = vi.fn();
+const updateKey = vi.fn();
 vi.mock('$lib/api/keys.js', () => ({
   createKey: (...args: unknown[]) => createKey(...args),
   revokeKey: (...args: unknown[]) => revokeKey(...args),
-  updateKeyRateLimit: (...args: unknown[]) => updateKeyRateLimit(...args),
+  updateKey: (...args: unknown[]) => updateKey(...args),
 }));
 
 function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
@@ -39,8 +39,8 @@ describe('keys page', () => {
   beforeEach(() => {
     createKey.mockReset();
     revokeKey.mockReset();
-    updateKeyRateLimit.mockReset();
-    updateKeyRateLimit.mockResolvedValue(undefined);
+    updateKey.mockReset();
+    updateKey.mockResolvedValue(undefined);
     revokeKey.mockResolvedValue({ revoked: '' });
   });
 
@@ -110,28 +110,60 @@ describe('keys page', () => {
     expect(within(rows[1]).getAllByText(/default/i).length).toBeGreaterThan(0);
   });
 
-  it('inline edit PATCHes the per-key rate limit via updateKeyRateLimit', async () => {
+  it('Edit opens a dialog and PATCHes the full editable cap set via updateKey', async () => {
     renderPage([key('k1', { rate_limit_rpm: null, rate_limit_tpm: null })]);
     const row = screen.getByTestId('key-row');
-    await fireEvent.click(within(row).getByRole('button', { name: /edit limits/i }));
-    const rpm = within(row).getByLabelText(/rpm/i);
-    await fireEvent.input(rpm, { target: { value: '120' } });
-    await fireEvent.click(within(row).getByRole('button', { name: /save/i }));
+    await fireEvent.click(within(row).getByRole('button', { name: /^edit$/i }));
+    const dialog = screen.getByRole('dialog', { name: /edit key/i });
+    // The key value/prefix and role are shown read-only — never an editable field.
+    expect(within(dialog).getByText('helm_live_k1')).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText(/role/i)).not.toBeInTheDocument();
+    // Edit caps: set a max-lane cap, whitelist a lane, set an explicit RPM.
+    await fireEvent.change(within(dialog).getByLabelText(/max lane/i), {
+      target: { value: 'balanced' },
+    });
+    await fireEvent.click(within(dialog).getByLabelText('economy'));
+    await fireEvent.input(within(dialog).getByLabelText(/requests per minute/i), {
+      target: { value: '120' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
     await waitFor(() =>
-      expect(updateKeyRateLimit).toHaveBeenCalledWith('k1', { rpm: 120, tpm: null }),
+      expect(updateKey).toHaveBeenCalledWith('k1', {
+        max_lane: 'balanced',
+        allowed_lanes: ['economy'],
+        allow_custom_model: false,
+        rate_limit_rpm: 120,
+        rate_limit_tpm: null, // untouched → still inherit (null), not undefined
+      }),
+    );
+    // Dialog closes after a successful save.
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: /edit key/i })).not.toBeInTheDocument(),
     );
   });
 
-  it('clearing an inline rate-limit field sends null (clear → inherit), not undefined', async () => {
+  it('clearing a rate-limit field in the dialog sends null (clear → inherit), not undefined', async () => {
     renderPage([key('k1', { rate_limit_rpm: 120, rate_limit_tpm: null })]);
     const row = screen.getByTestId('key-row');
-    await fireEvent.click(within(row).getByRole('button', { name: /edit limits/i }));
+    await fireEvent.click(within(row).getByRole('button', { name: /^edit$/i }));
+    const dialog = screen.getByRole('dialog', { name: /edit key/i });
     // Clear the pre-filled RPM field; an emptied number input binds to undefined.
-    await fireEvent.input(within(row).getByLabelText(/rpm/i), { target: { value: '' } });
-    await fireEvent.click(within(row).getByRole('button', { name: /save/i }));
+    await fireEvent.input(within(dialog).getByLabelText(/requests per minute/i), {
+      target: { value: '' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
     await waitFor(() =>
-      expect(updateKeyRateLimit).toHaveBeenCalledWith('k1', { rpm: null, tpm: null }),
+      expect(updateKey).toHaveBeenCalledWith(
+        'k1',
+        expect.objectContaining({ rate_limit_rpm: null }),
+      ),
     );
+  });
+
+  it('does not offer Edit on a revoked (disabled) key', () => {
+    renderPage([key('k1', { disabled: true })]);
+    const row = screen.getByTestId('key-row');
+    expect(within(row).queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();
   });
 
   it('on revoke failure shows an error and leaves the row unchanged (fail-closed)', async () => {

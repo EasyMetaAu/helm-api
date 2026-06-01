@@ -27,6 +27,61 @@
 
 ---
 
+## 2026-06-01 · 密钥可编辑：caps 就地改写 + 统一 Edit 弹窗（docs/06，原则 7）
+
+**背景**：用户要求 `/admin/keys` 页「除 key 值本身外，所有参数都可编辑」，并在每行右侧加「编辑」按钮。此前只有 RPM/TPM 可改（行内编辑器），`max_lane`/`allowed_lanes`/`allow_custom_model` 在创建后**固定**（spec docs/06 原措辞：caps 不可变，靠吊销+重铸轮换）。**本轮是对该决定的有意偏离**：把 caps 改成可就地编辑。
+
+**做了什么（严格 TDD，红→绿）**：
+1. **shared schema**：`UpdateKeyRequestSchema` 扩出 `max_lane`/`allowed_lanes`（均 `.nullable().optional()`，null=清除）+ `allow_custom_model`。保持 `.strict()`，**仍拒绝 `role`**（schema 已有该断言）。
+2. **core port**：`RateLimitPatch`→`KeyPatch`、`updateRateLimit`→`updateKey`，把「present=写，absent=不动，null=清除」的原子部分 PATCH 语义推广到全部可编辑 caps（**单一** patch 方法，不留两个重叠的）。sqlite/postgres 适配器同步扩 set-builder（`allowed_lanes`：SQLite JSON 文本 vs PG 原生 jsonb）。
+3. **gateway PATCH 路由**：把 snake_case 字段映射成 `KeyPatch`（camelCase）后调 `updateKey`。
+4. **admin**：API client `updateKeyRateLimit`→`updateKey(UpdateKeyInput)`（整组发送，清除发显式 null）；新增 `EditKeyDialog.svelte`（预填、allowed_lanes 多选 checkbox、prefix/role 只读展示）；`/keys/+page.svelte` 删行内编辑器、右侧加「Edit」按钮 + 弹窗，速率列改纯展示。
+5. **i18n**：5 个 locale 各加 6 个键（中文意译）。
+
+**决定 / 取舍**：
+- **`role` 保持不可变**（用户确认）：编辑路径不得把 user 提权成 root；改 role 仍须吊销+重铸。schema/路由双重拒绝。
+- **`allowed_lanes` 纳入可编辑**（用户确认）：创建弹窗从不暴露它（历史上恒为 null），编辑弹窗的多选成为唯一设置入口。
+- **行内速率编辑器→统一弹窗**（用户确认）：单一编辑入口，弹窗同时覆盖速率限制；删除旧行内编辑路径及其两条测试。
+- **`updateKey` 重命名波及面**：迁移 ports/sqlite/store-contract/bootstrap/admin route mock/admin client+page 全部测试（机械改名 + 新增 caps 用例）。`RateLimitPatch` 未对外 re-export，改名无下游破坏。
+- **EditKeyDialog 用 `untrack(() => key.*)` 取初值**：弹窗随 `{#if editingKey}` 每次重挂载，初值捕获语义正确，沿用 `+page.svelte` 的 `data.keys` 既有写法消除 Svelte `state_referenced_locally` 警告。
+
+**门禁**：见本轮末 `pnpm typecheck`/`lint`/`test` 结果。预存的 telemetry 测试类型告警（`error_detail`/`request_id`）非本轮引入。
+
+---
+
+## 2026-06-01 · Lanes editor: offer other lanes (not just models) as chain targets (docs/04, Principle 6)
+
+**Context**: the lanes admin page (`/admin/lanes`) only suggested **model aliases** in the primary/fallback comboboxes. But a chain element may be a **model alias OR another lane name** — core's `expandChain` (`packages/core/src/routing/route-request.ts`) already flattens lane refs recursively with a cycle guard, and the default lanes ship with lane-to-lane fallbacks (`balanced.fallback: ["premium", "economy"]`). The capability existed end-to-end; only the UI hid it.
+
+**What changed** (admin-only, no core/schema change needed):
+- `LaneEditor.svelte` gained a `laneNames?: string[]` prop. A `$derived` `laneOptions = laneNames.filter(n => n !== initial.name)` excludes the card's **own** lane — a lane targeting itself is meaningless (the expander would just dedupe it). The `<datalist>` now renders `laneOptions` (each `<option>` carries `label={$t('lane')}` so they read distinctly from models) **before** the model aliases.
+- `lanes/+page.svelte` derives `laneNames` from the loaded lanes and threads it into every `LaneEditor`. Names are immutable in this editor (saves map by name), so the derived list is stable across edits.
+- Fallback-add placeholder `"model alias"` → `"model or lane"`. New i18n keys `lane` / `model or lane` added+translated across all 5 locales; the orphaned `"model alias"` key was removed (only consumer was this input).
+
+**Decisions / trade-offs**:
+- **No new validation of lane refs in the UI** — kept the input permissive (free text + suggestions), matching the existing model-alias behaviour. The schema already validates only non-empty strings; real cycle/typo safety lives in core (`expandChain` cycle guard + execution fallback). Adding UI-side graph validation would duplicate core logic for little gain.
+- **Self-exclusion only, not full cycle prevention in the picker** — the requirement was "can't pick its own lane". Deeper cycles (a→b→a) are already neutralised by `expandChain`'s `visited` set, so the picker intentionally still lets you build them (they're harmless and sometimes intended as "try the other tier then stop").
+
+**Gate**: admin Vitest 149/149 (2 new lane tests); `svelte-check` 0 errors (1 pre-existing warning in `settings/+page.svelte`, untouched); Prettier clean. Biome ignores `apps/admin` by design.
+
+---
+
+## 2026-06-01 · Inject build info into the Docker image so /version is real (docs/10)
+
+**Context**: follow-up to the status cluster. After deploying, the header's **version pill never showed** and the gateway reported `GET /version → {"version":"unknown",...}`. Root cause: `readBuildInfo()` reads `HELM_VERSION`/`HELM_GIT_SHA`/`HELM_BUILT_AT` from env, but the **`Dockerfile` never set them** — so the docs' claim that build info is "injected at build time" was aspirational. (The status-cluster component intentionally hides a `"unknown"` version, which is why the pill was blank — correct behavior, missing data.)
+
+**Fix**:
+- `Dockerfile` (runtime stage): declare `ARG HELM_VERSION/HELM_GIT_SHA/HELM_BUILT_AT` (default `unknown`) → `ENV`. A bare `docker build` still works; values come from `--build-arg`.
+- `.github/workflows/ci.yml` (docker job): pass the args — `HELM_VERSION` from `package.json`, `HELM_GIT_SHA` from `git rev-parse --short HEAD`, `HELM_BUILT_AT` from a UTC stamp — and a new step asserts `/version` reports the injected version (and a non-`unknown` gitSha), guarding the wiring.
+- `docker-compose.yml`: documented the same args under a commented `build` block for local `build: .`.
+- Root `package.json` version `0.0.0` → **`0.1.0`** so the injected value is meaningful (matches the "0.1 release" framing across README/docs). This is the single source of truth the build reads.
+
+**Sibling decision (GitHub stars)**: the star count was *also* blank, but for an unrelated reason — `EasyMetaAu/helm-api` was **private**, so the unauthenticated GitHub API returned 404 and the client fail-silently hid the count. Resolved by **making the repo public** (the intended open-source state); the existing client-side fetch now shows `★ N` with no code change. The earlier "stars client-side, not gateway-proxied" decision stands.
+
+**Local deploy**: rebuilt `ghcr.io/easymetaau/helm-api:latest` with the three `--build-arg`s and recreated the compose container; `/version` now returns `0.1.0` + short sha + timestamp, and the pill renders.
+
+---
+
 ## 2026-06-01 · Unified admin status cluster in the header top-right (docs/11, Principle 3 & 7)
 
 **Context**: operator-facing meta was scattered in the sidebar footer — a `LocaleSwitcher`, a **hardcoded** "Gateway online" badge (static green dot that never reflected real health), and a GitHub link with no star count — and there was no version display despite the gateway already exposing `GET /version`. Consolidated all of it into one designed cluster in the previously-empty **header top-right**, and made the signals live.

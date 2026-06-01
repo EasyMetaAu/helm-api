@@ -158,7 +158,8 @@
   "Message": "メッセージ",
   "miss": "ミス",
   "Model": "モデル",
-  "model alias": "モデルエイリアス",
+  "lane": "レーン",
+  "model or lane": "モデルまたはレーン",
   "move down": "下へ移動",
   "move up": "上へ移動",
   "n/a": "該当なし",
@@ -316,5 +317,11 @@
   "Failed to update rate limit": "レート制限の更新に失敗しました",
   "Default requests per minute (RPM)": "デフォルトの1分あたりリクエスト数 (RPM)",
   "Default tokens per minute (TPM)": "デフォルトの1分あたりトークン数 (TPM)",
-  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "キー独自の値が設定されていないキーに適用されるフォールバック制限。0 は無制限を意味します。"
+  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "キー独自の値が設定されていないキーに適用されるフォールバック制限。0 は無制限を意味します。",
+  "Edit": "編集",
+  "Edit key": "キーを編集",
+  "Save changes": "変更を保存",
+  "Failed to update key": "キーの更新に失敗しました",
+  "Role is fixed for the life of a key — rotate by revoking and minting a new one.": "ロールはキーの有効期間中は変更できません。変更するには失効させて新しいキーを発行してください。",
+  "Restrict this key to a specific set of lanes. Leave all unchecked to allow any lane (no whitelist).": "このキーを特定のレーンに限定します。すべて未選択の場合は任意のレーンを許可します（ホワイトリストなし）。"
 }

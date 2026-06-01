@@ -69,32 +69,43 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     return c.json({ key_id: keyId, plaintext: minted.plaintext, prefix: minted.prefix }, 201);
   });
 
-  // PATCH /keys/:id — edit a key's per-key rate-limit override (docs/06). Only the
-  // two rate-limit dimensions are editable after mint (role/caps are fixed; rotate
-  // by revoking + re-minting). The body is validated with .strict() so an unknown
-  // field is rejected (400, fail-closed). The patch is PARTIAL: an omitted
-  // dimension is left untouched at the store layer (no read-modify-write, so
+  // PATCH /keys/:id — edit a key's per-key caps (docs/06). Every cap is editable
+  // after mint EXCEPT the immutable identity and `role` (role stays fixed so the
+  // edit path can't escalate a user key to root; rotate role by revoke + re-mint —
+  // the schema rejects a role field). The body is validated with .strict() so an
+  // unknown field is rejected (400, fail-closed). The patch is PARTIAL: an omitted
+  // field is left untouched at the store layer (no read-modify-write, so
   // concurrent partial PATCHes can't clobber each other); an explicit null clears
-  // the override back to inheriting the system default; a number (0 = unlimited)
-  // sets an explicit override. 404 on unknown id.
+  // a cap (rate limit → inherit the system default; max_lane / allowed_lanes → no
+  // cap). 404 on unknown id.
   app.patch("/admin/api/keys/:id", async (c) => {
     const parsed = UpdateKeyRequestSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: "invalid key update", issues: parsed.error.issues }, 400);
     }
     const id = c.req.param("id");
-    // Forward ONLY the dimensions the client supplied (present, possibly null).
-    // Zod leaves an omitted field as `undefined`, so this distinguishes
-    // "clear to inherit" (null) from "leave unchanged" (absent).
-    const patch: { rpm?: number | null; tpm?: number | null } = {};
-    if (parsed.data.rate_limit_rpm !== undefined) patch.rpm = parsed.data.rate_limit_rpm;
-    if (parsed.data.rate_limit_tpm !== undefined) patch.tpm = parsed.data.rate_limit_tpm;
+    // Forward ONLY the fields the client supplied (present, possibly null), mapping
+    // the wire snake_case to the store's camelCase KeyPatch. Zod leaves an omitted
+    // field as `undefined`, distinguishing "clear" (null) from "leave unchanged".
+    const d = parsed.data;
+    const patch: {
+      maxLane?: string | null;
+      allowedLanes?: string[] | null;
+      allowCustomModel?: boolean;
+      rateLimitRpm?: number | null;
+      rateLimitTpm?: number | null;
+    } = {};
+    if (d.max_lane !== undefined) patch.maxLane = d.max_lane;
+    if (d.allowed_lanes !== undefined) patch.allowedLanes = d.allowed_lanes;
+    if (d.allow_custom_model !== undefined) patch.allowCustomModel = d.allow_custom_model;
+    if (d.rate_limit_rpm !== undefined) patch.rateLimitRpm = d.rate_limit_rpm;
+    if (d.rate_limit_tpm !== undefined) patch.rateLimitTpm = d.rate_limit_tpm;
     try {
-      await deps.keyStore.updateRateLimit(id, patch);
+      await deps.keyStore.updateKey(id, patch);
     } catch {
       return c.json({ error: "key not found" }, 404);
     }
-    return c.json({ key_id: id, ...parsed.data });
+    return c.json({ key_id: id, ...d });
   });
 
   // DELETE /keys/:id — soft revoke (disabled:true). 404 when the id is unknown.

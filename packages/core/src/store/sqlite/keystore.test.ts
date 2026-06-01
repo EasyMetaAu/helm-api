@@ -146,7 +146,7 @@ describe("SqliteKeyStore", () => {
     expect(got?.rate_limit_tpm).toBe(0);
   });
 
-  it("updateRateLimit sets, clears (null), and leaves other fields untouched", async () => {
+  it("updateKey sets rate limits, clears (null), and leaves other fields untouched", async () => {
     const store = freshStore();
     await store.createKey({
       keyId: "k1",
@@ -156,7 +156,7 @@ describe("SqliteKeyStore", () => {
       role: "user",
       maxLane: "balanced",
     });
-    await store.updateRateLimit("k1", { rpm: 100, tpm: 5000 });
+    await store.updateKey("k1", { rateLimitRpm: 100, rateLimitTpm: 5000 });
     let got = await store.getByHash("h1");
     expect(got?.rate_limit_rpm).toBe(100);
     expect(got?.rate_limit_tpm).toBe(5000);
@@ -164,13 +164,13 @@ describe("SqliteKeyStore", () => {
     expect(got?.max_lane).toBe("balanced");
     expect(got?.disabled).toBe(false);
     // null clears the override back to inheriting the system default
-    await store.updateRateLimit("k1", { rpm: null, tpm: null });
+    await store.updateKey("k1", { rateLimitRpm: null, rateLimitTpm: null });
     got = await store.getByHash("h1");
     expect(got?.rate_limit_rpm).toBeNull();
     expect(got?.rate_limit_tpm).toBeNull();
   });
 
-  it("updateRateLimit is PARTIAL: an omitted dimension is left untouched", async () => {
+  it("updateKey edits caps: max_lane, allowed_lanes, allow_custom_model (set + clear)", async () => {
     const store = freshStore();
     await store.createKey({
       keyId: "k1",
@@ -178,24 +178,58 @@ describe("SqliteKeyStore", () => {
       prefix: "p1",
       accountId: "a",
       role: "user",
+      rateLimitRpm: 7,
+    });
+    await store.updateKey("k1", {
+      maxLane: "balanced",
+      allowedLanes: ["economy", "balanced"],
+      allowCustomModel: true,
+    });
+    let got = await store.getByHash("h1");
+    expect(got?.max_lane).toBe("balanced");
+    expect(got?.allowed_lanes).toEqual(["economy", "balanced"]);
+    expect(got?.allow_custom_model).toBe(true);
+    // an unrelated column (rate limit) is left untouched
+    expect(got?.rate_limit_rpm).toBe(7);
+    // role is never written by updateKey
+    expect(got?.role).toBe("user");
+    // null clears the caps back to "no cap"
+    await store.updateKey("k1", { maxLane: null, allowedLanes: null });
+    got = await store.getByHash("h1");
+    expect(got?.max_lane).toBeNull();
+    expect(got?.allowed_lanes).toBeNull();
+    expect(got?.allow_custom_model).toBe(true);
+  });
+
+  it("updateKey is PARTIAL: an omitted field is left untouched", async () => {
+    const store = freshStore();
+    await store.createKey({
+      keyId: "k1",
+      hash: "h1",
+      prefix: "p1",
+      accountId: "a",
+      role: "user",
+      maxLane: "balanced",
       rateLimitRpm: 10,
       rateLimitTpm: 20,
     });
-    // Patch only rpm; tpm must survive unchanged (no read-modify-write clobber).
-    await store.updateRateLimit("k1", { rpm: 99 });
+    // Patch only rpm; tpm and max_lane must survive (no read-modify-write clobber).
+    await store.updateKey("k1", { rateLimitRpm: 99 });
     let got = await store.getByHash("h1");
     expect(got?.rate_limit_rpm).toBe(99);
     expect(got?.rate_limit_tpm).toBe(20);
-    // Patch only tpm to null (clear); rpm must survive.
-    await store.updateRateLimit("k1", { tpm: null });
+    expect(got?.max_lane).toBe("balanced");
+    // Patch only tpm to null (clear); rpm and max_lane must survive.
+    await store.updateKey("k1", { rateLimitTpm: null });
     got = await store.getByHash("h1");
     expect(got?.rate_limit_rpm).toBe(99);
     expect(got?.rate_limit_tpm).toBeNull();
+    expect(got?.max_lane).toBe("balanced");
   });
 
-  it("updateRateLimit on a missing key rejects — both with a patch and an empty patch", async () => {
+  it("updateKey on a missing key rejects — both with a patch and an empty patch", async () => {
     const store = freshStore();
-    await expect(store.updateRateLimit("nope", { rpm: 1, tpm: 1 })).rejects.toThrow();
-    await expect(store.updateRateLimit("nope", {})).rejects.toThrow();
+    await expect(store.updateKey("nope", { rateLimitRpm: 1, rateLimitTpm: 1 })).rejects.toThrow();
+    await expect(store.updateKey("nope", {})).rejects.toThrow();
   });
 });

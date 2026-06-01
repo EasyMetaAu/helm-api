@@ -158,7 +158,8 @@
   "Message": "Message",
   "miss": "miss",
   "Model": "Model",
-  "model alias": "model alias",
+  "lane": "lane",
+  "model or lane": "model or lane",
   "move down": "move down",
   "move up": "move up",
   "n/a": "n/a",
@@ -318,5 +319,11 @@
   "Failed to update rate limit": "Failed to update rate limit",
   "Default requests per minute (RPM)": "Default requests per minute (RPM)",
   "Default tokens per minute (TPM)": "Default tokens per minute (TPM)",
-  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "The fallback limit for any key without its own per-key value. 0 means unlimited."
+  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "The fallback limit for any key without its own per-key value. 0 means unlimited.",
+  "Edit": "Edit",
+  "Edit key": "Edit key",
+  "Save changes": "Save changes",
+  "Failed to update key": "Failed to update key",
+  "Role is fixed for the life of a key — rotate by revoking and minting a new one.": "Role is fixed for the life of a key — rotate by revoking and minting a new one.",
+  "Restrict this key to a specific set of lanes. Leave all unchecked to allow any lane (no whitelist).": "Restrict this key to a specific set of lanes. Leave all unchecked to allow any lane (no whitelist)."
 }

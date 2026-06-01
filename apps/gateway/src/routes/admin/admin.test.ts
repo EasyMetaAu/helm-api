@@ -86,12 +86,16 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       // Soft revoke: flip disabled ONLY, never rewrite other fields in place.
       row.disabled = true;
     },
-    async updateRateLimit(keyId, patch) {
+    async updateKey(keyId, patch) {
       const row = rows.find((r) => r.key_id === keyId);
       if (!row) throw new Error(`key not found: ${keyId}`);
-      // PARTIAL: only supplied dims change; absent dims untouched (never role/caps).
-      if (patch.rpm !== undefined) row.rate_limit_rpm = patch.rpm;
-      if (patch.tpm !== undefined) row.rate_limit_tpm = patch.tpm;
+      // PARTIAL: only supplied fields change; absent fields untouched (never role
+      // or the immutable identity). null clears a cap/override.
+      if (patch.maxLane !== undefined) row.max_lane = patch.maxLane;
+      if (patch.allowedLanes !== undefined) row.allowed_lanes = patch.allowedLanes;
+      if (patch.allowCustomModel !== undefined) row.allow_custom_model = patch.allowCustomModel;
+      if (patch.rateLimitRpm !== undefined) row.rate_limit_rpm = patch.rateLimitRpm;
+      if (patch.rateLimitTpm !== undefined) row.rate_limit_tpm = patch.rateLimitTpm;
     },
   };
 }
@@ -528,7 +532,42 @@ describe("admin.api keys", () => {
     expect(keyStore.rows[0]?.rate_limit_tpm).toBe(5000);
   });
 
-  it("PATCH rejects an unknown field with 400 (fail-closed, strict)", async () => {
+  it("PATCH edits a key's caps (max_lane, allowed_lanes, allow_custom_model; null clears)", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user", max_lane: "balanced", rate_limit_rpm: 7 }),
+    });
+    const set = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        max_lane: "economy",
+        allowed_lanes: ["economy", "balanced"],
+        allow_custom_model: true,
+      }),
+    });
+    expect(set.status).toBe(200);
+    expect(keyStore.rows[0]?.max_lane).toBe("economy");
+    expect(keyStore.rows[0]?.allowed_lanes).toEqual(["economy", "balanced"]);
+    expect(keyStore.rows[0]?.allow_custom_model).toBe(true);
+    expect(keyStore.rows[0]?.rate_limit_rpm).toBe(7); // unrelated field untouched
+    expect(keyStore.rows[0]?.role).toBe("user"); // role never rewritten
+    // null clears the caps back to "no cap".
+    const clear = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ max_lane: null, allowed_lanes: null }),
+    });
+    expect(clear.status).toBe(200);
+    expect(keyStore.rows[0]?.max_lane).toBeNull();
+    expect(keyStore.rows[0]?.allowed_lanes).toBeNull();
+    expect(keyStore.rows[0]?.allow_custom_model).toBe(true); // omitted → untouched
+  });
+
+  it("PATCH rejects role and other unknown fields with 400 (fail-closed, strict)", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);
     await app.request("/admin/api/keys", {
@@ -536,12 +575,19 @@ describe("admin.api keys", () => {
       headers: JSON_HEADERS,
       body: JSON.stringify({ role: "user" }),
     });
-    const res = await app.request("/admin/api/keys/key_1", {
+    // role is immutable — cannot escalate to root via the edit path.
+    const role = await app.request("/admin/api/keys/key_1", {
       method: "PATCH",
       headers: JSON_HEADERS,
       body: JSON.stringify({ role: "root" }),
     });
-    expect(res.status).toBe(400);
+    expect(role.status).toBe(400);
+    const unknown = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ nope: 1 }),
+    });
+    expect(unknown.status).toBe(400);
   });
 
   it("PATCH on an unknown key id returns 404", async () => {

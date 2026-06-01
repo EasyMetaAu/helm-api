@@ -40,6 +40,19 @@ export interface CreateKeyInput {
   rate_limit_tpm?: number;
 }
 
+// Editable caps for an existing key (PATCH). Mirrors the server
+// UpdateKeyRequestSchema: every field is OPTIONAL (omit = leave unchanged); the
+// nullable ones accept null to CLEAR (max_lane / allowed_lanes → no cap; rate
+// limit → inherit the system default). `role` and the immutable identity are
+// deliberately absent — role cannot be edited (rotate by revoke + re-mint).
+export interface UpdateKeyInput {
+  max_lane?: string | null;
+  allowed_lanes?: string[] | null;
+  allow_custom_model?: boolean;
+  rate_limit_rpm?: number | null;
+  rate_limit_tpm?: number | null;
+}
+
 // The ONLY shape that ever carries plaintext, returned once by POST. `prefix` is
 // the server-minted non-sensitive display prefix (same value stored + listed) —
 // carried so the UI builds the redacted view from it instead of slicing plaintext.
@@ -122,17 +135,15 @@ export async function createKey(input: CreateKeyInput): Promise<CreatedKey> {
   return asJson<CreatedKey>(res);
 }
 
-// PATCH /admin/api/keys/:id -> edit a key's per-key rate-limit override. A number
-// sets an explicit limit (0 = unlimited); null clears it back to inheriting the
-// system default. Both dimensions are sent together (the server overwrites both).
-export async function updateKeyRateLimit(
-  keyId: string,
-  limits: { rpm: number | null; tpm: number | null },
-): Promise<void> {
+// PATCH /admin/api/keys/:id -> edit a key's caps. The body is forwarded as-is: the
+// server schema is `.strict()` + PARTIAL, so only the fields PRESENT are written
+// (null clears a cap; a number/array/boolean sets it). The Edit dialog sends the
+// whole editable set each call (explicit null for cleared) — overwrite intent.
+export async function updateKey(keyId: string, patch: UpdateKeyInput): Promise<void> {
   const res = await fetch(`${BASE}/${encodeURIComponent(keyId)}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ rate_limit_rpm: limits.rpm, rate_limit_tpm: limits.tpm }),
+    body: JSON.stringify(patch),
   });
   await asJson<unknown>(res);
 }

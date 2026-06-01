@@ -97,6 +97,35 @@ describe('LaneEditor', () => {
     expect(fallbackAdd.getAttribute('list')).toBe(listId);
   });
 
+  it('also offers other lanes (excluding itself) as combobox targets, labelled as lanes', () => {
+    const models = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro'];
+    const laneNames = ['economy', 'balanced', 'coding', 'premium'];
+    const { container } = render(LaneEditor, {
+      lane: makeLane({ name: 'coding' }),
+      models,
+      laneNames,
+      onsave: vi.fn(),
+    });
+
+    const options = Array.from(
+      container.querySelectorAll('datalist option'),
+    ) as HTMLOptionElement[];
+    const values = options.map((o) => o.value);
+
+    // Other lanes are routable targets (the chain may point at another lane)…
+    expect(values).toEqual(expect.arrayContaining(['economy', 'balanced', 'premium']));
+    // …and the model aliases are still there too…
+    expect(values).toEqual(expect.arrayContaining(models));
+    // …but a lane can never target itself.
+    expect(values).not.toContain('coding');
+
+    // Lane suggestions carry a label so the operator can tell them apart from models.
+    const laneOption = options.find((o) => o.value === 'balanced');
+    expect(laneOption?.label).toBe('lane');
+    const modelOption = options.find((o) => o.value === models[0]);
+    expect(modelOption?.label ?? '').not.toBe('lane');
+  });
+
   it('still works as a plain text input when no models are provided (graceful default)', () => {
     const { container } = render(LaneEditor, { lane: makeLane(), onsave: vi.fn() });
     const datalist = container.querySelector('datalist');

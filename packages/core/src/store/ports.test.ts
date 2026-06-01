@@ -4,8 +4,8 @@ import type {
   CreateKeyInput,
   InsertPayloadInput,
   InsertTelemetryInput,
+  KeyPatch,
   KeyStore,
-  RateLimitPatch,
   RecentDecisionRecord,
   RequestPayload,
   TelemetryPage,
@@ -49,12 +49,15 @@ class InMemoryKeyStore implements KeyStore {
     const r = this.byId.get(keyId);
     if (r) this.byId.set(keyId, { ...r, disabled: true });
   }
-  async updateRateLimit(keyId: string, patch: RateLimitPatch): Promise<void> {
+  async updateKey(keyId: string, patch: KeyPatch): Promise<void> {
     const r = this.byId.get(keyId);
     if (!r) return;
     const next = { ...r };
-    if (patch.rpm !== undefined) next.rate_limit_rpm = patch.rpm;
-    if (patch.tpm !== undefined) next.rate_limit_tpm = patch.tpm;
+    if (patch.maxLane !== undefined) next.max_lane = patch.maxLane;
+    if (patch.allowedLanes !== undefined) next.allowed_lanes = patch.allowedLanes;
+    if (patch.allowCustomModel !== undefined) next.allow_custom_model = patch.allowCustomModel;
+    if (patch.rateLimitRpm !== undefined) next.rate_limit_rpm = patch.rateLimitRpm;
+    if (patch.rateLimitTpm !== undefined) next.rate_limit_tpm = patch.rateLimitTpm;
     this.byId.set(keyId, next);
   }
 }
