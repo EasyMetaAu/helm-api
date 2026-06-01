@@ -131,9 +131,28 @@ describe("UpdateKeyRequestSchema", () => {
     expect(UpdateKeyRequestSchema.safeParse({}).success).toBe(true);
   });
 
-  it("rejects unknown fields and invalid values (fail-closed)", () => {
+  it("accepts editable caps: max_lane / allowed_lanes / allow_custom_model", () => {
+    expect(UpdateKeyRequestSchema.safeParse({ max_lane: "balanced" }).success).toBe(true);
+    expect(
+      UpdateKeyRequestSchema.safeParse({ allowed_lanes: ["economy", "balanced"] }).success,
+    ).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ allow_custom_model: true }).success).toBe(true);
+  });
+
+  it("accepts null to clear a cap (max_lane / allowed_lanes)", () => {
+    expect(UpdateKeyRequestSchema.safeParse({ max_lane: null }).success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ allowed_lanes: null }).success).toBe(true);
+  });
+
+  it("rejects role (immutable — cannot escalate via edit)", () => {
     expect(UpdateKeyRequestSchema.safeParse({ role: "root" }).success).toBe(false);
+  });
+
+  it("rejects unknown fields and invalid values (fail-closed)", () => {
+    expect(UpdateKeyRequestSchema.safeParse({ nope: 1 }).success).toBe(false);
     expect(UpdateKeyRequestSchema.safeParse({ rate_limit_tpm: -1 }).success).toBe(false);
     expect(UpdateKeyRequestSchema.safeParse({ rate_limit_rpm: 2.5 }).success).toBe(false);
+    expect(UpdateKeyRequestSchema.safeParse({ max_lane: "" }).success).toBe(false);
+    expect(UpdateKeyRequestSchema.safeParse({ allowed_lanes: [""] }).success).toBe(false);
   });
 });

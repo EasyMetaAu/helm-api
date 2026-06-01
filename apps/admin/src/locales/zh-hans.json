@@ -299,5 +299,11 @@
   "Failed to update rate limit": "更新速率限制失败",
   "Default requests per minute (RPM)": "默认每分钟请求数 (RPM)",
   "Default tokens per minute (TPM)": "默认每分钟令牌数 (TPM)",
-  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "未单独设置速率的密钥的兜底限制。0 表示不限。"
+  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "未单独设置速率的密钥的兜底限制。0 表示不限。",
+  "Edit": "编辑",
+  "Edit key": "编辑密钥",
+  "Save changes": "保存修改",
+  "Failed to update key": "更新密钥失败",
+  "Role is fixed for the life of a key — rotate by revoking and minting a new one.": "角色在密钥的生命周期内不可更改——如需更换，请吊销后重新创建。",
+  "Restrict this key to a specific set of lanes. Leave all unchecked to allow any lane (no whitelist).": "将此密钥限制在指定的若干 lane 内。全部不勾选则允许任意 lane（不设白名单）。"
 }

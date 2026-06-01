@@ -299,5 +299,11 @@
   "Failed to update rate limit": "속도 제한 업데이트에 실패했습니다",
   "Default requests per minute (RPM)": "기본 분당 요청 수 (RPM)",
   "Default tokens per minute (TPM)": "기본 분당 토큰 수 (TPM)",
-  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "키별 값이 없는 키에 적용되는 대체 제한입니다. 0은 무제한을 의미합니다."
+  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "키별 값이 없는 키에 적용되는 대체 제한입니다. 0은 무제한을 의미합니다.",
+  "Edit": "편집",
+  "Edit key": "키 편집",
+  "Save changes": "변경 사항 저장",
+  "Failed to update key": "키 업데이트 실패",
+  "Role is fixed for the life of a key — rotate by revoking and minting a new one.": "역할은 키의 수명 동안 고정됩니다. 변경하려면 키를 폐기하고 새 키를 발급하세요.",
+  "Restrict this key to a specific set of lanes. Leave all unchecked to allow any lane (no whitelist).": "이 키를 특정 레인으로 제한합니다. 모두 선택하지 않으면 모든 레인을 허용합니다(화이트리스트 없음)."
 }
