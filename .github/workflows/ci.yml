@@ -11,9 +11,9 @@ jobs:
     # are not used. All 9 runners carry these labels.
     runs-on: [self-hosted, Linux, X64, docker]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -31,7 +31,7 @@ jobs:
   docker:
     runs-on: [self-hosted, Linux, X64, docker]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build gateway image
         # Inject build info (docs/10) so GET /version reports real values instead
         # of "unknown": app version from package.json, the commit, and a UTC stamp.
