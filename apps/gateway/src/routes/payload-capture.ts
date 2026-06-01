@@ -17,14 +17,20 @@ export interface PayloadCaptureDeps {
   capturePayloads?: () => boolean;
   /** Live getter for payload_retention_days expressed in ms (drives auto-prune). */
   payloadRetentionMs?: () => number;
-  /** Cost of `usage` tokens at `alias`'s pricing, or null when pricing unknown.
-   *  Closed over the catalog in the composition root. */
+  /** Resolve the served attempt's USD cost from the trailing usage chunk: an
+   *  upstream-BILLED cost in it (`cost_usd` / OpenRouter `cost`) OVERRIDES the
+   *  catalog estimate, else tokens × `alias`'s pricing; null when neither is
+   *  available. Closed over the catalog + resolveCostUsd in the composition root. */
   costOf?: (alias: string, usage: StreamUsage) => number | null;
 }
 
 export interface StreamUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
+  /** Upstream-billed cost, when the relay reports it in the usage chunk. OpenRouter
+   *  uses `cost`; others `cost_usd`. resolveCostUsd prefers these over the estimate. */
+  cost?: number;
+  cost_usd?: number;
 }
 
 export function captureEnabled(deps: PayloadCaptureDeps): boolean {

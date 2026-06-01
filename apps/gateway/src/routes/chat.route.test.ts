@@ -435,6 +435,76 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
     expect(okAttempt?.cost_usd).toBeCloseTo(100 * 1e-6 + 50 * 2e-6);
   });
 
+  it("backfills streamed cost even when capture_payloads is OFF (#6 ungated)", async () => {
+    // Regression: cost telemetry must not depend on full-body capture. With
+    // capture off, NO payload is stored, but the trailing usage chunk is still
+    // parsed and the completion cost is backfilled onto the persisted decision.
+    const cap = captureTelemetry();
+    const { deps: d, harness } = deps({
+      telemetry: cap.telemetry,
+      capturePayloads: () => false,
+      costOf: (_alias, u) => (u.prompt_tokens ?? 0) * 1e-6 + (u.completion_tokens ?? 0) * 2e-6,
+    });
+    const chunks = [
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+      'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    harness.execute.mockResolvedValue({
+      ...nonStreamOutcome(null),
+      body: null,
+      stream: sse(chunks),
+    });
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(STREAM_BODY),
+    });
+    expect(res.status).toBe(200);
+    await res.text(); // drain so the stream's finally block runs
+
+    expect(cap.payloads).toHaveLength(0); // capture off → nothing stored
+    const decision = cap.inserted[0] as { cost_breakdown: { completion_usd: number | null } };
+    expect(decision.cost_breakdown.completion_usd).toBeCloseTo(100 * 1e-6 + 50 * 2e-6);
+  });
+
+  it("prefers an upstream-billed cost in the stream usage chunk over the estimate", async () => {
+    // The relay billed back a cost in usage.cost_usd; resolveCostUsd (via the real
+    // server costOf) must OVERRIDE the token-estimate. Here costOf is the real
+    // resolveCostUsd-backed shape: it returns the billed cost when present.
+    const cap = captureTelemetry();
+    const { deps: d, harness } = deps({
+      telemetry: cap.telemetry,
+      capturePayloads: () => false,
+      // Mirror the composition-root costOf: billed cost wins, else token estimate.
+      costOf: (_alias, u) =>
+        typeof u.cost_usd === "number"
+          ? u.cost_usd
+          : (u.prompt_tokens ?? 0) * 1e-6 + (u.completion_tokens ?? 0) * 2e-6,
+    });
+    const chunks = [
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+      'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"cost_usd":0.42}}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    harness.execute.mockResolvedValue({
+      ...nonStreamOutcome(null),
+      body: null,
+      stream: sse(chunks),
+    });
+    const app = buildApp(d);
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(STREAM_BODY),
+    });
+    await res.text();
+    const decision = cap.inserted[0] as { cost_breakdown: { completion_usd: number | null } };
+    expect(decision.cost_breakdown.completion_usd).toBe(0.42); // billed, not 0.0002
+  });
+
   it("does NOT capture when capture_payloads is off", async () => {
     const cap = captureTelemetry();
     const { deps: d, harness } = deps({

@@ -4,17 +4,16 @@ import {
   type ClassifierInput,
   type Complexity,
   classifyCascade,
-  computeCostUsd,
   createEvalCache,
   type EvalCache,
   type EvalModelRequest,
   type EvalModelResponse,
   type LanesConfig,
   type MomentumStore,
+  resolveCostUsd,
   resolveLane as resolveLaneCore,
   runEvalCached,
   scoreRequest,
-  usageFromBody,
 } from "@helm/core";
 import type {
   CatalogEntry,
@@ -248,20 +247,12 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
       if (msg && typeof msg.content === "string") text = msg.content;
     }
     // Eval self-cost (docs/07; SEPARATE from completion cost, principle 5; NEVER
-    // a key/payload). Prefer an inline cost the upstream billed back (OpenAI-shaped
-    // `usage.cost_usd` / top-level `cost_usd`); otherwise convert the eval call's
-    // OWN token usage × the catalog pricing for the eval model. Missing pricing
-    // (no entry / half-filled row) → null (unknown, not a measured 0), no crash.
-    const usage = (res as { usage?: { cost_usd?: unknown } }).usage;
-    const inlineCost = (res as { cost_usd?: unknown }).cost_usd;
-    const billed =
-      typeof usage?.cost_usd === "number"
-        ? usage.cost_usd
-        : typeof inlineCost === "number"
-          ? inlineCost
-          : null;
-    const costUsd =
-      billed ?? computeCostUsd(catalog?.get(modelReq.model)?.pricing, usageFromBody(res));
+    // a key/payload). resolveCostUsd is the single override-or-preset rule: prefer
+    // an upstream-BILLED cost the eval call returned (`usage.cost_usd` / OpenRouter
+    // `usage.cost` / top-level `cost_usd`); otherwise convert the eval call's OWN
+    // token usage × the catalog pricing for the eval model. Missing both → null
+    // (unknown, not a measured 0), no crash.
+    const costUsd = resolveCostUsd(catalog?.get(modelReq.model)?.pricing, res);
     return { text, cost_usd: costUsd };
   };
 

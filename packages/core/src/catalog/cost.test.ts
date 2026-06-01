@@ -1,6 +1,6 @@
 import type { Pricing } from "@helm/shared";
 import { describe, expect, it } from "vitest";
-import { computeCostUsd, usageFromBody } from "./cost.js";
+import { billedCostFromBody, computeCostUsd, resolveCostUsd, usageFromBody } from "./cost.js";
 
 // Pricing is per MILLION tokens. cost = prompt/1e6*input + completion/1e6*output.
 describe("computeCostUsd — token usage × catalog pricing", () => {
@@ -77,5 +77,69 @@ describe("usageFromBody — defensive token extraction", () => {
     expect(usageFromBody({})).toEqual({});
     expect(usageFromBody(null)).toEqual({});
     expect(usageFromBody({ usage: "nope" })).toEqual({});
+  });
+});
+
+// billedCostFromBody surfaces an upstream-returned cost (real money charged),
+// probing usage.cost_usd → usage.cost (OpenRouter) → top-level cost_usd, and
+// defensively rejecting anything non-finite/negative.
+describe("billedCostFromBody — upstream-returned cost", () => {
+  it("reads usage.cost_usd", () => {
+    expect(billedCostFromBody({ usage: { cost_usd: 0.0123 } })).toBe(0.0123);
+  });
+
+  it("reads OpenRouter-style usage.cost", () => {
+    expect(billedCostFromBody({ usage: { cost: 0.0042 } })).toBe(0.0042);
+  });
+
+  it("reads a top-level cost_usd", () => {
+    expect(billedCostFromBody({ cost_usd: 0.5 })).toBe(0.5);
+  });
+
+  it("prefers usage.cost_usd over usage.cost and top-level cost_usd", () => {
+    expect(billedCostFromBody({ cost_usd: 9, usage: { cost_usd: 1, cost: 2 } })).toBe(1);
+    // usage.cost beats the top-level fallback when usage.cost_usd is absent.
+    expect(billedCostFromBody({ cost_usd: 9, usage: { cost: 2 } })).toBe(2);
+  });
+
+  it("accepts a measured zero billed cost", () => {
+    expect(billedCostFromBody({ usage: { cost_usd: 0 } })).toBe(0);
+  });
+
+  it("returns null when no billed cost is present", () => {
+    expect(billedCostFromBody({ usage: { prompt_tokens: 10, completion_tokens: 5 } })).toBeNull();
+    expect(billedCostFromBody({})).toBeNull();
+    expect(billedCostFromBody(null)).toBeNull();
+  });
+
+  it("rejects non-finite / negative billed costs (falls back to estimate)", () => {
+    expect(billedCostFromBody({ usage: { cost_usd: -1 } })).toBeNull();
+    expect(billedCostFromBody({ usage: { cost: Number.NaN } })).toBeNull();
+    expect(billedCostFromBody({ cost_usd: "1.0" })).toBeNull();
+  });
+});
+
+// resolveCostUsd is the single override-or-preset rule: upstream-billed cost wins;
+// otherwise estimate from tokens × pricing; null only when neither is available.
+describe("resolveCostUsd — billed overrides preset estimate", () => {
+  const gpt4o: Pricing = { inputPerMTokUsd: 2.5, outputPerMTokUsd: 10 };
+
+  it("uses the upstream-billed cost over the catalog estimate", () => {
+    const body = { usage: { prompt_tokens: 1000, completion_tokens: 500, cost_usd: 0.99 } };
+    // Estimate would be 0.0075; the billed 0.99 must win.
+    expect(resolveCostUsd(gpt4o, body)).toBe(0.99);
+  });
+
+  it("falls back to the catalog estimate when no billed cost is present", () => {
+    const body = { usage: { prompt_tokens: 1000, completion_tokens: 500 } };
+    expect(resolveCostUsd(gpt4o, body)).toBeCloseTo(0.0075, 12);
+  });
+
+  it("honors a billed cost even when pricing is unknown (no catalog entry)", () => {
+    expect(resolveCostUsd(undefined, { usage: { cost_usd: 0.02 } })).toBe(0.02);
+  });
+
+  it("returns null when there is neither a billed cost nor pricing", () => {
+    expect(resolveCostUsd(undefined, { usage: { prompt_tokens: 10 } })).toBeNull();
   });
 });
