@@ -26,7 +26,7 @@
   // $state initializer doesn't capture the reactive `data` prop reference).
   let form = $state<RuntimeSettings>(untrack(() => ({ ...(data.settings ?? DEFAULTS) })));
 
-  let error = $state<string | null>(data.loadError ?? null);
+  let error = $state<string | null>(untrack(() => data.loadError ?? null));
   let saving = $state(false);
   let saved = $state(false);
 
