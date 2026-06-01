@@ -188,17 +188,20 @@ describe("default config activates capability filter + cost (alias-namespace ali
     // A chain that puts the json-INCAPABLE auto FIRST, then a json-capable model.
     // A needs_json request must SKIP the auto (skip_reason no_json_support) and
     // land on the capable model — proving the filter prunes on the real catalog.
-    const chain = ["zenmux/auto", "openai-crs/gpt-5.4-mini"];
+    // The landing model is deepseek-crs/deepseek-pro (json + non-stream capable);
+    // the gpt-5.x relay heads are stream-ONLY (requiresStreaming) so a non-stream
+    // request would skip them too (covered by the json-lane test below).
+    const chain = ["zenmux/auto", "deepseek-crs/deepseek-pro"];
     const out = await execute(plan(chain), req({ response_format: { type: "json_object" } }));
 
     expect(out.attempts[0]?.alias).toBe("zenmux/auto");
     expect(out.attempts[0]?.skipped).toBe(true);
     expect(out.attempts[0]?.skip_reason).toBe("no_json_support");
     expect(out.final.status).toBe("ok");
-    if (out.final.status === "ok") expect(out.final.alias).toBe("openai-crs/gpt-5.4-mini");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("deepseek-crs/deepseek-pro");
     // The pruned auto must NEVER have been invoked upstream. The upstream `model`
-    // is the RESOLVED bare provider_model (`gpt-5.4-mini`), not the alias.
-    expect(calls).toEqual(["gpt-5.4-mini"]);
+    // is the RESOLVED bare provider_model (`deepseek-pro`), not the alias.
+    expect(calls).toEqual(["deepseek-pro"]);
   });
 
   it("the shipped `json` lane chain prunes its */auto tail for a needs_json request", async () => {
@@ -214,14 +217,20 @@ describe("default config activates capability filter + cost (alias-namespace ali
     // Expand the REAL shipped `json` lane: primary openai-crs/gpt-5.4-mini, then
     // balanced (whose tail is zenmux/auto + openrouter/auto, both json-incapable).
     const chain = expandChain("json");
+    expect(chain).toContain("openai-crs/gpt-5.4-mini");
     expect(chain).toContain("zenmux/auto");
     expect(chain).toContain("openrouter/auto");
     const out = await execute(plan(chain), req({ response_format: { type: "json_object" } }));
     expect(out.final.status).toBe("ok");
-    // Lands on the json-capable primary; the auto tails are never reached here,
-    // but the chain demonstrably CONTAINS json-incapable candidates the filter
-    // would prune (proven head-on by the previous test).
-    if (out.final.status === "ok") expect(out.final.alias).toBe("openai-crs/gpt-5.4-mini");
+    // The json primary openai-crs/gpt-5.4-mini is stream-ONLY (requiresStreaming),
+    // so a non-stream request SKIPS it (no_nonstream_support) without invoking it,
+    // and the chain lands on the next json + non-stream capable model,
+    // deepseek-crs/deepseek-pro. The json-incapable */auto tails are pruned too
+    // (no_json_support, proven head-on by the previous test) but are never reached.
+    const primary = out.attempts.find((a) => a.alias === "openai-crs/gpt-5.4-mini");
+    expect(primary?.skipped).toBe(true);
+    expect(primary?.skip_reason).toBe("no_nonstream_support");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("deepseek-crs/deepseek-pro");
   });
 
   it("a chain of ONLY json-incapable candidates → capability_unsatisfiable (422 class)", async () => {
@@ -260,14 +269,16 @@ describe("default config activates capability filter + cost (alias-namespace ali
       now: clock(),
       signal: new AbortController().signal,
     });
-    // Serve a plain request on the economy head (openai-crs/gpt-5.4-mini).
-    const out = await execute(plan(["openai-crs/gpt-5.4-mini"]), req());
+    // Serve a plain (non-stream) request on the balanced json head
+    // deepseek-crs/deepseek-pro. The gpt-5.x relay heads are stream-ONLY
+    // (requiresStreaming) so they can't serve this non-stream request.
+    const out = await execute(plan(["deepseek-crs/deepseek-pro"]), req());
     expect(out.final.status).toBe("ok");
     const served = out.attempts.find((a) => a.status === "ok");
     expect(served).toBeDefined();
-    // pricing: input 0.75/MTok, output 4.5/MTok; usage 1000 prompt + 500 compl.
-    // cost = 1000/1e6*0.75 + 500/1e6*4.5 = 0.00075 + 0.00225 = 0.003.
+    // pricing: input 0.435/MTok, output 0.87/MTok; usage 1000 prompt + 500 compl.
+    // cost = 1000/1e6*0.435 + 500/1e6*0.87 = 0.000435 + 0.000435 = 0.00087.
     expect(served?.cost_usd).not.toBeNull();
-    expect(served?.cost_usd).toBeCloseTo(0.003, 9);
+    expect(served?.cost_usd).toBeCloseTo(0.00087, 9);
   });
 });
