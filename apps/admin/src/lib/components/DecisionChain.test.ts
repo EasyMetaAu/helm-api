@@ -36,14 +36,26 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
         outcome: 'error',
         latency_ms: 120,
         error_class: 'upstream_error',
+        error_detail: {
+          upstream_status: 429,
+          message: 'upstream returned 429',
+          provider_raw: { error: { message: 'rate limit exceeded', type: 'rate_limit_error' } },
+        },
       },
-      { model: 'claude-x', provider: 'anthropic', outcome: 'success', latency_ms: 340 },
+      {
+        model: 'claude-x',
+        provider: 'anthropic',
+        outcome: 'success',
+        latency_ms: 340,
+        error_detail: null,
+      },
       {
         model: 'small-x',
         provider: 'local',
         outcome: 'skipped',
         skip_reason: 'capability_unsatisfiable',
         latency_ms: 0,
+        error_detail: null,
       },
     ],
     response_meta: { model_alias: 'claude-x' },
@@ -93,6 +105,21 @@ describe('DecisionChain', () => {
     expect(rows[1]).toHaveTextContent(/success/i);
     expect(rows[2]).toHaveTextContent(/skipped/i);
     expect(rows[2]).toHaveTextContent('capability_unsatisfiable');
+  });
+
+  it('exposes a failed attempt error_detail (upstream status + message + raw body) as an expandable panel', () => {
+    render(DecisionChain, { detail: detail() });
+    const attempts = screen.getByTestId('chain-attempts');
+    const rows = within(attempts).getAllByTestId('attempt-row');
+    // The first attempt failed — its detail is the only record of WHY.
+    const detailEl = within(rows[0]).getByTestId('attempt-error-detail');
+    expect(detailEl).toBeInTheDocument();
+    expect(detailEl).toHaveTextContent('429');
+    expect(detailEl).toHaveTextContent('upstream returned 429');
+    // The redacted raw upstream body is shown (already key-scrubbed by backend).
+    expect(detailEl).toHaveTextContent('rate limit exceeded');
+    // A successful attempt has no detail panel.
+    expect(within(rows[1]).queryByTestId('attempt-error-detail')).toBeNull();
   });
 
   it('keeps classification-stage and execution-stage fallback in separate sections (原则5)', () => {

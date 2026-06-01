@@ -118,6 +118,7 @@ function nonStreamOutcome(body: unknown): ExecuteOutcome {
         error_class: null,
         latency_ms: 10,
         cost_usd: null,
+        error_detail: null,
       },
     ],
     final: { status: "ok", alias: "default_good_model", providerModel: "gpt-x" },
