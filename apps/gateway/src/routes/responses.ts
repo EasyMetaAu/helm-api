@@ -3,6 +3,7 @@ import { type ErrorClass, ErrorClassSchema, makeHelmError } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
+import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
 
@@ -142,7 +143,21 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       const detail = err instanceof Error ? err.message : "invalid Responses request";
       throw helmError("invalid_request", detail, traceId);
     }
-    ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
+    // Memory scope (docs/08 阶段 1): parse the four memory headers at this HTTP
+    // boundary and stamp them onto the IR metadata bag (mirrors /v1/messages), so
+    // the SHARED pipeline's observe phase can read the scope off ir.metadata
+    // without touching HTTP (principle 1). Without this, /v1/responses was wired
+    // with observe deps but never received a scope → memory was dead on this
+    // surface. Absent/illegal headers → off + null (default-safe).
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name));
+    ir.metadata = {
+      ...(ir.metadata ?? {}),
+      trace_id: traceId,
+      thread_id: memoryScope.threadId,
+      resource_id: memoryScope.resourceId,
+      project_id: memoryScope.projectId,
+      memory_mode: memoryScope.mode,
+    };
 
     // 3) Streaming is not yet implemented for Responses (no SSE transformer). Reject
     //    explicitly rather than degrade a stream client to a single JSON body.

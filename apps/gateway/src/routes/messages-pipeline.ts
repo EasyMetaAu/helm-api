@@ -2,8 +2,14 @@ import {
   type AnthropicSSEEvent,
   convertOpenAIStreamToAnthropic,
   type ExecutionResult,
+  type IRMessage,
   type IRResponse,
+  type MemoryScope,
+  type ObserveDeps,
+  observeInbound,
+  observeOutbound,
   type RouteOptions,
+  resolveMemoryMode,
 } from "@helm/core";
 import type { InternalRequest, Protocol } from "@helm/shared";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
@@ -90,6 +96,11 @@ function toInternalRequest(
     typeof ir.metadata?.conversation_id === "string" && ir.metadata.conversation_id.length > 0
       ? ir.metadata.conversation_id
       : null;
+  // Memory scope (docs/08): the route stamped thread_id/resource_id/project_id/
+  // memory_mode onto ir.metadata from the request headers (core never parses
+  // HTTP, principle 1). Read them back here so the InternalRequest carries the
+  // same scope the OpenAI surface produces.
+  const memoryScope = memoryScopeFromMeta(ir.metadata);
 
   return {
     request_id: traceId,
@@ -110,12 +121,58 @@ function toInternalRequest(
     stream: ir.stream === true,
     metadata: {
       conversation_id: conversationId,
-      thread_id: null,
-      resource_id: null,
-      project_id: null,
-      memory_mode: "off",
+      thread_id: memoryScope.threadId,
+      resource_id: memoryScope.resourceId,
+      project_id: memoryScope.projectId,
+      memory_mode: memoryScope.mode,
     },
   };
+}
+
+// Build a MemoryScope from the IR metadata bag the route stamped (docs/08). A
+// string id of length 0 or a non-string folds to null; the mode is normalized by
+// core's resolveMemoryMode (absent/illegal → off, default-safe). This is the
+// IR-metadata twin of resolveMemoryScope's header path — same defaults, no HTTP.
+function memoryScopeFromMeta(meta: PipelineIR["metadata"]): MemoryScope {
+  const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+  return {
+    threadId: str(meta?.thread_id),
+    resourceId: str(meta?.resource_id),
+    projectId: str(meta?.project_id),
+    mode: resolveMemoryMode(typeof meta?.memory_mode === "string" ? meta.memory_mode : null),
+  };
+}
+
+// Accumulate assistant delta text across OpenAI SSE frames for observeOutbound on
+// the streamed path. The pipeline already parses each frame via parseOpenAISSE;
+// this reads the delta.content off ONE parsed chunk. Used to reconstruct the
+// assistant turn WITHOUT buffering or altering the events forwarded downstream
+// (CLAUDE.md principle 8 — both Anthropic + Responses surfaces share this).
+function accumulateAssistantText(buffer: { text: string }, chunk: Record<string, unknown>): void {
+  const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
+  for (const ch of choices) {
+    const delta = (ch as { delta?: unknown })?.delta as { content?: unknown } | undefined;
+    if (typeof delta?.content === "string") buffer.text += delta.content;
+  }
+}
+
+// Extract the assistant message (+ tool messages) from an IRResponse for
+// observeOutbound on the non-stream path. Tolerant of a degraded IR.
+function outboundFromIR(ir: IRResponse): {
+  responseMessages: IRMessage[];
+  toolResults: IRMessage[];
+} {
+  const responseMessages: IRMessage[] = [];
+  const toolResults: IRMessage[] = [];
+  for (const ch of ir.choices) {
+    const m = ch.message;
+    if (m.role === "tool") {
+      toolResults.push(m as IRMessage);
+    } else {
+      responseMessages.push(m as IRMessage);
+    }
+  }
+  return { responseMessages, toolResults };
 }
 
 // —— OpenAI chat.completion body → IRResponse. The upstream is OpenAI-compatible
@@ -207,6 +264,13 @@ export function createMessagesPipeline(
   // Default anthropic_messages (the /v1/messages caller); /v1/responses passes
   // openai_responses so telemetry attributes the surface correctly (principle 5).
   protocol: Protocol = "anthropic_messages",
+  // Memory observe-phase wiring (docs/08 阶段 1). Optional — absent = no-op (the
+  // pipeline's existing tests run unchanged). When present, observeInbound
+  // persists the request before routing and observeOutbound persists the
+  // assistant turn after; both self-gate on the resolved MemoryScope and are
+  // fail-open (a store failure never surfaces, principle 3). Serves BOTH the
+  // /v1/messages and /v1/responses surfaces (they share this pipeline).
+  memory?: { observe: ObserveDeps },
 ): {
   run(ir: PipelineIR, identity: MessagesIdentity, signal: AbortSignal): Promise<PipelineRunResult>;
 } {
@@ -224,6 +288,17 @@ export function createMessagesPipeline(
         throw new PipelineError("invalid_request", "messages must be a non-empty array", traceId);
       }
       const internal = toInternalRequest(ir, identity, traceId, protocol);
+
+      // Memory observe (inbound): persist the request's raw messages BEFORE
+      // routing (docs/08 阶段 1). observe is write-only — it never mutates the
+      // messages nor changes routing, self-gates to a no-op on off/null-thread,
+      // and never throws (fail-open inside core). The scope rides ir.metadata,
+      // already stamped by the route from the request headers.
+      const memoryScope = memoryScopeFromMeta(ir.metadata);
+      if (memory !== undefined) {
+        await observeInbound(memory.observe, memoryScope, internal.messages as IRMessage[]);
+      }
+
       const caps = identity.caps as
         | { allowCustomModel?: unknown; maxLane?: unknown; allowedLanes?: unknown }
         | undefined;
@@ -261,16 +336,46 @@ export function createMessagesPipeline(
           if (failure !== null) throw failure;
           // The route surfaces the OpenAI body; project it into the IR the
           // outbound Anthropic transformer expects.
-          return openAIBodyToIR(result.body);
+          const irResponse = openAIBodyToIR(result.body);
+          // Memory observe (outbound, non-stream): persist the assistant turn (+
+          // any tool messages) from the projected IR. Fail-open inside core; it
+          // cannot turn a successful response into an error.
+          if (memory !== undefined) {
+            await observeOutbound(memory.observe, memoryScope, outboundFromIR(irResponse));
+          }
+          return irResponse;
         },
         async *streamIR(): AsyncIterable<{ type: string; [k: string]: unknown }> {
           // Surface a routing failure BEFORE any event is emitted, so the route
           // can write a terminal error frame instead of an empty (silent) stream.
           if (failure !== null) throw failure;
           if (result.stream === null) return;
+          // Accumulate the assistant text from the OpenAI-side chunks (one
+          // accumulator serves BOTH protocols) WITHOUT buffering or altering the
+          // events forwarded downstream (principle 8). observeOutbound runs in a
+          // finally so a client disconnect mid-stream still records what arrived.
+          const assistant = { text: "" };
           const chunks = parseOpenAISSE(result.stream);
-          for await (const ev of convertOpenAIStreamToAnthropic(chunks as AsyncIterable<never>)) {
-            yield ev as AnthropicSSEEvent & { type: string };
+          const source =
+            memory === undefined
+              ? chunks
+              : (async function* () {
+                  for await (const ch of chunks) {
+                    accumulateAssistantText(assistant, ch);
+                    yield ch;
+                  }
+                })();
+          try {
+            for await (const ev of convertOpenAIStreamToAnthropic(source as AsyncIterable<never>)) {
+              yield ev as AnthropicSSEEvent & { type: string };
+            }
+          } finally {
+            if (memory !== undefined && assistant.text.length > 0) {
+              await observeOutbound(memory.observe, memoryScope, {
+                responseMessages: [{ role: "assistant", content: assistant.text }],
+                toolResults: [],
+              });
+            }
           }
         },
       };

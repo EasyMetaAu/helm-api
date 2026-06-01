@@ -21,6 +21,7 @@ import {
   loadRuntimeCatalog,
   loadRuntimeSettings,
   makeAnthropicError,
+  type ObserveDeps,
   type PoliciesConfig,
   type ProviderClient,
   type ProviderConfig,
@@ -245,6 +246,20 @@ export async function buildServer(
     store: store.rateLimit,
   });
 
+  // Memory observe-phase deps (docs/08 阶段 1), built ONCE process-wide and shared
+  // by every request surface (chat / messages / responses). store.memory is the
+  // live MemoryStore createStore already returns for both sqlite + postgres — no
+  // extra adapter wiring. estimateTokens is a deterministic chars/4 heuristic (NOT
+  // estimateRequestTokens, which reads a Content-Length header — wrong shape for a
+  // raw string). The logger is redaction-safe: observe core only ever logs ids /
+  // counts / mode, never memory content or keys (principle 7).
+  const observe: ObserveDeps = {
+    memoryStore: store.memory,
+    now: () => new Date(),
+    estimateTokens: (text) => Math.ceil(text.length / 4),
+    log: (line, meta) => logger.log("info", line, meta as Record<string, unknown> | undefined),
+  };
+
   // Bootstrap root key on first start (idempotent; prints once). AWAITED before
   // buildServer returns: a store-read failure here MUST reject buildServer so
   // main()'s try/catch exits non-zero (fail-CLOSED, principle 2). Fire-and-forget
@@ -442,6 +457,9 @@ export async function buildServer(
     // so the eval cascade can be black-boxed without a config reload. Production
     // leaves HELM_E2E unset → eval stays config-driven (fail-closed, principle 2).
     evalHeaderOverride: process.env.HELM_E2E === "1",
+    // Memory observe-phase wiring (docs/08): the process-wide ObserveDeps. The
+    // route self-gates on the resolved x-memory-mode (off = pure no-op).
+    memory: { observe },
   });
 
   // Anthropic Messages route (/v1/messages). It reuses the SAME routing core via
@@ -526,7 +544,10 @@ export async function buildServer(
     });
   }
 
-  const messagesPipeline = createMessagesPipeline(route);
+  // Both Anthropic /v1/messages and OpenAI /v1/responses share this pipeline
+  // shape; each gets the SAME observe deps so memory observe fires on every
+  // surface (the pipeline self-gates on the scope it reads off ir.metadata).
+  const messagesPipeline = createMessagesPipeline(route, "anthropic_messages", { observe });
   // Inject the SAME per-key limiter instance the chat surface uses so the
   // Anthropic /v1/messages handler can meter per-key AFTER its self-auth (closes
   // the rate-limit bypass on /v1/messages + /v1/responses). The Wave2 handlers
@@ -595,7 +616,7 @@ export async function buildServer(
   // pipeline stamped with the openai_responses protocol, and the Responses
   // transformer for IR↔native translation. Non-streaming only (no Responses SSE
   // transformer yet); a stream:true request is rejected with a structured 400.
-  const responsesPipeline = createMessagesPipeline(route, "openai_responses");
+  const responsesPipeline = createMessagesPipeline(route, "openai_responses", { observe });
   registerResponsesRoute(app, {
     // Same per-key limiter, same cast rationale as the messages route above —
     // closes the rate-limit bypass on /v1/responses.

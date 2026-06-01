@@ -2,9 +2,13 @@ import type {
   ChatCompletionRequest,
   DecisionRecord,
   ExecutionResult,
+  IRMessage,
+  MemoryScope,
+  ObserveDeps,
   RouteOptions,
   TelemetryStore,
 } from "@helm/core";
+import { observeInbound, observeOutbound } from "@helm/core";
 import {
   type HelmError,
   type InternalRequest,
@@ -15,6 +19,7 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
+import { resolveMemoryScope } from "./memory-scope.js";
 import {
   backfillCompletionCost,
   captureEnabled,
@@ -56,6 +61,13 @@ export interface ChatRouteDeps {
    *  Gated by HELM_E2E in the composition root; production never sets this so
    *  classification stays config-driven (fail-closed). */
   evalHeaderOverride?: boolean;
+  /** Memory observe-phase wiring (docs/08 阶段 1). Optional — absent = no-op
+   *  (existing tests run unchanged). When present, observeInbound persists the
+   *  request before routing and observeOutbound persists the assistant turn
+   *  after; both self-gate on the resolved MemoryScope mode and are fail-open
+   *  (a store failure never 5xx's, principle 3). `observe` is the process-wide
+   *  ObserveDeps built once in the composition root. */
+  memory?: { observe: ObserveDeps };
 }
 
 // Minimal identity shape the adapter reads (subset of middleware/auth's
@@ -78,6 +90,7 @@ function toInternalRequest(
   traceId: string,
   identity: ChatIdentity,
   sessionKey: string | null,
+  memoryScope: MemoryScope,
 ): InternalRequest {
   const messages = Array.isArray(body.messages)
     ? (body.messages as InternalRequest["messages"])
@@ -117,10 +130,13 @@ function toInternalRequest(
     stream: body.stream === true,
     metadata: {
       conversation_id: conversationId,
-      thread_id: null,
-      resource_id: null,
-      project_id: null,
-      memory_mode: "off",
+      // Memory scope (docs/08): resolved from the x-thread-id/x-resource-id/
+      // x-project-id/x-memory-mode headers at the route boundary (core never
+      // parses HTTP, principle 1). Absent headers → off + null ids.
+      thread_id: memoryScope.threadId,
+      resource_id: memoryScope.resourceId,
+      project_id: memoryScope.projectId,
+      memory_mode: memoryScope.mode,
     },
   };
 }
@@ -143,6 +159,95 @@ function invalidRequest(message: string, traceId: string): HelmHttpError {
 function isAbort(err: unknown, signal: AbortSignal): boolean {
   if (signal.aborted) return true;
   return err instanceof Error && (err.name === "AbortError" || err.message.includes("aborted"));
+}
+
+// Extract the assistant message (+ any tool messages) from a non-stream OpenAI
+// chat.completion body for observeOutbound. Tolerant of a degraded body: a
+// missing/odd shape yields no messages (observe then persists nothing) rather
+// than throwing into the response path.
+function outboundFromOpenAIBody(body: unknown): {
+  responseMessages: IRMessage[];
+  toolResults: IRMessage[];
+} {
+  const choices = (body as { choices?: unknown })?.choices;
+  if (!Array.isArray(choices)) return { responseMessages: [], toolResults: [] };
+  const responseMessages: IRMessage[] = [];
+  const toolResults: IRMessage[] = [];
+  for (const ch of choices) {
+    const m = (ch as { message?: unknown })?.message as
+      | { role?: unknown; content?: unknown; tool_calls?: unknown; tool_call_id?: unknown }
+      | undefined;
+    if (m === undefined || m === null) continue;
+    const content = typeof m.content === "string" ? m.content : null;
+    if (m.role === "tool") {
+      toolResults.push({
+        role: "tool",
+        content,
+        ...(typeof m.tool_call_id === "string" ? { tool_call_id: m.tool_call_id } : {}),
+      } as IRMessage);
+    } else {
+      responseMessages.push({
+        role: "assistant",
+        content,
+        ...(Array.isArray(m.tool_calls) ? { tool_calls: m.tool_calls as never } : {}),
+      } as IRMessage);
+    }
+  }
+  return { responseMessages, toolResults };
+}
+
+// Buffer for reconstructing the assistant turn from a forwarded OpenAI SSE stream.
+// `text` is the accumulated assistant content; `pending` holds bytes of an event
+// not yet terminated by the `\n\n` SSE delimiter.
+interface SSEAccumulator {
+  text: string;
+  pending: string;
+}
+
+// Parse ONE complete SSE event and append any assistant delta content. A
+// malformed/`[DONE]` frame is swallowed (fail-open).
+function parseOpenAIEvent(buffer: SSEAccumulator, event: string): void {
+  for (const line of event.split("\n")) {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith("data:")) continue;
+    const payload = trimmed.slice(5).trim();
+    if (payload === "" || payload === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(payload) as { choices?: unknown };
+      const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
+      for (const ch of choices) {
+        const delta = (ch as { delta?: unknown })?.delta as { content?: unknown } | undefined;
+        if (typeof delta?.content === "string") buffer.text += delta.content;
+      }
+    } catch {
+      // malformed frame: skip (fail-open) — never alters the forwarded stream.
+    }
+  }
+}
+
+// Accumulate assistant delta text across OpenAI SSE frames for observeOutbound.
+// The provider client yields ARBITRARY transport chunks (openai.ts reader.read()),
+// NOT whole SSE events, so a single `data: {...}` frame can be split across two
+// chunks. We append to `pending` and parse only COMPLETE events (delimited by
+// `\n\n`), holding the trailing partial for the next chunk — otherwise a split
+// JSON frame would JSON.parse-fail and silently drop assistant content. Never
+// disturbs the bytes forwarded to the client (principle 8 — the caller writes the
+// chunk FIRST, then feeds a copy here).
+function accumulateOpenAIChunk(buffer: SSEAccumulator, chunk: string): void {
+  buffer.pending += chunk;
+  const events = buffer.pending.split("\n\n");
+  // The last segment may be an incomplete event — keep it for the next chunk.
+  buffer.pending = events.pop() ?? "";
+  for (const event of events) parseOpenAIEvent(buffer, event);
+}
+
+// Flush the final buffered event at stream end (the last frame may arrive without
+// a trailing `\n\n`). Clears pending so it is idempotent.
+function flushOpenAIChunk(buffer: SSEAccumulator): void {
+  if (buffer.pending !== "") {
+    parseOpenAIEvent(buffer, buffer.pending);
+    buffer.pending = "";
+  }
 }
 
 export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void {
@@ -176,7 +281,13 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     const sessionKey =
       headerSessionKey !== undefined && headerSessionKey.length > 0 ? headerSessionKey : null;
 
-    const internal = toInternalRequest(body, traceId, identity, sessionKey);
+    // Memory scope (docs/08 阶段 1): parse the four memory headers at this HTTP
+    // boundary into a resolved MemoryScope (core never reads headers, principle
+    // 1). The scope ids/mode ride the InternalRequest metadata AND gate the
+    // observe calls below; absent/illegal headers → off + null (default-safe).
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name));
+
+    const internal = toInternalRequest(body, traceId, identity, sessionKey, memoryScope);
 
     // Persist a (redacted) telemetry record. Fail-open: a telemetry failure must
     // never turn a successful request into a 5xx or break an in-flight stream.
@@ -210,6 +321,14 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       const parsed = thresholdHeader === undefined ? Number.NaN : Number(thresholdHeader);
       const rulesThreshold = Number.isFinite(parsed) ? parsed : undefined;
       classifyOverrides = { evalEnabled, rulesThreshold };
+    }
+
+    // Memory observe (inbound): persist the request's raw messages BEFORE routing
+    // (docs/08 阶段 1). observe is write-only — it NEVER mutates `internal.messages`
+    // nor changes routing, and self-gates to a no-op on mode=off / threadId=null.
+    // It never throws (fail-open inside core), so no try/catch is needed here.
+    if (deps.memory !== undefined) {
+      await observeInbound(deps.memory.observe, memoryScope, internal.messages as IRMessage[]);
     }
 
     const result = await deps.route(
@@ -264,6 +383,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     //     (the upstream's own [DONE]). (principle 8) ---
     if (internal.stream && result.stream !== null) {
       const stream = result.stream;
+      // Accumulate the assistant text for observeOutbound WITHOUT touching the
+      // forwarded bytes (principle 8): write the chunk first, then parse a copy.
+      const assistant: SSEAccumulator = { text: "", pending: "" };
       // Accumulate raw SSE chunks so the finally block can parse the trailing
       // usage chunk and backfill the streamed completion cost (#6 — execute()
       // couldn't know it at peek time). This runs REGARDLESS of capture_payloads:
@@ -277,6 +399,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           for await (const chunk of stream) {
             captured.push(chunk);
             await sse.write(chunk);
+            if (deps.memory !== undefined) accumulateOpenAIChunk(assistant, chunk);
           }
         } catch (err) {
           // A client disconnect / abort is NOT a provider fault: do not 5xx, do
@@ -314,6 +437,19 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
           );
           await persist(result.decision);
+          // Memory observe (outbound, streamed): persist the reconstructed
+          // assistant turn AFTER the bytes were forwarded. Fail-open inside core.
+          if (deps.memory !== undefined) {
+            // Flush the last partial event the \n\n-split loop held back, so a
+            // final frame without a trailing \n\n is not dropped.
+            flushOpenAIChunk(assistant);
+            if (assistant.text.length > 0) {
+              await observeOutbound(deps.memory.observe, memoryScope, {
+                responseMessages: [{ role: "assistant", content: assistant.text }],
+                toolResults: [],
+              });
+            }
+          }
         }
       });
     }
@@ -339,6 +475,12 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           trace_id: traceId,
         });
       throw structuredError(error, traceId);
+    }
+    // Memory observe (outbound, non-stream): persist the assistant message (+ any
+    // tool messages) from the OpenAI body. observe self-gates on mode/thread and
+    // never throws (fail-open) — it cannot turn a successful 200 into a 5xx.
+    if (deps.memory !== undefined) {
+      await observeOutbound(deps.memory.observe, memoryScope, outboundFromOpenAIBody(result.body));
     }
     return c.json(result.body as Record<string, unknown>);
   });

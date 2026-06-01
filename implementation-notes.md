@@ -5,6 +5,27 @@
 
 ---
 
+## 2026-05-31 · 记忆中间件 observe 接线（docs/08 阶段 1，原则 1/3/7/8）
+
+**背景**：记忆 core（`packages/core/src/memory/`）已实现 + 单测齐全并从 `@helm/core` 导出，但运行时死代码——`chat.ts` / `messages-pipeline.ts` 硬编码 `memory_mode:"off"` + null scope，无人调用 observe。本轮把 **observe 半边**接进网关请求路径（inject 半边的 `enqueueObserverJob` 后端未实现，**本轮不接**）。
+
+**做了什么（严格 TDD，红→绿）**：
+1. **新 `apps/gateway/src/routes/memory-scope.ts`** — `resolveMemoryScope(headerGet)` 纯函数读 `x-thread-id/x-resource-id/x-project-id`（absent/空串 → null）+ `x-memory-mode`（经 core `resolveMemoryMode`，absent/非法 → off）。对 header-getter 抽象，使 Hono `c.req.header` 与 IR-metadata getter 共用一套解析（原则 1：core 不碰 HTTP）。
+2. **OpenAI `chat.ts`** — 解析 scope 并替换硬编码 metadata（保留 conversation_id）；route 前 `observeInbound`，非流式从 `body.choices[].message` 取 assistant/tool 调 `observeOutbound`，流式在 SSE 循环里**先写 chunk 再累积** `delta.content`（原则 8 字节透明），`finally` 里 observeOutbound。
+3. **Anthropic `messages.ts` + `messages-pipeline.ts`** — 路由在 `transformRequestOut` 后把 4 个 memory 字段盖到 `ir.metadata`（镜像 conversation_id）；pipeline `toInternalRequest` 从 `ir.metadata` 读回（替换硬编码），并在 `run` 里 observeInbound、`collect()` / `streamIR()` 里 observeOutbound（流式用一个累加器从 OpenAI 侧 chunk 提取，喂给 `convertOpenAIStreamToAnthropic` 前透传不改字节）。**同时覆盖 /v1/messages 与 /v1/responses**（共享 pipeline）。
+4. **`server.ts` 组合根** — 进程级构建一次 `ObserveDeps`：`memoryStore: store.memory`（createStore 已返回，无新适配器）、`now: ()=>new Date()`、`estimateTokens: chars/4`（**不复用** `estimateRequestTokens`——那读 Content-Length，形状不对）、`log` 走结构化 logger（只记 id/count/mode，原则 7）。穿进 `registerChatRoutes` + 两处 `createMessagesPipeline`。
+
+**决定 / 取舍**：
+- **路由接口上 `memory` 设为可选**（`memory?: { observe: ObserveDeps }`）——absent = no-op，既有测试零改动通过。
+- **不包 try/catch**：observe core 内部已 fail-open（store 错误捕获 + 记日志，绝不抛），故 wiring 直接 await，绝不把记忆故障变成 5xx（原则 3）。
+- **流式累积容错**：本地 frame 解析对畸形帧 / `[DONE]` try/catch 吞掉，绝不影响转发字节。
+- **inject 模式本轮按 observe 持久化、不 hydrate**：`observeInbound/Outbound` 已对 mode∈{observe,inject} 生效，故只接这两个，**完全不调** `assembleInjectedContext`。
+
+**门禁**：`pnpm typecheck` 0 error；`pnpm lint` exit 0（15 个预存 warning，均他人 test 文件 noNonNullAssertion，未涉新文件）；`pnpm test`（node 套件）新增 22 测试全绿、无回归。
+**预存失败（非本轮引入）**：`admin-static.test.ts` 4 条失败——依赖 `pnpm build` 产出的 admin SPA 静态目录（本 worktree 未 build → 404）；stash 掉本轮改动后同样 4 条失败，确证与记忆接线无关，留给编排者终态 build 门禁。
+
+---
+
 ## 2026-06-01 · 成本「全是 $0.0000」三连修（cost-visibility + upstream-override + stream-ungate）（docs/07，原则 3/5/7）
 
 **症状（用户在 `/admin/requests` 实测）**：每一行「成本」都是 `$0.0000`。直觉以为「成本根本没算」，要求「上游返回了成本就用它覆盖，没返回才用预制 pricing」。
@@ -154,6 +175,8 @@
 - **保留清理**：采用「insert 时机会式 prune」（route 内调 `prunePayloads(now - retentionMs)`），靠 `created_at` 索引保持低成本；未引入独立定时器。
 - **i18n**：已跑 `i18n:extract`+`i18n:update`，新串进了各 locale（未跑 `i18n:translate`，新串暂为英文回退，待后续翻译）。
 - **预存在 flake（非本次引入）**：`policies/+page.svelte` 的 `scrollIntoView`（commit 51974fc）在 jsdom 下抛 unhandled rejection，使 `pnpm test` 退出码非 0（1131 tests 全过）。与本功能无关，未处理。
+
+---
 
 ## 2026-05-31 · 全模块审计 + 41 项修复（workflow 驱动，全原则）
 
