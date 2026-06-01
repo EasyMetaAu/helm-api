@@ -352,6 +352,65 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         }),
       ).rejects.toThrow();
     });
+
+    // --- full-payload capture (admin capture_payloads) ---
+    it("round-trips a captured request/response payload verbatim", async () => {
+      ctx = await make();
+      const requestJson = JSON.stringify({
+        model: "gpt",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      const responseJson = JSON.stringify({ choices: [{ message: { content: "yo" } }] });
+      await ctx.stores.telemetry.insertPayload({
+        requestId: "req_1",
+        requestJson,
+        responseJson,
+        createdAt: new Date(5000),
+      });
+      const got = await ctx.stores.telemetry.getPayload("req_1");
+      expect(got?.requestJson).toBe(requestJson);
+      expect(got?.responseJson).toBe(responseJson);
+      expect(got?.createdAt.getTime()).toBe(5000);
+      expect(await ctx.stores.telemetry.getPayload("nope")).toBeNull();
+    });
+
+    it("upserts a payload by request_id (request first, response backfilled)", async () => {
+      ctx = await make();
+      await ctx.stores.telemetry.insertPayload({
+        requestId: "req_1",
+        requestJson: "{}",
+        responseJson: null,
+        createdAt: new Date(1000),
+      });
+      await ctx.stores.telemetry.insertPayload({
+        requestId: "req_1",
+        requestJson: "{}",
+        responseJson: '{"done":true}',
+        createdAt: new Date(1000),
+      });
+      const got = await ctx.stores.telemetry.getPayload("req_1");
+      expect(got?.responseJson).toBe('{"done":true}');
+    });
+
+    it("prunePayloads drops rows strictly older than the cutoff", async () => {
+      ctx = await make();
+      for (const [id, ms] of [
+        ["old", 1000],
+        ["edge", 2000],
+        ["new", 3000],
+      ] as const) {
+        await ctx.stores.telemetry.insertPayload({
+          requestId: id,
+          requestJson: "{}",
+          responseJson: null,
+          createdAt: new Date(ms),
+        });
+      }
+      await ctx.stores.telemetry.prunePayloads(2000); // strictly older than 2000 → only "old"
+      expect(await ctx.stores.telemetry.getPayload("old")).toBeNull();
+      expect(await ctx.stores.telemetry.getPayload("edge")).not.toBeNull();
+      expect(await ctx.stores.telemetry.getPayload("new")).not.toBeNull();
+    });
   });
 
   // --- RateLimitStore -----------------------------------------------------

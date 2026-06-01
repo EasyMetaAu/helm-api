@@ -373,4 +373,105 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
   });
 });
 
+// ── full-payload capture + streamed-cost backfill (capture_payloads + #6) ─────
+
+describe("POST /v1/chat/completions — payload capture + streamed cost", () => {
+  // Telemetry double that records both the decision insert and the payload insert.
+  function captureTelemetry() {
+    const inserted: unknown[] = [];
+    const payloads: Array<{ requestId: string; responseJson: string | null }> = [];
+    const telemetry = {
+      insert: vi.fn(async (i: { decision: unknown }) => {
+        inserted.push(i.decision);
+        return { id: "1" };
+      }),
+      insertPayload: vi.fn(async (p: { requestId: string; responseJson: string | null }) => {
+        payloads.push({ requestId: p.requestId, responseJson: p.responseJson });
+      }),
+      prunePayloads: vi.fn(async () => {}),
+    } as unknown as TelemetryStore;
+    return { telemetry, inserted, payloads };
+  }
+
+  it("captures the verbatim request + assembled stream and backfills cost (#6)", async () => {
+    const cap = captureTelemetry();
+    const { deps: d, harness } = deps({
+      telemetry: cap.telemetry,
+      capturePayloads: () => true,
+      payloadRetentionMs: () => 1000,
+      // price 100 prompt + 50 completion tokens deterministically.
+      costOf: (_alias, u) => (u.prompt_tokens ?? 0) * 1e-6 + (u.completion_tokens ?? 0) * 2e-6,
+    });
+    const chunks = [
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+      'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    harness.execute.mockResolvedValue({
+      ...nonStreamOutcome(null),
+      body: null,
+      stream: sse(chunks),
+    });
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(STREAM_BODY),
+    });
+    expect(res.status).toBe(200);
+    await res.text(); // drain so the stream's finally block runs
+
+    // payload captured: request stored, response = the raw assembled SSE.
+    expect(cap.payloads).toHaveLength(1);
+    expect(cap.payloads[0]?.responseJson).toContain("usage");
+    // cost backfilled onto the persisted decision (was null at peek time).
+    const decision = cap.inserted[0] as {
+      cost_breakdown: { completion_usd: number | null };
+      provider_attempts: Array<{ alias: string; cost_usd: number | null }>;
+    };
+    expect(decision.cost_breakdown.completion_usd).toBeCloseTo(100 * 1e-6 + 50 * 2e-6);
+    const okAttempt = decision.provider_attempts.find((a) => a.alias === "default_good_model");
+    expect(okAttempt?.cost_usd).toBeCloseTo(100 * 1e-6 + 50 * 2e-6);
+  });
+
+  it("does NOT capture when capture_payloads is off", async () => {
+    const cap = captureTelemetry();
+    const { deps: d, harness } = deps({
+      telemetry: cap.telemetry,
+      capturePayloads: () => false,
+    });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({ id: "x", choices: [{ message: { content: "ok" } }] }),
+    );
+    const app = buildApp(d);
+    await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(cap.payloads).toHaveLength(0);
+    expect(cap.telemetry.insert).toHaveBeenCalled(); // decision still persisted
+  });
+
+  it("captures the non-stream response body verbatim when enabled", async () => {
+    const cap = captureTelemetry();
+    const { deps: d, harness } = deps({
+      telemetry: cap.telemetry,
+      capturePayloads: () => true,
+      payloadRetentionMs: () => 1000,
+    });
+    const upstream = { id: "cmpl-9", choices: [{ message: { content: "hello" } }] };
+    harness.execute.mockResolvedValue(nonStreamOutcome(upstream));
+    const app = buildApp(d);
+    await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(cap.payloads).toHaveLength(1);
+    expect(cap.payloads[0]?.responseJson).toBe(JSON.stringify(upstream));
+  });
+});
+
 export type { ExecutionResult };

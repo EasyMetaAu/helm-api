@@ -331,6 +331,15 @@ export {
   type RouteOptions,
   routeRequest,
 } from "./routing/route-request.js";
+// Runtime-mutable settings (admin "System Settings") — load/seed/persist the
+// operator-facing config subset that can change at runtime without a restart.
+export {
+  defaultSettingsFromConfig,
+  loadRuntimeSettings,
+  RUNTIME_SETTINGS_KEY,
+  type SettingsLog,
+  saveRuntimeSettings,
+} from "./settings/runtime-settings.js";
 // Agentic Signals — POST-MVP low-cost production feedback layer (docs/02,
 // research-notes「Plano」). Pure aggregator + background collector that distill
 // REDACTED routing signals from already-persisted decision records, ASYNCHRONOUS
@@ -377,12 +386,14 @@ export {
 export type {
   ConfigStore,
   CreateKeyInput,
+  InsertPayloadInput,
   InsertTelemetryInput,
   KeyStore,
   MemoryJobStatus,
   MemoryStore,
   RateLimitConsumeResult,
   RateLimitStore,
+  RequestPayload,
   SignalStore,
   TelemetryStore,
 } from "./store/ports.js";

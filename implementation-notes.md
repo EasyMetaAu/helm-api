@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-06-01 · 完整正文记录 + 系统设置页（payload-capture + system-settings）（docs/06、07，原则 7/8；修 #6 成本=0、#7 正文不可见）
+
+**用户决定**：删除原则 7 的「私有 payload 禁条」，**默认记录完整 request/response 正文**；**保留** API key 只存 sha256（两者本不冲突——key 在 Authorization 头，不在 chat 正文里）。同时新增独立的管理界面「系统设置」页承载可运行时修改的设置。
+
+**做了什么**：
+- **运行时设置基础设施**：新增 `RuntimeSettingsSchema`（shared）+ `loadRuntimeSettings/saveRuntimeSettings/defaultSettingsFromConfig`（core/settings），复用已存在但闲置的 `config_kv`/`ConfigStore`。设置项：`capture_payloads`(默认 true)、`payload_retention_days`(默认 30)、`rate_limit_enabled`、`log_level`。读取 fail-OPEN（损坏 blob 回落默认），写入 fail-CLOSED（Zod 校验，非法 400）。
+- **正文存储**：新增独立表 `request_payloads`（sqlite v7 / pg v6 迁移），`TelemetryStore` 扩展 `insertPayload/getPayload/prunePayloads`。**与 `DecisionRecord` 解耦**：DecisionRecord 仍走 `redact()` 脱敏（纵深防御），完整正文走全新的可关闭捕获路径。正文以 TEXT 原样存储（round-trip 精确字节）。
+- **捕获 + 成本回填（一处改动修两个 issue）**：`chat.ts` 流式转发循环（:256）累计 chunk，`finally`（与 persist 同处）用 `usageFromSSE` 解析末尾 usage → `costOf`(catalog 定价) 回填 `decision.cost_breakdown` 与 ok attempt 的 `cost_usd`（#6）；同时 `insertPayload` 存完整正文 + 机会式 `prunePayloads`。非流式分支同样捕获 `result.body`。全部 fail-open。
+- **`stream_options.include_usage` 注入**：`execute.ts` 的 `stripInternal` 在 `stream:true` 时注入，否则 OpenAI 兼容上游不会发末尾 usage 帧 → 流式成本永远算不出。**坑/限制**：极少数不认 `stream_options` 的上游可能报错；本期按「OpenAI 兼容上游普遍支持」处理，未做 per-provider 开关（如遇不兼容上游，后续可加 provider 能力位）。
+- **运行时联动**：`server.ts` 启动 `loadRuntimeSettings` → `applySettings` 回调重绑 `settings`、`logger.setLevel`、可变 `rateLimitConfig.enabled`（限流器每次 check 读 `.enabled`，故运行时切换即时生效，无需重启）。`logging.ts` 加可变 level + 按级别门控。
+- **管理界面**：新增 `/settings` 页 + `lib/api/settings.ts` + 导航/i18n anchors；请求详情页用完整 request/response 替换原「payload withheld」占位（捕获关时显示「未记录」）；列表/仪表盘成本区分 `null`(未测量→`—`) 与数字（不再把未测量误显为 `$0.0000`）。
+
+**取舍/坑**：
+- **`/v1/messages`（Anthropic）路径当前不持久化 telemetry**（既有缺口，非本次引入），故该路径也未接入正文捕获——只有 `/v1/chat/completions` 落库+捕获。后续若给 messages 接 telemetry，应同处接 `persistPayload`。
+- **隐私**：`capture_payloads` 默认开 = 明文正文落库。已在设置页加醒目提示，并提供 `payload_retention_days` 自动清理；自托管场景数据在运营者自己机器上，用户已确认接受。
+- **保留清理**：采用「insert 时机会式 prune」（route 内调 `prunePayloads(now - retentionMs)`），靠 `created_at` 索引保持低成本；未引入独立定时器。
+- **i18n**：已跑 `i18n:extract`+`i18n:update`，新串进了各 locale（未跑 `i18n:translate`，新串暂为英文回退，待后续翻译）。
+- **预存在 flake（非本次引入）**：`policies/+page.svelte` 的 `scrollIntoView`（commit 51974fc）在 jsdom 下抛 unhandled rejection，使 `pnpm test` 退出码非 0（1131 tests 全过）。与本功能无关，未处理。
+
 ## 2026-05-31 · 全模块审计 + 41 项修复（workflow 驱动，全原则）
 
 **背景**：用 workflow 对 10 个模块做对抗式审计（finder → 逐条 verify against real code），得 **42 条确认发现**（22 bug / 5 incomplete / 15 improvement，4 条误报驳回）。随后用第二个 workflow（文件不相交并行波 + 依赖串行）TDD 修复 **41 条**（记忆中间件接线 1 条 incomplete 单列为 Task，本轮不接——属请求路径全新行为）。

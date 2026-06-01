@@ -83,6 +83,26 @@ export interface InsertTelemetryInput {
   createdAt: Date;
 }
 
+// Full request/response body capture (admin "System Settings" → capture_payloads).
+// Stored in a SEPARATE table from the decision record so it prunes independently
+// (payload_retention_days) and never bloats the decision JSON. Unlike telemetry,
+// this is NOT redacted — it is the verbatim client request body + the assembled
+// provider response. It carries NO plaintext API key: the bearer lives in the
+// request's Authorization HEADER, which is never part of the chat body stored here.
+export interface InsertPayloadInput {
+  requestId: string;
+  requestJson: string; // verbatim client request body, serialized
+  responseJson: string | null; // assembled full response (null on error / unknown)
+  createdAt: Date;
+}
+
+export interface RequestPayload {
+  requestId: string;
+  requestJson: string;
+  responseJson: string | null;
+  createdAt: Date;
+}
+
 export interface TelemetryStore {
   insert(input: InsertTelemetryInput): Promise<{ id: string }>;
   queryRecent(limit: number): Promise<DecisionRecord[]>; // most recent N, createdAt desc
@@ -92,6 +112,14 @@ export interface TelemetryStore {
   // aggregate a window AFTER the fact. Half-open interval keeps adjacent windows
   // non-overlapping → idempotent re-collect. NEVER called on the request path.
   queryWindow(startMs: number, endMs: number): Promise<DecisionRecord[]>;
+  // Full-payload capture (opt-out via runtime settings capture_payloads). Upsert
+  // by request_id (idempotent: the stream path may write the request first, then
+  // backfill the assembled response). Stores verbatim bodies — never redacted.
+  insertPayload(input: InsertPayloadInput): Promise<void>;
+  getPayload(requestId: string): Promise<RequestPayload | null>;
+  // Delete payloads with createdAt strictly older than the cutoff (epoch ms).
+  // Drives payload_retention_days auto-prune; safe to call opportunistically.
+  prunePayloads(olderThanMs: number): Promise<void>;
 }
 
 // SignalStore — persistence for the POST-MVP Agentic Signals feedback layer

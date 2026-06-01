@@ -1,12 +1,12 @@
 import type { CreateKeyInput, KeyStore, Lane, PoliciesConfig, TelemetryStore } from "@helm/core";
 import { DEFAULT_LANES, parseLanesConfig } from "@helm/core";
-import type { ApiKeyRecord, ClassifierConfig, DecisionRecord } from "@helm/shared";
-import { ClassifierConfigSchema } from "@helm/shared";
+import type { ApiKeyRecord, ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/shared";
+import { ClassifierConfigSchema, RuntimeSettingsSchema } from "@helm/shared";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AppEnv } from "../../app.js";
 import { basicAuth } from "../../middleware/basic-auth.js";
-import type { AdminApiDeps, RuleStore } from "./deps.js";
+import type { AdminApiDeps, RuleStore, SettingsAccess } from "./deps.js";
 import { registerAdminApi } from "./index.js";
 
 // admin.api — the gateway management API. These tests pin the CONTRACT (DoD
@@ -15,6 +15,18 @@ import { registerAdminApi } from "./index.js";
 // requests只读含 trace_id; all端点 behind basicAuth.
 
 // ── In-memory fakes (no IO; routes are pure glue) ────────────────────────────
+
+// In-memory settings seam: validates+persists into a closure, mirroring server.ts.
+function makeSettings(): SettingsAccess {
+  let current: RuntimeSettings = RuntimeSettingsSchema.parse({});
+  return {
+    get: () => current,
+    save: async (next) => {
+      current = RuntimeSettingsSchema.parse(next);
+      return current;
+    },
+  };
+}
 
 function makeRuleStore(): RuleStore {
   // Seed with the checked-in defaults so reads have a baseline.
@@ -89,6 +101,11 @@ function makeTelemetry(seed: DecisionRecord[] = []): TelemetryStore {
     async queryWindow() {
       return [...rows];
     },
+    async insertPayload() {},
+    async getPayload() {
+      return null;
+    },
+    async prunePayloads() {},
   };
 }
 
@@ -151,6 +168,7 @@ function buildDeps(over: Partial<AdminApiDeps> = {}): AdminApiDeps {
     genKeyId: () => `key_${++n}`,
     accountId: "acct_default",
     modelAliases: ["openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro", "zenmux/auto"],
+    settings: makeSettings(),
     ...over,
   };
 }
@@ -472,5 +490,85 @@ describe("admin.api auth isolation", () => {
     const creds = `Basic ${Buffer.from("admin:pw").toString("base64")}`;
     const res = await app.request("/admin/api/lanes", { headers: { Authorization: creds } });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("admin.api settings (System Settings)", () => {
+  it("GET returns the live runtime settings", async () => {
+    const app = buildApp(buildDeps());
+    const res = await app.request("/admin/api/settings");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as RuntimeSettings;
+    expect(body.capture_payloads).toBe(true); // factory default ON
+    expect(body.log_level).toBe("info");
+  });
+
+  it("PUT validates, persists and echoes the new settings", async () => {
+    const settings = makeSettings();
+    const app = buildApp(buildDeps({ settings }));
+    const res = await app.request("/admin/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        capture_payloads: false,
+        payload_retention_days: 7,
+        rate_limit_enabled: true,
+        log_level: "debug",
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as RuntimeSettings).toMatchObject({
+      capture_payloads: false,
+      payload_retention_days: 7,
+      log_level: "debug",
+    });
+    // The save seam applied it: a subsequent GET reflects the change.
+    const after = (await (await app.request("/admin/api/settings")).json()) as RuntimeSettings;
+    expect(after.capture_payloads).toBe(false);
+  });
+
+  it("PUT rejects an invalid body with 400 and does not persist (fail-closed)", async () => {
+    const settings = makeSettings();
+    const app = buildApp(buildDeps({ settings }));
+    const res = await app.request("/admin/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ log_level: "verbose" }),
+    });
+    expect(res.status).toBe(400);
+    expect(settings.get().log_level).toBe("info"); // unchanged
+  });
+});
+
+describe("admin.api request payload", () => {
+  it("returns captured:false when no payload was stored", async () => {
+    const app = buildApp(buildDeps());
+    const res = await app.request("/admin/api/requests/req_x/payload");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ captured: false });
+  });
+
+  it("returns the parsed request/response when a payload exists", async () => {
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayload: async (id: string) =>
+        id === "req_1"
+          ? {
+              requestId: "req_1",
+              requestJson: JSON.stringify({ model: "auto" }),
+              responseJson: JSON.stringify({ ok: true }),
+              createdAt: new Date(1234),
+            }
+          : null,
+    } as unknown as TelemetryStore;
+    const app = buildApp(buildDeps({ telemetry }));
+    const res = await app.request("/admin/api/requests/req_1/payload");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      captured: true,
+      request: { model: "auto" },
+      response: { ok: true },
+      created_at: 1234,
+    });
   });
 });
