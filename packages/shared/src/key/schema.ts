@@ -17,6 +17,12 @@ export const ApiKeyRecordSchema = z.object({
   allowed_lanes: z.array(z.string()).nullable(),
   allow_custom_model: z.boolean(),
   disabled: z.boolean(),
+  // Per-key rate-limit overrides (docs/06). NULL = inherit the system default
+  // (runtime setting rate_limit_default_{rpm,tpm}); a number overrides that ONE
+  // dimension only (0 = explicitly unlimited for this key). present-but-nullable
+  // so the storage shape is explicit, mirroring the other per-key caps above.
+  rate_limit_rpm: z.number().int().nonnegative().nullable(),
+  rate_limit_tpm: z.number().int().nonnegative().nullable(),
 });
 
 export type KeyRole = z.infer<typeof KeyRoleSchema>;
@@ -32,7 +38,27 @@ export const CreateKeyRequestSchema = z
     max_lane: z.string().min(1).optional(),
     allowed_lanes: z.array(z.string().min(1)).optional(),
     allow_custom_model: z.boolean().optional(),
+    // Optional per-key rate limits at mint time. Omitted => inherit the system
+    // default. 0 => explicitly unlimited for that dimension (原则2 fail-closed on
+    // a negative/non-int value).
+    rate_limit_rpm: z.number().int().nonnegative().optional(),
+    rate_limit_tpm: z.number().int().nonnegative().optional(),
   })
   .strict();
 
 export type CreateKeyRequest = z.infer<typeof CreateKeyRequestSchema>;
+
+// Admin-facing update-key request (docs/06). MVP scope: only the per-key rate
+// limits are editable after mint (role/caps are fixed at creation; rotate by
+// revoking + re-minting). `.strict()` so an unknown field fails closed. Each
+// dimension is OPTIONAL (omit = leave unchanged) and NULLABLE (null = clear the
+// override back to inheriting the system default); a number sets an explicit
+// override (0 = unlimited for that dimension).
+export const UpdateKeyRequestSchema = z
+  .object({
+    rate_limit_rpm: z.number().int().nonnegative().nullable().optional(),
+    rate_limit_tpm: z.number().int().nonnegative().nullable().optional(),
+  })
+  .strict();
+
+export type UpdateKeyRequest = z.infer<typeof UpdateKeyRequestSchema>;

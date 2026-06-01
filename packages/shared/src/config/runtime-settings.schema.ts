@@ -32,6 +32,13 @@ export const RuntimeSettingsSchema = z.object({
   // admin can flip it without a restart. Seeded at boot from
   // runtime.rate_limit.enabled (see defaultSettingsFromConfig).
   rate_limit_enabled: z.boolean().default(false),
+  // System DEFAULT quota (requests/min, tokens/min) applied to any key WITHOUT
+  // its own per-key override (ApiKeyRecord.rate_limit_{rpm,tpm}). Editable at
+  // runtime so the operator can tune the fleet-wide fallback without a restart;
+  // the limiter reads config.default fresh on every check. 0 = unlimited (mirrors
+  // the quota convention). Seeded at boot from runtime.rate_limit.default.
+  rate_limit_default_rpm: z.number().int().nonnegative().default(0),
+  rate_limit_default_tpm: z.number().int().nonnegative().default(0),
   // Structured-log verbosity floor. Applied live via logger.setLevel().
   log_level: LogLevelSchema.default("info"),
 });

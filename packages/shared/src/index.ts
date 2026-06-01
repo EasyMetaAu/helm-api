@@ -152,6 +152,8 @@ export {
   CreateKeyRequestSchema,
   type KeyRole,
   KeyRoleSchema,
+  type UpdateKeyRequest,
+  UpdateKeyRequestSchema,
 } from "./key/schema.js";
 // Memory middleware storage contracts (docs/08) — POST-MVP persistence floor.
 export {

@@ -12,6 +12,8 @@ describe("RuntimeSettingsSchema", () => {
     expect(parsed.capture_payloads).toBe(true);
     expect(parsed.payload_retention_days).toBe(30);
     expect(parsed.rate_limit_enabled).toBe(false);
+    expect(parsed.rate_limit_default_rpm).toBe(0);
+    expect(parsed.rate_limit_default_tpm).toBe(0);
     expect(parsed.log_level).toBe("info");
   });
 
@@ -20,14 +22,27 @@ describe("RuntimeSettingsSchema", () => {
       capture_payloads: false,
       payload_retention_days: 7,
       rate_limit_enabled: true,
+      rate_limit_default_rpm: 60,
+      rate_limit_default_tpm: 90000,
       log_level: "debug",
     });
     expect(parsed).toEqual({
       capture_payloads: false,
       payload_retention_days: 7,
       rate_limit_enabled: true,
+      rate_limit_default_rpm: 60,
+      rate_limit_default_tpm: 90000,
       log_level: "debug",
     });
+  });
+
+  it("rejects a negative / non-integer default rate limit (fail-closed)", () => {
+    expect(RuntimeSettingsSchema.safeParse({ rate_limit_default_rpm: -1 }).success).toBe(false);
+    expect(RuntimeSettingsSchema.safeParse({ rate_limit_default_tpm: 1.5 }).success).toBe(false);
+  });
+
+  it("accepts 0 as the default rate limit (0 = unlimited)", () => {
+    expect(RuntimeSettingsSchema.safeParse({ rate_limit_default_rpm: 0 }).success).toBe(true);
   });
 
   it("rejects a non-integer retention (fail-closed)", () => {
