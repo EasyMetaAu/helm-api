@@ -4,6 +4,7 @@
   import { t } from '$lib/i18n';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
+  import JsonViewer from '$lib/components/JsonViewer.svelte';
 
   // Request detail (docs/07 详情). READ-ONLY consumer — renders the recorded trail
   // and recomputes nothing (原则1). When capture_payloads is on, the full request +
@@ -29,17 +30,6 @@
       copied = true;
     } catch {
       // clipboard unavailable — degrade silently, never surface secrets in errors
-    }
-  }
-
-  // Pretty-print a captured body: a parsed JSON object/array → indented JSON; a
-  // raw string (e.g. assembled SSE for a stream) → shown verbatim.
-  function show(value: unknown): string {
-    if (typeof value === 'string') return value;
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return String(value);
     }
   }
 </script>
@@ -79,20 +69,12 @@
         <p class="field-help mb-2">
           {$t('Full request body recorded for this call.')}
         </p>
-        <pre
-          data-testid="request-body"
-          class="max-h-96 overflow-auto rounded bg-slate-50 p-2 text-xs text-slate-700">{show(
-            data.payload.request,
-          )}</pre>
+        <JsonViewer value={data.payload.request} testid="request-body" />
       {:else}
         <p class="field-help mb-2">
           {$t('Request metadata recorded for this call (redacted — no message content or secrets).')}
         </p>
-        <pre class="overflow-x-auto rounded bg-slate-50 p-2 text-xs text-slate-700">{JSON.stringify(
-            d.request_meta,
-            null,
-            2,
-          )}</pre>
+        <JsonViewer value={d.request_meta} />
         <p data-testid="payload-summary" class="mt-2 italic text-ink-muted">
           {$t('Full request/response not recorded (payload capture was off for this request).')}
         </p>
@@ -133,11 +115,7 @@
       <section class="card text-sm">
         <h2 class="section-header">{$t('Response')}</h2>
         <p class="field-help mb-2">{$t('Full response body recorded for this call.')}</p>
-        <pre
-          data-testid="response-body"
-          class="max-h-96 overflow-auto rounded bg-slate-50 p-2 text-xs text-slate-700">{show(
-            data.payload.response,
-          )}</pre>
+        <JsonViewer value={data.payload.response} testid="response-body" />
       </section>
     {:else if d.response_meta}
       <section class="card text-sm">
@@ -145,11 +123,7 @@
         <p class="field-help mb-2">
           {$t('Response metadata recorded for this call (redacted — no message content).')}
         </p>
-        <pre class="overflow-x-auto rounded bg-slate-50 p-2 text-xs text-slate-700">{JSON.stringify(
-            d.response_meta,
-            null,
-            2,
-          )}</pre>
+        <JsonViewer value={d.response_meta} />
       </section>
     {/if}
   {/if}

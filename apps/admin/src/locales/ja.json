@@ -266,5 +266,15 @@
   "Which classification layer chose the lane.": "どの分類レイヤーがレーンを選択したか。",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "ポリシーがない場合、リクエストはタスクレーンのみによってルーティングされます。一致するリクエストに対してレーンを強制または制限するには、ポリシーを追加してください。",
   "yes": "はい",
-  "Your new API key": "新しい API キー"
+  "Your new API key": "新しい API キー",
+  "Tree": "ツリー",
+  "Formatted": "整形",
+  "Raw": "生データ",
+  "Expand": "展開",
+  "Collapse": "折りたたむ",
+  "Show remaining {count} items": "残り {count} 件を表示",
+  "Max depth reached": "最大の深さに到達しました",
+  "(empty object)": "（空のオブジェクト）",
+  "(empty array)": "（空の配列）",
+  "(null)": "（null）"
 }

@@ -5,6 +5,27 @@
 
 ---
 
+## 2026-06-01 · 请求详情正文改为可折叠树形查看器（admin.json-tree-viewer）（docs/07，原则 1/7）
+
+**动机（用户实测）**：请求详情页 `/admin/requests/:traceId` 的「请求 / 响应」正文（以及 capture 关闭时的 `request_meta`/`response_meta` 兜底）都是扁平 `<pre>` + `JSON.stringify(…, 2)`，长正文（如组装后的 SSE 响应）一堵到底、无法折叠分支，难以审阅。
+
+**做法（移植，不引依赖）**：参考 `llm-router/src/api/admin/views/detail.ts`（约 266–408 行）的「树形 / 格式化 / 原始」三标签查看器。那段是服务端 HTML 字符串里的原生 JS，无法 import；helm-api admin 是 SvelteKit 5（runes）。故**把同一行为重写成两个惯用 Svelte 组件**：
+- `apps/admin/src/lib/components/JsonTree.svelte`：递归节点（组件自引用 `import Self from './JsonTree.svelte'`）。对象/数组用原生 `<details>`，默认展开到 `DEFAULT_DEPTH=2`；子节点**惰性渲染**（`{#if open}`，闭合即不入 DOM），分页 `VISIBLE_LIMIT=200`（「展开剩余 N 项」按钮）；超长字符串 `STRING_LIMIT=512` 截断 + 展开/收起；`MAX_RENDER_DEPTH=24` 兜底。常量与上游一致。
+- `apps/admin/src/lib/components/JsonViewer.svelte`：三标签壳（Tree 默认 / Formatted / Raw）。
+
+**自己拍板的决定（spec 未覆盖）**：
+1. **正文形态归一**：`RequestPayloadView.request/response` 类型是 `unknown`——可能是已解析对象，也可能是原始字符串（组装后的 SSE 流）。JsonViewer 先尝试 `JSON.parse(string)`：成功→树形/格式化用解析结果；失败→**原样展示**（树形当作单个字符串标量，Raw 逐字），绝不因非法 JSON 白屏（fail-soft，呼应原则 3 的健壮性取向）。
+2. **应用范围**：把详情页 4 处 JSON `<pre>` 全部换成 `<JsonViewer>`（请求正文、`request_meta`、响应正文、`response_meta`），并保留 `data-testid="request-body"/"response-body"` 以免动到既有 e2e 选择器。错误区里的 `provider_raw` 是内联渲染、非 JSON 面板，保持原样。删除页面里不再用到的 `show()` 辅助函数。
+3. **样式用语义 token**（`bg-canvas`/`text-ink-body`/`border-border`/`text-link`/`bg-action`），不照搬上游的 `bg-panel`/`text-accent` 字面类。
+4. **i18n**：键即英文源串，新增 `Tree/Formatted/Raw/Expand/Collapse/Show remaining {count} items/Max depth reached/(empty object)/(empty array)/(null)` 到全部 5 个 locale（en 恒等 + zh-hans/zh-hant/ja/ko 译文），各 +10 键→278。（注：`easyi18n` 抽取会重排键序，本次手填以免大 diff；如后续跑 `pnpm i18n:sync` 顺带规整。）
+5. **`untrack` 消警告**：`let open = $state(untrack(() => depth < DEFAULT_DEPTH))`——`depth` 是 prop 但节点被 key 固定、其值终生不变，捕获初值是有意为之；用 `untrack` 静音 svelte 的 `state_referenced_locally` 误报。
+
+**TDD**：先写 `JsonTree.test.ts`(6) + `JsonViewer.test.ts`(7) 红，再实现转绿。覆盖：默认展开到深度 2 / 深层折叠不入 DOM、`Object(n)`/`Array(n)` 计数、数组按下标、超长串截断+展开、200 分页+「展开剩余 50 项」、三标签切换、Formatted 缩进、非法 JSON 原样、空对象/空数组/null 占位、`testid` 透传。
+
+**门禁**：admin 单测 **96 全绿**（新增 13）、`svelte-check` 0 error（仅 1 个**既有** `settings/+page.svelte` 警告）、`biome check .` exit 0（admin 被 biome 忽略，由 svelte-check 兜底；15 个警告均为 core/gateway 既有）。**坑/TODO**：纯组件单测已覆盖行为；尚未跑浏览器视觉确认与 Playwright e2e（worktree 无用户那条 captured 请求的 SQLite 数据，无法本地复现该 traceId）。
+
+---
+
 ## 2026-06-01 · 分类器车道校准（classifier.lane-calibration）—— 修「所有请求都落到 balanced」（docs/03，原则 2/3/4/5）
 
 **症状（用户在 Docker 实测发现）**：每一条 `model:auto` 请求的遥测都是 `decided_by=fallback` / `fallback_reason=eval_disabled` / `lane=balanced`。lane 体系（economy/coding/premium/json/vision）**形同虚设**——无论提示词是打招呼、写代码还是深度推理，全部走 balanced。
