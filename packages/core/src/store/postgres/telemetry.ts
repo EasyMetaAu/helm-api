@@ -4,6 +4,7 @@ import { and, asc, desc, eq, gte, lt } from "drizzle-orm";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
+  RecentDecisionRecord,
   RequestPayload,
   TelemetryStore,
 } from "../ports.js";
@@ -41,13 +42,15 @@ export class PgTelemetryStore implements TelemetryStore {
     return { id };
   }
 
-  async queryRecent(limit: number): Promise<DecisionRecord[]> {
+  async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
     const rows = await this.db
       .select()
       .from(telemetry)
       .orderBy(desc(telemetry.createdAt))
       .limit(limit);
-    return rows.map((r) => this.toDecision(r));
+    // createdAt is stored as epoch ms (bigint) here — wrap it back to a Date so
+    // the port contract matches the sqlite adapter exactly.
+    return rows.map((r) => ({ record: this.toDecision(r), createdAt: new Date(r.createdAt) }));
   }
 
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {

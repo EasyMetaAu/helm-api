@@ -103,9 +103,19 @@ export interface RequestPayload {
   createdAt: Date;
 }
 
+// A recent decision row paired with the time the gateway recorded it. `createdAt`
+// is STORE metadata (a separate column), deliberately kept OUT of the redacted
+// DecisionRecord schema; the Debug UI list needs it for the 「时间」 column, so the
+// recent-list port surfaces it alongside the record instead of forcing the UI to
+// fabricate a timestamp (原则1: UI re-computes nothing).
+export interface RecentDecisionRecord {
+  record: DecisionRecord;
+  createdAt: Date;
+}
+
 export interface TelemetryStore {
   insert(input: InsertTelemetryInput): Promise<{ id: string }>;
-  queryRecent(limit: number): Promise<DecisionRecord[]>; // most recent N, createdAt desc
+  queryRecent(limit: number): Promise<RecentDecisionRecord[]>; // most recent N, createdAt desc
   getByRequestId(requestId: string): Promise<DecisionRecord | null>;
   // POST-MVP Agentic Signals (docs/02). Read every decision record whose
   // createdAt falls in [startMs, endMs) so the background Signal Collector can

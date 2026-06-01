@@ -105,6 +105,9 @@ interface RawAttempt {
 interface RawDecisionRecord {
   request_id?: string;
   trace_id?: string;
+  // Epoch ms the gateway recorded the request (store metadata flattened onto the
+  // row by GET /admin/api/requests). Absent on legacy records → ts stays ''.
+  created_at?: number;
   requested_model?: string;
   // Display prefix only (helm_live_ab12) — the record NEVER carries the plaintext
   // key (原则7). Null/absent on legacy (pre-enrichment) records.
@@ -211,7 +214,10 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
       : undefined;
   return {
     trace_id: String(raw.trace_id ?? raw.request_id ?? ''),
-    ts: '', // backend does not record a timestamp yet (placeholder, no fabrication)
+    // Real recorded timestamp (epoch ms) surfaced by the list endpoint, kept as an
+    // ISO string so the row is deterministic/sortable; the view formats it for
+    // display. '' when the record carries none (legacy) — never fabricated.
+    ts: typeof raw.created_at === 'number' ? new Date(raw.created_at).toISOString() : '',
     // Real display prefix from the recorded auth identity — PREFIX ONLY, never the
     // plaintext key (原则7). '—' when the record carries none (legacy / unknown).
     key_prefix:

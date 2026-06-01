@@ -8,6 +8,8 @@
   },
   "packageManager": "pnpm@10.25.0",
   "scripts": {
+    "dev": "pnpm --filter @helm/admin dev",
+    "dev:admin": "pnpm --filter @helm/admin dev",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
     "test:watch": "vitest",

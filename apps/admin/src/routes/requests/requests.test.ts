@@ -1,5 +1,6 @@
-import { render, screen, waitFor, within } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { goto } from '$app/navigation';
 import type { RequestDetail, RequestListItem } from '$lib/api/requests.js';
 import DetailPage from './[traceId]/+page.svelte';
 import ListPage from './+page.svelte';
@@ -120,6 +121,29 @@ describe('requests list page', () => {
     render(ListPage, { data: { items: [item('tr_link')], nextCursor: undefined } });
     const link = screen.getByTestId('request-row').querySelector('a');
     expect(link).toHaveAttribute('href', '/requests/tr_link');
+  });
+
+  it('shows the request ID as the first column and the recorded time, with no separate "view" action', () => {
+    render(ListPage, {
+      data: {
+        items: [item('tr_first', { ts: '2026-05-31T10:00:00Z' })],
+        nextCursor: undefined,
+      },
+    });
+    const cells = screen.getByTestId('request-row').querySelectorAll('td');
+    // Request ID is the FIRST column.
+    expect(cells[0]).toHaveTextContent('tr_first');
+    // The time column (second) renders the recorded timestamp (year is locale-stable).
+    expect(cells[1]).toHaveTextContent('2026');
+    // The trailing "view" link is gone — the whole row is the link now.
+    expect(screen.queryByText('view')).not.toBeInTheDocument();
+  });
+
+  it('navigates to the detail page when the row itself is clicked', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, { data: { items: [item('tr_go')], nextCursor: undefined } });
+    await fireEvent.click(screen.getByTestId('request-row'));
+    expect(goto).toHaveBeenCalledWith('/requests/tr_go');
   });
 
   it('shows an empty state when there are no requests', () => {
