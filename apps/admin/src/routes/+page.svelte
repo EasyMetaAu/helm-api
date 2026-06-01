@@ -1,6 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
+  import { formatUsd } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
   type Stats = {
@@ -96,7 +97,7 @@
     </div>
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Spend')}</div>
-      <div class="mt-1 text-2xl font-semibold text-slate-900">${stats.totalCost.toFixed(4)}</div>
+      <div class="mt-1 text-2xl font-semibold text-slate-900">{formatUsd(stats.totalCost)}</div>
     </div>
   </div>
 
@@ -175,9 +176,7 @@
                   {/if}
                 </td>
                 <td class="px-3 py-2 text-right text-slate-500">{r.latency_ms}ms</td>
-                <td class="px-3 py-2 text-right font-mono text-slate-600"
-                  >{r.cost_usd === null ? '—' : `$${r.cost_usd.toFixed(4)}`}</td
-                >
+                <td class="px-3 py-2 text-right font-mono text-slate-600">{formatUsd(r.cost_usd)}</td>
               </tr>
             {/each}
           </tbody>

@@ -5,6 +5,26 @@
 
 ---
 
+## 2026-06-01 · 成本「全是 $0.0000」三连修（cost-visibility + upstream-override + stream-ungate）（docs/07，原则 3/5/7）
+
+**症状（用户在 `/admin/requests` 实测）**：每一行「成本」都是 `$0.0000`。直觉以为「成本根本没算」，要求「上游返回了成本就用它覆盖，没返回才用预制 pricing」。
+
+**根因（实测 docker telemetry DB 取证，竟是三件事，非「没算」）**：抽样最近 100 行 → `null(无成本)=25` / `tiny(<$0.0001，四舍五入成 0)=33` / `visible=22`。即 **58% 显示成 `$0.0000`**，但分两类成因：
+1. **显示截断（主因，33%）**：DeepSeek 极便宜（一次补全 ~$0.0000244）。admin 四处用 `toFixed(4)` → 任何 < $0.0001 的真实成本都被渲染成 `$0.0000`，与「免费」无法区分。**数字是对的，是格式吃掉了它。**
+2. **流式成本为 null（25%）**：跑着的 docker 是**旧镜像**（`telemetry_payloads` 表都没有），完全没有 main 上的流式回填。即便在 main 上，流式回填也**被 `capture_payloads` 开关挟持**——`chat.ts` 仅在 `captureOn` 时累积 chunk，关闭抓取就拿不到尾部 usage chunk → 成本 null。
+3. **执行路径无「上游成本覆盖」**：只有 eval 路径（classify.ts）实现了 billed-cost 覆盖；completion 路径只会 `computeCostUsd(tokens×pricing)`，上游真账单 `cost` 字段被忽略。
+
+**修法**：
+- **统一覆盖规则（core）**：`catalog/cost.ts` 新增 `billedCostFromBody`（按 `usage.cost_usd` → OpenRouter `usage.cost` → 顶层 `cost_usd` 探测，仅取有限非负）与 `resolveCostUsd(pricing, body)=billed ?? 估算`。**单一**「覆盖否则预制」真源；eval / 非流式 / 流式三处全部改走它（classify.ts 内联逻辑删除并替换；execute.ts 非流式 `costOf`；server.ts 流式 `costOf` 走 `resolveCostUsd({usage})`，`StreamUsage` 扩 `cost?/cost_usd?`）。`null` 仅在「无 billed 且无 pricing」时出现（保「未测量」≠「测量为 0」，原则 3）。
+- **解除流式回填的抓取挟持（chat.ts）**：流式 finally 中**无论 `capture_payloads` 与否都累积 chunk** 以解析尾部 usage 回填成本；`captureOn` 只决定是否**持久化** body，不再决定是否**采集成本**（运营者为隐私关抓取，成本遥测不应一起瞎）。代价：抓取关闭时仍会在内存中暂存整段响应用于解析（默认抓取本就开，可接受）。
+- **自适应成本显示（admin）**：新增 `lib/format.ts::formatUsd(n|null)`——`null/NaN→「—」`、`0→$0.00`、小数量级按 ~3 位有效数字放宽小数位（`0.0000244` 而非 `$0.0000`），并裁尾零保底 2 位。替换四处：`requests/+page.svelte`、dashboard `+page.svelte`（含 Spend 合计）、`CostBreakdown.svelte`。
+
+**de-scope（已记录的后续）**：Anthropic `/v1/messages` 路径（`createMessagesPipeline(route)`）**根本不持久化任何遥测**（无 `telemetry.insert`/`costOf`/capture，仅 `log` trace_id）——故该面流式成本回填**无处可挂**，须先为该面补遥测持久化。本次不做，列为 TODO。（用户实际流量走 OpenAI chat 面，本次修复已覆盖。）
+
+**门禁**：typecheck 0（shared/core/gateway）/ svelte-check 0 error / biome 改动文件 0 / 单测 **1150 全绿**（含新 `format.test.ts` 6 + cost 覆盖 20 + chat 流式回填 ungate/override 2）。`admin-static.test.ts` 4 例在**未 build SPA 的全新 worktree**里因 404 失败，`pnpm --filter @helm/admin build` 后 8/8 绿——纯环境（产物缺失），非改动所致。
+
+---
+
 ## 2026-06-01 · 每次供应商尝试的失败详情（admin-debug-error-detail）（docs/07，原则 3/5/7/8）
 
 **起因（用户在管理界面发现）**：请求详情页「供应商尝试（执行回退）」里，失败的尝试只显示一个 `error_class`（如 `upstream_error`）红字，看不到**为什么**失败。当首选 model 失败但回退 model 成功时（请求整体 200），那条失败尝试的详细原因**在任何地方都没有记录**——`DecisionRecord` 的每条 `provider_attempts` 只存 `error_class`，详细信息（上游状态码、报文体）只在「整链全失败」的终态 `final` 里才保留。所以这类「失败后被回退救回」的请求，其失败原因彻底丢失（日志里也没有——`execute.ts` 只记 `stream.truncated`/`cost.pricing_missing`，不记每次尝试的上游错误）。

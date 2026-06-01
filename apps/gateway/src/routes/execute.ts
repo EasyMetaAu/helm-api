@@ -6,7 +6,7 @@ import type {
   ProviderRegistry,
   RouteProviderAttempt,
 } from "@helm/core";
-import { checkCapability, computeCostUsd, UpstreamError, usageFromBody } from "@helm/core";
+import { checkCapability, resolveCostUsd, UpstreamError } from "@helm/core";
 import type { AttemptErrorDetail, CatalogEntry, InternalRequest } from "@helm/shared";
 import { makeHelmError } from "@helm/shared";
 
@@ -139,12 +139,16 @@ export function createExecute(deps: ExecuteAdapterDeps) {
   // Keyed by the candidate ALIAS — the catalog/pricing modelKey is the routing
   // alias (e.g. `openai-crs/gpt-5.4-mini`), NOT the bare upstream model id we send
   // on the wire (`gpt-5.4-mini`). See the resolve block below.
-  // Missing pricing (no catalog entry, or a half-filled pricing row) → null
-  // ("not measured", distinct from a measured 0) and a logged miss, NEVER a
-  // crash (principle 3). Streaming attempts have no usage at peek time → null.
+  // Prefer an upstream-BILLED cost the response carried (real money charged —
+  // `usage.cost_usd` / OpenRouter `usage.cost` / top-level `cost_usd`); otherwise
+  // estimate from token usage × catalog pricing (resolveCostUsd, the single
+  // override-or-preset rule). Missing BOTH (no billed cost AND no catalog entry /
+  // half-filled pricing row) → null ("not measured", distinct from a measured 0)
+  // and a logged miss, NEVER a crash (principle 3). Streaming attempts have no
+  // usage at peek time → null here, backfilled by the route from the usage chunk.
   const costOf = (alias: string, body: unknown): number | null => {
     const pricing = catalog.get(alias)?.pricing;
-    const cost = computeCostUsd(pricing, usageFromBody(body));
+    const cost = resolveCostUsd(pricing, body);
     if (cost === null) {
       log?.("info", "cost.pricing_missing", { alias });
     }

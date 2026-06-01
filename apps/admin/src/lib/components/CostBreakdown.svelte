@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatUsd } from '$lib/format.js';
   import type { RequestDetail } from '$lib/api/requests.js';
   import { t } from '$lib/i18n';
 
@@ -6,9 +7,9 @@
   // Read-only: renders exactly the figures the backend recorded — no re-computation.
   let { cost }: { cost: RequestDetail['cost_breakdown'] } = $props();
 
-  function usd(n: number): string {
-    return `$${n.toFixed(4)}`;
-  }
+  // Adaptive precision so sub-cent relay costs (~$0.0000244) stay visible instead
+  // of collapsing to $0.0000; null components render as "—" (not measured).
+  const usd = formatUsd;
 </script>
 
 <dl data-testid="cost-breakdown" class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm">

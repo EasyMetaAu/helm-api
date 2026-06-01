@@ -45,3 +45,38 @@ export function usageFromBody(body: unknown): TokenUsage {
     completionTokens: finiteNonNegative(u.completion_tokens),
   };
 }
+
+// An upstream-BILLED cost the provider returned alongside the response — the
+// relay's OWN computed price, in USD. Different relays surface it differently, so
+// we probe, in precedence order: `usage.cost_usd` → `usage.cost` (OpenRouter) →
+// top-level `cost_usd`. When present this is AUTHORITATIVE (real money charged)
+// and must OVERRIDE our catalog estimate (CLAUDE.md 成本约定: 上游返回了就用它覆盖,
+// 没返回才用预制 pricing). Defensive (principle 3/7): only a finite, non-negative
+// number counts — anything else → null so the caller falls back to the estimate.
+// Never throws, never reads message content.
+export function billedCostFromBody(body: unknown): number | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as { cost_usd?: unknown; usage?: unknown };
+  const usage =
+    b.usage && typeof b.usage === "object"
+      ? (b.usage as { cost_usd?: unknown; cost?: unknown })
+      : undefined;
+  for (const candidate of [usage?.cost_usd, usage?.cost, b.cost_usd]) {
+    const v = finiteNonNegative(candidate);
+    if (v !== undefined) return v;
+  }
+  return null;
+}
+
+// Resolve one served attempt's USD cost from a raw upstream response body: prefer
+// the upstream-billed cost when present (authoritative — overrides the estimate,
+// and works even with no catalog entry), otherwise estimate from token usage ×
+// catalog pricing. Returns null ONLY when BOTH are unavailable (no billed cost
+// AND pricing missing) — the honest "not measured" sentinel, kept DISTINCT from a
+// measured 0 (principle 3). This is the single source of the override-or-preset
+// rule; eval (classify) and execution (execute/stream) both route through it.
+export function resolveCostUsd(pricing: Pricing | undefined, body: unknown): number | null {
+  const billed = billedCostFromBody(body);
+  if (billed !== null) return billed;
+  return computeCostUsd(pricing, usageFromBody(body));
+}
