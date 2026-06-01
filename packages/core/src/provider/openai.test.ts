@@ -147,4 +147,180 @@ describe("createOpenAIClient (Phase 0 passthrough)", () => {
     const init = fetch.mock.calls[0]?.[1] as RequestInit;
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
+
+  it("does not retry a 401 on a static-key client (no onUnauthorized)", async () => {
+    const fetch = vi
+      .fn()
+      .mockImplementation(async () => jsonResponse({ error: { message: "nope" } }, 401));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+    await expect(client.chatCompletion({ model: "m" })).rejects.toMatchObject({
+      errorClass: "upstream_error",
+      upstreamStatus: 401,
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// --- OAuth dynamic-credential client (issue #38). The auth header becomes a
+// per-request async lookup, and a single upstream 401 triggers an invalidate +
+// one retry with a freshly fetched token. Static-key clients are unchanged.
+describe("createOpenAIClient (OAuth dynamic credential)", () => {
+  const OAUTH_BASE = { baseUrl: "https://upstream.test/v1" };
+
+  function jsonRes(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  function sse(chunks: string[], status = 200): Response {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const enc = new TextEncoder();
+        for (const c of chunks) controller.enqueue(enc.encode(c));
+        controller.close();
+      },
+    });
+    return new Response(stream, { status });
+  }
+
+  it("awaits getAuthHeader() and sends the dynamic Bearer (non-streaming)", async () => {
+    const getAuthHeader = vi.fn().mockResolvedValue("Bearer fetched-token-1");
+    const fetch = vi.fn().mockResolvedValue(jsonRes({ ok: true }));
+    const client = createOpenAIClient({ config: { ...OAUTH_BASE, getAuthHeader }, fetch });
+    await client.chatCompletion({ model: "m" });
+    const init = fetch.mock.calls[0]?.[1] as RequestInit & { headers: Record<string, string> };
+    expect(init.headers.Authorization).toBe("Bearer fetched-token-1");
+    expect(getAuthHeader).toHaveBeenCalled();
+  });
+
+  it("recomputes the header per request (refreshed token on the next call)", async () => {
+    const getAuthHeader = vi
+      .fn()
+      .mockResolvedValueOnce("Bearer token-A")
+      .mockResolvedValueOnce("Bearer token-B");
+    // Fresh Response per call: a Response body can only be read once.
+    const fetch = vi.fn().mockImplementation(async () => jsonRes({ ok: true }));
+    const client = createOpenAIClient({ config: { ...OAUTH_BASE, getAuthHeader }, fetch });
+    await client.chatCompletion({ model: "m" });
+    await client.chatCompletion({ model: "m" });
+    const h0 = (fetch.mock.calls[0]?.[1] as { headers: Record<string, string> }).headers;
+    const h1 = (fetch.mock.calls[1]?.[1] as { headers: Record<string, string> }).headers;
+    expect(h0.Authorization).toBe("Bearer token-A");
+    expect(h1.Authorization).toBe("Bearer token-B");
+  });
+
+  it("on a 401: invalidates, retries once with a new token, succeeds (non-streaming)", async () => {
+    const onUnauthorized = vi.fn();
+    const getAuthHeader = vi
+      .fn()
+      .mockResolvedValueOnce("Bearer stale")
+      .mockResolvedValueOnce("Bearer fresh");
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonRes({ error: "unauthorized" }, 401))
+      .mockResolvedValueOnce(jsonRes({ id: "ok" }, 200));
+    const client = createOpenAIClient({
+      config: { ...OAUTH_BASE, getAuthHeader, onUnauthorized },
+      fetch,
+    });
+    const out = await client.chatCompletion({ model: "m" });
+    expect(out).toEqual({ id: "ok" });
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const retryHeaders = (fetch.mock.calls[1]?.[1] as { headers: Record<string, string> }).headers;
+    expect(retryHeaders.Authorization).toBe("Bearer fresh");
+  });
+
+  it("on a persistent 401: retries once then throws UpstreamError(upstreamStatus=401)", async () => {
+    const onUnauthorized = vi.fn();
+    const getAuthHeader = vi.fn().mockResolvedValue("Bearer whatever");
+    const fetch = vi.fn().mockImplementation(async () => jsonRes({ error: "unauthorized" }, 401));
+    const client = createOpenAIClient({
+      config: { ...OAUTH_BASE, getAuthHeader, onUnauthorized },
+      fetch,
+    });
+    await expect(client.chatCompletion({ model: "m" })).rejects.toMatchObject({
+      errorClass: "upstream_error",
+      upstreamStatus: 401,
+    });
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(2); // original + exactly one retry
+  });
+
+  it("scrubs access + refresh tokens from an echoed upstream error body", async () => {
+    const currentSecrets = vi.fn().mockReturnValue(["access-XYZ", "refresh-ABC"]);
+    const getAuthHeader = vi.fn().mockResolvedValue("Bearer access-XYZ");
+    const fetch = vi
+      .fn()
+      .mockImplementation(async () =>
+        jsonRes({ error: { echoed: "access-XYZ and refresh-ABC leaked" } }, 502),
+      );
+    const client = createOpenAIClient({
+      config: { ...OAUTH_BASE, getAuthHeader, currentSecrets },
+      fetch,
+    });
+    try {
+      await client.chatCompletion({ model: "m" });
+    } catch (e) {
+      const raw = JSON.stringify((e as UpstreamError).providerRaw);
+      expect(raw).not.toContain("access-XYZ");
+      expect(raw).not.toContain("refresh-ABC");
+    }
+  });
+
+  it("streaming 401 retries before the first chunk and yields the full stream", async () => {
+    const onUnauthorized = vi.fn();
+    const getAuthHeader = vi
+      .fn()
+      .mockResolvedValueOnce("Bearer stale")
+      .mockResolvedValueOnce("Bearer fresh");
+    const chunks = ['data: {"a":1}\n\n', 'data: {"b":2}\n\n', "data: [DONE]\n\n"];
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonRes({ error: "unauthorized" }, 401))
+      .mockResolvedValueOnce(sse(chunks));
+    const client = createOpenAIClient({
+      config: { ...OAUTH_BASE, getAuthHeader, onUnauthorized },
+      fetch,
+    });
+    const received: string[] = [];
+    for await (const c of client.chatCompletionStream({ model: "m", stream: true })) {
+      received.push(c);
+    }
+    expect(received.join("")).toBe(chunks.join(""));
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const retryHeaders = (fetch.mock.calls[1]?.[1] as { headers: Record<string, string> }).headers;
+    expect(retryHeaders.Authorization).toBe("Bearer fresh");
+  });
+
+  it("streaming non-401 error throws before any chunk (breaker contract intact)", async () => {
+    const onUnauthorized = vi.fn();
+    const getAuthHeader = vi.fn().mockResolvedValue("Bearer t");
+    const fetch = vi.fn().mockImplementation(async () => jsonRes({ error: "boom" }, 503));
+    const client = createOpenAIClient({
+      config: { ...OAUTH_BASE, getAuthHeader, onUnauthorized },
+      fetch,
+    });
+    const iter = client.chatCompletionStream({ model: "m", stream: true });
+    await expect(iter[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      errorClass: "upstream_error",
+      upstreamStatus: 503,
+    });
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a config that supplies both apiKey and getAuthHeader (fail-closed)", () => {
+    const getAuthHeader = vi.fn().mockResolvedValue("Bearer t");
+    expect(() =>
+      createOpenAIClient({ config: { ...OAUTH_BASE, apiKey: "sk-x", getAuthHeader } }),
+    ).toThrow();
+  });
+
+  it("rejects a config that supplies neither apiKey nor getAuthHeader (fail-closed)", () => {
+    expect(() => createOpenAIClient({ config: { ...OAUTH_BASE } })).toThrow();
+  });
 });

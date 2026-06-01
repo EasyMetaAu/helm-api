@@ -11,6 +11,7 @@ import {
   createRateLimiter,
   createSignalCollector,
   createStore,
+  createTokenManager,
   DEFAULT_LANES,
   generateKey,
   hashKey,
@@ -107,7 +108,10 @@ function buildRegistry(
   providers: ReadonlyArray<ProviderConfigShared>,
   primaryName: string,
   primaryBaseUrl: string,
-  primaryApiKeyEnv: string,
+  // OPTIONAL (issue #38): an OAuth primary has no api_key_env. The registry never
+  // reads this to fetch a credential (the per-name client is pre-built), so the
+  // back-fill entry stores "" when absent.
+  primaryApiKeyEnv: string | undefined,
   lanes: LanesConfig,
   fallbackBaseUrl: string,
 ) {
@@ -133,32 +137,84 @@ function buildRegistry(
     cfgs.push({
       name: primaryName,
       base_url: primaryBaseUrl,
-      api_key_env: primaryApiKeyEnv,
+      api_key_env: primaryApiKeyEnv ?? "", // OAuth primary has none; registry never reads it
       models: [...backfill].map((alias) => ({ alias, provider_model: alias })),
     });
   }
   return createProviderRegistry(cfgs);
 }
 
+// A resolved provider credential, ready to splice into a ProviderConfig. Either a
+// static `apiKey` (key path) or the dynamic OAuth trio (getAuthHeader / on401 /
+// currentSecrets). The env→plaintext resolution happens HERE (composition root,
+// principle 7); core never sees an env var name.
+type ProviderCredential =
+  | { apiKey: string }
+  | {
+      getAuthHeader: () => Promise<string>;
+      onUnauthorized: () => void;
+      currentSecrets: () => string[];
+    };
+
+// Resolve a provider's credential from env (issue #38). Returns null when a
+// required secret env is unset — the caller decides fail-open (skip a non-primary
+// provider, mirroring the old `if (!apiKey) continue`) vs fail-closed (throw for
+// the primary). Each OAuth provider gets ONE process-level TokenManager (1:1 with
+// its client), shared across all requests — lazy refresh, no background timer.
+// Exported for unit tests (server.oauth.test.ts); not part of the public API.
+export function buildCredential(p: ProviderConfigShared): ProviderCredential | null {
+  if (p.oauth) {
+    const o = p.oauth;
+    const clientId = process.env[o.client_id_env];
+    const clientSecret = process.env[o.client_secret_env];
+    const refreshToken = o.refresh_token_env ? process.env[o.refresh_token_env] : undefined;
+    // Any REQUIRED secret unset → cannot build (fail-open at the caller).
+    if (!clientId || !clientSecret) return null;
+    if (o.grant === "refresh_token" && !refreshToken) return null;
+    const tm = createTokenManager({
+      oauth: {
+        grant: o.grant,
+        tokenUrl: o.token_url,
+        clientId,
+        clientSecret,
+        refreshToken,
+        scopes: o.scopes,
+        audience: o.audience,
+      },
+      now: () => Date.now(),
+    });
+    return {
+      getAuthHeader: () => tm.getAuthHeader(),
+      onUnauthorized: () => tm.invalidate(),
+      currentSecrets: () => tm.currentSecrets(),
+    };
+  }
+  // Static key path: env var NAME → plaintext key (or null when unset).
+  const apiKey = p.api_key_env ? process.env[p.api_key_env] : undefined;
+  if (!apiKey) return null;
+  return { apiKey };
+}
+
 // Build one OpenAI-compatible client per configured provider, keyed by provider
 // NAME, so the executor can dispatch each resolved candidate to the right
-// upstream (cross-provider fallback). Credentials come ONLY from the env var each
-// provider's api_key_env points at (principle 7 — never plaintext in config). A
-// provider whose credential env is unset is SKIPPED (it cannot be invoked); its
-// aliases will fail open at resolve/execute time rather than blocking startup of
-// the others. The PRIMARY provider's missing credential is still fatal (handled
-// by the caller) since it backs the default path.
-function buildProviderClients(
+// upstream (cross-provider fallback). Credentials come ONLY from env (principle 7
+// — never plaintext in config), resolved by buildCredential (static key OR OAuth
+// token manager). A provider whose required credential env is unset is SKIPPED (it
+// cannot be invoked); its aliases will fail open at resolve/execute time rather
+// than blocking startup of the others. The PRIMARY provider's missing credential
+// is still fatal (handled by the caller) since it backs the default path.
+// Exported for unit tests (server.oauth.test.ts); not part of the public API.
+export function buildProviderClients(
   providers: ReadonlyArray<ProviderConfigShared>,
   fallbackBaseUrl: string,
   timeoutMs: number,
 ): Map<string, ProviderClient> {
   const clients = new Map<string, ProviderClient>();
   for (const p of providers) {
-    const apiKey = process.env[p.api_key_env];
-    if (!apiKey) continue; // no credential → cannot build a client; skip.
+    const cred = buildCredential(p);
+    if (!cred) continue; // no credential → cannot build a client; skip.
     const baseUrl = p.base_url ?? fallbackBaseUrl;
-    clients.set(p.name, createOpenAIClient({ config: { baseUrl, apiKey, timeoutMs } }));
+    clients.set(p.name, createOpenAIClient({ config: { baseUrl, timeoutMs, ...cred } }));
   }
   return clients;
 }
@@ -282,16 +338,23 @@ export async function buildServer(
   // the shared fallback base_url when a provider omits one).
   const first = config.providers[0];
   if (!first) throw new Error("no provider configured");
-  const apiKey = process.env[first.api_key_env];
-  if (!apiKey) throw new Error(`missing provider credential env: ${first.api_key_env}`);
+  // Primary credential is MANDATORY (fail-closed, principle 2): it backs the
+  // default/eval/passthrough path. Static key OR OAuth — buildCredential returns
+  // null only when a required secret env is unset, which is fatal for the primary.
+  const primaryCred = buildCredential(first);
+  if (!primaryCred) {
+    throw new Error(`missing provider credential for primary provider ${first.name}`);
+  }
   // HELM_PROVIDER_BASE_URL (test/e2e) overrides EVERY provider's base_url so the
   // mock upstream serves all of them; otherwise each provider uses its own.
   const baseUrlOverride = process.env.HELM_PROVIDER_BASE_URL;
   const fallbackBaseUrl = baseUrlOverride ?? "https://api.openai.com/v1";
   const baseUrl = baseUrlOverride ?? first.base_url ?? fallbackBaseUrl;
   const timeoutMs = config.runtime.request_timeout_ms;
-  const providerConfig: ProviderConfig = { baseUrl, apiKey, timeoutMs };
-  // The default/primary client (eval + passthrough + back-fill aliases).
+  const providerConfig: ProviderConfig = { baseUrl, timeoutMs, ...primaryCred };
+  // The default/primary client (eval + passthrough + back-fill aliases). When the
+  // primary is OAuth, this SAME dynamic-header client backs the eval/classify path
+  // below, so eval auth never silently fails (acceptance criterion 9).
   const provider = createOpenAIClient({ config: providerConfig });
   // Per-provider clients keyed by provider NAME. When HELM_PROVIDER_BASE_URL is
   // set (test/e2e), force the override so cross-provider candidates still hit the

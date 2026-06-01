@@ -485,6 +485,36 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.final.status).toBe("ok");
   });
 
+  it("classifies a persistent upstream 401 as auth_error and records exactly one breaker failure", async () => {
+    // OAuth (issue #38): the client already retried once with a fresh token before
+    // surfacing this 401, so the executor sees a single failure. It must classify
+    // the attempt as `auth_error` (D5) and record EXACTLY one breaker failure (D6 —
+    // no extra executor branch / no double-count), then advance the chain.
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(new UpstreamError("upstream_error", "401", null, 401))
+        .mockResolvedValueOnce({ id: "second" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      registry: registry({ a: "m-a", b: "m-b" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["a", "b"]), req());
+    expect(out.attempts[0]?.error_class).toBe("auth_error");
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith("a");
+    expect(out.final.status).toBe("ok");
+  });
+
   it("does NOT treat a generic 'aborted' message as a client abort (only signal/name)", async () => {
     // Over-broad heuristic fix: an upstream error whose message merely contains
     // 'aborted' must be a normal provider failure (breaker.recordFailure), NOT a

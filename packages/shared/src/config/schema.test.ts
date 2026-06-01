@@ -265,4 +265,150 @@ describe("HelmConfigSchema", () => {
     expect(JSON.stringify(parsed.providers)).not.toMatch(/sk-/);
     expect(parsed.providers[0] && "api_key" in parsed.providers[0]).toBe(false);
   });
+
+  // --- OAuth subscription providers (issue #38). A provider may reference an
+  // OAuth credential (env-NAME-only) INSTEAD of a static api_key_env. The two are
+  // mutually exclusive and exactly-one is required (fail-closed, principle 2).
+
+  it("accepts a provider with an oauth credential (refresh_token grant)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "claude-sub",
+        type: "openai",
+        base_url: "https://oauth.example.com/v1",
+        oauth: {
+          grant: "refresh_token",
+          token_url: "https://oauth.example.com/token",
+          client_id_env: "CLAUDE_SUB_CLIENT_ID",
+          client_secret_env: "CLAUDE_SUB_CLIENT_SECRET",
+          refresh_token_env: "CLAUDE_SUB_REFRESH_TOKEN",
+        },
+      },
+    ];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(true);
+    if (res.success) {
+      const p0 = res.data.providers[0];
+      expect(p0?.oauth?.grant).toBe("refresh_token");
+      expect(p0?.oauth?.token_url).toBe("https://oauth.example.com/token");
+      expect(p0?.oauth?.scopes).toEqual([]); // defaulted
+      expect(p0?.api_key_env).toBeUndefined();
+    }
+  });
+
+  it("defaults the oauth grant to refresh_token", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "claude-sub",
+        type: "openai",
+        base_url: "https://oauth.example.com/v1",
+        oauth: {
+          token_url: "https://oauth.example.com/token",
+          client_id_env: "CLIENT_ID",
+          client_secret_env: "CLIENT_SECRET",
+          refresh_token_env: "REFRESH_TOKEN",
+        },
+      },
+    ];
+    const parsed = HelmConfigSchema.parse(cfg);
+    expect(parsed.providers[0]?.oauth?.grant).toBe("refresh_token");
+  });
+
+  it("accepts a client_credentials oauth provider with no refresh_token_env", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "sso-gw",
+        type: "openai",
+        base_url: "https://sso.example.com/v1",
+        oauth: {
+          grant: "client_credentials",
+          token_url: "https://sso.example.com/token",
+          client_id_env: "SSO_CLIENT_ID",
+          client_secret_env: "SSO_CLIENT_SECRET",
+          scopes: ["models.read"],
+          audience: "https://sso.example.com/api",
+        },
+      },
+    ];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data.providers[0]?.oauth?.grant).toBe("client_credentials");
+      expect(res.data.providers[0]?.oauth?.scopes).toEqual(["models.read"]);
+    }
+  });
+
+  it("rejects a provider that has BOTH api_key_env and oauth (fail-closed)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "ambiguous",
+        type: "openai",
+        base_url: "https://x.example.com/v1",
+        api_key_env: "X_API_KEY",
+        oauth: {
+          grant: "client_credentials",
+          token_url: "https://x.example.com/token",
+          client_id_env: "X_CLIENT_ID",
+          client_secret_env: "X_CLIENT_SECRET",
+        },
+      },
+    ];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(false);
+  });
+
+  it("rejects a provider that has NEITHER api_key_env nor oauth (fail-closed)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "credless",
+        type: "openai",
+        base_url: "https://x.example.com/v1",
+      },
+    ];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(false);
+  });
+
+  it("rejects a refresh_token grant missing refresh_token_env (fail-closed)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "claude-sub",
+        type: "openai",
+        base_url: "https://oauth.example.com/v1",
+        oauth: {
+          grant: "refresh_token",
+          token_url: "https://oauth.example.com/token",
+          client_id_env: "CLIENT_ID",
+          client_secret_env: "CLIENT_SECRET",
+          // refresh_token_env intentionally omitted
+        },
+      },
+    ];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(false);
+  });
+
+  it("rejects an oauth block with a non-url token_url (fail-closed)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "claude-sub",
+        type: "openai",
+        oauth: {
+          token_url: "not-a-url",
+          client_id_env: "CLIENT_ID",
+          client_secret_env: "CLIENT_SECRET",
+          refresh_token_env: "REFRESH_TOKEN",
+        },
+      },
+    ];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(false);
+  });
 });

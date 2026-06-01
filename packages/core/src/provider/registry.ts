@@ -24,7 +24,12 @@ import type { ProviderConfig as SharedProviderConfig } from "@helm/shared";
 export interface ProviderConfig {
   name: string; // provider id, e.g. "openai" / "anthropic" / "openrouter"
   base_url: string;
-  api_key_env: string; // credential reference: env var NAME — never a plaintext key
+  // Credential reference: env var NAME — never a plaintext key. OPTIONAL because an
+  // OAuth provider (issue #38) has no api_key_env; its client is built separately
+  // in the composition root. The registry NEVER reads this to fetch a credential
+  // (the per-name client is pre-built in providerClients), so an empty value is
+  // acceptable for OAuth providers.
+  api_key_env?: string;
   models: Array<{
     alias: string; // internal alias, e.g. "cheap_model", "openai/auto"
     provider_model: string; // the provider's real model id, e.g. "gpt-4o-mini"
@@ -38,7 +43,10 @@ export interface ResolvedProvider {
   providerName: string;
   providerModel: string; // the provider's real model id
   baseUrl: string;
-  apiKeyEnv: string; // credential env NAME — value is NOT echoed here
+  // Credential env NAME — value is NOT echoed here. OPTIONAL: OAuth providers
+  // (issue #38) carry no api_key_env and the executor never reads it (it dispatches
+  // by providerName to a pre-built client).
+  apiKeyEnv?: string;
 }
 
 // Structured resolve/build errors — unknown alias (resolve-time) and duplicate
@@ -125,7 +133,10 @@ export function toRegistryProviders(
   return providers.map((p) => ({
     name: p.name,
     base_url: p.base_url ?? opts.fallbackBaseUrl ?? "",
-    api_key_env: p.api_key_env,
+    // OAuth providers (issue #38) have no api_key_env; default to "" since the
+    // registry never reads it to fetch a credential (the per-name client is
+    // pre-built in providerClients).
+    api_key_env: p.api_key_env ?? "",
     models: p.models.map((m) => ({ alias: m.alias, provider_model: m.provider_model })),
   }));
 }

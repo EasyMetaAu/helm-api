@@ -39,6 +39,33 @@ export const ProviderModelSchema = z.object({
   provider_model: z.string().min(1),
 });
 
+// OAuth credential reference for subscription / SSO upstreams (issue #38). Like
+// api_key_env, this carries env-var NAMES only — never a plaintext token, secret,
+// or client id (principle 7). Helm refreshes the access token non-interactively
+// (refresh_token / client_credentials grants); the interactive authorization_code
+// flow is out of scope (no redirect/callback route — see implementation-notes D1).
+//   - grant: which non-interactive grant to use (default refresh_token).
+//   - token_url: the OAuth token endpoint (URL, validated).
+//   - client_id_env / client_secret_env: env var NAMES holding the OAuth client
+//     credentials (both required — the token request is client-authenticated).
+//   - refresh_token_env: env var NAME holding the refresh token. REQUIRED for the
+//     refresh_token grant (enforced below); unused by client_credentials.
+//   - scopes / audience: optional OAuth parameters forwarded in the token request.
+export const OAuthConfigSchema = z
+  .object({
+    grant: z.enum(["refresh_token", "client_credentials"]).default("refresh_token"),
+    token_url: z.url(),
+    client_id_env: z.string().min(1), // env var NAME, not a plaintext client id
+    client_secret_env: z.string().min(1), // env var NAME, not a plaintext secret
+    refresh_token_env: z.string().min(1).optional(), // env var NAME; required for refresh_token
+    scopes: z.array(z.string()).default([]),
+    audience: z.string().min(1).optional(),
+  })
+  .refine((o) => o.grant !== "refresh_token" || o.refresh_token_env !== undefined, {
+    message: "oauth grant `refresh_token` requires `refresh_token_env`",
+    path: ["refresh_token_env"],
+  });
+
 // Unified provider config — the SINGLE shape both config-loader and the provider
 // registry agree on (reconciles the two divergent ProviderConfig shapes noted in
 // implementation-notes provider.registry). A provider carries:
@@ -46,8 +73,11 @@ export const ProviderModelSchema = z.object({
 //     used `alias`); when only `alias` is given, `name` is derived from it so the
 //     registry always has a provider id.
 //   - `type` (openai | anthropic | ...): optional, defaults to "openai".
-//   - `base_url?`, `api_key_env` (credential REFERENCE — env var NAME, never a
-//     plaintext key, principle 7).
+//   - `base_url?`, and EXACTLY ONE credential reference:
+//       * `api_key_env` (static key — env var NAME, never a plaintext key), OR
+//       * `oauth` (OAuth subscription/SSO credential — env var NAMES only).
+//     The exactly-one rule is fail-closed below (principle 2): a half-specified
+//     credential (both / neither) refuses to start.
 //   - `models[]`: per-model alias mapping. OPTIONAL (defaults to []) so the
 //     Phase-0 OpenAI-compatible passthrough provider (no models[]) keeps working.
 // Credentials are stored as a REFERENCE (env var name) only — never plaintext.
@@ -60,12 +90,24 @@ export const ProviderConfigSchema = z
     alias: z.string().min(1).optional(),
     type: z.string().min(1).default("openai"), // openai | anthropic | ... (not locked in MVP)
     base_url: z.url().optional(),
-    api_key_env: z.string().min(1), // credential reference: env var name, not plaintext
+    // Credential reference: env var name, not plaintext. OPTIONAL now that an
+    // `oauth` block is an alternative; the exactly-one refine below keeps a
+    // provider from booting with both / neither.
+    api_key_env: z.string().min(1).optional(),
+    oauth: OAuthConfigSchema.optional(),
     models: z.array(ProviderModelSchema).default([]),
   })
   .refine((p) => p.name !== undefined || p.alias !== undefined, {
     message: "provider requires `name` or `alias`",
     path: ["name"],
+  })
+  // Exactly one credential mechanism. Applied BEFORE the transform so it reads the
+  // raw `api_key_env`/`oauth` fields (the transform only re-keys name/alias and
+  // does not touch credentials, but ordering the refine first keeps the guard on
+  // the original shape). A provider with both OR neither fails closed (principle 2).
+  .refine((p) => (p.api_key_env !== undefined) !== (p.oauth !== undefined), {
+    message: "provider requires exactly one of `api_key_env` or `oauth`",
+    path: ["api_key_env"],
   })
   .transform((p) => ({
     // Single source of truth for the provider id: prefer `name`, fall back to the
@@ -158,6 +200,7 @@ export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 export type BootstrapConfig = z.infer<typeof BootstrapConfigSchema>;
 export type AuthConfig = z.infer<typeof AuthConfigSchema>;
 export type ProviderModel = z.infer<typeof ProviderModelSchema>;
+export type OAuthConfig = z.infer<typeof OAuthConfigSchema>;
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type RateLimitQuota = z.infer<typeof RateLimitQuotaSchema>;
 export type RateLimitQuotaOverride = z.infer<typeof RateLimitQuotaOverrideSchema>;

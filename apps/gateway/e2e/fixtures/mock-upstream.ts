@@ -166,6 +166,23 @@ export const EVAL_RESET_PATH = "/__eval_reset";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// —— OAuth subscription provider stand-in (e2e.oauth, issue #38) ——————————————
+// The same mock doubles as an OAuth token endpoint + a credential-checked upstream.
+//   • POST OAUTH_TOKEN_PATH → issues a fresh access token (monotonic counter so the
+//     spec can prove a refresh happened). The mock counts every token mint.
+//   • /chat/completions checks the Authorization Bearer: a request whose prompt
+//     carries OAUTH_401_ONCE_SENTINEL is answered 401 the FIRST time and 200
+//     afterwards — exercising the client's invalidate + single-retry-with-fresh-
+//     token path (the retry mints a new token, then succeeds).
+// All env-NAME-only, deterministic, offline.
+export const OAUTH_TOKEN_PATH = "/oauth/token";
+export const OAUTH_BEARER_PREFIX = "mock-oauth-access-";
+export const OAUTH_TOKEN_COUNT_PATH = "/__oauth_token_count";
+export const OAUTH_RESET_PATH = "/__oauth_reset";
+// A prompt carrying this sentinel makes the mock 401 the FIRST chat call (per
+// process), forcing the OAuth client to refresh + retry exactly once.
+export const OAUTH_401_ONCE_SENTINEL = "__HELM_OAUTH_401_ONCE__";
+
 // —— upstream request capture (e2e.protocol) —————————————————————————————————
 // The path the spec GETs to read back the LAST request the gateway forwarded
 // upstream. Lets the e2e assert the NORMALIZED (OpenAI-Chat IR) request shape
@@ -186,6 +203,12 @@ export function createMockUpstream() {
   // BEFORE any slow-path delay, so a timed-out call still counts (the spec
   // asserts a fail-open is re-called, not cached).
   let evalCallCount = 0;
+  // OAuth token mints (e2e.oauth). Incremented on every token endpoint POST so the
+  // spec can prove a refresh happened (a 401-retry mints a second token).
+  let oauthTokenCount = 0;
+  // Whether the OAuth-401-once branch has already fired in THIS process. Reset via
+  // OAUTH_RESET_PATH between spec cases.
+  let oauth401Fired = false;
 
   // Readiness probe for Playwright's webServer wait.
   app.get("/", (c) => c.text("mock upstream ok"));
@@ -198,6 +221,26 @@ export function createMockUpstream() {
     return c.json({ ok: true });
   });
 
+  // OAuth token endpoint (e2e.oauth): mint a fresh access token each call. The
+  // token id encodes the mint count so the spec / mock can prove a refresh.
+  app.post(OAUTH_TOKEN_PATH, async (c) => {
+    oauthTokenCount += 1;
+    // Drain the body (grant_type/client_id/…) so the connection closes cleanly;
+    // we never echo it (it carries the client secret / refresh token).
+    await c.req.text().catch(() => "");
+    return c.json({
+      access_token: `${OAUTH_BEARER_PREFIX}${oauthTokenCount}`,
+      token_type: "Bearer",
+      expires_in: 3600,
+    });
+  });
+  app.get(OAUTH_TOKEN_COUNT_PATH, (c) => c.json({ count: oauthTokenCount }));
+  app.post(OAUTH_RESET_PATH, (c) => {
+    oauthTokenCount = 0;
+    oauth401Fired = false;
+    return c.json({ ok: true });
+  });
+
   app.post("/chat/completions", async (c) => {
     const body = (await c.req.json()) as {
       stream?: boolean;
@@ -207,6 +250,23 @@ export function createMockUpstream() {
     const model = typeof body.model === "string" ? body.model : "mock-model";
 
     const promptText = messagesText(body);
+
+    // ── OAuth 401-once branch (e2e.oauth, issue #38): a request carrying the
+    //    sentinel is answered 401 the FIRST time, forcing the gateway's OAuth
+    //    client to invalidate + refresh + retry exactly once. The retry mints a
+    //    new token and is served normally. We also assert the Authorization header
+    //    is the mock-issued Bearer (never a plaintext static key).
+    if (promptText.includes(OAUTH_401_ONCE_SENTINEL)) {
+      const auth = c.req.header("authorization") ?? "";
+      if (!auth.startsWith(`Bearer ${OAUTH_BEARER_PREFIX}`)) {
+        return c.json({ error: { message: "missing oauth bearer" } }, 401);
+      }
+      if (!oauth401Fired) {
+        oauth401Fired = true;
+        return c.json({ error: { message: "token expired" } }, 401);
+      }
+      return c.json(echoResponse(model));
+    }
 
     // ── Layer-2 eval branch: the request is the internal classify call. We key
     //    on the eval SYSTEM-PROMPT marker ("Classify the request.", see

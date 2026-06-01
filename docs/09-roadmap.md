@@ -53,6 +53,14 @@ Verified against the code and `implementation-notes.md`:
   [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
 - **Agentic Signals feedback layer.** The store ports and the redacted
   `RoutingSignal` shape exist, but nothing reads signals back into routing yet.
+- **OAuth subscription providers (added past 0.1, issue #38).** Net-new scope not
+  in the original roadmap. A provider may now reference an `oauth` block instead of
+  `api_key_env`; Helm refreshes the token **non-interactively** (`refresh_token` /
+  `client_credentials`) and injects a dynamic Bearer per request, with a single
+  refresh-on-401 retry. **Deferred within this feature**: the interactive
+  `authorization_code` (browser) flow, and a **persistent token store** (the v1
+  cache is in-memory, so a rotating refresh token is lost on restart — see
+  `implementation-notes.md` D3). See `config/providers.yaml` for the example block.
 
 ## Success criteria (met by 0.1)
 

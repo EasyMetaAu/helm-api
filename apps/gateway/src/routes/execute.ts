@@ -98,7 +98,16 @@ function upstreamStatusOf(err: unknown): number | null {
 }
 
 function errorClassOf(err: unknown): string {
-  if (err instanceof UpstreamError) return err.errorClass;
+  if (err instanceof UpstreamError) {
+    // OAuth (issue #38, D5): a persistent upstream 401 — the client already
+    // refreshed + retried once — is an authentication failure, not a generic
+    // upstream error. Classify it as `auth_error` (an existing ErrorClass) so the
+    // decision record / client error reflects the real cause. This is a pure
+    // relabel at the existing classification chokepoint; breaker counting and
+    // chain advancement are unchanged (D6 — no new executor branch).
+    if (err.upstreamStatus === 401) return "auth_error";
+    return err.errorClass;
+  }
   return "upstream_error";
 }
 

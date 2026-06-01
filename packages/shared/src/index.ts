@@ -95,6 +95,8 @@ export {
   BootstrapConfigSchema,
   type HelmConfig,
   HelmConfigSchema,
+  type OAuthConfig,
+  OAuthConfigSchema,
   type ProviderConfig,
   ProviderConfigSchema,
   type ProviderModel,

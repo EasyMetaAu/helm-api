@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-06-02 · OAuth subscription providers (issue #38, docs/02/05/07, Principles 1/2/3/7/8)
+
+**Context**: Helm only supported static API keys (env-var NAME references) as upstream credentials. Subscription/SSO providers (Claude/ChatGPT subscriptions, enterprise SSO gateways) hand out short-lived OAuth access tokens that expire and rotate. This change makes the upstream auth header **dynamic, per-request** so Helm can refresh non-interactively and inject a fresh Bearer.
+
+**What was added**:
+- `packages/shared/src/config/schema.ts` — `OAuthConfigSchema` (env-NAME-only: `token_url`, `client_id_env`, `client_secret_env`, `refresh_token_env?`, `grant` default `refresh_token`, `scopes`, `audience?`); inner `.refine` requires `refresh_token_env` for the `refresh_token` grant. `ProviderConfigSchema.api_key_env` relaxed to optional; new `oauth?`; top-level `.refine` enforces **exactly one** of `{api_key_env, oauth}` (fail-closed, Principle 2). Refine placed BEFORE the existing name/alias `.transform` so it reads the raw fields.
+- `packages/core/src/provider/token-manager.ts` — framework-agnostic `createTokenManager`: lazy refresh (no background timer), injected `now` clock, **single-flight** refresh lock (mirrors `breaker.ts` inFlightProbe) so N concurrent expired callers → 1 fetch. `getAuthHeader()` / `currentSecrets()` (for redaction) / `invalidate()` (401). `TokenRefreshError` message is scrubbed by construction (never contains token/secret material; Principle 7).
+- `packages/core/src/provider/openai.ts` — `ProviderConfig` now takes EITHER `apiKey` OR `getAuthHeader` + `onUnauthorized` + `currentSecrets` (construct-time fail-closed guard: exactly one). `headers()` is async (per-request token). `scrub()` generalized to iterate the live secret set (access+refresh), skipping secrets <4 chars so an empty/tiny token can't blow the body away. **401 single retry** (D2): on a 401 with `onUnauthorized`, invalidate + replay the SAME request exactly once with the new header — for streaming this happens BEFORE `getReader()`/any chunk yield (Principle 8).
+- `apps/gateway/src/server.ts` — `buildCredential(p)` resolves env→plaintext (Principle 7: env resolution stays in the composition root); returns `null` when a required secret env is unset (fail-OPEN skip for non-primary, fail-CLOSED throw for primary). Each OAuth provider gets ONE process-level `TokenManager` 1:1 with its client. The primary's same `cred` backs the eval/classify client so OAuth-primary eval auth never silently fails (acceptance criterion 9).
+- `apps/gateway/src/routes/execute.ts` — `errorClassOf` relabels a persistent upstream 401 → `auth_error` (D5) at the existing chokepoint; breaker counting / chain advance unchanged (D6, no new executor branch).
+- registry types relaxed: `api_key_env`/`apiKeyEnv` optional (the registry never reads them to fetch a credential — the per-name client is pre-built).
+
+**Decisions (maintainer to confirm)**:
+- **D1** — non-interactive grants only (`refresh_token`/`client_credentials`). Interactive `authorization_code` (browser redirect/callback) is out of scope (Helm is headless; no callback route). Separate issue.
+- **D2** — refresh-on-401 retry lives in the CLIENT (transport-level single replay with the new header); the token manager only refreshes. Executor/registry stay credential-agnostic.
+- **D3** — token cache is **in-memory only** (v1). **Known limitation**: a provider that ROTATES its refresh token loses the rotated value on a process restart and re-derives from the env value; if the upstream already retired it, refresh fails and that provider is skipped (fail-open). A persistent `TokenStore` port is the follow-up.
+- **D4** — credential discriminated by the `{api_key_env, oauth}` exactly-one refine (NOT reusing `type`, which is the protocol hint and must stay orthogonal to the auth mechanism).
+- **D5** — persistent post-refresh 401 reuses the existing `auth_error` class (no new `auth_failed`).
+- **D6** — `executor/fallback.ts` untouched; `execute.ts` inlines its own loop and gains no new branch.
+
+**Deviation from docs/09**: OAuth was net-new scope not on the roadmap; recorded in `docs/09-roadmap.md` under deferred/added.
+
+---
+
 ## 2026-06-01 · Pagination + error/role filters for the admin requests list (docs/07, Principle 1)
 
 **Context**: `/admin/requests` fetched a hardcoded `queryRecent(100)` and rendered all rows at once; the UI had dead cursor/"Load more" plumbing that never fired. No way to page past 100 requests or isolate errors / a time window — unusable for real debugging. Added numbered pagination (time DESC) plus Date-range / Status / Decided-by / Lane / Model filters, all applied at the SQL layer so totals stay correct.

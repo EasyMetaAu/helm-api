@@ -102,3 +102,50 @@ providers:
       # last-resort tail fallback shared by every lane.
       - alias: openrouter/auto
         provider_model: openrouter/auto
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OAUTH SUBSCRIPTION PROVIDER (issue #38) — EXAMPLE, COMMENTED OUT.
+  # For subscription / SSO upstreams that issue SHORT-LIVED OAuth access tokens
+  # (Claude/ChatGPT subscriptions, enterprise SSO gateways), reference an `oauth`
+  # block INSTEAD of `api_key_env`. Helm refreshes the token NON-INTERACTIVELY and
+  # injects a dynamic Bearer per request. A provider must carry EXACTLY ONE of
+  # `api_key_env` or `oauth` (fail-closed otherwise; principle 2).
+  #
+  # SECURITY (principle 7): every field below is an env var NAME — NEVER a plaintext
+  # client id / secret / token. Set the actual values in the environment:
+  #   PROVIDER_X_CLIENT_ID, PROVIDER_X_CLIENT_SECRET, PROVIDER_X_REFRESH_TOKEN.
+  #
+  # KNOWN LIMITATION (v1, see implementation-notes D3): the token cache is IN-MEMORY
+  # only. A provider that ROTATES refresh tokens on each refresh will lose the
+  # rotated token on a process restart; Helm then re-derives from the env value,
+  # which fails if the upstream already retired it. A persistent TokenStore is a
+  # follow-up. The interactive authorization_code (browser) flow is OUT OF SCOPE.
+  #
+  # - name: claude-subscription
+  #   type: openai
+  #   base_url: https://example-subscription.test/v1
+  #   oauth:
+  #     grant: refresh_token            # refresh_token (default) | client_credentials
+  #     token_url: https://example-subscription.test/oauth/token
+  #     client_id_env: PROVIDER_X_CLIENT_ID
+  #     client_secret_env: PROVIDER_X_CLIENT_SECRET
+  #     refresh_token_env: PROVIDER_X_REFRESH_TOKEN   # required for refresh_token grant
+  #     scopes: []                      # optional OAuth scopes
+  #     # audience: https://example-subscription.test/api   # optional
+  #   models:
+  #     - alias: claude-subscription/opus
+  #       provider_model: claude-opus
+  #
+  # client_credentials variant (machine-to-machine; no refresh_token needed):
+  # - name: sso-gateway
+  #   type: openai
+  #   base_url: https://sso.example.test/v1
+  #   oauth:
+  #     grant: client_credentials
+  #     token_url: https://sso.example.test/oauth/token
+  #     client_id_env: SSO_CLIENT_ID
+  #     client_secret_env: SSO_CLIENT_SECRET
+  #     scopes: ["models.read"]
+  #   models:
+  #     - alias: sso-gateway/default
+  #       provider_model: default-model
