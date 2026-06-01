@@ -12,13 +12,21 @@
   // operator picks a real alias instead of hand-typing one (a typo would silently
   // break a fallback chain). Defaulted to [] — when empty the inputs degrade to
   // plain text, so the editor never depends on the catalog being present.
+  // `laneNames` is the set of all configured lane names: a chain element may be
+  // a model alias OR another lane name (core's expandChain flattens lane refs,
+  // see docs/04). We surface the OTHER lanes as suggestions too — minus this
+  // lane's own name, since a lane targeting itself is meaningless (the expander
+  // would just dedupe it). Labelled in the datalist so they read distinctly from
+  // model aliases.
   let {
     lane,
     models = [],
+    laneNames = [],
     onsave,
   }: {
     lane: Lane;
     models?: string[];
+    laneNames?: string[];
     onsave: (name: string, body: Lane) => void | Promise<void>;
   } = $props();
 
@@ -40,6 +48,8 @@
   // Per-card <datalist> id (each lane renders its own editor). Drives the
   // combobox on both the primary and fallback-add inputs.
   const modelsListId = `lane-models-${initial.name}`;
+  // Other lanes this lane may chain to — its own name is excluded (no self-loops).
+  const laneOptions = $derived(laneNames.filter((n) => n !== initial.name));
 
   // Validation. `balanced` must keep a primary (docs/04 hard line); other lanes also
   // need a non-empty primary to be coherent. The hint text differs so ops sees
@@ -122,9 +132,13 @@
     </span>
   </label>
 
-  <!-- Shared alias catalog for the primary + fallback comboboxes. Empty when no
-       catalog was loaded → the inputs behave as plain text fields. -->
+  <!-- Shared suggestion list for the primary + fallback comboboxes: other lanes
+       (labelled, so they read as tiers) followed by the model-alias catalog.
+       Empty when neither is loaded → the inputs behave as plain text fields. -->
   <datalist id={modelsListId}>
+    {#each laneOptions as ln (ln)}
+      <option value={ln} label={$t('lane')}></option>
+    {/each}
     {#each models as alias (alias)}
       <option value={alias}></option>
     {/each}
@@ -174,7 +188,7 @@
     <div class="flex gap-2">
       <input
         class="input flex-1"
-        placeholder={$t('model alias')}
+        placeholder={$t('model or lane')}
         list={modelsListId}
         data-testid="fallback-add-input"
         bind:value={newFallback}
