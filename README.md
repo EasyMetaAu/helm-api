@@ -229,4 +229,4 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
 
 ## License
 
-[MIT](LICENSE) © 2026 EasyMeta AU / 路田（上海）网络科技有限公司
+[MIT](LICENSE) © 2026 EasyMeta AU
