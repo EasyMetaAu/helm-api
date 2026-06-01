@@ -145,10 +145,18 @@ async function main() {
     check('/v1/messages malformed JSON → 400 (Anthropic envelope, not 502)', r.status === 400, `status=${r.status}`);
   }
   {
-    const r = await http('POST', '/v1/chat/completions', { auth: true, body: { ...userMsg('Return JSON with ok=true'), response_format: { type: 'json_object' } } });
-    // CRS json-capable candidates fail upstream + */auto pruned (no_json_support) → 502
-    check('JSON-constraint request → structured error (502/422)', [502, 422].includes(r.status), `status=${r.status} code=${r.json?.error?.code ?? r.json?.error_class}`);
-    check('error body is structured (has code/type)', !!(r.json?.error?.code || r.json?.error_class || r.json?.error?.type));
+    // Gateway contract for a json_object request: route to a json-capable candidate and EITHER
+    // return a well-formed chat.completion envelope (200), OR a structured error (502/422) when no
+    // candidate can satisfy the constraint. NOTE: whether the upstream content itself is valid JSON
+    // is the model's job, not the gateway's — and a tiny max_tokens truncates it (finish=length),
+    // so we assert the envelope/contract, not the model's JSON compliance. (max_tokens raised so the
+    // happy path isn't masked by truncation when an upstream does emit JSON.)
+    const r = await http('POST', '/v1/chat/completions', { auth: true, body: { model: 'auto', max_tokens: 64, response_format: { type: 'json_object' }, messages: [{ role: 'user', content: 'Return JSON with ok=true' }] } });
+    const okEnvelope = r.status === 200 && r.json?.object === 'chat.completion' && r.json?.choices?.[0]?.message?.role === 'assistant';
+    const structuredErr = [502, 422].includes(r.status) && !!(r.json?.error?.code || r.json?.error_class || r.json?.error?.type);
+    check('JSON-constraint request → 200 chat.completion envelope or structured error (502/422)', okEnvelope || structuredErr,
+      `status=${r.status} ${r.status === 200 ? 'model=' + r.json?.model : 'code=' + (r.json?.error?.code ?? r.json?.error_class)}`);
+    check('JSON-constraint response well-formed (valid envelope, or structured error body)', okEnvelope || structuredErr);
   }
   {
     const noKey = await http('POST', '/v1/chat/completions', { body: userMsg('hi') });

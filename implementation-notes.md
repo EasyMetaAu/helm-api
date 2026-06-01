@@ -5,6 +5,34 @@
 
 ---
 
+## 2026-06-01 · 分类器车道校准（classifier.lane-calibration）—— 修「所有请求都落到 balanced」（docs/03，原则 2/3/4/5）
+
+**症状（用户在 Docker 实测发现）**：每一条 `model:auto` 请求的遥测都是 `decided_by=fallback` / `fallback_reason=eval_disabled` / `lane=balanced`。lane 体系（economy/coding/premium/json/vision）**形同虚设**——无论提示词是打招呼、写代码还是深度推理，全部走 balanced。
+
+**根因（校准失配，非崩溃）**：级联本身代码正确，坏在 **Layer-1 置信度闸**。
+- 置信度 = 到最近 tier 边界的距离过 `2/(1+e^(-k·d))-1`（k=8）。要过 0.45 阈值需 `d ≥ 0.121`。
+- 边界挤在 `{-0.10, 0.08, 0.35}`，`standard` 带仅 0.18 宽——带内任何分数都**永远到不了 0.45**（死区）。
+- 关键词信号本就被强衰减（1 个关键词→0.33 信号 ×~0.2 权重≈0.067），rawScore 全挤在 0 附近的死区。
+- 于是 Layer-1 永远「不确定」→ 想升 Layer-2 eval → **eval 默认关** → 100% 降级 balanced。
+
+**测试为何没抓到**：`golden-routing.test.ts` 直接调 `scoreRequest` 并**把 `decided_by` 硬编码成 `"rules"`**再喂给路由器——它验证了「给定 rules 决策，lane 解析正确」，却从没验证「真实提示词能让级联**到达** `decided_by=rules`」。这个盲区放跑了整个回归。
+
+**附带挖出的真 bug（已修，用户批准扩范围）**：`keywordSignal` 用裸 `includes()` 子串匹配 → `"hi"` 命中 `"t·hi·s"`、`"ok"` 命中 `"lo·ok"`，给大量无关提示词注入了 `simple_kw` 的假负分，污染 rawScore。**修法**：`dimensions.ts` 改为词/词元边界匹配——仅在关键词自身边缘是字母数字时加边界（故 `"step by step"`、结尾带标点的 `"cve-"` 仍照常命中）；编译正则带缓存避免每请求重编。TDD：先红（`dimensions.test.ts` 新增边界用例）后绿。
+
+**校准（纯配置，原则 2）**：建了离线校准夹具 `scripts/calibrate-classifier.ts`（跑真实 `scoreRequest`+闸+`routeRequest`，对 golden 提示集打分→输出 lane 对错矩阵）。据真实分布迭代：拉开关键词/结构权重把分数撑出死区、把边界重置到分布空隙（`{-0.06, 0.30, 0.85}`）、`sigmoid_k 8→12`、阈值 `0.45→0.42`。结果 golden 提示集 **29/29 命中目标 lane、0 降级**，且置信度健康散布（~0.44–0.91，闸仍能表达不确定）。新增 `has_json_format` 维度（探测器早已在 `dimensions.ts`，配置里没接）让 JSON 约束请求离开 `standard` 边界→稳定经 needs_json 策略落 `json` lane。
+
+**关键数据点**：`reasoning` 与 `complex` 下游都塌成 `complex`（classify.ts mapComplexity），故 `reasoning` 边界（0.85）只为把高分簇推离边界、不影响 lane 选择。lane-resolver 在 `decided_by=fallback` 时**短路直接 balanced**（绕过 task/complexity/policy），所以「到达 rules」是一切差异化的前提。
+
+**新增回归守卫**：`packages/core/src/classifier/cascade-gate.test.ts`——跑**真实闸**（eval off），断言代表性提示词 `decided_by=rules` 且落到各自 lane、且整组横跨 ≥4 个 lane（不再全 balanced）。这正是原套件缺的那个测试。
+
+**e2e 解耦**：`eval.spec.ts` 原本依赖 ambiguous 提示词置信度 <0.45。校准后它升到 ~0.41（仍 <0.42 但 margin 太薄）。改为用 e2e-only 的 `x-helm-rules-threshold:0.99` 头**强制**不确定（eval 级联测试本就该测级联、不该耦合权重）；STRONG/hit-stop 场景（scenario 6）保持默认阈值。
+
+**门禁全绿**：typecheck 0 / lint 0 error / 单测 **1089**（含新 cascade-gate 13 + dimensions 边界 6）/ admin 78 / **e2e 34** / build 全绿。Docker 重建镜像（带 matcher 修复，config 走 bind-mount 实时生效）+ 重启容器后**线上实测**：greeting→economy、coding→coding、reasoning/analysis→premium、json→json，全部 `decided_by=rules`；integration-live.mjs 42/42。
+
+**坑/TODO**：
+- 关键词表非穷举（如 `"hello"` 不在 `simple_kw`，故「hello there」这类无强信号短语仍 fallback→balanced，属正确的「不确定」行为）。要更激进的 rules 差异化可继续加关键词或开 eval。
+- 校准对着 golden 提示集调，是有限样本；生产真实分布可能偏移，建议后续按线上遥测的 `decided_by` 占比复核（fallback 占比应显著下降）。
+- `scripts/calibrate-classifier.ts` 为签入的调参工具，改权重后重跑它即可回归。
 ## 2026-06-01 · 完整正文记录 + 系统设置页（payload-capture + system-settings）（docs/06、07，原则 7/8；修 #6 成本=0、#7 正文不可见）
 
 **用户决定**：删除原则 7 的「私有 payload 禁条」，**默认记录完整 request/response 正文**；**保留** API key 只存 sha256（两者本不冲突——key 在 Authorization 头，不在 chat 正文里）。同时新增独立的管理界面「系统设置」页承载可运行时修改的设置。
