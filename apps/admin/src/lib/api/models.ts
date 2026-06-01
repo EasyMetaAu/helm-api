@@ -1,7 +1,7 @@
 // Admin models API client. The catalog of routable `provider/model` aliases the
 // gateway exposes at /admin/api/models (sourced from config/providers.yaml). The
 // Lanes UI uses it for combobox suggestions so an operator picks a real alias
-// instead of hand-typing one. The admin UI stays a pure HTTP consumer (原则1) —
+// instead of hand-typing one. The admin UI stays a pure HTTP consumer (Principle 1) —
 // no core/gateway import.
 
 const ENDPOINT = '/admin/api/models';

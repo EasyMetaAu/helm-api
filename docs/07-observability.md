@@ -1,65 +1,137 @@
-# 07 · 错误模型与可观测性
+# 07 · Error Model & Observability
 
-决策记录（每个请求的完整路由轨迹）的结构见 [02 · 架构](02-architecture.md)。本章覆盖错误模型与 Debug UI。
+> Status: **implemented (0.1)**. The structured error model, the redacted
+> decision record, and the separate full-payload capture all ship.
 
-## 错误模型
+The full per-request routing trail (the decision record) is described
+structurally in [02 · Architecture](02-architecture.md). This chapter covers the
+error model, the redacted decision record, the separate payload capture, and what
+the Debug UI surfaces.
 
-所有错误都是**结构化的**，并以**客户端所用协议的错误形态**返回（OpenAI 客户端拿到 OpenAI 错误形状，Anthropic 客户端拿到 Anthropic 错误形状），让现有 SDK 能直接解析。
+## Error model
 
-统一内部错误结构：
+Every error is **structured** and is returned in the **error shape of the
+protocol the client used** (an OpenAI client gets an OpenAI-shaped error; an
+Anthropic client gets an Anthropic-shaped error), so existing SDKs parse it
+without special casing.
 
-```yaml
-error:
-  error_class: auth_error | invalid_request | lane_unavailable
-              | all_providers_failed | capability_unsatisfiable
-              | upstream_error | timeout | rate_limited
-  http_status: number          # 见下表
-  message: string              # 脱敏后的人类可读信息
-  trace_id: string             # 关联决策记录，可在 Debug UI 还原
-  provider_raw: object | null  # 上游原始错误（脱敏），便于排障
+The unified internal error (`HelmError`, single source of truth in
+`packages/shared/src/error/schema.ts`):
+
+```ts
+{
+  error_class: "auth_error" | "invalid_request" | "lane_unavailable"
+             | "all_providers_failed" | "capability_unsatisfiable"
+             | "upstream_error" | "timeout" | "rate_limited",
+  http_status: number,                          // mapped from error_class (see below)
+  message: string,                              // redacted, human-readable
+  trace_id: string,                             // links the decision record; restorable in the Debug UI
+  provider_raw: Record<string, unknown> | null, // upstream raw error (redacted), for debugging
+}
 ```
 
-错误分类（`error_class`）及建议 HTTP 状态：
+The `error_class → HTTP status` map is authoritative (`ERROR_CLASS_HTTP_STATUS`),
+and `makeHelmError` guarantees `http_status` always agrees with the class —
+callers cannot supply a mismatched status:
 
-| error_class | HTTP | 含义 |
+| `error_class` | HTTP | Meaning |
 |---|---|---|
-| `auth_error` | 401 | 缺/错 key |
-| `invalid_request` | 400 | 请求不合法 / 协议字段错误 |
-| `lane_unavailable` | 503 | 选中的 lane 无可用候选 |
-| `all_providers_failed` | 502 | 候选链全部失败 |
-| `capability_unsatisfiable` | 422 | 无候选满足能力约束（如强制 JSON / vision） |
-| `upstream_error` | 502 | 上游 provider 返回错误 |
-| `timeout` | 504 | 超时 |
-| `rate_limited` | 429 | 触发限流 |
+| `auth_error` | 401 | Missing / invalid key |
+| `invalid_request` | 400 | Malformed request / protocol field error |
+| `lane_unavailable` | 503 | The selected lane has no usable candidate |
+| `all_providers_failed` | 502 | The whole candidate chain failed |
+| `capability_unsatisfiable` | 422 | No candidate satisfies the capability constraints (e.g. forced JSON / vision) |
+| `upstream_error` | 502 | An upstream provider returned an error |
+| `timeout` | 504 | Timed out |
+| `rate_limited` | 429 | Rate limit tripped |
 
-Protocol Adapter 的 `responseOut` 负责把统一错误翻成各协议的错误形状（见 [05](05-protocol-translation.md)）。
+Per **Principle 7**, `message` and `provider_raw` must already be redacted by the
+producer. The Protocol Adapter's response-out stage translates this unified error
+into each client protocol's error shape (see [05 · Protocol
+Translation](05-protocol-translation.md)).
 
-## Debug UI 需求
+A client-initiated disconnect is **not** treated as a server timeout: the timeout
+middleware (`apps/gateway/src/middleware/limits.ts`) checks the client's own
+abort signal and does not synthesize a 504 (see [02 ·
+Architecture](02-architecture.md)).
 
-请求列表应当展示：
+## Decision record (redacted)
 
-- 时间
-- API key / 用户 / 组织
-- 请求的模型
-- 分类得到的任务类型
-- 复杂度
-- **决策层级**：rules / eval / default（哪一层定的 lane）
-- 选中的 lane
-- 最终模型
-- fallback 次数
-- 状态
-- 延迟
-- 成本
-- 错误原因
+For every request the gateway persists a `DecisionRecord` (single source of truth
+in `packages/shared/src/decision/schema.ts`) via the `TelemetryStore`. It is the
+full routing trail and is **redacted** as defence-in-depth — it carries no
+plaintext key and no private payload. The record holds:
 
-请求详情应当展示：
+- `request_id` / `trace_id` (correlation across logs and the Debug UI);
+  `requested_model`; `key_prefix` (display prefix only, never the plaintext key).
+- `classifier`: `task_type`, `complexity`, `confidence`, **`decided_by`**
+  (`rules` / `eval` / `default` / `fallback`), `eval_cache_hit`,
+  `fallback_reason`, `constraints`, and `explanation` (matched dimensions /
+  signals).
+- `policy`: the matched policy id and a reason.
+- `lane`: the selected lane and the ordered candidate chain.
+- `provider_attempts[]`: per attempt — alias, `skipped` + `skip_reason`, status,
+  `error_class`, latency, cost, and `error_detail` (the real upstream status +
+  redacted message + redacted `provider_raw`, captured even when a later
+  candidate served the request).
+- `final`: the served model alias / provider model, status, and error reason.
+- `latency_total_ms`, `fallback_count` (execution-stage count), and
+  `cost_breakdown` (`eval_usd` / `completion_usd` / `total_usd`).
 
-- 原始请求元数据，以及脱敏后的 payload 摘要
-- 分类器输出（含置信度与命中的维度/信号）
-- 是否触发 eval、eval 是否命中缓存
-- 命中的策略
-- lane 候选链路
-- provider 尝试记录
-- 最终响应元数据，或结构化错误
-- 成本拆分（含 eval 评估自身的成本）
-- Trace ID
+Per **Principle 5**, the **classification** fallback (`classifier.decided_by` /
+`fallback_reason`) and the **execution** fallback (`provider_attempts` /
+`fallback_count`) are separate fields and are never conflated.
+
+### Redaction
+
+`packages/core/src/telemetry/redaction.ts` is the last gate before anything is
+persisted or logged. It is pure (never mutates its input) and framework-agnostic:
+
+- Plaintext keys / credentials → irreversible `sha256:<prefix>` fingerprints
+  (reconcilable with the keystore hash, not reversible to plaintext).
+- Private payload fields (`messages`, `attachments`, `prompt`, `content`,
+  `input`) → summaries (kind + size), not their contents.
+- Keys matching the secret pattern (`api_key`, `authorization`, `password`,
+  `secret`, `token`, `credential`) are fingerprinted or summarized.
+- Non-sensitive fields (`trace_id`, latency, cost, status, …) pass through
+  verbatim.
+
+## Full payload capture
+
+Separately from the redacted decision record, Helm can record the **complete,
+verbatim** request and response bodies into a dedicated `request_payloads` table
+(`InsertPayloadInput` / `getPayload` / `prunePayloads` on the `TelemetryStore`).
+This is deliberately split from the decision record so it prunes independently and
+never bloats the decision JSON.
+
+- `capture_payloads` defaults to **ON** (`RuntimeSettingsSchema`). For a
+  self-hosted gateway the operator owns the data on their own box; capture makes
+  debugging and auditing straightforward. It can be toggled off at runtime from
+  the admin "System Settings" page, in which case the capture path is skipped
+  entirely (zero storage).
+- `payload_retention_days` (default 30) bounds the storage footprint and the
+  exposure window; older payloads are auto-pruned.
+- Capture is **not** redacted — it is the verbatim client request body plus the
+  assembled provider response. It still carries no plaintext API key, because the
+  bearer key lives in the `Authorization` header, never in the chat body that is
+  stored.
+- Writes are idempotent (upsert by `request_id`): a streamed response may write
+  the request first, then backfill the assembled response.
+
+## Debug UI
+
+The admin Debug UI ([11 · Admin UI](11-admin-ui.md)) is a pure consumer of the
+redacted decision record plus the optional captured payload.
+
+The request **list** shows per row: time, key prefix, requested model, classified
+task type, complexity, the decision stage (`decided_by`: rules / eval / default /
+fallback), selected lane, final model, fallback count, status, latency, cost, and
+error reason.
+
+The request **detail** shows: request metadata, the classifier output (with
+confidence and matched dimensions/signals), whether eval ran and whether it hit
+the cache, the matched policy, the lane candidate chain, every provider attempt
+(including upstream `error_detail`), the final response metadata or structured
+error, the cost split (including eval's own self-cost), and the trace id. When
+`capture_payloads` is on and the row is present, the detail can also load the full
+captured request/response bodies.

@@ -5,7 +5,7 @@
   // Visualises the recorded decision trail in order:
   //   classifier output -> eval -> matched policy -> lane candidates -> provider
   //   attempts.
-  // CLAUDE.md 原则5: the classification-stage decision (classifier/eval/policy) and
+  // CLAUDE.md Principle 5: the classification-stage decision (classifier/eval/policy) and
   // the execution-stage provider fallback (attempts) live in SEPARATE sections and
   // are never conflated. Read-only: nothing here is recomputed.
   let { detail }: { detail: RequestDetail } = $props();
@@ -25,7 +25,7 @@
 
   // Pretty-print the (already redacted) upstream error body for the expandable
   // detail panel. An object → indented JSON; a raw string → verbatim. READ-ONLY:
-  // the backend has key-scrubbed this (原则7); we only display it.
+  // the backend has key-scrubbed this (Principle 7); we only display it.
   function showRaw(value: unknown): string {
     if (typeof value === 'string') return value;
     try {
@@ -37,7 +37,7 @@
 </script>
 
 <div class="flex flex-col gap-4">
-  <!-- 1. Classification stage (原则5: NOT execution fallback) -->
+  <!-- 1. Classification stage (Principle 5: NOT execution fallback) -->
   <section data-testid="chain-classifier" class="card">
     <h3 class="text-sm font-semibold text-ink-strong">
       {$t('Classifier (classification stage)')}
@@ -119,7 +119,7 @@
     </ol>
   </section>
 
-  <!-- 5. Execution stage: provider attempts (原则5: distinct from classification) -->
+  <!-- 5. Execution stage: provider attempts (Principle 5: distinct from classification) -->
   <section data-testid="chain-attempts" class="card">
     <h3 class="text-sm font-semibold text-ink-strong">
       {$t('Provider attempts (execution fallback)')}
@@ -143,7 +143,7 @@
           </div>
           <!-- Expandable upstream failure detail for THIS attempt — the only
                record of WHY a candidate failed when a later one served. Already
-               redacted by the backend (原则7). -->
+               redacted by the backend (Principle 7). -->
           {#if a.error_detail}
             {@const ed = a.error_detail}
             <details

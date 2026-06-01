@@ -1,30 +1,90 @@
-# 05 · 协议互译
+# 05 · Protocol Translation
 
-Protocol Adapter 把多种客户端协议与任意上游 provider 协议互译，让客户端只见统一的标准与输出。各协议互译的开源参考、覆盖矩阵与坑位清单见 [调研笔记](research-notes.md)。
+The Protocol Adapter translates between client protocols and arbitrary upstream
+provider protocols, so a client always sees one standard interface and output
+shape. Open-source references, the coverage matrix, and the footgun checklist are
+in [Research Notes](research-notes.md). The implementation lives in
+`packages/core/src/protocol/`.
 
-## 职责
+## Wired protocols
 
-- 将 OpenAI / Anthropic / Responses / 未来的 Gemini 请求归一化为统一的内部请求结构。
-- 将提供方的响应转换回客户端所请求的协议。
-- 保持流式语义（SSE 事件跨协议映射）。
+Three client protocols are wired and routed in 0.1:
 
-## 设计
+| Endpoint | Protocol | Streaming |
+|----------|----------|-----------|
+| `POST /v1/chat/completions` | OpenAI Chat Completions | Yes (SSE) and non-stream |
+| `POST /v1/messages` | Anthropic Messages | Yes (SSE) and non-stream |
+| `POST /v1/responses` | OpenAI Responses | **Non-streaming only** |
 
-以 **musistudio/llms** 为架构蓝本，**litellm** 作正确性规范；不抄代码，自行重写。
+For **OpenAI Responses**, streaming is not yet implemented: there is no Responses
+SSE (`response.*` event) transformer, so a `stream:true` request is rejected with
+a structured `400 invalid_request` ("streaming is not yet supported on
+/v1/responses; retry with stream:false") rather than being silently mis-served
+(fail-closed, principle 2). The non-streaming path is fully wired and routed. See
+`apps/gateway/src/routes/responses.ts`.
 
-- **统一中枢（IR）用 OpenAI Chat 形态**，扩展 thinking/推理块、多部件 content、tool-call ID、`provider_raw` 透传袋（装上游原生 `stop_reason`/`usage`）。
-- **每协议一个类、5 方法契约**（`transformRequestOut/In`、`transformResponseOut/In`、`endPoint`），入站+出站同处一文件。
-- **翻译永远 `nativeIn → IR → nativeOut`**，绝不 N×N 直连（N 协议 = 2N 变换函数）。
-- **流式 = 显式状态机**：content-block index 分配器、tool-call-index→block-index 映射、临时 id→真 id 升级、幂等关闭守卫；为缓存命中/非流式上游提供 JSON→SSE 合成器。
-- **横切关注点做成可叠加 transformer**（max-token 钳制、tool-use 归一、reasoning 注入）。
+A **Gemini** transformer exists in `packages/core/src/protocol/gemini/`, but it is
+**not** exported from the core entry point and **not** routed to any endpoint.
+Native Gemini support (request/response plus a streaming state machine) is on the
+roadmap; it is not a usable endpoint today. See [09 · Roadmap](09-roadmap.md).
 
-## 必须处理的坑
+## Responsibilities
 
-- finish_reason / stop_reason 枚举错配（映射成合法枚举 **并** 把原始值存进 `provider_raw`）。
-- usage 字段翻译与缓存计费（`input = prompt − cached`，流式末事件 buffer usage）。
-- tool-call 流式的 index/ID 协调（维护映射、临时 id 后补升级、容忍残缺 JSON）。
-- 流式 block/part ID 与 role 一致性（先 start 再 delta 后 stop；OpenAI 首片带 `role:"assistant"`）。
-- system 提示与多模态结构错配（Anthropic 顶层 `system`、禁连续同角色；图像 `image_url` vs `source:{base64}`）。
-- Responses API item 展开（照 litellm 的 spec 补齐）。
+- Normalize each wired client request (OpenAI Chat / Anthropic Messages / OpenAI
+  Responses) into the unified internal representation (IR).
+- Translate the provider's response back to the protocol the client requested.
+- Preserve streaming semantics — mapping SSE events across protocols where
+  streaming is supported.
 
-错误也要按客户端协议形态翻译，见 [07 · 可观测性](07-observability.md)。
+## Design
+
+The architecture is modeled on `musistudio/llms`, with `litellm` as the
+correctness reference; the code is a clean reimplementation, not a copy.
+
+- **The IR uses the OpenAI Chat shape as its hub**
+  (`packages/core/src/protocol/ir.ts`), extended with thinking/reasoning blocks,
+  typed multipart content (text/image/thinking), tool-call IDs, cache-control,
+  and a `provider_raw` passthrough bag that carries upstream-native fields (raw
+  `stop_reason` / `usage`) that cannot be mapped losslessly. The IR is the single
+  Zod type source for the whole protocol layer.
+- **One class per protocol, a five-member contract**
+  (`transformRequestOut` / `transformResponseOut` / `transformRequestIn` /
+  `transformResponseIn` / `endPoint`; see `protocol/transformer.ts`), with inbound
+  and outbound translation in the same file.
+- **Translation always goes `nativeIn → IR → nativeOut`**, never N×N direct
+  conversion (N protocols need 2N transform functions, not N²).
+- **Streaming is an explicit state machine** (`protocol/streaming.ts` plus the
+  per-direction machines, e.g. `protocol/anthropic/stream.ts`): a monotonic
+  content-block index allocator, an OpenAI-tool-index → Anthropic-block-index map,
+  a temp-id → real-id upgrade table, and idempotent close guards. A JSON → SSE
+  synthesizer (`synthesizeSSE`) covers cache hits and non-streaming upstreams so a
+  streaming client is none the wiser.
+- **Cross-cutting concerns are stackable behavior transformers** (max-token
+  clamping, tool-use normalization, reasoning injection) that operate on the IR
+  only.
+
+## Footguns that are handled
+
+These are the protocol-translation pits the implementation and its tests cover:
+
+- **finish_reason / stop_reason enum mismatches** — mapped to a legal enum **and**
+  the original value is kept in `provider_raw`.
+- **Usage fields and cache billing** — `input = prompt − cached`; usage is
+  buffered to the terminal stream event so a cache read is not double-counted.
+- **Tool-call streaming index/ID reconciliation** — maintain the index→block map,
+  upgrade a temporary id once the real id arrives on a later fragment, and
+  tolerate fragmented/partial argument JSON.
+- **Stream block/part ID and role consistency** — `start` before `delta` before
+  `stop`; the first OpenAI chunk carries `role: "assistant"`.
+- **System prompt and multimodal structural mismatches** — Anthropic's top-level
+  `system`, the ban on consecutive same-role messages, and image `image_url` vs
+  `source: {base64}`.
+- **Responses API item expansion** — the flat `input[]` item stream folds into the
+  IR and explodes back out.
+- **Idempotent stream close** — every `content_block_stop` and `message_stop` is
+  emitted at most once, guarding against the "controller already closed" bug.
+
+Errors are also translated into each client protocol's native shape (the OpenAI
+error envelope for `/v1/chat/completions` and `/v1/responses`, the Anthropic error
+envelope for `/v1/messages`). See
+[07 · Error Model & Observability](07-observability.md).

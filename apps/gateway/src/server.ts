@@ -174,7 +174,7 @@ export async function buildServer(
   const logger = opts.logger ?? createJsonLogger();
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });
 
-  // Store adapter set, chosen by config (CLAUDE.md "DB 抽象层"): sqlite (default,
+  // Store adapter set, chosen by config (CLAUDE.md "DB abstraction layer"): sqlite (default,
   // local file) or supabase (hosted Postgres). The factory fails CLOSED on an
   // unknown driver / a missing supabase credential (principle 2). The supabase
   // connection string is referenced by env-var NAME (runtime.store.url_env) and
@@ -247,7 +247,7 @@ export async function buildServer(
     store: store.rateLimit,
   });
 
-  // Memory observe-phase deps (docs/08 阶段 1), built ONCE process-wide and shared
+  // Memory observe-phase deps (docs/08 Phase 1), built ONCE process-wide and shared
   // by every request surface (chat / messages / responses). store.memory is the
   // live MemoryStore createStore already returns for both sqlite + postgres — no
   // extra adapter wiring. estimateTokens is a deterministic chars/4 heuristic (NOT
@@ -322,7 +322,7 @@ export async function buildServer(
   // Live classifier config. `let` so an admin edit (via the runtime RuleStore's
   // onClassifier callback below) re-binds the value the classify adapter reads
   // per request — classifier changes hot-apply WITHOUT a restart (closes the
-  // admin.api TODO: "admin 改 classifier 不热生效"). The adapter rebuilds its eval
+  // admin.api TODO: "admin classifier edits do not hot-apply"). The adapter rebuilds its eval
   // cache when this value changes, so a verdict from the old config is never served.
   let classifierConfig: ClassifierConfig = config.classifier;
   // Session-momentum soft-state. Instantiated ONCE here (process-wide singleton,
@@ -471,7 +471,7 @@ export async function buildServer(
   // from API-key auth (different credential source, no RBAC). Rule edits go through
   // a runtime RuleStore that re-binds the live `lanes`/`policies` the router reads;
   // keys/requests go to the Store. The plaintext of a freshly minted key is the
-  // ONLY secret ever returned, once (原则7).
+  // ONLY secret ever returned, once (Principle 7).
   const adminAuth = resolveAdminAuth(config as { admin?: Record<string, unknown> }, process.env);
   warnIfAdminUnconfigured(adminAuth, (line) => logger.log("warn", "admin.auth", { line }));
   // SECURITY: only mount the admin surface (API + SPA) when admin is enabled — i.e.
@@ -531,7 +531,7 @@ export async function buildServer(
     // the more-specific /admin/api/* routes win (Hono matches in registration
     // order); the static catch-all would otherwise return index.html for them. The
     // sub-app re-applies basicAuth so the page + assets are also gated. We never run
-    // SvelteKit here — just serve the adapter-static build (CLAUDE.md 原则1).
+    // SvelteKit here — just serve the adapter-static build (CLAUDE.md Principle 1).
     if (!existsSync(ADMIN_BUILD_ROOT)) {
       logger.log("warn", "admin.static_missing", {
         dir: ADMIN_BUILD_ROOT,

@@ -23,7 +23,7 @@ import { SqliteRateLimitStore } from "./sqlite/rate-limit.js";
 import { SqliteSignalStore } from "./sqlite/signals.js";
 import { SqliteTelemetryStore } from "./sqlite/telemetry.js";
 
-// ONE contract, BOTH real drivers. The DoD ("sqlite 与 supabase 同一契约测试") is
+// ONE contract, BOTH real drivers. The DoD ("sqlite and supabase share one contract test") is
 // met here: the SAME assertions run against the sqlite adapter AND against the
 // Postgres adapters on an in-process PGlite database. supabase == hosted
 // Postgres, so the pglite pg-dialect coverage validates the supabase path WITHOUT

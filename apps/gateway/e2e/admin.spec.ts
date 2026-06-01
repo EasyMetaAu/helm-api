@@ -90,7 +90,7 @@ test.describe("admin request debugging", () => {
       .getByTestId("request-row")
       .filter({ has: page.locator(`a[href$="/requests/${SEED_TRACE_ID}"]`) });
     await expect(row).toBeVisible();
-    // Classification-stage decision layer is shown (decided_by column, 原则5).
+    // Classification-stage decision layer is shown (decided_by column, Principle 5).
     await expect(row.getByTestId("decided-by")).toHaveText("rules");
 
     // Drill into the detail by deep-linking the trace id (SPA fallback route).

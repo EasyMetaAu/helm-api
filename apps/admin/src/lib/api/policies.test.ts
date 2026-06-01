@@ -9,7 +9,7 @@ import { listPolicies, savePolicies, TASK_TYPE_OPTIONS } from './policies.js';
 
 describe('task_type dropdown contract', () => {
   // The dropdown options are hardcoded in this client (admin must NOT import
-  // @helm/shared, 原则1), so they can silently drift from the gateway's canonical
+  // @helm/shared, Principle 1), so they can silently drift from the gateway's canonical
   // TaskTypeSchema (@helm/shared classifier/eval-output.schema.ts). This guard
   // pins the FULL set: a config policy whose task_type has no matching <option>
   // renders the <select> blank (e.g. `security` policies showed empty). Keep this

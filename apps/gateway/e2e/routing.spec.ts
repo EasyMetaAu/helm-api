@@ -10,7 +10,7 @@ import { FAIL_PRIMARY_SENTINEL } from "./fixtures/mock-upstream.js";
 //
 // Determinism (CI-safe): the mock upstream is fixed/offline, the key is
 // pre-seeded, and every prompt is chosen to be CLEARLY-TYPED so Layer-1 rules
-// hit-stop with confidence ABOVE the default 0.45 gate (eval is OFF) and the
+// hit-stop with confidence ABOVE the default 0.42 gate (eval is OFF) and the
 // selected lane is reproducible. After classifier.confidence-fix a boundary-
 // hugging prompt would instead fall open to `balanced`, so these prompts lean on
 // strong simple/reasoning signals to stay far from the tier boundaries. See task
@@ -52,34 +52,41 @@ function chat(content: string, extra: Record<string, unknown> = {}) {
 
 test.describe("routing e2e", () => {
   // ── Scenario 1: simple prompt → economy lane ────────────────────────────────
+  // The economy head (openai-crs/gpt-5.4-mini) is STREAM-ONLY on the relay
+  // (capabilities.yaml requiresStreaming:true), so exercise it with a STREAMING
+  // request — a non-stream request would (correctly) skip the head with
+  // skip_reason no_nonstream_support and fall to the next in-chain candidate
+  // (covered by the non-stream paths elsewhere). Routing is asserted via the
+  // debug headers, which the gateway emits BEFORE the SSE body; the resolved bare
+  // wire id is surfaced separately as x-helm-provider-model.
   test("simple prompt -> economy lane", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
       // Clearly-simple: strong simple-keyword signals (hi/thanks/ok) push the
       // score well below the `standard` boundary -> confident `simple` -> economy.
-      data: chat("hi thanks, translate to spanish: ok"),
+      data: chat("hi thanks, translate to spanish: ok", { stream: true }),
       headers: AUTH,
     });
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("economy");
-    // final model is the economy head and is echoed back by the mock.
+    // final model is the economy head; its resolved provider_model is the bare id.
     expect(res.headers()["x-helm-final-model"]).toBe(ECONOMY_HEAD);
-    const body = await res.json();
-    expect(body.model).toBe(ECONOMY_HEAD_WIRE);
+    expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_HEAD_WIRE);
   });
 
   // ── Scenario 2: complex prompt → premium lane ───────────────────────────────
+  // Premium head (openai-crs/gpt-5.5) is likewise stream-only — exercise via streaming.
   test("complex prompt -> premium lane", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
       data: chat(
         "Prove step by step the theorem and derive the integral, reason about the matrix equation and analyze the implications first then finally compile the proof.",
+        { stream: true },
       ),
       headers: AUTH,
     });
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("premium");
     expect(res.headers()["x-helm-final-model"]).toBe(PREMIUM_HEAD);
-    const body = await res.json();
-    expect(body.model).toBe(PREMIUM_HEAD_WIRE);
+    expect(res.headers()["x-helm-provider-model"]).toBe(PREMIUM_HEAD_WIRE);
   });
 
   // ── Scenario 3: response_format=json_object → json lane + valid JSON shape ───
@@ -117,10 +124,13 @@ test.describe("routing e2e", () => {
   }) => {
     // The prompt routes to economy (simple) AND carries the fail sentinel so the
     // mock 5xxs the economy head. The gateway only forwards model+messages
-    // upstream, so the fault is steered through the prompt.
+    // upstream, so the fault is steered through the prompt. STREAMING so the
+    // stream-only economy head is actually INVOKED (and then 5xxs) — a non-stream
+    // request would skip the head on capability grounds and never exercise the
+    // upstream-error fallback this scenario is about.
     const res = await request.post("/v1/chat/completions", {
       // Same clearly-simple economy prompt as scenario 1, plus the fail sentinel.
-      data: chat(`hi thanks, translate to spanish: ok ${FAIL_PRIMARY_SENTINEL}`),
+      data: chat(`hi thanks, translate to spanish: ok ${FAIL_PRIMARY_SENTINEL}`, { stream: true }),
       headers: AUTH,
     });
     expect(res.status()).toBe(200);
@@ -130,8 +140,7 @@ test.describe("routing e2e", () => {
     const finalModel = res.headers()["x-helm-final-model"];
     expect(finalModel).not.toBe(ECONOMY_HEAD);
     expect(finalModel).toBe(ECONOMY_NEXT);
-    const body = await res.json();
-    expect(body.model).toBe(ECONOMY_NEXT_WIRE);
+    expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_NEXT_WIRE);
   });
 
   // ── Scenario 5: unclassifiable prompt → balanced (classification fallback) ──

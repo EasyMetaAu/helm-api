@@ -4,7 +4,7 @@ import type { Complexity } from "./tiers.js";
 
 // Layer-1 hard overrides & shortcuts — the deterministic signals that BYPASS the
 // weighted dimension score and pin (or floor) a tier directly. Per the Manifest
-// "硬覆盖与捷径": heartbeat → simple, formal logic → reasoning, tools → ≥standard,
+// "hard overrides & shortcuts": heartbeat → simple, formal logic → reasoning, tools → ≥standard,
 // long context → ≥complex, very-short-no-signal → simple. Keywords/thresholds/
 // floor tiers are DATA (classifier.yaml.overrides); matching and the tier-order
 // control flow are CODE here (CLAUDE.md principle 4 — a pure, network-free,

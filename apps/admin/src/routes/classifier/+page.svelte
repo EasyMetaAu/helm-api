@@ -5,7 +5,7 @@
   import { t } from '$lib/i18n';
 
   // Data comes from `+page.ts`'s load (mocked via the `data` prop in tests). The
-  // page runs NO classification logic (原则1): it only flips eval on/off, edits
+  // page runs NO classification logic (Principle 1): it only flips eval on/off, edits
   // the confidence threshold within [0,1], and renders the read-only rule
   // dimensions / eval details. It writes back via the API client only.
   let { data }: { data: { classifier: ClassifierConfig } } = $props();
@@ -21,7 +21,7 @@
   let saved = $state(false);
 
   // Validation: threshold must parse to a finite number in [0,1] (fail-closed,
-  // 原则2 — the UI never guesses a legal value for the operator).
+  // Principle 2 — the UI never guesses a legal value for the operator).
   // `bind:value` on a number input yields a number (or NaN when blank/invalid);
   // normalize to a string for parsing so validation is robust either way.
   const thresholdStr = $derived(String(thresholdText));

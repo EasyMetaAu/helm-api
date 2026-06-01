@@ -8,7 +8,7 @@
   import { t } from '$lib/i18n';
 
   // Create-key dialog: owns the caps form AND the ONE-TIME plaintext reveal.
-  // CLAUDE.md 原则7 / docs/06: the plaintext is returned by the create response
+  // CLAUDE.md Principle 7 / docs/06: the plaintext is returned by the create response
   // exactly once, shown once, then wiped from component state on close — it is
   // never persisted, re-fetchable, or surfaced anywhere else. The dialog bubbles
   // the redacted view (prefix only, NO plaintext) up via `oncreated`.

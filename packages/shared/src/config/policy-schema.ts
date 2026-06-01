@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 // policies.yaml schema — server-side custom policies let operators customize
-// routing WITHOUT touching client code (docs/04 "策略配置"). A policy declares a
+// routing WITHOUT touching client code (docs/04 "policy configuration"). A policy declares a
 // `match` (AND of all written fields) and at least one action: pin a lane
 // (`use_lane`) and/or cap the candidate (`max_lane` / `allowed_lanes`).
 //

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { SqliteMemoryStore } from "./memory-store.js";
 import { createSqliteDb, runMigrations } from "./migrate.js";
 
-// docs/08 "存储模型" — the 5 memory tables, their exact column sets, the
+// docs/08 "storage model" — the 5 memory tables, their exact column sets, the
 // source_message_range NOT NULL invariant, and isolation from routing/key tables.
 
 function tableCols(raw: ReturnType<typeof createSqliteDb>["$sqlite"], table: string): string[] {

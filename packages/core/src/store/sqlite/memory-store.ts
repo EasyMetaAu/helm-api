@@ -93,7 +93,7 @@ export class SqliteMemoryStore implements MemoryStore {
     return id;
   }
 
-  // POST-MVP 阶段 2 (Observer): read a thread's raw messages oldest-first.
+  // POST-MVP Phase 2 (Observer): read a thread's raw messages oldest-first.
   async listMessages(threadId: string): Promise<RawMessage[]> {
     const rows = this.db
       .select()
@@ -133,7 +133,7 @@ export class SqliteMemoryStore implements MemoryStore {
     return id;
   }
 
-  // POST-MVP 阶段 2 (Reflector): read a scope's active observations oldest-first.
+  // POST-MVP Phase 2 (Reflector): read a scope's active observations oldest-first.
   // Scope is matched on thread_id only here (observations are thread-anchored in
   // storage); the Reflector merges them into a scope-level reflection. Returns
   // empty when the scope has no thread anchor.
@@ -161,7 +161,7 @@ export class SqliteMemoryStore implements MemoryStore {
 
   // Read the latest (highest-version) reflection for an EXACT scope match. Absent
   // scope levels must be NULL in storage (never a different scope's row) so the
-  // Reflector never crosses project/resource/thread boundaries (docs/08 隔离).
+  // Reflector never crosses project/resource/thread boundaries (docs/08 isolation).
   async getReflection(scope: ReflectionScope): Promise<Reflection | null> {
     const row = this.db
       .select()

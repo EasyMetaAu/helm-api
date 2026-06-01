@@ -6,7 +6,7 @@
 
   // Data comes from `+page.ts`'s load (mocked via the `data` prop in tests).
   // The page owns the ORDERED working list — order IS the match priority
-  // (docs/04 first-match). It contains NO matching logic (原则1/原则5): it only
+  // (docs/04 first-match). It contains NO matching logic (Principle 1/Principle 5): it only
   // edits/reorders the list and writes the whole set back via the API client.
   let { data }: { data: { policies: Policy[]; lanes?: string[] } } = $props();
 

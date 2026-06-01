@@ -33,7 +33,7 @@
   let maxLatency = $state<number | null>(initial.constraints.max_latency_ms ?? null);
   let newFallback = $state('');
   // Per-card success flag: set when the parent's save resolves without throwing.
-  // It is the visible "成功提示" the operator (and the e2e) waits for.
+  // It is the visible "success notice" the operator (and the e2e) waits for.
   let saved = $state(false);
 
   const isBalanced = initial.name === 'balanced';
@@ -41,7 +41,7 @@
   // combobox on both the primary and fallback-add inputs.
   const modelsListId = `lane-models-${initial.name}`;
 
-  // Validation. `balanced` must keep a primary (docs/04 红线); other lanes also
+  // Validation. `balanced` must keep a primary (docs/04 hard line); other lanes also
   // need a non-empty primary to be coherent. The hint text differs so ops sees
   // *why* balanced is special.
   const trimmedPrimary = $derived(primary.trim());

@@ -4,15 +4,15 @@ import { describe, expect, it } from "vitest";
 import type { AdminAuthConfig } from "../middleware/basic-auth.js";
 import { mountAdminStatic } from "./admin-static.js";
 
-// admin.static-serve — Hono 在 /admin 托管 admin SPA（替换 Phase 0 占位）。
-// 这些测试钉住契约（DoD 场景 1-7）：
-//   1. 带凭证 GET /admin -> 200 index.html (text/html)
-//   2. 静态资源 (_app/immutable/assets/*.css) -> 200 + 正确 MIME
-//   3. SPA fallback：未命中物理文件的子路由 (/admin/keys) -> 200 index.html，不 404
-//   4. 未认证 -> 401 + WWW-Authenticate，且不泄露任何静态内容
-//   5. Phase 0 占位文案不再出现（catch-all 静态托管已接管）
-//   6. /admin/api/* 不被静态 fallback 吞（API 路由先注册时优先）
-//   7. admin.enabled:false -> Basic 不拦，/admin 仍发静态
+// admin.static-serve — Hono serves the admin SPA at /admin (replacing the Phase 0
+// placeholder). These tests pin the contract (DoD scenarios 1-7):
+//   1. With credentials, GET /admin -> 200 index.html (text/html)
+//   2. Static assets (_app/immutable/assets/*.css) -> 200 + correct MIME
+//   3. SPA fallback: a sub-route with no physical file (/admin/keys) -> 200 index.html, not 404
+//   4. Unauthenticated -> 401 + WWW-Authenticate, and leaks no static content
+//   5. The Phase 0 placeholder text no longer appears (catch-all static serving has taken over)
+//   6. /admin/api/* is not swallowed by the static fallback (API routes win when registered first)
+//   7. admin.enabled:false -> Basic does not block, /admin still serves static files
 
 const ENABLED: AdminAuthConfig = { enabled: true, username: "admin", password: "s3cret" };
 const DISABLED: AdminAuthConfig = { enabled: false, username: null, password: null };

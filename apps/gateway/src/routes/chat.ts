@@ -61,7 +61,7 @@ export interface ChatRouteDeps {
    *  Gated by HELM_E2E in the composition root; production never sets this so
    *  classification stays config-driven (fail-closed). */
   evalHeaderOverride?: boolean;
-  /** Memory observe-phase wiring (docs/08 阶段 1). Optional — absent = no-op
+  /** Memory observe-phase wiring (docs/08 Phase 1). Optional — absent = no-op
    *  (existing tests run unchanged). When present, observeInbound persists the
    *  request before routing and observeOutbound persists the assistant turn
    *  after; both self-gate on the resolved MemoryScope mode and are fail-open
@@ -281,7 +281,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     const sessionKey =
       headerSessionKey !== undefined && headerSessionKey.length > 0 ? headerSessionKey : null;
 
-    // Memory scope (docs/08 阶段 1): parse the four memory headers at this HTTP
+    // Memory scope (docs/08 Phase 1): parse the four memory headers at this HTTP
     // boundary into a resolved MemoryScope (core never reads headers, principle
     // 1). The scope ids/mode ride the InternalRequest metadata AND gate the
     // observe calls below; absent/illegal headers → off + null (default-safe).
@@ -324,7 +324,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     }
 
     // Memory observe (inbound): persist the request's raw messages BEFORE routing
-    // (docs/08 阶段 1). observe is write-only — it NEVER mutates `internal.messages`
+    // (docs/08 Phase 1). observe is write-only — it NEVER mutates `internal.messages`
     // nor changes routing, and self-gates to a no-op on mode=off / threadId=null.
     // It never throws (fail-open inside core), so no try/catch is needed here.
     if (deps.memory !== undefined) {

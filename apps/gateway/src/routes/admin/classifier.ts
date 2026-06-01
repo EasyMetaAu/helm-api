@@ -13,7 +13,7 @@ import type { AdminApiDeps } from "./deps.js";
 
 // /admin/api/classifier — read/write the classifier config (config/classifier.yaml
 // via RuleStore, NEVER the DB). The toggle for Layer-2 eval, confidence_threshold,
-// and rule weights all live here as data (原则2/4). An out-of-range threshold or
+// and rule weights all live here as data (Principle 2/4). An out-of-range threshold or
 // any schema violation -> 400, config unchanged (fail-closed). ClassifierConfigSchema
 // is the single type source (z.infer); no duplicate shape.
 

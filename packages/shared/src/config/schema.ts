@@ -99,7 +99,7 @@ export const RateLimitConfigSchema = z.object({
   overrides: z.record(z.string(), RateLimitQuotaOverrideSchema).default({}),
 });
 
-// DB abstraction layer (CLAUDE.md "DB 抽象层"). The gateway switches its Store
+// DB abstraction layer (CLAUDE.md "DB abstraction layer"). The gateway switches its Store
 // adapter set by config: `sqlite` (default, local file) or `supabase` (hosted
 // Postgres). The connection string is referenced by ENV VAR NAME (`url_env`) —
 // NEVER a plaintext DSN in config/yaml (mirrors providers[].api_key_env,

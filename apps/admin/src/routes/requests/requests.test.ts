@@ -6,9 +6,9 @@ import DetailPage from './[traceId]/+page.svelte';
 import ListPage from './+page.svelte';
 
 // The Debug UI is a READ-ONLY consumer of /admin/api/* — it renders the trail the
-// backend recorded and re-computes nothing (docs/07, 原则1). The list/detail
-// clients are mocked; we assert docs/07 列表/详情 fields, the 原则5 separation of
-// classification-stage vs execution-stage fallback, and 原则7 redaction.
+// backend recorded and re-computes nothing (docs/07, Principle 1). The list/detail
+// clients are mocked; we assert docs/07 list/detail fields, the Principle 5 separation of
+// classification-stage vs execution-stage fallback, and Principle 7 redaction.
 
 const getRequest = vi.fn();
 vi.mock('$lib/api/requests.js', () => ({
@@ -174,7 +174,7 @@ describe('requests detail page', () => {
     getRequest.mockReset();
   });
 
-  it('renders the decision chain, cost breakdown (含 eval) and a not-recorded notice when capture is off', () => {
+  it('renders the decision chain, cost breakdown (incl. eval) and a not-recorded notice when capture is off', () => {
     render(DetailPage, {
       data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
     });

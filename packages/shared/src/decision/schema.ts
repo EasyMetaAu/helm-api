@@ -81,7 +81,7 @@ export const FinalDecisionSchema = z.object({
   error_reason: z.string().nullable(),
 });
 
-// Cost split (docs/07 「成本拆分（含 eval 评估自身的成本）」). `eval_usd` isolates the
+// Cost split (docs/07 "cost split (including eval's own self-cost)"). `eval_usd` isolates the
 // Layer-2 small-model self-cost (non-null ONLY when eval actually ran; null when
 // eval was skipped/disabled) from `completion_usd` (Σ of the served provider
 // attempts' cost). `total_usd` is their sum. Each is nullable because upstream
@@ -101,7 +101,7 @@ export const DecisionRecordSchema = z.object({
   trace_id: z.string().min(1),
   requested_model: z.string(),
   // Display-only key fingerprint for the Debug UI key column (docs/07
-  // 「API key / 用户 / 组织」). PREFIX ONLY — the resolved auth identity's
+  // "API key / user / org"). PREFIX ONLY — the resolved auth identity's
   // ApiKeyRecord.prefix (e.g. helm_live_ab12), NEVER the plaintext key
   // (principle 7). Null when the key/prefix is unknown. `.default(null)` keeps
   // pre-existing (pre-enrichment) records valid.
@@ -111,7 +111,7 @@ export const DecisionRecordSchema = z.object({
   lane: LaneDecisionSchema,
   provider_attempts: z.array(ProviderAttemptSchema),
   final: FinalDecisionSchema,
-  // Total served latency = Σ provider_attempts.latency_ms (docs/07 延迟).
+  // Total served latency = Σ provider_attempts.latency_ms (docs/07 latency).
   // `.default(0)` so legacy records validate; the builder computes the real sum.
   latency_total_ms: z.number().nonnegative().default(0),
   // EXECUTION-stage fallback count (principle 5; NEVER the classification

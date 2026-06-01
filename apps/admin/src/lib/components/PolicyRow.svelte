@@ -9,7 +9,7 @@
   import { t } from '$lib/i18n';
 
   // Single ordered policy row: a pure "condition → action" editor. It owns NO
-  // matching logic (first-match resolution lives in headless core, 原则1/原则5);
+  // matching logic (first-match resolution lives in headless core, Principle 1/Principle 5);
   // it only enforces enum constraints (no free text) and the use_lane/max_lane
   // mutual exclusion, then bubbles changes up so the parent owns the ordered list.
   let {

@@ -1,6 +1,6 @@
 import { type ErrorClass, type HelmError, makeHelmError } from "@helm/shared";
 
-// HelmError -> native Anthropic error shape (docs/05 §错误也按客户端协议形态翻译,
+// HelmError -> native Anthropic error shape (docs/05 §errors are also translated into the client protocol's shape,
 // docs/07). The outbound error half of the Protocol Adapter: a structured internal
 // error becomes the wire envelope the Anthropic SDK expects
 //

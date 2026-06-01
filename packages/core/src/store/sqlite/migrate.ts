@@ -51,7 +51,7 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Memory middleware tables (docs/08 "存储模型"). POST-MVP persistence floor:
+    // Memory middleware tables (docs/08 "storage model"). POST-MVP persistence floor:
     // build only — no read/inject. Deliberately ISOLATED from routing/key
     // tables (no FK to lanes/policies/api_keys); memory_messages references
     // memory_threads ONLY. source_message_range is NOT NULL so compressed
@@ -113,7 +113,7 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Per-key rate-limit token buckets (docs/06 "限流与配额"). One row per
+    // Per-key rate-limit token buckets (docs/06 "rate limits & quotas"). One row per
     // (key_id, dim); tokens is REAL so fractional refill survives reads. key_id
     // only — NEVER a plaintext/hashed key (principle 7). Counters live here (not
     // process memory) so windows survive restarts and span instances.
@@ -129,7 +129,7 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Agentic Signals (POST-MVP feedback layer; docs/02, research-notes「Plano」).
+    // Agentic Signals (POST-MVP feedback layer; docs/02, research-notes "Plano").
     // One row per (task_type, lane): the latest rolled-up, REDACTED observation,
     // written ASYNCHRONOUSLY by the background collector — never on the request
     // path. NO key/payload column (principle 7); only aggregate dimensions. Two
@@ -217,7 +217,7 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Per-key rate-limit OVERRIDE columns on api_keys (docs/06 "限流与配额"). Two
+    // Per-key rate-limit OVERRIDE columns on api_keys (docs/06 "rate limits & quotas"). Two
     // nullable integer columns: NULL = inherit the system default at check time;
     // a value (0 = unlimited) overrides that one dimension for this key. Additive
     // — existing rows get NULL and therefore keep inheriting the default. Distinct

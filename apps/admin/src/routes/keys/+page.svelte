@@ -4,11 +4,11 @@
   import CreateKeyDialog from '$lib/components/CreateKeyDialog.svelte';
   import { t } from '$lib/i18n';
 
-  // API key management view. HARD security line (CLAUDE.md 原则7 / docs/06): the
+  // API key management view. HARD security line (CLAUDE.md Principle 7 / docs/06): the
   // list shows ONLY the display prefix + sha256-backed reference — never plaintext.
   // The plaintext is shown once by the create dialog at mint time, then wiped.
   // Revocation is a SOFT disable (server flips disabled:true) — the row is kept,
-  // never removed or rewritten in place (轮转/吊销审计可追溯). This view is a pure
+  // never removed or rewritten in place (rotation/revocation stays auditable). This view is a pure
   // consumer of /admin/api/* — it owns no auth logic and persists no credentials.
   let { data }: { data: { keys: ApiKeyView[]; lanes: string[] } } = $props();
 

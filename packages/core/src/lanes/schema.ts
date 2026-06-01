@@ -11,7 +11,7 @@ import type { z } from "zod";
 
 // The lane Zod schema is the single source of truth in @helm/shared (so
 // HelmConfigSchema validates config against the SAME shape the router consumes;
-// schema-first, no duplicate definitions — CLAUDE.md 代码规范). This module
+// schema-first, no duplicate definitions — CLAUDE.md code style). This module
 // re-exports it for core's routing code and keeps the checked-in DEFAULT_LANES
 // constant, which is a CORE concern (first-boot baseline / fallback), not a
 // config shape. See docs/04-routing-and-lanes.md, packages/shared lanes-schema.

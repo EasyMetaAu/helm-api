@@ -11,7 +11,7 @@ import type { InternalRequest } from "@helm/shared";
 // The hash covers EXACTLY the 5 inputs that influence classification, pinned in
 // implementation-notes (2026-05-30):
 //   1. last_user_message  — last user message, trim()ed, NOT lowercased
-//   2. turn_count         — number of user-role messages (fixed 口径, see below)
+//   2. turn_count         — number of user-role messages (fixed convention, see below)
 //   3. tool_names         — tool names only (no schema), lexicographically sorted
 //   4. response_format_json — whether response_format requests JSON
 //   5. has_attachments    — whether an image/vision attachment is present
@@ -81,7 +81,7 @@ function lastUserMessage(messages: ClassifierInput["messages"]): string {
   return "";
 }
 
-// turn_count 口径 (fixed): number of role==="user" messages. This is the
+// turn_count convention (fixed): number of role==="user" messages. This is the
 // classification-relevant turn measure; documented here so eval.cascade and any
 // future consumer use the SAME counting rule and the key never drifts.
 function userTurnCount(messages: ClassifierInput["messages"]): number {

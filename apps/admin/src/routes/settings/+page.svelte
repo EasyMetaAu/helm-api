@@ -10,7 +10,7 @@
 
   // System Settings — runtime-mutable config that applies WITHOUT a restart
   // (capture_payloads, payload_retention_days, rate_limit_enabled, log_level).
-  // Pure consumer (原则1): edits a local working copy, PUTs the whole object on Save;
+  // Pure consumer (Principle 1): edits a local working copy, PUTs the whole object on Save;
   // the gateway validates + applies it live.
   let { data }: { data: { settings: RuntimeSettings | null; loadError?: string } } = $props();
 

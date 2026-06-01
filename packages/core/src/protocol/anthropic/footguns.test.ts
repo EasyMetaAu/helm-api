@@ -8,12 +8,15 @@ import {
   type OpenAIChunk,
 } from "./stream.js";
 
-// —— 协议互译 5 大坑专项回归测试矩阵 (docs/05「必须处理的坑」全 5 条) ————————————
+// —— Dedicated regression matrix for the 5 big protocol-translation footguns (all 5 from docs/05 "footguns that must be handled") ————————————
 //
-// 这套测试是协议互译层的"防回归护城河"：即便底层 request/response/stream 被重构,
-// 只要这 5 个反复让其他实现翻车的坑之一复活, 这里就会变红。断言措辞针对"坑的本质
-// 行为"(不双算 / 无孤儿 delta / 不产出非法枚举), 而非实现细节, 以避免脆性。
-// 复用既有导出, 不新增产品代码 (task protocol.footgun-tests)。
+// This suite is the protocol-translation layer's "anti-regression moat": even if the
+// underlying request/response/stream code is refactored, the moment one of these 5
+// footguns that have repeatedly tripped up other implementations comes back to life,
+// this turns red. Assertions are worded against the "essential behavior of the footgun"
+// (no double-counting / no orphan delta / no illegal enum produced) rather than
+// implementation details, to avoid brittleness. Reuses existing exports; adds no new
+// product code (task protocol.footgun-tests).
 
 // —— shared helpers ——————————————————————————————————————————————————————————
 
@@ -42,9 +45,10 @@ function textChunk(content: string, finish: string | null = null): OpenAIChunk {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// 坑 #1 — finish/stop 枚举错配
-//   OpenAI SDK 遇到非法 stop_reason 枚举会 DROP 整个响应。映射必须永远落在合法枚举,
-//   未知/null 兜底 end_turn, 且原始值始终入 provider_raw.stop_reason。
+// Footgun #1 — finish/stop enum mismatch
+//   The OpenAI SDK DROPS the whole response on an illegal stop_reason enum. The mapping
+//   must ALWAYS land on a legal enum, fall back to end_turn for unknown/null, and the
+//   original value must always go into provider_raw.stop_reason.
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("footgun #1 — finish/stop enum mismatch never produces an illegal enum", () => {
@@ -103,9 +107,10 @@ describe("footgun #1 — finish/stop enum mismatch never produces an illegal enu
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// 坑 #2 — usage 缓存双重计费 (~10× 成本错误)
-//   缓存读 token 被当全价输入算 → ~10× 成本。input_tokens = prompt − cached,
-//   cache_read 单列, 缓存读绝不计入 input。非流式与流式两路必须一致, 都不双算。
+// Footgun #2 — usage cache double-billing (~10× cost error)
+//   Cache-read tokens counted as full-price input → ~10× cost. input_tokens = prompt − cached,
+//   cache_read is its own line, and cache reads are NEVER counted into input. The non-streaming
+//   and streaming paths must agree — neither double-counts.
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("footgun #2 — cached tokens are never double-billed as full-price input", () => {
@@ -198,9 +203,10 @@ describe("footgun #2 — cached tokens are never double-billed as full-price inp
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// 坑 #3 — tool-call 流式 index/id 错配
-//   并行 tool 的 OpenAI 整数 index 必须稳定映射到 Anthropic block, 分片不串;
-//   id 仅首片缺失时用临时 id 后补升级; 截断 partial_json 累积容忍不崩。
+// Footgun #3 — tool-call streaming index/id mismatch
+//   OpenAI integer indexes for parallel tools must map STABLY to Anthropic blocks, with
+//   no cross-contaminated fragments; a temp id is used only when the first fragment lacks
+//   one and is later upgraded; truncated partial_json accumulation is tolerated without crashing.
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("footgun #3 — parallel tool-call index/id reconciliation", () => {
@@ -313,9 +319,10 @@ describe("footgun #3 — parallel tool-call index/id reconciliation", () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// 坑 #4 — block/role 一致性 (孤儿 delta + 重复 stop)
-//   每个 content_block_delta 前必有同 index 的 content_block_start (无孤儿 delta);
-//   start/stop 配对; 关闭守卫幂等 (无重复 stop)。首片带 role:"assistant" 语义。
+// Footgun #4 — block/role consistency (orphan delta + duplicate stop)
+//   Every content_block_delta must be preceded by a same-index content_block_start (no orphan delta);
+//   start/stop are paired; the close guard is idempotent (no duplicate stop). The first event carries
+//   role:"assistant" semantics.
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("footgun #4 — block/role consistency: no orphan delta, idempotent close", () => {
@@ -383,9 +390,9 @@ describe("footgun #4 — block/role consistency: no orphan delta, idempotent clo
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// 坑 #5 — system + 多模态结构错配
-//   顶层 system 提升为 IR system 消息; 连续同角色被合并 (无连续 user/tool);
-//   图像 source:{base64} 字段拆分保留 media_type/data。
+// Footgun #5 — system + multimodal structure mismatch
+//   Top-level system is hoisted to an IR system message; consecutive same-role turns are merged
+//   (no consecutive user/tool); the image source:{base64} fields are split out, preserving media_type/data.
 // ════════════════════════════════════════════════════════════════════════════
 
 describe("footgun #5 — system hoist, same-role merge, image source split", () => {

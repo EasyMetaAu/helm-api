@@ -4,7 +4,7 @@ import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps } from "./deps.js";
 
 // /admin/api/settings — the System Settings surface (runtime-mutable config that
-// applies WITHOUT a restart). PURE HTTP glue (原则1): validate → save → echo. The
+// applies WITHOUT a restart). PURE HTTP glue (Principle 1): validate → save → echo. The
 // save seam (deps.settings.save) validates+persists to config_kv and applies live
 // (logger level, rate-limit switch); it is wired in server.ts.
 
@@ -15,7 +15,7 @@ export function registerSettingsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   });
 
   // PUT /settings -> validate the WHOLE object against the schema, persist+apply,
-  // echo the validated result. Fail-closed (原则2): an invalid body is rejected
+  // echo the validated result. Fail-closed (Principle 2): an invalid body is rejected
   // (400) and never written nor applied to the live closures.
   app.put("/admin/api/settings", async (c) => {
     const body = await c.req.json().catch(() => null);

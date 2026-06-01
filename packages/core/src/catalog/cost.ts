@@ -1,6 +1,6 @@
 import type { Pricing } from "@helm/shared";
 
-// Cost conversion: provider token usage × catalog pricing (docs/07 「成本拆分」).
+// Cost conversion: provider token usage × catalog pricing (docs/07 "cost breakdown").
 // Framework-/network-free (principle 1). Pricing is quoted per MILLION tokens
 // (LiteLLM-derived generated catalog + manual overrides), so we divide by 1e6.
 //
@@ -50,8 +50,9 @@ export function usageFromBody(body: unknown): TokenUsage {
 // relay's OWN computed price, in USD. Different relays surface it differently, so
 // we probe, in precedence order: `usage.cost_usd` → `usage.cost` (OpenRouter) →
 // top-level `cost_usd`. When present this is AUTHORITATIVE (real money charged)
-// and must OVERRIDE our catalog estimate (CLAUDE.md 成本约定: 上游返回了就用它覆盖,
-// 没返回才用预制 pricing). Defensive (principle 3/7): only a finite, non-negative
+// and must OVERRIDE our catalog estimate (CLAUDE.md cost convention: if the upstream
+// returns cost use it to override; otherwise fall back to the prepared pricing).
+// Defensive (principle 3/7): only a finite, non-negative
 // number counts — anything else → null so the caller falls back to the estimate.
 // Never throws, never reads message content.
 export function billedCostFromBody(body: unknown): number | null {

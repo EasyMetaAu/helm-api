@@ -1,12 +1,30 @@
-# 08 · 记忆中间件（MVP 之后）
+# 08 · Memory Middleware
 
-> 状态：**不在 MVP 内**。本章描述 MVP 之后的可选中间件设计；MVP 不实现记忆的读写与注入。
+> Status (0.1): the **observe** phase is **implemented and wired** into the
+> gateway request path; the **inject** phase is **on the roadmap** (see
+> [09 · Roadmap](09-roadmap.md)). This chapter describes the design and marks the
+> true state of each part.
 >
-> **实现状态（2026-05-31）**：core 侧逻辑已实现并单测覆盖（`packages/core/src/memory/` 的 `observeInbound`/`observeOutbound`/`assembleInjectedContext`/`resolveMemoryMode`，并从 `@helm/core` 导出），但**尚未接入网关请求路径**——`chat.ts` / `messages-pipeline.ts` 仍把 `memory_mode` 硬编码为 `"off"`、scope id 全为 null，故 observe/inject 在运行时**不可达（dead at runtime）**。对比之下 signals 子系统已接线。**接线工作已延后**为独立任务：解析 `x-thread-id`/`x-resource-id`/`x-project-id`/`x-memory-mode`（经 `resolveMemoryMode`）入 `metadata`，在路由前后调用 observe、在分类前调用 inject，并补路由级测试。见 `implementation-notes.md` 的「全模块审计 + 41 项修复」条目与本仓 TODO。
+> What is live: the four memory headers are parsed at the gateway boundary
+> (`apps/gateway/src/routes/memory-scope.ts`), the resolved scope/mode is threaded
+> through, and `observeInbound` / `observeOutbound`
+> (`packages/core/src/memory/observe.ts`) are called from the OpenAI Chat route
+> (`chat.ts`), the Anthropic/Responses pipeline (`messages-pipeline.ts`), and the
+> Anthropic/Responses surfaces (`messages.ts`, `responses.ts`). In `observe`/
+> `inject` mode the gateway persists raw request/response/tool messages into the
+> `memory_*` tables.
+>
+> What is **not** wired yet: the **inject** phase. `assembleInjectedContext`
+> exists, is unit-tested, and is exported from `@helm/core`, but it is **not
+> called from any gateway route**. So today `inject` mode behaves like `observe`
+> (it persists but does not hydrate); `memory_hydrated` is always `false` and the
+> inject-phase counters stay at their null/zero defaults. The background Observer /
+> Reflector jobs are also roadmap.
 
-## 定位
+## Positioning
 
-记忆并不属于 MVP 路由核心。记忆是一个可选的中间件，它在分类和执行之前为请求提供足够的上下文。
+Memory is not part of the routing core. It is an optional middleware that gives a
+request enough context to be understood before classification and execution.
 
 ```text
 Memory helps the request be understood.
@@ -15,62 +33,73 @@ Provider executes.
 Logs explain what happened.
 ```
 
-## 来源 issue
+Memory must never rewrite lane rules. For example, an entitlement-based route
+belongs to the Policy Engine, not to memory.
 
-本规范基于 llm-router issue #362：Memory Gateway / Observational Memory（记忆网关 / 观察式记忆）。
+## Origin
 
-Issue: https://github.com/EasyMetaAu/llm-router/issues/362
+The design follows llm-router issue #362 (Memory Gateway / Observational Memory)
+and is inspired by Mastra's Observational Memory:
+<https://github.com/EasyMetaAu/llm-router/issues/362>.
 
-## 核心思路
+## Core idea
 
-采用受 Mastra Observational Memory 启发的网关级记忆层：
+A gateway-level memory layer inspired by Mastra Observational Memory:
 
-- 客户端传入稳定的 ID，例如 `x-thread-id`、`x-resource-id` 和 `x-project-id`。
-- 网关存储原始消息和工具结果。
-- 后台 Observer 将旧的原始历史压缩为带日期的观察记录。
-- 后台 Reflector 将观察记录合并为稳定的反思。
-- Provider 上下文由反思、观察记录、近期原始消息以及当前消息组装而成。
+- The client passes stable IDs such as `x-thread-id`, `x-resource-id`, and
+  `x-project-id`.
+- The gateway stores raw messages and tool results.
+- A background Observer compresses old raw history into dated observations.
+- A background Reflector merges observations into stable reflections.
+- The provider context is assembled from reflections, observations, recent raw
+  messages, and the current message.
 
-在 MVP 方向上这并不是动态 RAG。目标是构建一个稳定、对缓存友好的上下文前缀。
+This is deliberately not dynamic RAG. The goal is a stable, cache-friendly context
+prefix.
 
-## 请求头
+## Request headers
 
 ```http
-x-thread-id: current conversation or task thread
-x-resource-id: current document, asset, issue, or workspace object
-x-project-id: project-level memory scope
+x-thread-id:   the current conversation or task thread
+x-resource-id: the current document, asset, issue, or workspace object
+x-project-id:  the project-level memory scope
 x-memory-mode: off | observe | inject
 ```
 
-默认值：
+Default: `x-memory-mode = off`. Mode normalization is centralized in core's
+`resolveMemoryMode`; an absent, illegal, or wrong-case value falls back safely to
+`off`. An empty `x-thread-id` yields `null` (never a fabricated thread id), and
+`observe` self-gates to a no-op when there is no thread scope.
 
-```text
-x-memory-mode = off
-```
+Modes:
 
-模式：
+- `off` — no memory read/write; routing behavior is unchanged. Zero DB touch.
+- `observe` — record messages and tool outputs, but do not inject memory.
+  **Implemented and wired.**
+- `inject` — load memory context, assemble the prompt, and enqueue the
+  write-back. **Roadmap.** Today `inject` is accepted and persists like `observe`,
+  but the inject phase is not invoked, so nothing is hydrated.
 
-- `off`：不进行记忆读写；保持当前路由行为。
-- `observe`：记录消息和工具输出，但不注入记忆。
-- `inject`：加载记忆上下文、组装 prompt，并将回写任务入队。
-
-## 流水线
+## Pipeline (target design)
 
 ```text
 Request comes in
-  -> save raw message if observe/inject
-  -> if inject:
+  -> save raw message if observe/inject        # implemented (observeInbound)
+  -> if inject:                                 # roadmap
        load reflection + active observations
        assemble stable context
   -> classifier uses current message + short memory context
   -> route + provider execute
-  -> save response/tool result
-  -> enqueue observer job
-  -> observer compresses raw history into observations
-  -> reflector periodically merges observations into reflection
+  -> save response/tool result                  # implemented (observeOutbound)
+  -> enqueue observer job                       # roadmap
+  -> observer compresses raw history into observations   # roadmap
+  -> reflector periodically merges observations into reflection  # roadmap
 ```
 
-## 上下文组装顺序
+Persistence is **fail-open** (Principle 3): a memory store failure degrades to
+"continue without memory" plus a logged failure — never a 5xx.
+
+## Context assembly order (inject phase, roadmap)
 
 ```text
 system prompt
@@ -81,17 +110,18 @@ system prompt
 + current user message
 ```
 
-规则：
+Rules:
 
-- 反思应当稳定且缓慢变化。
-- 必须保留近期原始消息，以避免压缩造成信息丢失。
-- 观察记录文本应包含时间锚点。
-- 记忆注入应保持在 token 预算范围内。
-- 如果记忆加载失败，主请求应在无记忆的情况下继续执行，并记录该失败。
+- Reflections should be stable and slow-changing.
+- Recent raw messages must be retained so compression cannot lose information.
+- Observation text should carry a time anchor.
+- Injected memory must stay within a token budget.
+- If memory loading fails, the main request continues without memory and the
+  failure is recorded.
 
-## 存储模型
+## Storage model
 
-最小表集合：
+Minimal table set (see `MemoryStore` in `packages/core/src/store/ports.ts`):
 
 ```text
 memory_threads
@@ -112,38 +142,27 @@ memory_jobs
   id, type, scope_id, status, error, created_at, updated_at
 ```
 
-`source_message_range` 是必填字段，这样压缩后的记忆才能与原始消息进行审计核对。
+`source_message_range` is required so compressed memory can be audited against the
+original raw messages. The `observe` path uses `ensureThread` + `appendMessage`
+today; the read/compress/reflect methods back the roadmap Observer/Reflector.
 
-## 路由集成
+## Routing integration
 
-分类器可以使用：
+The classifier may use the current message, recent raw turns, a short memory
+summary, and tool/request metadata. The routing output is unchanged
+(`task_type` / `complexity` / `constraints` / `lane`). Memory must not directly
+rewrite lane rules.
 
-- 当前消息。
-- 近期的原始对话轮次。
-- 简短的记忆摘要。
-- 工具/请求元数据。
+## Debug UI fields
 
-路由输出保持不变：
-
-```text
-task_type
-complexity
-constraints
-lane
-```
-
-记忆不得直接改写 lane 规则。例如，用户权益路由应归属于 Policy Engine，而非记忆。
-
-## 调试 UI 字段
-
-新增请求级别的记忆元数据：
+Request-level memory metadata (`MemoryMeta`):
 
 ```text
 memory_mode
 thread_id
 resource_id
 project_id
-memory_hydrated
+memory_hydrated            # always false until the inject phase ships
 reflection_version
 observation_count
 memory_tokens_injected
@@ -151,47 +170,43 @@ observer_job_id
 memory_writeback_status
 ```
 
-请求详情默认可以展示记忆元数据。完整的记忆内容应需要显式授权，并且应被审计。
+The request detail may show memory metadata by default. Full memory **content**
+requires explicit authorization and is audited (see [07 · Error Model &
+Observability](07-observability.md)).
 
-## 成本核算
+## Cost accounting (roadmap)
 
-独立的 token/成本分桶：
+Memory maintenance gets its own token/cost buckets so it is visible in cost
+reports and not hidden inside provider execution cost: actor request tokens, actor
+response tokens, memory hydrate tokens, Observer tokens, Reflector tokens.
 
-- Actor 请求 token。
-- Actor 响应 token。
-- 记忆补水（hydrate）token。
-- Observer token。
-- Reflector token。
+## Phases
 
-记忆维护必须在成本报告中可见，且不应隐藏在 Provider 执行成本之中。
+### Phase 1 — Memory-ready · implemented
 
-## 阶段计划
+- Accept the memory headers.
+- Persist raw messages in `observe` mode.
+- Surface memory metadata in the request log.
+- Do not inject memory yet.
 
-### 阶段 1：记忆就绪（Memory-ready）
+### Phase 2 — Observational Memory MVP · roadmap
 
-- 接受记忆请求头。
-- 在 observe 模式下持久化原始消息。
-- 在请求日志中展示记忆元数据。
-- 暂不注入记忆。
+- Implement the Observer: raw messages → observations.
+- Implement the Reflector: observations → reflections.
+- Implement inject-phase context assembly (call `assembleInjectedContext`).
+- Run only when `x-memory-mode=inject` is explicitly set.
 
-### 阶段 2：观察式记忆 MVP（Observational Memory MVP）
+### Phase 3 — Project memory · roadmap
 
-- 实现 Observer：原始消息 -> 观察记录。
-- 实现 Reflector：观察记录 -> 反思。
-- 实现 inject 模式的上下文组装。
-- 仅在显式设置 `x-memory-mode=inject` 时运行。
+- Project / resource / thread scope hierarchy.
+- Structured facts and an asset graph.
+- Creative / project workspace support.
 
-### 阶段 3：项目记忆（Project memory）
+## Non-goals
 
-- 项目/资源/线程的作用域层级。
-- 结构化事实与资产图谱。
-- 创意/项目工作区支持。
-
-## 非目标
-
-- 不在路由核心中构建完整的 RAG 产品。
-- 默认不进行逐轮的动态检索。
-- 不进行跨项目的记忆共享。
-- 首个版本中不引入全局用户画像。
-- 不在主请求路径中引入同步的 Observer。
-- 不在记忆中间件中进行 agent 编排。
+- No full RAG product inside the routing core.
+- No per-turn dynamic retrieval by default.
+- No cross-project memory sharing.
+- No global user profile in the first version.
+- No synchronous Observer on the main request path.
+- No agent orchestration inside the memory middleware.

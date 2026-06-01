@@ -4,7 +4,7 @@ import type { EvalDecision } from "./eval/client.js";
 import type { TaskType } from "./taskdetect.js";
 import type { Complexity } from "./tiers.js";
 
-// eval.cascade — the THREE-layer classification cascade (docs/03 §分类级联),
+// eval.cascade — the THREE-layer classification cascade (docs/03 §Classification Cascade),
 // hit-stop: Layer 1 rules (always-on, zero-network, pure) → Layer 2 eval (ONLY
 // when rules are uncertain AND eval is enabled) → Layer 3 `balanced` fail-open.
 // This is the eval module's "final assembly": the SINGLE place that references
