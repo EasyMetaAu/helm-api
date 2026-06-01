@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { type ApiKeyView, revokeKey } from '$lib/api/keys.js';
+  import { type ApiKeyView, revokeKey, updateKeyRateLimit } from '$lib/api/keys.js';
   import CreateKeyDialog from '$lib/components/CreateKeyDialog.svelte';
   import { t } from '$lib/i18n';
 
@@ -23,6 +23,58 @@
 
   // The display prefix of the key pending revoke confirmation — purely for copy.
   let confirmingPrefix = $derived(keys.find((k) => k.key_id === confirmingRevoke)?.prefix ?? '');
+
+  // Inline per-key rate-limit editing. `editingLimits` holds the key_id under edit
+  // (one row at a time); the two inputs are raw strings ('' = clear → inherit).
+  let editingLimits = $state<string | null>(null);
+  let editRpm = $state<string>('');
+  let editTpm = $state<string>('');
+  let savingLimits = $state<string | null>(null);
+
+  // Parse a rate-limit input: blank => null (inherit system default), else a
+  // non-negative int (0 = unlimited); a malformed value falls back to null.
+  function parseLimit(raw: string): number | null {
+    const trimmed = raw.trim();
+    if (trimmed === '') return null;
+    const n = Number(trimmed);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  }
+
+  // Render a stored limit for display: a number as-is (0 → "unlimited"), null as
+  // the inherit/"default" copy.
+  function limitLabel(v: number | null): string {
+    if (v === null) return $t('Default');
+    return v === 0 ? $t('Unlimited') : String(v);
+  }
+
+  function startEditLimits(key: ApiKeyView): void {
+    error = null;
+    editingLimits = key.key_id;
+    editRpm = key.rate_limit_rpm === null ? '' : String(key.rate_limit_rpm);
+    editTpm = key.rate_limit_tpm === null ? '' : String(key.rate_limit_tpm);
+  }
+
+  function cancelEditLimits(): void {
+    editingLimits = null;
+  }
+
+  async function saveLimits(keyId: string): Promise<void> {
+    error = null;
+    savingLimits = keyId;
+    const rpm = parseLimit(editRpm);
+    const tpm = parseLimit(editTpm);
+    try {
+      await updateKeyRateLimit(keyId, { rpm, tpm });
+      keys = keys.map((k) =>
+        k.key_id === keyId ? { ...k, rate_limit_rpm: rpm, rate_limit_tpm: tpm } : k,
+      );
+      editingLimits = null;
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to update rate limit');
+    } finally {
+      savingLimits = null;
+    }
+  }
 
   function onCreated(view: ApiKeyView): void {
     // Append the new key by its redacted view (prefix only). It is also re-fetched

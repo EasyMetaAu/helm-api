@@ -22,6 +22,8 @@ export interface ApiKeyView {
   allowed_lanes: string[] | null; // whitelist
   allow_custom_model: boolean; // explicit client-model passthrough
   disabled: boolean; // revoked state (soft)
+  rate_limit_rpm: number | null; // per-key RPM override; null = inherit system default
+  rate_limit_tpm: number | null; // per-key TPM override; null = inherit system default
 }
 
 // Operator-specified caps for a new key. The plaintext is minted server-side; the
@@ -32,6 +34,10 @@ export interface CreateKeyInput {
   max_lane?: string;
   allowed_lanes?: string[];
   allow_custom_model?: boolean;
+  // Optional per-key rate limits at mint time. Omitted => inherit the system
+  // default. 0 => explicitly unlimited for that dimension.
+  rate_limit_rpm?: number;
+  rate_limit_tpm?: number;
 }
 
 // The ONLY shape that ever carries plaintext, returned once by POST. `prefix` is
@@ -76,6 +82,9 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     allowed_lanes: Array.isArray(allowed) ? allowed.map(String) : null,
     allow_custom_model: raw.allow_custom_model === true,
     disabled: raw.disabled === true,
+    // null/absent = inherit system default; a finite number (incl. 0) = override.
+    rate_limit_rpm: typeof raw.rate_limit_rpm === 'number' ? raw.rate_limit_rpm : null,
+    rate_limit_tpm: typeof raw.rate_limit_tpm === 'number' ? raw.rate_limit_tpm : null,
   };
 }
 
@@ -90,6 +99,9 @@ function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   if (input.allow_custom_model !== undefined) {
     out.allow_custom_model = input.allow_custom_model;
   }
+  // Send rate limits only when set (0 is meaningful = unlimited, so check undefined).
+  if (input.rate_limit_rpm !== undefined) out.rate_limit_rpm = input.rate_limit_rpm;
+  if (input.rate_limit_tpm !== undefined) out.rate_limit_tpm = input.rate_limit_tpm;
   return out;
 }
 
@@ -108,6 +120,21 @@ export async function createKey(input: CreateKeyInput): Promise<CreatedKey> {
     body: JSON.stringify(toServerBody(input)),
   });
   return asJson<CreatedKey>(res);
+}
+
+// PATCH /admin/api/keys/:id -> edit a key's per-key rate-limit override. A number
+// sets an explicit limit (0 = unlimited); null clears it back to inheriting the
+// system default. Both dimensions are sent together (the server overwrites both).
+export async function updateKeyRateLimit(
+  keyId: string,
+  limits: { rpm: number | null; tpm: number | null },
+): Promise<void> {
+  const res = await fetch(`${BASE}/${encodeURIComponent(keyId)}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ rate_limit_rpm: limits.rpm, rate_limit_tpm: limits.tpm }),
+  });
+  await asJson<unknown>(res);
 }
 
 // DELETE /admin/api/keys/:id -> { revoked: id } (soft disable; row is kept).

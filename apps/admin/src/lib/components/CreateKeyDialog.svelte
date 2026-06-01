@@ -27,6 +27,10 @@
   let role = $state<Role>('user');
   let maxLane = $state<string>('');
   let allowCustomModel = $state<boolean>(false);
+  // Per-key rate limits as raw input strings ('' = leave unset → inherit system
+  // default). Parsed to an int only when non-blank; 0 is a valid value (unlimited).
+  let rpmInput = $state<string>('');
+  let tpmInput = $state<string>('');
 
   let error = $state<string | null>(null);
   let creating = $state<boolean>(false);
@@ -34,6 +38,15 @@
   // cleared on close. While set, the form is replaced by the one-time reveal.
   let revealed = $state<CreatedKey | null>(null);
   let copied = $state<boolean>(false);
+
+  // Parse a rate-limit field: blank => null (inherit), else a non-negative int
+  // (0 = unlimited). A malformed value parses to null so it never blocks submit.
+  function parseLimit(raw: string): number | null {
+    const trimmed = raw.trim();
+    if (trimmed === '') return null;
+    const n = Number(trimmed);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  }
 
   async function handleCreate(): Promise<void> {
     error = null;
@@ -43,6 +56,11 @@
       allow_custom_model: allowCustomModel,
     };
     if (maxLane) input.max_lane = maxLane;
+    // Send a rate limit only when the operator typed one; blank => inherit default.
+    const rpm = parseLimit(rpmInput);
+    const tpm = parseLimit(tpmInput);
+    if (rpm !== null) input.rate_limit_rpm = rpm;
+    if (tpm !== null) input.rate_limit_tpm = tpm;
     try {
       revealed = await createKey(input);
     } catch (e) {
@@ -80,6 +98,8 @@
         allowed_lanes: null,
         allow_custom_model: allowCustomModel,
         disabled: false,
+        rate_limit_rpm: parseLimit(rpmInput),
+        rate_limit_tpm: parseLimit(tpmInput),
       };
       oncreated(view);
     }
@@ -167,6 +187,38 @@
       <span class="field-help"
         >{$t(
           'Lets this client bypass lanes and target a specific model by name. Leave off to keep every request routed through lanes.',
+        )}</span
+      >
+
+      <div class="grid grid-cols-2 gap-3">
+        <label class="flex flex-col gap-1 text-sm">
+          <span class="field-label">{$t('Requests per minute (RPM)')}</span>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            aria-label={$t('Requests per minute (RPM)')}
+            placeholder={$t('Default')}
+            class="select"
+            bind:value={rpmInput}
+          />
+        </label>
+        <label class="flex flex-col gap-1 text-sm">
+          <span class="field-label">{$t('Tokens per minute (TPM)')}</span>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            aria-label={$t('Tokens per minute (TPM)')}
+            placeholder={$t('Default')}
+            class="select"
+            bind:value={tpmInput}
+          />
+        </label>
+      </div>
+      <span class="field-help"
+        >{$t(
+          'Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.',
         )}</span
       >
     </div>

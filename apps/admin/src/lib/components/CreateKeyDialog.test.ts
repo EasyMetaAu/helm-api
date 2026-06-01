@@ -43,6 +43,19 @@ describe('CreateKeyDialog', () => {
     expect(input.allow_custom_model).toBe(false);
   });
 
+  it('submits per-key rate limits when filled, and omits them when left blank', async () => {
+    setup();
+    await fireEvent.input(screen.getByLabelText(/requests per minute|rpm/i), {
+      target: { value: '60' },
+    });
+    // Leave TPM blank -> it must be omitted (inherit the system default).
+    await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
+    await waitFor(() => expect(createKey).toHaveBeenCalledTimes(1));
+    const input = createKey.mock.calls[0][0];
+    expect(input.rate_limit_rpm).toBe(60);
+    expect(input.rate_limit_tpm).toBeUndefined();
+  });
+
   it('reveals the plaintext exactly once with a copy button after creation', async () => {
     setup();
     await fireEvent.click(screen.getByRole('button', { name: /create key/i }));

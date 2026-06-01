@@ -9,9 +9,11 @@ import KeysPage from './+page.svelte';
 
 const createKey = vi.fn();
 const revokeKey = vi.fn();
+const updateKeyRateLimit = vi.fn();
 vi.mock('$lib/api/keys.js', () => ({
   createKey: (...args: unknown[]) => createKey(...args),
   revokeKey: (...args: unknown[]) => revokeKey(...args),
+  updateKeyRateLimit: (...args: unknown[]) => updateKeyRateLimit(...args),
 }));
 
 function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
@@ -23,6 +25,8 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     allowed_lanes: null,
     allow_custom_model: false,
     disabled: false,
+    rate_limit_rpm: null,
+    rate_limit_tpm: null,
     ...overrides,
   };
 }
@@ -35,6 +39,8 @@ describe('keys page', () => {
   beforeEach(() => {
     createKey.mockReset();
     revokeKey.mockReset();
+    updateKeyRateLimit.mockReset();
+    updateKeyRateLimit.mockResolvedValue(undefined);
     revokeKey.mockResolvedValue({ revoked: '' });
   });
 
@@ -90,6 +96,29 @@ describe('keys page', () => {
     expect(text).not.toContain('helm_live_TOPSECRETVALUE0000');
     // The new key now appears in the list by prefix only.
     expect(screen.getAllByTestId('key-row').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('shows per-key rate limits in the row (number, and "default" when null)', () => {
+    renderPage([
+      key('k1', { rate_limit_rpm: 60, rate_limit_tpm: 0 }),
+      key('k2'), // both null -> inherits the system default
+    ]);
+    const rows = screen.getAllByTestId('key-row');
+    // k1 shows its explicit RPM; k2 shows the inherit/default copy.
+    expect(within(rows[0]).getByText(/60/)).toBeInTheDocument();
+    expect(within(rows[1]).getByText(/default/i)).toBeInTheDocument();
+  });
+
+  it('inline edit PATCHes the per-key rate limit via updateKeyRateLimit', async () => {
+    renderPage([key('k1', { rate_limit_rpm: null, rate_limit_tpm: null })]);
+    const row = screen.getByTestId('key-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /edit limits/i }));
+    const rpm = within(row).getByLabelText(/rpm/i);
+    await fireEvent.input(rpm, { target: { value: '120' } });
+    await fireEvent.click(within(row).getByRole('button', { name: /save/i }));
+    await waitFor(() =>
+      expect(updateKeyRateLimit).toHaveBeenCalledWith('k1', { rpm: 120, tpm: null }),
+    );
   });
 
   it('on revoke failure shows an error and leaves the row unchanged (fail-closed)', async () => {
