@@ -5,6 +5,7 @@ import type {
   InsertPayloadInput,
   InsertTelemetryInput,
   KeyStore,
+  RecentDecisionRecord,
   RequestPayload,
   TelemetryStore,
 } from "./ports.js";
@@ -51,11 +52,11 @@ class InMemoryTelemetryStore implements TelemetryStore {
     this.rows.push({ at: input.createdAt, rec: input.decision });
     return { id: String(this.rows.length) };
   }
-  async queryRecent(limit: number): Promise<DecisionRecord[]> {
+  async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
     return [...this.rows]
       .sort((a, b) => b.at.getTime() - a.at.getTime())
       .slice(0, limit)
-      .map((r) => r.rec);
+      .map((r) => ({ record: r.rec, createdAt: r.at }));
   }
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {
     return this.rows.find((r) => r.rec.request_id === requestId)?.rec ?? null;

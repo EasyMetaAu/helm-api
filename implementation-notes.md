@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-06-01 · 请求列表：行点击进详情 + 显示请求 ID/时间（docs/07，原则 1/7）
+
+**用户反馈（管理界面 `/admin/requests`）**：① 行尾的「view」按钮多余——希望**点整行**直接进详情；② **请求时间**没显示；③ **请求 ID** 没显示，且应作为**第一列**。
+
+**实现**：
+- **请求 ID（trace_id）**：早已在 `DecisionRecord` 里，纯前端改动——`+page.svelte` 新增第一列（`<a href>` 保留真链接，支持中键/新标签页/键盘），并删掉行尾 view 单元格。整行 `onclick → goto(detail)`，点内层 ID 链接时让锚点自处理（`closest('a')` 短路，避免双跳转）。a11y：因给 `<tr>` 挂 click 加了 `svelte-ignore`，键盘可达性由首列锚点承担。
+- **请求时间**：这是真正的后端缺口。时间戳存于 telemetry 表独立的 `created_at` 列，**不在**（脱敏的）`DecisionRecord` schema 里，而 `queryRecent` 只返回 `DecisionRecord[]` → UI 拿不到时间（原 `ts` 硬编码 `''`，注释写「backend does not record a timestamp yet」其实是没**透出**）。
+  - **决定**：让 recent-list 端口把时间和记录**配对**透出，而非塞进 `DecisionRecord`（保持脱敏 schema 干净，原则 7）。新增 `RecentDecisionRecord { record; createdAt }`，`queryRecent(): Promise<RecentDecisionRecord[]>`；sqlite/postgres 两个适配器同步（pg 的 `createdAt` 存 epoch ms→`new Date()` 包回，对齐 sqlite 的 `Date`）。
+  - 路由 `GET /admin/api/requests` 把配对拍平成 `{...record, created_at: ms}`（epoch ms，路由时间戳、非密钥/正文，原则 7）。前端 `toListItem` 据此填 `ts`（ISO，确定性/可排序），视图 `formatTs` 本地化展示；缺失（legacy 行）→ `'—'`，绝不伪造（原则 1）。
+- **范围**：仅列表页。详情页（`getByRequestId`）仍不透出时间（其 header 显示「time not recorded」），本次不动以收敛改动面；后续如需可同法扩 `getByRequestId`。
+
+**端口签名变更波及**：`ports.ts` + sqlite/pg 适配器 + 三处 store 测试（`ports.test`/`sqlite/telemetry.test`/`store-contract.test` 改读 `.record`）+ 路由 `admin.test`（mock 返回配对、断言 `created_at`）。`queryWindow`（Signal Collector）不受影响。
+
+**TDD/门禁**：先改测后实现。typecheck 0 / lint 0 error（仅历史 warning）/ svelte-check 0 error / 全套 **1134** 全绿 / admin build 通过。新增 i18n key `Request ID` 等（运行时缺失回退英文键）。
+
+**坑**：worktree 是干净 checkout——需先 `pnpm install` 且 `apps/admin` 跑 `svelte-kit sync`（生成 `.svelte-kit/tsconfig.json`，否则 admin vitest 解析 tsconfig 失败）；`admin-static.test` 依赖 `apps/admin/build`，须先 `pnpm --filter @helm/admin build`。全量 `pnpm test` 并行下 PGlite 偶发超时，隔离重跑即过。
+
+---
+
 ## 2026-06-01 · 分类器车道校准（classifier.lane-calibration）—— 修「所有请求都落到 balanced」（docs/03，原则 2/3/4/5）
 
 **症状（用户在 Docker 实测发现）**：每一条 `model:auto` 请求的遥测都是 `decided_by=fallback` / `fallback_reason=eval_disabled` / `lane=balanced`。lane 体系（economy/coding/premium/json/vision）**形同虚设**——无论提示词是打招呼、写代码还是深度推理，全部走 balanced。

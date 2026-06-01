@@ -272,7 +272,8 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       });
       const recent = await ctx.stores.telemetry.queryRecent(10);
       expect(recent).toHaveLength(1);
-      expect(recent[0]).toEqual(decision("req_1"));
+      expect(recent[0]?.record).toEqual(decision("req_1"));
+      expect(recent[0]?.createdAt).toBeInstanceOf(Date);
     });
 
     it("getByRequestId returns the record, null on a miss", async () => {
@@ -317,7 +318,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         createdAt: new Date(3000),
       });
       const recent = await ctx.stores.telemetry.queryRecent(2);
-      expect(recent.map((r) => r.request_id)).toEqual(["new", "mid"]);
+      expect(recent.map((r) => r.record.request_id)).toEqual(["new", "mid"]);
     });
 
     it("queryWindow returns half-open [start, end) matches in asc order", async () => {
