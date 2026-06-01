@@ -4,9 +4,9 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-### Route every LLM request to the right model — by config, not code.
+### One gateway in front of all your LLM providers — pick models by config, not code.
 
-*Think **nginx**, but for LLM traffic.* Open-source, self-hosted, MIT.
+Open-source · self-hosted · MIT
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-3c873a.svg)](package.json)
@@ -16,40 +16,38 @@
 
 </div>
 
-You wired your app to one model. Then a cheaper one shipped, a provider started rate-limiting you, one request needed vision, the bill crept up — and every change meant another redeploy. **Helm API puts a thin, fast gateway in front of your providers so those decisions live in config, not code.**
+**The problem.** Your app is hard-wired to one model. The day you want a cheaper model for easy requests, a stronger one for hard requests, or an automatic backup when a provider goes down, you have to change code and redeploy.
 
-Point your client at Helm and send a normal OpenAI or Anthropic request. Helm sizes up how hard it is, drops it into a **lane** (`economy` / `balanced` / `premium` …), runs it through provider adapters with automatic failover, and logs *why* every request went where it did. Your app only ever touches its `base_url` and API key — everything else is yours to tune from a config file or the built-in dashboard.
+**What Helm does.** Helm sits between your app and the model providers. Your app sends a normal OpenAI or Anthropic request to Helm; Helm decides which model should handle it, calls that provider (and switches to a backup if it fails), and records every decision. Your app only ever sets its `base_url` and API key — all the routing lives in a config file you control.
 
-```bash
-# your app, unchanged — just a new base_url + key
+Instead of naming a model, you name a **lane** — a tier like `economy`, `balanced`, or `premium`. Helm maps each lane to a real model behind the scenes, so you can change models without changing your app.
+
+```python
+# Your app: the same OpenAI client, just a new base_url and key.
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="<helm-key>")
 client.chat.completions.create(model="balanced", messages=[...])   # Helm picks the model
 ```
 
 ---
 
-## ✨ Why Helm
+## Why teams use it
 
-- **Lanes, not a model catalog.** Callers ask for an *intent* — `economy`, `balanced`, `premium` — and never need to know which provider or model actually answered. Swap models behind a lane without touching a single client.
-- **Config is the product.** Routing, lanes, policies, providers — all live in `config/*.yaml`, validated by Zod. Misconfigure something and Helm **refuses to boot** instead of misbehaving in production.
-- **Nothing 5xxs on a side-quest.** If classification, eval, or the cache hiccups, the request quietly drops to the `balanced` lane and keeps going. You only get a hard error when *every* provider is truly down.
-- **Fast path is deterministic.** Routing decisions are a pure, zero-network, unit-tested function. The optional small-model "second opinion" runs at `temperature: 0`, is cached, and ships **off by default** — no surprise latency or spend.
-- **Keys hashed, bodies kept.** API keys are stored as SHA-256 hashes — never logged, never echoed. Full request/response bodies land in a separate, toggleable table with retention, so you can actually debug what happened.
-- **Headless or hands-on.** The whole routing engine is framework-free and runs fine without a UI — but there's a polished admin dashboard when you want one.
-- **Yours to run.** MIT-licensed, Docker-deployed, no SaaS, no phone-home. It's your gateway on your infra.
+- **Change models without changing code.** Point a lane at a different model in a config file — your apps never notice.
+- **It won't fail by accident.** If an optional step has trouble (classification, scoring, cache), the request quietly falls back to the `balanced` lane. You only get an error when every provider is genuinely down.
+- **Safe by default.** Invalid config refuses to start. API keys are stored only as hashes. Rate limiting and the optional scoring model are off until you turn them on.
+- **Every decision is visible.** Each request records the lane it took, the model that answered, why, and what it cost — all browsable in the dashboard.
+- **Runs on your own infrastructure.** MIT-licensed and deployed with Docker. No SaaS, and no data leaves your servers.
 
-## 🧩 What's inside
+## What it does
 
-- 🔌 **Drop-in compatible** with OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses — including SSE streaming for Chat & Messages.
-- 🔁 **Speaks every dialect** via one internal representation, with SSE event mapping handled for you.
-- 🧭 **Three-layer routing**: deterministic rules → optional small-model eval → `balanced` safety net.
-- 🛣️ **Lane + policy engine** with first-match rules and per-org caps.
-- 🪂 **Multi-provider failover** across providers, with capability filtering (JSON / tools / vision / context / streaming) and a per-model circuit breaker.
-- 💾 **Bring your own store**: SQLite out of the box, Postgres/Supabase when you scale — one interface, swap freely.
-- 🔒 **Auth that's on by default**: mandatory API keys, a root key minted on first boot, optional per-key RPM/TPM limits.
-- 📊 **A real dashboard** (SvelteKit) for keys, lanes, policies, classifier tuning, and request debugging — HTTP Basic auth, localized in 5 languages.
+- Accepts **OpenAI Chat Completions**, **Anthropic Messages**, and **OpenAI Responses** requests — with streaming for the first two.
+- Translates between protocols, so one client can reach many different backends.
+- Picks a lane with fast built-in rules (plus an optional small model for a second opinion — off by default).
+- Falls back across providers automatically, checking each candidate's capabilities (JSON, tools, vision, context size) and skipping ones that are failing.
+- Stores everything in SQLite by default, or Postgres/Supabase when you grow.
+- Comes with a web dashboard for keys, lanes, policies, and request debugging — in 5 languages.
 
-## 🗺️ How a request flows
+## How a request flows
 
 ```
         ┌──────────────────────────── Helm API gateway (Hono) ───────────────────────────┐
@@ -58,44 +56,42 @@ client ─┤  /v1/chat/completions ─┐                                      
 (OpenAI/ │  /v1/messages ─────────┼─▶ auth ─▶ rate limit ─▶ classify ─▶ route ─▶ execute ──┼─▶ upstream
  Anthropic) /v1/responses ────────┘     │         │            │          │         │       │   providers
         │                               │         │            │          │         │       │  (openai-crs,
-        │   /admin (SPA, HTTP Basic) ───┘   per-key RPM/TPM   3-layer    lane +    provider  │   zenmux,
-        │   /admin/api/*                                      cascade   policies   fallback  │   openrouter…)
-        │   /healthz  /version                                                    + breaker  │
+        │   /admin (SPA, HTTP Basic) ───┘   per-key RPM/TPM   pick a     apply     try, then │   zenmux,
+        │   /admin/api/*                                       lane     policies  fall back  │   openrouter…)
+        │   /healthz  /version                                                               │
         │                                                                                    │
         └──────────────────────────── Store (SQLite default · Postgres optional) ───────────┘
-              keys · decision telemetry · request payloads · rate-limit buckets · memory
+              keys · decision logs · request payloads · rate-limit counters · memory
 ```
 
-The routing brain lives in `packages/core` and depends on no web framework. `apps/gateway` is a thin Hono shell that also serves the dashboard.
+The routing logic lives in `packages/core` and depends on no web framework. `apps/gateway` is a thin Hono layer that also serves the dashboard.
 
-## 🚀 Quick start
+## Quick start
 
-Up and running in three commands:
+Three commands to a running gateway:
 
 ```bash
-# 1. clone + create your env file
+# 1. Clone and create your env file
 git clone https://github.com/EasyMetaAu/helm-api.git && cd helm-api
 cp .env.example .env
-#    set HELM_ADMIN_PASSWORD and at least OPENAI_API_KEY in .env
+#    In .env, set HELM_ADMIN_PASSWORD and at least OPENAI_API_KEY
 
-# 2. launch
+# 2. Start it
 docker compose up -d
 
-# 3. grab the root API key Helm prints ONCE on first boot
+# 3. Copy the root API key — it is printed once, on first boot
 docker compose logs helm | grep -i "root key"
 ```
 
-That's it:
-
 - **Gateway** → `http://localhost:8080`
-- **Dashboard** → `http://localhost:8080/admin` (`HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD`)
+- **Dashboard** → `http://localhost:8080/admin` (log in with `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD`)
 - **Health / version** → `GET /healthz`, `GET /version`
 
-`docker-compose.yml` mounts `./config` and `./data`, so your config and SQLite database survive restarts. Credentials are injected via env vars only — never baked into the image.
+`docker-compose.yml` mounts `./config` and `./data`, so your config and database survive restarts. Credentials are passed in as environment variables only — never built into the image.
 
-## 🔗 Calling it
+## Calling the gateway
 
-Any OpenAI-compatible client works — just point it at Helm with a Helm key:
+Any OpenAI-compatible client works. Point it at Helm and use a Helm API key:
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
@@ -108,66 +104,66 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-The `model` field takes a **lane** name, not a vendor model id:
+Put a **lane** name in the `model` field, not a vendor model id:
 
 | Endpoint | Protocol | Streaming |
 |---|---|---|
-| `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ SSE |
-| `POST /v1/messages` | Anthropic Messages | ✅ SSE |
-| `POST /v1/responses` | OpenAI Responses | ❌ non-streaming (0.1) |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ |
+| `POST /v1/messages` | Anthropic Messages | ✅ |
+| `POST /v1/responses` | OpenAI Responses | ❌ not yet (0.1) |
 
-> Pass `economy`, `balanced`, `premium`, or a task lane like `coding`. Leave it off (or send something unknown) and Helm classifies the request and picks a lane for you. A Gemini adapter already lives in the core but isn't routed yet — see the [roadmap](docs/09-roadmap.md).
+> Use `economy`, `balanced`, `premium`, or a task lane like `coding`. Leave it blank (or send a name Helm doesn't know) and Helm picks a lane for you. A Gemini adapter exists in the core but isn't exposed as a route yet — see the [roadmap](docs/09-roadmap.md).
 
-## ⚙️ Configuration
+## Configuration
 
-Everything is config-as-code in `config/*.yaml` — Zod-validated, fail-closed. The hot-reloadable ones can also be edited live from the dashboard.
+Everything is configured in `config/*.yaml`. Files are validated on load, and invalid config stops the gateway from starting. The lanes, policies, and classifier can also be edited live in the dashboard.
 
 | File | What it controls | Live-editable |
 |---|---|---|
 | `server.yaml` | Host / port / base path | — |
-| `auth.yaml` | Mandatory API key + root-key bootstrap | — |
-| `runtime.yaml` | Request limits, rate-limit defaults, store driver | partial |
-| `providers.yaml` | Upstream providers + model aliases (creds by env-var **name** only) | — |
-| `lanes.yaml` | Lanes (primary + fallback chain, constraints) | ✅ |
-| `policies.yaml` | First-match routing rules | ✅ |
-| `classifier.yaml` | Layer-1 rules + Layer-2 eval | ✅ |
+| `auth.yaml` | API key requirement + first-run root key | — |
+| `runtime.yaml` | Request limits, rate-limit defaults, storage driver | partial |
+| `providers.yaml` | Upstream providers + model aliases (credentials by env-var **name** only) | — |
+| `lanes.yaml` | Lanes — each lane's main model and its backup chain | ✅ |
+| `policies.yaml` | Rules that pick or cap the lane | ✅ |
+| `classifier.yaml` | The built-in rules and the optional scoring model | ✅ |
 | `capabilities.yaml` / `pricing.yaml` | Manual overrides on the model catalog | — |
 
-Most-used env vars (full list in [`.env.example`](.env.example)):
+Most-used environment variables (full list in [`.env.example`](.env.example)):
 
 | Variable | Purpose |
 |---|---|
-| `OPENAI_API_KEY` | Primary provider credential (**required**) |
-| `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` | Optional fallback-provider credentials |
+| `OPENAI_API_KEY` | Main provider credential (**required**) |
+| `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` | Backup provider credentials (optional) |
 | `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | Dashboard login |
 | `HELM_PORT` / `HELM_HOST` | Server binding (default `0.0.0.0:8080`) |
 | `HELM_STORE_DRIVER` | `sqlite` (default) or `supabase` |
-| `HELM_RATE_LIMIT_ENABLED` | Master rate-limit switch (default off) |
+| `HELM_RATE_LIMIT_ENABLED` | Turn rate limiting on (off by default) |
 
-Ships with lanes **economy** / **balanced** / **premium**, plus task lanes **coding** / **json** / **vision** / **tool_use**. `balanced` is the guaranteed safety net every classification can fall back to.
+Helm ships with the lanes **economy**, **balanced**, and **premium**, plus task lanes **coding**, **json**, **vision**, and **tool_use**. `balanced` is the lane every request can safely fall back to.
 
-## 🖥️ The dashboard
+## The dashboard
 
-At `/admin`, behind HTTP Basic auth: a live dashboard, API keys (create / revoke / per-key limits), lane and policy editors, classifier tuning, request telemetry with full decision-chain drill-down, and system settings (payload capture, retention, rate-limit switch). Localized in English (default), Simplified & Traditional Chinese, Japanese, and Korean.
+At `/admin`, behind a username/password (HTTP Basic): a live overview, API keys (create, revoke, set per-key limits), lane and policy editors, classifier settings, and a request log you can drill into to see exactly how each request was routed. Available in English (default), Simplified and Traditional Chinese, Japanese, and Korean.
 
-## 🗂️ Project layout
+## Project layout
 
 ```
 helm-api/
 ├─ apps/
 │  ├─ gateway/   # Hono API + serves the dashboard + /healthz, /version
-│  └─ admin/     # SvelteKit + Tailwind dashboard (adapter-static SPA)
+│  └─ admin/     # SvelteKit + Tailwind dashboard (static SPA)
 ├─ packages/
-│  ├─ core/      # routing · classification · providers · protocol translation · Store ports (framework-free)
+│  ├─ core/      # routing, classification, providers, protocol translation, storage ports (no framework)
 │  └─ shared/    # Zod schemas + shared types (single source of truth)
 ├─ config/       # default lanes / policies / classifier / providers / … YAML
 ├─ docs/         # documentation (read 01 → 11)
 └─ scripts/      # sync:catalog and other build-time tools
 ```
 
-## 🛠️ Development
+## Development
 
-Needs **Node ≥ 22** and **pnpm**.
+Requires **Node ≥ 22** and **pnpm**.
 
 ```bash
 pnpm install
@@ -176,13 +172,13 @@ pnpm test         # Vitest unit tests
 pnpm test:e2e     # Playwright end-to-end tests
 pnpm typecheck    # tsc --noEmit across the workspace
 pnpm lint         # Biome
-pnpm build        # build gateway + dashboard assets
+pnpm build        # build the gateway + dashboard
 pnpm sync:catalog # refresh the generated model catalog (capabilities + pricing)
 ```
 
-Built test-first (Vitest for the core, Playwright for the flows). The full spec lives in [`docs/`](docs/README.md); design decisions and trade-offs are logged in [`implementation-notes.md`](implementation-notes.md).
+Tests come first (Vitest for the core, Playwright for full flows). The full spec is in [`docs/`](docs/README.md), and design decisions are logged in [`implementation-notes.md`](implementation-notes.md).
 
-## 📚 Documentation
+## Documentation
 
 Read in order, starting at [`docs/README.md`](docs/README.md):
 
@@ -198,18 +194,18 @@ Read in order, starting at [`docs/README.md`](docs/README.md):
 [10 Deployment](docs/10-deployment.md) ·
 [11 Admin UI](docs/11-admin-ui.md)
 
-## 🧭 Roadmap
+## Roadmap
 
-**0.1** ships the full routing gateway, three client protocols, multi-provider failover, the dashboard, and the observational-memory *observe* phase. Next up: a Gemini client route, streaming for `/v1/responses`, the memory *inject* phase, and richer quota controls. Details in [09 Roadmap](docs/09-roadmap.md).
+**0.1** includes the full routing gateway, three client protocols, multi-provider fallback, the dashboard, and the first half of the memory feature (observe). Coming next: a Gemini route, streaming for `/v1/responses`, the second half of memory (inject), and finer-grained quotas. See [09 Roadmap](docs/09-roadmap.md).
 
-## 🤝 Contributing
+## Contributing
 
-Issues and PRs welcome. Work on a branch and make sure CI is green before opening a PR:
+Issues and pull requests are welcome. Work on a branch, and make sure the checks pass before opening a PR:
 
 ```bash
 pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
 ```
 
-## 📄 License
+## License
 
 [MIT](LICENSE) © 2026 EasyMeta AU / 路田（上海）网络科技有限公司
