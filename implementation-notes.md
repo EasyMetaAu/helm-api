@@ -5,6 +5,22 @@
 
 ---
 
+## 2026-06-01 · Inject build info into the Docker image so /version is real (docs/10)
+
+**Context**: follow-up to the status cluster. After deploying, the header's **version pill never showed** and the gateway reported `GET /version → {"version":"unknown",...}`. Root cause: `readBuildInfo()` reads `HELM_VERSION`/`HELM_GIT_SHA`/`HELM_BUILT_AT` from env, but the **`Dockerfile` never set them** — so the docs' claim that build info is "injected at build time" was aspirational. (The status-cluster component intentionally hides a `"unknown"` version, which is why the pill was blank — correct behavior, missing data.)
+
+**Fix**:
+- `Dockerfile` (runtime stage): declare `ARG HELM_VERSION/HELM_GIT_SHA/HELM_BUILT_AT` (default `unknown`) → `ENV`. A bare `docker build` still works; values come from `--build-arg`.
+- `.github/workflows/ci.yml` (docker job): pass the args — `HELM_VERSION` from `package.json`, `HELM_GIT_SHA` from `git rev-parse --short HEAD`, `HELM_BUILT_AT` from a UTC stamp — and a new step asserts `/version` reports the injected version (and a non-`unknown` gitSha), guarding the wiring.
+- `docker-compose.yml`: documented the same args under a commented `build` block for local `build: .`.
+- Root `package.json` version `0.0.0` → **`0.1.0`** so the injected value is meaningful (matches the "0.1 release" framing across README/docs). This is the single source of truth the build reads.
+
+**Sibling decision (GitHub stars)**: the star count was *also* blank, but for an unrelated reason — `EasyMetaAu/helm-api` was **private**, so the unauthenticated GitHub API returned 404 and the client fail-silently hid the count. Resolved by **making the repo public** (the intended open-source state); the existing client-side fetch now shows `★ N` with no code change. The earlier "stars client-side, not gateway-proxied" decision stands.
+
+**Local deploy**: rebuilt `ghcr.io/easymetaau/helm-api:latest` with the three `--build-arg`s and recreated the compose container; `/version` now returns `0.1.0` + short sha + timestamp, and the pill renders.
+
+---
+
 ## 2026-06-01 · Unified admin status cluster in the header top-right (docs/11, Principle 3 & 7)
 
 **Context**: operator-facing meta was scattered in the sidebar footer — a `LocaleSwitcher`, a **hardcoded** "Gateway online" badge (static green dot that never reflected real health), and a GitHub link with no star count — and there was no version display despite the gateway already exposing `GET /version`. Consolidated all of it into one designed cluster in the previously-empty **header top-right**, and made the signals live.
