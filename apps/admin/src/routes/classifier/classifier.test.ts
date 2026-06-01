@@ -110,6 +110,26 @@ describe('classifier page', () => {
     expect(table.querySelectorAll('input, select, textarea, button')).toHaveLength(0);
   });
 
+  it('keeps the rule dimensions collapsed by default with title + intro + toggle always visible', () => {
+    renderPage(config());
+    const table = screen.getByTestId('dimension-table');
+    const details = table.closest('details') as HTMLDetailsElement;
+    expect(details).not.toBeNull();
+    // Collapsed by default: the table is hidden behind the disclosure.
+    expect(details.open).toBe(false);
+    // The summary (always visible) carries the title, the intro paragraph, and a
+    // clear toggle affordance with the dimension count — so the operator knows the
+    // section is expandable even while it is collapsed.
+    const summary = details.querySelector('summary') as HTMLElement;
+    expect(summary).not.toBeNull();
+    expect(within_text(summary, 'Rule dimensions')).toBe(true);
+    expect(within_text(summary, 'How Layer-1 scores each request')).toBe(true);
+    // 2 dimensions in the mock config → "Show all 2 dimensions".
+    expect(within_text(summary, 'Show all 2 dimensions')).toBe(true);
+    // The table itself lives outside the summary (in the toggled body).
+    expect(summary.contains(table)).toBe(false);
+  });
+
   it('shows eval details read-only (model, temperature=0, timeout, on_failure, cache ttl)', () => {
     renderPage(config());
     const details = screen.getByTestId('eval-details');
