@@ -43,3 +43,6 @@ docker-data/
 
 # i18n translator generated config (non-secret, runtime only)
 apps/admin/tools/.translator.env
+
+# CodeGraph local index (per-machine, rebuilt from source — never committed)
+.codegraph/
