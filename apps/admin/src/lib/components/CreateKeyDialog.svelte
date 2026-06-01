@@ -27,10 +27,11 @@
   let role = $state<Role>('user');
   let maxLane = $state<string>('');
   let allowCustomModel = $state<boolean>(false);
-  // Per-key rate limits as raw input strings ('' = leave unset → inherit system
-  // default). Parsed to an int only when non-blank; 0 is a valid value (unlimited).
-  let rpmInput = $state<string>('');
-  let tpmInput = $state<string>('');
+  // Per-key rate limits. null = leave unset → inherit the system default; a number
+  // (0 = unlimited) sets an explicit override. A number input binds to number|null
+  // (empty field => null), so no string parsing is needed.
+  let rpmInput = $state<number | null>(null);
+  let tpmInput = $state<number | null>(null);
 
   let error = $state<string | null>(null);
   let creating = $state<boolean>(false);
@@ -38,15 +39,6 @@
   // cleared on close. While set, the form is replaced by the one-time reveal.
   let revealed = $state<CreatedKey | null>(null);
   let copied = $state<boolean>(false);
-
-  // Parse a rate-limit field: blank => null (inherit), else a non-negative int
-  // (0 = unlimited). A malformed value parses to null so it never blocks submit.
-  function parseLimit(raw: string): number | null {
-    const trimmed = raw.trim();
-    if (trimmed === '') return null;
-    const n = Number(trimmed);
-    return Number.isInteger(n) && n >= 0 ? n : null;
-  }
 
   async function handleCreate(): Promise<void> {
     error = null;
@@ -56,11 +48,9 @@
       allow_custom_model: allowCustomModel,
     };
     if (maxLane) input.max_lane = maxLane;
-    // Send a rate limit only when the operator typed one; blank => inherit default.
-    const rpm = parseLimit(rpmInput);
-    const tpm = parseLimit(tpmInput);
-    if (rpm !== null) input.rate_limit_rpm = rpm;
-    if (tpm !== null) input.rate_limit_tpm = tpm;
+    // Send a rate limit only when the operator set one; blank (null) => inherit default.
+    if (rpmInput !== null) input.rate_limit_rpm = rpmInput;
+    if (tpmInput !== null) input.rate_limit_tpm = tpmInput;
     try {
       revealed = await createKey(input);
     } catch (e) {
@@ -98,8 +88,8 @@
         allowed_lanes: null,
         allow_custom_model: allowCustomModel,
         disabled: false,
-        rate_limit_rpm: parseLimit(rpmInput),
-        rate_limit_tpm: parseLimit(tpmInput),
+        rate_limit_rpm: rpmInput,
+        rate_limit_tpm: tpmInput,
       };
       oncreated(view);
     }

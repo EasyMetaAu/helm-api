@@ -27,18 +27,11 @@
   // Inline per-key rate-limit editing. `editingLimits` holds the key_id under edit
   // (one row at a time); the two inputs are raw strings ('' = clear → inherit).
   let editingLimits = $state<string | null>(null);
-  let editRpm = $state<string>('');
-  let editTpm = $state<string>('');
+  // number | null: null = clear → inherit the system default; a number input binds
+  // to number|null (empty field => null), so no string parsing is needed.
+  let editRpm = $state<number | null>(null);
+  let editTpm = $state<number | null>(null);
   let savingLimits = $state<string | null>(null);
-
-  // Parse a rate-limit input: blank => null (inherit system default), else a
-  // non-negative int (0 = unlimited); a malformed value falls back to null.
-  function parseLimit(raw: string): number | null {
-    const trimmed = raw.trim();
-    if (trimmed === '') return null;
-    const n = Number(trimmed);
-    return Number.isInteger(n) && n >= 0 ? n : null;
-  }
 
   // Render a stored limit for display: a number as-is (0 → "unlimited"), null as
   // the inherit/"default" copy.
@@ -50,8 +43,8 @@
   function startEditLimits(key: ApiKeyView): void {
     error = null;
     editingLimits = key.key_id;
-    editRpm = key.rate_limit_rpm === null ? '' : String(key.rate_limit_rpm);
-    editTpm = key.rate_limit_tpm === null ? '' : String(key.rate_limit_tpm);
+    editRpm = key.rate_limit_rpm;
+    editTpm = key.rate_limit_tpm;
   }
 
   function cancelEditLimits(): void {
@@ -61,8 +54,8 @@
   async function saveLimits(keyId: string): Promise<void> {
     error = null;
     savingLimits = keyId;
-    const rpm = parseLimit(editRpm);
-    const tpm = parseLimit(editTpm);
+    const rpm = editRpm;
+    const tpm = editTpm;
     try {
       await updateKeyRateLimit(keyId, { rpm, tpm });
       keys = keys.map((k) =>
@@ -146,6 +139,7 @@
             <th class="px-3 py-2">{$t('Key (prefix)')}</th>
             <th class="px-3 py-2">{$t('Role')}</th>
             <th class="px-3 py-2">{$t('Caps')}</th>
+            <th class="px-3 py-2">{$t('Rate limit')}</th>
             <th class="px-3 py-2">{$t('Status')}</th>
             <th class="px-3 py-2"></th>
           </tr>
@@ -171,6 +165,57 @@
                 <div>{$t('Max lane')}: {key.max_lane ?? $t('No cap')}</div>
                 <div>{$t('Allowed lanes')}: {key.allowed_lanes?.join(', ') || $t('No cap')}</div>
                 <div>{$t('Custom model')}: {key.allow_custom_model ? $t('yes') : $t('no')}</div>
+              </td>
+              <td class="px-3 py-2 text-ink-muted">
+                {#if editingLimits === key.key_id}
+                  <div class="flex flex-col gap-2">
+                    <label class="flex items-center gap-2">
+                      <span class="w-12 text-xs">{$t('RPM')}</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        aria-label={$t('RPM')}
+                        placeholder={$t('Default')}
+                        class="w-24 rounded border border-slate-300 px-2 py-1"
+                        bind:value={editRpm}
+                      />
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <span class="w-12 text-xs">{$t('TPM')}</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        aria-label={$t('TPM')}
+                        placeholder={$t('Default')}
+                        class="w-24 rounded border border-slate-300 px-2 py-1"
+                        bind:value={editTpm}
+                      />
+                    </label>
+                    <div class="flex gap-2">
+                      <button
+                        type="button"
+                        class="btn-primary-sm"
+                        disabled={savingLimits === key.key_id}
+                        onclick={() => saveLimits(key.key_id)}>{$t('Save')}</button
+                      >
+                      <button type="button" class="btn-secondary" onclick={cancelEditLimits}
+                        >{$t('Cancel')}</button
+                      >
+                    </div>
+                  </div>
+                {:else}
+                  <div>{$t('RPM')}: {limitLabel(key.rate_limit_rpm)}</div>
+                  <div>{$t('TPM')}: {limitLabel(key.rate_limit_tpm)}</div>
+                  {#if !key.disabled}
+                    <button
+                      type="button"
+                      class="mt-1 text-xs text-indigo-600 hover:underline"
+                      onclick={() => startEditLimits(key)}>{$t('Edit limits')}</button
+                    >
+                  {/if}
+                {/if}
               </td>
               <td class="px-3 py-2">
                 {#if key.disabled}

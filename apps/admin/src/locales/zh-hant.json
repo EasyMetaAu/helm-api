@@ -278,5 +278,18 @@
   "Max depth reached": "已達最大深度",
   "(empty object)": "（空物件）",
   "(empty array)": "（空陣列）",
-  "(null)": "（空值 null）"
+  "(null)": "（空值 null）",
+  "Requests per minute (RPM)": "每分鐘請求數 (RPM)",
+  "Tokens per minute (TPM)": "每分鐘權杖數 (TPM)",
+  "Default": "預設",
+  "Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.": "每個金鑰的速率限制。留空則使用系統預設值。0 表示該維度不限。",
+  "Rate limit": "速率限制",
+  "RPM": "RPM",
+  "TPM": "TPM",
+  "Unlimited": "不限",
+  "Edit limits": "編輯限制",
+  "Failed to update rate limit": "更新速率限制失敗",
+  "Default requests per minute (RPM)": "預設每分鐘請求數 (RPM)",
+  "Default tokens per minute (TPM)": "預設每分鐘權杖數 (TPM)",
+  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "未單獨設定速率的金鑰的兜底限制。0 表示不限。"
 }

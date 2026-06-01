@@ -104,9 +104,10 @@ describe('keys page', () => {
       key('k2'), // both null -> inherits the system default
     ]);
     const rows = screen.getAllByTestId('key-row');
-    // k1 shows its explicit RPM; k2 shows the inherit/default copy.
+    // k1 shows its explicit RPM; k2 (both null) shows the inherit/default copy
+    // on both the RPM and TPM lines.
     expect(within(rows[0]).getByText(/60/)).toBeInTheDocument();
-    expect(within(rows[1]).getByText(/default/i)).toBeInTheDocument();
+    expect(within(rows[1]).getAllByText(/default/i).length).toBeGreaterThan(0);
   });
 
   it('inline edit PATCHes the per-key rate limit via updateKeyRateLimit', async () => {

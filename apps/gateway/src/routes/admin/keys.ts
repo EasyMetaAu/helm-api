@@ -88,9 +88,13 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       return c.json({ error: "key not found" }, 404);
     }
     const rpm =
-      parsed.data.rate_limit_rpm === undefined ? current.rate_limit_rpm : parsed.data.rate_limit_rpm;
+      parsed.data.rate_limit_rpm === undefined
+        ? current.rate_limit_rpm
+        : parsed.data.rate_limit_rpm;
     const tpm =
-      parsed.data.rate_limit_tpm === undefined ? current.rate_limit_tpm : parsed.data.rate_limit_tpm;
+      parsed.data.rate_limit_tpm === undefined
+        ? current.rate_limit_tpm
+        : parsed.data.rate_limit_tpm;
     try {
       await deps.keyStore.updateRateLimit(id, rpm, tpm);
     } catch {

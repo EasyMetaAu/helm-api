@@ -18,6 +18,8 @@
     capture_payloads: true,
     payload_retention_days: 30,
     rate_limit_enabled: false,
+    rate_limit_default_rpm: 0,
+    rate_limit_default_tpm: 0,
     log_level: 'info' as LogLevel,
   };
   // Local working copy (snapshot the loaded settings into a NEW object so the
@@ -122,6 +124,36 @@
           >
         </span>
       </label>
+
+      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 sm:flex-row sm:gap-6">
+        <label class="flex flex-col gap-1">
+          <span class="font-medium">{$t('Default requests per minute (RPM)')}</span>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            data-testid="rate-limit-default-rpm"
+            class="w-32 rounded border border-slate-300 px-2 py-1"
+            bind:value={form.rate_limit_default_rpm}
+          />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="font-medium">{$t('Default tokens per minute (TPM)')}</span>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            data-testid="rate-limit-default-tpm"
+            class="w-32 rounded border border-slate-300 px-2 py-1"
+            bind:value={form.rate_limit_default_tpm}
+          />
+        </label>
+      </div>
+      <span class="field-help"
+        >{$t(
+          'The fallback limit for any key without its own per-key value. 0 means unlimited.',
+        )}</span
+      >
 
       <label class="flex flex-col gap-1">
         <span class="font-medium">{$t('Log level')}</span>

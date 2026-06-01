@@ -278,5 +278,18 @@
   "Max depth reached": "最大の深さに到達しました",
   "(empty object)": "（空のオブジェクト）",
   "(empty array)": "（空の配列）",
-  "(null)": "（null）"
+  "(null)": "（null）",
+  "Requests per minute (RPM)": "1分あたりのリクエスト数 (RPM)",
+  "Tokens per minute (TPM)": "1分あたりのトークン数 (TPM)",
+  "Default": "デフォルト",
+  "Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.": "キーごとのレート制限。空欄の場合はシステムのデフォルトを使用します。0 はその項目が無制限であることを意味します。",
+  "Rate limit": "レート制限",
+  "RPM": "RPM",
+  "TPM": "TPM",
+  "Unlimited": "無制限",
+  "Edit limits": "制限を編集",
+  "Failed to update rate limit": "レート制限の更新に失敗しました",
+  "Default requests per minute (RPM)": "デフォルトの1分あたりリクエスト数 (RPM)",
+  "Default tokens per minute (TPM)": "デフォルトの1分あたりトークン数 (TPM)",
+  "The fallback limit for any key without its own per-key value. 0 means unlimited.": "キー独自の値が設定されていないキーに適用されるフォールバック制限。0 は無制限を意味します。"
 }
