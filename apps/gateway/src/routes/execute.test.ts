@@ -115,6 +115,61 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[1]?.status).toBe("ok");
   });
 
+  it("captures per-attempt error_detail (upstream status + message + raw body) on a failed attempt", async () => {
+    const rawBody = { error: { message: "rate limit exceeded", type: "rate_limit_error" } };
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError("upstream_error", "upstream returned 429", rawBody, 429),
+        )
+        .mockResolvedValueOnce({ id: "second" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      registry: registry({ a: "m-a", b: "m-b" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["a", "b"]), req());
+    // The first candidate failed but the SECOND served — so this detail is the
+    // only record of WHY `a` failed (it never reaches the terminal error).
+    expect(out.attempts[0]?.status).toBe("error");
+    expect(out.attempts[0]?.error_detail).toEqual({
+      upstream_status: 429,
+      message: "upstream returned 429",
+      provider_raw: rawBody,
+    });
+    // ok / skipped rows must NOT carry a detail.
+    expect(out.attempts[1]?.error_detail ?? null).toBeNull();
+  });
+
+  it("captures error_detail for a non-UpstreamError failure (null status, null raw)", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockRejectedValue(new Error("socket hang up")),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      registry: registry({ a: "m-a" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["a"]), req());
+    expect(out.attempts[0]?.status).toBe("error");
+    expect(out.attempts[0]?.error_detail?.upstream_status).toBeNull();
+    expect(out.attempts[0]?.error_detail?.provider_raw).toBeNull();
+    // A generic error's message is surfaced (it is not key-bearing here).
+    expect(out.attempts[0]?.error_detail?.message).toContain("socket hang up");
+  });
+
   it("returns all_providers_failed when every candidate fails", async () => {
     const provider = {
       chatCompletion: vi.fn().mockRejectedValue(new UpstreamError("upstream_error", "boom")),

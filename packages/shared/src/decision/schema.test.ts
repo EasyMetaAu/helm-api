@@ -190,6 +190,53 @@ describe("DecisionRecordSchema", () => {
     expect(DecisionRecordSchema.safeParse(r).success).toBe(false);
   });
 
+  it("accepts a per-attempt error_detail (upstream status + message + raw body)", () => {
+    const r = fullRecord();
+    r.provider_attempts[0] = {
+      alias: "coding_model",
+      skipped: false,
+      skip_reason: null,
+      status: "error",
+      error_class: "upstream_error",
+      latency_ms: 306,
+      cost_usd: null,
+      error_detail: {
+        upstream_status: 429,
+        message: "upstream returned 429",
+        provider_raw: { error: { message: "rate limit exceeded", type: "rate_limit_error" } },
+      },
+    };
+    const parsed = DecisionRecordSchema.parse(r);
+    expect(parsed.provider_attempts[0]?.error_detail?.upstream_status).toBe(429);
+    expect(parsed.provider_attempts[0]?.error_detail?.message).toBe("upstream returned 429");
+    expect(parsed.provider_attempts[0]?.error_detail?.provider_raw).toEqual({
+      error: { message: "rate limit exceeded", type: "rate_limit_error" },
+    });
+  });
+
+  it("defaults error_detail to null when omitted (legacy records round-trip)", () => {
+    const parsed = DecisionRecordSchema.parse(fullRecord());
+    // The legacy fixture omits error_detail entirely → must parse as null,
+    // never undefined, so the field is always present in stored records.
+    expect(parsed.provider_attempts[0]?.error_detail).toBeNull();
+  });
+
+  it("accepts a null upstream_status / null provider_raw (timeout, no body)", () => {
+    const r = fullRecord();
+    r.provider_attempts[0] = {
+      ...r.provider_attempts[0],
+      error_class: "timeout",
+      error_detail: {
+        upstream_status: null,
+        message: "upstream request timed out",
+        provider_raw: null,
+      },
+    } as (typeof r.provider_attempts)[number];
+    const parsed = DecisionRecordSchema.parse(r);
+    expect(parsed.provider_attempts[0]?.error_detail?.upstream_status).toBeNull();
+    expect(parsed.provider_attempts[0]?.error_detail?.provider_raw).toBeNull();
+  });
+
   it("accepts an all-providers-failed terminal shape", () => {
     const r = fullRecord();
     for (const a of r.provider_attempts) {

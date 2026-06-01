@@ -1,4 +1,9 @@
-import { type HelmError, type InternalRequest, makeHelmError } from "@helm/shared";
+import {
+  type AttemptErrorDetail,
+  type HelmError,
+  type InternalRequest,
+  makeHelmError,
+} from "@helm/shared";
 import type { CircuitBreaker } from "../circuit/breaker.js";
 
 // executor.fallback — traverse the ordered candidate chain (primary →
@@ -44,18 +49,27 @@ export interface InvokeFailureInit {
   error_class: string; // docs/07 error_class for the decision record
   status?: number; // upstream HTTP status, if any (e.g. 429)
   aborted?: boolean; // client abort — non-provider fault, terminates the chain
+  // Optional redacted upstream detail for the per-attempt error_detail row
+  // (admin-debug-error-detail). `detail_message` overrides the default class
+  // string; `provider_raw` is the already key-scrubbed upstream error body.
+  detail_message?: string;
+  provider_raw?: Record<string, unknown> | null;
 }
 
 export class InvokeFailure extends Error {
   readonly error_class: string;
   readonly status: number | null;
   readonly aborted: boolean;
+  readonly detail_message: string;
+  readonly provider_raw: Record<string, unknown> | null;
   constructor(init: InvokeFailureInit) {
     super(init.error_class);
     this.name = "InvokeFailure";
     this.error_class = init.error_class;
     this.status = init.status ?? null;
     this.aborted = init.aborted ?? false;
+    this.detail_message = init.detail_message ?? init.error_class;
+    this.provider_raw = init.provider_raw ?? null;
   }
 }
 
@@ -69,6 +83,9 @@ export interface AttemptRecord {
   error_class: string | null;
   latency_ms: number;
   cost_usd: number | null;
+  // Upstream failure detail for THIS attempt (admin-debug-error-detail). Non-null
+  // only for a genuine pre-first-chunk provider failure; null for ok/skipped rows.
+  error_detail: AttemptErrorDetail | null;
 }
 
 export interface CapabilityVerdict {
@@ -114,6 +131,25 @@ function errorClassOf(err: unknown): string {
 
 function statusOf(err: unknown): number | null {
   return err instanceof InvokeFailure ? err.status : null;
+}
+
+// Build the redacted per-attempt error_detail from a genuine upstream failure.
+// Pulls the carried status/message/raw body off InvokeFailure; degrades to the
+// generic error message (or string) otherwise. provider_raw is the producer's
+// already key-scrubbed body — the telemetry redact gate scrubs it again.
+function detailOf(err: unknown): AttemptErrorDetail {
+  if (err instanceof InvokeFailure) {
+    return {
+      upstream_status: err.status,
+      message: err.detail_message,
+      provider_raw: err.provider_raw,
+    };
+  }
+  return {
+    upstream_status: null,
+    message: err instanceof Error ? err.message : String(err),
+    provider_raw: null,
+  };
 }
 
 /**
@@ -163,6 +199,7 @@ export async function runFallback(
         error_class: null,
         latency_ms: elapsed(),
         cost_usd: null,
+        error_detail: null,
       });
       continue;
     }
@@ -181,6 +218,7 @@ export async function runFallback(
         error_class: null,
         latency_ms: elapsed(),
         cost_usd: null,
+        error_detail: null,
       });
       continue;
     }
@@ -193,6 +231,7 @@ export async function runFallback(
         error_class: null,
         latency_ms: elapsed(),
         cost_usd: null,
+        error_detail: null,
       });
       continue;
     }
@@ -210,6 +249,7 @@ export async function runFallback(
         error_class: result.error_class,
         latency_ms: elapsed(),
         cost_usd: result.cost_usd,
+        error_detail: null,
       });
       return {
         attempts,
@@ -229,6 +269,7 @@ export async function runFallback(
           error_class: "client_abort",
           latency_ms: elapsed(),
           cost_usd: null,
+          error_detail: null,
         });
         return {
           attempts,
@@ -255,6 +296,7 @@ export async function runFallback(
           error_class: "rate_limited",
           latency_ms: elapsed(),
           cost_usd: null,
+          error_detail: detailOf(err),
         });
         continue;
       }
@@ -269,6 +311,7 @@ export async function runFallback(
         error_class: errorClassOf(err),
         latency_ms: elapsed(),
         cost_usd: null,
+        error_detail: detailOf(err),
       });
     }
   }

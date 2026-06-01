@@ -107,6 +107,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
         error_class: "upstream_error",
         latency_ms: 0,
         cost_usd: null,
+        error_detail: null,
       },
       {
         alias: "premium",
@@ -116,6 +117,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
         error_class: null,
         latency_ms: 1200,
         cost_usd: 0.004,
+        error_detail: null,
       },
     ],
     final: { model_alias: "premium", provider_model: "claude-x", status: "ok", error_reason: null },
@@ -273,6 +275,50 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       const recent = await ctx.stores.telemetry.queryRecent(10);
       expect(recent).toHaveLength(1);
       expect(recent[0]).toEqual(decision("req_1"));
+    });
+
+    it("round-trips a populated per-attempt error_detail (upstream status + message + raw body)", async () => {
+      ctx = await make();
+      const withDetail = decision("req_detail", {
+        provider_attempts: [
+          {
+            alias: "openai-crs/gpt-5.4-mini",
+            skipped: false,
+            skip_reason: null,
+            status: "error",
+            error_class: "upstream_error",
+            latency_ms: 306,
+            cost_usd: null,
+            error_detail: {
+              upstream_status: 429,
+              message: "upstream returned 429",
+              provider_raw: { error: { message: "rate limit exceeded", type: "rate_limit_error" } },
+            },
+          },
+          {
+            alias: "deepseek-crs/deepseek-pro",
+            skipped: false,
+            skip_reason: null,
+            status: "ok",
+            error_class: null,
+            latency_ms: 2675,
+            cost_usd: 0.003,
+            error_detail: null,
+          },
+        ],
+      });
+      await ctx.stores.telemetry.insert({
+        decision: withDetail,
+        apiKeyId: "k1",
+        createdAt: new Date(),
+      });
+      const got = await ctx.stores.telemetry.getByRequestId("req_detail");
+      expect(got?.provider_attempts[0]?.error_detail).toEqual({
+        upstream_status: 429,
+        message: "upstream returned 429",
+        provider_raw: { error: { message: "rate limit exceeded", type: "rate_limit_error" } },
+      });
+      expect(got?.provider_attempts[1]?.error_detail).toBeNull();
     });
 
     it("getByRequestId returns the record, null on a miss", async () => {

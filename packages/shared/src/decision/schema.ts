@@ -44,6 +44,22 @@ export const LaneDecisionSchema = z.object({
   candidate_chain: z.array(z.string()), // ordered primary + fallback aliases
 });
 
+// Per-attempt upstream error detail (admin-debug-error-detail). Captured ONLY
+// for attempts that actually failed at the upstream — it carries WHY a single
+// candidate failed even when a LATER candidate served the request (so the
+// failure is no longer visible in the terminal `final` error). Mirrors
+// HelmError's redacted shape; principle 7: `message`/`provider_raw` are already
+// key-scrubbed by the producer and pass through the telemetry `redact` gate.
+//   • upstream_status — the REAL upstream HTTP status (e.g. 429/500); null for a
+//     timeout / network error with no response.
+//   • message         — short, redacted, human-readable (e.g. "upstream returned 429").
+//   • provider_raw    — the upstream error body (key-scrubbed), or null when absent.
+export const AttemptErrorDetailSchema = z.object({
+  upstream_status: z.number().int().nullable(),
+  message: z.string(),
+  provider_raw: z.record(z.string(), z.unknown()).nullable(),
+});
+
 export const ProviderAttemptSchema = z.object({
   alias: z.string(),
   skipped: z.boolean(),
@@ -52,6 +68,10 @@ export const ProviderAttemptSchema = z.object({
   error_class: z.string().nullable(),
   latency_ms: z.number().nonnegative(),
   cost_usd: z.number().nullable(),
+  // Present (non-null) ONLY for a genuine upstream failure on THIS attempt;
+  // null for ok / skipped rows and for legacy records. `.default(null)` keeps
+  // stored pre-feature records round-tripping (always present, never undefined).
+  error_detail: AttemptErrorDetailSchema.nullable().default(null),
 });
 
 export const FinalDecisionSchema = z.object({
@@ -112,6 +132,7 @@ export type AttemptStatus = z.infer<typeof AttemptStatusSchema>;
 export type ClassifierDecision = z.infer<typeof ClassifierDecisionSchema>;
 export type PolicyDecision = z.infer<typeof PolicyDecisionSchema>;
 export type LaneDecision = z.infer<typeof LaneDecisionSchema>;
+export type AttemptErrorDetail = z.infer<typeof AttemptErrorDetailSchema>;
 export type ProviderAttempt = z.infer<typeof ProviderAttemptSchema>;
 export type FinalDecision = z.infer<typeof FinalDecisionSchema>;
 export type CostBreakdown = z.infer<typeof CostBreakdownSchema>;

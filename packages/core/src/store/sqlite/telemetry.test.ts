@@ -28,6 +28,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
         error_class: "upstream_error",
         latency_ms: 0,
         cost_usd: null,
+        error_detail: null,
       },
       {
         alias: "premium",
@@ -37,6 +38,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
         error_class: null,
         latency_ms: 1200,
         cost_usd: 0.004,
+        error_detail: null,
       },
     ],
     final: { model_alias: "premium", provider_model: "claude-x", status: "ok", error_reason: null },

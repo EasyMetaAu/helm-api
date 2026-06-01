@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-06-01 · 每次供应商尝试的失败详情（admin-debug-error-detail）（docs/07，原则 3/5/7/8）
+
+**起因（用户在管理界面发现）**：请求详情页「供应商尝试（执行回退）」里，失败的尝试只显示一个 `error_class`（如 `upstream_error`）红字，看不到**为什么**失败。当首选 model 失败但回退 model 成功时（请求整体 200），那条失败尝试的详细原因**在任何地方都没有记录**——`DecisionRecord` 的每条 `provider_attempts` 只存 `error_class`，详细信息（上游状态码、报文体）只在「整链全失败」的终态 `final` 里才保留。所以这类「失败后被回退救回」的请求，其失败原因彻底丢失（日志里也没有——`execute.ts` 只记 `stream.truncated`/`cost.pricing_missing`，不记每次尝试的上游错误）。
+
+**做法（新增 per-attempt `error_detail`，全链路 TDD 红→绿）**：
+- **shared**：`ProviderAttemptSchema` 增 `error_detail`（`AttemptErrorDetailSchema`：`{ upstream_status: number|null, message: string, provider_raw: record|null }`，镜像 `HelmError` 的脱敏形态）。`.nullable().default(null)` ——**旧记录零迁移**：存量 `decisionJson` 反序列化时自动补 `null`，永不 `undefined`。
+- **core/gateway 捕获**：`UpstreamError` 早已携带 `upstreamStatus` + `message` + 已脱敏的 `providerRaw`（openai.ts 的 `scrub` 抹 key），但 `execute.ts`/`fallback.ts` 在记录失败尝试行时把它们**全丢了**。新增 `errorDetailOf(err)`/`detailOf(err)` 从 `UpstreamError`/`InvokeFailure` 提取，填进失败行；ok/skipped/abort 行一律 `null`；`:free` 429 跳过行也带 detail（它本就是一次上游响应）。`InvokeFailure` 增 `detail_message`/`provider_raw` 字段透传。
+- **持久化**：**无需 SQL 迁移**——telemetry store 把整个 record 存成 JSON 文本（`decisionJson`），读回经 `DecisionRecordSchema.parse` 即带上新字段。
+- **脱敏（原则 7）**：`buildDecisionRecord` 末尾的 `redact()` 是递归的、按 key 名脱敏——`error_detail.provider_raw` 里任何 `authorization`/`api_key` 等键会被再次指纹化（纵深防御，即便上游报文回显了 key 也不落库）。新增测试 `decision.test.ts` 6b 锁这条：泄漏的 key 被指纹化、`upstream_status`/`message` 完整保留。
+- **admin UI**：`requests.ts` 的 `RawAttempt`/`ProviderAttempt` 增 `error_detail` + `attemptErrorDetail()` 归一化；`DecisionChain.svelte` 每条失败尝试下渲染一个可展开 `<details>`（summary 显示 `HTTP <status> — <message>`，展开显示脱敏后的 `provider_raw` JSON）。i18n 新增 `Error detail`/`No raw upstream body recorded.`，5 语言齐全。
+
+**重要限制（已告知用户）**：本特性**前向**——它只让**今后**的失败尝试可展开。**存量请求（含用户最初排查的 `a1948cc3`）不会追溯出现详情**，因为它们是在 schema 变更前记录的，且原始失败原因当时未落库、日志中也无。
+
+**「捕获深度」的决策**：用户在三选项里选了「状态码 + message + 原始报文体」（镜像终态 error 的处理），而非「仅状态码+message」或「报文体随 `capture_payloads` 开关」。理由：复用既有 `redact` 脱敏路径，最利调试，泄漏面由 openai.ts 的 `scrub` + 递归 `redact` 双重兜底。`provider_raw` 经 `toRawRecord()` 归一：纯对象直通，数组/字符串/原始值包成 `{ raw }` 以免丢信息又满足 `z.record` 形态。
+
+**门禁**：typecheck 0 / lint 0 error（15 个 warning 均为存量、不在本次文件）/ 单测 **1142 全绿**（新增 shared 3 + execute 2 + decision 1 + store-contract 1 + admin map 2 + DecisionChain 1）/ admin svelte-check 0 error / admin build 绿。改动只触遥测**记录**与 UI **展示**，不改路由/回退/熔断语义。
+
+---
+
 ## 2026-06-01 · 分类器车道校准（classifier.lane-calibration）—— 修「所有请求都落到 balanced」（docs/03，原则 2/3/4/5）
 
 **症状（用户在 Docker 实测发现）**：每一条 `model:auto` 请求的遥测都是 `decided_by=fallback` / `fallback_reason=eval_disabled` / `lane=balanced`。lane 体系（economy/coding/premium/json/vision）**形同虚设**——无论提示词是打招呼、写代码还是深度推理，全部走 balanced。

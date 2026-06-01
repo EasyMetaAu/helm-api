@@ -89,4 +89,28 @@ describe('toDetail', () => {
     expect(d.cost_breakdown.completion_usd).toBeCloseTo(0.01);
     expect(d.cost_breakdown.eval_usd).toBe(0);
   });
+
+  it('surfaces a failed attempt error_detail (status + message + raw body); null elsewhere', () => {
+    const raw = rawRecord();
+    // The first attempt failed at the upstream but the second served — so this
+    // detail is the only record of WHY the first failed.
+    (raw.provider_attempts as Array<Record<string, unknown>>)[0].error_detail = {
+      upstream_status: 429,
+      message: 'upstream returned 429',
+      provider_raw: { error: { message: 'rate limit exceeded' } },
+    };
+    const d = toDetail(raw);
+    expect(d.provider_attempts[0]?.error_detail).toEqual({
+      upstream_status: 429,
+      message: 'upstream returned 429',
+      provider_raw: { error: { message: 'rate limit exceeded' } },
+    });
+    // The ok attempt carries no detail.
+    expect(d.provider_attempts[1]?.error_detail ?? null).toBeNull();
+  });
+
+  it('maps a missing error_detail to null (legacy records)', () => {
+    const d = toDetail(rawRecord());
+    expect(d.provider_attempts[0]?.error_detail ?? null).toBeNull();
+  });
 });

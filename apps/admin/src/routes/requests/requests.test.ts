@@ -51,7 +51,13 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     matched_policy: 'policy_x',
     lane_candidates: ['premium', 'balanced'],
     provider_attempts: [
-      { model: 'claude-x', provider: 'anthropic', outcome: 'success', latency_ms: 340 },
+      {
+        model: 'claude-x',
+        provider: 'anthropic',
+        outcome: 'success',
+        latency_ms: 340,
+        error_detail: null,
+      },
     ],
     response_meta: { model_alias: 'claude-x' },
     error: null,
