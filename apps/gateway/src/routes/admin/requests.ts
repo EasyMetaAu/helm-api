@@ -17,10 +17,15 @@ import type { AdminApiDeps } from "./deps.js";
 const DEFAULT_LIMIT = 100;
 
 export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
-  // GET /requests -> DecisionRecord[] (most recent first; already redacted).
+  // GET /requests -> (DecisionRecord & { created_at })[] (most recent first;
+  // already redacted). The store pairs each record with its recorded timestamp
+  // (a separate column, kept out of the redacted record); we flatten it onto the
+  // row as `created_at` (epoch ms) so the Debug UI can render the 「时间」 column
+  // without recomputing or fabricating it (原则1). created_at is a routing
+  // timestamp — it carries no plaintext key/payload (原则7).
   app.get("/admin/api/requests", async (c) => {
     const records = await deps.telemetry.queryRecent(DEFAULT_LIMIT);
-    return c.json(records);
+    return c.json(records.map((r) => ({ ...r.record, created_at: r.createdAt.getTime() })));
   });
 
   // GET /requests/:traceId -> RequestDetail (full decision trail) | 404.

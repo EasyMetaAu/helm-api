@@ -71,6 +71,13 @@ describe('toListItem', () => {
     const row = toListItem(rawRecord({ key_prefix: null }));
     expect(row.key_prefix).toBe('—');
   });
+
+  it('maps the recorded created_at (epoch ms) to an ISO ts; legacy records stay empty', () => {
+    const row = toListItem(rawRecord({ created_at: 1717155600000 }));
+    expect(row.ts).toBe(new Date(1717155600000).toISOString());
+    // No created_at on a legacy record → empty (never fabricated).
+    expect(toListItem(rawRecord()).ts).toBe('');
+  });
 });
 
 describe('toDetail', () => {
