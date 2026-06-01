@@ -5,6 +5,27 @@
 
 ---
 
+## 2026-06-01 · Unified admin status cluster in the header top-right (docs/11, Principle 3 & 7)
+
+**Context**: operator-facing meta was scattered in the sidebar footer — a `LocaleSwitcher`, a **hardcoded** "Gateway online" badge (static green dot that never reflected real health), and a GitHub link with no star count — and there was no version display despite the gateway already exposing `GET /version`. Consolidated all of it into one designed cluster in the previously-empty **header top-right**, and made the signals live.
+
+**What was added**:
+- `apps/admin/src/lib/api/gateway.ts` — `getVersion()` (parses `/version`) and `getHealth()` → `'online' | 'degraded' | 'offline'`. `getHealth` is the fail-open primitive: 200→online, reachable-but-!ok (e.g. 503)→degraded, **network/throw caught→offline** (never rejects), so the 30s poll caller needs no guard.
+- `apps/admin/src/lib/api/github.ts` — `formatStars()` (`1234`→`1.2k`, `12345`→`12.3k`, `1.5M`) + `getStarCount()`.
+- `apps/admin/src/lib/components/StatusCluster.svelte` — health dot+label, version pill, GitHub stars link, compact locale switcher. Polls health every 30s (`onMount`/`onDestroy`), fetches version+stars once; each signal try/caught independently so one failure never breaks the shell.
+- `LocaleSwitcher.svelte` gained a `compact` prop (narrow header pill) instead of a duplicate component — its only prior consumer (the footer) was removed.
+- Wired into `+layout.svelte` header (`ml-auto`); removed the sidebar footer trio. New i18n keys (`Online`/`Degraded`/`Offline`/`Checking…`/`Gateway status`/`GitHub repository`) added + translated across all 5 locales. The now-unused `"Gateway online"` key was left in the JSONs (harmless; will drop on next `i18n:extract`).
+
+**Decisions / trade-offs**:
+- **GitHub stars fetched client-side, NOT proxied through the gateway** — keeps the headless core free of outbound calls (Principle 6 / minimal runtime). Mitigates GitHub's ~60 req/hr unauth limit with a **localStorage cache** (key `helm_admin_gh_stars`, 6h TTL) and is **fail-silent**: any failure (network/CORS/rate-limit/parse) returns `null` and the count simply hides. On a failed refetch it falls back to the stale cached value.
+- **Version pill hidden when `/version` returns `"unknown"`** (the dev default — `HELM_VERSION` unset in `build-info.ts`), so dev doesn't show a meaningless `vunknown`.
+- **`/healthz` + `/version` are origin-root & unauthenticated**, so the SPA (served under `/admin`) reaches them with a plain relative `fetch` — no auth/CORS handling needed.
+- **TODO / future**: if a CSP is ever added, `api.github.com` must be allowed in `connect-src`.
+
+**Gate**: admin Vitest 147/147 (27 new across `gateway.test.ts`, `github.test.ts`, `StatusCluster.test.ts`); `svelte-check` 0 errors (1 pre-existing warning in `settings/+page.svelte`, untouched).
+
+---
+
 ## 2026-06-01 · Reconcile stream-only capability gate with routing/cost tests (docs/03/04/07, Principle 5)
 
 **Context**: the stream-only capability gate (commit `3eb15ab`, `no_nonstream_support`) left **6 tests red on `main`** — they predated the gate and asserted that the `openai-crs/*` heads (gpt-5.4-mini, gpt-5.5; `requiresStreaming: true` in `capabilities.yaml`) serve **non-stream** requests. They no longer can: a non-stream request correctly SKIPS them and falls forward. Surfaced during the 0.1 doc-audit verification run.
