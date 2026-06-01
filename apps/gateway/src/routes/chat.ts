@@ -386,15 +386,18 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       // Accumulate the assistant text for observeOutbound WITHOUT touching the
       // forwarded bytes (principle 8): write the chunk first, then parse a copy.
       const assistant: SSEAccumulator = { text: "", pending: "" };
-      // Accumulate raw SSE chunks (only when capturing) so the finally block can
-      // store the full response AND parse the trailing usage to backfill the
-      // streamed completion cost (#6 — execute() couldn't know it at peek time).
+      // Accumulate raw SSE chunks so the finally block can parse the trailing
+      // usage chunk and backfill the streamed completion cost (#6 — execute()
+      // couldn't know it at peek time). This runs REGARDLESS of capture_payloads:
+      // cost telemetry must not depend on full-body capture (an operator may turn
+      // capture off for privacy yet still want costs). `captureOn` gates only
+      // whether the buffered body is PERSISTED, not whether it is collected.
       const captureOn = captureEnabled(deps);
       const captured: string[] = [];
       return streamSSE(c, async (sse) => {
         try {
           for await (const chunk of stream) {
-            if (captureOn) captured.push(chunk);
+            captured.push(chunk);
             await sse.write(chunk);
             if (deps.memory !== undefined) accumulateOpenAIChunk(assistant, chunk);
           }

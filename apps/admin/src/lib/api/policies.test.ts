@@ -1,11 +1,40 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Policy } from './policies.js';
-import { listPolicies, savePolicies } from './policies.js';
+import { listPolicies, savePolicies, TASK_TYPE_OPTIONS } from './policies.js';
 
 // The admin UI talks to the gateway ONLY over /admin/api/* HTTP (DoD: no core
 // import). These tests pin the client contract against a mocked fetch. The wire
 // shape is a bare ordered Policy[]; the server validates the whole set and the
 // order IS the match priority (first-match), so the client must preserve it.
+
+describe('task_type dropdown contract', () => {
+  // The dropdown options are hardcoded in this client (admin must NOT import
+  // @helm/shared, 原则1), so they can silently drift from the gateway's canonical
+  // TaskTypeSchema (@helm/shared classifier/eval-output.schema.ts). This guard
+  // pins the FULL set: a config policy whose task_type has no matching <option>
+  // renders the <select> blank (e.g. `security` policies showed empty). Keep this
+  // list in lockstep with TaskTypeSchema; the gateway is the source of truth.
+  it('offers every canonical TaskType (must match the server enum)', () => {
+    expect([...TASK_TYPE_OPTIONS].sort()).toEqual(
+      [
+        'chat',
+        'coding',
+        'data',
+        'extraction',
+        'math',
+        'security',
+        'tool_use',
+        'vision',
+        'web',
+        'writing',
+      ].sort(),
+    );
+  });
+
+  it('includes `security` (regression: policy #8 security_complex_to_premium rendered blank)', () => {
+    expect(TASK_TYPE_OPTIONS).toContain('security');
+  });
+});
 
 describe('policies api client', () => {
   beforeEach(() => {

@@ -66,6 +66,7 @@
   "End-to-end response time in milliseconds.": "端到端回應時間（毫秒）。",
   "error": "錯誤",
   "Error": "錯誤",
+  "Error detail": "錯誤詳情",
   "Error type": "錯誤類型",
   "Errors: {count}": "錯誤：{count}",
   "Estimated cost of the request in US dollars.": "該請求的預估成本（美元）。",
@@ -150,6 +151,7 @@
   "No fallback models yet. Add one below.": "暫無備援模型，請在下方新增。",
   "No lanes are configured yet.": "尚未設定任何通道。",
   "No policies yet": "暫無策略",
+  "No raw upstream body recorded.": "未記錄上游原始回應正文。",
   "No requests recorded yet.": "尚無請求記錄。",
   "No requests recorded yet. Point a client at the gateway to see routing activity here.": "尚無請求記錄。將用戶端指向閘道後，路由活動會顯示在這裡。",
   "No rule matched, so it defaulted to the balanced lane.": "沒有規則符合，因此回退到了 balanced（均衡）車道。",
@@ -266,5 +268,15 @@
   "Which classification layer chose the lane.": "由哪一分類層選定了通道。",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "沒有策略時，請求僅按其任務車道路由。新增策略可為符合的請求強制使用或限制車道上限。",
   "yes": "是",
-  "Your new API key": "你的新 API 金鑰"
+  "Your new API key": "你的新 API 金鑰",
+  "Tree": "樹狀",
+  "Formatted": "格式化",
+  "Raw": "原始",
+  "Expand": "展開",
+  "Collapse": "收起",
+  "Show remaining {count} items": "展開剩餘 {count} 項",
+  "Max depth reached": "已達最大深度",
+  "(empty object)": "（空物件）",
+  "(empty array)": "（空陣列）",
+  "(null)": "（空值 null）"
 }

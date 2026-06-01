@@ -22,6 +22,18 @@
         return 'badge-error';
     }
   }
+
+  // Pretty-print the (already redacted) upstream error body for the expandable
+  // detail panel. An object → indented JSON; a raw string → verbatim. READ-ONLY:
+  // the backend has key-scrubbed this (原则7); we only display it.
+  function showRaw(value: unknown): string {
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
 </script>
 
 <div class="flex flex-col gap-4">
@@ -119,13 +131,40 @@
     </p>
     <ul class="flex flex-col gap-2">
       {#each detail.provider_attempts as a, i (i)}
-        <li data-testid="attempt-row" class="flex flex-wrap items-center gap-2 text-sm">
-          <span class="font-mono text-ink-strong">{a.provider}</span>
-          <span class="text-ink-muted">{a.model}</span>
-          <span class={outcomeBadge(a.outcome)}>{a.outcome}</span>
-          <span class="text-ink-muted">{a.latency_ms}ms</span>
-          {#if a.error_class}<span class="text-red-600">{a.error_class}</span>{/if}
-          {#if a.skip_reason}<span class="text-ink-muted">{$t('skip:')} {a.skip_reason}</span>{/if}
+        <li data-testid="attempt-row" class="flex flex-col gap-1 text-sm">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="font-mono text-ink-strong">{a.provider}</span>
+            <span class="text-ink-muted">{a.model}</span>
+            <span class={outcomeBadge(a.outcome)}>{a.outcome}</span>
+            <span class="text-ink-muted">{a.latency_ms}ms</span>
+            {#if a.error_class}<span class="text-red-600">{a.error_class}</span>{/if}
+            {#if a.skip_reason}<span class="text-ink-muted">{$t('skip:')} {a.skip_reason}</span
+              >{/if}
+          </div>
+          <!-- Expandable upstream failure detail for THIS attempt — the only
+               record of WHY a candidate failed when a later one served. Already
+               redacted by the backend (原则7). -->
+          {#if a.error_detail}
+            {@const ed = a.error_detail}
+            <details
+              data-testid="attempt-error-detail"
+              class="ml-1 rounded border border-red-100 bg-red-50/60 px-2 py-1 text-xs"
+            >
+              <summary class="cursor-pointer select-none text-red-700">
+                {$t('Error detail')}{ed.upstream_status !== null
+                  ? ` · HTTP ${ed.upstream_status}`
+                  : ''}{ed.message ? ` — ${ed.message}` : ''}
+              </summary>
+              {#if ed.provider_raw !== null && ed.provider_raw !== undefined}
+                <pre
+                  class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all text-red-900">{showRaw(
+                    ed.provider_raw,
+                  )}</pre>
+              {:else}
+                <p class="mt-1 italic text-ink-muted">{$t('No raw upstream body recorded.')}</p>
+              {/if}
+            </details>
+          {/if}
         </li>
       {/each}
     </ul>

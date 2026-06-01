@@ -73,6 +73,7 @@ function okExecute(): ExecuteOutcome {
         error_class: null,
         latency_ms: 12,
         cost_usd: null,
+        error_detail: null,
       },
     ],
     final: { status: "ok", alias: "coder_a", providerModel: "coder-a-model" },
@@ -262,6 +263,7 @@ describe("routeRequest — orchestration", () => {
           error_class: "upstream_error",
           latency_ms: 5,
           cost_usd: null,
+          error_detail: null,
         },
         {
           alias: "coder_b",
@@ -271,6 +273,7 @@ describe("routeRequest — orchestration", () => {
           error_class: null,
           latency_ms: 0,
           cost_usd: null,
+          error_detail: null,
         },
       ],
       final: {
@@ -358,6 +361,7 @@ describe("routeRequest — orchestration", () => {
               error_class: "upstream_error",
               latency_ms: 300,
               cost_usd: null,
+              error_detail: null,
             },
             {
               alias: "coder_b",
@@ -367,6 +371,7 @@ describe("routeRequest — orchestration", () => {
               error_class: null,
               latency_ms: 950,
               cost_usd: 0.004,
+              error_detail: null,
             },
           ],
           final: { status: "ok", alias: "coder_b", providerModel: "coder-b-model" },

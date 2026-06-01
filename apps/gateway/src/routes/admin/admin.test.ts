@@ -138,6 +138,7 @@ function decision(traceId: string, lane: string): DecisionRecord {
         error_class: null,
         latency_ms: 12,
         cost_usd: 0.002,
+        error_detail: null,
       },
     ],
     final: {

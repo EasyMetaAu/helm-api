@@ -4,7 +4,6 @@ import {
   type AnthropicSSEEvent,
   anthropicTransformer,
   bootstrapRootKey,
-  computeCostUsd,
   createCircuitBreaker,
   createMemoryMomentumStore,
   createOpenAIClient,
@@ -30,6 +29,7 @@ import {
   type ProviderRegistryConfig as RegistryProviderConfig,
   type RouteOptions,
   redact,
+  resolveCostUsd,
   responsesTransformer,
   routeRequest,
   type StoreSet,
@@ -351,13 +351,13 @@ export async function buildServer(
   });
   // Price streamed completions (#6): the executor can't know token usage at
   // stream-peek time, so the chat route parses the trailing usage chunk and asks
-  // this to convert it to USD at the served alias's pricing. Null when pricing is
-  // unknown — the record then keeps an honest "not measured" null, never a 0.
+  // this to convert it to USD at the served alias's pricing. Routed through
+  // resolveCostUsd so an upstream-BILLED cost in that usage chunk (`cost_usd` /
+  // OpenRouter `cost`) OVERRIDES the catalog estimate, matching the non-stream
+  // path. Null when neither a billed cost nor pricing is available — the record
+  // then keeps an honest "not measured" null, never a misleading 0.
   const costOf = (alias: string, usage: { prompt_tokens?: number; completion_tokens?: number }) =>
-    computeCostUsd(catalog.get(alias)?.pricing, {
-      promptTokens: usage.prompt_tokens,
-      completionTokens: usage.completion_tokens,
-    });
+    resolveCostUsd(catalog.get(alias)?.pricing, { usage });
   // Three-layer cascade classify adapter: Layer-1 rules + Layer-2 eval (OFF by
   // default; per-request override threaded from the chat route) + Layer-3
   // balanced fail-open. The eval small-model is invoked via the same provider

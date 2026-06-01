@@ -35,6 +35,7 @@ function makeRecord(over: {
       error_class: null,
       latency_ms: a.latencyMs,
       cost_usd: a.costUsd,
+      error_detail: null,
     })),
     final: {
       model_alias: "m0",

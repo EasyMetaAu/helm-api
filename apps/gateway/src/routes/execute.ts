@@ -6,8 +6,8 @@ import type {
   ProviderRegistry,
   RouteProviderAttempt,
 } from "@helm/core";
-import { checkCapability, computeCostUsd, UpstreamError, usageFromBody } from "@helm/core";
-import type { CatalogEntry, InternalRequest } from "@helm/shared";
+import { checkCapability, resolveCostUsd, UpstreamError } from "@helm/core";
+import type { AttemptErrorDetail, CatalogEntry, InternalRequest } from "@helm/shared";
 import { makeHelmError } from "@helm/shared";
 
 // Gateway execution adapter — the `execute` injected into routeRequest. It walks
@@ -102,6 +102,35 @@ function errorClassOf(err: unknown): string {
   return "upstream_error";
 }
 
+// Coerce an already-scrubbed upstream error body into the schema's record|null
+// shape. A plain object passes through; a primitive/array (e.g. an HTML or text
+// error page) is wrapped so the detail is preserved, not silently dropped.
+function toRawRecord(raw: unknown): Record<string, unknown> | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  return { raw };
+}
+
+// Build the redacted per-attempt error_detail (admin-debug-error-detail) from a
+// genuine upstream failure. An UpstreamError carries the real upstream status,
+// a message, and the key-scrubbed body; any other error degrades to its message
+// with no status/body. The telemetry redact gate scrubs this again before it is
+// persisted (principle 7), so a key echoed in the body never survives.
+function errorDetailOf(err: unknown): AttemptErrorDetail {
+  if (err instanceof UpstreamError) {
+    return {
+      upstream_status: err.upstreamStatus,
+      message: err.message,
+      provider_raw: toRawRecord(err.providerRaw),
+    };
+  }
+  return {
+    upstream_status: null,
+    message: err instanceof Error ? err.message : String(err),
+    provider_raw: null,
+  };
+}
+
 // Build the `execute` callback bound to a single request's deps.
 export function createExecute(deps: ExecuteAdapterDeps) {
   const { defaultProvider, providers, registry, breaker, catalog, now, signal, log } = deps;
@@ -110,12 +139,16 @@ export function createExecute(deps: ExecuteAdapterDeps) {
   // Keyed by the candidate ALIAS — the catalog/pricing modelKey is the routing
   // alias (e.g. `openai-crs/gpt-5.4-mini`), NOT the bare upstream model id we send
   // on the wire (`gpt-5.4-mini`). See the resolve block below.
-  // Missing pricing (no catalog entry, or a half-filled pricing row) → null
-  // ("not measured", distinct from a measured 0) and a logged miss, NEVER a
-  // crash (principle 3). Streaming attempts have no usage at peek time → null.
+  // Prefer an upstream-BILLED cost the response carried (real money charged —
+  // `usage.cost_usd` / OpenRouter `usage.cost` / top-level `cost_usd`); otherwise
+  // estimate from token usage × catalog pricing (resolveCostUsd, the single
+  // override-or-preset rule). Missing BOTH (no billed cost AND no catalog entry /
+  // half-filled pricing row) → null ("not measured", distinct from a measured 0)
+  // and a logged miss, NEVER a crash (principle 3). Streaming attempts have no
+  // usage at peek time → null here, backfilled by the route from the usage chunk.
   const costOf = (alias: string, body: unknown): number | null => {
     const pricing = catalog.get(alias)?.pricing;
-    const cost = computeCostUsd(pricing, usageFromBody(body));
+    const cost = resolveCostUsd(pricing, body);
     if (cost === null) {
       log?.("info", "cost.pricing_missing", { alias });
     }
@@ -235,6 +268,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             error_class: "client_abort",
             latency_ms: elapsed(),
             cost_usd: null,
+            error_detail: null,
           });
           return {
             attempts,
@@ -263,6 +297,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             error_class: "rate_limited",
             latency_ms: elapsed(),
             cost_usd: null,
+            error_detail: errorDetailOf(err),
           });
           continue;
         }
@@ -277,6 +312,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           error_class: errorClassOf(err),
           latency_ms: elapsed(),
           cost_usd: null,
+          error_detail: errorDetailOf(err),
         });
       }
     }
@@ -383,6 +419,7 @@ function skipRow(alias: string, reason: string, latencyMs: number): RouteProvide
     error_class: null,
     latency_ms: latencyMs,
     cost_usd: null,
+    error_detail: null,
   };
 }
 
@@ -395,5 +432,6 @@ function okRow(alias: string, latencyMs: number, costUsd: number | null): RouteP
     error_class: null,
     latency_ms: latencyMs,
     cost_usd: costUsd,
+    error_detail: null,
   };
 }

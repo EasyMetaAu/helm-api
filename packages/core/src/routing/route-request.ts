@@ -1,4 +1,4 @@
-import type { DecisionRecord, HelmError, InternalRequest } from "@helm/shared";
+import type { AttemptErrorDetail, DecisionRecord, HelmError, InternalRequest } from "@helm/shared";
 import type { LanesConfig } from "../lanes/schema.js";
 import { type Classification as ResolverClassification, resolveLane } from "./lane-resolver.js";
 import { applyCaps, evaluatePolicies, type PolicyContext } from "./policy-engine.js";
@@ -74,6 +74,9 @@ export interface ProviderAttempt {
   error_class: string | null;
   latency_ms: number;
   cost_usd: number | null;
+  /** Upstream failure detail for THIS attempt (admin-debug-error-detail). Non-null
+   *  only for a genuine upstream failure; null for ok/skipped rows. Redacted. */
+  error_detail: AttemptErrorDetail | null;
 }
 
 // What execute() returns: the provider_attempts trail, the final landing, and

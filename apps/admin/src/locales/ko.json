@@ -66,6 +66,7 @@
   "End-to-end response time in milliseconds.": "종단 간 응답 시간(밀리초)입니다.",
   "error": "오류",
   "Error": "오류",
+  "Error detail": "오류 세부정보",
   "Error type": "오류 유형",
   "Errors: {count}": "오류: {count}",
   "Estimated cost of the request in US dollars.": "요청의 예상 비용(미국 달러)입니다.",
@@ -150,6 +151,7 @@
   "No fallback models yet. Add one below.": "아직 대체 모델이 없습니다. 아래에 하나를 추가하세요.",
   "No lanes are configured yet.": "아직 구성된 레인이 없습니다.",
   "No policies yet": "아직 정책 없음",
+  "No raw upstream body recorded.": "업스트림 원본 응답 본문이 기록되지 않았습니다.",
   "No requests recorded yet.": "아직 기록된 요청이 없습니다.",
   "No requests recorded yet. Point a client at the gateway to see routing activity here.": "아직 기록된 요청이 없습니다. 클라이언트를 게이트웨이로 연결하면 라우팅 활동이 여기에 표시됩니다.",
   "No rule matched, so it defaulted to the balanced lane.": "일치하는 규칙이 없어 균형 레인으로 기본 설정되었습니다.",
@@ -266,5 +268,15 @@
   "Which classification layer chose the lane.": "어느 분류 계층이 레인을 선택했는지입니다.",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "정책이 없으면 요청은 작업 레인에 의해서만 라우팅됩니다. 일치하는 요청에 대해 레인을 강제하거나 제한하려면 정책을 추가하세요.",
   "yes": "예",
-  "Your new API key": "새 API 키"
+  "Your new API key": "새 API 키",
+  "Tree": "트리",
+  "Formatted": "서식",
+  "Raw": "원본",
+  "Expand": "펼치기",
+  "Collapse": "접기",
+  "Show remaining {count} items": "나머지 {count}개 표시",
+  "Max depth reached": "최대 깊이에 도달했습니다",
+  "(empty object)": "(빈 객체)",
+  "(empty array)": "(빈 배열)",
+  "(null)": "(null)"
 }
