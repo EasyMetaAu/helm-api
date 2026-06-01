@@ -168,7 +168,9 @@
                 {/if}
               </td>
               <td class="px-3 py-2 font-mono text-ink-body">{r.latency_ms}ms</td>
-              <td class="px-3 py-2 font-mono text-ink-body">${r.cost_usd.toFixed(4)}</td>
+              <td class="px-3 py-2 font-mono text-ink-body"
+                >{r.cost_usd === null ? '—' : `$${r.cost_usd.toFixed(4)}`}</td
+              >
               <td class="px-3 py-2 {r.error_class ? 'text-red-600' : 'text-ink-muted'}"
                 >{r.error_class ?? '—'}</td
               >

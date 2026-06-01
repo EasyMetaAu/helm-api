@@ -15,6 +15,13 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
+import {
+  backfillCompletionCost,
+  captureEnabled,
+  type PayloadCaptureDeps,
+  persistPayload,
+  usageFromSSE,
+} from "./payload-capture.js";
 
 // POST /v1/chat/completions — Phase 1 routing pipeline wiring. This file is
 // PURE HTTP adaptation (CLAUDE.md principle 1): parse the OpenAI request into an
@@ -38,6 +45,12 @@ export interface ChatRouteDeps {
   telemetry: TelemetryStore;
   redact: (payload: unknown) => unknown;
   now: () => number;
+  /** Full request/response capture + streamed-cost backfill wiring. Optional so
+   *  test deps can omit it; when present, governs payload storage (capture_payloads)
+   *  and streamed completion-cost backfill (#6). */
+  capturePayloads?: PayloadCaptureDeps["capturePayloads"];
+  payloadRetentionMs?: PayloadCaptureDeps["payloadRetentionMs"];
+  costOf?: PayloadCaptureDeps["costOf"];
   /** When true, honor the e2e-only `x-helm-eval` / `x-helm-rules-threshold`
    *  headers to toggle Layer-2 eval and raise the Layer-1 gate per request.
    *  Gated by HELM_E2E in the composition root; production never sets this so
@@ -251,9 +264,15 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     //     (the upstream's own [DONE]). (principle 8) ---
     if (internal.stream && result.stream !== null) {
       const stream = result.stream;
+      // Accumulate raw SSE chunks (only when capturing) so the finally block can
+      // store the full response AND parse the trailing usage to backfill the
+      // streamed completion cost (#6 — execute() couldn't know it at peek time).
+      const captureOn = captureEnabled(deps);
+      const captured: string[] = [];
       return streamSSE(c, async (sse) => {
         try {
           for await (const chunk of stream) {
+            if (captureOn) captured.push(chunk);
             await sse.write(chunk);
           }
         } catch (err) {
@@ -268,12 +287,45 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             await sse.write(`data: ${JSON.stringify({ error: errBody })}\n\n`);
           }
         } finally {
+          // Streamed completion-cost backfill (#6): parse the trailing usage and
+          // price it at the served alias. Fail-open — leave cost null on any miss.
+          const rawSse = captured.join("");
+          const finalAlias =
+            result.decision.final.status === "ok" ? result.decision.final.model_alias : null;
+          try {
+            const usage = usageFromSSE(rawSse);
+            if (usage && finalAlias && deps.costOf) {
+              backfillCompletionCost(result.decision, finalAlias, deps.costOf(finalAlias, usage));
+            }
+          } catch {
+            c.get("logger").log("warn", "cost.stream_backfill_failed", { trace_id: traceId });
+          }
+          await persistPayload(
+            deps,
+            {
+              requestId: traceId,
+              requestJson: JSON.stringify(raw),
+              responseJson: captureOn ? rawSse : null,
+              now: deps.now(),
+            },
+            (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+          );
           await persist(result.decision);
         }
       });
     }
 
     // --- non-streaming branch ---
+    await persistPayload(
+      deps,
+      {
+        requestId: traceId,
+        requestJson: JSON.stringify(raw),
+        responseJson: result.body !== null ? JSON.stringify(result.body) : null,
+        now: deps.now(),
+      },
+      (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+    );
     await persist(result.decision);
     if (result.final.status === "error" || result.body === null) {
       const error =

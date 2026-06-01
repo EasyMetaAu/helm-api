@@ -313,6 +313,9 @@ describe("persistDecision", () => {
       queryRecent: async () => [],
       getByRequestId: async () => null,
       queryWindow: async () => [],
+      insertPayload: async () => {},
+      getPayload: async () => null,
+      prunePayloads: async () => {},
     };
   }
 

@@ -40,7 +40,10 @@ export interface RequestListItem {
   fallback_count: number; // 执行兜底次数 (provider attempts - 1)
   status: 'ok' | 'error';
   latency_ms: number;
-  cost_usd: number;
+  // null = NOT measured (no pricing / usage unknown — e.g. an unpriced model),
+  // rendered as '—'. A number is a real cost. Crucially distinct from 0 so an
+  // unmeasured request never looks like a free one (#6).
+  cost_usd: number | null;
   error_class?: string;
 }
 
@@ -159,6 +162,16 @@ function sumCost(attempts: RawAttempt[]): number {
   return attempts.reduce((acc, a) => acc + (typeof a.cost_usd === 'number' ? a.cost_usd : 0), 0);
 }
 
+// List-row cost: a real number when ANY signal carries it (a priced attempt or a
+// recorded total), else null = "not measured" (rendered '—', never $0.0000). This
+// is the UI side of #6: a streamed call now backfills a real cost, while a request
+// against an unpriced model stays honestly unmeasured instead of looking free.
+function listCost(raw: RawDecisionRecord, attempts: RawAttempt[]): number | null {
+  if (attempts.some((a) => typeof a.cost_usd === 'number')) return sumCost(attempts);
+  if (typeof raw.cost_breakdown?.total_usd === 'number') return raw.cost_breakdown.total_usd;
+  return null;
+}
+
 function sumLatency(attempts: RawAttempt[]): number {
   return attempts.reduce(
     (acc, a) => acc + (typeof a.latency_ms === 'number' ? a.latency_ms : 0),
@@ -216,7 +229,7 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     status,
     latency_ms:
       typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : sumLatency(attempts),
-    cost_usd: sumCost(attempts),
+    cost_usd: listCost(raw, attempts),
     error_class: errorClass ?? undefined,
   };
 }
@@ -338,4 +351,30 @@ export async function getRequest(traceId: string): Promise<RequestDetail> {
   });
   const raw = await asJson<RawDecisionRecord>(res);
   return toDetail(raw);
+}
+
+// The full captured request/response bodies (admin "System Settings" →
+// capture_payloads). `captured:false` means this request was served while capture
+// was OFF (or the row was pruned by retention) — the UI then shows a clear
+// "not recorded" notice instead of the bodies.
+export interface RequestPayloadView {
+  captured: boolean;
+  request?: unknown;
+  response?: unknown;
+  created_at?: number;
+}
+
+// GET /admin/api/requests/:traceId/payload -> the captured bodies. Resolves to
+// { captured:false } on any error (missing row / capture off) so the detail page
+// degrades gracefully and never white-screens.
+export async function getRequestPayload(traceId: string): Promise<RequestPayloadView> {
+  try {
+    const res = await fetch(`${BASE}/${encodeURIComponent(traceId)}/payload`, {
+      headers: { accept: 'application/json' },
+    });
+    if (!res.ok) return { captured: false };
+    return (await res.json()) as RequestPayloadView;
+  } catch {
+    return { captured: false };
+  }
 }

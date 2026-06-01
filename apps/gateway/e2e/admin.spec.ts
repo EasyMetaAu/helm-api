@@ -121,3 +121,38 @@ test.describe("admin redaction smoke", () => {
     expect((await page.locator("body").textContent()) ?? "").not.toContain(SEED_KEY_PLAINTEXT);
   });
 });
+
+// ── 5. System Settings: read + persist a runtime-mutable setting ─────────────
+test.describe("admin system settings", () => {
+  test("renders the settings page and persists a toggle across reloads", async ({ page }) => {
+    await page.goto(`${BASE}/admin/settings`);
+    await expect(page.getByTestId("capture-payloads")).toBeVisible();
+    await expect(page.getByTestId("log-level")).toBeVisible();
+
+    // Capture is ON by default; toggle it OFF and save.
+    const capture = page.getByTestId("capture-payloads");
+    await expect(capture).toBeChecked();
+    await capture.uncheck();
+    await page.getByRole("button", { name: /save settings/i }).click();
+    await expect(page.getByRole("status")).toBeVisible(); // "Saved" badge
+
+    // Re-load: the persisted (config_kv) value is reflected → toggle stays OFF.
+    await page.goto(`${BASE}/admin/settings`);
+    await expect(page.getByTestId("capture-payloads")).not.toBeChecked();
+
+    // Restore the default so the throwaway DB doesn't affect other specs.
+    await page.getByTestId("capture-payloads").check();
+    await page.getByRole("button", { name: /save settings/i }).click();
+    await expect(page.getByRole("status")).toBeVisible();
+  });
+});
+
+// ── 6. Payload view: the seeded request was stored WITHOUT a captured body ────
+test.describe("admin request payload view", () => {
+  test("shows a not-recorded notice when no payload was captured", async ({ page }) => {
+    // The seed uses telemetry.insert only (no insertPayload), so the detail page
+    // must surface the explicit "not recorded" notice rather than a body.
+    await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
+    await expect(page.getByTestId("payload-summary")).toContainText(/not recorded/i);
+  });
+});

@@ -4,6 +4,7 @@ import {
   type AnthropicSSEEvent,
   anthropicTransformer,
   bootstrapRootKey,
+  computeCostUsd,
   createCircuitBreaker,
   createMemoryMomentumStore,
   createOpenAIClient,
@@ -19,6 +20,7 @@ import {
   type LanesConfig,
   loadConfig,
   loadRuntimeCatalog,
+  loadRuntimeSettings,
   makeAnthropicError,
   type PoliciesConfig,
   type ProviderClient,
@@ -30,6 +32,7 @@ import {
   responsesTransformer,
   routeRequest,
   type StoreSet,
+  saveRuntimeSettings,
   startSignalScheduler,
   toRegistryProviders,
 } from "@helm/core";
@@ -39,6 +42,7 @@ import type {
   ErrorClass,
   InternalRequest,
   ProviderConfig as ProviderConfigShared,
+  RuntimeSettings,
 } from "@helm/shared";
 import { ErrorClassSchema } from "@helm/shared";
 import type { MiddlewareHandler } from "hono";
@@ -198,6 +202,30 @@ export async function buildServer(
   const store: StoreSet = await createStore({ store: storeCfg, dataDir, connectionString });
   const keyStore = store.keys;
   const telemetry = store.telemetry;
+
+  // Runtime-mutable settings (admin "System Settings"): persisted overrides for
+  // the operator-facing subset that can change WITHOUT a restart (capture_payloads,
+  // payload_retention_days, rate_limit_enabled, log_level). Loaded from the
+  // config_kv store, seeded from yaml/env defaults; fail-OPEN on a corrupt blob
+  // (it is convenience state, not a security boundary). `let` so the admin PUT can
+  // re-bind the live value through applySettings below — read by getters injected
+  // into the chat route, the rate limiter, and the logger.
+  let settings = await loadRuntimeSettings(store.config, config, (lvl, msg, fields) =>
+    logger.log(lvl, msg, fields),
+  );
+  logger.setLevel?.(settings.log_level);
+  // A MUTABLE copy of the rate-limit config: the limiter reads `.enabled` fresh on
+  // every check(), so flipping this field live applies the rate_limit_enabled
+  // toggle without a restart (seeded from settings, which seeded from yaml/env).
+  const rateLimitConfig = { ...config.runtime.rate_limit, enabled: settings.rate_limit_enabled };
+  // Apply a new settings object live: re-bind `settings`, push the log level into
+  // the logger, and flip the rate-limit master switch. Called by the admin settings
+  // route after it validates + persists (see registerAdminApi below).
+  const applySettings = (next: RuntimeSettings): void => {
+    settings = next;
+    logger.setLevel?.(next.log_level);
+    rateLimitConfig.enabled = next.rate_limit_enabled;
+  };
   // Agentic Signals (POST-MVP feedback layer, docs/02). The collector consumes
   // ALREADY-persisted telemetry and writes aggregated, REDACTED signals — it is
   // started as a BACKGROUND interval below (NEVER on the request path), so it
@@ -213,7 +241,7 @@ export async function buildServer(
   // -> zero-overhead pass-through. Counters persist in the SAME store so windows
   // survive restarts / span instances. Sits AFTER auth, BEFORE routing.
   const rateLimiter = createRateLimiter({
-    config: config.runtime.rate_limit,
+    config: rateLimitConfig,
     store: store.rateLimit,
   });
 
@@ -306,6 +334,15 @@ export async function buildServer(
   const catalog: Map<string, CatalogEntry> = loadRuntimeCatalog({
     configDir: opts.configDir ?? "./config",
   });
+  // Price streamed completions (#6): the executor can't know token usage at
+  // stream-peek time, so the chat route parses the trailing usage chunk and asks
+  // this to convert it to USD at the served alias's pricing. Null when pricing is
+  // unknown — the record then keeps an honest "not measured" null, never a 0.
+  const costOf = (alias: string, usage: { prompt_tokens?: number; completion_tokens?: number }) =>
+    computeCostUsd(catalog.get(alias)?.pricing, {
+      promptTokens: usage.prompt_tokens,
+      completionTokens: usage.completion_tokens,
+    });
   // Three-layer cascade classify adapter: Layer-1 rules + Layer-2 eval (OFF by
   // default; per-request override threaded from the chat route) + Layer-3
   // balanced fail-open. The eval small-model is invoked via the same provider
@@ -396,6 +433,11 @@ export async function buildServer(
     telemetry,
     redact: (payload) => redact(payload),
     now: () => Date.now(),
+    // Full request/response capture + streamed-cost backfill. The getters read the
+    // LIVE runtime settings so the admin toggle/retention apply without a restart.
+    capturePayloads: () => settings.capture_payloads,
+    payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
+    costOf,
     // e2e-only: allow the `x-helm-eval` header to toggle Layer-2 eval per request
     // so the eval cascade can be black-boxed without a config reload. Production
     // leaves HELM_E2E unset → eval stays config-driven (fail-closed, principle 2).
@@ -453,6 +495,17 @@ export async function buildServer(
       },
       genKeyId: () => randomUUID(),
       accountId: "default",
+      // System Settings: read the live value; on save, validate+persist to the
+      // config_kv store then apply live (logger level, rate-limit switch). The
+      // route layer (admin/settings.ts) validates against RuntimeSettingsSchema.
+      settings: {
+        get: () => settings,
+        save: async (next) => {
+          const saved = await saveRuntimeSettings(store.config, next);
+          applySettings(saved);
+          return saved;
+        },
+      },
     });
 
     // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so
