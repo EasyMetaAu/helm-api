@@ -1,6 +1,7 @@
 import {
   type AnthropicSSEEvent,
   convertOpenAIStreamToAnthropic,
+  convertOpenAIStreamToResponses,
   type ExecutionResult,
   geminiTransformer,
   type IRChunk,
@@ -10,6 +11,7 @@ import {
   type ObserveDeps,
   observeInbound,
   observeOutbound,
+  type ResponsesSSEEvent,
   type RouteOptions,
   resolveMemoryMode,
 } from "@helm/core";
@@ -381,10 +383,14 @@ export function createMessagesPipeline(
                 yield snapshot as Record<string, unknown>;
               }
             } else {
-              for await (const ev of convertOpenAIStreamToAnthropic(
-                source as AsyncIterable<never>,
-              )) {
-                yield ev as AnthropicSSEEvent & { type: string };
+              // openai_responses / anthropic both yield typed SSE events; the route
+              // treats them as an opaque {type,...} bag, so the branch lives here.
+              const events =
+                protocol === "openai_responses"
+                  ? convertOpenAIStreamToResponses(source as AsyncIterable<never>)
+                  : convertOpenAIStreamToAnthropic(source as AsyncIterable<never>);
+              for await (const ev of events) {
+                yield ev as (AnthropicSSEEvent | ResponsesSSEEvent) & { type: string };
               }
             }
           } finally {

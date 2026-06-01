@@ -15,6 +15,7 @@ function makeDeps(
     authed?: boolean;
     transformRequestOut?: (n: unknown) => { stream?: boolean; metadata?: Record<string, unknown> };
     collect?: () => Promise<unknown>;
+    streamIR?: () => AsyncIterable<{ type: string; [k: string]: unknown }>;
     rateLimiter?: ResponsesRouteDeps["rateLimiter"];
     identity?: MessagesIdentity;
   } = {},
@@ -40,19 +41,45 @@ function makeDeps(
         order.push("translate-back");
         return { id: "resp_1", object: "response", status: "completed", output: [], __ir: ir };
       },
+      // Serialize ONE Responses SSE event into its wire event/data pair (mirrors
+      // the server wiring: event = the response.* type, data = the whole event).
+      transformStreamOut: (event) => ({
+        event: (event as { type: string }).type,
+        data: JSON.stringify(event),
+      }),
     },
     pipeline: {
       run: async (_ir, _identity, _signal) => {
         order.push("route");
         return {
           collect: over.collect ?? (async () => ({ id: "ir-resp", choices: [] })),
-          // streamIR is never consumed by the Responses route (non-stream only).
-          streamIR: async function* () {},
+          streamIR:
+            over.streamIR ??
+            async function* () {
+              yield { type: "response.created", sequence_number: 0 };
+              yield { type: "response.completed", sequence_number: 1 };
+            },
         };
       },
     },
   };
   return { deps, order };
+}
+
+// Parse an SSE response body into [event, dataJSON] frames.
+function parseSSE(text: string): Array<{ event: string; data: string }> {
+  const frames: Array<{ event: string; data: string }> = [];
+  for (const block of text.split("\n\n")) {
+    if (block.trim() === "") continue;
+    let event = "message";
+    let data = "";
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data += line.slice(5).trim();
+    }
+    frames.push({ event, data });
+  }
+  return frames;
 }
 
 function buildApp(deps: ResponsesRouteDeps) {
@@ -106,9 +133,14 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(order).not.toContain("route");
   });
 
-  it("rejects stream:true with a structured 400 (Responses streaming not yet supported)", async () => {
-    const { deps, order } = makeDeps({
-      transformRequestOut: () => ({ stream: true, metadata: {} }),
+  it("stream:true returns text/event-stream with the response.* event sequence (no 400)", async () => {
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
     });
     const app = buildApp(deps);
     const res = await app.request("/v1/responses", {
@@ -116,11 +148,93 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       headers: AUTH,
       body: JSON.stringify({ ...REQ, stream: true }),
     });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: { code: string; message: string } };
-    expect(body.error.code).toBe("invalid_request");
-    expect(body.error.message).toContain("streaming");
-    expect(order).not.toContain("route");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const frames = parseSSE(await res.text());
+    expect(frames[0]?.event).toBe("response.created");
+    expect(frames.at(-1)?.event).toBe("response.completed");
+    // No [DONE] sentinel on the Responses surface.
+    expect(frames.some((f) => f.data === "[DONE]")).toBe(false);
+  });
+
+  it("mid-stream provider failure emits exactly one OpenAI-envelope error frame", async () => {
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      streamIR: async function* () {
+        yield { type: "response.created", sequence_number: 0 };
+        throw new Error("upstream exploded");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    expect(res.status).toBe(200);
+    const frames = parseSSE(await res.text());
+    const errorFrames = frames.filter((f) => f.event === "error");
+    expect(errorFrames).toHaveLength(1);
+    const env = JSON.parse(errorFrames[0]!.data) as { error: { code: string } };
+    // OpenAI error envelope, NOT the Anthropic shape.
+    expect(env.error.code).toBeDefined();
+  });
+
+  it("pre-stream all_providers_failed surfaces a single terminal OpenAI error frame", async () => {
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      // biome-ignore lint/correctness/useYield: throw-only generator (failure before first event)
+      streamIR: async function* () {
+        throw new PipelineError("all_providers_failed", "all providers failed", "trace-1");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    const frames = parseSSE(await res.text());
+    const errorFrames = frames.filter((f) => f.event === "error");
+    expect(errorFrames).toHaveLength(1);
+    const env = JSON.parse(errorFrames[0]!.data) as { error: { code: string } };
+    expect(env.error.code).toBe("all_providers_failed");
+  });
+
+  it("client abort emits NO error frame (benign non-provider fault)", async () => {
+    const ac = new AbortController();
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      streamIR: async function* () {
+        yield { type: "response.created", sequence_number: 0 };
+        ac.abort();
+        throw new Error("aborted");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+      signal: ac.signal,
+    });
+    const frames = parseSSE(await res.text());
+    expect(frames.some((f) => f.event === "error")).toBe(false);
   });
 
   it("maps a structurally invalid Responses body (transformer throws) to 400", async () => {

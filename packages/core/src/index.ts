@@ -283,6 +283,15 @@ export {
 // OpenAI Responses transformer — the third client presentation surface (docs/05);
 // folds the flat input[] item stream into the IR and explodes it back out.
 export { mapResponsesStatus, responsesTransformer } from "./protocol/responses.js";
+// OpenAI Responses streaming state machine (docs/05): the SECOND IR→SSE machine,
+// emitting the `response.*` event sequence + a JSON→SSE synthesizer for cache
+// hits / non-streaming upstreams. Framework-agnostic (principle 1).
+export {
+  convertOpenAIStreamToResponses,
+  type ResponsesSSEEvent,
+  ResponsesSSEEventSchema,
+  synthesizeResponsesSSEFromJSON,
+} from "./protocol/responses-stream.js";
 // Streaming primitives (docs/05): generic SSE splitter, shared per-direction
 // state machine + idempotent close guards, and the JSON->SSE synthesizer for
 // cache hits / non-streaming upstreams. Framework-agnostic (Web ReadableStream).

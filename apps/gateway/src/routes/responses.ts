@@ -1,8 +1,9 @@
 import type { RateLimitProbe, RateLimitResult } from "@helm/core";
 import { type ErrorClass, ErrorClassSchema, makeHelmError } from "@helm/shared";
 import type { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
-import { HelmHttpError } from "../middleware/error-handler.js";
+import { HelmHttpError, openAIErrorEnvelope } from "../middleware/error-handler.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
@@ -17,10 +18,12 @@ import { PipelineError } from "./messages-pipeline.js";
 // envelope (a thrown HelmHttpError handled by the global onError) — identical to
 // /v1/chat, NOT the Anthropic envelope.
 //
-// MVP scope: NON-STREAMING only. The Responses streaming protocol (response.*
-// SSE events) has no transformer yet, so a `stream:true` request is rejected with
-// a structured 400 rather than silently mis-served (principle 2, fail-closed). The
-// non-stream path is fully wired and routed.
+// Streaming: a `stream:true` request is served as `text/event-stream`, emitting
+// the native Responses `response.*` event sequence (the pipeline runs the second
+// IR→SSE state machine, stamped openai_responses). Errors in the stream use the
+// OpenAI error envelope written DIRECTLY into the SSE stream — once the stream has
+// started we can no longer throw to onError, so the serializable envelope body is
+// written as a terminal `event: error` frame (docs/05, docs/07).
 
 interface ResponsesIRLike {
   stream?: boolean;
@@ -44,6 +47,12 @@ export interface ResponsesRouteDeps {
     transformRequestOut(native: unknown): ResponsesIRLike;
     /** IR response → native Responses response. */
     transformResponseOut(ir: unknown): unknown;
+    /** ONE IR stream event → ONE Responses SSE frame (event/data pair). The
+     *  pipeline already produced the response.* events; this only serializes. */
+    transformStreamOut(event: { type: string; [k: string]: unknown }): {
+      event: string;
+      data: string;
+    };
   };
   pipeline: {
     run(
@@ -52,6 +61,13 @@ export interface ResponsesRouteDeps {
       signal: AbortSignal,
     ): Promise<PipelineRunResult>;
   };
+}
+
+// Client disconnect / abort detection — mirrors messages.ts. Used to suppress a
+// terminal error frame for a benign disconnect (NOT a provider fault, docs/02).
+function isAbort(err: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted) return true;
+  return err instanceof Error && (err.name === "AbortError" || err.message.includes("aborted"));
 }
 
 function extractCredential(auth: string | undefined): string | null {
@@ -165,22 +181,12 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       memory_mode: memoryScope.mode,
     };
 
-    // 3) Streaming is not yet implemented for Responses (no SSE transformer). Reject
-    //    explicitly rather than degrade a stream client to a single JSON body.
-    if (ir.stream === true) {
-      throw helmError(
-        "invalid_request",
-        "streaming is not yet supported on /v1/responses; retry with stream:false",
-        traceId,
-      );
-    }
-
-    // 4) Route through the shared core, then translate the IR response back to the
-    //    native Responses shape. The pipeline throws a PipelineError when routing
-    //    failed (all_providers_failed) or for an empty request (invalid_request) —
-    //    surface it as the matching OpenAI envelope instead of an empty 200. `run`
-    //    throws for the empty-request case; `collect` throws for the routing-failure
-    //    case (the seam that previously synthesized an empty assistant message).
+    // 3) Route through the shared core. The pipeline throws a PipelineError when
+    //    routing failed (all_providers_failed) or for an empty request
+    //    (invalid_request) — surface it as the matching OpenAI envelope instead of
+    //    an empty 200. `run` itself throws for the empty-request case (pre-stream,
+    //    so it still reaches onError as a 400/502); the per-accessor failure
+    //    (collect/streamIR) covers the routing-failure case.
     let result: PipelineRunResult;
     try {
       result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
@@ -188,6 +194,48 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
       throw err;
     }
+
+    // 4) Outbound: stream vs non-stream, isomorphic shape.
+    if (ir.stream === true) {
+      return streamSSE(c, async (sse) => {
+        // Each IR event is serialized by the transformer's stream mapping; the
+        // pipeline already ran the Responses state machine (principle 8 — we never
+        // forward a raw upstream chunk). There is NO [DONE] sentinel; the terminal
+        // response.completed closes the stream.
+        try {
+          for await (const event of result.streamIR()) {
+            const frame = deps.transformer.transformStreamOut(event);
+            await sse.writeSSE({ event: frame.event, data: frame.data });
+          }
+        } catch (err) {
+          // A client disconnect / abort is benign (docs/02): emit NO error frame.
+          // Any other throw — incl. a PipelineError when all providers failed
+          // before the stream started — writes a SINGLE terminal OpenAI-envelope
+          // error frame DIRECTLY into the stream. We CANNOT throw here (the stream
+          // has already started; onError would never see it), so the serializable
+          // makeHelmError body is written as an `event: error` frame instead.
+          if (!isAbort(err, c.req.raw.signal)) {
+            const envelope =
+              err instanceof PipelineError
+                ? openAIErrorEnvelope({
+                    error_class: coerceErrorClass(err.error_class),
+                    message: err.message,
+                    trace_id: traceId,
+                  })
+                : openAIErrorEnvelope({
+                    error_class: "upstream_error",
+                    message: "upstream error",
+                    trace_id: traceId,
+                  });
+            await sse.writeSSE({ event: "error", data: JSON.stringify(envelope.body) });
+          }
+        }
+      });
+    }
+
+    // Non-stream: collect() throws a PipelineError when routing failed (all
+    // providers failed) — surface it as the OpenAI envelope instead of the empty
+    // 200 a synthesized placeholder body would produce.
     let collected: unknown;
     try {
       collected = await result.collect();

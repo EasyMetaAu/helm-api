@@ -184,6 +184,104 @@ test.describe("OpenAI client → upstream", () => {
   });
 });
 
+// ── OpenAI Responses client → Helm → upstream (SSE streaming) ───────────────
+// The Responses surface is the THIRD client protocol. Streaming emits the native
+// `response.*` event sequence via the second IR→SSE state machine. This proves the
+// seam end-to-end: created → … → completed, monotonic sequence_number, delta
+// concatenation, tool-call streaming, and the OpenAI error envelope on failure
+// (docs/05 §Responses item expansion, principle 8).
+test.describe("OpenAI Responses client → upstream (streaming)", () => {
+  // Parse an SSE body into ordered { event, data } frames.
+  function parseSSE(text: string): Array<{ event: string; data: string }> {
+    const frames: Array<{ event: string; data: string }> = [];
+    for (const block of text.split("\n\n")) {
+      if (block.trim() === "") continue;
+      let event = "message";
+      let data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      frames.push({ event, data });
+    }
+    return frames;
+  }
+
+  test("text stream: response.created … response.completed, monotonic sequence_number", async ({
+    request,
+  }) => {
+    const res = await request.post("/v1/responses", {
+      headers: OPENAI_AUTH,
+      data: {
+        model: "auto",
+        input: "translate this sentence to french: hola",
+        stream: true,
+      },
+    });
+    expect(res.ok()).toBeTruthy();
+    expect(res.headers()["content-type"]).toContain("text/event-stream");
+    const text = await res.text();
+    const frames = parseSSE(text);
+
+    // ordered envelope boundaries (no [DONE] sentinel on the Responses surface).
+    expect(frames[0]?.event).toBe("response.created");
+    expect(frames.at(-1)?.event).toBe("response.completed");
+    expect(text).not.toContain("[DONE]");
+    // never leak a raw OpenAI chunk through the Responses surface.
+    expect(text).not.toContain("chat.completion.chunk");
+
+    // sequence_number is strictly monotonic across every event.
+    const seqs = frames.map(
+      (f) => (JSON.parse(f.data) as { sequence_number: number }).sequence_number,
+    );
+    for (let i = 1; i < seqs.length; i++) {
+      expect(seqs[i]).toBe((seqs[i - 1] ?? -1) + 1);
+    }
+
+    // output_text.delta concatenation equals the output_text.done full text.
+    const deltas = frames
+      .filter((f) => f.event === "response.output_text.delta")
+      .map((f) => (JSON.parse(f.data) as { delta: string }).delta)
+      .join("");
+    const doneFrame = frames.find((f) => f.event === "response.output_text.done");
+    expect(doneFrame).toBeDefined();
+    const doneText = (JSON.parse(doneFrame?.data ?? "{}") as { text?: string }).text;
+    expect(doneText).toBe(deltas);
+  });
+
+  test("tool-call stream: function_call item + arguments deltas", async ({ request }) => {
+    const res = await request.post("/v1/responses", {
+      headers: OPENAI_AUTH,
+      data: {
+        model: "auto",
+        input: `look up the weather ${TOOL_CALL_SENTINEL}`,
+        tools: [
+          {
+            type: "function",
+            name: "get_weather",
+            parameters: { type: "object", properties: { city: { type: "string" } } },
+          },
+        ],
+        stream: true,
+      },
+    });
+    expect(res.ok()).toBeTruthy();
+    const text = await res.text();
+    const frames = parseSSE(text);
+
+    const added = frames.find((f) => f.event === "response.output_item.added");
+    expect(added).toBeDefined();
+    const item = (JSON.parse(added?.data ?? "{}") as { item?: { type?: string; name?: string } })
+      .item;
+    expect(item?.type).toBe("function_call");
+    expect(item?.name).toBe("get_weather");
+    // arguments arrive as function_call_arguments.delta and close with .done.
+    expect(text).toContain("response.function_call_arguments.delta");
+    expect(text).toContain("response.function_call_arguments.done");
+    expect(frames.at(-1)?.event).toBe("response.completed");
+  });
+});
+
 // ── Bidirectional isomorphism: same logical chat, two client protocols, ONE
 //    normalized upstream shape (proves a unified IR hub, not N×N direct). ─────
 test.describe("bidirectional isomorphism", () => {

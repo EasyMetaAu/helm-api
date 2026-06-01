@@ -43,6 +43,7 @@ import {
   type ProxyConfig,
   parseLanesConfig,
   type ProviderRegistryConfig as RegistryProviderConfig,
+  type ResponsesSSEEvent,
   type RouteOptions,
   redact,
   resolveCostUsd,
@@ -1078,8 +1079,8 @@ export async function buildServer(
 
   // OpenAI Responses route (/v1/responses). Reuses the SAME routing core via a
   // pipeline stamped with the openai_responses protocol, and the Responses
-  // transformer for IR↔native translation. Non-streaming only (no Responses SSE
-  // transformer yet); a stream:true request is rejected with a structured 400.
+  // transformer for IR↔native translation. Streaming (stream:true) emits the
+  // native response.* SSE event sequence via the second IR→SSE state machine.
   const responsesPipeline = createMessagesPipeline(route, "openai_responses", { observe });
   registerResponsesRoute(app, {
     // Same per-key limiter, same cast rationale as the messages route above —
@@ -1112,6 +1113,12 @@ export async function buildServer(
       transformRequestOut: (native) =>
         responsesTransformer.transformRequestOut(native) as { metadata?: Record<string, unknown> },
       transformResponseOut: (ir) => responsesTransformer.transformResponseOut(ir as IRResponse),
+      // The pipeline already produced Responses SSE events; here we only serialize
+      // ONE event into its wire event/data pair (event = the response.* type).
+      transformStreamOut: (event) => {
+        const ev = event as ResponsesSSEEvent & { type: string };
+        return { event: ev.type, data: JSON.stringify(ev) };
+      },
     },
     pipeline: responsesPipeline,
   } as Parameters<typeof registerResponsesRoute>[1] & { rateLimiter: RateLimiterPort });
