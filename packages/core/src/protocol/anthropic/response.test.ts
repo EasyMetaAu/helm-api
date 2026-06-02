@@ -5,6 +5,7 @@ import {
   createAnthropicToolNameMap,
   mapStopReason,
   mapUsage,
+  transformNativeResponseToIR,
   transformResponseIn,
 } from "./response.js";
 
@@ -283,5 +284,35 @@ describe("transformResponseIn", () => {
     });
     const text = out.content.find((b) => b.type === "text");
     expect(text).toMatchObject({ type: "text", text: "the answer is 42" });
+  });
+});
+
+describe("transformNativeResponseToIR — tool-name round-trip (Codex P1)", () => {
+  // Anthropic requires tool names to match ^[a-zA-Z0-9_-]{1,128}$, so transformRequestIn
+  // sanitizes `db.query` -> `db_query`. Anthropic then echoes the sanitized name on the
+  // response. Without the request-side map, the original is unrecoverable; threading the
+  // SAME deterministic map restores it so client-side tool dispatch keeps working.
+  const nativeWithSanitizedTool = {
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
+    model: "claude-3-5-sonnet",
+    content: [{ type: "tool_use", id: "tu_1", name: "db_query", input: { sql: "select 1" } }],
+    stop_reason: "tool_use",
+    usage: { input_tokens: 5, output_tokens: 2 },
+  };
+
+  it("restores the original tool name when the request-side map is threaded", () => {
+    // Deterministically rebuilt from the IR request's original tool list.
+    const map = createAnthropicToolNameMap(["db.query"]);
+    expect(map.toAnthropic("db.query")).toBe("db_query"); // request sanitized it thus
+
+    const ir = transformNativeResponseToIR(nativeWithSanitizedTool, map);
+    expect(ir.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("db.query");
+  });
+
+  it("falls back to the sanitized name when no map is provided (stateless)", () => {
+    const ir = transformNativeResponseToIR(nativeWithSanitizedTool);
+    expect(ir.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("db_query");
   });
 });
