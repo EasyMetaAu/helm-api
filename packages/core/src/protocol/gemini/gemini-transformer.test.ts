@@ -63,6 +63,28 @@ describe("GeminiTransformer.transformRequestOut (Gemini generateContent -> IR)",
     // generationConfig.maxOutputTokens -> max_tokens
     expect(ir.max_tokens).toBe(256);
   });
+
+  it("normalizes Gemini toolConfig functionCallingConfig into IR tool_choice", () => {
+    expect(
+      (
+        geminiTransformer.transformRequestOut({
+          contents: [{ role: "user", parts: [{ text: "x" }] }],
+          toolConfig: { functionCallingConfig: { mode: "NONE" } },
+        }) as IRRequest
+      ).tool_choice,
+    ).toBe("none");
+
+    expect(
+      (
+        geminiTransformer.transformRequestOut({
+          contents: [{ role: "user", parts: [{ text: "x" }] }],
+          toolConfig: {
+            functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["get_weather"] },
+          },
+        }) as IRRequest
+      ).tool_choice,
+    ).toEqual({ type: "function", function: { name: "get_weather" } });
+  });
 });
 
 describe("GeminiTransformer.transformResponseOut (IR -> Gemini response)", () => {
@@ -170,6 +192,54 @@ describe("tool-call id synthesis (the core pit)", () => {
     expect(toolMsgs[1]?.tool_call_id).toBe(id1);
   });
 
+  it("maps OpenAI tool_choice into Gemini functionCallingConfig", () => {
+    const base: IRRequest = {
+      model: "gemini-1.5-pro",
+      messages: [{ role: "user", content: "weather?" }],
+      tools: [
+        {
+          type: "function",
+          function: { name: "get_weather", parameters: { type: "object" } },
+        },
+      ],
+    };
+
+    expect(
+      (
+        geminiTransformer.transformRequestIn({
+          ...base,
+          tool_choice: "auto",
+        }) as GeminiGenerateContentRequest
+      ).toolConfig,
+    ).toEqual({ functionCallingConfig: { mode: "AUTO" } });
+    expect(
+      (
+        geminiTransformer.transformRequestIn({
+          ...base,
+          tool_choice: "none",
+        }) as GeminiGenerateContentRequest
+      ).toolConfig,
+    ).toEqual({ functionCallingConfig: { mode: "NONE" } });
+    expect(
+      (
+        geminiTransformer.transformRequestIn({
+          ...base,
+          tool_choice: "required",
+        }) as GeminiGenerateContentRequest
+      ).toolConfig,
+    ).toEqual({ functionCallingConfig: { mode: "ANY" } });
+    expect(
+      (
+        geminiTransformer.transformRequestIn({
+          ...base,
+          tool_choice: { type: "function", function: { name: "get_weather" } },
+        }) as GeminiGenerateContentRequest
+      ).toolConfig,
+    ).toEqual({
+      functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["get_weather"] },
+    });
+  });
+
   it("drops synthesized ids when going IR -> Gemini (outbound)", () => {
     const ir: IRRequest = {
       model: "gemini-1.5-pro",
@@ -226,6 +296,26 @@ describe("schema format sanitize (date / date-time pit)", () => {
     expect(items.type).toBe("string");
   });
 
+  it("strips Gemini-unsupported schema keywords recursively", () => {
+    const schema = {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        email: { type: "string", format: "email", pattern: "@" },
+        choice: { anyOf: [{ type: "string" }, { type: "number" }] },
+      },
+    };
+
+    const cleaned = sanitizeSchema(schema) as Record<string, unknown>;
+    expect(cleaned.$schema).toBeUndefined();
+    expect(cleaned.additionalProperties).toBeUndefined();
+    const props = cleaned.properties as Record<string, Record<string, unknown> | undefined>;
+    expect(props.email?.format).toBeUndefined();
+    expect(props.email?.pattern).toBeUndefined();
+    expect(props.choice?.anyOf).toBeUndefined();
+  });
+
   it("sanitizes functionDeclarations parameters on the outbound request", () => {
     const ir: IRRequest = {
       model: "gemini-1.5-pro",
@@ -250,6 +340,52 @@ describe("schema format sanitize (date / date-time pit)", () => {
     };
     expect(params.properties.date?.format).toBeUndefined();
     expect(params.properties.date?.type).toBe("string");
+  });
+
+  it("emits sanitized Gemini responseSchema from IR response_format json_schema", () => {
+    const ir: IRRequest = {
+      model: "gemini-1.5-pro",
+      messages: [{ role: "user", content: "return json" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "answer",
+          schema: {
+            type: "object",
+            properties: { when: { type: "string", format: "date-time" } },
+            required: ["when"],
+          },
+        },
+      },
+    };
+
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    expect(native.generationConfig?.responseMimeType).toBe("application/json");
+    const schema = native.generationConfig?.responseSchema as {
+      properties: Record<string, Record<string, unknown> | undefined>;
+    };
+    expect(schema.properties.when?.format).toBeUndefined();
+    expect(schema.properties.when?.description).toContain("format: date-time");
+  });
+
+  it("keeps remote image outbound as explicit text non-goal instead of invalid inlineData", () => {
+    const ir: IRRequest = {
+      model: "gemini-1.5-pro",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "describe" },
+            { type: "image", url: "https://example.com/cat.png", mediaType: "image/png" },
+          ],
+        },
+      ],
+    };
+
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    expect(JSON.stringify(native)).not.toContain("inlineData");
+    expect(JSON.stringify(native)).toContain("remote image unsupported");
+    expect(JSON.stringify(native)).toContain("https://example.com/cat.png");
   });
 });
 

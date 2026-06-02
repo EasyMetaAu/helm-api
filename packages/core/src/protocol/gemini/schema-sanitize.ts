@@ -18,6 +18,39 @@ const SUPPORTED_FORMATS = new Set(["int32", "int64", "float", "double", "enum"])
 // the field is a string, record the intent in `description` so it isn't fully lost.
 const DATE_FORMATS = new Set(["date", "date-time", "time", "duration"]);
 
+// Gemini accepts a narrow OpenAPI-ish schema subset. Strip JSON Schema draft and
+// validation keywords that Gemini does not understand instead of forwarding a
+// request that upstream rejects with 400.
+const UNSUPPORTED_KEYS = new Set([
+  "$schema",
+  "$id",
+  "$ref",
+  "$defs",
+  "definitions",
+  "additionalProperties",
+  "patternProperties",
+  "unevaluatedProperties",
+  "anyOf",
+  "oneOf",
+  "allOf",
+  "not",
+  "pattern",
+  "minLength",
+  "maxLength",
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+  "minItems",
+  "maxItems",
+  "uniqueItems",
+  "contains",
+  "const",
+  "default",
+  "examples",
+]);
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -39,6 +72,7 @@ export function sanitizeSchema(schema: unknown): unknown {
 
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(schema)) {
+    if (UNSUPPORTED_KEYS.has(key)) continue;
     if (key === "format") continue; // handled explicitly below
     if (key === "properties" && isPlainObject(value)) {
       const props: Record<string, unknown> = {};

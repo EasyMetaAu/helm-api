@@ -130,14 +130,13 @@ const openaiToGemini = path("openai", "gemini", [
   fixture(
     "multimodal",
     "todo",
-    "OpenAI remote image_url outbound to Gemini is lossy today",
-    "PR A records the gap; issue #45 routes the fix to a later Gemini compatibility PR.",
+    "OpenAI remote image_url outbound to Gemini is an explicit non-goal",
+    "Remote image fetch/proxy is a non-goal for issue #49; Gemini nativeOut emits an explicit text placeholder until a later fetch/proxy design exists.",
   ),
   fixture(
     "json-schema",
-    "todo",
-    "OpenAI response_format JSON schema to Gemini responseSchema is not emitted today",
-    "PR A records the gap; adding Gemini request nativeOut behavior belongs to a later PR.",
+    "passing",
+    "OpenAI response_format JSON schema renders as Gemini generationConfig.responseSchema",
   ),
   fixture(
     "error",
