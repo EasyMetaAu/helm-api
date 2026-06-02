@@ -351,3 +351,45 @@ describe("createOpenAIClient (OAuth dynamic credential)", () => {
     expect(() => createOpenAIClient({ config: { ...OAUTH_BASE } })).toThrow();
   });
 });
+
+describe("createOpenAIClient (extraHeaders + resolveBaseUrl — Copilot path, issue #38)", () => {
+  it("merges extraHeaders and computes the base URL per request from resolveBaseUrl", async () => {
+    let seenUrl = "";
+    let seenHeaders: Headers | undefined;
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      seenUrl = url;
+      seenHeaders = new Headers(init?.headers);
+      return jsonResponse({ ok: true });
+    });
+    // resolveBaseUrl tracks a rotating value: first call host-1, then host-2.
+    let n = 0;
+    const client = createOpenAIClient({
+      config: {
+        baseUrl: "https://ignored.test",
+        apiKey: "sk",
+        extraHeaders: () => ({ "Copilot-Integration-Id": "vscode-chat" }),
+        resolveBaseUrl: async () => `https://api.host-${++n}.test`,
+      },
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    await client.chatCompletion({ model: "m" });
+    expect(seenUrl).toBe("https://api.host-1.test/chat/completions");
+    expect(seenHeaders?.get("Copilot-Integration-Id")).toBe("vscode-chat");
+    await client.chatCompletion({ model: "m" });
+    expect(seenUrl).toBe("https://api.host-2.test/chat/completions"); // recomputed
+  });
+
+  it("falls back to the static baseUrl when resolveBaseUrl is absent", async () => {
+    let seenUrl = "";
+    const fetch = vi.fn(async (url: string) => {
+      seenUrl = url;
+      return jsonResponse({ ok: true });
+    });
+    const client = createOpenAIClient({
+      config: { ...CONFIG },
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    await client.chatCompletion({ model: "m" });
+    expect(seenUrl).toBe("https://upstream.test/v1/chat/completions");
+  });
+});

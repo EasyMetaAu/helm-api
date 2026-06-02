@@ -4,6 +4,7 @@ import {
   type AnthropicSSEEvent,
   anthropicTransformer,
   bootstrapRootKey,
+  COPILOT_HEADERS,
   createAnthropicClient,
   createCircuitBreaker,
   createMemoryMomentumStore,
@@ -15,6 +16,7 @@ import {
   createTokenManager,
   DEFAULT_LANES,
   generateKey,
+  getGitHubCopilotBaseUrl,
   getOAuthProvider,
   hashKey,
   type IRResponse,
@@ -269,6 +271,29 @@ function createProviderClient(
 ): ProviderClient {
   if (p.type === "anthropic") {
     return createAnthropicClient({ config: { ...base, ...cred } });
+  }
+  // GitHub Copilot is OpenAI-compatible, BUT: (1) it requires editor identity
+  // headers on every call, and (2) its API host comes from the current token's
+  // `proxy-ep` (the short-lived Copilot token rotates, so the host can change).
+  // Inject both via the openai client's generic seams; the per-request base URL
+  // resolver also forces getAuthHeader() — so a routed request re-mints the
+  // Copilot token on demand (auto-refresh on use).
+  if (
+    p.oauth &&
+    isOAuthPreset(p.oauth) &&
+    p.oauth.provider === "github-copilot" &&
+    "getAuthHeader" in cred
+  ) {
+    const getAuth = cred.getAuthHeader;
+    return createOpenAIClient({
+      config: {
+        ...base,
+        ...cred,
+        extraHeaders: () => ({ ...COPILOT_HEADERS }),
+        resolveBaseUrl: async () =>
+          getGitHubCopilotBaseUrl((await getAuth()).replace(/^Bearer /, "")),
+      },
+    });
   }
   return createOpenAIClient({ config: { ...base, ...cred } });
 }

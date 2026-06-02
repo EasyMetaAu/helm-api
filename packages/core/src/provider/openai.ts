@@ -19,6 +19,15 @@ export interface ProviderConfig {
   onUnauthorized?: () => void; // 401 hook (force refresh); only with getAuthHeader
   currentSecrets?: () => string[]; // live token set for redaction (OAuth)
   timeoutMs?: number; // default 60_000
+  // Extra static headers merged into every request (issue #38). GitHub Copilot
+  // requires editor identity headers (Copilot-Integration-Id, Editor-Version…) on
+  // each chat call; this is the generic seam for them.
+  extraHeaders?: () => Record<string, string>;
+  // Per-request base URL resolver (issue #38). When set, the chat URL is computed
+  // fresh on EACH request from this (so it tracks a rotating value) instead of the
+  // static `baseUrl`. Copilot derives its API host from the current token's
+  // `proxy-ep`, which changes when the short-lived Copilot token is re-minted.
+  resolveBaseUrl?: () => Promise<string>;
 }
 
 export interface OpenAIClientDeps {
@@ -90,7 +99,13 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const cfg = deps.config;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const url = `${cfg.baseUrl}/chat/completions`;
+
+  // The chat endpoint. Static by default; recomputed per request when
+  // resolveBaseUrl is set (Copilot's host comes from the rotating token).
+  async function chatUrl(): Promise<string> {
+    const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
+    return `${base}/chat/completions`;
+  }
 
   // Fail-closed credential guard (principle 2): EXACTLY ONE of static apiKey or
   // dynamic getAuthHeader. A client built with both / neither cannot resolve an
@@ -113,6 +128,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     return {
       Authorization: await authHeader(),
       "Content-Type": "application/json",
+      ...(cfg.extraHeaders ? cfg.extraHeaders() : {}),
     };
   }
 
@@ -153,7 +169,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   ): Promise<Response> {
     const t = withTimeout(timeoutMs, external);
     try {
-      return await doFetch(url, {
+      return await doFetch(await chatUrl(), {
         method: "POST",
         headers: await headers(),
         body: JSON.stringify(req),
