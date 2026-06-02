@@ -101,6 +101,16 @@ wrapped so a degenerate input yields a safe default instead of throwing
   from any boundary approaches 1 (most certain). When confidence is below
   `rules.confidence_threshold`, Layer 1 is treated as uncertain and the cascade
   enters Layer 2 (if eval is enabled), otherwise Layer 3.
+- **Language-coverage guard** (`engine.ts` + `signals.ts`): the keyword lists are
+  **English-only**, so Layer 1 is an English fast path. A predominantly non-Latin
+  prompt (`nonLatinRatio ≥ language.non_latin_min_ratio`) with no content-type
+  structural grip is forced `uncertain` (confidence 0) so the cascade escalates to
+  the multilingual Layer-2 eval. **Operator contract**: serve non-English traffic →
+  enable eval. With eval **off**, a non-Latin prompt degrades deterministically to
+  `balanced` (fail-open) rather than being routed by a keyword score that matched
+  nothing. Latin-script non-English (es/fr/de) is not flagged by ratio, but already
+  yields ~0 keyword signal → low confidence → eval anyway. The guard is suppressed
+  for trivially-short prompts (already pinned `simple`).
 
 ### Tunables live in config
 
