@@ -623,14 +623,7 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
       candidates: [candidate],
       ...(chunk.usage != null
         ? {
-            usageMetadata: {
-              ...(chunk.usage.prompt_tokens !== undefined
-                ? { promptTokenCount: chunk.usage.prompt_tokens }
-                : {}),
-              ...(chunk.usage.completion_tokens !== undefined
-                ? { candidatesTokenCount: chunk.usage.completion_tokens }
-                : {}),
-            },
+            usageMetadata: irUsageToMetadata(chunk.usage),
           }
         : {}),
     };

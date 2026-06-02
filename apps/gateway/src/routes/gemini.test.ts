@@ -192,6 +192,41 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     expect(harness.order).not.toContain("route");
   });
 
+  it("rate-limits after auth with a 429 Gemini envelope and limit headers, without translating or routing", async () => {
+    const { deps, harness } = makeDeps({
+      rateLimiter: {
+        check: async (probe) => {
+          harness.order.push(`rate-limit:${probe.keyId}`);
+          return {
+            allowed: false,
+            limitedBy: "rpm",
+            limit: 60,
+            remaining: 0,
+            resetSeconds: 42,
+            retryAfterSeconds: 12,
+          };
+        },
+      },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("12");
+    expect(res.headers.get("x-ratelimit-limit")).toBe("60");
+    expect(res.headers.get("x-ratelimit-remaining")).toBe("0");
+    expect(res.headers.get("x-ratelimit-reset")).toBe("42");
+    const body = (await res.json()) as { error: { code: number; status: string } };
+    expect(body.error).toMatchObject({ code: 429, status: "RESOURCE_EXHAUSTED" });
+    expect(harness.order).toEqual(["auth:helm_live_secret", "rate-limit:k1"]);
+    expect(harness.pipelineSawIR).toBeNull();
+  });
+
   it("maps a malformed JSON body to 400 INVALID_ARGUMENT, after auth, without routing", async () => {
     const { deps, harness } = makeDeps();
     const app = buildApp(deps);

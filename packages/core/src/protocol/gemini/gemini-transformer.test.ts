@@ -362,6 +362,28 @@ describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
     expect(last?.candidates?.[0]?.finishReason).toBe("STOP");
   });
 
+  it("maps streaming usageMetadata with totalTokenCount and cachedContentTokenCount", async () => {
+    const chunks: IRChunk[] = [
+      { id: "c", model: "m", choices: [{ index: 0, delta: { role: "assistant" } }] },
+      {
+        id: "c",
+        model: "m",
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 7, completion_tokens: 5, cached_tokens: 3 },
+      },
+    ];
+
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(chunks)));
+    const last = events[events.length - 1];
+
+    expect(last?.usageMetadata).toEqual({
+      promptTokenCount: 10,
+      candidatesTokenCount: 5,
+      totalTokenCount: 15,
+      cachedContentTokenCount: 3,
+    });
+  });
+
   // test #4: outbound streaming must surface tool calls as functionCall parts.
   it("emits a functionCall part in the cumulative snapshot from streamed tool_calls", async () => {
     const chunks: IRChunk[] = [
