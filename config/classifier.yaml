@@ -13,6 +13,20 @@
 # the threshold. Tuned against the golden prompt set (scripts/calibrate-classifier.ts):
 # 29/29 prompts now reach decided_by=rules and route to their intended lanes, with a
 # healthy confidence spread (~0.44–0.91) so the gate still expresses uncertainty.
+#
+# VOCABULARY EXPANSION (2026-06-02, classifier.vocab-expansion): the keyword lists
+# were thin (4-9 terms) and missed common phrasings (summarize / derivative /
+# implement / pull out / group by / assess / command injection ...), so real-world
+# prompts fell through to chat/balanced. Each list was widened toward ~10-14 varied
+# terms. Two mechanics drove the re-calibration: (1) the keyword signal SATURATES at
+# min(1, hits/ceil(len/2)), so a longer list dilutes each hit -- positive weights were
+# raised (reasoning .55->.65, coding .42->.62, analysis .45->.76, security .40->.85)
+# and the negative weights MAGNIFIED (simple -.55->-1.35, lookup -.40->-1.05, chitchat
+# -1.15, translation -.78) to keep short prompts' confidence off the boundary; (2)
+# task_keywords use plain substring includes(), so "tone" was dropped from task
+# detection (it matched "mile{stone}s") and `rce` is kept only in the boundary-matched
+# security_kw dimension. Golden set grown 29->38 (9 real-world prompts); calibrate
+# prints 38/38 rules, 0 fallbacks, confidence spread ~0.45-0.93.
 classifier:
   rules:
     enabled: true
@@ -31,21 +45,41 @@ classifier:
     dimensions:
       # —— keyword dimensions (weight sign = direction) —— magnitudes raised vs the
       #    original ship to SPREAD rawScores out of the boundary band (calibration). ——
-      reasoning_kw: { weight: 0.55, keywords: ["prove", "derive", "theorem", "step by step", "reason about"] }
-      coding_kw: { weight: 0.42, keywords: ["refactor", "debug", "stack trace", "function", "compile"] }
-      math_kw: { weight: 0.18, keywords: ["integral", "matrix", "equation", "probability"] }
-      planning_kw: { weight: 0.34, keywords: ["plan", "architecture", "design doc", "trade-off", "strategy"] }
-      analysis_kw: { weight: 0.45, keywords: ["analyze", "compare", "evaluate", "implications", "root cause"] }
-      writing_kw: { weight: 0.14, keywords: ["essay", "rewrite", "draft", "tone", "polish"] }
-      security_kw: { weight: 0.40, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf"] }
-      extraction_kw: { weight: 0.12, keywords: ["extract", "parse", "json from", "fields", "schema"] }
-      data_kw: { weight: 0.20, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot"] }
-      vision_kw: { weight: 0.16, keywords: ["image", "screenshot", "this picture", "diagram", "chart"] }
-      multistep_kw: { weight: 0.26, keywords: ["first", "then", "finally", "and then", "after that"] }
-      translation_kw: { weight: -0.30, keywords: ["translate", "in french", "in chinese", "to spanish"] }
-      lookup_kw: { weight: -0.40, keywords: ["what is", "who is", "define", "meaning of"] }
-      chitchat_kw: { weight: -0.45, keywords: ["how are you", "good morning", "lol", "haha"] }
-      simple_kw: { weight: -0.55, keywords: ["hi", "thanks", "ok", "ping"] }
+      # VOCABULARY EXPANSION (2026-06-02): each list widened toward ~10–14 varied
+      # terms (synonyms / verb forms / common variants) for real-world coverage.
+      # Matching is WORD-BOUNDARY, case-insensitive (dimensions.ts); the signal
+      # SATURATES at `min(1, hits/ceil(len/2))`, so a longer list DILUTES each hit
+      # — positive weights were nudged up to offset the dilution on the multi-hit
+      # golden prompts (coding/reasoning/analysis/planning/math) and keep their
+      # tiers. Short (<50 char) prompts are pinned `simple` by the short_message
+      # override, so the negative lists could grow freely.
+      # NOTE on the positive weights below: several were raised again during the
+      # 2026-06-02 expansion. The signal SATURATES (min(1, hits/ceil(len/2))), so a
+      # longer list means a single hit contributes less; the bump restores enough
+      # magnitude that a boundary-sitting prompt (e.g. a 2-keyword analysis or
+      # security request) clears its tier with confidence > threshold rather than
+      # hugging the boundary and degrading to fallback.
+      reasoning_kw: { weight: 0.65, keywords: ["prove", "derive", "theorem", "step by step", "reason about", "deduce", "infer", "justify", "rationale", "explain why"] }
+      coding_kw: { weight: 0.62, keywords: ["refactor", "debug", "stack trace", "function", "compile", "implement", "unit test", "exception", "traceback", "syntax error", "endpoint", "regex"] }
+      math_kw: { weight: 0.20, keywords: ["integral", "matrix", "equation", "probability", "derivative", "calculus", "algebra", "solve for", "polynomial", "summation"] }
+      planning_kw: { weight: 0.38, keywords: ["plan", "architecture", "design doc", "trade-off", "strategy", "roadmap", "milestone", "break down", "blueprint", "trade-offs"] }
+      analysis_kw: { weight: 0.76, keywords: ["analyze", "compare", "evaluate", "implications", "root cause", "assess", "critique", "pros and cons", "diagnose", "investigate"] }
+      writing_kw: { weight: 0.14, keywords: ["essay", "rewrite", "draft", "tone", "polish", "summarize", "summary", "paraphrase", "proofread", "article", "headline", "grammar"] }
+      security_kw: { weight: 0.85, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "rce", "csrf", "malware", "auth bypass"] }
+      extraction_kw: { weight: 0.12, keywords: ["extract", "parse", "json from", "fields", "schema", "pull out", "list all", "structured data", "named entities", "scrape"] }
+      data_kw: { weight: 0.20, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot", "group by", "spreadsheet", "histogram", "correlation", "query"] }
+      vision_kw: { weight: 0.16, keywords: ["image", "screenshot", "this picture", "diagram", "chart", "photo", "ocr", "figure", "graph"] }
+      multistep_kw: { weight: 0.26, keywords: ["first", "then", "finally", "and then", "after that", "step 1", "lastly", "subsequently", "followed by"] }
+      # —— negative dimensions —— weights MAGNIFIED (not just expanded). A longer
+      # list dilutes each hit toward zero, which pulls a short greeting/lookup
+      # prompt's rawScore UP toward the `standard` boundary and tanks its
+      # confidence (→ fallback to balanced) even though the short_message override
+      # still pins the tier `simple`. The large magnitudes restore each single
+      # hit's original pull so these prompts stay confidently economy.
+      translation_kw: { weight: -0.78, keywords: ["translate", "in french", "in chinese", "to spanish", "translate to", "in german", "in japanese", "localize", "into english"] }
+      lookup_kw: { weight: -1.05, keywords: ["what is", "who is", "define", "meaning of", "when did", "where is", "how many", "capital of", "tell me about", "what are"] }
+      chitchat_kw: { weight: -1.15, keywords: ["how are you", "good morning", "lol", "haha", "thank you", "goodbye", "what's up", "good night", "cheers"] }
+      simple_kw: { weight: -1.35, keywords: ["hi", "thanks", "ok", "ping", "yes", "no", "sure", "got it", "thx"] }
       # —— structural / context dimensions (keywords empty; code feeds the score) ——
       has_code_block: { weight: 0.34 }
       has_url: { weight: 0.06 }
@@ -62,18 +96,27 @@ classifier:
       msg_length: { weight: 0.16 }
       turn_count: { weight: 0.08 }
       tool_count: { weight: 0.10 }
+    # task_keywords feed TASK detection (taskdetect.ts) and — unlike dimensions —
+    # are matched with a plain SUBSTRING `includes()` (no word boundary, no
+    # saturation; each hit is a flat +1.0). New terms are therefore kept
+    # distinctive or multi-word to avoid in-word false hits (e.g. "rce" would
+    # match "source"/"force", so it lives ONLY in the boundary-matched
+    # security_kw dimension, never here). Expanded 2026-06-02.
     task_keywords:
-      coding: ["function", "class", "bug", "compile", "npm", "git"]
-      math: ["integral", "matrix", "equation"]
-      writing: ["essay", "rewrite", "draft", "tone"]
-      extraction: ["extract", "parse", "json from", "fields"]
-      web: ["search the web", "browse", "look up online"]
-      data: ["csv", "dataframe", "aggregate", "sql"]
-      vision: ["image", "screenshot", "this picture"]
+      coding: ["function", "class", "bug", "compile", "npm", "git", "refactor", "debug", "implement", "unit test", "stack trace", "typescript"]
+      math: ["integral", "matrix", "equation", "derivative", "calculus", "algebra", "polynomial"]
+      # "tone" dropped from task detection: as a SUBSTRING it false-matches
+      # "mile{stone}s" → spurious writing task. It stays in the writing_kw
+      # dimension (word-boundary matched there, so it is safe).
+      writing: ["essay", "rewrite", "draft", "summarize", "paraphrase", "proofread", "article"]
+      extraction: ["extract", "parse", "json from", "fields", "pull out", "structured data"]
+      web: ["search the web", "browse", "look up online", "latest news", "google for"]
+      data: ["csv", "dataframe", "aggregate", "sql", "group by", "spreadsheet", "pivot table"]
+      vision: ["image", "screenshot", "this picture", "photo", "this diagram", "this chart"]
       # security (eval-v2 cybersecurity domain). Conservative, multi-word
       # keywords; paired with a raised task_activation.security (>= 2.0) so a
       # single lone hit (e.g. "explain what XSS is") does NOT false-activate.
-      security: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf"]
+      security: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "remote code execution"]
     tool_prefixes:
       web: ["browser_", "web_"]
       coding: ["code_", "shell_", "fs_"]

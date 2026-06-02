@@ -416,6 +416,96 @@ const CASES: GoldenCase[] = [
     complexity: "simple",
     selected_lane: "economy",
   },
+
+  // ── VOCABULARY EXPANSION (2026-06-02) ──────────────────────────────────────
+  // Real-world phrasings the original thin keyword lists missed entirely (they
+  // fell through to chat/balanced). These encode the human-obvious routing and
+  // are made to pass by the classifier.yaml vocabulary expansion in the same
+  // commit. Each was RED against the pre-expansion config.
+  {
+    // "summarize" / "article" are new writing_kw + task_keywords.writing terms.
+    name: "expand: summarize -> writing",
+    request: req("summarize this article in two short sentences"),
+    task_type: "writing",
+    complexity: "simple",
+    selected_lane: "economy",
+  },
+  {
+    // "paraphrase" is a new writing term.
+    name: "expand: paraphrase -> writing",
+    request: req("paraphrase this paragraph more clearly"),
+    task_type: "writing",
+    complexity: "simple",
+    selected_lane: "economy",
+  },
+  {
+    // "derivative" / "polynomial" are new math terms; math+simple -> balanced
+    // (math_simple_to_balanced). "derivative" deliberately does NOT substring-
+    // match "derive" in the existing "math probability prove" golden case.
+    name: "expand: derivative -> math/balanced",
+    request: req("calculate the derivative of this polynomial"),
+    task_type: "math",
+    complexity: "simple",
+    selected_lane: "balanced",
+  },
+  {
+    // "implement" / "unit tests" are new coding terms. This short prompt is
+    // pinned `simple` by the short-message override, so coding_simple_to_economy
+    // steers it to economy (trivial-code-is-not-premium philosophy).
+    name: "expand: implement -> coding/economy",
+    request: req("implement binary search and add unit tests for it"),
+    task_type: "coding",
+    complexity: "simple",
+    selected_lane: "economy",
+  },
+  {
+    // "group by" / "spreadsheet" are new data terms; data has no own lane so a
+    // medium data task rides the complexity fallback to balanced.
+    name: "expand: group by -> data/balanced",
+    request: req("group by region and sum the revenue in this spreadsheet"),
+    task_type: "data",
+    complexity: "medium",
+    selected_lane: "balanced",
+  },
+  {
+    // "pull out" is a new extraction term; extraction+simple -> economy.
+    name: "expand: pull out -> extraction",
+    request: req("pull out all the email addresses from this text"),
+    task_type: "extraction",
+    complexity: "simple",
+    selected_lane: "economy",
+  },
+  {
+    // "assess" / "pros and cons" / "trade-offs" are new analysis/planning
+    // complexity terms (analysis is not a task_type, so task stays chat);
+    // chat+complex -> premium.
+    name: "expand: assess pros/cons -> premium",
+    request: req("assess the pros and cons of these two approaches and weigh the trade-offs"),
+    task_type: "chat",
+    complexity: "complex",
+    selected_lane: "premium",
+  },
+  {
+    // "command injection" is a new security term; paired with "sql injection" it
+    // clears the raised security activation (>= 2.0). security+complex -> premium.
+    name: "expand: injection audit -> security/premium",
+    request: req("audit this endpoint for sql injection and command injection vulnerabilities"),
+    task_type: "security",
+    complexity: "complex",
+    selected_lane: "premium",
+  },
+  {
+    // "roadmap" / "break down" are new planning terms. With no reasoning
+    // co-signal a pure-planning prompt lands medium (not complex like the
+    // reasoning-laden "planning architecture" case) -> balanced. Task stays chat
+    // (planning is not a task_type). Guards the "tone" substring fix: "milestones"
+    // must NOT be mis-detected as the writing task.
+    name: "expand: roadmap -> planning/balanced",
+    request: req("outline a project roadmap with milestones and break down the deliverables"),
+    task_type: "chat",
+    complexity: "medium",
+    selected_lane: "balanced",
+  },
 ];
 
 describe("GOLDEN classify+route baseline (characterizes current behavior)", () => {

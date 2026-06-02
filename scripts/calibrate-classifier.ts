@@ -140,6 +140,16 @@ const CASES: Case[] = [
   { name: "multistep coding", request: req("first set up the repo, then write the function, and then finally compile it"), lane: "coding" },
   { name: "json generic", request: req("respond with structured output", { response_format: { type: "json_object" } }), lane: "json" },
   { name: "ping", request: req("ping"), lane: "economy" },
+  // ── vocabulary expansion (2026-06-02) — mirrors golden-routing.test.ts ──
+  { name: "expand summarize->writing", request: req("summarize this article in two short sentences"), lane: "economy" },
+  { name: "expand paraphrase->writing", request: req("paraphrase this paragraph more clearly"), lane: "economy" },
+  { name: "expand derivative->math", request: req("calculate the derivative of this polynomial"), lane: "balanced" },
+  { name: "expand implement->coding", request: req("implement binary search and add unit tests for it"), lane: "economy" },
+  { name: "expand groupby->data", request: req("group by region and sum the revenue in this spreadsheet"), lane: "balanced" },
+  { name: "expand pullout->extraction", request: req("pull out all the email addresses from this text"), lane: "economy" },
+  { name: "expand assess->premium", request: req("assess the pros and cons of these two approaches and weigh the trade-offs"), lane: "premium" },
+  { name: "expand injection->security", request: req("audit this endpoint for sql injection and command injection vulnerabilities"), lane: "premium" },
+  { name: "expand roadmap->balanced", request: req("outline a project roadmap with milestones and break down the deliverables"), lane: "balanced" },
 ];
 
 const threshold = rulesCfg.confidence_threshold;
