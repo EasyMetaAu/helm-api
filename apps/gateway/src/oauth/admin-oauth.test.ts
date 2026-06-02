@@ -72,6 +72,34 @@ describe("createOAuthAdmin", () => {
     expect(status.find((p) => p.id === "anthropic")?.accounts).toHaveLength(1);
   });
 
+  it("binds MULTIPLE accounts of the SAME provider (each connect = a new account)", async () => {
+    const store = makeStore();
+    let seq = 0;
+    const admin = createOAuthAdmin({ store, encKey: KEY, genSessionId: () => `s${++seq}` });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+      ]),
+    );
+    for (const account of ["work", "personal"]) {
+      const { sessionId, authorizeUrl } = await admin.startManualPaste({ providerId: "anthropic" });
+      const state = new URL(authorizeUrl).searchParams.get("state");
+      await admin.completeManualPaste({
+        sessionId,
+        redirectInput: `https://x/cb?code=C&state=${state}`,
+        account,
+      });
+    }
+    const anthropic = (await admin.listStatus()).find((p) => p.id === "anthropic");
+    expect(anthropic?.accounts.map((a) => a.account).sort()).toEqual(["personal", "work"]);
+
+    // Disconnecting one leaves the other intact.
+    await admin.logout({ providerId: "anthropic", account: "work" });
+    const after = (await admin.listStatus()).find((p) => p.id === "anthropic");
+    expect(after?.accounts.map((a) => a.account)).toEqual(["personal"]);
+  });
+
   it("manual-paste: Codex start -> complete persists encrypted creds (form-encoded exchange)", async () => {
     const store = makeStore();
     const admin = createOAuthAdmin({ store, encKey: KEY, genSessionId: () => "cdx" });
