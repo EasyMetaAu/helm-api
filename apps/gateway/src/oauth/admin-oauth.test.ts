@@ -1,4 +1,4 @@
-import { createSqliteDb, decryptSecret, SqliteOAuthTokenStore } from "@helm/core";
+import { createSqliteDb, decryptSecret, encryptSecret, SqliteOAuthTokenStore } from "@helm/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOAuthAdmin } from "./admin-oauth.js";
 
@@ -195,6 +195,58 @@ describe("createOAuthAdmin", () => {
     await expect(
       admin.completeManualPaste({ sessionId: "nope", redirectInput: "code=x", account: "default" }),
     ).rejects.toThrow(/session not found/);
+  });
+
+  it("listStatus AUTO-RENEWS an expired account on view (openclaw-style lazy refresh)", async () => {
+    const store = makeStore();
+    const NOW = 10_000_000;
+    // An EXPIRED Copilot account whose durable GitHub token is still valid.
+    await store.upsert({
+      providerId: "github-copilot",
+      account: "mylukin",
+      accessEnc: encryptSecret("old;proxy-ep=proxy.x.com;", KEY),
+      refreshEnc: encryptSecret("gho_valid", KEY),
+      expiresAt: 1000, // long past
+      meta: null,
+      updatedAt: 1,
+    });
+    const admin = createOAuthAdmin({ store, encKey: KEY, now: () => NOW });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [
+          /copilot_internal\/v2\/token/,
+          () => json({ token: "tid=y;proxy-ep=proxy.y.com;", expires_at: NOW / 1000 + 1800 }),
+        ],
+      ]),
+    );
+    const acct = (await admin.listStatus()).find((p) => p.id === "github-copilot")?.accounts[0];
+    expect(acct?.healthy).toBe(true);
+    expect(acct?.expiresAt ?? 0).toBeGreaterThan(NOW); // renewed into the future
+    // The store now holds the freshly re-minted token.
+    expect(
+      decryptSecret((await store.get("github-copilot", "mylukin"))?.accessEnc ?? "", KEY),
+    ).toContain("proxy-ep=proxy.y.com");
+  });
+
+  it("listStatus marks an account unhealthy when its refresh fails (needs reconnect)", async () => {
+    const store = makeStore();
+    await store.upsert({
+      providerId: "github-copilot",
+      account: "dead",
+      accessEnc: encryptSecret("x", KEY),
+      refreshEnc: encryptSecret("gho_revoked", KEY),
+      expiresAt: 1000,
+      meta: null,
+      updatedAt: 1,
+    });
+    const admin = createOAuthAdmin({ store, encKey: KEY, now: () => 10_000_000 });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([[/copilot_internal\/v2\/token/, () => json({ error: "bad" }, 401)]]),
+    );
+    const acct = (await admin.listStatus()).find((p) => p.id === "github-copilot")?.accounts[0];
+    expect(acct?.healthy).toBe(false);
   });
 
   it("rejects the wrong flow for a provider", async () => {

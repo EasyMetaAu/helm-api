@@ -6,7 +6,9 @@ import {
   type CopilotDeviceStart,
   completeAnthropicLogin,
   completeOpenAICodexLogin,
+  createTokenManager,
   encryptSecret,
+  getOAuthProvider,
   type OAuthCredentials,
   type OAuthTokenStore,
   pollCopilotDeviceOnce,
@@ -103,13 +105,54 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     });
   }
 
+  // Ensure a stored account's access token is fresh — the SAME lazy refresh the
+  // execution path uses (openclaw-style: refresh when expired/near, write back),
+  // but triggered on page view so the UI shows a live, just-renewed expiry instead
+  // of a stale "expired". A still-valid token is a no-op (no network). Returns the
+  // (possibly updated) expiry + a health flag: `healthy:false` means the durable
+  // credential itself failed to refresh — the account needs re-connecting.
+  async function ensureFresh(
+    providerId: string,
+    account: string,
+    stored: { expiresAt: number | null; updatedAt: number },
+  ): Promise<{ account: string; expiresAt: number | null; updatedAt: number; healthy: boolean }> {
+    const provider = getOAuthProvider(providerId);
+    if (!provider) return { account, ...stored, healthy: true };
+    const tm = createTokenManager({
+      oauth: { kind: "preset", providerId, account },
+      tokenStore: deps.store,
+      encKey: deps.encKey,
+      oauthProvider: provider,
+      now,
+    });
+    let healthy = true;
+    try {
+      await tm.getAuthHeader(); // refresh-if-expired + write back; no-op when fresh
+    } catch {
+      healthy = false; // refresh-token / durable credential is dead → needs re-login
+    }
+    const r = await deps.store.get(providerId, account);
+    return {
+      account,
+      expiresAt: r?.expiresAt ?? stored.expiresAt,
+      updatedAt: r?.updatedAt ?? stored.updatedAt,
+      healthy,
+    };
+  }
+
   return {
     async listStatus(): Promise<OAuthAdminStatus[]> {
       const rows = await deps.store.list();
+      // Ensure-fresh every stored account in parallel so the page reflects live,
+      // auto-renewed expiries (and surfaces a dead credential as unhealthy).
+      const refreshed = await Promise.all(
+        rows.map(async (r) => ({
+          providerId: r.providerId,
+          ...(await ensureFresh(r.providerId, r.account, r)),
+        })),
+      );
       const accountsFor = (id: string) =>
-        rows
-          .filter((r) => r.providerId === id)
-          .map((r) => ({ account: r.account, expiresAt: r.expiresAt, updatedAt: r.updatedAt }));
+        refreshed.filter((x) => x.providerId === id).map(({ providerId: _p, ...rest }) => rest);
       return [
         {
           id: ANTHROPIC,

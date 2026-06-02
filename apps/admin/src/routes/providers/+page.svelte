@@ -28,14 +28,13 @@
     return data.providers.find((p) => p.id === id)?.name ?? id;
   }
 
-  function expired(a: OAuthAccount): boolean {
-    return a.expiresAt != null && a.expiresAt <= Date.now();
-  }
-
+  // The access token is short-lived and auto-renewed by the gateway, so a lapsed
+  // one is NOT an alarm — show "auto-renews" rather than a scary "expired". When
+  // valid, show the remaining time as a hint of when it next renews.
   function expiryLabel(a: OAuthAccount): string {
-    if (a.expiresAt == null) return $t('unknown');
+    if (a.expiresAt == null) return $t('auto-renews');
     const ms = a.expiresAt - Date.now();
-    if (ms <= 0) return $t('expired');
+    if (ms <= 0) return $t('auto-renews');
     const h = Math.floor(ms / 3_600_000);
     const m = Math.floor((ms % 3_600_000) / 60_000);
     return h > 0 ? $t('in {h}h {m}m', { h, m }) : $t('in {m}m', { m });
@@ -126,10 +125,10 @@
                 <code class="font-mono text-ink-strong">{row.account.account}</code>
               </td>
               <td class="px-3 py-2">
-                {#if expired(row.account)}
-                  <span class="badge-neutral">{$t('expired')}</span>
+                {#if row.account.healthy}
+                  <span class="badge-ok">{$t('connected')}</span>
                 {:else}
-                  <span class="badge-ok">{$t('active')}</span>
+                  <span class="badge-neutral">{$t('needs reconnect')}</span>
                 {/if}
               </td>
               <td class="px-3 py-2 text-ink-muted">{expiryLabel(row.account)}</td>

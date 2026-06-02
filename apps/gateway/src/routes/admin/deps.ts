@@ -53,10 +53,19 @@ export interface GeneratedKeyParts {
 // device code) is an OPERATOR action behind the admin basicAuth — never an
 // API-client surface (Principle 6). No method ever returns secret material.
 export interface OAuthAdminStatus {
-  id: string; // provider id: 'anthropic' | 'github-copilot'
+  id: string; // provider id: 'anthropic' | 'github-copilot' | 'openai-codex'
   name: string;
   flow: "manual_paste" | "device_code"; // shapes the UI
-  accounts: Array<{ account: string; expiresAt: number | null; updatedAt: number }>;
+  // `healthy` reflects whether the account's token could be (re)obtained when the
+  // status was read — true once it has a working durable credential, false when a
+  // refresh failed (needs reconnecting). The short-lived access-token `expiresAt`
+  // is informational; the gateway auto-renews it (so it is NOT an alarm signal).
+  accounts: Array<{
+    account: string;
+    expiresAt: number | null;
+    updatedAt: number;
+    healthy: boolean;
+  }>;
 }
 
 export interface OAuthAdminAccess {

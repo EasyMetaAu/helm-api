@@ -9,6 +9,9 @@ export interface OAuthAccount {
   account: string;
   expiresAt: number | null;
   updatedAt: number;
+  // True when the account has a working durable credential (the gateway auto-renews
+  // the short-lived access token). False = a refresh failed → needs reconnecting.
+  healthy: boolean;
 }
 
 export interface OAuthProviderStatus {
@@ -35,7 +38,10 @@ async function asJson<T>(res: Response): Promise<T> {
 
 // GET /oauth -> provider catalog + logged-in accounts (no secrets). 503 when
 // OAuth login is not configured (HELM_OAUTH_ENC_KEY unset).
-export async function listOAuthStatus(): Promise<{ configured: boolean; providers: OAuthProviderStatus[] }> {
+export async function listOAuthStatus(): Promise<{
+  configured: boolean;
+  providers: OAuthProviderStatus[];
+}> {
   const res = await fetch(BASE, { headers: { accept: 'application/json' } });
   if (res.status === 503) return { configured: false, providers: [] };
   const body = await asJson<{ providers: OAuthProviderStatus[] }>(res);
@@ -43,7 +49,9 @@ export async function listOAuthStatus(): Promise<{ configured: boolean; provider
 }
 
 // ── manual-paste (Anthropic) ─────────────────────────────────────────────────
-export async function startManualPaste(provider: string): Promise<{ sessionId: string; authorizeUrl: string }> {
+export async function startManualPaste(
+  provider: string,
+): Promise<{ sessionId: string; authorizeUrl: string }> {
   const res = await fetch(`${BASE}/${provider}/manual/start`, { method: 'POST' });
   return asJson(res);
 }
