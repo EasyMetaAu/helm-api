@@ -223,6 +223,9 @@ function transformRequestOut(native: unknown): IRRequest {
     ...(gc?.temperature !== undefined ? { temperature: gc.temperature } : {}),
     ...(gc?.maxOutputTokens !== undefined ? { max_tokens: gc.maxOutputTokens } : {}),
     ...(responseFormat !== undefined ? { response_format: responseFormat } : {}),
+    ...(geminiToolConfigToToolChoice(req.toolConfig) !== undefined
+      ? { tool_choice: geminiToolConfigToToolChoice(req.toolConfig) }
+      : {}),
   };
 
   return IRRequestSchema.parse(ir);
@@ -266,7 +269,9 @@ function irMessageToParts(message: IRMessage): GeminiPart[] {
         const match = /^data:([^;]+);base64,(.*)$/.exec(part.url);
         if (match !== null && match[1] !== undefined && match[2] !== undefined) {
           parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
-        } else parts.push({ text: part.url });
+        } else {
+          parts.push({ text: `[remote image unsupported by Gemini nativeOut: ${part.url}]` });
+        }
       }
     }
   }
@@ -289,13 +294,77 @@ function parseArgs(raw: string): unknown {
   }
 }
 
+function geminiToolConfigToToolChoice(toolConfig: unknown): unknown {
+  if (typeof toolConfig !== "object" || toolConfig === null) return undefined;
+  const config = (toolConfig as { functionCallingConfig?: unknown }).functionCallingConfig;
+  if (typeof config !== "object" || config === null) return undefined;
+  const fcc = config as { mode?: unknown; allowedFunctionNames?: unknown };
+  if (fcc.mode === "NONE") return "none";
+  if (fcc.mode === "AUTO") return "auto";
+  if (fcc.mode === "ANY") {
+    const names = Array.isArray(fcc.allowedFunctionNames)
+      ? fcc.allowedFunctionNames.filter((name): name is string => typeof name === "string")
+      : [];
+    if (names.length === 1) return { type: "function", function: { name: names[0] } };
+    return "required";
+  }
+  return undefined;
+}
+
+function irToolChoiceToGeminiToolConfig(toolChoice: unknown): unknown {
+  if (toolChoice === "auto") return { functionCallingConfig: { mode: "AUTO" } };
+  if (toolChoice === "none") return { functionCallingConfig: { mode: "NONE" } };
+  if (toolChoice === "required") return { functionCallingConfig: { mode: "ANY" } };
+  if (typeof toolChoice === "object" && toolChoice !== null) {
+    const choice = toolChoice as { type?: unknown; function?: { name?: unknown } };
+    const name = choice.function?.name;
+    if (choice.type === "function" && typeof name === "string" && name !== "") {
+      return { functionCallingConfig: { mode: "ANY", allowedFunctionNames: [name] } };
+    }
+  }
+  return undefined;
+}
+
+function responseFormatToGenerationConfig(
+  responseFormat: unknown,
+): Record<string, unknown> | undefined {
+  if (typeof responseFormat !== "object" || responseFormat === null) return undefined;
+  const rf = responseFormat as { type?: unknown; json_schema?: unknown };
+  if (rf.type === "json_object") return { responseMimeType: "application/json" };
+  if (rf.type !== "json_schema") return undefined;
+
+  const rawSchema = rf.json_schema;
+  const schema =
+    typeof rawSchema === "object" && rawSchema !== null && "schema" in rawSchema
+      ? (rawSchema as { schema?: unknown }).schema
+      : rawSchema;
+  return {
+    responseMimeType: "application/json",
+    ...(schema !== undefined ? { responseSchema: sanitizeSchema(schema) } : {}),
+  };
+}
+
+function mergeGenerationConfig(
+  ...configs: Array<Record<string, unknown> | undefined>
+): Record<string, unknown> | undefined {
+  const merged = Object.assign(
+    {},
+    ...configs.filter((c): c is Record<string, unknown> => c !== undefined),
+  );
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
   const parsed = IRRequestSchema.parse(ir);
 
   const contents: GeminiContent[] = [];
   let systemInstruction: GeminiContent | undefined;
+  const toolNameById = new Map<string, string>();
 
   for (const message of parsed.messages) {
+    for (const call of message.tool_calls ?? []) {
+      toolNameById.set(call.id, call.function.name);
+    }
     if (message.role === "system") {
       const text = irMessageContentToText(message.content);
       if (text !== "") systemInstruction = { parts: [{ text }] };
@@ -308,7 +377,12 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
         parts: [
           {
             functionResponse: {
-              name: message.name ?? message.tool_call_id ?? "tool",
+              name:
+                message.name ??
+                (message.tool_call_id !== undefined
+                  ? toolNameById.get(message.tool_call_id)
+                  : undefined) ??
+                "tool",
               response: { content: irMessageContentToText(message.content) },
             },
           },
@@ -325,18 +399,22 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
       ? [{ functionDeclarations: parsed.tools.map(irToolToFunctionDeclaration) }]
       : undefined;
 
-  const generationConfig =
+  const generationConfig = mergeGenerationConfig(
     parsed.temperature !== undefined || parsed.max_tokens !== undefined
       ? {
           ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
           ...(parsed.max_tokens !== undefined ? { maxOutputTokens: parsed.max_tokens } : {}),
         }
-      : undefined;
+      : undefined,
+    responseFormatToGenerationConfig(parsed.response_format),
+  );
+  const toolConfig = irToolChoiceToGeminiToolConfig(parsed.tool_choice);
 
   return {
     contents,
     ...(systemInstruction !== undefined ? { systemInstruction } : {}),
     ...(tools !== undefined ? { tools } : {}),
+    ...(toolConfig !== undefined ? { toolConfig } : {}),
     ...(generationConfig !== undefined ? { generationConfig } : {}),
   };
 }

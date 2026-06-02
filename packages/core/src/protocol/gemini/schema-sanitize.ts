@@ -1,14 +1,6 @@
-// JSON-Schema `format` sanitizer (docs/05 "cross-cutting concerns as stackable
-// transformers"). Gemini's functionDeclarations[].parameters accept only an
-// OpenAPI 3.0 subset: the JSON-Schema `format` keyword is largely unsupported, and
-// passing e.g. `format:"date"` / `"date-time"` makes the upstream reject the
-// request with a 400. The contract from the task spec: STRIP unsupported `format`
-// values and DOWNGRADE date/date-time string fields to a plain string (folding the
-// lost semantic into `description` so the model still gets the hint). It is better
-// to degrade the semantic than to let the upstream 400 (fail-open, principle 3).
-//
-// Pure, recursive, framework-agnostic (principle 1). It is protocol-agnostic on
-// purpose — any provider that needs OpenAPI-subset schemas can reuse it. No `any`.
+// Gemini accepts a narrow OpenAPI-ish schema subset for function parameters and
+// responseSchema. This sanitizer keeps requests out of upstream 400s while
+// preserving as much shape as possible from common OpenAI/Zod JSON Schema.
 
 // The small set of `format` values Gemini's OpenAPI subset does accept (numbers).
 // Everything else is stripped. Kept deliberately narrow: when in doubt, strip.
@@ -18,68 +10,157 @@ const SUPPORTED_FORMATS = new Set(["int32", "int64", "float", "double", "enum"])
 // the field is a string, record the intent in `description` so it isn't fully lost.
 const DATE_FORMATS = new Set(["date", "date-time", "time", "duration"]);
 
+// Unsupported keywords that cannot be lowered safely. `$ref` and combinators are
+// handled before this strip list so common schemas do not collapse to `{}`.
+const UNSUPPORTED_KEYS = new Set([
+  "$schema",
+  "$id",
+  "$defs",
+  "definitions",
+  "additionalProperties",
+  "patternProperties",
+  "unevaluatedProperties",
+  "not",
+  "pattern",
+  "minLength",
+  "maxLength",
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+  "minItems",
+  "maxItems",
+  "uniqueItems",
+  "contains",
+  "const",
+  "default",
+  "examples",
+]);
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/**
- * Recursively sanitize a JSON Schema for the Gemini OpenAPI subset. Returns a NEW
- * value (never mutates the input, so it is composable like a behavior transformer).
- * - Unsupported `format` keywords are removed.
- * - A `date`/`date-time`/`time`/`duration` format on a string degrades to a plain
- *   string and the original format is appended to `description` as a hint.
- * - Recurses through `properties`, `items`, `$defs`/`definitions`, and the
- *   `anyOf`/`oneOf`/`allOf` combinators; all other structure is preserved verbatim.
- */
-export function sanitizeSchema(schema: unknown): unknown {
-  if (Array.isArray(schema)) {
-    return schema.map((s) => sanitizeSchema(s));
+function localRef(root: unknown, ref: string): unknown {
+  if (!ref.startsWith("#/")) return undefined;
+  let cur: unknown = root;
+  for (const raw of ref.slice(2).split("/")) {
+    if (!isPlainObject(cur)) return undefined;
+    const key = raw.replace(/~1/g, "/").replace(/~0/g, "~");
+    cur = cur[key];
   }
+  return cur;
+}
+
+function mergeObjects(left: Record<string, unknown>, right: Record<string, unknown>) {
+  const out: Record<string, unknown> = { ...left, ...right };
+  if (isPlainObject(left.properties) || isPlainObject(right.properties)) {
+    out.properties = {
+      ...(isPlainObject(left.properties) ? left.properties : {}),
+      ...(isPlainObject(right.properties) ? right.properties : {}),
+    };
+  }
+  const leftRequired = Array.isArray(left.required) ? left.required : [];
+  const rightRequired = Array.isArray(right.required) ? right.required : [];
+  if (leftRequired.length > 0 || rightRequired.length > 0) {
+    out.required = Array.from(new Set([...leftRequired, ...rightRequired]));
+  }
+  return out;
+}
+
+function mergeSanitizedBranches(branches: unknown[]) {
+  return branches.reduce<Record<string, unknown>>((acc, branch) => {
+    if (!isPlainObject(branch)) return acc;
+    return mergeObjects(acc, branch);
+  }, {});
+}
+
+function firstRepresentable(branches: unknown[]) {
+  return branches.find((branch) => {
+    if (!isPlainObject(branch)) return branch !== undefined;
+    if (branch.type === "null") return false;
+    return Object.keys(branch).length > 0;
+  });
+}
+
+function sanitize(schema: unknown, root: unknown, seen: Set<string>): unknown {
+  if (Array.isArray(schema)) return schema.map((s) => sanitize(s, root, seen));
   if (!isPlainObject(schema)) return schema;
 
+  let working: Record<string, unknown> = schema;
+  const ref = typeof schema.$ref === "string" ? schema.$ref : undefined;
+  if (ref !== undefined && !seen.has(ref)) {
+    const resolved = localRef(root, ref);
+    if (resolved !== undefined) {
+      const siblings = { ...schema };
+      delete siblings.$ref;
+      seen.add(ref);
+      const base = sanitize(resolved, root, seen);
+      seen.delete(ref);
+      working = isPlainObject(base) ? mergeObjects(base, siblings) : siblings;
+    }
+  }
+
   const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(schema)) {
+
+  if (Array.isArray(working.allOf)) {
+    Object.assign(out, mergeSanitizedBranches(working.allOf.map((s) => sanitize(s, root, seen))));
+  }
+  const unionBranches = Array.isArray(working.oneOf)
+    ? working.oneOf
+    : Array.isArray(working.anyOf)
+      ? working.anyOf
+      : undefined;
+  if (unionBranches !== undefined) {
+    const picked = firstRepresentable(unionBranches.map((s) => sanitize(s, root, seen)));
+    if (isPlainObject(picked)) Object.assign(out, picked);
+  }
+
+  const siblings: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(working)) {
+    if (key === "$ref" || key === "allOf" || key === "oneOf" || key === "anyOf") continue;
+    if (UNSUPPORTED_KEYS.has(key)) continue;
     if (key === "format") continue; // handled explicitly below
     if (key === "properties" && isPlainObject(value)) {
       const props: Record<string, unknown> = {};
       for (const [propName, propSchema] of Object.entries(value)) {
-        props[propName] = sanitizeSchema(propSchema);
+        props[propName] = sanitize(propSchema, root, seen);
       }
-      out[key] = props;
+      siblings[key] = props;
       continue;
     }
-    if (
-      (key === "items" ||
-        key === "additionalProperties" ||
-        key === "not" ||
-        key === "$defs" ||
-        key === "definitions") &&
-      (isPlainObject(value) || Array.isArray(value))
-    ) {
-      out[key] = sanitizeSchema(value);
+    if (key === "items" && (isPlainObject(value) || Array.isArray(value))) {
+      siblings[key] = sanitize(value, root, seen);
       continue;
     }
-    if ((key === "anyOf" || key === "oneOf" || key === "allOf") && Array.isArray(value)) {
-      out[key] = value.map((s) => sanitizeSchema(s));
-      continue;
-    }
-    out[key] = value;
+    siblings[key] = value;
   }
 
-  // Now decide what to do with the original `format`, if any.
-  const format = schema.format;
+  const format = working.format;
   if (typeof format === "string" && format !== "") {
     if (SUPPORTED_FORMATS.has(format)) {
-      out.format = format; // keep the few formats Gemini understands
+      siblings.format = format;
     } else if (DATE_FORMATS.has(format)) {
-      // Downgrade to a plain string; fold the semantic into description.
-      if (out.type === undefined || out.type === "string") out.type = "string";
-      const existing = typeof out.description === "string" ? out.description : "";
+      if (siblings.type === undefined || siblings.type === "string") siblings.type = "string";
+      const existing = typeof siblings.description === "string" ? siblings.description : "";
       const hint = `format: ${format}`;
-      out.description = existing === "" ? hint : `${existing} (${hint})`;
+      siblings.description = existing === "" ? hint : `${existing} (${hint})`;
     }
-    // any other unsupported format is simply dropped (already skipped above).
   }
 
-  return out;
+  return mergeObjects(out, siblings);
+}
+
+/**
+ * Recursively sanitize a JSON Schema for the Gemini OpenAPI subset. Returns a NEW
+ * value and never mutates the input.
+ * - Unsupported `format` keywords are removed.
+ * - date/time string formats are downgraded to plain strings with description hints.
+ * - Local `$ref` entries are resolved before unsupported keywords are stripped.
+ * - `allOf` branches are merged; `oneOf`/`anyOf` choose the first representable
+ *   non-null branch so common Zod/OpenAI schemas do not become `{}`.
+ */
+export function sanitizeSchema(schema: unknown): unknown {
+  return sanitize(schema, schema, new Set());
 }

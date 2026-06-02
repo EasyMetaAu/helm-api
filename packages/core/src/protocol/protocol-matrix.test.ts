@@ -365,7 +365,8 @@ describe("protocol cross-path executable harness", () => {
     const toNative = requestIn[to];
     expect(toNative).toBeDefined();
     const native = await toNative?.(ir);
-    expectSerializedField(native, "response_format");
+    if (to === "gemini") expectSerializedField(native, "responseSchema");
+    else expectSerializedField(native, "response_format");
     expect(JSON.stringify(native)).toContain("summary");
   });
 
