@@ -80,11 +80,16 @@ function textBlocksFromContent(content: unknown): AnthropicBlock[] {
 }
 
 // Extract the system prompt (string or array) and ALWAYS prepend the Claude-Code
-// spoof as system[0] (mandatory for the OAuth subscription endpoint).
+// spoof as system[0] (mandatory for the OAuth subscription endpoint). Both
+// `system` AND `developer` turns fold here, in original message order — Anthropic
+// has no `developer` role (it is OpenAI's renamed system tier), so dropping it to
+// a user turn would shift instruction precedence and leak hidden instructions.
+// Mirrors LiteLLM map_developer_role_to_system_role + the Gemini collectSystemText
+// policy (developer == system, order preserved).
 function buildSystem(messages: Array<Record<string, unknown>>): AnthropicBlock[] {
   const sys: AnthropicBlock[] = [{ type: "text", text: SYSTEM_SPOOF }];
   for (const m of messages) {
-    if (m.role !== "system") continue;
+    if (m.role !== "system" && m.role !== "developer") continue;
     for (const b of textBlocksFromContent(m.content)) sys.push(b);
   }
   return sys;
@@ -94,7 +99,8 @@ function toAnthropicMessages(messages: Array<Record<string, unknown>>): Anthropi
   const out: AnthropicMessage[] = [];
   for (const m of messages) {
     const role = m.role;
-    if (role === "system") continue;
+    // system + developer both fold into the top-level system param (buildSystem).
+    if (role === "system" || role === "developer") continue;
     if (role === "tool") {
       // OpenAI tool result -> anthropic tool_result block on a user message.
       out.push({
