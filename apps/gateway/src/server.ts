@@ -14,6 +14,8 @@ import {
   createStore,
   createTokenManager,
   DEFAULT_LANES,
+  type GeminiGenerateContentResponse,
+  geminiTransformer,
   generateKey,
   getOAuthProvider,
   hashKey,
@@ -25,6 +27,7 @@ import {
   loadRuntimeCatalog,
   loadRuntimeSettings,
   makeAnthropicError,
+  makeGeminiError,
   type OAuthTokenStore,
   type ObserveDeps,
   type PoliciesConfig,
@@ -64,6 +67,7 @@ import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
 import { createExecute } from "./routes/execute.js";
+import { registerGeminiRoute } from "./routes/gemini.js";
 import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
@@ -798,6 +802,55 @@ export async function buildServer(
     },
     pipeline: responsesPipeline,
   } as Parameters<typeof registerResponsesRoute>[1] & { rateLimiter: RateLimiterPort });
+
+  // Gemini route (/v1beta/models/{model}:generateContent | :streamGenerateContent).
+  // The FOURTH client surface. Reuses the SAME routing core via a pipeline stamped
+  // with the `gemini` protocol (so streamIR yields Gemini snapshot events), and the
+  // Gemini transformer for IR↔native translation + the Gemini error envelope. Self-
+  // auth (x-goog-api-key preferred, Bearer fallback) so a missing key is rejected as
+  // a Gemini error envelope (docs/05, docs/07).
+  const geminiPipeline = createMessagesPipeline(route, "gemini", { observe });
+  registerGeminiRoute(app, {
+    rateLimiter,
+    auth: {
+      resolve: async (credential): Promise<MessagesIdentity | null> => {
+        if (credential === null) return null;
+        const record = await keyStore.getByHash(hashKey(credential));
+        if (record === null || record.disabled) return null;
+        return {
+          keyId: record.key_id,
+          keyPrefix: record.prefix,
+          accountId: record.account_id,
+          orgId: null,
+          userId: null,
+          role: record.role,
+          caps: {
+            maxLane: record.max_lane,
+            allowedLanes: record.allowed_lanes,
+            allowCustomModel: record.allow_custom_model,
+            rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+          },
+        };
+      },
+    },
+    transformer: {
+      transformRequestOut: (native) => geminiTransformer.transformRequestOut(native),
+      transformResponseOut: (ir) =>
+        geminiTransformer.transformResponseOut(ir as IRResponse) as GeminiGenerateContentResponse,
+      transformErrorOut: (err: RouteError) =>
+        makeGeminiError({
+          // Pass the precise error_class straight through; makeGeminiError maps all
+          // 8 ErrorClass values to the right status + Google canonical status. A
+          // RouteError.error_class is a plain string, so validate it against the
+          // schema; an unrecognized value falls back to upstream_error (502) rather
+          // than throwing (fail-open, principle 3).
+          error_class: coerceErrorClass(err.error_class),
+          message: err.message,
+          trace_id: err.trace_id,
+        }),
+    },
+    pipeline: geminiPipeline,
+  } as Parameters<typeof registerGeminiRoute>[1] & { rateLimiter: RateLimiterPort });
 
   // Start the Agentic Signals background scheduler — the OFF-the-request-path
   // trigger. It periodically asks the collector to aggregate the just-elapsed
