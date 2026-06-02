@@ -230,11 +230,17 @@
     }
   }
 
-  // Load every section's current values once at mount. They are small reads and
-  // letting all three settle up front keeps tab switches instant.
-  void loadModels();
-  void loadProxy();
-  void loadSchedule();
+  // (Re)load every section whenever the TARGET ACCOUNT changes — not just at mount.
+  // The page may reuse this dialog for a different account without unmounting it, so
+  // a one-shot load would leave the previous account's models/proxy/schedule on
+  // screen. Tracking providerId+account here re-fetches on every switch.
+  $effect(() => {
+    void providerId;
+    void account;
+    void loadModels();
+    void loadProxy();
+    void loadSchedule();
+  });
 </script>
 
 <div class="dialog flex flex-col gap-4" role="dialog" aria-label={$t('Manage account')}>

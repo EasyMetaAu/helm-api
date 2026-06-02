@@ -11,13 +11,38 @@ function jsonResponse(body: unknown, status = 200): Response {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("discoverOAuthModels", () => {
-  it("returns the curated list for anthropic / codex (no network)", async () => {
+  it("returns the curated list for anthropic (no token) / codex", async () => {
     expect(await discoverOAuthModels("anthropic", undefined)).toEqual(
       CURATED_OAUTH_MODELS.anthropic,
     );
     expect(await discoverOAuthModels("openai-codex", undefined)).toEqual(
       CURATED_OAUTH_MODELS["openai-codex"],
     );
+  });
+
+  it("discovers Anthropic models LIVE from /v1/models when a token is present", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        expect(url).toContain("api.anthropic.com/v1/models");
+        expect(new Headers(init?.headers).get("anthropic-beta")).toContain("oauth-2025-04-20");
+        return jsonResponse({
+          data: [{ id: "claude-opus-4-8" }, { id: "claude-sonnet-4-6" }],
+        });
+      }),
+    );
+    expect(await discoverOAuthModels("anthropic", "at")).toEqual([
+      "claude-opus-4-8",
+      "claude-sonnet-4-6",
+    ]);
+  });
+
+  it("falls back to curated Anthropic models when /v1/models rejects the token", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: "unauthorized" }, 401)),
+    );
+    expect(await discoverOAuthModels("anthropic", "bad")).toEqual(CURATED_OAUTH_MODELS.anthropic);
   });
 
   it("returns [] for an unknown provider", async () => {
