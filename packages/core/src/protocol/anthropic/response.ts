@@ -61,6 +61,78 @@ const ProviderRawSchema = z
   .object({ stop_reason: z.unknown().optional(), usage: z.unknown().optional() })
   .catchall(z.unknown());
 
+export interface AnthropicToolNameMap {
+  toAnthropic(name: string): string;
+  toOriginal(name: string): string | undefined;
+  reverse: Record<string, string>;
+}
+
+const ANTHROPIC_TOOL_NAME_MAX = 64;
+const TOOL_NAME_SUFFIX_LENGTH = 9; // '_' + 8-char stable hash
+
+function hashToolName(name: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < name.length; i++) {
+    hash ^= name.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(36).padStart(8, "0").slice(0, 8);
+}
+
+function sanitizeAnthropicToolName(name: string): string {
+  const cleaned = name
+    .replace(/[^A-Za-z0-9_]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const base = cleaned === "" ? "tool" : cleaned;
+  return base.slice(0, ANTHROPIC_TOOL_NAME_MAX);
+}
+
+function withHashSuffix(base: string, original: string): string {
+  const prefix = base
+    .slice(0, ANTHROPIC_TOOL_NAME_MAX - TOOL_NAME_SUFFIX_LENGTH)
+    .replace(/_+$/g, "");
+  return `${prefix}_${hashToolName(original)}`.slice(0, ANTHROPIC_TOOL_NAME_MAX);
+}
+
+export function createAnthropicToolNameMap(names: readonly string[] = []): AnthropicToolNameMap {
+  const forward = new Map<string, string>();
+  const reverse = new Map<string, string>();
+
+  function register(original: string): string {
+    const existing = forward.get(original);
+    if (existing !== undefined) return existing;
+
+    const base = sanitizeAnthropicToolName(original);
+    let candidate = base;
+    const currentOwner = reverse.get(candidate);
+    if (currentOwner !== undefined && currentOwner !== original) {
+      candidate = withHashSuffix(base, original);
+      let counter = 1;
+      while (reverse.has(candidate) && reverse.get(candidate) !== original) {
+        const suffix = `_${hashToolName(`${original}:${counter}`)}`;
+        const prefix = base.slice(0, ANTHROPIC_TOOL_NAME_MAX - suffix.length).replace(/_+$/g, "");
+        candidate = `${prefix}${suffix}`;
+        counter += 1;
+      }
+    }
+
+    forward.set(original, candidate);
+    reverse.set(candidate, original);
+    return candidate;
+  }
+
+  for (const name of names) register(name);
+
+  return {
+    toAnthropic: register,
+    toOriginal: (name) => reverse.get(name),
+    get reverse() {
+      return Object.fromEntries(reverse);
+    },
+  };
+}
+
 export const AnthropicMessagesResponseSchema = z.object({
   id: z.string(),
   type: z.literal("message"),
@@ -180,6 +252,7 @@ function repairJson(s: string): string | undefined {
 // multipart content; tool_use comes from the separate IR tool_calls array. ————————
 function toContentBlocks(
   message: IRResponse["choices"][number]["message"],
+  toolNameMap: AnthropicToolNameMap,
 ): AnthropicContentBlock[] {
   const blocks: AnthropicContentBlock[] = [];
   const { content } = message;
@@ -202,16 +275,19 @@ function toContentBlocks(
   }
 
   for (const call of message.tool_calls ?? []) {
-    blocks.push(toToolUseBlock(call));
+    blocks.push(toToolUseBlock(call, toolNameMap));
   }
   return blocks;
 }
 
-function toToolUseBlock(call: IRToolCall): AnthropicContentBlock {
+function toToolUseBlock(
+  call: IRToolCall,
+  toolNameMap: AnthropicToolNameMap,
+): AnthropicContentBlock {
   return {
     type: "tool_use",
     id: call.id,
-    name: call.function.name,
+    name: toolNameMap.toAnthropic(call.function.name),
     input: parseToolArguments(call.function.arguments),
   };
 }
@@ -226,19 +302,24 @@ export function transformResponseIn(ir: IRResponse): AnthropicMessagesResponse {
   const message = choice?.message ?? { role: "assistant" as const, content: null };
   const { stop_reason, raw } = mapStopReason(choice?.finish_reason ?? "");
   const usage = mapUsage(ir.usage ?? {});
+  const toolNameMap = createAnthropicToolNameMap(
+    (message.tool_calls ?? []).map((call) => call.function.name),
+  );
+  const reverseMap = toolNameMap.reverse;
 
   const out: AnthropicMessagesResponse = {
     id: ir.id,
     type: "message",
     role: "assistant",
     model: ir.model,
-    content: toContentBlocks(message),
+    content: toContentBlocks(message, toolNameMap),
     stop_reason,
     stop_sequence: null,
     usage,
     provider_raw: {
       stop_reason: raw,
       ...(ir.usage !== undefined ? { usage: ir.usage } : {}),
+      ...(Object.keys(reverseMap).length > 0 ? { anthropic_tool_name_map: reverseMap } : {}),
     },
   };
 

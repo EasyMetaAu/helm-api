@@ -135,6 +135,10 @@ async function decide(request: InternalRequest) {
 // golden lane (golden does that) but to prove the GATE clears by RULES — i.e. the
 // cascade is not silently dumping everything to balanced.
 const CASES: Array<{ name: string; request: InternalRequest; lane: string }> = [
+  { name: "exact confirmation yes", request: req("yes"), lane: "economy" },
+  { name: "exact confirmation no", request: req("no"), lane: "economy" },
+  { name: "exact confirmation sure", request: req("sure"), lane: "economy" },
+  { name: "exact confirmation got it", request: req("got it"), lane: "economy" },
   { name: "greeting", request: req("hi"), lane: "economy" },
   { name: "lookup", request: req("what is a monad"), lane: "economy" },
   { name: "translate", request: req("translate this to french"), lane: "economy" },
@@ -166,6 +170,48 @@ const CASES: Array<{ name: string; request: InternalRequest; lane: string }> = [
     request: req(
       "analyze and compare these approaches, evaluate the implications and find the root cause",
     ),
+    lane: "premium",
+  },
+  {
+    name: "expanded security without coding crutch",
+    request: req("audit this service for sql injection and command injection vulnerabilities"),
+    lane: "premium",
+  },
+  {
+    name: "expanded analysis",
+    request: req("assess the pros and cons of these two approaches and weigh the trade-offs"),
+    lane: "premium",
+  },
+  {
+    name: "expanded planning",
+    request: req("outline a project roadmap with milestones and break down the deliverables"),
+    lane: "balanced",
+  },
+  {
+    name: "no output analysis is not simple",
+    request: req("analyze why there is no output and diagnose the failure root cause"),
+    lane: "premium",
+  },
+  {
+    name: "no stack trace debug is not simple",
+    request: req(
+      "debug why there is no stack trace in this failing compile step and refactor the failing function",
+    ),
+    lane: "coding",
+  },
+  {
+    name: "no auth check audit is not simple",
+    request: req(
+      "audit why there is no auth check in this access control system and privilege escalation risk",
+    ),
+    lane: "premium",
+  },
+  { name: "short no output is diagnostic", request: req("no output"), lane: "premium" },
+  { name: "short no stack trace is coding", request: req("no stack trace"), lane: "coding" },
+  { name: "short no auth check is security", request: req("no auth check"), lane: "premium" },
+  {
+    name: "short no command injection is security",
+    request: req("no command injection"),
     lane: "premium",
   },
   {

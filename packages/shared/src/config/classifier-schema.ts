@@ -43,6 +43,9 @@ export const ClassifierRulesConfigSchema = z.object({
   task_activation: z.record(z.string(), z.number()).default({}),
   overrides: z.object({
     heartbeat_tokens: z.array(z.string()).default(["HEARTBEAT_OK"]),
+    exact_confirmation_tokens: z
+      .array(z.string())
+      .default(["yes", "no", "sure", "got it", "ok", "thanks"]),
     formal_logic_keywords: z.array(z.string()).default([]),
     tools_floor: TierSchema.default("standard"),
     long_context_token_threshold: z.number().int().positive().default(64_000),
@@ -57,6 +60,19 @@ export const ClassifierRulesConfigSchema = z.object({
     disable_above_chars: z.number().int().positive().default(100),
     max_history_weight: z.number().min(0).max(1).default(0.6),
   }),
+  // Language-coverage guard. The keyword lists above are ENGLISH-ONLY, so a
+  // predominantly non-Latin prompt (Chinese / Japanese / Korean / Cyrillic / …)
+  // cannot be scored by keywords. When `non_latin_uncertain` is on, such a prompt
+  // is forced `uncertain` so the cascade escalates to the (multilingual) Layer-2
+  // eval — or, with eval OFF, degrades deterministically to `balanced` instead of
+  // a misleading high-confidence keyword verdict. Prefaulted so an omitted block
+  // parses through inner defaults (fail-open, principle 3).
+  language: z
+    .object({
+      non_latin_uncertain: z.boolean().default(true),
+      non_latin_min_ratio: z.number().min(0).max(1).default(0.3),
+    })
+    .prefault({}),
 });
 
 // Layer-2 eval block — the hardened schema is the single source of truth, defined

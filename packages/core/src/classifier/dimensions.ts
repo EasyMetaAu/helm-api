@@ -148,12 +148,21 @@ function escapeRegExp(s: string): string {
 }
 
 const WORD = /[\p{L}\p{N}_]/u; // unicode letter/number/underscore
+// CJK scripts (Han / Hiragana / Katakana / Hangul) write words WITHOUT spaces, so a
+// CJK edge char would NEVER satisfy the word-boundary lookaround below — "分析" inside
+// "请分析这个" is flanked by other \p{L} chars, so both lookarounds fail and the keyword
+// becomes permanently unmatchable. CJK edges therefore match as plain substrings (their
+// "words" are 1–3 meaningful chars, so the naive-substring false-hit risk that boundaries
+// guard against for Latin does not apply). This is what makes config-level CJK keyword
+// lists possible at all (see implementation-notes: classifier.multilingual-guard).
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const needsBoundary = (ch: string): boolean => WORD.test(ch) && !CJK.test(ch);
 const keywordMatcherCache = new Map<string, RegExp>();
 function keywordMatcher(kw: string): RegExp {
   let re = keywordMatcherCache.get(kw);
   if (re === undefined) {
-    const left = WORD.test(kw[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
-    const right = WORD.test(kw[kw.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
+    const left = needsBoundary(kw[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
+    const right = needsBoundary(kw[kw.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
     re = new RegExp(left + escapeRegExp(kw) + right, "iu");
     keywordMatcherCache.set(kw, re);
   }
