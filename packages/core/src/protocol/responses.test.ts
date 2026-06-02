@@ -116,6 +116,26 @@ describe("responsesTransformer — request input items -> IR (folding)", () => {
     expect(ir.messages[0]?.role).toBe("user");
     expect(ir.messages[0]?.content).toBe("hello");
   });
+
+  it("preserves a developer item as IR role:developer (issue #50, no longer collapses to system)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "Prefer metric units." }],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "weather in SF?" }],
+        },
+      ],
+    });
+    expect(ir.messages.map((m) => m.role)).toEqual(["developer", "user"]);
+    expect(ir.messages[0]?.content).toEqual([{ type: "text", text: "Prefer metric units." }]);
+  });
 });
 
 describe("responsesTransformer — reasoning item inbound (test #2)", () => {

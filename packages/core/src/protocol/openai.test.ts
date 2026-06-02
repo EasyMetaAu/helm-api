@@ -63,6 +63,31 @@ describe("openaiTransformer — request identity round-trip", () => {
   });
 });
 
+describe("openaiTransformer — developer role survives + round-trips (issue #50)", () => {
+  // OpenAI's `developer` is a first-class IR role: it must survive inbound and
+  // round-trip unchanged outbound, keeping its position relative to system/user.
+  const devRequest = {
+    model: "gpt-4o",
+    messages: [
+      { role: "developer", content: "Prefer metric units." },
+      { role: "system", content: "Be precise." },
+      { role: "user", content: "weather in SF?" },
+    ],
+  };
+
+  it("preserves role:developer and message order (transformRequestOut)", async () => {
+    const ir = await openaiTransformer.transformRequestOut(devRequest);
+    expect(ir.messages.map((m) => m.role)).toEqual(["developer", "system", "user"]);
+    expect(ir.messages[0]?.content).toBe("Prefer metric units.");
+  });
+
+  it("round-trips developer unchanged (IR -> OpenAI native)", async () => {
+    const ir = await openaiTransformer.transformRequestOut(devRequest);
+    const back = (await openaiTransformer.transformRequestIn(ir)) as typeof devRequest;
+    expect(back.messages).toEqual(devRequest.messages);
+  });
+});
+
 describe("openaiTransformer — response identity round-trip", () => {
   // test #2: res -> IR -> res is lossless on choices/message/finish_reason/usage.
   it("round-trips a representative response losslessly", async () => {

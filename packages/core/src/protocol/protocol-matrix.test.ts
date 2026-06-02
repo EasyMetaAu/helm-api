@@ -503,3 +503,33 @@ describe("protocol cross-path executable harness", () => {
     });
   });
 });
+
+// Focused cross-path check for the developer role (issue #50). Intentionally NOT
+// a new matrix dimension — protocolMatrixDimensions stays untouched so the
+// "every path has every dimension" invariant above still holds.
+describe("developer-role cross-path fold (issue #50)", () => {
+  it("OpenAI developer+system+user -> Gemini native folds both into systemInstruction in order", async () => {
+    const native = {
+      model: "gpt-4o",
+      messages: [
+        { role: "system", content: "Be precise." },
+        { role: "developer", content: "Prefer metric units." },
+        { role: "user", content: "weather in SF?" },
+      ],
+    };
+    const ir = await requestOut.openai(native);
+    expect(ir.messages.map((m) => m.role)).toEqual(["system", "developer", "user"]);
+
+    const gemini = (await requestIn.gemini?.(ir)) as {
+      systemInstruction?: { parts: Array<{ text?: string }> };
+      contents: Array<{ role: string; parts: Array<{ text?: string }> }>;
+    };
+    const sysText = (gemini.systemInstruction?.parts ?? []).map((p) => p.text ?? "").join("");
+    expect(sysText).toBe("Be precise.\n\nPrefer metric units.");
+
+    // Only the user turn survives in contents — no developer/system leakage.
+    expect(gemini.contents).toHaveLength(1);
+    expect(gemini.contents[0]?.role).toBe("user");
+    expect(JSON.stringify(gemini.contents)).not.toContain("Prefer metric units.");
+  });
+});
