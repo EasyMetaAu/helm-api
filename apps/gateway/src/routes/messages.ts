@@ -62,8 +62,10 @@ export interface RouteError {
 export interface PipelineRunResult {
   /** Drain the full (non-stream) result into ONE IR response object. */
   collect(): Promise<unknown>;
-  /** The IR-level event stream (one object per Anthropic SSE event source). */
-  streamIR(): AsyncIterable<{ type: string; [k: string]: unknown }>;
+  /** The outbound-protocol event stream: one object per wire event. For Anthropic
+   *  each carries a `type` (the SSE event name); for Gemini each is a full snapshot
+   *  GenerateContentResponse (no `type`). The route serializes them per protocol. */
+  streamIR(): AsyncIterable<Record<string, unknown>>;
 }
 
 /** Per-key rate limiter (core, framework-agnostic). Same instance the OpenAI
@@ -90,7 +92,7 @@ export interface MessagesRouteDeps {
       /** IR response → native Anthropic response (outbound Protocol Adapter). */
       transformResponseOut(ir: unknown): unknown | Promise<unknown>;
       /** ONE IR stream event → ONE Anthropic SSE frame (state-machine mapped). */
-      transformStreamOut(event: { type: string; [k: string]: unknown }): AnthropicSSEFrame;
+      transformStreamOut(event: Record<string, unknown>): AnthropicSSEFrame;
       /** Structured internal error → Anthropic error envelope + status. */
       transformErrorOut(err: RouteError): AnthropicErrorOut;
     };

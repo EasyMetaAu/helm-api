@@ -57,6 +57,34 @@ describe("openaiToAnthropicRequest", () => {
     expect(msgs[1]?.content[0]).toMatchObject({ type: "tool_result", tool_use_id: "t1" });
     expect(body.tools as unknown[]).toHaveLength(1);
   });
+
+  it("folds the `developer` role into system (after spoof, in message order), never a user turn (issue #50)", () => {
+    // `developer` is OpenAI's renamed system tier. On the native Anthropic
+    // subscription path it must fold into the top-level system param (like
+    // `system`), NOT fall through to a user turn — otherwise instruction
+    // precedence shifts and hidden instructions leak into the conversation.
+    // Matches LiteLLM's map_developer_role_to_system_role (developer == system,
+    // original order) and Gemini's collectSystemText policy.
+    const body = openaiToAnthropicRequest({
+      model: "claude-opus-4-6",
+      messages: [
+        { role: "system", content: "Be terse." },
+        { role: "developer", content: "Prefer metric units." },
+        { role: "user", content: "weather in SF?" },
+      ],
+    });
+    const sys = body.system as Array<{ text: string }>;
+    expect(sys.map((b) => b.text)).toEqual([
+      "You are Claude Code, Anthropic's official CLI for Claude.",
+      "Be terse.",
+      "Prefer metric units.",
+    ]);
+    // developer must NOT leak into the conversation as a user message.
+    const msgs = body.messages as Array<{ role: string }>;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]?.role).toBe("user");
+    expect(JSON.stringify(body.messages)).not.toContain("Prefer metric units.");
+  });
 });
 
 describe("anthropicToOpenAIResponse", () => {

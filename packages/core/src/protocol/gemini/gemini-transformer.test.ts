@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { IRRequest, IRResponse } from "../ir.js";
 import {
+  collectSystemText,
   GEMINI_API_KEY_HEADER,
   GEMINI_ENDPOINT,
   geminiTransformer,
@@ -291,6 +292,45 @@ describe("tool-call id synthesis (the core pit)", () => {
     expect(fc.name).toBe("get_weather");
     expect(fc.args).toEqual({ city: "SF" });
     expect("id" in fc).toBe(false); // no synthesized id leaks to Gemini
+  });
+});
+
+describe("system/developer fold into systemInstruction (issue #50)", () => {
+  // The pure helper accumulates system + developer text IN MESSAGE ORDER,
+  // joined by a blank line, skipping empty content and non-system/developer roles.
+  it("collectSystemText accumulates system + developer in order", () => {
+    const text = collectSystemText([
+      { role: "system", content: "S1" },
+      { role: "developer", content: "D1" },
+      { role: "user", content: "ignored" },
+      { role: "developer", content: "" }, // empty -> skipped
+      { role: "system", content: "S2" },
+    ]);
+    expect(text).toBe("S1\n\nD1\n\nS2");
+  });
+
+  it("folds system AND developer into systemInstruction in order; contents has only the user turn", () => {
+    const ir: IRRequest = {
+      model: "gemini-1.5-pro",
+      messages: [
+        { role: "system", content: "Be precise." },
+        { role: "developer", content: "Prefer metric units." },
+        { role: "user", content: "weather in SF?" },
+      ],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+
+    const sysParts = native.systemInstruction?.parts ?? [];
+    const sysText = sysParts.map((p) => (p as { text: string }).text).join("");
+    expect(sysText).toBe("Be precise.\n\nPrefer metric units.");
+
+    // developer/system must NOT leak into contents — only the user turn remains.
+    expect(native.contents).toHaveLength(1);
+    expect(native.contents[0]?.role).toBe("user");
+    const userText = (native.contents[0]?.parts[0] as { text: string }).text;
+    expect(userText).toBe("weather in SF?");
+    expect(JSON.stringify(native.contents)).not.toContain("Be precise.");
+    expect(JSON.stringify(native.contents)).not.toContain("Prefer metric units.");
   });
 });
 

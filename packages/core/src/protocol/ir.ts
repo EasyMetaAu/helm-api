@@ -63,10 +63,13 @@ export const IRToolCallSchema = z.object({
 export type IRToolCall = z.infer<typeof IRToolCallSchema>;
 
 // —— Message (role=tool carries tool_call_id; content is a string or multipart,
-// and may be null for an assistant turn that only emits tool_calls). —————————
+// and may be null for an assistant turn that only emits tool_calls). `developer`
+// is OpenAI's renamed system tier — kept as a FIRST-CLASS role so it survives the
+// IR intact; protocols without a developer concept fold it into their system
+// instruction (see gemini-transformer's collectSystemText). ————————————————————
 
 export const IRMessageSchema = z.object({
-  role: z.enum(["system", "user", "assistant", "tool"]),
+  role: z.enum(["system", "developer", "user", "assistant", "tool"]),
   content: z.union([z.string(), z.array(IRContentPartSchema)]).nullable(),
   tool_calls: z.array(IRToolCallSchema).optional(), // assistant initiates
   tool_call_id: z.string().optional(), // role=tool backfills the matching id

@@ -60,24 +60,21 @@ function path(
 const openaiToAnthropic = path("openai", "anthropic", [
   fixture(
     "request",
-    "todo",
-    "OpenAI request can be normalized to IR; Anthropic request nativeOut is not implemented yet",
-    "PR A records the gap only; adding IR->Anthropic request behavior belongs to a later PR.",
+    "passing",
+    "OpenAI request normalizes to IR and Anthropic Messages request nativeOut",
   ),
   fixture("response", "passing", "IR assistant response renders as Anthropic message response"),
   fixture("streaming", "passing", "OpenAI chunks render as ordered Anthropic SSE events"),
   fixture("tool-call", "passing", "OpenAI tool_calls render as Anthropic tool_use blocks"),
   fixture(
     "multimodal",
-    "todo",
-    "OpenAI image_url to Anthropic image source requires request nativeOut support",
-    "Keep as matrix coverage until IR->Anthropic request conversion is designed.",
+    "passing",
+    "OpenAI image_url normalizes to IR and renders as Anthropic image source",
   ),
   fixture(
     "json-schema",
-    "todo",
-    "OpenAI response_format to Anthropic JSON mode/output_format strategy is undecided",
-    "Issue #45 requires Trent policy before silent mapping.",
+    "passing",
+    "OpenAI response_format JSON schema renders as Anthropic output_format json_schema",
   ),
   fixture("error", "passing", "Helm ErrorClass can render an Anthropic-native error envelope"),
   fixture("usage", "passing", "Cached prompt tokens stay separate in Anthropic usage"),
@@ -87,29 +84,25 @@ const anthropicToOpenai = path("anthropic", "openai", [
   fixture("request", "passing", "Anthropic request normalizes to IR and OpenAI request nativeOut"),
   fixture(
     "response",
-    "todo",
-    "Anthropic provider-native response to IR is not implemented",
-    "Current Anthropic response module is IR->Anthropic only.",
+    "passing",
+    "Anthropic provider-native response normalizes to IR and OpenAI response nativeOut",
   ),
   fixture(
     "streaming",
-    "todo",
-    "Anthropic inbound stream to OpenAI chunk conversion is not implemented",
-    "Current stream module covers OpenAI chunks -> Anthropic events.",
+    "passing",
+    "Anthropic inbound SSE stream normalizes to IR chunks for OpenAI serialization",
   ),
   fixture("tool-call", "passing", "Anthropic tool_use/tool_result normalizes to OpenAI-shaped IR"),
   fixture("multimodal", "passing", "Anthropic base64 image source normalizes to IR image data URL"),
   fixture(
     "json-schema",
-    "todo",
-    "Anthropic JSON mode/output_format to OpenAI response_format fixture is pending",
-    "No current transformer behavior to exercise without changing behavior.",
+    "passing",
+    "Anthropic output_format json_schema normalizes back to OpenAI response_format",
   ),
   fixture(
     "error",
-    "todo",
-    "Anthropic-native client errors to OpenAI error envelope need a dedicated renderer",
-    "No OpenAI-native error envelope transformer exists to assert in PR A without adding behavior.",
+    "passing",
+    "Helm ErrorClass renders an OpenAI-native error envelope for Anthropic-origin failures",
   ),
   fixture("usage", "passing", "Anthropic cache_read_input_tokens can stay distinct in IR usage"),
 ]);
@@ -140,9 +133,8 @@ const openaiToGemini = path("openai", "gemini", [
   ),
   fixture(
     "error",
-    "todo",
-    "Helm ErrorClass to Gemini-native error envelope needs a dedicated renderer",
-    "No Gemini-native error envelope transformer exists to assert in PR A without adding behavior.",
+    "passing",
+    "Helm ErrorClass renders a Gemini-native google.rpc.Status error envelope",
   ),
   fixture(
     "usage",
@@ -160,9 +152,8 @@ const geminiToOpenai = path("gemini", "openai", [
   fixture("response", "passing", "Gemini response normalizes to IR and OpenAI response nativeOut"),
   fixture(
     "streaming",
-    "todo",
-    "Gemini snapshot stream to OpenAI chunks is not exposed as a target fixture yet",
-    "Current Gemini stream helper normalizes snapshots to IR chunks; OpenAI SSE serialization is gateway-level.",
+    "passing",
+    "Gemini snapshot stream normalizes to IR chunks and serializes as OpenAI chat.completion.chunk SSE",
   ),
   fixture(
     "tool-call",
@@ -177,9 +168,8 @@ const geminiToOpenai = path("gemini", "openai", [
   ),
   fixture(
     "error",
-    "todo",
-    "Gemini-native client errors to OpenAI error envelope need a dedicated renderer",
-    "No OpenAI-native error envelope transformer exists to assert in PR A without adding behavior.",
+    "passing",
+    "Helm ErrorClass renders an OpenAI-native error envelope for Gemini-origin failures",
   ),
   fixture("usage", "passing", "Gemini cachedContentTokenCount remains distinct in IR usage"),
 ]);
@@ -188,15 +178,13 @@ const anthropicToGemini = path("anthropic", "gemini", [
   fixture("request", "passing", "Anthropic request normalizes to IR and Gemini request nativeOut"),
   fixture(
     "response",
-    "todo",
-    "Anthropic provider-native response to Gemini response is not implemented",
-    "Current Anthropic response module is IR->Anthropic only.",
+    "passing",
+    "Anthropic provider-native response normalizes to IR and renders as Gemini response",
   ),
   fixture(
     "streaming",
-    "todo",
-    "Anthropic stream to Gemini snapshot stream has no implemented source stream normalizer",
-    "PR A records the cross-stream gap only.",
+    "passing",
+    "Anthropic inbound SSE stream normalizes to IR chunks for Gemini snapshot serialization",
   ),
   fixture(
     "tool-call",
@@ -210,15 +198,13 @@ const anthropicToGemini = path("anthropic", "gemini", [
   ),
   fixture(
     "json-schema",
-    "todo",
-    "Anthropic JSON mode/output_format to Gemini responseSchema strategy is pending",
-    "No current transformer behavior to exercise without changing behavior.",
+    "passing",
+    "Anthropic output_format json_schema normalizes to IR and renders as Gemini responseSchema",
   ),
   fixture(
     "error",
-    "todo",
-    "Helm ErrorClass to Gemini-native envelopes for Anthropic-origin failures needs a renderer",
-    "No Gemini-native error envelope transformer exists to assert in PR A without adding behavior.",
+    "passing",
+    "Helm ErrorClass renders Gemini-native google.rpc.Status envelopes for Anthropic-origin failures",
   ),
   fixture("usage", "passing", "IR cached usage can render to Gemini usageMetadata"),
 ]);
@@ -226,9 +212,8 @@ const anthropicToGemini = path("anthropic", "gemini", [
 const geminiToAnthropic = path("gemini", "anthropic", [
   fixture(
     "request",
-    "todo",
-    "Gemini request normalizes to IR; Anthropic request nativeOut is not implemented yet",
-    "PR A records the gap only; adding IR->Anthropic request behavior belongs to a later PR.",
+    "passing",
+    "Gemini request normalizes to IR and Anthropic Messages request nativeOut",
   ),
   fixture(
     "response",
@@ -237,9 +222,8 @@ const geminiToAnthropic = path("gemini", "anthropic", [
   ),
   fixture(
     "streaming",
-    "todo",
-    "Gemini snapshot stream to Anthropic events needs a source stream normalizer plus target renderer",
-    "Current helpers do not expose that full path without new behavior.",
+    "passing",
+    "Gemini snapshot stream normalizes to IR chunks and renders as Anthropic SSE events",
   ),
   fixture(
     "tool-call",
@@ -253,9 +237,8 @@ const geminiToAnthropic = path("gemini", "anthropic", [
   ),
   fixture(
     "json-schema",
-    "todo",
-    "Gemini responseSchema to Anthropic JSON mode/output_format strategy is pending",
-    "No current transformer behavior to exercise without changing behavior.",
+    "passing",
+    "Gemini responseSchema normalizes to IR and renders as Anthropic output_format json_schema",
   ),
   fixture(
     "error",
