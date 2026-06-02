@@ -5,6 +5,36 @@
 
 ---
 
+## 2026-06-02 · Interactive OAuth subscription LOGIN — Claude Pro/Max + Copilot, web UI (issue #38, builds on the entry below)
+
+**Context**: The entry below added the non-interactive token *refresh* half of OAuth (given a `refresh_token` in env). It explicitly deferred the interactive `authorization_code`/device login that actually OBTAINS a subscription credential. This change adds that — for **Claude Pro/Max** (native Anthropic executor), **GitHub Copilot**, and **ChatGPT Plus/Pro (Codex)** — driven entirely from the **admin web UI** (no CLI, per maintainer decision).
+
+**Reference**: the interactive flows + identity recipe are ported from **openclaw** (MIT, © 2026 OpenClaw Foundation), `src/plugin-sdk/provider-oauth-runtime.ts` + `src/llm/utils/oauth/{anthropic,github-copilot}.ts` + `src/llm/providers/anthropic.ts`. Self-contained re-implementation — Helm imports nothing from openclaw. Attribution is in each ported file's header.
+
+**What was added**:
+- **`OAuthTokenStore` port** (`packages/core/src/store/ports.ts`) + sqlite/postgres adapters + migrations (sqlite **v9**, pg **v8**). One row per `(provider_id, account)`. UNLIKE api_keys (hash-only), refresh tokens are stored **reversibly** because they are replayed — so encrypted at rest.
+- **`token-cipher.ts`** (`packages/core/src/store/crypto/`) — AES-256-GCM, blob `v1:<base64(iv|ct|tag)>`, key from `HELM_OAUTH_ENC_KEY` (32 bytes; base64 or 64 hex). Resolved at the composition root only; core sees the decoded buffer, never the env name.
+- **OAuth kit** (`packages/core/src/provider/oauth/`) — `runtime.ts` (PKCE/state/parse/expiry/abort/html primitives, openclaw-ported), `anthropic.ts` (auth-code+PKCE; public-client refresh: client_id+refresh_token, NO secret; **stateless `beginAnthropicLogin`/`completeAnthropicLogin`** for the web manual-paste flow), `github-copilot.ts` (device-code; two-level token: GitHub token → minted Copilot token; **`beginCopilotDeviceLogin`/`pollCopilotDeviceOnce`**), `registry.ts`.
+- **`token-manager.ts` generalized** to a `ResolvedOAuth` union: `confidential` (the entry below, unchanged) | `preset` (delegates refresh to an `OAuthProviderInterface`, reads/writes the `OAuthTokenStore`, **persists the rotated refresh token** → survives restart, closing D3's gap for presets).
+- **Config schema** — `oauth` is now `OAuthConfigSchema | OAuthPresetConfigSchema` (`{ provider: anthropic|github-copilot, account? }`), `.strict()` preset keeps the union disjoint; `isOAuthPreset()` discriminates. `type: anthropic` accepted (free string, documented not enum-locked).
+- **Native Anthropic executor** (`packages/core/src/provider/anthropic.ts`) — `createAnthropicClient`: OpenAI-Chat IR → Anthropic Messages (request) and Anthropic response/SSE → OpenAI-Chat (the inverse of the inbound `protocol/anthropic` transformers, which are inbound-only and not reusable here). Injects the **mandatory** Claude-Code identity: `anthropic-beta: claude-code-20250219,oauth-2025-04-20`, `user-agent: claude-cli/<ver>`, `x-app: cli`, **and a `system[0]` spoof** ("You are Claude Code, Anthropic's official CLI for Claude."). 401 → refresh → replay once (before any stream chunk, Principle 8).
+- **Admin login surface** — gateway `OAuthAdminAccess` seam (`apps/gateway/src/oauth/admin-oauth.ts`: ephemeral PKCE/device session map, encrypt + persist), `/admin/api/oauth/*` routes (pure glue), and the **`/admin/providers` Svelte page** ("Connect" → manual-paste for Claude, device-code for Copilot; Disconnect). 503 when no enc key.
+- **Server wiring** — `buildCredential` discriminates the union (preset builds a store-backed `TokenManager`); `buildProviderClients` dispatches on `type` (anthropic → native executor); fail-closed if a preset is configured without `HELM_OAUTH_ENC_KEY`.
+
+**Decisions (this round)**:
+- **Web UI, not CLI** (maintainer). Anthropic uses **manual-paste** (the reverse-engineered `localhost:53692` redirect can't reach a remote gateway, so the operator pastes the redirect URL); Copilot uses device-code (natural for a browser). The single-call `login(callbacks)` kit functions remain but the UI drives the stateless begin/complete step-fns.
+- **Ship all three subscription presets with a ToS disclaimer** (maintainer). **Codex LOGIN now ships too** (`openai-codex`, `provider/oauth/openai-codex.ts`): auth-code + PKCE public client, form-encoded token endpoint (`auth.openai.com/oauth/token`), `chatgpt_account_id` decoded from the access-token JWT and stored in the credential `meta` for execute-time use. Web manual-paste flow (same admin path as Anthropic). **Codex request EXECUTION** (the OpenAI **Responses** API with the `chatgpt-account-id` header) is the remaining execute-time follow-up — same status as Copilot routing.
+- Reversible secret class: refresh tokens CANNOT be sha256'd (Principle 7 is about api_keys). Encrypted-at-rest under `HELM_OAUTH_ENC_KEY` is the compensating control.
+
+**Known limitations / TODO**:
+- **Spike not yet run**: the reverse-engineered Anthropic recipe (headers + system spoof) and the Copilot token model are ported from openclaw but NOT yet validated against the live endpoints in this repo. Run one real login + request before relying on it (constants can drift).
+- **Copilot request execution** is wired as an OpenAI-compatible client, but the per-request **base_url derived from the token `proxy-ep`** and the mandatory `COPILOT_HEADERS` are **not yet injected at execute time** (login + storage work; routing through Copilot needs an `extraHeaders`/dynamic-base seam on the OpenAI client — follow-up). `getGitHubCopilotBaseUrl` + `COPILOT_HEADERS` are exported and ready.
+- Anthropic executor covers text + tool_use + base64 images; exotic content parts (documents, citations) are not translated.
+- OAuth login **session state is in-memory** (ephemeral PKCE/device sessions): a gateway restart mid-login just means re-clicking Connect.
+- e2e (`oauth-subscription.spec.ts`) is **not yet written** — unit coverage is comprehensive (store/cipher/kit/token-manager/executor/admin-seam), e2e is the remaining test layer.
+
+---
+
 ## 2026-06-02 · OAuth subscription providers (issue #38, docs/02/05/07, Principles 1/2/3/7/8)
 
 **Context**: Helm only supported static API keys (env-var NAME references) as upstream credentials. Subscription/SSO providers (Claude/ChatGPT subscriptions, enterprise SSO gateways) hand out short-lived OAuth access tokens that expire and rotate. This change makes the upstream auth header **dynamic, per-request** so Helm can refresh non-interactively and inject a fresh Bearer.

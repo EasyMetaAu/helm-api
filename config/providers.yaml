@@ -149,3 +149,42 @@ providers:
   #   models:
   #     - alias: sso-gateway/default
   #       provider_model: default-model
+  #
+  # ── SUBSCRIPTION PRESET OAuth (issue #38) — interactive login via the admin UI ──
+  # These use a BUILT-IN provider (client id / endpoints / scopes baked in) and
+  # store the (rotating) credential ENCRYPTED in the OAuthTokenStore — NOT env.
+  # Requirements:
+  #   1. Set HELM_OAUTH_ENC_KEY (32 bytes; base64 or 64 hex) — fail-closed if a
+  #      preset is configured without it.
+  #   2. Log in from the admin UI: Providers → Connect. Nothing to put in env here.
+  # ⚠️ ToS: using a Claude/Copilot subscription via a third-party gateway may violate
+  #   the provider's terms — you opt in (see README "OAuth subscription providers").
+  #
+  # Claude Pro/Max (native Anthropic executor — note `type: anthropic`):
+  # - name: claude-pro
+  #   type: anthropic
+  #   base_url: https://api.anthropic.com
+  #   oauth:
+  #     provider: anthropic            # built-in preset (manual-paste browser login)
+  #     # account: default             # optional; for multi-account installs
+  #   models:
+  #     - alias: claude/opus
+  #       provider_model: claude-opus-4-6
+  #
+  # GitHub Copilot (OpenAI-compatible; device-code login):
+  # - name: copilot
+  #   type: openai
+  #   oauth:
+  #     provider: github-copilot
+  #   models:
+  #     - alias: copilot/gpt
+  #       provider_model: gpt-4o
+  #
+  # ChatGPT Plus/Pro — Codex (browser login + paste redirect URL):
+  # - name: chatgpt-codex
+  #   type: openai
+  #   oauth:
+  #     provider: openai-codex
+  #   models:
+  #     - alias: codex/gpt
+  #       provider_model: gpt-5-codex
