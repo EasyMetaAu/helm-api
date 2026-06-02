@@ -2,6 +2,8 @@ import {
   type AnthropicSSEEvent,
   convertOpenAIStreamToAnthropic,
   type ExecutionResult,
+  geminiTransformer,
+  type IRChunk,
   type IRMessage,
   type IRResponse,
   type MemoryScope,
@@ -345,13 +347,13 @@ export function createMessagesPipeline(
           }
           return irResponse;
         },
-        async *streamIR(): AsyncIterable<{ type: string; [k: string]: unknown }> {
+        async *streamIR(): AsyncIterable<Record<string, unknown>> {
           // Surface a routing failure BEFORE any event is emitted, so the route
           // can write a terminal error frame instead of an empty (silent) stream.
           if (failure !== null) throw failure;
           if (result.stream === null) return;
           // Accumulate the assistant text from the OpenAI-side chunks (one
-          // accumulator serves BOTH protocols) WITHOUT buffering or altering the
+          // accumulator serves ALL protocols) WITHOUT buffering or altering the
           // events forwarded downstream (principle 8). observeOutbound runs in a
           // finally so a client disconnect mid-stream still records what arrived.
           const assistant = { text: "" };
@@ -366,8 +368,25 @@ export function createMessagesPipeline(
                   }
                 })();
           try {
-            for await (const ev of convertOpenAIStreamToAnthropic(source as AsyncIterable<never>)) {
-              yield ev as AnthropicSSEEvent & { type: string };
+            // Outbound stream mapping is chosen by the pipeline's stamped protocol
+            // (principle 5: surfaces never conflate). Gemini consumes the SAME
+            // OpenAI-shaped chunks parseOpenAISSE produces (its IRChunk IS the
+            // OpenAI chat.completion.chunk), so we feed them straight into the
+            // Gemini snapshot state machine — no Anthropic adapter (docs/05). Each
+            // yielded object is a full GenerateContentResponse snapshot (no `type`);
+            // the route writes it as a nameless `data:` SSE frame with no [DONE].
+            if (protocol === "gemini") {
+              for await (const snapshot of geminiTransformer.transformStreamOut(
+                source as AsyncIterable<IRChunk>,
+              )) {
+                yield snapshot as Record<string, unknown>;
+              }
+            } else {
+              for await (const ev of convertOpenAIStreamToAnthropic(
+                source as AsyncIterable<never>,
+              )) {
+                yield ev as AnthropicSSEEvent & { type: string };
+              }
             }
           } finally {
             if (memory !== undefined && assistant.text.length > 0) {

@@ -216,6 +216,26 @@ export {
   makeGeminiError,
   transformErrorOut as geminiTransformErrorOut,
 } from "./protocol/gemini/error.js";
+// Gemini transformer + route parser (docs/05, issue #34/#52). nativeIn -> IR ->
+// nativeOut, plus the pure path parser the gateway hands `{model}:{op}` to.
+export {
+  GEMINI_API_KEY_HEADER,
+  GEMINI_ENDPOINT,
+  type GeminiRoute,
+  geminiTransformer,
+  parseGeminiPath,
+} from "./protocol/gemini/gemini-transformer.js";
+// Gemini wire types (docs/05). GenerateContentRequest/Response + the snapshot SSE
+// event + the OpenAI-shaped IRChunk the snapshot state machine consumes.
+export {
+  type GeminiGenerateContentRequest,
+  GeminiGenerateContentRequestSchema,
+  type GeminiGenerateContentResponse,
+  GeminiGenerateContentResponseSchema,
+  type GeminiSSEEvent,
+  GeminiSSEEventSchema,
+  type IRChunk,
+} from "./protocol/gemini/gemini-types.js";
 // Protocol IR — the single central representation (docs/05). All translation
 // goes nativeIn -> IR -> nativeOut. Types are z.infer of these schemas.
 export {

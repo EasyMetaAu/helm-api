@@ -5,6 +5,23 @@
 
 ---
 
+## 2026-06-02 · Gemini endpoint — superseded #39 (issue #52/#34, spec docs/05)
+
+**Context**: PR #39 (`feat/issue-34-gemini`) built the entire Gemini surface — core transformer/error/types/path-parser AND the gateway route layer — in one branch. Between then and now, the CORE half of that work landed on `main` separately via #49/#51/#54: `protocol/gemini/{gemini-transformer,error,gemini-types}.ts` already exist, `index.ts` already exports the Gemini ERROR symbols (`makeGeminiError`, `geminiTransformErrorOut`, `GeminiErrorEnvelope`), `@helm/shared` `ProtocolSchema` already includes `"gemini"`, and `server.ts` already has `coerceErrorClass`. The decision on #52 is **supersede #39**: port only the GATEWAY route layer onto current `main`, do not re-create the core pieces. #39 stays **closed/superseded** (no push/merge).
+
+**Migrated FROM #39 (gateway only)**:
+- `apps/gateway/src/routes/gemini.ts` — the thin HTTP↔IR route glue (catch-all `POST /v1beta/models/:rest{.+}` → `parseGeminiPath` → 404 on non-`generateContent`; `x-goog-api-key` preferred / `Bearer` fallback auth; rate-limit AFTER auth; malformed-JSON → 400; `transformRequestOut`; backfill `route.model`+`route.stream`+memory scope onto `ir.metadata`; `pipeline.run`; streaming via `streamSSE` writing NAMELESS `data:` frames with NO `[DONE]`; non-abort stream error → ONE terminal Gemini error frame; abort → no frame; non-stream → `transformResponseOut`). Ported verbatim — its imports already align with current `main`'s APIs.
+- `server.ts` wiring — `registerGeminiRoute` import + the `geminiPipeline = createMessagesPipeline(route, "gemini", { observe })` block after the responses route (auth mirrors the messages route's `keyStore.getByHash(hashKey(credential))`; `transformErrorOut` = `makeGeminiError(coerceErrorClass(err.error_class), …)`).
+- `messages-pipeline.ts` gemini branch — `streamIR()` widened to `AsyncIterable<Record<string, unknown>>`; when `protocol === "gemini"` it feeds the OpenAI-shaped `parseOpenAISSE` chunks straight into `geminiTransformer.transformStreamOut` (its `IRChunk` IS the OpenAI `chat.completion.chunk`), no Anthropic adapter. observe/finally accumulator untouched.
+- `messages.ts` — `PipelineRunResult.streamIR()` + Anthropic `transformStreamOut` param widened to `Record<string, unknown>` (the Anthropic route still typechecks; it reads `.type` off the object).
+- Tests: `gemini.test.ts` (12), `messages-pipeline.gemini.test.ts` (2), `e2e/gemini.spec.ts` (6) — all green.
+
+**Already-on-main (NOT re-added, would be duplicate exports / compile errors)**: the transformer, error envelope, wire types, and path parser in `protocol/gemini/*`, plus the Gemini ERROR exports in `index.ts`. Step 1 of this task only added the still-MISSING barrel exports (`geminiTransformer`/`parseGeminiPath`/`GEMINI_ENDPOINT`/`GEMINI_API_KEY_HEADER`/`GeminiRoute` + the wire types incl. `IRChunk`); the error exports were left alone.
+
+**Did NOT apply #39's server.ts OAuth churn**: #39's full `server.ts` diff also REVERTED the #38 subscription-OAuth wiring (`buildCredential`/`createProviderClient`/`oauthCtx`/preset enc-key). That OAuth work is on current `main` (#55) and must stay — only the Gemini-specific additions were cherry-picked.
+
+---
+
 ## 2026-06-02 · OpenAI + Gemini native error-envelope transformers + cross-protocol error fixtures flipped (issue #51, spec docs/05+07)
 
 **Context**: The error half of the Protocol Adapter only existed for Anthropic (`protocol/anthropic/error.ts`). The cross-protocol fixture matrix therefore had four `error` TODOs whose `todoReason` literally said "No OpenAI/Gemini-native error envelope transformer exists" (anthropic→openai, gemini→openai, openai→gemini, anthropic→gemini). The matrix error test hard-coded `expect(to).toBe("anthropic")`.
