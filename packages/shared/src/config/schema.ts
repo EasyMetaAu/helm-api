@@ -78,6 +78,36 @@ export const OAuthConfigSchema = z
     path: ["refresh_token_env"],
   });
 
+// PRESET subscription OAuth (issue #38): a built-in interactive provider whose
+// client id / endpoints / scopes are baked in and whose credentials live in the
+// OAuthTokenStore (populated by `helm oauth login <provider>`), NOT in env. So,
+// unlike the confidential block above, this carries NO env names and NO secret —
+// just which provider preset to use. `.strict()` keeps it disjoint from the
+// confidential block in the union below (a confidential object's token_url/
+// *_env keys are rejected here, so it can only match the confidential branch).
+//   - provider: which built-in subscription flow — anthropic (Claude Pro/Max),
+//     github-copilot, or openai-codex (ChatGPT Plus/Pro).
+//   - account: logical account label for multi-account installs (default 'default').
+export const OAuthPresetConfigSchema = z
+  .object({
+    provider: z.enum(["anthropic", "github-copilot", "openai-codex"]),
+    account: z.string().min(1).default("default"),
+  })
+  .strict();
+
+// A provider's `oauth` block is EITHER the confidential-client config (generic
+// SSO / client_credentials) OR a subscription preset. The union tries confidential
+// first; a preset object (no token_url / *_env) falls through to the preset branch.
+export const OAuthCredentialSchema = z.union([OAuthConfigSchema, OAuthPresetConfigSchema]);
+
+// Discriminate the two oauth modes at the use site (server wiring): a preset block
+// is the one carrying a `provider` field.
+export function isOAuthPreset(
+  o: z.infer<typeof OAuthCredentialSchema>,
+): o is z.infer<typeof OAuthPresetConfigSchema> {
+  return "provider" in o;
+}
+
 // Unified provider config — the SINGLE shape both config-loader and the provider
 // registry agree on (reconciles the two divergent ProviderConfig shapes noted in
 // implementation-notes provider.registry). A provider carries:
@@ -106,7 +136,7 @@ export const ProviderConfigSchema = z
     // `oauth` block is an alternative; the exactly-one refine below keeps a
     // provider from booting with both / neither.
     api_key_env: z.string().min(1).optional(),
-    oauth: OAuthConfigSchema.optional(),
+    oauth: OAuthCredentialSchema.optional(),
     models: z.array(ProviderModelSchema).default([]),
   })
   .refine((p) => p.name !== undefined || p.alias !== undefined, {
@@ -213,6 +243,8 @@ export type BootstrapConfig = z.infer<typeof BootstrapConfigSchema>;
 export type AuthConfig = z.infer<typeof AuthConfigSchema>;
 export type ProviderModel = z.infer<typeof ProviderModelSchema>;
 export type OAuthConfig = z.infer<typeof OAuthConfigSchema>;
+export type OAuthPresetConfig = z.infer<typeof OAuthPresetConfigSchema>;
+export type OAuthCredential = z.infer<typeof OAuthCredentialSchema>;
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type RateLimitQuota = z.infer<typeof RateLimitQuotaSchema>;
 export type RateLimitQuotaOverride = z.infer<typeof RateLimitQuotaOverrideSchema>;

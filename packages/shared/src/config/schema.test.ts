@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { HelmConfigSchema } from "./schema.js";
+import { HelmConfigSchema, isOAuthPreset, type OAuthConfig } from "./schema.js";
+
+// Narrow a provider's oauth union to the CONFIDENTIAL block for assertions
+// (fails loudly if it is actually a preset block).
+function confidential(oauth: unknown): OAuthConfig {
+  if (!oauth || typeof oauth !== "object" || isOAuthPreset(oauth as never)) {
+    throw new Error("expected a confidential oauth block");
+  }
+  return oauth as OAuthConfig;
+}
 
 function fullConfig() {
   return {
@@ -290,9 +299,10 @@ describe("HelmConfigSchema", () => {
     expect(res.success).toBe(true);
     if (res.success) {
       const p0 = res.data.providers[0];
-      expect(p0?.oauth?.grant).toBe("refresh_token");
-      expect(p0?.oauth?.token_url).toBe("https://oauth.example.com/token");
-      expect(p0?.oauth?.scopes).toEqual([]); // defaulted
+      const oauth = confidential(p0?.oauth);
+      expect(oauth.grant).toBe("refresh_token");
+      expect(oauth.token_url).toBe("https://oauth.example.com/token");
+      expect(oauth.scopes).toEqual([]); // defaulted
       expect(p0?.api_key_env).toBeUndefined();
     }
   });
@@ -313,7 +323,7 @@ describe("HelmConfigSchema", () => {
       },
     ];
     const parsed = HelmConfigSchema.parse(cfg);
-    expect(parsed.providers[0]?.oauth?.grant).toBe("refresh_token");
+    expect(confidential(parsed.providers[0]?.oauth).grant).toBe("refresh_token");
   });
 
   it("accepts a client_credentials oauth provider with no refresh_token_env", () => {
@@ -336,8 +346,9 @@ describe("HelmConfigSchema", () => {
     const res = HelmConfigSchema.safeParse(cfg);
     expect(res.success).toBe(true);
     if (res.success) {
-      expect(res.data.providers[0]?.oauth?.grant).toBe("client_credentials");
-      expect(res.data.providers[0]?.oauth?.scopes).toEqual(["models.read"]);
+      const oauth = confidential(res.data.providers[0]?.oauth);
+      expect(oauth.grant).toBe("client_credentials");
+      expect(oauth.scopes).toEqual(["models.read"]);
     }
   });
 
@@ -450,5 +461,64 @@ describe("HelmConfigSchema", () => {
     ];
     const res = HelmConfigSchema.safeParse(cfg);
     expect(res.success).toBe(true);
+  });
+
+  // ── subscription PRESET oauth (issue #38) ──────────────────────────────────
+
+  it("accepts a subscription preset oauth provider (anthropic) with type: anthropic", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [{ name: "claude-pro", type: "anthropic", oauth: { provider: "anthropic" } }];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(true);
+    if (res.success) {
+      const p0 = res.data.providers[0];
+      expect(p0?.type).toBe("anthropic");
+      const oauth = p0?.oauth;
+      expect(oauth && isOAuthPreset(oauth)).toBe(true);
+      if (oauth && isOAuthPreset(oauth)) {
+        expect(oauth.provider).toBe("anthropic");
+        expect(oauth.account).toBe("default"); // defaulted
+      }
+    }
+  });
+
+  it("accepts a github-copilot preset with an explicit account", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      { name: "copilot", type: "openai", oauth: { provider: "github-copilot", account: "work" } },
+    ];
+    const parsed = HelmConfigSchema.parse(cfg);
+    const oauth = parsed.providers[0]?.oauth;
+    expect(oauth && isOAuthPreset(oauth) && oauth.account).toBe("work");
+  });
+
+  it("rejects an unknown preset provider (fail-closed)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [{ name: "x", type: "openai", oauth: { provider: "midjourney" } }];
+    expect(HelmConfigSchema.safeParse(cfg).success).toBe(false);
+  });
+
+  it("rejects mixing a preset provider with confidential fields (fail-closed)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "x",
+        type: "anthropic",
+        oauth: {
+          provider: "anthropic",
+          token_url: "https://oauth.example.com/token",
+          client_id_env: "CID",
+        },
+      },
+    ];
+    expect(HelmConfigSchema.safeParse(cfg).success).toBe(false);
+  });
+
+  it("still enforces exactly-one credential for a preset (api_key_env + preset oauth fails)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      { name: "x", type: "anthropic", api_key_env: "X_KEY", oauth: { provider: "anthropic" } },
+    ];
+    expect(HelmConfigSchema.safeParse(cfg).success).toBe(false);
   });
 });
