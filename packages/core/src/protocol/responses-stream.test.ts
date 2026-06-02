@@ -299,15 +299,39 @@ describe("convertOpenAIStreamToResponses — tool calls", () => {
     expect((added[1]?.item as { call_id?: string }).call_id).toBe("c1");
   });
 
-  it("drops an empty-husk tool (announced index/id but no name and no arguments)", async () => {
+  it("keeps function_call when call_id arrives without arguments/name", async () => {
     const chunks: OpenAIChunk[] = [
-      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "ghost" }] } }] },
-      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_only" }] } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
     ];
     const events = await collect(convertOpenAIStreamToResponses(feed(chunks)));
-    expect(events.some((e) => e.type === "response.output_item.added")).toBe(false);
-    // still terminates cleanly.
-    expect(events.at(-1)?.type).toBe("response.completed");
+    const added = events.find((e) => e.type === "response.output_item.added") as Extract<
+      ResponsesSSEEvent,
+      { type: "response.output_item.added" }
+    >;
+    expect(added.item).toMatchObject({
+      type: "function_call",
+      call_id: "call_only",
+      name: "",
+      status: "in_progress",
+      arguments: "",
+    });
+    const argsDone = events.find(
+      (e) => e.type === "response.function_call_arguments.done",
+    ) as Extract<ResponsesSSEEvent, { type: "response.function_call_arguments.done" }>;
+    expect(argsDone.arguments).toBe("");
+    const done = events.find((e) => e.type === "response.output_item.done") as Extract<
+      ResponsesSSEEvent,
+      { type: "response.output_item.done" }
+    >;
+    expect(done.item).toMatchObject({
+      type: "function_call",
+      call_id: "call_only",
+      status: "completed",
+      arguments: "",
+    });
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    expect(completed.response.output).toEqual([expect.objectContaining(done.item)]);
   });
 
   it("interleaves text then tool call with distinct output_index slots", async () => {

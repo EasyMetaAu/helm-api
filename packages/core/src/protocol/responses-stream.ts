@@ -387,8 +387,13 @@ export async function* convertOpenAIStreamToResponses(
       }
 
       const args = tc.function?.arguments;
-      if (args !== undefined || slot.name !== "") {
-        // First meaningful tool signal: settle id/name and emit output_item.added before
+      const hasMeaningfulToolSignal =
+        args !== undefined ||
+        tc.function?.name !== undefined ||
+        tc.id !== undefined ||
+        slot.callId !== "";
+      if (hasMeaningfulToolSignal) {
+        // First meaningful tool signal: settle id/name/call_id and emit output_item.added before
         // any argument delta (item added ALWAYS precedes its deltas, pit #4).
         if (!slot.started) {
           slot.started = true;
