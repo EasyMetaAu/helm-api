@@ -192,6 +192,25 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rate_limit_tpm INTEGER;
     `,
   },
+  {
+    // Persisted OAuth subscription credentials (issue #38) — pg mirror of the
+    // sqlite v9 migration (different ledger, same logical change). access_enc/
+    // refresh_enc are AES-256-GCM CIPHERTEXT (TEXT). Composite PK makes the
+    // rotation write-back idempotent. epoch-ms bigint matches sqlite.
+    version: 8,
+    sql: `
+      CREATE TABLE IF NOT EXISTS oauth_tokens (
+        provider_id TEXT NOT NULL,
+        account TEXT NOT NULL,
+        access_enc TEXT,
+        refresh_enc TEXT,
+        expires_at BIGINT,
+        meta TEXT,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY (provider_id, account)
+      );
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

@@ -156,6 +156,24 @@ export const requestPayloads = pgTable("request_payloads", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
 
+// Persisted OAuth subscription credentials (issue #38) — the pg mirror of the
+// sqlite oauth_tokens table. access_enc/refresh_enc are AES-256-GCM CIPHERTEXT
+// (TEXT, not jsonb — opaque bytes), the only reversibly-stored secrets in Helm.
+// updated_at/expires_at are epoch-ms bigint to match the sqlite value space.
+export const oauthTokens = pgTable(
+  "oauth_tokens",
+  {
+    providerId: text("provider_id").notNull(),
+    account: text("account").notNull(),
+    accessEnc: text("access_enc"),
+    refreshEnc: text("refresh_enc"),
+    expiresAt: bigint("expires_at", { mode: "number" }), // ms epoch; nullable
+    meta: text("meta"),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.providerId, t.account] })],
+);
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
@@ -167,3 +185,4 @@ export type MemoryReflectionsTable = typeof memoryReflections;
 export type MemoryJobsTable = typeof memoryJobs;
 export type ConfigKvTable = typeof configKv;
 export type RequestPayloadsTable = typeof requestPayloads;
+export type OAuthTokensTable = typeof oauthTokens;

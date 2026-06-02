@@ -240,3 +240,35 @@ export interface ConfigStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
 }
+
+// Persisted OAuth subscription credentials (issue #38 follow-up — makes the
+// token manager's in-memory cache survive restarts and handle REFRESH-TOKEN
+// ROTATION). One row per (provider_id, account). UNLIKE api_keys (hash only),
+// these secrets are stored REVERSIBLY because they are replayed to the upstream
+// token endpoint — so `accessEnc`/`refreshEnc` are AES-256-GCM ciphertext
+// (store/crypto/token-cipher.ts), NEVER plaintext. The adapter only ever stores
+// and returns the ciphertext blobs verbatim; encryption/decryption stays in the
+// CALLER (token manager / CLI), exactly as the KeyStore never hashes (principle 7).
+export interface OAuthTokenRecord {
+  providerId: string; // 'anthropic' | 'github-copilot' | ... (OAuth provider id)
+  account: string; // logical account label; 'default' for the single-account UX
+  accessEnc: string | null; // AES-GCM blob; null when the provider derives access lazily
+  refreshEnc: string | null; // AES-GCM blob (the long-lived credential)
+  expiresAt: number | null; // ms epoch the access token expires; null = unknown
+  meta: string | null; // provider-specific JSON (e.g. copilot proxy base / enterprise host)
+  updatedAt: number; // ms epoch of the last write (rotation timestamp)
+}
+
+export interface OAuthTokenStore {
+  // Load the stored credential for a provider/account, or null if none.
+  get(providerId: string, account: string): Promise<OAuthTokenRecord | null>;
+  // Upsert (login + every rotation write-back). Overwrites the row for the
+  // (provider_id, account) pair — credential rotation never mutates a sibling.
+  upsert(rec: OAuthTokenRecord): Promise<void>;
+  // Remove a stored credential (CLI `logout`).
+  delete(providerId: string, account: string): Promise<void>;
+  // Inventory for the CLI `list` — NEVER returns secret columns.
+  list(): Promise<
+    Array<Pick<OAuthTokenRecord, "providerId" | "account" | "expiresAt" | "updatedAt">>
+  >;
+}
