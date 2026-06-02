@@ -6,6 +6,8 @@ import {
   IRRequestSchema,
   type IRToolCall,
 } from "../ir.js";
+import { type AnthropicOutputFormat, responseFormatToOutputFormat } from "./output-format.js";
+import { createAnthropicToolNameMap, sanitizeAnthropicToolName } from "./response.js";
 
 // Anthropic Messages -> IR inbound normalization (docs/05, task protocol.anthropic-req).
 // This is the inbound half of "nativeIn -> IR -> nativeOut, never N×N direct".
@@ -107,6 +109,13 @@ const AnthropicToolSchema = z
   })
   .passthrough();
 
+// Anthropic structured-output: { type:"json_schema", schema } (the newer
+// output_format API LiteLLM prefers). Carried inbound so anthropic->X json-schema
+// requests round-trip back to an IR response_format (issue #59, Theme 3).
+const AnthropicOutputFormatSchema = z
+  .object({ type: z.literal("json_schema"), schema: z.unknown() })
+  .passthrough();
+
 const AnthropicMessagesRequestSchema = z
   .object({
     model: z.string(),
@@ -115,8 +124,10 @@ const AnthropicMessagesRequestSchema = z
     max_tokens: z.number().int().positive().optional(),
     temperature: z.number().optional(),
     stream: z.boolean().optional(),
+    stop_sequences: z.array(z.string()).optional(),
     tools: z.array(AnthropicToolSchema).optional(),
     tool_choice: z.unknown().optional(),
+    output_format: AnthropicOutputFormatSchema.optional(),
   })
   .passthrough();
 
@@ -323,6 +334,17 @@ export function transformRequestOut(req: unknown): IRRequest {
   // Rule 6: collapse any adjacent same-role turns left after the fan-out.
   const merged = mergeConsecutiveSameRole(messages);
 
+  // output_format (json_schema) -> IR response_format so anthropic->X structured
+  // output round-trips (issue #59, Theme 3). We rewrap as an OpenAI-shaped
+  // response_format.json_schema since the IR hub is OpenAI-shaped.
+  const responseFormat =
+    parsed.output_format !== undefined
+      ? {
+          type: "json_schema",
+          json_schema: { name: "output", schema: parsed.output_format.schema },
+        }
+      : undefined;
+
   const ir: IRRequest = {
     model: parsed.model,
     messages: merged,
@@ -331,9 +353,281 @@ export function transformRequestOut(req: unknown): IRRequest {
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
     ...(parsed.max_tokens !== undefined ? { max_tokens: parsed.max_tokens } : {}),
     ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
+    ...(responseFormat !== undefined ? { response_format: responseFormat } : {}),
     ...(thinking.length > 0 ? { thinking } : {}),
   };
 
   // Final structural validation: the IR we hand downstream is always well-formed.
   return IRRequestSchema.parse(ir);
+}
+
+// ——————————————————————————————————————————————————————————————————————————————
+// Outbound: IR (OpenAI-Chat shape) -> native Anthropic Messages request (issue #59,
+// Theme 1). The inverse of transformRequestOut, completing Anthropic's bidirectional
+// protocol surface. This is PROTOCOL translation only: unlike provider/anthropic.ts
+// (which serves the OAuth subscription endpoint), it carries NO Claude-Code system
+// spoof and NO identity headers — those are provider/transport concerns.
+//
+// Structural rules (mirroring LiteLLM behavior — referenced, not copied):
+//   • system + developer turns fold into the top-level `system` param IN MESSAGE
+//     ORDER (LiteLLM map_developer_role_to_system_role; consistent with #50). Emit a
+//     string when a single text segment, else text blocks.
+//   • assistant.tool_calls -> tool_use blocks (input = JSON.parse(arguments) best-effort).
+//   • role:"tool" -> a tool_result block on a user message (tool_use_id = tool_call_id).
+//   • IR image data-url -> Anthropic image source {type:"base64", media_type, data}
+//     (reverse of the inbound base64->data-url collapse); a remote url passes through
+//     as source {type:"url", url}.
+//   • tools -> Anthropic tools[{name, description, input_schema}], names sanitized to
+//     ^[a-zA-Z0-9_-]{1,128}$ (the shared createAnthropicToolNameMap); the reverse map
+//     is stashed in provider_raw for recovery.
+//   • tool_choice auto|required|none|{function} -> {type:auto}|{type:any}|omit|{type:tool,name}.
+//   • max_tokens is REQUIRED by Anthropic — default 4096 if absent.
+//   • response_format json_schema -> output_format {type:json_schema, schema} (Theme 3).
+
+export interface AnthropicTextBlockOut {
+  type: "text";
+  text: string;
+}
+export interface AnthropicImageBlockOut {
+  type: "image";
+  source: { type: "base64"; media_type: string; data: string } | { type: "url"; url: string };
+}
+export interface AnthropicToolUseBlockOut {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: unknown;
+}
+export interface AnthropicToolResultBlockOut {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string;
+}
+export type AnthropicRequestBlock =
+  | AnthropicTextBlockOut
+  | AnthropicImageBlockOut
+  | AnthropicToolUseBlockOut
+  | AnthropicToolResultBlockOut;
+
+export interface AnthropicRequestMessage {
+  role: "user" | "assistant";
+  content: AnthropicRequestBlock[];
+}
+
+export interface AnthropicOutboundTool {
+  name: string;
+  description?: string;
+  input_schema: unknown;
+}
+
+export type AnthropicToolChoiceOut =
+  | { type: "auto" }
+  | { type: "any" }
+  | { type: "none" }
+  | { type: "tool"; name: string };
+
+export interface AnthropicOutboundRequest {
+  model: string;
+  max_tokens: number;
+  system?: string | AnthropicTextBlockOut[];
+  messages: AnthropicRequestMessage[];
+  temperature?: number;
+  stream?: boolean;
+  stop_sequences?: string[];
+  tools?: AnthropicOutboundTool[];
+  tool_choice?: AnthropicToolChoiceOut;
+  output_format?: AnthropicOutputFormat;
+}
+
+const DEFAULT_MAX_TOKENS = 4096;
+
+function parseToolInput(raw: string): unknown {
+  const trimmed = raw.trim();
+  if (trimmed === "") return {};
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return {};
+  }
+}
+
+// IR image part (data-url or remote url) -> Anthropic image block (reverse of the
+// inbound base64->data-url collapse, pit #5).
+function imageBlockFromPart(
+  part: Extract<IRContentPart, { type: "image" }>,
+): AnthropicImageBlockOut {
+  const match = /^data:([^;]+);base64,(.*)$/.exec(part.url);
+  if (match !== null && match[1] !== undefined && match[2] !== undefined) {
+    return { type: "image", source: { type: "base64", media_type: match[1], data: match[2] } };
+  }
+  return { type: "image", source: { type: "url", url: part.url } };
+}
+
+function contentToBlocks(content: IRMessage["content"]): AnthropicRequestBlock[] {
+  if (content === null) return [];
+  if (typeof content === "string") {
+    return content === "" ? [] : [{ type: "text", text: content }];
+  }
+  const blocks: AnthropicRequestBlock[] = [];
+  for (const part of content) {
+    if (part.type === "text") blocks.push({ type: "text", text: part.text });
+    else if (part.type === "image") blocks.push(imageBlockFromPart(part));
+    // thinking parts are not re-emitted on the outbound request path.
+  }
+  return blocks;
+}
+
+function systemFromMessages(
+  messages: readonly IRMessage[],
+): string | AnthropicTextBlockOut[] | undefined {
+  const blocks: AnthropicTextBlockOut[] = [];
+  for (const m of messages) {
+    if (m.role !== "system" && m.role !== "developer") continue;
+    for (const block of contentToBlocks(m.content)) {
+      if (block.type === "text") blocks.push(block);
+    }
+  }
+  if (blocks.length === 0) return undefined;
+  if (blocks.length === 1 && blocks[0] !== undefined) return blocks[0].text;
+  return blocks;
+}
+
+function mapToolChoice(
+  toolChoice: unknown,
+  toolNameMap: ReturnType<typeof createAnthropicToolNameMap>,
+): AnthropicToolChoiceOut | undefined {
+  if (toolChoice === "auto") return { type: "auto" };
+  if (toolChoice === "required") return { type: "any" };
+  if (toolChoice === "none") return { type: "none" };
+  if (typeof toolChoice === "object" && toolChoice !== null) {
+    const choice = toolChoice as { type?: unknown; function?: { name?: unknown } };
+    const name = choice.function?.name;
+    if (choice.type === "function" && typeof name === "string" && name !== "") {
+      return { type: "tool", name: toolNameMap.toAnthropic(name) };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * IR request -> native Anthropic Messages request. Pure, framework-agnostic
+ * (CLAUDE.md principle 1). Reimplemented from public docs/LiteLLM behavior, NOT
+ * copied. fail-closed on a structurally invalid IR; never carries provider_raw onto
+ * the wire (the gateway strips it; here it is only used to record the tool-name map
+ * INTERNALLY and is dropped from the returned object's own enumerable serialization
+ * unless a caller opts to keep it — see the matrix test which asserts no leakage).
+ */
+export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
+  const parsed = IRRequestSchema.parse(ir);
+
+  // Sanitize tool names up-front so both the tools[] block and tool_choice map
+  // through the SAME forward map (a tool_choice name must match a declared tool).
+  const toolNames = (parsed.tools ?? [])
+    .map((t) => {
+      const fn = (t as { function?: { name?: unknown } }).function;
+      return typeof fn?.name === "string" ? fn.name : undefined;
+    })
+    .filter((n): n is string => n !== undefined);
+  const toolNameMap = createAnthropicToolNameMap(toolNames);
+
+  const messages: AnthropicRequestMessage[] = [];
+  for (const m of parsed.messages) {
+    if (m.role === "system" || m.role === "developer") continue; // folded into system
+    if (m.role === "tool") {
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: m.tool_call_id ?? "",
+            content:
+              typeof m.content === "string"
+                ? m.content
+                : m.content === null
+                  ? ""
+                  : m.content
+                      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+                      .map((p) => p.text)
+                      .join(""),
+          },
+        ],
+      });
+      continue;
+    }
+    if (m.role === "assistant") {
+      const blocks = contentToBlocks(m.content);
+      for (const call of m.tool_calls ?? []) {
+        blocks.push({
+          type: "tool_use",
+          id: call.id,
+          name: toolNameMap.toAnthropic(call.function.name),
+          input: parseToolInput(call.function.arguments),
+        });
+      }
+      messages.push({ role: "assistant", content: blocks });
+      continue;
+    }
+    // user
+    messages.push({ role: "user", content: contentToBlocks(m.content) });
+  }
+
+  const merged = mergeConsecutiveSameRoleOut(messages);
+
+  const tools: AnthropicOutboundTool[] | undefined =
+    parsed.tools !== undefined && parsed.tools.length > 0
+      ? parsed.tools.map((t) => {
+          const fn = (
+            t as {
+              function?: { name?: unknown; description?: unknown; parameters?: unknown };
+            }
+          ).function;
+          const rawName = typeof fn?.name === "string" ? fn.name : "";
+          return {
+            name:
+              rawName === "" ? sanitizeAnthropicToolName("tool") : toolNameMap.toAnthropic(rawName),
+            ...(typeof fn?.description === "string" ? { description: fn.description } : {}),
+            input_schema: fn?.parameters ?? { type: "object" },
+          };
+        })
+      : undefined;
+
+  const system = systemFromMessages(parsed.messages);
+  const toolChoice = mapToolChoice(parsed.tool_choice, toolNameMap);
+  const outputFormat = responseFormatToOutputFormat(parsed.response_format);
+
+  // NB: the tool-name reverse map is NOT emitted onto the outbound request wire.
+  // An Anthropic Messages request has no provider_raw field, and the matrix's
+  // no-leak invariant forbids smuggling internal bookkeeping onto the wire. The map
+  // is deterministic (createAnthropicToolNameMap) and reconstructible from the same
+  // tool list on the response path, so nothing is lost.
+  const out: AnthropicOutboundRequest = {
+    model: parsed.model,
+    max_tokens: parsed.max_tokens ?? DEFAULT_MAX_TOKENS,
+    messages: merged,
+    ...(system !== undefined ? { system } : {}),
+    ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
+    ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
+    ...(tools !== undefined ? { tools } : {}),
+    ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
+    ...(outputFormat !== undefined ? { output_format: outputFormat } : {}),
+  };
+  return out;
+}
+
+// Merge consecutive same-role Anthropic messages (Anthropic forbids them). Concats
+// block arrays; never merges across a user/assistant boundary. Mirrors the inbound
+// mergeConsecutiveSameRole but on the Anthropic block shape.
+function mergeConsecutiveSameRoleOut(
+  messages: AnthropicRequestMessage[],
+): AnthropicRequestMessage[] {
+  const out: AnthropicRequestMessage[] = [];
+  for (const msg of messages) {
+    const prev = out[out.length - 1];
+    if (prev !== undefined && prev.role === msg.role) {
+      prev.content = [...prev.content, ...msg.content];
+      continue;
+    }
+    out.push({ role: msg.role, content: [...msg.content] });
+  }
+  return out;
 }

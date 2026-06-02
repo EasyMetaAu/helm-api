@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { IRChunk } from "../gemini/gemini-types.js";
 import type { IRResponse, IRUsage } from "../ir.js";
 import {
   type AnthropicStopReason,
@@ -444,4 +445,141 @@ export async function* synthesizeSSEFromJSON(resp: IRResponse): AsyncIterable<An
   }
 
   yield* convertOpenAIStreamToAnthropic(single());
+}
+
+// ——————————————————————————————————————————————————————————————————————————————
+// Inbound: native Anthropic SSE events -> IR chunks (issue #59, Theme 2). The
+// reverse of convertOpenAIStreamToAnthropic: an Anthropic provider stream becomes
+// the IR (OpenAI chat.completion.chunk) shape the hub speaks. Reference
+// translateAnthropicSSE (provider/anthropic.ts) but yield IR chunk OBJECTS, not
+// OpenAI SSE strings — framework-agnostic, no Hono, no [DONE] sentinel.
+//
+//   message_start            -> a {role:"assistant"} delta chunk
+//   content_block_start(text)-> (no emit; text arrives via deltas)
+//   content_block_start(tool)-> a tool_calls delta announcing id+name (args: "")
+//   content_block_delta      -> text_delta -> {content}; input_json_delta -> tool args
+//   message_delta            -> buffer stop_reason + usage (flushed on terminal chunk)
+//   message_stop             -> terminal chunk carrying finish_reason + usage
+//
+// Anthropic input_tokens is ALREADY the non-cached input, so prompt_tokens maps
+// straight across; cache_read_input_tokens -> cached_tokens (never double-billed).
+
+const STOP_REASON_TO_FINISH_STREAM: Record<string, string> = {
+  end_turn: "stop",
+  max_tokens: "length",
+  stop_sequence: "stop",
+  tool_use: "tool_calls",
+};
+
+interface InboundToolState {
+  openaiIndex: number; // the OpenAI integer tool_call index
+}
+
+export async function* convertAnthropicStreamToIR(
+  events: AsyncIterable<AnthropicSSEEvent>,
+): AsyncIterable<IRChunk> {
+  let model = "";
+  let id = "";
+  let started = false;
+  let nextToolIndex = 0;
+  // Anthropic content-block index -> OpenAI tool_call index (only for tool blocks).
+  const blockToTool = new Map<number, InboundToolState>();
+  let finishReason: string | null = null;
+  let usage: IRChunk["usage"] | undefined;
+
+  function base(): IRChunk {
+    return {
+      ...(id !== "" ? { id } : {}),
+      ...(model !== "" ? { model } : {}),
+    };
+  }
+
+  for await (const event of events) {
+    switch (event.type) {
+      case "message_start": {
+        id = event.message.id !== "" ? event.message.id : id;
+        model = event.message.model !== "" ? event.message.model : model;
+        started = true;
+        yield { ...base(), choices: [{ index: 0, delta: { role: "assistant" } }] };
+        break;
+      }
+      case "content_block_start": {
+        const block = event.content_block;
+        if (block.type === "tool_use") {
+          const openaiIndex = nextToolIndex;
+          nextToolIndex += 1;
+          blockToTool.set(event.index, { openaiIndex });
+          yield {
+            ...base(),
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    {
+                      index: openaiIndex,
+                      id: block.id,
+                      type: "function",
+                      function: { name: block.name, arguments: "" },
+                    },
+                  ],
+                },
+              },
+            ],
+          };
+        }
+        // text block start carries no payload; deltas follow.
+        break;
+      }
+      case "content_block_delta": {
+        const delta = event.delta;
+        if (delta.type === "text_delta") {
+          if (!started) {
+            started = true;
+            yield { ...base(), choices: [{ index: 0, delta: { role: "assistant" } }] };
+          }
+          yield { ...base(), choices: [{ index: 0, delta: { content: delta.text } }] };
+        } else if (delta.type === "input_json_delta") {
+          const tool = blockToTool.get(event.index);
+          const openaiIndex = tool?.openaiIndex ?? 0;
+          yield {
+            ...base(),
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [{ index: openaiIndex, function: { arguments: delta.partial_json } }],
+                },
+              },
+            ],
+          };
+        }
+        break;
+      }
+      case "content_block_stop":
+        // No IR equivalent; tool args are streamed incrementally and finalized by
+        // the consumer. Nothing to emit (idempotent close lives on the producer).
+        break;
+      case "message_delta": {
+        finishReason = STOP_REASON_TO_FINISH_STREAM[event.delta.stop_reason] ?? "stop";
+        // Anthropic input_tokens is non-cached; carry straight across.
+        usage = {
+          prompt_tokens: event.usage.input_tokens,
+          completion_tokens: event.usage.output_tokens,
+          ...(event.usage.cache_read_input_tokens > 0
+            ? { cached_tokens: event.usage.cache_read_input_tokens }
+            : {}),
+        };
+        break;
+      }
+      case "message_stop": {
+        yield {
+          ...base(),
+          choices: [{ index: 0, delta: {}, finish_reason: finishReason ?? "stop" }],
+          ...(usage !== undefined ? { usage } : {}),
+        };
+        break;
+      }
+    }
+  }
 }

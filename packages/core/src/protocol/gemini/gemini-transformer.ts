@@ -263,10 +263,10 @@ function irMessageContentToText(content: IRMessage["content"]): string {
 // joined by a blank line, so a [system, developer] pair keeps the author's
 // intended precedence. This is explicit + tested, NOT a silent drop.
 //
-// Anthropic non-goal: anthropicTransformer has no transformRequestIn (it is
-// client-presentation only), so there is no IR->Anthropic request path to fold
-// into. Were one added, `developer` would fold into the top-level `system`
-// param under exactly this policy. See implementation-notes.md (2026-06-02).
+// Anthropic parity (issue #59): anthropicTransformer.transformRequestIn now folds
+// `system` + `developer` into the top-level `system` param under exactly this
+// policy (systemFromMessages in protocol/anthropic/request.ts). See
+// implementation-notes.md (2026-06-02).
 export function collectSystemText(messages: readonly IRMessage[]): string {
   const segments: string[] = [];
   for (const message of messages) {

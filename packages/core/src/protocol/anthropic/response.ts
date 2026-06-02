@@ -1,5 +1,12 @@
 import { z } from "zod";
-import type { IRResponse, IRToolCall, IRUsage } from "../ir.js";
+import {
+  type IRContentPart,
+  type IRMessage,
+  type IRResponse,
+  IRResponseSchema,
+  type IRToolCall,
+  type IRUsage,
+} from "../ir.js";
 
 // IR -> Anthropic Messages native response (docs/05, task protocol.anthropic-resp).
 // The outbound half of "nativeIn -> IR -> nativeOut, never N×N direct". Two
@@ -79,7 +86,7 @@ function hashToolName(name: string): string {
   return hash.toString(36).padStart(8, "0").slice(0, 8);
 }
 
-function sanitizeAnthropicToolName(name: string): string {
+export function sanitizeAnthropicToolName(name: string): string {
   const cleaned = name
     .replace(/[^A-Za-z0-9_]/g, "_")
     .replace(/_+/g, "_")
@@ -325,4 +332,127 @@ export function transformResponseIn(ir: IRResponse): AnthropicMessagesResponse {
 
   // Final structural validation: the response handed to the client is well-formed.
   return AnthropicMessagesResponseSchema.parse(out);
+}
+
+// ——————————————————————————————————————————————————————————————————————————————
+// Inbound: native Anthropic Messages response -> IR (issue #59, Theme 2). The
+// reverse of transformResponseIn, completing Anthropic's bidirectional surface.
+// Reference anthropicToOpenAIResponse (provider/anthropic.ts) but emit a VALIDATED
+// IRResponse, with reverse stop_reason/usage mapping and raw preserved.
+
+// —— stop_reason (Anthropic) -> finish_reason (IR/OpenAI): the reverse of
+// STOP_REASON_MAP. tool_use -> tool_calls, max_tokens -> length, the rest -> stop.
+const STOP_REASON_TO_FINISH: Record<string, string> = {
+  end_turn: "stop",
+  max_tokens: "length",
+  stop_sequence: "stop",
+  tool_use: "tool_calls",
+};
+
+// Tolerant inbound schema for a native Anthropic response. Block/usage shapes use
+// passthrough so unknown fields survive; thinking blocks are recovered into the IR
+// thinking content part.
+const InboundTextBlockSchema = z
+  .object({ type: z.literal("text"), text: z.string() })
+  .passthrough();
+const InboundToolUseBlockSchema = z
+  .object({ type: z.literal("tool_use"), id: z.string(), name: z.string(), input: z.unknown() })
+  .passthrough();
+const InboundThinkingBlockSchema = z
+  .object({ type: z.literal("thinking"), thinking: z.string(), signature: z.string().optional() })
+  .passthrough();
+const InboundUnknownBlockSchema = z.object({ type: z.string() }).passthrough();
+const InboundContentBlockSchema = z.union([
+  InboundTextBlockSchema,
+  InboundToolUseBlockSchema,
+  InboundThinkingBlockSchema,
+  InboundUnknownBlockSchema,
+]);
+
+const InboundUsageSchema = z
+  .object({
+    input_tokens: z.number().int().nonnegative().optional(),
+    output_tokens: z.number().int().nonnegative().optional(),
+    cache_read_input_tokens: z.number().int().nonnegative().optional(),
+    cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+  })
+  .passthrough();
+
+const InboundResponseSchema = z
+  .object({
+    id: z.string().optional(),
+    model: z.string().optional(),
+    content: z.array(InboundContentBlockSchema),
+    stop_reason: z.string().nullable().optional(),
+    stop_sequence: z.string().nullable().optional(),
+    usage: InboundUsageSchema.optional(),
+  })
+  .passthrough();
+
+/**
+ * Native Anthropic Messages response -> IR. Pure, framework-agnostic. text blocks ->
+ * message content, tool_use -> IR tool_calls (arguments = JSON.stringify(input)),
+ * thinking -> IR thinking content part. stop_reason -> finish_reason (reverse map),
+ * raw kept in provider_raw.stop_reason. usage: input_tokens is ALREADY the non-cached
+ * input on the Anthropic wire, so prompt_tokens = input_tokens and cached_tokens =
+ * cache_read_input_tokens (never double-billed). Raw usage stashed in provider_raw.
+ */
+export function transformNativeResponseToIR(native: unknown): IRResponse {
+  const res = InboundResponseSchema.parse(native);
+
+  const parts: IRContentPart[] = [];
+  const toolCalls: IRToolCall[] = [];
+  for (const block of res.content) {
+    if (block.type === "text") {
+      parts.push({ type: "text", text: (block as z.infer<typeof InboundTextBlockSchema>).text });
+    } else if (block.type === "thinking") {
+      const b = block as z.infer<typeof InboundThinkingBlockSchema>;
+      parts.push({
+        type: "thinking",
+        text: b.thinking,
+        ...(b.signature !== undefined ? { signature: b.signature } : {}),
+      });
+    } else if (block.type === "tool_use") {
+      const b = block as z.infer<typeof InboundToolUseBlockSchema>;
+      toolCalls.push({
+        id: b.id,
+        type: "function",
+        function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+      });
+    }
+    // unknown block types are tolerated (fail-open) and dropped from content.
+  }
+
+  const message: IRMessage = {
+    role: "assistant",
+    content: parts.length > 0 ? parts : toolCalls.length > 0 ? null : "",
+    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+  };
+
+  const rawStop = res.stop_reason ?? null;
+  const finishReason = rawStop !== null ? (STOP_REASON_TO_FINISH[rawStop] ?? "stop") : null;
+
+  const u = res.usage;
+  const usage: IRUsage | undefined =
+    u !== undefined
+      ? {
+          ...(u.input_tokens !== undefined ? { prompt_tokens: u.input_tokens } : {}),
+          ...(u.output_tokens !== undefined ? { completion_tokens: u.output_tokens } : {}),
+          ...(u.cache_read_input_tokens !== undefined
+            ? { cached_tokens: u.cache_read_input_tokens }
+            : {}),
+        }
+      : undefined;
+
+  const ir: IRResponse = {
+    id: res.id ?? `anthropic_${Date.now()}`,
+    model: res.model ?? "anthropic",
+    choices: [{ index: 0, message, finish_reason: finishReason }],
+    ...(usage !== undefined ? { usage } : {}),
+    provider_raw: {
+      ...(rawStop !== null ? { stop_reason: rawStop } : {}),
+      ...(u !== undefined ? { usage: u } : {}),
+    },
+  };
+  return IRResponseSchema.parse(ir);
 }

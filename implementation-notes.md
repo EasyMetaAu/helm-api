@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-06-02 · Anthropic protocol made fully bidirectional + cross-protocol matrix TODOs flipped (issue #59, follow-up of #45, spec docs/05)
+
+**Context**: The Anthropic transformer was a 4-method `Pick` (name/endPoint/transformRequestOut/transformResponseOut) — it could serve an Anthropic-API client but had NO IR→Anthropic-request path, NO Anthropic-native-response→IR, and NO Anthropic-native-stream→IR. That left 15 explicit `todo` fixtures in `protocol-matrix.fixtures.ts`. This change implements the missing halves at the PROTOCOL-transformer layer (pure, framework-free) — distinct from `provider/anthropic.ts`, which carries OAuth/identity/subscription concerns and a Claude-Code system spoof. Behavior referenced from public LiteLLM, NOT copied.
+
+**Theme 1 — `transformRequestIn` (IR → Anthropic Messages request)** in `protocol/anthropic/request.ts`, wired onto `anthropicTransformer`:
+- system + developer turns fold into the top-level `system` param IN MESSAGE ORDER (consistent with #50 / LiteLLM `map_developer_role_to_system_role`); emitted as a string when a single text segment, else text blocks. **NO Claude-Code system spoof** (that is OAuth-provider-specific).
+- assistant `tool_calls` → `tool_use` blocks (input = best-effort `JSON.parse(arguments)`); `role:"tool"` → `tool_result` block on a user message (`tool_use_id = tool_call_id`); IR image data-url → Anthropic image `source:{type:"base64",media_type,data}` (reverse of the inbound collapse), remote url → `source:{type:"url",url}`; consecutive same-role messages merged.
+- tools → `[{name, description, input_schema}]` with names sanitized through the existing `createAnthropicToolNameMap`/`sanitizeAnthropicToolName` (exported from `response.ts`). `tool_choice` auto|required|none|{function} → `{type:auto}`|`{type:any}`|`{type:none}`|`{type:tool,name}` (name run through the same forward map so it matches a declared tool). `max_tokens` defaults to 4096 (Anthropic requires it).
+- **Decision (tool-name reverse map NOT on the wire)**: the reverse map is deterministic and reconstructible, and the matrix's no-leak invariant forbids `provider_raw` on an outbound request (which has no such field), so it is intentionally dropped rather than smuggled.
+
+**Theme 2 — Anthropic native response & stream → IR**:
+- `transformNativeResponseToIR` (`response.ts`): content text→message content, `tool_use`→IR `tool_calls` (`arguments = JSON.stringify(input)`), `thinking`→IR thinking part; `stop_reason`→`finish_reason` (reverse of `STOP_REASON_MAP`: end_turn→stop, max_tokens→length, tool_use→tool_calls, stop_sequence→stop); usage `input_tokens`→`prompt_tokens` (Anthropic input is ALREADY non-cached, so no subtraction), `cache_read_input_tokens`→`cached_tokens`; raw `stop_reason`/`usage` stashed in `provider_raw`. Wired as `transformResponseIn`.
+- `convertAnthropicStreamToIR` (`stream.ts`): Anthropic SSE event objects → IR chunks (reverse of `convertOpenAIStreamToAnthropic`); yields `IRChunk` objects (NOT OpenAI SSE strings, NO `[DONE]`). Wired as `transformStreamIn`. Returns the gemini-types `IRChunk` type to stay assignment-compatible with `geminiTransformer.transformStreamOut`.
+
+**Theme 3 — Anthropic JSON mode (`output_format`), policy referenced from LiteLLM**: new `protocol/anthropic/output-format.ts`. Outbound: an OpenAI `response_format.json_schema` → Anthropic `output_format: { type:"json_schema", schema:<filtered> }` (the newer structured-output API LiteLLM prefers over the json-tool hack). The filter mirrors LiteLLM `filter_anthropic_output_schema` BEHAVIOR — **dropped keywords**: `minItems`, `maxItems`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `minLength`, `maxLength` (each recorded as a human hint appended to the field `description`), and local `$ref`/`$defs` are resolved/inlined (Anthropic rejects external references). A bare `json_object` (no schema) → undefined (JSON mode without a schema is left to instructions). Inbound: `AnthropicMessagesRequestSchema` now accepts `output_format`; `transformRequestOut` maps it back to an IR `response_format.json_schema` so anthropic→X structured output round-trips.
+
+**Theme 4 — cross-protocol stream normalizer fixtures**: added matrix tests driving a Gemini snapshot stream through `geminiTransformer.transformStreamIn` (snapshot→IR chunks) then (a) an identity OpenAI `chat.completion.chunk` SSE serializer + `[DONE]` for gemini→openai, and (b) `convertOpenAIStreamToAnthropic` for gemini→anthropic; plus a native-Anthropic-SSE→IR→{OpenAI,Gemini} test for Theme 2.
+
+**Fixtures flipped to `passing`** (14): openai→anthropic {request, multimodal, json-schema}; anthropic→openai {response, streaming, json-schema}; anthropic→gemini {response, streaming, json-schema}; gemini→anthropic {request, streaming, json-schema}; gemini→openai {streaming}. (openai→anthropic request & streaming & tool-call & error & usage were already passing.)
+
+**Kept as `todo` (documented non-goal)**: openai→gemini `multimodal` — remote image_url outbound to Gemini requires fetch/proxy, an explicit non-goal (issue #49). This single remaining todo preserves the matrix's `todos.length > 0` invariant. `protocolMatrixDimensions` is UNCHANGED.
+
+---
+
 ## 2026-06-02 · Gemini endpoint — superseded #39 (issue #52/#34, spec docs/05)
 
 **Context**: PR #39 (`feat/issue-34-gemini`) built the entire Gemini surface — core transformer/error/types/path-parser AND the gateway route layer — in one branch. Between then and now, the CORE half of that work landed on `main` separately via #49/#51/#54: `protocol/gemini/{gemini-transformer,error,gemini-types}.ts` already exist, `index.ts` already exports the Gemini ERROR symbols (`makeGeminiError`, `geminiTransformErrorOut`, `GeminiErrorEnvelope`), `@helm/shared` `ProtocolSchema` already includes `"gemini"`, and `server.ts` already has `coerceErrorClass`. The decision on #52 is **supersede #39**: port only the GATEWAY route layer onto current `main`, do not re-create the core pieces. #39 stays **closed/superseded** (no push/merge).
