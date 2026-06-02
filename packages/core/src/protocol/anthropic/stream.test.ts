@@ -431,3 +431,44 @@ describe("synthesizeSSEFromJSON — cache hit / non-streaming upstream", () => {
     }
   });
 });
+
+describe("convertOpenAIStreamToAnthropic — tool name sanitizer", () => {
+  it("sanitizes colliding tool names in parallel streaming tool_use blocks", async () => {
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "call_a",
+                      function: { name: "search-web", arguments: '{"q":"a"}' },
+                    },
+                    {
+                      index: 1,
+                      id: "call_b",
+                      function: { name: "search web", arguments: '{"q":"b"}' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          { choices: [{ finish_reason: "tool_calls" }] },
+        ]),
+      ),
+    );
+
+    const starts = events.filter(
+      (e): e is Extract<AnthropicSSEEvent, { type: "content_block_start" }> =>
+        e.type === "content_block_start" && e.content_block.type === "tool_use",
+    );
+    const toolNames = starts.flatMap((e) =>
+      e.content_block.type === "tool_use" ? [e.content_block.name] : [],
+    );
+    expect(toolNames).toEqual(["search_web", expect.stringMatching(/^search_web_[a-z0-9]{8}$/)]);
+  });
+});
