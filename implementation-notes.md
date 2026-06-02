@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-06-02 · OpenAI + Gemini native error-envelope transformers + cross-protocol error fixtures flipped (issue #51, spec docs/05+07)
+
+**Context**: The error half of the Protocol Adapter only existed for Anthropic (`protocol/anthropic/error.ts`). The cross-protocol fixture matrix therefore had four `error` TODOs whose `todoReason` literally said "No OpenAI/Gemini-native error envelope transformer exists" (anthropic→openai, gemini→openai, openai→gemini, anthropic→gemini). The matrix error test hard-coded `expect(to).toBe("anthropic")`.
+
+**Decision**: add two pure, framework-free outbound error transformers mirroring `anthropic/error.ts` exactly (exhaustive `Record<ErrorClass,…>` map ⇒ compile error if a 9th class is added; status always `err.http_status`, never hand-coded; message passed through verbatim because the producer already redacts per principle 7).
+
+- **`protocol/openai-error.ts`** (flat sibling of the single-file `openai.ts` — NOT a directory). Envelope `{ error: { message, type, code, param } }`; `code`/`param` always `null` (Helm does not surface OpenAI field-level diagnostics, but keys stay present so SDKs don't NPE). Type map: auth→`authentication_error`, invalid_request→`invalid_request_error`, capability_unsatisfiable→`invalid_request_error`, rate_limited→`rate_limit_error`, and lane_unavailable/all_providers_failed/upstream_error/timeout all → `server_error` (OpenAI's documented set is narrow; the precise Helm class survives in telemetry/trace_id).
+- **`protocol/gemini/error.ts`** (gemini IS a directory). Google canonical `google.rpc.Status` envelope `{ error: { code, message, status } }` where `code === err.http_status` and `status` is the canonical Code name. Map: auth→`UNAUTHENTICATED`, invalid_request→`INVALID_ARGUMENT`, lane_unavailable→`UNAVAILABLE`, all_providers_failed/upstream_error→`INTERNAL`, capability_unsatisfiable→`FAILED_PRECONDITION`, timeout→`DEADLINE_EXCEEDED`, rate_limited→`RESOURCE_EXHAUSTED`.
+
+**Barrel**: `index.ts` now exports `openaiTransformErrorOut`/`makeOpenAIError`/`OpenAIErrorEnvelope` and `geminiTransformErrorOut`/`makeGeminiError`/`GeminiErrorEnvelope`, matching the existing `anthropicTransformErrorOut` aliasing.
+
+**Matrix**: the four error TODOs flipped to `passing`; the two pre-existing `passing` Anthropic-target error fixtures (openai→anthropic, gemini→anthropic) were unchanged. The "guards passing error fixtures" test was rewritten to render via the TARGET protocol's `transformErrorOut` and assert that target's native envelope + status (anthropic `{type:"error",error:{type,message}}`, openai `{error:{message,type,code,param}}`, gemini `{error:{code,message,status}}`) plus a trace_id-not-leaked check. The `todos.length > 0` invariant still holds (request/response/streaming/multimodal/json-schema TODOs remain).
+
+**AC2/AC1/AC4 — no new code needed**: streaming abort-vs-non-abort is already covered (`apps/gateway/.../messages.test.ts:394` asserts a terminal Anthropic `event: error` frame on a non-abort mid-stream throw; `:307` asserts a client disconnect reaches the pipeline as a non-provider fault; `execute.test.ts:487` asserts client abort ⇒ `client_abort`, no `all_providers_failed`; `:279` logs `stream.truncated`). Terminal usage / cached-non-double-bill are covered by `protocol-matrix.test.ts` (input_tokens 7 + cache_read_input_tokens 3, gemini promptTokenCount 10, no `[DONE]` leakage). No gateway file was modified.
+
+**Tests**: `openai-error.test.ts` (5) + `gemini/error.test.ts` (5) cover all 8 classes → correct type+status, verbatim message, envelope-shape/no-key-leakage. Full `packages/core/src/protocol` suite green (208 tests; matrix grew 51→55 as the 4 flipped error paths now execute). Typecheck + Biome clean on changed files.
+
+---
+
 ## 2026-06-02 · OpenAI `developer` role — first-class IR role + order-preserving system fold (issue #50, spec docs/05)
 
 **Context**: OpenAI renamed the top instruction tier `system` → `developer` (Chat Completions + Responses API both accept it). Previously the IR enum rejected `developer`, so the Responses transformer silently remapped `developer→system` (`responses.ts:~192`) and an OpenAI Chat `developer` message was *dropped* by IR validation. Silent loss violates the lossless-passthrough goal.

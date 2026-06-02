@@ -5,11 +5,13 @@ import {
   convertOpenAIStreamToAnthropic,
   transformErrorOut as transformAnthropicErrorOut,
 } from "./anthropic/index.js";
+import { transformErrorOut as transformGeminiErrorOut } from "./gemini/error.js";
 import { geminiTransformer } from "./gemini/gemini-transformer.js";
 import type { IRChunk as GeminiIRChunk } from "./gemini/gemini-types.js";
 import type { IRRequest, IRResponse } from "./ir.js";
 import { IRRequestSchema, IRResponseSchema } from "./ir.js";
 import { openaiTransformer } from "./openai.js";
+import { transformErrorOut as transformOpenAIErrorOut } from "./openai-error.js";
 import {
   canonicalRequestIR,
   canonicalResponseIR,
@@ -487,20 +489,49 @@ describe("protocol cross-path executable harness", () => {
   it.each(
     protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "error")),
   )("guards passing error fixtures for $from->$to", ({ to }) => {
-    expect(to).toBe("anthropic");
-    const out = transformAnthropicErrorOut(
-      makeHelmError({
-        error_class: "rate_limited",
-        message: "matrix rate limit",
-        trace_id: "trace-matrix",
-      }),
-    );
-
-    expect(out.status).toBe(429);
-    expect(out.body).toEqual({
-      type: "error",
-      error: { type: "rate_limit_error", message: "matrix rate limit" },
+    // Representative terminal error: rate_limited -> 429. Each TARGET protocol must
+    // render its own native envelope shape + status from the shared table (docs/07);
+    // the status is never hand-coded, it comes from err.http_status.
+    const helm = makeHelmError({
+      error_class: "rate_limited",
+      message: "matrix rate limit",
+      trace_id: "trace-matrix",
     });
+
+    if (to === "anthropic") {
+      const out = transformAnthropicErrorOut(helm);
+      expect(out.status).toBe(429);
+      expect(out.body).toEqual({
+        type: "error",
+        error: { type: "rate_limit_error", message: "matrix rate limit" },
+      });
+    } else if (to === "openai") {
+      const out = transformOpenAIErrorOut(helm);
+      expect(out.status).toBe(429);
+      expect(out.body).toEqual({
+        error: {
+          message: "matrix rate limit",
+          type: "rate_limit_error",
+          code: null,
+          param: null,
+        },
+      });
+    } else {
+      const out = transformGeminiErrorOut(helm);
+      expect(out.status).toBe(429);
+      expect(out.body).toEqual({
+        error: { code: 429, message: "matrix rate limit", status: "RESOURCE_EXHAUSTED" },
+      });
+    }
+
+    // Trace id stays internal — never on the wire envelope (principle 7).
+    const rendered =
+      to === "anthropic"
+        ? transformAnthropicErrorOut(helm)
+        : to === "openai"
+          ? transformOpenAIErrorOut(helm)
+          : transformGeminiErrorOut(helm);
+    expect(JSON.stringify(rendered.body)).not.toContain("trace-matrix");
   });
 });
 
