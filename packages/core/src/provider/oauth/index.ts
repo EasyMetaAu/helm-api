@@ -16,11 +16,13 @@ export {
   type CopilotPollResult,
   getGitHubCopilotBaseUrl,
   githubCopilotOAuthProvider,
+  listGitHubCopilotModels,
   loginGitHubCopilot,
   normalizeDomain,
   pollCopilotDeviceOnce,
   refreshGitHubCopilotToken,
 } from "./github-copilot.js";
+export { CURATED_OAUTH_MODELS, discoverOAuthModels } from "./models.js";
 export {
   beginOpenAICodexLogin,
   type CodexLoginStart,

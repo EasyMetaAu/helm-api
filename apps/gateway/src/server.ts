@@ -15,6 +15,7 @@ import {
   createStore,
   createTokenManager,
   DEFAULT_LANES,
+  discoverOAuthModels,
   generateKey,
   getGitHubCopilotBaseUrl,
   getOAuthProvider,
@@ -169,6 +170,81 @@ type ProviderCredential =
 export interface OAuthRuntimeCtx {
   store: OAuthTokenStore;
   encKey: Buffer;
+}
+
+// Executor-ready subscription providers that a bound credential can AUTO-ROUTE to
+// (issue #38). Codex is intentionally absent until its Responses-API execution is
+// wired (it can be connected, just not auto-routed yet). For Copilot the base URL
+// is derived per-request from the token, so none is set here.
+const ROUTABLE_OAUTH: Record<string, { type: string; baseUrl?: string }> = {
+  anthropic: { type: "anthropic", baseUrl: "https://api.anthropic.com" },
+  "github-copilot": { type: "openai" },
+};
+
+// Turn bound subscription credentials into routable providers (issue #38, "connect
+// = routable"): for each connected account of an executor-ready provider NOT
+// already declared in providers.yaml, synthesize a provider config (type + oauth
+// preset + discovered models as `<provider>/<model>` aliases). Fed through the same
+// client/registry/modelAliases pipeline as configured providers, so the models show
+// up in the Lanes picker and route. Discovery is live where possible (Copilot
+// /models), else curated. Fail-open: a dead credential / empty model list skips
+// that provider (logged), never blocks startup. v1 routes ONE account per provider
+// (the "default", else the first); per-account routing is a follow-up.
+async function synthesizeOAuthProviders(
+  configured: ReadonlyArray<ProviderConfigShared>,
+  oauthCtx: OAuthRuntimeCtx | undefined,
+  log: (level: "info" | "warn", msg: string, fields?: Record<string, unknown>) => void,
+): Promise<ProviderConfigShared[]> {
+  if (!oauthCtx) return [];
+  const declared = new Set<string>(
+    configured.flatMap((p) => (p.oauth && isOAuthPreset(p.oauth) ? [p.oauth.provider] : [])),
+  );
+  // Choose one account per provider: prefer "default", else the first seen.
+  const chosen = new Map<string, string>();
+  for (const b of await oauthCtx.store.list()) {
+    if (!ROUTABLE_OAUTH[b.providerId] || declared.has(b.providerId)) continue;
+    if (!chosen.has(b.providerId) || b.account === "default") chosen.set(b.providerId, b.account);
+  }
+  const out: ProviderConfigShared[] = [];
+  for (const [providerId, account] of chosen) {
+    const spec = ROUTABLE_OAUTH[providerId];
+    const provider = getOAuthProvider(providerId);
+    if (!spec || !provider) continue;
+    let accessToken: string;
+    try {
+      const tm = createTokenManager({
+        oauth: { kind: "preset", providerId, account },
+        tokenStore: oauthCtx.store,
+        encKey: oauthCtx.encKey,
+        oauthProvider: provider,
+        now: () => Date.now(),
+      });
+      accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
+    } catch {
+      log("warn", "oauth.autoroute.skip", { providerId, reason: "credential refresh failed" });
+      continue;
+    }
+    let models: string[];
+    try {
+      models = await discoverOAuthModels(providerId, accessToken);
+    } catch {
+      models = [];
+    }
+    if (models.length === 0) {
+      log("warn", "oauth.autoroute.no_models", { providerId });
+      continue;
+    }
+    out.push({
+      name: providerId,
+      alias: providerId,
+      type: spec.type,
+      base_url: spec.baseUrl,
+      oauth: { provider: providerId, account },
+      models: models.map((m) => ({ alias: `${providerId}/${m}`, provider_model: m })),
+    } as ProviderConfigShared);
+    log("info", "oauth.autoroute", { providerId, account, models: models.length });
+  }
+  return out;
 }
 
 // Resolve a provider's credential from env / store (issue #38). Returns null when
@@ -344,6 +420,16 @@ export async function buildServer(
     ? { store: store.oauthTokens, encKey: oauthEncKey }
     : undefined;
 
+  // Bound subscriptions become routable providers (issue #38) — synthesized from
+  // stored credentials + discovered models, then merged with the configured
+  // providers for client building, the registry, and the Lanes model catalog.
+  const synthesizedOAuth = await synthesizeOAuthProviders(
+    config.providers,
+    oauthCtx,
+    (lvl, msg, f) => logger.log(lvl, msg, f),
+  );
+  const routableProviders: ProviderConfigShared[] = [...config.providers, ...synthesizedOAuth];
+
   // Runtime-mutable settings (admin "System Settings"): persisted overrides for
   // the operator-facing subset that can change WITHOUT a restart (capture_payloads,
   // payload_retention_days, rate_limit_enabled, log_level). Loaded from the
@@ -457,8 +543,8 @@ export async function buildServer(
   // mock; in production each provider keeps its own base_url.
   const providerClients = buildProviderClients(
     baseUrlOverride
-      ? config.providers.map((p) => ({ ...p, base_url: baseUrlOverride }))
-      : config.providers,
+      ? routableProviders.map((p) => ({ ...p, base_url: baseUrlOverride }))
+      : routableProviders,
     fallbackBaseUrl,
     timeoutMs,
     oauthCtx,
@@ -534,7 +620,7 @@ export async function buildServer(
     catalog,
   });
   const registry = buildRegistry(
-    config.providers,
+    routableProviders,
     first.name,
     baseUrl,
     first.api_key_env,
@@ -661,7 +747,7 @@ export async function buildServer(
     // providers[].models[].alias, deduped + sorted. Computed once at wire time
     // (config is immutable for the process lifetime).
     const modelAliases = [
-      ...new Set(config.providers.flatMap((p) => p.models.map((m) => m.alias))),
+      ...new Set(routableProviders.flatMap((p) => p.models.map((m) => m.alias))),
     ].sort();
     registerAdminApi(app, {
       rules: ruleStore,

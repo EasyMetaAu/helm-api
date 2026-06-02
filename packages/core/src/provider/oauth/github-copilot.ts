@@ -268,6 +268,35 @@ export async function refreshGitHubCopilotToken(
   return { refresh: githubToken, access: token, expires, enterpriseUrl: enterpriseDomain };
 }
 
+// List the chat models this Copilot subscription can use (GET <base>/models with
+// the short-lived Copilot token). Filters to chat-capable model ids and drops
+// router/account entries — ported from openclaw's listGitHubCopilotModelIds.
+export async function listGitHubCopilotModels(
+  copilotToken: string,
+  enterpriseDomain?: string,
+): Promise<string[]> {
+  const baseUrl = getGitHubCopilotBaseUrl(copilotToken, enterpriseDomain);
+  const raw = (await fetchJson(`${baseUrl}/models`, {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${copilotToken}`,
+      ...COPILOT_HEADERS,
+    },
+  })) as { data?: unknown };
+  const data = Array.isArray(raw.data) ? raw.data : [];
+  const ids: string[] = [];
+  for (const entry of data) {
+    if (!entry || typeof entry !== "object") continue;
+    const m = entry as { id?: unknown; object?: unknown; capabilities?: { type?: unknown } };
+    const id = typeof m.id === "string" ? m.id.trim() : "";
+    if (!id || id.startsWith("accounts/")) continue;
+    if (m.object && m.object !== "model") continue;
+    if (m.capabilities?.type && m.capabilities.type !== "chat") continue;
+    ids.push(id);
+  }
+  return [...new Set(ids)].sort();
+}
+
 export async function loginGitHubCopilot(
   callbacks: OAuthLoginCallbacks,
 ): Promise<CopilotCredentials> {
