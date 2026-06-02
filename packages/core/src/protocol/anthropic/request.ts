@@ -595,11 +595,15 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
   const toolChoice = mapToolChoice(parsed.tool_choice, toolNameMap);
   const outputFormat = responseFormatToOutputFormat(parsed.response_format);
 
-  // NB: the tool-name reverse map is NOT emitted onto the outbound request wire.
-  // An Anthropic Messages request has no provider_raw field, and the matrix's
-  // no-leak invariant forbids smuggling internal bookkeeping onto the wire. The map
-  // is deterministic (createAnthropicToolNameMap) and reconstructible from the same
-  // tool list on the response path, so nothing is lost.
+  // NB: the tool-name reverse map is NOT emitted onto the outbound request wire (an
+  // Anthropic Messages request has no provider_raw field, and the matrix's no-leak
+  // invariant forbids smuggling internal bookkeeping there). It is NOT recoverable
+  // from the Anthropic RESPONSE alone — that only carries the sanitized name. The map
+  // IS deterministic, though: an orchestrator that called transformRequestIn rebuilds
+  // the identical map with `createAnthropicToolNameMap(<original tool names from the
+  // IR request>)` and passes it to `transformNativeResponseToIR(res, map)`, which
+  // restores `db_query` -> `db.query`. Stateless callers (no map) keep the sanitized
+  // name. See response.ts.
   const out: AnthropicOutboundRequest = {
     model: parsed.model,
     max_tokens: parsed.max_tokens ?? DEFAULT_MAX_TOKENS,

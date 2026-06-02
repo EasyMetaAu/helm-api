@@ -126,9 +126,15 @@ const MessageStartEventSchema = z.object({
     content: z.array(z.unknown()),
     stop_reason: z.null(),
     stop_sequence: z.null(),
+    // Real Anthropic streams put the PROMPT usage on message_start: input_tokens
+    // and the cache fields are known up-front (output_tokens is the initial, ~1).
+    // cache_* are optional (absent when no prompt caching). The skeleton Helm
+    // itself emits ({input_tokens:0,output_tokens:0}) validates here too.
     usage: z.object({
       input_tokens: z.number().int().nonnegative(),
       output_tokens: z.number().int().nonnegative(),
+      cache_read_input_tokens: z.number().int().nonnegative().optional(),
+      cache_creation_input_tokens: z.number().int().nonnegative().optional(),
     }),
   }),
 });
@@ -152,11 +158,20 @@ const ContentBlockStopEventSchema = z.object({
 
 const MessageDeltaEventSchema = z.object({
   type: z.literal("message_delta"),
-  delta: z.object({ stop_reason: z.string(), stop_sequence: z.null() }),
+  // Real Anthropic: stop_sequence is the matched string (or null); stop_reason can
+  // be null on a non-terminal message_delta.
+  delta: z.object({
+    stop_reason: z.string().nullable(),
+    stop_sequence: z.string().nullable(),
+  }),
+  // Real Anthropic message_delta.usage carries ONLY the cumulative output_tokens;
+  // input_tokens / cache_* live on message_start. We keep input/cache OPTIONAL so
+  // both the real wire shape AND Helm's own outbound (which echoes them here) parse.
   usage: z.object({
-    input_tokens: z.number().int().nonnegative(),
     output_tokens: z.number().int().nonnegative(),
-    cache_read_input_tokens: z.number().int().nonnegative(),
+    input_tokens: z.number().int().nonnegative().optional(),
+    cache_read_input_tokens: z.number().int().nonnegative().optional(),
+    cache_creation_input_tokens: z.number().int().nonnegative().optional(),
   }),
 });
 
@@ -485,7 +500,15 @@ export async function* convertAnthropicStreamToIR(
   // Anthropic content-block index -> OpenAI tool_call index (only for tool blocks).
   const blockToTool = new Map<number, InboundToolState>();
   let finishReason: string | null = null;
-  let usage: IRChunk["usage"] | undefined;
+  // Usage is assembled across events: input/cache land on message_start (real
+  // Anthropic) — or echoed on message_delta (Helm's own outbound) — while the
+  // cumulative output lands on message_delta. We take the max of each input/cache
+  // sighting so a 0-skeleton message_start never clobbers the real value, then flush
+  // a single terminal usage on message_stop. `sawUsage` gates emission.
+  let inputTokens = 0;
+  let cacheTokens = 0;
+  let outputTokens = 0;
+  let sawUsage = false;
 
   function base(): IRChunk {
     return {
@@ -500,6 +523,10 @@ export async function* convertAnthropicStreamToIR(
         id = event.message.id !== "" ? event.message.id : id;
         model = event.message.model !== "" ? event.message.model : model;
         started = true;
+        // Capture the prompt usage that real Anthropic reports up-front.
+        const u = event.message.usage;
+        inputTokens = Math.max(inputTokens, u.input_tokens);
+        cacheTokens = Math.max(cacheTokens, u.cache_read_input_tokens ?? 0);
         yield { ...base(), choices: [{ index: 0, delta: { role: "assistant" } }] };
         break;
       }
@@ -561,18 +588,28 @@ export async function* convertAnthropicStreamToIR(
         // the consumer. Nothing to emit (idempotent close lives on the producer).
         break;
       case "message_delta": {
-        finishReason = STOP_REASON_TO_FINISH_STREAM[event.delta.stop_reason] ?? "stop";
-        // Anthropic input_tokens is non-cached; carry straight across.
-        usage = {
-          prompt_tokens: event.usage.input_tokens,
-          completion_tokens: event.usage.output_tokens,
-          ...(event.usage.cache_read_input_tokens > 0
-            ? { cached_tokens: event.usage.cache_read_input_tokens }
-            : {}),
-        };
+        if (event.delta.stop_reason !== null) {
+          finishReason = STOP_REASON_TO_FINISH_STREAM[event.delta.stop_reason] ?? "stop";
+        }
+        // Real Anthropic message_delta carries the cumulative output_tokens; some
+        // sources (Helm's own outbound) also echo input/cache here — fold them in.
+        outputTokens = event.usage.output_tokens;
+        inputTokens = Math.max(inputTokens, event.usage.input_tokens ?? 0);
+        cacheTokens = Math.max(cacheTokens, event.usage.cache_read_input_tokens ?? 0);
+        sawUsage = true;
         break;
       }
       case "message_stop": {
+        // Flush ONE terminal usage assembled from message_start (input/cache) +
+        // message_delta (output). prompt_tokens is already non-cached in Anthropic,
+        // so it maps straight across; cached is re-exposed, never double-billed.
+        const usage: IRChunk["usage"] | undefined = sawUsage
+          ? {
+              prompt_tokens: inputTokens,
+              completion_tokens: outputTokens,
+              ...(cacheTokens > 0 ? { cached_tokens: cacheTokens } : {}),
+            }
+          : undefined;
         yield {
           ...base(),
           choices: [{ index: 0, delta: {}, finish_reason: finishReason ?? "stop" }],

@@ -5,6 +5,17 @@
 
 ---
 
+## 2026-06-02 · Fix two Codex-review P1s in the #59 Anthropic bidirectional work (spec docs/05)
+
+A `/codex:review` of PR #60 (merged) found two real correctness bugs that the unit tests masked:
+
+- **Inbound stream usage shape was wrong** (`anthropic/stream.ts`). `convertAnthropicStreamToIR` read `input_tokens`/`cache_read_input_tokens` off `message_delta`, but **real Anthropic streams put the prompt usage on `message_start`** and send only the cumulative `output_tokens` on `message_delta`; `message_delta.delta.stop_sequence` can be a string. The old schema *required* input/cache on `message_delta`, so a real provider stream would fail to parse (or report 0 prompt tokens). Fix: `message_start.usage` now carries optional `cache_*`; `message_delta.usage` requires only `output_tokens` (input/cache optional); `stop_reason`/`stop_sequence` are nullable strings. The converter now accumulates input/cache via `Math.max` across `message_start`+`message_delta` (so a 0-skeleton start never clobbers the real value, and Helm's own outbound — which echoes usage on `message_delta` — still works) and flushes one terminal usage on `message_stop`. The matrix masking test was rewritten to the **real wire shape**.
+- **Tool-name round-trip lost the original name** (`anthropic/request.ts` + `response.ts`). The request sanitizes `db.query` → `db_query` (Anthropic's `^[a-zA-Z0-9_-]{1,128}$`), but `transformNativeResponseToIR` returned the sanitized name into IR, breaking client tool dispatch. The earlier comment claiming the map was "reconstructible from the response" was wrong (the response only carries the sanitized name). Fix: `transformNativeResponseToIR(native, toolNameMap?)` restores the original via the threaded map; the map is deterministic, so an orchestrator rebuilds it with `createAnthropicToolNameMap(<original IR tool names>)` and passes it. Stateless callers keep the sanitized name. Round-trip + stateless tests added; the misleading comment corrected.
+
+protocol + gateway routes 406 tests green; typecheck clean; `pnpm lint` exit 0.
+
+---
+
 ## 2026-06-02 · Anthropic protocol made fully bidirectional + cross-protocol matrix TODOs flipped (issue #59, follow-up of #45, spec docs/05)
 
 **Context**: The Anthropic transformer was a 4-method `Pick` (name/endPoint/transformRequestOut/transformResponseOut) — it could serve an Anthropic-API client but had NO IR→Anthropic-request path, NO Anthropic-native-response→IR, and NO Anthropic-native-stream→IR. That left 15 explicit `todo` fixtures in `protocol-matrix.fixtures.ts`. This change implements the missing halves at the PROTOCOL-transformer layer (pure, framework-free) — distinct from `provider/anthropic.ts`, which carries OAuth/identity/subscription concerns and a Claude-Code system spoof. Behavior referenced from public LiteLLM, NOT copied.

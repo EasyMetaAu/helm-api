@@ -397,7 +397,10 @@ const InboundResponseSchema = z
  * input on the Anthropic wire, so prompt_tokens = input_tokens and cached_tokens =
  * cache_read_input_tokens (never double-billed). Raw usage stashed in provider_raw.
  */
-export function transformNativeResponseToIR(native: unknown): IRResponse {
+export function transformNativeResponseToIR(
+  native: unknown,
+  toolNameMap?: AnthropicToolNameMap,
+): IRResponse {
   const res = InboundResponseSchema.parse(native);
 
   const parts: IRContentPart[] = [];
@@ -414,10 +417,16 @@ export function transformNativeResponseToIR(native: unknown): IRResponse {
       });
     } else if (block.type === "tool_use") {
       const b = block as z.infer<typeof InboundToolUseBlockSchema>;
+      // Restore the ORIGINAL tool name when the request-side sanitizer map is
+      // threaded in (e.g. `db.query` was sent as `db_query`). Without the map we
+      // pass Anthropic's name through unchanged — the best we can do statelessly.
       toolCalls.push({
         id: b.id,
         type: "function",
-        function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+        function: {
+          name: toolNameMap?.toOriginal(b.name) ?? b.name,
+          arguments: JSON.stringify(b.input ?? {}),
+        },
       });
     }
     // unknown block types are tolerated (fail-open) and dropped from content.

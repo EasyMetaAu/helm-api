@@ -611,7 +611,9 @@ describe("protocol cross-path executable harness", () => {
           content: [],
           stop_reason: null,
           stop_sequence: null,
-          usage: { input_tokens: 0, output_tokens: 0 },
+          // REAL Anthropic wire shape: the prompt usage (input + cache) is reported
+          // up-front on message_start; message_delta later carries only output.
+          usage: { input_tokens: 10, output_tokens: 0, cache_read_input_tokens: 3 },
         },
       },
       { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
@@ -631,7 +633,8 @@ describe("protocol cross-path executable harness", () => {
       {
         type: "message_delta",
         delta: { stop_reason: "tool_use", stop_sequence: null },
-        usage: { input_tokens: 10, output_tokens: 4, cache_read_input_tokens: 3 },
+        // REAL Anthropic message_delta carries ONLY the cumulative output_tokens.
+        usage: { output_tokens: 4 },
       },
       { type: "message_stop" },
     ];
@@ -646,7 +649,9 @@ describe("protocol cross-path executable harness", () => {
     // terminal IR chunk carries the reverse-mapped finish_reason + non-double-billed usage.
     const terminal = irChunks.at(-1);
     expect(terminal?.choices?.[0]?.finish_reason).toBe("tool_calls");
+    // input from message_start, output from message_delta, cache from message_start.
     expect(terminal?.usage?.prompt_tokens).toBe(10);
+    expect(terminal?.usage?.completion_tokens).toBe(4);
     expect(terminal?.usage?.cached_tokens).toBe(3);
 
     // anthropic -> gemini: re-serialize the IR chunks to Gemini snapshots.
