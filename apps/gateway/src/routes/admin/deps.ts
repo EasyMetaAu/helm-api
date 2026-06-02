@@ -102,7 +102,9 @@ export interface OAuthAdminAccess {
   listModels(input: {
     providerId: string;
     account: string;
-  }): Promise<{ available: string[]; enabled: string[] }>;
+    // `canPull` = the provider has a live list-models API, so a "pull from
+    // provider" action is meaningful (false for curated-only providers e.g. Codex).
+  }): Promise<{ available: string[]; enabled: string[]; canPull: boolean }>;
   // Persist the exposed-model subset for one account (replaces the prior list).
   setEnabledModels(input: { providerId: string; account: string; models: string[] }): Promise<void>;
   // Per-account egress proxy (issue #38 follow-up). Multiple accounts of one
@@ -169,12 +171,15 @@ export interface AdminApiDeps {
   // Admin OAuth-login seam (issue #38). Optional so existing tests that build a
   // partial deps object stay valid; the route 503s when it is absent.
   oauth?: OAuthAdminAccess;
-  // The catalog of routable model aliases (config.providers[].models[].alias),
-  // deduped + sorted at startup. Read-only: the Lanes admin UI offers these as
-  // combobox suggestions so an operator picks a real alias instead of hand-typing
-  // one (a typo would silently break a fallback chain). A supply-chain detail
-  // (Principle 6) exposed only to the authenticated admin surface, never to API clients.
-  modelAliases: string[];
+  // The catalog of routable model aliases the Lanes admin UI offers as combobox
+  // suggestions (so an operator picks a real alias instead of hand-typing one — a
+  // typo would silently break a fallback chain). A THUNK, not a static array,
+  // because the OAuth-subscription part is LIVE: it reflects each connected
+  // account's current curation (effectiveOAuthAliases) so a Manage-dialog edit shows
+  // up here on the next read WITHOUT a restart. The configured-provider part is
+  // static (config is immutable for the process). A supply-chain detail (Principle
+  // 6) exposed only to the authenticated admin surface, never to API clients.
+  modelAliases: () => Promise<string[]>;
   // Mint a fresh key (crypto). Injected for testability + single-source plaintext.
   genKey: () => GeneratedKeyParts;
   // Generate a key_id for a new key. Injected so tests get deterministic ids.

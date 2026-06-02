@@ -8,6 +8,7 @@ import {
   type ConfigStore,
   createAnthropicClient,
   createCircuitBreaker,
+  createCodexResponsesClient,
   createMemoryMomentumStore,
   createOAuthPoolClient,
   createOpenAIClient,
@@ -71,6 +72,7 @@ import {
   loadAccountSettings,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
+import { effectiveOAuthAliases } from "./oauth/effective-models.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
@@ -183,13 +185,21 @@ export interface OAuthRuntimeCtx {
 }
 
 // Executor-ready subscription providers that a bound credential can AUTO-ROUTE to
-// (issue #38). Codex is intentionally absent until its Responses-API execution is
-// wired (it can be connected, just not auto-routed yet). For Copilot the base URL
-// is derived per-request from the token, so none is set here.
+// (issue #38): each maps to the executor `type` createProviderClient dispatches on.
+// For Copilot the base URL is derived per-request from the token, so none is set
+// here. This map is the SINGLE gate for "which subscriptions route" — the live
+// model catalog (effectiveOAuthAliases) reads its keys (ROUTABLE_OAUTH_IDS).
 const ROUTABLE_OAUTH: Record<string, { type: string; baseUrl?: string }> = {
   anthropic: { type: "anthropic", baseUrl: "https://api.anthropic.com" },
   "github-copilot": { type: "openai" },
+  // ChatGPT Codex via the native Responses executor (the endpoint is
+  // baseUrl + /responses). No list-models API → hasLiveModelDiscovery stays false
+  // (curated list only; the Manage dialog hides "Pull from provider").
+  "openai-codex": { type: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex" },
 };
+// The single gate for "which subscriptions route". Keys of ROUTABLE_OAUTH, reused
+// by the live model catalog so it can never offer a model whose executor is unwired.
+const ROUTABLE_OAUTH_IDS: ReadonlySet<string> = new Set(Object.keys(ROUTABLE_OAUTH));
 
 // The synthesis result (issue #38, Stage 3): one synthetic provider config per
 // routable subscription, plus the POOL client that serves ALL its accounts. The
@@ -224,8 +234,8 @@ export async function synthesizeOAuthProviders(
   const declared = new Set<string>(
     configured.flatMap((p) => (p.oauth && isOAuthPreset(p.oauth) ? [p.oauth.provider] : [])),
   );
-  // Group every bound account by routable provider (skip non-routable providers
-  // like openai-codex and any provider already declared in providers.yaml).
+  // Group every bound account by routable provider (skip providers without a wired
+  // executor and any provider already declared in providers.yaml).
   const accountsByProvider = new Map<string, string[]>();
   for (const b of await oauthCtx.store.list()) {
     if (!ROUTABLE_OAUTH[b.providerId] || declared.has(b.providerId)) continue;
@@ -274,8 +284,10 @@ export async function synthesizeOAuthProviders(
       } catch {
         discovered = [];
       }
-      // Filter to the account's exposed subset (unset ⇒ all discovered).
-      if (s.enabledModels) discovered = discovered.filter((m) => s.enabledModels?.includes(m));
+      // The operator's edited list is AUTHORITATIVE (verbatim) — it may include
+      // model ids that discovery missed (stale/incomplete catalogs). Unset ⇒ use
+      // the discovered seed. An explicit empty list ⇒ expose nothing.
+      if (s.enabledModels) discovered = s.enabledModels;
       if (discovered.length === 0) {
         log("warn", "oauth.autoroute.no_models", { providerId, account });
         continue;
@@ -460,6 +472,12 @@ function createProviderClient(
   const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
   if (p.type === "anthropic") {
     return createAnthropicClient({ config: { ...base, ...cred }, fetch: proxyFetch });
+  }
+  // ChatGPT Codex subscription: the OpenAI *Responses* protocol (stream-only,
+  // ChatGPT identity headers, account-id decoded from the access-token JWT). Needs
+  // the dynamic OAuth header; a static key never drives this path.
+  if (p.type === "openai-responses" && "getAuthHeader" in cred) {
+    return createCodexResponsesClient({ config: { ...base, ...cred }, fetch: proxyFetch });
   }
   // GitHub Copilot is OpenAI-compatible, BUT: (1) it requires editor identity
   // headers on every call, and (2) its API host comes from the current token's
@@ -892,12 +910,18 @@ export async function buildServer(
       },
     });
     app.use("/admin/api/*", basicAuth(adminAuth));
-    // Routable alias catalog for the Lanes admin combobox: every
-    // providers[].models[].alias, deduped + sorted. Computed once at wire time
-    // (config is immutable for the process lifetime).
-    const modelAliases = [
-      ...new Set(routableProviders.flatMap((p) => p.models.map((m) => m.alias))),
-    ].sort();
+    // Routable alias catalog for the Lanes admin combobox. The CONFIGURED-provider
+    // aliases are static (config is immutable for the process). The OAuth-subscription
+    // aliases are computed LIVE per read (effectiveOAuthAliases) so a Manage-dialog
+    // curation edit is reflected here WITHOUT a restart — one source of truth shared
+    // with the structural router (execute.ts). Network-free; deduped + sorted.
+    const configuredAliases = config.providers.flatMap((p) => p.models.map((m) => m.alias));
+    const modelAliases = async (): Promise<string[]> => {
+      const oauthAliases = oauthCtx
+        ? await effectiveOAuthAliases(oauthCtx, store.config, ROUTABLE_OAUTH_IDS)
+        : [];
+      return [...new Set([...configuredAliases, ...oauthAliases])].sort();
+    };
     registerAdminApi(app, {
       rules: ruleStore,
       keyStore,

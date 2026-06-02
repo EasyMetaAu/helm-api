@@ -65,6 +65,15 @@ export async function listAnthropicModels(accessToken: string): Promise<string[]
   return [...new Set(ids)].sort();
 }
 
+// Whether this provider has a LIVE list-models API that `discoverOAuthModels`
+// queries (Copilot GET /models, Anthropic GET /v1/models). Codex has none — its
+// list is the hand-curated set — so a "pull from provider" action is meaningless
+// for it (there is nothing live to pull). The admin UI uses this to hide that
+// button where it can't do anything real.
+export function hasLiveModelDiscovery(providerId: string): boolean {
+  return providerId === "github-copilot" || providerId === "anthropic";
+}
+
 // Resolve the routable model ids for a bound provider. `accessToken` drives live
 // discovery (Copilot + Anthropic). Never throws — a discovery failure falls back
 // to the curated list (or [] when none), so the composition root stays fail-open.

@@ -299,6 +299,7 @@ export {
   getOAuthProvider,
   getOAuthProviders,
   githubCopilotOAuthProvider,
+  hasLiveModelDiscovery,
   listOAuthProviderIds,
   type OAuthAuthInfo,
   type OAuthCredentials,
@@ -323,6 +324,15 @@ export {
   type ProviderConfig,
   UpstreamError,
 } from "./provider/openai.js";
+export {
+  aggregateResponsesStream,
+  type CodexResponsesClientConfig,
+  type CodexResponsesClientDeps,
+  codexAccountIdFromToken,
+  createCodexResponsesClient,
+  openaiToResponsesRequest,
+  translateResponsesSSE,
+} from "./provider/openai-responses.js";
 // Per-account egress proxy (issue #38 follow-up): a drop-in `fetch` that tunnels
 // upstream traffic through an http/https/socks5 proxy, so distinct subscription
 // accounts can leave from distinct IPs. Injected into the executors' `fetch` seam.

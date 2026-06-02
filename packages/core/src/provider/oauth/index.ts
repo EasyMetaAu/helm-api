@@ -22,7 +22,7 @@ export {
   pollCopilotDeviceOnce,
   refreshGitHubCopilotToken,
 } from "./github-copilot.js";
-export { CURATED_OAUTH_MODELS, discoverOAuthModels } from "./models.js";
+export { CURATED_OAUTH_MODELS, discoverOAuthModels, hasLiveModelDiscovery } from "./models.js";
 export {
   beginOpenAICodexLogin,
   type CodexLoginStart,

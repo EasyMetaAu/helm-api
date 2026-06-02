@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CURATED_OAUTH_MODELS, discoverOAuthModels } from "./models.js";
+import { CURATED_OAUTH_MODELS, discoverOAuthModels, hasLiveModelDiscovery } from "./models.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -78,5 +78,14 @@ describe("discoverOAuthModels", () => {
 
   it("Copilot with no token yields [] (can't discover)", async () => {
     expect(await discoverOAuthModels("github-copilot", undefined)).toEqual([]);
+  });
+});
+
+describe("hasLiveModelDiscovery", () => {
+  it("is true for providers with a live list-models API, false otherwise", () => {
+    expect(hasLiveModelDiscovery("anthropic")).toBe(true);
+    expect(hasLiveModelDiscovery("github-copilot")).toBe(true);
+    expect(hasLiveModelDiscovery("openai-codex")).toBe(false); // curated-only
+    expect(hasLiveModelDiscovery("mystery")).toBe(false);
   });
 });

@@ -312,7 +312,7 @@ describe("createOAuthAdmin", () => {
       updatedAt: 1,
     });
     const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
-    const { available, enabled } = await admin.listModels({
+    const { available, enabled, canPull } = await admin.listModels({
       providerId: "anthropic",
       account: "default",
     });
@@ -320,6 +320,25 @@ describe("createOAuthAdmin", () => {
     expect(available).toEqual(["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]);
     // Unset settings ⇒ everything is enabled.
     expect(enabled).toEqual(available);
+    // Anthropic has a live list-models API → the UI may offer "pull from provider".
+    expect(canPull).toBe(true);
+  });
+
+  it("listModels: a curated-only provider (Codex) reports canPull=false", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "openai-codex",
+      account: "default",
+      accessEnc: encryptSecret("AT", KEY),
+      refreshEnc: encryptSecret("RT", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: null,
+      updatedAt: 1,
+    });
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    const { canPull } = await admin.listModels({ providerId: "openai-codex", account: "default" });
+    // No live list-models API → the UI hides "pull from provider".
+    expect(canPull).toBe(false);
   });
 
   it("setEnabledModels persists a subset; listModels then returns it as `enabled`", async () => {
@@ -350,6 +369,33 @@ describe("createOAuthAdmin", () => {
     expect(blob).toContain("v1:");
     expect(blob).not.toContain("claude-opus-4-6");
     expect(decryptSecret(blob ?? "", KEY)).toContain("claude-opus-4-6");
+  });
+
+  it("listModels: a CUSTOM (undiscovered) enabled id survives verbatim — the list is authoritative", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "default",
+      accessEnc: encryptSecret("AT", KEY),
+      refreshEnc: encryptSecret("RT", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: null,
+      updatedAt: 1,
+    });
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    // An id the operator typed by hand that discovery does NOT report (stale
+    // catalog). It must NOT be intersected away — the saved list wins.
+    await admin.setEnabledModels({
+      providerId: "anthropic",
+      account: "default",
+      models: ["claude-future-9", "claude-opus-4-6"],
+    });
+    const { available, enabled } = await admin.listModels({
+      providerId: "anthropic",
+      account: "default",
+    });
+    expect(available).not.toContain("claude-future-9"); // not discovered…
+    expect(enabled).toEqual(["claude-future-9", "claude-opus-4-6"]); // …but kept verbatim
   });
 
   it("listModels: Copilot discovers live models via the refreshed token (fail-open)", async () => {

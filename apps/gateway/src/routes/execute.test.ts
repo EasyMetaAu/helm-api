@@ -401,6 +401,40 @@ describe("createExecute — gateway execution adapter", () => {
     if (out.final.status === "ok") expect(out.final.providerModel).toBe("model-b");
   });
 
+  it("structurally routes a provider/model alias the registry never enumerated to that provider's pool client", async () => {
+    // Live OAuth curation: the operator added a model AFTER startup, so the live
+    // catalog offers `openai-codex/gpt-5.5` but the startup registry has no entry.
+    // The pool client (keyed by providerId, forwards ANY model) must still serve it
+    // with providerModel = the part after the slash — no restart, no default cross.
+    const pool = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "from-pool" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const defaultProvider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "default" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider,
+      providers: new Map([["openai-codex", pool]]),
+      registry: registry({}), // resolves nothing -> unknown_alias
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["openai-codex/gpt-5.5"]), req());
+    expect(out.final.status).toBe("ok");
+    expect(out.body).toEqual({ id: "from-pool" });
+    expect(defaultProvider.chatCompletion).not.toHaveBeenCalled();
+    // Routed to the pool with the upstream model id (the slash-suffix), NOT the alias.
+    expect((pool.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toMatchObject({
+      model: "gpt-5.5",
+    });
+    if (out.final.status === "ok") expect(out.final.providerModel).toBe("gpt-5.5");
+  });
+
   it("falls back to the default provider when the alias resolves to an unknown provider client", async () => {
     // Phase-0 passthrough: lane aliases map 1:1 to the single configured upstream
     // and are NOT in the registry's models[]; the executor must still serve them

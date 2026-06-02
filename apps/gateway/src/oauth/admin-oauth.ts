@@ -11,6 +11,7 @@ import {
   discoverOAuthModels,
   encryptSecret,
   getOAuthProvider,
+  hasLiveModelDiscovery,
   type OAuthCredentials,
   type OAuthTokenStore,
   type ProxyConfig,
@@ -269,18 +270,20 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           available = [];
         }
       }
-      // `enabled` is the operator's chosen subset; UNSET ⇒ all available. Keep the
-      // stored list intersected with what is currently available (a model that
-      // disappeared upstream silently drops out of the exposed set).
+      // `available` is the live/curated discovery — only SUGGESTIONS to seed from.
+      // `enabled` is the operator's AUTHORITATIVE list (verbatim, NOT intersected),
+      // so a model the operator typed in by hand survives even when discovery is
+      // stale / missing it. UNSET ⇒ seed with all available.
       const settings = getAccountSettings(
         await loadAccountSettings(deps.config, deps.encKey),
         providerId,
         account,
       );
-      const enabled = settings.enabledModels
-        ? available.filter((m) => settings.enabledModels?.includes(m))
-        : available;
-      return { available, enabled };
+      const enabled = settings.enabledModels ?? available;
+      // `canPull` tells the UI whether a "pull from provider" action is meaningful:
+      // true only where a LIVE list-models API exists (Copilot, Anthropic). Codex
+      // has none — its list is curated — so the UI hides the button for it.
+      return { available, enabled, canPull: hasLiveModelDiscovery(providerId) };
     },
 
     async setEnabledModels({ providerId, account, models }) {

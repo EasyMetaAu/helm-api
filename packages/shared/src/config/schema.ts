@@ -130,7 +130,7 @@ export const ProviderConfigSchema = z
     // and reconciled by the transform below (refine guards "neither given").
     name: z.string().min(1).optional(),
     alias: z.string().min(1).optional(),
-    type: z.string().min(1).default("openai"), // openai | anthropic | ... (not locked in MVP)
+    type: z.string().min(1).default("openai"), // openai | anthropic | openai-responses | ... (not locked in MVP)
     base_url: z.url().optional(),
     // Credential reference: env var name, not plaintext. OPTIONAL now that an
     // `oauth` block is an alternative; the exactly-one refine below keeps a

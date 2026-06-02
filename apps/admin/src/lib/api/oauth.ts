@@ -109,6 +109,9 @@ export async function logoutOAuth(provider: string, account = 'default'): Promis
 export interface AccountModels {
   available: string[];
   enabled: string[];
+  // True when the provider has a live list-models API (so "pull from provider"
+  // does something real). False for curated-only providers like Codex.
+  canPull: boolean;
 }
 
 // GET /oauth/:provider/models?account= -> { available, enabled }.

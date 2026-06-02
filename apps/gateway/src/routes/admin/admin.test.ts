@@ -216,7 +216,8 @@ function buildDeps(over: Partial<AdminApiDeps> = {}): AdminApiDeps {
     }),
     genKeyId: () => `key_${++n}`,
     accountId: "acct_default",
-    modelAliases: ["openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro", "zenmux/auto"],
+    modelAliases: () =>
+      Promise.resolve(["openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro", "zenmux/auto"]),
     settings: makeSettings(),
     ...over,
   };
@@ -312,7 +313,8 @@ describe("admin.api lanes", () => {
 describe("admin.api models", () => {
   it("GET /models returns the injected alias catalog as a JSON array", async () => {
     const deps = buildDeps({
-      modelAliases: ["zenmux/auto", "openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro"],
+      modelAliases: () =>
+        Promise.resolve(["zenmux/auto", "openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro"]),
     });
     const app = buildApp(deps);
     const res = await app.request("/admin/api/models");

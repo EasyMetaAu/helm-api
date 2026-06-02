@@ -45,24 +45,31 @@
   }
 
   // ── Models ──────────────────────────────────────────────────────────────────
-  // Tick which discovered models this account exposes to Lanes. `enabled` unset on
-  // the backend ⇒ all available are checked. We persist only the still-available
-  // checked subset (a stale tick is dropped).
+  // An EDITABLE list of model ids this account exposes to Lanes. Discovery (live
+  // for Copilot/Anthropic, curated for Codex) only SEEDS suggestions — the saved
+  // list is authoritative, so the operator can add ids discovery missed (stale
+  // catalogs), edit, or remove. "Pull from provider" merges in current suggestions.
   let modelsLoading = $state<boolean>(true);
   let modelsSaving = $state<boolean>(false);
   let modelsError = $state<string | null>(null);
-  let available = $state<string[]>([]);
-  let checked = $state<Set<string>>(new Set());
+  let suggestions = $state<string[]>([]); // discovered — offered via "Pull"
+  let models = $state<string[]>([]); // the authoritative, editable list
+  let newModel = $state<string>('');
+  // Whether this provider has a live list-models API. Codex doesn't, so "Pull
+  // from provider" is hidden for it (there is nothing live to pull).
+  let canPull = $state<boolean>(false);
 
   async function loadModels(): Promise<void> {
     modelsError = null;
     modelsLoading = true;
-    available = [];
-    checked = new Set();
+    suggestions = [];
+    models = [];
+    canPull = false;
     try {
       const res = await getAccountModels(providerId, account);
-      available = res.available;
-      checked = new Set(res.enabled);
+      suggestions = res.available;
+      models = [...res.enabled];
+      canPull = res.canPull;
     } catch (e) {
       modelsError = e instanceof Error ? e.message : $t('Failed to load models');
     } finally {
@@ -70,22 +77,31 @@
     }
   }
 
-  function toggleModel(model: string): void {
-    const next = new Set(checked);
-    if (next.has(model)) next.delete(model);
-    else next.add(model);
-    checked = next;
+  function addModel(): void {
+    const id = newModel.trim();
+    if (id && !models.includes(id)) models = [...models, id];
+    newModel = '';
+  }
+
+  function removeModel(index: number): void {
+    models = models.filter((_, i) => i !== index);
+  }
+
+  // Merge any discovered suggestion not already in the list (keeps the operator's
+  // edits, just tops up with what the provider currently reports).
+  function pullFromProvider(): void {
+    const merged = [...models];
+    for (const s of suggestions) if (!merged.includes(s.trim())) merged.push(s);
+    models = merged;
   }
 
   async function saveModels(): Promise<void> {
     modelsError = null;
     modelsSaving = true;
     try {
-      await setAccountModels(
-        providerId,
-        account,
-        available.filter((m) => checked.has(m)),
-      );
+      const clean = [...new Set(models.map((m) => m.trim()).filter((m) => m.length > 0))];
+      await setAccountModels(providerId, account, clean);
+      models = clean;
       dirty = true;
     } catch (e) {
       modelsError = e instanceof Error ? e.message : $t('Failed to save models');
@@ -251,7 +267,18 @@
         {providerName} · <code class="font-mono">{account}</code>
       </p>
     </div>
-    <button type="button" class="btn-secondary shrink-0" onclick={close}>{$t('Done')}</button>
+    <button type="button" class="btn-icon shrink-0" aria-label={$t('Close')} onclick={close}>
+      <svg
+        class="h-5 w-5"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke-width="1.8"
+        stroke="currentColor"
+        aria-hidden="true"
+      >
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+      </svg>
+    </button>
   </header>
 
   <!-- Section switcher: one tab per control group so the dialog stays compact. -->
@@ -287,30 +314,69 @@
     <div class="flex flex-col gap-3">
       <p class="field-help">
         {$t(
-          'Choose which models this account exposes to Lanes. Unchecking hides a model from routing.',
+          'The models this account exposes to Lanes. This list is authoritative — add, edit, or remove ids freely. Use “Pull from provider” to seed it with what the provider currently reports.',
         )}
       </p>
       {#if modelsError}
         <p class="alert-error" role="alert">{modelsError}</p>
       {:else if modelsLoading}
         <p class="text-sm text-ink-muted">{$t('Loading models…')}</p>
-      {:else if available.length === 0}
-        <p class="text-sm text-ink-muted">{$t('No models discovered for this account.')}</p>
       {:else}
-        <div class="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-          {#each available as model (model)}
-            <label class="checkbox-field">
+        <div class="flex flex-col gap-1.5">
+          {#each models as _model, i (i)}
+            <div class="flex items-center gap-2">
               <input
-                type="checkbox"
-                class="checkbox"
-                checked={checked.has(model)}
-                onchange={() => toggleModel(model)}
+                type="text"
+                class="input flex-1 font-mono text-xs"
+                bind:value={models[i]}
+                spellcheck="false"
+                autocomplete="off"
               />
-              <code class="font-mono text-xs text-ink-strong">{model}</code>
-            </label>
+              <button
+                type="button"
+                class="btn-danger-outline shrink-0"
+                aria-label={$t('Remove model')}
+                onclick={() => removeModel(i)}>{$t('Remove')}</button
+              >
+            </div>
           {/each}
+          {#if models.length === 0}
+            <p class="text-sm text-ink-muted">
+              {$t('No models yet. Add one below or pull from the provider.')}
+            </p>
+          {/if}
         </div>
+
+        <div class="flex items-center gap-2">
+          <input
+            type="text"
+            class="input flex-1 font-mono text-xs"
+            placeholder={$t('Add a model id…')}
+            bind:value={newModel}
+            spellcheck="false"
+            autocomplete="off"
+            onkeydown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                addModel();
+              }
+            }}
+          />
+          <button type="button" class="btn-secondary shrink-0" onclick={addModel}
+            >{$t('Add')}</button
+          >
+        </div>
+
         <div class="card-actions">
+          {#if canPull}
+            <button
+              type="button"
+              class="btn-secondary"
+              disabled={suggestions.length === 0}
+              onclick={pullFromProvider}
+              >{$t('Pull from provider ({n})', { n: suggestions.length })}</button
+            >
+          {/if}
           <button type="button" class="btn-primary-sm" disabled={modelsSaving} onclick={saveModels}
             >{modelsSaving ? $t('Saving…') : $t('Save')}</button
           >

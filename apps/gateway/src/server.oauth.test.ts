@@ -239,4 +239,37 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     const out = await synthesizeOAuthProviders([], undefined, config, "https://f/v1", 60_000, noop);
     expect(out).toEqual({ providers: [], poolClients: new Map() });
   });
+
+  it("routes a bound Codex account: synthesizes an `openai-responses` pool with its curated aliases", async () => {
+    const { ctx, config } = oauthStores();
+    // Seed an openai-codex account (far-future expiry → no token refresh/network).
+    await ctx.store.upsert({
+      providerId: "openai-codex",
+      account: "default",
+      accessEnc: encryptSecret("codex-access", ENC_KEY),
+      refreshEnc: encryptSecret("codex-refresh", ENC_KEY),
+      expiresAt: FAR_FUTURE,
+      meta: null,
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, ENC_KEY, "openai-codex", "default", {
+      enabledModels: ["gpt-5.5", "gpt-5.4"],
+    });
+    const { providers, poolClients } = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    // Codex is now routable: one synthetic provider keyed by providerId, executor
+    // type `openai-responses`, served by ONE pool client.
+    expect(providers).toHaveLength(1);
+    expect(providers[0]?.name).toBe("openai-codex");
+    expect(providers[0]?.type).toBe("openai-responses");
+    expect(poolClients.has("openai-codex")).toBe(true);
+    const aliases = (providers[0]?.models ?? []).map((m) => m.alias).sort();
+    expect(aliases).toEqual(["openai-codex/gpt-5.4", "openai-codex/gpt-5.5"]);
+  });
 });

@@ -207,8 +207,29 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // resolved provider has no client, skip fail-closed; falling back to the
       // default would cross credential/subscription boundaries.
       const resolved = registry.resolve(alias);
-      const providerModel = resolved.ok ? resolved.value.providerModel : alias;
-      const provider = resolved.ok ? providers?.get(resolved.value.providerName) : defaultProvider;
+      let providerModel: string;
+      let provider: ProviderClient | undefined;
+      if (resolved.ok) {
+        providerModel = resolved.value.providerModel;
+        provider = providers?.get(resolved.value.providerName);
+      } else {
+        // Structural fallback for an alias the registry never enumerated. A
+        // synthesized OAuth provider's POOL client is keyed by its providerId and
+        // forwards ANY upstream model id, so `${providerId}/${model}` routes
+        // correctly even for a model the operator curated AFTER startup (the live
+        // catalog already offers it — this keeps routing consistent with that
+        // catalog without a restart). Only a known provider NAME matches; a bare or
+        // truly-unknown alias still falls through to the Phase-0 passthrough default.
+        const slash = alias.indexOf("/");
+        const name = slash > 0 ? alias.slice(0, slash) : "";
+        if (name && providers?.has(name)) {
+          providerModel = alias.slice(slash + 1);
+          provider = providers.get(name);
+        } else {
+          providerModel = alias;
+          provider = defaultProvider;
+        }
+      }
       if (!provider) {
         attempts.push(skipRow(alias, "provider_unavailable", elapsed()));
         continue;
