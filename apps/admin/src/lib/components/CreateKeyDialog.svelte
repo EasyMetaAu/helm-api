@@ -5,6 +5,7 @@
     createKey,
     type CreatedKey,
   } from '$lib/api/keys.js';
+  import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
   // Create-key dialog: owns the caps form AND the ONE-TIME plaintext reveal.
@@ -101,7 +102,10 @@
   }
 </script>
 
-<div class="dialog" role="dialog" aria-label={$t('Create API key')}>
+<!-- While the plaintext is revealed the modal is non-dismissible: no scrim, Escape
+     ignored. The operator must click "I saved it" (confirmSaved) to bubble the
+     redacted view and wipe the secret — see CLAUDE.md 原则7 / docs/06. -->
+<Modal label={$t('Create API key')} {onclose} dismissible={!revealed}>
   {#if revealed}
     <h2 class="section-header">{$t('Your new API key')}</h2>
     <p class="mt-1 text-sm text-amber-700">
@@ -222,4 +226,4 @@
       >
     </div>
   {/if}
-</div>
+</Modal>
