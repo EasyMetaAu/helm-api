@@ -240,6 +240,32 @@ describe("tool-call id synthesis (the core pit)", () => {
     });
   });
 
+  it("uses the original function name, not tool_call_id, when emitting Gemini functionResponse", () => {
+    const ir: IRRequest = {
+      model: "gemini-1.5-pro",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_weather_0",
+              type: "function",
+              function: { name: "get_weather", arguments: '{"city":"SF"}' },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_weather_0", content: "72F sunny" },
+      ],
+    };
+
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const response = native.contents[1]?.parts[0] as {
+      functionResponse: { name: string; response: unknown };
+    };
+    expect(response.functionResponse.name).toBe("get_weather");
+  });
+
   it("drops synthesized ids when going IR -> Gemini (outbound)", () => {
     const ir: IRRequest = {
       model: "gemini-1.5-pro",
@@ -314,6 +340,35 @@ describe("schema format sanitize (date / date-time pit)", () => {
     expect(props.email?.format).toBeUndefined();
     expect(props.email?.pattern).toBeUndefined();
     expect(props.choice?.anyOf).toBeUndefined();
+  });
+
+  it("resolves local refs and folds combinators instead of silently weakening schema", () => {
+    const schema = {
+      type: "object",
+      $defs: {
+        City: { type: "string", description: "city name", minLength: 1 },
+        Place: {
+          type: "object",
+          properties: { city: { $ref: "#/$defs/City" } },
+          required: ["city"],
+        },
+      },
+      properties: {
+        place: { $ref: "#/$defs/Place" },
+        choice: { oneOf: [{ $ref: "#/$defs/City" }, { type: "number" }] },
+        merged: { allOf: [{ type: "object" }, { properties: { ok: { type: "boolean" } } }] },
+      },
+    };
+
+    const cleaned = sanitizeSchema(schema) as Record<string, unknown>;
+    expect(cleaned.$defs).toBeUndefined();
+    const props = cleaned.properties as Record<string, Record<string, unknown> | undefined>;
+    expect(props.place?.type).toBe("object");
+    const placeProps = props.place?.properties as Record<string, Record<string, unknown>>;
+    expect(placeProps.city).toEqual({ type: "string", description: "city name" });
+    expect(props.choice).toEqual({ type: "string", description: "city name" });
+    expect(props.merged?.type).toBe("object");
+    expect(props.merged?.properties).toEqual({ ok: { type: "boolean" } });
   });
 
   it("sanitizes functionDeclarations parameters on the outbound request", () => {

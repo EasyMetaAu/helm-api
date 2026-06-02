@@ -359,8 +359,12 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
 
   const contents: GeminiContent[] = [];
   let systemInstruction: GeminiContent | undefined;
+  const toolNameById = new Map<string, string>();
 
   for (const message of parsed.messages) {
+    for (const call of message.tool_calls ?? []) {
+      toolNameById.set(call.id, call.function.name);
+    }
     if (message.role === "system") {
       const text = irMessageContentToText(message.content);
       if (text !== "") systemInstruction = { parts: [{ text }] };
@@ -373,7 +377,12 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
         parts: [
           {
             functionResponse: {
-              name: message.name ?? message.tool_call_id ?? "tool",
+              name:
+                message.name ??
+                (message.tool_call_id !== undefined
+                  ? toolNameById.get(message.tool_call_id)
+                  : undefined) ??
+                "tool",
               response: { content: irMessageContentToText(message.content) },
             },
           },
