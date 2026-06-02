@@ -121,6 +121,16 @@ describe("createOpenAIClient (Phase 0 passthrough)", () => {
     }
   });
 
+  it("scrubs a static apiKey from a string upstream error body", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse("upstream echoed sk-secret-key", 502));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+    try {
+      await client.chatCompletion({ model: "m" });
+    } catch (e) {
+      expect((e as UpstreamError).providerRaw).toBe("upstream echoed [redacted]");
+    }
+  });
+
   it("passes the caller's abort signal through and rethrows AbortError (not UpstreamError)", async () => {
     const fetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
       // observe the signal then reject as aborted
@@ -267,6 +277,23 @@ describe("createOpenAIClient (OAuth dynamic credential)", () => {
       const raw = JSON.stringify((e as UpstreamError).providerRaw);
       expect(raw).not.toContain("access-XYZ");
       expect(raw).not.toContain("refresh-ABC");
+    }
+  });
+
+  it("scrubs OAuth secrets from a string upstream error body", async () => {
+    const currentSecrets = vi.fn().mockReturnValue(["access-XYZ", "refresh-ABC"]);
+    const getAuthHeader = vi.fn().mockResolvedValue("Bearer access-XYZ");
+    const fetch = vi
+      .fn()
+      .mockImplementation(async () => jsonRes("access-XYZ and refresh-ABC leaked", 502));
+    const client = createOpenAIClient({
+      config: { ...OAUTH_BASE, getAuthHeader, currentSecrets },
+      fetch,
+    });
+    try {
+      await client.chatCompletion({ model: "m" });
+    } catch (e) {
+      expect((e as UpstreamError).providerRaw).toBe("[redacted] and [redacted] leaked");
     }
   });
 

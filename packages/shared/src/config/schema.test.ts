@@ -411,4 +411,40 @@ describe("HelmConfigSchema", () => {
     const res = HelmConfigSchema.safeParse(cfg);
     expect(res.success).toBe(false);
   });
+
+  it("rejects a non-localhost http oauth token_url (fail-closed)", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "claude-sub",
+        type: "openai",
+        oauth: {
+          token_url: "http://oauth.example.com/token",
+          client_id_env: "CLIENT_ID",
+          client_secret_env: "CLIENT_SECRET",
+          refresh_token_env: "REFRESH_TOKEN",
+        },
+      },
+    ];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(false);
+  });
+
+  it("allows localhost http oauth token_url for local tests", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "local-oauth",
+        type: "openai",
+        oauth: {
+          token_url: "http://127.0.0.1:9876/token",
+          client_id_env: "CLIENT_ID",
+          client_secret_env: "CLIENT_SECRET",
+          refresh_token_env: "REFRESH_TOKEN",
+        },
+      },
+    ];
+    const res = HelmConfigSchema.safeParse(cfg);
+    expect(res.success).toBe(true);
+  });
 });

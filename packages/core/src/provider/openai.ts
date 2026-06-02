@@ -122,21 +122,29 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   // refresh). Empty / very-short secrets are skipped so an empty token never
   // replaces the whole body and a 1-char token never over-redacts.
   function scrub(raw: unknown): unknown {
-    if (raw === null || typeof raw !== "object") return raw;
+    if (raw === null) return raw;
     const secrets = cfg.currentSecrets ? cfg.currentSecrets() : [];
     if (cfg.apiKey !== undefined) secrets.push(cfg.apiKey);
-    let json = JSON.stringify(raw);
-    let changed = false;
-    for (const secret of secrets) {
-      // Skip empty/too-short secrets: an empty string would blow the body away,
-      // and a single character would redact unrelated content.
-      if (secret.length < 4) continue;
-      if (json.includes(secret)) {
-        json = json.split(secret).join("[redacted]");
-        changed = true;
+    const replaceSecrets = (value: string): { value: string; changed: boolean } => {
+      let redacted = value;
+      let changed = false;
+      for (const secret of secrets) {
+        // Skip empty/too-short secrets: an empty string would blow the body away,
+        // and a single character would redact unrelated content.
+        if (secret.length < 4) continue;
+        if (redacted.includes(secret)) {
+          redacted = redacted.split(secret).join("[redacted]");
+          changed = true;
+        }
       }
-    }
-    return changed ? JSON.parse(json) : raw;
+      return { value: redacted, changed };
+    };
+
+    if (typeof raw === "string") return replaceSecrets(raw).value;
+    if (typeof raw !== "object") return raw;
+
+    const { value, changed } = replaceSecrets(JSON.stringify(raw));
+    return changed ? JSON.parse(value) : raw;
   }
 
   async function request(

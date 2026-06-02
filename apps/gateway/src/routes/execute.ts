@@ -23,9 +23,9 @@ import { makeHelmError } from "@helm/shared";
 // Multi-provider (providers-multi): each candidate alias resolves (via registry)
 // to a provider name + upstream model id. The executor invokes THAT provider's
 // client — so a fallback chain like [deepseek/.., openai/..] hits two different
-// upstreams in order. When the alias is unknown to the registry, or no client is
-// registered for the resolved provider, it falls back to `defaultProvider` (the
-// Phase-0 single-provider passthrough: lane aliases map 1:1 to the one upstream).
+// upstreams in order. Unknown aliases still fall back to `defaultProvider` for
+// Phase-0 passthrough; a resolved provider with no registered client is skipped
+// fail-closed, never silently served with another provider's credential.
 //
 // Streaming (principle 8): for stream:true the provider stream is forwarded
 // UNBUFFERED. We peek the FIRST chunk to decide success vs. pre-first-chunk
@@ -33,8 +33,8 @@ import { makeHelmError } from "@helm/shared";
 // re-emits that first chunk followed by the rest — byte-for-byte, in order.
 
 export interface ExecuteAdapterDeps {
-  /** Default/fallback provider client: used for an unknown alias OR a resolved
-   *  provider with no registered client (Phase-0 single-provider passthrough). */
+  /** Default/fallback provider client: used only for unknown aliases
+   *  (Phase-0 single-provider passthrough). */
   defaultProvider: ProviderClient;
   /** Per-provider clients keyed by provider NAME (registry providerName). When a
    *  candidate resolves to one of these, its client is used → chains cross
@@ -202,12 +202,20 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // An unknown alias is a config gap: keep the alias as the upstream model id
       // too and use the default provider (fail-open — never substitute a different
       // model silently). A resolved alias selects BOTH the upstream model id AND
-      // the provider client (so the fallback chain can cross providers). When the
-      // resolved provider has no registered client, fall back to the default too.
+      // the provider client (so the fallback chain can cross providers). If that
+      // resolved provider has no client, skip fail-closed; falling back to the
+      // default would cross credential/subscription boundaries.
       const resolved = registry.resolve(alias);
       const providerModel = resolved.ok ? resolved.value.providerModel : alias;
-      const provider =
-        (resolved.ok ? providers?.get(resolved.value.providerName) : undefined) ?? defaultProvider;
+      const provider = resolved.ok
+        ? providers
+          ? providers.get(resolved.value.providerName)
+          : defaultProvider
+        : defaultProvider;
+      if (!provider) {
+        attempts.push(skipRow(alias, "provider_unavailable", elapsed()));
+        continue;
+      }
 
       // 1) Circuit breaker gate (keyed by alias — the routing unit).
       const gate = breaker.canAttempt(alias);

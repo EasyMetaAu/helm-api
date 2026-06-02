@@ -54,7 +54,19 @@ export const ProviderModelSchema = z.object({
 export const OAuthConfigSchema = z
   .object({
     grant: z.enum(["refresh_token", "client_credentials"]).default("refresh_token"),
-    token_url: z.url(),
+    token_url: z.url().refine(
+      (url) => {
+        try {
+          const parsed = new URL(url);
+          if (parsed.protocol === "https:") return true;
+          if (parsed.protocol !== "http:") return false;
+          return ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+        } catch {
+          return false;
+        }
+      },
+      { message: "oauth token_url must use https except localhost/127.0.0.1" },
+    ),
     client_id_env: z.string().min(1), // env var NAME, not a plaintext client id
     client_secret_env: z.string().min(1), // env var NAME, not a plaintext secret
     refresh_token_env: z.string().min(1).optional(), // env var NAME; required for refresh_token
