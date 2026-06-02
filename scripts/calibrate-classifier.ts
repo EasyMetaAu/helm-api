@@ -111,6 +111,10 @@ interface Case {
   lane: string;
 }
 const CASES: Case[] = [
+  { name: "exact yes", request: req("yes"), lane: "economy" },
+  { name: "exact no", request: req("no"), lane: "economy" },
+  { name: "exact sure", request: req("sure"), lane: "economy" },
+  { name: "exact got it", request: req("got it"), lane: "economy" },
   { name: "greeting hi", request: req("hi"), lane: "economy" },
   { name: "thanks", request: req("thanks"), lane: "economy" },
   { name: "good morning", request: req("good morning"), lane: "economy" },
@@ -153,6 +157,10 @@ const CASES: Case[] = [
   { name: "no output analysis not simple", request: req("analyze why there is no output and diagnose the failure root cause"), lane: "premium" },
   { name: "no stack trace debug not simple", request: req("debug why there is no stack trace in this failing compile step and refactor the failing function"), lane: "coding" },
   { name: "no auth check audit not simple", request: req("audit why there is no auth check in this access control system and privilege escalation risk"), lane: "premium" },
+  { name: "short no output", request: req("no output"), lane: "premium" },
+  { name: "short no stack trace", request: req("no stack trace"), lane: "coding" },
+  { name: "short no auth check", request: req("no auth check"), lane: "premium" },
+  { name: "short no command injection", request: req("no command injection"), lane: "premium" },
   { name: "expand roadmap->balanced", request: req("outline a project roadmap with milestones and break down the deliverables"), lane: "balanced" },
 ];
 

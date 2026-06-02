@@ -135,6 +135,10 @@ async function decide(request: InternalRequest) {
 // golden lane (golden does that) but to prove the GATE clears by RULES — i.e. the
 // cascade is not silently dumping everything to balanced.
 const CASES: Array<{ name: string; request: InternalRequest; lane: string }> = [
+  { name: "exact confirmation yes", request: req("yes"), lane: "economy" },
+  { name: "exact confirmation no", request: req("no"), lane: "economy" },
+  { name: "exact confirmation sure", request: req("sure"), lane: "economy" },
+  { name: "exact confirmation got it", request: req("got it"), lane: "economy" },
   { name: "greeting", request: req("hi"), lane: "economy" },
   { name: "lookup", request: req("what is a monad"), lane: "economy" },
   { name: "translate", request: req("translate this to french"), lane: "economy" },
@@ -200,6 +204,14 @@ const CASES: Array<{ name: string; request: InternalRequest; lane: string }> = [
     request: req(
       "audit why there is no auth check in this access control system and privilege escalation risk",
     ),
+    lane: "premium",
+  },
+  { name: "short no output is diagnostic", request: req("no output"), lane: "premium" },
+  { name: "short no stack trace is coding", request: req("no stack trace"), lane: "coding" },
+  { name: "short no auth check is security", request: req("no auth check"), lane: "premium" },
+  {
+    name: "short no command injection is security",
+    request: req("no command injection"),
     lane: "premium",
   },
   {

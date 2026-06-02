@@ -43,6 +43,9 @@ export const ClassifierRulesConfigSchema = z.object({
   task_activation: z.record(z.string(), z.number()).default({}),
   overrides: z.object({
     heartbeat_tokens: z.array(z.string()).default(["HEARTBEAT_OK"]),
+    exact_confirmation_tokens: z
+      .array(z.string())
+      .default(["yes", "no", "sure", "got it", "ok", "thanks"]),
     formal_logic_keywords: z.array(z.string()).default([]),
     tools_floor: TierSchema.default("standard"),
     long_context_token_threshold: z.number().int().positive().default(64_000),

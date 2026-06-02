@@ -69,6 +69,9 @@ classifier:
       analysis_kw: { weight: 0.76, keywords: ["analyze", "compare", "evaluate", "implications", "root cause", "assess", "critique", "pros and cons", "diagnose", "investigate"] }
       writing_kw: { weight: 0.14, keywords: ["essay", "rewrite", "draft", "tone", "polish", "summarize", "summary", "paraphrase", "proofread", "article", "headline", "grammar"] }
       security_kw: { weight: 1.40, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "rce", "csrf", "malware", "auth bypass", "auth check", "access control"] }
+      # Short diagnostics/security fragments are meaningful despite being tiny;
+      # give them enough positive signal to escape the simple/economy shortcut.
+      diagnostic_short_kw: { weight: 3.60, keywords: ["no output", "no stack trace", "no auth check", "no command injection"] }
       extraction_kw: { weight: 0.12, keywords: ["extract", "parse", "json from", "fields", "schema", "pull out", "list all", "structured data", "named entities", "scrape"] }
       data_kw: { weight: 0.20, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot", "group by", "spreadsheet", "histogram", "correlation", "query"] }
       vision_kw: { weight: 0.16, keywords: ["image", "screenshot", "this picture", "diagram", "chart", "photo", "ocr", "figure", "graph"] }
@@ -133,6 +136,7 @@ classifier:
     task_activation: { web: 3.0, security: 2.0 }
     overrides:
       heartbeat_tokens: ["HEARTBEAT_OK"]
+      exact_confirmation_tokens: ["yes", "no", "sure", "got it", "ok", "thanks"]
       formal_logic_keywords: ["⊢", "∴", "modus ponens", "first-order logic"]
       tools_floor: standard
       long_context_token_threshold: 64000  # capability signal (NOT a task_type); bumped 50k->64k to match llm-router lanes.yaml long_context anchor
