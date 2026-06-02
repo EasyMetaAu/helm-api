@@ -45,10 +45,54 @@ export interface GeneratedKeyParts {
   prefix: string;
 }
 
+// Read/write seam for the admin OAuth-login surface (issue #38). The routes stay
+// pure HTTP glue (Principle 1): all flow orchestration (ephemeral PKCE/device
+// session state, the upstream token exchange, at-rest encryption, and the
+// OAuthTokenStore write-back) lives behind this seam, wired in server.ts. A
+// preset subscription login (Claude Pro/Max via manual-paste, GitHub Copilot via
+// device code) is an OPERATOR action behind the admin basicAuth — never an
+// API-client surface (Principle 6). No method ever returns secret material.
+export interface OAuthAdminStatus {
+  id: string; // provider id: 'anthropic' | 'github-copilot'
+  name: string;
+  flow: "manual_paste" | "device_code"; // shapes the UI
+  accounts: Array<{ account: string; expiresAt: number | null; updatedAt: number }>;
+}
+
+export interface OAuthAdminAccess {
+  // Built-in providers + which accounts are currently logged in (no secrets).
+  listStatus(): Promise<OAuthAdminStatus[]>;
+  // Anthropic manual-paste: begin -> { authorizeUrl }; the verifier/state are held
+  // server-side keyed by sessionId. complete exchanges the pasted redirect URL.
+  startManualPaste(input: {
+    providerId: string;
+  }): Promise<{ sessionId: string; authorizeUrl: string }>;
+  completeManualPaste(input: {
+    sessionId: string;
+    redirectInput: string;
+    account: string;
+  }): Promise<void>;
+  // Copilot device code: begin -> { userCode, verificationUri }; poll until done,
+  // then the seam mints the Copilot token and persists it.
+  startDeviceCode(input: {
+    providerId: string;
+    enterprise?: string;
+  }): Promise<{ sessionId: string; userCode: string; verificationUri: string }>;
+  pollDeviceCode(input: {
+    sessionId: string;
+    account: string;
+  }): Promise<{ status: "pending" | "slow_down" | "done" }>;
+  // Remove a stored credential (admin "log out").
+  logout(input: { providerId: string; account: string }): Promise<void>;
+}
+
 export interface AdminApiDeps {
   rules: RuleStore;
   keyStore: KeyStore;
   telemetry: TelemetryStore;
+  // Admin OAuth-login seam (issue #38). Optional so existing tests that build a
+  // partial deps object stay valid; the route 503s when it is absent.
+  oauth?: OAuthAdminAccess;
   // The catalog of routable model aliases (config.providers[].models[].alias),
   // deduped + sorted at startup. Read-only: the Lanes admin UI offers these as
   // combobox suggestions so an operator picks a real alias instead of hand-typing

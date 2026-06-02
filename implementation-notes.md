@@ -5,6 +5,60 @@
 
 ---
 
+## 2026-06-02 · Interactive OAuth subscription LOGIN — Claude Pro/Max + Copilot, web UI (issue #38, builds on the entry below)
+
+**Context**: The entry below added the non-interactive token *refresh* half of OAuth (given a `refresh_token` in env). It explicitly deferred the interactive `authorization_code`/device login that actually OBTAINS a subscription credential. This change adds that — for **Claude Pro/Max** (native Anthropic executor), **GitHub Copilot**, and **ChatGPT Plus/Pro (Codex)** — driven entirely from the **admin web UI** (no CLI, per maintainer decision).
+
+**Reference**: the interactive flows + identity recipe are ported from **openclaw** (MIT, © 2026 OpenClaw Foundation), `src/plugin-sdk/provider-oauth-runtime.ts` + `src/llm/utils/oauth/{anthropic,github-copilot}.ts` + `src/llm/providers/anthropic.ts`. Self-contained re-implementation — Helm imports nothing from openclaw. Attribution is in each ported file's header.
+
+**What was added**:
+- **`OAuthTokenStore` port** (`packages/core/src/store/ports.ts`) + sqlite/postgres adapters + migrations (sqlite **v9**, pg **v8**). One row per `(provider_id, account)`. UNLIKE api_keys (hash-only), refresh tokens are stored **reversibly** because they are replayed — so encrypted at rest.
+- **`token-cipher.ts`** (`packages/core/src/store/crypto/`) — AES-256-GCM, blob `v1:<base64(iv|ct|tag)>`, key from `HELM_OAUTH_ENC_KEY` (32 bytes; base64 or 64 hex). Resolved at the composition root only; core sees the decoded buffer, never the env name.
+- **OAuth kit** (`packages/core/src/provider/oauth/`) — `runtime.ts` (PKCE/state/parse/expiry/abort/html primitives, openclaw-ported), `anthropic.ts` (auth-code+PKCE; public-client refresh: client_id+refresh_token, NO secret; **stateless `beginAnthropicLogin`/`completeAnthropicLogin`** for the web manual-paste flow), `github-copilot.ts` (device-code; two-level token: GitHub token → minted Copilot token; **`beginCopilotDeviceLogin`/`pollCopilotDeviceOnce`**), `registry.ts`.
+- **`token-manager.ts` generalized** to a `ResolvedOAuth` union: `confidential` (the entry below, unchanged) | `preset` (delegates refresh to an `OAuthProviderInterface`, reads/writes the `OAuthTokenStore`, **persists the rotated refresh token** → survives restart, closing D3's gap for presets).
+- **Config schema** — `oauth` is now `OAuthConfigSchema | OAuthPresetConfigSchema` (`{ provider: anthropic|github-copilot, account? }`), `.strict()` preset keeps the union disjoint; `isOAuthPreset()` discriminates. `type: anthropic` accepted (free string, documented not enum-locked).
+- **Native Anthropic executor** (`packages/core/src/provider/anthropic.ts`) — `createAnthropicClient`: OpenAI-Chat IR → Anthropic Messages (request) and Anthropic response/SSE → OpenAI-Chat (the inverse of the inbound `protocol/anthropic` transformers, which are inbound-only and not reusable here). Injects the **mandatory** Claude-Code identity: `anthropic-beta: claude-code-20250219,oauth-2025-04-20`, `user-agent: claude-cli/<ver>`, `x-app: cli`, **and a `system[0]` spoof** ("You are Claude Code, Anthropic's official CLI for Claude."). 401 → refresh → replay once (before any stream chunk, Principle 8).
+- **Admin login surface** — gateway `OAuthAdminAccess` seam (`apps/gateway/src/oauth/admin-oauth.ts`: ephemeral PKCE/device session map, encrypt + persist), `/admin/api/oauth/*` routes (pure glue), and the **`/admin/providers` Svelte page** ("Connect" → manual-paste for Claude, device-code for Copilot; Disconnect). 503 when no enc key.
+- **Server wiring** — `buildCredential` discriminates the union (preset builds a store-backed `TokenManager`); `buildProviderClients` dispatches on `type` (anthropic → native executor); fail-closed if a preset is configured without `HELM_OAUTH_ENC_KEY`.
+
+**Decisions (this round)**:
+- **Web UI, not CLI** (maintainer). Anthropic uses **manual-paste** (the reverse-engineered `localhost:53692` redirect can't reach a remote gateway, so the operator pastes the redirect URL); Copilot uses device-code (natural for a browser). The single-call `login(callbacks)` kit functions remain but the UI drives the stateless begin/complete step-fns.
+- **Ship all three subscription presets with a ToS disclaimer** (maintainer). **Codex LOGIN now ships too** (`openai-codex`, `provider/oauth/openai-codex.ts`): auth-code + PKCE public client, form-encoded token endpoint (`auth.openai.com/oauth/token`), `chatgpt_account_id` decoded from the access-token JWT and stored in the credential `meta` for execute-time use. Web manual-paste flow (same admin path as Anthropic). **Codex request EXECUTION** (the OpenAI **Responses** API with the `chatgpt-account-id` header) is the remaining execute-time follow-up — same status as Copilot routing.
+- Reversible secret class: refresh tokens CANNOT be sha256'd (Principle 7 is about api_keys). Encrypted-at-rest under `HELM_OAUTH_ENC_KEY` is the compensating control.
+
+**Known limitations / TODO**:
+- **Spike not yet run**: the reverse-engineered Anthropic recipe (headers + system spoof) and the Copilot token model are ported from openclaw but NOT yet validated against the live endpoints in this repo. Run one real login + request before relying on it (constants can drift).
+- **Copilot request execution** is wired as an OpenAI-compatible client, but the per-request **base_url derived from the token `proxy-ep`** and the mandatory `COPILOT_HEADERS` are **not yet injected at execute time** (login + storage work; routing through Copilot needs an `extraHeaders`/dynamic-base seam on the OpenAI client — follow-up). `getGitHubCopilotBaseUrl` + `COPILOT_HEADERS` are exported and ready.
+- Anthropic executor covers text + tool_use + base64 images; exotic content parts (documents, citations) are not translated.
+- OAuth login **session state is in-memory** (ephemeral PKCE/device sessions): a gateway restart mid-login just means re-clicking Connect.
+- e2e (`oauth-subscription.spec.ts`) is **not yet written** — unit coverage is comprehensive (store/cipher/kit/token-manager/executor/admin-seam), e2e is the remaining test layer.
+
+---
+
+## 2026-06-02 · OAuth subscription providers (issue #38, docs/02/05/07, Principles 1/2/3/7/8)
+
+**Context**: Helm only supported static API keys (env-var NAME references) as upstream credentials. Subscription/SSO providers (Claude/ChatGPT subscriptions, enterprise SSO gateways) hand out short-lived OAuth access tokens that expire and rotate. This change makes the upstream auth header **dynamic, per-request** so Helm can refresh non-interactively and inject a fresh Bearer.
+
+**What was added**:
+- `packages/shared/src/config/schema.ts` — `OAuthConfigSchema` (env-NAME-only: `token_url`, `client_id_env`, `client_secret_env`, `refresh_token_env?`, `grant` default `refresh_token`, `scopes`, `audience?`); inner `.refine` requires `refresh_token_env` for the `refresh_token` grant. `ProviderConfigSchema.api_key_env` relaxed to optional; new `oauth?`; top-level `.refine` enforces **exactly one** of `{api_key_env, oauth}` (fail-closed, Principle 2). Refine placed BEFORE the existing name/alias `.transform` so it reads the raw fields.
+- `packages/core/src/provider/token-manager.ts` — framework-agnostic `createTokenManager`: lazy refresh (no background timer), injected `now` clock, **single-flight** refresh lock (mirrors `breaker.ts` inFlightProbe) so N concurrent expired callers → 1 fetch. `getAuthHeader()` / `currentSecrets()` (for redaction) / `invalidate()` (401). `TokenRefreshError` message is scrubbed by construction (never contains token/secret material; Principle 7).
+- `packages/core/src/provider/openai.ts` — `ProviderConfig` now takes EITHER `apiKey` OR `getAuthHeader` + `onUnauthorized` + `currentSecrets` (construct-time fail-closed guard: exactly one). `headers()` is async (per-request token). `scrub()` generalized to iterate the live secret set (access+refresh), skipping secrets <4 chars so an empty/tiny token can't blow the body away. **401 single retry** (D2): on a 401 with `onUnauthorized`, invalidate + replay the SAME request exactly once with the new header — for streaming this happens BEFORE `getReader()`/any chunk yield (Principle 8).
+- `apps/gateway/src/server.ts` — `buildCredential(p)` resolves env→plaintext (Principle 7: env resolution stays in the composition root); returns `null` when a required secret env is unset (fail-OPEN skip for non-primary, fail-CLOSED throw for primary). Each OAuth provider gets ONE process-level `TokenManager` 1:1 with its client. The primary's same `cred` backs the eval/classify client so OAuth-primary eval auth never silently fails (acceptance criterion 9).
+- `apps/gateway/src/routes/execute.ts` — `errorClassOf` relabels a persistent upstream 401 → `auth_error` (D5) at the existing chokepoint; breaker counting / chain advance unchanged (D6, no new executor branch).
+- registry types relaxed: `api_key_env`/`apiKeyEnv` optional (the registry never reads them to fetch a credential — the per-name client is pre-built).
+
+**Decisions (maintainer to confirm)**:
+- **D1** — non-interactive grants only (`refresh_token`/`client_credentials`). Interactive `authorization_code` (browser redirect/callback) is out of scope (Helm is headless; no callback route). Separate issue.
+- **D2** — refresh-on-401 retry lives in the CLIENT (transport-level single replay with the new header); the token manager only refreshes. Executor/registry stay credential-agnostic.
+- **D3** — token cache is **in-memory only** (v1). **Known limitation**: a provider that ROTATES its refresh token loses the rotated value on a process restart and re-derives from the env value; if the upstream already retired it, refresh fails and that provider is skipped (fail-open). A persistent `TokenStore` port is the follow-up.
+- **D4** — credential discriminated by the `{api_key_env, oauth}` exactly-one refine (NOT reusing `type`, which is the protocol hint and must stay orthogonal to the auth mechanism).
+- **D5** — persistent post-refresh 401 reuses the existing `auth_error` class (no new `auth_failed`).
+- **D6** — `executor/fallback.ts` untouched; `execute.ts` inlines its own loop and gains no new branch.
+
+**Deviation from docs/09**: OAuth was net-new scope not on the roadmap; recorded in `docs/09-roadmap.md` under deferred/added.
+
+---
+
 ## 2026-06-02 · Classifier keyword-vocabulary expansion (docs/03, Principle 2/4)
 
 **Context**: the Layer-1 keyword lists in `config/classifier.yaml` were thin (4–9 terms each). Production intent-classification practice wants ~10–15 *varied* terms per category (synonyms, verb forms, colloquial variants). Common real-world phrasings — `summarize`, `paraphrase`, `derivative`, `implement`, `pull out`, `group by`, `assess`, `command injection` — matched **nothing**, so those prompts fell through to `chat`/`balanced`. Goal: broaden coverage (config-only, Principle 2) without regressing the calibrated routing.

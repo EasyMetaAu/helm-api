@@ -51,6 +51,28 @@ function registry(map: Record<string, string>): ProviderRegistry {
   };
 }
 
+function registryWithProviders(
+  map: Record<string, { providerName: string; providerModel: string }>,
+): ProviderRegistry {
+  return {
+    resolve(alias: string) {
+      const hit = map[alias];
+      if (hit === undefined) return { ok: false, error: { kind: "unknown_alias", alias } };
+      return {
+        ok: true,
+        value: {
+          alias,
+          providerName: hit.providerName,
+          providerModel: hit.providerModel,
+          baseUrl: "http://x",
+          apiKeyEnv: "X",
+        },
+      };
+    },
+    list: () => Object.keys(map),
+  };
+}
+
 function plan(chain: string[]): ExecutionPlan {
   return { selected_lane: "balanced", candidate_chain: chain, explicit_model: null };
 }
@@ -76,6 +98,7 @@ describe("createExecute — gateway execution adapter", () => {
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ default_good_model: "gpt-x" }),
       breaker: breaker(),
       catalog: new Map(),
@@ -99,6 +122,7 @@ describe("createExecute — gateway execution adapter", () => {
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: breaker(),
       catalog: new Map(),
@@ -128,6 +152,7 @@ describe("createExecute — gateway execution adapter", () => {
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: breaker(),
       catalog: new Map(),
@@ -155,6 +180,7 @@ describe("createExecute — gateway execution adapter", () => {
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a" }),
       breaker: breaker(),
       catalog: new Map(),
@@ -177,6 +203,7 @@ describe("createExecute — gateway execution adapter", () => {
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: breaker(),
       catalog: new Map(),
@@ -211,6 +238,7 @@ describe("createExecute — gateway execution adapter", () => {
     };
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: breaker(),
       catalog: new Map([["a", noTools]]),
@@ -232,6 +260,7 @@ describe("createExecute — gateway execution adapter", () => {
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a" }),
       breaker: breaker(),
       catalog: new Map(),
@@ -266,6 +295,7 @@ describe("createExecute — gateway execution adapter", () => {
     const logs: Array<{ level: string; msg: string; fields: Record<string, unknown> }> = [];
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a" }),
       breaker: cb,
       catalog: new Map(),
@@ -395,6 +425,65 @@ describe("createExecute — gateway execution adapter", () => {
     expect(defaultProvider.chatCompletion).toHaveBeenCalledTimes(1);
   });
 
+  it("does not fall back to default when a resolved provider has no client", async () => {
+    const defaultProvider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "default" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider,
+      providers: new Map(),
+      registry: registryWithProviders({
+        oauth_alias: { providerName: "oauth-sub", providerModel: "gpt-sub" },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["oauth_alias"]), req());
+    expect(defaultProvider.chatCompletion).not.toHaveBeenCalled();
+    expect(out.attempts[0]).toMatchObject({
+      alias: "oauth_alias",
+      skipped: true,
+      skip_reason: "provider_unavailable",
+    });
+    expect(out.final.status).toBe("error");
+    if (out.final.status === "error") {
+      expect(out.final.error.error_class).toBe("all_providers_failed");
+    }
+  });
+
+  it("does not fall back to default when a resolved provider has no client and providers are omitted", async () => {
+    const defaultProvider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "default" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider,
+      registry: registryWithProviders({
+        oauth_alias: { providerName: "oauth-sub", providerModel: "gpt-sub" },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["oauth_alias"]), req());
+    expect(defaultProvider.chatCompletion).not.toHaveBeenCalled();
+    expect(out.attempts[0]).toMatchObject({
+      alias: "oauth_alias",
+      skipped: true,
+      skip_reason: "provider_unavailable",
+    });
+    expect(out.final.status).toBe("error");
+    if (out.final.status === "error") {
+      expect(out.final.error.error_class).toBe("all_providers_failed");
+    }
+  });
+
   it("treats a client abort as a non-provider fault (no all_providers_failed)", async () => {
     const ac = new AbortController();
     const abortErr = new Error("aborted");
@@ -407,6 +496,7 @@ describe("createExecute — gateway execution adapter", () => {
     const recordFailure = vi.spyOn(cb, "recordFailure");
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a" }),
       breaker: cb,
       catalog: new Map(),
@@ -439,6 +529,7 @@ describe("createExecute — gateway execution adapter", () => {
     const recordFailure = vi.spyOn(cb, "recordFailure");
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ "free-model:free": "m-free", paid: "m-paid" }),
       breaker: cb,
       catalog: new Map(),
@@ -469,6 +560,7 @@ describe("createExecute — gateway execution adapter", () => {
     const recordFailure = vi.spyOn(cb, "recordFailure");
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ "free-model:free": "m-free", b: "m-b" }),
       breaker: cb,
       catalog: new Map(),
@@ -482,6 +574,37 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[0]?.error_class).toBe("upstream_error");
     expect(recordFailure).toHaveBeenCalledTimes(1);
     expect(recordFailure).toHaveBeenCalledWith("free-model:free");
+    expect(out.final.status).toBe("ok");
+  });
+
+  it("classifies a persistent upstream 401 as auth_error and records exactly one breaker failure", async () => {
+    // OAuth (issue #38): the client already retried once with a fresh token before
+    // surfacing this 401, so the executor sees a single failure. It must classify
+    // the attempt as `auth_error` (D5) and record EXACTLY one breaker failure (D6 —
+    // no extra executor branch / no double-count), then advance the chain.
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(new UpstreamError("upstream_error", "401", null, 401))
+        .mockResolvedValueOnce({ id: "second" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ a: "m-a", b: "m-b" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["a", "b"]), req());
+    expect(out.attempts[0]?.error_class).toBe("auth_error");
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith("a");
     expect(out.final.status).toBe("ok");
   });
 
@@ -500,6 +623,7 @@ describe("createExecute — gateway execution adapter", () => {
     const recordFailure = vi.spyOn(cb, "recordFailure");
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: cb,
       catalog: new Map(),
@@ -542,6 +666,7 @@ describe("createExecute — gateway execution adapter", () => {
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: breaker(),
       // Catalog is keyed by the candidate ALIAS (the modelKey), not the resolved
@@ -571,6 +696,7 @@ describe("createExecute — gateway execution adapter", () => {
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ text: "m-text", vis: "m-vis" }),
       breaker: breaker(),
       catalog: new Map([
@@ -600,6 +726,7 @@ describe("createExecute — gateway execution adapter", () => {
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: breaker(),
       catalog: new Map([
@@ -631,6 +758,7 @@ describe("createExecute — gateway execution adapter", () => {
     // over-prune) rather than declaring capability_unsatisfiable.
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a", u: "m-unknown" }),
       breaker: breaker(),
       catalog: new Map([["a", entry("a", { supportsJsonMode: false })]]),
@@ -673,6 +801,7 @@ describe("createExecute — gateway execution adapter", () => {
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ good: "gpt-4o" }),
       breaker: breaker(),
       catalog: new Map([["good", priced("good", { inputPerMTokUsd: 2.5, outputPerMTokUsd: 10 })]]),
@@ -695,6 +824,7 @@ describe("createExecute — gateway execution adapter", () => {
     // Catalog has NO entry for the resolved model → pricing unknown → null.
     const execute = createExecute({
       defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
       registry: registry({ unknown_model: "m-unpriced" }),
       breaker: breaker(),
       catalog: new Map(),

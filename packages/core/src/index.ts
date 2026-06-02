@@ -265,6 +265,50 @@ export type {
   NativeResponse,
   Transformer,
 } from "./protocol/transformer.js";
+// Native Anthropic Messages executor (issue #38): Claude Pro/Max subscription
+// routing — OpenAI-Chat IR <-> Anthropic Messages translation + Claude-Code
+// identity headers + system spoof + 401 refresh-retry.
+export {
+  type AnthropicClientConfig,
+  type AnthropicClientDeps,
+  anthropicToOpenAIResponse,
+  createAnthropicClient,
+  openaiToAnthropicRequest,
+  translateAnthropicSSE,
+} from "./provider/anthropic.js";
+// Interactive OAuth subscription-provider kit (issue #38): authorization-code +
+// PKCE / device-code login flows, built-in provider registry (anthropic,
+// github-copilot), and the flow primitives. Ported from openclaw (MIT).
+export {
+  type AnthropicLoginStart,
+  anthropicOAuthProvider,
+  beginAnthropicLogin,
+  beginCopilotDeviceLogin,
+  beginOpenAICodexLogin,
+  buildOAuthRequestSignal,
+  COPILOT_HEADERS,
+  type CodexLoginStart,
+  type CopilotDeviceStart,
+  type CopilotPollResult,
+  completeAnthropicLogin,
+  completeOpenAICodexLogin,
+  getGitHubCopilotBaseUrl,
+  getOAuthProvider,
+  getOAuthProviders,
+  githubCopilotOAuthProvider,
+  listOAuthProviderIds,
+  type OAuthAuthInfo,
+  type OAuthCredentials,
+  type OAuthLoginCallbacks,
+  type OAuthPrompt,
+  type OAuthProviderId,
+  type OAuthProviderInterface,
+  openaiCodexOAuthProvider,
+  parseOAuthAuthorizationInput,
+  pollCopilotDeviceOnce,
+  refreshGitHubCopilotToken,
+  refreshOpenAICodexToken,
+} from "./provider/oauth/index.js";
 export {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
@@ -287,6 +331,18 @@ export {
   type ResolveResult,
   toRegistryProviders,
 } from "./provider/registry.js";
+// OAuth subscription providers (issue #38): non-interactive token manager
+// (refresh_token / client_credentials), single-flight refresh, injected clock.
+// Framework-agnostic; env→secret resolution stays in the composition root.
+export {
+  type ConfidentialOAuth,
+  createTokenManager,
+  type PresetOAuth,
+  type ResolvedOAuth,
+  type TokenManager,
+  type TokenManagerDeps,
+  TokenRefreshError,
+} from "./provider/token-manager.js";
 export {
   createRateLimiter,
   type RateLimiterDeps,
@@ -363,6 +419,13 @@ export {
   startSignalScheduler,
 } from "./signals/scheduler.js";
 export type { RoutingSignal } from "./signals/types.js";
+// At-rest encryption for OAuth subscription secrets (issue #38). AES-256-GCM under
+// HELM_OAUTH_ENC_KEY; the only reversibly-stored secret class in Helm.
+export {
+  decryptSecret,
+  encryptSecret,
+  loadEncKeyFromEnv,
+} from "./store/crypto/token-cipher.js";
 export {
   type CreateStoreOptions,
   createPgDb,
@@ -375,6 +438,7 @@ export {
   type PgDb,
   PgKeyStore,
   PgMemoryStore,
+  PgOAuthTokenStore,
   PgRateLimitStore,
   PgSignalStore,
   PgTelemetryStore,
@@ -384,6 +448,7 @@ export {
   type SqliteDb,
   SqliteKeyStore,
   SqliteMemoryStore,
+  SqliteOAuthTokenStore,
   SqliteRateLimitStore,
   SqliteSignalStore,
   SqliteTelemetryStore,
@@ -397,6 +462,8 @@ export type {
   KeyStore,
   MemoryJobStatus,
   MemoryStore,
+  OAuthTokenRecord,
+  OAuthTokenStore,
   RateLimitConsumeResult,
   RateLimitStore,
   RequestPayload,

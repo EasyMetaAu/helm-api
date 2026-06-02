@@ -4,6 +4,7 @@ import {
   type AnthropicSSEEvent,
   anthropicTransformer,
   bootstrapRootKey,
+  createAnthropicClient,
   createCircuitBreaker,
   createMemoryMomentumStore,
   createOpenAIClient,
@@ -11,20 +12,23 @@ import {
   createRateLimiter,
   createSignalCollector,
   createStore,
+  createTokenManager,
   DEFAULT_LANES,
   generateKey,
+  getOAuthProvider,
   hashKey,
   type IRResponse,
   type Lane,
   type LanesConfig,
   loadConfig,
+  loadEncKeyFromEnv,
   loadRuntimeCatalog,
   loadRuntimeSettings,
   makeAnthropicError,
+  type OAuthTokenStore,
   type ObserveDeps,
   type PoliciesConfig,
   type ProviderClient,
-  type ProviderConfig,
   parseLanesConfig,
   type ProviderRegistryConfig as RegistryProviderConfig,
   type RouteOptions,
@@ -45,7 +49,7 @@ import type {
   ProviderConfig as ProviderConfigShared,
   RuntimeSettings,
 } from "@helm/shared";
-import { ErrorClassSchema } from "@helm/shared";
+import { ErrorClassSchema, isOAuthPreset } from "@helm/shared";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
@@ -53,6 +57,7 @@ import { authMiddleware } from "./middleware/auth.js";
 import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middleware/basic-auth.js";
 import { estimateRequestTokens } from "./middleware/estimate-tokens.js";
 import { type RateLimiterPort, rateLimitMiddleware } from "./middleware/rate-limit.js";
+import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
@@ -107,7 +112,10 @@ function buildRegistry(
   providers: ReadonlyArray<ProviderConfigShared>,
   primaryName: string,
   primaryBaseUrl: string,
-  primaryApiKeyEnv: string,
+  // OPTIONAL (issue #38): an OAuth primary has no api_key_env. The registry never
+  // reads this to fetch a credential (the per-name client is pre-built), so the
+  // back-fill entry stores "" when absent.
+  primaryApiKeyEnv: string | undefined,
   lanes: LanesConfig,
   fallbackBaseUrl: string,
 ) {
@@ -133,34 +141,136 @@ function buildRegistry(
     cfgs.push({
       name: primaryName,
       base_url: primaryBaseUrl,
-      api_key_env: primaryApiKeyEnv,
+      api_key_env: primaryApiKeyEnv ?? "", // OAuth primary has none; registry never reads it
       models: [...backfill].map((alias) => ({ alias, provider_model: alias })),
     });
   }
   return createProviderRegistry(cfgs);
 }
 
+// A resolved provider credential, ready to splice into a ProviderConfig. Either a
+// static `apiKey` (key path) or the dynamic OAuth trio (getAuthHeader / on401 /
+// currentSecrets). The env→plaintext resolution happens HERE (composition root,
+// principle 7); core never sees an env var name.
+type ProviderCredential =
+  | { apiKey: string }
+  | {
+      getAuthHeader: () => Promise<string>;
+      onUnauthorized: () => void;
+      currentSecrets: () => string[];
+    };
+
+// Runtime context for PRESET subscription OAuth (issue #38): the persistent
+// credential store + the at-rest encryption key. Resolved once at the composition
+// root (principle 7) and threaded into buildCredential so the preset token manager
+// can read/decrypt the stored credential the admin login wrote.
+export interface OAuthRuntimeCtx {
+  store: OAuthTokenStore;
+  encKey: Buffer;
+}
+
+// Resolve a provider's credential from env / store (issue #38). Returns null when
+// a required secret is unset / no credential is stored — the caller decides
+// fail-open (skip a non-primary provider) vs fail-closed (throw for the primary).
+// Each OAuth provider gets ONE process-level TokenManager (1:1 with its client),
+// shared across requests — lazy refresh, no background timer.
+// Exported for unit tests (server.oauth.test.ts); not part of the public API.
+export function buildCredential(
+  p: ProviderConfigShared,
+  oauthCtx?: OAuthRuntimeCtx,
+): ProviderCredential | null {
+  if (p.oauth) {
+    const o = p.oauth;
+    // ── PRESET subscription OAuth: credentials live in the OAuthTokenStore,
+    //    populated by the admin login. Refresh is delegated to the provider.
+    if (isOAuthPreset(o)) {
+      // No enc key / store wired (HELM_OAUTH_ENC_KEY unset) → cannot build.
+      if (!oauthCtx) return null;
+      const provider = getOAuthProvider(o.provider);
+      if (!provider) return null;
+      const tm = createTokenManager({
+        oauth: { kind: "preset", providerId: o.provider, account: o.account },
+        tokenStore: oauthCtx.store,
+        encKey: oauthCtx.encKey,
+        oauthProvider: provider,
+        now: () => Date.now(),
+      });
+      return {
+        getAuthHeader: () => tm.getAuthHeader(),
+        onUnauthorized: () => tm.invalidate(),
+        currentSecrets: () => tm.currentSecrets(),
+      };
+    }
+    // ── CONFIDENTIAL-client OAuth (generic SSO / client_credentials): env secrets.
+    const clientId = process.env[o.client_id_env];
+    const clientSecret = process.env[o.client_secret_env];
+    const refreshToken = o.refresh_token_env ? process.env[o.refresh_token_env] : undefined;
+    // Any REQUIRED secret unset → cannot build (fail-open at the caller).
+    if (!clientId || !clientSecret) return null;
+    if (o.grant === "refresh_token" && !refreshToken) return null;
+    const tm = createTokenManager({
+      oauth: {
+        grant: o.grant,
+        tokenUrl: o.token_url,
+        clientId,
+        clientSecret,
+        refreshToken,
+        scopes: o.scopes,
+        audience: o.audience,
+      },
+      now: () => Date.now(),
+    });
+    return {
+      getAuthHeader: () => tm.getAuthHeader(),
+      onUnauthorized: () => tm.invalidate(),
+      currentSecrets: () => tm.currentSecrets(),
+    };
+  }
+  // Static key path: env var NAME → plaintext key (or null when unset).
+  const apiKey = p.api_key_env ? process.env[p.api_key_env] : undefined;
+  if (!apiKey) return null;
+  return { apiKey };
+}
+
 // Build one OpenAI-compatible client per configured provider, keyed by provider
 // NAME, so the executor can dispatch each resolved candidate to the right
-// upstream (cross-provider fallback). Credentials come ONLY from the env var each
-// provider's api_key_env points at (principle 7 — never plaintext in config). A
-// provider whose credential env is unset is SKIPPED (it cannot be invoked); its
-// aliases will fail open at resolve/execute time rather than blocking startup of
-// the others. The PRIMARY provider's missing credential is still fatal (handled
-// by the caller) since it backs the default path.
-function buildProviderClients(
+// upstream (cross-provider fallback). Credentials come ONLY from env (principle 7
+// — never plaintext in config), resolved by buildCredential (static key OR OAuth
+// token manager). A provider whose required credential env is unset is SKIPPED (it
+// cannot be invoked); its aliases will fail open at resolve/execute time rather
+// than blocking startup of the others. The PRIMARY provider's missing credential
+// is still fatal (handled by the caller) since it backs the default path.
+// Exported for unit tests (server.oauth.test.ts); not part of the public API.
+export function buildProviderClients(
   providers: ReadonlyArray<ProviderConfigShared>,
   fallbackBaseUrl: string,
   timeoutMs: number,
+  oauthCtx?: OAuthRuntimeCtx,
 ): Map<string, ProviderClient> {
   const clients = new Map<string, ProviderClient>();
   for (const p of providers) {
-    const apiKey = process.env[p.api_key_env];
-    if (!apiKey) continue; // no credential → cannot build a client; skip.
+    const cred = buildCredential(p, oauthCtx);
+    if (!cred) continue; // no credential → cannot build a client; skip.
     const baseUrl = p.base_url ?? fallbackBaseUrl;
-    clients.set(p.name, createOpenAIClient({ config: { baseUrl, apiKey, timeoutMs } }));
+    clients.set(p.name, createProviderClient(p, { baseUrl, timeoutMs }, cred));
   }
   return clients;
+}
+
+// Dispatch on provider `type` (issue #38): a native Anthropic subscription
+// provider (Claude Pro/Max via OAuth) speaks the Anthropic Messages API with
+// Claude-Code identity headers; everything else is OpenAI-compatible. Copilot is
+// OpenAI-shaped, so it reuses the OpenAI client (with its editor headers injected
+// at wiring time via base_url derived from the token).
+function createProviderClient(
+  p: ProviderConfigShared,
+  base: { baseUrl: string; timeoutMs: number },
+  cred: ProviderCredential,
+): ProviderClient {
+  if (p.type === "anthropic") {
+    return createAnthropicClient({ config: { ...base, ...cred } });
+  }
+  return createOpenAIClient({ config: { ...base, ...cred } });
 }
 
 // Full wiring: config -> store -> bootstrap key -> provider -> routing pipeline.
@@ -191,6 +301,23 @@ export async function buildServer(
   const store: StoreSet = await createStore({ store: storeCfg, dataDir, connectionString });
   const keyStore = store.keys;
   const telemetry = store.telemetry;
+
+  // OAuth subscription runtime (issue #38). PRESET providers store their (rotating)
+  // credentials encrypted at rest, so an at-rest key is REQUIRED when any preset is
+  // configured (principle 2: fail-closed). HELM_OAUTH_ENC_KEY is resolved HERE
+  // (composition root, principle 7) — core only ever sees the decoded key buffer.
+  const usesPresetOAuth = config.providers.some((p) => p.oauth && isOAuthPreset(p.oauth));
+  const oauthEncKey = loadEncKeyFromEnv();
+  if (usesPresetOAuth && !oauthEncKey) {
+    throw new Error(
+      "a subscription OAuth provider is configured but HELM_OAUTH_ENC_KEY is unset: set a 32-byte key (base64 or 64 hex chars) to encrypt stored tokens",
+    );
+  }
+  // The runtime context threaded into buildCredential (preset token managers) and
+  // the admin login surface. Present only when an enc key is available.
+  const oauthCtx: OAuthRuntimeCtx | undefined = oauthEncKey
+    ? { store: store.oauthTokens, encKey: oauthEncKey }
+    : undefined;
 
   // Runtime-mutable settings (admin "System Settings"): persisted overrides for
   // the operator-facing subset that can change WITHOUT a restart (capture_payloads,
@@ -282,17 +409,24 @@ export async function buildServer(
   // the shared fallback base_url when a provider omits one).
   const first = config.providers[0];
   if (!first) throw new Error("no provider configured");
-  const apiKey = process.env[first.api_key_env];
-  if (!apiKey) throw new Error(`missing provider credential env: ${first.api_key_env}`);
+  // Primary credential is MANDATORY (fail-closed, principle 2): it backs the
+  // default/eval/passthrough path. Static key OR OAuth — buildCredential returns
+  // null only when a required secret env is unset, which is fatal for the primary.
+  const primaryCred = buildCredential(first, oauthCtx);
+  if (!primaryCred) {
+    throw new Error(`missing provider credential for primary provider ${first.name}`);
+  }
   // HELM_PROVIDER_BASE_URL (test/e2e) overrides EVERY provider's base_url so the
   // mock upstream serves all of them; otherwise each provider uses its own.
   const baseUrlOverride = process.env.HELM_PROVIDER_BASE_URL;
   const fallbackBaseUrl = baseUrlOverride ?? "https://api.openai.com/v1";
   const baseUrl = baseUrlOverride ?? first.base_url ?? fallbackBaseUrl;
   const timeoutMs = config.runtime.request_timeout_ms;
-  const providerConfig: ProviderConfig = { baseUrl, apiKey, timeoutMs };
-  // The default/primary client (eval + passthrough + back-fill aliases).
-  const provider = createOpenAIClient({ config: providerConfig });
+  // The default/primary client (eval + passthrough + back-fill aliases), dispatched
+  // by type (anthropic native vs OpenAI-compatible). When the primary is OAuth this
+  // SAME dynamic-header client backs the eval/classify path below, so eval auth
+  // never silently fails (acceptance criterion 9).
+  const provider = createProviderClient(first, { baseUrl, timeoutMs }, primaryCred);
   // Per-provider clients keyed by provider NAME. When HELM_PROVIDER_BASE_URL is
   // set (test/e2e), force the override so cross-provider candidates still hit the
   // mock; in production each provider keeps its own base_url.
@@ -302,6 +436,7 @@ export async function buildServer(
       : config.providers,
     fallbackBaseUrl,
     timeoutMs,
+    oauthCtx,
   );
   // Ensure the primary client is registered under its name (it is built above with
   // the resolved baseUrl, which already honors the override).
@@ -525,6 +660,12 @@ export async function buildServer(
           return saved;
         },
       },
+      // Admin OAuth-login surface (issue #38). Present only when an enc key is
+      // configured (oauthCtx); otherwise the /admin/api/oauth routes 503 — login
+      // is disabled rather than storing tokens in plaintext (principle 7).
+      oauth: oauthCtx
+        ? createOAuthAdmin({ store: oauthCtx.store, encKey: oauthCtx.encKey })
+        : undefined,
     });
 
     // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so

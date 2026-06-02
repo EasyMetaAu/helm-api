@@ -175,6 +175,14 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 >
 > **Credentials.** Provider keys are referenced by env-var *name* in `providers.yaml` — never written as plaintext into the repo or image.
 
+### OAuth subscription providers (Claude Pro/Max, ChatGPT Codex, GitHub Copilot)
+
+Instead of a static API key, a provider can authenticate with an **OAuth subscription** you log into from the dashboard (**Providers → Connect**). Claude Pro/Max and ChatGPT Codex use a browser login + paste-the-redirect-URL step; GitHub Copilot uses a device code. Helm stores the (rotating) refresh token **encrypted at rest** and refreshes the short-lived access token automatically.
+
+To enable it, set **`HELM_OAUTH_ENC_KEY`** to a 32-byte key (base64, or 64 hex chars) — Helm uses it to encrypt stored tokens and **refuses to start** if a subscription provider is configured without it. Configure the provider with an `oauth: { provider: anthropic | github-copilot | openai-codex }` block (see the commented examples in `config/providers.yaml`); for Claude use `type: anthropic`.
+
+> ⚠️ **Terms of service.** Routing a Claude/ChatGPT/Copilot **subscription** through a third-party gateway may violate the provider's terms of service, which can be grounds for account suspension. This is an opt-in feature for self-hosted, personal use — **you are responsible** for ensuring your usage complies with your provider agreements. When in doubt, use a normal API key (`api_key_env`) instead.
+
 ## The dashboard
 
 At `/admin`, behind HTTP Basic auth: a live overview, API keys (create, revoke, set per-key limits), lane and policy editors, classifier settings, and a request log you can drill into to see how each request was routed. Available in English (default), Simplified and Traditional Chinese, Japanese, and Korean. The dashboard mounts **only when** `HELM_ADMIN_USER` and `HELM_ADMIN_PASSWORD` are set; otherwise `/admin` and `/admin/api/*` return `404`.

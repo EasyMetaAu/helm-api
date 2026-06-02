@@ -162,6 +162,10 @@ function stubProvider(): { client: ProviderClient; calls: string[] } {
   return { client, calls };
 }
 
+function providerClients(client: ProviderClient): Map<string, ProviderClient> {
+  return new Map(config.providers.map((p) => [p.name, client]));
+}
+
 describe("default config activates capability filter + cost (alias-namespace alignment)", () => {
   it("sanity: the shipped catalog is keyed by the SAME provider/model aliases the lanes use", () => {
     // Pre-alignment these were absent (lane aliases like `cheap_model` had no
@@ -178,6 +182,7 @@ describe("default config activates capability filter + cost (alias-namespace ali
     const registry = buildRegistry();
     const execute = createExecute({
       defaultProvider: client,
+      providers: providerClients(client),
       registry,
       breaker: breaker(),
       catalog,
@@ -208,6 +213,7 @@ describe("default config activates capability filter + cost (alias-namespace ali
     const { client } = stubProvider();
     const execute = createExecute({
       defaultProvider: client,
+      providers: providerClients(client),
       registry: buildRegistry(),
       breaker: breaker(),
       catalog,
@@ -237,6 +243,7 @@ describe("default config activates capability filter + cost (alias-namespace ali
     const { client, calls } = stubProvider();
     const execute = createExecute({
       defaultProvider: client,
+      providers: providerClients(client),
       registry: buildRegistry(),
       breaker: breaker(),
       catalog,
@@ -263,6 +270,7 @@ describe("default config activates capability filter + cost (alias-namespace ali
     const { client } = stubProvider();
     const execute = createExecute({
       defaultProvider: client,
+      providers: providerClients(client),
       registry: buildRegistry(),
       breaker: breaker(),
       catalog,

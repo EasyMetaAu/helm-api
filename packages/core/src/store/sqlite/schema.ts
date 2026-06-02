@@ -100,9 +100,30 @@ export const requestPayloads = sqliteTable("request_payloads", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+// Persisted OAuth subscription credentials (issue #38). One row per
+// (provider_id, account). access_enc / refresh_enc are AES-256-GCM CIPHERTEXT
+// (store/crypto/token-cipher.ts) — the ONLY reversibly-stored secrets in Helm,
+// kept encrypted because they are replayed to the upstream token endpoint (unlike
+// api_keys, which are hash-only). The adapter stores the blobs verbatim and never
+// decrypts. meta holds provider-specific JSON (e.g. copilot proxy base).
+export const oauthTokens = sqliteTable(
+  "oauth_tokens",
+  {
+    providerId: text("provider_id").notNull(),
+    account: text("account").notNull(),
+    accessEnc: text("access_enc"), // AES-GCM blob; nullable (lazy-derived access)
+    refreshEnc: text("refresh_enc"), // AES-GCM blob (long-lived credential)
+    expiresAt: integer("expires_at"), // ms epoch; nullable
+    meta: text("meta"), // provider-specific JSON; nullable
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.providerId, t.account] })],
+);
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
 export type RoutingSignalsTable = typeof routingSignals;
 export type ConfigKvTable = typeof configKv;
 export type RequestPayloadsTable = typeof requestPayloads;
+export type OAuthTokensTable = typeof oauthTokens;

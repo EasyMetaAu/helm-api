@@ -228,6 +228,27 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys ADD COLUMN rate_limit_tpm INTEGER;
     `,
   },
+  {
+    // Persisted OAuth subscription credentials (issue #38). One row per
+    // (provider_id, account). access_enc/refresh_enc are AES-256-GCM CIPHERTEXT —
+    // the only reversibly-stored secrets in Helm (replayed to the token endpoint),
+    // so encrypted at rest (store/crypto/token-cipher.ts). meta holds
+    // provider-specific JSON (e.g. copilot proxy base). Composite PK makes the
+    // rotation write-back an idempotent upsert.
+    version: 9,
+    sql: `
+      CREATE TABLE IF NOT EXISTS oauth_tokens (
+        provider_id TEXT NOT NULL,
+        account TEXT NOT NULL,
+        access_enc TEXT,
+        refresh_enc TEXT,
+        expires_at INTEGER,
+        meta TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (provider_id, account)
+      );
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {
