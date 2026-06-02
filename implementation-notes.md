@@ -5,6 +5,29 @@
 
 ---
 
+## 2026-06-02 · Classifier keyword-vocabulary expansion (docs/03, Principle 2/4)
+
+**Context**: the Layer-1 keyword lists in `config/classifier.yaml` were thin (4–9 terms each). Production intent-classification practice wants ~10–15 *varied* terms per category (synonyms, verb forms, colloquial variants). Common real-world phrasings — `summarize`, `paraphrase`, `derivative`, `implement`, `pull out`, `group by`, `assess`, `command injection` — matched **nothing**, so those prompts fell through to `chat`/`balanced`. Goal: broaden coverage (config-only, Principle 2) without regressing the calibrated routing.
+
+**What changed**: `dimensions.*_kw` and `task_keywords.*` widened toward ~10–14 terms each; golden set grown 29→38 (9 new real-world prompts in `golden-routing.test.ts` + mirrored in `scripts/calibrate-classifier.ts`); 5 new substring-hazard guards in `taskdetect.test.ts`. No `packages/core` logic, schema, lane, or policy changes.
+
+**The two mechanics that forced a re-calibration (not a free add)**:
+- **Signal saturation / dilution**: the dimension signal is `min(1, hits/ceil(len/2))` (`dimensions.ts`). A longer list raises the denominator, so each individual hit contributes *less*, shifting every `rawScore`. Positive weights were raised to offset it on multi-hit golden prompts: `reasoning .55→.65`, `coding .42→.62`, `analysis .45→.76`, `security .40→.85`.
+- **Confidence is computed from the raw score's distance to the nearest tier boundary — *before* the override pins the tier.** Diluting the **negative** dimensions pulled short greeting/lookup prompts' scores *up* toward the `standard` boundary (−0.06) and tanked their confidence below the 0.42 gate → they degraded to `decided_by=fallback`/`balanced` even though `short_message` still pinned them `simple`. Fix: **magnify** the negative weights so each single hit keeps its original pull — `simple −.55→−1.35`, `lookup −.40→−1.05`, `chitchat −.45→−1.15`, `translation −.30→−.78`. (Counter-intuitive: expanding the *negative* lists was the riskiest part, not the positive ones.)
+
+**Substring gotcha (the sharp edge)**: `task_keywords` are matched with a plain `includes()` substring (no word boundary, no saturation, flat +1.0/hit) — unlike `dimensions` which are word-boundary regex. Two consequences baked into the curation:
+- `tone` was **dropped from `task_keywords.writing`**: it substring-matched "mile**stone**s" → spurious `writing` task. It stays in the `writing_kw` *dimension* (boundary-matched there, so safe).
+- `rce` is kept **only** in the boundary-matched `security_kw` dimension, never in `task_keywords` (as a substring it would match "sou**rce**"/"fo**rce**"). `task_keywords.security` uses the multi-word `remote code execution` instead.
+- General rule recorded for future contributors: new `task_keywords` must be distinctive or multi-word; new `*_kw` dimension terms are boundary-safe but note boundary matching also *misses* inflections (`milestone` does not match `milestones`).
+
+**Trade-offs / decisions**:
+- One new prompt (`outline a project roadmap…`) targets **medium/balanced**, not premium: a pure-planning request with no reasoning co-signal scores medium by design (the existing `planning architecture` premium case only reaches complex because it *also* carries `reason about`/`step by step`). Forcing it to premium would have needed a fragile ~0.97 `planning_kw` weight; medium/balanced is the honest, stable outcome.
+- Short (<50 char) coding/writing/extraction prompts stay `simple` via the `short_message` override regardless of keyword weight, so those new cases only needed task detection to fire (the tier is pinned).
+
+**Verification**: `node --import tsx scripts/calibrate-classifier.ts` → **38/38 lanes, 0 fallbacks**, confidence spread ~0.45–0.93 (was 0.44–0.91 over 29). Full suite `pnpm test` 1342/1342, `pnpm typecheck` clean, `pnpm lint` exit 0. The header note in `config/classifier.yaml` carries the same rationale.
+
+---
+
 ## 2026-06-02 · Multilingual handling for the Layer-1 classifier (docs/03, Principles 2/3/4)
 
 **Context**: PR #44 expands the **English** Layer-1 keyword vocabulary, which surfaced a pre-existing (not PR-introduced) limitation: the *entire* Layer-1 classifier is implicitly English-only. Layer-1 mixes English keyword signals with language-agnostic structural signals (code blocks, stack traces, math, tables, tools, length). A non-English **prose** request matches zero keywords, lands on the `standard` boundary, and — with eval **ON** — escalates to the multilingual Layer-2 LLM (correct), but with eval **OFF (the shipped default)** degrades to `balanced` only *by luck* of where the structural-only `rawScore` happened to fall. Separately, a latent bug made config-level CJK localization impossible. Chose Hybrid "C": keep keywords as the English fast-path, make non-Latin text *deterministically* escalate, fix the CJK bug, document the contract. Kept **separate** from PR #44 (own branch `feat/classifier-multilingual-guard`).

@@ -15,7 +15,7 @@ import type { Complexity } from "./tiers.js";
 export type OverrideKind = "set" | "floor";
 
 export interface OverrideHit {
-  /** "heartbeat" | "formal_logic" | "tools_floor" | "long_context" | "short_message" */
+  /** "heartbeat" | "exact_confirmation" | "formal_logic" | "tools_floor" | "long_context" | "short_message" */
   rule: string;
   kind: OverrideKind;
   complexity: Complexity;
@@ -23,6 +23,8 @@ export interface OverrideHit {
 
 // Total tier order. `floor` may only raise toward a higher index, never lower.
 // RANK is derived from ORDER so the sequence is the single source of truth.
+const DEFAULT_EXACT_CONFIRMATION_TOKENS = ["yes", "no", "sure", "got it", "ok", "thanks"];
+
 const ORDER: Complexity[] = ["simple", "standard", "complex", "reasoning"];
 const RANK: Record<Complexity, number> = Object.fromEntries(
   ORDER.map((tier, i) => [tier, i]),
@@ -52,6 +54,13 @@ export function evaluateOverrides(
     hits.push({ rule: "heartbeat", kind: "set", complexity: "simple" });
   }
 
+  // Exact confirmations: weak words like "no" are safe only when the whole last
+  // user utterance is exactly the confirmation, never as full-prompt keywords.
+  const exactConfirmationTokens = ov.exact_confirmation_tokens ?? DEFAULT_EXACT_CONFIRMATION_TOKENS;
+  if (isExactConfirmation(lastUserText, exactConfirmationTokens)) {
+    hits.push({ rule: "exact_confirmation", kind: "set", complexity: "simple" });
+  }
+
   // Formal logic: a configured keyword anywhere in the conversation pins
   // reasoning regardless of how low the weighted score was.
   if (containsAny(fullText, ov.formal_logic_keywords)) {
@@ -60,7 +69,7 @@ export function evaluateOverrides(
 
   // Short-message shortcut: a tiny last user message with NO complex structural
   // signal (no code block / stack trace / over-long body) is trivially simple.
-  if (isShortAndSimple(lastUserText, ov.short_message_max_chars)) {
+  if (isShortAndSimple(lastUserText, ov.short_message_max_chars, cfg)) {
     hits.push({ rule: "short_message", kind: "set", complexity: "simple" });
   }
 
@@ -104,20 +113,70 @@ function isHeartbeat(text: string, tokens: string[]): boolean {
   return tokens.some((t) => t.length > 0 && trimmed === t.trim());
 }
 
-function isShortAndSimple(text: string, maxChars: number): boolean {
+function isExactConfirmation(text: string, tokens: string[]): boolean {
+  const normalized = normalizeUtterance(text);
+  if (normalized.length === 0) return false;
+  return tokens.some((t) => normalizeUtterance(t) === normalized);
+}
+
+function isShortAndSimple(text: string, maxChars: number, cfg: ClassifierRulesConfig): boolean {
   const trimmed = text.trim();
   if (trimmed.length === 0) return false;
   if (trimmed.length >= maxChars) return false;
-  // A complex structural signal disqualifies the shortcut even when short.
+  // A complex structural or classifier signal disqualifies the shortcut even when short.
   if (detectCodeBlock(text) > 0) return false;
   if (detectStackTrace(text) > 0) return false;
+  if (containsClassifierSignal(trimmed, cfg)) return false;
   return true;
+}
+
+function containsClassifierSignal(text: string, cfg: ClassifierRulesConfig): boolean {
+  const signalKeywords = [
+    ...keywordsForDimension(cfg, "analysis_kw"),
+    ...keywordsForDimension(cfg, "security_kw"),
+    ...keywordsForDimension(cfg, "diagnostic_short_kw"),
+    ...(cfg.task_keywords.security ?? []),
+  ];
+  return matchesAnyKeyword(text, signalKeywords);
+}
+
+function keywordsForDimension(cfg: ClassifierRulesConfig, name: string): string[] {
+  return cfg.dimensions[name]?.keywords ?? [];
+}
+
+function matchesAnyKeyword(text: string, keywords: string[]): boolean {
+  return keywords.some((kw) => kw.length > 0 && keywordMatcher(kw).test(text));
 }
 
 function containsAny(text: string, keywords: string[]): boolean {
   if (text.trim().length === 0) return false;
   const haystack = text.toLowerCase();
   return keywords.some((kw) => kw.length > 0 && haystack.includes(kw.toLowerCase()));
+}
+
+function normalizeUtterance(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]+$/u, "")
+    .replace(/\s+/gu, " ");
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const WORD = /[\p{L}\p{N}_]/u;
+const keywordMatcherCache = new Map<string, RegExp>();
+function keywordMatcher(kw: string): RegExp {
+  let re = keywordMatcherCache.get(kw);
+  if (re === undefined) {
+    const left = WORD.test(kw[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
+    const right = WORD.test(kw[kw.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
+    re = new RegExp(left + escapeRegExp(kw) + right, "iu");
+    keywordMatcherCache.set(kw, re);
+  }
+  return re;
 }
 
 // Text of the LAST user-role message (heartbeat / short-message look at the

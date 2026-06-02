@@ -1,6 +1,9 @@
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
 import { ClassifierRulesConfigSchema } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
+import { loadConfig } from "../config/loader.js";
 import { detectTask } from "./taskdetect.js";
 
 // Minimal classifier rules config mirroring config/classifier.yaml's task layer:
@@ -240,6 +243,49 @@ describe("detectTask", () => {
     });
     const res = detectTask(makeReq("aa bb cc dd"), cfg);
     expect(res.task_type).toBe("extraction");
+  });
+
+  // ── SUBSTRING-HAZARD GUARDS (vocabulary expansion, 2026-06-02) ─────────────
+  // task_keywords are matched with a plain `includes()` substring (taskdetect.ts),
+  // so a short or common token silently fires inside a larger word. The shipped
+  // config (config/classifier.yaml) was curated to avoid this; these guards load
+  // the REAL config and pin that no expanded term false-activates. Regression
+  // origin: "tone" matched "mile{stone}s" → spurious `writing`.
+  describe("shipped config avoids substring false-activation", () => {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const repoRoot = resolve(__dirname, "../../../..");
+    const shipped = loadConfig({ configDir: join(repoRoot, "config"), env: {} }).classifier.rules;
+
+    it("'milestones' does NOT trigger the writing task ('tone' substring fix)", () => {
+      const res = detectTask(makeReq("review the project milestones for next quarter"), shipped);
+      expect(res.task_type).not.toBe("writing");
+    });
+
+    it("'encode the payload' does NOT trigger coding ('code' is not a keyword)", () => {
+      const res = detectTask(makeReq("encode the payload before sending it"), shipped);
+      expect(res.task_type).not.toBe("coding");
+    });
+
+    it("'resource' / 'force' do NOT trigger security ('rce' kept out of task_keywords)", () => {
+      const res = detectTask(
+        makeReq("allocate the resource and force a refresh of the page"),
+        shipped,
+      );
+      expect(res.task_type).not.toBe("security");
+    });
+
+    it("still activates an expanded term: 'paraphrase' → writing", () => {
+      const res = detectTask(makeReq("paraphrase the opening paragraph for me"), shipped);
+      expect(res.task_type).toBe("writing");
+    });
+
+    it("still needs >= 2 hits for security: 'command injection' + 'sql injection'", () => {
+      const res = detectTask(
+        makeReq("audit this endpoint for sql injection and command injection"),
+        shipped,
+      );
+      expect(res.task_type).toBe("security");
+    });
   });
 
   it("is pure & deterministic with no side effects", () => {

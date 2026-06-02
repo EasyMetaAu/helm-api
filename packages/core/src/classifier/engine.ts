@@ -108,15 +108,22 @@ export function scoreRequest(req: InternalRequest, deps: ScoreRequestDeps): Clas
   // ── 4. overrides (set pins / floor raises over the weighted tier) ─────────
   // Momentum is the designated mechanism to stop "a single short message
   // dragging classification off-course" (docs/03 §momentum). When momentum
-  // actually fired, the weak `short_message` SHORTCUT must not re-pin `simple`
-  // and undo it — so the engine drops that one hit. The high-certainty `set`
-  // signals (heartbeat exact-token / formal_logic) are precise and still win.
-  // See implementation-notes (engine: momentum suppresses short_message).
+  // actually fired, weak follow-up shortcuts must not re-pin `simple` and undo
+  // it — so the engine drops short_message and exact_confirmation. The
+  // high-certainty `set` signals (heartbeat exact-token / formal_logic) are
+  // precise and still win. See implementation-notes (engine: momentum suppresses
+  // short follow-up shortcuts).
   const rawOverrideHits = safe(() => evaluateOverrides(req, cfg, approxTokens), []);
   const overrideHits = momentumApplied
-    ? rawOverrideHits.filter((h) => h.rule !== "short_message")
+    ? rawOverrideHits.filter((h) => h.rule !== "short_message" && h.rule !== "exact_confirmation")
     : rawOverrideHits;
   const complexity = safe(() => applyOverrides(baseComplexity, overrideHits), baseComplexity);
+  const hasExactConfirmation = overrideHits.some((h) => h.rule === "exact_confirmation");
+  // `let` because the language-coverage guard (step 5.5) may override these below.
+  let confidence = hasExactConfirmation
+    ? Math.max(tier.confidence, cfg.confidence_threshold)
+    : tier.confidence;
+  let uncertain = confidence < cfg.confidence_threshold;
   for (const hit of overrideHits) {
     explanation.push({
       source: "override",
@@ -138,8 +145,9 @@ export function scoreRequest(req: InternalRequest, deps: ScoreRequestDeps): Clas
   // `simple` by the short_message override) or (b) a CONTENT-TYPE structural signal
   // gave real, language-agnostic grip (code block / stack / table / attachment / …).
   // Ambient signals (msg_length / turn_count) fire on every request and are NOT grip.
-  let confidence = tier.confidence;
-  let uncertain = tier.uncertain;
+  // Overrides the exact-confirmation / tier confidence computed above (a non-Latin
+  // prompt cannot have matched an English exact-confirmation token, so this only
+  // ever lowers confidence — never undoes a legitimate confirmation shortcut).
   if (safe(() => languageGuardTrips(req, cfg), false)) {
     confidence = 0;
     uncertain = true;
@@ -217,10 +225,10 @@ function deriveConstraints(
   const needs_json = isJsonResponseFormat(req.response_format);
   const needs_vision = hasImageAttachment(req.attachments);
   const long_context = approxTokens > cfg.overrides.long_context_token_threshold;
-  // A heartbeat or short-message shortcut signals a latency-sensitive, cheap
-  // request: prefer fast & cheap. `simple` tier also reads as low-cost.
+  // A heartbeat, exact confirmation, or short-message shortcut signals a
+  // latency-sensitive, cheap request: prefer fast & cheap.
   const heartbeatOrShort = overrideHits.some(
-    (h) => h.rule === "heartbeat" || h.rule === "short_message",
+    (h) => h.rule === "heartbeat" || h.rule === "exact_confirmation" || h.rule === "short_message",
   );
   const low_latency = heartbeatOrShort;
   const low_cost = heartbeatOrShort || complexity === "simple";

@@ -111,6 +111,10 @@ interface Case {
   lane: string;
 }
 const CASES: Case[] = [
+  { name: "exact yes", request: req("yes"), lane: "economy" },
+  { name: "exact no", request: req("no"), lane: "economy" },
+  { name: "exact sure", request: req("sure"), lane: "economy" },
+  { name: "exact got it", request: req("got it"), lane: "economy" },
   { name: "greeting hi", request: req("hi"), lane: "economy" },
   { name: "thanks", request: req("thanks"), lane: "economy" },
   { name: "good morning", request: req("good morning"), lane: "economy" },
@@ -140,6 +144,24 @@ const CASES: Case[] = [
   { name: "multistep coding", request: req("first set up the repo, then write the function, and then finally compile it"), lane: "coding" },
   { name: "json generic", request: req("respond with structured output", { response_format: { type: "json_object" } }), lane: "json" },
   { name: "ping", request: req("ping"), lane: "economy" },
+  // ── vocabulary expansion (2026-06-02) — mirrors golden-routing.test.ts ──
+  { name: "expand summarize->writing", request: req("summarize this article in two short sentences"), lane: "economy" },
+  { name: "expand paraphrase->writing", request: req("paraphrase this paragraph more clearly"), lane: "economy" },
+  { name: "expand derivative->math", request: req("calculate the derivative of this polynomial"), lane: "balanced" },
+  { name: "expand implement->coding", request: req("implement binary search and add unit tests for it"), lane: "economy" },
+  { name: "expand groupby->data", request: req("group by region and sum the revenue in this spreadsheet"), lane: "balanced" },
+  { name: "expand pullout->extraction", request: req("pull out all the email addresses from this text"), lane: "economy" },
+  { name: "expand assess->premium", request: req("assess the pros and cons of these two approaches and weigh the trade-offs"), lane: "premium" },
+  { name: "expand injection->security", request: req("audit this endpoint for sql injection and command injection vulnerabilities"), lane: "premium" },
+  { name: "expand injection no coding crutch->security", request: req("audit this service for sql injection and command injection vulnerabilities"), lane: "premium" },
+  { name: "no output analysis not simple", request: req("analyze why there is no output and diagnose the failure root cause"), lane: "premium" },
+  { name: "no stack trace debug not simple", request: req("debug why there is no stack trace in this failing compile step and refactor the failing function"), lane: "coding" },
+  { name: "no auth check audit not simple", request: req("audit why there is no auth check in this access control system and privilege escalation risk"), lane: "premium" },
+  { name: "short no output", request: req("no output"), lane: "premium" },
+  { name: "short no stack trace", request: req("no stack trace"), lane: "coding" },
+  { name: "short no auth check", request: req("no auth check"), lane: "premium" },
+  { name: "short no command injection", request: req("no command injection"), lane: "premium" },
+  { name: "expand roadmap->balanced", request: req("outline a project roadmap with milestones and break down the deliverables"), lane: "balanced" },
 ];
 
 const threshold = rulesCfg.confidence_threshold;
