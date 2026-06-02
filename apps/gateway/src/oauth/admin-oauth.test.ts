@@ -1,4 +1,10 @@
-import { createSqliteDb, decryptSecret, encryptSecret, SqliteOAuthTokenStore } from "@helm/core";
+import {
+  createSqliteDb,
+  decryptSecret,
+  encryptSecret,
+  SqliteConfigStore,
+  SqliteOAuthTokenStore,
+} from "@helm/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOAuthAdmin } from "./admin-oauth.js";
 
@@ -6,6 +12,19 @@ const KEY = Buffer.alloc(32, 4);
 
 function makeStore(): SqliteOAuthTokenStore {
   return new SqliteOAuthTokenStore(createSqliteDb(":memory:"));
+}
+
+// A token store + config store sharing ONE in-memory db (createSqliteDb migrates
+// both tables), for the model-curation tests that need the ConfigStore-backed
+// per-account settings blob.
+function makeStores(): { tokens: SqliteOAuthTokenStore; config: SqliteConfigStore } {
+  const db = createSqliteDb(":memory:");
+  return { tokens: new SqliteOAuthTokenStore(db), config: new SqliteConfigStore(db) };
+}
+
+// A throwaway ConfigStore for the flow tests that don't exercise account settings.
+function makeConfig(): SqliteConfigStore {
+  return new SqliteConfigStore(createSqliteDb(":memory:"));
 }
 
 function json(body: unknown, status = 200): Response {
@@ -28,7 +47,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("createOAuthAdmin", () => {
   it("lists the three built-in providers with no accounts initially", async () => {
-    const admin = createOAuthAdmin({ store: makeStore(), encKey: KEY });
+    const admin = createOAuthAdmin({ store: makeStore(), encKey: KEY, config: makeConfig() });
     const status = await admin.listStatus();
     expect(status.map((p) => p.id).sort()).toEqual(["anthropic", "github-copilot", "openai-codex"]);
     expect(status.find((p) => p.id === "anthropic")?.flow).toBe("manual_paste");
@@ -43,6 +62,7 @@ describe("createOAuthAdmin", () => {
     const admin = createOAuthAdmin({
       store,
       encKey: KEY,
+      config: makeConfig(),
       now: () => 1000,
       genSessionId: () => `s${++seq}`,
     });
@@ -75,7 +95,12 @@ describe("createOAuthAdmin", () => {
   it("binds MULTIPLE accounts of the SAME provider (each connect = a new account)", async () => {
     const store = makeStore();
     let seq = 0;
-    const admin = createOAuthAdmin({ store, encKey: KEY, genSessionId: () => `s${++seq}` });
+    const admin = createOAuthAdmin({
+      store,
+      encKey: KEY,
+      config: makeConfig(),
+      genSessionId: () => `s${++seq}`,
+    });
     vi.stubGlobal(
       "fetch",
       routeFetch([
@@ -102,7 +127,12 @@ describe("createOAuthAdmin", () => {
 
   it("manual-paste: Codex start -> complete persists encrypted creds (form-encoded exchange)", async () => {
     const store = makeStore();
-    const admin = createOAuthAdmin({ store, encKey: KEY, genSessionId: () => "cdx" });
+    const admin = createOAuthAdmin({
+      store,
+      encKey: KEY,
+      config: makeConfig(),
+      genSessionId: () => "cdx",
+    });
     // A Codex access token is a JWT; carry an account id claim so completion succeeds.
     const seg = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
     const jwt = `${seg({ alg: "none" })}.${seg({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_9" } })}.s`;
@@ -133,7 +163,12 @@ describe("createOAuthAdmin", () => {
 
   it("device-code: start -> poll(pending) -> poll(done) persists + stores enterprise meta", async () => {
     const store = makeStore();
-    const admin = createOAuthAdmin({ store, encKey: KEY, genSessionId: () => "dev" });
+    const admin = createOAuthAdmin({
+      store,
+      encKey: KEY,
+      config: makeConfig(),
+      genSessionId: () => "dev",
+    });
     const tokenResponses = [{ error: "authorization_pending" }, { access_token: "gho_x" }];
     let i = 0;
     vi.stubGlobal(
@@ -185,13 +220,13 @@ describe("createOAuthAdmin", () => {
       meta: null,
       updatedAt: 1,
     });
-    const admin = createOAuthAdmin({ store, encKey: KEY });
+    const admin = createOAuthAdmin({ store, encKey: KEY, config: makeConfig() });
     await admin.logout({ providerId: "anthropic", account: "default" });
     expect(await store.get("anthropic", "default")).toBeNull();
   });
 
   it("rejects an unknown/expired session", async () => {
-    const admin = createOAuthAdmin({ store: makeStore(), encKey: KEY });
+    const admin = createOAuthAdmin({ store: makeStore(), encKey: KEY, config: makeConfig() });
     await expect(
       admin.completeManualPaste({ sessionId: "nope", redirectInput: "code=x", account: "default" }),
     ).rejects.toThrow(/session not found/);
@@ -210,7 +245,7 @@ describe("createOAuthAdmin", () => {
       meta: null,
       updatedAt: 1,
     });
-    const admin = createOAuthAdmin({ store, encKey: KEY, now: () => NOW });
+    const admin = createOAuthAdmin({ store, encKey: KEY, config: makeConfig(), now: () => NOW });
     vi.stubGlobal(
       "fetch",
       routeFetch([
@@ -240,7 +275,12 @@ describe("createOAuthAdmin", () => {
       meta: null,
       updatedAt: 1,
     });
-    const admin = createOAuthAdmin({ store, encKey: KEY, now: () => 10_000_000 });
+    const admin = createOAuthAdmin({
+      store,
+      encKey: KEY,
+      config: makeConfig(),
+      now: () => 10_000_000,
+    });
     vi.stubGlobal(
       "fetch",
       routeFetch([[/copilot_internal\/v2\/token/, () => json({ error: "bad" }, 401)]]),
@@ -250,10 +290,254 @@ describe("createOAuthAdmin", () => {
   });
 
   it("rejects the wrong flow for a provider", async () => {
-    const admin = createOAuthAdmin({ store: makeStore(), encKey: KEY });
+    const admin = createOAuthAdmin({ store: makeStore(), encKey: KEY, config: makeConfig() });
     await expect(admin.startManualPaste({ providerId: "github-copilot" })).rejects.toThrow(
       /manual-paste/,
     );
     await expect(admin.startDeviceCode({ providerId: "anthropic" })).rejects.toThrow(/device-code/);
+  });
+
+  // ── per-account model curation (Stage 1) ───────────────────────────────────
+
+  it("listModels: an UNCURATED account reports enabled = all available (curated provider)", async () => {
+    const { tokens, config } = makeStores();
+    // A stored Anthropic credential whose access token refresh succeeds.
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "default",
+      accessEnc: encryptSecret("AT", KEY),
+      refreshEnc: encryptSecret("RT", KEY),
+      expiresAt: Date.now() + 3_600_000, // still fresh → no network on getAuthHeader
+      meta: null,
+      updatedAt: 1,
+    });
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    const { available, enabled } = await admin.listModels({
+      providerId: "anthropic",
+      account: "default",
+    });
+    // Anthropic is a curated provider → available is the curated set.
+    expect(available).toEqual(["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]);
+    // Unset settings ⇒ everything is enabled.
+    expect(enabled).toEqual(available);
+  });
+
+  it("setEnabledModels persists a subset; listModels then returns it as `enabled`", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "default",
+      accessEnc: encryptSecret("AT", KEY),
+      refreshEnc: encryptSecret("RT", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: null,
+      updatedAt: 1,
+    });
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    await admin.setEnabledModels({
+      providerId: "anthropic",
+      account: "default",
+      models: ["claude-opus-4-6"],
+    });
+    const { available, enabled } = await admin.listModels({
+      providerId: "anthropic",
+      account: "default",
+    });
+    expect(available).toContain("claude-opus-4-6");
+    expect(enabled).toEqual(["claude-opus-4-6"]);
+    // The persisted blob is ENCRYPTED (never plaintext model JSON).
+    const blob = await config.get("oauth.account_settings");
+    expect(blob).toContain("v1:");
+    expect(blob).not.toContain("claude-opus-4-6");
+    expect(decryptSecret(blob ?? "", KEY)).toContain("claude-opus-4-6");
+  });
+
+  it("listModels: Copilot discovers live models via the refreshed token (fail-open)", async () => {
+    const { tokens, config } = makeStores();
+    const NOW = 10_000_000;
+    await tokens.upsert({
+      providerId: "github-copilot",
+      account: "default",
+      accessEnc: encryptSecret("old;proxy-ep=proxy.x.com;", KEY),
+      refreshEnc: encryptSecret("gho_valid", KEY),
+      expiresAt: 1000, // expired → getAuthHeader re-mints the copilot token
+      meta: null,
+      updatedAt: 1,
+    });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [
+          /copilot_internal\/v2\/token/,
+          () => json({ token: "tid=y;proxy-ep=proxy.y.com;", expires_at: NOW / 1000 + 1800 }),
+        ],
+        [
+          /api\.y\.com\/models/, // proxy-ep=proxy.y.com → base https://api.y.com
+          () =>
+            json({
+              data: [
+                { id: "gpt-4o", object: "model", capabilities: { type: "chat" } },
+                { id: "claude-sonnet-4", object: "model", capabilities: { type: "chat" } },
+                { id: "accounts/x", object: "model" }, // dropped
+              ],
+            }),
+        ],
+      ]),
+    );
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config, now: () => NOW });
+    const { available, enabled } = await admin.listModels({
+      providerId: "github-copilot",
+      account: "default",
+    });
+    expect(available).toEqual(["claude-sonnet-4", "gpt-4o"]);
+    expect(enabled).toEqual(available);
+  });
+
+  it("listModels fails open to [] when discovery throws", async () => {
+    const { tokens, config } = makeStores();
+    // No stored credential → token manager getAuthHeader throws → caught, [].
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    const { available, enabled } = await admin.listModels({
+      providerId: "github-copilot",
+      account: "missing",
+    });
+    expect(available).toEqual([]);
+    expect(enabled).toEqual([]);
+  });
+
+  // ── per-account proxy (issue #38 follow-up) ─────────────────────────────────
+  it("getAccountProxy returns null when no proxy is configured", async () => {
+    const { tokens, config } = makeStores();
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    expect(await admin.getAccountProxy({ providerId: "anthropic", account: "default" })).toBeNull();
+  });
+
+  it("setAccountProxy persists; getAccountProxy returns it WITHOUT the password", async () => {
+    const { tokens, config } = makeStores();
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    await admin.setAccountProxy({
+      providerId: "anthropic",
+      account: "default",
+      proxy: { type: "socks5", host: "10.0.0.1", port: 1080, username: "u", password: "secret" },
+    });
+    const view = await admin.getAccountProxy({ providerId: "anthropic", account: "default" });
+    expect(view).toEqual({
+      type: "socks5",
+      host: "10.0.0.1",
+      port: 1080,
+      username: "u",
+      hasPassword: true,
+    });
+    // The password is NEVER in the projection (principle 7).
+    expect(JSON.stringify(view)).not.toContain("secret");
+    // …but it IS persisted (encrypted) so routing can use it.
+    const blob = await config.get("oauth.account_settings");
+    expect(blob).toContain("v1:");
+    expect(blob).not.toContain("secret");
+    expect(decryptSecret(blob ?? "", KEY)).toContain("secret");
+  });
+
+  it("setAccountProxy with an omitted password PRESERVES the stored one", async () => {
+    const { tokens, config } = makeStores();
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    await admin.setAccountProxy({
+      providerId: "anthropic",
+      account: "default",
+      proxy: { type: "http", host: "p", port: 8080, password: "keep-me" },
+    });
+    // Edit host/port only; no password field → the prior password survives.
+    await admin.setAccountProxy({
+      providerId: "anthropic",
+      account: "default",
+      proxy: { type: "http", host: "p2", port: 9090 },
+    });
+    const view = await admin.getAccountProxy({ providerId: "anthropic", account: "default" });
+    expect(view).toMatchObject({ host: "p2", port: 9090, hasPassword: true });
+    expect(decryptSecret((await config.get("oauth.account_settings")) ?? "", KEY)).toContain(
+      "keep-me",
+    );
+  });
+
+  it("setAccountProxy(null) CLEARS the proxy back to a direct connection", async () => {
+    const { tokens, config } = makeStores();
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    await admin.setAccountProxy({
+      providerId: "anthropic",
+      account: "default",
+      proxy: { type: "http", host: "p", port: 8080 },
+    });
+    await admin.setAccountProxy({ providerId: "anthropic", account: "default", proxy: null });
+    expect(await admin.getAccountProxy({ providerId: "anthropic", account: "default" })).toBeNull();
+  });
+
+  it("setAccountProxy rejects a malformed proxy (fail-closed)", async () => {
+    const { tokens, config } = makeStores();
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    await expect(
+      admin.setAccountProxy({
+        providerId: "anthropic",
+        account: "default",
+        proxy: { type: "http", host: "", port: 8080 },
+      }),
+    ).rejects.toThrow(/host/);
+  });
+
+  // ── per-account pool scheduling (Stage 3) ──────────────────────────────────
+  it("getAccountSchedule returns the defaults (priority 50, schedulable true)", async () => {
+    const { tokens, config } = makeStores();
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    expect(await admin.getAccountSchedule({ providerId: "anthropic", account: "default" })).toEqual(
+      {
+        priority: 50,
+        schedulable: true,
+      },
+    );
+  });
+
+  it("setAccountSchedule persists priority + schedulable; round-trips", async () => {
+    const { tokens, config } = makeStores();
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    await admin.setAccountSchedule({
+      providerId: "anthropic",
+      account: "a1",
+      priority: 10,
+      schedulable: false,
+    });
+    expect(await admin.getAccountSchedule({ providerId: "anthropic", account: "a1" })).toEqual({
+      priority: 10,
+      schedulable: false,
+    });
+  });
+
+  it("setAccountSchedule leaves an omitted field unchanged + preserves proxy", async () => {
+    const { tokens, config } = makeStores();
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    await admin.setAccountProxy({
+      providerId: "anthropic",
+      account: "default",
+      proxy: { type: "http", host: "p", port: 8080, password: "keep" },
+    });
+    await admin.setAccountSchedule({ providerId: "anthropic", account: "default", priority: 5 });
+    // schedulable omitted → default; priority set; proxy untouched.
+    expect(await admin.getAccountSchedule({ providerId: "anthropic", account: "default" })).toEqual(
+      {
+        priority: 5,
+        schedulable: true,
+      },
+    );
+    await admin.setAccountSchedule({
+      providerId: "anthropic",
+      account: "default",
+      schedulable: false,
+    });
+    expect(await admin.getAccountSchedule({ providerId: "anthropic", account: "default" })).toEqual(
+      {
+        priority: 5,
+        schedulable: false,
+      },
+    );
+    expect(decryptSecret((await config.get("oauth.account_settings")) ?? "", KEY)).toContain(
+      "keep",
+    );
   });
 });

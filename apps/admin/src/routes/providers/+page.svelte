@@ -3,11 +3,13 @@
   import { invalidateAll } from '$app/navigation';
   import { logoutOAuth, type OAuthAccount, type OAuthProviderStatus } from '$lib/api/oauth.js';
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
+  import ManageAccountDialog from '$lib/components/ManageAccountDialog.svelte';
   import { t } from '$lib/i18n';
 
   // Subscription OAuth login (issue #38). Pure consumer (Principle 1): the gateway
   // owns the flow + encrypted token storage; this page just lists connected
-  // accounts and opens the Connect dialog. Multiple accounts per provider are
+  // accounts, opens the Connect dialog, and the per-account Manage dialog (model
+  // curation / egress proxy / pool scheduling). Multiple accounts per provider are
   // supported (the store is keyed by provider + account label).
   let {
     data,
@@ -16,6 +18,9 @@
 
   let error = $state<string | null>(untrack(() => data.loadError ?? null));
   let showConnect = $state<boolean>(false);
+  // The account whose Manage dialog is open ({#if} remounts it per selection so the
+  // dialog's per-section editing buffers reset cleanly each time).
+  let managing = $state<{ providerId: string; providerName: string; account: string } | null>(null);
   let confirming = $state<{ providerId: string; account: string } | null>(null);
   let disconnecting = $state<boolean>(false);
 
@@ -42,6 +47,14 @@
 
   function onConnected(): void {
     showConnect = false;
+    void invalidateAll();
+  }
+
+  // The Manage dialog persists each section itself; on close it tells us whether any
+  // section changed so we invalidate exactly once (the Lanes catalog / pool reflect
+  // the new model exposure + schedulable membership).
+  function onManaged(): void {
+    managing = null;
     void invalidateAll();
   }
 
@@ -97,6 +110,16 @@
     />
   {/if}
 
+  {#if managing}
+    <ManageAccountDialog
+      providerId={managing.providerId}
+      providerName={managing.providerName}
+      account={managing.account}
+      onsaved={onManaged}
+      onclose={() => (managing = null)}
+    />
+  {/if}
+
   {#if rows.length === 0}
     <div class="empty-state">
       <p>
@@ -119,7 +142,7 @@
         </thead>
         <tbody>
           {#each rows as row (row.provider.id + '/' + row.account.account)}
-            <tr class="table-row align-top">
+            <tr class="table-row">
               <td class="px-3 py-2 text-ink-body">{row.provider.name}</td>
               <td class="px-3 py-2">
                 <code class="font-mono text-ink-strong">{row.account.account}</code>
@@ -133,14 +156,26 @@
               </td>
               <td class="px-3 py-2 text-ink-muted">{expiryLabel(row.account)}</td>
               <td class="px-3 py-2 text-right">
-                <button
-                  type="button"
-                  class="btn-danger-outline"
-                  disabled={disconnecting}
-                  onclick={() =>
-                    (confirming = { providerId: row.provider.id, account: row.account.account })}
-                  >{$t('Disconnect')}</button
-                >
+                <div class="inline-flex gap-2">
+                  <button
+                    type="button"
+                    class="btn-secondary"
+                    onclick={() =>
+                      (managing = {
+                        providerId: row.provider.id,
+                        providerName: row.provider.name,
+                        account: row.account.account,
+                      })}>{$t('Manage')}</button
+                  >
+                  <button
+                    type="button"
+                    class="btn-danger-outline"
+                    disabled={disconnecting}
+                    onclick={() =>
+                      (confirming = { providerId: row.provider.id, account: row.account.account })}
+                    >{$t('Disconnect')}</button
+                  >
+                </div>
               </td>
             </tr>
           {/each}

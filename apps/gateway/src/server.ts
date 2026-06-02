@@ -5,9 +5,11 @@ import {
   anthropicTransformer,
   bootstrapRootKey,
   COPILOT_HEADERS,
+  type ConfigStore,
   createAnthropicClient,
   createCircuitBreaker,
   createMemoryMomentumStore,
+  createOAuthPoolClient,
   createOpenAIClient,
   createProviderRegistry,
   createRateLimiter,
@@ -28,10 +30,13 @@ import {
   loadRuntimeCatalog,
   loadRuntimeSettings,
   makeAnthropicError,
+  makeProxyFetch,
+  type OAuthPoolMember,
   type OAuthTokenStore,
   type ObserveDeps,
   type PoliciesConfig,
   type ProviderClient,
+  type ProxyConfig,
   parseLanesConfig,
   type ProviderRegistryConfig as RegistryProviderConfig,
   type RouteOptions,
@@ -60,6 +65,11 @@ import { authMiddleware } from "./middleware/auth.js";
 import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middleware/basic-auth.js";
 import { estimateRequestTokens } from "./middleware/estimate-tokens.js";
 import { type RateLimiterPort, rateLimitMiddleware } from "./middleware/rate-limit.js";
+import {
+  type AccountSettingsMap,
+  getAccountSettings,
+  loadAccountSettings,
+} from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
@@ -181,70 +191,162 @@ const ROUTABLE_OAUTH: Record<string, { type: string; baseUrl?: string }> = {
   "github-copilot": { type: "openai" },
 };
 
+// The synthesis result (issue #38, Stage 3): one synthetic provider config per
+// routable subscription, plus the POOL client that serves ALL its accounts. The
+// config carries the UNION of every schedulable account's enabled models as
+// `<provider>/<model>` aliases (so Lanes sees the full exposure); the registry
+// maps each alias to providerName === providerId, and `poolClients.get(providerId)`
+// returns ONE pool client that round-robins across the accounts on every call.
+export interface SynthesizedOAuth {
+  providers: ProviderConfigShared[];
+  poolClients: Map<string, ProviderClient>;
+}
+
 // Turn bound subscription credentials into routable providers (issue #38, "connect
-// = routable"): for each connected account of an executor-ready provider NOT
-// already declared in providers.yaml, synthesize a provider config (type + oauth
-// preset + discovered models as `<provider>/<model>` aliases). Fed through the same
-// client/registry/modelAliases pipeline as configured providers, so the models show
-// up in the Lanes picker and route. Discovery is live where possible (Copilot
-// /models), else curated. Fail-open: a dead credential / empty model list skips
-// that provider (logged), never blocks startup. v1 routes ONE account per provider
-// (the "default", else the first); per-account routing is a follow-up.
-async function synthesizeOAuthProviders(
+// = routable"): for each executor-ready provider NOT already declared in
+// providers.yaml, build a POOL over ALL its SCHEDULABLE bound accounts. Each
+// account gets its own per-account client (token manager + egress proxy + executor
+// type); the pool selects one per request by priority (asc) then LRU round-robin
+// (Stage 3). The synthetic provider config exposes the UNION of the accounts'
+// enabled models to Lanes. Discovery is live where possible (Copilot /models),
+// else curated. Fail-open (principle 3): a dead credential / empty model list skips
+// THAT account (logged); a provider with no live account is skipped entirely;
+// startup is never blocked.
+export async function synthesizeOAuthProviders(
   configured: ReadonlyArray<ProviderConfigShared>,
   oauthCtx: OAuthRuntimeCtx | undefined,
+  config: ConfigStore,
+  fallbackBaseUrl: string,
+  timeoutMs: number,
   log: (level: "info" | "warn", msg: string, fields?: Record<string, unknown>) => void,
-): Promise<ProviderConfigShared[]> {
-  if (!oauthCtx) return [];
+): Promise<SynthesizedOAuth> {
+  if (!oauthCtx) return { providers: [], poolClients: new Map() };
   const declared = new Set<string>(
     configured.flatMap((p) => (p.oauth && isOAuthPreset(p.oauth) ? [p.oauth.provider] : [])),
   );
-  // Choose one account per provider: prefer "default", else the first seen.
-  const chosen = new Map<string, string>();
+  // Group every bound account by routable provider (skip non-routable providers
+  // like openai-codex and any provider already declared in providers.yaml).
+  const accountsByProvider = new Map<string, string[]>();
   for (const b of await oauthCtx.store.list()) {
     if (!ROUTABLE_OAUTH[b.providerId] || declared.has(b.providerId)) continue;
-    if (!chosen.has(b.providerId) || b.account === "default") chosen.set(b.providerId, b.account);
+    const list = accountsByProvider.get(b.providerId) ?? [];
+    list.push(b.account);
+    accountsByProvider.set(b.providerId, list);
   }
-  const out: ProviderConfigShared[] = [];
-  for (const [providerId, account] of chosen) {
+  // Per-account settings: enabledModels curation + priority + schedulable.
+  // Loaded once (fail-open to {}).
+  const accountSettings = await loadAccountSettings(config, oauthCtx.encKey);
+  const providers: ProviderConfigShared[] = [];
+  const poolClients = new Map<string, ProviderClient>();
+
+  for (const [providerId, accounts] of accountsByProvider) {
     const spec = ROUTABLE_OAUTH[providerId];
     const provider = getOAuthProvider(providerId);
     if (!spec || !provider) continue;
-    let accessToken: string;
-    try {
-      const tm = createTokenManager({
-        oauth: { kind: "preset", providerId, account },
-        tokenStore: oauthCtx.store,
-        encKey: oauthCtx.encKey,
-        oauthProvider: provider,
-        now: () => Date.now(),
-      });
-      accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
-    } catch {
-      log("warn", "oauth.autoroute.skip", { providerId, reason: "credential refresh failed" });
+
+    // Build a pool member per SCHEDULABLE account (a parked account stays connected
+    // but never routes). Accumulate the UNION of enabled models across the members.
+    const members: OAuthPoolMember[] = [];
+    const unionModels = new Set<string>();
+    for (const account of accounts) {
+      const s = getAccountSettings(accountSettings, providerId, account);
+      if (s.schedulable === false) {
+        log("info", "oauth.autoroute.parked", { providerId, account });
+        continue;
+      }
+      let accessToken: string;
+      try {
+        const tm = createTokenManager({
+          oauth: { kind: "preset", providerId, account },
+          tokenStore: oauthCtx.store,
+          encKey: oauthCtx.encKey,
+          oauthProvider: provider,
+          now: () => Date.now(),
+        });
+        accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
+      } catch {
+        log("warn", "oauth.autoroute.skip", { providerId, account, reason: "refresh failed" });
+        continue;
+      }
+      let discovered: string[];
+      try {
+        discovered = await discoverOAuthModels(providerId, accessToken);
+      } catch {
+        discovered = [];
+      }
+      // Filter to the account's exposed subset (unset ⇒ all discovered).
+      if (s.enabledModels) discovered = discovered.filter((m) => s.enabledModels?.includes(m));
+      if (discovered.length === 0) {
+        log("warn", "oauth.autoroute.no_models", { providerId, account });
+        continue;
+      }
+      for (const m of discovered) unionModels.add(m);
+      // The per-account config drives createProviderClient (type + oauth preset +
+      // base). The per-account egress proxy is resolved from the same settings.
+      const accountConfig = {
+        name: providerId,
+        alias: providerId,
+        type: spec.type,
+        base_url: spec.baseUrl,
+        oauth: { provider: providerId, account },
+        models: [],
+      } as unknown as ProviderConfigShared;
+      const cred = buildCredential(accountConfig, oauthCtx);
+      if (!cred) continue; // unreachable (token just refreshed) — fail-open guard
+      const proxy = resolveProviderProxy(accountConfig, accountSettings);
+      const client = createProviderClient(
+        accountConfig,
+        { baseUrl: spec.baseUrl ?? fallbackBaseUrl, timeoutMs },
+        cred,
+        proxy,
+      );
+      members.push({ account, priority: s.priority ?? 50, schedulable: true, client });
+    }
+
+    if (members.length === 0 || unionModels.size === 0) {
+      log("warn", "oauth.autoroute.empty", { providerId });
       continue;
     }
-    let models: string[];
-    try {
-      models = await discoverOAuthModels(providerId, accessToken);
-    } catch {
-      models = [];
-    }
-    if (models.length === 0) {
-      log("warn", "oauth.autoroute.no_models", { providerId });
-      continue;
-    }
-    out.push({
+    // ONE pool client per provider, keyed by providerId. onSelect records the
+    // serving account (Stage 3 telemetry) — a non-secret structured log line.
+    const pool = createOAuthPoolClient({
+      members,
+      now: () => Date.now(),
+      onSelect: (account) => log("info", "oauth.pool.select", { providerId, account }),
+    });
+    poolClients.set(providerId, pool);
+    providers.push({
       name: providerId,
       alias: providerId,
       type: spec.type,
       base_url: spec.baseUrl,
-      oauth: { provider: providerId, account },
-      models: models.map((m) => ({ alias: `${providerId}/${m}`, provider_model: m })),
+      // The synthetic config keeps an oauth preset (informational); the pool
+      // client below overrides any single-account client for this provider name.
+      oauth: { provider: providerId, account: members[0]?.account ?? "default" },
+      models: [...unionModels].map((m) => ({ alias: `${providerId}/${m}`, provider_model: m })),
     } as ProviderConfigShared);
-    log("info", "oauth.autoroute", { providerId, account, models: models.length });
+    log("info", "oauth.autoroute", {
+      providerId,
+      accounts: members.length,
+      models: unionModels.size,
+    });
   }
-  return out;
+  return { providers, poolClients };
+}
+
+// Per-account egress proxy resolver (issue #38 follow-up). A preset OAuth provider
+// MAY pin a proxy in its account settings so its upstream traffic leaves from a
+// distinct IP. Returns the validated proxy for `p`'s bound account, or undefined
+// (direct connection) when none is set / `p` is not a preset OAuth provider. The
+// settings map is loaded once at the composition root; proxies are keyed by the
+// SAME `${providerId} ${account}` composite as the rest of the per-account state.
+export function resolveProviderProxy(
+  p: ProviderConfigShared,
+  accountSettings: AccountSettingsMap,
+): ProxyConfig | undefined {
+  if (!p.oauth || !isOAuthPreset(p.oauth)) return undefined;
+  const proxy = getAccountSettings(accountSettings, p.oauth.provider, p.oauth.account).proxy;
+  return proxy ? (proxy as ProxyConfig) : undefined;
 }
 
 // Resolve a provider's credential from env / store (issue #38). Returns null when
@@ -324,13 +426,17 @@ export function buildProviderClients(
   fallbackBaseUrl: string,
   timeoutMs: number,
   oauthCtx?: OAuthRuntimeCtx,
+  // Per-account proxy settings (issue #38 follow-up). Optional so the existing
+  // unit tests stay valid; when absent, every account egresses directly.
+  accountSettings: AccountSettingsMap = {},
 ): Map<string, ProviderClient> {
   const clients = new Map<string, ProviderClient>();
   for (const p of providers) {
     const cred = buildCredential(p, oauthCtx);
     if (!cred) continue; // no credential → cannot build a client; skip.
     const baseUrl = p.base_url ?? fallbackBaseUrl;
-    clients.set(p.name, createProviderClient(p, { baseUrl, timeoutMs }, cred));
+    const proxy = resolveProviderProxy(p, accountSettings);
+    clients.set(p.name, createProviderClient(p, { baseUrl, timeoutMs }, cred, proxy));
   }
   return clients;
 }
@@ -344,9 +450,16 @@ function createProviderClient(
   p: ProviderConfigShared,
   base: { baseUrl: string; timeoutMs: number },
   cred: ProviderCredential,
+  // Per-account egress proxy (issue #38 follow-up). When set, ALL of this
+  // provider's upstream traffic tunnels through it via the executor's injected
+  // `fetch` seam — invisible to the protocol layer. undefined ⇒ direct connection.
+  proxy?: ProxyConfig,
 ): ProviderClient {
+  // One proxy fetch per client (the executor keeps one client per account, so the
+  // undici dispatcher is pooled per account). Built ONCE here, not per request.
+  const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
   if (p.type === "anthropic") {
-    return createAnthropicClient({ config: { ...base, ...cred } });
+    return createAnthropicClient({ config: { ...base, ...cred }, fetch: proxyFetch });
   }
   // GitHub Copilot is OpenAI-compatible, BUT: (1) it requires editor identity
   // headers on every call, and (2) its API host comes from the current token's
@@ -369,9 +482,10 @@ function createProviderClient(
         resolveBaseUrl: async () =>
           getGitHubCopilotBaseUrl((await getAuth()).replace(/^Bearer /, "")),
       },
+      fetch: proxyFetch,
     });
   }
-  return createOpenAIClient({ config: { ...base, ...cred } });
+  return createOpenAIClient({ config: { ...base, ...cred }, fetch: proxyFetch });
 }
 
 // Full wiring: config -> store -> bootstrap key -> provider -> routing pipeline.
@@ -420,15 +534,13 @@ export async function buildServer(
     ? { store: store.oauthTokens, encKey: oauthEncKey }
     : undefined;
 
-  // Bound subscriptions become routable providers (issue #38) — synthesized from
-  // stored credentials + discovered models, then merged with the configured
-  // providers for client building, the registry, and the Lanes model catalog.
-  const synthesizedOAuth = await synthesizeOAuthProviders(
-    config.providers,
-    oauthCtx,
-    (lvl, msg, f) => logger.log(lvl, msg, f),
-  );
-  const routableProviders: ProviderConfigShared[] = [...config.providers, ...synthesizedOAuth];
+  // Per-account settings blob (issue #38 follow-up): proxy / curation / pool state,
+  // loaded ONCE here (fail-open to {}) and threaded into client building so each
+  // preset OAuth account egresses through its pinned proxy (if any). Empty when no
+  // enc key is wired — then every account connects directly.
+  const accountSettings: AccountSettingsMap = oauthCtx
+    ? await loadAccountSettings(store.config, oauthCtx.encKey)
+    : {};
 
   // Runtime-mutable settings (admin "System Settings"): persisted overrides for
   // the operator-facing subset that can change WITHOUT a restart (capture_payloads,
@@ -533,22 +645,59 @@ export async function buildServer(
   const fallbackBaseUrl = baseUrlOverride ?? "https://api.openai.com/v1";
   const baseUrl = baseUrlOverride ?? first.base_url ?? fallbackBaseUrl;
   const timeoutMs = config.runtime.request_timeout_ms;
+
+  // Bound subscriptions become routable providers (issue #38, Stage 3). For each
+  // routable subscription NOT declared in providers.yaml, synthesize a provider
+  // exposing the UNION of its schedulable accounts' enabled models, backed by a
+  // POOL client that round-robins across those accounts (priority asc, then LRU).
+  // Built HERE (after fallbackBaseUrl/timeoutMs) so each per-account client is
+  // wired with the same base/timeout + its own proxy. The pool clients override any
+  // single-name client for the same providerId in providerClients below.
+  const synthBaseUrl = baseUrlOverride ?? fallbackBaseUrl;
+  const synthesizedOAuth = await synthesizeOAuthProviders(
+    config.providers,
+    oauthCtx,
+    store.config,
+    synthBaseUrl,
+    timeoutMs,
+    (lvl, msg, f) => logger.log(lvl, msg, f),
+  );
+  const routableProviders: ProviderConfigShared[] = [
+    ...config.providers,
+    ...synthesizedOAuth.providers,
+  ];
+
   // The default/primary client (eval + passthrough + back-fill aliases), dispatched
   // by type (anthropic native vs OpenAI-compatible). When the primary is OAuth this
   // SAME dynamic-header client backs the eval/classify path below, so eval auth
   // never silently fails (acceptance criterion 9).
-  const provider = createProviderClient(first, { baseUrl, timeoutMs }, primaryCred);
-  // Per-provider clients keyed by provider NAME. When HELM_PROVIDER_BASE_URL is
-  // set (test/e2e), force the override so cross-provider candidates still hit the
-  // mock; in production each provider keeps its own base_url.
+  const provider = createProviderClient(
+    first,
+    { baseUrl, timeoutMs },
+    primaryCred,
+    resolveProviderProxy(first, accountSettings),
+  );
+  // Per-provider clients keyed by provider NAME. Only the CONFIGURED providers go
+  // through buildProviderClients (one static/OAuth client each). When
+  // HELM_PROVIDER_BASE_URL is set (test/e2e), force the override so cross-provider
+  // candidates still hit the mock; in production each provider keeps its own base_url.
   const providerClients = buildProviderClients(
     baseUrlOverride
-      ? routableProviders.map((p) => ({ ...p, base_url: baseUrlOverride }))
-      : routableProviders,
+      ? config.providers.map((p) => ({ ...p, base_url: baseUrlOverride }))
+      : config.providers,
     fallbackBaseUrl,
     timeoutMs,
     oauthCtx,
+    accountSettings,
   );
+  // Merge the synthesized OAuth POOL clients (Stage 3): each subscription provider
+  // is keyed by its providerId and served by ONE pool that rotates across the
+  // bound accounts. These OVERRIDE any same-named single-account client — every
+  // `<provider>/<model>` alias resolves (via the registry) to providerName ===
+  // providerId, so this single pool client serves them all.
+  for (const [providerId, client] of synthesizedOAuth.poolClients) {
+    providerClients.set(providerId, client);
+  }
   // Ensure the primary client is registered under its name (it is built above with
   // the resolved baseUrl, which already honors the override).
   providerClients.set(first.name, provider);
@@ -775,7 +924,11 @@ export async function buildServer(
       // configured (oauthCtx); otherwise the /admin/api/oauth routes 503 — login
       // is disabled rather than storing tokens in plaintext (principle 7).
       oauth: oauthCtx
-        ? createOAuthAdmin({ store: oauthCtx.store, encKey: oauthCtx.encKey })
+        ? createOAuthAdmin({
+            store: oauthCtx.store,
+            encKey: oauthCtx.encKey,
+            config: store.config,
+          })
         : undefined,
     });
 

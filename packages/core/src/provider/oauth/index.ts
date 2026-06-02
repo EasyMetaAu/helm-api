@@ -30,6 +30,11 @@ export {
   openaiCodexOAuthProvider,
   refreshOpenAICodexToken,
 } from "./openai-codex.js";
+export {
+  createOAuthPoolClient,
+  type OAuthPoolDeps,
+  type OAuthPoolMember,
+} from "./pool.js";
 export { getOAuthProvider, getOAuthProviders, listOAuthProviderIds } from "./registry.js";
 export {
   buildOAuthRequestSignal,

@@ -108,6 +108,155 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
   });
 
+  // GET /oauth/:provider/models?account=... -> { available, enabled }
+  // The discovered models for one account + the operator's exposed subset.
+  app.get("/admin/api/oauth/:provider/models", async (c) => {
+    const s = seam();
+    if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    const account = c.req.query("account") || DEFAULT_ACCOUNT;
+    try {
+      return c.json(await s.listModels({ providerId: c.req.param("provider"), account }));
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
+  // PUT /oauth/:provider/models { account?, models: string[] } -> 204
+  // Persist which discovered models this account exposes to Lanes.
+  app.put("/admin/api/oauth/:provider/models", async (c) => {
+    const s = seam();
+    if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      account?: unknown;
+      models?: unknown;
+    };
+    if (!Array.isArray(body.models) || body.models.some((m) => typeof m !== "string")) {
+      return c.json({ error: "models must be an array of strings" }, 400);
+    }
+    try {
+      await s.setEnabledModels({
+        providerId: c.req.param("provider"),
+        account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
+        models: body.models as string[],
+      });
+      return c.body(null, 204);
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
+  // GET /oauth/:provider/proxy?account=... -> AccountProxyView | null
+  // The account's egress proxy (issue #38 follow-up). NEVER returns the password —
+  // only `hasPassword`. null = no proxy (direct connection).
+  app.get("/admin/api/oauth/:provider/proxy", async (c) => {
+    const s = seam();
+    if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    const account = c.req.query("account") || DEFAULT_ACCOUNT;
+    try {
+      return c.json({
+        proxy: await s.getAccountProxy({ providerId: c.req.param("provider"), account }),
+      });
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
+  // PUT /oauth/:provider/proxy { account?, proxy: {type,host,port,username?,password?} | null } -> 204
+  // Persist or CLEAR (proxy: null) the account's egress proxy. A malformed proxy is
+  // rejected (400) and never persisted (fail-closed). An omitted password on an
+  // update preserves the stored one (the seam resolves it).
+  app.put("/admin/api/oauth/:provider/proxy", async (c) => {
+    const s = seam();
+    if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      account?: unknown;
+      proxy?: unknown;
+    };
+    const account =
+      typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
+    let proxy: Parameters<NonNullable<typeof s>["setAccountProxy"]>[0]["proxy"];
+    if (body.proxy === null || body.proxy === undefined) {
+      proxy = null;
+    } else if (typeof body.proxy === "object") {
+      const p = body.proxy as Record<string, unknown>;
+      if (
+        (p.type !== "http" && p.type !== "https" && p.type !== "socks5") ||
+        typeof p.host !== "string" ||
+        typeof p.port !== "number"
+      ) {
+        return c.json({ error: "proxy requires type (http|https|socks5), host, port" }, 400);
+      }
+      proxy = {
+        type: p.type,
+        host: p.host,
+        port: p.port,
+        ...(typeof p.username === "string" ? { username: p.username } : {}),
+        ...(typeof p.password === "string" ? { password: p.password } : {}),
+      };
+    } else {
+      return c.json({ error: "proxy must be an object or null" }, 400);
+    }
+    try {
+      await s.setAccountProxy({ providerId: c.req.param("provider"), account, proxy });
+      return c.body(null, 204);
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
+  // GET /oauth/:provider/account?account=... -> AccountScheduleView
+  // The account's effective scheduling (priority + schedulable; defaults applied).
+  app.get("/admin/api/oauth/:provider/account", async (c) => {
+    const s = seam();
+    if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    const account = c.req.query("account") || DEFAULT_ACCOUNT;
+    try {
+      return c.json(await s.getAccountSchedule({ providerId: c.req.param("provider"), account }));
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
+  // PUT /oauth/:provider/account { account?, priority?, schedulable? } -> 204
+  // Persist the account's pool scheduling. priority must be a finite integer; either
+  // field may be omitted to leave it unchanged (fail-closed on a malformed value).
+  app.put("/admin/api/oauth/:provider/account", async (c) => {
+    const s = seam();
+    if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      account?: unknown;
+      priority?: unknown;
+      schedulable?: unknown;
+    };
+    const account =
+      typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
+    let priority: number | undefined;
+    if (body.priority !== undefined) {
+      if (typeof body.priority !== "number" || !Number.isInteger(body.priority)) {
+        return c.json({ error: "priority must be an integer" }, 400);
+      }
+      priority = body.priority;
+    }
+    let schedulable: boolean | undefined;
+    if (body.schedulable !== undefined) {
+      if (typeof body.schedulable !== "boolean") {
+        return c.json({ error: "schedulable must be a boolean" }, 400);
+      }
+      schedulable = body.schedulable;
+    }
+    try {
+      await s.setAccountSchedule({
+        providerId: c.req.param("provider"),
+        account,
+        priority,
+        schedulable,
+      });
+      return c.body(null, 204);
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
   // DELETE /oauth/:provider?account=... -> 204 (log out / forget a credential)
   app.delete("/admin/api/oauth/:provider", async (c) => {
     const s = seam();

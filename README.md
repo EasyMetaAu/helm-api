@@ -181,6 +181,12 @@ Instead of a static API key, a provider can authenticate with an **OAuth subscri
 
 To enable it, set **`HELM_OAUTH_ENC_KEY`** to a 32-byte key (base64, or 64 hex chars) — Helm uses it to encrypt stored tokens and **refuses to start** if a subscription provider is configured without it. Configure the provider with an `oauth: { provider: anthropic | github-copilot | openai-codex }` block (see the commented examples in `config/providers.yaml`); for Claude use `type: anthropic`.
 
+You can connect **several accounts of one provider** and Helm pools them. Each account, via **Providers → Manage**, has its own:
+
+- **Models** — curate exactly which discovered models that account exposes to your lanes.
+- **Proxy** — route that account's upstream traffic through an HTTP/HTTPS/SOCKS5 proxy so it egresses from a distinct IP (avoids ban-correlation when accounts share a host).
+- **Schedule** — a `priority` (lower = served first) and a `schedulable` toggle. Helm picks the lowest-priority account, round-robin (least-recently-used) within an equal priority; parking an account keeps it connected but out of rotation.
+
 > ⚠️ **Terms of service.** Routing a Claude/ChatGPT/Copilot **subscription** through a third-party gateway may violate the provider's terms of service, which can be grounds for account suspension. This is an opt-in feature for self-hosted, personal use — **you are responsible** for ensuring your usage complies with your provider agreements. When in doubt, use a normal API key (`api_key_env`) instead.
 
 ## The dashboard

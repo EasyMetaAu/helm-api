@@ -160,6 +160,15 @@ providers:
   # ⚠️ ToS: using a Claude/Copilot subscription via a third-party gateway may violate
   #   the provider's terms — you opt in (see README "OAuth subscription providers").
   #
+  # Multi-account pool: connect SEVERAL accounts of one provider (Providers →
+  # Connect) and Helm pools them. Per-account settings live ENCRYPTED in the DB
+  # (config_kv), edited from the admin UI under Providers → Manage — NOT in this
+  # file: which models each account exposes, an egress proxy (HTTP/HTTPS/SOCKS5)
+  # so each account leaves from a distinct IP, and a schedule (priority — lower =
+  # served first; round-robin within an equal priority; "parked" = kept connected
+  # but out of rotation). The `account:` field below only names ONE account to
+  # declare statically; the pool needs no YAML.
+  #
   # Claude Pro/Max (native Anthropic executor — note `type: anthropic`):
   # - name: claude-pro
   #   type: anthropic

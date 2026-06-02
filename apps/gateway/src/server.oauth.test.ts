@@ -1,7 +1,19 @@
+import {
+  createSqliteDb,
+  encryptSecret,
+  SqliteConfigStore,
+  SqliteOAuthTokenStore,
+} from "@helm/core";
 import type { ProviderConfig as ProviderConfigShared } from "@helm/shared";
 import { ProviderConfigSchema } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildCredential, buildProviderClients } from "./server.js";
+import { setAccountSettings } from "./oauth/account-settings.js";
+import {
+  buildCredential,
+  buildProviderClients,
+  type OAuthRuntimeCtx,
+  synthesizeOAuthProviders,
+} from "./server.js";
 
 // Compose a validated shared ProviderConfig (so tests exercise the real schema
 // shape, not a hand-rolled object). Parse never fails for these fixtures.
@@ -127,5 +139,104 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
     );
     expect(clients.has("openai")).toBe(true);
     expect(clients.has("claude-sub")).toBe(false);
+  });
+});
+
+// ── synthesizeOAuthProviders (Stage 3: priority + round-robin account pool) ────
+// Anthropic discovers its models from the CURATED list (offline — no network), so
+// a far-future access-token expiry makes the whole synthesis run without touching
+// the network. Two bound accounts → ONE synthetic provider exposing the UNION of
+// their enabled models, served by ONE pool client keyed by providerId.
+const ENC_KEY = Buffer.alloc(32, 7);
+const FAR_FUTURE = 9_999_999_999_999; // ms epoch well past any clock skew → no refresh
+
+function oauthStores(): { ctx: OAuthRuntimeCtx; config: SqliteConfigStore } {
+  const db = createSqliteDb(":memory:");
+  return {
+    ctx: { store: new SqliteOAuthTokenStore(db), encKey: ENC_KEY },
+    config: new SqliteConfigStore(db),
+  };
+}
+
+async function seedAnthropic(ctx: OAuthRuntimeCtx, account: string): Promise<void> {
+  await ctx.store.upsert({
+    providerId: "anthropic",
+    account,
+    accessEnc: encryptSecret(`access-${account}`, ENC_KEY),
+    refreshEnc: encryptSecret(`refresh-${account}`, ENC_KEY),
+    expiresAt: FAR_FUTURE,
+    meta: null,
+    updatedAt: 1,
+  });
+}
+
+describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
+  const noop = () => {};
+
+  it("pools MULTIPLE accounts into one provider exposing the UNION of enabled models", async () => {
+    const { ctx, config } = oauthStores();
+    await seedAnthropic(ctx, "work");
+    await seedAnthropic(ctx, "home");
+    // Curate disjoint subsets so the union is observable + de-duplicated.
+    await setAccountSettings(config, ENC_KEY, "anthropic", "work", {
+      enabledModels: ["claude-opus-4-6", "claude-sonnet-4-6"],
+    });
+    await setAccountSettings(config, ENC_KEY, "anthropic", "home", {
+      enabledModels: ["claude-sonnet-4-6", "claude-haiku-4-5"],
+    });
+
+    const { providers, poolClients } = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+
+    // ONE synthetic provider keyed by providerId, ONE pool client serving it.
+    expect(providers).toHaveLength(1);
+    expect(providers[0]?.name).toBe("anthropic");
+    expect(poolClients.has("anthropic")).toBe(true);
+    expect(poolClients.size).toBe(1);
+    // modelAliases = UNION of both accounts' enabled models (deduped), as
+    // `<provider>/<model>` aliases.
+    const aliases = (providers[0]?.models ?? []).map((m) => m.alias).sort();
+    expect(aliases).toEqual([
+      "anthropic/claude-haiku-4-5",
+      "anthropic/claude-opus-4-6",
+      "anthropic/claude-sonnet-4-6",
+    ]);
+  });
+
+  it("excludes an UNSCHEDULABLE (parked) account from the pool union", async () => {
+    const { ctx, config } = oauthStores();
+    await seedAnthropic(ctx, "live");
+    await seedAnthropic(ctx, "parked");
+    await setAccountSettings(config, ENC_KEY, "anthropic", "live", {
+      enabledModels: ["claude-opus-4-6"],
+    });
+    await setAccountSettings(config, ENC_KEY, "anthropic", "parked", {
+      enabledModels: ["claude-haiku-4-5"],
+      schedulable: false,
+    });
+
+    const { providers } = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    // Only the live account's model is exposed; the parked one drops out.
+    const aliases = (providers[0]?.models ?? []).map((m) => m.alias);
+    expect(aliases).toEqual(["anthropic/claude-opus-4-6"]);
+  });
+
+  it("returns empty when no OAuth runtime is wired (no enc key)", async () => {
+    const { config } = oauthStores();
+    const out = await synthesizeOAuthProviders([], undefined, config, "https://f/v1", 60_000, noop);
+    expect(out).toEqual({ providers: [], poolClients: new Map() });
   });
 });

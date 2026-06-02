@@ -171,6 +171,14 @@
     @apply border-t border-slate-100 hover:bg-slate-50;
   }
 
+  /* — Tabs — */
+  /* Underline-style section switcher (e.g. the per-account Manage dialog). The
+     selected tab gets a slate underline + strong ink; the rest stay muted. Driven
+     by `aria-selected` so the markup carries the a11y state and the style follows. */
+  .tab-btn {
+    @apply -mb-px border-b-2 border-transparent px-1 pb-2 text-sm font-medium text-slate-500 transition-colors hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 aria-selected:border-slate-800 aria-selected:text-slate-900;
+  }
+
   /* — Feedback & states — */
   .alert-error {
     @apply rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700;

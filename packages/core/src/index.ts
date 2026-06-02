@@ -293,6 +293,7 @@ export {
   CURATED_OAUTH_MODELS,
   completeAnthropicLogin,
   completeOpenAICodexLogin,
+  createOAuthPoolClient,
   discoverOAuthModels,
   getGitHubCopilotBaseUrl,
   getOAuthProvider,
@@ -302,6 +303,8 @@ export {
   type OAuthAuthInfo,
   type OAuthCredentials,
   type OAuthLoginCallbacks,
+  type OAuthPoolDeps,
+  type OAuthPoolMember,
   type OAuthPrompt,
   type OAuthProviderId,
   type OAuthProviderInterface,
@@ -320,6 +323,10 @@ export {
   type ProviderConfig,
   UpstreamError,
 } from "./provider/openai.js";
+// Per-account egress proxy (issue #38 follow-up): a drop-in `fetch` that tunnels
+// upstream traffic through an http/https/socks5 proxy, so distinct subscription
+// accounts can leave from distinct IPs. Injected into the executors' `fetch` seam.
+export { makeProxyFetch, type ProxyConfig, validateProxyConfig } from "./provider/proxy.js";
 // Provider Registry — alias -> { provider, model, base_url, api_key_env }.
 // `ProviderConfig` from this module is aliased to `ProviderRegistryConfig` to
 // avoid colliding with the passthrough client's `ProviderConfig` above.

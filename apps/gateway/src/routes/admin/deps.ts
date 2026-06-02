@@ -93,6 +93,73 @@ export interface OAuthAdminAccess {
   }): Promise<{ status: "pending" | "slow_down" | "done" }>;
   // Remove a stored credential (admin "log out").
   logout(input: { providerId: string; account: string }): Promise<void>;
+  // Per-account model curation: which discovered models are exposed to Lanes.
+  // `available` is the live/curated discovery for the account's current token
+  // (fail-open to [] when discovery fails); `enabled` is the operator's chosen
+  // subset (unset settings = ALL available, so a never-curated account exposes
+  // everything). Only the `enabled` models become routable `<provider>/<model>`
+  // aliases (server.ts synthesizeOAuthProviders applies the same filter).
+  listModels(input: {
+    providerId: string;
+    account: string;
+  }): Promise<{ available: string[]; enabled: string[] }>;
+  // Persist the exposed-model subset for one account (replaces the prior list).
+  setEnabledModels(input: { providerId: string; account: string; models: string[] }): Promise<void>;
+  // Per-account egress proxy (issue #38 follow-up). Multiple accounts of one
+  // provider must not share an egress IP (ban-correlation risk), so each account
+  // may pin an http/https/socks5 proxy its upstream traffic tunnels through.
+  // SECURITY (principle 7): the read NEVER returns the password — only whether one
+  // is set (`hasPassword`). null = no proxy configured (direct connection).
+  getAccountProxy(input: { providerId: string; account: string }): Promise<AccountProxyView | null>;
+  // Persist or CLEAR (proxy = null) one account's proxy. A clear drops the proxy
+  // field so the account reverts to a direct connection.
+  setAccountProxy(input: {
+    providerId: string;
+    account: string;
+    proxy: AccountProxyInput | null;
+  }): Promise<void>;
+  // Per-account scheduling (issue #38 Stage 3). When a provider has several
+  // connected accounts, the gateway pools them: `priority` (LOWER = preferred,
+  // default 50) orders the pool and `schedulable` (default true) parks an account
+  // out of rotation without disconnecting it. Round-robin (LRU) breaks ties within
+  // an equal priority. Read returns the effective values (defaults applied).
+  getAccountSchedule(input: { providerId: string; account: string }): Promise<AccountScheduleView>;
+  // Persist one account's scheduling knobs. Either field may be omitted to leave
+  // it unchanged; the route validates `priority` is a finite integer first.
+  setAccountSchedule(input: {
+    providerId: string;
+    account: string;
+    priority?: number;
+    schedulable?: boolean;
+  }): Promise<void>;
+}
+
+// The effective scheduling for one account: defaults applied (priority 50,
+// schedulable true) so the UI always renders a concrete value.
+export interface AccountScheduleView {
+  priority: number;
+  schedulable: boolean;
+}
+
+// Redacted proxy projection for the admin read path: the password is NEVER echoed,
+// only `hasPassword` so the UI can show "password set" without revealing it.
+export interface AccountProxyView {
+  type: "http" | "https" | "socks5";
+  host: string;
+  port: number;
+  username?: string;
+  hasPassword: boolean;
+}
+
+// Proxy write shape. `password` omitted/undefined on an UPDATE preserves the stored
+// password (so the operator can edit host/port without re-entering it); an empty
+// string explicitly clears it.
+export interface AccountProxyInput {
+  type: "http" | "https" | "socks5";
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
 }
 
 export interface AdminApiDeps {

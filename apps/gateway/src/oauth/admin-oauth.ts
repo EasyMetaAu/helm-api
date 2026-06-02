@@ -3,18 +3,28 @@ import {
   beginAnthropicLogin,
   beginCopilotDeviceLogin,
   beginOpenAICodexLogin,
+  type ConfigStore,
   type CopilotDeviceStart,
   completeAnthropicLogin,
   completeOpenAICodexLogin,
   createTokenManager,
+  discoverOAuthModels,
   encryptSecret,
   getOAuthProvider,
   type OAuthCredentials,
   type OAuthTokenStore,
+  type ProxyConfig,
   pollCopilotDeviceOnce,
   refreshGitHubCopilotToken,
+  validateProxyConfig,
 } from "@helm/core";
-import type { OAuthAdminAccess, OAuthAdminStatus } from "../routes/admin/deps.js";
+import type {
+  AccountProxyView,
+  AccountScheduleView,
+  OAuthAdminAccess,
+  OAuthAdminStatus,
+} from "../routes/admin/deps.js";
+import { getAccountSettings, loadAccountSettings, setAccountSettings } from "./account-settings.js";
 
 // Admin OAuth-login orchestration (issue #38) — the implementation behind the
 // OAuthAdminAccess seam the /admin/api/oauth routes call. Owns the ephemeral
@@ -61,6 +71,10 @@ type Session =
 export interface OAuthAdminDeps {
   store: OAuthTokenStore;
   encKey: Buffer;
+  // Per-account SETTINGS live in the ConfigStore (config_kv), NOT in the token
+  // store's `meta` (a token refresh overwrites meta). Same enc key encrypts the
+  // settings blob. Threaded in from the composition root (server.ts store.config).
+  config: ConfigStore;
   now?: () => number;
   genSessionId?: () => string;
 }
@@ -231,6 +245,117 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
 
     async logout({ providerId, account }) {
       await deps.store.delete(providerId, account);
+    },
+
+    async listModels({ providerId, account }) {
+      // Discover the account's available models. Live where an API exists
+      // (Copilot GET /models) using the account's REFRESHED access token; curated
+      // otherwise. Fail-open: any error (no credential, dead refresh, network)
+      // yields [] so the providers page never breaks on a flaky discovery.
+      let available: string[] = [];
+      const provider = getOAuthProvider(providerId);
+      if (provider) {
+        try {
+          const tm = createTokenManager({
+            oauth: { kind: "preset", providerId, account },
+            tokenStore: deps.store,
+            encKey: deps.encKey,
+            oauthProvider: provider,
+            now,
+          });
+          const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
+          available = await discoverOAuthModels(providerId, accessToken);
+        } catch {
+          available = [];
+        }
+      }
+      // `enabled` is the operator's chosen subset; UNSET ⇒ all available. Keep the
+      // stored list intersected with what is currently available (a model that
+      // disappeared upstream silently drops out of the exposed set).
+      const settings = getAccountSettings(
+        await loadAccountSettings(deps.config, deps.encKey),
+        providerId,
+        account,
+      );
+      const enabled = settings.enabledModels
+        ? available.filter((m) => settings.enabledModels?.includes(m))
+        : available;
+      return { available, enabled };
+    },
+
+    async setEnabledModels({ providerId, account, models }) {
+      await setAccountSettings(deps.config, deps.encKey, providerId, account, {
+        enabledModels: models,
+      });
+    },
+
+    async getAccountProxy({ providerId, account }): Promise<AccountProxyView | null> {
+      const proxy = getAccountSettings(
+        await loadAccountSettings(deps.config, deps.encKey),
+        providerId,
+        account,
+      ).proxy;
+      if (!proxy) return null;
+      // REDACT the password (principle 7): the admin read surface returns only
+      // whether one is set, never the secret itself.
+      return {
+        type: proxy.type,
+        host: proxy.host,
+        port: proxy.port,
+        ...(proxy.username !== undefined ? { username: proxy.username } : {}),
+        hasPassword: typeof proxy.password === "string" && proxy.password.length > 0,
+      };
+    },
+
+    async setAccountProxy({ providerId, account, proxy }): Promise<void> {
+      if (proxy === null) {
+        // Clear: revert to a direct connection. setAccountSettings does a top-level
+        // merge, so patching `proxy: undefined` overwrites just that field (JSON
+        // drops the undefined key) while curation/pool state survive.
+        await setAccountSettings(deps.config, deps.encKey, providerId, account, {
+          proxy: undefined,
+        });
+        return;
+      }
+      // An OMITTED password on an update preserves the stored one (so the operator
+      // can edit host/port without re-entering the secret); an explicit empty string
+      // clears it. Resolve the effective password BEFORE validating + persisting.
+      const prior = getAccountSettings(
+        await loadAccountSettings(deps.config, deps.encKey),
+        providerId,
+        account,
+      ).proxy;
+      const password = proxy.password !== undefined ? proxy.password : prior?.password;
+      const next: ProxyConfig = {
+        type: proxy.type,
+        host: proxy.host,
+        port: proxy.port,
+        ...(proxy.username !== undefined ? { username: proxy.username } : {}),
+        ...(password !== undefined && password !== "" ? { password } : {}),
+      };
+      // Fail-closed (principle 2): reject a malformed proxy here, never persist it.
+      validateProxyConfig(next);
+      await setAccountSettings(deps.config, deps.encKey, providerId, account, { proxy: next });
+    },
+
+    async getAccountSchedule({ providerId, account }): Promise<AccountScheduleView> {
+      const s = getAccountSettings(
+        await loadAccountSettings(deps.config, deps.encKey),
+        providerId,
+        account,
+      );
+      // Apply the scheduler defaults so the UI always shows a concrete value
+      // (priority 50, schedulable true) even for a never-tuned account.
+      return { priority: s.priority ?? 50, schedulable: s.schedulable ?? true };
+    },
+
+    async setAccountSchedule({ providerId, account, priority, schedulable }): Promise<void> {
+      // Top-level merge (setAccountSettings) preserves curation/proxy. Only patch
+      // the fields the caller supplied — an omitted field stays unchanged.
+      const patch: { priority?: number; schedulable?: boolean } = {};
+      if (priority !== undefined) patch.priority = priority;
+      if (schedulable !== undefined) patch.schedulable = schedulable;
+      await setAccountSettings(deps.config, deps.encKey, providerId, account, patch);
     },
   };
 }
