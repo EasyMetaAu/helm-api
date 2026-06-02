@@ -430,14 +430,18 @@ describe("HelmConfigSchema", () => {
     expect(res.success).toBe(false);
   });
 
-  it("allows localhost http oauth token_url for local tests", () => {
+  it.each([
+    "http://127.0.0.1:9876/token",
+    "http://localhost:9876/token",
+    "http://[::1]:9876/token",
+  ])("allows localhost http oauth token_url for local tests: %s", (tokenUrl) => {
     const cfg = fullConfig() as Record<string, unknown>;
     cfg.providers = [
       {
         name: "local-oauth",
         type: "openai",
         oauth: {
-          token_url: "http://127.0.0.1:9876/token",
+          token_url: tokenUrl,
           client_id_env: "CLIENT_ID",
           client_secret_env: "CLIENT_SECRET",
           refresh_token_env: "REFRESH_TOKEN",

@@ -37,8 +37,9 @@ export interface ExecuteAdapterDeps {
    *  (Phase-0 single-provider passthrough). */
   defaultProvider: ProviderClient;
   /** Per-provider clients keyed by provider NAME (registry providerName). When a
-   *  candidate resolves to one of these, its client is used → chains cross
-   *  providers. Optional: absent/empty => everything uses defaultProvider. */
+   *  candidate resolves to one of these, its client is used -> chains cross
+   *  providers. Missing clients fail closed; defaultProvider is only for unknown
+   *  aliases in Phase-0 passthrough. */
   providers?: Map<string, ProviderClient>;
   registry: ProviderRegistry;
   breaker: CircuitBreaker;
@@ -207,11 +208,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // default would cross credential/subscription boundaries.
       const resolved = registry.resolve(alias);
       const providerModel = resolved.ok ? resolved.value.providerModel : alias;
-      const provider = resolved.ok
-        ? providers
-          ? providers.get(resolved.value.providerName)
-          : defaultProvider
-        : defaultProvider;
+      const provider = resolved.ok ? providers?.get(resolved.value.providerName) : defaultProvider;
       if (!provider) {
         attempts.push(skipRow(alias, "provider_unavailable", elapsed()));
         continue;
