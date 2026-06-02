@@ -107,8 +107,9 @@ const anthropicToOpenai = path("anthropic", "openai", [
   ),
   fixture(
     "error",
-    "passing",
-    "Anthropic-native client errors map through Helm ErrorClass to OpenAI envelope",
+    "todo",
+    "Anthropic-native client errors to OpenAI error envelope need a dedicated renderer",
+    "No OpenAI-native error envelope transformer exists to assert in PR A without adding behavior.",
   ),
   fixture("usage", "passing", "Anthropic cache_read_input_tokens can stay distinct in IR usage"),
 ]);
@@ -138,7 +139,12 @@ const openaiToGemini = path("openai", "gemini", [
     "OpenAI response_format JSON schema to Gemini responseSchema is not emitted today",
     "PR A records the gap; adding Gemini request nativeOut behavior belongs to a later PR.",
   ),
-  fixture("error", "passing", "Helm ErrorClass can render a Gemini-native error envelope"),
+  fixture(
+    "error",
+    "todo",
+    "Helm ErrorClass to Gemini-native error envelope needs a dedicated renderer",
+    "No Gemini-native error envelope transformer exists to assert in PR A without adding behavior.",
+  ),
   fixture(
     "usage",
     "passing",
@@ -172,8 +178,9 @@ const geminiToOpenai = path("gemini", "openai", [
   ),
   fixture(
     "error",
-    "passing",
-    "Gemini-native client errors map through Helm ErrorClass to OpenAI envelope",
+    "todo",
+    "Gemini-native client errors to OpenAI error envelope need a dedicated renderer",
+    "No OpenAI-native error envelope transformer exists to assert in PR A without adding behavior.",
   ),
   fixture("usage", "passing", "Gemini cachedContentTokenCount remains distinct in IR usage"),
 ]);
@@ -210,8 +217,9 @@ const anthropicToGemini = path("anthropic", "gemini", [
   ),
   fixture(
     "error",
-    "passing",
-    "Helm ErrorClass can render Gemini-native envelopes for Anthropic-origin failures",
+    "todo",
+    "Helm ErrorClass to Gemini-native envelopes for Anthropic-origin failures needs a renderer",
+    "No Gemini-native error envelope transformer exists to assert in PR A without adding behavior.",
   ),
   fixture("usage", "passing", "IR cached usage can render to Gemini usageMetadata"),
 ]);

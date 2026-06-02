@@ -1,5 +1,10 @@
+import { makeHelmError } from "@helm/shared";
 import { describe, expect, it } from "vitest";
-import { anthropicTransformer, convertOpenAIStreamToAnthropic } from "./anthropic/index.js";
+import {
+  anthropicTransformer,
+  convertOpenAIStreamToAnthropic,
+  transformErrorOut as transformAnthropicErrorOut,
+} from "./anthropic/index.js";
 import { geminiTransformer } from "./gemini/gemini-transformer.js";
 import type { IRChunk as GeminiIRChunk } from "./gemini/gemini-types.js";
 import type { IRRequest, IRResponse } from "./ir.js";
@@ -8,6 +13,8 @@ import { openaiTransformer } from "./openai.js";
 import {
   canonicalRequestIR,
   canonicalResponseIR,
+  type ProtocolMatrixDimension,
+  type ProtocolMatrixPath,
   type ProtocolName,
   protocolCrossPathMatrix,
   protocolMatrixDimensions,
@@ -194,6 +201,62 @@ function nativeResponse(protocol: ProtocolName): unknown {
   return undefined;
 }
 
+function hasPassingFixture(path: ProtocolMatrixPath, dimension: ProtocolMatrixDimension): boolean {
+  return path.fixtures.some(
+    (fixture) => fixture.dimension === dimension && fixture.status === "passing",
+  );
+}
+
+function expectSerializedField(value: unknown, field: string): void {
+  expect(JSON.stringify(value)).toContain(`"${field}"`);
+}
+
+function expectIrToolCall(ir: IRRequest | IRResponse): void {
+  const serialized = JSON.stringify(ir);
+  expectSerializedField(ir, "tool_calls");
+  expect(serialized).toContain("get_weather");
+  expect(serialized).toContain("Melbourne");
+}
+
+function expectIrImageDataUrl(ir: IRRequest): void {
+  expect(JSON.stringify(ir)).toContain("data:image/png;base64,AAAA");
+}
+
+function expectIrUsageNotDoubleBilled(ir: IRResponse): void {
+  expect(ir.usage?.prompt_tokens).toBe(10);
+  expect(ir.usage?.cached_tokens).toBe(3);
+  expect(ir.usage?.completion_tokens).toBe(4);
+}
+
+function expectTargetToolCall(protocol: ProtocolName, native: unknown): void {
+  const serialized = JSON.stringify(native);
+  expect(serialized).toContain("get_weather");
+  expect(serialized).toContain("Melbourne");
+  if (protocol === "openai") expectSerializedField(native, "tool_calls");
+  if (protocol === "anthropic") expect(serialized).toContain("tool_use");
+  if (protocol === "gemini") expectSerializedField(native, "functionCall");
+}
+
+function expectTargetUsageNotDoubleBilled(protocol: ProtocolName, native: unknown): void {
+  const serialized = JSON.stringify(native);
+  if (protocol === "openai") {
+    expect(serialized).toContain('"prompt_tokens":13');
+    expect(serialized).toContain('"completion_tokens":4');
+    expect(serialized).toContain('"cached_tokens":3');
+  }
+  if (protocol === "anthropic") {
+    expect(serialized).toContain('"input_tokens":10');
+    expect(serialized).toContain('"output_tokens":4');
+    expect(serialized).toContain('"cache_read_input_tokens":3');
+  }
+  if (protocol === "gemini") {
+    expect(serialized).toContain('"promptTokenCount":13');
+    expect(serialized).toContain('"candidatesTokenCount":4');
+    expect(serialized).toContain('"cachedContentTokenCount":3');
+    expect(serialized).toContain('"totalTokenCount":17');
+  }
+}
+
 describe("protocol cross-path fixture matrix", () => {
   it("documents LiteLLM provenance without vendoring code", () => {
     expect(protocolMatrixProvenance).toContain("behavior/checklist");
@@ -269,12 +332,74 @@ describe("protocol cross-path executable harness", () => {
   });
 
   it.each(
+    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "tool-call")),
+  )("guards passing tool-call fixtures for $from->$to", async ({ from, to }) => {
+    const ir = await requestOut[from](nativeRequest(from));
+    expectIrToolCall(ir);
+
+    const native = await responseOut[to](canonicalResponseIR);
+    expectTargetToolCall(to, native);
+  });
+
+  it.each(
+    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "multimodal")),
+  )("guards passing multimodal fixtures for $from->$to", async ({ from, to }) => {
+    const ir = await requestOut[from](nativeRequest(from));
+    expectIrImageDataUrl(ir);
+
+    const toNative = requestIn[to];
+    if (toNative !== undefined) {
+      const native = await toNative(ir);
+      if (to === "openai") expect(JSON.stringify(native)).toContain("data:image/png;base64,AAAA");
+      if (to === "gemini") expectSerializedField(native, "inlineData");
+    }
+  });
+
+  it.each(
+    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "json-schema")),
+  )("guards passing JSON schema fixtures for $from->$to", async ({ from, to }) => {
+    const ir = await requestOut[from](nativeRequest(from));
+    expect(ir.response_format).toBeDefined();
+    expect(JSON.stringify(ir.response_format)).toContain("summary");
+
+    const toNative = requestIn[to];
+    expect(toNative).toBeDefined();
+    const native = await toNative?.(ir);
+    expectSerializedField(native, "response_format");
+    expect(JSON.stringify(native)).toContain("summary");
+  });
+
+  it.each(
     protocolCrossPathMatrix,
   )("renders canonical IR responses as $to native responses for $from->$to", async ({ to }) => {
     const native = await responseOut[to](canonicalResponseIR);
     const serialized = JSON.stringify(native);
     expect(native).toBeDefined();
     expect(serialized).toContain("Here is the answer");
+  });
+
+  it.each(
+    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "response")),
+  )("guards passing response fixtures for $from->$to", async ({ to }) => {
+    const native = await responseOut[to](canonicalResponseIR);
+    expectTargetToolCall(to, native);
+    expectTargetUsageNotDoubleBilled(to, native);
+  });
+
+  it.each(
+    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "usage")),
+  )("guards passing usage fixtures for $from->$to", async ({ from, to }) => {
+    const source = nativeResponse(from);
+    if (source !== undefined) {
+      const ir =
+        from === "openai"
+          ? await openaiTransformer.transformResponseIn(source)
+          : await geminiTransformer.transformResponseIn(source);
+      expectIrUsageNotDoubleBilled(ir);
+    }
+
+    const native = await responseOut[to](canonicalResponseIR);
+    expectTargetUsageNotDoubleBilled(to, native);
   });
 
   it.each(
@@ -341,9 +466,39 @@ describe("protocol cross-path executable harness", () => {
     const anthropicEvents = await collect(convertOpenAIStreamToAnthropic(fromArray(chunks)));
     const geminiEvents = await collect(geminiTransformer.transformStreamOut(fromArray(chunks)));
 
+    const anthropicSerialized = JSON.stringify(anthropicEvents);
+    const geminiSerialized = JSON.stringify(geminiEvents);
+
     expect(anthropicEvents.map((event) => event.type)).toContain("message_stop");
-    expect(JSON.stringify(anthropicEvents)).toContain("input_json_delta");
+    expect(anthropicSerialized).toContain("input_json_delta");
+    expect(anthropicSerialized).toContain("tool_use");
+    expect(anthropicSerialized).toContain("get_weather");
+    expect(anthropicSerialized).toContain("Melbourne");
+    expect(anthropicSerialized).toContain('"input_tokens":7');
+    expect(anthropicSerialized).toContain('"cache_read_input_tokens":3');
     expect(geminiEvents.at(-1)?.usageMetadata?.promptTokenCount).toBe(10);
-    expect(JSON.stringify(geminiEvents)).not.toContain("[DONE]");
+    expect(geminiSerialized).toContain("functionCall");
+    expect(geminiSerialized).toContain("get_weather");
+    expect(geminiSerialized).toContain("Melbourne");
+    expect(geminiSerialized).not.toContain("[DONE]");
+  });
+
+  it.each(
+    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "error")),
+  )("guards passing error fixtures for $from->$to", ({ to }) => {
+    expect(to).toBe("anthropic");
+    const out = transformAnthropicErrorOut(
+      makeHelmError({
+        error_class: "rate_limited",
+        message: "matrix rate limit",
+        trace_id: "trace-matrix",
+      }),
+    );
+
+    expect(out.status).toBe(429);
+    expect(out.body).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "matrix rate limit" },
+    });
   });
 });
