@@ -371,6 +371,24 @@ describe("schema format sanitize (date / date-time pit)", () => {
     expect(props.merged?.properties).toEqual({ ok: { type: "boolean" } });
   });
 
+  it("merges allOf object shape with sibling properties and required fields", () => {
+    const schema = {
+      allOf: [
+        {
+          type: "object",
+          properties: { a: { type: "string" } },
+          required: ["a"],
+        },
+      ],
+      properties: { b: { type: "number" } },
+      required: ["b"],
+    };
+
+    const cleaned = sanitizeSchema(schema) as Record<string, unknown>;
+    expect(cleaned.properties).toEqual({ a: { type: "string" }, b: { type: "number" } });
+    expect(cleaned.required).toEqual(["a", "b"]);
+  });
+
   it("sanitizes functionDeclarations parameters on the outbound request", () => {
     const ir: IRRequest = {
       model: "gemini-1.5-pro",

@@ -117,6 +117,7 @@ function sanitize(schema: unknown, root: unknown, seen: Set<string>): unknown {
     if (isPlainObject(picked)) Object.assign(out, picked);
   }
 
+  const siblings: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(working)) {
     if (key === "$ref" || key === "allOf" || key === "oneOf" || key === "anyOf") continue;
     if (UNSUPPORTED_KEYS.has(key)) continue;
@@ -126,29 +127,29 @@ function sanitize(schema: unknown, root: unknown, seen: Set<string>): unknown {
       for (const [propName, propSchema] of Object.entries(value)) {
         props[propName] = sanitize(propSchema, root, seen);
       }
-      out[key] = props;
+      siblings[key] = props;
       continue;
     }
     if (key === "items" && (isPlainObject(value) || Array.isArray(value))) {
-      out[key] = sanitize(value, root, seen);
+      siblings[key] = sanitize(value, root, seen);
       continue;
     }
-    out[key] = value;
+    siblings[key] = value;
   }
 
   const format = working.format;
   if (typeof format === "string" && format !== "") {
     if (SUPPORTED_FORMATS.has(format)) {
-      out.format = format;
+      siblings.format = format;
     } else if (DATE_FORMATS.has(format)) {
-      if (out.type === undefined || out.type === "string") out.type = "string";
-      const existing = typeof out.description === "string" ? out.description : "";
+      if (siblings.type === undefined || siblings.type === "string") siblings.type = "string";
+      const existing = typeof siblings.description === "string" ? siblings.description : "";
       const hint = `format: ${format}`;
-      out.description = existing === "" ? hint : `${existing} (${hint})`;
+      siblings.description = existing === "" ? hint : `${existing} (${hint})`;
     }
   }
 
-  return out;
+  return mergeObjects(out, siblings);
 }
 
 /**
