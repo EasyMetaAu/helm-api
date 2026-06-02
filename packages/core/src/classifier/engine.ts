@@ -1,7 +1,8 @@
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
-import { scoreDimensions } from "./dimensions.js";
+import { type DimensionScore, scoreDimensions } from "./dimensions.js";
 import { applyMomentum, type MomentumDeps, recordMomentum } from "./momentum.js";
 import { applyOverrides, evaluateOverrides } from "./overrides.js";
+import { nonLatinRatio } from "./signals.js";
 import { detectTask, type TaskType } from "./taskdetect.js";
 import { type Complexity, classifyTier } from "./tiers.js";
 
@@ -127,6 +128,24 @@ export function scoreRequest(req: InternalRequest, deps: ScoreRequestDeps): Clas
   const task = safe(() => detectTask(req, cfg), { task_type: "chat" as TaskType, scores: [] });
   explanation.push({ source: "task", detail: task.task_type });
 
+  // ── 5.5 language-coverage guard ───────────────────────────────────────────
+  // The keyword lists are ENGLISH-ONLY (CLAUDE.md: Layer-1 is the English fast
+  // path). A predominantly non-Latin prompt therefore cannot be scored by them, so
+  // a high-confidence keyword verdict on it would be a lie. Force `uncertain` so the
+  // cascade escalates to the (multilingual) Layer-2 eval — or, with eval OFF, lands
+  // `balanced` deterministically rather than by luck of where the structural-only
+  // rawScore fell. Suppressed when (a) the message is trivially short (already pinned
+  // `simple` by the short_message override) or (b) a CONTENT-TYPE structural signal
+  // gave real, language-agnostic grip (code block / stack / table / attachment / …).
+  // Ambient signals (msg_length / turn_count) fire on every request and are NOT grip.
+  let confidence = tier.confidence;
+  let uncertain = tier.uncertain;
+  if (safe(() => languageGuardTrips(req, cfg, dim.hits), false)) {
+    confidence = 0;
+    uncertain = true;
+    explanation.push({ source: "override", detail: "low_keyword_coverage" });
+  }
+
   // ── 6. derive constraints ─────────────────────────────────────────────────
   const constraints = deriveConstraints(req, approxTokens, cfg, complexity, overrideHits);
 
@@ -145,12 +164,39 @@ export function scoreRequest(req: InternalRequest, deps: ScoreRequestDeps): Clas
   return {
     complexity,
     task_type: task.task_type,
-    confidence: tier.confidence,
-    uncertain: tier.uncertain,
+    confidence,
+    uncertain,
     decided_by: "rules",
     constraints,
     explanation,
   };
+}
+
+// Ambient structural dimensions fire on (almost) every request, so they are NOT
+// evidence that the keyword classifier actually understood the prompt — they must
+// not suppress the language guard. Every OTHER positive-contribution dimension hit
+// (keyword match or a content-type structural signal) IS real grip.
+const AMBIENT_DIMENSIONS = new Set(["msg_length", "turn_count"]);
+
+// True when Layer-1's English keyword lists have no purchase on a non-Latin prompt
+// and nothing else gave it real grip — see step 5.5. Pure: reads only its inputs.
+function languageGuardTrips(
+  req: InternalRequest,
+  cfg: ClassifierRulesConfig,
+  hits: DimensionScore["hits"],
+): boolean {
+  // Robust to a config SUBSET (dimensions.ts contract): an absent `language` block
+  // (or an older parsed config) simply disables the guard rather than throwing.
+  const lang = cfg.language;
+  if (!lang?.non_latin_uncertain) return false;
+  const text = lastUserMessageText(req.messages).trim();
+  // Trivially short prompts are pinned `simple` by the short_message override; do
+  // not escalate them. Reuse the same char threshold so the two stay consistent.
+  if (text.length <= cfg.overrides.short_message_max_chars) return false;
+  if (nonLatinRatio(text) < lang.non_latin_min_ratio) return false;
+  // Any positive, non-ambient hit (keyword or content-type structural) = real grip.
+  const hasGrip = hits.some((h) => h.contribution > 0 && !AMBIENT_DIMENSIONS.has(h.dimension));
+  return !hasGrip;
 }
 
 // ── constraint derivation ──────────────────────────────────────────────────
@@ -200,14 +246,18 @@ function round(n: number): number {
   return Math.round(n * 1000) / 1000;
 }
 
-function lastUserMessageChars(messages: InternalRequest["messages"]): number {
+function lastUserMessageText(messages: InternalRequest["messages"]): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
     if (msg && msg.role === "user") {
-      return contentToString(msg.content).trim().length;
+      return contentToString(msg.content);
     }
   }
-  return 0;
+  return "";
+}
+
+function lastUserMessageChars(messages: InternalRequest["messages"]): number {
+  return lastUserMessageText(messages).trim().length;
 }
 
 function contentToString(content: unknown): string {

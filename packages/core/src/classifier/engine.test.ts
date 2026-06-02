@@ -276,6 +276,68 @@ describe("scoreRequest — Layer-1 orchestration", () => {
     expect(out.confidence).toBeLessThanOrEqual(1);
   });
 
+  // ── language-coverage guard ────────────────────────────────────────────────
+  // The keyword lists are English-only, so a predominantly non-Latin prompt can't
+  // be scored by them. The guard forces `uncertain` (confidence 0) so the cascade
+  // escalates to the multilingual Layer-2 eval — UNLESS a content-type structural
+  // signal gave real grip, or the message is trivially short. See plan / notes
+  // (classifier.multilingual-guard).
+  const longZh =
+    "请帮我详细分析这家公司过去三年的财务状况和现金流情况，并结合所在行业的整体趋势给出具体的投资建议以及主要风险点的评估和应对措施";
+
+  it("language guard: long non-Latin prose with no structural grip is forced uncertain", () => {
+    const cfg = makeConfig();
+    const req = makeRequest({ messages: [{ role: "user", content: longZh }] });
+    const out = scoreRequest(req, { cfg, approxTokens: 40 });
+
+    expect(out.uncertain).toBe(true);
+    expect(out.confidence).toBe(0);
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(true);
+  });
+
+  it("language guard: a content-type structural hit (attachment) suppresses the guard", () => {
+    const cfg = makeConfig();
+    const req = makeRequest({
+      messages: [{ role: "user", content: longZh }],
+      attachments: [{ type: "image", url: "x" }],
+    });
+    const out = scoreRequest(req, { cfg, approxTokens: 40 });
+
+    // has_attachment is real, language-agnostic grip → trust the tier, do not force.
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  it("language guard: a short non-Latin greeting stays simple, guard skipped", () => {
+    const cfg = makeConfig();
+    const req = makeRequest({ messages: [{ role: "user", content: "你好" }] });
+    const out = scoreRequest(req, { cfg, approxTokens: 1 });
+
+    expect(out.complexity).toBe("simple"); // short_message override still pins simple
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  it("language guard: English prose is unaffected (ratio 0)", () => {
+    const cfg = makeConfig();
+    const req = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content:
+            "Please give me a thorough overview of how the company performed financially across the last three fiscal years.",
+        },
+      ],
+    });
+    const out = scoreRequest(req, { cfg, approxTokens: 40 });
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  it("language guard: disabled via config → non-Latin prose not forced", () => {
+    const cfg = makeConfig({ language: { non_latin_uncertain: false } });
+    const req = makeRequest({ messages: [{ role: "user", content: longZh }] });
+    const out = scoreRequest(req, { cfg, approxTokens: 40 });
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
   it("records final tier back into momentum history (write-back)", () => {
     const cfg = makeConfig();
     const sessionKey = "sess-wb";

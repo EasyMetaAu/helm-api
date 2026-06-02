@@ -13,6 +13,12 @@
 # the threshold. Tuned against the golden prompt set (scripts/calibrate-classifier.ts):
 # 29/29 prompts now reach decided_by=rules and route to their intended lanes, with a
 # healthy confidence spread (~0.44–0.91) so the gate still expresses uncertainty.
+#
+# MULTILINGUAL (2026-06-02, classifier.multilingual-guard): the keyword lists are
+# ENGLISH-ONLY, so Layer-1 is an English fast path. A predominantly non-Latin prompt
+# is forced `uncertain` by the `rules.language` guard (below) → escalates to the
+# multilingual Layer-2 eval. CONTRACT: serve non-English traffic → enable `eval`;
+# with eval OFF a non-Latin prompt degrades deterministically to `balanced`.
 classifier:
   rules:
     enabled: true
@@ -96,6 +102,20 @@ classifier:
       short_message_max_chars: 30
       disable_above_chars: 100
       max_history_weight: 0.6
+    # Language-coverage guard. The keyword lists above are ENGLISH-ONLY, so a
+    # predominantly non-Latin prompt (Chinese / Japanese / Korean / Cyrillic / …)
+    # cannot be scored by them. With this on, such a prompt is forced `uncertain` →
+    # the cascade escalates to the (multilingual) Layer-2 eval. CONTRACT: if you
+    # serve non-English traffic, ENABLE eval below — with eval OFF a non-Latin prompt
+    # degrades deterministically to `balanced` (fail-open, no 5xx) rather than being
+    # routed by an English keyword score that never matched anything. The guard is
+    # suppressed for trivially-short prompts (pinned `simple`) and for prompts with a
+    # content-type structural signal (code block / table / attachment / …) that gives
+    # real language-agnostic grip. Latin-script non-English (es/fr/de) is NOT flagged
+    # by ratio; it already produces ~0 keyword signal → low confidence → eval anyway.
+    language:
+      non_latin_uncertain: true
+      non_latin_min_ratio: 0.3
   # Layer-2 (small-model eval) — OPTIONAL, costed, OFF by default. Validated by
   # EvalConfigSchema (@helm/shared): temperature/on_failure/cache.key are locked,
   # max_tokens capped at 1024. Downstream eval modules read this parsed object.

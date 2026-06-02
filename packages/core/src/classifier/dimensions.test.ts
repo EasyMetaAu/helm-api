@@ -212,3 +212,40 @@ describe("scoreDimensions keyword matching is word-boundary aware", () => {
     ).toBeDefined();
   });
 });
+
+// CJK (Han / Hiragana / Katakana / Hangul) has NO spaces between words, so the
+// word-boundary lookarounds that protect Latin keywords ("ok" inside "look") would
+// otherwise make EVERY CJK keyword embedded in CJK text unmatchable: a keyword like
+// "分析" inside "请分析这个" is flanked by other \p{L} chars, so both boundary
+// lookarounds fail. CJK edges must therefore match as plain substrings. These pin
+// that contract so config-level localization (e.g. a Chinese keyword list) is even
+// possible — see implementation-notes (classifier.multilingual-guard).
+describe("scoreDimensions keyword matching handles CJK (no spurious boundary)", () => {
+  it("MATCHES a CJK keyword embedded mid-sentence in CJK text", () => {
+    const cfg = makeConfig({ analysis_kw: { weight: 0.4, keywords: ["分析", "评估"] } });
+    const res = scoreDimensions(makeReq("请分析这家公司的财务状况"), cfg);
+    expect(res.hits.find((h) => h.dimension === "analysis_kw")).toBeDefined();
+  });
+
+  it("MATCHES a CJK keyword at the start and end of CJK text", () => {
+    const cfg = makeConfig({ analysis_kw: { weight: 0.4, keywords: ["分析"] } });
+    expect(
+      scoreDimensions(makeReq("分析这个"), cfg).hits.find((h) => h.dimension === "analysis_kw"),
+    ).toBeDefined();
+    expect(
+      scoreDimensions(makeReq("请你分析"), cfg).hits.find((h) => h.dimension === "analysis_kw"),
+    ).toBeDefined();
+  });
+
+  it("MATCHES a Japanese (Hiragana/Kanji) keyword embedded in Japanese text", () => {
+    const cfg = makeConfig({ coding_kw: { weight: 0.3, keywords: ["実装"] } });
+    const res = scoreDimensions(makeReq("この関数を実装してください"), cfg);
+    expect(res.hits.find((h) => h.dimension === "coding_kw")).toBeDefined();
+  });
+
+  it("STILL enforces Latin word boundaries (CJK fix must not regress 'ok' in 'look')", () => {
+    const cfg = makeConfig();
+    const res = scoreDimensions(makeReq("look at the book on the shelf"), cfg);
+    expect(res.hits.find((h) => h.dimension === "simple_kw")).toBeUndefined();
+  });
+});
