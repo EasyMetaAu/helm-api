@@ -11,14 +11,22 @@
 // refresh tokens to the client's `scrub()` so they can be stripped from any echoed
 // upstream error body.
 //
-// Decisions D1–D3 (see implementation-notes): non-interactive grants only
-// (refresh_token / client_credentials); refresh logic lives here, the 401 retry
-// trigger lives in the client; in-memory only (a rotating refresh token is lost on
-// restart — documented limitation).
+// Decisions D1–D3 (see implementation-notes): refresh logic lives here, the 401
+// retry trigger lives in the client. CONFIDENTIAL-client grants (PR #43,
+// refresh_token / client_credentials) stay in-memory only. PRESET subscription
+// grants (issue #38) are persisted to the OAuthTokenStore — encrypted — so a
+// rotated refresh token survives restarts.
 
-// Already-resolved OAuth credential values (NOT env var names — the composition
-// root resolves those). `refreshToken` is present for the refresh_token grant.
-export interface ResolvedOAuth {
+import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
+import type { OAuthTokenStore } from "../store/ports.js";
+import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
+
+// CONFIDENTIAL-client OAuth (PR #43): generic token endpoint reached with a
+// client SECRET. Already-resolved values (NOT env names — the composition root
+// resolves those). `refreshToken` is present for the refresh_token grant. `kind`
+// is optional so existing call sites that omit it default to confidential.
+export interface ConfidentialOAuth {
+  kind?: "confidential";
   grant: "refresh_token" | "client_credentials";
   tokenUrl: string;
   clientId: string;
@@ -28,6 +36,19 @@ export interface ResolvedOAuth {
   audience?: string;
 }
 
+// PRESET subscription OAuth (issue #38): a public-client / device flow whose
+// refresh wire shape is encapsulated in an OAuthProviderInterface, and whose
+// credentials live in the OAuthTokenStore (encrypted) rather than env. The token
+// manager delegates refresh to the provider and writes the rotated credential
+// back to the store so it survives restarts.
+export interface PresetOAuth {
+  kind: "preset";
+  providerId: string;
+  account: string;
+}
+
+export type ResolvedOAuth = ConfidentialOAuth | PresetOAuth;
+
 export interface TokenManagerDeps {
   oauth: ResolvedOAuth;
   fetch?: typeof globalThis.fetch;
@@ -35,6 +56,13 @@ export interface TokenManagerDeps {
   now?: () => number;
   /** Refresh `skew` ms before the reported expiry so a token never expires mid-flight. */
   expirySkewMs?: number;
+  // ── preset-kind deps (REQUIRED when oauth.kind === "preset") ────────────────
+  /** Persistent credential store (read on first use, rotation write-back on refresh). */
+  tokenStore?: OAuthTokenStore;
+  /** AES key for at-rest encrypt/decrypt of the stored access + refresh tokens. */
+  encKey?: Buffer;
+  /** The subscription provider whose refresh wire shape + getApiKey is used. */
+  oauthProvider?: OAuthProviderInterface;
 }
 
 export interface TokenManager {
@@ -74,38 +102,51 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
   const now = deps.now ?? (() => Date.now());
   const skew = deps.expirySkewMs ?? DEFAULT_EXPIRY_SKEW_MS;
   const oauth = deps.oauth;
+  const isPreset = oauth.kind === "preset";
 
   let accessToken: string | null = null;
   let expiresAt = 0; // ms epoch; 0 => no cached token
   // Refresh tokens may ROTATE: the endpoint can hand back a new one each refresh.
-  // Hold the live value in memory (D3: lost on restart — documented limitation).
-  let refreshToken: string | undefined = oauth.refreshToken;
+  // Confidential: held in memory (D3). Preset: persisted (see doPresetRefresh).
+  let refreshToken: string | undefined = isPreset ? undefined : oauth.refreshToken;
   // Single-flight lock: concurrent callers hitting an expired token await the SAME
   // in-flight refresh (mirrors breaker.ts inFlightProbe) so N callers => 1 fetch.
   let refreshing: Promise<void> | null = null;
+  // Preset-only: extra credential fields (e.g. copilot `enterpriseUrl`) carried
+  // through the store `meta` and re-merged into the provider refresh call.
+  let presetExtra: Record<string, unknown> = {};
+  let presetLoaded = false;
 
-  function buildBody(): URLSearchParams {
+  // ── preset deps (validated up-front so a misconfig fails CLOSED, principle 2) ─
+  if (isPreset) {
+    if (!deps.tokenStore || !deps.encKey || !deps.oauthProvider) {
+      throw new Error("preset OAuth token manager requires tokenStore + encKey + oauthProvider");
+    }
+  }
+
+  function buildBody(o: ConfidentialOAuth): URLSearchParams {
     const body = new URLSearchParams();
-    body.set("grant_type", oauth.grant);
-    body.set("client_id", oauth.clientId);
-    body.set("client_secret", oauth.clientSecret);
-    if (oauth.grant === "refresh_token") {
+    body.set("grant_type", o.grant);
+    body.set("client_id", o.clientId);
+    body.set("client_secret", o.clientSecret);
+    if (o.grant === "refresh_token") {
       // refreshToken is guaranteed present for this grant (config refine), but
       // guard anyway so a desync never sends "undefined" on the wire.
       if (refreshToken !== undefined) body.set("refresh_token", refreshToken);
     }
-    if (oauth.scopes.length > 0) body.set("scope", oauth.scopes.join(" "));
-    if (oauth.audience !== undefined) body.set("audience", oauth.audience);
+    if (o.scopes.length > 0) body.set("scope", o.scopes.join(" "));
+    if (o.audience !== undefined) body.set("audience", o.audience);
     return body;
   }
 
   async function doRefresh(): Promise<void> {
+    const o = oauth as ConfidentialOAuth;
     let res: Response;
     try {
-      res = await doFetch(oauth.tokenUrl, {
+      res = await doFetch(o.tokenUrl, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: buildBody().toString(),
+        body: buildBody(o).toString(),
       });
     } catch {
       // Network / DNS / abort: never echo the cause (could carry the URL with a
@@ -138,17 +179,85 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
     }
   }
 
+  // Split a credential into store fields. `meta` carries every key beyond the
+  // canonical {access, refresh, expires} (e.g. copilot enterpriseUrl).
+  function metaFrom(creds: OAuthCredentials): string | null {
+    const { access: _a, refresh: _r, expires: _e, ...rest } = creds;
+    return Object.keys(rest).length > 0 ? JSON.stringify(rest) : null;
+  }
+
+  // Lazily load the persisted credential on first use (preset only). Decrypts the
+  // stored access + refresh blobs so a still-valid token is reused WITHOUT a
+  // network refresh after a restart.
+  async function ensurePresetLoaded(): Promise<void> {
+    if (presetLoaded) return;
+    presetLoaded = true;
+    const p = oauth as PresetOAuth;
+    const rec = await deps.tokenStore?.get(p.providerId, p.account);
+    if (!rec) return;
+    const encKey = deps.encKey as Buffer;
+    accessToken = rec.accessEnc ? decryptSecret(rec.accessEnc, encKey) : null;
+    refreshToken = rec.refreshEnc ? decryptSecret(rec.refreshEnc, encKey) : undefined;
+    expiresAt = rec.expiresAt ?? 0;
+    presetExtra = rec.meta ? (JSON.parse(rec.meta) as Record<string, unknown>) : {};
+  }
+
+  // Preset refresh: delegate the wire shape to the subscription provider, then
+  // WRITE THE ROTATED credential back to the store (encrypted) so it survives a
+  // restart — the core of why the preset path is persistent (issue #38 / D3).
+  async function doPresetRefresh(): Promise<void> {
+    await ensurePresetLoaded();
+    const p = oauth as PresetOAuth;
+    const provider = deps.oauthProvider as OAuthProviderInterface;
+    const encKey = deps.encKey as Buffer;
+    if (refreshToken === undefined) {
+      throw new TokenRefreshError(
+        `no stored OAuth credential for ${p.providerId} (run \`helm oauth login ${p.providerId}\`)`,
+      );
+    }
+    let creds: OAuthCredentials;
+    try {
+      creds = await provider.refreshToken({
+        access: accessToken ?? "",
+        refresh: refreshToken,
+        expires: expiresAt,
+        ...presetExtra,
+      });
+    } catch {
+      // Provider refresh failed — never echo its message (could carry a token).
+      throw new TokenRefreshError(`oauth refresh failed (${p.providerId})`);
+    }
+    accessToken = provider.getApiKey(creds);
+    refreshToken = creds.refresh;
+    expiresAt = creds.expires;
+    presetExtra = (() => {
+      const { access: _a, refresh: _r, expires: _e, ...rest } = creds;
+      return rest;
+    })();
+    await deps.tokenStore?.upsert({
+      providerId: p.providerId,
+      account: p.account,
+      accessEnc: encryptSecret(accessToken, encKey),
+      refreshEnc: encryptSecret(refreshToken, encKey),
+      expiresAt,
+      meta: metaFrom(creds),
+      updatedAt: now(),
+    });
+  }
+
   function isExpired(): boolean {
     return accessToken === null || now() + skew >= expiresAt;
   }
 
   async function ensureFresh(): Promise<void> {
+    // Preset: load the persisted token first so a still-valid one skips refresh.
+    if (isPreset) await ensurePresetLoaded();
     if (!isExpired()) return;
     // Coalesce concurrent refreshes. The first caller starts the fetch; everyone
     // else awaits the same promise. Cleared in finally so a later expiry refreshes
     // again (and a failed refresh does not poison the lock).
     if (refreshing === null) {
-      refreshing = doRefresh().finally(() => {
+      refreshing = (isPreset ? doPresetRefresh() : doRefresh()).finally(() => {
         refreshing = null;
       });
     }
