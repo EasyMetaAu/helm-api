@@ -331,6 +331,71 @@ describe("scoreRequest — Layer-1 orchestration", () => {
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
   });
 
+  it("language guard: historical English keyword hits do not suppress current non-Latin prose", () => {
+    const cfg = makeConfig();
+    const req = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content: "Please refactor this function and prove the theorem step by step.",
+        },
+        { role: "assistant", content: "Sure, here is the coding and reasoning outline." },
+        { role: "user", content: longZh },
+      ],
+    });
+    const out = scoreRequest(req, { cfg, approxTokens: 80 });
+
+    expect(out.uncertain).toBe(true);
+    expect(out.confidence).toBe(0);
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(true);
+  });
+
+  it("language guard: current code block suppresses guard even after historical English hits", () => {
+    const cfg = makeConfig();
+    const req = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content: "Please refactor this function and prove the theorem step by step.",
+        },
+        {
+          role: "user",
+          content: `${longZh}\n\n\`\`\`ts\nfunction broken() { return 1 }\n\`\`\``,
+        },
+      ],
+    });
+    const out = scoreRequest(req, { cfg, approxTokens: 80 });
+
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  it.each([
+    [
+      "Japanese",
+      "この会社の過去三年間の財務状況とキャッシュフローを詳しく分析し、業界動向も踏まえて投資判断と主要なリスクを具体的に説明してください",
+    ],
+    [
+      "Korean",
+      "이 회사의 지난 삼 년간 재무 상태와 현금 흐름을 자세히 분석하고 업계 동향을 반영해 투자 의견과 주요 위험을 구체적으로 설명해 주세요",
+    ],
+    [
+      "mixed Chinese and English",
+      "请 analyze 这家公司过去三年的 financial performance、cash flow、资产负债变化和主要 risk，并结合行业趋势给出具体 investment 建议以及风险缓释措施",
+    ],
+    [
+      "Cyrillic",
+      "Проанализируй финансовое состояние этой компании за последние три года и подробно оцени денежные потоки, отраслевые тенденции, инвестиционные риски и возможные рекомендации",
+    ],
+  ])("language guard: %s long prose is forced uncertain", (_label, content) => {
+    const cfg = makeConfig();
+    const req = makeRequest({ messages: [{ role: "user", content }] });
+    const out = scoreRequest(req, { cfg, approxTokens: 60 });
+
+    expect(out.uncertain).toBe(true);
+    expect(out.confidence).toBe(0);
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(true);
+  });
+
   it("language guard: disabled via config → non-Latin prose not forced", () => {
     const cfg = makeConfig({ language: { non_latin_uncertain: false } });
     const req = makeRequest({ messages: [{ role: "user", content: longZh }] });

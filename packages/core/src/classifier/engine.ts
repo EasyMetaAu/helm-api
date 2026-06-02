@@ -1,5 +1,5 @@
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
-import { type DimensionScore, scoreDimensions } from "./dimensions.js";
+import { scoreDimensions } from "./dimensions.js";
 import { applyMomentum, type MomentumDeps, recordMomentum } from "./momentum.js";
 import { applyOverrides, evaluateOverrides } from "./overrides.js";
 import { nonLatinRatio } from "./signals.js";
@@ -140,7 +140,7 @@ export function scoreRequest(req: InternalRequest, deps: ScoreRequestDeps): Clas
   // Ambient signals (msg_length / turn_count) fire on every request and are NOT grip.
   let confidence = tier.confidence;
   let uncertain = tier.uncertain;
-  if (safe(() => languageGuardTrips(req, cfg, dim.hits), false)) {
+  if (safe(() => languageGuardTrips(req, cfg), false)) {
     confidence = 0;
     uncertain = true;
     explanation.push({ source: "override", detail: "low_keyword_coverage" });
@@ -180,11 +180,7 @@ const AMBIENT_DIMENSIONS = new Set(["msg_length", "turn_count"]);
 
 // True when Layer-1's English keyword lists have no purchase on a non-Latin prompt
 // and nothing else gave it real grip — see step 5.5. Pure: reads only its inputs.
-function languageGuardTrips(
-  req: InternalRequest,
-  cfg: ClassifierRulesConfig,
-  hits: DimensionScore["hits"],
-): boolean {
+function languageGuardTrips(req: InternalRequest, cfg: ClassifierRulesConfig): boolean {
   // Robust to a config SUBSET (dimensions.ts contract): an absent `language` block
   // (or an older parsed config) simply disables the guard rather than throwing.
   const lang = cfg.language;
@@ -194,8 +190,17 @@ function languageGuardTrips(
   // not escalate them. Reuse the same char threshold so the two stay consistent.
   if (text.length <= cfg.overrides.short_message_max_chars) return false;
   if (nonLatinRatio(text) < lang.non_latin_min_ratio) return false;
+
+  // Guard suppression must be based on the CURRENT user turn only. Historical
+  // English keyword hits are useful for the total score, but they are not evidence
+  // that Layer-1 understood this non-Latin prompt.
+  const currentUserMessage = lastUserMessage(req.messages);
+  if (!currentUserMessage) return false;
+  const currentHits = scoreDimensions({ ...req, messages: [currentUserMessage] }, cfg).hits;
   // Any positive, non-ambient hit (keyword or content-type structural) = real grip.
-  const hasGrip = hits.some((h) => h.contribution > 0 && !AMBIENT_DIMENSIONS.has(h.dimension));
+  const hasGrip = currentHits.some(
+    (h) => h.contribution > 0 && !AMBIENT_DIMENSIONS.has(h.dimension),
+  );
   return !hasGrip;
 }
 
@@ -246,14 +251,19 @@ function round(n: number): number {
   return Math.round(n * 1000) / 1000;
 }
 
-function lastUserMessageText(messages: InternalRequest["messages"]): string {
+function lastUserMessage(
+  messages: InternalRequest["messages"],
+): InternalRequest["messages"][number] | null {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
-    if (msg && msg.role === "user") {
-      return contentToString(msg.content);
-    }
+    if (msg && msg.role === "user") return msg;
   }
-  return "";
+  return null;
+}
+
+function lastUserMessageText(messages: InternalRequest["messages"]): string {
+  const msg = lastUserMessage(messages);
+  return msg ? contentToString(msg.content) : "";
 }
 
 function lastUserMessageChars(messages: InternalRequest["messages"]): number {
