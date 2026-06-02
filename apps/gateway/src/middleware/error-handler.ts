@@ -1,25 +1,14 @@
-import {
-  ERROR_CLASS_HTTP_STATUS,
-  type ErrorClass,
-  type HelmError,
-  HelmErrorSchema,
-} from "@helm/shared";
+import { makeOpenAIError, openaiTransformErrorOut } from "@helm/core";
+import { type ErrorClass, type HelmError, HelmErrorSchema } from "@helm/shared";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 
-// error_class -> OpenAI error shape (type/code). HTTP status comes from the
-// shared ERROR_CLASS_HTTP_STATUS map (docs/07). Exhaustive over the enum.
-const OPENAI_SHAPE: Record<ErrorClass, { type: string; code: string }> = {
-  auth_error: { type: "invalid_request_error", code: "invalid_api_key" },
-  invalid_request: { type: "invalid_request_error", code: "invalid_request" },
-  lane_unavailable: { type: "api_error", code: "lane_unavailable" },
-  all_providers_failed: { type: "api_error", code: "all_providers_failed" },
-  capability_unsatisfiable: { type: "invalid_request_error", code: "capability_unsatisfiable" },
-  upstream_error: { type: "api_error", code: "upstream_error" },
-  timeout: { type: "api_error", code: "timeout" },
-  rate_limited: { type: "rate_limit_error", code: "rate_limited" },
-};
+// The OpenAI error wire shape (type/code/status) lives in ONE place —
+// @helm/core's openai-error transformer (OPENAI_ERROR_SHAPE) — so the gateway's
+// onError response and the protocol-layer renderer cannot drift. This handler
+// only adds gateway concerns: client-disconnect handling, logging, and the
+// redacted fallback for non-HelmError throws (docs/07).
 
 // Throwable wrapper so a structured HelmError survives Hono's onError (which
 // only catches thrown Error instances, not plain objects). core/gateway code
@@ -63,19 +52,23 @@ export function handleError(err: unknown, c: Context<AppEnv>): Response {
 
   const helm = asHelmError(err);
   const errorClass: ErrorClass = helm?.error_class ?? "upstream_error";
-  const httpStatus = ERROR_CLASS_HTTP_STATUS[errorClass];
-  const shape = OPENAI_SHAPE[errorClass];
-  // Redacted, generic message for non-HelmError fallbacks (never leak raw text).
-  const message = helm?.message ?? "internal error";
+
+  // Render via the canonical OpenAI transformer. A real HelmError renders
+  // directly; a non-HelmError throw falls back to a redacted upstream_error so we
+  // never leak raw stack/message text. trace_id is always the request's trace_id.
+  const { status, body } = helm
+    ? openaiTransformErrorOut({ ...helm, trace_id: traceId })
+    : makeOpenAIError({
+        error_class: "upstream_error",
+        message: "internal error",
+        trace_id: traceId,
+      });
 
   logger.log("error", "request.error", {
     trace_id: traceId,
     error_class: errorClass,
-    http_status: httpStatus,
+    http_status: status,
   });
 
-  return c.json(
-    { error: { message, type: shape.type, code: shape.code, trace_id: traceId } },
-    httpStatus as ContentfulStatusCode,
-  );
+  return c.json(body, status as ContentfulStatusCode);
 }

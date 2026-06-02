@@ -1,15 +1,17 @@
-import { makeHelmError } from "@helm/shared";
+import { type ErrorClass, makeHelmError } from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import {
   anthropicTransformer,
   convertOpenAIStreamToAnthropic,
   transformErrorOut as transformAnthropicErrorOut,
 } from "./anthropic/index.js";
+import { transformErrorOut as transformGeminiErrorOut } from "./gemini/error.js";
 import { geminiTransformer } from "./gemini/gemini-transformer.js";
 import type { IRChunk as GeminiIRChunk } from "./gemini/gemini-types.js";
 import type { IRRequest, IRResponse } from "./ir.js";
 import { IRRequestSchema, IRResponseSchema } from "./ir.js";
 import { openaiTransformer } from "./openai.js";
+import { transformErrorOut as transformOpenAIErrorOut } from "./openai-error.js";
 import {
   canonicalRequestIR,
   canonicalResponseIR,
@@ -484,23 +486,106 @@ describe("protocol cross-path executable harness", () => {
     expect(geminiSerialized).not.toContain("[DONE]");
   });
 
+  // SCOPE (issue #51, P2): the error dimension verifies that the TARGET protocol
+  // can render a Helm error into its own native envelope — it deliberately does
+  // NOT exercise a source-protocol-specific failure path. A provider's native
+  // error -> Helm ErrorClass classification happens at the executor / circuit
+  // layer (see provider/* + the gateway routes), not in these pure renderers, so
+  // the matrix asserts on `to` only. Each target is checked against MULTIPLE
+  // classes so the whole map is exercised, not one synthetic value.
+  const ERROR_RENDER_EXPECTATIONS: Record<
+    ProtocolName,
+    Array<{ cls: ErrorClass; status: number; body: unknown }>
+  > = {
+    anthropic: [
+      {
+        cls: "rate_limited",
+        status: 429,
+        body: { type: "error", error: { type: "rate_limit_error", message: "matrix err" } },
+      },
+      {
+        cls: "auth_error",
+        status: 401,
+        body: { type: "error", error: { type: "authentication_error", message: "matrix err" } },
+      },
+    ],
+    openai: [
+      {
+        cls: "rate_limited",
+        status: 429,
+        body: {
+          error: {
+            message: "matrix err",
+            type: "rate_limit_error",
+            code: "rate_limited",
+            // trace_id is carried ON the wire by the OpenAI contract (docs/07).
+            trace_id: "trace-matrix",
+          },
+        },
+      },
+      {
+        cls: "auth_error",
+        status: 401,
+        body: {
+          error: {
+            message: "matrix err",
+            type: "invalid_request_error",
+            code: "invalid_api_key",
+            trace_id: "trace-matrix",
+          },
+        },
+      },
+    ],
+    gemini: [
+      {
+        cls: "rate_limited",
+        status: 429,
+        body: { error: { code: 429, message: "matrix err", status: "RESOURCE_EXHAUSTED" } },
+      },
+      {
+        cls: "auth_error",
+        status: 401,
+        body: { error: { code: 401, message: "matrix err", status: "UNAUTHENTICATED" } },
+      },
+    ],
+  };
+
+  const renderError: Record<ProtocolName, (helm: ReturnType<typeof makeHelmError>) => unknown> = {
+    anthropic: (helm) => transformAnthropicErrorOut(helm),
+    openai: (helm) => transformOpenAIErrorOut(helm),
+    gemini: (helm) => transformGeminiErrorOut(helm),
+  };
+
   it.each(
     protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "error")),
-  )("guards passing error fixtures for $from->$to", ({ to }) => {
-    expect(to).toBe("anthropic");
-    const out = transformAnthropicErrorOut(
-      makeHelmError({
-        error_class: "rate_limited",
-        message: "matrix rate limit",
+  )("renders Helm errors into the $to native envelope (target-renderer; source $from is incidental)", ({
+    to,
+  }) => {
+    for (const { cls, status, body } of ERROR_RENDER_EXPECTATIONS[to]) {
+      const helm = makeHelmError({
+        error_class: cls,
+        message: "matrix err",
         trace_id: "trace-matrix",
-      }),
-    );
+      });
+      const out = renderError[to](helm) as { status: number; body: unknown };
+      expect(out.status).toBe(status);
+      expect(out.body).toEqual(body);
+    }
 
-    expect(out.status).toBe(429);
-    expect(out.body).toEqual({
-      type: "error",
-      error: { type: "rate_limit_error", message: "matrix rate limit" },
+    // Anthropic/Gemini native shapes have no trace_id field; OpenAI carries it by
+    // contract. Assert the non-OpenAI targets do not smuggle the trace id onto the
+    // wire (principle 7), while OpenAI exposes it intentionally.
+    const probe = makeHelmError({
+      error_class: "rate_limited",
+      message: "matrix err",
+      trace_id: "trace-matrix",
     });
+    const rendered = renderError[to](probe) as { body: unknown };
+    if (to === "openai") {
+      expect(JSON.stringify(rendered.body)).toContain("trace-matrix");
+    } else {
+      expect(JSON.stringify(rendered.body)).not.toContain("trace-matrix");
+    }
   });
 });
 

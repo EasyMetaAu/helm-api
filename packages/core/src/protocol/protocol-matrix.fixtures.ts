@@ -107,9 +107,8 @@ const anthropicToOpenai = path("anthropic", "openai", [
   ),
   fixture(
     "error",
-    "todo",
-    "Anthropic-native client errors to OpenAI error envelope need a dedicated renderer",
-    "No OpenAI-native error envelope transformer exists to assert in PR A without adding behavior.",
+    "passing",
+    "Helm ErrorClass renders an OpenAI-native error envelope for Anthropic-origin failures",
   ),
   fixture("usage", "passing", "Anthropic cache_read_input_tokens can stay distinct in IR usage"),
 ]);
@@ -140,9 +139,8 @@ const openaiToGemini = path("openai", "gemini", [
   ),
   fixture(
     "error",
-    "todo",
-    "Helm ErrorClass to Gemini-native error envelope needs a dedicated renderer",
-    "No Gemini-native error envelope transformer exists to assert in PR A without adding behavior.",
+    "passing",
+    "Helm ErrorClass renders a Gemini-native google.rpc.Status error envelope",
   ),
   fixture(
     "usage",
@@ -177,9 +175,8 @@ const geminiToOpenai = path("gemini", "openai", [
   ),
   fixture(
     "error",
-    "todo",
-    "Gemini-native client errors to OpenAI error envelope need a dedicated renderer",
-    "No OpenAI-native error envelope transformer exists to assert in PR A without adding behavior.",
+    "passing",
+    "Helm ErrorClass renders an OpenAI-native error envelope for Gemini-origin failures",
   ),
   fixture("usage", "passing", "Gemini cachedContentTokenCount remains distinct in IR usage"),
 ]);
@@ -216,9 +213,8 @@ const anthropicToGemini = path("anthropic", "gemini", [
   ),
   fixture(
     "error",
-    "todo",
-    "Helm ErrorClass to Gemini-native envelopes for Anthropic-origin failures needs a renderer",
-    "No Gemini-native error envelope transformer exists to assert in PR A without adding behavior.",
+    "passing",
+    "Helm ErrorClass renders Gemini-native google.rpc.Status envelopes for Anthropic-origin failures",
   ),
   fixture("usage", "passing", "IR cached usage can render to Gemini usageMetadata"),
 ]);
