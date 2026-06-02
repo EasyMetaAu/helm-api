@@ -87,6 +87,45 @@ describe("convertOpenAIStreamToResponses — text event sequence", () => {
     );
   });
 
+  it("created/in_progress/completed carry the same non-empty model from the request seed", async () => {
+    const events = await collect(
+      convertOpenAIStreamToResponses(feed([textChunk("hi"), textChunk("", "stop")]), {
+        model: "gpt-seeded",
+      }),
+    );
+    const responseEvents = events.filter(
+      (
+        e,
+      ): e is Extract<
+        ResponsesSSEEvent,
+        { type: "response.created" | "response.in_progress" | "response.completed" }
+      > =>
+        e.type === "response.created" ||
+        e.type === "response.in_progress" ||
+        e.type === "response.completed",
+    );
+    expect(responseEvents.map((e) => e.response.model)).toEqual([
+      "gpt-seeded",
+      "gpt-seeded",
+      "gpt-seeded",
+    ]);
+  });
+
+  it("done item and final response output mark message items completed", async () => {
+    const events = await collect(
+      convertOpenAIStreamToResponses(feed([textChunk("hi"), textChunk("", "stop")]), {
+        model: "gpt-x",
+      }),
+    );
+    const done = events.find((e) => e.type === "response.output_item.done") as Extract<
+      ResponsesSSEEvent,
+      { type: "response.output_item.done" }
+    >;
+    expect(done.item).toMatchObject({ type: "message", status: "completed" });
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    expect(completed.response.output[0]).toMatchObject({ type: "message", status: "completed" });
+  });
+
   it("response.completed carries terminal status completed + usage projection", async () => {
     const usageChunk: OpenAIChunk = {
       id: "chatcmpl-x",
@@ -164,6 +203,75 @@ describe("convertOpenAIStreamToResponses — tool calls", () => {
     expect(done.output_index).toBe(0);
   });
 
+  it("marks function_call added as in_progress and done/final output as completed", async () => {
+    const chunks: OpenAIChunk[] = [
+      {
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                { index: 0, id: "call_ping", function: { name: "ping", arguments: "{}" } },
+              ],
+            },
+          },
+        ],
+      },
+      { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+    ];
+    const events = await collect(convertOpenAIStreamToResponses(feed(chunks), { model: "gpt-x" }));
+    const added = events.find((e) => e.type === "response.output_item.added") as Extract<
+      ResponsesSSEEvent,
+      { type: "response.output_item.added" }
+    >;
+    expect(added.item).toMatchObject({ type: "function_call", status: "in_progress" });
+    const done = events.find((e) => e.type === "response.output_item.done") as Extract<
+      ResponsesSSEEvent,
+      { type: "response.output_item.done" }
+    >;
+    expect(done.item).toMatchObject({ type: "function_call", status: "completed" });
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    expect(completed.response.output[0]).toMatchObject({
+      type: "function_call",
+      status: "completed",
+    });
+  });
+
+  it("keeps no-argument function_call items when name/call_id arrives with empty arguments", async () => {
+    const chunks: OpenAIChunk[] = [
+      {
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                { index: 0, id: "call_empty", function: { name: "ping", arguments: "" } },
+              ],
+            },
+          },
+        ],
+      },
+      { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+    ];
+    const events = await collect(convertOpenAIStreamToResponses(feed(chunks), { model: "gpt-x" }));
+    const added = events.find((e) => e.type === "response.output_item.added") as Extract<
+      ResponsesSSEEvent,
+      { type: "response.output_item.added" }
+    >;
+    expect(added.item).toMatchObject({
+      type: "function_call",
+      call_id: "call_empty",
+      name: "ping",
+      arguments: "",
+    });
+    const argsDone = events.find(
+      (e) => e.type === "response.function_call_arguments.done",
+    ) as Extract<ResponsesSSEEvent, { type: "response.function_call_arguments.done" }>;
+    expect(argsDone.arguments).toBe("");
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    expect(completed.response.output).toHaveLength(1);
+  });
+
   it("assigns stable, non-reused output_index across multiple tool calls", async () => {
     const chunks: OpenAIChunk[] = [
       {
@@ -187,8 +295,8 @@ describe("convertOpenAIStreamToResponses — tool calls", () => {
       { type: "response.output_item.added" }
     >[];
     expect(added.map((e) => e.output_index)).toEqual([0, 1]);
-    expect((added[0]!.item as { call_id?: string }).call_id).toBe("c0");
-    expect((added[1]!.item as { call_id?: string }).call_id).toBe("c1");
+    expect((added[0]?.item as { call_id?: string }).call_id).toBe("c0");
+    expect((added[1]?.item as { call_id?: string }).call_id).toBe("c1");
   });
 
   it("drops an empty-husk tool (announced index/id but no name and no arguments)", async () => {

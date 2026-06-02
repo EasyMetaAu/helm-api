@@ -59,7 +59,7 @@ import { mapResponsesStatus } from "./responses.js";
 const ResponsesMessageItemSchema = z.object({
   type: z.literal("message"),
   id: z.string(),
-  status: z.literal("in_progress"),
+  status: z.enum(["in_progress", "completed"]),
   role: z.literal("assistant"),
   content: z.array(z.unknown()),
 });
@@ -67,6 +67,7 @@ const ResponsesMessageItemSchema = z.object({
 const ResponsesFunctionCallItemSchema = z.object({
   type: z.literal("function_call"),
   id: z.string(),
+  status: z.enum(["in_progress", "completed"]),
   call_id: z.string(),
   name: z.string(),
   arguments: z.string(),
@@ -212,11 +213,11 @@ interface StreamState {
   usage: IRUsage | null; // buffered; flushed on response.completed
 }
 
-function createState(): StreamState {
+function createState(model = "unknown"): StreamState {
   return {
     sequenceNumber: 0,
     responseId: "",
-    model: "",
+    model,
     nextOutputIndex: 0,
     openItems: new Set(),
     textSlot: null,
@@ -289,12 +290,17 @@ function responseObject(
  */
 export async function* convertOpenAIStreamToResponses(
   chunks: AsyncIterable<OpenAIChunk>,
-  // Optional seed id (open question 3): the synthesizer passes the IR response id
-  // so a cache-hit's created/completed match the non-stream body; the live stream
-  // omits it and a stable synthesized `resp_*` id is reused across created…completed.
-  seedId?: string,
+  // Optional seed: the synthesizer passes the IR response id/model so cache-hit
+  // created/completed matches the non-stream body; live streams pass request model
+  // so prelude events never expose an empty model before the first upstream chunk.
+  seed?: string | { id?: string; model?: string },
 ): AsyncIterable<ResponsesSSEEvent> {
-  const state = createState();
+  const seedId = typeof seed === "string" ? seed : seed?.id;
+  const seedModel =
+    typeof seed === "object" && seed.model !== undefined && seed.model !== ""
+      ? seed.model
+      : "unknown";
+  const state = createState(seedModel);
   state.responseId = seedId !== undefined && seedId !== "" ? seedId : synthResponseId();
 
   // Unconditional prelude: an empty/zero-chunk stream still terminates cleanly.
@@ -381,8 +387,8 @@ export async function* convertOpenAIStreamToResponses(
       }
 
       const args = tc.function?.arguments;
-      if (args !== undefined && args !== "") {
-        // First argument fragment: settle id/name and emit output_item.added before
+      if (args !== undefined || slot.name !== "") {
+        // First meaningful tool signal: settle id/name and emit output_item.added before
         // any argument delta (item added ALWAYS precedes its deltas, pit #4).
         if (!slot.started) {
           slot.started = true;
@@ -395,18 +401,21 @@ export async function* convertOpenAIStreamToResponses(
               id: slot.itemId,
               call_id: slot.callId !== "" ? slot.callId : synthCallId(slot.outputIndex),
               name: slot.name,
+              status: "in_progress",
               arguments: "",
             },
           });
         }
-        slot.argBuffer += args;
-        yield ResponsesSSEEventSchema.parse({
-          type: "response.function_call_arguments.delta",
-          sequence_number: nextSeq(state),
-          item_id: slot.itemId,
-          output_index: slot.outputIndex,
-          delta: args,
-        });
+        if (args !== undefined && args !== "") {
+          slot.argBuffer += args;
+          yield ResponsesSSEEventSchema.parse({
+            type: "response.function_call_arguments.delta",
+            sequence_number: nextSeq(state),
+            item_id: slot.itemId,
+            output_index: slot.outputIndex,
+            delta: args,
+          });
+        }
       }
     }
 
@@ -450,7 +459,7 @@ export async function* convertOpenAIStreamToResponses(
     const item: ResponsesOutputItem = {
       type: "message",
       id: slot.itemId,
-      status: "in_progress",
+      status: "completed",
       role: "assistant",
       content: [{ type: "output_text", text: slot.textBuffer }],
     };
@@ -489,6 +498,7 @@ export async function* convertOpenAIStreamToResponses(
       type: "function_call",
       id: slot.itemId,
       call_id: callId,
+      status: "completed",
       name: slot.name,
       arguments: slot.argBuffer,
     };
@@ -566,5 +576,5 @@ export async function* synthesizeResponsesSSEFromJSON(
     yield chunk;
   }
 
-  yield* convertOpenAIStreamToResponses(single(), resp.id);
+  yield* convertOpenAIStreamToResponses(single(), { id: resp.id, model: resp.model });
 }

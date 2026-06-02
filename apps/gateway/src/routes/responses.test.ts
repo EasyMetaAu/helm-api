@@ -157,7 +157,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(frames.some((f) => f.data === "[DONE]")).toBe(false);
   });
 
-  it("mid-stream provider failure emits exactly one OpenAI-envelope error frame", async () => {
+  it("mid-stream provider failure emits exactly one Responses-shaped error frame", async () => {
     const { deps } = makeDeps({
       transformRequestOut: () => ({
         stream: true,
@@ -180,12 +180,19 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const frames = parseSSE(await res.text());
     const errorFrames = frames.filter((f) => f.event === "error");
     expect(errorFrames).toHaveLength(1);
-    const env = JSON.parse(errorFrames[0]!.data) as { error: { code: string } };
-    // OpenAI error envelope, NOT the Anthropic shape.
-    expect(env.error.code).toBeDefined();
+    const env = JSON.parse(errorFrames[0]?.data ?? "{}") as {
+      type: string;
+      code: string;
+      message: string;
+      param: null;
+      sequence_number: number;
+    };
+    expect(env).toMatchObject({ type: "error", code: "internal_error", param: null });
+    expect(env.message).toBe("upstream exploded");
+    expect(typeof env.sequence_number).toBe("number");
   });
 
-  it("pre-stream all_providers_failed surfaces a single terminal OpenAI error frame", async () => {
+  it("pre-stream all_providers_failed surfaces a single terminal Responses-shaped error frame", async () => {
     const { deps } = makeDeps({
       transformRequestOut: () => ({
         stream: true,
@@ -207,8 +214,12 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const frames = parseSSE(await res.text());
     const errorFrames = frames.filter((f) => f.event === "error");
     expect(errorFrames).toHaveLength(1);
-    const env = JSON.parse(errorFrames[0]!.data) as { error: { code: string } };
-    expect(env.error.code).toBe("all_providers_failed");
+    const env = JSON.parse(errorFrames[0]?.data ?? "{}") as {
+      type: string;
+      code: string;
+      param: null;
+    };
+    expect(env).toMatchObject({ type: "error", code: "all_providers_failed", param: null });
   });
 
   it("client abort emits NO error frame (benign non-provider fault)", async () => {

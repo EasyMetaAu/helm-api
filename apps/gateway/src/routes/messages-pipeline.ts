@@ -221,15 +221,14 @@ function openAIBodyToIR(body: unknown): IRResponse {
 }
 
 // —— Raw OpenAI SSE text stream → parsed OpenAIChunk objects. The provider yields
-// decoded byte chunks (NOT line-aligned), so we buffer across chunks, split on
-// blank-line SSE event boundaries, drop the `data: ` prefix, skip `[DONE]`, and
-// JSON.parse each frame. A malformed frame is skipped (fail-open) rather than
-// 5xx'ing the stream. The shape is fed verbatim into the Anthropic state machine.
+// decoded byte chunks (NOT line-aligned), so we normalize CRLF, buffer across
+// chunks, split on blank-line SSE event boundaries, collect all `data:` lines,
+// skip `[DONE]`, and JSON.parse each frame. Malformed frames are skipped
+// (fail-open) rather than 5xx'ing the stream.
 async function* parseOpenAISSE(raw: AsyncIterable<string>): AsyncIterable<Record<string, unknown>> {
   let buffer = "";
   for await (const piece of raw) {
-    buffer += piece;
-    // SSE events are separated by a blank line.
+    buffer += piece.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     let sep = buffer.indexOf("\n\n");
     while (sep !== -1) {
       const event = buffer.slice(0, sep);
@@ -239,21 +238,25 @@ async function* parseOpenAISSE(raw: AsyncIterable<string>): AsyncIterable<Record
       sep = buffer.indexOf("\n\n");
     }
   }
-  // flush any trailing event without a terminating blank line.
   const tail = parseFrame(buffer);
   if (tail !== null) yield tail;
 }
 
 function parseFrame(event: string): Record<string, unknown> | null {
+  const dataLines: string[] = [];
   for (const line of event.split("\n")) {
     const trimmed = line.trimStart();
     if (!trimmed.startsWith("data:")) continue;
-    const payload = trimmed.slice(5).trim();
-    if (payload === "" || payload === "[DONE]") continue;
+    dataLines.push(trimmed.slice(5).replace(/^ /, ""));
+  }
+  if (dataLines.length === 0) return null;
+  const payload = dataLines.join("\n").trim();
+  if (payload === "" || payload === "[DONE]") return null;
+  for (const candidate of [payload, dataLines.join("").trim()]) {
     try {
-      return JSON.parse(payload) as Record<string, unknown>;
+      return JSON.parse(candidate) as Record<string, unknown>;
     } catch {
-      return null; // malformed frame: skip (fail-open).
+      // Try the next legal/compat concatenation form before failing open.
     }
   }
   return null;
@@ -385,9 +388,13 @@ export function createMessagesPipeline(
             } else {
               // openai_responses / anthropic both yield typed SSE events; the route
               // treats them as an opaque {type,...} bag, so the branch lives here.
+              // The Responses machine also gets the requested model so its
+              // synthesized envelope carries it (review-blocker fix d55332e).
               const events =
                 protocol === "openai_responses"
-                  ? convertOpenAIStreamToResponses(source as AsyncIterable<never>)
+                  ? convertOpenAIStreamToResponses(source as AsyncIterable<never>, {
+                      model: typeof ir.model === "string" && ir.model.length > 0 ? ir.model : "auto",
+                    })
                   : convertOpenAIStreamToAnthropic(source as AsyncIterable<never>);
               for await (const ev of events) {
                 yield ev as (AnthropicSSEEvent | ResponsesSSEEvent) & { type: string };

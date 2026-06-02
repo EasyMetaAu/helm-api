@@ -3,7 +3,7 @@ import { type ErrorClass, ErrorClassSchema, makeHelmError } from "@helm/shared";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
-import { HelmHttpError, openAIErrorEnvelope } from "../middleware/error-handler.js";
+import { HelmHttpError } from "../middleware/error-handler.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
@@ -98,6 +98,23 @@ function coerceErrorClass(value: string): ErrorClass {
 // A PipelineError surfaced across the pipeline seam → a throwable HelmHttpError so
 // the global onError serializes it in the OpenAI envelope (all_providers_failed →
 // 502, invalid_request → 400, …) instead of degrading to an empty 200.
+
+function responsesStreamError(args: {
+  code: string;
+  message: string;
+  traceId: string;
+  sequenceNumber: number;
+}): Record<string, unknown> {
+  return {
+    type: "error",
+    code: args.code,
+    message: args.message,
+    param: null,
+    sequence_number: args.sequenceNumber,
+    trace_id: args.traceId,
+  };
+}
+
 function pipelineToHelm(err: PipelineError, traceId: string): HelmHttpError {
   return new HelmHttpError(
     makeHelmError({
@@ -202,32 +219,36 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         // pipeline already ran the Responses state machine (principle 8 — we never
         // forward a raw upstream chunk). There is NO [DONE] sentinel; the terminal
         // response.completed closes the stream.
+        let nextErrorSequence = 0;
         try {
           for await (const event of result.streamIR()) {
+            if (typeof event.sequence_number === "number")
+              nextErrorSequence = event.sequence_number + 1;
             const frame = deps.transformer.transformStreamOut(event);
             await sse.writeSSE({ event: frame.event, data: frame.data });
           }
         } catch (err) {
           // A client disconnect / abort is benign (docs/02): emit NO error frame.
           // Any other throw — incl. a PipelineError when all providers failed
-          // before the stream started — writes a SINGLE terminal OpenAI-envelope
-          // error frame DIRECTLY into the stream. We CANNOT throw here (the stream
-          // has already started; onError would never see it), so the serializable
-          // makeHelmError body is written as an `event: error` frame instead.
+          // before the stream started — writes a SINGLE terminal Responses-shaped
+          // error event DIRECTLY into the stream. We CANNOT throw here (the stream
+          // has already started; onError would never see it).
           if (!isAbort(err, c.req.raw.signal)) {
-            const envelope =
+            const body =
               err instanceof PipelineError
-                ? openAIErrorEnvelope({
-                    error_class: coerceErrorClass(err.error_class),
+                ? responsesStreamError({
+                    code: coerceErrorClass(err.error_class),
                     message: err.message,
-                    trace_id: traceId,
+                    traceId,
+                    sequenceNumber: nextErrorSequence,
                   })
-                : openAIErrorEnvelope({
-                    error_class: "upstream_error",
-                    message: "upstream error",
-                    trace_id: traceId,
+                : responsesStreamError({
+                    code: "internal_error",
+                    message: err instanceof Error ? err.message : "upstream error",
+                    traceId,
+                    sequenceNumber: nextErrorSequence,
                   });
-            await sse.writeSSE({ event: "error", data: JSON.stringify(envelope.body) });
+            await sse.writeSSE({ event: "error", data: JSON.stringify(body) });
           }
         }
       });

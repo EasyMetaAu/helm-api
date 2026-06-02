@@ -96,6 +96,35 @@ describe("createMessagesPipeline — streamIR protocol branch", () => {
     expect(types.at(-1)).toBe("response.completed");
     expect(types.some((t) => t.startsWith("message_"))).toBe(false);
   });
+
+  it("parses OpenAI SSE with CRLF separators and multi-data lines", async () => {
+    const splitJson = JSON.stringify({
+      id: "chatcmpl-x",
+      model: "gpt-x",
+      choices: [{ index: 0, delta: { content: "hi" } }],
+    });
+    const finishJson = JSON.stringify({
+      id: "chatcmpl-x",
+      model: "gpt-x",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    });
+    const stream = (async function* () {
+      yield `data: ${splitJson.slice(0, 20)}\r\n`;
+      yield `data: ${splitJson.slice(20)}\r\n\r\n`;
+      yield `event: ignored\r\n`;
+      yield `data: ${finishJson}\r\n\r\n`;
+    })();
+    const route: RouteFn = async () => streamOkResult(stream);
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const events = [];
+    for await (const ev of run.streamIR()) events.push(ev);
+    const delta = events.find((e) => e.type === "response.output_text.delta") as
+      | { delta?: string }
+      | undefined;
+    expect(delta?.delta).toBe("hi");
+    expect(events.at(-1)?.type).toBe("response.completed");
+  });
 });
 
 describe("createMessagesPipeline — failure surfaces", () => {
