@@ -75,6 +75,65 @@ describe("SqliteCreditStore", () => {
     expect(led[0]?.request_id).toBe("req1");
   });
 
+  it("repeated debit with the same request_id is idempotent", async () => {
+    const { store } = freshStore();
+    await store.topup({
+      accountId: "a",
+      requestId: null,
+      apiKeyId: null,
+      amountUsd: 10,
+      kind: "topup",
+      costMeasured: true,
+      nowMs: NOW,
+    });
+    const first = await store.debit({
+      accountId: "a",
+      requestId: "req-idem",
+      apiKeyId: "k1",
+      amountUsd: -2,
+      kind: "debit",
+      costMeasured: true,
+      nowMs: NOW + 1,
+    });
+    const second = await store.debit({
+      accountId: "a",
+      requestId: "req-idem",
+      apiKeyId: "k1",
+      amountUsd: -2,
+      kind: "debit",
+      costMeasured: true,
+      nowMs: NOW + 2,
+    });
+    expect(first.balanceAfter).toBeCloseTo(8);
+    expect(second.balanceAfter).toBeCloseTo(8);
+    expect((await store.getBalance("a"))?.balance).toBeCloseTo(8);
+    expect((await store.recentLedger("a", 10)).filter((e) => e.kind === "debit")).toHaveLength(1);
+  });
+
+  it("topup and adjustment are not deduped by null request_id", async () => {
+    const { store } = freshStore();
+    await store.topup({
+      accountId: "a",
+      requestId: null,
+      apiKeyId: null,
+      amountUsd: 5,
+      kind: "topup",
+      costMeasured: true,
+      nowMs: NOW,
+    });
+    await store.topup({
+      accountId: "a",
+      requestId: null,
+      apiKeyId: null,
+      amountUsd: -1,
+      kind: "adjustment",
+      costMeasured: true,
+      nowMs: NOW + 1,
+    });
+    expect((await store.getBalance("a"))?.balance).toBeCloseTo(4);
+    expect(await store.recentLedger("a", 10)).toHaveLength(2);
+  });
+
   it("debit 0 is allowed (D4 — null cost debits 0 + cost_measured=false)", async () => {
     const { store } = freshStore();
     await store.ensureAccount({ accountId: "a", nowMs: NOW });

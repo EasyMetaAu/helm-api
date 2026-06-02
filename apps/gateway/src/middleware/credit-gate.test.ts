@@ -8,7 +8,7 @@ function buildApp(opts: {
   defaultQuotaUsd: number;
   behavior?: "reject" | "alert";
   accountId?: string | null;
-  seed?: (store: SqliteCreditStore) => Promise<void>;
+  seed?: (store: SqliteCreditStore, db: ReturnType<typeof createSqliteDb>) => Promise<void>;
 }) {
   const db = createSqliteDb(":memory:");
   const store = new SqliteCreditStore(db);
@@ -28,12 +28,12 @@ function buildApp(opts: {
   });
   app.use("*", creditGateMiddleware({ gate }));
   app.get("/v1/chat/completions", (c) => c.json({ ok: true }));
-  return { app, store, seed: opts.seed };
+  return { app, store, db, seed: opts.seed };
 }
 
 async function run(opts: Parameters<typeof buildApp>[0]) {
-  const { app, store } = buildApp(opts);
-  if (opts.seed) await opts.seed(store);
+  const { app, store, db } = buildApp(opts);
+  if (opts.seed) await opts.seed(store, db);
   return app.request("/v1/chat/completions");
 }
 
@@ -63,6 +63,36 @@ describe("creditGateMiddleware", () => {
       },
     });
     expect(res.status).toBe(200);
+  });
+
+  it("uses account quota=0 as unlimited even when the default quota is finite", async () => {
+    const res = await run({
+      enabled: true,
+      defaultQuotaUsd: 10,
+      seed: async (_store, db) => {
+        db.$sqlite
+          .prepare(
+            "INSERT INTO accounts (account_id, credit_balance_usd, credit_quota_usd, disabled, created_at) VALUES (?,?,?,?,?)",
+          )
+          .run("acct_default", -100, 0, 0, NOW);
+      },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("uses an account finite quota even when the default quota is unlimited", async () => {
+    const res = await run({
+      enabled: true,
+      defaultQuotaUsd: 0,
+      seed: async (_store, db) => {
+        db.$sqlite
+          .prepare(
+            "INSERT INTO accounts (account_id, credit_balance_usd, credit_quota_usd, disabled, created_at) VALUES (?,?,?,?,?)",
+          )
+          .run("acct_default", 0, 5, 0, NOW);
+      },
+    });
+    expect(res.status).toBe(429);
   });
 
   it("returns a structured 429 when the account is over quota (reject)", async () => {

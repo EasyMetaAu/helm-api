@@ -60,6 +60,17 @@ describe("sqlite credit migration (v9)", () => {
     db.$sqlite.close();
   });
 
+  it("creates a partial unique debit idempotency index", () => {
+    const db = createSqliteDb(":memory:");
+    const indexes = db.$sqlite.prepare("PRAGMA index_list(credit_ledger)").all() as Array<{
+      name: string;
+      unique: number;
+    }>;
+    const idx = indexes.find((i) => i.name === "idx_credit_ledger_debit_request");
+    expect(idx?.unique).toBe(1);
+    db.$sqlite.close();
+  });
+
   it("credit_ledger carries api_key_id (key_id only) + cost_measured", () => {
     const db = createSqliteDb(":memory:");
     const cols = db.$sqlite.prepare("PRAGMA table_info(credit_ledger)").all() as Array<{

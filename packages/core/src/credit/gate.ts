@@ -14,11 +14,15 @@ const ALLOWED: CreditCheckResult = {
   quota: null,
 };
 
-// Resolve the effective quota for a probe (mirrors the rate-limiter's resolveQuota):
-// a present per-account override wins; null/undefined inherits the system default.
+// Resolve the effective quota after the account row has been read. The account
+// row is authoritative; the probe value exists for tests/legacy callers only.
 // 0 is a real value (explicitly unlimited), NOT "inherit".
-function resolveQuota(config: CreditConfig, probe: CreditProbe): number {
-  return probe.quota ?? config.defaultQuotaUsd;
+function resolveQuota(
+  config: CreditConfig,
+  account: { quota: number | null } | null,
+  probe: CreditProbe,
+): number {
+  return account?.quota ?? probe.quota ?? config.defaultQuotaUsd;
 }
 
 // Build the pre-request credit gate. core-only: pure logic + a Store port, no web
@@ -27,10 +31,10 @@ function resolveQuota(config: CreditConfig, probe: CreditProbe): number {
 // does a PURE BALANCE SIGN CHECK (D5): balance > 0 ⇒ serve; balance ≤ 0 ⇒ over
 // quota. It does NOT pre-estimate the request's cost (unlike the limiter's TPM
 // pre-debit) — a single in-flight request may push the balance slightly negative,
-// settled post-served by the ledger. Zero-touch fast path when credits are
-// disabled OR the effective quota is 0 (unlimited): the store is NEVER read
-// (mirrors limiter.ts:64). When over quota: "reject" ⇒ !allowed; "alert" ⇒
-// allowed + alert flag (soft, balance may go negative).
+// settled post-served by the ledger. Zero-touch fast path only when credits are
+// disabled or identity is absent; otherwise the account row is read so
+// account.credit_quota_usd can override the default. When over quota: "reject" ⇒
+// !allowed; "alert" ⇒ allowed + alert flag (soft, balance may go negative).
 export function createCreditGate(deps: CreditGateDeps): {
   check(probe: CreditProbe): Promise<CreditCheckResult>;
 } {
@@ -40,15 +44,14 @@ export function createCreditGate(deps: CreditGateDeps): {
     // Master switch off, or no identity to meter → zero-touch (no store read).
     if (!config.enabled || probe.accountId === null) return ALLOWED;
 
-    // Unlimited (effective quota 0) → fast path, store never read (mirrors the
-    // limiter's "both dimensions unlimited" short-circuit).
-    const quota = resolveQuota(config, probe);
+    // Read the live balance before resolving quota: account.credit_quota_usd is
+    // the authoritative override (including 0 = unlimited).
+    const account = await store.getBalance(probe.accountId);
+    const quota = resolveQuota(config, account, probe);
     if (quota <= 0) return ALLOWED;
 
-    // Read the live balance. Errors propagate (fail-closed). A missing account row
-    // is treated as a zero balance under the resolved quota (provisioned lazily on
-    // first debit) — never a crash, never an implicit "unlimited".
-    const account = await store.getBalance(probe.accountId);
+    // A missing account row is treated as a zero balance under the resolved quota
+    // (provisioned lazily on first debit) — never a crash, never implicit credit.
     const balance = account?.balance ?? 0;
     const disabled = account?.disabled ?? false;
 

@@ -79,6 +79,23 @@ export class PgCreditStore implements CreditStore {
         .where(eq(accounts.accountId, input.accountId))
         .limit(1)
         .for("update");
+      if (input.kind === "debit" && input.requestId !== null) {
+        const existingDebit = await tx
+          .select({ balanceAfterUsd: creditLedger.balanceAfterUsd })
+          .from(creditLedger)
+          .where(
+            and(
+              eq(creditLedger.accountId, input.accountId),
+              eq(creditLedger.requestId, input.requestId),
+              eq(creditLedger.kind, "debit"),
+            ),
+          )
+          .limit(1);
+        if (existingDebit[0] !== undefined) {
+          return { balanceAfter: existingDebit[0].balanceAfterUsd, ok: true };
+        }
+      }
+
       const current = rows[0]?.creditBalanceUsd ?? 0;
       const balanceAfter = current + input.amountUsd;
 

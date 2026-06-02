@@ -7,14 +7,13 @@ import { ADMIN_PASSWORD, ADMIN_USER, basicHeader } from "./fixtures/admin.js";
 // API, then drives /v1/chat to assert the gate's reject (429) + alert (served)
 // behavior and that a served request appends a ledger debit (settlement).
 //
-// NOTE: the mock upstream emits no usage chunk, so the streamed cost settles to
-// "not measured" (null) → a 0-amount, cost_measured=false debit (D4). The
-// per-cost-amount settlement is covered by the unit tests (chat.credit.test +
-// ledger.test); here we assert the END-TO-END gate behavior + that a debit row
-// is appended through the live pipeline.
+// The mock upstream emits a trailing usage chunk with cost_usd, so the streamed
+// path can assert true measured settlement end-to-end (balance decreases by the
+// usage total rather than the old null-cost 0 debit).
 
 const TEST_KEY = process.env.HELM_TEST_KEY ?? "helm_live_e2e_testkey";
 const AUTH = { Authorization: `Bearer ${TEST_KEY}`, "Content-Type": "application/json" };
+const ANTHROPIC_AUTH = { "x-api-key": TEST_KEY, "Content-Type": "application/json" };
 const ADMIN = { Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD) };
 
 // The e2e key is seeded under this account (fixtures/test-server.ts).
@@ -99,6 +98,52 @@ test.describe("credit gate + ledger e2e", () => {
     await api.dispose();
   });
 
+  test("/v1/messages over quota returns 429 and does not debit", async ({ request }) => {
+    const api = await playwrightRequest.newContext();
+    await setCredits(api, {
+      credits_enabled: true,
+      over_quota_behavior: "reject",
+      credit_default_quota_usd: 10,
+    });
+    const bal = await balance(api);
+    if (bal > 0) await topup(api, -bal);
+    const before = await balance(api);
+
+    const res = await request.post("/v1/messages", {
+      headers: ANTHROPIC_AUTH,
+      data: {
+        model: "auto",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "over quota" }],
+      },
+    });
+    expect(res.status()).toBe(429);
+    expect(await balance(api)).toBeCloseTo(before);
+    await api.dispose();
+  });
+
+  test("/v1/responses over quota returns 429 and does not debit", async ({ request }) => {
+    const api = await playwrightRequest.newContext();
+    await setCredits(api, {
+      credits_enabled: true,
+      over_quota_behavior: "reject",
+      credit_default_quota_usd: 10,
+    });
+    const bal = await balance(api);
+    if (bal > 0) await topup(api, -bal);
+    const before = await balance(api);
+
+    const res = await request.post("/v1/responses", {
+      headers: AUTH,
+      data: { model: "auto", input: "over quota", max_output_tokens: 16 },
+    });
+    expect(res.status()).toBe(429);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("rate_limited");
+    expect(await balance(api)).toBeCloseTo(before);
+    await api.dispose();
+  });
+
   // ── topup → served, and a ledger debit is appended (settlement) ──────────────
   test("a topped-up account is served and the request settles a ledger debit", async ({
     request,
@@ -115,6 +160,27 @@ test.describe("credit gate + ledger e2e", () => {
 
     const res = await request.post("/v1/chat/completions", { data: chat("hello"), headers: AUTH });
     expect(res.status()).toBe(200);
+    await api.dispose();
+  });
+
+  test("a streamed request settles the measured SSE usage total", async ({ request }) => {
+    const api = await playwrightRequest.newContext();
+    await setCredits(api, {
+      credits_enabled: true,
+      over_quota_behavior: "reject",
+      credit_default_quota_usd: 10,
+    });
+    const bal = await balance(api);
+    if (bal < 5) await topup(api, 5 - bal);
+    const before = await balance(api);
+
+    const res = await request.post("/v1/chat/completions", {
+      data: chat("stream usage", { stream: true }),
+      headers: AUTH,
+    });
+    expect(res.status()).toBe(200);
+    expect(await res.text()).toContain("[DONE]");
+    await expect.poll(() => balance(api)).toBeCloseTo(before - 0.42, 5);
     await api.dispose();
   });
 

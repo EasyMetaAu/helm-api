@@ -296,6 +296,9 @@ const MIGRATIONS: readonly Migration[] = [
       );
 
       CREATE INDEX IF NOT EXISTS idx_credit_ledger_account ON credit_ledger (account_id, created_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_debit_request
+        ON credit_ledger (account_id, request_id)
+        WHERE kind = 'debit' AND request_id IS NOT NULL;
     `,
   },
 ];

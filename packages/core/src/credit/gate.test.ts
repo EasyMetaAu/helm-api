@@ -45,21 +45,29 @@ describe("createCreditGate", () => {
     expect(getBalance).not.toHaveBeenCalled();
   });
 
-  it("effective quota 0 (unlimited) → allowed, store NEVER read (fast path)", async () => {
+  it("account quota 0 (unlimited) wins over a finite default", async () => {
     const { store, getBalance } = stubStore({ balance: -100, quota: 0, disabled: false });
-    // Account quota resolves to 0 via the probe override (mirrors resolveQuota).
     const gate = createCreditGate({ store, config: cfg({ defaultQuotaUsd: 50 }) });
-    const r = await gate.check({ accountId: "a", quota: 0 });
+    const r = await gate.check({ accountId: "a" });
     expect(r.allowed).toBe(true);
-    expect(getBalance).not.toHaveBeenCalled();
+    expect(getBalance).toHaveBeenCalledOnce();
   });
 
-  it("default quota 0 with no per-account override → allowed, store NEVER read", async () => {
-    const { store, getBalance } = stubStore(null);
+  it("default quota 0 with no account override → allowed after reading the account row", async () => {
+    const { store, getBalance } = stubStore({ balance: -100, quota: null, disabled: false });
     const gate = createCreditGate({ store, config: cfg({ defaultQuotaUsd: 0 }) });
     const r = await gate.check({ accountId: "a" });
     expect(r.allowed).toBe(true);
-    expect(getBalance).not.toHaveBeenCalled();
+    expect(getBalance).toHaveBeenCalledOnce();
+  });
+
+  it("account finite quota wins over default quota 0", async () => {
+    const { store, getBalance } = stubStore({ balance: 0, quota: 25, disabled: false });
+    const gate = createCreditGate({ store, config: cfg({ defaultQuotaUsd: 0 }) });
+    const r = await gate.check({ accountId: "a" });
+    expect(r.allowed).toBe(false);
+    expect(r.quota).toBe(25);
+    expect(getBalance).toHaveBeenCalledOnce();
   });
 
   it("positive balance under a finite quota → allowed", async () => {

@@ -59,6 +59,22 @@ export class SqliteCreditStore implements CreditStore {
   // ledger row — all in one synchronous transaction.
   private applyMovement(input: CreditMovementInput): CreditMovementResult {
     const txn = this.db.$sqlite.transaction((): CreditMovementResult => {
+      if (input.kind === "debit" && input.requestId !== null) {
+        const existingDebit = this.db
+          .select({ balanceAfterUsd: creditLedger.balanceAfterUsd })
+          .from(creditLedger)
+          .where(
+            and(
+              eq(creditLedger.accountId, input.accountId),
+              eq(creditLedger.requestId, input.requestId),
+              eq(creditLedger.kind, "debit"),
+            ),
+          )
+          .get() as { balanceAfterUsd: number } | undefined;
+        if (existingDebit !== undefined)
+          return { balanceAfter: existingDebit.balanceAfterUsd, ok: true };
+      }
+
       const existing = this.db
         .select()
         .from(accounts)

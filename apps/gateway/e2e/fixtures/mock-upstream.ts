@@ -77,6 +77,7 @@ export const STREAM_CHUNKS = [
   'data: {"id":"chatcmpl-mock","choices":[{"delta":{"role":"assistant"}}]}\n\n',
   'data: {"id":"chatcmpl-mock","choices":[{"delta":{"content":"hel"}}]}\n\n',
   'data: {"id":"chatcmpl-mock","choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}\n\n',
+  'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":5,"cost_usd":0.42}}\n\n',
   "data: [DONE]\n\n",
 ];
 

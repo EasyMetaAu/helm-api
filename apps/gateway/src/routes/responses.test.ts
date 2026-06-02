@@ -17,12 +17,14 @@ function makeDeps(
     collect?: () => Promise<unknown>;
     streamIR?: () => AsyncIterable<{ type: string; [k: string]: unknown }>;
     rateLimiter?: ResponsesRouteDeps["rateLimiter"];
+    creditGate?: ResponsesRouteDeps["creditGate"];
     identity?: MessagesIdentity;
   } = {},
 ): { deps: ResponsesRouteDeps; order: string[] } {
   const order: string[] = [];
   const deps: ResponsesRouteDeps = {
     rateLimiter: over.rateLimiter,
+    creditGate: over.creditGate,
     auth: {
       resolve: async (cred) => {
         order.push("auth");
@@ -320,6 +322,30 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(res.headers.get("retry-after")).toBe("12");
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe("rate_limited");
     expect(order).not.toContain("route");
+  });
+
+  it("429s an over-quota account before translation/routing and therefore creates no debit", async () => {
+    const creditGate: ResponsesRouteDeps["creditGate"] = {
+      check: async () => ({
+        allowed: false,
+        limitedBy: "credit",
+        alert: false,
+        balance: 0,
+        quota: 10,
+      }),
+    };
+    const { deps, order } = makeDeps({ creditGate });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("rate_limited");
+    expect(body.error.message).toContain("insufficient account credit");
+    expect(order).toEqual(["auth"]);
   });
 
   it("threads the key's per-key rate-limit override into the limiter probe", async () => {

@@ -56,6 +56,7 @@ function makeDeps(
     authed?: boolean;
     transformRequestOut?: (native: unknown) => unknown;
     rateLimiter?: MessagesRouteDeps["rateLimiter"];
+    creditGate?: MessagesRouteDeps["creditGate"];
     identity?: MessagesIdentity;
   } = {},
 ): { deps: MessagesRouteDeps; harness: Harness } {
@@ -68,6 +69,7 @@ function makeDeps(
 
   const deps: MessagesRouteDeps = {
     rateLimiter: over.rateLimiter,
+    creditGate: over.creditGate,
     auth: {
       resolve: async (_key: string | null) => {
         harness.order.push("auth");
@@ -435,6 +437,31 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(body.type).toBe("error");
     // Anthropic rate-limit envelope, and routing never ran.
     expect(harness.order).not.toContain("route");
+  });
+
+  it("429s an over-quota account before translation/routing and therefore creates no debit", async () => {
+    const creditGate: MessagesRouteDeps["creditGate"] = {
+      check: async () => ({
+        allowed: false,
+        limitedBy: "credit",
+        alert: false,
+        balance: 0,
+        quota: 10,
+      }),
+    };
+    const { deps, harness } = makeDeps({ creditGate });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { type: string; error: { type: string; message: string } };
+    expect(body.type).toBe("error");
+    expect(body.error.type).toBe("rate_limit_error");
+    expect(body.error.message).toContain("insufficient account credit");
+    expect(harness.order).toEqual(["auth"]);
   });
 
   it("threads the key's per-key rate-limit override into the limiter probe", async () => {
