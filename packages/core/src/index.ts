@@ -243,10 +243,12 @@ export {
 // anchor for the protocol layer (nativeIn -> IR -> nativeOut, isomorphic).
 export { openaiTransformer } from "./protocol/openai.js";
 // OpenAI-native error envelope transformer (docs/05, 07). HelmError -> the OpenAI
-// SDK's { error: { message, type, code, param } } shape; status from
-// err.http_status. Sibling of openai.ts (single-file module).
+// SDK's { error: { message, type, code, trace_id } } shape; status from
+// err.http_status. Canonical OpenAI error mapping for the whole codebase (the
+// gateway onError handler imports it). Sibling of openai.ts (single-file module).
 export {
   makeOpenAIError,
+  OPENAI_ERROR_SHAPE,
   type OpenAIErrorEnvelope,
   transformErrorOut as openaiTransformErrorOut,
 } from "./protocol/openai-error.js";
