@@ -169,6 +169,40 @@ const CASES: Array<{ name: string; request: InternalRequest; lane: string }> = [
     lane: "premium",
   },
   {
+    name: "expanded security without coding crutch",
+    request: req("audit this service for sql injection and command injection vulnerabilities"),
+    lane: "premium",
+  },
+  {
+    name: "expanded analysis",
+    request: req("assess the pros and cons of these two approaches and weigh the trade-offs"),
+    lane: "premium",
+  },
+  {
+    name: "expanded planning",
+    request: req("outline a project roadmap with milestones and break down the deliverables"),
+    lane: "balanced",
+  },
+  {
+    name: "no output analysis is not simple",
+    request: req("analyze why there is no output and diagnose the failure root cause"),
+    lane: "premium",
+  },
+  {
+    name: "no stack trace debug is not simple",
+    request: req(
+      "debug why there is no stack trace in this failing compile step and refactor the failing function",
+    ),
+    lane: "coding",
+  },
+  {
+    name: "no auth check audit is not simple",
+    request: req(
+      "audit why there is no auth check in this access control system and privilege escalation risk",
+    ),
+    lane: "premium",
+  },
+  {
     name: "data medium",
     request: req("aggregate this csv into a dataframe and run a sql pivot"),
     lane: "balanced",

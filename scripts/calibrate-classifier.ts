@@ -149,6 +149,10 @@ const CASES: Case[] = [
   { name: "expand pullout->extraction", request: req("pull out all the email addresses from this text"), lane: "economy" },
   { name: "expand assess->premium", request: req("assess the pros and cons of these two approaches and weigh the trade-offs"), lane: "premium" },
   { name: "expand injection->security", request: req("audit this endpoint for sql injection and command injection vulnerabilities"), lane: "premium" },
+  { name: "expand injection no coding crutch->security", request: req("audit this service for sql injection and command injection vulnerabilities"), lane: "premium" },
+  { name: "no output analysis not simple", request: req("analyze why there is no output and diagnose the failure root cause"), lane: "premium" },
+  { name: "no stack trace debug not simple", request: req("debug why there is no stack trace in this failing compile step and refactor the failing function"), lane: "coding" },
+  { name: "no auth check audit not simple", request: req("audit why there is no auth check in this access control system and privilege escalation risk"), lane: "premium" },
   { name: "expand roadmap->balanced", request: req("outline a project roadmap with milestones and break down the deliverables"), lane: "balanced" },
 ];
 

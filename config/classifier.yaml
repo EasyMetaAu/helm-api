@@ -20,13 +20,16 @@
 # prompts fell through to chat/balanced. Each list was widened toward ~10-14 varied
 # terms. Two mechanics drove the re-calibration: (1) the keyword signal SATURATES at
 # min(1, hits/ceil(len/2)), so a longer list dilutes each hit -- positive weights were
-# raised (reasoning .55->.65, coding .42->.62, analysis .45->.76, security .40->.85)
+# raised (reasoning .55->.65, coding .42->.62, analysis .45->.76, security .40->1.40)
 # and the negative weights MAGNIFIED (simple -.55->-1.35, lookup -.40->-1.05, chitchat
 # -1.15, translation -.78) to keep short prompts' confidence off the boundary; (2)
 # task_keywords use plain substring includes(), so "tone" was dropped from task
 # detection (it matched "mile{stone}s") and `rce` is kept only in the boundary-matched
-# security_kw dimension. Golden set grown 29->38 (9 real-world prompts); calibrate
-# prints 38/38 rules, 0 fallbacks, confidence spread ~0.45-0.93.
+# security_kw dimension; (3) short confirmations like yes/no/sure/got-it stay out of
+# full-prompt simple_kw and are left to short-message handling, so "no output" /
+# "no auth check" cannot subtract complexity from real diagnostic/security prompts.
+# Golden set grown 29->38 (9 real-world prompts); cascade/calibrate lock 42 real
+# prompts with 0 fallbacks and confidence spread ~0.43-0.98.
 classifier:
   rules:
     enabled: true
@@ -65,7 +68,7 @@ classifier:
       planning_kw: { weight: 0.38, keywords: ["plan", "architecture", "design doc", "trade-off", "strategy", "roadmap", "milestone", "break down", "blueprint", "trade-offs"] }
       analysis_kw: { weight: 0.76, keywords: ["analyze", "compare", "evaluate", "implications", "root cause", "assess", "critique", "pros and cons", "diagnose", "investigate"] }
       writing_kw: { weight: 0.14, keywords: ["essay", "rewrite", "draft", "tone", "polish", "summarize", "summary", "paraphrase", "proofread", "article", "headline", "grammar"] }
-      security_kw: { weight: 0.85, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "rce", "csrf", "malware", "auth bypass"] }
+      security_kw: { weight: 1.40, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "rce", "csrf", "malware", "auth bypass", "auth check", "access control"] }
       extraction_kw: { weight: 0.12, keywords: ["extract", "parse", "json from", "fields", "schema", "pull out", "list all", "structured data", "named entities", "scrape"] }
       data_kw: { weight: 0.20, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot", "group by", "spreadsheet", "histogram", "correlation", "query"] }
       vision_kw: { weight: 0.16, keywords: ["image", "screenshot", "this picture", "diagram", "chart", "photo", "ocr", "figure", "graph"] }
@@ -75,11 +78,14 @@ classifier:
       # prompt's rawScore UP toward the `standard` boundary and tanks its
       # confidence (→ fallback to balanced) even though the short_message override
       # still pins the tier `simple`. The large magnitudes restore each single
-      # hit's original pull so these prompts stay confidently economy.
+      # hit's original pull so these prompts stay confidently economy. Short
+      # confirmations (yes/no/sure/got it) intentionally do NOT live here because
+      # this dimension scans the whole prompt; short_message handles them as whole
+      # short utterances without penalizing "no output" / "no auth check" requests.
       translation_kw: { weight: -0.78, keywords: ["translate", "in french", "in chinese", "to spanish", "translate to", "in german", "in japanese", "localize", "into english"] }
       lookup_kw: { weight: -1.05, keywords: ["what is", "who is", "define", "meaning of", "when did", "where is", "how many", "capital of", "tell me about", "what are"] }
       chitchat_kw: { weight: -1.15, keywords: ["how are you", "good morning", "lol", "haha", "thank you", "goodbye", "what's up", "good night", "cheers"] }
-      simple_kw: { weight: -1.35, keywords: ["hi", "thanks", "ok", "ping", "yes", "no", "sure", "got it", "thx"] }
+      simple_kw: { weight: -1.35, keywords: ["hi", "thanks", "ok", "ping", "thx"] }
       # —— structural / context dimensions (keywords empty; code feeds the score) ——
       has_code_block: { weight: 0.34 }
       has_url: { weight: 0.06 }
