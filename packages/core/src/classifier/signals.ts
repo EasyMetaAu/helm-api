@@ -61,3 +61,22 @@ export function normalize(value: number, saturateAt: number): number {
 export function lengthSignal(text: string): number {
   return normalize(text.trim().length, 2000);
 }
+
+// Fraction of LETTERS (\p{L}) that are NOT Latin script, in [0,1]; 0 when there are
+// no letters. Digits, punctuation and whitespace are ignored so they never skew the
+// ratio. The Layer-1 keyword lists are English-only, so a predominantly non-Latin
+// prompt is unscoreable by keywords — the engine's language-coverage guard uses this
+// to force `uncertain` and escalate to the (multilingual) Layer-2 eval. Pure: same
+// input => same output, zero I/O (CLAUDE.md principle 4).
+const LETTER = /\p{L}/u;
+const LATIN_LETTER = /\p{Script=Latin}/u;
+export function nonLatinRatio(text: string): number {
+  let letters = 0;
+  let nonLatin = 0;
+  for (const ch of text) {
+    if (!LETTER.test(ch)) continue;
+    letters += 1;
+    if (!LATIN_LETTER.test(ch)) nonLatin += 1;
+  }
+  return letters === 0 ? 0 : nonLatin / letters;
+}

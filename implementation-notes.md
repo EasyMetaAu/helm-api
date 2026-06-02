@@ -28,6 +28,28 @@
 
 ---
 
+## 2026-06-02 · Multilingual handling for the Layer-1 classifier (docs/03, Principles 2/3/4)
+
+**Context**: PR #44 expands the **English** Layer-1 keyword vocabulary, which surfaced a pre-existing (not PR-introduced) limitation: the *entire* Layer-1 classifier is implicitly English-only. Layer-1 mixes English keyword signals with language-agnostic structural signals (code blocks, stack traces, math, tables, tools, length). A non-English **prose** request matches zero keywords, lands on the `standard` boundary, and — with eval **ON** — escalates to the multilingual Layer-2 LLM (correct), but with eval **OFF (the shipped default)** degrades to `balanced` only *by luck* of where the structural-only `rawScore` happened to fall. Separately, a latent bug made config-level CJK localization impossible. Chose Hybrid "C": keep keywords as the English fast-path, make non-Latin text *deterministically* escalate, fix the CJK bug, document the contract. Kept **separate** from PR #44 (own branch `feat/classifier-multilingual-guard`).
+
+**What was done (strict TDD, red→green)**:
+1. **CJK word-boundary fix** (`packages/core/src/classifier/dimensions.ts`): `keywordMatcher` wrapped keywords in `(?<![\p{L}\p{N}_])` / `(?![\p{L}\p{N}_])` whenever the edge char was a word char. CJK has no spaces, so a keyword like `分析` inside `请分析这个` is flanked by other `\p{L}` chars → both lookarounds fail → permanently **unmatchable**. Fix: a `CJK` regex (Han/Hiragana/Katakana/Hangul); boundaries are emitted only on a `WORD && !CJK` edge. CJK edges match as plain substrings (their "words" are 1–3 meaningful chars, so the naive-substring false-hit risk boundaries guard against for Latin does not apply). Latin protection (`"ok"`≠`"look"`) is unchanged.
+2. **`nonLatinRatio` detector** (`signals.ts`): fraction of `\p{L}` letters that are NOT `\p{Script=Latin}`; 0 when there are no letters (digits/punct/space ignored). Pure.
+3. **Language-coverage guard** (`engine.ts`, step 5.5): when `language.non_latin_uncertain` is on AND the last user message is longer than `overrides.short_message_max_chars` AND `nonLatinRatio ≥ language.non_latin_min_ratio` AND there is no positive, **non-ambient** dimension hit → force `confidence = 0`, `uncertain = true`, push explanation `low_keyword_coverage`. Forced in the engine, NOT the cascade, because the gateway `runRules` adapter returns only `{complexity, task_type, confidence}` and the cascade gates purely on `confidence` — so a 0 confidence flows through with zero wiring changes.
+4. **Schema + config**: added a prefaulted `language` block to `ClassifierRulesConfigSchema` and `config/classifier.yaml` (defaults `non_latin_uncertain: true`, `non_latin_min_ratio: 0.3`).
+
+**Decisions / trade-offs**:
+- **Why "no positive hit" excludes `msg_length` / `turn_count`**: those *ambient* dimensions fire on essentially every request, so they are not evidence the keyword classifier understood the prompt. Counting them as "grip" would make the guard never fire on long non-Latin prose. Encoded as `AMBIENT_DIMENSIONS` in `engine.ts`. Every other positive hit (keyword match OR a content-type structural signal: code/stack/table/attachment/json/tools) IS grip and correctly suppresses the guard.
+- **`confidence = 0` (maximally uncertain)** rather than a small epsilon: guarantees `< threshold` for any configured threshold, and is honest — we genuinely cannot trust a keyword score on text the keywords never matched.
+- **Rejected Option B (per-language keyword tables)**: combinatorial maintenance + per-language re-calibration (the 06-02 vocab PR shows how fragile that math is). The CJK boundary fix merely makes Option B *possible* later for a team that wants one specific language.
+- **No dedicated cascade test added**: the cascade already gates purely on `confidence` and existing tests cover "uncertain → eval-on→eval / eval-off→balanced(`eval_disabled`)". A non-Latin cascade test would re-assert that with a mocked low-confidence `runRules` — pure duplication. The novel mechanism is proven at the engine level.
+
+**Known edges / TODO**:
+- **Latin-script non-English** (Spanish/French/German) is NOT flagged by `nonLatinRatio`. It already produces ~0 keyword signal → low confidence → eval (when on), so the guard just adds a *hard guarantee* for non-Latin scripts. A future "low absolute keyword coverage" guard could cover Latin-script languages too, but risks over-triggering on legitimately simple English, so it was left out.
+- **Operator contract**: serve non-English traffic → enable Layer-2 eval. With eval off, non-Latin prompts deterministically route to `balanced`. Documented in `config/classifier.yaml` and `docs/03`.
+
+---
+
 ## 2026-06-01 · Pagination + error/role filters for the admin requests list (docs/07, Principle 1)
 
 **Context**: `/admin/requests` fetched a hardcoded `queryRecent(100)` and rendered all rows at once; the UI had dead cursor/"Load more" plumbing that never fired. No way to page past 100 requests or isolate errors / a time window — unusable for real debugging. Added numbered pagination (time DESC) plus Date-range / Status / Decided-by / Lane / Model filters, all applied at the SQL layer so totals stay correct.

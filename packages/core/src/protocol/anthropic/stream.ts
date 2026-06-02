@@ -3,6 +3,7 @@ import type { IRResponse, IRUsage } from "../ir.js";
 import {
   type AnthropicStopReason,
   type AnthropicUsage,
+  createAnthropicToolNameMap,
   mapStopReason,
   mapUsage,
 } from "./response.js";
@@ -186,6 +187,7 @@ interface StreamState {
   openBlocks: Set<number>; // started-but-not-stopped blocks (close guard)
   textBlockIndex: number | null; // text block index (lazily allocated)
   toolIndexToBlock: Map<number, ToolSlot>; // OpenAI tool index → block slot
+  toolNameMap: ReturnType<typeof createAnthropicToolNameMap>;
   finishReason: string | null; // terminal message_delta.stop_reason
   usage: IRUsage | null; // buffered; flushed on the terminal event
 }
@@ -197,6 +199,7 @@ function createState(): StreamState {
     openBlocks: new Set(),
     textBlockIndex: null,
     toolIndexToBlock: new Map(),
+    toolNameMap: createAnthropicToolNameMap(),
     finishReason: null,
     usage: null,
   };
@@ -313,7 +316,8 @@ export async function* convertOpenAIStreamToAnthropic(
           blockIndex,
           started: false,
           id: tc.id ?? tempId(blockIndex),
-          name: tc.function?.name ?? "",
+          name:
+            tc.function?.name !== undefined ? state.toolNameMap.toAnthropic(tc.function.name) : "",
           argBuffer: "",
         };
         state.toolIndexToBlock.set(tc.index, slot);
@@ -321,7 +325,7 @@ export async function* convertOpenAIStreamToAnthropic(
         // Upgrade a temp id to the real one and backfill a late-arriving name.
         if (tc.id !== undefined && tc.id !== "") slot.id = tc.id;
         if (tc.function?.name !== undefined && tc.function.name !== "")
-          slot.name = tc.function.name;
+          slot.name = state.toolNameMap.toAnthropic(tc.function.name);
       }
 
       const args = tc.function?.arguments;

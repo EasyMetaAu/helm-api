@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { IRResponse } from "../ir.js";
 import {
   AnthropicMessagesResponseSchema,
+  createAnthropicToolNameMap,
   mapStopReason,
   mapUsage,
   transformResponseIn,
@@ -200,6 +201,60 @@ describe("transformResponseIn", () => {
     const block = out.content.find((b) => b.type === "tool_use");
     expect(block).toBeDefined();
     expect(typeof (block as { input: unknown }).input).toBe("object");
+  });
+
+  it("sanitizes invalid and colliding tool names while keeping a reverse map", () => {
+    const nameA = "search-web";
+    const nameB = "search web";
+    const empty = "";
+    const long = `${"x".repeat(64)}!`;
+    const map = createAnthropicToolNameMap([nameA, nameB, empty, long]);
+
+    expect(map.toAnthropic(nameA)).toBe("search_web");
+    expect(map.toAnthropic(nameB)).toMatch(/^search_web_[a-z0-9]{8}$/);
+    expect(map.toAnthropic(empty)).toBe("tool");
+    expect(map.toAnthropic(long)).toHaveLength(64);
+    expect(map.toOriginal(map.toAnthropic(nameB))).toBe(nameB);
+  });
+
+  it("emits sanitized tool_use names and records reverse map provenance", () => {
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_a",
+                  type: "function",
+                  function: { name: "search-web", arguments: '{"q":"a"}' },
+                },
+                {
+                  id: "call_b",
+                  type: "function",
+                  function: { name: "search web", arguments: '{"q":"b"}' },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      }),
+    );
+
+    const toolUses = out.content.filter(
+      (b): b is Extract<typeof b, { type: "tool_use" }> => b.type === "tool_use",
+    );
+    const secondName = toolUses[1]?.name;
+    expect(secondName).toEqual(expect.stringMatching(/^search_web_[a-z0-9]{8}$/));
+    expect(toolUses.map((b) => b.name)).toEqual(["search_web", secondName]);
+    expect(out.provider_raw?.anthropic_tool_name_map).toEqual({
+      search_web: "search-web",
+      [secondName as string]: "search web",
+    });
   });
 
   it("back-translates thinking parts -> thinking block preserving signature", () => {
