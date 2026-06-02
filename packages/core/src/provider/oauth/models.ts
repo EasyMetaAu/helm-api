@@ -11,12 +11,16 @@
 
 import { listGitHubCopilotModels } from "./github-copilot.js";
 
-// Curated FALLBACK model ids — used only when live discovery is unavailable or
-// fails (e.g. the endpoint rejects the OAuth token). Operators can also override
-// via an explicit providers.yaml entry.
+// Curated FALLBACK model ids — used when live discovery is unavailable or fails.
+// anthropic is normally live (GET /v1/models); these are only its safety net.
+// openai-codex has NO list-models endpoint (the ChatGPT Codex backend doesn't
+// expose one — confirmed against openclaw, whose Codex catalog is literally
+// `models: []`, and claude-relay-service, which only tracks usage). So Codex is
+// ALWAYS this curated set — the known Codex subscription models. Operators can
+// override via an explicit providers.yaml entry.
 export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
   anthropic: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
-  "openai-codex": ["gpt-5-codex"],
+  "openai-codex": ["gpt-5-codex", "gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5", "gpt-5-mini"],
 };
 
 // Live-list Anthropic (Claude Pro/Max) models via GET /v1/models with the OAuth
