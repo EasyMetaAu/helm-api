@@ -83,6 +83,26 @@ describe('CreateKeyDialog', () => {
     expect(onclose).toHaveBeenCalled();
   });
 
+  it('renders the create form inside a dismissible modal (scrim + Escape close)', async () => {
+    const { onclose } = setup();
+    expect(screen.getByRole('dialog', { name: /create api key/i })).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('modal-scrim'));
+    expect(onclose).toHaveBeenCalledTimes(1);
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onclose).toHaveBeenCalledTimes(2);
+  });
+
+  it('locks the one-time plaintext reveal — modal is NOT dismissible (must acknowledge)', async () => {
+    const { onclose } = setup();
+    await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
+    await waitFor(() => expect(screen.getByTestId('plaintext-reveal')).toBeInTheDocument());
+    // No scrim to click, and Escape must not dismiss the secret reveal.
+    expect(screen.queryByTestId('modal-scrim')).not.toBeInTheDocument();
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onclose).not.toHaveBeenCalled();
+    expect(screen.getByTestId('plaintext-reveal')).toBeInTheDocument();
+  });
+
   it('shows an error and reveals no plaintext when createKey fails (fail-closed)', async () => {
     createKey.mockRejectedValue(new Error('400 invalid key request'));
     setup();

@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-06-02 · Admin: API-key create/edit/revoke moved into a centered modal (spec docs/06, docs/11 — UI)
+
+**Context**: On `/admin/keys` the create/edit dialogs and the revoke confirmation rendered inline in the page flow (a plain `.dialog` card injected between the header and the table), so they shoved the content down and read as "stuck at the top". Requested change: present them as a centered overlay modal.
+
+- New reusable `apps/admin/src/lib/components/Modal.svelte`: a fixed full-screen backdrop (`.modal-backdrop`) + a dismiss **scrim rendered as a real `<button>`** (`.modal-scrim`, not a click-handler on a `<div>` — keeps svelte-check a11y clean, 0 warnings) + a centered, scrollable `.modal-panel` carrying `role="dialog"` / `aria-modal` / `aria-label`. It locks body scroll and focuses the panel on mount (`$effect` restores on unmount), and closes on Escape via `<svelte:window onkeydown>`.
+- **`dismissible` prop gates BOTH scrim and Escape.** `CreateKeyDialog` passes `dismissible={!revealed}`: while the one-time plaintext is shown there is no scrim and Escape is ignored, so the operator MUST click "I saved it" (`confirmSaved`) — preserving the must-acknowledge UX for the secret (CLAUDE.md 原则7). The revoke modal sets `dismissible={revoking !== confirmingRevoke}` so it can't be dismissed mid-request.
+- `role="dialog"` + aria-label moved off the inner `.dialog` div onto the Modal panel (single dialog node — `getByRole('dialog')` stays unambiguous). The old inline `.dialog` wrapper is gone from both key dialogs; the revoke confirm dropped its inline `alert-warn` card for the Modal.
+- New i18n key `Close` (scrim aria-label) added to all 5 locales. CSS `.modal-*` utilities live next to `.dialog` in `app.css`.
+- TDD: added modal-behavior tests first (scrim+Escape dismiss for edit & revoke; non-dismissible reveal for create). Full admin suite 170/170 green, svelte-check 0/0, prettier clean.
+
+---
+
 ## 2026-06-02 · Fix two Codex-review P1s in the #59 Anthropic bidirectional work (spec docs/05)
 
 A `/codex:review` of PR #60 (merged) found two real correctness bugs that the unit tests masked:

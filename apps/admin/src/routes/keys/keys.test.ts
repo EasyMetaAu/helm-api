@@ -160,6 +160,38 @@ describe('keys page', () => {
     );
   });
 
+  it('presents the Edit dialog as a centered modal dismissible via scrim and Escape', async () => {
+    renderPage([key('k1')]);
+    await fireEvent.click(within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }));
+    expect(screen.getByRole('dialog', { name: /edit key/i })).toBeInTheDocument();
+    // Clicking the backdrop scrim closes the modal.
+    await fireEvent.click(screen.getByTestId('modal-scrim'));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: /edit key/i })).not.toBeInTheDocument(),
+    );
+
+    // Re-open and close via Escape.
+    await fireEvent.click(within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }));
+    expect(screen.getByRole('dialog', { name: /edit key/i })).toBeInTheDocument();
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: /edit key/i })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('presents the revoke confirmation as a centered modal', async () => {
+    renderPage([key('k1', { prefix: 'helm_live_ab12' })]);
+    await fireEvent.click(within(screen.getByTestId('key-row')).getByRole('button', { name: /revoke/i }));
+    const dialog = screen.getByRole('dialog', { name: /confirm revoke/i });
+    expect(within(dialog).getByRole('button', { name: /confirm/i })).toBeInTheDocument();
+    // The scrim dismisses the confirmation (same as Cancel) without revoking.
+    await fireEvent.click(screen.getByTestId('modal-scrim'));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: /confirm revoke/i })).not.toBeInTheDocument(),
+    );
+    expect(revokeKey).not.toHaveBeenCalled();
+  });
+
   it('does not offer Edit on a revoked (disabled) key', () => {
     renderPage([key('k1', { disabled: true })]);
     const row = screen.getByTestId('key-row');

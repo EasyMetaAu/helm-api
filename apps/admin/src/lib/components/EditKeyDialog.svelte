@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { type ApiKeyView, type UpdateKeyInput, updateKey } from '$lib/api/keys.js';
+  import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
   // Edit-key dialog: edits every per-key cap of an EXISTING key in one place. The
@@ -77,7 +78,7 @@
   }
 </script>
 
-<div class="dialog" role="dialog" aria-label={$t('Edit key')}>
+<Modal label={$t('Edit key')} {onclose}>
   <h2 class="section-header">{$t('Edit key')}</h2>
 
   {#if error}
@@ -95,7 +96,11 @@
     <div class="flex flex-col gap-1 text-sm">
       <span class="field-label">{$t('Role')}</span>
       <span class="text-ink-body">{key.role}</span>
-      <span class="field-help">{$t('Role is fixed for the life of a key — rotate by revoking and minting a new one.')}</span>
+      <span class="field-help"
+        >{$t(
+          'Role is fixed for the life of a key — rotate by revoking and minting a new one.',
+        )}</span
+      >
     </div>
 
     <label class="flex flex-col gap-1 text-sm">
@@ -135,7 +140,11 @@
     </fieldset>
 
     <label class="flex items-center gap-2 text-sm">
-      <input type="checkbox" bind:checked={allowCustomModel} aria-label={$t('allow custom model')} />
+      <input
+        type="checkbox"
+        bind:checked={allowCustomModel}
+        aria-label={$t('allow custom model')}
+      />
       <span class="text-ink-body">{$t('Allow explicit client-specified model passthrough')}</span>
     </label>
 
@@ -178,4 +187,4 @@
       >{$t('Save changes')}</button
     >
   </div>
-</div>
+</Modal>

@@ -50,6 +50,16 @@
   .dialog {
     @apply rounded-lg border border-slate-300 bg-white p-5 shadow-sm;
   }
+  /* — Modal: centered overlay built from a fixed backdrop + scrim + panel — */
+  .modal-backdrop {
+    @apply fixed inset-0 z-50 flex items-center justify-center p-4;
+  }
+  .modal-scrim {
+    @apply absolute inset-0 cursor-default bg-slate-900/40;
+  }
+  .modal-panel {
+    @apply relative z-10 max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto rounded-lg border border-slate-300 bg-white p-5 shadow-lg focus:outline-none;
+  }
 
   /* — Buttons — */
   .btn-primary {
