@@ -187,10 +187,9 @@ function toIRRequest(req: NativeRequest): IRRequest {
       switch (item.type) {
         case "message": {
           const m = item as z.infer<typeof ResponsesMessageItemSchema>;
-          // `developer` collapses to `system` (the IR has no developer role);
-          // `system` stays system.
-          const role = m.role === "developer" ? "system" : m.role;
-          messages.push({ role, content: foldMessageContent(m.content) });
+          // `developer` is a first-class IR role (OpenAI's renamed system tier),
+          // so it survives intact; `system`/`user`/`assistant` pass through too.
+          messages.push({ role: m.role, content: foldMessageContent(m.content) });
           break;
         }
         case "function_call": {

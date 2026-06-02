@@ -5,6 +5,22 @@
 
 ---
 
+## 2026-06-02 · OpenAI `developer` role — first-class IR role + order-preserving system fold (issue #50, spec docs/05)
+
+**Context**: OpenAI renamed the top instruction tier `system` → `developer` (Chat Completions + Responses API both accept it). Previously the IR enum rejected `developer`, so the Responses transformer silently remapped `developer→system` (`responses.ts:~192`) and an OpenAI Chat `developer` message was *dropped* by IR validation. Silent loss violates the lossless-passthrough goal.
+
+**Decision (maintainer-chosen)**: make `developer` a **first-class IR message role**.
+- `IRMessageSchema.role` is now `z.enum(["system","developer","user","assistant","tool"])` (`ir.ts:69`).
+- **OpenAI inbound/outbound** (`openai.ts`): identity — `developer` survives `transformRequestOut` and round-trips unchanged through `transformRequestIn`, keeping its position relative to `system`/`user`.
+- **Responses API** (`responses.ts`): a `developer` input item now maps to IR `role:"developer"` (the silent `developer→system` remap is removed). Outbound `toResponsesRequest` already emits `role:m.role` generically, so it round-trips.
+- **Gemini outbound** (`gemini-transformer.ts`): Gemini has no `developer` role, so **both `system` and `developer` turns fold into the single `systemInstruction`**. New pure exported helper `collectSystemText(messages)` accumulates their text **in message order** (previously `system` *overwrote*), joined by `"\n\n"`. `system`/`developer` are skipped from `contents` so they never leak into the conversation. Folding is explicit + unit-tested, NOT silent.
+
+**Anthropic non-goal (explicit)**: `anthropicTransformer` is a 4-method `Pick` with **no `transformRequestIn`** (Anthropic is client-presentation only) — there is no IR→Anthropic *request* path, so there is nothing to fold `developer` into, and none was invented. Were such a transform ever added, `developer` would fold into Anthropic's top-level `system` param under exactly the same order-preserving policy as Gemini. Anthropic native *inbound* only allows `user`/`assistant`, so `developer` never originates from Anthropic input. (Documented in the `collectSystemText` header.)
+
+**Tests**: order/golden coverage for the `developer + system + user` combination — `openai.test.ts` (survives + round-trips), `responses.test.ts` (developer preserved, not collapsed), `gemini-transformer.test.ts` (`collectSystemText` unit test + fold-into-`systemInstruction`-in-order + no contents leakage), `protocol-matrix.test.ts` (focused OpenAI→Gemini cross-path fold; **no new matrix dimension** added — the "every path has every dimension" invariant is preserved). All 1570 unit tests green; typecheck clean; Biome clean on changed files (the 19 repo lint warnings are pre-existing `noNonNullAssertion` in untouched test files).
+
+---
+
 ## 2026-06-02 · Interactive OAuth subscription LOGIN — Claude Pro/Max + Copilot, web UI (issue #38, builds on the entry below)
 
 **Context**: The entry below added the non-interactive token *refresh* half of OAuth (given a `refresh_token` in env). It explicitly deferred the interactive `authorization_code`/device login that actually OBTAINS a subscription credential. This change adds that — for **Claude Pro/Max** (native Anthropic executor), **GitHub Copilot**, and **ChatGPT Plus/Pro (Codex)** — driven entirely from the **admin web UI** (no CLI, per maintainer decision).

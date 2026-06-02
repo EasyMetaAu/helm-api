@@ -256,6 +256,27 @@ function irMessageContentToText(content: IRMessage["content"]): string {
     .join("");
 }
 
+// —— System/developer fold (docs/05). Protocols without a `developer` role —
+// Gemini here, and an Anthropic outbound request transform were one ever added —
+// fold both `system` and `developer` turns into a single top-level system
+// instruction. The text is accumulated IN MESSAGE ORDER (not overwritten) and
+// joined by a blank line, so a [system, developer] pair keeps the author's
+// intended precedence. This is explicit + tested, NOT a silent drop.
+//
+// Anthropic non-goal: anthropicTransformer has no transformRequestIn (it is
+// client-presentation only), so there is no IR->Anthropic request path to fold
+// into. Were one added, `developer` would fold into the top-level `system`
+// param under exactly this policy. See implementation-notes.md (2026-06-02).
+export function collectSystemText(messages: readonly IRMessage[]): string {
+  const segments: string[] = [];
+  for (const message of messages) {
+    if (message.role !== "system" && message.role !== "developer") continue;
+    const text = irMessageContentToText(message.content);
+    if (text !== "") segments.push(text);
+  }
+  return segments.join("\n\n");
+}
+
 function irMessageToParts(message: IRMessage): GeminiPart[] {
   const parts: GeminiPart[] = [];
   const { content } = message;
@@ -358,18 +379,19 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
   const parsed = IRRequestSchema.parse(ir);
 
   const contents: GeminiContent[] = [];
-  let systemInstruction: GeminiContent | undefined;
+  // Gemini has no `developer` role: both `system` and `developer` turns fold into
+  // a single systemInstruction, accumulated in message order (collectSystemText).
+  const systemText = collectSystemText(parsed.messages);
+  const systemInstruction: GeminiContent | undefined =
+    systemText !== "" ? { parts: [{ text: systemText }] } : undefined;
   const toolNameById = new Map<string, string>();
 
   for (const message of parsed.messages) {
     for (const call of message.tool_calls ?? []) {
       toolNameById.set(call.id, call.function.name);
     }
-    if (message.role === "system") {
-      const text = irMessageContentToText(message.content);
-      if (text !== "") systemInstruction = { parts: [{ text }] };
-      continue;
-    }
+    // system/developer were folded into systemInstruction above; never leak into contents.
+    if (message.role === "system" || message.role === "developer") continue;
     if (message.role === "tool") {
       // role:"tool" -> a user turn carrying functionResponse (Gemini convention).
       contents.push({
