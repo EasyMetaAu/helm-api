@@ -195,11 +195,14 @@ export interface AdminApiDeps {
   // Hot-reload hook (issue #38 follow-up): invoked by the OAuth admin routes AFTER
   // any mutation that changes the routable pool — proxy / priority / schedulable /
   // model curation / connect (login complete) / disconnect. server.ts wires this to
-  // re-synthesize the OAuth pool and swap the live provider-client map, so the change
-  // takes effect on the NEXT request WITHOUT a restart (mirrors the RuleStore
-  // callbacks for lanes/policies/classifier). Awaited before the route returns, so a
-  // successful Save means the change is already live. Optional: absent in unit tests.
-  onOAuthMutation?: () => Promise<void>;
+  // re-synthesize the OAuth pool and swap the live provider-client map + alias set, so
+  // the change takes effect on the NEXT request WITHOUT a restart (mirrors the
+  // RuleStore callbacks for lanes/policies/classifier). Awaited before the route
+  // returns. Resolves `{ applied }`: false means the persist SUCCEEDED but the live
+  // rebuild failed — the route then returns a 503 "saved but not applied" rather than
+  // a false 204, honoring the Save == applied contract. Optional: absent in unit tests
+  // (treated as applied).
+  onOAuthMutation?: () => Promise<{ applied: boolean }>;
 }
 
 // Re-exported for route signatures.

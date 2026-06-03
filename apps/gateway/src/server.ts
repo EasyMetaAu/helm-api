@@ -748,21 +748,30 @@ export async function buildServer(
   // `providerClients` is the LIVE merge the per-request `route` closure reads;
   // reassigning it swaps the pool for the NEXT request with no restart and no
   // per-request cost (mirrors the RuleStore re-bind for lanes/policies/classifier).
-  // The registry is intentionally NOT rebuilt: OAuth `<provider>/<model>` aliases
-  // route via execute.ts's structural fallback (`providers.has(name)`) against this
-  // live map, and the `modelAliases` thunk already surfaces curation live — the same
-  // mechanism that already makes model curation hot.
+  // `oauthAliasSet` is the matching LIVE set of currently-exposed (curated)
+  // `<provider>/<model>` aliases — execute.ts uses it as the AUTHORITATIVE allow-list
+  // for subscription aliases so a de-curated / disconnected model fails closed
+  // (provider_unavailable) instead of routing stale via the startup registry or
+  // crossing to defaultProvider. The registry is intentionally NOT rebuilt: OAuth
+  // aliases bypass it entirely (the prefix is in ROUTABLE_OAUTH_IDS), gated by this
+  // set + the live pool.
+  const aliasSetOf = (synth: SynthesizedOAuth): Set<string> =>
+    new Set(synth.providers.flatMap((p) => p.models.map((m) => m.alias)));
   let oauthPoolClients = synthesizedOAuth.poolClients;
+  let oauthAliasSet = aliasSetOf(synthesizedOAuth);
   let providerClients = new Map<string, ProviderClient>([
     ...configuredClients,
     ...oauthPoolClients,
   ]);
-  // Serialize rebuilds onto a chain so two rapid admin saves can't interleave a
-  // stale read with a fresh assign — each link re-reads the CURRENT account settings
-  // + bound credentials, re-synthesizes, and swaps the map. A rebuild failure leaves
-  // the previous pool intact (logged), never crashing the admin save.
+  // Serialize rebuilds onto a chain so two rapid admin saves can't interleave a stale
+  // read with a fresh assign — each link re-reads the CURRENT account settings + bound
+  // credentials, re-synthesizes, and swaps the map + alias set. The chain itself never
+  // rejects (so it stays alive); each call reports whether ITS rebuild applied, so the
+  // admin route can return an honest "saved but not applied" (503) on failure instead
+  // of a false 204 (the persisted change still wins on the next rebuild / restart).
   let rebuildChain: Promise<void> = Promise.resolve();
-  const rebuildOAuthPool = (): Promise<void> => {
+  const rebuildOAuthPool = async (): Promise<{ applied: boolean }> => {
+    let applied = true;
     rebuildChain = rebuildChain.then(async () => {
       try {
         const next = await synthesizeOAuthProviders(
@@ -774,6 +783,7 @@ export async function buildServer(
           (lvl, msg, f) => logger.log(lvl, msg, f),
         );
         oauthPoolClients = next.poolClients;
+        oauthAliasSet = aliasSetOf(next);
         providerClients = new Map<string, ProviderClient>([
           ...configuredClients,
           ...oauthPoolClients,
@@ -782,12 +792,14 @@ export async function buildServer(
           providers: [...oauthPoolClients.keys()],
         });
       } catch (err) {
+        applied = false;
         logger.log("warn", "oauth.pool.rebuild_failed", {
           line: err instanceof Error ? err.message : String(err),
         });
       }
     });
-    return rebuildChain;
+    await rebuildChain;
+    return { applied };
   };
 
   // Routing pipeline building blocks (framework-agnostic core). `let` so admin
@@ -914,6 +926,11 @@ export async function buildServer(
         execute: createExecute({
           defaultProvider: provider,
           providers: providerClients,
+          // Subscription aliases are gated authoritatively by the LIVE curation set +
+          // pool (fail-closed), bypassing the startup registry — so de-curation /
+          // disconnect take effect immediately and never cross provider boundaries.
+          knownOAuthPrefixes: ROUTABLE_OAUTH_IDS,
+          oauthAliases: () => oauthAliasSet,
           registry,
           breaker,
           catalog,

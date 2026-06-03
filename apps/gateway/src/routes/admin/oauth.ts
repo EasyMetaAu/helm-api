@@ -27,16 +27,26 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
 
   // Hot-reload the routable OAuth pool after a mutation, so proxy / priority /
   // schedulable / curation / connect / disconnect take effect on the NEXT request
-  // without a restart. Awaited before the route returns (Save == applied). Failure
-  // to rebuild must not mask a successful persist — the persisted change still wins
-  // on the next natural rebuild/restart, so swallow + leave it to server.ts logging.
-  const afterMutation = async (): Promise<void> => {
+  // without a restart. Awaited before the route returns. Returns whether the live
+  // rebuild APPLIED: when it didn't (e.g. a transient refresh/discovery failure during
+  // re-synthesis), the persist still SUCCEEDED, so the caller returns a 503
+  // "saved but not applied" rather than a false 204 — the change takes effect on the
+  // next successful mutation or a restart. No hook wired (unit tests) ⇒ applied.
+  const afterMutation = async (): Promise<boolean> => {
+    if (!deps.onOAuthMutation) return true;
     try {
-      await deps.onOAuthMutation?.();
+      return (await deps.onOAuthMutation()).applied;
     } catch {
-      /* persist already succeeded; rebuild error is logged in server.ts */
+      return false;
     }
   };
+  // Body for the 503 a mutating route returns when persist succeeded but the live
+  // rebuild failed — honest "saved, not yet live" signal (Principle 3: fail visible).
+  const notApplied = {
+    error:
+      "saved but could not be applied to the live pool; it will take effect on the next change or a restart",
+    code: "not_applied",
+  } as const;
 
   // GET /oauth -> provider catalog + which accounts are logged in (no secrets).
   app.get("/admin/api/oauth", async (c) => {
@@ -75,7 +85,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
       });
       // A completed login adds/refreshes an account → rebuild the routable pool.
-      await afterMutation();
+      if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -154,7 +164,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
         models: body.models as string[],
       });
-      await afterMutation();
+      if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -215,7 +225,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     try {
       await s.setAccountProxy({ providerId: c.req.param("provider"), account, proxy });
       // Rebuild so the new egress proxy is applied to this account's client now.
-      await afterMutation();
+      if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -270,7 +280,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         schedulable,
       });
       // Rebuild so the new priority / schedulable reorders (or parks) this account now.
-      await afterMutation();
+      if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -284,7 +294,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const account = c.req.query("account") || DEFAULT_ACCOUNT;
     await s.logout({ providerId: c.req.param("provider"), account });
     // Disconnect removes an account → rebuild so it leaves the pool immediately.
-    await afterMutation();
+    if (!(await afterMutation())) return c.json(notApplied, 503);
     return c.body(null, 204);
   });
 }

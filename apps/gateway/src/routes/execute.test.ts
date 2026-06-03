@@ -871,3 +871,109 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[0]?.cost_usd).toBeNull();
   });
 });
+
+// OAuth subscription alias guard (issue #38 follow-up, Codex review P1): a known
+// `<provider>/` prefix is gated authoritatively by the LIVE curation set + pool, so a
+// de-curated or disconnected subscription alias FAILS CLOSED (provider_unavailable)
+// and never routes via the startup registry or crosses to defaultProvider.
+describe("createExecute — OAuth subscription alias guard (fail-closed)", () => {
+  const ok = (id: string) =>
+    ({
+      chatCompletion: vi.fn().mockResolvedValue({ id }),
+      chatCompletionStream: vi.fn(),
+    }) as unknown as ProviderClient & { chatCompletion: ReturnType<typeof vi.fn> };
+
+  it("routes a CURATED subscription alias to its pool with the bare model id", async () => {
+    const pool = ok("pool");
+    const dflt = ok("default");
+    const execute = createExecute({
+      defaultProvider: dflt,
+      providers: new Map([["anthropic", pool]]),
+      knownOAuthPrefixes: new Set(["anthropic"]),
+      oauthAliases: () => new Set(["anthropic/claude-x"]),
+      registry: registry({}), // empty — the guard bypasses the registry entirely
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["anthropic/claude-x"]), req());
+    expect(out.final.status).toBe("ok");
+    expect(out.final.status === "ok" && out.final.providerModel).toBe("claude-x");
+    expect(
+      (pool as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      (dflt as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("fails CLOSED for a DE-CURATED subscription alias — never the registry, never defaultProvider", async () => {
+    const pool = ok("pool");
+    const dflt = ok("default");
+    const execute = createExecute({
+      defaultProvider: dflt,
+      providers: new Map([["anthropic", pool]]),
+      knownOAuthPrefixes: new Set(["anthropic"]),
+      oauthAliases: () => new Set(["anthropic/claude-x"]), // claude-removed NOT exposed
+      // A stale startup registry that WOULD resolve the removed alias — must be ignored.
+      registry: registryWithProviders({
+        "anthropic/claude-removed": { providerName: "anthropic", providerModel: "claude-removed" },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["anthropic/claude-removed"]), req());
+    expect(out.final.status).toBe("error");
+    expect(out.attempts[0]?.skip_reason).toBe("provider_unavailable");
+    expect(
+      (pool as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion,
+    ).not.toHaveBeenCalled();
+    expect(
+      (dflt as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("fails CLOSED for a DISCONNECTED subscription provider (pool gone) — never defaultProvider", async () => {
+    const dflt = ok("default");
+    const execute = createExecute({
+      defaultProvider: dflt,
+      providers: new Map(), // anthropic pool removed (disconnected)
+      knownOAuthPrefixes: new Set(["anthropic"]),
+      oauthAliases: () => new Set(["anthropic/claude-x"]), // still "exposed" but no pool
+      registry: registry({}),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["anthropic/claude-x"]), req());
+    expect(out.final.status).toBe("error");
+    expect(out.attempts[0]?.skip_reason).toBe("provider_unavailable");
+    expect(
+      (dflt as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("leaves NON-subscription aliases on the existing registry/default passthrough", async () => {
+    const dflt = ok("default");
+    const execute = createExecute({
+      defaultProvider: dflt,
+      providers: new Map([["mock", dflt]]),
+      knownOAuthPrefixes: new Set(["anthropic"]), // openai-crs is NOT a subscription prefix
+      oauthAliases: () => new Set(),
+      registry: registry({}), // unknown alias → Phase-0 defaultProvider passthrough
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["openai-crs/gpt-x"]), req());
+    expect(out.final.status).toBe("ok");
+    expect(
+      (dflt as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion,
+    ).toHaveBeenCalledTimes(1);
+  });
+});
