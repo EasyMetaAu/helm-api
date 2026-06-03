@@ -25,6 +25,19 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   // Resolve the seam per-request so the 503 guard is uniform.
   const seam = (): OAuthAdminAccess | undefined => deps.oauth;
 
+  // Hot-reload the routable OAuth pool after a mutation, so proxy / priority /
+  // schedulable / curation / connect / disconnect take effect on the NEXT request
+  // without a restart. Awaited before the route returns (Save == applied). Failure
+  // to rebuild must not mask a successful persist — the persisted change still wins
+  // on the next natural rebuild/restart, so swallow + leave it to server.ts logging.
+  const afterMutation = async (): Promise<void> => {
+    try {
+      await deps.onOAuthMutation?.();
+    } catch {
+      /* persist already succeeded; rebuild error is logged in server.ts */
+    }
+  };
+
   // GET /oauth -> provider catalog + which accounts are logged in (no secrets).
   app.get("/admin/api/oauth", async (c) => {
     const s = seam();
@@ -61,6 +74,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         redirectInput: body.redirectInput,
         account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
       });
+      // A completed login adds/refreshes an account → rebuild the routable pool.
+      await afterMutation();
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -96,13 +111,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       return c.json({ error: "sessionId is required" }, 400);
     }
     try {
-      return c.json(
-        await s.pollDeviceCode({
-          sessionId: body.sessionId,
-          account:
-            typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
-        }),
-      );
+      const result = await s.pollDeviceCode({
+        sessionId: body.sessionId,
+        account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
+      });
+      // Only a COMPLETED device login mutates the credential set → rebuild then.
+      if (result.status === "done") await afterMutation();
+      return c.json(result);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
     }
@@ -139,6 +154,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
         models: body.models as string[],
       });
+      await afterMutation();
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -198,6 +214,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
     try {
       await s.setAccountProxy({ providerId: c.req.param("provider"), account, proxy });
+      // Rebuild so the new egress proxy is applied to this account's client now.
+      await afterMutation();
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -251,6 +269,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         priority,
         schedulable,
       });
+      // Rebuild so the new priority / schedulable reorders (or parks) this account now.
+      await afterMutation();
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -263,6 +283,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
     const account = c.req.query("account") || DEFAULT_ACCOUNT;
     await s.logout({ providerId: c.req.param("provider"), account });
+    // Disconnect removes an account → rebuild so it leaves the pool immediately.
+    await afterMutation();
     return c.body(null, 204);
   });
 }

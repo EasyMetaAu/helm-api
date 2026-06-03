@@ -192,6 +192,14 @@ export interface AdminApiDeps {
   // Runtime-mutable settings access (admin "System Settings"). Read/write seam
   // wired in server.ts; the route validates the body before save (fail-closed).
   settings: SettingsAccess;
+  // Hot-reload hook (issue #38 follow-up): invoked by the OAuth admin routes AFTER
+  // any mutation that changes the routable pool — proxy / priority / schedulable /
+  // model curation / connect (login complete) / disconnect. server.ts wires this to
+  // re-synthesize the OAuth pool and swap the live provider-client map, so the change
+  // takes effect on the NEXT request WITHOUT a restart (mirrors the RuleStore
+  // callbacks for lanes/policies/classifier). Awaited before the route returns, so a
+  // successful Save means the change is already live. Optional: absent in unit tests.
+  onOAuthMutation?: () => Promise<void>;
 }
 
 // Re-exported for route signatures.

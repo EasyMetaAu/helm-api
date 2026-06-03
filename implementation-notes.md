@@ -5,6 +5,21 @@
 
 ---
 
+## 2026-06-03 · Hot-reload the OAuth subscription pool (proxy / priority / schedulable / connect / disconnect) — no restart (issue #38)
+
+**Context**: The operator's rule — anything editable in an admin page form must hot-apply on Save, never need a restart. Audited every admin form vs its runtime consumption: **lanes, policies, classifier, API keys, System Settings (capture/retention/rate-limit/log-level), and OAuth model curation were ALREADY hot** (RuleStore re-bind callbacks / live keystore reads / per-request thunks). The **only gap** was the OAuth pool: `synthesizeOAuthProviders()` ran once at startup and froze each account's proxy/priority/schedulable + the connected-account set into the pool; the admin PUT handlers only persisted.
+
+**Fix** (mirrors the existing `RuleStore` re-bind pattern):
+- `apps/gateway/src/server.ts` — split `configuredClients` (from `config/providers.yaml`, built once, NOT UI-editable) from the OAuth pool. `let providerClients = new Map([...configured, ...oauthPool])` is the LIVE map the per-request `route()` closure already reads (it builds `createExecute` every request). `rebuildOAuthPool()` re-runs `synthesizeOAuthProviders` (which re-reads account settings + bound creds), reassigns `oauthPoolClients` + `providerClients`, and logs `oauth.pool.rebuilt`. Rebuilds are serialized on a promise chain (no interleaved stale read→assign); a rebuild failure logs `oauth.pool.rebuild_failed` and leaves the old pool intact (never crashes the save).
+- `routes/admin/deps.ts` + `routes/admin/oauth.ts` — new `onOAuthMutation?: () => Promise<void>` is `await`ed after every mutating op (`PUT proxy` / `PUT account` / `PUT models`, `manual/complete`, `device/poll` when `status==="done"`, `DELETE` disconnect) BEFORE returning, so "Save returned 204" == "applied". Wired to `rebuildOAuthPool` in server.ts.
+- **Registry intentionally NOT rebuilt**: OAuth `<provider>/<model>` aliases route via execute.ts's structural fallback (`providers.has(name)`) against the live map, and the `modelAliases` thunk already surfaces curation live — the same mechanism that already makes model curation hot. Configured providers aren't UI-editable, so the registry never goes stale from the UI.
+
+**Verified LIVE on local Docker (no restart, all observed via `oauth.pool.select` / `oauth.pool.rebuilt` logs)**: (1) park `openai-codex/default` → next requests go 100% to `mylukin`; (2) set `default` priority=1 → 100% to `default`; (3) set a dead proxy (`192.0.2.1:1080`) on `default` → routing to it fails `all_providers_failed` (proves egress now flows through the proxy), clear → serves again; (4) revert → `codex/gpt-5.4 → "pong"`, live suite 49/49. Test: `server.oauth.test.ts` "re-synthesis reflects a schedulable change made AFTER the first build (no restart)" + disconnect drops the provider.
+
+**Cost note**: a rebuild re-runs the per-account token-refresh/discovery pass — acceptable for an infrequent admin action; the save awaits it so the UI reflects "applied".
+
+---
+
 ## 2026-06-03 · Retire the per-key `max_lane` ceiling; add allowed-lanes checkboxes to the create dialog (spec docs/06, docs/04)
 
 **Context**: The API-key create/edit modal exposed a 「最大通道（上限）」/ "Max lane (cap)" select — the highest lane a key could reach, clamping richer requests down. It was redundant and confusing: `LANE_RANK` only orders `economy < balanced < premium`, while `coding/json/vision/tool_call` are **unranked task lanes**, so the ceiling was ill-defined for most lanes. The **allowed-lanes whitelist already expresses everything** the ceiling could (to "cap at balanced" you just check `economy + balanced`). Separately, the **create** dialog was missing the lane checkboxes that **edit** already had.

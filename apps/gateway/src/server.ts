@@ -724,7 +724,9 @@ export async function buildServer(
   // through buildProviderClients (one static/OAuth client each). When
   // HELM_PROVIDER_BASE_URL is set (test/e2e), force the override so cross-provider
   // candidates still hit the mock; in production each provider keeps its own base_url.
-  const providerClients = buildProviderClients(
+  // CONFIGURED providers (config/providers.yaml) + the primary client. These come
+  // from immutable config — NOT editable via the admin UI — so they are built ONCE.
+  const configuredClients = buildProviderClients(
     baseUrlOverride
       ? config.providers.map((p) => ({ ...p, base_url: baseUrlOverride }))
       : config.providers,
@@ -733,17 +735,60 @@ export async function buildServer(
     oauthCtx,
     accountSettings,
   );
-  // Merge the synthesized OAuth POOL clients (Stage 3): each subscription provider
-  // is keyed by its providerId and served by ONE pool that rotates across the
-  // bound accounts. These OVERRIDE any same-named single-account client — every
-  // `<provider>/<model>` alias resolves (via the registry) to providerName ===
-  // providerId, so this single pool client serves them all.
-  for (const [providerId, client] of synthesizedOAuth.poolClients) {
-    providerClients.set(providerId, client);
-  }
-  // Ensure the primary client is registered under its name (it is built above with
-  // the resolved baseUrl, which already honors the override).
-  providerClients.set(first.name, provider);
+  // Ensure the primary client is registered under its name (built above with the
+  // resolved baseUrl, which already honors the override).
+  configuredClients.set(first.name, provider);
+
+  // The synthesized OAuth subscription POOL clients (Stage 3): each subscription
+  // provider is keyed by its providerId and served by ONE pool that rotates across
+  // its bound accounts (priority asc, then LRU). They OVERRIDE any same-named
+  // configured client. Unlike configured providers, the pool is HOT-RELOADABLE —
+  // proxy / priority / schedulable / connect / disconnect are admin-editable, so it
+  // is re-synthesized on demand (rebuildOAuthPool) instead of frozen at startup.
+  // `providerClients` is the LIVE merge the per-request `route` closure reads;
+  // reassigning it swaps the pool for the NEXT request with no restart and no
+  // per-request cost (mirrors the RuleStore re-bind for lanes/policies/classifier).
+  // The registry is intentionally NOT rebuilt: OAuth `<provider>/<model>` aliases
+  // route via execute.ts's structural fallback (`providers.has(name)`) against this
+  // live map, and the `modelAliases` thunk already surfaces curation live — the same
+  // mechanism that already makes model curation hot.
+  let oauthPoolClients = synthesizedOAuth.poolClients;
+  let providerClients = new Map<string, ProviderClient>([
+    ...configuredClients,
+    ...oauthPoolClients,
+  ]);
+  // Serialize rebuilds onto a chain so two rapid admin saves can't interleave a
+  // stale read with a fresh assign — each link re-reads the CURRENT account settings
+  // + bound credentials, re-synthesizes, and swaps the map. A rebuild failure leaves
+  // the previous pool intact (logged), never crashing the admin save.
+  let rebuildChain: Promise<void> = Promise.resolve();
+  const rebuildOAuthPool = (): Promise<void> => {
+    rebuildChain = rebuildChain.then(async () => {
+      try {
+        const next = await synthesizeOAuthProviders(
+          config.providers,
+          oauthCtx,
+          store.config,
+          synthBaseUrl,
+          timeoutMs,
+          (lvl, msg, f) => logger.log(lvl, msg, f),
+        );
+        oauthPoolClients = next.poolClients;
+        providerClients = new Map<string, ProviderClient>([
+          ...configuredClients,
+          ...oauthPoolClients,
+        ]);
+        logger.log("info", "oauth.pool.rebuilt", {
+          providers: [...oauthPoolClients.keys()],
+        });
+      } catch (err) {
+        logger.log("warn", "oauth.pool.rebuild_failed", {
+          line: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+    return rebuildChain;
+  };
 
   // Routing pipeline building blocks (framework-agnostic core). `let` so admin
   // rule edits (via the runtime RuleStore below) re-bind the live config the
@@ -985,6 +1030,10 @@ export async function buildServer(
             config: store.config,
           })
         : undefined,
+      // Hot-reload the routable OAuth pool after any admin mutation (proxy /
+      // priority / schedulable / curation / connect / disconnect) so it applies on
+      // the next request without a restart.
+      onOAuthMutation: rebuildOAuthPool,
     });
 
     // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so
