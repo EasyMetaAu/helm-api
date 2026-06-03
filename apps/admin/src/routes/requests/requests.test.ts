@@ -192,6 +192,28 @@ describe('requests list page', () => {
     expect(goto).toHaveBeenCalledWith('?page=2', expect.anything());
   });
 
+  it('renders numbered page links with the current page marked, others as hrefs', () => {
+    // total 1000 / 50 = 20 pages, current 10 → 1 … 9 [10] 11 … 20
+    render(ListPage, { data: listData([item('tr_a')], { total: 1000, page: 10, pageSize: 50 }) });
+    const current = screen.getByTestId('pager-page-current');
+    expect(current).toHaveTextContent('10');
+    expect(current.getAttribute('aria-current')).toBe('page');
+
+    // Other numbers are real <a> links carrying the target page (page 1 → clean '?').
+    const links = screen.getAllByTestId('pager-page');
+    const hrefs = links.map((a) => a.getAttribute('href'));
+    expect(hrefs).toContain('?'); // page 1 omits the param
+    expect(hrefs).toContain('?page=11');
+    expect(hrefs).toContain('?page=20'); // last page always shown
+  });
+
+  it('changing rows-per-page navigates with pageSize (and resets to page 1)', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, { data: listData([item('tr_a')], { total: 1000, page: 5, pageSize: 50 }) });
+    await fireEvent.change(screen.getByTestId('pager-page-size'), { target: { value: '100' } });
+    expect(goto).toHaveBeenCalledWith('?pageSize=100', expect.anything());
+  });
+
   it('changing a filter navigates with the filter in the querystring (resets to page 1)', async () => {
     vi.mocked(goto).mockClear();
     render(ListPage, { data: listData([item('tr_a')], { total: 120, page: 2, pageSize: 50 }) });
@@ -203,7 +225,7 @@ describe('requests list page', () => {
     vi.mocked(goto).mockClear();
     render(ListPage, {
       data: listData([item('tr_a')], {
-        filters: { range: '7d', status: 'error', page: 1 },
+        filters: { range: '7d', status: 'error', page: 1, pageSize: 50 },
       }),
     });
     await fireEvent.click(screen.getByTestId('filter-reset'));
@@ -272,7 +294,12 @@ describe('requests detail page', () => {
 
   it('shows a friendly error state when the trace cannot be loaded (no white screen)', () => {
     render(DetailPage, {
-      data: { detail: null, payload: { captured: false }, traceId: 'missing', loadError: 'not found' },
+      data: {
+        detail: null,
+        payload: { captured: false },
+        traceId: 'missing',
+        loadError: 'not found',
+      },
     });
     expect(screen.getByTestId('detail-error')).toBeInTheDocument();
   });

@@ -3,10 +3,13 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
+  import RangeFilter from '$lib/components/RangeFilter.svelte';
   import { formatUsd } from '$lib/format.js';
+  import { paginationItems } from '$lib/pagination.js';
   import {
     DEFAULT_FILTERS,
     filtersToSearch,
+    PAGE_SIZE_OPTIONS,
     type RangeKey,
     type RequestsFilters,
   } from '$lib/requests-filters.js';
@@ -40,6 +43,7 @@
   );
   let lane = $state(untrack(() => data.filters.lane ?? ''));
   let model = $state(untrack(() => data.filters.model ?? ''));
+  let pageSize = $state(untrack(() => data.filters.pageSize));
 
   $effect(() => {
     const f = data.filters;
@@ -48,9 +52,12 @@
     decidedBy = f.decidedBy ?? '';
     lane = f.lane ?? '';
     model = f.model ?? '';
+    pageSize = f.pageSize;
   });
 
   const totalPages = $derived(Math.max(1, Math.ceil(data.total / Math.max(1, data.pageSize))));
+  // The number/ellipsis row for the pager (first + last + a window around current).
+  const pageItems = $derived(paginationItems(data.page, totalPages));
 
   // Navigate to the same route with the updated querystring. Changing any filter
   // resets to page 1 (default); the pager passes an explicit `page` to override.
@@ -62,11 +69,29 @@
       decidedBy: decidedBy || undefined,
       lane: lane.trim() || undefined,
       model: model.trim() || undefined,
+      pageSize,
       page: 1,
       ...next,
     };
     const search = filtersToSearch(f);
     void goto(search ? `?${search}` : '?', { keepFocus: true, noScroll: true });
+  }
+
+  // Real href for a page-number link: the current filter set with the target page.
+  // Rendering the numbers as <a> (not buttons) gives a native pointer cursor +
+  // middle-click / open-in-new-tab; SvelteKit still navigates client-side, and
+  // data-sveltekit-noscroll keeps the scroll position like the Prev/Next buttons.
+  function pageHref(n: number): string {
+    const search = filtersToSearch({
+      range,
+      status: status || undefined,
+      decidedBy: decidedBy || undefined,
+      lane: lane.trim() || undefined,
+      model: model.trim() || undefined,
+      pageSize,
+      page: n,
+    });
+    return search ? `?${search}` : '?';
   }
 
   function reset(): void {
@@ -125,6 +150,17 @@
     </p>
   </header>
 
+  <!-- Date-range presets, pulled out as a standalone button row (the shared
+       RangeFilter — identical to the dashboard window picker). Changing it applies
+       immediately and resets to page 1 via go(). -->
+  <RangeFilter
+    value={range}
+    onChange={(next) => {
+      range = next;
+      go();
+    }}
+  />
+
   <!-- Filter bar. Selects apply immediately; the lane/model text inputs apply on
        Enter (form submit). Changing any filter resets to page 1. -->
   <form
@@ -134,17 +170,6 @@
       go();
     }}
   >
-    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
-      {$t('Date range')}
-      <select data-testid="filter-range" class="select" bind:value={range} onchange={() => go()}>
-        <option value="all">{$t('All time')}</option>
-        <option value="today">{$t('Today')}</option>
-        <option value="24h">{$t('Last 24 hours')}</option>
-        <option value="7d">{$t('Last 7 days')}</option>
-        <option value="30d">{$t('Last 30 days')}</option>
-      </select>
-    </label>
-
     <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
       {$t('Status')}
       <select data-testid="filter-status" class="select" bind:value={status} onchange={() => go()}>
@@ -332,14 +357,34 @@
       </table>
     </div>
 
-    <!-- Pagination footer: time-desc numbered pages. `total` reflects the active
-         filters so "Page X of Y" is consistent with the rows shown. -->
-    <div class="flex items-center justify-between gap-3 text-sm text-ink-muted">
-      <span data-testid="pager-status">
-        {$t('Page {page} of {pages}', { page: data.page, pages: totalPages })} ·
-        {$t('{total} requests', { total: data.total })}
-      </span>
-      <div class="flex items-center gap-2">
+    <!-- Pagination footer: rows-per-page on the left, numbered pages + Prev/Next on
+         the right. `total` reflects the active filters so the counts stay consistent
+         with the rows shown. Page numbers are real <a> links (native pointer cursor /
+         open-in-new-tab); Prev/Next stay buttons for their disabled states. -->
+    <div
+      class="flex flex-col gap-3 text-sm text-ink-muted sm:flex-row sm:items-center sm:justify-between"
+    >
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <label class="flex items-center gap-2">
+          {$t('Rows per page')}
+          <select
+            data-testid="pager-page-size"
+            class="select w-auto cursor-pointer"
+            bind:value={pageSize}
+            onchange={() => go()}
+          >
+            {#each PAGE_SIZE_OPTIONS as n (n)}
+              <option value={n}>{n}</option>
+            {/each}
+          </select>
+        </label>
+        <span data-testid="pager-status">
+          {$t('Page {page} of {pages}', { page: data.page, pages: totalPages })} ·
+          {$t('{total} requests', { total: data.total })}
+        </span>
+      </div>
+
+      <nav class="flex items-center gap-1" aria-label={$t('Pagination')}>
         <button
           type="button"
           data-testid="pager-prev"
@@ -347,6 +392,26 @@
           disabled={data.page <= 1}
           onclick={() => go({ page: data.page - 1 })}>{$t('Previous')}</button
         >
+        {#each pageItems as item, i (item === 'ellipsis' ? `e${i}` : item)}
+          {#if item === 'ellipsis'}
+            <span class="px-2 text-ink-muted" aria-hidden="true">…</span>
+          {:else if item === data.page}
+            <span
+              data-testid="pager-page-current"
+              aria-current="page"
+              class="inline-flex h-9 min-w-9 items-center justify-center rounded border border-slate-800 bg-slate-800 px-2 text-sm font-medium text-white"
+              >{item}</span
+            >
+          {:else}
+            <a
+              data-testid="pager-page"
+              data-sveltekit-noscroll
+              href={pageHref(item)}
+              class="inline-flex h-9 min-w-9 cursor-pointer items-center justify-center rounded border border-slate-300 px-2 text-sm text-ink-body transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+              >{item}</a
+            >
+          {/if}
+        {/each}
         <button
           type="button"
           data-testid="pager-next"
@@ -354,7 +419,7 @@
           disabled={data.page >= totalPages}
           onclick={() => go({ page: data.page + 1 })}>{$t('Next')}</button
         >
-      </div>
+      </nav>
     </div>
   {/if}
 </section>
