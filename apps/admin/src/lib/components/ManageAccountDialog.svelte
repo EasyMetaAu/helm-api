@@ -9,6 +9,7 @@
     setAccountProxy,
     setAccountSchedule,
   } from '$lib/api/oauth.js';
+  import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
   // Per-account management dialog (account-pool feature, issue #38 follow-up).
@@ -259,235 +260,240 @@
   });
 </script>
 
-<div class="dialog flex flex-col gap-4" role="dialog" aria-label={$t('Manage account')}>
-  <header class="flex items-start justify-between gap-3">
-    <div class="min-w-0">
-      <h2 class="section-header">{$t('Manage account')}</h2>
-      <p class="field-help">
-        {providerName} · <code class="font-mono">{account}</code>
-      </p>
-    </div>
-    <button type="button" class="btn-icon shrink-0" aria-label={$t('Close')} onclick={close}>
-      <svg
-        class="h-5 w-5"
-        fill="none"
-        viewBox="0 0 24 24"
-        stroke-width="1.8"
-        stroke="currentColor"
-        aria-hidden="true"
+<Modal label={$t('Manage account')} onclose={close}>
+  <div class="flex flex-col gap-4">
+    <header class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h2 class="section-header">{$t('Manage account')}</h2>
+        <p class="field-help">
+          {providerName} · <code class="font-mono">{account}</code>
+        </p>
+      </div>
+      <button type="button" class="btn-icon shrink-0" aria-label={$t('Close')} onclick={close}>
+        <svg
+          class="h-5 w-5"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke-width="1.8"
+          stroke="currentColor"
+          aria-hidden="true"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </header>
+
+    <!-- Section switcher: one tab per control group so the dialog stays compact. -->
+    <div
+      class="flex gap-2 border-b border-slate-200"
+      role="tablist"
+      aria-label={$t('Manage account')}
+    >
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn"
+        aria-selected={section === 'models'}
+        onclick={() => (section = 'models')}>{$t('Models')}</button
       >
-        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
-      </svg>
-    </button>
-  </header>
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn"
+        aria-selected={section === 'proxy'}
+        onclick={() => (section = 'proxy')}>{$t('Proxy')}</button
+      >
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn"
+        aria-selected={section === 'schedule'}
+        onclick={() => (section = 'schedule')}>{$t('Schedule')}</button
+      >
+    </div>
 
-  <!-- Section switcher: one tab per control group so the dialog stays compact. -->
-  <div
-    class="flex gap-2 border-b border-slate-200"
-    role="tablist"
-    aria-label={$t('Manage account')}
-  >
-    <button
-      type="button"
-      role="tab"
-      class="tab-btn"
-      aria-selected={section === 'models'}
-      onclick={() => (section = 'models')}>{$t('Models')}</button
-    >
-    <button
-      type="button"
-      role="tab"
-      class="tab-btn"
-      aria-selected={section === 'proxy'}
-      onclick={() => (section = 'proxy')}>{$t('Proxy')}</button
-    >
-    <button
-      type="button"
-      role="tab"
-      class="tab-btn"
-      aria-selected={section === 'schedule'}
-      onclick={() => (section = 'schedule')}>{$t('Schedule')}</button
-    >
-  </div>
+    {#if section === 'models'}
+      <div class="flex flex-col gap-3">
+        <p class="field-help">
+          {$t(
+            'The models this account exposes to Lanes. This list is authoritative — add, edit, or remove ids freely. Use “Pull from provider” to seed it with what the provider currently reports.',
+          )}
+        </p>
+        {#if modelsError}
+          <p class="alert-error" role="alert">{modelsError}</p>
+        {:else if modelsLoading}
+          <p class="text-sm text-ink-muted">{$t('Loading models…')}</p>
+        {:else}
+          <div class="flex flex-col gap-1.5">
+            {#each models as _model, i (i)}
+              <div class="flex items-center gap-2">
+                <input
+                  type="text"
+                  class="input flex-1 font-mono text-xs"
+                  bind:value={models[i]}
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+                <button
+                  type="button"
+                  class="btn-danger-outline shrink-0"
+                  aria-label={$t('Remove model')}
+                  onclick={() => removeModel(i)}>{$t('Remove')}</button
+                >
+              </div>
+            {/each}
+            {#if models.length === 0}
+              <p class="text-sm text-ink-muted">
+                {$t('No models yet. Add one below or pull from the provider.')}
+              </p>
+            {/if}
+          </div>
 
-  {#if section === 'models'}
-    <div class="flex flex-col gap-3">
-      <p class="field-help">
-        {$t(
-          'The models this account exposes to Lanes. This list is authoritative — add, edit, or remove ids freely. Use “Pull from provider” to seed it with what the provider currently reports.',
-        )}
-      </p>
-      {#if modelsError}
-        <p class="alert-error" role="alert">{modelsError}</p>
-      {:else if modelsLoading}
-        <p class="text-sm text-ink-muted">{$t('Loading models…')}</p>
-      {:else}
-        <div class="flex flex-col gap-1.5">
-          {#each models as _model, i (i)}
-            <div class="flex items-center gap-2">
-              <input
-                type="text"
-                class="input flex-1 font-mono text-xs"
-                bind:value={models[i]}
-                spellcheck="false"
-                autocomplete="off"
-              />
+          <div class="flex items-center gap-2">
+            <input
+              type="text"
+              class="input flex-1 font-mono text-xs"
+              placeholder={$t('Add a model id…')}
+              bind:value={newModel}
+              spellcheck="false"
+              autocomplete="off"
+              onkeydown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  addModel();
+                }
+              }}
+            />
+            <button type="button" class="btn-secondary shrink-0" onclick={addModel}
+              >{$t('Add')}</button
+            >
+          </div>
+
+          <div class="card-actions">
+            {#if canPull}
               <button
                 type="button"
-                class="btn-danger-outline shrink-0"
-                aria-label={$t('Remove model')}
-                onclick={() => removeModel(i)}>{$t('Remove')}</button
+                class="btn-secondary"
+                disabled={suggestions.length === 0}
+                onclick={pullFromProvider}
+                >{$t('Pull from provider ({n})', { n: suggestions.length })}</button
               >
-            </div>
-          {/each}
-          {#if models.length === 0}
-            <p class="text-sm text-ink-muted">
-              {$t('No models yet. Add one below or pull from the provider.')}
-            </p>
-          {/if}
-        </div>
-
-        <div class="flex items-center gap-2">
-          <input
-            type="text"
-            class="input flex-1 font-mono text-xs"
-            placeholder={$t('Add a model id…')}
-            bind:value={newModel}
-            spellcheck="false"
-            autocomplete="off"
-            onkeydown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                addModel();
-              }
-            }}
-          />
-          <button type="button" class="btn-secondary shrink-0" onclick={addModel}
-            >{$t('Add')}</button
-          >
-        </div>
-
-        <div class="card-actions">
-          {#if canPull}
+            {/if}
             <button
               type="button"
-              class="btn-secondary"
-              disabled={suggestions.length === 0}
-              onclick={pullFromProvider}
-              >{$t('Pull from provider ({n})', { n: suggestions.length })}</button
+              class="btn-primary-sm"
+              disabled={modelsSaving}
+              onclick={saveModels}>{modelsSaving ? $t('Saving…') : $t('Save')}</button
             >
-          {/if}
-          <button type="button" class="btn-primary-sm" disabled={modelsSaving} onclick={saveModels}
-            >{modelsSaving ? $t('Saving…') : $t('Save')}</button
-          >
-        </div>
-      {/if}
-    </div>
-  {:else if section === 'proxy'}
-    <div class="flex flex-col gap-3">
-      <p class="field-help">
-        {$t(
-          'Route this account’s upstream traffic through a proxy so it egresses from a distinct IP. Leave unset for a direct connection.',
-        )}
-      </p>
-      {#if proxyError}
-        <p class="alert-error" role="alert">{proxyError}</p>
-      {/if}
-      {#if proxyLoading}
-        <p class="text-sm text-ink-muted">{$t('Loading proxy…')}</p>
-      {:else}
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <label class="field">
-            <span class="field-label">{$t('Type')}</span>
-            <select class="select" bind:value={proxyType}>
-              <option value="http">HTTP</option>
-              <option value="https">HTTPS</option>
-              <option value="socks5">SOCKS5</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">{$t('Host')}</span>
-            <input class="input" type="text" placeholder="10.0.0.1" bind:value={proxyHost} />
-          </label>
-          <label class="field">
-            <span class="field-label">{$t('Port')}</span>
-            <input
-              class="input"
-              type="number"
-              min="1"
-              max="65535"
-              placeholder="1080"
-              bind:value={proxyPort}
-            />
-          </label>
-          <label class="field">
-            <span class="field-label">{$t('Username (optional)')}</span>
-            <input class="input" type="text" bind:value={proxyUser} />
-          </label>
-          <label class="field">
-            <span class="field-label">{$t('Password (optional)')}</span>
-            <input
-              class="input"
-              type="password"
-              placeholder={proxyHasStored ? $t('•••••• (unchanged)') : ''}
-              bind:value={proxyPass}
-            />
-          </label>
-        </div>
-        <div class="card-actions">
-          {#if proxyConfigured}
+          </div>
+        {/if}
+      </div>
+    {:else if section === 'proxy'}
+      <div class="flex flex-col gap-3">
+        <p class="field-help">
+          {$t(
+            'Route this account’s upstream traffic through a proxy so it egresses from a distinct IP. Leave unset for a direct connection.',
+          )}
+        </p>
+        {#if proxyError}
+          <p class="alert-error" role="alert">{proxyError}</p>
+        {/if}
+        {#if proxyLoading}
+          <p class="text-sm text-ink-muted">{$t('Loading proxy…')}</p>
+        {:else}
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label class="field">
+              <span class="field-label">{$t('Type')}</span>
+              <select class="select" bind:value={proxyType}>
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+                <option value="socks5">SOCKS5</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">{$t('Host')}</span>
+              <input class="input" type="text" placeholder="10.0.0.1" bind:value={proxyHost} />
+            </label>
+            <label class="field">
+              <span class="field-label">{$t('Port')}</span>
+              <input
+                class="input"
+                type="number"
+                min="1"
+                max="65535"
+                placeholder="1080"
+                bind:value={proxyPort}
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">{$t('Username (optional)')}</span>
+              <input class="input" type="text" bind:value={proxyUser} />
+            </label>
+            <label class="field">
+              <span class="field-label">{$t('Password (optional)')}</span>
+              <input
+                class="input"
+                type="password"
+                placeholder={proxyHasStored ? $t('•••••• (unchanged)') : ''}
+                bind:value={proxyPass}
+              />
+            </label>
+          </div>
+          <div class="card-actions">
+            {#if proxyConfigured}
+              <button
+                type="button"
+                class="btn-danger-outline"
+                disabled={proxySaving}
+                onclick={clearProxy}>{$t('Clear proxy')}</button
+              >
+            {/if}
+            <button type="button" class="btn-primary-sm" disabled={proxySaving} onclick={saveProxy}
+              >{proxySaving ? $t('Saving…') : $t('Save')}</button
+            >
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <div class="flex flex-col gap-3">
+        <p class="field-help">
+          {$t(
+            'When a provider has several accounts, Helm pools them: a lower priority is served first, with round-robin within an equal priority. Parking an account keeps it connected but out of routing.',
+          )}
+        </p>
+        {#if scheduleError}
+          <p class="alert-error" role="alert">{scheduleError}</p>
+        {/if}
+        {#if scheduleLoading}
+          <p class="text-sm text-ink-muted">{$t('Loading schedule…')}</p>
+        {:else}
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label class="field">
+              <span class="field-label">{$t('Priority (lower = preferred)')}</span>
+              <input
+                class="input"
+                type="number"
+                min="0"
+                step="1"
+                placeholder="50"
+                bind:value={priority}
+              />
+            </label>
+            <label class="checkbox-field self-end pb-2">
+              <input type="checkbox" class="checkbox" bind:checked={schedulable} />
+              <span class="text-sm text-ink-body">{$t('Schedulable (in rotation)')}</span>
+            </label>
+          </div>
+          <div class="card-actions">
             <button
               type="button"
-              class="btn-danger-outline"
-              disabled={proxySaving}
-              onclick={clearProxy}>{$t('Clear proxy')}</button
+              class="btn-primary-sm"
+              disabled={scheduleSaving}
+              onclick={saveSchedule}>{scheduleSaving ? $t('Saving…') : $t('Save')}</button
             >
-          {/if}
-          <button type="button" class="btn-primary-sm" disabled={proxySaving} onclick={saveProxy}
-            >{proxySaving ? $t('Saving…') : $t('Save')}</button
-          >
-        </div>
-      {/if}
-    </div>
-  {:else}
-    <div class="flex flex-col gap-3">
-      <p class="field-help">
-        {$t(
-          'When a provider has several accounts, Helm pools them: a lower priority is served first, with round-robin within an equal priority. Parking an account keeps it connected but out of routing.',
-        )}
-      </p>
-      {#if scheduleError}
-        <p class="alert-error" role="alert">{scheduleError}</p>
-      {/if}
-      {#if scheduleLoading}
-        <p class="text-sm text-ink-muted">{$t('Loading schedule…')}</p>
-      {:else}
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <label class="field">
-            <span class="field-label">{$t('Priority (lower = preferred)')}</span>
-            <input
-              class="input"
-              type="number"
-              min="0"
-              step="1"
-              placeholder="50"
-              bind:value={priority}
-            />
-          </label>
-          <label class="checkbox-field self-end pb-2">
-            <input type="checkbox" class="checkbox" bind:checked={schedulable} />
-            <span class="text-sm text-ink-body">{$t('Schedulable (in rotation)')}</span>
-          </label>
-        </div>
-        <div class="card-actions">
-          <button
-            type="button"
-            class="btn-primary-sm"
-            disabled={scheduleSaving}
-            onclick={saveSchedule}>{scheduleSaving ? $t('Saving…') : $t('Save')}</button
-          >
-        </div>
-      {/if}
-    </div>
-  {/if}
-</div>
+          </div>
+        {/if}
+      </div>
+    {/if}
+  </div>
+</Modal>
