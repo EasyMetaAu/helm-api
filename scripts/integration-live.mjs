@@ -117,9 +117,15 @@ async function main() {
     const r = await http('POST', '/v1/responses', { auth: true, body: { model: 'auto', max_output_tokens: 200, input: 'Say hello' } });
     if (r.status === 404) check('/v1/responses route mounted', false, 'route not mounted');
     else check('/v1/responses non-stream → 200 + Responses shape', r.status === 200 && r.json?.object === 'response' && Array.isArray(r.json?.output), `status=${r.status} object=${r.json?.object}`);
-    // Streaming Responses has no SSE transformer yet → must reject with a clean 400, not 5xx / silent JSON.
-    const s = await http('POST', '/v1/responses', { auth: true, body: { model: 'auto', max_output_tokens: 24, input: 'hi', stream: true } });
-    check('/v1/responses stream:true → 400 invalid_request (honest unsupported)', s.status === 400 && (s.json?.error?.code === 'invalid_request'), `status=${s.status}`);
+    // Streaming Responses is now natively supported (#40): stream:true → 200 + an SSE
+    // stream of Responses events terminated by [DONE]. (It used to 400 as unsupported;
+    // that assertion rotted when the SSE transformer landed — updated here.)
+    const s = await http('POST', '/v1/responses', { auth: true, raw: true, body: { model: 'auto', max_output_tokens: 200, input: 'Reply with exactly: one two three', stream: true } });
+    const ev = (name) => s.text.includes(`"type":"${name}"`) || s.text.includes(`"type": "${name}"`) || s.text.includes(`event: ${name}`);
+    check('/v1/responses stream:true → 200 + Responses SSE (created/delta)', s.status === 200 && (ev('response.created') || ev('response.output_text.delta')), `status=${s.status}`);
+    // The Responses API stream terminates with a `response.completed` event — NOT the
+    // Chat-Completions `[DONE]` sentinel. (Asserting [DONE] here would be wrong.)
+    check('/v1/responses stream → terminates with response.completed', ev('response.completed'));
   }
 
   // ── Routing & classification (docs/03,04) ───────────────────────────────────
@@ -229,6 +235,24 @@ async function main() {
     check('GET /admin/api/models is live + includes OAuth-backed aliases (alias+accounts)',
       oauthAliases.length > 0, `${oauthAliases.length} OAuth of ${catalog.length} total`);
 
+    // ── Known-good model PER PROVIDER — verified live 2026-06-03 ────────────────
+    // Each subscription is tested with its OWN model id; they DO NOT share one. This
+    // is hard-won knowledge — pinned here so we don't relearn it every time:
+    //   • openai-codex (ChatGPT Codex backend): serves gpt-5.4 / gpt-5.4-mini / gpt-5.5.
+    //     The legacy *-codex / *-pro / *-nano slugs 400 "model is not supported when
+    //     using Codex with a ChatGPT account" — it is a MODEL-id problem, not auth.
+    //   • github-copilot: serves gpt-4o / gpt-4.1 / gpt-4o-mini / gpt-5-mini (+ some
+    //     claude). Copilot's /models ADVERTISES gpt-5.4 / gpt-5.4-mini / gpt-5.5 and
+    //     claude-opus/sonnet + gemini, but its chat endpoint REJECTS them
+    //     (model_not_supported). So NEVER reuse Codex's gpt-5.4* ids for Copilot.
+    //   • anthropic: any live-listed claude model (haiku is the cheapest).
+    // The check below routes each provider's own model explicitly and asserts it serves.
+    const KNOWN_GOOD = {
+      anthropic: 'claude-haiku-4-5-20251001',
+      'openai-codex': 'gpt-5.4-mini',
+      'github-copilot': 'gpt-5-mini',
+    };
+
     // A passthrough key so an explicit `provider/model` alias routes DIRECTLY to that
     // subscription (explicit-model passthrough is gated by allow_custom_model, docs/04).
     const mk = await http('POST', '/admin/api/keys', { admin: true, body: { role: 'user', allow_custom_model: true } });
@@ -271,6 +295,19 @@ async function main() {
         }
         check(`route → ${p.id} subscription reaches upstream (≥1 model serves 200)`, served !== null,
           served ? `${served.alias} → ${JSON.stringify(served.content)}` : `0/${Math.min(aliases.length, 5)} served: ${tried.join(' | ')}`);
+
+        // Explicit, documented per-provider model (the KNOWN_GOOD map) — pinned as its
+        // own check so the "each provider uses its OWN model" knowledge can't silently
+        // rot. Skips if that model isn't currently curated for this provider.
+        const good = KNOWN_GOOD[p.id];
+        if (good && aliases.includes(`${p.id}/${good}`)) {
+          const r = await passProbe(`${p.id}/${good}`);
+          check(`route → ${p.id}/${good} (its own model, distinct per provider) serves 200`,
+            r.status === 200 && r.content != null && (r.finalModel ?? '').startsWith(`${p.id}/`),
+            r.content != null ? `→ ${JSON.stringify(r.content)}` : `status=${r.status} ${r.upstream.slice(0, 60)}`);
+        } else if (good) {
+          check(`route → ${p.id}/${good} (its own model) serves 200`, 'skip', `${good} not currently curated for ${p.id}`);
+        }
       }
     }
     // Clean up the throwaway passthrough key.
