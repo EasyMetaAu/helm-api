@@ -116,6 +116,13 @@ const AnthropicOutputFormatSchema = z
   .object({ type: z.literal("json_schema"), schema: z.unknown() })
   .passthrough();
 
+// Anthropic extended-thinking config: { type:"enabled", budget_tokens } (or a
+// future "adaptive"/"disabled" shape). Carried as a passthrough bag so it round-trips
+// into IR.thinking verbatim and back out unchanged (LiteLLM forwards `thinking` as-is).
+const AnthropicThinkingConfigSchema = z
+  .object({ type: z.string(), budget_tokens: z.number().int().nonnegative().optional() })
+  .passthrough();
+
 const AnthropicMessagesRequestSchema = z
   .object({
     model: z.string(),
@@ -123,11 +130,20 @@ const AnthropicMessagesRequestSchema = z
     system: AnthropicSystemSchema.optional(),
     max_tokens: z.number().int().positive().optional(),
     temperature: z.number().optional(),
+    // —— litellm-parity sampling knobs (mapped straight to/from the IR). ——
+    top_p: z.number().optional(),
+    top_k: z.number().int().optional(),
     stream: z.boolean().optional(),
     stop_sequences: z.array(z.string()).optional(),
     tools: z.array(AnthropicToolSchema).optional(),
     tool_choice: z.unknown().optional(),
     output_format: AnthropicOutputFormatSchema.optional(),
+    // —— extended-thinking + routing knobs. thinking -> IR.thinking; service_tier
+    // passes through; metadata is Anthropic's only documented user-attribution field
+    // and has no IR home, so it is preserved verbatim in provider_raw. ——
+    thinking: AnthropicThinkingConfigSchema.optional(),
+    service_tier: z.string().optional(),
+    metadata: z.unknown().optional(),
   })
   .passthrough();
 
@@ -345,17 +361,36 @@ export function transformRequestOut(req: unknown): IRRequest {
         }
       : undefined;
 
+  // metadata has no IR home (Anthropic-only user-attribution); preserve it verbatim
+  // in provider_raw so an anthropic->anthropic round-trip is lossless.
+  const providerRaw = parsed.metadata !== undefined ? { metadata: parsed.metadata } : undefined;
+
   const ir: IRRequest = {
     model: parsed.model,
     messages: merged,
     ...(parsed.tools !== undefined ? { tools: parsed.tools.map(toIRTool) } : {}),
     ...(parsed.tool_choice !== undefined ? { tool_choice: parsed.tool_choice } : {}),
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
+    ...(parsed.top_p !== undefined ? { top_p: parsed.top_p } : {}),
+    ...(parsed.top_k !== undefined ? { top_k: parsed.top_k } : {}),
     ...(parsed.max_tokens !== undefined ? { max_tokens: parsed.max_tokens } : {}),
     ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
+    // Anthropic stop_sequences[] is the IR `stop` (string | string[]) — carried as the
+    // array verbatim; the OpenAI/IR side accepts both forms.
+    ...(parsed.stop_sequences !== undefined ? { stop: parsed.stop_sequences } : {}),
     ...(responseFormat !== undefined ? { response_format: responseFormat } : {}),
-    ...(thinking.length > 0 ? { thinking } : {}),
+    // The extended-thinking config rides IR.thinking (the provider-shaped reasoning
+    // bag), distinct from the per-message `thinking` block extension built above.
+    ...(parsed.thinking !== undefined ? { thinking: parsed.thinking } : {}),
+    ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
+    ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
   };
+
+  // Per-message thinking BLOCKS (kept out of prompt content) live on provider_raw,
+  // never colliding with the request-level thinking CONFIG above. Merge if both.
+  if (thinking.length > 0) {
+    ir.provider_raw = { ...(ir.provider_raw ?? {}), thinking_blocks: thinking };
+  }
 
   // Final structural validation: the IR we hand downstream is always well-formed.
   return IRRequestSchema.parse(ir);
@@ -426,20 +461,66 @@ export type AnthropicToolChoiceOut =
   | { type: "none" }
   | { type: "tool"; name: string };
 
+export interface AnthropicThinkingConfigOut {
+  type: string;
+  budget_tokens?: number;
+}
+
 export interface AnthropicOutboundRequest {
   model: string;
   max_tokens: number;
   system?: string | AnthropicTextBlockOut[];
   messages: AnthropicRequestMessage[];
   temperature?: number;
+  top_p?: number;
+  top_k?: number;
   stream?: boolean;
   stop_sequences?: string[];
   tools?: AnthropicOutboundTool[];
   tool_choice?: AnthropicToolChoiceOut;
   output_format?: AnthropicOutputFormat;
+  thinking?: AnthropicThinkingConfigOut;
+  service_tier?: string;
 }
 
 const DEFAULT_MAX_TOKENS = 4096;
+
+// reasoning_effort -> Anthropic extended-thinking budget (tokens). The IR enum is
+// minimal|low|medium|high; LiteLLM derives a per-tier budget (referenced, NOT copied).
+// All non-disabled efforts emit type:"enabled" with a positive budget so the request
+// is a valid extended-thinking call.
+const REASONING_EFFORT_TO_BUDGET: Record<string, number> = {
+  minimal: 1024,
+  low: 2048,
+  medium: 8192,
+  high: 16384,
+};
+
+function thinkingFromIR(ir: IRRequest): AnthropicThinkingConfigOut | undefined {
+  // An explicit thinking config wins: forward it verbatim (LiteLLM passes `thinking`
+  // straight through). We narrow the unknown bag to the outbound shape defensively.
+  if (ir.thinking !== undefined && ir.thinking !== null && typeof ir.thinking === "object") {
+    const cfg = ir.thinking as { type?: unknown; budget_tokens?: unknown };
+    if (typeof cfg.type === "string") {
+      return {
+        type: cfg.type,
+        ...(typeof cfg.budget_tokens === "number" ? { budget_tokens: cfg.budget_tokens } : {}),
+      };
+    }
+  }
+  // Otherwise derive a budget from reasoning_effort (the cross-protocol knob).
+  if (ir.reasoning_effort !== undefined) {
+    const budget = REASONING_EFFORT_TO_BUDGET[ir.reasoning_effort];
+    if (budget !== undefined) return { type: "enabled", budget_tokens: budget };
+  }
+  return undefined;
+}
+
+// IR.stop (string | string[]) -> Anthropic stop_sequences[] (always an array).
+function stopSequencesFromIR(stop: IRRequest["stop"]): string[] | undefined {
+  if (stop === undefined) return undefined;
+  return typeof stop === "string" ? [stop] : stop;
+}
 
 function parseToolInput(raw: string): unknown {
   const trimmed = raw.trim();
@@ -593,7 +674,11 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
 
   const system = systemFromMessages(parsed.messages);
   const toolChoice = mapToolChoice(parsed.tool_choice, toolNameMap);
+  // responseFormatToOutputFormat invokes filterAnthropicOutputSchema internally, so
+  // the outbound output_format drops Anthropic-unsupported constraint keywords.
   const outputFormat = responseFormatToOutputFormat(parsed.response_format);
+  const thinking = thinkingFromIR(parsed);
+  const stopSequences = stopSequencesFromIR(parsed.stop);
 
   // NB: the tool-name reverse map is NOT emitted onto the outbound request wire (an
   // Anthropic Messages request has no provider_raw field, and the matrix's no-leak
@@ -610,10 +695,15 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
     messages: merged,
     ...(system !== undefined ? { system } : {}),
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
+    ...(parsed.top_p !== undefined ? { top_p: parsed.top_p } : {}),
+    ...(parsed.top_k !== undefined ? { top_k: parsed.top_k } : {}),
     ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
+    ...(stopSequences !== undefined ? { stop_sequences: stopSequences } : {}),
     ...(tools !== undefined ? { tools } : {}),
     ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
     ...(outputFormat !== undefined ? { output_format: outputFormat } : {}),
+    ...(thinking !== undefined ? { thinking } : {}),
+    ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
   };
   return out;
 }

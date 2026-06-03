@@ -23,14 +23,34 @@ import {
 // Pure function: zero network, zero framework (CLAUDE.md principle 1). Reimplemented
 // from the docs, NOT copied from musistudio/llms or litellm.
 
-// —— Anthropic native stop_reason enum (the only legal output values). —————————————
+// —— Anthropic native stop_reason enum (the legal output values). pause_turn (a
+// long-running tool/agent pause) and refusal (Claude declined) are newer additions;
+// both are accepted on output and mapped back to a legal IR finish_reason. ——————————
 export const AnthropicStopReasonSchema = z.enum([
   "end_turn",
   "max_tokens",
   "stop_sequence",
   "tool_use",
+  "pause_turn",
+  "refusal",
 ]);
 export type AnthropicStopReason = z.infer<typeof AnthropicStopReasonSchema>;
+
+// —— Structured cache_creation breakdown (ephemeral 5m / 1h writes). Anthropic
+// reports the split alongside the aggregate cache_creation_input_tokens. ——————————
+export const AnthropicCacheCreationSchema = z
+  .object({
+    ephemeral_5m_input_tokens: z.number().int().nonnegative().optional(),
+    ephemeral_1h_input_tokens: z.number().int().nonnegative().optional(),
+  })
+  .passthrough();
+export type AnthropicCacheCreation = z.infer<typeof AnthropicCacheCreationSchema>;
+
+// —— output_tokens_details: Anthropic surfaces the reasoning split here as
+// thinking_tokens (mapped to IRUsage.reasoning_tokens). ———————————————————————————
+export const AnthropicOutputTokensDetailsSchema = z
+  .object({ thinking_tokens: z.number().int().nonnegative().optional() })
+  .passthrough();
 
 // —— Anthropic native usage. cache_read/cache_creation are first-class, separate
 // from input_tokens (so cache is never billed at full input price). ———————————————
@@ -39,6 +59,8 @@ export const AnthropicUsageSchema = z.object({
   output_tokens: z.number().int().nonnegative(),
   cache_read_input_tokens: z.number().int().nonnegative(),
   cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+  cache_creation: AnthropicCacheCreationSchema.optional(),
+  output_tokens_details: AnthropicOutputTokensDetailsSchema.optional(),
 });
 export type AnthropicUsage = z.infer<typeof AnthropicUsageSchema>;
 
@@ -186,10 +208,33 @@ export function mapStopReason(finish: string): { stop_reason: AnthropicStopReaso
 export function mapUsage(u: IRUsage): AnthropicUsage {
   const cached = u.cached_tokens ?? 0;
   const input = Math.max(0, u.prompt_tokens ?? 0);
+  // cache_creation = ephemeral WRITE tokens (distinct from cache_read). Surface the
+  // aggregate, and — when the prompt detail carries the ephemeral split — the
+  // structured cache_creation breakdown too.
+  const cacheCreation = u.cache_creation_tokens;
+  const detail = u.prompt_tokens_details;
+  const ephemeral5m = (detail as { ephemeral_5m_input_tokens?: number } | undefined)
+    ?.ephemeral_5m_input_tokens;
+  const ephemeral1h = (detail as { ephemeral_1h_input_tokens?: number } | undefined)
+    ?.ephemeral_1h_input_tokens;
+  const breakdown: AnthropicCacheCreation | undefined =
+    ephemeral5m !== undefined || ephemeral1h !== undefined
+      ? {
+          ...(ephemeral5m !== undefined ? { ephemeral_5m_input_tokens: ephemeral5m } : {}),
+          ...(ephemeral1h !== undefined ? { ephemeral_1h_input_tokens: ephemeral1h } : {}),
+        }
+      : undefined;
+  // reasoning_tokens -> output_tokens_details.thinking_tokens (Anthropic's name).
+  const thinkingTokens = u.reasoning_tokens;
   return {
     input_tokens: input,
     output_tokens: u.completion_tokens ?? 0,
     cache_read_input_tokens: cached,
+    ...(cacheCreation !== undefined ? { cache_creation_input_tokens: cacheCreation } : {}),
+    ...(breakdown !== undefined ? { cache_creation: breakdown } : {}),
+    ...(thinkingTokens !== undefined
+      ? { output_tokens_details: { thinking_tokens: thinkingTokens } }
+      : {}),
   };
 }
 
@@ -347,6 +392,11 @@ const STOP_REASON_TO_FINISH: Record<string, string> = {
   max_tokens: "length",
   stop_sequence: "stop",
   tool_use: "tool_calls",
+  // pause_turn is a long-running agent/tool pause — there is no OpenAI equivalent, so
+  // it bottoms out at `stop` (the raw value survives in provider_raw). refusal (Claude
+  // declined) is OpenAI's content_filter (LiteLLM _FINISH_REASON_MAP).
+  pause_turn: "stop",
+  refusal: "content_filter",
 };
 
 // Tolerant inbound schema for a native Anthropic response. Block/usage shapes use
@@ -375,6 +425,8 @@ const InboundUsageSchema = z
     output_tokens: z.number().int().nonnegative().optional(),
     cache_read_input_tokens: z.number().int().nonnegative().optional(),
     cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+    cache_creation: AnthropicCacheCreationSchema.optional(),
+    output_tokens_details: AnthropicOutputTokensDetailsSchema.optional(),
   })
   .passthrough();
 
@@ -385,6 +437,9 @@ const InboundResponseSchema = z
     content: z.array(InboundContentBlockSchema),
     stop_reason: z.string().nullable().optional(),
     stop_sequence: z.string().nullable().optional(),
+    // Anthropic Sonnet 4+ carries a stop_details object alongside stop_reason; it has
+    // no IR home, so it is preserved verbatim in provider_raw.
+    stop_details: z.unknown().optional(),
     usage: InboundUsageSchema.optional(),
   })
   .passthrough();
@@ -442,6 +497,16 @@ export function transformNativeResponseToIR(
   const finishReason = rawStop !== null ? (STOP_REASON_TO_FINISH[rawStop] ?? "stop") : null;
 
   const u = res.usage;
+  // cache_creation aggregate: prefer the explicit field, else sum the ephemeral split.
+  const cacheCreation = (() => {
+    if (u === undefined) return undefined;
+    if (u.cache_creation_input_tokens !== undefined) return u.cache_creation_input_tokens;
+    const c = u.cache_creation;
+    if (c === undefined) return undefined;
+    const sum = (c.ephemeral_5m_input_tokens ?? 0) + (c.ephemeral_1h_input_tokens ?? 0);
+    return sum > 0 ? sum : undefined;
+  })();
+  const thinkingTokens = u?.output_tokens_details?.thinking_tokens;
   const usage: IRUsage | undefined =
     u !== undefined
       ? {
@@ -450,6 +515,8 @@ export function transformNativeResponseToIR(
           ...(u.cache_read_input_tokens !== undefined
             ? { cached_tokens: u.cache_read_input_tokens }
             : {}),
+          ...(cacheCreation !== undefined ? { cache_creation_tokens: cacheCreation } : {}),
+          ...(thinkingTokens !== undefined ? { reasoning_tokens: thinkingTokens } : {}),
         }
       : undefined;
 
@@ -460,6 +527,7 @@ export function transformNativeResponseToIR(
     ...(usage !== undefined ? { usage } : {}),
     provider_raw: {
       ...(rawStop !== null ? { stop_reason: rawStop } : {}),
+      ...(res.stop_details !== undefined ? { stop_details: res.stop_details } : {}),
       ...(u !== undefined ? { usage: u } : {}),
     },
   };

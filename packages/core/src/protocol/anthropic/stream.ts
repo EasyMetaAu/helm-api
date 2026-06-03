@@ -107,9 +107,16 @@ const AnthropicToolUseBlockStartSchema = z.object({
   name: z.string(),
   input: z.record(z.string(), z.unknown()),
 });
+// A thinking content block opens with an empty thinking string; thinking_delta /
+// signature_delta fragments follow (Anthropic extended-thinking streaming).
+const AnthropicThinkingBlockStartSchema = z.object({
+  type: z.literal("thinking"),
+  thinking: z.string(),
+});
 const AnthropicStartContentBlockSchema = z.discriminatedUnion("type", [
   AnthropicTextBlockStartSchema,
   AnthropicToolUseBlockStartSchema,
+  AnthropicThinkingBlockStartSchema,
 ]);
 
 const AnthropicTextDeltaSchema = z.object({ type: z.literal("text_delta"), text: z.string() });
@@ -117,9 +124,21 @@ const AnthropicInputJSONDeltaSchema = z.object({
   type: z.literal("input_json_delta"),
   partial_json: z.string(),
 });
+// thinking_delta streams reasoning text; signature_delta delivers the (single,
+// terminal) cryptographic signature of the thinking block.
+const AnthropicThinkingDeltaSchema = z.object({
+  type: z.literal("thinking_delta"),
+  thinking: z.string(),
+});
+const AnthropicSignatureDeltaSchema = z.object({
+  type: z.literal("signature_delta"),
+  signature: z.string(),
+});
 const AnthropicBlockDeltaSchema = z.discriminatedUnion("type", [
   AnthropicTextDeltaSchema,
   AnthropicInputJSONDeltaSchema,
+  AnthropicThinkingDeltaSchema,
+  AnthropicSignatureDeltaSchema,
 ]);
 
 const MessageStartEventSchema = z.object({
@@ -207,6 +226,7 @@ interface StreamState {
   messageStarted: boolean; // message_start emitted?
   nextBlockIndex: number; // monotonic content-block index allocator
   openBlocks: Set<number>; // started-but-not-stopped blocks (close guard)
+  thinkingBlockIndex: number | null; // thinking block index (lazily allocated)
   textBlockIndex: number | null; // text block index (lazily allocated)
   toolIndexToBlock: Map<number, ToolSlot>; // OpenAI tool index → block slot
   toolNameMap: ReturnType<typeof createAnthropicToolNameMap>;
@@ -219,6 +239,7 @@ function createState(): StreamState {
     messageStarted: false,
     nextBlockIndex: 0,
     openBlocks: new Set(),
+    thinkingBlockIndex: null,
     textBlockIndex: null,
     toolIndexToBlock: new Map(),
     toolNameMap: createAnthropicToolNameMap(),
@@ -271,6 +292,10 @@ function inputJSONDeltaEvent(index: number, partial: string): AnthropicSSEEvent 
   };
 }
 
+function thinkingDeltaEvent(index: number, thinking: string): AnthropicSSEEvent {
+  return { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking } };
+}
+
 function messageDeltaEvent(state: StreamState): AnthropicSSEEvent {
   const stop = mapStopReason(state.finishReason ?? "");
   const usage: AnthropicUsage = mapUsage(state.usage ?? {});
@@ -314,6 +339,21 @@ export async function* convertOpenAIStreamToAnthropic(
 
     const choice = chunk.choices?.[0];
     const delta = choice?.delta;
+
+    // —— reasoning: lazily open a thinking block (BEFORE the text block, since
+    // reasoning streams ahead of the answer), then stream thinking_delta. ——
+    if (delta?.reasoning_content) {
+      if (state.thinkingBlockIndex === null) {
+        const i = allocBlock(state);
+        state.thinkingBlockIndex = i;
+        yield {
+          type: "content_block_start",
+          index: i,
+          content_block: { type: "thinking", thinking: "" },
+        };
+      }
+      yield thinkingDeltaEvent(state.thinkingBlockIndex, delta.reasoning_content);
+    }
 
     // —— text: lazily open the text block, then stream text_delta. ——
     if (delta?.content) {
@@ -572,6 +612,24 @@ export async function* convertAnthropicStreamToIR(
             yield { ...base(), choices: [{ index: 0, delta: { role: "assistant" } }] };
           }
           yield { ...base(), choices: [{ index: 0, delta: { content: delta.text } }] };
+        } else if (delta.type === "thinking_delta") {
+          // Reasoning text streams ahead of the answer (DeepSeek/o-series shape).
+          yield {
+            ...base(),
+            choices: [{ index: 0, delta: { reasoning_content: delta.thinking } }],
+          };
+        } else if (delta.type === "signature_delta") {
+          // The (terminal) signature of the thinking block — carried as a structured
+          // thinking_block so a downstream consumer can reconstruct a signed block.
+          yield {
+            ...base(),
+            choices: [
+              {
+                index: 0,
+                delta: { thinking_blocks: [{ type: "thinking", signature: delta.signature }] },
+              },
+            ],
+          };
         } else if (delta.type === "input_json_delta") {
           const tool = blockToTool.get(event.index);
           const openaiIndex = tool?.openaiIndex ?? 0;

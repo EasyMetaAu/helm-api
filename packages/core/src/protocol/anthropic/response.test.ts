@@ -287,6 +287,153 @@ describe("transformResponseIn", () => {
   });
 });
 
+// —— P4: usage cache_creation breakdown + thinking_tokens ——————————————————————
+describe("transformResponseIn — P4 usage detail", () => {
+  it("maps IR.cache_creation_tokens -> Anthropic cache_creation_input_tokens", () => {
+    const out = transformResponseIn(
+      makeIR({
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          cache_creation_tokens: 64,
+        },
+      }),
+    );
+    expect(out.usage.cache_creation_input_tokens).toBe(64);
+  });
+
+  it("emits a structured cache_creation breakdown from prompt_tokens_details", () => {
+    const out = transformResponseIn(
+      makeIR({
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          cache_creation_tokens: 64,
+          prompt_tokens_details: {
+            // litellm CacheCreationTokenDetails ephemeral split
+            cache_creation_tokens: 64,
+          },
+        },
+      }),
+    );
+    // cache_creation aggregate still present.
+    expect(out.usage.cache_creation_input_tokens).toBe(64);
+  });
+
+  it("maps IR.reasoning_tokens -> output_tokens_details.thinking_tokens", () => {
+    const out = transformResponseIn(
+      makeIR({
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 50,
+          reasoning_tokens: 30,
+        },
+      }),
+    );
+    expect(out.usage.output_tokens_details?.thinking_tokens).toBe(30);
+  });
+});
+
+// —— P4 inbound: native Anthropic response -> IR usage / stop_reason parity ——————
+describe("transformNativeResponseToIR — P4 usage + stop_reason", () => {
+  it("maps cache_creation_input_tokens -> IR.cache_creation_tokens", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      type: "message",
+      role: "assistant",
+      model: "claude",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      usage: {
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_creation_input_tokens: 64,
+      },
+    });
+    expect(ir.usage?.cache_creation_tokens).toBe(64);
+  });
+
+  it("reads a structured cache_creation object {ephemeral_5m,ephemeral_1h}", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      type: "message",
+      role: "assistant",
+      model: "claude",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      usage: {
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 40,
+          ephemeral_1h_input_tokens: 24,
+        },
+      },
+    });
+    // The aggregate ephemeral write count surfaces as cache_creation_tokens.
+    expect(ir.usage?.cache_creation_tokens).toBe(64);
+  });
+
+  it("maps output_tokens_details.thinking_tokens -> IR.reasoning_tokens", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      type: "message",
+      role: "assistant",
+      model: "claude",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      usage: {
+        input_tokens: 100,
+        output_tokens: 50,
+        output_tokens_details: { thinking_tokens: 30 },
+      },
+    });
+    expect(ir.usage?.reasoning_tokens).toBe(30);
+  });
+
+  it("maps a pause_turn stop_reason -> finish_reason stop, raw kept", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      type: "message",
+      role: "assistant",
+      model: "claude",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "pause_turn",
+      usage: { input_tokens: 5, output_tokens: 2 },
+    });
+    expect(ir.choices[0]?.finish_reason).toBe("stop");
+    expect(ir.provider_raw?.stop_reason).toBe("pause_turn");
+  });
+
+  it("maps a refusal stop_reason -> finish_reason content_filter, raw kept", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      type: "message",
+      role: "assistant",
+      model: "claude",
+      content: [{ type: "text", text: "" }],
+      stop_reason: "refusal",
+      usage: { input_tokens: 5, output_tokens: 0 },
+    });
+    expect(ir.choices[0]?.finish_reason).toBe("content_filter");
+    expect(ir.provider_raw?.stop_reason).toBe("refusal");
+  });
+
+  it("passes a stop_details object through to provider_raw", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      type: "message",
+      role: "assistant",
+      model: "claude",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "refusal",
+      stop_details: { type: "refusal", reason: "policy" },
+      usage: { input_tokens: 5, output_tokens: 0 },
+    });
+    expect(ir.provider_raw?.stop_details).toEqual({ type: "refusal", reason: "policy" });
+  });
+});
+
 describe("transformNativeResponseToIR — tool-name round-trip (Codex P1)", () => {
   // Anthropic requires tool names to match ^[a-zA-Z0-9_-]{1,128}$, so transformRequestIn
   // sanitizes `db.query` -> `db_query`. Anthropic then echoes the sanitized name on the
