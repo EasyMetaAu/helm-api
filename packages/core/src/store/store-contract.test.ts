@@ -164,7 +164,6 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         prefix: "helm_live_ab12",
         accountId: "acct",
         role: "user",
-        maxLane: "balanced",
         allowedLanes: ["economy", "balanced"],
         allowCustomModel: true,
       });
@@ -175,7 +174,6 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         prefix: "helm_live_ab12",
         account_id: "acct",
         role: "user",
-        max_lane: "balanced",
         allowed_lanes: ["economy", "balanced"],
         allow_custom_model: true,
         disabled: false,
@@ -204,12 +202,12 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         prefix: "helm_live_a",
         accountId: "acct",
         role: "user",
-        maxLane: "balanced",
+        allowedLanes: ["economy", "balanced"],
       });
       await ctx.stores.keys.disable("k1");
       const got = await ctx.stores.keys.getByHash("h1");
       expect(got?.disabled).toBe(true);
-      expect(got?.max_lane).toBe("balanced");
+      expect(got?.allowed_lanes).toEqual(["economy", "balanced"]);
     });
 
     it("disable on a missing key rejects (not silently)", async () => {
@@ -304,7 +302,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(got?.rate_limit_tpm).toBeNull();
     });
 
-    it("updateKey edits caps (max_lane / allowed_lanes / allow_custom_model) and clears with null", async () => {
+    it("updateKey edits caps (allowed_lanes / allow_custom_model) and clears with null", async () => {
       ctx = await make();
       await ctx.stores.keys.createKey({
         keyId: "k1",
@@ -314,19 +312,16 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         role: "user",
       });
       await ctx.stores.keys.updateKey("k1", {
-        maxLane: "balanced",
         allowedLanes: ["economy", "balanced"],
         allowCustomModel: true,
       });
       let got = await ctx.stores.keys.getByHash("h1");
-      expect(got?.max_lane).toBe("balanced");
       expect(got?.allowed_lanes).toEqual(["economy", "balanced"]);
       expect(got?.allow_custom_model).toBe(true);
       expect(got?.role).toBe("user"); // never rewritten by updateKey
-      // null clears the caps back to "no cap"; an omitted field is left untouched.
-      await ctx.stores.keys.updateKey("k1", { maxLane: null, allowedLanes: null });
+      // null clears the whitelist back to "no cap"; an omitted field is left untouched.
+      await ctx.stores.keys.updateKey("k1", { allowedLanes: null });
       got = await ctx.stores.keys.getByHash("h1");
-      expect(got?.max_lane).toBeNull();
       expect(got?.allowed_lanes).toBeNull();
       expect(got?.allow_custom_model).toBe(true);
     });

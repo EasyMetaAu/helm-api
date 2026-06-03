@@ -87,7 +87,7 @@
       <h1 class="page-title">{$t('API Keys')}</h1>
       <p class="section-desc">
         {$t(
-          'An API key authenticates a client and can cap the top lane it is allowed to reach. Keys are stored as a hash plus a short display prefix — the full key is shown only once, at creation.',
+          'An API key authenticates a client and can be restricted to a specific set of lanes. Keys are stored as a hash plus a short display prefix — the full key is shown only once, at creation.',
         )}
       </p>
     </div>
@@ -145,7 +145,6 @@
                 {/if}
               </td>
               <td class="px-3 py-2 text-ink-muted">
-                <div>{$t('Max lane')}: {key.max_lane ?? $t('No cap')}</div>
                 <div>{$t('Allowed lanes')}: {key.allowed_lanes?.join(', ') || $t('No cap')}</div>
                 <div>{$t('Custom model')}: {key.allow_custom_model ? $t('yes') : $t('no')}</div>
               </td>

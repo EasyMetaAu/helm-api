@@ -13,7 +13,6 @@ function fullKey() {
     prefix: "helm_live_ab12",
     account_id: "acct_default",
     role: "root",
-    max_lane: null,
     allowed_lanes: null,
     allow_custom_model: false,
     disabled: false,
@@ -27,8 +26,8 @@ describe("ApiKeyRecordSchema", () => {
     expect(ApiKeyRecordSchema.safeParse(fullKey()).success).toBe(true);
   });
 
-  it("accepts optional caps as null and as values", () => {
-    const withCaps = { ...fullKey(), max_lane: "balanced", allowed_lanes: ["economy", "balanced"] };
+  it("accepts the allowed-lanes whitelist as null and as values", () => {
+    const withCaps = { ...fullKey(), allowed_lanes: ["economy", "balanced"] };
     expect(ApiKeyRecordSchema.safeParse(withCaps).success).toBe(true);
   });
 
@@ -131,16 +130,14 @@ describe("UpdateKeyRequestSchema", () => {
     expect(UpdateKeyRequestSchema.safeParse({}).success).toBe(true);
   });
 
-  it("accepts editable caps: max_lane / allowed_lanes / allow_custom_model", () => {
-    expect(UpdateKeyRequestSchema.safeParse({ max_lane: "balanced" }).success).toBe(true);
+  it("accepts editable caps: allowed_lanes / allow_custom_model", () => {
     expect(
       UpdateKeyRequestSchema.safeParse({ allowed_lanes: ["economy", "balanced"] }).success,
     ).toBe(true);
     expect(UpdateKeyRequestSchema.safeParse({ allow_custom_model: true }).success).toBe(true);
   });
 
-  it("accepts null to clear a cap (max_lane / allowed_lanes)", () => {
-    expect(UpdateKeyRequestSchema.safeParse({ max_lane: null }).success).toBe(true);
+  it("accepts null to clear the allowed-lanes whitelist", () => {
     expect(UpdateKeyRequestSchema.safeParse({ allowed_lanes: null }).success).toBe(true);
   });
 
@@ -148,11 +145,17 @@ describe("UpdateKeyRequestSchema", () => {
     expect(UpdateKeyRequestSchema.safeParse({ role: "root" }).success).toBe(false);
   });
 
+  it("rejects the retired max_lane cap (strict — no longer a per-key field)", () => {
+    expect(UpdateKeyRequestSchema.safeParse({ max_lane: "balanced" }).success).toBe(false);
+    expect(CreateKeyRequestSchema.safeParse({ role: "user", max_lane: "balanced" }).success).toBe(
+      false,
+    );
+  });
+
   it("rejects unknown fields and invalid values (fail-closed)", () => {
     expect(UpdateKeyRequestSchema.safeParse({ nope: 1 }).success).toBe(false);
     expect(UpdateKeyRequestSchema.safeParse({ rate_limit_tpm: -1 }).success).toBe(false);
     expect(UpdateKeyRequestSchema.safeParse({ rate_limit_rpm: 2.5 }).success).toBe(false);
-    expect(UpdateKeyRequestSchema.safeParse({ max_lane: "" }).success).toBe(false);
     expect(UpdateKeyRequestSchema.safeParse({ allowed_lanes: [""] }).success).toBe(false);
   });
 });

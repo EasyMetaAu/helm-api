@@ -249,6 +249,19 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // Retire the per-key max_lane CEILING. Lanes are parallel, not a strict
+    // hierarchy (only economy<balanced<premium rank; coding/json/vision are
+    // unranked task lanes), so the ceiling was ill-defined for most lanes and
+    // fully subsumed by the allowed_lanes whitelist (to "cap at balanced" just
+    // whitelist economy+balanced). DROP COLUMN is supported by the bundled SQLite
+    // (3.35+); the column is unindexed so the drop is a metadata-only rewrite. v1
+    // ships untouched — this is a forward step (any stored ceilings are discarded).
+    version: 10,
+    sql: `
+      ALTER TABLE api_keys DROP COLUMN max_lane;
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

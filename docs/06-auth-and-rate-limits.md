@@ -74,8 +74,7 @@ The stored record (`ApiKeyRecord`, single source of truth in
   prefix: string,           // e.g. helm_live_ab12 — display/debug only
   account_id: string,
   role: "root" | "user",
-  max_lane: string | null,        // cap routing at this lane
-  allowed_lanes: string[] | null, // allow-list of lanes
+  allowed_lanes: string[] | null, // allow-list of lanes (empty/null = any lane)
   allow_custom_model: boolean,    // may the client pin a model directly?
   disabled: boolean,
   rate_limit_rpm: number | null,  // per-key override; null = inherit default
@@ -87,8 +86,10 @@ The stored record (`ApiKeyRecord`, single source of truth in
   field, so the persistence layer is structurally unable to store a plaintext
   key. The plaintext of a freshly minted key is returned to the admin caller
   exactly once and then discarded.
-- **Per-key caps.** `max_lane`, `allowed_lanes`, and `allow_custom_model`
-  constrain how a key may route (resolved into `AuthIdentity.caps`).
+- **Per-key caps.** `allowed_lanes` and `allow_custom_model` constrain how a key
+  may route (resolved into `AuthIdentity.caps`). (A per-key `max_lane` ceiling was
+  retired — lanes are parallel, not a strict hierarchy, so the whitelist subsumes
+  it; see implementation-notes.md.)
 - **Rotation & revocation never mutate in place.** `KeyStore.disable` is a soft
   revoke (`disabled = true`); rotate by minting a new key and disabling the old
   one. `updateRateLimit` is a partial PATCH that touches only the rate-limit

@@ -211,6 +211,16 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // Retire the per-key max_lane CEILING — pg mirror of the sqlite v10 migration
+    // (different ledger, same logical change). Lanes are parallel, not a strict
+    // hierarchy, so the ceiling was fully subsumed by the allowed_lanes whitelist.
+    // IF EXISTS keeps the drop idempotent across hand-patched databases.
+    version: 9,
+    sql: `
+      ALTER TABLE api_keys DROP COLUMN IF EXISTS max_lane;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

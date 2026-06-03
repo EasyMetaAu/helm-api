@@ -205,7 +205,6 @@ export interface KeySummary {
   key_id: string;
   prefix: string;
   role: "root" | "user";
-  max_lane: string | null;
   allowed_lanes: string[] | null;
   allow_custom_model: boolean;
   disabled: boolean;

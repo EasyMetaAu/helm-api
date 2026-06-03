@@ -26,7 +26,6 @@ class InMemoryKeyStore implements KeyStore {
       prefix: input.prefix,
       account_id: input.accountId,
       role: input.role,
-      max_lane: input.maxLane ?? null,
       allowed_lanes: input.allowedLanes ?? null,
       allow_custom_model: input.allowCustomModel ?? false,
       disabled: false,
@@ -53,7 +52,6 @@ class InMemoryKeyStore implements KeyStore {
     const r = this.byId.get(keyId);
     if (!r) return;
     const next = { ...r };
-    if (patch.maxLane !== undefined) next.max_lane = patch.maxLane;
     if (patch.allowedLanes !== undefined) next.allowed_lanes = patch.allowedLanes;
     if (patch.allowCustomModel !== undefined) next.allow_custom_model = patch.allowCustomModel;
     if (patch.rateLimitRpm !== undefined) next.rate_limit_rpm = patch.rateLimitRpm;
@@ -179,7 +177,6 @@ describe("port type contracts", () => {
       | "prefix"
       | "accountId"
       | "role"
-      | "maxLane"
       | "allowedLanes"
       | "allowCustomModel"
       | "rateLimitRpm"

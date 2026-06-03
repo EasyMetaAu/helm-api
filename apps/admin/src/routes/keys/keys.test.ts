@@ -21,7 +21,6 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     key_id: keyId,
     prefix: `helm_live_${keyId}`,
     role: 'user',
-    max_lane: null,
     allowed_lanes: null,
     allow_custom_model: false,
     disabled: false,
@@ -46,7 +45,7 @@ describe('keys page', () => {
 
   it('lists each key by prefix/role/caps/status and shows NO plaintext-like secret', () => {
     renderPage([
-      key('k1', { prefix: 'helm_live_ab12', role: 'user', max_lane: 'balanced' }),
+      key('k1', { prefix: 'helm_live_ab12', role: 'user', allowed_lanes: ['balanced'] }),
       key('k2', { prefix: 'helm_live_cd34', disabled: true }),
     ]);
     expect(screen.getAllByTestId('key-row')).toHaveLength(2);
@@ -118,10 +117,7 @@ describe('keys page', () => {
     // The key value/prefix and role are shown read-only — never an editable field.
     expect(within(dialog).getByText('helm_live_k1')).toBeInTheDocument();
     expect(within(dialog).queryByLabelText(/role/i)).not.toBeInTheDocument();
-    // Edit caps: set a max-lane cap, whitelist a lane, set an explicit RPM.
-    await fireEvent.change(within(dialog).getByLabelText(/max lane/i), {
-      target: { value: 'balanced' },
-    });
+    // Edit caps: whitelist a lane, set an explicit RPM.
     await fireEvent.click(within(dialog).getByLabelText('economy'));
     await fireEvent.input(within(dialog).getByLabelText(/requests per minute/i), {
       target: { value: '120' },
@@ -129,7 +125,6 @@ describe('keys page', () => {
     await fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
     await waitFor(() =>
       expect(updateKey).toHaveBeenCalledWith('k1', {
-        max_lane: 'balanced',
         allowed_lanes: ['economy'],
         allow_custom_model: false,
         rate_limit_rpm: 120,

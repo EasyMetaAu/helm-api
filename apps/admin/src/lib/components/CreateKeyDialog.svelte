@@ -26,7 +26,8 @@
   type Role = 'root' | 'user';
 
   let role = $state<Role>('user');
-  let maxLane = $state<string>('');
+  // Allowed-lanes whitelist as a Set for cheap toggle/lookup; [] => no cap (null).
+  let allowedLanes = $state<Set<string>>(new Set());
   let allowCustomModel = $state<boolean>(false);
   // Per-key rate limits. null = leave unset → inherit the system default; a number
   // (0 = unlimited) sets an explicit override. A number input binds to number|null
@@ -36,6 +37,13 @@
 
   let error = $state<string | null>(null);
   let creating = $state<boolean>(false);
+
+  function toggleLane(lane: string, checked: boolean): void {
+    const next = new Set(allowedLanes);
+    if (checked) next.add(lane);
+    else next.delete(lane);
+    allowedLanes = next;
+  }
   // The minted plaintext + its key_id live ONLY in this transient state and are
   // cleared on close. While set, the form is replaced by the one-time reveal.
   let revealed = $state<CreatedKey | null>(null);
@@ -48,7 +56,7 @@
       role,
       allow_custom_model: allowCustomModel,
     };
-    if (maxLane) input.max_lane = maxLane;
+    if (allowedLanes.size > 0) input.allowed_lanes = [...allowedLanes];
     // Send a rate limit only when the operator set one; blank => inherit default.
     // `!= null` also catches the `undefined` Svelte 5 gives an emptied number input.
     if (rpmInput != null) input.rate_limit_rpm = rpmInput;
@@ -86,8 +94,7 @@
         // response. NEVER a slice of the plaintext.
         prefix: revealed.prefix,
         role,
-        max_lane: maxLane || null,
-        allowed_lanes: null,
+        allowed_lanes: allowedLanes.size > 0 ? [...allowedLanes] : null,
         allow_custom_model: allowCustomModel,
         disabled: false,
         rate_limit_rpm: rpmInput ?? null,
@@ -156,20 +163,26 @@
         {/if}
       </label>
 
-      <label class="flex flex-col gap-1 text-sm">
-        <span class="field-label">{$t('Max lane (cap)')}</span>
-        <select bind:value={maxLane} aria-label={$t('max lane')} class="select">
-          <option value="">{$t('— no cap —')}</option>
+      <fieldset class="flex flex-col gap-1 text-sm">
+        <legend class="field-label">{$t('Allowed lanes')}</legend>
+        <div class="flex flex-wrap gap-3">
           {#each lanes as lane (lane)}
-            <option value={lane}>{lane}</option>
+            <label class="flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={allowedLanes.has(lane)}
+                onchange={(e) => toggleLane(lane, e.currentTarget.checked)}
+              />
+              <span class="text-ink-body">{lane}</span>
+            </label>
           {/each}
-        </select>
+        </div>
         <span class="field-help"
           >{$t(
-            'The highest lane this key may reach. Requests asking for a richer lane are capped down to this one. Leave unset for no cap.',
+            'Restrict this key to a specific set of lanes. Leave all unchecked to allow any lane (no whitelist).',
           )}</span
         >
-      </label>
+      </fieldset>
 
       <label class="checkbox-field">
         <input

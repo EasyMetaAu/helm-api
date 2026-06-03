@@ -17,7 +17,6 @@ function summaryRow(
     key_id: keyId,
     prefix: `helm_live_${keyId}`,
     role: 'user',
-    max_lane: null,
     allowed_lanes: null,
     allow_custom_model: false,
     disabled: false,
@@ -69,7 +68,7 @@ describe('keys api client', () => {
 
     const result = await createKey({
       role: 'user',
-      max_lane: 'balanced',
+      allowed_lanes: ['economy', 'balanced'],
       allow_custom_model: false,
     });
 
@@ -78,7 +77,7 @@ describe('keys api client', () => {
     expect(init.method).toBe('POST');
     const body = JSON.parse(init.body as string);
     expect(body.role).toBe('user');
-    expect(body.max_lane).toBe('balanced');
+    expect(body.allowed_lanes).toEqual(['economy', 'balanced']);
     expect(body.allow_custom_model).toBe(false);
     expect(result.key_id).toBe('key_1');
     expect(result.plaintext).toBe('helm_live_SECRET_ONCE');
@@ -141,7 +140,6 @@ describe('keys api client', () => {
       new Response(JSON.stringify({ key_id: 'key_1' }), { status: 200 }),
     );
     await updateKey('key_1', {
-      max_lane: 'balanced',
       allowed_lanes: ['economy', 'balanced'],
       allow_custom_model: true,
       rate_limit_rpm: null,
@@ -151,21 +149,19 @@ describe('keys api client', () => {
     expect(url).toBe('/admin/api/keys/key_1');
     expect(init.method).toBe('PATCH');
     const body = JSON.parse(init.body as string);
-    expect(body.max_lane).toBe('balanced');
     expect(body.allowed_lanes).toEqual(['economy', 'balanced']);
     expect(body.allow_custom_model).toBe(true);
     expect(body.rate_limit_rpm).toBeNull(); // explicit null = clear
     expect(body.rate_limit_tpm).toBe(100);
   });
 
-  it('updateKey forwards null to clear a cap (max_lane / allowed_lanes)', async () => {
+  it('updateKey forwards null to clear the allowed-lanes whitelist', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ key_id: 'key_1' }), { status: 200 }),
     );
-    await updateKey('key_1', { max_lane: null, allowed_lanes: null });
+    await updateKey('key_1', { allowed_lanes: null });
     const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     const body = JSON.parse(init.body as string);
-    expect(body.max_lane).toBeNull();
     expect(body.allowed_lanes).toBeNull();
   });
 

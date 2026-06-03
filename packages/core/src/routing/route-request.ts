@@ -123,12 +123,12 @@ export interface RouteOptions {
    *  UI key column. PREFIX ONLY — never the plaintext key (principle 7). The
    *  gateway threads it from the auth identity; null/undefined when unknown. */
   keyPrefix?: string | null;
-  /** Per-key lane caps from the API key's auth record (docs/04). The OUTER,
-   *  non-negotiable bound: applied LAST (after policy caps) so they win even over
-   *  a policy use_lane pin. Each sub-field null = unconstrained on that axis;
-   *  keyCaps itself undefined = no-op (existing callers unaffected). The gateway
-   *  handlers thread it from the auth identity (Wave 2). */
-  keyCaps?: { maxLane: string | null; allowedLanes: string[] | null };
+  /** Per-key lane whitelist from the API key's auth record (docs/04). The OUTER,
+   *  non-negotiable bound: applied LAST (after policy caps) so it wins even over
+   *  a policy use_lane pin. allowedLanes null = unconstrained; keyCaps itself
+   *  undefined = no-op (existing callers unaffected). The gateway handlers thread
+   *  it from the auth identity. */
+  keyCaps?: { allowedLanes: string[] | null };
 }
 
 // Fail-open classification default (principle 3 + 5): a degraded classifier
@@ -300,7 +300,7 @@ async function plan(
       : applyCaps(policyCappedLane, {
           matched_policy_id: null,
           use_lane: null,
-          max_lane: opts.keyCaps.maxLane,
+          max_lane: null,
           allowed_lanes: opts.keyCaps.allowedLanes,
           reason: "key caps",
         });

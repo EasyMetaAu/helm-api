@@ -25,7 +25,6 @@ export const apiKeys = pgTable("api_keys", {
   prefix: text("prefix").notNull(), // helm_live_xxxx — display/debug only
   accountId: text("account_id").notNull(),
   role: text("role").notNull(), // 'root' | 'user'
-  maxLane: text("max_lane"), // optional cap lane
   allowedLanes: jsonb("allowed_lanes").$type<string[]>(), // native jsonb array
   allowCustomModel: boolean("allow_custom_model").notNull().default(false),
   disabled: boolean("disabled").notNull().default(false),

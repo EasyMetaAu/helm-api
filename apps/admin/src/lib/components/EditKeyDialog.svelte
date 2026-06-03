@@ -25,8 +25,7 @@
   // Pre-fill the form from the current key — captured ONCE at mount. The dialog is
   // remounted per edit ({#if editingKey} in the page), so untracking the initial
   // read is correct (matches the +page.svelte `data.keys` pattern) and the form
-  // stays the editing buffer thereafter. `''` for max lane means "no cap".
-  let maxLane = $state<string>(untrack(() => key.max_lane ?? ''));
+  // stays the editing buffer thereafter.
   // Allowed-lanes whitelist as a Set for cheap toggle/lookup; [] => no cap (null).
   let allowedLanes = $state<Set<string>>(untrack(() => new Set(key.allowed_lanes ?? [])));
   let allowCustomModel = $state<boolean>(untrack(() => key.allow_custom_model));
@@ -52,7 +51,6 @@
     // `?? null` also catches the `undefined` Svelte 5 gives an emptied number input.
     const selected = [...allowedLanes];
     const patch: UpdateKeyInput = {
-      max_lane: maxLane || null,
       allowed_lanes: selected.length > 0 ? selected : null,
       allow_custom_model: allowCustomModel,
       rate_limit_rpm: rpmInput ?? null,
@@ -63,7 +61,6 @@
       // Project the updated redacted view (role/prefix carried over unchanged).
       onsaved({
         ...key,
-        max_lane: patch.max_lane ?? null,
         allowed_lanes: patch.allowed_lanes ?? null,
         allow_custom_model: allowCustomModel,
         rate_limit_rpm: patch.rate_limit_rpm ?? null,
@@ -102,21 +99,6 @@
         )}</span
       >
     </div>
-
-    <label class="flex flex-col gap-1 text-sm">
-      <span class="field-label">{$t('Max lane (cap)')}</span>
-      <select bind:value={maxLane} aria-label={$t('max lane')} class="select">
-        <option value="">{$t('— no cap —')}</option>
-        {#each lanes as lane (lane)}
-          <option value={lane}>{lane}</option>
-        {/each}
-      </select>
-      <span class="field-help"
-        >{$t(
-          'The highest lane this key may reach. Requests asking for a richer lane are capped down to this one. Leave unset for no cap.',
-        )}</span
-      >
-    </label>
 
     <fieldset class="flex flex-col gap-1 text-sm">
       <legend class="field-label">{$t('Allowed lanes')}</legend>

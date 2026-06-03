@@ -22,7 +22,6 @@ function keyRecord(over: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     prefix: "helm_live_ab",
     account_id: "acct",
     role: "user",
-    max_lane: null,
     allowed_lanes: null,
     allow_custom_model: false,
     disabled: false,
@@ -324,16 +323,16 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     expect(harness.execute).not.toHaveBeenCalled();
   });
 
-  it("threads per-key maxLane caps: an economy key routes a would-be-balanced request down to economy", async () => {
+  it("threads per-key lane whitelist: an economy-only key routes a would-be-balanced request down to economy", async () => {
     // No policies + default classification resolve to `balanced`; the key's
-    // max_lane:'economy' cap (the OUTER bound) must clamp the selected lane to
-    // economy end-to-end, so the executor's chain starts with economy's primary.
+    // allowed_lanes:['economy'] whitelist (the OUTER bound) must clamp the selected
+    // lane to economy end-to-end, so the executor's chain starts with economy's primary.
     const { deps: d, harness } = deps();
     harness.execute.mockResolvedValue({
       ...nonStreamOutcome({ ok: true }),
       final: { status: "ok", alias: "cheap_model", providerModel: "cheap" },
     });
-    const app = buildApp(d, { record: { max_lane: "economy" } });
+    const app = buildApp(d, { record: { allowed_lanes: ["economy"] } });
 
     const res = await app.request("/v1/chat/completions", {
       method: "POST",

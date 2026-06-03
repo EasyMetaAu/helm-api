@@ -99,13 +99,12 @@ describe("createMessagesPipeline — failure surfaces", () => {
     const identity: MessagesIdentity = {
       keyId: "k1",
       accountId: "acct",
-      caps: { allowCustomModel: false, maxLane: "economy", allowedLanes: null },
+      caps: { allowCustomModel: false, allowedLanes: ["economy"] },
     };
     await pipeline.run(irOf(), identity, new AbortController().signal);
     expect(sawOpts).not.toBeNull();
     expect((sawOpts as RouteOptions | null)?.keyCaps).toEqual({
-      maxLane: "economy",
-      allowedLanes: null,
+      allowedLanes: ["economy"],
     });
   });
 
@@ -118,7 +117,6 @@ describe("createMessagesPipeline — failure surfaces", () => {
     const pipeline = createMessagesPipeline(route);
     await pipeline.run(irOf(), IDENTITY, new AbortController().signal);
     expect((sawOpts as RouteOptions | null)?.keyCaps).toEqual({
-      maxLane: null,
       allowedLanes: null,
     });
   });
