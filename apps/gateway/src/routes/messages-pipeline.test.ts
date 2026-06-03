@@ -47,6 +47,86 @@ function errorResult(stream: AsyncIterable<string> | null = null): ExecutionResu
   };
 }
 
+// A minimal OpenAI SSE text stream (one content delta + a stop frame). The
+// pipeline parses these via parseOpenAISSE and feeds the chosen state machine.
+function sseTextStream(): AsyncIterable<string> {
+  const frames = [
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "hi" } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
+    "data: [DONE]\n\n",
+  ];
+  return (async function* () {
+    for (const f of frames) yield f;
+  })();
+}
+
+function streamOkResult(stream: AsyncIterable<string>): ExecutionResult {
+  return {
+    decision: { lane: { selected_lane: "balanced" } } as unknown as ExecutionResult["decision"],
+    final: { status: "ok", alias: "x" },
+    body: null,
+    stream,
+    error: null,
+  };
+}
+
+async function drain(it: AsyncIterable<Record<string, unknown>>): Promise<string[]> {
+  const out: string[] = [];
+  for await (const ev of it) out.push(String(ev.type));
+  return out;
+}
+
+describe("createMessagesPipeline — streamIR protocol branch", () => {
+  it("default (anthropic_messages) yields Anthropic message_* events", async () => {
+    const route: RouteFn = async () => streamOkResult(sseTextStream());
+    const pipeline = createMessagesPipeline(route);
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const types = await drain(run.streamIR());
+    expect(types[0]).toBe("message_start");
+    expect(types).toContain("message_stop");
+    expect(types.some((t) => t.startsWith("response."))).toBe(false);
+  });
+
+  it("openai_responses yields Responses response.* events", async () => {
+    const route: RouteFn = async () => streamOkResult(sseTextStream());
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const types = await drain(run.streamIR());
+    expect(types[0]).toBe("response.created");
+    expect(types.at(-1)).toBe("response.completed");
+    expect(types.some((t) => t.startsWith("message_"))).toBe(false);
+  });
+
+  it("parses OpenAI SSE with CRLF separators and multi-data lines", async () => {
+    const splitJson = JSON.stringify({
+      id: "chatcmpl-x",
+      model: "gpt-x",
+      choices: [{ index: 0, delta: { content: "hi" } }],
+    });
+    const finishJson = JSON.stringify({
+      id: "chatcmpl-x",
+      model: "gpt-x",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    });
+    const stream = (async function* () {
+      yield `data: ${splitJson.slice(0, 20)}\r\n`;
+      yield `data: ${splitJson.slice(20)}\r\n\r\n`;
+      yield `event: ignored\r\n`;
+      yield `data: ${finishJson}\r\n\r\n`;
+    })();
+    const route: RouteFn = async () => streamOkResult(stream);
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const events = [];
+    for await (const ev of run.streamIR()) events.push(ev);
+    const delta = events.find((e) => e.type === "response.output_text.delta") as
+      | { delta?: string }
+      | undefined;
+    expect(delta?.delta).toBe("hi");
+    expect(events.at(-1)?.type).toBe("response.completed");
+  });
+});
+
 describe("createMessagesPipeline — failure surfaces", () => {
   it("collect() throws a structured PipelineError when routing fails (no empty 200)", async () => {
     const route: RouteFn = async () => errorResult();

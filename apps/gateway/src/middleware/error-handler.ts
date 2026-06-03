@@ -30,6 +30,24 @@ function isClientDisconnect(err: unknown): boolean {
   return false;
 }
 
+// Build the OpenAI error envelope (the `{ error: { message, type, code,
+// trace_id } }` body) for a given class/message/trace. Extracted so the SSE
+// streaming paths — which cannot throw to onError once the stream has started —
+// can write the SAME envelope as a terminal `event: error` frame. The HTTP status
+// is returned alongside for the non-stream (throw → onError) path.
+export function openAIErrorEnvelope(args: {
+  error_class: ErrorClass;
+  message: string;
+  trace_id: string;
+}): {
+  status: number;
+  body: { error: { message: string; type: string; code: string; trace_id: string } };
+} {
+  // Delegate to the canonical core mapping (SINGLE SOURCE OF TRUTH) so the SSE
+  // terminal error frame and the non-stream onError envelope cannot drift.
+  return makeOpenAIError(args);
+}
+
 function asHelmError(err: unknown): HelmError | null {
   // Unwrap the throwable wrapper, or accept a bare HelmError-shaped object.
   const candidate = err instanceof HelmHttpError ? err.helm : err;

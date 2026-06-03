@@ -292,6 +292,33 @@ protocol + gateway routes 406 tests green; typecheck clean; `pnpm lint` exit 0.
 
 ---
 
+## 2026-06-01 · `/v1/responses` SSE streaming (docs/05, `protocol.responses`, Principle 8)
+
+**Context**: `/v1/responses` previously hard-rejected `stream:true` with a 400 (no Responses SSE transformer). This adds the native `response.*` event stream — the SECOND IR→SSE state machine alongside the Anthropic one — reusing the shared pipeline and branching by the stamped surface protocol.
+
+**What was added**:
+- `packages/core/src/protocol/responses-stream.ts` — `convertOpenAIStreamToResponses` (the state machine) + `synthesizeResponsesSSEFromJSON` (cache-hit / non-stream upstream) + `ResponsesSSEEventSchema` (Zod discriminated union, the output alphabet). Exported from `packages/core/src/index.ts`.
+- `messages-pipeline.ts` — `streamIR()` now branches on `protocol`: `openai_responses` → Responses machine, else Anthropic (unchanged). Same post-`parseOpenAISSE` `source` feed, same memory-accumulation wrapper; only the output alphabet differs.
+- `apps/gateway/src/routes/responses.ts` — removed the `stream:true` reject; added a `streamSSE` branch + `isAbort` + `transformStreamOut` on the transformer dep. Error frames use the **OpenAI envelope written directly into the stream** (cannot `throw`→onError once the stream has started).
+- `apps/gateway/src/middleware/error-handler.ts` — extracted `openAIErrorEnvelope({error_class,message,trace_id})` so the SSE error path and `handleError` build the identical `{error:{message,type,code,trace_id}}` body (DRY).
+- `server.ts` — wired `transformStreamOut` for the responses transformer.
+
+**Open-question decisions (from the issue plan)**:
+1. **`sequence_number` starts at `0`**, single global counter, +1 per emitted event (`response.created` consumes index 0).
+2. **`response.in_progress` is always emitted** (one cheap event; avoids stalling SDK parsers that wait for it). `response.created` + `response.in_progress` fire UNCONDITIONALLY before the chunk loop, so an empty/zero-chunk stream still yields a legal `created…completed` envelope (the Anthropic machine gates `message_start` inside the loop → no analogue here).
+3. **Response `id`**: the synthesizer seeds the generator with the IR `id` so a cache-hit's `created`/`completed` match the non-stream body; the live stream synthesizes a stable `resp_*` id reused across the whole stream (created == completed).
+4. **Usage** is buffered and flushed ONLY on `response.completed` (never mid-stream, pit #2), projected as `{input_tokens, output_tokens}` (the same shape the unexported `toResponsesResponse` produces — inlined, NOT a reference to a non-existent `mapRes_usage`). Terminal `status` comes from the exported `mapResponsesStatus`, so streaming/non-streaming statuses cannot diverge (`length`→`incomplete`, else `completed`). If the upstream omits usage, `completed` carries `0`s.
+5. **Reasoning streaming is deferred** — the non-stream path already emits a reasoning item; streamed `reasoning.*` events are a follow-up.
+6. **Payload capture out of scope** — SSE bodies are not written to `request_payloads` in this issue.
+
+**Why NOT reuse `streaming.ts`'s `createStreamState`/`safeClose`**: the Anthropic machine carries its own local `StreamState`; for stylistic consistency the Responses machine does the same, with idempotent close enforced by a local `openItems: Set<number>` (each `output_item.done` and the terminal `completed` emitted at most once). Tool items defer `output_item.added` until id/name are settled and skip empty husks — same discipline as `anthropic/stream.ts`.
+
+**Build note**: `@helm/core`'s `exports` resolves `.` to `./dist/index.js` outside the `development` condition, and the e2e webServer (`tsx`) hits that path — so the gateway/e2e need `pnpm --filter @helm/core build` after changing core exports. Unit tests (vitest, source) don't.
+
+**Test results (local)**: typecheck clean, lint clean (warnings pre-exist), unit `1348 passed`. e2e: the two new Responses SSE specs pass; `38 passed / 1 failed` overall — the single failure is the unrelated `admin.spec.ts` pagination test (seeded-row count from reused non-CI data dir, untouched by this change).
+
+---
+
 ## 2026-06-01 · Pagination + error/role filters for the admin requests list (docs/07, Principle 1)
 
 **Context**: `/admin/requests` fetched a hardcoded `queryRecent(100)` and rendered all rows at once; the UI had dead cursor/"Load more" plumbing that never fired. No way to page past 100 requests or isolate errors / a time window — unusable for real debugging. Added numbered pagination (time DESC) plus Date-range / Status / Decided-by / Lane / Model filters, all applied at the SQL layer so totals stay correct.

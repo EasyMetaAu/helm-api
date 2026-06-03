@@ -66,10 +66,35 @@ function captureRoute(body: unknown): { route: RouteFn; seen: InternalRequest[] 
   return { route, seen };
 }
 
+// A route that returns an OpenAI SSE stream (one assistant text delta + stop). The
+// pipeline parses it and feeds the Responses state machine; the streamed assistant
+// text is what observeOutbound must persist in the `finally` of streamIR.
+function streamingRoute(text: string): { route: RouteFn; seen: InternalRequest[] } {
+  const seen: InternalRequest[] = [];
+  const frames = [
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
+    "data: [DONE]\n\n",
+  ];
+  const route: RouteFn = async (req: InternalRequest, _opts: RouteOptions) => {
+    seen.push(req);
+    return {
+      decision: { lane: { selected_lane: "balanced" } },
+      final: { status: "ok" },
+      body: null,
+      stream: (async function* () {
+        for (const f of frames) yield f;
+      })(),
+      error: null,
+    } as unknown as ExecutionResult;
+  };
+  return { route, seen };
+}
+
 // Real pipeline (with the memory dep injected) behind the Responses route, plus a
 // pass-through transformer that keeps `messages`/`metadata` so the route can stamp
 // the memory scope and the pipeline can read it back — observe runs end to end.
-function buildApp(opts: { route: RouteFn; memory?: { observe: ObserveDeps } }) {
+function buildApp(opts: { route: RouteFn; memory?: { observe: ObserveDeps }; stream?: boolean }) {
   const pipeline = createMessagesPipeline(opts.route, "openai_responses", opts.memory);
   const deps: ResponsesRouteDeps = {
     auth: { resolve: async () => ({ keyId: "k1", accountId: "acct" }) },
@@ -79,7 +104,7 @@ function buildApp(opts: { route: RouteFn; memory?: { observe: ObserveDeps } }) {
         return {
           model: typeof n.model === "string" ? n.model : "auto",
           messages: [{ role: "user", content: "hi" }],
-          stream: false,
+          stream: opts.stream === true,
           metadata: {},
         };
       },
@@ -89,6 +114,10 @@ function buildApp(opts: { route: RouteFn; memory?: { observe: ObserveDeps } }) {
         status: "completed",
         output: [],
         __ir: ir,
+      }),
+      transformStreamOut: (event) => ({
+        event: (event as { type: string }).type,
+        data: JSON.stringify(event),
       }),
     },
     pipeline,
@@ -122,6 +151,29 @@ describe("gateway.responses.memory — observe reaches /v1/responses", () => {
     // Inbound user message + outbound assistant message both persisted to the thread.
     expect(messages.some((m) => m.threadId === "thread-1" && m.role === "user")).toBe(true);
     expect(messages.some((m) => m.role === "assistant" && m.content === "hello")).toBe(true);
+  });
+
+  it("STREAMING: persists the streamed assistant turn via observeOutbound in finally", async () => {
+    const { store, threads, messages } = makeFakeStore();
+    const { route } = streamingRoute("hello world");
+    const app = buildApp({ route, memory: { observe: observeDeps(store) }, stream: true });
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { ...AUTH, ...MEM_HEADERS },
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    // Drain the stream so the streamIR `finally` (observeOutbound) actually runs.
+    const text = await res.text();
+    expect(text).toContain("response.completed");
+    // The streamed assistant text was accumulated and persisted (the FIRST time the
+    // Responses surface exercises the streaming observe path).
+    expect(threads[0]?.id).toBe("thread-1");
+    expect(messages.some((m) => m.threadId === "thread-1" && m.role === "user")).toBe(true);
+    expect(messages.some((m) => m.role === "assistant" && m.content === "hello world")).toBe(true);
   });
 
   it("off-mode (no memory headers) is a pure no-op: zero store touches", async () => {
