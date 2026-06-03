@@ -393,7 +393,8 @@ export function createMessagesPipeline(
               const events =
                 protocol === "openai_responses"
                   ? convertOpenAIStreamToResponses(source as AsyncIterable<never>, {
-                      model: typeof ir.model === "string" && ir.model.length > 0 ? ir.model : "auto",
+                      model:
+                        typeof ir.model === "string" && ir.model.length > 0 ? ir.model : "auto",
                     })
                   : convertOpenAIStreamToAnthropic(source as AsyncIterable<never>);
               for await (const ev of events) {

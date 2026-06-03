@@ -49,7 +49,7 @@ export interface ResponsesRouteDeps {
     transformResponseOut(ir: unknown): unknown;
     /** ONE IR stream event → ONE Responses SSE frame (event/data pair). The
      *  pipeline already produced the response.* events; this only serializes. */
-    transformStreamOut(event: { type: string; [k: string]: unknown }): {
+    transformStreamOut(event: Record<string, unknown>): {
       event: string;
       data: string;
     };

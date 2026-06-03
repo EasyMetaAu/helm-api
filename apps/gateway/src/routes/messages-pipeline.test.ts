@@ -70,9 +70,9 @@ function streamOkResult(stream: AsyncIterable<string>): ExecutionResult {
   };
 }
 
-async function drain(it: AsyncIterable<{ type: string }>): Promise<string[]> {
+async function drain(it: AsyncIterable<Record<string, unknown>>): Promise<string[]> {
   const out: string[] = [];
-  for await (const ev of it) out.push(ev.type);
+  for await (const ev of it) out.push(String(ev.type));
   return out;
 }
 
