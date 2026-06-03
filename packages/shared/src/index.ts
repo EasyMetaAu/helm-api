@@ -166,6 +166,8 @@ export {
   CreateKeyRequestSchema,
   type KeyRole,
   KeyRoleSchema,
+  type OverBudgetBehavior,
+  OverBudgetBehaviorSchema,
   type UpdateKeyRequest,
   UpdateKeyRequestSchema,
 } from "./key/schema.js";

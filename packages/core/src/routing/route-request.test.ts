@@ -340,6 +340,29 @@ describe("routeRequest — orchestration", () => {
     expect(plan.selected_lane).toBe("balanced");
   });
 
+  it("keyCaps.maxLane degrades an over-budget request down to the cheaper lane", async () => {
+    // A policy pins `premium`; the key is over budget so the gateway sets the
+    // dynamic degrade ceiling maxLane=economy for this request.
+    const d = deps({
+      classify: vi.fn(async () => classification({ task_type: "chat" })),
+      policies: { policies: [{ id: "pin-premium", match: {}, use_lane: "premium" }] },
+    });
+    await routeRequest(req(), d, { keyCaps: { allowedLanes: null, maxLane: "economy" } });
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+  });
+
+  it("keyCaps.maxLane null is a no-op (within budget => requested lane preserved)", async () => {
+    const d = deps({
+      classify: vi.fn(async () => classification({ task_type: "chat" })),
+      policies: { policies: [{ id: "pin-premium", match: {}, use_lane: "premium" }] },
+    });
+    await routeRequest(req(), d, { keyCaps: { allowedLanes: null, maxLane: null } });
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("premium");
+  });
+
   it("keyCaps undefined is a no-op (existing callers unaffected)", async () => {
     const d = deps();
     await routeRequest(req(), d);

@@ -28,6 +28,31 @@ await keyStore.createKey({
   role: "root",
 });
 
+// Two per-key usage-budget keys (docs/06, e2e.budget). Each caps requests at 1 over
+// the window: the FIRST request is served at its full lane (cold bucket = full),
+// the SECOND is over budget. The `degrade` key then drops to the economy lane (keep
+// serving); the `reject` key returns a 429. Request-count needs no upstream usage,
+// so this is fully deterministic against the mock.
+await keyStore.createKey({
+  keyId: "k_budget_degrade",
+  hash: hashKey("helm_live_e2e_budget_degrade"),
+  prefix: "helm_live_bd",
+  accountId: "acct_e2e",
+  role: "user",
+  budgetRequests: 1,
+  overBudgetBehavior: "degrade",
+  degradeLane: "economy",
+});
+await keyStore.createKey({
+  keyId: "k_budget_reject",
+  hash: hashKey("helm_live_e2e_budget_reject"),
+  prefix: "helm_live_br",
+  accountId: "acct_e2e",
+  role: "user",
+  budgetRequests: 1,
+  overBudgetBehavior: "reject",
+});
+
 // Seed one full decision record for the admin requests views (e2e.admin). It is
 // a pre-built, redacted DecisionRecord — NOT a live upstream call — so the admin
 // request list/detail have a deterministic row with a trace_id, a classified

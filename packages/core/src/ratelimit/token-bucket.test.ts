@@ -19,6 +19,18 @@ describe("token-bucket refill", () => {
     const afterFar = refill(empty, 2, 10 * MIN);
     expect(afterFar.tokens).toBe(2);
   });
+
+  it("honors a custom window: capacity refills over windowMs, not 60s", () => {
+    // capacity 100 over a 1-day window => 100/86_400_000 tokens per ms.
+    const DAY = 86_400_000;
+    const empty: BucketState = { tokens: 0, lastRefillMs: 0 };
+    const halfDay = refill(empty, 100, DAY / 2, DAY);
+    expect(halfDay.tokens).toBeCloseTo(50, 5);
+    const full = refill(empty, 100, DAY, DAY);
+    expect(full.tokens).toBe(100);
+    // The default window stays 60s when windowMs is omitted (back-compat).
+    expect(refill(empty, 60, 60_000).tokens).toBe(60);
+  });
 });
 
 describe("token-bucket tryConsume", () => {
@@ -44,6 +56,15 @@ describe("token-bucket tryConsume", () => {
     const r = tryConsume(empty, 2, 1, 30_000);
     expect(r.ok).toBe(true);
     expect(r.remaining).toBe(0); // exactly one refilled and consumed
+  });
+
+  it("consumes against a custom window (budget-style rolling window)", () => {
+    const DAY = 86_400_000;
+    // Budget of 10 USD over a day; spend 4 from a full bucket.
+    const full: BucketState = { tokens: 10, lastRefillMs: 0 };
+    const r = tryConsume(full, 10, 4, 0, DAY);
+    expect(r.ok).toBe(true);
+    expect(r.state.tokens).toBeCloseTo(6, 5);
   });
 
   it("resetSeconds is the time to regain one whole unit", () => {

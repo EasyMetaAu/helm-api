@@ -32,6 +32,12 @@ function keyRecord(over: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     disabled: false,
     rate_limit_rpm: null,
     rate_limit_tpm: null,
+    budget_requests: null,
+    budget_tokens: null,
+    budget_spend_usd: null,
+    budget_window_seconds: null,
+    over_budget_behavior: "degrade",
+    degrade_lane: null,
     ...over,
   };
 }

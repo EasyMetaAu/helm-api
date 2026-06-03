@@ -221,6 +221,29 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys DROP COLUMN IF EXISTS max_lane;
     `,
   },
+  {
+    // Per-key USAGE BUDGETS (docs/06) — pg mirror of the sqlite v11 migration. Six
+    // budget config columns on api_keys (IF NOT EXISTS = idempotent) + the
+    // usage_budget_buckets counter table. Spend is DOUBLE PRECISION; tokens double
+    // precision (may go negative — soft cap settled post-served). key_id only.
+    version: 10,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS budget_requests INTEGER;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS budget_tokens INTEGER;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS budget_spend_usd DOUBLE PRECISION;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS budget_window_seconds INTEGER;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS over_budget_behavior TEXT NOT NULL DEFAULT 'degrade';
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS degrade_lane TEXT;
+
+      CREATE TABLE IF NOT EXISTS usage_budget_buckets (
+        key_id TEXT NOT NULL,
+        dim TEXT NOT NULL,
+        tokens DOUBLE PRECISION NOT NULL,
+        last_refill_ms BIGINT NOT NULL,
+        PRIMARY KEY (key_id, dim)
+      );
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

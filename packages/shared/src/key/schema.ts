@@ -6,6 +6,11 @@ import { z } from "zod";
 
 export const KeyRoleSchema = z.enum(["root", "user"]);
 
+// What to do when a key exceeds one of its usage budgets (docs/06 "usage budgets").
+// `degrade` (default): keep serving but force the request down to a cheaper lane —
+// bounds cost without interrupting service. `reject`: hard 429 once over budget.
+export const OverBudgetBehaviorSchema = z.enum(["degrade", "reject"]);
+
 export const ApiKeyRecordSchema = z.object({
   key_id: z.string().min(1),
   hash: z.string().min(1), // sha256(plaintext) hex; never the plaintext
@@ -22,9 +27,26 @@ export const ApiKeyRecordSchema = z.object({
   // so the storage shape is explicit, mirroring the other per-key caps above.
   rate_limit_rpm: z.number().int().nonnegative().nullable(),
   rate_limit_tpm: z.number().int().nonnegative().nullable(),
+  // Per-key usage budgets (docs/06 "usage budgets"). Each cap is OPTIONAL: a number
+  // is the ceiling consumed over the rolling window, null = no cap for that
+  // dimension. Unlike rate limits (which REJECT), exceeding a budget DEGRADES the
+  // request to `degrade_lane` by default (keep serving, bound cost). These are
+  // `.default()`ed (not just required-nullable like the rate limits) so legacy key
+  // rows predating the migration — and unrelated record fixtures — still parse;
+  // the keystores populate them explicitly from the columns.
+  budget_requests: z.number().int().nonnegative().nullable().default(null),
+  budget_tokens: z.number().int().nonnegative().nullable().default(null),
+  budget_spend_usd: z.number().nonnegative().nullable().default(null),
+  // Rolling window the budgets are measured over (seconds). null = the system
+  // default window. Continuous token-bucket refill, no hard reset.
+  budget_window_seconds: z.number().int().positive().nullable().default(null),
+  over_budget_behavior: OverBudgetBehaviorSchema.default("degrade"),
+  // Lane to fall back to when degrading. null = `economy` (the cheapest ranked lane).
+  degrade_lane: z.string().min(1).nullable().default(null),
 });
 
 export type KeyRole = z.infer<typeof KeyRoleSchema>;
+export type OverBudgetBehavior = z.infer<typeof OverBudgetBehaviorSchema>;
 export type ApiKeyRecord = z.infer<typeof ApiKeyRecordSchema>;
 
 // Admin-facing create-key request (docs/06 Key management). The plaintext is minted
@@ -41,6 +63,14 @@ export const CreateKeyRequestSchema = z
     // a negative/non-int value).
     rate_limit_rpm: z.number().int().nonnegative().optional(),
     rate_limit_tpm: z.number().int().nonnegative().optional(),
+    // Optional per-key usage budgets at mint time (docs/06). Omitted => no cap for
+    // that dimension. over_budget_behavior omitted => stored default ("degrade").
+    budget_requests: z.number().int().nonnegative().optional(),
+    budget_tokens: z.number().int().nonnegative().optional(),
+    budget_spend_usd: z.number().nonnegative().optional(),
+    budget_window_seconds: z.number().int().positive().optional(),
+    over_budget_behavior: OverBudgetBehaviorSchema.optional(),
+    degrade_lane: z.string().min(1).optional(),
   })
   .strict();
 
@@ -62,6 +92,14 @@ export const UpdateKeyRequestSchema = z
     allow_custom_model: z.boolean().optional(),
     rate_limit_rpm: z.number().int().nonnegative().nullable().optional(),
     rate_limit_tpm: z.number().int().nonnegative().nullable().optional(),
+    // Budget edits (docs/06). Omit = leave unchanged; null = clear the cap (no cap).
+    // over_budget_behavior has no null (it always resolves to degrade|reject).
+    budget_requests: z.number().int().nonnegative().nullable().optional(),
+    budget_tokens: z.number().int().nonnegative().nullable().optional(),
+    budget_spend_usd: z.number().nonnegative().nullable().optional(),
+    budget_window_seconds: z.number().int().positive().nullable().optional(),
+    over_budget_behavior: OverBudgetBehaviorSchema.optional(),
+    degrade_lane: z.string().min(1).nullable().optional(),
   })
   .strict();
 

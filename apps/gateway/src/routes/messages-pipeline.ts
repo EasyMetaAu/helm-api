@@ -1,5 +1,8 @@
 import {
   type AnthropicSSEEvent,
+  type BudgetCaps,
+  type BudgetCheckResult,
+  type BudgetProbe,
   convertOpenAIStreamToAnthropic,
   convertOpenAIStreamToResponses,
   type ExecutionResult,
@@ -17,6 +20,30 @@ import {
 } from "@helm/core";
 import type { InternalRequest, Protocol } from "@helm/shared";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
+import {
+  backfillCompletionCost,
+  type StreamUsage,
+  tokensFromUsage,
+  usageFromBody,
+} from "./payload-capture.js";
+
+// Per-key usage-budget wiring shared by ALL pipeline faces (anthropic /v1/messages,
+// openai /v1/responses, gemini :generateContent). The pipeline is the single place
+// these three converge, so the budget CHECK (pre-route degrade/reject) + SETTLE
+// (post-served) + streamed-cost backfill live here ONCE (docs/06). Absent = no
+// budgets (existing tests unchanged). costOf prices the streamed usage tail so the
+// spend dimension settles the real cost on the streaming path too.
+export interface PipelineBudgetDeps {
+  gate: { check(probe: BudgetProbe): Promise<BudgetCheckResult> };
+  settle: (
+    keyId: string,
+    caps: BudgetCaps,
+    usage: { requests: number; tokens: number; costUsd: number | null },
+    nowMs: number,
+  ) => Promise<void>;
+  costOf?: (alias: string, usage: StreamUsage) => number | null;
+  now: () => number;
+}
 
 // The loose IR the route hands us: the inbound transformer's IRRequest, augmented
 // with the `metadata` bag the route stamps the trace_id into. We treat it as an
@@ -278,6 +305,9 @@ export function createMessagesPipeline(
   // fail-open (a store failure never surfaces, principle 3). Serves BOTH the
   // /v1/messages and /v1/responses surfaces (they share this pipeline).
   memory?: { observe: ObserveDeps },
+  // Per-key usage budgets (docs/06). Absent = no budgets. Serves all three
+  // pipeline faces at once (they share this pipeline).
+  budget?: PipelineBudgetDeps,
 ): {
   run(ir: PipelineIR, identity: MessagesIdentity, signal: AbortSignal): Promise<PipelineRunResult>;
 } {
@@ -307,9 +337,30 @@ export function createMessagesPipeline(
       }
 
       const caps = identity.caps as
-        | { allowCustomModel?: unknown; allowedLanes?: unknown }
+        | { allowCustomModel?: unknown; allowedLanes?: unknown; budget?: BudgetCaps }
         | undefined;
       const allowCustomModel = caps?.allowCustomModel === true;
+
+      // Pre-route usage-budget gate (docs/06), shared across all three pipeline
+      // faces. FAIL-CLOSED: a peek store error propagates out of run() → the route
+      // surfaces a 5xx, never a silent pass. Over budget → reject (a PipelineError
+      // the route maps to a protocol-correct 429) or degrade (cap the lane via
+      // keyCaps.maxLane below).
+      let degradeLane: string | null = null;
+      const budgetCaps = caps?.budget;
+      if (budget !== undefined && budgetCaps !== undefined) {
+        const check = await budget.gate.check({
+          keyId: internal.api_key_id,
+          caps: budgetCaps,
+          nowMs: budget.now(),
+        });
+        if (check.overBudget) {
+          if (check.behavior === "reject") {
+            throw new PipelineError("rate_limited", "usage budget exceeded", traceId);
+          }
+          degradeLane = check.degradeLane;
+        }
+      }
       // Display prefix only (never the plaintext key, principle 7) for the Debug
       // UI key column; null when this identity carries none.
       const keyPrefix = typeof identity.keyPrefix === "string" ? identity.keyPrefix : null;
@@ -320,9 +371,29 @@ export function createMessagesPipeline(
       // null = unconstrained; an identity with no caps yields {null} (no-op).
       const keyCaps = {
         allowedLanes: Array.isArray(caps?.allowedLanes) ? (caps.allowedLanes as string[]) : null,
+        // Over-budget degrade ceiling for this request (docs/06); null = no degrade.
+        maxLane: degradeLane,
       };
 
       const result = await route(internal, { allowCustomModel, keyPrefix, keyCaps }, signal);
+
+      // Post-served usage-budget settle (docs/06), fail-OPEN. Charges the SETTLED
+      // total_usd (never recomputed) + served tokens + 1 request. Shared helper for
+      // both accessors; a settle failure is swallowed (never breaks a served
+      // response). No-op when budgets are unwired or the key has no caps.
+      const settleBudget = async (tokens: number): Promise<void> => {
+        if (budget === undefined || budgetCaps === undefined) return;
+        try {
+          await budget.settle(
+            internal.api_key_id,
+            budgetCaps,
+            { requests: 1, tokens, costUsd: result.decision.cost_breakdown.total_usd },
+            budget.now(),
+          );
+        } catch {
+          /* fail-open: a budget settle failure never breaks a served request */
+        }
+      };
 
       // Routing returned a structured failure WITHOUT throwing (final.status:
       // "error"). Capture it so the failure surfaces through whichever accessor
@@ -349,6 +420,9 @@ export function createMessagesPipeline(
           if (memory !== undefined) {
             await observeOutbound(memory.observe, memoryScope, outboundFromIR(irResponse));
           }
+          // Settle the budget on the served (non-stream) response: cost is already
+          // on the decision; tokens from the OpenAI body's usage.
+          await settleBudget(tokensFromUsage(usageFromBody(result.body)));
           return irResponse;
         },
         async *streamIR(): AsyncIterable<Record<string, unknown>> {
@@ -361,16 +435,18 @@ export function createMessagesPipeline(
           // events forwarded downstream (principle 8). observeOutbound runs in a
           // finally so a client disconnect mid-stream still records what arrived.
           const assistant = { text: "" };
+          // Capture the trailing OpenAI usage chunk (include_usage) so the budget
+          // settle + streamed-cost backfill below have the real token/cost — the
+          // upstream is OpenAI SSE on EVERY face, so this one extractor serves all.
+          let lastUsage: StreamUsage | null = null;
           const chunks = parseOpenAISSE(result.stream);
-          const source =
-            memory === undefined
-              ? chunks
-              : (async function* () {
-                  for await (const ch of chunks) {
-                    accumulateAssistantText(assistant, ch);
-                    yield ch;
-                  }
-                })();
+          const source = (async function* () {
+            for await (const ch of chunks) {
+              if (memory !== undefined) accumulateAssistantText(assistant, ch);
+              if (ch.usage && typeof ch.usage === "object") lastUsage = ch.usage as StreamUsage;
+              yield ch;
+            }
+          })();
           try {
             // Outbound stream mapping is chosen by the pipeline's stamped protocol
             // (principle 5: surfaces never conflate). Gemini consumes the SAME
@@ -407,6 +483,26 @@ export function createMessagesPipeline(
                 responseMessages: [{ role: "assistant", content: assistant.text }],
                 toolResults: [],
               });
+            }
+            // Streamed-cost backfill + budget settle (docs/06). Zero-touch when
+            // budgets are unwired/unmetered. The pipeline faces never settled
+            // streamed cost before — price the usage tail at the served alias so the
+            // decision's total_usd is real, THEN settle the budget. Fail-open.
+            if (budget !== undefined && budgetCaps !== undefined) {
+              const finalAlias =
+                result.decision.final.status === "ok" ? result.decision.final.model_alias : null;
+              if (lastUsage && finalAlias && budget.costOf) {
+                try {
+                  backfillCompletionCost(
+                    result.decision,
+                    finalAlias,
+                    budget.costOf(finalAlias, lastUsage),
+                  );
+                } catch {
+                  /* fail-open: leave cost null on any pricing miss */
+                }
+              }
+              await settleBudget(tokensFromUsage(lastUsage));
             }
           }
         },

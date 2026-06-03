@@ -48,8 +48,11 @@ Verified against the code and `implementation-notes.md`:
 - **Memory inject phase.** The `observe` phase is wired; the `inject` phase
   (`assembleInjectedContext`) and the background Observer/Reflector jobs are not.
   See [08 · Memory Middleware](08-memory-middleware.md).
-- **Fuller quota / rate-limit features.** Per-key RPM/TPM limiting ships
-  (disabled by default); full quota / billing / credit accounting is deferred. See
+- **Fuller quota / rate-limit features.** Per-key RPM/TPM limiting **and** per-key
+  usage budgets (requests / tokens / spend over a rolling window, with
+  degrade-to-cheaper-lane or reject) ship — metered **per API key**. Helm is an
+  internal/self-hosted gateway with no account/customer billing subject, so
+  **account-level credit accounting is out of scope** (not merely deferred). See
   [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
 - **Agentic Signals feedback layer.** The store ports and the redacted
   `RoutingSignal` shape exist, but nothing reads signals back into routing yet.

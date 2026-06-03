@@ -37,6 +37,17 @@
     return v === 0 ? $t('Unlimited') : String(v);
   }
 
+  // Compact per-key usage-budget summary for the list (docs/06). Shows only the
+  // dimensions that have a cap; empty = no budget. The over-budget behavior
+  // (degrade lane / reject) is appended so operators see the cost-control posture.
+  function budgetParts(key: ApiKeyView): string[] {
+    const parts: string[] = [];
+    if (key.budget_requests !== null) parts.push(`${key.budget_requests} req`);
+    if (key.budget_tokens !== null) parts.push(`${key.budget_tokens} tok`);
+    if (key.budget_spend_usd !== null) parts.push(`$${key.budget_spend_usd}`);
+    return parts;
+  }
+
   function startEdit(key: ApiKeyView): void {
     error = null;
     editingKey = key;
@@ -123,6 +134,7 @@
             <th class="px-3 py-2">{$t('Role')}</th>
             <th class="px-3 py-2">{$t('Caps')}</th>
             <th class="px-3 py-2">{$t('Rate limit')}</th>
+            <th class="px-3 py-2">{$t('Budget')}</th>
             <th class="px-3 py-2">{$t('Status')}</th>
             <th class="px-3 py-2"></th>
           </tr>
@@ -151,6 +163,18 @@
               <td class="px-3 py-2 text-ink-muted">
                 <div>{$t('RPM')}: {limitLabel(key.rate_limit_rpm)}</div>
                 <div>{$t('TPM')}: {limitLabel(key.rate_limit_tpm)}</div>
+              </td>
+              <td class="px-3 py-2 text-ink-muted">
+                {#if budgetParts(key).length > 0}
+                  <div>{budgetParts(key).join(' · ')}</div>
+                  <div class="text-xs">
+                    {key.over_budget_behavior === 'reject'
+                      ? $t('reject')
+                      : `→ ${key.degrade_lane ?? 'economy'}`}
+                  </div>
+                {:else}
+                  <span>{$t('None')}</span>
+                {/if}
               </td>
               <td class="px-3 py-2">
                 {#if key.disabled}

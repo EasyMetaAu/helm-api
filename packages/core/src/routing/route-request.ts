@@ -123,12 +123,18 @@ export interface RouteOptions {
    *  UI key column. PREFIX ONLY — never the plaintext key (principle 7). The
    *  gateway threads it from the auth identity; null/undefined when unknown. */
   keyPrefix?: string | null;
-  /** Per-key lane whitelist from the API key's auth record (docs/04). The OUTER,
+  /** Per-key lane caps from the API key's auth record (docs/04). The OUTER,
    *  non-negotiable bound: applied LAST (after policy caps) so it wins even over
    *  a policy use_lane pin. allowedLanes null = unconstrained; keyCaps itself
    *  undefined = no-op (existing callers unaffected). The gateway handlers thread
-   *  it from the auth identity. */
-  keyCaps?: { allowedLanes: string[] | null };
+   *  it from the auth identity.
+   *
+   *  `maxLane` is the DYNAMIC degrade ceiling (docs/06 "usage budgets"): null in
+   *  the normal case, but set to the key's degrade lane (e.g. "economy") for THIS
+   *  request when the key is over its usage budget — capping a richer request down
+   *  to a cheaper lane instead of rejecting it. Reuses the same lane-ranking cap as
+   *  a policy max_lane (an unranked task lane is conservatively capped). */
+  keyCaps?: { allowedLanes: string[] | null; maxLane?: string | null };
 }
 
 // Fail-open classification default (principle 3 + 5): a degraded classifier
@@ -300,7 +306,8 @@ async function plan(
       : applyCaps(policyCappedLane, {
           matched_policy_id: null,
           use_lane: null,
-          max_lane: null,
+          // Over-budget degrade ceiling for this request (docs/06); null = no cap.
+          max_lane: opts.keyCaps.maxLane ?? null,
           allowed_lanes: opts.keyCaps.allowedLanes,
           reason: "key caps",
         });

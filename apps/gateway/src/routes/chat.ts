@@ -1,4 +1,7 @@
 import type {
+  BudgetCaps,
+  BudgetCheckResult,
+  BudgetProbe,
   ChatCompletionRequest,
   DecisionRecord,
   ExecutionResult,
@@ -25,6 +28,8 @@ import {
   captureEnabled,
   type PayloadCaptureDeps,
   persistPayload,
+  tokensFromUsage,
+  usageFromBody,
   usageFromSSE,
 } from "./payload-capture.js";
 
@@ -68,6 +73,19 @@ export interface ChatRouteDeps {
    *  (a store failure never 5xx's, principle 3). `observe` is the process-wide
    *  ObserveDeps built once in the composition root. */
   memory?: { observe: ObserveDeps };
+  /** Per-key usage-budget wiring (docs/06). Optional — absent = no budgets (existing
+   *  tests unchanged). `budgetGate.check` runs BEFORE route (fail-CLOSED: a store
+   *  error propagates → 5xx); over budget either rejects (429) or yields a degrade
+   *  lane fed into keyCaps.maxLane. `settleBudget` runs post-served inside the SAME
+   *  fail-open envelope as telemetry persist (a settle failure is logged, never
+   *  5xx's a served request). */
+  budgetGate?: { check(probe: BudgetProbe): Promise<BudgetCheckResult> };
+  settleBudget?: (
+    keyId: string,
+    caps: BudgetCaps,
+    usage: { requests: number; tokens: number; costUsd: number | null },
+    nowMs: number,
+  ) => Promise<void>;
 }
 
 // Minimal identity shape the adapter reads (subset of middleware/auth's
@@ -79,7 +97,7 @@ interface ChatIdentity {
   accountId: string;
   orgId: string | null;
   userId: string | null;
-  caps: { allowCustomModel: boolean; allowedLanes?: string[] | null };
+  caps: { allowCustomModel: boolean; allowedLanes?: string[] | null; budget?: BudgetCaps };
 }
 
 // Map the OpenAI chat request body to the normalized InternalRequest (Protocol
@@ -303,6 +321,49 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       }
     };
 
+    // Post-served usage-budget settle (docs/06). Fail-OPEN — mirrors `persist`: a
+    // settle failure is logged, never 5xx's a served request nor breaks a stream.
+    // Self-gates: no-op when no budget dep is wired. Charges the SETTLED total_usd
+    // (never recomputed) + actual served tokens + 1 request.
+    const settle = async (decision: DecisionRecord, tokens: number) => {
+      if (deps.settleBudget === undefined || identity.caps?.budget === undefined) return;
+      try {
+        await deps.settleBudget(
+          identity.keyId,
+          identity.caps.budget,
+          { requests: 1, tokens, costUsd: decision.cost_breakdown.total_usd },
+          deps.now(),
+        );
+      } catch {
+        c.get("logger").log("error", "budget.settle_failed", { trace_id: traceId });
+      }
+    };
+
+    // Pre-route usage-budget gate (docs/06). FAIL-CLOSED: a store-read error
+    // propagates (→ 5xx), never a silent pass. Over budget → reject (429) or
+    // degrade: cap THIS request's lane to the key's degrade lane via keyCaps.maxLane.
+    let degradeLane: string | null = null;
+    if (deps.budgetGate !== undefined && identity.caps?.budget !== undefined) {
+      const check = await deps.budgetGate.check({
+        keyId: identity.keyId,
+        caps: identity.caps.budget,
+        nowMs: deps.now(),
+      });
+      if (check.overBudget) {
+        if (check.behavior === "reject") {
+          throw structuredError(
+            makeHelmError({
+              error_class: "rate_limited",
+              message: "usage budget exceeded",
+              trace_id: traceId,
+            }),
+            traceId,
+          );
+        }
+        degradeLane = check.degradeLane;
+      }
+    }
+
     // e2e-only classification overrides: honor `x-helm-eval` (Layer-2 toggle) and
     // `x-helm-rules-threshold` (raise the Layer-1 gate so the cascade reaches
     // eval) ONLY when the composition root opted in (HELM_E2E). Production leaves
@@ -344,6 +405,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         // unconstrained.
         keyCaps: {
           allowedLanes: identity.caps?.allowedLanes ?? null,
+          // Dynamic degrade ceiling: set only when the key is over budget AND its
+          // behavior is "degrade" (docs/06). null = no degrade for this request.
+          maxLane: degradeLane,
         },
       },
       c.req.raw.signal,
@@ -436,6 +500,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
           );
           await persist(result.decision);
+          // Usage-budget settle (streamed): runs HERE — after the usage tail
+          // backfilled the streamed cost — so the spend dimension settles the real
+          // total. Tokens come from the same usage tail. Fail-open.
+          await settle(result.decision, tokensFromUsage(usageFromSSE(rawSse)));
           // Memory observe (outbound, streamed): persist the reconstructed
           // assistant turn AFTER the bytes were forwarded. Fail-open inside core.
           if (deps.memory !== undefined) {
@@ -481,6 +549,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     if (deps.memory !== undefined) {
       await observeOutbound(deps.memory.observe, memoryScope, outboundFromOpenAIBody(result.body));
     }
+    // Usage-budget settle (non-stream, success): cost is already on the decision;
+    // tokens from the body's usage. Fail-open.
+    await settle(result.decision, tokensFromUsage(usageFromBody(result.body)));
     return c.json(result.body as Record<string, unknown>);
   });
 }

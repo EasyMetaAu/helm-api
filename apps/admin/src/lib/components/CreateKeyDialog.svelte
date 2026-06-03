@@ -34,6 +34,15 @@
   // (empty field => null), so no string parsing is needed.
   let rpmInput = $state<number | null>(null);
   let tpmInput = $state<number | null>(null);
+  // Per-key usage budgets (docs/06). null = no cap for that dimension. windowInput
+  // (seconds) sets the rolling window; blank => system default. behavior chooses
+  // degrade (drop to a cheaper lane) vs reject (429). degradeLane blank => economy.
+  let budgetRequestsInput = $state<number | null>(null);
+  let budgetTokensInput = $state<number | null>(null);
+  let budgetSpendInput = $state<number | null>(null);
+  let budgetWindowInput = $state<number | null>(null);
+  let overBudgetBehavior = $state<'degrade' | 'reject'>('degrade');
+  let degradeLaneInput = $state<string>('');
 
   let error = $state<string | null>(null);
   let creating = $state<boolean>(false);
@@ -61,6 +70,13 @@
     // `!= null` also catches the `undefined` Svelte 5 gives an emptied number input.
     if (rpmInput != null) input.rate_limit_rpm = rpmInput;
     if (tpmInput != null) input.rate_limit_tpm = tpmInput;
+    // Usage budgets: send only the dimensions the operator set (blank => no cap).
+    if (budgetRequestsInput != null) input.budget_requests = budgetRequestsInput;
+    if (budgetTokensInput != null) input.budget_tokens = budgetTokensInput;
+    if (budgetSpendInput != null) input.budget_spend_usd = budgetSpendInput;
+    if (budgetWindowInput != null) input.budget_window_seconds = budgetWindowInput;
+    input.over_budget_behavior = overBudgetBehavior;
+    if (degradeLaneInput.length > 0) input.degrade_lane = degradeLaneInput;
     try {
       revealed = await createKey(input);
     } catch (e) {
@@ -99,6 +115,12 @@
         disabled: false,
         rate_limit_rpm: rpmInput ?? null,
         rate_limit_tpm: tpmInput ?? null,
+        budget_requests: budgetRequestsInput ?? null,
+        budget_tokens: budgetTokensInput ?? null,
+        budget_spend_usd: budgetSpendInput ?? null,
+        budget_window_seconds: budgetWindowInput ?? null,
+        over_budget_behavior: overBudgetBehavior,
+        degrade_lane: degradeLaneInput.length > 0 ? degradeLaneInput : null,
       };
       oncreated(view);
     }
@@ -230,6 +252,83 @@
           'Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.',
         )}</span
       >
+
+      <fieldset class="flex flex-col gap-1 text-sm">
+        <legend class="field-label">{$t('Usage budgets')}</legend>
+        <div class="grid grid-cols-2 gap-3">
+          <label class="flex flex-col gap-1">
+            <span class="field-label">{$t('Max requests')}</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              aria-label={$t('Max requests')}
+              placeholder={$t('No cap')}
+              class="input"
+              bind:value={budgetRequestsInput}
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="field-label">{$t('Max tokens')}</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              aria-label={$t('Max tokens')}
+              placeholder={$t('No cap')}
+              class="input"
+              bind:value={budgetTokensInput}
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="field-label">{$t('Max spend (USD)')}</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              aria-label={$t('Max spend (USD)')}
+              placeholder={$t('No cap')}
+              class="input"
+              bind:value={budgetSpendInput}
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="field-label">{$t('Window (seconds)')}</span>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              aria-label={$t('Window (seconds)')}
+              placeholder={$t('Default')}
+              class="input"
+              bind:value={budgetWindowInput}
+            />
+          </label>
+        </div>
+        <label class="mt-1 flex flex-col gap-1">
+          <span class="field-label">{$t('When over budget')}</span>
+          <select bind:value={overBudgetBehavior} aria-label={$t('When over budget')} class="select">
+            <option value="degrade">{$t('Degrade to a cheaper lane')}</option>
+            <option value="reject">{$t('Reject (429)')}</option>
+          </select>
+        </label>
+        {#if overBudgetBehavior === 'degrade'}
+          <label class="mt-1 flex flex-col gap-1">
+            <span class="field-label">{$t('Degrade lane')}</span>
+            <select bind:value={degradeLaneInput} aria-label={$t('Degrade lane')} class="select">
+              <option value="">{$t('Default (economy)')}</option>
+              {#each lanes as lane (lane)}
+                <option value={lane}>{lane}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
+        <span class="field-help"
+          >{$t(
+            'Cap usage over a rolling window. Over budget, the key is degraded to a cheaper lane (cost-controlled, service continues) or rejected. Leave caps blank for no budget.',
+          )}</span
+        >
+      </fieldset>
     </div>
 
     <div class="mt-4 flex justify-end gap-2">

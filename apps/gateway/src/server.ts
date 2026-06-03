@@ -3,10 +3,12 @@ import { existsSync } from "node:fs";
 import {
   type AnthropicSSEEvent,
   anthropicTransformer,
+  type BudgetCaps,
   bootstrapRootKey,
   COPILOT_HEADERS,
   type ConfigStore,
   createAnthropicClient,
+  createBudgetGate,
   createCircuitBreaker,
   createCodexResponsesClient,
   createMemoryMomentumStore,
@@ -51,6 +53,7 @@ import {
   routeRequest,
   type StoreSet,
   saveRuntimeSettings,
+  settleBudget,
   startSignalScheduler,
   toRegistryProviders,
 } from "@helm/core";
@@ -855,6 +858,33 @@ export async function buildServer(
   // then keeps an honest "not measured" null, never a misleading 0.
   const costOf = (alias: string, usage: { prompt_tokens?: number; completion_tokens?: number }) =>
     resolveCostUsd(catalog.get(alias)?.pricing, { usage });
+
+  // Per-key usage budgets (docs/06). No global on/off — a key with no caps is a
+  // zero-touch fast path (the gate reads nothing). `defaultWindowSeconds` (30d)
+  // applies only when a key sets a cap but no window; `defaultDegradeLane` is the
+  // fallback when a key degrades without naming a target lane. The CHECK is
+  // fail-CLOSED (a peek error propagates → 5xx); SETTLE is fail-OPEN (the route
+  // swallows store failures). Shared by all four faces: chat reads the gate/settle
+  // directly; the three pipeline faces get them via `pipelineBudget`.
+  const budgetConfig = { defaultWindowSeconds: 2_592_000, defaultDegradeLane: "economy" };
+  const budgetGate = createBudgetGate({ store: store.budget, config: budgetConfig });
+  const settleKeyBudget = (
+    keyId: string,
+    caps: BudgetCaps,
+    usage: { requests: number; tokens: number; costUsd: number | null },
+    nowMs: number,
+  ): Promise<void> =>
+    settleBudget({ store: store.budget, config: budgetConfig }, keyId, caps, usage, nowMs);
+  // Budget deps the shared messages-pipeline (messages/responses/gemini) consumes:
+  // the gate, the settle closure, costOf (to price the streamed usage tail), and a
+  // clock. The streamed-cost backfill it does ALSO fills the decision's total_usd
+  // on these faces (which previously never settled streamed cost).
+  const pipelineBudget = {
+    gate: budgetGate,
+    settle: settleKeyBudget,
+    costOf,
+    now: () => Date.now(),
+  };
   // Three-layer cascade classify adapter: Layer-1 rules + Layer-2 eval (OFF by
   // default; per-request override threaded from the chat route) + Layer-3
   // balanced fail-open. The eval small-model is invoked via the same provider
@@ -955,6 +985,10 @@ export async function buildServer(
     capturePayloads: () => settings.capture_payloads,
     payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
     costOf,
+    // Per-key usage budgets (docs/06): the pre-route gate (degrade/reject) + the
+    // post-served settle, threaded from the composition root.
+    budgetGate,
+    settleBudget: settleKeyBudget,
     // e2e-only: allow the `x-helm-eval` header to toggle Layer-2 eval per request
     // so the eval cascade can be black-boxed without a config reload. Production
     // leaves HELM_E2E unset → eval stays config-driven (fail-closed, principle 2).
@@ -1075,7 +1109,12 @@ export async function buildServer(
   // Both Anthropic /v1/messages and OpenAI /v1/responses share this pipeline
   // shape; each gets the SAME observe deps so memory observe fires on every
   // surface (the pipeline self-gates on the scope it reads off ir.metadata).
-  const messagesPipeline = createMessagesPipeline(route, "anthropic_messages", { observe });
+  const messagesPipeline = createMessagesPipeline(
+    route,
+    "anthropic_messages",
+    { observe },
+    pipelineBudget,
+  );
   // Inject the SAME per-key limiter instance the chat surface uses so the
   // Anthropic /v1/messages handler can meter per-key AFTER its self-auth (closes
   // the rate-limit bypass on /v1/messages + /v1/responses). The Wave2 handlers
@@ -1107,6 +1146,16 @@ export async function buildServer(
             // /v1/messages + /v1/responses paths enforce per-key limits too, not
             // just the OpenAI chat middleware.
             rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+            // Per-key usage budgets (docs/06): carried so the pipeline's budget
+            // gate/settle enforce on these self-auth faces too.
+            budget: {
+              requests: record.budget_requests,
+              tokens: record.budget_tokens,
+              spendUsd: record.budget_spend_usd,
+              windowSeconds: record.budget_window_seconds,
+              behavior: record.over_budget_behavior,
+              degradeLane: record.degrade_lane,
+            },
           },
         };
       },
@@ -1147,7 +1196,12 @@ export async function buildServer(
   // pipeline stamped with the openai_responses protocol, and the Responses
   // transformer for IR↔native translation. Streaming (stream:true) emits the
   // native response.* SSE event sequence via the second IR→SSE state machine.
-  const responsesPipeline = createMessagesPipeline(route, "openai_responses", { observe });
+  const responsesPipeline = createMessagesPipeline(
+    route,
+    "openai_responses",
+    { observe },
+    pipelineBudget,
+  );
   registerResponsesRoute(app, {
     // Same per-key limiter, same cast rationale as the messages route above —
     // closes the rate-limit bypass on /v1/responses.
@@ -1171,6 +1225,16 @@ export async function buildServer(
             // /v1/messages + /v1/responses paths enforce per-key limits too, not
             // just the OpenAI chat middleware.
             rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+            // Per-key usage budgets (docs/06): carried so the pipeline's budget
+            // gate/settle enforce on these self-auth faces too.
+            budget: {
+              requests: record.budget_requests,
+              tokens: record.budget_tokens,
+              spendUsd: record.budget_spend_usd,
+              windowSeconds: record.budget_window_seconds,
+              behavior: record.over_budget_behavior,
+              degradeLane: record.degrade_lane,
+            },
           },
         };
       },
@@ -1195,7 +1259,7 @@ export async function buildServer(
   // Gemini transformer for IR↔native translation + the Gemini error envelope. Self-
   // auth (x-goog-api-key preferred, Bearer fallback) so a missing key is rejected as
   // a Gemini error envelope (docs/05, docs/07).
-  const geminiPipeline = createMessagesPipeline(route, "gemini", { observe });
+  const geminiPipeline = createMessagesPipeline(route, "gemini", { observe }, pipelineBudget);
   registerGeminiRoute(app, {
     rateLimiter,
     auth: {
@@ -1214,6 +1278,14 @@ export async function buildServer(
             allowedLanes: record.allowed_lanes,
             allowCustomModel: record.allow_custom_model,
             rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+            budget: {
+              requests: record.budget_requests,
+              tokens: record.budget_tokens,
+              spendUsd: record.budget_spend_usd,
+              windowSeconds: record.budget_window_seconds,
+              behavior: record.over_budget_behavior,
+              degradeLane: record.degrade_lane,
+            },
           },
         };
       },

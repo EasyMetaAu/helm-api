@@ -26,6 +26,12 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     disabled: false,
     rate_limit_rpm: null,
     rate_limit_tpm: null,
+    budget_requests: null,
+    budget_tokens: null,
+    budget_spend_usd: null,
+    budget_window_seconds: null,
+    over_budget_behavior: 'degrade',
+    degrade_lane: null,
     ...overrides,
   };
 }
@@ -129,6 +135,13 @@ describe('keys page', () => {
         allow_custom_model: false,
         rate_limit_rpm: 120,
         rate_limit_tpm: null, // untouched → still inherit (null), not undefined
+        // Budgets untouched → still no cap (null) + default behavior.
+        budget_requests: null,
+        budget_tokens: null,
+        budget_spend_usd: null,
+        budget_window_seconds: null,
+        over_budget_behavior: 'degrade',
+        degrade_lane: null,
       }),
     );
     // Dialog closes after a successful save.
