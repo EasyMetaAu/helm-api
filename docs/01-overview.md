@@ -44,18 +44,16 @@ you run yourself that manages model traffic through configuration".
 
 ## Client-facing API surface
 
-Helm exposes standard AI API shapes. Three client protocols are wired and routed
+Helm exposes standard AI API shapes. Four client protocols are wired and routed
 today:
 
 - **OpenAI Chat Completions** — `POST /v1/chat/completions` (streaming and
   non-streaming).
 - **Anthropic Messages** — `POST /v1/messages` (streaming and non-streaming).
-- **OpenAI Responses** — `POST /v1/responses` (**non-streaming only** in 0.1; a
-  `stream:true` request is rejected with a structured 400).
-
-A **Gemini** transformer exists in the codebase but is not yet routed to an
-endpoint; native Gemini support is on the roadmap (see
-[09 · Roadmap](09-roadmap.md)), not a usable endpoint today.
+- **OpenAI Responses** — `POST /v1/responses` (streaming and non-streaming; the
+  SSE stream terminates with a `response.completed` event).
+- **Google Gemini** — `POST /v1beta/models/{model}:generateContent` (non-streaming;
+  `:streamGenerateContent` is not yet implemented).
 
 Clients should only need to change their `base_url` and API key. A client never
 needs to know which provider or model actually executed the request.
@@ -69,8 +67,10 @@ Provider adapters can target:
 - OpenAI-compatible providers: OpenRouter, ZenMux, vLLM, DeepSeek, Qwen, local
   models, custom endpoints.
 - Anthropic native.
+- OAuth subscription providers — Claude Pro/Max, ChatGPT Codex, GitHub Copilot —
+  via interactive login + a pooled, hot-reloadable, per-account credential store
+  (see [09 · Roadmap](09-roadmap.md) "Delivered in 0.2").
 - Gemini native (future).
-- Future OAuth/subscription providers such as Claude Code, Codex, or Copilot.
 
 Provider aliases are an internal supply-chain detail. They are not the primary
 user-facing surface.

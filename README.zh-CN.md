@@ -49,28 +49,27 @@ AI 应用开发者不想在每个客户端里维护成百上千个模型、各�
 
 ## 项目状态
 
-Helm API 目前是 **0.1**、尚处早期，但它是一套真实实现，而非空架子 —— 完整链路（配置 → 鉴权 → 分类 → 路由 → 执行（含熔断与兜底）→ 协议互译 → 遥测）已端到端打通，背后有一套相当完整的 Vitest 单测和 Playwright e2e 用例兜底。具体哪些已上线、哪些还只在路线图上，见 [功能](#功能)。
+Helm API 目前是 **0.2**、尚处早期，但它是一套真实实现，而非空架子 —— 完整链路（配置 → 鉴权 → 分类 → 路由 → 执行（含熔断与兜底）→ 协议互译 → 遥测）已端到端打通，背后有一套相当完整的 Vitest 单测和 Playwright e2e 用例兜底。具体哪些已上线、哪些还只在路线图上，见 [功能](#功能)。
 
 ## 功能
 
 **已上线：**
 
-- **三种客户端协议** —— `POST /v1/chat/completions`（OpenAI Chat，流式 + 非流式）、`POST /v1/messages`（Anthropic Messages，流式 + 非流式）、`POST /v1/responses`（OpenAI Responses，仅非流式）。
-- **跨协议互译** —— 归一到一套内部 IR；跨后端输出格式一致，chat 与 messages 两个面支持 SSE 流式。
+- **四种客户端协议** —— `POST /v1/chat/completions`（OpenAI Chat）、`POST /v1/messages`（Anthropic Messages）、`POST /v1/responses`（OpenAI Responses）三者均支持流式 + 非流式，外加 `POST /v1beta/models/{model}:generateContent`（Google Gemini，非流式）。
+- **跨协议互译** —— 归一到一套内部 IR；跨后端输出格式一致，chat、messages、responses 三个面均支持 SSE 流式。
 - **三层分类** —— 确定性规则常驻；不确定时走可选的小模型 eval（默认关闭）；最后兜底到 `balanced` lane。
 - **Lane + 策略路由** —— 首条命中的策略可以钉死、设上限或限定 lane；内置默认 lane：`economy`、`balanced`、`premium`，外加任务 lane `coding`、`json`、`vision`、`tool_use`（`balanced` 是必须存在、永远兜底的那条）。
 - **带兜底的 provider 执行** —— 在多个 OpenAI 兼容上游之间走「主 + 兜底」链，配有熔断器（OPEN/HALF_OPEN）、能力过滤（缺 JSON / 工具 / 视觉 / 上下文长度的候选会被显式跳过并记原因）、以及 `:free` 档 429 跳过。客户端断连不算 provider 故障。
-- **强制 API key 鉴权** —— key 只存 SHA-256 哈希；首次启动会生成并打印一次 root key。支持按 key 设权限（`max_lane`、`allowed_lanes`、是否允许自定义模型），以及可选的按 key RPM/TPM 限流。
+- **强制 API key 鉴权** —— key 只存 SHA-256 哈希；首次启动会生成并打印一次 root key。支持按 key 设权限（`allowed_lanes` 白名单、是否允许自定义模型），以及可选的按 key RPM/TPM 限流。
+- **OAuth 订阅类供应商** —— 把你的 Claude Pro/Max、ChatGPT Codex、GitHub Copilot **订阅**当作后端来路由：在面板里登录，每个供应商可接入多个账号组成池，逐账号策展模型 / 设出口代理 / 设调度优先级 —— 这些改动全部**热重载**（无需重启）。详见[下文](#oauth-订阅类供应商claude-promaxchatgpt-codexgithub-copilot)。*（可选功能，可能违反供应商服务条款，务必阅读警告。）*
 - **可观测性** —— 每个请求一条脱敏决策记录（分类、策略、lane、各次 provider 尝试、延迟、兜底次数、成本拆分），外加可选的正文逐字捕获（单独存表、按保留期清理）。
 - **管理面板** —— 一个 SvelteKit + Tailwind 的 SPA，挂在 `/admin`、用 HTTP Basic 保护：实时概览、API key 增删改（含按 key 限额）、lane 与策略编辑器、分类器设置、可下钻的请求日志。支持 5 种语言（默认英文，简繁中文、日文、韩文）。改动会重新绑定到运行中的配置，下一个请求即生效，无需重启。
 - **存储** —— 默认 SQLite（本地文件）；可选 Postgres / Supabase，通过统一的 Store 端口抽象切换。
 
 **路线图 / 尚未接通：**
 
-- **Gemini** —— core 里有 transformer，但还没接到任何端点；Google/Gemini 格式的客户端目前还打不进网关。
-- **`/v1/responses` 的流式** —— 0.1 里 `stream: true` 会被一个结构化 `400` 拒掉。
 - **Memory 中间件** —— observe（写入）阶段已接通；inject（把记忆读回 prompt）和 reflector 阶段在 core 里已实现，但运行中的网关还触达不到。
-- 更细粒度的配额 / 计费，以及 OAuth 订阅类供应商，都属于后续工作。
+- 更细粒度的配额 / 计费属于后续工作。
 
 详见 [09 路线图](docs/09-roadmap.md)。
 
@@ -133,7 +132,8 @@ curl http://localhost:8080/v1/chat/completions \
 |---|---|---|
 | `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ |
 | `POST /v1/messages` | Anthropic Messages | ✅ |
-| `POST /v1/responses` | OpenAI Responses | ❌ 暂未支持（0.1） |
+| `POST /v1/responses` | OpenAI Responses | ✅ |
+| `POST /v1beta/models/{model}:generateContent` | Google Gemini | ❌ 非流式 |
 
 **`model` 字段里填什么：**
 
@@ -174,6 +174,22 @@ curl http://localhost:8080/v1/chat/completions \
 > **存储。** 默认 SQLite（`better-sqlite3`，`./data` 下的本地文件）。要用 Postgres/Supabase，把 `HELM_STORE_DRIVER` 设成 `supabase`，再让 `HELM_STORE_URL_ENV` 指向存放 DSN 的环境变量。未知驱动在启动时 fail-closed。
 >
 > **凭证。** 供应商 key 在 `providers.yaml` 里只按环境变量*名*引用 —— 绝不以明文写进仓库或镜像。
+
+### OAuth 订阅类供应商（Claude Pro/Max、ChatGPT Codex、GitHub Copilot）
+
+除了静态 API key，供应商还能用你在面板里登录的 **OAuth 订阅**来鉴权（**提供商 → 连接**）。Claude Pro/Max 和 ChatGPT Codex 走「浏览器登录 + 粘贴回跳 URL」；GitHub Copilot 走设备码。Helm 把（会轮换的）refresh token **加密存盘**，并自动刷新短时的 access token。
+
+启用前需把 **`HELM_OAUTH_ENC_KEY`** 设成一把 32 字节的密钥（base64，或 64 位十六进制）—— Helm 用它加密存储的 token；若配置了订阅类供应商却没设这把 key，会**拒绝启动**。在供应商上配一个 `oauth: { provider: anthropic | github-copilot | openai-codex }` 块（参见 `config/providers.yaml` 里注释掉的示例）；Claude 用 `type: anthropic`。
+
+同一个供应商可以**接入多个账号**，Helm 把它们组成池。每个账号在 **提供商 → 管理** 里都有各自的：
+
+- **模型** —— 精确策展这个账号向你的 lane 暴露哪些模型。这份策展清单是权威的：移除某个模型后它会立刻不再被路由，未策展的模型会被拒（fail-closed）—— 所以策展是一份**实时白名单**，而不只是显示层的过滤。
+- **代理** —— 让这个账号的上游流量走 HTTP/HTTPS/SOCKS5 代理，从不同的 IP 出口（多个账号共用一台主机时，避免被关联封号）。
+- **调度** —— 一个 `priority`（越小越优先）和一个 `schedulable` 开关。Helm 选优先级最低的账号，同优先级内按 LRU 轮询；把账号「停泊」则保持连接但不参与轮换。
+
+**这里的一切都热重载。** 连接、断开、模型策展、代理、调度的改动都在**下一个请求即生效 —— 无需重启**。另外，为了表现得像一方官方客户端，Helm 会照搬官方客户端的身份头，并发送一个**稳定的、按账号固定的设备标识**（绝不会在请求之间乱变），以降低被关联封号的风险。
+
+> ⚠️ **服务条款。** 把 Claude/ChatGPT/Copilot **订阅**通过第三方网关来路由，可能违反供应商的服务条款，并可能成为账号被封的理由。这是面向自托管、个人使用的可选功能 —— **你需自行负责**确保用法符合你与供应商的协议。拿不准时，就改用普通的 API key（`api_key_env`）。
 
 ## 管理面板
 

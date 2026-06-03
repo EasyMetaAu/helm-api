@@ -49,28 +49,27 @@ AI app developers don't want to manage hundreds of models, per-provider quirks, 
 
 ## Status
 
-Helm API is **0.1** and early-stage, but it is a real implementation, not a scaffold — the full pipeline (config → auth → classify → route → execute with circuit-breaking and fallback → protocol translation → telemetry) is wired end-to-end and backed by an extensive Vitest unit suite plus Playwright e2e specs. See [Features](#features) for exactly what ships today versus what is roadmap-only.
+Helm API is **0.2** and early-stage, but it is a real implementation, not a scaffold — the full pipeline (config → auth → classify → route → execute with circuit-breaking and fallback → protocol translation → telemetry) is wired end-to-end and backed by an extensive Vitest unit suite plus Playwright e2e specs. See [Features](#features) for exactly what ships today versus what is roadmap-only.
 
 ## Features
 
 **Shipped:**
 
-- **Three client protocols** — `POST /v1/chat/completions` (OpenAI Chat, streaming + non-streaming), `POST /v1/messages` (Anthropic Messages, streaming + non-streaming), `POST /v1/responses` (OpenAI Responses, non-streaming).
-- **Cross-protocol translation** — normalize to one internal IR; consistent output shape across backends, with SSE streaming for the chat and messages surfaces.
+- **Four client protocols** — `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages), and `POST /v1/responses` (OpenAI Responses) — all streaming + non-streaming — plus `POST /v1beta/models/{model}:generateContent` (Google Gemini, non-streaming).
+- **Cross-protocol translation** — normalize to one internal IR; consistent output shape across backends, with SSE streaming on the chat, messages, and responses surfaces.
 - **Three-layer classification** — deterministic rules always on; optional small-model eval (off by default) for uncertain cases; `balanced`-lane fallback.
 - **Lane + policy routing** — first-match policies that pin, cap, or restrict lanes; default lanes shipped: `economy`, `balanced`, `premium`, plus task lanes `coding`, `json`, `vision`, `tool_use`. (`balanced` is the required, always-available fallback lane.)
 - **Provider execution with fallback** — primary + fallback chains across OpenAI-compatible upstreams, with a circuit breaker (OPEN/HALF_OPEN), a capability filter (skip candidates lacking JSON / tools / vision / context size with an explicit reason), and `:free`-tier 429 skipping. Client disconnects are treated as non-provider faults.
-- **Mandatory API-key auth** — keys stored as SHA-256 hashes only; a root key is generated and printed once on first boot. Per-key caps (`max_lane`, `allowed_lanes`, custom-model permission) and optional per-key RPM/TPM rate limits.
+- **Mandatory API-key auth** — keys stored as SHA-256 hashes only; a root key is generated and printed once on first boot. Per-key caps (an `allowed_lanes` whitelist and custom-model permission) and optional per-key RPM/TPM rate limits.
+- **OAuth subscription providers** — route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot **subscriptions** as backends: log in from the dashboard, pool several accounts per provider, and curate models / set an egress proxy / set scheduling per account — all of which **hot-reload** (no restart). See [the section below](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot). *(Opt-in; may violate provider ToS — read the warning.)*
 - **Observability** — a redacted decision record per request (classifier, policy, lane, provider attempts, latency, fallback count, cost breakdown) plus optional verbatim payload capture to a dedicated store, aged out by retention.
 - **Admin dashboard** — a SvelteKit + Tailwind SPA served at `/admin` behind HTTP Basic: live overview, API-key CRUD with per-key limits, lane and policy editors, classifier settings, and a drill-down request log. Available in 5 languages (English default, Simplified & Traditional Chinese, Japanese, Korean). Edits re-bind the live config and apply on the next request — no restart.
 - **Storage** — SQLite by default (local file); Postgres / Supabase optional, via a shared Store-port abstraction.
 
 **Roadmap / not yet wired:**
 
-- **Gemini** — a transformer exists in core but is routed to no endpoint; Google/Gemini-format clients cannot hit the gateway today.
-- **Streaming for `/v1/responses`** — `stream: true` is rejected with a structured `400` in 0.1.
 - **Memory middleware** — the observe (write) phase is wired; the inject (read-back-into-prompt) and reflector phases exist in core but are not yet reachable in the running gateway.
-- Finer-grained quotas / billing, and OAuth-subscription providers, are future work.
+- Finer-grained quotas / billing are future work.
 
 See [09 Roadmap](docs/09-roadmap.md) for details.
 
@@ -133,7 +132,8 @@ curl http://localhost:8080/v1/chat/completions \
 |---|---|---|
 | `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ |
 | `POST /v1/messages` | Anthropic Messages | ✅ |
-| `POST /v1/responses` | OpenAI Responses | ❌ not yet (0.1) |
+| `POST /v1/responses` | OpenAI Responses | ✅ |
+| `POST /v1beta/models/{model}:generateContent` | Google Gemini | ❌ non-streaming |
 
 **What to put in the `model` field:**
 
@@ -183,9 +183,11 @@ To enable it, set **`HELM_OAUTH_ENC_KEY`** to a 32-byte key (base64, or 64 hex c
 
 You can connect **several accounts of one provider** and Helm pools them. Each account, via **Providers → Manage**, has its own:
 
-- **Models** — curate exactly which discovered models that account exposes to your lanes.
+- **Models** — curate exactly which models that account exposes to your lanes. The curated list is authoritative: a model you remove stops routing immediately, and an uncurated model is refused (fail-closed) — so curation is a live allow-list, not just a display filter.
 - **Proxy** — route that account's upstream traffic through an HTTP/HTTPS/SOCKS5 proxy so it egresses from a distinct IP (avoids ban-correlation when accounts share a host).
 - **Schedule** — a `priority` (lower = served first) and a `schedulable` toggle. Helm picks the lowest-priority account, round-robin (least-recently-used) within an equal priority; parking an account keeps it connected but out of rotation.
+
+**Everything here hot-reloads.** Connecting, disconnecting, curation, proxy, and scheduling changes **apply on the next request — no restart.** And to look like a first-party client, Helm mirrors the official client's identity headers and sends a **stable, per-account device identity** (it never rotates mid-stream), reducing ban-correlation risk.
 
 > ⚠️ **Terms of service.** Routing a Claude/ChatGPT/Copilot **subscription** through a third-party gateway may violate the provider's terms of service, which can be grounds for account suspension. This is an opt-in feature for self-hosted, personal use — **you are responsible** for ensuring your usage complies with your provider agreements. When in doubt, use a normal API key (`api_key_env`) instead.
 

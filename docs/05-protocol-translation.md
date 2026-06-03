@@ -8,25 +8,25 @@ in [Research Notes](research-notes.md). The implementation lives in
 
 ## Wired protocols
 
-Three client protocols are wired and routed in 0.1:
+Four client protocols are wired and routed in 0.2:
 
 | Endpoint | Protocol | Streaming |
 |----------|----------|-----------|
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes (SSE) and non-stream |
 | `POST /v1/messages` | Anthropic Messages | Yes (SSE) and non-stream |
-| `POST /v1/responses` | OpenAI Responses | **Non-streaming only** |
+| `POST /v1/responses` | OpenAI Responses | Yes (SSE) and non-stream |
+| `POST /v1beta/models/{model}:generateContent` | Google Gemini | Non-streaming |
 
-For **OpenAI Responses**, streaming is not yet implemented: there is no Responses
-SSE (`response.*` event) transformer, so a `stream:true` request is rejected with
-a structured `400 invalid_request` ("streaming is not yet supported on
-/v1/responses; retry with stream:false") rather than being silently mis-served
-(fail-closed, principle 2). The non-streaming path is fully wired and routed. See
-`apps/gateway/src/routes/responses.ts`.
+For **OpenAI Responses**, streaming is now wired (0.2): a `stream:true` request
+returns a native Responses SSE stream of `response.*` events terminated by a
+`response.completed` event — **not** the Chat-Completions `[DONE]` sentinel. The
+`response.*` SSE transformer lives in `packages/core/src/protocol/responses-stream.ts`;
+see `apps/gateway/src/routes/responses.ts` for the route.
 
-A **Gemini** transformer exists in `packages/core/src/protocol/gemini/`, but it is
-**not** exported from the core entry point and **not** routed to any endpoint.
-Native Gemini support (request/response plus a streaming state machine) is on the
-roadmap; it is not a usable endpoint today. See [09 · Roadmap](09-roadmap.md).
+**Gemini** is now an inbound route (0.2): `POST /v1beta/models/{model}:generateContent`
+(issue #58), backed by the transformers in `packages/core/src/protocol/gemini/`.
+Streaming (`:streamGenerateContent`) is not implemented — the endpoint is
+non-streaming only. See `apps/gateway/src/routes/gemini.ts`.
 
 ## Responsibilities
 

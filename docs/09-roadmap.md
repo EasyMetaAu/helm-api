@@ -1,9 +1,9 @@
 # 09 · Roadmap
 
-> Status: **0.1 is implemented.** Phases 0–4 are done; the gateway routes real
-> traffic, translates protocols, classifies and routes with fallback and circuit
-> breaking, supports optional eval, and ships an admin UI. The "remaining" list
-> below is what is deferred past 0.1.
+> Status: **0.2 is implemented.** Phases 0–4 (the 0.1 core) are done; 0.2 adds the
+> Gemini inbound route, native OpenAI Responses streaming, full OAuth subscription
+> providers (multi-account pools + hot-reload), and an admin-UI overhaul. The
+> "remaining" list below is what is still deferred.
 
 ## Delivered in 0.1 (phases 0–4)
 
@@ -32,19 +32,35 @@ The build followed an order where each phase runs on its own.
   management (lanes / policies / classifier / keys / system settings) plus request
   debugging (list / detail / decision trail). See [11 · Admin UI](11-admin-ui.md).
 
-## Remaining / deferred past 0.1
+## Delivered in 0.2
+
+Net-new since 0.1 — all verified live (see `implementation-notes.md`):
+
+- **Gemini inbound route.** `POST /v1beta/models/{model}:generateContent` is mounted
+  (issue #58) — Google/Gemini-format clients now reach the gateway (non-streaming).
+  The earlier "transformer exists but no endpoint" gap is closed. See
+  [05 · Protocol Translation](05-protocol-translation.md).
+- **OpenAI Responses streaming.** `stream: true` on `/v1/responses` now returns a
+  native `response.*` SSE stream terminated by a `response.completed` event (not the
+  Chat-Completions `[DONE]` sentinel). The structured-400 rejection is gone.
+- **OAuth subscription providers (issue #38).** Now a complete feature, not the
+  deferred sketch the 0.1 note described: **interactive login** from the dashboard
+  (Claude Pro/Max + ChatGPT Codex paste-the-redirect, GitHub Copilot device-code), a
+  **persistent encrypted token store** (survives restarts), **multi-account pools**
+  with per-account model curation / egress proxy / priority+schedulable, **hot-reload**
+  of all of those (no restart), fail-closed subscription routing, and a stable
+  per-account anti-ban device identity. ChatGPT Codex routes via the OpenAI Responses
+  backend; GitHub Copilot via its OpenAI-compatible endpoint.
+- **Admin UI overhaul.** Unified Providers UI + modals (key create/edit,
+  connect/disconnect/manage), requests-list pagination + filters, editable key caps,
+  and the per-key `max_lane` ceiling retired in favor of an allowed-lanes whitelist.
+- **Classifier.** Multilingual non-Latin fallback guard + CJK word-boundary fixes +
+  an expanded Layer-1 keyword vocabulary.
+
+## Remaining / deferred
 
 Verified against the code and `implementation-notes.md`:
 
-- **Gemini client route.** The Gemini protocol transformer exists and is
-  unit-tested (`packages/core/src/protocol/gemini/`), but it is **not mounted as
-  an inbound route** yet — there is no `/v1beta/models/...` endpoint. A
-  `parseGeminiPath` helper and the `x-goog-api-key` header constant are in place;
-  the gateway wiring is the remaining work.
-- **OpenAI Responses streaming.** The Responses route is wired for non-streaming
-  only. A `stream: true` Responses request returns a structured 400 (it does not
-  silently downgrade, per Principle 2) because the `response.*` SSE transformer
-  is not implemented yet.
 - **Memory inject phase.** The `observe` phase is wired; the `inject` phase
   (`assembleInjectedContext`) and the background Observer/Reflector jobs are not.
   See [08 · Memory Middleware](08-memory-middleware.md).
@@ -53,14 +69,6 @@ Verified against the code and `implementation-notes.md`:
   [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
 - **Agentic Signals feedback layer.** The store ports and the redacted
   `RoutingSignal` shape exist, but nothing reads signals back into routing yet.
-- **OAuth subscription providers (added past 0.1, issue #38).** Net-new scope not
-  in the original roadmap. A provider may now reference an `oauth` block instead of
-  `api_key_env`; Helm refreshes the token **non-interactively** (`refresh_token` /
-  `client_credentials`) and injects a dynamic Bearer per request, with a single
-  refresh-on-401 retry. **Deferred within this feature**: the interactive
-  `authorization_code` (browser) flow, and a **persistent token store** (the v1
-  cache is in-memory, so a rotating refresh token is lost on restart — see
-  `implementation-notes.md` D3). See `config/providers.yaml` for the example block.
 
 ## Success criteria (met by 0.1)
 
