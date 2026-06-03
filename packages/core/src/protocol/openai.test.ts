@@ -534,6 +534,29 @@ describe("openaiTransformer — multimodal input content normalization (P7)", ()
     expect(fileBlock.file?.file_data).toContain("application/pdf");
     expect(fileBlock.file?.filename).toBe("r.pdf");
   });
+
+  // Regression (Codex P1): an uploaded-file reference must round-trip as file_id, NOT
+  // be collapsed to document.url and re-emitted as file_data (OpenAI expects file_id).
+  it("round-trips an uploaded file_id reference (not corrupted into file_data)", async () => {
+    const native = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: [{ type: "file", file: { file_id: "file-abc123" } }] }],
+    };
+    const ir = await openaiTransformer.transformRequestOut(native);
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "document", fileId: "file-abc123" });
+    expect((parts[0] as { url?: string }).url).toBeUndefined();
+
+    const back = (await openaiTransformer.transformRequestIn(ir)) as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>;
+    };
+    const out = back.messages[0]?.content?.[0] as {
+      file?: { file_id?: string; file_data?: string };
+    };
+    expect(out.file?.file_id).toBe("file-abc123");
+    expect(out.file?.file_data).toBeUndefined();
+  });
 });
 
 describe("openaiTransformer — model-generated audio output round-trip (P7)", () => {

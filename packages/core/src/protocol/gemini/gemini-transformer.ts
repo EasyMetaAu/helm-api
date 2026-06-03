@@ -951,8 +951,6 @@ interface StreamToolSlot {
 
 async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIterable<IRChunk> {
   let started = false;
-  let emittedText = "";
-  let emittedThought = ""; // accumulated reasoning text (Gemini thought parts)
   let lastModel: string | undefined;
   let pendingFinish: string | null = null;
   let lastUsage: IRChunk["usage"];
@@ -988,28 +986,22 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
 
     // —— Split visible text from thought parts. A thought part (part.thought===true)
     // is reasoning, streamed as delta.reasoning_content; visible text is delta.content.
-    // Both diff the accumulated snapshot (append-only by nature). ——————————————————————
+    // Gemini `?alt=sse` frames are INCREMENTAL deltas — each frame's text is the NEW
+    // chunk, NOT a growing snapshot (confirmed against the official SDK; mirrors our own
+    // transformStreamOut). So forward each frame's text/thought verbatim as the delta.
+    // (Per-frame snapshot-prefix diffing truncated a delta that happened to start with
+    // the prior one, e.g. "a" then "ab" -> "b" instead of "ab"; one explicit framing
+    // mode avoids that — docs/05 streaming correctness.) ————————————————————————————————
     const parts = candidate?.content.parts ?? [];
     const isThought = (p: GeminiPart): boolean => (p as { thought?: boolean }).thought === true;
-    const snapshotText = parts
+    const textDelta = parts
       .filter((p) => !isThought(p))
       .map((p) => p.text ?? "")
       .join("");
-    const snapshotThought = parts
+    const thoughtDelta = parts
       .filter(isThought)
       .map((p) => p.text ?? "")
       .join("");
-
-    let textDelta = "";
-    if (snapshotText.startsWith(emittedText)) textDelta = snapshotText.slice(emittedText.length);
-    else textDelta = snapshotText; // non-prefix snapshot (rare): emit the whole text
-    if (snapshotText.length >= emittedText.length) emittedText = snapshotText;
-
-    let thoughtDelta = "";
-    if (snapshotThought.startsWith(emittedThought)) {
-      thoughtDelta = snapshotThought.slice(emittedThought.length);
-    } else thoughtDelta = snapshotThought;
-    if (snapshotThought.length >= emittedThought.length) emittedThought = snapshotThought;
 
     // —— tool-call args: buffer the latest full args per name (no mid-stream emit). ——
     for (const part of parts) {

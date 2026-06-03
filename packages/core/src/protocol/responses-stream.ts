@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { type OpenAIChunk, OpenAIChunkSchema } from "./anthropic/stream.js";
 import type { IRResponse, IRUsage } from "./ir.js";
+import { resolveReasoning } from "./reasoning.js";
 import { mapResponsesStatus } from "./responses.js";
 
 // OpenAI chunk → OpenAI **Responses** (`response.*`) SSE event stream: the SECOND
@@ -699,6 +700,14 @@ export async function* synthesizeResponsesSSEFromJSON(
       .map((p) => p.text)
       .join("");
     if (text !== "") delta.content = text;
+  }
+
+  // Reasoning must survive the cache-hit / non-stream synthesis: surface it on the
+  // synthetic chunk so convertOpenAIStreamToResponses emits the reasoning event (P6/P3).
+  if (message !== undefined) {
+    const { reasoningText } = resolveReasoning(message);
+    if (reasoningText !== undefined && reasoningText !== "")
+      delta.reasoning_content = reasoningText;
   }
 
   const toolCalls = message?.tool_calls ?? [];

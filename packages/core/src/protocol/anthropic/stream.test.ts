@@ -391,6 +391,30 @@ describe("synthesizeSSEFromJSON — cache hit / non-streaming upstream", () => {
     }
   });
 
+  // Regression (Codex P3): reasoning must survive the cache-hit / non-stream synth —
+  // a streaming Anthropic client served from a non-stream path still gets the thinking.
+  it("carries reasoning_content into a synthesized thinking block", async () => {
+    const res: IRResponse = {
+      id: "resp_r",
+      model: "deepseek-r",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "answer", reasoning_content: "let me think" },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const events = await collect(synthesizeSSEFromJSON(res));
+    const thinking = events
+      .filter((e) => e.type === "content_block_delta")
+      .map((e) => (e.type === "content_block_delta" ? e.delta : undefined))
+      .filter((d) => d?.type === "thinking_delta");
+    expect(thinking.length).toBeGreaterThan(0);
+    const text = thinking.map((d) => (d?.type === "thinking_delta" ? d.thinking : "")).join("");
+    expect(text).toBe("let me think");
+  });
+
   it("synthesizes a tool_use block: start (id+name) before input_json_delta", async () => {
     const res: IRResponse = {
       id: "resp_2",

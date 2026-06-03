@@ -753,6 +753,47 @@ describe("createExecute — gateway execution adapter", () => {
     if (out.final.status === "ok") expect(out.final.alias).toBe("vis");
   });
 
+  // Regression (Codex P1): a vision requirement carried as an in-MESSAGE image part
+  // (image_url / input_image / IR image) — not the legacy `attachments` array — must
+  // also prune a non-vision model.
+  it("in-message image content prunes a non-vision model (not just attachments)", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "vis2" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ text: "m-text", vis: "m-vis" }),
+      breaker: breaker(),
+      catalog: new Map([
+        ["text", entry("text", { supportsVision: false })],
+        ["vis", entry("vis", { supportsVision: true })],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["text", "vis"]),
+      req({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is this?" },
+              { type: "image_url", image_url: { url: "https://x/a.png" } },
+            ],
+          },
+        ] as unknown as InternalRequest["messages"],
+      }),
+    );
+    expect(out.attempts[0]?.skipped).toBe(true);
+    expect(out.attempts[0]?.skip_reason).toBe("no_vision_support");
+    expect(out.final.status).toBe("ok");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("vis");
+  });
+
   it("audio request prunes a model lacking the audio modality and lands on one advertising it (P7)", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "aud" }),

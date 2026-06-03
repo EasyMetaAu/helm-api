@@ -6,7 +6,7 @@ import {
   IRRequestSchema,
   type IRToolCall,
 } from "../ir.js";
-import { guardRequestFor } from "../protocol-guards.js";
+import { guardRequestFor, type ProtocolWarning, readWarnings } from "../protocol-guards.js";
 import { type AnthropicOutputFormat, responseFormatToOutputFormat } from "./output-format.js";
 import { createAnthropicToolNameMap, sanitizeAnthropicToolName } from "./response.js";
 
@@ -198,7 +198,8 @@ function imagePartFromSource(
 }
 
 // —— document block source -> IR document part. base64 keeps data+media_type inline;
-// a url/file_id source rides on document.url so the round-trip is lossless (P7). ——————
+// a url source -> document.url; an uploaded-file source -> document.fileId, so the
+// upload handle round-trips back to a {type:"file"} source losslessly (P7). ——————————
 function documentPartFromSource(
   source: z.infer<typeof AnthropicDocumentBlockSchema>["source"],
 ): IRContentPart {
@@ -212,7 +213,7 @@ function documentPartFromSource(
   if (source.type === "file" && source.file_id !== undefined) {
     return {
       type: "document",
-      url: source.file_id,
+      fileId: source.file_id,
       ...(source.media_type ? { mediaType: source.media_type } : {}),
     };
   }
@@ -481,7 +482,10 @@ export interface AnthropicImageBlockOut {
 }
 export interface AnthropicDocumentBlockOut {
   type: "document";
-  source: { type: "base64"; media_type: string; data: string } | { type: "url"; url: string };
+  source:
+    | { type: "base64"; media_type: string; data: string }
+    | { type: "url"; url: string }
+    | { type: "file"; file_id: string };
 }
 export interface AnthropicToolUseBlockOut {
   type: "tool_use";
@@ -601,11 +605,14 @@ function imageBlockFromPart(
   return { type: "image", source: { type: "url", url: part.url } };
 }
 
-// IR document part -> Anthropic document block. Inline base64 keeps data+media_type;
-// a url/file_id ref becomes a {type:"url"} source (P7).
+// IR document part -> Anthropic document block. An uploaded-file handle -> {type:"file"}
+// source; inline base64 keeps data+media_type; a remote ref -> {type:"url"} source (P7).
 function documentBlockFromPart(
   part: Extract<IRContentPart, { type: "document" }>,
 ): AnthropicDocumentBlockOut {
+  if (part.fileId !== undefined) {
+    return { type: "document", source: { type: "file", file_id: part.fileId } };
+  }
   if (part.data !== undefined) {
     return {
       type: "document",
@@ -675,11 +682,29 @@ function mapToolChoice(
  * INTERNALLY and is dropped from the returned object's own enumerable serialization
  * unless a caller opts to keep it — see the matrix test which asserts no leakage).
  */
+/**
+ * IR -> native Anthropic request AND the structured degradation warnings (n_capped /
+ * data_loss) the guard produced. Exposed so a caller (route / pipeline / telemetry)
+ * can OBSERVE the degradation — `transformRequestIn` alone returns only the native
+ * request and would otherwise drop the warnings (Codex review P2). Pure: the warnings
+ * are read off the guarded IR's provider_raw, which never reaches the wire.
+ */
+export function transformRequestInWithWarnings(ir: IRRequest): {
+  request: AnthropicOutboundRequest;
+  warnings: ProtocolWarning[];
+} {
+  return {
+    request: transformRequestIn(ir),
+    warnings: readWarnings(guardRequestFor("anthropic", ir)),
+  };
+}
+
 export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
   // P8 inter-translation hardening: cap n>1 (Anthropic emits one candidate) and
   // record data_loss warnings for logprobs/modalities (no Anthropic surface). The
   // guard lives on the IR's provider_raw.warnings, which is stripped before the wire
   // (no leak); here we only consume the guarded IR so the native output is correct.
+  // Warnings are surfaced via transformRequestInWithWarnings (above) for observability.
   const parsed = IRRequestSchema.parse(guardRequestFor("anthropic", ir));
 
   // Sanitize tool names up-front so both the tools[] block and tool_choice map

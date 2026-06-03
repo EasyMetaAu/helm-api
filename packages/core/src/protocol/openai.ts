@@ -177,15 +177,14 @@ function nativePartToIR(part: unknown): IRContentPart {
           ...(filename !== undefined ? { filename } : {}),
         };
       }
-      // file_id / remote reference (no inline data): keep it as the document url.
-      const ref =
-        typeof f.file_id === "string" ? f.file_id : fileData !== undefined ? fileData : "";
-      return {
-        type: "document",
-        url: ref,
-        ...(typeof f.format === "string" ? { mediaType: f.format } : {}),
-        ...(filename !== undefined ? { filename } : {}),
-      };
+      // An uploaded-file handle is preserved as fileId (NOT url) so it round-trips
+      // back to file.file_id; a non-data-url string falls back to a remote url ref.
+      const fmt = typeof f.format === "string" ? { mediaType: f.format } : {};
+      const name = filename !== undefined ? { filename } : {};
+      if (typeof f.file_id === "string") {
+        return { type: "document", fileId: f.file_id, ...fmt, ...name };
+      }
+      return { type: "document", url: fileData ?? "", ...fmt, ...name };
     }
     default:
       // Already an IR-shaped part (image/audio/video/document/thinking) — pass it
@@ -223,7 +222,12 @@ function irPartToNative(part: IRContentPart): unknown {
     case "audio":
       return { type: "input_audio", input_audio: { data: part.data, format: part.format } };
     case "document": {
-      // Inline base64 -> file_data data-url; a remote/url ref -> file_data=url.
+      // An uploaded-file handle round-trips back to file.file_id (OpenAI's expected
+      // shape); else inline base64 -> file_data data-url; else a remote url -> file_data.
+      const name = part.filename !== undefined ? { filename: part.filename } : {};
+      if (part.fileId !== undefined) {
+        return { type: "file", file: { file_id: part.fileId, ...name } };
+      }
       const fileData =
         part.data !== undefined
           ? `data:${part.mediaType ?? "application/octet-stream"};base64,${part.data}`
@@ -232,7 +236,7 @@ function irPartToNative(part: IRContentPart): unknown {
         type: "file",
         file: {
           ...(fileData !== undefined ? { file_data: fileData } : {}),
-          ...(part.filename !== undefined ? { filename: part.filename } : {}),
+          ...name,
         },
       };
     }

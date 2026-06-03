@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { IRChunk } from "../gemini/gemini-types.js";
 import { IRAnnotationSchema, IRLogprobsSchema, type IRResponse, type IRUsage } from "../ir.js";
+import { resolveReasoning } from "../reasoning.js";
 import {
   type AnthropicStopReason,
   type AnthropicUsage,
@@ -482,6 +483,14 @@ export async function* synthesizeSSEFromJSON(resp: IRResponse): AsyncIterable<An
       .map((p) => p.text)
       .join("");
     if (text !== "") delta.content = text;
+  }
+
+  // Reasoning must survive the cache-hit / non-stream synthesis too: surface it on the
+  // synthetic chunk so convertOpenAIStreamToAnthropic emits the thinking block (P6/P3).
+  if (message !== undefined) {
+    const { reasoningText } = resolveReasoning(message);
+    if (reasoningText !== undefined && reasoningText !== "")
+      delta.reasoning_content = reasoningText;
   }
 
   const toolCalls = message?.tool_calls ?? [];

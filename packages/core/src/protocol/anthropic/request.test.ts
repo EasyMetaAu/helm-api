@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { IRRequestSchema } from "../ir.js";
+import { type IRRequest, IRRequestSchema } from "../ir.js";
 import { guardRequestFor, readWarnings } from "../protocol-guards.js";
-import { transformRequestIn, transformRequestOut } from "./request.js";
+import {
+  transformRequestIn,
+  transformRequestInWithWarnings,
+  transformRequestOut,
+} from "./request.js";
 
 // Anthropic Messages -> IR inbound normalization (docs/05, task protocol.anthropic-req).
 // Anthropic's wire shape diverges structurally from the OpenAI-shaped IR hub:
@@ -533,6 +537,50 @@ describe("anthropic document input (P7 multimodal)", () => {
     expect(block.type).toBe("document");
     expect(block.source?.type).toBe("url");
     expect(block.source?.url).toBe("https://x/doc.pdf");
+  });
+
+  // Regression (Codex P1): an uploaded-file source must round-trip as a {type:"file"}
+  // source (file_id), NOT be collapsed to document.url and re-emitted as a url source.
+  it("round-trips an uploaded file_id document source (not url-collapsed)", () => {
+    const native = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "document", source: { type: "file", file_id: "file_xyz" } }],
+        },
+      ],
+    };
+    const ir = transformRequestOut(native) as IRRequest;
+    const part = (ir.messages[0]?.content as Array<Record<string, unknown>>)[0];
+    expect(part).toMatchObject({ type: "document", fileId: "file_xyz" });
+    expect((part as { url?: string }).url).toBeUndefined();
+
+    const back = transformRequestIn(IRRequestSchema.parse(ir));
+    const block = back.messages[0]?.content?.[0] as {
+      source?: { type?: string; file_id?: string; url?: string };
+    };
+    expect(block.source?.type).toBe("file");
+    expect(block.source?.file_id).toBe("file_xyz");
+    expect(block.source?.url).toBeUndefined();
+  });
+
+  // Regression (Codex P2): the degradation warnings must be OBSERVABLE — returned
+  // alongside the native request, not silently dropped by transformRequestIn.
+  it("transformRequestInWithWarnings surfaces n_capped + data_loss warnings", () => {
+    const ir = IRRequestSchema.parse({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "hi" }],
+      n: 4,
+      logprobs: true,
+    });
+    const { request, warnings } = transformRequestInWithWarnings(ir);
+    expect(JSON.stringify(request)).not.toContain("warnings"); // native wire stays clean
+    const codes = warnings.map((w) => `${w.code}:${w.param}`);
+    expect(codes).toContain("n_capped:n");
+    expect(codes).toContain("data_loss:logprobs");
   });
 
   // P8 inter-translation hardening: non-mappable knobs degrade cleanly + are recorded.

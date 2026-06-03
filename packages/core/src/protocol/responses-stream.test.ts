@@ -463,6 +463,27 @@ describe("convertOpenAIStreamToResponses — reasoning summary streaming", () =>
       expect(s[i]).toBe((s[i - 1] as number) + 1);
     }
   });
+
+  // Regression (Codex P3): reasoning must survive the cache-hit / non-stream synth.
+  it("synthesizeResponsesSSEFromJSON carries reasoning_content into a reasoning event", async () => {
+    const events = await collect(
+      synthesizeResponsesSSEFromJSON({
+        id: "resp_r",
+        model: "o-mini",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "answer", reasoning_content: "ponder" },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+    const done = events.find((e) => e.type === "response.reasoning_summary_text.done") as
+      | Extract<ResponsesSSEEvent, { type: "response.reasoning_summary_text.done" }>
+      | undefined;
+    expect(done?.text).toBe("ponder");
+  });
 });
 
 describe("convertResponsesEventStreamToOpenAI — reasoning delta -> IR (reverse)", () => {

@@ -527,6 +527,21 @@ describe("streaming alt=sse (snapshot events -> IR chunks)", () => {
     expect(finals[0]?.choices?.[0]?.finish_reason).toBe("stop");
   });
 
+  // Regression (Codex P2): ?alt=sse frames are DELTAS, not snapshots. A delta that
+  // happens to be a prefix-extension of the previous one must NOT be truncated by
+  // snapshot diffing — "a" then "ab" must concatenate to "aab", not "ab".
+  it("treats prefix-overlapping frames as deltas, not snapshots (no truncation)", async () => {
+    const events: GeminiSSEEvent[] = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "a" }] } }] },
+      {
+        candidates: [{ content: { role: "model", parts: [{ text: "ab" }] }, finishReason: "STOP" }],
+      },
+    ];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const text = chunks.map((c) => c.choices?.[0]?.delta?.content ?? "").join("");
+    expect(text).toBe("aab");
+  });
+
   // test #6: functionCall.args spread across snapshot events accumulate to full JSON.
   it("accumulates fragmented functionCall args across events without throwing", async () => {
     const events: GeminiSSEEvent[] = [

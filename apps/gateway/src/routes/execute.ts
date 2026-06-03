@@ -88,16 +88,20 @@ function approxPromptTokens(req: InternalRequest): number {
   return Math.ceil(chars / 4);
 }
 
-// Detect which extra INPUT modalities (audio / video / document) the request carries,
-// so the capability filter only routes them to a backend that advertises them (P7).
-// Reads the native OpenAI content-part discriminants a client sends (input_audio,
-// file, image — image is gated by vision, not here) plus the IR-normalized part types
-// (audio/video/document) in case content was already normalized upstream.
+// Detect which extra INPUT modalities (image / audio / video / document) the request
+// carries IN MESSAGE CONTENT, so the capability filter only routes them to a backend
+// that advertises them (P7). Reads the native OpenAI/Responses content-part
+// discriminants a client sends (image_url / input_image, input_audio, file) plus the
+// IR-normalized part types (image/audio/video/document) in case content was already
+// normalized upstream. `image` here is the vision gate for in-message images — the
+// legacy `attachments` array is the OTHER vision source (see needsVision below).
 function detectRequestModalities(req: InternalRequest): {
+  image: boolean;
   audio: boolean;
   video: boolean;
   document: boolean;
 } {
+  let image = false;
   let audio = false;
   let video = false;
   let document = false;
@@ -107,12 +111,13 @@ function detectRequestModalities(req: InternalRequest): {
     for (const part of content) {
       if (part === null || typeof part !== "object") continue;
       const type = (part as { type?: unknown }).type;
-      if (type === "input_audio" || type === "audio") audio = true;
+      if (type === "image_url" || type === "input_image" || type === "image") image = true;
+      else if (type === "input_audio" || type === "audio") audio = true;
       else if (type === "video") video = true;
       else if (type === "file" || type === "document") document = true;
     }
   }
-  return { audio, video, document };
+  return { image, audio, video, document };
 }
 
 function isAbort(err: unknown, signal: AbortSignal): boolean {
@@ -318,7 +323,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         const verdict = checkCapability(caps, {
           needsTools: Array.isArray(req.tools) && req.tools.length > 0,
           needsJson: isJson(req.response_format),
-          needsVision: Array.isArray(req.attachments) && req.attachments.length > 0,
+          needsVision:
+            (Array.isArray(req.attachments) && req.attachments.length > 0) || reqModalities.image,
           needsStreaming: req.stream,
           estimatedPromptTokens: approxPromptTokens(req),
           maxTokens: req.max_tokens,
