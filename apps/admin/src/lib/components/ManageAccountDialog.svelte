@@ -324,9 +324,11 @@
         {:else if modelsLoading}
           <p class="text-sm text-ink-muted">{$t('Loading models…')}</p>
         {:else}
-          <div class="flex flex-col gap-1.5">
+          <div class="flex flex-col gap-0.5">
             {#each models as _model, i (i)}
-              <div class="flex items-center gap-2">
+              <div
+                class="-mx-2 flex items-center gap-2 rounded-md px-2 py-1 transition-colors hover:bg-slate-100"
+              >
                 <input
                   type="text"
                   class="input flex-1 font-mono text-xs"
