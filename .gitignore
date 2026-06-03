@@ -38,8 +38,16 @@ apps/gateway/.e2e-data/
 apps/gateway/test-results/
 apps/gateway/playwright-report/
 
+# Playwright MCP browser snapshots (generated debugging artifacts; may contain
+# local OAuth account labels / connection state — never commit)
+.playwright-mcp/
+
 # local docker test data
 docker-data/
+
+# Per-machine Compose override (absolute host paths + local build metadata;
+# auto-loaded by `docker compose` — must stay local, never committed)
+docker-compose.override.yml
 
 # i18n translator generated config (non-secret, runtime only)
 apps/admin/tools/.translator.env
