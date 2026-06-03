@@ -5,6 +5,73 @@
 
 ---
 
+## 2026-06-03 · Providers page: per-account usage, quota windows, priority/schedulable (docs/06, #38)
+
+**Context**: `/admin/providers` showed only provider/account/status/expiry. The operator runs
+several OAuth subscription accounts and needs the operating signals claude-relay-service shows:
+remaining quota, today's usage, and the pool routing knobs (priority + enabled). Built all three.
+
+**Per-provider quota source asymmetry** (mirrors claude-relay; the crux of the design):
+- **Claude** = on-demand PULL of `GET https://api.anthropic.com/api/oauth/usage` (`anthropic-beta:
+  oauth-2025-04-20` + claude-cli UA) → `{ five_hour, seven_day, seven_day_sonnet }`. Lives in the
+  OAuth admin seam (`fetchAnthropicQuota`), behind a **5-min in-memory cache**, routed through the
+  account's egress proxy. **Zero changes to the streaming request path.** Triggered when
+  `GET /admin/api/oauth/quota` is read.
+- **Codex** = PUSH via `x-codex-{primary,secondary}-{used-percent,reset-after-seconds,window-minutes}`
+  response headers. Captured by an `onResponseMeta(headers)` hook added to `CodexResponsesClientConfig`,
+  fired in `requestWithRetry` the instant the response resolves (before any SSE chunk is read, so
+  chunk order is untouched — Principle 8). Bound per-account in `synthesizeOAuthProviders`.
+- **Copilot** = no quota source exists → renders "—".
+
+**Decisions made (spec didn't cover)**:
+- **Usage attribution → AsyncLocalStorage** (`runtime/serving-account.ts`), scoped ONLY around the
+  synchronous `routeRequest()` call. The pool's `onSelect` writes the account into the ALS holder
+  (it fires during selection + execute's first-chunk peek, inside that scope); the gateway reads it
+  OFF the result (`result.servingAccount`) and threads the plain value to the settle path. So token
+  recording never depends on ALS surviving into Hono's deferred stream callback. Recorded at the two
+  settle choke points (`chat.ts`, `messages-pipeline.ts`) which already compute served tokens for all
+  protocol faces.
+- **Cost is NULLABLE in `oauth_usage`** and stays NULL until a measured cost arrives (null-aware SQL
+  sum). Subscription plans are flat-rate → `completion_usd` is usually null, so **request count +
+  tokens are the real usage signal**, not cost (the page shows "—" for unpriced cost).
+- **RPM = daily average** (`requests / minutes-since-first-seen-today`), derived in the endpoint;
+  the store stays a plain counter (no per-minute buckets).
+- **`server.ts` schedulable was NOT a bug**: the synthesize loop already `continue`-skips parked
+  accounts before building a pool member (so the hardcoded `schedulable: true` on the member only
+  ever applies to accounts that passed the filter). The inline toggle works via pool rebuild — no fix
+  needed (the plan's suspected fix was unnecessary; verified at server.ts ~272).
+
+**New tables (migrations sqlite v12 / pg v11)**: `oauth_usage` (additive daily aggregate, PK
+provider+account+day) and `oauth_quota` (latest window snapshot, PK provider+account). Ports
+`OAuthUsageStore` / `OAuthQuotaStore` with sqlite + postgres adapters (pglite-tested). All
+observability paths are **fail-open** — a stats failure never 5xx's a chat nor breaks the page.
+
+**Observability scope (known limitation)**: usage + quota instrumentation covers the
+**admin-connected synthesized OAuth pools** (the canonical issue-#38 flow). A preset OAuth provider
+EXPLICITLY declared in `providers.yaml` is skipped by `synthesizeOAuthProviders` and built as a plain
+single client WITHOUT the pool `onSelect` marker or the Codex `onResponseMeta` hook, so its traffic
+shows zero daily usage and no Codex quota capture. Such accounts also aren't listed on the providers
+page (it reads admin-connected `oauth_tokens`/pools), so this is a non-visible edge; wiring the
+configured-client path is deferred (declare-in-yaml + admin-connect is the uncommon overlap).
+
+**Codex review fixes (same day)**:
+- **[P1] mis-attribution after fallback** — the pool marks the account at SELECTION time, so a failed
+  OAuth attempt that falls back to another provider left a stale `servingAccount`. Added the pure
+  `servedByAccount(servingAccount, servedAlias)` guard (gateway `serving-account.ts`): usage is
+  recorded only when the FINAL served alias is `<providerId>/…` of the marked account. Threaded
+  `decision.final.model_alias` through both settle paths. Unit-tested.
+- **[P2] page-hang on a slow quota pull** — added bounded `AbortSignal.timeout` to the server-side
+  Anthropic usage fetch (8s) and the client `getOAuthUsage`/`getOAuthQuota` reads (10s); both
+  fail-open so the page renders with stored/empty data instead of spinning.
+- **[P2] priority validation** — inline editor now uses `Number` + rejects non-integers and `< 0`
+  (parseInt silently truncated `1.9`→`1` and accepted `-1`); the `PUT …/account` route enforces the
+  same non-negative-integer bound (a negative priority would always win scheduling).
+
+**Verified**: feature unit tests (101) green across both dialects incl. the Codex streaming-order
+regression; typecheck + lint clean; admin svelte-check 0/0.
+
+---
+
 ## 2026-06-03 · Drop the `openai-crs` relay; route via the `openai-codex` subscription + official DeepSeek (spec docs/03, docs/04, docs/10)
 
 **Context**: `config/providers.yaml` shipped a single self-built relay named `openai-crs` (`la.atmy.work`, `OPENAI_API_KEY`) that fronted both `openai-crs/*` (gpt-5.x) and `deepseek-crs/*` model families under one credential, and was `providers[0]` (the mandatory primary backing eval + Phase-0 passthrough). The relay was really just a proxy in front of a ChatGPT/Codex subscription — which Helm already connects natively via the built-in `openai-codex` OAuth preset (wired end-to-end in #64/#65) — so it was redundant. Per the maintainer: delete the relay, route the premium/coding lanes through the `openai-codex` subscription channel, and point the deepseek models at the **official** DeepSeek API.

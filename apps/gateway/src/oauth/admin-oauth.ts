@@ -12,13 +12,16 @@ import {
   encryptSecret,
   getOAuthProvider,
   hasLiveModelDiscovery,
+  makeProxyFetch,
   type OAuthCredentials,
   type OAuthTokenStore,
   type ProxyConfig,
+  parseAnthropicUsageBody,
   pollCopilotDeviceOnce,
   refreshGitHubCopilotToken,
   validateProxyConfig,
 } from "@helm/core";
+import type { OAuthQuotaWindow } from "@helm/shared";
 import type {
   AccountProxyView,
   AccountScheduleView,
@@ -41,6 +44,22 @@ const ANTHROPIC = "anthropic";
 const COPILOT = "github-copilot";
 const CODEX = "openai-codex";
 const SESSION_TTL_MS = 15 * 60 * 1000;
+
+// Anthropic OAuth usage endpoint (providers page Tier 3 quota PULL). Mirrors the
+// claude-relay-service reference: the `oauth-2025-04-20` beta flag + a claude-cli
+// User-Agent gate the endpoint (a generic UA is rejected). Cached per account for 5
+// min so a page refresh never hammers it (the upstream itself rate-limits this).
+const QUOTA_TTL_MS = 5 * 60 * 1000;
+// Hard ceiling on the usage-endpoint fetch so a hung proxy/upstream never blocks the
+// providers page (the route is fail-open; this bounds the worst case).
+const QUOTA_FETCH_TIMEOUT_MS = 8_000;
+const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const ANTHROPIC_USAGE_HEADERS = {
+  "anthropic-beta": "oauth-2025-04-20",
+  "user-agent": "claude-cli/2.0.53 (external, cli)",
+  accept: "application/json",
+  "accept-language": "en-US,en;q=0.9",
+} as const;
 
 // Manual-paste (authorization-code) providers and their begin/complete step-fns.
 const MANUAL_FLOWS: Record<
@@ -91,6 +110,8 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   const now = deps.now ?? (() => Date.now());
   const genId = deps.genSessionId ?? (() => randomUUID());
   const sessions = new Map<string, Session>();
+  // Per-account Anthropic quota cache (5-min TTL): key `anthropic <account>`.
+  const quotaCache = new Map<string, { at: number; windows: OAuthQuotaWindow[] }>();
 
   function prune(): void {
     const cutoff = now() - SESSION_TTL_MS;
@@ -158,13 +179,24 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   return {
     async listStatus(): Promise<OAuthAdminStatus[]> {
       const rows = await deps.store.list();
+      // Load the per-account settings blob ONCE for the whole page (a single decrypt)
+      // so the list carries each account's effective priority + schedulable without an
+      // N+1 per-account GET. Fail-open to {} (defaults applied below).
+      const settings = await loadAccountSettings(deps.config, deps.encKey);
       // Ensure-fresh every stored account in parallel so the page reflects live,
       // auto-renewed expiries (and surfaces a dead credential as unhealthy).
       const refreshed = await Promise.all(
-        rows.map(async (r) => ({
-          providerId: r.providerId,
-          ...(await ensureFresh(r.providerId, r.account, r)),
-        })),
+        rows.map(async (r) => {
+          // Same defaults as getAccountSchedule (priority 50, schedulable true) so a
+          // never-tuned account always renders a concrete value.
+          const sch = getAccountSettings(settings, r.providerId, r.account);
+          return {
+            providerId: r.providerId,
+            ...(await ensureFresh(r.providerId, r.account, r)),
+            priority: sch.priority ?? 50,
+            schedulable: sch.schedulable ?? true,
+          };
+        }),
       );
       const accountsFor = (id: string) =>
         refreshed.filter((x) => x.providerId === id).map(({ providerId: _p, ...rest }) => rest);
@@ -359,6 +391,52 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       if (priority !== undefined) patch.priority = priority;
       if (schedulable !== undefined) patch.schedulable = schedulable;
       await setAccountSettings(deps.config, deps.encKey, providerId, account, patch);
+    },
+
+    async fetchAnthropicQuota({ account }): Promise<OAuthQuotaWindow[] | null> {
+      // Serve from the 5-min cache when warm (a page refresh must not hammer the
+      // upstream usage endpoint, which itself rate-limits).
+      const key = `${ANTHROPIC}${" "}${account}`;
+      const cached = quotaCache.get(key);
+      if (cached && now() - cached.at < QUOTA_TTL_MS) return cached.windows;
+      const provider = getOAuthProvider(ANTHROPIC);
+      if (!provider) return null;
+      try {
+        // Same lazy-refresh token manager the execution path uses, so the bearer is
+        // fresh; the account's egress proxy is reused for network-identity
+        // consistency (anti-ban) when one is configured.
+        const tm = createTokenManager({
+          oauth: { kind: "preset", providerId: ANTHROPIC, account },
+          tokenStore: deps.store,
+          encKey: deps.encKey,
+          oauthProvider: provider,
+          now,
+        });
+        const authorization = await tm.getAuthHeader(); // "Bearer <access>"
+        const proxy = getAccountSettings(
+          await loadAccountSettings(deps.config, deps.encKey),
+          ANTHROPIC,
+          account,
+        ).proxy;
+        const doFetch = proxy ? makeProxyFetch(proxy) : fetch;
+        // Bounded timeout (fail-open): a slow proxy/upstream must NOT hang the
+        // providers page — the AbortSignal trips the catch below, which returns null
+        // so the page renders with the stored/empty snapshot instead of stalling.
+        const res = await doFetch(ANTHROPIC_USAGE_URL, {
+          headers: { ...ANTHROPIC_USAGE_HEADERS, authorization },
+          signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
+        });
+        if (!res.ok) {
+          await res.body?.cancel().catch(() => {});
+          return null;
+        }
+        const body: unknown = await res.json();
+        const windows = parseAnthropicUsageBody(body, now());
+        quotaCache.set(key, { at: now(), windows });
+        return windows;
+      } catch {
+        return null; // dead token / network / malformed body → page renders "—"
+      }
     },
   };
 }

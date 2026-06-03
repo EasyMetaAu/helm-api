@@ -43,6 +43,7 @@ import {
   type PoliciesConfig,
   type ProviderClient,
   type ProxyConfig,
+  parseCodexQuotaHeaders,
   parseLanesConfig,
   type ProviderRegistryConfig as RegistryProviderConfig,
   type ResponsesSSEEvent,
@@ -92,6 +93,12 @@ import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
 import { registerResponsesRoute } from "./routes/responses.js";
+import {
+  markServingAccount,
+  type ServingAccount,
+  servedByAccount,
+  withServingAccountCapture,
+} from "./runtime/serving-account.js";
 
 export interface ServerHandle {
   app: ReturnType<typeof createApp>;
@@ -238,6 +245,10 @@ export async function synthesizeOAuthProviders(
   fallbackBaseUrl: string,
   timeoutMs: number,
   log: (level: "info" | "warn", msg: string, fields?: Record<string, unknown>) => void,
+  // Per-account upstream quota-header sink (providers page Tier 3). Bound per built
+  // client so the Codex `x-codex-*` window scrape knows which subscription it came
+  // from. Optional — absent in unit tests (no quota capture).
+  onQuotaHeaders?: (providerId: string, account: string, headers: Headers) => void,
 ): Promise<SynthesizedOAuth> {
   if (!oauthCtx) return { providers: [], poolClients: new Map() };
   const declared = new Set<string>(
@@ -324,12 +335,19 @@ export async function synthesizeOAuthProviders(
           : providerId === "openai-codex"
             ? { sessionId: stableSessionId(providerId, account, oauthCtx.encKey) }
             : undefined;
+      // Bind the quota-header scrape to THIS account (providers page Tier 3): the
+      // Codex client invokes it with each reply's headers; synthesis closes over the
+      // account so the snapshot is attributed correctly. undefined ⇒ no capture.
+      const onResponseMeta = onQuotaHeaders
+        ? (headers: Headers) => onQuotaHeaders(providerId, account, headers)
+        : undefined;
       const client = createProviderClient(
         accountConfig,
         { baseUrl: spec.baseUrl ?? fallbackBaseUrl, timeoutMs },
         cred,
         proxy,
         identity,
+        onResponseMeta,
       );
       members.push({ account, priority: s.priority ?? 50, schedulable: true, client });
     }
@@ -343,7 +361,13 @@ export async function synthesizeOAuthProviders(
     const pool = createOAuthPoolClient({
       members,
       now: () => Date.now(),
-      onSelect: (account) => log("info", "oauth.pool.select", { providerId, account }),
+      onSelect: (account) => {
+        log("info", "oauth.pool.select", { providerId, account });
+        // Stamp the per-request holder so the route's settle path can attribute
+        // today's usage to THIS subscription (providers page Tier 2). No-op when
+        // not inside a capture scope (fail-open; never throws).
+        markServingAccount(providerId, account);
+      },
     });
     poolClients.set(providerId, pool);
     providers.push({
@@ -489,6 +513,10 @@ function createProviderClient(
   // per account by synthesis (deterministic, never per-request): Anthropic carries
   // it as metadata.user_id; Codex as a stable session_id / prompt_cache_key.
   identity?: { metadataUserId?: string; sessionId?: string },
+  // Upstream response-header hook (providers page Tier 3 quota). Only the Codex
+  // client uses it today (its `x-codex-*` rate-limit windows are PUSHed on every
+  // reply); bound per-account by synthesis so the scrape knows which subscription.
+  onResponseMeta?: (headers: Headers) => void,
 ): ProviderClient {
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
@@ -504,7 +532,7 @@ function createProviderClient(
   // the dynamic OAuth header; a static key never drives this path.
   if (p.type === "openai-responses" && "getAuthHeader" in cred) {
     return createCodexResponsesClient({
-      config: { ...base, ...cred, sessionId: identity?.sessionId },
+      config: { ...base, ...cred, sessionId: identity?.sessionId, onResponseMeta },
       fetch: proxyFetch,
     });
   }
@@ -701,6 +729,17 @@ export async function buildServer(
   // wired with the same base/timeout + its own proxy. The pool clients override any
   // single-name client for the same providerId in providerClients below.
   const synthBaseUrl = baseUrlOverride ?? fallbackBaseUrl;
+  // Codex quota-window scrape (providers page Tier 3): parse the `x-codex-*` headers
+  // off each Codex reply and snapshot them per account. FAIL-OPEN — a parse/store
+  // failure is swallowed (an observability scrape never breaks a served request).
+  const captureCodexQuota = (providerId: string, account: string, headers: Headers): void => {
+    const nowMs = Date.now();
+    const windows = parseCodexQuotaHeaders(headers, nowMs);
+    if (windows.length === 0) return; // no quota headers on this reply → nothing to store
+    void store.oauthQuota
+      .upsert({ providerId, account, windows, capturedAt: nowMs, source: "codex-headers" })
+      .catch(() => logger.log("error", "oauth.quota.capture_failed", { provider_id: providerId }));
+  };
   const synthesizedOAuth = await synthesizeOAuthProviders(
     config.providers,
     oauthCtx,
@@ -708,6 +747,7 @@ export async function buildServer(
     synthBaseUrl,
     timeoutMs,
     (lvl, msg, f) => logger.log(lvl, msg, f),
+    captureCodexQuota,
   );
   const routableProviders: ProviderConfigShared[] = [
     ...config.providers,
@@ -785,6 +825,7 @@ export async function buildServer(
           synthBaseUrl,
           timeoutMs,
           (lvl, msg, f) => logger.log(lvl, msg, f),
+          captureCodexQuota,
         );
         oauthPoolClients = next.poolClients;
         oauthAliasSet = aliasSetOf(next);
@@ -942,44 +983,85 @@ export async function buildServer(
   // `evalEnabled` is the per-request Layer-2 toggle (default OFF); it is bound
   // into the classify closure here so the orchestrator's `classify(req)` contract
   // stays single-arg and core remains unaware of the eval knob.
-  const route = (
+  const route = async (
     req: InternalRequest,
     routeOpts: RouteOptions,
     signal: AbortSignal,
     classifyOverrides?: { evalEnabled?: boolean; rulesThreshold?: number },
-  ) =>
-    routeRequest(
-      req,
-      {
-        classify: (r) => classify(r, classifyOverrides),
-        policies,
-        lanes,
-        execute: createExecute({
-          defaultProvider: provider,
-          providers: providerClients,
-          // Subscription aliases are gated authoritatively by the LIVE curation set +
-          // pool (fail-closed), bypassing the startup registry — so de-curation /
-          // disconnect take effect immediately and never cross provider boundaries.
-          knownOAuthPrefixes: ROUTABLE_OAUTH_IDS,
-          oauthAliases: () => oauthAliasSet,
-          registry,
-          breaker,
-          catalog,
-          now: () => Date.now(),
-          signal,
-          log: (level, msg, fields) => logger.log(level as "info", msg, fields),
-        }),
-        now: () => new Date(),
-        log: (record) => logger.log("info", "route.decision", { trace_id: record.request_id }),
-      },
-      routeOpts,
+  ) => {
+    // Capture which OAuth subscription served this request: the pool's onSelect
+    // fires synchronously inside routeRequest (selection + execute's first-chunk
+    // peek), so the ALS holder is populated by the time routeRequest resolves. We
+    // then thread the plain value out on the result — token recording in the route's
+    // settle path never relies on ALS surviving into Hono's deferred stream callback.
+    const { result, servingAccount } = await withServingAccountCapture(() =>
+      routeRequest(
+        req,
+        {
+          classify: (r) => classify(r, classifyOverrides),
+          policies,
+          lanes,
+          execute: createExecute({
+            defaultProvider: provider,
+            providers: providerClients,
+            // Subscription aliases are gated authoritatively by the LIVE curation set +
+            // pool (fail-closed), bypassing the startup registry — so de-curation /
+            // disconnect take effect immediately and never cross provider boundaries.
+            knownOAuthPrefixes: ROUTABLE_OAUTH_IDS,
+            oauthAliases: () => oauthAliasSet,
+            registry,
+            breaker,
+            catalog,
+            now: () => Date.now(),
+            signal,
+            log: (level, msg, fields) => logger.log(level as "info", msg, fields),
+          }),
+          now: () => new Date(),
+          log: (record) => logger.log("info", "route.decision", { trace_id: record.request_id }),
+        },
+        routeOpts,
+      ),
     );
+    return Object.assign(result, { servingAccount });
+  };
+
+  // Per-account OAuth subscription usage recorder (providers page Tier 2). Called
+  // from the route settle paths with the account captured on the result + the served
+  // alias + tokens/cost. FAIL-OPEN (principle 3): swallowed + logged, never 5xx's a
+  // served request. No-op for a non-OAuth request. `servedByAccount` guards against
+  // mis-attribution after a fallback: the pool marks the account at SELECTION time,
+  // so a stale OAuth account is dropped unless the FINAL served alias is actually
+  // that provider's (`<providerId>/<model>`). `dayMs` is UTC midnight (epoch ms is
+  // UTC, so `ms - ms % 86_400_000` floors to the day).
+  const recordOAuthUsage = (
+    servingAccount: ServingAccount | null,
+    servedAlias: string | null,
+    usage: { tokens: number; costUsd: number | null },
+  ): void => {
+    if (!servingAccount || !servedByAccount(servingAccount, servedAlias)) return;
+    const nowMs = Date.now();
+    void store.oauthUsage
+      .record({
+        providerId: servingAccount.providerId,
+        account: servingAccount.account,
+        dayMs: nowMs - (nowMs % 86_400_000),
+        tokens: usage.tokens,
+        costUsd: usage.costUsd,
+        nowMs,
+      })
+      .catch(() =>
+        logger.log("error", "oauth.usage.record_failed", {
+          provider_id: servingAccount.providerId,
+        }),
+      );
+  };
 
   registerChatRoutes(app, {
     route,
     telemetry,
     redact: (payload) => redact(payload),
     now: () => Date.now(),
+    recordOAuthUsage,
     // Full request/response capture + streamed-cost backfill. The getters read the
     // LIVE runtime settings so the admin toggle/retention apply without a restart.
     capturePayloads: () => settings.capture_payloads,
@@ -1082,6 +1164,11 @@ export async function buildServer(
             config: store.config,
           })
         : undefined,
+      // Per-account OAuth subscription observability stores (providers page): today's
+      // usage aggregate (Tier 2) + latest quota window snapshot (Tier 3). Read by the
+      // /oauth/usage + /oauth/quota admin routes (fail-open to empty when absent).
+      oauthUsage: store.oauthUsage,
+      oauthQuota: store.oauthQuota,
       // Hot-reload the routable OAuth pool after any admin mutation (proxy /
       // priority / schedulable / curation / connect / disconnect) so it applies on
       // the next request without a restart.
@@ -1114,6 +1201,7 @@ export async function buildServer(
     "anthropic_messages",
     { observe },
     pipelineBudget,
+    recordOAuthUsage,
   );
   // Inject the SAME per-key limiter instance the chat surface uses so the
   // Anthropic /v1/messages handler can meter per-key AFTER its self-auth (closes
@@ -1201,6 +1289,7 @@ export async function buildServer(
     "openai_responses",
     { observe },
     pipelineBudget,
+    recordOAuthUsage,
   );
   registerResponsesRoute(app, {
     // Same per-key limiter, same cast rationale as the messages route above —
@@ -1259,7 +1348,13 @@ export async function buildServer(
   // Gemini transformer for IR↔native translation + the Gemini error envelope. Self-
   // auth (x-goog-api-key preferred, Bearer fallback) so a missing key is rejected as
   // a Gemini error envelope (docs/05, docs/07).
-  const geminiPipeline = createMessagesPipeline(route, "gemini", { observe }, pipelineBudget);
+  const geminiPipeline = createMessagesPipeline(
+    route,
+    "gemini",
+    { observe },
+    pipelineBudget,
+    recordOAuthUsage,
+  );
   registerGeminiRoute(app, {
     rateLimiter,
     auth: {

@@ -38,6 +38,13 @@ export interface CodexResponsesClientConfig {
   // Overrides the default Codex-client User-Agent (openclaw proves a custom UA is
   // accepted by the backend; the real first-party value is not required).
   userAgent?: string;
+  // Response-metadata hook (providers page Tier 3 quota). Invoked with the upstream
+  // response Headers AS SOON AS they resolve — BEFORE any SSE chunk is read — so the
+  // caller can scrape the `x-codex-*` rate-limit window headers without buffering or
+  // perturbing the streamed body (Principle 8). MUST be cheap + non-throwing (the
+  // caller wraps its own fail-open); a throw here is swallowed so it never breaks a
+  // served request.
+  onResponseMeta?: (headers: Headers) => void;
 }
 
 export interface CodexResponsesClientDeps {
@@ -312,6 +319,19 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     }
   }
 
+  // Scrape the upstream rate-limit window headers (providers page Tier 3) the moment
+  // the response resolves — headers are available before any SSE chunk is read, so
+  // this never buffers or perturbs the streamed body (Principle 8). Fail-open: a
+  // throwing hook is swallowed (a quota-scrape must never break a served request).
+  function fireResponseMeta(res: Response): void {
+    if (!cfg.onResponseMeta) return;
+    try {
+      cfg.onResponseMeta(res.headers);
+    } catch {
+      /* fail-open: quota observability never breaks the request */
+    }
+  }
+
   async function requestWithRetry(
     body: Record<string, unknown>,
     external?: AbortSignal,
@@ -320,8 +340,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     if (res.status === 401 && cfg.onUnauthorized !== undefined) {
       await res.body?.cancel().catch(() => {});
       cfg.onUnauthorized();
-      return await request(body, external);
+      const retried = await request(body, external);
+      fireResponseMeta(retried);
+      return retried;
     }
+    fireResponseMeta(res);
     return res;
   }
 

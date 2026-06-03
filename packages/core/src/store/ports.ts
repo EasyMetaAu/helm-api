@@ -4,6 +4,8 @@ import type {
   MemoryMessageInput,
   MemoryObservationInput,
   MemoryThreadInput,
+  OAuthQuotaSnapshot,
+  OAuthUsageRow,
   Observation,
   RawMessage,
   Reflection,
@@ -313,6 +315,42 @@ export interface OAuthTokenRecord {
   expiresAt: number | null; // ms epoch the access token expires; null = unknown
   meta: string | null; // provider-specific JSON (e.g. copilot proxy base / enterprise host)
   updatedAt: number; // ms epoch of the last write (rotation timestamp)
+}
+
+// Per-account OAuth subscription USAGE aggregate (providers-page Tier 2). One row
+// per (provider_id, account, day) — `day` is the UTC-midnight epoch ms. This is an
+// OBSERVABILITY artifact, NOT a quota/security boundary, so both methods are
+// FAIL-OPEN at the call site (a write/read failure is swallowed + logged, never
+// 5xx's a served request nor breaks the admin page — Principle 3). `record` is an
+// additive upsert (requests+1, tokens+=, cost null-aware) fired once per served
+// OAuth call. NEVER a plaintext key / payload — only aggregate counters (principle 7).
+export interface OAuthUsageStore {
+  // Fold one served call into today's row: +1 request, +tokens, +costUsd (null
+  // stays null until a measured cost arrives — flat-rate plans report no cost).
+  // `firstSeenMs` is taken as the MIN across calls (anchors daily-average RPM).
+  record(input: {
+    providerId: string;
+    account: string;
+    dayMs: number; // UTC-midnight epoch ms (caller floors `now`)
+    tokens: number;
+    costUsd: number | null;
+    nowMs: number; // epoch ms of this call (firstSeenMs / updatedAt source)
+  }): Promise<void>;
+  // All accounts' aggregate rows for one UTC day (the providers page reads today).
+  queryDay(dayMs: number): Promise<OAuthUsageRow[]>;
+}
+
+// Per-account OAuth subscription QUOTA snapshot (providers-page Tier 3). One row
+// per (provider_id, account): the LATEST rate-limit window snapshot, sourced either
+// from Anthropic's on-demand usage endpoint (PULL) or Codex response headers (PUSH).
+// OBSERVABILITY only — FAIL-OPEN both ways (a stale/missing snapshot renders "—",
+// never an error). `upsert` overwrites the single row (latest wins); no history.
+export interface OAuthQuotaStore {
+  upsert(snapshot: OAuthQuotaSnapshot): Promise<void>;
+  // The latest snapshot for one account, or null if none captured yet.
+  get(providerId: string, account: string): Promise<OAuthQuotaSnapshot | null>;
+  // All accounts' latest snapshots (the providers page reads them in one shot).
+  getAll(): Promise<OAuthQuotaSnapshot[]>;
 }
 
 export interface OAuthTokenStore {

@@ -196,8 +196,45 @@ export const oauthTokens = pgTable(
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );
 
+// Per-account OAuth subscription USAGE aggregate (providers page Tier 2) — pg
+// mirror of the sqlite oauth_usage table. Additive daily counters per
+// (provider_id, account, day); day = UTC-midnight epoch ms (bigint). cost_usd
+// double precision nullable (flat-rate plans report no cost). Pure aggregate
+// observability — no key/payload column (principle 7).
+export const oauthUsage = pgTable(
+  "oauth_usage",
+  {
+    providerId: text("provider_id").notNull(),
+    account: text("account").notNull(),
+    day: bigint("day", { mode: "number" }).notNull(), // UTC-midnight epoch ms
+    requests: integer("requests").notNull(),
+    tokens: bigint("tokens", { mode: "number" }).notNull(),
+    costUsd: doublePrecision("cost_usd"), // nullable; summed completion cost
+    firstSeenMs: bigint("first_seen_ms", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.providerId, t.account, t.day] })],
+);
+
+// Per-account OAuth subscription QUOTA snapshot (providers page Tier 3) — pg
+// mirror of the sqlite oauth_quota table. windows stored as jsonb (native);
+// latest-wins upsert per (provider_id, account). No secret column.
+export const oauthQuota = pgTable(
+  "oauth_quota",
+  {
+    providerId: text("provider_id").notNull(),
+    account: text("account").notNull(),
+    windows: jsonb("windows").$type<unknown[]>().notNull(), // OAuthQuotaWindow[]
+    capturedAt: bigint("captured_at", { mode: "number" }).notNull(),
+    source: text("source").notNull(), // 'anthropic' | 'codex-headers'
+  },
+  (t) => [primaryKey({ columns: [t.providerId, t.account] })],
+);
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
+export type OAuthUsageTable = typeof oauthUsage;
+export type OAuthQuotaTable = typeof oauthQuota;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
 export type UsageBudgetBucketsTable = typeof usageBudgetBuckets;
 export type RoutingSignalsTable = typeof routingSignals;

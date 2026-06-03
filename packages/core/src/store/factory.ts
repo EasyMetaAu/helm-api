@@ -5,7 +5,9 @@ import type {
   ConfigStore,
   KeyStore,
   MemoryStore,
+  OAuthQuotaStore,
   OAuthTokenStore,
+  OAuthUsageStore,
   RateLimitStore,
   SignalStore,
   TelemetryStore,
@@ -15,7 +17,9 @@ import { PgConfigStore } from "./postgres/config-store.js";
 import { PgKeyStore } from "./postgres/keystore.js";
 import { PgMemoryStore } from "./postgres/memory-store.js";
 import { createPgDb } from "./postgres/migrate.js";
+import { PgOAuthQuotaStore } from "./postgres/oauth-quota.js";
 import { PgOAuthTokenStore } from "./postgres/oauth-tokens.js";
+import { PgOAuthUsageStore } from "./postgres/oauth-usage.js";
 import { PgRateLimitStore } from "./postgres/rate-limit.js";
 import { PgSignalStore } from "./postgres/signals.js";
 import { PgTelemetryStore } from "./postgres/telemetry.js";
@@ -24,7 +28,9 @@ import { SqliteConfigStore } from "./sqlite/config-store.js";
 import { SqliteKeyStore } from "./sqlite/keystore.js";
 import { SqliteMemoryStore } from "./sqlite/memory-store.js";
 import { createSqliteDb } from "./sqlite/migrate.js";
+import { SqliteOAuthQuotaStore } from "./sqlite/oauth-quota.js";
 import { SqliteOAuthTokenStore } from "./sqlite/oauth-tokens.js";
+import { SqliteOAuthUsageStore } from "./sqlite/oauth-usage.js";
 import { SqliteRateLimitStore } from "./sqlite/rate-limit.js";
 import { SqliteSignalStore } from "./sqlite/signals.js";
 import { SqliteTelemetryStore } from "./sqlite/telemetry.js";
@@ -42,6 +48,10 @@ export interface StoreSet {
   readonly memory: MemoryStore;
   readonly config: ConfigStore;
   readonly oauthTokens: OAuthTokenStore;
+  // Per-account OAuth subscription observability (providers page). usage = today's
+  // served traffic; quota = latest rate-limit window snapshot. Both fail-open.
+  readonly oauthUsage: OAuthUsageStore;
+  readonly oauthQuota: OAuthQuotaStore;
   readonly close: () => Promise<void>;
 }
 
@@ -76,6 +86,8 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         memory: new SqliteMemoryStore(db),
         config: new SqliteConfigStore(db),
         oauthTokens: new SqliteOAuthTokenStore(db),
+        oauthUsage: new SqliteOAuthUsageStore(db),
+        oauthQuota: new SqliteOAuthQuotaStore(db),
         close: async () => {
           db.$sqlite.close();
         },
@@ -98,6 +110,8 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         memory: new PgMemoryStore(db),
         config: new PgConfigStore(db),
         oauthTokens: new PgOAuthTokenStore(db),
+        oauthUsage: new PgOAuthUsageStore(db),
+        oauthQuota: new PgOAuthQuotaStore(db),
         close: () => db.$close(),
       };
     }

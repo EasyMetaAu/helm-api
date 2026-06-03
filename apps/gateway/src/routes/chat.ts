@@ -22,6 +22,7 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
+import type { ServingAccount } from "../runtime/serving-account.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import {
   backfillCompletionCost,
@@ -51,10 +52,20 @@ export interface ChatRouteDeps {
     opts: RouteOptions,
     signal: AbortSignal,
     classifyOverrides?: { evalEnabled?: boolean; rulesThreshold?: number },
-  ) => Promise<ExecutionResult>;
+  ) => Promise<ExecutionResult & { servingAccount?: ServingAccount | null }>;
   telemetry: TelemetryStore;
   redact: (payload: unknown) => unknown;
   now: () => number;
+  /** Per-account OAuth subscription usage recorder (providers page Tier 2).
+   *  Optional — absent in unit tests. Called once per served request from the
+   *  settle path with the subscription that served it (null for a configured /
+   *  non-OAuth provider) + the served tokens/cost. Fail-open in the composition
+   *  root (a record failure never 5xx's a served request). */
+  recordOAuthUsage?: (
+    servingAccount: ServingAccount | null,
+    servedAlias: string | null,
+    usage: { tokens: number; costUsd: number | null },
+  ) => void;
   /** Full request/response capture + streamed-cost backfill wiring. Optional so
    *  test deps can omit it; when present, governs payload storage (capture_payloads)
    *  and streamed completion-cost backfill (#6). */
@@ -325,7 +336,18 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // settle failure is logged, never 5xx's a served request nor breaks a stream.
     // Self-gates: no-op when no budget dep is wired. Charges the SETTLED total_usd
     // (never recomputed) + actual served tokens + 1 request.
+    // Captured from the route result (the subscription the pool selected, or null
+    // for a configured/non-OAuth provider) so the settle path can attribute usage.
+    let servingAccount: ServingAccount | null = null;
     const settle = async (decision: DecisionRecord, tokens: number) => {
+      // Per-account OAuth usage (providers page Tier 2) — recorded for EVERY served
+      // request, independent of whether usage budgets are wired. The served alias is
+      // passed so the recorder can drop a STALE account after a fallback (the pool
+      // marks at selection time). completion_usd is null for flat-rate subscriptions.
+      deps.recordOAuthUsage?.(servingAccount, decision.final.model_alias, {
+        tokens,
+        costUsd: decision.cost_breakdown.completion_usd,
+      });
       if (deps.settleBudget === undefined || identity.caps?.budget === undefined) return;
       try {
         await deps.settleBudget(
@@ -413,6 +435,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       c.req.raw.signal,
       classifyOverrides,
     );
+    // The subscription the pool selected (null for a configured/non-OAuth provider),
+    // threaded out on the result so the settle path can attribute usage (Tier 2).
+    servingAccount = result.servingAccount ?? null;
 
     // Routing-signal debug headers (read by e2e + operators): the lane the
     // pipeline selected and the model it finally landed on. These expose the

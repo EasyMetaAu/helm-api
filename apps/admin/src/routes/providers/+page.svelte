@@ -1,31 +1,52 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
-  import { logoutOAuth, type OAuthAccount, type OAuthProviderStatus } from '$lib/api/oauth.js';
+  import {
+    logoutOAuth,
+    setAccountSchedule,
+    type OAuthAccount,
+    type OAuthProviderStatus,
+    type OAuthQuotaSnapshot,
+    type OAuthUsageRow,
+  } from '$lib/api/oauth.js';
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
   import ManageAccountDialog from '$lib/components/ManageAccountDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
   // Subscription OAuth login (issue #38). Pure consumer (Principle 1): the gateway
-  // owns the flow + encrypted token storage; this page just lists connected
-  // accounts, opens the Connect dialog, and the per-account Manage dialog (model
-  // curation / egress proxy / pool scheduling). Multiple accounts per provider are
-  // supported (the store is keyed by provider + account label).
+  // owns the flow + encrypted token storage; this page lists connected accounts and
+  // now their day-to-day operating signals — today's usage, remaining quota windows,
+  // pool priority + schedulable — with inline edits for the routing knobs. Usage and
+  // quota are fail-open observability (absent ⇒ rendered as "—"), so a flaky stats
+  // endpoint never breaks the page.
   let {
     data,
-  }: { data: { configured: boolean; providers: OAuthProviderStatus[]; loadError?: string } } =
-    $props();
+  }: {
+    data: {
+      configured: boolean;
+      providers: OAuthProviderStatus[];
+      usage: OAuthUsageRow[];
+      quota: OAuthQuotaSnapshot[];
+      loadError?: string;
+    };
+  } = $props();
 
   let error = $state<string | null>(untrack(() => data.loadError ?? null));
   let showConnect = $state<boolean>(false);
-  // The account whose Manage dialog is open ({#if} remounts it per selection so the
-  // dialog's per-section editing buffers reset cleanly each time).
   let managing = $state<{ providerId: string; providerName: string; account: string } | null>(null);
   let confirming = $state<{ providerId: string; account: string } | null>(null);
   let disconnecting = $state<boolean>(false);
+  // Accounts whose inline schedule edit is in flight (keyed provider/account) — used
+  // to disable the control while saving without blocking the rest of the table.
+  let savingSchedule = $state<Record<string, boolean>>({});
 
-  // One table row per connected account, flattened across providers.
+  const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
+
+  // One table row per connected account, flattened across providers, joined to its
+  // usage + quota snapshot (both fail-open: a missing entry renders "—").
+  let usageByKey = $derived(new Map(data.usage.map((u) => [keyOf(u.providerId, u.account), u])));
+  let quotaByKey = $derived(new Map(data.quota.map((q) => [keyOf(q.providerId, q.account), q])));
   let rows = $derived(
     data.providers.flatMap((p) => p.accounts.map((account) => ({ provider: p, account }))),
   );
@@ -34,9 +55,19 @@
     return data.providers.find((p) => p.id === id)?.name ?? id;
   }
 
-  // The access token is short-lived and auto-renewed by the gateway, so a lapsed
-  // one is NOT an alarm — show "auto-renews" rather than a scary "expired". When
-  // valid, show the remaining time as a hint of when it next renews.
+  // A short "platform · auth" pill so the supply-chain shape is legible at a glance
+  // (Claude Max / Codex / Copilot + how it authenticates) without exposing the model
+  // market (Principle 6 — provider aliases stay internal).
+  function typeBadge(p: OAuthProviderStatus): string {
+    if (p.id === 'anthropic') return `${$t('Claude Max')} · OAuth`;
+    if (p.id === 'openai-codex') return `Codex · OAuth`;
+    if (p.id === 'github-copilot') return `Copilot · ${$t('Device')}`;
+    return p.flow === 'device_code' ? $t('Device') : 'OAuth';
+  }
+
+  // The access token is short-lived and auto-renewed by the gateway, so a lapsed one
+  // is NOT an alarm — show "auto-renews"; when valid, the remaining time hints at the
+  // next renewal.
   function expiryLabel(a: OAuthAccount): string {
     if (a.expiresAt == null) return $t('auto-renews');
     const ms = a.expiresAt - Date.now();
@@ -46,17 +77,99 @@
     return h > 0 ? $t('in {h}h {m}m', { h, m }) : $t('in {m}m', { m });
   }
 
+  // Compact token formatting (240.09M / 18.2k / 412) so a dense cell stays readable.
+  function fmtTokens(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+    return String(n);
+  }
+
+  // Cost is null for flat-rate subscriptions (unpriced) — show "—", not "$0".
+  function fmtCost(n: number | null): string {
+    if (n == null) return '—';
+    return n >= 0.01 || n === 0 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
+  }
+
+  // Friendly window labels (provider-specific keys → display).
+  function windowLabel(key: string): string {
+    const map: Record<string, string> = {
+      '5h': '5h',
+      '7d': '7d',
+      '7d-opus': '7d · Opus',
+      primary: $t('Primary'),
+      secondary: $t('Secondary'),
+    };
+    return map[key] ?? key;
+  }
+
+  // Color ramp mirrors claude-relay: calm under 75%, warning to 90%, danger beyond.
+  function barColor(pct: number): string {
+    if (pct >= 90) return 'bg-red-500';
+    if (pct >= 75) return 'bg-amber-500';
+    return 'bg-indigo-500';
+  }
+
+  // "resets in 3h 12m" countdown from an absolute reset timestamp; null/elapsed ⇒ "".
+  function resetIn(ms: number | null): string {
+    if (ms == null) return '';
+    const left = ms - Date.now();
+    if (left <= 0) return '';
+    const h = Math.floor(left / 3_600_000);
+    const m = Math.floor((left % 3_600_000) / 60_000);
+    return h > 0 ? $t('resets in {h}h {m}m', { h, m }) : $t('resets in {m}m', { m });
+  }
+
   function onConnected(): void {
     showConnect = false;
     void invalidateAll();
   }
 
-  // The Manage dialog persists each section itself; on close it tells us whether any
-  // section changed so we invalidate exactly once (the Lanes catalog / pool reflect
-  // the new model exposure + schedulable membership).
   function onManaged(): void {
     managing = null;
     void invalidateAll();
+  }
+
+  // Inline schedule edits reuse the existing PUT seam; on success the route hot-rebuilds
+  // the pool, so we invalidateAll to reflect the live priority/parked state. A 503
+  // "saved but not applied" (or any error) surfaces via `error` without losing the page.
+  async function savePriority(providerId: string, account: string, raw: string): Promise<void> {
+    // Reject what the Manage dialog + API also reject: priority is a NON-NEGATIVE
+    // integer. `Number` (not parseInt) so "1.9" fails instead of silently truncating
+    // to 1, and "-1" is refused (a negative priority would always win pool scheduling).
+    const priority = Number(raw);
+    if (!Number.isInteger(priority) || priority < 0) {
+      error = $t('Priority must be a non-negative integer');
+      return;
+    }
+    const k = keyOf(providerId, account);
+    savingSchedule = { ...savingSchedule, [k]: true };
+    error = null;
+    try {
+      await setAccountSchedule(providerId, account, { priority });
+      await invalidateAll();
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to update scheduling');
+    } finally {
+      savingSchedule = { ...savingSchedule, [k]: false };
+    }
+  }
+
+  async function toggleSchedulable(
+    providerId: string,
+    account: string,
+    schedulable: boolean,
+  ): Promise<void> {
+    const k = keyOf(providerId, account);
+    savingSchedule = { ...savingSchedule, [k]: true };
+    error = null;
+    try {
+      await setAccountSchedule(providerId, account, { schedulable });
+      await invalidateAll();
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to update scheduling');
+    } finally {
+      savingSchedule = { ...savingSchedule, [k]: false };
+    }
   }
 
   async function confirmDisconnect(): Promise<void> {
@@ -135,28 +248,113 @@
         <thead class="table-head">
           <tr>
             <th class="px-3 py-2">{$t('Provider')}</th>
-            <th class="px-3 py-2">{$t('Account')}</th>
             <th class="px-3 py-2">{$t('Status')}</th>
+            <th class="px-3 py-2">{$t('Today')}</th>
+            <th class="px-3 py-2">{$t('Quota')}</th>
+            <th class="px-3 py-2">{$t('Priority')}</th>
+            <th class="px-3 py-2">{$t('Schedulable')}</th>
             <th class="px-3 py-2">{$t('Expires')}</th>
             <th class="px-3 py-2"></th>
           </tr>
         </thead>
         <tbody>
-          {#each rows as row (row.provider.id + '/' + row.account.account)}
-            <tr class="table-row">
-              <td class="px-3 py-2 text-ink-body">{row.provider.name}</td>
-              <td class="px-3 py-2">
-                <code class="font-mono text-ink-strong">{row.account.account}</code>
+          {#each rows as row (keyOf(row.provider.id, row.account.account))}
+            {@const k = keyOf(row.provider.id, row.account.account)}
+            {@const usage = usageByKey.get(k)}
+            {@const quota = quotaByKey.get(k)}
+            {@const saving = savingSchedule[k] === true}
+            <tr class="table-row align-top">
+              <!-- Provider / account + type badge -->
+              <td class="px-3 py-3">
+                <div class="font-medium text-ink-body">{row.provider.name}</div>
+                <code class="font-mono text-xs text-ink-strong">{row.account.account}</code>
+                <div class="mt-1"><span class="badge-neutral">{typeBadge(row.provider)}</span></div>
               </td>
-              <td class="px-3 py-2">
+
+              <!-- Status (+ parked pill) -->
+              <td class="px-3 py-3">
                 {#if row.account.healthy}
                   <span class="badge-ok">{$t('connected')}</span>
                 {:else}
-                  <span class="badge-neutral">{$t('needs reconnect')}</span>
+                  <span class="badge-error">{$t('needs reconnect')}</span>
+                {/if}
+                {#if !row.account.schedulable}
+                  <div class="mt-1"><span class="badge-neutral">{$t('parked')}</span></div>
                 {/if}
               </td>
-              <td class="px-3 py-2 text-ink-muted">{expiryLabel(row.account)}</td>
-              <td class="px-3 py-2 text-right">
+
+              <!-- Today's usage -->
+              <td class="px-3 py-3 text-xs">
+                {#if usage && usage.requests > 0}
+                  <div class="text-ink-body">{$t('{n} req', { n: usage.requests })}</div>
+                  <div class="text-ink-muted">{fmtTokens(usage.tokens)} tok</div>
+                  <div class="text-ink-muted">{fmtCost(usage.costUsd)}</div>
+                  <div class="text-ink-muted">{usage.rpm} RPM</div>
+                {:else}
+                  <span class="text-ink-muted">—</span>
+                {/if}
+              </td>
+
+              <!-- Quota / session windows -->
+              <td class="px-3 py-3">
+                {#if quota && quota.windows.length > 0}
+                  <div class="flex w-40 flex-col gap-1.5">
+                    {#each quota.windows as w (w.key)}
+                      <div>
+                        <div class="flex items-center justify-between text-xs text-ink-muted">
+                          <span>{windowLabel(w.key)}</span>
+                          <span>{Math.round(w.usedPercent)}%</span>
+                        </div>
+                        <div class="progress-track">
+                          <div
+                            class={`progress-bar ${barColor(w.usedPercent)}`}
+                            style={`width:${Math.min(100, Math.max(2, w.usedPercent))}%`}
+                          ></div>
+                        </div>
+                        {#if resetIn(w.resetsAtMs)}
+                          <div class="text-[10px] text-ink-muted">{resetIn(w.resetsAtMs)}</div>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {:else}
+                  <span class="text-xs text-ink-muted">—</span>
+                {/if}
+              </td>
+
+              <!-- Priority (inline, lower = served first) -->
+              <td class="px-3 py-3">
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  class="w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50"
+                  value={row.account.priority}
+                  disabled={saving}
+                  aria-label={$t('Priority')}
+                  onchange={(e) =>
+                    savePriority(row.provider.id, row.account.account, e.currentTarget.value)}
+                />
+              </td>
+
+              <!-- Schedulable (inline toggle) -->
+              <td class="px-3 py-3">
+                <input
+                  type="checkbox"
+                  class="h-4 w-4 disabled:opacity-50"
+                  checked={row.account.schedulable}
+                  disabled={saving}
+                  aria-label={$t('Schedulable')}
+                  onchange={(e) =>
+                    toggleSchedulable(row.provider.id, row.account.account, e.currentTarget.checked)}
+                />
+              </td>
+
+              <!-- Token expiry -->
+              <td class="px-3 py-3 text-ink-muted">{expiryLabel(row.account)}</td>
+
+              <!-- Actions -->
+              <td class="px-3 py-3 text-right">
                 <div class="inline-flex gap-2">
                   <button
                     type="button"
