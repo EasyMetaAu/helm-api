@@ -5,6 +5,24 @@
 
 ---
 
+## 2026-06-03 · P7 多模态 I/O 全量 + 能力感知路由 (litellm parity, spec docs/05 + docs/02)
+
+**Context**: 第 7 阶段 — 四协议端到端的音频/视频/文档 **输入** 与模型生成的图像/音频 **输出**，外加按 modality 路由。
+
+**关键发现（OpenAI 近 identity 的隐藏缺口）**: OpenAI 客户端发送的是 NATIVE content part（`image_url` / `input_audio` / `file`），它们 **不是** 合法的 IRContentPart 判别值（IR 用 `image`/`audio`/`document`）。此前 `openai.ts` 的 “identity” 路径会让带 `image_url` 的真实 OpenAI 请求 **直接 Zod 解析失败**（matrix 测试用 IR 形状冒充 OpenAI native 才掩盖了这一点）。新增 `nativePartToIR` / `irPartToNative` 双向归一化：`image_url↔image`、`input_audio↔audio`、`file↔document`（PDF data-url ↔ document base64+mediaType）。
+
+**Anthropic**: 入站 `document` block（base64 PDF/text 或 url）→ IR document part，出站反向；模型生成图像双向往返 `IRMessage.images ↔ image content block`。Anthropic Messages 今天没有 audio/video content block，故请求路径不发 audio/video。
+
+**Gemini**: 入站 `inlineData` 改为 **按 MIME 路由**（image/audio/video/document），而非一律 image；新增 `fileData{mimeType,fileUri}` + `videoMetadata{fps,startOffset,endOffset}` → IR video/document。出站 IR audio/document → inlineData（远程 document uri → fileData），IR video → fileData+videoMetadata（gs:// / Files-API uri）或内联 base64。**保留 issue #49 决定**：远程 http(s) 图片仍降级为显式文本占位符（任意 web 图片不是 Gemini 可访问的 fileData uri；只有 gs:// / Files-API 引用才用 fileData）。
+
+**能力感知路由**: 给 capabilities schema 加可选 `modalities: (audio|video|document)[]`（image 仍由 `supportsVision` 把关）。filter 新增 `no_audio_support`/`no_video_support`/`no_document_support` 跳过原因，置于 vision 之后、固定短路顺序。网关从 native OpenAI content part（`input_audio`/`file`）+ IR 归一化 part 检测请求 modality，喂给每个候选的能力门。`skip_reason` 在 DecisionRecord 里本就是自由字符串，无需改枚举。`capabilities.yaml` 文档化该字段并标注 Gemini(audio/video/document)、Claude(document)。
+
+**权衡**: IR 没有 image_url 的 `detail` 字段（low/high/auto）——目前丢弃（litellm 也不在 IR hub 保留）；若需要再进 provider_raw。Gemini 远程 audio fileData 暂作 document 处理（IR audio 仅内联 base64，无远程 uri 之家）。
+
+**Verified**: `pnpm typecheck` 全绿；`packages/core` 1211、`packages/core/src/protocol` 351、gateway execute/chat 全绿；biome 干净。4 个 green commit（slice A/B/C/D）。
+
+---
+
 ## 2026-06-03 · Providers page: per-account usage, quota windows, priority/schedulable (docs/06, #38)
 
 **Context**: `/admin/providers` showed only provider/account/status/expiry. The operator runs
