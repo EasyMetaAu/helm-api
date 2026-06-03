@@ -5,6 +5,68 @@
 
 ---
 
+## 2026-06-03 · litellm-parity 收官：parity 计分卡 + 文档同步 (P9, spec docs/05)
+
+P9 是纯文档：把 Phases 2–8 的成果写进 docs/05、新建 `docs/protocol-compatibility.md`（逐对数据丢失矩阵）、
+更新 README（中英），并给出 parity 计分卡。无任何代码逻辑改动；`pnpm typecheck` 仍须通过。
+
+**Parity 计分卡**（litellm 字段覆盖的粗略百分比，升级前→升级后）：
+
+| 协议 | 升级前 | 升级后 |
+|---|---|---|
+| OpenAI Chat | 72 | 95 |
+| Anthropic Messages | 62 | 90 |
+| OpenAI Responses | 72 | 90 |
+| Gemini | 55–60 | 88 |
+
+升级把四面的采样/控制旋钮、usage 明细（reasoning/cache/逐模态）、reasoning/thinking 跨协议统一、
+全量多模态 I/O，以及 finish_reason 两向枚举映射补齐到 IR 中枢；剩余缺口主要是 provider 专属的边角
+（Vertex 专属字段、Responses 有状态会话 `previous_response_id` 的真正续接、远端 http(s) 图片在 Gemini
+出站的拉取——见下「已知非目标」）。
+
+**关键策略（写进 docs，便于复查）**：
+
+- **n>1 reject-clean**：单候选后端（Anthropic）把 `n>1` 钳到 1 + `n_capped` 警告；多候选后端
+  （OpenAI/Gemini candidateCount）原生支持，无 guard。降级而非报错。
+- **provider_raw 透传清单**（无损、绝不上 wire；无法映射的上游数据归宿）：
+  - 通用：`stop_reason`（finish_reason 原值）、原始 `usage`。
+  - OpenAI：`system_fingerprint`。
+  - Anthropic：`stop_details`（Sonnet 4+）、请求侧 `metadata`、per-message thinking 块。
+  - Responses：响应 `reasoning`/`text`/`tool_choice` echo；请求 `store`/`previous_response_id`/
+    `metadata`/`logit_bias`；旧式 `function_call`（legacy OpenAI 字段）映射到 `tool_use`/tool_calls。
+  - Gemini：`safetyRatings`、`promptFeedback`（请求侧 `safetySettings`/`thinkingConfig` 透传）。
+  - guard 警告：`provider_raw.warnings`（n_capped / data_loss）。
+  - 注：litellm 的 Vertex 专属旋钮（labels / inference_geo / container）当前**未**接入本仓库的
+    Gemini 面；Gemini 透传的是 `safetySettings`/`thinkingConfig`。`anthropic-beta` 头是 provider 执行层
+    （OAuth）的事，不属于协议互译的 provider_raw。
+- **能力门控的多模态**：`capabilities.yaml.modalities`（audio|video|document）声明 text+image 之外的额外
+  输入模态；请求带某模态时只路由到声明它的后端，否则 `no_{audio,video,document}_support` 显式跳过。
+  内置：Gemini = audio/video/document，Claude = document。
+
+## 2026-06-03 · litellm-parity Phases 2–6：四协议字段对齐 + reasoning 统一 (spec docs/05)
+
+> P7（多模态）/ P8（互译加固）各有独立条目（见下）。本条覆盖 P2–P6。
+
+- **P2 Gemini**：采样旋钮 ↔ `generationConfig`（topP/topK/candidateCount/responseLogprobs/
+  responseModalities/thinkingConfig）双向；`thoughtsTokenCount → reasoning_tokens`，逐模态 token 明细，
+  `groundingMetadata`/`citationMetadata → annotations`，`logprobsResult → IRChoice.logprobs`；finishReason
+  枚举补全；`safetySettings`/`thinkingConfig` 透传，`safetyRatings`/`promptFeedback → provider_raw`；
+  流式 thought ↔ `delta.reasoning_content`。
+- **P3 OpenAI Chat**：采样旋钮经 identity 直通；响应补 `logprobs`/`completion_tokens_details`/`created`/
+  `system_fingerprint`；`finish_reason` 映合法枚举，原值留 `provider_raw.stop_reason`。
+- **P4 Anthropic**：请求接 `top_p`/`top_k`/thinking-config/`metadata`/`service_tier` + per-block
+  `cache_control`；`stop_sequences ↔ stop`，thinking ↔ IR.thinking，`reasoning_effort` 推 budget；响应补
+  结构化 `cache_creation` + `thinking_tokens`；`STOP_REASON` 两向（refusal→content_filter、pause_turn→stop），
+  `stop_details` 透传。
+- **P5 Responses**：请求加采样旋钮 + Responses-only（store/previous_response_id/metadata/logit_bias →
+  provider_raw）；usage 接 cache_creation + reasoning_tokens；流式新增 reasoning summary 事件 + 中途
+  上游失败的结构化 `error` 帧（错误后不再发 `response.completed`）。
+- **P6 Reasoning 统一桥**（`protocol/reasoning.ts`）：把 `{type:"thinking"}` 内容部件与扁平
+  `message.reasoning_content` 两套形状互桥，每个 transformer 同写同读，跨协议 reasoning 不再丢/漏。
+
+**铁律**：finish_reason 在 IR 内是自由字符串；每协议两向补枚举，原值留 `provider_raw.stop_reason`；
+真正无法映射的上游数据进 `provider_raw`（无损），绝不发明字段。
+
 ## 2026-06-03 · P8 互译加固 + 4×4 协议矩阵 (litellm parity, spec docs/05)
 
 **Context**: 第 8 阶段 — 跨协议互译的“reject-clean”降级、数据丢失告警，以及把矩阵从 3 协议/6 路扩到 **4 协议/16 路（含 self 恒等路径）**。
