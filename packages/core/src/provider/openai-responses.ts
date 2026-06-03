@@ -30,6 +30,14 @@ export interface CodexResponsesClientConfig {
   onUnauthorized?: () => void; // 401 hook -> force token refresh, replay once
   currentSecrets?: () => string[]; // live token set for redaction
   timeoutMs?: number;
+  // Stable per-account session id (anti-ban / cache coherence). When set it rides on
+  // `session_id` + `x-client-request-id` headers and `prompt_cache_key` — the official
+  // Codex client keys its prompt cache on a stable session, so reuse one per account
+  // rather than minting a new one per request.
+  sessionId?: string;
+  // Overrides the default Codex-client User-Agent (openclaw proves a custom UA is
+  // accepted by the backend; the real first-party value is not required).
+  userAgent?: string;
 }
 
 export interface CodexResponsesClientDeps {
@@ -40,6 +48,12 @@ export interface CodexResponsesClientDeps {
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_INSTRUCTIONS = "You are a helpful assistant.";
 const ORIGINATOR = "helm"; // matches the OAuth login `originator` (openai-codex.ts)
+// Codex-client User-Agent. openclaw sends its own `openclaw (...)` UA and the backend
+// accepts it, so a first-party `codex_cli_rs` value is not required — only a UA that
+// presents as a Codex client. Overridable via config.userAgent. (Verified live: the
+// ChatGPT-account model allowlist is gated by the account's Codex ENTITLEMENT, not by
+// originator/UA/body — impersonating codex_cli_rs changed nothing.)
+const DEFAULT_USER_AGENT = "helm-codex/1.0.0";
 
 // ── account id from the access-token JWT (chatgpt_account_id claim) ───────────
 // Same recipe as the login-time capture in oauth/openai-codex.ts, applied at
@@ -156,21 +170,32 @@ function toResponsesInput(messages: Array<Record<string, unknown>>): ResponsesIt
   return out;
 }
 
-export function openaiToResponsesRequest(req: ChatCompletionRequest): Record<string, unknown> {
+export function openaiToResponsesRequest(
+  req: ChatCompletionRequest,
+  opts?: { sessionId?: string },
+): Record<string, unknown> {
   const r = req as Record<string, unknown>;
   const messages = Array.isArray(r.messages) ? (r.messages as Array<Record<string, unknown>>) : [];
   const body: Record<string, unknown> = {
     model: r.model,
-    // Codex backend constraints: store MUST be false, stream MUST be true.
+    // Codex backend constraints (ported from openclaw's known-good body): store MUST
+    // be false, stream MUST be true, and a store:false request MUST ask for the
+    // encrypted reasoning back (omitting `include` is rejected by the ChatGPT-account
+    // backend, surfaced misleadingly as "model not supported"). `text.verbosity` is
+    // part of the Codex request contract too. NOTE: we deliberately send NO
+    // `max_output_tokens` — openclaw omits it and the ChatGPT-account backend dislikes it.
     store: false,
     stream: true,
     instructions: buildInstructions(messages),
     input: toResponsesInput(messages),
+    text: { verbosity: "low" },
+    include: ["reasoning.encrypted_content"],
     tool_choice: "auto",
     parallel_tool_calls: true,
   };
+  // Stable per-account prompt cache key (matches the session id we send on headers).
+  if (opts?.sessionId) body.prompt_cache_key = opts.sessionId;
   if (typeof r.temperature === "number") body.temperature = r.temperature;
-  if (typeof r.max_tokens === "number") body.max_output_tokens = r.max_tokens;
   if (Array.isArray(r.tools)) {
     const tools = (r.tools as Array<Record<string, unknown>>).flatMap((t) => {
       const fn = (t.function ?? {}) as Record<string, unknown>;
@@ -229,14 +254,22 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   async function headers(): Promise<Record<string, string>> {
     const auth = await getAuthHeader();
     const token = auth.replace(/^Bearer /, "");
-    return {
+    const h: Record<string, string> = {
       "Content-Type": "application/json",
       accept: "text/event-stream",
       Authorization: `Bearer ${token}`,
       "chatgpt-account-id": codexAccountIdFromToken(token),
       originator: ORIGINATOR,
+      "User-Agent": cfg.userAgent ?? DEFAULT_USER_AGENT,
       "OpenAI-Beta": "responses=experimental",
     };
+    // The official Codex client carries a stable session id on both headers; reuse
+    // ours (per-account-stable) so the backend recognizes a coherent session.
+    if (cfg.sessionId) {
+      h.session_id = cfg.sessionId;
+      h["x-client-request-id"] = cfg.sessionId;
+    }
+    return h;
   }
 
   function scrub(raw: unknown): unknown {
@@ -315,7 +348,10 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   return {
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
-      const res = await requestWithRetry(openaiToResponsesRequest(req), opts?.signal);
+      const res = await requestWithRetry(
+        openaiToResponsesRequest(req, { sessionId: cfg.sessionId }),
+        opts?.signal,
+      );
       if (!res.ok) throw await errorFromResponse(res);
       // Codex is stream-only → aggregate the SSE into a single Chat response.
       return await aggregateResponsesStream(res, model);
@@ -323,7 +359,10 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
 
     async *chatCompletionStream(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
-      const res = await requestWithRetry(openaiToResponsesRequest(req), opts?.signal);
+      const res = await requestWithRetry(
+        openaiToResponsesRequest(req, { sessionId: cfg.sessionId }),
+        opts?.signal,
+      );
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateResponsesSSE(res, model);
     },

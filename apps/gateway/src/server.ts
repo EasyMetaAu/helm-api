@@ -75,6 +75,7 @@ import {
   loadAccountSettings,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
+import { anthropicMetadataUserId, stableSessionId } from "./oauth/device-identity.js";
 import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
@@ -310,11 +311,21 @@ export async function synthesizeOAuthProviders(
       const cred = buildCredential(accountConfig, oauthCtx);
       if (!cred) continue; // unreachable (token just refreshed) — fail-open guard
       const proxy = resolveProviderProxy(accountConfig, accountSettings);
+      // Stable per-account anti-ban identity (never rotates): Anthropic gets a
+      // metadata.user_id; Codex a stable session_id. Both deterministic from
+      // (providerId, account) salted by the at-rest key — no DB write-back.
+      const identity =
+        providerId === "anthropic"
+          ? { metadataUserId: anthropicMetadataUserId(providerId, account, oauthCtx.encKey) }
+          : providerId === "openai-codex"
+            ? { sessionId: stableSessionId(providerId, account, oauthCtx.encKey) }
+            : undefined;
       const client = createProviderClient(
         accountConfig,
         { baseUrl: spec.baseUrl ?? fallbackBaseUrl, timeoutMs },
         cred,
         proxy,
+        identity,
       );
       members.push({ account, priority: s.priority ?? 50, schedulable: true, client });
     }
@@ -470,18 +481,28 @@ function createProviderClient(
   // provider's upstream traffic tunnels through it via the executor's injected
   // `fetch` seam — invisible to the protocol layer. undefined ⇒ direct connection.
   proxy?: ProxyConfig,
+  // Stable per-account subscription identity (anti-ban, issue #38). Computed ONCE
+  // per account by synthesis (deterministic, never per-request): Anthropic carries
+  // it as metadata.user_id; Codex as a stable session_id / prompt_cache_key.
+  identity?: { metadataUserId?: string; sessionId?: string },
 ): ProviderClient {
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
   const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
   if (p.type === "anthropic") {
-    return createAnthropicClient({ config: { ...base, ...cred }, fetch: proxyFetch });
+    return createAnthropicClient({
+      config: { ...base, ...cred, metadataUserId: identity?.metadataUserId },
+      fetch: proxyFetch,
+    });
   }
   // ChatGPT Codex subscription: the OpenAI *Responses* protocol (stream-only,
   // ChatGPT identity headers, account-id decoded from the access-token JWT). Needs
   // the dynamic OAuth header; a static key never drives this path.
   if (p.type === "openai-responses" && "getAuthHeader" in cred) {
-    return createCodexResponsesClient({ config: { ...base, ...cred }, fetch: proxyFetch });
+    return createCodexResponsesClient({
+      config: { ...base, ...cred, sessionId: identity?.sessionId },
+      fetch: proxyFetch,
+    });
   }
   // GitHub Copilot is OpenAI-compatible, BUT: (1) it requires editor identity
   // headers on every call, and (2) its API host comes from the current token's

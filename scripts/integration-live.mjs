@@ -169,7 +169,10 @@ async function main() {
   cat('Telemetry, logging & redaction');
   {
     const list = await http('GET', '/admin/api/requests', { admin: true });
-    const row = Array.isArray(list.json) ? list.json.find((r) => r.trace_id === chatTrace || r.request_id === chatTrace) : null;
+    // /admin/api/requests is paginated → { items, total, page, pageSize }. Tolerate
+    // both that and a bare array (older builds) so the lookup survives either shape.
+    const rows = Array.isArray(list.json) ? list.json : (list.json?.items ?? []);
+    const row = rows.find((r) => r.trace_id === chatTrace || r.request_id === chatTrace) ?? null;
     check('chat request was persisted to telemetry', !!row, `trace=${chatTrace}`);
     if (row) {
       check('decision record has classifier+lane+attempts+final', !!(row.classifier && row.lane && Array.isArray(row.provider_attempts) && row.final));
@@ -202,6 +205,77 @@ async function main() {
       const del = await http('DELETE', `/admin/api/keys/${keyId}`, { admin: true });
       check('admin revoke key → 2xx', del.status >= 200 && del.status < 300, `status=${del.status}`);
     } else check('admin revoke key', 'skip', 'no key_id returned');
+  }
+
+  // ── Subscriptions (OAuth) end-to-end (docs/06,09 + issue #38) ────────────────
+  // Proves the OAuth subscription chain is actually STRUNG THROUGH, not just listed:
+  // connected providers → live model catalog → a real request that reaches each
+  // upstream. A connected provider passes iff ≥1 of its catalogued models serves a
+  // 200 from THAT provider; stale/invalid curated ids (upstream 4xx) are surfaced
+  // in the info string so a drifted list reads as a data problem, not a dead chain.
+  cat('Subscriptions (OAuth)');
+  {
+    const oauth = await http('GET', '/admin/api/oauth', { admin: true });
+    const providers = Array.isArray(oauth.json?.providers) ? oauth.json.providers : [];
+    check('GET /admin/api/oauth → 200 + providers[]', oauth.status === 200 && providers.length > 0,
+      `providers=${providers.map((p) => p.id).join(',')}`);
+    // Defense-in-depth (原则7): the status surface must never echo token material.
+    check('OAuth status carries NO access/refresh token material (原则7)',
+      !oauth.text.includes('refresh_token') && !/"access[_A-Za-z]*"\s*:\s*"[A-Za-z0-9._-]{20}/.test(oauth.text));
+
+    const catRes = await http('GET', '/admin/api/models', { admin: true });
+    const catalog = Array.isArray(catRes.json) ? catRes.json : [];
+    const oauthAliases = catalog.filter((m) => Array.isArray(m.accounts) && m.accounts.length > 0);
+    check('GET /admin/api/models is live + includes OAuth-backed aliases (alias+accounts)',
+      oauthAliases.length > 0, `${oauthAliases.length} OAuth of ${catalog.length} total`);
+
+    // A passthrough key so an explicit `provider/model` alias routes DIRECTLY to that
+    // subscription (explicit-model passthrough is gated by allow_custom_model, docs/04).
+    const mk = await http('POST', '/admin/api/keys', { admin: true, body: { role: 'user', allow_custom_model: true } });
+    const passKey = mk.json?.plaintext ?? mk.json?.key ?? mk.json?.api_key;
+    const passProbe = async (alias) => {
+      const res = await fetch(`${BASE}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${passKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: alias, messages: [{ role: 'user', content: 'Reply with exactly: pong' }], max_tokens: 16 }),
+      });
+      let j = null; try { j = await res.json(); } catch {}
+      const upstream = j?.error?.message || j?.message ||
+        (j?.provider_raw ? JSON.stringify(j.provider_raw) : '');
+      return {
+        status: res.status,
+        finalModel: res.headers.get('x-helm-final-model'),
+        content: j?.choices?.[0]?.message?.content ?? null,
+        upstream: typeof upstream === 'string' ? upstream : JSON.stringify(upstream),
+      };
+    };
+
+    check('admin minted an allow_custom_model passthrough key', typeof passKey === 'string' && passKey.startsWith('helm_live_'));
+    if (typeof passKey === 'string' && passKey.startsWith('helm_live_')) {
+      for (const p of providers) {
+        const healthy = (p.accounts ?? []).some((a) => a.healthy);
+        const aliases = oauthAliases.filter((m) => m.alias.startsWith(`${p.id}/`)).map((m) => m.alias);
+        if (!healthy || aliases.length === 0) {
+          check(`route → ${p.id} subscription reaches upstream`, 'skip', healthy ? 'no catalogued models' : 'no healthy account');
+          continue;
+        }
+        let served = null;
+        const tried = [];
+        for (const alias of aliases.slice(0, 5)) {
+          const r = await passProbe(alias);
+          if (r.status === 200 && r.content != null && (r.finalModel ?? '').startsWith(`${p.id}/`)) {
+            served = { alias, ...r };
+            break;
+          }
+          tried.push(`${alias.split('/').slice(1).join('/')}→${r.status}${r.upstream ? ` (${r.upstream.slice(0, 48)})` : ''}`);
+        }
+        check(`route → ${p.id} subscription reaches upstream (≥1 model serves 200)`, served !== null,
+          served ? `${served.alias} → ${JSON.stringify(served.content)}` : `0/${Math.min(aliases.length, 5)} served: ${tried.join(' | ')}`);
+      }
+    }
+    // Clean up the throwaway passthrough key.
+    const passId = mk.json?.key_id ?? mk.json?.id;
+    if (passId) await http('DELETE', `/admin/api/keys/${passId}`, { admin: true });
   }
 
   // ── Classifier hot-apply (docs/03 + consolidation) ──────────────────────────

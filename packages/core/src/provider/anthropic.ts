@@ -27,6 +27,12 @@ export interface AnthropicClientConfig {
   onUnauthorized?: () => void; // 401 hook -> force token refresh, replay once
   currentSecrets?: () => string[]; // live token set for redaction
   timeoutMs?: number;
+  // Anti-ban stable device identity (Claude subscription, ref claude-relay-service):
+  // an opaque, per-account-STABLE string sent verbatim as `metadata.user_id` on every
+  // request. Computed ONCE per account upstream (deterministic, never per-request) so
+  // the device identity never rotates — the real-client posture Anthropic expects.
+  // Undefined → no `metadata` is sent (back-compat; matches openclaw's default).
+  metadataUserId?: string;
 }
 
 export interface AnthropicClientDeps {
@@ -145,7 +151,10 @@ function toAnthropicMessages(messages: Array<Record<string, unknown>>): Anthropi
   return out;
 }
 
-export function openaiToAnthropicRequest(req: ChatCompletionRequest): Record<string, unknown> {
+export function openaiToAnthropicRequest(
+  req: ChatCompletionRequest,
+  opts?: { metadataUserId?: string },
+): Record<string, unknown> {
   const r = req as Record<string, unknown>;
   const messages = Array.isArray(r.messages) ? (r.messages as Array<Record<string, unknown>>) : [];
   const body: Record<string, unknown> = {
@@ -154,6 +163,10 @@ export function openaiToAnthropicRequest(req: ChatCompletionRequest): Record<str
     messages: toAnthropicMessages(messages),
     max_tokens: typeof r.max_tokens === "number" ? r.max_tokens : DEFAULT_MAX_TOKENS,
   };
+  // Anti-ban stable device identity: forward the ready-made, per-account-stable
+  // user_id verbatim. Anthropic's metadata.user_id is an opaque ≤256-char string;
+  // we carry {device_id, account_uuid, session_id} like the official client.
+  if (opts?.metadataUserId) body.metadata = { user_id: opts.metadataUserId };
   if (typeof r.temperature === "number") body.temperature = r.temperature;
   if (typeof r.top_p === "number") body.top_p = r.top_p;
   if (r.stream === true) body.stream = true;
@@ -255,6 +268,10 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
   async function headers(): Promise<Record<string, string>> {
     const h: Record<string, string> = {
       "Content-Type": "application/json",
+      // Header parity with openclaw's OAuth recipe — both are load-bearing for the
+      // Claude-Code identity the subscription endpoint expects.
+      accept: "application/json",
+      "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-version": ANTHROPIC_VERSION,
       "anthropic-beta": OAUTH_BETA,
       "user-agent": `claude-cli/${CLAUDE_CODE_VERSION}`,
@@ -335,7 +352,10 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
   return {
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
-      const res = await requestWithRetry(openaiToAnthropicRequest(req), opts?.signal);
+      const res = await requestWithRetry(
+        openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId }),
+        opts?.signal,
+      );
       if (!res.ok) throw await errorFromResponse(res);
       const anthResp = (await res.json()) as Record<string, unknown>;
       return anthropicToOpenAIResponse(anthResp, model);
@@ -343,7 +363,10 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
 
     async *chatCompletionStream(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
-      const body = { ...openaiToAnthropicRequest(req), stream: true };
+      const body = {
+        ...openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId }),
+        stream: true,
+      };
       const res = await requestWithRetry(body, opts?.signal);
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateAnthropicSSE(res, model);

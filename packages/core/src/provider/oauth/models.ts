@@ -20,28 +20,13 @@ import { listGitHubCopilotModels } from "./github-copilot.js";
 // override via an explicit providers.yaml entry.
 export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
   anthropic: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
-  // ChatGPT / Codex set, mirrored from claude-relay-service config/models.js (its
-  // OpenAI account model list) — the closest authoritative source since there is
-  // no list-models API for the Codex OAuth.
-  "openai-codex": [
-    "gpt-5",
-    "gpt-5-mini",
-    "gpt-5-nano",
-    "gpt-5-codex",
-    "gpt-5.1",
-    "gpt-5.1-codex",
-    "gpt-5.1-codex-max",
-    "gpt-5.1-codex-mini",
-    "gpt-5.2",
-    "gpt-5.2-codex",
-    "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
-    "gpt-5.4",
-    "gpt-5.4-pro",
-    "gpt-5.5",
-    "gpt-5.5-pro",
-    "codex-mini",
-  ],
+  // ChatGPT Codex set. VERIFIED LIVE (2026-06-03) against a real ChatGPT-account
+  // token on /backend-api/codex/responses: this backend accepts ONLY the current GA
+  // chat models — every legacy `*-codex` / `*-pro` / `*-nano` slug returns
+  // 400 "model is not supported when using Codex with a ChatGPT account". So the
+  // curated default is exactly the models that serve; operators can add more via the
+  // Manage dialog (their saved list is authoritative) or a providers.yaml override.
+  "openai-codex": ["gpt-5.4", "gpt-5.4-mini", "gpt-5.5"],
 };
 
 // Live-list Anthropic (Claude Pro/Max) models via GET /v1/models with the OAuth
