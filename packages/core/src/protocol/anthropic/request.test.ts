@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { IRRequestSchema } from "../ir.js";
+import { guardRequestFor, readWarnings } from "../protocol-guards.js";
 import { transformRequestIn, transformRequestOut } from "./request.js";
 
 // Anthropic Messages -> IR inbound normalization (docs/05, task protocol.anthropic-req).
@@ -532,5 +533,43 @@ describe("anthropic document input (P7 multimodal)", () => {
     expect(block.type).toBe("document");
     expect(block.source?.type).toBe("url");
     expect(block.source?.url).toBe("https://x/doc.pdf");
+  });
+
+  // P8 inter-translation hardening: non-mappable knobs degrade cleanly + are recorded.
+  it("never leaks n / logprobs / modalities onto the Anthropic wire (reject-clean)", () => {
+    const ir = IRRequestSchema.parse({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "hi" }],
+      n: 3,
+      logprobs: true,
+      modalities: ["text", "audio"],
+    });
+    const native = transformRequestIn(ir);
+    const serialized = JSON.stringify(native);
+    // None of the unsupported OpenAI knobs reach Anthropic's wire shape.
+    expect(serialized).not.toContain('"n"');
+    expect(serialized).not.toContain("logprobs");
+    expect(serialized).not.toContain("modalities");
+    // ...and no internal bookkeeping (provider_raw / warnings) leaks either.
+    expect(serialized).not.toContain("provider_raw");
+    expect(serialized).not.toContain("warnings");
+  });
+
+  it("guardRequestFor('anthropic', ir) records the degradation observably on the IR", () => {
+    const ir = IRRequestSchema.parse({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "hi" }],
+      n: 5,
+      logprobs: true,
+      modalities: ["text", "audio"],
+    });
+    const guarded = guardRequestFor("anthropic", ir);
+    expect(guarded.n).toBe(1);
+    const codes = readWarnings(guarded).map((w) => `${w.code}:${w.param}`);
+    expect(codes).toContain("n_capped:n");
+    expect(codes).toContain("data_loss:logprobs");
+    expect(codes).toContain("data_loss:modalities");
   });
 });

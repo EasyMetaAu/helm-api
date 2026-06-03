@@ -6,6 +6,7 @@ import {
   IRRequestSchema,
   type IRToolCall,
 } from "../ir.js";
+import { guardRequestFor } from "../protocol-guards.js";
 import { type AnthropicOutputFormat, responseFormatToOutputFormat } from "./output-format.js";
 import { createAnthropicToolNameMap, sanitizeAnthropicToolName } from "./response.js";
 
@@ -675,7 +676,11 @@ function mapToolChoice(
  * unless a caller opts to keep it — see the matrix test which asserts no leakage).
  */
 export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
-  const parsed = IRRequestSchema.parse(ir);
+  // P8 inter-translation hardening: cap n>1 (Anthropic emits one candidate) and
+  // record data_loss warnings for logprobs/modalities (no Anthropic surface). The
+  // guard lives on the IR's provider_raw.warnings, which is stripped before the wire
+  // (no leak); here we only consume the guarded IR so the native output is correct.
+  const parsed = IRRequestSchema.parse(guardRequestFor("anthropic", ir));
 
   // Sanitize tool names up-front so both the tools[] block and tool_choice map
   // through the SAME forward map (a tool_choice name must match a declared tool).

@@ -5,6 +5,31 @@
 
 ---
 
+## 2026-06-03 · P8 互译加固 + 4×4 协议矩阵 (litellm parity, spec docs/05)
+
+**Context**: 第 8 阶段 — 跨协议互译的“reject-clean”降级、数据丢失告警，以及把矩阵从 3 协议/6 路扩到 **4 协议/16 路（含 self 恒等路径）**。
+
+**新增 `protocol-guards.ts`（结构化告警）**: 两类不可映射的处理统一在此，遵循 fail-open（principle 3）+ P8 的“绝不静默丢弃”。
+- **REJECT-CLEAN cap**: `n>1` 落到只产单候选的后端时 **cap 到 1** 并记 `n_capped` 告警（降级、不丢、不 5xx）。
+- **DATA-LOSS guard**: 目标无原生承载面的 param（logprobs→Anthropic、modalities→纯文本后端）记 `data_loss` 告警。
+- 告警写在 **IR 的 `provider_raw.warnings`**（IR 内部 bag），**不进任何 native wire 对象**——transformer 在序列化前剥掉 provider_raw，所以矩阵的 no-leak 不变量仍成立，而 DecisionRecord/遥测能从 IR 读到降级记录。所有 helper 纯函数（无变更则返回同一引用）。`guardRequestFor(target, ir)` 是 per-target 派发：anthropic cap n + warn logprobs/top_logprobs/modalities；gemini/openai 因原生支持 candidateCount/responseLogprobs/responseModalities 而是 no-op。Anthropic `transformRequestIn` 顶部调用它，保证 native 输出正确。
+
+**决定（spec 未明示，我拍板）**: P8 任务给了“provider_raw.warnings 或 thrown invalid_request”两个选项；选 **warnings**（不 throw），因为 Helm 哲学偏好降级 + 记录而非对非致命不匹配抛 4xx。`reasoning_effort→预算` 视为**有损但已映射**的近似（非数据丢失），不另发告警。
+
+**矩阵扩到 16 路**: `protocols` 增加第 4 个协议 `responses`（OpenAI Responses，已是全双向）。fixtures 改为**程序化生成** 4×4=16 路（含 4 条 self 恒等路径，验证单协议的入/出两半无损组合）。每个 (path,dimension) cell 断言**往返保留** 或 **文档化降级**（todo + >20 字理由）。
+
+**文档化的真实 gap（todo）**:
+- `*→responses` 的 **multimodal**：Responses 出站 request 渲染器把 content 折成纯文本（contentToText），图片 part 暂不重出为 input_image。
+- `*→responses` 的 **json-schema**：Responses 用 native `text`/format 承载结构化输出，出站渲染器暂不重出 JSON schema。
+- `responses→{anthropic,gemini,openai}` 的 **json-schema（SOURCE gap）**：Responses 入站把 `text.format.{json_schema}` 原样停在 IR.response_format，**不是** OpenAI `response_format.{type,json_schema}` 形状，故其它目标的出站渲染器读不到。
+- **取代旧的唯一 todo**（openai→gemini remote image）：内联 base64 图片本就能往返 Gemini inlineData，旧 todo 仅针对 **远程** image_url（issue #49 非目标），矩阵改为内联 fixture → `*→gemini` multimodal 现为 passing；远程限制以注释文档化。
+
+**新增 focused 跨路检查（非新维度，保持“每路 8 维”不变量）**: citations/annotations（OpenAI 目标原生重出 url_citation；anthropic/gemini/responses 无原生 citation 重出面，断言其 native wire **明确不含** url_citation——记录 gap 而非半渲染）；usage-detail（四源的 reasoning_tokens / cache_creation_tokens / cached_tokens 入站归一到 IR，cached split 不重复计费：prompt=10/cached=3/completion=9 跨源一致；Anthropic 无 reasoning split，改报 cache_creation=7）。
+
+**Verified**: `pnpm typecheck` 全绿；`packages/core/src/protocol` 467（matrix 176 + guards 12）全绿；`packages/core` 1327 全绿；biome 干净。gateway 的 4 个 `admin-static` 失败是**预存的**（fresh worktree 缺 admin 构建产物，stash 后在干净树上同样失败），与本阶段无关。
+
+---
+
 ## 2026-06-03 · P7 多模态 I/O 全量 + 能力感知路由 (litellm parity, spec docs/05 + docs/02)
 
 **Context**: 第 7 阶段 — 四协议端到端的音频/视频/文档 **输入** 与模型生成的图像/音频 **输出**，外加按 modality 路由。

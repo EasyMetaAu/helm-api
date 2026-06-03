@@ -14,6 +14,7 @@ import { IRRequestSchema, IRResponseSchema } from "./ir.js";
 import { openaiTransformer } from "./openai.js";
 import { transformErrorOut as transformOpenAIErrorOut } from "./openai-error.js";
 import {
+  canonicalAnnotationResponseIR,
   canonicalReasoningResponseIR,
   canonicalRequestIR,
   canonicalResponseIR,
@@ -21,10 +22,13 @@ import {
   type ProtocolMatrixPath,
   type ProtocolName,
   protocolCrossPathMatrix,
+  protocolIdentityMatrix,
+  protocolMatrix,
   protocolMatrixDimensions,
   protocolMatrixProvenance,
   protocols,
 } from "./protocol-matrix.fixtures.js";
+import { responsesTransformer } from "./responses.js";
 import type { Transformer } from "./transformer.js";
 
 async function collect<T>(src: AsyncIterable<T>): Promise<T[]> {
@@ -41,28 +45,32 @@ const requestOut: Record<ProtocolName, (native: unknown) => IRRequest | Promise<
   openai: (native) => openaiTransformer.transformRequestOut(native),
   anthropic: (native) => anthropicTransformer.transformRequestOut(native),
   gemini: (native) => geminiTransformer.transformRequestOut(native),
+  responses: (native) => responsesTransformer.transformRequestOut(native),
 };
 
 const responseOut: Record<ProtocolName, (ir: IRResponse) => unknown | Promise<unknown>> = {
   openai: (ir) => openaiTransformer.transformResponseOut(ir),
   anthropic: (ir) => anthropicTransformer.transformResponseOut(ir),
   gemini: (ir) => geminiTransformer.transformResponseOut(ir),
+  responses: (ir) => responsesTransformer.transformResponseOut(ir),
 };
 
 const requestIn: Partial<Record<ProtocolName, Transformer["transformRequestIn"]>> = {
   openai: (ir) => openaiTransformer.transformRequestIn(ir),
   anthropic: (ir) => anthropicTransformer.transformRequestIn(ir),
   gemini: (ir) => geminiTransformer.transformRequestIn(ir),
+  responses: (ir) => responsesTransformer.transformRequestIn(ir),
 };
 
-// Provider-native response -> IR, per source protocol. anthropic joins openai/gemini
-// now that the Anthropic transformer is bidirectional (issue #59, Theme 2).
+// Provider-native response -> IR, per source protocol. All four protocols are
+// bidirectional now (issue #59 Theme 2 for anthropic; Responses since P5).
 const responseInBySource: Partial<
   Record<ProtocolName, (native: unknown) => IRResponse | Promise<IRResponse>>
 > = {
   openai: (native) => openaiTransformer.transformResponseIn(native),
   anthropic: (native) => anthropicTransformer.transformResponseIn(native),
   gemini: (native) => geminiTransformer.transformResponseIn(native),
+  responses: (native) => responsesTransformer.transformResponseIn(native),
 };
 
 function nativeRequest(protocol: ProtocolName): unknown {
@@ -128,6 +136,46 @@ function nativeRequest(protocol: ProtocolName): unknown {
           required: ["summary"],
         },
       },
+    };
+  }
+
+  if (protocol === "responses") {
+    return {
+      model: "matrix-model",
+      instructions: "Be precise.",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "Describe this image and call the tool." },
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ],
+        },
+        {
+          type: "function_call",
+          call_id: "call_weather_0",
+          name: "get_weather",
+          arguments: '{"city":"Melbourne"}',
+        },
+        { type: "function_call_output", call_id: "call_weather_0", output: "18C" },
+      ],
+      tools: canonicalRequestIR.tools,
+      tool_choice: "auto",
+      // Responses carries structured output under `text`; the inbound normalizer
+      // maps it to IR.response_format (so responses-as-SOURCE json-schema works).
+      text: {
+        format: {
+          type: "json_schema",
+          name: "weather_answer",
+          schema: {
+            type: "object",
+            properties: { summary: { type: "string" } },
+            required: ["summary"],
+          },
+        },
+      },
+      stream: true,
     };
   }
 
@@ -223,6 +271,35 @@ function nativeResponse(protocol: ProtocolName): unknown {
     };
   }
 
+  if (protocol === "responses") {
+    // Responses input_tokens is the FULL prompt (incl cache); the IR normalizer
+    // subtracts cached -> prompt_tokens=10, cached_tokens=3 (non-double-billed).
+    return {
+      id: "matrix-responses-response",
+      object: "response",
+      model: "matrix-model",
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Here is the answer." }],
+        },
+        {
+          type: "function_call",
+          call_id: "call_weather_0",
+          name: "get_weather",
+          arguments: '{"city":"Melbourne"}',
+        },
+      ],
+      usage: {
+        input_tokens: 13,
+        output_tokens: 4,
+        input_tokens_details: { cached_tokens: 3 },
+      },
+    };
+  }
+
   if (protocol === "anthropic") {
     // Anthropic input_tokens is ALREADY the non-cached input, so input_tokens=10
     // maps straight to IR prompt_tokens=10 and cache_read_input_tokens=3 ->
@@ -284,6 +361,7 @@ function expectTargetToolCall(protocol: ProtocolName, native: unknown): void {
   if (protocol === "openai") expectSerializedField(native, "tool_calls");
   if (protocol === "anthropic") expect(serialized).toContain("tool_use");
   if (protocol === "gemini") expectSerializedField(native, "functionCall");
+  if (protocol === "responses") expectSerializedField(native, "function_call");
 }
 
 function expectTargetUsageNotDoubleBilled(protocol: ProtocolName, native: unknown): void {
@@ -304,6 +382,13 @@ function expectTargetUsageNotDoubleBilled(protocol: ProtocolName, native: unknow
     expect(serialized).toContain('"cachedContentTokenCount":3');
     expect(serialized).toContain('"totalTokenCount":17');
   }
+  if (protocol === "responses") {
+    // The Responses IR->native renderer emits the NON-cached input + output (it has
+    // no on-wire cached breakdown — the cache split survives in the IR / provider_raw,
+    // never double-billed). 10 = prompt_tokens (13 full − 3 cached).
+    expect(serialized).toContain('"input_tokens":10');
+    expect(serialized).toContain('"output_tokens":4');
+  }
 }
 
 describe("protocol cross-path fixture matrix", () => {
@@ -312,25 +397,26 @@ describe("protocol cross-path fixture matrix", () => {
     expect(protocolMatrixProvenance).toContain("no LiteLLM code is copied");
   });
 
-  it("covers exactly the six non-identity protocol paths", () => {
-    const expected = new Set([
-      "openai->anthropic",
-      "anthropic->openai",
-      "openai->gemini",
-      "gemini->openai",
-      "anthropic->gemini",
-      "gemini->anthropic",
-    ]);
-    const actual = new Set(protocolCrossPathMatrix.map((entry) => `${entry.from}->${entry.to}`));
+  it("covers all 16 round-trip paths (4 protocols incl identity/self)", () => {
+    const expected = new Set<string>();
+    for (const from of protocols) for (const to of protocols) expected.add(`${from}->${to}`);
+    const actual = new Set(protocolMatrix.map((entry) => `${entry.from}->${entry.to}`));
 
+    expect(expected.size).toBe(16);
     expect(actual).toEqual(expected);
-    for (const protocol of protocols) {
-      expect(actual.has(`${protocol}->${protocol}`)).toBe(false);
-    }
+  });
+
+  it("splits the matrix into 12 cross paths + 4 identity paths", () => {
+    expect(protocolCrossPathMatrix).toHaveLength(12);
+    expect(protocolIdentityMatrix).toHaveLength(4);
+    for (const p of protocolCrossPathMatrix) expect(p.from).not.toBe(p.to);
+    for (const p of protocolIdentityMatrix) expect(p.from).toBe(p.to);
+    // identity paths cover exactly one self-path per protocol.
+    expect(new Set(protocolIdentityMatrix.map((p) => p.from))).toEqual(new Set(protocols));
   });
 
   it("covers every required dimension on every path", () => {
-    for (const path of protocolCrossPathMatrix) {
+    for (const path of protocolMatrix) {
       const dimensions = new Set(path.fixtures.map((fixture) => fixture.dimension));
       expect(dimensions).toEqual(new Set(protocolMatrixDimensions));
       expect(path.fixtures).toHaveLength(protocolMatrixDimensions.length);
@@ -338,7 +424,7 @@ describe("protocol cross-path fixture matrix", () => {
   });
 
   it("keeps todo/failing coverage explicit instead of silently passing gaps", () => {
-    const todos = protocolCrossPathMatrix.flatMap((path) =>
+    const todos = protocolMatrix.flatMap((path) =>
       path.fixtures.filter((fixture) => fixture.status === "todo"),
     );
     expect(todos.length).toBeGreaterThan(0);
@@ -349,7 +435,7 @@ describe("protocol cross-path fixture matrix", () => {
   });
 
   it("uses unique fixture ids so future golden files can target one gap at a time", () => {
-    const ids = protocolCrossPathMatrix.flatMap((path) =>
+    const ids = protocolMatrix.flatMap((path) =>
       path.fixtures.map((fixture) => `${path.from}->${path.to}:${fixture.id}`),
     );
     expect(new Set(ids).size).toBe(ids.length);
@@ -358,7 +444,7 @@ describe("protocol cross-path fixture matrix", () => {
 
 describe("protocol cross-path executable harness", () => {
   it.each(
-    protocolCrossPathMatrix,
+    protocolMatrix,
   )("normalizes $from requests to IR before any target nativeOut checks", async ({ from }) => {
     const ir = await requestOut[from](nativeRequest(from));
     expect(() => IRRequestSchema.parse(ir)).not.toThrow();
@@ -366,7 +452,7 @@ describe("protocol cross-path executable harness", () => {
   });
 
   it.each(
-    protocolCrossPathMatrix.filter((path) => requestIn[path.to] !== undefined),
+    protocolMatrix.filter((path) => requestIn[path.to] !== undefined),
   )("converts $from request IR to $to native request without leaking provider_raw", async ({
     from,
     to,
@@ -381,7 +467,7 @@ describe("protocol cross-path executable harness", () => {
   });
 
   it.each(
-    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "tool-call")),
+    protocolMatrix.filter((path) => hasPassingFixture(path, "tool-call")),
   )("guards passing tool-call fixtures for $from->$to", async ({ from, to }) => {
     const ir = await requestOut[from](nativeRequest(from));
     expectIrToolCall(ir);
@@ -391,7 +477,7 @@ describe("protocol cross-path executable harness", () => {
   });
 
   it.each(
-    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "multimodal")),
+    protocolMatrix.filter((path) => hasPassingFixture(path, "multimodal")),
   )("guards passing multimodal fixtures for $from->$to", async ({ from, to }) => {
     const ir = await requestOut[from](nativeRequest(from));
     expectIrImageDataUrl(ir);
@@ -401,11 +487,18 @@ describe("protocol cross-path executable harness", () => {
       const native = await toNative(ir);
       if (to === "openai") expect(JSON.stringify(native)).toContain("data:image/png;base64,AAAA");
       if (to === "gemini") expectSerializedField(native, "inlineData");
+      if (to === "anthropic") {
+        // Inline data-url collapses back into an Anthropic base64 image source.
+        const serialized = JSON.stringify(native);
+        expectSerializedField(native, "source");
+        expect(serialized).toContain('"base64"');
+        expect(serialized).toContain("AAAA");
+      }
     }
   });
 
   it.each(
-    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "json-schema")),
+    protocolMatrix.filter((path) => hasPassingFixture(path, "json-schema")),
   )("guards passing JSON schema fixtures for $from->$to", async ({ from, to }) => {
     const ir = await requestOut[from](nativeRequest(from));
     expect(ir.response_format).toBeDefined();
@@ -421,7 +514,7 @@ describe("protocol cross-path executable harness", () => {
   });
 
   it.each(
-    protocolCrossPathMatrix,
+    protocolMatrix,
   )("renders canonical IR responses as $to native responses for $from->$to", async ({ to }) => {
     const native = await responseOut[to](canonicalResponseIR);
     const serialized = JSON.stringify(native);
@@ -430,7 +523,7 @@ describe("protocol cross-path executable harness", () => {
   });
 
   it.each(
-    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "response")),
+    protocolMatrix.filter((path) => hasPassingFixture(path, "response")),
   )("guards passing response fixtures for $from->$to", async ({ to }) => {
     const native = await responseOut[to](canonicalResponseIR);
     expectTargetToolCall(to, native);
@@ -438,7 +531,7 @@ describe("protocol cross-path executable harness", () => {
   });
 
   it.each(
-    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "usage")),
+    protocolMatrix.filter((path) => hasPassingFixture(path, "usage")),
   )("guards passing usage fixtures for $from->$to", async ({ from, to }) => {
     const source = nativeResponse(from);
     const toIr = responseInBySource[from];
@@ -452,7 +545,7 @@ describe("protocol cross-path executable harness", () => {
   });
 
   it.each(
-    protocolCrossPathMatrix.filter((path) => nativeResponse(path.from) !== undefined),
+    protocolMatrix.filter((path) => nativeResponse(path.from) !== undefined),
   )("normalizes $from provider-native responses before rendering $to native responses", async ({
     from,
     to,
@@ -725,16 +818,45 @@ describe("protocol cross-path executable harness", () => {
         body: { error: { code: 401, message: "matrix err", status: "UNAUTHENTICATED" } },
       },
     ],
+    // Responses is OpenAI's own protocol, so it shares the OpenAI error envelope
+    // (including the on-wire trace_id, docs/07).
+    responses: [
+      {
+        cls: "rate_limited",
+        status: 429,
+        body: {
+          error: {
+            message: "matrix err",
+            type: "rate_limit_error",
+            code: "rate_limited",
+            trace_id: "trace-matrix",
+          },
+        },
+      },
+      {
+        cls: "auth_error",
+        status: 401,
+        body: {
+          error: {
+            message: "matrix err",
+            type: "invalid_request_error",
+            code: "invalid_api_key",
+            trace_id: "trace-matrix",
+          },
+        },
+      },
+    ],
   };
 
   const renderError: Record<ProtocolName, (helm: ReturnType<typeof makeHelmError>) => unknown> = {
     anthropic: (helm) => transformAnthropicErrorOut(helm),
     openai: (helm) => transformOpenAIErrorOut(helm),
     gemini: (helm) => transformGeminiErrorOut(helm),
+    responses: (helm) => transformOpenAIErrorOut(helm),
   };
 
   it.each(
-    protocolCrossPathMatrix.filter((path) => hasPassingFixture(path, "error")),
+    protocolMatrix.filter((path) => hasPassingFixture(path, "error")),
   )("renders Helm errors into the $to native envelope (target-renderer; source $from is incidental)", ({
     to,
   }) => {
@@ -758,7 +880,7 @@ describe("protocol cross-path executable harness", () => {
       trace_id: "trace-matrix",
     });
     const rendered = renderError[to](probe) as { body: unknown };
-    if (to === "openai") {
+    if (to === "openai" || to === "responses") {
       expect(JSON.stringify(rendered.body)).toContain("trace-matrix");
     } else {
       expect(JSON.stringify(rendered.body)).not.toContain("trace-matrix");
@@ -830,6 +952,15 @@ describe("reasoning cross-path render (P6)", () => {
       const parts = r.candidates[0]?.content.parts ?? [];
       return parts.some((p) => p.thought === true && p.text === "Reasoning step.");
     },
+    // Responses: a `reasoning` output item carrying the reasoning as summary_text,
+    // emitted BEFORE the answer message (reasoning precedes the answer).
+    responses: (native) => {
+      const r = native as {
+        output: Array<{ type: string; summary?: Array<{ type?: string; text?: string }> }>;
+      };
+      const item = r.output.find((o) => o.type === "reasoning");
+      return (item?.summary ?? []).some((s) => s.text === "Reasoning step.");
+    },
   };
 
   it.each(
@@ -859,5 +990,147 @@ describe("reasoning cross-path render (P6)", () => {
     };
     expect(oai.choices[0]?.message.reasoning_content).toContain("Reasoning step.");
     expect(JSON.stringify(oai.choices[0]?.message.content ?? "")).not.toContain("thinking");
+  });
+});
+
+// Focused cross-path check for citations/annotations (P8). The IR carries citations
+// on message.annotations (the OpenAI url_citation shape; Gemini grounding folds in on
+// inbound). OpenAI's IR->native renderer re-emits them natively; Anthropic/Gemini/
+// Responses have no native annotation re-render today, so the matrix DOCUMENTS that
+// gap here rather than silently dropping it. Not a new matrix dimension.
+describe("citations/annotations cross-path render (P8)", () => {
+  // Which targets re-emit IR annotations onto their native wire (true) vs. drop them
+  // as a documented gap until a native citation re-render exists (false).
+  const ANNOTATION_NATIVE_SURFACE: Record<ProtocolName, boolean> = {
+    openai: true,
+    responses: false,
+    anthropic: false,
+    gemini: false,
+  };
+
+  it("preserves a url_citation through openai nativeIn -> IR -> openai nativeOut", async () => {
+    // OpenAI source -> IR keeps annotations on the assistant message.
+    const native = (await responseOut.openai(canonicalAnnotationResponseIR)) as {
+      choices: Array<{ message: { annotations?: Array<{ type: string; url?: string }> } }>;
+    };
+    const ann = native.choices[0]?.message.annotations;
+    expect(ann?.[0]?.type).toBe("url_citation");
+    expect(ann?.[0]?.url).toBe("https://example.com/au");
+  });
+
+  it.each(
+    protocols,
+  )("renders the canonical annotation IR into %s (native surface OR documented gap)", async (to) => {
+    const native = await responseOut[to](canonicalAnnotationResponseIR);
+    const serialized = JSON.stringify(native);
+    // The visible answer always survives regardless of citation support.
+    expect(serialized).toContain("Sydney is in Australia.");
+    if (ANNOTATION_NATIVE_SURFACE[to]) {
+      expect(serialized).toContain("url_citation");
+      expect(serialized).toContain("https://example.com/au");
+    } else {
+      // Documented gap: the target has no native annotation re-render yet, so the
+      // citation is intentionally absent from its native wire shape (no silent
+      // half-rendered shape). It survives losslessly on the IR for OpenAI clients.
+      expect(serialized).not.toContain("url_citation");
+    }
+  });
+});
+
+// Focused cross-path check for usage detail (P8): reasoning_tokens / cache_creation_
+// tokens / cached_tokens must survive each source's nativeIn -> IR normalization
+// without double-billing the cached split, OR be documented. Not a new dimension.
+describe("usage-detail cross-path normalization (P8)", () => {
+  // Per-source provider-native responses carrying the FULL usage detail surface.
+  function nativeUsageResponse(from: ProtocolName): unknown | undefined {
+    if (from === "openai") {
+      return {
+        id: "u-openai",
+        model: "matrix-model",
+        choices: [
+          { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+        ],
+        usage: {
+          prompt_tokens: 13,
+          completion_tokens: 9,
+          total_tokens: 22,
+          prompt_tokens_details: { cached_tokens: 3 },
+          completion_tokens_details: { reasoning_tokens: 5 },
+        },
+      };
+    }
+    if (from === "gemini") {
+      return {
+        candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+        usageMetadata: {
+          promptTokenCount: 13,
+          cachedContentTokenCount: 3,
+          candidatesTokenCount: 9,
+          thoughtsTokenCount: 5,
+          totalTokenCount: 22,
+        },
+      };
+    }
+    if (from === "anthropic") {
+      return {
+        id: "u-anthropic",
+        type: "message",
+        role: "assistant",
+        model: "matrix-model",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        // Anthropic reports non-cached input + a cache read + a cache CREATION write.
+        usage: {
+          input_tokens: 10,
+          output_tokens: 9,
+          cache_read_input_tokens: 3,
+          cache_creation_input_tokens: 7,
+        },
+      };
+    }
+    if (from === "responses") {
+      return {
+        id: "u-responses",
+        object: "response",
+        model: "matrix-model",
+        status: "completed",
+        output: [
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+        ],
+        usage: {
+          input_tokens: 13,
+          output_tokens: 9,
+          input_tokens_details: { cached_tokens: 3 },
+          output_tokens_details: { reasoning_tokens: 5 },
+        },
+      };
+    }
+    return undefined;
+  }
+
+  it.each(
+    protocols,
+  )("normalizes %s usage detail to IR without double-billing the cached split", async (from) => {
+    const native = nativeUsageResponse(from);
+    const toIr = responseInBySource[from];
+    expect(native).toBeDefined();
+    expect(toIr).toBeDefined();
+    const ir = await toIr?.(native);
+    expect(ir).toBeDefined();
+    if (ir === undefined) return;
+
+    // Non-cached prompt + cached split is consistent across every source.
+    expect(ir.usage?.prompt_tokens).toBe(10);
+    expect(ir.usage?.cached_tokens).toBe(3);
+    expect(ir.usage?.completion_tokens).toBe(9);
+
+    // reasoning_tokens surfaces for the sources that report it (Anthropic's usage has
+    // no reasoning split — it reports a cache CREATION write instead).
+    if (from === "anthropic") {
+      expect(ir.usage?.cache_creation_tokens).toBe(7);
+    } else {
+      expect(ir.usage?.reasoning_tokens).toBe(5);
+    }
   });
 });

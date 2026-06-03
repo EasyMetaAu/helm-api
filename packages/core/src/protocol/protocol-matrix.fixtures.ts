@@ -1,6 +1,19 @@
 import type { IRRequest, IRResponse } from "./ir.js";
 
-export const protocols = ["openai", "anthropic", "gemini"] as const;
+// —— The cross-protocol translation matrix (P8). FOUR protocols — OpenAI Chat,
+// Anthropic Messages, Gemini generateContent, and OpenAI Responses — each of which
+// can be both a SOURCE (nativeIn -> IR) and a TARGET (IR -> nativeOut). The full
+// matrix is therefore 4×4 = 16 round-trip paths, INCLUDING the four identity/self
+// paths (openai->openai, …) which guard that a protocol's own inbound and outbound
+// halves compose losslessly. Translation is always nativeIn -> IR -> nativeOut, so
+// these 16 paths are exercised by 4 inbound + 4 outbound transforms, never 16 direct
+// converters.
+//
+// Each (path, dimension) cell is a fixture: it asserts either round-trip PRESERVATION
+// or a DOCUMENTED degradation (a provider_raw passthrough or a structured warning).
+// A cell with no feasible mapping today is `todo` with a >20-char reason, so gaps are
+// explicit instead of silently green.
+export const protocols = ["openai", "anthropic", "gemini", "responses"] as const;
 export type ProtocolName = (typeof protocols)[number];
 
 export const protocolMatrixDimensions = [
@@ -49,217 +62,111 @@ function fixture(
   };
 }
 
-function path(
+// —— Per-TARGET capability of the executable renderers. The matrix's `passing`
+// status is keyed on what the TARGET protocol's IR->native renderer can faithfully
+// emit (the source side is always a full nativeIn->IR normalizer). Cells listed here
+// are documented degradations on the OUTBOUND (IR -> target) side. ————————————————————
+const TARGET_DEGRADATIONS: Partial<
+  Record<ProtocolName, Partial<Record<ProtocolMatrixDimension, string>>>
+> = {
+  // The Responses IR->native request renderer collapses content to text
+  // (contentToText) and carries structured-output via the `text` field rather than a
+  // response_format clone, so these two OUTBOUND dimensions are documented gaps.
+  // (Inline base64 images DO round-trip to Gemini inlineData — only a REMOTE
+  // image_url is a non-goal, issue #49; the canonical fixture uses an inline image so
+  // X->gemini multimodal is passing.)
+  responses: {
+    multimodal:
+      "The Responses IR->native request renderer folds content to text (contentToText), so image parts are not re-emitted as input_image on the outbound request path yet.",
+    "json-schema":
+      "Responses carries structured output via the native `text`/format field, not a response_format clone; the IR->Responses request renderer does not yet re-emit a JSON schema there.",
+  },
+};
+
+// —— SOURCE-side documented gaps. A knob whose NATIVE inbound shape does not
+// normalize into the IR shape the other targets read. ————————————————————————————————
+const SOURCE_DEGRADATIONS: Partial<
+  Record<ProtocolName, Partial<Record<ProtocolMatrixDimension, string>>>
+> = {
+  // The Responses structured-output shape is `text.format.{json_schema}`, which the
+  // inbound normalizer parks on IR.response_format VERBATIM — it is NOT the OpenAI
+  // `response_format.{type,json_schema}` shape the Anthropic/Gemini outbound renderers
+  // expect, so a responses-origin JSON schema does not yet re-render to those targets'
+  // structured-output surface. (A responses->responses self round-trip is fine.)
+  responses: {
+    "json-schema":
+      "Responses carries structured output as text.format.{json_schema}; the inbound normalizer keeps it verbatim on IR.response_format, which is NOT the OpenAI response_format shape the Anthropic/Gemini outbound renderers read.",
+  },
+};
+
+function dimensionFixture(
   from: ProtocolName,
   to: ProtocolName,
-  fixtures: readonly ProtocolMatrixFixture[],
-): ProtocolMatrixPath {
-  return { from, to, fixtures };
+  dimension: ProtocolMatrixDimension,
+): ProtocolMatrixFixture {
+  const self = from === to;
+  const label = self ? `${from} self` : `${from}->${to}`;
+  const degraded = TARGET_DEGRADATIONS[to]?.[dimension];
+  // A SOURCE gap only applies to cross paths — a self round-trip reads its own shape
+  // back and is lossless.
+  const sourceGap = self ? undefined : SOURCE_DEGRADATIONS[from]?.[dimension];
+
+  if (degraded !== undefined) {
+    return fixture(
+      dimension,
+      "todo",
+      `${label} ${dimension}: documented target degradation`,
+      degraded,
+    );
+  }
+
+  if (sourceGap !== undefined) {
+    return fixture(
+      dimension,
+      "todo",
+      `${label} ${dimension}: documented source degradation`,
+      sourceGap,
+    );
+  }
+
+  // Passing assertions: a concise human-readable statement of the invariant the
+  // executable harness guards for this cell.
+  const passing: Record<ProtocolMatrixDimension, string> = {
+    request: `${label} request normalizes to a schema-valid IR before any ${to} nativeOut`,
+    response: `${label} renders a canonical IR response as a ${to} native response`,
+    streaming: `${label} streams IR chunks to ordered ${to} native stream events`,
+    "tool-call": `${label} preserves the tool call through IR into the ${to} native tool surface`,
+    multimodal: `${label} preserves an inline image through IR into the ${to} native image surface`,
+    "json-schema": `${label} preserves the JSON schema through IR into the ${to} structured-output surface`,
+    error: `${label} renders a Helm error into the ${to} native error envelope`,
+    usage: `${label} keeps cached/prompt/completion usage non-double-billed through IR`,
+  };
+  return fixture(dimension, "passing", passing[dimension]);
 }
 
-const openaiToAnthropic = path("openai", "anthropic", [
-  fixture(
-    "request",
-    "passing",
-    "OpenAI request normalizes to IR and Anthropic Messages request nativeOut",
-  ),
-  fixture("response", "passing", "IR assistant response renders as Anthropic message response"),
-  fixture("streaming", "passing", "OpenAI chunks render as ordered Anthropic SSE events"),
-  fixture("tool-call", "passing", "OpenAI tool_calls render as Anthropic tool_use blocks"),
-  fixture(
-    "multimodal",
-    "passing",
-    "OpenAI image_url normalizes to IR and renders as Anthropic image source",
-  ),
-  fixture(
-    "json-schema",
-    "passing",
-    "OpenAI response_format JSON schema renders as Anthropic output_format json_schema",
-  ),
-  fixture("error", "passing", "Helm ErrorClass can render an Anthropic-native error envelope"),
-  fixture("usage", "passing", "Cached prompt tokens stay separate in Anthropic usage"),
-]);
+function buildPath(from: ProtocolName, to: ProtocolName): ProtocolMatrixPath {
+  return {
+    from,
+    to,
+    fixtures: protocolMatrixDimensions.map((d) => dimensionFixture(from, to, d)),
+  };
+}
 
-const anthropicToOpenai = path("anthropic", "openai", [
-  fixture("request", "passing", "Anthropic request normalizes to IR and OpenAI request nativeOut"),
-  fixture(
-    "response",
-    "passing",
-    "Anthropic provider-native response normalizes to IR and OpenAI response nativeOut",
-  ),
-  fixture(
-    "streaming",
-    "passing",
-    "Anthropic inbound SSE stream normalizes to IR chunks for OpenAI serialization",
-  ),
-  fixture("tool-call", "passing", "Anthropic tool_use/tool_result normalizes to OpenAI-shaped IR"),
-  fixture("multimodal", "passing", "Anthropic base64 image source normalizes to IR image data URL"),
-  fixture(
-    "json-schema",
-    "passing",
-    "Anthropic output_format json_schema normalizes back to OpenAI response_format",
-  ),
-  fixture(
-    "error",
-    "passing",
-    "Helm ErrorClass renders an OpenAI-native error envelope for Anthropic-origin failures",
-  ),
-  fixture("usage", "passing", "Anthropic cache_read_input_tokens can stay distinct in IR usage"),
-]);
+// The FULL 4×4 matrix, including the four identity/self paths.
+export const protocolMatrix: readonly ProtocolMatrixPath[] = protocols.flatMap((from) =>
+  protocols.map((to) => buildPath(from, to)),
+);
 
-const openaiToGemini = path("openai", "gemini", [
-  fixture(
-    "request",
-    "passing",
-    "OpenAI request normalizes to IR and Gemini generateContent nativeOut",
-  ),
-  fixture(
-    "response",
-    "passing",
-    "IR assistant response renders as Gemini generateContent response",
-  ),
-  fixture("streaming", "passing", "OpenAI chunks render as Gemini full-snapshot SSE events"),
-  fixture("tool-call", "passing", "OpenAI tool_calls render as Gemini functionCall parts"),
-  fixture(
-    "multimodal",
-    "todo",
-    "OpenAI remote image_url outbound to Gemini is an explicit non-goal",
-    "Remote image fetch/proxy is a non-goal for issue #49; Gemini nativeOut emits an explicit text placeholder until a later fetch/proxy design exists.",
-  ),
-  fixture(
-    "json-schema",
-    "passing",
-    "OpenAI response_format JSON schema renders as Gemini generationConfig.responseSchema",
-  ),
-  fixture(
-    "error",
-    "passing",
-    "Helm ErrorClass renders a Gemini-native google.rpc.Status error envelope",
-  ),
-  fixture(
-    "usage",
-    "passing",
-    "IR usage renders as Gemini usageMetadata without double-counting cache",
-  ),
-]);
+// Non-identity cross paths (kept as a named export for callers that only want the
+// 12 distinct-protocol conversions).
+export const protocolCrossPathMatrix: readonly ProtocolMatrixPath[] = protocolMatrix.filter(
+  (p) => p.from !== p.to,
+);
 
-const geminiToOpenai = path("gemini", "openai", [
-  fixture(
-    "request",
-    "passing",
-    "Gemini generateContent normalizes to IR and OpenAI request nativeOut",
-  ),
-  fixture("response", "passing", "Gemini response normalizes to IR and OpenAI response nativeOut"),
-  fixture(
-    "streaming",
-    "passing",
-    "Gemini snapshot stream normalizes to IR chunks and serializes as OpenAI chat.completion.chunk SSE",
-  ),
-  fixture(
-    "tool-call",
-    "passing",
-    "Gemini functionCall/functionResponse normalizes with synthesized tool ids",
-  ),
-  fixture("multimodal", "passing", "Gemini inlineData normalizes to IR image data URL"),
-  fixture(
-    "json-schema",
-    "passing",
-    "Gemini responseSchema/functionDeclarations normalize into IR fields",
-  ),
-  fixture(
-    "error",
-    "passing",
-    "Helm ErrorClass renders an OpenAI-native error envelope for Gemini-origin failures",
-  ),
-  fixture("usage", "passing", "Gemini cachedContentTokenCount remains distinct in IR usage"),
-]);
-
-const anthropicToGemini = path("anthropic", "gemini", [
-  fixture("request", "passing", "Anthropic request normalizes to IR and Gemini request nativeOut"),
-  fixture(
-    "response",
-    "passing",
-    "Anthropic provider-native response normalizes to IR and renders as Gemini response",
-  ),
-  fixture(
-    "streaming",
-    "passing",
-    "Anthropic inbound SSE stream normalizes to IR chunks for Gemini snapshot serialization",
-  ),
-  fixture(
-    "tool-call",
-    "passing",
-    "Anthropic tool_use/tool_result can become Gemini functionCall/functionResponse via IR",
-  ),
-  fixture(
-    "multimodal",
-    "passing",
-    "Anthropic base64 image source can become Gemini inlineData via IR",
-  ),
-  fixture(
-    "json-schema",
-    "passing",
-    "Anthropic output_format json_schema normalizes to IR and renders as Gemini responseSchema",
-  ),
-  fixture(
-    "error",
-    "passing",
-    "Helm ErrorClass renders Gemini-native google.rpc.Status envelopes for Anthropic-origin failures",
-  ),
-  fixture("usage", "passing", "IR cached usage can render to Gemini usageMetadata"),
-]);
-
-const geminiToAnthropic = path("gemini", "anthropic", [
-  fixture(
-    "request",
-    "passing",
-    "Gemini request normalizes to IR and Anthropic Messages request nativeOut",
-  ),
-  fixture(
-    "response",
-    "passing",
-    "Gemini response can normalize to IR and render as Anthropic response",
-  ),
-  fixture(
-    "streaming",
-    "passing",
-    "Gemini snapshot stream normalizes to IR chunks and renders as Anthropic SSE events",
-  ),
-  fixture(
-    "tool-call",
-    "passing",
-    "Gemini functionCall can render as Anthropic tool_use through IR",
-  ),
-  fixture(
-    "multimodal",
-    "passing",
-    "Gemini inlineData normalizes to IR image data URL for Anthropic policy decisions",
-  ),
-  fixture(
-    "json-schema",
-    "passing",
-    "Gemini responseSchema normalizes to IR and renders as Anthropic output_format json_schema",
-  ),
-  fixture(
-    "error",
-    "passing",
-    "Helm ErrorClass can render Anthropic-native envelopes for Gemini-origin failures",
-  ),
-  fixture(
-    "usage",
-    "passing",
-    "Gemini cached usage can render as Anthropic cache_read_input_tokens",
-  ),
-]);
-
-export const protocolCrossPathMatrix = [
-  openaiToAnthropic,
-  anthropicToOpenai,
-  openaiToGemini,
-  geminiToOpenai,
-  anthropicToGemini,
-  geminiToAnthropic,
-] as const;
+// Identity/self paths only (the 4 round-trips through a single protocol's own halves).
+export const protocolIdentityMatrix: readonly ProtocolMatrixPath[] = protocolMatrix.filter(
+  (p) => p.from === p.to,
+);
 
 export const canonicalRequestIR: IRRequest = {
   model: "matrix-model",
@@ -339,6 +246,34 @@ export const canonicalReasoningResponseIR: IRResponse = {
     },
   ],
   usage: { prompt_tokens: 10, completion_tokens: 4, reasoning_tokens: 6 },
+};
+
+// An annotation/citation-bearing assistant response. Used by the P8 citations cross-
+// path check: a url_citation annotation must survive nativeIn->IR->nativeOut into each
+// target that has a citation surface, or be documented as a provider_raw passthrough.
+export const canonicalAnnotationResponseIR: IRResponse = {
+  id: "matrix-annotation-1",
+  model: "matrix-model",
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: "assistant",
+        content: "Sydney is in Australia.",
+        annotations: [
+          {
+            type: "url_citation",
+            url: "https://example.com/au",
+            title: "Australia",
+            start_index: 0,
+            end_index: 6,
+          },
+        ],
+      },
+      finish_reason: "stop",
+    },
+  ],
+  usage: { prompt_tokens: 8, completion_tokens: 5 },
 };
 
 export const canonicalResponseIR: IRResponse = {
