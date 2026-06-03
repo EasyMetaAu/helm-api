@@ -4,6 +4,7 @@
   import { logoutOAuth, type OAuthAccount, type OAuthProviderStatus } from '$lib/api/oauth.js';
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
   import ManageAccountDialog from '$lib/components/ManageAccountDialog.svelte';
+  import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
   // Subscription OAuth login (issue #38). Pure consumer (Principle 1): the gateway
@@ -185,14 +186,20 @@
   {/if}
 
   {#if confirming}
-    <div class="alert-warn" role="dialog" aria-label={$t('Confirm disconnect')}>
-      <p class="text-sm text-amber-800">
+    <Modal
+      label={$t('Confirm disconnect')}
+      onclose={() => {
+        if (!disconnecting) confirming = null;
+      }}
+    >
+      <h2 class="section-header">{$t('Confirm disconnect')}</h2>
+      <p class="mt-3 text-sm text-ink-body">
         {$t('Disconnect')}
-        <code class="font-mono">{confirming.account}</code>
+        <code class="font-mono text-ink-strong">{confirming.account}</code>
         {$t('from')}
         {providerName(confirming.providerId)}{$t('? Helm will forget its stored tokens.')}
       </p>
-      <div class="mt-3 flex justify-end gap-2">
+      <div class="mt-4 flex justify-end gap-2">
         <button
           type="button"
           class="btn-secondary"
@@ -207,6 +214,6 @@
           >{disconnecting ? $t('Disconnecting…') : $t('Disconnect')}</button
         >
       </div>
-    </div>
+    </Modal>
   {/if}
 </section>

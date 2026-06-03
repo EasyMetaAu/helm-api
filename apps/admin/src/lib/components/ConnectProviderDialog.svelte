@@ -7,6 +7,7 @@
     startDeviceCode,
     startManualPaste,
   } from '$lib/api/oauth.js';
+  import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
   // Connect-subscription dialog (issue #38). Mirrors CreateKeyDialog's shape so the
@@ -116,7 +117,7 @@
   }
 </script>
 
-<div class="dialog" role="dialog" aria-label={$t('Connect a subscription')}>
+<Modal label={$t('Connect a subscription')} {onclose}>
   <h2 class="section-header">{$t('Connect a subscription')}</h2>
 
   {#if error}
@@ -216,4 +217,4 @@
       <button type="button" class="btn-secondary" onclick={onclose}>{$t('Cancel')}</button>
     </div>
   {/if}
-</div>
+</Modal>
