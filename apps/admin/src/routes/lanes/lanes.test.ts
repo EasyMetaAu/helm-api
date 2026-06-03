@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Lane } from '$lib/api/lanes.js';
+import type { ModelOption } from '$lib/api/models.js';
 import LanesPage from './+page.svelte';
 
 // The page consumes data from `load` (mocked via the `data` prop) and writes
@@ -21,7 +22,7 @@ function lane(name: string, overrides: Partial<Lane> = {}): Lane {
   };
 }
 
-function renderPage(lanes: Lane[], models: string[] = []) {
+function renderPage(lanes: Lane[], models: ModelOption[] = []) {
   return render(LanesPage, { data: { lanes, models } });
 }
 
@@ -41,14 +42,15 @@ describe('lanes page', () => {
   });
 
   it('threads the model catalog into each lane card as combobox suggestions', () => {
-    const models = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro'];
+    const aliases = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro'];
+    const models = aliases.map((alias) => ({ alias, accounts: [] }));
     const { container } = renderPage([lane('economy'), lane('balanced')], models);
     // Every card gets a populated <datalist> sourced from data.models.
     const lists = Array.from(container.querySelectorAll('datalist'));
     expect(lists).toHaveLength(2);
     for (const dl of lists) {
       const values = Array.from(dl.querySelectorAll('option')).map((o) => o.value);
-      expect(values).toEqual(expect.arrayContaining(models));
+      expect(values).toEqual(expect.arrayContaining(aliases));
     }
   });
 

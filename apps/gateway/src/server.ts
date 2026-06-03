@@ -75,7 +75,7 @@ import {
   loadAccountSettings,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
-import { effectiveOAuthAliases } from "./oauth/effective-models.js";
+import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
@@ -914,17 +914,23 @@ export async function buildServer(
       },
     });
     app.use("/admin/api/*", basicAuth(adminAuth));
-    // Routable alias catalog for the Lanes admin combobox. The CONFIGURED-provider
-    // aliases are static (config is immutable for the process). The OAuth-subscription
-    // aliases are computed LIVE per read (effectiveOAuthAliases) so a Manage-dialog
-    // curation edit is reflected here WITHOUT a restart — one source of truth shared
-    // with the structural router (execute.ts). Network-free; deduped + sorted.
+    // Routable model catalog for the Lanes admin combobox: each alias + the
+    // subscription account(s) exposing it (so the picker can show the account under
+    // each model). CONFIGURED-provider aliases are static (config is immutable) and
+    // carry no account; the OAuth-subscription options are computed LIVE per read
+    // (effectiveOAuthModelOptions) so a Manage-dialog curation edit is reflected here
+    // WITHOUT a restart — one source of truth shared with the structural router
+    // (execute.ts). Network-free; deduped by alias, sorted.
     const configuredAliases = config.providers.flatMap((p) => p.models.map((m) => m.alias));
-    const modelAliases = async (): Promise<string[]> => {
-      const oauthAliases = oauthCtx
-        ? await effectiveOAuthAliases(oauthCtx, store.config, ROUTABLE_OAUTH_IDS)
+    const modelAliases = async (): Promise<ModelOption[]> => {
+      const oauthOptions = oauthCtx
+        ? await effectiveOAuthModelOptions(oauthCtx, store.config, ROUTABLE_OAUTH_IDS)
         : [];
-      return [...new Set([...configuredAliases, ...oauthAliases])].sort();
+      const byAlias = new Map<string, ModelOption>();
+      for (const alias of configuredAliases) byAlias.set(alias, { alias, accounts: [] });
+      // OAuth options win on a clash (they carry the exposing accounts).
+      for (const opt of oauthOptions) byAlias.set(opt.alias, opt);
+      return [...byAlias.values()].sort((a, b) => a.alias.localeCompare(b.alias));
     };
     registerAdminApi(app, {
       rules: ruleStore,

@@ -79,14 +79,15 @@ describe('LaneEditor', () => {
   });
 
   it('offers the model catalog as combobox suggestions on primary + fallback inputs', () => {
-    const models = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro', 'zenmux/auto'];
+    const aliases = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro', 'zenmux/auto'];
+    const models = aliases.map((alias) => ({ alias, accounts: [] }));
     const { container } = render(LaneEditor, { lane: makeLane(), models, onsave: vi.fn() });
 
     // A <datalist> with one <option> per alias is rendered…
     const datalist = container.querySelector('datalist');
     expect(datalist).not.toBeNull();
     const options = Array.from(datalist?.querySelectorAll('option') ?? []).map((o) => o.value);
-    expect(options).toEqual(models);
+    expect(options).toEqual(aliases);
 
     // …and both inputs reference it via `list`, turning them into comboboxes.
     const primary = container.querySelector("input[name='primary']") as HTMLInputElement;
@@ -98,7 +99,8 @@ describe('LaneEditor', () => {
   });
 
   it('also offers other lanes (excluding itself) as combobox targets, labelled as lanes', () => {
-    const models = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro'];
+    const aliases = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro'];
+    const models = aliases.map((alias) => ({ alias, accounts: [] }));
     const laneNames = ['economy', 'balanced', 'coding', 'premium'];
     const { container } = render(LaneEditor, {
       lane: makeLane({ name: 'coding' }),
@@ -115,15 +117,31 @@ describe('LaneEditor', () => {
     // Other lanes are routable targets (the chain may point at another lane)…
     expect(values).toEqual(expect.arrayContaining(['economy', 'balanced', 'premium']));
     // …and the model aliases are still there too…
-    expect(values).toEqual(expect.arrayContaining(models));
+    expect(values).toEqual(expect.arrayContaining(aliases));
     // …but a lane can never target itself.
     expect(values).not.toContain('coding');
 
     // Lane suggestions carry a label so the operator can tell them apart from models.
     const laneOption = options.find((o) => o.value === 'balanced');
     expect(laneOption?.label).toBe('lane');
-    const modelOption = options.find((o) => o.value === models[0]);
+    const modelOption = options.find((o) => o.value === aliases[0]);
     expect(modelOption?.label ?? '').not.toBe('lane');
+  });
+
+  it('shows the exposing subscription account(s) as each model option label', () => {
+    const models = [
+      { alias: 'anthropic/claude-opus-4-8', accounts: ['default'] },
+      { alias: 'openai-codex/gpt-5.5', accounts: ['default', 'mylukin'] },
+      { alias: 'zenmux/auto', accounts: [] }, // configured provider → no account label
+    ];
+    const { container } = render(LaneEditor, { lane: makeLane(), models, onsave: vi.fn() });
+    const options = Array.from(
+      container.querySelectorAll('datalist option'),
+    ) as HTMLOptionElement[];
+    const labelOf = (v: string) => options.find((o) => o.value === v)?.label ?? '';
+    expect(labelOf('anthropic/claude-opus-4-8')).toBe('default');
+    expect(labelOf('openai-codex/gpt-5.5')).toBe('default, mylukin');
+    expect(labelOf('zenmux/auto')).toBe('');
   });
 
   it('still works as a plain text input when no models are provided (graceful default)', () => {

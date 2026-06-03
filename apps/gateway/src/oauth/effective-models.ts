@@ -35,20 +35,49 @@ export function effectiveAccountModels(
 // Every routable `${providerId}/${model}` alias across all bound accounts, deduped
 // and sorted. Fail-open: a missing/corrupt settings blob yields the curated
 // fallback (loadAccountSettings already swallows decrypt errors to {}).
-export async function effectiveOAuthAliases(
+
+// One routable model alias + which subscription account(s) currently expose it.
+// `accounts` lets the Lanes picker show, under each model, the bound account(s)
+// that back it (a model may be exposed by several accounts of the same provider —
+// the pool rotates across them). Configured (non-OAuth) providers carry no account.
+export interface ModelOption {
+  alias: string;
+  accounts: string[];
+}
+
+// Every routable `${providerId}/${model}` alias WITH the set of accounts exposing
+// it, deduped + sorted by alias. The single source the catalog endpoint serves.
+export async function effectiveOAuthModelOptions(
   oauthCtx: OAuthRuntimeCtxLike,
   config: ConfigStore,
   routableProviderIds: ReadonlySet<string>,
-): Promise<string[]> {
+): Promise<ModelOption[]> {
   const settings = await loadAccountSettings(config, oauthCtx.encKey);
-  const aliases = new Set<string>();
+  const aliasToAccounts = new Map<string, Set<string>>();
   for (const row of await oauthCtx.store.list()) {
     if (!routableProviderIds.has(row.providerId)) continue;
     const models = effectiveAccountModels(
       getAccountSettings(settings, row.providerId, row.account),
       row.providerId,
     );
-    for (const m of models) aliases.add(`${row.providerId}/${m}`);
+    for (const m of models) {
+      const alias = `${row.providerId}/${m}`;
+      const accounts = aliasToAccounts.get(alias) ?? new Set<string>();
+      accounts.add(row.account);
+      aliasToAccounts.set(alias, accounts);
+    }
   }
-  return [...aliases].sort();
+  return [...aliasToAccounts.entries()]
+    .map(([alias, accounts]) => ({ alias, accounts: [...accounts].sort() }))
+    .sort((a, b) => a.alias.localeCompare(b.alias));
+}
+
+// Alias-only view (back-compat / routing): the sorted alias list, dropping accounts.
+export async function effectiveOAuthAliases(
+  oauthCtx: OAuthRuntimeCtxLike,
+  config: ConfigStore,
+  routableProviderIds: ReadonlySet<string>,
+): Promise<string[]> {
+  const options = await effectiveOAuthModelOptions(oauthCtx, config, routableProviderIds);
+  return options.map((o) => o.alias);
 }

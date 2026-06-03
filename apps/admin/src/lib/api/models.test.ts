@@ -13,8 +13,11 @@ describe('models api client', () => {
     vi.unstubAllGlobals();
   });
 
-  it('listModels GETs /admin/api/models and returns the alias array', async () => {
-    const rows = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro'];
+  it('listModels GETs /admin/api/models and returns model options (alias + accounts)', async () => {
+    const rows = [
+      { alias: 'openai-crs/gpt-5.4-mini', accounts: [] },
+      { alias: 'anthropic/claude-opus-4-8', accounts: ['default', 'work'] },
+    ];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify(rows), { status: 200 }),
     );
@@ -23,6 +26,16 @@ describe('models api client', () => {
 
     expect(fetch).toHaveBeenCalledWith('/admin/api/models', expect.objectContaining({}));
     expect(models).toEqual(rows);
+  });
+
+  it('normalizes a legacy bare string[] response into model options', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify(['a/b', 'c/d']), { status: 200 }),
+    );
+    await expect(listModels()).resolves.toEqual([
+      { alias: 'a/b', accounts: [] },
+      { alias: 'c/d', accounts: [] },
+    ]);
   });
 
   it('returns [] (no throw) on a non-2xx response', async () => {
@@ -35,10 +48,15 @@ describe('models api client', () => {
     await expect(listModels()).resolves.toEqual([]);
   });
 
-  it('filters out non-string entries defensively', async () => {
+  it('filters out malformed entries defensively', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response(JSON.stringify(['a/b', 42, null, 'c/d']), { status: 200 }),
+      new Response(JSON.stringify(['a/b', 42, null, { alias: 'c/d', accounts: ['x'] }, {}]), {
+        status: 200,
+      }),
     );
-    await expect(listModels()).resolves.toEqual(['a/b', 'c/d']);
+    await expect(listModels()).resolves.toEqual([
+      { alias: 'a/b', accounts: [] },
+      { alias: 'c/d', accounts: ['x'] },
+    ]);
   });
 });

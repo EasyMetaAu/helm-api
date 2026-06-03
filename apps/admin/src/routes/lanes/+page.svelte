@@ -1,13 +1,14 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { saveLane, type Lane } from '$lib/api/lanes.js';
+  import type { ModelOption } from '$lib/api/models.js';
   import LaneEditor from '$lib/components/LaneEditor.svelte';
   import { t } from '$lib/i18n';
 
   // Data comes from `+page.ts`'s load (mocked via the `data` prop in tests).
-  // `models` is the routable-alias catalog the editor offers as combobox
-  // suggestions; it defaults to [] so older callers/tests without it still work.
-  let { data }: { data: { lanes: Lane[]; models?: string[] } } = $props();
+  // `models` is the routable-model catalog (alias + exposing accounts) the editor
+  // offers as combobox suggestions; it defaults to [] so older callers/tests work.
+  let { data }: { data: { lanes: Lane[]; models?: ModelOption[] } } = $props();
   const models = $derived(data.models ?? []);
 
   // Seed the working list from the loaded data once; thereafter the page owns it.

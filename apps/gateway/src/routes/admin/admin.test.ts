@@ -217,7 +217,12 @@ function buildDeps(over: Partial<AdminApiDeps> = {}): AdminApiDeps {
     genKeyId: () => `key_${++n}`,
     accountId: "acct_default",
     modelAliases: () =>
-      Promise.resolve(["openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro", "zenmux/auto"]),
+      Promise.resolve(
+        ["openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro", "zenmux/auto"].map((alias) => ({
+          alias,
+          accounts: [],
+        })),
+      ),
     settings: makeSettings(),
     ...over,
   };
@@ -311,16 +316,17 @@ describe("admin.api lanes", () => {
 });
 
 describe("admin.api models", () => {
-  it("GET /models returns the injected alias catalog as a JSON array", async () => {
-    const deps = buildDeps({
-      modelAliases: () =>
-        Promise.resolve(["zenmux/auto", "openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro"]),
-    });
+  it("GET /models returns the injected model-option catalog as a JSON array", async () => {
+    const options = [
+      { alias: "zenmux/auto", accounts: [] },
+      { alias: "anthropic/claude-opus-4-8", accounts: ["default", "work"] },
+    ];
+    const deps = buildDeps({ modelAliases: () => Promise.resolve(options) });
     const app = buildApp(deps);
     const res = await app.request("/admin/api/models");
     expect(res.status).toBe(200);
-    const list = (await res.json()) as string[];
-    expect(list).toEqual(["zenmux/auto", "openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro"]);
+    const list = (await res.json()) as Array<{ alias: string; accounts: string[] }>;
+    expect(list).toEqual(options);
   });
 
   it("is gated behind admin basicAuth like every sibling endpoint", async () => {

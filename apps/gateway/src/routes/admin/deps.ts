@@ -1,5 +1,6 @@
 import type { CreateKeyInput, KeyStore, Lane, PoliciesConfig, TelemetryStore } from "@helm/core";
 import type { ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/shared";
+import type { ModelOption } from "../../oauth/effective-models.js";
 
 // Injected dependency contracts for the admin API. Per CLAUDE.md principle 1 the
 // route files are PURE HTTP glue — they own no business logic and never touch the
@@ -171,15 +172,17 @@ export interface AdminApiDeps {
   // Admin OAuth-login seam (issue #38). Optional so existing tests that build a
   // partial deps object stay valid; the route 503s when it is absent.
   oauth?: OAuthAdminAccess;
-  // The catalog of routable model aliases the Lanes admin UI offers as combobox
+  // The catalog of routable model options the Lanes admin UI offers as combobox
   // suggestions (so an operator picks a real alias instead of hand-typing one — a
-  // typo would silently break a fallback chain). A THUNK, not a static array,
-  // because the OAuth-subscription part is LIVE: it reflects each connected
-  // account's current curation (effectiveOAuthAliases) so a Manage-dialog edit shows
-  // up here on the next read WITHOUT a restart. The configured-provider part is
-  // static (config is immutable for the process). A supply-chain detail (Principle
-  // 6) exposed only to the authenticated admin surface, never to API clients.
-  modelAliases: () => Promise<string[]>;
+  // typo would silently break a fallback chain). Each option is `{ alias, accounts }`
+  // so the picker can show the subscription account(s) under each model. A THUNK,
+  // not a static array, because the OAuth-subscription part is LIVE: it reflects each
+  // connected account's current curation (effectiveOAuthModelOptions) so a
+  // Manage-dialog edit shows up here on the next read WITHOUT a restart. The
+  // configured-provider part is static (config is immutable) and carries no account.
+  // A supply-chain detail (Principle 6) exposed only to the authenticated admin
+  // surface, never to API clients.
+  modelAliases: () => Promise<ModelOption[]>;
   // Mint a fresh key (crypto). Injected for testability + single-source plaintext.
   genKey: () => GeneratedKeyParts;
   // Generate a key_id for a new key. Injected so tests get deterministic ids.

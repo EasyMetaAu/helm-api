@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { Lane } from '$lib/api/lanes.js';
+  import type { ModelOption } from '$lib/api/models.js';
   import { t } from '$lib/i18n';
 
   // Single-lane editor. Pure form: it owns NO routing/classification logic
@@ -25,7 +26,7 @@
     onsave,
   }: {
     lane: Lane;
-    models?: string[];
+    models?: ModelOption[];
     laneNames?: string[];
     onsave: (name: string, body: Lane) => void | Promise<void>;
   } = $props();
@@ -139,8 +140,11 @@
     {#each laneOptions as ln (ln)}
       <option value={ln} label={$t('lane')}></option>
     {/each}
-    {#each models as alias (alias)}
-      <option value={alias}></option>
+    {#each models as { alias, accounts } (alias)}
+      <!-- label = the subscription account(s) backing this model, so the picker
+           shows e.g. "default" / "default, mylukin" beside the alias. Configured
+           providers have no account → no label. -->
+      <option value={alias} label={accounts.length ? accounts.join(', ') : undefined}></option>
     {/each}
   </datalist>
 

@@ -6,7 +6,11 @@ import {
 } from "@helm/core";
 import { describe, expect, it } from "vitest";
 import { setAccountSettings } from "./account-settings.js";
-import { effectiveAccountModels, effectiveOAuthAliases } from "./effective-models.js";
+import {
+  effectiveAccountModels,
+  effectiveOAuthAliases,
+  effectiveOAuthModelOptions,
+} from "./effective-models.js";
 
 const KEY = Buffer.alloc(32, 7);
 const ROUTABLE = new Set(["anthropic", "github-copilot", "openai-codex"]);
@@ -116,6 +120,30 @@ describe("effectiveOAuthAliases", () => {
     expect(await effectiveOAuthAliases({ store: tokens, encKey: KEY }, config, ROUTABLE)).toEqual([
       "anthropic/claude-a",
       "anthropic/claude-b",
+    ]);
+  });
+});
+
+describe("effectiveOAuthModelOptions", () => {
+  it("groups the exposing account(s) under each alias (sorted, deduped)", async () => {
+    const { tokens, config } = makeStores();
+    // Two Codex accounts: both expose gpt-5.5; only `default` exposes gpt-5.4.
+    await bind(tokens, "openai-codex", "default");
+    await bind(tokens, "openai-codex", "mylukin");
+    await setAccountSettings(config, KEY, "openai-codex", "default", {
+      enabledModels: ["gpt-5.5", "gpt-5.4"],
+    });
+    await setAccountSettings(config, KEY, "openai-codex", "mylukin", {
+      enabledModels: ["gpt-5.5"],
+    });
+    const options = await effectiveOAuthModelOptions(
+      { store: tokens, encKey: KEY },
+      config,
+      ROUTABLE,
+    );
+    expect(options).toEqual([
+      { alias: "openai-codex/gpt-5.4", accounts: ["default"] },
+      { alias: "openai-codex/gpt-5.5", accounts: ["default", "mylukin"] },
     ]);
   });
 });
