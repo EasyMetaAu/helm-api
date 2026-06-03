@@ -88,6 +88,21 @@ Rule edits go through a runtime rule store that re-binds the live `lanes` /
 `policies` / `classifier` config the router reads — applied on the very next
 request, no restart. Changes are persisted, keeping "config-as-code".
 
+### Providers (OAuth subscriptions)
+
+- **Providers** (`/providers`) — connect and manage **OAuth subscription** backends
+  (Claude Pro/Max, ChatGPT Codex, GitHub Copilot). **Connect** runs the login flow
+  (manual paste-the-redirect for Claude/Codex, device-code for Copilot); **Manage**
+  opens a per-account dialog with three tabs — **Models** (curate the exposed set — a
+  live allow-list, not just a display filter), **Proxy** (per-account HTTP/HTTPS/SOCKS5
+  egress), and **Schedule** (`priority` + a `schedulable` toggle). Several accounts per
+  provider are pooled (priority asc, then LRU). Every change here — connect, disconnect,
+  curation, proxy, scheduling — **hot-reloads**: it re-synthesizes the live provider
+  pool and applies on the next request, no restart. Tokens are stored encrypted and are
+  never returned to the UI (proxy passwords included: read shows only `hasPassword`).
+  See [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md) and the
+  README's OAuth subscription section.
+
 ### System settings
 
 - **Settings** (`/settings`) — the runtime-mutable settings the operator can
@@ -109,7 +124,7 @@ request, no restart. Changes are persisted, keeping "config-as-code".
   `capture_payloads` is on, the detail can load the full captured request/response
   bodies (`/admin/api/requests/:traceId/payload`).
 
-## Boundaries (0.1)
+## Boundaries (0.2)
 
 - Basic rule management and request inspection only — no multi-tenancy and no
   fine-grained RBAC.
