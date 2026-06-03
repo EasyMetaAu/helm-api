@@ -681,6 +681,333 @@ describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
   });
 });
 
+describe("generationConfig param round-trip (litellm parity)", () => {
+  it("maps IR sampling/control params -> Gemini generationConfig (IR -> Gemini)", () => {
+    const ir: IRRequest = {
+      model: "gemini-1.5-pro",
+      messages: [{ role: "user", content: "hi" }],
+      top_p: 0.9,
+      top_k: 40,
+      frequency_penalty: 0.2,
+      presence_penalty: 0.3,
+      seed: 7,
+      stop: ["STOP", "END"],
+      n: 2,
+      logprobs: true,
+      top_logprobs: 3,
+      modalities: ["text", "image"],
+      temperature: 0.5,
+      max_tokens: 128,
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const gc = native.generationConfig;
+    expect(gc?.topP).toBe(0.9);
+    expect(gc?.topK).toBe(40);
+    expect(gc?.frequencyPenalty).toBe(0.2);
+    expect(gc?.presencePenalty).toBe(0.3);
+    expect(gc?.seed).toBe(7);
+    expect(gc?.stopSequences).toEqual(["STOP", "END"]);
+    expect(gc?.candidateCount).toBe(2);
+    expect(gc?.responseLogprobs).toBe(true);
+    expect(gc?.logprobs).toBe(3);
+    expect(gc?.responseModalities).toEqual(["TEXT", "IMAGE"]);
+    expect(gc?.temperature).toBe(0.5);
+    expect(gc?.maxOutputTokens).toBe(128);
+  });
+
+  it("maps a single-string stop into stopSequences as a one-element array", () => {
+    const native = geminiTransformer.transformRequestIn({
+      model: "gemini-1.5-pro",
+      messages: [{ role: "user", content: "hi" }],
+      stop: "DONE",
+    }) as GeminiGenerateContentRequest;
+    expect(native.generationConfig?.stopSequences).toEqual(["DONE"]);
+  });
+
+  it("maps reasoning_effort -> thinkingConfig (low/medium/high), minimal allowed", () => {
+    const mk = (effort: "minimal" | "low" | "medium" | "high"): GeminiGenerateContentRequest =>
+      geminiTransformer.transformRequestIn({
+        model: "gemini-2.5-pro",
+        messages: [{ role: "user", content: "hi" }],
+        reasoning_effort: effort,
+      }) as GeminiGenerateContentRequest;
+
+    expect(mk("low").generationConfig?.thinkingConfig?.includeThoughts).toBe(true);
+    const lowBudget = mk("low").generationConfig?.thinkingConfig?.thinkingBudget;
+    const medBudget = mk("medium").generationConfig?.thinkingConfig?.thinkingBudget;
+    const highBudget = mk("high").generationConfig?.thinkingConfig?.thinkingBudget;
+    expect(typeof lowBudget).toBe("number");
+    // budgets increase with effort.
+    expect((medBudget ?? 0) > (lowBudget ?? 0)).toBe(true);
+    expect((highBudget ?? 0) > (medBudget ?? 0)).toBe(true);
+    // minimal is allowed (some thinking config emitted, not undefined).
+    expect(mk("minimal").generationConfig?.thinkingConfig).toBeDefined();
+  });
+
+  it("maps Gemini generationConfig -> IR params (Gemini -> IR)", () => {
+    const native: GeminiGenerateContentRequest = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      generationConfig: {
+        topP: 0.8,
+        topK: 20,
+        frequencyPenalty: 0.1,
+        presencePenalty: 0.15,
+        seed: 11,
+        stopSequences: ["A", "B"],
+        candidateCount: 3,
+        responseLogprobs: true,
+        logprobs: 2,
+        responseModalities: ["TEXT", "IMAGE"],
+      },
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.top_p).toBe(0.8);
+    expect(ir.top_k).toBe(20);
+    expect(ir.frequency_penalty).toBe(0.1);
+    expect(ir.presence_penalty).toBe(0.15);
+    expect(ir.seed).toBe(11);
+    expect(ir.stop).toEqual(["A", "B"]);
+    expect(ir.n).toBe(3);
+    expect(ir.logprobs).toBe(true);
+    expect(ir.top_logprobs).toBe(2);
+    expect(ir.modalities).toEqual(["text", "image"]);
+  });
+});
+
+describe("usage detail (thoughtsTokenCount + per-modality details)", () => {
+  it("maps thoughtsTokenCount -> reasoning_tokens and modality details (Gemini -> IR)", () => {
+    const native: GeminiGenerateContentResponse = {
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: {
+        promptTokenCount: 100,
+        candidatesTokenCount: 20,
+        totalTokenCount: 135,
+        cachedContentTokenCount: 10,
+        thoughtsTokenCount: 15,
+        promptTokensDetails: [
+          { modality: "TEXT", tokenCount: 80 },
+          { modality: "IMAGE", tokenCount: 20 },
+        ],
+        candidatesTokensDetails: [{ modality: "TEXT", tokenCount: 20 }],
+      },
+    };
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.usage?.prompt_tokens).toBe(90); // 100 - 10 cached
+    expect(ir.usage?.completion_tokens).toBe(20);
+    expect(ir.usage?.cached_tokens).toBe(10);
+    expect(ir.usage?.reasoning_tokens).toBe(15);
+    expect(ir.usage?.prompt_tokens_details?.text_tokens).toBe(80);
+    expect(ir.usage?.prompt_tokens_details?.image_tokens).toBe(20);
+    expect(ir.usage?.completion_tokens_details?.text_tokens).toBe(20);
+  });
+
+  it("emits totalTokenCount/cachedContentTokenCount/thoughtsTokenCount (IR -> Gemini)", () => {
+    const ir: IRResponse = {
+      id: "r",
+      model: "m",
+      choices: [{ index: 0, message: { role: "assistant", content: "x" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 30, completion_tokens: 10, cached_tokens: 5, reasoning_tokens: 4 },
+    };
+    const native = geminiTransformer.transformResponseOut(ir) as GeminiGenerateContentResponse;
+    const um = native.usageMetadata;
+    // prompt = prompt_tokens + cached; total = prompt + completion.
+    expect(um?.promptTokenCount).toBe(35);
+    expect(um?.candidatesTokenCount).toBe(10);
+    expect(um?.totalTokenCount).toBe(45);
+    expect(um?.cachedContentTokenCount).toBe(5);
+    expect(um?.thoughtsTokenCount).toBe(4);
+  });
+});
+
+describe("grounding/citation -> annotations + logprobs", () => {
+  it("folds groundingMetadata chunks+supports into IRMessage.annotations (url_citation)", () => {
+    const native: GeminiGenerateContentResponse = {
+      candidates: [
+        {
+          content: { role: "model", parts: [{ text: "Paris is the capital." }] },
+          finishReason: "STOP",
+          groundingMetadata: {
+            groundingChunks: [
+              { web: { uri: "https://example.com/a", title: "Source A" } },
+              { web: { uri: "https://example.com/b", title: "Source B" } },
+            ],
+            groundingSupports: [
+              { segment: { startIndex: 0, endIndex: 5 }, groundingChunkIndices: [0] },
+            ],
+          },
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    const annotations = ir.choices[0]?.message.annotations ?? [];
+    expect(annotations.length).toBeGreaterThanOrEqual(2);
+    const first = annotations.find((a) => a.url === "https://example.com/a");
+    expect(first?.type).toBe("url_citation");
+    expect(first?.title).toBe("Source A");
+    // a support segment carries start/end indices.
+    const withSeg = annotations.find((a) => a.start_index === 0 && a.end_index === 5);
+    expect(withSeg).toBeDefined();
+  });
+
+  it("maps logprobsResult -> IRChoice.logprobs and safetyRatings -> provider_raw", () => {
+    const native: GeminiGenerateContentResponse = {
+      candidates: [
+        {
+          content: { role: "model", parts: [{ text: "hi" }] },
+          finishReason: "STOP",
+          logprobsResult: { topCandidates: [], chosenCandidates: [] },
+          safetyRatings: [{ category: "HARM_CATEGORY_HATE_SPEECH", probability: "NEGLIGIBLE" }],
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.choices[0]?.logprobs).toBeDefined();
+    expect(ir.provider_raw?.safety_ratings).toBeDefined();
+  });
+});
+
+describe("promptFeedback block (content_filter)", () => {
+  it("sets finish_reason content_filter and stashes promptFeedback in provider_raw", () => {
+    const native: GeminiGenerateContentResponse = {
+      promptFeedback: {
+        blockReason: "SAFETY",
+        safetyRatings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", probability: "HIGH" }],
+      },
+    };
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.choices[0]?.finish_reason).toBe("content_filter");
+    const pf = ir.provider_raw?.prompt_feedback as { blockReason?: string } | undefined;
+    expect(pf?.blockReason).toBe("SAFETY");
+  });
+});
+
+describe("finishReason additions (litellm parity)", () => {
+  const cases: Array<[string, string]> = [
+    ["LANGUAGE", "content_filter"],
+    ["IMAGE_SAFETY", "content_filter"],
+    ["IMAGE_PROHIBITED_CONTENT", "content_filter"],
+    ["TOO_MANY_TOOL_CALLS", "stop"],
+    ["MALFORMED_RESPONSE", "stop"],
+    ["FINISH_REASON_UNSPECIFIED", "stop"],
+  ];
+  for (const [gemini, ir] of cases) {
+    it(`maps ${gemini} -> ${ir} and keeps raw`, () => {
+      const native: GeminiGenerateContentResponse = {
+        candidates: [{ content: { role: "model", parts: [{ text: "x" }] }, finishReason: gemini }],
+      };
+      const out = geminiTransformer.transformResponseIn(native) as IRResponse;
+      expect(out.choices[0]?.finish_reason).toBe(ir);
+      expect(out.provider_raw?.stop_reason).toBe(gemini);
+    });
+  }
+});
+
+describe("generated media parts (inlineData image/audio -> IRMessage)", () => {
+  it("routes an image/* inlineData part to IRMessage.images", () => {
+    const native: GeminiGenerateContentResponse = {
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [{ inlineData: { mimeType: "image/png", data: "IMGDATA" } }],
+          },
+          finishReason: "STOP",
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    const imgs = ir.choices[0]?.message.images ?? [];
+    expect(imgs[0]?.b64_json).toBe("IMGDATA");
+    expect(imgs[0]?.mediaType).toBe("image/png");
+  });
+
+  it("routes an audio/* inlineData part to IRMessage.audio", () => {
+    const native: GeminiGenerateContentResponse = {
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [{ inlineData: { mimeType: "audio/wav", data: "AUDIODATA" } }],
+          },
+          finishReason: "STOP",
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.choices[0]?.message.audio?.data).toBe("AUDIODATA");
+  });
+});
+
+describe("streaming reasoning (thought parts)", () => {
+  it("emits Gemini thought parts as delta.reasoning_content (Gemini -> IR)", async () => {
+    const events: GeminiSSEEvent[] = [
+      {
+        candidates: [
+          { content: { role: "model", parts: [{ text: "thinking...", thought: true }] } },
+        ],
+      },
+      { candidates: [{ content: { role: "model", parts: [{ text: "Answer" }] } }] },
+      { candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }] },
+    ];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const reasoning = chunks.map((c) => c.choices?.[0]?.delta?.reasoning_content ?? "").join("");
+    expect(reasoning).toBe("thinking...");
+    // the thought text must NOT also leak into the visible content stream.
+    const content = chunks.map((c) => c.choices?.[0]?.delta?.content ?? "").join("");
+    expect(content).toBe("Answer");
+  });
+
+  it("emits IR delta.reasoning_content as a Gemini thought part (IR -> Gemini)", async () => {
+    const chunks: IRChunk[] = [
+      {
+        id: "c",
+        model: "m",
+        choices: [{ index: 0, delta: { role: "assistant", reasoning_content: "ponder" } }],
+      },
+      {
+        id: "c",
+        model: "m",
+        choices: [{ index: 0, delta: { content: "Done" }, finish_reason: "stop" }],
+      },
+    ];
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(chunks)));
+    const thoughtParts = events
+      .flatMap((e) => e.candidates?.[0]?.content?.parts ?? [])
+      .filter((p) => (p as { thought?: boolean }).thought === true) as Array<{ text?: string }>;
+    expect(thoughtParts.map((p) => p.text).join("")).toBe("ponder");
+  });
+
+  it("accumulates groundingMetadata across stream and emits annotations on terminal chunk", async () => {
+    const events: GeminiSSEEvent[] = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "Paris" }] } }] },
+      {
+        candidates: [
+          {
+            content: { role: "model", parts: [] },
+            finishReason: "STOP",
+            groundingMetadata: {
+              groundingChunks: [{ web: { uri: "https://example.com/x", title: "X" } }],
+            },
+          },
+        ],
+      },
+    ];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const annotated = chunks.find((c) => (c.choices?.[0]?.delta?.annotations ?? []).length > 0);
+    expect(annotated?.choices?.[0]?.delta?.annotations?.[0]?.url).toBe("https://example.com/x");
+  });
+
+  it("surfaces a top-level error SSE frame by throwing", async () => {
+    const events: GeminiSSEEvent[] = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "hi" }] } }] },
+      { error: { code: 429, message: "rate limited", status: "RESOURCE_EXHAUSTED" } },
+    ];
+    await expect(collect(geminiTransformer.transformStreamIn(fromArray(events)))).rejects.toThrow(
+      /rate limited/,
+    );
+  });
+});
+
 describe("endPoint routing (/v1beta/...)", () => {
   // test #7: generateContent -> non-stream; streamGenerateContent?alt=sse -> stream;
   // {model} -> IR model; declares x-goog-api-key.

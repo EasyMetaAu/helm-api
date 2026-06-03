@@ -78,7 +78,16 @@ const GEMINI_TO_IR_FINISH: Record<string, string> = {
   BLOCKLIST: "content_filter",
   PROHIBITED_CONTENT: "content_filter",
   SPII: "content_filter",
+  // litellm parity additions: image-safety / language flags -> content_filter; the
+  // "should-have-stopped" diagnostics (too many tool calls, malformed/unspecified) map
+  // to plain stop. Raw value is always preserved in provider_raw.stop_reason.
+  LANGUAGE: "content_filter",
+  IMAGE_SAFETY: "content_filter",
+  IMAGE_PROHIBITED_CONTENT: "content_filter",
   MALFORMED_FUNCTION_CALL: "stop",
+  TOO_MANY_TOOL_CALLS: "stop",
+  MALFORMED_RESPONSE: "stop",
+  FINISH_REASON_UNSPECIFIED: "stop",
   OTHER: "stop",
 };
 
@@ -100,6 +109,53 @@ function mapFinishReasonToGemini(reason: string | null): string | undefined {
   return IR_TO_GEMINI_FINISH[reason] ?? "STOP";
 }
 
+// —— modalities <-> responseModalities (litellm map_response_modalities). IR uses
+// lowercase OpenAI tokens; Gemini wants uppercase enum constants. ————————————————————
+const IR_TO_GEMINI_MODALITY: Record<string, string> = {
+  text: "TEXT",
+  image: "IMAGE",
+  audio: "AUDIO",
+  video: "VIDEO",
+};
+const GEMINI_TO_IR_MODALITY: Record<string, "text" | "image" | "audio" | "video"> = {
+  TEXT: "text",
+  IMAGE: "image",
+  AUDIO: "audio",
+  VIDEO: "video",
+};
+
+// —— reasoning_effort -> Gemini thinkingConfig (litellm _map_reasoning_effort_to_
+// thinking_budget). We emit a thinkingBudget + includeThoughts. The exact litellm
+// budget constants are model-family specific; we use representative monotonically
+// increasing defaults (minimal < low < medium < high) so the level is honored and
+// budgets order correctly. The raw effort survives in provider_raw at the request
+// layer if needed; here we only need a valid, ordered thinkingConfig.
+const REASONING_EFFORT_BUDGET: Record<"minimal" | "low" | "medium" | "high", number> = {
+  minimal: 128,
+  low: 1024,
+  medium: 8192,
+  high: 24576,
+};
+
+function reasoningEffortToThinkingConfig(
+  effort: "minimal" | "low" | "medium" | "high" | undefined,
+): { thinkingBudget: number; includeThoughts: boolean } | undefined {
+  if (effort === undefined) return undefined;
+  return { thinkingBudget: REASONING_EFFORT_BUDGET[effort], includeThoughts: true };
+}
+
+function thinkingConfigToReasoningEffort(
+  thinkingConfig: { thinkingBudget?: number } | undefined,
+): "minimal" | "low" | "medium" | "high" | undefined {
+  const budget = thinkingConfig?.thinkingBudget;
+  if (budget === undefined) return undefined;
+  // Reverse the budget bands back to the nearest effort level.
+  if (budget <= REASONING_EFFORT_BUDGET.minimal) return "minimal";
+  if (budget <= REASONING_EFFORT_BUDGET.low) return "low";
+  if (budget <= REASONING_EFFORT_BUDGET.medium) return "medium";
+  return "high";
+}
+
 // —— Synthesize a deterministic tool-call id. Gemini functionCall has no id; we make
 // one from name + per-turn occurrence index so the matching functionResponse (which
 // only carries `name`) can be paired back. ————————————————————————————————————————
@@ -114,6 +170,101 @@ function inlineDataToImagePart(data: { mimeType: string; data: string }): IRCont
     url: `data:${data.mimeType};base64,${data.data}`,
     mediaType: data.mimeType,
   };
+}
+
+// —— Per-modality token detail: Gemini's [{modality,tokenCount}] -> IR token-details
+// object ({text_tokens, image_tokens, audio_tokens, video_tokens}). ——————————————————
+function modalityDetailsToIR(
+  details: Array<{ modality?: string; tokenCount?: number }> | undefined,
+): Record<string, number> | undefined {
+  if (details === undefined || details.length === 0) return undefined;
+  const out: Record<string, number> = {};
+  for (const d of details) {
+    if (d.tokenCount === undefined) continue;
+    const modality = (d.modality ?? "").toUpperCase();
+    const key =
+      modality === "TEXT"
+        ? "text_tokens"
+        : modality === "IMAGE"
+          ? "image_tokens"
+          : modality === "AUDIO"
+            ? "audio_tokens"
+            : modality === "VIDEO"
+              ? "video_tokens"
+              : undefined;
+    if (key === undefined) continue;
+    out[key] = (out[key] ?? 0) + d.tokenCount;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+// —— groundingMetadata/citationMetadata -> IR annotations (url_citation). Gemini puts
+// the cited sources in groundingChunks[].web.{uri,title} and the cited text spans in
+// groundingSupports[].segment.{startIndex,endIndex}; citationMetadata.citationSources[]
+// carries {uri,startIndex,endIndex,title}. We flatten all into the unified annotation
+// shape so any downstream protocol (OpenAI url_citation) renders them. ————————————————
+function groundingToAnnotations(
+  groundingMetadata: unknown,
+  citationMetadata: unknown,
+): IRMessage["annotations"] {
+  const annotations: NonNullable<IRMessage["annotations"]> = [];
+
+  if (typeof groundingMetadata === "object" && groundingMetadata !== null) {
+    const gm = groundingMetadata as {
+      groundingChunks?: Array<{ web?: { uri?: unknown; title?: unknown } }>;
+      groundingSupports?: Array<{
+        segment?: { startIndex?: unknown; endIndex?: unknown; text?: unknown };
+      }>;
+    };
+    for (const chunk of gm.groundingChunks ?? []) {
+      const uri = chunk.web?.uri;
+      if (typeof uri !== "string") continue;
+      annotations.push({
+        type: "url_citation",
+        url: uri,
+        ...(typeof chunk.web?.title === "string" ? { title: chunk.web.title } : {}),
+      });
+    }
+    for (const support of gm.groundingSupports ?? []) {
+      const seg = support.segment;
+      if (seg === undefined) continue;
+      const start = typeof seg.startIndex === "number" ? seg.startIndex : undefined;
+      const end = typeof seg.endIndex === "number" ? seg.endIndex : undefined;
+      if (start === undefined && end === undefined) continue;
+      annotations.push({
+        type: "url_citation",
+        ...(start !== undefined ? { start_index: start } : {}),
+        ...(end !== undefined ? { end_index: end } : {}),
+        ...(typeof seg.text === "string" ? { text: seg.text } : {}),
+      });
+    }
+  }
+
+  if (typeof citationMetadata === "object" && citationMetadata !== null) {
+    const cm = citationMetadata as {
+      citationSources?: Array<{
+        uri?: unknown;
+        title?: unknown;
+        startIndex?: unknown;
+        endIndex?: unknown;
+      }>;
+    };
+    for (const src of cm.citationSources ?? []) {
+      const uri = typeof src.uri === "string" ? src.uri : undefined;
+      const start = typeof src.startIndex === "number" ? src.startIndex : undefined;
+      const end = typeof src.endIndex === "number" ? src.endIndex : undefined;
+      if (uri === undefined && start === undefined && end === undefined) continue;
+      annotations.push({
+        type: "url_citation",
+        ...(uri !== undefined ? { url: uri } : {}),
+        ...(typeof src.title === "string" ? { title: src.title } : {}),
+        ...(start !== undefined ? { start_index: start } : {}),
+        ...(end !== undefined ? { end_index: end } : {}),
+      });
+    }
+  }
+
+  return annotations.length > 0 ? annotations : undefined;
 }
 
 // —— Inbound: Gemini generateContent request -> IR. ————————————————————————————————
@@ -217,12 +368,32 @@ function transformRequestOut(native: unknown): IRRequest {
         : { type: "json_object" }
       : undefined;
 
+  // —— Gemini generationConfig -> flat IR sampling/control knobs (reverse of the
+  // IR -> Gemini map above). stopSequences -> stop (array kept as-is); candidateCount
+  // -> n; responseLogprobs/logprobs -> logprobs/top_logprobs; responseModalities ->
+  // lowercase modalities; thinkingConfig -> reasoning_effort.
+  const modalities = gc?.responseModalities
+    ?.map((m) => GEMINI_TO_IR_MODALITY[m])
+    .filter((m): m is "text" | "image" | "audio" | "video" => m !== undefined);
+  const reasoningEffort = thinkingConfigToReasoningEffort(gc?.thinkingConfig);
+
   const ir: IRRequest = {
     model: "gemini", // path-derived model is supplied by the route layer; default here.
     messages,
     ...(tools !== undefined && tools.length > 0 ? { tools } : {}),
     ...(gc?.temperature !== undefined ? { temperature: gc.temperature } : {}),
     ...(gc?.maxOutputTokens !== undefined ? { max_tokens: gc.maxOutputTokens } : {}),
+    ...(gc?.topP !== undefined ? { top_p: gc.topP } : {}),
+    ...(gc?.topK !== undefined ? { top_k: gc.topK } : {}),
+    ...(gc?.frequencyPenalty !== undefined ? { frequency_penalty: gc.frequencyPenalty } : {}),
+    ...(gc?.presencePenalty !== undefined ? { presence_penalty: gc.presencePenalty } : {}),
+    ...(gc?.seed !== undefined ? { seed: gc.seed } : {}),
+    ...(gc?.stopSequences !== undefined ? { stop: gc.stopSequences } : {}),
+    ...(gc?.candidateCount !== undefined ? { n: gc.candidateCount } : {}),
+    ...(gc?.responseLogprobs !== undefined ? { logprobs: gc.responseLogprobs } : {}),
+    ...(gc?.logprobs !== undefined ? { top_logprobs: gc.logprobs } : {}),
+    ...(modalities !== undefined && modalities.length > 0 ? { modalities } : {}),
+    ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
     ...(responseFormat !== undefined ? { response_format: responseFormat } : {}),
     ...(geminiToolConfigToToolChoice(req.toolConfig) !== undefined
       ? { tool_choice: geminiToolConfigToToolChoice(req.toolConfig) }
@@ -422,13 +593,41 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
       ? [{ functionDeclarations: parsed.tools.map(irToolToFunctionDeclaration) }]
       : undefined;
 
-  const generationConfig = mergeGenerationConfig(
-    parsed.temperature !== undefined || parsed.max_tokens !== undefined
+  // —— Map the flat IR sampling/control knobs onto Gemini's camelCase generationConfig
+  // (litellm map_openai_params parity). stop string -> 1-element stopSequences; n ->
+  // candidateCount; logprobs(bool)/top_logprobs(int) -> responseLogprobs/logprobs;
+  // modalities -> uppercase responseModalities; reasoning_effort -> thinkingConfig.
+  const samplingConfig: Record<string, unknown> = {
+    ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
+    ...(parsed.max_tokens !== undefined ? { maxOutputTokens: parsed.max_tokens } : {}),
+    ...(parsed.top_p !== undefined ? { topP: parsed.top_p } : {}),
+    ...(parsed.top_k !== undefined ? { topK: parsed.top_k } : {}),
+    ...(parsed.frequency_penalty !== undefined
+      ? { frequencyPenalty: parsed.frequency_penalty }
+      : {}),
+    ...(parsed.presence_penalty !== undefined ? { presencePenalty: parsed.presence_penalty } : {}),
+    ...(parsed.seed !== undefined ? { seed: parsed.seed } : {}),
+    ...(parsed.stop !== undefined
+      ? { stopSequences: typeof parsed.stop === "string" ? [parsed.stop] : parsed.stop }
+      : {}),
+    ...(parsed.n !== undefined ? { candidateCount: parsed.n } : {}),
+    ...(parsed.logprobs !== undefined ? { responseLogprobs: parsed.logprobs } : {}),
+    ...(parsed.top_logprobs !== undefined ? { logprobs: parsed.top_logprobs } : {}),
+    ...(parsed.modalities !== undefined
       ? {
-          ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
-          ...(parsed.max_tokens !== undefined ? { maxOutputTokens: parsed.max_tokens } : {}),
+          responseModalities: parsed.modalities.map(
+            (m) => IR_TO_GEMINI_MODALITY[m] ?? "MODALITY_UNSPECIFIED",
+          ),
         }
-      : undefined,
+      : {}),
+    ...((): Record<string, unknown> => {
+      const tc = reasoningEffortToThinkingConfig(parsed.reasoning_effort);
+      return tc !== undefined ? { thinkingConfig: tc } : {};
+    })(),
+  };
+
+  const generationConfig = mergeGenerationConfig(
+    Object.keys(samplingConfig).length > 0 ? samplingConfig : undefined,
     responseFormatToGenerationConfig(parsed.response_format),
   );
   const toolConfig = irToolChoiceToGeminiToolConfig(parsed.tool_choice);
@@ -453,6 +652,7 @@ function irUsageToMetadata(usage: IRResponse["usage"]): GeminiUsageMetadata | un
     candidatesTokenCount: candidates,
     totalTokenCount: prompt + candidates,
     ...(usage.cached_tokens !== undefined ? { cachedContentTokenCount: usage.cached_tokens } : {}),
+    ...(usage.reasoning_tokens !== undefined ? { thoughtsTokenCount: usage.reasoning_tokens } : {}),
   };
 }
 
@@ -482,11 +682,24 @@ function geminiCandidateToMessage(candidate: GeminiCandidate): IRMessage {
   const parts: IRContentPart[] = [];
   const toolCalls: IRToolCall[] = [];
   const callIdsByName = new Map<string, number>();
+  // GENERATED media surfaces on the message, not as input content parts: inlineData
+  // image/* -> images[] (IRImageOut), audio/* -> audio (IRAudioOut). Any other inline
+  // mime degrades to an image content part (lossless data-url passthrough).
+  const images: NonNullable<IRMessage["images"]> = [];
+  let audio: IRMessage["audio"];
 
   for (const part of candidate.content.parts) {
     if (part.text !== undefined) parts.push({ type: "text", text: part.text });
-    else if (part.inlineData !== undefined) parts.push(inlineDataToImagePart(part.inlineData));
-    else if (part.functionCall !== undefined) {
+    else if (part.inlineData !== undefined) {
+      const mime = part.inlineData.mimeType;
+      if (mime.startsWith("image/")) {
+        images.push({ b64_json: part.inlineData.data, mediaType: mime });
+      } else if (mime.startsWith("audio/")) {
+        audio = { data: part.inlineData.data };
+      } else {
+        parts.push(inlineDataToImagePart(part.inlineData));
+      }
+    } else if (part.functionCall !== undefined) {
       const name = part.functionCall.name;
       const n = callIdsByName.get(name) ?? 0;
       callIdsByName.set(name, n + 1);
@@ -498,10 +711,23 @@ function geminiCandidateToMessage(candidate: GeminiCandidate): IRMessage {
     }
   }
 
+  const annotations = groundingToAnnotations(
+    candidate.groundingMetadata,
+    candidate.citationMetadata,
+  );
+
+  const hasContent = parts.length > 0;
   return {
     role: "assistant",
-    content: parts.length > 0 ? parts : toolCalls.length > 0 ? null : "",
+    content: hasContent
+      ? parts
+      : toolCalls.length > 0 || images.length > 0 || audio !== undefined
+        ? null
+        : "",
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    ...(images.length > 0 ? { images } : {}),
+    ...(audio !== undefined ? { audio } : {}),
+    ...(annotations !== undefined ? { annotations } : {}),
   };
 }
 
@@ -514,6 +740,8 @@ function transformResponseIn(native: unknown): IRResponse {
       : { role: "assistant", content: "" };
 
   const um = res.usageMetadata;
+  const promptDetails = modalityDetailsToIR(um?.promptTokensDetails);
+  const candidateDetails = modalityDetailsToIR(um?.candidatesTokensDetails);
   const usage =
     um !== undefined
       ? {
@@ -528,8 +756,28 @@ function transformResponseIn(native: unknown): IRResponse {
           ...(um.cachedContentTokenCount !== undefined
             ? { cached_tokens: um.cachedContentTokenCount }
             : {}),
+          // thoughtsTokenCount is the reasoning-token count (litellm parity).
+          ...(um.thoughtsTokenCount !== undefined
+            ? { reasoning_tokens: um.thoughtsTokenCount }
+            : {}),
+          ...(promptDetails !== undefined ? { prompt_tokens_details: promptDetails } : {}),
+          ...(candidateDetails !== undefined
+            ? { completion_tokens_details: candidateDetails }
+            : {}),
         }
       : undefined;
+
+  // promptFeedback.blockReason means the PROMPT was rejected (no candidate). Surface
+  // it as content_filter and keep the raw block; its blockReason is also the raw stop.
+  const promptBlock = res.promptFeedback?.blockReason;
+  const finishReason =
+    promptBlock !== undefined && promptBlock !== ""
+      ? "content_filter"
+      : mapFinishReasonToIR(candidate?.finishReason);
+
+  // logprobsResult -> IRChoice.logprobs (kept raw under the logprobs bag; IRLogprobs is
+  // permissive/.passthrough()). safetyRatings + promptFeedback live in provider_raw.
+  const logprobs = candidate?.logprobsResult;
 
   const ir: IRResponse = {
     id: `gemini_${Date.now()}`,
@@ -538,13 +786,24 @@ function transformResponseIn(native: unknown): IRResponse {
       {
         index: 0,
         message,
-        finish_reason: mapFinishReasonToIR(candidate?.finishReason),
+        finish_reason: finishReason,
+        ...(logprobs !== undefined && logprobs !== null
+          ? { logprobs: logprobs as Record<string, unknown> }
+          : {}),
       },
     ],
     ...(usage !== undefined ? { usage } : {}),
     provider_raw: {
-      ...(candidate?.finishReason !== undefined ? { stop_reason: candidate.finishReason } : {}),
+      ...(candidate?.finishReason !== undefined
+        ? { stop_reason: candidate.finishReason }
+        : promptBlock !== undefined
+          ? { stop_reason: promptBlock }
+          : {}),
       ...(um !== undefined ? { usage: um } : {}),
+      ...(candidate?.safetyRatings !== undefined
+        ? { safety_ratings: candidate.safetyRatings }
+        : {}),
+      ...(res.promptFeedback !== undefined ? { prompt_feedback: res.promptFeedback } : {}),
     },
   };
   return IRResponseSchema.parse(ir);
@@ -566,9 +825,12 @@ interface StreamToolSlot {
 async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIterable<IRChunk> {
   let started = false;
   let emittedText = "";
+  let emittedThought = ""; // accumulated reasoning text (Gemini thought parts)
   let lastModel: string | undefined;
   let pendingFinish: string | null = null;
   let lastUsage: IRChunk["usage"];
+  let groundingMeta: unknown; // latest grounding/citation metadata seen across frames
+  let citationMeta: unknown;
   // Tool args are NOT append-only across Gemini snapshots: each snapshot carries the
   // CURRENT complete `args` object (which JSON.stringify may re-serialize wholesale,
   // not as a strict prefix extension). So we BUFFER the latest full args per tool and
@@ -579,21 +841,51 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
 
   for await (const raw of src) {
     const event = GeminiSSEEventSchema.parse(raw);
+
+    // —— A top-level error frame aborts the generation: surface it instead of silently
+    // dropping (docs/05 streaming correctness). Throw so the gateway error path runs.
+    if (event.error !== undefined) {
+      const e = event.error;
+      throw new Error(
+        `Gemini stream error${e.status !== undefined ? ` [${e.status}]` : ""}: ${e.message ?? "unknown"}`,
+      );
+    }
+
     const candidate = event.candidates?.[0];
     if (event.modelVersion !== undefined) lastModel = event.modelVersion;
+    if (candidate?.groundingMetadata !== undefined) groundingMeta = candidate.groundingMetadata;
+    if (candidate?.citationMetadata !== undefined) citationMeta = candidate.citationMetadata;
 
     const roleField = !started ? { role: "assistant" } : {};
     started = true;
 
-    // —— text delta: diff the accumulated snapshot text (append-only by nature). ——
-    const snapshotText = candidate?.content.parts.map((p) => p.text ?? "").join("") ?? "";
+    // —— Split visible text from thought parts. A thought part (part.thought===true)
+    // is reasoning, streamed as delta.reasoning_content; visible text is delta.content.
+    // Both diff the accumulated snapshot (append-only by nature). ——————————————————————
+    const parts = candidate?.content.parts ?? [];
+    const isThought = (p: GeminiPart): boolean => (p as { thought?: boolean }).thought === true;
+    const snapshotText = parts
+      .filter((p) => !isThought(p))
+      .map((p) => p.text ?? "")
+      .join("");
+    const snapshotThought = parts
+      .filter(isThought)
+      .map((p) => p.text ?? "")
+      .join("");
+
     let textDelta = "";
     if (snapshotText.startsWith(emittedText)) textDelta = snapshotText.slice(emittedText.length);
     else textDelta = snapshotText; // non-prefix snapshot (rare): emit the whole text
     if (snapshotText.length >= emittedText.length) emittedText = snapshotText;
 
+    let thoughtDelta = "";
+    if (snapshotThought.startsWith(emittedThought)) {
+      thoughtDelta = snapshotThought.slice(emittedThought.length);
+    } else thoughtDelta = snapshotThought;
+    if (snapshotThought.length >= emittedThought.length) emittedThought = snapshotThought;
+
     // —— tool-call args: buffer the latest full args per name (no mid-stream emit). ——
-    for (const part of candidate?.content.parts ?? []) {
+    for (const part of parts) {
       if (part.functionCall === undefined) continue;
       const name = part.functionCall.name;
       let slot = toolNameToSlot.get(name);
@@ -621,22 +913,35 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
         ...(um.cachedContentTokenCount !== undefined
           ? { cached_tokens: um.cachedContentTokenCount }
           : {}),
+        ...(um.thoughtsTokenCount !== undefined ? { reasoning_tokens: um.thoughtsTokenCount } : {}),
       };
     }
 
-    // Emit a delta chunk for streamed text and/or the first-chunk role announcement;
-    // tool args are flushed at stream end. Skip a silent empty mid-stream snapshot.
+    // Emit a delta chunk for streamed text/reasoning and/or the first-chunk role
+    // announcement; tool args + annotations are flushed at stream end. Skip a silent
+    // empty mid-stream snapshot.
     const isFirst = Object.keys(roleField).length > 0;
-    if (textDelta !== "" || isFirst) {
+    if (textDelta !== "" || thoughtDelta !== "" || isFirst) {
       const delta: NonNullable<IRChunk["choices"]>[number]["delta"] = {
         ...roleField,
         ...(textDelta !== "" ? { content: textDelta } : {}),
+        ...(thoughtDelta !== "" ? { reasoning_content: thoughtDelta } : {}),
       };
       yield {
         ...(lastModel !== undefined ? { model: lastModel } : {}),
         choices: [{ index: 0, delta }],
       };
     }
+  }
+
+  // —— Stream end: emit accumulated grounding/citation as an annotations delta (one
+  // chunk) before the tool flush + terminal finish. ————————————————————————————————
+  const annotations = groundingToAnnotations(groundingMeta, citationMeta);
+  if (annotations !== undefined) {
+    yield {
+      ...(lastModel !== undefined ? { model: lastModel } : {}),
+      choices: [{ index: 0, delta: { annotations } }],
+    };
   }
 
   // —— Stream end: flush complete tool-call args (each a fully-parseable JSON), then
@@ -705,12 +1010,24 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
     return parts;
   };
 
-  const toUsageMetadata = (usage: NonNullable<IRChunk["usage"]>): GeminiUsageMetadata => ({
-    ...(usage.prompt_tokens !== undefined ? { promptTokenCount: usage.prompt_tokens } : {}),
-    ...(usage.completion_tokens !== undefined
-      ? { candidatesTokenCount: usage.completion_tokens }
-      : {}),
-  });
+  const toUsageMetadata = (usage: NonNullable<IRChunk["usage"]>): GeminiUsageMetadata => {
+    const prompt = usage.prompt_tokens;
+    const candidates = usage.completion_tokens;
+    return {
+      ...(prompt !== undefined ? { promptTokenCount: prompt } : {}),
+      ...(candidates !== undefined ? { candidatesTokenCount: candidates } : {}),
+      // The real Gemini wire always carries totalTokenCount on the terminal frame.
+      ...(prompt !== undefined || candidates !== undefined
+        ? { totalTokenCount: (prompt ?? 0) + (candidates ?? 0) }
+        : {}),
+      ...(usage.reasoning_tokens !== undefined
+        ? { thoughtsTokenCount: usage.reasoning_tokens }
+        : {}),
+      ...(usage.cached_tokens !== undefined
+        ? { cachedContentTokenCount: usage.cached_tokens }
+        : {}),
+    };
+  };
 
   // The terminal frame (text delta + functionCall parts + finishReason) is held back
   // until stream end so a late usage-only chunk merges into it as ONE frame.
@@ -721,6 +1038,7 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
   for await (const chunk of src) {
     const choice = chunk.choices?.[0];
     const content = choice?.delta?.content;
+    const reasoning = choice?.delta?.reasoning_content;
 
     for (const tc of choice?.delta?.tool_calls ?? []) {
       let slot = toolIndexToSlot.get(tc.index);
@@ -738,15 +1056,26 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
     if (choice?.finish_reason != null) {
       // Terminal chunk: assemble the final frame but hold it (usage may still trail).
       terminalParts = [];
+      if (typeof reasoning === "string" && reasoning !== "") {
+        terminalParts.push({ text: reasoning, thought: true });
+      }
       if (typeof content === "string" && content !== "") terminalParts.push({ text: content });
       terminalParts.push(...flushToolParts());
       terminalFinish = mapFinishReasonToGemini(choice.finish_reason) ?? "STOP";
       continue;
     }
 
-    // Non-terminal: forward only a real text delta. Role-only announcements, tool-arg
-    // fragments, and usage-only chunks carry no Gemini frame (Gemini has no empty/role
-    // frame; their payload surfaces on the terminal frame instead).
+    // Non-terminal: forward a reasoning delta as a thought part and/or a real text
+    // delta. Role-only announcements, tool-arg fragments, and usage-only chunks carry
+    // no Gemini frame (Gemini has no empty/role frame; their payload surfaces on the
+    // terminal frame instead).
+    if (typeof reasoning === "string" && reasoning !== "") {
+      yield {
+        candidates: [
+          { content: { role: "model", parts: [{ text: reasoning, thought: true }] }, index: 0 },
+        ],
+      };
+    }
     if (typeof content === "string" && content !== "") {
       yield { candidates: [{ content: { role: "model", parts: [{ text: content }] }, index: 0 }] };
     }
