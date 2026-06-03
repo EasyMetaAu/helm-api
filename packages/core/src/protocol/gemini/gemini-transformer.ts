@@ -1,5 +1,6 @@
 import type { IRContentPart, IRMessage, IRRequest, IRResponse, IRToolCall } from "../ir.js";
 import { IRRequestSchema, IRResponseSchema } from "../ir.js";
+import { liftReasoningToFlat, resolveReasoning } from "../reasoning.js";
 import type { Transformer } from "../transformer.js";
 import {
   type GeminiCandidate,
@@ -452,11 +453,23 @@ export function collectSystemText(messages: readonly IRMessage[]): string {
 function irMessageToParts(message: IRMessage): GeminiPart[] {
   const parts: GeminiPart[] = [];
   const { content } = message;
+  // Reasoning (from content-block thinking parts OR the flat reasoning_content/
+  // thinking_blocks carriers — e.g. an OpenAI-origin response) renders as Gemini
+  // thought parts, emitted FIRST so reasoning precedes the answer. (P6)
+  const { thinkingParts } = resolveReasoning(message);
+  for (const part of thinkingParts) {
+    parts.push({
+      text: part.text,
+      thought: true,
+      ...(part.signature !== undefined ? { thoughtSignature: part.signature } : {}),
+    });
+  }
   if (typeof content === "string") {
     if (content !== "") parts.push({ text: content });
   } else if (Array.isArray(content)) {
     for (const part of content) {
       if (part.type === "text") parts.push({ text: part.text });
+      // thinking parts already emitted via resolveReasoning above.
       else if (part.type === "image") {
         // data-url -> inlineData{mimeType,data}; remote urls degrade to text.
         const match = /^data:([^;]+);base64,(.*)$/.exec(part.url);
@@ -689,8 +702,21 @@ function geminiCandidateToMessage(candidate: GeminiCandidate): IRMessage {
   let audio: IRMessage["audio"];
 
   for (const part of candidate.content.parts) {
-    if (part.text !== undefined) parts.push({ type: "text", text: part.text });
-    else if (part.inlineData !== undefined) {
+    if (part.text !== undefined) {
+      // A thought part (thought===true) is REASONING — it must become a thinking
+      // content part, not leak into the visible text. thoughtSignature (if any) is
+      // preserved on the part. liftReasoningToFlat later mirrors it onto the flat
+      // reasoning_content/thinking_blocks carriers for OpenAI clients. (P6)
+      if (part.thought === true) {
+        parts.push({
+          type: "thinking",
+          text: part.text,
+          ...(part.thoughtSignature !== undefined ? { signature: part.thoughtSignature } : {}),
+        });
+      } else {
+        parts.push({ type: "text", text: part.text });
+      }
+    } else if (part.inlineData !== undefined) {
       const mime = part.inlineData.mimeType;
       if (mime.startsWith("image/")) {
         images.push({ b64_json: part.inlineData.data, mediaType: mime });
@@ -717,7 +743,8 @@ function geminiCandidateToMessage(candidate: GeminiCandidate): IRMessage {
   );
 
   const hasContent = parts.length > 0;
-  return {
+  // Lift any thinking content part onto reasoning_content/thinking_blocks (P6).
+  return liftReasoningToFlat({
     role: "assistant",
     content: hasContent
       ? parts
@@ -728,7 +755,7 @@ function geminiCandidateToMessage(candidate: GeminiCandidate): IRMessage {
     ...(images.length > 0 ? { images } : {}),
     ...(audio !== undefined ? { audio } : {}),
     ...(annotations !== undefined ? { annotations } : {}),
-  };
+  });
 }
 
 function transformResponseIn(native: unknown): IRResponse {

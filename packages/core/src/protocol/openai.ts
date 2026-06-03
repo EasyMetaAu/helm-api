@@ -7,6 +7,7 @@ import {
   IRResponseSchema,
   IRTokenDetailsSchema,
 } from "./ir.js";
+import { resolveReasoning, stripThinkingFromContent } from "./reasoning.js";
 import type { NativeRequest, NativeResponse, Transformer } from "./transformer.js";
 
 // OpenAI Chat transformer — the hub IDENTITY transform (docs/05). The IR takes
@@ -173,6 +174,22 @@ function toIRResponse(res: NativeResponse): IRResponse {
   return IRResponseSchema.parse(irResponse);
 }
 
+// —— IR message -> OpenAI-shaped message. Reasoning is surfaced flat on
+// message.reasoning_content (the OpenAI o-series/DeepSeek field) and any thinking
+// content part is stripped from `content`, since OpenAI clients do not understand a
+// {type:"thinking"} content block. A message that already carries reasoning_content
+// (native OpenAI origin) is preserved. (P6) ————————————————————————————————————————
+function toOpenAIMessage(message: IRMessage): IRMessage {
+  const { reasoningText } = resolveReasoning(message);
+  const content = stripThinkingFromContent(message.content);
+  if (reasoningText === undefined && content === message.content) return message;
+  return {
+    ...message,
+    content,
+    ...(reasoningText !== undefined ? { reasoning_content: reasoningText } : {}),
+  };
+}
+
 // —— Response: IR -> OpenAI native (sent back to the client). Rebuild the OpenAI
 // usage shape, adding cached back into prompt_tokens so the full prompt is
 // reported (matching the upstream) without double-billing the cache. ——————————
@@ -210,8 +227,11 @@ function toOpenAIResponse(res: IRResponse): NativeResponse {
     ...(systemFingerprint !== undefined ? { system_fingerprint: systemFingerprint } : {}),
     choices: parsed.choices.map((c) => ({
       index: c.index,
-      // message already carries reasoning_content/annotations (IR-shaped == native).
-      message: c.message,
+      // OpenAI carries reasoning OUT-OF-BAND in message.reasoning_content — a
+      // {type:"thinking"} content part (from an Anthropic/Gemini/Responses origin)
+      // must NOT leak into the OpenAI `content` array. resolveReasoning unifies the
+      // flat + content-block IR shapes; we then strip thinking from content. (P6)
+      message: toOpenAIMessage(c.message),
       // map to a legal OpenAI value; the raw value stays in provider_raw.stop_reason.
       finish_reason: toOpenAIFinishReason(c.finish_reason),
       ...(c.logprobs !== undefined ? { logprobs: c.logprobs } : {}),

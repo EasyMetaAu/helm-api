@@ -7,6 +7,7 @@ import {
   type IRToolCall,
   type IRUsage,
 } from "../ir.js";
+import { liftReasoningToFlat, resolveReasoning } from "../reasoning.js";
 
 // IR -> Anthropic Messages native response (docs/05, task protocol.anthropic-resp).
 // The outbound half of "nativeIn -> IR -> nativeOut, never N×N direct". Two
@@ -309,20 +310,28 @@ function toContentBlocks(
   const blocks: AnthropicContentBlock[] = [];
   const { content } = message;
 
+  // Reasoning may arrive on EITHER the content-block thinking parts OR the flat
+  // reasoning_content/thinking_blocks carriers (e.g. an OpenAI-origin response).
+  // resolveReasoning unifies them; Anthropic emits thinking blocks FIRST (the
+  // native order — reasoning precedes the answer). (P6)
+  const { thinkingParts } = resolveReasoning(message);
+  for (const part of thinkingParts) {
+    blocks.push({
+      type: "thinking",
+      thinking: part.text,
+      ...(part.signature !== undefined ? { signature: part.signature } : {}),
+    });
+  }
+
   if (typeof content === "string") {
     if (content !== "") blocks.push({ type: "text", text: content });
   } else if (Array.isArray(content)) {
     for (const part of content) {
       if (part.type === "text") {
         blocks.push({ type: "text", text: part.text });
-      } else if (part.type === "thinking") {
-        blocks.push({
-          type: "thinking",
-          thinking: part.text,
-          ...(part.signature !== undefined ? { signature: part.signature } : {}),
-        });
       }
-      // image parts are inbound-only on the response path; nothing to emit.
+      // thinking parts were already emitted via resolveReasoning above;
+      // image parts are inbound-only on the response path — nothing to emit.
     }
   }
 
@@ -487,11 +496,14 @@ export function transformNativeResponseToIR(
     // unknown block types are tolerated (fail-open) and dropped from content.
   }
 
-  const message: IRMessage = {
+  // Lift the thinking content parts onto the flat reasoning_content/thinking_blocks
+  // carriers so a downstream OpenAI client (which reads message.reasoning_content,
+  // not a content-block thinking part) receives the reasoning losslessly (P6).
+  const message: IRMessage = liftReasoningToFlat({
     role: "assistant",
     content: parts.length > 0 ? parts : toolCalls.length > 0 ? null : "",
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-  };
+  });
 
   const rawStop = res.stop_reason ?? null;
   const finishReason = rawStop !== null ? (STOP_REASON_TO_FINISH[rawStop] ?? "stop") : null;

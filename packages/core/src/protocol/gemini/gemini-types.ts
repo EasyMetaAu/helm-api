@@ -37,6 +37,11 @@ export const GeminiFunctionResponseSchema = z.object({
 export const GeminiPartSchema = z
   .object({
     text: z.string().optional(),
+    // thought=true marks a reasoning part (Gemini "thinking" output); thoughtSignature
+    // is the opaque signature Gemini attaches to a thought part. Declared explicitly
+    // (was only surviving via passthrough) so the reasoning bridge can read them. (P6)
+    thought: z.boolean().optional(),
+    thoughtSignature: z.string().optional(),
     inlineData: GeminiInlineDataSchema.optional(),
     functionCall: GeminiFunctionCallSchema.optional(),
     functionResponse: GeminiFunctionResponseSchema.optional(),

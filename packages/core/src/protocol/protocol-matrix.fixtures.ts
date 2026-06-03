@@ -314,6 +314,33 @@ export const canonicalRequestIR: IRRequest = {
   stream: true,
 };
 
+// A reasoning-bearing assistant response carried in BOTH IR shapes: a
+// {type:"thinking"} content part AND the flat reasoning_content/thinking_blocks
+// carriers. Used by the P6 reasoning cross-path checks to assert reasoning survives
+// nativeOut into every target's native thinking surface.
+export const canonicalReasoningResponseIR: IRResponse = {
+  id: "matrix-reasoning-1",
+  model: "matrix-model",
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", text: "Reasoning step.", signature: "sig-matrix" },
+          { type: "text", text: "Here is the answer." },
+        ],
+        reasoning_content: "Reasoning step.",
+        thinking_blocks: [
+          { type: "thinking", thinking: "Reasoning step.", signature: "sig-matrix" },
+        ],
+      },
+      finish_reason: "stop",
+    },
+  ],
+  usage: { prompt_tokens: 10, completion_tokens: 4, reasoning_tokens: 6 },
+};
+
 export const canonicalResponseIR: IRResponse = {
   id: "matrix-response-1",
   model: "matrix-model",

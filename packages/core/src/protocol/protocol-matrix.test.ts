@@ -14,6 +14,7 @@ import { IRRequestSchema, IRResponseSchema } from "./ir.js";
 import { openaiTransformer } from "./openai.js";
 import { transformErrorOut as transformOpenAIErrorOut } from "./openai-error.js";
 import {
+  canonicalReasoningResponseIR,
   canonicalRequestIR,
   canonicalResponseIR,
   type ProtocolMatrixDimension,
@@ -792,5 +793,71 @@ describe("developer-role cross-path fold (issue #50)", () => {
     expect(gemini.contents).toHaveLength(1);
     expect(gemini.contents[0]?.role).toBe("user");
     expect(JSON.stringify(gemini.contents)).not.toContain("Prefer metric units.");
+  });
+});
+
+// Focused cross-path check for reasoning/thinking (P6). Intentionally NOT a new
+// matrix dimension — protocolMatrixDimensions stays untouched so the "every path
+// has every dimension" invariant above still holds. A single reasoning-bearing IR
+// is rendered into each target's NATIVE thinking surface, asserting reasoning is
+// never dropped (gemini outbound) nor leaked into visible text (openai outbound).
+describe("reasoning cross-path render (P6)", () => {
+  // Each target reads reasoning from the IR (content-block thinking part + flat
+  // reasoning_content/thinking_blocks) and renders it into its native surface.
+  const reasoningSurface: Record<ProtocolName, (native: unknown) => boolean> = {
+    // OpenAI: flat message.reasoning_content, NOT a thinking content block.
+    openai: (native) => {
+      const r = native as {
+        choices: Array<{ message: { content: unknown; reasoning_content?: string } }>;
+      };
+      const msg = r.choices[0]?.message;
+      const contentOk = !JSON.stringify(msg?.content ?? "").includes("thinking");
+      return msg?.reasoning_content === "Reasoning step." && contentOk;
+    },
+    // Anthropic: a thinking content block with the preserved signature.
+    anthropic: (native) => {
+      const r = native as {
+        content: Array<{ type: string; thinking?: string; signature?: string }>;
+      };
+      const t = r.content.find((b) => b.type === "thinking");
+      return t?.thinking === "Reasoning step." && t?.signature === "sig-matrix";
+    },
+    // Gemini: a thought part (thought:true) carrying the reasoning text.
+    gemini: (native) => {
+      const r = native as {
+        candidates: Array<{ content: { parts: Array<{ text?: string; thought?: boolean }> } }>;
+      };
+      const parts = r.candidates[0]?.content.parts ?? [];
+      return parts.some((p) => p.thought === true && p.text === "Reasoning step.");
+    },
+  };
+
+  it.each(
+    protocols,
+  )("renders the canonical reasoning IR into %s native thinking surface", async (to) => {
+    const native = await responseOut[to](canonicalReasoningResponseIR);
+    // The visible answer is always present.
+    expect(JSON.stringify(native)).toContain("Here is the answer.");
+    expect(reasoningSurface[to](native)).toBe(true);
+  });
+
+  it.each(
+    protocols,
+  )("round-trips reasoning %s native -> IR -> openai reasoning_content", async (from) => {
+    // Render the canonical reasoning IR to `from`'s native shape, normalize it BACK
+    // to IR, then to OpenAI — reasoning must survive the full nativeIn->IR->nativeOut.
+    const native = await responseOut[from](canonicalReasoningResponseIR);
+    const toIr = responseInBySource[from];
+    expect(toIr).toBeDefined();
+    const ir = await toIr?.(native);
+    expect(ir).toBeDefined();
+    if (ir === undefined) return;
+    expect(ir.choices[0]?.message.reasoning_content).toContain("Reasoning step.");
+
+    const oai = (await responseOut.openai(ir)) as {
+      choices: Array<{ message: { content: unknown; reasoning_content?: string } }>;
+    };
+    expect(oai.choices[0]?.message.reasoning_content).toContain("Reasoning step.");
+    expect(JSON.stringify(oai.choices[0]?.message.content ?? "")).not.toContain("thinking");
   });
 });

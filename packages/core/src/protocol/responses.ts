@@ -8,6 +8,7 @@ import {
   IRResponseSchema,
   type IRToolCall,
 } from "./ir.js";
+import { liftReasoningToFlat, resolveReasoning } from "./reasoning.js";
 import type { NativeRequest, NativeResponse, Transformer } from "./transformer.js";
 
 // OpenAI Responses transformer (docs/05, task protocol.responses). Responses is a
@@ -431,6 +432,14 @@ function toResponsesResponse(res: IRResponse): NativeResponse {
   const output: Array<Record<string, unknown>> = [];
   const messageContent: Array<{ type: "output_text"; text: string }> = [];
 
+  // Reasoning (content-block thinking parts OR the flat reasoning_content/
+  // thinking_blocks carriers — e.g. an OpenAI-Chat/Anthropic/Gemini origin) renders
+  // as Responses reasoning items, emitted FIRST (reasoning precedes the answer). (P6)
+  const { thinkingParts } = resolveReasoning(message);
+  for (const part of thinkingParts) {
+    output.push({ type: "reasoning", summary: [{ type: "summary_text", text: part.text }] });
+  }
+
   const { content } = message;
   if (typeof content === "string") {
     if (content !== "") messageContent.push({ type: "output_text", text: content });
@@ -438,13 +447,8 @@ function toResponsesResponse(res: IRResponse): NativeResponse {
     for (const part of content) {
       if (part.type === "text") {
         messageContent.push({ type: "output_text", text: part.text });
-      } else if (part.type === "thinking") {
-        // thinking -> a reasoning item; summary uses summary_text.
-        output.push({
-          type: "reasoning",
-          summary: [{ type: "summary_text", text: part.text }],
-        });
       }
+      // thinking parts already emitted via resolveReasoning above;
       // image parts are inbound-only on the response path.
     }
   }
@@ -565,11 +569,13 @@ function toIRResponse(res: NativeResponse): IRResponse {
   const reasoningTokens = parsed.usage?.output_tokens_details?.reasoning_tokens;
   const fullInput = parsed.usage?.input_tokens;
 
-  const message: IRMessage = {
+  // Lift reasoning items (folded into thinking content parts above) onto the flat
+  // reasoning_content/thinking_blocks carriers for downstream OpenAI clients. (P6)
+  const message: IRMessage = liftReasoningToFlat({
     role: "assistant",
     content: parts.length > 0 ? parts : null,
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-  };
+  });
 
   const ir = {
     id: parsed.id,
