@@ -94,8 +94,11 @@ export const ClassifierConfigSchema = z.object({
   }),
   // prefault with the default model: the eval schema requires `model` (an enabled
   // eval with no model is a lie), so an omitted block must still carry one to
-  // parse through inner defaults. enabled stays false regardless.
-  eval: ClassifierEvalConfigSchema.prefault({ model: "deepseek/deepseek-v4-flash" }),
+  // parse through inner defaults. enabled stays false regardless. The eval client
+  // sends this id DIRECTLY on the wire to the primary provider (bypassing the
+  // registry), so it MUST be a bare upstream id the primary accepts — `deepseek-v4-
+  // flash` (official DeepSeek), matching config/classifier.yaml + pricing.yaml.
+  eval: ClassifierEvalConfigSchema.prefault({ model: "deepseek-v4-flash" }),
 });
 
 // Strict full-replace variant for the admin PUT /admin/api/classifier endpoint.

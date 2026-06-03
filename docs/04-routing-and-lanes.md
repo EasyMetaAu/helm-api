@@ -43,18 +43,18 @@ The shipped quality/cost lanes:
 ```yaml
 economy:
   purpose: Cheap and fast for simple tasks
-  primary: openai-crs/gpt-5.4-mini
-  fallback: [deepseek-crs/deepseek-flash, balanced]
+  primary: deepseek/deepseek-v4-flash
+  fallback: [openai-codex/gpt-5.4, balanced]
 
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
-  primary: deepseek-crs/deepseek-pro
-  fallback: [openai-crs/gpt-5.4-mini, zenmux/auto, openrouter/auto]
+  primary: deepseek/deepseek-v4-pro
+  fallback: [openai-codex/gpt-5.4, zenmux/auto, openrouter/auto]
 
 premium:
   purpose: Strong reasoning and high quality
-  primary: openai-crs/gpt-5.5
-  fallback: [zenmux/claude-opus-4.7, zenmux/auto, openrouter/auto]
+  primary: openai-codex/gpt-5.5
+  fallback: [deepseek/deepseek-v4-pro, zenmux/claude-opus-4.7, zenmux/auto, openrouter/auto]
 ```
 
 `balanced` is **required** and must be healthy — it is the terminal of the
@@ -66,12 +66,12 @@ same-named lane):
 ```yaml
 coding:
   purpose: Coding-capable models for code generation / editing
-  primary: openai-crs/gpt-5.3-codex-spark
+  primary: openai-codex/gpt-5.3-codex-spark
   fallback: [premium, balanced]
 
 json:
   purpose: Strict structured-output (JSON) responses
-  primary: openai-crs/gpt-5.4-mini
+  primary: deepseek/deepseek-v4-flash
   fallback: [balanced]
   constraints:
     require_json: true
@@ -85,7 +85,7 @@ vision:
 
 tool_use:
   purpose: Reliable function / tool calling
-  primary: openai-crs/gpt-5.5
+  primary: openai-codex/gpt-5.5
   fallback: [premium]
   constraints:
     require_tools: true

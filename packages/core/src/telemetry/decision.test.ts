@@ -254,7 +254,7 @@ describe("buildDecisionRecord", () => {
 
   it("6b. redaction: a secret echoed in a per-attempt error_detail.provider_raw is fingerprinted, status/message survive", () => {
     const failed: AttemptRecord = {
-      alias: "openai-crs/gpt-5.4-mini",
+      alias: "deepseek/deepseek-v4-flash",
       skipped: false,
       skip_reason: null,
       status: "error",
@@ -271,7 +271,7 @@ describe("buildDecisionRecord", () => {
         },
       },
     };
-    const record = buildDecisionRecord(parts({ attempts: [failed, okAttempt("deepseek-crs")] }));
+    const record = buildDecisionRecord(parts({ attempts: [failed, okAttempt("deepseek")] }));
     const serialized = JSON.stringify(record);
     // The leaked key is gone; the diagnostic status + message are preserved.
     expect(serialized).not.toContain("sk-live-PLAINTEXT-SECRET-123");

@@ -5,6 +5,23 @@
 
 ---
 
+## 2026-06-03 · Drop the `openai-crs` relay; route via the `openai-codex` subscription + official DeepSeek (spec docs/03, docs/04, docs/10)
+
+**Context**: `config/providers.yaml` shipped a single self-built relay named `openai-crs` (`la.atmy.work`, `OPENAI_API_KEY`) that fronted both `openai-crs/*` (gpt-5.x) and `deepseek-crs/*` model families under one credential, and was `providers[0]` (the mandatory primary backing eval + Phase-0 passthrough). The relay was really just a proxy in front of a ChatGPT/Codex subscription — which Helm already connects natively via the built-in `openai-codex` OAuth preset (wired end-to-end in #64/#65) — so it was redundant. Per the maintainer: delete the relay, route the premium/coding lanes through the `openai-codex` subscription channel, and point the deepseek models at the **official** DeepSeek API.
+
+- **`openai-codex` is NOT declared statically**. The OAuth preset is synthesized at runtime when a subscription is connected, and its aliases are `openai-codex/<model>` keyed by the OAuth provider id. So lanes reference `openai-codex/*` and rely on fail-open: with no subscription connected, the executor's subscription-prefix gate (`knownOAuthPrefixes` + `oauthAliases()`, from #64/#65) finds the alias is not exposed and SKIPS it (`provider_unavailable`) — it never reaches the registry/primary and never forwards a prefixed id upstream — so the lane falls open to its next static fallback, never a 5xx and never a bogus upstream call. Config load does **not** cross-check lane aliases against providers, so referencing them is safe at boot.
+- **New primary = official `deepseek`** (`providers[0]`, `https://api.deepseek.com/v1`, `DEEPSEEK_API_KEY`, models `deepseek-v4-pro` / `deepseek-v4-flash`). It is a real static key, so dev/e2e/fresh-install all boot without any subscription. The eval small-model (`classifier.yaml eval.model`) moved `deepseek-flash` → `deepseek-v4-flash` (a real DeepSeek id sent bare to the primary, bypassing the registry); its `eval_usd` resolves via the bare `deepseek-v4-flash` pricing key.
+- **Lane mix**: cheap/default lanes (economy/balanced/json) anchor on the always-available `deepseek` primary; premium/coding/tool_use lead with `openai-codex/*` and keep a static fallback so they degrade gracefully when no subscription is bound.
+- **Capability change**: the old `openai-crs/*` heads carried `requiresStreaming: true` (a `la.atmy.work` relay quirk — non-stream → 400). The `openai-codex` subscription goes through the `openai-responses` executor with no such constraint, so the new `openai-codex/*` capability entries DROP `requiresStreaming`. This flipped one integration test: the json lane now SERVES its non-stream primary (`deepseek-v4-flash`) directly instead of skipping it (`execute.default-config.test.ts`).
+- **e2e under no subscription**: the routing/eval specs run with no subscription connected, so the `openai-codex/*` lane heads skip and each lane serves its first STATIC `deepseek/*` fallback. The specs assert that fail-open behavior (premium serves `deepseek-v4-pro`), so CI genuinely covers the unconnected path.
+- **Credential rename `OPENAI_API_KEY` → `DEEPSEEK_API_KEY`** propagated to the mandatory-primary path: `.env.example`, `docker-compose.yml` (`${DEEPSEEK_API_KEY:?…}`), CI docker smoke job (`.github/workflows/ci.yml`), `playwright.config.ts` e2e env, README/docs/10, and the compose/CI/dockerfile contract tests. Self-contained unit fixtures that build their own provider config with `OPENAI_API_KEY` were left as-is (arbitrary).
+- **No DB migration**: `openai-crs` was a static-key provider (no stored OAuth credential); telemetry rows keep their historical `openai-crs/*` alias strings as-is (immutable audit trail).
+- **Live-verified (2026-06-03)** against `https://api.deepseek.com` with the test key: `GET /models` returns exactly `deepseek-v4-flash` + `deepseek-v4-pro`, and `POST /chat/completions` on both returns HTTP 200. So the `deepseek-v4-*` ids are correct (NOT the public `deepseek-chat`/`deepseek-reasoner` names).
+- **⚠️ Caveat — `deepseek-v4-flash` is a REASONING model**: it emits `reasoning_content` and burns ~180+ reasoning tokens even on a trivial prompt BEFORE any `content`. With a small client `max_tokens` the reply comes back with empty `content` and `finish_reason: "length"` (e.g. `max_tokens: 120` → empty; `800` → real content). Since the economy/json lanes lead with `deepseek-v4-flash`, a client that caps `max_tokens` low will get empty completions. Operational tuning concern, not a gateway bug; `capabilities.yaml` maxOutputTokens (16384) leaves room when the client doesn't force a tiny cap.
+- **TODO**: DeepSeek capability/pricing numbers were carried over from the prior relay entries — still worth confirming against official pricing.
+
+---
+
 ## 2026-06-03 · Request-list defaults to the last 24h (not all) (admin)
 
 **Context**: `/admin/requests` opened on `range=all`, which grows unwieldy; the operator wanted the last 24 hours by default.
@@ -110,7 +127,6 @@
 **Verified LIVE on local Docker (no restart, all observed via `oauth.pool.select` / `oauth.pool.rebuilt` logs)**: (1) park `openai-codex/default` → next requests go 100% to `mylukin`; (2) set `default` priority=1 → 100% to `default`; (3) set a dead proxy (`192.0.2.1:1080`) on `default` → routing to it fails `all_providers_failed` (proves egress now flows through the proxy), clear → serves again; (4) revert → `codex/gpt-5.4 → "pong"`, live suite 49/49. Test: `server.oauth.test.ts` "re-synthesis reflects a schedulable change made AFTER the first build (no restart)" + disconnect drops the provider.
 
 **Cost note**: a rebuild re-runs the per-account token-refresh/discovery pass — acceptable for an infrequent admin action; the save awaits it so the UI reflects "applied".
-
 ---
 
 ## 2026-06-03 · Retire the per-key `max_lane` ceiling; add allowed-lanes checkboxes to the create dialog (spec docs/06, docs/04)

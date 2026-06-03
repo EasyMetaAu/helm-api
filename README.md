@@ -98,7 +98,7 @@ A request flows: **auth → rate limit → classify → route → execute (with 
 # 1. Clone and create your env file
 git clone https://github.com/EasyMetaAu/helm-api.git && cd helm-api
 cp .env.example .env
-#    In .env, set HELM_ADMIN_PASSWORD and at least OPENAI_API_KEY
+#    In .env, set HELM_ADMIN_PASSWORD and at least DEEPSEEK_API_KEY
 
 # 2. Start it
 docker compose up -d
@@ -140,7 +140,7 @@ curl http://localhost:8080/v1/chat/completions \
 | Value | What Helm does |
 |---|---|
 | `auto` *(recommended)* | Classifies the request and routes it to the best lane automatically. |
-| a model alias, e.g. `openai-crs/gpt-5.5` | Uses exactly that model and skips routing — only for keys granted custom-model permission. |
+| a model alias, e.g. `openai-codex/gpt-5.5` | Uses exactly that model and skips routing — only for keys granted custom-model permission. |
 
 > With a standard key, routing is automatic no matter what you send — just use `auto`. Lanes are configured by the operator in `lanes.yaml` and the dashboard; clients don't choose a lane per call.
 
@@ -163,7 +163,7 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 
 | Variable | Purpose |
 |---|---|
-| `OPENAI_API_KEY` | Primary provider credential (**required**) |
+| `DEEPSEEK_API_KEY` | Primary provider credential (**required**) |
 | `ZENMUX_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY` | Optional provider credentials (provider is skipped if missing) |
 | `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | Dashboard login (Basic auth) |
 | `HELM_HOST` / `HELM_PORT` | Server binding (default `0.0.0.0:8080`) |

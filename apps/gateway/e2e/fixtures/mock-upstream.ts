@@ -42,14 +42,14 @@ export function echoResponse(model: string) {
 // gateway to fall forward to the next in-chain candidate. Exported so the spec
 // and the mock stay in lockstep.
 //
-// The economy lane head is the alias `openai-crs/gpt-5.4-mini`, whose RESOLVED
-// provider_model is the BARE upstream id `gpt-5.4-mini` (fix-upstream-model-id
-// 2026-05-31: alias != provider_model — the relay only accepts the bare id). The
-// gateway forwards that resolved provider_model upstream as `model`, so the mock
-// must match on the BARE id. Keep in lockstep with config/providers.yaml's
-// `provider_model` for config/lanes.yaml `economy.primary`.
+// The economy lane head is the alias `deepseek/deepseek-v4-flash`, whose RESOLVED
+// provider_model is the BARE upstream id `deepseek-v4-flash` (alias != provider_
+// model — the upstream accepts the bare id). The gateway forwards that resolved
+// provider_model upstream as `model`, so the mock must match on the BARE id. Keep
+// in lockstep with config/providers.yaml's `provider_model` for config/lanes.yaml
+// `economy.primary`.
 export const FAIL_PRIMARY_SENTINEL = "__HELM_FAIL_PRIMARY__";
-export const FAIL_PRIMARY_MODEL = "gpt-5.4-mini";
+export const FAIL_PRIMARY_MODEL = "deepseek-v4-flash";
 
 function messagesText(body: { messages?: unknown }): string {
   if (!Array.isArray(body.messages)) return "";
@@ -271,7 +271,7 @@ export function createMockUpstream() {
     // ── Layer-2 eval branch: the request is the internal classify call. We key
     //    on the eval SYSTEM-PROMPT marker ("Classify the request.", see
     //    apps/gateway/src/routes/classify.ts) — NOT the model id — so the eval
-    //    model can be a real model that ALSO serves a lane (e.g. deepseek-flash)
+    //    model can be a real model that ALSO serves a lane (e.g. deepseek-v4-flash)
     //    without the mock mistaking a normal routed request for an eval call
     //    (fix-upstream-model-id 2026-05-31). Returns a strict JSON judgment; the
     //    slow sentinel makes it exceed the eval timeout.

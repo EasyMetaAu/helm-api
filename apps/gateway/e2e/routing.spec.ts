@@ -19,27 +19,32 @@ import { FAIL_PRIMARY_SENTINEL } from "./fixtures/mock-upstream.js";
 const TEST_KEY = "helm_live_e2e_testkey";
 const AUTH = { Authorization: `Bearer ${TEST_KEY}`, "Content-Type": "application/json" };
 
-// Shipped config/lanes.yaml candidate aliases per lane (post chain-expansion
-// head). The router resolves an alias which the executor sends to the upstream
-// (the resolved provider_model == the alias, by the alias-namespace convention);
-// the mock echoes it back as `model`. Keep these in lockstep with the lane
-// primaries in config/lanes.yaml.
-const ECONOMY_HEAD = "openai-crs/gpt-5.4-mini";
-const PREMIUM_HEAD = "openai-crs/gpt-5.5";
-const BALANCED_HEAD = "deepseek-crs/deepseek-pro";
-// economy chain = [openai-crs/gpt-5.4-mini, deepseek-crs/deepseek-flash,
-// balanced...]; the in-chain candidate AFTER the economy head is the one that
-// serves when the head is fault-injected (scenario 4, EXECUTION fallback).
-const ECONOMY_NEXT = "deepseek-crs/deepseek-flash";
+// NO-SUBSCRIPTION FAIL-OPEN (the CI reality). These e2e run with NO subscription
+// connected, so the `openai-codex/*` lane heads (premium/coding/tool_use primaries
+// in config/lanes.yaml) are NOT routable: the executor SKIPS them with
+// skip_reason=provider_unavailable (never forwarding a prefixed id to the primary)
+// and the lane falls open to its first STATIC fallback. So the model that actually
+// SERVES each lane below is the deepseek/* (or zenmux/openrouter) static candidate,
+// not the nominal openai-codex primary. With a subscription connected, the codex
+// head would serve instead.
+const ECONOMY_HEAD = "deepseek/deepseek-v4-flash"; // economy static primary serves
+// premium's nominal primary is openai-codex/gpt-5.5 — skipped w/o a subscription,
+// so premium serves its first static fallback, deepseek/deepseek-v4-pro.
+const PREMIUM_HEAD = "deepseek/deepseek-v4-pro";
+const BALANCED_HEAD = "deepseek/deepseek-v4-pro"; // balanced static primary serves
+// economy chain = [deepseek/deepseek-v4-flash, openai-codex/gpt-5.4, balanced...].
+// On fault injection (scenario 4) the economy head 5xxs, the next candidate
+// openai-codex/gpt-5.4 is SKIPPED (no subscription), so the in-chain model that
+// actually serves is balanced's primary, deepseek/deepseek-v4-pro.
+const ECONOMY_NEXT = "deepseek/deepseek-v4-pro";
 
-// The upstream WIRE model ids the gateway actually sends (config/providers.yaml
-// `provider_model`), which the mock echoes back verbatim in the response `model`
-// field. Since fix-upstream-model-id decoupled alias from wire id, body.model is
-// the bare wire id; the routing ALIAS is surfaced separately via the
-// `x-helm-final-model` header (asserted above each body.model check).
-const ECONOMY_HEAD_WIRE = "gpt-5.4-mini";
-const PREMIUM_HEAD_WIRE = "gpt-5.5";
-const ECONOMY_NEXT_WIRE = "deepseek-flash";
+// The upstream WIRE model ids the gateway sends (config/providers.yaml
+// `provider_model`), echoed back by the mock as `model`. All served candidates
+// here are EXPLICIT deepseek/* entries, so the wire id is the bare provider_model.
+// The routing ALIAS is surfaced separately via `x-helm-final-model`.
+const ECONOMY_HEAD_WIRE = "deepseek-v4-flash";
+const PREMIUM_HEAD_WIRE = "deepseek-v4-pro";
+const ECONOMY_NEXT_WIRE = "deepseek-v4-pro";
 
 function chat(content: string, extra: Record<string, unknown> = {}) {
   return {
@@ -52,18 +57,14 @@ function chat(content: string, extra: Record<string, unknown> = {}) {
 
 test.describe("routing e2e", () => {
   // ── Scenario 1: simple prompt → economy lane ────────────────────────────────
-  // The economy head (openai-crs/gpt-5.4-mini) is STREAM-ONLY on the relay
-  // (capabilities.yaml requiresStreaming:true), so exercise it with a STREAMING
-  // request — a non-stream request would (correctly) skip the head with
-  // skip_reason no_nonstream_support and fall to the next in-chain candidate
-  // (covered by the non-stream paths elsewhere). Routing is asserted via the
-  // debug headers, which the gateway emits BEFORE the SSE body; the resolved bare
-  // wire id is surfaced separately as x-helm-provider-model.
+  // The economy head (deepseek/deepseek-v4-flash) is json + non-stream capable, so
+  // a plain non-stream request serves it directly. Routing is asserted via the
+  // debug headers; the resolved bare wire id is surfaced as x-helm-provider-model.
   test("simple prompt -> economy lane", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
       // Clearly-simple: strong simple-keyword signals (hi/thanks/ok) push the
       // score well below the `standard` boundary -> confident `simple` -> economy.
-      data: chat("hi thanks, translate to spanish: ok", { stream: true }),
+      data: chat("hi thanks, translate to spanish: ok"),
       headers: AUTH,
     });
     expect(res.status()).toBe(200);
@@ -74,12 +75,15 @@ test.describe("routing e2e", () => {
   });
 
   // ── Scenario 2: complex prompt → premium lane ───────────────────────────────
-  // Premium head (openai-crs/gpt-5.5) is likewise stream-only — exercise via streaming.
+  // Premium's nominal primary (openai-codex/gpt-5.5) is the subscription channel;
+  // with no subscription connected it is SKIPPED (provider_unavailable) and premium
+  // fails open to its first static fallback, deepseek/deepseek-v4-pro. The lane is
+  // still `premium` (asserted via the header) — only the served model is the
+  // fallback.
   test("complex prompt -> premium lane", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
       data: chat(
         "Prove step by step the theorem and derive the integral, reason about the matrix equation and analyze the implications first then finally compile the proof.",
-        { stream: true },
       ),
       headers: AUTH,
     });
@@ -116,21 +120,22 @@ test.describe("routing e2e", () => {
   });
 
   // ── Scenario 4: primary provider error → EXECUTION fallback serves ──────────
-  // Mock injects a one-shot 5xx for the economy head (`openai-crs/gpt-5.4-mini`);
-  // the chain's NEXT candidate (`deepseek-crs/deepseek-flash`) must serve. Lane
+  // Mock injects a one-shot 5xx for the economy head (`deepseek/deepseek-v4-flash`);
+  // the next candidate `openai-codex/gpt-5.4` is skipped (no subscription), so the
+  // first STATIC in-chain candidate that serves is `deepseek/deepseek-v4-pro`. Lane
   // stays `economy` (execution fallback ≠ classification fallback, principle 5).
   test("primary provider error -> fallback model serves (execution fallback)", async ({
     request,
   }) => {
     // The prompt routes to economy (simple) AND carries the fail sentinel so the
     // mock 5xxs the economy head. The gateway only forwards model+messages
-    // upstream, so the fault is steered through the prompt. STREAMING so the
-    // stream-only economy head is actually INVOKED (and then 5xxs) — a non-stream
-    // request would skip the head on capability grounds and never exercise the
-    // upstream-error fallback this scenario is about.
+    // upstream, so the fault is steered through the prompt. The economy head is
+    // invoked (non-stream) and 5xxs, so the gateway falls forward past the skipped
+    // codex candidate to the next static one — the upstream-error fallback this
+    // scenario is about.
     const res = await request.post("/v1/chat/completions", {
       // Same clearly-simple economy prompt as scenario 1, plus the fail sentinel.
-      data: chat(`hi thanks, translate to spanish: ok ${FAIL_PRIMARY_SENTINEL}`, { stream: true }),
+      data: chat(`hi thanks, translate to spanish: ok ${FAIL_PRIMARY_SENTINEL}`),
       headers: AUTH,
     });
     expect(res.status()).toBe(200);

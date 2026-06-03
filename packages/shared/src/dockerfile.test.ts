@@ -37,7 +37,7 @@ describe("Dockerfile contract", () => {
   });
 
   it("embeds no plaintext credentials", () => {
-    expect(dockerfile).not.toMatch(/OPENAI_API_KEY\s*=/);
+    expect(dockerfile).not.toMatch(/DEEPSEEK_API_KEY\s*=/);
     expect(dockerfile).not.toMatch(/HELM_ADMIN_PASSWORD\s*=/);
     expect(dockerfile).not.toContain("sk-");
   });
