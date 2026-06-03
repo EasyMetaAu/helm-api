@@ -128,11 +128,11 @@ describe('LaneEditor', () => {
     expect(modelOption?.label ?? '').not.toBe('lane');
   });
 
-  it('shows the exposing subscription account(s) as each model option label', () => {
+  it('labels each model option: account(s) for OAuth, provider name for configured', () => {
     const models = [
       { alias: 'anthropic/claude-opus-4-8', accounts: ['default'] },
       { alias: 'openai-codex/gpt-5.5', accounts: ['default', 'mylukin'] },
-      { alias: 'zenmux/auto', accounts: [] }, // configured provider → no account label
+      { alias: 'openai-crs/gpt-5.4-mini', accounts: [] }, // configured → provider as label
     ];
     const { container } = render(LaneEditor, { lane: makeLane(), models, onsave: vi.fn() });
     const options = Array.from(
@@ -141,7 +141,7 @@ describe('LaneEditor', () => {
     const labelOf = (v: string) => options.find((o) => o.value === v)?.label ?? '';
     expect(labelOf('anthropic/claude-opus-4-8')).toBe('default');
     expect(labelOf('openai-codex/gpt-5.5')).toBe('default, mylukin');
-    expect(labelOf('zenmux/auto')).toBe('');
+    expect(labelOf('openai-crs/gpt-5.4-mini')).toBe('openai-crs');
   });
 
   it('still works as a plain text input when no models are provided (graceful default)', () => {

@@ -52,6 +52,16 @@
   // Other lanes this lane may chain to — its own name is excluded (no self-loops).
   const laneOptions = $derived(laneNames.filter((n) => n !== initial.name));
 
+  // Secondary label shown beside each model option in the datalist: the exposing
+  // subscription account(s) for OAuth models (e.g. "default", "default, mylukin"),
+  // else the provider name (the `provider/` prefix) for configured models — so
+  // every option carries a source hint, not just the subscription ones.
+  function modelLabel(alias: string, accounts: string[]): string | undefined {
+    if (accounts.length > 0) return accounts.join(', ');
+    const slash = alias.indexOf('/');
+    return slash > 0 ? alias.slice(0, slash) : undefined;
+  }
+
   // Validation. `balanced` must keep a primary (docs/04 hard line); other lanes also
   // need a non-empty primary to be coherent. The hint text differs so ops sees
   // *why* balanced is special.
@@ -141,10 +151,10 @@
       <option value={ln} label={$t('lane')}></option>
     {/each}
     {#each models as { alias, accounts } (alias)}
-      <!-- label = the subscription account(s) backing this model, so the picker
-           shows e.g. "default" / "default, mylukin" beside the alias. Configured
-           providers have no account → no label. -->
-      <option value={alias} label={accounts.length ? accounts.join(', ') : undefined}></option>
+      <!-- label = the subscription account(s) backing this model (e.g. "default" /
+           "default, mylukin"); for configured providers with no account it falls
+           back to the provider name, so every option shows a source hint. -->
+      <option value={alias} label={modelLabel(alias, accounts)}></option>
     {/each}
   </datalist>
 
