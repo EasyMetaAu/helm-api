@@ -16,6 +16,14 @@
 #   supportsStreaming: true
 #   maxContextTokens: 131072
 #   maxOutputTokens: 4096
+#
+# `modalities` (optional) lists the EXTRA input modalities a backend accepts beyond
+# text + image (image is gated by supportsVision). Allowed values: audio, video,
+# document. P7 capability-aware routing: a request carrying one of these is only
+# routed to a backend advertising it, else it is skipped with an explicit reason
+# (no_audio_support / no_video_support / no_document_support). Absent ⇒ none.
+# "openai/gpt-4o-audio-preview":
+#   modalities: [audio]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SUBSCRIPTION / AGGREGATOR MODELS (drop-openai-crs-relay 2026-06-03). These live
@@ -74,6 +82,9 @@ zenmux/claude-opus-4.7:
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
+  # Claude accepts PDF/text documents as input but not audio/video (P7 modality
+  # routing). A document-bearing request only routes here when "document" is listed.
+  modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
 zenmux/gemini-3.5-flash:
@@ -81,6 +92,8 @@ zenmux/gemini-3.5-flash:
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
+  # Gemini is fully multimodal on input: audio, video, and documents (P7).
+  modalities: [audio, video, document]
   maxContextTokens: 1048576
   maxOutputTokens: 65536
 # */auto aggregators: JSON-INCAPABLE on purpose — the capability filter prunes

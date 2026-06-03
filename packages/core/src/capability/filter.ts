@@ -21,6 +21,9 @@ export type SkipReason =
   | "no_tool_support" // request carries tools, candidate has no tool-call
   | "no_json_support" // request needs strict JSON, candidate has no JSON mode
   | "no_vision_support" // request has images/attachments, candidate is text-only
+  | "no_audio_support" // request carries audio input, candidate advertises no audio modality
+  | "no_video_support" // request carries video input, candidate advertises no video modality
+  | "no_document_support" // request carries a document (PDF/text), candidate advertises no document modality
   | "context_too_small" // prompt(+max_tokens) exceeds candidate's window
   | "no_streaming_support" // request wants stream, candidate can't stream
   | "no_nonstream_support"; // request is non-stream, candidate is stream-ONLY (relay requires stream:true)
@@ -32,6 +35,12 @@ export interface CapabilityRequest {
   needsStreaming: boolean; // request.stream === true
   estimatedPromptTokens: number;
   maxTokens: number | null; // client-requested output cap, counted in budget
+  // Extra INPUT modalities this request carries beyond text+image (P7). A modality
+  // present here is only satisfiable by a candidate that advertises it in
+  // caps.modalities; otherwise the candidate is skipped with an explicit reason.
+  needsAudio?: boolean;
+  needsVideo?: boolean;
+  needsDocument?: boolean;
 }
 
 export interface FilterResult {
@@ -62,6 +71,19 @@ export function checkCapability(
   // 3. vision
   if (req.needsVision && !caps.supportsVision) {
     return skip("no_vision_support");
+  }
+  // 3b. extra input modalities (audio / video / document). A request carrying one is
+  //     only satisfiable by a candidate advertising it in caps.modalities; otherwise
+  //     skip with the matching reason (a lane never routes audio to a text-only model).
+  const modalities = caps.modalities ?? [];
+  if (req.needsAudio === true && !modalities.includes("audio")) {
+    return skip("no_audio_support");
+  }
+  if (req.needsVideo === true && !modalities.includes("video")) {
+    return skip("no_video_support");
+  }
+  if (req.needsDocument === true && !modalities.includes("document")) {
+    return skip("no_document_support");
   }
   // 4. context budget = input + planned output ≤ window (null maxTokens → 0).
   const outputBudget = req.maxTokens ?? 0;
