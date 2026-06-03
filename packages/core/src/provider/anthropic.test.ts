@@ -58,6 +58,24 @@ describe("openaiToAnthropicRequest", () => {
     expect(body.tools as unknown[]).toHaveLength(1);
   });
 
+  it("emits metadata.user_id when provided, omits it otherwise (anti-ban stable device identity)", () => {
+    // The Claude subscription anti-ban measure (ref claude-relay-service): a STABLE
+    // per-account identity travels in metadata.user_id. The transformer only forwards
+    // the ready-made string; the stable value is computed once per account upstream.
+    const uid = '{"device_id":"d0","account_uuid":"","session_id":"s0"}';
+    const withId = openaiToAnthropicRequest(
+      { model: "m", messages: [{ role: "user", content: "hi" }] },
+      { metadataUserId: uid },
+    );
+    expect(withId.metadata).toEqual({ user_id: uid });
+    // Back-compat: no opts → no metadata key at all (older callers unaffected).
+    const without = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(without.metadata).toBeUndefined();
+  });
+
   it("folds the `developer` role into system (after spoof, in message order), never a user turn (issue #50)", () => {
     // `developer` is OpenAI's renamed system tier. On the native Anthropic
     // subscription path it must fold into the top-level system param (like
@@ -202,6 +220,39 @@ describe("createAnthropicClient", () => {
       ((resp.choices as Array<Record<string, unknown>>)[0]?.message as Record<string, unknown>)
         .content,
     ).toBe("ok");
+  });
+
+  it("sends openclaw header parity + a STABLE metadata.user_id on every request (Device ID never rotates)", async () => {
+    // Header parity with openclaw's OAuth recipe (accept + dangerous-direct-browser-access)
+    // and the anti-ban requirement: the SAME device identity must ride on EVERY request —
+    // never regenerated per call (the claude-relay-service session_id-rotation anti-pattern).
+    const uid = '{"device_id":"D","account_uuid":"","session_id":"S"}';
+    const seenMeta: unknown[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const h = new Headers(init?.headers);
+      expect(h.get("accept")).toBe("application/json");
+      expect(h.get("anthropic-dangerous-direct-browser-access")).toBe("true");
+      seenMeta.push((JSON.parse(String(init?.body)) as { metadata?: unknown }).metadata);
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => "Bearer T",
+        metadataUserId: uid,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await client.chatCompletion({ model: "m", messages: [{ role: "user", content: "a" }] });
+    await client.chatCompletion({ model: "m", messages: [{ role: "user", content: "b" }] });
+    expect(seenMeta).toHaveLength(2);
+    expect(seenMeta[0]).toEqual({ user_id: uid });
+    expect(seenMeta[1]).toEqual(seenMeta[0]); // identical across requests → no rotation
   });
 
   it("throws UpstreamError on a persistent non-401 error", async () => {

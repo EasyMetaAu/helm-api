@@ -56,7 +56,11 @@ describe("openaiToResponsesRequest", () => {
     expect(body.stream).toBe(true);
     expect(body.instructions).toBe("Be terse.");
     expect(body.temperature).toBe(0.3);
-    expect(body.max_output_tokens).toBe(256);
+    // Codex/ChatGPT-account contract (ported from openclaw): NO max_output_tokens,
+    // and a store:false request MUST request encrypted reasoning back + set verbosity.
+    expect(body.max_output_tokens).toBeUndefined();
+    expect(body.include).toEqual(["reasoning.encrypted_content"]);
+    expect(body.text).toEqual({ verbosity: "low" });
     const input = body.input as Array<Record<string, unknown>>;
     expect(input[0]).toMatchObject({ type: "message", role: "user" });
     expect((input[0]?.content as Array<{ type: string }>)[0]).toMatchObject({ type: "input_text" });
@@ -64,6 +68,19 @@ describe("openaiToResponsesRequest", () => {
     expect((input[1]?.content as Array<{ type: string }>)[0]).toMatchObject({
       type: "output_text",
     });
+  });
+
+  it("sets prompt_cache_key from a stable sessionId (omitted when absent)", () => {
+    const withSession = openaiToResponsesRequest(
+      { model: "gpt-5.5", messages: [{ role: "user", content: "Hi" }] },
+      { sessionId: "sess-123" },
+    );
+    expect(withSession.prompt_cache_key).toBe("sess-123");
+    const without = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Hi" }],
+    });
+    expect(without.prompt_cache_key).toBeUndefined();
   });
 
   it("maps assistant tool_calls -> function_call items and tool results -> function_call_output", () => {
@@ -253,6 +270,31 @@ describe("createCodexResponsesClient", () => {
       ((resp.choices as Array<Record<string, unknown>>)[0]?.message as Record<string, unknown>)
         .content,
     ).toBe("ok");
+  });
+
+  it("sends User-Agent + stable session_id / x-client-request-id headers when configured", async () => {
+    let seen: Headers | null = null;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen = new Headers(init?.headers);
+      return sseResponse([
+        { type: "response.output_text.delta", delta: "ok" },
+        { type: "response.completed", response: { status: "completed", usage: {} } },
+      ]);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        sessionId: "sess-abc",
+        userAgent: "helm-codex/9.9.9",
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await client.chatCompletion({ model: "gpt-5.5", messages: [{ role: "user", content: "hi" }] });
+    const h = seen as unknown as Headers;
+    expect(h.get("user-agent")).toBe("helm-codex/9.9.9");
+    expect(h.get("session_id")).toBe("sess-abc");
+    expect(h.get("x-client-request-id")).toBe("sess-abc");
   });
 
   it("redacts the access token from an echoed upstream error body", async () => {
