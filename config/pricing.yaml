@@ -21,11 +21,11 @@ openai-codex/gpt-5.5:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
 openai-codex/gpt-5.4:
+  inputPerMTokUsd: 2.5
+  outputPerMTokUsd: 15.0
+openai-codex/gpt-5.4-mini:
   inputPerMTokUsd: 0.75
   outputPerMTokUsd: 4.5
-openai-codex/gpt-5.3-codex-spark:
-  inputPerMTokUsd: 1.75
-  outputPerMTokUsd: 14.0
 deepseek/deepseek-v4-pro:
   inputPerMTokUsd: 0.435
   outputPerMTokUsd: 0.87

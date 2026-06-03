@@ -44,7 +44,7 @@ The shipped quality/cost lanes:
 economy:
   purpose: Cheap and fast for simple tasks
   primary: deepseek/deepseek-v4-flash
-  fallback: [openai-codex/gpt-5.4, balanced]
+  fallback: [openai-codex/gpt-5.4-mini, balanced]
 
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
@@ -66,7 +66,7 @@ same-named lane):
 ```yaml
 coding:
   purpose: Coding-capable models for code generation / editing
-  primary: openai-codex/gpt-5.3-codex-spark
+  primary: openai-codex/gpt-5.5
   fallback: [premium, balanced]
 
 json:
