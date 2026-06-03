@@ -123,12 +123,20 @@ export interface RouteOptions {
    *  UI key column. PREFIX ONLY — never the plaintext key (principle 7). The
    *  gateway threads it from the auth identity; null/undefined when unknown. */
   keyPrefix?: string | null;
-  /** Per-key lane whitelist from the API key's auth record (docs/04). The OUTER,
+  /** Per-key lane caps from the API key's auth record (docs/04). The OUTER,
    *  non-negotiable bound: applied LAST (after policy caps) so it wins even over
    *  a policy use_lane pin. allowedLanes null = unconstrained; keyCaps itself
    *  undefined = no-op (existing callers unaffected). The gateway handlers thread
-   *  it from the auth identity. */
-  keyCaps?: { allowedLanes: string[] | null };
+   *  it from the auth identity.
+   *
+   *  `degradeLane` is the DYNAMIC over-budget action (docs/06 "usage budgets"):
+   *  null in the normal case, but set to the key's degrade lane (e.g. "economy")
+   *  for THIS request when the key is over its usage budget. It FORCES the request
+   *  onto that lane (a forced selection, not a rank ceiling) — so it works for any
+   *  target lane (ranked OR a task lane) and cannot be bypassed by explicit-model
+   *  passthrough (passthrough is suppressed while degrading). The forced lane is
+   *  still clamped to `allowedLanes` (the harder security bound). */
+  keyCaps?: { allowedLanes: string[] | null; degradeLane?: string | null };
 }
 
 // Fail-open classification default (principle 3 + 5): a degraded classifier
@@ -248,10 +256,15 @@ async function plan(
   //    treated as an explicit model, even for an allow_custom_model key — otherwise
   //    it short-circuits classify/lane-resolve and gets sent upstream as the literal
   //    model "auto" (the llm-router #391 regression). Fall through to classify.
+  //    A key that is OVER its usage budget and set to `degrade` (opts.keyCaps.
+  //    degradeLane is populated for this request) must NOT be able to bypass the
+  //    downgrade by naming an expensive explicit model — so suppress passthrough
+  //    while degrading and fall through to the forced degrade lane below (docs/06).
   if (
     opts.allowCustomModel === true &&
     req.requested_model.length > 0 &&
-    req.requested_model !== "auto"
+    req.requested_model !== "auto" &&
+    (opts.keyCaps?.degradeLane === undefined || opts.keyCaps.degradeLane === null)
   ) {
     const model = req.requested_model;
     return {
@@ -294,16 +307,25 @@ async function plan(
   // auth record. Applied after policy caps so the key wins even over a policy
   // use_lane pin (principle 6: lanes are the user-facing abstraction; a key may
   // be confined to a subset). keyCaps undefined => no-op.
-  const cappedLane =
-    opts.keyCaps === undefined
-      ? policyCappedLane
-      : applyCaps(policyCappedLane, {
-          matched_policy_id: null,
-          use_lane: null,
-          max_lane: null,
-          allowed_lanes: opts.keyCaps.allowedLanes,
-          reason: "key caps",
-        });
+  //
+  // Over-budget degrade (docs/06): when `degradeLane` is set for this request, FORCE
+  // the request onto it (a forced selection, not a rank ceiling) so it works for any
+  // target lane — ranked OR a task lane — which a `max_lane` ceiling would silently
+  // ignore. The forced lane is then clamped to the key's `allowedLanes` whitelist
+  // (the harder security bound) via applyCaps, exactly as the normal lane is.
+  let cappedLane: string;
+  if (opts.keyCaps === undefined) {
+    cappedLane = policyCappedLane;
+  } else {
+    const base = opts.keyCaps.degradeLane ?? policyCappedLane;
+    cappedLane = applyCaps(base, {
+      matched_policy_id: null,
+      use_lane: null,
+      max_lane: null,
+      allowed_lanes: opts.keyCaps.allowedLanes,
+      reason: "key caps",
+    });
+  }
   const chain = expandChain(cappedLane, deps.lanes);
 
   return {

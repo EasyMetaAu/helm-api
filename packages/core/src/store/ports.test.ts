@@ -31,6 +31,12 @@ class InMemoryKeyStore implements KeyStore {
       disabled: false,
       rate_limit_rpm: input.rateLimitRpm ?? null,
       rate_limit_tpm: input.rateLimitTpm ?? null,
+      budget_requests: input.budgetRequests ?? null,
+      budget_tokens: input.budgetTokens ?? null,
+      budget_spend_usd: input.budgetSpendUsd ?? null,
+      budget_window_seconds: input.budgetWindowSeconds ?? null,
+      over_budget_behavior: input.overBudgetBehavior ?? "degrade",
+      degrade_lane: input.degradeLane ?? null,
     };
     this.byId.set(record.key_id, record);
     return record;
@@ -56,6 +62,14 @@ class InMemoryKeyStore implements KeyStore {
     if (patch.allowCustomModel !== undefined) next.allow_custom_model = patch.allowCustomModel;
     if (patch.rateLimitRpm !== undefined) next.rate_limit_rpm = patch.rateLimitRpm;
     if (patch.rateLimitTpm !== undefined) next.rate_limit_tpm = patch.rateLimitTpm;
+    if (patch.budgetRequests !== undefined) next.budget_requests = patch.budgetRequests;
+    if (patch.budgetTokens !== undefined) next.budget_tokens = patch.budgetTokens;
+    if (patch.budgetSpendUsd !== undefined) next.budget_spend_usd = patch.budgetSpendUsd;
+    if (patch.budgetWindowSeconds !== undefined)
+      next.budget_window_seconds = patch.budgetWindowSeconds;
+    if (patch.overBudgetBehavior !== undefined)
+      next.over_budget_behavior = patch.overBudgetBehavior;
+    if (patch.degradeLane !== undefined) next.degrade_lane = patch.degradeLane;
     this.byId.set(keyId, next);
   }
 }
@@ -181,6 +195,12 @@ describe("port type contracts", () => {
       | "allowCustomModel"
       | "rateLimitRpm"
       | "rateLimitTpm"
+      | "budgetRequests"
+      | "budgetTokens"
+      | "budgetSpendUsd"
+      | "budgetWindowSeconds"
+      | "overBudgetBehavior"
+      | "degradeLane"
     >();
   });
 

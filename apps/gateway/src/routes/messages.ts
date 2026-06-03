@@ -1,4 +1,4 @@
-import type { RateLimitProbe, RateLimitResult } from "@helm/core";
+import type { BudgetCaps, RateLimitProbe, RateLimitResult } from "@helm/core";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -31,6 +31,9 @@ export interface MessagesIdentity {
    *  path enforces per-key limits, mirroring the OpenAI chat middleware. */
   caps?: {
     rateLimit?: { rpm: number | null; tpm: number | null };
+    /** Per-key usage budgets (docs/06), read by the pipeline's budget gate/settle.
+     *  Absent = no budgets on this face. */
+    budget?: BudgetCaps;
     [k: string]: unknown;
   };
   [k: string]: unknown;

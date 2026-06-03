@@ -19,6 +19,19 @@ export {
   KEY_PREFIX,
 } from "./auth/keygen.js";
 export {
+  activeDims,
+  type BudgetCaps,
+  type BudgetCheckResult,
+  type BudgetConfig,
+  type BudgetGateDeps,
+  type BudgetProbe,
+  type BudgetUsage,
+  createBudgetGate,
+  type SettleBudgetDeps,
+  settleBudget,
+  windowMsFor,
+} from "./budget/index.js";
+export {
   type CapabilityRequest,
   checkCapability,
   type FilterResult,
@@ -500,6 +513,7 @@ export {
   createStore,
   InMemoryRateLimitStore,
   InMemorySignalStore,
+  PgBudgetStore,
   PgConfigStore,
   type PgDb,
   PgKeyStore,
@@ -510,6 +524,7 @@ export {
   PgTelemetryStore,
   runMigrations,
   runPgMigrations,
+  SqliteBudgetStore,
   SqliteConfigStore,
   type SqliteDb,
   SqliteKeyStore,
@@ -521,6 +536,9 @@ export {
   type StoreSet,
 } from "./store/index.js";
 export type {
+  BudgetDim,
+  BudgetPeekResult,
+  BudgetStore,
   ConfigStore,
   CreateKeyInput,
   InsertPayloadInput,

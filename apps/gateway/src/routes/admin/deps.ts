@@ -224,6 +224,15 @@ export interface KeySummary {
   // display + edit it. No key material — just the quota numbers (principle 7).
   rate_limit_rpm: number | null;
   rate_limit_tpm: number | null;
+  // Per-key usage budgets (docs/06). null = no cap for that dimension. Surfaced so
+  // the admin UI can display + edit them. over_budget_behavior is degrade|reject;
+  // degrade_lane null = the system default (economy). No key material (principle 7).
+  budget_requests: number | null;
+  budget_tokens: number | null;
+  budget_spend_usd: number | null;
+  budget_window_seconds: number | null;
+  over_budget_behavior: "degrade" | "reject";
+  degrade_lane: string | null;
 }
 
 // New-key response: the ONLY place plaintext is ever returned, once.

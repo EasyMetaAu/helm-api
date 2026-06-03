@@ -99,8 +99,11 @@ The stored record (`ApiKeyRecord`, single source of truth in
 
 A "nginx for LLM" needs per-key rate limiting, but it must not become
 out-of-the-box friction. Helm ships lightweight per-key limiting (token-bucket
-RPM/TPM) that is **disabled by default**. Full quota/billing/credit accounting is
-on the [roadmap](09-roadmap.md), not in 0.1.
+RPM/TPM) that is **disabled by default**, plus per-key **usage budgets** (see
+below). Helm meters **per API key** — it is an internal/self-hosted gateway that
+hands out keys, so there is **no account/customer billing subject** and no
+account-level credit ledger (that remains out of scope; see the
+[roadmap](09-roadmap.md)).
 
 The limiter lives in core (`packages/core/src/ratelimit/`), behind a store-backed
 token bucket; the gateway middleware
@@ -152,6 +155,52 @@ Quota resolution per dimension (`resolveQuota` in `ratelimit/limiter.ts`):
 - The bucket store is **fail-closed**: a read/write failure propagates and the
   request is rejected — it never silently degrades to "unlimited".
 - Counters persist in the store, so they survive restarts.
+
+## Per-key usage budgets
+
+Rate limits cap the *rate* of traffic; **usage budgets** cap *cumulative
+consumption* per key over a rolling window, to control cost. Each key may set any
+subset of three optional caps (null = no cap for that dimension):
+
+- `budget_requests` — request count,
+- `budget_tokens` — total tokens,
+- `budget_spend_usd` — spend in USD,
+
+over a `budget_window_seconds` rolling window (null = a system default, ~30 days).
+Budgets reuse the same token-bucket as rate limits (`packages/core/src/budget/`,
+backed by the `usage_budget_buckets` store table) — just with a **configurable
+window** instead of the fixed 60s, and continuous refill (no hard reset).
+
+The distinguishing behavior is **what happens when a key is over budget**, chosen
+per key via `over_budget_behavior`:
+
+- **`degrade`** (default) — the request is **downgraded to a cheaper lane**
+  (`degrade_lane`, default `economy`) instead of its normal lane, then served
+  normally. Cost is bounded **without interrupting service**. Implemented by
+  feeding a dynamic `max_lane` ceiling into the router's existing `applyCaps` for
+  that one request.
+- **`reject`** — a hard `429 rate_limited` (`limited_by: "credit"` on the OpenAI
+  middleware face), before classify/route.
+
+Two phases, like the rate limiter but split by failure mode:
+
+- **Pre-route check** is a pure **balance sign check** (no per-request cost
+  pre-estimate): a discrete dimension (requests/tokens) is over when it can't
+  afford one more unit (`remaining < 1`); spend is over at `remaining <= 0`. The
+  check is **fail-CLOSED** — a store-read error propagates (→ 5xx), never a silent
+  pass. A key with no caps is a zero-touch fast path (no store read).
+- **Post-served settle** debits the **actual** served usage (1 request + measured
+  tokens + the decision's settled `total_usd`, never recomputed; an unmeasured
+  cost settles 0). It is **fail-OPEN** — a settle failure is logged, never 5xx's a
+  served request. Because settle is post-served, a single in-flight request may
+  push a bucket slightly negative; subsequent requests are then over budget.
+
+Budgets are enforced on **all four protocol faces** (OpenAI `/v1/chat`, Anthropic
+`/v1/messages`, OpenAI `/v1/responses`, Gemini `:generateContent`). The three
+self-authenticating faces share one routing pipeline, so the check + settle (and
+the streamed-cost backfill that makes the spend dimension correct on the streaming
+path) live there once. All budget config is editable per key in the admin API
+Keys page and applies on the next request (no restart).
 
 ## Admin authentication is separate
 

@@ -37,6 +37,24 @@ export function captureEnabled(deps: PayloadCaptureDeps): boolean {
   return deps.capturePayloads?.() === true;
 }
 
+// Total served tokens (prompt + completion) from an OpenAI-style usage object, for
+// the per-key token budget (docs/06). Tolerant of a missing/partial usage: a field
+// absent counts as 0. Used by every face's post-served budget settle — the usage
+// always rides the UPSTREAM OpenAI stream/body, so one extractor serves all.
+export function tokensFromUsage(usage: StreamUsage | null | undefined): number {
+  if (!usage) return 0;
+  return (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+}
+
+// Extract the OpenAI `usage` object from a NON-streaming response body (the
+// assembled chat.completion / equivalent). Mirrors usageFromSSE for the buffered
+// path. null when the body has no usage object.
+export function usageFromBody(body: unknown): StreamUsage | null {
+  const usage = (body as { usage?: unknown } | null)?.usage;
+  if (usage && typeof usage === "object") return usage as StreamUsage;
+  return null;
+}
+
 // Persist the verbatim request/response bodies + opportunistically prune expired
 // rows. Never throws — logs via the provided sink on failure.
 export async function persistPayload(

@@ -69,6 +69,12 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         disabled: false,
         rate_limit_rpm: input.rateLimitRpm ?? null,
         rate_limit_tpm: input.rateLimitTpm ?? null,
+        budget_requests: input.budgetRequests ?? null,
+        budget_tokens: input.budgetTokens ?? null,
+        budget_spend_usd: input.budgetSpendUsd ?? null,
+        budget_window_seconds: input.budgetWindowSeconds ?? null,
+        over_budget_behavior: input.overBudgetBehavior ?? "degrade",
+        degrade_lane: input.degradeLane ?? null,
       };
       rows.push(rec);
       return rec;
@@ -94,6 +100,14 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       if (patch.allowCustomModel !== undefined) row.allow_custom_model = patch.allowCustomModel;
       if (patch.rateLimitRpm !== undefined) row.rate_limit_rpm = patch.rateLimitRpm;
       if (patch.rateLimitTpm !== undefined) row.rate_limit_tpm = patch.rateLimitTpm;
+      if (patch.budgetRequests !== undefined) row.budget_requests = patch.budgetRequests;
+      if (patch.budgetTokens !== undefined) row.budget_tokens = patch.budgetTokens;
+      if (patch.budgetSpendUsd !== undefined) row.budget_spend_usd = patch.budgetSpendUsd;
+      if (patch.budgetWindowSeconds !== undefined)
+        row.budget_window_seconds = patch.budgetWindowSeconds;
+      if (patch.overBudgetBehavior !== undefined)
+        row.over_budget_behavior = patch.overBudgetBehavior;
+      if (patch.degradeLane !== undefined) row.degrade_lane = patch.degradeLane;
     },
   };
 }

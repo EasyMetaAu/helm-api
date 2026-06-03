@@ -21,6 +21,12 @@ function toSummary(rec: {
   disabled: boolean;
   rate_limit_rpm: number | null;
   rate_limit_tpm: number | null;
+  budget_requests: number | null;
+  budget_tokens: number | null;
+  budget_spend_usd: number | null;
+  budget_window_seconds: number | null;
+  over_budget_behavior: "degrade" | "reject";
+  degrade_lane: string | null;
 }): KeySummary {
   return {
     key_id: rec.key_id,
@@ -31,6 +37,12 @@ function toSummary(rec: {
     disabled: rec.disabled,
     rate_limit_rpm: rec.rate_limit_rpm,
     rate_limit_tpm: rec.rate_limit_tpm,
+    budget_requests: rec.budget_requests,
+    budget_tokens: rec.budget_tokens,
+    budget_spend_usd: rec.budget_spend_usd,
+    budget_window_seconds: rec.budget_window_seconds,
+    over_budget_behavior: rec.over_budget_behavior,
+    degrade_lane: rec.degrade_lane,
   };
 }
 
@@ -59,6 +71,12 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       allowCustomModel: parsed.data.allow_custom_model ?? false,
       rateLimitRpm: parsed.data.rate_limit_rpm,
       rateLimitTpm: parsed.data.rate_limit_tpm,
+      budgetRequests: parsed.data.budget_requests,
+      budgetTokens: parsed.data.budget_tokens,
+      budgetSpendUsd: parsed.data.budget_spend_usd,
+      budgetWindowSeconds: parsed.data.budget_window_seconds,
+      overBudgetBehavior: parsed.data.over_budget_behavior,
+      degradeLane: parsed.data.degrade_lane,
     });
     // The ONLY place plaintext is ever returned. `prefix` is the server-minted
     // non-sensitive display prefix (already persisted) — returned so the SPA need
@@ -90,11 +108,23 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       allowCustomModel?: boolean;
       rateLimitRpm?: number | null;
       rateLimitTpm?: number | null;
+      budgetRequests?: number | null;
+      budgetTokens?: number | null;
+      budgetSpendUsd?: number | null;
+      budgetWindowSeconds?: number | null;
+      overBudgetBehavior?: "degrade" | "reject";
+      degradeLane?: string | null;
     } = {};
     if (d.allowed_lanes !== undefined) patch.allowedLanes = d.allowed_lanes;
     if (d.allow_custom_model !== undefined) patch.allowCustomModel = d.allow_custom_model;
     if (d.rate_limit_rpm !== undefined) patch.rateLimitRpm = d.rate_limit_rpm;
     if (d.rate_limit_tpm !== undefined) patch.rateLimitTpm = d.rate_limit_tpm;
+    if (d.budget_requests !== undefined) patch.budgetRequests = d.budget_requests;
+    if (d.budget_tokens !== undefined) patch.budgetTokens = d.budget_tokens;
+    if (d.budget_spend_usd !== undefined) patch.budgetSpendUsd = d.budget_spend_usd;
+    if (d.budget_window_seconds !== undefined) patch.budgetWindowSeconds = d.budget_window_seconds;
+    if (d.over_budget_behavior !== undefined) patch.overBudgetBehavior = d.over_budget_behavior;
+    if (d.degrade_lane !== undefined) patch.degradeLane = d.degrade_lane;
     try {
       await deps.keyStore.updateKey(id, patch);
     } catch {
