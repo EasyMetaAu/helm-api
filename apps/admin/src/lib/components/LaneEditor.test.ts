@@ -79,7 +79,7 @@ describe('LaneEditor', () => {
   });
 
   it('offers the model catalog as combobox suggestions on primary + fallback inputs', () => {
-    const aliases = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro', 'zenmux/auto'];
+    const aliases = ['deepseek/deepseek-v4-flash', 'openai-codex/gpt-5.5', 'zenmux/auto'];
     const models = aliases.map((alias) => ({ alias, accounts: [] }));
     const { container } = render(LaneEditor, { lane: makeLane(), models, onsave: vi.fn() });
 
@@ -99,7 +99,7 @@ describe('LaneEditor', () => {
   });
 
   it('also offers other lanes (excluding itself) as combobox targets, labelled as lanes', () => {
-    const aliases = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro'];
+    const aliases = ['deepseek/deepseek-v4-flash', 'openai-codex/gpt-5.5'];
     const models = aliases.map((alias) => ({ alias, accounts: [] }));
     const laneNames = ['economy', 'balanced', 'coding', 'premium'];
     const { container } = render(LaneEditor, {
@@ -132,7 +132,7 @@ describe('LaneEditor', () => {
     const models = [
       { alias: 'anthropic/claude-opus-4-8', accounts: ['default'] },
       { alias: 'openai-codex/gpt-5.5', accounts: ['default', 'mylukin'] },
-      { alias: 'openai-crs/gpt-5.4-mini', accounts: [] }, // configured → provider as label
+      { alias: 'deepseek/deepseek-v4-flash', accounts: [] }, // configured → provider as label
     ];
     const { container } = render(LaneEditor, { lane: makeLane(), models, onsave: vi.fn() });
     const options = Array.from(
@@ -141,7 +141,7 @@ describe('LaneEditor', () => {
     const labelOf = (v: string) => options.find((o) => o.value === v)?.label ?? '';
     expect(labelOf('anthropic/claude-opus-4-8')).toBe('default');
     expect(labelOf('openai-codex/gpt-5.5')).toBe('default, mylukin');
-    expect(labelOf('openai-crs/gpt-5.4-mini')).toBe('openai-crs');
+    expect(labelOf('deepseek/deepseek-v4-flash')).toBe('deepseek');
   });
 
   it('still works as a plain text input when no models are provided (graceful default)', () => {

@@ -160,8 +160,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
 
   // Cost of one served attempt = provider usage × catalog pricing (docs/07).
   // Keyed by the candidate ALIAS — the catalog/pricing modelKey is the routing
-  // alias (e.g. `openai-crs/gpt-5.4-mini`), NOT the bare upstream model id we send
-  // on the wire (`gpt-5.4-mini`). See the resolve block below.
+  // alias (e.g. `deepseek/deepseek-v4-flash`), NOT the bare upstream model id we
+  // send on the wire (`deepseek-v4-flash`). See the resolve block below.
   // Prefer an upstream-BILLED cost the response carried (real money charged —
   // `usage.cost_usd` / OpenRouter `usage.cost` / top-level `cost_usd`); otherwise
   // estimate from token usage × catalog pricing (resolveCostUsd, the single
@@ -208,11 +208,11 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // out and must not be conflated (fix-upstream-model-id 2026-05-31):
       //   • alias        — the ROUTING key. The catalog/pricing modelKey, the
       //     circuit-breaker key, and the decision-record id are ALL the alias
-      //     (e.g. `openai-crs/gpt-5.4-mini`). This is what the rest of the system
+      //     (e.g. `deepseek/deepseek-v4-flash`). This is what the rest of the system
       //     keys on; the generated catalog is keyed by it.
       //   • providerModel — the provider's REAL upstream model id (e.g.
-      //     `gpt-5.4-mini`). The ONLY thing it is used for is the wire `model`
-      //     field we send upstream. The relay rejects anything else with a 500.
+      //     `deepseek-v4-flash`). The ONLY thing it is used for is the wire `model`
+      //     field we send upstream. The upstream rejects anything else with a 4xx/5xx.
       // An unknown alias is a config gap: keep the alias as the upstream model id
       // too and use the default provider (fail-open — never substitute a different
       // model silently). A resolved alias selects BOTH the upstream model id AND
@@ -261,6 +261,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           providerModel = alias.slice(slash + 1);
           provider = providers.get(prefix);
         } else {
+          // A BARE alias (no provider prefix): Phase-0 passthrough to the default
+          // provider with the alias as the upstream model id (single-provider
+          // deploys; never substitute a different model silently).
           providerModel = alias;
           provider = defaultProvider;
         }

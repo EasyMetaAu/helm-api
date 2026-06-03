@@ -98,7 +98,7 @@ helm-api/
 # 1. 克隆并创建环境变量文件
 git clone https://github.com/EasyMetaAu/helm-api.git && cd helm-api
 cp .env.example .env
-#    在 .env 里至少设好 HELM_ADMIN_PASSWORD 和 OPENAI_API_KEY
+#    在 .env 里至少设好 HELM_ADMIN_PASSWORD 和 DEEPSEEK_API_KEY
 
 # 2. 启动
 docker compose up -d
@@ -140,7 +140,7 @@ curl http://localhost:8080/v1/chat/completions \
 | 取值 | Helm 的行为 |
 |---|---|
 | `auto`（推荐） | 对请求做分类，自动路由到最合适的 lane。 |
-| 模型别名，如 `openai-crs/gpt-5.5` | 精确使用该模型、跳过路由 —— 仅对获授「自定义模型」权限的 key 有效。 |
+| 模型别名，如 `openai-codex/gpt-5.5` | 精确使用该模型、跳过路由 —— 仅对获授「自定义模型」权限的 key 有效。 |
 
 > 用普通 key 时，无论你发什么，路由都是自动的 —— 直接用 `auto` 即可。Lane 由运维方在 `lanes.yaml` 和面板里配置，客户端不在单次调用里挑 lane。
 
@@ -163,7 +163,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 | 变量 | 用途 |
 |---|---|
-| `OPENAI_API_KEY` | 主供应商凭证（**必填**） |
+| `DEEPSEEK_API_KEY` | 主供应商凭证（**必填**） |
 | `ZENMUX_API_KEY`、`OPENROUTER_API_KEY`、`ANTHROPIC_API_KEY` | 可选供应商凭证（缺失则跳过该供应商） |
 | `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | 面板登录（Basic auth） |
 | `HELM_HOST` / `HELM_PORT` | 服务绑定（默认 `0.0.0.0:8080`） |

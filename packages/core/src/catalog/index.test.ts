@@ -86,14 +86,14 @@ describe("loadCatalog", () => {
   });
 
   it("propagates a requiresStreaming override into the merged catalog entry", () => {
-    // The stream-only relay flag (capabilities.yaml) must survive the merge so the
+    // A requiresStreaming override (capabilities.yaml) must survive the merge so the
     // executor's capability filter can read it (catalog.get(alias).capabilities).
     const cat = loadCatalog({
       generated,
-      capabilitiesOverride: { "openai-crs/gpt-5.4-mini": { requiresStreaming: true } },
+      capabilitiesOverride: { "openai-codex/gpt-5.5": { requiresStreaming: true } },
       pricingOverride: {},
     });
-    const entry = cat.get("openai-crs/gpt-5.4-mini");
+    const entry = cat.get("openai-codex/gpt-5.5");
     expect(entry?.capabilities.requiresStreaming).toBe(true);
   });
 

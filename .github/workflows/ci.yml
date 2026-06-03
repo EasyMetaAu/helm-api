@@ -50,7 +50,7 @@ jobs:
           docker rm -f helm-ci 2>/dev/null || true
           docker run -d --name helm-ci \
             -p 8080:8080 \
-            -e OPENAI_API_KEY=sk-ci-smoke-test \
+            -e DEEPSEEK_API_KEY=sk-ci-smoke-test \
             helm-api:ci
       - name: Wait for /healthz to be healthy
         run: |

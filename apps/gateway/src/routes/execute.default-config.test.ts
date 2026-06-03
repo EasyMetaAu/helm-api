@@ -170,11 +170,11 @@ describe("default config activates capability filter + cost (alias-namespace ali
   it("sanity: the shipped catalog is keyed by the SAME provider/model aliases the lanes use", () => {
     // Pre-alignment these were absent (lane aliases like `cheap_model` had no
     // catalog entry). Now every lane candidate alias resolves in the catalog.
-    expect(catalog.get("openai-crs/gpt-5.4-mini")?.capabilities.supportsJsonMode).toBe(true);
+    expect(catalog.get("deepseek/deepseek-v4-flash")?.capabilities.supportsJsonMode).toBe(true);
     expect(catalog.get("zenmux/auto")?.capabilities.supportsJsonMode).toBe(false);
     expect(catalog.get("openrouter/auto")?.capabilities.supportsJsonMode).toBe(false);
     // pricing is populated (so cost can be computed, not null).
-    expect(catalog.get("openai-crs/gpt-5.4-mini")?.pricing.inputPerMTokUsd).toBeGreaterThan(0);
+    expect(catalog.get("deepseek/deepseek-v4-flash")?.pricing.inputPerMTokUsd).toBeGreaterThan(0);
   });
 
   it("PRUNES a json-incapable */auto candidate and lands on a json-capable model (skip_reason recorded)", async () => {
@@ -193,24 +193,22 @@ describe("default config activates capability filter + cost (alias-namespace ali
     // A chain that puts the json-INCAPABLE auto FIRST, then a json-capable model.
     // A needs_json request must SKIP the auto (skip_reason no_json_support) and
     // land on the capable model — proving the filter prunes on the real catalog.
-    // The landing model is deepseek-crs/deepseek-pro (json + non-stream capable);
-    // the gpt-5.x relay heads are stream-ONLY (requiresStreaming) so a non-stream
-    // request would skip them too (covered by the json-lane test below).
-    const chain = ["zenmux/auto", "deepseek-crs/deepseek-pro"];
+    // The landing model is deepseek/deepseek-v4-pro (json-capable).
+    const chain = ["zenmux/auto", "deepseek/deepseek-v4-pro"];
     const out = await execute(plan(chain), req({ response_format: { type: "json_object" } }));
 
     expect(out.attempts[0]?.alias).toBe("zenmux/auto");
     expect(out.attempts[0]?.skipped).toBe(true);
     expect(out.attempts[0]?.skip_reason).toBe("no_json_support");
     expect(out.final.status).toBe("ok");
-    if (out.final.status === "ok") expect(out.final.alias).toBe("deepseek-crs/deepseek-pro");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("deepseek/deepseek-v4-pro");
     // The pruned auto must NEVER have been invoked upstream. The upstream `model`
-    // is the RESOLVED bare provider_model (`deepseek-pro`), not the alias.
-    expect(calls).toEqual(["deepseek-pro"]);
+    // is the RESOLVED bare provider_model (`deepseek-v4-pro`), not the alias.
+    expect(calls).toEqual(["deepseek-v4-pro"]);
   });
 
-  it("the shipped `json` lane chain prunes its */auto tail for a needs_json request", async () => {
-    const { client } = stubProvider();
+  it("the shipped `json` lane serves its json-capable primary and never reaches the */auto tail", async () => {
+    const { client, calls } = stubProvider();
     const execute = createExecute({
       defaultProvider: client,
       providers: providerClients(client),
@@ -220,23 +218,20 @@ describe("default config activates capability filter + cost (alias-namespace ali
       now: clock(),
       signal: new AbortController().signal,
     });
-    // Expand the REAL shipped `json` lane: primary openai-crs/gpt-5.4-mini, then
+    // Expand the REAL shipped `json` lane: primary deepseek/deepseek-v4-flash, then
     // balanced (whose tail is zenmux/auto + openrouter/auto, both json-incapable).
     const chain = expandChain("json");
-    expect(chain).toContain("openai-crs/gpt-5.4-mini");
+    expect(chain).toContain("deepseek/deepseek-v4-flash");
     expect(chain).toContain("zenmux/auto");
     expect(chain).toContain("openrouter/auto");
     const out = await execute(plan(chain), req({ response_format: { type: "json_object" } }));
     expect(out.final.status).toBe("ok");
-    // The json primary openai-crs/gpt-5.4-mini is stream-ONLY (requiresStreaming),
-    // so a non-stream request SKIPS it (no_nonstream_support) without invoking it,
-    // and the chain lands on the next json + non-stream capable model,
-    // deepseek-crs/deepseek-pro. The json-incapable */auto tails are pruned too
-    // (no_json_support, proven head-on by the previous test) but are never reached.
-    const primary = out.attempts.find((a) => a.alias === "openai-crs/gpt-5.4-mini");
-    expect(primary?.skipped).toBe(true);
-    expect(primary?.skip_reason).toBe("no_nonstream_support");
-    if (out.final.status === "ok") expect(out.final.alias).toBe("deepseek-crs/deepseek-pro");
+    // The json primary deepseek/deepseek-v4-flash is json-capable AND serves
+    // non-stream requests, so it lands FIRST — the json-incapable */auto tails
+    // (which WOULD be pruned, proven head-on by the previous test) are never
+    // reached. The upstream `model` is the bare provider_model.
+    if (out.final.status === "ok") expect(out.final.alias).toBe("deepseek/deepseek-v4-flash");
+    expect(calls).toEqual(["deepseek-v4-flash"]);
   });
 
   it("a chain of ONLY json-incapable candidates → capability_unsatisfiable (422 class)", async () => {
@@ -277,10 +272,9 @@ describe("default config activates capability filter + cost (alias-namespace ali
       now: clock(),
       signal: new AbortController().signal,
     });
-    // Serve a plain (non-stream) request on the balanced json head
-    // deepseek-crs/deepseek-pro. The gpt-5.x relay heads are stream-ONLY
-    // (requiresStreaming) so they can't serve this non-stream request.
-    const out = await execute(plan(["deepseek-crs/deepseek-pro"]), req());
+    // Serve a plain (non-stream) request on the balanced head
+    // deepseek/deepseek-v4-pro (json-capable, non-stream OK).
+    const out = await execute(plan(["deepseek/deepseek-v4-pro"]), req());
     expect(out.final.status).toBe("ok");
     const served = out.attempts.find((a) => a.status === "ok");
     expect(served).toBeDefined();

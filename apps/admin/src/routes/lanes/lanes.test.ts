@@ -42,7 +42,7 @@ describe('lanes page', () => {
   });
 
   it('threads the model catalog into each lane card as combobox suggestions', () => {
-    const aliases = ['openai-crs/gpt-5.4-mini', 'deepseek-crs/deepseek-pro'];
+    const aliases = ['deepseek/deepseek-v4-flash', 'openai-codex/gpt-5.5'];
     const models = aliases.map((alias) => ({ alias, accounts: [] }));
     const { container } = renderPage([lane('economy'), lane('balanced')], models);
     // Every card gets a populated <datalist> sourced from data.models.

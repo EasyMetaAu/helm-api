@@ -9,36 +9,38 @@
 # gateway refuses to boot (fail-closed, principle 2). `balanced` is REQUIRED: it
 # is the terminal of the classification fallback.
 #
-# ALIAS-NAMESPACE ALIGNMENT (2026-05-31): every candidate below is a
-# `provider/model` alias that ALSO keys providers.yaml, the capability+pricing
-# catalog, and pricing — so the capability filter + cost path resolve by the lane
-# candidate alias at runtime (no more "unknown -> fail-open"). Each lane ends in a
-# `*/auto` tail fallback; those auto aliases are deliberately JSON-INCAPABLE
+# PROVIDER MIX (2026-06-03, task drop-openai-crs-relay): the cheap/default lanes
+# anchor on the ALWAYS-AVAILABLE official `deepseek` primary (static key — works in
+# dev, e2e, and a fresh install with NO subscription). premium / coding / tool_use
+# lead with the `openai-codex` SUBSCRIPTION channel (connect it in admin →
+# Providers), each backed by a static fallback so the lane degrades gracefully when
+# no subscription is bound: an unconnected `openai-codex/*` candidate fails OPEN
+# (Phase-0 back-fill / skip to the next fallback), never a 5xx. Each lane still ends
+# in a `*/auto` tail fallback; those auto aliases are deliberately JSON-INCAPABLE
 # (catalog supports_json_schema:false), so a strict-JSON request prunes them and
-# lands on a deterministic json-capable model (docs/02 security rule: `*/auto`
-# only at the tail).
+# lands on a deterministic json-capable model (docs/02: `*/auto` only at the tail).
 
 # —— quality/cost lanes ——
 economy:
   purpose: Cheap and fast for simple tasks
-  primary: openai-crs/gpt-5.4-mini
-  fallback: [deepseek-crs/deepseek-flash, balanced]
+  primary: deepseek/deepseek-v4-flash
+  fallback: [openai-codex/gpt-5.4, balanced]
 
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
-  primary: deepseek-crs/deepseek-pro
-  fallback: [openai-crs/gpt-5.4-mini, zenmux/auto, openrouter/auto]
+  primary: deepseek/deepseek-v4-pro
+  fallback: [openai-codex/gpt-5.4, zenmux/auto, openrouter/auto]
 
 premium:
   purpose: Strong reasoning and high quality
-  primary: openai-crs/gpt-5.5
-  fallback: [zenmux/claude-opus-4.7, zenmux/auto, openrouter/auto]
+  primary: openai-codex/gpt-5.5
+  fallback: [deepseek/deepseek-v4-pro, zenmux/claude-opus-4.7, zenmux/auto, openrouter/auto]
 
 # —— task lanes (named after detected task_type; the lane resolver maps a
 #    classified task_type onto a same-named lane — docs/04) ——
 coding:
   purpose: Coding-capable models for code generation / editing
-  primary: openai-crs/gpt-5.3-codex-spark
+  primary: openai-codex/gpt-5.3-codex-spark
   fallback: [premium, balanced]
 
 json:
@@ -47,7 +49,7 @@ json:
   # request lands deterministically. The chain then drops through balanced, whose
   # tail `*/auto` aliases are json-INCAPABLE and get PRUNED by the capability
   # filter — proving the filter fires on the default config.
-  primary: openai-crs/gpt-5.4-mini
+  primary: deepseek/deepseek-v4-flash
   fallback: [balanced]
   constraints:
     require_json: true
@@ -61,7 +63,7 @@ vision:
 
 tool_use:
   purpose: Reliable function / tool calling
-  primary: openai-crs/gpt-5.5
+  primary: openai-codex/gpt-5.5
   fallback: [premium]
   constraints:
     require_tools: true

@@ -39,7 +39,7 @@ describe("CI workflow", () => {
     expect(raw).toContain("docker build");
     expect(raw).toContain("docker run");
     // Boots with the required provider credential env and hits /healthz.
-    expect(raw).toContain("OPENAI_API_KEY");
+    expect(raw).toContain("DEEPSEEK_API_KEY");
     expect(raw).toContain("/healthz");
     // Cleans the container up afterwards.
     expect(raw).toContain("docker stop");

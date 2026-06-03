@@ -47,8 +47,13 @@ const UNCERTAIN = { ...AUTH, "x-helm-rules-threshold": "0.99" };
 // Shipped config/lanes.yaml candidate heads (alias-namespace alignment,
 // 2026-05-31). Keep in lockstep with config/lanes.yaml `balanced`/`premium`
 // primaries.
-const BALANCED_HEAD = "deepseek-crs/deepseek-pro";
-const PREMIUM_HEAD = "openai-crs/gpt-5.5";
+// These e2e run with NO subscription connected, so a lane's nominal `openai-codex/*`
+// primary is SKIPPED (provider_unavailable) and the lane serves its first STATIC
+// fallback. premium's nominal primary is openai-codex/gpt-5.5 → it serves
+// deepseek/deepseek-v4-pro (the same model balanced serves; the lanes are told
+// apart by the x-helm-lane header, not the served model).
+const BALANCED_HEAD = "deepseek/deepseek-v4-pro";
+const PREMIUM_HEAD = "deepseek/deepseek-v4-pro";
 
 // An intentionally ambiguous prompt: no strong Layer-1 keyword signal. Paired
 // with the UNCERTAIN header (rules threshold 0.99) the cascade is guaranteed to
@@ -106,11 +111,10 @@ test.describe("eval cascade e2e", () => {
     request,
   }) => {
     const res = await request.post("/v1/chat/completions", {
-      // Stream: the premium head (openai-crs/gpt-5.5) is stream-only, so a
-      // non-stream request would skip it (no_nonstream_support) and serve a
-      // fallback; streaming keeps the asserted final model the lane head. The
-      // internal eval call is a separate non-stream classify request, unaffected.
-      data: chat(ambiguous("s2"), { stream: true }),
+      // The eval verdict picks the premium LANE; premium's openai-codex head is
+      // skipped (no subscription) so it serves the static fallback PREMIUM_HEAD.
+      // The internal eval call is a separate non-stream classify request.
+      data: chat(ambiguous("s2")),
       headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(res.status()).toBe(200);
