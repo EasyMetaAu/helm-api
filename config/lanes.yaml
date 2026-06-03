@@ -24,7 +24,7 @@
 economy:
   purpose: Cheap and fast for simple tasks
   primary: deepseek/deepseek-v4-flash
-  fallback: [openai-codex/gpt-5.4, balanced]
+  fallback: [openai-codex/gpt-5.4-mini, balanced]
 
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
@@ -40,7 +40,9 @@ premium:
 #    classified task_type onto a same-named lane — docs/04) ——
 coding:
   purpose: Coding-capable models for code generation / editing
-  primary: openai-codex/gpt-5.3-codex-spark
+  # gpt-5.5 is the strongest model the Codex subscription actually exposes; the
+  # legacy `*-codex` slugs 400 on the ChatGPT-account backend, so they are NOT used.
+  primary: openai-codex/gpt-5.5
   fallback: [premium, balanced]
 
 json:

@@ -187,9 +187,10 @@ providers:
   #
   # ChatGPT Plus/Pro — Codex (browser login + paste redirect URL).
   # This is the default lane channel for premium/coding/tool_use (config/lanes.yaml
-  # references openai-codex/gpt-5.5, openai-codex/gpt-5.3-codex-spark, …). Just
-  # connect it in the admin UI (Providers → Connect) — the pool is SYNTHESIZED and
-  # its models become `openai-codex/<model>` aliases automatically; NO YAML needed.
+  # references openai-codex/gpt-5.5, openai-codex/gpt-5.4, openai-codex/gpt-5.4-mini
+  # — the models the Codex subscription actually exposes). Just connect it in the
+  # admin UI (Providers → Connect) — the pool is SYNTHESIZED and its models become
+  # `openai-codex/<model>` aliases automatically; NO YAML needed.
   # Declare a static block ONLY to pin a custom alias to a specific upstream id:
   # - name: chatgpt-codex
   #   type: openai

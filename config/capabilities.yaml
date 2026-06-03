@@ -29,6 +29,11 @@
 # id `openai-codex`). They go through the openai-responses executor (NOT the old
 # stream-only relay), so no `requiresStreaming` constraint applies. `deepseek/*`
 # are the official DeepSeek API models (providers[0]).
+#
+# These three are EXACTLY the curated Codex set the subscription exposes
+# (packages/core/src/provider/oauth/models.ts — the ChatGPT-account Codex backend
+# 400s on legacy `*-codex`/`*-pro` slugs, verified live), so every exposed alias
+# an operator can pick has a capability + pricing entry here.
 openai-codex/gpt-5.5:
   supportsTools: true
   supportsJsonMode: true
@@ -43,13 +48,13 @@ openai-codex/gpt-5.4:
   supportsStreaming: true
   maxContextTokens: 400000
   maxOutputTokens: 128000
-openai-codex/gpt-5.3-codex-spark:
+openai-codex/gpt-5.4-mini:
   supportsTools: true
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
   maxContextTokens: 400000
-  maxOutputTokens: 128000
+  maxOutputTokens: 65536
 deepseek/deepseek-v4-pro:
   supportsTools: true
   supportsJsonMode: true

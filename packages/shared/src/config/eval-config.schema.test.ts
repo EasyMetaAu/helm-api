@@ -94,7 +94,7 @@ describe("EvalConfigSchema", () => {
   });
 
   it("defaults the outer timeout strictly above the inner (backstop ordering)", () => {
-    const parsed = EvalConfigSchema.parse({ model: "deepseek-flash" });
+    const parsed = EvalConfigSchema.parse({ model: "deepseek-v4-flash" });
     expect(parsed.outer_timeout_ms).toBeGreaterThan(parsed.timeout_ms);
   });
 

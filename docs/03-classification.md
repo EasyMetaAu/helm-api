@@ -138,7 +138,7 @@ classifier:
 
   eval:
     enabled: false                 # OFF by default (non-negotiable)
-    model: deepseek-flash          # cheap, fast, reliable JSON; sent directly to the primary provider
+    model: deepseek-v4-flash       # a real bare id the primary (official DeepSeek) accepts; sent directly to it
     temperature: 0
     max_tokens: 256                # one JSON object; caps the cost
     timeout_ms: 250                # inner runner timeout
