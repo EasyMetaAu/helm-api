@@ -341,6 +341,115 @@ describe("responsesTransformer — unknown item type (fail-open)", () => {
   });
 });
 
+describe("responsesTransformer — request sampling/control params (litellm parity)", () => {
+  it("maps IR-backed params (top_p/frequency_penalty/presence_penalty/seed/n/parallel_tool_calls) onto IR", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "hi",
+      top_p: 0.9,
+      frequency_penalty: 0.5,
+      presence_penalty: 0.25,
+      seed: 42,
+      n: 2,
+      parallel_tool_calls: false,
+    });
+    expect(ir.top_p).toBe(0.9);
+    expect(ir.frequency_penalty).toBe(0.5);
+    expect(ir.presence_penalty).toBe(0.25);
+    expect(ir.seed).toBe(42);
+    expect(ir.n).toBe(2);
+    expect(ir.parallel_tool_calls).toBe(false);
+  });
+
+  it("stashes Responses-only params (store/previous_response_id/metadata/logit_bias) in provider_raw", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "hi",
+      store: true,
+      previous_response_id: "resp_prev",
+      metadata: { trace: "abc" },
+      logit_bias: { "123": -100 },
+    });
+    expect(ir.provider_raw?.store).toBe(true);
+    expect(ir.provider_raw?.previous_response_id).toBe("resp_prev");
+    expect(ir.provider_raw?.metadata).toEqual({ trace: "abc" });
+    expect(ir.provider_raw?.logit_bias).toEqual({ "123": -100 });
+  });
+
+  it("round-trips IR-backed params back onto the native Responses request (transformRequestIn)", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hi" }],
+      top_p: 0.8,
+      frequency_penalty: 0.1,
+      presence_penalty: 0.2,
+      seed: 7,
+      n: 3,
+      parallel_tool_calls: true,
+    })) as {
+      top_p?: number;
+      frequency_penalty?: number;
+      presence_penalty?: number;
+      seed?: number;
+      n?: number;
+      parallel_tool_calls?: boolean;
+    };
+    expect(native.top_p).toBe(0.8);
+    expect(native.frequency_penalty).toBe(0.1);
+    expect(native.presence_penalty).toBe(0.2);
+    expect(native.seed).toBe(7);
+    expect(native.n).toBe(3);
+    expect(native.parallel_tool_calls).toBe(true);
+  });
+});
+
+describe("responsesTransformer — usage detail mapping (transformResponseIn)", () => {
+  it("maps output_tokens_details.reasoning_tokens -> IRUsage.reasoning_tokens and cache fields", async () => {
+    const upstream = {
+      id: "resp_u",
+      object: "response",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
+      ],
+      usage: {
+        input_tokens: 100,
+        output_tokens: 20,
+        input_tokens_details: { cached_tokens: 30, cache_creation_input_tokens: 10 },
+        output_tokens_details: { reasoning_tokens: 8 },
+      },
+    };
+    const ir = await responsesTransformer.transformResponseIn(upstream);
+    expect(ir.usage?.reasoning_tokens).toBe(8);
+    expect(ir.usage?.cached_tokens).toBe(30);
+    expect(ir.usage?.cache_creation_tokens).toBe(10);
+    // prompt = input - cached
+    expect(ir.usage?.prompt_tokens).toBe(70);
+  });
+});
+
+describe("responsesTransformer — response echo passthrough (reasoning/text/tool_choice)", () => {
+  it("surfaces reasoning/text/tool_choice echo fields via provider_raw on transformResponseIn", async () => {
+    const upstream = {
+      id: "resp_e",
+      object: "response",
+      model: "gpt-4o",
+      status: "completed",
+      reasoning: { effort: "high", summary: "auto" },
+      text: { format: { type: "json_object" } },
+      tool_choice: "auto",
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
+      ],
+    };
+    const ir = await responsesTransformer.transformResponseIn(upstream);
+    expect(ir.provider_raw?.reasoning).toEqual({ effort: "high", summary: "auto" });
+    expect(ir.provider_raw?.text).toEqual({ format: { type: "json_object" } });
+    expect(ir.provider_raw?.tool_choice).toBe("auto");
+  });
+});
+
 describe("responsesTransformer — endpoint isolation (test #6)", () => {
   it("declares /v1/responses, distinct from OpenAI Chat", () => {
     expect(responsesTransformer.name).toBe("openai-responses");

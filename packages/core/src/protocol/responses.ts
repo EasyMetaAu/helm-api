@@ -131,6 +131,21 @@ const ResponsesRequestSchema = z
     max_output_tokens: z.number().int().positive().optional(),
     stream: z.boolean().optional(),
     text: z.unknown().optional(), // Responses' structured-output config (response_format analogue)
+    // —— litellm-parity sampling/control params. The IR-backed ones (top_p, the two
+    // penalties, seed, n, parallel_tool_calls) map straight onto the IR. The
+    // Responses-only knobs (store/previous_response_id/metadata/logit_bias) have no
+    // IR home, so they ride in provider_raw losslessly (principle: never invent IR
+    // fields; non-mappable upstream data goes to provider_raw). ————————————————————
+    top_p: z.number().optional(),
+    frequency_penalty: z.number().optional(),
+    presence_penalty: z.number().optional(),
+    seed: z.number().int().optional(),
+    n: z.number().int().positive().optional(),
+    parallel_tool_calls: z.boolean().optional(),
+    store: z.boolean().optional(),
+    previous_response_id: z.string().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    logit_bias: z.record(z.string(), z.number()).optional(),
   })
   .passthrough();
 export type ResponsesRequest = z.infer<typeof ResponsesRequestSchema>;
@@ -249,6 +264,12 @@ function toIRRequest(req: NativeRequest): IRRequest {
   const providerRaw: Record<string, unknown> = {};
   if (rawReasoning.length > 0) providerRaw.reasoning = rawReasoning;
   if (unknownItems.length > 0) providerRaw.unknown_items = unknownItems;
+  // Responses-only request knobs with no IR home are preserved verbatim.
+  if (parsed.store !== undefined) providerRaw.store = parsed.store;
+  if (parsed.previous_response_id !== undefined)
+    providerRaw.previous_response_id = parsed.previous_response_id;
+  if (parsed.metadata !== undefined) providerRaw.metadata = parsed.metadata;
+  if (parsed.logit_bias !== undefined) providerRaw.logit_bias = parsed.logit_bias;
 
   const ir: IRRequest = {
     model: parsed.model,
@@ -259,6 +280,17 @@ function toIRRequest(req: NativeRequest): IRRequest {
     ...(parsed.max_output_tokens !== undefined ? { max_tokens: parsed.max_output_tokens } : {}),
     ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
     ...(parsed.text !== undefined ? { response_format: parsed.text } : {}),
+    // IR-backed sampling/control params map straight through.
+    ...(parsed.top_p !== undefined ? { top_p: parsed.top_p } : {}),
+    ...(parsed.frequency_penalty !== undefined
+      ? { frequency_penalty: parsed.frequency_penalty }
+      : {}),
+    ...(parsed.presence_penalty !== undefined ? { presence_penalty: parsed.presence_penalty } : {}),
+    ...(parsed.seed !== undefined ? { seed: parsed.seed } : {}),
+    ...(parsed.n !== undefined ? { n: parsed.n } : {}),
+    ...(parsed.parallel_tool_calls !== undefined
+      ? { parallel_tool_calls: parsed.parallel_tool_calls }
+      : {}),
     ...(thinking.length > 0 ? { thinking } : {}),
     ...(Object.keys(providerRaw).length > 0 ? { provider_raw: providerRaw } : {}),
   };
@@ -325,6 +357,7 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
     });
   }
 
+  const raw = parsed.provider_raw;
   return {
     model: parsed.model,
     ...(instructions !== undefined ? { instructions } : {}),
@@ -334,6 +367,24 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
     ...(parsed.max_tokens !== undefined ? { max_output_tokens: parsed.max_tokens } : {}),
     ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
+    // IR-backed sampling/control params explode back onto the native request.
+    ...(parsed.top_p !== undefined ? { top_p: parsed.top_p } : {}),
+    ...(parsed.frequency_penalty !== undefined
+      ? { frequency_penalty: parsed.frequency_penalty }
+      : {}),
+    ...(parsed.presence_penalty !== undefined ? { presence_penalty: parsed.presence_penalty } : {}),
+    ...(parsed.seed !== undefined ? { seed: parsed.seed } : {}),
+    ...(parsed.n !== undefined ? { n: parsed.n } : {}),
+    ...(parsed.parallel_tool_calls !== undefined
+      ? { parallel_tool_calls: parsed.parallel_tool_calls }
+      : {}),
+    // Responses-only knobs come back out of provider_raw if they were stashed there.
+    ...(raw?.store !== undefined ? { store: raw.store } : {}),
+    ...(raw?.previous_response_id !== undefined
+      ? { previous_response_id: raw.previous_response_id }
+      : {}),
+    ...(raw?.metadata !== undefined ? { metadata: raw.metadata } : {}),
+    ...(raw?.logit_bias !== undefined ? { logit_bias: raw.logit_bias } : {}),
   };
 }
 
@@ -439,7 +490,15 @@ const ResponsesUsageSchema = z
     input_tokens: z.number().int().nonnegative().optional(),
     output_tokens: z.number().int().nonnegative().optional(),
     input_tokens_details: z
-      .object({ cached_tokens: z.number().int().nonnegative().optional() })
+      .object({
+        cached_tokens: z.number().int().nonnegative().optional(),
+        // Anthropic-via-Responses ephemeral cache write (litellm parity addendum).
+        cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
+    output_tokens_details: z
+      .object({ reasoning_tokens: z.number().int().nonnegative().optional() })
       .passthrough()
       .optional(),
   })
@@ -453,6 +512,11 @@ const ResponsesResponseSchema = z
     status: z.string().optional(),
     output: z.array(ResponsesInputItemSchema),
     usage: ResponsesUsageSchema.optional(),
+    // Echo fields the Responses API returns on the response object. They have no IR
+    // home, so they are surfaced via provider_raw (optional passthrough).
+    reasoning: z.unknown().optional(),
+    text: z.unknown().optional(),
+    tool_choice: z.unknown().optional(),
   })
   .passthrough();
 
@@ -497,6 +561,8 @@ function toIRResponse(res: NativeResponse): IRResponse {
   }
 
   const cached = parsed.usage?.input_tokens_details?.cached_tokens ?? 0;
+  const cacheCreation = parsed.usage?.input_tokens_details?.cache_creation_input_tokens;
+  const reasoningTokens = parsed.usage?.output_tokens_details?.reasoning_tokens;
   const fullInput = parsed.usage?.input_tokens;
 
   const message: IRMessage = {
@@ -525,12 +591,20 @@ function toIRResponse(res: NativeResponse): IRResponse {
               ? { completion_tokens: parsed.usage.output_tokens }
               : {}),
             ...(cached > 0 ? { cached_tokens: cached } : {}),
+            // output_tokens_details.reasoning_tokens -> IRUsage.reasoning_tokens;
+            // input_tokens_details.cache_creation_input_tokens -> cache_creation_tokens.
+            ...(reasoningTokens !== undefined ? { reasoning_tokens: reasoningTokens } : {}),
+            ...(cacheCreation !== undefined ? { cache_creation_tokens: cacheCreation } : {}),
           },
         }
       : {}),
     provider_raw: {
       stop_reason: parsed.status ?? null,
       ...(parsed.usage !== undefined ? { usage: parsed.usage } : {}),
+      // Echo fields surfaced losslessly (reasoning config / structured-output / tool_choice).
+      ...(parsed.reasoning !== undefined ? { reasoning: parsed.reasoning } : {}),
+      ...(parsed.text !== undefined ? { text: parsed.text } : {}),
+      ...(parsed.tool_choice !== undefined ? { tool_choice: parsed.tool_choice } : {}),
     },
   };
 

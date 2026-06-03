@@ -73,9 +73,19 @@ const ResponsesFunctionCallItemSchema = z.object({
   arguments: z.string(),
 });
 
+// A reasoning item: the Responses surface for streamed model reasoning. summary[]
+// accumulates summary_text parts (parity with the non-stream reasoning item).
+const ResponsesReasoningItemSchema = z.object({
+  type: z.literal("reasoning"),
+  id: z.string(),
+  status: z.enum(["in_progress", "completed"]),
+  summary: z.array(z.object({ type: z.literal("summary_text"), text: z.string() })),
+});
+
 const ResponsesOutputItemSchema = z.union([
   ResponsesMessageItemSchema,
   ResponsesFunctionCallItemSchema,
+  ResponsesReasoningItemSchema,
 ]);
 
 const ResponsesUsageSchema = z.object({
@@ -154,11 +164,40 @@ const FunctionCallArgumentsDoneSchema = z.object({
   output_index: z.number().int().nonnegative(),
   arguments: z.string(),
 });
+const ReasoningSummaryTextDeltaSchema = z.object({
+  type: z.literal("response.reasoning_summary_text.delta"),
+  sequence_number: z.number().int().nonnegative(),
+  item_id: z.string(),
+  output_index: z.number().int().nonnegative(),
+  summary_index: z.number().int().nonnegative(),
+  delta: z.string(),
+});
+const ReasoningSummaryTextDoneSchema = z.object({
+  type: z.literal("response.reasoning_summary_text.done"),
+  sequence_number: z.number().int().nonnegative(),
+  item_id: z.string(),
+  output_index: z.number().int().nonnegative(),
+  summary_index: z.number().int().nonnegative(),
+  text: z.string(),
+});
 const OutputItemDoneSchema = z.object({
   type: z.literal("response.output_item.done"),
   sequence_number: z.number().int().nonnegative(),
   output_index: z.number().int().nonnegative(),
   item: ResponsesOutputItemSchema,
+});
+// Mid-stream error frame (OpenAI Responses `error` event). The nested error object
+// mirrors litellm's ErrorEventError (type/code/message/param); sequence_number rides
+// the outer frame per our wire contract (every Responses SSE event carries one).
+const ResponsesErrorEventSchema = z.object({
+  type: z.literal("error"),
+  sequence_number: z.number().int().nonnegative(),
+  error: z.object({
+    type: z.string(),
+    code: z.string(),
+    message: z.string(),
+    param: z.string().nullable().optional(),
+  }),
 });
 const ResponseCompletedSchema = z.object({
   type: z.literal("response.completed"),
@@ -174,10 +213,13 @@ export const ResponsesSSEEventSchema = z.discriminatedUnion("type", [
   OutputTextDeltaSchema,
   OutputTextDoneSchema,
   ContentPartDoneSchema,
+  ReasoningSummaryTextDeltaSchema,
+  ReasoningSummaryTextDoneSchema,
   FunctionCallArgumentsDeltaSchema,
   FunctionCallArgumentsDoneSchema,
   OutputItemDoneSchema,
   ResponseCompletedSchema,
+  ResponsesErrorEventSchema,
 ]);
 export type ResponsesSSEEvent = z.infer<typeof ResponsesSSEEventSchema>;
 
@@ -201,12 +243,20 @@ interface ToolSlot {
   argBuffer: string; // accumulated argument fragments (tolerates partial JSON)
 }
 
+interface ReasoningSlot {
+  outputIndex: number;
+  itemId: string;
+  started: boolean; // output_item.added emitted?
+  textBuffer: string; // accumulated reasoning summary (flushed on .done)
+}
+
 interface StreamState {
   sequenceNumber: number; // monotonic per-event counter (allocated on emit)
   responseId: string; // stable response id reused on created + completed
   model: string;
   nextOutputIndex: number; // monotonic output-index allocator
   openItems: Set<number>; // started-but-not-done items (close guard)
+  reasoningSlot: ReasoningSlot | null; // lazily allocated reasoning item
   textSlot: TextSlot | null; // lazily allocated text item
   toolIndexToSlot: Map<number, ToolSlot>; // OpenAI tool index → output slot
   finishReason: string | null; // terminal status source
@@ -220,6 +270,7 @@ function createState(model = "unknown"): StreamState {
     model,
     nextOutputIndex: 0,
     openItems: new Set(),
+    reasoningSlot: null,
     textSlot: null,
     toolIndexToSlot: new Map(),
     finishReason: null,
@@ -315,134 +366,224 @@ export async function* convertOpenAIStreamToResponses(
     response: responseObject(state, { status: "in_progress" }),
   });
 
-  for await (const raw of chunks) {
-    const chunk = OpenAIChunkSchema.parse(raw);
-    if (state.model === "" && typeof chunk.model === "string") state.model = chunk.model;
+  try {
+    for await (const raw of chunks) {
+      yield* handleChunk(state, raw);
+    }
+  } catch (e) {
+    // Mid-stream upstream failure: emit a structured Responses `error` frame instead
+    // of tearing the connection down with no envelope. The terminal completed event
+    // is intentionally NOT emitted after an error (the stream ends on the error).
+    const message = e instanceof Error ? e.message : String(e);
+    yield ResponsesSSEEventSchema.parse({
+      type: "error",
+      sequence_number: nextSeq(state),
+      error: { type: "error", code: "upstream_error", message },
+    });
+    return;
+  }
 
-    const choice = chunk.choices?.[0];
-    const delta = choice?.delta;
+  yield* closeStream(state);
+}
 
-    // —— text: lazily open the text item + content part, then stream deltas. ——
-    if (delta?.content) {
-      if (state.textSlot === null) {
-        const outputIndex = allocOutputIndex(state);
-        const slot: TextSlot = {
-          outputIndex,
-          itemId: itemId(outputIndex),
-          started: true,
-          textBuffer: "",
-        };
-        state.textSlot = slot;
+// —— Per-chunk transition: reasoning -> text -> tool calls -> usage/finish. Split
+// out so the main generator can wrap the whole feed in a try/catch and emit an
+// `error` frame on a mid-stream upstream failure. ————————————————————————————————
+function* handleChunk(state: StreamState, raw: OpenAIChunk): Generator<ResponsesSSEEvent> {
+  const chunk = OpenAIChunkSchema.parse(raw);
+  if (state.model === "" && typeof chunk.model === "string") state.model = chunk.model;
+
+  const choice = chunk.choices?.[0];
+  const delta = choice?.delta;
+
+  // —— reasoning: lazily open a reasoning item, then stream summary deltas. The
+  // reasoning item precedes text/tool items in output order (it is allocated on
+  // the first reasoning fragment). ——
+  if (delta?.reasoning_content) {
+    if (state.reasoningSlot === null) {
+      const outputIndex = allocOutputIndex(state);
+      state.reasoningSlot = {
+        outputIndex,
+        itemId: itemId(outputIndex),
+        started: true,
+        textBuffer: "",
+      };
+      yield ResponsesSSEEventSchema.parse({
+        type: "response.output_item.added",
+        sequence_number: nextSeq(state),
+        output_index: state.reasoningSlot.outputIndex,
+        item: {
+          type: "reasoning",
+          id: state.reasoningSlot.itemId,
+          status: "in_progress",
+          summary: [],
+        },
+      });
+    }
+    const rslot = state.reasoningSlot;
+    rslot.textBuffer += delta.reasoning_content;
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.reasoning_summary_text.delta",
+      sequence_number: nextSeq(state),
+      item_id: rslot.itemId,
+      output_index: rslot.outputIndex,
+      summary_index: 0,
+      delta: delta.reasoning_content,
+    });
+  }
+
+  // —— text: lazily open the text item + content part, then stream deltas. ——
+  if (delta?.content) {
+    if (state.textSlot === null) {
+      const outputIndex = allocOutputIndex(state);
+      const slot: TextSlot = {
+        outputIndex,
+        itemId: itemId(outputIndex),
+        started: true,
+        textBuffer: "",
+      };
+      state.textSlot = slot;
+      yield ResponsesSSEEventSchema.parse({
+        type: "response.output_item.added",
+        sequence_number: nextSeq(state),
+        output_index: slot.outputIndex,
+        item: {
+          type: "message",
+          id: slot.itemId,
+          status: "in_progress",
+          role: "assistant",
+          content: [],
+        },
+      });
+      yield ResponsesSSEEventSchema.parse({
+        type: "response.content_part.added",
+        sequence_number: nextSeq(state),
+        item_id: slot.itemId,
+        output_index: slot.outputIndex,
+        content_index: 0,
+        part: { type: "output_text", text: "" },
+      });
+    }
+    const slot = state.textSlot;
+    slot.textBuffer += delta.content;
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.output_text.delta",
+      sequence_number: nextSeq(state),
+      item_id: slot.itemId,
+      output_index: slot.outputIndex,
+      content_index: 0,
+      delta: delta.content,
+    });
+  }
+
+  // —— tool calls: integer index → stable output item; temp id → real upgrade. ——
+  for (const tc of delta?.tool_calls ?? []) {
+    let slot = state.toolIndexToSlot.get(tc.index);
+    if (slot === undefined) {
+      const outputIndex = allocOutputIndex(state);
+      slot = {
+        outputIndex,
+        itemId: itemId(outputIndex),
+        started: false,
+        callId: tc.id ?? "",
+        name: tc.function?.name ?? "",
+        argBuffer: "",
+      };
+      state.toolIndexToSlot.set(tc.index, slot);
+    } else {
+      if (tc.id !== undefined && tc.id !== "") slot.callId = tc.id;
+      if (tc.function?.name !== undefined && tc.function.name !== "") slot.name = tc.function.name;
+    }
+
+    const args = tc.function?.arguments;
+    const hasMeaningfulToolSignal =
+      args !== undefined ||
+      tc.function?.name !== undefined ||
+      tc.id !== undefined ||
+      slot.callId !== "";
+    if (hasMeaningfulToolSignal) {
+      // First meaningful tool signal: settle id/name/call_id and emit output_item.added before
+      // any argument delta (item added ALWAYS precedes its deltas, pit #4).
+      if (!slot.started) {
+        slot.started = true;
         yield ResponsesSSEEventSchema.parse({
           type: "response.output_item.added",
           sequence_number: nextSeq(state),
           output_index: slot.outputIndex,
           item: {
-            type: "message",
+            type: "function_call",
             id: slot.itemId,
+            call_id: slot.callId !== "" ? slot.callId : synthCallId(slot.outputIndex),
+            name: slot.name,
             status: "in_progress",
-            role: "assistant",
-            content: [],
+            arguments: "",
           },
         });
+      }
+      if (args !== undefined && args !== "") {
+        slot.argBuffer += args;
         yield ResponsesSSEEventSchema.parse({
-          type: "response.content_part.added",
+          type: "response.function_call_arguments.delta",
           sequence_number: nextSeq(state),
           item_id: slot.itemId,
           output_index: slot.outputIndex,
-          content_index: 0,
-          part: { type: "output_text", text: "" },
+          delta: args,
         });
       }
-      const slot = state.textSlot;
-      slot.textBuffer += delta.content;
-      yield ResponsesSSEEventSchema.parse({
-        type: "response.output_text.delta",
-        sequence_number: nextSeq(state),
-        item_id: slot.itemId,
-        output_index: slot.outputIndex,
-        content_index: 0,
-        delta: delta.content,
-      });
     }
-
-    // —— tool calls: integer index → stable output item; temp id → real upgrade. ——
-    for (const tc of delta?.tool_calls ?? []) {
-      let slot = state.toolIndexToSlot.get(tc.index);
-      if (slot === undefined) {
-        const outputIndex = allocOutputIndex(state);
-        slot = {
-          outputIndex,
-          itemId: itemId(outputIndex),
-          started: false,
-          callId: tc.id ?? "",
-          name: tc.function?.name ?? "",
-          argBuffer: "",
-        };
-        state.toolIndexToSlot.set(tc.index, slot);
-      } else {
-        if (tc.id !== undefined && tc.id !== "") slot.callId = tc.id;
-        if (tc.function?.name !== undefined && tc.function.name !== "")
-          slot.name = tc.function.name;
-      }
-
-      const args = tc.function?.arguments;
-      const hasMeaningfulToolSignal =
-        args !== undefined ||
-        tc.function?.name !== undefined ||
-        tc.id !== undefined ||
-        slot.callId !== "";
-      if (hasMeaningfulToolSignal) {
-        // First meaningful tool signal: settle id/name/call_id and emit output_item.added before
-        // any argument delta (item added ALWAYS precedes its deltas, pit #4).
-        if (!slot.started) {
-          slot.started = true;
-          yield ResponsesSSEEventSchema.parse({
-            type: "response.output_item.added",
-            sequence_number: nextSeq(state),
-            output_index: slot.outputIndex,
-            item: {
-              type: "function_call",
-              id: slot.itemId,
-              call_id: slot.callId !== "" ? slot.callId : synthCallId(slot.outputIndex),
-              name: slot.name,
-              status: "in_progress",
-              arguments: "",
-            },
-          });
-        }
-        if (args !== undefined && args !== "") {
-          slot.argBuffer += args;
-          yield ResponsesSSEEventSchema.parse({
-            type: "response.function_call_arguments.delta",
-            sequence_number: nextSeq(state),
-            item_id: slot.itemId,
-            output_index: slot.outputIndex,
-            delta: args,
-          });
-        }
-      }
-    }
-
-    // Buffer usage; never billed mid-stream (pit #2). Raw upstream prompt_tokens is
-    // the FULL prompt; normalize prompt = max(0, prompt − cached) so the projection
-    // matches the non-stream toResponsesResponse path.
-    if (chunk.usage) {
-      const u = chunk.usage;
-      const cached = u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
-      state.usage = {
-        ...(u.prompt_tokens !== undefined
-          ? { prompt_tokens: Math.max(0, u.prompt_tokens - cached) }
-          : {}),
-        ...(u.completion_tokens !== undefined ? { completion_tokens: u.completion_tokens } : {}),
-        ...(cached > 0 ? { cached_tokens: cached } : {}),
-      };
-    }
-    if (choice?.finish_reason != null) state.finishReason = choice.finish_reason;
   }
 
-  // —— Stream end: close the text item (text done → part done → item done). ——
+  // Buffer usage; never billed mid-stream (pit #2). Raw upstream prompt_tokens is
+  // the FULL prompt; normalize prompt = max(0, prompt − cached) so the projection
+  // matches the non-stream toResponsesResponse path.
+  if (chunk.usage) {
+    const u = chunk.usage;
+    const cached = u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+    state.usage = {
+      ...(u.prompt_tokens !== undefined
+        ? { prompt_tokens: Math.max(0, u.prompt_tokens - cached) }
+        : {}),
+      ...(u.completion_tokens !== undefined ? { completion_tokens: u.completion_tokens } : {}),
+      ...(cached > 0 ? { cached_tokens: cached } : {}),
+    };
+  }
+  if (choice?.finish_reason != null) state.finishReason = choice.finish_reason;
+}
+
+// —— Stream end: close reasoning, then text, then tool items, then the terminal
+// response.completed. Split out so the main generator can call it after a clean
+// drain (an error path returns BEFORE this, so no completed follows an error). ————
+function* closeStream(state: StreamState): Generator<ResponsesSSEEvent> {
   const finalOutput: ResponsesOutputItem[] = [];
+
+  // —— Close the reasoning item first (summary done → item done). ——
+  if (state.reasoningSlot !== null && state.openItems.has(state.reasoningSlot.outputIndex)) {
+    const rslot = state.reasoningSlot;
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.reasoning_summary_text.done",
+      sequence_number: nextSeq(state),
+      item_id: rslot.itemId,
+      output_index: rslot.outputIndex,
+      summary_index: 0,
+      text: rslot.textBuffer,
+    });
+    const item: ResponsesOutputItem = {
+      type: "reasoning",
+      id: rslot.itemId,
+      status: "completed",
+      summary: [{ type: "summary_text", text: rslot.textBuffer }],
+    };
+    state.openItems.delete(rslot.outputIndex);
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.output_item.done",
+      sequence_number: nextSeq(state),
+      output_index: rslot.outputIndex,
+      item,
+    });
+    finalOutput.push(item);
+  }
+
+  // —— Close the text item (text done → part done → item done). ——
   if (state.textSlot !== null && state.openItems.has(state.textSlot.outputIndex)) {
     const slot = state.textSlot;
     yield ResponsesSSEEventSchema.parse({
@@ -582,4 +723,101 @@ export async function* synthesizeResponsesSSEFromJSON(
   }
 
   yield* convertOpenAIStreamToResponses(single(), { id: resp.id, model: resp.model });
+}
+
+// —— Reverse direction: native Responses `response.*` event stream → OpenAI chunks
+// (transformStreamIn for an upstream that speaks Responses natively). Each native
+// event projects onto one OpenAI-Chat-shaped chunk so the shared IR streaming
+// consumer sees a uniform feed:
+//   • output_text.delta              → choices[0].delta.content
+//   • reasoning_summary_text.delta   → choices[0].delta.reasoning_content
+//   • function_call_arguments.delta  → choices[0].delta.tool_calls[].function.arguments
+//   • output_item.added(function_call)→ choices[0].delta.tool_calls[] (id + name)
+//   • completed                      → finish_reason + usage (flushed once)
+//   • error                          → re-thrown so the gateway error path engages
+// Events with no IR projection (created/in_progress/part open-close/item done) are
+// dropped — they are pure framing the IR consumer does not need. ————————————————————
+export async function* convertResponsesEventStreamToOpenAI(
+  events: AsyncIterable<ResponsesSSEEvent>,
+): AsyncIterable<OpenAIChunk> {
+  // Map a Responses output_index → a stable OpenAI tool-call stream index. Only
+  // function_call items get an index; text/reasoning ride the bare delta fields.
+  const toolIndexByOutput = new Map<number, number>();
+  let nextToolIndex = 0;
+
+  for await (const ev of events) {
+    switch (ev.type) {
+      case "response.output_text.delta": {
+        yield { choices: [{ index: 0, delta: { content: ev.delta }, finish_reason: null }] };
+        break;
+      }
+      case "response.reasoning_summary_text.delta": {
+        yield {
+          choices: [{ index: 0, delta: { reasoning_content: ev.delta }, finish_reason: null }],
+        };
+        break;
+      }
+      case "response.output_item.added": {
+        if (ev.item.type === "function_call") {
+          const idx = nextToolIndex++;
+          toolIndexByOutput.set(ev.output_index, idx);
+          yield {
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    {
+                      index: idx,
+                      id: ev.item.call_id,
+                      type: "function",
+                      function: { name: ev.item.name, arguments: "" },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+          };
+        }
+        break;
+      }
+      case "response.function_call_arguments.delta": {
+        const idx = toolIndexByOutput.get(ev.output_index) ?? nextToolIndex++;
+        if (!toolIndexByOutput.has(ev.output_index)) toolIndexByOutput.set(ev.output_index, idx);
+        yield {
+          choices: [
+            {
+              index: 0,
+              delta: { tool_calls: [{ index: idx, function: { arguments: ev.delta } }] },
+              finish_reason: null,
+            },
+          ],
+        };
+        break;
+      }
+      case "response.completed": {
+        const u = ev.response.usage;
+        const finish = ev.response.status === "incomplete" ? "length" : "stop";
+        yield {
+          ...(ev.response.id !== "" ? { id: ev.response.id } : {}),
+          ...(ev.response.model !== "" ? { model: ev.response.model } : {}),
+          choices: [{ index: 0, delta: {}, finish_reason: finish }],
+          ...(u !== undefined
+            ? { usage: { prompt_tokens: u.input_tokens, completion_tokens: u.output_tokens } }
+            : {}),
+        };
+        break;
+      }
+      case "error": {
+        // Surface the mid-stream error to the gateway error path (cannot be swallowed
+        // as a silent end-of-stream).
+        throw new Error(ev.error.message);
+      }
+      default:
+        // Pure framing (created/in_progress/part/item done/text-done/args-done): no
+        // IR projection needed.
+        break;
+    }
+  }
 }

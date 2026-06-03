@@ -3,6 +3,7 @@ import type { OpenAIChunk } from "./anthropic/stream.js";
 import type { IRResponse } from "./ir.js";
 import {
   convertOpenAIStreamToResponses,
+  convertResponsesEventStreamToOpenAI,
   type ResponsesSSEEvent,
   synthesizeResponsesSSEFromJSON,
 } from "./responses-stream.js";
@@ -406,6 +407,108 @@ describe("convertOpenAIStreamToResponses — terminal mapping & edge sequences",
           (e as Extract<ResponsesSSEEvent, { type: "response.output_item.done" }>).output_index,
       );
     expect(new Set(doneIndexes).size).toBe(doneIndexes.length);
+  });
+});
+
+// —— 3b. reasoning streaming + error event ————————————————————————————————————
+
+describe("convertOpenAIStreamToResponses — reasoning summary streaming", () => {
+  function reasoningChunk(reasoning: string): OpenAIChunk {
+    return {
+      id: "chatcmpl-r",
+      model: "gpt-x",
+      choices: [{ index: 0, delta: { reasoning_content: reasoning }, finish_reason: null }],
+    };
+  }
+
+  it("emits a reasoning item + reasoning_summary_text.delta events for reasoning_content", async () => {
+    const events = await collect(
+      convertOpenAIStreamToResponses(
+        feed([reasoningChunk("think"), reasoningChunk("ing"), textChunk("Hi", "stop")]),
+      ),
+    );
+    const types = events.map((e) => e.type);
+    // reasoning item opens before text item
+    expect(types).toContain("response.reasoning_summary_text.delta");
+    const deltas = events
+      .filter((e) => e.type === "response.reasoning_summary_text.delta")
+      .map(
+        (e) =>
+          (e as Extract<ResponsesSSEEvent, { type: "response.reasoning_summary_text.delta" }>)
+            .delta,
+      )
+      .join("");
+    expect(deltas).toBe("thinking");
+    const done = events.find((e) => e.type === "response.reasoning_summary_text.done") as
+      | Extract<ResponsesSSEEvent, { type: "response.reasoning_summary_text.done" }>
+      | undefined;
+    expect(done?.text).toBe("thinking");
+    // reasoning item is opened (output_item.added with type reasoning)
+    const reasoningAdded = events.find(
+      (e) =>
+        e.type === "response.output_item.added" &&
+        (e as Extract<ResponsesSSEEvent, { type: "response.output_item.added" }>).item.type ===
+          "reasoning",
+    );
+    expect(reasoningAdded).toBeDefined();
+  });
+
+  it("keeps strictly monotonic sequence_number across reasoning + text events", async () => {
+    const events = await collect(
+      convertOpenAIStreamToResponses(feed([reasoningChunk("r"), textChunk("t", "stop")])),
+    );
+    const s = seqs(events);
+    expect(s[0]).toBe(0);
+    for (let i = 1; i < s.length; i++) {
+      expect(s[i]).toBe((s[i - 1] as number) + 1);
+    }
+  });
+});
+
+describe("convertResponsesEventStreamToOpenAI — reasoning delta -> IR (reverse)", () => {
+  it("folds response.reasoning_summary_text.delta back into an IR chunk reasoning_content", async () => {
+    async function* events(): AsyncIterable<ResponsesSSEEvent> {
+      yield {
+        type: "response.reasoning_summary_text.delta",
+        sequence_number: 0,
+        item_id: "rs_1",
+        output_index: 0,
+        summary_index: 0,
+        delta: "deep ",
+      };
+      yield {
+        type: "response.reasoning_summary_text.delta",
+        sequence_number: 1,
+        item_id: "rs_1",
+        output_index: 0,
+        summary_index: 0,
+        delta: "thought",
+      };
+    }
+    const chunks = await collect(convertResponsesEventStreamToOpenAI(events()));
+    const reasoning = chunks
+      .flatMap((c) => c.choices ?? [])
+      .map((ch) => ch.delta?.reasoning_content)
+      .filter((r): r is string => typeof r === "string")
+      .join("");
+    expect(reasoning).toBe("deep thought");
+  });
+});
+
+describe("convertOpenAIStreamToResponses — mid-stream error event", () => {
+  it("emits a Responses error event when the upstream feed throws", async () => {
+    async function* boom(): AsyncIterable<OpenAIChunk> {
+      yield textChunk("partial");
+      throw new Error("upstream exploded");
+    }
+    const events = await collect(convertOpenAIStreamToResponses(boom()));
+    const err = events.find((e) => e.type === "error") as
+      | Extract<ResponsesSSEEvent, { type: "error" }>
+      | undefined;
+    expect(err).toBeDefined();
+    expect(err?.error.message).toContain("upstream exploded");
+    expect(typeof err?.error.code).toBe("string");
+    expect(typeof err?.sequence_number).toBe("number");
   });
 });
 
