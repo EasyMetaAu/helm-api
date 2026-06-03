@@ -354,7 +354,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       const withDetail = decision("req_detail", {
         provider_attempts: [
           {
-            alias: "openai-crs/gpt-5.4-mini",
+            alias: "deepseek/deepseek-v4-flash",
             skipped: false,
             skip_reason: null,
             status: "error",
@@ -368,7 +368,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
             },
           },
           {
-            alias: "deepseek-crs/deepseek-pro",
+            alias: "deepseek/deepseek-v4-pro",
             skipped: false,
             skip_reason: null,
             status: "ok",

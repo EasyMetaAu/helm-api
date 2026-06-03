@@ -16,58 +16,54 @@
 #
 # REVERSED 2026-05-31 (task fix-upstream-model-id — see implementation-notes):
 # alias and provider_model are NOT equal. The earlier "align everything to the
-# prefixed alias" convention sent the prefixed string (e.g. `openai-crs/gpt-5.4-
-# mini`) upstream as `model`, and the la.atmy.work relay only knows the BARE id
-# (`gpt-5.4-mini`) — an unknown model makes the relay return a generic 500. The
+# prefixed alias" convention sent the prefixed string (e.g. `deepseek/deepseek-v4-
+# flash`) upstream as `model`, but a provider only knows the BARE id
+# (`deepseek-v4-flash`) — an unknown model makes the upstream return a 4xx/5xx. The
 # executor (apps/gateway/src/routes/execute.ts) sends the RESOLVED `provider_model`
 # upstream verbatim, so it MUST be the real bare id. The alias keeps the prefixed
 # `provider/model` form because it is the routing key (lanes candidates, decision
-# record, catalog/pricing lookup). The claimed "catalog resolves by alias" benefit
-# never materialized — capabilities.yaml/pricing.yaml are empty and the generated
-# catalog has none of these models, so `catalog.get()` already misses and fails
-# open. To pin a lane to a different upstream id, change only that entry's
-# `provider_model` (no code change; principle 2, config-as-code).
+# record, catalog/pricing lookup). To pin a lane to a different upstream id, change
+# only that entry's `provider_model` (no code change; principle 2, config-as-code).
 #
 # Unified shape (HelmConfigSchema.ProviderConfig): name, type (openai|anthropic),
 # base_url?, api_key_env (env-var NAME), models[] { alias -> provider_model }.
 # A duplicate alias across providers is rejected at build time (fail-closed,
 # principle 2). The test/e2e harness overrides every provider's base_url via
 # HELM_PROVIDER_BASE_URL so the mock upstream serves all of them.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# PRIMARY = official DeepSeek; premium/coding lanes route through the openai-codex
+# SUBSCRIPTION channel (2026-06-03, task drop-openai-crs-relay). The former
+# self-built `openai-crs` relay (la.atmy.work) was deleted: it WAS just a proxy in
+# front of a ChatGPT/Codex subscription, which Helm now connects natively via the
+# built-in `openai-codex` OAuth preset (admin → Providers → Connect). That preset
+# is SYNTHESIZED at runtime — it exposes its models as `openai-codex/<model>`
+# aliases keyed by the OAuth provider id — so it must NOT be declared as a static
+# provider here, or the duplicate alias would fail-closed. Lanes may reference
+# `openai-codex/*` even before a subscription is connected: an unconnected alias
+# fails OPEN (Phase-0 back-fill / skip to the next fallback), never a 5xx.
 providers:
   # PRIMARY provider (providers[0]). Backs the default path, the Layer-2 eval
-  # call, and the Phase-0 passthrough; its credential (OPENAI_API_KEY) is
-  # mandatory (fail-closed if unset). Self-built OpenAI-compatible relay; it
-  # fronts the openai-crs/* + deepseek-crs/* model families (the deepseek-crs
-  # relay speaks the Anthropic wire upstream but is reached through the same
-  # credential, mirroring llm-router's providers.yaml). real upstream ids in
-  # comments.
-  - name: openai-crs
+  # call, and the Phase-0 passthrough; its credential (DEEPSEEK_API_KEY) is
+  # mandatory (fail-closed if unset). Official DeepSeek OpenAI-compatible API
+  # (https://api.deepseek.com). alias == catalog/pricing key; provider_model is
+  # the real upstream id sent on the wire.
+  - name: deepseek
     type: openai
-    base_url: https://la.atmy.work/ai/openai/v1
-    api_key_env: OPENAI_API_KEY
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
     models:
-      # gpt-5.5 — premium primary (json-capable, multimodal:image). STREAM-ONLY on
-      # this relay (non-stream → 400 "Stream must be set to true").
-      - alias: openai-crs/gpt-5.5
-        provider_model: gpt-5.5
-      # gpt-5.4-mini — economy/cheap, json-capable. STREAM-ONLY on this relay.
-      - alias: openai-crs/gpt-5.4-mini
-        provider_model: gpt-5.4-mini
-      # gpt-5.3-codex-spark — coding-capable, json-capable. STREAM-ONLY on this relay.
-      - alias: openai-crs/gpt-5.3-codex-spark
-        provider_model: gpt-5.3-codex-spark
-      # deepseek-pro — balanced primary, json-capable, big context. stream + non-stream.
-      - alias: deepseek-crs/deepseek-pro
-        provider_model: deepseek-pro
-      # deepseek-flash — fast/cheap fallback, json-capable. stream + non-stream.
-      - alias: deepseek-crs/deepseek-flash
-        provider_model: deepseek-flash
-      # NOTE (catalog-reuse 2026-05-31): the Layer-2 eval small-model is NOT
-      # registered here. The eval client (classifier.yaml `eval.model`) bypasses
-      # the registry and sends its id directly on the wire to THIS primary
-      # provider's base_url; it is now `deepseek-flash` (a real relay id), priced
-      # for eval_usd via the bare `deepseek-flash` key in pricing.yaml. The former
-      # `deepseek/deepseek-v4-flash` entry was an OpenRouter id that 500'd here.
+      # deepseek-v4-pro — balanced/default primary, json-capable, big context.
+      - alias: deepseek/deepseek-v4-pro
+        provider_model: deepseek-v4-pro
+      # deepseek-v4-flash — economy/cheap + the Layer-2 eval small-model, json-capable.
+      - alias: deepseek/deepseek-v4-flash
+        provider_model: deepseek-v4-flash
+      # NOTE: the Layer-2 eval small-model is NOT a registry alias. The eval client
+      # (classifier.yaml `eval.model`) bypasses the registry and sends its id
+      # directly on the wire to THIS primary provider's base_url; it is
+      # `deepseek-v4-flash` (a real DeepSeek id), priced for eval_usd via the bare
+      # `deepseek-v4-flash` key in pricing.yaml.
 
   # SECONDARY provider — ZenMux aggregator. A genuinely DIFFERENT upstream with
   # its own credential, proving a fallback chain can CROSS providers. Carries the
@@ -189,7 +185,12 @@ providers:
   #     - alias: copilot/gpt
   #       provider_model: gpt-4o
   #
-  # ChatGPT Plus/Pro — Codex (browser login + paste redirect URL):
+  # ChatGPT Plus/Pro — Codex (browser login + paste redirect URL).
+  # This is the default lane channel for premium/coding/tool_use (config/lanes.yaml
+  # references openai-codex/gpt-5.5, openai-codex/gpt-5.3-codex-spark, …). Just
+  # connect it in the admin UI (Providers → Connect) — the pool is SYNTHESIZED and
+  # its models become `openai-codex/<model>` aliases automatically; NO YAML needed.
+  # Declare a static block ONLY to pin a custom alias to a specific upstream id:
   # - name: chatgpt-codex
   #   type: openai
   #   oauth:

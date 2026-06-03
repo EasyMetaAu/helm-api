@@ -21,7 +21,7 @@ describe("docker-compose contract", () => {
   });
 
   it("injects provider + admin credentials via env (fail-closed when unset)", () => {
-    expect(compose).toMatch(/OPENAI_API_KEY:\s*\$\{OPENAI_API_KEY:\?/);
+    expect(compose).toMatch(/DEEPSEEK_API_KEY:\s*\$\{DEEPSEEK_API_KEY:\?/);
     expect(compose).toMatch(/HELM_ADMIN_PASSWORD:\s*\$\{HELM_ADMIN_PASSWORD:\?/);
   });
 

@@ -230,7 +230,7 @@ function buildDeps(over: Partial<AdminApiDeps> = {}): AdminApiDeps {
     accountId: "acct_default",
     modelAliases: () =>
       Promise.resolve(
-        ["openai-crs/gpt-5.4-mini", "deepseek-crs/deepseek-pro", "zenmux/auto"].map((alias) => ({
+        ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro", "zenmux/auto"].map((alias) => ({
           alias,
           accounts: [],
         })),

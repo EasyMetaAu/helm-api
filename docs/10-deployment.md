@@ -27,7 +27,7 @@ docker run -d --name helm \
   -v "$(pwd)/data:/app/data" \       # telemetry, keys, sqlite — persisted
   -e HELM_ADMIN_USER=admin \         # admin UI Basic auth (see 11)
   -e HELM_ADMIN_PASSWORD=change-me \
-  -e OPENAI_API_KEY=sk-... \         # upstream provider credential
+  -e DEEPSEEK_API_KEY=sk-... \       # primary provider credential (required)
   ghcr.io/easymetaau/helm-api:latest
 ```
 
@@ -40,7 +40,7 @@ mounting their own directory at `/app/config`.
 
 A `docker-compose.yml` is provided. It defaults to the published image (uncomment
 `build: .` for local builds), mounts the two volumes, and injects credentials from
-a `.env` file. `HELM_ADMIN_PASSWORD` and `OPENAI_API_KEY` are required (compose
+a `.env` file. `HELM_ADMIN_PASSWORD` and `DEEPSEEK_API_KEY` are required (compose
 fails fast if they are unset):
 
 ```yaml
@@ -57,7 +57,7 @@ services:
     environment:
       HELM_ADMIN_USER: ${HELM_ADMIN_USER:-admin}
       HELM_ADMIN_PASSWORD: ${HELM_ADMIN_PASSWORD:?set HELM_ADMIN_PASSWORD in .env}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
     restart: unless-stopped
 ```
 
@@ -83,10 +83,12 @@ Configuration comes from **files** and **environment variables**, and env vars
   - `HELM_RATE_LIMIT_ENABLED`, `HELM_REQUEST_TIMEOUT_MS`, `HELM_MAX_REQUEST_BYTES`
   - `HELM_STORE_DRIVER` (`sqlite` | `supabase`), `HELM_STORE_URL_ENV`
   - `HELM_KEYS_PERSIST_TO`
-  - Upstream credentials such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+  - Upstream credentials such as `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`,
     `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` — each maps to a `providers.yaml`
-    entry's `api_key_env`. `OPENAI_API_KEY` is the primary credential and is
+    entry's `api_key_env`. `DEEPSEEK_API_KEY` is the primary credential and is
     required; the others are optional (their providers are skipped if absent).
+    (Premium/coding lanes route through the `openai-codex` subscription — connect
+    it in the admin UI, which needs `HELM_OAUTH_ENC_KEY`, not an API key here.)
 
 Invalid configuration is rejected at startup (Zod-validated, fail-closed) — Helm
 never runs in a half-broken state (Principle 2).

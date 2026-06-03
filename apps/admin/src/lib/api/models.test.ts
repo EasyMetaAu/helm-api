@@ -15,7 +15,7 @@ describe('models api client', () => {
 
   it('listModels GETs /admin/api/models and returns model options (alias + accounts)', async () => {
     const rows = [
-      { alias: 'openai-crs/gpt-5.4-mini', accounts: [] },
+      { alias: 'deepseek/deepseek-v4-flash', accounts: [] },
       { alias: 'anthropic/claude-opus-4-8', accounts: ['default', 'work'] },
     ];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(

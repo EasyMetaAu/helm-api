@@ -18,53 +18,46 @@
 #   maxOutputTokens: 4096
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RELAY / SELF-HOSTED MODELS (fix-upstream-model-id+catalog-reuse 2026-05-31).
-# These live HERE (the manual override layer), NOT in the generated catalog:
-# they are crs/aggregator relay aliases the LiteLLM-sourced `pnpm sync:catalog`
+# SUBSCRIPTION / AGGREGATOR MODELS (drop-openai-crs-relay 2026-06-03). These live
+# HERE (the manual override layer), NOT in the generated catalog: they are
+# subscription + aggregator aliases the LiteLLM-sourced `pnpm sync:catalog`
 # artifact cannot know about, so a sync would wipe them. Keyed by the routing
-# ALIAS (== the catalog modelKey the executor looks up; see execute.ts). Values
-# are the curated, battle-tested data from the sibling **llm-router** project
-# (`llm-router/config/providers.yaml` inline capabilities + provider-capabilities
-# .generated.yaml) — single source of truth; keep in step when llm-router changes.
+# ALIAS (== the catalog modelKey the executor looks up; see execute.ts).
 #
-# NOTE: gpt-5.x on the la.atmy.work relay are STREAM-ONLY (non-stream → 400 "Stream
-# must be set to true"). That is a relay request constraint, NOT a capability gap —
-# `supportsStreaming` stays true (the model DOES stream; it merely requires it).
-# `requiresStreaming: true` makes the capability filter SKIP these for a non-stream
-# request (skip_reason no_nonstream_support) instead of letting the attempt 400 and
-# poison the circuit breaker; streaming requests still use them normally.
-openai-crs/gpt-5.5:
+# `openai-codex/*` are the ChatGPT/Codex SUBSCRIPTION models (synthesized at
+# runtime when the subscription is connected — alias prefix == the OAuth provider
+# id `openai-codex`). They go through the openai-responses executor (NOT the old
+# stream-only relay), so no `requiresStreaming` constraint applies. `deepseek/*`
+# are the official DeepSeek API models (providers[0]).
+openai-codex/gpt-5.5:
   supportsTools: true
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
-  requiresStreaming: true
   maxContextTokens: 1050000
   maxOutputTokens: 128000
-openai-crs/gpt-5.4-mini:
+openai-codex/gpt-5.4:
   supportsTools: true
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
-  requiresStreaming: true
   maxContextTokens: 400000
   maxOutputTokens: 128000
-openai-crs/gpt-5.3-codex-spark:
+openai-codex/gpt-5.3-codex-spark:
   supportsTools: true
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
-  requiresStreaming: true
   maxContextTokens: 400000
   maxOutputTokens: 128000
-deepseek-crs/deepseek-pro:
+deepseek/deepseek-v4-pro:
   supportsTools: true
   supportsJsonMode: true
   supportsVision: false
   supportsStreaming: true
   maxContextTokens: 1048576
   maxOutputTokens: 384000
-deepseek-crs/deepseek-flash:
+deepseek/deepseek-v4-flash:
   supportsTools: true
   supportsJsonMode: true
   supportsVision: false

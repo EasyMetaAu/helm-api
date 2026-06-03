@@ -47,7 +47,7 @@ describe("checked-in config samples", () => {
     const cfg = loadConfig({ configDir, env: {} });
     expect(cfg.auth.require_api_key).toBe(true);
     expect(cfg.server.port).toBe(8080);
-    expect(cfg.providers[0]?.api_key_env).toBe("OPENAI_API_KEY");
+    expect(cfg.providers[0]?.api_key_env).toBe("DEEPSEEK_API_KEY");
   });
 
   it("loads the shipped lanes.yaml (economy/balanced/premium + task lanes)", () => {
