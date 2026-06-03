@@ -12,6 +12,10 @@ export interface OAuthAccount {
   // True when the account has a working durable credential (the gateway auto-renews
   // the short-lived access token). False = a refresh failed → needs reconnecting.
   healthy: boolean;
+  // Effective pool scheduling (defaults applied by the gateway: 50 / true). LOWER
+  // priority = served first; schedulable false parks the account out of rotation.
+  priority: number;
+  schedulable: boolean;
 }
 
 export interface OAuthProviderStatus {
@@ -46,6 +50,72 @@ export async function listOAuthStatus(): Promise<{
   if (res.status === 503) return { configured: false, providers: [] };
   const body = await asJson<{ providers: OAuthProviderStatus[] }>(res);
   return { configured: true, providers: body.providers };
+}
+
+// ── per-account usage + quota (providers page enrichment) ────────────────────
+
+// Today's served traffic for one account (Tier 2). `costUsd` is null for flat-rate
+// subscriptions (unpriced); `rpm` is the daily-average requests-per-minute.
+export interface OAuthUsageRow {
+  providerId: string;
+  account: string;
+  requests: number;
+  tokens: number;
+  costUsd: number | null;
+  rpm: number;
+}
+
+// One rate-limit window (Tier 3). `usedPercent` 0–100; `resetsAtMs` epoch ms (null =
+// unknown); `windowMinutes` set only when the provider reports it (Codex).
+export interface OAuthQuotaWindow {
+  key: string;
+  usedPercent: number;
+  resetsAtMs: number | null;
+  windowMinutes: number | null;
+}
+
+export interface OAuthQuotaSnapshot {
+  providerId: string;
+  account: string;
+  windows: OAuthQuotaWindow[];
+  capturedAt: number;
+  source: 'anthropic' | 'codex-headers';
+}
+
+// Observability reads block the providers-page load (Promise.all), so they carry a
+// hard client-side timeout: a slow/hung gateway (e.g. an Anthropic quota pull behind
+// a stalled proxy) must never keep `/admin/providers` spinning — the AbortSignal
+// trips the catch and the page renders with [] for that section.
+const OBSERVABILITY_TIMEOUT_MS = 10_000;
+
+// GET /oauth/usage -> today's per-account usage. FAIL-OPEN: any failure (incl.
+// timeout) yields [] so the page renders (zeros) instead of breaking.
+export async function getOAuthUsage(): Promise<OAuthUsageRow[]> {
+  try {
+    const res = await fetch(`${BASE}/usage`, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(OBSERVABILITY_TIMEOUT_MS),
+    });
+    if (!res.ok) return [];
+    return ((await res.json()) as { usage?: OAuthUsageRow[] }).usage ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// GET /oauth/quota -> latest rate-limit window snapshot per account. FAIL-OPEN to []
+// (incl. timeout) so a hung Anthropic pull on the server never stalls the page.
+export async function getOAuthQuota(): Promise<OAuthQuotaSnapshot[]> {
+  try {
+    const res = await fetch(`${BASE}/quota`, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(OBSERVABILITY_TIMEOUT_MS),
+    });
+    if (!res.ok) return [];
+    return ((await res.json()) as { quota?: OAuthQuotaSnapshot[] }).quota ?? [];
+  } catch {
+    return [];
+  }
 }
 
 // ── manual-paste (Anthropic) ─────────────────────────────────────────────────

@@ -19,6 +19,7 @@ import {
   resolveMemoryMode,
 } from "@helm/core";
 import type { InternalRequest, Protocol } from "@helm/shared";
+import type { ServingAccount } from "../runtime/serving-account.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import {
   backfillCompletionCost,
@@ -82,7 +83,16 @@ export type RouteFn = (
   req: InternalRequest,
   opts: RouteOptions,
   signal: AbortSignal,
-) => Promise<ExecutionResult>;
+) => Promise<ExecutionResult & { servingAccount?: ServingAccount | null }>;
+
+// Per-account OAuth subscription usage recorder (providers page Tier 2). Shared by
+// all three pipeline faces; called once per served request with the subscription
+// the pool selected (null for a configured/non-OAuth provider) + served tokens/cost.
+export type RecordOAuthUsageFn = (
+  servingAccount: ServingAccount | null,
+  servedAlias: string | null,
+  usage: { tokens: number; costUsd: number | null },
+) => void;
 
 // Protocol-NEUTRAL structured failure raised across the pipeline seam (collect /
 // streamIR / run). The routing core returns an error WITHOUT throwing (final.
@@ -308,6 +318,10 @@ export function createMessagesPipeline(
   // Per-key usage budgets (docs/06). Absent = no budgets. Serves all three
   // pipeline faces at once (they share this pipeline).
   budget?: PipelineBudgetDeps,
+  // Per-account OAuth subscription usage recorder (providers page Tier 2). Absent =
+  // no recording (existing tests unchanged). Called for EVERY served request,
+  // independent of budgets; fail-open in the composition root.
+  recordOAuthUsage?: RecordOAuthUsageFn,
 ): {
   run(ir: PipelineIR, identity: MessagesIdentity, signal: AbortSignal): Promise<PipelineRunResult>;
 } {
@@ -376,6 +390,9 @@ export function createMessagesPipeline(
       };
 
       const result = await route(internal, { allowCustomModel, keyPrefix, keyCaps }, signal);
+      // The subscription the pool selected (null for a configured/non-OAuth
+      // provider), for per-account usage attribution (providers page Tier 2).
+      const servingAccount = result.servingAccount ?? null;
 
       // Post-served usage-budget settle (docs/06), fail-OPEN. Charges the SETTLED
       // total_usd (never recomputed) + served tokens + 1 request. Shared helper for
@@ -422,7 +439,15 @@ export function createMessagesPipeline(
           }
           // Settle the budget on the served (non-stream) response: cost is already
           // on the decision; tokens from the OpenAI body's usage.
-          await settleBudget(tokensFromUsage(usageFromBody(result.body)));
+          const servedTokens = tokensFromUsage(usageFromBody(result.body));
+          await settleBudget(servedTokens);
+          // Per-account OAuth usage (providers page Tier 2) — recorded regardless of
+          // budgets. The served alias lets the recorder drop a STALE account after a
+          // fallback. completion_usd is null for flat-rate subscriptions ("unpriced").
+          recordOAuthUsage?.(servingAccount, result.decision.final.model_alias, {
+            tokens: servedTokens,
+            costUsd: result.decision.cost_breakdown.completion_usd,
+          });
           return irResponse;
         },
         async *streamIR(): AsyncIterable<Record<string, unknown>> {
@@ -504,6 +529,14 @@ export function createMessagesPipeline(
               }
               await settleBudget(tokensFromUsage(lastUsage));
             }
+            // Per-account OAuth usage (providers page Tier 2) — recorded for every
+            // served stream, independent of budgets. The served alias drops a STALE
+            // account after a fallback. completion_usd is null for flat-rate
+            // subscriptions (or when the cost backfill above didn't run).
+            recordOAuthUsage?.(servingAccount, result.decision.final.model_alias, {
+              tokens: tokensFromUsage(lastUsage),
+              costUsd: result.decision.cost_breakdown.completion_usd,
+            });
           }
         },
       };

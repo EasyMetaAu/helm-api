@@ -1,5 +1,18 @@
-import type { CreateKeyInput, KeyStore, Lane, PoliciesConfig, TelemetryStore } from "@helm/core";
-import type { ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/shared";
+import type {
+  CreateKeyInput,
+  KeyStore,
+  Lane,
+  OAuthQuotaStore,
+  OAuthUsageStore,
+  PoliciesConfig,
+  TelemetryStore,
+} from "@helm/core";
+import type {
+  ClassifierConfig,
+  DecisionRecord,
+  OAuthQuotaWindow,
+  RuntimeSettings,
+} from "@helm/shared";
 import type { ModelOption } from "../../oauth/effective-models.js";
 
 // Injected dependency contracts for the admin API. Per CLAUDE.md principle 1 the
@@ -66,6 +79,12 @@ export interface OAuthAdminStatus {
     expiresAt: number | null;
     updatedAt: number;
     healthy: boolean;
+    // Effective pool scheduling (defaults applied: priority 50, schedulable true),
+    // folded into the list so the providers page renders + inline-edits them without
+    // an N+1 per-account GET. LOWER priority = served first; schedulable false parks
+    // the account (kept connected, never routed).
+    priority: number;
+    schedulable: boolean;
   }>;
 }
 
@@ -135,6 +154,13 @@ export interface OAuthAdminAccess {
     priority?: number;
     schedulable?: boolean;
   }): Promise<void>;
+  // Pull the Anthropic OAuth usage endpoint for one account → quota windows
+  // (providers page Tier 3). Unlike Codex (which PUSHes quota headers on every
+  // reply), Claude exposes a dedicated usage endpoint, so this is an on-demand PULL
+  // behind a short TTL cache. FAIL-OPEN: returns null on any failure (dead token,
+  // network, malformed body) so the page renders "—" rather than erroring. Optional
+  // so unit-test seams can omit it.
+  fetchAnthropicQuota?(input: { account: string }): Promise<OAuthQuotaWindow[] | null>;
 }
 
 // The effective scheduling for one account: defaults applied (priority 50,
@@ -172,6 +198,12 @@ export interface AdminApiDeps {
   // Admin OAuth-login seam (issue #38). Optional so existing tests that build a
   // partial deps object stay valid; the route 503s when it is absent.
   oauth?: OAuthAdminAccess;
+  // Per-account OAuth subscription observability (providers page). `oauthUsage` =
+  // today's served traffic aggregate (Tier 2); `oauthQuota` = latest rate-limit
+  // window snapshot (Tier 3). Optional — the /usage + /quota routes return an empty
+  // list when absent (fail-open; never 503 the whole page over observability).
+  oauthUsage?: OAuthUsageStore;
+  oauthQuota?: OAuthQuotaStore;
   // The catalog of routable model options the Lanes admin UI offers as combobox
   // suggestions (so an operator picks a real alias instead of hand-typing one — a
   // typo would silently break a fallback chain). Each option is `{ alias, accounts }`

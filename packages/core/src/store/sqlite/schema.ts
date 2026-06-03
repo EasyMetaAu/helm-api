@@ -145,8 +145,47 @@ export const oauthTokens = sqliteTable(
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );
 
+// Per-account OAuth subscription USAGE aggregate (providers page Tier 2). One row
+// per (provider_id, account, day) — day = UTC-midnight epoch ms. Additive counters
+// (requests / tokens) + a nullable summed cost (REAL; flat-rate plans report no
+// cost → stays NULL). first_seen_ms anchors the daily-average RPM derivation. NO
+// key/payload column (principle 7); pure aggregate observability.
+export const oauthUsage = sqliteTable(
+  "oauth_usage",
+  {
+    providerId: text("provider_id").notNull(),
+    account: text("account").notNull(),
+    day: integer("day").notNull(), // UTC-midnight epoch ms
+    requests: integer("requests").notNull(),
+    tokens: integer("tokens").notNull(),
+    costUsd: real("cost_usd"), // nullable; summed completion cost
+    firstSeenMs: integer("first_seen_ms").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.providerId, t.account, t.day] })],
+);
+
+// Per-account OAuth subscription QUOTA snapshot (providers page Tier 3). One row
+// per (provider_id, account): the LATEST rate-limit window snapshot. `windows` is
+// a JSON-text array of { key, usedPercent, resetsAtMs, windowMinutes } (SQLite has
+// no native array). `source` = how it was captured (anthropic pull / codex-headers
+// push). Latest-wins upsert; no history. Pure observability — no secret column.
+export const oauthQuota = sqliteTable(
+  "oauth_quota",
+  {
+    providerId: text("provider_id").notNull(),
+    account: text("account").notNull(),
+    windows: text("windows").notNull(), // JSON text: OAuthQuotaWindow[]
+    capturedAt: integer("captured_at").notNull(),
+    source: text("source").notNull(), // 'anthropic' | 'codex-headers'
+  },
+  (t) => [primaryKey({ columns: [t.providerId, t.account] })],
+);
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
+export type OAuthUsageTable = typeof oauthUsage;
+export type OAuthQuotaTable = typeof oauthQuota;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
 export type UsageBudgetBucketsTable = typeof usageBudgetBuckets;
 export type RoutingSignalsTable = typeof routingSignals;

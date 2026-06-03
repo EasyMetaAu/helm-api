@@ -148,6 +148,16 @@
     @apply inline-flex items-center rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800;
   }
 
+  /* — Progress bars (quota / session windows on the providers page) — */
+  /* A thin rounded track; the inner .progress-bar's width = used%, and its color
+     ramps with utilization (set inline by the consumer: normal/warn/danger). */
+  .progress-track {
+    @apply h-1.5 w-full overflow-hidden rounded-full bg-slate-200;
+  }
+  .progress-bar {
+    @apply h-full rounded-full transition-all;
+  }
+
   /* — Typography roles — */
   .page-title {
     @apply text-2xl font-semibold tracking-tight text-slate-900;

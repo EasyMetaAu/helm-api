@@ -398,5 +398,17 @@
   "Which classification layer chose the lane.": "Which classification layer chose the lane.",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.",
   "yes": "yes",
-  "Your new API key": "Your new API key"
+  "Your new API key": "Your new API key",
+  "Claude Max": "Claude Max",
+  "Device": "Device",
+  "Quota": "Quota",
+  "Priority": "Priority",
+  "Schedulable": "Schedulable",
+  "parked": "parked",
+  "Secondary": "Secondary",
+  "{n} req": "{n} req",
+  "resets in {h}h {m}m": "resets in {h}h {m}m",
+  "resets in {m}m": "resets in {m}m",
+  "Failed to update scheduling": "Failed to update scheduling",
+  "Priority must be a non-negative integer": "Priority must be a non-negative integer"
 }

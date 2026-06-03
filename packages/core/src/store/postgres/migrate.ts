@@ -244,6 +244,38 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // Per-account OAuth subscription USAGE + QUOTA observability (providers page)
+    // — pg mirror of the sqlite v12 migration (different ledger, same logical
+    // change). oauth_usage: additive daily aggregate per (provider_id, account,
+    // day). oauth_quota: latest window snapshot per (provider_id, account), windows
+    // as jsonb. Pure aggregate observability — no key/payload column (principle 7).
+    version: 11,
+    sql: `
+      CREATE TABLE IF NOT EXISTS oauth_usage (
+        provider_id TEXT NOT NULL,
+        account TEXT NOT NULL,
+        day BIGINT NOT NULL,
+        requests INTEGER NOT NULL,
+        tokens BIGINT NOT NULL,
+        cost_usd DOUBLE PRECISION,
+        first_seen_ms BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY (provider_id, account, day)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_oauth_usage_day ON oauth_usage (day);
+
+      CREATE TABLE IF NOT EXISTS oauth_quota (
+        provider_id TEXT NOT NULL,
+        account TEXT NOT NULL,
+        windows JSONB NOT NULL,
+        captured_at BIGINT NOT NULL,
+        source TEXT NOT NULL,
+        PRIMARY KEY (provider_id, account)
+      );
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

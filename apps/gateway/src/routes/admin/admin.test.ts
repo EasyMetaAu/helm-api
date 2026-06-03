@@ -813,3 +813,156 @@ describe("admin.api request payload", () => {
     });
   });
 });
+
+describe("admin.api oauth usage", () => {
+  it("GET /oauth/usage returns today's per-account rows + derived RPM", async () => {
+    const day = Date.now() - (Date.now() % 86_400_000);
+    const oauthUsage = {
+      record: async () => {},
+      queryDay: async () => [
+        {
+          providerId: "anthropic",
+          account: "default",
+          day,
+          requests: 120,
+          tokens: 240_000,
+          costUsd: null, // flat-rate subscription → unpriced
+          firstSeenMs: Date.now() - 60 * 60_000, // 60 min ago
+          updatedAt: Date.now(),
+        },
+      ],
+    } as unknown as AdminApiDeps["oauthUsage"];
+    const app = buildApp(buildDeps({ oauthUsage }));
+    const res = await app.request("/admin/api/oauth/usage");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      usage: Array<{
+        providerId: string;
+        account: string;
+        requests: number;
+        tokens: number;
+        costUsd: number | null;
+        rpm: number;
+      }>;
+    };
+    expect(body.usage).toHaveLength(1);
+    expect(body.usage[0]).toMatchObject({
+      providerId: "anthropic",
+      account: "default",
+      requests: 120,
+      tokens: 240_000,
+      costUsd: null,
+    });
+    // ~120 requests over ~60 min ⇒ ~2 rpm (allow a wide band — clock-driven).
+    expect(body.usage[0]?.rpm).toBeGreaterThan(0);
+    expect(body.usage[0]?.rpm).toBeLessThan(5);
+  });
+
+  it("GET /oauth/usage fails open to [] when no usage store is wired", async () => {
+    const app = buildApp(buildDeps());
+    const res = await app.request("/admin/api/oauth/usage");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ usage: [] });
+  });
+});
+
+describe("admin.api oauth quota", () => {
+  it("GET /oauth/quota refreshes the Anthropic PULL, upserts, and returns all snapshots", async () => {
+    const upserts: unknown[] = [];
+    const stored = [
+      {
+        providerId: "openai-codex",
+        account: "default",
+        windows: [{ key: "primary", usedPercent: 5, resetsAtMs: 9_000, windowMinutes: 300 }],
+        capturedAt: 1,
+        source: "codex-headers" as const,
+      },
+    ];
+    const oauthQuota = {
+      upsert: async (s: unknown) => {
+        upserts.push(s);
+      },
+      get: async () => null,
+      getAll: async () => stored,
+    } as unknown as AdminApiDeps["oauthQuota"];
+    // Minimal seam: only the two methods the quota route touches.
+    const oauth = {
+      listStatus: async () => [
+        {
+          id: "anthropic",
+          name: "A",
+          flow: "manual_paste",
+          accounts: [
+            {
+              account: "default",
+              expiresAt: null,
+              updatedAt: 0,
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+            },
+          ],
+        },
+      ],
+      fetchAnthropicQuota: async () => [
+        { key: "5h", usedPercent: 6, resetsAtMs: 5_000, windowMinutes: null },
+      ],
+    } as unknown as AdminApiDeps["oauth"];
+    const app = buildApp(buildDeps({ oauthQuota, oauth }));
+    const res = await app.request("/admin/api/oauth/quota");
+    expect(res.status).toBe(200);
+    // The Anthropic pull was upserted with source "anthropic".
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0]).toMatchObject({
+      providerId: "anthropic",
+      account: "default",
+      source: "anthropic",
+    });
+    // The response returns the store's full snapshot set.
+    const body = (await res.json()) as { quota: Array<{ providerId: string }> };
+    expect(body.quota.map((q) => q.providerId)).toContain("openai-codex");
+  });
+
+  it("GET /oauth/quota fails open to [] when no quota store is wired", async () => {
+    const app = buildApp(buildDeps());
+    const res = await app.request("/admin/api/oauth/quota");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ quota: [] });
+  });
+});
+
+describe("admin.api oauth schedule validation", () => {
+  function oauthSeam(captured: { priority?: number }[]): AdminApiDeps["oauth"] {
+    return {
+      setAccountSchedule: async (i: { priority?: number }) => {
+        captured.push({ priority: i.priority });
+      },
+    } as unknown as AdminApiDeps["oauth"];
+  }
+
+  it("rejects a negative or non-integer priority (400) and never persists it", async () => {
+    const captured: { priority?: number }[] = [];
+    const app = buildApp(buildDeps({ oauth: oauthSeam(captured) }));
+    for (const bad of [-1, 1.9]) {
+      const res = await app.request("/admin/api/oauth/anthropic/account", {
+        method: "PUT",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ account: "default", priority: bad }),
+      });
+      expect(res.status).toBe(400);
+    }
+    expect(captured).toHaveLength(0);
+  });
+
+  it("accepts a non-negative integer priority (0 is valid)", async () => {
+    const captured: { priority?: number }[] = [];
+    const app = buildApp(buildDeps({ oauth: oauthSeam(captured) }));
+    const res = await app.request("/admin/api/oauth/anthropic/account", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ account: "default", priority: 0 }),
+    });
+    expect(res.status).toBe(204);
+    expect(captured).toEqual([{ priority: 0 }]);
+  });
+});

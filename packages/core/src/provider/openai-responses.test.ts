@@ -272,6 +272,50 @@ describe("createCodexResponsesClient", () => {
     ).toBe("ok");
   });
 
+  it("onResponseMeta fires EXACTLY once with the response headers and never perturbs the streamed chunks (Principle 8)", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          [
+            `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "hel" })}\n\n`,
+            `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "lo" })}\n\n`,
+            `data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: {} } })}\n\n`,
+          ].join(""),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "text/event-stream",
+              "x-codex-primary-used-percent": "7",
+              "x-codex-primary-reset-after-seconds": "300",
+            },
+          },
+        ),
+    );
+    const seen: Headers[] = [];
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        onResponseMeta: (h) => seen.push(h),
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const chunks: string[] = [];
+    for await (const ch of client.chatCompletionStream({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      chunks.push(ch);
+    }
+    // The hook fired once, BEFORE/at stream open, with the live quota headers.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.get("x-codex-primary-used-percent")).toBe("7");
+    // The streamed body is untouched: both deltas survive, in order.
+    const joined = chunks.join("");
+    expect(joined.indexOf("hel")).toBeGreaterThanOrEqual(0);
+    expect(joined.indexOf("hel")).toBeLessThan(joined.indexOf("lo"));
+  });
+
   it("sends User-Agent + stable session_id / x-client-request-id headers when configured", async () => {
     let seen: Headers | null = null;
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {

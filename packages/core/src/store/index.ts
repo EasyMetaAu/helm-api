@@ -10,8 +10,10 @@ export type {
   KeyStore,
   MemoryJobStatus,
   MemoryStore,
+  OAuthQuotaStore,
   OAuthTokenRecord,
   OAuthTokenStore,
+  OAuthUsageStore,
   RateLimitConsumeResult,
   RateLimitStore,
   RequestPayload,
@@ -31,7 +33,9 @@ export {
   type PgDb,
   runPgMigrations,
 } from "./postgres/migrate.js";
+export { PgOAuthQuotaStore } from "./postgres/oauth-quota.js";
 export { PgOAuthTokenStore } from "./postgres/oauth-tokens.js";
+export { PgOAuthUsageStore } from "./postgres/oauth-usage.js";
 export { PgRateLimitStore } from "./postgres/rate-limit.js";
 export { PgSignalStore } from "./postgres/signals.js";
 export { PgTelemetryStore } from "./postgres/telemetry.js";
@@ -40,7 +44,9 @@ export { SqliteConfigStore } from "./sqlite/config-store.js";
 export { SqliteKeyStore } from "./sqlite/keystore.js";
 export { SqliteMemoryStore } from "./sqlite/memory-store.js";
 export { createSqliteDb, runMigrations, type SqliteDb } from "./sqlite/migrate.js";
+export { SqliteOAuthQuotaStore } from "./sqlite/oauth-quota.js";
 export { SqliteOAuthTokenStore } from "./sqlite/oauth-tokens.js";
+export { SqliteOAuthUsageStore } from "./sqlite/oauth-usage.js";
 export { SqliteRateLimitStore } from "./sqlite/rate-limit.js";
 export { InMemoryRateLimitStore } from "./sqlite/rate-limit-memory.js";
 export { SqliteSignalStore } from "./sqlite/signals.js";

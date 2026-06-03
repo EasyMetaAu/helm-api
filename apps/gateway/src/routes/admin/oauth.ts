@@ -55,6 +55,76 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     return c.json({ providers: await s.listStatus() });
   });
 
+  // GET /oauth/usage -> today's per-account served traffic (providers page Tier 2).
+  // FAIL-OPEN: an absent store / read failure yields [] (the page renders zeros) —
+  // an observability read must never break the page. RPM is the daily AVERAGE
+  // (requests / minutes since the day's first served call), derived here so the
+  // store stays a plain counter. No secrets — aggregate counters only (principle 7).
+  app.get("/admin/api/oauth/usage", async (c) => {
+    const store = deps.oauthUsage;
+    if (!store) return c.json({ usage: [] });
+    const now = Date.now();
+    const dayMs = now - (now % 86_400_000); // UTC midnight (epoch ms is UTC)
+    try {
+      const rows = await store.queryDay(dayMs);
+      const usage = rows.map((r) => {
+        const minutes = Math.max(1, (now - r.firstSeenMs) / 60_000);
+        return {
+          providerId: r.providerId,
+          account: r.account,
+          requests: r.requests,
+          tokens: r.tokens,
+          costUsd: r.costUsd,
+          rpm: Math.round((r.requests / minutes) * 100) / 100,
+        };
+      });
+      return c.json({ usage });
+    } catch {
+      return c.json({ usage: [] });
+    }
+  });
+
+  // GET /oauth/quota -> latest rate-limit window snapshot per account (providers
+  // page Tier 3). Two sources merge in the quota store: Codex PUSHes `x-codex-*`
+  // headers on every reply; Anthropic exposes a PULL usage endpoint, so we refresh
+  // it on read (5-min cached in the seam) before returning. FAIL-OPEN throughout —
+  // a dead token / absent store yields fewer windows or [], never an error.
+  app.get("/admin/api/oauth/quota", async (c) => {
+    const store = deps.oauthQuota;
+    if (!store) return c.json({ quota: [] });
+    const s = seam();
+    // Refresh the Anthropic PULL for each connected Claude account (cached). Codex
+    // snapshots are already in the store from the live request path (no pull).
+    if (s?.fetchAnthropicQuota) {
+      try {
+        const anthropic = (await s.listStatus()).find((p) => p.id === "anthropic");
+        await Promise.all(
+          (anthropic?.accounts ?? []).map(async (a) => {
+            const windows = await s.fetchAnthropicQuota?.({ account: a.account });
+            if (windows && windows.length > 0) {
+              await store
+                .upsert({
+                  providerId: "anthropic",
+                  account: a.account,
+                  windows,
+                  capturedAt: Date.now(),
+                  source: "anthropic",
+                })
+                .catch(() => {});
+            }
+          }),
+        );
+      } catch {
+        // fail-open: a refresh failure still returns whatever is already stored
+      }
+    }
+    try {
+      return c.json({ quota: await store.getAll() });
+    } catch {
+      return c.json({ quota: [] });
+    }
+  });
+
   // POST /oauth/:provider/manual/start -> { sessionId, authorizeUrl }
   app.post("/admin/api/oauth/:provider/manual/start", async (c) => {
     const s = seam();
@@ -260,8 +330,15 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
     let priority: number | undefined;
     if (body.priority !== undefined) {
-      if (typeof body.priority !== "number" || !Number.isInteger(body.priority)) {
-        return c.json({ error: "priority must be an integer" }, 400);
+      // Non-negative integer (fail-closed): a negative priority would always win pool
+      // scheduling — reject it here so no client (incl. the inline UI editor) can
+      // persist one. LOWER = preferred; 0 is the most-preferred valid value.
+      if (
+        typeof body.priority !== "number" ||
+        !Number.isInteger(body.priority) ||
+        body.priority < 0
+      ) {
+        return c.json({ error: "priority must be a non-negative integer" }, 400);
       }
       priority = body.priority;
     }

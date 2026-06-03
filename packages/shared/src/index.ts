@@ -196,6 +196,19 @@ export {
   type ReflectionUpsertInput,
   ReflectionUpsertInputSchema,
 } from "./memory/schema.js";
+// Per-account OAuth subscription usage + quota observability (providers page).
+// Fail-open artifacts: usage = today's served traffic; quota = latest rate-limit
+// window snapshot; plus the (untrusted) Anthropic usage-endpoint response shape.
+export {
+  type AnthropicOAuthUsage,
+  AnthropicOAuthUsageSchema,
+  type OAuthQuotaSnapshot,
+  OAuthQuotaSnapshotSchema,
+  type OAuthQuotaWindow,
+  OAuthQuotaWindowSchema,
+  type OAuthUsageRow,
+  OAuthUsageRowSchema,
+} from "./oauth/usage-schema.js";
 // Internal request structure (docs/02).
 export {
   type InternalRequest,

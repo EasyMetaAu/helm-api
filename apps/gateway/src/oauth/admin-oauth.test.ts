@@ -528,6 +528,48 @@ describe("createOAuthAdmin", () => {
     ).rejects.toThrow(/host/);
   });
 
+  it("listStatus surfaces effective priority + schedulable per account (defaults + tuned)", async () => {
+    const { tokens, config } = makeStores();
+    let seq = 0;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      genSessionId: () => `s${++seq}`,
+    });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+      ]),
+    );
+    for (const account of ["tuned", "untuned"]) {
+      const { sessionId, authorizeUrl } = await admin.startManualPaste({ providerId: "anthropic" });
+      const state = new URL(authorizeUrl).searchParams.get("state");
+      await admin.completeManualPaste({
+        sessionId,
+        redirectInput: `https://x/cb?code=C&state=${state}`,
+        account,
+      });
+    }
+    // Tune one account; leave the other at defaults.
+    await admin.setAccountSchedule({
+      providerId: "anthropic",
+      account: "tuned",
+      priority: 10,
+      schedulable: false,
+    });
+    const accts = (await admin.listStatus()).find((p) => p.id === "anthropic")?.accounts ?? [];
+    expect(accts.find((a) => a.account === "tuned")).toMatchObject({
+      priority: 10,
+      schedulable: false,
+    });
+    expect(accts.find((a) => a.account === "untuned")).toMatchObject({
+      priority: 50,
+      schedulable: true,
+    });
+  });
+
   // ── per-account pool scheduling (Stage 3) ──────────────────────────────────
   it("getAccountSchedule returns the defaults (priority 50, schedulable true)", async () => {
     const { tokens, config } = makeStores();

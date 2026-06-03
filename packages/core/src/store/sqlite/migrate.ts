@@ -287,6 +287,39 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // Per-account OAuth subscription USAGE + QUOTA observability (providers page).
+    // oauth_usage: one additive daily aggregate per (provider_id, account, day) —
+    // day = UTC-midnight epoch ms; cost_usd REAL nullable (flat-rate plans report
+    // no cost). oauth_quota: latest rate-limit window snapshot per (provider_id,
+    // account), windows as JSON text. Both are pure aggregate OBSERVABILITY (no
+    // key/payload column, principle 7); writes are fail-open at the call site.
+    version: 12,
+    sql: `
+      CREATE TABLE IF NOT EXISTS oauth_usage (
+        provider_id TEXT NOT NULL,
+        account TEXT NOT NULL,
+        day INTEGER NOT NULL,
+        requests INTEGER NOT NULL,
+        tokens INTEGER NOT NULL,
+        cost_usd REAL,
+        first_seen_ms INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (provider_id, account, day)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_oauth_usage_day ON oauth_usage (day);
+
+      CREATE TABLE IF NOT EXISTS oauth_quota (
+        provider_id TEXT NOT NULL,
+        account TEXT NOT NULL,
+        windows TEXT NOT NULL,
+        captured_at INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        PRIMARY KEY (provider_id, account)
+      );
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {
