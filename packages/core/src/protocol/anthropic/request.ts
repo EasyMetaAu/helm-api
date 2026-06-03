@@ -48,6 +48,24 @@ const AnthropicImageBlockSchema = z
   })
   .passthrough();
 
+// Anthropic document block (PDF / text). source mirrors the image block: a base64
+// payload with media_type, OR a remote {type:"url", url}. file_id variant survives via
+// passthrough. Carried inbound so anthropic->X document requests reach the IR (P7).
+const AnthropicDocumentBlockSchema = z
+  .object({
+    type: z.literal("document"),
+    source: z
+      .object({
+        type: z.string(),
+        media_type: z.string().optional(),
+        data: z.string().optional(),
+        url: z.string().optional(),
+        file_id: z.string().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
 const AnthropicToolUseBlockSchema = z
   .object({
     type: z.literal("tool_use"),
@@ -85,6 +103,7 @@ const AnthropicUnknownBlockSchema = z.object({ type: z.string() }).passthrough()
 const AnthropicContentBlockSchema = z.union([
   AnthropicTextBlockSchema,
   AnthropicImageBlockSchema,
+  AnthropicDocumentBlockSchema,
   AnthropicToolUseBlockSchema,
   AnthropicToolResultBlockSchema,
   AnthropicThinkingBlockSchema,
@@ -175,6 +194,33 @@ function imagePartFromSource(
   const mediaType = source.media_type ?? "application/octet-stream";
   const url = `data:${mediaType};base64,${source.data ?? ""}`;
   return { type: "image", url, mediaType };
+}
+
+// —— document block source -> IR document part. base64 keeps data+media_type inline;
+// a url/file_id source rides on document.url so the round-trip is lossless (P7). ——————
+function documentPartFromSource(
+  source: z.infer<typeof AnthropicDocumentBlockSchema>["source"],
+): IRContentPart {
+  if (source.type === "url" && source.url !== undefined) {
+    return {
+      type: "document",
+      url: source.url,
+      ...(source.media_type ? { mediaType: source.media_type } : {}),
+    };
+  }
+  if (source.type === "file" && source.file_id !== undefined) {
+    return {
+      type: "document",
+      url: source.file_id,
+      ...(source.media_type ? { mediaType: source.media_type } : {}),
+    };
+  }
+  // base64 (or any inline-data source): keep data + media_type on the IR part.
+  return {
+    type: "document",
+    data: source.data ?? "",
+    ...(source.media_type ? { mediaType: source.media_type } : {}),
+  };
 }
 
 // —— tool_use -> IR tool_call. input is serialized to a STABLE JSON string (OpenAI
@@ -294,6 +340,11 @@ export function transformRequestOut(req: unknown): IRRequest {
         case "image":
           parts.push(
             imagePartFromSource((block as z.infer<typeof AnthropicImageBlockSchema>).source),
+          );
+          break;
+        case "document":
+          parts.push(
+            documentPartFromSource((block as z.infer<typeof AnthropicDocumentBlockSchema>).source),
           );
           break;
         case "thinking": {
@@ -427,6 +478,10 @@ export interface AnthropicImageBlockOut {
   type: "image";
   source: { type: "base64"; media_type: string; data: string } | { type: "url"; url: string };
 }
+export interface AnthropicDocumentBlockOut {
+  type: "document";
+  source: { type: "base64"; media_type: string; data: string } | { type: "url"; url: string };
+}
 export interface AnthropicToolUseBlockOut {
   type: "tool_use";
   id: string;
@@ -441,6 +496,7 @@ export interface AnthropicToolResultBlockOut {
 export type AnthropicRequestBlock =
   | AnthropicTextBlockOut
   | AnthropicImageBlockOut
+  | AnthropicDocumentBlockOut
   | AnthropicToolUseBlockOut
   | AnthropicToolResultBlockOut;
 
@@ -544,6 +600,24 @@ function imageBlockFromPart(
   return { type: "image", source: { type: "url", url: part.url } };
 }
 
+// IR document part -> Anthropic document block. Inline base64 keeps data+media_type;
+// a url/file_id ref becomes a {type:"url"} source (P7).
+function documentBlockFromPart(
+  part: Extract<IRContentPart, { type: "document" }>,
+): AnthropicDocumentBlockOut {
+  if (part.data !== undefined) {
+    return {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: part.mediaType ?? "application/pdf",
+        data: part.data,
+      },
+    };
+  }
+  return { type: "document", source: { type: "url", url: part.url ?? "" } };
+}
+
 function contentToBlocks(content: IRMessage["content"]): AnthropicRequestBlock[] {
   if (content === null) return [];
   if (typeof content === "string") {
@@ -553,7 +627,9 @@ function contentToBlocks(content: IRMessage["content"]): AnthropicRequestBlock[]
   for (const part of content) {
     if (part.type === "text") blocks.push({ type: "text", text: part.text });
     else if (part.type === "image") blocks.push(imageBlockFromPart(part));
-    // thinking parts are not re-emitted on the outbound request path.
+    else if (part.type === "document") blocks.push(documentBlockFromPart(part));
+    // thinking/audio/video parts are not re-emitted on the Anthropic request path
+    // (Anthropic Messages has no audio/video content block today).
   }
   return blocks;
 }

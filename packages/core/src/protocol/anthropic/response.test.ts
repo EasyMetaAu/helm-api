@@ -463,3 +463,51 @@ describe("transformNativeResponseToIR — tool-name round-trip (Codex P1)", () =
     expect(ir.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("db_query");
   });
 });
+
+describe("anthropic image output round-trip (P7 multimodal)", () => {
+  // Outbound: IR message.images -> Anthropic image content block on the response.
+  it("renders IR message.images as an Anthropic image block", () => {
+    const ir: IRResponse = {
+      id: "msg_img",
+      model: "claude-3-5-sonnet",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "here is your image",
+            images: [{ b64_json: "AAAA", mediaType: "image/png" }],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const native = transformResponseIn(ir);
+    const imageBlock = native.content.find((b) => b.type === "image") as
+      | { type: string; source?: { type?: string; media_type?: string; data?: string } }
+      | undefined;
+    expect(imageBlock).toBeDefined();
+    expect(imageBlock?.source?.type).toBe("base64");
+    expect(imageBlock?.source?.media_type).toBe("image/png");
+    expect(imageBlock?.source?.data).toBe("AAAA");
+  });
+
+  // Inbound: an Anthropic image content block on a native response -> IR message.images.
+  it("normalizes an inbound image block back into IR message.images", () => {
+    const native = {
+      id: "msg_img2",
+      type: "message",
+      role: "assistant",
+      model: "claude-3-5-sonnet",
+      content: [
+        { type: "text", text: "see image" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "BBBB" } },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 3 },
+    };
+    const ir = transformNativeResponseToIR(native);
+    expect(ir.choices[0]?.message.images?.[0]?.b64_json).toBe("BBBB");
+    expect(ir.choices[0]?.message.images?.[0]?.mediaType).toBe("image/png");
+  });
+});

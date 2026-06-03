@@ -78,10 +78,24 @@ const AnthropicThinkingBlockSchema = z.object({
   thinking: z.string(),
   signature: z.string().optional(),
 });
+// Model-generated image block on the response (P7). source is base64 (data+media_type)
+// or a remote url; mirrors the request-side image block shape.
+const AnthropicImageBlockSchema = z.object({
+  type: z.literal("image"),
+  source: z.union([
+    z.object({
+      type: z.literal("base64"),
+      media_type: z.string(),
+      data: z.string(),
+    }),
+    z.object({ type: z.literal("url"), url: z.string() }),
+  ]),
+});
 const AnthropicContentBlockSchema = z.discriminatedUnion("type", [
   AnthropicTextBlockSchema,
   AnthropicToolUseBlockSchema,
   AnthropicThinkingBlockSchema,
+  AnthropicImageBlockSchema,
 ]);
 type AnthropicContentBlock = z.infer<typeof AnthropicContentBlockSchema>;
 
@@ -330,8 +344,24 @@ function toContentBlocks(
       if (part.type === "text") {
         blocks.push({ type: "text", text: part.text });
       }
-      // thinking parts were already emitted via resolveReasoning above;
-      // image parts are inbound-only on the response path — nothing to emit.
+      // thinking parts were already emitted via resolveReasoning above.
+    }
+  }
+
+  // Model-generated images (IRMessage.images) render as Anthropic image blocks (P7):
+  // base64 -> {type:"base64",media_type,data}; a remote url -> {type:"url",url}.
+  for (const img of message.images ?? []) {
+    if (img.b64_json !== undefined) {
+      blocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: img.mediaType ?? "image/png",
+          data: img.b64_json,
+        },
+      });
+    } else if (img.url !== undefined) {
+      blocks.push({ type: "image", source: { type: "url", url: img.url } });
     }
   }
 
@@ -420,11 +450,26 @@ const InboundToolUseBlockSchema = z
 const InboundThinkingBlockSchema = z
   .object({ type: z.literal("thinking"), thinking: z.string(), signature: z.string().optional() })
   .passthrough();
+// Model-generated image block on an inbound native response (P7) -> IRMessage.images.
+const InboundImageBlockSchema = z
+  .object({
+    type: z.literal("image"),
+    source: z
+      .object({
+        type: z.string(),
+        media_type: z.string().optional(),
+        data: z.string().optional(),
+        url: z.string().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
 const InboundUnknownBlockSchema = z.object({ type: z.string() }).passthrough();
 const InboundContentBlockSchema = z.union([
   InboundTextBlockSchema,
   InboundToolUseBlockSchema,
   InboundThinkingBlockSchema,
+  InboundImageBlockSchema,
   InboundUnknownBlockSchema,
 ]);
 
@@ -469,9 +514,21 @@ export function transformNativeResponseToIR(
 
   const parts: IRContentPart[] = [];
   const toolCalls: IRToolCall[] = [];
+  const images: NonNullable<IRMessage["images"]> = [];
   for (const block of res.content) {
     if (block.type === "text") {
       parts.push({ type: "text", text: (block as z.infer<typeof InboundTextBlockSchema>).text });
+    } else if (block.type === "image") {
+      // Model-generated image -> IRMessage.images (NOT an input content part) (P7).
+      const src = (block as z.infer<typeof InboundImageBlockSchema>).source;
+      if (src.type === "url" && src.url !== undefined) {
+        images.push({ url: src.url, ...(src.media_type ? { mediaType: src.media_type } : {}) });
+      } else if (src.data !== undefined) {
+        images.push({
+          b64_json: src.data,
+          ...(src.media_type ? { mediaType: src.media_type } : {}),
+        });
+      }
     } else if (block.type === "thinking") {
       const b = block as z.infer<typeof InboundThinkingBlockSchema>;
       parts.push({
@@ -501,8 +558,9 @@ export function transformNativeResponseToIR(
   // not a content-block thinking part) receives the reasoning losslessly (P6).
   const message: IRMessage = liftReasoningToFlat({
     role: "assistant",
-    content: parts.length > 0 ? parts : toolCalls.length > 0 ? null : "",
+    content: parts.length > 0 ? parts : toolCalls.length > 0 || images.length > 0 ? null : "",
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    ...(images.length > 0 ? { images } : {}),
   });
 
   const rawStop = res.stop_reason ?? null;

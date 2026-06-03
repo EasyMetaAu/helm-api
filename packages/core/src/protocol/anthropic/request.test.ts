@@ -445,3 +445,92 @@ describe("anthropic transformRequestIn — P4 params", () => {
     expect(schema.properties.tags.description).toContain("minimum number of items");
   });
 });
+
+describe("anthropic document input (P7 multimodal)", () => {
+  // Inbound: an Anthropic document block (base64 PDF) -> IR document part.
+  it("normalizes a base64 PDF document block into an IR document part", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "summarize" },
+            {
+              type: "document",
+              source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+            },
+          ],
+        },
+      ],
+    };
+    const ir = transformRequestOut(req);
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[1]).toMatchObject({
+      type: "document",
+      data: "JVBERi0=",
+      mediaType: "application/pdf",
+    });
+  });
+
+  it("normalizes a url document block into an IR document part", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "document", source: { type: "url", url: "https://x/doc.pdf" } }],
+        },
+      ],
+    };
+    const ir = transformRequestOut(req);
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "document", url: "https://x/doc.pdf" });
+  });
+
+  // Outbound: an IR document part -> Anthropic document block.
+  it("renders an IR document part (base64) as an Anthropic document block", () => {
+    const ir = IRRequestSchema.parse({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "summarize" },
+            { type: "document", data: "JVBERi0=", mediaType: "application/pdf", filename: "r.pdf" },
+          ],
+        },
+      ],
+    });
+    const native = transformRequestIn(ir);
+    const block = native.messages[0]?.content?.[1] as {
+      type?: string;
+      source?: { type?: string; media_type?: string; data?: string; url?: string };
+    };
+    expect(block.type).toBe("document");
+    expect(block.source?.type).toBe("base64");
+    expect(block.source?.media_type).toBe("application/pdf");
+    expect(block.source?.data).toBe("JVBERi0=");
+  });
+
+  it("renders an IR document part (remote url) as an Anthropic url document block", () => {
+    const ir = IRRequestSchema.parse({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [{ role: "user", content: [{ type: "document", url: "https://x/doc.pdf" }] }],
+    });
+    const native = transformRequestIn(ir);
+    const block = native.messages[0]?.content?.[0] as {
+      type?: string;
+      source?: { type?: string; url?: string };
+    };
+    expect(block.type).toBe("document");
+    expect(block.source?.type).toBe("url");
+    expect(block.source?.url).toBe("https://x/doc.pdf");
+  });
+});
