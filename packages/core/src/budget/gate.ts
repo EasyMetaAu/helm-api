@@ -2,11 +2,13 @@ import type { BudgetDim, BudgetStore } from "../store/ports.js";
 import type { BudgetCaps, BudgetCheckResult, BudgetConfig } from "./types.js";
 
 // The active (capped) budget dimensions for a key. A dimension is active only
-// when its cap is a positive number — null OR 0 means "no cap" (0 mirrors the
-// rate-limit "0 = unlimited" convention), so it never touches the store.
+// when its cap is a positive number. null means "no cap" (the schema rejects 0 and
+// negatives, so a cap is always strictly positive); the `> 0` guard is defensive
+// against a legacy/hand-edited row, and skips the store entirely for uncapped dims.
 export function activeDims(caps: BudgetCaps): Array<{ dim: BudgetDim; capacity: number }> {
   const out: Array<{ dim: BudgetDim; capacity: number }> = [];
-  if (caps.requests !== null && caps.requests > 0) out.push({ dim: "req", capacity: caps.requests });
+  if (caps.requests !== null && caps.requests > 0)
+    out.push({ dim: "req", capacity: caps.requests });
   if (caps.tokens !== null && caps.tokens > 0) out.push({ dim: "tok", capacity: caps.tokens });
   if (caps.spendUsd !== null && caps.spendUsd > 0)
     out.push({ dim: "usd", capacity: caps.spendUsd });

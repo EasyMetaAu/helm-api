@@ -94,7 +94,8 @@ export class PgKeyStore implements KeyStore {
     if (patch.budgetRequests !== undefined) set.budgetRequests = patch.budgetRequests;
     if (patch.budgetTokens !== undefined) set.budgetTokens = patch.budgetTokens;
     if (patch.budgetSpendUsd !== undefined) set.budgetSpendUsd = patch.budgetSpendUsd;
-    if (patch.budgetWindowSeconds !== undefined) set.budgetWindowSeconds = patch.budgetWindowSeconds;
+    if (patch.budgetWindowSeconds !== undefined)
+      set.budgetWindowSeconds = patch.budgetWindowSeconds;
     if (patch.overBudgetBehavior !== undefined) set.overBudgetBehavior = patch.overBudgetBehavior;
     if (patch.degradeLane !== undefined) set.degradeLane = patch.degradeLane;
     if (Object.keys(set).length === 0) {

@@ -67,7 +67,8 @@ class InMemoryKeyStore implements KeyStore {
     if (patch.budgetSpendUsd !== undefined) next.budget_spend_usd = patch.budgetSpendUsd;
     if (patch.budgetWindowSeconds !== undefined)
       next.budget_window_seconds = patch.budgetWindowSeconds;
-    if (patch.overBudgetBehavior !== undefined) next.over_budget_behavior = patch.overBudgetBehavior;
+    if (patch.overBudgetBehavior !== undefined)
+      next.over_budget_behavior = patch.overBudgetBehavior;
     if (patch.degradeLane !== undefined) next.degrade_lane = patch.degradeLane;
     this.byId.set(keyId, next);
   }

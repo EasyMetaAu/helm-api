@@ -260,7 +260,7 @@
             <span class="field-label">{$t('Max requests')}</span>
             <input
               type="number"
-              min="0"
+              min="1"
               step="1"
               aria-label={$t('Max requests')}
               placeholder={$t('No cap')}
@@ -272,7 +272,7 @@
             <span class="field-label">{$t('Max tokens')}</span>
             <input
               type="number"
-              min="0"
+              min="1"
               step="1"
               aria-label={$t('Max tokens')}
               placeholder={$t('No cap')}
@@ -284,7 +284,7 @@
             <span class="field-label">{$t('Max spend (USD)')}</span>
             <input
               type="number"
-              min="0"
+              min="0.01"
               step="0.01"
               aria-label={$t('Max spend (USD)')}
               placeholder={$t('No cap')}

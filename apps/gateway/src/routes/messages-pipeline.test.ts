@@ -185,7 +185,7 @@ describe("createMessagesPipeline — failure surfaces", () => {
     expect(sawOpts).not.toBeNull();
     expect((sawOpts as RouteOptions | null)?.keyCaps).toEqual({
       allowedLanes: ["economy"],
-      maxLane: null,
+      degradeLane: null,
     });
   });
 
@@ -199,7 +199,7 @@ describe("createMessagesPipeline — failure surfaces", () => {
     await pipeline.run(irOf(), IDENTITY, new AbortController().signal);
     expect((sawOpts as RouteOptions | null)?.keyCaps).toEqual({
       allowedLanes: null,
-      maxLane: null,
+      degradeLane: null,
     });
   });
 });

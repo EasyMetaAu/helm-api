@@ -120,6 +120,12 @@ describe("ApiKeyRecordSchema", () => {
       ApiKeyRecordSchema.safeParse({ ...fullKey(), over_budget_behavior: "explode" }).success,
     ).toBe(false);
   });
+
+  it("rejects a 0 budget cap (0 is NOT 'unlimited' — null means no cap)", () => {
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_requests: 0 }).success).toBe(false);
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_tokens: 0 }).success).toBe(false);
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_spend_usd: 0 }).success).toBe(false);
+  });
 });
 
 describe("CreateKeyRequestSchema", () => {
@@ -164,8 +170,10 @@ describe("CreateKeyRequestSchema", () => {
     expect(res.success).toBe(true);
   });
 
-  it("rejects invalid budget values on create (fail-closed)", () => {
+  it("rejects invalid budget values on create (fail-closed; 0 rejected)", () => {
     expect(CreateKeyRequestSchema.safeParse({ budget_requests: -1 }).success).toBe(false);
+    expect(CreateKeyRequestSchema.safeParse({ budget_requests: 0 }).success).toBe(false);
+    expect(CreateKeyRequestSchema.safeParse({ budget_spend_usd: 0 }).success).toBe(false);
     expect(CreateKeyRequestSchema.safeParse({ over_budget_behavior: "nope" }).success).toBe(false);
   });
 });

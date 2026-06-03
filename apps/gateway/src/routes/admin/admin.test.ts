@@ -105,7 +105,8 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       if (patch.budgetSpendUsd !== undefined) row.budget_spend_usd = patch.budgetSpendUsd;
       if (patch.budgetWindowSeconds !== undefined)
         row.budget_window_seconds = patch.budgetWindowSeconds;
-      if (patch.overBudgetBehavior !== undefined) row.over_budget_behavior = patch.overBudgetBehavior;
+      if (patch.overBudgetBehavior !== undefined)
+        row.over_budget_behavior = patch.overBudgetBehavior;
       if (patch.degradeLane !== undefined) row.degrade_lane = patch.degradeLane;
     },
   };

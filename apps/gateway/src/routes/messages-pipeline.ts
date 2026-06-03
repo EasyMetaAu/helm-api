@@ -371,8 +371,8 @@ export function createMessagesPipeline(
       // null = unconstrained; an identity with no caps yields {null} (no-op).
       const keyCaps = {
         allowedLanes: Array.isArray(caps?.allowedLanes) ? (caps.allowedLanes as string[]) : null,
-        // Over-budget degrade ceiling for this request (docs/06); null = no degrade.
-        maxLane: degradeLane,
+        // Forced degrade lane for this request (docs/06); null = no degrade.
+        degradeLane,
       };
 
       const result = await route(internal, { allowCustomModel, keyPrefix, keyCaps }, signal);

@@ -405,9 +405,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         // unconstrained.
         keyCaps: {
           allowedLanes: identity.caps?.allowedLanes ?? null,
-          // Dynamic degrade ceiling: set only when the key is over budget AND its
+          // Forced degrade lane: set only when the key is over budget AND its
           // behavior is "degrade" (docs/06). null = no degrade for this request.
-          maxLane: degradeLane,
+          degradeLane,
         },
       },
       c.req.raw.signal,

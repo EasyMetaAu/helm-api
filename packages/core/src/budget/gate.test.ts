@@ -23,11 +23,7 @@ function peekStore(remainingByDim: Partial<Record<BudgetDim, number>>): {
   peek: ReturnType<typeof vi.fn>;
 } {
   const peek = vi.fn(
-    async (
-      _keyId: string,
-      dim: BudgetDim,
-      capacity: number,
-    ): Promise<BudgetPeekResult> => {
+    async (_keyId: string, dim: BudgetDim, capacity: number): Promise<BudgetPeekResult> => {
       const remaining = remainingByDim[dim] ?? capacity;
       return { remaining, ok: remaining > 0 };
     },
@@ -44,7 +40,7 @@ describe("createBudgetGate", () => {
     expect(peek).not.toHaveBeenCalled();
   });
 
-  it("treats a 0 cap as unlimited (no store read, mirrors rate-limit 0)", async () => {
+  it("defensively treats a 0/negative cap as no-cap (no store read; schema rejects 0)", async () => {
     const { store, peek } = peekStore({});
     const gate = createBudgetGate({ store, config: CONFIG });
     const r = await gate.check({ keyId: "k1", caps: caps({ spendUsd: 0 }), nowMs: 0 });

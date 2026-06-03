@@ -52,7 +52,10 @@ test.describe("per-key usage budget e2e", () => {
     request,
   }) => {
     // 1st request (non-stream): cold bucket → served; settle awaited before return.
-    const first = await request.post("/v1/chat/completions", { data: DEPLETE, headers: DEGRADE_AUTH });
+    const first = await request.post("/v1/chat/completions", {
+      data: DEPLETE,
+      headers: DEGRADE_AUTH,
+    });
     expect(first.status()).toBe(200);
 
     // 2nd request: budget exhausted → degraded to economy, STILL served (200).
@@ -66,11 +69,17 @@ test.describe("per-key usage budget e2e", () => {
 
   test("reject: over-budget request returns a structured 429", async ({ request }) => {
     // 1st request: served (full bucket); settle awaited before return.
-    const first = await request.post("/v1/chat/completions", { data: DEPLETE, headers: REJECT_AUTH });
+    const first = await request.post("/v1/chat/completions", {
+      data: DEPLETE,
+      headers: REJECT_AUTH,
+    });
     expect(first.status()).toBe(200);
 
     // 2nd request: budget exhausted + reject behavior → 429, before routing.
-    const second = await request.post("/v1/chat/completions", { data: DEPLETE, headers: REJECT_AUTH });
+    const second = await request.post("/v1/chat/completions", {
+      data: DEPLETE,
+      headers: REJECT_AUTH,
+    });
     expect(second.status()).toBe(429);
     expect(JSON.stringify(await second.json())).toContain("rate_limited");
   });
