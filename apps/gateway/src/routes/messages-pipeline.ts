@@ -477,8 +477,8 @@ export function createMessagesPipeline(
             // (principle 5: surfaces never conflate). Gemini consumes the SAME
             // OpenAI-shaped chunks parseOpenAISSE produces (its IRChunk IS the
             // OpenAI chat.completion.chunk), so we feed them straight into the
-            // Gemini snapshot state machine — no Anthropic adapter (docs/05). Each
-            // yielded object is a full GenerateContentResponse snapshot (no `type`);
+            // Gemini delta state machine — no Anthropic adapter (docs/05). Each
+            // yielded object is a GenerateContentResponse delta frame (no `type`);
             // the route writes it as a nameless `data:` SSE frame with no [DONE].
             if (protocol === "gemini") {
               for await (const snapshot of geminiTransformer.transformStreamOut(

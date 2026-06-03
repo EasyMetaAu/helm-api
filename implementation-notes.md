@@ -178,6 +178,20 @@ regression; typecheck + lint clean; admin svelte-check 0/0.
 
 ---
 
+## 2026-06-03 · Gemini inbound streaming — fix cumulative-snapshot bug, emit real deltas (docs/05)
+
+**Context**: The Gemini surface (`:streamGenerateContent?alt=sse`) was fully *wired* end-to-end since #58 — path parser recognizes the op, `gemini.ts` branches on `route.stream`, `messages-pipeline.ts` feeds OpenAI-shaped chunks into `geminiTransformer.transformStreamOut`, and route+transformer streaming tests existed — yet README/docs/05 marked it **❌ non-streaming**. The reason was a **wire-format correctness bug**, not a missing endpoint.
+
+**The bug**: `transformStreamOut` emitted **cumulative full snapshots** (`text += content`; every event carried the *entire* accumulated text). But real Google Gemini `streamGenerateContent?alt=sse` emits **incremental deltas** — each event holds only the new text and clients accumulate (`text += chunk.text`, confirmed against the official Google cookbook/SDK). A genuine Gemini client pointed at our endpoint would see massively duplicated text (`"Hi"` → `"HiHi there"`). The team correctly judged it not-truly-compatible and documented ❌ rather than ship broken streaming.
+
+**Fix** (`packages/core/src/protocol/gemini/gemini-transformer.ts`): rewrote `transformStreamOut` to forward each IR text delta verbatim (no accumulator). Tool-call arg fragments are still buffered per IR index and flushed as ONE complete `functionCall` part — but now only on the **terminal** chunk (with `finishReason` + `usageMetadata`), never re-emitted per snapshot. A role-only / tool-arg-fragment chunk (no text, no finish, no usage) is skipped (Gemini has no empty frame). A defensive post-loop flush surfaces tool calls if the IR stream ends without a finish chunk.
+
+**Inbound side untouched**: `transformStreamIn` already tolerates both shapes — its diff has a non-prefix fallback that emits the whole part when a chunk isn't a prefix of the accumulated text, so a delta stream and a snapshot stream both decode correctly. Only the outbound mapper was wrong.
+
+**Tests**: the two `transformStreamOut` tests were rewritten from snapshot assertions (last-event-carries-all) to delta assertions (concat across ALL events == full text, no single event carries the whole text, exactly one `finishReason`, exactly one `functionCall` part). Docs/05 + README (EN/zh-CN) flipped to ✅. No route change needed — the route already writes each yielded object as a nameless `data:` frame with no `[DONE]`.
+
+---
+
 ## 2026-06-03 · Hot-reload the OAuth subscription pool (proxy / priority / schedulable / connect / disconnect) — no restart (issue #38)
 
 **Context**: The operator's rule — anything editable in an admin page form must hot-apply on Save, never need a restart. Audited every admin form vs its runtime consumption: **lanes, policies, classifier, API keys, System Settings (capture/retention/rate-limit/log-level), and OAuth model curation were ALREADY hot** (RuleStore re-bind callbacks / live keystore reads / per-request thunks). The **only gap** was the OAuth pool: `synthesizeOAuthProviders()` ran once at startup and froze each account's proxy/priority/schedulable + the connected-account set into the pool; the admin PUT handlers only persisted.

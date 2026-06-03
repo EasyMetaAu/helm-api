@@ -25,8 +25,9 @@ import { sanitizeSchema } from "./schema-sanitize.js";
 //   • roles user|model (no system; system is a top-level systemInstruction);
 //   • tool calls have NO stable id — functionCall/functionResponse pair by NAME, so
 //     we SYNTHESIZE deterministic ids (call_<name>_<n>) and drop them outbound;
-//   • streaming is snapshot-based (?alt=sse): each event is a FULL response, so we
-//     diff snapshots into the IR start->delta->stop sequence with idempotent close;
+//   • streaming (?alt=sse) is delta-based both ways: outbound emits INCREMENTAL deltas
+//     (clients accumulate `chunk.text`); inbound diffs provider frames into the IR
+//     start->delta->stop sequence, tolerating either delta or snapshot framing;
 //   • JSON-Schema `format` (date/date-time) is unsupported -> sanitizeSchema strips it;
 //   • finishReason / usageMetadata are remapped, raw preserved in provider_raw.
 //
@@ -670,10 +671,17 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
   };
 }
 
-// —— Streaming outbound: IR chunks -> Gemini snapshot events. ——————————————————————
-// We accumulate IR deltas into a growing snapshot and emit one Gemini event per IR
-// chunk (Gemini clients expect full-snapshot events). The final chunk's
-// finish_reason is mapped onto the candidate.
+// —— Streaming outbound: IR chunks -> Gemini SSE delta events. ————————————————————————
+// Real Gemini `streamGenerateContent?alt=sse` emits INCREMENTAL deltas — each event
+// carries only the NEW text in candidates[0].content.parts, and clients accumulate
+// (`text += chunk.text`). So we forward each IR text delta verbatim (NEVER a growing
+// snapshot — that would double-count on the client). Tool-call fragments are buffered
+// and flushed as ONE complete functionCall part on the terminal frame, which also
+// carries `finishReason` + `usageMetadata`. CRUCIAL: the OpenAI source (with
+// `stream_options.include_usage`, always set by execute.ts) delivers usage on a
+// SEPARATE trailing chunk AFTER the finish chunk — so we hold the terminal frame until
+// the stream ends and merge that late usage in, emitting exactly ONE terminal frame
+// (never a `STOP` frame followed by a stray empty `usageMetadata` frame).
 
 interface OutToolSlot {
   index: number;
@@ -682,16 +690,37 @@ interface OutToolSlot {
 }
 
 async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<GeminiSSEEvent> {
-  let text = "";
   // Tool-call fragments arrive split across chunks (id/name early, arguments later);
-  // buffer per IR tool index — mirroring the inbound side — and re-serialize the
-  // accumulated args into functionCall parts on every cumulative snapshot.
+  // buffer per IR tool index — mirroring the inbound side — and emit each as a single
+  // complete functionCall part once the stream finishes (never a half-parsed snapshot).
   const toolIndexToSlot = new Map<number, OutToolSlot>();
+
+  // Build the completed functionCall parts in allocation order (skip un-named slots).
+  const flushToolParts = (): GeminiPart[] => {
+    const parts: GeminiPart[] = [];
+    for (const slot of [...toolIndexToSlot.values()].sort((a, b) => a.index - b.index)) {
+      if (slot.name === "") continue;
+      parts.push({ functionCall: { name: slot.name, args: parseArgs(slot.argBuffer) } });
+    }
+    return parts;
+  };
+
+  const toUsageMetadata = (usage: NonNullable<IRChunk["usage"]>): GeminiUsageMetadata => ({
+    ...(usage.prompt_tokens !== undefined ? { promptTokenCount: usage.prompt_tokens } : {}),
+    ...(usage.completion_tokens !== undefined
+      ? { candidatesTokenCount: usage.completion_tokens }
+      : {}),
+  });
+
+  // The terminal frame (text delta + functionCall parts + finishReason) is held back
+  // until stream end so a late usage-only chunk merges into it as ONE frame.
+  let terminalParts: GeminiPart[] | null = null;
+  let terminalFinish: string | undefined;
+  let latestUsage: GeminiUsageMetadata | undefined;
 
   for await (const chunk of src) {
     const choice = chunk.choices?.[0];
     const content = choice?.delta?.content;
-    if (typeof content === "string") text += content;
 
     for (const tc of choice?.delta?.tool_calls ?? []) {
       let slot = toolIndexToSlot.get(tc.index);
@@ -704,35 +733,46 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
       if (tc.function?.arguments !== undefined) slot.argBuffer += tc.function.arguments;
     }
 
-    const parts: GeminiPart[] = text !== "" ? [{ text }] : [];
-    // Emit functionCall parts in allocation order; tolerate partial JSON via parseArgs
-    // so a mid-stream snapshot never throws (complete args land on the finish chunk).
-    for (const slot of [...toolIndexToSlot.values()].sort((a, b) => a.index - b.index)) {
-      if (slot.name === "") continue;
-      parts.push({ functionCall: { name: slot.name, args: parseArgs(slot.argBuffer) } });
+    if (chunk.usage != null) latestUsage = toUsageMetadata(chunk.usage);
+
+    if (choice?.finish_reason != null) {
+      // Terminal chunk: assemble the final frame but hold it (usage may still trail).
+      terminalParts = [];
+      if (typeof content === "string" && content !== "") terminalParts.push({ text: content });
+      terminalParts.push(...flushToolParts());
+      terminalFinish = mapFinishReasonToGemini(choice.finish_reason) ?? "STOP";
+      continue;
     }
 
-    const candidate: GeminiCandidate = {
-      content: { role: "model", parts },
-      ...(choice?.finish_reason != null
-        ? { finishReason: mapFinishReasonToGemini(choice.finish_reason) ?? "STOP" }
-        : {}),
-      index: 0,
-    };
+    // Non-terminal: forward only a real text delta. Role-only announcements, tool-arg
+    // fragments, and usage-only chunks carry no Gemini frame (Gemini has no empty/role
+    // frame; their payload surfaces on the terminal frame instead).
+    if (typeof content === "string" && content !== "") {
+      yield { candidates: [{ content: { role: "model", parts: [{ text: content }] }, index: 0 }] };
+    }
+  }
+
+  if (terminalParts !== null) {
     yield {
-      candidates: [candidate],
-      ...(chunk.usage != null
-        ? {
-            usageMetadata: {
-              ...(chunk.usage.prompt_tokens !== undefined
-                ? { promptTokenCount: chunk.usage.prompt_tokens }
-                : {}),
-              ...(chunk.usage.completion_tokens !== undefined
-                ? { candidatesTokenCount: chunk.usage.completion_tokens }
-                : {}),
-            },
-          }
-        : {}),
+      candidates: [
+        {
+          content: { role: "model", parts: terminalParts },
+          finishReason: terminalFinish,
+          index: 0,
+        },
+      ],
+      ...(latestUsage !== undefined ? { usageMetadata: latestUsage } : {}),
+    };
+    return;
+  }
+
+  // Defensive: the IR stream ended WITHOUT a finish chunk (e.g. an abort). Still
+  // surface any buffered tool calls + usage once so the client loses nothing.
+  const parts = flushToolParts();
+  if (parts.length > 0 || latestUsage !== undefined) {
+    yield {
+      candidates: [{ content: { role: "model", parts }, index: 0 }],
+      ...(latestUsage !== undefined ? { usageMetadata: latestUsage } : {}),
     };
   }
 }

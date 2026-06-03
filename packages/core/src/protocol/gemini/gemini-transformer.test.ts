@@ -592,7 +592,15 @@ describe("streaming alt=sse (snapshot events -> IR chunks)", () => {
 });
 
 describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
-  it("emits Gemini snapshot events from IR chunks", async () => {
+  // Concatenate text parts across ALL events — the real Gemini wire contract: clients
+  // accumulate `chunk.text`, so events must carry incremental deltas, not snapshots.
+  const concatText = (events: GeminiSSEEvent[]): string =>
+    events
+      .flatMap((e) => e.candidates?.[0]?.content?.parts ?? [])
+      .map((p) => ("text" in p ? (p.text ?? "") : ""))
+      .join("");
+
+  it("emits INCREMENTAL text deltas, not cumulative snapshots (no duplication)", async () => {
     const chunks: IRChunk[] = [
       { id: "c", model: "m", choices: [{ index: 0, delta: { role: "assistant", content: "Hi" } }] },
       {
@@ -602,17 +610,26 @@ describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
       },
     ];
     const events = await collect(geminiTransformer.transformStreamOut(fromArray(chunks)));
-    // Gemini events are FULL snapshots: the last event carries the complete text.
-    const last = events[events.length - 1];
-    const text = (last?.candidates?.[0]?.content?.parts ?? [])
-      .map((p) => ("text" in p ? p.text : ""))
-      .join("");
-    expect(text).toBe("Hi there");
-    expect(last?.candidates?.[0]?.finishReason).toBe("STOP");
+    // Real Gemini emits deltas a client concatenates → the running join is the full
+    // text with NO duplication. (A cumulative-snapshot impl would yield "HiHi there".)
+    expect(concatText(events)).toBe("Hi there");
+    // No single event may carry the whole accumulated text — that would double-count
+    // on a client that appends each chunk.
+    for (const ev of events) {
+      const t = (ev.candidates?.[0]?.content?.parts ?? [])
+        .map((p) => ("text" in p ? (p.text ?? "") : ""))
+        .join("");
+      expect(t).not.toBe("Hi there");
+    }
+    // finishReason rides on exactly one (the terminal) event.
+    const withFinish = events.filter((e) => e.candidates?.[0]?.finishReason !== undefined);
+    expect(withFinish).toHaveLength(1);
+    expect(withFinish[0]?.candidates?.[0]?.finishReason).toBe("STOP");
   });
 
-  // test #4: outbound streaming must surface tool calls as functionCall parts.
-  it("emits a functionCall part in the cumulative snapshot from streamed tool_calls", async () => {
+  // test #4: outbound streaming must surface tool calls as a complete functionCall part
+  // (one delta event), flushed once args are complete — never a half-parsed JSON.
+  it("emits a single complete functionCall part from streamed tool_calls", async () => {
     const chunks: IRChunk[] = [
       {
         id: "c",
@@ -647,16 +664,20 @@ describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
       },
     ];
     const events = await collect(geminiTransformer.transformStreamOut(fromArray(chunks)));
-    const last = events[events.length - 1];
-    const parts = last?.candidates?.[0]?.content?.parts ?? [];
-    const fcPart = parts.find((p) => "functionCall" in p) as
-      | { functionCall: { name: string; args: Record<string, unknown> } }
-      | undefined;
-    expect(fcPart).toBeDefined();
-    expect(fcPart?.functionCall.name).toBe("get_weather");
-    // complete args flushed on the finish chunk
-    expect(fcPart?.functionCall.args).toEqual({ city: "SF" });
-    expect(last?.candidates?.[0]?.finishReason).toBe("STOP");
+    // The functionCall part appears in EXACTLY ONE event (a delta), never re-emitted
+    // across snapshots, and only once its args are a complete parseable JSON.
+    const fcParts = events
+      .flatMap((e) => e.candidates?.[0]?.content?.parts ?? [])
+      .filter((p) => "functionCall" in p) as Array<{
+      functionCall: { name: string; args: Record<string, unknown> };
+    }>;
+    expect(fcParts).toHaveLength(1);
+    expect(fcParts[0]?.functionCall.name).toBe("get_weather");
+    expect(fcParts[0]?.functionCall.args).toEqual({ city: "SF" });
+    // finishReason rides on exactly one (the terminal) event.
+    const withFinish = events.filter((e) => e.candidates?.[0]?.finishReason !== undefined);
+    expect(withFinish).toHaveLength(1);
+    expect(withFinish[0]?.candidates?.[0]?.finishReason).toBe("STOP");
   });
 });
 

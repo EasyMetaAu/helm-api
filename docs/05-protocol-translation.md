@@ -15,7 +15,7 @@ Four client protocols are wired and routed in 0.2:
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes (SSE) and non-stream |
 | `POST /v1/messages` | Anthropic Messages | Yes (SSE) and non-stream |
 | `POST /v1/responses` | OpenAI Responses | Yes (SSE) and non-stream |
-| `POST /v1beta/models/{model}:generateContent` | Google Gemini | Non-streaming |
+| `POST /v1beta/models/{model}:generateContent` | Google Gemini | Yes (SSE via `:streamGenerateContent?alt=sse`) and non-stream |
 
 For **OpenAI Responses**, streaming is now wired (0.2): a `stream:true` request
 returns a native Responses SSE stream of `response.*` events terminated by a
@@ -25,8 +25,13 @@ see `apps/gateway/src/routes/responses.ts` for the route.
 
 **Gemini** is now an inbound route (0.2): `POST /v1beta/models/{model}:generateContent`
 (issue #58), backed by the transformers in `packages/core/src/protocol/gemini/`.
-Streaming (`:streamGenerateContent`) is not implemented — the endpoint is
-non-streaming only. See `apps/gateway/src/routes/gemini.ts`.
+Streaming is wired via `:streamGenerateContent?alt=sse`: each SSE frame is a nameless
+`data:` `GenerateContentResponse` carrying an **incremental** text delta (matching real
+Gemini — clients accumulate `chunk.text`), with **no** `event:` name and **no** `[DONE]`
+sentinel. The terminal frame carries the completed `functionCall` parts, `finishReason`,
+and `usageMetadata`. The delta mapper is `transformStreamOut` in
+`packages/core/src/protocol/gemini/gemini-transformer.ts`; see
+`apps/gateway/src/routes/gemini.ts` for the route.
 
 ## Responsibilities
 
