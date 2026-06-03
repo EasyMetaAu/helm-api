@@ -24,7 +24,6 @@ export class SqliteKeyStore implements KeyStore {
       prefix: input.prefix,
       accountId: input.accountId,
       role: input.role,
-      maxLane: input.maxLane ?? null,
       allowedLanes: input.allowedLanes ? JSON.stringify(input.allowedLanes) : null,
       allowCustomModel: input.allowCustomModel ?? false,
       disabled: false,
@@ -62,17 +61,13 @@ export class SqliteKeyStore implements KeyStore {
   }
 
   // Edit ONLY the cap columns PRESENT in `patch` (null clears: rate limit →
-  // inherit, max_lane/allowed_lanes → no cap). Omitted fields are left untouched,
+  // inherit, allowed_lanes → no whitelist). Omitted fields are left untouched,
   // so a partial PATCH never rewrites a sibling column (no concurrent-clobber).
   // NEVER touches role or the immutable identity. Throws on unknown id.
   async updateKey(keyId: string, patch: KeyPatch): Promise<void> {
     const set: Partial<
-      Pick<
-        ApiKeyRow,
-        "maxLane" | "allowedLanes" | "allowCustomModel" | "rateLimitRpm" | "rateLimitTpm"
-      >
+      Pick<ApiKeyRow, "allowedLanes" | "allowCustomModel" | "rateLimitRpm" | "rateLimitTpm">
     > = {};
-    if (patch.maxLane !== undefined) set.maxLane = patch.maxLane;
     // SQLite has no native array: store the whitelist as JSON text (null = no cap).
     if (patch.allowedLanes !== undefined) {
       set.allowedLanes = patch.allowedLanes === null ? null : JSON.stringify(patch.allowedLanes);
@@ -100,7 +95,6 @@ export class SqliteKeyStore implements KeyStore {
       prefix: row.prefix,
       account_id: row.accountId,
       role: row.role === "root" ? "root" : "user",
-      max_lane: row.maxLane ?? null,
       allowed_lanes: row.allowedLanes ? (JSON.parse(row.allowedLanes) as string[]) : null,
       allow_custom_model: row.allowCustomModel,
       disabled: row.disabled,

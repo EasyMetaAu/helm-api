@@ -5,6 +5,21 @@
 
 ---
 
+## 2026-06-03 · Retire the per-key `max_lane` ceiling; add allowed-lanes checkboxes to the create dialog (spec docs/06, docs/04)
+
+**Context**: The API-key create/edit modal exposed a 「最大通道（上限）」/ "Max lane (cap)" select — the highest lane a key could reach, clamping richer requests down. It was redundant and confusing: `LANE_RANK` only orders `economy < balanced < premium`, while `coding/json/vision/tool_call` are **unranked task lanes**, so the ceiling was ill-defined for most lanes. The **allowed-lanes whitelist already expresses everything** the ceiling could (to "cap at balanced" you just check `economy + balanced`). Separately, the **create** dialog was missing the lane checkboxes that **edit** already had.
+
+- **Full removal of the per-key cap** across the stack (kept the *policy-level* `max_lane`, a distinct routing-config feature in `PolicySchema` / `policy-engine.ts` — untouched):
+  - `@helm/shared` key schemas (`ApiKeyRecord` / `Create` / `Update`), store `CreateKeyInput` + `KeyPatch`, both keystores, both Drizzle `api_keys` schemas.
+  - `route-request.ts` `keyCaps` is now `{ allowedLanes }` only; the key-cap `applyCaps(...)` call passes `max_lane: null` (the function itself is unchanged — policy caps still use it).
+  - Gateway threading: `auth.ts` caps, `messages-pipeline.ts`, `chat.ts`, `server.ts` (3 self-auth sites), `admin/keys.ts` + `admin/deps.ts` (`KeySummary`).
+  - Admin UI: removed the select from both dialogs + the keys-table "Max lane" row; reworded the page description; dropped 4 orphaned i18n keys across all 5 locales.
+- **DB column dropped destructively** via a new forward migration (sqlite **v10** `ALTER TABLE api_keys DROP COLUMN max_lane`, pg **v9** `… DROP COLUMN IF EXISTS …`), following the v6 precedent (v1 ships untouched). **Any stored ceilings are discarded** — acceptable since the field is retired. SQLite `DROP COLUMN` is supported by better-sqlite3's bundled engine; the column was unindexed. Covered by a new `schema.test.ts` case that seeds a v1–v9 DB with a `max_lane` value and asserts the column is gone + the row (incl. `allowed_lanes`) survives.
+- **New behaviour**: the create dialog now renders the allowed-lanes checkbox `<fieldset>` (mirrors edit) and sends `allowed_lanes`; the backend already accepted it on create, so this was UI-only.
+- **i18n note**: `pnpm i18n:extract`/`update` are **additive** (they neither prune orphaned keys nor reach the only translation relay, a LAN endpoint). Did the locale surgery with a one-shot Node script (delete 4 keys + rename the description key in place, with proper zh/ja/ko values) to keep the diff minimal instead of letting the extractor pull in unrelated pending keys.
+
+---
+
 ## 2026-06-02 · Unified live model catalog + Codex (Responses API) execution (issue #38 follow-up)
 
 **Context**: The Lanes model picker (`/admin/api/models`) was wrong across subscription providers — Codex was entirely missing (no executor ⇒ excluded from `ROUTABLE_OAUTH`), and the alias list was a **startup snapshot** while the Manage dialog read curation **live**, so the two diverged after any edit. The operator asked for ONE unified, effective (curated), live model list usable everywhere, and for Codex to actually route end-to-end (not a decorative connection).

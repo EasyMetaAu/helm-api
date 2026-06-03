@@ -13,7 +13,6 @@ export const ApiKeyRecordSchema = z.object({
   account_id: z.string().min(1),
   role: KeyRoleSchema,
   // Per-key caps (docs/06): present-but-nullable so the storage shape is explicit.
-  max_lane: z.string().nullable(),
   allowed_lanes: z.array(z.string()).nullable(),
   allow_custom_model: z.boolean(),
   disabled: z.boolean(),
@@ -35,7 +34,6 @@ export type ApiKeyRecord = z.infer<typeof ApiKeyRecordSchema>;
 export const CreateKeyRequestSchema = z
   .object({
     role: KeyRoleSchema.default("user"),
-    max_lane: z.string().min(1).optional(),
     allowed_lanes: z.array(z.string().min(1)).optional(),
     allow_custom_model: z.boolean().optional(),
     // Optional per-key rate limits at mint time. Omitted => inherit the system
@@ -54,14 +52,12 @@ export type CreateKeyRequest = z.infer<typeof CreateKeyRequestSchema>;
 // (rotate role by revoking + re-minting). `.strict()` so an unknown field fails
 // closed (Principle 2). Every field is OPTIONAL (omit = leave unchanged); the
 // nullable ones accept null to CLEAR the cap/override back to the default/no-cap:
-//   - max_lane:             null = remove the lane cap.
 //   - allowed_lanes:        null = remove the whitelist.
 //   - rate_limit_{rpm,tpm}: null = inherit the system default; a number sets an
 //     explicit override (0 = unlimited for that dimension).
 // allow_custom_model is a plain boolean (not nullable): present = set, omit = leave.
 export const UpdateKeyRequestSchema = z
   .object({
-    max_lane: z.string().min(1).nullable().optional(),
     allowed_lanes: z.array(z.string().min(1)).nullable().optional(),
     allow_custom_model: z.boolean().optional(),
     rate_limit_rpm: z.number().int().nonnegative().nullable().optional(),

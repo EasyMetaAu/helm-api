@@ -31,16 +31,27 @@ describe('CreateKeyDialog', () => {
     createKey.mockResolvedValue({ key_id: 'key_1', plaintext: PLAINTEXT, prefix: PREFIX });
   });
 
-  it('submits the chosen caps (max_lane + allow_custom_model) to createKey', async () => {
+  it('submits the chosen allowed-lanes whitelist + allow_custom_model to createKey', async () => {
     setup();
-    await fireEvent.change(screen.getByLabelText(/max lane/i), { target: { value: 'balanced' } });
+    // Tick a subset of lanes; the whitelist is the only lane cap (no max-lane field).
+    await fireEvent.click(screen.getByLabelText('economy'));
+    await fireEvent.click(screen.getByLabelText('balanced'));
     // allow_custom_model defaults to false; leave the checkbox unchecked.
     await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
 
     await waitFor(() => expect(createKey).toHaveBeenCalledTimes(1));
     const input = createKey.mock.calls[0][0];
-    expect(input.max_lane).toBe('balanced');
+    expect(input.allowed_lanes).toEqual(['economy', 'balanced']);
     expect(input.allow_custom_model).toBe(false);
+  });
+
+  it('omits allowed_lanes when no lane is checked (no whitelist = any lane)', async () => {
+    setup();
+    await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
+
+    await waitFor(() => expect(createKey).toHaveBeenCalledTimes(1));
+    const input = createKey.mock.calls[0][0];
+    expect(input.allowed_lanes).toBeUndefined();
   });
 
   it('submits per-key rate limits when filled, and omits them when left blank', async () => {

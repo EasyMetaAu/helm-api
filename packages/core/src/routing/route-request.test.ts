@@ -313,14 +313,14 @@ describe("routeRequest — orchestration", () => {
     expect(plan.candidate_chain).toContain("best_reasoning_model");
   });
 
-  it("keyCaps clamp a premium policy/lane result down to the key's maxLane (OUTER bound, wins over use_lane pin)", async () => {
-    // A policy pins `premium`, but the key's caps allow at most `economy`.
+  it("keyCaps clamp a premium policy/lane result down to the key's whitelist (OUTER bound, wins over use_lane pin)", async () => {
+    // A policy pins `premium`, but the key's whitelist permits only `economy`.
     // Key caps are the non-negotiable outer bound and must win.
     const d = deps({
       classify: vi.fn(async () => classification({ task_type: "chat" })),
       policies: { policies: [{ id: "pin-premium", match: {}, use_lane: "premium" }] },
     });
-    await routeRequest(req(), d, { keyCaps: { maxLane: "economy", allowedLanes: null } });
+    await routeRequest(req(), d, { keyCaps: { allowedLanes: ["economy"] } });
 
     const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
     expect(plan.selected_lane).toBe("economy");
@@ -332,7 +332,7 @@ describe("routeRequest — orchestration", () => {
       policies: { policies: [{ id: "pin-premium", match: {}, use_lane: "premium" }] },
     });
     await routeRequest(req(), d, {
-      keyCaps: { maxLane: null, allowedLanes: ["economy", "balanced"] },
+      keyCaps: { allowedLanes: ["economy", "balanced"] },
     });
 
     const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;

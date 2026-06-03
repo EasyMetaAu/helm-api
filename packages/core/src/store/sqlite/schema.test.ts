@@ -43,7 +43,6 @@ describe("sqlite schema + migrations", () => {
       "prefix",
       "account_id",
       "role",
-      "max_lane",
       "allowed_lanes",
       "allow_custom_model",
       "disabled",
@@ -51,6 +50,9 @@ describe("sqlite schema + migrations", () => {
     ]) {
       expect(keyCols).toContain(c);
     }
+    // max_lane was retired in v10 (drop column) — the ceiling is subsumed by
+    // the allowed_lanes whitelist, so it must NOT survive on a fully migrated DB.
+    expect(keyCols).not.toContain("max_lane");
     for (const c of [
       "id",
       "request_id",
@@ -132,6 +134,73 @@ describe("sqlite schema + migrations", () => {
     }
   });
 
+  it("v10 drops api_keys.max_lane on an existing DB while preserving the row", () => {
+    // Simulate an OLD database already migrated through v9 (api_keys still HAS the
+    // retired max_lane column) carrying a key row with a stored ceiling + a
+    // whitelist, then let runMigrations apply v10 (the DROP COLUMN forward step).
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v10-"));
+    const path = join(dir, "helm.db");
+    try {
+      const seed = new Database(path);
+      seed.exec(
+        "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);",
+      );
+      // v1 shape + the v8 rate-limit columns — api_keys still carries max_lane.
+      seed.exec(
+        `CREATE TABLE api_keys (
+          key_id TEXT PRIMARY KEY,
+          hash TEXT NOT NULL UNIQUE,
+          prefix TEXT NOT NULL,
+          account_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          max_lane TEXT,
+          allowed_lanes TEXT,
+          allow_custom_model INTEGER NOT NULL DEFAULT 0,
+          disabled INTEGER NOT NULL DEFAULT 0,
+          rate_limit_rpm INTEGER,
+          rate_limit_tpm INTEGER,
+          created_at INTEGER NOT NULL
+        );`,
+      );
+      const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9]) rec.run(v, Date.now());
+      seed
+        .prepare(
+          `INSERT INTO api_keys (key_id, hash, prefix, account_id, role, max_lane, allowed_lanes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "k1",
+          "h1",
+          "helm_live_ab",
+          "acct",
+          "user",
+          "premium",
+          '["economy","balanced"]',
+          Date.now(),
+        );
+      seed.close();
+
+      runMigrations(path);
+
+      const after = new Database(path);
+      const cols = (
+        after.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      expect(cols).not.toContain("max_lane");
+      // The row (and its whitelist) survives the drop — only the ceiling column goes.
+      const row = after.prepare("SELECT * FROM api_keys WHERE key_id = ?").get("k1") as {
+        role: string;
+        allowed_lanes: string;
+      };
+      expect(row.role).toBe("user");
+      expect(row.allowed_lanes).toBe('["economy","balanced"]');
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("declares the composite PK on rate_limit_buckets (key_id, dim) — matches pg + onConflict target", () => {
     const cfg = getTableConfig(rateLimitBuckets);
     const pk = cfg.primaryKeys[0];
@@ -191,7 +260,6 @@ describe("sqlite schema + migrations", () => {
         prefix: "helm_live_a",
         accountId: "acct",
         role: "root",
-        maxLane: "balanced",
         allowedLanes: JSON.stringify(["balanced", "economy"]),
         allowCustomModel: true,
         disabled: true,

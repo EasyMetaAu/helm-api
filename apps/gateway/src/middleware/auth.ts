@@ -15,7 +15,6 @@ export interface AuthIdentity {
   userId: string | null;
   role: ApiKeyRecord["role"];
   caps: {
-    maxLane: string | null;
     allowedLanes: string[] | null;
     allowCustomModel: boolean;
     /** Per-key rate-limit override (docs/06). null = inherit the system default
@@ -87,7 +86,6 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler {
       userId: null,
       role: record.role,
       caps: {
-        maxLane: record.max_lane,
         allowedLanes: record.allowed_lanes,
         allowCustomModel: record.allow_custom_model,
         rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },

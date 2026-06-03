@@ -16,7 +16,6 @@ describe("SqliteKeyStore", () => {
       prefix: "helm_live_ab12",
       accountId: "acct",
       role: "user",
-      maxLane: "balanced",
       allowedLanes: ["economy", "balanced"],
       allowCustomModel: true,
     });
@@ -28,7 +27,6 @@ describe("SqliteKeyStore", () => {
       prefix: "helm_live_ab12",
       account_id: "acct",
       role: "user",
-      max_lane: "balanced",
       allowed_lanes: ["economy", "balanced"],
       allow_custom_model: true,
       disabled: false,
@@ -59,14 +57,14 @@ describe("SqliteKeyStore", () => {
       prefix: "helm_live_a",
       accountId: "acct",
       role: "user",
-      maxLane: "balanced",
+      allowedLanes: ["economy", "balanced"],
     });
     await store.disable("k1");
     const got = await store.getByHash("h1");
     expect(got).not.toBeNull();
     expect(got?.disabled).toBe(true);
     // other fields untouched (no in-place rewrite)
-    expect(got?.max_lane).toBe("balanced");
+    expect(got?.allowed_lanes).toEqual(["economy", "balanced"]);
     expect(got?.prefix).toBe("helm_live_a");
   });
 
@@ -154,14 +152,14 @@ describe("SqliteKeyStore", () => {
       prefix: "helm_live_a",
       accountId: "a",
       role: "user",
-      maxLane: "balanced",
+      allowedLanes: ["balanced"],
     });
     await store.updateKey("k1", { rateLimitRpm: 100, rateLimitTpm: 5000 });
     let got = await store.getByHash("h1");
     expect(got?.rate_limit_rpm).toBe(100);
     expect(got?.rate_limit_tpm).toBe(5000);
     // other fields untouched (no in-place rewrite of unrelated columns)
-    expect(got?.max_lane).toBe("balanced");
+    expect(got?.allowed_lanes).toEqual(["balanced"]);
     expect(got?.disabled).toBe(false);
     // null clears the override back to inheriting the system default
     await store.updateKey("k1", { rateLimitRpm: null, rateLimitTpm: null });
@@ -170,7 +168,7 @@ describe("SqliteKeyStore", () => {
     expect(got?.rate_limit_tpm).toBeNull();
   });
 
-  it("updateKey edits caps: max_lane, allowed_lanes, allow_custom_model (set + clear)", async () => {
+  it("updateKey edits caps: allowed_lanes, allow_custom_model (set + clear)", async () => {
     const store = freshStore();
     await store.createKey({
       keyId: "k1",
@@ -181,22 +179,19 @@ describe("SqliteKeyStore", () => {
       rateLimitRpm: 7,
     });
     await store.updateKey("k1", {
-      maxLane: "balanced",
       allowedLanes: ["economy", "balanced"],
       allowCustomModel: true,
     });
     let got = await store.getByHash("h1");
-    expect(got?.max_lane).toBe("balanced");
     expect(got?.allowed_lanes).toEqual(["economy", "balanced"]);
     expect(got?.allow_custom_model).toBe(true);
     // an unrelated column (rate limit) is left untouched
     expect(got?.rate_limit_rpm).toBe(7);
     // role is never written by updateKey
     expect(got?.role).toBe("user");
-    // null clears the caps back to "no cap"
-    await store.updateKey("k1", { maxLane: null, allowedLanes: null });
+    // null clears the whitelist back to "no cap"
+    await store.updateKey("k1", { allowedLanes: null });
     got = await store.getByHash("h1");
-    expect(got?.max_lane).toBeNull();
     expect(got?.allowed_lanes).toBeNull();
     expect(got?.allow_custom_model).toBe(true);
   });
@@ -209,22 +204,22 @@ describe("SqliteKeyStore", () => {
       prefix: "p1",
       accountId: "a",
       role: "user",
-      maxLane: "balanced",
+      allowedLanes: ["balanced"],
       rateLimitRpm: 10,
       rateLimitTpm: 20,
     });
-    // Patch only rpm; tpm and max_lane must survive (no read-modify-write clobber).
+    // Patch only rpm; tpm and allowed_lanes must survive (no read-modify-write clobber).
     await store.updateKey("k1", { rateLimitRpm: 99 });
     let got = await store.getByHash("h1");
     expect(got?.rate_limit_rpm).toBe(99);
     expect(got?.rate_limit_tpm).toBe(20);
-    expect(got?.max_lane).toBe("balanced");
-    // Patch only tpm to null (clear); rpm and max_lane must survive.
+    expect(got?.allowed_lanes).toEqual(["balanced"]);
+    // Patch only tpm to null (clear); rpm and allowed_lanes must survive.
     await store.updateKey("k1", { rateLimitTpm: null });
     got = await store.getByHash("h1");
     expect(got?.rate_limit_rpm).toBe(99);
     expect(got?.rate_limit_tpm).toBeNull();
-    expect(got?.max_lane).toBe("balanced");
+    expect(got?.allowed_lanes).toEqual(["balanced"]);
   });
 
   it("updateKey on a missing key rejects — both with a patch and an empty patch", async () => {

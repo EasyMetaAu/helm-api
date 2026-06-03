@@ -12,7 +12,6 @@ export const apiKeys = sqliteTable("api_keys", {
   prefix: text("prefix").notNull(), // helm_live_xxxx — display/debug only
   accountId: text("account_id").notNull(),
   role: text("role").notNull(), // 'root' | 'user'
-  maxLane: text("max_lane"), // optional cap lane
   allowedLanes: text("allowed_lanes"), // JSON text array (SQLite has no native array)
   allowCustomModel: integer("allow_custom_model", { mode: "boolean" }) // SQLite has no native boolean
     .notNull()

@@ -12,7 +12,6 @@ function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     prefix: "helm_live_ab",
     account_id: "acct",
     role: "user",
-    max_lane: "balanced",
     allowed_lanes: ["economy", "balanced"],
     allow_custom_model: false,
     disabled: false,
@@ -81,7 +80,7 @@ describe("authMiddleware", () => {
       keyId: "k1",
       accountId: "acct",
       role: "user",
-      caps: { maxLane: "balanced", allowedLanes: ["economy", "balanced"], allowCustomModel: false },
+      caps: { allowedLanes: ["economy", "balanced"], allowCustomModel: false },
     });
   });
 

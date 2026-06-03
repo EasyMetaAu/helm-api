@@ -16,7 +16,6 @@ function toSummary(rec: {
   key_id: string;
   prefix: string;
   role: "root" | "user";
-  max_lane: string | null;
   allowed_lanes: string[] | null;
   allow_custom_model: boolean;
   disabled: boolean;
@@ -27,7 +26,6 @@ function toSummary(rec: {
     key_id: rec.key_id,
     prefix: rec.prefix,
     role: rec.role,
-    max_lane: rec.max_lane,
     allowed_lanes: rec.allowed_lanes,
     allow_custom_model: rec.allow_custom_model,
     disabled: rec.disabled,
@@ -57,7 +55,6 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       prefix: minted.prefix,
       accountId: deps.accountId,
       role: parsed.data.role,
-      maxLane: parsed.data.max_lane,
       allowedLanes: parsed.data.allowed_lanes,
       allowCustomModel: parsed.data.allow_custom_model ?? false,
       rateLimitRpm: parsed.data.rate_limit_rpm,
@@ -76,8 +73,8 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
   // unknown field is rejected (400, fail-closed). The patch is PARTIAL: an omitted
   // field is left untouched at the store layer (no read-modify-write, so
   // concurrent partial PATCHes can't clobber each other); an explicit null clears
-  // a cap (rate limit → inherit the system default; max_lane / allowed_lanes → no
-  // cap). 404 on unknown id.
+  // a cap (rate limit → inherit the system default; allowed_lanes → no
+  // whitelist). 404 on unknown id.
   app.patch("/admin/api/keys/:id", async (c) => {
     const parsed = UpdateKeyRequestSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
@@ -89,13 +86,11 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     // field as `undefined`, distinguishing "clear" (null) from "leave unchanged".
     const d = parsed.data;
     const patch: {
-      maxLane?: string | null;
       allowedLanes?: string[] | null;
       allowCustomModel?: boolean;
       rateLimitRpm?: number | null;
       rateLimitTpm?: number | null;
     } = {};
-    if (d.max_lane !== undefined) patch.maxLane = d.max_lane;
     if (d.allowed_lanes !== undefined) patch.allowedLanes = d.allowed_lanes;
     if (d.allow_custom_model !== undefined) patch.allowCustomModel = d.allow_custom_model;
     if (d.rate_limit_rpm !== undefined) patch.rateLimitRpm = d.rate_limit_rpm;

@@ -18,8 +18,7 @@ export interface ApiKeyView {
   key_id: string;
   prefix: string; // e.g. helm_live_ab12 — display/debug only
   role: 'root' | 'user';
-  max_lane: string | null; // cap lane
-  allowed_lanes: string[] | null; // whitelist
+  allowed_lanes: string[] | null; // lane whitelist (empty/null = any lane)
   allow_custom_model: boolean; // explicit client-model passthrough
   disabled: boolean; // revoked state (soft)
   rate_limit_rpm: number | null; // per-key RPM override; null = inherit system default
@@ -31,7 +30,6 @@ export interface ApiKeyView {
 // are not minted casually (docs/06).
 export interface CreateKeyInput {
   role?: 'root' | 'user';
-  max_lane?: string;
   allowed_lanes?: string[];
   allow_custom_model?: boolean;
   // Optional per-key rate limits at mint time. Omitted => inherit the system
@@ -42,11 +40,10 @@ export interface CreateKeyInput {
 
 // Editable caps for an existing key (PATCH). Mirrors the server
 // UpdateKeyRequestSchema: every field is OPTIONAL (omit = leave unchanged); the
-// nullable ones accept null to CLEAR (max_lane / allowed_lanes → no cap; rate
-// limit → inherit the system default). `role` and the immutable identity are
-// deliberately absent — role cannot be edited (rotate by revoke + re-mint).
+// nullable ones accept null to CLEAR (allowed_lanes → no whitelist; rate limit →
+// inherit the system default). `role` and the immutable identity are deliberately
+// absent — role cannot be edited (rotate by revoke + re-mint).
 export interface UpdateKeyInput {
-  max_lane?: string | null;
   allowed_lanes?: string[] | null;
   allow_custom_model?: boolean;
   rate_limit_rpm?: number | null;
@@ -91,7 +88,6 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     key_id: String(raw.key_id ?? ''),
     prefix: String(raw.prefix ?? ''),
     role: raw.role === 'root' ? 'root' : 'user',
-    max_lane: typeof raw.max_lane === 'string' ? raw.max_lane : null,
     allowed_lanes: Array.isArray(allowed) ? allowed.map(String) : null,
     allow_custom_model: raw.allow_custom_model === true,
     disabled: raw.disabled === true,
@@ -105,7 +101,6 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
 // `.strict()`, so empty/undefined optional fields must be omitted (Principle 2 fail-closed).
 function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   const out: Record<string, unknown> = { role: input.role ?? 'user' };
-  if (input.max_lane) out.max_lane = input.max_lane;
   if (input.allowed_lanes && input.allowed_lanes.length > 0) {
     out.allowed_lanes = input.allowed_lanes;
   }

@@ -302,19 +302,18 @@ export function createMessagesPipeline(
       }
 
       const caps = identity.caps as
-        | { allowCustomModel?: unknown; maxLane?: unknown; allowedLanes?: unknown }
+        | { allowCustomModel?: unknown; allowedLanes?: unknown }
         | undefined;
       const allowCustomModel = caps?.allowCustomModel === true;
       // Display prefix only (never the plaintext key, principle 7) for the Debug
       // UI key column; null when this identity carries none.
       const keyPrefix = typeof identity.keyPrefix === "string" ? identity.keyPrefix : null;
-      // Per-key lane caps from the auth record (docs/04): the OUTER, non-negotiable
-      // bound the core applies LAST (after policy caps). Thread it straight from
-      // identity.caps so a key confined to e.g. maxLane:"economy" is honored on the
-      // Anthropic/Responses surfaces too (not just /v1/chat). Each axis null =
-      // unconstrained; an identity with no caps yields {null,null} (no-op).
+      // Per-key lane whitelist from the auth record (docs/04): the OUTER,
+      // non-negotiable bound the core applies LAST (after policy caps). Thread it
+      // straight from identity.caps so a key confined to e.g. ["economy"] is
+      // honored on the Anthropic/Responses surfaces too (not just /v1/chat).
+      // null = unconstrained; an identity with no caps yields {null} (no-op).
       const keyCaps = {
-        maxLane: typeof caps?.maxLane === "string" ? caps.maxLane : null,
         allowedLanes: Array.isArray(caps?.allowedLanes) ? (caps.allowedLanes as string[]) : null,
       };
 

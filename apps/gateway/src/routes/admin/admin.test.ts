@@ -64,7 +64,6 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         prefix: input.prefix,
         account_id: input.accountId,
         role: input.role,
-        max_lane: input.maxLane ?? null,
         allowed_lanes: input.allowedLanes ?? null,
         allow_custom_model: input.allowCustomModel ?? false,
         disabled: false,
@@ -91,7 +90,6 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       if (!row) throw new Error(`key not found: ${keyId}`);
       // PARTIAL: only supplied fields change; absent fields untouched (never role
       // or the immutable identity). null clears a cap/override.
-      if (patch.maxLane !== undefined) row.max_lane = patch.maxLane;
       if (patch.allowedLanes !== undefined) row.allowed_lanes = patch.allowedLanes;
       if (patch.allowCustomModel !== undefined) row.allow_custom_model = patch.allowCustomModel;
       if (patch.rateLimitRpm !== undefined) row.rate_limit_rpm = patch.rateLimitRpm;
@@ -458,7 +456,7 @@ describe("admin.api keys", () => {
     const created = await app.request("/admin/api/keys", {
       method: "POST",
       headers: JSON_HEADERS,
-      body: JSON.stringify({ role: "user", max_lane: "balanced" }),
+      body: JSON.stringify({ role: "user", allowed_lanes: ["balanced"] }),
     });
     expect(created.status).toBe(201);
     const body = (await created.json()) as { key_id: string; plaintext: string; prefix: string };
@@ -518,7 +516,7 @@ describe("admin.api keys", () => {
     await app.request("/admin/api/keys", {
       method: "POST",
       headers: JSON_HEADERS,
-      body: JSON.stringify({ role: "user", max_lane: "balanced" }),
+      body: JSON.stringify({ role: "user", allowed_lanes: ["balanced"] }),
     });
     const set = await app.request("/admin/api/keys/key_1", {
       method: "PATCH",
@@ -528,7 +526,7 @@ describe("admin.api keys", () => {
     expect(set.status).toBe(200);
     expect(keyStore.rows[0]?.rate_limit_rpm).toBe(120);
     expect(keyStore.rows[0]?.rate_limit_tpm).toBe(5000);
-    expect(keyStore.rows[0]?.max_lane).toBe("balanced"); // caps untouched
+    expect(keyStore.rows[0]?.allowed_lanes).toEqual(["balanced"]); // caps untouched
     // null clears one dimension back to inheriting the system default.
     const clear = await app.request("/admin/api/keys/key_1", {
       method: "PATCH",
@@ -540,37 +538,34 @@ describe("admin.api keys", () => {
     expect(keyStore.rows[0]?.rate_limit_tpm).toBe(5000);
   });
 
-  it("PATCH edits a key's caps (max_lane, allowed_lanes, allow_custom_model; null clears)", async () => {
+  it("PATCH edits a key's caps (allowed_lanes, allow_custom_model; null clears)", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);
     await app.request("/admin/api/keys", {
       method: "POST",
       headers: JSON_HEADERS,
-      body: JSON.stringify({ role: "user", max_lane: "balanced", rate_limit_rpm: 7 }),
+      body: JSON.stringify({ role: "user", allowed_lanes: ["balanced"], rate_limit_rpm: 7 }),
     });
     const set = await app.request("/admin/api/keys/key_1", {
       method: "PATCH",
       headers: JSON_HEADERS,
       body: JSON.stringify({
-        max_lane: "economy",
         allowed_lanes: ["economy", "balanced"],
         allow_custom_model: true,
       }),
     });
     expect(set.status).toBe(200);
-    expect(keyStore.rows[0]?.max_lane).toBe("economy");
     expect(keyStore.rows[0]?.allowed_lanes).toEqual(["economy", "balanced"]);
     expect(keyStore.rows[0]?.allow_custom_model).toBe(true);
     expect(keyStore.rows[0]?.rate_limit_rpm).toBe(7); // unrelated field untouched
     expect(keyStore.rows[0]?.role).toBe("user"); // role never rewritten
-    // null clears the caps back to "no cap".
+    // null clears the whitelist back to "no cap".
     const clear = await app.request("/admin/api/keys/key_1", {
       method: "PATCH",
       headers: JSON_HEADERS,
-      body: JSON.stringify({ max_lane: null, allowed_lanes: null }),
+      body: JSON.stringify({ allowed_lanes: null }),
     });
     expect(clear.status).toBe(200);
-    expect(keyStore.rows[0]?.max_lane).toBeNull();
     expect(keyStore.rows[0]?.allowed_lanes).toBeNull();
     expect(keyStore.rows[0]?.allow_custom_model).toBe(true); // omitted → untouched
   });

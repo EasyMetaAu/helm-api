@@ -58,7 +58,6 @@ export interface CreateKeyInput {
   prefix: string; // e.g. helm_live_xxxx — display/debug only
   accountId: string;
   role: "root" | "user";
-  maxLane?: string;
   allowedLanes?: string[];
   allowCustomModel?: boolean;
   // Per-key rate-limit override (docs/06). Omitted => stored NULL => inherit the
@@ -81,8 +80,8 @@ export interface KeyStore {
   // `patch` are written; an omitted field is left untouched, so two concurrent
   // partial PATCHes on different fields cannot clobber each other (no
   // read-modify-write of the sibling columns). For the nullable fields a value of
-  // null CLEARS that column (rate limit → inherit the system default; max_lane /
-  // allowed_lanes → no cap); a number/array/boolean sets an explicit value.
+  // null CLEARS that column (rate limit → inherit the system default;
+  // allowed_lanes → no whitelist); a number/array/boolean sets an explicit value.
   // Touches ONLY the editable cap columns — NEVER role or the immutable identity
   // (key_id/hash/prefix/account_id). Throws if the key id is unknown (fail-loud).
   updateKey(keyId: string, patch: KeyPatch): Promise<void>;
@@ -93,7 +92,6 @@ export interface KeyStore {
 // throwing on an unknown id). Mirrors the editable subset of the key record —
 // role and the immutable identity are deliberately absent.
 export interface KeyPatch {
-  maxLane?: string | null;
   allowedLanes?: string[] | null;
   allowCustomModel?: boolean;
   rateLimitRpm?: number | null;
