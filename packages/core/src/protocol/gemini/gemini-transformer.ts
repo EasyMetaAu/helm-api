@@ -173,6 +173,55 @@ function inlineDataToImagePart(data: { mimeType: string; data: string }): IRCont
   };
 }
 
+// —— inlineData routed by MIME to the correct IR INPUT part (P7 multimodal):
+//   image/*  -> image (data-url, as before)
+//   audio/*  -> audio {data, format}        (format = subtype, e.g. wav)
+//   video/*  -> video {data, mediaType}
+//   else     -> document {data, mediaType}  (application/pdf, text/plain, …)
+function inlineDataToIRPart(data: { mimeType: string; data: string }): IRContentPart {
+  const mime = data.mimeType;
+  if (mime.startsWith("image/")) return inlineDataToImagePart(data);
+  if (mime.startsWith("audio/")) {
+    return { type: "audio", data: data.data, format: mime.slice("audio/".length) || mime };
+  }
+  if (mime.startsWith("video/")) {
+    return { type: "video", data: data.data, mediaType: mime };
+  }
+  return { type: "document", data: data.data, mediaType: mime };
+}
+
+// —— fileData{mimeType,fileUri} (+ optional videoMetadata) -> IR part routed by MIME.
+// A remote/uploaded blob reference rides on the part's `url` (gs:// or Files API uri).
+function fileDataToIRPart(
+  fileData: { mimeType?: string; fileUri: string },
+  videoMetadata?: { fps?: number; startOffset?: string; endOffset?: string },
+): IRContentPart {
+  const mime = fileData.mimeType ?? "";
+  const uri = fileData.fileUri;
+  if (mime.startsWith("image/")) {
+    return { type: "image", url: uri, mediaType: mime };
+  }
+  if (mime.startsWith("audio/")) {
+    // IR audio is inline-base64-only; a remote audio uri has no inline data, so we keep
+    // the subtype as format and leave data empty (the uri survives in provider_raw-free
+    // form only via document fallback otherwise). Prefer document for losslessness.
+    return { type: "document", url: uri, mediaType: mime };
+  }
+  if (mime.startsWith("video/") || videoMetadata !== undefined) {
+    return {
+      type: "video",
+      url: uri,
+      ...(mime !== "" ? { mediaType: mime } : {}),
+      ...(videoMetadata?.fps !== undefined ? { fps: videoMetadata.fps } : {}),
+      ...(videoMetadata?.startOffset !== undefined
+        ? { startOffset: videoMetadata.startOffset }
+        : {}),
+      ...(videoMetadata?.endOffset !== undefined ? { endOffset: videoMetadata.endOffset } : {}),
+    };
+  }
+  return { type: "document", url: uri, ...(mime !== "" ? { mediaType: mime } : {}) };
+}
+
 // —— Per-modality token detail: Gemini's [{modality,tokenCount}] -> IR token-details
 // object ({text_tokens, image_tokens, audio_tokens, video_tokens}). ——————————————————
 function modalityDetailsToIR(
@@ -301,7 +350,11 @@ function transformRequestOut(native: unknown): IRRequest {
         continue;
       }
       if (part.inlineData !== undefined) {
-        textImageParts.push(inlineDataToImagePart(part.inlineData));
+        textImageParts.push(inlineDataToIRPart(part.inlineData));
+        continue;
+      }
+      if (part.fileData !== undefined) {
+        textImageParts.push(fileDataToIRPart(part.fileData, part.videoMetadata));
         continue;
       }
       if (part.functionCall !== undefined) {
@@ -471,12 +524,59 @@ function irMessageToParts(message: IRMessage): GeminiPart[] {
       if (part.type === "text") parts.push({ text: part.text });
       // thinking parts already emitted via resolveReasoning above.
       else if (part.type === "image") {
-        // data-url -> inlineData{mimeType,data}; remote urls degrade to text.
+        // data-url -> inlineData{mimeType,data}; a remote http(s) image url degrades to
+        // an explicit text placeholder (no fetch/proxy — issue #49 non-goal). (Remote
+        // gs:// / Files-API references for video/document use fileData below; an
+        // arbitrary web image is NOT a Gemini-accessible fileData uri.)
         const match = /^data:([^;]+);base64,(.*)$/.exec(part.url);
         if (match !== null && match[1] !== undefined && match[2] !== undefined) {
           parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
         } else {
           parts.push({ text: `[remote image unsupported by Gemini nativeOut: ${part.url}]` });
+        }
+      } else if (part.type === "audio") {
+        // IR audio is inline base64 + a format subtype -> inlineData audio/<format>.
+        parts.push({ inlineData: { mimeType: `audio/${part.format}`, data: part.data } });
+      } else if (part.type === "document") {
+        // Inline base64 -> inlineData; a remote uri -> fileData.
+        if (part.data !== undefined) {
+          parts.push({
+            inlineData: {
+              mimeType: part.mediaType ?? "application/octet-stream",
+              data: part.data,
+            },
+          });
+        } else if (part.url !== undefined) {
+          parts.push({
+            fileData: {
+              fileUri: part.url,
+              ...(part.mediaType !== undefined ? { mimeType: part.mediaType } : {}),
+            },
+          });
+        }
+      } else if (part.type === "video") {
+        // Remote uri -> fileData (+ videoMetadata); inline base64 -> inlineData.
+        const videoMetadata =
+          part.fps !== undefined || part.startOffset !== undefined || part.endOffset !== undefined
+            ? {
+                ...(part.fps !== undefined ? { fps: part.fps } : {}),
+                ...(part.startOffset !== undefined ? { startOffset: part.startOffset } : {}),
+                ...(part.endOffset !== undefined ? { endOffset: part.endOffset } : {}),
+              }
+            : undefined;
+        if (part.url !== undefined) {
+          parts.push({
+            fileData: {
+              fileUri: part.url,
+              ...(part.mediaType !== undefined ? { mimeType: part.mediaType } : {}),
+            },
+            ...(videoMetadata !== undefined ? { videoMetadata } : {}),
+          });
+        } else if (part.data !== undefined) {
+          parts.push({
+            inlineData: { mimeType: part.mediaType ?? "video/mp4", data: part.data },
+            ...(videoMetadata !== undefined ? { videoMetadata } : {}),
+          });
         }
       }
     }

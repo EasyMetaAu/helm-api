@@ -24,6 +24,23 @@ export const GeminiInlineDataSchema = z.object({
   data: z.string(), // base64
 });
 
+// fileData references a remote/uploaded blob (gs:// or Files API uri) instead of
+// inlining base64. Used for large audio/video/document inputs (P7 multimodal).
+export const GeminiFileDataSchema = z.object({
+  mimeType: z.string().optional(),
+  fileUri: z.string(),
+});
+
+// videoMetadata rides ALONGSIDE an inlineData/fileData video part: frame-sampling rate
+// and a clip window. Offsets are duration strings ("1.5s"). (P7 multimodal)
+export const GeminiVideoMetadataSchema = z
+  .object({
+    fps: z.number().optional(),
+    startOffset: z.string().optional(),
+    endOffset: z.string().optional(),
+  })
+  .passthrough();
+
 export const GeminiFunctionCallSchema = z.object({
   name: z.string(),
   args: z.unknown().optional(), // parsed object (Gemini sends JSON object, not a string)
@@ -43,6 +60,8 @@ export const GeminiPartSchema = z
     thought: z.boolean().optional(),
     thoughtSignature: z.string().optional(),
     inlineData: GeminiInlineDataSchema.optional(),
+    fileData: GeminiFileDataSchema.optional(),
+    videoMetadata: GeminiVideoMetadataSchema.optional(),
     functionCall: GeminiFunctionCallSchema.optional(),
     functionResponse: GeminiFunctionResponseSchema.optional(),
   })

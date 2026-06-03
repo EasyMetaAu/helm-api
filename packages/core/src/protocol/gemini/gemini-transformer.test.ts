@@ -1037,3 +1037,135 @@ describe("endPoint routing (/v1beta/...)", () => {
     expect(parseGeminiPath("/v1/chat/completions", "")).toBeNull();
   });
 });
+
+describe("Gemini multimodal input (P7) — inlineData/fileData + videoMetadata", () => {
+  // Inbound: inlineData routed by MIME to the right IR part (audio/video/document/image).
+  it("routes inlineData by MIME: audio/* -> IR audio part", () => {
+    const native = {
+      contents: [
+        { role: "user", parts: [{ inlineData: { mimeType: "audio/wav", data: "QUJD" } }] },
+      ],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "audio", data: "QUJD", format: "wav" });
+  });
+
+  it("routes inlineData by MIME: application/pdf -> IR document part", () => {
+    const native = {
+      contents: [
+        {
+          role: "user",
+          parts: [{ inlineData: { mimeType: "application/pdf", data: "JVBE" } }],
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({
+      type: "document",
+      data: "JVBE",
+      mediaType: "application/pdf",
+    });
+  });
+
+  it("routes inlineData image/* -> IR image part (unchanged)", () => {
+    const native = {
+      contents: [
+        { role: "user", parts: [{ inlineData: { mimeType: "image/png", data: "AAAA" } }] },
+      ],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "image", url: "data:image/png;base64,AAAA" });
+  });
+
+  it("maps a video fileData + videoMetadata into an IR video part", () => {
+    const native = {
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              fileData: { mimeType: "video/mp4", fileUri: "gs://bucket/clip.mp4" },
+              videoMetadata: { fps: 2, startOffset: "1.5s", endOffset: "5s" },
+            },
+          ],
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({
+      type: "video",
+      url: "gs://bucket/clip.mp4",
+      mediaType: "video/mp4",
+      fps: 2,
+      startOffset: "1.5s",
+      endOffset: "5s",
+    });
+  });
+
+  // Outbound: IR audio/video/document parts -> Gemini inlineData/fileData + videoMetadata.
+  it("renders an IR audio part as Gemini inlineData", () => {
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [{ role: "user", content: [{ type: "audio", data: "QUJD", format: "wav" }] }],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const part = native.contents[0]?.parts?.[0] as {
+      inlineData?: { mimeType?: string; data?: string };
+    };
+    expect(part.inlineData?.mimeType).toBe("audio/wav");
+    expect(part.inlineData?.data).toBe("QUJD");
+  });
+
+  it("renders an IR document part (base64) as Gemini inlineData", () => {
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "document", data: "JVBE", mediaType: "application/pdf" }],
+        },
+      ],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const part = native.contents[0]?.parts?.[0] as { inlineData?: { mimeType?: string } };
+    expect(part.inlineData?.mimeType).toBe("application/pdf");
+  });
+
+  it("renders an IR video part (remote uri + metadata) as Gemini fileData + videoMetadata", () => {
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "video",
+              url: "gs://bucket/clip.mp4",
+              mediaType: "video/mp4",
+              fps: 2,
+              startOffset: "1.5s",
+              endOffset: "5s",
+            },
+          ],
+        },
+      ],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const part = native.contents[0]?.parts?.[0] as {
+      fileData?: { mimeType?: string; fileUri?: string };
+      videoMetadata?: { fps?: number; startOffset?: string; endOffset?: string };
+    };
+    expect(part.fileData?.fileUri).toBe("gs://bucket/clip.mp4");
+    expect(part.fileData?.mimeType).toBe("video/mp4");
+    expect(part.videoMetadata?.fps).toBe(2);
+    expect(part.videoMetadata?.startOffset).toBe("1.5s");
+  });
+});
