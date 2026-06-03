@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { type IRMessage, IRRequestSchema, type IRResponse, IRResponseSchema } from "./ir.js";
+import {
+  IRLogprobsSchema,
+  type IRMessage,
+  IRRequestSchema,
+  type IRResponse,
+  IRResponseSchema,
+  IRTokenDetailsSchema,
+} from "./ir.js";
 import type { NativeRequest, NativeResponse, Transformer } from "./transformer.js";
 
 // OpenAI Chat transformer — the hub IDENTITY transform (docs/05). The IR takes
@@ -28,7 +35,9 @@ const OpenAIChatRequestSchema = z.object({
 });
 
 // —— OpenAI usage shape. `prompt_tokens` is the FULL prompt (cached + fresh);
-// `prompt_tokens_details.cached_tokens` is the cached slice (pit #2). ——————————
+// `prompt_tokens_details.cached_tokens` is the cached slice (pit #2).
+// `completion_tokens_details` carries the litellm-parity reasoning/audio breakdown
+// (IRTokenDetailsSchema is the shared shape; .passthrough() keeps unknown extras). —
 const OpenAIUsageSchema = z
   .object({
     prompt_tokens: z.number().int().nonnegative().optional(),
@@ -38,6 +47,7 @@ const OpenAIUsageSchema = z
       .object({ cached_tokens: z.number().int().nonnegative().optional() })
       .passthrough()
       .optional(),
+    completion_tokens_details: IRTokenDetailsSchema.optional(),
   })
   .passthrough();
 
@@ -45,16 +55,57 @@ const OpenAIChoiceSchema = z.object({
   index: z.number().int(),
   message: z.object({}).passthrough(),
   finish_reason: z.string().nullable(),
+  // litellm-parity: per-choice token logprobs (shared IR shape). Optional + nullable
+  // because OpenAI omits it unless `logprobs:true` was requested.
+  logprobs: IRLogprobsSchema.nullable().optional(),
 });
 
 const OpenAIResponseSchema = z
   .object({
     id: z.string(),
     model: z.string(),
+    created: z.number().int().optional(),
+    system_fingerprint: z.string().nullable().optional(),
     choices: z.array(OpenAIChoiceSchema),
     usage: OpenAIUsageSchema.optional(),
   })
   .passthrough();
+
+// —— finish_reason -> legal OpenAI value (pit #1). OpenAI clients only accept this
+// closed set; any out-of-vocabulary upstream value (e.g. a proxied Anthropic
+// "max_tokens") collapses to the nearest legal value while the RAW value stays in
+// provider_raw.stop_reason for lossless reconstruction/billing. ————————————————————
+const OPENAI_FINISH_REASONS = new Set([
+  "stop",
+  "length",
+  "tool_calls",
+  "content_filter",
+  "function_call",
+]);
+function toOpenAIFinishReason(raw: string | null): string | null {
+  if (raw === null) return null;
+  if (OPENAI_FINISH_REASONS.has(raw)) return raw;
+  // Map common cross-protocol aliases; everything else falls back to "stop".
+  switch (raw) {
+    case "end_turn":
+    case "stop_sequence":
+    case "STOP":
+    case "complete":
+      return "stop";
+    case "max_tokens":
+    case "MAX_TOKENS":
+      return "length";
+    case "tool_use":
+    case "function_call_required":
+      return "tool_calls";
+    case "content_filtered":
+    case "safety":
+    case "recitation":
+      return "content_filter";
+    default:
+      return "stop";
+  }
+}
 
 // —— Request: OpenAI native -> IR (identity, but fail-closed validated). ————————
 function toIRRequest(req: NativeRequest) {
@@ -78,16 +129,21 @@ function toIRResponse(res: NativeResponse): IRResponse {
   const rawUsage = parsed.usage;
   const cached = rawUsage?.prompt_tokens_details?.cached_tokens ?? 0;
   const fullPrompt = rawUsage?.prompt_tokens;
+  // reasoning_tokens lives under completion_tokens_details (OpenAI o-series); lift it
+  // to the flat IRUsage.reasoning_tokens too so cross-protocol billing has one home.
+  const completionDetails = rawUsage?.completion_tokens_details;
+  const reasoningTokens = completionDetails?.reasoning_tokens;
 
   const irResponse = {
     id: parsed.id,
     model: parsed.model,
     choices: parsed.choices.map((c) => ({
       index: c.index,
-      // message is OpenAI-shaped already (assistant/tool_calls/content); the IR
-      // message schema validates it.
+      // message is OpenAI-shaped already (assistant/tool_calls/content +
+      // reasoning_content/annotations); the IR message schema validates it.
       message: c.message as IRMessage,
       finish_reason: c.finish_reason,
+      ...(c.logprobs !== undefined ? { logprobs: c.logprobs } : {}),
     })),
     usage:
       rawUsage === undefined
@@ -99,11 +155,19 @@ function toIRResponse(res: NativeResponse): IRResponse {
               ? { completion_tokens: rawUsage.completion_tokens }
               : {}),
             ...(cached > 0 ? { cached_tokens: cached } : {}),
+            ...(reasoningTokens !== undefined ? { reasoning_tokens: reasoningTokens } : {}),
+            ...(completionDetails !== undefined
+              ? { completion_tokens_details: completionDetails }
+              : {}),
           },
     provider_raw: {
       // raw upstream values, untouched, for cross-protocol reconstruction/billing.
       stop_reason: parsed.choices[0]?.finish_reason ?? null,
       ...(rawUsage !== undefined ? { usage: rawUsage } : {}),
+      // system_fingerprint is OpenAI-only (no IR home); keep it for re-emission.
+      ...(parsed.system_fingerprint != null
+        ? { system_fingerprint: parsed.system_fingerprint }
+        : {}),
     },
   };
   return IRResponseSchema.parse(irResponse);
@@ -126,16 +190,31 @@ function toOpenAIResponse(res: IRResponse): NativeResponse {
       completion_tokens: completion,
       total_tokens: fullPrompt + completion,
       ...(cached > 0 ? { prompt_tokens_details: { cached_tokens: cached } } : {}),
+      // Re-emit the reasoning/audio breakdown verbatim (OpenAI o-series clients
+      // read reasoning_tokens here, not from the flat IR mirror).
+      ...(u.completion_tokens_details !== undefined
+        ? { completion_tokens_details: u.completion_tokens_details }
+        : {}),
     };
   }
+  // system_fingerprint round-trips through provider_raw (no IR-native home).
+  const rawFingerprint = parsed.provider_raw?.system_fingerprint;
+  const systemFingerprint = typeof rawFingerprint === "string" ? rawFingerprint : undefined;
   return {
     id: parsed.id,
     object: "chat.completion",
+    // OpenAI responses always carry a `created` epoch-seconds timestamp; computing
+    // the current time here is fine (transformer/app code, not pure routing logic).
+    created: Math.floor(Date.now() / 1000),
     model: parsed.model,
+    ...(systemFingerprint !== undefined ? { system_fingerprint: systemFingerprint } : {}),
     choices: parsed.choices.map((c) => ({
       index: c.index,
+      // message already carries reasoning_content/annotations (IR-shaped == native).
       message: c.message,
-      finish_reason: c.finish_reason,
+      // map to a legal OpenAI value; the raw value stays in provider_raw.stop_reason.
+      finish_reason: toOpenAIFinishReason(c.finish_reason),
+      ...(c.logprobs !== undefined ? { logprobs: c.logprobs } : {}),
     })),
     ...(usage !== undefined ? { usage } : {}),
   };

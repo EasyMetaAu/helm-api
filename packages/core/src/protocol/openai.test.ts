@@ -186,6 +186,247 @@ describe("openaiTransformer — fail-closed request validation (pit: identity !=
   });
 });
 
+describe("openaiTransformer — litellm-parity request params", () => {
+  // P3: the new sampling/control params must survive native -> IR -> native.
+  const paramsRequest = {
+    model: "gpt-4o",
+    messages: [{ role: "user", content: "hi" }],
+    top_p: 0.9,
+    top_k: 40,
+    frequency_penalty: 0.5,
+    presence_penalty: -0.2,
+    seed: 42,
+    stop: ["\n\n", "END"],
+    n: 2,
+    logprobs: true,
+    top_logprobs: 5,
+    parallel_tool_calls: false,
+    stream_options: { include_usage: true },
+    modalities: ["text", "audio"],
+    reasoning_effort: "high",
+    user: "user-123",
+    service_tier: "auto",
+  } as const;
+
+  it("carries every new param into the IR (transformRequestOut)", async () => {
+    const ir = await openaiTransformer.transformRequestOut(paramsRequest);
+    expect(ir.top_p).toBe(0.9);
+    expect(ir.top_k).toBe(40);
+    expect(ir.frequency_penalty).toBe(0.5);
+    expect(ir.presence_penalty).toBe(-0.2);
+    expect(ir.seed).toBe(42);
+    expect(ir.stop).toEqual(["\n\n", "END"]);
+    expect(ir.n).toBe(2);
+    expect(ir.logprobs).toBe(true);
+    expect(ir.top_logprobs).toBe(5);
+    expect(ir.parallel_tool_calls).toBe(false);
+    expect(ir.stream_options).toEqual({ include_usage: true });
+    expect(ir.modalities).toEqual(["text", "audio"]);
+    expect(ir.reasoning_effort).toBe("high");
+    expect(ir.user).toBe("user-123");
+    expect(ir.service_tier).toBe("auto");
+  });
+
+  it("round-trips every new param back to native (transformRequestIn)", async () => {
+    const ir = await openaiTransformer.transformRequestOut(paramsRequest);
+    const back = (await openaiTransformer.transformRequestIn(ir)) as typeof paramsRequest;
+    expect(back.top_p).toBe(0.9);
+    expect(back.top_k).toBe(40);
+    expect(back.frequency_penalty).toBe(0.5);
+    expect(back.presence_penalty).toBe(-0.2);
+    expect(back.seed).toBe(42);
+    expect(back.stop).toEqual(["\n\n", "END"]);
+    expect(back.n).toBe(2);
+    expect(back.logprobs).toBe(true);
+    expect(back.top_logprobs).toBe(5);
+    expect(back.parallel_tool_calls).toBe(false);
+    expect(back.stream_options).toEqual({ include_usage: true });
+    expect(back.modalities).toEqual(["text", "audio"]);
+    expect(back.reasoning_effort).toBe("high");
+    expect(back.user).toBe("user-123");
+    expect(back.service_tier).toBe("auto");
+  });
+
+  it("accepts a bare string `stop`", async () => {
+    const ir = await openaiTransformer.transformRequestOut({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "x" }],
+      stop: "STOP",
+    });
+    expect(ir.stop).toBe("STOP");
+  });
+});
+
+describe("openaiTransformer — logprobs round-trip", () => {
+  // P3: choice-level logprobs survive native -> IR -> native.
+  const upstream = {
+    id: "chatcmpl-lp",
+    model: "gpt-4o",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content: "Hi" },
+        finish_reason: "stop",
+        logprobs: {
+          content: [
+            {
+              token: "Hi",
+              logprob: -0.0001,
+              bytes: [72, 105],
+              top_logprobs: [{ token: "Hi", logprob: -0.0001, bytes: [72, 105] }],
+            },
+          ],
+        },
+      },
+    ],
+    usage: { prompt_tokens: 5, completion_tokens: 1 },
+  };
+
+  it("extracts logprobs into IRChoice.logprobs (transformResponseIn)", async () => {
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    expect(ir.choices[0]?.logprobs?.content?.[0]?.token).toBe("Hi");
+    expect(ir.choices[0]?.logprobs?.content?.[0]?.logprob).toBeCloseTo(-0.0001);
+  });
+
+  it("emits logprobs back to native (transformResponseOut)", async () => {
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    const back = (await openaiTransformer.transformResponseOut(ir)) as {
+      choices: Array<{ logprobs?: { content?: Array<{ token: string }> } }>;
+    };
+    expect(back.choices[0]?.logprobs?.content?.[0]?.token).toBe("Hi");
+  });
+});
+
+describe("openaiTransformer — reasoning_content + completion_tokens_details", () => {
+  // P3: reasoning string + reasoning_tokens detail survive the round-trip.
+  const upstream = {
+    id: "chatcmpl-r",
+    model: "o1",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: "The answer is 4.",
+          reasoning_content: "2 + 2 = 4",
+        },
+        finish_reason: "stop",
+      },
+    ],
+    usage: {
+      prompt_tokens: 10,
+      completion_tokens: 20,
+      total_tokens: 30,
+      completion_tokens_details: { reasoning_tokens: 15, audio_tokens: 0 },
+    },
+  };
+
+  it("extracts reasoning_content + completion_tokens_details into the IR (transformResponseIn)", async () => {
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    expect(ir.choices[0]?.message.reasoning_content).toBe("2 + 2 = 4");
+    expect(ir.usage?.completion_tokens_details?.reasoning_tokens).toBe(15);
+    expect(ir.usage?.reasoning_tokens).toBe(15);
+  });
+
+  it("emits reasoning_content + completion_tokens_details back to native (transformResponseOut)", async () => {
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    const back = (await openaiTransformer.transformResponseOut(ir)) as {
+      choices: Array<{ message: { reasoning_content?: string } }>;
+      usage: { completion_tokens_details?: { reasoning_tokens?: number } };
+    };
+    expect(back.choices[0]?.message.reasoning_content).toBe("2 + 2 = 4");
+    expect(back.usage.completion_tokens_details?.reasoning_tokens).toBe(15);
+  });
+});
+
+describe("openaiTransformer — system_fingerprint + created", () => {
+  // P3: system_fingerprint stashes into provider_raw and is re-emitted; created
+  // is always present (epoch seconds) on the outbound response.
+  const upstream = {
+    id: "chatcmpl-sf",
+    object: "chat.completion",
+    created: 1_700_000_000,
+    model: "gpt-4o",
+    system_fingerprint: "fp_abc123",
+    choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  };
+
+  it("stashes system_fingerprint into provider_raw (transformResponseIn)", async () => {
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    expect(ir.provider_raw?.system_fingerprint).toBe("fp_abc123");
+  });
+
+  it("re-emits system_fingerprint + a created timestamp (transformResponseOut)", async () => {
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    const back = (await openaiTransformer.transformResponseOut(ir)) as {
+      system_fingerprint?: string;
+      created?: number;
+    };
+    expect(back.system_fingerprint).toBe("fp_abc123");
+    expect(typeof back.created).toBe("number");
+    expect(back.created).toBeGreaterThan(0);
+  });
+});
+
+describe("openaiTransformer — finish_reason mapped to a legal OpenAI value", () => {
+  // P3: an out-of-vocabulary upstream finish_reason maps to a legal OpenAI value
+  // outbound, with the raw value preserved in provider_raw.stop_reason.
+  it("maps an unknown finish_reason to `stop` outbound while keeping the raw value", async () => {
+    const upstream = {
+      id: "chatcmpl-fr",
+      model: "gpt-4o",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "x" },
+          finish_reason: "some_proprietary_reason",
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    };
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    expect(ir.provider_raw?.stop_reason).toBe("some_proprietary_reason");
+    const back = (await openaiTransformer.transformResponseOut(ir)) as {
+      choices: Array<{ finish_reason: string | null }>;
+    };
+    expect(back.choices[0]?.finish_reason).toBe("stop");
+  });
+
+  it("maps cross-protocol aliases (max_tokens -> length)", async () => {
+    const upstream = {
+      id: "chatcmpl-fr3",
+      model: "gpt-4o",
+      choices: [
+        { index: 0, message: { role: "assistant", content: "x" }, finish_reason: "max_tokens" },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    };
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    expect(ir.provider_raw?.stop_reason).toBe("max_tokens");
+    const back = (await openaiTransformer.transformResponseOut(ir)) as {
+      choices: Array<{ finish_reason: string | null }>;
+    };
+    expect(back.choices[0]?.finish_reason).toBe("length");
+  });
+
+  it("passes legal finish_reasons through unchanged", async () => {
+    const upstream = {
+      id: "chatcmpl-fr2",
+      model: "gpt-4o",
+      choices: [
+        { index: 0, message: { role: "assistant", content: null }, finish_reason: "tool_calls" },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    };
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    const back = (await openaiTransformer.transformResponseOut(ir)) as {
+      choices: Array<{ finish_reason: string | null }>;
+    };
+    expect(back.choices[0]?.finish_reason).toBe("tool_calls");
+  });
+});
+
 describe("openaiTransformer — endpoint + registry", () => {
   // test #6: endPoint is /v1/chat/completions and registry enumerates it.
   it("declares the /v1/chat/completions endPoint", () => {
