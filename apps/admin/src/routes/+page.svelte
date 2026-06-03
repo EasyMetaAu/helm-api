@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
+  import RangeFilter from '$lib/components/RangeFilter.svelte';
   import { formatUsd } from '$lib/format.js';
+  import { DEFAULT_PAGE_SIZE, filtersToSearch, type RangeKey } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
 
   type Stats = {
@@ -13,10 +16,50 @@
     totalCost: number;
   };
 
-  let { data }: { data: { items: RequestListItem[]; stats: Stats } } = $props();
+  let { data }: { data: { items: RequestListItem[]; range: RangeKey; stats: Stats } } = $props();
 
   const stats = $derived(data.stats);
-  const recent = $derived(data.items.slice(0, 6));
+  const recent = $derived(data.items.slice(0, 10));
+
+  // The dashboard window lives in the URL (?range=…) so the loader re-fetches and
+  // the view is shareable / back-button friendly — '24h' is the default, written
+  // as a clean URL (no query) to match the loader's fallback. The button row is the
+  // shared RangeFilter (same control as the request-list filter bar).
+  const HOME_DEFAULT_RANGE: RangeKey = '24h';
+
+  function selectRange(next: RangeKey): void {
+    const search = next === HOME_DEFAULT_RANGE ? '' : `range=${next}`;
+    void goto(search ? `?${search}` : '?', { keepFocus: true, noScroll: true });
+  }
+
+  // Carry the active window into the full request list so "View all" opens in the
+  // same range. Built with the list's own serializer so it matches exactly what the
+  // list treats as "clean" (the list defaults to 24h, so 24h → no query, all →
+  // ?range=all).
+  const viewAllHref = $derived.by(() => {
+    const qs = filtersToSearch({ range: data.range, page: 1, pageSize: DEFAULT_PAGE_SIZE });
+    return `${base}/requests${qs ? `?${qs}` : ''}`;
+  });
+
+  // A recent-requests row mirrors the full request list: the whole row links to the
+  // detail page, but the Request-ID cell keeps a real <a> so keyboard / middle-click /
+  // open-in-new-tab still work (the row click is a mouse convenience on top).
+  function detailHref(traceId: string): string {
+    return `${base}/requests/${traceId}`;
+  }
+
+  function onRowClick(event: MouseEvent, traceId: string): void {
+    if ((event.target as HTMLElement).closest('a')) return;
+    void goto(detailHref(traceId));
+  }
+
+  // Format the recorded ISO timestamp for the local locale; '—' for a legacy row
+  // that carried none.
+  function formatTs(ts: string): string {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
+  }
 
   function decidedByClass(d: RequestListItem['decided_by']): string {
     switch (d) {
@@ -70,6 +113,12 @@
     </p>
   </header>
 
+  <!-- Date-range filter: scopes the stat cards + recent-request preview to a
+       rolling window. Selecting a preset re-runs the loader via the URL. -->
+  <div class="mb-5">
+    <RangeFilter value={data.range} onChange={selectRange} />
+  </div>
+
   <!-- Stat cards -->
   <div class="grid grid-cols-2 gap-3 md:grid-cols-4 md:gap-4">
     <div class="card">
@@ -105,7 +154,7 @@
   <section class="mt-8">
     <div class="mb-1 flex items-center justify-between">
       <h2 class="section-header">{$t('Recent requests')}</h2>
-      <a class="link-inline text-sm font-medium" href={`${base}/requests`}>
+      <a class="link-inline text-sm font-medium" href={viewAllHref}>
         {$t('View all')} →
       </a>
     </div>
@@ -141,19 +190,36 @@
         <table class="table-base">
           <thead class="table-head">
             <tr>
-              <th class="px-3 py-2 font-medium">{$t('Requested')}</th>
+              <th class="px-3 py-2 font-medium">{$t('Request ID')}</th>
+              <th class="px-3 py-2 font-medium">{$t('Time')}</th>
+              <th class="px-3 py-2 font-medium">{$t('Requested model')}</th>
               <th class="px-3 py-2 font-medium">{$t('Decided by')}</th>
               <th class="px-3 py-2 font-medium">{$t('Lane')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Final model')}</th>
+              <th class="px-3 py-2 font-medium">{$t('Served model')}</th>
               <th class="px-3 py-2 font-medium">{$t('Status')}</th>
-              <th class="px-3 py-2 text-right font-medium">{$t('Latency')}</th>
-              <th class="px-3 py-2 text-right font-medium">{$t('Cost')}</th>
+              <th class="px-3 py-2 font-medium">{$t('Latency')}</th>
+              <th class="px-3 py-2 font-medium">{$t('Cost')}</th>
             </tr>
           </thead>
           <tbody>
             {#each recent as r (r.trace_id)}
-              <tr class="table-row">
-                <td class="px-3 py-2 text-slate-700">{r.requested_model ?? '—'}</td>
+              <!-- The whole row links to the detail page; the request-id cell keeps a
+                   real <a> for keyboard / open-in-new-tab. (Mirrors /requests.) -->
+              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+              <tr
+                data-testid="request-row"
+                class="table-row cursor-pointer"
+                onclick={(e) => onRowClick(e, r.trace_id)}
+              >
+                <td class="px-3 py-2">
+                  <a
+                    class="link-inline font-mono text-ink-strong"
+                    href={detailHref(r.trace_id)}
+                    title={r.trace_id}>{r.trace_id}</a
+                  >
+                </td>
+                <td class="px-3 py-2 text-ink-body">{formatTs(r.ts)}</td>
+                <td class="px-3 py-2 text-ink-body">{r.requested_model ?? '—'}</td>
                 <td class="px-3 py-2">
                   <span
                     class={decidedByClass(r.decided_by)}
@@ -166,8 +232,8 @@
                           : ''}>{r.decided_by}</span
                   >
                 </td>
-                <td class="px-3 py-2 text-slate-700">{r.lane || '—'}</td>
-                <td class="px-3 py-2 font-mono text-xs text-slate-600">{r.final_model ?? '—'}</td>
+                <td class="px-3 py-2 text-ink-body">{r.lane || '—'}</td>
+                <td class="px-3 py-2 font-mono text-xs text-ink-body">{r.final_model ?? '—'}</td>
                 <td class="px-3 py-2">
                   {#if r.status === 'error'}
                     <span class="badge-error">{$t('error')}</span>
@@ -175,8 +241,8 @@
                     <span class="badge-ok">{$t('ok')}</span>
                   {/if}
                 </td>
-                <td class="px-3 py-2 text-right text-slate-500">{r.latency_ms}ms</td>
-                <td class="px-3 py-2 text-right font-mono text-slate-600">{formatUsd(r.cost_usd)}</td>
+                <td class="px-3 py-2 font-mono text-ink-body">{r.latency_ms}ms</td>
+                <td class="px-3 py-2 font-mono text-ink-body">{formatUsd(r.cost_usd)}</td>
               </tr>
             {/each}
           </tbody>

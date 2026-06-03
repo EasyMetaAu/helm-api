@@ -12,6 +12,7 @@ export const load: PageLoad = async ({ url }) => {
   const { start, end } = resolveWindow(filters.range, Date.now());
   const page = await listRequests({
     page: filters.page,
+    pageSize: filters.pageSize,
     status: filters.status,
     decidedBy: filters.decidedBy,
     lane: filters.lane,

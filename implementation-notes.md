@@ -5,6 +5,76 @@
 
 ---
 
+## 2026-06-03 · Request-list defaults to the last 24h (not all) (admin)
+
+**Context**: `/admin/requests` opened on `range=all`, which grows unwieldy; the operator wanted the last 24 hours by default.
+
+**Change** (`requests-filters.ts`): introduced `DEFAULT_RANGE = '24h'` and used it in three coupled places so the round-trip stays consistent — `DEFAULT_FILTERS.range`, `parseFilters` fallback, and the `filtersToSearch` omit-test. Net effect: the clean URL `/admin/requests` now means **24h**, and `全部` is an explicit `?range=all`. `reset()` lands on 24h (it already reads `DEFAULT_FILTERS.range`). The homepage's "View all" link now builds its href via `filtersToSearch` (the canonical serializer) so its window carries over exactly: homepage 24h → clean `/requests`, `all` → `?range=all`, `6h` → `?range=6h`. Tests updated (default-range assertions; `range=all` now serialized explicitly). Supersedes the "list default = all" note below.
+
+**Verified**: admin suite **192**, svelte-check 0/0, prettier clean; deployed.
+
+---
+
+## 2026-06-03 · Request-list pager: numbered pages + rows-per-page + pointer cursor (spec docs/07, admin)
+
+**Context**: The list pager was just `Page X of Y` + Prev/Next buttons. The operator wanted numbered page links on the right, a rows-per-page control, Prev/Next kept, and correct (pointer) cursor on clickable controls.
+
+**Implementation**:
+- `lib/pagination.ts` (+test) — pure `paginationItems(current, total, around=1)` → `(number | 'ellipsis')[]`: always first+last, a window around current, one ellipsis per gap; clamps an out-of-range current. Deterministic, unit-tested.
+- `requests-filters.ts` — added `pageSize` to the filter state (`PAGE_SIZE_OPTIONS = [25,50,100,200]`, `DEFAULT_PAGE_SIZE = 50`). `parseFilters` accepts only an offered size (else default); `filtersToSearch` writes it only when non-default; `DEFAULT_FILTERS` carries 50. Loader passes `filters.pageSize` to `listRequests` (backend already clamps to [1,200]).
+- `routes/requests/+page.svelte` — footer rebuilt: **left** = rows-per-page `<select>` + `Page X of Y · N requests`; **right** = Prev (button) · numbered links · Next (button). Page numbers are real `<a href={pageHref(n)}>` (native pointer, middle-click / open-in-new-tab) with `data-sveltekit-noscroll` so client-side nav keeps scroll like the Prev/Next buttons; the current page is a non-link `<span aria-current="page">`. Changing page size calls `go()` (resets to page 1).
+- **Cursor fix** (`app.css`): added `cursor-pointer` to all button utility classes (`.btn-primary/-sm/-secondary/-success/-danger/-danger-outline/-icon`). `disabled:cursor-not-allowed` still wins when disabled (higher specificity). This fixes the "clickable shows arrow" complaint app-wide, not just the pager.
+- i18n: added `Rows per page` (每页行数) + `Pagination` (分页) to en + zh-hans; other locales fall back to English.
+
+**Verified**: new `pagination.test.ts` (7) + filter tests + 2 new pager tests in `requests.test.ts`; full admin suite 25 files / **190 tests**, svelte-check 0/0, prettier clean. Deployed; served bundle has `pager-page-size` / `pager-page` and `cursor:pointer` compiled into the button CSS.
+
+---
+
+## 2026-06-03 · Extract a shared `RangeFilter` component; request-list date-range = button row (admin)
+
+**Context**: After adding the homepage window picker, the request-list page still used a `日期范围` `<select>` (`filter-range`). The operator wanted that control pulled out into the same button row, shared between both pages.
+
+**Implementation**:
+- New `lib/components/RangeFilter.svelte` — stateless presets row (`1h/6h/24h/7d/30d/All`), `btn-primary-sm` active / `btn-secondary` idle, `role="group"` + `aria-label`. Props: `value: RangeKey`, `onChange(next)`, optional `label`. The parent owns the active value (from the URL) and applies the change — the component only renders + reports.
+- Homepage now renders `<RangeFilter value={data.range} onChange={selectRange} />` (dropped its inline copy).
+- Request-list page: removed the `日期范围` `<select>` from the filter `<form>` and put `<RangeFilter>` as a standalone row above it; `onChange` sets `range` + calls the existing `go()` (resets to page 1, re-runs the loader). **`today` is no longer a UI option** (the shared set omits it to match the homepage); it stays a valid `RangeKey` so old `?range=today` bookmarks still resolve, just with no button lit. The `All time / Today / Last N` i18n keys are now unused (harmless; left in the dicts).
+- Test: `RangeFilter.test.ts` — renders six presets, marks only the active one `aria-pressed`, fires `onChange` with the clicked key.
+
+**Verified**: admin suite 24 files / 179 tests, svelte-check 0/0, prettier clean. Deployed; served bundle has `filter-range` = 0 (select removed), `filter-status` = 1 (other filters intact), one shared `range-` chunk used by both pages.
+
+---
+
+## 2026-06-03 · Homepage "Recent requests" → clickable rows + request-list parity (spec docs/07, admin)
+
+**Context**: The Overview's "Recent requests" preview was a static table (slate-* colors, no Request ID, rows not clickable) while `/admin/requests` rows are clickable into the per-request detail trail. The operator wanted the preview to read + behave the same.
+
+**Implementation** (`routes/+page.svelte`, presentation only — no loader/API change):
+- Reused the request-list row pattern verbatim: whole row `onclick` → `detailHref(trace_id)` via `goto`, guarded so a click on the inner `<a>` lets the anchor navigate (keyboard / middle-click / open-in-new-tab still work); `cursor-pointer`; the `a11y_click_events_have_key_events` ignore comment (matches the list page → svelte-check stays at 0 warnings).
+- Led the table with **Request ID** (mono link) + **Time**, and renamed the existing headers to the list's wording (`Requested model`, `Served model`); switched cell colors slate-* → the `text-ink-*` semantic tokens the list uses. All four new header keys already existed in every locale (shared with `/requests`), so **no i18n churn**.
+- **Kept it a compact subset, NOT full 14-column parity.** The preview shows Request ID · Time · Requested · Decided by · Lane · Served · Status · Latency · Cost; Key / Task / Complexity / Fallbacks / Error stay exclusive to "View all" (the overview is at-a-glance, and "View all" already carries the active range). Easy to widen later if full parity is wanted.
+
+**Verified**: svelte-check 0/0, admin suite 176/176, prettier clean; deployed (see below) and the served homepage chunk contains `request-row` / `cursor-pointer` / the `requests/<id>` detail href.
+
+---
+
+## 2026-06-03 · Homepage date-range filter (1h/6h/24h/7d/30d/All) (spec docs/07, admin)
+
+**Context**: The Overview dashboard fetched a single default page of requests and computed its stat cards from it, with no way to scope the window — the old (pre-Helm) LLM-Router console had a `1h/6h/24h/7d/30d/全部` toolbar the operator wanted back.
+
+**Implementation** (reuses the request-list filter primitives, no new backend):
+- `requests-filters.ts` — added `1h`/`6h` to `RANGE_KEYS` + `resolveWindow` (new `HOUR_MS`), and a small `parseRange(value, fallback)` helper (the homepage carries ONLY `?range=` in the URL, not the list's full filter set). Purely additive — the request-list page's select is unaffected, and `parseFilters` now also accepts the two sub-day keys on a shared bookmark.
+- `routes/+page.ts` — the loader reads `?range=` (resolves to a `[start, end)` window in client-local time, gateway stays TZ-agnostic) and fetches `listRequests({ start, end, pageSize: 200 })`. Re-runs on every navigation since it depends on `url`. Fail-soft unchanged (API hiccup → empty dashboard).
+- `routes/+page.svelte` — a `role="group"` button row above the stat cards; active = `btn-primary-sm` (slate-800 fill), inactive = `btn-secondary`. Clicking navigates to `?range=X` (default `24h` → clean URL). "View all" carries the active range into the request list.
+
+**Decisions worth knowing:**
+- **Homepage default = `24h`** (a live dashboard cares about recent traffic; matches the old toolbar's active state) — deliberately DIFFERENT from the request-list page default (`all`). Each page owns its default; the shared `range` param is just validated by both.
+- **Stats are a sampled snapshot, not an exact aggregate.** `stats.total` is the backend's real filtered count, but success-rate / avg-latency / spend are computed over the ≤200-row sample (page size bumped 50→200 for a better sample). This preserves the dashboard's existing at-a-glance semantics rather than adding a dedicated aggregate endpoint; if exact windowed aggregates are ever needed, that's a backend `/stats` call. TODO if it matters.
+- **No new i18n keys** — numeric labels (`1h`…`30d`) are language-neutral literals; the only translated label, `All` (→ 全部), and the group's `Date range` aria-label already existed in the locale dicts.
+
+**Verified**: 11/11 `requests-filters` unit tests (added `1h`/`6h` window + `parseRange` cases, TDD), full admin suite 176/176, `svelte-check` 0 errors, prettier clean. Manually via `vite dev`: buttons render `1h/6h/24h/7d/30d/All`, `24h` active by default, click toggles active + URL (`24h`→`/`, others→`?range=X`), loader issues `pageSize=200` with the correct `start` per window and no `start` for `All`; fail-soft empty dashboard against a gateway-less dev server.
+
+---
+
 ## 2026-06-03 · Hot-reload the OAuth subscription pool (proxy / priority / schedulable / connect / disconnect) — no restart (issue #38)
 
 **Context**: The operator's rule — anything editable in an admin page form must hot-apply on Save, never need a restart. Audited every admin form vs its runtime consumption: **lanes, policies, classifier, API keys, System Settings (capture/retention/rate-limit/log-level), and OAuth model curation were ALREADY hot** (RuleStore re-bind callbacks / live keystore reads / per-request thunks). The **only gap** was the OAuth pool: `synthesizeOAuthProviders()` ran once at startup and froze each account's proxy/priority/schedulable + the connected-account set into the pool; the admin PUT handlers only persisted.
