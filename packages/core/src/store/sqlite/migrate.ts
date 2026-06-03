@@ -262,6 +262,31 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys DROP COLUMN max_lane;
     `,
   },
+  {
+    // Per-key USAGE BUDGETS (docs/06 "usage budgets"). Additive — existing rows get
+    // NULL caps (= no budget) + over_budget_behavior 'degrade'. Two parts: (a) six
+    // budget config columns on api_keys; (b) the usage_budget_buckets counter table
+    // (rolling token buckets, one row per key_id+dim, mirrors rate_limit_buckets but
+    // with a configurable window). tokens REAL so fractional spend/refill survive;
+    // may go negative (soft cap settled post-served). key_id only (principle 7).
+    version: 11,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN budget_requests INTEGER;
+      ALTER TABLE api_keys ADD COLUMN budget_tokens INTEGER;
+      ALTER TABLE api_keys ADD COLUMN budget_spend_usd REAL;
+      ALTER TABLE api_keys ADD COLUMN budget_window_seconds INTEGER;
+      ALTER TABLE api_keys ADD COLUMN over_budget_behavior TEXT NOT NULL DEFAULT 'degrade';
+      ALTER TABLE api_keys ADD COLUMN degrade_lane TEXT;
+
+      CREATE TABLE IF NOT EXISTS usage_budget_buckets (
+        key_id TEXT NOT NULL,
+        dim TEXT NOT NULL,
+        tokens REAL NOT NULL,
+        last_refill_ms INTEGER NOT NULL,
+        PRIMARY KEY (key_id, dim)
+      );
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

@@ -32,6 +32,14 @@ export const apiKeys = pgTable("api_keys", {
   // default at check time; a value (0 = unlimited) overrides that one dimension.
   rateLimitRpm: integer("rate_limit_rpm"),
   rateLimitTpm: integer("rate_limit_tpm"),
+  // Per-key usage budgets (docs/06). NULL = no cap. Spend is double precision
+  // (fractional USD). over_budget_behavior text enum defaulting to 'degrade'.
+  budgetRequests: integer("budget_requests"),
+  budgetTokens: integer("budget_tokens"),
+  budgetSpendUsd: doublePrecision("budget_spend_usd"),
+  budgetWindowSeconds: integer("budget_window_seconds"),
+  overBudgetBehavior: text("over_budget_behavior").notNull().default("degrade"),
+  degradeLane: text("degrade_lane"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(), // epoch ms
 });
 
@@ -54,6 +62,21 @@ export const rateLimitBuckets = pgTable(
   {
     keyId: text("key_id").notNull(), // key_id — never plaintext
     dim: text("dim").notNull(), // 'rpm' | 'tpm'
+    tokens: doublePrecision("tokens").notNull(),
+    lastRefillMs: bigint("last_refill_ms", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.keyId, t.dim] })],
+);
+
+// Per-key USAGE-BUDGET token buckets (docs/06 "usage budgets") — pg mirror of the
+// sqlite usage_budget_buckets table. Configurable rolling window; exceeding a
+// budget DEGRADES rather than rejects. One row per (key_id, dim ∈ req|tok|usd).
+// tokens double precision (fractional, may go negative — soft cap). key_id only.
+export const usageBudgetBuckets = pgTable(
+  "usage_budget_buckets",
+  {
+    keyId: text("key_id").notNull(),
+    dim: text("dim").notNull(), // 'req' | 'tok' | 'usd'
     tokens: doublePrecision("tokens").notNull(),
     lastRefillMs: bigint("last_refill_ms", { mode: "number" }).notNull(),
   },
@@ -176,6 +199,7 @@ export const oauthTokens = pgTable(
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
+export type UsageBudgetBucketsTable = typeof usageBudgetBuckets;
 export type RoutingSignalsTable = typeof routingSignals;
 export type MemoryThreadsTable = typeof memoryThreads;
 export type MemoryMessagesTable = typeof memoryMessages;

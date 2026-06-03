@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-06-03 · Per-API-key usage budgets with lane degradation (docs/06; supersedes the closed account-billing PR #42)
+
+**Context**: PR #42 built account-level credit billing (1 account : N keys). Helm is an **internal, self-hosted** gateway that hands out **API keys**, not accounts — there is no billing subject — so that PR was **closed**. What's actually wanted is **per-key cost control that doesn't interrupt service**: cap each key's usage over a rolling window and, when exceeded, **degrade to a cheaper lane** rather than reject.
+
+**Design** (reuses two existing mechanisms instead of a new ledger):
+- **Token-bucket** (`ratelimit/token-bucket.ts`) parameterized with a configurable `windowMs` (default 60s keeps RPM/TPM untouched). Budgets are token buckets with a long, per-key window. New `BudgetStore` port + sqlite/pg adapters (`usage_budget_buckets` table, one row per (key_id, dim ∈ req|tok|usd); sqlite migration **v11**, pg **v10**). Tokens may go negative (soft cap settled post-served).
+- **Lane degrade** reuses `applyCaps` (`policy-engine.ts`): re-added a `maxLane` to `RouteOptions.keyCaps` (the exact per-key ceiling #63 removed), now populated dynamically per request when over budget. No new routing logic.
+- Pure core `budget/` module: `gate.ts` (fail-CLOSED pre-route sign check) + `settle.ts` (fail-OPEN post-served debit). Key config: `budget_requests/_tokens/_spend_usd` (null = no cap), `budget_window_seconds`, `over_budget_behavior` (degrade|reject, default degrade), `degrade_lane` (null = economy).
+
+**Decisions / gotchas**:
+- **Per-dim over-budget threshold (important)**: a 30-day window means the bucket micro-refills a positive epsilon the instant after depletion, so a pure `remaining > 0` sign check would let a "budget of N" serve N+1. Fixed: discrete dims (req/tok) are over at `remaining < 1` (can't afford one whole unit); the fractional `usd` dim stays `remaining <= 0` (cost is unknown pre-request, so it keeps the D5 one-in-flight tolerance, settled after).
+- **All four faces** enforce budgets (the user asked for full coverage). The three self-auth faces (messages/responses/gemini) share `messages-pipeline.ts`, so the check + settle live there ONCE. To make the **spend** dim correct on the streaming pipeline path, the pipeline now also backfills streamed cost from the **upstream OpenAI usage tail** (`usageFromSSE`, the same parser chat uses) — the pipeline faces never settled streamed cost before; this closes that gap as a side benefit.
+- **Settle timing**: the non-stream path awaits settle before responding (deterministic); the streamed path settles in a `finally` after the usage-tail backfill. The e2e therefore depletes via a NON-stream request (a streamed settle can race a client that stops reading at `[DONE]`).
+- **Behavior default is `degrade`, NOT fail-closed**: the explicit product goal is uninterrupted service, so an over-budget key keeps serving on a cheaper lane unless configured to reject. Documented as intentional.
+- **No global on/off toggle**: a key with no caps is a zero-touch fast path (no store read), so budgets need no runtime-settings switch (unlike rate limits).
+- **Streamed-spend e2e**: the mock upstream emits no usage chunk, so the e2e covers the request-count dimension (degrade + reject, deterministic); per-amount spend/token settlement is covered by the unit tests (budget gate/settle + the pipeline/chat wiring), mirroring the constraint the closed PR hit.
+
+---
+
 ## 2026-06-03 · Hot-reload the OAuth subscription pool (proxy / priority / schedulable / connect / disconnect) — no restart (issue #38)
 
 **Context**: The operator's rule — anything editable in an admin page form must hot-apply on Save, never need a restart. Audited every admin form vs its runtime consumption: **lanes, policies, classifier, API keys, System Settings (capture/retention/rate-limit/log-level), and OAuth model curation were ALREADY hot** (RuleStore re-bind callbacks / live keystore reads / per-request thunks). The **only gap** was the OAuth pool: `synthesizeOAuthProviders()` ran once at startup and froze each account's proxy/priority/schedulable + the connected-account set into the pool; the admin PUT handlers only persisted.

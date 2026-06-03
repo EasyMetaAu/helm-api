@@ -340,6 +340,56 @@ describe("routeRequest — orchestration", () => {
     expect(plan.selected_lane).toBe("balanced");
   });
 
+  it("keyCaps.degradeLane forces an over-budget request onto the degrade lane", async () => {
+    // A policy pins `premium`; the key is over budget so the gateway sets
+    // degradeLane=economy for this request — it is FORCED onto economy.
+    const d = deps({
+      classify: vi.fn(async () => classification({ task_type: "chat" })),
+      policies: { policies: [{ id: "pin-premium", match: {}, use_lane: "premium" }] },
+    });
+    await routeRequest(req(), d, { keyCaps: { allowedLanes: null, degradeLane: "economy" } });
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+  });
+
+  it("keyCaps.degradeLane forces even an UNRANKED task lane (a ceiling would no-op)", async () => {
+    // Degrade target is the unranked `coding` lane: a rank-based max_lane would do
+    // nothing, but a forced selection routes the request onto it.
+    const d = deps({
+      classify: vi.fn(async () => classification({ task_type: "chat" })),
+      policies: { policies: [{ id: "pin-premium", match: {}, use_lane: "premium" }] },
+    });
+    await routeRequest(req(), d, { keyCaps: { allowedLanes: null, degradeLane: "coding" } });
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("coding");
+  });
+
+  it("keyCaps.degradeLane overrides explicit-model passthrough (no expensive-model bypass)", async () => {
+    // An allow_custom_model key naming an explicit model is normally passed through
+    // verbatim; over budget (degradeLane set) the passthrough is suppressed and the
+    // request is forced onto the degrade lane instead.
+    const d = deps();
+    const result = await routeRequest(req({ requested_model: "gpt-4o" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: null, degradeLane: "economy" },
+    });
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.explicit_model).toBeNull(); // NOT a [gpt-4o] passthrough chain
+    expect(plan.selected_lane).toBe("economy");
+    expect(result.decision.lane.selected_lane).toBe("economy");
+  });
+
+  it("keyCaps.degradeLane null is a no-op (within budget => requested lane preserved)", async () => {
+    const d = deps({
+      classify: vi.fn(async () => classification({ task_type: "chat" })),
+      policies: { policies: [{ id: "pin-premium", match: {}, use_lane: "premium" }] },
+    });
+    await routeRequest(req(), d, { keyCaps: { allowedLanes: null, degradeLane: null } });
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("premium");
+  });
+
   it("keyCaps undefined is a no-op (existing callers unaffected)", async () => {
     const d = deps();
     await routeRequest(req(), d);

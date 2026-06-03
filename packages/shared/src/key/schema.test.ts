@@ -83,6 +83,49 @@ describe("ApiKeyRecordSchema", () => {
   it("exposes the role enum options", () => {
     expect([...KeyRoleSchema.options].sort()).toEqual(["root", "user"]);
   });
+
+  it("accepts per-key usage budgets (number = cap, null = no cap)", () => {
+    const withBudgets = ApiKeyRecordSchema.safeParse({
+      ...fullKey(),
+      budget_requests: 1000,
+      budget_tokens: 500_000,
+      budget_spend_usd: 25.5,
+      budget_window_seconds: 86_400,
+      over_budget_behavior: "reject",
+      degrade_lane: "economy",
+    });
+    expect(withBudgets.success).toBe(true);
+  });
+
+  it("defaults budgets to no-cap + degrade when omitted (legacy rows / additive field)", () => {
+    const parsed = ApiKeyRecordSchema.parse(fullKey());
+    expect(parsed.budget_requests).toBeNull();
+    expect(parsed.budget_tokens).toBeNull();
+    expect(parsed.budget_spend_usd).toBeNull();
+    expect(parsed.budget_window_seconds).toBeNull();
+    expect(parsed.over_budget_behavior).toBe("degrade");
+    expect(parsed.degrade_lane).toBeNull();
+  });
+
+  it("rejects invalid budget values (fail-closed)", () => {
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_requests: -1 }).success).toBe(false);
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_tokens: 1.5 }).success).toBe(false);
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_spend_usd: -0.01 }).success).toBe(
+      false,
+    );
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_window_seconds: 0 }).success).toBe(
+      false,
+    );
+    expect(
+      ApiKeyRecordSchema.safeParse({ ...fullKey(), over_budget_behavior: "explode" }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a 0 budget cap (0 is NOT 'unlimited' — null means no cap)", () => {
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_requests: 0 }).success).toBe(false);
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_tokens: 0 }).success).toBe(false);
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_spend_usd: 0 }).success).toBe(false);
+  });
 });
 
 describe("CreateKeyRequestSchema", () => {
@@ -114,6 +157,24 @@ describe("CreateKeyRequestSchema", () => {
 
   it("rejects a negative per-key rate limit", () => {
     expect(CreateKeyRequestSchema.safeParse({ rate_limit_rpm: -5 }).success).toBe(false);
+  });
+
+  it("accepts optional per-key budgets + over-budget behavior", () => {
+    const res = CreateKeyRequestSchema.safeParse({
+      role: "user",
+      budget_spend_usd: 10,
+      budget_window_seconds: 3600,
+      over_budget_behavior: "degrade",
+      degrade_lane: "economy",
+    });
+    expect(res.success).toBe(true);
+  });
+
+  it("rejects invalid budget values on create (fail-closed; 0 rejected)", () => {
+    expect(CreateKeyRequestSchema.safeParse({ budget_requests: -1 }).success).toBe(false);
+    expect(CreateKeyRequestSchema.safeParse({ budget_requests: 0 }).success).toBe(false);
+    expect(CreateKeyRequestSchema.safeParse({ budget_spend_usd: 0 }).success).toBe(false);
+    expect(CreateKeyRequestSchema.safeParse({ over_budget_behavior: "nope" }).success).toBe(false);
   });
 });
 
@@ -157,5 +218,17 @@ describe("UpdateKeyRequestSchema", () => {
     expect(UpdateKeyRequestSchema.safeParse({ rate_limit_tpm: -1 }).success).toBe(false);
     expect(UpdateKeyRequestSchema.safeParse({ rate_limit_rpm: 2.5 }).success).toBe(false);
     expect(UpdateKeyRequestSchema.safeParse({ allowed_lanes: [""] }).success).toBe(false);
+  });
+
+  it("accepts budget edits: number (set), null (clear), behavior + degrade lane", () => {
+    expect(UpdateKeyRequestSchema.safeParse({ budget_spend_usd: 50 }).success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ budget_spend_usd: null }).success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ over_budget_behavior: "reject" }).success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ degrade_lane: null }).success).toBe(true);
+  });
+
+  it("rejects invalid budget edits (fail-closed)", () => {
+    expect(UpdateKeyRequestSchema.safeParse({ budget_tokens: -1 }).success).toBe(false);
+    expect(UpdateKeyRequestSchema.safeParse({ over_budget_behavior: "halt" }).success).toBe(false);
   });
 });

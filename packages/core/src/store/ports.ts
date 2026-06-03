@@ -45,6 +45,48 @@ export interface RateLimitStore {
   ): Promise<RateLimitConsumeResult>;
 }
 
+// Per-key usage-budget dimension (docs/06 "usage budgets"). req = request count,
+// tok = total tokens, usd = spend. One token-bucket row per (keyId, dim) in
+// `usage_budget_buckets` — same shape as rate_limit_buckets but with a CONFIGURABLE
+// rolling window (windowMs) instead of the fixed 60s.
+export type BudgetDim = "req" | "tok" | "usd";
+
+export interface BudgetPeekResult {
+  remaining: number; // refilled tokens left in the window (NOT persisted by peek)
+  ok: boolean; // remaining > 0 — the pre-route sign check
+}
+
+// Persistence for the per-key usage-budget buckets. UNLIKE the rate limiter, the
+// budget gate is fail-OPEN at settle (a served request is never 5xx'd over a
+// settle failure) but fail-CLOSED at peek (a read error propagates so the gate is
+// never silently bypassed — same boundary as RateLimitStore). The bucket starts
+// FULL (= capacity) so a fresh key has its whole budget; debits deplete it and may
+// push it NEGATIVE (a budget is a soft cap settled post-served, not a hard
+// reservation — D5-style tolerance). key_id only; never a plaintext key (principle 7).
+export interface BudgetStore {
+  // Pre-route sign check: refill (in memory) and read remaining for one
+  // (keyId, dim). READ-ONLY — never writes (the refilled state is persisted by the
+  // next debit). A cold bucket reads as FULL (capacity).
+  peek(
+    keyId: string,
+    dim: BudgetDim,
+    capacity: number,
+    windowMs: number,
+    nowMs: number,
+  ): Promise<BudgetPeekResult>;
+  // Post-served settle: atomically refill + subtract `amount` from the (keyId, dim)
+  // bucket and persist. ALWAYS debits (may go negative — soft cap). Returns the new
+  // remaining. amount 0 is a no-op debit (advances refill only).
+  debit(
+    keyId: string,
+    dim: BudgetDim,
+    capacity: number,
+    windowMs: number,
+    amount: number,
+    nowMs: number,
+  ): Promise<{ remaining: number }>;
+}
+
 // Store ports (repository pattern). core depends ONLY on these interfaces; the
 // sqlite and supabase adapters each implement the same contract. This file is
 // pure types — no SQL, no Drizzle import, no web framework. All structured data
@@ -64,6 +106,14 @@ export interface CreateKeyInput {
   // system default at check time. 0 => explicitly unlimited for that dimension.
   rateLimitRpm?: number;
   rateLimitTpm?: number;
+  // Per-key usage budgets (docs/06). Omitted => stored NULL => no cap for that
+  // dimension. overBudgetBehavior omitted => stored default ("degrade").
+  budgetRequests?: number;
+  budgetTokens?: number;
+  budgetSpendUsd?: number;
+  budgetWindowSeconds?: number;
+  overBudgetBehavior?: "degrade" | "reject";
+  degradeLane?: string;
 }
 
 export interface KeyStore {
@@ -96,6 +146,14 @@ export interface KeyPatch {
   allowCustomModel?: boolean;
   rateLimitRpm?: number | null;
   rateLimitTpm?: number | null;
+  // Budget edits: present (even null) => written; null clears the cap (no cap).
+  // overBudgetBehavior has no null (always resolves to degrade|reject).
+  budgetRequests?: number | null;
+  budgetTokens?: number | null;
+  budgetSpendUsd?: number | null;
+  budgetWindowSeconds?: number | null;
+  overBudgetBehavior?: "degrade" | "reject";
+  degradeLane?: string | null;
 }
 
 // Telemetry insert input: decision record + a redacted key reference. Never

@@ -21,6 +21,16 @@ export const apiKeys = sqliteTable("api_keys", {
   // default at check time; a value (0 = unlimited) overrides that one dimension.
   rateLimitRpm: integer("rate_limit_rpm"),
   rateLimitTpm: integer("rate_limit_tpm"),
+  // Per-key usage budgets (docs/06). NULL = no cap for that dimension. Spend is
+  // REAL (fractional USD, mirrors pg double precision). over_budget_behavior is a
+  // text enum ('degrade' | 'reject') defaulting to 'degrade'; degrade_lane NULL =
+  // 'economy' at use. window NULL = the system default window.
+  budgetRequests: integer("budget_requests"),
+  budgetTokens: integer("budget_tokens"),
+  budgetSpendUsd: real("budget_spend_usd"),
+  budgetWindowSeconds: integer("budget_window_seconds"),
+  overBudgetBehavior: text("over_budget_behavior").notNull().default("degrade"),
+  degradeLane: text("degrade_lane"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
@@ -48,6 +58,22 @@ export const rateLimitBuckets = sqliteTable(
   },
   // Composite PK mirrors pg + the hand-written migrate DDL; the onConflict upsert
   // target relies on it (the migration declares it, this makes Drizzle agree).
+  (t) => [primaryKey({ columns: [t.keyId, t.dim] })],
+);
+
+// Per-key USAGE-BUDGET token buckets (docs/06 "usage budgets"). Same shape as
+// rate_limit_buckets but a SEPARATE table: budgets refill over a CONFIGURABLE
+// rolling window (not the fixed 60s) and exceeding one DEGRADES rather than
+// rejects. One row per (key_id, dim ∈ req|tok|usd). tokens REAL so fractional
+// spend/refill survive reads; may go negative (soft cap settled post-served).
+export const usageBudgetBuckets = sqliteTable(
+  "usage_budget_buckets",
+  {
+    keyId: text("key_id").notNull(), // key_id — never plaintext
+    dim: text("dim").notNull(), // 'req' | 'tok' | 'usd'
+    tokens: real("tokens").notNull(),
+    lastRefillMs: integer("last_refill_ms").notNull(),
+  },
   (t) => [primaryKey({ columns: [t.keyId, t.dim] })],
 );
 
@@ -122,6 +148,7 @@ export const oauthTokens = sqliteTable(
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
+export type UsageBudgetBucketsTable = typeof usageBudgetBuckets;
 export type RoutingSignalsTable = typeof routingSignals;
 export type ConfigKvTable = typeof configKv;
 export type RequestPayloadsTable = typeof requestPayloads;

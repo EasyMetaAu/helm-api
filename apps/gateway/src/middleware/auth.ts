@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type ApiKeyRecord, hashKey, type KeyStore } from "@helm/core";
+import { type ApiKeyRecord, type BudgetCaps, hashKey, type KeyStore } from "@helm/core";
 import { makeHelmError } from "@helm/shared";
 import type { MiddlewareHandler } from "hono";
 
@@ -21,6 +21,9 @@ export interface AuthIdentity {
      *  for that dimension; a number (0 = unlimited) overrides it. Read by the
      *  rate-limit middleware so the limiter needs no extra KeyStore lookup. */
     rateLimit: { rpm: number | null; tpm: number | null };
+    /** Per-key usage budgets (docs/06). Read by the budget gate so it needs no
+     *  extra KeyStore lookup. Each cap null = no cap for that dimension. */
+    budget: BudgetCaps;
   };
 }
 
@@ -89,6 +92,14 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler {
         allowedLanes: record.allowed_lanes,
         allowCustomModel: record.allow_custom_model,
         rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+        budget: {
+          requests: record.budget_requests,
+          tokens: record.budget_tokens,
+          spendUsd: record.budget_spend_usd,
+          windowSeconds: record.budget_window_seconds,
+          behavior: record.over_budget_behavior,
+          degradeLane: record.degrade_lane,
+        },
       },
     };
     c.set("identity", identity);

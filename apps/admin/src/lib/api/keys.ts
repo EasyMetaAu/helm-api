@@ -23,6 +23,15 @@ export interface ApiKeyView {
   disabled: boolean; // revoked state (soft)
   rate_limit_rpm: number | null; // per-key RPM override; null = inherit system default
   rate_limit_tpm: number | null; // per-key TPM override; null = inherit system default
+  // Per-key usage budgets (docs/06). null = no cap for that dimension. When over a
+  // budget, the key is DEGRADED to `degrade_lane` (default economy) or REJECTED
+  // (429), per `over_budget_behavior`. window null = system default.
+  budget_requests: number | null;
+  budget_tokens: number | null;
+  budget_spend_usd: number | null;
+  budget_window_seconds: number | null;
+  over_budget_behavior: 'degrade' | 'reject';
+  degrade_lane: string | null;
 }
 
 // Operator-specified caps for a new key. The plaintext is minted server-side; the
@@ -36,6 +45,14 @@ export interface CreateKeyInput {
   // default. 0 => explicitly unlimited for that dimension.
   rate_limit_rpm?: number;
   rate_limit_tpm?: number;
+  // Optional per-key usage budgets at mint time. Omitted => no cap for that
+  // dimension. over_budget_behavior omitted => server default ("degrade").
+  budget_requests?: number;
+  budget_tokens?: number;
+  budget_spend_usd?: number;
+  budget_window_seconds?: number;
+  over_budget_behavior?: 'degrade' | 'reject';
+  degrade_lane?: string;
 }
 
 // Editable caps for an existing key (PATCH). Mirrors the server
@@ -48,6 +65,12 @@ export interface UpdateKeyInput {
   allow_custom_model?: boolean;
   rate_limit_rpm?: number | null;
   rate_limit_tpm?: number | null;
+  budget_requests?: number | null;
+  budget_tokens?: number | null;
+  budget_spend_usd?: number | null;
+  budget_window_seconds?: number | null;
+  over_budget_behavior?: 'degrade' | 'reject';
+  degrade_lane?: string | null;
 }
 
 // The ONLY shape that ever carries plaintext, returned once by POST. `prefix` is
@@ -94,6 +117,14 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     // null/absent = inherit system default; a finite number (incl. 0) = override.
     rate_limit_rpm: typeof raw.rate_limit_rpm === 'number' ? raw.rate_limit_rpm : null,
     rate_limit_tpm: typeof raw.rate_limit_tpm === 'number' ? raw.rate_limit_tpm : null,
+    // null/absent = no cap for that dimension; a finite number = the ceiling.
+    budget_requests: typeof raw.budget_requests === 'number' ? raw.budget_requests : null,
+    budget_tokens: typeof raw.budget_tokens === 'number' ? raw.budget_tokens : null,
+    budget_spend_usd: typeof raw.budget_spend_usd === 'number' ? raw.budget_spend_usd : null,
+    budget_window_seconds:
+      typeof raw.budget_window_seconds === 'number' ? raw.budget_window_seconds : null,
+    over_budget_behavior: raw.over_budget_behavior === 'reject' ? 'reject' : 'degrade',
+    degrade_lane: typeof raw.degrade_lane === 'string' ? raw.degrade_lane : null,
   };
 }
 
@@ -110,6 +141,19 @@ function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   // Send rate limits only when set (0 is meaningful = unlimited, so check undefined).
   if (input.rate_limit_rpm !== undefined) out.rate_limit_rpm = input.rate_limit_rpm;
   if (input.rate_limit_tpm !== undefined) out.rate_limit_tpm = input.rate_limit_tpm;
+  // Send budgets only when set (omitted = no cap; server schema is .strict()).
+  if (input.budget_requests !== undefined) out.budget_requests = input.budget_requests;
+  if (input.budget_tokens !== undefined) out.budget_tokens = input.budget_tokens;
+  if (input.budget_spend_usd !== undefined) out.budget_spend_usd = input.budget_spend_usd;
+  if (input.budget_window_seconds !== undefined) {
+    out.budget_window_seconds = input.budget_window_seconds;
+  }
+  if (input.over_budget_behavior !== undefined) {
+    out.over_budget_behavior = input.over_budget_behavior;
+  }
+  if (input.degrade_lane !== undefined && input.degrade_lane.length > 0) {
+    out.degrade_lane = input.degrade_lane;
+  }
   return out;
 }
 

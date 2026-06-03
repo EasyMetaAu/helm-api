@@ -31,6 +31,13 @@ export class PgKeyStore implements KeyStore {
       // Per-key rate-limit override: undefined input => NULL => inherit system default.
       rateLimitRpm: input.rateLimitRpm ?? null,
       rateLimitTpm: input.rateLimitTpm ?? null,
+      // Per-key usage budgets: undefined => NULL => no cap. behavior defaults to degrade.
+      budgetRequests: input.budgetRequests ?? null,
+      budgetTokens: input.budgetTokens ?? null,
+      budgetSpendUsd: input.budgetSpendUsd ?? null,
+      budgetWindowSeconds: input.budgetWindowSeconds ?? null,
+      overBudgetBehavior: input.overBudgetBehavior ?? "degrade",
+      degradeLane: input.degradeLane ?? null,
       createdAt: this.now().getTime(),
     };
     await this.db.insert(apiKeys).values(row);
@@ -65,13 +72,32 @@ export class PgKeyStore implements KeyStore {
   // NEVER touches role or the immutable identity. Throws on unknown id.
   async updateKey(keyId: string, patch: KeyPatch): Promise<void> {
     const set: Partial<
-      Pick<ApiKeyRow, "allowedLanes" | "allowCustomModel" | "rateLimitRpm" | "rateLimitTpm">
+      Pick<
+        ApiKeyRow,
+        | "allowedLanes"
+        | "allowCustomModel"
+        | "rateLimitRpm"
+        | "rateLimitTpm"
+        | "budgetRequests"
+        | "budgetTokens"
+        | "budgetSpendUsd"
+        | "budgetWindowSeconds"
+        | "overBudgetBehavior"
+        | "degradeLane"
+      >
     > = {};
     // Native jsonb: assign the array (or null = no cap) directly, no stringify.
     if (patch.allowedLanes !== undefined) set.allowedLanes = patch.allowedLanes;
     if (patch.allowCustomModel !== undefined) set.allowCustomModel = patch.allowCustomModel;
     if (patch.rateLimitRpm !== undefined) set.rateLimitRpm = patch.rateLimitRpm;
     if (patch.rateLimitTpm !== undefined) set.rateLimitTpm = patch.rateLimitTpm;
+    if (patch.budgetRequests !== undefined) set.budgetRequests = patch.budgetRequests;
+    if (patch.budgetTokens !== undefined) set.budgetTokens = patch.budgetTokens;
+    if (patch.budgetSpendUsd !== undefined) set.budgetSpendUsd = patch.budgetSpendUsd;
+    if (patch.budgetWindowSeconds !== undefined)
+      set.budgetWindowSeconds = patch.budgetWindowSeconds;
+    if (patch.overBudgetBehavior !== undefined) set.overBudgetBehavior = patch.overBudgetBehavior;
+    if (patch.degradeLane !== undefined) set.degradeLane = patch.degradeLane;
     if (Object.keys(set).length === 0) {
       // No-op patch: still verify the key exists (fail-loud on unknown id).
       const rows = await this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).limit(1);
@@ -98,6 +124,12 @@ export class PgKeyStore implements KeyStore {
       disabled: row.disabled,
       rate_limit_rpm: row.rateLimitRpm ?? null,
       rate_limit_tpm: row.rateLimitTpm ?? null,
+      budget_requests: row.budgetRequests ?? null,
+      budget_tokens: row.budgetTokens ?? null,
+      budget_spend_usd: row.budgetSpendUsd ?? null,
+      budget_window_seconds: row.budgetWindowSeconds ?? null,
+      over_budget_behavior: row.overBudgetBehavior === "reject" ? "reject" : "degrade",
+      degrade_lane: row.degradeLane ?? null,
     };
   }
 }
