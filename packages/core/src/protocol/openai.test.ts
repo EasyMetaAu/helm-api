@@ -444,6 +444,128 @@ describe("openaiTransformer — endpoint + registry", () => {
   });
 });
 
+describe("openaiTransformer — multimodal input content normalization (P7)", () => {
+  // OpenAI clients send NATIVE content parts: image_url / input_audio / file.
+  // These must normalize INTO the IR's typed parts (image/audio/document) on the
+  // way in, and back OUT to the native OpenAI shapes — the IR never carries the
+  // raw OpenAI part shapes (they are not valid IRContentPart discriminants).
+  it("normalizes image_url (data-url + remote) into IR image parts", async () => {
+    const native = {
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "describe" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+            { type: "image_url", image_url: { url: "https://x/y.png" } },
+          ],
+        },
+      ],
+    };
+    const ir = await openaiTransformer.transformRequestOut(native);
+    const parts = ir.messages[0]?.content;
+    expect(Array.isArray(parts)).toBe(true);
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[1]).toMatchObject({ type: "image", url: "data:image/png;base64,AAAA" });
+    expect(parts[2]).toMatchObject({ type: "image", url: "https://x/y.png" });
+  });
+
+  it("normalizes input_audio into an IR audio part and back to native (round-trip)", async () => {
+    const native = {
+      model: "gpt-4o-audio-preview",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "transcribe" },
+            { type: "input_audio", input_audio: { data: "QUJD", format: "wav" } },
+          ],
+        },
+      ],
+    };
+    const ir = await openaiTransformer.transformRequestOut(native);
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[1]).toMatchObject({ type: "audio", data: "QUJD", format: "wav" });
+
+    const back = (await openaiTransformer.transformRequestIn(ir)) as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>;
+    };
+    const outParts = back.messages[0]?.content;
+    expect(outParts?.[1]).toMatchObject({
+      type: "input_audio",
+      input_audio: { data: "QUJD", format: "wav" },
+    });
+  });
+
+  it("normalizes a file part (file_data PDF) into an IR document part and back", async () => {
+    const native = {
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "summarize" },
+            {
+              type: "file",
+              file: { file_data: "data:application/pdf;base64,JVBE", filename: "r.pdf" },
+            },
+          ],
+        },
+      ],
+    };
+    const ir = await openaiTransformer.transformRequestOut(native);
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[1]).toMatchObject({
+      type: "document",
+      data: "JVBE",
+      mediaType: "application/pdf",
+      filename: "r.pdf",
+    });
+
+    const back = (await openaiTransformer.transformRequestIn(ir)) as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>;
+    };
+    const outParts = back.messages[0]?.content;
+    expect(outParts?.[1]).toMatchObject({ type: "file" });
+    const fileBlock = outParts?.[1] as { file?: { file_data?: string; filename?: string } };
+    expect(fileBlock.file?.file_data).toContain("application/pdf");
+    expect(fileBlock.file?.filename).toBe("r.pdf");
+  });
+});
+
+describe("openaiTransformer — model-generated audio output round-trip (P7)", () => {
+  // OpenAI audio models put generated audio on message.audio {id,data,transcript}.
+  const upstream = {
+    id: "chatcmpl-audio",
+    model: "gpt-4o-audio-preview",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          audio: { id: "audio_1", data: "QUJD", transcript: "hello", expires_at: 1_700_000_000 },
+        },
+        finish_reason: "stop",
+      },
+    ],
+    usage: { prompt_tokens: 3, completion_tokens: 5 },
+  };
+
+  it("preserves message.audio through native -> IR -> native", async () => {
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    expect(ir.choices[0]?.message.audio?.transcript).toBe("hello");
+    const back = (await openaiTransformer.transformResponseOut(ir)) as {
+      choices: Array<{ message: { audio?: { id?: string; transcript?: string } } }>;
+    };
+    expect(back.choices[0]?.message.audio?.id).toBe("audio_1");
+    expect(back.choices[0]?.message.audio?.transcript).toBe("hello");
+  });
+});
+
 // Type-level sanity: the transformer satisfies the IR contract shapes.
 const _irReq: IRRequest = { model: "m", messages: [] };
 void _irReq;

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  type IRContentPart,
   IRLogprobsSchema,
   type IRMessage,
   IRRequestSchema,
@@ -108,19 +109,169 @@ function toOpenAIFinishReason(raw: string | null): string | null {
   }
 }
 
-// —— Request: OpenAI native -> IR (identity, but fail-closed validated). ————————
+// —— Multimodal content normalization (P7). OpenAI clients send NATIVE typed
+// content parts — image_url / input_audio / file — which are NOT valid IR part
+// discriminants (the IR uses image / audio / document). We normalize them into the
+// IR shape inbound and re-emit the native OpenAI shapes outbound so an
+// openai->openai round-trip is lossless and other protocols see the unified IR
+// parts. Text/thinking/already-IR parts pass through untouched. ————————————————————
+
+// data:<mime>;base64,<data> -> {mime,data}; returns null for a non-data url.
+function parseDataUrl(url: string): { mediaType: string; data: string } | null {
+  const match = /^data:([^;]+);base64,(.*)$/.exec(url);
+  if (match === null || match[1] === undefined || match[2] === undefined) return null;
+  return { mediaType: match[1], data: match[2] };
+}
+
+// One native OpenAI content part -> one IR content part. Unknown shapes degrade to a
+// JSON text placeholder (fail-open, principle 3) rather than failing the request.
+function nativePartToIR(part: unknown): IRContentPart {
+  if (typeof part !== "object" || part === null) {
+    return { type: "text", text: typeof part === "string" ? part : JSON.stringify(part) };
+  }
+  const p = part as Record<string, unknown>;
+  switch (p.type) {
+    case "text":
+      return { type: "text", text: typeof p.text === "string" ? p.text : "" };
+    case "image_url": {
+      // image_url may be a bare string OR { url, detail }.
+      const iu = p.image_url;
+      const url =
+        typeof iu === "string"
+          ? iu
+          : typeof iu === "object" &&
+              iu !== null &&
+              typeof (iu as { url?: unknown }).url === "string"
+            ? (iu as { url: string }).url
+            : "";
+      const parsed = parseDataUrl(url);
+      return parsed !== null
+        ? { type: "image", url, mediaType: parsed.mediaType }
+        : { type: "image", url };
+    }
+    case "input_audio": {
+      const ia = (p.input_audio ?? {}) as { data?: unknown; format?: unknown };
+      return {
+        type: "audio",
+        data: typeof ia.data === "string" ? ia.data : "",
+        format: typeof ia.format === "string" ? ia.format : "wav",
+      };
+    }
+    case "file": {
+      // OpenAI file content: { file: { file_data?: data-url, file_id?, filename?, format? } }.
+      // A PDF data-url becomes an IR document; file_id/url survive on document.url.
+      const f = (p.file ?? {}) as {
+        file_data?: unknown;
+        file_id?: unknown;
+        filename?: unknown;
+        format?: unknown;
+      };
+      const fileData = typeof f.file_data === "string" ? f.file_data : undefined;
+      const filename = typeof f.filename === "string" ? f.filename : undefined;
+      const parsed = fileData !== undefined ? parseDataUrl(fileData) : null;
+      if (parsed !== null) {
+        return {
+          type: "document",
+          data: parsed.data,
+          mediaType: parsed.mediaType,
+          ...(filename !== undefined ? { filename } : {}),
+        };
+      }
+      // file_id / remote reference (no inline data): keep it as the document url.
+      const ref =
+        typeof f.file_id === "string" ? f.file_id : fileData !== undefined ? fileData : "";
+      return {
+        type: "document",
+        url: ref,
+        ...(typeof f.format === "string" ? { mediaType: f.format } : {}),
+        ...(filename !== undefined ? { filename } : {}),
+      };
+    }
+    default:
+      // Already an IR-shaped part (image/audio/video/document/thinking) — pass it
+      // through; the IR schema validates it. Truly unknown shapes fall to JSON text.
+      if (
+        p.type === "image" ||
+        p.type === "audio" ||
+        p.type === "video" ||
+        p.type === "document" ||
+        p.type === "thinking"
+      ) {
+        return part as IRContentPart;
+      }
+      return { type: "text", text: JSON.stringify(part) };
+  }
+}
+
+// Normalize a native OpenAI message's content (string | part[]) for the IR. A string
+// stays a string; an array is normalized part-by-part. Non-content fields are kept.
+function normalizeMessageContentToIR(message: unknown): unknown {
+  if (typeof message !== "object" || message === null) return message;
+  const m = message as Record<string, unknown>;
+  if (!Array.isArray(m.content)) return message;
+  return { ...m, content: m.content.map(nativePartToIR) };
+}
+
+// One IR content part -> native OpenAI content part. The inverse of nativePartToIR:
+// image -> image_url, audio -> input_audio, document -> file. text passes through.
+function irPartToNative(part: IRContentPart): unknown {
+  switch (part.type) {
+    case "text":
+      return { type: "text", text: part.text };
+    case "image":
+      return { type: "image_url", image_url: { url: part.url } };
+    case "audio":
+      return { type: "input_audio", input_audio: { data: part.data, format: part.format } };
+    case "document": {
+      // Inline base64 -> file_data data-url; a remote/url ref -> file_data=url.
+      const fileData =
+        part.data !== undefined
+          ? `data:${part.mediaType ?? "application/octet-stream"};base64,${part.data}`
+          : part.url;
+      return {
+        type: "file",
+        file: {
+          ...(fileData !== undefined ? { file_data: fileData } : {}),
+          ...(part.filename !== undefined ? { filename: part.filename } : {}),
+        },
+      };
+    }
+    default:
+      // video / thinking have no native OpenAI content shape — preserve verbatim so a
+      // downstream consumer (or an openai->openai round-trip) does not lose them.
+      return part;
+  }
+}
+
+function normalizeMessageContentToNative(message: IRMessage): IRMessage {
+  if (!Array.isArray(message.content)) return message;
+  // The IR message type only allows IRContentPart[]; the native shapes we emit are
+  // wire-only, so we widen through unknown rather than fight the IR union here.
+  return {
+    ...message,
+    content: message.content.map(irPartToNative) as unknown as IRMessage["content"],
+  };
+}
+
+// —— Request: OpenAI native -> IR. Identity for everything EXCEPT multimodal content
+// parts, which are normalized into the IR's typed parts; fail-closed validated. ——————
 function toIRRequest(req: NativeRequest) {
   // fail-closed: an invalid request never enters the pipeline (identity != passthrough).
-  OpenAIChatRequestSchema.parse(req);
+  const parsed = OpenAIChatRequestSchema.parse(req);
+  const messages = parsed.messages.map(normalizeMessageContentToIR);
   // Isomorphic mapping; the IR (also OpenAI-shaped) validates the full structure.
-  return IRRequestSchema.parse(req);
+  // We carry the full original request through (the minimal schema only validates a
+  // subset) but with the multimodal-normalized messages substituted in.
+  return IRRequestSchema.parse({ ...(req as Record<string, unknown>), messages });
 }
 
 // —— Request: IR -> OpenAI native (identity). The IR is already OpenAI-shaped, so
 // we strip only the IR-internal `provider_raw` bag (never a wire field). ————————
 function toOpenAIRequest(ir: z.infer<typeof IRRequestSchema>): NativeRequest {
   const { provider_raw: _provider_raw, ...wire } = IRRequestSchema.parse(ir);
-  return wire;
+  // Re-emit native OpenAI content parts (image_url/input_audio/file) so the wire
+  // request a real OpenAI client/upstream expects is reconstructed losslessly (P7).
+  return { ...wire, messages: wire.messages.map(normalizeMessageContentToNative) };
 }
 
 // —— Response: upstream OpenAI -> IR. Stash raw stop_reason/usage in provider_raw
