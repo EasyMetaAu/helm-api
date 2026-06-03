@@ -42,6 +42,17 @@ export interface ExecuteAdapterDeps {
    *  aliases in Phase-0 passthrough. */
   providers?: Map<string, ProviderClient>;
   registry: ProviderRegistry;
+  /** Known OAuth subscription provider IDs (ROUTABLE_OAUTH keys). An alias whose
+   *  `<prefix>/` is one of these is a SUBSCRIPTION alias and is gated authoritatively
+   *  by `oauthAliases` below — it must NEVER fall through to the registry or
+   *  defaultProvider (that would cross subscription/credential boundaries). Absent →
+   *  the gate is off (back-compat for tests that don't wire OAuth). */
+  knownOAuthPrefixes?: ReadonlySet<string>;
+  /** LIVE set of currently-exposed (curated) OAuth `<provider>/<model>` aliases,
+   *  re-read per request so a Manage-dialog curation removal / disconnect takes
+   *  effect immediately: a subscription alias NOT in this set fails CLOSED
+   *  (provider_unavailable), never routes stale. Rebuilt alongside the pool. */
+  oauthAliases?: () => ReadonlySet<string>;
   breaker: CircuitBreaker;
   /** modelKey -> capabilities; missing entry => capability filter is skipped. */
   catalog: Map<string, CatalogEntry>;
@@ -144,6 +155,8 @@ function errorDetailOf(err: unknown): AttemptErrorDetail {
 // Build the `execute` callback bound to a single request's deps.
 export function createExecute(deps: ExecuteAdapterDeps) {
   const { defaultProvider, providers, registry, breaker, catalog, now, signal, log } = deps;
+  const knownOAuthPrefixes = deps.knownOAuthPrefixes;
+  const oauthAliases = deps.oauthAliases;
 
   // Cost of one served attempt = provider usage × catalog pricing (docs/07).
   // Keyed by the candidate ALIAS — the catalog/pricing modelKey is the routing
@@ -206,25 +219,47 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // the provider client (so the fallback chain can cross providers). If that
       // resolved provider has no client, skip fail-closed; falling back to the
       // default would cross credential/subscription boundaries.
-      const resolved = registry.resolve(alias);
       let providerModel: string;
       let provider: ProviderClient | undefined;
-      if (resolved.ok) {
-        providerModel = resolved.value.providerModel;
-        provider = providers?.get(resolved.value.providerName);
+      const slash = alias.indexOf("/");
+      const prefix = slash > 0 ? alias.slice(0, slash) : "";
+      if (prefix && (knownOAuthPrefixes?.has(prefix) ?? false)) {
+        // SUBSCRIPTION alias (issue #38). The live curation set + the pool are the
+        // SINGLE source of truth — re-read per request so a Manage-dialog removal,
+        // parking, or disconnect takes effect immediately. A subscription alias that
+        // is not CURRENTLY exposed, or whose pool is gone, fails CLOSED here; it must
+        // NEVER fall through to the registry's startup snapshot or to defaultProvider
+        // (that would route a removed/disconnected subscription model, or cross a
+        // subscription/credential boundary). The pool client forwards the bare model.
+        const exposed = oauthAliases?.().has(alias) ?? false;
+        const pool = providers?.get(prefix);
+        if (!exposed || !pool) {
+          attempts.push(skipRow(alias, "provider_unavailable", elapsed()));
+          continue;
+        }
+        provider = pool;
+        providerModel = alias.slice(slash + 1);
       } else {
-        // Structural fallback for an alias the registry never enumerated. A
-        // synthesized OAuth provider's POOL client is keyed by its providerId and
-        // forwards ANY upstream model id, so `${providerId}/${model}` routes
-        // correctly even for a model the operator curated AFTER startup (the live
-        // catalog already offers it — this keeps routing consistent with that
-        // catalog without a restart). Only a known provider NAME matches; a bare or
-        // truly-unknown alias still falls through to the Phase-0 passthrough default.
-        const slash = alias.indexOf("/");
-        const name = slash > 0 ? alias.slice(0, slash) : "";
-        if (name && providers?.has(name)) {
+        // Non-subscription alias. Resolve alias -> { provider name, upstream model }.
+        // Two DISTINCT ids come out and must not be conflated (fix-upstream-model-id
+        // 2026-05-31): `alias` is the ROUTING key (catalog/pricing/breaker/decision
+        // id); `providerModel` is the wire `model`. An unknown alias is a config gap:
+        // keep the alias as the upstream model id too and use the default provider
+        // (fail-open Phase-0 passthrough — never substitute a different model). A
+        // resolved alias selects BOTH the upstream model id AND the provider client
+        // (so the fallback chain can cross providers); a resolved provider with no
+        // client skips fail-closed rather than crossing credentials.
+        const resolved = registry.resolve(alias);
+        if (resolved.ok) {
+          providerModel = resolved.value.providerModel;
+          provider = providers?.get(resolved.value.providerName);
+        } else if (prefix && providers?.has(prefix)) {
+          // Structural fallback for a NON-subscription `provider/model` alias the
+          // registry never enumerated but whose provider client IS registered by name
+          // (the pool/client forwards the bare model id). Subscription prefixes never
+          // reach here — they took the gated branch above.
           providerModel = alias.slice(slash + 1);
-          provider = providers.get(name);
+          provider = providers.get(prefix);
         } else {
           providerModel = alias;
           provider = defaultProvider;

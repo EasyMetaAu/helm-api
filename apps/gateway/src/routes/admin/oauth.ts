@@ -25,6 +25,29 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   // Resolve the seam per-request so the 503 guard is uniform.
   const seam = (): OAuthAdminAccess | undefined => deps.oauth;
 
+  // Hot-reload the routable OAuth pool after a mutation, so proxy / priority /
+  // schedulable / curation / connect / disconnect take effect on the NEXT request
+  // without a restart. Awaited before the route returns. Returns whether the live
+  // rebuild APPLIED: when it didn't (e.g. a transient refresh/discovery failure during
+  // re-synthesis), the persist still SUCCEEDED, so the caller returns a 503
+  // "saved but not applied" rather than a false 204 — the change takes effect on the
+  // next successful mutation or a restart. No hook wired (unit tests) ⇒ applied.
+  const afterMutation = async (): Promise<boolean> => {
+    if (!deps.onOAuthMutation) return true;
+    try {
+      return (await deps.onOAuthMutation()).applied;
+    } catch {
+      return false;
+    }
+  };
+  // Body for the 503 a mutating route returns when persist succeeded but the live
+  // rebuild failed — honest "saved, not yet live" signal (Principle 3: fail visible).
+  const notApplied = {
+    error:
+      "saved but could not be applied to the live pool; it will take effect on the next change or a restart",
+    code: "not_applied",
+  } as const;
+
   // GET /oauth -> provider catalog + which accounts are logged in (no secrets).
   app.get("/admin/api/oauth", async (c) => {
     const s = seam();
@@ -61,6 +84,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         redirectInput: body.redirectInput,
         account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
       });
+      // A completed login adds/refreshes an account → rebuild the routable pool.
+      if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -96,13 +121,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       return c.json({ error: "sessionId is required" }, 400);
     }
     try {
-      return c.json(
-        await s.pollDeviceCode({
-          sessionId: body.sessionId,
-          account:
-            typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
-        }),
-      );
+      const result = await s.pollDeviceCode({
+        sessionId: body.sessionId,
+        account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
+      });
+      // Only a COMPLETED device login mutates the credential set → rebuild then.
+      if (result.status === "done") await afterMutation();
+      return c.json(result);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
     }
@@ -139,6 +164,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
         models: body.models as string[],
       });
+      if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -198,6 +224,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
     try {
       await s.setAccountProxy({ providerId: c.req.param("provider"), account, proxy });
+      // Rebuild so the new egress proxy is applied to this account's client now.
+      if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -251,6 +279,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         priority,
         schedulable,
       });
+      // Rebuild so the new priority / schedulable reorders (or parks) this account now.
+      if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -263,6 +293,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
     const account = c.req.query("account") || DEFAULT_ACCOUNT;
     await s.logout({ providerId: c.req.param("provider"), account });
+    // Disconnect removes an account → rebuild so it leaves the pool immediately.
+    if (!(await afterMutation())) return c.json(notApplied, 503);
     return c.body(null, 204);
   });
 }

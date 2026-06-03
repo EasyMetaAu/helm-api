@@ -240,6 +240,44 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(out).toEqual({ providers: [], poolClients: new Map() });
   });
 
+  // Hot-reload data path (issue #38 follow-up): rebuildOAuthPool re-invokes
+  // synthesizeOAuthProviders, which re-reads account settings + bound credentials
+  // every call. A re-synthesis after an admin edit MUST reflect the change — this is
+  // exactly what makes proxy/priority/schedulable/connect/disconnect apply WITHOUT a
+  // restart once server.ts swaps the freshly-synthesized pool into providerClients.
+  it("re-synthesis reflects a schedulable change made AFTER the first build (no restart)", async () => {
+    const { ctx, config } = oauthStores();
+    await seedAnthropic(ctx, "a");
+    await seedAnthropic(ctx, "b");
+    await setAccountSettings(config, ENC_KEY, "anthropic", "a", {
+      enabledModels: ["claude-opus-4-6"],
+    });
+    await setAccountSettings(config, ENC_KEY, "anthropic", "b", {
+      enabledModels: ["claude-haiku-4-5"],
+    });
+
+    // First synthesis: both accounts live → union of both models.
+    const first = await synthesizeOAuthProviders([], ctx, config, "https://f/v1", 60_000, noop);
+    expect((first.providers[0]?.models ?? []).map((m) => m.alias).sort()).toEqual([
+      "anthropic/claude-haiku-4-5",
+      "anthropic/claude-opus-4-6",
+    ]);
+
+    // Admin parks account "b" (the same call the PUT .../account route makes)…
+    await setAccountSettings(config, ENC_KEY, "anthropic", "b", { schedulable: false });
+
+    // …a fresh synthesis (what rebuildOAuthPool runs) drops it WITHOUT a restart.
+    const second = await synthesizeOAuthProviders([], ctx, config, "https://f/v1", 60_000, noop);
+    expect((second.providers[0]?.models ?? []).map((m) => m.alias)).toEqual([
+      "anthropic/claude-opus-4-6",
+    ]);
+
+    // And a disconnect (logout) of the last live account drops the provider entirely.
+    await ctx.store.delete("anthropic", "a");
+    const third = await synthesizeOAuthProviders([], ctx, config, "https://f/v1", 60_000, noop);
+    expect(third.poolClients.has("anthropic")).toBe(false);
+  });
+
   it("routes a bound Codex account: synthesizes an `openai-responses` pool with its curated aliases", async () => {
     const { ctx, config } = oauthStores();
     // Seed an openai-codex account (far-future expiry → no token refresh/network).
