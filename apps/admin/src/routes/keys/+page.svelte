@@ -3,6 +3,7 @@
   import { type ApiKeyView, revokeKey } from '$lib/api/keys.js';
   import CreateKeyDialog from '$lib/components/CreateKeyDialog.svelte';
   import EditKeyDialog from '$lib/components/EditKeyDialog.svelte';
+  import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
   // API key management view. HARD security line (CLAUDE.md Principle 7 / docs/06): the
@@ -162,10 +163,8 @@
               <td class="px-3 py-2 text-right">
                 {#if !key.disabled}
                   <div class="flex justify-end gap-2">
-                    <button
-                      type="button"
-                      class="btn-secondary"
-                      onclick={() => startEdit(key)}>{$t('Edit')}</button
+                    <button type="button" class="btn-secondary" onclick={() => startEdit(key)}
+                      >{$t('Edit')}</button
                     >
                     <button
                       type="button"
@@ -184,14 +183,19 @@
   {/if}
 
   {#if confirmingRevoke}
-    <div class="alert-warn" role="dialog" aria-label={$t('Confirm revoke')}>
-      <p class="text-sm text-amber-800">
+    <Modal
+      label={$t('Confirm revoke')}
+      onclose={cancelRevoke}
+      dismissible={revoking !== confirmingRevoke}
+    >
+      <h2 class="section-header">{$t('Confirm revoke')}</h2>
+      <p class="mt-2 text-sm text-amber-800">
         {$t('Revoke key')}
         <code class="font-mono">{confirmingPrefix}</code>{$t(
           '? It will be disabled (kept for audit, not deleted). Mint a fresh key to rotate.',
         )}
       </p>
-      <div class="mt-3 flex justify-end gap-2">
+      <div class="mt-4 flex justify-end gap-2">
         <button
           type="button"
           class="btn-secondary"
@@ -206,6 +210,6 @@
           >{revoking === confirmingRevoke ? $t('Revoking…') : $t('Confirm revoke')}</button
         >
       </div>
-    </div>
+    </Modal>
   {/if}
 </section>
