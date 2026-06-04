@@ -1,4 +1,11 @@
 import { z } from "zod";
+import {
+  IRAnnotationSchema,
+  IRAudioOutSchema,
+  IRLogprobsSchema,
+  IRThinkingBlockSchema,
+  IRTokenDetailsSchema,
+} from "../ir.js";
 
 // Gemini generateContent / streamGenerateContent wire schemas (docs/05). Zod is the
 // SINGLE type source (CLAUDE.md): every Gemini type below is `z.infer`-ed, never a
@@ -149,6 +156,15 @@ export const IRChunkDeltaSchema = z.object({
   role: z.string().optional(),
   content: z.string().nullable().optional(),
   tool_calls: z.array(IRToolCallDeltaSchema).optional(),
+  // —— litellm-parity streaming delta extensions (all optional). reasoning_content
+  // streams ahead of text (DeepSeek/o-series); thinking_blocks/annotations/audio/
+  // logprobs ride the same delta. Shared shapes come from ir.ts so every protocol's
+  // stream machine emits/consumes ONE form. ————————————————————————————————————————
+  reasoning_content: z.string().nullable().optional(),
+  thinking_blocks: z.array(IRThinkingBlockSchema).optional(),
+  annotations: z.array(IRAnnotationSchema).optional(),
+  audio: IRAudioOutSchema.optional(),
+  logprobs: IRLogprobsSchema.nullable().optional(),
 });
 
 export const IRChunkChoiceSchema = z.object({
@@ -162,6 +178,10 @@ export const IRChunkUsageSchema = z
     prompt_tokens: z.number().int().nonnegative().optional(),
     completion_tokens: z.number().int().nonnegative().optional(),
     cached_tokens: z.number().int().nonnegative().optional(),
+    reasoning_tokens: z.number().int().nonnegative().optional(),
+    cache_creation_tokens: z.number().int().nonnegative().optional(),
+    prompt_tokens_details: IRTokenDetailsSchema.optional(),
+    completion_tokens_details: IRTokenDetailsSchema.optional(),
   })
   .partial();
 

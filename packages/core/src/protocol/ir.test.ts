@@ -61,7 +61,120 @@ describe("IRContentPartSchema — multipart typed content", () => {
   });
 
   it("rejects an unknown content part `type` via discriminatedUnion", () => {
-    expect(() => IRContentPartSchema.parse({ type: "video", url: "x" })).toThrow(ZodError);
+    expect(() => IRContentPartSchema.parse({ type: "hologram", url: "x" })).toThrow(ZodError);
+  });
+
+  it("parses the new multimodal part types (audio / video / document)", () => {
+    expect(IRContentPartSchema.parse({ type: "audio", data: "AAAA", format: "wav" }).type).toBe(
+      "audio",
+    );
+    expect(
+      IRContentPartSchema.parse({ type: "video", url: "gs://b/v.mp4", fps: 2, startOffset: "0s" })
+        .type,
+    ).toBe("video");
+    expect(
+      IRContentPartSchema.parse({ type: "document", data: "JVBER", mediaType: "application/pdf" })
+        .type,
+    ).toBe("document");
+  });
+});
+
+describe("IRRequestSchema — litellm parity request params (all optional)", () => {
+  it("carries sampling + control params without stripping", () => {
+    const input = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hi" }],
+      top_p: 0.9,
+      top_k: 40,
+      frequency_penalty: 0.5,
+      presence_penalty: -0.5,
+      seed: 7,
+      stop: ["\n\n", "STOP"],
+      n: 1,
+      logprobs: true,
+      top_logprobs: 5,
+      parallel_tool_calls: false,
+      stream_options: { include_usage: true },
+      modalities: ["text", "audio"],
+      user: "u-123",
+      service_tier: "auto",
+      reasoning_effort: "high",
+    } as const;
+    const parsed = IRRequestSchema.parse(input);
+    expect(parsed.top_p).toBe(0.9);
+    expect(parsed.stop).toEqual(["\n\n", "STOP"]);
+    expect(parsed.stream_options?.include_usage).toBe(true);
+    expect(parsed.modalities).toContain("audio");
+    expect(parsed.reasoning_effort).toBe("high");
+  });
+
+  it("accepts a bare string `stop`", () => {
+    const parsed = IRRequestSchema.parse({
+      model: "m",
+      messages: [{ role: "user", content: "x" }],
+      stop: "END",
+    });
+    expect(parsed.stop).toBe("END");
+  });
+
+  it("rejects an illegal reasoning_effort value (fail-closed)", () => {
+    expect(() =>
+      IRRequestSchema.parse({
+        model: "m",
+        messages: [{ role: "user", content: "x" }],
+        reasoning_effort: "ultra",
+      }),
+    ).toThrow(ZodError);
+  });
+});
+
+describe("IRMessageSchema — litellm parity response fields", () => {
+  it("carries reasoning_content, thinking_blocks, annotations, images, audio", () => {
+    const parsed = IRMessageSchema.parse({
+      role: "assistant",
+      content: "answer",
+      reasoning_content: "let me think",
+      thinking_blocks: [{ type: "thinking", thinking: "step", signature: "sig" }],
+      annotations: [
+        { type: "url_citation", url: "https://x", title: "X", start_index: 0, end_index: 5 },
+      ],
+      images: [{ b64_json: "AAAA", mediaType: "image/png" }],
+      audio: { id: "a1", data: "BBBB", transcript: "hello", expires_at: 1000 },
+    });
+    expect(parsed.reasoning_content).toBe("let me think");
+    expect(parsed.thinking_blocks?.[0]?.signature).toBe("sig");
+    expect(parsed.annotations?.[0]?.url).toBe("https://x");
+    expect(parsed.images?.[0]?.b64_json).toBe("AAAA");
+    expect(parsed.audio?.transcript).toBe("hello");
+  });
+});
+
+describe("IRUsageSchema / IRChoiceSchema — litellm parity usage + logprobs", () => {
+  it("carries token detail breakdown and reasoning/cache-creation tokens", () => {
+    const parsed = IRResponseSchema.parse({
+      id: "r",
+      model: "m",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "hi" },
+          finish_reason: "stop",
+          logprobs: { content: [{ token: "hi", logprob: -0.1, top_logprobs: [] }] },
+        },
+      ],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        cached_tokens: 4,
+        reasoning_tokens: 2,
+        cache_creation_tokens: 3,
+        prompt_tokens_details: { text_tokens: 6, cached_tokens: 4, image_tokens: 0 },
+        completion_tokens_details: { text_tokens: 3, reasoning_tokens: 2 },
+      },
+    });
+    expect(parsed.usage?.reasoning_tokens).toBe(2);
+    expect(parsed.usage?.prompt_tokens_details?.text_tokens).toBe(6);
+    expect(parsed.choices[0]?.logprobs?.content?.[0]?.token).toBe("hi");
   });
 });
 

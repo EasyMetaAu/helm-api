@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { IRChunk } from "../gemini/gemini-types.js";
-import type { IRResponse, IRUsage } from "../ir.js";
+import { IRAnnotationSchema, IRLogprobsSchema, type IRResponse, type IRUsage } from "../ir.js";
 import {
   type AnthropicStopReason,
   type AnthropicUsage,
@@ -58,6 +58,12 @@ const OpenAIChunkDeltaSchema = z.object({
   role: z.string().optional(),
   content: z.string().nullable().optional(),
   tool_calls: z.array(OpenAIToolCallDeltaSchema).optional(),
+  // litellm-parity: reasoning streamed by DeepSeek/o-series; citations + logprobs on
+  // the delta. Optional + shared shapes (ir.ts) so the identity OpenAI stream carries
+  // them through to every downstream protocol consumer.
+  reasoning_content: z.string().nullable().optional(),
+  annotations: z.array(IRAnnotationSchema).optional(),
+  logprobs: IRLogprobsSchema.nullable().optional(),
 });
 
 const OpenAIChunkChoiceSchema = z.object({

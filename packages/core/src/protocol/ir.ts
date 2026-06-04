@@ -40,12 +40,124 @@ export const IRThinkingPartSchema = z.object({
   signature: z.string().optional(), // Anthropic thinking signature
 });
 
+// —— Multimodal input parts (litellm parity). Audio carries inline base64 + a
+// format hint (wav/mp3/…); video/document accept a remote url OR inline base64 and
+// optional metadata. The transformer enforces per-provider rules; the IR only needs
+// a lossless home so audio/video/document survive translation. ————————————————————
+export const IRAudioPartSchema = z.object({
+  type: z.literal("audio"),
+  data: z.string(), // base64
+  format: z.string(), // wav | mp3 | aac | flac | pcm | …
+  transcript: z.string().optional(),
+});
+
+export const IRVideoPartSchema = z.object({
+  type: z.literal("video"),
+  url: z.string().optional(), // remote / gs:// reference
+  data: z.string().optional(), // OR inline base64
+  mediaType: z.string().optional(),
+  fps: z.number().optional(),
+  startOffset: z.string().optional(), // e.g. "1.5s"
+  endOffset: z.string().optional(),
+});
+
+export const IRDocumentPartSchema = z.object({
+  type: z.literal("document"),
+  url: z.string().optional(),
+  data: z.string().optional(), // base64 (e.g. PDF)
+  mediaType: z.string().optional(),
+  filename: z.string().optional(),
+});
+
 export const IRContentPartSchema = z.discriminatedUnion("type", [
   IRTextPartSchema,
   IRImagePartSchema,
   IRThinkingPartSchema,
+  IRAudioPartSchema,
+  IRVideoPartSchema,
+  IRDocumentPartSchema,
 ]);
 export type IRContentPart = z.infer<typeof IRContentPartSchema>;
+
+// —— Shared parity sub-schemas (litellm unified model). Declared once here and
+// reused by IRMessage/IRChoice/IRUsage AND the streaming chunk (gemini-types.ts) and
+// the OpenAI chunk (anthropic/stream.ts), so reasoning/citations/logprobs/usage-
+// detail have ONE shape across every protocol. All permissive (.passthrough() where
+// upstreams add fields) and fail-open on unknown extras. ——————————————————————————
+
+/** Reasoning effort knob (OpenAI o-series / Anthropic budget / Gemini level). */
+export const IRReasoningEffortSchema = z.enum(["minimal", "low", "medium", "high"]);
+
+/** A thinking/redacted-thinking block (Anthropic-shaped; reused for streaming). */
+export const IRThinkingBlockSchema = z
+  .object({
+    type: z.string(), // "thinking" | "redacted_thinking"
+    thinking: z.string().optional(),
+    data: z.string().optional(), // redacted payload
+    signature: z.string().optional(),
+  })
+  .passthrough();
+export type IRThinkingBlock = z.infer<typeof IRThinkingBlockSchema>;
+
+/** A citation/annotation (OpenAI url_citation shape; grounding folds in here). */
+export const IRAnnotationSchema = z
+  .object({
+    type: z.string(), // "url_citation" | "file_citation" | …
+    url: z.string().optional(),
+    title: z.string().optional(),
+    text: z.string().optional(),
+    start_index: z.number().int().optional(),
+    end_index: z.number().int().optional(),
+  })
+  .passthrough();
+export type IRAnnotation = z.infer<typeof IRAnnotationSchema>;
+
+/** Token-level logprobs (OpenAI ChoiceLogprobs shape). */
+export const IRTopLogprobSchema = z.object({
+  token: z.string(),
+  logprob: z.number(),
+  bytes: z.array(z.number().int()).nullable().optional(),
+});
+export const IRLogprobTokenSchema = z.object({
+  token: z.string(),
+  logprob: z.number(),
+  bytes: z.array(z.number().int()).nullable().optional(),
+  top_logprobs: z.array(IRTopLogprobSchema).optional(),
+});
+export const IRLogprobsSchema = z
+  .object({ content: z.array(IRLogprobTokenSchema).nullable().optional() })
+  .passthrough();
+export type IRLogprobs = z.infer<typeof IRLogprobsSchema>;
+
+/** A model-generated image (vision/image-out models). */
+export const IRImageOutSchema = z.object({
+  url: z.string().optional(),
+  b64_json: z.string().optional(),
+  mediaType: z.string().optional(),
+  revised_prompt: z.string().optional(),
+});
+
+/** A model-generated audio response (OpenAI ChatCompletionAudioResponse shape). */
+export const IRAudioOutSchema = z.object({
+  id: z.string().optional(),
+  data: z.string().optional(),
+  transcript: z.string().optional(),
+  expires_at: z.number().int().optional(),
+});
+
+/** Per-modality / cache token breakdown (prompt or completion side). */
+export const IRTokenDetailsSchema = z
+  .object({
+    text_tokens: z.number().int().nonnegative().optional(),
+    audio_tokens: z.number().int().nonnegative().optional(),
+    image_tokens: z.number().int().nonnegative().optional(),
+    video_tokens: z.number().int().nonnegative().optional(),
+    cached_tokens: z.number().int().nonnegative().optional(),
+    reasoning_tokens: z.number().int().nonnegative().optional(),
+    cache_creation_tokens: z.number().int().nonnegative().optional(),
+  })
+  .partial()
+  .passthrough();
 
 // —— Tool call (carries an ID; OpenAI's integer stream index is reconciled by
 // the streaming state machine, not stored here). ————————————————————————————
@@ -74,6 +186,16 @@ export const IRMessageSchema = z.object({
   tool_calls: z.array(IRToolCallSchema).optional(), // assistant initiates
   tool_call_id: z.string().optional(), // role=tool backfills the matching id
   name: z.string().optional(),
+  // —— litellm-parity response extensions (all optional). reasoning_content is the
+  // flat reasoning string (DeepSeek/Groq/o-series); thinking_blocks is the structured
+  // Anthropic form (kept in parallel, NOT folded into content). annotations carries
+  // citations/grounding. images/audio carry model-GENERATED media (distinct from the
+  // input image/audio content parts). ————————————————————————————————————————————————
+  reasoning_content: z.string().nullable().optional(),
+  thinking_blocks: z.array(IRThinkingBlockSchema).optional(),
+  annotations: z.array(IRAnnotationSchema).optional(),
+  images: z.array(IRImageOutSchema).optional(),
+  audio: IRAudioOutSchema.optional(),
 });
 export type IRMessage = z.infer<typeof IRMessageSchema>;
 
@@ -101,7 +223,25 @@ export const IRRequestSchema = z.object({
   stream: z.boolean().optional(),
   response_format: z.unknown().optional(),
   cache_control: z.unknown().optional(), // extension: cache-control passthrough
-  thinking: z.unknown().optional(), // extension: reasoning/thinking config
+  thinking: z.unknown().optional(), // extension: provider-shaped reasoning/thinking config
+  // —— litellm-parity sampling + control params (all optional). The IR holds them;
+  // each transformer maps the subset its protocol supports and warns/passes through
+  // the rest (a backend that can't honor `n>1` rejects cleanly, never silently drops).
+  top_p: z.number().optional(),
+  top_k: z.number().int().optional(),
+  frequency_penalty: z.number().optional(),
+  presence_penalty: z.number().optional(),
+  seed: z.number().int().optional(),
+  stop: z.union([z.string(), z.array(z.string())]).optional(),
+  n: z.number().int().positive().optional(),
+  logprobs: z.boolean().optional(),
+  top_logprobs: z.number().int().nonnegative().optional(),
+  parallel_tool_calls: z.boolean().optional(),
+  stream_options: z.object({ include_usage: z.boolean().optional() }).passthrough().optional(),
+  modalities: z.array(z.enum(["text", "audio", "image", "video"])).optional(),
+  reasoning_effort: IRReasoningEffortSchema.optional(),
+  user: z.string().optional(),
+  service_tier: z.string().optional(),
   provider_raw: ProviderRawSchema.optional(),
 });
 export type IRRequest = z.infer<typeof IRRequestSchema>;
@@ -115,6 +255,14 @@ export const IRUsageSchema = z
     prompt_tokens: z.number().int().nonnegative().optional(),
     completion_tokens: z.number().int().nonnegative().optional(),
     cached_tokens: z.number().int().nonnegative().optional(),
+    // —— litellm-parity usage detail (all optional). reasoning_tokens (o-series /
+    // Gemini thoughtsTokenCount), cache_creation_tokens (Anthropic ephemeral write),
+    // and per-modality breakdowns. The prompt−cached arithmetic stays the
+    // transformer's job; the IR only needs room to hold the detail. ————————————————
+    reasoning_tokens: z.number().int().nonnegative().optional(),
+    cache_creation_tokens: z.number().int().nonnegative().optional(),
+    prompt_tokens_details: IRTokenDetailsSchema.optional(),
+    completion_tokens_details: IRTokenDetailsSchema.optional(),
   })
   .partial();
 export type IRUsage = z.infer<typeof IRUsageSchema>;
@@ -128,6 +276,7 @@ export const IRChoiceSchema = z.object({
   index: z.number().int(),
   message: IRMessageSchema,
   finish_reason: z.string().nullable(),
+  logprobs: IRLogprobsSchema.nullable().optional(), // litellm-parity token logprobs
 });
 export type IRChoice = z.infer<typeof IRChoiceSchema>;
 
