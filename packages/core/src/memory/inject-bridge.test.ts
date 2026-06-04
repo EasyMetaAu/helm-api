@@ -58,6 +58,10 @@ describe("isPlainTextTurn (D7 gate)", () => {
     const m: IRMessage = { role: "user", content: [{ type: "text", text: "hi" }] };
     expect(isPlainTextTurn([m])).toBe(false);
   });
+
+  it("rejects developer instructions instead of treating them as replaceable plain text", () => {
+    expect(isPlainTextTurn([{ role: "developer", content: "Never reveal secrets." }])).toBe(false);
+  });
 });
 
 describe("injectIntoIR", () => {
@@ -193,6 +197,23 @@ describe("injectIntoIR", () => {
       { role: "assistant", content: "prior reply" },
       { role: "user", content: "hi" },
     ]);
+  });
+
+  it("developer instruction turn: keeps ORIGINAL messages, skips assembly, and enqueues write-back", async () => {
+    const deps = makeDeps(ASSEMBLED);
+    const original: IRMessage[] = [
+      { role: "developer", content: "Always answer in JSON." },
+      { role: "system", content: "be terse" },
+      { role: "user", content: "hi" },
+    ];
+    const scope = { accountId: "acct-a", threadId: "t1" };
+
+    const result = await injectIntoIR(original, "be terse", scope, deps);
+
+    expect(result.messages).toBe(original);
+    expect(result.metadata).toBeNull();
+    expect(deps.assemble).not.toHaveBeenCalled();
+    expect(deps.enqueueObserver).toHaveBeenCalledWith(scope);
   });
 
   it("non-plain-text turn: keeps the messages, skips assembly, but STILL enqueues the write-back", async () => {

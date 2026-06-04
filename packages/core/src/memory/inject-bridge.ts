@@ -19,12 +19,12 @@ import type { InjectInput, InjectResult } from "./inject.js";
 // Lives in core so it imports no web framework and is unit-testable directly.
 
 // D7 gate. A turn is "plain text" iff EVERY message is a string-content user/
-// assistant/system message with no tool_calls and no tool role. The moment a tool
-// call, a tool result, or multipart/structured content appears, inject replacement
-// is unsafe (the memory role/content model cannot represent it) and we skip it.
+// assistant/system message with no tool_calls, no tool role, and no developer
+// instructions. The inject assembler can only rebuild user/assistant/system;
+// developer is a first-class instruction tier, so replacing would silently drop it.
 export function isPlainTextTurn(messages: IRMessage[]): boolean {
   for (const m of messages) {
-    if (m.role === "tool") return false;
+    if (m.role === "developer" || m.role === "tool") return false;
     if (m.tool_calls !== undefined && m.tool_calls.length > 0) return false;
     // content must be a plain string (or null) — an array is multipart/structured.
     if (m.content !== null && typeof m.content !== "string") return false;
