@@ -12,6 +12,7 @@
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
   import ManageAccountDialog from '$lib/components/ManageAccountDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import { durationParts } from '$lib/format';
   import { t } from '$lib/i18n';
 
   // Subscription OAuth login (issue #38). Pure consumer (Principle 1): the gateway
@@ -67,14 +68,16 @@
 
   // The access token is short-lived and auto-renewed by the gateway, so a lapsed one
   // is NOT an alarm — show "auto-renews"; when valid, the remaining time hints at the
-  // next renewal.
+  // next renewal. Coarsening (incl. the ">24h ⇒ days" rule) lives in `durationParts`
+  // so this label agrees with the quota-reset countdown below.
   function expiryLabel(a: OAuthAccount): string {
     if (a.expiresAt == null) return $t('auto-renews');
     const ms = a.expiresAt - Date.now();
     if (ms <= 0) return $t('auto-renews');
-    const h = Math.floor(ms / 3_600_000);
-    const m = Math.floor((ms % 3_600_000) / 60_000);
-    return h > 0 ? $t('in {h}h {m}m', { h, m }) : $t('in {m}m', { m });
+    const p = durationParts(ms);
+    if (p.unit === 'dh') return $t('in {d}d {h}h', { d: p.d, h: p.h });
+    if (p.unit === 'hm') return $t('in {h}h {m}m', { h: p.h, m: p.m });
+    return $t('in {m}m', { m: p.m });
   }
 
   // Compact token formatting (240.09M / 18.2k / 412) so a dense cell stays readable.
@@ -113,21 +116,16 @@
   }
 
   // "resets in 4d 16h" countdown from an absolute reset timestamp; null/elapsed ⇒ "".
-  // Coarsens by magnitude so the unit stays legible: ≥24h shows days+hours
-  // (a 7-day window reads "4d 16h", not "112h 2m"), ≥1h shows hours+minutes,
-  // under an hour shows minutes.
+  // Shares `durationParts` with `expiryLabel` so the coarsening (a 7-day window reads
+  // "4d 16h", not "112h 2m") stays identical across every duration label.
   function resetIn(ms: number | null): string {
     if (ms == null) return '';
     const left = ms - Date.now();
     if (left <= 0) return '';
-    const d = Math.floor(left / 86_400_000);
-    if (d > 0) {
-      const h = Math.floor((left % 86_400_000) / 3_600_000);
-      return $t('resets in {d}d {h}h', { d, h });
-    }
-    const h = Math.floor(left / 3_600_000);
-    const m = Math.floor((left % 3_600_000) / 60_000);
-    return h > 0 ? $t('resets in {h}h {m}m', { h, m }) : $t('resets in {m}m', { m });
+    const p = durationParts(left);
+    if (p.unit === 'dh') return $t('resets in {d}d {h}h', { d: p.d, h: p.h });
+    if (p.unit === 'hm') return $t('resets in {h}h {m}m', { h: p.h, m: p.m });
+    return $t('resets in {m}m', { m: p.m });
   }
 
   function onConnected(): void {

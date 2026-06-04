@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatUsd } from "./format.js";
+import { durationParts, formatUsd } from "./format.js";
 
 describe("formatUsd — adaptive USD precision", () => {
   it("renders not-measured (null/undefined/NaN) as an em dash", () => {
@@ -34,5 +34,41 @@ describe("formatUsd — adaptive USD precision", () => {
   it("never collapses a visible small non-zero cost to $0.00", () => {
     expect(formatUsd(0.0000244)).not.toBe("$0.00");
     expect(formatUsd(0.0000244)).not.toBe("$0.0000");
+  });
+});
+
+const H = 3_600_000;
+const M = 60_000;
+const D = 86_400_000;
+
+describe("durationParts — coarsen a span by magnitude (>24h rolls up to days)", () => {
+  it("under an hour: minutes only", () => {
+    expect(durationParts(10 * M)).toEqual({ unit: "m", m: 10 });
+    expect(durationParts(0)).toEqual({ unit: "m", m: 0 });
+    expect(durationParts(59 * M + 59_000)).toEqual({ unit: "m", m: 59 });
+  });
+
+  it("one hour up to a day: hours + minutes", () => {
+    expect(durationParts(H)).toEqual({ unit: "hm", h: 1, m: 0 });
+    expect(durationParts(6 * H + 21 * M)).toEqual({ unit: "hm", h: 6, m: 21 });
+    expect(durationParts(23 * H + 59 * M)).toEqual({ unit: "hm", h: 23, m: 59 });
+  });
+
+  it("exactly 24h rolls up to days", () => {
+    expect(durationParts(D)).toEqual({ unit: "dh", d: 1, h: 0 });
+  });
+
+  it("the bug: 238h 22m must read as days, not raw hours", () => {
+    // Screenshot regression: a Codex weekly window showed "238 小时 22 分钟后".
+    expect(durationParts(238 * H + 22 * M)).toEqual({ unit: "dh", d: 9, h: 22 });
+  });
+
+  it("drops sub-hour minutes once we are in the days bucket", () => {
+    // A days-scale span only carries days + hours, never trailing minutes.
+    expect(durationParts(4 * D + 14 * H + 37 * M)).toEqual({ unit: "dh", d: 4, h: 14 });
+  });
+
+  it("clamps negative spans to zero (already elapsed)", () => {
+    expect(durationParts(-5000)).toEqual({ unit: "m", m: 0 });
   });
 });

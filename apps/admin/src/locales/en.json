@@ -177,6 +177,7 @@
   "How much detail the gateway writes to its logs.": "How much detail the gateway writes to its logs.",
   "HTTP status": "HTTP status",
   "I saved it": "I saved it",
+  "in {d}d {h}h": "in {d}d {h}h",
   "in {h}h {m}m": "in {h}h {m}m",
   "in {m}m": "in {m}m",
   "Issue and revoke client keys, and cap the top lane each key may reach.": "Issue and revoke client keys, and cap the top lane each key may reach.",
