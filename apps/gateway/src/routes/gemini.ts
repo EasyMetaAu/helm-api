@@ -203,7 +203,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     // Memory scope (docs/08 Phase 1): parse the four memory headers and stamp them
     // onto the IR metadata bag (mirrors /v1/messages) so the SHARED pipeline's
     // observe phase reads the scope off ir.metadata without touching HTTP.
-    const memoryScope = resolveMemoryScope((name) => c.req.header(name));
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId);
     ir.metadata.thread_id = memoryScope.threadId;
     ir.metadata.resource_id = memoryScope.resourceId;
     ir.metadata.project_id = memoryScope.projectId;

@@ -171,9 +171,10 @@ describe("gateway.responses.memory — observe reaches /v1/responses", () => {
     const text = await res.text();
     expect(text).toContain("response.completed");
     // The streamed assistant text was accumulated and persisted (the FIRST time the
-    // Responses surface exercises the streaming observe path).
-    expect(threads[0]?.id).toBe("thread-1");
-    expect(messages.some((m) => m.threadId === "thread-1" && m.role === "user")).toBe(true);
+    // Responses surface exercises the streaming observe path). Thread ids are
+    // owner-scoped (`accountId:threadId`) so reused thread ids cannot cross accounts.
+    expect(threads[0]?.id).toBe("acct:thread-1");
+    expect(messages.some((m) => m.threadId === "acct:thread-1" && m.role === "user")).toBe(true);
     expect(messages.some((m) => m.role === "assistant" && m.content === "hello world")).toBe(true);
   });
 
