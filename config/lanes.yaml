@@ -24,17 +24,27 @@
 economy:
   purpose: Cheap and fast for simple tasks
   primary: deepseek/deepseek-v4-flash
-  fallback: [openai-codex/gpt-5.4-mini, balanced]
+  fallback:
+    - openai-codex/gpt-5.4-mini
+    - openrouter/deepseek-v4-flash
+    - balanced
 
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
   primary: deepseek/deepseek-v4-pro
-  fallback: [openai-codex/gpt-5.4, zenmux/auto, openrouter/auto]
+  fallback:
+    - openrouter/deepseek-v4-pro
+    - zenmux/claude-sonnet-4.6
+    - zenmux/auto
+    - openrouter/auto
 
 premium:
   purpose: Strong reasoning and high quality
   primary: openai-codex/gpt-5.5
-  fallback: [deepseek/deepseek-v4-pro, zenmux/claude-opus-4.7, zenmux/auto, openrouter/auto]
+  fallback:
+    - zenmux/claude-opus-4.7
+    - zenmux/gpt-5.5
+    - balanced
 
 # —— task lanes (named after detected task_type; the lane resolver maps a
 #    classified task_type onto a same-named lane — docs/04) ——
@@ -43,7 +53,9 @@ coding:
   # gpt-5.5 is the strongest model the Codex subscription actually exposes; the
   # legacy `*-codex` slugs 400 on the ChatGPT-account backend, so they are NOT used.
   primary: openai-codex/gpt-5.5
-  fallback: [premium, balanced]
+  fallback:
+    - premium
+    - balanced
 
 json:
   purpose: Strict structured-output (JSON) responses
@@ -52,20 +64,23 @@ json:
   # tail `*/auto` aliases are json-INCAPABLE and get PRUNED by the capability
   # filter — proving the filter fires on the default config.
   primary: deepseek/deepseek-v4-flash
-  fallback: [balanced]
+  fallback:
+    - balanced
   constraints:
     require_json: true
 
 vision:
   purpose: Multimodal / image understanding
   primary: zenmux/gemini-3.5-flash
-  fallback: [premium]
+  fallback:
+    - premium
   constraints:
     require_vision: true
 
 tool_use:
   purpose: Reliable function / tool calling
   primary: openai-codex/gpt-5.5
-  fallback: [premium]
+  fallback:
+    - premium
   constraints:
     require_tools: true
