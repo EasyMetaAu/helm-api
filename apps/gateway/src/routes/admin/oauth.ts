@@ -65,19 +65,36 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     if (!store) return c.json({ usage: [] });
     const now = Date.now();
     const dayMs = now - (now % 86_400_000); // UTC midnight (epoch ms is UTC)
+    // Restrict to currently-bound accounts (listStatus = the OAuth tokens) so a
+    // renamed / re-bound account does NOT linger as a phantom usage row — the same
+    // guard the /quota route applies. Fail-open: no seam / a listing failure leaves
+    // `bound` null and every row is returned (never hide data behind the filter).
+    const usageKey = (providerId: string, account: string) => JSON.stringify([providerId, account]);
+    let bound: Set<string> | null = null;
+    const s = seam();
+    if (s) {
+      try {
+        const status = await s.listStatus();
+        bound = new Set(status.flatMap((p) => p.accounts.map((a) => usageKey(p.id, a.account))));
+      } catch {
+        // fail-open: a listing failure returns all rows rather than hiding data
+      }
+    }
     try {
       const rows = await store.queryDay(dayMs);
-      const usage = rows.map((r) => {
-        const minutes = Math.max(1, (now - r.firstSeenMs) / 60_000);
-        return {
-          providerId: r.providerId,
-          account: r.account,
-          requests: r.requests,
-          tokens: r.tokens,
-          costUsd: r.costUsd,
-          rpm: Math.round((r.requests / minutes) * 100) / 100,
-        };
-      });
+      const usage = rows
+        .filter((r) => !bound || bound.has(usageKey(r.providerId, r.account)))
+        .map((r) => {
+          const minutes = Math.max(1, (now - r.firstSeenMs) / 60_000);
+          return {
+            providerId: r.providerId,
+            account: r.account,
+            requests: r.requests,
+            tokens: r.tokens,
+            costUsd: r.costUsd,
+            rpm: Math.round((r.requests / minutes) * 100) / 100,
+          };
+        });
       return c.json({ usage });
     } catch {
       return c.json({ usage: [] });

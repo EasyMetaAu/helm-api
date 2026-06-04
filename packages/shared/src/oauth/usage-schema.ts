@@ -65,8 +65,10 @@ export type OAuthQuotaSnapshot = z.infer<typeof OAuthQuotaSnapshotSchema>;
 // ── Anthropic usage-endpoint response (GET /api/oauth/usage) ─────────────────
 
 // The (untrusted) shape Anthropic's OAuth usage endpoint returns. Parsed
-// fail-open: any field may be absent (e.g. `seven_day_opus` is null on plans
-// without a separate Opus weekly cap). `utilization` is already a 0–100 PERCENT
+// fail-open: every window may be absent OR explicitly `null` (the API returns
+// `"seven_day_opus": null` on plans without a separate Opus weekly cap), so each
+// field is `.nullish()` — a strict `.optional()` would REJECT the null and fail the
+// whole parse, leaving the page blank. `utilization` is already a 0–100 PERCENT
 // (e.g. 33.0), NOT a 0–1 fraction — do not re-scale on ingest. `resets_at` is an
 // ISO-8601 timestamp. Windows: five_hour / seven_day / seven_day_opus /
 // seven_day_sonnet (mirrors the official Claude /usage display).
@@ -79,10 +81,10 @@ const AnthropicWindowSchema = z
 
 export const AnthropicOAuthUsageSchema = z
   .object({
-    five_hour: AnthropicWindowSchema.optional(),
-    seven_day: AnthropicWindowSchema.optional(),
-    seven_day_opus: AnthropicWindowSchema.optional(),
-    seven_day_sonnet: AnthropicWindowSchema.optional(),
+    five_hour: AnthropicWindowSchema.nullish(),
+    seven_day: AnthropicWindowSchema.nullish(),
+    seven_day_opus: AnthropicWindowSchema.nullish(),
+    seven_day_sonnet: AnthropicWindowSchema.nullish(),
   })
   .loose();
 
