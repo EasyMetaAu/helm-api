@@ -77,6 +77,13 @@ providers:
       # anthropic/claude-opus-4.7 — premium fallback, vision+json (zenmux real id).
       - alias: zenmux/claude-opus-4.7
         provider_model: anthropic/claude-opus-4.7
+      # anthropic/claude-sonnet-4.6 — balanced fallback, vision+json (zenmux real id).
+      - alias: zenmux/claude-sonnet-4.6
+        provider_model: anthropic/claude-sonnet-4.6
+      # openai/gpt-5.5 — premium fallback when no Codex subscription is connected
+      # (zenmux real id).
+      - alias: zenmux/gpt-5.5
+        provider_model: openai/gpt-5.5
       # google/gemini-3.5-flash — vision lane primary (multimodal; zenmux real id).
       - alias: zenmux/gemini-3.5-flash
         provider_model: google/gemini-3.5-flash
@@ -94,6 +101,12 @@ providers:
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
     models:
+      # deepseek/deepseek-v4-* — OpenRouter-hosted mirrors of the official
+      # DeepSeek models; economy/balanced fallbacks when the primary is down.
+      - alias: openrouter/deepseek-v4-pro
+        provider_model: deepseek/deepseek-v4-pro
+      - alias: openrouter/deepseek-v4-flash
+        provider_model: deepseek/deepseek-v4-flash
       # real_model: openrouter/auto — platform auto-route, JSON-INCAPABLE. The
       # last-resort tail fallback shared by every lane.
       - alias: openrouter/auto

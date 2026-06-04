@@ -77,6 +77,23 @@ deepseek/deepseek-v4-flash:
   supportsStreaming: true
   maxContextTokens: 1048576
   maxOutputTokens: 16384
+# OpenRouter-hosted DeepSeek mirrors (lanes fallback f0d0cc6; data from
+# https://openrouter.ai/api/v1/models, 2026-06-04 — tools + structured_outputs
+# supported, text-only input).
+openrouter/deepseek-v4-pro:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 1048576
+  maxOutputTokens: 384000
+openrouter/deepseek-v4-flash:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: false
+  supportsStreaming: true
+  maxContextTokens: 1048576
+  maxOutputTokens: 131072
 zenmux/claude-opus-4.7:
   supportsTools: true
   supportsJsonMode: true
@@ -86,6 +103,24 @@ zenmux/claude-opus-4.7:
   # routing). A document-bearing request only routes here when "document" is listed.
   modalities: [document]
   maxContextTokens: 1000000
+  maxOutputTokens: 128000
+zenmux/claude-sonnet-4.6:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  # Same document-input story as opus-4.7 (PDF/text, no audio/video).
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
+zenmux/gpt-5.5:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  # OpenRouter lists `file` input for gpt-5.5 (text+image+file->text).
+  modalities: [document]
+  maxContextTokens: 1050000
   maxOutputTokens: 128000
 zenmux/gemini-3.5-flash:
   supportsTools: true
