@@ -21,12 +21,32 @@ guaranteed to exist.
 
 ### Explicit client model has the highest priority
 
-When a client specifies a concrete model, classification and policy are skipped
-and the model is executed directly (the nginx pass-through equivalent). Whether
-this is allowed is controlled by the key's `allow_custom_model` capability (see
+When a client specifies a concrete model **or a lane name**, classification and
+policy are skipped and the request is executed directly (the nginx pass-through
+equivalent). Whether this is allowed is controlled by the key's
+`allow_custom_model` capability (see
 [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md)). The sentinel
 value `auto` is never treated as an explicit model — it means "let the router
 decide" and falls through to classification.
+
+For an `allow_custom_model` key the `model` field resolves in this order:
+
+1. **Lane name** (lanes shadow same-named model aliases): the lane's chain is
+   expanded and executed with full fallback semantics. The lane must sit inside
+   the key's `allowed_lanes` whitelist — an explicit ask for a forbidden lane is
+   rejected with `invalid_request` (400), **never silently downgraded** (only
+   classified routing clamps via `applyCaps`).
+2. **Model alias**: executed as a single-candidate chain (no fallback). The name
+   is validated against what the deployment can actually serve (providers.yaml
+   registry ∪ live curated OAuth aliases ∪ `provider/`-prefixed aliases whose
+   client is registered); an unknown name is rejected with `invalid_request`
+   (400) instead of silently falling through to the default provider.
+3. Over-budget `degrade` (docs/06) suppresses BOTH forms of explicit passthrough
+   — the request is forced onto the degrade lane.
+
+Keys **without** `allow_custom_model` ignore the `model` field entirely (any
+value behaves like `auto` and routes via classification); it is recorded in
+telemetry as `requested_model` only.
 
 ## Lanes
 

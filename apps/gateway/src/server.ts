@@ -1018,6 +1018,21 @@ export async function buildServer(
           }),
           now: () => new Date(),
           log: (record) => logger.log("info", "route.decision", { trace_id: record.request_id }),
+          // Strict explicit-model validation (docs/04): mirrors the executor's
+          // resolvability rules so plan-time acceptance == execute-time routability.
+          // Reads the LIVE oauthAliasSet/providerClients bindings (reassigned on
+          // OAuth curation changes), exactly like the executor's oauthAliases thunk.
+          isKnownModel: (alias) => {
+            if (oauthAliasSet.has(alias)) return true; // live curated OAuth set
+            const slash = alias.indexOf("/");
+            const prefix = slash > 0 ? alias.slice(0, slash) : "";
+            // Un-curated subscription alias: fail closed (executor would skip it).
+            if (prefix && ROUTABLE_OAUTH_IDS.has(prefix)) return false;
+            if (registry.resolve(alias).ok) return true; // providers.yaml alias
+            // Structural `provider/...` fallback: the named client forwards the bare id.
+            if (prefix && providerClients.has(prefix)) return true;
+            return false; // bare unknown name: rejected (no Phase-0 silent fallback)
+          },
         },
         routeOpts,
       ),

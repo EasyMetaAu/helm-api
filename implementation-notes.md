@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-06-04 · 显式 lane-as-model + 透传严格校验（spec docs/04 / docs/06）
+
+docs/04 路由优先级表第一行写的是 "explicit **model/lane**"，但实现里透传分支从未做 lane 展开：
+`model: "premium"` 会被当成字面模型名原样发给上游（4xx），未知裸模型名则静默落到
+defaultProvider（Phase-0 fail-open）。本次补齐 lane 半边并收紧校验（与用户拍板）：
+
+- **lane-as-model**（仅 `allow_custom_model=true` 的 key）：`model` 命中 lane 名 →
+  跳过分类/policy，但走 `expandChain` 完整 fallback 链。**lane 名遮蔽同名模型别名**
+  （先查 lane 再查模型）。
+- **`allowed_lanes` 硬约束**：显式点名一个不在白名单里的 lane → `invalid_request`(400)
+  **响亮拒绝**，不像分类路由那样经 `applyCaps` 静默降级——显式请求被偷偷换 lane 是更糟的语义。
+  空数组视为未启用（与 `applyCaps` 激活规则一致）。
+- **未知模型严格拒绝**：新增 `RouteDeps.isKnownModel?`（core 可选注入，headless 不强制；
+  gateway 必注入）。判定镜像执行器的可路由规则：live OAuth 别名集 ∪ providers.yaml registry
+  ∪ 有已注册 client 的 `provider/` 前缀；未捕捉的 subscription 前缀 fail-closed。
+  **裸未知名不再静默透传给 defaultProvider** ——显式透传路径的 Phase-0 fail-open 被移除
+  （分类路由产生的链不受影响，执行器语义未动）。
+- **不变**：`auto` 哨兵、普通 key（`allow_custom_model=false`）继续忽略 model 字段走分类、
+  超预算 degrade 同时压制模型与 lane 两种显式透传。
+- 拒绝同样落一条完整 DecisionRecord（final.status=error / error_reason=invalid_request /
+  空链 / 零 attempts），Debug UI 可见。
+
+---
+
 ## 2026-06-04 · Anthropic null 窗口解析回归 + /usage 孤儿过滤（providers 页, spec docs/11）
 
 两个收尾修复：

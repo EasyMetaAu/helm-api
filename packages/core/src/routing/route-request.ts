@@ -1,4 +1,10 @@
-import type { AttemptErrorDetail, DecisionRecord, HelmError, InternalRequest } from "@helm/shared";
+import {
+  type AttemptErrorDetail,
+  type DecisionRecord,
+  type HelmError,
+  type InternalRequest,
+  makeHelmError,
+} from "@helm/shared";
 import type { LanesConfig } from "../lanes/schema.js";
 import { type Classification as ResolverClassification, resolveLane } from "./lane-resolver.js";
 import { applyCaps, evaluatePolicies, type PolicyContext } from "./policy-engine.js";
@@ -54,9 +60,11 @@ export interface Classification {
   explanation: unknown[];
 }
 
-// The resolved execution plan handed to execute(). For explicit passthrough the
-// chain is exactly [explicit_model]; otherwise it is the selected lane's primary
-// plus its (recursively expanded, deduped, cycle-safe) fallback aliases.
+// The resolved execution plan handed to execute(). For explicit MODEL
+// passthrough the chain is exactly [explicit_model]; for an explicit LANE
+// (model field names a lane, docs/04) and for classified routing it is the
+// selected lane's primary plus its (recursively expanded, deduped, cycle-safe)
+// fallback aliases — explicit_model stays null in both lane cases.
 export interface ExecutionPlan {
   selected_lane: string;
   candidate_chain: string[];
@@ -114,6 +122,14 @@ export interface RouteDeps {
   /** telemetry sink — record is ALREADY redacted upstream is the caller's job;
    *  this never logs plaintext key/payload (principle 7). */
   log: (record: DecisionRecord) => void;
+  /** Is this string a model the deployment can actually serve? Used ONLY to
+   *  validate an explicit-model passthrough (allow_custom_model): an unknown
+   *  model is rejected with invalid_request instead of silently falling through
+   *  to the default provider (docs/04 — strict, no silent fallback). The gateway
+   *  wires it from registry + live OAuth curation + provider-prefix structure;
+   *  absent (headless core / tests) → validation is skipped. Lane names are
+   *  checked FIRST and never reach this. */
+  isKnownModel?: (alias: string) => boolean;
 }
 
 export interface RouteOptions {
@@ -243,6 +259,38 @@ interface PlanDecision {
   evalUsd: number | null;
 }
 
+// An explicit passthrough rejected BEFORE execution (unknown model / lane not in
+// the key's allowed_lanes — docs/04 strict validation). Carries everything the
+// orchestrator needs to log a complete error DecisionRecord without executing:
+// `selectedLane` is the requested name (chain stays empty — nothing was planned).
+interface PlanRejection {
+  reject: HelmError;
+  selectedLane: string;
+}
+
+function isRejection(p: PlanDecision | PlanRejection): p is PlanRejection {
+  return "reject" in p;
+}
+
+// The classifier segment shared by ALL explicit-passthrough outcomes (model,
+// lane, and their rejections). task_type:"passthrough" (NOT decided_by) is the
+// disambiguator: explicit passthrough and the classifier-crash fail-open BOTH
+// record decided_by:"default", so do not read decided_by to tell them apart —
+// passthrough is uniquely identified by task_type/complexity:"passthrough"
+// (crash fail-open uses task_type:"general", complexity:"medium").
+function passthroughClassifier(): DecisionRecord["classifier"] {
+  return {
+    task_type: "passthrough",
+    complexity: "passthrough",
+    confidence: 1,
+    decided_by: "default",
+    eval_cache_hit: null,
+    fallback_reason: null,
+    constraints: {},
+    explanation: [],
+  };
+}
+
 // Compute the execution plan + the classifier/policy decision segments. Explicit
 // passthrough short-circuits classify/policy/resolver entirely (docs/04: highest
 // priority, gated by allow_custom_model).
@@ -250,16 +298,19 @@ async function plan(
   req: InternalRequest,
   deps: RouteDeps,
   opts: RouteOptions,
-): Promise<PlanDecision> {
-  // 1) Explicit passthrough — bypass the whole routing brain.
+): Promise<PlanDecision | PlanRejection> {
+  // 1) Explicit passthrough — bypass the whole routing brain. The model field
+  //    may name a concrete MODEL (chain = [model]) or a LANE (chain = the lane's
+  //    expanded fallback chain, docs/04 "explicit model/lane").
   //    `auto` is the canonical "let the router decide" sentinel and must NEVER be
   //    treated as an explicit model, even for an allow_custom_model key — otherwise
   //    it short-circuits classify/lane-resolve and gets sent upstream as the literal
   //    model "auto" (the llm-router #391 regression). Fall through to classify.
   //    A key that is OVER its usage budget and set to `degrade` (opts.keyCaps.
   //    degradeLane is populated for this request) must NOT be able to bypass the
-  //    downgrade by naming an expensive explicit model — so suppress passthrough
-  //    while degrading and fall through to the forced degrade lane below (docs/06).
+  //    downgrade by naming an expensive explicit model OR lane — so suppress
+  //    passthrough while degrading and fall through to the forced degrade lane
+  //    below (docs/06).
   if (
     opts.allowCustomModel === true &&
     req.requested_model.length > 0 &&
@@ -267,23 +318,53 @@ async function plan(
     (opts.keyCaps?.degradeLane === undefined || opts.keyCaps.degradeLane === null)
   ) {
     const model = req.requested_model;
+
+    // 1a) Explicit LANE — lanes shadow same-named model aliases. The lane runs
+    //     with full fallback semantics (expandChain), but must sit inside the
+    //     key's allowed_lanes whitelist: unlike classified routing (where
+    //     applyCaps silently clamps), an EXPLICIT ask for a forbidden lane is a
+    //     client error and is rejected loudly (no silent downgrade). An empty
+    //     allowedLanes array is inactive, mirroring applyCaps' activation rule.
+    if (Object.hasOwn(deps.lanes, model)) {
+      const allowed = opts.keyCaps?.allowedLanes;
+      if (allowed != null && allowed.length > 0 && !allowed.includes(model)) {
+        return {
+          reject: makeHelmError({
+            error_class: "invalid_request",
+            message: `lane "${model}" is not permitted for this key (allowed_lanes)`,
+            trace_id: req.request_id,
+          }),
+          selectedLane: model,
+        };
+      }
+      return {
+        plan: {
+          selected_lane: model,
+          candidate_chain: expandChain(model, deps.lanes),
+          explicit_model: null,
+        },
+        classifier: passthroughClassifier(),
+        policy: { matched_policy_id: null, reason: "explicit lane passthrough" },
+        evalUsd: null,
+      };
+    }
+
+    // 1b) Explicit MODEL — strict validation when the deployment wired
+    //     isKnownModel: an unknown name is a client error (invalid_request),
+    //     NEVER a silent Phase-0 fall-through to the default provider.
+    if (deps.isKnownModel !== undefined && !deps.isKnownModel(model)) {
+      return {
+        reject: makeHelmError({
+          error_class: "invalid_request",
+          message: `unknown model or lane "${model}"`,
+          trace_id: req.request_id,
+        }),
+        selectedLane: model,
+      };
+    }
     return {
       plan: { selected_lane: model, candidate_chain: [model], explicit_model: model },
-      classifier: {
-        // task_type:"passthrough" (NOT decided_by) is the disambiguator here:
-        // explicit passthrough and the classifier-crash fail-open BOTH record
-        // decided_by:"default", so do not read decided_by to tell them apart —
-        // passthrough is uniquely identified by task_type/complexity:"passthrough"
-        // (crash fail-open uses task_type:"general", complexity:"medium").
-        task_type: "passthrough",
-        complexity: "passthrough",
-        confidence: 1,
-        decided_by: "default",
-        eval_cache_hit: null,
-        fallback_reason: null,
-        constraints: {},
-        explanation: [],
-      },
+      classifier: passthroughClassifier(),
       policy: { matched_policy_id: null, reason: "explicit model passthrough" },
       evalUsd: null,
     };
@@ -353,7 +434,43 @@ export async function routeRequest(
   deps: RouteDeps,
   opts: RouteOptions = {},
 ): Promise<ExecutionResult> {
-  const { plan: execPlan, classifier, policy, evalUsd } = await plan(req, deps, opts);
+  const planned = await plan(req, deps, opts);
+
+  // Explicit passthrough rejected before execution (unknown model / lane not
+  // permitted): no provider was attempted, but the rejection is still a routing
+  // decision — log a complete error record (empty chain, no attempts, costs
+  // unknown) so it shows up in the Debug UI like any other terminal error.
+  if (isRejection(planned)) {
+    const decision: DecisionRecord = {
+      request_id: req.request_id,
+      trace_id: req.request_id,
+      requested_model: req.requested_model,
+      key_prefix: opts.keyPrefix ?? null,
+      classifier: passthroughClassifier(),
+      policy: { matched_policy_id: null, reason: "explicit passthrough rejected" },
+      lane: { selected_lane: planned.selectedLane, candidate_chain: [] },
+      provider_attempts: [],
+      final: {
+        model_alias: null,
+        provider_model: null,
+        status: "error",
+        error_reason: planned.reject.error_class,
+      },
+      latency_total_ms: 0,
+      fallback_count: 0,
+      cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
+    };
+    deps.log(decision);
+    return {
+      decision,
+      final: { status: "error" },
+      body: null,
+      stream: null,
+      error: planned.reject,
+    };
+  }
+
+  const { plan: execPlan, classifier, policy, evalUsd } = planned;
 
   const outcome = await deps.execute(execPlan, req);
 
