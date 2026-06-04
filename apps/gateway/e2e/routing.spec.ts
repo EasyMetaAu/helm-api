@@ -148,6 +148,66 @@ test.describe("routing e2e", () => {
     expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_NEXT_WIRE);
   });
 
+  // ── Scenario 4b: explicit lane-as-model (allow_custom_model) ─────────────────
+  // An allow_custom_model key may name a LANE in the model field: classification
+  // is skipped and the lane's expanded chain executes (docs/04 explicit
+  // model/lane). The auth header switches to the dedicated k_custom key.
+  const CUSTOM_AUTH = {
+    Authorization: "Bearer helm_live_e2e_custom",
+    "Content-Type": "application/json",
+  };
+  const CAPPED_AUTH = {
+    Authorization: "Bearer helm_live_e2e_custom_capped",
+    "Content-Type": "application/json",
+  };
+
+  test("explicit lane-as-model -> lane chain serves (allow_custom_model)", async ({ request }) => {
+    const res = await request.post("/v1/chat/completions", {
+      // The prompt is clearly COMPLEX — if classification ran it would pick
+      // premium; landing on economy proves the explicit lane bypassed it.
+      data: chat("Prove step by step the theorem and derive the integral.", { model: "economy" }),
+      headers: CUSTOM_AUTH,
+    });
+    expect(res.status()).toBe(200);
+    expect(res.headers()["x-helm-lane"]).toBe("economy");
+    expect(res.headers()["x-helm-final-model"]).toBe(ECONOMY_HEAD);
+    expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_HEAD_WIRE);
+  });
+
+  test("explicit lane outside the key's allowed_lanes -> 400 invalid_request (no silent downgrade)", async ({
+    request,
+  }) => {
+    const res = await request.post("/v1/chat/completions", {
+      data: chat("hi thanks, ok", { model: "premium" }),
+      headers: CAPPED_AUTH,
+    });
+    expect(res.status()).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("premium");
+  });
+
+  test("explicit UNKNOWN model -> 400 invalid_request (strict, no Phase-0 fall-through)", async ({
+    request,
+  }) => {
+    const res = await request.post("/v1/chat/completions", {
+      data: chat("hi thanks, ok", { model: "totally-made-up-model" }),
+      headers: CUSTOM_AUTH,
+    });
+    expect(res.status()).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("totally-made-up-model");
+  });
+
+  test("explicit KNOWN model alias still passes through verbatim", async ({ request }) => {
+    const res = await request.post("/v1/chat/completions", {
+      data: chat("hi thanks, ok", { model: ECONOMY_HEAD }),
+      headers: CUSTOM_AUTH,
+    });
+    expect(res.status()).toBe(200);
+    expect(res.headers()["x-helm-final-model"]).toBe(ECONOMY_HEAD);
+    expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_HEAD_WIRE);
+  });
+
   // ── Scenario 5: unclassifiable prompt → balanced (classification fallback) ──
   // A contentless/degenerate prompt is genuinely unclassifiable: the classify
   // adapter fails open (principle 3) and the resolver pins `balanced` via the

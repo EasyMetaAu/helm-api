@@ -53,6 +53,28 @@ await keyStore.createKey({
   overBudgetBehavior: "reject",
 });
 
+// Explicit-passthrough keys (docs/04 lane-as-model + strict model validation).
+// `k_custom` may name any known model OR lane; `k_custom_capped` additionally
+// confines explicit lanes to allowed_lanes=[economy] — naming another lane is a
+// 400 invalid_request (loud reject, never a silent downgrade).
+await keyStore.createKey({
+  keyId: "k_custom",
+  hash: hashKey("helm_live_e2e_custom"),
+  prefix: "helm_live_cu",
+  accountId: "acct_e2e",
+  role: "user",
+  allowCustomModel: true,
+});
+await keyStore.createKey({
+  keyId: "k_custom_capped",
+  hash: hashKey("helm_live_e2e_custom_capped"),
+  prefix: "helm_live_cc",
+  accountId: "acct_e2e",
+  role: "user",
+  allowCustomModel: true,
+  allowedLanes: ["economy"],
+});
+
 // Seed one full decision record for the admin requests views (e2e.admin). It is
 // a pre-built, redacted DecisionRecord — NOT a live upstream call — so the admin
 // request list/detail have a deterministic row with a trace_id, a classified

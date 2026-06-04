@@ -75,7 +75,7 @@ The stored record (`ApiKeyRecord`, single source of truth in
   account_id: string,
   role: "root" | "user",
   allowed_lanes: string[] | null, // allow-list of lanes (empty/null = any lane)
-  allow_custom_model: boolean,    // may the client pin a model directly?
+  allow_custom_model: boolean,    // may the client pin a model OR lane directly?
   disabled: boolean,
   rate_limit_rpm: number | null,  // per-key override; null = inherit default
   rate_limit_tpm: number | null,  // 0 = explicitly unlimited
@@ -87,7 +87,10 @@ The stored record (`ApiKeyRecord`, single source of truth in
   key. The plaintext of a freshly minted key is returned to the admin caller
   exactly once and then discarded.
 - **Per-key caps.** `allowed_lanes` and `allow_custom_model` constrain how a key
-  may route (resolved into `AuthIdentity.caps`). (A per-key `max_lane` ceiling was
+  may route (resolved into `AuthIdentity.caps`). `allow_custom_model` lets the
+  `model` field name a concrete model alias or a lane (docs/04); an explicit
+  lane is still bounded by `allowed_lanes` and a violation is a 400, not a
+  silent downgrade. (A per-key `max_lane` ceiling was
   retired — lanes are parallel, not a strict hierarchy, so the whitelist subsumes
   it; see implementation-notes.md.)
 - **Rotation & revocation never mutate in place.** `KeyStore.disable` is a soft

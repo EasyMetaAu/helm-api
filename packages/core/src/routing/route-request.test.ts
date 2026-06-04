@@ -397,6 +397,139 @@ describe("routeRequest — orchestration", () => {
     expect(plan.selected_lane).toBe("coding");
   });
 
+  it("explicit LANE passthrough expands the lane's chain (full fallback semantics)", async () => {
+    // model = a lane name + allow_custom_model: skip classify/policy, but run the
+    // lane's expanded chain — NOT a [premium] literal candidate.
+    const d = deps();
+    const result = await routeRequest(req({ requested_model: "premium" }), d, {
+      allowCustomModel: true,
+    });
+
+    expect(d.classify).not.toHaveBeenCalled();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("premium");
+    expect(plan.explicit_model).toBeNull(); // a lane is not a single explicit model
+    // premium.primary, then balanced (lane ref) expanded; cycle back to premium cut.
+    expect(plan.candidate_chain).toEqual(["best_reasoning_model", "default_good_model"]);
+
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.lane.selected_lane).toBe("premium");
+    expect(rec.classifier.task_type).toBe("passthrough");
+    expect(result.final.status).toBe("ok");
+  });
+
+  it("explicit lane is rejected with invalid_request when NOT in the key's allowedLanes (no silent downgrade)", async () => {
+    const d = deps();
+    const result = await routeRequest(req({ requested_model: "premium" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: ["economy"] },
+    });
+
+    expect(d.execute).not.toHaveBeenCalled();
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(result.error?.message).toContain("premium");
+
+    // The rejection is still observable: a decision record is logged.
+    expect(d.log).toHaveBeenCalledOnce();
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.final.status).toBe("error");
+    expect(rec.final.error_reason).toBe("invalid_request");
+    expect(rec.lane.selected_lane).toBe("premium");
+    expect(rec.lane.candidate_chain).toEqual([]);
+    expect(rec.provider_attempts).toHaveLength(0);
+  });
+
+  it("explicit lane inside the key's allowedLanes is served", async () => {
+    const d = deps();
+    const result = await routeRequest(req({ requested_model: "economy" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: ["economy", "balanced"] },
+    });
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+    expect(plan.candidate_chain[0]).toBe("cheap_model");
+    expect(result.final.status).toBe("ok");
+  });
+
+  it("an EMPTY allowedLanes array is inactive for explicit lanes (mirrors applyCaps)", async () => {
+    const d = deps();
+    const result = await routeRequest(req({ requested_model: "premium" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: [] },
+    });
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("premium");
+  });
+
+  it("explicit lane works even when isKnownModel does not know it (lanes shadow model aliases)", async () => {
+    const d = deps({ isKnownModel: () => false });
+    const result = await routeRequest(req({ requested_model: "economy" }), d, {
+      allowCustomModel: true,
+    });
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+  });
+
+  it("explicit UNKNOWN model is rejected with invalid_request (strict — no Phase-0 silent fallback)", async () => {
+    const d = deps({ isKnownModel: (alias) => alias === "deepseek/deepseek-v4-pro" });
+    const result = await routeRequest(req({ requested_model: "gpt-4o" }), d, {
+      allowCustomModel: true,
+    });
+
+    expect(d.execute).not.toHaveBeenCalled();
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(result.error?.message).toContain("gpt-4o");
+
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.final.error_reason).toBe("invalid_request");
+    expect(rec.lane.candidate_chain).toEqual([]);
+  });
+
+  it("explicit KNOWN model passes through; isKnownModel ABSENT keeps legacy passthrough (back-compat)", async () => {
+    const known = deps({ isKnownModel: (alias) => alias === "deepseek/deepseek-v4-pro" });
+    const okKnown = await routeRequest(
+      req({ requested_model: "deepseek/deepseek-v4-pro" }),
+      known,
+      {
+        allowCustomModel: true,
+      },
+    );
+    expect(okKnown.final.status).toBe("ok");
+    const plan = (known.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.candidate_chain).toEqual(["deepseek/deepseek-v4-pro"]);
+
+    // No isKnownModel wired (headless core / older callers): no validation.
+    const legacy = deps();
+    const okLegacy = await routeRequest(req({ requested_model: "anything" }), legacy, {
+      allowCustomModel: true,
+    });
+    expect(okLegacy.final.status).toBe("ok");
+  });
+
+  it("keyCaps.degradeLane suppresses explicit LANE passthrough too (no over-budget bypass)", async () => {
+    const d = deps();
+    const result = await routeRequest(req({ requested_model: "premium" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: null, degradeLane: "economy" },
+    });
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+  });
+
+  it("a lane name WITHOUT allow_custom_model stays ignored — classified routing as before", async () => {
+    const d = deps();
+    await routeRequest(req({ requested_model: "premium" }), d, { allowCustomModel: false });
+    expect(d.classify).toHaveBeenCalledOnce();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("coding");
+  });
+
   it("populates the rich telemetry fields (latency total, fallback_count, cost split, key_prefix)", async () => {
     const d = deps({
       classify: vi.fn(async () => classification({ eval_usd: 0.00003 })),
