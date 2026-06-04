@@ -32,6 +32,7 @@ export {
   type AnthropicRequestMessage,
   type AnthropicToolChoiceOut,
   transformRequestIn,
+  transformRequestInWithWarnings,
   transformRequestOut,
 } from "./request.js";
 export {

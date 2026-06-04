@@ -63,8 +63,9 @@ export const IRVideoPartSchema = z.object({
 
 export const IRDocumentPartSchema = z.object({
   type: z.literal("document"),
-  url: z.string().optional(),
+  url: z.string().optional(), // remote http(s) reference
   data: z.string().optional(), // base64 (e.g. PDF)
+  fileId: z.string().optional(), // provider-uploaded file handle (OpenAI file_id / Anthropic file source)
   mediaType: z.string().optional(),
   filename: z.string().optional(),
 });

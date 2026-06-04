@@ -8,11 +8,21 @@ import { z } from "zod";
 //                   Manual entries ALWAYS WIN (CLAUDE.md implementation conventions).
 // Invalid override → fail-closed (principle 2). See docs/02 security rules.
 
+// Non-image INPUT modalities a backend can accept (P7 multimodal routing). image is
+// already gated by supportsVision; this set covers audio / video / document so a lane
+// only routes a request carrying that modality to a backend that advertises it.
+// Optional: absent ⇒ empty ⇒ the backend accepts NONE of these extra modalities (a
+// request without them is unaffected; one WITH them gets an explicit skip reason).
+export const InputModalitySchema = z.enum(["audio", "video", "document"]);
+export type InputModality = z.infer<typeof InputModalitySchema>;
+
 export const CapabilitiesSchema = z.object({
   supportsTools: z.boolean(),
   supportsJsonMode: z.boolean(),
   supportsVision: z.boolean(),
   supportsStreaming: z.boolean(),
+  // Extra input modalities (besides text+image) the backend accepts. See above.
+  modalities: z.array(InputModalitySchema).optional(),
   // Some upstream relays (e.g. la.atmy.work gpt-5.x) REQUIRE stream:true and 400 a
   // non-stream request ("Stream must be set to true"). That is a request-SHAPE
   // constraint, NOT a capability gap — the model DOES stream (supportsStreaming

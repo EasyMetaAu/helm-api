@@ -24,6 +24,23 @@ export const GeminiInlineDataSchema = z.object({
   data: z.string(), // base64
 });
 
+// fileData references a remote/uploaded blob (gs:// or Files API uri) instead of
+// inlining base64. Used for large audio/video/document inputs (P7 multimodal).
+export const GeminiFileDataSchema = z.object({
+  mimeType: z.string().optional(),
+  fileUri: z.string(),
+});
+
+// videoMetadata rides ALONGSIDE an inlineData/fileData video part: frame-sampling rate
+// and a clip window. Offsets are duration strings ("1.5s"). (P7 multimodal)
+export const GeminiVideoMetadataSchema = z
+  .object({
+    fps: z.number().optional(),
+    startOffset: z.string().optional(),
+    endOffset: z.string().optional(),
+  })
+  .passthrough();
+
 export const GeminiFunctionCallSchema = z.object({
   name: z.string(),
   args: z.unknown().optional(), // parsed object (Gemini sends JSON object, not a string)
@@ -37,7 +54,14 @@ export const GeminiFunctionResponseSchema = z.object({
 export const GeminiPartSchema = z
   .object({
     text: z.string().optional(),
+    // thought=true marks a reasoning part (Gemini "thinking" output); thoughtSignature
+    // is the opaque signature Gemini attaches to a thought part. Declared explicitly
+    // (was only surviving via passthrough) so the reasoning bridge can read them. (P6)
+    thought: z.boolean().optional(),
+    thoughtSignature: z.string().optional(),
     inlineData: GeminiInlineDataSchema.optional(),
+    fileData: GeminiFileDataSchema.optional(),
+    videoMetadata: GeminiVideoMetadataSchema.optional(),
     functionCall: GeminiFunctionCallSchema.optional(),
     functionResponse: GeminiFunctionResponseSchema.optional(),
   })
@@ -80,10 +104,32 @@ export const GeminiGenerationConfigSchema = z
     temperature: z.number().optional(),
     responseMimeType: z.string().optional(),
     responseSchema: z.unknown().optional(),
+    // —— litellm-parity sampling/control knobs (camelCase Gemini wire names). All
+    // optional; the transformer maps the IR's flat OpenAI-shaped params onto these.
+    topP: z.number().optional(),
+    topK: z.number().int().optional(),
+    frequencyPenalty: z.number().optional(),
+    presencePenalty: z.number().optional(),
+    seed: z.number().int().optional(),
+    stopSequences: z.array(z.string()).optional(),
+    candidateCount: z.number().int().positive().optional(),
+    responseLogprobs: z.boolean().optional(),
+    logprobs: z.number().int().nonnegative().optional(),
+    responseModalities: z.array(z.string()).optional(),
+    // thinkingConfig{thinkingBudget?, includeThoughts?} (Gemini reasoning control).
+    thinkingConfig: z
+      .object({
+        thinkingBudget: z.number().int().optional(),
+        includeThoughts: z.boolean().optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
 // —— Request ———————————————————————————————————————————————————————————————————————
+// safetySettings is an opaque array (HarmCategory/threshold tuples) we passthrough
+// rather than model — it is provider supply-chain config, not an IR concept.
 
 export const GeminiGenerateContentRequestSchema = z
   .object({
@@ -92,6 +138,8 @@ export const GeminiGenerateContentRequestSchema = z
     tools: z.array(GeminiToolSchema).optional(),
     toolConfig: z.unknown().optional(),
     generationConfig: GeminiGenerationConfigSchema.optional(),
+    safetySettings: z.array(z.unknown()).optional(),
+    thinkingConfig: z.unknown().optional(),
   })
   .passthrough();
 export type GeminiGenerateContentRequest = z.infer<typeof GeminiGenerateContentRequestSchema>;
@@ -100,12 +148,25 @@ export type GeminiGenerateContentRequest = z.infer<typeof GeminiGenerateContentR
 // finishReason is a Gemini enum; we keep it as a string so an unknown future value
 // does not fail parse (the transformer maps it to a legal IR value + keeps raw).
 
+// Per-modality token detail entry: {modality, tokenCount} (Gemini usage breakdown).
+export const GeminiModalityTokenCountSchema = z
+  .object({
+    modality: z.string().optional(),
+    tokenCount: z.number().int().nonnegative().optional(),
+  })
+  .passthrough();
+
 export const GeminiUsageMetadataSchema = z
   .object({
     promptTokenCount: z.number().int().nonnegative().optional(),
     candidatesTokenCount: z.number().int().nonnegative().optional(),
     totalTokenCount: z.number().int().nonnegative().optional(),
     cachedContentTokenCount: z.number().int().nonnegative().optional(),
+    // —— litellm-parity usage detail. thoughtsTokenCount is the reasoning-token count
+    // (-> IRUsage.reasoning_tokens); the *Details arrays carry per-modality breakdown.
+    thoughtsTokenCount: z.number().int().nonnegative().optional(),
+    promptTokensDetails: z.array(GeminiModalityTokenCountSchema).optional(),
+    candidatesTokensDetails: z.array(GeminiModalityTokenCountSchema).optional(),
   })
   .passthrough();
 export type GeminiUsageMetadata = z.infer<typeof GeminiUsageMetadataSchema>;
@@ -116,15 +177,32 @@ export const GeminiCandidateSchema = z
     finishReason: z.string().optional(),
     index: z.number().int().optional(),
     safetyRatings: z.array(z.unknown()).optional(),
+    // —— litellm-parity candidate annotations. groundingMetadata/citationMetadata fold
+    // into IRMessage.annotations (url_citation); logprobsResult -> IRChoice.logprobs.
+    groundingMetadata: z.unknown().optional(),
+    citationMetadata: z.unknown().optional(),
+    logprobsResult: z.unknown().optional(),
   })
   .passthrough();
 export type GeminiCandidate = z.infer<typeof GeminiCandidateSchema>;
+
+// promptFeedback: when blockReason is present the whole prompt was rejected upstream
+// (no candidates). The transformer surfaces it as finish_reason content_filter and
+// stashes the raw block in provider_raw.
+export const GeminiPromptFeedbackSchema = z
+  .object({
+    blockReason: z.string().optional(),
+    safetyRatings: z.array(z.unknown()).optional(),
+  })
+  .passthrough();
+export type GeminiPromptFeedback = z.infer<typeof GeminiPromptFeedbackSchema>;
 
 export const GeminiGenerateContentResponseSchema = z
   .object({
     candidates: z.array(GeminiCandidateSchema).optional(),
     usageMetadata: GeminiUsageMetadataSchema.optional(),
     modelVersion: z.string().optional(),
+    promptFeedback: GeminiPromptFeedbackSchema.optional(),
   })
   .passthrough();
 export type GeminiGenerateContentResponse = z.infer<typeof GeminiGenerateContentResponseSchema>;
@@ -133,7 +211,21 @@ export type GeminiGenerateContentResponse = z.infer<typeof GeminiGenerateContent
 // INCREMENTAL delta (clients accumulate text frame to frame). The event shape equals
 // the response shape, so the SSE event schema reuses the response schema. ——————————
 
-export const GeminiSSEEventSchema = GeminiGenerateContentResponseSchema;
+// A streamed frame is normally a response snapshot, but Gemini can also push a
+// top-level `error` frame ({error:{code,message,status}}) mid-stream. We allow it on
+// the SSE event so transformStreamIn can detect and surface it instead of silently
+// dropping a failed generation.
+export const GeminiErrorSchema = z
+  .object({
+    code: z.number().int().optional(),
+    message: z.string().optional(),
+    status: z.string().optional(),
+  })
+  .passthrough();
+
+export const GeminiSSEEventSchema = GeminiGenerateContentResponseSchema.extend({
+  error: GeminiErrorSchema.optional(),
+});
 export type GeminiSSEEvent = z.infer<typeof GeminiSSEEventSchema>;
 
 // —— IR chunk (the IR-level streaming delta). The IR is OpenAI-Chat shaped, so its

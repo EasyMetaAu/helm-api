@@ -6,6 +6,7 @@ import {
   IRRequestSchema,
   type IRToolCall,
 } from "../ir.js";
+import { guardRequestFor, type ProtocolWarning, readWarnings } from "../protocol-guards.js";
 import { type AnthropicOutputFormat, responseFormatToOutputFormat } from "./output-format.js";
 import { createAnthropicToolNameMap, sanitizeAnthropicToolName } from "./response.js";
 
@@ -48,6 +49,24 @@ const AnthropicImageBlockSchema = z
   })
   .passthrough();
 
+// Anthropic document block (PDF / text). source mirrors the image block: a base64
+// payload with media_type, OR a remote {type:"url", url}. file_id variant survives via
+// passthrough. Carried inbound so anthropic->X document requests reach the IR (P7).
+const AnthropicDocumentBlockSchema = z
+  .object({
+    type: z.literal("document"),
+    source: z
+      .object({
+        type: z.string(),
+        media_type: z.string().optional(),
+        data: z.string().optional(),
+        url: z.string().optional(),
+        file_id: z.string().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
 const AnthropicToolUseBlockSchema = z
   .object({
     type: z.literal("tool_use"),
@@ -85,6 +104,7 @@ const AnthropicUnknownBlockSchema = z.object({ type: z.string() }).passthrough()
 const AnthropicContentBlockSchema = z.union([
   AnthropicTextBlockSchema,
   AnthropicImageBlockSchema,
+  AnthropicDocumentBlockSchema,
   AnthropicToolUseBlockSchema,
   AnthropicToolResultBlockSchema,
   AnthropicThinkingBlockSchema,
@@ -116,6 +136,13 @@ const AnthropicOutputFormatSchema = z
   .object({ type: z.literal("json_schema"), schema: z.unknown() })
   .passthrough();
 
+// Anthropic extended-thinking config: { type:"enabled", budget_tokens } (or a
+// future "adaptive"/"disabled" shape). Carried as a passthrough bag so it round-trips
+// into IR.thinking verbatim and back out unchanged (LiteLLM forwards `thinking` as-is).
+const AnthropicThinkingConfigSchema = z
+  .object({ type: z.string(), budget_tokens: z.number().int().nonnegative().optional() })
+  .passthrough();
+
 const AnthropicMessagesRequestSchema = z
   .object({
     model: z.string(),
@@ -123,11 +150,20 @@ const AnthropicMessagesRequestSchema = z
     system: AnthropicSystemSchema.optional(),
     max_tokens: z.number().int().positive().optional(),
     temperature: z.number().optional(),
+    // —— litellm-parity sampling knobs (mapped straight to/from the IR). ——
+    top_p: z.number().optional(),
+    top_k: z.number().int().optional(),
     stream: z.boolean().optional(),
     stop_sequences: z.array(z.string()).optional(),
     tools: z.array(AnthropicToolSchema).optional(),
     tool_choice: z.unknown().optional(),
     output_format: AnthropicOutputFormatSchema.optional(),
+    // —— extended-thinking + routing knobs. thinking -> IR.thinking; service_tier
+    // passes through; metadata is Anthropic's only documented user-attribution field
+    // and has no IR home, so it is preserved verbatim in provider_raw. ——
+    thinking: AnthropicThinkingConfigSchema.optional(),
+    service_tier: z.string().optional(),
+    metadata: z.unknown().optional(),
   })
   .passthrough();
 
@@ -159,6 +195,34 @@ function imagePartFromSource(
   const mediaType = source.media_type ?? "application/octet-stream";
   const url = `data:${mediaType};base64,${source.data ?? ""}`;
   return { type: "image", url, mediaType };
+}
+
+// —— document block source -> IR document part. base64 keeps data+media_type inline;
+// a url source -> document.url; an uploaded-file source -> document.fileId, so the
+// upload handle round-trips back to a {type:"file"} source losslessly (P7). ——————————
+function documentPartFromSource(
+  source: z.infer<typeof AnthropicDocumentBlockSchema>["source"],
+): IRContentPart {
+  if (source.type === "url" && source.url !== undefined) {
+    return {
+      type: "document",
+      url: source.url,
+      ...(source.media_type ? { mediaType: source.media_type } : {}),
+    };
+  }
+  if (source.type === "file" && source.file_id !== undefined) {
+    return {
+      type: "document",
+      fileId: source.file_id,
+      ...(source.media_type ? { mediaType: source.media_type } : {}),
+    };
+  }
+  // base64 (or any inline-data source): keep data + media_type on the IR part.
+  return {
+    type: "document",
+    data: source.data ?? "",
+    ...(source.media_type ? { mediaType: source.media_type } : {}),
+  };
 }
 
 // —— tool_use -> IR tool_call. input is serialized to a STABLE JSON string (OpenAI
@@ -280,6 +344,11 @@ export function transformRequestOut(req: unknown): IRRequest {
             imagePartFromSource((block as z.infer<typeof AnthropicImageBlockSchema>).source),
           );
           break;
+        case "document":
+          parts.push(
+            documentPartFromSource((block as z.infer<typeof AnthropicDocumentBlockSchema>).source),
+          );
+          break;
         case "thinking": {
           const b = block as z.infer<typeof AnthropicThinkingBlockSchema>;
           // Rule 4: kept in the IR extension, NOT in normal content.
@@ -345,17 +414,36 @@ export function transformRequestOut(req: unknown): IRRequest {
         }
       : undefined;
 
+  // metadata has no IR home (Anthropic-only user-attribution); preserve it verbatim
+  // in provider_raw so an anthropic->anthropic round-trip is lossless.
+  const providerRaw = parsed.metadata !== undefined ? { metadata: parsed.metadata } : undefined;
+
   const ir: IRRequest = {
     model: parsed.model,
     messages: merged,
     ...(parsed.tools !== undefined ? { tools: parsed.tools.map(toIRTool) } : {}),
     ...(parsed.tool_choice !== undefined ? { tool_choice: parsed.tool_choice } : {}),
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
+    ...(parsed.top_p !== undefined ? { top_p: parsed.top_p } : {}),
+    ...(parsed.top_k !== undefined ? { top_k: parsed.top_k } : {}),
     ...(parsed.max_tokens !== undefined ? { max_tokens: parsed.max_tokens } : {}),
     ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
+    // Anthropic stop_sequences[] is the IR `stop` (string | string[]) — carried as the
+    // array verbatim; the OpenAI/IR side accepts both forms.
+    ...(parsed.stop_sequences !== undefined ? { stop: parsed.stop_sequences } : {}),
     ...(responseFormat !== undefined ? { response_format: responseFormat } : {}),
-    ...(thinking.length > 0 ? { thinking } : {}),
+    // The extended-thinking config rides IR.thinking (the provider-shaped reasoning
+    // bag), distinct from the per-message `thinking` block extension built above.
+    ...(parsed.thinking !== undefined ? { thinking: parsed.thinking } : {}),
+    ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
+    ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
   };
+
+  // Per-message thinking BLOCKS (kept out of prompt content) live on provider_raw,
+  // never colliding with the request-level thinking CONFIG above. Merge if both.
+  if (thinking.length > 0) {
+    ir.provider_raw = { ...(ir.provider_raw ?? {}), thinking_blocks: thinking };
+  }
 
   // Final structural validation: the IR we hand downstream is always well-formed.
   return IRRequestSchema.parse(ir);
@@ -392,6 +480,13 @@ export interface AnthropicImageBlockOut {
   type: "image";
   source: { type: "base64"; media_type: string; data: string } | { type: "url"; url: string };
 }
+export interface AnthropicDocumentBlockOut {
+  type: "document";
+  source:
+    | { type: "base64"; media_type: string; data: string }
+    | { type: "url"; url: string }
+    | { type: "file"; file_id: string };
+}
 export interface AnthropicToolUseBlockOut {
   type: "tool_use";
   id: string;
@@ -406,6 +501,7 @@ export interface AnthropicToolResultBlockOut {
 export type AnthropicRequestBlock =
   | AnthropicTextBlockOut
   | AnthropicImageBlockOut
+  | AnthropicDocumentBlockOut
   | AnthropicToolUseBlockOut
   | AnthropicToolResultBlockOut;
 
@@ -426,20 +522,66 @@ export type AnthropicToolChoiceOut =
   | { type: "none" }
   | { type: "tool"; name: string };
 
+export interface AnthropicThinkingConfigOut {
+  type: string;
+  budget_tokens?: number;
+}
+
 export interface AnthropicOutboundRequest {
   model: string;
   max_tokens: number;
   system?: string | AnthropicTextBlockOut[];
   messages: AnthropicRequestMessage[];
   temperature?: number;
+  top_p?: number;
+  top_k?: number;
   stream?: boolean;
   stop_sequences?: string[];
   tools?: AnthropicOutboundTool[];
   tool_choice?: AnthropicToolChoiceOut;
   output_format?: AnthropicOutputFormat;
+  thinking?: AnthropicThinkingConfigOut;
+  service_tier?: string;
 }
 
 const DEFAULT_MAX_TOKENS = 4096;
+
+// reasoning_effort -> Anthropic extended-thinking budget (tokens). The IR enum is
+// minimal|low|medium|high; LiteLLM derives a per-tier budget (referenced, NOT copied).
+// All non-disabled efforts emit type:"enabled" with a positive budget so the request
+// is a valid extended-thinking call.
+const REASONING_EFFORT_TO_BUDGET: Record<string, number> = {
+  minimal: 1024,
+  low: 2048,
+  medium: 8192,
+  high: 16384,
+};
+
+function thinkingFromIR(ir: IRRequest): AnthropicThinkingConfigOut | undefined {
+  // An explicit thinking config wins: forward it verbatim (LiteLLM passes `thinking`
+  // straight through). We narrow the unknown bag to the outbound shape defensively.
+  if (ir.thinking !== undefined && ir.thinking !== null && typeof ir.thinking === "object") {
+    const cfg = ir.thinking as { type?: unknown; budget_tokens?: unknown };
+    if (typeof cfg.type === "string") {
+      return {
+        type: cfg.type,
+        ...(typeof cfg.budget_tokens === "number" ? { budget_tokens: cfg.budget_tokens } : {}),
+      };
+    }
+  }
+  // Otherwise derive a budget from reasoning_effort (the cross-protocol knob).
+  if (ir.reasoning_effort !== undefined) {
+    const budget = REASONING_EFFORT_TO_BUDGET[ir.reasoning_effort];
+    if (budget !== undefined) return { type: "enabled", budget_tokens: budget };
+  }
+  return undefined;
+}
+
+// IR.stop (string | string[]) -> Anthropic stop_sequences[] (always an array).
+function stopSequencesFromIR(stop: IRRequest["stop"]): string[] | undefined {
+  if (stop === undefined) return undefined;
+  return typeof stop === "string" ? [stop] : stop;
+}
 
 function parseToolInput(raw: string): unknown {
   const trimmed = raw.trim();
@@ -463,6 +605,27 @@ function imageBlockFromPart(
   return { type: "image", source: { type: "url", url: part.url } };
 }
 
+// IR document part -> Anthropic document block. An uploaded-file handle -> {type:"file"}
+// source; inline base64 keeps data+media_type; a remote ref -> {type:"url"} source (P7).
+function documentBlockFromPart(
+  part: Extract<IRContentPart, { type: "document" }>,
+): AnthropicDocumentBlockOut {
+  if (part.fileId !== undefined) {
+    return { type: "document", source: { type: "file", file_id: part.fileId } };
+  }
+  if (part.data !== undefined) {
+    return {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: part.mediaType ?? "application/pdf",
+        data: part.data,
+      },
+    };
+  }
+  return { type: "document", source: { type: "url", url: part.url ?? "" } };
+}
+
 function contentToBlocks(content: IRMessage["content"]): AnthropicRequestBlock[] {
   if (content === null) return [];
   if (typeof content === "string") {
@@ -472,7 +635,9 @@ function contentToBlocks(content: IRMessage["content"]): AnthropicRequestBlock[]
   for (const part of content) {
     if (part.type === "text") blocks.push({ type: "text", text: part.text });
     else if (part.type === "image") blocks.push(imageBlockFromPart(part));
-    // thinking parts are not re-emitted on the outbound request path.
+    else if (part.type === "document") blocks.push(documentBlockFromPart(part));
+    // thinking/audio/video parts are not re-emitted on the Anthropic request path
+    // (Anthropic Messages has no audio/video content block today).
   }
   return blocks;
 }
@@ -517,8 +682,30 @@ function mapToolChoice(
  * INTERNALLY and is dropped from the returned object's own enumerable serialization
  * unless a caller opts to keep it — see the matrix test which asserts no leakage).
  */
+/**
+ * IR -> native Anthropic request AND the structured degradation warnings (n_capped /
+ * data_loss) the guard produced. Exposed so a caller (route / pipeline / telemetry)
+ * can OBSERVE the degradation — `transformRequestIn` alone returns only the native
+ * request and would otherwise drop the warnings (Codex review P2). Pure: the warnings
+ * are read off the guarded IR's provider_raw, which never reaches the wire.
+ */
+export function transformRequestInWithWarnings(ir: IRRequest): {
+  request: AnthropicOutboundRequest;
+  warnings: ProtocolWarning[];
+} {
+  return {
+    request: transformRequestIn(ir),
+    warnings: readWarnings(guardRequestFor("anthropic", ir)),
+  };
+}
+
 export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
-  const parsed = IRRequestSchema.parse(ir);
+  // P8 inter-translation hardening: cap n>1 (Anthropic emits one candidate) and
+  // record data_loss warnings for logprobs/modalities (no Anthropic surface). The
+  // guard lives on the IR's provider_raw.warnings, which is stripped before the wire
+  // (no leak); here we only consume the guarded IR so the native output is correct.
+  // Warnings are surfaced via transformRequestInWithWarnings (above) for observability.
+  const parsed = IRRequestSchema.parse(guardRequestFor("anthropic", ir));
 
   // Sanitize tool names up-front so both the tools[] block and tool_choice map
   // through the SAME forward map (a tool_choice name must match a declared tool).
@@ -593,7 +780,11 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
 
   const system = systemFromMessages(parsed.messages);
   const toolChoice = mapToolChoice(parsed.tool_choice, toolNameMap);
+  // responseFormatToOutputFormat invokes filterAnthropicOutputSchema internally, so
+  // the outbound output_format drops Anthropic-unsupported constraint keywords.
   const outputFormat = responseFormatToOutputFormat(parsed.response_format);
+  const thinking = thinkingFromIR(parsed);
+  const stopSequences = stopSequencesFromIR(parsed.stop);
 
   // NB: the tool-name reverse map is NOT emitted onto the outbound request wire (an
   // Anthropic Messages request has no provider_raw field, and the matrix's no-leak
@@ -610,10 +801,15 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
     messages: merged,
     ...(system !== undefined ? { system } : {}),
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
+    ...(parsed.top_p !== undefined ? { top_p: parsed.top_p } : {}),
+    ...(parsed.top_k !== undefined ? { top_k: parsed.top_k } : {}),
     ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
+    ...(stopSequences !== undefined ? { stop_sequences: stopSequences } : {}),
     ...(tools !== undefined ? { tools } : {}),
     ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
     ...(outputFormat !== undefined ? { output_format: outputFormat } : {}),
+    ...(thinking !== undefined ? { thinking } : {}),
+    ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
   };
   return out;
 }

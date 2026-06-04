@@ -88,6 +88,38 @@ function approxPromptTokens(req: InternalRequest): number {
   return Math.ceil(chars / 4);
 }
 
+// Detect which extra INPUT modalities (image / audio / video / document) the request
+// carries IN MESSAGE CONTENT, so the capability filter only routes them to a backend
+// that advertises them (P7). Reads the native OpenAI/Responses content-part
+// discriminants a client sends (image_url / input_image, input_audio, file) plus the
+// IR-normalized part types (image/audio/video/document) in case content was already
+// normalized upstream. `image` here is the vision gate for in-message images — the
+// legacy `attachments` array is the OTHER vision source (see needsVision below).
+function detectRequestModalities(req: InternalRequest): {
+  image: boolean;
+  audio: boolean;
+  video: boolean;
+  document: boolean;
+} {
+  let image = false;
+  let audio = false;
+  let video = false;
+  let document = false;
+  for (const m of req.messages) {
+    const content = (m as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (part === null || typeof part !== "object") continue;
+      const type = (part as { type?: unknown }).type;
+      if (type === "image_url" || type === "input_image" || type === "image") image = true;
+      else if (type === "input_audio" || type === "audio") audio = true;
+      else if (type === "video") video = true;
+      else if (type === "file" || type === "document") document = true;
+    }
+  }
+  return { image, audio, video, document };
+}
+
 function isAbort(err: unknown, signal: AbortSignal): boolean {
   // Mirror executor/fallback isAbort: rely ONLY on signal.aborted and the raw
   // AbortError name. A message merely containing "aborted" is NOT an abort (an
@@ -200,6 +232,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     let attemptedAny = false;
     let circuitSkipped = false;
 
+    // Request-level modality detection (audio/video/document) — computed once and
+    // applied to every candidate's capability gate (P7 capability-aware routing).
+    const reqModalities = detectRequestModalities(req);
+
     for (const alias of plan.candidate_chain) {
       const startedAt = now();
       const elapsed = () => Math.max(0, now() - startedAt);
@@ -287,10 +323,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         const verdict = checkCapability(caps, {
           needsTools: Array.isArray(req.tools) && req.tools.length > 0,
           needsJson: isJson(req.response_format),
-          needsVision: Array.isArray(req.attachments) && req.attachments.length > 0,
+          needsVision:
+            (Array.isArray(req.attachments) && req.attachments.length > 0) || reqModalities.image,
           needsStreaming: req.stream,
           estimatedPromptTokens: approxPromptTokens(req),
           maxTokens: req.max_tokens,
+          needsAudio: reqModalities.audio,
+          needsVideo: reqModalities.video,
+          needsDocument: reqModalities.document,
         });
         if (!verdict.ok) {
           capabilityPruned = true;

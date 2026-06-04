@@ -7,6 +7,7 @@ import {
   type IRToolCall,
   type IRUsage,
 } from "../ir.js";
+import { liftReasoningToFlat, resolveReasoning } from "../reasoning.js";
 
 // IR -> Anthropic Messages native response (docs/05, task protocol.anthropic-resp).
 // The outbound half of "nativeIn -> IR -> nativeOut, never N×N direct". Two
@@ -23,14 +24,34 @@ import {
 // Pure function: zero network, zero framework (CLAUDE.md principle 1). Reimplemented
 // from the docs, NOT copied from musistudio/llms or litellm.
 
-// —— Anthropic native stop_reason enum (the only legal output values). —————————————
+// —— Anthropic native stop_reason enum (the legal output values). pause_turn (a
+// long-running tool/agent pause) and refusal (Claude declined) are newer additions;
+// both are accepted on output and mapped back to a legal IR finish_reason. ——————————
 export const AnthropicStopReasonSchema = z.enum([
   "end_turn",
   "max_tokens",
   "stop_sequence",
   "tool_use",
+  "pause_turn",
+  "refusal",
 ]);
 export type AnthropicStopReason = z.infer<typeof AnthropicStopReasonSchema>;
+
+// —— Structured cache_creation breakdown (ephemeral 5m / 1h writes). Anthropic
+// reports the split alongside the aggregate cache_creation_input_tokens. ——————————
+export const AnthropicCacheCreationSchema = z
+  .object({
+    ephemeral_5m_input_tokens: z.number().int().nonnegative().optional(),
+    ephemeral_1h_input_tokens: z.number().int().nonnegative().optional(),
+  })
+  .passthrough();
+export type AnthropicCacheCreation = z.infer<typeof AnthropicCacheCreationSchema>;
+
+// —— output_tokens_details: Anthropic surfaces the reasoning split here as
+// thinking_tokens (mapped to IRUsage.reasoning_tokens). ———————————————————————————
+export const AnthropicOutputTokensDetailsSchema = z
+  .object({ thinking_tokens: z.number().int().nonnegative().optional() })
+  .passthrough();
 
 // —— Anthropic native usage. cache_read/cache_creation are first-class, separate
 // from input_tokens (so cache is never billed at full input price). ———————————————
@@ -39,6 +60,8 @@ export const AnthropicUsageSchema = z.object({
   output_tokens: z.number().int().nonnegative(),
   cache_read_input_tokens: z.number().int().nonnegative(),
   cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+  cache_creation: AnthropicCacheCreationSchema.optional(),
+  output_tokens_details: AnthropicOutputTokensDetailsSchema.optional(),
 });
 export type AnthropicUsage = z.infer<typeof AnthropicUsageSchema>;
 
@@ -55,10 +78,24 @@ const AnthropicThinkingBlockSchema = z.object({
   thinking: z.string(),
   signature: z.string().optional(),
 });
+// Model-generated image block on the response (P7). source is base64 (data+media_type)
+// or a remote url; mirrors the request-side image block shape.
+const AnthropicImageBlockSchema = z.object({
+  type: z.literal("image"),
+  source: z.union([
+    z.object({
+      type: z.literal("base64"),
+      media_type: z.string(),
+      data: z.string(),
+    }),
+    z.object({ type: z.literal("url"), url: z.string() }),
+  ]),
+});
 const AnthropicContentBlockSchema = z.discriminatedUnion("type", [
   AnthropicTextBlockSchema,
   AnthropicToolUseBlockSchema,
   AnthropicThinkingBlockSchema,
+  AnthropicImageBlockSchema,
 ]);
 type AnthropicContentBlock = z.infer<typeof AnthropicContentBlockSchema>;
 
@@ -186,10 +223,33 @@ export function mapStopReason(finish: string): { stop_reason: AnthropicStopReaso
 export function mapUsage(u: IRUsage): AnthropicUsage {
   const cached = u.cached_tokens ?? 0;
   const input = Math.max(0, u.prompt_tokens ?? 0);
+  // cache_creation = ephemeral WRITE tokens (distinct from cache_read). Surface the
+  // aggregate, and — when the prompt detail carries the ephemeral split — the
+  // structured cache_creation breakdown too.
+  const cacheCreation = u.cache_creation_tokens;
+  const detail = u.prompt_tokens_details;
+  const ephemeral5m = (detail as { ephemeral_5m_input_tokens?: number } | undefined)
+    ?.ephemeral_5m_input_tokens;
+  const ephemeral1h = (detail as { ephemeral_1h_input_tokens?: number } | undefined)
+    ?.ephemeral_1h_input_tokens;
+  const breakdown: AnthropicCacheCreation | undefined =
+    ephemeral5m !== undefined || ephemeral1h !== undefined
+      ? {
+          ...(ephemeral5m !== undefined ? { ephemeral_5m_input_tokens: ephemeral5m } : {}),
+          ...(ephemeral1h !== undefined ? { ephemeral_1h_input_tokens: ephemeral1h } : {}),
+        }
+      : undefined;
+  // reasoning_tokens -> output_tokens_details.thinking_tokens (Anthropic's name).
+  const thinkingTokens = u.reasoning_tokens;
   return {
     input_tokens: input,
     output_tokens: u.completion_tokens ?? 0,
     cache_read_input_tokens: cached,
+    ...(cacheCreation !== undefined ? { cache_creation_input_tokens: cacheCreation } : {}),
+    ...(breakdown !== undefined ? { cache_creation: breakdown } : {}),
+    ...(thinkingTokens !== undefined
+      ? { output_tokens_details: { thinking_tokens: thinkingTokens } }
+      : {}),
   };
 }
 
@@ -264,20 +324,44 @@ function toContentBlocks(
   const blocks: AnthropicContentBlock[] = [];
   const { content } = message;
 
+  // Reasoning may arrive on EITHER the content-block thinking parts OR the flat
+  // reasoning_content/thinking_blocks carriers (e.g. an OpenAI-origin response).
+  // resolveReasoning unifies them; Anthropic emits thinking blocks FIRST (the
+  // native order — reasoning precedes the answer). (P6)
+  const { thinkingParts } = resolveReasoning(message);
+  for (const part of thinkingParts) {
+    blocks.push({
+      type: "thinking",
+      thinking: part.text,
+      ...(part.signature !== undefined ? { signature: part.signature } : {}),
+    });
+  }
+
   if (typeof content === "string") {
     if (content !== "") blocks.push({ type: "text", text: content });
   } else if (Array.isArray(content)) {
     for (const part of content) {
       if (part.type === "text") {
         blocks.push({ type: "text", text: part.text });
-      } else if (part.type === "thinking") {
-        blocks.push({
-          type: "thinking",
-          thinking: part.text,
-          ...(part.signature !== undefined ? { signature: part.signature } : {}),
-        });
       }
-      // image parts are inbound-only on the response path; nothing to emit.
+      // thinking parts were already emitted via resolveReasoning above.
+    }
+  }
+
+  // Model-generated images (IRMessage.images) render as Anthropic image blocks (P7):
+  // base64 -> {type:"base64",media_type,data}; a remote url -> {type:"url",url}.
+  for (const img of message.images ?? []) {
+    if (img.b64_json !== undefined) {
+      blocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: img.mediaType ?? "image/png",
+          data: img.b64_json,
+        },
+      });
+    } else if (img.url !== undefined) {
+      blocks.push({ type: "image", source: { type: "url", url: img.url } });
     }
   }
 
@@ -347,6 +431,11 @@ const STOP_REASON_TO_FINISH: Record<string, string> = {
   max_tokens: "length",
   stop_sequence: "stop",
   tool_use: "tool_calls",
+  // pause_turn is a long-running agent/tool pause — there is no OpenAI equivalent, so
+  // it bottoms out at `stop` (the raw value survives in provider_raw). refusal (Claude
+  // declined) is OpenAI's content_filter (LiteLLM _FINISH_REASON_MAP).
+  pause_turn: "stop",
+  refusal: "content_filter",
 };
 
 // Tolerant inbound schema for a native Anthropic response. Block/usage shapes use
@@ -361,11 +450,26 @@ const InboundToolUseBlockSchema = z
 const InboundThinkingBlockSchema = z
   .object({ type: z.literal("thinking"), thinking: z.string(), signature: z.string().optional() })
   .passthrough();
+// Model-generated image block on an inbound native response (P7) -> IRMessage.images.
+const InboundImageBlockSchema = z
+  .object({
+    type: z.literal("image"),
+    source: z
+      .object({
+        type: z.string(),
+        media_type: z.string().optional(),
+        data: z.string().optional(),
+        url: z.string().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
 const InboundUnknownBlockSchema = z.object({ type: z.string() }).passthrough();
 const InboundContentBlockSchema = z.union([
   InboundTextBlockSchema,
   InboundToolUseBlockSchema,
   InboundThinkingBlockSchema,
+  InboundImageBlockSchema,
   InboundUnknownBlockSchema,
 ]);
 
@@ -375,6 +479,8 @@ const InboundUsageSchema = z
     output_tokens: z.number().int().nonnegative().optional(),
     cache_read_input_tokens: z.number().int().nonnegative().optional(),
     cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+    cache_creation: AnthropicCacheCreationSchema.optional(),
+    output_tokens_details: AnthropicOutputTokensDetailsSchema.optional(),
   })
   .passthrough();
 
@@ -385,6 +491,9 @@ const InboundResponseSchema = z
     content: z.array(InboundContentBlockSchema),
     stop_reason: z.string().nullable().optional(),
     stop_sequence: z.string().nullable().optional(),
+    // Anthropic Sonnet 4+ carries a stop_details object alongside stop_reason; it has
+    // no IR home, so it is preserved verbatim in provider_raw.
+    stop_details: z.unknown().optional(),
     usage: InboundUsageSchema.optional(),
   })
   .passthrough();
@@ -405,9 +514,21 @@ export function transformNativeResponseToIR(
 
   const parts: IRContentPart[] = [];
   const toolCalls: IRToolCall[] = [];
+  const images: NonNullable<IRMessage["images"]> = [];
   for (const block of res.content) {
     if (block.type === "text") {
       parts.push({ type: "text", text: (block as z.infer<typeof InboundTextBlockSchema>).text });
+    } else if (block.type === "image") {
+      // Model-generated image -> IRMessage.images (NOT an input content part) (P7).
+      const src = (block as z.infer<typeof InboundImageBlockSchema>).source;
+      if (src.type === "url" && src.url !== undefined) {
+        images.push({ url: src.url, ...(src.media_type ? { mediaType: src.media_type } : {}) });
+      } else if (src.data !== undefined) {
+        images.push({
+          b64_json: src.data,
+          ...(src.media_type ? { mediaType: src.media_type } : {}),
+        });
+      }
     } else if (block.type === "thinking") {
       const b = block as z.infer<typeof InboundThinkingBlockSchema>;
       parts.push({
@@ -432,16 +553,30 @@ export function transformNativeResponseToIR(
     // unknown block types are tolerated (fail-open) and dropped from content.
   }
 
-  const message: IRMessage = {
+  // Lift the thinking content parts onto the flat reasoning_content/thinking_blocks
+  // carriers so a downstream OpenAI client (which reads message.reasoning_content,
+  // not a content-block thinking part) receives the reasoning losslessly (P6).
+  const message: IRMessage = liftReasoningToFlat({
     role: "assistant",
-    content: parts.length > 0 ? parts : toolCalls.length > 0 ? null : "",
+    content: parts.length > 0 ? parts : toolCalls.length > 0 || images.length > 0 ? null : "",
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-  };
+    ...(images.length > 0 ? { images } : {}),
+  });
 
   const rawStop = res.stop_reason ?? null;
   const finishReason = rawStop !== null ? (STOP_REASON_TO_FINISH[rawStop] ?? "stop") : null;
 
   const u = res.usage;
+  // cache_creation aggregate: prefer the explicit field, else sum the ephemeral split.
+  const cacheCreation = (() => {
+    if (u === undefined) return undefined;
+    if (u.cache_creation_input_tokens !== undefined) return u.cache_creation_input_tokens;
+    const c = u.cache_creation;
+    if (c === undefined) return undefined;
+    const sum = (c.ephemeral_5m_input_tokens ?? 0) + (c.ephemeral_1h_input_tokens ?? 0);
+    return sum > 0 ? sum : undefined;
+  })();
+  const thinkingTokens = u?.output_tokens_details?.thinking_tokens;
   const usage: IRUsage | undefined =
     u !== undefined
       ? {
@@ -450,6 +585,8 @@ export function transformNativeResponseToIR(
           ...(u.cache_read_input_tokens !== undefined
             ? { cached_tokens: u.cache_read_input_tokens }
             : {}),
+          ...(cacheCreation !== undefined ? { cache_creation_tokens: cacheCreation } : {}),
+          ...(thinkingTokens !== undefined ? { reasoning_tokens: thinkingTokens } : {}),
         }
       : undefined;
 
@@ -460,6 +597,7 @@ export function transformNativeResponseToIR(
     ...(usage !== undefined ? { usage } : {}),
     provider_raw: {
       ...(rawStop !== null ? { stop_reason: rawStop } : {}),
+      ...(res.stop_details !== undefined ? { stop_details: res.stop_details } : {}),
       ...(u !== undefined ? { usage: u } : {}),
     },
   };

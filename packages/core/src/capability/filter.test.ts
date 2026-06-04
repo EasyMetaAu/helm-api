@@ -137,6 +137,55 @@ describe("checkCapability", () => {
     expect(result).toEqual({ ok: true, skipReason: null });
   });
 
+  it("skips with no_audio_support when audio is required but the modality is absent", () => {
+    const result = checkCapability(caps({ modalities: [] }), req({ needsAudio: true }));
+    expect(result).toEqual({ ok: false, skipReason: "no_audio_support" });
+  });
+
+  it("passes the audio gate when the candidate advertises the audio modality", () => {
+    const result = checkCapability(caps({ modalities: ["audio"] }), req({ needsAudio: true }));
+    expect(result).toEqual({ ok: true, skipReason: null });
+  });
+
+  it("skips with no_video_support when video is required but the modality is absent", () => {
+    const result = checkCapability(caps({ modalities: ["audio"] }), req({ needsVideo: true }));
+    expect(result).toEqual({ ok: false, skipReason: "no_video_support" });
+  });
+
+  it("skips with no_document_support when a document is required but the modality is absent", () => {
+    const result = checkCapability(
+      caps({ modalities: ["audio", "video"] }),
+      req({ needsDocument: true }),
+    );
+    expect(result).toEqual({ ok: false, skipReason: "no_document_support" });
+  });
+
+  it("passes document+video+audio when all three modalities are advertised", () => {
+    const result = checkCapability(
+      caps({ modalities: ["audio", "video", "document"] }),
+      req({ needsAudio: true, needsVideo: true, needsDocument: true }),
+    );
+    expect(result).toEqual({ ok: true, skipReason: null });
+  });
+
+  it("treats an absent modalities array as advertising no extra modalities (back-compat)", () => {
+    // A generated-catalog entry never sets modalities; a request WITHOUT extra
+    // modalities must still pass, and one WITH them must be skipped.
+    expect(checkCapability(caps(), req())).toEqual({ ok: true, skipReason: null });
+    expect(checkCapability(caps(), req({ needsAudio: true }))).toEqual({
+      ok: false,
+      skipReason: "no_audio_support",
+    });
+  });
+
+  it("gates vision before the extra modalities (short-circuit order)", () => {
+    const result = checkCapability(
+      caps({ supportsVision: false, modalities: [] }),
+      req({ needsVision: true, needsAudio: true }),
+    );
+    expect(result).toEqual({ ok: false, skipReason: "no_vision_support" });
+  });
+
   it("passes when every required capability is satisfied", () => {
     const result = checkCapability(
       caps(),

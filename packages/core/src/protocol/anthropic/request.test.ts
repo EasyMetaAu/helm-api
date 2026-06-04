@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { IRRequestSchema } from "../ir.js";
-import { transformRequestOut } from "./request.js";
+import { type IRRequest, IRRequestSchema } from "../ir.js";
+import { guardRequestFor, readWarnings } from "../protocol-guards.js";
+import {
+  transformRequestIn,
+  transformRequestInWithWarnings,
+  transformRequestOut,
+} from "./request.js";
 
 // Anthropic Messages -> IR inbound normalization (docs/05, task protocol.anthropic-req).
 // Anthropic's wire shape diverges structurally from the OpenAI-shaped IR hub:
@@ -169,8 +174,9 @@ describe("anthropic transformRequestOut", () => {
     const parts = assistantMsg?.content as Array<Record<string, unknown>>;
     expect(parts).toEqual([{ type: "text", text: "the answer is 42" }]);
 
-    // It is retained in the thinking extension with text + signature.
-    expect(ir.thinking).toEqual([
+    // It is retained as per-message thinking blocks in provider_raw (distinct from
+    // the request-level thinking CONFIG, which rides ir.thinking).
+    expect(ir.provider_raw?.thinking_blocks).toEqual([
       { type: "thinking", text: "step 1: reason", signature: "sig-xyz" },
     ]);
   });
@@ -191,7 +197,7 @@ describe("anthropic transformRequestOut", () => {
     };
     const ir = transformRequestOut(req);
     expect(() => IRRequestSchema.parse(ir)).not.toThrow();
-    expect(ir.thinking).toHaveLength(1);
+    expect(ir.provider_raw?.thinking_blocks).toHaveLength(1);
   });
 
   // Rule 7: tools input_schema -> function.parameters; cross-cutting fields pass through.
@@ -286,5 +292,332 @@ describe("anthropic transformRequestOut", () => {
   // fail-closed on a structurally invalid request (missing required fields).
   it("throws on a structurally invalid request", () => {
     expect(() => transformRequestOut({ messages: [] })).toThrow();
+  });
+
+  // —— litellm-parity sampling + control params (P4) ————————————————————————————
+  it("maps top_p / top_k through to the IR", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      top_p: 0.9,
+      top_k: 40,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.top_p).toBe(0.9);
+    expect(ir.top_k).toBe(40);
+  });
+
+  it("maps stop_sequences[] -> IR.stop", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      stop_sequences: ["STOP", "END"],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.stop).toEqual(["STOP", "END"]);
+  });
+
+  it("maps a thinking config {type:enabled,budget_tokens} -> IR.thinking", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-7-sonnet",
+      max_tokens: 64,
+      thinking: { type: "enabled", budget_tokens: 2048 },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+  });
+
+  it("passes service_tier through to the IR", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      service_tier: "standard_only",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.service_tier).toBe("standard_only");
+  });
+
+  it("preserves metadata in provider_raw (only documented Anthropic field)", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      metadata: { user_id: "u-123" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.provider_raw?.metadata).toEqual({ user_id: "u-123" });
+  });
+
+  it("accepts per-block cache_control without failing (fail-open passthrough)", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "long context", cache_control: { type: "ephemeral" } }],
+        },
+      ],
+    });
+    expect(() => IRRequestSchema.parse(ir)).not.toThrow();
+    const parts = ir.messages[0]?.content as Array<Record<string, unknown>>;
+    expect(parts[0]).toMatchObject({ type: "text", text: "long context" });
+  });
+});
+
+// —— Outbound: IR -> native Anthropic request (P4 additions) ————————————————————
+describe("anthropic transformRequestIn — P4 params", () => {
+  it("maps IR top_p / top_k onto the outbound request", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      top_p: 0.8,
+      top_k: 20,
+    });
+    expect(out.top_p).toBe(0.8);
+    expect(out.top_k).toBe(20);
+  });
+
+  it("maps IR.stop (string) -> stop_sequences[]", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      stop: "STOP",
+    });
+    expect(out.stop_sequences).toEqual(["STOP"]);
+  });
+
+  it("maps IR.stop (string[]) -> stop_sequences[]", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      stop: ["A", "B"],
+    });
+    expect(out.stop_sequences).toEqual(["A", "B"]);
+  });
+
+  it("maps IR.thinking config straight onto the outbound thinking param", () => {
+    const out = transformRequestIn({
+      model: "claude-3-7-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      thinking: { type: "enabled", budget_tokens: 4096 },
+    });
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 4096 });
+  });
+
+  it("derives a thinking budget from reasoning_effort when no explicit thinking config", () => {
+    const out = transformRequestIn({
+      model: "claude-3-7-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "low",
+    });
+    expect(out.thinking).toMatchObject({ type: "enabled" });
+    expect((out.thinking as { budget_tokens?: number }).budget_tokens).toBeGreaterThan(0);
+  });
+
+  it("passes IR.service_tier through to the outbound request", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      service_tier: "priority",
+    });
+    expect(out.service_tier).toBe("priority");
+  });
+
+  it("filters unsupported constraint keywords from an outbound output_format schema", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "result",
+          schema: {
+            type: "object",
+            properties: {
+              tags: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 5 },
+            },
+          },
+        },
+      },
+    });
+    expect(out.output_format?.type).toBe("json_schema");
+    const schema = out.output_format?.schema as {
+      properties: { tags: Record<string, unknown> };
+    };
+    // The unsupported minItems/maxItems are dropped (folded into description).
+    expect(schema.properties.tags).not.toHaveProperty("minItems");
+    expect(schema.properties.tags).not.toHaveProperty("maxItems");
+    expect(schema.properties.tags.description).toContain("minimum number of items");
+  });
+});
+
+describe("anthropic document input (P7 multimodal)", () => {
+  // Inbound: an Anthropic document block (base64 PDF) -> IR document part.
+  it("normalizes a base64 PDF document block into an IR document part", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "summarize" },
+            {
+              type: "document",
+              source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+            },
+          ],
+        },
+      ],
+    };
+    const ir = transformRequestOut(req);
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[1]).toMatchObject({
+      type: "document",
+      data: "JVBERi0=",
+      mediaType: "application/pdf",
+    });
+  });
+
+  it("normalizes a url document block into an IR document part", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "document", source: { type: "url", url: "https://x/doc.pdf" } }],
+        },
+      ],
+    };
+    const ir = transformRequestOut(req);
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "document", url: "https://x/doc.pdf" });
+  });
+
+  // Outbound: an IR document part -> Anthropic document block.
+  it("renders an IR document part (base64) as an Anthropic document block", () => {
+    const ir = IRRequestSchema.parse({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "summarize" },
+            { type: "document", data: "JVBERi0=", mediaType: "application/pdf", filename: "r.pdf" },
+          ],
+        },
+      ],
+    });
+    const native = transformRequestIn(ir);
+    const block = native.messages[0]?.content?.[1] as {
+      type?: string;
+      source?: { type?: string; media_type?: string; data?: string; url?: string };
+    };
+    expect(block.type).toBe("document");
+    expect(block.source?.type).toBe("base64");
+    expect(block.source?.media_type).toBe("application/pdf");
+    expect(block.source?.data).toBe("JVBERi0=");
+  });
+
+  it("renders an IR document part (remote url) as an Anthropic url document block", () => {
+    const ir = IRRequestSchema.parse({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [{ role: "user", content: [{ type: "document", url: "https://x/doc.pdf" }] }],
+    });
+    const native = transformRequestIn(ir);
+    const block = native.messages[0]?.content?.[0] as {
+      type?: string;
+      source?: { type?: string; url?: string };
+    };
+    expect(block.type).toBe("document");
+    expect(block.source?.type).toBe("url");
+    expect(block.source?.url).toBe("https://x/doc.pdf");
+  });
+
+  // Regression (Codex P1): an uploaded-file source must round-trip as a {type:"file"}
+  // source (file_id), NOT be collapsed to document.url and re-emitted as a url source.
+  it("round-trips an uploaded file_id document source (not url-collapsed)", () => {
+    const native = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "document", source: { type: "file", file_id: "file_xyz" } }],
+        },
+      ],
+    };
+    const ir = transformRequestOut(native) as IRRequest;
+    const part = (ir.messages[0]?.content as Array<Record<string, unknown>>)[0];
+    expect(part).toMatchObject({ type: "document", fileId: "file_xyz" });
+    expect((part as { url?: string }).url).toBeUndefined();
+
+    const back = transformRequestIn(IRRequestSchema.parse(ir));
+    const block = back.messages[0]?.content?.[0] as {
+      source?: { type?: string; file_id?: string; url?: string };
+    };
+    expect(block.source?.type).toBe("file");
+    expect(block.source?.file_id).toBe("file_xyz");
+    expect(block.source?.url).toBeUndefined();
+  });
+
+  // Regression (Codex P2): the degradation warnings must be OBSERVABLE — returned
+  // alongside the native request, not silently dropped by transformRequestIn.
+  it("transformRequestInWithWarnings surfaces n_capped + data_loss warnings", () => {
+    const ir = IRRequestSchema.parse({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "hi" }],
+      n: 4,
+      logprobs: true,
+    });
+    const { request, warnings } = transformRequestInWithWarnings(ir);
+    expect(JSON.stringify(request)).not.toContain("warnings"); // native wire stays clean
+    const codes = warnings.map((w) => `${w.code}:${w.param}`);
+    expect(codes).toContain("n_capped:n");
+    expect(codes).toContain("data_loss:logprobs");
+  });
+
+  // P8 inter-translation hardening: non-mappable knobs degrade cleanly + are recorded.
+  it("never leaks n / logprobs / modalities onto the Anthropic wire (reject-clean)", () => {
+    const ir = IRRequestSchema.parse({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "hi" }],
+      n: 3,
+      logprobs: true,
+      modalities: ["text", "audio"],
+    });
+    const native = transformRequestIn(ir);
+    const serialized = JSON.stringify(native);
+    // None of the unsupported OpenAI knobs reach Anthropic's wire shape.
+    expect(serialized).not.toContain('"n"');
+    expect(serialized).not.toContain("logprobs");
+    expect(serialized).not.toContain("modalities");
+    // ...and no internal bookkeeping (provider_raw / warnings) leaks either.
+    expect(serialized).not.toContain("provider_raw");
+    expect(serialized).not.toContain("warnings");
+  });
+
+  it("guardRequestFor('anthropic', ir) records the degradation observably on the IR", () => {
+    const ir = IRRequestSchema.parse({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "hi" }],
+      n: 5,
+      logprobs: true,
+      modalities: ["text", "audio"],
+    });
+    const guarded = guardRequestFor("anthropic", ir);
+    expect(guarded.n).toBe(1);
+    const codes = readWarnings(guarded).map((w) => `${w.code}:${w.param}`);
+    expect(codes).toContain("n_capped:n");
+    expect(codes).toContain("data_loss:logprobs");
+    expect(codes).toContain("data_loss:modalities");
   });
 });

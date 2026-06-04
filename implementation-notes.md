@@ -5,6 +5,111 @@
 
 ---
 
+## 2026-06-03 · litellm-parity 收官：parity 计分卡 + 文档同步 (P9, spec docs/05)
+
+P9 是纯文档：把 Phases 2–8 的成果写进 docs/05、新建 `docs/protocol-compatibility.md`（逐对数据丢失矩阵）、
+更新 README（中英），并给出 parity 计分卡。无任何代码逻辑改动；`pnpm typecheck` 仍须通过。
+
+**Parity 计分卡**（litellm 字段覆盖的粗略百分比，升级前→升级后）：
+
+| 协议 | 升级前 | 升级后 |
+|---|---|---|
+| OpenAI Chat | 72 | 95 |
+| Anthropic Messages | 62 | 90 |
+| OpenAI Responses | 72 | 90 |
+| Gemini | 55–60 | 88 |
+
+升级把四面的采样/控制旋钮、usage 明细（reasoning/cache/逐模态）、reasoning/thinking 跨协议统一、
+全量多模态 I/O，以及 finish_reason 两向枚举映射补齐到 IR 中枢；剩余缺口主要是 provider 专属的边角
+（Vertex 专属字段、Responses 有状态会话 `previous_response_id` 的真正续接、远端 http(s) 图片在 Gemini
+出站的拉取——见下「已知非目标」）。
+
+**关键策略（写进 docs，便于复查）**：
+
+- **n>1 reject-clean**：单候选后端（Anthropic）把 `n>1` 钳到 1 + `n_capped` 警告；多候选后端
+  （OpenAI/Gemini candidateCount）原生支持，无 guard。降级而非报错。
+- **provider_raw 透传清单**（无损、绝不上 wire；无法映射的上游数据归宿）：
+  - 通用：`stop_reason`（finish_reason 原值）、原始 `usage`。
+  - OpenAI：`system_fingerprint`。
+  - Anthropic：`stop_details`（Sonnet 4+）、请求侧 `metadata`、per-message thinking 块。
+  - Responses：响应 `reasoning`/`text`/`tool_choice` echo；请求 `store`/`previous_response_id`/
+    `metadata`/`logit_bias`；旧式 `function_call`（legacy OpenAI 字段）映射到 `tool_use`/tool_calls。
+  - Gemini：`safetyRatings`、`promptFeedback`（请求侧 `safetySettings`/`thinkingConfig` 透传）。
+  - guard 警告：`provider_raw.warnings`（n_capped / data_loss）。
+  - 注：litellm 的 Vertex 专属旋钮（labels / inference_geo / container）当前**未**接入本仓库的
+    Gemini 面；Gemini 透传的是 `safetySettings`/`thinkingConfig`。`anthropic-beta` 头是 provider 执行层
+    （OAuth）的事，不属于协议互译的 provider_raw。
+- **能力门控的多模态**：`capabilities.yaml.modalities`（audio|video|document）声明 text+image 之外的额外
+  输入模态；请求带某模态时只路由到声明它的后端，否则 `no_{audio,video,document}_support` 显式跳过。
+  内置：Gemini = audio/video/document，Claude = document。
+
+## 2026-06-03 · litellm-parity Phases 2–6：四协议字段对齐 + reasoning 统一 (spec docs/05)
+
+> P7（多模态）/ P8（互译加固）各有独立条目（见下）。本条覆盖 P2–P6。
+
+- **P2 Gemini**：采样旋钮 ↔ `generationConfig`（topP/topK/candidateCount/responseLogprobs/
+  responseModalities/thinkingConfig）双向；`thoughtsTokenCount → reasoning_tokens`，逐模态 token 明细，
+  `groundingMetadata`/`citationMetadata → annotations`，`logprobsResult → IRChoice.logprobs`；finishReason
+  枚举补全；`safetySettings`/`thinkingConfig` 透传，`safetyRatings`/`promptFeedback → provider_raw`；
+  流式 thought ↔ `delta.reasoning_content`。
+- **P3 OpenAI Chat**：采样旋钮经 identity 直通；响应补 `logprobs`/`completion_tokens_details`/`created`/
+  `system_fingerprint`；`finish_reason` 映合法枚举，原值留 `provider_raw.stop_reason`。
+- **P4 Anthropic**：请求接 `top_p`/`top_k`/thinking-config/`metadata`/`service_tier` + per-block
+  `cache_control`；`stop_sequences ↔ stop`，thinking ↔ IR.thinking，`reasoning_effort` 推 budget；响应补
+  结构化 `cache_creation` + `thinking_tokens`；`STOP_REASON` 两向（refusal→content_filter、pause_turn→stop），
+  `stop_details` 透传。
+- **P5 Responses**：请求加采样旋钮 + Responses-only（store/previous_response_id/metadata/logit_bias →
+  provider_raw）；usage 接 cache_creation + reasoning_tokens；流式新增 reasoning summary 事件 + 中途
+  上游失败的结构化 `error` 帧（错误后不再发 `response.completed`）。
+- **P6 Reasoning 统一桥**（`protocol/reasoning.ts`）：把 `{type:"thinking"}` 内容部件与扁平
+  `message.reasoning_content` 两套形状互桥，每个 transformer 同写同读，跨协议 reasoning 不再丢/漏。
+
+**铁律**：finish_reason 在 IR 内是自由字符串；每协议两向补枚举，原值留 `provider_raw.stop_reason`；
+真正无法映射的上游数据进 `provider_raw`（无损），绝不发明字段。
+
+## 2026-06-03 · P8 互译加固 + 4×4 协议矩阵 (litellm parity, spec docs/05)
+
+**Context**: 第 8 阶段 — 跨协议互译的“reject-clean”降级、数据丢失告警，以及把矩阵从 3 协议/6 路扩到 **4 协议/16 路（含 self 恒等路径）**。
+
+**新增 `protocol-guards.ts`（结构化告警）**: 两类不可映射的处理统一在此，遵循 fail-open（principle 3）+ P8 的“绝不静默丢弃”。
+- **REJECT-CLEAN cap**: `n>1` 落到只产单候选的后端时 **cap 到 1** 并记 `n_capped` 告警（降级、不丢、不 5xx）。
+- **DATA-LOSS guard**: 目标无原生承载面的 param（logprobs→Anthropic、modalities→纯文本后端）记 `data_loss` 告警。
+- 告警写在 **IR 的 `provider_raw.warnings`**（IR 内部 bag），**不进任何 native wire 对象**——transformer 在序列化前剥掉 provider_raw，所以矩阵的 no-leak 不变量仍成立，而 DecisionRecord/遥测能从 IR 读到降级记录。所有 helper 纯函数（无变更则返回同一引用）。`guardRequestFor(target, ir)` 是 per-target 派发：anthropic cap n + warn logprobs/top_logprobs/modalities；gemini/openai 因原生支持 candidateCount/responseLogprobs/responseModalities 而是 no-op。Anthropic `transformRequestIn` 顶部调用它，保证 native 输出正确。
+
+**决定（spec 未明示，我拍板）**: P8 任务给了“provider_raw.warnings 或 thrown invalid_request”两个选项；选 **warnings**（不 throw），因为 Helm 哲学偏好降级 + 记录而非对非致命不匹配抛 4xx。`reasoning_effort→预算` 视为**有损但已映射**的近似（非数据丢失），不另发告警。
+
+**矩阵扩到 16 路**: `protocols` 增加第 4 个协议 `responses`（OpenAI Responses，已是全双向）。fixtures 改为**程序化生成** 4×4=16 路（含 4 条 self 恒等路径，验证单协议的入/出两半无损组合）。每个 (path,dimension) cell 断言**往返保留** 或 **文档化降级**（todo + >20 字理由）。
+
+**文档化的真实 gap（todo）**:
+- `*→responses` 的 **multimodal**：Responses 出站 request 渲染器把 content 折成纯文本（contentToText），图片 part 暂不重出为 input_image。
+- `*→responses` 的 **json-schema**：Responses 用 native `text`/format 承载结构化输出，出站渲染器暂不重出 JSON schema。
+- `responses→{anthropic,gemini,openai}` 的 **json-schema（SOURCE gap）**：Responses 入站把 `text.format.{json_schema}` 原样停在 IR.response_format，**不是** OpenAI `response_format.{type,json_schema}` 形状，故其它目标的出站渲染器读不到。
+- **取代旧的唯一 todo**（openai→gemini remote image）：内联 base64 图片本就能往返 Gemini inlineData，旧 todo 仅针对 **远程** image_url（issue #49 非目标），矩阵改为内联 fixture → `*→gemini` multimodal 现为 passing；远程限制以注释文档化。
+
+**新增 focused 跨路检查（非新维度，保持“每路 8 维”不变量）**: citations/annotations（OpenAI 目标原生重出 url_citation；anthropic/gemini/responses 无原生 citation 重出面，断言其 native wire **明确不含** url_citation——记录 gap 而非半渲染）；usage-detail（四源的 reasoning_tokens / cache_creation_tokens / cached_tokens 入站归一到 IR，cached split 不重复计费：prompt=10/cached=3/completion=9 跨源一致；Anthropic 无 reasoning split，改报 cache_creation=7）。
+
+**Verified**: `pnpm typecheck` 全绿；`packages/core/src/protocol` 467（matrix 176 + guards 12）全绿；`packages/core` 1327 全绿；biome 干净。gateway 的 4 个 `admin-static` 失败是**预存的**（fresh worktree 缺 admin 构建产物，stash 后在干净树上同样失败），与本阶段无关。
+
+---
+
+## 2026-06-03 · P7 多模态 I/O 全量 + 能力感知路由 (litellm parity, spec docs/05 + docs/02)
+
+**Context**: 第 7 阶段 — 四协议端到端的音频/视频/文档 **输入** 与模型生成的图像/音频 **输出**，外加按 modality 路由。
+
+**关键发现（OpenAI 近 identity 的隐藏缺口）**: OpenAI 客户端发送的是 NATIVE content part（`image_url` / `input_audio` / `file`），它们 **不是** 合法的 IRContentPart 判别值（IR 用 `image`/`audio`/`document`）。此前 `openai.ts` 的 “identity” 路径会让带 `image_url` 的真实 OpenAI 请求 **直接 Zod 解析失败**（matrix 测试用 IR 形状冒充 OpenAI native 才掩盖了这一点）。新增 `nativePartToIR` / `irPartToNative` 双向归一化：`image_url↔image`、`input_audio↔audio`、`file↔document`（PDF data-url ↔ document base64+mediaType）。
+
+**Anthropic**: 入站 `document` block（base64 PDF/text 或 url）→ IR document part，出站反向；模型生成图像双向往返 `IRMessage.images ↔ image content block`。Anthropic Messages 今天没有 audio/video content block，故请求路径不发 audio/video。
+
+**Gemini**: 入站 `inlineData` 改为 **按 MIME 路由**（image/audio/video/document），而非一律 image；新增 `fileData{mimeType,fileUri}` + `videoMetadata{fps,startOffset,endOffset}` → IR video/document。出站 IR audio/document → inlineData（远程 document uri → fileData），IR video → fileData+videoMetadata（gs:// / Files-API uri）或内联 base64。**保留 issue #49 决定**：远程 http(s) 图片仍降级为显式文本占位符（任意 web 图片不是 Gemini 可访问的 fileData uri；只有 gs:// / Files-API 引用才用 fileData）。
+
+**能力感知路由**: 给 capabilities schema 加可选 `modalities: (audio|video|document)[]`（image 仍由 `supportsVision` 把关）。filter 新增 `no_audio_support`/`no_video_support`/`no_document_support` 跳过原因，置于 vision 之后、固定短路顺序。网关从 native OpenAI content part（`input_audio`/`file`）+ IR 归一化 part 检测请求 modality，喂给每个候选的能力门。`skip_reason` 在 DecisionRecord 里本就是自由字符串，无需改枚举。`capabilities.yaml` 文档化该字段并标注 Gemini(audio/video/document)、Claude(document)。
+
+**权衡**: IR 没有 image_url 的 `detail` 字段（low/high/auto）——目前丢弃（litellm 也不在 IR hub 保留）；若需要再进 provider_raw。Gemini 远程 audio fileData 暂作 document 处理（IR audio 仅内联 base64，无远程 uri 之家）。
+
+**Verified**: `pnpm typecheck` 全绿；`packages/core` 1211、`packages/core/src/protocol` 351、gateway execute/chat 全绿；biome 干净。4 个 green commit（slice A/B/C/D）。
+
+---
+
 ## 2026-06-03 · Providers page: per-account usage, quota windows, priority/schedulable (docs/06, #38)
 
 **Context**: `/admin/providers` showed only provider/account/status/expiry. The operator runs

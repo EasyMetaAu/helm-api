@@ -56,7 +56,7 @@ Helm API is **0.2** and early-stage, but it is a real implementation, not a scaf
 **Shipped:**
 
 - **Four client protocols** — `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses), and `POST /v1beta/models/{model}:generateContent` (Google Gemini) — all streaming + non-streaming. (Gemini streaming is the `:streamGenerateContent?alt=sse` operation.)
-- **Cross-protocol translation** — normalize to one internal IR; consistent output shape across backends, with SSE streaming on the chat, messages, and responses surfaces.
+- **Cross-protocol translation** — normalize to one internal IR; consistent output shape across backends, with SSE streaming on all four surfaces (chat, messages, responses, Gemini). Aligned to litellm's field coverage: sampling/control knobs, usage detail (reasoning / cache / per-modality), a unified reasoning/thinking bridge, full multimodal I/O, and both-ways `finish_reason` maps. Unmappable knobs degrade observably (`n>1` capped, `data_loss` warnings) rather than erroring — see [Protocol Compatibility](docs/protocol-compatibility.md) for the per-pair data-loss matrix.
 - **Three-layer classification** — deterministic rules always on; optional small-model eval (off by default) for uncertain cases; `balanced`-lane fallback.
 - **Lane + policy routing** — first-match policies that pin, cap, or restrict lanes; default lanes shipped: `economy`, `balanced`, `premium`, plus task lanes `coding`, `json`, `vision`, `tool_use`. (`balanced` is the required, always-available fallback lane.)
 - **Provider execution with fallback** — primary + fallback chains across OpenAI-compatible upstreams, with a circuit breaker (OPEN/HALF_OPEN), a capability filter (skip candidates lacking JSON / tools / vision / context size with an explicit reason), and `:free`-tier 429 skipping. Client disconnects are treated as non-provider faults.
@@ -232,7 +232,8 @@ Read in order, starting at [`docs/README.md`](docs/README.md):
 [08 Memory Middleware](docs/08-memory-middleware.md) ·
 [09 Roadmap](docs/09-roadmap.md) ·
 [10 Deployment](docs/10-deployment.md) ·
-[11 Admin UI](docs/11-admin-ui.md)
+[11 Admin UI](docs/11-admin-ui.md) ·
+[Protocol Compatibility](docs/protocol-compatibility.md)
 
 ## License
 

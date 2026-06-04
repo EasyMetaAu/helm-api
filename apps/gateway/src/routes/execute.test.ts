@@ -753,6 +753,119 @@ describe("createExecute — gateway execution adapter", () => {
     if (out.final.status === "ok") expect(out.final.alias).toBe("vis");
   });
 
+  // Regression (Codex P1): a vision requirement carried as an in-MESSAGE image part
+  // (image_url / input_image / IR image) — not the legacy `attachments` array — must
+  // also prune a non-vision model.
+  it("in-message image content prunes a non-vision model (not just attachments)", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "vis2" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ text: "m-text", vis: "m-vis" }),
+      breaker: breaker(),
+      catalog: new Map([
+        ["text", entry("text", { supportsVision: false })],
+        ["vis", entry("vis", { supportsVision: true })],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["text", "vis"]),
+      req({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is this?" },
+              { type: "image_url", image_url: { url: "https://x/a.png" } },
+            ],
+          },
+        ] as unknown as InternalRequest["messages"],
+      }),
+    );
+    expect(out.attempts[0]?.skipped).toBe(true);
+    expect(out.attempts[0]?.skip_reason).toBe("no_vision_support");
+    expect(out.final.status).toBe("ok");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("vis");
+  });
+
+  it("audio request prunes a model lacking the audio modality and lands on one advertising it (P7)", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "aud" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ noaudio: "m-na", audio: "m-au" }),
+      breaker: breaker(),
+      catalog: new Map([
+        ["noaudio", entry("noaudio", { modalities: [] })],
+        ["audio", entry("audio", { modalities: ["audio"] })],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["noaudio", "audio"]),
+      req({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "transcribe" },
+              { type: "input_audio", input_audio: { data: "QUJD", format: "wav" } },
+            ],
+          },
+        ] as unknown as InternalRequest["messages"],
+      }),
+    );
+    expect(out.attempts[0]?.skipped).toBe(true);
+    expect(out.attempts[0]?.skip_reason).toBe("no_audio_support");
+    expect(out.final.status).toBe("ok");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("audio");
+  });
+
+  it("a document (file) request prunes a no-document model and lands on a document-capable one (P7)", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "doc" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ nodoc: "m-nd", doc: "m-dc" }),
+      breaker: breaker(),
+      catalog: new Map([
+        ["nodoc", entry("nodoc", { modalities: ["audio"] })],
+        ["doc", entry("doc", { modalities: ["document"] })],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["nodoc", "doc"]),
+      req({
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "file", file: { file_data: "data:application/pdf;base64,JVBE" } }],
+          },
+        ] as unknown as InternalRequest["messages"],
+      }),
+    );
+    expect(out.attempts[0]?.skip_reason).toBe("no_document_support");
+    expect(out.final.status).toBe("ok");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("doc");
+  });
+
   it("no qualifying candidate (all pruned by capability) → capability_unsatisfiable 422", async () => {
     const provider = {
       chatCompletion: vi.fn(),

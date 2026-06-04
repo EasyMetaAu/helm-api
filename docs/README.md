@@ -34,6 +34,7 @@ interface ships with the gateway for basic rule management.
 | 09 | [Roadmap](09-roadmap.md) | Phased roadmap and success criteria. |
 | 10 | [Deployment (Self-hosted / Docker)](10-deployment.md) | Docker deployment, configuration sources, startup behavior, upgrades. |
 | 11 | [Admin UI](11-admin-ui.md) | Web console, rule management, HTTP Basic auth. |
+| — | [Protocol Compatibility](protocol-compatibility.md) | Per-pair data-loss matrix, the `n>1` cap / `data_loss` warning policy, the `provider_raw` passthrough list, capability-gated modalities, and the litellm parity scorecard. |
 | — | [Research Notes](research-notes.md) | Appendix: open-source references and comparisons for the rule engine, protocol translation, probes, etc. |
 
 ## Design principles

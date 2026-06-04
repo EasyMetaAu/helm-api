@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { IRChunk } from "../gemini/gemini-types.js";
 import type { IRResponse } from "../ir.js";
 import {
   type AnthropicSSEEvent,
+  convertAnthropicStreamToIR,
   convertOpenAIStreamToAnthropic,
   type OpenAIChunk,
   synthesizeSSEFromJSON,
@@ -389,6 +391,30 @@ describe("synthesizeSSEFromJSON — cache hit / non-streaming upstream", () => {
     }
   });
 
+  // Regression (Codex P3): reasoning must survive the cache-hit / non-stream synth —
+  // a streaming Anthropic client served from a non-stream path still gets the thinking.
+  it("carries reasoning_content into a synthesized thinking block", async () => {
+    const res: IRResponse = {
+      id: "resp_r",
+      model: "deepseek-r",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "answer", reasoning_content: "let me think" },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const events = await collect(synthesizeSSEFromJSON(res));
+    const thinking = events
+      .filter((e) => e.type === "content_block_delta")
+      .map((e) => (e.type === "content_block_delta" ? e.delta : undefined))
+      .filter((d) => d?.type === "thinking_delta");
+    expect(thinking.length).toBeGreaterThan(0);
+    const text = thinking.map((d) => (d?.type === "thinking_delta" ? d.thinking : "")).join("");
+    expect(text).toBe("let me think");
+  });
+
   it("synthesizes a tool_use block: start (id+name) before input_json_delta", async () => {
     const res: IRResponse = {
       id: "resp_2",
@@ -429,6 +455,112 @@ describe("synthesizeSSEFromJSON — cache hit / non-streaming upstream", () => {
     if (md?.type === "message_delta") {
       expect(md.delta.stop_reason).toBe("tool_use");
     }
+  });
+});
+
+// —— P4: thinking streaming OUTBOUND (OpenAI reasoning_content -> Anthropic) ————
+describe("convertOpenAIStreamToAnthropic — thinking streaming (outbound)", () => {
+  it("maps delta.reasoning_content to a thinking content block + thinking_delta", async () => {
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([
+          {
+            id: "c",
+            model: "m",
+            choices: [{ index: 0, delta: { reasoning_content: "let me " }, finish_reason: null }],
+          },
+          {
+            id: "c",
+            model: "m",
+            choices: [{ index: 0, delta: { reasoning_content: "think" }, finish_reason: null }],
+          },
+          textChunk("answer"),
+          textChunk("", "stop"),
+        ]),
+      ),
+    );
+
+    // A thinking content block opens before the text block.
+    const starts = events.filter(
+      (e): e is Extract<AnthropicSSEEvent, { type: "content_block_start" }> =>
+        e.type === "content_block_start",
+    );
+    expect(starts[0]?.content_block.type).toBe("thinking");
+
+    // thinking_delta fragments carry the reasoning text on the thinking block index.
+    const thinkingIndex = starts[0]!.index;
+    const thinkingText = events
+      .filter(
+        (e): e is Extract<AnthropicSSEEvent, { type: "content_block_delta" }> =>
+          e.type === "content_block_delta" && e.index === thinkingIndex,
+      )
+      .map((e) => (e.delta.type === "thinking_delta" ? e.delta.thinking : ""))
+      .join("");
+    expect(thinkingText).toBe("let me think");
+
+    // The text block is a distinct, later block.
+    expect(starts[1]?.content_block.type).toBe("text");
+  });
+});
+
+// —— P4: thinking streaming INBOUND (Anthropic thinking/signature -> IR) ————————
+describe("convertAnthropicStreamToIR — thinking streaming (inbound)", () => {
+  async function* events(evts: AnthropicSSEEvent[]): AsyncIterable<AnthropicSSEEvent> {
+    for (const e of evts) yield e;
+  }
+
+  it("maps thinking_delta -> IR delta.reasoning_content and signature_delta -> thinking_blocks", async () => {
+    const chunks = await collect<IRChunk>(
+      convertAnthropicStreamToIR(
+        events([
+          {
+            type: "message_start",
+            message: {
+              id: "m",
+              type: "message",
+              role: "assistant",
+              model: "claude",
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { input_tokens: 5, output_tokens: 1 },
+            },
+          },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "thinking", thinking: "" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "reason A" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "signature_delta", signature: "sig-xyz" },
+          },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn", stop_sequence: null },
+            usage: { output_tokens: 7 },
+          },
+          { type: "message_stop" },
+        ]),
+      ),
+    );
+
+    // reasoning_content streamed on a delta.
+    const reasoning = chunks.map((c) => c.choices?.[0]?.delta?.reasoning_content ?? "").join("");
+    expect(reasoning).toBe("reason A");
+
+    // signature lands in a thinking_blocks delta.
+    const sigChunk = chunks.find((c) =>
+      c.choices?.[0]?.delta?.thinking_blocks?.some((b) => b.signature === "sig-xyz"),
+    );
+    expect(sigChunk).toBeDefined();
   });
 });
 
