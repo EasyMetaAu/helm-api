@@ -8,6 +8,8 @@ import { normalizeHeaders } from "./middleware/normalize-headers.js";
 import { requestLoggerMiddleware } from "./middleware/request-logger.js";
 import { traceIdMiddleware } from "./middleware/trace-id.js";
 import { type HealthDeps, registerHealthRoutes } from "./routes/health.js";
+import { registerLandingRoute } from "./routes/landing.js";
+import { registerOpenApiRoutes } from "./routes/openapi.js";
 
 export interface AppDeps {
   logger: Logger;
@@ -63,6 +65,15 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     buildInfo: readBuildInfo(),
   };
   registerHealthRoutes(app, health);
+
+  // Public landing page at "/" (status dashboard). Unauthenticated, static HTML;
+  // replaces the bare 404 the root used to return. Headless callers simply never
+  // see it — it adds no dependency on routing/admin (Principle 1).
+  registerLandingRoute(app);
+
+  // Public API docs: GET /openapi.json (3.1 spec generated from the Zod schemas)
+  // and GET /docs (Swagger UI). Schema-only, no data — safe to expose unauth.
+  registerOpenApiRoutes(app, { buildInfo: health.buildInfo });
 
   // /admin (admin API + static SPA) is wired by server.ts (it needs the resolved
   // adminAuth config + Store deps). createApp stays framework-glue only and does

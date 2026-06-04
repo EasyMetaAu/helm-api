@@ -92,6 +92,7 @@ import { registerGeminiRoute } from "./routes/gemini.js";
 import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
+import { registerModelsRoute } from "./routes/models.js";
 import { registerResponsesRoute } from "./routes/responses.js";
 import {
   markServingAccount,
@@ -977,6 +978,23 @@ export async function buildServer(
     "/v1/chat/*",
     rateLimitMiddleware({ limiter: rateLimiter, estimateTokens: estimateRequestTokens }),
   );
+
+  // Model discovery (GET /v1/models) is key-aware: it requires the SAME mandatory
+  // key auth as the chat surface so the listing reflects the authenticated key's
+  // caps (allow_custom_model / allowed_lanes). Read-only, so no rate-limit gate.
+  app.use(
+    "/v1/models",
+    authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
+  );
+  app.use(
+    "/v1/models/*",
+    authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
+  );
+  registerModelsRoute(app, {
+    lanes: () => lanes,
+    catalog,
+    providerAliases: config.providers.flatMap((p) => p.models.map((m) => m.alias)),
+  });
 
   // The per-request `route`: bind a fresh `execute` to the request's abort
   // signal (client disconnect), then run the framework-agnostic orchestrator.

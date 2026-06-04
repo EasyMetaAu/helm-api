@@ -5,6 +5,7 @@ import {
   type InternalRequest,
   makeHelmError,
 } from "@helm/shared";
+import { expandLaneChain } from "../lanes/expand-chain.js";
 import type { LanesConfig } from "../lanes/schema.js";
 import { type Classification as ResolverClassification, resolveLane } from "./lane-resolver.js";
 import { applyCaps, evaluatePolicies, type PolicyContext } from "./policy-engine.js";
@@ -181,44 +182,11 @@ async function classifySafe(
   }
 }
 
-// Expand a selected lane into an ordered candidate chain. Each primary/fallback
-// element may name a model alias OR another lane (docs/04). Lane references are
-// expanded recursively; model aliases are appended. Dedup keeps first
-// occurrence; a `visited` set bounds recursion so `a→b→a` cannot loop.
-function expandChain(laneName: string, lanes: LanesConfig): string[] {
-  const chain: string[] = [];
-  const seen = new Set<string>();
-
-  const push = (alias: string): void => {
-    if (!seen.has(alias)) {
-      seen.add(alias);
-      chain.push(alias);
-    }
-  };
-
-  const visit = (name: string, visitedLanes: Set<string>): void => {
-    if (visitedLanes.has(name)) return; // cycle guard
-    visitedLanes.add(name);
-    const lane = lanes[name];
-    if (lane === undefined) {
-      // Not a lane → it is a model alias; append it.
-      push(name);
-      return;
-    }
-    // Lane: primary then fallback, each possibly a lane or an alias.
-    const elements = [lane.primary, ...lane.fallback];
-    for (const el of elements) {
-      if (Object.hasOwn(lanes, el)) {
-        visit(el, visitedLanes);
-      } else {
-        push(el);
-      }
-    }
-  };
-
-  visit(laneName, new Set<string>());
-  return chain;
-}
+// Expand a selected lane into an ordered candidate chain (primary/fallback,
+// recursive lane refs, deduped, cycle-safe). The implementation lives in
+// lanes/expand-chain so routing and the public model listing share one
+// definition (docs/04).
+const expandChain = expandLaneChain;
 
 // Build the PolicyContext the engine matches on, from the classification.
 function policyContext(req: InternalRequest, cls: Classification): PolicyContext {

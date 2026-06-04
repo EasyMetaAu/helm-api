@@ -1,0 +1,40 @@
+import { describe, expect, it } from "vitest";
+import { createApp } from "../app.js";
+import { buildOpenApiDocument } from "./openapi.js";
+
+describe("OpenAPI docs", () => {
+  it("GET /openapi.json returns a 3.1 spec covering the public surface", async () => {
+    const app = createApp({ logger: { log: () => {} } });
+    const res = await app.request("/openapi.json");
+    expect(res.status).toBe(200);
+    const doc = (await res.json()) as {
+      openapi: string;
+      paths: Record<string, { get: { security: unknown } }>;
+      components: { schemas: Record<string, Record<string, unknown>> };
+    };
+    expect(doc.openapi).toBe("3.1.0");
+    for (const path of ["/", "/healthz", "/version", "/v1/models", "/v1/chat/completions"]) {
+      expect(doc.paths[path]).toBeDefined();
+    }
+    // Components are generated from the Zod schemas; the meta `$schema` is stripped.
+    const modelsList = doc.components.schemas.ModelsList;
+    expect(modelsList).toBeDefined();
+    expect(modelsList?.$schema).toBeUndefined();
+    // /v1/models is marked as bearer-secured; / is public.
+    expect(doc.paths["/v1/models"]?.get.security).toEqual([{ bearerAuth: [] }]);
+    expect(doc.paths["/"]?.get.security).toEqual([]);
+  });
+
+  it("GET /docs serves Swagger UI HTML", async () => {
+    const app = createApp({ logger: { log: () => {} } });
+    const res = await app.request("/docs");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(await res.text()).toContain("swagger");
+  });
+
+  it("buildOpenApiDocument stamps the build version into info", () => {
+    const doc = buildOpenApiDocument({ version: "1.2.3", gitSha: "abc", builtAt: "now" });
+    expect((doc.info as { version: string }).version).toBe("1.2.3");
+  });
+});

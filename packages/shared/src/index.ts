@@ -23,7 +23,6 @@ export {
   PricingOverrideSchema,
   PricingSchema,
 } from "./catalog/schema.js";
-
 // Layer-2 eval output model (docs/03 §Task classification) — strict JSON the eval model
 // emits; validated as untrusted external input, fail-open on any failure.
 export {
@@ -196,6 +195,16 @@ export {
   type ReflectionUpsertInput,
   ReflectionUpsertInputSchema,
 } from "./memory/schema.js";
+// Public model-listing model (GET /v1/models) — OpenAI-compatible discovery
+// envelope; lanes are first-class, concrete aliases are key-gated (principle 6).
+export {
+  type ModelKind,
+  ModelKindSchema,
+  type ModelObject,
+  ModelObjectSchema,
+  type ModelsList,
+  ModelsListSchema,
+} from "./models/schema.js";
 // Per-account OAuth subscription usage + quota observability (providers page).
 // Fail-open artifacts: usage = today's served traffic; quota = latest rate-limit
 // window snapshot; plus the (untrusted) Anthropic usage-endpoint response shape.

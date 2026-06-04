@@ -107,8 +107,9 @@ docker compose up -d
 docker compose logs helm | grep -i "root API key"
 ```
 
-- **Gateway** → `http://localhost:8080`
+- **Gateway** → `http://localhost:8080` (a status landing page lives at `/`)
 - **Dashboard** → `http://localhost:8080/admin` (log in with `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD`)
+- **API docs** → `GET /docs` (interactive Swagger UI) · `GET /openapi.json` (OpenAPI 3.1 spec)
 - **Health / version** → `GET /healthz`, `GET /version`
 
 `docker-compose.yml` mounts `./config` and `./data`, so your config and database survive restarts. Credentials are passed in as environment variables only — never built into the image.
@@ -143,6 +144,22 @@ curl http://localhost:8080/v1/chat/completions \
 | a model alias, e.g. `openai-codex/gpt-5.5` | Uses exactly that model and skips routing — only for keys granted custom-model permission. |
 
 > With a standard key, routing is automatic no matter what you send — just use `auto`. Lanes are configured by the operator in `lanes.yaml` and the dashboard; clients don't choose a lane per call.
+
+### API surface
+
+Every endpoint is documented interactively at **`/docs`** (Swagger UI, "Try it out"), with the raw spec at **`/openapi.json`** (OpenAPI 3.1, generated from the same Zod schemas the gateway validates against).
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /` | — | Status landing page |
+| `GET /healthz` · `GET /version` | — | Readiness probe · build info |
+| `GET /docs` · `GET /openapi.json` | — | Interactive docs · OpenAPI 3.1 spec |
+| `GET /v1/models` · `GET /v1/models/{id}` | API key | List models the key can route to (lanes + `auto`; concrete aliases with capabilities & pricing for custom-model keys) |
+| `POST /v1/chat/completions` | API key | OpenAI Chat Completions |
+| `POST /v1/messages` | API key | Anthropic Messages |
+| `POST /v1/responses` | API key | OpenAI Responses |
+| `POST /v1beta/models/{model}:generateContent` | API key | Google Gemini |
+| `/admin` · `/admin/api/*` | Basic auth | Dashboard + its JSON backend (mounted only when admin credentials are set) |
 
 ## Configuration
 
