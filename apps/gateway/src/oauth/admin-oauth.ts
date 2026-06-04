@@ -111,7 +111,11 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   const genId = deps.genSessionId ?? (() => randomUUID());
   const sessions = new Map<string, Session>();
   // Per-account Anthropic quota cache (5-min TTL): key `anthropic <account>`.
-  const quotaCache = new Map<string, { at: number; windows: OAuthQuotaWindow[] }>();
+  // Caches the OUTCOME of a usage fetch — windows on success, `null` on failure —
+  // so a rate-limited/erroring endpoint is NOT retried until the TTL lapses
+  // (negative caching). The providers page is the only caller and triggers this on
+  // page open / after an account action; there is no background poll.
+  const quotaCache = new Map<string, { at: number; windows: OAuthQuotaWindow[] | null }>();
 
   function prune(): void {
     const cutoff = now() - SESSION_TTL_MS;
@@ -394,13 +398,16 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     },
 
     async fetchAnthropicQuota({ account }): Promise<OAuthQuotaWindow[] | null> {
-      // Serve from the 5-min cache when warm (a page refresh must not hammer the
-      // upstream usage endpoint, which itself rate-limits).
+      // Serve from the 5-min cache when warm — INCLUDING a cached failure (null) —
+      // so reopening the providers page or saving an account setting never re-hits
+      // the upstream usage endpoint, which itself rate-limits aggressively. Refresh
+      // is therefore page-open-driven AND debounced to at most once per TTL.
       const key = `${ANTHROPIC}${" "}${account}`;
       const cached = quotaCache.get(key);
       if (cached && now() - cached.at < QUOTA_TTL_MS) return cached.windows;
       const provider = getOAuthProvider(ANTHROPIC);
       if (!provider) return null;
+      let windows: OAuthQuotaWindow[] | null = null;
       try {
         // Same lazy-refresh token manager the execution path uses, so the bearer is
         // fresh; the account's egress proxy is reused for network-identity
@@ -420,23 +427,25 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         ).proxy;
         const doFetch = proxy ? makeProxyFetch(proxy) : fetch;
         // Bounded timeout (fail-open): a slow proxy/upstream must NOT hang the
-        // providers page — the AbortSignal trips the catch below, which returns null
-        // so the page renders with the stored/empty snapshot instead of stalling.
+        // providers page — the AbortSignal trips the catch below, leaving `windows`
+        // null so the page renders the stored/empty snapshot instead of stalling.
         const res = await doFetch(ANTHROPIC_USAGE_URL, {
           headers: { ...ANTHROPIC_USAGE_HEADERS, authorization },
           signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
         });
-        if (!res.ok) {
-          await res.body?.cancel().catch(() => {});
-          return null;
+        if (res.ok) {
+          const body: unknown = await res.json();
+          windows = parseAnthropicUsageBody(body, now());
+        } else {
+          await res.body?.cancel().catch(() => {}); // 429/4xx/5xx → cache the miss
         }
-        const body: unknown = await res.json();
-        const windows = parseAnthropicUsageBody(body, now());
-        quotaCache.set(key, { at: now(), windows });
-        return windows;
       } catch {
-        return null; // dead token / network / malformed body → page renders "—"
+        windows = null; // dead token / network / malformed body → page renders "—"
       }
+      // Cache the outcome (success OR failure) so the next page open within the TTL
+      // is served from memory rather than re-hitting the rate-limited endpoint.
+      quotaCache.set(key, { at: now(), windows });
+      return windows;
     },
   };
 }

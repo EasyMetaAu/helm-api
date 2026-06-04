@@ -5,6 +5,7 @@ import {
   SqliteConfigStore,
   SqliteOAuthTokenStore,
 } from "@helm/core";
+import type { OAuthQuotaWindow } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOAuthAdmin } from "./admin-oauth.js";
 
@@ -627,5 +628,75 @@ describe("createOAuthAdmin", () => {
     expect(decryptSecret((await config.get("oauth.account_settings")) ?? "", KEY)).toContain(
       "keep",
     );
+  });
+});
+
+describe("createOAuthAdmin > fetchAnthropicQuota", () => {
+  // Connect one Anthropic account, then expose the admin + a usage-endpoint hit
+  // counter. `now` is pinned so the 5-min cache window never elapses between calls.
+  async function connected(usage: () => Response): Promise<{
+    fetchQuota: (input: { account: string }) => Promise<OAuthQuotaWindow[] | null>;
+    usageHits: () => number;
+  }> {
+    let hits = 0;
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+        [
+          /oauth\/usage/,
+          () => {
+            hits++;
+            return usage();
+          },
+        ],
+      ]),
+    );
+    let seq = 0;
+    const admin = createOAuthAdmin({
+      store: makeStore(),
+      encKey: KEY,
+      config: makeConfig(),
+      now: () => 1000,
+      genSessionId: () => `s${++seq}`,
+    });
+    const { sessionId, authorizeUrl } = await admin.startManualPaste({ providerId: "anthropic" });
+    const state = new URL(authorizeUrl).searchParams.get("state");
+    await admin.completeManualPaste({
+      sessionId,
+      redirectInput: `https://x/cb?code=C&state=${state}`,
+      account: "default",
+    });
+    const fetchQuota = admin.fetchAnthropicQuota;
+    if (!fetchQuota) throw new Error("fetchAnthropicQuota not wired");
+    return { fetchQuota, usageHits: () => hits };
+  }
+
+  it("negative-caches a failed usage fetch (no upstream hammering within the TTL)", async () => {
+    const { fetchQuota, usageHits } = await connected(
+      () => new Response("rate_limited", { status: 429 }),
+    );
+    expect(await fetchQuota({ account: "default" })).toBeNull();
+    expect(await fetchQuota({ account: "default" })).toBeNull();
+    expect(usageHits()).toBe(1); // the second open is served from the negative cache
+  });
+
+  it("caches a successful snapshot and surfaces utilization as 0–100 percent as-is", async () => {
+    const { fetchQuota, usageHits } = await connected(() =>
+      json({
+        five_hour: { utilization: 3, resets_at: "2026-06-04T12:00:00.000Z" },
+        seven_day: { utilization: 17, resets_at: "2026-06-08T12:00:00.000Z" },
+        seven_day_sonnet: { utilization: 0, resets_at: "2026-06-08T12:00:00.000Z" },
+      }),
+    );
+    const first = await fetchQuota({ account: "default" });
+    const second = await fetchQuota({ account: "default" });
+    expect(first?.map((w) => `${w.key}:${w.usedPercent}`)).toEqual([
+      "5h:3",
+      "7d:17",
+      "7d-sonnet:0",
+    ]);
+    expect(second).toEqual(first); // served from the warm cache
+    expect(usageHits()).toBe(1);
   });
 });
