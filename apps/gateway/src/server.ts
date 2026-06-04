@@ -994,6 +994,10 @@ export async function buildServer(
     lanes: () => lanes,
     catalog,
     providerAliases: config.providers.flatMap((p) => p.models.map((m) => m.alias)),
+    // Live curated subscription aliases — the SAME hot-reloadable set the executor
+    // routes by (rebound on OAuth curation/connect/disconnect), so discovery and
+    // routability never disagree.
+    oauthAliases: () => oauthAliasSet,
   });
 
   // The per-request `route`: bind a fresh `execute` to the request's abort

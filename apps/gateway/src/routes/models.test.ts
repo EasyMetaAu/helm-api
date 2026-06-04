@@ -53,13 +53,13 @@ function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
   };
 }
 
-function buildApp(rec: ApiKeyRecord | null) {
+function buildApp(rec: ApiKeyRecord | null, oauthAliases?: () => Iterable<string>) {
   const getByHash = vi.fn().mockResolvedValue(rec);
   const app = createApp({ logger: { log: () => {} } });
   const auth = authMiddleware({ keyStore: { getByHash }, log: () => {} });
   app.use("/v1/models", auth);
   app.use("/v1/models/*", auth);
-  registerModelsRoute(app, { lanes: () => lanes, catalog, providerAliases });
+  registerModelsRoute(app, { lanes: () => lanes, catalog, providerAliases, oauthAliases });
   return app;
 }
 
@@ -93,6 +93,31 @@ describe("GET /v1/models", () => {
     expect(pro?.type).toBe("model");
     expect(pro?.pricing?.inputPerMTokUsd).toBe(0.5);
     expect(pro?.lanes?.sort()).toEqual(["balanced", "economy"]);
+  });
+
+  it("allow_custom_model key: includes live subscription (OAuth) aliases", async () => {
+    // Real subscription alias shape: `<providerId>/<model>` where providerId can
+    // contain a hyphen (ROUTABLE_OAUTH keys, e.g. `openai-codex`). owned_by must be
+    // the FULL prefix before the first slash, not a truncation.
+    const res = await buildApp(record({ allow_custom_model: true }), () => [
+      "openai-codex/gpt-5.4",
+      "deepseek/pro", // overlaps a configured alias -> deduped, listed once
+    ]).request("/v1/models", { headers: AUTH });
+    const body = (await res.json()) as ModelsList;
+    const ids = body.data.map((m) => m.id);
+    expect(ids).toContain("openai-codex/gpt-5.4");
+    expect(ids.filter((id) => id === "deepseek/pro")).toHaveLength(1);
+    const codex = body.data.find((m) => m.id === "openai-codex/gpt-5.4");
+    expect(codex?.type).toBe("model");
+    expect(codex?.owned_by).toBe("openai-codex");
+  });
+
+  it("normal key: subscription aliases stay hidden (lane abstraction)", async () => {
+    const res = await buildApp(record(), () => ["openai-codex/gpt-5.4"]).request("/v1/models", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as ModelsList;
+    expect(body.data.map((m) => m.id)).toEqual(["economy", "balanced", "auto"]);
   });
 
   it("retrieve: GET /v1/models/:id returns one model", async () => {

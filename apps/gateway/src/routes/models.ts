@@ -18,15 +18,24 @@ export interface ModelsRouteDeps {
   catalog: Map<string, CatalogEntry>;
   // Configured provider aliases: config.providers[].models[].alias.
   providerAliases: string[];
+  // Live curated subscription (OAuth) aliases — `<provider>/<model>` ids synthesized
+  // from bound credentials, not config. Hot-reloadable (admin curation / connect /
+  // disconnect), so read per request like `lanes` rather than snapshotted. Optional:
+  // absent in headless/no-OAuth deployments. These are concrete aliases, so — like
+  // providerAliases — they surface only for allow_custom_model keys (buildModelsList).
+  oauthAliases?: () => Iterable<string>;
 }
 
 export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): void {
   const build = (c: Context<AppEnv>) => {
     const identity = c.get("identity");
+    // Merge static config aliases with the LIVE subscription set. buildModelsList
+    // dedups + sorts, so an alias that is both configured and OAuth-curated lists once.
+    const oauth = deps.oauthAliases ? [...deps.oauthAliases()] : [];
     return buildModelsList({
       lanes: deps.lanes(),
       catalog: deps.catalog,
-      providerAliases: deps.providerAliases,
+      providerAliases: oauth.length ? [...deps.providerAliases, ...oauth] : deps.providerAliases,
       allowCustomModel: identity.caps.allowCustomModel,
       allowedLanes: identity.caps.allowedLanes,
     });
