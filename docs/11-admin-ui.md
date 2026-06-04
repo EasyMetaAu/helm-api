@@ -86,7 +86,10 @@ The landing page (`/`) gives an at-a-glance overview.
 
 Rule edits go through a runtime rule store that re-binds the live `lanes` /
 `policies` / `classifier` config the router reads — applied on the very next
-request, no restart. Changes are persisted, keeping "config-as-code".
+request, no restart. In 0.2 these edits are held in-process only and are **not**
+persisted across restarts; YAML write-back is future work. For durable changes,
+edit `config/*.yaml` directly. (The runtime **Settings** below are the exception
+— they are persisted to the config store.)
 
 ### Providers (OAuth subscriptions)
 

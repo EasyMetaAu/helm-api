@@ -76,7 +76,7 @@ helm-api/
 
 ```bash
 pnpm install
-pnpm dev            # 起网关 + admin
+pnpm dev            # 仅起 admin 开发服务器（网关无 watch：跑构建产物或 Docker）
 pnpm test           # Vitest 单测
 pnpm test:e2e       # Playwright
 pnpm typecheck      # tsc --noEmit
@@ -107,7 +107,7 @@ pnpm build          # 构建网关 + admin 静态资源
 
 ## Git 工作流
 
-- 在分支上开发，开 PR，**CI 全绿（typecheck + lint + 单测 + e2e）方可合并**；不直接推 `main`。
+- 在分支上开发，开 PR，**CI 全绿（typecheck + lint + build + 单测 + Docker smoke）方可合并**；e2e（Playwright）在本地跑，不在 CI 门禁内；不直接推 `main`。
 - Commit message 结尾带：
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 - 只有用户明确要求时才提交/推送。
@@ -130,7 +130,7 @@ pnpm build          # 构建网关 + admin 静态资源
 ## 实现约定（已拍板，细节见 implementation-notes.md）
 
 - **能力与定价数据源**：上游取 LiteLLM 的 `model_prices_and_context_window.json`，经 `pnpm sync:catalog` 同步成**签入的 generated catalog**；运行时读 `capabilities.yaml` / `pricing.yaml`，**手动条目覆盖生成项**。**不在运行时拉取**（生成目录是供应链输入，不直接进运行时选择）。
-- **provider 执行层**：在 `packages/core/providers` **重写**，移植 llm-router 的久经考验语义（熔断 OPEN/HALF_OPEN + 探测锁、首个有效 chunk 前记失败/后记成功、能力过滤显式 skip reason、`:free` 429 跳过、abort 不算故障）；用其现有测试当行为 checklist。**不 import llm-router**。
+- **provider 执行层**：在 `packages/core/src/provider` **重写**，移植 llm-router 的久经考验语义（熔断 OPEN/HALF_OPEN + 探测锁、首个有效 chunk 前记失败/后记成功、能力过滤显式 skip reason、`:free` 429 跳过、abort 不算故障）；用其现有测试当行为 checklist。**不 import llm-router**。
 - **eval 缓存键**：`sha256(canonical-json)`，只哈希分类依赖输入——末条 user 消息(trim)、turn 数、排序后的 tool 名、`response_format` 是否 JSON、是否含附件/vision；稳定键序、排除易变字段、不 lowercase。TTL 默认 300s，字段集可配，实现后验命中率。
 
 ## 仍需用户决定

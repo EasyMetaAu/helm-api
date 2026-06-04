@@ -153,8 +153,8 @@ Two cap layers apply, in order:
 1. **Policy caps** narrow the resolver's lane choice (`max_lane` /
    `allowed_lanes`).
 2. **Per-key caps** apply **last** as the outer, non-negotiable bound from the
-   API key's auth record, so a key confined to (for example) `maxLane: economy`
-   is honored even over a policy `use_lane` pin. See
+   API key's auth record, so a key whose `allowed_lanes` whitelist is confined
+   to (for example) `[economy]` is honored even over a policy `use_lane` pin. See
    [06](06-auth-and-rate-limits.md).
 
 ## Execution model and the two fallbacks

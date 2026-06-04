@@ -64,12 +64,13 @@ correctness reference; the code is a clean reimplementation, not a copy.
   that carries upstream-native fields (raw `stop_reason` / `usage` and
   provider-only echoes) that cannot be mapped losslessly. The IR is the single Zod
   type source for the whole protocol layer.
-- **One transformer per protocol, a six-method contract** — three request/response
-  pairs covering the three directions: `transformRequestOut` / `transformRequestIn`
-  (native ↔ IR request), `transformResponseOut` / `transformResponseIn`
-  (IR ↔ native response), and `transformStreamOut` / `transformStreamIn`
-  (IR chunks ↔ native SSE). Inbound and outbound translation live in the same file;
-  see `protocol/transformer.ts`.
+- **One transformer per protocol, a four-method contract** — two request/response
+  pairs covering both directions: `transformRequestOut` / `transformRequestIn`
+  (native ↔ IR request) and `transformResponseOut` / `transformResponseIn`
+  (IR ↔ native response). Streaming-capable protocols (Anthropic, Gemini)
+  additionally expose `transformStreamIn` / `transformStreamOut`
+  (native SSE ↔ IR chunks) as extensions on top of the base contract. Inbound and
+  outbound translation live in the same file; see `protocol/transformer.ts`.
 - **Reasoning crosses the IR through one bridge** (`protocol/reasoning.ts`):
   `{type:"thinking"}` content parts and the flat `message.reasoning_content` /
   `thinking_blocks` are kept in sync, so reasoning survives every cross-protocol

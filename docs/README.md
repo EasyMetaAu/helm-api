@@ -1,7 +1,7 @@
 # Helm API Documentation
 
 This directory holds the product and technical specification for Helm API. The
-project is **implemented and at the 0.1 release**: the gateway, routing brain,
+project is **implemented and at the 0.2 release**: the gateway, routing brain,
 classifier, protocol translation, store layer, and Admin UI are all built and
 covered by tests. The numbered documents below describe the system as it ships;
 read them in order.
@@ -11,7 +11,7 @@ read them in order.
 Helm API is an **open-source, self-hosted** LLM routing gateway (MIT license,
 deployed with Docker) — think of it as "**nginx for the LLM world**". It accepts
 standard AI API requests (OpenAI Chat Completions, Anthropic Messages, and
-OpenAI Responses today; Gemini is on the roadmap), uses deterministic rules
+OpenAI Responses, and Google Gemini today), uses deterministic rules
 (optionally aided by a small-model evaluation that is **off by default**) to
 classify each request by task type and complexity, and routes it to a
 configurable **lane** rather than to a bare provider alias. It executes the lane
@@ -61,4 +61,4 @@ These keep Helm more focused than its predecessor `llm-router`:
 | Specification | Implemented (these documents describe the shipping system) |
 | Core gateway (routing, classification, protocol translation, store) | Implemented |
 | Admin UI | Implemented |
-| Release | 0.1 |
+| Release | 0.2 |

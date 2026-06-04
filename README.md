@@ -164,7 +164,7 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 | Variable | Purpose |
 |---|---|
 | `DEEPSEEK_API_KEY` | Primary provider credential (**required**) |
-| `ZENMUX_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY` | Optional provider credentials (provider is skipped if missing) |
+| `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` | Optional provider credentials (provider is skipped if missing) |
 | `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | Dashboard login (Basic auth) |
 | `HELM_HOST` / `HELM_PORT` | Server binding (default `0.0.0.0:8080`) |
 | `HELM_STORE_DRIVER` | `sqlite` (default) or `supabase` |

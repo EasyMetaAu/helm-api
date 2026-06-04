@@ -164,7 +164,7 @@ curl http://localhost:8080/v1/chat/completions \
 | 变量 | 用途 |
 |---|---|
 | `DEEPSEEK_API_KEY` | 主供应商凭证（**必填**） |
-| `ZENMUX_API_KEY`、`OPENROUTER_API_KEY`、`ANTHROPIC_API_KEY` | 可选供应商凭证（缺失则跳过该供应商） |
+| `ZENMUX_API_KEY`、`OPENROUTER_API_KEY` | 可选供应商凭证（缺失则跳过该供应商，继续走 fallback 链） |
 | `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | 面板登录（Basic auth） |
 | `HELM_HOST` / `HELM_PORT` | 服务绑定（默认 `0.0.0.0:8080`） |
 | `HELM_STORE_DRIVER` | `sqlite`（默认）或 `supabase` |
