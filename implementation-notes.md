@@ -5,6 +5,15 @@
 
 ---
 
+## 2026-06-04 · `/v1/models` 漏报订阅（OAuth）模型（bug 修复；docs/04 lane、issue #38）
+
+**问题**：`GET /v1/models` 对 `allow_custom_model` key 列出了 configured providers 的别名（deepseek/openrouter/zenmux），但**完全没有订阅（OAuth）provider 的模型**。根因：`server.ts` 给 `registerModelsRoute` 的 `providerAliases` 只取 `config.providers[].models[].alias`（静态配置），而订阅模型是另一条链路 `synthesizeOAuthProviders` 合成的，活别名存在热加载的 `oauthAliasSet` 里。执行器读它做路由（`oauthAliases: () => oauthAliasSet`），但发现端点从没拿到——于是「能路由但列不出」。
+
+**方案**：给 `ModelsRouteDeps` 加可选 `oauthAliases?: () => Iterable<string>` thunk（**活读**，与执行器同一个 `oauthAliasSet`，curation/connect/disconnect 即时生效、无需重启），route 内与静态 `providerAliases` 合并后交给 `buildModelsList`（其本就 dedup+sort，配置别名与订阅别名重叠只列一次）。
+
+- **取舍**：不改 core `buildModelsList` 契约——合并发生在 gateway 组合根，core 仍是纯函数只认一份 `providerAliases`（principle 1）。订阅别名同属「concrete alias」，因此与 provider 别名一样**只对 `allow_custom_model` key 可见**，默认 key 仍只见 lane（principle 6）。
+- **已知限制（TODO）**：订阅别名（如 `openai-codex/gpt-5.4`，前缀是 `ROUTABLE_OAUTH` 的 key，可能带连字符）通常不在 runtime catalog 里，故列出时**不带 capabilities/pricing**——诚实且不阻塞「能被发现」。若要补全，需用去前缀的 base model 在 catalog 里回查，留待后续。
+
 ## 2026-06-04 · Codex 额度改为「PULL + PUSH 双源」（spec 未覆盖；issue #38 OAuth 订阅）
 
 **问题**：providers 页 Codex 账户的额度列永远显示「—」，刷新按钮无效。根因：Codex 额度此前**只有 PUSH 源**——从每次 `/responses` 响应的 `x-codex-*` 头里刮（`codex-quota.ts`），账户没流量就永远没有快照；而刷新按钮（#88）只重跑页面加载，其中的主动 PULL 只覆盖 Anthropic。参考项目 claude-relay-service 同样只刮头，**没有**主动拉取可抄。
