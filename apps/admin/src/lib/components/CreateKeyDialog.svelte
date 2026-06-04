@@ -43,6 +43,8 @@
   let budgetWindowInput = $state<number | null>(null);
   let overBudgetBehavior = $state<'degrade' | 'reject'>('degrade');
   let degradeLaneInput = $state<string>('');
+  // Max in-flight requests (issue #93). null = unlimited.
+  let concurrencyLimitInput = $state<number | null>(null);
 
   let error = $state<string | null>(null);
   let creating = $state<boolean>(false);
@@ -77,6 +79,8 @@
     if (budgetWindowInput != null) input.budget_window_seconds = budgetWindowInput;
     input.over_budget_behavior = overBudgetBehavior;
     if (degradeLaneInput.length > 0) input.degrade_lane = degradeLaneInput;
+    // Concurrency limit: send only when set (blank => unlimited).
+    if (concurrencyLimitInput != null) input.concurrency_limit = concurrencyLimitInput;
     try {
       revealed = await createKey(input);
     } catch (e) {
@@ -121,6 +125,7 @@
         budget_window_seconds: budgetWindowInput ?? null,
         over_budget_behavior: overBudgetBehavior,
         degrade_lane: degradeLaneInput.length > 0 ? degradeLaneInput : null,
+        concurrency_limit: concurrencyLimitInput ?? null,
       };
       oncreated(view);
     }
@@ -252,6 +257,24 @@
           'Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.',
         )}</span
       >
+
+      <label class="flex flex-col gap-1 text-sm">
+        <span class="field-label">{$t('Max concurrent requests')}</span>
+        <input
+          type="number"
+          min="1"
+          step="1"
+          aria-label={$t('Max concurrent requests')}
+          placeholder={$t('Unlimited')}
+          class="input"
+          bind:value={concurrencyLimitInput}
+        />
+        <span class="field-help"
+          >{$t(
+            'Cap how many requests this key may run at once. Extra requests queue when request queueing is enabled in System Settings. Leave blank for unlimited.',
+          )}</span
+        >
+      </label>
 
       <fieldset class="flex flex-col gap-1 text-sm">
         <legend class="field-label">{$t('Usage budgets')}</legend>

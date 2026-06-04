@@ -11,11 +11,14 @@ import {
   createBudgetGate,
   createCircuitBreaker,
   createCodexResponsesClient,
+  createKeyedSemaphore,
+  createKeyedSerialGate,
   createMemoryMomentumStore,
   createOAuthPoolClient,
   createOpenAIClient,
   createProviderRegistry,
   createRateLimiter,
+  createSerializingClient,
   createSignalCollector,
   createStore,
   createTokenManager,
@@ -28,6 +31,8 @@ import {
   getOAuthProvider,
   hashKey,
   type IRResponse,
+  isUserMessageRequest,
+  type KeyedSerialGate,
   type Lane,
   type LanesConfig,
   loadConfig,
@@ -72,6 +77,7 @@ import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middleware/basic-auth.js";
+import { concurrencyMiddleware, createConcurrencyGate } from "./middleware/concurrency.js";
 import { estimateRequestTokens } from "./middleware/estimate-tokens.js";
 import { type RateLimiterPort, rateLimitMiddleware } from "./middleware/rate-limit.js";
 import {
@@ -250,6 +256,15 @@ export async function synthesizeOAuthProviders(
   // client so the Codex `x-codex-*` window scrape knows which subscription it came
   // from. Optional — absent in unit tests (no quota capture).
   onQuotaHeaders?: (providerId: string, account: string, headers: Headers) => void,
+  // Per-account user-message serial queue (issue #93, feature B). One LONG-LIVED
+  // gate shared across pool rebuilds (queue state survives an admin save) plus a
+  // live-settings thunk; each member client is wrapped so user-message requests
+  // to the SAME account serialize with the configured delay. Optional — absent
+  // in unit tests and when the feature is unwired.
+  userMessageQueue?: {
+    gate: KeyedSerialGate;
+    getConfig: () => { enabled: boolean; delayMs: number; timeoutMs: number };
+  },
 ): Promise<SynthesizedOAuth> {
   if (!oauthCtx) return { providers: [], poolClients: new Map() };
   const declared = new Set<string>(
@@ -350,7 +365,25 @@ export async function synthesizeOAuthProviders(
         identity,
         onResponseMeta,
       );
-      members.push({ account, priority: s.priority ?? 50, schedulable: true, client });
+      // Serialize user-message requests per account (issue #93, feature B). The
+      // wrap sits INSIDE the pool member so the gate key is the concrete account
+      // the pool selected; non-user turns and a disabled setting pass through.
+      const serialized = userMessageQueue
+        ? createSerializingClient({
+            inner: client,
+            gate: userMessageQueue.gate,
+            key: `${providerId} ${account}`,
+            getConfig: userMessageQueue.getConfig,
+            isUserMessage: isUserMessageRequest,
+            log: (lvl, msg, fields) => log(lvl, msg, fields),
+          })
+        : client;
+      members.push({
+        account,
+        priority: s.priority ?? 50,
+        schedulable: true,
+        client: serialized,
+      });
     }
 
     if (members.length === 0 || unionModels.size === 0) {
@@ -741,6 +774,20 @@ export async function buildServer(
       .upsert({ providerId, account, windows, capturedAt: nowMs, source: "codex-headers" })
       .catch(() => logger.log("error", "oauth.quota.capture_failed", { provider_id: providerId }));
   };
+  // Per-account user-message serial queue (issue #93, feature B). ONE long-lived
+  // gate for the whole process: it must survive pool rebuilds so queued requests
+  // and completion stamps are never dropped by an admin save. The config thunk
+  // closes over the live `settings` binding — an admin toggle applies to the
+  // NEXT acquire with no rebuild.
+  const userMsgGate = createKeyedSerialGate();
+  const userMessageQueue = {
+    gate: userMsgGate,
+    getConfig: () => ({
+      enabled: settings.user_message_queue_enabled,
+      delayMs: settings.user_message_queue_delay_ms,
+      timeoutMs: settings.user_message_queue_wait_timeout_ms,
+    }),
+  };
   const synthesizedOAuth = await synthesizeOAuthProviders(
     config.providers,
     oauthCtx,
@@ -749,6 +796,7 @@ export async function buildServer(
     timeoutMs,
     (lvl, msg, f) => logger.log(lvl, msg, f),
     captureCodexQuota,
+    userMessageQueue,
   );
   const routableProviders: ProviderConfigShared[] = [
     ...config.providers,
@@ -827,6 +875,7 @@ export async function buildServer(
           timeoutMs,
           (lvl, msg, f) => logger.log(lvl, msg, f),
           captureCodexQuota,
+          userMessageQueue, // SAME gate instance — queue state survives rebuilds
         );
         oauthPoolClients = next.poolClients;
         oauthAliasSet = aliasSetOf(next);
@@ -978,6 +1027,23 @@ export async function buildServer(
     "/v1/chat/*",
     rateLimitMiddleware({ limiter: rateLimiter, estimateTokens: estimateRequestTokens }),
   );
+  // Per-key concurrency overflow queue (issue #93, feature A): AFTER rate-limit
+  // (a hard-rejected request must not hold a queue slot), BEFORE classify/route.
+  // ONE process-wide gate shared with the self-auth routes (messages / responses
+  // / gemini) so a key's in-flight count spans every entrypoint. No-op while
+  // concurrency_queue_enabled is OFF or for keys without a concurrency_limit.
+  const concurrencyGate = createConcurrencyGate({
+    semaphore: createKeyedSemaphore({
+      log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
+    }),
+    getConfig: () => ({
+      enabled: settings.concurrency_queue_enabled,
+      minSize: settings.concurrency_queue_min_size,
+      multiplier: settings.concurrency_queue_size_multiplier,
+      waitTimeoutMs: settings.concurrency_queue_wait_timeout_ms,
+    }),
+  });
+  app.use("/v1/chat/*", concurrencyMiddleware(concurrencyGate));
 
   // Model discovery (GET /v1/models) is key-aware: it requires the SAME mandatory
   // key auth as the chat surface so the listing reflects the authenticated key's
@@ -1252,6 +1318,9 @@ export async function buildServer(
     // See note above: attached via cast until Wave2 adds `rateLimiter` to the deps
     // interface (the cast then becomes a no-op).
     rateLimiter,
+    // SAME process-wide gate as the chat middleware (issue #93): a key's
+    // in-flight count spans every surface.
+    concurrencyGate,
     auth: {
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;
@@ -1271,6 +1340,8 @@ export async function buildServer(
             // /v1/messages + /v1/responses paths enforce per-key limits too, not
             // just the OpenAI chat middleware.
             rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+            // Per-key max in-flight (issue #93): read by the concurrency gate.
+            concurrencyLimit: record.concurrency_limit,
             // Per-key usage budgets (docs/06): carried so the pipeline's budget
             // gate/settle enforce on these self-auth faces too.
             budget: {
@@ -1332,6 +1403,7 @@ export async function buildServer(
     // Same per-key limiter, same cast rationale as the messages route above —
     // closes the rate-limit bypass on /v1/responses.
     rateLimiter,
+    concurrencyGate,
     auth: {
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;
@@ -1351,6 +1423,8 @@ export async function buildServer(
             // /v1/messages + /v1/responses paths enforce per-key limits too, not
             // just the OpenAI chat middleware.
             rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+            // Per-key max in-flight (issue #93): read by the concurrency gate.
+            concurrencyLimit: record.concurrency_limit,
             // Per-key usage budgets (docs/06): carried so the pipeline's budget
             // gate/settle enforce on these self-auth faces too.
             budget: {
@@ -1394,6 +1468,7 @@ export async function buildServer(
   );
   registerGeminiRoute(app, {
     rateLimiter,
+    concurrencyGate,
     auth: {
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;
@@ -1410,6 +1485,8 @@ export async function buildServer(
             allowedLanes: record.allowed_lanes,
             allowCustomModel: record.allow_custom_model,
             rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+            // Per-key max in-flight (issue #93): read by the concurrency gate.
+            concurrencyLimit: record.concurrency_limit,
             budget: {
               requests: record.budget_requests,
               tokens: record.budget_tokens,

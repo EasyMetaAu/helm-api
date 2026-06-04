@@ -27,6 +27,7 @@ function toSummary(rec: {
   budget_window_seconds: number | null;
   over_budget_behavior: "degrade" | "reject";
   degrade_lane: string | null;
+  concurrency_limit: number | null;
 }): KeySummary {
   return {
     key_id: rec.key_id,
@@ -43,6 +44,7 @@ function toSummary(rec: {
     budget_window_seconds: rec.budget_window_seconds,
     over_budget_behavior: rec.over_budget_behavior,
     degrade_lane: rec.degrade_lane,
+    concurrency_limit: rec.concurrency_limit,
   };
 }
 
@@ -77,6 +79,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       budgetWindowSeconds: parsed.data.budget_window_seconds,
       overBudgetBehavior: parsed.data.over_budget_behavior,
       degradeLane: parsed.data.degrade_lane,
+      concurrencyLimit: parsed.data.concurrency_limit,
     });
     // The ONLY place plaintext is ever returned. `prefix` is the server-minted
     // non-sensitive display prefix (already persisted) — returned so the SPA need
@@ -114,6 +117,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       budgetWindowSeconds?: number | null;
       overBudgetBehavior?: "degrade" | "reject";
       degradeLane?: string | null;
+      concurrencyLimit?: number | null;
     } = {};
     if (d.allowed_lanes !== undefined) patch.allowedLanes = d.allowed_lanes;
     if (d.allow_custom_model !== undefined) patch.allowCustomModel = d.allow_custom_model;
@@ -125,6 +129,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     if (d.budget_window_seconds !== undefined) patch.budgetWindowSeconds = d.budget_window_seconds;
     if (d.over_budget_behavior !== undefined) patch.overBudgetBehavior = d.over_budget_behavior;
     if (d.degrade_lane !== undefined) patch.degradeLane = d.degrade_lane;
+    if (d.concurrency_limit !== undefined) patch.concurrencyLimit = d.concurrency_limit;
     try {
       await deps.keyStore.updateKey(id, patch);
     } catch {

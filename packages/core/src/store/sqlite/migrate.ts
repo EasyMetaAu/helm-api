@@ -320,6 +320,16 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // Per-key max in-flight requests (issue #93 concurrency overflow queue).
+    // Additive — existing rows get NULL (= unlimited; like the budgets, 0 is not
+    // a sentinel). The in-flight counter itself is process memory (single-process
+    // FIFO semaphore), so no counter table — only the configured limit persists.
+    version: 13,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN concurrency_limit INTEGER;
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

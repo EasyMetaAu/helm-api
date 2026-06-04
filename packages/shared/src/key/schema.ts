@@ -45,6 +45,12 @@ export const ApiKeyRecordSchema = z.object({
   over_budget_behavior: OverBudgetBehaviorSchema.default("degrade"),
   // Lane to fall back to when degrading. null = `economy` (the cheapest ranked lane).
   degrade_lane: z.string().min(1).nullable().default(null),
+  // Max in-flight requests for this key (issue #93). null = unlimited. Like the
+  // budgets (and unlike the rate limits), 0 is NOT a sentinel — null already means
+  // unlimited, so 0 is rejected. Enforced only while the runtime setting
+  // concurrency_queue_enabled is ON; overflow waits in a FIFO queue (429 on
+  // queue-full / wait-timeout). `.default()`ed so legacy rows still parse.
+  concurrency_limit: z.number().int().positive().nullable().default(null),
 });
 
 export type KeyRole = z.infer<typeof KeyRoleSchema>;
@@ -74,6 +80,9 @@ export const CreateKeyRequestSchema = z
     budget_window_seconds: z.number().int().positive().optional(),
     over_budget_behavior: OverBudgetBehaviorSchema.optional(),
     degrade_lane: z.string().min(1).optional(),
+    // Optional max in-flight requests at mint time. Omitted => unlimited (null);
+    // must be strictly positive (0 rejected — null already means unlimited).
+    concurrency_limit: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -104,6 +113,9 @@ export const UpdateKeyRequestSchema = z
     budget_window_seconds: z.number().int().positive().nullable().optional(),
     over_budget_behavior: OverBudgetBehaviorSchema.optional(),
     degrade_lane: z.string().min(1).nullable().optional(),
+    // Omit = leave unchanged; null = clear back to unlimited; a number must be
+    // strictly positive (0 rejected).
+    concurrency_limit: z.number().int().positive().nullable().optional(),
   })
   .strict();
 

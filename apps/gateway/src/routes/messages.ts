@@ -3,6 +3,7 @@ import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
@@ -31,6 +32,8 @@ export interface MessagesIdentity {
    *  path enforces per-key limits, mirroring the OpenAI chat middleware. */
   caps?: {
     rateLimit?: { rpm: number | null; tpm: number | null };
+    /** Per-key max in-flight requests (issue #93). null/absent = unlimited. */
+    concurrencyLimit?: number | null;
     /** Per-key usage budgets (docs/06), read by the pipeline's budget gate/settle.
      *  Absent = no budgets on this face. */
     budget?: BudgetCaps;
@@ -82,6 +85,10 @@ export interface MessagesRateLimiterPort {
 
 export interface MessagesRouteDeps {
   rateLimiter?: MessagesRateLimiterPort;
+  /** Per-key concurrency overflow queue (issue #93). The SAME process-wide gate
+   *  the chat middleware uses, so a key's in-flight count spans every surface.
+   *  Optional — omitted = no gating (the gate also no-ops while disabled). */
+  concurrencyGate?: ConcurrencyGatePort;
   auth: {
     /** Resolve the request credential to an identity, or null when invalid.
      *  Mandatory auth: a null result short-circuits to a 401 (no anonymous
@@ -143,6 +150,10 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     return c.json(out.body as Record<string, unknown>, out.status as ContentfulStatusCode);
   };
 
+  // Frees an unclaimed concurrency lease on every exit path (the handler below
+  // acquires AFTER its self-auth, so the slot cannot be taken by middleware).
+  app.use("/v1/messages", concurrencyReleaseGuard());
+
   app.post("/v1/messages", async (c) => {
     const traceId = c.get("trace_id");
 
@@ -188,6 +199,31 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           });
         }
       }
+    }
+
+    // 1c) Concurrency overflow queue (issue #93) AFTER rate-limit: a queued
+    //     request WAITS for a slot instead of an instant 429; queue-full / wait
+    //     timeout → 429 in the Anthropic envelope. The release is parked on the
+    //     context so concurrencyReleaseGuard frees it on every non-stream exit
+    //     path; the stream branch claims it and releases at true stream end.
+    if (deps.concurrencyGate !== undefined) {
+      const acquired = await deps.concurrencyGate.acquire({
+        keyId: identity.keyId,
+        limit: identity.caps?.concurrencyLimit ?? null,
+        signal: c.req.raw.signal,
+      });
+      if (!acquired.ok) {
+        c.header("retry-after", String(acquired.retryAfterSeconds));
+        return sendError(c, {
+          error_class: "rate_limited",
+          message:
+            acquired.reason === "queue_full"
+              ? "concurrency queue is full"
+              : "timed out waiting for a concurrency slot",
+          trace_id: traceId,
+        });
+      }
+      c.set("concurrencyRelease", acquired.release);
     }
 
     // 2) Protocol Adapter (inbound): native Anthropic → IR, then stamp trace_id
@@ -264,6 +300,11 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
 
     // 4) Protocol Adapter (outbound): stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
+      // Claim the concurrency lease (issue #93): the guard middleware fires as
+      // soon as this Response is returned, but the slot must stay held until
+      // the stream body fully drains — release in the stream's own finally.
+      const releaseConcurrency = c.get("concurrencyRelease");
+      c.set("concurrencyRelease", undefined);
       return streamSSE(c, async (sse) => {
         // Every IR event is mapped by the transformer's explicit state machine;
         // we NEVER forward a raw upstream chunk (CLAUDE.md principle 8). The
@@ -286,6 +327,8 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             const out = anthropic.transformErrorOut(re);
             await sse.writeSSE({ event: "error", data: JSON.stringify(out.body) });
           }
+        } finally {
+          releaseConcurrency?.();
         }
       });
     }

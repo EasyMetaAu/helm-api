@@ -41,6 +41,28 @@ export const RuntimeSettingsSchema = z.object({
   rate_limit_default_tpm: z.number().int().nonnegative().default(0),
   // Structured-log verbosity floor. Applied live via logger.setLevel().
   log_level: LogLevelSchema.default("info"),
+  // ——— Per-API-key concurrency overflow queue (docs issue #93, feature A) ———
+  // When ON and a key has a concurrency_limit, requests beyond the limit WAIT in
+  // a FIFO queue instead of an immediate 429. Default OFF: without it the limit
+  // is simply not enforced (keys with no limit are never touched either way).
+  concurrency_queue_enabled: z.boolean().default(false),
+  // Fixed minimum queue capacity per key (固定最小排队数).
+  concurrency_queue_min_size: z.number().int().min(1).max(100).default(5),
+  // Queue capacity multiplier (排队数倍数): effective max queue =
+  // MAX(floor(multiplier × concurrency_limit), min_size); 0 = use min_size only.
+  concurrency_queue_size_multiplier: z.number().nonnegative().default(0),
+  // How long a queued request may wait for a slot before a 429 (排队超时).
+  concurrency_queue_wait_timeout_ms: z.number().int().min(5_000).max(300_000).default(10_000),
+  // ——— Per-OAuth-account user-message serial queue (issue #93, feature B) ———
+  // When ON, requests whose LAST message is a genuine user turn are serialized
+  // per upstream OAuth account with a minimum delay between completions, to
+  // avoid tripping upstream subscription rate limits. Tool-result round-trips
+  // and assistant continuations are never queued.
+  user_message_queue_enabled: z.boolean().default(false),
+  // Minimum gap between the previous request's COMPLETION and the next send (请求间隔).
+  user_message_queue_delay_ms: z.number().int().min(0).max(10_000).default(200),
+  // How long a request may wait for its turn before a 503 (队列超时).
+  user_message_queue_wait_timeout_ms: z.number().int().min(1_000).max(300_000).default(5_000),
 });
 
 export type LogLevel = z.infer<typeof LogLevelSchema>;

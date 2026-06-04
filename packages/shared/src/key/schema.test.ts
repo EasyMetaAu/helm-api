@@ -121,6 +121,28 @@ describe("ApiKeyRecordSchema", () => {
     ).toBe(false);
   });
 
+  it("defaults concurrency_limit to null = unlimited (legacy rows / additive field)", () => {
+    const parsed = ApiKeyRecordSchema.parse(fullKey());
+    expect(parsed.concurrency_limit).toBeNull();
+  });
+
+  it("accepts a strictly positive concurrency_limit; rejects 0 / negative / non-int", () => {
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), concurrency_limit: 1 }).success).toBe(true);
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), concurrency_limit: null }).success).toBe(
+      true,
+    );
+    // 0 is NOT a sentinel here — null already means unlimited (mirrors budgets).
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), concurrency_limit: 0 }).success).toBe(
+      false,
+    );
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), concurrency_limit: -1 }).success).toBe(
+      false,
+    );
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), concurrency_limit: 1.5 }).success).toBe(
+      false,
+    );
+  });
+
   it("rejects a 0 budget cap (0 is NOT 'unlimited' — null means no cap)", () => {
     expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_requests: 0 }).success).toBe(false);
     expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_tokens: 0 }).success).toBe(false);
@@ -168,6 +190,15 @@ describe("CreateKeyRequestSchema", () => {
       degrade_lane: "economy",
     });
     expect(res.success).toBe(true);
+  });
+
+  it("accepts an optional concurrency_limit at mint; rejects 0 / negative", () => {
+    expect(
+      CreateKeyRequestSchema.safeParse({ role: "user", concurrency_limit: 4 }).success,
+    ).toBe(true);
+    expect(CreateKeyRequestSchema.safeParse({ role: "user" }).success).toBe(true);
+    expect(CreateKeyRequestSchema.safeParse({ concurrency_limit: 0 }).success).toBe(false);
+    expect(CreateKeyRequestSchema.safeParse({ concurrency_limit: -2 }).success).toBe(false);
   });
 
   it("rejects invalid budget values on create (fail-closed; 0 rejected)", () => {
@@ -230,5 +261,12 @@ describe("UpdateKeyRequestSchema", () => {
   it("rejects invalid budget edits (fail-closed)", () => {
     expect(UpdateKeyRequestSchema.safeParse({ budget_tokens: -1 }).success).toBe(false);
     expect(UpdateKeyRequestSchema.safeParse({ over_budget_behavior: "halt" }).success).toBe(false);
+  });
+
+  it("accepts concurrency_limit edits: number (set), null (clear to unlimited)", () => {
+    expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: 8 }).success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: null }).success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: 0 }).success).toBe(false);
+    expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: 2.5 }).success).toBe(false);
   });
 });

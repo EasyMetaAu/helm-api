@@ -31,6 +31,9 @@ export const apiKeys = sqliteTable("api_keys", {
   budgetWindowSeconds: integer("budget_window_seconds"),
   overBudgetBehavior: text("over_budget_behavior").notNull().default("degrade"),
   degradeLane: text("degrade_lane"),
+  // Max in-flight requests for this key (issue #93). NULL = unlimited (0 is not
+  // a sentinel — mirrors the budget convention, not the rate-limit one).
+  concurrencyLimit: integer("concurrency_limit"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 

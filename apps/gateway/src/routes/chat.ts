@@ -482,6 +482,11 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       // whether the buffered body is PERSISTED, not whether it is collected.
       const captureOn = captureEnabled(deps);
       const captured: string[] = [];
+      // Concurrency slot handoff (issue #93, feature A): streamSSE returns its
+      // Response BEFORE the stream body finishes, so claim the lease from the
+      // middleware and release it in the stream's OWN finally — the slot stays
+      // held until the bytes are fully drained (or the client disconnects).
+      const releaseConcurrency = c.get("concurrencyClaim")?.();
       return streamSSE(c, async (sse) => {
         try {
           for await (const chunk of stream) {
@@ -501,6 +506,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             await sse.write(`data: ${JSON.stringify({ error: errBody })}\n\n`);
           }
         } finally {
+          // Free the concurrency slot FIRST — the bytes are done; the
+          // persist/settle bookkeeping below must not extend the hold.
+          releaseConcurrency?.();
           // Streamed completion-cost backfill (#6): parse the trailing usage and
           // price it at the served alias. Fail-open — leave cost null on any miss.
           const rawSse = captured.join("");

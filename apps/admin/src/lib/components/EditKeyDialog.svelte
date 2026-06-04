@@ -40,6 +40,8 @@
   let budgetWindowInput = $state<number | null>(untrack(() => key.budget_window_seconds));
   let overBudgetBehavior = $state<'degrade' | 'reject'>(untrack(() => key.over_budget_behavior));
   let degradeLaneInput = $state<string>(untrack(() => key.degrade_lane ?? ''));
+  // Max in-flight requests (issue #93). null = unlimited; clears the limit.
+  let concurrencyLimitInput = $state<number | null>(untrack(() => key.concurrency_limit));
 
   let error = $state<string | null>(null);
   let saving = $state<boolean>(false);
@@ -68,6 +70,7 @@
       budget_window_seconds: budgetWindowInput ?? null,
       over_budget_behavior: overBudgetBehavior,
       degrade_lane: degradeLaneInput.length > 0 ? degradeLaneInput : null,
+      concurrency_limit: concurrencyLimitInput ?? null,
     };
     try {
       await updateKey(key.key_id, patch);
@@ -84,6 +87,7 @@
         budget_window_seconds: patch.budget_window_seconds ?? null,
         over_budget_behavior: overBudgetBehavior,
         degrade_lane: degradeLaneInput.length > 0 ? degradeLaneInput : null,
+        concurrency_limit: patch.concurrency_limit ?? null,
       });
       onclose();
     } catch (e) {
@@ -180,6 +184,24 @@
         'Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.',
       )}</span
     >
+
+    <label class="flex flex-col gap-1 text-sm">
+      <span class="field-label">{$t('Max concurrent requests')}</span>
+      <input
+        type="number"
+        min="1"
+        step="1"
+        aria-label={$t('Max concurrent requests')}
+        placeholder={$t('Unlimited')}
+        class="select"
+        bind:value={concurrencyLimitInput}
+      />
+      <span class="field-help"
+        >{$t(
+          'Cap how many requests this key may run at once. Extra requests queue when request queueing is enabled in System Settings. Leave blank for unlimited.',
+        )}</span
+      >
+    </label>
 
     <fieldset class="flex flex-col gap-1 text-sm">
       <legend class="field-label">{$t('Usage budgets')}</legend>
