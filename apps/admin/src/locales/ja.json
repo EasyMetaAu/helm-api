@@ -301,6 +301,8 @@
   "Recent requests": "最近のリクエスト",
   "Record full request and response bodies": "完全なリクエスト本文とレスポンス本文を記録する",
   "redacted": "編集済み",
+  "Refresh": "更新",
+  "Refreshing…": "更新中…",
   "reject": "拒否",
   "Reject (429)": "拒否（429）",
   "remove": "削除",

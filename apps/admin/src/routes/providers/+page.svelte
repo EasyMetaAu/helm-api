@@ -34,6 +34,7 @@
   } = $props();
 
   let error = $state<string | null>(untrack(() => data.loadError ?? null));
+  let refreshing = $state<boolean>(false);
   let showConnect = $state<boolean>(false);
   let managing = $state<{ providerId: string; providerName: string; account: string } | null>(null);
   let confirming = $state<{ providerId: string; account: string } | null>(null);
@@ -133,6 +134,22 @@
     void invalidateAll();
   }
 
+  // Manual refresh: re-run the page load (status + today's usage + quota windows in
+  // parallel). Usage counters are read live; the Anthropic quota PULL stays behind
+  // the gateway's 5-min debounce (the upstream endpoint rate-limits aggressively),
+  // so within that window the bars re-render from the cached snapshot. The load
+  // itself never throws (fail-open) — `loadError` carries the only failure signal.
+  async function refresh(): Promise<void> {
+    refreshing = true;
+    error = null;
+    try {
+      await invalidateAll();
+      error = data.loadError ?? null;
+    } finally {
+      refreshing = false;
+    }
+  }
+
   function onManaged(): void {
     managing = null;
     void invalidateAll();
@@ -207,12 +224,17 @@
         )}
       </p>
     </div>
-    <button
-      type="button"
-      class="btn-primary shrink-0"
-      disabled={!data.configured}
-      onclick={() => (showConnect = true)}>{$t('Connect')}</button
-    >
+    <div class="flex shrink-0 gap-2">
+      <button type="button" class="btn-secondary" disabled={refreshing} onclick={refresh}
+        >{refreshing ? $t('Refreshing…') : $t('Refresh')}</button
+      >
+      <button
+        type="button"
+        class="btn-primary"
+        disabled={!data.configured}
+        onclick={() => (showConnect = true)}>{$t('Connect')}</button
+      >
+    </div>
   </header>
 
   {#if error}
