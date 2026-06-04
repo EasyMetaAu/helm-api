@@ -168,6 +168,7 @@ export {
 // routing/lane state.
 export {
   assembleInjectedContext,
+  enqueueObserverWriteback,
   type InjectDeps,
   type InjectInput,
   type InjectResult,

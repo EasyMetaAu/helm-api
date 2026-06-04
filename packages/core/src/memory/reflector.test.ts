@@ -253,3 +253,71 @@ describe("runReflectorJob", () => {
     expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
   });
 });
+
+// The reflection TARGET scope must be one inject actually READS BACK. inject loads
+// reflections as getReflection({accountId, projectId}) / ({accountId, resourceId})
+// — exact matches where absent levels are NULL — so a reflection written with the
+// observer job's full scope (threadId included) would be permanently invisible.
+// The job scope stays the OBSERVATION SOURCE (thread-anchored); the reflection is
+// written at the highest readable level: project > resource > thread (legacy).
+describe("runReflectorJob — reflection target scope (readable by inject)", () => {
+  it("writes the reflection at the PROJECT level when the job scope carries a thread anchor", async () => {
+    const { store, upserts } = makeFakeStore(makeObservations(["obs A"]));
+    const deps = makeDeps(store);
+    const job: ReflectorJob = {
+      jobId: "job-p",
+      scope: { accountId: "acct-a", projectId: "proj-1", threadId: "thread-1" },
+    };
+
+    const out = await runReflectorJob(job, deps);
+
+    expect(out.changed).toBe(true);
+    // The observation SOURCE keeps the thread anchor…
+    expect(store.listObservations).toHaveBeenCalledWith(job.scope);
+    // …but the reflection slot is read+written at the project level — the exact
+    // scope the next inject's getReflection({accountId, projectId}) reads back.
+    expect(store.getReflection).toHaveBeenCalledWith({ accountId: "acct-a", projectId: "proj-1" });
+    expect(upserts[0]).toMatchObject({ accountId: "acct-a", projectId: "proj-1" });
+    expect(upserts[0]?.threadId).toBeUndefined();
+    expect(upserts[0]?.resourceId).toBeUndefined();
+  });
+
+  it("writes the reflection at the RESOURCE level when the scope has a resource but no project", async () => {
+    const { store, upserts } = makeFakeStore(makeObservations(["obs A"]));
+    const deps = makeDeps(store);
+    const job: ReflectorJob = {
+      jobId: "job-r",
+      scope: { accountId: "acct-a", resourceId: "res-1", threadId: "thread-1" },
+    };
+
+    const out = await runReflectorJob(job, deps);
+
+    expect(out.changed).toBe(true);
+    expect(store.getReflection).toHaveBeenCalledWith({ accountId: "acct-a", resourceId: "res-1" });
+    expect(upserts[0]).toMatchObject({ accountId: "acct-a", resourceId: "res-1" });
+    expect(upserts[0]?.threadId).toBeUndefined();
+    expect(upserts[0]?.projectId).toBeUndefined();
+  });
+
+  it("lands at the PROJECT level (highest) when both project and resource are present", async () => {
+    const { store, upserts } = makeFakeStore(makeObservations(["obs A"]));
+    const deps = makeDeps(store);
+    const job: ReflectorJob = {
+      jobId: "job-pr",
+      scope: {
+        accountId: "acct-a",
+        projectId: "proj-1",
+        resourceId: "res-1",
+        threadId: "thread-1",
+      },
+    };
+
+    const out = await runReflectorJob(job, deps);
+
+    expect(out.changed).toBe(true);
+    expect(store.getReflection).toHaveBeenCalledWith({ accountId: "acct-a", projectId: "proj-1" });
+    expect(upserts[0]).toMatchObject({ accountId: "acct-a", projectId: "proj-1" });
+    expect(upserts[0]?.resourceId).toBeUndefined();
+    expect(upserts[0]?.threadId).toBeUndefined();
+  });
+});

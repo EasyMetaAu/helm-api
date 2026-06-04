@@ -45,6 +45,25 @@ export interface ReflectorResult {
   changed: boolean;
 }
 
+// The reflection TARGET is the highest scope level inject actually READS BACK.
+// inject loads reflections as getReflection({accountId, projectId}) and
+// ({accountId, resourceId}) — EXACT matches where absent levels are NULL (the
+// docs/08 assembly order has only those two reflection slots). The job scope is
+// the OBSERVATION SOURCE (thread-anchored, may carry all three levels): writing
+// it verbatim would pin the reflection to the thread and make it permanently
+// invisible to the next inject. project > resource; a scope with neither keeps
+// the legacy thread-level target (direct callers only — the worker no longer
+// promotes thread-only scopes).
+function reflectionTargetScope(scope: ReflectionScope): ReflectionScope {
+  if (scope.projectId !== undefined) {
+    return { accountId: scope.accountId, projectId: scope.projectId };
+  }
+  if (scope.resourceId !== undefined) {
+    return { accountId: scope.accountId, resourceId: scope.resourceId };
+  }
+  return scope;
+}
+
 // Take a scope's active observations + the current reflection, merge them, and —
 // ONLY when the merged text actually changed — write a version+1 reflection. If
 // the text is identical the version is NOT bumped and no row is written, keeping
@@ -57,8 +76,11 @@ export async function runReflectorJob(
   deps: ReflectorDeps,
 ): Promise<ReflectorResult> {
   try {
+    // Observations come from the SOURCE scope (thread-anchored); the reflection is
+    // read + written at the TARGET level the next inject hydrates from.
+    const target = reflectionTargetScope(job.scope);
     const observations = await deps.memoryStore.listObservations(job.scope);
-    const previousReflection = await deps.memoryStore.getReflection(job.scope);
+    const previousReflection = await deps.memoryStore.getReflection(target);
 
     if (observations.length === 0) {
       // Idempotent / nothing to merge — never write an empty reflection.
@@ -100,7 +122,7 @@ export async function runReflectorJob(
 
     const nextVersion = (previousReflection?.version ?? 0) + 1;
     const reflectionId = await deps.memoryStore.upsertReflection({
-      ...job.scope,
+      ...target,
       reflectionText,
       version: nextVersion,
       tokenEstimate,
@@ -110,6 +132,7 @@ export async function runReflectorJob(
     await deps.memoryStore.updateJobStatus(job.jobId, "done");
     deps.log("memory.reflector.merged", {
       scope: job.scope,
+      target_scope: target,
       reflection_id: reflectionId,
       version: nextVersion,
       observation_count: observations.length,

@@ -25,6 +25,10 @@ function makeDeps(
         degraded: false,
       },
     })),
+    enqueueObserver: vi.fn(async () => ({
+      observerJobId: "job-wb",
+      status: "queued" as const,
+    })),
     now: () => new Date("2026-06-01T00:00:00.000Z"),
     tokenBudget: 4000,
     log: vi.fn(),
@@ -189,5 +193,45 @@ describe("injectIntoIR", () => {
       { role: "assistant", content: "prior reply" },
       { role: "user", content: "hi" },
     ]);
+  });
+
+  it("non-plain-text turn: keeps the messages, skips assembly, but STILL enqueues the write-back", async () => {
+    // D7 says full-replace is unsafe for tool/multipart turns — but the observer
+    // write-back must not be lost with it, or tool-heavy threads never compress.
+    const deps = makeDeps(ASSEMBLED);
+    const original: IRMessage[] = [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: "{}" } }],
+      },
+      { role: "tool", content: "out", tool_call_id: "c1" },
+    ];
+    const scope = { accountId: "acct-a", threadId: "t1" };
+
+    const result = await injectIntoIR(original, "sys", scope, deps);
+
+    expect(result.messages).toBe(original);
+    expect(result.metadata).toBeNull();
+    expect(deps.assemble).not.toHaveBeenCalled();
+    expect(deps.enqueueObserver).toHaveBeenCalledWith(scope);
+  });
+
+  it("non-plain-text turn: a throwing write-back enqueue is still fail-open", async () => {
+    const enqueueObserver = vi.fn(async () => {
+      throw new Error("queue down");
+    });
+    const deps = makeDeps(ASSEMBLED, { enqueueObserver });
+    const original: IRMessage[] = [{ role: "tool", content: "out", tool_call_id: "c1" }];
+
+    const result = await injectIntoIR(
+      original,
+      "sys",
+      { accountId: "acct-a", threadId: "t1" },
+      deps,
+    );
+
+    expect(result.messages).toBe(original);
+    expect(result.metadata).toBeNull();
   });
 });

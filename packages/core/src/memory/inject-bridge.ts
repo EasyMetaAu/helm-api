@@ -36,6 +36,12 @@ export interface InjectBridgeDeps {
   // Bound assembler: assembleInjectedContext with its store/cost/log deps closed
   // over in the composition root. The bridge only supplies the per-request input.
   assemble: (input: InjectInput) => Promise<InjectResult>;
+  // Bound write-back enqueue (enqueueObserverWriteback with its deps closed over).
+  // Called DIRECTLY when the D7 gate skips assembly — a tool/multipart turn must
+  // still enqueue its observer job or tool-heavy threads never compress.
+  enqueueObserver: (
+    scope: InjectInput["scope"],
+  ) => Promise<{ observerJobId: string | null; status: "queued" | "skipped" | "failed" }>;
   // Upper bound for injected memory tokens (D9). System + current are excluded.
   tokenBudget: number;
   now: () => Date;
@@ -64,9 +70,13 @@ function assembledToIR(m: AssembledMessage): IRMessage {
   return { role: m.role, content: m.content };
 }
 
-// Run the inject phase for a plain-text turn and return the assembled IR prefix.
-// FAIL-OPEN: any throw returns the original messages + null metadata so the caller
-// routes WITHOUT memory — inject never 5xx's and never alters routing (principle 3).
+// Run the inject phase and return the assembled IR prefix. The bridge OWNS the
+// D7 gate: a non-plain-text turn keeps its original messages (replacement would
+// drop tool calls / structured content) but STILL enqueues the observer
+// write-back so the thread keeps compressing — the gate guards the replace, not
+// the write-back. FAIL-OPEN: any throw returns the original messages + null
+// metadata so the caller routes WITHOUT memory — inject never 5xx's and never
+// alters routing (principle 3).
 export async function injectIntoIR(
   messages: IRMessage[],
   systemPrompt: string,
@@ -74,6 +84,16 @@ export async function injectIntoIR(
   deps: InjectBridgeDeps,
 ): Promise<InjectBridgeResult> {
   try {
+    if (!isPlainTextTurn(messages)) {
+      const writeback = await deps.enqueueObserver(scope);
+      deps.log("memory.inject.skipped_non_plain_text", {
+        scope,
+        writeback_status: writeback.status,
+        observer_job_id: writeback.observerJobId,
+      });
+      return { messages, metadata: null };
+    }
+
     const last = messages[messages.length - 1];
     const content = typeof last?.content === "string" ? last.content : "";
     const role: RawMessage["role"] =

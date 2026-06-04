@@ -73,19 +73,24 @@ function currentMessage(current: RawMessage): AssembledMessage {
 // When there is no writeback TARGET (no threadId — observations/messages are
 // thread-anchored, so nothing can be written back), we do NOT enqueue and report
 // "skipped" — distinct from a "failed" enqueue.
-async function enqueueWriteback(
-  input: InjectInput,
-  deps: InjectDeps,
+//
+// EXPORTED separately from assembleInjectedContext: the D7 plain-text gate skips
+// the whole assembly for tool/multipart turns, but the write-back must still fire
+// for them (or tool-heavy threads would never compress) — the bridge calls this
+// directly on that path.
+export async function enqueueObserverWriteback(
+  scope: InjectInput["scope"],
+  deps: Pick<InjectDeps, "enqueueObserverJob" | "log">,
 ): Promise<{ observerJobId: string | null; status: "queued" | "skipped" | "failed" }> {
-  if (input.scope.threadId === undefined) {
+  if (scope.threadId === undefined) {
     return { observerJobId: null, status: "skipped" };
   }
   try {
-    const observerJobId = await deps.enqueueObserverJob(input.scope);
+    const observerJobId = await deps.enqueueObserverJob(scope);
     return { observerJobId, status: "queued" };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    deps.log("memory.inject.writeback_enqueue_failed", { scope: input.scope, error: message });
+    deps.log("memory.inject.writeback_enqueue_failed", { scope, error: message });
     return { observerJobId: null, status: "failed" };
   }
 }
@@ -153,7 +158,7 @@ export async function assembleInjectedContext(
     deps.log("memory.inject.load_failed", { scope: input.scope, error: message });
     // Still attempt write-back enqueue so the originals get compressed later;
     // if that also fails it stays best-effort (never throws).
-    const writeback = await enqueueWriteback(input, deps);
+    const writeback = await enqueueObserverWriteback(input.scope, deps);
     return {
       messages: [systemMessage(input.systemPrompt), currentMessage(input.currentUserMessage)],
       metadata: {
@@ -304,7 +309,7 @@ export async function assembleInjectedContext(
 
   // Enqueue write-back (Observer stays background — we only enqueue, never await
   // compression). A queue failure is best-effort and never fails the request.
-  const writeback = await enqueueWriteback(input, deps);
+  const writeback = await enqueueObserverWriteback(input.scope, deps);
 
   const memoryHydrated = injectedLayers.length > 0;
   deps.log("memory.inject.assembled", {

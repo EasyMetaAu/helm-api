@@ -142,6 +142,64 @@ describe("startMemoryWorker", () => {
     expect(enqueued).toEqual([]);
   });
 
+  it("does NOT promote a reflector for a thread-only scope (no readable reflection slot)", async () => {
+    // inject only reads project/resource reflection slots (docs/08 assembly order)
+    // — a thread-only reflection would be dead data + wasted merge tokens.
+    const { store, enqueued } = makeStore([
+      { jobId: "j1", type: "observer", scope: { accountId: "acct-a", threadId: "t1" } },
+    ]);
+    const handle = startMemoryWorker(makeDeps(store));
+
+    await vi.advanceTimersByTimeAsync(1000);
+    handle.stop();
+
+    expect(enqueued).toEqual([]);
+  });
+
+  it("marks a claimed job failed when its runner throws (never a permanent running row)", async () => {
+    // claimPendingJobs already flipped the row to running, and enqueueJob dedupes
+    // against pending AND running rows — a swallowed throw must close the row or
+    // the scope is blocked forever.
+    const { store, jobUpdates } = makeStore([
+      { jobId: "j1", type: "observer", scope: { accountId: "acct-a", threadId: "t1" } },
+    ]);
+    const runObserver = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    const handle = startMemoryWorker(makeDeps(store, { runObserver }));
+
+    await vi.advanceTimersByTimeAsync(1000);
+    handle.stop();
+
+    expect(jobUpdates).toContainEqual({ jobId: "j1", status: "failed" });
+  });
+
+  it("a failing reflector promotion does not overwrite the observer job's own status", async () => {
+    // The observer runner records its own done/failed; a throw from the PROMOTION
+    // enqueue must be logged, not converted into a failed observer job.
+    const { store, jobUpdates } = makeStore([
+      {
+        jobId: "j1",
+        type: "observer",
+        scope: { accountId: "acct-a", projectId: "p1", threadId: "t1" },
+      },
+    ]);
+    (store.enqueueJob as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      throw new Error("queue down");
+    });
+    const log = vi.fn();
+    const handle = startMemoryWorker(makeDeps(store, { log }));
+
+    await vi.advanceTimersByTimeAsync(1000);
+    handle.stop();
+
+    expect(jobUpdates).not.toContainEqual({ jobId: "j1", status: "failed" });
+    expect(log).toHaveBeenCalledWith(
+      "memory.worker.promote_failed",
+      expect.objectContaining({ job_id: "j1" }),
+    );
+  });
+
   it("swallows a throwing job and keeps the timer firing (fail-open)", async () => {
     const { store } = makeStore([
       { jobId: "j1", type: "observer", scope: { accountId: "acct-a", threadId: "t1" } },

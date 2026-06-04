@@ -50,11 +50,28 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
     });
     // D5: only promote a reflector when the observer actually wrote a new
     // observation — a noop observer leaves the reflection untouched. The reflector
-    // job inherits the observer's FULL scope so reflection can land at the highest
-    // available level (project/resource/thread); enqueueJob dedupes a pending
+    // job inherits the observer's FULL scope: the thread anchor is its observation
+    // SOURCE, while runReflectorJob writes the reflection at the highest READABLE
+    // level (project > resource — the only slots inject hydrates from, docs/08).
+    // A thread-only scope has no readable slot, so promoting it would burn merge
+    // tokens on a reflection nothing reads — skip. enqueueJob dedupes a pending
     // reflector for the same scope (D6), so a flood collapses to one row.
-    if (result.observationId !== null) {
-      await deps.memoryStore.enqueueJob({ type: "reflector", scope: job.scope });
+    if (
+      result.observationId !== null &&
+      (job.scope.projectId !== undefined || job.scope.resourceId !== undefined)
+    ) {
+      try {
+        await deps.memoryStore.enqueueJob({ type: "reflector", scope: job.scope });
+      } catch (err) {
+        // The observer itself succeeded (its runner recorded done) — a promotion
+        // failure must not be converted into a failed observer job. The next
+        // observer write for this scope re-promotes, so nothing is lost for good.
+        deps.log("memory.worker.promote_failed", {
+          job_id: job.jobId,
+          scope: job.scope,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     return;
   }
@@ -67,16 +84,29 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
     const jobs = await deps.memoryStore.claimPendingJobs(deps.batchSize);
     for (const job of jobs) {
       // Per-job guard: a single failing job must not abort the rest of the batch
-      // nor stop the timer (principle 3). The job's own runner records failure on
-      // the row; this catch is the belt-and-braces around promotion/enqueue too.
+      // nor stop the timer (principle 3). The runners record their own outcome on
+      // the row; this catch is the belt-and-braces around everything else.
       try {
         await processJob(job, deps);
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
         deps.log("memory.worker.job_failed", {
           job_id: job.jobId,
           type: job.type,
-          error: err instanceof Error ? err.message : String(err),
+          error: message,
         });
+        // claimPendingJobs already flipped this row to `running`, and enqueueJob
+        // dedupes against pending AND running rows — swallowing the throw without
+        // closing the row would block this scope's queue FOREVER. Best-effort:
+        // even the failure bookkeeping must never escape the tick.
+        try {
+          await deps.memoryStore.updateJobStatus(job.jobId, "failed", message);
+        } catch (updateErr) {
+          deps.log("memory.worker.job_update_failed", {
+            job_id: job.jobId,
+            error: updateErr instanceof Error ? updateErr.message : String(updateErr),
+          });
+        }
       }
     }
   };

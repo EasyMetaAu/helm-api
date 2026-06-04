@@ -396,11 +396,12 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
     db.$sqlite.close();
   });
 
-  it("skips replacement for a tool-call request (tool calls preserved)", async () => {
+  it("skips replacement for a tool-call request (tool calls preserved, write-back still enqueued)", async () => {
     const { store } = makeFakeStore({ reflection: { project: "R" }, observations: ["O"] });
+    const enqueueObserverJob = vi.fn(async () => "job-tool");
     const { deps, seen } = captureRouteDeps({
       body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
-      memory: { observe: observeDeps(store), inject: injectWiring(store) },
+      memory: { observe: observeDeps(store), inject: injectWiring(store, { enqueueObserverJob }) },
     });
     const app = buildApp(deps);
 
@@ -428,5 +429,8 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
     // The tool_calls survived — inject did NOT replace the messages.
     expect(msgs.some((m) => Array.isArray(m.tool_calls) && m.tool_calls.length > 0)).toBe(true);
     expect(msgs.some((m) => m.role === "tool")).toBe(true);
+    // But the observer WRITE-BACK still fired — tool-heavy threads must keep
+    // compressing even though replacement is unsafe (D7 gates only the replace).
+    expect(enqueueObserverJob).toHaveBeenCalledTimes(1);
   });
 });

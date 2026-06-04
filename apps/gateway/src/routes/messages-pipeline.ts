@@ -7,13 +7,13 @@ import {
   convertOpenAIStreamToAnthropic,
   convertOpenAIStreamToResponses,
   type ExecutionResult,
+  enqueueObserverWriteback,
   geminiTransformer,
   type InjectDeps,
   type IRChunk,
   type IRMessage,
   type IRResponse,
   injectIntoIR,
-  isPlainTextTurn,
   type MemoryScope,
   type ObserveDeps,
   observeInbound,
@@ -365,12 +365,10 @@ export function createMessagesPipeline(
       // Anthropic inbound transformer HOISTS the top-level `system` into a leading
       // IR system message (ir.messages[0]), so the system prompt is read from there
       // for BOTH the /v1/messages and /v1/responses surfaces (D8-bis) — never lost.
-      // Gated on a plain-text turn (D7); fully fail-open (never 5xx, never reroute).
-      if (
-        memory?.inject !== undefined &&
-        memoryScope.mode === "inject" &&
-        isPlainTextTurn(internal.messages as IRMessage[])
-      ) {
+      // The BRIDGE owns the D7 plain-text gate (tool/multipart turns keep their
+      // messages but still enqueue write-back); fully fail-open (never 5xx, never
+      // reroute).
+      if (memory?.inject !== undefined && memoryScope.mode === "inject") {
         const wiring = memory.inject;
         const leadingSystem = (internal.messages as IRMessage[])[0];
         const systemPrompt =
@@ -390,6 +388,7 @@ export function createMessagesPipeline(
           },
           {
             assemble: (input) => assembleInjectedContext(input, wiring.deps),
+            enqueueObserver: (scope) => enqueueObserverWriteback(scope, wiring.deps),
             tokenBudget: wiring.tokenBudget,
             now: wiring.deps.now,
             log: wiring.deps.log,

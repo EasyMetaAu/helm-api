@@ -14,6 +14,18 @@
 - **取舍**：不改 core `buildModelsList` 契约——合并发生在 gateway 组合根，core 仍是纯函数只认一份 `providerAliases`（principle 1）。订阅别名同属「concrete alias」，因此与 provider 别名一样**只对 `allow_custom_model` key 可见**，默认 key 仍只见 lane（principle 6）。
 - **已知限制（TODO）**：订阅别名（如 `openai-codex/gpt-5.4`，前缀是 `ROUTABLE_OAUTH` 的 key，可能带连字符）通常不在 runtime catalog 里，故列出时**不带 capabilities/pricing**——诚实且不阻塞「能被发现」。若要补全，需用去前缀的 base model 在 catalog 里回查，留待后续。
 
+---
+
+## 2026-06-04 · Memory 后台环路三处修复（docs/08 Phase 2；#41 评审跟进）
+
+Codex review 在 #41 rebase 后发现三个问题，全部修复（TDD，新增 10 个测试含一个真 sqlite 的端到端环路测试 `memory-loop.test.ts`）：
+
+1. **（高）reflection 写入 scope 与 inject 读取 scope 不匹配**：reflector 原样使用 observer job 的完整 scope（含 threadId）upsert，而 inject 只按 `{accountId, projectId}` / `{accountId, resourceId}` 精确读取（缺失层级必须 NULL）——worker 写出的 reflection 永远读不回。修复：job scope 仅作为**观察来源**（thread 锚点），reflection 的**写入目标**取最高可读层级（project > resource；见 `reflectionTargetScope`）。**取舍**：project+resource 同时存在时只写 project 层（最高层），resource 槽位留给 resource-only scope——避免双倍 merge 成本；thread-only scope 没有可读槽位，worker 不再晋升 reflector（省 token，不写死数据）。
+2. **（中）runner 抛错的已认领 job 永久卡 running**：claim 已把行置 running，而 enqueue 去重覆盖 pending+running——外层 catch 只记日志会让该 scope 的队列永久阻塞。修复：外层 catch best-effort 标记 failed；晋升 enqueue 单独 try/catch（observer 自身已 done 时晋升失败只记日志 `memory.worker.promote_failed`，不改写 observer 的状态；下次 observer 写入会重新晋升）。**遗留 TODO**：进程崩溃在 claim 与 runner 之间仍可能留下 stale running 行，需要 lease/超时重捡策略（记入后续）。
+3. **（中）非纯文本 inject 请求丢失 write-back**：D7 闸门原来在网关层挡掉整个 bridge，而 observer enqueue 在 `assembleInjectedContext` 内部——工具/多模态为主的线程永远不压缩。修复：D7 闸门移入 bridge（`injectIntoIR` 本就声明"owns the lossy-risk decisions"），非纯文本轮次保留原始消息但仍调用新导出的 `enqueueObserverWriteback`；网关两处 hook 删掉外层 `isPlainTextTurn` 条件，`InjectBridgeDeps` 新增 `enqueueObserver`。
+
+---
+
 ## 2026-06-04 · Codex 额度改为「PULL + PUSH 双源」（spec 未覆盖；issue #38 OAuth 订阅）
 
 **问题**：providers 页 Codex 账户的额度列永远显示「—」，刷新按钮无效。根因：Codex 额度此前**只有 PUSH 源**——从每次 `/responses` 响应的 `x-codex-*` 头里刮（`codex-quota.ts`），账户没流量就永远没有快照；而刷新按钮（#88）只重跑页面加载，其中的主动 PULL 只覆盖 Anthropic。参考项目 claude-relay-service 同样只刮头，**没有**主动拉取可抄。
