@@ -5,6 +5,21 @@
 
 ---
 
+## 2026-06-04 · 公开端点：落地页 + `/v1/models` + OpenAPI/Swagger 文档（spec 未覆盖；docs/06 安全、docs/04 lane）
+
+网关此前根路径 `/` 直接 404（Hono 默认 → OpenAI 错误信封），也没有任何「可用 API 一览」与可调试文档。本次在独立 worktree 补三块公开能力，均为 gateway 层薄胶水，core 不变（principle 1）：
+
+- **落地页 `GET /`（公开）**：自包含静态 HTML 状态页（无框架、无构建、零外部资源），内联脚本拉 `/healthz` + `/version` 渲染实时状态。设计走极简 status-page 风格（用户要求「简洁大气、稳重、可信」），改过一版后定稿。注册在 `createApp()`，headless 调用方不受影响。
+- **`GET /v1/models` + `/v1/models/{id}`（key-aware，需鉴权）**：与用户确认采「**key 感知**」方案以调和 principle 6（暴露 lane、不暴露模型市场）与「想看到所有可用模型」的诉求——
+  - 默认 key 只见 **lanes + `auto`**（`owned_by: "helm"`，`type: "lane"`，不带 capabilities/pricing，避免供应链/定价泄露）；
+  - `allow_custom_model=true` 的 key 额外见 `config.providers[].models[].alias` 具体别名，附 catalog 的 capabilities/pricing 与「该别名被哪些 lane 链命中」的 lane 成员关系（这些 key 本就可越过 lane 抽象点名模型，故一致而非泄露）；
+  - `allowed_lanes` 进一步收窄可见 lane 集合与成员计算——列表只反映该 key 真能用的；
+  - 纯逻辑落在 core 的 `buildModelsList`（`packages/core/src/catalog/models-list.ts`，框架无关、TDD），gateway 路由只做鉴权+序列化。`{id}` 未命中按 `invalid_request`(400) 报（结构化错误模型无 404 class）。
+  - **限制/TODO**：当前只列 `providers.yaml` 配置别名；OAuth 订阅合成别名（如 `openai-codex/gpt-5.5`）**未纳入** `/v1/models`（它们是运行时动态发现，admin 的 `/admin/api/models` 另算）——后续可选合并。
+- **OpenAPI 3.1 + Swagger UI（`GET /openapi.json` + `GET /docs`，公开）**：选 3.1 是因为它是 JSON Schema draft-2020-12 的超集，正好等于 Zod 4 `z.toJSONSchema()` 的输出，组件 schema 直接落地、零翻译（schema 即唯一真源）。现有路由是普通 Hono handler 而非 OpenAPIHono，故 **paths 手写**、只覆盖主要公开面（admin 内部端点不收录）；错误信封 `ErrorEnvelope` 手写（它是协议层线形，非 Zod 输入）。新增依赖 `@hono/swagger-ui`，并把 `zod` 提为 gateway 直接依赖。
+- **lane 链展开抽取**：`route-request.ts` 里私有的 `expandChain` 抽到 `packages/core/src/lanes/expand-chain.ts` 导出复用（路由与模型列表共用一份），行为不变，route-request/fallback 既有测试全绿。
+- **坑**：`admin-static.test.ts` 的 4 个用例依赖已构建的 admin SPA（`apps/admin/build`），全新 worktree 未 `pnpm build` 前 `scandir ENOENT` 失败——属环境前置，非本次改动；`pnpm build` 后全绿（2115/2115）。gateway 自身 tsconfig **包含** test 文件（与根 typecheck 不同），故 `*.test.ts` 也要过 `noUncheckedIndexedAccess`。
+
 ## 2026-06-04 · 显式 lane-as-model + 透传严格校验（spec docs/04 / docs/06）
 
 docs/04 路由优先级表第一行写的是 "explicit **model/lane**"，但实现里透传分支从未做 lane 展开：

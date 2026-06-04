@@ -13,7 +13,9 @@
     "@helm/core": "workspace:*",
     "@helm/shared": "workspace:*",
     "@hono/node-server": "^2.0.4",
-    "hono": "^4.12.23"
+    "@hono/swagger-ui": "^0.6.1",
+    "hono": "^4.12.23",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
