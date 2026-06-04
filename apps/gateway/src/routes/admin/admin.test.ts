@@ -207,6 +207,7 @@ function decision(traceId: string, lane: string): DecisionRecord {
     latency_total_ms: 12,
     fallback_count: 0,
     cost_breakdown: { eval_usd: null, completion_usd: 0.002, total_usd: 0.002 },
+    memory: null,
   };
 }
 

@@ -123,9 +123,12 @@ describe("startMemoryWorker", () => {
     await vi.advanceTimersByTimeAsync(1000);
     handle.stop();
 
+    // Promoted AT THE TARGET LEVEL (no thread anchor): the reflector aggregates
+    // across the project's threads, and target-level scope ids let promotions
+    // from different threads of the same project dedupe to one row (D6).
     expect(enqueued).toContainEqual({
       type: "reflector",
-      scope: { accountId: "acct-a", projectId: "p1", threadId: "t1" },
+      scope: { accountId: "acct-a", projectId: "p1" },
     });
   });
 

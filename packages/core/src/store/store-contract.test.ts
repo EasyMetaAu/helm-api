@@ -125,6 +125,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
     latency_total_ms: 1200,
     fallback_count: 0,
     cost_breakdown: { eval_usd: null, completion_usd: 0.004, total_usd: 0.004 },
+    memory: null,
     ...overrides,
   };
 }
@@ -758,6 +759,57 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(obs[0]?.sourceMessageRange).toEqual(["m1", "m2"]);
       expect(obs[0]?.tags).toEqual(["x", "y"]);
       expect(obs[0]?.observedAt).toBeInstanceOf(Date);
+    });
+
+    it("listObservations aggregates across a PROJECT's threads (reflector target scope)", async () => {
+      // The reflector merges at the project level — it must see EVERY thread of
+      // that project (same owner), never just the promoting thread, and never
+      // another project's or another account's threads.
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({ id: "t1", ownerId: "acct-a", projectId: "p1" });
+      await ctx.stores.memory.ensureThread({ id: "t2", ownerId: "acct-a", projectId: "p1" });
+      await ctx.stores.memory.ensureThread({ id: "t3", ownerId: "acct-a", projectId: "other" });
+      await ctx.stores.memory.ensureThread({ id: "t4", ownerId: "acct-b", projectId: "p1" });
+      const seed = async (threadId: string, text: string, at: number) =>
+        ctx.stores.memory.appendObservation({
+          threadId,
+          sourceMessageRange: ["m1", "m1"],
+          observationText: text,
+          observedAt: new Date(at),
+        });
+      await seed("t1", "from-t1", 1000);
+      await seed("t2", "from-t2", 2000);
+      await seed("t3", "from-other-project", 3000);
+      await seed("t4", "from-other-account", 4000);
+
+      const obs = await ctx.stores.memory.listObservations({
+        accountId: "acct-a",
+        projectId: "p1",
+      });
+      expect(obs.map((o) => o.observationText)).toEqual(["from-t1", "from-t2"]);
+    });
+
+    it("listObservations aggregates across a RESOURCE's threads the same way", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({ id: "t1", ownerId: "acct-a", resourceId: "r1" });
+      await ctx.stores.memory.ensureThread({ id: "t2", ownerId: "acct-a", resourceId: "r1" });
+      await ctx.stores.memory.ensureThread({ id: "t3", ownerId: "acct-a", resourceId: "zz" });
+      const seed = async (threadId: string, text: string, at: number) =>
+        ctx.stores.memory.appendObservation({
+          threadId,
+          sourceMessageRange: ["m1", "m1"],
+          observationText: text,
+          observedAt: new Date(at),
+        });
+      await seed("t1", "res-a", 1000);
+      await seed("t2", "res-b", 2000);
+      await seed("t3", "res-other", 3000);
+
+      const obs = await ctx.stores.memory.listObservations({
+        accountId: "acct-a",
+        resourceId: "r1",
+      });
+      expect(obs.map((o) => o.observationText)).toEqual(["res-a", "res-b"]);
     });
 
     it("upsertReflection -> getReflection returns the latest version for an exact scope", async () => {

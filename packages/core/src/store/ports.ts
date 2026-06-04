@@ -278,8 +278,11 @@ export interface MemoryStore {
   // is REQUIRED on the input (docs/08) so memory can be audited against originals.
   appendObservation(input: MemoryObservationInput): Promise<string>;
   // POST-MVP Phase 2 (Reflector). Read a scope's ACTIVE observations so the
-  // background Reflector can merge them into a stable reflection. Scope is
-  // project / resource / thread (one or more levels); never cross-project.
+  // background Reflector can merge them into a stable reflection. Two read
+  // shapes: a THREAD scope returns that thread's rows (inject/observer); a
+  // project/resource scope AGGREGATES across all the owner's threads carrying
+  // that id (the Reflector's target read — a project reflection covers the whole
+  // project). Never cross-project, never cross-account.
   listObservations(scope: ReflectionScope): Promise<Observation[]>;
   // Read the current (latest) reflection for a scope, or null if none yet. The
   // Reflector compares the freshly merged text against this to decide whether
@@ -300,11 +303,14 @@ export interface MemoryStore {
   // flood to one pending row per scope. Best-effort caller: inject treats an
   // enqueue throw as a "failed" writeback (fail-open), never a 5xx.
   enqueueJob(input: MemoryJobEnqueueInput): Promise<string>;
-  // POST-MVP Phase 2 (queue). Atomically claim up to `limit` pending jobs,
-  // flipping them pending → running in ONE statement so two workers (or two ticks)
-  // never double-process a row, and return them with scope_id DECODED back to a
-  // ReflectionScope. Empty queue → []. The worker runs each claimed job (itself
-  // fail-open) then marks it done/failed via updateJobStatus.
+  // POST-MVP Phase 2 (queue). Atomically claim up to `limit` open jobs, flipping
+  // them to running in ONE statement so two workers (or two ticks) never
+  // double-process a row, and return them with scope_id DECODED back to a
+  // ReflectionScope. Claimable = pending, PLUS running rows whose lease
+  // (updated_at) expired — crash recovery: a worker that died mid-job must not
+  // leave its scope blocked forever behind the running-row dedupe. Empty queue →
+  // []. The worker runs each claimed job (itself fail-open) then marks it
+  // done/failed via updateJobStatus.
   claimPendingJobs(limit: number): Promise<MemoryJobRow[]>;
 }
 

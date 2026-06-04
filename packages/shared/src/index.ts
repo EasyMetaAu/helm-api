@@ -143,6 +143,8 @@ export {
   FinalDecisionSchema,
   type LaneDecision,
   LaneDecisionSchema,
+  type MemoryDecision,
+  MemoryDecisionSchema,
   type PolicyDecision,
   PolicyDecisionSchema,
   type ProviderAttempt,

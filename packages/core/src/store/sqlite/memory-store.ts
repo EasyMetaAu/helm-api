@@ -44,6 +44,38 @@ function reflectionScopeWhere(scope: ReflectionScope): SQL {
   return and(...clauses) as SQL;
 }
 
+// How long a claimed (`running`) job stays exclusively leased. After this window
+// claimPendingJobs treats it as abandoned (worker crash between claim and finish)
+// and re-claims it — without this, the enqueue dedupe against running rows would
+// block the scope's queue FOREVER. 5 min is far beyond any real tick's work.
+const RUNNING_LEASE_MS = 5 * 60_000;
+
+// Observation read scope. Two shapes (docs/08):
+//  - thread scope (inject + observer): the thread's own rows, owner-checked;
+//  - project/resource scope (the REFLECTOR's target): aggregate across ALL the
+//    owner's threads carrying that project/resource id — a project reflection
+//    must see every thread of the project, never just the promoting one
+//    (otherwise the merge is last-writer-wins per thread).
+// No level at all → null (callers get []).
+function observationScopeWhere(scope: ReflectionScope): SQL | null {
+  if (
+    scope.threadId === undefined &&
+    scope.projectId === undefined &&
+    scope.resourceId === undefined
+  ) {
+    return null;
+  }
+  const threadFilters: SQL[] = [sql`mt.owner_id = ${scope.accountId}`];
+  if (scope.projectId !== undefined) threadFilters.push(sql`mt.project_id = ${scope.projectId}`);
+  if (scope.resourceId !== undefined) {
+    threadFilters.push(sql`mt.resource_id = ${scope.resourceId}`);
+  }
+  const ownerScope = sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryObservations.threadId} AND ${sql.join(threadFilters, sql` AND `)})`;
+  return scope.threadId !== undefined
+    ? (and(eq(memoryObservations.threadId, scope.threadId), ownerScope) as SQL)
+    : ownerScope;
+}
+
 // SQLite adapter for the MemoryStore port (docs/08). POST-MVP persistence floor:
 // ensure threads + append raw messages only — no read/inject/compress here. The
 // adapter owns dialect details (timestamps as epoch ms via Drizzle timestamp_ms)
@@ -135,21 +167,17 @@ export class SqliteMemoryStore implements MemoryStore {
     return id;
   }
 
-  // POST-MVP Phase 2 (Reflector): read a scope's active observations oldest-first.
-  // Scope is matched on thread_id only here (observations are thread-anchored in
-  // storage); the Reflector merges them into a scope-level reflection. Returns
-  // empty when the scope has no thread anchor.
+  // POST-MVP Phase 2: read a scope's active observations oldest-first. Thread
+  // scope = the thread's own rows (inject/observer); project/resource scope =
+  // aggregated across all the owner's matching threads (the Reflector's target
+  // read) — see observationScopeWhere.
   async listObservations(scope: ReflectionScope): Promise<Observation[]> {
-    if (scope.threadId === undefined) return [];
+    const where = observationScopeWhere(scope);
+    if (where === null) return [];
     const rows = this.db
       .select()
       .from(memoryObservations)
-      .where(
-        and(
-          eq(memoryObservations.threadId, scope.threadId),
-          sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryObservations.threadId} AND mt.owner_id = ${scope.accountId})`,
-        ),
-      )
+      .where(where)
       .orderBy(asc(memoryObservations.observedAt), asc(memoryObservations.id))
       .all();
     return rows.map((row) => {
@@ -262,14 +290,21 @@ export class SqliteMemoryStore implements MemoryStore {
     return id;
   }
 
-  // Atomically claim up to `limit` pending jobs (oldest-first) by flipping them
-  // pending → running in ONE UPDATE … RETURNING so a second tick/worker never
-  // double-processes a row. scope_id is decoded back to a ReflectionScope (D1).
+  // Atomically claim up to `limit` open jobs (oldest-first) by flipping them to
+  // running in ONE UPDATE … RETURNING so a second tick/worker never
+  // double-processes a row. Claimable = pending, PLUS running rows whose lease
+  // (updated_at) expired — a worker that died between claim and finish must not
+  // block its scope forever (enqueue dedupes against running rows). Re-claiming
+  // refreshes updated_at, restarting the lease; the runners are idempotent
+  // (observer skips covered ranges, reflector merges are stable), so a re-run of
+  // a job that ACTUALLY finished is harmless. scope_id is decoded back to a
+  // ReflectionScope (D1).
   async claimPendingJobs(limit: number): Promise<MemoryJobRow[]> {
     if (limit <= 0) return [];
     const updatedAt = this.now().getTime();
+    const staleBefore = updatedAt - RUNNING_LEASE_MS;
     // Drizzle has no portable RETURNING-on-subselect-UPDATE helper, so use the raw
-    // handle. The subquery picks the oldest pending ids; the UPDATE flips just
+    // handle. The subquery picks the oldest claimable ids; the UPDATE flips just
     // those and returns their decoded fields.
     const rows = this.db.$sqlite
       .prepare(
@@ -278,12 +313,13 @@ export class SqliteMemoryStore implements MemoryStore {
           WHERE id IN (
             SELECT id FROM memory_jobs
              WHERE status = 'pending'
+                OR (status = 'running' AND updated_at <= ?)
              ORDER BY created_at ASC, id ASC
              LIMIT ?
           )
         RETURNING id, type, scope_id`,
       )
-      .all(updatedAt, limit) as Array<{ id: string; type: string; scope_id: string }>;
+      .all(updatedAt, staleBefore, limit) as Array<{ id: string; type: string; scope_id: string }>;
     return rows.map((row) => ({
       jobId: row.id,
       // The type column is constrained to the enum at enqueue time; widen back.

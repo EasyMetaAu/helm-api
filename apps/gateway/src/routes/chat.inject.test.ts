@@ -396,6 +396,37 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
     db.$sqlite.close();
   });
 
+  it("stamps inject metadata onto the decision record for telemetry (P3)", async () => {
+    const { store } = makeFakeStore({
+      reflection: { project: "PROJECT REFLECTION" },
+      observations: ["OBS-1"],
+      recent: [],
+    });
+    const { deps } = captureRouteDeps({
+      body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
+      memory: { observe: observeDeps(store), inject: injectWiring(store) },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { ...AUTH, ...INJECT_HEADERS },
+      body: JSON.stringify(BODY),
+    });
+
+    expect(res.status).toBe(200);
+    const insert = deps.telemetry.insert as ReturnType<typeof vi.fn>;
+    expect(insert).toHaveBeenCalledTimes(1);
+    const arg = insert.mock.calls[0]?.[0] as {
+      decision: { memory?: { memory_hydrated: boolean } };
+    };
+    expect(arg.decision.memory).toMatchObject({
+      memory_hydrated: true,
+      observation_count: 1,
+      memory_writeback_status: "queued",
+    });
+  });
+
   it("skips replacement for a tool-call request (tool calls preserved, write-back still enqueued)", async () => {
     const { store } = makeFakeStore({ reflection: { project: "R" }, observations: ["O"] });
     const enqueueObserverJob = vi.fn(async () => "job-tool");

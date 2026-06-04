@@ -43,6 +43,34 @@ function reflectionScopeWhere(scope: ReflectionScope): SQL {
   return and(...clauses) as SQL;
 }
 
+// How long a claimed (`running`) job stays exclusively leased — pg mirror of the
+// sqlite adapter's constant (same contract, see its comment).
+const RUNNING_LEASE_MS = 5 * 60_000;
+
+// Observation read scope — pg mirror of the sqlite adapter's observationScopeWhere
+// (same contract, different dialect). Thread scope = the thread's own rows;
+// project/resource scope = aggregated across all the owner's matching threads
+// (the REFLECTOR's target read — a project reflection must see every thread of
+// the project, never just the promoting one). No level at all → null (→ []).
+function observationScopeWhere(scope: ReflectionScope): SQL | null {
+  if (
+    scope.threadId === undefined &&
+    scope.projectId === undefined &&
+    scope.resourceId === undefined
+  ) {
+    return null;
+  }
+  const threadFilters: SQL[] = [sql`mt.owner_id = ${scope.accountId}`];
+  if (scope.projectId !== undefined) threadFilters.push(sql`mt.project_id = ${scope.projectId}`);
+  if (scope.resourceId !== undefined) {
+    threadFilters.push(sql`mt.resource_id = ${scope.resourceId}`);
+  }
+  const ownerScope = sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryObservations.threadId} AND ${sql.join(threadFilters, sql` AND `)})`;
+  return scope.threadId !== undefined
+    ? (and(eq(memoryObservations.threadId, scope.threadId), ownerScope) as SQL)
+    : ownerScope;
+}
+
 // Postgres adapter for the MemoryStore port — the supabase implementation
 // (docs/08). Same contract as SqliteMemoryStore, but async and using native
 // jsonb (source ranges + tags) instead of JSON-string encoding. Epoch-ms
@@ -121,16 +149,12 @@ export class PgMemoryStore implements MemoryStore {
   }
 
   async listObservations(scope: ReflectionScope): Promise<Observation[]> {
-    if (scope.threadId === undefined) return [];
+    const where = observationScopeWhere(scope);
+    if (where === null) return [];
     const rows = await this.db
       .select()
       .from(memoryObservations)
-      .where(
-        and(
-          eq(memoryObservations.threadId, scope.threadId),
-          sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryObservations.threadId} AND mt.owner_id = ${scope.accountId})`,
-        ),
-      )
+      .where(where)
       .orderBy(asc(memoryObservations.observedAt), asc(memoryObservations.id));
     return rows.map((row) => ({
       id: row.id,
@@ -221,19 +245,26 @@ export class PgMemoryStore implements MemoryStore {
     throw new Error("memory job enqueue conflict without existing open row");
   }
 
-  // Atomically claim up to `limit` pending jobs (oldest-first). Postgres uses
+  // Atomically claim up to `limit` open jobs (oldest-first). Postgres uses
   // FOR UPDATE SKIP LOCKED in the id subquery so concurrent workers never contend
-  // on or double-process the same row; the outer UPDATE flips pending → running and
-  // RETURNS the rows. scope_id is decoded back to a ReflectionScope (D1).
+  // on or double-process the same row; the outer UPDATE flips the rows to running
+  // and RETURNS them. Claimable = pending, PLUS running rows whose lease
+  // (updated_at) expired — a worker that died between claim and finish must not
+  // block its scope forever (enqueue dedupes against running rows). Re-claiming
+  // refreshes updated_at (lease restarts); the runners are idempotent, so a
+  // re-run of a job that actually finished is harmless. scope_id is decoded back
+  // to a ReflectionScope (D1). Mirrors the sqlite adapter's lease semantics.
   async claimPendingJobs(limit: number): Promise<MemoryJobRow[]> {
     if (limit <= 0) return [];
     const updatedAt = this.now().getTime();
+    const staleBefore = updatedAt - RUNNING_LEASE_MS;
     const result = (await this.db.execute(sql`
       UPDATE memory_jobs
          SET status = 'running', updated_at = ${updatedAt}
        WHERE id IN (
          SELECT id FROM memory_jobs
           WHERE status = 'pending'
+             OR (status = 'running' AND updated_at <= ${staleBefore})
           ORDER BY created_at ASC, id ASC
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED

@@ -10,12 +10,12 @@ import {
 import { createMessagesPipeline, type InjectWiring, type RouteFn } from "./messages-pipeline.js";
 
 // gateway.messages.inject (docs/08 Phase 2) — PROVE the inject-phase wiring through
-// the shared pipeline that backs BOTH /v1/messages and /v1/responses. The pipeline
-// is identical across the two surfaces (only the stamped Protocol differs for
-// telemetry), so we exercise it over the /v1/messages route with BOTH Protocol
-// values: the assembled prefix reaches route() in docs/08 order, the hoisted system
-// prompt is NOT lost (D8-bis), non-inject modes leave messages untouched, and
-// inject is fail-open.
+// the shared pipeline that backs /v1/messages, /v1/responses AND the Gemini
+// surface. The pipeline is identical across the surfaces (only the stamped
+// Protocol differs for telemetry), so we exercise it over the /v1/messages route
+// with ALL THREE Protocol values: the assembled prefix reaches route() in docs/08
+// order, the hoisted system prompt is NOT lost (D8-bis), non-inject modes leave
+// messages untouched, and inject is fail-open.
 
 const AUTH = { "x-api-key": "helm_live_secret", "Content-Type": "application/json" };
 const IDENTITY: MessagesIdentity = { keyId: "k1", accountId: "acct" };
@@ -112,7 +112,7 @@ function captureRoute(): { route: RouteFn; seen: InternalRequest[] } {
 // inbound transformer does — so the pipeline reads systemPrompt from messages[0].
 function buildApp(opts: {
   route: RouteFn;
-  protocol: "anthropic_messages" | "openai_responses";
+  protocol: "anthropic_messages" | "openai_responses" | "gemini";
   memory?: { observe: ObserveDeps; inject?: InjectWiring };
 }) {
   const pipeline = createMessagesPipeline(opts.route, opts.protocol, opts.memory);
@@ -147,7 +147,7 @@ function buildApp(opts: {
 }
 
 const SURFACE = "/v1/messages";
-for (const protocol of ["anthropic_messages", "openai_responses"] as const) {
+for (const protocol of ["anthropic_messages", "openai_responses", "gemini"] as const) {
   const surface = SURFACE;
   describe(`gateway.inject — pipeline protocol=${protocol}`, () => {
     it("injects the docs/08 prefix ahead of the current turn, system prompt NOT lost", async () => {
@@ -240,3 +240,48 @@ for (const protocol of ["anthropic_messages", "openai_responses"] as const) {
     });
   });
 }
+
+// P3 (review follow-up): the inject metadata the bridge computes must not be
+// dropped at the gateway boundary — the pipeline stamps it onto the
+// DecisionRecord so telemetry / the debug UI can see what memory did.
+describe("gateway.inject — decision record metadata", () => {
+  it("stamps inject metadata onto the decision record", async () => {
+    const { store } = makeFakeStore({
+      reflection: "PROJECT REFLECTION",
+      observations: ["OBS-1"],
+      recent: [],
+    });
+    // Keep a reference to the decision object the fake route returns so the
+    // pipeline's post-route stamping is observable.
+    const decision: Record<string, unknown> = {
+      lane: { selected_lane: "balanced" },
+      final: { status: "ok" },
+    };
+    const route: RouteFn = async () =>
+      ({
+        decision,
+        final: { status: "ok" },
+        body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
+        stream: null,
+        error: null,
+      }) as unknown as ExecutionResult;
+    const app = buildApp({
+      route,
+      protocol: "anthropic_messages",
+      memory: { observe: observeDeps(store), inject: injectWiring(store) },
+    });
+
+    const res = await app.request(SURFACE, {
+      method: "POST",
+      headers: { ...AUTH, ...INJECT_HEADERS },
+      body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(decision.memory).toMatchObject({
+      memory_hydrated: true,
+      observation_count: 1,
+      memory_writeback_status: "queued",
+    });
+  });
+});

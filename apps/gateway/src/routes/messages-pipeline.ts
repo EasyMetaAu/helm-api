@@ -23,7 +23,7 @@ import {
   type RouteOptions,
   resolveMemoryMode,
 } from "@helm/core";
-import type { InternalRequest, Protocol } from "@helm/shared";
+import type { InternalRequest, MemoryDecision, Protocol } from "@helm/shared";
 import type { ServingAccount } from "../runtime/serving-account.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import {
@@ -368,6 +368,9 @@ export function createMessagesPipeline(
       // The BRIDGE owns the D7 plain-text gate (tool/multipart turns keep their
       // messages but still enqueue write-back); fully fail-open (never 5xx, never
       // reroute).
+      // Inject metadata for the DecisionRecord (docs/08 Step 10) — held here and
+      // stamped AFTER route() returns (the routing core never learns about memory).
+      let memoryMeta: MemoryDecision | null = null;
       if (memory?.inject !== undefined && memoryScope.mode === "inject") {
         const wiring = memory.inject;
         const leadingSystem = (internal.messages as IRMessage[])[0];
@@ -395,6 +398,7 @@ export function createMessagesPipeline(
           },
         );
         internal.messages = injected.messages as InternalRequest["messages"];
+        memoryMeta = injected.metadata;
       }
 
       // Memory observe (inbound): persist the original raw messages after
@@ -446,6 +450,11 @@ export function createMessagesPipeline(
       // The subscription the pool selected (null for a configured/non-OAuth
       // provider), for per-account usage attribution (providers page Tier 2).
       const servingAccount = result.servingAccount ?? null;
+
+      // Stamp the inject metadata onto the DecisionRecord (docs/08 Step 10) so
+      // telemetry / the debug UI can see what memory did. Counts + job id only —
+      // never memory content (principle 7).
+      if (memoryMeta !== null) result.decision.memory = memoryMeta;
 
       // Post-served usage-budget settle (docs/06), fail-OPEN. Charges the SETTLED
       // total_usd (never recomputed) + served tokens + 1 request. Shared helper for

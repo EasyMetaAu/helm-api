@@ -1474,7 +1474,7 @@ export async function buildServer(
   const geminiPipeline = createMessagesPipeline(
     route,
     "gemini",
-    { observe },
+    { observe, inject },
     pipelineBudget,
     recordOAuthUsage,
   );

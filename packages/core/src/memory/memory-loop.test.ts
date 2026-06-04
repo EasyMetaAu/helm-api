@@ -141,5 +141,72 @@ describe("memory background loop (observer → reflector → inject)", () => {
     ).toBe(true);
     expect(result.metadata.memory_hydrated).toBe(true);
     expect(result.metadata.reflection_version).toBe(1);
+
+    // The compressed turn is represented by its observation/reflection — never
+    // re-injected VERBATIM as recent_raw (that would double it and grow forever).
+    expect(
+      result.messages.some(
+        (m) => m.source === "recent_raw" && m.content === "the user prefers dark mode",
+      ),
+    ).toBe(false);
+  });
+
+  it("a project reflection aggregates observations from ALL the project's threads (no last-writer-wins)", async () => {
+    const store = deterministicStore();
+    const seedThread = async (threadId: string, fact: string) => {
+      await store.ensureThread({ id: threadId, projectId: "proj-1", ownerId: "acct-a" });
+      await store.appendMessage({ threadId, role: "user", content: fact, tokenEstimate: 4 });
+      await store.appendMessage({ threadId, role: "assistant", content: "ok", tokenEstimate: 1 });
+      await store.appendMessage({ threadId, role: "user", content: "thanks", tokenEstimate: 1 });
+      await store.enqueueJob({
+        type: "observer",
+        scope: { accountId: "acct-a", projectId: "proj-1", threadId },
+      });
+    };
+    await seedThread("t1", "thread one fact");
+    await seedThread("t2", "thread two fact");
+
+    const log = () => {};
+    const costSink = () => {};
+    const now = () => new Date("2026-06-04T00:00:00.000Z");
+    const handle = startMemoryWorker({
+      memoryStore: store,
+      batchSize: 10,
+      intervalMs: 100,
+      now: () => Date.now(),
+      log,
+      runObserver: (job) =>
+        runObserverJob(job, {
+          memoryStore: store,
+          summarize: async ({ messages }: { messages: RawMessage[] }) => ({
+            observationText: `OBSERVED: ${messages.map((m) => m.content).join(" / ")}`,
+          }),
+          costSink,
+          now,
+          log,
+        }),
+      runReflector: (job) =>
+        runReflectorJob(job, {
+          memoryStore: store,
+          merge: async ({ observations }: { observations: Observation[] }) => {
+            const text = `REFLECTION: ${observations.map((o) => o.observationText).join(" | ")}`;
+            return { reflectionText: text, tokenEstimate: Math.ceil(text.length / 4) };
+          },
+          costSink,
+          now,
+          log,
+        }),
+    });
+
+    // Tick 1: both observers run + promote. Tick 2: the reflector(s) merge.
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(100);
+    handle.stop();
+
+    // The SECOND thread's reflector run must not wipe the first thread's
+    // contribution — the project reflection covers the whole project.
+    const reflection = await store.getReflection({ accountId: "acct-a", projectId: "proj-1" });
+    expect(reflection?.reflectionText).toContain("thread one fact");
+    expect(reflection?.reflectionText).toContain("thread two fact");
   });
 });

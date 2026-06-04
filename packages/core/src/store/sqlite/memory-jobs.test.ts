@@ -125,4 +125,34 @@ describe("SqliteMemoryStore job queue", () => {
     });
     expect(second).toBe(first);
   });
+
+  it("re-claims a running job whose lease expired (crash recovery)", async () => {
+    // A worker that dies between claim and finish leaves a `running` row that
+    // enqueue dedupes against FOREVER — claim must treat a lease-expired running
+    // row as reclaimable, and re-claiming must refresh the lease.
+    let nowMs = 1_000_000;
+    let seq = 0;
+    const store = new SqliteMemoryStore(
+      createSqliteDb(":memory:"),
+      () => `id-${++seq}`,
+      () => new Date(nowMs),
+    );
+    await store.enqueueJob({ type: "observer", scope: { accountId: "acct-a", threadId: "t1" } });
+    const first = await store.claimPendingJobs(10);
+    expect(first).toHaveLength(1);
+
+    // Within the lease: the running row is NOT re-claimed.
+    nowMs += 60_000;
+    expect(await store.claimPendingJobs(10)).toEqual([]);
+
+    // Lease expired: the stale running row is re-claimed (same job id).
+    nowMs += 10 * 60_000;
+    const reclaimed = await store.claimPendingJobs(10);
+    expect(reclaimed).toHaveLength(1);
+    expect(reclaimed[0]?.jobId).toBe(first[0]?.jobId);
+
+    // The re-claim refreshed updated_at, so the lease restarts.
+    nowMs += 60_000;
+    expect(await store.claimPendingJobs(10)).toEqual([]);
+  });
 });

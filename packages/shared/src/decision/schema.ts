@@ -93,6 +93,21 @@ export const CostBreakdownSchema = z.object({
   total_usd: z.number().nullable(),
 });
 
+// Memory inject observability (docs/08 Phase 2 Step 10). Stamped onto the record
+// by the GATEWAY after the inject phase ran (the routing core never touches
+// memory — it is a middleware); null when memory inject was off / skipped /
+// failed. Mirrors the inject assembler's metadata: counts + job id only — never
+// memory CONTENT (the decision record stays redacted, principle 7).
+export const MemoryDecisionSchema = z.object({
+  memory_hydrated: z.boolean(),
+  reflection_version: z.number().int().nullable(),
+  observation_count: z.number().int().nonnegative(),
+  memory_tokens_injected: z.number().nonnegative(),
+  observer_job_id: z.string().nullable(),
+  memory_writeback_status: z.enum(["queued", "skipped", "failed"]),
+  degraded: z.boolean(),
+});
+
 export const DecisionRecordSchema = z.object({
   request_id: z.string().min(1),
   // Threaded end-to-end from the request context for cross-system correlation
@@ -125,6 +140,10 @@ export const DecisionRecordSchema = z.object({
     completion_usd: null,
     total_usd: null,
   }),
+  // Memory inject observability (docs/08) — stamped by the gateway AFTER routing
+  // (see MemoryDecisionSchema). `.default(null)` keeps the routing core's
+  // builders and all pre-existing records valid without knowing about memory.
+  memory: MemoryDecisionSchema.nullable().default(null),
 });
 
 export type DecidedBy = z.infer<typeof DecidedBySchema>;
@@ -136,4 +155,5 @@ export type AttemptErrorDetail = z.infer<typeof AttemptErrorDetailSchema>;
 export type ProviderAttempt = z.infer<typeof ProviderAttemptSchema>;
 export type FinalDecision = z.infer<typeof FinalDecisionSchema>;
 export type CostBreakdown = z.infer<typeof CostBreakdownSchema>;
+export type MemoryDecision = z.infer<typeof MemoryDecisionSchema>;
 export type DecisionRecord = z.infer<typeof DecisionRecordSchema>;

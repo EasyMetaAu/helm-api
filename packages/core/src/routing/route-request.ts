@@ -427,6 +427,9 @@ export async function routeRequest(
       latency_total_ms: 0,
       fallback_count: 0,
       cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
+      // Stamped by the GATEWAY after inject ran (memory is a middleware) — the
+      // routing core always emits null.
+      memory: null,
     };
     deps.log(decision);
     return {
@@ -487,6 +490,9 @@ export async function routeRequest(
       completion_usd: completionUsd,
       total_usd: totalUsd,
     },
+    // Stamped by the GATEWAY after inject ran (memory is a middleware) — the
+    // routing core always emits null.
+    memory: null,
   };
 
   deps.log(decision);

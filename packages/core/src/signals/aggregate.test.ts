@@ -47,6 +47,7 @@ function makeRecord(over: {
     latency_total_ms: 0,
     fallback_count: 0,
     cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
+    memory: null,
   };
 }
 

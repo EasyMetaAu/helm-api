@@ -100,4 +100,32 @@ describe("PgMemoryStore job queue", () => {
     expect(await store.claimPendingJobs(5)).toEqual([]);
     await db.$close();
   });
+
+  it("re-claims a running job whose lease expired (crash recovery)", async () => {
+    // Mirrors the sqlite contract: a stale `running` row (worker died mid-job)
+    // must be reclaimable after the lease, and the re-claim refreshes the lease.
+    let nowMs = 1_000_000;
+    let seq = 0;
+    const db = await createPgliteDb();
+    const store = new PgMemoryStore(
+      db,
+      () => `id-${++seq}`,
+      () => new Date(nowMs),
+    );
+    await store.enqueueJob({ type: "observer", scope: { accountId: "acct-a", threadId: "t1" } });
+    const first = await store.claimPendingJobs(10);
+    expect(first).toHaveLength(1);
+
+    nowMs += 60_000;
+    expect(await store.claimPendingJobs(10)).toEqual([]);
+
+    nowMs += 10 * 60_000;
+    const reclaimed = await store.claimPendingJobs(10);
+    expect(reclaimed).toHaveLength(1);
+    expect(reclaimed[0]?.jobId).toBe(first[0]?.jobId);
+
+    nowMs += 60_000;
+    expect(await store.claimPendingJobs(10)).toEqual([]);
+    await db.$close();
+  });
 });

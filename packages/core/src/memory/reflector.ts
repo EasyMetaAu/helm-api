@@ -48,13 +48,14 @@ export interface ReflectorResult {
 // The reflection TARGET is the highest scope level inject actually READS BACK.
 // inject loads reflections as getReflection({accountId, projectId}) and
 // ({accountId, resourceId}) — EXACT matches where absent levels are NULL (the
-// docs/08 assembly order has only those two reflection slots). The job scope is
-// the OBSERVATION SOURCE (thread-anchored, may carry all three levels): writing
-// it verbatim would pin the reflection to the thread and make it permanently
-// invisible to the next inject. project > resource; a scope with neither keeps
-// the legacy thread-level target (direct callers only — the worker no longer
-// promotes thread-only scopes).
-function reflectionTargetScope(scope: ReflectionScope): ReflectionScope {
+// docs/08 assembly order has only those two reflection slots). A job scope may
+// also carry a thread anchor: writing it verbatim would pin the reflection to
+// the thread and make it permanently invisible to the next inject. project >
+// resource; a scope with neither keeps the legacy thread-level target (direct
+// callers only — the worker no longer promotes thread-only scopes). EXPORTED so
+// the worker promotes reflector jobs ALREADY at the target level (cross-thread
+// promotions for the same project then dedupe to one queue row).
+export function reflectionTargetScope(scope: ReflectionScope): ReflectionScope {
   if (scope.projectId !== undefined) {
     return { accountId: scope.accountId, projectId: scope.projectId };
   }
@@ -76,10 +77,13 @@ export async function runReflectorJob(
   deps: ReflectorDeps,
 ): Promise<ReflectorResult> {
   try {
-    // Observations come from the SOURCE scope (thread-anchored); the reflection is
-    // read + written at the TARGET level the next inject hydrates from.
+    // BOTH reads happen at the TARGET level: the reflection slot the next inject
+    // hydrates from, and the observations AGGREGATED ACROSS every thread of that
+    // project/resource (the store joins threads by owner + scope id). Merging
+    // only the promoting thread's observations would make the project reflection
+    // last-writer-wins per thread.
     const target = reflectionTargetScope(job.scope);
-    const observations = await deps.memoryStore.listObservations(job.scope);
+    const observations = await deps.memoryStore.listObservations(target);
     const previousReflection = await deps.memoryStore.getReflection(target);
 
     if (observations.length === 0) {

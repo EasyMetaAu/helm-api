@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-06-05 · Memory 第二轮评审修复：5 个缺陷（docs/08 Phase 2；#41 评审跟进 II）
+
+Codex 第二轮 review 发现 5 个问题（2×P1、2×P2、1×P3），全部修复（TDD，新增/更新 13 个测试断言）：
+
+1. **（P1）inject 重复注入已压缩的 raw**：inject 把线程全部 raw 消息当 recent_raw 注入，已被 observation 覆盖的旧轮次会以「observation + 原文」双份进入 prompt，上下文无界增长。修复：导出 observer 的 `alreadyObservedMessageIds`，inject 装配时过滤掉 source range 已覆盖的 raw（raw 行仍留库审计，只是不再上 prefix）。
+2. **（P1）project reflection 按 thread 后写覆盖**：reflector 只合并晋升 thread 自己的 observations，同 project 第二个 thread 会整体覆盖 project reflection。修复：`listObservations` 两种读形——thread scope 读本线程；project/resource scope **跨该 owner 的所有匹配 thread 聚合**（join memory_threads，两个适配器同契约）；reflector 改读 target scope；scheduler 晋升时直接用 target scope（同 project 多 thread 晋升去重为一行）。loop 测试验证两个 thread 的内容都进 reflection。
+3. **（P2）Gemini 没接 inject**：`server.ts` gemini pipeline 只传 `{ observe }`。修复：传 `{ observe, inject }`；pipeline 级 inject 测试矩阵扩到三个 protocol（含 gemini）。
+4. **（P2）崩溃留下的 stale running 永久阻塞 scope**（即上一轮记下的 TODO）：claim 只取 pending，而 enqueue 去重覆盖 running。修复：`claimPendingJobs` 把 `running 且 updated_at 超过 5 分钟 lease` 的行视为可回收并刷新 lease（sqlite/pg 同契约）；runner 幂等（observer 跳过已覆盖 range、reflector 稳定 merge），重复执行无害。
+5. **（P3）inject metadata 在网关边界被丢弃**：即原推迟的 Step 10。修复：`DecisionRecord` 新增 `memory` 字段（`MemoryDecisionSchema`，nullable `.default(null)` 兼容旧记录；只含计数/job id，不含记忆内容，principle 7），chat 与 pipeline 在 route() 返回后盖章（routing core 保持 memory 无关，始终产出 null）。
+
+---
+
 ## 2026-06-04 · `/v1/models` 漏报订阅（OAuth）模型（bug 修复；docs/04 lane、issue #38）
 
 **问题**：`GET /v1/models` 对 `allow_custom_model` key 列出了 configured providers 的别名（deepseek/openrouter/zenmux），但**完全没有订阅（OAuth）provider 的模型**。根因：`server.ts` 给 `registerModelsRoute` 的 `providerAliases` 只取 `config.providers[].models[].alias`（静态配置），而订阅模型是另一条链路 `synthesizeOAuthProviders` 合成的，活别名存在热加载的 `oauthAliasSet` 里。执行器读它做路由（`oauthAliases: () => oauthAliasSet`），但发现端点从没拿到——于是「能路由但列不出」。

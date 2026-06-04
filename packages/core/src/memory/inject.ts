@@ -1,5 +1,6 @@
 import type { AssembledMessage, Observation, RawMessage, Reflection } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
+import { alreadyObservedMessageIds } from "./observer.js";
 
 // Memory middleware — INJECT phase (docs/08 Phase 2 "observational-memory MVP"). When
 // x-memory-mode=inject, this runs SYNCHRONOUSLY on the main request path, BEFORE
@@ -116,18 +117,26 @@ async function loadMemory(
     scope.resourceId !== undefined
       ? await store.getReflection({ accountId: scope.accountId, resourceId: scope.resourceId })
       : null;
-  // Observations are THREAD-ANCHORED by schema: both store adapters return []
-  // unless threadId is set and ignore project/resource. Gate on threadId only and
-  // pass threadId alone — aligned with the store contract (no cross-thread
-  // retrieval; there is no schema support for it).
+  // The inject layers stay THREAD-ANCHORED: pass threadId alone so this read
+  // never crosses threads (the cross-thread project/resource aggregation is the
+  // REFLECTOR's read shape, not inject's).
   const observations =
     scope.threadId !== undefined
       ? await store.listObservations({ accountId: scope.accountId, threadId: scope.threadId })
       : [];
-  const recentMessages =
+  const allMessages =
     scope.threadId !== undefined
       ? await store.listMessages({ accountId: scope.accountId, threadId: scope.threadId })
       : [];
+  // recent_raw = only the raw turns NOT yet covered by an observation's source
+  // range. Covered turns are already represented by their observation — injecting
+  // both would duplicate content and grow the prompt without bound (the raw rows
+  // stay in storage for audit; they just stop riding the prefix once compressed).
+  const covered = alreadyObservedMessageIds(
+    allMessages,
+    observations.map((o) => o.sourceMessageRange),
+  );
+  const recentMessages = allMessages.filter((m) => !covered.has(m.id));
   return { projectReflection, resourceReflection, observations, recentMessages };
 }
 

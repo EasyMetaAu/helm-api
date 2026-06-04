@@ -272,10 +272,13 @@ describe("runReflectorJob — reflection target scope (readable by inject)", () 
     const out = await runReflectorJob(job, deps);
 
     expect(out.changed).toBe(true);
-    // The observation SOURCE keeps the thread anchor…
-    expect(store.listObservations).toHaveBeenCalledWith(job.scope);
-    // …but the reflection slot is read+written at the project level — the exact
-    // scope the next inject's getReflection({accountId, projectId}) reads back.
+    // BOTH reads happen at the project level: observations aggregate across ALL
+    // the project's threads (never just the promoting one), and the reflection
+    // slot is the exact scope the next inject's getReflection reads back.
+    expect(store.listObservations).toHaveBeenCalledWith({
+      accountId: "acct-a",
+      projectId: "proj-1",
+    });
     expect(store.getReflection).toHaveBeenCalledWith({ accountId: "acct-a", projectId: "proj-1" });
     expect(upserts[0]).toMatchObject({ accountId: "acct-a", projectId: "proj-1" });
     expect(upserts[0]?.threadId).toBeUndefined();

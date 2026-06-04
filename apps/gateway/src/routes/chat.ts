@@ -23,6 +23,7 @@ import {
 import {
   type HelmError,
   type InternalRequest,
+  type MemoryDecision,
   makeHelmError,
   OpenAIChatRequestSchema,
 } from "@helm/shared";
@@ -437,6 +438,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // the original messages untouched (never 5xx, never alters routing —
     // principle 3). Runs AFTER observe (observe writes the raw turn; inject only
     // reads + assembles).
+    // Inject metadata for the DecisionRecord (docs/08 Step 10) — held here and
+    // stamped AFTER route() returns (the routing core never learns about memory).
+    let memoryMeta: MemoryDecision | null = null;
     if (deps.memory?.inject !== undefined && memoryScope.mode === "inject") {
       const wiring = deps.memory.inject;
       // OpenAI chat: the system prompt is the LEADING system IR message, else "".
@@ -465,6 +469,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         },
       );
       internal.messages = injected.messages as InternalRequest["messages"];
+      memoryMeta = injected.metadata;
     }
 
     // Memory observe (inbound): persist the original request raw messages AFTER
@@ -498,6 +503,12 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // The subscription the pool selected (null for a configured/non-OAuth provider),
     // threaded out on the result so the settle path can attribute usage (Tier 2).
     servingAccount = result.servingAccount ?? null;
+
+    // Stamp the inject metadata onto the DecisionRecord (docs/08 Step 10) so it
+    // reaches telemetry / the debug UI. Counts + job id only — never memory
+    // content (principle 7). Stamped HERE because the routing core is
+    // memory-agnostic (memory is a middleware, not a routing input).
+    if (memoryMeta !== null) result.decision.memory = memoryMeta;
 
     // Routing-signal debug headers (read by e2e + operators): the lane the
     // pipeline selected and the model it finally landed on. These expose the

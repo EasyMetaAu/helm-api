@@ -1,7 +1,7 @@
 import type { MemoryJobRow } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
 import type { ObserverJob, ObserverResult } from "./observer.js";
-import type { ReflectorJob, ReflectorResult } from "./reflector.js";
+import { type ReflectorJob, type ReflectorResult, reflectionTargetScope } from "./reflector.js";
 
 // Background memory worker (docs/08 Phase 2). The OFF-the-request-path drainer for
 // the memory_jobs queue — the inject phase ENQUEUES observer jobs on the request
@@ -50,18 +50,21 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
     });
     // D5: only promote a reflector when the observer actually wrote a new
     // observation — a noop observer leaves the reflection untouched. The reflector
-    // job inherits the observer's FULL scope: the thread anchor is its observation
-    // SOURCE, while runReflectorJob writes the reflection at the highest READABLE
-    // level (project > resource — the only slots inject hydrates from, docs/08).
+    // job is enqueued AT THE TARGET level (project > resource — the only slots
+    // inject hydrates from, docs/08): the reflector aggregates observations across
+    // ALL the target's threads, so the thread anchor adds nothing, and dropping it
+    // lets same-project promotions from different threads dedupe to ONE row (D6).
     // A thread-only scope has no readable slot, so promoting it would burn merge
-    // tokens on a reflection nothing reads — skip. enqueueJob dedupes a pending
-    // reflector for the same scope (D6), so a flood collapses to one row.
+    // tokens on a reflection nothing reads — skip.
     if (
       result.observationId !== null &&
       (job.scope.projectId !== undefined || job.scope.resourceId !== undefined)
     ) {
       try {
-        await deps.memoryStore.enqueueJob({ type: "reflector", scope: job.scope });
+        await deps.memoryStore.enqueueJob({
+          type: "reflector",
+          scope: reflectionTargetScope(job.scope),
+        });
       } catch (err) {
         // The observer itself succeeded (its runner recorded done) — a promotion
         // failure must not be converted into a failed observer job. The next

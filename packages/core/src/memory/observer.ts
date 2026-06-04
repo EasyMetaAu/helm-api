@@ -50,7 +50,12 @@ export interface ObserverResult {
 // token estimates already stored on each message plus the output length. This is
 // only for the SEPARATE observer cost bucket, not for routing.
 
-function alreadyObservedMessageIds(
+// Map observation source ranges back to the covered raw-message ids. EXPORTED:
+// the observer uses it to skip re-summarizing covered turns, and the inject
+// loader uses the SAME definition of "covered" to keep compressed turns out of
+// the recent_raw layer (an observation already represents them — injecting both
+// would duplicate content and grow the prompt without bound).
+export function alreadyObservedMessageIds(
   messages: RawMessage[],
   ranges: Array<[string, string]>,
 ): Set<string> {
