@@ -382,6 +382,7 @@ export {
   completeAnthropicLogin,
   completeOpenAICodexLogin,
   createOAuthPoolClient,
+  createSerializingClient,
   discoverOAuthModels,
   getGitHubCopilotBaseUrl,
   getOAuthProvider,
@@ -403,8 +404,10 @@ export {
   parseCodexUsageBody,
   parseOAuthAuthorizationInput,
   pollCopilotDeviceOnce,
+  QueueTimeoutError,
   refreshGitHubCopilotToken,
   refreshOpenAICodexToken,
+  type SerializeClientDeps,
 } from "./provider/oauth/index.js";
 export {
   type ChatCompletionRequest,
@@ -453,6 +456,24 @@ export {
   type TokenManagerDeps,
   TokenRefreshError,
 } from "./provider/token-manager.js";
+// In-memory request queueing primitives (issue #93): per-key counting semaphore
+// with FIFO overflow queue (feature A), per-key serial gate with inter-request
+// delay (feature B), and the user-turn detector. Single-process by design.
+export {
+  type AcquireArgs,
+  type AcquireResult,
+  createKeyedSemaphore,
+  type KeyedSemaphore,
+  type KeyedSemaphoreDeps,
+} from "./queue/keyed-semaphore.js";
+export {
+  createKeyedSerialGate,
+  type KeyedSerialGate,
+  type KeyedSerialGateDeps,
+  type SerialAcquireArgs,
+  type SerialAcquireResult,
+} from "./queue/keyed-serial-gate.js";
+export { isUserMessageRequest } from "./queue/user-turn.js";
 export {
   createRateLimiter,
   type RateLimiterDeps,

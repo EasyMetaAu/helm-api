@@ -37,6 +37,8 @@ export class SqliteKeyStore implements KeyStore {
       budgetWindowSeconds: input.budgetWindowSeconds ?? null,
       overBudgetBehavior: input.overBudgetBehavior ?? "degrade",
       degradeLane: input.degradeLane ?? null,
+      // Max in-flight requests: undefined => NULL => unlimited.
+      concurrencyLimit: input.concurrencyLimit ?? null,
       createdAt: this.now(),
     };
     this.db.insert(apiKeys).values(row).run();
@@ -85,6 +87,7 @@ export class SqliteKeyStore implements KeyStore {
         | "budgetWindowSeconds"
         | "overBudgetBehavior"
         | "degradeLane"
+        | "concurrencyLimit"
       >
     > = {};
     // SQLite has no native array: store the whitelist as JSON text (null = no cap).
@@ -101,6 +104,7 @@ export class SqliteKeyStore implements KeyStore {
       set.budgetWindowSeconds = patch.budgetWindowSeconds;
     if (patch.overBudgetBehavior !== undefined) set.overBudgetBehavior = patch.overBudgetBehavior;
     if (patch.degradeLane !== undefined) set.degradeLane = patch.degradeLane;
+    if (patch.concurrencyLimit !== undefined) set.concurrencyLimit = patch.concurrencyLimit;
     if (Object.keys(set).length === 0) {
       // No-op patch: still verify the key exists (fail-loud on unknown id).
       const row = this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).get();
@@ -132,6 +136,7 @@ export class SqliteKeyStore implements KeyStore {
       budget_window_seconds: row.budgetWindowSeconds ?? null,
       over_budget_behavior: row.overBudgetBehavior === "reject" ? "reject" : "degrade",
       degrade_lane: row.degradeLane ?? null,
+      concurrency_limit: row.concurrencyLimit ?? null,
     };
   }
 }

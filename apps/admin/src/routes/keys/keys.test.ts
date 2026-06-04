@@ -32,6 +32,7 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     budget_window_seconds: null,
     over_budget_behavior: 'degrade',
     degrade_lane: null,
+    concurrency_limit: null,
     ...overrides,
   };
 }
@@ -142,6 +143,8 @@ describe('keys page', () => {
         budget_window_seconds: null,
         over_budget_behavior: 'degrade',
         degrade_lane: null,
+        // Concurrency untouched → still unlimited (null).
+        concurrency_limit: null,
       }),
     );
     // Dialog closes after a successful save.

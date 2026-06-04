@@ -61,9 +61,9 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.execute(
       sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
     );
-    // Seed everything below the memory migrations (v12–v14) as applied, so
-    // only they run — the minimal seed has no api_keys table for v9–v11.
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]) {
+    // Seed everything below the memory migrations (v13–v15) as applied, so
+    // only they run — the minimal seed has no api_keys table for v9–v12.
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );

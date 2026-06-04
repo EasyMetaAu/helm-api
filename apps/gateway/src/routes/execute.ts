@@ -129,6 +129,13 @@ function isAbort(err: unknown, signal: AbortSignal): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
 
+// Per-account user-message queue timeout (issue #93, feature B). Detected by the
+// `queueTimeout` flag (not instanceof) so the check survives any package-boundary
+// duplication of the QueueTimeoutError class.
+function isQueueTimeout(err: unknown): boolean {
+  return err instanceof Error && (err as { queueTimeout?: unknown }).queueTimeout === true;
+}
+
 // :free candidates may be throttled (429) by the upstream's free tier. That is
 // NOT a provider-health signal (principle 5), so it skips to the next candidate
 // WITHOUT recording a breaker failure. Reads the real upstream status (not the
@@ -390,6 +397,38 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               error: makeHelmError({
                 error_class: "upstream_error",
                 message: "client aborted request",
+                trace_id: req.request_id,
+              }),
+            },
+            body: null,
+            stream: null,
+          };
+        }
+        // Per-account user-message queue timeout (issue #93, feature B):
+        // BACKPRESSURE, not provider health — release any probe lock WITHOUT a
+        // breaker failure. Terminal (no chain advance): the queue protects THIS
+        // subscription's rate limits; spilling onto the next candidate would
+        // defeat the throttle the operator deliberately turned on. 503 via
+        // lane_unavailable (retryable in the client's eyes).
+        if (isQueueTimeout(err)) {
+          breaker.recordAbort(alias);
+          attempts.push({
+            alias,
+            skipped: false,
+            skip_reason: "user_message_queue_timeout",
+            status: "error",
+            error_class: "lane_unavailable",
+            latency_ms: elapsed(),
+            cost_usd: null,
+            error_detail: null,
+          });
+          return {
+            attempts,
+            final: {
+              status: "error",
+              error: makeHelmError({
+                error_class: "lane_unavailable",
+                message: "user message queue wait timed out; retry shortly",
                 trace_id: req.request_id,
               }),
             },

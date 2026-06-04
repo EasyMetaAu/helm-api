@@ -7,6 +7,7 @@ import {
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
+import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult, RouteError } from "./messages.js";
@@ -54,6 +55,9 @@ interface GeminiIRLike {
 
 export interface GeminiRouteDeps {
   rateLimiter?: GeminiRateLimiterPort;
+  /** Per-key concurrency overflow queue (issue #93) — the SAME process-wide gate
+   *  as the chat middleware. Optional — omitted = no gating. */
+  concurrencyGate?: ConcurrencyGatePort;
   auth: {
     /** Resolve the request credential to an identity, or null when invalid. */
     resolve(credential: string | null): Promise<MessagesIdentity | null>;
@@ -101,6 +105,10 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     const out = transformer.transformErrorOut(err);
     return c.json(out.body as Record<string, unknown>, out.status as 400 | 401 | 404 | 429 | 502);
   };
+
+  // Frees an unclaimed concurrency lease on every exit path (the handler below
+  // acquires AFTER its self-auth).
+  app.use("/v1beta/models/*", concurrencyReleaseGuard());
 
   // Hono cannot match the literal ':' in `{model}:generateContent` with a named
   // param, so we mount a catch-all under /v1beta/models and hand the full path +
@@ -171,6 +179,30 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       }
     }
 
+    // 1c) Concurrency overflow queue (issue #93) AFTER rate-limit: wait for a
+    //     slot instead of an instant 429; queue-full / wait timeout → 429 in the
+    //     Gemini envelope. Release parked on the context for the guard; the
+    //     stream branch claims it and releases at true stream end.
+    if (deps.concurrencyGate !== undefined) {
+      const acquired = await deps.concurrencyGate.acquire({
+        keyId: identity.keyId,
+        limit: identity.caps?.concurrencyLimit ?? null,
+        signal: c.req.raw.signal,
+      });
+      if (!acquired.ok) {
+        c.header("retry-after", String(acquired.retryAfterSeconds));
+        return sendError(c, {
+          error_class: "rate_limited",
+          message:
+            acquired.reason === "queue_full"
+              ? "concurrency queue is full"
+              : "timed out waiting for a concurrency slot",
+          trace_id: traceId,
+        });
+      }
+      c.set("concurrencyRelease", acquired.release);
+    }
+
     // 2) Parse + translate inbound. A malformed JSON body OR a structurally invalid
     //    Gemini request (the transformer's Zod parse throws) is a CLIENT error →
     //    400 INVALID_ARGUMENT, before routing (docs/07, principle 2 fail-closed).
@@ -229,6 +261,10 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     // 4) Protocol Adapter (outbound). Gemini streaming events are incremental deltas,
     //    written as nameless `data:` frames — NO `event:` name, NO `[DONE]`.
     if (route.stream) {
+      // Claim the concurrency lease (issue #93): hold the slot until the stream
+      // body fully drains — release in the stream's own finally, not the guard.
+      const releaseConcurrency = c.get("concurrencyRelease");
+      c.set("concurrencyRelease", undefined);
       return streamSSE(c, async (sse) => {
         try {
           for await (const snapshot of result.streamIR()) {
@@ -246,6 +282,8 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             const out = transformer.transformErrorOut(re);
             await sse.writeSSE({ data: JSON.stringify(out.body) });
           }
+        } finally {
+          releaseConcurrency?.();
         }
       });
     }

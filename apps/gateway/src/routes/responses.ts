@@ -3,6 +3,7 @@ import { type ErrorClass, ErrorClassSchema, makeHelmError } from "@helm/shared";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
+import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
@@ -41,6 +42,9 @@ export interface ResponsesRateLimiterPort {
 
 export interface ResponsesRouteDeps {
   rateLimiter?: ResponsesRateLimiterPort;
+  /** Per-key concurrency overflow queue (issue #93) — the SAME process-wide gate
+   *  as the chat middleware. Optional — omitted = no gating. */
+  concurrencyGate?: ConcurrencyGatePort;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   transformer: {
     /** native Responses request → IR (throws on a structurally invalid body). */
@@ -126,6 +130,10 @@ function pipelineToHelm(err: PipelineError, traceId: string): HelmHttpError {
 }
 
 export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDeps): void {
+  // Frees an unclaimed concurrency lease on every exit path — incl. a throw into
+  // onError (the handler below acquires AFTER its self-auth).
+  app.use("/v1/responses", concurrencyReleaseGuard());
+
   app.post("/v1/responses", async (c) => {
     const traceId = c.get("trace_id");
 
@@ -164,6 +172,32 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           );
         }
       }
+    }
+
+    // 1c) Concurrency overflow queue (issue #93) AFTER rate-limit: wait for a
+    //     slot instead of an instant 429; queue-full / wait timeout → 429 via the
+    //     OpenAI envelope (onError). Release parked on the context for the guard;
+    //     the stream branch claims it and releases at true stream end.
+    if (deps.concurrencyGate !== undefined) {
+      const acquired = await deps.concurrencyGate.acquire({
+        keyId: identity.keyId,
+        limit: identity.caps?.concurrencyLimit ?? null,
+        signal: c.req.raw.signal,
+      });
+      if (!acquired.ok) {
+        c.header("retry-after", String(acquired.retryAfterSeconds));
+        throw new HelmHttpError(
+          makeHelmError({
+            error_class: "rate_limited",
+            message:
+              acquired.reason === "queue_full"
+                ? "concurrency queue is full"
+                : "timed out waiting for a concurrency slot",
+            trace_id: traceId,
+          }),
+        );
+      }
+      c.set("concurrencyRelease", acquired.release);
     }
 
     // 2) Parse + translate inbound. A malformed JSON body OR a structurally invalid
@@ -214,6 +248,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
 
     // 4) Outbound: stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
+      // Claim the concurrency lease (issue #93): hold the slot until the stream
+      // body fully drains — release in the stream's own finally, not the guard.
+      const releaseConcurrency = c.get("concurrencyRelease");
+      c.set("concurrencyRelease", undefined);
       return streamSSE(c, async (sse) => {
         // Each IR event is serialized by the transformer's stream mapping; the
         // pipeline already ran the Responses state machine (principle 8 — we never
@@ -250,6 +288,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                   });
             await sse.writeSSE({ event: "error", data: JSON.stringify(body) });
           }
+        } finally {
+          releaseConcurrency?.();
         }
       });
     }

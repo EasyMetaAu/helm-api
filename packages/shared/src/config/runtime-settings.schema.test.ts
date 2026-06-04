@@ -33,6 +33,14 @@ describe("RuntimeSettingsSchema", () => {
       rate_limit_default_rpm: 60,
       rate_limit_default_tpm: 90000,
       log_level: "debug",
+      // Queueing fields backfilled by their schema defaults (both OFF).
+      concurrency_queue_enabled: false,
+      concurrency_queue_min_size: 5,
+      concurrency_queue_size_multiplier: 0,
+      concurrency_queue_wait_timeout_ms: 10_000,
+      user_message_queue_enabled: false,
+      user_message_queue_delay_ms: 200,
+      user_message_queue_wait_timeout_ms: 5_000,
     });
   });
 
@@ -74,5 +82,63 @@ describe("RuntimeSettingsSchema", () => {
 
   it("RuntimeSettings is the z.infer of RuntimeSettingsSchema (single type source)", () => {
     expectTypeOf<RuntimeSettings>().toEqualTypeOf<z.infer<typeof RuntimeSettingsSchema>>();
+  });
+
+  it("backfills queueing defaults from an empty object (both queues OFF)", () => {
+    const parsed = RuntimeSettingsSchema.parse({});
+    expect(parsed.concurrency_queue_enabled).toBe(false);
+    expect(parsed.concurrency_queue_min_size).toBe(5);
+    expect(parsed.concurrency_queue_size_multiplier).toBe(0);
+    expect(parsed.concurrency_queue_wait_timeout_ms).toBe(10_000);
+    expect(parsed.user_message_queue_enabled).toBe(false);
+    expect(parsed.user_message_queue_delay_ms).toBe(200);
+    expect(parsed.user_message_queue_wait_timeout_ms).toBe(5_000);
+  });
+
+  it("accepts a full queueing config within bounds", () => {
+    const res = RuntimeSettingsSchema.safeParse({
+      concurrency_queue_enabled: true,
+      concurrency_queue_min_size: 100,
+      concurrency_queue_size_multiplier: 2.5,
+      concurrency_queue_wait_timeout_ms: 300_000,
+      user_message_queue_enabled: true,
+      user_message_queue_delay_ms: 0,
+      user_message_queue_wait_timeout_ms: 1_000,
+    });
+    expect(res.success).toBe(true);
+  });
+
+  it("rejects out-of-bounds concurrency queue values (fail-closed)", () => {
+    expect(RuntimeSettingsSchema.safeParse({ concurrency_queue_min_size: 0 }).success).toBe(false);
+    expect(RuntimeSettingsSchema.safeParse({ concurrency_queue_min_size: 101 }).success).toBe(
+      false,
+    );
+    expect(RuntimeSettingsSchema.safeParse({ concurrency_queue_min_size: 1.5 }).success).toBe(
+      false,
+    );
+    expect(
+      RuntimeSettingsSchema.safeParse({ concurrency_queue_size_multiplier: -0.1 }).success,
+    ).toBe(false);
+    expect(
+      RuntimeSettingsSchema.safeParse({ concurrency_queue_wait_timeout_ms: 4_999 }).success,
+    ).toBe(false);
+    expect(
+      RuntimeSettingsSchema.safeParse({ concurrency_queue_wait_timeout_ms: 300_001 }).success,
+    ).toBe(false);
+  });
+
+  it("rejects out-of-bounds user-message queue values (fail-closed)", () => {
+    expect(RuntimeSettingsSchema.safeParse({ user_message_queue_delay_ms: -1 }).success).toBe(
+      false,
+    );
+    expect(RuntimeSettingsSchema.safeParse({ user_message_queue_delay_ms: 10_001 }).success).toBe(
+      false,
+    );
+    expect(
+      RuntimeSettingsSchema.safeParse({ user_message_queue_wait_timeout_ms: 999 }).success,
+    ).toBe(false);
+    expect(
+      RuntimeSettingsSchema.safeParse({ user_message_queue_wait_timeout_ms: 300_001 }).success,
+    ).toBe(false);
   });
 });

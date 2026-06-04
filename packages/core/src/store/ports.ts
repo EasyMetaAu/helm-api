@@ -118,6 +118,8 @@ export interface CreateKeyInput {
   budgetWindowSeconds?: number;
   overBudgetBehavior?: "degrade" | "reject";
   degradeLane?: string;
+  // Max in-flight requests (issue #93). Omitted => stored NULL => unlimited.
+  concurrencyLimit?: number;
 }
 
 export interface KeyStore {
@@ -158,6 +160,8 @@ export interface KeyPatch {
   budgetWindowSeconds?: number | null;
   overBudgetBehavior?: "degrade" | "reject";
   degradeLane?: string | null;
+  // Concurrency edit: present (even null) => written; null clears to unlimited.
+  concurrencyLimit?: number | null;
 }
 
 // Telemetry insert input: decision record + a redacted key reference. Never

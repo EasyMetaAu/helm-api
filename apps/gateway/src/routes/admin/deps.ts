@@ -268,6 +268,10 @@ export interface KeySummary {
   budget_window_seconds: number | null;
   over_budget_behavior: "degrade" | "reject";
   degrade_lane: string | null;
+  // Per-key max in-flight requests (issue #93). null = unlimited (0 rejected by
+  // the schema — null already means unlimited). Enforced only while the runtime
+  // setting concurrency_queue_enabled is ON.
+  concurrency_limit: number | null;
 }
 
 // New-key response: the ONLY place plaintext is ever returned, once.

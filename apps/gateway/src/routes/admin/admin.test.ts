@@ -75,6 +75,7 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         budget_window_seconds: input.budgetWindowSeconds ?? null,
         over_budget_behavior: input.overBudgetBehavior ?? "degrade",
         degrade_lane: input.degradeLane ?? null,
+        concurrency_limit: input.concurrencyLimit ?? null,
       };
       rows.push(rec);
       return rec;
@@ -108,6 +109,7 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       if (patch.overBudgetBehavior !== undefined)
         row.over_budget_behavior = patch.overBudgetBehavior;
       if (patch.degradeLane !== undefined) row.degrade_lane = patch.degradeLane;
+      if (patch.concurrencyLimit !== undefined) row.concurrency_limit = patch.concurrencyLimit;
     },
   };
 }

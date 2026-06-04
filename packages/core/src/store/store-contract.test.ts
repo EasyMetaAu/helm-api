@@ -303,6 +303,40 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(got?.rate_limit_tpm).toBeNull();
     });
 
+    it("concurrency_limit: omitted -> null (unlimited), set at create round-trips, updateKey edits + clears", async () => {
+      ctx = await make();
+      // omitted -> null (unlimited)
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "h1",
+        prefix: "p1",
+        accountId: "a",
+        role: "user",
+      });
+      let got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.concurrency_limit).toBeNull();
+      // set at create
+      await ctx.stores.keys.createKey({
+        keyId: "k2",
+        hash: "h2",
+        prefix: "p2",
+        accountId: "a",
+        role: "user",
+        concurrencyLimit: 4,
+      });
+      got = await ctx.stores.keys.getByHash("h2");
+      expect(got?.concurrency_limit).toBe(4);
+      // edit, then clear back to unlimited; sibling caps untouched (no clobber)
+      await ctx.stores.keys.updateKey("k1", { concurrencyLimit: 2, rateLimitRpm: 9 });
+      got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.concurrency_limit).toBe(2);
+      expect(got?.rate_limit_rpm).toBe(9);
+      await ctx.stores.keys.updateKey("k1", { concurrencyLimit: null });
+      got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.concurrency_limit).toBeNull();
+      expect(got?.rate_limit_rpm).toBe(9);
+    });
+
     it("updateKey edits caps (allowed_lanes / allow_custom_model) and clears with null", async () => {
       ctx = await make();
       await ctx.stores.keys.createKey({

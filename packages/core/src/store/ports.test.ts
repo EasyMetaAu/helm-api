@@ -37,6 +37,7 @@ class InMemoryKeyStore implements KeyStore {
       budget_window_seconds: input.budgetWindowSeconds ?? null,
       over_budget_behavior: input.overBudgetBehavior ?? "degrade",
       degrade_lane: input.degradeLane ?? null,
+      concurrency_limit: input.concurrencyLimit ?? null,
     };
     this.byId.set(record.key_id, record);
     return record;
@@ -202,6 +203,7 @@ describe("port type contracts", () => {
       | "budgetWindowSeconds"
       | "overBudgetBehavior"
       | "degradeLane"
+      | "concurrencyLimit"
     >();
   });
 

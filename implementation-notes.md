@@ -17,6 +17,27 @@ Codex 第二轮 review 发现 5 个问题（2×P1、2×P2、1×P3），全部修
 
 ---
 
+## 2026-06-04 · 请求排队两特性：per-key 并发溢出排队 + per-account 用户消息串行队列（issue #93；spec 未覆盖）
+
+参考 claude-relay-service（CRS）移植的两个限流增强能力，实现与 CRS 的关键差异是 **in-memory promise FIFO 直接交接**（单进程，无 Redis、无轮询、无孤儿锁清理任务）。core 原语在 `packages/core/src/queue/`（keyed-semaphore / keyed-serial-gate / user-turn 判定），gateway 只装配。
+
+**特性 A（per-key 并发溢出排队）**：key 新增 `concurrency_limit` 列（NULL=不限；0 被 schema 拒绝——与 budgets 同约定，区别于 rate-limit 的 0=不限哨兵）。runtime settings 四个全局参数（`concurrency_queue_*`）。超限请求 FIFO 等待；队满/等待超时 → 429 `rate_limited` + retry-after（队满 1s、超时 5s）。
+
+**特性 B（per-account 用户消息串行）**：runtime settings 三个全局参数（`user_message_queue_*`）。判定在 OpenAI 形态消息上做（provider 层 tool 结果是 `role:"tool"`，content 数组的 `tool_result` 块检查是防御性兜底）。等待超时 → 503。
+
+不得不拍板的决定与坑：
+
+- **锁释放时机 = 完整完成**（用户拍板，CRS 对齐）：串行锁持有到流式响应**完全 drain**，`release()` 才盖完成时间戳、间隔从这一刻起算。代价是单账户吞吐 = 1 并发；备选「首 chunk 释放」被否。
+- **串行队列超时不前进 fallback 链**：`QueueTimeoutError` 在 execute 是**终态** 503（`lane_unavailable` 复用，不新增 ErrorClass——新增要动 4 张穷举映射表 + 全部 transformer 测试，零收益），且**不记熔断失败**（backpressure ≠ provider 健康）。理由：队列就是为保护这个订阅的限流而开，溢到下个 candidate 等于绕开节流。如希望「排队超时就切别家」，需改 execute.ts 该分支为 continue。
+- **并发槽释放路径**（头号风险，全覆盖）：chat 走 middleware claim-flag（streamSSE 先返回 Response、流体 finally 才是真正结束点）；messages/responses/gemini 自鉴权路由走 `concurrencyRelease` context 变量 + 路由级 `concurrencyReleaseGuard` 中间件（任何退出路径含 onError 抛出都释放），流式分支 claim 后在流 finally 释放。release 幂等 + 5 分钟 watchdog 兜底强制回收（warn 日志）。
+- **单进程假设（已知限制）**：两个队列都是进程内存状态。多实例部署（共享 Postgres）时各实例独立排队，per-key 并发上限实际 = limit × 实例数，per-account 串行也只在单实例内成立。CRS 用 Redis 解决；helm 不为此引入该依赖。
+- **串行 gate 跨 pool rebuild 存活**：`createKeyedSerialGate()` 在 buildServer 创建一次，穿入 `synthesizeOAuthProviders` 与 `rebuildOAuthPool`（同一实例），admin 保存不丢队列状态/完成时间戳；配置经 live thunk 读 `settings`，开关即时生效无需 rebuild。
+- **per-account 包装位置**：在 pool member 的 client 上包（`createSerializingClient`，gate key = `${providerId} ${account}`，与 account-settings 复合键一致），而非 pool 外层——锁必须对应 pool 实际选中的账户。
+- **fail-open**：gate 自身意外异常（非超时/abort）→ 放行 + warn（原则 3）；超时/队满是**设计内**拒绝，不属 fail-open 范畴。
+- 迁移：sqlite v13 / postgres v12（`ALTER TABLE api_keys ADD COLUMN concurrency_limit INTEGER`）。
+
+---
+
 ## 2026-06-04 · `/v1/models` 漏报订阅（OAuth）模型（bug 修复；docs/04 lane、issue #38）
 
 **问题**：`GET /v1/models` 对 `allow_custom_model` key 列出了 configured providers 的别名（deepseek/openrouter/zenmux），但**完全没有订阅（OAuth）provider 的模型**。根因：`server.ts` 给 `registerModelsRoute` 的 `providerAliases` 只取 `config.providers[].models[].alias`（静态配置），而订阅模型是另一条链路 `synthesizeOAuthProviders` 合成的，活别名存在热加载的 `oauthAliasSet` 里。执行器读它做路由（`oauthAliases: () => oauthAliasSet`），但发现端点从没拿到——于是「能路由但列不出」。
@@ -802,7 +823,7 @@ protocol + gateway routes 406 tests green; typecheck clean; `pnpm lint` exit 0.
 - **`injectIntoIR` / `isPlainTextTurn`** (`core/memory/inject-bridge.ts`): framework-agnostic IR↔inject bridge owning the D7 gate + D8 RawMessage synthesis / source→IR restoration.
 - **Gateway hooks**: `/v1/chat/completions` (`chat.ts`) and the shared messages/responses pipeline (`messages-pipeline.ts`) full-replace `internal.messages` with the assembled prefix on `mode=inject`, plain-text turns only, fully fail-open.
 - **Composition root** (`server.ts`): builds inject/observer/reflector deps + starts the env-gated worker (`HELM_MEMORY_WORKER_DISABLED` / `_INTERVAL_MS`); `dispose()` stops it.
-- Migration **v13** (sqlite) / **v12** (pg): `(type, scope_id, status)` index for the dedupe lookup + status scan. (Originally v9/v8 on the branch; renumbered during the rebase onto main, whose oauth/budget work had taken sqlite v9–v12 / pg v8–v11.)
+- Migration **v14** (sqlite) / **v13** (pg): `(type, scope_id, status)` index for the dedupe lookup + status scan. (Originally v9/v8 on the branch; renumbered twice while rebasing onto main — first past the oauth/budget migrations, then past #93's `concurrency_limit` which took sqlite v13 / pg v12.)
 
 **Decisions / trade-offs (maintainer review points)**:
 - **D1 scope_id encoding**: canonical JSON (omit-undefined, stable key order) in a single TEXT column — robust to ids containing delimiters; re-validated through Zod on decode (fail-closed at the boundary).

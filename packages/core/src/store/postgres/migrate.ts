@@ -267,11 +267,20 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Memory job queue scan index (docs/08 Phase 2). The unique open-job
-    // boundary is added in v14 after cleanup, so old duplicate open rows cannot
-    // make first-time upgrades fail before the cleanup migration runs. Mirrors
-    // sqlite v13 (different ledger, same logical change).
+    // Per-key max in-flight requests (issue #93) — pg mirror of the sqlite v13
+    // migration. Additive — existing rows get NULL (= unlimited; 0 is not a
+    // sentinel). The in-flight counter is process memory; only the limit persists.
     version: 12,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS concurrency_limit INTEGER;
+    `,
+  },
+  {
+    // Memory job queue scan index (docs/08 Phase 2). The unique open-job
+    // boundary is added in v15 after cleanup, so old duplicate open rows cannot
+    // make first-time upgrades fail before the cleanup migration runs. Mirrors
+    // sqlite v14 (different ledger, same logical change).
+    version: 13,
     sql: `
       CREATE TABLE IF NOT EXISTS memory_jobs (
         id TEXT PRIMARY KEY,
@@ -290,7 +299,7 @@ const MIGRATIONS: readonly Migration[] = [
   {
     // Bind memory_reflections to the authenticated account owner so project or
     // resource ids reused by another account cannot read long-lived memory.
-    version: 13,
+    version: 14,
     sql: `
       ALTER TABLE memory_reflections ADD COLUMN IF NOT EXISTS owner_id TEXT;
       CREATE INDEX IF NOT EXISTS idx_memory_reflections_owner_scope
@@ -298,9 +307,9 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // DB-level open-job dedupe boundary. The original v12 scan index was non-unique;
+    // DB-level open-job dedupe boundary. The original v13 scan index was non-unique;
     // this additive migration makes concurrent enqueueJob calls collapse atomically.
-    version: 14,
+    version: 15,
     sql: `
       WITH ranked AS (
         SELECT

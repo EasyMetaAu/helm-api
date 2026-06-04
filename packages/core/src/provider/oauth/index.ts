@@ -50,6 +50,11 @@ export {
   throwIfOAuthLoginAborted,
   withOAuthLoginAbort,
 } from "./runtime.js";
+export {
+  createSerializingClient,
+  QueueTimeoutError,
+  type SerializeClientDeps,
+} from "./serialize-client.js";
 export type {
   OAuthAuthInfo,
   OAuthCredentials,

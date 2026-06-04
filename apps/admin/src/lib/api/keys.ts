@@ -32,6 +32,9 @@ export interface ApiKeyView {
   budget_window_seconds: number | null;
   over_budget_behavior: 'degrade' | 'reject';
   degrade_lane: string | null;
+  // Per-key max in-flight requests (issue #93). null = unlimited. Enforced only
+  // while the runtime setting concurrency_queue_enabled is ON.
+  concurrency_limit: number | null;
 }
 
 // Operator-specified caps for a new key. The plaintext is minted server-side; the
@@ -53,6 +56,8 @@ export interface CreateKeyInput {
   budget_window_seconds?: number;
   over_budget_behavior?: 'degrade' | 'reject';
   degrade_lane?: string;
+  // Optional max in-flight requests at mint time. Omitted => unlimited.
+  concurrency_limit?: number;
 }
 
 // Editable caps for an existing key (PATCH). Mirrors the server
@@ -71,6 +76,8 @@ export interface UpdateKeyInput {
   budget_window_seconds?: number | null;
   over_budget_behavior?: 'degrade' | 'reject';
   degrade_lane?: string | null;
+  // Omit = leave unchanged; null = clear back to unlimited.
+  concurrency_limit?: number | null;
 }
 
 // The ONLY shape that ever carries plaintext, returned once by POST. `prefix` is
@@ -125,6 +132,7 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
       typeof raw.budget_window_seconds === 'number' ? raw.budget_window_seconds : null,
     over_budget_behavior: raw.over_budget_behavior === 'reject' ? 'reject' : 'degrade',
     degrade_lane: typeof raw.degrade_lane === 'string' ? raw.degrade_lane : null,
+    concurrency_limit: typeof raw.concurrency_limit === 'number' ? raw.concurrency_limit : null,
   };
 }
 
@@ -154,6 +162,8 @@ function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   if (input.degrade_lane !== undefined && input.degrade_lane.length > 0) {
     out.degrade_lane = input.degrade_lane;
   }
+  // Send only when set (omitted = unlimited; server schema is .strict()).
+  if (input.concurrency_limit !== undefined) out.concurrency_limit = input.concurrency_limit;
   return out;
 }
 

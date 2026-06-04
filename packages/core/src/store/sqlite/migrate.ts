@@ -311,10 +311,20 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Memory job queue scan index (docs/08 Phase 2). The unique open-job
-    // boundary is added in v15 after cleanup, so old duplicate open rows cannot
-    // make first-time upgrades fail before the cleanup migration runs.
+    // Per-key max in-flight requests (issue #93 concurrency overflow queue).
+    // Additive — existing rows get NULL (= unlimited; like the budgets, 0 is not
+    // a sentinel). The in-flight counter itself is process memory (single-process
+    // FIFO semaphore), so no counter table — only the configured limit persists.
     version: 13,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN concurrency_limit INTEGER;
+    `,
+  },
+  {
+    // Memory job queue scan index (docs/08 Phase 2). The unique open-job
+    // boundary is added in v16 after cleanup, so old duplicate open rows cannot
+    // make first-time upgrades fail before the cleanup migration runs.
+    version: 14,
     sql: `
       CREATE TABLE IF NOT EXISTS memory_jobs (
         id TEXT PRIMARY KEY,
@@ -333,7 +343,7 @@ const MIGRATIONS: readonly Migration[] = [
   {
     // Bind memory_reflections to the authenticated account owner so project or
     // resource ids reused by another account cannot read long-lived memory.
-    version: 14,
+    version: 15,
     sql: `
       CREATE TABLE IF NOT EXISTS memory_reflections (
         id TEXT PRIMARY KEY,
@@ -351,9 +361,9 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // DB-level open-job dedupe boundary. The original v13 scan index was non-unique;
+    // DB-level open-job dedupe boundary. The original v14 scan index was non-unique;
     // this additive migration makes concurrent enqueueJob calls collapse atomically.
-    version: 15,
+    version: 16,
     sql: `
       UPDATE memory_jobs
       SET status = 'failed',
