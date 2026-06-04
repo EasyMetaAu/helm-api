@@ -5,6 +5,8 @@
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
   import JsonViewer from '$lib/components/JsonViewer.svelte';
+  import StreamViewer from '$lib/components/StreamViewer.svelte';
+  import { isSseStream } from '$lib/sse';
 
   // Request detail (docs/07 detail). READ-ONLY consumer — renders the recorded trail
   // and recomputes nothing (Principle 1). When capture_payloads is on, the full request +
@@ -72,7 +74,9 @@
         <JsonViewer value={data.payload.request} testid="request-body" />
       {:else}
         <p class="field-help mb-2">
-          {$t('Request metadata recorded for this call (redacted — no message content or secrets).')}
+          {$t(
+            'Request metadata recorded for this call (redacted — no message content or secrets).',
+          )}
         </p>
         <JsonViewer value={d.request_meta} />
         <p data-testid="payload-summary" class="mt-2 italic text-ink-muted">
@@ -114,8 +118,17 @@
     {:else if data.payload?.captured && data.payload?.response != null}
       <section class="card text-sm">
         <h2 class="section-header">{$t('Response')}</h2>
-        <p class="field-help mb-2">{$t('Full response body recorded for this call.')}</p>
-        <JsonViewer value={data.payload.response} testid="response-body" />
+        {#if isSseStream(data.payload.response)}
+          <!-- Streaming call: the stored body is the raw SSE wire text. Render it
+               stream-aware (assembled final message / per-chunk table / raw). -->
+          <p class="field-help mb-2">
+            {$t('Streaming response — assembled from the recorded SSE stream.')}
+          </p>
+          <StreamViewer raw={data.payload.response} testid="response-body" />
+        {:else}
+          <p class="field-help mb-2">{$t('Full response body recorded for this call.')}</p>
+          <JsonViewer value={data.payload.response} testid="response-body" />
+        {/if}
       </section>
     {:else if d.response_meta}
       <section class="card text-sm">
