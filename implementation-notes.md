@@ -5,6 +5,26 @@
 
 ---
 
+## 2026-06-04 · OAuth 额度孤儿快照清理（providers 页 Tier 3, spec docs/11）
+
+`/admin/api/oauth/quota` 旧逻辑直接返回 `oauthQuota.getAll()`——**所有**存储的快照行。问题：
+Codex 额度是按 `(provider, account)` 通过响应头 PUSH 写入的；当账户被改名/重新绑定（如 `default` →
+`mylukin`），旧标签的行不会被清理，于是页面出现一个**幽灵账户**（用户实际只绑了 1 个 codex，却显示 2 个）。
+
+修复：以 `listStatus()`（已绑定的 OAuth token）为唯一真相，路由现在
+(1) 只返回属于已绑定账户的快照；(2) 顺手 `delete` 掉孤儿行（best-effort，不阻塞读取）。
+新增 `OAuthQuotaStore.delete(providerId, account)` 端口方法 + sqlite/postgres 两个适配器实现。
+`listStatus` 缺失（无 seam / 异常）时 fail-open 返回全部，绝不因清理逻辑隐藏数据。
+
+坑（自己踩的）：路由里 `acctKey` 分隔符一度被写成裸 NUL 字节（`${p}\x00${a}`），导致 git 把
+`oauth.ts` 当二进制、grep 失效；改成 ASCII 转义 `\u0000`（运行时键不变、源码恢复纯文本）。
+
+另：本轮还确认 Anthropic usage 端点本身工作正常（用解密后的 token 直连得到 HTTP 200，
+`five_hour/seven_day/seven_day_sonnet` 均有值，`seven_day_opus` 为 null）；之前页面显示 "—" 纯属
+前面压测把上游限流打挂 + 负缓存的 null 还没过期，并非代码缺陷——部署本修复后会自动刷新回填。
+
+---
+
 ## 2026-06-04 · OAuth 额度刷新负缓存（对齐 claude-relay-service, spec docs/11）
 
 对照参考实现 `/Users/lukin/Projects/claude-relay-service`，确认了两点并补了一处缺陷：

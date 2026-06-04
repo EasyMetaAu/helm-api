@@ -49,6 +49,13 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
       .map((r) => this.toSnapshot(r));
   }
 
+  async delete(providerId: string, account: string): Promise<void> {
+    this.db
+      .delete(oauthQuota)
+      .where(and(eq(oauthQuota.providerId, providerId), eq(oauthQuota.account, account)))
+      .run();
+  }
+
   // Row -> OAuthQuotaSnapshot. Re-validates through the shared schema so a
   // corrupted row surfaces loudly rather than leaking a malformed shape.
   private toSnapshot(row: QuotaRow): OAuthQuotaSnapshot {

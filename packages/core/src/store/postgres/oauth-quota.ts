@@ -47,6 +47,12 @@ export class PgOAuthQuotaStore implements OAuthQuotaStore {
     return rows.map((r) => this.toSnapshot(r));
   }
 
+  async delete(providerId: string, account: string): Promise<void> {
+    await this.db
+      .delete(oauthQuota)
+      .where(and(eq(oauthQuota.providerId, providerId), eq(oauthQuota.account, account)));
+  }
+
   private toSnapshot(row: QuotaRow): OAuthQuotaSnapshot {
     return OAuthQuotaSnapshotSchema.parse({
       providerId: row.providerId,
