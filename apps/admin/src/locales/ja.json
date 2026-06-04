@@ -345,7 +345,7 @@
   "Schedule": "スケジュール",
   "Search model": "モデルを検索",
   "Secondary": "セカンダリ",
-  "See the full decision trail for every request the gateway handled.": "ゲートウェイが処理したすべてのリクエストの完全な判断経路を確認します。",
+  "Weekly": "週間",  "See the full decision trail for every request the gateway handled.": "ゲートウェイが処理したすべてのリクエストの完全な判断経路を確認します。",
   "Served model": "提供モデル",
   "Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.": "サーバーサイドのルーティング規則。各規則は 条件 → アクション（レーンの強制または上限）です。ポリシーはタスクレーンを上書きしますが、実行フォールバック チェーンは上書きしません。",
   "Set the primary model and fallback chain for each quality and cost tier.": "各品質およびコストティアのプライマリモデルとフォールバックチェーンを設定します。",
