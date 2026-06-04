@@ -21,6 +21,13 @@
     rate_limit_default_rpm: 0,
     rate_limit_default_tpm: 0,
     log_level: 'info' as LogLevel,
+    concurrency_queue_enabled: false,
+    concurrency_queue_min_size: 5,
+    concurrency_queue_size_multiplier: 0,
+    concurrency_queue_wait_timeout_ms: 10000,
+    user_message_queue_enabled: false,
+    user_message_queue_delay_ms: 200,
+    user_message_queue_wait_timeout_ms: 5000,
   };
   // Local working copy (snapshot the loaded settings into a NEW object so the
   // $state initializer doesn't capture the reactive `data` prop reference).
@@ -156,6 +163,119 @@
         </select>
         <span class="field-help">{$t('How much detail the gateway writes to its logs.')}</span>
       </label>
+    </section>
+
+    <!-- Request queueing (issue #93) -->
+    <section class="card flex flex-col gap-3 text-sm">
+      <h2 class="section-header">{$t('Request queueing')}</h2>
+
+      <label class="flex items-start gap-3">
+        <input
+          type="checkbox"
+          data-testid="concurrency-queue-enabled"
+          class="checkbox mt-0.5"
+          bind:checked={form.concurrency_queue_enabled}
+        />
+        <span>
+          <span class="font-medium">{$t('Queue requests over a key’s concurrency limit')}</span>
+          <span class="field-help block"
+            >{$t(
+              'When an API key exceeds its max concurrent requests, extra requests wait in line instead of being rejected immediately. Suits agents that fire parallel tool calls.',
+            )}</span
+          >
+        </span>
+      </label>
+
+      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 sm:flex-row sm:gap-6">
+        <label class="flex flex-col gap-1">
+          <span class="font-medium">{$t('Minimum queue size')}</span>
+          <input
+            type="number"
+            min="1"
+            max="100"
+            step="1"
+            data-testid="concurrency-queue-min-size"
+            class="input-sm w-32"
+            bind:value={form.concurrency_queue_min_size}
+          />
+          <span class="field-help">{$t('Fixed lower bound on how many requests may wait.')}</span>
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="font-medium">{$t('Queue size multiplier')}</span>
+          <input
+            type="number"
+            min="0"
+            step="0.5"
+            data-testid="concurrency-queue-multiplier"
+            class="input-sm w-32"
+            bind:value={form.concurrency_queue_size_multiplier}
+          />
+          <span class="field-help"
+            >{$t('Max queue = MAX(multiplier × key limit, minimum). 0 uses the minimum only.')}</span
+          >
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="font-medium">{$t('Queue wait timeout (ms)')}</span>
+          <input
+            type="number"
+            min="5000"
+            max="300000"
+            step="1000"
+            data-testid="concurrency-queue-timeout"
+            class="input-sm w-32"
+            bind:value={form.concurrency_queue_wait_timeout_ms}
+          />
+          <span class="field-help">{$t('Waiting longer than this returns 429.')}</span>
+        </label>
+      </div>
+
+      <label class="flex items-start gap-3">
+        <input
+          type="checkbox"
+          data-testid="user-message-queue-enabled"
+          class="checkbox mt-0.5"
+          bind:checked={form.user_message_queue_enabled}
+        />
+        <span>
+          <span class="font-medium">{$t('Serialize user messages per subscription account')}</span>
+          <span class="field-help block"
+            >{$t(
+              'Runs user-message requests to the same OAuth account one at a time with a minimum gap, to avoid tripping upstream rate limits. Tool results and assistant continuations are never queued.',
+            )}</span
+          >
+        </span>
+      </label>
+
+      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 sm:flex-row sm:gap-6">
+        <label class="flex flex-col gap-1">
+          <span class="font-medium">{$t('Gap between requests (ms)')}</span>
+          <input
+            type="number"
+            min="0"
+            max="10000"
+            step="50"
+            data-testid="user-message-queue-delay"
+            class="input-sm w-32"
+            bind:value={form.user_message_queue_delay_ms}
+          />
+          <span class="field-help"
+            >{$t('Minimum time between one request finishing and the next starting.')}</span
+          >
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="font-medium">{$t('Queue wait timeout (ms)')}</span>
+          <input
+            type="number"
+            min="1000"
+            max="300000"
+            step="500"
+            data-testid="user-message-queue-timeout"
+            class="input-sm w-32"
+            bind:value={form.user_message_queue_wait_timeout_ms}
+          />
+          <span class="field-help">{$t('Waiting longer than this returns 503.')}</span>
+        </label>
+      </div>
     </section>
 
     <div class="card-actions border-t-0 pt-0">

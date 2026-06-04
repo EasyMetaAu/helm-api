@@ -41,6 +41,7 @@ function keyRecord(over: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     budget_window_seconds: null,
     over_budget_behavior: "degrade",
     degrade_lane: null,
+    concurrency_limit: null,
     ...over,
   };
 }

@@ -38,6 +38,14 @@ describe("defaultSettingsFromConfig", () => {
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
       log_level: "info",
+      // Queueing fields (issue #93) come straight from the schema defaults.
+      concurrency_queue_enabled: false,
+      concurrency_queue_min_size: 5,
+      concurrency_queue_size_multiplier: 0,
+      concurrency_queue_wait_timeout_ms: 10_000,
+      user_message_queue_enabled: false,
+      user_message_queue_delay_ms: 200,
+      user_message_queue_wait_timeout_ms: 5_000,
     });
     expect(defaultSettingsFromConfig(cfg(false)).rate_limit_enabled).toBe(false);
   });
@@ -99,6 +107,13 @@ describe("saveRuntimeSettings", () => {
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
       log_level: "warn",
+      concurrency_queue_enabled: false,
+      concurrency_queue_min_size: 5,
+      concurrency_queue_size_multiplier: 0,
+      concurrency_queue_wait_timeout_ms: 10_000,
+      user_message_queue_enabled: false,
+      user_message_queue_delay_ms: 200,
+      user_message_queue_wait_timeout_ms: 5_000,
     });
     expect(saved.payload_retention_days).toBe(7);
     expect(JSON.parse(store.map.get(RUNTIME_SETTINGS_KEY) ?? "{}")).toEqual(saved);

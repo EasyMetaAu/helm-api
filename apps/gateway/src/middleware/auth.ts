@@ -21,6 +21,9 @@ export interface AuthIdentity {
      *  for that dimension; a number (0 = unlimited) overrides it. Read by the
      *  rate-limit middleware so the limiter needs no extra KeyStore lookup. */
     rateLimit: { rpm: number | null; tpm: number | null };
+    /** Per-key max in-flight requests (issue #93). null = unlimited. Read by the
+     *  concurrency gate so it needs no extra KeyStore lookup. */
+    concurrencyLimit: number | null;
     /** Per-key usage budgets (docs/06). Read by the budget gate so it needs no
      *  extra KeyStore lookup. Each cap null = no cap for that dimension. */
     budget: BudgetCaps;
@@ -92,6 +95,7 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler {
         allowedLanes: record.allowed_lanes,
         allowCustomModel: record.allow_custom_model,
         rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+        concurrencyLimit: record.concurrency_limit,
         budget: {
           requests: record.budget_requests,
           tokens: record.budget_tokens,

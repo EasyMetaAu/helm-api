@@ -12,6 +12,13 @@ const FULL: RuntimeSettings = {
   rate_limit_default_rpm: 60,
   rate_limit_default_tpm: 90000,
   log_level: 'debug',
+  concurrency_queue_enabled: true,
+  concurrency_queue_min_size: 8,
+  concurrency_queue_size_multiplier: 1.5,
+  concurrency_queue_wait_timeout_ms: 20000,
+  user_message_queue_enabled: true,
+  user_message_queue_delay_ms: 300,
+  user_message_queue_wait_timeout_ms: 8000,
 };
 
 describe('settings api client', () => {
@@ -43,6 +50,14 @@ describe('settings api client', () => {
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
       log_level: 'info',
+      // Queueing fields default to the schema's documented values (both OFF).
+      concurrency_queue_enabled: false,
+      concurrency_queue_min_size: 5,
+      concurrency_queue_size_multiplier: 0,
+      concurrency_queue_wait_timeout_ms: 10000,
+      user_message_queue_enabled: false,
+      user_message_queue_delay_ms: 200,
+      user_message_queue_wait_timeout_ms: 5000,
     });
   });
 

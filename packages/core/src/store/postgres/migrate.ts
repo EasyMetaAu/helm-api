@@ -276,6 +276,15 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // Per-key max in-flight requests (issue #93) — pg mirror of the sqlite v13
+    // migration. Additive — existing rows get NULL (= unlimited; 0 is not a
+    // sentinel). The in-flight counter is process memory; only the limit persists.
+    version: 12,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS concurrency_limit INTEGER;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

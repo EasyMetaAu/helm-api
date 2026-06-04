@@ -16,6 +16,18 @@ export interface RuntimeSettings {
   rate_limit_default_rpm: number;
   rate_limit_default_tpm: number;
   log_level: LogLevel;
+  // Per-key concurrency overflow queue (issue #93, feature A). When ON, a key
+  // with a concurrency_limit queues excess requests instead of an instant 429.
+  concurrency_queue_enabled: boolean;
+  concurrency_queue_min_size: number; // 固定最小排队数 (1-100)
+  concurrency_queue_size_multiplier: number; // 排队数倍数; 0 = use min size only
+  concurrency_queue_wait_timeout_ms: number; // 排队超时 (5s-5min)
+  // Per-account user-message serial queue (issue #93, feature B). When ON,
+  // user-message requests to the SAME OAuth account run one at a time with a
+  // minimum delay between completions.
+  user_message_queue_enabled: boolean;
+  user_message_queue_delay_ms: number; // 请求间隔 (0-10000)
+  user_message_queue_wait_timeout_ms: number; // 队列超时 (1s-5min)
 }
 
 export const LOG_LEVEL_OPTIONS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
@@ -51,6 +63,24 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
     log_level: (LOG_LEVEL_OPTIONS as readonly string[]).includes(level as string)
       ? (level as LogLevel)
       : 'info',
+    concurrency_queue_enabled: raw.concurrency_queue_enabled === true,
+    concurrency_queue_min_size:
+      typeof raw.concurrency_queue_min_size === 'number' ? raw.concurrency_queue_min_size : 5,
+    concurrency_queue_size_multiplier:
+      typeof raw.concurrency_queue_size_multiplier === 'number'
+        ? raw.concurrency_queue_size_multiplier
+        : 0,
+    concurrency_queue_wait_timeout_ms:
+      typeof raw.concurrency_queue_wait_timeout_ms === 'number'
+        ? raw.concurrency_queue_wait_timeout_ms
+        : 10000,
+    user_message_queue_enabled: raw.user_message_queue_enabled === true,
+    user_message_queue_delay_ms:
+      typeof raw.user_message_queue_delay_ms === 'number' ? raw.user_message_queue_delay_ms : 200,
+    user_message_queue_wait_timeout_ms:
+      typeof raw.user_message_queue_wait_timeout_ms === 'number'
+        ? raw.user_message_queue_wait_timeout_ms
+        : 5000,
   };
 }
 
