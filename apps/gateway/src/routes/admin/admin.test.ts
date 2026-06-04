@@ -858,6 +858,42 @@ describe("admin.api oauth usage", () => {
     expect(body.usage[0]?.rpm).toBeLessThan(5);
   });
 
+  it("GET /oauth/usage returns only BOUND accounts (drops orphan rows)", async () => {
+    const day = Date.now() - (Date.now() % 86_400_000);
+    const row = (account: string, requests: number) => ({
+      providerId: "openai-codex",
+      account,
+      day,
+      requests,
+      tokens: 0,
+      costUsd: null,
+      firstSeenMs: Date.now() - 60 * 60_000,
+      updatedAt: Date.now(),
+    });
+    const oauthUsage = {
+      record: async () => {},
+      queryDay: async () => [row("mylukin", 4), row("default", 9)], // default = orphan
+    } as unknown as AdminApiDeps["oauthUsage"];
+    const acct = (account: string) => ({
+      account,
+      expiresAt: null,
+      updatedAt: 0,
+      healthy: true,
+      priority: 50,
+      schedulable: true,
+    });
+    const oauth = {
+      listStatus: async () => [
+        { id: "openai-codex", name: "C", flow: "manual_paste", accounts: [acct("mylukin")] },
+      ],
+    } as unknown as AdminApiDeps["oauth"];
+    const app = buildApp(buildDeps({ oauthUsage, oauth }));
+    const res = await app.request("/admin/api/oauth/usage");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { usage: Array<{ account: string }> };
+    expect(body.usage.map((u) => u.account)).toEqual(["mylukin"]);
+  });
+
   it("GET /oauth/usage fails open to [] when no usage store is wired", async () => {
     const app = buildApp(buildDeps());
     const res = await app.request("/admin/api/oauth/usage");

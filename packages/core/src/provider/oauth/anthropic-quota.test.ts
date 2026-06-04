@@ -24,6 +24,29 @@ describe("parseAnthropicUsageBody", () => {
     ]);
   });
 
+  it("parses the real-world body where seven_day_opus is null + unknown windows exist", () => {
+    // Mirrors a live response: opus is `null` (no Opus cap on this plan) and the API
+    // ships extra forward-compat keys. A strict `.optional()` schema would REJECT the
+    // null and drop EVERYTHING — this guards that regression (page went blank).
+    const out = parseAnthropicUsageBody(
+      {
+        five_hour: { utilization: 6, resets_at: RESET },
+        seven_day: { utilization: 18, resets_at: RESET },
+        seven_day_opus: null,
+        seven_day_sonnet: { utilization: 0, resets_at: RESET },
+        seven_day_oauth_apps: null,
+        tangelo: null,
+        extra_usage: { is_enabled: true, monthly_limit: null, used_credits: 0, currency: "AUD" },
+      },
+      NOW,
+    );
+    expect(out).toEqual([
+      { key: "5h", usedPercent: 6, resetsAtMs: RESET_MS, windowMinutes: null },
+      { key: "7d", usedPercent: 18, resetsAtMs: RESET_MS, windowMinutes: null },
+      { key: "7d-sonnet", usedPercent: 0, resetsAtMs: RESET_MS, windowMinutes: null },
+    ]);
+  });
+
   it("clamps an out-of-range utilization into 0–100 without re-scaling", () => {
     const out = parseAnthropicUsageBody({ five_hour: { utilization: 130, resets_at: RESET } }, NOW);
     expect(out).toEqual([

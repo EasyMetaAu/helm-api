@@ -5,6 +5,22 @@
 
 ---
 
+## 2026-06-04 · Anthropic null 窗口解析回归 + /usage 孤儿过滤（providers 页, spec docs/11）
+
+两个收尾修复：
+
+1. **Anthropic 额度一直显示 "—" 的真因（自己引入的回归）**：实测用解密 token 直连 usage 端点返回 200，
+   但 helm 解析后为空。原因是之前给 schema 加的 seven_day_opus 字段用了 .optional()，而真实响应里
+   该字段是显式 null（无 Opus 周限的套餐）。Zod 的 .optional() 只接受 undefined、不接受 null，于是整个
+   body 校验失败、parseAnthropicUsageBody 返回 []，页面空白。改为四个窗口字段全部 .nullish()
+   （nullable + optional）。新增回归测试：带 null opus + 额外前向兼容键的真实 body 仍能解析出 5h/7d/sonnet。
+
+2. **/usage（Tier 2）也有孤儿账户**：和 /quota 一样，account 改名/重绑后旧行残留，页面显示成两个 codex。
+   给 /usage 路由加上同样的 listStatus 绑定过滤（fail-open：listStatus 不可用则返回全部）。用 JSON.stringify
+   做账户 key，避免再次手滑写出裸 NUL 字节（上一条 commit 在 quota 路由踩过这个坑）。
+
+---
+
 ## 2026-06-04 · OAuth 额度孤儿快照清理（providers 页 Tier 3, spec docs/11）
 
 `/admin/api/oauth/quota` 旧逻辑直接返回 `oauthQuota.getAll()`——**所有**存储的快照行。问题：
