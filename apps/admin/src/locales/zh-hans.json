@@ -301,6 +301,8 @@
   "Recent requests": "最近请求",
   "Record full request and response bodies": "记录完整的请求和响应正文",
   "redacted": "已脱敏",
+  "Refresh": "刷新",
+  "Refreshing…": "刷新中…",
   "reject": "拒绝",
   "Reject (429)": "拒绝（429）",
   "remove": "移除",
