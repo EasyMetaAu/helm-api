@@ -374,6 +374,7 @@ export {
   openaiCodexOAuthProvider,
   parseAnthropicUsageBody,
   parseCodexQuotaHeaders,
+  parseCodexUsageBody,
   parseOAuthAuthorizationInput,
   pollCopilotDeviceOnce,
   refreshGitHubCopilotToken,

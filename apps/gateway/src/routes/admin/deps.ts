@@ -155,12 +155,15 @@ export interface OAuthAdminAccess {
     schedulable?: boolean;
   }): Promise<void>;
   // Pull the Anthropic OAuth usage endpoint for one account → quota windows
-  // (providers page Tier 3). Unlike Codex (which PUSHes quota headers on every
-  // reply), Claude exposes a dedicated usage endpoint, so this is an on-demand PULL
-  // behind a short TTL cache. FAIL-OPEN: returns null on any failure (dead token,
-  // network, malformed body) so the page renders "—" rather than erroring. Optional
-  // so unit-test seams can omit it.
+  // (providers page Tier 3). Claude exposes a dedicated usage endpoint, so this is
+  // an on-demand PULL behind a short TTL cache. FAIL-OPEN: returns null on any
+  // failure (dead token, network, malformed body) so the page renders "—" rather
+  // than erroring. Optional so unit-test seams can omit it.
   fetchAnthropicQuota?(input: { account: string }): Promise<OAuthQuotaWindow[] | null>;
+  // Same PULL for Codex (chatgpt.com/backend-api/wham/usage — what the Codex CLI
+  // /status reads). Complements the `x-codex-*` header PUSH so quota renders even
+  // before an account has served any traffic. Same TTL cache + fail-open contract.
+  fetchCodexQuota?(input: { account: string }): Promise<OAuthQuotaWindow[] | null>;
 }
 
 // The effective scheduling for one account: defaults applied (priority 50,

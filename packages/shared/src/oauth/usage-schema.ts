@@ -56,7 +56,7 @@ export const OAuthQuotaSnapshotSchema = z
     account: z.string(),
     windows: z.array(OAuthQuotaWindowSchema),
     capturedAt: z.number().int(), // epoch ms the snapshot was taken
-    source: z.enum(["anthropic", "codex-headers"]),
+    source: z.enum(["anthropic", "codex-headers", "codex"]),
   })
   .strict();
 
@@ -89,3 +89,34 @@ export const AnthropicOAuthUsageSchema = z
   .loose();
 
 export type AnthropicOAuthUsage = z.infer<typeof AnthropicOAuthUsageSchema>;
+
+// ── Codex usage-endpoint response (GET chatgpt.com/backend-api/wham/usage) ────
+
+// The (untrusted) shape ChatGPT's Codex usage endpoint returns — the same payload
+// the Codex CLI's /status display reads (active PULL counterpart of the
+// `x-codex-*` header PUSH). Parsed fail-open and `.loose()` throughout: the
+// endpoint also carries plan/credits/additional_rate_limits fields we ignore, and
+// any of them may appear/vanish without breaking the providers page. `reset_at`
+// is epoch SECONDS; `used_percent` is already 0–100.
+const CodexRateLimitWindowSchema = z
+  .object({
+    used_percent: z.number().optional(),
+    limit_window_seconds: z.number().optional(),
+    reset_after_seconds: z.number().optional(),
+    reset_at: z.number().optional(),
+  })
+  .loose();
+
+export const CodexOAuthUsageSchema = z
+  .object({
+    rate_limit: z
+      .object({
+        primary_window: CodexRateLimitWindowSchema.nullish(),
+        secondary_window: CodexRateLimitWindowSchema.nullish(),
+      })
+      .loose()
+      .nullish(),
+  })
+  .loose();
+
+export type CodexOAuthUsage = z.infer<typeof CodexOAuthUsageSchema>;

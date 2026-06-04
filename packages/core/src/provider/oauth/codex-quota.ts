@@ -1,4 +1,4 @@
-import type { OAuthQuotaWindow } from "@helm/shared";
+import { type CodexOAuthUsage, CodexOAuthUsageSchema, type OAuthQuotaWindow } from "@helm/shared";
 
 // Codex (ChatGPT) rate-limit window headers (providers page Tier 3). The Codex
 // backend stamps these `x-codex-*` headers on EVERY /responses reply (the same set
@@ -49,4 +49,52 @@ export function parseCodexQuotaHeaders(headers: Headers, nowMs: number): OAuthQu
     });
   }
   return out;
+}
+
+// ── Active PULL: GET chatgpt.com/backend-api/wham/usage (providers page) ──────
+// The same payload the Codex CLI's /status reads — the on-demand counterpart of
+// the header PUSH above, so quota renders even for an account that has served no
+// traffic yet. Window keys ("primary"/"secondary") match the PUSH path exactly:
+// the providers page labels them by windowMinutes (5h / Weekly) either way.
+//
+// Mapping per window (emitted only when used_percent parses — same rule as the
+// headers): `reset_at` (epoch SECONDS, absolute) wins over `reset_after_seconds`
+// (relative, anchored at nowMs); `limit_window_seconds` → whole minutes.
+const USAGE_WINDOWS = [
+  { key: "primary", src: "primary_window" },
+  { key: "secondary", src: "secondary_window" },
+] as const;
+
+export function codexUsageToWindows(usage: CodexOAuthUsage, nowMs: number): OAuthQuotaWindow[] {
+  const out: OAuthQuotaWindow[] = [];
+  for (const w of USAGE_WINDOWS) {
+    const win = usage.rate_limit?.[w.src];
+    if (!win || typeof win.used_percent !== "number" || !Number.isFinite(win.used_percent)) {
+      continue; // no usage signal → skip this window
+    }
+    const resetsAtMs = Number.isFinite(win.reset_at)
+      ? Math.round((win.reset_at as number) * 1000)
+      : Number.isFinite(win.reset_after_seconds)
+        ? Math.round(nowMs + (win.reset_after_seconds as number) * 1000)
+        : null;
+    const windowSeconds = win.limit_window_seconds;
+    out.push({
+      key: w.key,
+      usedPercent: Math.min(100, Math.max(0, win.used_percent)),
+      resetsAtMs,
+      windowMinutes:
+        Number.isFinite(windowSeconds) && (windowSeconds as number) > 0
+          ? Math.round((windowSeconds as number) / 60)
+          : null,
+    });
+  }
+  return out;
+}
+
+// Parse a raw (untrusted) usage-endpoint body into windows. Returns [] on any Zod
+// failure (fail-open — a malformed body must never break the providers page).
+export function parseCodexUsageBody(body: unknown, nowMs: number): OAuthQuotaWindow[] {
+  const parsed = CodexOAuthUsageSchema.safeParse(body);
+  if (!parsed.success) return [];
+  return codexUsageToWindows(parsed.data, nowMs);
 }

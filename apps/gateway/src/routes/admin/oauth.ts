@@ -102,10 +102,11 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   });
 
   // GET /oauth/quota -> latest rate-limit window snapshot per account (providers
-  // page Tier 3). Two sources merge in the quota store: Codex PUSHes `x-codex-*`
-  // headers on every reply; Anthropic exposes a PULL usage endpoint, so we refresh
-  // it on read (5-min cached in the seam) before returning. FAIL-OPEN throughout —
-  // a dead token / absent store yields fewer windows or [], never an error.
+  // page Tier 3). Sources merge in the quota store: Codex PUSHes `x-codex-*`
+  // headers on every reply, and BOTH Anthropic and Codex expose PULL usage
+  // endpoints we refresh on read (5-min cached in the seam) before returning.
+  // FAIL-OPEN throughout — a dead token / absent store yields fewer windows or
+  // [], never an error.
   app.get("/admin/api/oauth/quota", async (c) => {
     const store = deps.oauthQuota;
     if (!store) return c.json({ quota: [] });
@@ -120,27 +121,34 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       try {
         const status = await s.listStatus();
         bound = new Set(status.flatMap((p) => p.accounts.map((a) => acctKey(p.id, a.account))));
-        // Refresh the Anthropic PULL for each connected Claude account (cached). Codex
-        // snapshots are already in the store from the live request path (no pull).
-        if (s.fetchAnthropicQuota) {
-          const anthropic = status.find((p) => p.id === "anthropic");
-          await Promise.all(
-            (anthropic?.accounts ?? []).map(async (a) => {
-              const windows = await s.fetchAnthropicQuota?.({ account: a.account });
+        // Refresh the usage-endpoint PULL for each connected account (cached in the
+        // seam). Anthropic and Codex both expose one; the Codex `x-codex-*` header
+        // PUSH still updates the same store on live traffic — the PULL covers
+        // accounts that have served nothing yet (else they render "—" forever).
+        const pulls = [
+          { providerId: "anthropic", source: "anthropic" as const, fetch: s.fetchAnthropicQuota },
+          { providerId: "openai-codex", source: "codex" as const, fetch: s.fetchCodexQuota },
+        ];
+        await Promise.all(
+          pulls.flatMap((p) => {
+            if (!p.fetch) return [];
+            const accounts = status.find((x) => x.id === p.providerId)?.accounts ?? [];
+            return accounts.map(async (a) => {
+              const windows = await p.fetch?.({ account: a.account });
               if (windows && windows.length > 0) {
                 await store
                   .upsert({
-                    providerId: "anthropic",
+                    providerId: p.providerId,
                     account: a.account,
                     windows,
                     capturedAt: Date.now(),
-                    source: "anthropic",
+                    source: p.source,
                   })
                   .catch(() => {});
               }
-            }),
-          );
-        }
+            });
+          }),
+        );
       } catch {
         // fail-open: a refresh/listing failure still returns whatever is stored
       }
