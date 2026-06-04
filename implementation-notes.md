@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-06-04 · OAuth 额度刷新负缓存（对齐 claude-relay-service, spec docs/11）
+
+对照参考实现 `/Users/lukin/Projects/claude-relay-service`，确认了两点并补了一处缺陷：
+
+- **确认**：Anthropic `utilization` 就是 0–100 百分数，原样存储（`claudeAccountService.fetchOAuthUsage`，
+  headers 与我们一致：`claude-cli/2.0.53`、`anthropic-beta: oauth-2025-04-20`，缓存 300s）；时长格式化
+  `dateHelper.formatDuration` 在 86400s（24h）切换为「X天Y小时」——与本次的天级修正一致。
+- **缺陷修复（负缓存）**：`fetchAnthropicQuota` 旧逻辑**只在成功时写缓存**，429/超时/异常都直接 return
+  null 而不缓存。Anthropic 的 usage 端点限流凶猛，于是每次打开 providers 页 / 每次 `invalidateAll`
+  （改优先级、连接账户等）都会重新打这个被限流的端点 → 表现为「一直读取使用量」并把 429 越捅越死。
+  改为**缓存结果本身（成功 windows 或失败 null）**，TTL 内不再重试。刷新由「打开 providers 页」驱动，
+  且每账户每 5 分钟最多打一次上游。无后台轮询（确认 gateway 无 quota 定时器，唯一调用方是 quota 路由）。
+  新增 2 个 seam 测试覆盖：失败只打一次上游（负缓存）、成功命中缓存且 `utilization` 原样为 0–100。
+
+后续可选增强（claude-relay 也这么做、本次未做）：从普通 Anthropic 响应里顺手读 `anthropic-ratelimit-
+unified-*` 头作为 PUSH 数据源（像 Codex 的 `x-codex-*` 头），可完全绕开会限流的 usage 端点。
+
+---
+
 ## 2026-06-04 · OAuth 额度展示三处修正（providers 页 Tier 3, spec docs/11）
 
 对照官方 Claude `/usage` 与 Codex 真实数据，修了三个展示 bug：
