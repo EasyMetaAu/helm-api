@@ -5,15 +5,17 @@ import {
 } from "@helm/shared";
 
 // Map Anthropic's OAuth usage-endpoint payload (GET /api/oauth/usage) to the
-// providers-page quota windows (Tier 3). Anthropic reports `utilization` as a 0–1
-// FRACTION (scaled to a 0–100 percent here) + an ISO `resets_at`. The three windows
-// claude-relay-service surfaces map to our keys: five_hour → 5h, seven_day → 7d,
-// seven_day_sonnet → 7d-opus. PURE + FAIL-OPEN: an absent window or unparseable
-// reset timestamp is skipped/nulled, never thrown.
+// providers-page quota windows (Tier 3). Anthropic reports `utilization` as a
+// 0–100 PERCENT (e.g. 33.0), NOT a 0–1 fraction — surfaced as-is (clamped), never
+// re-scaled. Each window maps 1:1 to our keys: five_hour → 5h, seven_day → 7d,
+// seven_day_opus → 7d-opus, seven_day_sonnet → 7d-sonnet (matching the official
+// Claude /usage display). PURE + FAIL-OPEN: an absent window or unparseable reset
+// timestamp is skipped/nulled, never thrown.
 const WINDOWS = [
   { src: "five_hour", key: "5h" },
   { src: "seven_day", key: "7d" },
-  { src: "seven_day_sonnet", key: "7d-opus" },
+  { src: "seven_day_opus", key: "7d-opus" },
+  { src: "seven_day_sonnet", key: "7d-sonnet" },
 ] as const;
 
 export function anthropicUsageToWindows(
@@ -30,7 +32,7 @@ export function anthropicUsageToWindows(
     const resetMs = typeof win.resets_at === "string" ? Date.parse(win.resets_at) : Number.NaN;
     out.push({
       key: w.key,
-      usedPercent: Math.min(100, Math.max(0, win.utilization * 100)),
+      usedPercent: Math.min(100, Math.max(0, win.utilization)),
       resetsAtMs: Number.isFinite(resetMs) ? resetMs : null,
       windowMinutes: null, // Anthropic does not report a window length
     });

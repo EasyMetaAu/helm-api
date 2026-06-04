@@ -5,6 +5,29 @@
 
 ---
 
+## 2026-06-04 · OAuth 额度展示三处修正（providers 页 Tier 3, spec docs/11）
+
+对照官方 Claude `/usage` 与 Codex 真实数据，修了三个展示 bug：
+
+1. **Anthropic `utilization` 比例被多乘 100**：`/api/oauth/usage` 的 `utilization` 字段**已经是
+   0–100 的百分数**（如 `33.0`），并非 0–1 小数。旧代码 `utilization * 100` 把 3% 算成 300% → clamp
+   到 100%，于是所有窗口都显示 100%。改为直接取值并 clamp 到 [0,100]。schema/解析注释一并更正。
+   （来源：社区逆向的 endpoint 响应，多处一致；旧测试里 `0.06` 是凭空构造的小数输入，已替换为真实量级。）
+2. **Opus/Sonnet 窗口标错**：旧映射把 `seven_day_sonnet` 错挂到 key `7d-opus`（界面显示 "7d · Opus"）。
+   实际 API 同时有 `seven_day_opus` 与 `seven_day_sonnet`。改为各自 1:1 映射
+   （`seven_day_opus → 7d-opus`、`seven_day_sonnet → 7d-sonnet`），界面新增 "7d · Sonnet" label。
+   不带 Opus 周限的套餐 `seven_day_opus` 为 null，自动跳过——与官方 `/usage` 只显示 sonnet 行一致。
+3. **重置倒计时超 24h 仍按小时**：`resetIn()` 旧逻辑只输出 `{h}h {m}m`，7 天窗口会显示
+   "112 小时 2 分后重置"。新增天级档：≥24h 显示 `{d}d {h}h`（"4 天 16 小时后重置"），<24h 维持
+   时分，<1h 维持分。新增 i18n key `resets in {d}d {h}h`（en + zh-hans；ja/ko/zh-hant 沿用既有
+   未翻译现状，回退英文 key）。
+
+坑：Anthropic 这个 endpoint 是**未文档化**的，`utilization` 量级未来可能随上游改动；若再次出现整页
+100%/全 0%，先核对该字段量级再动 `* / 100`。Codex 的 `x-codex-*-used-percent` 本来就是 0–100，未动；
+界面 2% vs 官方 3% 的细小差异是抓取时点不同（header PUSH 快照），非 bug。
+
+---
+
 ## 2026-06-03 · litellm-parity 收官：parity 计分卡 + 文档同步 (P9, spec docs/05)
 
 P9 是纯文档：把 Phases 2–8 的成果写进 docs/05、新建 `docs/protocol-compatibility.md`（逐对数据丢失矩阵）、

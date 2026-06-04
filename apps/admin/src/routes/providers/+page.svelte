@@ -96,6 +96,7 @@
       '5h': '5h',
       '7d': '7d',
       '7d-opus': '7d · Opus',
+      '7d-sonnet': '7d · Sonnet',
       primary: $t('Primary'),
       secondary: $t('Secondary'),
     };
@@ -109,11 +110,19 @@
     return 'bg-indigo-500';
   }
 
-  // "resets in 3h 12m" countdown from an absolute reset timestamp; null/elapsed ⇒ "".
+  // "resets in 4d 16h" countdown from an absolute reset timestamp; null/elapsed ⇒ "".
+  // Coarsens by magnitude so the unit stays legible: ≥24h shows days+hours
+  // (a 7-day window reads "4d 16h", not "112h 2m"), ≥1h shows hours+minutes,
+  // under an hour shows minutes.
   function resetIn(ms: number | null): string {
     if (ms == null) return '';
     const left = ms - Date.now();
     if (left <= 0) return '';
+    const d = Math.floor(left / 86_400_000);
+    if (d > 0) {
+      const h = Math.floor((left % 86_400_000) / 3_600_000);
+      return $t('resets in {d}d {h}h', { d, h });
+    }
     const h = Math.floor(left / 3_600_000);
     const m = Math.floor((left % 3_600_000) / 60_000);
     return h > 0 ? $t('resets in {h}h {m}m', { h, m }) : $t('resets in {m}m', { m });
