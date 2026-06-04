@@ -1,0 +1,128 @@
+import { describe, expect, it } from "vitest";
+import { SqliteMemoryStore } from "./memory-store.js";
+import { createSqliteDb } from "./migrate.js";
+
+// docs/08 Phase 2 queue — enqueueJob / claimPendingJobs on the sqlite adapter.
+// Covers: enqueue returns an id; same-scope pending observer is deduped (D6);
+// claim flips pending → running atomically and decodes the scope (D1); claim
+// respects the limit; an empty queue returns [].
+
+function newStore() {
+  const db = createSqliteDb(":memory:");
+  return { store: new SqliteMemoryStore(db), db };
+}
+
+describe("SqliteMemoryStore job queue", () => {
+  it("enqueueJob returns a non-empty id", async () => {
+    const { store } = newStore();
+    const id = await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "t1" },
+    });
+    expect(id).toBeTruthy();
+  });
+
+  it("dedupes a second pending observer for the same scope (returns the existing id)", async () => {
+    const { store } = newStore();
+    const first = await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "t1" },
+    });
+    const second = await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "t1" },
+    });
+    expect(second).toBe(first);
+  });
+
+  it("does NOT dedupe across different scopes or types", async () => {
+    const { store } = newStore();
+    const a = await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "t1" },
+    });
+    const b = await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "t2" },
+    });
+    const c = await store.enqueueJob({
+      type: "reflector",
+      scope: { accountId: "acct-a", threadId: "t1" },
+    });
+    expect(new Set([a, b, c]).size).toBe(3);
+  });
+
+  it("enforces open-job dedupe at the database boundary", async () => {
+    const { store, db } = newStore();
+    const first = await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "t1" },
+    });
+    expect(() =>
+      db.$sqlite
+        .prepare(
+          "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          "manual-duplicate",
+          "observer",
+          JSON.stringify({ accountId: "acct-a", threadId: "t1" }),
+          "pending",
+          Date.now(),
+          Date.now(),
+        ),
+    ).toThrow();
+    await store.updateJobStatus(first, "done");
+    const next = await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "t1" },
+    });
+    expect(next).not.toBe(first);
+  });
+
+  it("claimPendingJobs flips pending → running and decodes the scope", async () => {
+    const { store } = newStore();
+    const id = await store.enqueueJob({
+      type: "reflector",
+      scope: { accountId: "acct-a", projectId: "p1", threadId: "t1" },
+    });
+    const claimed = await store.claimPendingJobs(10);
+    expect(claimed).toEqual([
+      {
+        jobId: id,
+        type: "reflector",
+        scope: { accountId: "acct-a", projectId: "p1", threadId: "t1" },
+      },
+    ]);
+    // A second claim returns nothing — the row is now running, not pending.
+    expect(await store.claimPendingJobs(10)).toEqual([]);
+  });
+
+  it("claimPendingJobs respects the limit", async () => {
+    const { store } = newStore();
+    await store.enqueueJob({ type: "observer", scope: { accountId: "acct-a", threadId: "t1" } });
+    await store.enqueueJob({ type: "observer", scope: { accountId: "acct-a", threadId: "t2" } });
+    await store.enqueueJob({ type: "observer", scope: { accountId: "acct-a", threadId: "t3" } });
+    const claimed = await store.claimPendingJobs(2);
+    expect(claimed.length).toBe(2);
+  });
+
+  it("empty queue yields []", async () => {
+    const { store } = newStore();
+    expect(await store.claimPendingJobs(5)).toEqual([]);
+  });
+
+  it("dedupes an observer while the prior same-scope job is running", async () => {
+    const { store } = newStore();
+    const first = await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "t1" },
+    });
+    await store.claimPendingJobs(10); // first → running
+    const second = await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "t1" },
+    });
+    expect(second).toBe(first);
+  });
+});

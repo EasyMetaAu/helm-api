@@ -74,6 +74,8 @@ function makeFakeStore(data: FakeStoreData) {
     }),
     upsertReflection: vi.fn(async () => "unused"),
     updateJobStatus: vi.fn(async () => {}),
+    enqueueJob: vi.fn(async () => "job"),
+    claimPendingJobs: vi.fn(async () => []),
   };
   return store;
 }
@@ -98,7 +100,7 @@ function makeDeps(store: MemoryStore, over: Partial<InjectDeps> = {}): InjectDep
 
 function baseInput(over: Partial<InjectInput> = {}): InjectInput {
   return {
-    scope: { projectId: "proj-1", resourceId: "res-1", threadId: "thread-1" },
+    scope: { accountId: "acct-a", projectId: "proj-1", resourceId: "res-1", threadId: "thread-1" },
     currentUserMessage: CURRENT,
     systemPrompt: "you are helpful",
     tokenBudget: 1000,
@@ -252,7 +254,7 @@ describe("assembleInjectedContext", () => {
     });
     const deps = makeDeps(store);
     const out = await assembleInjectedContext(
-      baseInput({ scope: { projectId: "proj-1", resourceId: "res-1" } }),
+      baseInput({ scope: { accountId: "acct-a", projectId: "proj-1", resourceId: "res-1" } }),
       deps,
     );
 
@@ -270,14 +272,20 @@ describe("assembleInjectedContext", () => {
 
     // Aligned with the thread-only store contract: project/resource are NOT spread
     // into the observation lookup (the adapters ignore them anyway).
-    expect(store.listObservations).toHaveBeenCalledWith({ threadId: "thread-1" });
+    expect(store.listObservations).toHaveBeenCalledWith({
+      accountId: "acct-a",
+      threadId: "thread-1",
+    });
   });
 
   it("reports 'skipped' writeback and does NOT enqueue when there is no thread target", async () => {
     const store = makeFakeStore({});
     const enqueueObserverJob = vi.fn(async () => "observer-job-1");
     const deps = makeDeps(store, { enqueueObserverJob });
-    const out = await assembleInjectedContext(baseInput({ scope: { projectId: "proj-1" } }), deps);
+    const out = await assembleInjectedContext(
+      baseInput({ scope: { accountId: "acct-a", projectId: "proj-1" } }),
+      deps,
+    );
 
     expect(enqueueObserverJob).not.toHaveBeenCalled();
     expect(out.metadata.memory_writeback_status).toBe("skipped");

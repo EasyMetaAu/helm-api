@@ -31,6 +31,11 @@ const e2eEnv = {
   // Enable HTTP Basic on /admin via env (env-priority, docs/11) so e2e.admin can
   // black-box the auth gate against the real gateway + adapter-static build.
   ...adminEnv,
+  // Memory background worker (docs/08 Phase 2): run it on a FAST interval so
+  // e2e.memory can enqueue an observer job (via an inject request) and observe the
+  // queue drain into memory_observations within the test window. Unref'd +
+  // fail-open, so it never blocks the gateway or other specs.
+  HELM_MEMORY_WORKER_INTERVAL_MS: "250",
 };
 
 export default defineConfig({

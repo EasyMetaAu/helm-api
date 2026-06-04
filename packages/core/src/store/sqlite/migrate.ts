@@ -98,16 +98,6 @@ const MIGRATIONS: readonly Migration[] = [
         updated_at INTEGER NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS memory_jobs (
-        id TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        scope_id TEXT NOT NULL,
-        status TEXT NOT NULL,
-        error TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-
       CREATE INDEX IF NOT EXISTS idx_memory_messages_thread ON memory_messages (thread_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_memory_observations_thread ON memory_observations (thread_id, observed_at);
     `,
@@ -318,6 +308,73 @@ const MIGRATIONS: readonly Migration[] = [
         source TEXT NOT NULL,
         PRIMARY KEY (provider_id, account)
       );
+    `,
+  },
+  {
+    // Memory job queue scan index (docs/08 Phase 2). The unique open-job
+    // boundary is added in v15 after cleanup, so old duplicate open rows cannot
+    // make first-time upgrades fail before the cleanup migration runs.
+    version: 13,
+    sql: `
+      CREATE TABLE IF NOT EXISTS memory_jobs (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_jobs_type_scope_status
+        ON memory_jobs (type, scope_id, status);
+    `,
+  },
+  {
+    // Bind memory_reflections to the authenticated account owner so project or
+    // resource ids reused by another account cannot read long-lived memory.
+    version: 14,
+    sql: `
+      CREATE TABLE IF NOT EXISTS memory_reflections (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        resource_id TEXT,
+        thread_id TEXT,
+        reflection_text TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        token_estimate INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      ALTER TABLE memory_reflections ADD COLUMN owner_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_memory_reflections_owner_scope
+        ON memory_reflections (owner_id, project_id, resource_id, thread_id, version DESC);
+    `,
+  },
+  {
+    // DB-level open-job dedupe boundary. The original v13 scan index was non-unique;
+    // this additive migration makes concurrent enqueueJob calls collapse atomically.
+    version: 15,
+    sql: `
+      UPDATE memory_jobs
+      SET status = 'failed',
+          error = COALESCE(error || '\n', '') || 'migration cleanup: closed duplicate open memory job before uniq_memory_jobs_open_type_scope',
+          updated_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000
+      WHERE status IN ('pending', 'running')
+        AND EXISTS (
+          SELECT 1
+          FROM memory_jobs keep
+          WHERE keep.type = memory_jobs.type
+            AND keep.scope_id = memory_jobs.scope_id
+            AND keep.status IN ('pending', 'running')
+            AND (
+              keep.created_at < memory_jobs.created_at
+              OR (keep.created_at = memory_jobs.created_at AND keep.id < memory_jobs.id)
+            )
+        );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_memory_jobs_open_type_scope
+        ON memory_jobs (type, scope_id)
+        WHERE status IN ('pending', 'running');
     `,
   },
 ];

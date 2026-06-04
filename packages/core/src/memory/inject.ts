@@ -21,7 +21,7 @@ import type { MemoryStore } from "../store/ports.js";
 // routing/lane state (memory is a MIDDLEWARE — it only provides context text).
 
 export interface InjectInput {
-  scope: { projectId?: string; resourceId?: string; threadId?: string };
+  scope: { accountId: string; projectId?: string; resourceId?: string; threadId?: string };
   currentUserMessage: RawMessage;
   systemPrompt: string;
   // Upper bound for INJECTED memory tokens. The mandatory system prompt + current
@@ -51,6 +51,7 @@ export interface InjectResult {
     memory_tokens_injected: number;
     observer_job_id: string | null;
     memory_writeback_status: "queued" | "skipped" | "failed";
+    degraded: boolean;
   };
 }
 
@@ -104,20 +105,24 @@ async function loadMemory(
 }> {
   const projectReflection =
     scope.projectId !== undefined
-      ? await store.getReflection({ projectId: scope.projectId })
+      ? await store.getReflection({ accountId: scope.accountId, projectId: scope.projectId })
       : null;
   const resourceReflection =
     scope.resourceId !== undefined
-      ? await store.getReflection({ resourceId: scope.resourceId })
+      ? await store.getReflection({ accountId: scope.accountId, resourceId: scope.resourceId })
       : null;
   // Observations are THREAD-ANCHORED by schema: both store adapters return []
   // unless threadId is set and ignore project/resource. Gate on threadId only and
   // pass threadId alone — aligned with the store contract (no cross-thread
   // retrieval; there is no schema support for it).
   const observations =
-    scope.threadId !== undefined ? await store.listObservations({ threadId: scope.threadId }) : [];
+    scope.threadId !== undefined
+      ? await store.listObservations({ accountId: scope.accountId, threadId: scope.threadId })
+      : [];
   const recentMessages =
-    scope.threadId !== undefined ? await store.listMessages(scope.threadId) : [];
+    scope.threadId !== undefined
+      ? await store.listMessages({ accountId: scope.accountId, threadId: scope.threadId })
+      : [];
   return { projectReflection, resourceReflection, observations, recentMessages };
 }
 
@@ -162,6 +167,7 @@ export async function assembleInjectedContext(
         // EXCEPT when there was no writeback target at all (no threadId): nothing
         // could be enqueued, so it stays an honest "skipped", not "failed".
         memory_writeback_status: writeback.status === "skipped" ? "skipped" : "failed",
+        degraded: true,
       },
     };
   }
@@ -318,6 +324,7 @@ export async function assembleInjectedContext(
       memory_tokens_injected: memoryTokensInjected,
       observer_job_id: writeback.observerJobId,
       memory_writeback_status: writeback.status,
+      degraded: false,
     },
   };
 }

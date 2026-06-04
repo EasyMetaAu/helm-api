@@ -170,6 +170,15 @@ export {
   type UpdateKeyRequest,
   UpdateKeyRequestSchema,
 } from "./key/schema.js";
+// Memory middleware background-job queue contracts (docs/08 Phase 2).
+export {
+  type MemoryJobEnqueueInput,
+  MemoryJobEnqueueInputSchema,
+  type MemoryJobRow,
+  MemoryJobRowSchema,
+  type MemoryJobType,
+  MemoryJobTypeSchema,
+} from "./memory/jobs.js";
 // Memory middleware storage contracts (docs/08) — POST-MVP persistence floor.
 export {
   type AssembledMessage,
@@ -195,6 +204,7 @@ export {
   type ReflectionUpsertInput,
   ReflectionUpsertInputSchema,
 } from "./memory/schema.js";
+export { decodeScopeId, encodeScopeId } from "./memory/scope-codec.js";
 // Public model-listing model (GET /v1/models) — OpenAI-compatible discovery
 // envelope; lanes are first-class, concrete aliases are key-gated (principle 6).
 export {

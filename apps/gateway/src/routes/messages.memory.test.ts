@@ -185,7 +185,9 @@ describe("gateway.messages.memory — observe persists request/response", () => 
     });
 
     expect(res.status).toBe(200);
-    expect(threads).toEqual([{ id: "thread-1", projectId: "project-1", resourceId: "resource-1" }]);
+    expect(threads).toEqual([
+      { id: "acct:thread-1", ownerId: "acct", projectId: "project-1", resourceId: "resource-1" },
+    ]);
     expect(messages.some((m) => m.role === "user" && m.content === "hi")).toBe(true);
   });
 

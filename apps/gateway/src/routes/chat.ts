@@ -5,13 +5,21 @@ import type {
   ChatCompletionRequest,
   DecisionRecord,
   ExecutionResult,
+  InjectDeps,
   IRMessage,
   MemoryScope,
   ObserveDeps,
   RouteOptions,
   TelemetryStore,
 } from "@helm/core";
-import { observeInbound, observeOutbound } from "@helm/core";
+import {
+  assembleInjectedContext,
+  injectIntoIR,
+  isPlainTextTurn,
+  observeInbound,
+  observeOutbound,
+  ownerScopedThreadId,
+} from "@helm/core";
 import {
   type HelmError,
   type InternalRequest,
@@ -83,7 +91,7 @@ export interface ChatRouteDeps {
    *  after; both self-gate on the resolved MemoryScope mode and are fail-open
    *  (a store failure never 5xx's, principle 3). `observe` is the process-wide
    *  ObserveDeps built once in the composition root. */
-  memory?: { observe: ObserveDeps };
+  memory?: { observe: ObserveDeps; inject?: InjectWiring };
   /** Per-key usage-budget wiring (docs/06). Optional — absent = no budgets (existing
    *  tests unchanged). `budgetGate.check` runs BEFORE route (fail-CLOSED: a store
    *  error propagates → 5xx); over budget either rejects (429) or yields a degrade
@@ -97,6 +105,16 @@ export interface ChatRouteDeps {
     usage: { requests: number; tokens: number; costUsd: number | null },
     nowMs: number,
   ) => Promise<void>;
+}
+
+// Gateway-side inject wiring (docs/08 Phase 2). Bundles the core InjectDeps with
+// the per-deployment token budget (D9 — there is no config.memory subtree yet, so
+// the budget rides here, sourced from HELM_MEMORY_INJECT_TOKEN_BUDGET in the
+// composition root). Optional so existing tests that pass only `{ observe }` are
+// unaffected (inject absent → inject is a pure no-op).
+export interface InjectWiring {
+  deps: InjectDeps;
+  tokenBudget: number;
 }
 
 // Minimal identity shape the adapter reads (subset of middleware/auth's
@@ -314,9 +332,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // boundary into a resolved MemoryScope (core never reads headers, principle
     // 1). The scope ids/mode ride the InternalRequest metadata AND gate the
     // observe calls below; absent/illegal headers → off + null (default-safe).
-    const memoryScope = resolveMemoryScope((name) => c.req.header(name));
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId);
 
     const internal = toInternalRequest(body, traceId, identity, sessionKey, memoryScope);
+    const originalMessagesForMemory = [...(internal.messages as IRMessage[])];
 
     // Persist a (redacted) telemetry record. Fail-open: a telemetry failure must
     // never turn a successful request into a 5xx or break an in-flight stream.
@@ -406,12 +425,55 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       classifyOverrides = { evalEnabled, rulesThreshold };
     }
 
-    // Memory observe (inbound): persist the request's raw messages BEFORE routing
-    // (docs/08 Phase 1). observe is write-only — it NEVER mutates `internal.messages`
-    // nor changes routing, and self-gates to a no-op on mode=off / threadId=null.
-    // It never throws (fail-open inside core), so no try/catch is needed here.
+    // Memory inject runs before inbound observe, so the current turn cannot be
+    // loaded back as recent_raw and duplicated in the same upstream request.
+
+    // Memory inject (docs/08 Phase 2): when x-memory-mode=inject, load + assemble a
+    // budgeted, cache-friendly context prefix and FULL-REPLACE internal.messages
+    // BEFORE routing — so classification/execution see the hydrated context. Gated
+    // on a PLAIN-TEXT turn (D7): a tool-call / structured request keeps its original
+    // messages (the memory model can't represent tool calls). Fully fail-open: a
+    // bridge failure leaves the original messages untouched (never 5xx, never
+    // alters routing — principle 3). Runs AFTER observe (observe writes the raw
+    // turn; inject only reads + assembles).
+    if (
+      deps.memory?.inject !== undefined &&
+      memoryScope.mode === "inject" &&
+      isPlainTextTurn(internal.messages as IRMessage[])
+    ) {
+      const wiring = deps.memory.inject;
+      // OpenAI chat: the system prompt is the LEADING system IR message, else "".
+      const leadingSystem = (internal.messages as IRMessage[])[0];
+      const systemPrompt =
+        leadingSystem?.role === "system" && typeof leadingSystem.content === "string"
+          ? leadingSystem.content
+          : "";
+      const injected = await injectIntoIR(
+        internal.messages as IRMessage[],
+        systemPrompt,
+        {
+          accountId: memoryScope.accountId,
+          ...(memoryScope.projectId !== null ? { projectId: memoryScope.projectId } : {}),
+          ...(memoryScope.resourceId !== null ? { resourceId: memoryScope.resourceId } : {}),
+          ...(memoryScope.threadId !== null
+            ? { threadId: ownerScopedThreadId(memoryScope.accountId, memoryScope.threadId) }
+            : {}),
+        },
+        {
+          assemble: (input) => assembleInjectedContext(input, wiring.deps),
+          tokenBudget: wiring.tokenBudget,
+          now: wiring.deps.now,
+          log: wiring.deps.log,
+        },
+      );
+      internal.messages = injected.messages as InternalRequest["messages"];
+    }
+
+    // Memory observe (inbound): persist the original request raw messages AFTER
+    // inject hydration. observe is write-only and fail-open; delaying it avoids
+    // same-turn self-pollution while still capturing the turn for future calls.
     if (deps.memory !== undefined) {
-      await observeInbound(deps.memory.observe, memoryScope, internal.messages as IRMessage[]);
+      await observeInbound(deps.memory.observe, memoryScope, originalMessagesForMemory);
     }
 
     const result = await deps.route(

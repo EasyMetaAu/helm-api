@@ -1,15 +1,19 @@
 import { randomUUID } from "node:crypto";
-import type {
-  MemoryMessageInput,
-  MemoryObservationInput,
-  MemoryThreadInput,
-  Observation,
-  RawMessage,
-  Reflection,
-  ReflectionScope,
-  ReflectionUpsertInput,
+import {
+  decodeScopeId,
+  encodeScopeId,
+  type MemoryJobEnqueueInput,
+  type MemoryJobRow,
+  type MemoryMessageInput,
+  type MemoryObservationInput,
+  type MemoryThreadInput,
+  type Observation,
+  type RawMessage,
+  type Reflection,
+  type ReflectionScope,
+  type ReflectionUpsertInput,
 } from "@helm/shared";
-import { and, asc, desc, eq, isNull, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, type SQL, sql } from "drizzle-orm";
 import type { MemoryJobStatus, MemoryStore } from "../ports.js";
 import {
   memoryJobs,
@@ -25,6 +29,7 @@ import type { SqliteDb } from "./migrate.js";
 // vice versa). Enforces docs/08 scope isolation (no cross-project profile).
 function reflectionScopeWhere(scope: ReflectionScope): SQL {
   const clauses: SQL[] = [
+    eq(memoryReflections.ownerId, scope.accountId),
     scope.projectId !== undefined
       ? eq(memoryReflections.projectId, scope.projectId)
       : isNull(memoryReflections.projectId),
@@ -65,15 +70,7 @@ export class SqliteMemoryStore implements MemoryStore {
         createdAt: ts,
         updatedAt: ts,
       })
-      .onConflictDoUpdate({
-        target: memoryThreads.id,
-        set: {
-          projectId: input.projectId ?? null,
-          resourceId: input.resourceId ?? null,
-          ownerId: input.ownerId ?? null,
-          updatedAt: ts,
-        },
-      })
+      .onConflictDoNothing()
       .run();
   }
 
@@ -94,11 +91,16 @@ export class SqliteMemoryStore implements MemoryStore {
   }
 
   // POST-MVP Phase 2 (Observer): read a thread's raw messages oldest-first.
-  async listMessages(threadId: string): Promise<RawMessage[]> {
+  async listMessages(scope: { threadId: string; accountId: string }): Promise<RawMessage[]> {
     const rows = this.db
       .select()
       .from(memoryMessages)
-      .where(eq(memoryMessages.threadId, threadId))
+      .where(
+        and(
+          eq(memoryMessages.threadId, scope.threadId),
+          sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryMessages.threadId} AND mt.owner_id = ${scope.accountId})`,
+        ),
+      )
       .orderBy(asc(memoryMessages.createdAt), asc(memoryMessages.id))
       .all();
     return rows.map((row) => ({
@@ -142,7 +144,12 @@ export class SqliteMemoryStore implements MemoryStore {
     const rows = this.db
       .select()
       .from(memoryObservations)
-      .where(eq(memoryObservations.threadId, scope.threadId))
+      .where(
+        and(
+          eq(memoryObservations.threadId, scope.threadId),
+          sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryObservations.threadId} AND mt.owner_id = ${scope.accountId})`,
+        ),
+      )
       .orderBy(asc(memoryObservations.observedAt), asc(memoryObservations.id))
       .all();
     return rows.map((row) => {
@@ -191,6 +198,7 @@ export class SqliteMemoryStore implements MemoryStore {
       .insert(memoryReflections)
       .values({
         id,
+        ownerId: input.accountId,
         projectId: input.projectId ?? null,
         resourceId: input.resourceId ?? null,
         threadId: input.threadId ?? null,
@@ -214,5 +222,73 @@ export class SqliteMemoryStore implements MemoryStore {
       })
       .where(eq(memoryJobs.id, jobId))
       .run();
+  }
+
+  // Enqueue a background job. DEDUPE (D6): the partial unique index on OPEN
+  // (pending/running) jobs owns the concurrency boundary; this method tries the
+  // insert first, then reads the existing open row when another request won.
+  async enqueueJob(input: MemoryJobEnqueueInput): Promise<string> {
+    const scopeId = encodeScopeId(input.scope);
+    const id = this.genId();
+    const ts = this.now().getTime();
+    const inserted = this.db.$sqlite
+      .prepare(
+        `INSERT OR IGNORE INTO memory_jobs
+           (id, type, scope_id, status, error, created_at, updated_at)
+         VALUES (?, ?, ?, 'pending', NULL, ?, ?)`,
+      )
+      .run(id, input.type, scopeId, ts, ts);
+    if (inserted.changes === 1) return id;
+
+    const existing = this.db.$sqlite
+      .prepare(
+        `SELECT id FROM memory_jobs
+          WHERE type = ? AND scope_id = ? AND status IN ('pending', 'running')
+          ORDER BY created_at ASC, id ASC
+          LIMIT 1`,
+      )
+      .get(input.type, scopeId) as { id: string } | undefined;
+    if (existing !== undefined) return existing.id;
+
+    // If INSERT OR IGNORE was skipped for a non-open unique conflict, retry once;
+    // completed jobs must not block a new pending enqueue for the same scope.
+    this.db.$sqlite
+      .prepare(
+        `INSERT INTO memory_jobs
+           (id, type, scope_id, status, error, created_at, updated_at)
+         VALUES (?, ?, ?, 'pending', NULL, ?, ?)`,
+      )
+      .run(id, input.type, scopeId, ts, ts);
+    return id;
+  }
+
+  // Atomically claim up to `limit` pending jobs (oldest-first) by flipping them
+  // pending → running in ONE UPDATE … RETURNING so a second tick/worker never
+  // double-processes a row. scope_id is decoded back to a ReflectionScope (D1).
+  async claimPendingJobs(limit: number): Promise<MemoryJobRow[]> {
+    if (limit <= 0) return [];
+    const updatedAt = this.now().getTime();
+    // Drizzle has no portable RETURNING-on-subselect-UPDATE helper, so use the raw
+    // handle. The subquery picks the oldest pending ids; the UPDATE flips just
+    // those and returns their decoded fields.
+    const rows = this.db.$sqlite
+      .prepare(
+        `UPDATE memory_jobs
+            SET status = 'running', updated_at = ?
+          WHERE id IN (
+            SELECT id FROM memory_jobs
+             WHERE status = 'pending'
+             ORDER BY created_at ASC, id ASC
+             LIMIT ?
+          )
+        RETURNING id, type, scope_id`,
+      )
+      .all(updatedAt, limit) as Array<{ id: string; type: string; scope_id: string }>;
+    return rows.map((row) => ({
+      jobId: row.id,
+      // The type column is constrained to the enum at enqueue time; widen back.
+      type: row.type as MemoryJobRow["type"],
+      scope: decodeScopeId(row.scope_id),
+    }));
   }
 }

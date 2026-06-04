@@ -172,6 +172,14 @@ export {
   type InjectInput,
   type InjectResult,
 } from "./memory/inject.js";
+// Memory middleware — inject↔IR bridge (docs/08 Phase 2). The D7 plain-text gate +
+// D8 RawMessage synthesis / source→IR restoration shared by all request surfaces.
+export {
+  type InjectBridgeDeps,
+  type InjectBridgeResult,
+  injectIntoIR,
+  isPlainTextTurn,
+} from "./memory/inject-bridge.js";
 // Memory middleware — observe phase (docs/08 Phase 1). Framework-agnostic
 // write-only persistence; never injects memory or changes routing.
 export {
@@ -179,8 +187,18 @@ export {
   type ObserveDeps,
   observeInbound,
   observeOutbound,
+  ownerScopedThreadId,
   resolveMemoryMode,
 } from "./memory/observe.js";
+// Memory middleware — background Observer (docs/08 Phase 2). Off the request path:
+// compresses a thread's older raw messages into one auditable observation.
+// Framework-agnostic; never touches routing/lane state.
+export {
+  type ObserverDeps,
+  type ObserverJob,
+  type ObserverResult,
+  runObserverJob,
+} from "./memory/observer.js";
 // Memory middleware — background Reflector (docs/08 Phase 2). Periodically merges a
 // scope's observations into a stable, versioned reflection; off the main request
 // path, fail-open. Framework-agnostic; never touches routing/lane state.
@@ -190,6 +208,13 @@ export {
   type ReflectorResult,
   runReflectorJob,
 } from "./memory/reflector.js";
+// Memory middleware — background worker scheduler (docs/08 Phase 2). Drains the
+// memory_jobs queue off the request path, dispatching by type. Framework-agnostic.
+export {
+  type MemoryWorkerDeps,
+  type MemoryWorkerHandle,
+  startMemoryWorker,
+} from "./memory/scheduler.js";
 export {
   type MemoryMeta,
   MemoryMetaSchema,

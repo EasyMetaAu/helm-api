@@ -26,6 +26,8 @@ function makeFakeStore() {
     getReflection: vi.fn(async () => null),
     upsertReflection: vi.fn(async () => "unused"),
     updateJobStatus: vi.fn(async () => {}),
+    enqueueJob: vi.fn(async () => "job"),
+    claimPendingJobs: vi.fn(async () => []),
   };
   return { store, threads, messages };
 }
@@ -42,6 +44,7 @@ function makeDeps(store: MemoryStore, overrides: Partial<ObserveDeps> = {}): Obs
 
 function scope(partial: Partial<MemoryScope> = {}): MemoryScope {
   return {
+    accountId: "acct-a",
     threadId: "thread-1",
     resourceId: "resource-1",
     projectId: "project-1",
@@ -64,18 +67,23 @@ describe("observeInbound", () => {
 
     expect(out.persisted).toBe(true);
     // Thread ensured once with the scope ids.
-    expect(threads).toEqual([{ id: "thread-1", projectId: "project-1", resourceId: "resource-1" }]);
-    // One row per message, role + token_estimate correct.
-    expect(messages).toHaveLength(2);
-    // The memory_* role enum is user|assistant|tool (no "system"); an IR system
-    // message is recorded as a user-side raw line.
+    expect(threads).toEqual([
+      {
+        id: "acct-a:thread-1",
+        ownerId: "acct-a",
+        projectId: "project-1",
+        resourceId: "resource-1",
+      },
+    ]);
+    // System/developer instructions are policy, not user memory, so only the
+    // user turn is persisted.
+    expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
-      threadId: "thread-1",
+      threadId: "acct-a:thread-1",
       role: "user",
-      content: "you are helpful",
-      tokenEstimate: "you are helpful".length,
+      content: "hello there",
+      tokenEstimate: "hello there".length,
     });
-    expect(messages[1]).toMatchObject({ role: "user", content: "hello there" });
   });
 
   it("does NOT inject: messages handed to the classifier are byte-for-byte unchanged, and no observation/reflection is read", async () => {

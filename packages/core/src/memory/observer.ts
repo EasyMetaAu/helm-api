@@ -19,6 +19,7 @@ const RECENT_KEEP = 2;
 // compressed. Enqueued by the request path, consumed asynchronously by a worker.
 export interface ObserverJob {
   jobId: string;
+  accountId: string;
   threadId: string;
 }
 
@@ -48,6 +49,27 @@ export interface ObserverResult {
 // the input it compressed plus the produced text; we approximate from the raw
 // token estimates already stored on each message plus the output length. This is
 // only for the SEPARATE observer cost bucket, not for routing.
+
+function alreadyObservedMessageIds(
+  messages: RawMessage[],
+  ranges: Array<[string, string]>,
+): Set<string> {
+  const byId = new Map(messages.map((m, i) => [m.id, i]));
+  const covered = new Set<string>();
+  for (const [firstId, lastId] of ranges) {
+    const first = byId.get(firstId);
+    const last = byId.get(lastId);
+    if (first === undefined || last === undefined) continue;
+    const start = Math.min(first, last);
+    const end = Math.max(first, last);
+    for (let i = start; i <= end; i += 1) {
+      const msg = messages[i];
+      if (msg !== undefined) covered.add(msg.id);
+    }
+  }
+  return covered;
+}
+
 function estimateObserverTokens(compressed: RawMessage[], observationText: string): number {
   const input = compressed.reduce((sum, m) => sum + m.tokenEstimate, 0);
   // Cheap output estimate; a real worker can swap in a tokenizer. ~4 chars/token.
@@ -66,9 +88,23 @@ export async function runObserverJob(
   deps: ObserverDeps,
 ): Promise<ObserverResult> {
   try {
-    const all = await deps.memoryStore.listMessages(job.threadId);
-    // Preserve the recent window; only compress what's older than it.
-    const compressed = all.slice(0, Math.max(0, all.length - RECENT_KEEP));
+    const all = await deps.memoryStore.listMessages({
+      accountId: job.accountId,
+      threadId: job.threadId,
+    });
+    // Preserve the recent window; only compress what's older than it. Then remove
+    // any source range already covered by a prior observation so retry/done jobs
+    // are idempotent and do not repeatedly summarize the same raw messages.
+    const oldWindow = all.slice(0, Math.max(0, all.length - RECENT_KEEP));
+    const existing = await deps.memoryStore.listObservations({
+      accountId: job.accountId,
+      threadId: job.threadId,
+    });
+    const covered = alreadyObservedMessageIds(
+      all,
+      existing.map((o) => o.sourceMessageRange),
+    );
+    const compressed = oldWindow.filter((m) => !covered.has(m.id));
 
     if (compressed.length === 0) {
       // Idempotent / nothing to do — never write an empty observation.

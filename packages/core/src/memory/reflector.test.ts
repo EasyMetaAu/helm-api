@@ -37,6 +37,8 @@ function makeFakeStore(observations: Observation[], initial: Reflection | null =
     updateJobStatus: vi.fn(async (jobId: string, status: MemoryJobStatus, error?: string) => {
       jobUpdates.push(error === undefined ? { jobId, status } : { jobId, status, error });
     }),
+    enqueueJob: vi.fn(async () => "job"),
+    claimPendingJobs: vi.fn(async () => []),
   };
   return { store, upserts, jobUpdates, getCurrent: () => current };
 }
@@ -52,7 +54,7 @@ function makeObservations(texts: string[]): Observation[] {
 }
 
 const NOW = new Date("2026-05-30T12:00:00.000Z");
-const JOB: ReflectorJob = { jobId: "job-1", scope: { threadId: "thread-1" } };
+const JOB: ReflectorJob = { jobId: "job-1", scope: { accountId: "acct-a", threadId: "thread-1" } };
 
 // Deterministic merge stub: joins the observation texts (+ optional previous
 // reflection prefix). Stands in for an LLM — same input → same output.

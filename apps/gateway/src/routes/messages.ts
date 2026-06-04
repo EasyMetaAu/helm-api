@@ -236,7 +236,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     // without ever touching HTTP (CLAUDE.md principle 1). Absent/illegal headers
     // → off + null (default-safe). The ids are opaque (not credentials) and are
     // never logged here.
-    const memoryScope = resolveMemoryScope((name) => c.req.header(name));
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId);
     ir.metadata.thread_id = memoryScope.threadId;
     ir.metadata.resource_id = memoryScope.resourceId;
     ir.metadata.project_id = memoryScope.projectId;

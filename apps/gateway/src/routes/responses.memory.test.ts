@@ -147,9 +147,10 @@ describe("gateway.responses.memory — observe reaches /v1/responses", () => {
     expect(res.status).toBe(200);
     // The memory scope reached observe via ir.metadata (the route stamping fix).
     expect(store.ensureThread).toHaveBeenCalled();
-    expect(threads[0]?.id).toBe("thread-1");
+    expect(threads[0]?.id).toBe("acct:thread-1");
+    expect(threads[0]?.ownerId).toBe("acct");
     // Inbound user message + outbound assistant message both persisted to the thread.
-    expect(messages.some((m) => m.threadId === "thread-1" && m.role === "user")).toBe(true);
+    expect(messages.some((m) => m.threadId === "acct:thread-1" && m.role === "user")).toBe(true);
     expect(messages.some((m) => m.role === "assistant" && m.content === "hello")).toBe(true);
   });
 

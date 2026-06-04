@@ -1,4 +1,6 @@
-import type { sql } from "drizzle-orm";
+import { PGlite } from "@electric-sql/pglite";
+import { sql } from "drizzle-orm";
+import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { describe, expect, it } from "vitest";
 import { createPgliteDb, runPgMigrations } from "./migrate.js";
 
@@ -49,6 +51,95 @@ describe("runPgMigrations — per-migration atomicity", () => {
     const db = await createPgliteDb();
     // Re-running is a no-op (ledger already full); must not throw.
     await runPgMigrations(db);
+    await db.$close();
+  });
+
+  it("upgrades a real pre-unique-index memory_jobs table with duplicate open jobs", async () => {
+    const client = new PGlite();
+    const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
+    const scope = JSON.stringify({ accountId: "acct-a", threadId: "t1" });
+    await db.execute(
+      sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
+    );
+    // Seed everything below the memory migrations (v12–v14) as applied, so
+    // only they run — the minimal seed has no api_keys table for v9–v11.
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]) {
+      await db.execute(
+        sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
+      );
+    }
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE memory_reflections (
+          id TEXT PRIMARY KEY,
+          project_id TEXT,
+          resource_id TEXT,
+          thread_id TEXT,
+          reflection_text TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          token_estimate INTEGER NOT NULL,
+          updated_at BIGINT NOT NULL
+        )
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE memory_jobs (
+          id TEXT PRIMARY KEY,
+          type TEXT NOT NULL,
+          scope_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          error TEXT,
+          created_at BIGINT NOT NULL,
+          updated_at BIGINT NOT NULL
+        )
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES
+        ('keep-earliest', 'observer', '${scope}', 'pending', 100, 100),
+        ('close-pending', 'observer', '${scope}', 'pending', 200, 200),
+        ('close-running', 'observer', '${scope}', 'running', 300, 300)
+      `),
+    );
+
+    await expect(runPgMigrations(db)).resolves.toBeUndefined();
+
+    const openRows = (await db.execute(
+      sql.raw(
+        `SELECT id, status FROM memory_jobs WHERE type = 'observer' AND scope_id = '${scope}' AND status IN ('pending','running') ORDER BY created_at, id`,
+      ),
+    )) as { rows: Array<{ id: string; status: string }> };
+    expect(openRows.rows).toEqual([{ id: "keep-earliest", status: "pending" }]);
+
+    const closedRows = (await db.execute(
+      sql.raw(
+        "SELECT id, status, error FROM memory_jobs WHERE id IN ('close-pending','close-running')",
+      ),
+    )) as { rows: Array<{ id: string; status: string; error: string }> };
+    expect(closedRows.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "close-pending", status: "failed" }),
+        expect.objectContaining({ id: "close-running", status: "failed" }),
+      ]),
+    );
+    expect(closedRows.rows.every((r) => r.error.includes("migration cleanup"))).toBe(true);
+    await expect(
+      db.execute(
+        sql.raw(
+          `INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES ('blocked-by-index', 'observer', '${scope}', 'pending', 400, 400)`,
+        ),
+      ),
+    ).rejects.toThrow();
+    await db.execute(sql.raw("UPDATE memory_jobs SET status = 'done' WHERE id = 'keep-earliest'"));
+    await expect(
+      db.execute(
+        sql.raw(
+          `INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES ('new-open-after-done', 'observer', '${scope}', 'pending', 500, 500)`,
+        ),
+      ),
+    ).resolves.toBeDefined();
     await db.$close();
   });
 });

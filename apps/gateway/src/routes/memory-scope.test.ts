@@ -26,8 +26,10 @@ describe("resolveMemoryScope", () => {
         "x-project-id": "project-1",
         "x-memory-mode": "observe",
       }),
+      "acct-a",
     );
     expect(scope).toEqual({
+      accountId: "acct-a",
       threadId: "thread-1",
       resourceId: "resource-1",
       projectId: "project-1",
@@ -36,8 +38,9 @@ describe("resolveMemoryScope", () => {
   });
 
   it("defaults to off + null ids when no headers are present", () => {
-    const scope = resolveMemoryScope(getterOf({}));
+    const scope = resolveMemoryScope(getterOf({}), "acct-a");
     expect(scope).toEqual({
+      accountId: "acct-a",
       threadId: null,
       resourceId: null,
       projectId: null,
@@ -46,14 +49,17 @@ describe("resolveMemoryScope", () => {
   });
 
   it("normalizes a missing or illegal x-memory-mode to off (default-safe)", () => {
-    expect(resolveMemoryScope(getterOf({ "x-thread-id": "t" })).mode).toBe("off");
-    expect(resolveMemoryScope(getterOf({ "x-memory-mode": "nonsense" })).mode).toBe("off");
-    expect(resolveMemoryScope(getterOf({ "x-memory-mode": "OFF" })).mode).toBe("off");
+    expect(resolveMemoryScope(getterOf({ "x-thread-id": "t" }), "acct-a").mode).toBe("off");
+    expect(resolveMemoryScope(getterOf({ "x-memory-mode": "nonsense" }), "acct-a").mode).toBe(
+      "off",
+    );
+    expect(resolveMemoryScope(getterOf({ "x-memory-mode": "OFF" }), "acct-a").mode).toBe("off");
   });
 
   it("folds an empty thread-id (and resource/project) to null", () => {
     const scope = resolveMemoryScope(
       getterOf({ "x-thread-id": "", "x-resource-id": "", "x-project-id": "" }),
+      "acct-a",
     );
     expect(scope.threadId).toBeNull();
     expect(scope.resourceId).toBeNull();
@@ -61,7 +67,11 @@ describe("resolveMemoryScope", () => {
   });
 
   it("passes through observe and inject modes", () => {
-    expect(resolveMemoryScope(getterOf({ "x-memory-mode": "observe" })).mode).toBe("observe");
-    expect(resolveMemoryScope(getterOf({ "x-memory-mode": "inject" })).mode).toBe("inject");
+    expect(resolveMemoryScope(getterOf({ "x-memory-mode": "observe" }), "acct-a").mode).toBe(
+      "observe",
+    );
+    expect(resolveMemoryScope(getterOf({ "x-memory-mode": "inject" }), "acct-a").mode).toBe(
+      "inject",
+    );
   });
 });

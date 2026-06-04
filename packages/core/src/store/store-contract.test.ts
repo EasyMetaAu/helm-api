@@ -701,23 +701,51 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
   describe("MemoryStore", () => {
     it("ensureThread is idempotent and appendMessage -> listMessages round-trips", async () => {
       ctx = await make();
-      await ctx.stores.memory.ensureThread({ id: "t1", projectId: "p1" });
-      await ctx.stores.memory.ensureThread({ id: "t1", projectId: "p1" }); // no duplicate
+      await ctx.stores.memory.ensureThread({ id: "t1", ownerId: "acct-a", projectId: "p1" });
+      await ctx.stores.memory.ensureThread({ id: "t1", ownerId: "acct-a", projectId: "p1" }); // no duplicate
       await ctx.stores.memory.appendMessage({
         threadId: "t1",
         role: "user",
         content: "hello",
         tokenEstimate: 2,
       });
-      const msgs = await ctx.stores.memory.listMessages("t1");
+      const msgs = await ctx.stores.memory.listMessages({ threadId: "t1", accountId: "acct-a" });
       expect(msgs).toHaveLength(1);
       expect(msgs[0]?.content).toBe("hello");
       expect(msgs[0]?.createdAt).toBeInstanceOf(Date);
     });
 
+    it("keeps raw messages and observations isolated by account for the same thread id", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({ id: "shared-thread", ownerId: "acct-a" });
+      await ctx.stores.memory.ensureThread({ id: "shared-thread", ownerId: "acct-b" });
+      await ctx.stores.memory.appendMessage({
+        threadId: "shared-thread",
+        role: "user",
+        content: "acct-a secret",
+        tokenEstimate: 3,
+      });
+      await ctx.stores.memory.appendObservation({
+        threadId: "shared-thread",
+        sourceMessageRange: ["m1", "m1"],
+        observationText: "acct-a observation",
+        observedAt: new Date(1000),
+      });
+
+      expect(
+        await ctx.stores.memory.listMessages({ threadId: "shared-thread", accountId: "acct-b" }),
+      ).toEqual([]);
+      expect(
+        await ctx.stores.memory.listObservations({
+          threadId: "shared-thread",
+          accountId: "acct-b",
+        }),
+      ).toEqual([]);
+    });
+
     it("appendObservation -> listObservations preserves range + tags", async () => {
       ctx = await make();
-      await ctx.stores.memory.ensureThread({ id: "t1" });
+      await ctx.stores.memory.ensureThread({ id: "t1", ownerId: "acct-a" });
       await ctx.stores.memory.appendObservation({
         threadId: "t1",
         sourceMessageRange: ["m1", "m2"],
@@ -725,7 +753,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         observedAt: new Date(1000),
         tags: ["x", "y"],
       });
-      const obs = await ctx.stores.memory.listObservations({ threadId: "t1" });
+      const obs = await ctx.stores.memory.listObservations({ threadId: "t1", accountId: "acct-a" });
       expect(obs).toHaveLength(1);
       expect(obs[0]?.sourceMessageRange).toEqual(["m1", "m2"]);
       expect(obs[0]?.tags).toEqual(["x", "y"]);
@@ -735,6 +763,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
     it("upsertReflection -> getReflection returns the latest version for an exact scope", async () => {
       ctx = await make();
       await ctx.stores.memory.upsertReflection({
+        accountId: "acct-a",
         projectId: "p1",
         reflectionText: "v1",
         version: 1,
@@ -742,17 +771,24 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         updatedAt: new Date(1000),
       });
       await ctx.stores.memory.upsertReflection({
+        accountId: "acct-a",
         projectId: "p1",
         reflectionText: "v2",
         version: 2,
         tokenEstimate: 6,
         updatedAt: new Date(2000),
       });
-      const got = await ctx.stores.memory.getReflection({ projectId: "p1" });
+      const got = await ctx.stores.memory.getReflection({ projectId: "p1", accountId: "acct-a" });
       expect(got?.version).toBe(2);
       expect(got?.reflectionText).toBe("v2");
       // Scope isolation: a thread-scoped read must NOT see the project row.
-      expect(await ctx.stores.memory.getReflection({ threadId: "p1" })).toBeNull();
+      expect(
+        await ctx.stores.memory.getReflection({ threadId: "p1", accountId: "acct-a" }),
+      ).toBeNull();
+      // Account isolation: same project id under another account must NOT see it.
+      expect(
+        await ctx.stores.memory.getReflection({ projectId: "p1", accountId: "acct-b" }),
+      ).toBeNull();
     });
   });
 

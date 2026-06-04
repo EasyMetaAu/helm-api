@@ -767,6 +767,31 @@ protocol + gateway routes 406 tests green; typecheck clean; `pnpm lint` exit 0.
 
 ---
 
+## 2026-06-02 · Memory inject + reflector — Phase 2 wired end-to-end (docs/08, #36)
+
+**Context**: `assembleInjectedContext` / `runObserverJob` / `runReflectorJob` existed and were unit-tested, but only OBSERVE was wired into the gateway. inject (request-path read) and the observer/reflector background jobs had no caller and no queue producing the `memory_jobs` rows they consume. This change connects all of it.
+
+**What was added**:
+- **Queue contracts (`@helm/shared`)**: `MemoryJobEnqueueInputSchema` / `MemoryJobRowSchema` / `MemoryJobTypeSchema` (`memory/jobs.ts`) + a canonical `encodeScopeId`/`decodeScopeId` codec (`memory/scope-codec.ts`).
+- **`MemoryStore` port**: `enqueueJob` (dedupe-on-pending) + `claimPendingJobs` (atomic `pending→running`), implemented on **both** sqlite (`UPDATE … RETURNING`) and postgres (`FOR UPDATE SKIP LOCKED`) adapters.
+- **`startMemoryWorker`** (`core/memory/scheduler.ts`): clones the signal-scheduler shape (unref'd `setInterval` + fail-open tick), claims a batch, dispatches by `type`, promotes a reflector after a successful observer write.
+- **`injectIntoIR` / `isPlainTextTurn`** (`core/memory/inject-bridge.ts`): framework-agnostic IR↔inject bridge owning the D7 gate + D8 RawMessage synthesis / source→IR restoration.
+- **Gateway hooks**: `/v1/chat/completions` (`chat.ts`) and the shared messages/responses pipeline (`messages-pipeline.ts`) full-replace `internal.messages` with the assembled prefix on `mode=inject`, plain-text turns only, fully fail-open.
+- **Composition root** (`server.ts`): builds inject/observer/reflector deps + starts the env-gated worker (`HELM_MEMORY_WORKER_DISABLED` / `_INTERVAL_MS`); `dispose()` stops it.
+- Migration **v13** (sqlite) / **v12** (pg): `(type, scope_id, status)` index for the dedupe lookup + status scan. (Originally v9/v8 on the branch; renumbered during the rebase onto main, whose oauth/budget work had taken sqlite v9–v12 / pg v8–v11.)
+
+**Decisions / trade-offs (maintainer review points)**:
+- **D1 scope_id encoding**: canonical JSON (omit-undefined, stable key order) in a single TEXT column — robust to ids containing delimiters; re-validated through Zod on decode (fail-closed at the boundary).
+- **D5 reflector trigger + gap**: a reflector job is promoted by the worker after an observer writes a new observation, inheriting the observer's **full** scope so reflection can land at the highest available level. MVP relies on this promotion path; there is no separate periodic project/resource reflector trigger yet.
+- **D7 lossy gate**: inject full-replace runs **only on plain-text turns**. `AssembledMessage` has no `tool_calls`/structured-content field, so a tool-using or multipart request is left untouched (tool calls preserved) and only enqueues an observer.
+- **D8-bis system prompt**: both surfaces read systemPrompt from the **leading IR system message** — the Anthropic inbound transformer already hoists top-level `system` into `messages[0]`, so the prompt is never lost.
+- **D9 token budget**: no `config.memory` subtree yet — the inject budget rides `HELM_MEMORY_INJECT_TOKEN_BUDGET` (default 4000, guarded). **Follow-up**: add a `config.memory` subtree (`inject_token_budget`, retention, etc.).
+- **D10 cost**: all memory deps share one `chars/4` estimator; hydrate/observer/reflector cost sinks are distinct buckets (currently no-ops pending a telemetry sink).
+- **D11 summarize/merge**: MVP ships **deterministic, non-LLM** summarize (concatenate+truncate) / merge so reflection versions only bump on real content change. **Follow-up**: wire a real LLM path behind the same interface.
+- **Deferred (not in #36)**: Step 10 `DecisionRecord.memory` telemetry meta — left as a follow-up (telemetry is not on the critical inject path); the inject bridge already returns the counts/ids needed to populate it.
+
+---
+
 ## 2026-06-01 · Pagination + error/role filters for the admin requests list (docs/07, Principle 1)
 
 **Context**: `/admin/requests` fetched a hardcoded `queryRecent(100)` and rendered all rows at once; the UI had dead cursor/"Load more" plumbing that never fired. No way to page past 100 requests or isolate errors / a time window — unusable for real debugging. Added numbered pagination (time DESC) plus Date-range / Status / Decided-by / Lane / Model filters, all applied at the SQL layer so totals stay correct.
