@@ -211,6 +211,8 @@ export {
 export {
   type AnthropicOAuthUsage,
   AnthropicOAuthUsageSchema,
+  type CodexOAuthUsage,
+  CodexOAuthUsageSchema,
   type OAuthQuotaSnapshot,
   OAuthQuotaSnapshotSchema,
   type OAuthQuotaWindow,

@@ -5,6 +5,7 @@ import {
   beginOpenAICodexLogin,
   type ConfigStore,
   type CopilotDeviceStart,
+  codexAccountIdFromToken,
   completeAnthropicLogin,
   completeOpenAICodexLogin,
   createTokenManager,
@@ -17,6 +18,7 @@ import {
   type OAuthTokenStore,
   type ProxyConfig,
   parseAnthropicUsageBody,
+  parseCodexUsageBody,
   pollCopilotDeviceOnce,
   refreshGitHubCopilotToken,
   validateProxyConfig,
@@ -59,6 +61,19 @@ const ANTHROPIC_USAGE_HEADERS = {
   "user-agent": "claude-cli/2.0.53 (external, cli)",
   accept: "application/json",
   "accept-language": "en-US,en;q=0.9",
+} as const;
+
+// Codex usage endpoint (providers page Tier 3 quota PULL) — the same payload the
+// Codex CLI's /status reads. The on-demand counterpart of the `x-codex-*` header
+// PUSH (provider/oauth/codex-quota.ts): without it an account that has served no
+// traffic yet renders "—" forever. Gated on a Codex-client originator/UA pair
+// (verified live 2026-06-04) plus the per-account `chatgpt-account-id` header
+// (decoded from the access-token JWT, same as the execution path).
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_USAGE_HEADERS = {
+  originator: "codex_cli_rs",
+  "user-agent": "codex_cli_rs",
+  accept: "application/json",
 } as const;
 
 // Manual-paste (authorization-code) providers and their begin/complete step-fns.
@@ -444,6 +459,54 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       }
       // Cache the outcome (success OR failure) so the next page open within the TTL
       // is served from memory rather than re-hitting the rate-limited endpoint.
+      quotaCache.set(key, { at: now(), windows });
+      return windows;
+    },
+
+    async fetchCodexQuota({ account }): Promise<OAuthQuotaWindow[] | null> {
+      // Twin of fetchAnthropicQuota above — same 5-min cache (success AND failure),
+      // same bounded timeout, same per-account proxy reuse. Codex-specific bits:
+      // the endpoint keys on `chatgpt-account-id` (decoded from the access-token
+      // JWT, exactly like the execution path in core/provider/openai-responses).
+      const key = `${CODEX} ${account}`;
+      const cached = quotaCache.get(key);
+      if (cached && now() - cached.at < QUOTA_TTL_MS) return cached.windows;
+      const provider = getOAuthProvider(CODEX);
+      if (!provider) return null;
+      let windows: OAuthQuotaWindow[] | null = null;
+      try {
+        const tm = createTokenManager({
+          oauth: { kind: "preset", providerId: CODEX, account },
+          tokenStore: deps.store,
+          encKey: deps.encKey,
+          oauthProvider: provider,
+          now,
+        });
+        const authorization = await tm.getAuthHeader(); // "Bearer <access>"
+        const accountId = codexAccountIdFromToken(authorization.replace(/^Bearer\s+/i, ""));
+        const proxy = getAccountSettings(
+          await loadAccountSettings(deps.config, deps.encKey),
+          CODEX,
+          account,
+        ).proxy;
+        const doFetch = proxy ? makeProxyFetch(proxy) : fetch;
+        const res = await doFetch(CODEX_USAGE_URL, {
+          headers: {
+            ...CODEX_USAGE_HEADERS,
+            authorization,
+            ...(accountId ? { "chatgpt-account-id": accountId } : {}),
+          },
+          signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
+        });
+        if (res.ok) {
+          const body: unknown = await res.json();
+          windows = parseCodexUsageBody(body, now());
+        } else {
+          await res.body?.cancel().catch(() => {}); // 429/4xx/5xx → cache the miss
+        }
+      } catch {
+        windows = null; // dead token / network / malformed body → page renders "—"
+      }
       quotaCache.set(key, { at: now(), windows });
       return windows;
     },

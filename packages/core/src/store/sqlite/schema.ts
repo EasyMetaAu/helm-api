@@ -168,8 +168,8 @@ export const oauthUsage = sqliteTable(
 // Per-account OAuth subscription QUOTA snapshot (providers page Tier 3). One row
 // per (provider_id, account): the LATEST rate-limit window snapshot. `windows` is
 // a JSON-text array of { key, usedPercent, resetsAtMs, windowMinutes } (SQLite has
-// no native array). `source` = how it was captured (anthropic pull / codex-headers
-// push). Latest-wins upsert; no history. Pure observability — no secret column.
+// no native array). `source` = how it was captured (anthropic pull / codex pull /
+// codex-headers push). Latest-wins upsert; no history. Pure observability — no secret column.
 export const oauthQuota = sqliteTable(
   "oauth_quota",
   {
@@ -177,7 +177,7 @@ export const oauthQuota = sqliteTable(
     account: text("account").notNull(),
     windows: text("windows").notNull(), // JSON text: OAuthQuotaWindow[]
     capturedAt: integer("captured_at").notNull(),
-    source: text("source").notNull(), // 'anthropic' | 'codex-headers'
+    source: text("source").notNull(), // 'anthropic' | 'codex' | 'codex-headers'
   },
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );

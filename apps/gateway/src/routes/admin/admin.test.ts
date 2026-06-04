@@ -967,6 +967,51 @@ describe("admin.api oauth quota", () => {
     expect(deletes).toEqual([["openai-codex", "default"]]);
   });
 
+  it("GET /oauth/quota also refreshes the Codex PULL (source 'codex')", async () => {
+    const upserts: unknown[] = [];
+    const oauthQuota = {
+      upsert: async (s: unknown) => {
+        upserts.push(s);
+      },
+      get: async () => null,
+      getAll: async () => [],
+      delete: async () => {},
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const oauth = {
+      listStatus: async () => [
+        {
+          id: "openai-codex",
+          name: "C",
+          flow: "manual_paste",
+          accounts: [
+            {
+              account: "mylukin",
+              expiresAt: null,
+              updatedAt: 0,
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+            },
+          ],
+        },
+      ],
+      // The PULL twin of the x-codex-* header PUSH: same window keys.
+      fetchCodexQuota: async () => [
+        { key: "primary", usedPercent: 1, resetsAtMs: 9_000, windowMinutes: 300 },
+        { key: "secondary", usedPercent: 14, resetsAtMs: 99_000, windowMinutes: 10_080 },
+      ],
+    } as unknown as AdminApiDeps["oauth"];
+    const app = buildApp(buildDeps({ oauthQuota, oauth }));
+    const res = await app.request("/admin/api/oauth/quota");
+    expect(res.status).toBe(200);
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0]).toMatchObject({
+      providerId: "openai-codex",
+      account: "mylukin",
+      source: "codex",
+    });
+  });
+
   it("GET /oauth/quota fails open to [] when no quota store is wired", async () => {
     const app = buildApp(buildDeps());
     const res = await app.request("/admin/api/oauth/quota");

@@ -10,7 +10,7 @@ export {
   refreshAnthropicToken,
 } from "./anthropic.js";
 export { anthropicUsageToWindows, parseAnthropicUsageBody } from "./anthropic-quota.js";
-export { parseCodexQuotaHeaders } from "./codex-quota.js";
+export { codexUsageToWindows, parseCodexQuotaHeaders, parseCodexUsageBody } from "./codex-quota.js";
 export {
   beginCopilotDeviceLogin,
   COPILOT_HEADERS,

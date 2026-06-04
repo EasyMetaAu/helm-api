@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-06-04 · Codex 额度改为「PULL + PUSH 双源」（spec 未覆盖；issue #38 OAuth 订阅）
+
+**问题**：providers 页 Codex 账户的额度列永远显示「—」，刷新按钮无效。根因：Codex 额度此前**只有 PUSH 源**——从每次 `/responses` 响应的 `x-codex-*` 头里刮（`codex-quota.ts`），账户没流量就永远没有快照；而刷新按钮（#88）只重跑页面加载，其中的主动 PULL 只覆盖 Anthropic。参考项目 claude-relay-service 同样只刮头，**没有**主动拉取可抄。
+
+**方案**：从 Codex CLI 二进制（v0.136.0 strings）找到官方用量端点 `GET https://chatgpt.com/backend-api/wham/usage`（即 CLI `/status` 的数据源；`/backend-api/codex/usage` 别名实测 403），鉴权为 `Bearer <access>` + `chatgpt-account-id`（沿用执行路径从 JWT 解出的 claim）+ codex 客户端 originator/UA。已用本地真实账户验证 200 与响应形态（2026-06-04）。
+
+- shared：`CodexOAuthUsageSchema`（loose、fail-open）；`OAuthQuotaSnapshot.source` 枚举加 `"codex"`。
+- core：`parseCodexUsageBody` / `codexUsageToWindows`——window key 沿用 PUSH 路径的 `primary`/`secondary`（UI 按 windowMinutes 标 5h/Weekly，两源一致）；`reset_at`（epoch 秒）优先于 `reset_after_seconds`；`limit_window_seconds`→分钟。
+- gateway：`fetchCodexQuota` 是 `fetchAnthropicQuota` 的孪生（同 5 分钟正负缓存、同 8s 超时、同代理复用）；`/admin/api/oauth/quota` 的刷新块泛化为 anthropic+codex 两个 PULL 并行。
+- **取舍**：PULL upsert 无条件覆盖快照——活跃流量期间 PUSH 实时性更好、PULL 缓存最多 5 分钟旧，可能短暂回写略旧的百分比；窗口数据变化慢，不值得为此引入 capturedAt 比较的复杂度。
+- **坑**：`wham` 端点是逆向产物（同 ToS 警示已存在于 openai-codex.ts 头部），上游可能改形态——schema 全 loose + fail-open，坏了最多回到「—」。
+
 ## 2026-06-04 · 公开端点：落地页 + `/v1/models` + OpenAPI/Swagger 文档（spec 未覆盖；docs/06 安全、docs/04 lane）
 
 网关此前根路径 `/` 直接 404（Hono 默认 → OpenAI 错误信封），也没有任何「可用 API 一览」与可调试文档。本次在独立 worktree 补三块公开能力，均为 gateway 层薄胶水，core 不变（principle 1）：

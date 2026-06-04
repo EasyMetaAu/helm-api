@@ -226,7 +226,7 @@ export const oauthQuota = pgTable(
     account: text("account").notNull(),
     windows: jsonb("windows").$type<unknown[]>().notNull(), // OAuthQuotaWindow[]
     capturedAt: bigint("captured_at", { mode: "number" }).notNull(),
-    source: text("source").notNull(), // 'anthropic' | 'codex-headers'
+    source: text("source").notNull(), // 'anthropic' | 'codex' | 'codex-headers'
   },
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );
