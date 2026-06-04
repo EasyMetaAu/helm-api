@@ -186,6 +186,40 @@ for (const protocol of ["anthropic_messages", "openai_responses"] as const) {
       ]);
     });
 
+    it("preserves developer instructions under x-memory-mode=inject instead of silently dropping them", async () => {
+      const { store } = makeFakeStore({
+        reflection: "PROJECT REFLECTION",
+        observations: ["OBS-1"],
+        recent: [{ role: "user", content: "earlier turn" }],
+      });
+      const { route, seen } = captureRoute();
+      const app = buildApp({
+        route,
+        protocol,
+        memory: { observe: observeDeps(store), inject: injectWiring(store) },
+      });
+
+      const res = await app.request(surface, {
+        method: "POST",
+        headers: { ...AUTH, ...INJECT_HEADERS },
+        body: JSON.stringify({
+          model: "m",
+          messages: [
+            { role: "developer", content: "Always answer in JSON." },
+            { role: "system", content: "be terse" },
+            { role: "user", content: "hi" },
+          ],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(seen[0]?.messages).toEqual([
+        { role: "developer", content: "Always answer in JSON." },
+        { role: "system", content: "be terse" },
+        { role: "user", content: "hi" },
+      ]);
+    });
+
     it("leaves messages untouched when mode is observe (not inject)", async () => {
       const { store } = makeFakeStore({ reflection: "R", observations: ["O"] });
       const { route, seen } = captureRoute();

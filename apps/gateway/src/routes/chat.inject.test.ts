@@ -220,6 +220,33 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
     ]);
   });
 
+  it("preserves developer instructions under x-memory-mode=inject instead of silently dropping them", async () => {
+    const { store } = makeFakeStore({
+      reflection: { project: "PROJECT REFLECTION" },
+      observations: ["OBS-1"],
+      recent: [{ role: "user", content: "earlier turn" }],
+    });
+    const { deps, seen } = captureRouteDeps({
+      body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
+      memory: { observe: observeDeps(store), inject: injectWiring(store) },
+    });
+    const app = buildApp(deps);
+
+    const original = [
+      { role: "developer", content: "Always answer in JSON." },
+      { role: "system", content: "be terse" },
+      { role: "user", content: "hi" },
+    ];
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { ...AUTH, ...INJECT_HEADERS },
+      body: JSON.stringify({ model: "auto", messages: original, stream: false }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(seen[0]?.messages).toEqual(original);
+  });
+
   it("hydrates before observing this turn so current input is not duplicated as recent_raw", async () => {
     const { store } = makeFakeStore({ recent: [] });
     const { deps, seen } = captureRouteDeps({
