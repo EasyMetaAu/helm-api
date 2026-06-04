@@ -9,8 +9,9 @@
 > (`apps/gateway/src/routes/memory-scope.ts`), the resolved scope/mode is threaded
 > through, and `observeInbound` / `observeOutbound`
 > (`packages/core/src/memory/observe.ts`) are called from the OpenAI Chat route
-> (`chat.ts`), the Anthropic/Responses pipeline (`messages-pipeline.ts`), and the
-> Anthropic/Responses surfaces (`messages.ts`, `responses.ts`). In `observe`/
+> (`chat.ts`) and from the shared protocol pipeline
+> (`messages-pipeline.ts`), which backs the Anthropic, OpenAI-Responses, and
+> Gemini surfaces (`messages.ts`, `responses.ts`, `gemini.ts`). In `observe`/
 > `inject` mode the gateway persists raw request/response/tool messages into the
 > `memory_*` tables.
 >

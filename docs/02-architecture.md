@@ -35,8 +35,8 @@ Each component is summarized here; deeper design lives in its own chapter.
 
 Built on Hono. Responsibilities:
 
-- Accept the standard API requests on `/v1/chat/completions`, `/v1/messages`, and
-  `/v1/responses`.
+- Accept the standard API requests on `/v1/chat/completions`, `/v1/messages`,
+  `/v1/responses`, and `/v1beta/models/{model}:generateContent` (Gemini).
 - Normalize request headers and the request/trace id.
 - Apply request-size and timeout limits (`runtime.max_request_bytes`,
   `runtime.request_timeout_ms`).
@@ -64,7 +64,7 @@ Per-key limiter (`packages/core/src/ratelimit`). Off by default
 (`runtime.rate_limit.enabled`) — a zero-overhead pass-through when disabled. It
 sits **after** auth (it needs the resolved `key_id`) and **before** classification
 (so cost is cut off before any classify/eval call). It enforces both the system
-default and any per-key RPM/TPM override on all three request surfaces. See
+default and any per-key RPM/TPM override on every request surface. See
 [06](06-auth-and-rate-limits.md).
 
 ### Task Classifier
@@ -138,7 +138,7 @@ The normalized `InternalRequest` that every protocol adapter produces:
 
 ```yaml
 request_id: string
-protocol: openai_chat | anthropic_messages | openai_responses
+protocol: openai_chat | anthropic_messages | openai_responses | gemini
 account_id: string
 api_key_id: string
 user_id: string | null
@@ -159,8 +159,9 @@ metadata:
   memory_mode: off | observe | inject
 ```
 
-> Note: `protocol` is one of the three wired protocols. A Gemini value is not
-> emitted today (the Gemini transformer is unrouted; see
+> Note: `protocol` is one of the four wired protocols. The Gemini value is
+> emitted by the Gemini inbound surface (`POST /v1beta/models/{model}:generateContent`),
+> which is routed through the same core pipeline (see
 > [01 · Overview](01-overview.md)).
 
 ## Decision record
@@ -229,7 +230,7 @@ config/
   capabilities.yaml    # manual capability overrides over the generated catalog
   pricing.yaml         # manual pricing overrides over the generated catalog
   auth.yaml            # require_api_key + admin auth source
-  runtime.yaml         # store driver, rate limit, timeouts, request size, payload capture
+  runtime.yaml         # store driver, rate limit, timeouts, request size
   server.yaml          # host / port
 ```
 

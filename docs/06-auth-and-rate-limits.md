@@ -92,8 +92,10 @@ The stored record (`ApiKeyRecord`, single source of truth in
   it; see implementation-notes.md.)
 - **Rotation & revocation never mutate in place.** `KeyStore.disable` is a soft
   revoke (`disabled = true`); rotate by minting a new key and disabling the old
-  one. `updateRateLimit` is a partial PATCH that touches only the rate-limit
-  columns, never role/caps.
+  one. `KeyStore.updateKey` is a partial PATCH that writes only the per-key cap
+  columns present in the patch (rate limits, allowed lanes, custom-model flag,
+  budgets), leaving omitted columns untouched; it never mutates `role` or the
+  immutable identity (`key_id`/`hash`/`prefix`/`account_id`).
 
 ## Rate limits & quotas
 
@@ -179,8 +181,8 @@ per key via `over_budget_behavior`:
   normally. Cost is bounded **without interrupting service**. Implemented by
   feeding a dynamic `max_lane` ceiling into the router's existing `applyCaps` for
   that one request.
-- **`reject`** — a hard `429 rate_limited` (`limited_by: "credit"` on the OpenAI
-  middleware face), before classify/route.
+- **`reject`** — a hard `429 rate_limited` (message `usage budget exceeded`),
+  before classify/route.
 
 Two phases, like the rate limiter but split by failure mode:
 

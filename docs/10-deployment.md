@@ -39,7 +39,7 @@ mounting their own directory at `/app/config`.
 ### docker-compose
 
 A `docker-compose.yml` is provided. It defaults to the published image (uncomment
-`build: .` for local builds), mounts the two volumes, and injects credentials from
+the `build:` block for local builds), mounts the two volumes, and injects credentials from
 a `.env` file. `HELM_ADMIN_PASSWORD` and `DEEPSEEK_API_KEY` are required (compose
 fails fast if they are unset):
 
@@ -76,8 +76,8 @@ Configuration comes from **files** and **environment variables**, and env vars
 - `config/*.yaml` — lanes, policies, classifier, providers, capabilities,
   pricing, auth, runtime, server (see [02 · Architecture](02-architecture.md)).
 - Environment variables — upstream provider credentials, the admin Basic-auth
-  user/password, the store driver, and optional bind/limit overrides. See
-  `.env.example` for the full list, including:
+  user/password, the store driver, and optional bind/limit overrides.
+  `.env.example` covers the common ones; additional overrides include:
   - `HELM_HOST`, `HELM_PORT`, `HELM_BASE_PATH`
   - `HELM_ADMIN_USER`, `HELM_ADMIN_PASSWORD`, `HELM_ADMIN_ENABLED`
   - `HELM_RATE_LIMIT_ENABLED`, `HELM_REQUEST_TIMEOUT_MS`, `HELM_MAX_REQUEST_BYTES`

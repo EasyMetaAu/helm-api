@@ -52,8 +52,9 @@ today:
 - **Anthropic Messages** — `POST /v1/messages` (streaming and non-streaming).
 - **OpenAI Responses** — `POST /v1/responses` (streaming and non-streaming; the
   SSE stream terminates with a `response.completed` event).
-- **Google Gemini** — `POST /v1beta/models/{model}:generateContent` (non-streaming;
-  `:streamGenerateContent` is not yet implemented).
+- **Google Gemini** — `POST /v1beta/models/{model}:generateContent` (non-streaming)
+  and `:streamGenerateContent` (streaming via `?alt=sse`, emitted as nameless `data:`
+  delta frames).
 
 Clients should only need to change their `base_url` and API key. A client never
 needs to know which provider or model actually executed the request.
@@ -86,8 +87,9 @@ user-facing surface.
    aliases.
 4. Execute each lane through a primary plus fallback providers.
 5. Record every routing decision and every provider attempt for debugging.
-6. Work out of the box: three default lanes shipped, and the LLM eval **off** by
-   default.
+6. Work out of the box: default lanes shipped (three quality/cost tiers — economy,
+   balanced, premium — plus task lanes such as coding, json, vision, tool_use), and
+   the LLM eval **off** by default.
 7. Enforce that an API key exists at startup; no anonymous access.
 8. Open-source and self-hosted: one-command Docker deployment, config-as-code, no
    hard dependency on external services (see [10 · Deployment](10-deployment.md)).

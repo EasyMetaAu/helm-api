@@ -1,7 +1,7 @@
 # 09 · Roadmap
 
 > Status: **0.2 is implemented.** Phases 0–4 (the 0.1 core) are done; 0.2 adds the
-> Gemini inbound route, native OpenAI Responses streaming, full OAuth subscription
+> Gemini inbound route (with streaming), native OpenAI Responses streaming, full OAuth subscription
 > providers (multi-account pools + hot-reload), and an admin-UI overhaul. The
 > "remaining" list below is what is still deferred.
 
@@ -36,8 +36,9 @@ The build followed an order where each phase runs on its own.
 
 Net-new since 0.1 — all verified live (see `implementation-notes.md`):
 
-- **Gemini inbound route.** `POST /v1beta/models/{model}:generateContent` is mounted
-  (issue #58) — Google/Gemini-format clients now reach the gateway (non-streaming).
+- **Gemini inbound route.** `POST /v1beta/models/{model}:generateContent` and
+  `:streamGenerateContent` are mounted (issue #58) — Google/Gemini-format clients now
+  reach the gateway, including native `alt=sse` streaming (incremental-delta frames).
   The earlier "transformer exists but no endpoint" gap is closed. See
   [05 · Protocol Translation](05-protocol-translation.md).
 - **OpenAI Responses streaming.** `stream: true` on `/v1/responses` now returns a
