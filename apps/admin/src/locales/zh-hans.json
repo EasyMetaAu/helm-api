@@ -407,6 +407,7 @@
   "parked": "已停用",
   "Secondary": "次窗口",
   "{n} req": "{n} 次",
+  "resets in {d}d {h}h": "{d} 天 {h} 小时后重置",
   "resets in {h}h {m}m": "{h} 小时 {m} 分后重置",
   "resets in {m}m": "{m} 分后重置",
   "Failed to update scheduling": "更新调度失败",

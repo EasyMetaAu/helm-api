@@ -407,6 +407,7 @@
   "parked": "parked",
   "Secondary": "Secondary",
   "{n} req": "{n} req",
+  "resets in {d}d {h}h": "resets in {d}d {h}h",
   "resets in {h}h {m}m": "resets in {h}h {m}m",
   "resets in {m}m": "resets in {m}m",
   "Failed to update scheduling": "Failed to update scheduling",
