@@ -346,7 +346,7 @@
   "Schedule": "Schedule",
   "Search model": "Search model",
   "Secondary": "Secondary",
-  "See the full decision trail for every request the gateway handled.": "See the full decision trail for every request the gateway handled.",
+  "Weekly": "Weekly",  "See the full decision trail for every request the gateway handled.": "See the full decision trail for every request the gateway handled.",
   "Served model": "Served model",
   "Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.": "Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.",
   "Set the primary model and fallback chain for each quality and cost tier.": "Set the primary model and fallback chain for each quality and cost tier.",

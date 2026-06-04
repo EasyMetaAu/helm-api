@@ -97,8 +97,10 @@
       '7d': '7d',
       '7d-opus': '7d · Opus',
       '7d-sonnet': '7d · Sonnet',
-      primary: $t('Primary'),
-      secondary: $t('Secondary'),
+      // Codex windows: `primary` is the 5-hour rolling window (windowMinutes 300),
+      // `secondary` is the weekly limit (windowMinutes 10080) — matching the Codex UI.
+      primary: '5h',
+      secondary: $t('Weekly'),
     };
     return map[key] ?? key;
   }

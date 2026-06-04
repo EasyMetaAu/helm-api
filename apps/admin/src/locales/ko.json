@@ -345,7 +345,7 @@
   "Schedule": "일정",
   "Search model": "모델 검색",
   "Secondary": "보조",
-  "See the full decision trail for every request the gateway handled.": "게이트웨이가 처리한 모든 요청의 전체 결정 추적을 확인하세요.",
+  "Weekly": "주간",  "See the full decision trail for every request the gateway handled.": "게이트웨이가 처리한 모든 요청의 전체 결정 추적을 확인하세요.",
   "Served model": "제공된 모델",
   "Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.": "서버 측 라우팅 규칙. 각 규칙은 조건 → 동작(레인 강제 또는 상한)입니다. 정책은 작업 레인을 재정의하지만 실행 폴백 체인은 재정의하지 않습니다.",
   "Set the primary model and fallback chain for each quality and cost tier.": "각 품질 및 비용 티어에 대한 기본 모델과 대체 체인을 설정하세요.",

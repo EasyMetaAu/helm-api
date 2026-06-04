@@ -346,7 +346,7 @@
   "Schedule": "计划",
   "Search model": "搜索模型",
   "Secondary": "次窗口",
-  "See the full decision trail for every request the gateway handled.": "查看网关处理的每个请求的完整决策轨迹。",
+  "Weekly": "周限",  "See the full decision trail for every request the gateway handled.": "查看网关处理的每个请求的完整决策轨迹。",
   "Served model": "最终模型",
   "Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.": "服务端路由规则。每条都是 条件 → 动作（强制或封顶某条通道）。策略会覆盖任务通道，但绝不覆盖执行回退链。",
   "Set the primary model and fallback chain for each quality and cost tier.": "为每个质量和成本层级设置主模型和备用链。",
