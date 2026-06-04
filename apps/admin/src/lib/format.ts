@@ -37,3 +37,36 @@ export function formatUsd(n: number | null | undefined): string {
   }
   return `$${s}`;
 }
+
+// Coarse, magnitude-aware breakdown of a duration (in ms) — the SINGLE source of
+// truth for "anything past 24h rolls up to days". Returns just the numbers +
+// which bucket they fall in; callers map the bucket to their own phrasing/i18n
+// key ("in {d}d {h}h" for token expiry, "resets in {d}d {h}h" for quota windows)
+// so the unit stays legible at every scale.
+//
+// WHY this exists: token-expiry used to format raw h+m, so a weekly Codex window
+// rendered "238h 22m" instead of "9d 22h". The quota-reset countdown already
+// coarsened correctly; this lifts that one rule out so every duration label
+// agrees on it. Kept i18n-free and side-effect-free (no `Date.now()`) so it is
+// trivially unit-testable.
+//
+// Buckets, by descending magnitude:
+//   • ≥ 24h → "dh": days + leftover whole hours (sub-hour minutes are dropped)
+//   • ≥  1h → "hm": hours + minutes
+//   • <  1h → "m":  minutes only
+// Negative spans (already elapsed) clamp to zero.
+export type DurationParts =
+  | { readonly unit: "dh"; readonly d: number; readonly h: number }
+  | { readonly unit: "hm"; readonly h: number; readonly m: number }
+  | { readonly unit: "m"; readonly m: number };
+
+export function durationParts(ms: number): DurationParts {
+  const left = Math.max(0, ms);
+  const d = Math.floor(left / 86_400_000);
+  if (d > 0) {
+    return { unit: "dh", d, h: Math.floor((left % 86_400_000) / 3_600_000) };
+  }
+  const h = Math.floor(left / 3_600_000);
+  const m = Math.floor((left % 3_600_000) / 60_000);
+  return h > 0 ? { unit: "hm", h, m } : { unit: "m", m };
+}

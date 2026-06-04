@@ -177,6 +177,7 @@
   "How much detail the gateway writes to its logs.": "网关写入日志的详细程度。",
   "HTTP status": "HTTP 状态码",
   "I saved it": "我已保存",
+  "in {d}d {h}h": "{d} 天 {h} 小时后",
   "in {h}h {m}m": "{h} 小时 {m} 分钟后",
   "in {m}m": "{m} 分钟后",
   "Issue and revoke client keys, and cap the top lane each key may reach.": "签发和撤销客户端密钥，并限制每个密钥可达到的最高通道。",
