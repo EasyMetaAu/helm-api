@@ -351,6 +351,10 @@ export interface OAuthQuotaStore {
   get(providerId: string, account: string): Promise<OAuthQuotaSnapshot | null>;
   // All accounts' latest snapshots (the providers page reads them in one shot).
   getAll(): Promise<OAuthQuotaSnapshot[]>;
+  // Remove the snapshot for a (provider_id, account). Used to prune ORPHANS — a
+  // renamed / logged-out account otherwise leaves a stale row (e.g. a Codex push
+  // under an old label) that would surface as a phantom account on the page.
+  delete(providerId: string, account: string): Promise<void>;
 }
 
 export interface OAuthTokenStore {

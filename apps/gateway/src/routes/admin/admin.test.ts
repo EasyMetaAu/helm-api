@@ -867,13 +867,29 @@ describe("admin.api oauth usage", () => {
 });
 
 describe("admin.api oauth quota", () => {
-  it("GET /oauth/quota refreshes the Anthropic PULL, upserts, and returns all snapshots", async () => {
+  it("GET /oauth/quota refreshes Anthropic, returns only BOUND accounts, and prunes orphans", async () => {
     const upserts: unknown[] = [];
+    const deletes: Array<[string, string]> = [];
+    const acct = (account: string) => ({
+      account,
+      expiresAt: null,
+      updatedAt: 0,
+      healthy: true,
+      priority: 50,
+      schedulable: true,
+    });
     const stored = [
       {
         providerId: "openai-codex",
-        account: "default",
+        account: "mylukin", // BOUND → kept
         windows: [{ key: "primary", usedPercent: 5, resetsAtMs: 9_000, windowMinutes: 300 }],
+        capturedAt: 1,
+        source: "codex-headers" as const,
+      },
+      {
+        providerId: "openai-codex",
+        account: "default", // ORPHAN (no token) → filtered out + pruned
+        windows: [{ key: "primary", usedPercent: 9, resetsAtMs: 9_000, windowMinutes: 300 }],
         capturedAt: 1,
         source: "codex-headers" as const,
       },
@@ -884,25 +900,15 @@ describe("admin.api oauth quota", () => {
       },
       get: async () => null,
       getAll: async () => stored,
+      delete: async (providerId: string, account: string) => {
+        deletes.push([providerId, account]);
+      },
     } as unknown as AdminApiDeps["oauthQuota"];
-    // Minimal seam: only the two methods the quota route touches.
+    // Bound accounts: anthropic/mylukin + openai-codex/mylukin (NOT codex/default).
     const oauth = {
       listStatus: async () => [
-        {
-          id: "anthropic",
-          name: "A",
-          flow: "manual_paste",
-          accounts: [
-            {
-              account: "default",
-              expiresAt: null,
-              updatedAt: 0,
-              healthy: true,
-              priority: 50,
-              schedulable: true,
-            },
-          ],
-        },
+        { id: "anthropic", name: "A", flow: "manual_paste", accounts: [acct("mylukin")] },
+        { id: "openai-codex", name: "C", flow: "manual_paste", accounts: [acct("mylukin")] },
       ],
       fetchAnthropicQuota: async () => [
         { key: "5h", usedPercent: 6, resetsAtMs: 5_000, windowMinutes: null },
@@ -915,12 +921,14 @@ describe("admin.api oauth quota", () => {
     expect(upserts).toHaveLength(1);
     expect(upserts[0]).toMatchObject({
       providerId: "anthropic",
-      account: "default",
+      account: "mylukin",
       source: "anthropic",
     });
-    // The response returns the store's full snapshot set.
-    const body = (await res.json()) as { quota: Array<{ providerId: string }> };
-    expect(body.quota.map((q) => q.providerId)).toContain("openai-codex");
+    // Only BOUND snapshots are returned; the orphan codex/default is dropped.
+    const body = (await res.json()) as { quota: Array<{ providerId: string; account: string }> };
+    expect(body.quota.map((q) => `${q.providerId}/${q.account}`)).toEqual(["openai-codex/mylukin"]);
+    // …and the orphan row is pruned from the store.
+    expect(deletes).toEqual([["openai-codex", "default"]]);
   });
 
   it("GET /oauth/quota fails open to [] when no quota store is wired", async () => {

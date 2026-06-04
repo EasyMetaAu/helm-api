@@ -57,4 +57,20 @@ describe("SqliteOAuthQuotaStore", () => {
     expect(await store.getAll()).toHaveLength(2);
     close();
   });
+
+  it("delete removes one (provider, account) row and leaves siblings intact", async () => {
+    const { store, close } = freshStore();
+    await store.upsert(snap({ account: "keep" }));
+    await store.upsert(
+      snap({ providerId: "openai-codex", account: "orphan", source: "codex-headers" }),
+    );
+    await store.delete("openai-codex", "orphan");
+    expect(await store.get("openai-codex", "orphan")).toBeNull();
+    expect((await store.getAll()).map((q) => `${q.providerId}/${q.account}`)).toEqual([
+      "anthropic/keep",
+    ]);
+    // Deleting a non-existent row is a no-op (idempotent), never throws.
+    await store.delete("openai-codex", "orphan");
+    close();
+  });
 });
