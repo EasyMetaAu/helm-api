@@ -55,7 +55,7 @@ Helm API is **0.2** and early-stage, but it is a real implementation, not a scaf
 
 **Shipped:**
 
-- **Four client protocols** — `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages), and `POST /v1/responses` (OpenAI Responses) — all streaming + non-streaming — plus `POST /v1beta/models/{model}:generateContent` (Google Gemini, non-streaming).
+- **Four client protocols** — `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses), and `POST /v1beta/models/{model}:generateContent` (Google Gemini) — all streaming + non-streaming. (Gemini streaming is the `:streamGenerateContent?alt=sse` operation.)
 - **Cross-protocol translation** — normalize to one internal IR; consistent output shape across backends, with SSE streaming on the chat, messages, and responses surfaces.
 - **Three-layer classification** — deterministic rules always on; optional small-model eval (off by default) for uncertain cases; `balanced`-lane fallback.
 - **Lane + policy routing** — first-match policies that pin, cap, or restrict lanes; default lanes shipped: `economy`, `balanced`, `premium`, plus task lanes `coding`, `json`, `vision`, `tool_use`. (`balanced` is the required, always-available fallback lane.)
@@ -133,7 +133,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ |
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ✅ |
-| `POST /v1beta/models/{model}:generateContent` | Google Gemini | ❌ non-streaming |
+| `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅ (via `:streamGenerateContent?alt=sse`) |
 
 **What to put in the `model` field:**
 

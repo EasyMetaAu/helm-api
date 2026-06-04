@@ -1344,7 +1344,7 @@ export async function buildServer(
 
   // Gemini route (/v1beta/models/{model}:generateContent | :streamGenerateContent).
   // The FOURTH client surface. Reuses the SAME routing core via a pipeline stamped
-  // with the `gemini` protocol (so streamIR yields Gemini snapshot events), and the
+  // with the `gemini` protocol (so streamIR yields Gemini delta events), and the
   // Gemini transformer for IR↔native translation + the Gemini error envelope. Self-
   // auth (x-goog-api-key preferred, Bearer fallback) so a missing key is rejected as
   // a Gemini error envelope (docs/05, docs/07).

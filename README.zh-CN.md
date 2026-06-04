@@ -55,8 +55,8 @@ Helm API 目前是 **0.2**、尚处早期，但它是一套真实实现，而非
 
 **已上线：**
 
-- **四种客户端协议** —— `POST /v1/chat/completions`（OpenAI Chat）、`POST /v1/messages`（Anthropic Messages）、`POST /v1/responses`（OpenAI Responses）三者均支持流式 + 非流式，外加 `POST /v1beta/models/{model}:generateContent`（Google Gemini，非流式）。
-- **跨协议互译** —— 归一到一套内部 IR；跨后端输出格式一致，chat、messages、responses 三个面均支持 SSE 流式。
+- **四种客户端协议** —— `POST /v1/chat/completions`（OpenAI Chat）、`POST /v1/messages`（Anthropic Messages）、`POST /v1/responses`（OpenAI Responses）、`POST /v1beta/models/{model}:generateContent`（Google Gemini）—— 四者均支持流式 + 非流式（Gemini 的流式即 `:streamGenerateContent?alt=sse`）。
+- **跨协议互译** —— 归一到一套内部 IR；跨后端输出格式一致，chat、messages、responses、Gemini 四个面均支持 SSE 流式。
 - **三层分类** —— 确定性规则常驻；不确定时走可选的小模型 eval（默认关闭）；最后兜底到 `balanced` lane。
 - **Lane + 策略路由** —— 首条命中的策略可以钉死、设上限或限定 lane；内置默认 lane：`economy`、`balanced`、`premium`，外加任务 lane `coding`、`json`、`vision`、`tool_use`（`balanced` 是必须存在、永远兜底的那条）。
 - **带兜底的 provider 执行** —— 在多个 OpenAI 兼容上游之间走「主 + 兜底」链，配有熔断器（OPEN/HALF_OPEN）、能力过滤（缺 JSON / 工具 / 视觉 / 上下文长度的候选会被显式跳过并记原因）、以及 `:free` 档 429 跳过。客户端断连不算 provider 故障。
@@ -133,7 +133,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ |
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ✅ |
-| `POST /v1beta/models/{model}:generateContent` | Google Gemini | ❌ 非流式 |
+| `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅（走 `:streamGenerateContent?alt=sse`） |
 
 **`model` 字段里填什么：**
 

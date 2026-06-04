@@ -129,8 +129,9 @@ export const GeminiGenerateContentResponseSchema = z
   .passthrough();
 export type GeminiGenerateContentResponse = z.infer<typeof GeminiGenerateContentResponseSchema>;
 
-// —— Streaming (?alt=sse): each SSE event is a COMPLETE GenerateContentResponse
-// snapshot, so the SSE event schema is the response schema itself. ————————————————
+// —— Streaming (?alt=sse): each SSE event is a GenerateContentResponse carrying an
+// INCREMENTAL delta (clients accumulate text frame to frame). The event shape equals
+// the response shape, so the SSE event schema reuses the response schema. ——————————
 
 export const GeminiSSEEventSchema = GeminiGenerateContentResponseSchema;
 export type GeminiSSEEvent = z.infer<typeof GeminiSSEEventSchema>;

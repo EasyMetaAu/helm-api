@@ -26,9 +26,9 @@ import { PipelineError } from "./messages-pipeline.js";
 //   • the model + operation are in the PATH (`{model}:{op}`), parsed by the core
 //     pure function `parseGeminiPath` (core never reads a Hono object, principle 1);
 //   • auth is `x-goog-api-key` (NOT Authorization: Bearer; Bearer is a fallback);
-//   • streaming events are FULL-SNAPSHOT `data:` frames with NO `event:` name and
+//   • streaming events are incremental-delta `data:` frames with NO `event:` name and
 //     NO `[DONE]` sentinel (docs/05 — Gemini's wire form differs from OpenAI /
-//     Anthropic SSE).
+//     Anthropic SSE; each frame is a `GenerateContentResponse` the client accumulates).
 
 /** One Gemini error envelope plus the HTTP status to send it with. Error
  *  translation is protocol logic (docs/05) — injected, never hand-assembled. */
@@ -226,7 +226,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       throw err;
     }
 
-    // 4) Protocol Adapter (outbound). Gemini streaming events are FULL snapshots,
+    // 4) Protocol Adapter (outbound). Gemini streaming events are incremental deltas,
     //    written as nameless `data:` frames — NO `event:` name, NO `[DONE]`.
     if (route.stream) {
       return streamSSE(c, async (sse) => {
