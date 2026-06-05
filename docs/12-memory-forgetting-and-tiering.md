@@ -282,11 +282,12 @@ reflections do not change their isolation: those reads already join through
 ### Migration
 
 All additive, all nullable-or-defaulted, so existing rows and existing tests are
-untouched. This lands as the **next inline migration in
-`packages/core/src/store/sqlite/migrate.ts` — version 17** (the runner is at
-version 16 today; the `000N_*.sql` files are legacy and stop at `0004`, so do
-**not** add a conflicting `0003_*.sql`). The Postgres adapter gets the same DDL,
-dialect differences sealed inside the adapter per CLAUDE.md.
+untouched. This lands as the **next free inline migration version in
+`packages/core/src/store/sqlite/migrate.ts`** — always current max + 1
+(**version 18** as of this writing: v17 was taken by issue #97's per-key memory
+defaults). The `000N_*.sql` files are legacy and stop at `0004`, so do **not**
+add a conflicting `000N_*.sql`. The Postgres adapter gets the same DDL, dialect
+differences sealed inside the adapter per CLAUDE.md.
 
 ```sql
 -- memory_observations: forgetting columns (referenced_at already exists → reused)
@@ -444,7 +445,7 @@ behaviour-identical to today. Every phase is independently shippable and gated.
 |-------|------|-----------|
 | **P0** | Pure score fn `memory/forgetting/score.ts`, incl. the `coalesce(referenced_at, fallback_ts)` rule | `age==half_life → recency==0.5`; `age==0 → recency==1`; **null `referenced_at` legacy row → score uses `fallback_ts`, never NaN**; importance floor keeps a stale-but-vital row > 0; `log1p` reinforcement monotonic + diminishing; float determinism pinned to 6 dp. No existing file touched. |
 | **P1** | `ForgettingSchema` (snake_case + `.strict()`) + `memory.yaml` loader | valid config infers; a non-default `half_life_s` round-trips and takes effect; an **unknown/misspelled key fails-closed (throws)**; `importance_floor > importance_ceil` fails-closed; missing block → all defaults (`enabled:false`). |
-| **P2** | Next inline migration (**version 17** in `migrate.ts`, not a `0003_*.sql`) + Zod schema deltas + `memory_facts` (with `owner_id`) | old rows still parse (regression guard); defaults backfill (`status='active'`, `reference_count=0`); **a null-`referenced_at` legacy observation scores via fallback**; a fact write requires `owner_id` and dedups only within that account (two accounts, same `content_hash` → both stored). |
+| **P2** | Next free inline migration (**v18** as of writing, in `migrate.ts`, not a `000N_*.sql`) + Zod schema deltas + `memory_facts` (with `owner_id`) | old rows still parse (regression guard); defaults backfill (`status='active'`, `reference_count=0`); **a null-`referenced_at` legacy observation scores via fallback**; a fact write requires `owner_id` and dedups only within that account (two accounts, same `content_hash` → both stored). |
 | **P3** | Reinforcement hook `bumpReferences({accountId, ids})` (gated) | bumps only when enabled; a throwing `bumpReferences` does not change returned `messages` (fail-open); only rows of the request's `accountId` are bumped. With flag off, `inject.ts` byte-identical. |
 | **P4** | Score-driven inject trim (gated) | under `score`, a high-`reference_count` old observation outlives a never-referenced newer one; comparator throw → oldest-first fallback. Legacy `oldest` path unchanged. |
 | **P5** | Extend `MemoryJobTypeSchema` with `decay` + scheduler dispatch + `runDecayJob` sweep (gated, off hot path) | **`MemoryJobTypeSchema.parse('decay')` succeeds and the scheduler routes it to `runDecayJob` (not the reflector fall-through at `scheduler.ts`)**; `decay` job dedupe/enqueue works; archives only sub-threshold active rows of one account; never `recent_raw`; idempotent re-run; bounded loop (iterations / wallclock / consecutive-errors). |
