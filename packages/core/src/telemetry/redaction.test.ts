@@ -57,6 +57,35 @@ describe("redact", () => {
     expect(redact(input)).toEqual(input);
   });
 
+  // Regression (docs/12 live-integration find): `memory_tokens_injected` matches the
+  // secret pattern ("token") but is a NUMERIC COUNT — the old behaviour summarized it
+  // into {redacted:true,kind:"number"}, corrupting the persisted DecisionRecord and
+  // 502-ing /admin/api/requests on read. Scalars (number/boolean/null) can never
+  // carry credential material → they pass through even under a secret-matching key.
+  it("numeric token COUNTS pass through (scalars are never credentials)", () => {
+    const input = {
+      memory: { memory_tokens_injected: 191, memory_hydrated: true },
+      max_tokens: 24,
+      tokens_used: 1042,
+    };
+    expect(redact(input)).toEqual(input);
+  });
+
+  it("boolean/null under a secret-matching key pass through; strings/objects stay redacted", () => {
+    const out = redact({
+      token_present: true, // boolean — not a credential
+      refresh_token: null, // null — nothing to leak
+      access_token: "eyJhbGciOi.secret.payload", // string — fingerprint
+      token_bundle: { access: "sk-live-1" }, // object — could hold secrets → summarize
+    });
+    expect(out.token_present).toBe(true);
+    expect(out.refresh_token).toBeNull();
+    expect(out.access_token).toMatch(/^sha256:/);
+    expect(out.token_bundle).toEqual({ redacted: true, kind: "object", itemCount: 1 });
+    expect(JSON.stringify(out)).not.toContain("sk-live-1");
+    expect(JSON.stringify(out)).not.toContain("secret.payload");
+  });
+
   it("preserves key_prefix verbatim (display prefix only — never hashed)", () => {
     // `key_prefix` matches the secret-key pattern ("key"), but it is ALREADY a
     // safe display prefix (helm_live_ab12), not the plaintext key — it must pass

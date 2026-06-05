@@ -250,4 +250,39 @@ describe("DecisionRecordSchema", () => {
     };
     expect(DecisionRecordSchema.safeParse(r).success).toBe(true);
   });
+
+  // Regression (docs/12 live-integration find): the redactor used to mangle the
+  // numeric `memory_tokens_injected` (key matches the "token" secret pattern) into
+  // {redacted:true,kind:"number"} — and those rows are PERSISTED in real DBs. The
+  // schema coerces that exact legacy artifact to 0 on read so a single old row can
+  // never 502 the whole /admin/api/requests list; anything else stays fail-closed.
+  it("tolerates the legacy redaction-mangled memory_tokens_injected (coerced to 0)", () => {
+    const r = {
+      ...fullRecord(),
+      memory: {
+        memory_hydrated: true,
+        reflection_version: 2,
+        observation_count: 1,
+        memory_tokens_injected: { redacted: true, kind: "number" }, // the legacy artifact
+        observer_job_id: "job-1",
+        memory_writeback_status: "queued",
+        degraded: false,
+        thread_source: "header",
+      },
+    } as unknown as DecisionRecordInput;
+    const parsed = DecisionRecordSchema.parse(r);
+    expect(parsed.memory?.memory_tokens_injected).toBe(0);
+    // A healthy numeric value round-trips untouched…
+    const healthy = DecisionRecordSchema.parse({
+      ...r,
+      memory: { ...(r as { memory: object }).memory, memory_tokens_injected: 191 },
+    } as unknown as DecisionRecordInput);
+    expect(healthy.memory?.memory_tokens_injected).toBe(191);
+    // …and a non-legacy junk object is still rejected (fail-closed).
+    const junk = DecisionRecordSchema.safeParse({
+      ...r,
+      memory: { ...(r as { memory: object }).memory, memory_tokens_injected: { nope: 1 } },
+    } as unknown as DecisionRecordInput);
+    expect(junk.success).toBe(false);
+  });
 });

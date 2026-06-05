@@ -189,6 +189,102 @@ async function main() {
     check('redaction: only key prefix stored, full plaintext key NEVER in telemetry (原则7)', prefixOnly, `key_prefix=${row?.key_prefix}`);
   }
 
+  // ── Memory middleware (docs/08 observe/inject + docs/12 forgetting) ─────────
+  // Black-boxes the memory contract a LIVE deployment must honor end-to-end:
+  // observe persists + routes normally; inject hydrates a memory prefix and
+  // enqueues the observer write-back; the background worker compresses history so
+  // a LATER inject carries an observation; the decision record carries ONLY the
+  // redacted memory meta (counts/ids, never content — 原则7); memory is fail-open
+  // and default-safe throughout. Works with memory.forgetting enabled OR disabled
+  // (the forgetting layer is config-gated; its internals are unit/e2e-covered —
+  // here we assert the API-observable contract). NOTE: DecisionRecord.memory is
+  // stamped for INJECT requests only (observe rows carry memory:null by design).
+  cat('Memory middleware');
+  {
+    const stamp = Date.now();
+    const th = `live-mem-${stamp}`;
+    const proj = `live-mem-proj-${stamp}`;
+    const memH = { 'x-thread-id': th, 'x-project-id': proj };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const findByTrace = async (trace) => {
+      const list = await http('GET', '/admin/api/requests', { admin: true });
+      const rows = Array.isArray(list.json) ? list.json : (list.json?.items ?? []);
+      return rows.find((r) => r.trace_id === trace || r.request_id === trace) ?? null;
+    };
+
+    // 1) observe turns: persist raw history + route normally (write-only middleware).
+    let observeOk = true;
+    for (let i = 1; i <= 3; i++) {
+      const r = await http('POST', '/v1/chat/completions', {
+        auth: true,
+        headers: { ...memH, 'x-memory-mode': 'observe' },
+        body: userMsg(`Live memory check ${i}: the project codename is HELM-MEM. Reply ok.`),
+      });
+      if (r.status !== 200) observeOk = false;
+    }
+    check('observe mode: turns route normally (200) with memory headers', observeOk);
+
+    // 2) inject: hydrates immediately (recent raw) + enqueues the observer
+    //    write-back; the decision record carries the redacted memory meta.
+    const injectOnce = async (content) => {
+      const r = await http('POST', '/v1/chat/completions', {
+        auth: true,
+        headers: { ...memH, 'x-memory-mode': 'inject' },
+        body: userMsg(content),
+      });
+      return { status: r.status, row: await findByTrace(r.headers.get('x-trace-id')) };
+    };
+    const first = await injectOnce('What is the project codename? One word.');
+    const m1 = first.row?.memory;
+    check('inject mode: 200 + memory_hydrated=true (prefix assembled)',
+      first.status === 200 && m1?.memory_hydrated === true,
+      m1 ? `tokens=${m1.memory_tokens_injected}` : `status=${first.status} memory=${JSON.stringify(m1 ?? null)}`);
+    check('inject: decision record carries redacted memory meta (thread_source=header, 原则7)',
+      m1?.thread_source === 'header' && typeof m1?.memory_tokens_injected === 'number',
+      JSON.stringify(m1 ?? null));
+    check('inject: observer write-back enqueued (job id recorded, off the request path)',
+      m1?.memory_writeback_status === 'queued' && !!m1?.observer_job_id,
+      `writeback=${m1?.memory_writeback_status} job=${m1?.observer_job_id ?? 'null'}`);
+
+    // 3) the background worker drains: a LATER inject carries a COMPRESSED
+    //    observation (observation_count ≥ 1). Worker cadence is deployment config
+    //    (HELM_MEMORY_WORKER_INTERVAL_MS, default 60s) → poll with backoff and SKIP
+    //    (not fail) when this deployment's worker is slower than the test window.
+    let drained = null;
+    for (const waitMs of [2500, 5000, 8000]) {
+      await sleep(waitMs);
+      const probe = await injectOnce('Remind me of the codename again, one word.');
+      if (probe.status === 200 && (probe.row?.memory?.observation_count ?? 0) >= 1) { drained = probe; break; }
+    }
+    check('background worker drained: a later inject carries a compressed observation',
+      drained !== null ? true : 'skip',
+      drained
+        ? `observation_count=${drained.row.memory.observation_count} reflection_v=${drained.row.memory.reflection_version} tokens=${drained.row.memory.memory_tokens_injected}`
+        : 'worker did not drain within ~15s (set HELM_MEMORY_WORKER_INTERVAL_MS lower for live testing)');
+
+    // 4) fail-open: inject with NO thread anchor degrades to minimal context, 200.
+    const noThread = await http('POST', '/v1/chat/completions', { auth: true, headers: { 'x-memory-mode': 'inject' }, body: userMsg('hi') });
+    check('fail-open: inject with NO thread anchor still 200', noThread.status === 200, `status=${noThread.status}`);
+
+    // 5) default-safe: an ILLEGAL x-memory-mode normalizes to off (200; never
+    //    silently falls back to inject — issue #97 priority semantics).
+    const illegal = await http('POST', '/v1/chat/completions', {
+      auth: true,
+      headers: { ...memH, 'x-memory-mode': 'definitely-not-a-mode' },
+      body: userMsg('hi'),
+    });
+    const ilRow = await findByTrace(illegal.headers.get('x-trace-id'));
+    check('default-safe: illegal x-memory-mode normalizes to off (200, memory meta null)',
+      illegal.status === 200 && (ilRow ? ilRow.memory == null : true),
+      `status=${illegal.status} memory=${JSON.stringify(ilRow?.memory ?? null)}`);
+
+    // 6) redaction (原则7): the requests LIST must never leak memory CONTENT — the
+    //    sentinel injected above must not appear anywhere in the admin list payload.
+    const listAll = await http('GET', '/admin/api/requests', { admin: true });
+    check('redaction: memory content (sentinel) never appears in the requests list (原则7)',
+      !listAll.text.includes('HELM-MEM'));
+  }
+
   // ── Admin API + auth (docs/11) ──────────────────────────────────────────────
   cat('Admin API & auth');
   {
