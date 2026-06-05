@@ -303,6 +303,18 @@ export class PgMemoryStore implements MemoryStore {
       .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")));
   }
 
+  // docs/12 (Codex review fix II; pg mirror) — MAX(version) across every status so
+  // the Reflector's next version stays monotonic across an archive→rebuild cycle.
+  async getReflectionVersionHighWater(scope: ReflectionScope): Promise<number> {
+    const rows = await this.db
+      .select({ version: memoryReflections.version })
+      .from(memoryReflections)
+      .where(reflectionScopeWhere(scope))
+      .orderBy(desc(memoryReflections.version))
+      .limit(1);
+    return rows[0]?.version ?? 0;
+  }
+
   async updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void> {
     await this.db
       .update(memoryJobs)
@@ -430,7 +442,18 @@ export class PgMemoryStore implements MemoryStore {
   // observations carry no owner_id column), with ONLY the score-input columns.
   // archived rows are excluded → idempotent re-sweep. The bigint epoch-ms columns
   // surface as numbers; box back to Date here (the score fn + sweep are Date-typed).
-  async listScorableObservations(scope: { accountId: string; limit?: number }): Promise<
+  async listScorableObservations(scope: {
+    accountId: string;
+    limit?: number;
+    candidates?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+      threshold: number;
+    };
+  }): Promise<
     Array<{
       id: string;
       referencedAt: Date | null;
@@ -439,8 +462,23 @@ export class PgMemoryStore implements MemoryStore {
       importance: number;
     }>
   > {
-    // OLDEST active first + bound the scan by `limit` (Codex review fix — pg mirror;
-    // see the sqlite adapter for the rationale). Absent/non-positive limit = no cap.
+    // OLDEST active first + bound the scan by `limit`. With `candidates` present the
+    // forgetting score is evaluated IN SQL (same formula as forgetting/score.ts; see
+    // the sqlite adapter for the starvation rationale — pg mirror):
+    //   power(0.5, GREATEST(0, (now − coalesce(ref, obs))/1000.0) / half_life)
+    //     × (LEAST(GREATEST(importance, floor), ceil) + aw × ln(1 + reference_count))
+    //     < threshold
+    const c = scope.candidates;
+    const filters: SQL[] = [
+      eq(memoryObservations.status, "active"),
+      sql`${memoryObservations.threadId} IN (SELECT id FROM memory_threads WHERE owner_id = ${scope.accountId})`,
+    ];
+    if (c !== undefined) {
+      filters.push(
+        sql`power(0.5, GREATEST(0, (${c.nowMs} - COALESCE(${memoryObservations.referencedAt}, ${memoryObservations.observedAt})) / 1000.0) / ${c.half_life_s})
+          * (LEAST(GREATEST(${memoryObservations.importance}, ${c.importance_floor}), ${c.importance_ceil}) + ${c.access_weight} * ln(1 + ${memoryObservations.referenceCount})) < ${c.threshold}`,
+      );
+    }
     const base = this.db
       .select({
         id: memoryObservations.id,
@@ -450,12 +488,7 @@ export class PgMemoryStore implements MemoryStore {
         importance: memoryObservations.importance,
       })
       .from(memoryObservations)
-      .where(
-        and(
-          eq(memoryObservations.status, "active"),
-          sql`${memoryObservations.threadId} IN (SELECT id FROM memory_threads WHERE owner_id = ${scope.accountId})`,
-        ),
-      )
+      .where(and(...filters))
       .orderBy(asc(memoryObservations.observedAt), asc(memoryObservations.id));
     const rows =
       scope.limit !== undefined && scope.limit > 0 ? await base.limit(scope.limit) : await base;

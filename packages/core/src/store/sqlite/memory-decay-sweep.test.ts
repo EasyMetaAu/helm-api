@@ -83,6 +83,61 @@ describe("SqliteMemoryStore decay sweep (listScorableObservations / archiveObser
     expect(all.map((r) => r.id)).toEqual(ids);
   });
 
+  // docs/12 (Codex review fix II — starvation) — with only a LIMIT, the oldest-first
+  // page could fill up with SURVIVORS (recently-reinforced rows) and re-select the
+  // same page every sweep, never reaching condemned rows beyond it. With `candidates`
+  // the forgetting score runs IN SQL and the page contains ONLY below-threshold rows.
+  it("candidates filter returns ONLY below-threshold rows — survivors never occupy the page", async () => {
+    const now = new Date("2026-06-05T00:00:00.000Z");
+    const { store, db } = newStore(now);
+    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
+    const day = 86_400_000;
+    // Three OLD survivors (recently referenced → recency ~1 → score ≈ 0.5) that are
+    // OLDER (by observed_at) than the condemned row, so a limit-only page of 3 would
+    // contain exactly these survivors and starve the condemned row forever.
+    const survivors: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const id = await store.appendObservation({
+        threadId: "t-a",
+        sourceMessageRange: [`s${i}a`, `s${i}b`],
+        observationText: `survivor ${i}`,
+        observedAt: new Date(now.getTime() - (30 - i) * day),
+      });
+      survivors.push(id);
+      // Reinforce: referenced_at = now → recency ~1.
+      db.$sqlite
+        .prepare(
+          "UPDATE memory_observations SET referenced_at = ?, reference_count = 1 WHERE id = ?",
+        )
+        .run(now.getTime(), id);
+    }
+    // One NEWER (by observed_at) but never-referenced row, 10 half-lives stale → condemned.
+    const condemned = await store.appendObservation({
+      threadId: "t-a",
+      sourceMessageRange: ["c1", "c2"],
+      observationText: "condemned",
+      observedAt: new Date(now.getTime() - 10 * day),
+    });
+
+    const candidates = {
+      nowMs: now.getTime(),
+      half_life_s: 86_400, // 1 day
+      importance_floor: 0.1,
+      importance_ceil: 1.0,
+      access_weight: 0.15,
+      threshold: 0.05,
+    };
+    // Limit-sized page of 3: WITHOUT candidates it would be the 3 oldest = the
+    // survivors (the starvation mode). WITH candidates, only the condemned row.
+    const page = await store.listScorableObservations({
+      accountId: "acct-a",
+      limit: 3,
+      candidates,
+    });
+    expect(page.map((r) => r.id)).toEqual([condemned]);
+    for (const s of survivors) expect(page.map((r) => r.id)).not.toContain(s);
+  });
+
   it("archiveObservations soft-invalidates only the named ACTIVE rows of the account", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store, db } = newStore(now);

@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-05 · 遗忘策略 Codex 评审修复 VI（2 项；docs/12）
+
+第六轮 Codex review 发现 2 个问题（均为前几轮修复的次生缺陷），全部修复（+4 回归测试）：
+
+1. **（P1）有界扫描的饥饿**：第三轮加的 limit-only 分页按 observed_at 取最旧 N 行——若这一页全是幸存者（被强化/高分），每轮 sweep 重选同一页，limit 之外的 condemned 行永不被处理。**修复：score 谓词下推进 SQL**（`candidates` 参数；sqlite `pow`/`ln`、pg `power`/`ln`，与 forgetting/score.ts 同一公式）——页内只含低于阈值的行，幸存者不占页、归档行离开 active 集，每轮必有进展。TS 复算保留作纵深防御（浮点边缘分歧 → 无害跳过）。docs/12 的「SQL 与 TS 同一公式」承诺至此兑现。
+2. **（P2）archive→rebuild 后 reflection 版本重置**：getReflection 过滤 active 后，nextVersion 只从 active 行推导 → 归档 v4 再复活会重写 v1（reflection_version 对客户端/缓存回退）。**修复：新增 `getReflectionVersionHighWater(scope)`（跨全 status 取 MAX(version)），写 highWater+1**；merge/inject 内容仍只读 active。可选端口方法，旧 fake 回退旧行为。
+
+---
+
+
 ## 2026-06-05 · 遗忘策略 Codex 评审修复 V（3 项；docs/12）
 
 第五轮 Codex review 发现 3 个问题（1×P1、1×P2、1×P3），全部修复（+3 回归测试）：
@@ -34,21 +44,11 @@
 
 ---
 
-## 2026-06-05 · 遗忘策略 Codex 评审修复 IV（3 项；docs/12）
-
-第四轮 Codex review 发现 3 个问题（1×P1、1×P2、1×P3），全部修复（+6 回归测试,全套 2446 绿）：
-
-1. **（P1）遗忘只清输入侧，reflection 仍泄漏**：decay 归档 observation,但已写入的 `memory_reflections`(observation 的派生缓存)没人重建——旧内容继续注入;更糟:reflector 若见 0 active observation 会原样保留旧 reflection。**修复(输出侧补全)**：(a) `getReflection` 两适配器过滤 `status='active'`;(b) 新增 `archiveReflections(scope)`——reflector 在 active 集为空时归档旧 reflection(reflectionText `min(1)` 不能写空,故用归档清除);(c) 新增 `listActiveReflectionScopes(accountId)`,decay 归档后为每个活跃 reflection scope 入队一个 reflector 重建(open-job 去重,全程 fail-open)。重建从缩减后的 active 集重新合并,遗忘内容自然掉出。
-2. **（P2）`max_facts_per_subject` 留最旧丢最新**：extractor 按 observation 顺序(oldest-first)产出,cap 取前 N → 丢掉更新的修正(supersede 还没跑就丢了)。**修复**：`tryExtractFacts` 按 subjectKey 分组,按 `validFrom` desc 取最新 N,再按 `validFrom` asc 重排写入(让 store 的 `valid_from < new` supersede 收敛到最新 active);validFrom 相等时 index 稳定兜底。
-3. **（P3）`sourceObservationRange` 语义不符**：schema 注释是 `[firstObservationId,lastObservationId]`,但 gateway extractor 写的是 `o.sourceMessageRange`(raw message id)→ 审计 join 错表。**修复**：extractor 改存 `[o.id, o.id]`(一 fact 一 observation,两端即该 observation id)。
-
-**设计补全**：这轮把「遗忘」从单侧(归档 observation)补成双侧——observation(输入)归档 + reflection(输出缓存)重建/归档。reflection 是派生缓存的认知是关键:任何 active observation 集变化(observer 加 / decay 归档)都应触发重建,之前只有 observer 加触发。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-05 · 遗忘策略评审修复 IV（docs/12）：遗忘补全输出侧——reflection 是 active observation 的派生缓存：getReflection 过滤 active；新增 archiveReflections（active 集空时归档旧 reflection，min(1) 不能写空）+ listActiveReflectionScopes（decay 归档后为每个活跃 scope 入队 reflector 重建，open-job 去重、fail-open）；max_facts_per_subject 改按 validFrom 取最新 N 再 asc 写入（原 head-slice 留最旧丢修正）；fact 审计字段改存 observation id `[o.id,o.id]` 对齐 schema。
 
 ### 2026-06-05 · 遗忘策略评审修复 III（docs/12）：fact validFrom 改用来源 observation 的 observedAt（处理时刻 now 让同批矛盾事实互不 supersede、旧 observation 晚处理可错误过期新 fact）；ExtractedFact 加 validFrom?/sourceObservationRange?；listScorableObservations 加 limit（max_iterations×50、oldest-first）扫描有界；docs 配置示例改扁平（`memory:` wrapper 会被 strict 拒）+ 状态横幅改「P0–P7 implemented / P8 deferred」。
 

@@ -213,7 +213,17 @@ export async function runReflectorJob(
       };
     }
 
-    const nextVersion = (previousReflection?.version ?? 0) + 1;
+    // Next version = high-water + 1 across EVERY status (Codex review fix II):
+    // getReflection hides archived rows, so deriving from the active row alone would
+    // RESET the sequence to 1 after an archive→rebuild cycle — a `reflection_version`
+    // regression for clients/caches. The optional store method falls back to the
+    // active row's version for pre-phase stores (legacy fakes), preserving the old
+    // behaviour when no archive can have happened.
+    const highWater =
+      deps.memoryStore.getReflectionVersionHighWater !== undefined
+        ? await deps.memoryStore.getReflectionVersionHighWater(target)
+        : (previousReflection?.version ?? 0);
+    const nextVersion = Math.max(highWater, previousReflection?.version ?? 0) + 1;
     const reflectionId = await deps.memoryStore.upsertReflection({
       ...target,
       reflectionText,

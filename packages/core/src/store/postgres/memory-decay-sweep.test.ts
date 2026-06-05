@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { PgMemoryStore } from "./memory-store.js";
 import { createPgliteDb } from "./migrate.js";
@@ -60,6 +61,50 @@ describe("PgMemoryStore decay sweep", () => {
     await store.archiveObservations({ accountId: "acct-a", ids: [obsA, obsB], now: archivedAt });
     expect(await store.listScorableObservations({ accountId: "acct-a" })).toEqual([]); // archived → gone
     expect(await store.listScorableObservations({ accountId: "acct-b" })).toHaveLength(1); // untouched
+  });
+
+  // docs/12 (Codex review fix II — starvation; pg mirror) — with `candidates` the
+  // forgetting score runs IN SQL, so a limit-sized page can never fill with survivors
+  // and starve condemned rows beyond it.
+  it("candidates filter returns ONLY below-threshold rows — survivors never occupy the page", async () => {
+    const now = new Date("2026-06-05T00:00:00.000Z");
+    const { store, db } = await newStore(now);
+    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
+    const day = 86_400_000;
+    const survivors: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const id = await store.appendObservation({
+        threadId: "t-a",
+        sourceMessageRange: [`s${i}a`, `s${i}b`],
+        observationText: `survivor ${i}`,
+        observedAt: new Date(now.getTime() - (30 - i) * day),
+      });
+      survivors.push(id);
+      await db.execute(
+        sql`UPDATE memory_observations SET referenced_at = ${now.getTime()}, reference_count = 1 WHERE id = ${id}`,
+      );
+    }
+    const condemned = await store.appendObservation({
+      threadId: "t-a",
+      sourceMessageRange: ["c1", "c2"],
+      observationText: "condemned",
+      observedAt: new Date(now.getTime() - 10 * day),
+    });
+
+    const page = await store.listScorableObservations({
+      accountId: "acct-a",
+      limit: 3,
+      candidates: {
+        nowMs: now.getTime(),
+        half_life_s: 86_400,
+        importance_floor: 0.1,
+        importance_ceil: 1.0,
+        access_weight: 0.15,
+        threshold: 0.05,
+      },
+    });
+    expect(page.map((r) => r.id)).toEqual([condemned]);
+    for (const s of survivors) expect(page.map((r) => r.id)).not.toContain(s);
   });
 
   // docs/12 (Codex review fix, pg mirror) — the scorable read is bounded by `limit`

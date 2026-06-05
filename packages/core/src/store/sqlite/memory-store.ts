@@ -349,6 +349,21 @@ export class SqliteMemoryStore implements MemoryStore {
       .run();
   }
 
+  // docs/12 (Codex review fix II) — MAX(version) across EVERY status of the scope's
+  // reflection rows (0 when none). The Reflector writes at high-water + 1 so the
+  // version stays monotonic across an archive→rebuild cycle (getReflection hides
+  // archived rows, so the active row alone would reset the sequence to 1).
+  async getReflectionVersionHighWater(scope: ReflectionScope): Promise<number> {
+    const row = this.db
+      .select({ version: memoryReflections.version })
+      .from(memoryReflections)
+      .where(reflectionScopeWhere(scope))
+      .orderBy(desc(memoryReflections.version))
+      .limit(1)
+      .get();
+    return row?.version ?? 0;
+  }
+
   // Update a background job's lifecycle status (+ optional error on failure).
   async updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void> {
     this.db
@@ -486,7 +501,18 @@ export class SqliteMemoryStore implements MemoryStore {
   // referenced_at / observed_at / archived_at are epoch-ms; Drizzle's timestamp_ms
   // surfaces them as Date through the typed select, so read via the raw handle and box
   // the ms back to Date here (the score fn + sweep are Date-typed).
-  async listScorableObservations(scope: { accountId: string; limit?: number }): Promise<
+  async listScorableObservations(scope: {
+    accountId: string;
+    limit?: number;
+    candidates?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+      threshold: number;
+    };
+  }): Promise<
     Array<{
       id: string;
       referencedAt: Date | null;
@@ -495,11 +521,35 @@ export class SqliteMemoryStore implements MemoryStore {
       importance: number;
     }>
   > {
-    // OLDEST active first (most decayed → most likely to archive), and bound the scan
-    // by `limit` so a huge tenant cannot load an unbounded set in one sweep (Codex
-    // review fix). A non-positive/absent limit means "no cap" (the bounded loop still
-    // guards the writes). Leftover rows are swept on the next trigger.
+    // OLDEST active first, scan bounded by `limit`. With `candidates` present, the
+    // forgetting score is evaluated IN SQL — the SAME formula as forgetting/score.ts
+    // (docs/12: "one pure function, identical in SQL and TypeScript"):
+    //   pow(0.5, max(0, (now − coalesce(referenced_at, observed_at))/1000) / half_life)
+    //     × (min(max(importance, floor), ceil) + access_weight × ln(1 + reference_count))
+    //     < threshold
+    // — so the page contains ONLY below-threshold (condemned) rows. This kills the
+    // starvation mode of a limit-only page (Codex review fix II): survivors never
+    // occupy the page, and archived candidates leave the active set, so every sweep
+    // makes progress. pow/ln/min/max are SQLite built-ins (math functions).
     const hasLimit = scope.limit !== undefined && scope.limit > 0;
+    const c = scope.candidates;
+    const candidatePredicate =
+      c !== undefined
+        ? `\n            AND pow(0.5, max(0, (? - COALESCE(o.referenced_at, o.observed_at)) / 1000.0) / ?)
+              * (min(max(o.importance, ?), ?) + ? * ln(1 + o.reference_count)) < ?`
+        : "";
+    const params: Array<string | number> = [scope.accountId];
+    if (c !== undefined) {
+      params.push(
+        c.nowMs,
+        c.half_life_s,
+        c.importance_floor,
+        c.importance_ceil,
+        c.access_weight,
+        c.threshold,
+      );
+    }
+    if (hasLimit && scope.limit !== undefined) params.push(scope.limit);
     const rows = this.db.$sqlite
       .prepare(
         `SELECT o.id, o.referenced_at, o.observed_at, o.reference_count, o.importance
@@ -507,10 +557,10 @@ export class SqliteMemoryStore implements MemoryStore {
           WHERE o.status = 'active'
             AND o.thread_id IN (
               SELECT id FROM memory_threads WHERE owner_id = ?
-            )
+            )${candidatePredicate}
           ORDER BY o.observed_at ASC, o.id ASC${hasLimit ? "\n          LIMIT ?" : ""}`,
       )
-      .all(...(hasLimit ? [scope.accountId, scope.limit] : [scope.accountId])) as Array<{
+      .all(...params) as Array<{
       id: string;
       referenced_at: number | null;
       observed_at: number;

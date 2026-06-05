@@ -189,6 +189,14 @@ back to the existing oldest-first path.
    status='active' AND score(now) < decay.archive_threshold` — over rows whose
    thread is owned by the swept account. Never deleted (audit-friendly). Archived
    rows stop being injected and stop counting toward the budget.
+   **Candidate selection runs IN SQL** (Codex review fix): the bounded page is
+   selected with the score predicate itself (`pow`/`ln` in SQLite, `power`/`ln`
+   in Postgres — the same formula as `forgetting/score.ts`), so the page contains
+   only below-threshold rows. A plain oldest-first `LIMIT` page could fill with
+   survivors and re-select the same page every sweep, starving condemned rows
+   beyond it; with the predicate, archived candidates leave the active set and
+   every sweep makes progress. The TS score re-verifies each row (defence in
+   depth against float-edge disagreement).
 2. **Promote mid → long (consolidate to facts).** When a scope's active-observation
    token sum crosses `consolidate.trigger_tokens`, the existing **Reflector** runs
    and *additionally* extracts discrete `memory_facts`, each stamped with the
@@ -237,7 +245,11 @@ reflection (`reflectionText` is `min(1)`), so it **archives** the existing
 reflection instead (`archiveReflections`); `getReflection` filters to
 `status='active'`, so an archived reflection stops being injected. Without this,
 forgetting only cleared the *input* side (observations) and leaked through the
-*output* side (reflections).
+*output* side (reflections). **Version numbering stays monotonic across an
+archive→rebuild cycle** (Codex review fix): the next version is computed from
+`getReflectionVersionHighWater` — `MAX(version)` across *every* status — never
+from the active row alone, so a revived scope continues at high-water + 1 instead
+of regressing `reflection_version` back to 1 for clients/caches.
 
 Content vs coverage reads (the rule the above depends on): `archived` and `pruned`
 rows are invisible to **content** reads (the Reflector's merge + fact extraction,

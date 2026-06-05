@@ -1082,6 +1082,23 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(await m.listActiveReflectionScopes?.("acct-a")).toEqual([
         { accountId: "acct-a", resourceId: "r1" },
       ]);
+
+      // docs/12 (Codex review fix II) — the version HIGH-WATER survives the archive
+      // (it counts every status), so a rebuild writes v3, never resetting to v1.
+      expect(
+        await m.getReflectionVersionHighWater?.({ accountId: "acct-a", projectId: "p1" }),
+      ).toBe(2);
+      await m.upsertReflection({
+        accountId: "acct-a",
+        projectId: "p1",
+        reflectionText: "p-v3 (revived)",
+        version: 3,
+        tokenEstimate: 4,
+        updatedAt: new Date(3000),
+      });
+      const revived = await m.getReflection({ accountId: "acct-a", projectId: "p1" });
+      expect(revived?.version).toBe(3); // active again, sequence continued
+      expect(revived?.reflectionText).toBe("p-v3 (revived)");
     });
   });
 

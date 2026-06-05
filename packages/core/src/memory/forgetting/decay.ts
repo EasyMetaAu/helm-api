@@ -110,9 +110,26 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
     // lives inside the score fn). Sub-threshold rows are the demotion set.
     const now = deps.now();
     const scanLimit = deps.config.sweep.max_iterations * ARCHIVE_CHUNK;
-    const rows = await list.call(deps.memoryStore, { accountId, limit: scanLimit });
     const threshold = deps.config.decay.archive_threshold;
     const scoreConfig = deps.config.score;
+    // `candidates` pushes the SAME forgetting score into SQL so the page contains
+    // ONLY below-threshold rows (Codex review fix II — starvation): with a plain
+    // oldest-first LIMIT, a page full of survivors (reinforced/vital rows) would be
+    // re-selected every sweep and condemned rows beyond the limit never reached.
+    // Candidates leave the active set when archived, so every sweep makes progress.
+    // The TS re-score below stays as defence in depth (float-edge disagreement → skip).
+    const rows = await list.call(deps.memoryStore, {
+      accountId,
+      limit: scanLimit,
+      candidates: {
+        nowMs: now.getTime(),
+        half_life_s: scoreConfig.half_life_s,
+        importance_floor: scoreConfig.importance_floor,
+        importance_ceil: scoreConfig.importance_ceil,
+        access_weight: scoreConfig.access_weight,
+        threshold,
+      },
+    });
     const condemned: string[] = [];
     for (const r of rows) {
       const score = forgettingScore(

@@ -373,7 +373,28 @@ export interface MemoryStore {
   // score an unbounded row set up front. The decay job passes
   // max_iterations × chunk_size; the OLDEST active observations come first (most
   // decayed → most likely to archive), and any leftover is swept on the next trigger.
-  listScorableObservations?(scope: { accountId: string; limit?: number }): Promise<
+  //
+  // `candidates` (Codex review fix II — starvation): with ONLY a limit, the page is
+  // the oldest N rows REGARDLESS of score; if those N are all survivors (reinforced/
+  // vital), they re-occupy the same page every sweep and condemned rows beyond the
+  // limit are NEVER reached. When `candidates` is present the adapter evaluates the
+  // SAME forgetting score IN SQL (docs/12: "one pure function, identical in SQL and
+  // TypeScript") and returns ONLY below-threshold rows — survivors never occupy the
+  // page, archived candidates leave the active set, so every sweep makes progress.
+  // The caller still re-verifies with the TS score (defence in depth against float
+  // edge disagreement — a row the SQL admits but TS rejects is harmlessly skipped).
+  listScorableObservations?(scope: {
+    accountId: string;
+    limit?: number;
+    candidates?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+      threshold: number;
+    };
+  }): Promise<
     Array<{
       id: string;
       referencedAt: Date | null;
@@ -420,6 +441,13 @@ export interface MemoryStore {
   //     forgotten reflection stops being injected. Never a DELETE (audit). Account-
   //     scoped via the scope's accountId.
   archiveReflections?(scope: ReflectionScope): Promise<void>;
+  //   - getReflectionVersionHighWater: MAX(version) across EVERY status of a scope's
+  //     reflection rows (0 when none). Codex review fix: getReflection now hides
+  //     archived versions, so deriving next-version from the active row alone would
+  //     RESET to 1 after an archive→rebuild cycle — a version regression for clients/
+  //     caches reading `reflection_version`. The Reflector writes at high-water + 1
+  //     (monotonic forever) while still merging/injecting only the ACTIVE text.
+  getReflectionVersionHighWater?(scope: ReflectionScope): Promise<number>;
   // docs/12 "Eviction, demotion, promotion" passes 2–3 (P6) — fact ingest with
   // DETERMINISTIC dedup + same-subject supersede, all in ONE batch. The Reflector
   // extracts discrete facts (its new sibling output) and calls this; per fact:

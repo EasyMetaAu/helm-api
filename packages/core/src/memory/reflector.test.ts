@@ -9,6 +9,9 @@ import { type ReflectorDeps, type ReflectorJob, runReflectorJob } from "./reflec
 // Memory is a MIDDLEWARE — this fake never touches routing/lane state.
 function makeFakeStore(observations: Observation[], initial: Reflection | null = null) {
   let current: Reflection | null = initial;
+  // The HIGHEST version ever written for the scope, across every status — mirrors
+  // the real adapters' getReflectionVersionHighWater (survives an archive).
+  let maxVersionEver = initial?.version ?? 0;
   const upserts: ReflectionUpsertInput[] = [];
   const jobUpdates: Array<{ jobId: string; status: MemoryJobStatus; error?: string }> = [];
   const archiveCalls: ReflectionScope[] = [];
@@ -18,9 +21,14 @@ function makeFakeStore(observations: Observation[], initial: Reflection | null =
     listMessages: vi.fn(async () => []),
     appendObservation: vi.fn(async () => "unused"),
     listObservations: vi.fn(async (_scope: ReflectionScope) => observations),
-    getReflection: vi.fn(async (_scope: ReflectionScope) => current),
+    // Mirrors the real adapters: only an ACTIVE reflection is readable (an archived
+    // one is invisible to inject + the Reflector — Codex review fix).
+    getReflection: vi.fn(async (_scope: ReflectionScope) =>
+      current !== null && current.status === "active" ? current : null,
+    ),
     upsertReflection: vi.fn(async (input: ReflectionUpsertInput) => {
       upserts.push(input);
+      maxVersionEver = Math.max(maxVersionEver, input.version);
       const id = `refl-${upserts.length}`;
       // Reflect the write back into "current" so a follow-up run reads it.
       current = {
@@ -49,6 +57,9 @@ function makeFakeStore(observations: Observation[], initial: Reflection | null =
       archiveCalls.push(scope);
       if (current !== null) current = { ...current, status: "archived" };
     }),
+    // docs/12 (Codex review fix II) — version high-water across every status, so the
+    // sequence stays monotonic across an archive→rebuild cycle.
+    getReflectionVersionHighWater: vi.fn(async (_scope: ReflectionScope) => maxVersionEver),
   };
   return { store, upserts, jobUpdates, archiveCalls, getCurrent: () => current };
 }
@@ -342,6 +353,47 @@ describe("runReflectorJob", () => {
     expect(upserts).toHaveLength(0); // never writes an empty reflection (reflectionText min(1))
     expect(deps.merge).not.toHaveBeenCalled();
     expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
+  });
+
+  // docs/12 (Codex review fix II) — version continuity across an archive→rebuild
+  // cycle. getReflection hides archived rows, so deriving next-version from the
+  // active row alone would RESET to 1 after a scope was archived and later revived —
+  // a reflection_version regression for clients/caches. The Reflector writes at
+  // high-water + 1 (across every status) instead.
+  it("continues the version sequence after an archive→rebuild cycle (no version regression)", async () => {
+    const existing: Reflection = {
+      id: "refl-old",
+      projectId: "proj-1",
+      resourceId: null,
+      threadId: null,
+      reflectionText: "stale memory at v4",
+      version: 4,
+      tokenEstimate: 6,
+      updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
+    };
+    // Start with NO active observations → the empty-set branch archives v4.
+    const { store, upserts } = makeFakeStore([], existing);
+    const deps = makeDeps(store);
+    const projectJob: ReflectorJob = {
+      jobId: "job-1",
+      scope: { accountId: "acct-a", projectId: "proj-1" },
+    };
+    await runReflectorJob(projectJob, deps);
+    expect(upserts).toHaveLength(0); // archived, nothing written
+
+    // The scope revives: new observations arrive and the Reflector runs again.
+    vi.mocked(store.listObservations).mockResolvedValue(
+      makeObservations(["the project picked Rust after all"]),
+    );
+    const out = await runReflectorJob(projectJob, deps);
+
+    expect(out.changed).toBe(true);
+    // v5, NOT v1 — the archived history's high-water still counts.
+    expect(out.version).toBe(5);
+    expect(upserts[0]?.version).toBe(5);
   });
 });
 
