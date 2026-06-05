@@ -118,7 +118,11 @@ describe("runDecayJob", () => {
 
     await runDecayJob({ jobId: "d1", scope: { accountId: "acct-a" } }, deps);
 
-    expect(store.listScorableObservations).toHaveBeenCalledWith({ accountId: "acct-a" });
+    // The read is account-scoped AND bounded (Codex review fix): limit =
+    // max_iterations × chunk so the scan can never exceed what the loop can archive.
+    expect(store.listScorableObservations).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: "acct-a", limit: 200 * 50 }),
+    );
     expect(store.archiveObservations).toHaveBeenCalledWith(
       expect.objectContaining({ accountId: "acct-a", ids: ["a-stale"] }),
     );

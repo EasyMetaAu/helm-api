@@ -23,6 +23,16 @@
 
 ---
 
+## 2026-06-05 · 遗忘策略 Codex 评审修复 III（3 项；docs/12）
+
+第三轮 Codex review 发现 3 个问题（1×P1、1×P2、1×P3），全部修复（+3 回归测试,全套 2440 绿）：
+
+1. **（P1）fact `validFrom` 用处理时刻 `now`**：supersede 按 `valid_from < new.valid_from` 排序,但所有抽取的 fact 都盖 `now` → 同一次抽取的矛盾 fact 互不 supersede（相等）；旧 observation 晚处理还可能过期更新的 fact。**修复：`ExtractedFact` 加 `validFrom?`/`sourceObservationRange?`,extractor 取来源 observation 的 `observedAt`/`sourceMessageRange`,reflector 用 `e.validFrom ?? now`**（stub 省略时回退 now，不破坏旧测试）。
+2. **（P2）decay 扫描无界**：sweep 的 iteration/wallclock 上限只盖 archive 写,不盖前面「读全部 active observation + 打分」→ 大租户单 job 加载无界行。**修复：`listScorableObservations` 加 `limit`,两适配器 `ORDER BY observed_at ASC LIMIT`；decay 传 `max_iterations × ARCHIVE_CHUNK(50)`**。最旧优先（最可能 decay），余量下次 trigger 再扫（fail-open 过度保留）。
+3. **（P3）docs yaml 示例带 `memory:` 包裹**：实际 `config/memory.yaml` 是扁平的（顶层 `forgetting:`，loader 挂到 `memory` key）；照抄文档会被 `.strict()` 拒（`memory.memory.forgetting`）。**修复：文档示例改扁平 + 加「文件布局说明」+ 更新 line 3 状态横幅**（proposed→P0–P7 implemented，P8 deferred）。
+
+---
+
 ## 2026-06-05 · 遗忘策略 Codex 评审修复 II（3 项；docs/12）
 
 第二轮 Codex review 发现 3 个问题（1×High、2×Medium），全部修复（+5 回归测试，全套 2435 绿）：

@@ -55,6 +55,34 @@ describe("SqliteMemoryStore decay sweep (listScorableObservations / archiveObser
     });
   });
 
+  // docs/12 (Codex review fix) — the scorable READ is bounded by `limit` and returns
+  // OLDEST-first, so a huge tenant cannot load an unbounded set before the bounded
+  // archive loop even starts. Leftover (newer) rows are swept on the next trigger.
+  it("bounds the scan by `limit` and returns oldest-first", async () => {
+    const now = new Date("2026-06-05T00:00:00.000Z");
+    const { store } = newStore(now);
+    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
+    const day = 86_400_000;
+    // 5 observations, observed_at increasing (o0 oldest … o4 newest).
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      ids.push(
+        await store.appendObservation({
+          threadId: "t-a",
+          sourceMessageRange: [`m${i}a`, `m${i}b`],
+          observationText: `obs ${i}`,
+          observedAt: new Date(now.getTime() - (5 - i) * day),
+        }),
+      );
+    }
+
+    const capped = await store.listScorableObservations({ accountId: "acct-a", limit: 2 });
+    expect(capped.map((r) => r.id)).toEqual([ids[0], ids[1]]); // the two OLDEST only
+    // No limit → all five, still oldest-first.
+    const all = await store.listScorableObservations({ accountId: "acct-a" });
+    expect(all.map((r) => r.id)).toEqual(ids);
+  });
+
   it("archiveObservations soft-invalidates only the named ACTIVE rows of the account", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store, db } = newStore(now);

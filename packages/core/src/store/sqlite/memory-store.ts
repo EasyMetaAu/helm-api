@@ -446,7 +446,7 @@ export class SqliteMemoryStore implements MemoryStore {
   // referenced_at / observed_at / archived_at are epoch-ms; Drizzle's timestamp_ms
   // surfaces them as Date through the typed select, so read via the raw handle and box
   // the ms back to Date here (the score fn + sweep are Date-typed).
-  async listScorableObservations(scope: { accountId: string }): Promise<
+  async listScorableObservations(scope: { accountId: string; limit?: number }): Promise<
     Array<{
       id: string;
       referencedAt: Date | null;
@@ -455,6 +455,11 @@ export class SqliteMemoryStore implements MemoryStore {
       importance: number;
     }>
   > {
+    // OLDEST active first (most decayed → most likely to archive), and bound the scan
+    // by `limit` so a huge tenant cannot load an unbounded set in one sweep (Codex
+    // review fix). A non-positive/absent limit means "no cap" (the bounded loop still
+    // guards the writes). Leftover rows are swept on the next trigger.
+    const hasLimit = scope.limit !== undefined && scope.limit > 0;
     const rows = this.db.$sqlite
       .prepare(
         `SELECT o.id, o.referenced_at, o.observed_at, o.reference_count, o.importance
@@ -462,9 +467,10 @@ export class SqliteMemoryStore implements MemoryStore {
           WHERE o.status = 'active'
             AND o.thread_id IN (
               SELECT id FROM memory_threads WHERE owner_id = ?
-            )`,
+            )
+          ORDER BY o.observed_at ASC, o.id ASC${hasLimit ? "\n          LIMIT ?" : ""}`,
       )
-      .all(scope.accountId) as Array<{
+      .all(...(hasLimit ? [scope.accountId, scope.limit] : [scope.accountId])) as Array<{
       id: string;
       referenced_at: number | null;
       observed_at: number;

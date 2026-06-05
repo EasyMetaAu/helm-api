@@ -1,13 +1,16 @@
 # 12 · Memory: Forgetting & Tiering
 
-> Status (proposed): this is a **design proposal**, not yet implemented. It
-> **extends** [08 · Memory Middleware](08-memory-middleware.md) — it does not
-> replace it. The observe / Observer / Reflector / inject pipeline described in 08
-> stays exactly as built; this chapter adds a **forgetting strategy** and an
-> explicit **short / mid / long-term tier model** on top of it. Everything here is
-> gated behind a single config switch (`memory.forgetting.enabled`, default
-> `false`), so a partially-rolled-out implementation is **inert** until enabled —
-> the system behaves byte-for-byte like today when the flag is off.
+> Status: **P0–P7 implemented and tested** (the deterministic forgetting layer);
+> **P8 (hybrid fact retrieval) is deferred** (needs embedding infra), and the real
+> LLM summarize/merge/extract behind the Observer/Reflector interfaces stays a
+> deterministic MVP stub (docs/08). It **extends**
+> [08 · Memory Middleware](08-memory-middleware.md) — it does not replace it. The
+> observe / Observer / Reflector / inject pipeline described in 08 stays exactly as
+> built; this chapter adds a **forgetting strategy** and an explicit **short / mid /
+> long-term tier model** on top of it. Everything here is gated behind a single
+> config switch (`memory.forgetting.enabled`, default `false`), so the layer is
+> **inert** until enabled — the system behaves byte-for-byte like today when the
+> flag is off.
 
 ## Why this exists
 
@@ -361,36 +364,43 @@ read methods for facts take `{ accountId, … }` exactly like the existing
 
 ## Config surface
 
-New `memory.forgetting` block in `config/memory.yaml`. Fail-closed on bad config
-(Zod), fail-open at runtime. **Off by default** — with `enabled: false` the system
-behaves identically to today.
+The `forgetting` block lives in `config/memory.yaml`. Fail-closed on bad config
+(Zod, `.strict()`), fail-open at runtime. **Off by default** — with `enabled: false`
+the system behaves identically to today.
+
+**File layout note:** `config/memory.yaml` is a **flat** file whose top-level key is
+`forgetting:` — there is **no** `memory:` wrapper. The loader mounts the whole file
+under the `memory` config key (like `lanes.yaml` → `config.lanes`), so the resulting
+config tree is `config.memory.forgetting.*` even though the file itself starts at
+`forgetting:`. Copy the snippet below verbatim; a `memory:` wrapper would fail strict
+validation (`memory.memory.forgetting`).
 
 ```yaml
-memory:
-  forgetting:
-    enabled: false                 # master switch — off = today's behaviour exactly
-    score:
-      half_life_s: 86400           # 1 day; recency = 0.5 ^ (age / half_life)
-      importance_floor: 0.1        # decay brake: vital memories never hit 0
-      importance_ceil: 1.0
-      access_weight: 0.15          # access_bonus = access_weight × log1p(reference_count)
-    inject:
-      drop_order: score            # score | oldest  (oldest = legacy fallback)
-    decay:
-      archive_threshold: 0.05      # score below this → soft-archive (mid tier)
-      trigger_observations: 50     # buffer-flush gate: run sweep after N new observations
-      trigger_interval_s: 3600     # …or this long elapsed, whichever first
-    consolidate:
-      trigger_tokens: 1024         # mid→long: extract facts when active-obs tokens exceed this
-      max_facts_per_subject: 8     # hard cap regardless of LLM output
-      enable_llm_supersede: false  # LLM-found contradictions — OFF by default (fail-safe)
-    retention:
-      archived_days: 30            # hard-delete archived rows older than this (rare, audit)
-      facts_expired_days: 90
-    sweep:
-      max_iterations: 200          # background-worker bounds
-      max_wallclock_s: 900
-      max_consecutive_errors: 5    # back off, do not loop forever
+# config/memory.yaml — copy as-is (top-level is `forgetting:`, no `memory:` wrapper)
+forgetting:
+  enabled: false                 # master switch — off = today's behaviour exactly
+  score:
+    half_life_s: 86400           # 1 day; recency = 0.5 ^ (age / half_life)
+    importance_floor: 0.1        # decay brake: vital memories never hit 0
+    importance_ceil: 1.0
+    access_weight: 0.15          # access_bonus = access_weight × log1p(reference_count)
+  inject:
+    drop_order: score            # score | oldest  (oldest = legacy fallback)
+  decay:
+    archive_threshold: 0.05      # score below this → soft-archive (mid tier)
+    trigger_observations: 50     # buffer-flush gate: run sweep after N new observations
+    trigger_interval_s: 3600     # …or this long elapsed, whichever first
+  consolidate:
+    trigger_tokens: 1024         # mid→long: extract facts when active-obs tokens exceed this
+    max_facts_per_subject: 8     # hard cap regardless of LLM output
+    enable_llm_supersede: false  # LLM-found contradictions — OFF by default (fail-safe)
+  retention:
+    archived_days: 30            # tombstone archived observations older than this (rare, audit)
+    facts_expired_days: 90       # hard-delete expired facts older than this
+  sweep:
+    max_iterations: 200          # background-worker bounds (also caps the scorable scan)
+    max_wallclock_s: 900
+    max_consecutive_errors: 5    # back off, do not loop forever
 ```
 
 Zod sketch (single source of truth; types via `z.infer`). **Keys are snake_case to

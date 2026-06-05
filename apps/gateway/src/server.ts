@@ -169,15 +169,30 @@ function mergeObservations(
 // (same observations → same facts), so content-hash dedup + supersede are stable.
 // Inert by default: the Reflector only calls this when the flag is on AND the
 // active-observation token sum crosses `consolidate.trigger_tokens`.
-function extractFactsFromObservations(
-  observations: readonly Observation[],
-): Array<{ subjectText: string; factText: string }> {
-  const facts: Array<{ subjectText: string; factText: string }> = [];
+function extractFactsFromObservations(observations: readonly Observation[]): Array<{
+  subjectText: string;
+  factText: string;
+  validFrom: Date;
+  sourceObservationRange: [string, string];
+}> {
+  const facts: Array<{
+    subjectText: string;
+    factText: string;
+    validFrom: Date;
+    sourceObservationRange: [string, string];
+  }> = [];
   for (const o of observations) {
     const text = o.observationText.trim();
     if (text.length === 0 || text === "[pruned]") continue;
     const subjectText = o.tags?.[0]?.trim() || text.split(/\s+/).slice(0, 6).join(" ") || "general";
-    facts.push({ subjectText, factText: truncate(text, MEMORY_REFLECTION_MAX_CHARS) });
+    facts.push({
+      subjectText,
+      factText: truncate(text, MEMORY_REFLECTION_MAX_CHARS),
+      // The fact became true when its observation was recorded — drives supersede
+      // ordering (Codex review fix), NOT the processing wall-clock.
+      validFrom: o.observedAt,
+      sourceObservationRange: o.sourceMessageRange,
+    });
   }
   return facts;
 }

@@ -29,6 +29,15 @@ export interface ReflectorJob {
 export interface ExtractedFact {
   subjectText: string; // the topic; normalized into subject_key for same-subject supersede
   factText: string; // the atomic assertion; hashed for idempotent ingest
+  // docs/12 (Codex review fix) — the time the fact BECAME TRUE, taken from the
+  // SUPPORTING observation's observed_at, NOT the wall-clock processing time. The
+  // supersede predicate is `valid_from < new.valid_from`, so stamping every fact
+  // with `now` made same-run facts un-supersedable (all equal) and let a stale
+  // observation processed late expire a genuinely newer fact. Optional for backward
+  // compat: the Reflector falls back to `now` when an extractor omits it.
+  validFrom?: Date;
+  // Optional audit trail back to the source observation range.
+  sourceObservationRange?: [string, string];
 }
 
 // docs/12 P6 — the consolidate-config subset the Reflector reads (structural, so
@@ -285,7 +294,13 @@ async function tryExtractFacts(args: {
         subjectKey,
         factText: e.factText,
         contentHash: factContentHash(e.factText),
-        validFrom: now,
+        // validFrom = the supporting observation's time (Codex review fix), so
+        // supersede orders by when facts became true, not when they were processed.
+        // Fall back to `now` only when an extractor omits it (deferred-LLM stub).
+        validFrom: e.validFrom ?? now,
+        ...(e.sourceObservationRange !== undefined
+          ? { sourceObservationRange: e.sourceObservationRange }
+          : {}),
         ...(target.projectId !== undefined ? { projectId: target.projectId } : {}),
         ...(target.resourceId !== undefined ? { resourceId: target.resourceId } : {}),
         ...(target.threadId !== undefined ? { threadId: target.threadId } : {}),

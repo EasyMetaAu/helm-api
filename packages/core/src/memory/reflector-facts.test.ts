@@ -141,7 +141,37 @@ describe("runReflectorJob — fact extraction (docs/12 P6, gated)", () => {
     expect(f.subjectKey).toBe(normalizeSubjectKey("Favourite Language"));
     expect(f.contentHash).toBe(factContentHash("User likes TypeScript"));
     expect(f.factText).toBe("User likes TypeScript");
-    expect(f.validFrom).toEqual(NOW);
+    expect(f.validFrom).toEqual(NOW); // no extractor validFrom → falls back to now
+  });
+
+  // docs/12 (Codex review fix) — validFrom must be the SUPPORTING observation's time,
+  // not the processing wall-clock. The supersede predicate is `valid_from < new`, so a
+  // fact stamped with the observation's observed_at orders correctly against other
+  // facts; stamping every fact with `now` made same-run facts un-supersedable.
+  it("uses the extractor-supplied validFrom (observation time) + sourceObservationRange, not now", async () => {
+    const obs = [bigObs("o1", "x".repeat(100))];
+    const { store, factCalls } = makeFactStore(obs);
+    const observedAt = new Date("2026-05-01T00:00:00.000Z"); // older than NOW
+    const extractFacts = extractStub([
+      {
+        subjectText: "Deploy Region",
+        factText: "deploys to eu-west",
+        validFrom: observedAt,
+        sourceObservationRange: ["m1", "m4"],
+      },
+    ]);
+    const deps = baseDeps(store, {
+      forgetting: { enabled: true, consolidate: { trigger_tokens: 10, max_facts_per_subject: 8 } },
+      extractFacts,
+    });
+
+    await runReflectorJob(JOB, deps);
+
+    const f = factCalls[0]?.facts[0];
+    if (!f) throw new Error("expected a fact");
+    expect(f.validFrom).toEqual(observedAt); // the observation's time, NOT NOW
+    expect(f.validFrom).not.toEqual(NOW);
+    expect(f.sourceObservationRange).toEqual(["m1", "m4"]);
   });
 
   it("does NOT extract when the token sum is BELOW trigger_tokens", async () => {

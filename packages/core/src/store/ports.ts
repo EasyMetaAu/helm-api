@@ -365,7 +365,12 @@ export interface MemoryStore {
   // so the pure score fn can coalesce a null referenced_at without the store knowing
   // the tier rules. OPTIONAL on the port (`?`) for the same reason as bumpReferences:
   // additive + gated, so pre-phase fixtures stay valid; callers null-check.
-  listScorableObservations?(scope: { accountId: string }): Promise<
+  // `limit` BOUNDS the scan (Codex review fix): the sweep's iteration/wallclock caps
+  // governed only the archive WRITES, not this READ, so a huge tenant could load +
+  // score an unbounded row set up front. The decay job passes
+  // max_iterations × chunk_size; the OLDEST active observations come first (most
+  // decayed → most likely to archive), and any leftover is swept on the next trigger.
+  listScorableObservations?(scope: { accountId: string; limit?: number }): Promise<
     Array<{
       id: string;
       referencedAt: Date | null;

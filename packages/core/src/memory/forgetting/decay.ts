@@ -100,12 +100,17 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
       return;
     }
 
-    // Read once: every ACTIVE observation owned by the account, with its scoring
-    // fields. The score is the pure forgetting score (fallback_ts = observed_at; the
-    // coalesce of a null referenced_at lives inside the score fn). Sub-threshold rows
-    // are the demotion set.
+    // Read the account's ACTIVE observations with their scoring fields, OLDEST first
+    // and BOUNDED (Codex review fix): the read is capped at max_iterations × chunk so
+    // it can never load more rows than the bounded archive loop could process in one
+    // sweep — otherwise a huge tenant would score an unbounded set up front, bypassing
+    // the iteration/wallclock caps. Leftover rows are swept on the next trigger
+    // (decay over-retains on under-coverage — fail-open). The score is the pure
+    // forgetting score (fallback_ts = observed_at; the null-referenced_at coalesce
+    // lives inside the score fn). Sub-threshold rows are the demotion set.
     const now = deps.now();
-    const rows = await list.call(deps.memoryStore, { accountId });
+    const scanLimit = deps.config.sweep.max_iterations * ARCHIVE_CHUNK;
+    const rows = await list.call(deps.memoryStore, { accountId, limit: scanLimit });
     const threshold = deps.config.decay.archive_threshold;
     const scoreConfig = deps.config.score;
     const condemned: string[] = [];

@@ -400,7 +400,7 @@ export class PgMemoryStore implements MemoryStore {
   // observations carry no owner_id column), with ONLY the score-input columns.
   // archived rows are excluded → idempotent re-sweep. The bigint epoch-ms columns
   // surface as numbers; box back to Date here (the score fn + sweep are Date-typed).
-  async listScorableObservations(scope: { accountId: string }): Promise<
+  async listScorableObservations(scope: { accountId: string; limit?: number }): Promise<
     Array<{
       id: string;
       referencedAt: Date | null;
@@ -409,7 +409,9 @@ export class PgMemoryStore implements MemoryStore {
       importance: number;
     }>
   > {
-    const rows = await this.db
+    // OLDEST active first + bound the scan by `limit` (Codex review fix — pg mirror;
+    // see the sqlite adapter for the rationale). Absent/non-positive limit = no cap.
+    const base = this.db
       .select({
         id: memoryObservations.id,
         referencedAt: memoryObservations.referencedAt,
@@ -423,7 +425,10 @@ export class PgMemoryStore implements MemoryStore {
           eq(memoryObservations.status, "active"),
           sql`${memoryObservations.threadId} IN (SELECT id FROM memory_threads WHERE owner_id = ${scope.accountId})`,
         ),
-      );
+      )
+      .orderBy(asc(memoryObservations.observedAt), asc(memoryObservations.id));
+    const rows =
+      scope.limit !== undefined && scope.limit > 0 ? await base.limit(scope.limit) : await base;
     return rows.map((row) => ({
       id: row.id,
       referencedAt: row.referencedAt === null ? null : new Date(row.referencedAt),

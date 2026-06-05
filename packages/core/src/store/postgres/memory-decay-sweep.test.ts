@@ -62,6 +62,32 @@ describe("PgMemoryStore decay sweep", () => {
     expect(await store.listScorableObservations({ accountId: "acct-b" })).toHaveLength(1); // untouched
   });
 
+  // docs/12 (Codex review fix, pg mirror) — the scorable read is bounded by `limit`
+  // and oldest-first, so a huge tenant cannot load an unbounded set before the
+  // bounded archive loop starts.
+  it("bounds the scan by `limit` and returns oldest-first", async () => {
+    const now = new Date("2026-06-05T00:00:00.000Z");
+    const { store } = await newStore(now);
+    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
+    const day = 86_400_000;
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      ids.push(
+        await store.appendObservation({
+          threadId: "t-a",
+          sourceMessageRange: [`m${i}a`, `m${i}b`],
+          observationText: `obs ${i}`,
+          observedAt: new Date(now.getTime() - (5 - i) * day),
+        }),
+      );
+    }
+
+    const capped = await store.listScorableObservations({ accountId: "acct-a", limit: 2 });
+    expect(capped.map((r) => r.id)).toEqual([ids[0], ids[1]]); // two OLDEST only
+    const all = await store.listScorableObservations({ accountId: "acct-a" });
+    expect(all.map((r) => r.id)).toEqual(ids);
+  });
+
   it("a never-swept account is due; count gate fires on new observations", async () => {
     const t0 = new Date("2026-06-05T00:00:00.000Z");
     const { store, set } = await newStore(t0);
