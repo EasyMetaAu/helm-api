@@ -148,6 +148,57 @@ describe("sqlite memory schema + migrations", () => {
     db.$sqlite.close();
   });
 
+  it("ensureThread upserts owner/project/resource scope on duplicate thread id", async () => {
+    const db = createSqliteDb(":memory:");
+    let nowMs = Date.UTC(2026, 0, 1, 0, 0, 0);
+    const store = new SqliteMemoryStore(
+      db,
+      () => "obs-1",
+      () => new Date(nowMs),
+    );
+
+    await store.ensureThread({ id: "t1" });
+    nowMs += 1_000;
+    await store.ensureThread({
+      id: "t1",
+      ownerId: "acct-a",
+      projectId: "proj-1",
+      resourceId: "res-1",
+    });
+    await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: ["m1", "m2"],
+      observationText: "remember scoped detail",
+      observedAt: new Date(nowMs),
+    });
+
+    const thread = db.$sqlite
+      .prepare(
+        "SELECT owner_id, project_id, resource_id, created_at, updated_at FROM memory_threads WHERE id = ?",
+      )
+      .get("t1") as {
+      owner_id: string | null;
+      project_id: string | null;
+      resource_id: string | null;
+      created_at: number;
+      updated_at: number;
+    };
+    expect(thread).toMatchObject({
+      owner_id: "acct-a",
+      project_id: "proj-1",
+      resource_id: "res-1",
+    });
+    expect(thread.updated_at).toBeGreaterThan(thread.created_at);
+    await expect(
+      store.listObservations({ accountId: "acct-a", projectId: "proj-1" }),
+    ).resolves.toHaveLength(1);
+    await expect(
+      store.listObservations({ accountId: "acct-a", resourceId: "res-1" }),
+    ).resolves.toHaveLength(1);
+    await expect(store.listMessages({ accountId: "acct-a", threadId: "t1" })).resolves.toEqual([]);
+    db.$sqlite.close();
+  });
+
   it("memory tables are isolated: build without any routing/key tables present", () => {
     // A fresh db that only ran the migration set still has no FK coupling to
     // lanes/policies — memory_messages.thread_id references memory_threads only.

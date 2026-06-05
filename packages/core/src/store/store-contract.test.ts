@@ -750,6 +750,39 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(msgs[0]?.createdAt).toBeInstanceOf(Date);
     });
 
+    it("ensureThread upgrades owner/project/resource scope when the same id is re-seen", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({ id: "t-upsert" });
+      await ctx.stores.memory.ensureThread({
+        id: "t-upsert",
+        ownerId: "acct-a",
+        projectId: "p1",
+        resourceId: "r1",
+      });
+      await ctx.stores.memory.appendMessage({
+        threadId: "t-upsert",
+        role: "user",
+        content: "visible after owner upsert",
+        tokenEstimate: 4,
+      });
+      await ctx.stores.memory.appendObservation({
+        threadId: "t-upsert",
+        sourceMessageRange: ["m1", "m1"],
+        observationText: "visible after scope upsert",
+        observedAt: new Date(1000),
+      });
+
+      expect(
+        await ctx.stores.memory.listMessages({ threadId: "t-upsert", accountId: "acct-a" }),
+      ).toHaveLength(1);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", projectId: "p1" }),
+      ).toHaveLength(1);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", resourceId: "r1" }),
+      ).toHaveLength(1);
+    });
+
     it("keeps raw messages and observations isolated by account for the same thread id", async () => {
       ctx = await make();
       await ctx.stores.memory.ensureThread({ id: "shared-thread", ownerId: "acct-a" });

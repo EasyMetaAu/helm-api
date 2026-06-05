@@ -102,7 +102,15 @@ export class SqliteMemoryStore implements MemoryStore {
         createdAt: ts,
         updatedAt: ts,
       })
-      .onConflictDoNothing()
+      .onConflictDoUpdate({
+        target: memoryThreads.id,
+        set: {
+          projectId: input.projectId ?? null,
+          resourceId: input.resourceId ?? null,
+          ownerId: input.ownerId ?? null,
+          updatedAt: ts,
+        },
+      })
       .run();
   }
 
