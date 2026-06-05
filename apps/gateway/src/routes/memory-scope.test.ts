@@ -195,3 +195,29 @@ describe("resolveMemoryScope — thread signal fallback chain (issue #97)", () =
     expect(scope.threadId).toBeNull();
   });
 });
+
+// Empty-header gate (issue #97 P2): an explicitly present but EMPTY x-thread-id
+// must NOT trigger the auto fallback chain — it is an explicit opt-out of thread
+// derivation (mirrors docs/08 "empty x-thread-id yields null"), distinct from an
+// ABSENT header which DOES run the chain.
+describe("resolveMemoryScope — empty x-thread-id opts out of the fallback chain (issue #97)", () => {
+  const AUTO = { mode: "inject", projectId: null, threadSource: "auto" } as const;
+
+  it("present-but-empty x-thread-id => null thread, chain NOT run, even with signals", () => {
+    const scope = resolveMemoryScope(
+      getterOf({ "x-thread-id": "", "x-session-key": "sess-1" }),
+      "acct-a",
+      { defaults: AUTO, signals: { promptCacheKey: "cache-1" } },
+    );
+    expect(scope.threadId).toBeNull();
+    expect(scope.threadSource).toBeNull();
+  });
+
+  it("ABSENT x-thread-id still runs the chain (contrast)", () => {
+    const scope = resolveMemoryScope(getterOf({ "x-session-key": "sess-1" }), "acct-a", {
+      defaults: AUTO,
+    });
+    expect(scope.threadId).toBe("sess-1");
+    expect(scope.threadSource).toBe("session_key");
+  });
+});

@@ -21,6 +21,10 @@
 
 **推迟**：会话指纹兜底（首条消息哈希，覆盖零信号客户端）——边界取舍（历史编辑/压缩重写）需先拍板，见 issue #97。
 
+**评审跟进（Codex，2 项）**：
+- **（P1 数据丢失）list 视图漏返回 memory 字段**：`toSummary`/`KeySummary` 没带三个 memory 列 → `GET /admin/api/keys` 不返回 → admin 客户端归一化成 off/null/header → EditKeyDialog 保存时把默认值原样发回，**编辑任意 key 就静默清空已配置的 memory defaults**。修复：补全 `toSummary` 投影 + `KeySummary` 类型；加 list 端到端 + admin 客户端 round-trip 回归测试。
+- **（P2 闸门）空 `x-thread-id` 仍触发回退链**：`nonEmpty` 把「显式空串」和「缺失」都折叠成 null，导致 `x-thread-id: ""` + 信号仍派生 thread，与 docs/08「空 thread-id 应为 null」矛盾，也让调用方无法在不关 memory 的前提下退出自动派生。修复：单独追踪 header **是否存在**（`!== undefined`），只在缺失时跑回退链；显式空串 = 主动退出（folds null，链不跑）。
+
 ---
 
 ## 2026-06-05 · Memory 第二轮评审修复：5 个缺陷（docs/08 Phase 2；#41 评审跟进 II）

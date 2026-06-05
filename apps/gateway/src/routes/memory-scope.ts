@@ -80,9 +80,14 @@ export function resolveMemoryScope(
 
   // Thread: explicit header first; the signal chain ONLY when the key opted in
   // via memory_thread_source = "auto" (default "header" keeps pre-#97 behavior).
+  // PRESENCE matters: an explicitly PRESENT x-thread-id — even empty "" — is an
+  // intentional opt-out of derivation (folds to null, chain NOT run), distinct
+  // from an ABSENT header (chain runs). This lets a caller disable auto thread
+  // derivation per request without turning memory off entirely.
+  const threadHeaderPresent = headerGet("x-thread-id") !== undefined;
   let threadId = nonEmpty(headerGet("x-thread-id"));
   let threadSource: ResolvedThreadSource | null = threadId !== null ? "header" : null;
-  if (threadId === null && defaults?.threadSource === "auto") {
+  if (!threadHeaderPresent && defaults?.threadSource === "auto") {
     const chain: Array<[ResolvedThreadSource, string | null]> = [
       ["metadata_thread_id", nonEmpty(opts?.signals?.metadataThreadId)],
       ["session_key", nonEmpty(headerGet("x-session-key"))],

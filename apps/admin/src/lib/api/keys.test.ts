@@ -112,6 +112,29 @@ describe('keys api client', () => {
     expect(keys[1].rate_limit_tpm).toBe(0);
   });
 
+  it('listKeys surfaces per-key memory defaults (issue #97 round-trip)', async () => {
+    const rows = [
+      summaryRow('k1'),
+      summaryRow('k2', {
+        memory_mode: 'inject',
+        memory_project_id: 'proj-1',
+        memory_thread_source: 'auto',
+      }),
+    ];
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify(rows), { status: 200 }),
+    );
+    const keys = await listKeys();
+    // Unconfigured key normalizes to the safe defaults…
+    expect(keys[0].memory_mode).toBe('off');
+    expect(keys[0].memory_project_id).toBeNull();
+    expect(keys[0].memory_thread_source).toBe('header');
+    // …a configured key round-trips its values (so an edit won't wipe them).
+    expect(keys[1].memory_mode).toBe('inject');
+    expect(keys[1].memory_project_id).toBe('proj-1');
+    expect(keys[1].memory_thread_source).toBe('auto');
+  });
+
   it('createKey sends per-key rate limits when set (including 0 = unlimited)', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ key_id: 'key_1', plaintext: 'x', prefix: 'p' }), {

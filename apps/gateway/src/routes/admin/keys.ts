@@ -28,6 +28,9 @@ function toSummary(rec: {
   over_budget_behavior: "degrade" | "reject";
   degrade_lane: string | null;
   concurrency_limit: number | null;
+  memory_mode: "off" | "observe" | "inject";
+  memory_project_id: string | null;
+  memory_thread_source: "header" | "auto";
 }): KeySummary {
   return {
     key_id: rec.key_id,
@@ -45,6 +48,9 @@ function toSummary(rec: {
     over_budget_behavior: rec.over_budget_behavior,
     degrade_lane: rec.degrade_lane,
     concurrency_limit: rec.concurrency_limit,
+    memory_mode: rec.memory_mode,
+    memory_project_id: rec.memory_project_id,
+    memory_thread_source: rec.memory_thread_source,
   };
 }
 
