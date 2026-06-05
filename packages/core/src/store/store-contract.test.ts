@@ -125,6 +125,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
     latency_total_ms: 1200,
     fallback_count: 0,
     cost_breakdown: { eval_usd: null, completion_usd: 0.004, total_usd: 0.004 },
+    memory: null,
     ...overrides,
   };
 }
@@ -735,23 +736,159 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
   describe("MemoryStore", () => {
     it("ensureThread is idempotent and appendMessage -> listMessages round-trips", async () => {
       ctx = await make();
-      await ctx.stores.memory.ensureThread({ id: "t1", projectId: "p1" });
-      await ctx.stores.memory.ensureThread({ id: "t1", projectId: "p1" }); // no duplicate
+      await ctx.stores.memory.ensureThread({ id: "t1", ownerId: "acct-a", projectId: "p1" });
+      await ctx.stores.memory.ensureThread({ id: "t1", ownerId: "acct-a", projectId: "p1" }); // no duplicate
       await ctx.stores.memory.appendMessage({
         threadId: "t1",
         role: "user",
         content: "hello",
         tokenEstimate: 2,
       });
-      const msgs = await ctx.stores.memory.listMessages("t1");
+      const msgs = await ctx.stores.memory.listMessages({ threadId: "t1", accountId: "acct-a" });
       expect(msgs).toHaveLength(1);
       expect(msgs[0]?.content).toBe("hello");
       expect(msgs[0]?.createdAt).toBeInstanceOf(Date);
     });
 
+    it("ensureThread fills missing owner/project/resource scope when the same id is re-seen", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({ id: "t-upsert" });
+      await ctx.stores.memory.ensureThread({
+        id: "t-upsert",
+        ownerId: "acct-a",
+        projectId: "p1",
+        resourceId: "r1",
+      });
+      await ctx.stores.memory.appendMessage({
+        threadId: "t-upsert",
+        role: "user",
+        content: "visible after owner upsert",
+        tokenEstimate: 4,
+      });
+      await ctx.stores.memory.appendObservation({
+        threadId: "t-upsert",
+        sourceMessageRange: ["m1", "m1"],
+        observationText: "visible after scope upsert",
+        observedAt: new Date(1000),
+      });
+
+      expect(
+        await ctx.stores.memory.listMessages({ threadId: "t-upsert", accountId: "acct-a" }),
+      ).toHaveLength(1);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", projectId: "p1" }),
+      ).toHaveLength(1);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", resourceId: "r1" }),
+      ).toHaveLength(1);
+    });
+
+    it("ensureThread preserves existing scope when later calls omit owner/project/resource", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({
+        id: "t-no-clear",
+        ownerId: "acct-a",
+        projectId: "p1",
+        resourceId: "r1",
+      });
+      await ctx.stores.memory.ensureThread({ id: "t-no-clear" });
+      await ctx.stores.memory.appendMessage({
+        threadId: "t-no-clear",
+        role: "user",
+        content: "still scoped",
+        tokenEstimate: 2,
+      });
+      await ctx.stores.memory.appendObservation({
+        threadId: "t-no-clear",
+        sourceMessageRange: ["m1", "m1"],
+        observationText: "still scoped observation",
+        observedAt: new Date(1000),
+      });
+
+      expect(
+        await ctx.stores.memory.listMessages({ threadId: "t-no-clear", accountId: "acct-a" }),
+      ).toHaveLength(1);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", projectId: "p1" }),
+      ).toHaveLength(1);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", resourceId: "r1" }),
+      ).toHaveLength(1);
+    });
+
+    it("ensureThread does not overwrite existing owner/project/resource for a different owner", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({
+        id: "t-no-cross-owner",
+        ownerId: "acct-a",
+        projectId: "p1",
+        resourceId: "r1",
+      });
+      await ctx.stores.memory.appendMessage({
+        threadId: "t-no-cross-owner",
+        role: "user",
+        content: "acct-a scoped secret",
+        tokenEstimate: 3,
+      });
+      await ctx.stores.memory.appendObservation({
+        threadId: "t-no-cross-owner",
+        sourceMessageRange: ["m1", "m1"],
+        observationText: "acct-a scoped observation",
+        observedAt: new Date(1000),
+      });
+
+      await ctx.stores.memory.ensureThread({
+        id: "t-no-cross-owner",
+        ownerId: "acct-b",
+        projectId: "p2",
+        resourceId: "r2",
+      });
+
+      expect(
+        await ctx.stores.memory.listMessages({ threadId: "t-no-cross-owner", accountId: "acct-b" }),
+      ).toEqual([]);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-b", projectId: "p2" }),
+      ).toEqual([]);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", projectId: "p1" }),
+      ).toHaveLength(1);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", resourceId: "r1" }),
+      ).toHaveLength(1);
+    });
+
+    it("keeps raw messages and observations isolated by account for the same thread id", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({ id: "shared-thread", ownerId: "acct-a" });
+      await ctx.stores.memory.appendMessage({
+        threadId: "shared-thread",
+        role: "user",
+        content: "acct-a secret",
+        tokenEstimate: 3,
+      });
+      await ctx.stores.memory.appendObservation({
+        threadId: "shared-thread",
+        sourceMessageRange: ["m1", "m1"],
+        observationText: "acct-a observation",
+        observedAt: new Date(1000),
+      });
+      await ctx.stores.memory.ensureThread({ id: "shared-thread", ownerId: "acct-b" });
+
+      expect(
+        await ctx.stores.memory.listMessages({ threadId: "shared-thread", accountId: "acct-b" }),
+      ).toEqual([]);
+      expect(
+        await ctx.stores.memory.listObservations({
+          threadId: "shared-thread",
+          accountId: "acct-b",
+        }),
+      ).toEqual([]);
+    });
+
     it("appendObservation -> listObservations preserves range + tags", async () => {
       ctx = await make();
-      await ctx.stores.memory.ensureThread({ id: "t1" });
+      await ctx.stores.memory.ensureThread({ id: "t1", ownerId: "acct-a" });
       await ctx.stores.memory.appendObservation({
         threadId: "t1",
         sourceMessageRange: ["m1", "m2"],
@@ -759,16 +896,68 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         observedAt: new Date(1000),
         tags: ["x", "y"],
       });
-      const obs = await ctx.stores.memory.listObservations({ threadId: "t1" });
+      const obs = await ctx.stores.memory.listObservations({ threadId: "t1", accountId: "acct-a" });
       expect(obs).toHaveLength(1);
       expect(obs[0]?.sourceMessageRange).toEqual(["m1", "m2"]);
       expect(obs[0]?.tags).toEqual(["x", "y"]);
       expect(obs[0]?.observedAt).toBeInstanceOf(Date);
     });
 
+    it("listObservations aggregates across a PROJECT's threads (reflector target scope)", async () => {
+      // The reflector merges at the project level — it must see EVERY thread of
+      // that project (same owner), never just the promoting thread, and never
+      // another project's or another account's threads.
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({ id: "t1", ownerId: "acct-a", projectId: "p1" });
+      await ctx.stores.memory.ensureThread({ id: "t2", ownerId: "acct-a", projectId: "p1" });
+      await ctx.stores.memory.ensureThread({ id: "t3", ownerId: "acct-a", projectId: "other" });
+      await ctx.stores.memory.ensureThread({ id: "t4", ownerId: "acct-b", projectId: "p1" });
+      const seed = async (threadId: string, text: string, at: number) =>
+        ctx.stores.memory.appendObservation({
+          threadId,
+          sourceMessageRange: ["m1", "m1"],
+          observationText: text,
+          observedAt: new Date(at),
+        });
+      await seed("t1", "from-t1", 1000);
+      await seed("t2", "from-t2", 2000);
+      await seed("t3", "from-other-project", 3000);
+      await seed("t4", "from-other-account", 4000);
+
+      const obs = await ctx.stores.memory.listObservations({
+        accountId: "acct-a",
+        projectId: "p1",
+      });
+      expect(obs.map((o) => o.observationText)).toEqual(["from-t1", "from-t2"]);
+    });
+
+    it("listObservations aggregates across a RESOURCE's threads the same way", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({ id: "t1", ownerId: "acct-a", resourceId: "r1" });
+      await ctx.stores.memory.ensureThread({ id: "t2", ownerId: "acct-a", resourceId: "r1" });
+      await ctx.stores.memory.ensureThread({ id: "t3", ownerId: "acct-a", resourceId: "zz" });
+      const seed = async (threadId: string, text: string, at: number) =>
+        ctx.stores.memory.appendObservation({
+          threadId,
+          sourceMessageRange: ["m1", "m1"],
+          observationText: text,
+          observedAt: new Date(at),
+        });
+      await seed("t1", "res-a", 1000);
+      await seed("t2", "res-b", 2000);
+      await seed("t3", "res-other", 3000);
+
+      const obs = await ctx.stores.memory.listObservations({
+        accountId: "acct-a",
+        resourceId: "r1",
+      });
+      expect(obs.map((o) => o.observationText)).toEqual(["res-a", "res-b"]);
+    });
+
     it("upsertReflection -> getReflection returns the latest version for an exact scope", async () => {
       ctx = await make();
       await ctx.stores.memory.upsertReflection({
+        accountId: "acct-a",
         projectId: "p1",
         reflectionText: "v1",
         version: 1,
@@ -776,17 +965,24 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         updatedAt: new Date(1000),
       });
       await ctx.stores.memory.upsertReflection({
+        accountId: "acct-a",
         projectId: "p1",
         reflectionText: "v2",
         version: 2,
         tokenEstimate: 6,
         updatedAt: new Date(2000),
       });
-      const got = await ctx.stores.memory.getReflection({ projectId: "p1" });
+      const got = await ctx.stores.memory.getReflection({ projectId: "p1", accountId: "acct-a" });
       expect(got?.version).toBe(2);
       expect(got?.reflectionText).toBe("v2");
       // Scope isolation: a thread-scoped read must NOT see the project row.
-      expect(await ctx.stores.memory.getReflection({ threadId: "p1" })).toBeNull();
+      expect(
+        await ctx.stores.memory.getReflection({ threadId: "p1", accountId: "acct-a" }),
+      ).toBeNull();
+      // Account isolation: same project id under another account must NOT see it.
+      expect(
+        await ctx.stores.memory.getReflection({ projectId: "p1", accountId: "acct-b" }),
+      ).toBeNull();
     });
   });
 

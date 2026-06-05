@@ -17,8 +17,12 @@ function nonEmpty(value: string | undefined): string | null {
 // Resolve the memory scope from a header-getter (name → value | undefined). The
 // getter mirrors Hono's `c.req.header(name)` contract so the same function serves
 // the IR-metadata path on the Anthropic surface too.
-export function resolveMemoryScope(headerGet: (name: string) => string | undefined): MemoryScope {
+export function resolveMemoryScope(
+  headerGet: (name: string) => string | undefined,
+  accountId: string,
+): MemoryScope {
   return {
+    accountId,
     threadId: nonEmpty(headerGet("x-thread-id")),
     resourceId: nonEmpty(headerGet("x-resource-id")),
     projectId: nonEmpty(headerGet("x-project-id")),

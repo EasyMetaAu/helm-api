@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-06-05 · Memory 第二轮评审修复：5 个缺陷（docs/08 Phase 2；#41 评审跟进 II）
+
+Codex 第二轮 review 发现 5 个问题（2×P1、2×P2、1×P3），全部修复（TDD，新增/更新 13 个测试断言）：
+
+1. **（P1）inject 重复注入已压缩的 raw**：inject 把线程全部 raw 消息当 recent_raw 注入，已被 observation 覆盖的旧轮次会以「observation + 原文」双份进入 prompt，上下文无界增长。修复：导出 observer 的 `alreadyObservedMessageIds`，inject 装配时过滤掉 source range 已覆盖的 raw（raw 行仍留库审计，只是不再上 prefix）。
+2. **（P1）project reflection 按 thread 后写覆盖**：reflector 只合并晋升 thread 自己的 observations，同 project 第二个 thread 会整体覆盖 project reflection。修复：`listObservations` 两种读形——thread scope 读本线程；project/resource scope **跨该 owner 的所有匹配 thread 聚合**（join memory_threads，两个适配器同契约）；reflector 改读 target scope；scheduler 晋升时直接用 target scope（同 project 多 thread 晋升去重为一行）。loop 测试验证两个 thread 的内容都进 reflection。
+3. **（P2）Gemini 没接 inject**：`server.ts` gemini pipeline 只传 `{ observe }`。修复：传 `{ observe, inject }`；pipeline 级 inject 测试矩阵扩到三个 protocol（含 gemini）。
+4. **（P2）崩溃留下的 stale running 永久阻塞 scope**（即上一轮记下的 TODO）：claim 只取 pending，而 enqueue 去重覆盖 running。修复：`claimPendingJobs` 把 `running 且 updated_at 超过 5 分钟 lease` 的行视为可回收并刷新 lease（sqlite/pg 同契约）；runner 幂等（observer 跳过已覆盖 range、reflector 稳定 merge），重复执行无害。
+5. **（P3）inject metadata 在网关边界被丢弃**：即原推迟的 Step 10。修复：`DecisionRecord` 新增 `memory` 字段（`MemoryDecisionSchema`，nullable `.default(null)` 兼容旧记录；只含计数/job id，不含记忆内容，principle 7），chat 与 pipeline 在 route() 返回后盖章（routing core 保持 memory 无关，始终产出 null）。
+
+---
+
 ## 2026-06-04 · 请求排队两特性：per-key 并发溢出排队 + per-account 用户消息串行队列（issue #93；spec 未覆盖）
 
 参考 claude-relay-service（CRS）移植的两个限流增强能力，实现与 CRS 的关键差异是 **in-memory promise FIFO 直接交接**（单进程，无 Redis、无轮询、无孤儿锁清理任务）。core 原语在 `packages/core/src/queue/`（keyed-semaphore / keyed-serial-gate / user-turn 判定），gateway 只装配。
@@ -24,6 +36,8 @@
 - **fail-open**：gate 自身意外异常（非超时/abort）→ 放行 + warn（原则 3）；超时/队满是**设计内**拒绝，不属 fail-open 范畴。
 - 迁移：sqlite v13 / postgres v12（`ALTER TABLE api_keys ADD COLUMN concurrency_limit INTEGER`）。
 
+---
+
 ## 2026-06-04 · `/v1/models` 漏报订阅（OAuth）模型（bug 修复；docs/04 lane、issue #38）
 
 **问题**：`GET /v1/models` 对 `allow_custom_model` key 列出了 configured providers 的别名（deepseek/openrouter/zenmux），但**完全没有订阅（OAuth）provider 的模型**。根因：`server.ts` 给 `registerModelsRoute` 的 `providerAliases` 只取 `config.providers[].models[].alias`（静态配置），而订阅模型是另一条链路 `synthesizeOAuthProviders` 合成的，活别名存在热加载的 `oauthAliasSet` 里。执行器读它做路由（`oauthAliases: () => oauthAliasSet`），但发现端点从没拿到——于是「能路由但列不出」。
@@ -32,6 +46,18 @@
 
 - **取舍**：不改 core `buildModelsList` 契约——合并发生在 gateway 组合根，core 仍是纯函数只认一份 `providerAliases`（principle 1）。订阅别名同属「concrete alias」，因此与 provider 别名一样**只对 `allow_custom_model` key 可见**，默认 key 仍只见 lane（principle 6）。
 - **已知限制（TODO）**：订阅别名（如 `openai-codex/gpt-5.4`，前缀是 `ROUTABLE_OAUTH` 的 key，可能带连字符）通常不在 runtime catalog 里，故列出时**不带 capabilities/pricing**——诚实且不阻塞「能被发现」。若要补全，需用去前缀的 base model 在 catalog 里回查，留待后续。
+
+---
+
+## 2026-06-04 · Memory 后台环路三处修复（docs/08 Phase 2；#41 评审跟进）
+
+Codex review 在 #41 rebase 后发现三个问题，全部修复（TDD，新增 10 个测试含一个真 sqlite 的端到端环路测试 `memory-loop.test.ts`）：
+
+1. **（高）reflection 写入 scope 与 inject 读取 scope 不匹配**：reflector 原样使用 observer job 的完整 scope（含 threadId）upsert，而 inject 只按 `{accountId, projectId}` / `{accountId, resourceId}` 精确读取（缺失层级必须 NULL）——worker 写出的 reflection 永远读不回。修复：job scope 仅作为**观察来源**（thread 锚点），reflection 的**写入目标**取最高可读层级（project > resource；见 `reflectionTargetScope`）。**取舍**：project+resource 同时存在时只写 project 层（最高层），resource 槽位留给 resource-only scope——避免双倍 merge 成本；thread-only scope 没有可读槽位，worker 不再晋升 reflector（省 token，不写死数据）。
+2. **（中）runner 抛错的已认领 job 永久卡 running**：claim 已把行置 running，而 enqueue 去重覆盖 pending+running——外层 catch 只记日志会让该 scope 的队列永久阻塞。修复：外层 catch best-effort 标记 failed；晋升 enqueue 单独 try/catch（observer 自身已 done 时晋升失败只记日志 `memory.worker.promote_failed`，不改写 observer 的状态；下次 observer 写入会重新晋升）。**遗留 TODO**：进程崩溃在 claim 与 runner 之间仍可能留下 stale running 行，需要 lease/超时重捡策略（记入后续）。
+3. **（中）非纯文本 inject 请求丢失 write-back**：D7 闸门原来在网关层挡掉整个 bridge，而 observer enqueue 在 `assembleInjectedContext` 内部——工具/多模态为主的线程永远不压缩。修复：D7 闸门移入 bridge（`injectIntoIR` 本就声明"owns the lossy-risk decisions"），非纯文本轮次保留原始消息但仍调用新导出的 `enqueueObserverWriteback`；网关两处 hook 删掉外层 `isPlainTextTurn` 条件，`InjectBridgeDeps` 新增 `enqueueObserver`。
+
+---
 
 ## 2026-06-04 · Codex 额度改为「PULL + PUSH 双源」（spec 未覆盖；issue #38 OAuth 订阅）
 
@@ -783,6 +809,31 @@ protocol + gateway routes 406 tests green; typecheck clean; `pnpm lint` exit 0.
 **Build note**: `@helm/core`'s `exports` resolves `.` to `./dist/index.js` outside the `development` condition, and the e2e webServer (`tsx`) hits that path — so the gateway/e2e need `pnpm --filter @helm/core build` after changing core exports. Unit tests (vitest, source) don't.
 
 **Test results (local)**: typecheck clean, lint clean (warnings pre-exist), unit `1348 passed`. e2e: the two new Responses SSE specs pass; `38 passed / 1 failed` overall — the single failure is the unrelated `admin.spec.ts` pagination test (seeded-row count from reused non-CI data dir, untouched by this change).
+
+---
+
+## 2026-06-02 · Memory inject + reflector — Phase 2 wired end-to-end (docs/08, #36)
+
+**Context**: `assembleInjectedContext` / `runObserverJob` / `runReflectorJob` existed and were unit-tested, but only OBSERVE was wired into the gateway. inject (request-path read) and the observer/reflector background jobs had no caller and no queue producing the `memory_jobs` rows they consume. This change connects all of it.
+
+**What was added**:
+- **Queue contracts (`@helm/shared`)**: `MemoryJobEnqueueInputSchema` / `MemoryJobRowSchema` / `MemoryJobTypeSchema` (`memory/jobs.ts`) + a canonical `encodeScopeId`/`decodeScopeId` codec (`memory/scope-codec.ts`).
+- **`MemoryStore` port**: `enqueueJob` (dedupe-on-pending) + `claimPendingJobs` (atomic `pending→running`), implemented on **both** sqlite (`UPDATE … RETURNING`) and postgres (`FOR UPDATE SKIP LOCKED`) adapters.
+- **`startMemoryWorker`** (`core/memory/scheduler.ts`): clones the signal-scheduler shape (unref'd `setInterval` + fail-open tick), claims a batch, dispatches by `type`, promotes a reflector after a successful observer write.
+- **`injectIntoIR` / `isPlainTextTurn`** (`core/memory/inject-bridge.ts`): framework-agnostic IR↔inject bridge owning the D7 gate + D8 RawMessage synthesis / source→IR restoration.
+- **Gateway hooks**: `/v1/chat/completions` (`chat.ts`) and the shared messages/responses pipeline (`messages-pipeline.ts`) full-replace `internal.messages` with the assembled prefix on `mode=inject`, plain-text turns only, fully fail-open.
+- **Composition root** (`server.ts`): builds inject/observer/reflector deps + starts the env-gated worker (`HELM_MEMORY_WORKER_DISABLED` / `_INTERVAL_MS`); `dispose()` stops it.
+- Migration **v14** (sqlite) / **v13** (pg): `(type, scope_id, status)` index for the dedupe lookup + status scan. (Originally v9/v8 on the branch; renumbered twice while rebasing onto main — first past the oauth/budget migrations, then past #93's `concurrency_limit` which took sqlite v13 / pg v12.)
+
+**Decisions / trade-offs (maintainer review points)**:
+- **D1 scope_id encoding**: canonical JSON (omit-undefined, stable key order) in a single TEXT column — robust to ids containing delimiters; re-validated through Zod on decode (fail-closed at the boundary).
+- **D5 reflector trigger + gap**: a reflector job is promoted by the worker after an observer writes a new observation, inheriting the observer's **full** scope so reflection can land at the highest available level. MVP relies on this promotion path; there is no separate periodic project/resource reflector trigger yet.
+- **D7 lossy gate**: inject full-replace runs **only on plain-text turns**. `AssembledMessage` has no `tool_calls`/structured-content field, so a tool-using or multipart request is left untouched (tool calls preserved) and only enqueues an observer.
+- **D8-bis system prompt**: both surfaces read systemPrompt from the **leading IR system message** — the Anthropic inbound transformer already hoists top-level `system` into `messages[0]`, so the prompt is never lost.
+- **D9 token budget**: no `config.memory` subtree yet — the inject budget rides `HELM_MEMORY_INJECT_TOKEN_BUDGET` (default 4000, guarded). **Follow-up**: add a `config.memory` subtree (`inject_token_budget`, retention, etc.).
+- **D10 cost**: all memory deps share one `chars/4` estimator; hydrate/observer/reflector cost sinks are distinct buckets (currently no-ops pending a telemetry sink).
+- **D11 summarize/merge**: MVP ships **deterministic, non-LLM** summarize (concatenate+truncate) / merge so reflection versions only bump on real content change. **Follow-up**: wire a real LLM path behind the same interface.
+- **Deferred (not in #36)**: Step 10 `DecisionRecord.memory` telemetry meta — left as a follow-up (telemetry is not on the critical inject path); the inject bridge already returns the counts/ids needed to populate it.
 
 ---
 

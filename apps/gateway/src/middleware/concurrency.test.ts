@@ -45,10 +45,18 @@ describe("createConcurrencyGate", () => {
   it("no-ops when disabled or the key has no limit", async () => {
     const semaphore = createKeyedSemaphore();
     const disabled = createConcurrencyGate({ semaphore, getConfig: () => cfg({ enabled: false }) });
-    const r1 = await disabled.acquire({ keyId: "k", limit: 1, signal: new AbortController().signal });
+    const r1 = await disabled.acquire({
+      keyId: "k",
+      limit: 1,
+      signal: new AbortController().signal,
+    });
     expect(r1.ok).toBe(true);
     const enabled = createConcurrencyGate({ semaphore, getConfig: () => cfg() });
-    const r2 = await enabled.acquire({ keyId: "k", limit: null, signal: new AbortController().signal });
+    const r2 = await enabled.acquire({
+      keyId: "k",
+      limit: null,
+      signal: new AbortController().signal,
+    });
     expect(r2.ok).toBe(true);
     expect(semaphore.inFlight("k")).toBe(0); // nothing was tracked
   });

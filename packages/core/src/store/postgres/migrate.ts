@@ -99,16 +99,6 @@ const MIGRATIONS: readonly Migration[] = [
         updated_at BIGINT NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS memory_jobs (
-        id TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        scope_id TEXT NOT NULL,
-        status TEXT NOT NULL,
-        error TEXT,
-        created_at BIGINT NOT NULL,
-        updated_at BIGINT NOT NULL
-      );
-
       CREATE INDEX IF NOT EXISTS idx_memory_messages_thread ON memory_messages (thread_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_memory_observations_thread ON memory_observations (thread_id, observed_at);
     `,
@@ -283,6 +273,65 @@ const MIGRATIONS: readonly Migration[] = [
     version: 12,
     sql: `
       ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS concurrency_limit INTEGER;
+    `,
+  },
+  {
+    // Memory job queue scan index (docs/08 Phase 2). The unique open-job
+    // boundary is added in v15 after cleanup, so old duplicate open rows cannot
+    // make first-time upgrades fail before the cleanup migration runs. Mirrors
+    // sqlite v14 (different ledger, same logical change).
+    version: 13,
+    sql: `
+      CREATE TABLE IF NOT EXISTS memory_jobs (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_jobs_type_scope_status
+        ON memory_jobs (type, scope_id, status);
+    `,
+  },
+  {
+    // Bind memory_reflections to the authenticated account owner so project or
+    // resource ids reused by another account cannot read long-lived memory.
+    version: 14,
+    sql: `
+      ALTER TABLE memory_reflections ADD COLUMN IF NOT EXISTS owner_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_memory_reflections_owner_scope
+        ON memory_reflections (owner_id, project_id, resource_id, thread_id, version DESC);
+    `,
+  },
+  {
+    // DB-level open-job dedupe boundary. The original v13 scan index was non-unique;
+    // this additive migration makes concurrent enqueueJob calls collapse atomically.
+    version: 15,
+    sql: `
+      WITH ranked AS (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY type, scope_id
+            ORDER BY created_at ASC, id ASC
+          ) AS rn
+        FROM memory_jobs
+        WHERE status IN ('pending', 'running')
+      )
+      UPDATE memory_jobs
+      SET status = 'failed',
+          error = CONCAT_WS(E'\n', NULLIF(error, ''), 'migration cleanup: closed duplicate open memory job before uniq_memory_jobs_open_type_scope'),
+          updated_at = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
+      FROM ranked
+      WHERE memory_jobs.id = ranked.id
+        AND ranked.rn > 1;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_memory_jobs_open_type_scope
+        ON memory_jobs (type, scope_id)
+        WHERE status IN ('pending', 'running');
     `,
   },
 ];

@@ -193,9 +193,9 @@ describe("CreateKeyRequestSchema", () => {
   });
 
   it("accepts an optional concurrency_limit at mint; rejects 0 / negative", () => {
-    expect(
-      CreateKeyRequestSchema.safeParse({ role: "user", concurrency_limit: 4 }).success,
-    ).toBe(true);
+    expect(CreateKeyRequestSchema.safeParse({ role: "user", concurrency_limit: 4 }).success).toBe(
+      true,
+    );
     expect(CreateKeyRequestSchema.safeParse({ role: "user" }).success).toBe(true);
     expect(CreateKeyRequestSchema.safeParse({ concurrency_limit: 0 }).success).toBe(false);
     expect(CreateKeyRequestSchema.safeParse({ concurrency_limit: -2 }).success).toBe(false);

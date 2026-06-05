@@ -39,11 +39,6 @@ export {
 } from "./pool.js";
 export { getOAuthProvider, getOAuthProviders, listOAuthProviderIds } from "./registry.js";
 export {
-  createSerializingClient,
-  QueueTimeoutError,
-  type SerializeClientDeps,
-} from "./serialize-client.js";
-export {
   buildOAuthRequestSignal,
   createOAuthLoginCancelledError,
   generateOAuthState,
@@ -55,6 +50,11 @@ export {
   throwIfOAuthLoginAborted,
   withOAuthLoginAbort,
 } from "./runtime.js";
+export {
+  createSerializingClient,
+  QueueTimeoutError,
+  type SerializeClientDeps,
+} from "./serialize-client.js";
 export type {
   OAuthAuthInfo,
   OAuthCredentials,

@@ -12,6 +12,7 @@ import { z } from "zod";
 // illegal x-memory-mode is normalized to "off" (default-safe) BEFORE it reaches
 // core (see resolveMemoryMode helper).
 export const MemoryScopeSchema = z.object({
+  accountId: z.string().min(1),
   threadId: z.string().nullable(),
   resourceId: z.string().nullable(),
   projectId: z.string().nullable(),

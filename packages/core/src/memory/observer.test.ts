@@ -7,23 +7,33 @@ import { type ObserverDeps, type ObserverJob, runObserverJob } from "./observer.
 // of raw messages, captures every appended observation, and records job status
 // transitions so tests can assert auditability + fail-open behavior. Memory is a
 // MIDDLEWARE — this fake never touches routing/lane state.
-function makeFakeStore(messages: RawMessage[]) {
+function makeFakeStore(messages: RawMessage[], existingRanges: Array<[string, string]> = []) {
   const observations: MemoryObservationInput[] = [];
   const jobUpdates: Array<{ jobId: string; status: MemoryJobStatus; error?: string }> = [];
   const store: MemoryStore = {
     ensureThread: vi.fn(async () => {}),
     appendMessage: vi.fn(async () => "unused"),
-    listMessages: vi.fn(async (_threadId: string) => messages),
+    listMessages: vi.fn(async () => messages),
     appendObservation: vi.fn(async (input: MemoryObservationInput) => {
       observations.push(input);
       return `obs-${observations.length}`;
     }),
-    listObservations: vi.fn(async () => []),
+    listObservations: vi.fn(async () =>
+      existingRanges.map((range, i) => ({
+        id: `existing-${i}`,
+        threadId: "thread-1",
+        sourceMessageRange: range,
+        observationText: "already compressed",
+        observedAt: NOW,
+      })),
+    ),
     getReflection: vi.fn(async () => null),
     upsertReflection: vi.fn(async () => "unused"),
     updateJobStatus: vi.fn(async (jobId: string, status: MemoryJobStatus, error?: string) => {
       jobUpdates.push(error === undefined ? { jobId, status } : { jobId, status, error });
     }),
+    enqueueJob: vi.fn(async () => "job"),
+    claimPendingJobs: vi.fn(async () => []),
   };
   return { store, observations, jobUpdates };
 }
@@ -58,7 +68,7 @@ function makeDeps(store: MemoryStore, overrides: Partial<ObserverDeps> = {}): Ob
   };
 }
 
-const JOB: ObserverJob = { jobId: "job-1", threadId: "thread-1" };
+const JOB: ObserverJob = { jobId: "job-1", accountId: "acct-a", threadId: "thread-1" };
 
 describe("runObserverJob", () => {
   it("compresses older messages into exactly one observation with a time anchor + source range", async () => {
@@ -97,6 +107,20 @@ describe("runObserverJob", () => {
     expect(obs.sourceMessageRange[1]).toBe("m4");
     expect(obs.sourceMessageRange).not.toContain("m5");
     expect(obs.sourceMessageRange).not.toContain("m6");
+  });
+
+  it("does not recompress a source range already covered by an existing observation", async () => {
+    const messages = makeMessages(6);
+    const { store, observations, jobUpdates } = makeFakeStore(messages, [["m1", "m4"]]);
+    const deps = makeDeps(store);
+
+    const out = await runObserverJob(JOB, deps);
+
+    expect(out.observationId).toBeNull();
+    expect(out.sourceMessageRange).toBeNull();
+    expect(observations).toHaveLength(0);
+    expect(deps.summarize).not.toHaveBeenCalled();
+    expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
   });
 
   it("books Observer tokens into the dedicated 'observer' cost bucket only", async () => {

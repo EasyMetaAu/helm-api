@@ -1,6 +1,8 @@
 import type {
   ApiKeyRecord,
   DecisionRecord,
+  MemoryJobEnqueueInput,
+  MemoryJobRow,
   MemoryMessageInput,
   MemoryObservationInput,
   MemoryThreadInput,
@@ -275,13 +277,16 @@ export interface MemoryStore {
   // POST-MVP Phase 2 (Observer). Read a thread's raw messages oldest-first so the
   // background Observer can compress the older ones into an observation. Returns
   // the persisted rows (with ids + createdAt) for an auditable source range.
-  listMessages(threadId: string): Promise<RawMessage[]>;
+  listMessages(scope: { threadId: string; accountId: string }): Promise<RawMessage[]>;
   // Persist one compressed observation; returns its generated id. source range
   // is REQUIRED on the input (docs/08) so memory can be audited against originals.
   appendObservation(input: MemoryObservationInput): Promise<string>;
   // POST-MVP Phase 2 (Reflector). Read a scope's ACTIVE observations so the
-  // background Reflector can merge them into a stable reflection. Scope is
-  // project / resource / thread (one or more levels); never cross-project.
+  // background Reflector can merge them into a stable reflection. Two read
+  // shapes: a THREAD scope returns that thread's rows (inject/observer); a
+  // project/resource scope AGGREGATES across all the owner's threads carrying
+  // that id (the Reflector's target read — a project reflection covers the whole
+  // project). Never cross-project, never cross-account.
   listObservations(scope: ReflectionScope): Promise<Observation[]>;
   // Read the current (latest) reflection for a scope, or null if none yet. The
   // Reflector compares the freshly merged text against this to decide whether
@@ -295,6 +300,22 @@ export interface MemoryStore {
   // The Observer/Reflector mark their job done/failed; failure is recorded here,
   // never bubbled to the main request path (fail-open).
   updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void>;
+  // POST-MVP Phase 2 (queue). Enqueue a background job (observer | reflector) for
+  // a scope. The scope is encoded into the single scope_id column (canonical JSON,
+  // D1). DEDUPE (D6): if an OPEN (pending) job of the same (type, scope_id) already
+  // exists, return its id instead of inserting a second row — this caps an observer
+  // flood to one pending row per scope. Best-effort caller: inject treats an
+  // enqueue throw as a "failed" writeback (fail-open), never a 5xx.
+  enqueueJob(input: MemoryJobEnqueueInput): Promise<string>;
+  // POST-MVP Phase 2 (queue). Atomically claim up to `limit` open jobs, flipping
+  // them to running in ONE statement so two workers (or two ticks) never
+  // double-process a row, and return them with scope_id DECODED back to a
+  // ReflectionScope. Claimable = pending, PLUS running rows whose lease
+  // (updated_at) expired — crash recovery: a worker that died mid-job must not
+  // leave its scope blocked forever behind the running-row dedupe. Empty queue →
+  // []. The worker runs each claimed job (itself fail-open) then marks it
+  // done/failed via updateJobStatus.
+  claimPendingJobs(limit: number): Promise<MemoryJobRow[]>;
 }
 
 // Optional config persistence (MVP is yaml-first; reserved for admin write-back).

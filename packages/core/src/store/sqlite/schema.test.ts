@@ -25,6 +25,80 @@ describe("sqlite schema + migrations", () => {
     }
   });
 
+  it("upgrades a real pre-unique-index memory_jobs table with duplicate open jobs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v13-memory-jobs-"));
+    const path = join(dir, "helm.db");
+    const scope = JSON.stringify({ accountId: "acct-a", threadId: "t1" });
+    try {
+      const seed = new Database(path);
+      seed.exec(
+        "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);",
+      );
+      seed.exec(`
+        CREATE TABLE memory_jobs (
+          id TEXT PRIMARY KEY,
+          type TEXT NOT NULL,
+          scope_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+      const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
+      // Seed everything below the memory migrations (v14–v16) as applied, so
+      // only they run — the minimal seed has no api_keys table for v10–v13.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]) rec.run(v, Date.now());
+      const insert = seed.prepare(
+        "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+      );
+      insert.run("keep-earliest", "observer", scope, "pending", 100, 100);
+      insert.run("close-pending", "observer", scope, "pending", 200, 200);
+      insert.run("close-running", "observer", scope, "running", 300, 300);
+      seed.close();
+
+      expect(() => runMigrations(path)).not.toThrow();
+
+      const after = new Database(path);
+      const openRows = after
+        .prepare(
+          "SELECT id, status FROM memory_jobs WHERE type = ? AND scope_id = ? AND status IN ('pending','running') ORDER BY created_at, id",
+        )
+        .all("observer", scope) as Array<{ id: string; status: string }>;
+      expect(openRows).toEqual([{ id: "keep-earliest", status: "pending" }]);
+      const closedRows = after
+        .prepare(
+          "SELECT id, status, error FROM memory_jobs WHERE id IN ('close-pending','close-running')",
+        )
+        .all() as Array<{ id: string; status: string; error: string }>;
+      expect(closedRows).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: "close-pending", status: "failed" }),
+          expect.objectContaining({ id: "close-running", status: "failed" }),
+        ]),
+      );
+      expect(closedRows.every((r) => r.error.includes("migration cleanup"))).toBe(true);
+      expect(() =>
+        after
+          .prepare(
+            "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+          )
+          .run("blocked-by-index", "observer", scope, "pending", 400, 400),
+      ).toThrow();
+      after.prepare("UPDATE memory_jobs SET status = 'done' WHERE id = 'keep-earliest'").run();
+      expect(() =>
+        after
+          .prepare(
+            "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+          )
+          .run("new-open-after-done", "observer", scope, "pending", 500, 500),
+      ).not.toThrow();
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("creates api_keys and telemetry with the expected columns", () => {
     const db = createSqliteDb(":memory:");
     const raw = db.$sqlite;

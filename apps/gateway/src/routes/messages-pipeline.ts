@@ -1,24 +1,29 @@
 import {
   type AnthropicSSEEvent,
+  assembleInjectedContext,
   type BudgetCaps,
   type BudgetCheckResult,
   type BudgetProbe,
   convertOpenAIStreamToAnthropic,
   convertOpenAIStreamToResponses,
   type ExecutionResult,
+  enqueueObserverWriteback,
   geminiTransformer,
+  type InjectDeps,
   type IRChunk,
   type IRMessage,
   type IRResponse,
+  injectIntoIR,
   type MemoryScope,
   type ObserveDeps,
   observeInbound,
   observeOutbound,
+  ownerScopedThreadId,
   type ResponsesSSEEvent,
   type RouteOptions,
   resolveMemoryMode,
 } from "@helm/core";
-import type { InternalRequest, Protocol } from "@helm/shared";
+import type { InternalRequest, MemoryDecision, Protocol } from "@helm/shared";
 import type { ServingAccount } from "../runtime/serving-account.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import {
@@ -59,6 +64,14 @@ interface PipelineIR {
   stream?: boolean;
   metadata?: Record<string, unknown>;
   [k: string]: unknown;
+}
+
+// Gateway-side inject wiring (docs/08 Phase 2). Bundles the core InjectDeps with
+// the per-deployment token budget (D9). Optional so existing pipeline tests that
+// pass only `{ observe }` are unaffected (inject absent → inject is a no-op).
+export interface InjectWiring {
+  deps: InjectDeps;
+  tokenBudget: number;
 }
 
 // Anthropic /v1/messages routing pipeline — the framework-agnostic bridge the
@@ -141,7 +154,7 @@ function toInternalRequest(
   // memory_mode onto ir.metadata from the request headers (core never parses
   // HTTP, principle 1). Read them back here so the InternalRequest carries the
   // same scope the OpenAI surface produces.
-  const memoryScope = memoryScopeFromMeta(ir.metadata);
+  const memoryScope = memoryScopeFromMeta(ir.metadata, accountId);
 
   return {
     request_id: traceId,
@@ -174,9 +187,10 @@ function toInternalRequest(
 // string id of length 0 or a non-string folds to null; the mode is normalized by
 // core's resolveMemoryMode (absent/illegal → off, default-safe). This is the
 // IR-metadata twin of resolveMemoryScope's header path — same defaults, no HTTP.
-function memoryScopeFromMeta(meta: PipelineIR["metadata"]): MemoryScope {
+function memoryScopeFromMeta(meta: PipelineIR["metadata"], accountId: string): MemoryScope {
   const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
   return {
+    accountId,
     threadId: str(meta?.thread_id),
     resourceId: str(meta?.resource_id),
     projectId: str(meta?.project_id),
@@ -314,7 +328,7 @@ export function createMessagesPipeline(
   // assistant turn after; both self-gate on the resolved MemoryScope and are
   // fail-open (a store failure never surfaces, principle 3). Serves BOTH the
   // /v1/messages and /v1/responses surfaces (they share this pipeline).
-  memory?: { observe: ObserveDeps },
+  memory?: { observe: ObserveDeps; inject?: InjectWiring },
   // Per-key usage budgets (docs/06). Absent = no budgets. Serves all three
   // pipeline faces at once (they share this pipeline).
   budget?: PipelineBudgetDeps,
@@ -339,15 +353,58 @@ export function createMessagesPipeline(
         throw new PipelineError("invalid_request", "messages must be a non-empty array", traceId);
       }
       const internal = toInternalRequest(ir, identity, traceId, protocol);
+      const originalMessagesForMemory = [...(internal.messages as IRMessage[])];
 
-      // Memory observe (inbound): persist the request's raw messages BEFORE
-      // routing (docs/08 Phase 1). observe is write-only — it never mutates the
-      // messages nor changes routing, self-gates to a no-op on off/null-thread,
-      // and never throws (fail-open inside core). The scope rides ir.metadata,
-      // already stamped by the route from the request headers.
-      const memoryScope = memoryScopeFromMeta(ir.metadata);
+      // Memory scope rides ir.metadata, already stamped by the route from the
+      // request headers. Inject runs before inbound observe so this turn cannot
+      // be loaded as recent_raw and duplicated in the same upstream request.
+      const memoryScope = memoryScopeFromMeta(ir.metadata, identity.accountId);
+
+      // Memory inject (docs/08 Phase 2): on x-memory-mode=inject, FULL-REPLACE
+      // internal.messages with the assembled docs/08 prefix BEFORE routing. The
+      // Anthropic inbound transformer HOISTS the top-level `system` into a leading
+      // IR system message (ir.messages[0]), so the system prompt is read from there
+      // for BOTH the /v1/messages and /v1/responses surfaces (D8-bis) — never lost.
+      // The BRIDGE owns the D7 plain-text gate (tool/multipart turns keep their
+      // messages but still enqueue write-back); fully fail-open (never 5xx, never
+      // reroute).
+      // Inject metadata for the DecisionRecord (docs/08 Step 10) — held here and
+      // stamped AFTER route() returns (the routing core never learns about memory).
+      let memoryMeta: MemoryDecision | null = null;
+      if (memory?.inject !== undefined && memoryScope.mode === "inject") {
+        const wiring = memory.inject;
+        const leadingSystem = (internal.messages as IRMessage[])[0];
+        const systemPrompt =
+          leadingSystem?.role === "system" && typeof leadingSystem.content === "string"
+            ? leadingSystem.content
+            : "";
+        const injected = await injectIntoIR(
+          internal.messages as IRMessage[],
+          systemPrompt,
+          {
+            accountId: memoryScope.accountId,
+            ...(memoryScope.projectId !== null ? { projectId: memoryScope.projectId } : {}),
+            ...(memoryScope.resourceId !== null ? { resourceId: memoryScope.resourceId } : {}),
+            ...(memoryScope.threadId !== null
+              ? { threadId: ownerScopedThreadId(memoryScope.accountId, memoryScope.threadId) }
+              : {}),
+          },
+          {
+            assemble: (input) => assembleInjectedContext(input, wiring.deps),
+            enqueueObserver: (scope) => enqueueObserverWriteback(scope, wiring.deps),
+            tokenBudget: wiring.tokenBudget,
+            now: wiring.deps.now,
+            log: wiring.deps.log,
+          },
+        );
+        internal.messages = injected.messages as InternalRequest["messages"];
+        memoryMeta = injected.metadata;
+      }
+
+      // Memory observe (inbound): persist the original raw messages after
+      // inject. It is write-only and fail-open; delaying it prevents self-pollution.
       if (memory !== undefined) {
-        await observeInbound(memory.observe, memoryScope, internal.messages as IRMessage[]);
+        await observeInbound(memory.observe, memoryScope, originalMessagesForMemory);
       }
 
       const caps = identity.caps as
@@ -393,6 +450,11 @@ export function createMessagesPipeline(
       // The subscription the pool selected (null for a configured/non-OAuth
       // provider), for per-account usage attribution (providers page Tier 2).
       const servingAccount = result.servingAccount ?? null;
+
+      // Stamp the inject metadata onto the DecisionRecord (docs/08 Step 10) so
+      // telemetry / the debug UI can see what memory did. Counts + job id only —
+      // never memory content (principle 7).
+      if (memoryMeta !== null) result.decision.memory = memoryMeta;
 
       // Post-served usage-budget settle (docs/06), fail-OPEN. Charges the SETTLED
       // total_usd (never recomputed) + served tokens + 1 request. Shared helper for

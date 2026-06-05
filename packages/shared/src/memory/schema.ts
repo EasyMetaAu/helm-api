@@ -85,8 +85,9 @@ export const ReflectionSchema = z.object({
 });
 
 // The scope a reflection merges over: project / resource / thread (one or more
-// levels). Mirrors the optional nullable scope columns on memory_reflections.
+// levels), always bound to the authenticated account owner.
 export const ReflectionScopeSchema = z.object({
+  accountId: z.string().min(1),
   projectId: z.string().min(1).optional(),
   resourceId: z.string().min(1).optional(),
   threadId: z.string().min(1).optional(),

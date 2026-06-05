@@ -222,7 +222,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // without touching HTTP (principle 1). Without this, /v1/responses was wired
     // with observe deps but never received a scope → memory was dead on this
     // surface. Absent/illegal headers → off + null (default-safe).
-    const memoryScope = resolveMemoryScope((name) => c.req.header(name));
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId);
     ir.metadata = {
       ...(ir.metadata ?? {}),
       trace_id: traceId,

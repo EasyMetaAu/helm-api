@@ -202,12 +202,14 @@ describe("gateway.chat.memory — observe persists request/response", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(threads).toEqual([{ id: "thread-1", projectId: "project-1", resourceId: "resource-1" }]);
+    expect(threads).toEqual([
+      { id: "acct:thread-1", ownerId: "acct", projectId: "project-1", resourceId: "resource-1" },
+    ]);
     // inbound user message persisted.
     expect(messages.some((m) => m.role === "user" && m.content === "hi")).toBe(true);
   });
 
-  it("folds an inbound system message to role=user on persist", async () => {
+  it("does not persist inbound system messages as long-term user memory", async () => {
     const { store, messages } = makeFakeStore();
     const { deps } = captureRouteDeps({
       body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
@@ -227,7 +229,8 @@ describe("gateway.chat.memory — observe persists request/response", () => {
       }),
     });
 
-    expect(messages.some((m) => m.role === "user" && m.content === "be terse")).toBe(true);
+    expect(messages.some((m) => m.content === "be terse")).toBe(false);
+    expect(messages.some((m) => m.role === "user" && m.content === "hi")).toBe(true);
   });
 
   it("does ZERO store calls when threadId is null even with mode observe", async () => {

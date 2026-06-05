@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS memory_observations (
 
 CREATE TABLE IF NOT EXISTS memory_reflections (
   id TEXT PRIMARY KEY,
+  owner_id TEXT,
   project_id TEXT,
   resource_id TEXT,
   thread_id TEXT,
@@ -59,3 +60,9 @@ CREATE TABLE IF NOT EXISTS memory_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_memory_messages_thread ON memory_messages (thread_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_memory_observations_thread ON memory_observations (thread_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_memory_reflections_owner_scope
+  ON memory_reflections (owner_id, project_id, resource_id, thread_id, version DESC);
+
+-- Phase-2 queue scan index (migration v9): claimPendingJobs scans by status.
+-- The partial unique open-job boundary is runner-applied in v11 after cleanup.
+CREATE INDEX IF NOT EXISTS idx_memory_jobs_type_scope_status ON memory_jobs (type, scope_id, status);

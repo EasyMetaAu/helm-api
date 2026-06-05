@@ -1,5 +1,6 @@
 import type { AssembledMessage, Observation, RawMessage, Reflection } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
+import { alreadyObservedMessageIds } from "./observer.js";
 
 // Memory middleware — INJECT phase (docs/08 Phase 2 "observational-memory MVP"). When
 // x-memory-mode=inject, this runs SYNCHRONOUSLY on the main request path, BEFORE
@@ -21,7 +22,7 @@ import type { MemoryStore } from "../store/ports.js";
 // routing/lane state (memory is a MIDDLEWARE — it only provides context text).
 
 export interface InjectInput {
-  scope: { projectId?: string; resourceId?: string; threadId?: string };
+  scope: { accountId: string; projectId?: string; resourceId?: string; threadId?: string };
   currentUserMessage: RawMessage;
   systemPrompt: string;
   // Upper bound for INJECTED memory tokens. The mandatory system prompt + current
@@ -51,6 +52,7 @@ export interface InjectResult {
     memory_tokens_injected: number;
     observer_job_id: string | null;
     memory_writeback_status: "queued" | "skipped" | "failed";
+    degraded: boolean;
   };
 }
 
@@ -72,19 +74,24 @@ function currentMessage(current: RawMessage): AssembledMessage {
 // When there is no writeback TARGET (no threadId — observations/messages are
 // thread-anchored, so nothing can be written back), we do NOT enqueue and report
 // "skipped" — distinct from a "failed" enqueue.
-async function enqueueWriteback(
-  input: InjectInput,
-  deps: InjectDeps,
+//
+// EXPORTED separately from assembleInjectedContext: the D7 plain-text gate skips
+// the whole assembly for tool/multipart turns, but the write-back must still fire
+// for them (or tool-heavy threads would never compress) — the bridge calls this
+// directly on that path.
+export async function enqueueObserverWriteback(
+  scope: InjectInput["scope"],
+  deps: Pick<InjectDeps, "enqueueObserverJob" | "log">,
 ): Promise<{ observerJobId: string | null; status: "queued" | "skipped" | "failed" }> {
-  if (input.scope.threadId === undefined) {
+  if (scope.threadId === undefined) {
     return { observerJobId: null, status: "skipped" };
   }
   try {
-    const observerJobId = await deps.enqueueObserverJob(input.scope);
+    const observerJobId = await deps.enqueueObserverJob(scope);
     return { observerJobId, status: "queued" };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    deps.log("memory.inject.writeback_enqueue_failed", { scope: input.scope, error: message });
+    deps.log("memory.inject.writeback_enqueue_failed", { scope, error: message });
     return { observerJobId: null, status: "failed" };
   }
 }
@@ -104,20 +111,32 @@ async function loadMemory(
 }> {
   const projectReflection =
     scope.projectId !== undefined
-      ? await store.getReflection({ projectId: scope.projectId })
+      ? await store.getReflection({ accountId: scope.accountId, projectId: scope.projectId })
       : null;
   const resourceReflection =
     scope.resourceId !== undefined
-      ? await store.getReflection({ resourceId: scope.resourceId })
+      ? await store.getReflection({ accountId: scope.accountId, resourceId: scope.resourceId })
       : null;
-  // Observations are THREAD-ANCHORED by schema: both store adapters return []
-  // unless threadId is set and ignore project/resource. Gate on threadId only and
-  // pass threadId alone — aligned with the store contract (no cross-thread
-  // retrieval; there is no schema support for it).
+  // The inject layers stay THREAD-ANCHORED: pass threadId alone so this read
+  // never crosses threads (the cross-thread project/resource aggregation is the
+  // REFLECTOR's read shape, not inject's).
   const observations =
-    scope.threadId !== undefined ? await store.listObservations({ threadId: scope.threadId }) : [];
-  const recentMessages =
-    scope.threadId !== undefined ? await store.listMessages(scope.threadId) : [];
+    scope.threadId !== undefined
+      ? await store.listObservations({ accountId: scope.accountId, threadId: scope.threadId })
+      : [];
+  const allMessages =
+    scope.threadId !== undefined
+      ? await store.listMessages({ accountId: scope.accountId, threadId: scope.threadId })
+      : [];
+  // recent_raw = only the raw turns NOT yet covered by an observation's source
+  // range. Covered turns are already represented by their observation — injecting
+  // both would duplicate content and grow the prompt without bound (the raw rows
+  // stay in storage for audit; they just stop riding the prefix once compressed).
+  const covered = alreadyObservedMessageIds(
+    allMessages,
+    observations.map((o) => o.sourceMessageRange),
+  );
+  const recentMessages = allMessages.filter((m) => !covered.has(m.id));
   return { projectReflection, resourceReflection, observations, recentMessages };
 }
 
@@ -148,7 +167,7 @@ export async function assembleInjectedContext(
     deps.log("memory.inject.load_failed", { scope: input.scope, error: message });
     // Still attempt write-back enqueue so the originals get compressed later;
     // if that also fails it stays best-effort (never throws).
-    const writeback = await enqueueWriteback(input, deps);
+    const writeback = await enqueueObserverWriteback(input.scope, deps);
     return {
       messages: [systemMessage(input.systemPrompt), currentMessage(input.currentUserMessage)],
       metadata: {
@@ -162,6 +181,7 @@ export async function assembleInjectedContext(
         // EXCEPT when there was no writeback target at all (no threadId): nothing
         // could be enqueued, so it stays an honest "skipped", not "failed".
         memory_writeback_status: writeback.status === "skipped" ? "skipped" : "failed",
+        degraded: true,
       },
     };
   }
@@ -298,7 +318,7 @@ export async function assembleInjectedContext(
 
   // Enqueue write-back (Observer stays background — we only enqueue, never await
   // compression). A queue failure is best-effort and never fails the request.
-  const writeback = await enqueueWriteback(input, deps);
+  const writeback = await enqueueObserverWriteback(input.scope, deps);
 
   const memoryHydrated = injectedLayers.length > 0;
   deps.log("memory.inject.assembled", {
@@ -318,6 +338,7 @@ export async function assembleInjectedContext(
       memory_tokens_injected: memoryTokensInjected,
       observer_job_id: writeback.observerJobId,
       memory_writeback_status: writeback.status,
+      degraded: false,
     },
   };
 }

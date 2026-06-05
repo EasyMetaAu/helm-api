@@ -74,6 +74,8 @@ function makeFakeStore(data: FakeStoreData) {
     }),
     upsertReflection: vi.fn(async () => "unused"),
     updateJobStatus: vi.fn(async () => {}),
+    enqueueJob: vi.fn(async () => "job"),
+    claimPendingJobs: vi.fn(async () => []),
   };
   return store;
 }
@@ -98,7 +100,7 @@ function makeDeps(store: MemoryStore, over: Partial<InjectDeps> = {}): InjectDep
 
 function baseInput(over: Partial<InjectInput> = {}): InjectInput {
   return {
-    scope: { projectId: "proj-1", resourceId: "res-1", threadId: "thread-1" },
+    scope: { accountId: "acct-a", projectId: "proj-1", resourceId: "res-1", threadId: "thread-1" },
     currentUserMessage: CURRENT,
     systemPrompt: "you are helpful",
     tokenBudget: 1000,
@@ -252,7 +254,7 @@ describe("assembleInjectedContext", () => {
     });
     const deps = makeDeps(store);
     const out = await assembleInjectedContext(
-      baseInput({ scope: { projectId: "proj-1", resourceId: "res-1" } }),
+      baseInput({ scope: { accountId: "acct-a", projectId: "proj-1", resourceId: "res-1" } }),
       deps,
     );
 
@@ -270,14 +272,49 @@ describe("assembleInjectedContext", () => {
 
     // Aligned with the thread-only store contract: project/resource are NOT spread
     // into the observation lookup (the adapters ignore them anyway).
-    expect(store.listObservations).toHaveBeenCalledWith({ threadId: "thread-1" });
+    expect(store.listObservations).toHaveBeenCalledWith({
+      accountId: "acct-a",
+      threadId: "thread-1",
+    });
+  });
+
+  it("does NOT re-inject raw messages already covered by an observation source range", async () => {
+    // The observer compresses old turns into observations but keeps the raw rows
+    // for audit. Inject must not feed both forms into the prompt — covered raw is
+    // represented by its observation; only UN-observed raw rides as recent_raw.
+    const obs = {
+      ...makeObservation("o1", "compressed summary", "2026-05-30T00:00:00.000Z"),
+      sourceMessageRange: ["r1", "r2"] as [string, string],
+    };
+    const store = makeFakeStore({
+      observations: [obs],
+      recentMessages: [
+        makeRaw("r1", "user", "old turn one"),
+        makeRaw("r2", "assistant", "old reply"),
+        makeRaw("r3", "user", "newer turn"),
+        makeRaw("r4", "assistant", "newest reply"),
+      ],
+    });
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store));
+
+    const recentRaw = out.messages.filter((m) => m.source === "recent_raw").map((m) => m.content);
+    expect(recentRaw).toEqual(["newer turn", "newest reply"]);
+    // The compressed turns still reach the prompt — as the observation, never verbatim.
+    expect(
+      out.messages.some(
+        (m) => m.source === "thread_observation" && m.content === "compressed summary",
+      ),
+    ).toBe(true);
   });
 
   it("reports 'skipped' writeback and does NOT enqueue when there is no thread target", async () => {
     const store = makeFakeStore({});
     const enqueueObserverJob = vi.fn(async () => "observer-job-1");
     const deps = makeDeps(store, { enqueueObserverJob });
-    const out = await assembleInjectedContext(baseInput({ scope: { projectId: "proj-1" } }), deps);
+    const out = await assembleInjectedContext(
+      baseInput({ scope: { accountId: "acct-a", projectId: "proj-1" } }),
+      deps,
+    );
 
     expect(enqueueObserverJob).not.toHaveBeenCalled();
     expect(out.metadata.memory_writeback_status).toBe("skipped");

@@ -37,6 +37,8 @@ function makeFakeStore(observations: Observation[], initial: Reflection | null =
     updateJobStatus: vi.fn(async (jobId: string, status: MemoryJobStatus, error?: string) => {
       jobUpdates.push(error === undefined ? { jobId, status } : { jobId, status, error });
     }),
+    enqueueJob: vi.fn(async () => "job"),
+    claimPendingJobs: vi.fn(async () => []),
   };
   return { store, upserts, jobUpdates, getCurrent: () => current };
 }
@@ -52,7 +54,7 @@ function makeObservations(texts: string[]): Observation[] {
 }
 
 const NOW = new Date("2026-05-30T12:00:00.000Z");
-const JOB: ReflectorJob = { jobId: "job-1", scope: { threadId: "thread-1" } };
+const JOB: ReflectorJob = { jobId: "job-1", scope: { accountId: "acct-a", threadId: "thread-1" } };
 
 // Deterministic merge stub: joins the observation texts (+ optional previous
 // reflection prefix). Stands in for an LLM — same input → same output.
@@ -249,5 +251,76 @@ describe("runReflectorJob", () => {
     // merge never called — no wasted LLM tokens.
     expect(deps.merge).not.toHaveBeenCalled();
     expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
+  });
+});
+
+// The reflection TARGET scope must be one inject actually READS BACK. inject loads
+// reflections as getReflection({accountId, projectId}) / ({accountId, resourceId})
+// — exact matches where absent levels are NULL — so a reflection written with the
+// observer job's full scope (threadId included) would be permanently invisible.
+// The job scope stays the OBSERVATION SOURCE (thread-anchored); the reflection is
+// written at the highest readable level: project > resource > thread (legacy).
+describe("runReflectorJob — reflection target scope (readable by inject)", () => {
+  it("writes the reflection at the PROJECT level when the job scope carries a thread anchor", async () => {
+    const { store, upserts } = makeFakeStore(makeObservations(["obs A"]));
+    const deps = makeDeps(store);
+    const job: ReflectorJob = {
+      jobId: "job-p",
+      scope: { accountId: "acct-a", projectId: "proj-1", threadId: "thread-1" },
+    };
+
+    const out = await runReflectorJob(job, deps);
+
+    expect(out.changed).toBe(true);
+    // BOTH reads happen at the project level: observations aggregate across ALL
+    // the project's threads (never just the promoting one), and the reflection
+    // slot is the exact scope the next inject's getReflection reads back.
+    expect(store.listObservations).toHaveBeenCalledWith({
+      accountId: "acct-a",
+      projectId: "proj-1",
+    });
+    expect(store.getReflection).toHaveBeenCalledWith({ accountId: "acct-a", projectId: "proj-1" });
+    expect(upserts[0]).toMatchObject({ accountId: "acct-a", projectId: "proj-1" });
+    expect(upserts[0]?.threadId).toBeUndefined();
+    expect(upserts[0]?.resourceId).toBeUndefined();
+  });
+
+  it("writes the reflection at the RESOURCE level when the scope has a resource but no project", async () => {
+    const { store, upserts } = makeFakeStore(makeObservations(["obs A"]));
+    const deps = makeDeps(store);
+    const job: ReflectorJob = {
+      jobId: "job-r",
+      scope: { accountId: "acct-a", resourceId: "res-1", threadId: "thread-1" },
+    };
+
+    const out = await runReflectorJob(job, deps);
+
+    expect(out.changed).toBe(true);
+    expect(store.getReflection).toHaveBeenCalledWith({ accountId: "acct-a", resourceId: "res-1" });
+    expect(upserts[0]).toMatchObject({ accountId: "acct-a", resourceId: "res-1" });
+    expect(upserts[0]?.threadId).toBeUndefined();
+    expect(upserts[0]?.projectId).toBeUndefined();
+  });
+
+  it("lands at the PROJECT level (highest) when both project and resource are present", async () => {
+    const { store, upserts } = makeFakeStore(makeObservations(["obs A"]));
+    const deps = makeDeps(store);
+    const job: ReflectorJob = {
+      jobId: "job-pr",
+      scope: {
+        accountId: "acct-a",
+        projectId: "proj-1",
+        resourceId: "res-1",
+        threadId: "thread-1",
+      },
+    };
+
+    const out = await runReflectorJob(job, deps);
+
+    expect(out.changed).toBe(true);
+    expect(store.getReflection).toHaveBeenCalledWith({ accountId: "acct-a", projectId: "proj-1" });
+    expect(upserts[0]).toMatchObject({ accountId: "acct-a", projectId: "proj-1" });
+    expect(upserts[0]?.resourceId).toBeUndefined();
+    expect(upserts[0]?.threadId).toBeUndefined();
   });
 });

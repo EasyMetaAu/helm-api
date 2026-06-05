@@ -1,15 +1,19 @@
 import { randomUUID } from "node:crypto";
-import type {
-  MemoryMessageInput,
-  MemoryObservationInput,
-  MemoryThreadInput,
-  Observation,
-  RawMessage,
-  Reflection,
-  ReflectionScope,
-  ReflectionUpsertInput,
+import {
+  decodeScopeId,
+  encodeScopeId,
+  type MemoryJobEnqueueInput,
+  type MemoryJobRow,
+  type MemoryMessageInput,
+  type MemoryObservationInput,
+  type MemoryThreadInput,
+  type Observation,
+  type RawMessage,
+  type Reflection,
+  type ReflectionScope,
+  type ReflectionUpsertInput,
 } from "@helm/shared";
-import { and, asc, desc, eq, isNull, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, type SQL, sql } from "drizzle-orm";
 import type { MemoryJobStatus, MemoryStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import {
@@ -25,6 +29,7 @@ import {
 // vice versa). Enforces docs/08 scope isolation (no cross-project profile).
 function reflectionScopeWhere(scope: ReflectionScope): SQL {
   const clauses: SQL[] = [
+    eq(memoryReflections.ownerId, scope.accountId),
     scope.projectId !== undefined
       ? eq(memoryReflections.projectId, scope.projectId)
       : isNull(memoryReflections.projectId),
@@ -36,6 +41,34 @@ function reflectionScopeWhere(scope: ReflectionScope): SQL {
       : isNull(memoryReflections.threadId),
   ];
   return and(...clauses) as SQL;
+}
+
+// How long a claimed (`running`) job stays exclusively leased — pg mirror of the
+// sqlite adapter's constant (same contract, see its comment).
+const RUNNING_LEASE_MS = 5 * 60_000;
+
+// Observation read scope — pg mirror of the sqlite adapter's observationScopeWhere
+// (same contract, different dialect). Thread scope = the thread's own rows;
+// project/resource scope = aggregated across all the owner's matching threads
+// (the REFLECTOR's target read — a project reflection must see every thread of
+// the project, never just the promoting one). No level at all → null (→ []).
+function observationScopeWhere(scope: ReflectionScope): SQL | null {
+  if (
+    scope.threadId === undefined &&
+    scope.projectId === undefined &&
+    scope.resourceId === undefined
+  ) {
+    return null;
+  }
+  const threadFilters: SQL[] = [sql`mt.owner_id = ${scope.accountId}`];
+  if (scope.projectId !== undefined) threadFilters.push(sql`mt.project_id = ${scope.projectId}`);
+  if (scope.resourceId !== undefined) {
+    threadFilters.push(sql`mt.resource_id = ${scope.resourceId}`);
+  }
+  const ownerScope = sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryObservations.threadId} AND ${sql.join(threadFilters, sql` AND `)})`;
+  return scope.threadId !== undefined
+    ? (and(eq(memoryObservations.threadId, scope.threadId), ownerScope) as SQL)
+    : ownerScope;
 }
 
 // Postgres adapter for the MemoryStore port — the supabase implementation
@@ -66,10 +99,56 @@ export class PgMemoryStore implements MemoryStore {
       .onConflictDoUpdate({
         target: memoryThreads.id,
         set: {
-          projectId: input.projectId ?? null,
-          resourceId: input.resourceId ?? null,
-          ownerId: input.ownerId ?? null,
-          updatedAt: ts,
+          ownerId: sql`case
+            when ${memoryThreads.ownerId} is null and excluded.owner_id is not null
+              then excluded.owner_id
+            else ${memoryThreads.ownerId}
+          end`,
+          projectId: sql`case
+            when ${memoryThreads.projectId} is null
+              and excluded.project_id is not null
+              and (
+                ${memoryThreads.ownerId} is null
+                or excluded.owner_id is null
+                or ${memoryThreads.ownerId} = excluded.owner_id
+              )
+              then excluded.project_id
+            else ${memoryThreads.projectId}
+          end`,
+          resourceId: sql`case
+            when ${memoryThreads.resourceId} is null
+              and excluded.resource_id is not null
+              and (
+                ${memoryThreads.ownerId} is null
+                or excluded.owner_id is null
+                or ${memoryThreads.ownerId} = excluded.owner_id
+              )
+              then excluded.resource_id
+            else ${memoryThreads.resourceId}
+          end`,
+          updatedAt: sql`case
+            when (
+              ${memoryThreads.ownerId} is null and excluded.owner_id is not null
+            ) or (
+              ${memoryThreads.projectId} is null
+              and excluded.project_id is not null
+              and (
+                ${memoryThreads.ownerId} is null
+                or excluded.owner_id is null
+                or ${memoryThreads.ownerId} = excluded.owner_id
+              )
+            ) or (
+              ${memoryThreads.resourceId} is null
+              and excluded.resource_id is not null
+              and (
+                ${memoryThreads.ownerId} is null
+                or excluded.owner_id is null
+                or ${memoryThreads.ownerId} = excluded.owner_id
+              )
+            )
+              then ${ts}
+            else ${memoryThreads.updatedAt}
+          end`,
         },
       });
   }
@@ -87,11 +166,16 @@ export class PgMemoryStore implements MemoryStore {
     return id;
   }
 
-  async listMessages(threadId: string): Promise<RawMessage[]> {
+  async listMessages(scope: { threadId: string; accountId: string }): Promise<RawMessage[]> {
     const rows = await this.db
       .select()
       .from(memoryMessages)
-      .where(eq(memoryMessages.threadId, threadId))
+      .where(
+        and(
+          eq(memoryMessages.threadId, scope.threadId),
+          sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryMessages.threadId} AND mt.owner_id = ${scope.accountId})`,
+        ),
+      )
       .orderBy(asc(memoryMessages.createdAt), asc(memoryMessages.id));
     return rows.map((row) => ({
       id: row.id,
@@ -119,11 +203,12 @@ export class PgMemoryStore implements MemoryStore {
   }
 
   async listObservations(scope: ReflectionScope): Promise<Observation[]> {
-    if (scope.threadId === undefined) return [];
+    const where = observationScopeWhere(scope);
+    if (where === null) return [];
     const rows = await this.db
       .select()
       .from(memoryObservations)
-      .where(eq(memoryObservations.threadId, scope.threadId))
+      .where(where)
       .orderBy(asc(memoryObservations.observedAt), asc(memoryObservations.id));
     return rows.map((row) => ({
       id: row.id,
@@ -161,6 +246,7 @@ export class PgMemoryStore implements MemoryStore {
     const id = this.genId();
     await this.db.insert(memoryReflections).values({
       id,
+      ownerId: input.accountId,
       projectId: input.projectId ?? null,
       resourceId: input.resourceId ?? null,
       threadId: input.threadId ?? null,
@@ -181,5 +267,75 @@ export class PgMemoryStore implements MemoryStore {
         updatedAt: this.now().getTime(),
       })
       .where(eq(memoryJobs.id, jobId));
+  }
+
+  // Enqueue a background job. DEDUPE (D6): the partial unique index on OPEN
+  // (pending/running) jobs owns the concurrency boundary; this method tries the
+  // insert first, then reads the existing open row when another request won.
+  async enqueueJob(input: MemoryJobEnqueueInput): Promise<string> {
+    const scopeId = encodeScopeId(input.scope);
+    const id = this.genId();
+    const ts = this.now().getTime();
+    const inserted = (await this.db.execute(sql`
+      INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
+      VALUES (${id}, ${input.type}, ${scopeId}, 'pending', NULL, ${ts}, ${ts})
+      ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
+      RETURNING id
+    `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
+    const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
+    if (insertedRows[0] !== undefined) return insertedRows[0].id;
+
+    const existing = (await this.db.execute(sql`
+      SELECT id FROM memory_jobs
+       WHERE type = ${input.type}
+         AND scope_id = ${scopeId}
+         AND status IN ('pending', 'running')
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1
+    `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
+    const existingRows = Array.isArray(existing) ? existing : (existing.rows ?? []);
+    if (existingRows[0] !== undefined) return existingRows[0].id;
+
+    throw new Error("memory job enqueue conflict without existing open row");
+  }
+
+  // Atomically claim up to `limit` open jobs (oldest-first). Postgres uses
+  // FOR UPDATE SKIP LOCKED in the id subquery so concurrent workers never contend
+  // on or double-process the same row; the outer UPDATE flips the rows to running
+  // and RETURNS them. Claimable = pending, PLUS running rows whose lease
+  // (updated_at) expired — a worker that died between claim and finish must not
+  // block its scope forever (enqueue dedupes against running rows). Re-claiming
+  // refreshes updated_at (lease restarts); the runners are idempotent, so a
+  // re-run of a job that actually finished is harmless. scope_id is decoded back
+  // to a ReflectionScope (D1). Mirrors the sqlite adapter's lease semantics.
+  async claimPendingJobs(limit: number): Promise<MemoryJobRow[]> {
+    if (limit <= 0) return [];
+    const updatedAt = this.now().getTime();
+    const staleBefore = updatedAt - RUNNING_LEASE_MS;
+    const result = (await this.db.execute(sql`
+      UPDATE memory_jobs
+         SET status = 'running', updated_at = ${updatedAt}
+       WHERE id IN (
+         SELECT id FROM memory_jobs
+          WHERE status = 'pending'
+             OR (status = 'running' AND updated_at <= ${staleBefore})
+          ORDER BY created_at ASC, id ASC
+          LIMIT ${limit}
+          FOR UPDATE SKIP LOCKED
+       )
+      RETURNING id, type, scope_id
+    `)) as
+      | { rows?: Array<{ id: string; type: string; scope_id: string }> }
+      | Array<{
+          id: string;
+          type: string;
+          scope_id: string;
+        }>;
+    const rows = Array.isArray(result) ? result : (result.rows ?? []);
+    return rows.map((row) => ({
+      jobId: row.id,
+      type: row.type as MemoryJobRow["type"],
+      scope: decodeScopeId(row.scope_id),
+    }));
   }
 }

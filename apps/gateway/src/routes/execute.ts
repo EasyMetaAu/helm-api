@@ -133,9 +133,7 @@ function isAbort(err: unknown, signal: AbortSignal): boolean {
 // `queueTimeout` flag (not instanceof) so the check survives any package-boundary
 // duplication of the QueueTimeoutError class.
 function isQueueTimeout(err: unknown): boolean {
-  return (
-    err instanceof Error && (err as { queueTimeout?: unknown }).queueTimeout === true
-  );
+  return err instanceof Error && (err as { queueTimeout?: unknown }).queueTimeout === true;
 }
 
 // :free candidates may be throttled (429) by the upstream's free tier. That is

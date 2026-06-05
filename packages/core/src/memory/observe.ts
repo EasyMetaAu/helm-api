@@ -24,19 +24,19 @@ export interface ObserveDeps {
   log: (line: string, meta?: object) => void;
 }
 
-// IR roles that the memory layer persists. IR has a "system" role too; observe
-// records it as a raw message under the user-facing thread. memory_* role enum
-// is user|assistant|tool, so a system message is stored as a user-side raw line.
-function toMemoryRole(role: IRMessage["role"]): MemoryRole {
+// IR roles that the memory layer persists. System/developer instructions are
+// execution policy, not user memory; they must not enter long-term memory or be
+// reflected back as ordinary context.
+function toMemoryRole(role: IRMessage["role"]): MemoryRole | null {
   switch (role) {
     case "assistant":
       return "assistant";
     case "tool":
       return "tool";
-    default:
-      // system + user collapse to "user" — both are inbound context the actor
-      // sent; the memory schema role enum has no "system".
+    case "user":
       return "user";
+    default:
+      return null;
   }
 }
 
@@ -47,6 +47,14 @@ function serializeContent(content: IRMessage["content"]): string {
   if (content === null) return "";
   if (typeof content === "string") return content;
   return JSON.stringify(content);
+}
+
+export function ownerScopedThreadId(accountId: string, threadId: string): string {
+  return `${encodeURIComponent(accountId)}:${encodeURIComponent(threadId)}`;
+}
+
+function storageThreadId(scope: Pick<MemoryScope, "accountId" | "threadId">): string | null {
+  return scope.threadId === null ? null : ownerScopedThreadId(scope.accountId, scope.threadId);
 }
 
 function memoryMeta(scope: MemoryScope): MemoryMeta {
@@ -86,17 +94,23 @@ export async function observeInbound(
     return { persisted: false, memoryMeta: meta };
   }
 
+  const threadId = storageThreadId(scope);
+  if (threadId === null) return { persisted: false, memoryMeta: meta };
+
   try {
     await deps.memoryStore.ensureThread({
-      id: scope.threadId,
+      id: threadId,
+      ownerId: scope.accountId,
       ...(scope.projectId !== null ? { projectId: scope.projectId } : {}),
       ...(scope.resourceId !== null ? { resourceId: scope.resourceId } : {}),
     });
     for (const message of messages) {
+      const role = toMemoryRole(message.role);
+      if (role === null) continue;
       const content = serializeContent(message.content);
       await deps.memoryStore.appendMessage({
-        threadId: scope.threadId,
-        role: toMemoryRole(message.role),
+        threadId,
+        role,
         content,
         tokenEstimate: deps.estimateTokens(content),
       });
@@ -122,15 +136,17 @@ export async function observeOutbound(
   result: { responseMessages: IRMessage[]; toolResults: IRToolResult[] },
 ): Promise<void> {
   if (scope.mode === "off") return;
-  if (scope.threadId === null) return;
-  const threadId = scope.threadId;
+  const threadId = storageThreadId(scope);
+  if (threadId === null) return;
 
   try {
     for (const message of [...result.responseMessages, ...result.toolResults]) {
+      const role = toMemoryRole(message.role);
+      if (role === null) continue;
       const content = serializeContent(message.content);
       await deps.memoryStore.appendMessage({
         threadId,
-        role: toMemoryRole(message.role),
+        role,
         content,
         tokenEstimate: deps.estimateTokens(content),
       });

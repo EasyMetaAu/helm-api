@@ -142,6 +142,7 @@ export const memoryObservations = pgTable("memory_observations", {
 
 export const memoryReflections = pgTable("memory_reflections", {
   id: text("id").primaryKey(),
+  ownerId: text("owner_id"),
   projectId: text("project_id"),
   resourceId: text("resource_id"),
   threadId: text("thread_id"),

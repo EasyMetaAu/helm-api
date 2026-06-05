@@ -30,6 +30,7 @@ import {
   getGitHubCopilotBaseUrl,
   getOAuthProvider,
   hashKey,
+  type InjectDeps,
   type IRResponse,
   isUserMessageRequest,
   type KeyedSerialGate,
@@ -45,11 +46,13 @@ import {
   type OAuthPoolMember,
   type OAuthTokenStore,
   type ObserveDeps,
+  type ObserverDeps,
   type PoliciesConfig,
   type ProviderClient,
   type ProxyConfig,
   parseCodexQuotaHeaders,
   parseLanesConfig,
+  type ReflectorDeps,
   type ProviderRegistryConfig as RegistryProviderConfig,
   type ResponsesSSEEvent,
   type RouteOptions,
@@ -57,9 +60,12 @@ import {
   resolveCostUsd,
   responsesTransformer,
   routeRequest,
+  runObserverJob,
+  runReflectorJob,
   type StoreSet,
   saveRuntimeSettings,
   settleBudget,
+  startMemoryWorker,
   startSignalScheduler,
   toRegistryProviders,
 } from "@helm/core";
@@ -68,7 +74,10 @@ import type {
   ClassifierConfig,
   ErrorClass,
   InternalRequest,
+  Observation,
   ProviderConfig as ProviderConfigShared,
+  RawMessage,
+  Reflection,
   RuntimeSettings,
 } from "@helm/shared";
 import { ErrorClassSchema, isOAuthPreset } from "@helm/shared";
@@ -114,6 +123,36 @@ export interface ServerHandle {
   // Stop background workers (e.g. the Agentic Signals scheduler). Optional and
   // safe to skip — the timers are unref'd so they never block process exit.
   dispose?: () => void;
+}
+
+// D11 — DETERMINISTIC, non-LLM summarize/merge for the MVP memory background jobs.
+// A real LLM path is a follow-up issue; until then these keep reflection text a
+// pure function of its inputs so the Reflector only bumps a version on a genuine
+// content change (cache-friendly, docs/08 "reflections should be stable and slow-changing").
+const MEMORY_SUMMARY_MAX_CHARS = 2000;
+const MEMORY_REFLECTION_MAX_CHARS = 4000;
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+// Compress a slice of raw messages into one observation: concatenate the turns in
+// order (role-tagged), truncated to a cap. Deterministic — same input → same text.
+function summarizeMessages(messages: readonly RawMessage[]): string {
+  const body = messages.map((m) => `${m.role}: ${m.content}`).join("\n");
+  return truncate(body || "(no messages)", MEMORY_SUMMARY_MAX_CHARS);
+}
+
+// Merge a scope's observations (oldest-first) into one reflection text. Existing
+// reflection text is NOT re-prepended (it was already derived from earlier
+// observations) — we re-derive from the current observation set so the output is a
+// stable function of inputs. previousReflection is accepted for signature parity.
+function mergeObservations(
+  observations: readonly Observation[],
+  _previousReflection: Reflection | null,
+): string {
+  const body = observations.map((o) => `- ${o.observationText}`).join("\n");
+  return truncate(body || "(no observations)", MEMORY_REFLECTION_MAX_CHARS);
 }
 
 // Pre-classification TPM token estimator. Extracted to middleware/estimate-tokens
@@ -720,6 +759,53 @@ export async function buildServer(
     log: (line, meta) => logger.log("info", line, meta as Record<string, unknown> | undefined),
   };
 
+  // Memory deps shared by inject (request path) + the background worker (D10): ONE
+  // estimateTokens closure (chars/4) so the hydrate / observer / reflector cost
+  // buckets are comparable, and a redaction-safe logger (ids/counts only).
+  const estimateMemoryTokens = (text: string): number => Math.ceil(text.length / 4);
+  const memoryLog = (line: string, meta?: object): void =>
+    logger.log("info", line, meta as Record<string, unknown> | undefined);
+
+  // Inject-phase deps (docs/08 Phase 2). enqueueObserverJob bridges inject's
+  // best-effort write-back to the queue (type:"observer"); hydrate tokens land in
+  // their OWN cost bucket (principle 7). D9: there is no config.memory subtree yet,
+  // so the injected token budget rides an env tunable (fail-safe default + guard).
+  const injectDeps: InjectDeps = {
+    memoryStore: store.memory,
+    estimateTokens: estimateMemoryTokens,
+    enqueueObserverJob: (scope) => store.memory.enqueueJob({ type: "observer", scope }),
+    costSink: () => {},
+    now: () => new Date(),
+    log: memoryLog,
+  };
+  const injectTokenBudgetRaw = Number(process.env.HELM_MEMORY_INJECT_TOKEN_BUDGET ?? 4000);
+  const injectTokenBudget =
+    Number.isFinite(injectTokenBudgetRaw) && injectTokenBudgetRaw > 0 ? injectTokenBudgetRaw : 4000;
+  const inject = { deps: injectDeps, tokenBudget: injectTokenBudget };
+
+  // Observer/Reflector deps (docs/08 Phase 2). D11: MVP uses DETERMINISTIC, non-LLM
+  // summarize/merge (concatenate + truncate) so a reflection version only bumps on a
+  // real content change (cache-friendly); a real LLM path is a follow-up issue.
+  const observerDeps: ObserverDeps = {
+    memoryStore: store.memory,
+    summarize: async ({ messages }) => ({
+      observationText: summarizeMessages(messages),
+    }),
+    costSink: () => {},
+    now: () => new Date(),
+    log: memoryLog,
+  };
+  const reflectorDeps: ReflectorDeps = {
+    memoryStore: store.memory,
+    merge: async ({ observations, previousReflection }) => {
+      const reflectionText = mergeObservations(observations, previousReflection);
+      return { reflectionText, tokenEstimate: estimateMemoryTokens(reflectionText) };
+    },
+    costSink: () => {},
+    now: () => new Date(),
+    log: memoryLog,
+  };
+
   // Bootstrap root key on first start (idempotent; prints once). AWAITED before
   // buildServer returns: a store-read failure here MUST reject buildServer so
   // main()'s try/catch exits non-zero (fail-CLOSED, principle 2). Fire-and-forget
@@ -1180,7 +1266,7 @@ export async function buildServer(
     evalHeaderOverride: process.env.HELM_E2E === "1",
     // Memory observe-phase wiring (docs/08): the process-wide ObserveDeps. The
     // route self-gates on the resolved x-memory-mode (off = pure no-op).
-    memory: { observe },
+    memory: { observe, inject },
   });
 
   // Anthropic Messages route (/v1/messages). It reuses the SAME routing core via
@@ -1302,7 +1388,7 @@ export async function buildServer(
   const messagesPipeline = createMessagesPipeline(
     route,
     "anthropic_messages",
-    { observe },
+    { observe, inject },
     pipelineBudget,
     recordOAuthUsage,
   );
@@ -1395,7 +1481,7 @@ export async function buildServer(
   const responsesPipeline = createMessagesPipeline(
     route,
     "openai_responses",
-    { observe },
+    { observe, inject },
     pipelineBudget,
     recordOAuthUsage,
   );
@@ -1462,7 +1548,7 @@ export async function buildServer(
   const geminiPipeline = createMessagesPipeline(
     route,
     "gemini",
-    { observe },
+    { observe, inject },
     pipelineBudget,
     recordOAuthUsage,
   );
@@ -1535,12 +1621,34 @@ export async function buildServer(
     });
   }
 
+  // Start the memory background worker — the OFF-the-request-path drainer for the
+  // memory_jobs queue (docs/08 Phase 2). It claims a batch each tick and dispatches
+  // observer/reflector jobs; each job is fail-open and the tick swallows a single
+  // bad job so the timer keeps firing (principle 3). DELIBERATELY started here,
+  // outside every route, so no request touches it (zero added latency). Disabled
+  // when HELM_MEMORY_WORKER_DISABLED=1 (tests default to OFF); interval is an
+  // env tunable (fail-safe default + guard, mirroring the signals scheduler).
+  let memoryWorker: { stop: () => void } | null = null;
+  if (process.env.HELM_MEMORY_WORKER_DISABLED !== "1") {
+    const intervalRaw = Number(process.env.HELM_MEMORY_WORKER_INTERVAL_MS ?? 60_000);
+    memoryWorker = startMemoryWorker({
+      memoryStore: store.memory,
+      batchSize: 10,
+      intervalMs: Number.isFinite(intervalRaw) && intervalRaw > 0 ? intervalRaw : 60_000,
+      now: () => Date.now(),
+      log: memoryLog,
+      runObserver: (job) => runObserverJob(job, observerDeps),
+      runReflector: (job) => runReflectorJob(job, reflectorDeps),
+    });
+  }
+
   return {
     app,
     port: config.server.port,
     host: config.server.host,
     dispose: () => {
       signalScheduler?.stop();
+      memoryWorker?.stop();
       // Close the underlying DB connection (sqlite file handle / pg pool). Best
       // effort: a close error must not mask a clean shutdown.
       void store.close().catch(() => {});
