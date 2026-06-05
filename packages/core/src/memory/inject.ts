@@ -478,7 +478,16 @@ export async function assembleInjectedContext(
       // and crash the process — fail-open demands log-and-continue).
       setImmediate(() => {
         try {
-          void bump(bumpInput).catch(logFailure);
+          void bump(bumpInput).then(() => {
+            // Success line so the reinforcement loop is OBSERVABLE end-to-end in
+            // production logs (the e2e/docker smoke greps for it); counts only,
+            // never memory content (principle 7).
+            deps.log("memory.inject.reinforced", {
+              scope: input.scope,
+              observation_count: bumpInput.observationIds.length,
+              reflection_count: bumpInput.reflectionIds.length,
+            });
+          }, logFailure);
         } catch (err) {
           logFailure(err);
         }

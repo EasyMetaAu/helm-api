@@ -208,9 +208,11 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
     if (archivedCount > 0 && deps.memoryStore.listActiveReflectionScopes !== undefined) {
       try {
         const scopes = await deps.memoryStore.listActiveReflectionScopes(accountId);
+        let enqueued = 0;
         for (const scope of scopes) {
           try {
             await deps.memoryStore.enqueueJob({ type: "reflector", scope });
+            enqueued += 1;
           } catch (enqErr) {
             deps.log("memory.decay.rebuild_enqueue_failed", {
               account_id: accountId,
@@ -218,6 +220,14 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
               error: enqErr instanceof Error ? enqErr.message : String(enqErr),
             });
           }
+        }
+        if (enqueued > 0) {
+          // Success line — makes the decay → reflection-rebuild hop observable in
+          // production logs (the e2e/docker smoke greps for it).
+          deps.log("memory.decay.rebuild_enqueued", {
+            account_id: accountId,
+            scope_count: enqueued,
+          });
         }
       } catch (listErr) {
         deps.log("memory.decay.rebuild_list_failed", {
