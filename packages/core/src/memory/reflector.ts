@@ -126,7 +126,18 @@ export async function runReflectorJob(
     // only the promoting thread's observations would make the project reflection
     // last-writer-wins per thread.
     const target = reflectionTargetScope(job.scope);
-    const observations = await deps.memoryStore.listObservations(target);
+    // docs/12 (P5/P6 correctness) — the Reflector merges + extracts facts from
+    // ACTIVE observations ONLY. `listObservations` returns every status (the
+    // archived/pruned rows still serve as raw-coverage markers for inject/observer),
+    // so a decayed (archived) or retention-tombstoned (pruned) observation would
+    // otherwise leak back into a long-lived reflection or fact — "forgotten" memory
+    // resurrecting through the back door. Filter here, unconditionally: with
+    // forgetting OFF every row is `active` so this is a pure no-op (byte-identical
+    // to today); with it ON, hidden rows stay hidden everywhere, not just in inject.
+    const allObservations = await deps.memoryStore.listObservations(target);
+    const observations = allObservations.filter(
+      (o) => (o.status ?? "active") === "active" && (o.expiredAt ?? null) === null,
+    );
     const previousReflection = await deps.memoryStore.getReflection(target);
 
     if (observations.length === 0) {

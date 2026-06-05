@@ -217,16 +217,18 @@ export async function assembleInjectedContext(
   const { projectReflection, resourceReflection, observations, recentMessages } = loaded;
   const forgettingOn = deps.forgetting?.enabled === true;
 
-  // docs/12 (P4) — when forgetting is ON, archived/expired rows are INVISIBLE to
-  // injection: a decayed/superseded observation must never ride the prefix (decay
-  // hides; it does not delete, so the rows stay for audit but stop being injected).
-  // The filter is applied at ASSEMBLE time (not at the store read) so it is a pure,
-  // testable predicate over whatever the read returned and stays gated behind the
-  // flag — with forgetting OFF the read result passes through untouched (legacy
-  // rows carry status='active'/expiredAt=null defaults anyway, so this is inert).
-  const visibleObservations = forgettingOn
-    ? observations.filter((o) => o.status === "active" && (o.expiredAt ?? null) === null)
-    : observations;
+  // docs/12 (P4/P7) — archived (decay), pruned (retention tombstone), and expired
+  // rows are INVISIBLE to injection: a forgotten observation must never ride the
+  // prefix (decay/retention hide; they do not orphan coverage — the rows stay so
+  // their sourceMessageRange still suppresses raw duplication, but stop being
+  // injected). The filter is a pure, testable predicate at ASSEMBLE time and is
+  // applied UNCONDITIONALLY: with forgetting OFF every legacy row is
+  // status='active'/expiredAt=null so it is a no-op (byte-identical to today), but
+  // a row pruned/archived during an earlier enabled window must stay hidden even if
+  // the flag is later turned off (otherwise a '[pruned]' tombstone would inject).
+  const visibleObservations = observations.filter(
+    (o) => (o.status ?? "active") === "active" && (o.expiredAt ?? null) === null,
+  );
 
   // Build the trimmable injected layers in docs/08 order. Observations are sorted
   // oldest-first so the budget trimmer can drop the oldest ones first while

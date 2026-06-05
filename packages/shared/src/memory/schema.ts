@@ -50,13 +50,23 @@ export const MemoryObservationInputSchema = z.object({
   observationText: z.string().min(1),
   observedAt: z.date(),
   priority: z.number().int().optional(),
+  // docs/12 (P5 salience). Optional [0,1] importance the Observer resolves (from a
+  // summarizer rating, or derived from `priority`); the store applies 0.5 when
+  // absent. This is the forgetting score's decay-brake multiplier.
+  importance: z.number().min(0).max(1).optional(),
   tags: z.array(z.string()).optional(),
 });
 
 // docs/12 "Forgetting score" — the mid-tier (observation) status enum. `active`
 // rows are injected + counted toward the budget; `archived` rows are
-// soft-invalidated (never deleted), invisible to reads, but kept for audit.
-export const MemoryStatusSchema = z.enum(["active", "archived"]);
+// soft-invalidated by the decay sweep (never deleted), invisible to content
+// reads, but kept for audit. `pruned` is the retention tombstone (docs/12 P7):
+// an aged-out archived row whose bulky text has been freed, but whose row +
+// `sourceMessageRange` are KEPT so it still marks its raw messages as covered —
+// a hard DELETE here would orphan that coverage and resurrect the raw turns into
+// inject/observer. Content reads treat `archived` and `pruned` identically
+// (invisible); only coverage reads (raw dedup) still see them.
+export const MemoryStatusSchema = z.enum(["active", "archived", "pruned"]);
 
 // A persisted observation row read back from the store (docs/08 Phase 2). The
 // background Reflector reads a scope's active observations to merge them into a

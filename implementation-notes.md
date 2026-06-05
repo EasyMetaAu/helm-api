@@ -23,6 +23,20 @@
 
 ---
 
+## 2026-06-05 · 遗忘策略 Codex 评审修复（5 项；docs/12）
+
+Codex review 发现 5 个问题（3×P1、2×P2），全部修复（TDD，+5 回归测试，全套 2430 测试绿）：
+
+1. **（P1）retention 硬删 archived observation 会让 raw 复活**：observation 的 `sourceMessageRange` 同时兼着「raw 覆盖标记」（inject 去重 + observer 幂等都靠它）。删掉归档行后其 raw 又变「未覆盖」→ 重新注入/重新压缩。**修复：observation retention 改为 TOMBSTONE**（`status='pruned'`、`observation_text='[pruned]'`、tags 清空），保留行 + range；facts 仍真删（无覆盖职责，唯一的 DELETE）。新增 'pruned' 状态值（TEXT 列，无需迁移）。
+2. **（P1）archived observation 仍进 reflection 合并**：`listObservations` 返回全状态（覆盖读需要），但 reflector 直接拿来 merge → 被遗忘的内容从长期 reflection 后门复活。**修复：reflector merge + 事实抽取只读 active**（`(status ?? 'active')==='active' && !expiredAt`，宽松处理 undefined 兼容旧 fixture）；inject 内容层同样无条件过滤（覆盖读仍用全状态）。**内容读 vs 覆盖读**分离写入 docs/12。
+3. **（P1）pg fact reconcile 非原子**：insert 后单独 supersede，崩在中间则重试命中 `ON CONFLICT DO NOTHING`+`continue`，旧 fact 永不过期。**修复：整批包进一个 `db.transaction`**（对齐 sqlite 已有的 `$sqlite.transaction`）。
+4. **（P2）P6 抽取未接线**：`server.ts` 的 `reflectorDeps` 没传 `forgetting`/`extractFacts` → consolidate 配置/`memory_facts` 在生产是死代码。**修复：接入 `forgetting` 配置 + 确定性 extractor**（与 summarize/merge MVP stub 同风格，一 observation 一 fact，subject 取首 tag/首词），enabled 时真正跑通；默认 off 仍 inert。
+5. **（P2）importance 从不写入**：observation 写入只带 `priority`，store 吃默认 0.5 → 评分显著性维度恒为常数。**修复：observer 解析 importance**（显式 summarizer importance 优先，否则 `clamp(priority/10)`，0–10 Generative-Agents 量纲），加进 `MemoryObservationInputSchema` + 两适配器 appendObservation。
+
+**坑**：tombstone 用 `'[pruned]'` 占位文本满足 `observationText` 的 `min(1)`，内容读已过滤故永不注入。inject/reflector 的 active 过滤对 `undefined` status 宽松（`?? 'active'`），否则旧 fixture（无 status 字段）会被误删——这正是首轮 6 个 gateway inject 测试红的原因。
+
+---
+
 ## 2026-06-05 · 记忆遗忘策略 + 短/中/长期分层（docs/12；P0–P7 全实现）
 
 **动机（用户拍板）**：现有记忆只「记 + 压缩」不会「忘」，记忆只增 = 越塞越满的抽屉。用户明确要求：必须有**遗忘策略** + **短/中/长期分层**。方案见新增 `docs/12`（含字节 M3-Agent / 腾讯 Agent Memory / MemOS 对照）。本轮用 Workflow 8-agent 并行 TDD 实现 P0–P7，全部 gated 在 `memory.forgetting.enabled`（**默认 false = 行为字节级不变**）。

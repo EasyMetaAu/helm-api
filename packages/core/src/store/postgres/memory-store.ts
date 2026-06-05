@@ -199,6 +199,9 @@ export class PgMemoryStore implements MemoryStore {
       observationText: input.observationText,
       observedAt: input.observedAt.getTime(),
       referencedAt: null,
+      // docs/12 (P5) — persist the Observer-resolved salience; absent ⇒ column
+      // default 0.5 (pg mirror of the sqlite adapter).
+      ...(input.importance !== undefined ? { importance: input.importance } : {}),
       priority: input.priority ?? null,
       tags: input.tags ?? null,
     });
@@ -522,16 +525,26 @@ export class PgMemoryStore implements MemoryStore {
   }): Promise<void> {
     if (input.facts.length === 0) return;
     const nowMs = input.now.getTime();
-    for (const f of input.facts) {
-      // The top-level accountId is the authoritative tenant guard; persist it as
-      // owner_id so a mismatched input can never write under another tenant.
-      const ownerId = input.accountId;
-      const projectId = f.projectId ?? null;
-      const resourceId = f.resourceId ?? null;
-      const threadId = f.threadId ?? null;
-      const id = this.genId();
-      const validFromMs = f.validFrom.getTime();
-      const inserted = (await this.db.execute(sql`
+    // docs/12 P6 (Codex review fix #3) — insert + supersede must be ATOMIC. The pg
+    // adapter previously ran them as two un-wrapped statements: a crash AFTER the
+    // insert but BEFORE the supersede left the new fact persisted while the old one
+    // stayed active, and the retry hit `ON CONFLICT DO NOTHING` + `continue`, so the
+    // stale fact was NEVER superseded. Wrapping the whole batch in ONE transaction
+    // makes each insert+supersede pair all-or-nothing: a mid-batch failure rolls the
+    // partial work back, and the content_hash unique index makes the retry's
+    // re-insert idempotent so supersede runs again. Mirrors the sqlite adapter, which
+    // already wraps the batch in `$sqlite.transaction`.
+    await this.db.transaction(async (tx) => {
+      for (const f of input.facts) {
+        // The top-level accountId is the authoritative tenant guard; persist it as
+        // owner_id so a mismatched input can never write under another tenant.
+        const ownerId = input.accountId;
+        const projectId = f.projectId ?? null;
+        const resourceId = f.resourceId ?? null;
+        const threadId = f.threadId ?? null;
+        const id = this.genId();
+        const validFromMs = f.validFrom.getTime();
+        const inserted = (await tx.execute(sql`
         INSERT INTO memory_facts
           (id, owner_id, project_id, resource_id, thread_id, subject_key, fact_text,
            content_hash, importance, reference_count, referenced_at, valid_from,
@@ -548,13 +561,13 @@ export class PgMemoryStore implements MemoryStore {
         ON CONFLICT (owner_id, content_hash) DO NOTHING
         RETURNING id
       `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-      const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
-      if (insertedRows[0] === undefined) continue; // deduped → no supersede
+        const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
+        if (insertedRows[0] === undefined) continue; // deduped → no supersede
 
-      // IS NOT DISTINCT FROM is the NULL-safe equality (matches NULL-to-NULL and
-      // value-to-value), so the supersede only touches rows whose scope equals the
-      // NEW fact's scope (in-account narrowing — docs/12).
-      await this.db.execute(sql`
+        // IS NOT DISTINCT FROM is the NULL-safe equality (matches NULL-to-NULL and
+        // value-to-value), so the supersede only touches rows whose scope equals the
+        // NEW fact's scope (in-account narrowing — docs/12).
+        await tx.execute(sql`
         UPDATE memory_facts
            SET expired_at = ${nowMs}, invalid_at = ${validFromMs}, updated_at = ${nowMs}
          WHERE owner_id = ${ownerId}
@@ -567,7 +580,8 @@ export class PgMemoryStore implements MemoryStore {
            AND resource_id IS NOT DISTINCT FROM ${resourceId}
            AND thread_id IS NOT DISTINCT FROM ${threadId}
       `);
-    }
+      }
+    });
   }
 
   // docs/12 P6 — fact READ half (pg mirror). The account's still-alive facts:
@@ -629,8 +643,12 @@ export class PgMemoryStore implements MemoryStore {
     archivedObservationsBeforeMs: number;
     expiredFactsBeforeMs: number;
   }): Promise<{ observationsDeleted: number; factsDeleted: number }> {
+    // docs/12 (P7, Codex review fix) — TOMBSTONE, not delete: free the text but
+    // keep the row + sourceMessageRange so raw coverage survives (pg mirror of the
+    // sqlite adapter; see that comment for why a hard DELETE resurrects raw turns).
     const obs = (await this.db.execute(sql`
-      DELETE FROM memory_observations
+      UPDATE memory_observations
+         SET status = 'pruned', observation_text = '[pruned]', tags = NULL
        WHERE status = 'archived'
          AND archived_at IS NOT NULL
          AND archived_at < ${input.archivedObservationsBeforeMs}

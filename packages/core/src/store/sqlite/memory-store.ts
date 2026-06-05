@@ -218,6 +218,9 @@ export class SqliteMemoryStore implements MemoryStore {
         observationText: input.observationText,
         observedAt: input.observedAt,
         referencedAt: null,
+        // docs/12 (P5) — persist the Observer-resolved salience; absent ⇒ 0.5 so
+        // the column default and an explicit default agree (legacy/no-salience path).
+        ...(input.importance !== undefined ? { importance: input.importance } : {}),
         priority: input.priority ?? null,
         tags: input.tags !== undefined ? JSON.stringify(input.tags) : null,
       })
@@ -713,14 +716,23 @@ export class SqliteMemoryStore implements MemoryStore {
     archivedObservationsBeforeMs: number;
     expiredFactsBeforeMs: number;
   }): Promise<{ observationsDeleted: number; factsDeleted: number }> {
+    // docs/12 (P7, Codex review fix) — observations are TOMBSTONED, not deleted.
+    // An aged-out archived observation still owns a `sourceMessageRange` that
+    // inject/observer rely on to know its raw turns are already covered; a hard
+    // DELETE would orphan that coverage and resurrect the raw into the prefix /
+    // re-compression. So we free the bulky text + tags but KEEP the row with
+    // status='pruned' (invisible to content reads, still seen by coverage reads).
     const obs = this.db.$sqlite
       .prepare(
-        `DELETE FROM memory_observations
+        `UPDATE memory_observations
+            SET status = 'pruned', observation_text = '[pruned]', tags = NULL
           WHERE status = 'archived'
             AND archived_at IS NOT NULL
             AND archived_at < ?`,
       )
       .run(input.archivedObservationsBeforeMs);
+    // Facts carry NO coverage role → a true hard DELETE is correct (the only
+    // DELETE in the forgetting system). expired_at IS NOT NULL keeps live facts.
     const facts = this.db.$sqlite
       .prepare(
         `DELETE FROM memory_facts

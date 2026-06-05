@@ -159,6 +159,29 @@ function mergeObservations(
   return truncate(body || "(no observations)", MEMORY_REFLECTION_MAX_CHARS);
 }
 
+// docs/12 P6 (Codex review fix #4) — the DETERMINISTIC fact extractor wired into
+// the Reflector, mirroring the summarize/merge MVP stubs above: a real LLM
+// extractor that atomizes claims is the follow-up (docs/08 "real LLM … deferred"),
+// but the pipeline must be genuinely LIVE when forgetting.enabled, not dead config.
+// It surfaces one candidate fact per active observation — subject from its first
+// tag (else a slug of the leading words, the same key the Reflector normalizes for
+// same-subject supersede), assertion = the observation text. Pure + deterministic
+// (same observations → same facts), so content-hash dedup + supersede are stable.
+// Inert by default: the Reflector only calls this when the flag is on AND the
+// active-observation token sum crosses `consolidate.trigger_tokens`.
+function extractFactsFromObservations(
+  observations: readonly Observation[],
+): Array<{ subjectText: string; factText: string }> {
+  const facts: Array<{ subjectText: string; factText: string }> = [];
+  for (const o of observations) {
+    const text = o.observationText.trim();
+    if (text.length === 0 || text === "[pruned]") continue;
+    const subjectText = o.tags?.[0]?.trim() || text.split(/\s+/).slice(0, 6).join(" ") || "general";
+    facts.push({ subjectText, factText: truncate(text, MEMORY_REFLECTION_MAX_CHARS) });
+  }
+  return facts;
+}
+
 // Pre-classification TPM token estimator. Extracted to middleware/estimate-tokens
 // so the chat middleware AND the self-authenticating /v1/messages + /v1/responses
 // routes share ONE heuristic. Re-exported here for back-compat (server.test.ts).
@@ -822,6 +845,14 @@ export async function buildServer(
     costSink: () => {},
     now: () => new Date(),
     log: memoryLog,
+    // docs/12 P6 (Codex review fix #4) — wire the consolidate config + the
+    // deterministic extractor so fact extraction is LIVE when forgetting.enabled
+    // (default off ⇒ inert: the Reflector's gates short-circuit before any fact
+    // work, so this is byte-identical to today). `estimateTokens` matches the
+    // Observer/Reflector heuristic used for the consolidate trigger.
+    forgetting: forgettingCfg,
+    extractFacts: async ({ observations }) => extractFactsFromObservations(observations),
+    estimateTokens: estimateMemoryTokens,
   };
   // Decay-sweep deps (docs/12 P5). The whole forgetting config drives the pure score +
   // archive threshold + the bounded-loop limits; gated behind forgetting.enabled so the

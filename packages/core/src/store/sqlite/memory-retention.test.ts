@@ -35,6 +35,16 @@ function obsIds(db: ReturnType<typeof createSqliteDb>): string[] {
     }>
   ).map((r) => r.id);
 }
+function obsRow(
+  db: ReturnType<typeof createSqliteDb>,
+  id: string,
+): { status: string; observation_text: string; source_message_range: string } {
+  return db.$sqlite
+    .prepare(
+      "SELECT status, observation_text, source_message_range FROM memory_observations WHERE id = ?",
+    )
+    .get(id) as { status: string; observation_text: string; source_message_range: string };
+}
 function factIds(db: ReturnType<typeof createSqliteDb>): string[] {
   return (
     db.$sqlite.prepare("SELECT id FROM memory_facts ORDER BY id").all() as Array<{ id: string }>
@@ -106,9 +116,18 @@ describe("SqliteMemoryStore.pruneExpiredMemory (P7 retention hard-delete)", () =
       expiredFactsBeforeMs: cutoff,
     });
 
-    expect(res.observationsDeleted).toBe(1);
-    // Only the 40d-archived row is gone; the recently-archived AND the active row stay.
-    expect(obsIds(db).sort()).toEqual([active, recent].sort());
+    expect(res.observationsDeleted).toBe(1); // one row TOMBSTONED (count, not a delete)
+    // docs/12 (Codex fix #1) — the aged archived row is NOT deleted: it is TOMBSTONED
+    // (status='pruned', bulky text freed) so its sourceMessageRange keeps covering its
+    // raw turns (a hard DELETE would resurrect them into inject/observer). All three
+    // rows remain; recent-archived + active are untouched.
+    expect(obsIds(db).sort()).toEqual([aged, active, recent].sort());
+    const tombstoned = obsRow(db, aged);
+    expect(tombstoned.status).toBe("pruned");
+    expect(tombstoned.observation_text).toBe("[pruned]");
+    expect(tombstoned.source_message_range).toBe(JSON.stringify(["m1", "m2"])); // coverage kept
+    expect(obsRow(db, recent).status).toBe("archived");
+    expect(obsRow(db, active).status).toBe("active");
   });
 
   it("deletes ONLY expired facts older than the cutoff; unexpired + recently-expired survive", async () => {
@@ -151,6 +170,38 @@ describe("SqliteMemoryStore.pruneExpiredMemory (P7 retention hard-delete)", () =
     expect(factIds(db)).toEqual(["f-edge"]);
   });
 
+  // docs/12 (Codex review fix #1) — the WHOLE POINT of tombstoning: after retention
+  // prunes an archived observation, its row + sourceMessageRange must still be
+  // returned by listObservations so inject/observer keep treating its raw turns as
+  // covered (a hard DELETE here would orphan that coverage and resurrect the raw).
+  it("keeps the tombstoned row visible to coverage reads (listObservations) so raw stays covered", async () => {
+    const { store } = newStore(NOW);
+    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
+    const aged = await store.appendObservation({
+      threadId: "t-a",
+      sourceMessageRange: ["m1", "m2"],
+      observationText: "aged",
+      observedAt: NOW,
+    });
+    await store.archiveObservations({
+      accountId: "acct-a",
+      ids: [aged],
+      now: new Date(NOW.getTime() - 40 * DAY_MS),
+    });
+
+    await store.pruneExpiredMemory({
+      archivedObservationsBeforeMs: NOW.getTime() - 30 * DAY_MS,
+      expiredFactsBeforeMs: NOW.getTime() - 90 * DAY_MS,
+    });
+
+    // The coverage read (all statuses) still returns the pruned row + its range.
+    const all = await store.listObservations({ accountId: "acct-a", threadId: "t-a" });
+    const tombstone = all.find((o) => o.id === aged);
+    expect(tombstone).toBeDefined();
+    expect(tombstone?.status).toBe("pruned");
+    expect(tombstone?.sourceMessageRange).toEqual(["m1", "m2"]); // coverage intact
+  });
+
   it("is account-agnostic: ages out rows across every account in one sweep", async () => {
     const { store, db } = newStore(NOW);
     await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
@@ -176,7 +227,10 @@ describe("SqliteMemoryStore.pruneExpiredMemory (P7 retention hard-delete)", () =
       expiredFactsBeforeMs: NOW.getTime() - 90 * DAY_MS,
     });
 
-    expect(res.observationsDeleted).toBe(2); // both accounts' aged archives gone
-    expect(obsCount(db)).toBe(0);
+    expect(res.observationsDeleted).toBe(2); // both accounts' aged archives TOMBSTONED
+    // Tombstoned, not deleted — both rows remain (status='pruned'), coverage preserved.
+    expect(obsCount(db)).toBe(2);
+    expect(obsRow(db, a).status).toBe("pruned");
+    expect(obsRow(db, b).status).toBe("pruned");
   });
 });

@@ -147,8 +147,8 @@ Columns the score reads (all on the tiered rows):
 |--------|------|---------|
 | `referenced_at` | epoch ms \| null | last time injected/used — **already exists** on `memory_observations`. Null = never reinforced; the score coalesces to the per-tier `fallback_ts` above |
 | `reference_count` | int | times injected/used (the frequency term) |
-| `importance` | real [0,1] | salience; Observer derives it from `priority`, default 0.5 |
-| `status` | text | `active` \| `archived` (soft-invalidate) |
+| `importance` | real [0,1] | salience; the Observer resolves it (explicit summarizer rating, else `priority/10`) and persists it, default 0.5 |
+| `status` | text | `active` \| `archived` (decay soft-invalidate) \| `pruned` (retention tombstone: text freed, coverage kept) |
 | `expired_at` | epoch ms \| null | supersede stamp; set when a newer fact invalidates this one |
 
 `half_life`, `importance_floor` / `ceil`, and `access_weight` are **config, not
@@ -197,14 +197,33 @@ back to the existing oldest-first path.
    `owner_id = :accountId AND expired_at IS NULL`. LLM-found contradictions are
    gated behind `consolidate.enable_llm_supersede` (**off by default**; on
    uncertainty, supersede nothing).
-4. **Hard-delete (rare, retention only).**
-   `DELETE … WHERE status='archived' AND archived_at < now − retention.archived_days`.
-   Mirrors the existing `payload_retention_days` cleanup. Facts and reflections are
-   **never** hard-deleted by score — only by explicit retention age, and only after
-   being archived/expired first.
+4. **Retention (rare, age-only).** Two different operations, because observations
+   carry a second identity that facts do not — their `sourceMessageRange` is the
+   **coverage marker** inject/observer use to know a raw turn is already
+   compressed:
+   - **Observations are TOMBSTONED, not deleted** —
+     `UPDATE memory_observations SET status='pruned', observation_text='[pruned]',
+     tags=NULL WHERE status='archived' AND archived_at < now −
+     retention.archived_days`. The bulky text is freed, but the row +
+     `sourceMessageRange` are KEPT so coverage survives. A hard `DELETE` here would
+     orphan that coverage and resurrect the raw turns into the prefix /
+     re-compression (Codex review fix).
+   - **Facts are hard-deleted** —
+     `DELETE FROM memory_facts WHERE expired_at IS NOT NULL AND expired_at < now −
+     retention.facts_expired_days`. Facts have no coverage role, so this is the one
+     true `DELETE`. Mirrors the existing `payload_retention_days` cleanup.
+   Reflections are **never** deleted.
 
-**Decay never destroys; it hides.** Hard delete is the audit-trail exception, not
-the mechanism.
+**Decay never destroys; it hides.** Even retention only *tombstones* observations
+(content freed, coverage kept); the single hard delete is aged-out superseded
+facts.
+
+Content vs coverage reads (the rule the above depends on): `archived` and `pruned`
+rows are invisible to **content** reads (the Reflector's merge + fact extraction,
+inject's observation layer — all filter `status='active'`), but still returned by
+**coverage** reads (inject's recent-raw dedup + the Observer's idempotency check)
+so a forgotten observation keeps suppressing its raw turns. A decayed observation
+therefore never re-enters a reflection or a fact (Codex review fix).
 
 ## Access reinforcement (the loop closer)
 
@@ -449,8 +468,8 @@ behaviour-identical to today. Every phase is independently shippable and gated.
 | **P3** | Reinforcement hook `bumpReferences({accountId, ids})` (gated) | bumps only when enabled; a throwing `bumpReferences` does not change returned `messages` (fail-open); only rows of the request's `accountId` are bumped. With flag off, `inject.ts` byte-identical. |
 | **P4** | Score-driven inject trim (gated) | under `score`, a high-`reference_count` old observation outlives a never-referenced newer one; comparator throw → oldest-first fallback. Legacy `oldest` path unchanged. |
 | **P5** | Extend `MemoryJobTypeSchema` with `decay` + scheduler dispatch + `runDecayJob` sweep (gated, off hot path) | **`MemoryJobTypeSchema.parse('decay')` succeeds and the scheduler routes it to `runDecayJob` (not the reflector fall-through at `scheduler.ts`)**; `decay` job dedupe/enqueue works; archives only sub-threshold active rows of one account; never `recent_raw`; idempotent re-run; bounded loop (iterations / wallclock / consecutive-errors). |
-| **P6** | Fact extraction + supersede (gated, deterministic only) | identical fact within an account → idempotent skip (`UNIQUE(owner_id, content_hash)`); newer same-`(owner_id, subject_key)` fact → old `expired_at` stamped; reads filter `owner_id = :accountId AND expired_at IS NULL`. Reflector versioning tests unchanged. |
-| **P7** | Retention hard-delete (rare) | deletes only archived + aged rows, never `active`. The only `DELETE` in the system. |
+| **P6** | Fact extraction + supersede (gated, deterministic only). Reflector reads **active observations only** (archived/pruned never feed a fact); a deterministic extractor is wired in `server.ts` so the pipeline is live when enabled (pg insert+supersede in one transaction) | identical fact within an account → idempotent skip (`UNIQUE(owner_id, content_hash)`); newer same-`(owner_id, subject_key)` fact → old `expired_at` stamped; reads filter `owner_id = :accountId AND expired_at IS NULL`; an **archived/pruned observation is excluded from the merge + extraction**. Reflector versioning tests unchanged. |
+| **P7** | Retention (rare): observations **tombstoned** (`status='pruned'`, text freed, coverage kept); facts **hard-deleted** | tombstone keeps the row + `sourceMessageRange` visible to coverage reads (raw stays covered after prune); facts are the only `DELETE`; never touches `active` or recently-aged rows. |
 | **P8** | Hybrid fact retrieval (gated, own flag) — sqlite-vec/pgvector + FTS5 + forgetting-score, fused with RRF(k=60) | RRF fusion is order-stable and scale-free on a fixture; a superseded/archived fact never surfaces; empty/failed recall → request proceeds with the v1 prefix (fail-open); retrieved facts get the reinforcement bump. |
 
 ## Open questions (track in implementation-notes.md)

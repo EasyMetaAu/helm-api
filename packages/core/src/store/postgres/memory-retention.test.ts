@@ -46,6 +46,20 @@ async function obsIds(db: Awaited<ReturnType<typeof createPgliteDb>>): Promise<s
   return rows.map((r) => r.id);
 }
 
+async function obsStatus(
+  db: Awaited<ReturnType<typeof createPgliteDb>>,
+  id: string,
+): Promise<{ status: string; observation_text: string }> {
+  const out = (await db.execute(
+    sql`SELECT status, observation_text FROM memory_observations WHERE id = ${id}`,
+  )) as unknown;
+  const rows = (Array.isArray(out) ? out : ((out as { rows?: unknown[] }).rows ?? [])) as Array<{
+    status: string;
+    observation_text: string;
+  }>;
+  return rows[0] as { status: string; observation_text: string };
+}
+
 // Insert a fact already stamped expired_at (the supersede outcome P7 collects),
 // controlling the timestamp directly.
 async function insertExpiredFact(
@@ -108,8 +122,15 @@ describe("PgMemoryStore.pruneExpiredMemory (P7 retention hard-delete)", () => {
       expiredFactsBeforeMs: cutoff,
     });
 
-    expect(res.observationsDeleted).toBe(1);
-    expect((await obsIds(db)).sort()).toEqual([active, recent].sort());
+    expect(res.observationsDeleted).toBe(1); // one row TOMBSTONED (count, not a delete)
+    // docs/12 (Codex fix #1) — TOMBSTONE not delete: the aged row stays (status='pruned',
+    // text freed) so its coverage survives; recent + active untouched. All three remain.
+    expect((await obsIds(db)).sort()).toEqual([aged, active, recent].sort());
+    const tombstoned = await obsStatus(db, aged);
+    expect(tombstoned.status).toBe("pruned");
+    expect(tombstoned.observation_text).toBe("[pruned]");
+    expect((await obsStatus(db, recent)).status).toBe("archived");
+    expect((await obsStatus(db, active)).status).toBe("active");
   });
 
   it("deletes ONLY expired facts older than the cutoff; unexpired + recently-expired survive", async () => {
@@ -176,7 +197,10 @@ describe("PgMemoryStore.pruneExpiredMemory (P7 retention hard-delete)", () => {
       expiredFactsBeforeMs: NOW.getTime() - 90 * DAY_MS,
     });
 
-    expect(res.observationsDeleted).toBe(2);
-    expect(await countRows(db, "memory_observations")).toBe(0);
+    expect(res.observationsDeleted).toBe(2); // both accounts' aged archives TOMBSTONED
+    // Tombstoned, not deleted — both rows remain (status='pruned'), coverage preserved.
+    expect(await countRows(db, "memory_observations")).toBe(2);
+    expect((await obsStatus(db, a)).status).toBe("pruned");
+    expect((await obsStatus(db, b)).status).toBe("pruned");
   });
 });

@@ -164,6 +164,49 @@ describe("runObserverJob", () => {
     expect(failed?.error).toContain("llm down");
   });
 
+  // docs/12 (P5 salience, Codex review fix #5) — the Observer must resolve the
+  // observation's `importance` so the forgetting score's decay-brake has a real
+  // input instead of every row defaulting to a flat 0.5.
+  it("derives importance from the summarizer priority (priority/10, clamped)", async () => {
+    const messages = makeMessages(6);
+    const { store, observations } = makeFakeStore(messages);
+    // summarize stub returns priority:3 (see makeDeps) → importance 0.3.
+    const deps = makeDeps(store);
+
+    await runObserverJob(JOB, deps);
+
+    expect(observations[0]?.importance).toBeCloseTo(0.3, 6);
+  });
+
+  it("prefers an explicit summarizer importance over the priority derivation", async () => {
+    const messages = makeMessages(6);
+    const { store, observations } = makeFakeStore(messages);
+    const deps = makeDeps(store, {
+      summarize: vi.fn(async () => ({
+        observationText: "x",
+        priority: 3, // would derive 0.3…
+        importance: 0.9, // …but an explicit importance wins, and out-of-range is clamped
+      })),
+    });
+
+    await runObserverJob(JOB, deps);
+
+    expect(observations[0]?.importance).toBe(0.9);
+  });
+
+  it("leaves importance unset when the summarizer gives neither importance nor priority", async () => {
+    const messages = makeMessages(6);
+    const { store, observations } = makeFakeStore(messages);
+    const deps = makeDeps(store, {
+      summarize: vi.fn(async () => ({ observationText: "x" })),
+    });
+
+    await runObserverJob(JOB, deps);
+
+    // Undefined → the store applies its 0.5 column default (no override here).
+    expect(observations[0]?.importance).toBeUndefined();
+  });
+
   it("writes no observation when there is nothing old enough to compress", async () => {
     // Only the recent-keep window of messages exist → nothing older to compress.
     const messages = makeMessages(2);

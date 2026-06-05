@@ -106,6 +106,35 @@ describe("runReflectorJob", () => {
     expect(up.threadId).toBe("thread-1");
   });
 
+  // docs/12 (Codex review fix #2) — a decayed (archived) or retention-tombstoned
+  // (pruned) observation is a FORGOTTEN row: it must NOT feed the long-lived
+  // reflection merge, even though the store still returns it (its range serves as a
+  // raw-coverage marker for inject/observer). Otherwise forgotten memory resurrects
+  // through the reflection back door.
+  it("excludes archived/pruned observations from the merge (forgotten rows stay forgotten)", async () => {
+    const obs = makeObservations(["active fact", "archived fact", "pruned fact"]);
+    const archived = obs[1];
+    const pruned = obs[2];
+    if (!archived || !pruned) throw new Error("fixture");
+    archived.status = "archived";
+    archived.archivedAt = new Date("2026-05-20T00:00:00.000Z");
+    pruned.status = "pruned";
+    const { store, upserts } = makeFakeStore(obs);
+    const merge = vi.fn(async ({ observations }: { observations: Observation[] }) => {
+      const text = observations.map((o) => o.observationText).join(" | ");
+      return { reflectionText: text, tokenEstimate: text.length };
+    });
+    const deps = makeDeps(store, { merge });
+
+    const out = await runReflectorJob(JOB, deps);
+
+    expect(out.changed).toBe(true);
+    // merge saw ONLY the active observation — archived + pruned were filtered out.
+    const merged = (merge.mock.calls[0]?.[0]?.observations ?? []) as Observation[];
+    expect(merged.map((o) => o.observationText)).toEqual(["active fact"]);
+    expect(upserts[0]?.reflectionText).toBe("active fact");
+  });
+
   it("is stable/slowly-changing: identical observations do not bump the version or write a new row", async () => {
     const obs = makeObservations(["a", "b"]);
     // Existing reflection whose text already equals what merge would produce.
