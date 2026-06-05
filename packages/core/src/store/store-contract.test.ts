@@ -750,7 +750,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(msgs[0]?.createdAt).toBeInstanceOf(Date);
     });
 
-    it("ensureThread upgrades owner/project/resource scope when the same id is re-seen", async () => {
+    it("ensureThread fills missing owner/project/resource scope when the same id is re-seen", async () => {
       ctx = await make();
       await ctx.stores.memory.ensureThread({ id: "t-upsert" });
       await ctx.stores.memory.ensureThread({
@@ -783,10 +783,84 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       ).toHaveLength(1);
     });
 
+    it("ensureThread preserves existing scope when later calls omit owner/project/resource", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({
+        id: "t-no-clear",
+        ownerId: "acct-a",
+        projectId: "p1",
+        resourceId: "r1",
+      });
+      await ctx.stores.memory.ensureThread({ id: "t-no-clear" });
+      await ctx.stores.memory.appendMessage({
+        threadId: "t-no-clear",
+        role: "user",
+        content: "still scoped",
+        tokenEstimate: 2,
+      });
+      await ctx.stores.memory.appendObservation({
+        threadId: "t-no-clear",
+        sourceMessageRange: ["m1", "m1"],
+        observationText: "still scoped observation",
+        observedAt: new Date(1000),
+      });
+
+      expect(
+        await ctx.stores.memory.listMessages({ threadId: "t-no-clear", accountId: "acct-a" }),
+      ).toHaveLength(1);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", projectId: "p1" }),
+      ).toHaveLength(1);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", resourceId: "r1" }),
+      ).toHaveLength(1);
+    });
+
+    it("ensureThread does not overwrite existing owner/project/resource for a different owner", async () => {
+      ctx = await make();
+      await ctx.stores.memory.ensureThread({
+        id: "t-no-cross-owner",
+        ownerId: "acct-a",
+        projectId: "p1",
+        resourceId: "r1",
+      });
+      await ctx.stores.memory.appendMessage({
+        threadId: "t-no-cross-owner",
+        role: "user",
+        content: "acct-a scoped secret",
+        tokenEstimate: 3,
+      });
+      await ctx.stores.memory.appendObservation({
+        threadId: "t-no-cross-owner",
+        sourceMessageRange: ["m1", "m1"],
+        observationText: "acct-a scoped observation",
+        observedAt: new Date(1000),
+      });
+
+      await ctx.stores.memory.ensureThread({
+        id: "t-no-cross-owner",
+        ownerId: "acct-b",
+        projectId: "p2",
+        resourceId: "r2",
+      });
+
+      expect(
+        await ctx.stores.memory.listMessages({ threadId: "t-no-cross-owner", accountId: "acct-b" }),
+      ).toEqual([]);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-b", projectId: "p2" }),
+      ).toEqual([]);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", projectId: "p1" }),
+      ).toHaveLength(1);
+      expect(
+        await ctx.stores.memory.listObservations({ accountId: "acct-a", resourceId: "r1" }),
+      ).toHaveLength(1);
+    });
+
     it("keeps raw messages and observations isolated by account for the same thread id", async () => {
       ctx = await make();
       await ctx.stores.memory.ensureThread({ id: "shared-thread", ownerId: "acct-a" });
-      await ctx.stores.memory.ensureThread({ id: "shared-thread", ownerId: "acct-b" });
       await ctx.stores.memory.appendMessage({
         threadId: "shared-thread",
         role: "user",
@@ -799,6 +873,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         observationText: "acct-a observation",
         observedAt: new Date(1000),
       });
+      await ctx.stores.memory.ensureThread({ id: "shared-thread", ownerId: "acct-b" });
 
       expect(
         await ctx.stores.memory.listMessages({ threadId: "shared-thread", accountId: "acct-b" }),

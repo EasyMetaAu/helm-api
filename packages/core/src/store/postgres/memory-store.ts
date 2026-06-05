@@ -99,10 +99,56 @@ export class PgMemoryStore implements MemoryStore {
       .onConflictDoUpdate({
         target: memoryThreads.id,
         set: {
-          projectId: input.projectId ?? null,
-          resourceId: input.resourceId ?? null,
-          ownerId: input.ownerId ?? null,
-          updatedAt: ts,
+          ownerId: sql`case
+            when ${memoryThreads.ownerId} is null and excluded.owner_id is not null
+              then excluded.owner_id
+            else ${memoryThreads.ownerId}
+          end`,
+          projectId: sql`case
+            when ${memoryThreads.projectId} is null
+              and excluded.project_id is not null
+              and (
+                ${memoryThreads.ownerId} is null
+                or excluded.owner_id is null
+                or ${memoryThreads.ownerId} = excluded.owner_id
+              )
+              then excluded.project_id
+            else ${memoryThreads.projectId}
+          end`,
+          resourceId: sql`case
+            when ${memoryThreads.resourceId} is null
+              and excluded.resource_id is not null
+              and (
+                ${memoryThreads.ownerId} is null
+                or excluded.owner_id is null
+                or ${memoryThreads.ownerId} = excluded.owner_id
+              )
+              then excluded.resource_id
+            else ${memoryThreads.resourceId}
+          end`,
+          updatedAt: sql`case
+            when (
+              ${memoryThreads.ownerId} is null and excluded.owner_id is not null
+            ) or (
+              ${memoryThreads.projectId} is null
+              and excluded.project_id is not null
+              and (
+                ${memoryThreads.ownerId} is null
+                or excluded.owner_id is null
+                or ${memoryThreads.ownerId} = excluded.owner_id
+              )
+            ) or (
+              ${memoryThreads.resourceId} is null
+              and excluded.resource_id is not null
+              and (
+                ${memoryThreads.ownerId} is null
+                or excluded.owner_id is null
+                or ${memoryThreads.ownerId} = excluded.owner_id
+              )
+            )
+              then ${ts}
+            else ${memoryThreads.updatedAt}
+          end`,
         },
       });
   }
