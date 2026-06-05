@@ -47,8 +47,10 @@ describe("sqlite schema + migrations", () => {
       `);
       const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
       // Seed everything EXCEPT the memory migrations (v14–v16) as applied, so
-      // only they run — the minimal seed has no api_keys table for v10–v13/v17.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17]) rec.run(v, Date.now());
+      // only they run — the minimal seed has no api_keys table for v10–v13/v17,
+      // and no memory_observations/reflections tables for the v18 forgetting
+      // deltas, so both are pre-marked applied to keep this test scoped to v14–v16.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18]) rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       );
@@ -180,7 +182,11 @@ describe("sqlite schema + migrations", () => {
         );`,
       );
       const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
-      for (const v of [1, 2, 3, 4, 5]) rec.run(v, Date.now());
+      // This fixture seeds only api_keys + telemetry (the tables v6 rewrites);
+      // the v18 forgetting deltas target memory_observations/reflections, absent
+      // from this minimal fixture, so v18 is pre-marked applied to keep the test
+      // scoped to v6's cost_usd rebuild.
+      for (const v of [1, 2, 3, 4, 5, 18]) rec.run(v, Date.now());
       seed
         .prepare(
           "INSERT INTO telemetry (id, request_id, api_key_id, decision_json, cost_usd, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -237,7 +243,10 @@ describe("sqlite schema + migrations", () => {
         );`,
       );
       const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9]) rec.run(v, Date.now());
+      // This fixture seeds only api_keys; the v18 forgetting deltas target the
+      // memory tables (absent here), so v18 is pre-marked applied to keep the
+      // test scoped to v10's max_lane DROP COLUMN forward step.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18]) rec.run(v, Date.now());
       seed
         .prepare(
           `INSERT INTO api_keys (key_id, hash, prefix, account_id, role, max_lane, allowed_lanes, created_at)

@@ -23,6 +23,7 @@ import {
   createStore,
   createTokenManager,
   DEFAULT_LANES,
+  type DecayDeps,
   discoverOAuthModels,
   type GeminiGenerateContentResponse,
   geminiTransformer,
@@ -43,6 +44,7 @@ import {
   makeAnthropicError,
   makeGeminiError,
   makeProxyFetch,
+  maybeEnqueueDecayJobs,
   type OAuthPoolMember,
   type OAuthTokenStore,
   type ObserveDeps,
@@ -52,6 +54,7 @@ import {
   type ProxyConfig,
   parseCodexQuotaHeaders,
   parseLanesConfig,
+  pruneRetainedMemory,
   type ReflectorDeps,
   type ProviderRegistryConfig as RegistryProviderConfig,
   type ResponsesSSEEvent,
@@ -60,6 +63,7 @@ import {
   resolveCostUsd,
   responsesTransformer,
   routeRequest,
+  runDecayJob,
   runObserverJob,
   runReflectorJob,
   type StoreSet,
@@ -770,6 +774,19 @@ export async function buildServer(
   // best-effort write-back to the queue (type:"observer"); hydrate tokens land in
   // their OWN cost bucket (principle 7). D9: there is no config.memory subtree yet,
   // so the injected token budget rides an env tunable (fail-safe default + guard).
+  // docs/12 P3/P4 — forgetting wiring for the inject path, GATED behind
+  // config.memory.forgetting.enabled (default false ⇒ this dep is inert and inject
+  // behaves byte-identically to today). When enabled it carries the score-trim
+  // tunables (drop_order + the score curve) and a fail-open bumpReferences bound to
+  // the live store (the port method is optional; the `?? noop` keeps the dep total).
+  const forgettingCfg = config.memory.forgetting;
+  const injectForgetting: InjectDeps["forgetting"] = {
+    enabled: forgettingCfg.enabled,
+    dropOrder: forgettingCfg.inject.drop_order,
+    scoreConfig: forgettingCfg.score,
+    bumpReferences: (bumpInput) => store.memory.bumpReferences?.(bumpInput) ?? Promise.resolve(),
+  };
+
   const injectDeps: InjectDeps = {
     memoryStore: store.memory,
     estimateTokens: estimateMemoryTokens,
@@ -777,6 +794,7 @@ export async function buildServer(
     costSink: () => {},
     now: () => new Date(),
     log: memoryLog,
+    forgetting: injectForgetting,
   };
   const injectTokenBudgetRaw = Number(process.env.HELM_MEMORY_INJECT_TOKEN_BUDGET ?? 4000);
   const injectTokenBudget =
@@ -802,6 +820,16 @@ export async function buildServer(
       return { reflectionText, tokenEstimate: estimateMemoryTokens(reflectionText) };
     },
     costSink: () => {},
+    now: () => new Date(),
+    log: memoryLog,
+  };
+  // Decay-sweep deps (docs/12 P5). The whole forgetting config drives the pure score +
+  // archive threshold + the bounded-loop limits; gated behind forgetting.enabled so the
+  // worker only ever receives a 'decay' job (and only ever triggers one) when the flag
+  // is on (default off ⇒ inert). Same injected clock as the rest of the memory pipeline.
+  const decayDeps: DecayDeps = {
+    memoryStore: store.memory,
+    config: forgettingCfg,
     now: () => new Date(),
     log: memoryLog,
   };
@@ -1660,6 +1688,29 @@ export async function buildServer(
       log: memoryLog,
       runObserver: (job) => runObserverJob(job, observerDeps),
       runReflector: (job) => runReflectorJob(job, reflectorDeps),
+      // docs/12 P5: dispatch decay rows to the sweep, and evaluate the buffer-flush
+      // trigger each tick. Both are GATED — maybeEnqueueDecayJobs no-ops when
+      // forgetting.enabled is false, so with the flag off no decay job is ever enqueued
+      // and the worker behaves byte-identically to today.
+      runDecay: (job) => runDecayJob(job, decayDeps),
+      onTick: async () => {
+        await maybeEnqueueDecayJobs({
+          memoryStore: store.memory,
+          config: forgettingCfg,
+          now: () => new Date(),
+          log: memoryLog,
+        });
+        // docs/12 P7: the retention HARD-DELETE — account-agnostic, off the request path,
+        // same cadence as the payload_retention_days prune. GATED (no-op with the flag
+        // off) and fail-open (errors logged, never thrown), so a delete failure never
+        // breaks the worker tick.
+        await pruneRetainedMemory({
+          memoryStore: store.memory,
+          config: forgettingCfg,
+          now: () => new Date(),
+          log: memoryLog,
+        });
+      },
     });
   }
 

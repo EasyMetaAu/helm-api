@@ -16,6 +16,9 @@ function makeReflection(over: Partial<Reflection> & { reflectionText: string }):
     version: 1,
     tokenEstimate: 0,
     updatedAt: new Date("2026-05-30T00:00:00.000Z"),
+    referencedAt: null,
+    referenceCount: 0,
+    status: "active",
     ...over,
   };
 }
@@ -27,6 +30,12 @@ function makeObservation(id: string, text: string, observedAt: string): Observat
     sourceMessageRange: ["m1", "m2"],
     observationText: text,
     observedAt: new Date(observedAt),
+    referenceCount: 0,
+    importance: 0.5,
+    status: "active",
+    referencedAt: null,
+    archivedAt: null,
+    expiredAt: null,
   };
 }
 

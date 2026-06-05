@@ -31,6 +31,9 @@ function makeFakeStore(observations: Observation[], initial: Reflection | null =
         version: input.version,
         tokenEstimate: input.tokenEstimate,
         updatedAt: input.updatedAt,
+        referencedAt: null,
+        referenceCount: 0,
+        status: "active",
       };
       return id;
     }),
@@ -50,6 +53,12 @@ function makeObservations(texts: string[]): Observation[] {
     sourceMessageRange: [`m${i * 2 + 1}`, `m${i * 2 + 2}`] as [string, string],
     observationText: text,
     observedAt: new Date(`2026-05-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`),
+    referenceCount: 0,
+    importance: 0.5,
+    status: "active" as const,
+    referencedAt: null,
+    archivedAt: null,
+    expiredAt: null,
   }));
 }
 
@@ -109,6 +118,9 @@ describe("runReflectorJob", () => {
       version: 7,
       tokenEstimate: 1,
       updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
     };
     const { store, upserts } = makeFakeStore(obs, existing);
     // merge with NO previous-prefix behavior so identical input → identical "a | b".
@@ -140,6 +152,9 @@ describe("runReflectorJob", () => {
       version: 1,
       tokenEstimate: 1,
       updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
     };
     const { store, upserts } = makeFakeStore(obs, existing);
     const deps = makeDeps(store, {
@@ -171,6 +186,9 @@ describe("runReflectorJob", () => {
       version: 3,
       tokenEstimate: 1,
       updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
     };
     const { store, upserts } = makeFakeStore(obs, existing);
     const merge = vi.fn(async ({ observations, previousReflection }) => {

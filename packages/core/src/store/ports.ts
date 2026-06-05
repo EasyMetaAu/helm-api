@@ -1,6 +1,8 @@
 import type {
   ApiKeyRecord,
   DecisionRecord,
+  Fact,
+  MemoryFactInput,
   MemoryJobEnqueueInput,
   MemoryJobRow,
   MemoryMessageInput,
@@ -326,6 +328,133 @@ export interface MemoryStore {
   // []. The worker runs each claimed job (itself fail-open) then marks it
   // done/failed via updateJobStatus.
   claimPendingJobs(limit: number): Promise<MemoryJobRow[]>;
+  // docs/12 "Access reinforcement" (P3) — the loop-closer. After the injector
+  // assembles the prefix and knows EXACTLY which observations/reflections
+  // survived the budget trim, it fires ONE batched, account-guarded write:
+  //   UPDATE … SET reference_count = reference_count + 1, referenced_at = :now …
+  // bumping the rows it injected. That resets their recency to ~1.0 so a used
+  // memory survives the next sweep/score-trim; memories that stop being injected
+  // stop being reinforced and quietly decay (the whole forgetting loop, closed by
+  // touching two columns). The accountId guard makes it tenant-safe even though
+  // the injected ids already came from an account-scoped read (defence in depth,
+  // matching the read predicates): observations are guarded via their thread's
+  // owner_id, reflections via owner_id directly. FAIL-OPEN: this is NEVER awaited
+  // on the response path (inject fires it fire-and-forget); a failure leaves the
+  // counters stale (the score just uses the old value) and never affects the
+  // request. Empty id lists are a no-op. Only CALLED when forgetting.enabled is on.
+  //
+  // OPTIONAL on the port (`?`): the real sqlite + postgres adapters BOTH implement
+  // it, but it is gated behind forgetting.enabled and is purely additive (docs/12
+  // P3 — inert until the flag is on). Marking it optional keeps every existing
+  // MemoryStore fixture/fake that predates this phase valid WITHOUT being rewritten
+  // — the gating lever (`forgetting.enabled: false` ⇒ byte-identical behaviour)
+  // applies to the type surface too. Callers must null-check before invoking.
+  bumpReferences?(input: {
+    accountId: string;
+    observationIds: string[];
+    reflectionIds: string[];
+    now: Date;
+  }): Promise<void>;
+  // docs/12 "Eviction, demotion, promotion" (P5 decay sweep, pass 1) — the read half.
+  // Return EVERY ACTIVE observation owned by the account, with ONLY the forgetting-
+  // score input fields (referenced_at / observed_at / reference_count / importance).
+  // Account-scoped via the observation's thread owner_id (observations carry no
+  // owner_id column — they inherit it from memory_threads, matching the existing read
+  // predicates); archived rows are excluded so the sweep is idempotent (a re-run sees
+  // nothing already demoted). The mid-tier `fallback_ts` is observed_at, surfaced here
+  // so the pure score fn can coalesce a null referenced_at without the store knowing
+  // the tier rules. OPTIONAL on the port (`?`) for the same reason as bumpReferences:
+  // additive + gated, so pre-phase fixtures stay valid; callers null-check.
+  listScorableObservations?(scope: { accountId: string }): Promise<
+    Array<{
+      id: string;
+      referencedAt: Date | null;
+      observedAt: Date;
+      referenceCount: number;
+      importance: number;
+    }>
+  >;
+  // docs/12 "Demote mid → archived (soft-invalidate)" — the write half of the sweep.
+  // Soft-invalidate the named observations: status='archived', archived_at=now. NEVER
+  // a DELETE (audit-friendly — archived rows stop being injected + stop counting toward
+  // the budget, but survive for audit/retention). ACCOUNT-GUARDED via the thread's
+  // owner_id (defence in depth; the ids already came from an account-scoped read).
+  // Empty id lists are a no-op. OPTIONAL (`?`): additive + gated, same contract as
+  // listScorableObservations / bumpReferences.
+  archiveObservations?(input: { accountId: string; ids: string[]; now: Date }): Promise<void>;
+  // docs/12 P5 trigger — the buffer-flush gate, run OFF the request path (the worker
+  // tick, never per request). Return the account ids DUE for a decay sweep: an account
+  // owning ≥1 active observation that EITHER has accumulated ≥ `triggerObservations`
+  // active observations since its last decay sweep, OR whose last sweep was ≥
+  // `triggerIntervalS` ago (an account that has NEVER been swept is due on the time
+  // gate). "Last sweep" = the newest memory_jobs row of type='decay' for that account's
+  // scope. Pure read; the caller enqueues one decay job per returned account and the
+  // open-job dedupe index collapses duplicates (uniq_memory_jobs_open_type_scope), so a
+  // returned-but-already-queued account is a harmless no-op. OPTIONAL (`?`): additive +
+  // gated — only the forgetting-enabled worker calls it. Account-scoped throughout.
+  listDecayCandidateAccounts?(input: {
+    triggerObservations: number;
+    triggerIntervalS: number;
+    nowMs: number;
+  }): Promise<string[]>;
+  // docs/12 "Eviction, demotion, promotion" passes 2–3 (P6) — fact ingest with
+  // DETERMINISTIC dedup + same-subject supersede, all in ONE batch. The Reflector
+  // extracts discrete facts (its new sibling output) and calls this; per fact:
+  //   - dedup (Mem0 borrow): if (owner_id, content_hash) already exists → SKIP
+  //     (idempotent — the account-scoped UNIQUE index is the boundary, so the same
+  //     assertion ingested twice is one row);
+  //   - else INSERT, then SUPERSEDE (Graphiti borrow, pure datetime UPDATE — no
+  //     LLM): if a still-ACTIVE fact with the same (owner_id, subject_key),
+  //     narrowed by the scope columns that are non-null on the NEW fact, and an
+  //     OLDER valid_from exists → stamp the old row expired_at=now,
+  //     invalid_at=new.valid_from. NEVER a DELETE (audit-friendly; decay hides,
+  //     retention deletes). enable_llm_supersede contradiction-finding beyond
+  //     same-subject_key is OUT of scope here (off by default).
+  // owner_id is the TENANT BOUNDARY (a fact may have a null thread_id, so it
+  // cannot lean on memory_threads — docs/12 "Tenant isolation"): every predicate
+  // includes it, and the top-level `accountId` is the authoritative guard that
+  // each fact's ownerId must match. The whole batch is ONE transaction where the
+  // adapter allows (sqlite synchronous txn; pg statement-by-statement). OPTIONAL
+  // (`?`): additive + gated behind forgetting.enabled — pre-phase fixtures stay
+  // valid; the Reflector null-checks before calling.
+  insertFactsReconciled?(input: {
+    accountId: string;
+    scope: { projectId?: string; resourceId?: string; threadId?: string };
+    facts: MemoryFactInput[];
+    now: Date;
+  }): Promise<void>;
+  // docs/12 "Supersede within long" — the fact READ half. Return the account's
+  // facts that are still alive: owner_id = accountId AND status='active' AND
+  // expired_at IS NULL (the single predicate that makes superseded/archived facts
+  // invisible without deleting them), optionally narrowed by the in-account scope
+  // columns. Account-scoped throughout (owner_id is the tenant boundary). OPTIONAL
+  // (`?`): additive + gated, same contract as the sweep reads.
+  listActiveFacts?(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+  }): Promise<Fact[]>;
+  // docs/12 "Hard-delete (rare, retention only)" pass 4 (P7) — the ONLY DELETE in the
+  // forgetting system. Mirrors the existing payload_retention_days prune (an account-
+  // AGNOSTIC, age-cutoff sweep run off the request path on the worker tick). TWO deletes
+  // in one call, each over the WHOLE store (a retention age cutoff is tenant-neutral by
+  // construction — archived_at / expired_at is the same wallclock for every account):
+  //   1. DELETE memory_observations WHERE status='archived'
+  //        AND archived_at < archivedObservationsBeforeMs
+  //   2. DELETE memory_facts        WHERE expired_at IS NOT NULL
+  //        AND expired_at < expiredFactsBeforeMs
+  // NEVER touches active observations, unexpired facts, or reflections (reflections are
+  // never hard-deleted by retention — docs/12 "Facts and reflections are never hard-
+  // deleted by score — only by explicit retention age, and only after being archived/
+  // expired first"). The cutoffs are STRICT lower bounds (strictly-older-than), matching
+  // prunePayloads, so a row stamped exactly at the cutoff survives. Returns the deleted
+  // row counts purely for the caller's log line. OPTIONAL (`?`): additive + gated behind
+  // forgetting.enabled — pre-phase fixtures stay valid; the pruner null-checks before use.
+  pruneExpiredMemory?(input: {
+    archivedObservationsBeforeMs: number;
+    expiredFactsBeforeMs: number;
+  }): Promise<{ observationsDeleted: number; factsDeleted: number }>;
 }
 
 // Optional config persistence (MVP is yaml-first; reserved for admin write-back).

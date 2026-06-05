@@ -344,6 +344,55 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS memory_thread_source TEXT NOT NULL DEFAULT 'header';
     `,
   },
+  {
+    // Memory FORGETTING & TIERING schema deltas (docs/12 "Schema deltas") — pg
+    // mirror of the sqlite v18 migration (different ledger, same logical change;
+    // dialect differences sealed in the adapter per CLAUDE.md). All additive,
+    // IF NOT EXISTS = idempotent. memory_observations gets the forgetting-score
+    // columns (referenced_at already exists from v2 and is reused);
+    // memory_reflections gets reference tracking + visibility only. memory_facts
+    // is the new account-scoped long-tier table: owner_id (= accountId) is the
+    // tenant boundary (a fact may have a null thread_id), and the content_hash
+    // dedup index is ACCOUNT-scoped (UNIQUE(owner_id, content_hash)), never
+    // global. Epoch-ms timestamps are BIGINT to match the sqlite value space.
+    version: 17,
+    sql: `
+      ALTER TABLE memory_observations ADD COLUMN IF NOT EXISTS reference_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE memory_observations ADD COLUMN IF NOT EXISTS importance      DOUBLE PRECISION NOT NULL DEFAULT 0.5;
+      ALTER TABLE memory_observations ADD COLUMN IF NOT EXISTS status          TEXT    NOT NULL DEFAULT 'active';
+      ALTER TABLE memory_observations ADD COLUMN IF NOT EXISTS archived_at     BIGINT;
+      ALTER TABLE memory_observations ADD COLUMN IF NOT EXISTS expired_at      BIGINT;
+
+      ALTER TABLE memory_reflections ADD COLUMN IF NOT EXISTS referenced_at   BIGINT;
+      ALTER TABLE memory_reflections ADD COLUMN IF NOT EXISTS reference_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE memory_reflections ADD COLUMN IF NOT EXISTS status          TEXT    NOT NULL DEFAULT 'active';
+
+      CREATE TABLE IF NOT EXISTS memory_facts (
+        id            TEXT PRIMARY KEY,
+        owner_id      TEXT    NOT NULL,
+        project_id    TEXT,
+        resource_id   TEXT,
+        thread_id     TEXT,
+        subject_key   TEXT    NOT NULL,
+        fact_text     TEXT    NOT NULL,
+        content_hash  TEXT    NOT NULL,
+        importance    DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+        reference_count INTEGER NOT NULL DEFAULT 0,
+        referenced_at BIGINT,
+        valid_from    BIGINT  NOT NULL,
+        invalid_at    BIGINT,
+        expired_at    BIGINT,
+        status        TEXT    NOT NULL DEFAULT 'active',
+        source_observation_range JSONB,
+        created_at    BIGINT  NOT NULL,
+        updated_at    BIGINT  NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_facts_hash    ON memory_facts (owner_id, content_hash);
+      CREATE INDEX        IF NOT EXISTS idx_memory_facts_subject ON memory_facts (owner_id, project_id, resource_id, thread_id, subject_key);
+      CREATE INDEX        IF NOT EXISTS idx_memory_facts_active  ON memory_facts (owner_id, status, expired_at);
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

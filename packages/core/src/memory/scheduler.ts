@@ -1,5 +1,6 @@
 import type { MemoryJobRow } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
+import type { DecayJob } from "./forgetting/decay.js";
 import type { ObserverJob, ObserverResult } from "./observer.js";
 import { type ReflectorJob, type ReflectorResult, reflectionTargetScope } from "./reflector.js";
 
@@ -24,15 +25,54 @@ export interface MemoryWorkerDeps {
   runObserver: (job: ObserverJob) => Promise<ObserverResult>;
   // Run one reflector job. Wired to runReflectorJob(job, reflectorDeps).
   runReflector: (job: ReflectorJob) => Promise<ReflectorResult>;
+  // Run one decay sweep (docs/12 P5). Wired to runDecayJob(job, decayDeps). OPTIONAL
+  // + GATED: 'decay' rows are only enqueued when forgetting.enabled, so a worker built
+  // without forgetting (the default) never receives one — and if one somehow arrives,
+  // the dispatch fails it cleanly rather than running the wrong worker (no reflector
+  // fall-through). Keeping it optional also means existing worker fixtures that predate
+  // this phase stay valid unmodified (the gating lever applies to the type surface too).
+  runDecay?: (job: DecayJob) => Promise<void>;
+  // OPTIONAL per-tick hook run BEFORE claiming jobs (docs/12 P5 trigger). The
+  // composition root wires maybeEnqueueDecayJobs here so the buffer-flush gate is
+  // evaluated on the worker interval (OFF the request path — decay never triggers per
+  // request). Itself fail-open + guarded by the tick wrapper; with forgetting off it is
+  // either unset or a no-op, so the tick is byte-identical to today.
+  onTick?: () => Promise<void>;
 }
 
 export interface MemoryWorkerHandle {
   stop(): void;
 }
 
-// Process a single claimed job. Each branch is itself fail-open (the runners never
-// throw), but we still guard so a thrown promotion/enqueue can't escape the tick.
+// Process a single claimed job. Dispatch is EXPLICIT per type (observer / reflector /
+// decay) — NOT a two-branch "observer else reflector" fall-through (docs/12 P5: a
+// decay row must never be silently handed to the reflector). Each branch is itself
+// fail-open (the runners never throw), but we still guard so a thrown promotion/enqueue
+// can't escape the tick. An UNKNOWN type (a corrupt row, or a future kind this worker
+// build predates) is marked failed rather than run by the wrong worker.
 async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<void> {
+  if (job.type === "reflector") {
+    // reflector: the whole scope drives the merge.
+    await deps.runReflector({ jobId: job.jobId, scope: job.scope });
+    return;
+  }
+  if (job.type === "decay") {
+    // decay sweep (docs/12 P5): account-scoped soft-archive of sub-threshold
+    // observations. Only enqueued when forgetting.enabled, so runDecay should be wired;
+    // if it is not (a worker built without forgetting), fail the row cleanly instead of
+    // crashing or mis-routing.
+    if (deps.runDecay === undefined) {
+      await deps.memoryStore.updateJobStatus(
+        job.jobId,
+        "failed",
+        "decay job but worker has no runDecay",
+      );
+      deps.log("memory.worker.decay_unsupported", { job_id: job.jobId });
+      return;
+    }
+    await deps.runDecay({ jobId: job.jobId, scope: job.scope });
+    return;
+  }
   if (job.type === "observer") {
     // D2-bis: runObserverJob needs {jobId, threadId}, NOT a scope. threadId is
     // `.min(1)` and cannot be downgraded to "" — an observer row that lost its
@@ -78,12 +118,36 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
     }
     return;
   }
-  // reflector: the whole scope drives the merge.
-  await deps.runReflector({ jobId: job.jobId, scope: job.scope });
+  // Unknown type: a corrupt scope_id row, or a job kind this worker build predates.
+  // Mark it failed (closing the running row so its scope's queue is not blocked
+  // forever) rather than dispatching it to the wrong worker — the P5 dispatch
+  // requirement (no reflector fall-through). `never` on a clean enum widening means a
+  // newly-added MemoryJobType would surface here at compile time too.
+  await deps.memoryStore.updateJobStatus(
+    job.jobId,
+    "failed",
+    `unknown memory job type: ${String((job as { type: string }).type)}`,
+  );
+  deps.log("memory.worker.unknown_job_type", {
+    job_id: job.jobId,
+    type: (job as { type: string }).type,
+  });
 }
 
 export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
   const tick = async (): Promise<void> => {
+    // Per-tick hook (P5 trigger). Runs BEFORE the claim so a decay job enqueued this
+    // tick can be drained the same tick. Guarded: a throw here must never abort the
+    // drain nor stop the timer (fail-open, principle 3).
+    if (deps.onTick !== undefined) {
+      try {
+        await deps.onTick();
+      } catch (err) {
+        deps.log("memory.worker.on_tick_failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     const jobs = await deps.memoryStore.claimPendingJobs(deps.batchSize);
     for (const job of jobs) {
       // Per-job guard: a single failing job must not abort the rest of the batch

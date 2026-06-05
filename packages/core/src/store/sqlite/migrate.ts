@@ -399,6 +399,60 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys ADD COLUMN memory_thread_source TEXT NOT NULL DEFAULT 'header';
     `,
   },
+  {
+    // Memory FORGETTING & TIERING schema deltas (docs/12 "Schema deltas"). All
+    // additive, all nullable-or-defaulted, so existing rows + existing tests are
+    // untouched and — gated behind forgetting.enabled (default false) — runtime
+    // is byte-identical to today until the flag is flipped. Three parts:
+    //   (a) mid tier (memory_observations) gets the forgetting-score columns;
+    //       referenced_at already exists (v2) and is REUSED.
+    //   (b) long tier (memory_reflections) gets reference tracking + visibility
+    //       only — reflections are slow-changing, so no importance/archived.
+    //   (c) the new memory_facts long-tier table. owner_id (= accountId) is the
+    //       TENANT BOUNDARY (a fact may have a null thread_id, so it cannot lean
+    //       on memory_threads.owner_id like observations do — docs/12 "Tenant
+    //       isolation"). The content_hash dedup index is ACCOUNT-scoped
+    //       (UNIQUE(owner_id, content_hash)), never global. DDL copied verbatim
+    //       from docs/12; epoch-ms timestamps are INTEGER to match the existing
+    //       memory columns' value space.
+    version: 18,
+    sql: `
+      ALTER TABLE memory_observations ADD COLUMN reference_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE memory_observations ADD COLUMN importance      REAL    NOT NULL DEFAULT 0.5;
+      ALTER TABLE memory_observations ADD COLUMN status          TEXT    NOT NULL DEFAULT 'active';
+      ALTER TABLE memory_observations ADD COLUMN archived_at     INTEGER;
+      ALTER TABLE memory_observations ADD COLUMN expired_at      INTEGER;
+
+      ALTER TABLE memory_reflections ADD COLUMN referenced_at   INTEGER;
+      ALTER TABLE memory_reflections ADD COLUMN reference_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE memory_reflections ADD COLUMN status          TEXT    NOT NULL DEFAULT 'active';
+
+      CREATE TABLE IF NOT EXISTS memory_facts (
+        id            TEXT PRIMARY KEY,
+        owner_id      TEXT    NOT NULL,
+        project_id    TEXT,
+        resource_id   TEXT,
+        thread_id     TEXT,
+        subject_key   TEXT    NOT NULL,
+        fact_text     TEXT    NOT NULL,
+        content_hash  TEXT    NOT NULL,
+        importance    REAL    NOT NULL DEFAULT 0.5,
+        reference_count INTEGER NOT NULL DEFAULT 0,
+        referenced_at INTEGER,
+        valid_from    INTEGER NOT NULL,
+        invalid_at    INTEGER,
+        expired_at    INTEGER,
+        status        TEXT    NOT NULL DEFAULT 'active',
+        source_observation_range TEXT,
+        created_at    INTEGER NOT NULL,
+        updated_at    INTEGER NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_facts_hash    ON memory_facts (owner_id, content_hash);
+      CREATE INDEX        IF NOT EXISTS idx_memory_facts_subject ON memory_facts (owner_id, project_id, resource_id, thread_id, subject_key);
+      CREATE INDEX        IF NOT EXISTS idx_memory_facts_active  ON memory_facts (owner_id, status, expired_at);
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

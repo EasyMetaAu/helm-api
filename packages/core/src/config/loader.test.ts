@@ -169,6 +169,51 @@ describe("loadConfig", () => {
     ).toThrow(ConfigError);
   });
 
+  // —— memory.yaml (docs/12 P1 "Config surface") ——
+  // The memory subtree is NEW (docs/08 left config.memory deferred). Absent file
+  // → all defaults (forgetting.enabled:false, gateway boots, behaviour identical
+  // to today). Present-but-invalid → fail-closed (CLAUDE.md principle 2).
+
+  it("memory.yaml is optional: absent -> config.memory defaults (forgetting.enabled:false)", () => {
+    const cfg = loadConfig({ configDir: "config", env: {}, readFile: fakeReadFile(VALID_YAML) });
+    expect(cfg.memory.forgetting.enabled).toBe(false);
+    expect(cfg.memory.forgetting.score.half_life_s).toBe(86400);
+  });
+
+  it("loads memory.yaml: a non-default half_life_s round-trips and takes effect", () => {
+    const memYaml = "forgetting:\n  enabled: true\n  score:\n    half_life_s: 3600\n";
+    const cfg = loadConfig({
+      configDir: "config",
+      env: {},
+      readFile: fakeReadFile({ ...VALID_YAML, "config/memory.yaml": memYaml }),
+    });
+    expect(cfg.memory.forgetting.enabled).toBe(true);
+    expect(cfg.memory.forgetting.score.half_life_s).toBe(3600);
+    expect(cfg.memory.forgetting.inject.drop_order).toBe("score"); // untouched default
+  });
+
+  it("fail-closed: an unknown/misspelled memory.yaml key (strict) throws ConfigError", () => {
+    const badMem = "forgetting:\n  score:\n    half_life_s: 3600\n  halflife_s: 99\n";
+    expect(() =>
+      loadConfig({
+        configDir: "config",
+        env: {},
+        readFile: fakeReadFile({ ...VALID_YAML, "config/memory.yaml": badMem }),
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("fail-closed: memory.yaml with importance_floor > importance_ceil throws ConfigError", () => {
+    const badMem = "forgetting:\n  score:\n    importance_floor: 0.9\n    importance_ceil: 0.1\n";
+    expect(() =>
+      loadConfig({
+        configDir: "config",
+        env: {},
+        readFile: fakeReadFile({ ...VALID_YAML, "config/memory.yaml": badMem }),
+      }),
+    ).toThrow(ConfigError);
+  });
+
   it("fail-closed: an unknown field in a lane (strict) throws ConfigError", () => {
     const badLanes = "balanced:\n  primary: default_good_model\n  weight: 5\n";
     expect(() =>

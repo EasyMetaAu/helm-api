@@ -1,5 +1,6 @@
 import type { AssembledMessage, Observation, RawMessage, Reflection } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
+import { forgettingScore, type ScoreConfig } from "./forgetting/score.js";
 import { alreadyObservedMessageIds } from "./observer.js";
 
 // Memory middleware — INJECT phase (docs/08 Phase 2 "observational-memory MVP"). When
@@ -30,6 +31,30 @@ export interface InjectInput {
   tokenBudget: number;
 }
 
+// docs/12 P3 + P4 — the OPTIONAL forgetting wiring inject receives. Defaulting to
+// ABSENT (the field is optional on InjectDeps) means every existing caller/test
+// compiles and behaves byte-identically without change — with no `forgetting` dep
+// the assembler runs exactly today's oldest-first trim and never reinforces. Only
+// when `enabled` does the inject path switch on the two gated behaviours:
+//   - P4 score-trim: when `dropOrder === "score"` the observation budget trim
+//     drops the LOWEST-scored row first instead of the oldest (scoreConfig is the
+//     `memory.forgetting.score` block; the score's per-tier fallback_ts is
+//     observedAt for observations). Fail-open: if scoring throws, fall back to
+//     oldest-first.
+//   - P3 reinforcement: after assembly, `bumpReferences` is fired fire-and-forget
+//     with exactly the post-trim injected ids (never awaited on the response path).
+export interface ForgettingInjectDeps {
+  enabled: boolean;
+  dropOrder: "score" | "oldest";
+  scoreConfig: ScoreConfig;
+  bumpReferences: (input: {
+    accountId: string;
+    observationIds: string[];
+    reflectionIds: string[];
+    now: Date;
+  }) => Promise<void>;
+}
+
 export interface InjectDeps {
   memoryStore: MemoryStore;
   estimateTokens: (text: string) => number;
@@ -41,6 +66,9 @@ export interface InjectDeps {
   costSink: (bucket: "hydrate", tokens: number) => void;
   now: () => Date;
   log: (line: string, meta?: object) => void;
+  // OPTIONAL (docs/12 P3/P4). Absent ⇒ today's behaviour exactly (no score-trim,
+  // no reinforcement). Present-but-disabled (`enabled:false`) is identical to absent.
+  forgetting?: ForgettingInjectDeps;
 }
 
 export interface InjectResult {
@@ -187,11 +215,23 @@ export async function assembleInjectedContext(
   }
 
   const { projectReflection, resourceReflection, observations, recentMessages } = loaded;
+  const forgettingOn = deps.forgetting?.enabled === true;
+
+  // docs/12 (P4) — when forgetting is ON, archived/expired rows are INVISIBLE to
+  // injection: a decayed/superseded observation must never ride the prefix (decay
+  // hides; it does not delete, so the rows stay for audit but stop being injected).
+  // The filter is applied at ASSEMBLE time (not at the store read) so it is a pure,
+  // testable predicate over whatever the read returned and stays gated behind the
+  // flag — with forgetting OFF the read result passes through untouched (legacy
+  // rows carry status='active'/expiredAt=null defaults anyway, so this is inert).
+  const visibleObservations = forgettingOn
+    ? observations.filter((o) => o.status === "active" && (o.expiredAt ?? null) === null)
+    : observations;
 
   // Build the trimmable injected layers in docs/08 order. Observations are sorted
   // oldest-first so the budget trimmer can drop the oldest ones first while
   // preserving the rest of the prefix (recent raw + current are NEVER trimmed).
-  const sortedObservations = [...observations].sort(
+  const sortedObservations = [...visibleObservations].sort(
     (a, b) => a.observedAt.getTime() - b.observedAt.getTime(),
   );
 
@@ -207,10 +247,18 @@ export async function assembleInjectedContext(
       ? { role: "user", content: resourceReflection.reflectionText, source: "resource_reflection" }
       : null;
 
-  const observationMessages: AssembledMessage[] = sortedObservations.map((o) => ({
-    role: "user" as const,
-    content: o.observationText,
-    source: "thread_observation" as const,
+  // Each observation paired with the message it produces AND its source id, so the
+  // post-trim reinforcement (P3) can bump EXACTLY the rows that survived. Kept in
+  // oldest-first order to mirror the legacy assembled-prefix order (docs/08).
+  interface ObsEntry {
+    id: string;
+    message: AssembledMessage;
+    observation: Observation;
+  }
+  const observationEntries: ObsEntry[] = sortedObservations.map((o) => ({
+    id: o.id,
+    observation: o,
+    message: { role: "user", content: o.observationText, source: "thread_observation" },
   }));
 
   // Recent raw messages are kept verbatim, in order (docs/08 "recent raw messages must be preserved").
@@ -267,20 +315,81 @@ export async function assembleInjectedContext(
   const reflectionTokens = reflectionMessages.reduce((sum, m) => sum + tokensOf(m), 0);
 
   // Observations get whatever the budget has left after recent raw + kept
-  // reflections; drop oldest-first until they fit.
+  // reflections. The DROP ORDER is the one hot-path forgetting change (docs/12
+  // "Eviction … inject-time trim"): legacy drops OLDEST-first; with forgetting ON
+  // and drop_order=score we drop LOWEST-SCORE-first. Only the comparator changes —
+  // recent_raw + current are still never trimmed; the invariants hold either way.
+  //
+  // `keepOrder` is the order in which entries are CONSIDERED for keeping (best to
+  // keep → first). Whatever does not fit the budget falls off the END of this
+  // order = the row that gets dropped first. Legacy: newest-first (so the oldest
+  // is the first sacrificed). Score: highest-score-first (so the lowest-scored is
+  // the first sacrificed). The kept set is then re-sorted to oldest-first for the
+  // STRICT docs/08 prefix order — the drop order changes WHICH rows survive, never
+  // the surviving rows' order in the prompt.
   let observationBudget = Math.max(0, input.tokenBudget - recentRawTokens - reflectionTokens);
-  const keptObservations: AssembledMessage[] = [];
-  // Newest-first so we add the most recent observations until the budget is spent,
-  // then re-sort to oldest-first for the assembled order.
-  for (const obs of [...observationMessages].reverse()) {
-    const cost = tokensOf(obs);
+
+  // observationEntries is oldest-first. Legacy keep order = newest-first (reverse).
+  const legacyKeepOrder = (): ObsEntry[] => [...observationEntries].reverse();
+  let keepOrder: ObsEntry[];
+  if (forgettingOn && deps.forgetting?.dropOrder === "score") {
+    // Score-trim: keep highest-score first so the lowest-scored is dropped first.
+    // The score's per-tier fallback_ts for observations is observedAt (docs/12
+    // fallback table) — a never-reinforced row ages from when it was observed.
+    // FAIL-OPEN: if scoring throws for ANY row, abandon the score order entirely
+    // and fall back to legacy oldest-first (a partial score order could silently
+    // mis-rank), logging the fallback so the degrade is observable, never silent.
+    try {
+      const scoreCfg = deps.forgetting.scoreConfig;
+      const now = deps.now();
+      const scored = observationEntries.map((entry) => ({
+        entry,
+        score: forgettingScore(
+          {
+            referencedAt: entry.observation.referencedAt ?? null,
+            fallbackTs: entry.observation.observedAt,
+            referenceCount: entry.observation.referenceCount ?? 0,
+            importance: entry.observation.importance ?? 0.5,
+          },
+          scoreCfg,
+          now,
+        ),
+      }));
+      // Highest score first. Tie-break newest-first (observedAt desc) so a tie
+      // matches the legacy preference for recency.
+      scored.sort(
+        (a, b) =>
+          b.score - a.score ||
+          b.entry.observation.observedAt.getTime() - a.entry.observation.observedAt.getTime(),
+      );
+      keepOrder = scored.map((s) => s.entry);
+    } catch (err) {
+      deps.log("memory.inject.score_trim_fallback", {
+        scope: input.scope,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      keepOrder = legacyKeepOrder();
+    }
+  } else {
+    keepOrder = legacyKeepOrder();
+  }
+
+  const keptEntries: ObsEntry[] = [];
+  for (const entry of keepOrder) {
+    const cost = tokensOf(entry.message);
     if (cost <= observationBudget) {
-      keptObservations.push(obs);
+      keptEntries.push(entry);
       observationBudget -= cost;
     }
-    // else: skip this (older) observation — it's been trimmed for budget.
+    // else: skip this (lowest-priority) observation — trimmed for budget.
   }
-  keptObservations.reverse(); // restore oldest-first order for the prefix
+  // Restore oldest-first order for the prefix (observedAt asc) regardless of which
+  // drop order chose the survivors.
+  keptEntries.sort(
+    (a, b) => a.observation.observedAt.getTime() - b.observation.observedAt.getTime(),
+  );
+  const keptObservations: AssembledMessage[] = keptEntries.map((e) => e.message);
+  const keptObservationIds = keptEntries.map((e) => e.id);
 
   // Signal a budget breach whenever the un-trimmed fixed layers (all reflections +
   // recent raw) would have exceeded the cap — i.e. the budget actually forced a
@@ -328,6 +437,37 @@ export async function assembleInjectedContext(
     memory_tokens_injected: memoryTokensInjected,
     observer_job_id: writeback.observerJobId,
   });
+
+  // ── access reinforcement (docs/12 P3, gated) ──────────────────────────────
+  // The injector knows EXACTLY which observations/reflections survived the trim
+  // and were actually injected. Fire ONE batched, account-guarded bump for them —
+  // FIRE-AND-FORGET: the promise is NEVER awaited on the response path (a
+  // reinforcement write must not add latency or be able to fail the request).
+  // A rejection is swallowed + logged (fail-open): a stale counter just means the
+  // score reads the old value next time. Only runs when forgetting is enabled.
+  if (forgettingOn && deps.forgetting !== undefined) {
+    const injectedReflectionIds: string[] = [];
+    if (keptReflections.project && projectReflection !== null) {
+      injectedReflectionIds.push(projectReflection.id);
+    }
+    if (keptReflections.resource && resourceReflection !== null) {
+      injectedReflectionIds.push(resourceReflection.id);
+    }
+    if (keptObservationIds.length > 0 || injectedReflectionIds.length > 0) {
+      const bump = deps.forgetting.bumpReferences;
+      void bump({
+        accountId: input.scope.accountId,
+        observationIds: keptObservationIds,
+        reflectionIds: injectedReflectionIds,
+        now: deps.now(),
+      }).catch((err) => {
+        deps.log("memory.inject.reinforce_failed", {
+          scope: input.scope,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+  }
 
   return {
     messages,

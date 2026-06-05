@@ -23,6 +23,26 @@
 
 ---
 
+## 2026-06-05 · 记忆遗忘策略 + 短/中/长期分层（docs/12；P0–P7 全实现）
+
+**动机（用户拍板）**：现有记忆只「记 + 压缩」不会「忘」，记忆只增 = 越塞越满的抽屉。用户明确要求：必须有**遗忘策略** + **短/中/长期分层**。方案见新增 `docs/12`（含字节 M3-Agent / 腾讯 Agent Memory / MemOS 对照）。本轮用 Workflow 8-agent 并行 TDD 实现 P0–P7，全部 gated 在 `memory.forgetting.enabled`（**默认 false = 行为字节级不变**）。
+
+**实现（spec 未覆盖 / 拍板项）**：
+
+- **纯评分函数**（P0，`memory/forgetting/score.ts`）：`score = 0.5^(age/half_life) × clamp(importance,floor,ceil) + access_weight·log1p(reference_count)`，`age` 用 `coalesce(referenced_at, fallback_ts)` 永不为 null。刻意做成**零依赖叶子模块**——`ScoreConfig` 是本地结构接口而非 import P1 的 `z.infer<ScoreSchema>`（保持 core 无 shared 依赖；两者结构兼容）。负 age（时钟偏移）在 `recency()` 内夹到 0，单点 clamp。
+- **config**（P1）：新建 `config.memory` 子树（docs/08 原先 deferred）。`config/memory.yaml` 是**扁平文件**（顶层 `forgetting:`，**无 `memory:` 包裹**）——loader 把整文件挂到 `memory` key，与 lanes.yaml 同模式；spec YAML 里的 `memory:` 缩进描述的是结果配置树不是文件布局。所有嵌套对象用 **`.prefault({})` 而非 `.default({})`**（Zod v4：`.default({})` 不跑内层字段默认，半衰期等会 undefined；仓库既有约定）。snake_case + `.strict()` → 未知 key fail-closed。
+- **schema/迁移**（P2）：迁移 **sqlite v18 / pg v17**（v17/v16 是 #97 占用的）。`memory_observations` +reference_count/importance/status/archived_at/expired_at；`memory_reflections` +referenced_at/reference_count/status；新表 `memory_facts`（`owner_id NOT NULL` 租户边界 + `UNIQUE(owner_id, content_hash)` 账户级去重 + bi-temporal valid_from/invalid_at/expired_at）。Zod 新字段 optional-with-default → 旧行仍 parse。**`MemoryFactInput` 用 `z.input` 不是 `z.infer`**（让 `.default()` 字段在写入 DTO 上可选，适配器侧 `?? default`）。
+- **inject**（P3+P4，合一个 agent 因都改 inject.ts）：`bumpReferences({accountId, observationIds, reflectionIds, now})` fire-and-forget（`.catch` 只 log，永不 await、永不 throw），账户隔离;裁剪顺序在 `enabled && drop_order==='score'` 时改最低分先丢，比较器抛错回退 oldest-first（fail-open）;归档行不注入。inject 收 forgetting 配置走**可选 dep 默认禁用**，所有旧 caller/test 不改即编译。
+- **decay job**（P5）：`MemoryJobTypeSchema` 加 `'decay'`；scheduler 改**按 type 显式分发**（原先非 observer 全落 reflector），未知 type 优雅失败不跑错 worker；`runDecayJob` 只做 pass-1 软归档（score < archive_threshold → status='archived'）；触发用独立 `decay-trigger.ts`（N 条新 observation 或间隔 T 秒，复用 `uniq_memory_jobs_open_type_scope` 去重）；循环受 max_iterations/wallclock/consecutive_errors 限，时钟全注入。
+- **facts**（P6）：`insertFactsReconciled` 幂等（命中 `(owner_id,content_hash)` 跳过）+ 同 `(owner_id,subject_key)` 更新 valid_from 更晚者盖旧行 `expired_at/invalid_at`（纯 datetime UPDATE，无 LLM）。`subject_key` 确定性归一（小写/trim/空白→`-`/去非字母数字-）；`content_hash = sha256(归一 fact_text)`。Reflector 加**可选 `extractFacts` dep**（测试用确定性 stub，真 LLM 仍 deferred），gated 在 token 阈值;`enable_llm_supersede` v1 不启用。
+- **retention**（P7）：唯一的 DELETE，扩展既有 payload-retention 清理，只删 `archived`+超龄 observation / `expired`+超龄 fact，永不删 active/reflection，fail-open。
+
+**验证**：typecheck / lint / build 全 0，**vitest 210 文件 / 2425 测试全过**（含 sqlite + pglite-postgres 两套 MemoryStore 契约）。集成裂缝修复：旧 `listObservations`/`getReflection` 映射器要补填 P2 新增的输出列(legacy mapper 早于 schema delta)。**未实现 P8（混合检索）**——spec 本身列为独立 gated follow-up，需 sqlite-vec/embedding 基础设施，留待后续。
+
+**坑/TODO**：Reflector 与 Observer 背后真正的 LLM summarize/merge/extractFacts 仍是 deterministic stub（docs/08 既有 deferred）;facts 的 P8 混合检索未做;`importance` 目前从 observer `priority` 粗导出。
+
+---
+
 ## 2026-06-05 · 零改动客户端记忆接入：per-key 默认值 + 信号回退链（issue #97；docs/08）
 
 **动机**：Claude Code / Codex 只能发静态头，发不了每会话动态的 `x-thread-id`；Hermes 等什么信号都不发。让 helm 从客户端**已经在发**的信号里推导 scope，配合 key 级默认值，任何兼容客户端「换 base_url + key」即获记忆。设计与三客户端调研实证见 issue #97。

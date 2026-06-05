@@ -1,5 +1,6 @@
-import type { Observation, Reflection, ReflectionScope } from "@helm/shared";
+import type { MemoryFactInput, Observation, Reflection, ReflectionScope } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
+import { factContentHash, normalizeSubjectKey } from "./forgetting/facts.js";
 
 // Background Reflector (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
 // request-path job: a scheduler triggers it PERIODICALLY to merge a scope's many
@@ -17,6 +18,29 @@ import type { MemoryStore } from "../store/ports.js";
 export interface ReflectorJob {
   jobId: string;
   scope: ReflectionScope;
+}
+
+// docs/12 P6 — one discrete fact the extractor produced from a scope's
+// observations (spec pass 2). The extractor returns RAW strings; the Reflector
+// derives the DETERMINISTIC subject_key + content_hash itself (so the
+// supersede/dedup keys never depend on the LLM — the open-question resolved as
+// deterministic-from-tags/subject). Like `merge`/`summarize`, the real LLM behind
+// this interface is still deferred (docs/08), so a deterministic stub is correct.
+export interface ExtractedFact {
+  subjectText: string; // the topic; normalized into subject_key for same-subject supersede
+  factText: string; // the atomic assertion; hashed for idempotent ingest
+}
+
+// docs/12 P6 — the consolidate-config subset the Reflector reads (structural, so
+// reflector stays a leaf and never imports the config loader). z.infer of the P1
+// `ForgettingSchema.consolidate` is assignable to this. Keys are snake_case to
+// mirror the YAML / config shape exactly.
+export interface ReflectorForgettingConfig {
+  readonly enabled: boolean;
+  readonly consolidate: {
+    readonly trigger_tokens: number; // extract facts when active-obs token sum ≥ this
+    readonly max_facts_per_subject: number; // hard cap per subject_key regardless of extractor output
+  };
 }
 
 export interface ReflectorDeps {
@@ -37,6 +61,25 @@ export interface ReflectorDeps {
   // come from here.
   now: () => Date;
   log: (line: string, meta?: object) => void;
+  // docs/12 P6 (OPTIONAL — gated + additive). Extract discrete facts from a
+  // scope's observations (the Reflector's new sibling output). Injected exactly
+  // like `merge`: a deterministic stub in tests, an LLM later (still deferred,
+  // docs/08). Only invoked when `forgetting.enabled` AND the active-observation
+  // token sum crosses `consolidate.trigger_tokens`; absent dep ⇒ no extraction
+  // (opt-in). Fail-open: a throw here NEVER breaks the reflection write.
+  extractFacts?: (input: {
+    observations: Observation[];
+    previousReflection: Reflection | null;
+    now: Date;
+  }) => Promise<ExtractedFact[]>;
+  // docs/12 P6 (OPTIONAL). The forgetting config subset that gates extraction.
+  // Absent ⇒ disabled (byte-identical to today — the gating lever). z.infer of
+  // ForgettingSchema is assignable.
+  forgetting?: ReflectorForgettingConfig;
+  // OPTIONAL token estimator for the consolidate trigger (active-obs token sum).
+  // Defaults to ~4 chars/token, matching the Observer's estimate (observer.ts).
+  // Deterministic + pure; only consulted when extraction is gated on.
+  estimateTokens?: (text: string) => number;
 }
 
 export interface ReflectorResult {
@@ -109,6 +152,14 @@ export async function runReflectorJob(
     // ran, since it consumed tokens even if the text turned out unchanged.
     deps.costSink("reflector", tokenEstimate);
 
+    // docs/12 P6 (spec pass 2) — facts are a NEW sibling output of the Reflector.
+    // Gated on forgetting.enabled && the consolidate token trigger; runs whether
+    // or not the reflection text changed (a stable reflection can still surface
+    // discrete facts). SELF-CONTAINED fail-open: a fact failure must NEVER break
+    // the reflection write below — so it has its own try/catch and is awaited HERE
+    // (before the version branches) only so the cost/merge already ran.
+    await tryExtractFacts({ deps, target, observations, previousReflection, now });
+
     // STABILITY: only bump the version + write a new row when the text actually
     // changed. Identical input → identical text → no churn (cache-friendly).
     if (previousReflection !== null && previousReflection.reflectionText === reflectionText) {
@@ -157,5 +208,100 @@ export async function runReflectorJob(
     }
     deps.log("memory.reflector.failed", { scope: job.scope, error: message });
     return { reflectionId: null, version: null, changed: false };
+  }
+}
+
+// Default token estimate (~4 chars/token), matching the Observer's estimate
+// (observer.ts estimateObserverTokens). Pure + deterministic.
+function defaultEstimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+// docs/12 P6 (spec pass 2) — the gated fact-extraction step, fully SELF-CONTAINED
+// and fail-open so a fact failure can never break the reflection write. Returns
+// nothing; all effects are the optional insertFactsReconciled call + logging.
+//
+// Gates (ALL must hold, else a silent no-op):
+//   - forgetting.enabled (the master lever — off ⇒ byte-identical to today);
+//   - an extractFacts dep is wired (opt-in, additive — pre-phase callers omit it);
+//   - the store implements insertFactsReconciled (optional on the port);
+//   - the active-observation token sum ≥ consolidate.trigger_tokens (the
+//     buffer-flush trigger — never per request).
+//
+// Determinism: the extractor returns RAW {subjectText, factText}; the Reflector
+// derives subject_key + content_hash ITSELF via the pure helpers, so the
+// supersede/dedup keys never depend on the LLM. Facts are capped at
+// max_facts_per_subject PER subject_key (the spec's hard cap regardless of
+// extractor output). The fact scope mirrors the reflection TARGET (project >
+// resource > thread), and validFrom = now (the fact became known at this run).
+async function tryExtractFacts(args: {
+  deps: ReflectorDeps;
+  target: ReflectionScope;
+  observations: Observation[];
+  previousReflection: Reflection | null;
+  now: Date;
+}): Promise<void> {
+  const { deps, target, observations, previousReflection, now } = args;
+  const { extractFacts, forgetting } = deps;
+  // Gate 1–3: flag on, extractor wired, store capable.
+  if (forgetting?.enabled !== true) return;
+  if (extractFacts === undefined) return;
+  if (deps.memoryStore.insertFactsReconciled === undefined) return;
+
+  try {
+    // Gate 4: the buffer-flush token trigger — active-observation token sum.
+    const estimate = deps.estimateTokens ?? defaultEstimateTokens;
+    const tokenSum = observations.reduce((sum, o) => sum + estimate(o.observationText), 0);
+    if (tokenSum < forgetting.consolidate.trigger_tokens) return;
+
+    const extracted = await extractFacts({ observations, previousReflection, now });
+    if (extracted.length === 0) return;
+
+    // Build fact inputs with DETERMINISTIC keys, capping per subject_key.
+    const cap = forgetting.consolidate.max_facts_per_subject;
+    const perSubjectCount = new Map<string, number>();
+    const facts: MemoryFactInput[] = [];
+    for (const e of extracted) {
+      const subjectKey = normalizeSubjectKey(e.subjectText);
+      // Skip facts whose subject/fact text strips to nothing (the Zod input min(1)
+      // would reject them anyway — guard here so one bad row never aborts the batch).
+      if (subjectKey.length === 0 || e.factText.trim().length === 0) continue;
+      const seen = perSubjectCount.get(subjectKey) ?? 0;
+      if (seen >= cap) continue; // hard cap per subject_key regardless of extractor output
+      perSubjectCount.set(subjectKey, seen + 1);
+      facts.push({
+        ownerId: target.accountId,
+        subjectKey,
+        factText: e.factText,
+        contentHash: factContentHash(e.factText),
+        validFrom: now,
+        ...(target.projectId !== undefined ? { projectId: target.projectId } : {}),
+        ...(target.resourceId !== undefined ? { resourceId: target.resourceId } : {}),
+        ...(target.threadId !== undefined ? { threadId: target.threadId } : {}),
+      });
+    }
+    if (facts.length === 0) return;
+
+    const scope: { projectId?: string; resourceId?: string; threadId?: string } = {};
+    if (target.projectId !== undefined) scope.projectId = target.projectId;
+    if (target.resourceId !== undefined) scope.resourceId = target.resourceId;
+    if (target.threadId !== undefined) scope.threadId = target.threadId;
+
+    await deps.memoryStore.insertFactsReconciled({
+      accountId: target.accountId,
+      scope,
+      facts,
+      now,
+    });
+    deps.log("memory.reflector.facts_extracted", {
+      target_scope: target,
+      fact_count: facts.length,
+    });
+  } catch (err) {
+    // FAIL-OPEN: a fact failure must never break the reflection write. Log + swallow.
+    deps.log("memory.reflector.facts_failed", {
+      target_scope: target,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }

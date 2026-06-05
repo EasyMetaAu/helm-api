@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import {
   decodeScopeId,
   encodeScopeId,
+  type Fact,
+  type MemoryFactInput,
   type MemoryJobEnqueueInput,
   type MemoryJobRow,
   type MemoryMessageInput,
@@ -17,6 +19,7 @@ import { and, asc, desc, eq, isNull, type SQL, sql } from "drizzle-orm";
 import type { MemoryJobStatus, MemoryStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import {
+  memoryFacts,
   memoryJobs,
   memoryMessages,
   memoryObservations,
@@ -216,6 +219,12 @@ export class PgMemoryStore implements MemoryStore {
       sourceMessageRange: row.sourceMessageRange,
       observationText: row.observationText,
       observedAt: new Date(row.observedAt),
+      referenceCount: row.referenceCount,
+      importance: row.importance,
+      status: row.status as Observation["status"],
+      referencedAt: row.referencedAt !== null ? new Date(row.referencedAt) : null,
+      archivedAt: row.archivedAt !== null ? new Date(row.archivedAt) : null,
+      expiredAt: row.expiredAt !== null ? new Date(row.expiredAt) : null,
       ...(row.priority !== null ? { priority: row.priority } : {}),
       ...(row.tags !== null ? { tags: row.tags } : {}),
     }));
@@ -239,6 +248,9 @@ export class PgMemoryStore implements MemoryStore {
       version: row.version,
       tokenEstimate: row.tokenEstimate,
       updatedAt: new Date(row.updatedAt),
+      referencedAt: row.referencedAt !== null ? new Date(row.referencedAt) : null,
+      referenceCount: row.referenceCount,
+      status: row.status as Reflection["status"],
     };
   }
 
@@ -337,5 +349,305 @@ export class PgMemoryStore implements MemoryStore {
       type: row.type as MemoryJobRow["type"],
       scope: decodeScopeId(row.scope_id),
     }));
+  }
+
+  // docs/12 "Access reinforcement" (P3) — pg mirror of the sqlite adapter. One
+  // batched, ACCOUNT-GUARDED UPDATE per tier: bump reference_count + stamp
+  // referenced_at (epoch ms in the bigint column) on exactly the injected ids.
+  // Observations are guarded via their thread's owner_id (no owner_id column of
+  // their own); reflections carry owner_id directly. Empty id lists skip their
+  // UPDATE. FAIL-OPEN is the caller's contract (inject never awaits this).
+  async bumpReferences(input: {
+    accountId: string;
+    observationIds: string[];
+    reflectionIds: string[];
+    now: Date;
+  }): Promise<void> {
+    const nowMs = input.now.getTime();
+    if (input.observationIds.length > 0) {
+      const ids = sql.join(
+        input.observationIds.map((id) => sql`${id}`),
+        sql`, `,
+      );
+      await this.db.execute(sql`
+        UPDATE memory_observations
+           SET reference_count = reference_count + 1, referenced_at = ${nowMs}
+         WHERE id IN (${ids})
+           AND thread_id IN (
+             SELECT id FROM memory_threads WHERE owner_id = ${input.accountId}
+           )
+      `);
+    }
+    if (input.reflectionIds.length > 0) {
+      const ids = sql.join(
+        input.reflectionIds.map((id) => sql`${id}`),
+        sql`, `,
+      );
+      await this.db.execute(sql`
+        UPDATE memory_reflections
+           SET reference_count = reference_count + 1, referenced_at = ${nowMs}
+         WHERE id IN (${ids})
+           AND owner_id = ${input.accountId}
+      `);
+    }
+  }
+
+  // docs/12 P5 decay sweep — READ half (pg mirror of the sqlite adapter). Every
+  // ACTIVE observation owned by the account (joined via its thread's owner_id —
+  // observations carry no owner_id column), with ONLY the score-input columns.
+  // archived rows are excluded → idempotent re-sweep. The bigint epoch-ms columns
+  // surface as numbers; box back to Date here (the score fn + sweep are Date-typed).
+  async listScorableObservations(scope: { accountId: string }): Promise<
+    Array<{
+      id: string;
+      referencedAt: Date | null;
+      observedAt: Date;
+      referenceCount: number;
+      importance: number;
+    }>
+  > {
+    const rows = await this.db
+      .select({
+        id: memoryObservations.id,
+        referencedAt: memoryObservations.referencedAt,
+        observedAt: memoryObservations.observedAt,
+        referenceCount: memoryObservations.referenceCount,
+        importance: memoryObservations.importance,
+      })
+      .from(memoryObservations)
+      .where(
+        and(
+          eq(memoryObservations.status, "active"),
+          sql`${memoryObservations.threadId} IN (SELECT id FROM memory_threads WHERE owner_id = ${scope.accountId})`,
+        ),
+      );
+    return rows.map((row) => ({
+      id: row.id,
+      referencedAt: row.referencedAt === null ? null : new Date(row.referencedAt),
+      observedAt: new Date(row.observedAt),
+      referenceCount: row.referenceCount,
+      importance: row.importance,
+    }));
+  }
+
+  // docs/12 P5 decay sweep — WRITE half (pg mirror). Soft-invalidate the named
+  // observations (status='archived', archived_at=now) — NEVER a DELETE. ACCOUNT-GUARDED
+  // via the thread's owner_id; empty id list → no statement; touches ONLY the
+  // observation status/archived_at, never raw messages nor other accounts' rows.
+  async archiveObservations(input: { accountId: string; ids: string[]; now: Date }): Promise<void> {
+    if (input.ids.length === 0) return;
+    const nowMs = input.now.getTime();
+    const ids = sql.join(
+      input.ids.map((id) => sql`${id}`),
+      sql`, `,
+    );
+    await this.db.execute(sql`
+      UPDATE memory_observations
+         SET status = 'archived', archived_at = ${nowMs}
+       WHERE id IN (${ids})
+         AND status = 'active'
+         AND thread_id IN (
+           SELECT id FROM memory_threads WHERE owner_id = ${input.accountId}
+         )
+    `);
+  }
+
+  // docs/12 P5 trigger — pg mirror of the sqlite buffer-flush gate (same contract). For
+  // every owner with ≥1 active observation: last decay sweep time (newest decay job's
+  // created_at for its scope_id) + count of active observations newer than that sweep;
+  // DUE if that count ≥ triggerObservations OR (now − lastSweep) ≥ triggerIntervalS (a
+  // never-swept account is due on the time gate). The account-only scope_id is canonical
+  // JSON ({"accountId":"<id>"}) = encodeScopeId({accountId}); a JSON-special id misses
+  // the join and over-triggers (the open-job dedupe collapses it — fail-open).
+  async listDecayCandidateAccounts(input: {
+    triggerObservations: number;
+    triggerIntervalS: number;
+    nowMs: number;
+  }): Promise<string[]> {
+    const intervalCutoff = input.nowMs - input.triggerIntervalS * 1000;
+    const result = (await this.db.execute(sql`
+      SELECT mt.owner_id AS owner_id,
+             (SELECT MAX(j.created_at) FROM memory_jobs j
+               WHERE j.type = 'decay'
+                 AND j.scope_id = '{"accountId":"' || mt.owner_id || '"}') AS last_sweep,
+             COUNT(o.id) AS active_total,
+             SUM(CASE WHEN o.observed_at > COALESCE(
+               (SELECT MAX(j2.created_at) FROM memory_jobs j2
+                 WHERE j2.type = 'decay'
+                   AND j2.scope_id = '{"accountId":"' || mt.owner_id || '"}'), 0)
+               THEN 1 ELSE 0 END) AS new_since_sweep
+        FROM memory_observations o
+        JOIN memory_threads mt ON mt.id = o.thread_id
+       WHERE o.status = 'active'
+         AND mt.owner_id IS NOT NULL
+       GROUP BY mt.owner_id
+    `)) as unknown;
+    const rows = (
+      Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+    ) as Array<{
+      owner_id: string;
+      last_sweep: number | string | null;
+      active_total: number | string;
+      new_since_sweep: number | string | null;
+    }>;
+    return rows
+      .filter((row) => {
+        const activeTotal = Number(row.active_total);
+        const newSince = Number(row.new_since_sweep ?? 0);
+        const lastSweep = row.last_sweep === null ? null : Number(row.last_sweep);
+        const countGate = newSince >= input.triggerObservations;
+        const timeGate = lastSweep === null || lastSweep <= intervalCutoff;
+        return activeTotal > 0 && (countGate || timeGate);
+      })
+      .map((row) => row.owner_id);
+  }
+
+  // docs/12 P6 — fact ingest with deterministic dedup + same-subject supersede
+  // (pg mirror of the sqlite adapter; same contract). Per fact:
+  //   1. INSERT … ON CONFLICT (owner_id, content_hash) DO NOTHING → the
+  //      account-scoped unique index makes a repeat assertion a no-op (Mem0 dedup
+  //      borrow); two accounts with the same content_hash both insert.
+  //   2. On a REAL insert (RETURNING id non-empty), supersede the OLDER same-
+  //      subject row: a pure datetime UPDATE stamping expired_at=now +
+  //      invalid_at=new.valid_from over still-ACTIVE rows with the same
+  //      (owner_id, subject_key), the new fact's scope (NULL-safe via IS NOT
+  //      DISTINCT FROM), an OLDER valid_from and a DIFFERENT id. NEVER a DELETE
+  //      (Graphiti borrow). Statement-by-statement (no native multi-row reconcile)
+  //      — the dedupe/supersede logic is identical, the dialect differs.
+  async insertFactsReconciled(input: {
+    accountId: string;
+    scope: { projectId?: string; resourceId?: string; threadId?: string };
+    facts: MemoryFactInput[];
+    now: Date;
+  }): Promise<void> {
+    if (input.facts.length === 0) return;
+    const nowMs = input.now.getTime();
+    for (const f of input.facts) {
+      // The top-level accountId is the authoritative tenant guard; persist it as
+      // owner_id so a mismatched input can never write under another tenant.
+      const ownerId = input.accountId;
+      const projectId = f.projectId ?? null;
+      const resourceId = f.resourceId ?? null;
+      const threadId = f.threadId ?? null;
+      const id = this.genId();
+      const validFromMs = f.validFrom.getTime();
+      const inserted = (await this.db.execute(sql`
+        INSERT INTO memory_facts
+          (id, owner_id, project_id, resource_id, thread_id, subject_key, fact_text,
+           content_hash, importance, reference_count, referenced_at, valid_from,
+           invalid_at, expired_at, status, source_observation_range, created_at, updated_at)
+        VALUES (
+          ${id}, ${ownerId}, ${projectId}, ${resourceId}, ${threadId}, ${f.subjectKey},
+          ${f.factText}, ${f.contentHash}, ${f.importance ?? 0.5}, ${f.referenceCount ?? 0},
+          ${f.referencedAt != null ? f.referencedAt.getTime() : null}, ${validFromMs},
+          ${f.invalidAt != null ? f.invalidAt.getTime() : null},
+          ${f.expiredAt != null ? f.expiredAt.getTime() : null}, ${f.status ?? "active"},
+          ${f.sourceObservationRange !== undefined ? JSON.stringify(f.sourceObservationRange) : null},
+          ${nowMs}, ${nowMs}
+        )
+        ON CONFLICT (owner_id, content_hash) DO NOTHING
+        RETURNING id
+      `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
+      const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
+      if (insertedRows[0] === undefined) continue; // deduped → no supersede
+
+      // IS NOT DISTINCT FROM is the NULL-safe equality (matches NULL-to-NULL and
+      // value-to-value), so the supersede only touches rows whose scope equals the
+      // NEW fact's scope (in-account narrowing — docs/12).
+      await this.db.execute(sql`
+        UPDATE memory_facts
+           SET expired_at = ${nowMs}, invalid_at = ${validFromMs}, updated_at = ${nowMs}
+         WHERE owner_id = ${ownerId}
+           AND subject_key = ${f.subjectKey}
+           AND status = 'active'
+           AND expired_at IS NULL
+           AND valid_from < ${validFromMs}
+           AND id <> ${id}
+           AND project_id IS NOT DISTINCT FROM ${projectId}
+           AND resource_id IS NOT DISTINCT FROM ${resourceId}
+           AND thread_id IS NOT DISTINCT FROM ${threadId}
+      `);
+    }
+  }
+
+  // docs/12 P6 — fact READ half (pg mirror). The account's still-alive facts:
+  // owner_id = accountId AND status='active' AND expired_at IS NULL, optionally
+  // narrowed by the in-account scope columns. bigint epoch-ms columns boxed back
+  // to Date; the source range jsonb is native.
+  async listActiveFacts(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+  }): Promise<Fact[]> {
+    const clauses: SQL[] = [
+      eq(memoryFacts.ownerId, input.accountId),
+      eq(memoryFacts.status, "active"),
+      isNull(memoryFacts.expiredAt),
+    ];
+    if (input.projectId !== undefined) clauses.push(eq(memoryFacts.projectId, input.projectId));
+    if (input.resourceId !== undefined) clauses.push(eq(memoryFacts.resourceId, input.resourceId));
+    if (input.threadId !== undefined) clauses.push(eq(memoryFacts.threadId, input.threadId));
+    const rows = await this.db
+      .select()
+      .from(memoryFacts)
+      .where(and(...clauses) as SQL)
+      .orderBy(asc(memoryFacts.createdAt), asc(memoryFacts.id));
+    return rows.map((row) => ({
+      id: row.id,
+      ownerId: row.ownerId,
+      projectId: row.projectId,
+      resourceId: row.resourceId,
+      threadId: row.threadId,
+      subjectKey: row.subjectKey,
+      factText: row.factText,
+      contentHash: row.contentHash,
+      importance: row.importance,
+      referenceCount: row.referenceCount,
+      referencedAt: row.referencedAt === null ? null : new Date(row.referencedAt),
+      validFrom: new Date(row.validFrom),
+      invalidAt: row.invalidAt === null ? null : new Date(row.invalidAt),
+      expiredAt: row.expiredAt === null ? null : new Date(row.expiredAt),
+      status: row.status as Fact["status"],
+      ...(row.sourceObservationRange !== null
+        ? { sourceObservationRange: row.sourceObservationRange }
+        : {}),
+      createdAt: new Date(row.createdAt),
+      updatedAt: new Date(row.updatedAt),
+    }));
+  }
+
+  // docs/12 P7 — the retention HARD-DELETE (pg mirror of the sqlite adapter; same
+  // contract). The ONLY DELETE in the forgetting system, account-AGNOSTIC, two deletes
+  // over the WHOLE store, each a STRICT lower bound (strictly-older-than — a row stamped
+  // exactly at the cutoff survives): (1) archived observations whose archived_at < cutoff
+  // (the status='archived' guard keeps active rows; raw messages untouched); (2) expired
+  // facts whose expired_at < cutoff (expired_at IS NOT NULL keeps still-alive facts).
+  // Reflections are NEVER hard-deleted. RETURNING id makes the deleted count portable
+  // across pglite + postgres-js (rowCount shape differs between drivers).
+  async pruneExpiredMemory(input: {
+    archivedObservationsBeforeMs: number;
+    expiredFactsBeforeMs: number;
+  }): Promise<{ observationsDeleted: number; factsDeleted: number }> {
+    const obs = (await this.db.execute(sql`
+      DELETE FROM memory_observations
+       WHERE status = 'archived'
+         AND archived_at IS NOT NULL
+         AND archived_at < ${input.archivedObservationsBeforeMs}
+      RETURNING id
+    `)) as unknown;
+    const obsRows = (
+      Array.isArray(obs) ? obs : ((obs as { rows?: unknown[] }).rows ?? [])
+    ) as unknown[];
+    const facts = (await this.db.execute(sql`
+      DELETE FROM memory_facts
+       WHERE expired_at IS NOT NULL
+         AND expired_at < ${input.expiredFactsBeforeMs}
+      RETURNING id
+    `)) as unknown;
+    const factRows = (
+      Array.isArray(facts) ? facts : ((facts as { rows?: unknown[] }).rows ?? [])
+    ) as unknown[];
+    return { observationsDeleted: obsRows.length, factsDeleted: factRows.length };
   }
 }
