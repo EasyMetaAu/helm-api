@@ -1,6 +1,6 @@
 # 11 · Admin UI
 
-> Status: **implemented (0.1).** A SvelteKit + Tailwind SPA (`adapter-static`),
+> Status: **implemented.** A SvelteKit + Tailwind SPA (`adapter-static`),
 > built into `apps/admin/build` and served by the gateway under `/admin`.
 
 After it boots, Helm ships a web console for basic rule management and request
@@ -10,10 +10,9 @@ credentials.
 ## Authentication: HTTP Basic
 
 The admin UI's authentication is **deliberately separate** from the API-key auth
-used for API traffic (see [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md)):
-a different header (Basic vs. Bearer), a different credential source (config/env
-vs. the KeyStore), and no RBAC. The admin path never consults the KeyStore, and
-API traffic never consults these credentials.
+used for API traffic — a different header (Basic vs. Bearer), a different
+credential source (config/env vs. the KeyStore), and no RBAC (see
+[06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md)).
 
 Credentials are resolved by `resolveAdminAuth`
 (`apps/gateway/src/middleware/basic-auth.ts`), with environment variables taking
@@ -69,10 +68,14 @@ The landing page (`/`) gives an at-a-glance overview.
 
 ### Rule management
 
-- **Keys** (`/keys`) — create and revoke API keys and set per-key rate limits.
-  Backed by the KeyStore (`/admin/api/keys` `GET` / `POST` / `PATCH` / `DELETE`),
-  never YAML. The plaintext of a freshly minted key is returned exactly once
-  (Principle 7); revocation is a soft disable. See [06 · Auth, API Keys & Rate
+- **Keys** (`/keys`) — create and revoke API keys and edit the full per-key cap
+  set: allowed lanes, custom-model permission, rate limits (RPM/TPM), usage
+  budgets (requests / tokens / spend with a budget window plus the over-budget
+  behavior and degrade lane), the concurrency limit, and the memory mode
+  (`off` / `observe` / `inject` with project id and thread source). Backed by the
+  KeyStore (`/admin/api/keys` `GET` / `POST` / `PATCH` / `DELETE`), never YAML.
+  The plaintext of a freshly minted key is returned exactly once (Principle 7);
+  revocation is a soft disable. See [06 · Auth, API Keys & Rate
   Limits](06-auth-and-rate-limits.md).
 - **Lanes** (`/lanes`) — view/edit each lane's `primary + fallback[]`
   (`/admin/api/lanes` CRUD). The model combobox is populated from a read-only
@@ -86,7 +89,7 @@ The landing page (`/`) gives an at-a-glance overview.
 
 Rule edits go through a runtime rule store that re-binds the live `lanes` /
 `policies` / `classifier` config the router reads — applied on the very next
-request, no restart. In 0.2 these edits are held in-process only and are **not**
+request, no restart. These edits are held in-process only and are **not**
 persisted across restarts; YAML write-back is future work. For durable changes,
 edit `config/*.yaml` directly. (The runtime **Settings** below are the exception
 — they are persisted to the config store.)
@@ -94,15 +97,22 @@ edit `config/*.yaml` directly. (The runtime **Settings** below are the exception
 ### Providers (OAuth subscriptions)
 
 - **Providers** (`/providers`) — connect and manage **OAuth subscription** backends
-  (Claude Pro/Max, ChatGPT Codex, GitHub Copilot). **Connect** runs the login flow
-  (manual paste-the-redirect for Claude/Codex, device-code for Copilot); **Manage**
-  opens a per-account dialog with three tabs — **Models** (curate the exposed set — a
-  live allow-list, not just a display filter), **Proxy** (per-account HTTP/HTTPS/SOCKS5
-  egress), and **Schedule** (`priority` + a `schedulable` toggle). Several accounts per
-  provider are pooled (priority asc, then LRU). Every change here — connect, disconnect,
-  curation, proxy, scheduling — **hot-reloads**: it re-synthesizes the live provider
-  pool and applies on the next request, no restart. Tokens are stored encrypted and are
-  never returned to the UI (proxy passwords included: read shows only `hasPassword`).
+  (Claude Pro/Max, ChatGPT Codex, GitHub Copilot). This surface requires
+  `HELM_OAUTH_ENC_KEY` (a 32-byte token-encryption key); without it the OAuth admin
+  endpoints are disabled, and the gateway refuses to start if a subscription
+  provider is configured without it.
+  - **Connect** runs the login flow — manual paste-the-redirect for Claude/Codex,
+    device-code for Copilot.
+  - **Manage** opens a per-account dialog with three tabs: **Models** (curate the
+    exposed set — a live allow-list, not just a display filter), **Proxy**
+    (per-account HTTP/HTTPS/SOCKS5 egress), and **Schedule** (`priority` plus a
+    `schedulable` toggle).
+  - **Pooling** — several accounts per provider are pooled (priority asc, then LRU).
+  - **Hot-reload** — every change (connect, disconnect, curation, proxy, scheduling)
+    re-synthesizes the live provider pool and applies on the next request, no restart.
+  - **Token storage** — tokens are stored encrypted and never returned to the UI
+    (proxy passwords included: a read shows only `hasPassword`).
+
   See [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md) and the
   README's OAuth subscription section.
 
@@ -110,10 +120,13 @@ edit `config/*.yaml` directly. (The runtime **Settings** below are the exception
 
 - **Settings** (`/settings`) — the runtime-mutable settings the operator can
   change without a restart (`/admin/api/settings`, validated against
-  `RuntimeSettingsSchema`, fail-closed on an invalid body): `capture_payloads`
-  (default on), `payload_retention_days`, the rate-limit master switch
-  (`rate_limit_enabled`) and system default quota
-  (`rate_limit_default_rpm`/`_tpm`), and `log_level`. See [07 · Error Model &
+  `RuntimeSettingsSchema`, fail-closed on an invalid body). A representative set:
+  `capture_payloads` (default on) and `payload_retention_days`; the rate-limit
+  master switch (`rate_limit_enabled`) and system default quota
+  (`rate_limit_default_rpm` / `_tpm`); the concurrency overflow queue
+  (`concurrency_queue_enabled` plus `min_size` / `size_multiplier` /
+  `wait_timeout_ms`); the per-OAuth-account user-message serial queue (its
+  `enabled` / `delay` / `timeout`); and `log_level`. See [07 · Error Model &
   Observability](07-observability.md) and [06 · Auth, API Keys & Rate
   Limits](06-auth-and-rate-limits.md).
 
@@ -127,10 +140,11 @@ edit `config/*.yaml` directly. (The runtime **Settings** below are the exception
   `capture_payloads` is on, the detail can load the full captured request/response
   bodies (`/admin/api/requests/:traceId/payload`).
 
-## Boundaries (0.2)
+## Boundaries
 
 - Basic rule management and request inspection only — no multi-tenancy and no
   fine-grained RBAC.
-- No Memory / agent orchestration in the admin UI.
+- No memory-content browsing or agent orchestration in the admin UI (the per-key
+  memory **mode** is configurable on the Keys page).
 - Complex configuration can still be edited directly in `config/*.yaml` and
   reloaded — the admin UI is a convenience layer, not the only entry point.

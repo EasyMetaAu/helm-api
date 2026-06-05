@@ -2,13 +2,13 @@
 
 The Protocol Adapter translates between client protocols and arbitrary upstream
 provider protocols, so a client always sees one standard interface and output
-shape. Open-source references, the coverage matrix, and the footgun checklist are
-in [Research Notes](research-notes.md). The implementation lives in
+shape. Open-source references and the coverage matrix are in
+[Research Notes](research-notes.md). The implementation lives in
 `packages/core/src/protocol/`.
 
 ## Wired protocols
 
-Four client protocols are wired and routed in 0.2:
+Four client protocols are wired and routed:
 
 | Endpoint | Protocol | Streaming |
 |----------|----------|-----------|
@@ -17,33 +17,36 @@ Four client protocols are wired and routed in 0.2:
 | `POST /v1/responses` | OpenAI Responses | Yes (SSE) and non-stream |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | Yes (SSE via `:streamGenerateContent?alt=sse`) and non-stream |
 
-For **OpenAI Responses**, streaming is now wired (0.2): a `stream:true` request
-returns a native Responses SSE stream of `response.*` events terminated by a
-`response.completed` event — **not** the Chat-Completions `[DONE]` sentinel. The
-`response.*` SSE transformer lives in `packages/core/src/protocol/responses-stream.ts`;
+**OpenAI Responses** streaming returns a native Responses SSE stream of
+`response.*` events terminated by a `response.completed` event. There is **no**
+`[DONE]` sentinel; instead every event carries a strictly monotonic
+`sequence_number` (the Responses wire contract). The `response.*` SSE machine is
+`convertOpenAIStreamToResponses` in `packages/core/src/protocol/responses-stream.ts`;
 see `apps/gateway/src/routes/responses.ts` for the route.
 
-**Gemini** is now an inbound route (0.2): `POST /v1beta/models/{model}:generateContent`
-(issue #58), backed by the transformers in `packages/core/src/protocol/gemini/`.
-Streaming is wired via `:streamGenerateContent?alt=sse`: each SSE frame is a nameless
-`data:` `GenerateContentResponse` carrying an **incremental** text delta (matching real
-Gemini — clients accumulate `chunk.text`), with **no** `event:` name and **no** `[DONE]`
-sentinel. The terminal frame carries the completed `functionCall` parts, `finishReason`,
-and `usageMetadata`. The delta mapper is `transformStreamOut` in
-`packages/core/src/protocol/gemini/gemini-transformer.ts`; see
-`apps/gateway/src/routes/gemini.ts` for the route.
+**Gemini** is mounted as a catch-all `POST /v1beta/models/:rest{.+}` (Hono can't
+match the literal `:` in `{model}:generateContent` with a named param). The core
+`parseGeminiPath` recognizes only `:generateContent` and `:streamGenerateContent`;
+any other op (`:countTokens`, `:embedContent`, …) returns a `404` in the **Gemini
+error shape**, never a generic gateway error. Auth is `x-goog-api-key` (the Gemini
+SDK default), with `Authorization: Bearer` as a fallback. Streaming via
+`:streamGenerateContent?alt=sse` emits nameless `data:` `GenerateContentResponse`
+frames each carrying an **incremental** text delta (matching real Gemini — clients
+accumulate `chunk.text`), with **no** `event:` name and **no** `[DONE]` sentinel;
+the terminal frame carries the completed `functionCall` parts, `finishReason`, and
+`usageMetadata`. The transformers live in `packages/core/src/protocol/gemini/`;
+see `apps/gateway/src/routes/gemini.ts` for the route.
 
-> **litellm parity (0.2).** All four faces are aligned to litellm's field
-> coverage: the full sampling/control knob set, usage detail (reasoning / cache /
+> **litellm parity.** All four faces are aligned to litellm's field coverage:
+> the full sampling/control knob set, usage detail (reasoning / cache /
 > per-modality), a unified reasoning bridge, full multimodal I/O, and both-ways
-> `finish_reason` maps. The per-pair data-loss matrix, the `n>1` reject-clean cap
-> policy, the `provider_raw` passthrough list, the capability-gated modalities, and
-> the parity scorecard live in [Protocol Compatibility](protocol-compatibility.md).
+> `finish_reason` maps. The per-pair data-loss matrix and the parity scorecard
+> live in [Protocol Compatibility](protocol-compatibility.md).
 
 ## Responsibilities
 
 - Normalize each wired client request (OpenAI Chat / Anthropic Messages / OpenAI
-  Responses) into the unified internal representation (IR).
+  Responses / Google Gemini) into the unified internal representation (IR).
 - Translate the provider's response back to the protocol the client requested.
 - Preserve streaming semantics — mapping SSE events across protocols where
   streaming is supported.
@@ -67,35 +70,50 @@ correctness reference; the code is a clean reimplementation, not a copy.
 - **One transformer per protocol, a four-method contract** — two request/response
   pairs covering both directions: `transformRequestOut` / `transformRequestIn`
   (native ↔ IR request) and `transformResponseOut` / `transformResponseIn`
-  (IR ↔ native response). Streaming-capable protocols (Anthropic, Gemini)
-  additionally expose `transformStreamIn` / `transformStreamOut`
-  (native SSE ↔ IR chunks) as extensions on top of the base contract. Inbound and
+  (IR ↔ native response). All four faces stream, but the SSE machines are
+  standalone per-direction conversion functions — `convertOpenAIStreamToAnthropic`,
+  `convertOpenAIStreamToResponses`, the Gemini `transformStreamIn` /
+  `transformStreamOut` pair — plus the `synthesizeSSE` synthesizer for synthetic
+  streams. As transformer **methods**, only Gemini exposes both `transformStreamIn`
+  and `transformStreamOut`; Anthropic exposes `transformStreamIn` only. Inbound and
   outbound translation live in the same file; see `protocol/transformer.ts`.
 - **Reasoning crosses the IR through one bridge** (`protocol/reasoning.ts`):
   `{type:"thinking"}` content parts and the flat `message.reasoning_content` /
   `thinking_blocks` are kept in sync, so reasoning survives every cross-protocol
   hop (OpenAI ↔ Anthropic ↔ Responses ↔ Gemini), streaming and non-streaming.
+  `reasoning_effort` maps to a per-protocol thinking-budget band — Anthropic
+  `{minimal:1024, low:2048, medium:8192, high:16384}`, Gemini
+  `{minimal:128, low:1024, medium:8192, high:24576}`.
 - **Non-mappable knobs degrade observably, never silently**
-  (`protocol/protocol-guards.ts`): `n>1` is capped to 1 on single-candidate
-  backends (`n_capped`), and a param with no native target surface (e.g.
-  `logprobs` → Anthropic) is dropped with a `data_loss` warning. Warnings ride
+  (`protocol/protocol-guards.ts`): guards fire **only for the Anthropic target** —
+  `n>1` is capped to 1 (`n_capped`), and `logprobs` / `top_logprobs` / `modalities`
+  are dropped with a `data_loss` warning. The `openai` and `gemini` targets are an
+  intentional no-op: every guarded knob has a native home (Responses passes `n`
+  through; Gemini maps `n` → `candidateCount`). Warnings ride
   `provider_raw.warnings` and are stripped before the wire — telemetry sees them,
   the upstream never does.
+- **`provider_raw` never reaches the wire.** The IR-internal passthrough bag is
+  stripped by every `transformRequestIn` / `transformResponseIn` before output;
+  the no-leak invariant is enforced by the protocol matrix tests across every
+  pair.
 - **Translation always goes `nativeIn → IR → nativeOut`**, never N×N direct
   conversion (N protocols need 2N transform functions, not N²).
 - **Streaming is an explicit state machine** (`protocol/streaming.ts` plus the
   per-direction machines, e.g. `protocol/anthropic/stream.ts`): a monotonic
   content-block index allocator, an OpenAI-tool-index → Anthropic-block-index map,
-  a temp-id → real-id upgrade table, and idempotent close guards. A JSON → SSE
-  synthesizer (`synthesizeSSE`) covers cache hits and non-streaming upstreams so a
-  streaming client is none the wiser.
-- **Cross-cutting concerns are stackable behavior transformers** (max-token
-  clamping, tool-use normalization, reasoning injection) that operate on the IR
-  only.
+  a temp-id → real-id upgrade table, and idempotent close guards. The Anthropic SSE
+  stream ends with a `message_stop` event; `synthesizeSSE` covers cache hits and
+  non-streaming upstreams so a streaming client is none the wiser (synthesized
+  OpenAI/Anthropic streams *do* append `[DONE]`).
+- **Cross-cutting concerns are stackable behavior transformers** (e.g. IR-only
+  clamps and normalizations such as Anthropic's `max_tokens` default of `4096`
+  when omitted) that operate on the IR only.
 
 ## Footguns that are handled
 
-These are the protocol-translation pits the implementation and its tests cover:
+These are the protocol-translation pits the implementation and its tests cover;
+the full per-pair degradation matrix is in
+[Protocol Compatibility](protocol-compatibility.md).
 
 - **finish_reason / stop_reason enum mismatches** — mapped to a legal enum **and**
   the original value is kept in `provider_raw`.
@@ -104,6 +122,9 @@ These are the protocol-translation pits the implementation and its tests cover:
 - **Tool-call streaming index/ID reconciliation** — maintain the index→block map,
   upgrade a temporary id once the real id arrives on a later fragment, and
   tolerate fragmented/partial argument JSON.
+- **Gemini tool-call IDs** — Gemini `functionCall` has no wire id, so a
+  deterministic `call_<name>_<occurrence>` id is synthesized inbound (to pair the
+  matching `functionResponse`) and dropped again outbound.
 - **Stream block/part ID and role consistency** — `start` before `delta` before
   `stop`; the first OpenAI chunk carries `role: "assistant"`.
 - **System prompt and multimodal structural mismatches** — Anthropic's top-level
@@ -117,13 +138,8 @@ These are the protocol-translation pits the implementation and its tests cover:
   content block while OpenAI uses a flat `reasoning_content` field; the bridge
   populates and reads both, so reasoning is neither dropped nor leaked into visible
   text on any hop.
-- **Unsupported knobs (`n>1`, `logprobs`, `modalities`)** — capped or dropped with
-  a recorded warning instead of erroring or silently vanishing.
-
-The full per-pair degradation matrix is in
-[Protocol Compatibility](protocol-compatibility.md).
 
 Errors are also translated into each client protocol's native shape (the OpenAI
 error envelope for `/v1/chat/completions` and `/v1/responses`, the Anthropic error
-envelope for `/v1/messages`). See
+envelope for `/v1/messages`, the Gemini error shape for `/v1beta/models/*`). See
 [07 · Error Model & Observability](07-observability.md).

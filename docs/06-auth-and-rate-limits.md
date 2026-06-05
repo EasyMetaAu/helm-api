@@ -1,12 +1,13 @@
 # 06 · Auth, API Keys & Rate Limits
 
-> Status: **implemented (0.1)**. Mandatory API-key auth, root-key bootstrap, and
+> Status: **implemented**. Mandatory API-key auth, root-key bootstrap, and
 > per-key rate limits all ship in the gateway.
 
 Helm never allows anonymous access. Every request to the API surface
-(`/v1/chat/completions`, `/v1/messages`, `/v1/responses`) must carry a valid
-API key. The admin UI is a separate surface with its own HTTP Basic credentials
-(see [11 · Admin UI](11-admin-ui.md)).
+(`/v1/chat/completions`, `/v1/messages`, `/v1/responses`,
+`/v1beta/models/...:generateContent`) must carry a valid API key. The admin UI
+is a separate surface with its own HTTP Basic credentials (see
+[11 · Admin UI](11-admin-ui.md)).
 
 ## Authentication
 
@@ -23,8 +24,15 @@ request is short-circuited before it can cost anything.
   Observability](07-observability.md).
 - On success, an `AuthIdentity` is attached to the request context: `keyId`,
   `keyPrefix` (display prefix only — **never** the plaintext key), `accountId`,
-  `role`, the per-key caps, and the per-key rate-limit override. Downstream
-  middleware reads this instead of touching the store again.
+  `role`, and the per-key caps (`AuthIdentity.caps`, including the rate-limit
+  override). Downstream middleware reads this instead of touching the store
+  again.
+
+The native-protocol faces authenticate **inside the handler** rather than at the
+shared middleware, so they can emit their own error envelopes: `/v1/messages`,
+`/v1/responses`, and `/v1beta/*` each run the same key lookup but shape a 401 in
+their native protocol shape. The Anthropic face accepts either `x-api-key` or
+`Authorization: Bearer`.
 
 Per **Principle 7**, the plaintext key lives only in the `Authorization` header.
 It is never logged, never echoed in a response, and never written to telemetry
@@ -74,41 +82,61 @@ The stored record (`ApiKeyRecord`, single source of truth in
   prefix: string,           // e.g. helm_live_ab12 — display/debug only
   account_id: string,
   role: "root" | "user",
-  allowed_lanes: string[] | null, // allow-list of lanes (empty/null = any lane)
-  allow_custom_model: boolean,    // may the client pin a model OR lane directly?
+  allowed_lanes: string[] | null,   // allow-list of lanes (empty/null = any lane)
+  allow_custom_model: boolean,      // may the client pin a model OR lane directly?
   disabled: boolean,
-  rate_limit_rpm: number | null,  // per-key override; null = inherit default
-  rate_limit_tpm: number | null,  // 0 = explicitly unlimited
+
+  // Rate limit (null = inherit system default; 0 = explicitly unlimited)
+  rate_limit_rpm: number | null,
+  rate_limit_tpm: number | null,
+
+  // Usage budgets (null = no cap for that dimension)
+  budget_requests: number | null,
+  budget_tokens: number | null,
+  budget_spend_usd: number | null,
+  budget_window_seconds: number | null,        // null = system default (~30 days)
+  over_budget_behavior: "degrade" | "reject",  // default "degrade"
+  degrade_lane: string | null,                 // null = economy
+
+  // Concurrency (issue #93) — null = unlimited; enforced only when
+  // concurrency_queue_enabled is on
+  concurrency_limit: number | null,
+
+  // Per-key memory defaults (issue #97) — x-memory-* headers override these
+  memory_mode: "off" | "observe" | "inject",   // default "off"
+  memory_project_id: string | null,
+  memory_thread_source: "header" | ...,        // default "header"
 }
 ```
+
+All of these are resolved at auth time onto `AuthIdentity.caps` and threaded
+through the request — downstream code reads the caps, never the store.
 
 - **Hashed storage only.** The store port's `CreateKeyInput` has no plaintext
   field, so the persistence layer is structurally unable to store a plaintext
   key. The plaintext of a freshly minted key is returned to the admin caller
   exactly once and then discarded.
 - **Per-key caps.** `allowed_lanes` and `allow_custom_model` constrain how a key
-  may route (resolved into `AuthIdentity.caps`). `allow_custom_model` lets the
-  `model` field name a concrete model alias or a lane (docs/04); an explicit
-  lane is still bounded by `allowed_lanes` and a violation is a 400, not a
-  silent downgrade. (A per-key `max_lane` ceiling was
-  retired — lanes are parallel, not a strict hierarchy, so the whitelist subsumes
-  it; see implementation-notes.md.)
+  may route. `allow_custom_model` lets the `model` field name a concrete model
+  alias or a lane (docs/04); an explicit lane is still bounded by `allowed_lanes`
+  and a violation is a 400, not a silent downgrade. (A per-key `max_lane` ceiling
+  was retired — lanes are parallel, not a strict hierarchy, so the whitelist
+  subsumes it; see implementation-notes.md.)
 - **Rotation & revocation never mutate in place.** `KeyStore.disable` is a soft
   revoke (`disabled = true`); rotate by minting a new key and disabling the old
   one. `KeyStore.updateKey` is a partial PATCH that writes only the per-key cap
   columns present in the patch (rate limits, allowed lanes, custom-model flag,
-  budgets), leaving omitted columns untouched; it never mutates `role` or the
-  immutable identity (`key_id`/`hash`/`prefix`/`account_id`).
+  budgets, concurrency, memory defaults), leaving omitted columns untouched; it
+  never mutates `role` or the immutable identity
+  (`key_id`/`hash`/`prefix`/`account_id`).
 
 ## Rate limits & quotas
 
 A "nginx for LLM" needs per-key rate limiting, but it must not become
 out-of-the-box friction. Helm ships lightweight per-key limiting (token-bucket
 RPM/TPM) that is **disabled by default**, plus per-key **usage budgets** (see
-below). Helm meters **per API key** — it is an internal/self-hosted gateway that
-hands out keys, so there is **no account/customer billing subject** and no
-account-level credit ledger (that remains out of scope; see the
-[roadmap](09-roadmap.md)).
+below). Helm meters **per API key** — there is no account/customer billing
+subject or credit ledger (out of scope; see the [roadmap](09-roadmap.md)).
 
 The limiter lives in core (`packages/core/src/ratelimit/`), behind a store-backed
 token bucket; the gateway middleware
@@ -130,7 +158,7 @@ rate_limit:
   default:
     rpm: 0                 # 0 = unlimited
     tpm: 0
-  overrides: {}           # yaml per-key overrides, keyed by key_id (config-only fallback)
+  overrides: {}            # yaml per-key overrides, keyed by key_id (config-only fallback)
 ```
 
 Quota resolution per dimension (`resolveQuota` in `ratelimit/limiter.ts`):
@@ -179,29 +207,33 @@ window** instead of the fixed 60s, and continuous refill (no hard reset).
 The distinguishing behavior is **what happens when a key is over budget**, chosen
 per key via `over_budget_behavior`:
 
-- **`degrade`** (default) — the request is **downgraded to a cheaper lane**
-  (`degrade_lane`, default `economy`) instead of its normal lane, then served
-  normally. Cost is bounded **without interrupting service**. Implemented by
-  feeding a dynamic `max_lane` ceiling into the router's existing `applyCaps` for
-  that one request.
+- **`degrade`** (default) — the request is **forced onto the cheaper
+  `degrade_lane`** (default `economy`), then served normally, so cost is bounded
+  **without interrupting service**. This is a *forced lane selection*, not a
+  `max_lane` ceiling (`degradeLane` is applied with `max_lane: null`), so it works
+  even when the target is a task lane (`coding`, `json`, …). The forced lane is
+  still clamped to the key's `allowed_lanes`, and explicit-model/lane passthrough
+  is **suppressed** while degrading — a degrading key cannot bypass the cap by
+  naming an expensive model or lane.
 - **`reject`** — a hard `429 rate_limited` (message `usage budget exceeded`),
   before classify/route.
 
-Two phases, like the rate limiter but split by failure mode:
+Enforcement runs in two phases, split by failure mode:
 
-- **Pre-route check** is a pure **balance sign check** (no per-request cost
-  pre-estimate): a discrete dimension (requests/tokens) is over when it can't
-  afford one more unit (`remaining < 1`); spend is over at `remaining <= 0`. The
-  check is **fail-CLOSED** — a store-read error propagates (→ 5xx), never a silent
-  pass. A key with no caps is a zero-touch fast path (no store read).
+- **Pre-route check** is a pure balance sign check (no per-request cost estimate):
+  a discrete dimension (requests/tokens) is over when it can't afford one more
+  unit (`remaining < 1`); spend is over at `remaining <= 0`. It is **fail-CLOSED**
+  — a store-read error propagates (→ 5xx), never a silent pass. A key with no caps
+  is a zero-touch fast path (no store read).
 - **Post-served settle** debits the **actual** served usage (1 request + measured
-  tokens + the decision's settled `total_usd`, never recomputed; an unmeasured
-  cost settles 0). It is **fail-OPEN** — a settle failure is logged, never 5xx's a
+  tokens + the decision's settled `total_usd`, never recomputed; unmeasured cost
+  settles 0). It is **fail-OPEN** — a settle failure is logged, never 5xx's a
   served request. Because settle is post-served, a single in-flight request may
-  push a bucket slightly negative; subsequent requests are then over budget.
+  push a bucket slightly negative (a soft cap); subsequent requests are then over
+  budget.
 
 Budgets are enforced on **all four protocol faces** (OpenAI `/v1/chat`, Anthropic
-`/v1/messages`, OpenAI `/v1/responses`, Gemini `:generateContent`). The three
+`/v1/messages`, OpenAI `/v1/responses`, Gemini `:generateContent`). The
 self-authenticating faces share one routing pipeline, so the check + settle (and
 the streamed-cost backfill that makes the spend dimension correct on the streaming
 path) live there once. All budget config is editable per key in the admin API

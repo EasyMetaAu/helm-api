@@ -8,14 +8,14 @@ Client
   -> Auth Resolver               # mandatory API key (bootstrapped at first start)
   -> Rate Limiter                # per-key; off by default
   -> Protocol Adapter
-  -> Task Classifier             # three-layer cascade: rules -> eval -> balanced
+  -> Task Classifier             # cascade: rules (always on) -> optional eval -> balanced
   -> Policy Engine
   -> Lane Resolver
   -> Capability Filter
   -> Circuit Breaker
   -> Provider Executor
   -> Telemetry / Request Log
-  -> (Memory Middleware)         # observe phase wired on every surface
+  -> (Memory Middleware)         # observe/inject, opt-in per request; off by default
 ```
 
 Positioning: Helm is **nginx for LLMs** — a declaratively-configured model
@@ -55,7 +55,9 @@ back to the client protocol, preserving streaming semantics. See
 
 Resolves an API key to an identity, attaches account/org/user/role and capability
 metadata, and enforces authentication. API keys are stored only as a sha256 hash;
-the plaintext key never appears in telemetry or logs. See
+the plaintext key never appears in telemetry or logs. The resolved identity
+carries the per-key caps (`allowed_lanes`, `allow_custom_model`, rate/budget
+limits, `degrade_lane`, memory mode) that later stages enforce. See
 [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
 
 ### Rate Limiter
@@ -69,9 +71,11 @@ default and any per-key RPM/TPM override on every request surface. See
 
 ### Task Classifier
 
-The three-layer classification cascade (rules → optional eval → balanced),
-producing `task_type` / `complexity` / `confidence` / `constraints`. See
-[03 · Classification Cascade](03-classification.md).
+The classification cascade producing `task_type` / `complexity` / `confidence` /
+`constraints`. Layer-1 rules are **always on** (pure, zero-network); Layer-2 eval
+is **off by default** and runs only when Layer-1 confidence is below the threshold;
+Layer-3 is the `balanced` fail-open sink. So the live default cascade is
+**rules → balanced**. See [03 · Classification Cascade](03-classification.md).
 
 ### Policy Engine
 
@@ -87,11 +91,18 @@ Applies explicit server-side policies. Responsibilities:
 
 Collapses the classifier + policy outcome into exactly one lane. Responsibilities:
 
-- Apply the routing priority (policy pin → task lane → complexity-fallback lane).
-- Fall back to `balanced` when the classifier itself fell back, or when no lane
-  resolves.
-- Preserve the lane's declared primary/fallback order (chain expansion happens in
-  the orchestrator, not here).
+- Honor **explicit passthrough** first: when `allow_custom_model` is set and the
+  request names a lane, that lane's chain is used; a known concrete model becomes
+  a single-element chain (an unknown model is rejected as `invalid_request`, never
+  silently re-routed). `auto` is never explicit — it always forces classification.
+- Otherwise apply the routing priority: policy pin (`use_lane`) → lane named after
+  the `task_type` → complexity-fallback lane (simple→economy, medium→balanced,
+  complex→premium) → `balanced`.
+- Fall back straight to `balanced` when the classifier itself fell back (the
+  outcome is not re-derived).
+- Apply **per-key caps last** as the outer bound, after the policy caps. A per-key
+  `degrade_lane` forces the request onto that lane (clamped to `allowed_lanes`) and
+  suppresses explicit-model passthrough; it is not a `max_lane` ceiling.
 
 The resolver itself never trips circuit breakers or calls providers; that is the
 execution stage's job.
@@ -132,6 +143,27 @@ bodies. Full request/response payloads are captured separately (governed by the
 and aged out per `payload_retention_days`. The error model and Debug UI are in
 [07 · Error Model & Observability](07-observability.md).
 
+## Lanes
+
+Helm exposes a small fixed set of **lanes** (the only abstraction clients steer
+toward; provider aliases stay internal). The shipped set is three ranked
+quality/cost lanes — `economy`, `balanced`, `premium` — plus four task lanes —
+`coding`, `json`, `vision`, `tool_use`. `balanced` is **mandatory**: it is the
+terminal of the classification fallback and the tail every other lane drops
+through. The chains live in `config/lanes.yaml`; see
+[04 · Routing & Lanes](04-routing-and-lanes.md).
+
+## Memory middleware
+
+Memory is **opt-in per request** via the `x-memory-mode` header, normalized in
+core. `off` (the default) touches no storage. `observe` writes the turn back to
+memory; `inject` additionally does a synchronous read-back that **fully replaces
+the message array before routing**, then also writes. Both phases are wired on the
+chat, messages, and responses surfaces (when the mode is `observe`/`inject`) — not
+on the Gemini or models surfaces. A background `MemoryWorker` (observer / reflector
+/ decay jobs) runs process-wide by default and can be disabled via env. See
+[08 · Memory](08-memory.md).
+
 ## Internal request shape
 
 The normalized `InternalRequest` that every protocol adapter produces:
@@ -159,61 +191,19 @@ metadata:
   memory_mode: off | observe | inject
 ```
 
-> Note: `protocol` is one of the four wired protocols. The Gemini value is
-> emitted by the Gemini inbound surface (`POST /v1beta/models/{model}:generateContent`),
-> which is routed through the same core pipeline (see
-> [01 · Overview](01-overview.md)).
-
 ## Decision record
 
-Every routed request produces a redacted `DecisionRecord` (no message bodies),
-which feeds telemetry and the Debug UI:
+Every routed request produces a redacted `DecisionRecord` (no message bodies) that
+feeds telemetry and the Debug UI. It captures the classifier outcome (including
+`decided_by`: `rules | eval | default | fallback`), the matched policy, the
+selected lane and expanded candidate chain, every provider attempt (with skip
+reasons), the final outcome, `fallback_count` (execution-stage swaps only), a
+cost breakdown, and a `memory` block of counts/ids only (never memory content).
+Field-level detail lives in [07 · Error Model & Observability](07-observability.md).
 
-```yaml
-request_id: string
-trace_id: string
-requested_model: string
-key_prefix: string | null          # display prefix only, never the plaintext key
-classifier:
-  task_type: string
-  complexity: string
-  confidence: number
-  decided_by: rules | eval | default | fallback   # which layer picked the lane
-  eval_cache_hit: boolean | null     # only meaningful when eval ran
-  fallback_reason: string | null     # eval_disabled / eval_<reason> (only on "fallback")
-  constraints: object
-  explanation: array
-policy:
-  matched_policy_id: string | null
-  reason: string
-lane:
-  selected_lane: string
-  candidate_chain: array             # expanded primary + fallback aliases
-provider_attempts:
-  - alias: string
-    skipped: boolean
-    skip_reason: string | null       # circuit_open | capability:<reason> | free_429 | ...
-    status: ok | error
-    error_class: string | null
-    latency_ms: number
-    cost_usd: number | null
-    error_detail: object | null      # redacted upstream failure detail
-final:
-  model_alias: string | null
-  provider_model: string | null
-  status: ok | error
-  error_reason: string | null
-latency_total_ms: number
-fallback_count: number               # EXECUTION-stage swaps (served attempts - 1)
-cost_breakdown:
-  eval_usd: number | null            # Layer-2 small-model self-cost
-  completion_usd: number | null      # sum of served attempts' cost
-  total_usd: number | null
-```
-
-`decided_by` describes **only** the classification stage. The execution-stage
-provider fallback is a separate mechanism recorded under `provider_attempts` /
-`fallback_count`; the two fallbacks are never conflated (principle 5). See
+The classifier `decided_by` describes **only** the classification stage; the
+execution-stage provider fallback is a separate mechanism recorded under
+`provider_attempts` / `fallback_count` (principle 5). See
 [04 · Routing & Lanes](04-routing-and-lanes.md).
 
 ## Configuration files

@@ -1,12 +1,11 @@
 # 07 · Error Model & Observability
 
-> Status: **implemented (0.1)**. The structured error model, the redacted
+> Status: **implemented**. The structured error model, the redacted
 > decision record, and the separate full-payload capture all ship.
 
-The full per-request routing trail (the decision record) is described
-structurally in [02 · Architecture](02-architecture.md). This chapter covers the
-error model, the redacted decision record, the separate payload capture, and what
-the Debug UI surfaces.
+This chapter covers the error model, the redacted decision record, the separate
+payload capture, and what the Debug UI surfaces. The decision record's structural
+place in the pipeline is described in [02 · Architecture](02-architecture.md).
 
 ## Error model
 
@@ -50,10 +49,14 @@ producer. The Protocol Adapter's response-out stage translates this unified erro
 into each client protocol's error shape (see [05 · Protocol
 Translation](05-protocol-translation.md)).
 
-A client-initiated disconnect is **not** treated as a server timeout: the timeout
-middleware (`apps/gateway/src/middleware/limits.ts`) checks the client's own
-abort signal and does not synthesize a 504 (see [02 ·
-Architecture](02-architecture.md)).
+Two cases never become a generic 5xx leak (`apps/gateway/src/middleware/error-handler.ts`):
+
+- An **unknown / non-`HelmError` throw** falls back to a redacted
+  `upstream_error` (502) — fail-open (Principle 3), with no stack or raw message
+  leaked to the client.
+- A **client-initiated disconnect** is not a provider fault and not a server
+  timeout: the handler detects the client's own abort signal and returns **499**
+  (not a 5xx, no synthesized 504; see [02 · Architecture](02-architecture.md)).
 
 ## Decision record (redacted)
 
@@ -63,7 +66,8 @@ full routing trail and is **redacted** as defence-in-depth — it carries no
 plaintext key and no private payload. The record holds:
 
 - `request_id` / `trace_id` (correlation across logs and the Debug UI);
-  `requested_model`; `key_prefix` (display prefix only, never the plaintext key).
+  `requested_model`; `key_prefix` (display prefix only, e.g. `helm_live_ab12`,
+  never the plaintext key).
 - `classifier`: `task_type`, `complexity`, `confidence`, **`decided_by`**
   (`rules` / `eval` / `default` / `fallback`), `eval_cache_hit`,
   `fallback_reason`, `constraints`, and `explanation` (matched dimensions /
@@ -77,6 +81,14 @@ plaintext key and no private payload. The record holds:
 - `final`: the served model alias / provider model, status, and error reason.
 - `latency_total_ms`, `fallback_count` (execution-stage count), and
   `cost_breakdown` (`eval_usd` / `completion_usd` / `total_usd`).
+- `memory`: stamped by the gateway **after** the inject phase ran (the routing
+  core never touches memory); `null` when memory inject was off / skipped /
+  failed. Counts and ids only — **never memory content** (Principle 7):
+  `memory_hydrated`, `reflection_version`, `observation_count`,
+  `memory_tokens_injected`, `observer_job_id`, `memory_writeback_status`
+  (`queued` / `skipped` / `failed`), `degraded`, and `thread_source` (which
+  fallback-chain link produced the thread anchor). See [08 ·
+  Memory](08-memory.md).
 
 Per **Principle 5**, the **classification** fallback (`classifier.decided_by` /
 `fallback_reason`) and the **execution** fallback (`provider_attempts` /
@@ -92,7 +104,17 @@ persisted or logged. It is pure (never mutates its input) and framework-agnostic
 - Private payload fields (`messages`, `attachments`, `prompt`, `content`,
   `input`) → summaries (kind + size), not their contents.
 - Keys matching the secret pattern (`api_key`, `authorization`, `password`,
-  `secret`, `token`, `credential`) are fingerprinted or summarized.
+  `secret`, `token`, `credential`) are handled **by value type**: a **string**
+  is fingerprinted, an **object / array** is summarized (it could hold
+  credentials), but a **scalar** (number, boolean, null, undefined) passes
+  through **verbatim** — it can never carry key material, and summarizing it
+  would corrupt a legitimate counter. This is why `memory_tokens_injected` (a
+  token *count* whose name matches `token`) survives intact; persisting it as
+  `{redacted:true,kind:"number"}` previously broke the schema on read and 502-ed
+  the requests list.
+- `key_prefix` deliberately does **not** match the secret pattern (it is a
+  display fragment, not a credential), so it survives redaction and reaches the
+  Debug UI.
 - Non-sensitive fields (`trace_id`, latency, cost, status, …) pass through
   verbatim.
 
@@ -104,11 +126,9 @@ verbatim** request and response bodies into a dedicated `request_payloads` table
 This is deliberately split from the decision record so it prunes independently and
 never bloats the decision JSON.
 
-- `capture_payloads` defaults to **ON** (`RuntimeSettingsSchema`). For a
-  self-hosted gateway the operator owns the data on their own box; capture makes
-  debugging and auditing straightforward. It can be toggled off at runtime from
-  the admin "System Settings" page, in which case the capture path is skipped
-  entirely (zero storage).
+- `capture_payloads` defaults to **ON** (`RuntimeSettingsSchema`) and is
+  toggleable at runtime from the admin "System Settings" page; toggled off, the
+  capture path is skipped entirely (zero storage).
 - `payload_retention_days` (default 30) bounds the storage footprint and the
   exposure window; older payloads are auto-pruned.
 - Capture is **not** redacted — it is the verbatim client request body plus the

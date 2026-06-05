@@ -18,7 +18,8 @@ The cascade itself is framework-agnostic
 (`packages/core/src/classifier/cascade.ts`), driven by the live, Zod-validated
 configuration in `config/classifier.yaml`. With the default config
 (`eval.enabled: false`), the cascade degrades to the two-layer "rules + balanced"
-path — Layer 2 is a pure additive switch.
+path — Layer 2 is a pure additive switch. A **confident Layer 1 ends the cascade
+even when eval is enabled** — high confidence never spends an eval call.
 
 **Key distinction: the two fallbacks are different things and are recorded
 separately.**
@@ -33,6 +34,23 @@ separately.**
 The first happens while *choosing* a lane; the second happens while *executing*
 one. Two mechanisms, two sets of log fields — never conflated (principle 5).
 Execution fallback is covered in [04 · Routing & Lanes](04-routing-and-lanes.md).
+
+### `decided_by`: who chose the lane
+
+The classifier itself emits `rules` | `eval` | `fallback`. There is a fourth
+value, `default`, written one layer up: if `classify()` *throws* outright, the
+routing orchestrator hard fail-opens (principle 3) — it degrades to `balanced`
+and stamps `decided_by: default` rather than surfacing a 5xx
+(`packages/core/src/routing/route-request.ts`).
+
+So when you debug a `balanced` decision:
+
+- `decided_by: fallback` → the cascade ran to Layer 3 (uncertain, no commit).
+- `decided_by: default` → the classifier *errored* and we caught it.
+
+Both route straight to `balanced` without re-deriving a lane from
+task/complexity (`lane-resolver.ts`), but they mean different things — one is
+"couldn't decide", the other is "blew up".
 
 ## Classifier output
 
@@ -85,12 +103,13 @@ wrapped so a degenerate input yields a safe default instead of throwing
   activation threshold wins; otherwise the task is `chat`. Some tasks have a
   raised activation threshold (e.g. `web` and `security`) so a single weak signal
   cannot false-trigger them.
-- **Session momentum** (`momentum.ts`): a short follow-up message is weighted by
-  the session's recent classification history (keyed by
-  `metadata.conversation_id`, which maps from the `x-session-key` header) so one
-  short message does not drag classification off course. It is best-effort soft
-  state held only as `complexity` / `rawScore` / timestamp — never message
-  content.
+- **Session momentum** (`momentum.ts`): **on by default** (`momentum.enabled:
+  true`, `ttl_sec: 1800`, `history_size: 5`, `max_history_weight: 0.6`). A short
+  follow-up message is weighted by the session's recent classification history
+  (keyed by `metadata.conversation_id`, which maps from the `x-session-key`
+  header) so one short message does not drag classification off course. It is
+  best-effort soft state held only as `complexity` / `rawScore` / timestamp —
+  never message content.
 - **Hard overrides and shortcuts** (`overrides.ts`): heartbeat tokens (e.g.
   `HEARTBEAT_OK`) snap to `simple`; formal-logic markers snap to `reasoning`; a
   request carrying tools has a floor of `standard`; a very long context
@@ -105,12 +124,12 @@ wrapped so a degenerate input yields a safe default instead of throwing
   **English-only**, so Layer 1 is an English fast path. A predominantly non-Latin
   prompt (`nonLatinRatio ≥ language.non_latin_min_ratio`) with no content-type
   structural grip is forced `uncertain` (confidence 0) so the cascade escalates to
-  the multilingual Layer-2 eval. **Operator contract**: serve non-English traffic →
-  enable eval. With eval **off**, a non-Latin prompt degrades deterministically to
-  `balanced` (fail-open) rather than being routed by a keyword score that matched
-  nothing. Latin-script non-English (es/fr/de) is not flagged by ratio, but already
-  yields ~0 keyword signal → low confidence → eval anyway. The guard is suppressed
-  for trivially-short prompts (already pinned `simple`).
+  the multilingual Layer-2 eval. **Operator contract**: to serve non-English
+  traffic, enable eval — with eval **off**, a non-Latin prompt degrades
+  deterministically to `balanced` (fail-open) rather than being routed by a
+  keyword score that matched nothing. (Latin-script non-English already yields ~0
+  keyword signal → low confidence → eval anyway.) The guard is suppressed for
+  trivially-short prompts (already pinned `simple`).
 
 ### Tunables live in config
 
@@ -118,11 +137,10 @@ Dimension names, weights, keyword lists, tier boundaries, the sigmoid slope `k`,
 and the confidence threshold are all **data** in
 [`config/classifier.yaml`](../config/classifier.yaml) — adjust them without
 touching code (principle 2). The shipped values are calibrated against a golden
-prompt set; rather than reproduce numbers that drift, read the live file. As of
-the calibration that ships with 0.1, the salient values are
-`confidence_threshold: 0.42`, `sigmoid_k: 12`, and tier boundaries
-`{ standard: -0.06, complex: 0.30, reasoning: 0.85 }`. Treat `classifier.yaml` as
-the source of truth.
+prompt set; rather than reproduce numbers that drift, read the live file. The
+salient defaults are `confidence_threshold: 0.42`, `sigmoid_k: 12`, and tier
+boundaries `{ standard: -0.06, complex: 0.30, reasoning: 0.85 }`. Treat
+`classifier.yaml` as the source of truth.
 
 ## Layer 2: small-model eval
 
@@ -151,23 +169,19 @@ classifier:
       max_entries: 5000            # LRU capacity
 ```
 
-Design notes:
+The verdict is **decisive**: unlike a pure advisory probe, the eval output
+directly selects a lane (a JSON validation failure fails open to `balanced`).
+The cache key is a **content hash** (not a `conversation_id`), since the gateway
+is stateless — identical or near-identical requests hit the cache and skip a
+repeat eval. The cache is held per process and is rebuilt whenever the live
+classifier config changes, so a stale verdict computed under old config is never
+served.
 
-- The eval output is strict JSON `{ complexity, task_type, confidence }`; a
-  validation failure fails open to `balanced`.
-- `temperature: 0`, non-streaming, and cacheable.
-- The verdict is **decisive**: unlike a pure advisory probe, the eval output
-  directly selects a lane.
-- The cache key is a **content hash** (not a `conversation_id`), since the gateway
-  is stateless. Identical or near-identical requests hit the cache and skip a
-  repeat eval. The cache is held per process and is rebuilt whenever the live
-  classifier config changes (so a stale verdict computed under old config is never
-  served).
-- The eval call goes through the primary provider as an internal small-model call
-  (the eval model id is sent directly on the wire); it is not one of the
-  user-facing lanes. Its own token usage is converted to a separate `eval_usd`
-  cost, kept distinct from completion cost (see
-  [07 · Error Model & Observability](07-observability.md)).
+The eval call goes through the primary provider as an internal small-model call
+(the eval model id is sent directly on the wire); it is not one of the
+user-facing lanes. Its own token usage is converted to a separate `eval_usd`
+cost, kept distinct from completion cost (see
+[07 · Error Model & Observability](07-observability.md)).
 
 Whenever the cascade falls to `balanced`, the decision record distinguishes why:
 `eval_disabled` (uncertain but eval is off, so no Layer 2 ran) versus

@@ -1,80 +1,108 @@
 # 09 · Roadmap
 
-> Status: **0.2 is implemented.** Phases 0–4 (the 0.1 core) are done; 0.2 adds the
-> Gemini inbound route (with streaming), native OpenAI Responses streaming, full OAuth subscription
-> providers (multi-account pools + hot-reload), and an admin-UI overhaul. The
-> "remaining" list below is what is still deferred.
+> Status: **shipped — 0.6.0.** The core gateway (routing, classification, provider
+> execution, protocol translation, telemetry) runs in production, and several major
+> subsystems have landed since the early releases: a memory middleware (observe +
+> inject + background workers, opt-in), per-key budgets / rate limits / concurrency
+> limiting, runtime hot-reload settings, verbatim payload capture, four streaming
+> inbound protocols, full OAuth subscription providers, and an admin-UI overhaul.
+> The "deferred" list below is what is genuinely still out of scope or not yet wired.
 
-## Delivered in 0.1 (phases 0–4)
+## Delivered
 
-The build followed an order where each phase runs on its own.
+### Core gateway
 
-- **Phase 0 — Skeleton · done.** HTTP gateway + mandatory API-key auth (with
-  root-key bootstrap) + single-protocol passthrough (OpenAI Chat) + telemetry
-  persistence + Docker deployment (config/data volumes). It authenticates,
-  forwards, logs, and runs in a container. See
-  [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md) and
+- **Skeleton.** HTTP gateway + mandatory API-key auth (root-key bootstrap when the
+  key store is empty) + telemetry persistence + Docker deployment (config/data
+  volumes). See [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md) and
   [10 · Deployment](10-deployment.md).
-- **Phase 1 — Routing core · done.** Layer-1 deterministic rule classifier + the
-  default lanes + the provider executor + capability filtering + circuit breaker +
-  the in-chain fallback. It serves real traffic; an uncertain classification falls
-  open to `balanced`. See [03 · Classification Cascade](03-classification.md) and
+- **Routing core.** Layer-1 deterministic rule classifier + the default lanes + the
+  provider executor + capability filtering + per-model circuit breaker + in-chain
+  execution fallback. An uncertain classification falls open to `balanced`. See
+  [03 · Classification Cascade](03-classification.md) and
   [04 · Routing & Lanes](04-routing-and-lanes.md).
-- **Phase 2 — Protocol translation · done.** The Protocol Adapter translates
-  OpenAI Chat, Anthropic Messages, and OpenAI Responses (with streaming for Chat
-  and Messages), rewritten with musistudio/llms as the architecture blueprint and
-  litellm as the correctness spec. Clients can mix SDKs. See
-  [05 · Protocol Translation](05-protocol-translation.md).
-- **Phase 3 — Eval layer · done.** The Layer-2 small-model evaluator with a
-  content-hash cache (disabled by default). When enabled, its verdict selects a
-  lane; identical requests hit the cache instead of re-evaluating.
-- **Phase 4 — Admin UI · done.** A web console (HTTP Basic auth) for basic rule
-  management (lanes / policies / classifier / keys / system settings) plus request
-  debugging (list / detail / decision trail). See [11 · Admin UI](11-admin-ui.md).
+- **Eval layer.** The Layer-2 small-model evaluator with a content-hash cache,
+  **off by default**. When enabled, it runs only when Layer-1 confidence is below
+  the threshold; identical requests hit the cache instead of re-evaluating.
 
-## Delivered in 0.2
+### Protocol translation
 
-Net-new since 0.1 — all verified live (see `implementation-notes.md`):
+The Protocol Adapter accepts **four inbound protocols, all with streaming**:
 
-- **Gemini inbound route.** `POST /v1beta/models/{model}:generateContent` and
-  `:streamGenerateContent` are mounted (issue #58) — Google/Gemini-format clients now
-  reach the gateway, including native `alt=sse` streaming (incremental-delta frames).
-  The earlier "transformer exists but no endpoint" gap is closed. See
-  [05 · Protocol Translation](05-protocol-translation.md).
-- **OpenAI Responses streaming.** `stream: true` on `/v1/responses` now returns a
-  native `response.*` SSE stream terminated by a `response.completed` event (not the
-  Chat-Completions `[DONE]` sentinel). The structured-400 rejection is gone.
-- **OAuth subscription providers (issue #38).** Now a complete feature, not the
-  deferred sketch the 0.1 note described: **interactive login** from the dashboard
-  (Claude Pro/Max + ChatGPT Codex paste-the-redirect, GitHub Copilot device-code), a
-  **persistent encrypted token store** (survives restarts), **multi-account pools**
-  with per-account model curation / egress proxy / priority+schedulable, **hot-reload**
-  of all of those (no restart), fail-closed subscription routing, and a stable
-  per-account anti-ban device identity. ChatGPT Codex routes via the OpenAI Responses
-  backend; GitHub Copilot via its OpenAI-compatible endpoint.
+- OpenAI Chat `POST /v1/chat/completions`
+- Anthropic Messages `POST /v1/messages`
+- OpenAI Responses `POST /v1/responses` — native `response.*` SSE stream, terminated
+  by `response.completed` with a strictly monotonic `sequence_number` (no `[DONE]`).
+- Google Gemini `POST /v1beta/models/{model}:generateContent` and
+  `:streamGenerateContent?alt=sse` — auth via `x-goog-api-key`, native incremental
+  delta frames.
+
+Clients can mix SDKs; cross-protocol SSE conversion is covered per direction. See
+[05 · Protocol Translation](05-protocol-translation.md).
+
+### Memory middleware
+
+Opt-in per request via the `x-memory-mode` header (default `off` — zero DB touch):
+
+- **`observe`** — write-only capture of inbound/outbound turns.
+- **`inject`** — synchronous read-back that full-replaces the message array before
+  routing, then also writes. Wired on the chat, Messages, and Responses surfaces.
+- **Background `MemoryWorker`** runs process-wide by default (disable via
+  `HELM_MEMORY_WORKER_DISABLED=1`), dispatching observer / reflector / decay jobs.
+- **Forgetting & tiering** (short / mid / long, see [12 · Memory Tiering](12-memory-tiering.md))
+  has shipped, gated behind `config.memory.forgetting.enabled` — **default `false`**,
+  so with forgetting off the runtime is byte-identical to before.
+- The `DecisionRecord` carries a redacted `memory` block (counts / ids only, never
+  content). See [08 · Memory Middleware](08-memory-middleware.md).
+
+> Note: the observer / reflector / fact-extraction summarizers are currently
+> **deterministic non-LLM stubs** (concatenate + truncate). The real LLM
+> summarize / merge path is the one genuinely deferred piece of this subsystem.
+
+### OAuth subscription providers
+
+Three built-in subscription channels — Anthropic (Claude Pro/Max), GitHub Copilot,
+and OpenAI Codex (ChatGPT):
+
+- **Interactive login** from the dashboard — authorization-code paste for Anthropic
+  and OpenAI Codex, device-code for GitHub Copilot.
+- **Encrypted token store** (AES-256-GCM, survives restarts; requires
+  `HELM_OAUTH_ENC_KEY`).
+- **Multi-account pools** with per-account model curation, egress proxy
+  (http/https/socks5), device identity, and priority.
+- **Hot-reload** of all of the above, with no restart, and fail-closed subscription
+  routing.
+
+### Platform & admin
+
+- **Per-key caps.** Allowed-lanes whitelist, `allow_custom_model`, RPM/TPM rate
+  limits, usage budgets (requests / tokens / spend over a rolling window with
+  degrade-to-cheaper-lane or reject), and concurrency limiting — all metered **per
+  API key**.
+- **Runtime hot-reload settings.** Lanes, policies, classifier, and system settings
+  re-bind the live config and apply on the next request — no restart.
+- **Verbatim payload capture.** Full request/response bodies recorded to a separate
+  `request_payloads` table (default on, 30-day retention), toggleable in System
+  Settings.
 - **Admin UI overhaul.** Unified Providers UI + modals (key create/edit,
-  connect/disconnect/manage), requests-list pagination + filters, editable key caps,
-  and the per-key `max_lane` ceiling retired in favor of an allowed-lanes whitelist.
-- **Classifier.** Multilingual non-Latin fallback guard + CJK word-boundary fixes +
-  an expanded Layer-1 keyword vocabulary.
+  connect/disconnect/manage), requests-list pagination + filters, and progressive
+  key-caps dialogs. See [11 · Admin UI](11-admin-ui.md).
 
-## Remaining / deferred
+## Deferred / out of scope
 
 Verified against the code and `implementation-notes.md`:
 
-- **Memory inject phase.** The `observe` phase is wired; the `inject` phase
-  (`assembleInjectedContext`) and the background Observer/Reflector jobs are not.
-  See [08 · Memory Middleware](08-memory-middleware.md).
-- **Fuller quota / rate-limit features.** Per-key RPM/TPM limiting **and** per-key
-  usage budgets (requests / tokens / spend over a rolling window, with
-  degrade-to-cheaper-lane or reject) ship — metered **per API key**. Helm is an
-  internal/self-hosted gateway with no account/customer billing subject, so
-  **account-level credit accounting is out of scope** (not merely deferred). See
-  [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
+- **LLM-backed memory summarization.** The observer / reflector / fact-extraction
+  paths use deterministic stubs today; swapping in a real small-model summarize +
+  merge step is the next memory milestone.
+- **Account-level credit accounting.** Per-key RPM/TPM and budgets have shipped.
+  Helm is an internal/self-hosted gateway with no account/customer billing subject,
+  so account-level / customer credit accounting is **out of scope** (not merely
+  deferred). See [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
 - **Agentic Signals feedback layer.** The store ports and the redacted
   `RoutingSignal` shape exist, but nothing reads signals back into routing yet.
 
-## Success criteria (met by 0.1)
+## Success criteria
 
 - A new client can point an OpenAI-compatible SDK at Helm and get usable routing
   with no custom config.

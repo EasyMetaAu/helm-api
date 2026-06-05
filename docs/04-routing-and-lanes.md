@@ -9,25 +9,33 @@ its ordered chain. The framework-agnostic orchestrator is `routeRequest`
 ## Lane routing priority
 
 ```text
-explicit model/lane           # client specified a concrete model; skips all rules
+classifier short-circuit       # decided_by 'default' | 'fallback' → straight to balanced
+  > explicit model/lane        # client specified a concrete model; skips all rules
   > server-side policy         # a policy pin (use_lane)
   > task-specific lane         # a lane named after the detected task_type
   > complexity-fallback lane   # simple→economy / medium→balanced / complex→premium
+  > balanced                   # final default
 ```
+
+The resolver's **priority-0** short-circuit comes first: if the classifier
+`decided_by` is `default` (classify() itself threw — hard fail-open) or
+`fallback` (eval/rules abstained), the request goes **straight to `balanced`**
+without re-deriving a lane. Both signals mean "we are not confident enough to
+steer," so they collapse to the safe terminal.
 
 Default lanes are deliberately few and easy to reason about. Any selected lane
 name that does not exist is skipped (fail-open); the terminal `balanced` is
 guaranteed to exist.
 
-### Explicit client model has the highest priority
+### Explicit client model
 
 When a client specifies a concrete model **or a lane name**, classification and
 policy are skipped and the request is executed directly (the nginx pass-through
 equivalent). Whether this is allowed is controlled by the key's
 `allow_custom_model` capability (see
 [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md)). The sentinel
-value `auto` is never treated as an explicit model — it means "let the router
-decide" and falls through to classification.
+value `auto` is **never** treated as an explicit model — it means "let the router
+decide" and forces classification.
 
 For an `allow_custom_model` key the `model` field resolves in this order:
 
@@ -58,30 +66,33 @@ resolved via `config/providers.yaml`) or the name of another lane (expanded
 recursively, deduped, cycle-safe). Optional `constraints` drive the Capability
 Filter (`require_tools` / `require_json` / `require_vision`).
 
-The shipped quality/cost lanes:
+The shipped quality/cost lanes (the three ranked lanes; `LANE_RANK` orders only
+these: economy=0 < balanced=1 < premium=2):
 
 ```yaml
 economy:
   purpose: Cheap and fast for simple tasks
   primary: deepseek/deepseek-v4-flash
-  fallback: [openai-codex/gpt-5.4-mini, balanced]
+  fallback: [openai-codex/gpt-5.4-mini, openrouter/deepseek-v4-flash, balanced]
 
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
   primary: deepseek/deepseek-v4-pro
-  fallback: [openai-codex/gpt-5.4, zenmux/auto, openrouter/auto]
+  fallback: [openrouter/deepseek-v4-pro, zenmux/claude-sonnet-4.6, zenmux/auto, openrouter/auto]
 
 premium:
   purpose: Strong reasoning and high quality
   primary: openai-codex/gpt-5.5
-  fallback: [deepseek/deepseek-v4-pro, zenmux/claude-opus-4.7, zenmux/auto, openrouter/auto]
+  fallback: [zenmux/claude-opus-4.7, zenmux/gpt-5.5, balanced]
 ```
 
 `balanced` is **required** and must be healthy — it is the terminal of the
 classification fallback.
 
 The shipped task lanes (the lane resolver maps a classified `task_type` onto a
-same-named lane):
+same-named lane). These are **unranked** — incomparable to the quality/cost
+lanes, so `applyCaps` treats an unrankable task lane conservatively when a
+`max_lane` cap is in force:
 
 ```yaml
 coding:
@@ -112,14 +123,33 @@ tool_use:
 ```
 
 If no task-specific lane is configured, the resolver falls back to the three
-default lanes by complexity (`simple → economy`, `medium → balanced`, `complex →
-premium`).
+quality/cost lanes by complexity (`simple → economy`, `medium → balanced`,
+`complex → premium`).
 
-Note the deliberate design where each lane's tail fallback is a `*/auto` alias
-(e.g. `zenmux/auto`, `openrouter/auto`). Those auto aliases are intentionally
-JSON-incapable in the catalog, so a strict-JSON request prunes them via the
-Capability Filter and lands on a deterministic JSON-capable model — proving the
-filter fires on the default config. `*/auto` aliases live only at the tail.
+### Provider mix and the `*/auto` tail
+
+The cheap and default lanes anchor on the **always-available** official
+`deepseek` primary — a static key that works in dev, e2e, and a fresh install
+with no subscription bound. The `premium` / `coding` / `tool_use` lanes lead with
+the `openai-codex` subscription channel (connect it in admin → Providers), each
+backed by a static fallback so the lane **degrades gracefully**: an unconnected
+`openai-codex/*` candidate fails OPEN (skip to the next fallback), never a 5xx.
+
+The `*/auto` aliases (`zenmux/auto`, `openrouter/auto`) sit only at the **tail of
+the `balanced` chain** — every other lane reaches them by falling through to
+`balanced`, not by carrying its own auto tail. Those auto aliases are
+deliberately JSON-incapable in the catalog (`supports_json_schema: false`), so a
+strict-JSON request prunes them via the Capability Filter and lands on a
+deterministic JSON-capable model — proving the filter fires on the default
+config.
+
+### Chain expansion
+
+`expandLaneChain` flattens `primary` + `fallback[]` into one ordered candidate
+list, expanding nested lane references recursively. Dedup keeps the **first**
+occurrence of each candidate; a visited-set cycle guard makes self/mutual
+references safe. Expansion is pure: it trips no circuit breakers and applies no
+capability filter — those happen later, in the executor.
 
 ## Policies
 
@@ -135,8 +165,8 @@ pin, caps **accumulate** across every matching policy (intersect `allowed_lanes`
 keep the strictest `max_lane`), so a cap policy placed after a pin policy still
 binds.
 
-The shipped policies illustrate the pattern (`task_type × complexity → lane`,
-plus a JSON-contract pin and a budget-org cap):
+The nine shipped policies, in evaluation order (`task_type × complexity → lane`,
+plus a JSON-contract pin first and a budget-org cap last):
 
 ```yaml
 policies:
@@ -148,6 +178,14 @@ policies:
     match: { task_type: coding, complexity: complex }
     use_lane: coding
 
+  - id: coding_simple_to_economy          # trivial code must not hit a coding-grade model
+    match: { task_type: coding, complexity: simple }
+    use_lane: economy
+
+  - id: math_simple_to_balanced           # math is never economy
+    match: { task_type: math, complexity: simple }
+    use_lane: balanced
+
   - id: math_complex_to_premium
     match: { task_type: math, complexity: complex }
     use_lane: premium
@@ -155,6 +193,14 @@ policies:
   - id: chat_simple_to_economy
     match: { task_type: chat, complexity: simple }
     use_lane: economy
+
+  - id: chat_complex_to_premium
+    match: { task_type: chat, complexity: complex }
+    use_lane: premium
+
+  - id: security_complex_to_premium       # only complex security is pinned
+    match: { task_type: security, complexity: complex }
+    use_lane: premium
 
   - id: budget_org_cap                     # caps-only; clamps the classified lane
     match: { org_id: budget_org }
@@ -171,7 +217,8 @@ mapped output (see [03](03-classification.md)).
 Two cap layers apply, in order:
 
 1. **Policy caps** narrow the resolver's lane choice (`max_lane` /
-   `allowed_lanes`).
+   `allowed_lanes`). `max_lane` only constrains the ranked lanes; an unranked
+   task lane is treated conservatively.
 2. **Per-key caps** apply **last** as the outer, non-negotiable bound from the
    API key's auth record, so a key whose `allowed_lanes` whitelist is confined
    to (for example) `[economy]` is honored even over a policy `use_lane` pin. See
@@ -181,7 +228,8 @@ Two cap layers apply, in order:
 
 The selected lane is expanded into an ordered candidate chain (primary →
 fallback[], with lane references expanded recursively). The executor
-(`packages/core/src/executor/fallback.ts`) then walks the chain:
+(`packages/core/src/executor/fallback.ts`) then walks the chain, recording every
+attempt with its reason and latency:
 
 1. Try the primary.
 2. Skip a candidate the Capability Filter rejects (with an explicit skip reason).
@@ -196,7 +244,10 @@ fallback[], with lane references expanded recursively). The executor
 7. If every candidate fails, return a structured `all_providers_failed` error; an
    empty chain returns `lane_unavailable` (see
    [07 · Error Model & Observability](07-observability.md)).
-8. Record every attempt with its reason and latency.
+
+`fallback_count` counts only **non-skipped, served** attempts beyond the first —
+candidates pruned by the Capability Filter or skipped for an OPEN breaker do not
+increment it.
 
 This in-chain model swap is the **execution fallback** — it never rewrites the
 lane. The **classification fallback** (→ `balanced`) is the separate mechanism

@@ -8,12 +8,12 @@ deployment is **Docker**.
 
 - **Single container, config-as-code.** One image plus one config directory boots
   the gateway; you change configuration and restart, like nginx.
-- **Lightweight, self-hostable.** The default store is SQLite (a local file under
-  the data volume), so there is no hard dependency on an external database.
-  Postgres/Supabase is available via the same store abstraction (see [02 ·
-  Architecture](02-architecture.md)).
-- **No extra services required.** 0.1 needs no Redis or message queue; rate
-  limiting and caches are in-process / store-backed.
+- **Lightweight, self-hostable.** The default store is SQLite (`helm.db`, a local
+  file under the data volume), so there is no hard dependency on an external
+  database. Postgres/Supabase is available via the same store abstraction (see
+  [02 · Architecture](02-architecture.md)).
+- **No extra services required.** Helm needs no Redis or message queue; rate
+  limiting, caches, and the background workers are in-process / store-backed.
 
 ## Docker
 
@@ -23,7 +23,7 @@ The published image is `ghcr.io/easymetaau/helm-api`. It is built on **Node 22**
 ```bash
 docker run -d --name helm \
   -p 8080:8080 \
-  -v "$(pwd)/config:/app/config" \   # lanes/policies/classifier/providers/...
+  -v "$(pwd)/config:/app/config" \   # config tree (see Configuration sources)
   -v "$(pwd)/data:/app/data" \       # telemetry, keys, sqlite — persisted
   -e HELM_ADMIN_USER=admin \         # admin UI Basic auth (see 11)
   -e HELM_ADMIN_PASSWORD=change-me \
@@ -63,32 +63,41 @@ services:
 
 ## Volumes
 
-- `/app/config` — the YAML config tree: `lanes`, `policies`, `classifier`,
-  `providers`, `capabilities`, `pricing`, `auth`, `runtime`, `server`.
-- `/app/data` — persisted state: SQLite database, telemetry, captured payloads,
-  and the bootstrapped key file (`./data/helm-keys.json`).
+- `/app/config` — the YAML config tree (see [Configuration sources](#configuration-sources)).
+- `/app/data` — persisted state (the directory named by `HELM_DATA_DIR`, default
+  `./data`): the SQLite database `helm.db`, telemetry, captured payloads, and the
+  bootstrapped key file (`./data/helm-keys.json`).
 
 ## Configuration sources
 
 Configuration comes from **files** and **environment variables**, and env vars
 **win** (this is what makes containerized deployment and secret injection clean):
 
-- `config/*.yaml` — lanes, policies, classifier, providers, capabilities,
-  pricing, auth, runtime, server (see [02 · Architecture](02-architecture.md)).
-- Environment variables — upstream provider credentials, the admin Basic-auth
-  user/password, the store driver, and optional bind/limit overrides.
-  `.env.example` covers the common ones; additional overrides include:
+- `config/*.yaml` — `lanes`, `policies`, `classifier`, `providers`,
+  `capabilities`, `pricing`, `auth`, `runtime`, `server`, `memory` (see
+  [02 · Architecture](02-architecture.md)). This is the single config tree
+  mounted at `/app/config`.
+- Environment variables — the common ones are in `.env.example`:
   - `HELM_HOST`, `HELM_PORT`, `HELM_BASE_PATH`
   - `HELM_ADMIN_USER`, `HELM_ADMIN_PASSWORD`, `HELM_ADMIN_ENABLED`
   - `HELM_RATE_LIMIT_ENABLED`, `HELM_REQUEST_TIMEOUT_MS`, `HELM_MAX_REQUEST_BYTES`
   - `HELM_STORE_DRIVER` (`sqlite` | `supabase`), `HELM_STORE_URL_ENV`
-  - `HELM_KEYS_PERSIST_TO`
+  - `HELM_DATA_DIR` (data directory, default `./data`), `HELM_KEYS_PERSIST_TO`
+  - `HELM_OAUTH_ENC_KEY` — a 32-byte key used to encrypt stored OAuth
+    subscription tokens. **Mandatory whenever any OAuth subscription provider is
+    connected**: the gateway refuses to start if one is configured without it,
+    and the admin OAuth surface stays disabled until it is set.
+  - Background-worker toggles: `HELM_SIGNALS_DISABLED=1` stops the signal
+    scheduler and `HELM_MEMORY_WORKER_DISABLED=1` stops the memory worker (both
+    run by default); `HELM_MEMORY_WORKER_INTERVAL_MS` tunes the memory worker
+    tick (default `60000`).
   - Upstream credentials such as `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`,
     `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` — each maps to a `providers.yaml`
-    entry's `api_key_env`. `DEEPSEEK_API_KEY` is the primary credential and is
-    required; the others are optional (their providers are skipped if absent).
-    (Premium/coding lanes route through the `openai-codex` subscription — connect
-    it in the admin UI, which needs `HELM_OAUTH_ENC_KEY`, not an API key here.)
+    entry's `api_key_env`. `DEEPSEEK_API_KEY` is required (the primary
+    credential); the others are optional (their providers are skipped if absent).
+    Premium/coding lanes can instead route through the `openai-codex`
+    subscription — connect it in the admin UI (which needs `HELM_OAUTH_ENC_KEY`,
+    above), not an API key here.
 
 Invalid configuration is rejected at startup (Zod-validated, fail-closed) — Helm
 never runs in a half-broken state (Principle 2).
@@ -100,7 +109,10 @@ never runs in a half-broken state (Principle 2).
    API Keys & Rate Limits](06-auth-and-rate-limits.md)).
 3. Start the HTTP server (the API plus the admin UI when admin credentials are
    configured; see [11 · Admin UI](11-admin-ui.md)).
-4. Begin serving once the health endpoint reports ready.
+4. Start the two off-request-path background workers — the **signal scheduler**
+   and the **memory worker** — unless disabled by their env vars (above). Each
+   timer is unref'd and fail-open; no request ever touches them.
+5. Begin serving once the health endpoint reports ready.
 
 ## Health & version
 

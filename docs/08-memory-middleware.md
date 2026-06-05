@@ -1,28 +1,28 @@
 # 08 · Memory Middleware
 
-> Status (0.5): **observe AND inject are implemented and wired end-to-end**
-> (issue #36 / PR #41), including the background Observer / Reflector worker that
-> drains the `memory_jobs` queue. The four memory headers are parsed at the
-> gateway boundary (`apps/gateway/src/routes/memory-scope.ts`) and serve all four
-> client surfaces (OpenAI Chat, Anthropic Messages, OpenAI Responses, Gemini).
-> On `inject`, the gateway assembles the docs/08 context prefix and full-replaces
-> the request messages BEFORE classification/execution; an observer write-back
-> job is enqueued off the request path; the worker compresses raw → observations
-> → reflections.
+> Status: **implemented, opt-in.** `observe` and `inject` are both wired
+> end-to-end across the OpenAI Chat, Anthropic Messages, and OpenAI Responses
+> surfaces (Gemini is not wired), together with a process-wide background
+> `MemoryWorker` that drains the `memory_jobs` queue (observer / reflector /
+> decay jobs). The four memory headers are parsed at the gateway boundary
+> (`apps/gateway/src/routes/memory-scope.ts`); mode normalization and
+> owner-scoping live in core (`packages/core/src/memory/observe.ts`).
 >
-> Issue #97 adds **zero-client-change adoption**: per-key memory defaults stored
-> on the API key plus a thread-signal fallback chain, so clients limited to
-> static headers (Claude Code, Codex) — or none at all — still get memory. See
-> "Zero-client-change adoption" below.
+> The only genuinely deferred piece is the **real LLM summarize/merge**: the
+> Observer, Reflector, and fact-extraction summarizers are currently
+> **deterministic non-LLM stubs** (concatenate / truncate) behind an injected
+> interface. Swapping in an LLM is a drop-in replacement.
 >
-> Still deferred: a real LLM summarize/merge behind the deterministic interface,
-> and a `config.memory` subtree (the inject token budget rides
-> `HELM_MEMORY_INJECT_TOKEN_BUDGET`).
+> The forgetting & tiering layer ([12 · Memory: Forgetting & Tiering](12-memory-forgetting-and-tiering.md))
+> has also shipped, gated behind `config.memory.forgetting.enabled` whose schema
+> default is `false`. With forgetting off, runtime is byte-identical to before.
 
 ## Positioning
 
 Memory is not part of the routing core. It is an optional middleware that gives a
-request enough context to be understood before classification and execution.
+request enough context to be understood before classification and execution. It
+never rewrites lane rules — an entitlement-based route belongs to the Policy
+Engine, not to memory.
 
 ```text
 Memory helps the request be understood.
@@ -31,29 +31,15 @@ Provider executes.
 Logs explain what happened.
 ```
 
-Memory must never rewrite lane rules. For example, an entitlement-based route
-belongs to the Policy Engine, not to memory.
-
-## Origin
-
 The design follows llm-router issue #362 (Memory Gateway / Observational Memory)
 and is inspired by Mastra's Observational Memory:
-<https://github.com/EasyMetaAu/llm-router/issues/362>.
-
-## Core idea
-
-A gateway-level memory layer inspired by Mastra Observational Memory:
-
-- The client passes stable IDs such as `x-thread-id`, `x-resource-id`, and
-  `x-project-id`.
-- The gateway stores raw messages and tool results.
-- A background Observer compresses old raw history into dated observations.
-- A background Reflector merges observations into stable reflections.
-- The provider context is assembled from reflections, observations, recent raw
-  messages, and the current message.
-
-This is deliberately not dynamic RAG. The goal is a stable, cache-friendly context
-prefix.
+<https://github.com/EasyMetaAu/llm-router/issues/362>. The client passes stable
+IDs (`x-thread-id`, `x-resource-id`, `x-project-id`); the gateway stores raw
+messages and tool results; a background Observer compresses old raw history into
+dated observations; a background Reflector merges observations into stable
+reflections; on `inject`, the provider context is assembled from reflections,
+observations, recent raw messages, and the current message. This is deliberately
+not dynamic RAG — the goal is a stable, cache-friendly context prefix.
 
 ## Request headers
 
@@ -72,18 +58,84 @@ Default: `x-memory-mode = off`. Mode normalization is centralized in core's
 Modes:
 
 - `off` — no memory read/write; routing behavior is unchanged. Zero DB touch.
-- `observe` — record messages and tool outputs, but do not inject memory.
-  **Implemented and wired.**
-- `inject` — load memory context, assemble the prompt, and enqueue the
-  write-back. **Implemented and wired** on all four surfaces.
+- `observe` — record request messages, response messages, and tool outputs;
+  enqueue an observer write-back job. Does not inject memory or change routing.
+- `inject` — synchronously load + assemble the memory context, **full-replace**
+  the request message array BEFORE classification/execution, then also write back
+  (same persistence + enqueue as `observe`).
 
-## Zero-client-change adoption (issue #97)
+## End-to-end flow
+
+```text
+Request comes in
+  -> observeInbound: persist raw request messages        (observe | inject)
+  -> if inject: assembleInjectedContext + injectIntoIR
+       load reflections + active observations + recent raw
+       full-replace the message array within the token budget
+  -> classifier uses the (possibly injected) message context
+  -> route + provider execute
+  -> observeOutbound: persist response + tool results     (observe | inject)
+  -> enqueue observer write-back job
+  ── background MemoryWorker (off the request path) ──
+  -> runObserverJob:  raw history -> dated observation
+  -> runReflectorJob: observations -> stable reflection
+  -> runDecayJob:     forgetting sweep (only when forgetting.enabled)
+```
+
+Persistence is **fail-open** (Principle 3): a memory store failure degrades to
+"continue without memory" plus a logged failure — never a 5xx. On `inject`, any
+load/assembly failure falls back to the minimal context (system + current
+message), marks the decision `degraded: true`, and still attempts the write-back
+enqueue.
+
+### Context assembly order (inject phase — live)
+
+```text
+system prompt
++ project reflection
++ resource reflection
++ thread observations
++ recent raw messages (RECENT_KEEP = 2 kept uncompressed)
++ current user message
+```
+
+Rules:
+
+- Reflections are stable and slow-changing (the Reflector only bumps the version
+  when the merged text actually changes).
+- The most recent `RECENT_KEEP = 2` raw turns are kept uncompressed so
+  compression can never lose information; turns already covered by an
+  observation's source range are not re-injected (no duplication).
+- Observation text carries a time anchor.
+- Injected memory stays within a token budget — `HELM_MEMORY_INJECT_TOKEN_BUDGET`
+  (default `4000`), counting injected memory layers only (the system prompt and
+  current message are excluded).
+- The plain-text inject path applies only to plain message turns. Tool-call,
+  multipart, `developer`, and `tool` turns keep their original messages (no
+  full-replace) but still enqueue the observer write-back.
+
+## Background worker
+
+The `MemoryWorker` is started process-wide by default. It claims pending
+`memory_jobs` in batches and dispatches each to `runObserverJob`,
+`runReflectorJob`, or `runDecayJob` by `type`.
+
+```text
+HELM_MEMORY_WORKER_DISABLED      set to "1" to disable the worker entirely
+HELM_MEMORY_WORKER_INTERVAL_MS   tick interval (default 60000)
+batchSize                        jobs claimed per tick (10)
+```
+
+`decay` jobs are only ever enqueued when `forgetting.enabled`, so a build with
+forgetting off simply never produces them.
+
+## Zero-client-change adoption
 
 Many agent clients can only send **static** headers (Claude Code via
 `ANTHROPIC_CUSTOM_HEADERS`, Codex via `model_providers.*.http_headers`) — and a
 dynamic per-conversation `x-thread-id` is impossible for them. Two server-side
 mechanisms close that gap; both are **inert unless explicitly configured on the
-API key** (an unconfigured key behaves exactly as before):
+API key** (an unconfigured key behaves exactly as before).
 
 ### 1. Per-key memory defaults
 
@@ -127,8 +179,7 @@ name = "Helm"
 base_url = "https://helm.example.com/v1"
 env_key = "HELM_API_KEY"
 wire_api = "responses"
-# Optional: override the key defaults per machine
-http_headers = { "x-project-id" = "my-project" }
+http_headers = { "x-project-id" = "my-project" }  # optional, overrides key defaults
 ```
 
 **Claude Code** — thread derives from `metadata.user_id` (stable per session):
@@ -136,20 +187,17 @@ http_headers = { "x-project-id" = "my-project" }
 ```bash
 export ANTHROPIC_BASE_URL="https://helm.example.com"
 export ANTHROPIC_AUTH_TOKEN="helm_live_..."
-# Optional: override the key defaults
-export ANTHROPIC_CUSTOM_HEADERS="x-project-id: my-project"
+export ANTHROPIC_CUSTOM_HEADERS="x-project-id: my-project"  # optional
 ```
 
-**OpenClaw** — static headers via provider `request.headers`; thread derives
-from `prompt_cache_key` (OpenAI path) or `metadata.user_id` (Anthropic path).
-Note OpenClaw also ships its own local vector memory — gateway memory is the
-cross-agent shared layer; avoid running both injectors on the same context.
+**OpenClaw** — static headers via provider `request.headers`; thread derives from
+`prompt_cache_key` (OpenAI path) or `metadata.user_id` (Anthropic path). OpenClaw
+also ships its own local vector memory — gateway memory is the cross-agent shared
+layer; avoid running both injectors on the same context.
 
-**Anything else** (e.g. Hermes-agent): configure the key with
-`memory_mode: inject` + `memory_thread_source: auto` and point the client at
-helm — if it sends any of the chain's signals, memory just works. Clients that
-send none can pass `x-session-key` (a single static-ish header) or wait for the
-conversation-fingerprint fallback (deferred follow-up).
+**Anything else** — configure the key with `memory_mode: inject` +
+`memory_thread_source: auto`; if the client sends any chain signal, memory just
+works. Clients that send none can pass `x-session-key` (a single static header).
 
 Caveats:
 
@@ -158,48 +206,9 @@ Caveats:
 - OpenClaw rotates its sessionId on compaction: the thread restarts, but
   project/resource reflections carry across (the layering absorbs it).
 
-## Pipeline (target design)
-
-```text
-Request comes in
-  -> save raw message if observe/inject        # implemented (observeInbound)
-  -> if inject:                                 # roadmap
-       load reflection + active observations
-       assemble stable context
-  -> classifier uses current message + short memory context
-  -> route + provider execute
-  -> save response/tool result                  # implemented (observeOutbound)
-  -> enqueue observer job                       # roadmap
-  -> observer compresses raw history into observations   # roadmap
-  -> reflector periodically merges observations into reflection  # roadmap
-```
-
-Persistence is **fail-open** (Principle 3): a memory store failure degrades to
-"continue without memory" plus a logged failure — never a 5xx.
-
-## Context assembly order (inject phase, roadmap)
-
-```text
-system prompt
-+ project reflection
-+ resource reflection
-+ thread observations
-+ recent raw messages
-+ current user message
-```
-
-Rules:
-
-- Reflections should be stable and slow-changing.
-- Recent raw messages must be retained so compression cannot lose information.
-- Observation text should carry a time anchor.
-- Injected memory must stay within a token budget.
-- If memory loading fails, the main request continues without memory and the
-  failure is recorded.
-
 ## Storage model
 
-Minimal table set (see `MemoryStore` in `packages/core/src/store/ports.ts`):
+See `MemoryStore` in `packages/core/src/store/ports.ts`:
 
 ```text
 memory_threads
@@ -209,20 +218,29 @@ memory_messages
   id, thread_id, role, content, token_estimate, created_at
 
 memory_observations
-  id, thread_id, source_message_range, observation_text,
-  observed_at, referenced_at, priority, tags
+  id, thread_id, source_message_range, observation_text, observed_at,
+  referenced_at, priority, tags,
+  reference_count, importance, status (active | archived), archived_at, expired_at
 
 memory_reflections
-  id, project_id, resource_id, thread_id, reflection_text,
-  version, token_estimate, updated_at
+  id, project_id, resource_id, thread_id, reflection_text, version,
+  token_estimate, updated_at,
+  referenced_at, reference_count, status
+
+memory_facts
+  id, owner_id, subject_key, content_hash, content,
+  valid_from, invalid_at, expired_at, status
 
 memory_jobs
-  id, type, scope_id, status, error, created_at, updated_at
+  id, type (observer | reflector | decay), scope_id, status, error,
+  created_at, updated_at
 ```
 
 `source_message_range` is required so compressed memory can be audited against the
-original raw messages. The `observe` path uses `ensureThread` + `appendMessage`
-today; the read/compress/reflect methods back the roadmap Observer/Reflector.
+original raw messages. The forgetting-score columns on observations / reflections
+and the `memory_facts` table back the docs/12 layer; with `forgetting.enabled`
+false every row stays `status='active'` / `expired_at=null`, so those columns are
+inert.
 
 ## Routing integration
 
@@ -233,68 +251,68 @@ rewrite lane rules.
 
 ## Debug UI fields
 
-Request-level memory metadata (`MemoryMeta`):
+`DecisionRecord` carries a `memory` block — counts and ids only, never memory
+content:
 
 ```text
-memory_mode
-thread_id
-resource_id
-project_id
-memory_hydrated            # always false until the inject phase ships
+memory_hydrated            # true when any layer was injected
 reflection_version
 observation_count
 memory_tokens_injected
 observer_job_id
-memory_writeback_status
+memory_writeback_status    # queued | skipped | failed
+degraded
+thread_source              # which fallback-chain link produced the thread
 ```
 
-The request detail may show memory metadata by default. Full memory **content**
+The request detail may show this metadata by default. Full memory **content**
 requires explicit authorization and is audited (see [07 · Error Model &
 Observability](07-observability.md)).
 
-## Cost accounting (roadmap)
+## Cost accounting
 
-Memory maintenance gets its own token/cost buckets so it is visible in cost
-reports and not hidden inside provider execution cost: actor request tokens, actor
-response tokens, memory hydrate tokens, Observer tokens, Reflector tokens.
+Memory maintenance has its own token/cost buckets so it is visible in cost
+reports and not hidden inside provider execution cost: actor request tokens,
+actor response tokens, memory hydrate tokens, Observer tokens, Reflector tokens.
+The buckets and sinks exist today; the Observer bucket is currently a no-op sink
+(deterministic stub), and full memory-maintenance cost reporting is deferred
+until the LLM summarizer lands.
 
 ## Phases
 
 ### Phase 1 — Memory-ready · implemented
 
-- Accept the memory headers.
-- Persist raw messages in `observe` mode.
+- Accept the memory headers and persist raw messages in `observe`.
 - Surface memory metadata in the request log.
-- Do not inject memory yet.
 
-### Phase 2 — Observational Memory MVP · roadmap
+### Phase 2 — Observational Memory MVP · implemented
 
-- Implement the Observer: raw messages → observations.
-- Implement the Reflector: observations → reflections.
-- Implement inject-phase context assembly (call `assembleInjectedContext`).
-- Run only when `x-memory-mode=inject` is explicitly set.
+- Observer (`runObserverJob`): raw messages → observations.
+- Reflector (`runReflectorJob`): observations → reflections.
+- Inject-phase context assembly (`assembleInjectedContext` + `injectIntoIR`),
+  wired into the chat / messages / responses surfaces and the background worker.
+- The summarize/merge steps are deterministic stubs pending an LLM.
 
-### Phase 3 — Project memory · roadmap
+### Phase 3 — Project memory · implemented
 
 - Project / resource / thread scope hierarchy.
-- Structured facts and an asset graph.
-- Creative / project workspace support.
+- Structured facts (`memory_facts`) and scope aggregation.
 
-### Phase 4 — Forgetting & tiering · proposed
+### Phase 4 — Forgetting & tiering · implemented (opt-in)
 
-- Explicit short / mid / long-term memory tiers mapped onto recent_raw /
-  observations / reflections + facts.
+- Short / mid / long-term tiers mapped onto recent_raw / observations /
+  reflections + facts.
 - A deterministic forgetting score (Ebbinghaus recency decay × importance +
-  access reinforcement) driving score-based inject trimming, an off-hot-path decay
-  sweep, soft-archive, and bi-temporal supersede.
-- See [12 · Memory: Forgetting & Tiering](12-memory-forgetting-and-tiering.md) for
-  the full design. Gated behind `memory.forgetting.enabled` (default off).
+  access reinforcement) driving score-based inject trimming, an off-hot-path
+  decay sweep, soft-archive, and bi-temporal supersede.
+- See [12 · Memory: Forgetting & Tiering](12-memory-forgetting-and-tiering.md).
+  Gated behind `config.memory.forgetting.enabled` (schema default `false`).
 
 ## Non-goals
 
 - No full RAG product inside the routing core.
 - No per-turn dynamic retrieval by default.
 - No cross-project memory sharing.
-- No global user profile in the first version.
+- No global user profile.
 - No synchronous Observer on the main request path.
 - No agent orchestration inside the memory middleware.

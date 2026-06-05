@@ -14,6 +14,25 @@ degradation, so this page and the tests stay in lock-step.
 
 ---
 
+## The four inbound protocols
+
+Each client protocol is parsed by a named transformer (`nativeIn`/`nativeOut`),
+all four streaming-capable:
+
+| Protocol | Endpoint | Transformer | Auth header |
+|---|---|---|---|
+| OpenAI Chat | `POST /v1/chat/completions` | `openai` | `Authorization: Bearer` |
+| Anthropic Messages | `POST /v1/messages` | `anthropic` | `x-api-key` or `Authorization: Bearer` |
+| OpenAI Responses | `POST /v1/responses` | `openai-responses` | `Authorization: Bearer` |
+| Google Gemini | `POST /v1beta/models/{model}:generateContent` (+ `:streamGenerateContent?alt=sse`) | `gemini` | `x-goog-api-key` |
+
+Gemini is mounted as a catch-all `POST /v1beta/models/:rest{.+}`; any operation
+other than `generateContent` / `streamGenerateContent` returns 404 in the native
+Gemini error shape. The Gemini and Responses faces authenticate **inside** the
+handler so they can emit their own native error envelopes.
+
+---
+
 ## How degradation works
 
 There are exactly two ways a value can fail to reach a target, and both are
@@ -21,22 +40,22 @@ There are exactly two ways a value can fail to reach a target, and both are
 
 1. **`n_capped` (reject-clean cap).** A backend that emits a single candidate
    caps `n > 1` to `1` and records an `n_capped` warning. The request still runs;
-   it just returns one choice. Multi-candidate backends (OpenAI Chat, Gemini's
-   `candidateCount`) honor `n` natively, so no cap fires.
+   it just returns one choice.
 2. **`data_loss` (no native surface).** A parameter the target has no place for
    (e.g. token `logprobs` → Anthropic) records a `data_loss` warning and is
    dropped from the wire request.
 
-Both warning kinds are appended to `provider_raw.warnings` on the IR. **They
-never reach the wire** — every transformer strips `provider_raw` before
-serialization — but the DecisionRecord and telemetry can read them off the IR.
-See `packages/core/src/protocol/protocol-guards.ts`.
+Both warning kinds are appended to `provider_raw.warnings` on the IR and read off
+by the DecisionRecord and telemetry; they never reach the wire. A third,
+non-degrading mechanism is **`provider_raw` passthrough** (the lossless bag,
+[below](#provider_raw-passthrough-the-lossless-bag)). See
+`packages/core/src/protocol/protocol-guards.ts`.
 
-A third, non-degrading mechanism is **`provider_raw` passthrough**: upstream
-data with no IR home (raw `stop_reason`, raw `usage`, provider-only echo fields)
-is preserved verbatim so a *same-protocol* round-trip is lossless and billing can
-reconstruct the original. The full list is in
-[the passthrough section](#provider_raw-passthrough-the-lossless-bag) below.
+The guard table is target-specific. The `n_capped` cap and the
+`logprobs`/`top_logprobs`/`modalities` `data_loss` warnings fire **only for the
+Anthropic target**; the `openai` and `gemini` targets are intentionally no-ops in
+`TARGET_GUARDS`. Responses passes `n` through, and Gemini maps `n` →
+`candidateCount`, so neither caps.
 
 ---
 
@@ -62,9 +81,10 @@ Rows are the **source** protocol (what the client sent); columns are the
 **target** backend protocol. Each cell lists only what is *not* a clean
 round-trip. "lossless" means every IR-modeled field maps both ways.
 
-Legend: **cap** = `n>1` capped to 1; **drop** = dropped with a `data_loss`
-warning; **raw** = preserved in `provider_raw` (recoverable, not on the target
-wire); **degrade** = mapped to the nearest native shape.
+Legend: **cap** = `n>1` capped to 1 with an `n_capped` warning (Anthropic target
+only); **drop** = dropped with a `data_loss` warning (Anthropic target only);
+**raw** = preserved in `provider_raw` (recoverable, not on the target wire);
+**degrade** = mapped to the nearest native shape.
 
 | source ↓ \ target → | OpenAI Chat | Anthropic Messages | OpenAI Responses | Gemini |
 |---|---|---|---|---|
@@ -73,15 +93,12 @@ wire); **degrade** = mapped to the nearest native shape.
 | **OpenAI Responses** | reasoning summary→`reasoning_content`; `store`/`previous_response_id`→**raw** (stateless) | `n>1`→**cap**; `logprobs`→**drop**; reasoning summary→thinking | lossless (identity) | reasoning→`thinkingConfig`; sampling knobs map |
 | **Gemini** | `groundingMetadata`→`annotations`; `logprobsResult`→`logprobs`; `safetyRatings`→**raw** | `n>1`→**cap**; `safetyRatings`→**raw**; thought→thinking | grounding→annotations; thought→reasoning summary | lossless (identity) |
 
-Notes on the recurring degradations:
+Notes (only what the table can't show):
 
-- **`logprobs` → Anthropic.** Anthropic Messages exposes no token logprobs, so
-  `logprobs`/`top_logprobs` are dropped with a `data_loss` warning.
-- **`modalities` → Anthropic.** Anthropic Messages is text-out only; an output
-  `modalities` request is dropped with a warning. (Document/image *input* is
-  supported and maps.)
-- **`n > 1` → Anthropic.** Anthropic returns a single message; `n` is capped to 1
-  with an `n_capped` warning. OpenAI Responses also single-candidate on this axis.
+- **`n > 1` is capped on the Anthropic target only.** Anthropic returns a single
+  message, so `n` is clamped to 1 with an `n_capped` warning. The other three
+  targets honor multiple candidates: OpenAI Chat and Responses pass `n` through,
+  Gemini maps it to `candidateCount`.
 - **Remote `http(s)` images → Gemini output.** Gemini's request shape wants
   inline base64 or a `gs://` / Files-API URI; an arbitrary remote image URL
   degrades to an explicit text placeholder (issue #49 non-goal). Inline base64
@@ -90,6 +107,55 @@ Notes on the recurring degradations:
   a server-side conversation that other protocols don't model; they ride
   `provider_raw` so a Responses→Responses round-trip is lossless, but they are
   not replayed as real session continuation on a different backend.
+
+---
+
+## Streaming shape
+
+Each face emits its native SSE framing; standalone per-direction converters
+(e.g. `convertOpenAIStreamToAnthropic`, `convertOpenAIStreamToResponses`, and
+Gemini's `transformStreamIn` / `transformStreamOut`) bridge the IR delta stream.
+Of the four transformers only Gemini exposes **both** `transformStreamIn` and
+`transformStreamOut`; Anthropic exposes `transformStreamIn` only.
+
+- **OpenAI Chat:** classic `data:` chunks terminated by a `[DONE]` sentinel.
+- **OpenAI Responses:** **no `[DONE]` sentinel** — every event instead carries a
+  strictly monotonic `sequence_number`; the client reads completion from the
+  typed terminal event.
+- **Anthropic Messages:** event-typed SSE ending with `message_stop`.
+- **Gemini:** delta-based both inbound and outbound.
+- **Synthesized streams** (a non-streaming upstream replayed as SSE via
+  `synthesizeSSE`) follow the target's own framing — the OpenAI/Anthropic
+  synthetic streams **do** append `[DONE]`.
+
+---
+
+## Tool / function calling
+
+- **Anthropic** tool names are sanitized to `^[A-Za-z0-9_-]` with a max length of
+  64; collisions are disambiguated with an FNV-1a hash suffix so distinct source
+  names stay distinct after sanitization.
+- **Gemini** tool calls have **no wire id**. Inbound, Helm synthesizes a
+  deterministic `call_<name>_<occurrence>` id; outbound, that synthetic id is
+  dropped (Gemini never sees it).
+- `parallel_tool_calls` maps both ways where the target supports it.
+
+---
+
+## Reasoning budget mapping
+
+`reasoning_effort` (`minimal|low|medium|high`) maps to each backend's native
+thinking knob. The band values differ per target:
+
+| effort | Anthropic (thinking budget) | Gemini (`thinkingConfig`) |
+|---|---|---|
+| minimal | 1024 | 128 |
+| low | 2048 | 1024 |
+| medium | 8192 | 8192 |
+| high | 16384 | 24576 |
+
+Anthropic Messages also defaults `max_tokens` to **4096** when the client omits
+it (the field is required upstream but optional on the Helm face).
 
 ---
 
@@ -123,7 +189,8 @@ them; where a protocol lacks one, the cell above shows the degradation.
 
 Upstream data with no IR home is carried verbatim in `provider_raw` and
 re-emitted on a same-protocol round-trip. It is **never** sent to a *different*
-target's wire (transformers strip `provider_raw` before serialization).
+target's wire — every transformer strips `provider_raw` before serialization
+(the matrix tests assert this no-leak invariant on all 16 paths).
 
 | Source | `provider_raw` keys |
 |---|---|
@@ -141,18 +208,10 @@ provider-execution (OAuth) concern, not protocol-translation `provider_raw`.
 
 ---
 
-## Parity scorecard
+## Remaining gaps
 
-Approximate litellm field-coverage per protocol, before → after the parity
-upgrade (Phases 2–8):
-
-| Protocol | Before | After |
-|---|---|---|
-| OpenAI Chat | 72 | 95 |
-| Anthropic Messages | 62 | 90 |
-| OpenAI Responses | 72 | 90 |
-| Gemini | 55–60 | 88 |
-
-The remaining gap is mostly provider-specific edges (Vertex-only fields, true
-Responses session continuation, remote-image fetch on the Gemini output path) —
-each one a documented non-goal above, not a silent loss.
+Field coverage is asserted path-by-path against the litellm reference in
+`protocol-matrix.test.ts`. The remaining gaps are provider-specific edges —
+litellm's Vertex-only fields, true Responses session continuation, and
+remote-image fetch on the Gemini output path — each a documented non-goal above,
+not a silent loss.
