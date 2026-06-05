@@ -57,8 +57,20 @@ function redactNode(value: unknown, opts: ResolvedOptions, seen: WeakSet<object>
   const out: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
     if (opts.secretKeyPattern.test(key)) {
-      out[key] =
-        typeof child === "string" ? redactKey(child, opts.keyPrefixLen) : summarizePayload(child);
+      // Strings under a secret-matching key are fingerprinted; objects/arrays are
+      // summarized (they could hold credentials). SCALARS pass through: a number,
+      // boolean, null or undefined can never carry key material, and summarizing
+      // them corrupts legitimate counters — `memory_tokens_injected` (a token
+      // COUNT, matches "token") was persisted as {redacted:true,kind:"number"},
+      // breaking the DecisionRecord schema on read and 502-ing the requests list
+      // (docs/12 live-integration regression).
+      if (typeof child === "string") {
+        out[key] = redactKey(child, opts.keyPrefixLen);
+      } else if (child !== null && typeof child === "object") {
+        out[key] = summarizePayload(child);
+      } else {
+        out[key] = child; // number | boolean | null | undefined — not a credential
+      }
     } else if (opts.payloadKeys.has(key)) {
       out[key] = summarizePayload(child);
     } else {

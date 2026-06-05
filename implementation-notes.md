@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-05 · live 集成测试上线记忆段 + 脱敏器吞数字计数的生产 bug（scripts/integration-live.mjs；docs/07/08/12）
+
+- **integration-live.mjs 新增「Memory middleware」段**：observe 正常路由；inject hydrate + 写回入队 + DecisionRecord 携带脱敏 memory 元数据（thread_source=header）；后台 worker 压缩后 observation 进 prefix（poll-with-backoff，worker 太慢则 SKIP 不误报——worker 间隔是部署配置）；fail-open（无 thread anchor）；default-safe（非法 x-memory-mode 归一 off）；requests 列表不得泄漏记忆正文哨兵（原则 7）。注：DecisionRecord.memory 只在 INJECT 行打戳（observe 行 memory:null 属设计）。
+- **该段首跑即抓到真 bug**：脱敏器把 `memory_tokens_injected`（数字计数，key 命中 secret 模式里的 "token"）mangle 成 `{redacted:true,kind:"number"}` → DecisionRecord 读回解析失败 → **`/admin/api/requests` 整页 502** + signals collector 报错。#41 起潜伏；单测/e2e 全未踩（fake store 不过脱敏回环）——live 集成的价值所在。
+- **修复（双侧）**：写侧 `redactNode` 对 secret-key 命中的**标量放行**（number/boolean/null 不可能携带凭证；字符串仍 sha256 指纹、对象/数组仍摘要——顺带救了 `max_tokens` 等同类计数）；读侧 `MemoryDecisionSchema.memory_tokens_injected` 对**已落库的 legacy 损坏行** preprocess→0（真实部署的库里已有这种行，一行旧数据不能 502 整页），非 legacy 垃圾对象仍 fail-closed。
+- **部署注**：仓库提交 `config/memory.yaml` 默认 `enabled:false`（自文档化、行为不变）；本地 helm 实例以 working-tree 改动开启 `enabled:true` + override `HELM_MEMORY_WORKER_INTERVAL_MS=500`（gitignored）。
+
+---
+
+
 ## 2026-06-05 · 遗忘策略 Codex 评审修复 VII（2 项；docs/12）
 
 第七轮 review 仅剩 2×P2（持续收敛 5→3→3→3→3→2→2），全部修复（+1 回归测试）：

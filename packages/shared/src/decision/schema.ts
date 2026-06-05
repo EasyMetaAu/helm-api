@@ -102,7 +102,19 @@ export const MemoryDecisionSchema = z.object({
   memory_hydrated: z.boolean(),
   reflection_version: z.number().int().nullable(),
   observation_count: z.number().int().nonnegative(),
-  memory_tokens_injected: z.number().nonnegative(),
+  // LEGACY-ROW TOLERANCE: until the redaction fix (docs/12 live-integration find),
+  // the redactor mangled this numeric COUNT into {redacted:true,kind:"number"}
+  // because the key matches the "token" secret pattern — and those rows are
+  // PERSISTED in real deployments. Coerce that exact legacy artifact to 0 on read
+  // so one old row can never 502 the whole requests list again; everything else
+  // must still be a non-negative number (fail-closed).
+  memory_tokens_injected: z.preprocess(
+    (v) =>
+      typeof v === "object" && v !== null && (v as { redacted?: unknown }).redacted === true
+        ? 0
+        : v,
+    z.number().nonnegative(),
+  ),
   observer_job_id: z.string().nullable(),
   memory_writeback_status: z.enum(["queued", "skipped", "failed"]),
   degraded: z.boolean(),
