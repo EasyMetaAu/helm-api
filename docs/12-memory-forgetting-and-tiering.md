@@ -27,6 +27,14 @@ So memory must do two more things the current pipeline does not:
    archive, and let used memories reinforce — the
    [Ebbinghaus forgetting curve](https://en.wikipedia.org/wiki/Forgetting_curve)
    plus spaced-repetition reinforcement, made into a pure function.
+3. **Treat time as structure, not metadata.** LLMs are natively bad at time, and
+   pure semantic retrieval happily resurrects a stale high-similarity fact as if
+   it were still true — "the corrected fact keeps coming back". So temporality is
+   a **structural dimension** of this design, not a column we sort by: every
+   memory ages through the score, every fact carries bi-temporal validity
+   (`valid_from` / `invalid_at` / `expired_at`), and supersede-on-contradiction is
+   **not optional**. (Tencent's Agent Memory engine articulates the same rule:
+   "时序不是 metadata，而是 Memory OS 的结构维度" — see Prior art below.)
 
 This stays true to the core principles: **deterministic-first** (the score is a
 pure, unit-testable function — no LLM, no network), **fail-open** (any forgetting
@@ -229,6 +237,29 @@ score-trim. Memories that stop being injected stop being reinforced, decay, and
 quietly archive. **That is the whole forgetting loop, closed by touching two
 columns.**
 
+## Fact retrieval (P8 — hybrid, deterministic fusion)
+
+v1 (P0–P7) injects facts only via the Reflector (facts feed reflections; nothing
+is searched per turn — the stable-prefix rule). Once the fact store has real
+volume, scope+score selection alone will under-recall, so **P8** adds hybrid
+retrieval over `memory_facts`, aligned with where the field has converged
+(Tencent Agent Memory and MemOS both ship sqlite-local hybrid search):
+
+- **Three deterministic signals**, each producing a ranked list per query:
+  vector similarity (`sqlite-vec` / `pgvector`, dialect sealed in the adapter),
+  full-text (`FTS5` / `tsvector`), and the forgetting **score** itself (so decayed
+  facts rank low in retrieval too — retrieval and forgetting share one notion of
+  "alive").
+- **Fusion is RRF** (`k=60`): rank-based, scale-free, no tuned weights, trivially
+  unit-testable — deliberately *not* a learned/hidden fusion like Mem0's.
+- **Same invariants**: account-scoped reads (`owner_id = :accountId AND
+  expired_at IS NULL`), fail-open (empty or failed recall → request proceeds with
+  the v1 prefix), and retrieval results get the same reinforcement bump.
+- Gated behind its own flag (`forgetting.facts_retrieval.enabled`, default off);
+  schema impact is one nullable `embedding` column on `memory_facts`.
+
+## Schema deltas
+
 ### Tenant isolation (read this before the DDL)
 
 Memory in Helm is **already account-scoped**: every `memory_threads` row carries
@@ -419,6 +450,7 @@ behaviour-identical to today. Every phase is independently shippable and gated.
 | **P5** | Extend `MemoryJobTypeSchema` with `decay` + scheduler dispatch + `runDecayJob` sweep (gated, off hot path) | **`MemoryJobTypeSchema.parse('decay')` succeeds and the scheduler routes it to `runDecayJob` (not the reflector fall-through at `scheduler.ts`)**; `decay` job dedupe/enqueue works; archives only sub-threshold active rows of one account; never `recent_raw`; idempotent re-run; bounded loop (iterations / wallclock / consecutive-errors). |
 | **P6** | Fact extraction + supersede (gated, deterministic only) | identical fact within an account → idempotent skip (`UNIQUE(owner_id, content_hash)`); newer same-`(owner_id, subject_key)` fact → old `expired_at` stamped; reads filter `owner_id = :accountId AND expired_at IS NULL`. Reflector versioning tests unchanged. |
 | **P7** | Retention hard-delete (rare) | deletes only archived + aged rows, never `active`. The only `DELETE` in the system. |
+| **P8** | Hybrid fact retrieval (gated, own flag) — sqlite-vec/pgvector + FTS5 + forgetting-score, fused with RRF(k=60) | RRF fusion is order-stable and scale-free on a fixture; a superseded/archived fact never surfaces; empty/failed recall → request proceeds with the v1 prefix (fail-open); retrieved facts get the reinforcement bump. |
 
 ## Open questions (track in implementation-notes.md)
 
@@ -432,6 +464,13 @@ behaviour-identical to today. Every phase is independently shippable and gated.
 - **Per-scope half-life.** Config is currently global. If project memories should
   decay slower than thread memories, `half_life_s` can become a per-tier map.
   Easy follow-up; kept flat for v1.
+- **Procedural / skill memory.** Tencent Agent Memory and MemOS both formalize
+  "successful interaction histories → reusable executable skill units" as a
+  first-class memory kind, arguing plain RAG retrieves *information* but not
+  *procedures*. We deliberately ship facts/episodes only: for a routing gateway,
+  skills belong to the client's agent loop, not the pipe. Revisit **only if**
+  Helm grows agent-platform ambitions; if so, skills would be a fourth long-tier
+  table under the same score/supersede regime, not a new architecture.
 
 ## Non-goals (this chapter)
 
@@ -442,10 +481,31 @@ behaviour-identical to today. Every phase is independently shippable and gated.
 - No cross-project memory sharing or global user profile (unchanged from
   [08](08-memory-middleware.md) non-goals).
 
+## Prior art (2025–2026 industry alignment)
+
+A second survey pass over the memory systems open-sourced by ByteDance, Tencent,
+and MemTensor confirms this design's direction — and marks where we deliberately
+diverge.
+
+| System | What it validates in this design | Where we deliberately differ |
+|--------|----------------------------------|------------------------------|
+| **Tencent — TencentDB Agent Memory** (closest relative) | "Temporality is a structural dimension of the Memory OS, not metadata" — the stale-fact-resurrection problem our bi-temporal supersede + decay solve; layered write→tier→recall→governance pipeline (= our short/mid/long); sqlite-vec local hybrid search (= our P8); role/permission/privacy isolation (= our `owner_id` scoping) | It exposes write/update/delete as **LLM-callable tools** so the model manages its own memory. We keep the hot path LLM-free and the write path deterministic — more controllable and testable, less flexible. |
+| **ByteDance — M3-Agent** (`bytedance-seed/m3-agent`) | The **memory–control dual-thread split**: a background process continuously encodes inputs into structured memory while the reasoning path only retrieves — exactly our observe/Observer (background) vs inject (read) separation | Its multimodal entity graphs (faces, voiceprints, GNN entity linking) are agent-product scope, not gateway scope. Text-only here. |
+| **ByteDance — DeerFlow 2.0** | Long-term memory in a vector store + session persistence as table stakes for agent frameworks | Nothing novel to borrow beyond what P8 already covers. |
+| **MemTensor — MemOS** (often misattributed to ByteDance) | "Memory is **managed system state, not an index**" (= our versioned reflections / stable prefix); FTS5+vector hybrid local search; their measured ~35% token savings support the stable-prefix cost argument | Its self-evolving skill memory and memory-scheduling OS layer exceed a gateway's mandate (see Open questions). |
+
+Net: the field independently converged on background-encode/foreground-retrieve,
+tiered consolidation, temporal supersede, and local hybrid search. This design
+adopts those, and stays more conservative than all four on one axis: **no LLM in
+the write/maintenance loop by default** — determinism and fail-open over
+flexibility.
+
 ## References
 
 Reference implementations cloned for study (not vendored, not imported):
 Mem0, Graphiti, Letta/MemGPT, Cognee, Memobase, LangMem, A-Mem, MemoryScope.
+Industry systems surveyed (2025–2026): TencentDB Agent Memory, ByteDance
+M3-Agent (arXiv:2508.09736) & DeerFlow 2.0, MemTensor MemOS.
 Literature: Ebbinghaus forgetting curve; Stanford *Generative Agents* retrieval
 score (recency · importance · relevance, exponential recency decay); MemGPT
 virtual-context paging.
