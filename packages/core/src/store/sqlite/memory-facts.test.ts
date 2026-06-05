@@ -174,6 +174,65 @@ describe("SqliteMemoryStore.insertFactsReconciled (dedup + supersede, docs/12 P6
     expect(active[0]?.contentHash).toBe("new");
   });
 
+  // docs/12 (Codex review fix #2) — supersede must use the SAME scope semantics as the
+  // listActiveFacts read: narrow ONLY by the NEW fact's non-null scope columns. Before
+  // the fix it demanded null-safe equality on ALL columns, so a newer project-level
+  // fact could not expire an older same-subject fact that ALSO carried a thread id —
+  // yet a project-scoped read returned both (stale fact stayed visible).
+  it("a newer project-level fact supersedes an older same-subject fact with a NARROWER scope under that project", async () => {
+    const now = new Date("2026-06-05T00:00:00.000Z");
+    const { store, db } = newStore(now);
+    const oldValidFrom = new Date("2026-05-01T00:00:00.000Z");
+    const newValidFrom = new Date("2026-06-01T00:00:00.000Z");
+
+    // OLD: same subject, scoped (p1 + t1) — what a project-scoped read for p1 returns.
+    await store.insertFactsReconciled({
+      accountId: "acct-a",
+      scope: {},
+      now,
+      facts: [
+        fact({
+          ownerId: "acct-a",
+          subjectKey: "deploy-region",
+          contentHash: "old-narrow",
+          projectId: "p1",
+          threadId: "t1",
+          validFrom: oldValidFrom,
+        }),
+        // Control: same subject under a DIFFERENT project — must stay alive.
+        fact({
+          ownerId: "acct-a",
+          subjectKey: "deploy-region",
+          contentHash: "other-project",
+          projectId: "p2",
+          validFrom: oldValidFrom,
+        }),
+      ],
+    });
+    // NEW: project-level (p1 only), newer.
+    await store.insertFactsReconciled({
+      accountId: "acct-a",
+      scope: {},
+      now,
+      facts: [
+        fact({
+          ownerId: "acct-a",
+          subjectKey: "deploy-region",
+          contentHash: "new-project",
+          projectId: "p1",
+          validFrom: newValidFrom,
+        }),
+      ],
+    });
+
+    const rows = rawFacts(db);
+    expect(rows.find((r) => r.content_hash === "old-narrow")?.expired_at).toBe(now.getTime());
+    expect(rows.find((r) => r.content_hash === "other-project")?.expired_at).toBeNull();
+    // The project-scoped read now returns ONLY the newer fact — no stale sibling.
+    const active = await store.listActiveFacts({ accountId: "acct-a", projectId: "p1" });
+    expect(active.map((f) => f.contentHash)).toEqual(["new-project"]);
+  });
+
   it("does NOT supersede across different subject_keys or different accounts", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store } = newStore(now);

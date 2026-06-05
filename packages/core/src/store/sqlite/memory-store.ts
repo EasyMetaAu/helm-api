@@ -507,11 +507,12 @@ export class SqliteMemoryStore implements MemoryStore {
   // count of its active observations newer than that sweep; the account is DUE if that
   // count ≥ triggerObservations OR (now − lastSweep) ≥ triggerIntervalS. An account that
   // has NEVER been swept (lastSweep NULL) is due on the time gate — its whole active set
-  // is "new". The account-only scope_id encoding is canonical JSON
-  // ({"accountId":"<id>"}) — the SAME string encodeScopeId({accountId}) produces — so we
-  // match it directly with a literal concat; a pathological id with JSON-special chars
-  // would simply miss the join and over-trigger (the open-job dedupe then collapses the
-  // duplicate — fail-open). Account-scoped throughout; never crosses owners.
+  // is "new". scope_id is the canonical encodeScopeId JSON, so the account is matched
+  // via json_extract(scope_id, '$.accountId') — NEVER by string-concatenating a
+  // lookalike literal (Codex review fix: an id containing JSON-special characters like
+  // `"` or `\` is escaped by the codec, so a concat would never match, last_sweep would
+  // stay null forever, and the account would re-trigger on every worker tick).
+  // Account-scoped throughout; never crosses owners.
   async listDecayCandidateAccounts(input: {
     triggerObservations: number;
     triggerIntervalS: number;
@@ -523,12 +524,12 @@ export class SqliteMemoryStore implements MemoryStore {
         `SELECT mt.owner_id AS owner_id,
                 (SELECT MAX(j.created_at) FROM memory_jobs j
                   WHERE j.type = 'decay'
-                    AND j.scope_id = '{"accountId":"' || mt.owner_id || '"}') AS last_sweep,
+                    AND json_extract(j.scope_id, '$.accountId') = mt.owner_id) AS last_sweep,
                 COUNT(o.id) AS active_total,
                 SUM(CASE WHEN o.observed_at > COALESCE(
                   (SELECT MAX(j2.created_at) FROM memory_jobs j2
                     WHERE j2.type = 'decay'
-                      AND j2.scope_id = '{"accountId":"' || mt.owner_id || '"}'), 0)
+                      AND json_extract(j2.scope_id, '$.accountId') = mt.owner_id), 0)
                   THEN 1 ELSE 0 END) AS new_since_sweep
            FROM memory_observations o
            JOIN memory_threads mt ON mt.id = o.thread_id
@@ -589,9 +590,9 @@ export class SqliteMemoryStore implements MemoryStore {
           AND expired_at IS NULL
           AND valid_from < ?
           AND id <> ?
-          AND project_id IS ?
-          AND resource_id IS ?
-          AND thread_id IS ?`,
+          AND (? IS NULL OR project_id = ?)
+          AND (? IS NULL OR resource_id = ?)
+          AND (? IS NULL OR thread_id = ?)`,
     );
     // The whole batch is atomic: a partial ingest must not leave a fact inserted
     // without its supersede applied (or vice versa).
@@ -628,10 +629,13 @@ export class SqliteMemoryStore implements MemoryStore {
         );
         // Only a fresh insert supersedes; a deduped fact (changes === 0) does not.
         if (res.changes === 1) {
-          // `IS ?` matches NULL-to-NULL and value-to-value, so the supersede only
-          // touches rows whose scope columns equal the NEW fact's scope (an
-          // in-account narrowing — docs/12 "narrowed by the scope columns that are
-          // non-null"); a null scope column on the new fact targets sibling nulls.
+          // Supersede narrows by the NEW fact's NON-NULL scope columns ONLY — the
+          // SAME semantics as the listActiveFacts read path (Codex review fix: a
+          // stricter all-columns match here let a stale same-subject fact stay
+          // visible to a read that also returns the newer one). A null scope column
+          // on the new fact imposes NO constraint: `(? IS NULL OR col = ?)` is a
+          // no-op clause when the bound value is null (docs/12 "optionally narrowed
+          // by project/resource/thread").
           supersede.run(
             nowMs,
             f.validFrom.getTime(),
@@ -641,7 +645,10 @@ export class SqliteMemoryStore implements MemoryStore {
             f.validFrom.getTime(),
             id,
             projectId,
+            projectId,
             resourceId,
+            resourceId,
+            threadId,
             threadId,
           );
         }

@@ -23,6 +23,18 @@
 
 ---
 
+## 2026-06-05 · 遗忘策略 Codex 评审修复 II（3 项；docs/12）
+
+第二轮 Codex review 发现 3 个问题（1×High、2×Medium），全部修复（+5 回归测试，全套 2435 绿）：
+
+1. **（High）decay job 不复查 `enabled`**：队列是持久的——启用期残留的 pending decay row 在重启 + 关闭开关后仍会归档,违反「enabled:false 绝对 inert」。**修复：`runDecayJob` 入口 re-check `config.enabled`,关则标 done no-op**(不留 pending、不算失败),任何读写前短路。
+2. **（Medium）supersede 比读取路径更严**：supersede 要求三个 scope 列全部 null-safe 相等,而 `listActiveFacts` 只按传入列收窄 → project 级新 fact 不会过期同 project 下还带 thread 的同主题旧 fact,但 project 读两个都返回(过期事实仍可见)。**修复：supersede 只按新 fact 的非空 scope 列收窄**——sqlite 用 `(? IS NULL OR col = ?)`、pg 用 `(${"v"}::text IS NULL OR col = v)`,与读取语义一致。
+3. **（Medium）decay trigger 用字符串拼接重建 scope_id**：`'{"accountId":"' || owner_id || '"}'` 匹配不了 codec 转义后的 JSON 特殊字符 id → `last_sweep` 恒 null → 每个 worker tick 重复触发。**修复：sqlite `json_extract(scope_id,'$.accountId')`、pg `scope_id::jsonb ->> 'accountId'`**,复用 canonical 编码语义;前提是 memory_jobs 所有 scope_id 都经 encodeScopeId 写入（成立）。
+
+**语义拍板**：supersede 的「非空列收窄」意味着 project 级新 fact 会过期同 project 下任意更窄 scope 的同主题旧 fact（read-visible ⇒ supersede-able 的一致性原则）；反向（thread 级新 fact）不会过期 project 级旧 fact——thread 读本也看不到它，无不一致。
+
+---
+
 ## 2026-06-05 · 遗忘策略 Codex 评审修复（5 项；docs/12）
 
 Codex review 发现 5 个问题（3×P1、2×P2），全部修复（TDD，+5 回归测试，全套 2430 测试绿）：

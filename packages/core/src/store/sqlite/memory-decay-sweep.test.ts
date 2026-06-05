@@ -177,6 +177,35 @@ describe("SqliteMemoryStore.listDecayCandidateAccounts (P5 buffer-flush gate)", 
     expect(due).toEqual([]);
   });
 
+  // docs/12 (Codex review fix #3) — the gate matches the decay job's scope_id via
+  // json_extract, NOT a string-concatenated lookalike literal. An account id with
+  // JSON-special characters (quote/backslash) is escaped by encodeScopeId, so a
+  // concat would never match → last_sweep stays null → the account re-triggers on
+  // every worker tick. json_extract sees through the escaping.
+  it("matches last_sweep for an account id containing JSON-special characters", async () => {
+    const t0 = new Date("2026-06-05T00:00:00.000Z");
+    const weird = 'acct-"quote\\back';
+    const { store, set } = clockStore(t0);
+    await store.ensureThread({ id: "t-w", ownerId: weird });
+    await store.enqueueJob({ type: "decay", scope: { accountId: weird } }); // sweep at t0
+    await store.appendObservation({
+      threadId: "t-w",
+      sourceMessageRange: ["m1", "m2"],
+      observationText: "W",
+      observedAt: t0,
+    });
+
+    // Within the interval + below the count gate → NOT due. With the old concat
+    // matching, last_sweep would be null and the time gate would fire spuriously.
+    set(new Date(t0.getTime() + 60_000));
+    const due = await store.listDecayCandidateAccounts({
+      triggerObservations: 50,
+      triggerIntervalS: 3600,
+      nowMs: t0.getTime() + 60_000,
+    });
+    expect(due).toEqual([]);
+  });
+
   it("crosses the count gate when enough NEW observations accumulate since the last sweep", async () => {
     const t0 = new Date("2026-06-05T00:00:00.000Z");
     const { store, set } = clockStore(t0);

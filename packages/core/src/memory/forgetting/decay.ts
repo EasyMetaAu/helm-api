@@ -18,11 +18,14 @@ import { forgettingScore } from "./score.js";
 // archived rows simply stop being injected and stop counting toward the budget. The
 // later passes (promote→facts, supersede, hard-delete) land in P6/P7.
 //
-// GATING: 'decay' jobs are only ever ENQUEUED when forgetting.enabled is true (see
-// the scheduler trigger), so with the flag off this code is never reached and runtime
-// behaviour is byte-identical to today. The job itself trusts that gate and does not
-// re-check `enabled` (an enqueued decay row is, by construction, an enabled-system
-// row); the curve params it reads still come from config.
+// GATING (defence in depth, Codex review fix): 'decay' jobs are only ever ENQUEUED
+// when forgetting.enabled is true (see the scheduler trigger) — but the queue is
+// PERSISTENT, so a pending row enqueued during an earlier enabled window can survive
+// a restart with the master switch turned off. The enqueue gate alone is therefore
+// not enough: runDecayJob RE-CHECKS `config.enabled` at entry and no-ops the job
+// (marked done — never left pending to retry forever) when the flag is off. This
+// keeps the contract absolute: enabled:false ⇒ nothing is ever archived, including
+// by leftover jobs.
 
 // A background job: a pointer to the ACCOUNT being swept. The scope is an account-only
 // ReflectionScope (no project/resource/thread level), so the enqueue dedupe keys one
@@ -73,6 +76,16 @@ const ARCHIVE_CHUNK = 50;
 export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void> {
   const accountId = job.scope.accountId;
   try {
+    // Master-switch re-check (Codex review fix) — a persisted decay row from an
+    // earlier ENABLED window must not sweep after a restart with the flag off.
+    // Mark it done (a no-op, not a failure: nothing is wrong, the operator turned
+    // forgetting off) so it never lingers pending. enabled:false ⇒ zero archives.
+    if (deps.config.enabled !== true) {
+      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      deps.log("memory.decay.noop_disabled", { account_id: accountId });
+      return;
+    }
+
     // The adapter methods are optional (gated/additive). A store that predates this
     // phase cannot sweep — fail the job cleanly rather than crash or silently noop.
     const list = deps.memoryStore.listScorableObservations;

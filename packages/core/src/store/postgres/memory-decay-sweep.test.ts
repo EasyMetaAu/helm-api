@@ -110,4 +110,32 @@ describe("PgMemoryStore decay sweep", () => {
       }),
     ).toEqual([]);
   });
+
+  // docs/12 (Codex review fix #3, pg mirror) — the gate matches scope_id via
+  // `scope_id::jsonb ->> 'accountId'`, never a string-concatenated literal, so an
+  // account id with JSON-special characters (escaped by encodeScopeId) still finds
+  // its last_sweep instead of re-triggering on every worker tick.
+  it("matches last_sweep for an account id containing JSON-special characters", async () => {
+    const t0 = new Date("2026-06-05T00:00:00.000Z");
+    const weird = 'acct-"quote\\back';
+    const { store, set } = await newStore(t0);
+    await store.ensureThread({ id: "t-w", ownerId: weird });
+    await store.enqueueJob({ type: "decay", scope: { accountId: weird } }); // sweep at t0
+    await store.appendObservation({
+      threadId: "t-w",
+      sourceMessageRange: ["m1", "m2"],
+      observationText: "W",
+      observedAt: t0,
+    });
+
+    // Within the interval + below the count gate → NOT due (last_sweep matched).
+    set(new Date(t0.getTime() + 60_000));
+    expect(
+      await store.listDecayCandidateAccounts({
+        triggerObservations: 50,
+        triggerIntervalS: 3600,
+        nowMs: t0.getTime() + 60_000,
+      }),
+    ).toEqual([]);
+  });
 });

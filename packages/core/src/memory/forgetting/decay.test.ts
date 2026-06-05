@@ -84,6 +84,21 @@ function row(
 }
 
 describe("runDecayJob", () => {
+  // docs/12 (Codex review fix) — the queue is PERSISTENT: a decay row enqueued during
+  // an earlier ENABLED window can survive a restart with the master switch off. The
+  // job must re-check `config.enabled` at entry and no-op (marked done, NOTHING
+  // archived) — enabled:false means zero archives, including by leftover jobs.
+  it("no-ops a leftover queued job when forgetting.enabled is false (re-checks the master switch)", async () => {
+    const { store, archived, jobUpdates } = makeStore([row("stale", 100)]); // would archive if enabled
+    const deps = makeDeps(store, NOW, makeConfig({ enabled: false }));
+
+    await runDecayJob({ jobId: "d-off", scope: { accountId: "acct-a" } }, deps);
+
+    expect(archived).toEqual([]); // nothing swept
+    expect(store.listScorableObservations).not.toHaveBeenCalled(); // short-circuits before any read
+    expect(jobUpdates).toContainEqual({ jobId: "d-off", status: "done" }); // done, never left pending
+  });
+
   it("archives ONLY sub-threshold active observations (fresh rows survive)", async () => {
     // half_life 1s, threshold 0.05 → recency<0.05 at age>~4.32s. age 100s → archive;
     // age 0s → score≈0.5 → keep.

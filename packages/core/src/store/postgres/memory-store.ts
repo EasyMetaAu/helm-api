@@ -459,9 +459,11 @@ export class PgMemoryStore implements MemoryStore {
   // every owner with ≥1 active observation: last decay sweep time (newest decay job's
   // created_at for its scope_id) + count of active observations newer than that sweep;
   // DUE if that count ≥ triggerObservations OR (now − lastSweep) ≥ triggerIntervalS (a
-  // never-swept account is due on the time gate). The account-only scope_id is canonical
-  // JSON ({"accountId":"<id>"}) = encodeScopeId({accountId}); a JSON-special id misses
-  // the join and over-triggers (the open-job dedupe collapses it — fail-open).
+  // never-swept account is due on the time gate). scope_id is the canonical
+  // encodeScopeId JSON, so the account is matched via `scope_id::jsonb ->> 'accountId'`
+  // — NEVER by string-concatenating a lookalike literal (Codex review fix: a
+  // JSON-special id is escaped by the codec, a concat would never match, last_sweep
+  // would stay null forever and the account would re-trigger every worker tick).
   async listDecayCandidateAccounts(input: {
     triggerObservations: number;
     triggerIntervalS: number;
@@ -472,12 +474,12 @@ export class PgMemoryStore implements MemoryStore {
       SELECT mt.owner_id AS owner_id,
              (SELECT MAX(j.created_at) FROM memory_jobs j
                WHERE j.type = 'decay'
-                 AND j.scope_id = '{"accountId":"' || mt.owner_id || '"}') AS last_sweep,
+                 AND j.scope_id::jsonb ->> 'accountId' = mt.owner_id) AS last_sweep,
              COUNT(o.id) AS active_total,
              SUM(CASE WHEN o.observed_at > COALESCE(
                (SELECT MAX(j2.created_at) FROM memory_jobs j2
                  WHERE j2.type = 'decay'
-                   AND j2.scope_id = '{"accountId":"' || mt.owner_id || '"}'), 0)
+                   AND j2.scope_id::jsonb ->> 'accountId' = mt.owner_id), 0)
                THEN 1 ELSE 0 END) AS new_since_sweep
         FROM memory_observations o
         JOIN memory_threads mt ON mt.id = o.thread_id
@@ -564,9 +566,11 @@ export class PgMemoryStore implements MemoryStore {
         const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
         if (insertedRows[0] === undefined) continue; // deduped → no supersede
 
-        // IS NOT DISTINCT FROM is the NULL-safe equality (matches NULL-to-NULL and
-        // value-to-value), so the supersede only touches rows whose scope equals the
-        // NEW fact's scope (in-account narrowing — docs/12).
+        // Supersede narrows by the NEW fact's NON-NULL scope columns ONLY — the SAME
+        // semantics as the listActiveFacts read path (Codex review fix; pg mirror of
+        // the sqlite adapter). A null scope column on the new fact imposes NO
+        // constraint: `(${"value"}::text IS NULL OR col = value)` short-circuits to
+        // a no-op clause when the bound value is null.
         await tx.execute(sql`
         UPDATE memory_facts
            SET expired_at = ${nowMs}, invalid_at = ${validFromMs}, updated_at = ${nowMs}
@@ -576,9 +580,9 @@ export class PgMemoryStore implements MemoryStore {
            AND expired_at IS NULL
            AND valid_from < ${validFromMs}
            AND id <> ${id}
-           AND project_id IS NOT DISTINCT FROM ${projectId}
-           AND resource_id IS NOT DISTINCT FROM ${resourceId}
-           AND thread_id IS NOT DISTINCT FROM ${threadId}
+           AND (${projectId}::text IS NULL OR project_id = ${projectId})
+           AND (${resourceId}::text IS NULL OR resource_id = ${resourceId})
+           AND (${threadId}::text IS NULL OR thread_id = ${threadId})
       `);
       }
     });

@@ -125,6 +125,56 @@ describe("PgMemoryStore.insertFactsReconciled (dedup + supersede, docs/12 P6)", 
     expect(active[0]?.contentHash).toBe("new");
   });
 
+  // docs/12 (Codex review fix #2, pg mirror) — supersede narrows by the NEW fact's
+  // non-null scope columns only, matching the read path; a newer project-level fact
+  // must expire an older same-subject fact that also carries a thread id under that
+  // project, while a different project's fact stays alive.
+  it("a newer project-level fact supersedes an older same-subject fact with a NARROWER scope under that project", async () => {
+    const now = new Date("2026-06-05T00:00:00.000Z");
+    const { store } = await newStore(now);
+    await store.insertFactsReconciled({
+      accountId: "acct-a",
+      scope: {},
+      now,
+      facts: [
+        fact({
+          ownerId: "acct-a",
+          subjectKey: "deploy-region",
+          contentHash: "old-narrow",
+          projectId: "p1",
+          threadId: "t1",
+          validFrom: new Date("2026-05-01T00:00:00.000Z"),
+        }),
+        fact({
+          ownerId: "acct-a",
+          subjectKey: "deploy-region",
+          contentHash: "other-project",
+          projectId: "p2",
+          validFrom: new Date("2026-05-01T00:00:00.000Z"),
+        }),
+      ],
+    });
+    await store.insertFactsReconciled({
+      accountId: "acct-a",
+      scope: {},
+      now,
+      facts: [
+        fact({
+          ownerId: "acct-a",
+          subjectKey: "deploy-region",
+          contentHash: "new-project",
+          projectId: "p1",
+          validFrom: new Date("2026-06-01T00:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const p1Active = await store.listActiveFacts({ accountId: "acct-a", projectId: "p1" });
+    expect(p1Active.map((f) => f.contentHash)).toEqual(["new-project"]);
+    const p2Active = await store.listActiveFacts({ accountId: "acct-a", projectId: "p2" });
+    expect(p2Active.map((f) => f.contentHash)).toEqual(["other-project"]);
+  });
+
   it("does NOT supersede across different subject_keys or accounts", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store } = await newStore(now);
