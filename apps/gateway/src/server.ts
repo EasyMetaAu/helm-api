@@ -23,6 +23,7 @@ import {
   createStore,
   createTokenManager,
   DEFAULT_LANES,
+  type DecayDeps,
   discoverOAuthModels,
   type GeminiGenerateContentResponse,
   geminiTransformer,
@@ -43,6 +44,7 @@ import {
   makeAnthropicError,
   makeGeminiError,
   makeProxyFetch,
+  maybeEnqueueDecayJobs,
   type OAuthPoolMember,
   type OAuthTokenStore,
   type ObserveDeps,
@@ -52,6 +54,7 @@ import {
   type ProxyConfig,
   parseCodexQuotaHeaders,
   parseLanesConfig,
+  pruneRetainedMemory,
   type ReflectorDeps,
   type ProviderRegistryConfig as RegistryProviderConfig,
   type ResponsesSSEEvent,
@@ -60,6 +63,7 @@ import {
   resolveCostUsd,
   responsesTransformer,
   routeRequest,
+  runDecayJob,
   runObserverJob,
   runReflectorJob,
   type StoreSet,
@@ -153,6 +157,50 @@ function mergeObservations(
 ): string {
   const body = observations.map((o) => `- ${o.observationText}`).join("\n");
   return truncate(body || "(no observations)", MEMORY_REFLECTION_MAX_CHARS);
+}
+
+// docs/12 P6 (Codex review fix #4) — the DETERMINISTIC fact extractor wired into
+// the Reflector, mirroring the summarize/merge MVP stubs above: a real LLM
+// extractor that atomizes claims is the follow-up (docs/08 "real LLM … deferred"),
+// but the pipeline must be genuinely LIVE when forgetting.enabled, not dead config.
+// It surfaces one candidate fact per active observation — subject from its first
+// tag (else a slug of the leading words, the same key the Reflector normalizes for
+// same-subject supersede), assertion = the observation text. Pure + deterministic
+// (same observations → same facts), so content-hash dedup + supersede are stable.
+// Inert by default: the Reflector only calls this when the flag is on AND the
+// active-observation token sum crosses `consolidate.trigger_tokens`.
+function extractFactsFromObservations(observations: readonly Observation[]): Array<{
+  subjectText: string;
+  factText: string;
+  validFrom: Date;
+  sourceObservationRange: [string, string];
+}> {
+  const facts: Array<{
+    subjectText: string;
+    factText: string;
+    validFrom: Date;
+    sourceObservationRange: [string, string];
+  }> = [];
+  for (const o of observations) {
+    const text = o.observationText.trim();
+    if (text.length === 0 || text === "[pruned]") continue;
+    const subjectText = o.tags?.[0]?.trim() || text.split(/\s+/).slice(0, 6).join(" ") || "general";
+    facts.push({
+      subjectText,
+      factText: truncate(text, MEMORY_REFLECTION_MAX_CHARS),
+      // The fact became true when its observation was recorded — drives supersede
+      // ordering (Codex review fix), NOT the processing wall-clock.
+      validFrom: o.observedAt,
+      // Audit trail = the OBSERVATION's id (memory_facts.source_observation_range is
+      // [firstObservationId, lastObservationId] per the schema), NOT the raw
+      // message-id range — one fact derives from one observation here, so both ends
+      // are this observation's id. Codex review fix: previously stored
+      // o.sourceMessageRange (raw message ids), which would join against the wrong
+      // table.
+      sourceObservationRange: [o.id, o.id],
+    });
+  }
+  return facts;
 }
 
 // Pre-classification TPM token estimator. Extracted to middleware/estimate-tokens
@@ -770,6 +818,19 @@ export async function buildServer(
   // best-effort write-back to the queue (type:"observer"); hydrate tokens land in
   // their OWN cost bucket (principle 7). D9: there is no config.memory subtree yet,
   // so the injected token budget rides an env tunable (fail-safe default + guard).
+  // docs/12 P3/P4 — forgetting wiring for the inject path, GATED behind
+  // config.memory.forgetting.enabled (default false ⇒ this dep is inert and inject
+  // behaves byte-identically to today). When enabled it carries the score-trim
+  // tunables (drop_order + the score curve) and a fail-open bumpReferences bound to
+  // the live store (the port method is optional; the `?? noop` keeps the dep total).
+  const forgettingCfg = config.memory.forgetting;
+  const injectForgetting: InjectDeps["forgetting"] = {
+    enabled: forgettingCfg.enabled,
+    dropOrder: forgettingCfg.inject.drop_order,
+    scoreConfig: forgettingCfg.score,
+    bumpReferences: (bumpInput) => store.memory.bumpReferences?.(bumpInput) ?? Promise.resolve(),
+  };
+
   const injectDeps: InjectDeps = {
     memoryStore: store.memory,
     estimateTokens: estimateMemoryTokens,
@@ -777,6 +838,7 @@ export async function buildServer(
     costSink: () => {},
     now: () => new Date(),
     log: memoryLog,
+    forgetting: injectForgetting,
   };
   const injectTokenBudgetRaw = Number(process.env.HELM_MEMORY_INJECT_TOKEN_BUDGET ?? 4000);
   const injectTokenBudget =
@@ -802,6 +864,24 @@ export async function buildServer(
       return { reflectionText, tokenEstimate: estimateMemoryTokens(reflectionText) };
     },
     costSink: () => {},
+    now: () => new Date(),
+    log: memoryLog,
+    // docs/12 P6 (Codex review fix #4) — wire the consolidate config + the
+    // deterministic extractor so fact extraction is LIVE when forgetting.enabled
+    // (default off ⇒ inert: the Reflector's gates short-circuit before any fact
+    // work, so this is byte-identical to today). `estimateTokens` matches the
+    // Observer/Reflector heuristic used for the consolidate trigger.
+    forgetting: forgettingCfg,
+    extractFacts: async ({ observations }) => extractFactsFromObservations(observations),
+    estimateTokens: estimateMemoryTokens,
+  };
+  // Decay-sweep deps (docs/12 P5). The whole forgetting config drives the pure score +
+  // archive threshold + the bounded-loop limits; gated behind forgetting.enabled so the
+  // worker only ever receives a 'decay' job (and only ever triggers one) when the flag
+  // is on (default off ⇒ inert). Same injected clock as the rest of the memory pipeline.
+  const decayDeps: DecayDeps = {
+    memoryStore: store.memory,
+    config: forgettingCfg,
     now: () => new Date(),
     log: memoryLog,
   };
@@ -1660,6 +1740,29 @@ export async function buildServer(
       log: memoryLog,
       runObserver: (job) => runObserverJob(job, observerDeps),
       runReflector: (job) => runReflectorJob(job, reflectorDeps),
+      // docs/12 P5: dispatch decay rows to the sweep, and evaluate the buffer-flush
+      // trigger each tick. Both are GATED — maybeEnqueueDecayJobs no-ops when
+      // forgetting.enabled is false, so with the flag off no decay job is ever enqueued
+      // and the worker behaves byte-identically to today.
+      runDecay: (job) => runDecayJob(job, decayDeps),
+      onTick: async () => {
+        await maybeEnqueueDecayJobs({
+          memoryStore: store.memory,
+          config: forgettingCfg,
+          now: () => new Date(),
+          log: memoryLog,
+        });
+        // docs/12 P7: the retention HARD-DELETE — account-agnostic, off the request path,
+        // same cadence as the payload_retention_days prune. GATED (no-op with the flag
+        // off) and fail-open (errors logged, never thrown), so a delete failure never
+        // breaks the worker tick.
+        await pruneRetainedMemory({
+          memoryStore: store.memory,
+          config: forgettingCfg,
+          now: () => new Date(),
+          log: memoryLog,
+        });
+      },
     });
   }
 

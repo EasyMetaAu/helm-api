@@ -1,0 +1,38 @@
+# memory.yaml — Memory forgetting & tiering (docs/12).
+#
+# The whole forgetting strategy is gated behind a single switch
+# (memory.forgetting.enabled, default false). With it OFF, runtime behaviour is
+# byte-for-byte identical to today — this file is inert. Config is fail-CLOSED
+# (Zod: an unknown/misspelled key or an inverted importance band refuses startup);
+# the runtime forgetting steps are fail-OPEN (any score/decay error degrades to
+# "keep the memory", never a 5xx).
+#
+# This file IS the `config.memory` subtree (the loader assigns the whole file to
+# the `memory` key — so the top-level keys here are `forgetting`, etc., with NO
+# `memory:` wrapper, mirroring how lanes.yaml is a flat map). It is OPTIONAL:
+# delete it and all values below apply as defaults.
+
+forgetting:
+  enabled: false                 # master switch — off = today's behaviour exactly
+  score:
+    half_life_s: 86400           # 1 day; recency = 0.5 ^ (age / half_life)
+    importance_floor: 0.1        # decay brake: vital memories never hit 0
+    importance_ceil: 1.0
+    access_weight: 0.15          # access_bonus = access_weight × log1p(reference_count)
+  inject:
+    drop_order: score            # score | oldest  (oldest = legacy fallback)
+  decay:
+    archive_threshold: 0.05      # score below this → soft-archive (mid tier)
+    trigger_observations: 50     # buffer-flush gate: run sweep after N new observations
+    trigger_interval_s: 3600     # …or this long elapsed, whichever first
+  consolidate:
+    trigger_tokens: 1024         # mid→long: extract facts when active-obs tokens exceed this
+    max_facts_per_subject: 8     # hard cap regardless of LLM output
+    enable_llm_supersede: false  # LLM-found contradictions — OFF by default (fail-safe)
+  retention:
+    archived_days: 30            # hard-delete archived rows older than this (rare, audit)
+    facts_expired_days: 90
+  sweep:
+    max_iterations: 200          # background-worker bounds
+    max_wallclock_s: 900
+    max_consecutive_errors: 5    # back off, do not loop forever

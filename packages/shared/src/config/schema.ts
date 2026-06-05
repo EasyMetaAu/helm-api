@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ClassifierConfigSchema } from "./classifier-schema.js";
 import { LanesConfigSchema } from "./lanes-schema.js";
+import { MemoryConfigSchema } from "./memory-schema.js";
 import { PoliciesConfigSchema } from "./policy-schema.js";
 
 // Config-as-code: behavior is driven by config/*.yaml + env, not code changes.
@@ -236,6 +237,12 @@ export const HelmConfigSchema = z.object({
   // policies.yaml is a no-op (the router runs on lanes alone). A present-but-
   // invalid file still fails closed.
   policies: PoliciesConfigSchema.prefault({ policies: [] }),
+  // Memory subtree (config/memory.yaml). NEW per docs/12 — docs/08 left it
+  // deferred. Prefaulted so an absent memory.yaml stays on all-defaults
+  // (forgetting.enabled:false → behaviour identical to today); a present-but-
+  // invalid file still fails closed (principle 2). Empty prefault lets
+  // MemoryConfigSchema's own field defaults supply the nested tree.
+  memory: MemoryConfigSchema.prefault({}),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -252,3 +259,12 @@ export type RateLimitConfig = z.infer<typeof RateLimitConfigSchema>;
 export type StoreConfig = z.infer<typeof StoreConfigSchema>;
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 export type HelmConfig = z.infer<typeof HelmConfigSchema>;
+
+// Re-export the memory subtree's public surface from the config barrel so
+// consumers import the whole config model from one place (schema-first).
+export {
+  type ForgettingConfig,
+  ForgettingSchema,
+  type MemoryConfig,
+  MemoryConfigSchema,
+} from "./memory-schema.js";

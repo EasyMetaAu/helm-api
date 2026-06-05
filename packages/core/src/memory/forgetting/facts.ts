@@ -1,0 +1,63 @@
+import { createHash } from "node:crypto";
+
+// docs/12 P6 — the DETERMINISTIC pure helpers behind fact extraction +
+// dedup/supersede. These are leaf functions (no LLM, no network, no clock read),
+// exactly like the forgetting score: a reflection that ran twice over the same
+// observations must derive the SAME subject_key + content_hash so the
+// account-scoped UNIQUE(owner_id, content_hash) dedups idempotently and the
+// same-(owner_id, subject_key) supersede targets the same logical fact.
+//
+// The spec's one fuzzy bit — "`subject_key` derivation … deterministic
+// normalization (lowercased tag + entity slug) vs LLM-assigned" — is RESOLVED
+// here as deterministic-from-tags/subject for v1 (CLAUDE.md: "subject_key …
+// DETERMINISTICALLY"); the LLM-assigned variant stays gated behind
+// consolidate.enable_llm_supersede (off, out of scope for P6).
+
+// Normalize a subject string into a stable supersede key (docs/12 P6). Pure,
+// deterministic, applied in the EXACT order CLAUDE.md specifies — "lowercase,
+// trim, collapse whitespace to '-', strip non-alphanumeric-dash":
+//   1. lowercase + trim;
+//   2. collapse any run of whitespace to a single dash (the word separator);
+//   3. strip every remaining char that is not [a-z0-9-] — so intra-word
+//      punctuation is DELETED (joins the neighbours), not turned into a gap;
+//   4. collapse dash runs + trim edge dashes left by steps 2–3.
+// Order matters: collapsing whitespace BEFORE stripping punctuation means
+// "User's favourite: TypeScript!" → "users-favourite-typescript" and
+// "gpt-5.4 model" → "gpt-54-model" (the apostrophe / dot vanish, the space is
+// the only separator). A re-run reproduces the slug byte-for-byte, so two
+// extractions of the same topic land on the same (owner_id, subject_key) and the
+// newer one supersedes the older (pure datetime UPDATE, no LLM). Input that
+// strips to nothing yields "".
+export function normalizeSubjectKey(subject: string): string {
+  return (
+    subject
+      .toLowerCase()
+      .trim()
+      // Whitespace runs are the word boundary → single dash.
+      .replace(/\s+/g, "-")
+      // Strip everything that is not alnum-or-dash (intra-word punctuation is
+      // deleted, joining the neighbours rather than splitting them).
+      .replace(/[^a-z0-9-]+/g, "")
+      // Fold any dash runs that survived + trim leading/trailing dashes.
+      .replace(/-+/g, "-")
+      .replace(/^-+|-+$/g, "")
+  );
+}
+
+// Canonicalize fact text into the hash PRE-IMAGE (docs/12 P6). UNLIKE the subject
+// key, this keeps punctuation: it only folds case + collapses internal whitespace
+// so trivially-equal assertions ("User likes TS" vs "  user   likes TS ") hash
+// identically. The stored fact_text stays human-readable; only the hash input is
+// normalized. Deterministic + pure.
+export function normalizeFactText(factText: string): string {
+  return factText.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// content_hash = sha256(normalized_fact_text), hex (docs/12 "Schema deltas":
+// `content_hash = sha256(normalized_text) — idempotent ingest`; "content_hash
+// idempotent dedup" borrowed from Mem0). One pure-function column kills memory
+// bloat from repeated facts: the same assertion, however it is cased/spaced,
+// produces one row per (owner_id, content_hash).
+export function factContentHash(factText: string): string {
+  return createHash("sha256").update(normalizeFactText(factText)).digest("hex");
+}

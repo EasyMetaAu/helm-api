@@ -1026,6 +1026,80 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         await ctx.stores.memory.getReflection({ projectId: "p1", accountId: "acct-b" }),
       ).toBeNull();
     });
+
+    // docs/12 (Codex review fix) — the reflection-rebuild half of forgetting:
+    // listActiveReflectionScopes (what decay enqueues rebuilds for) + archiveReflections
+    // (clears a forgotten scope) + getReflection filtering to ACTIVE only.
+    it("archiveReflections clears every version of a scope; getReflection then returns null; listActiveReflectionScopes drops it", async () => {
+      ctx = await make();
+      const m = ctx.stores.memory;
+      // Two scopes for one account: a project reflection (2 versions) + a resource one.
+      await m.upsertReflection({
+        accountId: "acct-a",
+        projectId: "p1",
+        reflectionText: "p-v1",
+        version: 1,
+        tokenEstimate: 4,
+        updatedAt: new Date(1000),
+      });
+      await m.upsertReflection({
+        accountId: "acct-a",
+        projectId: "p1",
+        reflectionText: "p-v2",
+        version: 2,
+        tokenEstimate: 4,
+        updatedAt: new Date(2000),
+      });
+      await m.upsertReflection({
+        accountId: "acct-a",
+        resourceId: "r1",
+        reflectionText: "r-v1",
+        version: 1,
+        tokenEstimate: 4,
+        updatedAt: new Date(1000),
+      });
+
+      // Both scopes are active reflection targets the decay job would rebuild.
+      const scopesBefore = await m.listActiveReflectionScopes?.("acct-a");
+      expect(scopesBefore).toEqual(
+        expect.arrayContaining([
+          { accountId: "acct-a", projectId: "p1" },
+          { accountId: "acct-a", resourceId: "r1" },
+        ]),
+      );
+      expect(scopesBefore).toHaveLength(2);
+
+      // Archive the project scope (its whole active observation set decayed).
+      await m.archiveReflections?.({ accountId: "acct-a", projectId: "p1" });
+
+      // getReflection now returns null for the archived scope (ALL versions cleared),
+      // but the resource scope is untouched.
+      expect(await m.getReflection({ accountId: "acct-a", projectId: "p1" })).toBeNull();
+      expect(
+        (await m.getReflection({ accountId: "acct-a", resourceId: "r1" }))?.reflectionText,
+      ).toBe("r-v1");
+      // Only the resource scope remains an active rebuild target.
+      expect(await m.listActiveReflectionScopes?.("acct-a")).toEqual([
+        { accountId: "acct-a", resourceId: "r1" },
+      ]);
+
+      // docs/12 (Codex review fix II) — the version HIGH-WATER survives the archive
+      // (it counts every status), so a rebuild writes v3, never resetting to v1.
+      expect(
+        await m.getReflectionVersionHighWater?.({ accountId: "acct-a", projectId: "p1" }),
+      ).toBe(2);
+      await m.upsertReflection({
+        accountId: "acct-a",
+        projectId: "p1",
+        reflectionText: "p-v3 (revived)",
+        version: 3,
+        tokenEstimate: 4,
+        updatedAt: new Date(3000),
+      });
+      const revived = await m.getReflection({ accountId: "acct-a", projectId: "p1" });
+      expect(revived?.version).toBe(3); // active again, sequence continued
+      expect(revived?.reflectionText).toBe("p-v3 (revived)");
+    });
   });
 
   // --- ConfigStore --------------------------------------------------------

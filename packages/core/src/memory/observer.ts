@@ -28,10 +28,17 @@ export interface ObserverDeps {
   // Compress a slice of raw messages into observation text. Injected so tests
   // use a deterministic stub and production uses an LLM. `now` lets the summary
   // embed a stable time anchor.
-  summarize: (input: {
-    messages: RawMessage[];
-    now: Date;
-  }) => Promise<{ observationText: string; priority?: number; tags?: string[] }>;
+  summarize: (input: { messages: RawMessage[]; now: Date }) => Promise<{
+    observationText: string;
+    priority?: number;
+    tags?: string[];
+    // docs/12 (P0/P5 salience input). Optional [0,1] salience the summarizer can
+    // emit directly; when absent it is DERIVED from `priority` (see below). This is
+    // the `importance` multiplier the forgetting score uses as its decay brake — so
+    // a real (LLM) summarizer's salience rating actually reaches the score curve
+    // instead of every observation defaulting to a flat 0.5.
+    importance?: number;
+  }>;
   // Observer tokens are a SEPARATE cost bucket (docs/08 "cost accounting"): they must
   // NOT be hidden inside actor/provider execution cost.
   costSink: (bucket: "observer", tokens: number) => void;
@@ -119,10 +126,28 @@ export async function runObserverJob(
     }
 
     const now = deps.now();
-    const { observationText, priority, tags } = await deps.summarize({
+    const {
+      observationText,
+      priority,
+      tags,
+      importance: rawImportance,
+    } = await deps.summarize({
       messages: compressed,
       now,
     });
+
+    // docs/12 (P5 salience) — resolve the observation's `importance` ∈ [0,1] so the
+    // forgetting score's decay-brake has a real input instead of always reading the
+    // DB default 0.5. Preference: (1) an explicit `importance` from the summarizer;
+    // (2) else DERIVE it from `priority`, treated as a 0–10 salience scale (the
+    // Generative-Agents convention) → clamp(priority/10, 0, 1); (3) else leave
+    // undefined so the store applies its 0.5 default. Pure + deterministic.
+    const importance =
+      rawImportance !== undefined
+        ? Math.min(1, Math.max(0, rawImportance))
+        : priority !== undefined
+          ? Math.min(1, Math.max(0, priority / 10))
+          : undefined;
 
     // source_message_range is REQUIRED + must be precise (docs/08 auditability).
     const first = compressed[0];
@@ -139,6 +164,7 @@ export async function runObserverJob(
       observationText,
       observedAt: now,
       ...(priority !== undefined ? { priority } : {}),
+      ...(importance !== undefined ? { importance } : {}),
       ...(tags !== undefined ? { tags } : {}),
     });
 

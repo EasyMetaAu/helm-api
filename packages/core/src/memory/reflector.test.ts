@@ -9,17 +9,26 @@ import { type ReflectorDeps, type ReflectorJob, runReflectorJob } from "./reflec
 // Memory is a MIDDLEWARE — this fake never touches routing/lane state.
 function makeFakeStore(observations: Observation[], initial: Reflection | null = null) {
   let current: Reflection | null = initial;
+  // The HIGHEST version ever written for the scope, across every status — mirrors
+  // the real adapters' getReflectionVersionHighWater (survives an archive).
+  let maxVersionEver = initial?.version ?? 0;
   const upserts: ReflectionUpsertInput[] = [];
   const jobUpdates: Array<{ jobId: string; status: MemoryJobStatus; error?: string }> = [];
+  const archiveCalls: ReflectionScope[] = [];
   const store: MemoryStore = {
     ensureThread: vi.fn(async () => {}),
     appendMessage: vi.fn(async () => "unused"),
     listMessages: vi.fn(async () => []),
     appendObservation: vi.fn(async () => "unused"),
     listObservations: vi.fn(async (_scope: ReflectionScope) => observations),
-    getReflection: vi.fn(async (_scope: ReflectionScope) => current),
+    // Mirrors the real adapters: only an ACTIVE reflection is readable (an archived
+    // one is invisible to inject + the Reflector — Codex review fix).
+    getReflection: vi.fn(async (_scope: ReflectionScope) =>
+      current !== null && current.status === "active" ? current : null,
+    ),
     upsertReflection: vi.fn(async (input: ReflectionUpsertInput) => {
       upserts.push(input);
+      maxVersionEver = Math.max(maxVersionEver, input.version);
       const id = `refl-${upserts.length}`;
       // Reflect the write back into "current" so a follow-up run reads it.
       current = {
@@ -31,6 +40,9 @@ function makeFakeStore(observations: Observation[], initial: Reflection | null =
         version: input.version,
         tokenEstimate: input.tokenEstimate,
         updatedAt: input.updatedAt,
+        referencedAt: null,
+        referenceCount: 0,
+        status: "active",
       };
       return id;
     }),
@@ -39,8 +51,17 @@ function makeFakeStore(observations: Observation[], initial: Reflection | null =
     }),
     enqueueJob: vi.fn(async () => "job"),
     claimPendingJobs: vi.fn(async () => []),
+    // docs/12 (Codex review fix) — archive every reflection version of a scope when
+    // its active observation set empties out; records the scope it was asked to clear.
+    archiveReflections: vi.fn(async (scope: ReflectionScope) => {
+      archiveCalls.push(scope);
+      if (current !== null) current = { ...current, status: "archived" };
+    }),
+    // docs/12 (Codex review fix II) — version high-water across every status, so the
+    // sequence stays monotonic across an archive→rebuild cycle.
+    getReflectionVersionHighWater: vi.fn(async (_scope: ReflectionScope) => maxVersionEver),
   };
-  return { store, upserts, jobUpdates, getCurrent: () => current };
+  return { store, upserts, jobUpdates, archiveCalls, getCurrent: () => current };
 }
 
 function makeObservations(texts: string[]): Observation[] {
@@ -50,6 +71,12 @@ function makeObservations(texts: string[]): Observation[] {
     sourceMessageRange: [`m${i * 2 + 1}`, `m${i * 2 + 2}`] as [string, string],
     observationText: text,
     observedAt: new Date(`2026-05-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`),
+    referenceCount: 0,
+    importance: 0.5,
+    status: "active" as const,
+    referencedAt: null,
+    archivedAt: null,
+    expiredAt: null,
   }));
 }
 
@@ -97,6 +124,35 @@ describe("runReflectorJob", () => {
     expect(up.threadId).toBe("thread-1");
   });
 
+  // docs/12 (Codex review fix #2) — a decayed (archived) or retention-tombstoned
+  // (pruned) observation is a FORGOTTEN row: it must NOT feed the long-lived
+  // reflection merge, even though the store still returns it (its range serves as a
+  // raw-coverage marker for inject/observer). Otherwise forgotten memory resurrects
+  // through the reflection back door.
+  it("excludes archived/pruned observations from the merge (forgotten rows stay forgotten)", async () => {
+    const obs = makeObservations(["active fact", "archived fact", "pruned fact"]);
+    const archived = obs[1];
+    const pruned = obs[2];
+    if (!archived || !pruned) throw new Error("fixture");
+    archived.status = "archived";
+    archived.archivedAt = new Date("2026-05-20T00:00:00.000Z");
+    pruned.status = "pruned";
+    const { store, upserts } = makeFakeStore(obs);
+    const merge = vi.fn(async ({ observations }: { observations: Observation[] }) => {
+      const text = observations.map((o) => o.observationText).join(" | ");
+      return { reflectionText: text, tokenEstimate: text.length };
+    });
+    const deps = makeDeps(store, { merge });
+
+    const out = await runReflectorJob(JOB, deps);
+
+    expect(out.changed).toBe(true);
+    // merge saw ONLY the active observation — archived + pruned were filtered out.
+    const merged = (merge.mock.calls[0]?.[0]?.observations ?? []) as Observation[];
+    expect(merged.map((o) => o.observationText)).toEqual(["active fact"]);
+    expect(upserts[0]?.reflectionText).toBe("active fact");
+  });
+
   it("is stable/slowly-changing: identical observations do not bump the version or write a new row", async () => {
     const obs = makeObservations(["a", "b"]);
     // Existing reflection whose text already equals what merge would produce.
@@ -109,6 +165,9 @@ describe("runReflectorJob", () => {
       version: 7,
       tokenEstimate: 1,
       updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
     };
     const { store, upserts } = makeFakeStore(obs, existing);
     // merge with NO previous-prefix behavior so identical input → identical "a | b".
@@ -140,6 +199,9 @@ describe("runReflectorJob", () => {
       version: 1,
       tokenEstimate: 1,
       updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
     };
     const { store, upserts } = makeFakeStore(obs, existing);
     const deps = makeDeps(store, {
@@ -171,6 +233,9 @@ describe("runReflectorJob", () => {
       version: 3,
       tokenEstimate: 1,
       updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
     };
     const { store, upserts } = makeFakeStore(obs, existing);
     const merge = vi.fn(async ({ observations, previousReflection }) => {
@@ -240,7 +305,7 @@ describe("runReflectorJob", () => {
   });
 
   it("writes nothing when the scope has no observations", async () => {
-    const { store, upserts, jobUpdates } = makeFakeStore([]);
+    const { store, upserts, jobUpdates, archiveCalls } = makeFakeStore([]);
     const deps = makeDeps(store);
 
     const out = await runReflectorJob(JOB, deps);
@@ -250,7 +315,97 @@ describe("runReflectorJob", () => {
     expect(upserts).toHaveLength(0);
     // merge never called — no wasted LLM tokens.
     expect(deps.merge).not.toHaveBeenCalled();
+    expect(archiveCalls).toHaveLength(0); // no previous reflection → nothing to clear
     expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
+  });
+
+  // docs/12 (Codex review fix) — a scope whose active observation set has emptied out
+  // (everything decayed) is FORGOTTEN: the previous reflection is a stale cache of gone
+  // observations and would keep injecting forgotten content. The Reflector ARCHIVES it
+  // (soft-invalidate) so getReflection returns null and it stops being injected.
+  it("archives the previous reflection when the active observation set is now empty", async () => {
+    const existing: Reflection = {
+      id: "refl-old",
+      projectId: "proj-1",
+      resourceId: null,
+      threadId: null,
+      reflectionText: "stale: user liked X (now decayed)",
+      version: 4,
+      tokenEstimate: 9,
+      updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
+    };
+    const { store, upserts, archiveCalls, jobUpdates } = makeFakeStore([], existing);
+    // The archive branch is gated on forgetting.enabled (Codex review fix: only the
+    // forgetting machinery may clear a reflection; flag off = legacy keep).
+    const deps = makeDeps(store, {
+      forgetting: {
+        enabled: true,
+        consolidate: { trigger_tokens: 1024, max_facts_per_subject: 8 },
+      },
+    });
+    // A project-scoped job → target is an injectable project reflection.
+    const projectJob: ReflectorJob = {
+      jobId: "job-1",
+      scope: { accountId: "acct-a", projectId: "proj-1" },
+    };
+
+    const out = await runReflectorJob(projectJob, deps);
+
+    expect(archiveCalls).toEqual([{ accountId: "acct-a", projectId: "proj-1" }]); // cleared at the target scope
+    expect(out.changed).toBe(true); // the scope's memory genuinely changed (it was forgotten)
+    expect(out.reflectionId).toBeNull();
+    expect(upserts).toHaveLength(0); // never writes an empty reflection (reflectionText min(1))
+    expect(deps.merge).not.toHaveBeenCalled();
+    expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
+  });
+
+  // docs/12 (Codex review fix II) — version continuity across an archive→rebuild
+  // cycle. getReflection hides archived rows, so deriving next-version from the
+  // active row alone would RESET to 1 after a scope was archived and later revived —
+  // a reflection_version regression for clients/caches. The Reflector writes at
+  // high-water + 1 (across every status) instead.
+  it("continues the version sequence after an archive→rebuild cycle (no version regression)", async () => {
+    const existing: Reflection = {
+      id: "refl-old",
+      projectId: "proj-1",
+      resourceId: null,
+      threadId: null,
+      reflectionText: "stale memory at v4",
+      version: 4,
+      tokenEstimate: 6,
+      updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
+    };
+    // Start with NO active observations → the empty-set branch archives v4.
+    const { store, upserts } = makeFakeStore([], existing);
+    const deps = makeDeps(store, {
+      forgetting: {
+        enabled: true,
+        consolidate: { trigger_tokens: 1024, max_facts_per_subject: 8 },
+      },
+    });
+    const projectJob: ReflectorJob = {
+      jobId: "job-1",
+      scope: { accountId: "acct-a", projectId: "proj-1" },
+    };
+    await runReflectorJob(projectJob, deps);
+    expect(upserts).toHaveLength(0); // archived, nothing written
+
+    // The scope revives: new observations arrive and the Reflector runs again.
+    vi.mocked(store.listObservations).mockResolvedValue(
+      makeObservations(["the project picked Rust after all"]),
+    );
+    const out = await runReflectorJob(projectJob, deps);
+
+    expect(out.changed).toBe(true);
+    // v5, NOT v1 — the archived history's high-water still counts.
+    expect(out.version).toBe(5);
+    expect(upserts[0]?.version).toBe(5);
   });
 });
 

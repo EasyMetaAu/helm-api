@@ -48,6 +48,11 @@ const CONFIG_FILES: ReadonlyArray<{
   // PoliciesConfigSchema shape — so the whole file becomes the `policies` key.
   // Optional: absent -> the schema default ({ policies: [] }) applies (no-op).
   { file: "policies.yaml", key: "policies", optional: true },
+  // memory.yaml IS the `config.memory` subtree (docs/12 "Config surface"): the
+  // whole file becomes the `memory` key. Optional: absent → the schema prefault
+  // applies (forgetting.enabled:false → behaviour identical to today; the gateway
+  // still boots). A present-but-invalid file fails closed (strict/refine throws).
+  { file: "memory.yaml", key: "memory", optional: true },
 ];
 
 type Mutable = Record<string, unknown>;

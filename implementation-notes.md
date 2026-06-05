@@ -7,59 +7,45 @@
 
 ---
 
-## 2026-06-05 · 密钥对话框信息架构重组：渐进披露 + 共享 KeyCapsForm（docs/06/11 未覆盖的 UI 决策）
+## 2026-06-05 · 遗忘策略 Codex 评审修复 VII（2 项；docs/12）
 
-**动机**：创建/编辑密钥对话框已积累 7 组同等视觉权重的字段（角色/lanes/透传/限速/并发/记忆/预算），一屏放不下、没有层次，但其中只有「角色 + lanes + 透传」定义密钥本质，其余全是多数运维永远不碰的可选项。
+第七轮 review 仅剩 2×P2（持续收敛 5→3→3→3→3→2→2），全部修复（+1 回归测试）：
 
-**决定（候选方案：折叠分区 / Tabs / 平铺卡片，用户拍板选折叠分区）**：
-
-- **渐进披露**：基础字段常驻；「速率与并发」「用量预算」「记忆默认值」三组折叠为原生 `<details>` 分区，头部带「可选」徽标 + **一行实时状态摘要**（如「使用系统默认值」「$5 · 降级」「关闭」），折叠态不成黑盒。
-- **选原生 `<details>` 而非 JS 折叠**：内容始终在 DOM——a11y、页内查找、testing-library 查询全不受影响（现有测试零迁移成本）；`bind:open` 即可驱动 chevron 与摘要显隐。
-- **编辑对话框 `expandConfigured`**：含已配置值的分区初始即展开（把生效中的 cap 藏进折叠会诱发盲改）；创建对话框全折叠。
-- **顺序调整**：记忆默认值移到最后（最小众），限速/并发/预算相邻（同属流量控制）。
-- **顺手修复**：两对话框 ~200 行表单重复，抽出 `KeyCapsForm.svelte`（`<script module>` 导出 `KeyCaps` 缓冲类型 + `emptyKeyCaps`/`keyCapsFromView` 工厂，`$bindable` 传递）；EditKeyDialog 数字输入误用 `class="select"` 一并纠正为 `.input`。新 CSS recipe：`.form-section{,-summary,-body}`（app.css）。
-
-**i18n**：新增 10 key（Rate & concurrency / Optional / 摘要片段等），4 语种手工翻译（与既有术语表对齐：令牌/權杖/トークン/토큰）。
+1. **（P2）reinforcement 仍在请求 tick 上执行**：`void bump().catch()` 只保证不 await，但默认 sqlite 适配器的写是**同步**的（better-sqlite3 `.run()`）——promise 体当场执行，写库时间仍花在请求路径上。**修复：调用整体 `setImmediate` 延后到 macrotask**，并 try/catch 包同步抛错（macrotask 里未捕获异常会崩进程）。测试的微任务 flush 升级为 macrotask flush。
+2. **（P2）空集归档分支缺 `enabled` 门控**：只查了 archiveReflections 方法存在与否——遗忘关闭时，「有 reflection 但 observation 为空」的 scope 跑普通 reflector job 会被归档，违反「enabled:false 字节级不变」。**修复：分支加 `deps.forgetting?.enabled === true`**；既有归档/版本延续测试显式开 enabled。
 
 ---
 
-## 2026-06-05 · 零改动客户端记忆接入：per-key 默认值 + 信号回退链（issue #97；docs/08）
 
-**动机**：Claude Code / Codex 只能发静态头，发不了每会话动态的 `x-thread-id`；Hermes 等什么信号都不发。让 helm 从客户端**已经在发**的信号里推导 scope，配合 key 级默认值，任何兼容客户端「换 base_url + key」即获记忆。设计与三客户端调研实证见 issue #97。
+## 2026-06-05 · 遗忘策略 Codex 评审修复 VI（2 项；docs/12）
 
-**实现**：
+第六轮 Codex review 发现 2 个问题（均为前几轮修复的次生缺陷），全部修复（+4 回归测试）：
 
-- **per-key 默认值**：`api_keys` 新增 `memory_mode`（off|observe|inject，默认 off）/ `memory_project_id` / `memory_thread_source`（header|auto，默认 header），迁移 **sqlite v17 / pg v16**。沿用 budgets/concurrency 的全套模式（schema `.default()` 兼容旧行、CreateKeyInput/KeyPatch、两适配器、admin API + 两个 key 对话框 + zh 双语）。
-- **回退链**（`thread_source=auto` 才生效）：`x-thread-id` → body `metadata.thread_id/conversation_id` → `x-session-key` → `prompt_cache_key`（chat + responses 两条路由）→ `metadata.user_id`（anthropic 路由）。推导出的 thread 同样走 `ownerScopedThreadId` 账号隔离；来源记入 `DecisionRecord.memory.thread_source`（`MemoryDecisionSchema` 新增字段，`.default(null)` 兼容旧记录）。
-- **优先级语义（拍板）**：显式头永远赢——包括 `x-memory-mode: off` 压过 key 默认 inject；**非法的显式 mode 头归一化为 off 而不是落回 key 默认**（typo 不能静默变成 inject，fail-safe）。
-- **gemini 面**：wire 形态无每会话 body 信号，只接 key 默认值 + x-session-key。
-- **零回归保证**：未配置 memory 的 key 走到的代码路径与改动前完全一致（`defaults` 缺省 = 旧行为），有专门回归测试。
-
-**坑/约定**：`prompt_cache_key` 被复用为会话锚点（语义一致：同会话同 key，但属隐式契约，已写入 docs/08）；OpenClaw sessionId 在压缩时轮换 → thread 断档但 project/resource 画像延续。
-
-**推迟**：会话指纹兜底（首条消息哈希，覆盖零信号客户端）——边界取舍（历史编辑/压缩重写）需先拍板，见 issue #97。
-
-**评审跟进（Codex，2 项）**：
-- **（P1 数据丢失）list 视图漏返回 memory 字段**：`toSummary`/`KeySummary` 没带三个 memory 列 → `GET /admin/api/keys` 不返回 → admin 客户端归一化成 off/null/header → EditKeyDialog 保存时把默认值原样发回，**编辑任意 key 就静默清空已配置的 memory defaults**。修复：补全 `toSummary` 投影 + `KeySummary` 类型；加 list 端到端 + admin 客户端 round-trip 回归测试。
-- **（P2 闸门）空 `x-thread-id` 仍触发回退链**：`nonEmpty` 把「显式空串」和「缺失」都折叠成 null，导致 `x-thread-id: ""` + 信号仍派生 thread，与 docs/08「空 thread-id 应为 null」矛盾，也让调用方无法在不关 memory 的前提下退出自动派生。修复：单独追踪 header **是否存在**（`!== undefined`），只在缺失时跑回退链；显式空串 = 主动退出（folds null，链不跑）。
+1. **（P1）有界扫描的饥饿**：第三轮加的 limit-only 分页按 observed_at 取最旧 N 行——若这一页全是幸存者（被强化/高分），每轮 sweep 重选同一页，limit 之外的 condemned 行永不被处理。**修复：score 谓词下推进 SQL**（`candidates` 参数；sqlite `pow`/`ln`、pg `power`/`ln`，与 forgetting/score.ts 同一公式）——页内只含低于阈值的行，幸存者不占页、归档行离开 active 集，每轮必有进展。TS 复算保留作纵深防御（浮点边缘分歧 → 无害跳过）。docs/12 的「SQL 与 TS 同一公式」承诺至此兑现。
+2. **（P2）archive→rebuild 后 reflection 版本重置**：getReflection 过滤 active 后，nextVersion 只从 active 行推导 → 归档 v4 再复活会重写 v1（reflection_version 对客户端/缓存回退）。**修复：新增 `getReflectionVersionHighWater(scope)`（跨全 status 取 MAX(version)），写 highWater+1**；merge/inject 内容仍只读 active。可选端口方法，旧 fake 回退旧行为。
 
 ---
 
-## 2026-06-05 · Memory 第二轮评审修复：5 个缺陷（docs/08 Phase 2；#41 评审跟进 II）
-
-Codex 第二轮 review 发现 5 个问题（2×P1、2×P2、1×P3），全部修复（TDD，新增/更新 13 个测试断言）：
-
-1. **（P1）inject 重复注入已压缩的 raw**：inject 把线程全部 raw 消息当 recent_raw 注入，已被 observation 覆盖的旧轮次会以「observation + 原文」双份进入 prompt，上下文无界增长。修复：导出 observer 的 `alreadyObservedMessageIds`，inject 装配时过滤掉 source range 已覆盖的 raw（raw 行仍留库审计，只是不再上 prefix）。
-2. **（P1）project reflection 按 thread 后写覆盖**：reflector 只合并晋升 thread 自己的 observations，同 project 第二个 thread 会整体覆盖 project reflection。修复：`listObservations` 两种读形——thread scope 读本线程；project/resource scope **跨该 owner 的所有匹配 thread 聚合**（join memory_threads，两个适配器同契约）；reflector 改读 target scope；scheduler 晋升时直接用 target scope（同 project 多 thread 晋升去重为一行）。loop 测试验证两个 thread 的内容都进 reflection。
-3. **（P2）Gemini 没接 inject**：`server.ts` gemini pipeline 只传 `{ observe }`。修复：传 `{ observe, inject }`；pipeline 级 inject 测试矩阵扩到三个 protocol（含 gemini）。
-4. **（P2）崩溃留下的 stale running 永久阻塞 scope**（即上一轮记下的 TODO）：claim 只取 pending，而 enqueue 去重覆盖 running。修复：`claimPendingJobs` 把 `running 且 updated_at 超过 5 分钟 lease` 的行视为可回收并刷新 lease（sqlite/pg 同契约）；runner 幂等（observer 跳过已覆盖 range、reflector 稳定 merge），重复执行无害。
-5. **（P3）inject metadata 在网关边界被丢弃**：即原推迟的 Step 10。修复：`DecisionRecord` 新增 `memory` 字段（`MemoryDecisionSchema`，nullable `.default(null)` 兼容旧记录；只含计数/job id，不含记忆内容，principle 7），chat 与 pipeline 在 route() 返回后盖章（routing core 保持 memory 无关，始终产出 null）。
-
----
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-05 · 遗忘策略评审修复 V（docs/12）：评分公式语义级修正——access bonus 移进 recency 乘积内 `score = recency × (importance + bonus)`（原加法 = 一次注入的 bonus 0.104 永远高于阈值 0.05，「用过一次 = 永不遗忘」）；强化只延迟遗忘无永久豁免；`enable_llm_supersede` 改 `z.literal(false)`（LLM path 未接入前拒绝 true，不留撒谎开关）；notes 完成「最近 3 条」合规压缩。
+
+### 2026-06-05 · 遗忘策略评审修复 IV（docs/12）：遗忘补全输出侧——reflection 是 active observation 的派生缓存：getReflection 过滤 active；新增 archiveReflections（active 集空时归档旧 reflection，min(1) 不能写空）+ listActiveReflectionScopes（decay 归档后为每个活跃 scope 入队 reflector 重建，open-job 去重、fail-open）；max_facts_per_subject 改按 validFrom 取最新 N 再 asc 写入（原 head-slice 留最旧丢修正）；fact 审计字段改存 observation id `[o.id,o.id]` 对齐 schema。
+
+### 2026-06-05 · 遗忘策略评审修复 III（docs/12）：fact validFrom 改用来源 observation 的 observedAt（处理时刻 now 让同批矛盾事实互不 supersede、旧 observation 晚处理可错误过期新 fact）；ExtractedFact 加 validFrom?/sourceObservationRange?；listScorableObservations 加 limit（max_iterations×50、oldest-first）扫描有界；docs 配置示例改扁平（`memory:` wrapper 会被 strict 拒）+ 状态横幅改「P0–P7 implemented / P8 deferred」。
+
+### 2026-06-05 · 遗忘策略评审修复 II（docs/12）：decay job 入口 re-check `enabled`（持久队列的残留 job 在开关关闭后不得归档）；fact supersede 改按新 fact 非空 scope 列收窄（与 listActiveFacts 读取语义一致，read-visible ⇒ supersede-able）；decay trigger 的 scope_id 匹配改 `json_extract`/`::jsonb->>'accountId'`（字符串拼接匹配不了 codec 转义的特殊字符 id → 每 tick 重触发）。
+
+### 2026-06-05 · 遗忘策略评审修复 I（docs/12）：observation retention 改 TOMBSTONE（status='pruned' 保留行 + sourceMessageRange 覆盖标记——硬删会让 raw 复活重注入）；reflector/inject 内容读只取 active（覆盖读仍全状态，内容读 vs 覆盖读分离）；pg fact reconcile 整批包事务；P6 extractor 在 server.ts 接线（确定性 stub）；observer 从 priority 推导 importance（clamp(priority/10)）。坑：'[pruned]' 占位满足 observationText min(1)；active 过滤对 undefined status 宽松（旧 fixture 无 status 字段）。
+
+### 2026-06-05 · 记忆遗忘策略 + 短/中/长期分层（docs/12 P0–P7 全实现）：纯评分函数（零依赖叶子模块、负 age 夹 0）；config.memory 子树（memory.yaml 扁平无 `memory:` wrapper，嵌套用 `.prefault({})` 非 `.default({})`——Zod v4 内层默认才生效）；迁移 sqlite v18/pg v17；memory_facts（owner_id NOT NULL 租户界 + UNIQUE(owner_id,content_hash) + bi-temporal）；inject bumpReferences fire-and-forget + score 裁剪（fail-open 回退 oldest）；decay job + scheduler 显式分发；facts 确定性去重/supersede；retention。`MemoryFactInput` 用 z.input 非 z.infer。全 gated `forgetting.enabled:false` = 字节级不变。TODO：P8 混合检索 deferred；LLM summarize/merge/extract 仍是确定性 stub。
+
+### 2026-06-05 · 零改动客户端记忆接入（issue #97；docs/08）：per-key memory 默认值（api_keys 三列，迁移 sqlite v17/pg v16）+ thread 信号回退链（x-thread-id → body metadata → x-session-key → prompt_cache_key → metadata.user_id）；显式头永远赢、非法 mode 头归一 off（不落回 key 默认）。坑：prompt_cache_key 复用为会话锚点（隐式契约）；评审修复：key list 视图漏 memory 字段会让编辑静默清空配置、显式空 x-thread-id 不再触发回退链。
+
+### 2026-06-05 · Memory 第二轮评审修复（docs/08 Phase 2；#41 跟进 II）：inject 过滤已被 observation 覆盖的 raw（防 observation+原文双份注入）；listObservations 的 project/resource scope 跨该 owner 全部 thread 聚合（防 project reflection 被单 thread last-writer-wins）；gemini pipeline 接 inject；claimPendingJobs 回收超 5min lease 的 stale running；DecisionRecord 新增脱敏 memory 字段。
 
 ### 2026-06-04 · 请求排队两特性（issue #93）：per-key 并发溢出排队（`concurrency_limit` 列，NULL=不限、0 被拒；队满/超时→429）+ per-account 用户消息串行（完整 drain 才释放锁；超时→终态 503 不前进 fallback、不记熔断）。in-memory promise FIFO（无 Redis，多实例各自排队=已知限制）；释放路径全覆盖（context 变量 + 路由 guard + 流 finally + 5min watchdog）；串行 gate 在 buildServer 建一次跨 pool rebuild 存活；gate 意外异常 fail-open。迁移 sqlite v13 / pg v12。
 

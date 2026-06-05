@@ -222,6 +222,63 @@ describe("startMemoryWorker", () => {
     expect(claimSpy.mock.calls.length).toBeGreaterThan(callsAfterOne);
   });
 
+  it("dispatches a decay row to runDecay (NOT the reflector) — docs/12 P5", async () => {
+    const scope = { accountId: "acct-a" };
+    const { store } = makeStore([{ jobId: "d1", type: "decay", scope }]);
+    const runDecay = vi.fn(async () => {});
+    const runReflector = vi.fn(async (): Promise<ReflectorResult> => REF_OK);
+    const handle = startMemoryWorker(makeDeps(store, { runDecay, runReflector }));
+
+    await vi.advanceTimersByTimeAsync(1000);
+    handle.stop();
+
+    expect(runDecay).toHaveBeenCalledTimes(1);
+    expect(runDecay).toHaveBeenCalledWith({ jobId: "d1", scope });
+    // The decay row must NOT fall through to the reflector (the bug P5 fixes).
+    expect(runReflector).not.toHaveBeenCalled();
+  });
+
+  it("fails an unknown job type gracefully instead of running the wrong worker", async () => {
+    // A row whose type is none of observer/reflector/decay must be marked failed —
+    // never dispatched to a runner (no silent reflector fall-through).
+    const { store, jobUpdates } = makeStore([
+      // biome-ignore lint/suspicious/noExplicitAny: deliberately forging an out-of-enum type.
+      { jobId: "x1", type: "compactor" as any, scope: { accountId: "acct-a" } },
+    ]);
+    const runReflector = vi.fn(async (): Promise<ReflectorResult> => REF_OK);
+    const runDecay = vi.fn(async () => {});
+    const handle = startMemoryWorker(makeDeps(store, { runReflector, runDecay }));
+
+    await vi.advanceTimersByTimeAsync(1000);
+    handle.stop();
+
+    expect(runReflector).not.toHaveBeenCalled();
+    expect(runDecay).not.toHaveBeenCalled();
+    expect(jobUpdates).toContainEqual({ jobId: "x1", status: "failed" });
+  });
+
+  it("runs the onTick hook before claiming, and swallows its throw (P5 trigger)", async () => {
+    const { store } = makeStore([]);
+    const calls: string[] = [];
+    const onTick = vi.fn(async () => {
+      calls.push("onTick");
+      throw new Error("trigger boom");
+    });
+    const claimSpy = store.claimPendingJobs as ReturnType<typeof vi.fn>;
+    claimSpy.mockImplementation(async () => {
+      calls.push("claim");
+      return [];
+    });
+    const handle = startMemoryWorker(makeDeps(store, { onTick }));
+
+    await vi.advanceTimersByTimeAsync(1000);
+    handle.stop();
+
+    expect(onTick).toHaveBeenCalled();
+    // onTick fired BEFORE the claim, and its throw did not abort the tick.
+    expect(calls.slice(0, 2)).toEqual(["onTick", "claim"]);
+  });
+
   it("stop() clears the interval (no further claims)", async () => {
     const { store } = makeStore([]);
     const claimSpy = store.claimPendingJobs as ReturnType<typeof vi.fn>;

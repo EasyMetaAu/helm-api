@@ -54,6 +54,60 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 
+  // docs/12 "Schema deltas" (P2) — the forgetting migration (sqlite v18 / pg
+  // v17). Additive columns + the new account-scoped memory_facts table, mirrored
+  // into the pg dialect per CLAUDE.md (dialect differences sealed in the adapter).
+  it("adds the forgetting columns + memory_facts (account-scoped) on a fresh db", async () => {
+    const db = await createPgliteDb();
+    const cols = async (table: string): Promise<string[]> => {
+      const res = (await db.execute(
+        sql.raw(`SELECT column_name FROM information_schema.columns WHERE table_name = '${table}'`),
+      )) as { rows: Array<{ column_name: string }> };
+      return res.rows.map((r) => r.column_name);
+    };
+
+    expect(await cols("memory_observations")).toEqual(
+      expect.arrayContaining([
+        "reference_count",
+        "importance",
+        "status",
+        "archived_at",
+        "expired_at",
+      ]),
+    );
+    expect(await cols("memory_reflections")).toEqual(
+      expect.arrayContaining(["referenced_at", "reference_count", "status"]),
+    );
+    expect(await cols("memory_facts")).toEqual(
+      expect.arrayContaining([
+        "id",
+        "owner_id",
+        "subject_key",
+        "fact_text",
+        "content_hash",
+        "valid_from",
+        "invalid_at",
+        "expired_at",
+        "status",
+      ]),
+    );
+
+    // Dedup is account-scoped (UNIQUE(owner_id, content_hash)): two accounts may
+    // assert the same content_hash; the same account may not (idempotent ingest).
+    const hash = "h".repeat(64);
+    const ins = (id: string, owner: string) =>
+      db.execute(
+        sql.raw(
+          `INSERT INTO memory_facts (id, owner_id, subject_key, fact_text, content_hash, valid_from, created_at, updated_at)
+           VALUES ('${id}', '${owner}', 's', 'fact', '${hash}', 1, 1, 1)`,
+        ),
+      );
+    await expect(ins("f-a", "acct-a")).resolves.toBeDefined();
+    await expect(ins("f-b", "acct-b")).resolves.toBeDefined();
+    await expect(ins("f-a2", "acct-a")).rejects.toThrow();
+    await db.$close();
+  });
+
   it("upgrades a real pre-unique-index memory_jobs table with duplicate open jobs", async () => {
     const client = new PGlite();
     const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
@@ -62,8 +116,10 @@ describe("runPgMigrations — per-migration atomicity", () => {
       sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
     );
     // Seed everything EXCEPT the memory migrations (v13–v15) as applied, so
-    // only they run — the minimal seed has no api_keys table for v9–v12/v16.
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16]) {
+    // only they run — the minimal seed has no api_keys table for v9–v12/v16, and
+    // no memory_observations table for the v17 forgetting deltas, so both are
+    // pre-marked applied to keep this test scoped to the v13–v15 jobs upgrade.
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );

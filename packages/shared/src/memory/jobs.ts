@@ -7,10 +7,14 @@ import { ReflectionScopeSchema } from "./schema.js";
 // by `type`. Per CLAUDE.md the Zod schema is the single source of truth — types
 // come from z.infer (no hand-written interfaces). Framework-agnostic.
 
-// The two background job kinds. observer = compress a thread's older raw messages
-// into one observation; reflector = merge a scope's observations into a stable,
-// versioned reflection. Both run OFF the request path.
-export const MemoryJobTypeSchema = z.enum(["observer", "reflector"]);
+// The background job kinds. observer = compress a thread's older raw messages into
+// one observation; reflector = merge a scope's observations into a stable, versioned
+// reflection; decay (docs/12 P5) = the OFF-hot-path forgetting SWEEP that soft-
+// archives sub-threshold observations for one account. All three run OFF the request
+// path. Additive: 'decay' is a NEW member, so an old observer/reflector row still
+// parses unchanged — the gating lever (forgetting.enabled:false ⇒ no decay jobs are
+// ever enqueued) keeps the enum widening inert until the flag is on.
+export const MemoryJobTypeSchema = z.enum(["observer", "reflector", "decay"]);
 
 // Input to enqueue a background job. The scope is the full ReflectionScope so a
 // reflector job can land at the highest available level (project/resource/thread);

@@ -143,6 +143,13 @@ export const memoryObservations = pgTable("memory_observations", {
   referencedAt: bigint("referenced_at", { mode: "number" }), // nullable
   priority: integer("priority"), // nullable
   tags: jsonb("tags").$type<string[]>(), // nullable native array
+  // Forgetting-score columns (docs/12 "Schema deltas", pg v17) — pg mirror of the
+  // sqlite v18 delta. importance is double precision; epoch-ms stamps are bigint.
+  referenceCount: integer("reference_count").notNull().default(0),
+  importance: doublePrecision("importance").notNull().default(0.5),
+  status: text("status").notNull().default("active"), // active | archived
+  archivedAt: bigint("archived_at", { mode: "number" }), // nullable
+  expiredAt: bigint("expired_at", { mode: "number" }), // nullable
 });
 
 export const memoryReflections = pgTable("memory_reflections", {
@@ -154,6 +161,36 @@ export const memoryReflections = pgTable("memory_reflections", {
   reflectionText: text("reflection_text").notNull(),
   version: integer("version").notNull(),
   tokenEstimate: integer("token_estimate").notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  // Forgetting deltas (docs/12 pg v17): reference tracking + visibility only.
+  referencedAt: bigint("referenced_at", { mode: "number" }), // nullable
+  referenceCount: integer("reference_count").notNull().default(0),
+  status: text("status").notNull().default("active"),
+});
+
+// docs/12 "Schema deltas" — memory_facts long tier (pg mirror of sqlite). owner_id
+// (= accountId) is the TENANT BOUNDARY (a fact may have a null thread_id);
+// project/resource/thread are in-account scopes and may be null. The
+// account-scoped dedup index UNIQUE(owner_id, content_hash) is declared in the
+// migration. source_observation_range is jsonb (native) for the [first,last] tuple.
+export const memoryFacts = pgTable("memory_facts", {
+  id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull(), // accountId — the tenant boundary
+  projectId: text("project_id"),
+  resourceId: text("resource_id"),
+  threadId: text("thread_id"),
+  subjectKey: text("subject_key").notNull(),
+  factText: text("fact_text").notNull(),
+  contentHash: text("content_hash").notNull(), // sha256(normalized_text)
+  importance: doublePrecision("importance").notNull().default(0.5),
+  referenceCount: integer("reference_count").notNull().default(0),
+  referencedAt: bigint("referenced_at", { mode: "number" }), // nullable
+  validFrom: bigint("valid_from", { mode: "number" }).notNull(),
+  invalidAt: bigint("invalid_at", { mode: "number" }), // nullable
+  expiredAt: bigint("expired_at", { mode: "number" }), // nullable
+  status: text("status").notNull().default("active"),
+  sourceObservationRange: jsonb("source_observation_range").$type<[string, string]>(), // nullable
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
 });
 
@@ -251,6 +288,7 @@ export type MemoryThreadsTable = typeof memoryThreads;
 export type MemoryMessagesTable = typeof memoryMessages;
 export type MemoryObservationsTable = typeof memoryObservations;
 export type MemoryReflectionsTable = typeof memoryReflections;
+export type MemoryFactsTable = typeof memoryFacts;
 export type MemoryJobsTable = typeof memoryJobs;
 export type ConfigKvTable = typeof configKv;
 export type RequestPayloadsTable = typeof requestPayloads;

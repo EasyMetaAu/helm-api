@@ -162,6 +162,38 @@ export {
   LanesConfigSchema,
   parseLanesConfig,
 } from "./lanes/schema.js";
+// Memory forgetting — the decay buffer-flush TRIGGER (docs/12 P5). Run on the worker
+// tick (never per request): enqueues account-scoped decay jobs for due accounts, gated.
+export { type DecayTriggerDeps, maybeEnqueueDecayJobs } from "./memory/decay-trigger.js";
+// Memory forgetting — the OFF-hot-path decay SWEEP (docs/12 P5). Soft-archives sub-
+// threshold observations for one account; gated behind forgetting.enabled. Sibling of
+// runObserverJob/runReflectorJob — deps-injected, fail-open. Framework-agnostic.
+export {
+  type DecayDeps,
+  type DecayJob,
+  runDecayJob,
+  type ScorableObservation,
+} from "./memory/forgetting/decay.js";
+// Memory forgetting — deterministic fact dedup/supersede helpers (docs/12 P6). Pure
+// leaf: subject_key normalization + sha256 content_hash for idempotent ingest.
+export {
+  factContentHash,
+  normalizeFactText,
+  normalizeSubjectKey,
+} from "./memory/forgetting/facts.js";
+// Memory forgetting — the retention HARD-DELETE (docs/12 P7, the ONLY DELETE). Run on the
+// worker tick (account-agnostic, off the request path); drops aged archived observations +
+// aged expired facts. Gated behind forgetting.enabled, fail-open. Framework-agnostic.
+export { pruneRetainedMemory, type RetentionDeps } from "./memory/forgetting/retention.js";
+// Memory forgetting — the pure, deterministic forgetting score (docs/12). Leaf module:
+// no store/config/framework deps. Imported by the inject trim (P4) + decay sweep (P5).
+export {
+  effectiveReferencedAt,
+  forgettingScore,
+  recency,
+  type ScoreConfig,
+  type ScoreInput,
+} from "./memory/forgetting/score.js";
 // Memory middleware — inject phase (docs/08 Phase 2). Synchronous on the request
 // path: load + assemble a budgeted, cache-friendly context prefix in the fixed
 // docs/08 order, enqueue write-back, fail-open. Framework-agnostic; never touches
@@ -204,7 +236,9 @@ export {
 // scope's observations into a stable, versioned reflection; off the main request
 // path, fail-open. Framework-agnostic; never touches routing/lane state.
 export {
+  type ExtractedFact,
   type ReflectorDeps,
+  type ReflectorForgettingConfig,
   type ReflectorJob,
   type ReflectorResult,
   runReflectorJob,
