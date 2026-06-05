@@ -1438,6 +1438,13 @@ export async function buildServer(
               behavior: record.over_budget_behavior,
               degradeLane: record.degrade_lane,
             },
+            // Per-key memory defaults (issue #97): read by the route's memory
+            // scope resolver; explicit x-memory-* headers always override.
+            memory: {
+              mode: record.memory_mode,
+              projectId: record.memory_project_id,
+              threadSource: record.memory_thread_source,
+            },
           },
         };
       },
@@ -1521,6 +1528,13 @@ export async function buildServer(
               behavior: record.over_budget_behavior,
               degradeLane: record.degrade_lane,
             },
+            // Per-key memory defaults (issue #97): read by the route's memory
+            // scope resolver; explicit x-memory-* headers always override.
+            memory: {
+              mode: record.memory_mode,
+              projectId: record.memory_project_id,
+              threadSource: record.memory_thread_source,
+            },
           },
         };
       },
@@ -1580,6 +1594,13 @@ export async function buildServer(
               windowSeconds: record.budget_window_seconds,
               behavior: record.over_budget_behavior,
               degradeLane: record.degrade_lane,
+            },
+            // Per-key memory defaults (issue #97): read by the route's memory
+            // scope resolver; explicit x-memory-* headers always override.
+            memory: {
+              mode: record.memory_mode,
+              projectId: record.memory_project_id,
+              threadSource: record.memory_thread_source,
             },
           },
         };

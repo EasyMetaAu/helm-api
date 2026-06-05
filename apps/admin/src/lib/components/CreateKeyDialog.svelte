@@ -45,6 +45,10 @@
   let degradeLaneInput = $state<string>('');
   // Max in-flight requests (issue #93). null = unlimited.
   let concurrencyLimitInput = $state<number | null>(null);
+  // Per-key memory defaults (issue #97). 'off' = inert (server default).
+  let memoryMode = $state<'off' | 'observe' | 'inject'>('off');
+  let memoryProjectInput = $state<string>('');
+  let memoryThreadSource = $state<'header' | 'auto'>('header');
 
   let error = $state<string | null>(null);
   let creating = $state<boolean>(false);
@@ -81,6 +85,9 @@
     if (degradeLaneInput.length > 0) input.degrade_lane = degradeLaneInput;
     // Concurrency limit: send only when set (blank => unlimited).
     if (concurrencyLimitInput != null) input.concurrency_limit = concurrencyLimitInput;
+    if (memoryMode !== 'off') input.memory_mode = memoryMode;
+    if (memoryProjectInput.length > 0) input.memory_project_id = memoryProjectInput;
+    if (memoryThreadSource !== 'header') input.memory_thread_source = memoryThreadSource;
     try {
       revealed = await createKey(input);
     } catch (e) {
@@ -126,6 +133,9 @@
         over_budget_behavior: overBudgetBehavior,
         degrade_lane: degradeLaneInput.length > 0 ? degradeLaneInput : null,
         concurrency_limit: concurrencyLimitInput ?? null,
+        memory_mode: memoryMode,
+        memory_project_id: memoryProjectInput.length > 0 ? memoryProjectInput : null,
+        memory_thread_source: memoryThreadSource,
       };
       oncreated(view);
     }
@@ -277,6 +287,42 @@
       </label>
 
       <fieldset class="flex flex-col gap-1 text-sm">
+        <legend class="field-label">{$t('Memory defaults')}</legend>
+        <div class="grid grid-cols-2 gap-3">
+          <label class="flex flex-col gap-1">
+            <span class="field-label">{$t('Memory mode')}</span>
+            <select class="select" aria-label={$t('Memory mode')} bind:value={memoryMode}>
+              <option value="off">{$t('Off')}</option>
+              <option value="observe">{$t('Observe (record only)')}</option>
+              <option value="inject">{$t('Inject (record + hydrate)')}</option>
+            </select>
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="field-label">{$t('Thread source')}</span>
+            <select class="select" aria-label={$t('Thread source')} bind:value={memoryThreadSource}>
+              <option value="header">{$t('Header only (x-thread-id)')}</option>
+              <option value="auto">{$t('Auto (derive from client signals)')}</option>
+            </select>
+          </label>
+        </div>
+        <label class="flex flex-col gap-1">
+          <span class="field-label">{$t('Default project id')}</span>
+          <input
+            type="text"
+            aria-label={$t('Default project id')}
+            placeholder={$t('None')}
+            class="input"
+            bind:value={memoryProjectInput}
+          />
+        </label>
+        <span class="field-help"
+          >{$t(
+            'Server-side memory defaults for clients that cannot send dynamic headers (Claude Code, Codex). Explicit x-memory-* request headers always override. Auto thread source derives the conversation from signals the client already sends (prompt_cache_key, metadata.user_id, x-session-key).',
+          )}</span
+        >
+      </fieldset>
+
+      <fieldset class="flex flex-col gap-1 text-sm">
         <legend class="field-label">{$t('Usage budgets')}</legend>
         <div class="grid grid-cols-2 gap-3">
           <label class="flex flex-col gap-1">
@@ -330,7 +376,11 @@
         </div>
         <label class="mt-1 flex flex-col gap-1">
           <span class="field-label">{$t('When over budget')}</span>
-          <select bind:value={overBudgetBehavior} aria-label={$t('When over budget')} class="select">
+          <select
+            bind:value={overBudgetBehavior}
+            aria-label={$t('When over budget')}
+            class="select"
+          >
             <option value="degrade">{$t('Degrade to a cheaper lane')}</option>
             <option value="reject">{$t('Reject (429)')}</option>
           </select>

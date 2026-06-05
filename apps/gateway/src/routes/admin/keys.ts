@@ -80,6 +80,9 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       overBudgetBehavior: parsed.data.over_budget_behavior,
       degradeLane: parsed.data.degrade_lane,
       concurrencyLimit: parsed.data.concurrency_limit,
+      memoryMode: parsed.data.memory_mode,
+      memoryProjectId: parsed.data.memory_project_id,
+      memoryThreadSource: parsed.data.memory_thread_source,
     });
     // The ONLY place plaintext is ever returned. `prefix` is the server-minted
     // non-sensitive display prefix (already persisted) — returned so the SPA need
@@ -118,6 +121,9 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       overBudgetBehavior?: "degrade" | "reject";
       degradeLane?: string | null;
       concurrencyLimit?: number | null;
+      memoryMode?: "off" | "observe" | "inject";
+      memoryProjectId?: string | null;
+      memoryThreadSource?: "header" | "auto";
     } = {};
     if (d.allowed_lanes !== undefined) patch.allowedLanes = d.allowed_lanes;
     if (d.allow_custom_model !== undefined) patch.allowCustomModel = d.allow_custom_model;
@@ -130,6 +136,9 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     if (d.over_budget_behavior !== undefined) patch.overBudgetBehavior = d.over_budget_behavior;
     if (d.degrade_lane !== undefined) patch.degradeLane = d.degrade_lane;
     if (d.concurrency_limit !== undefined) patch.concurrencyLimit = d.concurrency_limit;
+    if (d.memory_mode !== undefined) patch.memoryMode = d.memory_mode;
+    if (d.memory_project_id !== undefined) patch.memoryProjectId = d.memory_project_id;
+    if (d.memory_thread_source !== undefined) patch.memoryThreadSource = d.memory_thread_source;
     try {
       await deps.keyStore.updateKey(id, patch);
     } catch {

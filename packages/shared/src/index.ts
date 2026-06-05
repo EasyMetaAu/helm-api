@@ -167,6 +167,8 @@ export {
   CreateKeyRequestSchema,
   type KeyRole,
   KeyRoleSchema,
+  type MemoryThreadSource,
+  MemoryThreadSourceSchema,
   type OverBudgetBehavior,
   OverBudgetBehaviorSchema,
   type UpdateKeyRequest,

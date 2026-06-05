@@ -222,7 +222,21 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // without touching HTTP (principle 1). Without this, /v1/responses was wired
     // with observe deps but never received a scope → memory was dead on this
     // surface. Absent/illegal headers → off + null (default-safe).
-    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId);
+    const nativeRec = (native ?? {}) as Record<string, unknown>;
+    const nativeMetaBag =
+      nativeRec.metadata && typeof nativeRec.metadata === "object"
+        ? (nativeRec.metadata as Record<string, unknown>)
+        : null;
+    const sig = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId, {
+      defaults: identity.caps?.memory,
+      signals: {
+        metadataThreadId: sig(nativeMetaBag?.thread_id) ?? sig(nativeMetaBag?.conversation_id),
+        // Responses body prompt_cache_key — the per-conversation cache-affinity
+        // key Codex and OpenClaw already send (issue #97 fallback chain).
+        promptCacheKey: sig(nativeRec.prompt_cache_key),
+      },
+    });
     ir.metadata = {
       ...(ir.metadata ?? {}),
       trace_id: traceId,
@@ -230,6 +244,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       resource_id: memoryScope.resourceId,
       project_id: memoryScope.projectId,
       memory_mode: memoryScope.mode,
+      memory_thread_source: memoryScope.threadSource,
     };
 
     // 3) Route through the shared core. The pipeline throws a PipelineError when

@@ -5,6 +5,24 @@
 
 ---
 
+## 2026-06-05 · 零改动客户端记忆接入：per-key 默认值 + 信号回退链（issue #97；docs/08）
+
+**动机**：Claude Code / Codex 只能发静态头，发不了每会话动态的 `x-thread-id`；Hermes 等什么信号都不发。让 helm 从客户端**已经在发**的信号里推导 scope，配合 key 级默认值，任何兼容客户端「换 base_url + key」即获记忆。设计与三客户端调研实证见 issue #97。
+
+**实现**：
+
+- **per-key 默认值**：`api_keys` 新增 `memory_mode`（off|observe|inject，默认 off）/ `memory_project_id` / `memory_thread_source`（header|auto，默认 header），迁移 **sqlite v17 / pg v16**。沿用 budgets/concurrency 的全套模式（schema `.default()` 兼容旧行、CreateKeyInput/KeyPatch、两适配器、admin API + 两个 key 对话框 + zh 双语）。
+- **回退链**（`thread_source=auto` 才生效）：`x-thread-id` → body `metadata.thread_id/conversation_id` → `x-session-key` → `prompt_cache_key`（chat + responses 两条路由）→ `metadata.user_id`（anthropic 路由）。推导出的 thread 同样走 `ownerScopedThreadId` 账号隔离；来源记入 `DecisionRecord.memory.thread_source`（`MemoryDecisionSchema` 新增字段，`.default(null)` 兼容旧记录）。
+- **优先级语义（拍板）**：显式头永远赢——包括 `x-memory-mode: off` 压过 key 默认 inject；**非法的显式 mode 头归一化为 off 而不是落回 key 默认**（typo 不能静默变成 inject，fail-safe）。
+- **gemini 面**：wire 形态无每会话 body 信号，只接 key 默认值 + x-session-key。
+- **零回归保证**：未配置 memory 的 key 走到的代码路径与改动前完全一致（`defaults` 缺省 = 旧行为），有专门回归测试。
+
+**坑/约定**：`prompt_cache_key` 被复用为会话锚点（语义一致：同会话同 key，但属隐式契约，已写入 docs/08）；OpenClaw sessionId 在压缩时轮换 → thread 断档但 project/resource 画像延续。
+
+**推迟**：会话指纹兜底（首条消息哈希，覆盖零信号客户端）——边界取舍（历史编辑/压缩重写）需先拍板，见 issue #97。
+
+---
+
 ## 2026-06-05 · Memory 第二轮评审修复：5 个缺陷（docs/08 Phase 2；#41 评审跟进 II）
 
 Codex 第二轮 review 发现 5 个问题（2×P1、2×P2、1×P3），全部修复（TDD，新增/更新 13 个测试断言）：

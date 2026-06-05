@@ -35,6 +35,11 @@ export interface ApiKeyView {
   // Per-key max in-flight requests (issue #93). null = unlimited. Enforced only
   // while the runtime setting concurrency_queue_enabled is ON.
   concurrency_limit: number | null;
+  // Per-key memory defaults (issue #97). Explicit x-memory-* request headers
+  // always override; mode 'off' (the default) = memory inert for this key.
+  memory_mode: 'off' | 'observe' | 'inject';
+  memory_project_id: string | null;
+  memory_thread_source: 'header' | 'auto';
 }
 
 // Operator-specified caps for a new key. The plaintext is minted server-side; the
@@ -58,6 +63,10 @@ export interface CreateKeyInput {
   degrade_lane?: string;
   // Optional max in-flight requests at mint time. Omitted => unlimited.
   concurrency_limit?: number;
+  // Optional per-key memory defaults at mint time (issue #97). Omitted => off.
+  memory_mode?: 'off' | 'observe' | 'inject';
+  memory_project_id?: string;
+  memory_thread_source?: 'header' | 'auto';
 }
 
 // Editable caps for an existing key (PATCH). Mirrors the server
@@ -78,6 +87,10 @@ export interface UpdateKeyInput {
   degrade_lane?: string | null;
   // Omit = leave unchanged; null = clear back to unlimited.
   concurrency_limit?: number | null;
+  // Memory default edits (issue #97). Omit = leave unchanged; project null clears.
+  memory_mode?: 'off' | 'observe' | 'inject';
+  memory_project_id?: string | null;
+  memory_thread_source?: 'header' | 'auto';
 }
 
 // The ONLY shape that ever carries plaintext, returned once by POST. `prefix` is
@@ -133,6 +146,10 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     over_budget_behavior: raw.over_budget_behavior === 'reject' ? 'reject' : 'degrade',
     degrade_lane: typeof raw.degrade_lane === 'string' ? raw.degrade_lane : null,
     concurrency_limit: typeof raw.concurrency_limit === 'number' ? raw.concurrency_limit : null,
+    memory_mode:
+      raw.memory_mode === 'inject' ? 'inject' : raw.memory_mode === 'observe' ? 'observe' : 'off',
+    memory_project_id: typeof raw.memory_project_id === 'string' ? raw.memory_project_id : null,
+    memory_thread_source: raw.memory_thread_source === 'auto' ? 'auto' : 'header',
   };
 }
 
@@ -164,6 +181,14 @@ function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   }
   // Send only when set (omitted = unlimited; server schema is .strict()).
   if (input.concurrency_limit !== undefined) out.concurrency_limit = input.concurrency_limit;
+  // Memory defaults (issue #97): send only when set (omitted = off; .strict()).
+  if (input.memory_mode !== undefined) out.memory_mode = input.memory_mode;
+  if (input.memory_project_id !== undefined && input.memory_project_id.length > 0) {
+    out.memory_project_id = input.memory_project_id;
+  }
+  if (input.memory_thread_source !== undefined) {
+    out.memory_thread_source = input.memory_thread_source;
+  }
   return out;
 }
 

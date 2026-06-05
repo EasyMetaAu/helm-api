@@ -38,6 +38,9 @@ function keyRecord(over: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     over_budget_behavior: "degrade",
     degrade_lane: null,
     concurrency_limit: null,
+    memory_mode: "off" as const,
+    memory_project_id: null,
+    memory_thread_source: "header" as const,
     ...over,
   };
 }
@@ -491,5 +494,90 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
     // But the observer WRITE-BACK still fired — tool-heavy threads must keep
     // compressing even though replacement is unsafe (D7 gates only the replace).
     expect(enqueueObserverJob).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Issue #97 — ZERO-CLIENT-CHANGE memory: the key's stored defaults turn memory on
+// and the fallback chain derives the thread from signals the client already sends
+// (here: OpenAI prompt_cache_key, what OpenClaw/Codex emit per conversation).
+// No x-memory-* headers anywhere in these requests.
+describe("gateway.chat.inject — per-key defaults + signal fallback (issue #97)", () => {
+  const MEMORY_KEY = keyRecord({
+    memory_mode: "inject",
+    memory_project_id: "proj-key",
+    memory_thread_source: "auto",
+  });
+
+  it("hydrates with ZERO memory headers: key defaults + prompt_cache_key as thread", async () => {
+    const { store } = makeFakeStore({
+      reflection: { project: "PROJECT REFLECTION" },
+      observations: ["OBS-1"],
+      recent: [],
+    });
+    const { deps, seen } = captureRouteDeps({
+      body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
+      memory: { observe: observeDeps(store), inject: injectWiring(store) },
+    });
+    const app = buildApp(deps, [MEMORY_KEY]);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH, // ← no x-memory-* headers at all
+      body: JSON.stringify({ ...BODY, prompt_cache_key: "conv-abc" }),
+    });
+
+    expect(res.status).toBe(200);
+    const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
+    // The key default project's reflection was hydrated in.
+    expect(msgs.some((m) => m.content === "PROJECT REFLECTION")).toBe(true);
+    // Observability: the decision records WHICH chain link produced the thread.
+    const insert = deps.telemetry.insert as ReturnType<typeof vi.fn>;
+    const arg = insert.mock.calls[0]?.[0] as {
+      decision: { memory?: { memory_hydrated: boolean; thread_source: string | null } };
+    };
+    expect(arg.decision.memory?.memory_hydrated).toBe(true);
+    expect(arg.decision.memory?.thread_source).toBe("prompt_cache_key");
+    // The derived thread is owner-scoped like any explicit one.
+    expect(store.ensureThread).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "acct:conv-abc" }),
+    );
+  });
+
+  it("an explicit x-memory-mode: off header still disables memory for a default-inject key", async () => {
+    const { store } = makeFakeStore({ reflection: { project: "R" } });
+    const { deps, seen } = captureRouteDeps({
+      body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
+      memory: { observe: observeDeps(store), inject: injectWiring(store) },
+    });
+    const app = buildApp(deps, [MEMORY_KEY]);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { ...AUTH, "x-memory-mode": "off" },
+      body: JSON.stringify({ ...BODY, prompt_cache_key: "conv-abc" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(seen[0]?.messages).toEqual(BODY.messages);
+    expect(store.ensureThread).not.toHaveBeenCalled();
+  });
+
+  it("an unconfigured key with no headers behaves exactly as before (zero regression)", async () => {
+    const { store } = makeFakeStore({ reflection: { project: "R" } });
+    const { deps, seen } = captureRouteDeps({
+      body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
+      memory: { observe: observeDeps(store), inject: injectWiring(store) },
+    });
+    const app = buildApp(deps); // default keyRecord(): memory off
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...BODY, prompt_cache_key: "conv-abc" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(seen[0]?.messages).toEqual(BODY.messages);
+    expect(store.ensureThread).not.toHaveBeenCalled();
   });
 });

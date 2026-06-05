@@ -42,6 +42,10 @@
   let degradeLaneInput = $state<string>(untrack(() => key.degrade_lane ?? ''));
   // Max in-flight requests (issue #93). null = unlimited; clears the limit.
   let concurrencyLimitInput = $state<number | null>(untrack(() => key.concurrency_limit));
+  // Per-key memory defaults (issue #97). Explicit x-memory-* headers always override.
+  let memoryMode = $state<'off' | 'observe' | 'inject'>(untrack(() => key.memory_mode));
+  let memoryProjectInput = $state<string>(untrack(() => key.memory_project_id ?? ''));
+  let memoryThreadSource = $state<'header' | 'auto'>(untrack(() => key.memory_thread_source));
 
   let error = $state<string | null>(null);
   let saving = $state<boolean>(false);
@@ -71,6 +75,9 @@
       over_budget_behavior: overBudgetBehavior,
       degrade_lane: degradeLaneInput.length > 0 ? degradeLaneInput : null,
       concurrency_limit: concurrencyLimitInput ?? null,
+      memory_mode: memoryMode,
+      memory_project_id: memoryProjectInput.length > 0 ? memoryProjectInput : null,
+      memory_thread_source: memoryThreadSource,
     };
     try {
       await updateKey(key.key_id, patch);
@@ -88,6 +95,9 @@
         over_budget_behavior: overBudgetBehavior,
         degrade_lane: degradeLaneInput.length > 0 ? degradeLaneInput : null,
         concurrency_limit: patch.concurrency_limit ?? null,
+        memory_mode: memoryMode,
+        memory_project_id: patch.memory_project_id ?? null,
+        memory_thread_source: memoryThreadSource,
       });
       onclose();
     } catch (e) {
@@ -202,6 +212,42 @@
         )}</span
       >
     </label>
+
+    <fieldset class="flex flex-col gap-1 text-sm">
+      <legend class="field-label">{$t('Memory defaults')}</legend>
+      <div class="grid grid-cols-2 gap-3">
+        <label class="flex flex-col gap-1">
+          <span class="field-label">{$t('Memory mode')}</span>
+          <select class="select" aria-label={$t('Memory mode')} bind:value={memoryMode}>
+            <option value="off">{$t('Off')}</option>
+            <option value="observe">{$t('Observe (record only)')}</option>
+            <option value="inject">{$t('Inject (record + hydrate)')}</option>
+          </select>
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="field-label">{$t('Thread source')}</span>
+          <select class="select" aria-label={$t('Thread source')} bind:value={memoryThreadSource}>
+            <option value="header">{$t('Header only (x-thread-id)')}</option>
+            <option value="auto">{$t('Auto (derive from client signals)')}</option>
+          </select>
+        </label>
+      </div>
+      <label class="flex flex-col gap-1">
+        <span class="field-label">{$t('Default project id')}</span>
+        <input
+          type="text"
+          aria-label={$t('Default project id')}
+          placeholder={$t('None')}
+          class="select"
+          bind:value={memoryProjectInput}
+        />
+      </label>
+      <span class="field-help"
+        >{$t(
+          'Server-side memory defaults for clients that cannot send dynamic headers (Claude Code, Codex). Explicit x-memory-* request headers always override. Auto thread source derives the conversation from signals the client already sends (prompt_cache_key, metadata.user_id, x-session-key).',
+        )}</span
+      >
+    </fieldset>
 
     <fieldset class="flex flex-col gap-1 text-sm">
       <legend class="field-label">{$t('Usage budgets')}</legend>

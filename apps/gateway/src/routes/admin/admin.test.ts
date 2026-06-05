@@ -76,6 +76,9 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         over_budget_behavior: input.overBudgetBehavior ?? "degrade",
         degrade_lane: input.degradeLane ?? null,
         concurrency_limit: input.concurrencyLimit ?? null,
+        memory_mode: input.memoryMode ?? "off",
+        memory_project_id: input.memoryProjectId ?? null,
+        memory_thread_source: input.memoryThreadSource ?? "header",
       };
       rows.push(rec);
       return rec;
@@ -110,6 +113,10 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         row.over_budget_behavior = patch.overBudgetBehavior;
       if (patch.degradeLane !== undefined) row.degrade_lane = patch.degradeLane;
       if (patch.concurrencyLimit !== undefined) row.concurrency_limit = patch.concurrencyLimit;
+      if (patch.memoryMode !== undefined) row.memory_mode = patch.memoryMode;
+      if (patch.memoryProjectId !== undefined) row.memory_project_id = patch.memoryProjectId;
+      if (patch.memoryThreadSource !== undefined)
+        row.memory_thread_source = patch.memoryThreadSource;
     },
   };
 }

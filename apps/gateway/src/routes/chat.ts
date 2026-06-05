@@ -32,7 +32,7 @@ import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import type { ServingAccount } from "../runtime/serving-account.js";
-import { resolveMemoryScope } from "./memory-scope.js";
+import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import {
   backfillCompletionCost,
   captureEnabled,
@@ -127,7 +127,13 @@ interface ChatIdentity {
   accountId: string;
   orgId: string | null;
   userId: string | null;
-  caps: { allowCustomModel: boolean; allowedLanes?: string[] | null; budget?: BudgetCaps };
+  caps: {
+    allowCustomModel: boolean;
+    allowedLanes?: string[] | null;
+    budget?: BudgetCaps;
+    /** Per-key memory defaults (issue #97); absent = memory off unless headers say otherwise. */
+    memory?: MemoryKeyDefaults;
+  };
 }
 
 // Map the OpenAI chat request body to the normalized InternalRequest (Protocol
@@ -329,11 +335,25 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     const sessionKey =
       headerSessionKey !== undefined && headerSessionKey.length > 0 ? headerSessionKey : null;
 
-    // Memory scope (docs/08 Phase 1): parse the four memory headers at this HTTP
-    // boundary into a resolved MemoryScope (core never reads headers, principle
-    // 1). The scope ids/mode ride the InternalRequest metadata AND gate the
-    // observe calls below; absent/illegal headers → off + null (default-safe).
-    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId);
+    // Memory scope (docs/08 + issue #97): parse the four memory headers at this
+    // HTTP boundary into a resolved MemoryScope (core never reads headers,
+    // principle 1), filled in from the KEY's stored defaults and — when the key
+    // opted into thread_source=auto — from body signals the client already sends
+    // (metadata.thread_id / prompt_cache_key). Explicit headers always override;
+    // an unconfigured key resolves exactly as before (default-safe).
+    const bodyRec = body as Record<string, unknown>;
+    const bodyMetaBag =
+      bodyRec.metadata && typeof bodyRec.metadata === "object"
+        ? (bodyRec.metadata as Record<string, unknown>)
+        : null;
+    const sig = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId, {
+      defaults: identity.caps?.memory,
+      signals: {
+        metadataThreadId: sig(bodyMetaBag?.thread_id) ?? sig(bodyMetaBag?.conversation_id),
+        promptCacheKey: sig(bodyRec.prompt_cache_key),
+      },
+    });
 
     const internal = toInternalRequest(body, traceId, identity, sessionKey, memoryScope);
     const originalMessagesForMemory = [...(internal.messages as IRMessage[])];
@@ -440,7 +460,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // reads + assembles).
     // Inject metadata for the DecisionRecord (docs/08 Step 10) — held here and
     // stamped AFTER route() returns (the routing core never learns about memory).
-    let memoryMeta: MemoryDecision | null = null;
+    let memoryMeta: Omit<MemoryDecision, "thread_source"> | null = null;
     if (deps.memory?.inject !== undefined && memoryScope.mode === "inject") {
       const wiring = deps.memory.inject;
       // OpenAI chat: the system prompt is the LEADING system IR message, else "".
@@ -508,7 +528,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // reaches telemetry / the debug UI. Counts + job id only — never memory
     // content (principle 7). Stamped HERE because the routing core is
     // memory-agnostic (memory is a middleware, not a routing input).
-    if (memoryMeta !== null) result.decision.memory = memoryMeta;
+    if (memoryMeta !== null) {
+      result.decision.memory = { ...memoryMeta, thread_source: memoryScope.threadSource };
+    }
 
     // Routing-signal debug headers (read by e2e + operators): the lane the
     // pipeline selected and the model it finally landed on. These expose the
