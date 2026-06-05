@@ -139,9 +139,16 @@ describe("forgettingScore", () => {
     expect(fiftiethStep).toBeGreaterThan(0);
   });
 
-  it("a frequently-used old memory can outrank a fresh never-used one (the float-back-up effect)", () => {
-    const oldButPopular = forgettingScore(
-      input({ fallbackTs: ago(3 * CFG.half_life_s), referenceCount: 40, importance: 0.5 }),
+  it("a RECENTLY-reinforced popular memory outranks a fresh never-used one (reinforcement pays at full strength)", () => {
+    // The bonus lives inside the recency product, so "popular" only helps while the
+    // memory keeps being touched — here referenced_at is recent, recency ~1.
+    const recentlyReinforced = forgettingScore(
+      input({
+        fallbackTs: ago(10 * CFG.half_life_s), // created long ago…
+        referencedAt: ago(0.1 * CFG.half_life_s), // …but touched moments ago
+        referenceCount: 40,
+        importance: 0.5,
+      }),
       CFG,
       NOW,
     );
@@ -150,7 +157,27 @@ describe("forgettingScore", () => {
       CFG,
       NOW,
     );
-    expect(oldButPopular).toBeGreaterThan(freshButCold);
+    expect(recentlyReinforced).toBeGreaterThan(freshButCold);
+  });
+
+  // docs/12 (Codex review fix) — reinforcement is NOT permanent immunity. With the
+  // earlier additive bonus, reference_count=1 alone scored 0.15×log1p(1) ≈ 0.104 — above
+  // the default archive_threshold (0.05) FOREVER. The bonus now decays with recency:
+  // a once-used row whose last touch is ancient must fall below the threshold.
+  it("a once-used but very stale memory decays below the default archive threshold", () => {
+    const s = forgettingScore(
+      input({
+        fallbackTs: ago(30 * CFG.half_life_s),
+        referencedAt: ago(20 * CFG.half_life_s), // last touched 20 half-lives ago
+        referenceCount: 1,
+        importance: 0.5,
+      }),
+      CFG,
+      NOW,
+    );
+    // recency = 0.5^20 ≈ 9.5e-7 → score ≈ 9.5e-7 × (0.5 + 0.104) ≈ 5.8e-7 ≪ 0.05.
+    expect(s).toBeLessThan(0.05);
+    expect(s).toBeGreaterThan(0); // still > 0 for any finite age (rank order intact)
   });
 
   it("is deterministic to 6 decimal places for a fixed input (float-stability pin)", () => {
@@ -164,8 +191,8 @@ describe("forgettingScore", () => {
       CFG,
       NOW,
     );
-    // recency = 0.5^(567/86400); ×clamp(0.73)=0.73; +0.15×log1p(7).
-    const expected = 0.5 ** (567 / 86_400) * 0.73 + 0.15 * Math.log1p(7);
+    // recency = 0.5^(567/86400); × (clamp(0.73) + 0.15×log1p(7)).
+    const expected = 0.5 ** (567 / 86_400) * (0.73 + 0.15 * Math.log1p(7));
     expect(s).toBeCloseTo(expected, 6);
     // Pinned literal so an accidental formula change is caught even if Math drifts.
     expect(Number(s.toFixed(6))).toBe(Number(expected.toFixed(6)));

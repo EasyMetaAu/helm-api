@@ -100,7 +100,7 @@ Graphiti), importance as a decay brake (Generative Agents), and access
 reinforcement via a frequency term (Cognee / MemoryScope).
 
 ```text
-score(now) = recency(now) × importance_weight + access_bonus
+score(now) = recency(now) × (importance_weight + access_bonus)
 
 recency(now)      = 0.5 ^ (age_seconds / half_life_seconds)
 age_seconds       = max(0, now − last_referenced_at)
@@ -133,16 +133,19 @@ Design rationale:
   Recency is the **multiplicative** core, so a stale memory decays toward 0
   regardless of how important it once was.
 - **Importance is a multiplier with a floor**, not an addend. `importance_floor >
-  0` is the **decay brake**: a vital memory decays slower in effective rank and
-  never reaches exactly 0, so it is forgotten **last**.
-- **`access_bonus` is additive and uses `log1p`** so the 50th recall does not
-  dominate the 5th — reinforcement with diminishing returns. Added *after* the
-  recency × importance product so a frequently-used-but-old memory floats back up
-  without overpowering a fresh, high-importance one.
+  0` is the **decay brake**: a vital memory holds a higher score at every age, so
+  it is forgotten **last** — but it still decays toward 0 like everything else.
+- **`access_bonus` lives INSIDE the recency product** (Codex review fix) and uses
+  `log1p` so the 50th recall does not dominate the 5th. An earlier draft *added*
+  the bonus after the product, which made it a permanent score floor: one
+  injection (`reference_count = 1`) yielded `0.15 × log1p(1) ≈ 0.104` — above the
+  default `archive_threshold` (0.05) **forever**, so a once-used row could never
+  be forgotten. Multiplying instead means the bonus decays with disuse:
+  **nothing is un-forgettable; reinforcement only delays forgetting.**
 - **Reinforcement-on-access updates `last_referenced_at`**, which resets `age` →
-  recency jumps back to ~1.0. That is the spaced-repetition effect (each review
-  extends retention) achieved by touching one timestamp — no separate stability
-  column in v1.
+  recency jumps back to ~1.0 and the full `importance + bonus` weight applies
+  again. That is the spaced-repetition effect (each review extends retention)
+  achieved by touching one timestamp — no separate stability column in v1.
 
 Columns the score reads (all on the tiered rows):
 
@@ -198,8 +201,9 @@ back to the existing oldest-first path.
    project/resource/thread) with a newer `valid_from` → stamp the old row
    `expired_at = now` (a pure datetime UPDATE, no LLM). Reads filter
    `owner_id = :accountId AND expired_at IS NULL`. LLM-found contradictions are
-   gated behind `consolidate.enable_llm_supersede` (**off by default**; on
-   uncertainty, supersede nothing).
+   deferred behind `consolidate.enable_llm_supersede` — which currently **rejects
+   `true`** (`z.literal(false)`, fail-closed) so the knob cannot lie while the LLM
+   path is unimplemented; on uncertainty, supersede nothing.
 4. **Retention (rare, age-only).** Two different operations, because observations
    carry a second identity that facts do not — their `sourceMessageRange` is the
    **coverage marker** inject/observer use to know a raw turn is already
@@ -407,7 +411,7 @@ forgetting:
   consolidate:
     trigger_tokens: 1024         # mid→long: extract facts when active-obs tokens exceed this
     max_facts_per_subject: 8     # hard cap regardless of LLM output
-    enable_llm_supersede: false  # LLM-found contradictions — OFF by default (fail-safe)
+    enable_llm_supersede: false  # deferred LLM path — `true` is REJECTED (fail-closed) until it ships
   retention:
     archived_days: 30            # tombstone archived observations older than this (rare, audit)
     facts_expired_days: 90       # hard-delete expired facts older than this
@@ -446,7 +450,7 @@ export const ForgettingSchema = z.object({
   consolidate: z.object({
     trigger_tokens:       z.number().int().positive().default(1024),
     max_facts_per_subject: z.number().int().positive().default(8),
-    enable_llm_supersede: z.boolean().default(false),
+    enable_llm_supersede: z.literal(false).default(false), // deferred — `true` refuses startup (no lying knobs)
   }).strict().default({}),
   retention: z.object({
     archived_days:      z.number().int().positive().default(30),

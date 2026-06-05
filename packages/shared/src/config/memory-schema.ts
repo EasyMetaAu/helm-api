@@ -73,13 +73,16 @@ export const ForgettingSchema = z
       .strict()
       .prefault({}),
     // mid→long consolidation into deduplicated facts (docs/12 "Promote mid → long").
-    // enable_llm_supersede is OFF by default (fail-safe: on uncertainty supersede
-    // nothing; only deterministic same-subject/newer-valid_from supersede runs).
+    // enable_llm_supersede currently accepts ONLY false (Codex review fix): the LLM
+    // contradiction-finding path is deferred and not wired, so accepting `true` would
+    // be a lying knob — an operator would flip it and nothing would change, violating
+    // config-as-code. `z.literal(false)` makes `true` REFUSE STARTUP (fail-closed)
+    // until the behaviour actually ships; widen back to z.boolean() then.
     consolidate: z
       .object({
         trigger_tokens: z.number().int().positive().default(1024), // extract facts when active-obs tokens exceed this
         max_facts_per_subject: z.number().int().positive().default(8), // hard cap regardless of LLM output
-        enable_llm_supersede: z.boolean().default(false), // LLM-found contradictions — OFF by default
+        enable_llm_supersede: z.literal(false).default(false), // deferred — `true` is rejected until the LLM path exists
       })
       .strict()
       .prefault({}),

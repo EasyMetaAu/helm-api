@@ -38,6 +38,16 @@ describe("ForgettingSchema", () => {
     expect(f.inject.drop_order).toBe("score");
   });
 
+  // docs/12 (Codex review fix) — the LLM supersede path is DEFERRED and not wired, so
+  // accepting `true` would be a lying knob (config-as-code violation). It refuses
+  // startup until the behaviour ships.
+  it("enable_llm_supersede: true is REJECTED (fail-closed) while the LLM path is deferred", () => {
+    expect(() => ForgettingSchema.parse({ consolidate: { enable_llm_supersede: true } })).toThrow();
+    // false (the only honest value) still parses.
+    const f = ForgettingSchema.parse({ consolidate: { enable_llm_supersede: false } });
+    expect(f.consolidate.enable_llm_supersede).toBe(false);
+  });
+
   it("drop_order accepts the legacy `oldest` fallback", () => {
     const f = ForgettingSchema.parse({ inject: { drop_order: "oldest" } });
     expect(f.inject.drop_order).toBe("oldest");

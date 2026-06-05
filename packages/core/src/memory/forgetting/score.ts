@@ -5,13 +5,22 @@
 // Agents), and access reinforcement via a log1p frequency term (Cognee /
 // MemoryScope).
 //
-//   score(now) = recency(now) × importance_weight + access_bonus
+//   score(now) = recency(now) × (importance_weight + access_bonus)
 //
 //   recency(now)       = 0.5 ^ (age_seconds / half_life_seconds)
 //   age_seconds        = max(0, now − last_referenced_at)
 //   last_referenced_at = coalesce(referenced_at, fallback_ts)   // NEVER null
 //   importance_weight  = clamp(importance, importance_floor, importance_ceil)
 //   access_bonus       = access_weight × log1p(reference_count)
+//
+// The access bonus lives INSIDE the recency product (Codex review fix): an earlier
+// draft ADDED it after the product, which made it a permanent score floor — one
+// injection (reference_count = 1) yielded a bonus above the default archive
+// threshold, so a once-used row could NEVER be forgotten no matter how old it got.
+// Multiplying instead means reinforcement works exactly like spaced repetition:
+// touching a memory resets `referenced_at` (recency back to ~1, full bonus), but a
+// memory that STOPS being used decays toward 0 — bonus and all. Nothing is
+// un-forgettable; reinforcement only delays forgetting.
 //
 // CLAUDE.md principles this module is load-bearing for:
 //  - "确定性优先" (determinism-first): no LLM, no network, no clock read. `now` is
@@ -85,11 +94,13 @@ function clamp(value: number, floor: number, ceil: number): number {
 }
 
 // The full forgetting score for one tiered row at instant `now` (caller-supplied —
-// the function never reads the real clock). Recency is the MULTIPLICATIVE core (a
-// stale memory decays toward 0 regardless of how important it once was); access_bonus
-// is ADDED AFTER the recency × importance product (docs/12) so a frequently-used-but-
-// old memory floats back up via `log1p` (diminishing returns: the 50th recall does not
-// dominate the 5th) without overpowering a fresh, high-importance one.
+// the function never reads the real clock). Recency is the MULTIPLICATIVE core over
+// EVERYTHING — importance AND the access bonus (Codex review fix: an additive bonus
+// was a permanent floor that made once-used rows un-forgettable). The bonus still
+// uses `log1p` (diminishing returns: the 50th recall does not dominate the 5th), and
+// reinforcement still pays off — bumping `referenced_at` resets recency to ~1, so a
+// recently-used row scores `importance + bonus` at full strength — but a row that
+// stops being used decays toward 0, bonus included. Nothing is un-forgettable.
 export function forgettingScore(input: ScoreInput, config: ScoreConfig, now: Date): number {
   const lastReferencedAt = effectiveReferencedAt(input.referencedAt, input.fallbackTs);
   // Milliseconds → seconds. `now − last_referenced_at`; the clamp lives in recency().
@@ -97,5 +108,5 @@ export function forgettingScore(input: ScoreInput, config: ScoreConfig, now: Dat
   const recencyTerm = recency(ageSeconds, config.half_life_s);
   const importanceWeight = clamp(input.importance, config.importance_floor, config.importance_ceil);
   const accessBonus = config.access_weight * Math.log1p(input.referenceCount);
-  return recencyTerm * importanceWeight + accessBonus;
+  return recencyTerm * (importanceWeight + accessBonus);
 }

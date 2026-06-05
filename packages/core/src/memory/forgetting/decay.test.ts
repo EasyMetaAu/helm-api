@@ -170,17 +170,26 @@ describe("runDecayJob", () => {
     expect(enqueued).toEqual([]);
   });
 
-  it("a reinforced (high reference_count) old row survives via the score", async () => {
-    // access_weight 0.3 + log1p(50) ≈ 1.18 access bonus alone clears 0.05 even at age 100s.
+  it("a RECENTLY-reinforced row survives; a once-used STALE row is archived (no permanent immunity)", async () => {
+    // docs/12 (Codex review fix) — the access bonus decays WITH recency. Reinforcement
+    // works by resetting referenced_at (recency back to ~1 → full bonus), so:
+    //  - "recent": touched at NOW → age 0 → score = importance + bonus → survives;
+    //  - "stale": used once but last touched 100 half-lives ago → recency ~0 → the
+    //    bonus decays with it → archived. Under the old ADDITIVE bonus this row scored
+    //    0.3×log1p(1) ≈ 0.21 > 0.05 forever — the un-forgettable bug.
     const cfg = makeConfig({
       score: { half_life_s: 1, importance_floor: 0, importance_ceil: 1, access_weight: 0.3 },
     });
-    const { store, archived } = makeStore([row("used", 100, { referenceCount: 50 })]);
+    const { store, archived } = makeStore([
+      row("recent", 100, { referenceCount: 50, referencedAt: NOW }),
+      row("stale", 100, { referenceCount: 1 }), // referencedAt null → ages from observedAt
+    ]);
     const deps = makeDeps(store, NOW, cfg);
 
     await runDecayJob({ jobId: "d1", scope: { accountId: "acct-a" } }, deps);
 
-    expect(archived).toEqual([]);
+    expect(archived).toEqual(["stale"]);
+    expect(archived).not.toContain("recent");
   });
 
   it("is idempotent: a second run over no remaining active rows archives nothing new", async () => {
