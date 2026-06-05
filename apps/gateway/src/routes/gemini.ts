@@ -235,11 +235,16 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     // Memory scope (docs/08 Phase 1): parse the four memory headers and stamp them
     // onto the IR metadata bag (mirrors /v1/messages) so the SHARED pipeline's
     // observe phase reads the scope off ir.metadata without touching HTTP.
-    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId);
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId, {
+      // Per-key defaults (issue #97); the Gemini wire shape has no per-conversation
+      // body signal, so only headers / x-session-key / key defaults apply here.
+      defaults: identity.caps?.memory,
+    });
     ir.metadata.thread_id = memoryScope.threadId;
     ir.metadata.resource_id = memoryScope.resourceId;
     ir.metadata.project_id = memoryScope.projectId;
     ir.metadata.memory_mode = memoryScope.mode;
+    ir.metadata.memory_thread_source = memoryScope.threadSource;
 
     // 3) Route through the shared core. The per-request abort signal rides along so
     //    a client disconnect is a non-provider fault (docs/02). run() throws a

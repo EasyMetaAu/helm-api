@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MemoryModeSchema } from "../request/schema.js";
 
 // API key record (storage layer shape) per docs/06. Per CLAUDE.md principle 7,
 // keys are stored as sha256 hash + display prefix ONLY — there is no plaintext
@@ -10,6 +11,14 @@ export const KeyRoleSchema = z.enum(["root", "user"]);
 // `degrade` (default): keep serving but force the request down to a cheaper lane —
 // bounds cost without interrupting service. `reject`: hard 429 once over budget.
 export const OverBudgetBehaviorSchema = z.enum(["degrade", "reject"]);
+
+// Where the memory THREAD anchor comes from when x-thread-id is absent (issue #97).
+// `header` (default): only the explicit header — exactly the pre-#97 behavior.
+// `auto`: derive from signals the client already sends (body metadata.thread_id /
+// conversation_id → x-session-key → OpenAI prompt_cache_key → Anthropic
+// metadata.user_id) so static-header-only clients (Claude Code / Codex) and
+// zero-config clients still get per-conversation memory.
+export const MemoryThreadSourceSchema = z.enum(["header", "auto"]);
 
 export const ApiKeyRecordSchema = z.object({
   key_id: z.string().min(1),
@@ -51,10 +60,20 @@ export const ApiKeyRecordSchema = z.object({
   // concurrency_queue_enabled is ON; overflow waits in a FIFO queue (429 on
   // queue-full / wait-timeout). `.default()`ed so legacy rows still parse.
   concurrency_limit: z.number().int().positive().nullable().default(null),
+  // Per-key MEMORY DEFAULTS (issue #97): server-side defaults so clients limited
+  // to static headers (Claude Code / Codex) — or none at all — still get memory.
+  // Explicit x-memory-* request headers always override. memory_mode is a
+  // BEHAVIOR-level default (inject rewrites requests), so it is never set
+  // globally — only per key, explicitly (fail-safe). `.default()`ed so legacy
+  // rows predating the migration still parse with memory off.
+  memory_mode: MemoryModeSchema.default("off"),
+  memory_project_id: z.string().min(1).nullable().default(null),
+  memory_thread_source: MemoryThreadSourceSchema.default("header"),
 });
 
 export type KeyRole = z.infer<typeof KeyRoleSchema>;
 export type OverBudgetBehavior = z.infer<typeof OverBudgetBehaviorSchema>;
+export type MemoryThreadSource = z.infer<typeof MemoryThreadSourceSchema>;
 export type ApiKeyRecord = z.infer<typeof ApiKeyRecordSchema>;
 
 // Admin-facing create-key request (docs/06 Key management). The plaintext is minted
@@ -83,6 +102,11 @@ export const CreateKeyRequestSchema = z
     // Optional max in-flight requests at mint time. Omitted => unlimited (null);
     // must be strictly positive (0 rejected — null already means unlimited).
     concurrency_limit: z.number().int().positive().optional(),
+    // Optional per-key memory defaults at mint time (issue #97). Omitted => memory
+    // off (zero behavior change). Explicit x-memory-* headers always override.
+    memory_mode: MemoryModeSchema.optional(),
+    memory_project_id: z.string().min(1).optional(),
+    memory_thread_source: MemoryThreadSourceSchema.optional(),
   })
   .strict();
 
@@ -116,6 +140,11 @@ export const UpdateKeyRequestSchema = z
     // Omit = leave unchanged; null = clear back to unlimited; a number must be
     // strictly positive (0 rejected).
     concurrency_limit: z.number().int().positive().nullable().optional(),
+    // Memory default edits (issue #97). Omit = leave unchanged; mode/source have
+    // no null (they always resolve to an enum value); project null clears it.
+    memory_mode: MemoryModeSchema.optional(),
+    memory_project_id: z.string().min(1).nullable().optional(),
+    memory_thread_source: MemoryThreadSourceSchema.optional(),
   })
   .strict();
 

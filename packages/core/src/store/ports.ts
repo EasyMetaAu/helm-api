@@ -120,6 +120,11 @@ export interface CreateKeyInput {
   degradeLane?: string;
   // Max in-flight requests (issue #93). Omitted => stored NULL => unlimited.
   concurrencyLimit?: number;
+  // Per-key memory defaults (issue #97). Omitted => off / none / header — memory
+  // stays off for this key; explicit x-memory-* headers always override.
+  memoryMode?: "off" | "observe" | "inject";
+  memoryProjectId?: string;
+  memoryThreadSource?: "header" | "auto";
 }
 
 export interface KeyStore {
@@ -162,6 +167,11 @@ export interface KeyPatch {
   degradeLane?: string | null;
   // Concurrency edit: present (even null) => written; null clears to unlimited.
   concurrencyLimit?: number | null;
+  // Memory default edits (issue #97). mode/source always resolve to an enum
+  // value (no null); project null clears it back to none.
+  memoryMode?: "off" | "observe" | "inject";
+  memoryProjectId?: string | null;
+  memoryThreadSource?: "header" | "auto";
 }
 
 // Telemetry insert input: decision record + a redacted key reference. Never

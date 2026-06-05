@@ -39,6 +39,10 @@ export class SqliteKeyStore implements KeyStore {
       degradeLane: input.degradeLane ?? null,
       // Max in-flight requests: undefined => NULL => unlimited.
       concurrencyLimit: input.concurrencyLimit ?? null,
+      // Memory defaults (issue #97): undefined => memory stays off for this key.
+      memoryMode: input.memoryMode ?? "off",
+      memoryProjectId: input.memoryProjectId ?? null,
+      memoryThreadSource: input.memoryThreadSource ?? "header",
       createdAt: this.now(),
     };
     this.db.insert(apiKeys).values(row).run();
@@ -88,6 +92,9 @@ export class SqliteKeyStore implements KeyStore {
         | "overBudgetBehavior"
         | "degradeLane"
         | "concurrencyLimit"
+        | "memoryMode"
+        | "memoryProjectId"
+        | "memoryThreadSource"
       >
     > = {};
     // SQLite has no native array: store the whitelist as JSON text (null = no cap).
@@ -105,6 +112,9 @@ export class SqliteKeyStore implements KeyStore {
     if (patch.overBudgetBehavior !== undefined) set.overBudgetBehavior = patch.overBudgetBehavior;
     if (patch.degradeLane !== undefined) set.degradeLane = patch.degradeLane;
     if (patch.concurrencyLimit !== undefined) set.concurrencyLimit = patch.concurrencyLimit;
+    if (patch.memoryMode !== undefined) set.memoryMode = patch.memoryMode;
+    if (patch.memoryProjectId !== undefined) set.memoryProjectId = patch.memoryProjectId;
+    if (patch.memoryThreadSource !== undefined) set.memoryThreadSource = patch.memoryThreadSource;
     if (Object.keys(set).length === 0) {
       // No-op patch: still verify the key exists (fail-loud on unknown id).
       const row = this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).get();
@@ -137,6 +147,11 @@ export class SqliteKeyStore implements KeyStore {
       over_budget_behavior: row.overBudgetBehavior === "reject" ? "reject" : "degrade",
       degrade_lane: row.degradeLane ?? null,
       concurrency_limit: row.concurrencyLimit ?? null,
+      // Text-column enums narrowed defensively (mirrors over_budget_behavior).
+      memory_mode:
+        row.memoryMode === "inject" ? "inject" : row.memoryMode === "observe" ? "observe" : "off",
+      memory_project_id: row.memoryProjectId ?? null,
+      memory_thread_source: row.memoryThreadSource === "auto" ? "auto" : "header",
     };
   }
 }

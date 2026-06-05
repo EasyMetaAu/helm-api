@@ -27,6 +27,14 @@ export interface AuthIdentity {
     /** Per-key usage budgets (docs/06). Read by the budget gate so it needs no
      *  extra KeyStore lookup. Each cap null = no cap for that dimension. */
     budget: BudgetCaps;
+    /** Per-key memory defaults (issue #97). Read by the memory-scope resolver so
+     *  static-header-only / zero-config clients still get memory; explicit
+     *  x-memory-* headers always override. */
+    memory: {
+      mode: "off" | "observe" | "inject";
+      projectId: string | null;
+      threadSource: "header" | "auto";
+    };
   };
 }
 
@@ -103,6 +111,11 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler {
           windowSeconds: record.budget_window_seconds,
           behavior: record.over_budget_behavior,
           degradeLane: record.degrade_lane,
+        },
+        memory: {
+          mode: record.memory_mode,
+          projectId: record.memory_project_id,
+          threadSource: record.memory_thread_source,
         },
       },
     };

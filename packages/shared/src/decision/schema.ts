@@ -106,6 +106,10 @@ export const MemoryDecisionSchema = z.object({
   observer_job_id: z.string().nullable(),
   memory_writeback_status: z.enum(["queued", "skipped", "failed"]),
   degraded: z.boolean(),
+  // Which fallback-chain link produced the thread anchor (issue #97): "header",
+  // "metadata_thread_id", "session_key", "prompt_cache_key", "metadata_user_id",
+  // or null when no thread resolved. `.default(null)` keeps pre-#97 records valid.
+  thread_source: z.string().nullable().default(null),
 });
 
 export const DecisionRecordSchema = z.object({

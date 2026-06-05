@@ -34,6 +34,11 @@ export const apiKeys = sqliteTable("api_keys", {
   // Max in-flight requests for this key (issue #93). NULL = unlimited (0 is not
   // a sentinel — mirrors the budget convention, not the rate-limit one).
   concurrencyLimit: integer("concurrency_limit"),
+  // Per-key memory defaults (issue #97). mode/source are text enums with the
+  // fail-safe defaults (off / header); project NULL = none.
+  memoryMode: text("memory_mode").notNull().default("off"),
+  memoryProjectId: text("memory_project_id"),
+  memoryThreadSource: text("memory_thread_source").notNull().default("header"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 

@@ -187,7 +187,10 @@ function toInternalRequest(
 // string id of length 0 or a non-string folds to null; the mode is normalized by
 // core's resolveMemoryMode (absent/illegal → off, default-safe). This is the
 // IR-metadata twin of resolveMemoryScope's header path — same defaults, no HTTP.
-function memoryScopeFromMeta(meta: PipelineIR["metadata"], accountId: string): MemoryScope {
+function memoryScopeFromMeta(
+  meta: PipelineIR["metadata"],
+  accountId: string,
+): MemoryScope & { threadSource: string | null } {
   const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
   return {
     accountId,
@@ -195,6 +198,9 @@ function memoryScopeFromMeta(meta: PipelineIR["metadata"], accountId: string): M
     resourceId: str(meta?.resource_id),
     projectId: str(meta?.project_id),
     mode: resolveMemoryMode(typeof meta?.memory_mode === "string" ? meta.memory_mode : null),
+    // Which fallback-chain link produced the thread (issue #97 observability);
+    // stamped by the route alongside the ids, surfaced on DecisionRecord.memory.
+    threadSource: str(meta?.memory_thread_source),
   };
 }
 
@@ -370,7 +376,7 @@ export function createMessagesPipeline(
       // reroute).
       // Inject metadata for the DecisionRecord (docs/08 Step 10) — held here and
       // stamped AFTER route() returns (the routing core never learns about memory).
-      let memoryMeta: MemoryDecision | null = null;
+      let memoryMeta: Omit<MemoryDecision, "thread_source"> | null = null;
       if (memory?.inject !== undefined && memoryScope.mode === "inject") {
         const wiring = memory.inject;
         const leadingSystem = (internal.messages as IRMessage[])[0];
@@ -454,7 +460,9 @@ export function createMessagesPipeline(
       // Stamp the inject metadata onto the DecisionRecord (docs/08 Step 10) so
       // telemetry / the debug UI can see what memory did. Counts + job id only —
       // never memory content (principle 7).
-      if (memoryMeta !== null) result.decision.memory = memoryMeta;
+      if (memoryMeta !== null) {
+        result.decision.memory = { ...memoryMeta, thread_source: memoryScope.threadSource };
+      }
 
       // Post-served usage-budget settle (docs/06), fail-OPEN. Charges the SETTLED
       // total_usd (never recomputed) + served tokens + 1 request. Shared helper for

@@ -337,6 +337,48 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(got?.rate_limit_rpm).toBe(9);
     });
 
+    it("memory defaults (issue #97): omitted -> off/null/header, set at create round-trips, updateKey edits + clears", async () => {
+      ctx = await make();
+      // omitted -> defaults (memory stays off; zero behavior change for old keys)
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "h1",
+        prefix: "p1",
+        accountId: "a",
+        role: "user",
+      });
+      let got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.memory_mode).toBe("off");
+      expect(got?.memory_project_id).toBeNull();
+      expect(got?.memory_thread_source).toBe("header");
+      // set at create
+      await ctx.stores.keys.createKey({
+        keyId: "k2",
+        hash: "h2",
+        prefix: "p2",
+        accountId: "a",
+        role: "user",
+        memoryMode: "inject",
+        memoryProjectId: "proj-1",
+        memoryThreadSource: "auto",
+      });
+      got = await ctx.stores.keys.getByHash("h2");
+      expect(got?.memory_mode).toBe("inject");
+      expect(got?.memory_project_id).toBe("proj-1");
+      expect(got?.memory_thread_source).toBe("auto");
+      // edit; sibling caps untouched (no clobber)
+      await ctx.stores.keys.updateKey("k1", { memoryMode: "observe", rateLimitRpm: 9 });
+      got = await ctx.stores.keys.getByHash("h1");
+      expect(got?.memory_mode).toBe("observe");
+      expect(got?.rate_limit_rpm).toBe(9);
+      // clear the project id back to null; mode/source keep their values
+      await ctx.stores.keys.updateKey("k2", { memoryProjectId: null });
+      got = await ctx.stores.keys.getByHash("h2");
+      expect(got?.memory_project_id).toBeNull();
+      expect(got?.memory_mode).toBe("inject");
+      expect(got?.memory_thread_source).toBe("auto");
+    });
+
     it("updateKey edits caps (allowed_lanes / allow_custom_model) and clears with null", async () => {
       ctx = await make();
       await ctx.stores.keys.createKey({

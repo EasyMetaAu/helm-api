@@ -5,7 +5,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
-import { resolveMemoryScope } from "./memory-scope.js";
+import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
 
 // POST /v1/messages — Anthropic Messages inbound, translated to IR, routed, and
@@ -37,6 +37,9 @@ export interface MessagesIdentity {
     /** Per-key usage budgets (docs/06), read by the pipeline's budget gate/settle.
      *  Absent = no budgets on this face. */
     budget?: BudgetCaps;
+    /** Per-key memory defaults (issue #97), read by the route's memory scope
+     *  resolver; absent = memory off unless headers say otherwise. */
+    memory?: MemoryKeyDefaults;
     [k: string]: unknown;
   };
   [k: string]: unknown;
@@ -272,11 +275,25 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     // without ever touching HTTP (CLAUDE.md principle 1). Absent/illegal headers
     // → off + null (default-safe). The ids are opaque (not credentials) and are
     // never logged here.
-    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId);
+    const nativeMetaBag =
+      native && typeof native === "object" && (native as Record<string, unknown>).metadata
+        ? ((native as Record<string, unknown>).metadata as Record<string, unknown>)
+        : null;
+    const sig = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+    const memoryScope = resolveMemoryScope((name) => c.req.header(name), identity.accountId, {
+      defaults: identity.caps?.memory,
+      signals: {
+        metadataThreadId: sig(nativeMetaBag?.thread_id) ?? sig(nativeMetaBag?.conversation_id),
+        // Anthropic body metadata.user_id — the session-stable hash Claude Code
+        // and OpenClaw already send (issue #97 fallback chain).
+        metadataUserId: sig(nativeMetaBag?.user_id),
+      },
+    });
     ir.metadata.thread_id = memoryScope.threadId;
     ir.metadata.resource_id = memoryScope.resourceId;
     ir.metadata.project_id = memoryScope.projectId;
     ir.metadata.memory_mode = memoryScope.mode;
+    ir.metadata.memory_thread_source = memoryScope.threadSource;
 
     // 3) Routing pipeline (framework-agnostic core). The per-request abort signal
     //    rides along so a client disconnect is a non-provider fault, not a breaker

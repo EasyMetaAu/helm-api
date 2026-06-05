@@ -33,6 +33,9 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     over_budget_behavior: 'degrade',
     degrade_lane: null,
     concurrency_limit: null,
+    memory_mode: 'off' as const,
+    memory_project_id: null,
+    memory_thread_source: 'header' as const,
     ...overrides,
   };
 }
@@ -145,6 +148,10 @@ describe('keys page', () => {
         degrade_lane: null,
         // Concurrency untouched → still unlimited (null).
         concurrency_limit: null,
+        // Memory defaults untouched → off / none / header (issue #97).
+        memory_mode: 'off',
+        memory_project_id: null,
+        memory_thread_source: 'header',
       }),
     );
     // Dialog closes after a successful save.

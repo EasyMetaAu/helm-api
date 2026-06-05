@@ -34,6 +34,9 @@ function keyRecord(over: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     over_budget_behavior: "degrade",
     degrade_lane: null,
     concurrency_limit: null,
+    memory_mode: "off" as const,
+    memory_project_id: null,
+    memory_thread_source: "header" as const,
     ...over,
   };
 }

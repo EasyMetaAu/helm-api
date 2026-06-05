@@ -1,26 +1,23 @@
 # 08 · Memory Middleware
 
-> Status (0.1): the **observe** phase is **implemented and wired** into the
-> gateway request path; the **inject** phase is **on the roadmap** (see
-> [09 · Roadmap](09-roadmap.md)). This chapter describes the design and marks the
-> true state of each part.
+> Status (0.5): **observe AND inject are implemented and wired end-to-end**
+> (issue #36 / PR #41), including the background Observer / Reflector worker that
+> drains the `memory_jobs` queue. The four memory headers are parsed at the
+> gateway boundary (`apps/gateway/src/routes/memory-scope.ts`) and serve all four
+> client surfaces (OpenAI Chat, Anthropic Messages, OpenAI Responses, Gemini).
+> On `inject`, the gateway assembles the docs/08 context prefix and full-replaces
+> the request messages BEFORE classification/execution; an observer write-back
+> job is enqueued off the request path; the worker compresses raw → observations
+> → reflections.
 >
-> What is live: the four memory headers are parsed at the gateway boundary
-> (`apps/gateway/src/routes/memory-scope.ts`), the resolved scope/mode is threaded
-> through, and `observeInbound` / `observeOutbound`
-> (`packages/core/src/memory/observe.ts`) are called from the OpenAI Chat route
-> (`chat.ts`) and from the shared protocol pipeline
-> (`messages-pipeline.ts`), which backs the Anthropic, OpenAI-Responses, and
-> Gemini surfaces (`messages.ts`, `responses.ts`, `gemini.ts`). In `observe`/
-> `inject` mode the gateway persists raw request/response/tool messages into the
-> `memory_*` tables.
+> Issue #97 adds **zero-client-change adoption**: per-key memory defaults stored
+> on the API key plus a thread-signal fallback chain, so clients limited to
+> static headers (Claude Code, Codex) — or none at all — still get memory. See
+> "Zero-client-change adoption" below.
 >
-> What is **not** wired yet: the **inject** phase. `assembleInjectedContext`
-> exists, is unit-tested, and is exported from `@helm/core`, but it is **not
-> called from any gateway route**. So today `inject` mode behaves like `observe`
-> (it persists but does not hydrate); `memory_hydrated` is always `false` and the
-> inject-phase counters stay at their null/zero defaults. The background Observer /
-> Reflector jobs are also roadmap.
+> Still deferred: a real LLM summarize/merge behind the deterministic interface,
+> and a `config.memory` subtree (the inject token budget rides
+> `HELM_MEMORY_INJECT_TOKEN_BUDGET`).
 
 ## Positioning
 
@@ -78,8 +75,88 @@ Modes:
 - `observe` — record messages and tool outputs, but do not inject memory.
   **Implemented and wired.**
 - `inject` — load memory context, assemble the prompt, and enqueue the
-  write-back. **Roadmap.** Today `inject` is accepted and persists like `observe`,
-  but the inject phase is not invoked, so nothing is hydrated.
+  write-back. **Implemented and wired** on all four surfaces.
+
+## Zero-client-change adoption (issue #97)
+
+Many agent clients can only send **static** headers (Claude Code via
+`ANTHROPIC_CUSTOM_HEADERS`, Codex via `model_providers.*.http_headers`) — and a
+dynamic per-conversation `x-thread-id` is impossible for them. Two server-side
+mechanisms close that gap; both are **inert unless explicitly configured on the
+API key** (an unconfigured key behaves exactly as before):
+
+### 1. Per-key memory defaults
+
+Stored on the API key (admin UI → key dialog → "Memory defaults"):
+
+```text
+memory_mode:          off | observe | inject     (default off)
+memory_project_id:    <string> | null            (default null)
+memory_thread_source: header | auto              (default header)
+```
+
+Explicit `x-memory-*` request headers always override the key defaults —
+including `x-memory-mode: off` disabling memory for a default-inject key, and an
+ILLEGAL header value normalizing to `off` (never falling back to the key's
+inject).
+
+### 2. Thread-signal fallback chain (`memory_thread_source: auto`)
+
+When the key opts in and no `x-thread-id` header is present, the thread anchor
+is derived from signals the client ALREADY sends, in fixed priority order:
+
+```text
+x-thread-id (explicit header — always wins)
+  → body metadata.thread_id / conversation_id
+  → x-session-key header (helm's session-momentum key)
+  → prompt_cache_key       (OpenAI Chat + Responses body — OpenClaw, Codex)
+  → metadata.user_id       (Anthropic body — Claude Code, OpenClaw)
+```
+
+The derived thread is owner-scoped exactly like an explicit one (account-prefixed
+storage id — cross-account identical signals never collide). The chain link that
+produced the thread is recorded as `DecisionRecord.memory.thread_source`.
+
+### Client recipes
+
+**Codex** (`~/.codex/config.toml`) — thread derives from `prompt_cache_key`:
+
+```toml
+[model_providers.helm]
+name = "Helm"
+base_url = "https://helm.example.com/v1"
+env_key = "HELM_API_KEY"
+wire_api = "responses"
+# Optional: override the key defaults per machine
+http_headers = { "x-project-id" = "my-project" }
+```
+
+**Claude Code** — thread derives from `metadata.user_id` (stable per session):
+
+```bash
+export ANTHROPIC_BASE_URL="https://helm.example.com"
+export ANTHROPIC_AUTH_TOKEN="helm_live_..."
+# Optional: override the key defaults
+export ANTHROPIC_CUSTOM_HEADERS="x-project-id: my-project"
+```
+
+**OpenClaw** — static headers via provider `request.headers`; thread derives
+from `prompt_cache_key` (OpenAI path) or `metadata.user_id` (Anthropic path).
+Note OpenClaw also ships its own local vector memory — gateway memory is the
+cross-agent shared layer; avoid running both injectors on the same context.
+
+**Anything else** (e.g. Hermes-agent): configure the key with
+`memory_mode: inject` + `memory_thread_source: auto` and point the client at
+helm — if it sends any of the chain's signals, memory just works. Clients that
+send none can pass `x-session-key` (a single static-ish header) or wait for the
+conversation-fingerprint fallback (deferred follow-up).
+
+Caveats:
+
+- `prompt_cache_key` is reused as a conversation anchor — semantically aligned
+  (same conversation ⇒ same key) but an implicit contract worth knowing.
+- OpenClaw rotates its sessionId on compaction: the thread restarts, but
+  project/resource reflections carry across (the layering absorbs it).
 
 ## Pipeline (target design)
 

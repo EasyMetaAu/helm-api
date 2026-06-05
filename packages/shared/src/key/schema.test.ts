@@ -270,3 +270,55 @@ describe("UpdateKeyRequestSchema", () => {
     expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: 2.5 }).success).toBe(false);
   });
 });
+
+// Per-key memory defaults (issue #97): server-side defaults so clients that can
+// only send static headers (Claude Code / Codex) — or none at all — still get
+// memory. Explicit x-memory-* request headers always override these.
+describe("per-key memory defaults (issue #97)", () => {
+  it("defaults to off/null/header when omitted (legacy rows / additive fields)", () => {
+    const parsed = ApiKeyRecordSchema.parse(fullKey());
+    expect(parsed.memory_mode).toBe("off");
+    expect(parsed.memory_project_id).toBeNull();
+    expect(parsed.memory_thread_source).toBe("header");
+  });
+
+  it("accepts explicit memory defaults and enforces the enums (fail-closed)", () => {
+    const ok = ApiKeyRecordSchema.parse({
+      ...fullKey(),
+      memory_mode: "inject",
+      memory_project_id: "proj-1",
+      memory_thread_source: "auto",
+    });
+    expect(ok.memory_mode).toBe("inject");
+    expect(ok.memory_project_id).toBe("proj-1");
+    expect(ok.memory_thread_source).toBe("auto");
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), memory_mode: "on" }).success).toBe(false);
+    expect(
+      ApiKeyRecordSchema.safeParse({ ...fullKey(), memory_thread_source: "magic" }).success,
+    ).toBe(false);
+    // Empty project id must never look like a real scope id.
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), memory_project_id: "" }).success).toBe(
+      false,
+    );
+  });
+
+  it("CreateKeyRequest accepts optional memory defaults", () => {
+    const res = CreateKeyRequestSchema.safeParse({
+      role: "user",
+      memory_mode: "inject",
+      memory_project_id: "proj-1",
+      memory_thread_source: "auto",
+    });
+    expect(res.success).toBe(true);
+  });
+
+  it("UpdateKeyRequest edits memory defaults; null clears the project id", () => {
+    const res = UpdateKeyRequestSchema.safeParse({
+      memory_mode: "observe",
+      memory_project_id: null,
+      memory_thread_source: "header",
+    });
+    expect(res.success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ memory_mode: "loud" }).success).toBe(false);
+  });
+});

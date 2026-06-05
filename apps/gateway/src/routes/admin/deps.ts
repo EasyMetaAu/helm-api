@@ -272,6 +272,13 @@ export interface KeySummary {
   // the schema — null already means unlimited). Enforced only while the runtime
   // setting concurrency_queue_enabled is ON.
   concurrency_limit: number | null;
+  // Per-key memory defaults (issue #97). Surfaced so the admin UI can display +
+  // edit them — and, critically, ROUND-TRIP them: omitting these from the list
+  // view makes the UI re-read off/null/header and silently wipe a configured
+  // default on the next save. No key material (principle 7).
+  memory_mode: "off" | "observe" | "inject";
+  memory_project_id: string | null;
+  memory_thread_source: "header" | "auto";
 }
 
 // New-key response: the ONLY place plaintext is ever returned, once.

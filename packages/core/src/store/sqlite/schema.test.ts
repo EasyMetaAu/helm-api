@@ -46,9 +46,9 @@ describe("sqlite schema + migrations", () => {
         );
       `);
       const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
-      // Seed everything below the memory migrations (v14–v16) as applied, so
-      // only they run — the minimal seed has no api_keys table for v10–v13.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]) rec.run(v, Date.now());
+      // Seed everything EXCEPT the memory migrations (v14–v16) as applied, so
+      // only they run — the minimal seed has no api_keys table for v10–v13/v17.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17]) rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       );

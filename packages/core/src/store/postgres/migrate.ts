@@ -334,6 +334,16 @@ const MIGRATIONS: readonly Migration[] = [
         WHERE status IN ('pending', 'running');
     `,
   },
+  {
+    // Per-key MEMORY DEFAULTS (issue #97) — pg mirror of the sqlite v17 migration
+    // (different ledger, same logical change). Additive with fail-safe defaults.
+    version: 16,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS memory_mode TEXT NOT NULL DEFAULT 'off';
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS memory_project_id TEXT;
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS memory_thread_source TEXT NOT NULL DEFAULT 'header';
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

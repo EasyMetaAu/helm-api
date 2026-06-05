@@ -387,6 +387,18 @@ const MIGRATIONS: readonly Migration[] = [
         WHERE status IN ('pending', 'running');
     `,
   },
+  {
+    // Per-key MEMORY DEFAULTS (issue #97). Additive — existing rows get the
+    // fail-safe defaults (memory off, no project, header-only thread source), so
+    // unconfigured keys behave exactly as before. Explicit x-memory-* request
+    // headers always override these at resolve time.
+    version: 17,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN memory_mode TEXT NOT NULL DEFAULT 'off';
+      ALTER TABLE api_keys ADD COLUMN memory_project_id TEXT;
+      ALTER TABLE api_keys ADD COLUMN memory_thread_source TEXT NOT NULL DEFAULT 'header';
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

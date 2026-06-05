@@ -319,3 +319,70 @@ describe("gateway.inject — decision record metadata", () => {
     });
   });
 });
+
+// Issue #97 — ZERO-CLIENT-CHANGE memory on the Anthropic surface: key defaults
+// turn memory on; the thread derives from body metadata.user_id (the
+// session-stable hash Claude Code / OpenClaw already send). No x-memory-* headers.
+describe("gateway.inject — per-key defaults + metadata.user_id fallback (issue #97)", () => {
+  const MEMORY_IDENTITY: MessagesIdentity = {
+    keyId: "k1",
+    accountId: "acct",
+    caps: {
+      memory: { mode: "inject", projectId: "proj-key", threadSource: "auto" },
+    },
+  };
+
+  it("hydrates with ZERO memory headers: key defaults + metadata.user_id as thread", async () => {
+    const { store } = makeFakeStore({
+      reflection: "PROJECT REFLECTION",
+      observations: [],
+      recent: [],
+    });
+    const { route, seen } = captureRoute();
+    const pipeline = createMessagesPipeline(route, "anthropic_messages", {
+      observe: observeDeps(store),
+      inject: injectWiring(store),
+    });
+    const app = createApp({ logger: { log: () => {} } });
+    registerMessagesRoute(app, {
+      auth: { resolve: async () => MEMORY_IDENTITY },
+      transformers: {
+        anthropic: {
+          transformRequestOut: (native: unknown) => {
+            const n = native as Record<string, unknown>;
+            return { model: n.model, messages: n.messages, stream: false, metadata: {} };
+          },
+          transformResponseOut: (ir: unknown) => ({ type: "message", __ir: ir }),
+          transformStreamOut: (ev: { type: string }) => ({
+            event: ev.type,
+            data: JSON.stringify(ev),
+          }),
+          transformErrorOut: (err: { message: string }) => ({
+            status: 502,
+            body: { type: "error", error: { message: err.message } },
+          }),
+        },
+      },
+      pipeline,
+    } as Parameters<typeof registerMessagesRoute>[1]);
+
+    const res = await app.request(SURFACE, {
+      method: "POST",
+      headers: AUTH, // ← no x-memory-* headers
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: { user_id: "cc-session-hash-1" },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
+    // The key default project's reflection was hydrated in.
+    expect(msgs.some((m) => m.content === "PROJECT REFLECTION")).toBe(true);
+    // The derived thread is owner-scoped (account prefix) like an explicit one.
+    expect(store.ensureThread).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "acct:cc-session-hash-1" }),
+    );
+  });
+});

@@ -76,6 +76,9 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         over_budget_behavior: input.overBudgetBehavior ?? "degrade",
         degrade_lane: input.degradeLane ?? null,
         concurrency_limit: input.concurrencyLimit ?? null,
+        memory_mode: input.memoryMode ?? "off",
+        memory_project_id: input.memoryProjectId ?? null,
+        memory_thread_source: input.memoryThreadSource ?? "header",
       };
       rows.push(rec);
       return rec;
@@ -110,6 +113,10 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         row.over_budget_behavior = patch.overBudgetBehavior;
       if (patch.degradeLane !== undefined) row.degrade_lane = patch.degradeLane;
       if (patch.concurrencyLimit !== undefined) row.concurrency_limit = patch.concurrencyLimit;
+      if (patch.memoryMode !== undefined) row.memory_mode = patch.memoryMode;
+      if (patch.memoryProjectId !== undefined) row.memory_project_id = patch.memoryProjectId;
+      if (patch.memoryThreadSource !== undefined)
+        row.memory_thread_source = patch.memoryThreadSource;
     },
   };
 }
@@ -495,6 +502,31 @@ describe("admin.api keys", () => {
     expect(list[0]?.prefix).toBe("helm_live_PLAI");
     expect(list[0]).not.toHaveProperty("hash");
     expect(list[0]).not.toHaveProperty("plaintext");
+  });
+
+  it("POST persists per-key memory defaults and the LIST surfaces them (issue #97)", async () => {
+    // Regression: the list view must echo the configured memory defaults, or the
+    // admin UI re-reads off/null/header and silently wipes them on the next save.
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const created = await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        role: "user",
+        memory_mode: "inject",
+        memory_project_id: "proj-1",
+        memory_thread_source: "auto",
+      }),
+    });
+    expect(created.status).toBe(201);
+    expect(keyStore.rows[0]?.memory_mode).toBe("inject");
+    const list = (await (await app.request("/admin/api/keys")).json()) as Array<
+      Record<string, unknown>
+    >;
+    expect(list[0]?.memory_mode).toBe("inject");
+    expect(list[0]?.memory_project_id).toBe("proj-1");
+    expect(list[0]?.memory_thread_source).toBe("auto");
   });
 
   it("POST persists per-key rate limits and the list surfaces them", async () => {
