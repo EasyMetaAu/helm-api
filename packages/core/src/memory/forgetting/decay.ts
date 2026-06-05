@@ -178,6 +178,38 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
       }
     }
 
+    // docs/12 (Codex review fix) — a reflection is a derived cache of its scope's
+    // ACTIVE observations, so archiving observations makes the affected reflections
+    // STALE: the forgotten content lingers in the already-written reflection (and
+    // keeps being injected) until something rebuilds it. So after a sweep that
+    // actually archived rows, enqueue ONE reflector REBUILD per active-reflection
+    // scope of this account. The rebuild re-merges the now-reduced active set
+    // (forgotten content drops); a scope whose active set is now EMPTY gets its
+    // reflection archived by the Reflector's empty-set branch. Dedupe via the
+    // open-job index; FULLY fail-open — a rebuild-enqueue failure never fails the
+    // sweep (the next sweep re-enqueues).
+    if (archivedCount > 0 && deps.memoryStore.listActiveReflectionScopes !== undefined) {
+      try {
+        const scopes = await deps.memoryStore.listActiveReflectionScopes(accountId);
+        for (const scope of scopes) {
+          try {
+            await deps.memoryStore.enqueueJob({ type: "reflector", scope });
+          } catch (enqErr) {
+            deps.log("memory.decay.rebuild_enqueue_failed", {
+              account_id: accountId,
+              scope,
+              error: enqErr instanceof Error ? enqErr.message : String(enqErr),
+            });
+          }
+        }
+      } catch (listErr) {
+        deps.log("memory.decay.rebuild_list_failed", {
+          account_id: accountId,
+          error: listErr instanceof Error ? listErr.message : String(listErr),
+        });
+      }
+    }
+
     await deps.memoryStore.updateJobStatus(job.jobId, "done");
     deps.log("memory.decay.swept", {
       account_id: accountId,

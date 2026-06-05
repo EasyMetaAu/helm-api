@@ -11,6 +11,7 @@ function makeFakeStore(observations: Observation[], initial: Reflection | null =
   let current: Reflection | null = initial;
   const upserts: ReflectionUpsertInput[] = [];
   const jobUpdates: Array<{ jobId: string; status: MemoryJobStatus; error?: string }> = [];
+  const archiveCalls: ReflectionScope[] = [];
   const store: MemoryStore = {
     ensureThread: vi.fn(async () => {}),
     appendMessage: vi.fn(async () => "unused"),
@@ -42,8 +43,14 @@ function makeFakeStore(observations: Observation[], initial: Reflection | null =
     }),
     enqueueJob: vi.fn(async () => "job"),
     claimPendingJobs: vi.fn(async () => []),
+    // docs/12 (Codex review fix) — archive every reflection version of a scope when
+    // its active observation set empties out; records the scope it was asked to clear.
+    archiveReflections: vi.fn(async (scope: ReflectionScope) => {
+      archiveCalls.push(scope);
+      if (current !== null) current = { ...current, status: "archived" };
+    }),
   };
-  return { store, upserts, jobUpdates, getCurrent: () => current };
+  return { store, upserts, jobUpdates, archiveCalls, getCurrent: () => current };
 }
 
 function makeObservations(texts: string[]): Observation[] {
@@ -287,7 +294,7 @@ describe("runReflectorJob", () => {
   });
 
   it("writes nothing when the scope has no observations", async () => {
-    const { store, upserts, jobUpdates } = makeFakeStore([]);
+    const { store, upserts, jobUpdates, archiveCalls } = makeFakeStore([]);
     const deps = makeDeps(store);
 
     const out = await runReflectorJob(JOB, deps);
@@ -296,6 +303,43 @@ describe("runReflectorJob", () => {
     expect(out.changed).toBe(false);
     expect(upserts).toHaveLength(0);
     // merge never called — no wasted LLM tokens.
+    expect(deps.merge).not.toHaveBeenCalled();
+    expect(archiveCalls).toHaveLength(0); // no previous reflection → nothing to clear
+    expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
+  });
+
+  // docs/12 (Codex review fix) — a scope whose active observation set has emptied out
+  // (everything decayed) is FORGOTTEN: the previous reflection is a stale cache of gone
+  // observations and would keep injecting forgotten content. The Reflector ARCHIVES it
+  // (soft-invalidate) so getReflection returns null and it stops being injected.
+  it("archives the previous reflection when the active observation set is now empty", async () => {
+    const existing: Reflection = {
+      id: "refl-old",
+      projectId: "proj-1",
+      resourceId: null,
+      threadId: null,
+      reflectionText: "stale: user liked X (now decayed)",
+      version: 4,
+      tokenEstimate: 9,
+      updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
+    };
+    const { store, upserts, archiveCalls, jobUpdates } = makeFakeStore([], existing);
+    const deps = makeDeps(store);
+    // A project-scoped job → target is an injectable project reflection.
+    const projectJob: ReflectorJob = {
+      jobId: "job-1",
+      scope: { accountId: "acct-a", projectId: "proj-1" },
+    };
+
+    const out = await runReflectorJob(projectJob, deps);
+
+    expect(archiveCalls).toEqual([{ accountId: "acct-a", projectId: "proj-1" }]); // cleared at the target scope
+    expect(out.changed).toBe(true); // the scope's memory genuinely changed (it was forgotten)
+    expect(out.reflectionId).toBeNull();
+    expect(upserts).toHaveLength(0); // never writes an empty reflection (reflectionText min(1))
     expect(deps.merge).not.toHaveBeenCalled();
     expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
   });

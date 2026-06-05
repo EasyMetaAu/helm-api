@@ -150,7 +150,25 @@ export async function runReflectorJob(
     const previousReflection = await deps.memoryStore.getReflection(target);
 
     if (observations.length === 0) {
-      // Idempotent / nothing to merge — never write an empty reflection.
+      // docs/12 (Codex review fix) — a scope whose ACTIVE observation set is now empty
+      // has been fully FORGOTTEN (everything decayed/pruned). The previous reflection
+      // is a derived cache of those gone observations, so keeping it would inject
+      // forgotten content indefinitely. ARCHIVE it (soft-invalidate — getReflection
+      // then returns null) instead of returning it unchanged. reflectionText's min(1)
+      // forbids writing an "empty" reflection, so archival is the clear-out mechanism.
+      // Gated on the optional store method; absent ⇒ legacy no-op (keep), so this is
+      // inert for pre-phase stores / forgetting-off.
+      if (previousReflection !== null && deps.memoryStore.archiveReflections !== undefined) {
+        await deps.memoryStore.archiveReflections(target);
+        await deps.memoryStore.updateJobStatus(job.jobId, "done");
+        deps.log("memory.reflector.archived_empty_scope", {
+          scope: job.scope,
+          target_scope: target,
+          archived_reflection_id: previousReflection.id,
+        });
+        return { reflectionId: null, version: null, changed: true };
+      }
+      // No previous reflection (or no archive support) — nothing to merge or clear.
       await deps.memoryStore.updateJobStatus(job.jobId, "done");
       deps.log("memory.reflector.noop_no_observations", { scope: job.scope });
       return {
@@ -277,34 +295,55 @@ async function tryExtractFacts(args: {
     const extracted = await extractFacts({ observations, previousReflection, now });
     if (extracted.length === 0) return;
 
-    // Build fact inputs with DETERMINISTIC keys, capping per subject_key.
+    // Normalize + resolve each candidate's validFrom (the supporting observation's
+    // time; falls back to `now` for a stub that omits it). Skip rows whose subject/
+    // fact text strips to nothing (the Zod input min(1) would reject them anyway).
     const cap = forgetting.consolidate.max_facts_per_subject;
-    const perSubjectCount = new Map<string, number>();
-    const facts: MemoryFactInput[] = [];
-    for (const e of extracted) {
-      const subjectKey = normalizeSubjectKey(e.subjectText);
-      // Skip facts whose subject/fact text strips to nothing (the Zod input min(1)
-      // would reject them anyway — guard here so one bad row never aborts the batch).
-      if (subjectKey.length === 0 || e.factText.trim().length === 0) continue;
-      const seen = perSubjectCount.get(subjectKey) ?? 0;
-      if (seen >= cap) continue; // hard cap per subject_key regardless of extractor output
-      perSubjectCount.set(subjectKey, seen + 1);
-      facts.push({
-        ownerId: target.accountId,
-        subjectKey,
+    const candidates = extracted
+      .map((e, index) => ({
+        subjectKey: normalizeSubjectKey(e.subjectText),
         factText: e.factText,
-        contentHash: factContentHash(e.factText),
-        // validFrom = the supporting observation's time (Codex review fix), so
-        // supersede orders by when facts became true, not when they were processed.
-        // Fall back to `now` only when an extractor omits it (deferred-LLM stub).
         validFrom: e.validFrom ?? now,
-        ...(e.sourceObservationRange !== undefined
-          ? { sourceObservationRange: e.sourceObservationRange }
-          : {}),
-        ...(target.projectId !== undefined ? { projectId: target.projectId } : {}),
-        ...(target.resourceId !== undefined ? { resourceId: target.resourceId } : {}),
-        ...(target.threadId !== undefined ? { threadId: target.threadId } : {}),
-      });
+        sourceObservationRange: e.sourceObservationRange,
+        index, // original order — the stable tiebreak when validFrom ties
+      }))
+      .filter((c) => c.subjectKey.length > 0 && c.factText.trim().length > 0);
+
+    // Group by subject_key and apply the cap to the NEWEST facts (Codex review fix):
+    // the extractor emits in observation order (OLDEST first), so a naive "keep the
+    // first `cap`" dropped the freshest corrections before supersede could run. Sort
+    // each group by validFrom DESC (newest wins the cap), then re-emit OLDEST-first so
+    // the store's supersede (`valid_from < new`) settles to the newest active fact.
+    const bySubject = new Map<string, typeof candidates>();
+    for (const c of candidates) {
+      const group = bySubject.get(c.subjectKey);
+      if (group === undefined) bySubject.set(c.subjectKey, [c]);
+      else group.push(c);
+    }
+    const facts: MemoryFactInput[] = [];
+    // Deterministic subject order (sorted) so the batch is reproducible.
+    for (const subjectKey of [...bySubject.keys()].sort()) {
+      const group = bySubject.get(subjectKey) ?? [];
+      const kept = group
+        .slice()
+        .sort((a, b) => b.validFrom.getTime() - a.validFrom.getTime() || a.index - b.index)
+        .slice(0, cap) // the `cap` NEWEST
+        .sort((a, b) => a.validFrom.getTime() - b.validFrom.getTime() || a.index - b.index); // re-emit oldest-first
+      for (const c of kept) {
+        facts.push({
+          ownerId: target.accountId,
+          subjectKey,
+          factText: c.factText,
+          contentHash: factContentHash(c.factText),
+          validFrom: c.validFrom,
+          ...(c.sourceObservationRange !== undefined
+            ? { sourceObservationRange: c.sourceObservationRange }
+            : {}),
+          ...(target.projectId !== undefined ? { projectId: target.projectId } : {}),
+          ...(target.resourceId !== undefined ? { resourceId: target.resourceId } : {}),
+          ...(target.threadId !== undefined ? { threadId: target.threadId } : {}),
+        });
+      }
     }
     if (facts.length === 0) return;
 

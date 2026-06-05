@@ -265,10 +265,14 @@ export class SqliteMemoryStore implements MemoryStore {
   // scope levels must be NULL in storage (never a different scope's row) so the
   // Reflector never crosses project/resource/thread boundaries (docs/08 isolation).
   async getReflection(scope: ReflectionScope): Promise<Reflection | null> {
+    // Only the latest ACTIVE version (Codex review fix): a reflection archived by the
+    // decay→rebuild path (its whole scope decayed) must be invisible to inject + the
+    // Reflector. Legacy rows default status='active', so this is inert when forgetting
+    // is off.
     const row = this.db
       .select()
       .from(memoryReflections)
-      .where(reflectionScopeWhere(scope))
+      .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")))
       .orderBy(desc(memoryReflections.version))
       .limit(1)
       .get();
@@ -307,6 +311,42 @@ export class SqliteMemoryStore implements MemoryStore {
       })
       .run();
     return id;
+  }
+
+  // docs/12 (Codex review fix) — the distinct scopes that currently hold an ACTIVE
+  // reflection for the account, so the decay job can enqueue ONE reflector rebuild
+  // per scope. Reflections are stored at a single target level (project-only or
+  // resource-only — reflectionTargetScope), so each returned scope carries exactly
+  // the level(s) that were set.
+  async listActiveReflectionScopes(accountId: string): Promise<ReflectionScope[]> {
+    const rows = this.db.$sqlite
+      .prepare(
+        `SELECT DISTINCT project_id, resource_id, thread_id
+           FROM memory_reflections
+          WHERE owner_id = ? AND status = 'active'`,
+      )
+      .all(accountId) as Array<{
+      project_id: string | null;
+      resource_id: string | null;
+      thread_id: string | null;
+    }>;
+    return rows.map((r) => ({
+      accountId,
+      ...(r.project_id !== null ? { projectId: r.project_id } : {}),
+      ...(r.resource_id !== null ? { resourceId: r.resource_id } : {}),
+      ...(r.thread_id !== null ? { threadId: r.thread_id } : {}),
+    }));
+  }
+
+  // docs/12 (Codex review fix) — soft-invalidate EVERY version of a scope's
+  // reflection (status='archived'); getReflection then returns null so the forgotten
+  // reflection stops being injected. Never a DELETE (audit). Account-scoped.
+  async archiveReflections(scope: ReflectionScope): Promise<void> {
+    this.db
+      .update(memoryReflections)
+      .set({ status: "archived" })
+      .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")))
+      .run();
   }
 
   // Update a background job's lifecycle status (+ optional error on failure).

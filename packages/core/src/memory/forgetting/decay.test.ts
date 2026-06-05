@@ -28,12 +28,13 @@ function makeConfig(overrides: Partial<ForgettingConfig> = {}): ForgettingConfig
 
 // A fake store recording archive calls + job-status writes; listScorableObservations
 // returns a caller-supplied fixture once (then [] so a re-run is idempotent).
-function makeStore(rows: ScorableObservation[]) {
+function makeStore(rows: ScorableObservation[], reflectionScopes: unknown[] = []) {
   const archived: string[] = [];
   const jobUpdates: Array<{ jobId: string; status: MemoryJobStatus }> = [];
+  const enqueued: Array<{ type: string; scope: unknown }> = [];
   let served = false;
   const store = {
-    listScorableObservations: vi.fn(async (_scope: { accountId: string }) => {
+    listScorableObservations: vi.fn(async (_scope: { accountId: string; limit?: number }) => {
       if (served) return [];
       served = true;
       return rows;
@@ -41,11 +42,18 @@ function makeStore(rows: ScorableObservation[]) {
     archiveObservations: vi.fn(async (input: { accountId: string; ids: string[]; now: Date }) => {
       archived.push(...input.ids);
     }),
+    // docs/12 (Codex review fix) — decay enqueues a reflector rebuild per active
+    // reflection scope after it archives observations.
+    listActiveReflectionScopes: vi.fn(async (_accountId: string) => reflectionScopes),
+    enqueueJob: vi.fn(async (input: { type: string; scope: unknown }) => {
+      enqueued.push(input);
+      return "job";
+    }),
     updateJobStatus: vi.fn(async (jobId: string, status: MemoryJobStatus) => {
       jobUpdates.push({ jobId, status });
     }),
   };
-  return { store, archived, jobUpdates };
+  return { store, archived, jobUpdates, enqueued };
 }
 
 function makeDeps(
@@ -126,6 +134,40 @@ describe("runDecayJob", () => {
     expect(store.archiveObservations).toHaveBeenCalledWith(
       expect.objectContaining({ accountId: "acct-a", ids: ["a-stale"] }),
     );
+  });
+
+  // docs/12 (Codex review fix) — after archiving observations, decay enqueues a
+  // reflector REBUILD per active-reflection scope so the stale reflections drop the
+  // forgotten content (a reflection is a derived cache of active observations).
+  it("enqueues a reflector rebuild per active reflection scope when it archived rows", async () => {
+    const scopes = [
+      { accountId: "acct-a", projectId: "p1" },
+      { accountId: "acct-a", resourceId: "r1" },
+    ];
+    const { store, enqueued } = makeStore([row("a-stale", 100)], scopes);
+    const deps = makeDeps(store, NOW);
+
+    await runDecayJob({ jobId: "d1", scope: { accountId: "acct-a" } }, deps);
+
+    expect(store.listActiveReflectionScopes).toHaveBeenCalledWith("acct-a");
+    expect(enqueued).toEqual([
+      { type: "reflector", scope: { accountId: "acct-a", projectId: "p1" } },
+      { type: "reflector", scope: { accountId: "acct-a", resourceId: "r1" } },
+    ]);
+  });
+
+  it("does NOT enqueue rebuilds when the sweep archived nothing", async () => {
+    // age 0 → score ≈ 0.5 → above threshold → nothing archived.
+    const { store, enqueued } = makeStore(
+      [row("fresh", 0)],
+      [{ accountId: "acct-a", projectId: "p1" }],
+    );
+    const deps = makeDeps(store, NOW);
+
+    await runDecayJob({ jobId: "d1", scope: { accountId: "acct-a" } }, deps);
+
+    expect(store.listActiveReflectionScopes).not.toHaveBeenCalled();
+    expect(enqueued).toEqual([]);
   });
 
   it("a reinforced (high reference_count) old row survives via the score", async () => {

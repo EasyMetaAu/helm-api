@@ -300,9 +300,12 @@ export interface MemoryStore {
   // that id (the Reflector's target read — a project reflection covers the whole
   // project). Never cross-project, never cross-account.
   listObservations(scope: ReflectionScope): Promise<Observation[]>;
-  // Read the current (latest) reflection for a scope, or null if none yet. The
-  // Reflector compares the freshly merged text against this to decide whether
-  // to bump the version (stable / slowly-changing).
+  // Read the current (latest) ACTIVE reflection for a scope, or null if none yet.
+  // ARCHIVED reflections (cleared by the decay→rebuild path when a scope's whole
+  // active observation set is forgotten — Codex review fix) are invisible here, so
+  // neither inject nor the Reflector ever surfaces forgotten content. The Reflector
+  // compares the freshly merged text against this to decide whether to bump the
+  // version (stable / slowly-changing).
   getReflection(scope: ReflectionScope): Promise<Reflection | null>;
   // Persist a NEW reflection version (version+1) when the merged text actually
   // changed. Returns its generated id. Never called when the text is unchanged
@@ -402,6 +405,21 @@ export interface MemoryStore {
     triggerIntervalS: number;
     nowMs: number;
   }): Promise<string[]>;
+  // docs/12 (Codex review fix) — the reflection-rebuild half of forgetting. A
+  // reflection is a derived cache of its scope's ACTIVE observations, so when the
+  // decay sweep archives observations the affected reflections go stale and must be
+  // rebuilt (or cleared). Two methods support that, both OPTIONAL (`?`, gated):
+  //   - listActiveReflectionScopes: the distinct scopes that currently hold an
+  //     ACTIVE reflection for the account, so the decay job can enqueue ONE reflector
+  //     rebuild per scope (the rebuild re-merges the now-reduced active set, dropping
+  //     forgotten content; the open-job dedupe collapses duplicates).
+  listActiveReflectionScopes?(accountId: string): Promise<ReflectionScope[]>;
+  //   - archiveReflections: soft-invalidate (status='archived') EVERY reflection
+  //     version of a scope. Called by the Reflector when a scope's active observation
+  //     set is EMPTY (everything decayed) — getReflection then returns null, so the
+  //     forgotten reflection stops being injected. Never a DELETE (audit). Account-
+  //     scoped via the scope's accountId.
+  archiveReflections?(scope: ReflectionScope): Promise<void>;
   // docs/12 "Eviction, demotion, promotion" passes 2–3 (P6) — fact ingest with
   // DETERMINISTIC dedup + same-subject supersede, all in ONE batch. The Reflector
   // extracts discrete facts (its new sibling output) and calls this; per fact:

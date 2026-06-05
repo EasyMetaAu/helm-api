@@ -23,6 +23,18 @@
 
 ---
 
+## 2026-06-05 · 遗忘策略 Codex 评审修复 IV（3 项；docs/12）
+
+第四轮 Codex review 发现 3 个问题（1×P1、1×P2、1×P3），全部修复（+6 回归测试,全套 2446 绿）：
+
+1. **（P1）遗忘只清输入侧，reflection 仍泄漏**：decay 归档 observation,但已写入的 `memory_reflections`(observation 的派生缓存)没人重建——旧内容继续注入;更糟:reflector 若见 0 active observation 会原样保留旧 reflection。**修复(输出侧补全)**：(a) `getReflection` 两适配器过滤 `status='active'`;(b) 新增 `archiveReflections(scope)`——reflector 在 active 集为空时归档旧 reflection(reflectionText `min(1)` 不能写空,故用归档清除);(c) 新增 `listActiveReflectionScopes(accountId)`,decay 归档后为每个活跃 reflection scope 入队一个 reflector 重建(open-job 去重,全程 fail-open)。重建从缩减后的 active 集重新合并,遗忘内容自然掉出。
+2. **（P2）`max_facts_per_subject` 留最旧丢最新**：extractor 按 observation 顺序(oldest-first)产出,cap 取前 N → 丢掉更新的修正(supersede 还没跑就丢了)。**修复**：`tryExtractFacts` 按 subjectKey 分组,按 `validFrom` desc 取最新 N,再按 `validFrom` asc 重排写入(让 store 的 `valid_from < new` supersede 收敛到最新 active);validFrom 相等时 index 稳定兜底。
+3. **（P3）`sourceObservationRange` 语义不符**：schema 注释是 `[firstObservationId,lastObservationId]`,但 gateway extractor 写的是 `o.sourceMessageRange`(raw message id)→ 审计 join 错表。**修复**：extractor 改存 `[o.id, o.id]`(一 fact 一 observation,两端即该 observation id)。
+
+**设计补全**：这轮把「遗忘」从单侧(归档 observation)补成双侧——observation(输入)归档 + reflection(输出缓存)重建/归档。reflection 是派生缓存的认知是关键:任何 active observation 集变化(observer 加 / decay 归档)都应触发重建,之前只有 observer 加触发。
+
+---
+
 ## 2026-06-05 · 遗忘策略 Codex 评审修复 III（3 项；docs/12）
 
 第三轮 Codex review 发现 3 个问题（1×P1、1×P2、1×P3），全部修复（+3 回归测试,全套 2440 绿）：

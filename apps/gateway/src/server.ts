@@ -191,7 +191,13 @@ function extractFactsFromObservations(observations: readonly Observation[]): Arr
       // The fact became true when its observation was recorded — drives supersede
       // ordering (Codex review fix), NOT the processing wall-clock.
       validFrom: o.observedAt,
-      sourceObservationRange: o.sourceMessageRange,
+      // Audit trail = the OBSERVATION's id (memory_facts.source_observation_range is
+      // [firstObservationId, lastObservationId] per the schema), NOT the raw
+      // message-id range — one fact derives from one observation here, so both ends
+      // are this observation's id. Codex review fix: previously stored
+      // o.sourceMessageRange (raw message ids), which would join against the wrong
+      // table.
+      sourceObservationRange: [o.id, o.id],
     });
   }
   return facts;

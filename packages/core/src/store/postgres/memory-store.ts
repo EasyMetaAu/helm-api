@@ -234,10 +234,12 @@ export class PgMemoryStore implements MemoryStore {
   }
 
   async getReflection(scope: ReflectionScope): Promise<Reflection | null> {
+    // Latest ACTIVE version only (Codex review fix; pg mirror) — archived reflections
+    // are invisible so forgotten content never re-injects.
     const rows = await this.db
       .select()
       .from(memoryReflections)
-      .where(reflectionScopeWhere(scope))
+      .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")))
       .orderBy(desc(memoryReflections.version))
       .limit(1);
     const row = rows[0];
@@ -271,6 +273,34 @@ export class PgMemoryStore implements MemoryStore {
       updatedAt: input.updatedAt.getTime(),
     });
     return id;
+  }
+
+  // docs/12 (Codex review fix; pg mirror) — distinct ACTIVE-reflection scopes for the
+  // account, so the decay job can enqueue one reflector rebuild per scope.
+  async listActiveReflectionScopes(accountId: string): Promise<ReflectionScope[]> {
+    const rows = await this.db
+      .selectDistinct({
+        projectId: memoryReflections.projectId,
+        resourceId: memoryReflections.resourceId,
+        threadId: memoryReflections.threadId,
+      })
+      .from(memoryReflections)
+      .where(and(eq(memoryReflections.ownerId, accountId), eq(memoryReflections.status, "active")));
+    return rows.map((r) => ({
+      accountId,
+      ...(r.projectId !== null ? { projectId: r.projectId } : {}),
+      ...(r.resourceId !== null ? { resourceId: r.resourceId } : {}),
+      ...(r.threadId !== null ? { threadId: r.threadId } : {}),
+    }));
+  }
+
+  // docs/12 (Codex review fix; pg mirror) — soft-invalidate every version of a scope's
+  // reflection so getReflection returns null. Never a DELETE (audit).
+  async archiveReflections(scope: ReflectionScope): Promise<void> {
+    await this.db
+      .update(memoryReflections)
+      .set({ status: "archived" })
+      .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")));
   }
 
   async updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void> {

@@ -244,9 +244,39 @@ describe("runReflectorJob — fact extraction (docs/12 P6, gated)", () => {
 
     const call = factCalls[0];
     if (!call) throw new Error("expected an insertFactsReconciled call");
-    // Only the first 2 facts of the shared subject survive the cap.
+    // With NO validFrom, all candidates tie → the cap keeps them in extraction order.
     expect(call.facts).toHaveLength(2);
     expect(call.facts.map((f) => f.factText)).toEqual(["fact 1", "fact 2"]);
+  });
+
+  // docs/12 (Codex review fix) — when candidates carry distinct validFrom, the cap must
+  // keep the NEWEST `cap` (the freshest corrections), NOT the first-emitted (oldest);
+  // the extractor emits oldest-first, so a naive head-slice dropped the corrections
+  // before supersede could run. Kept facts are re-emitted OLDEST-first so the store's
+  // supersede (`valid_from < new`) settles to the newest active fact.
+  it("caps to the NEWEST facts per subject by validFrom (not the first-emitted)", async () => {
+    const obs = [bigObs("o1", "x".repeat(1000))];
+    const { store, factCalls } = makeFactStore(obs);
+    const d = (iso: string) => new Date(iso);
+    // Emitted oldest-first (observation order); cap = 2 → keep the two NEWEST (v4, v5).
+    const extractFacts = extractStub([
+      { subjectText: "Topic", factText: "v1", validFrom: d("2026-01-01T00:00:00.000Z") },
+      { subjectText: "Topic", factText: "v2", validFrom: d("2026-02-01T00:00:00.000Z") },
+      { subjectText: "Topic", factText: "v3", validFrom: d("2026-03-01T00:00:00.000Z") },
+      { subjectText: "Topic", factText: "v4", validFrom: d("2026-04-01T00:00:00.000Z") },
+      { subjectText: "Topic", factText: "v5", validFrom: d("2026-05-01T00:00:00.000Z") },
+    ]);
+    const deps = baseDeps(store, {
+      forgetting: { enabled: true, consolidate: { trigger_tokens: 1, max_facts_per_subject: 2 } },
+      extractFacts,
+    });
+
+    await runReflectorJob(JOB, deps);
+
+    const call = factCalls[0];
+    if (!call) throw new Error("expected an insertFactsReconciled call");
+    // The two NEWEST survive, re-emitted oldest-first so supersede converges to v5.
+    expect(call.facts.map((f) => f.factText)).toEqual(["v4", "v5"]);
   });
 
   it("is fail-open: an extractFacts throw does NOT break the reflection write", async () => {

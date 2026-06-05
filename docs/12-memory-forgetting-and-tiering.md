@@ -221,6 +221,20 @@ back to the existing oldest-first path.
 (content freed, coverage kept); the single hard delete is aged-out superseded
 facts.
 
+**Reflections are a derived cache — decay must rebuild them.** A reflection is
+built from a scope's *active* observations, so archiving observations leaves the
+already-written reflection stale (it still holds the forgotten content, and inject
+keeps emitting it). So pass 1, after it archives rows, **enqueues one Reflector
+rebuild per active-reflection scope of the account** (`listActiveReflectionScopes`
+→ `enqueueJob('reflector')`, deduped by the open-job index, fully fail-open). The
+rebuild re-merges the now-reduced active set and the forgotten content drops out.
+When a scope's active set is now **empty**, the Reflector cannot write an empty
+reflection (`reflectionText` is `min(1)`), so it **archives** the existing
+reflection instead (`archiveReflections`); `getReflection` filters to
+`status='active'`, so an archived reflection stops being injected. Without this,
+forgetting only cleared the *input* side (observations) and leaked through the
+*output* side (reflections).
+
 Content vs coverage reads (the rule the above depends on): `archived` and `pruned`
 rows are invisible to **content** reads (the Reflector's merge + fact extraction,
 inject's observation layer — all filter `status='active'`), but still returned by
