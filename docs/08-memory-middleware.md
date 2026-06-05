@@ -280,6 +280,16 @@ response tokens, memory hydrate tokens, Observer tokens, Reflector tokens.
 - Structured facts and an asset graph.
 - Creative / project workspace support.
 
+### Phase 4 — Forgetting & tiering · proposed
+
+- Explicit short / mid / long-term memory tiers mapped onto recent_raw /
+  observations / reflections + facts.
+- A deterministic forgetting score (Ebbinghaus recency decay × importance +
+  access reinforcement) driving score-based inject trimming, an off-hot-path decay
+  sweep, soft-archive, and bi-temporal supersede.
+- See [12 · Memory: Forgetting & Tiering](12-memory-forgetting-and-tiering.md) for
+  the full design. Gated behind `memory.forgetting.enabled` (default off).
+
 ## Non-goals
 
 - No full RAG product inside the routing core.
