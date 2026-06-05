@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-05 · 遗忘策略 Codex 评审修复 VII（2 项；docs/12）
+
+第七轮 review 仅剩 2×P2（持续收敛 5→3→3→3→3→2→2），全部修复（+1 回归测试）：
+
+1. **（P2）reinforcement 仍在请求 tick 上执行**：`void bump().catch()` 只保证不 await，但默认 sqlite 适配器的写是**同步**的（better-sqlite3 `.run()`）——promise 体当场执行，写库时间仍花在请求路径上。**修复：调用整体 `setImmediate` 延后到 macrotask**，并 try/catch 包同步抛错（macrotask 里未捕获异常会崩进程）。测试的微任务 flush 升级为 macrotask flush。
+2. **（P2）空集归档分支缺 `enabled` 门控**：只查了 archiveReflections 方法存在与否——遗忘关闭时，「有 reflection 但 observation 为空」的 scope 跑普通 reflector job 会被归档，违反「enabled:false 字节级不变」。**修复：分支加 `deps.forgetting?.enabled === true`**；既有归档/版本延续测试显式开 enabled。
+
+---
+
+
 ## 2026-06-05 · 遗忘策略 Codex 评审修复 VI（2 项；docs/12）
 
 第六轮 Codex review 发现 2 个问题（均为前几轮修复的次生缺陷），全部修复（+4 回归测试）：
@@ -17,36 +27,11 @@
 ---
 
 
-## 2026-06-05 · 遗忘策略 Codex 评审修复 V（3 项；docs/12）
-
-第五轮 Codex review 发现 3 个问题（1×P1、1×P2、1×P3），全部修复（+3 回归测试）：
-
-1. **（P1）加法 access bonus = 永久免死金牌**：原公式 `score = recency×importance + bonus` 的 bonus 是衰减后的常数项——一次注入（reference_count=1）的 bonus `0.15×log1p(1)≈0.104` 就永远高于默认归档阈值 0.05，「用过一次 = 永不遗忘」。**修复：bonus 移进 recency 乘积内**——`score = recency × (importance + bonus)`。语义修正：reinforcement 靠刷新 referenced_at（recency 回 ~1）按全额生效，但停止使用后 bonus 随 recency 一起衰减——**没有不可遗忘的记忆，强化只延迟遗忘**。同步改写两处语义反转的测试（float-back-up → recently-reinforced 才赢；reinforced-old-survives → recently-reinforced 存活 / once-used-stale 归档）。
-2. **（P2）`enable_llm_supersede` 是会撒谎的开关**：schema 收 `true` 但运行时无效。**修复：`z.literal(false)`**——LLM supersede path ship 之前 `true` 直接拒绝启动（fail-closed，配置即代码），届时再放宽回 boolean。
-3. **（P3）implementation-notes 违反自身「最近 3 条」规则**：把超出前三的遗忘系列条目（II/I/P0–P7/#97/第二轮 + 本次被挤出的 III）全部压缩成一行要点移入「历史条目摘要」。
-
----
-
-
-## 2026-06-05 · 密钥对话框信息架构重组：渐进披露 + 共享 KeyCapsForm（docs/06/11 未覆盖的 UI 决策）
-
-**动机**：创建/编辑密钥对话框已积累 7 组同等视觉权重的字段（角色/lanes/透传/限速/并发/记忆/预算），一屏放不下、没有层次，但其中只有「角色 + lanes + 透传」定义密钥本质，其余全是多数运维永远不碰的可选项。
-
-**决定（候选方案：折叠分区 / Tabs / 平铺卡片，用户拍板选折叠分区）**：
-
-- **渐进披露**：基础字段常驻；「速率与并发」「用量预算」「记忆默认值」三组折叠为原生 `<details>` 分区，头部带「可选」徽标 + **一行实时状态摘要**（如「使用系统默认值」「$5 · 降级」「关闭」），折叠态不成黑盒。
-- **选原生 `<details>` 而非 JS 折叠**：内容始终在 DOM——a11y、页内查找、testing-library 查询全不受影响（现有测试零迁移成本）；`bind:open` 即可驱动 chevron 与摘要显隐。
-- **编辑对话框 `expandConfigured`**：含已配置值的分区初始即展开（把生效中的 cap 藏进折叠会诱发盲改）；创建对话框全折叠。
-- **顺序调整**：记忆默认值移到最后（最小众），限速/并发/预算相邻（同属流量控制）。
-- **顺手修复**：两对话框 ~200 行表单重复，抽出 `KeyCapsForm.svelte`（`<script module>` 导出 `KeyCaps` 缓冲类型 + `emptyKeyCaps`/`keyCapsFromView` 工厂，`$bindable` 传递）；EditKeyDialog 数字输入误用 `class="select"` 一并纠正为 `.input`。新 CSS recipe：`.form-section{,-summary,-body}`（app.css）。
-
-**i18n**：新增 10 key（Rate & concurrency / Optional / 摘要片段等），4 语种手工翻译（与既有术语表对齐：令牌/權杖/トークン/토큰）。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-05 · 遗忘策略评审修复 V（docs/12）：评分公式语义级修正——access bonus 移进 recency 乘积内 `score = recency × (importance + bonus)`（原加法 = 一次注入的 bonus 0.104 永远高于阈值 0.05，「用过一次 = 永不遗忘」）；强化只延迟遗忘无永久豁免；`enable_llm_supersede` 改 `z.literal(false)`（LLM path 未接入前拒绝 true，不留撒谎开关）；notes 完成「最近 3 条」合规压缩。
 
 ### 2026-06-05 · 遗忘策略评审修复 IV（docs/12）：遗忘补全输出侧——reflection 是 active observation 的派生缓存：getReflection 过滤 active；新增 archiveReflections（active 集空时归档旧 reflection，min(1) 不能写空）+ listActiveReflectionScopes（decay 归档后为每个活跃 scope 入队 reflector 重建，open-job 去重、fail-open）；max_facts_per_subject 改按 validFrom 取最新 N 再 asc 写入（原 head-slice 留最旧丢修正）；fact 审计字段改存 observation id `[o.id,o.id]` 对齐 schema。
 

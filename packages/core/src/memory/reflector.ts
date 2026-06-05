@@ -156,9 +156,16 @@ export async function runReflectorJob(
       // forgotten content indefinitely. ARCHIVE it (soft-invalidate — getReflection
       // then returns null) instead of returning it unchanged. reflectionText's min(1)
       // forbids writing an "empty" reflection, so archival is the clear-out mechanism.
-      // Gated on the optional store method; absent ⇒ legacy no-op (keep), so this is
-      // inert for pre-phase stores / forgetting-off.
-      if (previousReflection !== null && deps.memoryStore.archiveReflections !== undefined) {
+      // DOUBLE-gated (Codex review fix II): on `forgetting.enabled` — only the
+      // forgetting machinery can empty a scope's active set, and with the flag OFF
+      // an ordinary reflector job over a no-observation scope must keep its existing
+      // reflection exactly as the base behaviour did (enabled:false = byte-identical)
+      // — AND on the optional store method (absent ⇒ pre-phase store, legacy no-op).
+      if (
+        deps.forgetting?.enabled === true &&
+        previousReflection !== null &&
+        deps.memoryStore.archiveReflections !== undefined
+      ) {
         await deps.memoryStore.archiveReflections(target);
         await deps.memoryStore.updateJobStatus(job.jobId, "done");
         deps.log("memory.reflector.archived_empty_scope", {

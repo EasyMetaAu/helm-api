@@ -249,13 +249,45 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       ...makeDeps(store),
       forgetting: forgetting({ dropOrder: "oldest", bumpReferences }),
     });
-    // Allow the fire-and-forget microtask to settle.
-    await Promise.resolve();
-    await Promise.resolve();
+    // Allow the fire-and-forget write to settle: the invocation itself is DEFERRED
+    // to a macrotask (setImmediate — Codex review fix: a sync sqlite .run() must not
+    // execute on the request tick), so flush a macrotask, not just microtasks.
+    await new Promise((resolve) => setImmediate(resolve));
     expect(bumpReferences).toHaveBeenCalledTimes(1);
     const call = bumpReferences.mock.calls[0]![0];
     expect(call.accountId).toBe("acct-a");
     expect(call.observationIds).toEqual(["kept-newer"]); // dropped-older NOT bumped
+  });
+
+  // docs/12 (Codex review fix) — the reinforcement INVOCATION is deferred off the
+  // request tick: the default sqlite adapter's writes are synchronous (.run()), so
+  // an inline (even un-awaited) call would still spend the write on the request
+  // path. assemble must return BEFORE the bump executes; a SYNCHRONOUSLY-throwing
+  // bump inside the macrotask must be caught (an uncaught macrotask throw would
+  // crash the process), logged, and change nothing.
+  it("flag ON: the bump runs AFTER assemble returns (deferred macrotask) and a sync throw is contained", async () => {
+    const bumpReferences = vi.fn(() => {
+      throw new Error("sync boom"); // SYNCHRONOUS throw — not a rejected promise
+    }) as unknown as ReturnType<typeof makeBumpSpy>;
+    const store = makeFakeStore(
+      [makeObservation({ id: "o1", observedAt: new Date("2026-05-28T00:00:00.000Z") })],
+      { bumpReferences },
+    );
+    const log = vi.fn();
+    const out = await assembleInjectedContext(baseInput(), {
+      ...makeDeps(store, { log }),
+      forgetting: forgetting({ bumpReferences }),
+    });
+
+    // assemble has returned, the macrotask has NOT run yet — nothing bumped.
+    expect(bumpReferences).not.toHaveBeenCalled();
+    expect(out.messages.at(-1)?.source).toBe("current");
+
+    await new Promise((resolve) => setImmediate(resolve)); // run the deferred task
+    expect(bumpReferences).toHaveBeenCalledTimes(1);
+    // The sync throw was caught + logged — no crash, no behavioural change.
+    const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("memory.inject.reinforce_failed");
   });
 
   it("flag ON: a throwing bumpReferences does not change the returned messages (fail-open)", async () => {
@@ -271,8 +303,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       ...makeDeps(store, { log }),
       forgetting: forgetting({ bumpReferences }),
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve)); // flush the deferred macrotask
     // The prefix still includes the observation and ends with current — unaffected.
     expect(out.messages.map((m) => m.source)).toContain("thread_observation");
     expect(out.messages.at(-1)?.source).toBe("current");
@@ -303,8 +334,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       ...makeDeps(store),
       forgetting: forgetting({ bumpReferences }),
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve)); // flush the deferred macrotask
     const call = bumpReferences.mock.calls[0]![0];
     expect(call.accountId).toBe("acct-a");
     expect(call.reflectionIds).toContain("refl-p");

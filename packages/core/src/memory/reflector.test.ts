@@ -338,7 +338,14 @@ describe("runReflectorJob", () => {
       status: "active",
     };
     const { store, upserts, archiveCalls, jobUpdates } = makeFakeStore([], existing);
-    const deps = makeDeps(store);
+    // The archive branch is gated on forgetting.enabled (Codex review fix: only the
+    // forgetting machinery may clear a reflection; flag off = legacy keep).
+    const deps = makeDeps(store, {
+      forgetting: {
+        enabled: true,
+        consolidate: { trigger_tokens: 1024, max_facts_per_subject: 8 },
+      },
+    });
     // A project-scoped job → target is an injectable project reflection.
     const projectJob: ReflectorJob = {
       jobId: "job-1",
@@ -376,7 +383,12 @@ describe("runReflectorJob", () => {
     };
     // Start with NO active observations → the empty-set branch archives v4.
     const { store, upserts } = makeFakeStore([], existing);
-    const deps = makeDeps(store);
+    const deps = makeDeps(store, {
+      forgetting: {
+        enabled: true,
+        consolidate: { trigger_tokens: 1024, max_facts_per_subject: 8 },
+      },
+    });
     const projectJob: ReflectorJob = {
       jobId: "job-1",
       scope: { accountId: "acct-a", projectId: "proj-1" },

@@ -457,16 +457,31 @@ export async function assembleInjectedContext(
     }
     if (keptObservationIds.length > 0 || injectedReflectionIds.length > 0) {
       const bump = deps.forgetting.bumpReferences;
-      void bump({
+      const bumpInput = {
         accountId: input.scope.accountId,
         observationIds: keptObservationIds,
         reflectionIds: injectedReflectionIds,
         now: deps.now(),
-      }).catch((err) => {
+      };
+      const logFailure = (err: unknown) => {
         deps.log("memory.inject.reinforce_failed", {
           scope: input.scope,
           error: err instanceof Error ? err.message : String(err),
         });
+      };
+      // DEFER the invocation itself to a macrotask (Codex review fix): "not awaited"
+      // alone is not enough — the default sqlite adapter's writes are SYNCHRONOUS
+      // (better-sqlite3 .run()), so calling bump() inline would still execute the
+      // UPDATEs on the request tick before the response returns. setImmediate pushes
+      // the whole call off the request path. The try/catch guards a SYNCHRONOUS
+      // throw inside the macrotask (which would otherwise be an uncaught exception
+      // and crash the process — fail-open demands log-and-continue).
+      setImmediate(() => {
+        try {
+          void bump(bumpInput).catch(logFailure);
+        } catch (err) {
+          logFailure(err);
+        }
       });
     }
   }
