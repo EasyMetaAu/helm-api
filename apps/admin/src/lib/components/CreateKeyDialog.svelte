@@ -5,6 +5,7 @@
     createKey,
     type CreatedKey,
   } from '$lib/api/keys.js';
+  import KeyCapsForm, { emptyKeyCaps } from '$lib/components/KeyCapsForm.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
@@ -26,39 +27,13 @@
   type Role = 'root' | 'user';
 
   let role = $state<Role>('user');
-  // Allowed-lanes whitelist as a Set for cheap toggle/lookup; [] => no cap (null).
-  let allowedLanes = $state<Set<string>>(new Set());
-  let allowCustomModel = $state<boolean>(false);
-  // Per-key rate limits. null = leave unset → inherit the system default; a number
-  // (0 = unlimited) sets an explicit override. A number input binds to number|null
-  // (empty field => null), so no string parsing is needed.
-  let rpmInput = $state<number | null>(null);
-  let tpmInput = $state<number | null>(null);
-  // Per-key usage budgets (docs/06). null = no cap for that dimension. windowInput
-  // (seconds) sets the rolling window; blank => system default. behavior chooses
-  // degrade (drop to a cheaper lane) vs reject (429). degradeLane blank => economy.
-  let budgetRequestsInput = $state<number | null>(null);
-  let budgetTokensInput = $state<number | null>(null);
-  let budgetSpendInput = $state<number | null>(null);
-  let budgetWindowInput = $state<number | null>(null);
-  let overBudgetBehavior = $state<'degrade' | 'reject'>('degrade');
-  let degradeLaneInput = $state<string>('');
-  // Max in-flight requests (issue #93). null = unlimited.
-  let concurrencyLimitInput = $state<number | null>(null);
-  // Per-key memory defaults (issue #97). 'off' = inert (server default).
-  let memoryMode = $state<'off' | 'observe' | 'inject'>('off');
-  let memoryProjectInput = $state<string>('');
-  let memoryThreadSource = $state<'header' | 'auto'>('header');
+  // Every per-key cap lives in the shared buffer rendered by <KeyCapsForm>
+  // (identical structure to the edit dialog). null/empty = leave unset.
+  let form = $state(emptyKeyCaps());
 
   let error = $state<string | null>(null);
   let creating = $state<boolean>(false);
 
-  function toggleLane(lane: string, checked: boolean): void {
-    const next = new Set(allowedLanes);
-    if (checked) next.add(lane);
-    else next.delete(lane);
-    allowedLanes = next;
-  }
   // The minted plaintext + its key_id live ONLY in this transient state and are
   // cleared on close. While set, the form is replaced by the one-time reveal.
   let revealed = $state<CreatedKey | null>(null);
@@ -69,25 +44,25 @@
     creating = true;
     const input: CreateKeyInput = {
       role,
-      allow_custom_model: allowCustomModel,
+      allow_custom_model: form.allowCustomModel,
     };
-    if (allowedLanes.size > 0) input.allowed_lanes = [...allowedLanes];
+    if (form.allowedLanes.length > 0) input.allowed_lanes = [...form.allowedLanes];
     // Send a rate limit only when the operator set one; blank => inherit default.
     // `!= null` also catches the `undefined` Svelte 5 gives an emptied number input.
-    if (rpmInput != null) input.rate_limit_rpm = rpmInput;
-    if (tpmInput != null) input.rate_limit_tpm = tpmInput;
+    if (form.rpm != null) input.rate_limit_rpm = form.rpm;
+    if (form.tpm != null) input.rate_limit_tpm = form.tpm;
     // Usage budgets: send only the dimensions the operator set (blank => no cap).
-    if (budgetRequestsInput != null) input.budget_requests = budgetRequestsInput;
-    if (budgetTokensInput != null) input.budget_tokens = budgetTokensInput;
-    if (budgetSpendInput != null) input.budget_spend_usd = budgetSpendInput;
-    if (budgetWindowInput != null) input.budget_window_seconds = budgetWindowInput;
-    input.over_budget_behavior = overBudgetBehavior;
-    if (degradeLaneInput.length > 0) input.degrade_lane = degradeLaneInput;
+    if (form.budgetRequests != null) input.budget_requests = form.budgetRequests;
+    if (form.budgetTokens != null) input.budget_tokens = form.budgetTokens;
+    if (form.budgetSpend != null) input.budget_spend_usd = form.budgetSpend;
+    if (form.budgetWindow != null) input.budget_window_seconds = form.budgetWindow;
+    input.over_budget_behavior = form.overBudgetBehavior;
+    if (form.degradeLane.length > 0) input.degrade_lane = form.degradeLane;
     // Concurrency limit: send only when set (blank => unlimited).
-    if (concurrencyLimitInput != null) input.concurrency_limit = concurrencyLimitInput;
-    if (memoryMode !== 'off') input.memory_mode = memoryMode;
-    if (memoryProjectInput.length > 0) input.memory_project_id = memoryProjectInput;
-    if (memoryThreadSource !== 'header') input.memory_thread_source = memoryThreadSource;
+    if (form.concurrencyLimit != null) input.concurrency_limit = form.concurrencyLimit;
+    if (form.memoryMode !== 'off') input.memory_mode = form.memoryMode;
+    if (form.memoryProject.length > 0) input.memory_project_id = form.memoryProject;
+    if (form.memoryThreadSource !== 'header') input.memory_thread_source = form.memoryThreadSource;
     try {
       revealed = await createKey(input);
     } catch (e) {
@@ -121,21 +96,21 @@
         // response. NEVER a slice of the plaintext.
         prefix: revealed.prefix,
         role,
-        allowed_lanes: allowedLanes.size > 0 ? [...allowedLanes] : null,
-        allow_custom_model: allowCustomModel,
+        allowed_lanes: form.allowedLanes.length > 0 ? [...form.allowedLanes] : null,
+        allow_custom_model: form.allowCustomModel,
         disabled: false,
-        rate_limit_rpm: rpmInput ?? null,
-        rate_limit_tpm: tpmInput ?? null,
-        budget_requests: budgetRequestsInput ?? null,
-        budget_tokens: budgetTokensInput ?? null,
-        budget_spend_usd: budgetSpendInput ?? null,
-        budget_window_seconds: budgetWindowInput ?? null,
-        over_budget_behavior: overBudgetBehavior,
-        degrade_lane: degradeLaneInput.length > 0 ? degradeLaneInput : null,
-        concurrency_limit: concurrencyLimitInput ?? null,
-        memory_mode: memoryMode,
-        memory_project_id: memoryProjectInput.length > 0 ? memoryProjectInput : null,
-        memory_thread_source: memoryThreadSource,
+        rate_limit_rpm: form.rpm ?? null,
+        rate_limit_tpm: form.tpm ?? null,
+        budget_requests: form.budgetRequests ?? null,
+        budget_tokens: form.budgetTokens ?? null,
+        budget_spend_usd: form.budgetSpend ?? null,
+        budget_window_seconds: form.budgetWindow ?? null,
+        over_budget_behavior: form.overBudgetBehavior,
+        degrade_lane: form.degradeLane.length > 0 ? form.degradeLane : null,
+        concurrency_limit: form.concurrencyLimit ?? null,
+        memory_mode: form.memoryMode,
+        memory_project_id: form.memoryProject.length > 0 ? form.memoryProject : null,
+        memory_thread_source: form.memoryThreadSource,
       };
       oncreated(view);
     }
@@ -200,208 +175,7 @@
         {/if}
       </label>
 
-      <fieldset class="flex flex-col gap-1 text-sm">
-        <legend class="field-label">{$t('Allowed lanes')}</legend>
-        <div class="flex flex-wrap gap-3">
-          {#each lanes as lane (lane)}
-            <label class="flex items-center gap-1.5">
-              <input
-                type="checkbox"
-                checked={allowedLanes.has(lane)}
-                onchange={(e) => toggleLane(lane, e.currentTarget.checked)}
-              />
-              <span class="text-ink-body">{lane}</span>
-            </label>
-          {/each}
-        </div>
-        <span class="field-help"
-          >{$t(
-            'Restrict this key to a specific set of lanes. Leave all unchecked to allow any lane (no whitelist).',
-          )}</span
-        >
-      </fieldset>
-
-      <label class="checkbox-field">
-        <input
-          type="checkbox"
-          class="checkbox"
-          bind:checked={allowCustomModel}
-          aria-label={$t('allow custom model')}
-        />
-        <span class="text-ink-body">{$t('Allow explicit client-specified model passthrough')}</span>
-      </label>
-      <span class="field-help"
-        >{$t(
-          'Lets this client bypass lanes and target a specific model by name. Leave off to keep every request routed through lanes.',
-        )}</span
-      >
-
-      <div class="grid grid-cols-2 gap-3">
-        <label class="flex flex-col gap-1 text-sm">
-          <span class="field-label">{$t('Requests per minute (RPM)')}</span>
-          <input
-            type="number"
-            min="0"
-            step="1"
-            aria-label={$t('Requests per minute (RPM)')}
-            placeholder={$t('Default')}
-            class="input"
-            bind:value={rpmInput}
-          />
-        </label>
-        <label class="flex flex-col gap-1 text-sm">
-          <span class="field-label">{$t('Tokens per minute (TPM)')}</span>
-          <input
-            type="number"
-            min="0"
-            step="1"
-            aria-label={$t('Tokens per minute (TPM)')}
-            placeholder={$t('Default')}
-            class="input"
-            bind:value={tpmInput}
-          />
-        </label>
-      </div>
-      <span class="field-help"
-        >{$t(
-          'Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.',
-        )}</span
-      >
-
-      <label class="flex flex-col gap-1 text-sm">
-        <span class="field-label">{$t('Max concurrent requests')}</span>
-        <input
-          type="number"
-          min="1"
-          step="1"
-          aria-label={$t('Max concurrent requests')}
-          placeholder={$t('Unlimited')}
-          class="input"
-          bind:value={concurrencyLimitInput}
-        />
-        <span class="field-help"
-          >{$t(
-            'Cap how many requests this key may run at once. Extra requests queue when request queueing is enabled in System Settings. Leave blank for unlimited.',
-          )}</span
-        >
-      </label>
-
-      <fieldset class="flex flex-col gap-1 text-sm">
-        <legend class="field-label">{$t('Memory defaults')}</legend>
-        <div class="grid grid-cols-2 gap-3">
-          <label class="flex flex-col gap-1">
-            <span class="field-label">{$t('Memory mode')}</span>
-            <select class="select" aria-label={$t('Memory mode')} bind:value={memoryMode}>
-              <option value="off">{$t('Off')}</option>
-              <option value="observe">{$t('Observe (record only)')}</option>
-              <option value="inject">{$t('Inject (record + hydrate)')}</option>
-            </select>
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="field-label">{$t('Thread source')}</span>
-            <select class="select" aria-label={$t('Thread source')} bind:value={memoryThreadSource}>
-              <option value="header">{$t('Header only (x-thread-id)')}</option>
-              <option value="auto">{$t('Auto (derive from client signals)')}</option>
-            </select>
-          </label>
-        </div>
-        <label class="flex flex-col gap-1">
-          <span class="field-label">{$t('Default project id')}</span>
-          <input
-            type="text"
-            aria-label={$t('Default project id')}
-            placeholder={$t('None')}
-            class="input"
-            bind:value={memoryProjectInput}
-          />
-        </label>
-        <span class="field-help"
-          >{$t(
-            'Server-side memory defaults for clients that cannot send dynamic headers (Claude Code, Codex). Explicit x-memory-* request headers always override. Auto thread source derives the conversation from signals the client already sends (prompt_cache_key, metadata.user_id, x-session-key).',
-          )}</span
-        >
-      </fieldset>
-
-      <fieldset class="flex flex-col gap-1 text-sm">
-        <legend class="field-label">{$t('Usage budgets')}</legend>
-        <div class="grid grid-cols-2 gap-3">
-          <label class="flex flex-col gap-1">
-            <span class="field-label">{$t('Max requests')}</span>
-            <input
-              type="number"
-              min="1"
-              step="1"
-              aria-label={$t('Max requests')}
-              placeholder={$t('No cap')}
-              class="input"
-              bind:value={budgetRequestsInput}
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="field-label">{$t('Max tokens')}</span>
-            <input
-              type="number"
-              min="1"
-              step="1"
-              aria-label={$t('Max tokens')}
-              placeholder={$t('No cap')}
-              class="input"
-              bind:value={budgetTokensInput}
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="field-label">{$t('Max spend (USD)')}</span>
-            <input
-              type="number"
-              min="0.01"
-              step="0.01"
-              aria-label={$t('Max spend (USD)')}
-              placeholder={$t('No cap')}
-              class="input"
-              bind:value={budgetSpendInput}
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="field-label">{$t('Window (seconds)')}</span>
-            <input
-              type="number"
-              min="1"
-              step="1"
-              aria-label={$t('Window (seconds)')}
-              placeholder={$t('Default')}
-              class="input"
-              bind:value={budgetWindowInput}
-            />
-          </label>
-        </div>
-        <label class="mt-1 flex flex-col gap-1">
-          <span class="field-label">{$t('When over budget')}</span>
-          <select
-            bind:value={overBudgetBehavior}
-            aria-label={$t('When over budget')}
-            class="select"
-          >
-            <option value="degrade">{$t('Degrade to a cheaper lane')}</option>
-            <option value="reject">{$t('Reject (429)')}</option>
-          </select>
-        </label>
-        {#if overBudgetBehavior === 'degrade'}
-          <label class="mt-1 flex flex-col gap-1">
-            <span class="field-label">{$t('Degrade lane')}</span>
-            <select bind:value={degradeLaneInput} aria-label={$t('Degrade lane')} class="select">
-              <option value="">{$t('Default (economy)')}</option>
-              {#each lanes as lane (lane)}
-                <option value={lane}>{lane}</option>
-              {/each}
-            </select>
-          </label>
-        {/if}
-        <span class="field-help"
-          >{$t(
-            'Cap usage over a rolling window. Over budget, the key is degraded to a cheaper lane (cost-controlled, service continues) or rejected. Leave caps blank for no budget.',
-          )}</span
-        >
-      </fieldset>
+      <KeyCapsForm bind:form {lanes} />
     </div>
 
     <div class="mt-4 flex justify-end gap-2">
