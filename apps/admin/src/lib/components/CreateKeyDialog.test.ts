@@ -67,6 +67,32 @@ describe('CreateKeyDialog', () => {
     expect(input.rate_limit_tpm).toBeUndefined();
   });
 
+  it('collapses the optional cap sections by default, basics stay visible', () => {
+    setup();
+    // Basics (lanes + passthrough) are immediately visible — not inside a section.
+    expect(screen.getByLabelText('economy')).toBeInTheDocument();
+    expect(screen.getByLabelText('allow custom model')).toBeInTheDocument();
+    // The three optional groups render as <details> sections, all closed.
+    const sections = document.querySelectorAll('details');
+    expect(sections).toHaveLength(3);
+    for (const section of sections) expect(section.open).toBe(false);
+    // Each closed section carries a one-line state summary so the operator can
+    // see "nothing configured" without expanding.
+    expect(screen.getByText(/rate & concurrency/i)).toBeInTheDocument();
+    expect(screen.getByText('Using system defaults')).toBeInTheDocument();
+    expect(screen.getByText('No budget')).toBeInTheDocument();
+  });
+
+  it('submits budget fields edited inside a collapsed section', async () => {
+    setup();
+    await fireEvent.input(screen.getByLabelText(/max spend/i), { target: { value: '5' } });
+    await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
+    await waitFor(() => expect(createKey).toHaveBeenCalledTimes(1));
+    const input = createKey.mock.calls[0][0];
+    expect(input.budget_spend_usd).toBe(5);
+    expect(input.budget_requests).toBeUndefined();
+  });
+
   it('reveals the plaintext exactly once with a copy button after creation', async () => {
     setup();
     await fireEvent.click(screen.getByRole('button', { name: /create key/i }));

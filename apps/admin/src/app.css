@@ -118,6 +118,19 @@
   .field-help {
     @apply text-xs text-slate-500;
   }
+  /* — Collapsible form section (optional cap groups in the key dialogs) —
+     A native <details> styled as a bordered fold: clickable header row (title +
+     "Optional" badge + one-line state summary) and an indented field body.
+     Native disclosure keeps the content in the DOM (a11y, find-in-page, tests). */
+  .form-section {
+    @apply rounded-lg border border-slate-200;
+  }
+  .form-section-summary {
+    @apply flex cursor-pointer select-none list-none items-center gap-2 rounded-lg px-3 py-2.5 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 [&::-webkit-details-marker]:hidden;
+  }
+  .form-section-body {
+    @apply flex flex-col gap-3 border-t border-slate-100 p-3;
+  }
   /* Standard card footer: a right-aligned action row (Save / Cancel) divided from
      the fields above. Used at the bottom of every editable card so the primary
      action sits in one consistent place app-wide. */

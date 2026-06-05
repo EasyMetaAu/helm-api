@@ -7,6 +7,22 @@
 
 ---
 
+## 2026-06-05 · 密钥对话框信息架构重组：渐进披露 + 共享 KeyCapsForm（docs/06/11 未覆盖的 UI 决策）
+
+**动机**：创建/编辑密钥对话框已积累 7 组同等视觉权重的字段（角色/lanes/透传/限速/并发/记忆/预算），一屏放不下、没有层次，但其中只有「角色 + lanes + 透传」定义密钥本质，其余全是多数运维永远不碰的可选项。
+
+**决定（候选方案：折叠分区 / Tabs / 平铺卡片，用户拍板选折叠分区）**：
+
+- **渐进披露**：基础字段常驻；「速率与并发」「用量预算」「记忆默认值」三组折叠为原生 `<details>` 分区，头部带「可选」徽标 + **一行实时状态摘要**（如「使用系统默认值」「$5 · 降级」「关闭」），折叠态不成黑盒。
+- **选原生 `<details>` 而非 JS 折叠**：内容始终在 DOM——a11y、页内查找、testing-library 查询全不受影响（现有测试零迁移成本）；`bind:open` 即可驱动 chevron 与摘要显隐。
+- **编辑对话框 `expandConfigured`**：含已配置值的分区初始即展开（把生效中的 cap 藏进折叠会诱发盲改）；创建对话框全折叠。
+- **顺序调整**：记忆默认值移到最后（最小众），限速/并发/预算相邻（同属流量控制）。
+- **顺手修复**：两对话框 ~200 行表单重复，抽出 `KeyCapsForm.svelte`（`<script module>` 导出 `KeyCaps` 缓冲类型 + `emptyKeyCaps`/`keyCapsFromView` 工厂，`$bindable` 传递）；EditKeyDialog 数字输入误用 `class="select"` 一并纠正为 `.input`。新 CSS recipe：`.form-section{,-summary,-body}`（app.css）。
+
+**i18n**：新增 10 key（Rate & concurrency / Optional / 摘要片段等），4 语种手工翻译（与既有术语表对齐：令牌/權杖/トークン/토큰）。
+
+---
+
 ## 2026-06-05 · 零改动客户端记忆接入：per-key 默认值 + 信号回退链（issue #97；docs/08）
 
 **动机**：Claude Code / Codex 只能发静态头，发不了每会话动态的 `x-thread-id`；Hermes 等什么信号都不发。让 helm 从客户端**已经在发**的信号里推导 scope，配合 key 级默认值，任何兼容客户端「换 base_url + key」即获记忆。设计与三客户端调研实证见 issue #97。
@@ -41,30 +57,11 @@ Codex 第二轮 review 发现 5 个问题（2×P1、2×P2、1×P3），全部修
 
 ---
 
-## 2026-06-04 · 请求排队两特性：per-key 并发溢出排队 + per-account 用户消息串行队列（issue #93；spec 未覆盖）
-
-参考 claude-relay-service（CRS）移植的两个限流增强能力，实现与 CRS 的关键差异是 **in-memory promise FIFO 直接交接**（单进程，无 Redis、无轮询、无孤儿锁清理任务）。core 原语在 `packages/core/src/queue/`（keyed-semaphore / keyed-serial-gate / user-turn 判定），gateway 只装配。
-
-**特性 A（per-key 并发溢出排队）**：key 新增 `concurrency_limit` 列（NULL=不限；0 被 schema 拒绝——与 budgets 同约定，区别于 rate-limit 的 0=不限哨兵）。runtime settings 四个全局参数（`concurrency_queue_*`）。超限请求 FIFO 等待；队满/等待超时 → 429 `rate_limited` + retry-after（队满 1s、超时 5s）。
-
-**特性 B（per-account 用户消息串行）**：runtime settings 三个全局参数（`user_message_queue_*`）。判定在 OpenAI 形态消息上做（provider 层 tool 结果是 `role:"tool"`，content 数组的 `tool_result` 块检查是防御性兜底）。等待超时 → 503。
-
-不得不拍板的决定与坑：
-
-- **锁释放时机 = 完整完成**（用户拍板，CRS 对齐）：串行锁持有到流式响应**完全 drain**，`release()` 才盖完成时间戳、间隔从这一刻起算。代价是单账户吞吐 = 1 并发；备选「首 chunk 释放」被否。
-- **串行队列超时不前进 fallback 链**：`QueueTimeoutError` 在 execute 是**终态** 503（`lane_unavailable` 复用，不新增 ErrorClass——新增要动 4 张穷举映射表 + 全部 transformer 测试，零收益），且**不记熔断失败**（backpressure ≠ provider 健康）。理由：队列就是为保护这个订阅的限流而开，溢到下个 candidate 等于绕开节流。如希望「排队超时就切别家」，需改 execute.ts 该分支为 continue。
-- **并发槽释放路径**（头号风险，全覆盖）：chat 走 middleware claim-flag（streamSSE 先返回 Response、流体 finally 才是真正结束点）；messages/responses/gemini 自鉴权路由走 `concurrencyRelease` context 变量 + 路由级 `concurrencyReleaseGuard` 中间件（任何退出路径含 onError 抛出都释放），流式分支 claim 后在流 finally 释放。release 幂等 + 5 分钟 watchdog 兜底强制回收（warn 日志）。
-- **单进程假设（已知限制）**：两个队列都是进程内存状态。多实例部署（共享 Postgres）时各实例独立排队，per-key 并发上限实际 = limit × 实例数，per-account 串行也只在单实例内成立。CRS 用 Redis 解决；helm 不为此引入该依赖。
-- **串行 gate 跨 pool rebuild 存活**：`createKeyedSerialGate()` 在 buildServer 创建一次，穿入 `synthesizeOAuthProviders` 与 `rebuildOAuthPool`（同一实例），admin 保存不丢队列状态/完成时间戳；配置经 live thunk 读 `settings`，开关即时生效无需 rebuild。
-- **per-account 包装位置**：在 pool member 的 client 上包（`createSerializingClient`，gate key = `${providerId} ${account}`，与 account-settings 复合键一致），而非 pool 外层——锁必须对应 pool 实际选中的账户。
-- **fail-open**：gate 自身意外异常（非超时/abort）→ 放行 + warn（原则 3）；超时/队满是**设计内**拒绝，不属 fail-open 范畴。
-- 迁移：sqlite v13 / postgres v12（`ALTER TABLE api_keys ADD COLUMN concurrency_limit INTEGER`）。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-04 · 请求排队两特性（issue #93）：per-key 并发溢出排队（`concurrency_limit` 列，NULL=不限、0 被拒；队满/超时→429）+ per-account 用户消息串行（完整 drain 才释放锁；超时→终态 503 不前进 fallback、不记熔断）。in-memory promise FIFO（无 Redis，多实例各自排队=已知限制）；释放路径全覆盖（context 变量 + 路由 guard + 流 finally + 5min watchdog）；串行 gate 在 buildServer 建一次跨 pool rebuild 存活；gate 意外异常 fail-open。迁移 sqlite v13 / pg v12。
 
 ### 2026-06-04
 
