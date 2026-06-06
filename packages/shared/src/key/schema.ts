@@ -122,8 +122,9 @@ export const CreateKeyRequestSchema = z
     // Optional max in-flight requests at mint time. Omitted => unlimited (null);
     // must be strictly positive (0 rejected — null already means unlimited).
     concurrency_limit: z.number().int().positive().optional(),
-    // Optional per-key memory defaults at mint time (issue #97). Omitted => memory
-    // off (zero behavior change). Explicit x-memory-* headers always override.
+    // Optional per-key memory defaults at mint time (issue #97). Omitted => the
+    // keystore mints the NEW-KEY defaults (mode "inject", thread_source "auto"); pass
+    // these explicitly to opt out. Explicit x-memory-* headers always override.
     memory_mode: MemoryModeSchema.optional(),
     memory_project_id: z.string().min(1).optional(),
     memory_thread_source: MemoryThreadSourceSchema.optional(),

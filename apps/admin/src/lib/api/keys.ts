@@ -66,7 +66,8 @@ export interface CreateKeyInput {
   degrade_lane?: string;
   // Optional max in-flight requests at mint time. Omitted => unlimited.
   concurrency_limit?: number;
-  // Optional per-key memory defaults at mint time (issue #97). Omitted => off.
+  // Optional per-key memory defaults at mint time (issue #97). Omitted => the server
+  // mints the new-key defaults (mode 'inject', thread_source 'auto').
   memory_mode?: 'off' | 'observe' | 'inject';
   memory_project_id?: string;
   memory_thread_source?: 'header' | 'auto';

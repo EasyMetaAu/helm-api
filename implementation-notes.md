@@ -14,6 +14,7 @@
 - **parse-default vs mint-default 分离（沿用 memory_mode 既有模式）**：docs/06 列的是 schema parse-defaults（off/header，照旧准确，不动）；docs/08 列的是新 key mint 行为（inject/auto），只改这一行 `(default header) → (default auto — new keys)`。两文档各自内部自洽。
 - **admin UI 诚实化**：`KeyCapsForm.emptyKeyCaps` 的 thread source `'header' → 'auto'` + `CreateKeyDialog` 省略 guard `!== 'header' → !== 'auto'`——下拉默认显示 **Auto** = 实际落库值，**避免重蹈 memory_mode 的 UI 错位**（emptyKeyCaps `memoryMode:'off'` + guard `!=='off'` 省略 → keystore 实际 mint `inject`，UI 显示 Off 却落 inject；本次不碰该 pre-existing 错位，仅 thread source 做对）。EditKeyDialog 不动（按存储值预填）。
 - **测试/验证**：`store-contract`（真 sqlite+pglite keystore）断言无记忆字段 create → `memory_thread_source === "auto"`；`schema.test` 维持 parse-default `header`（未动）；admin/ports 的 **fake keystore 保守桩仍 `?? "header"`**（与其 `memoryMode ?? "off"` 桩一致，本就不冒充真 mint 默认，不动）；`memory-scope` 测试显式传 threadSource、两分支俱存，未受影响。typecheck/build/svelte-check 全绿，101 store-contract+keystore 串行通过。
+- **Codex review 修复（2 项）**：(P2) `bootstrapRootKey` 不传记忆字段 → 继承新默认会让 root key 落 `inject`+`auto`；但 root key 是**管理/引导面**（日志明示「勿用于生产流量」），显式置 `memoryMode:"off"`+`memoryThreadSource:"header"` 让其记忆惰性（+bootstrap 测试断言 off/header）。inject 根因来自 #106，本 PR 的 auto 放大了它，就地一并堵上。(P3) 请求层 contract 注释（`ports.CreateKeyInput` / `CreateKeyRequest` / admin api `CreateKeyInput`）自 #106 起仍写「Omitted => off / memory stays off」属误导——改为如实写「省略 ⇒ keystore mint 新 key 默认 inject/auto」。**fake keystore 保守桩**（无测试依赖真 mint 默认，真值由 store-contract 对真 keystore 覆盖）与 **docs/06**（记的是 record schema parse-default off/header，仍准）维持不动。
 
 ---
 

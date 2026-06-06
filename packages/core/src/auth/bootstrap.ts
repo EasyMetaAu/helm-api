@@ -36,6 +36,12 @@ export async function bootstrapRootKey(deps: BootstrapDeps): Promise<BootstrapRe
     accountId: "acct_default",
     role: "root",
     allowCustomModel: true,
+    // The root key is the management/bootstrap plane ("do not use for production
+    // traffic", logged below) — opt it OUT of the new-key memory mint defaults
+    // (mode "inject" / thread_source "auto"). A management key must never
+    // observe/inject memory or derive conversation threads from request signals.
+    memoryMode: "off",
+    memoryThreadSource: "header",
   });
 
   // Print the plaintext exactly once for the operator to capture.
