@@ -43,6 +43,49 @@ const ScoreSchema = z
   .strict()
   .refine((s) => s.importance_floor <= s.importance_ceil, "importance_floor ≤ importance_ceil");
 
+const FixedObserverCompactionSchema = z
+  .object({
+    mode: z.literal("fixed").default("fixed"),
+    recent_keep: z.number().int().min(0).default(2),
+  })
+  .strict();
+
+const EconomyObserverCompactionSchema = z
+  .object({
+    mode: z.literal("economy"),
+    min_recent_messages: z.number().int().positive().default(2),
+    min_keep_ratio: z.number().min(0).max(1).default(0.12),
+    max_context_tokens: z.number().int().positive().default(200000),
+    force_at_context_ratio: z.number().min(0).max(1).default(0.9),
+    expected_remaining_calls: z.number().min(0).default(8),
+    fixed_prefix_tokens: z.number().int().min(0).default(5000),
+    summary_output_tokens: z.number().int().min(0).default(500),
+    summary_instruction_tokens: z.number().int().min(0).default(70),
+    average_input_tokens: z.number().int().positive().default(4000),
+    price_input_per_mtok: z.number().min(0).default(3),
+    price_cache_per_mtok: z.number().min(0).default(0.3),
+    price_output_per_mtok: z.number().min(0).default(15),
+    retention_rate: z.number().min(0).max(1).default(0.8),
+    prior_compaction_count: z.number().int().min(0).default(0),
+    distortion_penalty: z.number().min(0).default(0.03),
+    quality_penalty: z.number().min(0).default(0.2),
+    min_net_benefit_usd: z.number().min(0).default(0),
+  })
+  .strict();
+
+export const ObserverCompactionSchema = z.discriminatedUnion("mode", [
+  FixedObserverCompactionSchema,
+  EconomyObserverCompactionSchema,
+]);
+
+export const ObserverSchema = z
+  .object({
+    // Legacy default: keep the latest two raw messages verbatim. `economy` opts in
+    // to the cache-aware DP gate inspired by bash-agent; config is fail-closed.
+    compaction: ObserverCompactionSchema.prefault({ mode: "fixed" }),
+  })
+  .strict();
+
 export const ForgettingSchema = z
   .object({
     // Master switch — off = today's behaviour exactly (the gating lever for the
@@ -112,10 +155,13 @@ export const ForgettingSchema = z
 // fail-closed until they are added here, exactly like the rest of the config tree).
 export const MemoryConfigSchema = z
   .object({
+    observer: ObserverSchema.prefault({}),
     forgetting: ForgettingSchema.prefault({}),
   })
   .strict();
 
+export type ObserverCompactionConfig = z.infer<typeof ObserverCompactionSchema>;
+export type ObserverConfig = z.infer<typeof ObserverSchema>;
 export type ScoreConfig = z.infer<typeof ScoreSchema>;
 export type ForgettingConfig = z.infer<typeof ForgettingSchema>;
 export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;

@@ -267,4 +267,8 @@ export {
   ForgettingSchema,
   type MemoryConfig,
   MemoryConfigSchema,
+  type ObserverCompactionConfig,
+  ObserverCompactionSchema,
+  type ObserverConfig,
+  ObserverSchema,
 } from "./memory-schema.js";

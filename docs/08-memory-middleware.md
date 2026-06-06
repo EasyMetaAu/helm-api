@@ -95,7 +95,7 @@ system prompt
 + project reflection
 + resource reflection
 + thread observations
-+ recent raw messages (RECENT_KEEP = 2 kept uncompressed)
++ recent raw messages (fixed default: keep latest 2; economy mode can keep a dynamic suffix)
 + current user message
 ```
 
@@ -103,9 +103,14 @@ Rules:
 
 - Reflections are stable and slow-changing (the Reflector only bumps the version
   when the merged text actually changes).
-- The most recent `RECENT_KEEP = 2` raw turns are kept uncompressed so
-  compression can never lose information; turns already covered by an
-  observation's source range are not re-injected (no duplication).
+- By default, the Observer preserves the most recent `recent_keep = 2` raw turns
+  uncompressed so compression can never lose the live working set; turns already
+  covered by an observation's source range are not re-injected (no duplication).
+- Optional `memory.observer.compaction.mode = economy` borrows bash-agent's useful
+  idea: before summarizing, estimate whether compaction is worth its summary cost,
+  cache-prefix churn, information loss, and long-context quality benefit. If no
+  candidate suffix has positive benefit, the Observer skips the summary job; near
+  the configured context ceiling it still compacts as a safety valve.
 - Observation text carries a time anchor.
 - Injected memory stays within a token budget — `HELM_MEMORY_INJECT_TOKEN_BUDGET`
   (default `4000`), counting injected memory layers only (the system prompt and

@@ -1,3 +1,10 @@
+# Observer compaction defaults. fixed/recent_keep=2 preserves current runtime
+# behaviour. Switch mode to economy to use cache-aware dynamic compaction.
+observer:
+  compaction:
+    mode: fixed
+    recent_keep: 2
+
 # Memory forgetting layer (docs/12). enabled:false = byte-identical to pre-docs/12
 # behaviour; flip to true to turn on decay/reinforcement/facts. All knobs are
 # fail-closed validated (snake_case, unknown keys refuse startup).
