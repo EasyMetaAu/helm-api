@@ -134,7 +134,7 @@ export function chooseObserverCompaction(
     Math.ceil(messages.length * clampRatio(policy.minKeepRatio, 0.12)),
   );
   const forced =
-    totalTokens >=
+    policy.fixedPrefixTokens + totalTokens >=
     Math.max(1, policy.maxContextTokens) * clampRatio(policy.forceAtContextRatio, 0.9);
 
   let best: CompactionDecision | null = null;

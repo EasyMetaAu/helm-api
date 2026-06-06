@@ -84,6 +84,21 @@ export function alreadyObservedMessageIds(
   return covered;
 }
 
+function uncoveredContiguousSegments(messages: RawMessage[], covered: Set<string>): RawMessage[][] {
+  const segments: RawMessage[][] = [];
+  let current: RawMessage[] = [];
+  for (const message of messages) {
+    if (covered.has(message.id)) {
+      if (current.length > 0) segments.push(current);
+      current = [];
+      continue;
+    }
+    current.push(message);
+  }
+  if (current.length > 0) segments.push(current);
+  return segments;
+}
+
 function estimateObserverTokens(compressed: RawMessage[], observationText: string): number {
   const input = compressed.reduce((sum, m) => sum + m.tokenEstimate, 0);
   // Cheap output estimate; a real worker can swap in a tokenizer. ~4 chars/token.
@@ -115,22 +130,27 @@ export async function runObserverJob(
       existing.map((o) => o.sourceMessageRange),
     );
 
-    // Legacy default: keep the two most recent raw messages and summarize older
-    // uncovered rows. When `compaction.mode=economy` is configured, the same cut
-    // is chosen by a cache/summary-aware benefit model so short threads do not pay
-    // for premature summaries. Covered rows stay excluded either way.
-    const candidates = all.filter((m) => !covered.has(m.id));
-    const decision = chooseObserverCompaction(candidates, deps.compaction);
-    if (!decision.shouldCompact) {
+    // Covered rows can sit in the middle of the raw history. Never summarize a
+    // sparse set and then write it as one continuous source range; choose the
+    // oldest compactable contiguous uncovered segment instead.
+    const segments = uncoveredContiguousSegments(all, covered);
+    const decisions = segments.map((segment) => ({
+      segment,
+      decision: chooseObserverCompaction(segment, deps.compaction),
+    }));
+    const selected = decisions.find(({ decision }) => decision.shouldCompact);
+    if (selected === undefined) {
       await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      const lastDecision = decisions.at(-1)?.decision;
       deps.log("memory.observer.noop_compaction_skipped", {
         thread_id: job.threadId,
-        reason: decision.reason,
-        net_benefit_usd: decision.netBenefitUsd,
-        candidate_count: candidates.length,
+        reason: lastDecision?.reason ?? "nothing_to_compact",
+        net_benefit_usd: lastDecision?.netBenefitUsd ?? 0,
+        candidate_count: segments.reduce((sum, segment) => sum + segment.length, 0),
       });
       return { observationId: null, sourceMessageRange: null };
     }
+    const { segment: candidates, decision } = selected;
     const compressed = candidates.slice(0, decision.compressedCount);
 
     if (compressed.length === 0) {

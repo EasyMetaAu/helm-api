@@ -78,4 +78,17 @@ describe("chooseObserverCompaction", () => {
     expect(decision.shouldCompact).toBe(true);
     expect(decision.reason).toBe("forced_context_limit");
   });
+
+  it("counts fixed prefix tokens when deciding forced context-limit compaction", () => {
+    const decision = chooseObserverCompaction(messages([125, 125, 125, 125]), {
+      ...ECONOMY,
+      maxContextTokens: 6000,
+      forceAtContextRatio: 0.9,
+      fixedPrefixTokens: 5000,
+      expectedRemainingCalls: 1,
+    });
+
+    expect(decision.shouldCompact).toBe(true);
+    expect(decision.reason).toBe("forced_context_limit");
+  });
 });

@@ -129,6 +129,24 @@ describe("runObserverJob", () => {
     expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
   });
 
+  it("does not write a sparse uncovered set as one continuous source range", async () => {
+    const messages = makeMessages(6);
+    const { store, observations } = makeFakeStore(messages, [["m2", "m3"]]);
+    const deps = makeDeps(store);
+
+    const out = await runObserverJob(JOB, deps);
+
+    expect(observations).toHaveLength(1);
+    const obs = observations[0];
+    if (!obs) throw new Error("expected one observation");
+    // m2..m3 is already covered, so the next observation must not claim m1..m4.
+    // The oldest compactable contiguous uncovered segment is m4..m6; fixed keep=2
+    // compresses only m4 and writes an exact single-row range.
+    expect(obs.sourceMessageRange).toEqual(["m4", "m4"]);
+    expect(obs.observationText).toContain("Observed 1 msgs");
+    expect(out.sourceMessageRange).toEqual(["m4", "m4"]);
+  });
+
   it("books Observer tokens into the dedicated 'observer' cost bucket only", async () => {
     const messages = makeMessages(6);
     const { store } = makeFakeStore(messages);
