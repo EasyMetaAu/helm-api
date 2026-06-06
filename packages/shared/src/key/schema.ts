@@ -20,6 +20,13 @@ export const OverBudgetBehaviorSchema = z.enum(["degrade", "reject"]);
 // zero-config clients still get per-conversation memory.
 export const MemoryThreadSourceSchema = z.enum(["header", "auto"]);
 
+// Human-readable key label (docs/06) — cosmetic only, never an auth/routing input.
+// `.trim()` runs BEFORE the length checks, so a whitespace-only label collapses to
+// "" and fails min(1) (fail-closed, Principle 2) instead of masquerading as a real
+// name, and a padded label is stored normalized. Reused by the record + create +
+// update schemas so the three can never drift apart.
+const KeyNameSchema = z.string().trim().min(1).max(100);
+
 export const ApiKeyRecordSchema = z.object({
   key_id: z.string().min(1),
   hash: z.string().min(1), // sha256(plaintext) hex; never the plaintext
@@ -30,7 +37,7 @@ export const ApiKeyRecordSchema = z.object({
   // key belongs to (the prefix alone is opaque). PURELY cosmetic — never an auth or
   // routing input. null = unnamed. `.default(null)` (like the budgets/memory fields)
   // so legacy rows predating the column — and unrelated record fixtures — still parse.
-  name: z.string().min(1).max(100).nullable().default(null),
+  name: KeyNameSchema.nullable().default(null),
   // Per-key caps (docs/06): present-but-nullable so the storage shape is explicit.
   allowed_lanes: z.array(z.string()).nullable(),
   allow_custom_model: z.boolean(),
@@ -89,7 +96,7 @@ export const CreateKeyRequestSchema = z
   .object({
     role: KeyRoleSchema.default("user"),
     // Optional human-readable label at mint time (omitted => unnamed). Cosmetic only.
-    name: z.string().min(1).max(100).optional(),
+    name: KeyNameSchema.optional(),
     allowed_lanes: z.array(z.string().min(1)).optional(),
     allow_custom_model: z.boolean().optional(),
     // Optional per-key rate limits at mint time. Omitted => inherit the system
@@ -132,7 +139,7 @@ export type CreateKeyRequest = z.infer<typeof CreateKeyRequestSchema>;
 export const UpdateKeyRequestSchema = z
   .object({
     // Rename a key after mint. Omit = leave unchanged; null = clear back to unnamed.
-    name: z.string().min(1).max(100).nullable().optional(),
+    name: KeyNameSchema.nullable().optional(),
     allowed_lanes: z.array(z.string().min(1)).nullable().optional(),
     allow_custom_model: z.boolean().optional(),
     rate_limit_rpm: z.number().int().nonnegative().nullable().optional(),

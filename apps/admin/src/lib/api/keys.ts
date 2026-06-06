@@ -136,8 +136,9 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     key_id: String(raw.key_id ?? ''),
     prefix: String(raw.prefix ?? ''),
     role: raw.role === 'root' ? 'root' : 'user',
-    // null/absent/empty = unnamed; a non-empty string is the label.
-    name: typeof raw.name === 'string' && raw.name.length > 0 ? raw.name : null,
+    // null/absent/blank = unnamed; trim so a whitespace-only value never renders as
+    // an apparently-empty name cell (defence in depth — the server already trims).
+    name: typeof raw.name === 'string' && raw.name.trim().length > 0 ? raw.name.trim() : null,
     allowed_lanes: Array.isArray(allowed) ? allowed.map(String) : null,
     allow_custom_model: raw.allow_custom_model === true,
     disabled: raw.disabled === true,
