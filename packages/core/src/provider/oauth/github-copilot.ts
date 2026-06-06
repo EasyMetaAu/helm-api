@@ -68,8 +68,16 @@ export function getGitHubCopilotBaseUrl(token?: string, enterpriseDomain?: strin
   return "https://api.individual.githubcopilot.com";
 }
 
-async function fetchJson(url: string, init: RequestInit, signal?: AbortSignal): Promise<unknown> {
-  const res = await fetch(url, {
+async function fetchJson(
+  url: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+  // Drop-in fetch (e.g. the account's egress-proxy fetch). Defaults to the global
+  // so EVERY device-flow call — including the very first device-code POST — can
+  // tunnel through the same hop as execution and never leak the real IP (issue #38).
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Promise<unknown> {
+  const res = await fetchImpl(url, {
     ...init,
     signal: signal
       ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)])
@@ -90,7 +98,11 @@ interface DeviceCode {
   expiresAt: number;
 }
 
-async function startDeviceFlow(domain: string, signal?: AbortSignal): Promise<DeviceCode> {
+async function startDeviceFlow(
+  domain: string,
+  signal?: AbortSignal,
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Promise<DeviceCode> {
   const data = (await fetchJson(
     getUrls(domain).deviceCodeUrl,
     {
@@ -103,6 +115,7 @@ async function startDeviceFlow(domain: string, signal?: AbortSignal): Promise<De
       body: new URLSearchParams({ client_id: CLIENT_ID, scope: "read:user" }),
     },
     signal,
+    fetchImpl,
   )) as Record<string, unknown>;
 
   const intervalMs = nonNegativeSecondsToSafeMs(data.interval);
@@ -198,12 +211,13 @@ export interface CopilotDeviceStart {
 
 export async function beginCopilotDeviceLogin(
   enterpriseInput?: string,
+  fetchImpl: typeof globalThis.fetch = fetch,
 ): Promise<CopilotDeviceStart> {
   const trimmed = (enterpriseInput ?? "").trim();
   const enterpriseDomain = trimmed ? normalizeDomain(trimmed) : null;
   if (trimmed && !enterpriseDomain) throw new Error("Invalid GitHub Enterprise URL/domain");
   const domain = enterpriseDomain || "github.com";
-  const device = await startDeviceFlow(domain);
+  const device = await startDeviceFlow(domain, undefined, fetchImpl);
   return {
     userCode: device.user_code,
     verificationUri: device.verification_uri,
@@ -222,23 +236,31 @@ export type CopilotPollResult =
 
 // One device-token poll. The UI calls this on an interval; it never blocks for the
 // whole flow. "done" hands back the GitHub token to exchange for a Copilot token.
-export async function pollCopilotDeviceOnce(input: {
-  domain: string;
-  deviceCode: string;
-}): Promise<CopilotPollResult> {
-  const raw = (await fetchJson(getUrls(input.domain).accessTokenUrl, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": COPILOT_HEADERS["User-Agent"],
+export async function pollCopilotDeviceOnce(
+  input: {
+    domain: string;
+    deviceCode: string;
+  },
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Promise<CopilotPollResult> {
+  const raw = (await fetchJson(
+    getUrls(input.domain).accessTokenUrl,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": COPILOT_HEADERS["User-Agent"],
+      },
+      body: new URLSearchParams({
+        client_id: CLIENT_ID,
+        device_code: input.deviceCode,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      }),
     },
-    body: new URLSearchParams({
-      client_id: CLIENT_ID,
-      device_code: input.deviceCode,
-      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-    }),
-  })) as Record<string, unknown>;
+    undefined,
+    fetchImpl,
+  )) as Record<string, unknown>;
 
   if (typeof raw.access_token === "string")
     return { status: "done", githubToken: raw.access_token };
@@ -251,15 +273,21 @@ export async function pollCopilotDeviceOnce(input: {
 export async function refreshGitHubCopilotToken(
   githubToken: string,
   enterpriseDomain?: string,
+  fetchImpl: typeof globalThis.fetch = fetch,
 ): Promise<CopilotCredentials> {
   const domain = enterpriseDomain || "github.com";
-  const raw = (await fetchJson(getUrls(domain).copilotTokenUrl, {
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${githubToken}`,
-      ...COPILOT_HEADERS,
+  const raw = (await fetchJson(
+    getUrls(domain).copilotTokenUrl,
+    {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${githubToken}`,
+        ...COPILOT_HEADERS,
+      },
     },
-  })) as Record<string, unknown>;
+    undefined,
+    fetchImpl,
+  )) as Record<string, unknown>;
   const token = raw.token;
   const expires = resolveExpiresAtMsFromEpochSeconds(raw.expires_at, { bufferMs: EPOCH_SKEW_MS });
   if (typeof token !== "string" || expires === undefined) {
@@ -274,15 +302,21 @@ export async function refreshGitHubCopilotToken(
 export async function listGitHubCopilotModels(
   copilotToken: string,
   enterpriseDomain?: string,
+  fetchImpl: typeof globalThis.fetch = fetch,
 ): Promise<string[]> {
   const baseUrl = getGitHubCopilotBaseUrl(copilotToken, enterpriseDomain);
-  const raw = (await fetchJson(`${baseUrl}/models`, {
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${copilotToken}`,
-      ...COPILOT_HEADERS,
+  const raw = (await fetchJson(
+    `${baseUrl}/models`,
+    {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${copilotToken}`,
+        ...COPILOT_HEADERS,
+      },
     },
-  })) as { data?: unknown };
+    undefined,
+    fetchImpl,
+  )) as { data?: unknown };
   const data = Array.isArray(raw.data) ? raw.data : [];
   const ids: string[] = [];
   for (const entry of data) {
@@ -333,7 +367,11 @@ export const githubCopilotOAuthProvider: OAuthProviderInterface = {
   name: "GitHub Copilot",
   usesCallbackServer: false,
   login: loginGitHubCopilot,
-  refreshToken: (creds) =>
-    refreshGitHubCopilotToken(creds.refresh, (creds as CopilotCredentials).enterpriseUrl),
+  refreshToken: (creds, fetchImpl) =>
+    refreshGitHubCopilotToken(
+      creds.refresh,
+      (creds as CopilotCredentials).enterpriseUrl,
+      fetchImpl,
+    ),
   getApiKey: (creds) => creds.access,
 };

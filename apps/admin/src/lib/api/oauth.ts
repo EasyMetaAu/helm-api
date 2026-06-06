@@ -119,10 +119,17 @@ export async function getOAuthQuota(): Promise<OAuthQuotaSnapshot[]> {
 }
 
 // ── manual-paste (Anthropic) ─────────────────────────────────────────────────
+// `proxy` (optional, from the connect dialog's first step) is pinned to the login
+// session server-side so the token exchange egresses through it, never the real IP.
 export async function startManualPaste(
   provider: string,
+  proxy?: AccountProxyInput,
 ): Promise<{ sessionId: string; authorizeUrl: string }> {
-  const res = await fetch(`${BASE}/${provider}/manual/start`, { method: 'POST' });
+  const res = await fetch(`${BASE}/${provider}/manual/start`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ proxy }),
+  });
   return asJson(res);
 }
 
@@ -139,14 +146,17 @@ export async function completeManualPaste(
 }
 
 // ── device-code (Copilot) ────────────────────────────────────────────────────
+// `proxy` is pinned BEFORE the device-code POST (the flow's first call), so step 1
+// already egresses through it — no real-IP leak at bind time.
 export async function startDeviceCode(
   provider: string,
   enterprise?: string,
+  proxy?: AccountProxyInput,
 ): Promise<{ sessionId: string; userCode: string; verificationUri: string }> {
   const res = await fetch(`${BASE}/${provider}/device/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ enterprise }),
+    body: JSON.stringify({ enterprise, proxy }),
   });
   return asJson(res);
 }

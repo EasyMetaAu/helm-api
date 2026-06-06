@@ -387,6 +387,14 @@ export async function synthesizeOAuthProviders(
         log("info", "oauth.autoroute.parked", { providerId, account });
         continue;
       }
+      // The account's egress proxy gates EVERY leg from here on: token refresh,
+      // model discovery, and (below) the executor client — so a proxied account
+      // never leaks the real IP at any stage (issue #38).
+      const proxy = resolveProviderProxy(
+        { oauth: { provider: providerId, account } } as unknown as ProviderConfigShared,
+        accountSettings,
+      );
+      const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
       let accessToken: string;
       try {
         const tm = createTokenManager({
@@ -394,6 +402,7 @@ export async function synthesizeOAuthProviders(
           tokenStore: oauthCtx.store,
           encKey: oauthCtx.encKey,
           oauthProvider: provider,
+          fetch: proxyFetch,
           now: () => Date.now(),
         });
         accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
@@ -403,7 +412,7 @@ export async function synthesizeOAuthProviders(
       }
       let discovered: string[];
       try {
-        discovered = await discoverOAuthModels(providerId, accessToken);
+        discovered = await discoverOAuthModels(providerId, accessToken, proxyFetch);
       } catch {
         discovered = [];
       }
@@ -417,7 +426,8 @@ export async function synthesizeOAuthProviders(
       }
       for (const m of discovered) unionModels.add(m);
       // The per-account config drives createProviderClient (type + oauth preset +
-      // base). The per-account egress proxy is resolved from the same settings.
+      // base). The egress proxy (resolved above) is threaded into the credential's
+      // token manager AND the executor client, so refresh + execution egress alike.
       const accountConfig = {
         name: providerId,
         alias: providerId,
@@ -426,9 +436,8 @@ export async function synthesizeOAuthProviders(
         oauth: { provider: providerId, account },
         models: [],
       } as unknown as ProviderConfigShared;
-      const cred = buildCredential(accountConfig, oauthCtx);
+      const cred = buildCredential(accountConfig, oauthCtx, proxy);
       if (!cred) continue; // unreachable (token just refreshed) — fail-open guard
-      const proxy = resolveProviderProxy(accountConfig, accountSettings);
       // Stable per-account anti-ban identity (never rotates): Anthropic gets a
       // metadata.user_id; Codex a stable session_id. Both deterministic from
       // (providerId, account) salted by the at-rest key — no DB write-back.
@@ -534,6 +543,10 @@ export function resolveProviderProxy(
 export function buildCredential(
   p: ProviderConfigShared,
   oauthCtx?: OAuthRuntimeCtx,
+  // The account's egress proxy (preset OAuth only). Threaded into the token
+  // manager so a proxied account's token REFRESH leaves through the same hop as its
+  // execution traffic — never the real IP (issue #38). undefined ⇒ direct.
+  proxy?: ProxyConfig,
 ): ProviderCredential | null {
   if (p.oauth) {
     const o = p.oauth;
@@ -549,6 +562,7 @@ export function buildCredential(
         tokenStore: oauthCtx.store,
         encKey: oauthCtx.encKey,
         oauthProvider: provider,
+        fetch: proxy ? makeProxyFetch(proxy) : undefined,
         now: () => Date.now(),
       });
       return {
@@ -608,10 +622,10 @@ export function buildProviderClients(
 ): Map<string, ProviderClient> {
   const clients = new Map<string, ProviderClient>();
   for (const p of providers) {
-    const cred = buildCredential(p, oauthCtx);
+    const proxy = resolveProviderProxy(p, accountSettings);
+    const cred = buildCredential(p, oauthCtx, proxy);
     if (!cred) continue; // no credential → cannot build a client; skip.
     const baseUrl = p.base_url ?? fallbackBaseUrl;
-    const proxy = resolveProviderProxy(p, accountSettings);
     clients.set(p.name, createProviderClient(p, { baseUrl, timeoutMs }, cred, proxy));
   }
   return clients;
@@ -910,7 +924,12 @@ export async function buildServer(
   // Primary credential is MANDATORY (fail-closed, principle 2): it backs the
   // default/eval/passthrough path. Static key OR OAuth — buildCredential returns
   // null only when a required secret env is unset, which is fatal for the primary.
-  const primaryCred = buildCredential(first, oauthCtx);
+  // Resolve the primary's egress proxy ONCE and thread it into BOTH the credential
+  // (so token refresh tunnels through it) and the client (so chat execution does) —
+  // a preset-OAuth primary must not leak the real IP on the eval/default/401 path
+  // (issue #38). Reused at the createProviderClient call below.
+  const primaryProxy = resolveProviderProxy(first, accountSettings);
+  const primaryCred = buildCredential(first, oauthCtx, primaryProxy);
   if (!primaryCred) {
     throw new Error(`missing provider credential for primary provider ${first.name}`);
   }
@@ -973,12 +992,7 @@ export async function buildServer(
   // by type (anthropic native vs OpenAI-compatible). When the primary is OAuth this
   // SAME dynamic-header client backs the eval/classify path below, so eval auth
   // never silently fails (acceptance criterion 9).
-  const provider = createProviderClient(
-    first,
-    { baseUrl, timeoutMs },
-    primaryCred,
-    resolveProviderProxy(first, accountSettings),
-  );
+  const provider = createProviderClient(first, { baseUrl, timeoutMs }, primaryCred, primaryProxy);
   // Per-provider clients keyed by provider NAME. Only the CONFIGURED providers go
   // through buildProviderClients (one static/OAuth client each). When
   // HELM_PROVIDER_BASE_URL is set (test/e2e), force the override so cross-provider

@@ -7,6 +7,18 @@
 
 ---
 
+## 2026-06-06 · 订阅 provider 绑定全程走代理，堵住绑定首步的真实 IP 泄露（issue #38；docs/02/06/11）
+
+- **Bug**：订阅 provider 绑定的所有出站调用硬编码全局 `fetch`，代理只能在绑定**之后**于 ManageAccountDialog 设置。于是绑定的**第一通网络请求即从运营者真实 IP 发出**——Copilot 的 device-code POST（第 1 步）、Anthropic/Codex 的 token 交换（Finish 步）；连 token 刷新（synthesis/401/quota）也走真实 IP，唯独 chat 执行已走代理。
+- **修复（注入 fetch seam，原则 1）**：core OAuth kit 全部网络函数追加可选 `fetchImpl`（默认全局 fetch → 向后兼容）；`OAuthProviderInterface.refreshToken(creds, fetchImpl?)`；token-manager 的 `doPresetRefresh` 把 `deps.fetch` 透传给 refresh。core 只收一个 drop-in fetch，不识代理细节（与 createProviderClient/token-manager 既有 fetch seam 一致）。
+- **绑定首步即收代理**：连接对话框第 1 步加可选代理区（type/host/port/user/pass）；start 路由把代理 `validateProxyConfig` 后 pin 进 login session（manual 的 begin 纯函数无网络，device 的 begin **就是**首通调用 → 必须先有代理）；complete/poll 用 session 代理；绑定成功后把代理写进 account settings → 与 resolveProviderProxy 同一 blob，refresh/execution/quota 自动复用 = 真正"全程"，不需二次录入。
+- **执行/刷新侧补漏**：server.ts synthesis 与 buildCredential 的 preset token manager 现传 `fetch: makeProxyFetch(proxy)`；admin ensureFresh/listModels/两个 quota fetch 同步注入；discoverOAuthModels/listAnthropicModels 也接 fetchImpl。
+- **测试（无泄露证明）**：注入 spy `makeFetch` + 把全局 fetch stub 成 throw——绑定走代理则全局 `fetch` **永不被调用**（被调即抛错令测试失败），并断言代理已落 settings、密码加密不回显；token-manager 断言 refresh 收到注入 fetch。
+- **坑/注**：CLI 的 `loginAnthropic`/`loginGitHubCopilot` 暂留默认全局 fetch（本次主体是 admin UI；CLI 加代理 flag 时再接同一 seam）。i18n 新增 3 个 key（en + zh-hans/hant 意译，ja/ko 回退英文）。全量单测仅 PGlite store 测试在并行下偶发 flaky（隔离跑全绿），与本改动无关。
+- **Codex review 三修**：(P1) `buildServer` 的 `primaryCred = buildCredential(first, oauthCtx)` 漏传代理——primary 若是 preset-OAuth，其 token manager 刷新仍走全局 fetch（且 L1013 用该 client 覆盖了 buildProviderClients 里带代理的版本）→ eval/default/401 路径泄露。改：`resolveProviderProxy` 一次算出 `primaryProxy`，同时喂给 buildCredential（刷新）与 createProviderClient（执行）。(P2) 绑定持久化顺序改「先代理后 token」（fail-closed）：settings 写失败则 token 不落库、运营者重试，绝不出现「已绑定但无代理 → 重启后直连」；token 写失败只剩孤儿代理设置（无 token 不可路由，下次绑定覆盖）。(P2) UI 文案夸大——浏览器打开的授权页（window.open）走的是管理员浏览器、不经代理；改为「网关对 provider 的请求走代理并保存，浏览器登录页不走代理」（en+zh 同步）。
+
+---
+
 ## 2026-06-06 · API key 增加可编辑 name 字段（docs/06）
 
 - **动机**：`/admin/keys` 创建的密钥只有不透明的 `prefix`，运营者记不住某把 key 属于哪个项目。新增 `api_keys.name`——**纯展示标签，绝非鉴权/路由输入**（与 budgets/memory 同档：present-but-nullable）。迁移 **sqlite v19 / pg v18**（additive nullable，pg `ADD COLUMN IF NOT EXISTS`）。
@@ -27,19 +39,11 @@
 ---
 
 
-## 2026-06-05 · 遗忘策略 Codex 评审修复 VII（2 项；docs/12）
-
-第七轮 review 仅剩 2×P2（持续收敛 5→3→3→3→3→2→2），全部修复（+1 回归测试）：
-
-1. **（P2）reinforcement 仍在请求 tick 上执行**：`void bump().catch()` 只保证不 await，但默认 sqlite 适配器的写是**同步**的（better-sqlite3 `.run()`）——promise 体当场执行，写库时间仍花在请求路径上。**修复：调用整体 `setImmediate` 延后到 macrotask**，并 try/catch 包同步抛错（macrotask 里未捕获异常会崩进程）。测试的微任务 flush 升级为 macrotask flush。
-2. **（P2）空集归档分支缺 `enabled` 门控**：只查了 archiveReflections 方法存在与否——遗忘关闭时，「有 reflection 但 observation 为空」的 scope 跑普通 reflector job 会被归档，违反「enabled:false 字节级不变」。**修复：分支加 `deps.forgetting?.enabled === true`**；既有归档/版本延续测试显式开 enabled。
-
----
-
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-05 · 遗忘策略 Codex 评审修复 VII（docs/12）：(P2) reinforcement 仍在请求 tick 执行——`void bump().catch()` 不 await，但 sqlite 同步写当场执行 → 整体包 `setImmediate` 延后到 macrotask（try/catch 防崩）；(P2) 空集归档分支缺 `enabled` 门控，关闭时「有 reflection 无 observation」的 scope 仍被归档 → 加 `deps.forgetting?.enabled === true`。
 
 ### 2026-06-05 · 遗忘策略 Codex 评审修复 VI（docs/12）：有界扫描饥饿——limit-only 分页按 observed_at 取最旧 N，全幸存者页让 limit 外 condemned 行永不处理 → score 谓词下推 SQL（`candidates` 参数，与 score.ts 同公式），TS 复算留作纵深防御；archive→rebuild 后 reflection 版本重置 → 新增 `getReflectionVersionHighWater`（跨全 status MAX），写 highWater+1，内容仍只读 active。
 

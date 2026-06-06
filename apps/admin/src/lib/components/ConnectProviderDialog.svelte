@@ -1,9 +1,11 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import {
+    type AccountProxyInput,
     completeManualPaste,
     type OAuthProviderStatus,
     pollDeviceCode,
+    type ProxyType,
     startDeviceCode,
     startManualPaste,
   } from '$lib/api/oauth.js';
@@ -39,6 +41,32 @@
   let userCode = $state<string>('');
   let verificationUri = $state<string>('');
 
+  // Optional egress proxy entered up-front (issue #38). Pinned to the login session
+  // server-side so the VERY FIRST network call of the flow — and the persisted
+  // account — already egress through it, never the operator's real IP. Off ⇒ direct.
+  let useProxy = $state<boolean>(false);
+  let proxyType = $state<ProxyType>('http');
+  let proxyHost = $state<string>('');
+  let proxyPort = $state<string>('');
+  let proxyUser = $state<string>('');
+  let proxyPass = $state<string>('');
+
+  // Build the AccountProxyInput from the form, or null when proxy is off. Returns
+  // `false` when ON but the host/port are invalid (caller surfaces an error and
+  // aborts BEFORE any network call — fail-closed, no silent real-IP fallback).
+  function buildProxy(): AccountProxyInput | null | false {
+    if (!useProxy) return null;
+    const port = Number(proxyPort);
+    if (!proxyHost.trim() || !Number.isInteger(port) || port < 1 || port > 65535) return false;
+    return {
+      type: proxyType,
+      host: proxyHost.trim(),
+      port,
+      ...(proxyUser.trim() ? { username: proxyUser.trim() } : {}),
+      ...(proxyPass ? { password: proxyPass } : {}),
+    };
+  }
+
   let selected = $derived(providers.find((p) => p.id === providerId));
 
   // Suggest a unique label for the chosen provider: first is "default", then
@@ -57,18 +85,23 @@
 
   async function start(): Promise<void> {
     error = null;
+    const proxy = buildProxy();
+    if (proxy === false) {
+      error = $t('Enter a proxy host and a port between 1 and 65535.');
+      return;
+    }
     busy = true;
     const acct = account.trim() || suggestion;
     try {
       if (selected?.flow === 'manual_paste') {
-        const s = await startManualPaste(providerId);
+        const s = await startManualPaste(providerId, proxy ?? undefined);
         sessionId = s.sessionId;
         authorizeUrl = s.authorizeUrl;
         account = acct;
         step = 'manual';
         window.open(s.authorizeUrl, '_blank', 'noopener');
       } else {
-        const s = await startDeviceCode(providerId, enterprise.trim() || undefined);
+        const s = await startDeviceCode(providerId, enterprise.trim() || undefined, proxy ?? undefined);
         sessionId = s.sessionId;
         userCode = s.userCode;
         verificationUri = s.verificationUri;
@@ -159,6 +192,53 @@
           />
         </label>
       {/if}
+
+      <!-- Egress proxy (issue #38): collected up-front so the FIRST sign-in call
+           already tunnels through it — the operator's real IP is never exposed. -->
+      <div class="flex flex-col gap-2">
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" class="checkbox" bind:checked={useProxy} />
+          <span class="field-label">{$t('Use a proxy (optional)')}</span>
+        </label>
+        {#if useProxy}
+          <span class="field-help">
+            {$t("Routes the gateway's calls to this provider (token exchange, refresh, API traffic) and is saved to this account. The sign-in page you open in your browser is not proxied.")}
+          </span>
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="field-label">{$t('Type')}</span>
+              <select class="select" bind:value={proxyType}>
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+                <option value="socks5">SOCKS5</option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="field-label">{$t('Host')}</span>
+              <input class="input" type="text" placeholder="10.0.0.1" bind:value={proxyHost} />
+            </label>
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="field-label">{$t('Port')}</span>
+              <input
+                class="input"
+                type="number"
+                min="1"
+                max="65535"
+                placeholder="1080"
+                bind:value={proxyPort}
+              />
+            </label>
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="field-label">{$t('Username (optional)')}</span>
+              <input class="input" type="text" autocomplete="off" bind:value={proxyUser} />
+            </label>
+            <label class="flex flex-col gap-1 text-sm">
+              <span class="field-label">{$t('Password (optional)')}</span>
+              <input class="input" type="password" autocomplete="off" bind:value={proxyPass} />
+            </label>
+          </div>
+        {/if}
+      </div>
     </div>
 
     <div class="mt-4 flex justify-end gap-2">

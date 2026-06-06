@@ -1,6 +1,6 @@
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
-import type { AdminApiDeps, OAuthAdminAccess } from "./deps.js";
+import type { AccountProxyInput, AdminApiDeps, OAuthAdminAccess } from "./deps.js";
 
 // /admin/api/oauth/* — interactive OAuth subscription login from the admin UI
 // (issue #38). Pure HTTP glue (Principle 1): every flow step delegates to the
@@ -19,6 +19,34 @@ const DEFAULT_ACCOUNT = "default";
 // so echoing the message is safe; anything else degrades to a generic string.
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : "oauth request failed";
+}
+
+// A malformed proxy body — thrown by parseProxyInput, caught at the route to map to
+// a 400. Distinct type so a genuine seam error isn't masked as a parse error.
+class ProxyParseError extends Error {}
+
+// Parse a request body's `proxy` field into the AccountProxyInput write shape (or
+// null = no/clear proxy). Shared by the connect-start routes (proxy from step 1)
+// and PUT /proxy (issue #38). Fail-closed: a malformed shape throws → 400, never a
+// silent direct connection. Validation of host/port range happens in the seam.
+function parseProxyInput(raw: unknown): AccountProxyInput | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "object") throw new ProxyParseError("proxy must be an object or null");
+  const p = raw as Record<string, unknown>;
+  if (
+    (p.type !== "http" && p.type !== "https" && p.type !== "socks5") ||
+    typeof p.host !== "string" ||
+    typeof p.port !== "number"
+  ) {
+    throw new ProxyParseError("proxy requires type (http|https|socks5), host, port");
+  }
+  return {
+    type: p.type,
+    host: p.host,
+    port: p.port,
+    ...(typeof p.username === "string" ? { username: p.username } : {}),
+    ...(typeof p.password === "string" ? { password: p.password } : {}),
+  };
 }
 
 export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
@@ -170,12 +198,26 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
   });
 
-  // POST /oauth/:provider/manual/start -> { sessionId, authorizeUrl }
+  // POST /oauth/:provider/manual/start { proxy? } -> { sessionId, authorizeUrl }
+  // An optional egress proxy entered in the connect dialog's first step is pinned to
+  // the login session so the token exchange never leaves from the real IP (issue #38).
   app.post("/admin/api/oauth/:provider/manual/start", async (c) => {
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    const body = (await c.req.json().catch(() => ({}))) as { proxy?: unknown };
+    let proxy: AccountProxyInput | null;
     try {
-      return c.json(await s.startManualPaste({ providerId: c.req.param("provider") }));
+      proxy = parseProxyInput(body.proxy);
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+    try {
+      return c.json(
+        await s.startManualPaste({
+          providerId: c.req.param("provider"),
+          proxy: proxy ?? undefined,
+        }),
+      );
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
     }
@@ -207,16 +249,28 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
   });
 
-  // POST /oauth/:provider/device/start { enterprise? } -> { sessionId, userCode, verificationUri }
+  // POST /oauth/:provider/device/start { enterprise?, proxy? } -> { sessionId, userCode, verificationUri }
+  // The proxy is pinned BEFORE the device-code POST (the flow's first call), so step
+  // 1 already egresses through it — no real-IP leak at bind time (issue #38).
   app.post("/admin/api/oauth/:provider/device/start", async (c) => {
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
-    const body = (await c.req.json().catch(() => ({}))) as { enterprise?: unknown };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      enterprise?: unknown;
+      proxy?: unknown;
+    };
+    let proxy: AccountProxyInput | null;
+    try {
+      proxy = parseProxyInput(body.proxy);
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
     try {
       return c.json(
         await s.startDeviceCode({
           providerId: c.req.param("provider"),
           enterprise: typeof body.enterprise === "string" ? body.enterprise : undefined,
+          proxy: proxy ?? undefined,
         }),
       );
     } catch (e) {
@@ -315,27 +369,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     };
     const account =
       typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
-    let proxy: Parameters<NonNullable<typeof s>["setAccountProxy"]>[0]["proxy"];
-    if (body.proxy === null || body.proxy === undefined) {
-      proxy = null;
-    } else if (typeof body.proxy === "object") {
-      const p = body.proxy as Record<string, unknown>;
-      if (
-        (p.type !== "http" && p.type !== "https" && p.type !== "socks5") ||
-        typeof p.host !== "string" ||
-        typeof p.port !== "number"
-      ) {
-        return c.json({ error: "proxy requires type (http|https|socks5), host, port" }, 400);
-      }
-      proxy = {
-        type: p.type,
-        host: p.host,
-        port: p.port,
-        ...(typeof p.username === "string" ? { username: p.username } : {}),
-        ...(typeof p.password === "string" ? { password: p.password } : {}),
-      };
-    } else {
-      return c.json({ error: "proxy must be an object or null" }, 400);
+    // null = clear the proxy (direct connection); an object = set it. Same parse the
+    // connect-start routes use, so a malformed proxy is rejected identically.
+    let proxy: AccountProxyInput | null;
+    try {
+      proxy = parseProxyInput(body.proxy);
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
     }
     try {
       await s.setAccountProxy({ providerId: c.req.param("provider"), account, proxy });

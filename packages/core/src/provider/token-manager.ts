@@ -217,12 +217,17 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
     }
     let creds: OAuthCredentials;
     try {
-      creds = await provider.refreshToken({
-        access: accessToken ?? "",
-        refresh: refreshToken,
-        expires: expiresAt,
-        ...presetExtra,
-      });
+      // Forward the manager's fetch (deps.fetch ?? global) so a proxied account
+      // refreshes through the SAME egress hop as its execution traffic (issue #38).
+      creds = await provider.refreshToken(
+        {
+          access: accessToken ?? "",
+          refresh: refreshToken,
+          expires: expiresAt,
+          ...presetExtra,
+        },
+        doFetch,
+      );
     } catch {
       // Provider refresh failed — never echo its message (could carry a token).
       throw new TokenRefreshError(`oauth refresh failed (${p.providerId})`);
