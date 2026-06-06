@@ -22,8 +22,9 @@
   [03 · Classification Cascade](03-classification.md) and
   [04 · Routing & Lanes](04-routing-and-lanes.md).
 - **Eval layer.** The Layer-2 small-model evaluator with a content-hash cache,
-  **off by default**. When enabled, it runs only when Layer-1 confidence is below
-  the threshold; identical requests hit the cache instead of re-evaluating.
+  **on in the shipped config** (schema default off). It runs only when Layer-1
+  confidence is below the threshold; identical requests hit the cache instead of
+  re-evaluating.
 
 ### Protocol translation
 
@@ -107,7 +108,7 @@ Verified against the code and `implementation-notes.md`:
 - A new client can point an OpenAI-compatible SDK at Helm and get usable routing
   with no custom config.
 - The default economy / balanced / premium lanes work out of the box, with LLM
-  evaluation off by default.
+  evaluation on by default (shipped config).
 - On first start with no key, a root key is generated; requests without a key are
   rejected.
 - Layer-1 rules route directly to the matching lane when classification is

@@ -42,8 +42,10 @@ export class PgKeyStore implements KeyStore {
       degradeLane: input.degradeLane ?? null,
       // Max in-flight requests: undefined => NULL => unlimited.
       concurrencyLimit: input.concurrencyLimit ?? null,
-      // Memory defaults (issue #97): undefined => memory stays off for this key.
-      memoryMode: input.memoryMode ?? "off",
+      // Memory defaults (issue #97): a new key opts INTO memory by default —
+      // undefined => "inject" (record + inject). Pass memoryMode explicitly to
+      // override (e.g. "off"/"observe"). Existing keys keep their stored value.
+      memoryMode: input.memoryMode ?? "inject",
       memoryProjectId: input.memoryProjectId ?? null,
       memoryThreadSource: input.memoryThreadSource ?? "header",
       createdAt: this.now().getTime(),

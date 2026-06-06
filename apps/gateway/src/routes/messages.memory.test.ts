@@ -148,7 +148,7 @@ describe("gateway.messages.memory — headers round-trip onto InternalRequest me
     });
   });
 
-  it("defaults to off + null ids when no memory headers are present", async () => {
+  it("defaults to inject (memory on) + null ids when no memory headers are present", async () => {
     const { route, seen } = captureRoute({
       body: { choices: [{ index: 0, message: { role: "assistant", content: "yo" } }] },
     });
@@ -164,7 +164,7 @@ describe("gateway.messages.memory — headers round-trip onto InternalRequest me
       thread_id: null,
       resource_id: null,
       project_id: null,
-      memory_mode: "off",
+      memory_mode: "inject",
     });
   });
 });

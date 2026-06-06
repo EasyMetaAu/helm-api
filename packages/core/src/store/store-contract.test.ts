@@ -337,9 +337,9 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(got?.rate_limit_rpm).toBe(9);
     });
 
-    it("memory defaults (issue #97): omitted -> off/null/header, set at create round-trips, updateKey edits + clears", async () => {
+    it("memory defaults (issue #97): omitted -> inject/null/header, set at create round-trips, updateKey edits + clears", async () => {
       ctx = await make();
-      // omitted -> defaults (memory stays off; zero behavior change for old keys)
+      // omitted -> a new key opts INTO memory by default (mode inject)
       await ctx.stores.keys.createKey({
         keyId: "k1",
         hash: "h1",
@@ -348,7 +348,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         role: "user",
       });
       let got = await ctx.stores.keys.getByHash("h1");
-      expect(got?.memory_mode).toBe("off");
+      expect(got?.memory_mode).toBe("inject");
       expect(got?.memory_project_id).toBeNull();
       expect(got?.memory_thread_source).toBe("header");
       // set at create

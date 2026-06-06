@@ -85,7 +85,7 @@ user-facing surface.
 
 ## Memory
 
-Memory is **per-request, header-gated, and off by default**. The `x-memory-mode`
+Memory is **per-request and on by default (`inject`)**, overridable via header. The `x-memory-mode`
 header selects `off` (zero DB touch), `observe` (write-only), or `inject`
 (read-back that hydrates the message array before routing, then writes). The
 forgetting / tiering layer (short / mid / long term, decay) has **shipped** but is
