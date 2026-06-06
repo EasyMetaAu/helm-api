@@ -453,6 +453,16 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX        IF NOT EXISTS idx_memory_facts_active  ON memory_facts (owner_id, status, expired_at);
     `,
   },
+  {
+    // Per-key human-readable NAME — a cosmetic label so an operator can tell which
+    // project/client a key belongs to (the prefix alone is opaque). Additive +
+    // nullable, so existing rows + fixtures are untouched (NULL = unnamed). Never an
+    // auth/routing input.
+    version: 19,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN name TEXT;
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

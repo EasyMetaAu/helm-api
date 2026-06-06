@@ -18,6 +18,7 @@ export interface ApiKeyView {
   key_id: string;
   prefix: string; // e.g. helm_live_ab12 — display/debug only
   role: 'root' | 'user';
+  name: string | null; // human-readable label; null = unnamed (cosmetic only)
   allowed_lanes: string[] | null; // lane whitelist (empty/null = any lane)
   allow_custom_model: boolean; // explicit client-model passthrough
   disabled: boolean; // revoked state (soft)
@@ -47,6 +48,8 @@ export interface ApiKeyView {
 // are not minted casually (docs/06).
 export interface CreateKeyInput {
   role?: 'root' | 'user';
+  // Optional human-readable label at mint time (omitted => unnamed).
+  name?: string;
   allowed_lanes?: string[];
   allow_custom_model?: boolean;
   // Optional per-key rate limits at mint time. Omitted => inherit the system
@@ -75,6 +78,8 @@ export interface CreateKeyInput {
 // inherit the system default). `role` and the immutable identity are deliberately
 // absent — role cannot be edited (rotate by revoke + re-mint).
 export interface UpdateKeyInput {
+  // Rename: omit = leave unchanged; null = clear back to unnamed.
+  name?: string | null;
   allowed_lanes?: string[] | null;
   allow_custom_model?: boolean;
   rate_limit_rpm?: number | null;
@@ -131,6 +136,9 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     key_id: String(raw.key_id ?? ''),
     prefix: String(raw.prefix ?? ''),
     role: raw.role === 'root' ? 'root' : 'user',
+    // null/absent/blank = unnamed; trim so a whitespace-only value never renders as
+    // an apparently-empty name cell (defence in depth — the server already trims).
+    name: typeof raw.name === 'string' && raw.name.trim().length > 0 ? raw.name.trim() : null,
     allowed_lanes: Array.isArray(allowed) ? allowed.map(String) : null,
     allow_custom_model: raw.allow_custom_model === true,
     disabled: raw.disabled === true,
@@ -157,6 +165,8 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
 // `.strict()`, so empty/undefined optional fields must be omitted (Principle 2 fail-closed).
 function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   const out: Record<string, unknown> = { role: input.role ?? 'user' };
+  // Send a name only when the operator typed one (omitted => unnamed; .strict()).
+  if (input.name !== undefined && input.name.length > 0) out.name = input.name;
   if (input.allowed_lanes && input.allowed_lanes.length > 0) {
     out.allowed_lanes = input.allowed_lanes;
   }

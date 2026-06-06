@@ -38,6 +38,7 @@ function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     prefix: "helm_live_ab",
     account_id: "acct",
     role: "user",
+    name: null,
     allowed_lanes: null,
     allow_custom_model: false,
     disabled: false,

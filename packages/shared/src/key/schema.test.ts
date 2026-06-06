@@ -148,6 +148,28 @@ describe("ApiKeyRecordSchema", () => {
     expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_tokens: 0 }).success).toBe(false);
     expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_spend_usd: 0 }).success).toBe(false);
   });
+
+  it("defaults name to null when omitted (legacy rows / additive field)", () => {
+    expect(ApiKeyRecordSchema.parse(fullKey()).name).toBeNull();
+  });
+
+  it("accepts a name (1..100 chars), trims it, and rejects empty/whitespace/over-long", () => {
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), name: "Production backend" }).success).toBe(
+      true,
+    );
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), name: null }).success).toBe(true);
+    // A padded label is stored normalized (trimmed).
+    expect(ApiKeyRecordSchema.parse({ ...fullKey(), name: "  Production  " }).name).toBe(
+      "Production",
+    );
+    // Empty / whitespace-only must never masquerade as a real label — null is the
+    // only "unnamed" (whitespace collapses to "" and fails min(1)).
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), name: "" }).success).toBe(false);
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), name: "   " }).success).toBe(false);
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), name: "x".repeat(101) }).success).toBe(
+      false,
+    );
+  });
 });
 
 describe("CreateKeyRequestSchema", () => {
@@ -206,6 +228,16 @@ describe("CreateKeyRequestSchema", () => {
     expect(CreateKeyRequestSchema.safeParse({ budget_requests: 0 }).success).toBe(false);
     expect(CreateKeyRequestSchema.safeParse({ budget_spend_usd: 0 }).success).toBe(false);
     expect(CreateKeyRequestSchema.safeParse({ over_budget_behavior: "nope" }).success).toBe(false);
+  });
+
+  it("accepts an optional name at mint (trimmed); rejects empty / whitespace / over-long", () => {
+    const res = CreateKeyRequestSchema.safeParse({ role: "user", name: "  Mobile app  " });
+    expect(res.success).toBe(true);
+    if (res.success) expect(res.data.name).toBe("Mobile app"); // stored trimmed
+    expect(CreateKeyRequestSchema.safeParse({ role: "user" }).success).toBe(true);
+    expect(CreateKeyRequestSchema.safeParse({ name: "" }).success).toBe(false);
+    expect(CreateKeyRequestSchema.safeParse({ name: "   " }).success).toBe(false);
+    expect(CreateKeyRequestSchema.safeParse({ name: "x".repeat(101) }).success).toBe(false);
   });
 });
 
@@ -268,6 +300,16 @@ describe("UpdateKeyRequestSchema", () => {
     expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: null }).success).toBe(true);
     expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: 0 }).success).toBe(false);
     expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: 2.5 }).success).toBe(false);
+  });
+
+  it("renames a key: new name (set, trimmed) / null (clear); rejects empty / whitespace / over-long", () => {
+    const res = UpdateKeyRequestSchema.safeParse({ name: "  Renamed  " });
+    expect(res.success).toBe(true);
+    if (res.success) expect(res.data.name).toBe("Renamed"); // stored trimmed
+    expect(UpdateKeyRequestSchema.safeParse({ name: null }).success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ name: "" }).success).toBe(false);
+    expect(UpdateKeyRequestSchema.safeParse({ name: "   " }).success).toBe(false);
+    expect(UpdateKeyRequestSchema.safeParse({ name: "x".repeat(101) }).success).toBe(false);
   });
 });
 

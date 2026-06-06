@@ -64,6 +64,7 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         prefix: input.prefix,
         account_id: input.accountId,
         role: input.role,
+        name: input.name ?? null,
         allowed_lanes: input.allowedLanes ?? null,
         allow_custom_model: input.allowCustomModel ?? false,
         disabled: false,
@@ -100,6 +101,7 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       if (!row) throw new Error(`key not found: ${keyId}`);
       // PARTIAL: only supplied fields change; absent fields untouched (never role
       // or the immutable identity). null clears a cap/override.
+      if (patch.name !== undefined) row.name = patch.name;
       if (patch.allowedLanes !== undefined) row.allowed_lanes = patch.allowedLanes;
       if (patch.allowCustomModel !== undefined) row.allow_custom_model = patch.allowCustomModel;
       if (patch.rateLimitRpm !== undefined) row.rate_limit_rpm = patch.rateLimitRpm;
@@ -527,6 +529,51 @@ describe("admin.api keys", () => {
     expect(list[0]?.memory_mode).toBe("inject");
     expect(list[0]?.memory_project_id).toBe("proj-1");
     expect(list[0]?.memory_thread_source).toBe("auto");
+  });
+
+  it("POST persists a key name and the LIST surfaces it; PATCH renames + clears it", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const created = await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user", name: "Production backend" }),
+    });
+    expect(created.status).toBe(201);
+    expect(keyStore.rows[0]?.name).toBe("Production backend");
+    let list = (await (await app.request("/admin/api/keys")).json()) as Array<
+      Record<string, unknown>
+    >;
+    expect(list[0]?.name).toBe("Production backend");
+    // PATCH renames…
+    const renamed = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ name: "Mobile app" }),
+    });
+    expect(renamed.status).toBe(200);
+    expect(keyStore.rows[0]?.name).toBe("Mobile app");
+    // …and null clears it back to unnamed.
+    const cleared = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ name: null }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(keyStore.rows[0]?.name).toBeNull();
+    list = (await (await app.request("/admin/api/keys")).json()) as Array<Record<string, unknown>>;
+    expect(list[0]?.name).toBeNull();
+  });
+
+  it("POST without a name leaves it null (unnamed)", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user" }),
+    });
+    expect(keyStore.rows[0]?.name).toBeNull();
   });
 
   it("POST persists per-key rate limits and the list surfaces them", async () => {

@@ -341,6 +341,9 @@ describe("sqlite v18 forgetting schema deltas", () => {
         .run("o-old", "t1", JSON.stringify(["m1", "m2"]), "old obs", Date.now());
       const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
       for (let v = 1; v <= 17; v++) rec.run(v, Date.now());
+      // v19 (api_keys.name) is pre-marked applied too: this minimal seed has no
+      // api_keys table, so its ALTER would fail — keep the test scoped to v18.
+      rec.run(19, Date.now());
       seed.close();
 
       expect(() => runMigrations(path)).not.toThrow();

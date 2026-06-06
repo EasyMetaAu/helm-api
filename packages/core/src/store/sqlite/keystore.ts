@@ -24,6 +24,8 @@ export class SqliteKeyStore implements KeyStore {
       prefix: input.prefix,
       accountId: input.accountId,
       role: input.role,
+      // Human-readable label: undefined input => NULL => unnamed.
+      name: input.name ?? null,
       allowedLanes: input.allowedLanes ? JSON.stringify(input.allowedLanes) : null,
       allowCustomModel: input.allowCustomModel ?? false,
       disabled: false,
@@ -81,6 +83,7 @@ export class SqliteKeyStore implements KeyStore {
     const set: Partial<
       Pick<
         ApiKeyRow,
+        | "name"
         | "allowedLanes"
         | "allowCustomModel"
         | "rateLimitRpm"
@@ -97,6 +100,8 @@ export class SqliteKeyStore implements KeyStore {
         | "memoryThreadSource"
       >
     > = {};
+    // Rename (null clears back to unnamed). Cosmetic only.
+    if (patch.name !== undefined) set.name = patch.name;
     // SQLite has no native array: store the whitelist as JSON text (null = no cap).
     if (patch.allowedLanes !== undefined) {
       set.allowedLanes = patch.allowedLanes === null ? null : JSON.stringify(patch.allowedLanes);
@@ -135,6 +140,7 @@ export class SqliteKeyStore implements KeyStore {
       prefix: row.prefix,
       account_id: row.accountId,
       role: row.role === "root" ? "root" : "user",
+      name: row.name ?? null,
       allowed_lanes: row.allowedLanes ? (JSON.parse(row.allowedLanes) as string[]) : null,
       allow_custom_model: row.allowCustomModel,
       disabled: row.disabled,

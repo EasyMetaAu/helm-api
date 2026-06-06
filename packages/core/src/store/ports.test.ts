@@ -26,6 +26,7 @@ class InMemoryKeyStore implements KeyStore {
       prefix: input.prefix,
       account_id: input.accountId,
       role: input.role,
+      name: input.name ?? null,
       allowed_lanes: input.allowedLanes ?? null,
       allow_custom_model: input.allowCustomModel ?? false,
       disabled: false,
@@ -196,6 +197,7 @@ describe("port type contracts", () => {
       | "prefix"
       | "accountId"
       | "role"
+      | "name"
       | "allowedLanes"
       | "allowCustomModel"
       | "rateLimitRpm"

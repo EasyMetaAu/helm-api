@@ -251,6 +251,9 @@ export interface KeySummary {
   key_id: string;
   prefix: string;
   role: "root" | "user";
+  // Human-readable label so an operator can recognize which project/client a key
+  // belongs to (the prefix is opaque). null = unnamed. Cosmetic — no key material.
+  name: string | null;
   allowed_lanes: string[] | null;
   allow_custom_model: boolean;
   disabled: boolean;
