@@ -7,6 +7,18 @@
 
 ---
 
+## 2026-06-06 · 记忆与小模型 eval 默认开启（用户决策；docs/03/08；偏离 CLAUDE.md 原则 4）
+
+- **动机**：用户明确要求「记忆 + 小模型 eval 默认都打开」。两者开关分处不同层，处理方式各异。
+- **eval（config/classifier.yaml）**：`classifier.eval.enabled: false → true`。**schema 默认仍 `false`**（`EvalConfigSchema`，缺块时的 fail-safe 不动），只把**发行配置**改成 opt-in——发动机默认关、发行版默认开。⚠️ **此处偏离 CLAUDE.md 原则 4「eval 默认关闭」与 docs/03 的「OFF by default (non-negotiable)」**；属用户明示决策，记此备查。成本：不确定/非英文切片会打 eval 模型（providers[0]），下方 cache（TTL 300s / LRU 5000）兜底封顶。
+- **memory（无全局开关，逐 key `memory_mode`）**：① 新 key 的 `keystore.create` 默认 `"off" → "inject"`（sqlite + pg 两个适配器）；② 请求兜底 `memory-scope.ts` `defaults?.mode ?? "off" → ?? "inject"`。**范围 = 仅新 key + 兜底，不迁移既有 key**：DB 列默认与已应用迁移仍保留 `"off"`（底线 + 迁移历史不重写），既有 key 维持其存储值。显式 `x-memory-mode`（含 `off`）与 key 存储 mode 仍永远优先；非法 mode 头仍归一 `off`（fail-safe，不继承宽松默认）。
+- **forgetting**：`config/memory.yaml` `enabled` 本会话稍早已置 `true`（PR #106）——与「记忆默认开」配套（衰减/巩固/facts 生效）。
+- **测试更新（4 处断言随默认翻转）**：`classifier-samples`（eval true）、`store-contract`（新 key → inject）、`memory-scope`（无头/无默认 → inject）、`messages.memory`（无记忆头 → memory_mode inject）。全单测 **2474 绿**，typecheck 净、lint exit 0（残留 warning 非本次引入）。
+- **文档同步**：README（根）+ docs/01/02/03/09 + docs/README 的「off by default」表述改为「发行默认开启（schema/引擎默认仍 off 作 fail-safe）」。
+- **坑/取舍**：兜底改 `inject` 触及 memory-scope 原「零回退（无配置 = off）」契约——但**真实认证流量恒携带 key 存储 mode**（auth.ts 注入 `record.memory_mode`），裸兜底仅管「完全无 key 配置」路径；且 `inject` 在 `threadId === null` 时 observe/inject 自闸为 no-op，无 thread 的请求不会真正注入。
+
+---
+
 ## 2026-06-06 · 订阅 provider 绑定全程走代理，堵住绑定首步的真实 IP 泄露（issue #38；docs/02/06/11）
 
 - **Bug**：订阅 provider 绑定的所有出站调用硬编码全局 `fetch`，代理只能在绑定**之后**于 ManageAccountDialog 设置。于是绑定的**第一通网络请求即从运营者真实 IP 发出**——Copilot 的 device-code POST（第 1 步）、Anthropic/Codex 的 token 交换（Finish 步）；连 token 刷新（synthesis/401/quota）也走真实 IP，唯独 chat 执行已走代理。
@@ -29,19 +41,11 @@
 
 ---
 
-## 2026-06-05 · live 集成测试上线记忆段 + 脱敏器吞数字计数的生产 bug（scripts/integration-live.mjs；docs/07/08/12）
-
-- **integration-live.mjs 新增「Memory middleware」段**：observe 正常路由；inject hydrate + 写回入队 + DecisionRecord 携带脱敏 memory 元数据（thread_source=header）；后台 worker 压缩后 observation 进 prefix（poll-with-backoff，worker 太慢则 SKIP 不误报——worker 间隔是部署配置）；fail-open（无 thread anchor）；default-safe（非法 x-memory-mode 归一 off）；requests 列表不得泄漏记忆正文哨兵（原则 7）。注：DecisionRecord.memory 只在 INJECT 行打戳（observe 行 memory:null 属设计）。
-- **该段首跑即抓到真 bug**：脱敏器把 `memory_tokens_injected`（数字计数，key 命中 secret 模式里的 "token"）mangle 成 `{redacted:true,kind:"number"}` → DecisionRecord 读回解析失败 → **`/admin/api/requests` 整页 502** + signals collector 报错。#41 起潜伏；单测/e2e 全未踩（fake store 不过脱敏回环）——live 集成的价值所在。
-- **修复（双侧）**：写侧 `redactNode` 对 secret-key 命中的**标量放行**（number/boolean/null 不可能携带凭证；字符串仍 sha256 指纹、对象/数组仍摘要——顺带救了 `max_tokens` 等同类计数）；读侧 `MemoryDecisionSchema.memory_tokens_injected` 对**已落库的 legacy 损坏行** preprocess→0（真实部署的库里已有这种行，一行旧数据不能 502 整页），非 legacy 垃圾对象仍 fail-closed。
-- **部署注**：仓库提交 `config/memory.yaml` 默认 `enabled:false`（自文档化、行为不变）；本地 helm 实例以 working-tree 改动开启 `enabled:true` + override `HELM_MEMORY_WORKER_INTERVAL_MS=500`（gitignored）。
-
----
-
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-05 · live 集成测试上线记忆段 + 脱敏器吞数字计数的生产 bug（scripts/integration-live.mjs；docs/07/08/12）：integration-live 新增「Memory middleware」段（observe/inject/写回/fail-open/default-safe/不泄漏正文哨兵）首跑即抓真 bug——脱敏器把 `memory_tokens_injected` 数字计数 mangle 成对象 → DecisionRecord 解析失败 → `/admin/api/requests` 整页 502（#41 起潜伏，fake store 不过脱敏回环故单测/e2e 全未踩）。双侧修：写侧 redactNode 放行 secret-key 命中的标量（number/bool/null 不携凭证，顺救 max_tokens），读侧 schema 对 legacy 损坏行 preprocess→0、非 legacy 垃圾仍 fail-closed。
 
 ### 2026-06-05 · 遗忘策略 Codex 评审修复 VII（docs/12）：(P2) reinforcement 仍在请求 tick 执行——`void bump().catch()` 不 await，但 sqlite 同步写当场执行 → 整体包 `setImmediate` 延后到 macrotask（try/catch 防崩）；(P2) 空集归档分支缺 `enabled` 门控，关闭时「有 reflection 无 observation」的 scope 仍被归档 → 加 `deps.forgetting?.enabled === true`。
 

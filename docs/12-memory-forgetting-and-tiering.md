@@ -7,8 +7,8 @@
 > built; this chapter adds a **forgetting strategy** and an explicit **short / mid /
 > long-term tier model** on top of it.
 >
-> **Gated and off by default.** Everything here sits behind one config switch
-> (`memory.forgetting.enabled`, schema default `false`). With the flag off the
+> **Gated behind one config switch** (`memory.forgetting.enabled`, schema default
+> `false`, **enabled in the shipped `config/memory.yaml`**). With the flag off the
 > system is byte-for-byte today's behaviour — no new query, no new write, no new
 > job. This is the single inertness guarantee; the rest of the doc assumes the flag
 > is **on** unless it says otherwise.
@@ -420,7 +420,8 @@ read methods for facts take `{ accountId, … }` exactly like the existing
 ## Config surface
 
 The `forgetting` block lives in `config/memory.yaml`. Fail-closed on bad config
-(Zod, `.strict()`), fail-open at runtime. Off by default (`enabled: false`).
+(Zod, `.strict()`), fail-open at runtime. Schema default `false`; the shipped
+`config/memory.yaml` sets `enabled: true`.
 
 The file is **flat**: its top-level key is `forgetting:` (no `memory:` wrapper).
 The loader mounts the whole file under the `memory` config key — like `lanes.yaml`
@@ -430,7 +431,7 @@ snippet below as-is; a `memory:` wrapper would fail strict validation.
 ```yaml
 # config/memory.yaml — copy as-is (top-level is `forgetting:`, no `memory:` wrapper)
 forgetting:
-  enabled: false                 # master switch — off = today's behaviour exactly
+  enabled: true                  # master switch — shipped ON; false = today's behaviour exactly
   score:
     half_life_s: 86400           # 1 day; recency = 0.5 ^ (age / half_life)
     importance_floor: 0.1        # decay brake: vital memories never hit 0
@@ -530,8 +531,9 @@ write/maintenance loop by default** — determinism and fail-open over flexibili
 
 Existing suites (`observe.test.ts`, `observer.test.ts`, `reflector.test.ts`,
 `inject.test.ts`, `memory-schema.test.ts`, the route memory tests) must stay green
-at **every** phase. The lever: `forgetting.enabled: false` is the default and is
-behaviour-identical to today. Every phase is independently shippable and gated.
+at **every** phase. The lever: `forgetting.enabled: false` (the schema default, and
+what those suites pin) is behaviour-identical to today. Every phase is independently
+shippable and gated.
 
 | Phase | Adds | Key tests |
 |-------|------|-----------|

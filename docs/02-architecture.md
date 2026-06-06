@@ -15,7 +15,7 @@ Client
   -> Circuit Breaker
   -> Provider Executor
   -> Telemetry / Request Log
-  -> (Memory Middleware)         # observe/inject, opt-in per request; off by default
+  -> (Memory Middleware)         # observe/inject, on by default; header-overridable per request
 ```
 
 Positioning: Helm is **nginx for LLMs** — a declaratively-configured model
@@ -73,9 +73,9 @@ default and any per-key RPM/TPM override on every request surface. See
 
 The classification cascade producing `task_type` / `complexity` / `confidence` /
 `constraints`. Layer-1 rules are **always on** (pure, zero-network); Layer-2 eval
-is **off by default** and runs only when Layer-1 confidence is below the threshold;
-Layer-3 is the `balanced` fail-open sink. So the live default cascade is
-**rules → balanced**. See [03 · Classification Cascade](03-classification.md).
+is **on in the shipped config** (schema default off as a fail-safe) and runs only
+when Layer-1 confidence is below the threshold; Layer-3 is the `balanced` fail-open
+sink. See [03 · Classification Cascade](03-classification.md).
 
 ### Policy Engine
 

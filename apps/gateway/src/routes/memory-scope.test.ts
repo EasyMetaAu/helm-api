@@ -38,20 +38,22 @@ describe("resolveMemoryScope", () => {
     });
   });
 
-  it("defaults to off + null ids when no headers are present", () => {
+  it("defaults to inject (memory on) + null ids when no headers are present", () => {
     const scope = resolveMemoryScope(getterOf({}), "acct-a");
     expect(scope).toEqual({
       accountId: "acct-a",
       threadId: null,
       resourceId: null,
       projectId: null,
-      mode: "off",
+      mode: "inject",
       threadSource: null,
     });
   });
 
-  it("normalizes a missing or illegal x-memory-mode to off (default-safe)", () => {
-    expect(resolveMemoryScope(getterOf({ "x-thread-id": "t" }), "acct-a").mode).toBe("off");
+  it("normalizes an ILLEGAL x-memory-mode to off (fail-safe); absent header → inject", () => {
+    // Absent header with no key default → the on-by-default fallback.
+    expect(resolveMemoryScope(getterOf({ "x-thread-id": "t" }), "acct-a").mode).toBe("inject");
+    // A present-but-illegal value must never inherit the permissive default.
     expect(resolveMemoryScope(getterOf({ "x-memory-mode": "nonsense" }), "acct-a").mode).toBe(
       "off",
     );
@@ -107,9 +109,9 @@ describe("resolveMemoryScope — per-key defaults (issue #97)", () => {
     expect(scope.mode).toBe("off");
   });
 
-  it("no defaults provided = exactly the old behavior (zero regression)", () => {
+  it("no defaults provided → memory on by default (mode inject, null ids)", () => {
     const scope = resolveMemoryScope(getterOf({}), "acct-a");
-    expect(scope.mode).toBe("off");
+    expect(scope.mode).toBe("inject");
     expect(scope.projectId).toBeNull();
     expect(scope.threadId).toBeNull();
   });

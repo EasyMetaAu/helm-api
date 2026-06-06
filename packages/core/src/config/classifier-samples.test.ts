@@ -25,9 +25,9 @@ describe("checked-in classifier.yaml sample", () => {
     });
   });
 
-  it("ships eval disabled by default with documented eval defaults", () => {
+  it("ships eval enabled with documented eval defaults", () => {
     const cfg = loadConfig({ configDir, env: {} });
-    expect(cfg.classifier.eval.enabled).toBe(false);
+    expect(cfg.classifier.eval.enabled).toBe(true);
     expect(cfg.classifier.eval.max_tokens).toBe(256);
     expect(cfg.classifier.eval.timeout_ms).toBe(250);
     expect(cfg.classifier.eval.on_failure).toBe("balanced");

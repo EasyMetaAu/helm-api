@@ -14,7 +14,10 @@ import type { MemoryMode, MemoryThreadSource } from "@helm/shared";
 //   • a thread-signal FALLBACK CHAIN derives the thread anchor from signals the
 //     client already sends (body metadata, x-session-key, OpenAI prompt_cache_key,
 //     Anthropic metadata.user_id) — gated behind memory_thread_source === "auto".
-// A key with no memory config resolves EXACTLY as before (mode off, header-only).
+// Memory is ON by default: absent a header and a per-key default, mode resolves
+// to "inject". An explicit x-memory-mode (incl. "off") or a stored key default
+// still wins. Real authed traffic always carries the key's stored mode, so this
+// bare fallback only governs the no-key-config path.
 
 // An absent header OR an empty string yields null — an empty x-thread-id must
 // never fabricate a thread id (observe self-gates to a no-op on threadId===null).
@@ -70,10 +73,10 @@ export function resolveMemoryScope(
 
   // Mode: an explicit, non-empty x-memory-mode header always wins — including
   // "off" overriding a key default of inject, and an ILLEGAL value normalizing
-  // to off (fail-safe: a typo must never silently fall back to the key's
-  // inject). Absent header → the key default → off.
+  // to off (fail-safe: a typo must never silently inherit a more permissive
+  // mode). Absent header → the key default → "inject" (memory is on by default).
   const modeHeader = nonEmpty(headerGet("x-memory-mode"));
-  const mode = modeHeader !== null ? resolveMemoryMode(modeHeader) : (defaults?.mode ?? "off");
+  const mode = modeHeader !== null ? resolveMemoryMode(modeHeader) : (defaults?.mode ?? "inject");
 
   // Project: header wins; else the key default.
   const projectId = nonEmpty(headerGet("x-project-id")) ?? defaults?.projectId ?? null;
