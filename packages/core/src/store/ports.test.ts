@@ -59,6 +59,9 @@ class InMemoryKeyStore implements KeyStore {
     const r = this.byId.get(keyId);
     if (r) this.byId.set(keyId, { ...r, disabled: true });
   }
+  async deleteKey(keyId: string): Promise<void> {
+    this.byId.delete(keyId);
+  }
   async updateKey(keyId: string, patch: KeyPatch): Promise<void> {
     const r = this.byId.get(keyId);
     if (!r) return;

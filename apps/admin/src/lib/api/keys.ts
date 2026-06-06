@@ -114,6 +114,12 @@ export interface RevokeResult {
   revoked: string;
 }
 
+// DELETE ?purge=true response (permanent delete of an already-revoked key). The
+// server echoes the deleted id; the UI drops the row locally.
+export interface DeleteResult {
+  deleted: string;
+}
+
 const BASE = '/admin/api/keys';
 
 async function asJson<T>(res: Response): Promise<T> {
@@ -237,4 +243,12 @@ export async function updateKey(keyId: string, patch: UpdateKeyInput): Promise<v
 export async function revokeKey(keyId: string): Promise<RevokeResult> {
   const res = await fetch(`${BASE}/${encodeURIComponent(keyId)}`, { method: 'DELETE' });
   return asJson<RevokeResult>(res);
+}
+
+// DELETE /admin/api/keys/:id?purge=true -> { deleted: id }. PERMANENTLY removes an
+// already-revoked key (the server rejects an active one with 409). Call only on a
+// row that is already disabled; the caller drops the row from the list on success.
+export async function deleteKey(keyId: string): Promise<DeleteResult> {
+  const res = await fetch(`${BASE}/${encodeURIComponent(keyId)}?purge=true`, { method: 'DELETE' });
+  return asJson<DeleteResult>(res);
 }

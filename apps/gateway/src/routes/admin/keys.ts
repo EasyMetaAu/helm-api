@@ -7,8 +7,10 @@ import type { AdminApiDeps, KeySummary } from "./deps.js";
 // are stored as sha256 hash + display prefix ONLY. The plaintext is minted here,
 // returned EXACTLY ONCE in the POST response, and never persisted or echoed again.
 // The list view projects to a redacted KeySummary — no hash full-text, no plaintext.
-// Revocation is a soft disable (disabled:true), never a physical delete or in-place
-// rewrite (docs/06 key rotation/revocation).
+// Revocation is a soft disable (disabled:true), never an in-place rewrite (docs/06
+// key rotation/revocation). A physical delete is offered only as an explicit
+// second step (DELETE ?purge=true) on an already-revoked key — never on an active
+// one — so destruction is deliberate and the soft-revoke audit step is preserved.
 
 // Redact a stored record to the summary the list view exposes. Deliberately omits
 // `hash` and `account_id` internals beyond what the UI needs; NEVER plaintext.
@@ -158,9 +160,28 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     return c.json({ key_id: id, ...d });
   });
 
-  // DELETE /keys/:id — soft revoke (disabled:true). 404 when the id is unknown.
+  // DELETE /keys/:id — soft revoke (disabled:true) by default. 404 when the id is
+  // unknown. With ?purge=true it instead PERMANENTLY deletes the row — but only a
+  // key that has ALREADY been revoked: a two-step destroy so an active key is
+  // never silently wiped (409 if still active). Audit history survives — telemetry
+  // references key_id as an unlinked column (docs/06).
   app.delete("/admin/api/keys/:id", async (c) => {
     const id = c.req.param("id");
+    if (c.req.query("purge") === "true") {
+      // Gate on the current state: must exist AND be revoked first.
+      const existing = (await deps.keyStore.list()).find((r) => r.key_id === id);
+      if (!existing) return c.json({ error: "key not found" }, 404);
+      if (!existing.disabled) {
+        return c.json({ error: "key must be revoked before deletion" }, 409);
+      }
+      try {
+        await deps.keyStore.deleteKey(id);
+      } catch {
+        // Lost a race — the row vanished between the read and the delete.
+        return c.json({ error: "key not found" }, 404);
+      }
+      return c.json({ deleted: id });
+    }
     try {
       await deps.keyStore.disable(id);
     } catch {

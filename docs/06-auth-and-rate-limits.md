@@ -129,6 +129,14 @@ through the request — downstream code reads the caps, never the store.
   budgets, concurrency, memory defaults), leaving omitted columns untouched; it
   never mutates `role` or the immutable identity
   (`key_id`/`hash`/`prefix`/`account_id`).
+- **Permanent deletion is an explicit second step.** An already-**revoked** key
+  may be physically removed via `KeyStore.deleteKey` (admin:
+  `DELETE /admin/api/keys/:id?purge=true`). The route gates it server-side: an
+  **active** key cannot be purged (`409`) — it must be revoked first, so the
+  soft-revoke audit step is never skipped and an active key is never silently
+  wiped. Deletion is safe for observability: telemetry/payload rows reference
+  `api_key_id` as an unlinked column (no FK to `api_keys`), so past decisions keep
+  their (now-dangling) key reference for audit even after the key row is gone.
 
 ## Rate limits & quotas
 

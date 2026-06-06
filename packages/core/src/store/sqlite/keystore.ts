@@ -79,6 +79,15 @@ export class SqliteKeyStore implements KeyStore {
     }
   }
 
+  // Hard delete: physically remove the row. The "must be disabled first" policy
+  // is enforced by the admin route, not here. Throws on unknown id (fail-loud).
+  async deleteKey(keyId: string): Promise<void> {
+    const res = this.db.delete(apiKeys).where(eq(apiKeys.keyId, keyId)).run();
+    if (res.changes === 0) {
+      throw new Error(`key not found: ${keyId}`);
+    }
+  }
+
   // Edit ONLY the cap columns PRESENT in `patch` (null clears: rate limit →
   // inherit, allowed_lanes → no whitelist). Omitted fields are left untouched,
   // so a partial PATCH never rewrites a sibling column (no concurrent-clobber).
