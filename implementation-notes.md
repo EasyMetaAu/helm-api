@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-06 · 记忆 thread source 新 key 默认 auto（配合「记忆默认开启」；用户决策；docs/08）
+
+- **动机**：承接同日「记忆默认开启」（新 key `memory_mode` mint 默认 `inject`）。但 `memory_thread_source` 仍 mint 默认 `header`——新 key 记忆开了却**不自动推导 thread**（缺 `x-thread-id` 时不回退信号链 → 无 per-conversation 记忆），等于开了个寂寞。把新 key 的 thread source mint 默认翻 `header → auto`，让记忆真正开箱即用。
+- **范围 = 仅新 key（用户拍板，不迁移既有 key）**：改两个 keystore 的 `createKey` mint 默认 `?? "header" → ?? "auto"`（sqlite + pg），与紧邻的 `memoryMode ?? "inject"` 同一档（**mint-default**）。**Zod `ApiKeyRecordSchema.default("header")` 保持不动**（**parse-default**，镜像 `memory_mode` 的 `.default("off")`）——既有 key 列默认与已应用迁移仍 `header`、不重写。
+- **parse-default vs mint-default 分离（沿用 memory_mode 既有模式）**：docs/06 列的是 schema parse-defaults（off/header，照旧准确，不动）；docs/08 列的是新 key mint 行为（inject/auto），只改这一行 `(default header) → (default auto — new keys)`。两文档各自内部自洽。
+- **admin UI 诚实化**：`KeyCapsForm.emptyKeyCaps` 的 thread source `'header' → 'auto'` + `CreateKeyDialog` 省略 guard `!== 'header' → !== 'auto'`——下拉默认显示 **Auto** = 实际落库值，**避免重蹈 memory_mode 的 UI 错位**（emptyKeyCaps `memoryMode:'off'` + guard `!=='off'` 省略 → keystore 实际 mint `inject`，UI 显示 Off 却落 inject；本次不碰该 pre-existing 错位，仅 thread source 做对）。EditKeyDialog 不动（按存储值预填）。
+- **测试/验证**：`store-contract`（真 sqlite+pglite keystore）断言无记忆字段 create → `memory_thread_source === "auto"`；`schema.test` 维持 parse-default `header`（未动）；admin/ports 的 **fake keystore 保守桩仍 `?? "header"`**（与其 `memoryMode ?? "off"` 桩一致，本就不冒充真 mint 默认，不动）；`memory-scope` 测试显式传 threadSource、两分支俱存，未受影响。typecheck/build/svelte-check 全绿，101 store-contract+keystore 串行通过。
+
+---
+
 ## 2026-06-06 · 记忆默认开启（eval 维持默认关闭——依赖已配置 eval 模型）（用户决策；docs/08）
 
 - **动机**：用户要求「记忆 + 小模型 eval 默认都打开」，复核后**只开记忆、eval 仍默认关**。
@@ -31,19 +41,11 @@
 
 ---
 
-## 2026-06-06 · API key 增加可编辑 name 字段（docs/06）
-
-- **动机**：`/admin/keys` 创建的密钥只有不透明的 `prefix`，运营者记不住某把 key 属于哪个项目。新增 `api_keys.name`——**纯展示标签，绝非鉴权/路由输入**（与 budgets/memory 同档：present-but-nullable）。迁移 **sqlite v19 / pg v18**（additive nullable，pg `ADD COLUMN IF NOT EXISTS`）。
-- **贯穿全栈一处加字段**：3 个 Zod schema 共用 `KeyNameSchema = z.string().trim().min(1).max(100)`（**服务端 trim**：`.trim()` 在 `.min(1)` 前跑，纯空白塌成 `""` 被拒、padded 标签落库归一——Codex P3 修复）；record `.nullable().default(null)`（`.default(null)` 让 legacy 行/既有 fixture 仍解析）；create `.optional()`；update `.nullable().optional()` = 省略不动 / null 清空 → ports `CreateKeyInput.name?` / `KeyPatch.name?:string|null` → 两个 keystore 的 create/update/toRecord → admin route POST/PATCH/toSummary + `KeySummary` → admin api client（`ApiKeyView`/`normalizeView` 读侧也 trim/`toServerBody` 空串不发）→ Create/Edit 对话框（trim，空=null 清空；Edit 预填可改）→ keys 列表新增 **Name 列**（空显示 `Unnamed` 占位）。
-- **i18n**：新增 `Name`/`Unnamed`/帮助句三键，`pnpm i18n:extract`+`i18n:update` 机械登记后手译 zh-hans/zh-hant/ja/ko（占位符复用既有 `Optional`，少一键）。
-- **坑（测试侧，三类）**：① 最小种子迁移测试（sqlite schema.test.ts 第 28 例、memory-schema.test.ts、pg migrate.test.ts）按既有约定把**触及 api_keys 的迁移预标记为已应用**（种子无 api_keys 表）——v19/v18 必须并入预标记集，否则 `ALTER api_keys` 撞「无表」。② 6 个 gateway 测试各自的 `ApiKeyRecord` fixture 字面量缺 `name`（现为 required）→ 补 `name:null`。③ api client 测试**复用单个 `Response` 实例**（body 单次可读）→ 双调用改 `mockResolvedValueOnce` 各给新 Response。
-- **验证**：typecheck / build / svelte-check 全绿；my 改动文件 biome 干净（仓库残留的 reflector-facts noUnusedImports 错误非本次引入）。满载并行下 PGlite(pg) 测试偶发 5s 超时（每跑失败集不同）——隔离串行跑 54/54 全过，确认是 wasm 负载抖动而非逻辑回归。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-06 · API key 增加可编辑 name 字段（docs/06）：新增 `api_keys.name`（纯展示标签，非鉴权/路由）+迁移 sqlite v19/pg v18（additive nullable）；3 个 schema 共用 `KeyNameSchema=z.string().trim().min(1).max(100)`（服务端 trim，纯空白塌成 "" 被拒——Codex P3）；record `.nullable().default(null)`、create `.optional()`、update `.nullable().optional()`(null 清空)；贯穿 ports/两 keystore/admin route(POST/PATCH/toSummary)/api client(normalizeView 读侧也 trim)/Create+Edit 对话框/列表 Name 列(空显 Unnamed)。坑：最小种子迁移测试须把 v19/v18 并入预标记集（种子无 api_keys 表）；6 个 gateway fixture 补 `name:null`；api client 测试复用单 Response(body 单读)→ mockResolvedValueOnce。
 
 ### 2026-06-05 · live 集成测试上线记忆段 + 脱敏器吞数字计数的生产 bug（scripts/integration-live.mjs；docs/07/08/12）：integration-live 新增「Memory middleware」段（observe/inject/写回/fail-open/default-safe/不泄漏正文哨兵）首跑即抓真 bug——脱敏器把 `memory_tokens_injected` 数字计数 mangle 成对象 → DecisionRecord 解析失败 → `/admin/api/requests` 整页 502（#41 起潜伏，fake store 不过脱敏回环故单测/e2e 全未踩）。双侧修：写侧 redactNode 放行 secret-key 命中的标量（number/bool/null 不携凭证，顺救 max_tokens），读侧 schema 对 legacy 损坏行 preprocess→0、非 legacy 垃圾仍 fail-closed。
 

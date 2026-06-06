@@ -46,7 +46,9 @@ export class SqliteKeyStore implements KeyStore {
       // override (e.g. "off"/"observe"). Existing keys keep their stored value.
       memoryMode: input.memoryMode ?? "inject",
       memoryProjectId: input.memoryProjectId ?? null,
-      memoryThreadSource: input.memoryThreadSource ?? "header",
+      // undefined => "auto": a memory-on key derives its thread from client signals
+      // out of the box (issue #97). Pass "header" explicitly to opt out.
+      memoryThreadSource: input.memoryThreadSource ?? "auto",
       createdAt: this.now(),
     };
     this.db.insert(apiKeys).values(row).run();

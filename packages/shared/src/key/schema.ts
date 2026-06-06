@@ -13,11 +13,13 @@ export const KeyRoleSchema = z.enum(["root", "user"]);
 export const OverBudgetBehaviorSchema = z.enum(["degrade", "reject"]);
 
 // Where the memory THREAD anchor comes from when x-thread-id is absent (issue #97).
-// `header` (default): only the explicit header — exactly the pre-#97 behavior.
 // `auto`: derive from signals the client already sends (body metadata.thread_id /
 // conversation_id → x-session-key → OpenAI prompt_cache_key → Anthropic
 // metadata.user_id) so static-header-only clients (Claude Code / Codex) and
-// zero-config clients still get per-conversation memory.
+// zero-config clients still get per-conversation memory. `header`: only the explicit
+// x-thread-id header (opt out of derivation — the pre-#97 behavior). NEW keys are
+// minted with `auto` (set in the keystores, mirroring memory_mode minting `inject`)
+// so a key works out of the box the moment memory is on; moot while memory is off.
 export const MemoryThreadSourceSchema = z.enum(["header", "auto"]);
 
 // Human-readable key label (docs/06) — cosmetic only, never an auth/routing input.
@@ -80,6 +82,10 @@ export const ApiKeyRecordSchema = z.object({
   // rows predating the migration still parse with memory off.
   memory_mode: MemoryModeSchema.default("off"),
   memory_project_id: z.string().min(1).nullable().default(null),
+  // Zod parse-default is the conservative `header` (legacy rows / record fixtures
+  // that omit the column — mirrors memory_mode parse-defaulting to `off`). NEW keys
+  // are minted with `auto` in the keystores, so a memory-on key derives its thread
+  // out of the box; existing keys keep their stored value.
   memory_thread_source: MemoryThreadSourceSchema.default("header"),
 });
 
