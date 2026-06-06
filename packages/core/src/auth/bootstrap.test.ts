@@ -23,6 +23,16 @@ describe("bootstrapRootKey", () => {
     expect(all[0]?.role).toBe("root");
   });
 
+  it("root key opts OUT of memory (management plane: no inject/auto-thread)", async () => {
+    const keyStore = freshKeyStore();
+    await bootstrapRootKey({ keyStore, generateKey, now: () => new Date(), log: () => {} });
+    const stored = (await keyStore.list())[0];
+    // Despite the keystore minting inject/auto for normal new keys, the bootstrap
+    // root key is explicitly management-plane and must stay memory-inert.
+    expect(stored?.memory_mode).toBe("off");
+    expect(stored?.memory_thread_source).toBe("header");
+  });
+
   it("prints the plaintext exactly once and never persists it", async () => {
     const keyStore = freshKeyStore();
     const fixed = generateKey();

@@ -144,7 +144,7 @@ Stored on the API key (admin UI → key dialog → "Memory defaults"):
 ```text
 memory_mode:          off | observe | inject     (default inject — new keys)
 memory_project_id:    <string> | null            (default null)
-memory_thread_source: header | auto              (default header)
+memory_thread_source: header | auto              (default auto — new keys)
 ```
 
 Explicit `x-memory-*` request headers always override the key defaults —

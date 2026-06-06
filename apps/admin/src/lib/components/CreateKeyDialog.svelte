@@ -67,7 +67,9 @@
     if (form.concurrencyLimit != null) input.concurrency_limit = form.concurrencyLimit;
     if (form.memoryMode !== 'off') input.memory_mode = form.memoryMode;
     if (form.memoryProject.length > 0) input.memory_project_id = form.memoryProject;
-    if (form.memoryThreadSource !== 'header') input.memory_thread_source = form.memoryThreadSource;
+    // Send only when the operator opts out of the default ('auto'); omitted => the
+    // keystore mints 'auto'.
+    if (form.memoryThreadSource !== 'auto') input.memory_thread_source = form.memoryThreadSource;
     try {
       revealed = await createKey(input);
     } catch (e) {

@@ -37,7 +37,9 @@
       degradeLane: '',
       memoryMode: 'off',
       memoryProject: '',
-      memoryThreadSource: 'header',
+      // Mirrors the keystore mint-default: a new key derives its thread automatically
+      // (issue #97). The operator can switch to 'header' to opt out.
+      memoryThreadSource: 'auto',
     };
   }
 
