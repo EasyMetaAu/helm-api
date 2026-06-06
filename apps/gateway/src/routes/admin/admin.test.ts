@@ -96,6 +96,11 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       // Soft revoke: flip disabled ONLY, never rewrite other fields in place.
       row.disabled = true;
     },
+    async deleteKey(keyId) {
+      const idx = rows.findIndex((r) => r.key_id === keyId);
+      if (idx === -1) throw new Error(`key not found: ${keyId}`);
+      rows.splice(idx, 1);
+    },
     async updateKey(keyId, patch) {
       const row = rows.find((r) => r.key_id === keyId);
       if (!row) throw new Error(`key not found: ${keyId}`);
@@ -715,6 +720,44 @@ describe("admin.api keys", () => {
     expect(keyStore.rows[0]?.disabled).toBe(true);
     // Only `disabled` changed; everything else untouched.
     expect({ ...keyStore.rows[0], disabled: before?.disabled }).toEqual(before);
+  });
+
+  it("DELETE ?purge=true permanently removes a REVOKED key", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user" }),
+    });
+    // Two-step destroy: revoke first (soft), then purge.
+    await app.request("/admin/api/keys/key_1", { method: "DELETE" });
+    expect(keyStore.rows[0]?.disabled).toBe(true);
+    const res = await app.request("/admin/api/keys/key_1?purge=true", { method: "DELETE" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ deleted: "key_1" });
+    expect(keyStore.rows).toHaveLength(0); // physically gone
+  });
+
+  it("DELETE ?purge=true on an ACTIVE key is refused (409) and keeps the row", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user" }),
+    });
+    const res = await app.request("/admin/api/keys/key_1?purge=true", { method: "DELETE" });
+    expect(res.status).toBe(409);
+    expect(keyStore.rows).toHaveLength(1);
+    expect(keyStore.rows[0]?.disabled).toBe(false);
+  });
+
+  it("DELETE ?purge=true on an unknown id returns 404", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const res = await app.request("/admin/api/keys/nope?purge=true", { method: "DELETE" });
+    expect(res.status).toBe(404);
   });
 });
 

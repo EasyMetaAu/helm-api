@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-06-06 · 已吊销 key 允许永久删除（两步销毁；用户决策；docs/06）
+
+- **动机**：原来 key 只能软吊销（`DELETE /admin/api/keys/:id` → `disabled:true`），行永久保留，admin 列表里已吊销 key 越积越多、无从清理。用户要求「吊销后允许删除」。
+- **两步销毁（拍板）**：保留 `DELETE /:id` = 软吊销契约不动；硬删除作为同一路由的 `?purge=true` 旗标。路由侧 gate：先 `list().find` 取当前态——未找到 `404`、仍 active `409`（必须先吊销）、已 `disabled` 才 `deleteKey` → `{deleted:id}`。**「必须先吊销」是路由策略，不进 store**（沿用 getByHash 返回 disabled key、由 caller 决策的既有模式）。UI 仅在 disabled 行展示 Delete 按钮，但 server 仍独立校验（纵深防御）——active key 永不被静默清除，软吊销审计步骤不可跳过。
+- **审计存活（关键论据）**：telemetry/payload 表的 `api_key_id` 是**无 FK 的纯文本列**（schema 第 49/58 行），硬删 key 行不级联、不报错，历史决策仍保留该（现悬空）key 引用可供审计。这调和了 CLAUDE.md 原则 7 / docs/06「吊销不物理删除」——那是指吊销本身不该静默销毁；此处是**显式二次销毁**，前提是已有一条可审计的软吊销记录。
+- **贯穿层**：core `KeyStore.deleteKey`（port + sqlite `db.delete().run()` 查 `changes===0`、pg `.returning()` 查 `length===0`，均 throw on unknown）→ admin route 分支 → api client `deleteKey` 打 `?purge=true` → `+page.svelte`（disabled 行 Delete 按钮 + 确认 Modal，成功 `keys.filter` 移除行）。i18n 新增 6 key（en + zh-hans 意译，其余 locale 回退英文，留 `pnpm i18n:sync` 补）。
+- **测试（TDD 先红）**：keystore.test（删除后 getByHash→null、list 变短；删未知 reject）；admin.test（mock 加 `deleteKey` splice；purge disabled→200+行消失、purge active→409+行存、purge unknown→404；原软吊销 no-flag 用例保持绿）；keys.test（mock 加 `deleteKey`；disabled 行只显 Delete、确认后 deleteKey 被调+行消失、删除失败显错+行存 fail-closed）。
+- **坑/注**：`?purge=true` 旗标 vs 子资源路径——选旗标以保单 handler、不破既有 revoke 契约/测试。route gate 用 `list().find` 而非新增 `getById`（port 无 getById，list 量小、admin 非热路径），read→delete 之间的 TOCTOU 在自托管单管理员场景可忽略，且 deleteKey 仍 throw→catch 回 404 兜底。
+
+---
+
 ## 2026-06-06 · 记忆 thread source 新 key 默认 auto（配合「记忆默认开启」；用户决策；docs/08）
 
 - **动机**：承接同日「记忆默认开启」（新 key `memory_mode` mint 默认 `inject`）。但 `memory_thread_source` 仍 mint 默认 `header`——新 key 记忆开了却**不自动推导 thread**（缺 `x-thread-id` 时不回退信号链 → 无 per-conversation 记忆），等于开了个寂寞。把新 key 的 thread source mint 默认翻 `header → auto`，让记忆真正开箱即用。
@@ -30,21 +41,11 @@
 
 ---
 
-## 2026-06-06 · 订阅 provider 绑定全程走代理，堵住绑定首步的真实 IP 泄露（issue #38；docs/02/06/11）
-
-- **Bug**：订阅 provider 绑定的所有出站调用硬编码全局 `fetch`，代理只能在绑定**之后**于 ManageAccountDialog 设置。于是绑定的**第一通网络请求即从运营者真实 IP 发出**——Copilot 的 device-code POST（第 1 步）、Anthropic/Codex 的 token 交换（Finish 步）；连 token 刷新（synthesis/401/quota）也走真实 IP，唯独 chat 执行已走代理。
-- **修复（注入 fetch seam，原则 1）**：core OAuth kit 全部网络函数追加可选 `fetchImpl`（默认全局 fetch → 向后兼容）；`OAuthProviderInterface.refreshToken(creds, fetchImpl?)`；token-manager 的 `doPresetRefresh` 把 `deps.fetch` 透传给 refresh。core 只收一个 drop-in fetch，不识代理细节（与 createProviderClient/token-manager 既有 fetch seam 一致）。
-- **绑定首步即收代理**：连接对话框第 1 步加可选代理区（type/host/port/user/pass）；start 路由把代理 `validateProxyConfig` 后 pin 进 login session（manual 的 begin 纯函数无网络，device 的 begin **就是**首通调用 → 必须先有代理）；complete/poll 用 session 代理；绑定成功后把代理写进 account settings → 与 resolveProviderProxy 同一 blob，refresh/execution/quota 自动复用 = 真正"全程"，不需二次录入。
-- **执行/刷新侧补漏**：server.ts synthesis 与 buildCredential 的 preset token manager 现传 `fetch: makeProxyFetch(proxy)`；admin ensureFresh/listModels/两个 quota fetch 同步注入；discoverOAuthModels/listAnthropicModels 也接 fetchImpl。
-- **测试（无泄露证明）**：注入 spy `makeFetch` + 把全局 fetch stub 成 throw——绑定走代理则全局 `fetch` **永不被调用**（被调即抛错令测试失败），并断言代理已落 settings、密码加密不回显；token-manager 断言 refresh 收到注入 fetch。
-- **坑/注**：CLI 的 `loginAnthropic`/`loginGitHubCopilot` 暂留默认全局 fetch（本次主体是 admin UI；CLI 加代理 flag 时再接同一 seam）。i18n 新增 3 个 key（en + zh-hans/hant 意译，ja/ko 回退英文）。全量单测仅 PGlite store 测试在并行下偶发 flaky（隔离跑全绿），与本改动无关。
-- **Codex review 三修**：(P1) `buildServer` 的 `primaryCred = buildCredential(first, oauthCtx)` 漏传代理——primary 若是 preset-OAuth，其 token manager 刷新仍走全局 fetch（且 L1013 用该 client 覆盖了 buildProviderClients 里带代理的版本）→ eval/default/401 路径泄露。改：`resolveProviderProxy` 一次算出 `primaryProxy`，同时喂给 buildCredential（刷新）与 createProviderClient（执行）。(P2) 绑定持久化顺序改「先代理后 token」（fail-closed）：settings 写失败则 token 不落库、运营者重试，绝不出现「已绑定但无代理 → 重启后直连」；token 写失败只剩孤儿代理设置（无 token 不可路由，下次绑定覆盖）。(P2) UI 文案夸大——浏览器打开的授权页（window.open）走的是管理员浏览器、不经代理；改为「网关对 provider 的请求走代理并保存，浏览器登录页不走代理」（en+zh 同步）。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-06 · 订阅 provider 绑定全程走代理，堵住绑定首步真实 IP 泄露（issue #38；docs/02/06/11）：所有 OAuth 出站硬编码全局 fetch → 绑定首通（Copilot device-code POST / Anthropic·Codex token 交换）+ 刷新从运营者真实 IP 发出，唯 chat 执行走代理。修：core OAuth kit 全网络函数加可选 `fetchImpl`（默认全局 fetch 向后兼容）+ `refreshToken(creds,fetchImpl?)`；连接对话框第 1 步加代理区，start 路由 validate 后 pin 进 login session，绑定成功写 account settings → refresh/execution/quota 复用。测试 stub 全局 fetch 成 throw 证明绑定走代理则永不调用全局 fetch。Codex 三修：(P1) buildServer primaryCred 漏传代理→preset-OAuth 刷新泄露，resolveProviderProxy 一次算 primaryProxy 同喂 buildCredential+createProviderClient；(P2) 持久化改「先代理后 token」fail-closed；(P2) UI 文案改「浏览器登录页不走代理」。
 
 ### 2026-06-06 · API key 增加可编辑 name 字段（docs/06）：新增 `api_keys.name`（纯展示标签，非鉴权/路由）+迁移 sqlite v19/pg v18（additive nullable）；3 个 schema 共用 `KeyNameSchema=z.string().trim().min(1).max(100)`（服务端 trim，纯空白塌成 "" 被拒——Codex P3）；record `.nullable().default(null)`、create `.optional()`、update `.nullable().optional()`(null 清空)；贯穿 ports/两 keystore/admin route(POST/PATCH/toSummary)/api client(normalizeView 读侧也 trim)/Create+Edit 对话框/列表 Name 列(空显 Unnamed)。坑：最小种子迁移测试须把 v19/v18 并入预标记集（种子无 api_keys 表）；6 个 gateway fixture 补 `name:null`；api client 测试复用单 Response(body 单读)→ mockResolvedValueOnce。
 

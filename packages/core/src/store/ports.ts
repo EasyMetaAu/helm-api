@@ -143,6 +143,13 @@ export interface KeyStore {
   // Soft revoke: set disabled=true. Never physically deletes, never rewrites
   // other fields in place ("rotation/revocation never mutates in place").
   disable(keyId: string): Promise<void>;
+  // Hard delete: physically remove the row. Use ONLY after a soft revoke — the
+  // "must be disabled first" policy is enforced by the caller (admin route), not
+  // here, mirroring how getByHash returns disabled keys and lets the caller
+  // decide. Audit history survives: telemetry/payloads reference key_id as an
+  // unlinked column (no FK), so past decisions keep their reference. Throws on an
+  // unknown id (fail-loud, like disable/updateKey).
+  deleteKey(keyId: string): Promise<void>;
   // Edit a key's per-key caps (docs/06). PARTIAL: only the fields PRESENT in
   // `patch` are written; an omitted field is left untouched, so two concurrent
   // partial PATCHes on different fields cannot clobber each other (no
