@@ -162,6 +162,15 @@ export {
   LanesConfigSchema,
   parseLanesConfig,
 } from "./lanes/schema.js";
+// Memory middleware — Observer compaction policy. Pure + config-driven so the
+// background worker can avoid paying for premature summaries when economy mode is on.
+export {
+  type CompactionDecision,
+  chooseObserverCompaction,
+  type EconomyCompactionPolicy,
+  type FixedCompactionPolicy,
+  type ObserverCompactionPolicy,
+} from "./memory/compaction-policy.js";
 // Memory forgetting — the decay buffer-flush TRIGGER (docs/12 P5). Run on the worker
 // tick (never per request): enqueues account-scoped decay jobs for due accounts, gated.
 export { type DecayTriggerDeps, maybeEnqueueDecayJobs } from "./memory/decay-trigger.js";
@@ -223,15 +232,6 @@ export {
   ownerScopedThreadId,
   resolveMemoryMode,
 } from "./memory/observe.js";
-// Memory middleware — Observer compaction policy. Pure + config-driven so the
-// background worker can avoid paying for premature summaries when economy mode is on.
-export {
-  chooseObserverCompaction,
-  type CompactionDecision,
-  type EconomyCompactionPolicy,
-  type FixedCompactionPolicy,
-  type ObserverCompactionPolicy,
-} from "./memory/compaction-policy.js";
 // Memory middleware — background Observer (docs/08 Phase 2). Off the request path:
 // compresses a thread's older raw messages into one auditable observation.
 // Framework-agnostic; never touches routing/lane state.
