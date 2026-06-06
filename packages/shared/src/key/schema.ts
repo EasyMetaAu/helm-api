@@ -26,6 +26,11 @@ export const ApiKeyRecordSchema = z.object({
   prefix: z.string().min(1), // e.g. helm_live_ab12 — display/debug only
   account_id: z.string().min(1),
   role: KeyRoleSchema,
+  // Human-readable label so an operator can tell at a glance which project/client a
+  // key belongs to (the prefix alone is opaque). PURELY cosmetic — never an auth or
+  // routing input. null = unnamed. `.default(null)` (like the budgets/memory fields)
+  // so legacy rows predating the column — and unrelated record fixtures — still parse.
+  name: z.string().min(1).max(100).nullable().default(null),
   // Per-key caps (docs/06): present-but-nullable so the storage shape is explicit.
   allowed_lanes: z.array(z.string()).nullable(),
   allow_custom_model: z.boolean(),
@@ -83,6 +88,8 @@ export type ApiKeyRecord = z.infer<typeof ApiKeyRecordSchema>;
 export const CreateKeyRequestSchema = z
   .object({
     role: KeyRoleSchema.default("user"),
+    // Optional human-readable label at mint time (omitted => unnamed). Cosmetic only.
+    name: z.string().min(1).max(100).optional(),
     allowed_lanes: z.array(z.string().min(1)).optional(),
     allow_custom_model: z.boolean().optional(),
     // Optional per-key rate limits at mint time. Omitted => inherit the system
@@ -124,6 +131,8 @@ export type CreateKeyRequest = z.infer<typeof CreateKeyRequestSchema>;
 // allow_custom_model is a plain boolean (not nullable): present = set, omit = leave.
 export const UpdateKeyRequestSchema = z
   .object({
+    // Rename a key after mint. Omit = leave unchanged; null = clear back to unnamed.
+    name: z.string().min(1).max(100).nullable().optional(),
     allowed_lanes: z.array(z.string().min(1)).nullable().optional(),
     allow_custom_model: z.boolean().optional(),
     rate_limit_rpm: z.number().int().nonnegative().nullable().optional(),

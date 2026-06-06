@@ -227,4 +227,59 @@ describe("SqliteKeyStore", () => {
     await expect(store.updateKey("nope", { rateLimitRpm: 1, rateLimitTpm: 1 })).rejects.toThrow();
     await expect(store.updateKey("nope", {})).rejects.toThrow();
   });
+
+  it("defaults name to null when omitted; round-trips a name set at creation", async () => {
+    const store = freshStore();
+    await store.createKey({ keyId: "k1", hash: "h1", prefix: "p1", accountId: "a", role: "user" });
+    expect((await store.getByHash("h1"))?.name).toBeNull();
+    await store.createKey({
+      keyId: "k2",
+      hash: "h2",
+      prefix: "p2",
+      accountId: "a",
+      role: "user",
+      name: "Production backend",
+    });
+    expect((await store.getByHash("h2"))?.name).toBe("Production backend");
+  });
+
+  it("updateKey renames a key (set + clear) and leaves other fields untouched", async () => {
+    const store = freshStore();
+    await store.createKey({
+      keyId: "k1",
+      hash: "h1",
+      prefix: "p1",
+      accountId: "a",
+      role: "user",
+      name: "Initial",
+      allowedLanes: ["balanced"],
+      rateLimitRpm: 7,
+    });
+    await store.updateKey("k1", { name: "Renamed" });
+    let got = await store.getByHash("h1");
+    expect(got?.name).toBe("Renamed");
+    // unrelated columns survive (no read-modify-write clobber); role never written
+    expect(got?.allowed_lanes).toEqual(["balanced"]);
+    expect(got?.rate_limit_rpm).toBe(7);
+    expect(got?.role).toBe("user");
+    // null clears the name back to unnamed
+    await store.updateKey("k1", { name: null });
+    got = await store.getByHash("h1");
+    expect(got?.name).toBeNull();
+    expect(got?.allowed_lanes).toEqual(["balanced"]);
+  });
+
+  it("updateKey leaves name untouched when the patch omits it", async () => {
+    const store = freshStore();
+    await store.createKey({
+      keyId: "k1",
+      hash: "h1",
+      prefix: "p1",
+      accountId: "a",
+      role: "user",
+      name: "Keep me",
+    });
+    await store.updateKey("k1", { rateLimitRpm: 99 });
+    expect((await store.getByHash("h1"))?.name).toBe("Keep me");
+  });
 });

@@ -16,6 +16,7 @@ function toSummary(rec: {
   key_id: string;
   prefix: string;
   role: "root" | "user";
+  name: string | null;
   allowed_lanes: string[] | null;
   allow_custom_model: boolean;
   disabled: boolean;
@@ -36,6 +37,7 @@ function toSummary(rec: {
     key_id: rec.key_id,
     prefix: rec.prefix,
     role: rec.role,
+    name: rec.name,
     allowed_lanes: rec.allowed_lanes,
     allow_custom_model: rec.allow_custom_model,
     disabled: rec.disabled,
@@ -75,6 +77,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       prefix: minted.prefix,
       accountId: deps.accountId,
       role: parsed.data.role,
+      name: parsed.data.name,
       allowedLanes: parsed.data.allowed_lanes,
       allowCustomModel: parsed.data.allow_custom_model ?? false,
       rateLimitRpm: parsed.data.rate_limit_rpm,
@@ -116,6 +119,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     // field as `undefined`, distinguishing "clear" (null) from "leave unchanged".
     const d = parsed.data;
     const patch: {
+      name?: string | null;
       allowedLanes?: string[] | null;
       allowCustomModel?: boolean;
       rateLimitRpm?: number | null;
@@ -131,6 +135,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       memoryProjectId?: string | null;
       memoryThreadSource?: "header" | "auto";
     } = {};
+    if (d.name !== undefined) patch.name = d.name;
     if (d.allowed_lanes !== undefined) patch.allowedLanes = d.allowed_lanes;
     if (d.allow_custom_model !== undefined) patch.allowCustomModel = d.allow_custom_model;
     if (d.rate_limit_rpm !== undefined) patch.rateLimitRpm = d.rate_limit_rpm;

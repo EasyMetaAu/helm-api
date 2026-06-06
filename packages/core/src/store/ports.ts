@@ -106,6 +106,9 @@ export interface CreateKeyInput {
   prefix: string; // e.g. helm_live_xxxx — display/debug only
   accountId: string;
   role: "root" | "user";
+  // Optional human-readable label (cosmetic; never an auth/routing input). Omitted
+  // => stored NULL => unnamed.
+  name?: string;
   allowedLanes?: string[];
   allowCustomModel?: boolean;
   // Per-key rate-limit override (docs/06). Omitted => stored NULL => inherit the
@@ -155,6 +158,8 @@ export interface KeyStore {
 // throwing on an unknown id). Mirrors the editable subset of the key record —
 // role and the immutable identity are deliberately absent.
 export interface KeyPatch {
+  // Rename: present (even null) => written; null clears back to unnamed.
+  name?: string | null;
   allowedLanes?: string[] | null;
   allowCustomModel?: boolean;
   rateLimitRpm?: number | null;

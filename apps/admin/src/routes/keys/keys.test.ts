@@ -21,6 +21,7 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     key_id: keyId,
     prefix: `helm_live_${keyId}`,
     role: 'user',
+    name: null,
     allowed_lanes: null,
     allow_custom_model: false,
     disabled: false,
@@ -64,6 +65,41 @@ describe('keys page', () => {
     // No long opaque secret string anywhere (prefixes are short helm_live_xxxx).
     const text = document.body.textContent ?? '';
     expect(text).not.toMatch(/helm_live_[A-Za-z0-9]{16,}/);
+  });
+
+  it('shows the key name in the row, and an "unnamed" placeholder when null', () => {
+    renderPage([
+      key('k1', { name: 'Production backend' }),
+      key('k2', { name: null }),
+    ]);
+    const rows = screen.getAllByTestId('key-row');
+    expect(within(rows[0]).getByText('Production backend')).toBeInTheDocument();
+    expect(within(rows[1]).getByText(/unnamed/i)).toBeInTheDocument();
+  });
+
+  it('Edit renames a key: PATCHes the new name; blank clears it to null', async () => {
+    renderPage([key('k1', { name: 'Old name' })]);
+    const row = screen.getByTestId('key-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /^edit$/i }));
+    let dialog = screen.getByRole('dialog', { name: /edit key/i });
+    // The name field is pre-filled and editable; set a new value.
+    const nameInput = within(dialog).getByLabelText(/^name$/i);
+    expect((nameInput as HTMLInputElement).value).toBe('Old name');
+    await fireEvent.input(nameInput, { target: { value: 'New name' } });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
+    await waitFor(() =>
+      expect(updateKey).toHaveBeenCalledWith('k1', expect.objectContaining({ name: 'New name' })),
+    );
+
+    // Re-open and clear the name → PATCH sends null (cleared), not undefined.
+    updateKey.mockClear();
+    await fireEvent.click(within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }));
+    dialog = screen.getByRole('dialog', { name: /edit key/i });
+    await fireEvent.input(within(dialog).getByLabelText(/^name$/i), { target: { value: '   ' } });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
+    await waitFor(() =>
+      expect(updateKey).toHaveBeenCalledWith('k1', expect.objectContaining({ name: null })),
+    );
   });
 
   it("flags a root key row with a 'management plane only' warning (docs/06)", () => {
@@ -135,6 +171,8 @@ describe('keys page', () => {
     await fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
     await waitFor(() =>
       expect(updateKey).toHaveBeenCalledWith('k1', {
+        // Name untouched in this edit → still unnamed (null), never undefined.
+        name: null,
         allowed_lanes: ['economy'],
         allow_custom_model: false,
         rate_limit_rpm: 120,

@@ -135,6 +135,43 @@ describe('keys api client', () => {
     expect(keys[1].memory_thread_source).toBe('auto');
   });
 
+  it('listKeys surfaces the key name (null when absent/empty, string when set)', async () => {
+    const rows = [summaryRow('k1'), summaryRow('k2', { name: 'Production backend' })];
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify(rows), { status: 200 }),
+    );
+    const keys = await listKeys();
+    expect(keys[0].name).toBeNull();
+    expect(keys[1].name).toBe('Production backend');
+  });
+
+  it('createKey sends the name when set and omits it when blank (strict schema)', async () => {
+    // A Response body is single-use, so give each call its own fresh Response.
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ key_id: 'k', plaintext: 'x', prefix: 'p' }), { status: 201 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ key_id: 'k', plaintext: 'x', prefix: 'p' }), { status: 201 }),
+      );
+    await createKey({ role: 'user', name: 'Mobile app' });
+    await createKey({ role: 'user', name: '' });
+    const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(JSON.parse(calls[0][1].body as string).name).toBe('Mobile app');
+    expect(JSON.parse(calls[1][1].body as string)).not.toHaveProperty('name');
+  });
+
+  it('updateKey forwards the name to rename (string) and null to clear it', async () => {
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ key_id: 'k' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ key_id: 'k' }), { status: 200 }));
+    await updateKey('k', { name: 'Renamed' });
+    await updateKey('k', { name: null });
+    const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(JSON.parse(calls[0][1].body as string).name).toBe('Renamed');
+    expect(JSON.parse(calls[1][1].body as string).name).toBeNull();
+  });
+
   it('createKey sends per-key rate limits when set (including 0 = unlimited)', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ key_id: 'key_1', plaintext: 'x', prefix: 'p' }), {

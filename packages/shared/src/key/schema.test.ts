@@ -148,6 +148,22 @@ describe("ApiKeyRecordSchema", () => {
     expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_tokens: 0 }).success).toBe(false);
     expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), budget_spend_usd: 0 }).success).toBe(false);
   });
+
+  it("defaults name to null when omitted (legacy rows / additive field)", () => {
+    expect(ApiKeyRecordSchema.parse(fullKey()).name).toBeNull();
+  });
+
+  it("accepts a name (1..100 chars) and rejects empty / over-long (fail-closed)", () => {
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), name: "Production backend" }).success).toBe(
+      true,
+    );
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), name: null }).success).toBe(true);
+    // Empty must never masquerade as a real label — null is the only "unnamed".
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), name: "" }).success).toBe(false);
+    expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), name: "x".repeat(101) }).success).toBe(
+      false,
+    );
+  });
 });
 
 describe("CreateKeyRequestSchema", () => {
@@ -206,6 +222,15 @@ describe("CreateKeyRequestSchema", () => {
     expect(CreateKeyRequestSchema.safeParse({ budget_requests: 0 }).success).toBe(false);
     expect(CreateKeyRequestSchema.safeParse({ budget_spend_usd: 0 }).success).toBe(false);
     expect(CreateKeyRequestSchema.safeParse({ over_budget_behavior: "nope" }).success).toBe(false);
+  });
+
+  it("accepts an optional name at mint; rejects empty / over-long", () => {
+    const res = CreateKeyRequestSchema.safeParse({ role: "user", name: "Mobile app" });
+    expect(res.success).toBe(true);
+    if (res.success) expect(res.data.name).toBe("Mobile app");
+    expect(CreateKeyRequestSchema.safeParse({ role: "user" }).success).toBe(true);
+    expect(CreateKeyRequestSchema.safeParse({ name: "" }).success).toBe(false);
+    expect(CreateKeyRequestSchema.safeParse({ name: "x".repeat(101) }).success).toBe(false);
   });
 });
 
@@ -268,6 +293,13 @@ describe("UpdateKeyRequestSchema", () => {
     expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: null }).success).toBe(true);
     expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: 0 }).success).toBe(false);
     expect(UpdateKeyRequestSchema.safeParse({ concurrency_limit: 2.5 }).success).toBe(false);
+  });
+
+  it("renames a key: a new name (set), null (clear to unnamed); rejects empty / over-long", () => {
+    expect(UpdateKeyRequestSchema.safeParse({ name: "Renamed" }).success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ name: null }).success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ name: "" }).success).toBe(false);
+    expect(UpdateKeyRequestSchema.safeParse({ name: "x".repeat(101) }).success).toBe(false);
   });
 });
 

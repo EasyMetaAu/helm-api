@@ -27,6 +27,9 @@
   type Role = 'root' | 'user';
 
   let role = $state<Role>('user');
+  // Optional human-readable label so the operator can tell which project/client this
+  // key belongs to later (the prefix alone is opaque). Trimmed; blank => unnamed.
+  let name = $state<string>('');
   // Every per-key cap lives in the shared buffer rendered by <KeyCapsForm>
   // (identical structure to the edit dialog). null/empty = leave unset.
   let form = $state(emptyKeyCaps());
@@ -46,6 +49,8 @@
       role,
       allow_custom_model: form.allowCustomModel,
     };
+    const trimmedName = name.trim();
+    if (trimmedName.length > 0) input.name = trimmedName;
     if (form.allowedLanes.length > 0) input.allowed_lanes = [...form.allowedLanes];
     // Send a rate limit only when the operator set one; blank => inherit default.
     // `!= null` also catches the `undefined` Svelte 5 gives an emptied number input.
@@ -96,6 +101,7 @@
         // response. NEVER a slice of the plaintext.
         prefix: revealed.prefix,
         role,
+        name: name.trim().length > 0 ? name.trim() : null,
         allowed_lanes: form.allowedLanes.length > 0 ? [...form.allowedLanes] : null,
         allow_custom_model: form.allowCustomModel,
         disabled: false,
@@ -155,6 +161,21 @@
     {/if}
 
     <div class="mt-3 flex flex-col gap-3">
+      <label class="flex flex-col gap-1 text-sm">
+        <span class="field-label">{$t('Name')}</span>
+        <input
+          type="text"
+          maxlength="100"
+          aria-label={$t('Name')}
+          placeholder={$t('Optional')}
+          class="input"
+          bind:value={name}
+        />
+        <span class="field-help"
+          >{$t('A label to help you recognize this key later — e.g. the project it belongs to.')}</span
+        >
+      </label>
+
       <label class="flex flex-col gap-1 text-sm">
         <span class="field-label">{$t('Role')}</span>
         <select bind:value={role} aria-label={$t('role')} class="select">

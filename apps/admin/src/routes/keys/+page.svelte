@@ -130,6 +130,7 @@
       <table class="table-base">
         <thead class="table-head">
           <tr>
+            <th class="px-3 py-2">{$t('Name')}</th>
             <th class="px-3 py-2">{$t('Key (prefix)')}</th>
             <th class="px-3 py-2">{$t('Role')}</th>
             <th class="px-3 py-2">{$t('Caps')}</th>
@@ -142,6 +143,13 @@
         <tbody>
           {#each keys as key (key.key_id)}
             <tr data-testid="key-row" class="table-row align-top">
+              <td class="px-3 py-2">
+                {#if key.name}
+                  <span class="text-ink-strong">{key.name}</span>
+                {:else}
+                  <span class="text-ink-muted">{$t('Unnamed')}</span>
+                {/if}
+              </td>
               <td class="px-3 py-2">
                 <code class="font-mono text-ink-strong">{key.prefix}</code>
               </td>

@@ -116,10 +116,10 @@ describe("runPgMigrations — per-migration atomicity", () => {
       sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
     );
     // Seed everything EXCEPT the memory migrations (v13–v15) as applied, so
-    // only they run — the minimal seed has no api_keys table for v9–v12/v16, and
+    // only they run — the minimal seed has no api_keys table for v9–v12/v16/v18, and
     // no memory_observations table for the v17 forgetting deltas, so both are
     // pre-marked applied to keep this test scoped to the v13–v15 jobs upgrade.
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17]) {
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );

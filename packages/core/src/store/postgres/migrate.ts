@@ -393,6 +393,15 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX        IF NOT EXISTS idx_memory_facts_active  ON memory_facts (owner_id, status, expired_at);
     `,
   },
+  {
+    // Per-key human-readable NAME — pg mirror of the sqlite v19 migration (different
+    // ledger, same logical change). Additive + nullable, IF NOT EXISTS = idempotent
+    // (NULL = unnamed). Cosmetic label only, never an auth/routing input.
+    version: 18,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS name TEXT;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

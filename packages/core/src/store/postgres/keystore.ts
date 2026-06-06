@@ -25,6 +25,8 @@ export class PgKeyStore implements KeyStore {
       prefix: input.prefix,
       accountId: input.accountId,
       role: input.role,
+      // Human-readable label: undefined input => NULL => unnamed.
+      name: input.name ?? null,
       allowedLanes: input.allowedLanes ?? null,
       allowCustomModel: input.allowCustomModel ?? false,
       disabled: false,
@@ -80,6 +82,7 @@ export class PgKeyStore implements KeyStore {
     const set: Partial<
       Pick<
         ApiKeyRow,
+        | "name"
         | "allowedLanes"
         | "allowCustomModel"
         | "rateLimitRpm"
@@ -96,6 +99,8 @@ export class PgKeyStore implements KeyStore {
         | "memoryThreadSource"
       >
     > = {};
+    // Rename (null clears back to unnamed). Cosmetic only.
+    if (patch.name !== undefined) set.name = patch.name;
     // Native jsonb: assign the array (or null = no cap) directly, no stringify.
     if (patch.allowedLanes !== undefined) set.allowedLanes = patch.allowedLanes;
     if (patch.allowCustomModel !== undefined) set.allowCustomModel = patch.allowCustomModel;
@@ -133,6 +138,7 @@ export class PgKeyStore implements KeyStore {
       prefix: row.prefix,
       account_id: row.accountId,
       role: row.role === "root" ? "root" : "user",
+      name: row.name ?? null,
       allowed_lanes: row.allowedLanes ?? null,
       allow_custom_model: row.allowCustomModel,
       disabled: row.disabled,

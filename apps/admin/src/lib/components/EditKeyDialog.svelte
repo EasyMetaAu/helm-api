@@ -30,6 +30,9 @@
   // starts any section that holds real values open, so active caps are never
   // hidden behind a closed fold.
   let form = $state(untrack(() => keyCapsFromView(key)));
+  // Editable human-readable label (unlike role/prefix, which are immutable). Trimmed
+  // on save; blank => cleared back to unnamed. Captured once at mount (see above).
+  let name = $state(untrack(() => key.name ?? ''));
 
   let error = $state<string | null>(null);
   let saving = $state<boolean>(false);
@@ -40,6 +43,7 @@
     // Send the WHOLE editable set (explicit null clears a cap) — overwrite intent.
     // `?? null` also catches the `undefined` Svelte 5 gives an emptied number input.
     const patch: UpdateKeyInput = {
+      name: name.trim().length > 0 ? name.trim() : null,
       allowed_lanes: form.allowedLanes.length > 0 ? [...form.allowedLanes] : null,
       allow_custom_model: form.allowCustomModel,
       rate_limit_rpm: form.rpm ?? null,
@@ -60,6 +64,7 @@
       // Project the updated redacted view (role/prefix carried over unchanged).
       onsaved({
         ...key,
+        name: patch.name ?? null,
         allowed_lanes: patch.allowed_lanes ?? null,
         allow_custom_model: form.allowCustomModel,
         rate_limit_rpm: patch.rate_limit_rpm ?? null,
@@ -108,6 +113,22 @@
     <span class="field-help"
       >{$t('Role is fixed for the life of a key — rotate by revoking and minting a new one.')}</span
     >
+
+    <!-- Name IS editable (unlike the identity above). Blank clears it to unnamed. -->
+    <label class="flex flex-col gap-1 text-sm">
+      <span class="field-label">{$t('Name')}</span>
+      <input
+        type="text"
+        maxlength="100"
+        aria-label={$t('Name')}
+        placeholder={$t('Optional')}
+        class="input"
+        bind:value={name}
+      />
+      <span class="field-help"
+        >{$t('A label to help you recognize this key later — e.g. the project it belongs to.')}</span
+      >
+    </label>
 
     <KeyCapsForm bind:form {lanes} expandConfigured />
   </div>

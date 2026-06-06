@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-06 · API key 增加可编辑 name 字段（docs/06）
+
+- **动机**：`/admin/keys` 创建的密钥只有不透明的 `prefix`，运营者记不住某把 key 属于哪个项目。新增 `api_keys.name`——**纯展示标签，绝非鉴权/路由输入**（与 budgets/memory 同档：present-but-nullable）。迁移 **sqlite v19 / pg v18**（additive nullable，pg `ADD COLUMN IF NOT EXISTS`）。
+- **贯穿全栈一处加字段**：3 个 Zod schema（record `z.string().min(1).max(100).nullable().default(null)`——`.default(null)` 让 legacy 行/既有 fixture 仍解析；create `optional`；update `nullable().optional()` = 省略不动 / null 清空）→ ports `CreateKeyInput.name?` / `KeyPatch.name?:string|null` → 两个 keystore 的 create/update/toRecord → admin route POST/PATCH/toSummary + `KeySummary` → admin api client（`ApiKeyView`/`normalizeView`/`toServerBody`，空串不发）→ Create/Edit 对话框（trim，空=null 清空；Edit 预填可改）→ keys 列表新增 **Name 列**（空显示 `Unnamed` 占位）。
+- **i18n**：新增 `Name`/`Unnamed`/帮助句三键，`pnpm i18n:extract`+`i18n:update` 机械登记后手译 zh-hans/zh-hant/ja/ko（占位符复用既有 `Optional`，少一键）。
+- **坑（测试侧，三类）**：① 最小种子迁移测试（sqlite schema.test.ts 第 28 例、memory-schema.test.ts、pg migrate.test.ts）按既有约定把**触及 api_keys 的迁移预标记为已应用**（种子无 api_keys 表）——v19/v18 必须并入预标记集，否则 `ALTER api_keys` 撞「无表」。② 6 个 gateway 测试各自的 `ApiKeyRecord` fixture 字面量缺 `name`（现为 required）→ 补 `name:null`。③ api client 测试**复用单个 `Response` 实例**（body 单次可读）→ 双调用改 `mockResolvedValueOnce` 各给新 Response。
+- **验证**：typecheck / build / svelte-check 全绿；my 改动文件 biome 干净（仓库残留的 reflector-facts noUnusedImports 错误非本次引入）。满载并行下 PGlite(pg) 测试偶发 5s 超时（每跑失败集不同）——隔离串行跑 54/54 全过，确认是 wasm 负载抖动而非逻辑回归。
+
+---
+
 ## 2026-06-05 · live 集成测试上线记忆段 + 脱敏器吞数字计数的生产 bug（scripts/integration-live.mjs；docs/07/08/12）
 
 - **integration-live.mjs 新增「Memory middleware」段**：observe 正常路由；inject hydrate + 写回入队 + DecisionRecord 携带脱敏 memory 元数据（thread_source=header）；后台 worker 压缩后 observation 进 prefix（poll-with-backoff，worker 太慢则 SKIP 不误报——worker 间隔是部署配置）；fail-open（无 thread anchor）；default-safe（非法 x-memory-mode 归一 off）；requests 列表不得泄漏记忆正文哨兵（原则 7）。注：DecisionRecord.memory 只在 INJECT 行打戳（observe 行 memory:null 属设计）。
@@ -27,19 +37,11 @@
 ---
 
 
-## 2026-06-05 · 遗忘策略 Codex 评审修复 VI（2 项；docs/12）
-
-第六轮 Codex review 发现 2 个问题（均为前几轮修复的次生缺陷），全部修复（+4 回归测试）：
-
-1. **（P1）有界扫描的饥饿**：第三轮加的 limit-only 分页按 observed_at 取最旧 N 行——若这一页全是幸存者（被强化/高分），每轮 sweep 重选同一页，limit 之外的 condemned 行永不被处理。**修复：score 谓词下推进 SQL**（`candidates` 参数；sqlite `pow`/`ln`、pg `power`/`ln`，与 forgetting/score.ts 同一公式）——页内只含低于阈值的行，幸存者不占页、归档行离开 active 集，每轮必有进展。TS 复算保留作纵深防御（浮点边缘分歧 → 无害跳过）。docs/12 的「SQL 与 TS 同一公式」承诺至此兑现。
-2. **（P2）archive→rebuild 后 reflection 版本重置**：getReflection 过滤 active 后，nextVersion 只从 active 行推导 → 归档 v4 再复活会重写 v1（reflection_version 对客户端/缓存回退）。**修复：新增 `getReflectionVersionHighWater(scope)`（跨全 status 取 MAX(version)），写 highWater+1**；merge/inject 内容仍只读 active。可选端口方法，旧 fake 回退旧行为。
-
----
-
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-05 · 遗忘策略 Codex 评审修复 VI（docs/12）：有界扫描饥饿——limit-only 分页按 observed_at 取最旧 N，全幸存者页让 limit 外 condemned 行永不处理 → score 谓词下推 SQL（`candidates` 参数，与 score.ts 同公式），TS 复算留作纵深防御；archive→rebuild 后 reflection 版本重置 → 新增 `getReflectionVersionHighWater`（跨全 status MAX），写 highWater+1，内容仍只读 active。
 
 ### 2026-06-05 · 遗忘策略评审修复 V（docs/12）：评分公式语义级修正——access bonus 移进 recency 乘积内 `score = recency × (importance + bonus)`（原加法 = 一次注入的 bonus 0.104 永远高于阈值 0.05，「用过一次 = 永不遗忘」）；强化只延迟遗忘无永久豁免；`enable_llm_supersede` 改 `z.literal(false)`（LLM path 未接入前拒绝 true，不留撒谎开关）；notes 完成「最近 3 条」合规压缩。
 
