@@ -7,14 +7,14 @@
 
 ---
 
-## 2026-06-06 · 记忆与小模型 eval 默认开启（用户决策；docs/03/08；偏离 CLAUDE.md 原则 4）
+## 2026-06-06 · 记忆默认开启（eval 维持默认关闭——依赖已配置 eval 模型）（用户决策；docs/08）
 
-- **动机**：用户明确要求「记忆 + 小模型 eval 默认都打开」。两者开关分处不同层，处理方式各异。
-- **eval（config/classifier.yaml）**：`classifier.eval.enabled: false → true`。**schema 默认仍 `false`**（`EvalConfigSchema`，缺块时的 fail-safe 不动），只把**发行配置**改成 opt-in——发动机默认关、发行版默认开。⚠️ **此处偏离 CLAUDE.md 原则 4「eval 默认关闭」与 docs/03 的「OFF by default (non-negotiable)」**；属用户明示决策，记此备查。成本：不确定/非英文切片会打 eval 模型（providers[0]），下方 cache（TTL 300s / LRU 5000）兜底封顶。
-- **memory（无全局开关，逐 key `memory_mode`）**：① 新 key 的 `keystore.create` 默认 `"off" → "inject"`（sqlite + pg 两个适配器）；② 请求兜底 `memory-scope.ts` `defaults?.mode ?? "off" → ?? "inject"`。**范围 = 仅新 key + 兜底，不迁移既有 key**：DB 列默认与已应用迁移仍保留 `"off"`（底线 + 迁移历史不重写），既有 key 维持其存储值。显式 `x-memory-mode`（含 `off`）与 key 存储 mode 仍永远优先；非法 mode 头仍归一 `off`（fail-safe，不继承宽松默认）。
+- **动机**：用户要求「记忆 + 小模型 eval 默认都打开」，复核后**只开记忆、eval 仍默认关**。
+- **eval 维持 OFF（拍板）**：原本随手把 `classifier.eval.enabled` 翻 `true`，但 Layer-2 eval 客户端把 `model`（`deepseek-v4-flash`）**直发 providers[0]**——没有配好的 DeepSeek 兼容 provider 时，每个 uncertain 请求都先打一通失败调用再 fail-open 回 `balanced`（不 5xx，但纯浪费延迟/无意义）。结论：eval **必须有可用模型才该开**，留作 per-deployment opt-in，遵守 CLAUDE.md 原则 4「eval 默认关闭」。config 注释补上该依赖说明。
+- **memory（无全局开关，逐 key `memory_mode`）**：① 新 key 的 `keystore.create` 默认 `"off" → "inject"`（sqlite + pg 两个适配器）；② 请求兜底 `memory-scope.ts` `defaults?.mode ?? "off" → ?? "inject"`。**范围 = 仅新 key + 兜底，不迁移既有 key**：DB 列默认与已应用迁移仍保留 `"off"`（底线 + 迁移历史不重写），既有 key 维持其存储值。显式 `x-memory-mode`（含 `off`）与 key 存储 mode 仍永远优先；非法 mode 头仍归一 `off`（fail-safe，不继承宽松默认）。记忆走本地 store，无外部模型依赖，故可安全默认开。
 - **forgetting**：`config/memory.yaml` `enabled` 本会话稍早已置 `true`（PR #106）——与「记忆默认开」配套（衰减/巩固/facts 生效）。
-- **测试更新（4 处断言随默认翻转）**：`classifier-samples`（eval true）、`store-contract`（新 key → inject）、`memory-scope`（无头/无默认 → inject）、`messages.memory`（无记忆头 → memory_mode inject）。全单测 **2474 绿**，typecheck 净、lint exit 0（残留 warning 非本次引入）。
-- **文档同步**：README（根）+ docs/01/02/03/09 + docs/README 的「off by default」表述改为「发行默认开启（schema/引擎默认仍 off 作 fail-safe）」。
+- **测试更新（随记忆默认翻转）**：`store-contract`（新 key → inject）、`memory-scope`（无头/无默认 → inject）、`messages.memory`（无记忆头 → memory_mode inject）；`classifier-samples` 仍断言 eval `false`（未动）。全单测 **2474 绿**，typecheck 净、lint exit 0（残留 warning 非本次引入）。
+- **文档同步**：README（根）+ docs/01/02/08 + docs/12 的记忆/遗忘「off/opt-in」表述改为「默认开启」；eval 相关（README/docs/02/03/09/README）维持「off by default」。
 - **坑/取舍**：兜底改 `inject` 触及 memory-scope 原「零回退（无配置 = off）」契约——但**真实认证流量恒携带 key 存储 mode**（auth.ts 注入 `record.memory_mode`），裸兜底仅管「完全无 key 配置」路径；且 `inject` 在 `threadId === null` 时 observe/inject 自闸为 no-op，无 thread 的请求不会真正注入。
 
 ---

@@ -173,12 +173,11 @@ classifier:
   # EvalConfigSchema (@helm/shared): temperature/on_failure/cache.key are locked,
   # max_tokens capped at 1024. Downstream eval modules read this parsed object.
   eval:
-    enabled: true                  # shipped ON. Schema default stays false (fail-safe
-                                    # for an absent block); this config opts the
-                                    # gateway in so uncertain / non-English prompts
-                                    # reach Layer-2 instead of degrading to balanced.
-                                    # Costs the eval model (providers[0]) on the
-                                    # uncertain slice; cache below bounds the spend.
+    enabled: false                 # default OFF (non-negotiable). Layer-2 needs a
+                                    # working eval model — the eval client sends
+                                    # `model` straight to providers[0] — so turning
+                                    # it on requires a configured/supported provider.
+                                    # Opt in per deployment once that model exists.
     # The eval client sends this id DIRECTLY on the wire to the primary provider
     # (official DeepSeek, providers[0]), bypassing the registry — so it MUST be a
     # real bare upstream id DeepSeek accepts. `deepseek-v4-flash` is the cheap/fast
