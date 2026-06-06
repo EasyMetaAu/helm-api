@@ -9,7 +9,7 @@ Helm API is an **open-source, self-hosted** LLM routing gateway (MIT license,
 deployed with Docker) — think of it as "**nginx for the LLM world**". It accepts
 standard AI API requests on four inbound protocols (OpenAI Chat Completions,
 Anthropic Messages, OpenAI Responses, and Google Gemini), uses deterministic
-rules (optionally aided by a small-model evaluation that is **on by default** in the shipped config; the schema default stays off as a fail-safe)
+rules (optionally aided by a small-model evaluation that is **off by default**)
 to classify each request by task type and complexity, and routes it to a
 configurable **lane** rather than to a bare provider alias. It executes the lane
 through a primary plus fallback providers and records every routing decision for
@@ -47,7 +47,7 @@ These keep Helm more focused than its predecessor `llm-router`:
 - **A small, explainable routing core.** Policies are explicit and inspectable;
   there is no black-box scoring at runtime.
 - **Deterministic classification first.** Local rules form Layer 1; the
-  small-model eval is on by default (shipped config) and sits behind them.
+  small-model eval is off by default and sits behind them.
 - **Memory is middleware.** It helps a request be understood; it never rewrites
   lane rules.
 - **Every surprising provider choice is explainable from the logs.**
