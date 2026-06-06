@@ -32,8 +32,11 @@ export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
 // Live-list Anthropic (Claude Pro/Max) models via GET /v1/models with the OAuth
 // subscription identity (same Claude-Code headers the executor uses). Throws on a
 // non-2xx / bad shape so the caller can fall back to the curated set.
-export async function listAnthropicModels(accessToken: string): Promise<string[]> {
-  const res = await fetch("https://api.anthropic.com/v1/models?limit=1000", {
+export async function listAnthropicModels(
+  accessToken: string,
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Promise<string[]> {
+  const res = await fetchImpl("https://api.anthropic.com/v1/models?limit=1000", {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "anthropic-version": "2023-06-01",
@@ -62,14 +65,17 @@ export function hasLiveModelDiscovery(providerId: string): boolean {
 // Resolve the routable model ids for a bound provider. `accessToken` drives live
 // discovery (Copilot + Anthropic). Never throws — a discovery failure falls back
 // to the curated list (or [] when none), so the composition root stays fail-open.
+// `fetchImpl` lets the caller route discovery through the account's egress proxy
+// (issue #38) so this leg of the flow leaves from the same hop as the rest.
 export async function discoverOAuthModels(
   providerId: string,
   accessToken: string | undefined,
+  fetchImpl: typeof globalThis.fetch = fetch,
 ): Promise<string[]> {
   if (providerId === "github-copilot") {
     if (!accessToken) return [];
     try {
-      return await listGitHubCopilotModels(accessToken);
+      return await listGitHubCopilotModels(accessToken, undefined, fetchImpl);
     } catch {
       return [];
     }
@@ -77,7 +83,7 @@ export async function discoverOAuthModels(
   if (providerId === "anthropic") {
     if (accessToken) {
       try {
-        const live = await listAnthropicModels(accessToken);
+        const live = await listAnthropicModels(accessToken, fetchImpl);
         if (live.length > 0) return live;
       } catch {
         // fall through to curated

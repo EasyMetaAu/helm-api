@@ -51,11 +51,19 @@ export interface OAuthLoginCallbacks {
 // the stored credentials; `getApiKey` extracts the bearer the gateway sends
 // upstream. `usesCallbackServer` documents whether login spins a localhost
 // redirect listener (anthropic/codex) vs a device-code flow (copilot).
+//
+// `refreshToken` accepts an optional `fetchImpl` (a drop-in for `fetch`, e.g. the
+// per-account egress proxy fetch from makeProxyFetch). The token manager threads
+// its own `deps.fetch` here so a proxied account refreshes through the SAME hop as
+// its execution traffic — the refresh must never leak the real IP (issue #38).
 export interface OAuthProviderInterface {
   readonly id: OAuthProviderId;
   readonly name: string;
   readonly usesCallbackServer?: boolean;
   login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials>;
-  refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
+  refreshToken(
+    credentials: OAuthCredentials,
+    fetchImpl?: typeof globalThis.fetch,
+  ): Promise<OAuthCredentials>;
   getApiKey(credentials: OAuthCredentials): string;
 }

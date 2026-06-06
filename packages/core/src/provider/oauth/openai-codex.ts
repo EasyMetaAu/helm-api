@@ -56,9 +56,13 @@ function accountIdFromToken(accessToken: string): string | undefined {
 async function postTokenForm(
   body: URLSearchParams,
   signal?: AbortSignal,
+  // Drop-in fetch (e.g. the account's egress-proxy fetch). Defaults to the global
+  // so the token exchange / refresh tunnels through the same hop as execution and
+  // the bind-time call never leaks the operator's real IP (issue #38).
+  fetchImpl: typeof globalThis.fetch = fetch,
 ): Promise<TokenResponseJson> {
   throwIfOAuthLoginAborted(signal);
-  const res = await fetch(TOKEN_URL, {
+  const res = await fetchImpl(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: body.toString(),
@@ -109,11 +113,14 @@ export function beginOpenAICodexLogin(): CodexLoginStart {
   return { authorizeUrl: url.toString(), verifier, state };
 }
 
-export async function completeOpenAICodexLogin(input: {
-  redirectInput: string;
-  verifier: string;
-  state: string;
-}): Promise<OAuthCredentials> {
+export async function completeOpenAICodexLogin(
+  input: {
+    redirectInput: string;
+    verifier: string;
+    state: string;
+  },
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Promise<OAuthCredentials> {
   const parsed = parseOAuthAuthorizationInput(input.redirectInput);
   if (!parsed.code) throw new Error("Missing authorization code");
   if (parsed.state && parsed.state !== input.state) throw new Error("OAuth state mismatch");
@@ -125,18 +132,25 @@ export async function completeOpenAICodexLogin(input: {
       code_verifier: input.verifier,
       redirect_uri: REDIRECT_URI,
     }),
+    undefined,
+    fetchImpl,
   );
   return toCredentials(json);
 }
 
 // Non-interactive refresh (public client: client_id + refresh_token, no secret).
-export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAuthCredentials> {
+export async function refreshOpenAICodexToken(
+  refreshToken: string,
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Promise<OAuthCredentials> {
   const json = await postTokenForm(
     new URLSearchParams({
       grant_type: "refresh_token",
       client_id: CLIENT_ID,
       refresh_token: refreshToken,
     }),
+    undefined,
+    fetchImpl,
   );
   // A refresh may omit refresh_token (rotation off); keep the prior one if so.
   if (!json.refresh_token) json.refresh_token = refreshToken;
@@ -163,6 +177,6 @@ export const openaiCodexOAuthProvider: OAuthProviderInterface = {
       state: start.state,
     });
   },
-  refreshToken: (creds) => refreshOpenAICodexToken(creds.refresh),
+  refreshToken: (creds, fetchImpl) => refreshOpenAICodexToken(creds.refresh, fetchImpl),
   getApiKey: (creds) => creds.access,
 };

@@ -93,8 +93,12 @@ export interface OAuthAdminAccess {
   listStatus(): Promise<OAuthAdminStatus[]>;
   // Anthropic manual-paste: begin -> { authorizeUrl }; the verifier/state are held
   // server-side keyed by sessionId. complete exchanges the pasted redirect URL.
+  // `proxy` (optional, entered in the connect dialog's first step) is validated +
+  // pinned to the session so the token exchange — and the persisted account — use
+  // it from the start, never the operator's real IP (issue #38).
   startManualPaste(input: {
     providerId: string;
+    proxy?: AccountProxyInput;
   }): Promise<{ sessionId: string; authorizeUrl: string }>;
   completeManualPaste(input: {
     sessionId: string;
@@ -102,10 +106,12 @@ export interface OAuthAdminAccess {
     account: string;
   }): Promise<void>;
   // Copilot device code: begin -> { userCode, verificationUri }; poll until done,
-  // then the seam mints the Copilot token and persists it.
+  // then the seam mints the Copilot token and persists it. `proxy` is pinned BEFORE
+  // the first device-code call so step 1 already egresses through it (issue #38).
   startDeviceCode(input: {
     providerId: string;
     enterprise?: string;
+    proxy?: AccountProxyInput;
   }): Promise<{ sessionId: string; userCode: string; verificationUri: string }>;
   pollDeviceCode(input: {
     sessionId: string;

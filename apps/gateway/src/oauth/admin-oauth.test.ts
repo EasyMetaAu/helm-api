@@ -2,6 +2,7 @@ import {
   createSqliteDb,
   decryptSecret,
   encryptSecret,
+  type ProxyConfig,
   SqliteConfigStore,
   SqliteOAuthTokenStore,
 } from "@helm/core";
@@ -628,6 +629,167 @@ describe("createOAuthAdmin", () => {
     expect(decryptSecret((await config.get("oauth.account_settings")) ?? "", KEY)).toContain(
       "keep",
     );
+  });
+});
+
+// ── proxy from the FIRST bind step: no real-IP leak (issue #38) ───────────────
+// These prove the central fix: when the operator enters a proxy in the connect
+// dialog, EVERY binding HTTP call tunnels through it from the very first call, and
+// the global (real-IP) fetch is never touched. The injected `makeFetch` returns the
+// routed spy for a proxy and a THROWING global otherwise, so any leak fails loudly.
+describe("createOAuthAdmin > bind-time egress proxy", () => {
+  it("device-code: the FIRST device-code call + poll go through the proxy, never the global", async () => {
+    const { tokens, config } = makeStores();
+    const PROXY: ProxyConfig = { type: "socks5", host: "10.9.9.9", port: 1080 };
+    const seenProxies: Array<ProxyConfig | undefined> = [];
+    const routed = routeFetch([
+      [
+        /login\/device\/code/,
+        () =>
+          json({
+            device_code: "DC",
+            user_code: "WXYZ-1234",
+            verification_uri: "https://github.com/login/device",
+            interval: 5,
+            expires_in: 900,
+          }),
+      ],
+      [/login\/oauth\/access_token/, () => json({ access_token: "gho_x" })],
+      [
+        /copilot_internal\/v2\/token/,
+        () =>
+          json({
+            token: "tid=x;proxy-ep=proxy.indiv.githubcopilot.com;",
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+          }),
+      ],
+    ]);
+    // If ANY call reaches the global fetch, the bind throws → the test fails.
+    const globalThrow = vi.fn(() => {
+      throw new Error("REAL IP LEAK: global fetch used");
+    });
+    vi.stubGlobal("fetch", globalThrow);
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      genSessionId: () => "dev",
+      makeFetch: (proxy) => {
+        seenProxies.push(proxy);
+        return proxy ? routed : (globalThis.fetch as typeof fetch);
+      },
+    });
+    const start = await admin.startDeviceCode({ providerId: "github-copilot", proxy: PROXY });
+    expect(start.userCode).toBe("WXYZ-1234");
+    expect(await admin.pollDeviceCode({ sessionId: "dev", account: "default" })).toEqual({
+      status: "done",
+    });
+    // The real-IP global was NEVER touched — including the first device-code POST.
+    expect(globalThrow).not.toHaveBeenCalled();
+    // makeFetch was asked for the proxy at least once (so the calls had it).
+    expect(seenProxies).toContainEqual(PROXY);
+    // Credential persisted (proving the routed fetch actually served the flow).
+    expect(
+      decryptSecret((await tokens.get("github-copilot", "default"))?.refreshEnc ?? "", KEY),
+    ).toBe("gho_x");
+    // …and the proxy is saved to account settings so refresh/execution reuse it (全程).
+    expect(decryptSecret((await config.get("oauth.account_settings")) ?? "", KEY)).toContain(
+      "10.9.9.9",
+    );
+  });
+
+  it("manual-paste: the token exchange goes through the proxy + persists it (with password)", async () => {
+    const { tokens, config } = makeStores();
+    const PROXY: ProxyConfig = {
+      type: "http",
+      host: "p.example",
+      port: 8080,
+      username: "u",
+      password: "pw",
+    };
+    const routed = routeFetch([
+      [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+    ]);
+    const globalThrow = vi.fn(() => {
+      throw new Error("REAL IP LEAK: global fetch used");
+    });
+    vi.stubGlobal("fetch", globalThrow);
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      genSessionId: () => "m1",
+      makeFetch: (proxy) => (proxy ? routed : (globalThis.fetch as typeof fetch)),
+    });
+    const { sessionId, authorizeUrl } = await admin.startManualPaste({
+      providerId: "anthropic",
+      proxy: PROXY,
+    });
+    const state = new URL(authorizeUrl).searchParams.get("state");
+    await admin.completeManualPaste({
+      sessionId,
+      redirectInput: `https://x/cb?code=C&state=${state}`,
+      account: "default",
+    });
+    expect(globalThrow).not.toHaveBeenCalled();
+    expect(decryptSecret((await tokens.get("anthropic", "default"))?.refreshEnc ?? "", KEY)).toBe(
+      "RT",
+    );
+    // Persisted proxy is readable back (redacted) — password kept, never echoed.
+    const view = await admin.getAccountProxy({ providerId: "anthropic", account: "default" });
+    expect(view).toMatchObject({
+      type: "http",
+      host: "p.example",
+      port: 8080,
+      username: "u",
+      hasPassword: true,
+    });
+    expect(decryptSecret((await config.get("oauth.account_settings")) ?? "", KEY)).toContain("pw");
+  });
+
+  it("rejects a malformed proxy at start BEFORE any network call (fail-closed)", async () => {
+    const globalThrow = vi.fn(() => {
+      throw new Error("REAL IP LEAK: global fetch used");
+    });
+    vi.stubGlobal("fetch", globalThrow);
+    const admin = createOAuthAdmin({ store: makeStore(), encKey: KEY, config: makeConfig() });
+    await expect(
+      admin.startDeviceCode({
+        providerId: "github-copilot",
+        proxy: { type: "http", host: "", port: 8080 },
+      }),
+    ).rejects.toThrow(/host/);
+    // No proxy ⇒ no device-code call ⇒ the global was never reached either.
+    expect(globalThrow).not.toHaveBeenCalled();
+  });
+
+  it("no proxy: binding still works (direct connection unchanged)", async () => {
+    const { tokens, config } = makeStores();
+    let proxyArg: ProxyConfig | undefined | "unset" = "unset";
+    const routed = routeFetch([
+      [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+    ]);
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      genSessionId: () => "m2",
+      // No proxy → makeFetch is called with undefined; serve via routed so we avoid
+      // a real socket, and assert no proxy was pinned.
+      makeFetch: (proxy) => {
+        proxyArg = proxy;
+        return routed;
+      },
+    });
+    const { sessionId, authorizeUrl } = await admin.startManualPaste({ providerId: "anthropic" });
+    const state = new URL(authorizeUrl).searchParams.get("state");
+    await admin.completeManualPaste({
+      sessionId,
+      redirectInput: `https://x/cb?code=C&state=${state}`,
+      account: "default",
+    });
+    expect(proxyArg).toBeUndefined();
+    expect(await admin.getAccountProxy({ providerId: "anthropic", account: "default" })).toBeNull();
   });
 });
 

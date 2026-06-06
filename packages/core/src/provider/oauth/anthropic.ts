@@ -124,9 +124,13 @@ async function postJson(
   url: string,
   body: Record<string, string>,
   signal?: AbortSignal,
+  // Drop-in fetch (e.g. the account's egress-proxy fetch). Defaults to the global
+  // so the token exchange / refresh can tunnel through the SAME hop as execution —
+  // the bind-time call must never leak the operator's real IP (issue #38).
+  fetchImpl: typeof globalThis.fetch = fetch,
 ): Promise<string> {
   throwIfOAuthLoginAborted(signal);
-  const res = await fetch(url, {
+  const res = await fetchImpl(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(body),
@@ -145,6 +149,7 @@ async function exchangeAuthorizationCode(
   state: string,
   verifier: string,
   signal?: AbortSignal,
+  fetchImpl: typeof globalThis.fetch = fetch,
 ): Promise<OAuthCredentials> {
   const body = await postJson(
     TOKEN_URL,
@@ -157,6 +162,7 @@ async function exchangeAuthorizationCode(
       code_verifier: verifier,
     },
     signal,
+    fetchImpl,
   );
   return parseTokenCredentials(body);
 }
@@ -284,24 +290,41 @@ export function beginAnthropicLogin(): AnthropicLoginStart {
   return { authorizeUrl: `${AUTHORIZE_URL}?${authParams.toString()}`, verifier, state };
 }
 
-export async function completeAnthropicLogin(input: {
-  redirectInput: string;
-  verifier: string;
-  state: string;
-}): Promise<OAuthCredentials> {
+export async function completeAnthropicLogin(
+  input: {
+    redirectInput: string;
+    verifier: string;
+    state: string;
+  },
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Promise<OAuthCredentials> {
   const parsed = parseOAuthAuthorizationInput(input.redirectInput);
   if (!parsed.code) throw new Error("Missing authorization code");
   if (parsed.state && parsed.state !== input.state) throw new Error("OAuth state mismatch");
-  return exchangeAuthorizationCode(parsed.code, parsed.state ?? input.state, input.verifier);
+  return exchangeAuthorizationCode(
+    parsed.code,
+    parsed.state ?? input.state,
+    input.verifier,
+    undefined,
+    fetchImpl,
+  );
 }
 
 // Non-interactive refresh (public PKCE client: client_id + refresh_token, no secret).
-export async function refreshAnthropicToken(refreshToken: string): Promise<OAuthCredentials> {
-  const body = await postJson(TOKEN_URL, {
-    grant_type: "refresh_token",
-    client_id: CLIENT_ID,
-    refresh_token: refreshToken,
-  });
+export async function refreshAnthropicToken(
+  refreshToken: string,
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Promise<OAuthCredentials> {
+  const body = await postJson(
+    TOKEN_URL,
+    {
+      grant_type: "refresh_token",
+      client_id: CLIENT_ID,
+      refresh_token: refreshToken,
+    },
+    undefined,
+    fetchImpl,
+  );
   return parseTokenCredentials(body);
 }
 
@@ -310,6 +333,6 @@ export const anthropicOAuthProvider: OAuthProviderInterface = {
   name: "Anthropic (Claude Pro/Max)",
   usesCallbackServer: true,
   login: loginAnthropic,
-  refreshToken: (creds) => refreshAnthropicToken(creds.refresh),
+  refreshToken: (creds, fetchImpl) => refreshAnthropicToken(creds.refresh, fetchImpl),
   getApiKey: (creds) => creds.access,
 };
