@@ -41,7 +41,7 @@ AI app developers don't want to manage hundreds of models, per-provider quirks, 
 ## Key concepts
 
 - **Lanes** — Requests route through configurable *lanes* (quality/cost tiers `economy`, `balanced`, `premium`, or task lanes `coding`, `json`, `vision`, `tool_use`), never raw provider names. You decide in config how each lane maps to a primary model plus a fallback chain. Provider aliases are an internal supply-chain detail, never the client-facing surface.
-- **Classification cascade** — Three layers pick the lane: **(1)** deterministic rules (a pure, zero-network, unit-tested scorer — always on); **(2)** an optional small-model "second opinion" eval (`temperature: 0`, cached, **on by default** in the shipped config; the schema default stays off as a fail-safe), consulted only when the rules are uncertain; **(3)** the `balanced` lane as the fail-open sink.
+- **Classification cascade** — Three layers pick the lane: **(1)** deterministic rules (a pure, zero-network, unit-tested scorer — always on); **(2)** an optional small-model "second opinion" eval (`temperature: 0`, cached, **off by default** — it needs a configured eval model), consulted only when the rules are uncertain; **(3)** the `balanced` lane as the fail-open sink.
 - **Two fallbacks, never conflated** — *Classification fallback* degrades an undecided request to the `balanced` lane; *execution fallback* swaps to the next model in the chain when a provider fails. They live in separate decision-record fields so you can always tell which one fired.
 - **Protocol translation** — Four inbound protocols normalize to one OpenAI-Chat-shaped internal representation (IR), so a single client reaches many backends and gets a consistent output shape — streaming SSE included.
 - **Config-as-code** — Behavior lives in `config/*.yaml`, Zod-validated at startup; an invalid file fails closed and the gateway refuses to boot.
@@ -64,7 +64,7 @@ CORE      packages/core · the routing brain (imports no web framework)
              ├─ auth        resolve sha256 key, load per-key caps        · fail-closed
              ├─ gate        rate limit (off) · usage budget (off)        · fail-closed
              ├─ memory      inject remembered context (on by default)    · fail-open
-             ├─ classify    L1 rules ─uncertain→ L2 eval (on) ─→ balanced · fail-open
+             ├─ classify    L1 rules ─uncertain→ L2 eval (off) ─→ balanced · fail-open
              ├─ resolve     first-match policy → lane → caps → fallback chain
              ├─ execute     capability filter → circuit breaker → provider
              │                  └── on failure: advance to next model in the chain
@@ -103,7 +103,7 @@ Helm API is at **0.6** and is a real, end-to-end implementation — not a scaffo
 
 - **Four client protocols** — `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses), and `POST /v1beta/models/{model}:generateContent` (Google Gemini) — all streaming + non-streaming. (Gemini streaming is the `:streamGenerateContent?alt=sse` operation; the Gemini surface authenticates with `x-goog-api-key`.)
 - **Cross-protocol translation** — normalize to one OpenAI-Chat-shaped IR; consistent output across backends with SSE on all four surfaces. Aligned to litellm's field coverage: sampling knobs, usage detail (reasoning / cache / per-modality), a unified reasoning/thinking bridge, full multimodal I/O, and both-ways `finish_reason` maps. Unmappable knobs degrade observably (e.g. Anthropic caps `n>1` and warns on `logprobs`/`modalities`) rather than erroring — see the [Protocol Compatibility](docs/protocol-compatibility.md) matrix.
-- **Three-layer classification** — deterministic rules always on; optional small-model eval (on by default in the shipped config; schema default off) for uncertain cases; `balanced`-lane fail-open sink.
+- **Three-layer classification** — deterministic rules always on; optional small-model eval (off by default; needs a configured eval model) for uncertain cases; `balanced`-lane fail-open sink.
 - **Lane + policy routing** — first-match policies that pin or cap lanes; shipped lanes `economy`, `balanced`, `premium` plus task lanes `coding`, `json`, `vision`, `tool_use` (`balanced` is the required, always-available fallback terminal).
 - **Provider execution with fallback** — primary + fallback chains across OpenAI-compatible upstreams, with a circuit breaker (OPEN/HALF_OPEN + single-probe), a capability filter (skip candidates lacking JSON / tools / vision / a modality / context size / streaming, with an explicit reason), and `:free`-tier 429 skipping. Client disconnects are treated as non-provider faults.
 - **OAuth subscription providers** — route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot **subscriptions** as backends: log in from the dashboard, pool several accounts per provider, and curate models / set an egress proxy / set scheduling per account — all of which **hot-reload**. See [the section below](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot). *(Opt-in; may violate provider ToS — read the warning.)*

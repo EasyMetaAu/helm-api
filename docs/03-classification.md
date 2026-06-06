@@ -9,16 +9,16 @@ ordered layers, stopping at the first one that commits (hit-stop):
 Request in
   → Layer 1: deterministic rules            [always on; zero cost, zero latency]
         confidence ≥ threshold → go straight to the resolved lane
-  → Layer 2: small-model eval               [ON by default (shipped); cached]
+  → Layer 2: small-model eval               [OFF by default; cached]
         the small model decides complexity / task_type → resolved lane
   → Layer 3: fallback → balanced lane       ← always-safe default
 ```
 
 The cascade itself is framework-agnostic
 (`packages/core/src/classifier/cascade.ts`), driven by the live, Zod-validated
-configuration in `config/classifier.yaml`. The shipped config sets
-`eval.enabled: true`; if eval is disabled, the cascade degrades to the two-layer
-"rules + balanced" path — Layer 2 is a pure additive switch. A **confident Layer 1 ends the cascade
+configuration in `config/classifier.yaml`. With eval off by default
+(`eval.enabled: false`), the cascade degrades to the two-layer "rules + balanced"
+path — Layer 2 is a pure additive switch. A **confident Layer 1 ends the cascade
 even when eval is enabled** — high confidence never spends an eval call.
 
 **Key distinction: the two fallbacks are different things and are recorded
@@ -155,7 +155,7 @@ classifier:
     confidence_threshold: 0.42     # below this, the cascade may enter eval
 
   eval:
-    enabled: true                  # ON by default (shipped). Schema default stays false as a fail-safe.
+    enabled: false                 # OFF by default (non-negotiable); needs a configured eval model
     model: deepseek-v4-flash       # a real bare id the primary (official DeepSeek) accepts; sent directly to it
     temperature: 0
     max_tokens: 256                # one JSON object; caps the cost
