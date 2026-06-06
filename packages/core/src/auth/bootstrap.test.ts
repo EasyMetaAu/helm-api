@@ -81,6 +81,7 @@ describe("bootstrapRootKey", () => {
       createKey: vi.fn(),
       getByHash: vi.fn(),
       disable: vi.fn(),
+      deleteKey: vi.fn(),
       updateKey: vi.fn(),
     };
     await expect(

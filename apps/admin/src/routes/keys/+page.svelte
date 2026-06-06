@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { type ApiKeyView, revokeKey } from '$lib/api/keys.js';
+  import { type ApiKeyView, deleteKey, revokeKey } from '$lib/api/keys.js';
   import CreateKeyDialog from '$lib/components/CreateKeyDialog.svelte';
   import EditKeyDialog from '$lib/components/EditKeyDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
@@ -22,9 +22,16 @@
   // The key_id currently pending a revoke confirmation, if any.
   let confirmingRevoke = $state<string | null>(null);
   let revoking = $state<string | null>(null);
+  // The key_id currently pending a permanent-delete confirmation, if any.
+  let confirmingDelete = $state<string | null>(null);
+  let deleting = $state<string | null>(null);
 
   // The display prefix of the key pending revoke confirmation — purely for copy.
   let confirmingPrefix = $derived(keys.find((k) => k.key_id === confirmingRevoke)?.prefix ?? '');
+  // The display prefix of the key pending delete confirmation — purely for copy.
+  let confirmingDeletePrefix = $derived(
+    keys.find((k) => k.key_id === confirmingDelete)?.prefix ?? '',
+  );
 
   // The key currently being edited in the Edit dialog (null = closed). All caps
   // are editable there EXCEPT the immutable identity and role (see EditKeyDialog).
@@ -88,6 +95,32 @@
       error = e instanceof Error ? e.message : $t('Failed to revoke key');
     } finally {
       revoking = null;
+    }
+  }
+
+  function askDelete(keyId: string): void {
+    error = null;
+    confirmingDelete = keyId;
+  }
+
+  function cancelDelete(): void {
+    confirmingDelete = null;
+  }
+
+  async function confirmDelete(): Promise<void> {
+    const keyId = confirmingDelete;
+    if (!keyId) return;
+    error = null;
+    deleting = keyId;
+    try {
+      await deleteKey(keyId);
+      // Permanent delete: drop the row entirely (never kept, unlike revoke).
+      keys = keys.filter((k) => k.key_id !== keyId);
+      confirmingDelete = null;
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to delete key');
+    } finally {
+      deleting = null;
     }
   }
 </script>
@@ -204,6 +237,15 @@
                       onclick={() => askRevoke(key.key_id)}>{$t('Revoke')}</button
                     >
                   </div>
+                {:else}
+                  <div class="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      class="btn-danger-outline"
+                      disabled={deleting === key.key_id}
+                      onclick={() => askDelete(key.key_id)}>{$t('Delete')}</button
+                    >
+                  </div>
                 {/if}
               </td>
             </tr>
@@ -239,6 +281,37 @@
           disabled={revoking === confirmingRevoke}
           onclick={confirmRevoke}
           >{revoking === confirmingRevoke ? $t('Revoking…') : $t('Confirm revoke')}</button
+        >
+      </div>
+    </Modal>
+  {/if}
+
+  {#if confirmingDelete}
+    <Modal
+      label={$t('Confirm delete')}
+      onclose={cancelDelete}
+      dismissible={deleting !== confirmingDelete}
+    >
+      <h2 class="section-header">{$t('Confirm delete')}</h2>
+      <p class="mt-2 text-sm text-amber-800">
+        {$t('Delete key')}
+        <code class="font-mono">{confirmingDeletePrefix}</code>{$t(
+          '? This permanently removes the revoked key. Past request logs keep an anonymized reference.',
+        )}
+      </p>
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          type="button"
+          class="btn-secondary"
+          disabled={deleting === confirmingDelete}
+          onclick={cancelDelete}>{$t('Cancel')}</button
+        >
+        <button
+          type="button"
+          class="btn-danger"
+          disabled={deleting === confirmingDelete}
+          onclick={confirmDelete}
+          >{deleting === confirmingDelete ? $t('Deleting…') : $t('Confirm delete')}</button
         >
       </div>
     </Modal>

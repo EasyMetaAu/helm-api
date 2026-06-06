@@ -73,6 +73,22 @@ describe("SqliteKeyStore", () => {
     await expect(store.disable("nope")).rejects.toThrow();
   });
 
+  it("deleteKey physically removes the row (gone from getByHash and list)", async () => {
+    const store = freshStore();
+    await store.createKey({ keyId: "k1", hash: "h1", prefix: "p1", accountId: "a", role: "user" });
+    await store.createKey({ keyId: "k2", hash: "h2", prefix: "p2", accountId: "a", role: "user" });
+    await store.deleteKey("k1");
+    expect(await store.getByHash("h1")).toBeNull();
+    const all = await store.list();
+    expect(all).toHaveLength(1);
+    expect(all[0]?.key_id).toBe("k2");
+  });
+
+  it("deleteKey on a missing key rejects (not silently)", async () => {
+    const store = freshStore();
+    await expect(store.deleteKey("nope")).rejects.toThrow();
+  });
+
   it("list returns [] when empty and all records when populated", async () => {
     const store = freshStore();
     expect(await store.list()).toEqual([]);

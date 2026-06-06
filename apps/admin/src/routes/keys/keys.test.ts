@@ -10,10 +10,12 @@ import KeysPage from './+page.svelte';
 const createKey = vi.fn();
 const revokeKey = vi.fn();
 const updateKey = vi.fn();
+const deleteKey = vi.fn();
 vi.mock('$lib/api/keys.js', () => ({
   createKey: (...args: unknown[]) => createKey(...args),
   revokeKey: (...args: unknown[]) => revokeKey(...args),
   updateKey: (...args: unknown[]) => updateKey(...args),
+  deleteKey: (...args: unknown[]) => deleteKey(...args),
 }));
 
 function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
@@ -50,8 +52,10 @@ describe('keys page', () => {
     createKey.mockReset();
     revokeKey.mockReset();
     updateKey.mockReset();
+    deleteKey.mockReset();
     updateKey.mockResolvedValue(undefined);
     revokeKey.mockResolvedValue({ revoked: '' });
+    deleteKey.mockResolvedValue({ deleted: '' });
   });
 
   it('lists each key by prefix/role/caps/status and shows NO plaintext-like secret', () => {
@@ -252,6 +256,46 @@ describe('keys page', () => {
     renderPage([key('k1', { disabled: true })]);
     const row = screen.getByTestId('key-row');
     expect(within(row).queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();
+  });
+
+  it('offers Delete (not Edit/Revoke) only on a revoked key', () => {
+    renderPage([
+      key('active', { disabled: false }),
+      key('revoked', { disabled: true }),
+    ]);
+    const rows = screen.getAllByTestId('key-row');
+    // Active row: Edit + Revoke, no Delete.
+    expect(within(rows[0]).getByRole('button', { name: /^edit$/i })).toBeInTheDocument();
+    expect(within(rows[0]).getByRole('button', { name: /revoke/i })).toBeInTheDocument();
+    expect(within(rows[0]).queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
+    // Revoked row: Delete only.
+    expect(within(rows[1]).getByRole('button', { name: /^delete$/i })).toBeInTheDocument();
+    expect(within(rows[1]).queryByRole('button', { name: /revoke/i })).not.toBeInTheDocument();
+  });
+
+  it('confirming Delete permanently removes the row (calls deleteKey)', async () => {
+    deleteKey.mockResolvedValue({ deleted: 'k1' });
+    renderPage([key('k1', { prefix: 'helm_live_ab12', disabled: true })]);
+    const row = screen.getByTestId('key-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /^delete$/i }));
+    // Confirmation step before the destructive action.
+    const dialog = screen.getByRole('dialog', { name: /confirm delete/i });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /confirm/i }));
+
+    await waitFor(() => expect(deleteKey).toHaveBeenCalledWith('k1'));
+    // Row is gone — not merely disabled.
+    await waitFor(() => expect(screen.queryAllByTestId('key-row')).toHaveLength(0));
+  });
+
+  it('on delete failure shows an error and keeps the row (fail-closed)', async () => {
+    deleteKey.mockRejectedValue(new Error('409 key must be revoked before deletion'));
+    renderPage([key('k1', { disabled: true })]);
+    const row = screen.getByTestId('key-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /^delete$/i }));
+    await fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getAllByTestId('key-row')).toHaveLength(1);
   });
 
   it('on revoke failure shows an error and leaves the row unchanged (fail-closed)', async () => {
