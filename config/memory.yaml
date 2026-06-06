@@ -2,7 +2,7 @@
 # behaviour; flip to true to turn on decay/reinforcement/facts. All knobs are
 # fail-closed validated (snake_case, unknown keys refuse startup).
 forgetting:
-  enabled: false
+  enabled: true
   score:
     half_life_s: 86400
     importance_floor: 0.1
