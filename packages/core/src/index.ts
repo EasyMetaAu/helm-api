@@ -223,6 +223,15 @@ export {
   ownerScopedThreadId,
   resolveMemoryMode,
 } from "./memory/observe.js";
+// Memory middleware — Observer compaction policy. Pure + config-driven so the
+// background worker can avoid paying for premature summaries when economy mode is on.
+export {
+  chooseObserverCompaction,
+  type CompactionDecision,
+  type EconomyCompactionPolicy,
+  type FixedCompactionPolicy,
+  type ObserverCompactionPolicy,
+} from "./memory/compaction-policy.js";
 // Memory middleware — background Observer (docs/08 Phase 2). Off the request path:
 // compresses a thread's older raw messages into one auditable observation.
 // Framework-agnostic; never touches routing/lane state.

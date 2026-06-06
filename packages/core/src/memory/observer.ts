@@ -1,5 +1,6 @@
 import type { RawMessage } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
+import { chooseObserverCompaction, type ObserverCompactionPolicy } from "./compaction-policy.js";
 
 // Background Observer (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
 // request-path job: the request path only persists raw messages and enqueues an
@@ -11,9 +12,8 @@ import type { MemoryStore } from "../store/ports.js";
 // are all dependency-injected; this module imports no web framework and never
 // touches routing/lane state (memory is a MIDDLEWARE).
 
-// How many of the most recent raw messages are PRESERVED uncompressed, so inject
-// can still serve them verbatim (docs/08 "recent raw messages must be preserved, to avoid information loss from compression").
-const RECENT_KEEP = 2;
+// The legacy Observer policy preserves recent raw messages verbatim; the default
+// value lives in compaction-policy.ts so the pure selector and runtime agree.
 
 // A background job: a pointer to the thread whose older history should be
 // compressed. Enqueued by the request path, consumed asynchronously by a worker.
@@ -42,6 +42,8 @@ export interface ObserverDeps {
   // Observer tokens are a SEPARATE cost bucket (docs/08 "cost accounting"): they must
   // NOT be hidden inside actor/provider execution cost.
   costSink: (bucket: "observer", tokens: number) => void;
+  // Optional economy-aware compaction gate. Absent => legacy fixed RECENT_KEEP=2.
+  compaction?: ObserverCompactionPolicy;
   // Injected clock — observed_at + the summary's time anchor come from here.
   now: () => Date;
   log: (line: string, meta?: object) => void;
@@ -104,10 +106,6 @@ export async function runObserverJob(
       accountId: job.accountId,
       threadId: job.threadId,
     });
-    // Preserve the recent window; only compress what's older than it. Then remove
-    // any source range already covered by a prior observation so retry/done jobs
-    // are idempotent and do not repeatedly summarize the same raw messages.
-    const oldWindow = all.slice(0, Math.max(0, all.length - RECENT_KEEP));
     const existing = await deps.memoryStore.listObservations({
       accountId: job.accountId,
       threadId: job.threadId,
@@ -116,7 +114,24 @@ export async function runObserverJob(
       all,
       existing.map((o) => o.sourceMessageRange),
     );
-    const compressed = oldWindow.filter((m) => !covered.has(m.id));
+
+    // Legacy default: keep the two most recent raw messages and summarize older
+    // uncovered rows. When `compaction.mode=economy` is configured, the same cut
+    // is chosen by a cache/summary-aware benefit model so short threads do not pay
+    // for premature summaries. Covered rows stay excluded either way.
+    const candidates = all.filter((m) => !covered.has(m.id));
+    const decision = chooseObserverCompaction(candidates, deps.compaction);
+    if (!decision.shouldCompact) {
+      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      deps.log("memory.observer.noop_compaction_skipped", {
+        thread_id: job.threadId,
+        reason: decision.reason,
+        net_benefit_usd: decision.netBenefitUsd,
+        candidate_count: candidates.length,
+      });
+      return { observationId: null, sourceMessageRange: null };
+    }
+    const compressed = candidates.slice(0, decision.compressedCount);
 
     if (compressed.length === 0) {
       // Idempotent / nothing to do — never write an empty observation.
@@ -177,6 +192,9 @@ export async function runObserverJob(
       observation_id: observationId,
       source_range: sourceMessageRange,
       compressed_count: compressed.length,
+      compaction_reason: decision.reason,
+      compaction_net_benefit_usd: decision.netBenefitUsd,
+      kept_recent: decision.keepRecent,
     });
     return { observationId, sourceMessageRange };
   } catch (err) {
