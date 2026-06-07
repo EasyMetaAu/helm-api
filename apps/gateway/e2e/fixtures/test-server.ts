@@ -2,7 +2,7 @@
 // tests don't have to scrape the bootstrap log. Provider base_url points at the
 // local mock upstream. Offline + deterministic.
 
-import { mkdirSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync } from "node:fs";
 import { hashKey } from "@helm/core";
 import { serve } from "@hono/node-server";
 import type Database from "better-sqlite3";
@@ -83,7 +83,10 @@ await keyStore.createKey({
 const telemetry = new SqliteTelemetryStore(seedDb);
 await telemetry.insert({
   apiKeyId: "k_e2e",
-  createdAt: new Date("2026-05-31T00:00:00.000Z"),
+  // One hour ago, NOT a fixed date: the requests list defaults to a 24h window,
+  // so a hard-coded timestamp silently ages out of view and the admin specs
+  // start failing (time bomb — happened with the original 2026-05-31 seed).
+  createdAt: new Date(Date.now() - 3_600_000),
   decision: {
     request_id: SEED_TRACE_ID,
     trace_id: SEED_TRACE_ID,
@@ -123,12 +126,17 @@ await telemetry.insert({
 (seedDb as unknown as { $sqlite: Database.Database }).$sqlite.close();
 
 const { buildServer } = await import("../../src/server.js");
-// Resolve the repo-root config dir regardless of cwd. The eval e2e raises the
-// effective Layer-1 confidence threshold PER REQUEST via the e2e-only
+// Boot from a THROWAWAY COPY of the repo-root config dir (fresh each run, like
+// the DB above): admin rule edits now WRITE BACK to config/*.yaml (yaml-writeback),
+// so e2e admin saves (e.g. the lane edit in admin.spec) must land in the copy —
+// never in the checked-in config. The eval e2e additionally raises the effective
+// Layer-1 confidence threshold PER REQUEST via the e2e-only
 // `x-helm-rules-threshold` header (gated by HELM_E2E) so it reaches Layer-2 eval
-// WITHOUT mutating the checked-in config — other specs (routing) keep the spec
+// without any config mutation at all — other specs (routing) keep the spec
 // default 0.45. See implementation-notes (2026-05-31 · e2e.eval).
-const configDir = new URL("../../../../config", import.meta.url).pathname;
+const repoConfigDir = new URL("../../../../config", import.meta.url).pathname;
+const configDir = `${DATA_DIR}/config`;
+cpSync(repoConfigDir, configDir, { recursive: true });
 const { app, port, host } = await buildServer({ configDir });
 serve({ fetch: app.fetch, port, hostname: host });
 process.stdout.write(`e2e gateway listening on ${host}:${port}\n`);

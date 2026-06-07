@@ -121,9 +121,10 @@ test.describe("admin request list filtering + pagination", () => {
       .filter({ has: page.locator(`a[href$="/requests/${SEED_TRACE_ID}"]`) });
     await expect(seededRow).toBeVisible();
 
-    // Filter controls + numbered pager are present.
+    // Filter controls + numbered pager are present. The date range is the shared
+    // RangeFilter preset-button row (testid range-<key>), not a select.
     await expect(page.getByTestId("filter-status")).toBeVisible();
-    await expect(page.getByTestId("filter-range")).toBeVisible();
+    await expect(page.getByTestId("range-24h")).toBeVisible();
     // Only the one seeded row exists → single page, Next disabled.
     await expect(page.getByTestId("pager-status")).toContainText("1 requests");
     await expect(page.getByTestId("pager-next")).toBeDisabled();
