@@ -25,8 +25,13 @@ import type { AdminApiDeps, ReplayWiring } from "./deps.js";
 // It is an ISOLATED debug re-run (Principle 3 + the operator's choice): no usage
 // budget is charged and no conversation memory is written/injected. Identity +
 // caps are reconstructed from the ORIGINAL request's key so routing (lane
-// whitelist / allow_custom_model) is faithful; a deleted/revoked key blocks the
-// replay rather than silently widening permissions.
+// whitelist / allow_custom_model) is faithful. When that key is gone (deleted or
+// revoked), the replay FALLS BACK to a live root key instead of refusing: the
+// operator behind the admin Basic auth already holds root-equivalent power, and
+// what they want from a retry is the RESULT — a 409 tells them nothing. The
+// trade-off is routing fidelity (root caps, no lane whitelist), so the fallback
+// is logged and the new trace is attributed to the key ACTUALLY used. Only when
+// no live root key exists either does the replay 409.
 //
 // DELIBERATE BYPASSES (debug, not client traffic): besides the budget gate/settle
 // and memory, a replay also skips the per-key RATE LIMIT (rate_limit_rpm/tpm) and
@@ -73,10 +78,25 @@ export async function runReplay(
   if (keyId === null) return { ok: false, status: 404, error: "original request not found" };
 
   // 3. Reconstruct identity from the still-live key so the re-run routes with the
-  //    SAME caps. A missing/disabled key blocks replay (never widen permissions).
-  const key = (await deps.keyStore.list()).find((k) => k.key_id === keyId);
-  if (!key || key.disabled) {
-    return { ok: false, status: 409, error: "original key is unavailable (deleted or revoked)" };
+  //    SAME caps. If the original key is gone (deleted or revoked), fall back to a
+  //    live root key — see the header comment for why this is the operator's
+  //    deliberate choice, not a permission leak. 409 only when neither exists.
+  const keys = await deps.keyStore.list();
+  const original = keys.find((k) => k.key_id === keyId);
+  let key: ApiKeyRecord;
+  if (original && !original.disabled) {
+    key = original;
+  } else {
+    const root = keys.find((k) => k.role === "root" && !k.disabled);
+    if (!root) {
+      return {
+        ok: false,
+        status: 409,
+        error: "original key is unavailable (deleted or revoked) and no active root key exists",
+      };
+    }
+    key = root;
+    args.log("replay.root_key_fallback");
   }
 
   // 4. Build a fresh InternalRequest under a NEW trace id. Memory OFF + no session
@@ -157,7 +177,10 @@ export async function runReplay(
   try {
     await deps.telemetry.insert({
       decision: deps.replay.redact(result.decision) as DecisionRecord,
-      apiKeyId: keyId,
+      // Attribute the NEW trace to the key ACTUALLY used — on a root-key
+      // fallback that is the root key, not the dead original (honest audit
+      // trail, no dangling key_id reference).
+      apiKeyId: key.key_id,
       createdAt: new Date(deps.replay.now()),
     });
   } catch {
@@ -212,8 +235,8 @@ function buildInternal(
 
 export function registerReplayRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   // POST /requests/:traceId/replay  body: { request: <openai chat body> } ->
-  // { trace_id } | { error } (400 bad body, 404 unknown request, 409 key gone,
-  // 500 result not recorded, 503 replay not wired).
+  // { trace_id } | { error } (400 bad body, 404 unknown request, 409 original
+  // key gone AND no live root key, 500 result not recorded, 503 replay not wired).
   app.post("/admin/api/requests/:traceId/replay", async (c) => {
     if (deps.replay === undefined) return c.json({ error: "replay not available" }, 503);
     const originalTraceId = c.req.param("traceId");

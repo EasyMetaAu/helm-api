@@ -510,8 +510,9 @@ export async function getRequestPayload(traceId: string): Promise<RequestPayload
 // (optionally edited) request body through the gateway as an ISOLATED debug re-run
 // and returns the NEW trace id so the page can navigate to the recorded result.
 // The `request` is the full OpenAI chat body the operator confirmed in the dialog;
-// identity/caps are reconstructed server-side from the ORIGINAL request's key (the
-// browser never handles a plaintext key — Principle 7).
+// identity/caps are reconstructed server-side from the ORIGINAL request's key, or —
+// when that key was deleted/revoked — from a live root key (409 only if neither
+// exists). Either way the browser never handles a plaintext key — Principle 7.
 // `signal` lets the dialog's Cancel abort the wait — the gateway sees the request
 // abort and cancels the in-flight upstream run (the route forwards its own signal).
 export async function replayRequest(

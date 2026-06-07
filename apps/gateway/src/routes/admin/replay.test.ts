@@ -253,30 +253,130 @@ describe("runReplay", () => {
     expect(rec.routeCalls).toHaveLength(0);
   });
 
-  it("409s when the original key was deleted or revoked", async () => {
+  it("falls back to a live root key when the original key was deleted", async () => {
+    const rec = emptyRec();
+    const root = fakeKey({
+      key_id: "k_root",
+      prefix: "helm_live_root",
+      role: "root",
+      allow_custom_model: true,
+    });
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id),
+      final: { status: "ok", alias: "openai/gpt-4" },
+      body: { ok: true },
+      stream: null,
+      error: null,
+    });
+    const logged: string[] = [];
+    const out = await runReplay(
+      {
+        replay: wiring(route, rec),
+        telemetry: fakeTelemetry("key_1", rec),
+        keyStore: fakeKeyStore([root]), // original key_1 deleted; only root remains
+      },
+      {
+        originalTraceId: "orig",
+        body: okBody,
+        signal: new AbortController().signal,
+        log: (m) => logged.push(m),
+      },
+    );
+    expect(out).toEqual({ ok: true, traceId: "new_trace" });
+    // Routed under the ROOT key's identity + caps (not the dead key's).
+    expect(rec.routeCalls[0]?.opts).toEqual({
+      allowCustomModel: true,
+      keyPrefix: "helm_live_root",
+      keyCaps: { allowedLanes: null, degradeLane: null },
+    });
+    expect(rec.routeCalls[0]?.req.api_key_id).toBe("k_root");
+    // Telemetry attributes the replay to the key ACTUALLY used.
+    expect(rec.inserts[0]?.apiKeyId).toBe("k_root");
+    // The fallback is logged for the audit trail.
+    expect(logged).toContain("replay.root_key_fallback");
+  });
+
+  it("falls back to a live root key when the original key is revoked", async () => {
+    const rec = emptyRec();
+    const root = fakeKey({
+      key_id: "k_root",
+      prefix: "helm_live_root",
+      role: "root",
+      allow_custom_model: true,
+    });
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id),
+      final: { status: "ok", alias: "openai/gpt-4" },
+      body: { ok: true },
+      stream: null,
+      error: null,
+    });
+    const out = await runReplay(
+      {
+        replay: wiring(route, rec),
+        telemetry: fakeTelemetry("key_1", rec),
+        keyStore: fakeKeyStore([fakeKey({ disabled: true }), root]),
+      },
+      { originalTraceId: "orig", body: okBody, signal: new AbortController().signal, log: noop },
+    );
+    expect(out).toEqual({ ok: true, traceId: "new_trace" });
+    expect(rec.inserts[0]?.apiKeyId).toBe("k_root");
+  });
+
+  it("skips DISABLED root keys when picking the fallback", async () => {
+    const rec = emptyRec();
+    const deadRoot = fakeKey({ key_id: "k_root_old", role: "root", disabled: true });
+    const liveRoot = fakeKey({ key_id: "k_root_new", prefix: "helm_live_root2", role: "root" });
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id),
+      final: { status: "ok", alias: "openai/gpt-4" },
+      body: { ok: true },
+      stream: null,
+      error: null,
+    });
+    const out = await runReplay(
+      {
+        replay: wiring(route, rec),
+        telemetry: fakeTelemetry("key_1", rec),
+        keyStore: fakeKeyStore([deadRoot, liveRoot]),
+      },
+      { originalTraceId: "orig", body: okBody, signal: new AbortController().signal, log: noop },
+    );
+    expect(out).toEqual({ ok: true, traceId: "new_trace" });
+    expect(rec.inserts[0]?.apiKeyId).toBe("k_root_new");
+  });
+
+  it("409s only when the original key AND every root key are unavailable", async () => {
+    // Empty store: nothing to route as.
     const recA = emptyRec();
     const missing = await runReplay(
       {
         replay: wiring(async () => ({}) as never, recA),
         telemetry: fakeTelemetry("key_1", recA),
-        keyStore: fakeKeyStore([]), // deleted
+        keyStore: fakeKeyStore([]),
       },
       { originalTraceId: "orig", body: okBody, signal: new AbortController().signal, log: noop },
     );
     expect(missing.ok).toBe(false);
     if (!missing.ok) expect(missing.status).toBe(409);
+    expect(recA.routeCalls).toHaveLength(0);
 
+    // Original revoked + the only root key revoked too: still blocked.
     const recB = emptyRec();
     const revoked = await runReplay(
       {
         replay: wiring(async () => ({}) as never, recB),
         telemetry: fakeTelemetry("key_1", recB),
-        keyStore: fakeKeyStore([fakeKey({ disabled: true })]),
+        keyStore: fakeKeyStore([
+          fakeKey({ disabled: true }),
+          fakeKey({ key_id: "k_root", role: "root", disabled: true }),
+        ]),
       },
       { originalTraceId: "orig", body: okBody, signal: new AbortController().signal, log: noop },
     );
     expect(revoked.ok).toBe(false);
     if (!revoked.ok) expect(revoked.status).toBe(409);
+    expect(recB.routeCalls).toHaveLength(0);
   });
 
   it("skips payload capture when capture_payloads is off (still records telemetry)", async () => {
