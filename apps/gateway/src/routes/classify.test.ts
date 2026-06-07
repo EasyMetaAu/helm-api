@@ -81,6 +81,9 @@ describe("classify adapter — admin classifier hot-apply", () => {
     const first = await classify(req("please refactor this function"));
     expect(calls.n).toBe(0);
     expect(first.decided_by).toBe("fallback");
+    // Eval never ran → no model / latency recorded.
+    expect(first.eval_model).toBeNull();
+    expect(first.eval_latency_ms).toBeNull();
 
     // Admin flips eval.enabled = true (a NEW config object, as the RuleStore stores
     // the freshly parsed body). No rebuild of the adapter.
@@ -93,6 +96,10 @@ describe("classify adapter — admin classifier hot-apply", () => {
     // The change took effect: eval ran for the (cache-miss) prompt.
     expect(calls.n).toBe(1);
     expect(second.decided_by).toBe("eval");
+    // Eval ran → the configured eval model id + a measured (≥0) latency are recorded.
+    expect(second.eval_model).toBe("eval-model");
+    expect(typeof second.eval_latency_ms).toBe("number");
+    expect(second.eval_latency_ms ?? -1).toBeGreaterThanOrEqual(0);
   });
 
   it("invalidates the eval cache when the classifier config changes (no stale verdict)", async () => {

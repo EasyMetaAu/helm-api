@@ -1,4 +1,4 @@
-import type { DecisionRecord, InternalRequest } from "@helm/shared";
+import type { DecidedBy, DecisionRecord, InternalRequest } from "@helm/shared";
 import type { AttemptRecord } from "../executor/fallback.js";
 import type { InsertTelemetryInput, TelemetryStore } from "../store/ports.js";
 import { redact } from "./redaction.js";
@@ -27,9 +27,16 @@ export interface ClassifierOutput {
   task_type: string;
   complexity: string;
   confidence: number;
-  decided_by: "rules" | "eval" | "default";
+  // Full classification-source union from the shared schema — INCLUDING "fallback"
+  // (the Layer-3 balanced sink), which the cascade + routing path legitimately
+  // produce. Derived from @helm/shared so this never drifts from the persisted enum.
+  decided_by: DecidedBy;
   /** boolean only when eval was triggered; null otherwise (NOT false). */
   eval_cache_hit: boolean | null;
+  /** Internal small-model id that ran eval; non-null whenever eval ran, else null. */
+  eval_model?: string | null;
+  /** Layer-2 eval call latency (ms); non-null whenever eval ran, else null. */
+  eval_latency_ms?: number | null;
   constraints: Record<string, unknown>;
   explanation: unknown[];
 }
@@ -126,6 +133,8 @@ export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
       confidence: classification.confidence,
       decided_by: classification.decided_by,
       eval_cache_hit: classification.eval_cache_hit,
+      eval_model: classification.eval_model ?? null,
+      eval_latency_ms: classification.eval_latency_ms ?? null,
       constraints: classification.constraints,
       explanation: classification.explanation,
     },

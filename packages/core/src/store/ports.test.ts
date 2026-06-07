@@ -176,6 +176,8 @@ describe("Store ports are implementable contracts", () => {
         confidence: 1,
         decided_by: "default",
         eval_cache_hit: null,
+        eval_model: null,
+        eval_latency_ms: null,
         constraints: {},
         explanation: [],
       },

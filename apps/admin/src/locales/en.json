@@ -496,5 +496,18 @@
   "Window (seconds)": "Window (seconds)",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.",
   "yes": "yes",
-  "Your new API key": "Your new API key"
+  "Your new API key": "Your new API key",
+  "model:": "model:",
+  "latency:": "latency:",
+  "Eval verdict:": "Eval verdict:",
+  "Decided by Layer-1 rules": "Decided by Layer-1 rules",
+  "Decided by the Layer-2 eval model": "Decided by the Layer-2 eval model",
+  "Rules uncertain — fell back to the balanced lane": "Rules uncertain — fell back to the balanced lane",
+  "Default (explicit passthrough or fail-open)": "Default (explicit passthrough or fail-open)",
+  "Eval failed open ({reason}) — routing fell back to the balanced lane.": "Eval failed open ({reason}) — routing fell back to the balanced lane.",
+  "timed out": "timed out",
+  "provider error": "provider error",
+  "circuit open": "circuit open",
+  "returned non-JSON": "returned non-JSON",
+  "returned an invalid schema": "returned an invalid schema"
 }

@@ -490,5 +490,18 @@
   "Window (seconds)": "視窗（秒）",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "沒有策略時，請求僅按其任務車道路由。新增策略可為符合的請求強制使用或限制車道上限。",
   "yes": "是",
-  "Your new API key": "你的新 API 金鑰"
+  "Your new API key": "你的新 API 金鑰",
+  "model:": "模型：",
+  "latency:": "耗時：",
+  "Eval verdict:": "複核結論：",
+  "Decided by Layer-1 rules": "由第一層規則判定",
+  "Decided by the Layer-2 eval model": "由第二層 eval 模型判定",
+  "Rules uncertain — fell back to the balanced lane": "規則不確定，已回退到 balanced lane",
+  "Default (explicit passthrough or fail-open)": "預設（顯式透傳或兜底）",
+  "Eval failed open ({reason}) — routing fell back to the balanced lane.": "eval 失敗兜底（{reason}），已回退到 balanced lane。",
+  "timed out": "逾時",
+  "provider error": "供應商錯誤",
+  "circuit open": "熔斷開啟",
+  "returned non-JSON": "回傳非 JSON",
+  "returned an invalid schema": "回傳的結構不合法"
 }

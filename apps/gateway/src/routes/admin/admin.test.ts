@@ -206,6 +206,8 @@ function decision(traceId: string, lane: string): DecisionRecord {
       confidence: 0.9,
       decided_by: "rules",
       eval_cache_hit: null,
+      eval_model: null,
+      eval_latency_ms: null,
       constraints: {},
       explanation: [],
     },
