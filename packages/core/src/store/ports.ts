@@ -264,6 +264,11 @@ export interface TelemetryStore {
   // identity/caps. key_id only — never a hash/plaintext (principle 7). null on a
   // miss (unknown/pruned request).
   getApiKeyId(requestId: string): Promise<string | null>;
+  // Resolve the recorded createdAt for one request. The redacted DecisionRecord
+  // carries no timestamp field (the time lives in its own column, flattened as
+  // created_at by the list endpoint), so the detail header uses this narrow
+  // lookup to show the request time. null on a miss (unknown/pruned request).
+  getCreatedAt(requestId: string): Promise<Date | null>;
   // POST-MVP Agentic Signals (docs/02). Read every decision record whose
   // createdAt falls in [startMs, endMs) so the background Signal Collector can
   // aggregate a window AFTER the fact. Half-open interval keeps adjacent windows

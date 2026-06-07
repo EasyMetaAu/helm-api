@@ -46,11 +46,16 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     });
   });
 
-  // GET /requests/:traceId -> RequestDetail (full decision trail) | 404.
+  // GET /requests/:traceId -> RequestDetail (full decision trail) | 404. The
+  // DecisionRecord has no timestamp field, so we flatten created_at (epoch ms)
+  // onto it exactly like the list endpoint above — the SPA header shows the same
+  // request time as the list "Time" column instead of "time not recorded".
   app.get("/admin/api/requests/:traceId", async (c) => {
-    const rec = await deps.telemetry.getByRequestId(c.req.param("traceId"));
+    const traceId = c.req.param("traceId");
+    const rec = await deps.telemetry.getByRequestId(traceId);
     if (!rec) return c.json({ error: "request not found" }, 404);
-    return c.json(rec);
+    const createdAt = await deps.telemetry.getCreatedAt(traceId);
+    return c.json(createdAt ? { ...rec, created_at: createdAt.getTime() } : rec);
   });
 
   // GET /requests/:traceId/payload -> the captured full request/response bodies

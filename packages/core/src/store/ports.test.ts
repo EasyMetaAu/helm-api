@@ -123,6 +123,9 @@ class InMemoryTelemetryStore implements TelemetryStore {
   async getApiKeyId(requestId: string): Promise<string | null> {
     return this.rows.find((r) => r.rec.request_id === requestId)?.keyId ?? null;
   }
+  async getCreatedAt(requestId: string): Promise<Date | null> {
+    return this.rows.find((r) => r.rec.request_id === requestId)?.at ?? null;
+  }
   async queryWindow(startMs: number, endMs: number): Promise<DecisionRecord[]> {
     return [...this.rows]
       .filter((r) => r.at.getTime() >= startMs && r.at.getTime() < endMs)

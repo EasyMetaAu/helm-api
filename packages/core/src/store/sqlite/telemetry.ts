@@ -120,6 +120,17 @@ export class SqliteTelemetryStore implements TelemetryStore {
     return row?.apiKeyId ?? null;
   }
 
+  // Narrow single-column lookup of the recorded createdAt (detail header time).
+  // Selects only created_at so it never deserializes the decision blob.
+  async getCreatedAt(requestId: string): Promise<Date | null> {
+    const row = this.db
+      .select({ createdAt: telemetry.createdAt })
+      .from(telemetry)
+      .where(eq(telemetry.requestId, requestId))
+      .get();
+    return row?.createdAt ?? null;
+  }
+
   // POST-MVP Agentic Signals (docs/02): records whose createdAt is in
   // [startMs, endMs). Half-open so adjacent windows never overlap → the
   // background collector's re-runs stay idempotent. Read-only; never on the

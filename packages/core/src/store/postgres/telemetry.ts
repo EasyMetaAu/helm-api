@@ -123,6 +123,20 @@ export class PgTelemetryStore implements TelemetryStore {
     return rows[0]?.apiKeyId ?? null;
   }
 
+  // Narrow single-column lookup of the recorded createdAt (detail header time).
+  // Selects only created_at so it never deserializes the decision blob.
+  async getCreatedAt(requestId: string): Promise<Date | null> {
+    const rows = await this.db
+      .select({ createdAt: telemetry.createdAt })
+      .from(telemetry)
+      .where(eq(telemetry.requestId, requestId))
+      .limit(1);
+    // createdAt is stored as epoch ms (bigint) here — wrap it back to a Date so
+    // the port contract is identical across adapters.
+    const ms = rows[0]?.createdAt;
+    return ms === undefined ? null : new Date(ms);
+  }
+
   // POST-MVP Agentic Signals (docs/02): records whose createdAt is in
   // [startMs, endMs). Half-open so adjacent windows never overlap → re-collects
   // stay idempotent. createdAt stored as epoch ms (bigint) → compare ms directly.

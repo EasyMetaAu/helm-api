@@ -177,6 +177,12 @@ function makeTelemetry(seed: DecisionRecord[] = []): TelemetryStore {
     async getApiKeyId(id) {
       return rows.some((r) => r.request_id === id) ? "k1" : null;
     },
+    async getCreatedAt(id) {
+      // Mirror the deterministic per-row timestamp used by queryRecent/queryPage
+      // so the detail route's created_at projection lines up with the list.
+      const i = rows.findIndex((r) => r.request_id === id);
+      return i >= 0 ? new Date(1_700_000_000_000 - i * 1000) : null;
+    },
     async queryWindow() {
       return [...rows];
     },
@@ -792,11 +798,15 @@ describe("admin.api requests", () => {
 
     const detail = (await (
       await app.request("/admin/api/requests/trace-1")
-    ).json()) as DecisionRecord;
+    ).json()) as DecisionRecord & { created_at: number };
     expect(detail.trace_id).toBe("trace-1");
     expect(detail.classifier.task_type).toBe("coding"); // classification stage
     expect(detail.lane.candidate_chain).toEqual(["premium", "balanced"]); // lane candidate chain
     expect(detail.provider_attempts).toHaveLength(1); // provider attempts
+    // The detail also carries the recorded timestamp (epoch ms) so the SPA header
+    // shows the request time instead of "time not recorded" (same source as the
+    // list "Time" column; the DecisionRecord itself has no timestamp field).
+    expect(detail.created_at).toBe(1_700_000_000_000);
   });
 
   it("forwards filters + pagination to the store and returns the page envelope", async () => {
