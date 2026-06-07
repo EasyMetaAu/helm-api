@@ -15,8 +15,8 @@
 //     mirrors the backend's null-vs-0 cost invariant, docs/07).
 //   • exactly 0              → "$0.00" (measured zero / free).
 export function formatUsd(n: number | null | undefined): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  if (n === 0) return "$0.00";
+  if (n === null || n === undefined || Number.isNaN(n)) return '—';
+  if (n === 0) return '$0.00';
 
   const abs = Math.abs(n);
   let decimals: number;
@@ -32,8 +32,8 @@ export function formatUsd(n: number | null | undefined): string {
   // Trim trailing zeros beyond the 2nd decimal so "$0.00000340" → "$0.0000034"
   // and "$12.50" stays "$12.50" (a minimum of 2 decimals is always kept).
   let s = n.toFixed(decimals);
-  if (s.includes(".")) {
-    s = s.replace(/(\.\d{2}\d*?)0+$/, "$1");
+  if (s.includes('.')) {
+    s = s.replace(/(\.\d{2}\d*?)0+$/, '$1');
   }
   return `$${s}`;
 }
@@ -56,17 +56,30 @@ export function formatUsd(n: number | null | undefined): string {
 //   • <  1h → "m":  minutes only
 // Negative spans (already elapsed) clamp to zero.
 export type DurationParts =
-  | { readonly unit: "dh"; readonly d: number; readonly h: number }
-  | { readonly unit: "hm"; readonly h: number; readonly m: number }
-  | { readonly unit: "m"; readonly m: number };
+  | { readonly unit: 'dh'; readonly d: number; readonly h: number }
+  | { readonly unit: 'hm'; readonly h: number; readonly m: number }
+  | { readonly unit: 'm'; readonly m: number };
 
 export function durationParts(ms: number): DurationParts {
   const left = Math.max(0, ms);
   const d = Math.floor(left / 86_400_000);
   if (d > 0) {
-    return { unit: "dh", d, h: Math.floor((left % 86_400_000) / 3_600_000) };
+    return { unit: 'dh', d, h: Math.floor((left % 86_400_000) / 3_600_000) };
   }
   const h = Math.floor(left / 3_600_000);
   const m = Math.floor((left % 3_600_000) / 60_000);
-  return h > 0 ? { unit: "hm", h, m } : { unit: "m", m };
+  return h > 0 ? { unit: 'hm', h, m } : { unit: 'm', m };
+}
+
+// Render a recorded ISO timestamp in the viewer's local timezone/locale. The
+// gateway records times in UTC (ISO 8601, `…Z`); both the request list column
+// and the detail header show them through this helper so the operator reads the
+// time in their own timezone rather than raw UTC. Empty input → "" so each
+// caller supplies its own placeholder ("—" on the list, "time not recorded" on
+// the detail page); a non-empty but unparseable value passes through unchanged
+// rather than rendering "Invalid Date".
+export function formatTimestamp(ts: string): string {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
 }

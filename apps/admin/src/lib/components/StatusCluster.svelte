@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { getHealth, getVersion, type BuildInfo, type HealthState } from '$lib/api/gateway.js';
   import { formatStars, getStarCount, REPO } from '$lib/api/github.js';
+  import { formatTimestamp } from '$lib/format.js';
   import { t } from '$lib/i18n';
   import LocaleSwitcher from './LocaleSwitcher.svelte';
 
@@ -54,11 +55,7 @@
   });
 
   const dotClass = $derived(
-    health === 'online'
-      ? 'bg-emerald-500'
-      : health === 'degraded'
-        ? 'bg-amber-500'
-        : 'bg-red-500',
+    health === 'online' ? 'bg-emerald-500' : health === 'degraded' ? 'bg-amber-500' : 'bg-red-500',
   );
   const healthLabel = $derived(
     !probed
@@ -86,7 +83,7 @@
   {#if showVersion && version}
     <span
       class="hidden tabular-nums text-slate-400 sm:inline"
-      title={`${version.gitSha} · ${version.builtAt}`}
+      title={`${version.gitSha} · ${formatTimestamp(version.builtAt)}`}
       data-testid="gateway-version">v{version.version}</span
     >
   {/if}

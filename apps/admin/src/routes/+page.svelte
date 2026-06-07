@@ -3,7 +3,7 @@
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
-  import { formatUsd } from '$lib/format.js';
+  import { formatTimestamp, formatUsd } from '$lib/format.js';
   import { DEFAULT_PAGE_SIZE, filtersToSearch, type RangeKey } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
 
@@ -53,12 +53,10 @@
     void goto(detailHref(traceId));
   }
 
-  // Format the recorded ISO timestamp for the local locale; '—' for a legacy row
-  // that carried none.
+  // Format the recorded ISO timestamp in the viewer's local zone (shared helper);
+  // '—' for a legacy row that carried none.
   function formatTs(ts: string): string {
-    if (!ts) return '—';
-    const d = new Date(ts);
-    return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
+    return formatTimestamp(ts) || '—';
   }
 
   function decidedByClass(d: RequestListItem['decided_by']): string {

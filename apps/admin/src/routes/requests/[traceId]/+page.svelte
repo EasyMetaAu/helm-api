@@ -1,6 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { RequestDetail, RequestPayloadView } from '$lib/api/requests.js';
+  import { formatTimestamp } from '$lib/format.js';
   import { t } from '$lib/i18n';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
@@ -65,7 +66,9 @@
         <p class="section-desc">
           {$t('Follow how this request was classified, routed, and billed — step by step.')}
         </p>
-        <p class="mt-1 text-sm text-ink-muted">{d.ts || $t('time not recorded')}</p>
+        <p class="mt-1 text-sm text-ink-muted">
+          {formatTimestamp(d.ts) || $t('time not recorded')}
+        </p>
       </div>
       <div class="flex items-center gap-2">
         <code class="rounded bg-slate-100 px-2 py-1 font-mono text-xs text-slate-700"

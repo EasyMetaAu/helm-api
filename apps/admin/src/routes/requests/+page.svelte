@@ -4,7 +4,7 @@
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
-  import { formatUsd } from '$lib/format.js';
+  import { formatTimestamp, formatUsd } from '$lib/format.js';
   import { paginationItems } from '$lib/pagination.js';
   import {
     DEFAULT_FILTERS,
@@ -117,12 +117,10 @@
     void goto(detailHref(traceId));
   }
 
-  // Recorded time for the "timestamp" column: format the ISO ts for the local locale;
-  // '—' when the record carried none (legacy row).
+  // Recorded time for the "timestamp" column: format the ISO ts in the viewer's
+  // local zone (shared helper); '—' when the record carried none (legacy row).
   function formatTs(ts: string): string {
-    if (!ts) return '—';
-    const d = new Date(ts);
-    return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
+    return formatTimestamp(ts) || '—';
   }
 
   // Distinct label styling per classification-stage decision layer (Principle 5).
