@@ -75,7 +75,10 @@ The landing page (`/`) gives an at-a-glance overview.
   (`off` / `observe` / `inject` with project id and thread source). Backed by the
   KeyStore (`/admin/api/keys` `GET` / `POST` / `PATCH` / `DELETE`), never YAML.
   The plaintext of a freshly minted key is returned exactly once (Principle 7);
-  revocation is a soft disable. See [06 · Auth, API Keys & Rate
+  revocation is a soft disable. A revoked key can then be permanently deleted as
+  an explicit second step (DELETE `?purge=true`); the server refuses to purge an
+  active key (409 'key must be revoked before deletion'). Telemetry keeps an
+  unlinked key_id reference for audit history. See [06 · Auth, API Keys & Rate
   Limits](06-auth-and-rate-limits.md).
 - **Lanes** (`/lanes`) — view/edit each lane's `primary + fallback[]`
   (`/admin/api/lanes` CRUD). The model combobox is populated from a read-only
@@ -87,12 +90,12 @@ The landing page (`/`) gives an at-a-glance overview.
   inspect the rule dimensions/weights (`/admin/api/classifier`). See [03 ·
   Classification Cascade](03-classification.md).
 
-Rule edits go through a runtime rule store that re-binds the live `lanes` /
-`policies` / `classifier` config the router reads — applied on the very next
-request, no restart. These edits are held in-process only and are **not**
-persisted across restarts; YAML write-back is future work. For durable changes,
-edit `config/*.yaml` directly. (The runtime **Settings** below are the exception
-— they are persisted to the config store.)
+Rule edits go through a runtime rule store that FIRST writes the change back to
+the canonical `config/*.yaml` (comment-preserving, atomic, fail-closed) and then
+re-binds the live `lanes` / `policies` / `classifier` config the router reads —
+applied on the very next request, no restart, and durable across restarts. A
+failed write rejects the edit with the live config unchanged, so file and memory
+never diverge.
 
 ### Providers (OAuth subscriptions)
 
@@ -138,7 +141,10 @@ edit `config/*.yaml` directly. (The runtime **Settings** below are the exception
   Observability](07-observability.md): classification stage, matched policy, lane
   candidate chain, provider attempts, cost, error, and `trace_id`. When
   `capture_payloads` is on, the detail can load the full captured request/response
-  bodies (`/admin/api/requests/:traceId/payload`).
+  bodies (`/admin/api/requests/:traceId/payload`). When the full request body was
+  captured and is an OpenAI-chat request (a `messages` array), the detail page
+  offers an editable **Retry** button that re-sends the (optionally edited) body
+  as an isolated, newly-traced debug re-run via the server replay endpoint.
 
 ## Boundaries
 

@@ -88,7 +88,7 @@ plaintext key and no private payload. The record holds:
   `memory_tokens_injected`, `observer_job_id`, `memory_writeback_status`
   (`queued` / `skipped` / `failed`), `degraded`, and `thread_source` (which
   fallback-chain link produced the thread anchor). See [08 ·
-  Memory](08-memory.md).
+  Memory](08-memory-middleware.md).
 
 Per **Principle 5**, the **classification** fallback (`classifier.decided_by` /
 `fallback_reason`) and the **execution** fallback (`provider_attempts` /

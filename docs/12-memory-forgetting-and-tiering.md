@@ -31,7 +31,7 @@
 | Retention (tombstone obs / hard-delete facts) | `packages/core/src/memory/forgetting/retention.ts` → `pruneRetainedMemory` |
 | Deterministic fact-extractor stub | `extractFactsFromObservations` in `apps/gateway/src/server.ts` |
 | Scheduler dispatch (`type='decay'`) + sweep `onTick` | `startMemoryWorker` wiring in `apps/gateway/src/server.ts` |
-| Config schema (snake_case, `.strict()`) | `packages/shared/src/config/schema.ts` (`ForgettingSchema`) |
+| Config schema (snake_case, `.strict()`) | `packages/shared/src/config/memory-schema.ts` (`ForgettingSchema`; re-exported from `config/schema.ts`) |
 | Migration v18 + Zod row deltas | `packages/core/src/store/sqlite/migrate.ts`, `packages/shared/src/memory/schema.ts` |
 
 ## Why this exists
@@ -462,10 +462,15 @@ excluded) and is read in `apps/gateway/src/server.ts`.
 
 Zod sketch (single source of truth; types via `z.infer`). **Keys are snake_case to
 match the YAML** and every object is `.strict()` — exactly the repo convention
-(`packages/shared/src/config/schema.ts`). snake_case + `.strict()` is what makes
+(`ForgettingSchema` / `ScoreSchema` are defined in
+`packages/shared/src/config/memory-schema.ts`, re-exported from `config/schema.ts`).
+snake_case + `.strict()` is what makes
 config-as-code fail-closed: a misspelled key throws at startup instead of being
 silently stripped to the default, and a real `half_life_s: 3600` actually takes
-effect (tests assert both the round-trip and the unknown-key rejection).
+effect (tests assert both the round-trip and the unknown-key rejection). Every
+nested block uses `.prefault({})` (not `.default({})`) so its inner field defaults
+actually fire when the block is omitted — a bare `.default({})` would hand back a
+literal `{}` with undefined inner fields (`half_life_s` would be `undefined`).
 
 ```ts
 const ScoreSchema = z.object({
@@ -477,27 +482,27 @@ const ScoreSchema = z.object({
 
 export const ForgettingSchema = z.object({
   enabled: z.boolean().default(false),
-  score:   ScoreSchema.default({}),
-  inject:  z.object({ drop_order: z.enum(["score", "oldest"]).default("score") }).strict().default({}),
+  score:   ScoreSchema.prefault({}),
+  inject:  z.object({ drop_order: z.enum(["score", "oldest"]).default("score") }).strict().prefault({}),
   decay:   z.object({
     archive_threshold:    z.number().min(0).max(1).default(0.05),
     trigger_observations: z.number().int().positive().default(50),
     trigger_interval_s:   z.number().int().positive().default(3600),
-  }).strict().default({}),
+  }).strict().prefault({}),
   consolidate: z.object({
     trigger_tokens:       z.number().int().positive().default(1024),
     max_facts_per_subject: z.number().int().positive().default(8),
     enable_llm_supersede: z.literal(false).default(false), // deferred — `true` refuses startup (no lying knobs)
-  }).strict().default({}),
+  }).strict().prefault({}),
   retention: z.object({
     archived_days:      z.number().int().positive().default(30),
     facts_expired_days: z.number().int().positive().default(90),
-  }).strict().default({}),
+  }).strict().prefault({}),
   sweep: z.object({
     max_iterations:         z.number().int().positive().default(200),
     max_wallclock_s:        z.number().int().positive().default(900),
     max_consecutive_errors: z.number().int().positive().default(5),
-  }).strict().default({}),
+  }).strict().prefault({}),
 }).strict();
 export type ForgettingConfig = z.infer<typeof ForgettingSchema>;
 ```

@@ -1,12 +1,14 @@
 # 09 · Roadmap
 
-> Status: **shipped — 0.6.0.** The core gateway (routing, classification, provider
+> Status: **shipped — 0.8.0.** The core gateway (routing, classification, provider
 > execution, protocol translation, telemetry) runs in production, and several major
 > subsystems have landed since the early releases: a memory middleware (observe +
-> inject + background workers, opt-in), per-key budgets / rate limits / concurrency
-> limiting, runtime hot-reload settings, verbatim payload capture, four streaming
-> inbound protocols, full OAuth subscription providers, and an admin-UI overhaul.
-> The "deferred" list below is what is genuinely still out of scope or not yet wired.
+> inject + background workers, on by default), per-key budgets / rate limits /
+> concurrency limiting, runtime hot-reload settings with admin YAML write-back,
+> verbatim payload capture, four streaming inbound protocols, full OAuth subscription
+> providers, an admin-UI overhaul, observer-economy compaction, and permanent delete
+> of revoked keys. The "deferred" list below is what is genuinely still out of scope
+> or not yet wired.
 
 ## Delivered
 
@@ -42,16 +44,20 @@ Clients can mix SDKs; cross-protocol SSE conversion is covered per direction. Se
 
 ### Memory middleware
 
-Opt-in per request via the `x-memory-mode` header (default `off` — zero DB touch):
+Memory defaults to **inject** for new keys and for requests with no `x-memory-mode`
+header (memory-on-by-default since #107); send `x-memory-mode: off` or set a per-key
+default of `off` to opt out (zero DB touch):
 
 - **`observe`** — write-only capture of inbound/outbound turns.
 - **`inject`** — synchronous read-back that full-replaces the message array before
   routing, then also writes. Wired on the chat, Messages, and Responses surfaces.
 - **Background `MemoryWorker`** runs process-wide by default (disable via
   `HELM_MEMORY_WORKER_DISABLED=1`), dispatching observer / reflector / decay jobs.
-- **Forgetting & tiering** (short / mid / long, see [12 · Memory Tiering](12-memory-tiering.md))
-  has shipped, gated behind `config.memory.forgetting.enabled` — **default `false`**,
-  so with forgetting off the runtime is byte-identical to before.
+- **Forgetting & tiering** (short / mid / long, see [12 · Memory Tiering](12-memory-forgetting-and-tiering.md))
+  has shipped, gated behind `config.memory.forgetting.enabled`. The Zod schema
+  default is `false` (fail-safe), but the shipped `config/memory.yaml` enables it
+  (`true`) since #106, so a default deployment runs decay/reinforcement; set it to
+  `false` to get pre-docs/12 byte-identical behavior.
 - The `DecisionRecord` carries a redacted `memory` block (counts / ids only, never
   content). See [08 · Memory Middleware](08-memory-middleware.md).
 
@@ -80,7 +86,10 @@ and OpenAI Codex (ChatGPT):
   degrade-to-cheaper-lane or reject), and concurrency limiting — all metered **per
   API key**.
 - **Runtime hot-reload settings.** Lanes, policies, classifier, and system settings
-  re-bind the live config and apply on the next request — no restart.
+  re-bind the live config and apply on the next request — no restart. Since #115,
+  classifier/lanes/policies edits are also persisted back to `config/*.yaml`
+  (comment-preserving, atomic, fail-closed) before the live config rebinds, so they
+  survive restarts rather than being reverted on restart.
 - **Verbatim payload capture.** Full request/response bodies recorded to a separate
   `request_payloads` table (default on, 30-day retention), toggleable in System
   Settings.

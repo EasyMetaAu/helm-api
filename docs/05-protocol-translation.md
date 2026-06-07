@@ -81,7 +81,9 @@ correctness reference; the code is a clean reimplementation, not a copy.
   `{type:"thinking"}` content parts and the flat `message.reasoning_content` /
   `thinking_blocks` are kept in sync, so reasoning survives every cross-protocol
   hop (OpenAI ↔ Anthropic ↔ Responses ↔ Gemini), streaming and non-streaming.
-  `reasoning_effort` maps to a per-protocol thinking-budget band — Anthropic
+  `reasoning_effort` maps to a per-protocol thinking-budget band
+  (`anthropic/request.ts` `REASONING_EFFORT_TO_BUDGET` and
+  `gemini/gemini-transformer.ts` `REASONING_EFFORT_BUDGET`) — Anthropic
   `{minimal:1024, low:2048, medium:8192, high:16384}`, Gemini
   `{minimal:128, low:1024, medium:8192, high:24576}`.
 - **Non-mappable knobs degrade observably, never silently**

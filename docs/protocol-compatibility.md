@@ -132,9 +132,10 @@ Of the four transformers only Gemini exposes **both** `transformStreamIn` and
 
 ## Tool / function calling
 
-- **Anthropic** tool names are sanitized to `^[A-Za-z0-9_-]` with a max length of
-  64; collisions are disambiguated with an FNV-1a hash suffix so distinct source
-  names stay distinct after sanitization.
+- **Anthropic** tool names are sanitized to `^[A-Za-z0-9_]+` — letters, digits,
+  and underscore only (hyphens and other characters become `_`) — with a max
+  length of 64; collisions are disambiguated with an FNV-1a hash suffix so
+  distinct source names stay distinct after sanitization.
 - **Gemini** tool calls have **no wire id**. Inbound, Helm synthesizes a
   deterministic `call_<name>_<occurrence>` id; outbound, that synthetic id is
   dropped (Gemini never sees it).

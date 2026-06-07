@@ -320,5 +320,6 @@ Do not copy blindly:
 - Making dynamic RAG the default memory strategy.
 
 > See [08 · Memory Middleware](08-memory-middleware.md) for how these ideas map to
-> Helm: the observe phase is implemented, the inject phase / Observer / Reflector
-> are on the roadmap.
+> Helm: observe and inject are both implemented end-to-end with a background
+> Observer/Reflector worker (opt-in); only the real LLM summarize/merge step
+> remains a deterministic stub.

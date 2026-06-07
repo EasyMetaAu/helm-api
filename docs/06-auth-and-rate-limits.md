@@ -44,7 +44,6 @@ only.
 require_api_key: true
 bootstrap:
   generate_if_missing: true            # on first start with no keys, mint a root key
-  persist_to: ./data/helm-keys.json    # written to the mounted ./data volume
   print_once: true                     # plaintext printed to the boot log exactly once
 ```
 
@@ -103,9 +102,9 @@ The stored record (`ApiKeyRecord`, single source of truth in
   concurrency_limit: number | null,
 
   // Per-key memory defaults (issue #97) — x-memory-* headers override these
-  memory_mode: "off" | "observe" | "inject",   // default "off"
+  memory_mode: "off" | "observe" | "inject",   // new keys mint "inject"; root key forced "off"; legacy rows parse-default "off"
   memory_project_id: string | null,
-  memory_thread_source: "header" | ...,        // default "header"
+  memory_thread_source: "header" | "auto",     // new keys mint "auto"; root key forced "header"; legacy rows parse-default "header"
 }
 ```
 

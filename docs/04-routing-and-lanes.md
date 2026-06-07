@@ -9,19 +9,24 @@ its ordered chain. The framework-agnostic orchestrator is `routeRequest`
 ## Lane routing priority
 
 ```text
-classifier short-circuit       # decided_by 'default' | 'fallback' → straight to balanced
-  > explicit model/lane        # client specified a concrete model; skips all rules
+explicit model/lane            # client specified a concrete model/lane; skips classify + policy entirely
+  > classifier short-circuit   # decided_by 'default' | 'fallback' → straight to balanced (classified branch only)
   > server-side policy         # a policy pin (use_lane)
   > task-specific lane         # a lane named after the detected task_type
   > complexity-fallback lane   # simple→economy / medium→balanced / complex→premium
   > balanced                   # final default
 ```
 
-The resolver's **priority-0** short-circuit comes first: if the classifier
-`decided_by` is `default` (classify() itself threw — hard fail-open) or
-`fallback` (eval/rules abstained), the request goes **straight to `balanced`**
-without re-deriving a lane. Both signals mean "we are not confident enough to
-steer," so they collapse to the safe terminal.
+Explicit model/lane passthrough is the **priority-0** short-circuit: a request
+that names a concrete model or lane (gated by `allow_custom_model`, and
+suppressed while degrading) skips classification and policy entirely and is
+executed directly, so the classifier never runs for it.
+
+Within the classified branch, the resolver applies its own priority-0
+short-circuit: if the classifier `decided_by` is `default` (classify() itself
+threw — hard fail-open) or `fallback` (eval/rules abstained), the request goes
+**straight to `balanced`** without re-deriving a lane. Both signals mean "we are
+not confident enough to steer," so they collapse to the safe terminal.
 
 Default lanes are deliberately few and easy to reason about. Any selected lane
 name that does not exist is skipped (fail-open); the terminal `balanced` is
@@ -245,7 +250,8 @@ attempt with its reason and latency:
    empty chain returns `lane_unavailable` (see
    [07 · Error Model & Observability](07-observability.md)).
 
-`fallback_count` counts only **non-skipped, served** attempts beyond the first —
+`fallback_count` counts only **non-skipped** attempts beyond the first (i.e.
+candidates actually attempted upstream, whether they succeeded or failed) —
 candidates pruned by the Capability Filter or skipped for an OPEN breaker do not
 increment it.
 
