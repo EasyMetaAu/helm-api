@@ -469,14 +469,18 @@ export async function getRequestPayload(traceId: string): Promise<RequestPayload
 // The `request` is the full OpenAI chat body the operator confirmed in the dialog;
 // identity/caps are reconstructed server-side from the ORIGINAL request's key (the
 // browser never handles a plaintext key — Principle 7).
+// `signal` lets the dialog's Cancel abort the wait — the gateway sees the request
+// abort and cancels the in-flight upstream run (the route forwards its own signal).
 export async function replayRequest(
   traceId: string,
   request: unknown,
+  signal?: AbortSignal,
 ): Promise<{ trace_id: string }> {
   const res = await fetch(`${BASE}/${encodeURIComponent(traceId)}/replay`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ request }),
+    signal,
   });
   return asJson<{ trace_id: string }>(res);
 }
