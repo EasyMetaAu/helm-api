@@ -1476,6 +1476,10 @@ export async function buildServer(
             store: oauthCtx.store,
             encKey: oauthCtx.encKey,
             config: store.config,
+            // Surface the (fail-open) quota PULL failures in the JSON log — a
+            // silently-swallowed parse failure once froze a providers-page
+            // snapshot for ~a day with zero log evidence.
+            log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
           })
         : undefined,
       // Per-account OAuth subscription observability stores (providers page): today's

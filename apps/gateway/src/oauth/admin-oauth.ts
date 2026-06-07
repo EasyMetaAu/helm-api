@@ -133,6 +133,13 @@ export interface OAuthAdminDeps {
   // can assert the proxy fetch — not the real-IP global — serves the binding calls.
   // Default: makeProxyFetch when a proxy is set, else the global fetch.
   makeFetch?: (proxy?: ProxyConfig) => typeof globalThis.fetch;
+  // Structured diagnostics sink (server.ts wires the JSON logger). The quota PULLs
+  // are fail-open by design, which previously meant their failures were swallowed
+  // SILENTLY — a body the schema rejected parsed to [] and froze the providers page
+  // on a stale snapshot for ~a day with zero log evidence. Optional so the many
+  // existing unit harnesses stay untouched. Ids/labels/status only — never a body
+  // or token (principle 7).
+  log?: (level: "warn" | "error", message: string, fields?: Record<string, unknown>) => void;
 }
 
 // Split a credential into store fields. `meta` carries every key beyond the
@@ -145,6 +152,7 @@ function metaFrom(creds: OAuthCredentials): string | null {
 export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   const now = deps.now ?? (() => Date.now());
   const genId = deps.genSessionId ?? (() => randomUUID());
+  const log = deps.log ?? (() => {});
   // Resolve the egress fetch for a (possibly absent) proxy. ONE place so the whole
   // flow — begin/complete/poll + token-manager refresh + quota — egresses alike.
   const makeFetch =
@@ -556,11 +564,28 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         if (res.ok) {
           const body: unknown = await res.json();
           windows = parseAnthropicUsageBody(body, now());
+          // A 200 that yields ZERO windows means the schema rejected the body (or
+          // it carried no windows at all) — the upsert is skipped and the stored
+          // snapshot silently goes stale. Warn so the next shape drift is visible
+          // in logs instead of frozen percentages (no body content — principle 7).
+          if (windows.length === 0) {
+            log("warn", "oauth.quota.pull_empty", { provider_id: ANTHROPIC, account });
+          }
         } else {
           await res.body?.cancel().catch(() => {}); // 429/4xx/5xx → cache the miss
+          log("warn", "oauth.quota.pull_failed", {
+            provider_id: ANTHROPIC,
+            account,
+            status: res.status,
+          });
         }
-      } catch {
+      } catch (e) {
         windows = null; // dead token / network / malformed body → page renders "—"
+        log("warn", "oauth.quota.pull_failed", {
+          provider_id: ANTHROPIC,
+          account,
+          error: e instanceof Error ? e.message : String(e),
+        });
       }
       // Cache the outcome (success OR failure) so the next page open within the TTL
       // is served from memory rather than re-hitting the rate-limited endpoint.
@@ -607,11 +632,26 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         if (res.ok) {
           const body: unknown = await res.json();
           windows = parseCodexUsageBody(body, now());
+          // Same tripwire as the Anthropic PULL: a 200 yielding zero windows would
+          // otherwise freeze the stored snapshot silently.
+          if (windows.length === 0) {
+            log("warn", "oauth.quota.pull_empty", { provider_id: CODEX, account });
+          }
         } else {
           await res.body?.cancel().catch(() => {}); // 429/4xx/5xx → cache the miss
+          log("warn", "oauth.quota.pull_failed", {
+            provider_id: CODEX,
+            account,
+            status: res.status,
+          });
         }
-      } catch {
+      } catch (e) {
         windows = null; // dead token / network / malformed body → page renders "—"
+        log("warn", "oauth.quota.pull_failed", {
+          provider_id: CODEX,
+          account,
+          error: e instanceof Error ? e.message : String(e),
+        });
       }
       quotaCache.set(key, { at: now(), windows });
       return windows;
