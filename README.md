@@ -9,7 +9,7 @@
 Open-source · self-hosted · MIT
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.8.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.8.6-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-3c873a.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](tsconfig.base.json)
 [![Built with Hono](https://img.shields.io/badge/gateway-Hono-ff5e00.svg)](https://hono.dev)
@@ -67,7 +67,7 @@ docker compose logs helm | grep -i "root API key"
 | 🛡️ | **Resilient execution** | Circuit breaker (OPEN/HALF_OPEN + single probe), capability filter with explicit skip reasons, `:free`-tier 429 skipping, per-key concurrency queueing. Client disconnects are never counted as provider faults. |
 | 🔐 | **OAuth subscriptions** | Route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, all hot-reloaded. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
 | 🔑 | **Keys with teeth** | Mandatory auth; keys stored as SHA-256 hashes only. Per key: lane whitelist, custom-model permission, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, memory mode. Revoke softly, then delete permanently. |
-| 🧠 | **Memory middleware** | On by default: remembered context is injected before routing; a background worker compresses and consolidates; a forgetting/tiering layer (decay, reinforcement, retention) keeps it honest. Opt out per key or per request (`x-memory-mode: off`). |
+| 🧠 | **Memory middleware** | On by default: remembered context is injected before routing; a background worker compresses and consolidates — compaction is **auto-adaptive and zero-config** (prices and context windows resolve from the model catalog; size / idle / context-pressure triggers); a forgetting/tiering layer (decay, reinforcement, retention) keeps it honest. Opt out per key or per request (`x-memory-mode: off`). |
 | 📊 | **Total observability** | A redacted decision record per request — classifier, policy, lane, every provider attempt, latency, fallbacks, cost. Verbatim payload capture to a separate table (on by default, 30-day retention). An editable **Retry** button replays any captured request. |
 | 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic: overview, key CRUD, lane/policy/classifier editors, system settings, drill-down request log. Edits **write back to `config/*.yaml`** (comment-preserving, atomic) and rebind live — no restart, and they survive one. Five languages. |
 | 💾 | **Storage** | SQLite by default (one local file). Postgres / Supabase behind the same Store-port abstraction — switch with one env var. |
@@ -183,8 +183,8 @@ Everything lives in `config/*.yaml`, Zod-validated on load. **Invalid config sto
 | `lanes.yaml` | Each lane's primary model + fallback chain | ✅ persists |
 | `policies.yaml` | First-match rules that pick or cap the lane | ✅ persists |
 | `classifier.yaml` | Built-in rules + the optional eval model | ✅ persists |
-| `memory.yaml` | Observer compaction + forgetting/tiering knobs (on in the shipped config) | ✅ |
-| `capabilities.yaml` / `pricing.yaml` | Manual overrides on the model catalog | — |
+| `memory.yaml` | Forgetting/tiering knobs (on in the shipped config). Compaction is automatic — not configurable; a leftover `observer:` block from older configs refuses startup | ✅ |
+| `capabilities.yaml` / `pricing.yaml` | Manual overrides on the model catalog (incl. prompt-cache read/write prices) | — |
 
 Most-used environment variables (env wins over YAML; full list in [`.env.example`](.env.example)):
 
@@ -262,7 +262,7 @@ Start at [`docs/README.md`](docs/README.md) and read in order:
 
 ## Status
 
-Helm API is at **0.8.0** — a real, end-to-end implementation, not a scaffold. The full pipeline (config → auth → classify → route → execute with circuit-breaking and fallback → protocol translation → telemetry) is wired and covered by an extensive Vitest suite plus Playwright e2e specs.
+Helm API is at **0.8.6** — a real, end-to-end implementation, not a scaffold. The full pipeline (config → auth → classify → route → execute with circuit-breaking and fallback → protocol translation → telemetry) is wired and covered by an extensive Vitest suite plus Playwright e2e specs.
 
 ## License
 
