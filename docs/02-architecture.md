@@ -155,14 +155,17 @@ through. The chains live in `config/lanes.yaml`; see
 
 ## Memory middleware
 
-Memory is **opt-in per request** via the `x-memory-mode` header, normalized in
-core. `off` (the default) touches no storage. `observe` writes the turn back to
+Memory is **on by default** and overridable per request via the `x-memory-mode`
+header, normalized in core. Absent a header and a per-key default, the mode
+resolves to `inject`; newly created API keys are also minted with `inject`.
+Setting `x-memory-mode: off` (or a key default of `off`) touches no storage.
+`observe` writes the turn back to
 memory; `inject` additionally does a synchronous read-back that **fully replaces
 the message array before routing**, then also writes. Both phases are wired on the
 chat, messages, and responses surfaces (when the mode is `observe`/`inject`) — not
 on the Gemini or models surfaces. A background `MemoryWorker` (observer / reflector
 / decay jobs) runs process-wide by default and can be disabled via env. See
-[08 · Memory](08-memory.md).
+[08 · Memory](08-memory-middleware.md).
 
 ## Internal request shape
 
@@ -222,6 +225,7 @@ config/
   auth.yaml            # require_api_key + admin auth source
   runtime.yaml         # store driver, rate limit, timeouts, request size
   server.yaml          # host / port
+  memory.yaml          # observer compaction + forgetting/decay layer
 ```
 
 Capability and pricing data originate from a checked-in **generated catalog**

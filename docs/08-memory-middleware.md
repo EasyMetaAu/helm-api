@@ -1,8 +1,8 @@
 # 08 · Memory Middleware
 
-> Status: **implemented, opt-in.** `observe` and `inject` are both wired
-> end-to-end across the OpenAI Chat, Anthropic Messages, and OpenAI Responses
-> surfaces (Gemini is not wired), together with a process-wide background
+> Status: **implemented; on by default.** `observe` and `inject` are both wired
+> end-to-end across the OpenAI Chat, Anthropic Messages, OpenAI Responses, and
+> Gemini generateContent surfaces, together with a process-wide background
 > `MemoryWorker` that drains the `memory_jobs` queue (observer / reflector /
 > decay jobs). The four memory headers are parsed at the gateway boundary
 > (`apps/gateway/src/routes/memory-scope.ts`); mode normalization and
@@ -14,8 +14,11 @@
 > interface. Swapping in an LLM is a drop-in replacement.
 >
 > The forgetting & tiering layer ([12 · Memory: Forgetting & Tiering](12-memory-forgetting-and-tiering.md))
-> has also shipped, gated behind `config.memory.forgetting.enabled` whose schema
-> default is `false`. With forgetting off, runtime is byte-identical to before.
+> has also shipped, gated behind `config.memory.forgetting.enabled`. Although the
+> Zod schema default is `false`, the shipped `config/memory.yaml` sets
+> `forgetting.enabled: true`, so the default deployment runs with forgetting **ON**
+> (decay sweeps, reinforcement, fact extraction). Set it to `false` for the legacy
+> byte-identical-to-before behavior.
 
 ## Positioning
 
@@ -50,9 +53,12 @@ x-project-id:  the project-level memory scope
 x-memory-mode: off | observe | inject
 ```
 
-Default: `x-memory-mode = off`. Mode normalization is centralized in core's
-`resolveMemoryMode`; an absent, illegal, or wrong-case value falls back safely to
-`off`. An empty `x-thread-id` yields `null` (never a fabricated thread id), and
+Default mode: an absent `x-memory-mode` resolves to the API key's stored default;
+keys created through the app default to `inject` (memory on), and the
+no-key-config path also falls back to `inject`. Only a present-but-illegal or
+wrong-case header value normalizes to `off` (centralized in core's
+`resolveMemoryMode` — a typo must never silently inherit a more permissive mode).
+An empty `x-thread-id` yields `null` (never a fabricated thread id), and
 `observe` self-gates to a no-op when there is no thread scope.
 
 Modes:
@@ -228,13 +234,14 @@ memory_observations
   reference_count, importance, status (active | archived), archived_at, expired_at
 
 memory_reflections
-  id, project_id, resource_id, thread_id, reflection_text, version,
+  id, owner_id, project_id, resource_id, thread_id, reflection_text, version,
   token_estimate, updated_at,
   referenced_at, reference_count, status
 
 memory_facts
-  id, owner_id, subject_key, content_hash, content,
-  valid_from, invalid_at, expired_at, status
+  id, owner_id, project_id, resource_id, thread_id, subject_key,
+  content_hash, fact_text, importance, reference_count, referenced_at,
+  source_observation_range, valid_from, invalid_at, expired_at, status
 
 memory_jobs
   id, type (observer | reflector | decay), scope_id, status, error,
@@ -303,7 +310,7 @@ until the LLM summarizer lands.
 - Project / resource / thread scope hierarchy.
 - Structured facts (`memory_facts`) and scope aggregation.
 
-### Phase 4 — Forgetting & tiering · implemented (opt-in)
+### Phase 4 — Forgetting & tiering · implemented (on by default in the shipped config)
 
 - Short / mid / long-term tiers mapped onto recent_raw / observations /
   reflections + facts.
@@ -311,7 +318,8 @@ until the LLM summarizer lands.
   access reinforcement) driving score-based inject trimming, an off-hot-path
   decay sweep, soft-archive, and bi-temporal supersede.
 - See [12 · Memory: Forgetting & Tiering](12-memory-forgetting-and-tiering.md).
-  Gated behind `config.memory.forgetting.enabled` (schema default `false`).
+  Gated behind `config.memory.forgetting.enabled` (Zod schema default `false`, but
+  the shipped `config/memory.yaml` sets it `true` — on by default).
 
 ## Non-goals
 

@@ -88,9 +88,11 @@ user-facing surface.
 Memory is **per-request and on by default (`inject`)**, overridable via header. The `x-memory-mode`
 header selects `off` (zero DB touch), `observe` (write-only), or `inject`
 (read-back that hydrates the message array before routing, then writes). The
-forgetting / tiering layer (short / mid / long term, decay) has **shipped** but is
-opt-in behind a config flag that defaults to off — with forgetting off, runtime
-is byte-identical to before. See [08 · Memory Middleware](08-memory-middleware.md).
+forgetting / tiering layer (short / mid / long term, decay) has **shipped** and is
+**enabled** in the shipped default config (`config/memory.yaml`:
+`forgetting.enabled: true`). Its Zod schema fallback is off, so set
+`forgetting.enabled: false` (or remove the YAML block) to get byte-identical
+pre-forgetting behavior. See [08 · Memory Middleware](08-memory-middleware.md).
 
 ## Goals
 
