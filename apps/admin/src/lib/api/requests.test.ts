@@ -18,6 +18,7 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
       complexity: 'complex',
       confidence: 0.9,
       decided_by: 'eval',
+      rules_confidence: 0.12,
       eval_cache_hit: false,
       eval_model: 'gpt-4o-mini',
       eval_latency_ms: 1234,
@@ -97,6 +98,29 @@ describe('toDetail', () => {
     expect(d.eval_model).toBe('gpt-4o-mini');
     expect(d.eval_latency_ms).toBe(1234);
     expect(d.eval_fallback_reason).toBeNull();
+  });
+
+  it('keeps the Layer-1 gate confidence separate from the eval verdict confidence', () => {
+    const d = toDetail(rawRecord());
+    // confidence (0.9) is the EVAL verdict; rules_confidence (0.12) is why it escalated.
+    expect(d.classifier_output.confidence).toBeCloseTo(0.9);
+    expect(d.classifier_output.rules_confidence).toBeCloseTo(0.12);
+    // Legacy record without the field → null, never fabricated.
+    const legacy = rawRecord();
+    delete (legacy.classifier as Record<string, unknown>).rules_confidence;
+    expect(toDetail(legacy).classifier_output.rules_confidence).toBeNull();
+  });
+
+  it('renders explanation OBJECT entries via their detail label (never "[object Object]")', () => {
+    const raw = rawRecord();
+    (raw.classifier as Record<string, unknown>).explanation = [
+      'plain-string-dim',
+      { source: 'dimension', detail: 'code_block', weight: 2 },
+      { source: 'override', weight: 1 }, // no string detail -> dropped
+      42, // junk -> dropped
+    ];
+    const d = toDetail(raw);
+    expect(d.classifier_output.matched_dimensions).toEqual(['plain-string-dim', 'code_block']);
   });
 
   it('maps an eval that ran then failed open (fallback_reason + null verdict model state)', () => {

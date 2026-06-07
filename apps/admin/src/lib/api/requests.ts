@@ -80,6 +80,10 @@ export interface RequestDetail {
     // Which stage produced the verdict above — so the UI can attribute it (a
     // decided_by==='eval' verdict is the EVAL model's output, not Layer-1 rules).
     decided_by: 'rules' | 'eval' | 'default' | 'fallback';
+    // The LAYER-1 gate confidence. Differs from `confidence` when eval decided
+    // (rules were uncertain → escalated; eval's verdict replaced the rules one).
+    // Null on passthrough/legacy records.
+    rules_confidence: number | null;
     matched_dimensions: string[];
     constraints: Record<string, boolean>;
   };
@@ -156,6 +160,7 @@ interface RawDecisionRecord {
     complexity?: string;
     confidence?: number;
     decided_by?: string;
+    rules_confidence?: number | null;
     eval_cache_hit?: boolean | null;
     eval_model?: string | null;
     eval_latency_ms?: number | null;
@@ -286,6 +291,21 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
   };
 }
 
+// Project the recorded explanation entries -> displayable dimension labels.
+// Entries are strings on simple records, but the rule engine's richer
+// ExplanationEntry objects carry the label in `detail` — String(obj) would
+// render "[object Object]", so extract the string or drop the entry.
+function matchedDimensions(explanation: unknown): string[] {
+  if (!Array.isArray(explanation)) return [];
+  const out: string[] = [];
+  for (const d of explanation) {
+    if (typeof d === 'string') out.push(d);
+    else if (d && typeof d === 'object' && typeof (d as { detail?: unknown }).detail === 'string')
+      out.push((d as { detail: string }).detail);
+  }
+  return out;
+}
+
 // Project constraints (record<string, unknown> bitmap) -> a boolean view.
 function normalizeConstraints(raw: Record<string, unknown> | undefined): Record<string, boolean> {
   const out: Record<string, boolean> = {};
@@ -339,9 +359,11 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
       complexity: raw.classifier?.complexity ?? '',
       confidence: typeof raw.classifier?.confidence === 'number' ? raw.classifier.confidence : 0,
       decided_by: normalizeDecidedBy(raw.classifier?.decided_by),
-      matched_dimensions: Array.isArray(raw.classifier?.explanation)
-        ? raw.classifier.explanation.map((d) => String(d))
-        : [],
+      rules_confidence:
+        typeof raw.classifier?.rules_confidence === 'number'
+          ? raw.classifier.rules_confidence
+          : null,
+      matched_dimensions: matchedDimensions(raw.classifier?.explanation),
       constraints: normalizeConstraints(raw.classifier?.constraints),
     },
     eval_triggered: raw.classifier?.decided_by === 'eval' || evalCacheHit !== null,

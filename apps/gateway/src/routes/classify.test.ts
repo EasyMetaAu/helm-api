@@ -100,6 +100,11 @@ describe("classify adapter — admin classifier hot-apply", () => {
     expect(second.eval_model).toBe("eval-model");
     expect(typeof second.eval_latency_ms).toBe("number");
     expect(second.eval_latency_ms ?? -1).toBeGreaterThanOrEqual(0);
+    // The Layer-1 gate confidence survives alongside the eval verdict's 0.9 —
+    // with the threshold forced to 1 the rules value is necessarily below it.
+    expect(typeof second.rules_confidence).toBe("number");
+    expect(second.rules_confidence ?? 2).toBeLessThan(1);
+    expect(second.confidence).toBe(0.9);
   });
 
   it("invalidates the eval cache when the classifier config changes (no stale verdict)", async () => {

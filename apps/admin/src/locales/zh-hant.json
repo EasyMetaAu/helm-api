@@ -503,5 +503,9 @@
   "provider error": "供應商錯誤",
   "circuit open": "熔斷開啟",
   "returned non-JSON": "回傳非 JSON",
-  "returned an invalid schema": "回傳的結構不合法"
+  "returned an invalid schema": "回傳的結構不合法",
+  "The verdict that routed this request — the badge shows which layer decided it.": "本請求最終採用的分類結論——徽章標明由哪一層判定。",
+  "Layer-1 rules were uncertain (confidence {confidence}) — escalated to the eval model; the verdict and confidence above are the eval model’s.": "第一層規則不確定（信心度 {confidence}），已升級到 eval 模型複核；上方的結論與信心度均為 eval 模型給出。",
+  "Layer-1 rules were uncertain — escalated to the eval model; the verdict and confidence above are the eval model’s.": "第一層規則不確定，已升級到 eval 模型複核；上方的結論與信心度均為 eval 模型給出。",
+  "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.": "——eval 未啟用；第一層規則不確定，路由已回退到 balanced lane。"
 }

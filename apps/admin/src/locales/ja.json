@@ -500,5 +500,9 @@
   "provider error": "プロバイダーエラー",
   "circuit open": "サーキットオープン",
   "returned non-JSON": "非JSONを返却",
-  "returned an invalid schema": "無効なスキーマを返却"
+  "returned an invalid schema": "無効なスキーマを返却",
+  "The verdict that routed this request — the badge shows which layer decided it.": "このリクエストをルーティングした判定結果——バッジがどのレイヤーの判定かを示します。",
+  "Layer-1 rules were uncertain (confidence {confidence}) — escalated to the eval model; the verdict and confidence above are the eval model’s.": "Layer-1ルールは不確実（信頼度 {confidence}）のため評価モデルにエスカレーション——上記の判定と信頼度は評価モデルによるものです。",
+  "Layer-1 rules were uncertain — escalated to the eval model; the verdict and confidence above are the eval model’s.": "Layer-1ルールは不確実のため評価モデルにエスカレーション——上記の判定と信頼度は評価モデルによるものです。",
+  "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.": "——評価は無効です。ルールが不確実だったため、ルーティングはbalancedレーンにフォールバックしました。"
 }

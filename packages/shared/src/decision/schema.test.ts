@@ -161,6 +161,23 @@ describe("DecisionRecordSchema", () => {
     expect(parsed.classifier.eval_latency_ms).toBe(1234);
   });
 
+  it("defaults rules_confidence to null when omitted; round-trips when present; bounds to [0,1]", () => {
+    // Legacy record (no field) → null, present (never undefined).
+    expect(DecisionRecordSchema.parse(fullRecord()).classifier.rules_confidence).toBeNull();
+    // An eval-decided record keeps the LOW Layer-1 gate value alongside the
+    // eval verdict's high `confidence` — the causal chain stays reconstructible.
+    const r = fullRecord();
+    r.classifier.decided_by = "eval";
+    r.classifier.confidence = 0.95;
+    (r.classifier as Record<string, unknown>).rules_confidence = 0.05;
+    const parsed = DecisionRecordSchema.parse(r);
+    expect(parsed.classifier.rules_confidence).toBeCloseTo(0.05);
+    expect(parsed.classifier.confidence).toBeCloseTo(0.95);
+    // Out-of-range rejected.
+    (r.classifier as Record<string, unknown>).rules_confidence = 1.2;
+    expect(DecisionRecordSchema.safeParse(r).success).toBe(false);
+  });
+
   it("rejects a negative eval_latency_ms", () => {
     const r = fullRecord();
     (r.classifier as Record<string, unknown>).eval_latency_ms = -1;

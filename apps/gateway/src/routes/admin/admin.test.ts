@@ -205,6 +205,7 @@ function decision(traceId: string, lane: string): DecisionRecord {
       complexity: "complex",
       confidence: 0.9,
       decided_by: "rules",
+      rules_confidence: null,
       eval_cache_hit: null,
       eval_model: null,
       eval_latency_ms: null,

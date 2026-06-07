@@ -81,8 +81,11 @@
     <h3 class="text-sm font-semibold text-ink-strong">
       {$t('Classifier (classification stage)')}
     </h3>
+    <!-- Deliberately NOT described as "Layer-1 rules": when eval decides, the
+         verdict below (incl. its confidence) is the EVAL MODEL's output. The
+         badge + escalation line attribute it; the description stays neutral. -->
     <p class="field-help mb-2">
-      {$t('Layer-1 deterministic rules read the request and decide which lane it belongs to.')}
+      {$t('The verdict that routed this request — the badge shows which layer decided it.')}
     </p>
     <div class="flex flex-wrap items-center gap-2 text-sm">
       <span class="badge-neutral">{cls.task_type}</span>
@@ -94,6 +97,24 @@
     <div data-testid="chain-decided-by" class="mt-2">
       <span class={decidedBy(cls.decided_by).badge}>{$t(decidedBy(cls.decided_by).key)}</span>
     </div>
+    {#if cls.decided_by === 'eval'}
+      <!-- The escalation causality: the confidence above is the EVAL model's —
+           Layer-1's own (low) gate value is what sent the request to eval. -->
+      <p data-testid="rules-escalation" class="mt-1 text-xs text-ink-muted">
+        {#if cls.rules_confidence !== null}
+          {$t(
+            'Layer-1 rules were uncertain (confidence {confidence}) — escalated to the eval model; the verdict and confidence above are the eval model’s.',
+            {
+              confidence: cls.rules_confidence.toFixed(2),
+            },
+          )}
+        {:else}
+          {$t(
+            'Layer-1 rules were uncertain — escalated to the eval model; the verdict and confidence above are the eval model’s.',
+          )}
+        {/if}
+      </p>
+    {/if}
     {#if cls.matched_dimensions.length > 0}
       <div class="mt-2 flex flex-wrap gap-1">
         {#each cls.matched_dimensions as dim (dim)}
@@ -159,6 +180,15 @@
       {/if}
     {:else}
       <span class="text-ink-muted">{$t('not triggered')}</span>
+      {#if detail.eval_fallback_reason === 'eval_disabled'}
+        <!-- Rules were uncertain but Layer 2 is off — complete the causal chain
+             so the balanced fallback isn't mistaken for a confident decision. -->
+        <span data-testid="eval-disabled-note" class="ml-2 text-ink-muted">
+          {$t(
+            '— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.',
+          )}
+        </span>
+      {/if}
     {/if}
   </section>
 

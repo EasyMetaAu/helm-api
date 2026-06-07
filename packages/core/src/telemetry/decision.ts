@@ -31,6 +31,9 @@ export interface ClassifierOutput {
   // (the Layer-3 balanced sink), which the cascade + routing path legitimately
   // produce. Derived from @helm/shared so this never drifts from the persisted enum.
   decided_by: DecidedBy;
+  /** Layer-1 gate confidence (differs from `confidence` when eval decided); null
+   *  when no rules ran (passthrough / fail-open default). */
+  rules_confidence?: number | null;
   /** boolean only when eval was triggered; null otherwise (NOT false). */
   eval_cache_hit: boolean | null;
   /** Internal small-model id that ran eval; non-null whenever eval ran, else null. */
@@ -132,6 +135,7 @@ export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
       complexity: classification.complexity,
       confidence: classification.confidence,
       decided_by: classification.decided_by,
+      rules_confidence: classification.rules_confidence ?? null,
       eval_cache_hit: classification.eval_cache_hit,
       eval_model: classification.eval_model ?? null,
       eval_latency_ms: classification.eval_latency_ms ?? null,

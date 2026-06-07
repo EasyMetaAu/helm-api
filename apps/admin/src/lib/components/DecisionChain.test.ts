@@ -23,6 +23,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       complexity: 'high',
       confidence: 0.87,
       decided_by: 'eval',
+      rules_confidence: 0.05,
       matched_dimensions: ['has_code_fence', 'long_context'],
       constraints: { require_tools: true, require_json: false },
     },
@@ -111,6 +112,7 @@ describe('DecisionChain', () => {
           complexity: 'low',
           confidence: 0.95,
           decided_by: 'rules',
+          rules_confidence: 0.95,
           matched_dimensions: [],
           constraints: {},
         },
@@ -120,6 +122,61 @@ describe('DecisionChain', () => {
       }),
     });
     expect(screen.getAllByTestId('chain-decided-by')[1]).toHaveTextContent(/rules/i);
+    // No escalation line on a rules-decided request (the confidence IS Layer-1's).
+    expect(screen.queryAllByTestId('rules-escalation')).toHaveLength(1); // only the eval-decided render
+  });
+
+  it('explains WHY eval ran: shows the low Layer-1 gate confidence next to the eval verdict', () => {
+    render(DecisionChain, { detail: detail() });
+    const cls = screen.getByTestId('chain-classifier');
+    const esc = within(cls).getByTestId('rules-escalation');
+    // The 0.87 above is the EVAL model's confidence; Layer-1's was 0.05 — the
+    // line must surface the gate value so they cannot be conflated.
+    expect(esc).toHaveTextContent('0.05');
+    expect(esc).toHaveTextContent(/uncertain/i);
+  });
+
+  it('legacy eval-decided record (no rules_confidence) still gets the qualitative escalation line', () => {
+    render(DecisionChain, {
+      detail: detail({
+        classifier_output: {
+          task_type: 'coding',
+          complexity: 'high',
+          confidence: 0.87,
+          decided_by: 'eval',
+          rules_confidence: null,
+          matched_dimensions: [],
+          constraints: {},
+        },
+      }),
+    });
+    const esc = screen.getByTestId('rules-escalation');
+    expect(esc).toHaveTextContent(/uncertain/i);
+    expect(esc).not.toHaveTextContent(/\d\.\d\d/); // no fabricated number
+  });
+
+  it('explains the eval_disabled fallback in the eval section (uncertain + eval off -> balanced)', () => {
+    render(DecisionChain, {
+      detail: detail({
+        classifier_output: {
+          task_type: 'chat',
+          complexity: 'standard',
+          confidence: 0.2,
+          decided_by: 'fallback',
+          rules_confidence: 0.2,
+          matched_dimensions: [],
+          constraints: {},
+        },
+        eval_triggered: false,
+        eval_cache_hit: null,
+        eval_model: null,
+        eval_latency_ms: null,
+        eval_fallback_reason: 'eval_disabled',
+      }),
+    });
+    const evalSec = screen.getByTestId('chain-eval');
+    expect(within(evalSec).getByText(/not triggered/i)).toBeInTheDocument();
+    expect(within(evalSec).getByTestId('eval-disabled-note')).toHaveTextContent(/disabled/i);
   });
 
   it('explains an eval that ran then failed open (reason + balanced fallback)', () => {
@@ -130,6 +187,7 @@ describe('DecisionChain', () => {
           complexity: 'standard',
           confidence: 0.2,
           decided_by: 'fallback',
+          rules_confidence: 0.2,
           matched_dimensions: [],
           constraints: {},
         },
