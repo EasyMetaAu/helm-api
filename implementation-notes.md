@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-06-07 · 修复 Anthropic 订阅配额页：`resets_at:null` 让整份用量解析失败、快照永久卡旧（线上实测；docs/06 providers 页 Tier 3；CLAUDE.md 原则 3 fail-open）
+
+- **现象（la.atmy.work 实测）**：providers 页两个 Claude Max 账号，`mylukin@gmail.com` 配额正确（5h 7%/7d 39%），`riverathomas6094@outlook.com` 恒显 9%/44%（真值应为 5%/5%，与并存的 claude-relay-service 对照），点刷新无效。
+- **定位（直连线上数据库 + 解密 token 实打 usage 端点）**：① `oauth_quota` 表里 river 账号快照 `captured_at` 已 **22.9 小时**未更新（mylukin 是 4.9 分钟），即 PULL 从不写回；② token 正常（`updated_at` 新鲜、刷新成功）；③ 解密 river 的 access token 实打 `GET /api/oauth/usage` 返回 **200 + 合法 body**（5h 5%/7d 5%），HTTP 层无错。差异只在 body 形状：mylukin 的 `seven_day_sonnet.resets_at` 是 ISO 串，river 的是 **`null`**（周 Sonnet 额度未动用、无倒计时）。
+- **根因**：`AnthropicWindowSchema` 内层 `resets_at: z.string().optional()` —— `.optional()` 接受 `string|undefined` 但**拒绝 `null`**。顶层窗口已是 `.nullish()`（容忍整窗为 null），却漏了**存在的窗口内部字段为 null** 这一情况。river 的 `seven_day_sonnet` 是个对象（非 null）→ 进内层校验 → `resets_at:null` 失败 → 整份 `AnthropicOAuthUsageSchema.safeParse` 失败 → `parseAnthropicUsageBody` 返回 `[]` → 路由 `if (windows.length>0)` 跳过 upsert → 旧快照永久留存，每次刷新同样失败。完美解释四个症状（账号1对、账号2卡、刷新无效、快照近一天前）。
+- **修复（最小且正确）**：`utilization`/`resets_at` 双双改 `.nullish()`，接受 API 合法的 `null`。下游 `anthropicUsageToWindows` 早已健壮（`typeof utilization!=="number"` 跳过、`resets_at` 非串 → `resetsAtMs:null`），故仅 schema 一处改动。保留 `utilization:"x"`（字符串）仍失败的防御性（坏类型≠合法 null）。
+- **取舍/坑**：(1) 当前设计是「任一窗口坏 → 整份 fail-open 到 []」的全有全无，本次只把**合法 null** 从「坏」里摘出；真要每窗独立容错是更大改动，未做。(2) 路由 `if (windows && windows.length>0)` 才 upsert 的逻辑放大了本 bug——解析失败时宁可留旧也不写空，导致静默卡死且**无任何日志**（catch 全吞）。已知观测盲点，TODO：PULL 失败/空至少记一条 warn。(3) **部署**：修复在 `packages/shared`，需重建镜像部署；la.atmy.work 现有 river 旧快照会在新镜像首次成功 PULL 后自动覆盖（5min TTL 内）。
+- **验证**：TDD 先红后绿——新增「存在窗口含 `resets_at:null`（逐字照搬线上 body）」用例，修前返回 `[]`、修后正确返回 5h/7d/7d-sonnet（sonnet `resetsAtMs:null`）。anthropic-quota 6/6、oauth 全组 67/67、shared+core typecheck 净、lint 净。全量 node 项目 2376 绿（4 红均为 `apps/admin/build` 未构建的 admin-static 环境失败，与本改无关）。
+
+---
+
 ## 2026-06-07 · 记忆压缩重写为单一 auto 模式：零配置 + 价格自适应（删除 fixed/economy；docs/08/12；CLAUDE.md 原则 1/2/3/4）
 
 - **动机（四领域专家评审）**：旧 `observer.compaction` 有 `fixed`/`economy` 两模式、economy 17 个手调旋钮，从未投产，且评审发现三处「配置撒谎」级缺陷：① `prior_compaction_count` 静态 0 → 失真项永远按首压算（真值=该线程已有 observation 数，数据本就在手）；② `retention_rate:0.8` 与现实脱节——生产 summarize 是 2000 字符截断桩，压 10k token 真实保留 ~5%；③ 失真按 input 价货币化是范畴错误（模型越贵越怕遗忘，因果倒置），质量项二次方曲率与 context-rot 研究（凹形）相反，且 catalog 无 cache 价字段而 economy 最依赖它。
@@ -31,21 +42,11 @@
 
 ---
 
-## 2026-06-07 · eval 快探针：关推理 + 配置驱动 extra_body 透传（修复线上恒 fallback；docs/03 Layer 2；CLAUDE.md 原则 2/4）
-
-- **现象（la.atmy.work 实测）**：`model:"auto"` 的中文请求详情页恒显 `fallback`，`fallback_reason: eval_timeout`。逐层定位：Layer-1 非拉丁守卫 → 升级 eval；eval 内层超时只有 **250ms**，而 eval 模型 `deepseek-v4-flash` 是**推理模型**（temperature:0 也吐 `reasoning_content`），LA 主机到 DeepSeek 真实往返 ~2–3s → 必然 `eval_timeout` → 降级 balanced。即「分类兜底」，**非执行兜底**（`fallback_count:0`，provider 全 ok），与流式无关。
-- **反面教训（硬调超时不对）**：先把 250→3500ms 止血，eval 确实开始 decide，但暴露第二坑——256 的 `max_tokens` 被 reasoning 吃光，`message.content` 截断/空 → `eval_not_json`；且 3500ms 内层超时给热路径加最多 3.5s 税。`contract.ts` 的 `extractFirstObject` 已够健壮，真因在上游 reasoning 占预算/占延迟。
-- **方案（让 eval 重新变快，而非容忍慢）**：① `EvalConfigSchema` 加 `extra_body: z.record(z.string(), z.unknown()).optional()`——**配置驱动的请求体透传**，provider 无关的逃生舱；② `EvalModelRequest.extra_body` 透传，`runEval` 仅在配置存在时挂上（不改无配置部署的请求形状）；③ `classify.ts` invokeModel **把 extra_body 铺在最前、锁定字段(model/temperature/stream/max_tokens)在后覆盖**——extra_body 能加旋钮、绝不能篡改锁定项；④ classifier.yaml 设 `extra_body.thinking.{type:disabled}`，实测往返 ~1.1s 且吐干净 JSON，于是超时**收回 1500/2000**（快且可靠，不再税热路径）。`ProviderForEval.chatCompletion(req: Record<string,unknown>)` 是松类型直接 `JSON.stringify`，故透传不受 `ChatCompletionRequestSchema` 约束。
-- **验证**：TDD 先红后绿——schema（extra_body 默认缺省/任意块原样透传）、client（配置存在则转发、缺省则不挂）、classify（敌意 extra_body 既加 thinking 又试图覆盖 model/temperature/stream → 锁定字段胜）。Codex review 抓出 P1（`classifier-samples.test.ts` 仍 pin `timeout_ms===250`）+ P2（docs/03 片段未更新）已修。typecheck/lint 净，全量 2546 绿。
-- **② 流式 idle/stall 超时（同日实现）**：`withTimeout` 在收到响应头即 `cleanup`，故 TTFB 后**流式读循环此前无任何超时**——上游 mid-stream 卡死会永久挂起（网关 timeout 中间件也在响应头返回时就 resolve，管不到流体）。新增 `provider/stream-idle.ts`：`readChunkWithIdle(reader, idleMs)` 把单次 `reader.read()` 与 idle deadline race，超时则 `reader.cancel()`（回收连接）并抛 `StreamStalledError`，由三个 client 转 `UpstreamError("timeout")`。**每次 read 各自计时 → 是「逐块静默上限」而非总时长上限**（持续吐字的长流不受限）。首个 chunk 前抛 = 可 fallback 的正常失败；之后抛 = 终止已在流的响应（无法 fallback）。**作用域取舍**：复用 `request_timeout_ms`（=TTFB 同一旋钮）当 idle 值，避免给 8 处 server.ts callsite 加新字段——语义统一为「上游必须在 N ms 内产出点东西」；专用 `stream_idle_timeout_ms` 旋钮留作未来细化。三 client（openai 内联、anthropic `translateAnthropicSSE`、responses `readResponsesEvents`，后两者加 `idleMs=0` 默认参，向后兼容）全部接入。TDD：helper 5 例（chunk 透传 / done 透传 / idleMs<=0 关闭 / 超时 cancel+抛 / 逐块计时不误杀）+ 三 client 各一 stall 集成例（首块送达后静默 → UpstreamError(timeout) 504 + reader 被 cancel）。
-- **② 的 Codex 二轮复审（3 个真 bug 已修）**：(P1) 终止 SSE 事件没停止读取——idle guard 会把**已完成**的响应变成 timeout：上游发 `message_stop`/`response.completed` 后若延迟关 body，下一次 idle read 就误触发。修：anthropic `message_stop` 后 `return`、responses `aggregateResponsesStream` 的 `response.completed` 后 `break`（`translateResponsesSSE` 本就 `return`，无恙）。各补一例「终止事件后 body 保持打开 → 不超时」回归。(P2) `stream-idle.ts` 超时路径先 `await reader.cancel()` 再抛——cancel 慢/不 resolve 会让超时形同虚设：改 `void reader.cancel().catch()` fire-and-forget，立即抛（cancel 同步发起，cancelReasons/cancelled 仍可断言）。(P3) 四个流式路由把非 `PipelineError` 的 throw 一律压成 `upstream_error`/`internal_error`，丢掉新的 timeout 分类：新增 `routes/stream-error.ts` 的 `isUpstreamTimeout(err)` 谓词，chat/responses/messages/gemini 终止错误帧统一 `isUpstreamTimeout ? "timeout" : <原兜底>`。补 helper 单测 + chat 路由集成例（流式首块后抛 UpstreamError(timeout) → 错误帧 `error_class:"timeout"`）。typecheck/lint 净，全量 2552 绿。
-- **部署坑（关键 TODO）**：①透传 + ②idle **代码都只在分支**，线上 0.8.3 镜像没有——服务器 config 现仍留**临时 3500/4000**（推理仍开）+ `HELM_REQUEST_TIMEOUT_MS=300000`。等本分支构建新镜像部署后：把服务器 classifier.yaml 切到 `extra_body.thinking + 1500/2000`；`request_timeout_ms` 现在身兼 TTFB+idle，300000 偏松（mid-stream 卡死需 5min 才回收），建议部署后下调到 ~60–90s（够推理 TTFB，又让卡死连接快速回收），或后续加专用 `stream_idle_timeout_ms` 再分离。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-07 · eval 快探针 + 流式 idle 超时（修复线上恒 fallback；docs/03 Layer 2；原则 2/4）：① `model:"auto"` 中文请求恒 `eval_timeout` 降级——根因 eval 模型是推理模型、250ms 内层超时不够；方案 `EvalConfigSchema.extra_body` 配置驱动请求体透传（classify invokeModel 铺最前、锁定 model/temperature/stream/max_tokens 后覆盖），classifier.yaml 设 `thinking.{type:disabled}` 关推理 → ~1.1s 干净 JSON、超时收回 1500/2000。② 新增 `provider/stream-idle.ts` `readChunkWithIdle`：TTFB 后流式读循环此前**无超时**，mid-stream 卡死永久挂起；逐块计时（非总时长），首块前抛=可 fallback、之后抛=终止流；复用 `request_timeout_ms` 当 idle 值；三 client 接入。Codex 二轮修 3 真 bug（终止 SSE 事件后须停读否则误判 timeout、cancel 改 fire-and-forget、四路由用 `isUpstreamTimeout` 谓词保 timeout 分类）。**部署 TODO**：代码在分支，线上 0.8.3 无；新镜像部署后 classifier.yaml 切 `extra_body.thinking+1500/2000`、`request_timeout_ms` 由 300000 下调 ~60–90s（兼 TTFB+idle，卡死连接快回收）。全量 2552 绿。
 
 ### 2026-06-07 · 请求详情页展示第二层 eval 的模型与复核结论（修复；docs/03/07；原则 5/7）：cascade 用 eval verdict 覆盖 rules 输出且 eval 模型名从不持久化 → 详情页把 eval 结果误标为「第一层规则」。修：新增持久字段 `classifier.eval_model`/`eval_latency_ms`（`.default(null)` 兼容 legacy；落库在 route-request.ts `plan()` 内联），`toDetail` 透传 `decided_by`，DecisionChain 加判定来源徽章、eval 框重做（模型+缓存+耗时+verdict/fail-open 原因）。后续修正：0.8.5 上线后用户仍把 eval 的 0.95 误读为第一层置信度 → 补 `classifier.rules_confidence` 持久化触发升级的 gate 置信度 + 升级因果行（"第一层不确定(0.05)→升级 eval 复核"，legacy 无数值定性显示不伪造）；`matched_dimensions` 映射加固防 `[object Object]`。两轮共 14 处 DecisionRecord fixture 补新字段；全量 2570 绿。
 

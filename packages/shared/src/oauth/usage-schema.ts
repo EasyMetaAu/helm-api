@@ -68,14 +68,18 @@ export type OAuthQuotaSnapshot = z.infer<typeof OAuthQuotaSnapshotSchema>;
 // fail-open: every window may be absent OR explicitly `null` (the API returns
 // `"seven_day_opus": null` on plans without a separate Opus weekly cap), so each
 // field is `.nullish()` — a strict `.optional()` would REJECT the null and fail the
-// whole parse, leaving the page blank. `utilization` is already a 0–100 PERCENT
+// whole parse, leaving the page blank. The SAME applies to the INNER fields: a
+// PRESENT window can still carry `"resets_at": null` (e.g. a weekly Sonnet cap not
+// yet touched, so no countdown), so both inner fields are `.nullish()` too — an
+// inner `.optional()` would reject that null and drop EVERY window, freezing the
+// providers page on a stale snapshot. `utilization` is already a 0–100 PERCENT
 // (e.g. 33.0), NOT a 0–1 fraction — do not re-scale on ingest. `resets_at` is an
 // ISO-8601 timestamp. Windows: five_hour / seven_day / seven_day_opus /
 // seven_day_sonnet (mirrors the official Claude /usage display).
 const AnthropicWindowSchema = z
   .object({
-    utilization: z.number().optional(),
-    resets_at: z.string().optional(),
+    utilization: z.number().nullish(),
+    resets_at: z.string().nullish(),
   })
   .loose();
 
