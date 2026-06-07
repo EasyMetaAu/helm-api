@@ -107,19 +107,49 @@ export const ForgettingSchema = z
   })
   .strict();
 
-// The `config.memory` subtree root. Carries only `forgetting`: observer
-// compaction is NOT configurable anymore — it is the gateway's internal
+// Optional overrides for the auto-compaction TRIGGER/keep parameters — the only
+// compaction surface an operator can touch. Every field is plain `.optional()`
+// with NO `.default()`: an omitted key stays `undefined` and the runtime uses
+// its internal prior (AUTO_PRIORS), so a value written here is the only thing
+// that ever takes effect — no lying knobs, and no `.partial()`-over-default
+// materialization trap (see PricingOverrideEntrySchema). The ECONOMICS priors
+// (quality coefficient, price heuristics, retention clamps, summary caps) stay
+// internal on purpose: they are expert constants with no operational meaning,
+// and the auto-resolved inputs (catalog prices, measured stats) leave nothing
+// honest to configure there. Prices pin via config/pricing.yaml.
+export const CompactionOverridesSchema = z
+  .object({
+    // Memory-formation size trigger: compact once the uncovered segment reaches
+    // this many tokens (internal default 2048).
+    segment_min_tokens: z.number().int().positive().optional(),
+    // Idle flush: fold a quiet thread's whole uncovered history after this many
+    // seconds without a new message (internal default 3600).
+    idle_flush_s: z.number().int().positive().optional(),
+    // Context-pressure safety valve: force compaction once the active footprint
+    // reaches this fraction of the served model's context window (default 0.8).
+    force_context_ratio: z.number().gt(0).max(1).optional(),
+    // Keep floor for writeback compaction: at least this many recent messages
+    // (default 4) and this fraction of the segment (default 0.25) stay raw.
+    min_recent_messages: z.number().int().min(0).optional(),
+    min_keep_ratio: z.number().min(0).max(1).optional(),
+  })
+  .strict();
+
+// The `config.memory` subtree root. `compaction` carries OPTIONAL trigger
+// overrides (above); everything else about compaction is the gateway's internal
 // auto-adaptive behaviour (prices/context from the model catalog, workload
 // stats derived per job; see packages/core/src/memory/compaction-policy.ts).
 // `.strict()` means a leftover `observer:` block from the deleted fixed/economy
 // era REFUSES STARTUP — deliberately fail-closed, so an operator notices the
-// knobs are gone instead of carrying dead config (the no-lying-knobs rule).
+// old knobs are gone instead of carrying dead config (the no-lying-knobs rule).
 export const MemoryConfigSchema = z
   .object({
+    compaction: CompactionOverridesSchema.prefault({}),
     forgetting: ForgettingSchema.prefault({}),
   })
   .strict();
 
 export type ScoreConfig = z.infer<typeof ScoreSchema>;
+export type CompactionOverrides = z.infer<typeof CompactionOverridesSchema>;
 export type ForgettingConfig = z.infer<typeof ForgettingSchema>;
 export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;

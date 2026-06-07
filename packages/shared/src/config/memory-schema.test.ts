@@ -81,6 +81,34 @@ describe("ForgettingSchema", () => {
   });
 });
 
+describe("CompactionOverridesSchema (via MemoryConfigSchema.compaction)", () => {
+  it("absent block → empty object: every override stays undefined (internal priors apply)", () => {
+    const m = MemoryConfigSchema.parse({});
+    expect(m.compaction).toEqual({});
+    expect(m.compaction.segment_min_tokens).toBeUndefined();
+    expect(m.compaction.idle_flush_s).toBeUndefined();
+    expect(m.compaction.force_context_ratio).toBeUndefined();
+  });
+
+  it("a written override round-trips; omitted siblings are NOT materialized", () => {
+    const m = MemoryConfigSchema.parse({ compaction: { idle_flush_s: 7200 } });
+    expect(m.compaction.idle_flush_s).toBe(7200);
+    // No .default() materialization — the merge/no-lying-knob contract.
+    expect("segment_min_tokens" in m.compaction).toBe(false);
+    expect("force_context_ratio" in m.compaction).toBe(false);
+  });
+
+  it("fails closed on unknown/misspelled keys and on out-of-range values", () => {
+    expect(() => MemoryConfigSchema.parse({ compaction: { idleFlushS: 7200 } })).toThrow();
+    expect(() => MemoryConfigSchema.parse({ compaction: { quality_coeff: 0.2 } })).toThrow();
+    expect(() => MemoryConfigSchema.parse({ compaction: { force_context_ratio: 0 } })).toThrow();
+    expect(() => MemoryConfigSchema.parse({ compaction: { force_context_ratio: 1.2 } })).toThrow();
+    expect(() => MemoryConfigSchema.parse({ compaction: { segment_min_tokens: -1 } })).toThrow();
+    expect(() => MemoryConfigSchema.parse({ compaction: { idle_flush_s: 0 } })).toThrow();
+    expect(() => MemoryConfigSchema.parse({ compaction: { min_keep_ratio: 1.5 } })).toThrow();
+  });
+});
+
 describe("MemoryConfigSchema", () => {
   it("absent block → all defaults with forgetting.enabled:false", () => {
     const m = MemoryConfigSchema.parse({});

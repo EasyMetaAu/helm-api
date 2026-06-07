@@ -1,8 +1,20 @@
-# Observer compaction is NOT configurable: it is the gateway's internal
-# auto-adaptive behaviour. Prices and context windows resolve from the model
-# catalog (pin prices via config/pricing.yaml if needed); compaction triggers on
-# segment size, thread idleness, or context pressure. A leftover `observer:`
-# block from older versions refuses startup — delete it.
+# Compaction is AUTO-ADAPTIVE: prices and context windows resolve from the model
+# catalog (pin prices via config/pricing.yaml if needed), workload stats are
+# measured per thread, and it triggers on segment size, thread idleness, or
+# context pressure. The economics are not configurable; the TRIGGER/keep
+# parameters below can optionally be overridden — an omitted key uses the
+# internal default shown. A leftover `observer:` block from older versions
+# refuses startup — delete it.
+#
+# compaction:
+#   segment_min_tokens: 2048    # memory-formation trigger: compact once the
+#                               # uncovered segment reaches this many tokens
+#   idle_flush_s: 3600          # fold a quiet thread's whole uncovered history
+#                               # after this many seconds without a new message
+#   force_context_ratio: 0.8    # force compaction once the active footprint
+#                               # reaches this fraction of the model's window
+#   min_recent_messages: 4      # keep floor: at least this many recent messages…
+#   min_keep_ratio: 0.25        # …and this fraction of the segment stay raw
 
 # Memory forgetting layer (docs/12). enabled:false = byte-identical to pre-docs/12
 # behaviour; flip to true to turn on decay/reinforcement/facts. All knobs are

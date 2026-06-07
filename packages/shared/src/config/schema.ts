@@ -263,6 +263,8 @@ export type HelmConfig = z.infer<typeof HelmConfigSchema>;
 // Re-export the memory subtree's public surface from the config barrel so
 // consumers import the whole config model from one place (schema-first).
 export {
+  type CompactionOverrides,
+  CompactionOverridesSchema,
   type ForgettingConfig,
   ForgettingSchema,
   type MemoryConfig,
