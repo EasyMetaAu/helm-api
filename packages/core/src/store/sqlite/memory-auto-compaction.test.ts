@@ -188,6 +188,36 @@ describe("SqliteMemoryStore — idle-flush candidates", () => {
     ]);
   });
 
+  it("detects a sparse uncovered GAP before a later observation (interval, not frontier)", async () => {
+    // m1 uncovered, m2 covered by [m2,m2]: a global-frontier test ("after the
+    // newest covered message") would call the thread fully covered and the sweep
+    // would stop while m1's history never forms a memory. Interval containment
+    // (the alreadyObservedMessageIds semantics) keeps the gap visible.
+    const { store, clock } = newStore();
+    await store.ensureThread({ id: "t1", ownerId: "acct-a" });
+    await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "uncovered gap",
+      tokenEstimate: 1,
+    });
+    const m2 = await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "covered later",
+      tokenEstimate: 1,
+    });
+    await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: [m2, m2],
+      observationText: "covers only the later message",
+      observedAt: new Date(clock() + 1),
+    });
+    expect(
+      await store.listIdleFlushCandidates({ idleBeforeMs: clock() + 1000, limit: 10 }),
+    ).toEqual([{ accountId: "acct-a", threadId: "t1" }]);
+  });
+
   it("carries the thread's project/resource scope on the candidate (for promotion)", async () => {
     const { store, clock } = newStore();
     await store.ensureThread({

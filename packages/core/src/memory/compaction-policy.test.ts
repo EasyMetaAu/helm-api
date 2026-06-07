@@ -173,6 +173,23 @@ describe("chooseAutoCompaction — context-pressure triggers", () => {
     expect(decision.reason).toBe("forced_context_limit");
   });
 
+  it("forced pressure folds even a SINGLE huge message (the floor cannot block the safety valve)", () => {
+    // Regression: floor=1 > n-1=0 used to no-op, pinning the active footprint
+    // above the context threshold until the idle path ran.
+    const segment = messages([9000]);
+    const decision = chooseAutoCompaction(
+      segment,
+      inputs({
+        pricing: { ...CLAUDE_PRICED, maxContextTokens: 10_000 },
+        threadTotalTokens: 9_000, // 0.9 ≥ 0.8 → forced
+      }),
+    );
+    expect(decision.shouldCompact).toBe(true);
+    expect(decision.reason).toBe("forced_context_limit");
+    expect(decision.keepRecent).toBe(0);
+    expect(decision.compressedCount).toBe(1);
+  });
+
   it("forced mode relaxes the keep floor so SOMETHING can always be freed", () => {
     // 3 huge messages: writeback floor (4) would forbid any compaction, but at
     // 90% context utilization we must free space — floor drops to 1.

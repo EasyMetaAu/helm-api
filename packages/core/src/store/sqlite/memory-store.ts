@@ -911,23 +911,28 @@ export class SqliteMemoryStore implements MemoryStore {
             AND last_activity IS NOT NULL
             AND last_activity <= ?
             AND EXISTS (
-              -- A message strictly AFTER every coverage frontier in the SAME
-              -- (created_at, id) order listMessages uses. Comparing the full
-              -- tuple — not just created_at — is load-bearing: messages appended
-              -- in one request can share a millisecond, and a created_at-only
-              -- test would permanently miss an uncovered tail that ties the
-              -- frontier's timestamp. A covered range-end message itself ties via
-              -- m2.id >= m.id and is correctly excluded; a thread with no
-              -- observations has no frontier so every message qualifies.
+              -- A message NOT covered by ANY observation's [first,last] range —
+              -- the SAME interval semantics alreadyObservedMessageIds uses, over
+              -- the SAME (created_at, id) order listMessages uses. Interval
+              -- containment (not a global frontier) is load-bearing twice over:
+              -- a sparse gap BEFORE a later observation must still surface the
+              -- thread, and messages appended in one request can share a
+              -- millisecond, so the full tuple — not just created_at — decides
+              -- containment. A thread with no observations has no ranges, so
+              -- every message qualifies.
               SELECT 1 FROM memory_messages m
                WHERE m.thread_id = t.id
                  AND NOT EXISTS (
                    SELECT 1 FROM memory_observations o
-                   JOIN memory_messages m2
-                     ON m2.id = json_extract(o.source_message_range, '$[1]')
+                   JOIN memory_messages mf
+                     ON mf.id = json_extract(o.source_message_range, '$[0]')
+                   JOIN memory_messages ml
+                     ON ml.id = json_extract(o.source_message_range, '$[1]')
                     WHERE o.thread_id = t.id
-                      AND (m2.created_at > m.created_at
-                        OR (m2.created_at = m.created_at AND m2.id >= m.id))
+                      AND (mf.created_at < m.created_at
+                        OR (mf.created_at = m.created_at AND mf.id <= m.id))
+                      AND (ml.created_at > m.created_at
+                        OR (ml.created_at = m.created_at AND ml.id >= m.id))
                  )
             )
           ORDER BY last_activity ASC

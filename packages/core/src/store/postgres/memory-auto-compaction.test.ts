@@ -109,6 +109,45 @@ describe("PgMemoryStore — idle-flush candidates", () => {
     await db.$close();
   });
 
+  it("detects a sparse uncovered GAP before a later observation (interval, not frontier)", async () => {
+    const db = await createPgliteDb();
+    let tickMs = 1_000_000;
+    const store = new PgMemoryStore(
+      db,
+      () => {
+        seq += 1;
+        return `pg-id-${seq}`;
+      },
+      () => {
+        tickMs += 1000;
+        return new Date(tickMs);
+      },
+    );
+    await store.ensureThread({ id: "t1", ownerId: "acct-a" });
+    await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "uncovered gap",
+      tokenEstimate: 1,
+    });
+    const m2 = await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "covered later",
+      tokenEstimate: 1,
+    });
+    await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: [m2, m2],
+      observationText: "covers only the later message",
+      observedAt: new Date(tickMs + 1),
+    });
+    expect(await store.listIdleFlushCandidates({ idleBeforeMs: tickMs + 1000, limit: 10 })).toEqual(
+      [{ accountId: "acct-a", threadId: "t1" }],
+    );
+    await db.$close();
+  });
+
   it("detects an uncovered tail sharing the frontier's millisecond (created_at,id tiebreak)", async () => {
     const db = await createPgliteDb();
     let n = 0;

@@ -257,7 +257,24 @@ export function chooseAutoCompaction(
   const floor = forced
     ? 1
     : Math.max(AUTO_PRIORS.minRecentMessages, Math.ceil(n * AUTO_PRIORS.minKeepRatio));
-  if (floor > n - 1) return noop("nothing_to_compact", segmentTokens);
+  if (floor > n - 1) {
+    // Forced pressure with NO keepable boundary (a single huge uncovered
+    // message): fold the whole segment anyway — keeping it raw would pin the
+    // active footprint above the context threshold until the idle path runs.
+    // Pressure beats the keep floor; the raw rows survive in the store.
+    if (forced) {
+      return {
+        shouldCompact: true,
+        keepRecent: 0,
+        compressedCount: n,
+        compressedTokens: segmentTokens,
+        keptTokens: 0,
+        netBenefitUsd: netBenefitUsd(segmentTokens, 0, prices, retained),
+        reason: "forced_context_limit",
+      };
+    }
+    return noop("nothing_to_compact", segmentTokens);
+  }
 
   // O(n) boundary sweep: maximize the ledger; ties keep the floor (deepest
   // compression — for unpriced models every candidate is 0 and memory
