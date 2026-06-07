@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-07 · 重试请求：原 key 失效时回退 root key（用户决策；docs/07；改写 2026-06-06「重试」条目的 409 行为）
+
+- **需求（用户拍板）**：重试一条原 key 已被删除/吊销的请求时返回 409「original key is unavailable」——对管理员毫无意义：他要的是**重试的结果**，不是一个解释为什么不能重试的错误。原 key 还活着就照旧用它（路由忠实）；不在了就用 root key 调试。
+- **方案**（`apps/gateway/src/routes/admin/replay.ts` 第 3 步）：原 key 存活 → 照旧；已删/已吊销 → 回退到**第一把存活的 root key**（`role==="root" && !disabled`，禁用的 root key 跳过），记日志 `replay.root_key_fallback`；只有连存活 root key 都没有（实际部署几乎不可能）才 409（错误文案改为 "…and no active root key exists"）。
+- **取舍（有意偏离原「绝不放宽权限」立场）**：原实现注释明写 "a deleted/revoked key blocks the replay rather than silently widening permissions"。推翻理由：replay 在 admin Basic auth 之后，**操作者本就持有 root 等价权力**（能看明文 payload、能铸 key），回退 root 是其主动调试选择而非提权泄露。代价是路由保真度（root 无 lane 白名单、`allow_custom_model:true`）——以日志 + 归因补偿。
+- **遥测归因改为「实际使用的 key」**：新 trace 的 `apiKeyId` 从原 keyId 改为 `key.key_id`——回退时诚实记在 root key 名下，且避免对已硬删 key 的悬空引用（审计链上「谁的身份发起了这次调用」必须真实）。
+- **验证**：TDD 先红后绿——4 个新 case（删除回退 / 吊销回退 / 跳过禁用 root / 双双失效才 409）+ 归因断言；replay 15/15、admin 路由 78/78 绿；typecheck/lint 净。前端零改动（弹窗只渲染服务端错误串）。
+
+---
+
 ## 2026-06-07 · eval 快探针：关推理 + 配置驱动 extra_body 透传（修复线上恒 fallback；docs/03 Layer 2；CLAUDE.md 原则 2/4）
 
 - **现象（la.atmy.work 实测）**：`model:"auto"` 的中文请求详情页恒显 `fallback`，`fallback_reason: eval_timeout`。逐层定位：Layer-1 非拉丁守卫 → 升级 eval；eval 内层超时只有 **250ms**，而 eval 模型 `deepseek-v4-flash` 是**推理模型**（temperature:0 也吐 `reasoning_content`），LA 主机到 DeepSeek 真实往返 ~2–3s → 必然 `eval_timeout` → 降级 balanced。即「分类兜底」，**非执行兜底**（`fallback_count:0`，provider 全 ok），与流式无关。
@@ -29,21 +39,15 @@
 
 ---
 
-## 2026-06-07 · 请求详情页时间显示「未记录时间」（修复；docs/07）
-
-- **Bug（用户报告）**：请求详情页头部恒显「未记录时间」。根因两处：① 网关详情接口 `GET /admin/api/requests/:traceId` 直接吐 `getByRequestId` 返回的 `DecisionRecord`，而该 record **schema 本身不含时间戳**（时间在独立的 `createdAt` 列里）；列表接口 `GET /requests` 早已 `created_at: r.createdAt.getTime()` 拍平上去，详情接口没拍。② 前端 `toDetail` 把 `ts` **写死成 `''`**（`toListItem` 早已正确从 `created_at` 映射），于是详情页永远落入 `{d.ts || '未记录时间'}` 兜底。
-- **方案（窄查询，对齐列表数据源）**：新增 Store 端口方法 `getCreatedAt(requestId): Promise<Date | null>`，仿 `getApiKeyId` 只 select 单列、不反序列化 decision blob；sqlite 直接返回 Date 列，postgres 列是 epoch-ms bigint 需 `new Date(ms)` 包回。网关详情接口改为 `{ ...rec, created_at: createdAt.getTime() }`（缺失则不加字段）。前端 `toDetail` 改成与 `toListItem` 同款 `created_at → ISO`；legacy 无值仍空串 → 仍走「未记录时间」兜底（绝不伪造时间）。**详情与列表时间同源同值，必然一致。**
-- **验证**：TDD 先红后绿——store-contract（双适配器 getCreatedAt 命中/未命中）、gateway 详情断言 `created_at`、前端 toDetail ts 映射；同步给 4 处 TelemetryStore mock 补 `getCreatedAt`。typecheck/lint 净，全量单测 2515 绿（唯 4 例 `admin-static.test` 红——需先 `pnpm build` 出 SPA 产物，与本改无关）。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+### 2026-06-07 · 请求详情页时间显示「未记录时间」（修复；docs/07）：根因①详情接口直吐 `DecisionRecord`（schema 无时间戳，时间在独立 `createdAt` 列）②前端 `toDetail` 把 `ts` 写死 `''`。修：新增窄查询端口 `getCreatedAt(requestId)`（仿 getApiKeyId 单列 select；pg 列为 epoch-ms bigint 需 `new Date(ms)` 包回），详情接口拍平 `created_at`，前端与 `toListItem` 同款映射；legacy 无值仍兜底（绝不伪造时间）。TDD 双适配器契约 + 4 处 TelemetryStore mock 补 `getCreatedAt`。
+
 ### 2026-06-06 · 管理界面规则编辑写回 YAML（修复「保存只活内存、重启即回滚」；用户决策；docs/11；原则 2）：三页（分类器/Lanes/Policies）保存只重绑内存、重启回滚 → 新增 `yaml-writeback.ts`（保留注释 eemeli/yaml `setIn` + 原子 tmp+rename + fail-closed 写失败 throw），RuntimeRuleStore **先持久化后重绑**（写失败→500、内存不动、文件内存不分叉）。文件形状对齐 loader（lanes 平铺 map 缺失即删 / policies 列表整替 / classifier 包裹逐 scalar）。e2e 防误伤：test-server configDir 改拷贝到 `.e2e-data/config` 不碰仓库 config。部署坑：`/opt/helm-api/config` 须 `chown` 10001（root 属主则保存 fail-closed 500）。gateway 新增依赖 `yaml@^2.9`。
 
-### 2026-06-06 · 请求详情页「重试」按钮（可编辑重发 + 隔离重跑；用户决策；docs/07）：弹窗预填录制请求体可改 max_tokens/messages 再发；隔离 debug 重跑走真路由+真 provider、记新 trace+payload 但**不计 budget/不写记忆**，身份/caps 从原 key 重建（lane 白名单/allow_custom_model 仍生效，key 删/吊 → 409）。后端 `getApiKeyId` 窄查询重建身份 + `admin/replay.ts`（判别式 outcome 400/404/409，insert 失败 fail-closed 500 因交付物就是那条记录）；范围 v1=openai_chat（按体 schema 推断，无需新存 protocol）。Codex 修复：限流/并发门一并绕过属有意取舍（运维动作非客户端面）已成文；流式 drain try/catch 部分字节照存。
+### 2026-06-06 · 请求详情页「重试」按钮（可编辑重发 + 隔离重跑；用户决策；docs/07）：弹窗预填录制请求体可改 max_tokens/messages 再发；隔离 debug 重跑走真路由+真 provider、记新 trace+payload 但**不计 budget/不写记忆**，身份/caps 从原 key 重建（lane 白名单/allow_custom_model 仍生效；key 删/吊当时 → 409，**2026-06-07 已改为回退 root key**，见顶部条目）。后端 `getApiKeyId` 窄查询重建身份 + `admin/replay.ts`（判别式 outcome 400/404/409，insert 失败 fail-closed 500 因交付物就是那条记录）；范围 v1=openai_chat（按体 schema 推断，无需新存 protocol）。Codex 修复：限流/并发门一并绕过属有意取舍（运维动作非客户端面）已成文；流式 drain try/catch 部分字节照存。
 
 ### 2026-06-06 · 已吊销 key 允许永久删除（两步销毁；用户决策；docs/06）：软吊销 `DELETE /:id` 契约不动，硬删作 `?purge=true` 旗标；路由 gate `list().find`——未找 404 / active 409（必先吊销）/ disabled 才 deleteKey。「必先吊销」是路由策略不进 store；UI 仅 disabled 行显 Delete 但 server 独立校验（纵深防御）。审计存活靠 telemetry/payload 的 `api_key_id` 是无 FK 纯文本列，硬删不级联、悬空引用仍可审计。贯穿 core `KeyStore.deleteKey`(throw on unknown)→admin route→api client→+page。坑：选旗标不破 revoke 契约；read→delete TOCTOU 在单管理员场景可忽略 + deleteKey throw 兜底。
 
