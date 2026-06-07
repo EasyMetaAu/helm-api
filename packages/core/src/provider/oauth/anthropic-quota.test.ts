@@ -47,6 +47,30 @@ describe("parseAnthropicUsageBody", () => {
     ]);
   });
 
+  it("keeps the other windows when a PRESENT window has resets_at:null (real account body)", () => {
+    // Verbatim shape from a live account whose weekly Sonnet cap has not yet been
+    // touched: `seven_day_sonnet` is a PRESENT object but its `resets_at` is null
+    // (no countdown yet). A `z.string().optional()` inner field REJECTS that null and
+    // fails the WHOLE parse → parseAnthropicUsageBody returned [] → the providers page
+    // kept a stale snapshot forever (the 9%/44% bug). 5h/7d must still come through;
+    // the null-reset window maps with resetsAtMs:null rather than nuking everything.
+    const out = parseAnthropicUsageBody(
+      {
+        five_hour: { utilization: 5, resets_at: RESET },
+        seven_day: { utilization: 5, resets_at: RESET },
+        seven_day_opus: null,
+        seven_day_sonnet: { utilization: 0, resets_at: null },
+        extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, currency: null },
+      },
+      NOW,
+    );
+    expect(out).toEqual([
+      { key: "5h", usedPercent: 5, resetsAtMs: RESET_MS, windowMinutes: null },
+      { key: "7d", usedPercent: 5, resetsAtMs: RESET_MS, windowMinutes: null },
+      { key: "7d-sonnet", usedPercent: 0, resetsAtMs: null, windowMinutes: null },
+    ]);
+  });
+
   it("clamps an out-of-range utilization into 0–100 without re-scaling", () => {
     const out = parseAnthropicUsageBody({ five_hour: { utilization: 130, resets_at: RESET } }, NOW);
     expect(out).toEqual([

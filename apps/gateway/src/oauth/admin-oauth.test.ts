@@ -799,6 +799,7 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
   async function connected(usage: () => Response): Promise<{
     fetchQuota: (input: { account: string }) => Promise<OAuthQuotaWindow[] | null>;
     usageHits: () => number;
+    logs: Array<{ level: string; message: string; fields?: Record<string, unknown> }>;
   }> {
     let hits = 0;
     vi.stubGlobal(
@@ -815,12 +816,14 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
       ]),
     );
     let seq = 0;
+    const logs: Array<{ level: string; message: string; fields?: Record<string, unknown> }> = [];
     const admin = createOAuthAdmin({
       store: makeStore(),
       encKey: KEY,
       config: makeConfig(),
       now: () => 1000,
       genSessionId: () => `s${++seq}`,
+      log: (level, message, fields) => logs.push({ level, message, fields }),
     });
     const { sessionId, authorizeUrl } = await admin.startManualPaste({ providerId: "anthropic" });
     const state = new URL(authorizeUrl).searchParams.get("state");
@@ -831,7 +834,7 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
     });
     const fetchQuota = admin.fetchAnthropicQuota;
     if (!fetchQuota) throw new Error("fetchAnthropicQuota not wired");
-    return { fetchQuota, usageHits: () => hits };
+    return { fetchQuota, usageHits: () => hits, logs };
   }
 
   it("negative-caches a failed usage fetch (no upstream hammering within the TTL)", async () => {
@@ -841,6 +844,58 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
     expect(await fetchQuota({ account: "default" })).toBeNull();
     expect(await fetchQuota({ account: "default" })).toBeNull();
     expect(usageHits()).toBe(1); // the second open is served from the negative cache
+  });
+
+  it("warns when a 200 body yields ZERO windows (a silent parse failure froze the page for ~23h)", async () => {
+    // A schema-rejected body parses to [] — previously cached silently, leaving the
+    // stored snapshot stale forever with no log evidence. The warn is the tripwire.
+    const { fetchQuota, logs } = await connected(() =>
+      json({ five_hour: { utilization: "not-a-number" } }),
+    );
+    expect(await fetchQuota({ account: "default" })).toEqual([]);
+    expect(logs).toEqual([
+      {
+        level: "warn",
+        message: "oauth.quota.pull_empty",
+        fields: { provider_id: "anthropic", account: "default" },
+      },
+    ]);
+  });
+
+  it("warns with the HTTP status when the usage endpoint replies non-ok", async () => {
+    const { fetchQuota, logs } = await connected(
+      () => new Response("rate_limited", { status: 429 }),
+    );
+    expect(await fetchQuota({ account: "default" })).toBeNull();
+    expect(logs).toEqual([
+      {
+        level: "warn",
+        message: "oauth.quota.pull_failed",
+        fields: { provider_id: "anthropic", account: "default", status: 429 },
+      },
+    ]);
+  });
+
+  it("warns when the usage fetch throws (network / dead token)", async () => {
+    const { fetchQuota, logs } = await connected(() => {
+      throw new Error("boom");
+    });
+    expect(await fetchQuota({ account: "default" })).toBeNull();
+    expect(logs).toEqual([
+      {
+        level: "warn",
+        message: "oauth.quota.pull_failed",
+        fields: { provider_id: "anthropic", account: "default", error: "boom" },
+      },
+    ]);
+  });
+
+  it("does NOT warn on a healthy pull", async () => {
+    const { fetchQuota, logs } = await connected(() =>
+      json({ five_hour: { utilization: 3, resets_at: "2026-06-04T12:00:00.000Z" } }),
+    );
+    expect((await fetchQuota({ account: "default" }))?.length).toBe(1);
+    expect(logs).toEqual([]);
   });
 
   it("caches a successful snapshot and surfaces utilization as 0–100 percent as-is", async () => {
