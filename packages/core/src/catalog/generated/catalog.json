@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-31T00:00:00.000Z",
+  "generatedAt": "2026-06-07T09:06:08.020Z",
   "source": "litellm:model_prices_and_context_window.json",
   "models": [
     {
@@ -14,7 +14,9 @@
       },
       "pricing": {
         "inputPerMTokUsd": 0.8,
-        "outputPerMTokUsd": 4
+        "outputPerMTokUsd": 4,
+        "cacheReadPerMTokUsd": 0.08,
+        "cacheWritePerMTokUsd": 1
       }
     },
     {
@@ -29,7 +31,9 @@
       },
       "pricing": {
         "inputPerMTokUsd": 3,
-        "outputPerMTokUsd": 15
+        "outputPerMTokUsd": 15,
+        "cacheReadPerMTokUsd": 0.3,
+        "cacheWritePerMTokUsd": 3.75
       }
     },
     {
@@ -44,7 +48,9 @@
       },
       "pricing": {
         "inputPerMTokUsd": 1.25,
-        "outputPerMTokUsd": 5
+        "outputPerMTokUsd": 5,
+        "cacheReadPerMTokUsd": 0.3125,
+        "cacheWritePerMTokUsd": null
       }
     },
     {
@@ -59,7 +65,9 @@
       },
       "pricing": {
         "inputPerMTokUsd": 2.5,
-        "outputPerMTokUsd": 10
+        "outputPerMTokUsd": 10,
+        "cacheReadPerMTokUsd": 1.25,
+        "cacheWritePerMTokUsd": null
       }
     },
     {
@@ -74,7 +82,9 @@
       },
       "pricing": {
         "inputPerMTokUsd": 0.15,
-        "outputPerMTokUsd": 0.6
+        "outputPerMTokUsd": 0.6,
+        "cacheReadPerMTokUsd": 0.075,
+        "cacheWritePerMTokUsd": null
       }
     }
   ]

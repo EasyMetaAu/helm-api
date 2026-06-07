@@ -23,7 +23,12 @@ function entry(modelKey: string, over: Partial<CatalogEntry["capabilities"]> = {
       maxOutputTokens: 8_000,
       ...over,
     },
-    pricing: { inputPerMTokUsd: 0.5, outputPerMTokUsd: 1.5 },
+    pricing: {
+      inputPerMTokUsd: 0.5,
+      outputPerMTokUsd: 1.5,
+      cacheReadPerMTokUsd: null,
+      cacheWritePerMTokUsd: null,
+    },
     source: "override",
   };
 }

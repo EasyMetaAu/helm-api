@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-06-07 · 记忆压缩重写为单一 auto 模式：零配置 + 价格自适应（删除 fixed/economy；docs/08/12；CLAUDE.md 原则 1/2/3/4）
+
+- **动机（四领域专家评审）**：旧 `observer.compaction` 有 `fixed`/`economy` 两模式、economy 17 个手调旋钮，从未投产，且评审发现三处「配置撒谎」级缺陷：① `prior_compaction_count` 静态 0 → 失真项永远按首压算（真值=该线程已有 observation 数，数据本就在手）；② `retention_rate:0.8` 与现实脱节——生产 summarize 是 2000 字符截断桩，压 10k token 真实保留 ~5%；③ 失真按 input 价货币化是范畴错误（模型越贵越怕遗忘，因果倒置），质量项二次方曲率与 context-rot 研究（凹形）相反，且 catalog 无 cache 价字段而 economy 最依赖它。
+- **决定（用户拍板，逐步收敛）**：先删 economy 留 fixed/auto 两模式 → 再砍成**唯一 auto** → 最终**连 mode 配置都删**。压缩不再是用户选项，而是网关内部行为：`config.memory.observer` 子树整体删除，`memory.yaml` 关于压缩零配置；价格/上下文窗口从 model catalog 自动解析，工作负载统计从已加载数据现场推导，专家先验是 `AUTO_PRIORS` 代码常量（不进配置）。`MemoryConfigSchema` 收缩为仅 `forgetting`；`.strict()` 下遗留的 `observer:` 块**拒绝启动**（有意 fail-closed，提醒运营者旋钮已消失，杜绝撒谎旋钮）。
+- **三触发决策（纯函数 `chooseAutoCompaction`，任一触发即压）**：① **size**——未覆盖段 ≥2048 token 必压（记忆形成是整条管线的原料，非经济奢侈品）；② **idle**——线程闲置 ≥1h 有未覆盖消息（worker 扫描入队 `trigger:"idle"`），全量压 `keepRecent=0` 兜住短线程，压完候选查询不再命中 → 自然终止；③ **pressure**——线程 token/上下文窗口 ≥0.80 强制压（keep 下限放到 1）。无「软经济区」：子阈值小段在任何价位都不值得压（摘要输出成本主导小切片），多一道门即死代码。
+- **netBenefit v2**：cache 价拆 **read/write**（Anthropic 写有溢价、OpenAI/DeepSeek 写免费——v1 单一 cache 价对两者都错）；质量项**线性** `(before−after)`（context-rot 是凹形，v1 二次方曲率反了）且与失真共用**单一** `qualityCoeff`（同一合成美元轴权衡，v1 两个无关旋钮不自洽）；`retained` 用**实测压缩比**（该线程已有 observation 的 输出/源 token 比，clamp[0.05,0.95]）；`priorCompactionCount=existing.length`（修 bug，天然防抖：压得越多次失真越高、边际收益单调收缩）。
+- **价格自适应通路**：catalog 加 `cacheRead/WritePerMTokUsd`（sync-catalog 从 LiteLLM `cache_read/creation_input_token_cost` + DeepSeek `input_cost_per_token_cache_hit` 映射，null=未发布）；`resolveCompactionPricing(catalog, alias)` 复用 cost telemetry 同款查表路径。后台 job 不知模型 → `observeOutbound` 执行后把 served model 戳到 `memory_threads.last_served_model`（sqlite v20 / pg v19 列），observer 读回定价。降级链全程 fail-open：未戳/未知模型→字段级启发式（read=0.1×input、write=0、output=5×input）；input 也缺（本地模型）→纯上下文/记忆决策，无钱可省。
+- **坑/取舍**：(1) **部署破坏性**——运营者持有的 `memory.yaml` 若含 `observer:` 块，升级后**拒绝启动**（有意），发布说明须写明手删该块（la.atmy.work 适用，deploy 不覆盖 config）。(2) idle 候选用**覆盖前沿**检测（range 末尾 join 回 message 比 created_at，非 observed_at——observer 跑在它覆盖的消息之后，observed_at 会误判 writeback 留下的 kept-recent 尾部已覆盖）。(3) `trigger:"idle"` 挂在 ReflectionScope 上随 scope_id JSON 编码走，无迁移；`reflectionTargetScope` 重建干净的 project/resource scope，trigger 不泄漏进 reflector 去重。(4) cache TTL 未建模（Anthropic 5min/1h 写溢价差异），v1 范围外。(5) 行为变化：小线程从「立刻压」变「攒 2k token 或闲置 1h 再压」，observation 形成略滞后但摘要质量更好。(6) summarize 仍是截断桩，retention 实测会经常 ~5%——真 LLM 摘要器落地后 retained 自然抬升，公式无需改。
+- **验证**：TDD 全程红→绿。新增/重写 compaction-policy.test（三触发/双阈值/v2 公式/纯质量模式/防抖单调）、observer.test（输入组装/idle/model→pricing）、idle-flush.test、双适配器 memory-auto-compaction.test（stamp 账号隔离 + idle 候选前沿/终止）。typecheck 净、lint 0 错、全量 **2605 绿**、build 通过。catalog.json 已 `pnpm sync:catalog` 重新生成签入。
+- **Codex 评审 II–IV 轮（同日，全修）**：II-(P1) trigger 进 scope_id 绕开单锁去重 → **彻底移除 trigger**：writeback/idle 入队同一 plain scope（DB 层每线程单 open-job 锁），idle 改 observer **运行时**从最新消息年龄推导（抗竞态：入队后有新活动即视为活跃）；II-(P1) 同毫秒前沿漏尾 → 比较 `(created_at,id)` 完整元组；II-(P2) 压力误算 archived/pruned → footprint 只数可见（active+未 expired）observation。III-(P2) `PricingSchema.partial()` 叠 `.default(null)` 会把省略的 cache 字段**物化成 null** 擦掉 generated 价 → override schema 显式声明纯 optional 无默认（**Zod 坑：`.partial()` 不剥离字段 `.default()`**）；III-(P2) 空响应/纯 tool-call 流不戳模型 → `observeOutbound` 无条件调用（空 messages 不持久化、stamp 照常）。IV-(P1 设计裁决) "配置即代码"与零配置冲突 → 用户拍板**例外化**，已写入 CLAUDE.md 原则 2；IV-(P2) forced 单消息段 no-op → forced 时 floor 挡不住安全阀，整段折叠 keepRecent=0；IV-(P2) 候选检测全局前沿漏 sparse gap → 改 interval containment（与 `alreadyObservedMessageIds` 同语义）。各补回归测试，终态全量 2619 绿。
+- **Codex 评审修复（同日，4 条全修）**：(P1) idle 候选误用 `memory_threads.updated_at` 当"最后活动"——普通回合只 append 消息**不碰线程行**，活跃长线程 1h 后会被误判空闲、对话中途被压：改用 `MAX(memory_messages.created_at)` 判闲（两适配器；sqlite WHERE 引用 SELECT 别名是其方言扩展，pg 需重复子查询）。(P1) idle 路径丢 project/resource scope → 短线程 observation 永远不 promote 成 reflection：候选返回值带上线程行的 `project_id/resource_id`，idle-flush 入队 scope 透传，scheduler 的 promote 门自然命中。(P2) 压力触发误用全量 raw 史（`tokenSum(all)`）——压过一次后永久虚高、逼迫后续小段被强制压：改算**活跃足迹** = 未覆盖 raw + observation 文本 token（covered raw 在 inject 时本就被其 observation 顶替；reflection 是 project 级有界量，排除以保持线程局部纯估计）。(P3) docs/08、docs/02 仍写 `recent_keep`/`economy` 旧配置（照抄会拒绝启动）→ 同步改为 auto 行为描述。修后全量 **2608 绿**、typecheck/lint/build 净。
+---
+
 ## 2026-06-07 · 重试请求：原 key 失效时回退 root key（用户决策；docs/07；改写 2026-06-06「重试」条目的 409 行为）
 
 - **需求（用户拍板）**：重试一条原 key 已被删除/吊销的请求时返回 409「original key is unavailable」——对管理员毫无意义：他要的是**重试的结果**，不是一个解释为什么不能重试的错误。原 key 还活着就照旧用它（路由忠实）；不在了就用 root key 调试。
@@ -29,19 +42,11 @@
 
 ---
 
-## 2026-06-07 · 请求详情页展示第二层 eval 的模型与复核结论（修复「不知道哪个模型 eval、结果是什么」；docs/03/07；CLAUDE.md 原则 5/7）
-
-- **Bug（用户报告）**：请求走了 Layer-2 eval，但详情页看不出①是哪个模型评估的、②评估结论是什么。根因：eval 决定时 cascade 用 eval 输出**替换**了 rules 的 complexity/task_type/confidence（cascade.ts:120），该 verdict 被存进 classifier 段——可详情页把它渲染在「分类器（第一层规则）」框里，无任何归属提示，用户误以为是规则结果；而 eval 模型名仅打日志、**从不持久化**。
-- **方案**：① **新增两个持久字段** `classifier.eval_model` / `eval_latency_ms`（shared schema，`.default(null)` 兼容 legacy）。模型名只在 classify 适配器有（`evalCfg.model`，cascade 对模型无感），故在适配器按 `eval_used` 盖章（覆盖「eval 决定」与「eval 跑了但 fail-open」两态）；latency 早在 `EvalDecision.latency_ms` 算好但被 cascade 丢弃，顺手穿过 `ClassificationResult`→`balancedFallback`。真正落库路径是 route-request.ts `plan()` 内联（`telemetry/decision.ts buildDecisionRecord` 实为死代码、零调用，仍同步改保持一致）。② **前端归因**：详情接口 `toDetail` 把 `decided_by` 透进 `classifier_output`，新增 `eval_model/eval_latency_ms/eval_fallback_reason`；DecisionChain 分类器框加「判定来源」徽章（rules/eval/fallback/default 各色 badge-*），eval 框重做为 模型 + 缓存 + 耗时 +（decided→复核结论 verdict / fail-open→失败原因 + 回退 balanced）。
-- **取舍/坑**：(用户拍板) 含 eval 耗时（动 core cascade + 其测试）+ 全 5 locale。`eval_model` 是模型 id 非密钥，过 `redact` 不变（原则 7）。`.default(null)` 让字段 z.infer **输出必填**，故 7 处 DecisionRecord 测试 fixture（core signals/store + gateway admin + admin routes）须补 `eval_model/eval_latency_ms: null`——typecheck 一路报出来补齐。legacy 旧记录：eval_model 缺→UI 隐藏模型行，但 `decided_by==='eval'` 的 verdict 仍照常显示（优雅降级）。
-- **验证**：TDD——schema（默认 null / 含值 round-trip / 负 latency 拒）、cascade（latency 在 rules/disabled→null，decided/fail-open→实测值）、classify 适配器（eval 跑→model=配置值、未跑→null）、requests.toDetail（decided_by/model/latency/fallback_reason 映射 + legacy null）、DecisionChain（显模型/耗时/verdict/失败行/归因徽章）。typecheck/svelte-check/lint/prettier 净，全量 2541 绿，build 通过。
-- **后续修正（0.8.5 上线后用户仍误读 → 补第一层 gate 置信度）**：用户看 eval 判定记录里的 0.95 仍读成"第一层置信度很高还跑了 eval"。两个根因补修：① 触发升级的**第一层 gate 置信度被 eval verdict 覆盖、从不持久化**——新增 `classifier.rules_confidence`（`.default(null)`；cascade 三分支恒填 `r.confidence`，passthrough/fail-open default 为 null，"为什么升级"自此可回溯）；② 分类器框描述仍写「第一层确定性规则读取请求…」误导归属——改中性文案（"最终结论 + 徽章标来源"），且 decided_by==='eval' 时加**升级因果行**："第一层规则不确定（置信度 0.05），已升级到 eval 模型复核；上方的结论与置信度均为 eval 模型给出"（legacy 无数值则定性显示、绝不伪造数字）。顺带按显示审计补两处：eval_disabled 回退在 eval 框补完整因果说明；`matched_dimensions` 映射加固（对象 entry 取 `.detail`，杜绝未来 `[object Object]`）。又一轮 7 处 DecisionRecord fixture 补 `rules_confidence: null`。全量 2570 绿。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-07 · 请求详情页展示第二层 eval 的模型与复核结论（修复；docs/03/07；原则 5/7）：cascade 用 eval verdict 覆盖 rules 输出且 eval 模型名从不持久化 → 详情页把 eval 结果误标为「第一层规则」。修：新增持久字段 `classifier.eval_model`/`eval_latency_ms`（`.default(null)` 兼容 legacy；落库在 route-request.ts `plan()` 内联），`toDetail` 透传 `decided_by`，DecisionChain 加判定来源徽章、eval 框重做（模型+缓存+耗时+verdict/fail-open 原因）。后续修正：0.8.5 上线后用户仍把 eval 的 0.95 误读为第一层置信度 → 补 `classifier.rules_confidence` 持久化触发升级的 gate 置信度 + 升级因果行（"第一层不确定(0.05)→升级 eval 复核"，legacy 无数值定性显示不伪造）；`matched_dimensions` 映射加固防 `[object Object]`。两轮共 14 处 DecisionRecord fixture 补新字段；全量 2570 绿。
 
 ### 2026-06-07 · 请求详情页时间显示「未记录时间」（修复；docs/07）：根因①详情接口直吐 `DecisionRecord`（schema 无时间戳，时间在独立 `createdAt` 列）②前端 `toDetail` 把 `ts` 写死 `''`。修：新增窄查询端口 `getCreatedAt(requestId)`（仿 getApiKeyId 单列 select；pg 列为 epoch-ms bigint 需 `new Date(ms)` 包回），详情接口拍平 `created_at`，前端与 `toListItem` 同款映射；legacy 无值仍兜底（绝不伪造时间）。TDD 双适配器契约 + 4 处 TelemetryStore mock 补 `getCreatedAt`。
 

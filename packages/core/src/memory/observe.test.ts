@@ -11,6 +11,7 @@ import type { MemoryScope } from "./types.js";
 function makeFakeStore() {
   const threads: MemoryThreadInput[] = [];
   const messages: MemoryMessageInput[] = [];
+  const stamps: Array<{ accountId: string; threadId: string; modelAlias: string }> = [];
   const store: MemoryStore = {
     ensureThread: vi.fn(async (input: MemoryThreadInput) => {
       threads.push(input);
@@ -28,8 +29,11 @@ function makeFakeStore() {
     updateJobStatus: vi.fn(async () => {}),
     enqueueJob: vi.fn(async () => "job"),
     claimPendingJobs: vi.fn(async () => []),
+    stampThreadModel: vi.fn(async (input) => {
+      stamps.push(input);
+    }),
   };
-  return { store, threads, messages };
+  return { store, threads, messages, stamps };
 }
 
 function makeDeps(store: MemoryStore, overrides: Partial<ObserveDeps> = {}): ObserveDeps {
@@ -195,6 +199,64 @@ describe("observeOutbound", () => {
       }),
     ).resolves.toBeUndefined();
     expect(log).toHaveBeenCalled();
+  });
+
+  it("stamps the served model for auto-compaction pricing", async () => {
+    const { store, stamps } = makeFakeStore();
+    const deps = makeDeps(store);
+
+    await observeOutbound(
+      deps,
+      scope(),
+      { responseMessages: [{ role: "assistant", content: "hi" }], toolResults: [] },
+      "anthropic/claude-x",
+    );
+
+    expect(stamps).toEqual([
+      { accountId: "acct-a", threadId: "acct-a:thread-1", modelAlias: "anthropic/claude-x" },
+    ]);
+  });
+
+  it("stamps the served model even with EMPTY response messages (tool-call/empty stream)", async () => {
+    // Regression: the streamed tool-call-only path has no reconstructed text, but
+    // the served-model stamp must still land — otherwise auto-compaction prices
+    // the thread from heuristics instead of the real catalog entry.
+    const { store, stamps, messages } = makeFakeStore();
+    const deps = makeDeps(store);
+
+    await observeOutbound(deps, scope(), { responseMessages: [], toolResults: [] }, "openai/gpt-x");
+
+    expect(messages).toHaveLength(0); // nothing to persist
+    expect(stamps).toEqual([
+      { accountId: "acct-a", threadId: "acct-a:thread-1", modelAlias: "openai/gpt-x" },
+    ]);
+  });
+
+  it("does NOT stamp when no served model is known", async () => {
+    const { store, stamps } = makeFakeStore();
+    const deps = makeDeps(store);
+
+    await observeOutbound(deps, scope(), {
+      responseMessages: [{ role: "assistant", content: "hi" }],
+      toolResults: [],
+    });
+
+    expect(stamps).toHaveLength(0);
+    expect(store.stampThreadModel).not.toHaveBeenCalled();
+  });
+
+  it("off mode does not stamp the served model", async () => {
+    const { store, stamps } = makeFakeStore();
+    const deps = makeDeps(store);
+
+    await observeOutbound(
+      deps,
+      scope({ mode: "off" }),
+      { responseMessages: [], toolResults: [] },
+      "anthropic/claude-x",
+    );
+
+    expect(stamps).toHaveLength(0);
   });
 });
 

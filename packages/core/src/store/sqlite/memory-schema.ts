@@ -13,6 +13,10 @@ export const memoryThreads = sqliteTable("memory_threads", {
   projectId: text("project_id"),
   resourceId: text("resource_id"),
   ownerId: text("owner_id"),
+  // Alias of the model that served the thread's latest turn (v20). Stamped
+  // best-effort by observeOutbound AFTER execution; the background observer
+  // reads it to price the auto-compaction ledger. NULL = never stamped.
+  lastServedModel: text("last_served_model"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

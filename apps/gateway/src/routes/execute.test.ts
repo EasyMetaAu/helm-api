@@ -233,7 +233,12 @@ describe("createExecute — gateway execution adapter", () => {
         maxContextTokens: 100000,
         maxOutputTokens: 4096,
       },
-      pricing: { inputPerMTokUsd: null, outputPerMTokUsd: null },
+      pricing: {
+        inputPerMTokUsd: null,
+        outputPerMTokUsd: null,
+        cacheReadPerMTokUsd: null,
+        cacheWritePerMTokUsd: null,
+      },
       source: "generated",
     };
     const execute = createExecute({
@@ -688,7 +693,12 @@ describe("createExecute — gateway execution adapter", () => {
         maxOutputTokens: 8192,
         ...caps,
       },
-      pricing: { inputPerMTokUsd: null, outputPerMTokUsd: null },
+      pricing: {
+        inputPerMTokUsd: null,
+        outputPerMTokUsd: null,
+        cacheReadPerMTokUsd: null,
+        cacheWritePerMTokUsd: null,
+      },
       source: "generated",
     };
   }
@@ -951,7 +961,17 @@ describe("createExecute — gateway execution adapter", () => {
       providers: new Map([["mock", provider]]),
       registry: registry({ good: "gpt-4o" }),
       breaker: breaker(),
-      catalog: new Map([["good", priced("good", { inputPerMTokUsd: 2.5, outputPerMTokUsd: 10 })]]),
+      catalog: new Map([
+        [
+          "good",
+          priced("good", {
+            inputPerMTokUsd: 2.5,
+            outputPerMTokUsd: 10,
+            cacheReadPerMTokUsd: null,
+            cacheWritePerMTokUsd: null,
+          }),
+        ],
+      ]),
       now: clock(),
       signal: new AbortController().signal,
     });

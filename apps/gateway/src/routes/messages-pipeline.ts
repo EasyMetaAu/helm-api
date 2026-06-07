@@ -505,7 +505,14 @@ export function createMessagesPipeline(
           // any tool messages) from the projected IR. Fail-open inside core; it
           // cannot turn a successful response into an error.
           if (memory !== undefined) {
-            await observeOutbound(memory.observe, memoryScope, outboundFromIR(irResponse));
+            const finalAlias =
+              result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+            await observeOutbound(
+              memory.observe,
+              memoryScope,
+              outboundFromIR(irResponse),
+              finalAlias,
+            );
           }
           // Settle the budget on the served (non-stream) response: cost is already
           // on the decision; tokens from the OpenAI body's usage.
@@ -573,11 +580,25 @@ export function createMessagesPipeline(
               }
             }
           } finally {
-            if (memory !== undefined && assistant.text.length > 0) {
-              await observeOutbound(memory.observe, memoryScope, {
-                responseMessages: [{ role: "assistant", content: assistant.text }],
-                toolResults: [],
-              });
+            // Called UNCONDITIONALLY (even when no assistant text was
+            // reconstructed — e.g. a tool-call-only stream) so the served-model
+            // stamp still lands for auto-compaction pricing; empty
+            // responseMessages persist nothing.
+            if (memory !== undefined) {
+              const finalAlias =
+                result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+              await observeOutbound(
+                memory.observe,
+                memoryScope,
+                {
+                  responseMessages:
+                    assistant.text.length > 0
+                      ? [{ role: "assistant", content: assistant.text }]
+                      : [],
+                  toolResults: [],
+                },
+                finalAlias,
+              );
             }
             // Streamed-cost backfill + budget settle (docs/06). Zero-touch when
             // budgets are unwired/unmetered. The pipeline faces never settled
@@ -585,7 +606,7 @@ export function createMessagesPipeline(
             // decision's total_usd is real, THEN settle the budget. Fail-open.
             if (budget !== undefined && budgetCaps !== undefined) {
               const finalAlias =
-                result.decision.final.status === "ok" ? result.decision.final.model_alias : null;
+                result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
               if (lastUsage && finalAlias && budget.costOf) {
                 try {
                   backfillCompletionCost(

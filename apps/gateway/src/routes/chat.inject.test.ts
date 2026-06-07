@@ -377,7 +377,15 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
           observationText: `A saw ${messages.map((m) => m.content).join("|")}`,
         }),
         costSink: vi.fn(),
-        now: () => new Date("2026-01-02T00:00:00.000Z"),
+        resolvePricing: () => ({
+          modelKey: null,
+          inputPerMtok: null,
+          outputPerMtok: null,
+          cacheReadPerMtok: null,
+          cacheWritePerMtok: null,
+          maxContextTokens: null,
+        }),
+        now: () => new Date("2099-01-02T00:00:00.000Z"),
         log: vi.fn(),
       },
     );
@@ -389,7 +397,15 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
           observationText: `B saw ${messages.map((m) => m.content).join("|")}`,
         }),
         costSink: vi.fn(),
-        now: () => new Date("2026-01-02T00:00:00.000Z"),
+        resolvePricing: () => ({
+          modelKey: null,
+          inputPerMtok: null,
+          outputPerMtok: null,
+          cacheReadPerMtok: null,
+          cacheWritePerMtok: null,
+          maxContextTokens: null,
+        }),
+        now: () => new Date("2099-01-02T00:00:00.000Z"),
         log: vi.fn(),
       },
     );

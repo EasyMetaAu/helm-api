@@ -530,6 +530,46 @@ export interface MemoryStore {
     archivedObservationsBeforeMs: number;
     expiredFactsBeforeMs: number;
   }): Promise<{ observationsDeleted: number; factsDeleted: number }>;
+  // Auto-compaction (model→price resolution) — the write half. Stamp the alias
+  // of the model that ACTUALLY served the thread's latest turn onto the thread
+  // row (memory_threads.last_served_model). Called best-effort by observeOutbound
+  // AFTER execution (the served model exists only post-route); the background
+  // observer reads it back to price the compaction ledger. FAIL-OPEN: a missed
+  // stamp just means the policy's price heuristics take over. Account-guarded.
+  // OPTIONAL (`?`): additive — pre-phase fixtures stay valid; callers null-check.
+  stampThreadModel?(input: {
+    accountId: string;
+    threadId: string;
+    modelAlias: string;
+  }): Promise<void>;
+  // Auto-compaction — the read half. Return the thread's stamped model alias
+  // (null when never stamped / unknown thread). OPTIONAL (`?`), same contract.
+  getThreadMeta?(input: {
+    accountId: string;
+    threadId: string;
+  }): Promise<{ lastServedModel: string | null } | null>;
+  // Idle-flush sweep (memory formation backstop) — run on the worker tick, never
+  // per request. Return threads that went QUIET with uncompacted history: last
+  // activity ≤ idleBeforeMs AND at least one message NEWER than the thread's
+  // coverage frontier (the newest message any observation covers — a timestamp
+  // approximation of "uncovered"; exact range math stays in the observer).
+  // "Last activity" is MAX(memory_messages.created_at), NOT memory_threads.
+  // updated_at: ordinary turns append messages but do NOT touch the thread row,
+  // so updated_at staleness would mark an active thread idle and compact it
+  // mid-conversation. Each candidate carries its project/resource scope (read
+  // from the thread row) so the observer can promote the resulting observation to
+  // the project/resource reflection — without it, short idle threads would form
+  // observations that never reach a readable slot. Once the idle flush compacts
+  // everything the frontier catches up and the thread leaves the candidate set,
+  // so the sweep TERMINATES (no eternal re-enqueue). `limit` bounds the scan; the
+  // open-job dedupe collapses an already-queued thread to a no-op. OPTIONAL (`?`):
+  // additive — pre-phase fixtures stay valid; the sweep null-checks.
+  listIdleFlushCandidates?(input: {
+    idleBeforeMs: number;
+    limit: number;
+  }): Promise<
+    Array<{ accountId: string; threadId: string; projectId?: string; resourceId?: string }>
+  >;
 }
 
 // Optional config persistence (MVP is yaml-first; reserved for admin write-back).

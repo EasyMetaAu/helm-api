@@ -225,7 +225,7 @@ config/
   auth.yaml            # require_api_key + admin auth source
   runtime.yaml         # store driver, rate limit, timeouts, request size
   server.yaml          # host / port
-  memory.yaml          # observer compaction + forgetting/decay layer
+  memory.yaml          # forgetting/decay layer (observer compaction is auto, not configured)
 ```
 
 Capability and pricing data originate from a checked-in **generated catalog**

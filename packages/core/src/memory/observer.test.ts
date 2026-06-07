@@ -44,17 +44,30 @@ function makeFakeStore(messages: RawMessage[], existingRanges: Array<[string, st
   return { store, observations, jobUpdates };
 }
 
-function makeMessages(count: number): RawMessage[] {
+function makeMessages(count: number, tokenEstimate = 600): RawMessage[] {
+  // 600-token default: 8 messages cross the auto policy's 2048-token
+  // memory-formation trigger while the keep floor (max(4, 25%)) still leaves a
+  // compactable prefix. Timestamps sit just BEFORE NOW (1s apart, ascending) so
+  // the observer's run-time idle check sees the thread as ACTIVE by default — the
+  // idle path is exercised explicitly by overriding deps.now far into the future.
   return Array.from({ length: count }, (_v, i) => ({
     id: `m${i + 1}`,
     threadId: "thread-1",
     role: "user" as const,
     content: `message ${i + 1}`,
-    tokenEstimate: 5,
-    // Spread across days so the time anchor is meaningful.
-    createdAt: new Date(`2026-05-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`),
+    tokenEstimate,
+    createdAt: new Date(NOW.getTime() - (count - i) * 1000),
   }));
 }
+
+const NULL_PRICING = {
+  modelKey: null,
+  inputPerMtok: null,
+  outputPerMtok: null,
+  cacheReadPerMtok: null,
+  cacheWritePerMtok: null,
+  maxContextTokens: null,
+};
 
 const NOW = new Date("2026-05-30T12:00:00.000Z");
 
@@ -68,6 +81,7 @@ function makeDeps(store: MemoryStore, overrides: Partial<ObserverDeps> = {}): Ob
       tags: ["test"],
     })),
     costSink: vi.fn(),
+    resolvePricing: vi.fn(() => NULL_PRICING),
     now: () => NOW,
     log: vi.fn(),
     ...overrides,
@@ -78,7 +92,7 @@ const JOB: ObserverJob = { jobId: "job-1", accountId: "acct-a", threadId: "threa
 
 describe("runObserverJob", () => {
   it("compresses older messages into exactly one observation with a time anchor + source range", async () => {
-    const messages = makeMessages(6); // 6 total; recent 2 kept, 4 older compressed
+    const messages = makeMessages(8); // 8 total; keep floor 4 kept, 4 older compressed
     const { store, observations, jobUpdates } = makeFakeStore(messages);
     const deps = makeDeps(store);
 
@@ -101,7 +115,7 @@ describe("runObserverJob", () => {
   });
 
   it("keeps the recent N raw messages out of the compressed source range", async () => {
-    const messages = makeMessages(6);
+    const messages = makeMessages(8);
     const { store, observations } = makeFakeStore(messages);
     const deps = makeDeps(store);
 
@@ -109,14 +123,14 @@ describe("runObserverJob", () => {
 
     const obs = observations[0];
     if (!obs) throw new Error("expected one observation");
-    // The recent 2 (m5, m6) must NOT be inside the compressed range.
+    // The kept suffix (m5..m8) must NOT be inside the compressed range.
     expect(obs.sourceMessageRange[1]).toBe("m4");
     expect(obs.sourceMessageRange).not.toContain("m5");
-    expect(obs.sourceMessageRange).not.toContain("m6");
+    expect(obs.sourceMessageRange).not.toContain("m8");
   });
 
   it("does not recompress a source range already covered by an existing observation", async () => {
-    const messages = makeMessages(6);
+    const messages = makeMessages(8);
     const { store, observations, jobUpdates } = makeFakeStore(messages, [["m1", "m4"]]);
     const deps = makeDeps(store);
 
@@ -130,7 +144,7 @@ describe("runObserverJob", () => {
   });
 
   it("does not write a sparse uncovered set as one continuous source range", async () => {
-    const messages = makeMessages(6);
+    const messages = makeMessages(8);
     const { store, observations } = makeFakeStore(messages, [["m2", "m3"]]);
     const deps = makeDeps(store);
 
@@ -140,15 +154,16 @@ describe("runObserverJob", () => {
     const obs = observations[0];
     if (!obs) throw new Error("expected one observation");
     // m2..m3 is already covered, so the next observation must not claim m1..m4.
-    // The oldest compactable contiguous uncovered segment is m4..m6; fixed keep=2
-    // compresses only m4 and writes an exact single-row range.
+    // The oldest compactable contiguous uncovered segment is m4..m8 (3000 tokens
+    // ≥ the size trigger); the keep floor of 4 compresses only m4 and writes an
+    // exact single-row range.
     expect(obs.sourceMessageRange).toEqual(["m4", "m4"]);
     expect(obs.observationText).toContain("Observed 1 msgs");
     expect(out.sourceMessageRange).toEqual(["m4", "m4"]);
   });
 
   it("books Observer tokens into the dedicated 'observer' cost bucket only", async () => {
-    const messages = makeMessages(6);
+    const messages = makeMessages(8);
     const { store } = makeFakeStore(messages);
     const costSink = vi.fn();
     const deps = makeDeps(store, { costSink });
@@ -163,7 +178,7 @@ describe("runObserverJob", () => {
   });
 
   it("is fail-open: a summarize error does not throw, returns null, and marks the job failed", async () => {
-    const messages = makeMessages(6);
+    const messages = makeMessages(8);
     const { store, observations, jobUpdates } = makeFakeStore(messages);
     const deps = makeDeps(store, {
       summarize: vi.fn(async () => {
@@ -186,7 +201,7 @@ describe("runObserverJob", () => {
   // observation's `importance` so the forgetting score's decay-brake has a real
   // input instead of every row defaulting to a flat 0.5.
   it("derives importance from the summarizer priority (priority/10, clamped)", async () => {
-    const messages = makeMessages(6);
+    const messages = makeMessages(8);
     const { store, observations } = makeFakeStore(messages);
     // summarize stub returns priority:3 (see makeDeps) → importance 0.3.
     const deps = makeDeps(store);
@@ -197,7 +212,7 @@ describe("runObserverJob", () => {
   });
 
   it("prefers an explicit summarizer importance over the priority derivation", async () => {
-    const messages = makeMessages(6);
+    const messages = makeMessages(8);
     const { store, observations } = makeFakeStore(messages);
     const deps = makeDeps(store, {
       summarize: vi.fn(async () => ({
@@ -213,7 +228,7 @@ describe("runObserverJob", () => {
   });
 
   it("leaves importance unset when the summarizer gives neither importance nor priority", async () => {
-    const messages = makeMessages(6);
+    const messages = makeMessages(8);
     const { store, observations } = makeFakeStore(messages);
     const deps = makeDeps(store, {
       summarize: vi.fn(async () => ({ observationText: "x" })),
@@ -226,7 +241,7 @@ describe("runObserverJob", () => {
   });
 
   it("writes no observation when there is nothing old enough to compress", async () => {
-    // Only the recent-keep window of messages exist → nothing older to compress.
+    // Below the memory-formation size trigger with no context pressure.
     const messages = makeMessages(2);
     const { store, observations, jobUpdates } = makeFakeStore(messages);
     const deps = makeDeps(store);
@@ -240,5 +255,51 @@ describe("runObserverJob", () => {
     expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
     // summarize never called — no wasted LLM tokens.
     expect(deps.summarize).not.toHaveBeenCalled();
+  });
+
+  it("folds the WHOLE uncovered history when the thread is idle (run-time age check)", async () => {
+    // 3 tiny messages — far below the size trigger, but a now() ≫ 1h past the
+    // newest message makes the observer derive idle=true and full-flush, so short
+    // threads still form memories. No job flag: idleness is computed at run time.
+    const messages = makeMessages(3, 10);
+    const { store, observations, jobUpdates } = makeFakeStore(messages);
+    const deps = makeDeps(store, { now: () => new Date(NOW.getTime() + 2 * 3_600_000) });
+
+    const out = await runObserverJob(JOB, deps);
+
+    expect(observations).toHaveLength(1);
+    expect(out.sourceMessageRange).toEqual(["m1", "m3"]);
+    expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
+  });
+
+  it("resolves pricing from the thread's stamped model via getThreadMeta", async () => {
+    const messages = makeMessages(8);
+    const { store } = makeFakeStore(messages);
+    const getThreadMeta = vi.fn(async () => ({ lastServedModel: "anthropic/claude-x" }));
+    const resolvePricing = vi.fn(() => NULL_PRICING);
+    const deps = makeDeps({ ...store, getThreadMeta } as typeof store, { resolvePricing });
+
+    await runObserverJob(JOB, deps);
+
+    expect(getThreadMeta).toHaveBeenCalledWith({ accountId: "acct-a", threadId: "thread-1" });
+    expect(resolvePricing).toHaveBeenCalledWith("anthropic/claude-x");
+  });
+
+  it("a missing/failing getThreadMeta degrades to a null model (fail-open)", async () => {
+    const messages = makeMessages(8);
+    const { store, observations } = makeFakeStore(messages);
+    const resolvePricing = vi.fn(() => NULL_PRICING);
+    const failingMeta = vi.fn(async () => {
+      throw new Error("db hiccup");
+    });
+    const deps = makeDeps({ ...store, getThreadMeta: failingMeta } as typeof store, {
+      resolvePricing,
+    });
+
+    await runObserverJob(JOB, deps);
+
+    // The job still compacts; pricing resolved with a null alias.
+    expect(resolvePricing).toHaveBeenCalledWith(null);
+    expect(observations).toHaveLength(1);
   });
 });

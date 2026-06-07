@@ -122,6 +122,10 @@ export const memoryThreads = pgTable("memory_threads", {
   projectId: text("project_id"),
   resourceId: text("resource_id"),
   ownerId: text("owner_id"),
+  // Alias of the model that served the thread's latest turn (pg v19). Stamped
+  // best-effort by observeOutbound; read by the background observer to price
+  // the auto-compaction ledger. NULL = never stamped.
+  lastServedModel: text("last_served_model"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
 });

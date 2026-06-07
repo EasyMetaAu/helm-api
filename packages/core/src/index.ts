@@ -40,6 +40,8 @@ export {
 export {
   billedCostFromBody,
   computeCostUsd,
+  type ResolvedCompactionPricing,
+  resolveCompactionPricing,
   resolveCostUsd,
   type TokenUsage,
   usageFromBody,
@@ -162,14 +164,16 @@ export {
   LanesConfigSchema,
   parseLanesConfig,
 } from "./lanes/schema.js";
-// Memory middleware — Observer compaction policy. Pure + config-driven so the
-// background worker can avoid paying for premature summaries when economy mode is on.
+// Memory middleware — auto-adaptive Observer compaction. Pure + internal (NOT
+// config): prices/context resolve from the catalog, workload stats derive from
+// store data; the background worker assembles the inputs per job.
 export {
+  AUTO_PRIORS,
+  type AutoCompactionInputs,
   type CompactionDecision,
-  chooseObserverCompaction,
-  type EconomyCompactionPolicy,
-  type FixedCompactionPolicy,
-  type ObserverCompactionPolicy,
+  chooseAutoCompaction,
+  type EffectiveCompactionPrices,
+  effectiveCompactionPrices,
 } from "./memory/compaction-policy.js";
 // Memory forgetting — the decay buffer-flush TRIGGER (docs/12 P5). Run on the worker
 // tick (never per request): enqueues account-scoped decay jobs for due accounts, gated.
@@ -203,6 +207,10 @@ export {
   type ScoreConfig,
   type ScoreInput,
 } from "./memory/forgetting/score.js";
+// Memory compaction — the idle-flush TRIGGER (memory-formation backstop). Run on
+// the worker tick: enqueues idle-flush observer jobs for quiet threads with
+// uncovered history. NOT gated behind forgetting (memory formation is baseline).
+export { type IdleFlushDeps, maybeEnqueueIdleObserverJobs } from "./memory/idle-flush.js";
 // Memory middleware — inject phase (docs/08 Phase 2). Synchronous on the request
 // path: load + assemble a budgeted, cache-friendly context prefix in the fixed
 // docs/08 order, enqueue write-back, fail-open. Framework-agnostic; never touches

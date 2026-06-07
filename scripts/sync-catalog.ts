@@ -19,6 +19,11 @@ interface UpstreamModelInfo {
   max_output_tokens?: number;
   input_cost_per_token?: number;
   output_cost_per_token?: number;
+  // Prompt-cache prices. DeepSeek publishes its cache-hit price under
+  // input_cost_per_token_cache_hit instead of cache_read_input_token_cost.
+  cache_read_input_token_cost?: number;
+  cache_creation_input_token_cost?: number;
+  input_cost_per_token_cache_hit?: number;
   supports_function_calling?: boolean;
   supports_response_schema?: boolean;
   supports_vision?: boolean;
@@ -62,6 +67,11 @@ function normalizeEntry(
     pricing: {
       inputPerMTokUsd: perMTok(info.input_cost_per_token),
       outputPerMTokUsd: perMTok(info.output_cost_per_token),
+      // null = unpublished (consumer applies its heuristic), never coerced to 0.
+      cacheReadPerMTokUsd: perMTok(
+        info.cache_read_input_token_cost ?? info.input_cost_per_token_cache_hit,
+      ),
+      cacheWritePerMTokUsd: perMTok(info.cache_creation_input_token_cost),
     },
   };
 }

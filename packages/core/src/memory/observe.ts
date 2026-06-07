@@ -130,10 +130,17 @@ export async function observeInbound(
 // Outbound: on observe/inject, persist the response messages + tool results. off
 // is a no-op. Fail-open — a store failure is logged, never thrown. observe does
 // NOT enqueue an observer job (that is docs/08 Phase 2).
+//
+// `servedModel` is the alias that ACTUALLY handled this turn (known only post-
+// route, so it cannot be set at inject time). We stamp it onto the thread so the
+// background observer can price its auto-compaction ledger from the catalog. The
+// stamp is its own best-effort try/catch (a stamp failure must not lose the
+// response messages); the whole method stays fail-open.
 export async function observeOutbound(
   deps: ObserveDeps,
   scope: MemoryScope,
   result: { responseMessages: IRMessage[]; toolResults: IRToolResult[] },
+  servedModel?: string | null,
 ): Promise<void> {
   if (scope.mode === "off") return;
   const threadId = storageThreadId(scope);
@@ -157,6 +164,24 @@ export async function observeOutbound(
       thread_id: threadId,
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+
+  // Stamp the served model (auto-compaction price resolution). Separate guard:
+  // independent of message persistence, and the store method is optional (a
+  // pre-phase store simply skips it).
+  if (servedModel != null && servedModel !== "" && deps.memoryStore.stampThreadModel) {
+    try {
+      await deps.memoryStore.stampThreadModel({
+        accountId: scope.accountId,
+        threadId,
+        modelAlias: servedModel,
+      });
+    } catch (err) {
+      deps.log("memory.observe.stamp_model_failed", {
+        thread_id: threadId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
 

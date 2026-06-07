@@ -740,4 +740,100 @@ export class PgMemoryStore implements MemoryStore {
     ) as unknown[];
     return { observationsDeleted: obsRows.length, factsDeleted: factRows.length };
   }
+
+  // Auto-compaction model→price resolution — pg mirror of the sqlite adapter
+  // (same contract; see those comments). Write half: account-guarded stamp,
+  // unknown thread = silent no-op (fail-open, fired best-effort post-response).
+  async stampThreadModel(input: {
+    accountId: string;
+    threadId: string;
+    modelAlias: string;
+  }): Promise<void> {
+    await this.db.execute(sql`
+      UPDATE memory_threads
+         SET last_served_model = ${input.modelAlias}
+       WHERE id = ${input.threadId} AND owner_id = ${input.accountId}
+    `);
+  }
+
+  // Read half: the thread's stamped model alias, account-guarded.
+  async getThreadMeta(input: {
+    accountId: string;
+    threadId: string;
+  }): Promise<{ lastServedModel: string | null } | null> {
+    const result = (await this.db.execute(sql`
+      SELECT last_served_model
+        FROM memory_threads
+       WHERE id = ${input.threadId} AND owner_id = ${input.accountId}
+    `)) as unknown;
+    const rows = (
+      Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+    ) as Array<{ last_served_model: string | null }>;
+    const row = rows[0];
+    return row === undefined ? null : { lastServedModel: row.last_served_model };
+  }
+
+  // Idle-flush sweep candidates — pg mirror of the sqlite adapter. Idleness =
+  // MAX(memory_messages.created_at) ≤ idleBeforeMs (the last appended message,
+  // NOT memory_threads.updated_at — ordinary turns append messages without
+  // touching the thread row, so updated_at would mark an active thread idle).
+  // Uncompacted = coverage FRONTIER (a message newer than the newest covered
+  // message; range ends joined back to their message rows), NOT observed_at
+  // (which would hide the kept-recent tail). project_id/resource_id ride along
+  // for promotion. Terminates once the frontier catches up. jsonb ->> 1 reads
+  // the range's lastId.
+  async listIdleFlushCandidates(input: {
+    idleBeforeMs: number;
+    limit: number;
+  }): Promise<
+    Array<{ accountId: string; threadId: string; projectId?: string; resourceId?: string }>
+  > {
+    const result = (await this.db.execute(sql`
+      SELECT t.owner_id AS owner_id, t.id AS thread_id,
+             t.project_id AS project_id, t.resource_id AS resource_id,
+             (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
+               AS last_activity
+        FROM memory_threads t
+       WHERE t.owner_id IS NOT NULL
+         AND (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
+               <= ${input.idleBeforeMs}
+         AND EXISTS (
+           -- A message NOT covered by ANY observation's [first,last] range — the
+           -- SAME interval semantics alreadyObservedMessageIds uses, over the
+           -- SAME (created_at, id) order listMessages uses. Interval containment
+           -- (not a global frontier) catches sparse gaps BEFORE later
+           -- observations, and the full tuple handles same-millisecond ties.
+           SELECT 1 FROM memory_messages m
+            WHERE m.thread_id = t.id
+              AND NOT EXISTS (
+                SELECT 1 FROM memory_observations o
+                JOIN memory_messages mf
+                  ON mf.id = o.source_message_range ->> 0
+                JOIN memory_messages ml
+                  ON ml.id = o.source_message_range ->> 1
+                 WHERE o.thread_id = t.id
+                   AND (mf.created_at < m.created_at
+                     OR (mf.created_at = m.created_at AND mf.id <= m.id))
+                   AND (ml.created_at > m.created_at
+                     OR (ml.created_at = m.created_at AND ml.id >= m.id))
+              )
+         )
+       ORDER BY last_activity ASC
+       LIMIT ${input.limit}
+    `)) as unknown;
+    const rows = (
+      Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+    ) as Array<{
+      owner_id: string;
+      thread_id: string;
+      project_id: string | null;
+      resource_id: string | null;
+    }>;
+    return rows.map((row) => ({
+      accountId: row.owner_id,
+      threadId: row.thread_id,
+      ...(row.project_id !== null ? { projectId: row.project_id } : {}),
+      ...(row.resource_id !== null ? { resourceId: row.resource_id } : {}),
+    }));
+  }
 }

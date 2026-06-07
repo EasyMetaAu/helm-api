@@ -18,7 +18,12 @@ const generated: GeneratedCatalog = {
         maxContextTokens: 128_000,
         maxOutputTokens: 16_384,
       },
-      pricing: { inputPerMTokUsd: 2.5, outputPerMTokUsd: 10 },
+      pricing: {
+        inputPerMTokUsd: 2.5,
+        outputPerMTokUsd: 10,
+        cacheReadPerMTokUsd: null,
+        cacheWritePerMTokUsd: null,
+      },
     },
   ],
 };
@@ -58,6 +63,59 @@ describe("loadCatalog", () => {
     expect(entry?.pricing.inputPerMTokUsd).toBe(1.0); // overridden
     expect(entry?.pricing.outputPerMTokUsd).toBe(10); // untouched
     expect(entry?.source).toBe("override");
+  });
+
+  it("a partial pricing override PRESERVES generated cache prices it does not mention", () => {
+    // Regression: overriding only inputPerMTokUsd must NOT wipe a generated
+    // cacheReadPerMTokUsd. (The override entry schema must keep omitted fields
+    // absent, not materialize them to null and clobber the merge.)
+    const withCache: GeneratedCatalog = {
+      ...generated,
+      models: [
+        {
+          ...generated.models[0]!,
+          pricing: {
+            inputPerMTokUsd: 2.5,
+            outputPerMTokUsd: 10,
+            cacheReadPerMTokUsd: 0.25,
+            cacheWritePerMTokUsd: 3.0,
+          },
+        },
+      ],
+    };
+    const cat = loadCatalog({
+      generated: withCache,
+      capabilitiesOverride: {},
+      pricingOverride: { "openai/gpt-4o": { inputPerMTokUsd: 1.0 } },
+    });
+    const entry = cat.get("openai/gpt-4o");
+    expect(entry?.pricing.inputPerMTokUsd).toBe(1.0); // overridden
+    expect(entry?.pricing.cacheReadPerMTokUsd).toBe(0.25); // preserved, not wiped
+    expect(entry?.pricing.cacheWritePerMTokUsd).toBe(3.0); // preserved, not wiped
+  });
+
+  it("an explicit null in a pricing override CLEARS that field", () => {
+    const withCache: GeneratedCatalog = {
+      ...generated,
+      models: [
+        {
+          ...generated.models[0]!,
+          pricing: {
+            inputPerMTokUsd: 2.5,
+            outputPerMTokUsd: 10,
+            cacheReadPerMTokUsd: 0.25,
+            cacheWritePerMTokUsd: 3.0,
+          },
+        },
+      ],
+    };
+    const cat = loadCatalog({
+      generated: withCache,
+      capabilitiesOverride: {},
+      pricingOverride: { "openai/gpt-4o": { cacheReadPerMTokUsd: null } },
+    });
+    expect(cat.get("openai/gpt-4o")?.pricing.cacheReadPerMTokUsd).toBeNull(); // explicitly cleared
+    expect(cat.get("openai/gpt-4o")?.pricing.cacheWritePerMTokUsd).toBe(3.0); // untouched
   });
 
   it("fail-closed on illegal override types (ConfigError, no value echo)", () => {

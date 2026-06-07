@@ -1,6 +1,11 @@
-import type { RawMessage } from "@helm/shared";
+import type { Observation, RawMessage } from "@helm/shared";
+import type { ResolvedCompactionPricing } from "../catalog/cost.js";
 import type { MemoryStore } from "../store/ports.js";
-import { chooseObserverCompaction, type ObserverCompactionPolicy } from "./compaction-policy.js";
+import {
+  AUTO_PRIORS,
+  type AutoCompactionInputs,
+  chooseAutoCompaction,
+} from "./compaction-policy.js";
 
 // Background Observer (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
 // request-path job: the request path only persists raw messages and enqueues an
@@ -12,11 +17,12 @@ import { chooseObserverCompaction, type ObserverCompactionPolicy } from "./compa
 // are all dependency-injected; this module imports no web framework and never
 // touches routing/lane state (memory is a MIDDLEWARE).
 
-// The legacy Observer policy preserves recent raw messages verbatim; the default
-// value lives in compaction-policy.ts so the pure selector and runtime agree.
-
 // A background job: a pointer to the thread whose older history should be
-// compressed. Enqueued by the request path, consumed asynchronously by a worker.
+// compressed. Enqueued by the request path (writeback) AND by the idle-flush
+// sweep — both produce the SAME plain {accountId, threadId} scope, so the
+// open-job dedupe collapses them to ONE lock per thread (no overlapping
+// observers in a multi-worker deployment). Whether to fold the whole history
+// (the idle backstop) is decided at RUN TIME from message ages, not a job flag.
 export interface ObserverJob {
   jobId: string;
   accountId: string;
@@ -42,8 +48,11 @@ export interface ObserverDeps {
   // Observer tokens are a SEPARATE cost bucket (docs/08 "cost accounting"): they must
   // NOT be hidden inside actor/provider execution cost.
   costSink: (bucket: "observer", tokens: number) => void;
-  // Optional economy-aware compaction gate. Absent => legacy fixed RECENT_KEEP=2.
-  compaction?: ObserverCompactionPolicy;
+  // Resolve the thread's last served model alias → catalog prices + context
+  // window for the auto compaction policy. Injected by the composition root
+  // (closure over the runtime catalog); null/unknown alias resolves all-null
+  // and the policy falls back to its deterministic heuristics (fail-open).
+  resolvePricing: (modelAlias: string | null) => ResolvedCompactionPricing;
   // Injected clock — observed_at + the summary's time anchor come from here.
   now: () => Date;
   log: (line: string, meta?: object) => void;
@@ -106,6 +115,51 @@ function estimateObserverTokens(compressed: RawMessage[], observationText: strin
   return input + output;
 }
 
+// MEASURED retention: output/source token ratio across this thread's prior
+// observations — what the summarizer ACTUALLY kept, not a declared constant
+// (the truncation stub keeps ~5% of a long slice; a config saying 0.8 lies).
+// null when the thread has no usable prior pass (first compaction → the policy
+// applies its prior). Pure; reuses the same range mapping as coverage.
+export function measuredRetention(
+  messages: RawMessage[],
+  observations: Array<Pick<Observation, "sourceMessageRange" | "observationText">>,
+): number | null {
+  const byId = new Map(messages.map((m, i) => [m.id, i]));
+  let sourceTokens = 0;
+  let outputTokens = 0;
+  for (const obs of observations) {
+    const [firstId, lastId] = obs.sourceMessageRange;
+    const first = byId.get(firstId);
+    const last = byId.get(lastId);
+    if (first === undefined || last === undefined) continue;
+    const start = Math.min(first, last);
+    const end = Math.max(first, last);
+    for (let i = start; i <= end; i += 1) {
+      const msg = messages[i];
+      if (msg !== undefined) sourceTokens += Math.max(0, msg.tokenEstimate);
+    }
+    outputTokens += Math.ceil(obs.observationText.length / 4);
+  }
+  if (sourceTokens <= 0) return null;
+  return outputTokens / sourceTokens;
+}
+
+// Per-field provenance for the decision log: which price came from the catalog,
+// which was derived by heuristic, which fell back entirely. Lets an operator
+// reproduce the ledger from the log line alone.
+function priceProvenance(pricing: ResolvedCompactionPricing): Record<string, string> {
+  const source = (published: number | null, derivable: boolean): string =>
+    published !== null ? "catalog" : derivable ? "derived" : "unpriced";
+  const priced = pricing.inputPerMtok !== null;
+  return {
+    input: priced ? "catalog" : "unpriced",
+    output: source(pricing.outputPerMtok, priced),
+    cache_read: source(pricing.cacheReadPerMtok, priced),
+    cache_write: source(pricing.cacheWritePerMtok, priced),
+    context_window: pricing.maxContextTokens !== null ? "catalog" : "fallback",
+  };
+}
+
 // Take a thread's older raw messages, compress them into ONE observation with a
 // precise, auditable source_message_range and a time anchor, and book the cost
 // into the observer bucket. The most recent RECENT_KEEP messages are preserved
@@ -130,13 +184,61 @@ export async function runObserverJob(
       existing.map((o) => o.sourceMessageRange),
     );
 
+    // Auto-compaction inputs — all DERIVED, none configured (the whole point):
+    //   model    → thread's last served alias, stamped by observeOutbound; the
+    //              optional store method / missing stamp degrade to null (the
+    //              policy's heuristics take over — fail-open, first-job race
+    //              with the stamp is harmless).
+    //   prices   → catalog lookup via the injected resolver.
+    //   priorCompactionCount → the thread's actual observation count (the v1
+    //              static 0 never engaged the distortion brake).
+    //   retention → measured output/source ratio of prior observations.
+    const threadMeta = await deps.memoryStore
+      .getThreadMeta?.({ accountId: job.accountId, threadId: job.threadId })
+      .catch(() => null);
+    const modelAlias = threadMeta?.lastServedModel ?? null;
+    const pricing = deps.resolvePricing(modelAlias);
+    // Idle is derived HERE, at run time, from the newest message's age — NOT from
+    // a job flag. This is race-free (a thread that got activity between enqueue
+    // and run is correctly seen as active) and means writeback + idle-sweep jobs
+    // can share ONE plain-scope open-job lock per thread (no overlap hazard).
+    const nowMs = deps.now().getTime();
+    const newestMessageMs = all.reduce((max, m) => Math.max(max, m.createdAt.getTime()), 0);
+    const idle = all.length > 0 && nowMs - newestMessageMs >= AUTO_PRIORS.idleFlushS * 1000;
+    // Context-pressure footprint = the ACTIVE prompt size, not the full raw audit
+    // history. Inject suppresses covered raw messages (they are represented by
+    // their observation), so a thread compacted once would otherwise keep
+    // tokenSum(all) high forever and force-compact every later small segment. Use
+    // the UNCOVERED raw tail + the VISIBLE observation texts (active + unexpired —
+    // the exact set inject injects); archived/pruned observations stay out of the
+    // footprint just as they stay out of the prompt. Reflections are
+    // project/resource-level and bounded; excluded to keep this thread-local.
+    const uncoveredTokens = all.reduce(
+      (sum, m) => (covered.has(m.id) ? sum : sum + Math.max(0, m.tokenEstimate)),
+      0,
+    );
+    const observationTokens = existing.reduce(
+      (sum, o) =>
+        (o.status ?? "active") === "active" && (o.expiredAt ?? null) === null
+          ? sum + Math.ceil(o.observationText.length / 4)
+          : sum,
+      0,
+    );
+    const inputs: AutoCompactionInputs = {
+      idle,
+      pricing,
+      priorCompactionCount: existing.length,
+      measuredRetention: measuredRetention(all, existing),
+      threadTotalTokens: uncoveredTokens + observationTokens,
+    };
+
     // Covered rows can sit in the middle of the raw history. Never summarize a
     // sparse set and then write it as one continuous source range; choose the
     // oldest compactable contiguous uncovered segment instead.
     const segments = uncoveredContiguousSegments(all, covered);
     const decisions = segments.map((segment) => ({
       segment,
-      decision: chooseObserverCompaction(segment, deps.compaction),
+      decision: chooseAutoCompaction(segment, inputs),
     }));
     const selected = decisions.find(({ decision }) => decision.shouldCompact);
     if (selected === undefined) {
@@ -144,9 +246,11 @@ export async function runObserverJob(
       const lastDecision = decisions.at(-1)?.decision;
       deps.log("memory.observer.noop_compaction_skipped", {
         thread_id: job.threadId,
+        idle,
         reason: lastDecision?.reason ?? "nothing_to_compact",
         net_benefit_usd: lastDecision?.netBenefitUsd ?? 0,
         candidate_count: segments.reduce((sum, segment) => sum + segment.length, 0),
+        resolved_model: pricing.modelKey,
       });
       return { observationId: null, sourceMessageRange: null };
     }
@@ -215,6 +319,12 @@ export async function runObserverJob(
       compaction_reason: decision.reason,
       compaction_net_benefit_usd: decision.netBenefitUsd,
       kept_recent: decision.keepRecent,
+      idle,
+      // Provenance: the auto-resolved economics, reproducible from this line.
+      resolved_model: pricing.modelKey,
+      price_source: priceProvenance(pricing),
+      measured_retention: inputs.measuredRetention,
+      prior_compaction_count: inputs.priorCompactionCount,
     });
     return { observationId, sourceMessageRange };
   } catch (err) {

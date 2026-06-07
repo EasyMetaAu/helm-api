@@ -1,36 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ForgettingSchema, MemoryConfigSchema, ObserverSchema } from "./memory-schema.js";
+import { ForgettingSchema, MemoryConfigSchema } from "./memory-schema.js";
 
 // P1 (docs/12 "Config surface"): the forgetting config is config-as-code, Zod-
 // validated, fail-closed on bad input (CLAUDE.md principle 2). snake_case keys +
 // .strict() are load-bearing: with camelCase an operator's `half_life_s` would be
 // silently stripped and the default would win; with snake_case an unknown/
 // misspelled key THROWS at startup, and a real value actually takes effect.
-
-describe("ObserverSchema", () => {
-  it("defaults to legacy fixed compaction with recent_keep=2", () => {
-    const observer = ObserverSchema.parse({});
-    expect(observer.compaction.mode).toBe("fixed");
-    if (observer.compaction.mode !== "fixed") throw new Error("expected fixed mode");
-    expect(observer.compaction.recent_keep).toBe(2);
-  });
-
-  it("accepts economy compaction and fills DP defaults", () => {
-    const observer = ObserverSchema.parse({ compaction: { mode: "economy" } });
-    expect(observer.compaction.mode).toBe("economy");
-    if (observer.compaction.mode !== "economy") throw new Error("expected economy mode");
-    expect(observer.compaction.min_recent_messages).toBe(2);
-    expect(observer.compaction.price_cache_per_mtok).toBe(0.3);
-    expect(observer.compaction.force_at_context_ratio).toBe(0.9);
-  });
-
-  it("fails closed on misspelled observer compaction keys", () => {
-    expect(() => ObserverSchema.parse({ compaction: { mode: "fixed", recentKeep: 2 } })).toThrow();
-    expect(() =>
-      ObserverSchema.parse({ compaction: { mode: "economy", min_recent: 2 } }),
-    ).toThrow();
-  });
-});
 
 describe("ForgettingSchema", () => {
   it("a valid config infers with all spec defaults (enabled:false)", () => {
@@ -109,19 +84,26 @@ describe("ForgettingSchema", () => {
 describe("MemoryConfigSchema", () => {
   it("absent block → all defaults with forgetting.enabled:false", () => {
     const m = MemoryConfigSchema.parse({});
-    expect(m.observer.compaction.mode).toBe("fixed");
     expect(m.forgetting.enabled).toBe(false);
     expect(m.forgetting.score.half_life_s).toBe(86400);
   });
 
   it("nests forgetting under memory and fails closed on an unknown memory key", () => {
-    const m = MemoryConfigSchema.parse({
-      observer: { compaction: { mode: "economy" } },
-      forgetting: { enabled: true },
-    });
-    expect(m.observer.compaction.mode).toBe("economy");
+    const m = MemoryConfigSchema.parse({ forgetting: { enabled: true } });
     expect(m.forgetting.enabled).toBe(true);
-    expect(() => MemoryConfigSchema.parse({ observre: {} })).toThrow();
     expect(() => MemoryConfigSchema.parse({ forgettign: {} })).toThrow();
+  });
+
+  // Compaction is no longer configurable — it is internal auto-adaptive
+  // behaviour. A leftover fixed/economy-era `observer:` block must REFUSE
+  // startup (fail-closed) so the operator notices the knobs are gone instead
+  // of carrying dead config that silently does nothing (no lying knobs).
+  it("a leftover `observer:` block from the deleted fixed/economy era refuses startup", () => {
+    expect(() =>
+      MemoryConfigSchema.parse({ observer: { compaction: { mode: "fixed", recent_keep: 2 } } }),
+    ).toThrow();
+    expect(() =>
+      MemoryConfigSchema.parse({ observer: { compaction: { mode: "economy" } } }),
+    ).toThrow();
   });
 });
