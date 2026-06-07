@@ -2,8 +2,8 @@ import type { Observation, RawMessage } from "@helm/shared";
 import type { ResolvedCompactionPricing } from "../catalog/cost.js";
 import type { MemoryStore } from "../store/ports.js";
 import {
+  AUTO_PRIORS,
   type AutoCompactionInputs,
-  type CompactionTrigger,
   chooseAutoCompaction,
 } from "./compaction-policy.js";
 
@@ -18,15 +18,15 @@ import {
 // touches routing/lane state (memory is a MIDDLEWARE).
 
 // A background job: a pointer to the thread whose older history should be
-// compressed. Enqueued by the request path (writeback) or the idle-flush sweep
-// (trigger: "idle"), consumed asynchronously by a worker.
+// compressed. Enqueued by the request path (writeback) AND by the idle-flush
+// sweep — both produce the SAME plain {accountId, threadId} scope, so the
+// open-job dedupe collapses them to ONE lock per thread (no overlapping
+// observers in a multi-worker deployment). Whether to fold the whole history
+// (the idle backstop) is decided at RUN TIME from message ages, not a job flag.
 export interface ObserverJob {
   jobId: string;
   accountId: string;
   threadId: string;
-  // Absent = writeback (the request-path enqueue). "idle" = the worker sweep
-  // flushing a quiet thread: compaction folds the WHOLE uncovered history.
-  trigger?: CompactionTrigger;
 }
 
 export interface ObserverDeps {
@@ -198,24 +198,34 @@ export async function runObserverJob(
       .catch(() => null);
     const modelAlias = threadMeta?.lastServedModel ?? null;
     const pricing = deps.resolvePricing(modelAlias);
-    const trigger = job.trigger ?? "writeback";
+    // Idle is derived HERE, at run time, from the newest message's age — NOT from
+    // a job flag. This is race-free (a thread that got activity between enqueue
+    // and run is correctly seen as active) and means writeback + idle-sweep jobs
+    // can share ONE plain-scope open-job lock per thread (no overlap hazard).
+    const nowMs = deps.now().getTime();
+    const newestMessageMs = all.reduce((max, m) => Math.max(max, m.createdAt.getTime()), 0);
+    const idle = all.length > 0 && nowMs - newestMessageMs >= AUTO_PRIORS.idleFlushS * 1000;
     // Context-pressure footprint = the ACTIVE prompt size, not the full raw audit
     // history. Inject suppresses covered raw messages (they are represented by
     // their observation), so a thread compacted once would otherwise keep
-    // tokenSum(all) high forever and force-compact every later small segment. The
-    // real injected footprint is the UNCOVERED raw tail + the observation texts
-    // that stand in for the covered turns (reflections are project/resource-level
-    // and bounded; excluded here to keep this a pure thread-local estimate).
+    // tokenSum(all) high forever and force-compact every later small segment. Use
+    // the UNCOVERED raw tail + the VISIBLE observation texts (active + unexpired —
+    // the exact set inject injects); archived/pruned observations stay out of the
+    // footprint just as they stay out of the prompt. Reflections are
+    // project/resource-level and bounded; excluded to keep this thread-local.
     const uncoveredTokens = all.reduce(
       (sum, m) => (covered.has(m.id) ? sum : sum + Math.max(0, m.tokenEstimate)),
       0,
     );
     const observationTokens = existing.reduce(
-      (sum, o) => sum + Math.ceil(o.observationText.length / 4),
+      (sum, o) =>
+        (o.status ?? "active") === "active" && (o.expiredAt ?? null) === null
+          ? sum + Math.ceil(o.observationText.length / 4)
+          : sum,
       0,
     );
     const inputs: AutoCompactionInputs = {
-      trigger,
+      idle,
       pricing,
       priorCompactionCount: existing.length,
       measuredRetention: measuredRetention(all, existing),
@@ -236,7 +246,7 @@ export async function runObserverJob(
       const lastDecision = decisions.at(-1)?.decision;
       deps.log("memory.observer.noop_compaction_skipped", {
         thread_id: job.threadId,
-        trigger,
+        idle,
         reason: lastDecision?.reason ?? "nothing_to_compact",
         net_benefit_usd: lastDecision?.netBenefitUsd ?? 0,
         candidate_count: segments.reduce((sum, segment) => sum + segment.length, 0),
@@ -309,7 +319,7 @@ export async function runObserverJob(
       compaction_reason: decision.reason,
       compaction_net_benefit_usd: decision.netBenefitUsd,
       kept_recent: decision.keepRecent,
-      trigger,
+      idle,
       // Provenance: the auto-resolved economics, reproducible from this line.
       resolved_model: pricing.modelKey,
       price_source: priceProvenance(pricing),

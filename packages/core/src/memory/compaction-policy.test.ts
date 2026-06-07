@@ -39,7 +39,7 @@ const CLAUDE_PRICED: ResolvedCompactionPricing = {
 
 function inputs(overrides: Partial<AutoCompactionInputs> = {}): AutoCompactionInputs {
   return {
-    trigger: "writeback",
+    idle: false,
     pricing: UNPRICED,
     priorCompactionCount: 0,
     measuredRetention: null,
@@ -97,7 +97,7 @@ describe("chooseAutoCompaction — empty / tiny segments", () => {
 describe("chooseAutoCompaction — idle flush", () => {
   it("compacts the WHOLE segment (keepRecent=0) so the sweep terminates", () => {
     const segment = messages([100, 100, 100]); // tiny — size threshold irrelevant
-    const decision = chooseAutoCompaction(segment, inputs({ trigger: "idle" }));
+    const decision = chooseAutoCompaction(segment, inputs({ idle: true }));
     expect(decision.shouldCompact).toBe(true);
     expect(decision.reason).toBe("idle_flush");
     expect(decision.keepRecent).toBe(0);
@@ -107,13 +107,13 @@ describe("chooseAutoCompaction — idle flush", () => {
   });
 
   it("works for unpriced models (memory formation is not an economic decision)", () => {
-    const decision = chooseAutoCompaction(messages([50]), inputs({ trigger: "idle" }));
+    const decision = chooseAutoCompaction(messages([50]), inputs({ idle: true }));
     expect(decision.shouldCompact).toBe(true);
     expect(decision.reason).toBe("idle_flush");
   });
 
   it("an empty idle segment is still a noop", () => {
-    const decision = chooseAutoCompaction([], inputs({ trigger: "idle" }));
+    const decision = chooseAutoCompaction([], inputs({ idle: true }));
     expect(decision.shouldCompact).toBe(false);
     expect(decision.reason).toBe("nothing_to_compact");
   });

@@ -9,7 +9,7 @@ import { type ReflectionScope, ReflectionScopeSchema } from "./schema.js";
 //     delimiter — JSON never is).
 // Kept in @helm/shared so BOTH the sqlite and postgres adapters encode identically.
 
-const ORDER = ["accountId", "projectId", "resourceId", "threadId", "trigger"] as const;
+const ORDER = ["accountId", "projectId", "resourceId", "threadId"] as const;
 
 export function encodeScopeId(scope: ReflectionScope): string {
   const canonical: Record<string, string> = {};

@@ -370,7 +370,7 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
     }
 
     await runObserverJob(
-      { jobId: "worker-a", accountId: "acct-a", threadId: "acct-a:t1", trigger: "idle" },
+      { jobId: "worker-a", accountId: "acct-a", threadId: "acct-a:t1" },
       {
         memoryStore: store,
         summarize: async ({ messages }) => ({
@@ -385,12 +385,12 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
           cacheWritePerMtok: null,
           maxContextTokens: null,
         }),
-        now: () => new Date("2026-01-02T00:00:00.000Z"),
+        now: () => new Date("2099-01-02T00:00:00.000Z"),
         log: vi.fn(),
       },
     );
     await runObserverJob(
-      { jobId: "worker-b", accountId: "acct-b", threadId: "acct-b:t1", trigger: "idle" },
+      { jobId: "worker-b", accountId: "acct-b", threadId: "acct-b:t1" },
       {
         memoryStore: store,
         summarize: async ({ messages }) => ({
@@ -405,7 +405,7 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
           cacheWritePerMtok: null,
           maxContextTokens: null,
         }),
-        now: () => new Date("2026-01-02T00:00:00.000Z"),
+        now: () => new Date("2099-01-02T00:00:00.000Z"),
         log: vi.fn(),
       },
     );

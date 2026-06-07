@@ -51,10 +51,14 @@ export async function maybeEnqueueIdleObserverJobs(deps: IdleFlushDeps): Promise
     for (const { accountId, threadId, projectId, resourceId } of candidates) {
       // Per-thread guard: one thread's enqueue failure must not skip the rest.
       try {
-        // Carry the thread's project/resource scope so the observer can promote
-        // the resulting observation to the project/resource reflection (the only
-        // slots inject hydrates). Without it a short idle thread's observation
-        // would have no readable target and the reflector would never run.
+        // A PLAIN observer scope (no trigger): identical to a writeback enqueue,
+        // so the open-job dedupe collapses both to ONE lock per thread — no
+        // overlapping writeback+idle observers in a multi-worker deployment. The
+        // observer decides whether to fold the whole history from message ages at
+        // run time. Carry project/resource so the resulting observation can
+        // promote to the project/resource reflection (the only slots inject
+        // hydrates); without it a short idle thread's observation would have no
+        // readable target and the reflector would never run.
         await deps.memoryStore.enqueueJob({
           type: "observer",
           scope: {
@@ -62,7 +66,6 @@ export async function maybeEnqueueIdleObserverJobs(deps: IdleFlushDeps): Promise
             threadId,
             ...(projectId !== undefined ? { projectId } : {}),
             ...(resourceId !== undefined ? { resourceId } : {}),
-            trigger: "idle",
           },
         });
       } catch (err) {

@@ -81,10 +81,13 @@ export const AUTO_PRIORS = {
   fallbackMaxContextTokens: 200_000,
 } as const;
 
-export type CompactionTrigger = "writeback" | "idle";
-
 export interface AutoCompactionInputs {
-  trigger: CompactionTrigger;
+  // The thread went quiet (newest message older than the idle threshold) — the
+  // observer derives this at RUN TIME from message ages, NOT from a job flag, so
+  // it is race-free: a thread that got new activity between enqueue and run is
+  // correctly seen as active. When idle, fold the WHOLE uncovered history (the
+  // memory-formation backstop for short threads); raw rows survive regardless.
+  idle: boolean;
   // Catalog lookup for the thread's last served model (all-null when unknown).
   pricing: ResolvedCompactionPricing;
   // = the thread's existing observation count (derived, not configured).
@@ -229,7 +232,7 @@ export function chooseAutoCompaction(
   // the sweep's "has uncovered messages" candidate query stops matching. This is
   // the memory-formation backstop for short threads that never reach the size
   // trigger; raw rows stay in the store regardless (compaction never deletes).
-  if (inputs.trigger === "idle") {
+  if (inputs.idle) {
     const compressedTokens = tokenSum(segment);
     return {
       shouldCompact: true,

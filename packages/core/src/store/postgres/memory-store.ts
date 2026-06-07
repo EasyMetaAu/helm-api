@@ -798,14 +798,21 @@ export class PgMemoryStore implements MemoryStore {
          AND (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
                <= ${input.idleBeforeMs}
          AND EXISTS (
+           -- A message strictly AFTER every coverage frontier in the SAME
+           -- (created_at, id) order listMessages uses — the full tuple, not just
+           -- created_at, so a same-millisecond tail tying the frontier is not
+           -- permanently missed. The frontier message itself ties via m2.id >=
+           -- m.id and is excluded; a thread with no observations qualifies fully.
            SELECT 1 FROM memory_messages m
             WHERE m.thread_id = t.id
-              AND m.created_at > COALESCE(
-                (SELECT MAX(m2.created_at)
-                   FROM memory_observations o
-                   JOIN memory_messages m2
-                     ON m2.id = o.source_message_range ->> 1
-                  WHERE o.thread_id = t.id), 0)
+              AND NOT EXISTS (
+                SELECT 1 FROM memory_observations o
+                JOIN memory_messages m2
+                  ON m2.id = o.source_message_range ->> 1
+                 WHERE o.thread_id = t.id
+                   AND (m2.created_at > m.created_at
+                     OR (m2.created_at = m.created_at AND m2.id >= m.id))
+              )
          )
        ORDER BY last_activity ASC
        LIMIT ${input.limit}

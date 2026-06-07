@@ -50,8 +50,8 @@ describe("maybeEnqueueIdleObserverJobs", () => {
       limit: 100,
     });
     expect(enqueued).toEqual([
-      { type: "observer", scope: { accountId: "acct-a", threadId: "t1", trigger: "idle" } },
-      { type: "observer", scope: { accountId: "acct-b", threadId: "t2", trigger: "idle" } },
+      { type: "observer", scope: { accountId: "acct-a", threadId: "t1" } },
+      { type: "observer", scope: { accountId: "acct-b", threadId: "t2" } },
     ]);
   });
 
@@ -69,12 +69,11 @@ describe("maybeEnqueueIdleObserverJobs", () => {
           threadId: "t1",
           projectId: "proj-1",
           resourceId: "res-1",
-          trigger: "idle",
         },
       },
       {
         type: "observer",
-        scope: { accountId: "acct-a", threadId: "t2", projectId: "proj-1", trigger: "idle" },
+        scope: { accountId: "acct-a", threadId: "t2", projectId: "proj-1" },
       },
     ]);
   });
@@ -116,7 +115,7 @@ describe("maybeEnqueueIdleObserverJobs", () => {
     });
     await maybeEnqueueIdleObserverJobs(makeDeps(store));
     expect(enqueued).toEqual([
-      { type: "observer", scope: { accountId: "acct-b", threadId: "t2", trigger: "idle" } },
+      { type: "observer", scope: { accountId: "acct-b", threadId: "t2" } },
     ]);
   });
 

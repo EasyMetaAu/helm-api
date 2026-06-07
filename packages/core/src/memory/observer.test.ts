@@ -47,15 +47,16 @@ function makeFakeStore(messages: RawMessage[], existingRanges: Array<[string, st
 function makeMessages(count: number, tokenEstimate = 600): RawMessage[] {
   // 600-token default: 8 messages cross the auto policy's 2048-token
   // memory-formation trigger while the keep floor (max(4, 25%)) still leaves a
-  // compactable prefix.
+  // compactable prefix. Timestamps sit just BEFORE NOW (1s apart, ascending) so
+  // the observer's run-time idle check sees the thread as ACTIVE by default — the
+  // idle path is exercised explicitly by overriding deps.now far into the future.
   return Array.from({ length: count }, (_v, i) => ({
     id: `m${i + 1}`,
     threadId: "thread-1",
     role: "user" as const,
     content: `message ${i + 1}`,
     tokenEstimate,
-    // Spread across days so the time anchor is meaningful.
-    createdAt: new Date(`2026-05-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`),
+    createdAt: new Date(NOW.getTime() - (count - i) * 1000),
   }));
 }
 
@@ -256,14 +257,15 @@ describe("runObserverJob", () => {
     expect(deps.summarize).not.toHaveBeenCalled();
   });
 
-  it("an idle-flush job compacts the WHOLE uncovered history (sweep terminates)", async () => {
-    // 3 tiny messages — far below the size trigger, but the thread went quiet:
-    // the idle flush folds everything so short threads still form memories.
+  it("folds the WHOLE uncovered history when the thread is idle (run-time age check)", async () => {
+    // 3 tiny messages — far below the size trigger, but a now() ≫ 1h past the
+    // newest message makes the observer derive idle=true and full-flush, so short
+    // threads still form memories. No job flag: idleness is computed at run time.
     const messages = makeMessages(3, 10);
     const { store, observations, jobUpdates } = makeFakeStore(messages);
-    const deps = makeDeps(store);
+    const deps = makeDeps(store, { now: () => new Date(NOW.getTime() + 2 * 3_600_000) });
 
-    const out = await runObserverJob({ ...JOB, trigger: "idle" }, deps);
+    const out = await runObserverJob(JOB, deps);
 
     expect(observations).toHaveLength(1);
     expect(out.sourceMessageRange).toEqual(["m1", "m3"]);

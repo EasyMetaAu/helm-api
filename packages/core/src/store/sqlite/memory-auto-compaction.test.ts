@@ -152,6 +152,42 @@ describe("SqliteMemoryStore — idle-flush candidates", () => {
     ).toEqual([{ accountId: "acct-a", threadId: "t1" }]);
   });
 
+  it("detects an uncovered tail that SHARES the frontier's millisecond (created_at,id tiebreak)", async () => {
+    // A constant clock: two messages land on the SAME created_at. A created_at-only
+    // frontier test would permanently miss the second once the first is covered;
+    // the (created_at, id) tuple keeps the tail visible.
+    const db = createSqliteDb(":memory:");
+    let n = 0;
+    const store = new SqliteMemoryStore(
+      db,
+      () => `id-${String(++n).padStart(3, "0")}`,
+      () => new Date(5_000_000), // frozen — every row ties on created_at
+    );
+    await store.ensureThread({ id: "t1", ownerId: "acct-a" });
+    const m1 = await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "covered",
+      tokenEstimate: 1,
+    });
+    await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "same-ms uncovered tail",
+      tokenEstimate: 1,
+    });
+    // Observation covers ONLY m1; m2 shares m1's created_at but has a greater id.
+    await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: [m1, m1],
+      observationText: "prefix",
+      observedAt: new Date(5_000_000),
+    });
+    expect(await store.listIdleFlushCandidates({ idleBeforeMs: 6_000_000, limit: 10 })).toEqual([
+      { accountId: "acct-a", threadId: "t1" },
+    ]);
+  });
+
   it("carries the thread's project/resource scope on the candidate (for promotion)", async () => {
     const { store, clock } = newStore();
     await store.ensureThread({

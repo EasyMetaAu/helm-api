@@ -171,7 +171,6 @@ export {
   AUTO_PRIORS,
   type AutoCompactionInputs,
   type CompactionDecision,
-  type CompactionTrigger,
   chooseAutoCompaction,
   type EffectiveCompactionPrices,
   effectiveCompactionPrices,

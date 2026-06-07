@@ -911,14 +911,24 @@ export class SqliteMemoryStore implements MemoryStore {
             AND last_activity IS NOT NULL
             AND last_activity <= ?
             AND EXISTS (
+              -- A message strictly AFTER every coverage frontier in the SAME
+              -- (created_at, id) order listMessages uses. Comparing the full
+              -- tuple — not just created_at — is load-bearing: messages appended
+              -- in one request can share a millisecond, and a created_at-only
+              -- test would permanently miss an uncovered tail that ties the
+              -- frontier's timestamp. A covered range-end message itself ties via
+              -- m2.id >= m.id and is correctly excluded; a thread with no
+              -- observations has no frontier so every message qualifies.
               SELECT 1 FROM memory_messages m
                WHERE m.thread_id = t.id
-                 AND m.created_at > COALESCE(
-                   (SELECT MAX(m2.created_at)
-                      FROM memory_observations o
-                      JOIN memory_messages m2
-                        ON m2.id = json_extract(o.source_message_range, '$[1]')
-                     WHERE o.thread_id = t.id), 0)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM memory_observations o
+                   JOIN memory_messages m2
+                     ON m2.id = json_extract(o.source_message_range, '$[1]')
+                    WHERE o.thread_id = t.id
+                      AND (m2.created_at > m.created_at
+                        OR (m2.created_at = m.created_at AND m2.id >= m.id))
+                 )
             )
           ORDER BY last_activity ASC
           LIMIT ?`,

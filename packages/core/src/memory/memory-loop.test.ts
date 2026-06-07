@@ -67,7 +67,7 @@ describe("memory background loop (observer → reflector → inject)", () => {
       content: "thanks",
       tokenEstimate: 1,
     });
-    await store.enqueueJob({ type: "observer", scope: { ...SCOPE, trigger: "idle" } });
+    await store.enqueueJob({ type: "observer", scope: SCOPE });
 
     const log = () => {};
     const costSink = () => {};
@@ -170,7 +170,7 @@ describe("memory background loop (observer → reflector → inject)", () => {
       await store.appendMessage({ threadId, role: "user", content: "thanks", tokenEstimate: 1 });
       await store.enqueueJob({
         type: "observer",
-        scope: { accountId: "acct-a", projectId: "proj-1", threadId, trigger: "idle" },
+        scope: { accountId: "acct-a", projectId: "proj-1", threadId },
       });
     };
     await seedThread("t1", "thread one fact");

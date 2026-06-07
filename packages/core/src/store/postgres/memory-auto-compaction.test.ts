@@ -108,4 +108,37 @@ describe("PgMemoryStore — idle-flush candidates", () => {
     expect(candidates).toEqual([{ accountId: "acct-a", threadId: "tA" }]);
     await db.$close();
   });
+
+  it("detects an uncovered tail sharing the frontier's millisecond (created_at,id tiebreak)", async () => {
+    const db = await createPgliteDb();
+    let n = 0;
+    const store = new PgMemoryStore(
+      db,
+      () => `pgms-${++n}`,
+      () => new Date(5_000_000), // frozen — both rows tie on created_at
+    );
+    await store.ensureThread({ id: "t1", ownerId: "acct-a" });
+    const m1 = await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "covered",
+      tokenEstimate: 1,
+    });
+    await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "same-ms uncovered tail",
+      tokenEstimate: 1,
+    });
+    await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: [m1, m1],
+      observationText: "prefix",
+      observedAt: new Date(5_000_000),
+    });
+    expect(await store.listIdleFlushCandidates({ idleBeforeMs: 6_000_000, limit: 10 })).toEqual([
+      { accountId: "acct-a", threadId: "t1" },
+    ]);
+    await db.$close();
+  });
 });
