@@ -12,6 +12,8 @@
 //   - `currentSecrets`: live access + refresh tokens, used by `scrub()` to strip
 //     any echoed credential from an upstream error body (principle 7).
 // Credentials are runtime-only: from env, never persisted/logged.
+import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
+
 export interface ProviderConfig {
   baseUrl: string; // e.g. https://openrouter.ai/api/v1
   apiKey?: string; // static credential; mutually exclusive with getAuthHeader
@@ -237,10 +239,20 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       const decoder = new TextDecoder();
       try {
         while (true) {
-          const { done, value } = await reader.read();
+          // Inter-chunk liveness: `withTimeout` already cleared once headers
+          // arrived, so without this a stream that wedges mid-flight hangs forever.
+          // Reuse `timeoutMs` as the max silence between chunks (a healthy stream
+          // keeps emitting; only a real stall trips it). Pre-first-chunk it is a
+          // normal fallback-eligible failure; after, it terminates the response.
+          const { done, value } = await readChunkWithIdle(reader, timeoutMs);
           if (done) break;
           if (value) yield decoder.decode(value, { stream: true });
         }
+      } catch (err) {
+        if (err instanceof StreamStalledError) {
+          throw new UpstreamError("timeout", err.message);
+        }
+        throw err;
       } finally {
         reader.releaseLock();
       }

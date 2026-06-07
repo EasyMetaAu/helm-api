@@ -19,6 +19,7 @@ import {
   type ProviderClient,
   UpstreamError,
 } from "./openai.js";
+import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface AnthropicClientConfig {
   baseUrl: string; // e.g. https://api.anthropic.com (NO /v1)
@@ -369,7 +370,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       };
       const res = await requestWithRetry(body, opts?.signal);
       if (!res.ok) throw await errorFromResponse(res);
-      yield* translateAnthropicSSE(res, model);
+      yield* translateAnthropicSSE(res, model, timeoutMs);
     },
   };
 }
@@ -387,7 +388,14 @@ function openaiChunk(model: string, delta: Record<string, unknown>, finish: stri
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
 
-export async function* translateAnthropicSSE(res: Response, model: string): AsyncGenerator<string> {
+export async function* translateAnthropicSSE(
+  res: Response,
+  model: string,
+  // Inter-chunk liveness deadline (ms); 0 disables. Threaded from the client's
+  // request timeout so a stream that wedges mid-flight is reclaimed rather than
+  // hanging forever (the connect/TTFB timeout was already cleared at headers).
+  idleMs = 0,
+): AsyncGenerator<string> {
   const body = res.body;
   if (!body) return;
   const reader = body.getReader();
@@ -398,7 +406,14 @@ export async function* translateAnthropicSSE(res: Response, model: string): Asyn
   let started = false;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let read: { done: boolean; value?: Uint8Array };
+      try {
+        read = await readChunkWithIdle(reader, idleMs);
+      } catch (err) {
+        if (err instanceof StreamStalledError) throw new UpstreamError("timeout", err.message);
+        throw err;
+      }
+      const { done, value } = read;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const events = buffer.split("\n\n");
@@ -457,6 +472,10 @@ export async function* translateAnthropicSSE(res: Response, model: string): Asyn
           }
         } else if (type === "message_stop") {
           yield "data: [DONE]\n\n";
+          // Terminal event: stop reading NOW. Otherwise the next read would block
+          // on the idle guard and could turn a completed response into a spurious
+          // timeout if the upstream delays closing the HTTP body after message_stop.
+          return;
         }
       }
     }

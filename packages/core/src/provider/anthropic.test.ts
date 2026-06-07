@@ -168,6 +168,69 @@ describe("translateAnthropicSSE", () => {
     expect(joined).toContain('"finish_reason":"stop"');
     expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
   });
+
+  it("returns at message_stop without waiting on the idle guard (terminal event stops the read)", async () => {
+    vi.useFakeTimers();
+    try {
+      const enc = new TextEncoder();
+      const events = [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"m"}}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ];
+      // Enqueue the terminal event then DELIBERATELY hold the body open (no close):
+      // the generator must return at message_stop, never issuing the idle-guarded read.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const e of events) controller.enqueue(enc.encode(e));
+        },
+      });
+      const res = new Response(stream, { status: 200 });
+      const chunks: string[] = [];
+      const run = (async () => {
+        for await (const c of translateAnthropicSSE(res, "m", 500)) chunks.push(c);
+      })();
+      // A regression (no early return) would pend on the next read; advancing past
+      // the deadline would then reject. With the fix, run already resolved.
+      await vi.advanceTimersByTimeAsync(500);
+      await run;
+      expect(chunks.join("").trimEnd().endsWith("data: [DONE]")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("throws UpstreamError(timeout) and cancels when the stream stalls past idleMs", async () => {
+    vi.useFakeTimers();
+    try {
+      let cancelled = false;
+      // Emit one event, then hang (no close) so the next read pends.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"m"}}\n\n',
+            ),
+          );
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const res = new Response(stream, { status: 200 });
+      const run = (async () => {
+        for await (const _ of translateAnthropicSSE(res, "m", 500)) {
+          // drain
+        }
+      })();
+      const assertion = expect(run).rejects.toMatchObject({ errorClass: "timeout" });
+      await vi.advanceTimersByTimeAsync(500);
+      await assertion;
+      expect(cancelled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 function jsonResponse(body: unknown, status = 200): Response {

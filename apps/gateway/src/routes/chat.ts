@@ -42,6 +42,7 @@ import {
   usageFromBody,
   usageFromSSE,
 } from "./payload-capture.js";
+import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/chat/completions — Phase 1 routing pipeline wiring. This file is
 // PURE HTTP adaptation (CLAUDE.md principle 1): parse the OpenAI request into an
@@ -591,9 +592,12 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           // A client disconnect / abort is NOT a provider fault: do not 5xx, do
           // not surface an error frame — the executor layer already recorded it.
           if (!isAbort(err, c.req.raw.signal)) {
+            // Preserve a mid-stream idle timeout (UpstreamError("timeout")) instead
+            // of flattening it to a generic upstream_error frame.
+            const timedOut = isUpstreamTimeout(err);
             const errBody = makeHelmError({
-              error_class: "upstream_error",
-              message: "upstream error",
+              error_class: timedOut ? "timeout" : "upstream_error",
+              message: timedOut ? "upstream timed out" : "upstream error",
               trace_id: traceId,
             });
             await sse.write(`data: ${JSON.stringify({ error: errBody })}\n\n`);

@@ -138,4 +138,52 @@ describe("classify adapter — admin classifier hot-apply", () => {
     expect(calls.n).toBe(2); // eval re-ran -> cache was invalidated
     expect(third.eval_cache_hit).toBe(false);
   });
+
+  it("merges eval.extra_body onto the eval wire request but never lets it override locked fields", async () => {
+    const cfg = baseClassifier();
+    cfg.eval.enabled = true;
+    cfg.rules.confidence_threshold = 1; // always cascade to eval
+    // Hostile extra_body: tries to add a real knob AND clobber the locked fields.
+    cfg.eval.extra_body = {
+      thinking: { type: "disabled" },
+      model: "HACKED",
+      temperature: 0.9,
+      stream: true,
+    };
+
+    let captured: Record<string, unknown> | null = null;
+    const provider: ProviderForEval = {
+      chatCompletion: async (body) => {
+        captured = body;
+        return {
+          choices: [
+            {
+              message: {
+                content: '{"complexity":"complex","task_type":"coding","confidence":0.9}',
+              },
+            },
+          ],
+        };
+      },
+    };
+
+    const classify = buildClassifyAdapter({
+      getClassifierConfig: () => cfg,
+      lanes: LANES,
+      provider,
+      now: () => Date.now(),
+      log: () => {},
+    });
+
+    await classify(req("summarize the meeting notes please"));
+
+    expect(captured).not.toBeNull();
+    const body = captured as unknown as Record<string, unknown>;
+    // The passthrough knob made it onto the wire…
+    expect(body.thinking).toEqual({ type: "disabled" });
+    // …but the locked fields win over the hostile overrides.
+    expect(body.model).toBe("eval-model");
+    expect(body.temperature).toBe(0);
+    expect(body.stream).toBe(false);
+  });
 });

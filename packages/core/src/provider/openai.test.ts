@@ -55,6 +55,45 @@ describe("createOpenAIClient (Phase 0 passthrough)", () => {
     expect(received.join("")).toBe(chunks.join(""));
   });
 
+  it("aborts a stream that goes silent past the idle deadline with UpstreamError(timeout)", async () => {
+    vi.useFakeTimers();
+    try {
+      let cancelled = false;
+      // Emit one chunk, then hang: never enqueue more and never close, so the
+      // NEXT reader.read() pends forever — the inter-chunk idle guard must fire.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: {"a":1}\n\n'));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const fetch = vi.fn().mockResolvedValue(new Response(stream, { status: 200 }));
+      const client = createOpenAIClient({ config: { ...CONFIG, timeoutMs: 500 }, fetch });
+
+      const received: string[] = [];
+      const run = (async () => {
+        for await (const c of client.chatCompletionStream({ model: "m", stream: true })) {
+          received.push(c);
+        }
+      })();
+      const assertion = expect(run).rejects.toMatchObject({
+        errorClass: "timeout",
+        httpStatus: 504,
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      await assertion;
+
+      // The first chunk was delivered before the stall; then the connection was
+      // cancelled to reclaim it.
+      expect(received.join("")).toBe('data: {"a":1}\n\n');
+      expect(cancelled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("maps an upstream 5xx to UpstreamError(upstream_error, 502)", async () => {
     // fresh Response per call (a Response body can only be read once)
     const fetch = vi

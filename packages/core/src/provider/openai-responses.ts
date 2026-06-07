@@ -23,6 +23,7 @@ import {
   type ProviderClient,
   UpstreamError,
 } from "./openai.js";
+import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface CodexResponsesClientConfig {
   baseUrl: string; // e.g. https://chatgpt.com/backend-api/codex (endpoint = baseUrl + /responses)
@@ -377,7 +378,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       );
       if (!res.ok) throw await errorFromResponse(res);
       // Codex is stream-only → aggregate the SSE into a single Chat response.
-      return await aggregateResponsesStream(res, model);
+      return await aggregateResponsesStream(res, model, timeoutMs);
     },
 
     async *chatCompletionStream(req, opts) {
@@ -387,14 +388,20 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         opts?.signal,
       );
       if (!res.ok) throw await errorFromResponse(res);
-      yield* translateResponsesSSE(res, model);
+      yield* translateResponsesSSE(res, model, timeoutMs);
     },
   };
 }
 
 // ── low-level SSE event reader (shared by stream + aggregate) ─────────────────
 
-export async function* readResponsesEvents(res: Response): AsyncGenerator<Record<string, unknown>> {
+export async function* readResponsesEvents(
+  res: Response,
+  // Inter-chunk liveness deadline (ms); 0 disables. Threaded from the client's
+  // request timeout so a wedged mid-stream upstream is reclaimed, not hung
+  // (connect/TTFB timeout was already cleared at headers).
+  idleMs = 0,
+): AsyncGenerator<Record<string, unknown>> {
   const body = res.body;
   if (!body) return;
   const reader = body.getReader();
@@ -402,7 +409,14 @@ export async function* readResponsesEvents(res: Response): AsyncGenerator<Record
   let buffer = "";
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let read: { done: boolean; value?: Uint8Array };
+      try {
+        read = await readChunkWithIdle(reader, idleMs);
+      } catch (err) {
+        if (err instanceof StreamStalledError) throw new UpstreamError("timeout", err.message);
+        throw err;
+      }
+      const { done, value } = read;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const events = buffer.split("\n\n");
@@ -437,12 +451,16 @@ function openaiChunk(model: string, delta: Record<string, unknown>, finish: stri
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
 
-export async function* translateResponsesSSE(res: Response, model: string): AsyncGenerator<string> {
+export async function* translateResponsesSSE(
+  res: Response,
+  model: string,
+  idleMs = 0,
+): AsyncGenerator<string> {
   let started = false;
   let toolIndex = -1;
   let hadToolCall = false;
   let status: unknown = "completed";
-  for await (const evt of readResponsesEvents(res)) {
+  for await (const evt of readResponsesEvents(res, idleMs)) {
     const type = evt.type;
     if (!started) {
       started = true;
@@ -508,6 +526,7 @@ export async function* translateResponsesSSE(res: Response, model: string): Asyn
 export async function aggregateResponsesStream(
   res: Response,
   model: string,
+  idleMs = 0,
 ): Promise<ChatCompletionResponse> {
   let text = "";
   let id = `chatcmpl-${Date.now()}`;
@@ -519,7 +538,7 @@ export async function aggregateResponsesStream(
   const toolById = new Map<string, { id: string; name: string; arguments: string }>();
   let currentCallId = "";
 
-  for await (const evt of readResponsesEvents(res)) {
+  for await (const evt of readResponsesEvents(res, idleMs)) {
     const type = evt.type;
     if (type === "response.created") {
       const response = (evt.response ?? {}) as Record<string, unknown>;
@@ -551,6 +570,9 @@ export async function aggregateResponsesStream(
       const usage = (response.usage ?? {}) as Record<string, unknown>;
       if (typeof usage.input_tokens === "number") inTok = usage.input_tokens;
       if (typeof usage.output_tokens === "number") outTok = usage.output_tokens;
+      // Terminal event: stop reading NOW so the idle guard cannot turn a completed
+      // aggregation into a timeout if the upstream delays closing the body.
+      break;
     } else if (type === "error" || type === "response.failed") {
       const msg =
         typeof evt.message === "string"

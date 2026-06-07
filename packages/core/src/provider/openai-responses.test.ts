@@ -174,9 +174,70 @@ describe("translateResponsesSSE", () => {
       }
     }).rejects.toBeInstanceOf(UpstreamError);
   });
+
+  it("throws UpstreamError(timeout) and cancels when the stream stalls past idleMs", async () => {
+    vi.useFakeTimers();
+    try {
+      let cancelled = false;
+      // One event, then hang so the next read pends and the idle guard fires.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode('data: {"type":"response.created","response":{}}\n\n'),
+          );
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const res = new Response(stream, { status: 200 });
+      const run = (async () => {
+        for await (const _ of translateResponsesSSE(res, "m", 500)) {
+          // drain
+        }
+      })();
+      const assertion = expect(run).rejects.toMatchObject({ errorClass: "timeout" });
+      await vi.advanceTimersByTimeAsync(500);
+      await assertion;
+      expect(cancelled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("aggregateResponsesStream", () => {
+  it("returns at response.completed without waiting on the idle guard (terminal event stops the read)", async () => {
+    vi.useFakeTimers();
+    try {
+      const enc = new TextEncoder();
+      const events = [
+        'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+        'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+        'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+      ];
+      // Terminal event enqueued, then the body is held open (no close): aggregation
+      // must break at response.completed, not block on the idle-guarded next read.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const e of events) controller.enqueue(enc.encode(e));
+        },
+      });
+      const res = new Response(stream, { status: 200 });
+      const p = aggregateResponsesStream(res, "m", 500);
+      // A regression (no break) would pend on the next read and reject here.
+      await vi.advanceTimersByTimeAsync(500);
+      const out = await p;
+      const msg = (out.choices as Array<Record<string, unknown>>)[0]?.message as Record<
+        string,
+        unknown
+      >;
+      expect(msg.content).toBe("hi");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("folds text + usage into a single chat response (Codex is stream-only)", async () => {
     const res = sseResponse([
       { type: "response.created", response: { id: "resp_7" } },

@@ -29,7 +29,14 @@ describe("checked-in classifier.yaml sample", () => {
     const cfg = loadConfig({ configDir, env: {} });
     expect(cfg.classifier.eval.enabled).toBe(false);
     expect(cfg.classifier.eval.max_tokens).toBe(256);
-    expect(cfg.classifier.eval.timeout_ms).toBe(250);
+    // eval-fast-probe (2026-06-07): the eval timeouts were tightened from 250/350
+    // to 1500/2000 once `extra_body.thinking:disabled` removed the eval model's
+    // reasoning round-trip (~2-3s → ~1s). The tight timeout is now SAFE because the
+    // call is fast, not loose to tolerate a slow one. Pin the new values + the
+    // passthrough so a drift back to 250 (which always timed out in prod) fails CI.
+    expect(cfg.classifier.eval.timeout_ms).toBe(1500);
+    expect(cfg.classifier.eval.outer_timeout_ms).toBe(2000);
+    expect(cfg.classifier.eval.extra_body).toEqual({ thinking: { type: "disabled" } });
     expect(cfg.classifier.eval.on_failure).toBe("balanced");
     expect(cfg.classifier.eval.cache.ttl_sec).toBe(300);
   });

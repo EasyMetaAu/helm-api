@@ -118,6 +118,19 @@ describe("EvalConfigSchema", () => {
     expect(EvalConfigSchema.safeParse(bad).success).toBe(false);
   });
 
+  it("omits extra_body by default (no passthrough unless configured)", () => {
+    const parsed = EvalConfigSchema.parse({ model: "deepseek-v4-flash" });
+    expect(parsed.extra_body).toBeUndefined();
+  });
+
+  it("passes an arbitrary extra_body block through verbatim (provider-specific knobs)", () => {
+    const parsed = EvalConfigSchema.parse({
+      model: "deepseek-v4-flash",
+      extra_body: { thinking: { type: "disabled" }, top_p: 0.1 },
+    });
+    expect(parsed.extra_body).toEqual({ thinking: { type: "disabled" }, top_p: 0.1 });
+  });
+
   it("EvalCacheConfigSchema backfills cache defaults from {}", () => {
     const parsed = EvalCacheConfigSchema.parse({});
     expect(parsed.enabled).toBe(true);

@@ -110,6 +110,33 @@ describe("runEval", () => {
     expect(signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("forwards config.extra_body onto the request verbatim (provider passthrough)", async () => {
+    const invokeModel = vi.fn(
+      async (_req: EvalModelRequest, _signal: AbortSignal): Promise<EvalModelResponse> => ({
+        text: SECRET_MODEL_TEXT,
+      }),
+    );
+    const deps = makeDeps({
+      config: makeConfig({ extra_body: { thinking: { type: "disabled" } } }),
+      invokeModel,
+    });
+    await runEval(INPUT, deps);
+    const [req] = invokeModel.mock.calls[0]!;
+    expect(req.extra_body).toEqual({ thinking: { type: "disabled" } });
+  });
+
+  it("omits extra_body on the request when none is configured", async () => {
+    const invokeModel = vi.fn(
+      async (_req: EvalModelRequest, _signal: AbortSignal): Promise<EvalModelResponse> => ({
+        text: SECRET_MODEL_TEXT,
+      }),
+    );
+    const deps = makeDeps({ invokeModel });
+    await runEval(INPUT, deps);
+    const [req] = invokeModel.mock.calls[0]!;
+    expect(req.extra_body).toBeUndefined();
+  });
+
   it("inner timeout fails open and aborts the upstream request (test 3)", async () => {
     let captured: AbortSignal | undefined;
     const deps = makeDeps({
