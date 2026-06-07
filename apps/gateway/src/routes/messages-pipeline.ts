@@ -580,14 +580,21 @@ export function createMessagesPipeline(
               }
             }
           } finally {
-            if (memory !== undefined && assistant.text.length > 0) {
+            // Called UNCONDITIONALLY (even when no assistant text was
+            // reconstructed — e.g. a tool-call-only stream) so the served-model
+            // stamp still lands for auto-compaction pricing; empty
+            // responseMessages persist nothing.
+            if (memory !== undefined) {
               const finalAlias =
                 result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
               await observeOutbound(
                 memory.observe,
                 memoryScope,
                 {
-                  responseMessages: [{ role: "assistant", content: assistant.text }],
+                  responseMessages:
+                    assistant.text.length > 0
+                      ? [{ role: "assistant", content: assistant.text }]
+                      : [],
                   toolResults: [],
                 },
                 finalAlias,

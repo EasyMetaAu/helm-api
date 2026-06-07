@@ -636,21 +636,24 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           await settle(result.decision, tokensFromUsage(usageFromSSE(rawSse)));
           // Memory observe (outbound, streamed): persist the reconstructed
           // assistant turn AFTER the bytes were forwarded. Fail-open inside core.
+          // Called UNCONDITIONALLY (even with no reconstructed text — e.g. a
+          // tool-call-only turn) so the served-model stamp still lands; the empty
+          // responseMessages just persist nothing while the stamp records the
+          // model auto-compaction prices itself from.
           if (deps.memory !== undefined) {
             // Flush the last partial event the \n\n-split loop held back, so a
             // final frame without a trailing \n\n is not dropped.
             flushOpenAIChunk(assistant);
-            if (assistant.text.length > 0) {
-              await observeOutbound(
-                deps.memory.observe,
-                memoryScope,
-                {
-                  responseMessages: [{ role: "assistant", content: assistant.text }],
-                  toolResults: [],
-                },
-                finalAlias,
-              );
-            }
+            await observeOutbound(
+              deps.memory.observe,
+              memoryScope,
+              {
+                responseMessages:
+                  assistant.text.length > 0 ? [{ role: "assistant", content: assistant.text }] : [],
+                toolResults: [],
+              },
+              finalAlias,
+            );
           }
         }
       });

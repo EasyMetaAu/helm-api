@@ -72,7 +72,20 @@ export const GeneratedCatalogSchema = z.object({
 // modelKey. Every field is optional so a manual entry can override a single
 // field (e.g. just supportsVision) without restating the whole record.
 export const CapabilitiesOverrideEntrySchema = CapabilitiesSchema.partial();
-export const PricingOverrideEntrySchema = PricingSchema.partial();
+// NOT `PricingSchema.partial()`: the cache fields carry `.default(null)`, and
+// `.partial()` over a defaulted field still MATERIALIZES the omitted key as null
+// on parse — so an operator overriding only `inputPerMTokUsd` would silently wipe
+// the generated `cacheReadPerMTokUsd` on the spread merge. Declared explicitly
+// (plain optional + nullable, NO defaults): an omitted field stays `undefined`
+// and the merge preserves the generated value; an explicit `null` clears it.
+export const PricingOverrideEntrySchema = z
+  .object({
+    inputPerMTokUsd: z.number().nonnegative().nullable().optional(),
+    outputPerMTokUsd: z.number().nonnegative().nullable().optional(),
+    cacheReadPerMTokUsd: z.number().nonnegative().nullable().optional(),
+    cacheWritePerMTokUsd: z.number().nonnegative().nullable().optional(),
+  })
+  .strict();
 
 export const CapabilitiesOverrideSchema = z.record(
   z.string().min(1),
