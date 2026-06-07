@@ -105,6 +105,7 @@ import { anthropicMetadataUserId, stableSessionId } from "./oauth/device-identit
 import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
+import { createYamlRulePersister } from "./routes/admin/yaml-writeback.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
@@ -1410,10 +1411,18 @@ export async function buildServer(
   // Otherwise it is NOT mounted at all (/admin and /admin/api → 404), so the
   // key-management + telemetry endpoints can never be reached unauthenticated.
   if (adminAuth.enabled) {
+    // Rule edits write back to the canonical config/*.yaml FIRST (comment-
+    // preserving, atomic, fail-closed — see yaml-writeback.ts), THEN rebind the
+    // live config. A failed write 500s with nothing changed, so the file always
+    // equals the running config and a restart re-loads exactly what was saved.
+    const yamlPersister = createYamlRulePersister(opts.configDir ?? "./config");
     const ruleStore = createRuntimeRuleStore({
       lanes: lanes as Record<string, Lane>,
       policies,
       classifier: classifierConfig,
+      persistLanes: yamlPersister.persistLanes,
+      persistPolicies: yamlPersister.persistPolicies,
+      persistClassifier: yamlPersister.persistClassifier,
       onLanes: (next) => {
         lanes = next as LanesConfig;
       },

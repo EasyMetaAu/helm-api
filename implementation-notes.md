@@ -7,6 +7,18 @@
 
 ---
 
+## 2026-06-06 · 管理界面规则编辑写回 YAML（修复「保存只活在内存、重启即回滚」；用户决策；docs/11；CLAUDE.md 原则 2）
+
+- **Bug（用户报告）**：分类器/Lanes/Policies 三页的「保存」只经 `createRuntimeRuleStore` 重绑**内存变量**（rule-store.ts 自注 "MVP…future YAML write-back adapter"），不落任何持久层——重启即回滚到 yaml。其余面（System Settings → config_kv、Keys/OAuth → DB）本就持久，仅这三页挥发。
+- **方案（用户拍板：YAML 写回，文件即真相）**：新增 `yaml-writeback.ts`（gateway admin），三特性：**保留注释**（eemeli/yaml Document API，`setIn` 原位改值，发行 yaml 重注释不可毁）、**原子写**（同目录 tmp + rename，绝不留半截文件给 fail-closed loader）、**fail-closed**（写失败 throw）。`RuntimeRuleStoreInit` 加可选 `persist*` 钩子，**先持久化后重绑**——写失败 → 路由 500、live config 不动，文件与内存永不分叉；重启 loader 读回的就是上次保存值。server.ts 用 `opts.configDir` 构造 persister（仅 adminAuth.enabled 时）。
+- **文件形状对齐 loader**：lanes.yaml = 顶层平铺 map（保存集合**精确镜像**：改原位、增追加、**缺失即删**——admin 删 lane 必须落文件）；policies.yaml = `{policies:[...]}`（列表整体替换，列表内逐项注释为文档化可接受损失）；classifier.yaml = `classifier:` 包裹（逐 scalar 原位）。Zod round-trip 会把可选字段的显式默认写进文件（如 lane `constraints.require_*: false`）——无害、自文档化。
+- **e2e 防误伤（关键）**：test-server.ts 原以**仓库签入 config/ 为 configDir**——写回上线后 admin.spec 的 lane 保存会改库内文件！改为每次拷贝 config → `.e2e-data/config`（与 DB 同抛弃式）。已验证：UI 保存后编辑落在拷贝、仓库 config 无 diff。
+- **顺手修 admin.spec 两个 pre-existing 本地挂**（e2e 不在 CI 门禁，无人发现）：① 种子 DecisionRecord 写死 `2026-05-31` + 请求列表默认 24h 窗 → 种子行老化出窗（**定时炸弹**），改 `Date.now()-1h`；② spec 仍找 `filter-range` testid，但 06-03 已重构成共享 RangeFilter 预设按钮（`range-<key>`），改断言 `range-24h`。admin.spec 现 9/9 绿。
+- **验证**：新增 yaml-writeback.test（注释存活/原子/缺文件创建/只读目录 throw 且原文件不动）+ rule-store.test（persist 先于 rebind；persist 失败 → 旧值保持 + onChange 不调）共 10 例 TDD 先红后绿；typecheck/lint 净；全量单测仅 PGlite 已知并行 flake（隔离 103/103 绿）。gateway 新增直接依赖 `yaml@^2.9`。
+- **部署坑（la.atmy.work）**：`/opt/helm-api/config` 现为 **root 属主**，容器用户 10001 无写权限 → 管理界面保存会 fail-closed 500。上线本特性前需 `chown` config 目录（与 data/ 同 10001 属主）；fail-closed 设计保证权限没改好时只是保存报错，绝不静默分叉。
+
+---
+
 ## 2026-06-06 · 请求详情页「重试」按钮（可编辑重发 + 隔离重跑；用户决策；docs/07）
 
 - **动机**：线上调试（deepseek-v4-pro 把 5000 `max_tokens` 全烧在 reasoning，`finish:length`、正文为空，详情页正确显示「无可见输出」）后，需要在 admin 内「改一下（如调高 max_tokens）再发一次」并看新结果，无需离开界面/手搓 curl。
@@ -31,20 +43,11 @@
 
 ---
 
-## 2026-06-06 · 记忆 thread source 新 key 默认 auto（配合「记忆默认开启」；用户决策；docs/08）
-
-- **动机**：承接同日「记忆默认开启」（新 key `memory_mode` mint 默认 `inject`）。但 `memory_thread_source` 仍 mint 默认 `header`——新 key 记忆开了却**不自动推导 thread**（缺 `x-thread-id` 时不回退信号链 → 无 per-conversation 记忆），等于开了个寂寞。把新 key 的 thread source mint 默认翻 `header → auto`，让记忆真正开箱即用。
-- **范围 = 仅新 key（用户拍板，不迁移既有 key）**：改两个 keystore 的 `createKey` mint 默认 `?? "header" → ?? "auto"`（sqlite + pg），与紧邻的 `memoryMode ?? "inject"` 同一档（**mint-default**）。**Zod `ApiKeyRecordSchema.default("header")` 保持不动**（**parse-default**，镜像 `memory_mode` 的 `.default("off")`）——既有 key 列默认与已应用迁移仍 `header`、不重写。
-- **parse-default vs mint-default 分离（沿用 memory_mode 既有模式）**：docs/06 列的是 schema parse-defaults（off/header，照旧准确，不动）；docs/08 列的是新 key mint 行为（inject/auto），只改这一行 `(default header) → (default auto — new keys)`。两文档各自内部自洽。
-- **admin UI 诚实化**：`KeyCapsForm.emptyKeyCaps` 的 thread source `'header' → 'auto'` + `CreateKeyDialog` 省略 guard `!== 'header' → !== 'auto'`——下拉默认显示 **Auto** = 实际落库值，**避免重蹈 memory_mode 的 UI 错位**（emptyKeyCaps `memoryMode:'off'` + guard `!=='off'` 省略 → keystore 实际 mint `inject`，UI 显示 Off 却落 inject；本次不碰该 pre-existing 错位，仅 thread source 做对）。EditKeyDialog 不动（按存储值预填）。
-- **测试/验证**：`store-contract`（真 sqlite+pglite keystore）断言无记忆字段 create → `memory_thread_source === "auto"`；`schema.test` 维持 parse-default `header`（未动）；admin/ports 的 **fake keystore 保守桩仍 `?? "header"`**（与其 `memoryMode ?? "off"` 桩一致，本就不冒充真 mint 默认，不动）；`memory-scope` 测试显式传 threadSource、两分支俱存，未受影响。typecheck/build/svelte-check 全绿，101 store-contract+keystore 串行通过。
-- **Codex review 修复（2 项）**：(P2) `bootstrapRootKey` 不传记忆字段 → 继承新默认会让 root key 落 `inject`+`auto`；但 root key 是**管理/引导面**（日志明示「勿用于生产流量」），显式置 `memoryMode:"off"`+`memoryThreadSource:"header"` 让其记忆惰性（+bootstrap 测试断言 off/header）。inject 根因来自 #106，本 PR 的 auto 放大了它，就地一并堵上。(P3) 请求层 contract 注释（`ports.CreateKeyInput` / `CreateKeyRequest` / admin api `CreateKeyInput`）自 #106 起仍写「Omitted => off / memory stays off」属误导——改为如实写「省略 ⇒ keystore mint 新 key 默认 inject/auto」。**fake keystore 保守桩**（无测试依赖真 mint 默认，真值由 store-contract 对真 keystore 覆盖）与 **docs/06**（记的是 record schema parse-default off/header，仍准）维持不动。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-06 · 记忆 thread source 新 key 默认 auto（配合「记忆默认开启」；用户决策；docs/08）：新 key `memory_mode=inject` 却 thread source 仍 `header` = 缺 `x-thread-id` 不回退信号链、无 per-conversation 记忆——两 keystore `createKey` mint 默认 `?? "header" → ?? "auto"`（仅新 key；Zod parse-default `header` 不动，既有 key/迁移不重写）。admin UI 诚实化：KeyCapsForm/CreateKeyDialog 默认显 Auto = 实际落库值。Codex 修复：(P2) `bootstrapRootKey` 显式置 `off`+`header` 让 root key 记忆惰性（root key 勿用于生产流量）；(P3) CreateKeyInput 各层注释自 #106 起误写「omitted => off」→ 改如实「省略 ⇒ mint 默认 inject/auto」。
 
 ### 2026-06-06 · 记忆默认开启（eval 维持默认关闭——依赖已配置 eval 模型）（用户决策；docs/08）：只开记忆不开 eval——Layer-2 eval 客户端把 `model`(deepseek-v4-flash) 直发 providers[0]，无配好 DeepSeek 兼容 provider 时每个 uncertain 请求先打一通失败再 fail-open 回 balanced，故 eval **必须有可用模型才开**、留 per-deployment opt-in（原则 4）。memory 无全局开关：新 key `keystore.create` mint `off→inject`（sqlite+pg）+ 请求兜底 `memory-scope` `?? off → ?? inject`，**仅新 key+兜底、不迁移既有 key**（DB 列默认/迁移仍 off）；显式 `x-memory-mode` 仍优先、非法头归一 off，`inject` 在 threadId===null 时自闸 no-op。`config/memory.yaml enabled` 早前置 true 配套。测试 store-contract/memory-scope/messages.memory 随翻转，2474 绿；README+docs/01/02/08/12 记忆表述改「默认开启」、eval 维持「off by default」。
 
