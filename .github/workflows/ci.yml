@@ -16,7 +16,12 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: pnpm
+          # The self-hosted Docker runners keep /home/runner/_work on a host
+          # volume. Do not use actions/cache here: it re-downloads a ~245MB pnpm
+          # cache from GitHub on every run and costs 2+ minutes on 199.4.
+          package-manager-cache: false
+      - name: Use persistent pnpm store on runner
+        run: pnpm config set store-dir /home/runner/_work/.pnpm-store
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
