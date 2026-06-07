@@ -61,6 +61,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       complexity: 'high',
       confidence: 0.91,
       decided_by: 'rules',
+      rules_confidence: 0.91,
       matched_dimensions: ['has_code_fence'],
       constraints: { require_tools: true },
     },

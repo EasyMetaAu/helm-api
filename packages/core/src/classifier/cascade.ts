@@ -49,6 +49,11 @@ export interface ClassificationResult {
   complexity: Complexity;
   task_type: TaskType;
   confidence: number;
+  // The LAYER-1 rules confidence — the gate value that decided whether Layer 2
+  // ran. On decided_by==="eval" the `confidence` above is the EVAL model's (its
+  // verdict replaces the rules one), so this is the only record of why the
+  // cascade escalated. Always known here (rules always run).
+  rules_confidence: number;
   decided_by: DecidedBy; // observable; never conflated with provider fallback
   eval_used: boolean; // did this request actually invoke/hit Layer-2 eval
   eval_cache_hit: boolean; // eval cache hit (always false when eval unused)
@@ -106,6 +111,7 @@ export async function classify(
       complexity: r.complexity,
       task_type: r.task_type,
       confidence: r.confidence,
+      rules_confidence: r.confidence,
       decided_by: "rules",
       eval_used: false,
       eval_cache_hit: false,
@@ -133,6 +139,9 @@ export async function classify(
       complexity: e.output.complexity,
       task_type: e.output.task_type,
       confidence: e.output.confidence,
+      // The eval verdict replaced the rules one above — keep the Layer-1 gate
+      // value so "rules were uncertain → escalated" stays reconstructible.
+      rules_confidence: r.confidence,
       decided_by: "eval",
       eval_used: true,
       eval_cache_hit: e.cache_hit,
@@ -163,6 +172,7 @@ function balancedFallback(
     complexity: r.complexity,
     task_type: r.task_type,
     confidence: r.confidence,
+    rules_confidence: r.confidence,
     decided_by: "fallback",
     eval_used: evalState.eval_used,
     eval_cache_hit: evalState.eval_cache_hit,

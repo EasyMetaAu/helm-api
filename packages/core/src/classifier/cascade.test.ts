@@ -123,9 +123,31 @@ describe("classify — cascade control flow", () => {
     expect(res.complexity).toBe("complex");
     expect(res.task_type).toBe("coding");
     expect(res.confidence).toBe(0.8);
+    // The eval verdict REPLACED the rules one — but the Layer-1 gate value that
+    // caused the escalation survives separately (the "why eval ran" record).
+    expect(res.rules_confidence).toBe(0.1);
     // lane derived from eval output via resolveLane
     expect(res.lane).toBe("lane:complex:coding");
     expect(runEvalCached).toHaveBeenCalledTimes(1);
+  });
+
+  it("3b. rules_confidence equals confidence on the rules and fallback paths", async () => {
+    const rulesRes = await classify(
+      INPUT,
+      makeDeps({ rules: rules({ confidence: 0.9 }), config: makeConfig({ evalEnabled: true }) })
+        .deps,
+    );
+    expect(rulesRes.decided_by).toBe("rules");
+    expect(rulesRes.rules_confidence).toBe(rulesRes.confidence);
+
+    const fb = await classify(
+      INPUT,
+      makeDeps({ rules: rules({ confidence: 0.2 }), config: makeConfig({ evalEnabled: false }) })
+        .deps,
+    );
+    expect(fb.decided_by).toBe("fallback");
+    expect(fb.rules_confidence).toBe(0.2);
+    expect(fb.rules_confidence).toBe(fb.confidence);
   });
 
   it("4. eval cache hit is propagated", async () => {
@@ -358,6 +380,7 @@ const _typecheck: ClassificationResult = {
   complexity: "standard",
   task_type: "chat",
   confidence: 0.5,
+  rules_confidence: 0.5,
   decided_by: "fallback",
   eval_used: false,
   eval_cache_hit: false,

@@ -331,6 +331,9 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
       task_type: result.task_type,
       complexity: mapComplexity(result.complexity),
       confidence: result.confidence,
+      // Layer-1 gate confidence, kept even when the eval verdict replaced
+      // `confidence` above — the Debug UI shows WHY the cascade escalated.
+      rules_confidence: result.rules_confidence,
       decided_by: result.decided_by,
       eval_cache_hit: result.eval_used ? result.eval_cache_hit : null,
       // Layer-2 self-cost, threaded into cost_breakdown.eval_usd (separate from

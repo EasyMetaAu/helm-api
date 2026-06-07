@@ -500,5 +500,9 @@
   "provider error": "공급자 오류",
   "circuit open": "서킷 오픈",
   "returned non-JSON": "비 JSON 반환",
-  "returned an invalid schema": "잘못된 스키마 반환"
+  "returned an invalid schema": "잘못된 스키마 반환",
+  "The verdict that routed this request — the badge shows which layer decided it.": "이 요청을 라우팅한 판정 결과 — 배지가 어느 레이어의 판정인지 표시합니다.",
+  "Layer-1 rules were uncertain (confidence {confidence}) — escalated to the eval model; the verdict and confidence above are the eval model’s.": "Layer-1 규칙이 불확실하여(신뢰도 {confidence}) 평가 모델로 에스컬레이션됨 — 위의 판정과 신뢰도는 평가 모델의 결과입니다.",
+  "Layer-1 rules were uncertain — escalated to the eval model; the verdict and confidence above are the eval model’s.": "Layer-1 규칙이 불확실하여 평가 모델로 에스컬레이션됨 — 위의 판정과 신뢰도는 평가 모델의 결과입니다.",
+  "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.": "— 평가가 비활성화되어 있습니다. 규칙이 불확실하여 라우팅이 balanced 레인으로 폴백되었습니다."
 }

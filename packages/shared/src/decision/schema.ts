@@ -23,6 +23,14 @@ export const ClassifierDecisionSchema = z.object({
   complexity: z.string(),
   confidence: z.number().min(0).max(1),
   decided_by: DecidedBySchema,
+  // The LAYER-1 rules confidence — the gate value that decided whether the
+  // cascade escalated to eval. Persisted separately because on decided_by==="eval"
+  // the eval verdict REPLACES `confidence` above (the 0.95 a user sees is the eval
+  // model's self-reported confidence, NOT Layer-1's), so without this field the
+  // "rules were uncertain (0.05) → escalated → eval said 0.95" causal chain is
+  // unrecoverable. Null on passthrough/fail-open default records (no rules ran)
+  // and on legacy pre-field records (`.default(null)`).
+  rules_confidence: z.number().min(0).max(1).nullable().default(null),
   eval_cache_hit: z.boolean().nullable(), // null when eval was not triggered
   // The internal small-model id that ran Layer-2 eval (e.g. "gpt-4o-mini"), so the
   // Debug UI can show WHICH model judged the lane. Non-null whenever eval actually

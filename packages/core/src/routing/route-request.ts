@@ -52,6 +52,9 @@ export interface Classification {
   //   eval_model — the internal small-model id that judged the lane; non-null
   //     whenever eval ran (decided OR failed open), null otherwise.
   //   eval_latency_ms — Layer-2 call latency; non-null whenever eval ran.
+  //   rules_confidence — the LAYER-1 gate confidence; differs from `confidence`
+  //     on decided_by==="eval" (where the eval verdict replaced the rules one).
+  rules_confidence?: number | null;
   eval_cache_hit?: boolean | null;
   fallback_reason?: string | null;
   eval_usd?: number | null;
@@ -257,6 +260,8 @@ function passthroughClassifier(): DecisionRecord["classifier"] {
     complexity: "passthrough",
     confidence: 1,
     decided_by: "default",
+    // No Layer-1 rules ran on the passthrough path — null, not a measured 0.
+    rules_confidence: null,
     eval_cache_hit: null,
     eval_model: null,
     eval_latency_ms: null,
@@ -394,6 +399,7 @@ async function plan(
       // Thread Layer-2 eval observability straight from the classify adapter
       // (cascade). null/undefined collapse to null so the record never carries
       // an ambiguous undefined (principle 5: classification fields only).
+      rules_confidence: cls.rules_confidence ?? null,
       eval_cache_hit: cls.eval_cache_hit ?? null,
       eval_model: cls.eval_model ?? null,
       eval_latency_ms: cls.eval_latency_ms ?? null,

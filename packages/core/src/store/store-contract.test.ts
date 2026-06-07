@@ -92,6 +92,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
       complexity: "complex",
       confidence: 0.87,
       decided_by: "rules",
+      rules_confidence: null,
       eval_cache_hit: null,
       eval_model: null,
       eval_latency_ms: null,
