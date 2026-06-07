@@ -2,6 +2,7 @@ import { LaneSchema, LanesConfigSchema } from "@helm/core";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps } from "./deps.js";
+import { rulePersistErrorResponse } from "./persist-error.js";
 
 // /admin/api/lanes — CRUD over the lane config (config/lanes.yaml via RuleStore,
 // NEVER the DB; CLAUDE.md Principle 2, config-as-code). Pure HTTP glue: every read/write goes
@@ -41,7 +42,12 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     if (!map.success) {
       return c.json({ error: "invalid lanes config", issues: map.error.issues }, 400);
     }
-    await deps.rules.setLanes(lanes);
+    try {
+      await deps.rules.setLanes(lanes);
+    } catch (err) {
+      // Persist failure (e.g. unwritable config mount) is a local 500, not a 502.
+      return rulePersistErrorResponse(c, err);
+    }
     return c.json(parsed.data);
   });
 
@@ -58,7 +64,11 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     if (!map.success) {
       return c.json({ error: "invalid lanes config", issues: map.error.issues }, 409);
     }
-    await deps.rules.setLanes(lanes);
+    try {
+      await deps.rules.setLanes(lanes);
+    } catch (err) {
+      return rulePersistErrorResponse(c, err);
+    }
     return c.json({ deleted: name });
   });
 }

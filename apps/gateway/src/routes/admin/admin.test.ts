@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AppEnv } from "../../app.js";
 import { basicAuth } from "../../middleware/basic-auth.js";
+import { handleError } from "../../middleware/error-handler.js";
 import type { AdminApiDeps, RuleStore, SettingsAccess } from "./deps.js";
 import { registerAdminApi } from "./index.js";
 
@@ -1191,5 +1192,137 @@ describe("admin.api oauth schedule validation", () => {
     });
     expect(res.status).toBe(204);
     expect(captured).toEqual([{ priority: 0 }]);
+  });
+});
+
+describe("admin.api rule persist failures", () => {
+  // The YAML write-back (yaml-writeback.ts) throws when config/*.yaml cannot be
+  // written — most commonly EACCES: the mounted ./config dir is owned by root
+  // while the container runs as uid 10001. That is a LOCAL fault: it must
+  // surface as a 500 with an operator-actionable message, NOT fall through
+  // app.onError's redacted upstream_error(502) fallback and masquerade as a
+  // provider outage (observed in production: PUT /admin/api/classifier -> 502).
+  function eacces(): Error {
+    const err: Error & { code?: string } = new Error(
+      "EACCES: permission denied, open '/app/config/lanes.yaml.tmp-7'",
+    );
+    err.code = "EACCES";
+    return err;
+  }
+
+  // RuleStore whose writes fail like a root-owned ./config mount; reads work.
+  function failingRules(err: Error): RuleStore {
+    const inner = makeRuleStore();
+    return {
+      ...inner,
+      setLanes: async () => {
+        throw err;
+      },
+      setPolicies: async () => {
+        throw err;
+      },
+      setClassifier: async () => {
+        throw err;
+      },
+    };
+  }
+
+  // Mirror production wiring: logger + trace_id context vars and the global
+  // onError fallback (app.ts), so an uncaught route throw renders exactly as it
+  // would on a deployed gateway (502 upstream_error) — pinning the regression.
+  function buildAppWithOnError(deps: AdminApiDeps) {
+    const app = new Hono<AppEnv>();
+    app.use("*", async (c, next) => {
+      c.set("trace_id", "trace-test");
+      c.set("logger", { log: () => {} });
+      await next();
+    });
+    registerAdminApi(app, deps);
+    app.onError((err, c) => handleError(err, c));
+    return app;
+  }
+
+  async function expectActionable500(res: Response): Promise<void> {
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: unknown };
+    // Admin error shape ({ error: string }), not the OpenAI envelope.
+    expect(typeof body.error).toBe("string");
+    const msg = body.error as string;
+    expect(msg).toContain("EACCES");
+    expect(msg).toContain("not writable"); // actionable hint, not redacted
+  }
+
+  it("PUT /lanes/:name surfaces a persist EACCES as an actionable 500, not 502", async () => {
+    const app = buildAppWithOnError(buildDeps({ rules: failingRules(eacces()) }));
+    const body: Lane = {
+      primary: "best_reasoning_model",
+      fallback: [],
+      constraints: { require_tools: false, require_json: false, require_vision: false },
+    };
+    const res = await app.request("/admin/api/lanes/balanced", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify(body),
+    });
+    await expectActionable500(res);
+  });
+
+  it("DELETE /lanes/:name surfaces a persist EACCES as an actionable 500, not 502", async () => {
+    const app = buildAppWithOnError(buildDeps({ rules: failingRules(eacces()) }));
+    const res = await app.request("/admin/api/lanes/economy", { method: "DELETE" });
+    await expectActionable500(res);
+  });
+
+  it("PUT /policies surfaces a persist EACCES as an actionable 500, not 502", async () => {
+    const app = buildAppWithOnError(buildDeps({ rules: failingRules(eacces()) }));
+    const res = await app.request("/admin/api/policies", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify([]),
+    });
+    await expectActionable500(res);
+  });
+
+  it("DELETE /policies/:id surfaces a persist EACCES as an actionable 500, not 502", async () => {
+    const store = failingRules(eacces());
+    // Seed a deletable policy so the route reaches the failing write.
+    const seeded: RuleStore = {
+      ...store,
+      getPolicies: async () => ({ policies: [{ id: "p1", match: {} }] }),
+    };
+    const app = buildAppWithOnError(buildDeps({ rules: seeded }));
+    const res = await app.request("/admin/api/policies/p1", { method: "DELETE" });
+    await expectActionable500(res);
+  });
+
+  it("PUT /classifier surfaces a persist EACCES as an actionable 500, not 502", async () => {
+    const app = buildAppWithOnError(buildDeps({ rules: failingRules(eacces()) }));
+    const res = await app.request("/admin/api/classifier", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify(ClassifierConfigSchema.parse({})),
+    });
+    await expectActionable500(res);
+  });
+
+  it("a non-permission persist failure still returns 500 with the message, no chown hint", async () => {
+    const app = buildAppWithOnError(
+      buildDeps({ rules: failingRules(new Error("disk full while writing lanes.yaml")) }),
+    );
+    const body: Lane = {
+      primary: "best_reasoning_model",
+      fallback: [],
+      constraints: { require_tools: false, require_json: false, require_vision: false },
+    };
+    const res = await app.request("/admin/api/lanes/balanced", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(500);
+    const json = (await res.json()) as { error?: unknown };
+    expect(typeof json.error).toBe("string");
+    expect(json.error as string).toContain("disk full while writing lanes.yaml");
+    expect(json.error as string).not.toContain("not writable");
   });
 });

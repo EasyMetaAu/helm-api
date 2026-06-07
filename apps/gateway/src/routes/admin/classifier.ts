@@ -2,6 +2,7 @@ import { ClassifierConfigStrictSchema } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps } from "./deps.js";
+import { rulePersistErrorResponse } from "./persist-error.js";
 
 // PUT is a full REPLACE of the classifier config, so it uses the STRICT schema
 // (both `rules` and `eval` required, unknown keys rejected). The base
@@ -27,7 +28,12 @@ export function registerClassifierRoutes(app: Hono<AppEnv>, deps: AdminApiDeps):
     if (!parsed.success) {
       return c.json({ error: "invalid classifier config", issues: parsed.error.issues }, 400);
     }
-    await deps.rules.setClassifier(parsed.data);
+    try {
+      await deps.rules.setClassifier(parsed.data);
+    } catch (err) {
+      // Persist failure (e.g. unwritable config mount) is a local 500, not a 502.
+      return rulePersistErrorResponse(c, err);
+    }
     return c.json(parsed.data);
   });
 }
