@@ -109,6 +109,17 @@ export class SqliteTelemetryStore implements TelemetryStore {
     return row ? this.toDecision(row) : null;
   }
 
+  // Narrow single-column lookup of the recorded key_id (replay identity rebuild).
+  // Selects only api_key_id so it never deserializes the decision blob.
+  async getApiKeyId(requestId: string): Promise<string | null> {
+    const row = this.db
+      .select({ apiKeyId: telemetry.apiKeyId })
+      .from(telemetry)
+      .where(eq(telemetry.requestId, requestId))
+      .get();
+    return row?.apiKeyId ?? null;
+  }
+
   // POST-MVP Agentic Signals (docs/02): records whose createdAt is in
   // [startMs, endMs). Half-open so adjacent windows never overlap → the
   // background collector's re-runs stay idempotent. Read-only; never on the

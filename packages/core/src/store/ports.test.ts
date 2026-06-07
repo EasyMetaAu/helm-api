@@ -83,9 +83,9 @@ class InMemoryKeyStore implements KeyStore {
 }
 
 class InMemoryTelemetryStore implements TelemetryStore {
-  private readonly rows: Array<{ at: Date; rec: DecisionRecord }> = [];
+  private readonly rows: Array<{ at: Date; rec: DecisionRecord; keyId: string }> = [];
   async insert(input: InsertTelemetryInput): Promise<{ id: string }> {
-    this.rows.push({ at: input.createdAt, rec: input.decision });
+    this.rows.push({ at: input.createdAt, rec: input.decision, keyId: input.apiKeyId });
     return { id: String(this.rows.length) };
   }
   async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
@@ -119,6 +119,9 @@ class InMemoryTelemetryStore implements TelemetryStore {
   }
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {
     return this.rows.find((r) => r.rec.request_id === requestId)?.rec ?? null;
+  }
+  async getApiKeyId(requestId: string): Promise<string | null> {
+    return this.rows.find((r) => r.rec.request_id === requestId)?.keyId ?? null;
   }
   async queryWindow(startMs: number, endMs: number): Promise<DecisionRecord[]> {
     return [...this.rows]
@@ -186,6 +189,10 @@ describe("Store ports are implementable contracts", () => {
     await store.insert({ decision, apiKeyId: "k1", createdAt: new Date() });
     expect(await store.queryRecent(10)).toHaveLength(1);
     expect((await store.getByRequestId("req_1"))?.request_id).toBe("req_1");
+    // getApiKeyId returns the INSERTED key id (not a field derived from the
+    // record — the redacted record carries no key id at all), null on a miss.
+    expect(await store.getApiKeyId("req_1")).toBe("k1");
+    expect(await store.getApiKeyId("nope")).toBeNull();
   });
 });
 

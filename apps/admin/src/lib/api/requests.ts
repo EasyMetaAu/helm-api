@@ -459,3 +459,21 @@ export async function getRequestPayload(traceId: string): Promise<RequestPayload
     return { captured: false };
   }
 }
+
+// POST /admin/api/requests/:traceId/replay -> { trace_id } | throws. Re-issues the
+// (optionally edited) request body through the gateway as an ISOLATED debug re-run
+// and returns the NEW trace id so the page can navigate to the recorded result.
+// The `request` is the full OpenAI chat body the operator confirmed in the dialog;
+// identity/caps are reconstructed server-side from the ORIGINAL request's key (the
+// browser never handles a plaintext key — Principle 7).
+export async function replayRequest(
+  traceId: string,
+  request: unknown,
+): Promise<{ trace_id: string }> {
+  const res = await fetch(`${BASE}/${encodeURIComponent(traceId)}/replay`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ request }),
+  });
+  return asJson<{ trace_id: string }>(res);
+}

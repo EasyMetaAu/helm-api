@@ -1450,6 +1450,18 @@ export async function buildServer(
       rules: ruleStore,
       keyStore,
       telemetry,
+      // Admin "Retry" replay (isolated debug re-run). Reuses the SAME core `route`
+      // + redactor + streamed-cost pricer + capture getters as the chat route, so a
+      // re-issued request routes faithfully; a fresh UUID mints the new trace id.
+      replay: {
+        route,
+        redact: (payload) => redact(payload),
+        now: () => Date.now(),
+        genTraceId: () => randomUUID(),
+        capturePayloads: () => settings.capture_payloads,
+        payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
+        costOf,
+      },
       modelAliases,
       genKey: () => {
         const k = generateKey();

@@ -353,6 +353,7 @@ describe("persistDecision", () => {
       queryRecent: async () => [],
       queryPage: async () => ({ rows: [], total: 0 }),
       getByRequestId: async () => null,
+      getApiKeyId: async () => null,
       queryWindow: async () => [],
       insertPayload: async () => {},
       getPayload: async () => null,

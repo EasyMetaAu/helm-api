@@ -174,6 +174,9 @@ function makeTelemetry(seed: DecisionRecord[] = []): TelemetryStore {
     async getByRequestId(id) {
       return rows.find((r) => r.request_id === id) ?? null;
     },
+    async getApiKeyId(id) {
+      return rows.some((r) => r.request_id === id) ? "k1" : null;
+    },
     async queryWindow() {
       return [...rows];
     },

@@ -258,6 +258,12 @@ export interface TelemetryStore {
   // ordering as queryRecent; returns the page plus the full filtered total.
   queryPage(query: TelemetryPageQuery): Promise<TelemetryPage>;
   getByRequestId(requestId: string): Promise<DecisionRecord | null>;
+  // Resolve the recorded api_key_id (key_id) for one request. The redacted
+  // DecisionRecord deliberately omits it (it carries only key_prefix), so the
+  // admin replay path uses this narrow lookup to reconstruct the original key's
+  // identity/caps. key_id only — never a hash/plaintext (principle 7). null on a
+  // miss (unknown/pruned request).
+  getApiKeyId(requestId: string): Promise<string | null>;
   // POST-MVP Agentic Signals (docs/02). Read every decision record whose
   // createdAt falls in [startMs, endMs) so the background Signal Collector can
   // aggregate a window AFTER the fact. Half-open interval keeps adjacent windows
