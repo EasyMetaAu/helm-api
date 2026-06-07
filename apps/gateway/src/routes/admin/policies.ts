@@ -2,6 +2,7 @@ import { PoliciesConfigSchema } from "@helm/core";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps } from "./deps.js";
+import { rulePersistErrorResponse } from "./persist-error.js";
 
 // /admin/api/policies — read/write the policy list (config/policies.yaml via
 // RuleStore, NEVER the DB). The wire shape is a bare Policy[] (the editor edits a
@@ -23,7 +24,12 @@ export function registerPoliciesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     if (!parsed.success) {
       return c.json({ error: "invalid policies", issues: parsed.error.issues }, 400);
     }
-    await deps.rules.setPolicies(parsed.data);
+    try {
+      await deps.rules.setPolicies(parsed.data);
+    } catch (err) {
+      // Persist failure (e.g. unwritable config mount) is a local 500, not a 502.
+      return rulePersistErrorResponse(c, err);
+    }
     return c.json(parsed.data.policies);
   });
 
@@ -52,7 +58,11 @@ export function registerPoliciesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       }
       return c.json({ error: "policy not found" }, 404);
     }
-    await deps.rules.setPolicies({ policies: remaining });
+    try {
+      await deps.rules.setPolicies({ policies: remaining });
+    } catch (err) {
+      return rulePersistErrorResponse(c, err);
+    }
     return c.json({ deleted: id });
   });
 }
