@@ -9,7 +9,7 @@
 开源 · 自托管 · MIT
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.8.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.8.6-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-3c873a.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](tsconfig.base.json)
 [![Built with Hono](https://img.shields.io/badge/gateway-Hono-ff5e00.svg)](https://hono.dev)
@@ -67,7 +67,7 @@ docker compose logs helm | grep -i "root API key"
 | 🛡️ | **稳健的执行层** | 熔断器（OPEN/HALF_OPEN + 单探针）、能力过滤（跳过候选时记下明确原因）、`:free` 档 429 跳过、按 key 并发排队。客户端断连永远不算供应商故障。 |
 | 🔐 | **OAuth 订阅** | 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的**订阅**当后端来路由——多账号组池，逐账号做模型策展 / 出口代理 / 调度，全部热重载。*（可选功能，先读 [ToS 警告](#oauth-订阅类供应商claude-promaxchatgpt-codexgithub-copilot)。）* |
 | 🔑 | **带约束力的 key** | 强制鉴权；key 只存 SHA-256 哈希。每把 key 可设：lane 白名单、自定义模型权限、RPM/TPM 限流、用量预算（降级或拒绝）、并发上限、记忆模式。先软吊销，再永久删除。 |
-| 🧠 | **Memory 中间件** | 默认开启：路由前把记忆注入上下文；后台 worker 负责压缩与归并；遗忘/分层机制（衰减、强化、保留期）防止记忆膨胀。可按 key 或按请求关闭（`x-memory-mode: off`）。 |
+| 🧠 | **Memory 中间件** | 默认开启：路由前把记忆注入上下文；后台 worker 负责压缩与归并——压缩**全自动、零配置**（价格与上下文窗口取自模型目录；按体量 / 空闲 / 上下文压力三种时机触发）；遗忘/分层机制（衰减、强化、保留期）防止记忆膨胀。可按 key 或按请求关闭（`x-memory-mode: off`）。 |
 | 📊 | **全程可观测** | 每个请求一条脱敏决策记录——分类、策略、lane、每次供应商尝试、延迟、兜底、成本。正文逐字捕获单独存表（默认开，保留 30 天）。可编辑的 **Retry** 按钮能重放任何已捕获的请求。 |
 | 🖥️ | **管理面板** | `/admin` 上的 SvelteKit SPA，HTTP Basic 把守：概览、key 增删改、lane / 策略 / 分类器编辑器、系统设置、可下钻的请求日志。编辑会**写回 `config/*.yaml`**（保留注释、原子写入）并实时重绑——无需重启，重启也不丢。支持 5 种语言。 |
 | 💾 | **存储** | 默认 SQLite（一个本地文件）。Postgres / Supabase 走同一套 Store 端口抽象——改一个环境变量即可切换。 |
@@ -183,8 +183,8 @@ curl http://localhost:8080/v1/chat/completions \
 | `lanes.yaml` | 每条 lane 的主模型 + 兜底链 | ✅ 持久化 |
 | `policies.yaml` | 首条命中、用来挑选或封顶 lane 的规则 | ✅ 持久化 |
 | `classifier.yaml` | 内置规则 + 可选的 eval 模型 | ✅ 持久化 |
-| `memory.yaml` | Observer 压缩 + 遗忘/分层旋钮（出厂配置即开启） | ✅ |
-| `capabilities.yaml` / `pricing.yaml` | 对模型目录的手动覆盖项 | — |
+| `memory.yaml` | 遗忘/分层旋钮（出厂配置即开启）。压缩是全自动的、不提供配置项；旧版遗留的 `observer:` 配置块会导致启动失败 | ✅ |
+| `capabilities.yaml` / `pricing.yaml` | 对模型目录的手动覆盖项（含 prompt 缓存读/写价格） | — |
 
 最常用的环境变量（env 优先于 YAML；完整列表见 [`.env.example`](.env.example)）：
 
@@ -264,7 +264,7 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
 
 ## 项目状态
 
-Helm API 当前版本 **0.8.0**——一套端到端的真实实现，不是空架子。完整链路（配置 → 鉴权 → 分类 → 路由 → 执行（含熔断与兜底）→ 协议互译 → 遥测）已全部打通，背后是一套相当完整的 Vitest 单测加 Playwright e2e 用例。
+Helm API 当前版本 **0.8.6**——一套端到端的真实实现，不是空架子。完整链路（配置 → 鉴权 → 分类 → 路由 → 执行（含熔断与兜底）→ 协议互译 → 遥测）已全部打通，背后是一套相当完整的 Vitest 单测加 Playwright e2e 用例。
 
 ## 许可
 
