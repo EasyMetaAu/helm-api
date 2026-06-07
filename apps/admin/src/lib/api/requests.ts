@@ -312,7 +312,10 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
   const evalCacheHit = raw.classifier?.eval_cache_hit ?? null;
   return {
     trace_id: String(raw.trace_id ?? raw.request_id ?? ''),
-    ts: '',
+    // Same source as the list "Time" column (created_at, flattened by the detail
+    // endpoint). Legacy records without it stay empty → header shows the
+    // "time not recorded" placeholder rather than a fabricated time.
+    ts: typeof raw.created_at === 'number' ? new Date(raw.created_at).toISOString() : '',
     request_meta: buildRequestMeta(raw),
     // The backend does not persist a payload; we render a redaction placeholder so
     // the operator knows it was intentionally withheld (Principle 7).

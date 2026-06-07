@@ -120,6 +120,14 @@ describe('toDetail', () => {
     const d = toDetail(rawRecord());
     expect(d.provider_attempts[0]?.error_detail ?? null).toBeNull();
   });
+
+  it('maps the recorded created_at (epoch ms) to an ISO ts; legacy records stay empty', () => {
+    const d = toDetail(rawRecord({ created_at: 1717155600000 }));
+    expect(d.ts).toBe(new Date(1717155600000).toISOString());
+    // No created_at on a legacy record → empty (never fabricated), so the detail
+    // header degrades to "time not recorded" rather than showing a wrong time.
+    expect(toDetail(rawRecord()).ts).toBe('');
+  });
 });
 
 describe('listRequests', () => {

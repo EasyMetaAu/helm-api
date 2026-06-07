@@ -496,6 +496,21 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(await ctx.stores.telemetry.getApiKeyId("nope")).toBeNull();
     });
 
+    it("getCreatedAt returns the recorded timestamp, null on a miss", async () => {
+      ctx = await make();
+      const stamp = new Date(1_700_000_000_000);
+      await ctx.stores.telemetry.insert({
+        decision: decision("req_1"),
+        apiKeyId: "k1",
+        createdAt: stamp,
+      });
+      // The redacted DecisionRecord has no timestamp field; the detail header
+      // resolves the request time through this narrow lookup (same column the
+      // list endpoint flattens as created_at).
+      expect((await ctx.stores.telemetry.getCreatedAt("req_1"))?.getTime()).toBe(stamp.getTime());
+      expect(await ctx.stores.telemetry.getCreatedAt("nope")).toBeNull();
+    });
+
     it("stores no plaintext key and no raw message payload", async () => {
       ctx = await make();
       await ctx.stores.telemetry.insert({

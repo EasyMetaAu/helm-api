@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-07 · 请求详情页时间显示「未记录时间」（修复；docs/07）
+
+- **Bug（用户报告）**：请求详情页头部恒显「未记录时间」。根因两处：① 网关详情接口 `GET /admin/api/requests/:traceId` 直接吐 `getByRequestId` 返回的 `DecisionRecord`，而该 record **schema 本身不含时间戳**（时间在独立的 `createdAt` 列里）；列表接口 `GET /requests` 早已 `created_at: r.createdAt.getTime()` 拍平上去，详情接口没拍。② 前端 `toDetail` 把 `ts` **写死成 `''`**（`toListItem` 早已正确从 `created_at` 映射），于是详情页永远落入 `{d.ts || '未记录时间'}` 兜底。
+- **方案（窄查询，对齐列表数据源）**：新增 Store 端口方法 `getCreatedAt(requestId): Promise<Date | null>`，仿 `getApiKeyId` 只 select 单列、不反序列化 decision blob；sqlite 直接返回 Date 列，postgres 列是 epoch-ms bigint 需 `new Date(ms)` 包回。网关详情接口改为 `{ ...rec, created_at: createdAt.getTime() }`（缺失则不加字段）。前端 `toDetail` 改成与 `toListItem` 同款 `created_at → ISO`；legacy 无值仍空串 → 仍走「未记录时间」兜底（绝不伪造时间）。**详情与列表时间同源同值，必然一致。**
+- **验证**：TDD 先红后绿——store-contract（双适配器 getCreatedAt 命中/未命中）、gateway 详情断言 `created_at`、前端 toDetail ts 映射；同步给 4 处 TelemetryStore mock 补 `getCreatedAt`。typecheck/lint 净，全量单测 2515 绿（唯 4 例 `admin-static.test` 红——需先 `pnpm build` 出 SPA 产物，与本改无关）。
+
+---
+
 ## 2026-06-06 · 管理界面规则编辑写回 YAML（修复「保存只活在内存、重启即回滚」；用户决策；docs/11；CLAUDE.md 原则 2）
 
 - **Bug（用户报告）**：分类器/Lanes/Policies 三页的「保存」只经 `createRuntimeRuleStore` 重绑**内存变量**（rule-store.ts 自注 "MVP…future YAML write-back adapter"），不落任何持久层——重启即回滚到 yaml。其余面（System Settings → config_kv、Keys/OAuth → DB）本就持久，仅这三页挥发。
@@ -32,20 +40,11 @@
 
 ---
 
-## 2026-06-06 · 已吊销 key 允许永久删除（两步销毁；用户决策；docs/06）
-
-- **动机**：原来 key 只能软吊销（`DELETE /admin/api/keys/:id` → `disabled:true`），行永久保留，admin 列表里已吊销 key 越积越多、无从清理。用户要求「吊销后允许删除」。
-- **两步销毁（拍板）**：保留 `DELETE /:id` = 软吊销契约不动；硬删除作为同一路由的 `?purge=true` 旗标。路由侧 gate：先 `list().find` 取当前态——未找到 `404`、仍 active `409`（必须先吊销）、已 `disabled` 才 `deleteKey` → `{deleted:id}`。**「必须先吊销」是路由策略，不进 store**（沿用 getByHash 返回 disabled key、由 caller 决策的既有模式）。UI 仅在 disabled 行展示 Delete 按钮，但 server 仍独立校验（纵深防御）——active key 永不被静默清除，软吊销审计步骤不可跳过。
-- **审计存活（关键论据）**：telemetry/payload 表的 `api_key_id` 是**无 FK 的纯文本列**（schema 第 49/58 行），硬删 key 行不级联、不报错，历史决策仍保留该（现悬空）key 引用可供审计。这调和了 CLAUDE.md 原则 7 / docs/06「吊销不物理删除」——那是指吊销本身不该静默销毁；此处是**显式二次销毁**，前提是已有一条可审计的软吊销记录。
-- **贯穿层**：core `KeyStore.deleteKey`（port + sqlite `db.delete().run()` 查 `changes===0`、pg `.returning()` 查 `length===0`，均 throw on unknown）→ admin route 分支 → api client `deleteKey` 打 `?purge=true` → `+page.svelte`（disabled 行 Delete 按钮 + 确认 Modal，成功 `keys.filter` 移除行）。i18n 新增 6 key（en + zh-hans 意译，其余 locale 回退英文，留 `pnpm i18n:sync` 补）。
-- **测试（TDD 先红）**：keystore.test（删除后 getByHash→null、list 变短；删未知 reject）；admin.test（mock 加 `deleteKey` splice；purge disabled→200+行消失、purge active→409+行存、purge unknown→404；原软吊销 no-flag 用例保持绿）；keys.test（mock 加 `deleteKey`；disabled 行只显 Delete、确认后 deleteKey 被调+行消失、删除失败显错+行存 fail-closed）。
-- **坑/注**：`?purge=true` 旗标 vs 子资源路径——选旗标以保单 handler、不破既有 revoke 契约/测试。route gate 用 `list().find` 而非新增 `getById`（port 无 getById，list 量小、admin 非热路径），read→delete 之间的 TOCTOU 在自托管单管理员场景可忽略，且 deleteKey 仍 throw→catch 回 404 兜底。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-06 · 已吊销 key 允许永久删除（两步销毁；用户决策；docs/06）：软吊销 `DELETE /:id` 契约不动，硬删作 `?purge=true` 旗标；路由 gate `list().find`——未找 404 / active 409（必先吊销）/ disabled 才 deleteKey。「必先吊销」是路由策略不进 store；UI 仅 disabled 行显 Delete 但 server 独立校验（纵深防御）。审计存活靠 telemetry/payload 的 `api_key_id` 是无 FK 纯文本列，硬删不级联、悬空引用仍可审计。贯穿 core `KeyStore.deleteKey`(throw on unknown)→admin route→api client→+page。坑：选旗标不破 revoke 契约；read→delete TOCTOU 在单管理员场景可忽略 + deleteKey throw 兜底。
 
 ### 2026-06-06 · 记忆 thread source 新 key 默认 auto（配合「记忆默认开启」；用户决策；docs/08）：新 key `memory_mode=inject` 却 thread source 仍 `header` = 缺 `x-thread-id` 不回退信号链、无 per-conversation 记忆——两 keystore `createKey` mint 默认 `?? "header" → ?? "auto"`（仅新 key；Zod parse-default `header` 不动，既有 key/迁移不重写）。admin UI 诚实化：KeyCapsForm/CreateKeyDialog 默认显 Auto = 实际落库值。Codex 修复：(P2) `bootstrapRootKey` 显式置 `off`+`header` 让 root key 记忆惰性（root key 勿用于生产流量）；(P3) CreateKeyInput 各层注释自 #106 起误写「omitted => off」→ 改如实「省略 ⇒ mint 默认 inject/auto」。
 

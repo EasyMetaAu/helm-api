@@ -67,6 +67,9 @@ function fakeTelemetry(
     async getApiKeyId() {
       return keyId;
     },
+    async getCreatedAt() {
+      return null;
+    },
     async insert(input) {
       if (opts.failInsert) throw new Error("telemetry down");
       rec.inserts.push(input);
