@@ -876,6 +876,9 @@ export async function buildServer(
     // in this same scope, built before the worker starts), so prices are looked
     // up per job from live catalog data instead of hand-tuned config.
     resolvePricing: (alias) => resolveCompactionPricing(catalog, alias),
+    // Optional trigger overrides (config.memory.compaction). Empty by default —
+    // the internal AUTO_PRIORS apply; a written key is the only thing that wins.
+    compaction: config.memory.compaction,
     now: () => new Date(),
     log: memoryLog,
   };
@@ -1811,6 +1814,7 @@ export async function buildServer(
           memoryStore: store.memory,
           now: () => new Date(),
           batchSize: 10,
+          compaction: config.memory.compaction,
           log: memoryLog,
         });
       },

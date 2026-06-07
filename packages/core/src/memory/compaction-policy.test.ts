@@ -6,6 +6,7 @@ import {
   type AutoCompactionInputs,
   chooseAutoCompaction,
   effectiveCompactionPrices,
+  resolveCompactionTunables,
 } from "./compaction-policy.js";
 
 function messages(tokens: number[]): RawMessage[] {
@@ -40,6 +41,7 @@ const CLAUDE_PRICED: ResolvedCompactionPricing = {
 function inputs(overrides: Partial<AutoCompactionInputs> = {}): AutoCompactionInputs {
   return {
     idle: false,
+    tunables: resolveCompactionTunables(),
     pricing: UNPRICED,
     priorCompactionCount: 0,
     measuredRetention: null,
@@ -232,6 +234,58 @@ describe("chooseAutoCompaction — context-pressure triggers", () => {
     const calm = chooseAutoCompaction(segment, inputs({ threadTotalTokens: 150_000 }));
     expect(calm.shouldCompact).toBe(false);
     expect(calm.reason).toBe("below_thresholds");
+  });
+});
+
+describe("resolveCompactionTunables — config overrides over internal priors", () => {
+  it("no overrides → exactly the AUTO_PRIORS values (zero-config posture)", () => {
+    expect(resolveCompactionTunables()).toEqual({
+      segmentMinTokens: AUTO_PRIORS.segmentMinTokens,
+      idleFlushS: AUTO_PRIORS.idleFlushS,
+      forceContextRatio: AUTO_PRIORS.forceContextRatio,
+      minRecentMessages: AUTO_PRIORS.minRecentMessages,
+      minKeepRatio: AUTO_PRIORS.minKeepRatio,
+    });
+    expect(resolveCompactionTunables({})).toEqual(resolveCompactionTunables());
+  });
+
+  it("a written override wins per-field; omitted siblings keep their priors", () => {
+    const t = resolveCompactionTunables({ idle_flush_s: 7200, force_context_ratio: 0.9 });
+    expect(t.idleFlushS).toBe(7200);
+    expect(t.forceContextRatio).toBe(0.9);
+    expect(t.segmentMinTokens).toBe(AUTO_PRIORS.segmentMinTokens);
+    expect(t.minRecentMessages).toBe(AUTO_PRIORS.minRecentMessages);
+  });
+
+  it("overrides actually change the DECISION (no lying knobs)", () => {
+    // 1000 tokens: below the default 2048 size trigger → no compaction…
+    const segment = messages([250, 250, 250, 250, 250, 250]); // 1500, n=6
+    const calm = chooseAutoCompaction(segment, inputs({ threadTotalTokens: 1500 }));
+    expect(calm.shouldCompact).toBe(false);
+    expect(calm.reason).toBe("below_thresholds");
+    // …but with segment_min_tokens lowered, the same segment compacts.
+    const eager = chooseAutoCompaction(
+      segment,
+      inputs({
+        threadTotalTokens: 1500,
+        tunables: resolveCompactionTunables({ segment_min_tokens: 1000 }),
+      }),
+    );
+    expect(eager.shouldCompact).toBe(true);
+    expect(eager.reason).toBe("memory_formation");
+
+    // force_context_ratio override moves the pressure line: 0.5 utilization
+    // forces with a 0.4 override but not with the default 0.8.
+    const pressured = chooseAutoCompaction(
+      segment,
+      inputs({
+        pricing: { ...CLAUDE_PRICED, maxContextTokens: 10_000 },
+        threadTotalTokens: 5_000,
+        tunables: resolveCompactionTunables({ force_context_ratio: 0.4 }),
+      }),
+    );
+    expect(pressured.shouldCompact).toBe(true);
+    expect(pressured.reason).toBe("forced_context_limit");
   });
 });
 

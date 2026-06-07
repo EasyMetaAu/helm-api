@@ -183,7 +183,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `lanes.yaml` | 每条 lane 的主模型 + 兜底链 | ✅ 持久化 |
 | `policies.yaml` | 首条命中、用来挑选或封顶 lane 的规则 | ✅ 持久化 |
 | `classifier.yaml` | 内置规则 + 可选的 eval 模型 | ✅ 持久化 |
-| `memory.yaml` | 遗忘/分层旋钮（出厂配置即开启）。压缩是全自动的、不提供配置项；旧版遗留的 `observer:` 配置块会导致启动失败 | ✅ |
+| `memory.yaml` | 遗忘/分层旋钮（出厂配置即开启）+ 可选的压缩触发覆盖（`compaction:`——体量/空闲/压力阈值；经济学部分保持全自动）。旧版遗留的 `observer:` 配置块会导致启动失败 | ✅ |
 | `capabilities.yaml` / `pricing.yaml` | 对模型目录的手动覆盖项（含 prompt 缓存读/写价格） | — |
 
 最常用的环境变量（env 优先于 YAML；完整列表见 [`.env.example`](.env.example)）：

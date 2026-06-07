@@ -1,5 +1,6 @@
+import type { CompactionOverrides } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
-import { AUTO_PRIORS } from "./compaction-policy.js";
+import { resolveCompactionTunables } from "./compaction-policy.js";
 
 // Idle-flush trigger — the memory-FORMATION backstop for short threads. Most
 // compaction is enqueued on the request path (writeback) and fires once the
@@ -27,6 +28,9 @@ export interface IdleFlushDeps {
   // Bound the per-tick scan so one busy deployment can't enqueue unbounded jobs
   // in a single sweep; leftovers are picked up on the next tick.
   batchSize: number;
+  // Optional config.memory.compaction trigger overrides (idle_flush_s drives the
+  // sweep cutoff). Absent → the internal AUTO_PRIORS default applies.
+  compaction?: CompactionOverrides;
   log: (line: string, meta?: object) => void;
 }
 
@@ -43,7 +47,8 @@ export async function maybeEnqueueIdleObserverJobs(deps: IdleFlushDeps): Promise
   }
 
   try {
-    const idleBeforeMs = deps.now().getTime() - AUTO_PRIORS.idleFlushS * 1000;
+    const idleBeforeMs =
+      deps.now().getTime() - resolveCompactionTunables(deps.compaction).idleFlushS * 1000;
     const candidates = await listCandidates.call(deps.memoryStore, {
       idleBeforeMs,
       limit: deps.batchSize,

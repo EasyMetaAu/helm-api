@@ -78,6 +78,16 @@ describe("maybeEnqueueIdleObserverJobs", () => {
     ]);
   });
 
+  it("honors the idle_flush_s config override for the sweep cutoff", async () => {
+    const { store } = makeStore([]);
+    const deps = { ...makeDeps(store), compaction: { idle_flush_s: 7200 } };
+    await maybeEnqueueIdleObserverJobs(deps);
+    expect(store.listIdleFlushCandidates).toHaveBeenCalledWith({
+      idleBeforeMs: new Date("2026-06-05T00:00:00.000Z").getTime() - 7200 * 1000,
+      limit: 100,
+    });
+  });
+
   it("is a no-op when no thread is idle", async () => {
     const { store, enqueued } = makeStore([]);
     await maybeEnqueueIdleObserverJobs(makeDeps(store));

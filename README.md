@@ -183,7 +183,7 @@ Everything lives in `config/*.yaml`, Zod-validated on load. **Invalid config sto
 | `lanes.yaml` | Each lane's primary model + fallback chain | ✅ persists |
 | `policies.yaml` | First-match rules that pick or cap the lane | ✅ persists |
 | `classifier.yaml` | Built-in rules + the optional eval model | ✅ persists |
-| `memory.yaml` | Forgetting/tiering knobs (on in the shipped config). Compaction is automatic — not configurable; a leftover `observer:` block from older configs refuses startup | ✅ |
+| `memory.yaml` | Forgetting/tiering knobs (on in the shipped config) + optional compaction trigger overrides (`compaction:` — size/idle/pressure thresholds; economics stay automatic). A leftover `observer:` block from older configs refuses startup | ✅ |
 | `capabilities.yaml` / `pricing.yaml` | Manual overrides on the model catalog (incl. prompt-cache read/write prices) | — |
 
 Most-used environment variables (env wins over YAML; full list in [`.env.example`](.env.example)):

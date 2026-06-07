@@ -81,6 +81,35 @@ export const AUTO_PRIORS = {
   fallbackMaxContextTokens: 200_000,
 } as const;
 
+// The operator-tunable subset of the priors: the TRIGGER/keep parameters, the
+// only compaction surface with operational meaning. Resolved from the optional
+// config.memory.compaction overrides — an omitted key falls back to AUTO_PRIORS,
+// so a value in the config is the only thing that ever takes effect (no lying
+// knobs). The economics priors stay internal on purpose.
+export interface CompactionTunables {
+  segmentMinTokens: number;
+  idleFlushS: number;
+  forceContextRatio: number;
+  minRecentMessages: number;
+  minKeepRatio: number;
+}
+
+export function resolveCompactionTunables(overrides?: {
+  segment_min_tokens?: number;
+  idle_flush_s?: number;
+  force_context_ratio?: number;
+  min_recent_messages?: number;
+  min_keep_ratio?: number;
+}): CompactionTunables {
+  return {
+    segmentMinTokens: overrides?.segment_min_tokens ?? AUTO_PRIORS.segmentMinTokens,
+    idleFlushS: overrides?.idle_flush_s ?? AUTO_PRIORS.idleFlushS,
+    forceContextRatio: overrides?.force_context_ratio ?? AUTO_PRIORS.forceContextRatio,
+    minRecentMessages: overrides?.min_recent_messages ?? AUTO_PRIORS.minRecentMessages,
+    minKeepRatio: overrides?.min_keep_ratio ?? AUTO_PRIORS.minKeepRatio,
+  };
+}
+
 export interface AutoCompactionInputs {
   // The thread went quiet (newest message older than the idle threshold) — the
   // observer derives this at RUN TIME from message ages, NOT from a job flag, so
@@ -88,6 +117,8 @@ export interface AutoCompactionInputs {
   // correctly seen as active. When idle, fold the WHOLE uncovered history (the
   // memory-formation backstop for short threads); raw rows survive regardless.
   idle: boolean;
+  // Resolved trigger/keep parameters (config overrides ?? AUTO_PRIORS).
+  tunables: CompactionTunables;
   // Catalog lookup for the thread's last served model (all-null when unknown).
   pricing: ResolvedCompactionPricing;
   // = the thread's existing observation count (derived, not configured).
@@ -247,8 +278,8 @@ export function chooseAutoCompaction(
 
   const segmentTokens = tokenSum(segment);
   const forced =
-    inputs.threadTotalTokens >= prices.maxContextTokens * AUTO_PRIORS.forceContextRatio;
-  const sizeTriggered = segmentTokens >= AUTO_PRIORS.segmentMinTokens;
+    inputs.threadTotalTokens >= prices.maxContextTokens * inputs.tunables.forceContextRatio;
+  const sizeTriggered = segmentTokens >= inputs.tunables.segmentMinTokens;
 
   if (!forced && !sizeTriggered) return noop("below_thresholds", segmentTokens);
 
@@ -256,7 +287,7 @@ export function chooseAutoCompaction(
   // it to 1 so something can ALWAYS be freed near the context limit.
   const floor = forced
     ? 1
-    : Math.max(AUTO_PRIORS.minRecentMessages, Math.ceil(n * AUTO_PRIORS.minKeepRatio));
+    : Math.max(inputs.tunables.minRecentMessages, Math.ceil(n * inputs.tunables.minKeepRatio));
   if (floor > n - 1) {
     // Forced pressure with NO keepable boundary (a single huge uncovered
     // message): fold the whole segment anyway — keeping it raw would pin the

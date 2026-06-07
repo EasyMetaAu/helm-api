@@ -171,9 +171,11 @@ export {
   AUTO_PRIORS,
   type AutoCompactionInputs,
   type CompactionDecision,
+  type CompactionTunables,
   chooseAutoCompaction,
   type EffectiveCompactionPrices,
   effectiveCompactionPrices,
+  resolveCompactionTunables,
 } from "./memory/compaction-policy.js";
 // Memory forgetting — the decay buffer-flush TRIGGER (docs/12 P5). Run on the worker
 // tick (never per request): enqueues account-scoped decay jobs for due accounts, gated.

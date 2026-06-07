@@ -92,6 +92,8 @@ export {
   AuthConfigSchema,
   type BootstrapConfig,
   BootstrapConfigSchema,
+  type CompactionOverrides,
+  CompactionOverridesSchema,
   type ForgettingConfig,
   ForgettingSchema,
   type HelmConfig,

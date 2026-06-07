@@ -1,10 +1,10 @@
-import type { Observation, RawMessage } from "@helm/shared";
+import type { CompactionOverrides, Observation, RawMessage } from "@helm/shared";
 import type { ResolvedCompactionPricing } from "../catalog/cost.js";
 import type { MemoryStore } from "../store/ports.js";
 import {
-  AUTO_PRIORS,
   type AutoCompactionInputs,
   chooseAutoCompaction,
+  resolveCompactionTunables,
 } from "./compaction-policy.js";
 
 // Background Observer (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
@@ -53,6 +53,9 @@ export interface ObserverDeps {
   // (closure over the runtime catalog); null/unknown alias resolves all-null
   // and the policy falls back to its deterministic heuristics (fail-open).
   resolvePricing: (modelAlias: string | null) => ResolvedCompactionPricing;
+  // Optional config.memory.compaction trigger overrides. Absent (the default
+  // and the zero-config posture) → the internal AUTO_PRIORS apply verbatim.
+  compaction?: CompactionOverrides;
   // Injected clock — observed_at + the summary's time anchor come from here.
   now: () => Date;
   log: (line: string, meta?: object) => void;
@@ -198,13 +201,14 @@ export async function runObserverJob(
       .catch(() => null);
     const modelAlias = threadMeta?.lastServedModel ?? null;
     const pricing = deps.resolvePricing(modelAlias);
+    const tunables = resolveCompactionTunables(deps.compaction);
     // Idle is derived HERE, at run time, from the newest message's age — NOT from
     // a job flag. This is race-free (a thread that got activity between enqueue
     // and run is correctly seen as active) and means writeback + idle-sweep jobs
     // can share ONE plain-scope open-job lock per thread (no overlap hazard).
     const nowMs = deps.now().getTime();
     const newestMessageMs = all.reduce((max, m) => Math.max(max, m.createdAt.getTime()), 0);
-    const idle = all.length > 0 && nowMs - newestMessageMs >= AUTO_PRIORS.idleFlushS * 1000;
+    const idle = all.length > 0 && nowMs - newestMessageMs >= tunables.idleFlushS * 1000;
     // Context-pressure footprint = the ACTIVE prompt size, not the full raw audit
     // history. Inject suppresses covered raw messages (they are represented by
     // their observation), so a thread compacted once would otherwise keep
@@ -226,6 +230,7 @@ export async function runObserverJob(
     );
     const inputs: AutoCompactionInputs = {
       idle,
+      tunables,
       pricing,
       priorCompactionCount: existing.length,
       measuredRetention: measuredRetention(all, existing),
