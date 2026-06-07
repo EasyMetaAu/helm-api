@@ -12,6 +12,7 @@ const UPSTREAM_SAMPLE = {
     max_output_tokens: 16384,
     input_cost_per_token: 0.0000025,
     output_cost_per_token: 0.00001,
+    cache_read_input_token_cost: 0.00000125, // free writes (no creation field)
     supports_function_calling: true,
     supports_response_schema: true,
     supports_vision: true,
@@ -22,8 +23,19 @@ const UPSTREAM_SAMPLE = {
     max_output_tokens: 8192,
     input_cost_per_token: 0.000003,
     output_cost_per_token: 0.000015,
+    cache_creation_input_token_cost: 0.00000375, // paid cache writes (1.25× input)
+    cache_read_input_token_cost: 0.0000003,
     supports_function_calling: true,
     supports_vision: true,
+    mode: "chat",
+  },
+  "deepseek-chat": {
+    max_input_tokens: 65536,
+    max_output_tokens: 8192,
+    input_cost_per_token: 0.00000027,
+    output_cost_per_token: 0.0000011,
+    input_cost_per_token_cache_hit: 0.00000007, // DeepSeek's cache-hit alias
+    supports_function_calling: true,
     mode: "chat",
   },
   "broken-no-context": {
@@ -47,13 +59,13 @@ describe("syncCatalog", () => {
       now: () => new Date("2026-01-02T03:04:05.000Z"),
     });
 
-    // 2 valid models (gpt-4o, claude); sample_spec + broken entry skipped.
-    expect(modelCount).toBe(2);
+    // 3 valid models (gpt-4o, claude, deepseek); sample_spec + broken entry skipped.
+    expect(modelCount).toBe(3);
 
     const written = JSON.parse(readFileSync(outFile, "utf-8"));
     const parsed = GeneratedCatalogSchema.parse(written);
     expect(parsed.generatedAt).toBe("2026-01-02T03:04:05.000Z");
-    expect(parsed.models).toHaveLength(2);
+    expect(parsed.models).toHaveLength(3);
 
     const byKey = new Map(parsed.models.map((m) => [m.modelKey, m]));
     const gpt = byKey.get("gpt-4o");
@@ -64,6 +76,19 @@ describe("syncCatalog", () => {
     // per-token → per-MTok USD
     expect(gpt?.pricing.inputPerMTokUsd).toBeCloseTo(2.5, 6);
     expect(gpt?.pricing.outputPerMTokUsd).toBeCloseTo(10, 6);
+    // Cache prices: read mapped, creation absent → null (NOT zero — null means
+    // "unpublished", the consumer decides; OpenAI's free writes are a consumer fact).
+    expect(gpt?.pricing.cacheReadPerMTokUsd).toBeCloseTo(1.25, 6);
+    expect(gpt?.pricing.cacheWritePerMTokUsd).toBeNull();
+
+    const claude = byKey.get("claude-3-5-sonnet");
+    expect(claude?.pricing.cacheReadPerMTokUsd).toBeCloseTo(0.3, 6);
+    expect(claude?.pricing.cacheWritePerMTokUsd).toBeCloseTo(3.75, 6);
+
+    // DeepSeek publishes the cache-hit price under its own alias field.
+    const deepseek = byKey.get("deepseek-chat");
+    expect(deepseek?.pricing.cacheReadPerMTokUsd).toBeCloseTo(0.07, 6);
+    expect(deepseek?.pricing.cacheWritePerMTokUsd).toBeNull();
   });
 
   it("emits models in stable sorted key order (deterministic artifact)", async () => {

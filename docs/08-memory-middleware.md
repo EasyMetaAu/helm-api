@@ -101,7 +101,7 @@ system prompt
 + project reflection
 + resource reflection
 + thread observations
-+ recent raw messages (fixed default: keep latest 2; economy mode can keep a dynamic suffix)
++ recent raw messages (an uncompressed suffix the auto-compaction policy keeps)
 + current user message
 ```
 
@@ -109,14 +109,19 @@ Rules:
 
 - Reflections are stable and slow-changing (the Reflector only bumps the version
   when the merged text actually changes).
-- By default, the Observer preserves the most recent `recent_keep = 2` raw turns
-  uncompressed so compression can never lose the live working set; turns already
-  covered by an observation's source range are not re-injected (no duplication).
-- Optional `memory.observer.compaction.mode = economy` borrows bash-agent's useful
-  idea: before summarizing, estimate whether compaction is worth its summary cost,
-  cache-prefix churn, information loss, and long-context quality benefit. If no
-  candidate suffix has positive benefit, the Observer skips the summary job; near
-  the configured context ceiling it still compacts as a safety valve.
+- Compaction is **not configurable** — there is no `memory.observer` block (a
+  leftover one fails startup). The Observer runs a single, internal auto-adaptive
+  policy: it preserves a recent raw suffix so compression never loses the live
+  working set, and turns already covered by an observation's source range are not
+  re-injected (no duplication). Three triggers compact (any one suffices):
+  **size** (the uncovered segment crosses an internal token threshold —
+  observations are the raw material of reflections and facts), **idle** (a quiet
+  thread with uncovered history is swept on the worker tick so short threads still
+  form memories), and **context pressure** (the active footprint nears the served
+  model's context window — a safety valve). Prices and the context window are
+  resolved per job from the model catalog (pin a price via `pricing.yaml`); the
+  economics weigh summary cost, cache-prefix churn, measured information loss, and
+  long-context quality benefit, with no tuning knobs to set.
 - Observation text carries a time anchor.
 - Injected memory stays within a token budget — `HELM_MEMORY_INJECT_TOKEN_BUDGET`
   (default `4000`), counting injected memory layers only (the system prompt and

@@ -23,7 +23,12 @@ const catalog = new Map<string, CatalogEntry>([
         maxContextTokens: 128_000,
         maxOutputTokens: 8_000,
       },
-      pricing: { inputPerMTokUsd: 0.5, outputPerMTokUsd: 1.5 },
+      pricing: {
+        inputPerMTokUsd: 0.5,
+        outputPerMTokUsd: 1.5,
+        cacheReadPerMTokUsd: null,
+        cacheWritePerMTokUsd: null,
+      },
       source: "override",
     },
   ],

@@ -370,25 +370,41 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
     }
 
     await runObserverJob(
-      { jobId: "worker-a", accountId: "acct-a", threadId: "acct-a:t1" },
+      { jobId: "worker-a", accountId: "acct-a", threadId: "acct-a:t1", trigger: "idle" },
       {
         memoryStore: store,
         summarize: async ({ messages }) => ({
           observationText: `A saw ${messages.map((m) => m.content).join("|")}`,
         }),
         costSink: vi.fn(),
+        resolvePricing: () => ({
+          modelKey: null,
+          inputPerMtok: null,
+          outputPerMtok: null,
+          cacheReadPerMtok: null,
+          cacheWritePerMtok: null,
+          maxContextTokens: null,
+        }),
         now: () => new Date("2026-01-02T00:00:00.000Z"),
         log: vi.fn(),
       },
     );
     await runObserverJob(
-      { jobId: "worker-b", accountId: "acct-b", threadId: "acct-b:t1" },
+      { jobId: "worker-b", accountId: "acct-b", threadId: "acct-b:t1", trigger: "idle" },
       {
         memoryStore: store,
         summarize: async ({ messages }) => ({
           observationText: `B saw ${messages.map((m) => m.content).join("|")}`,
         }),
         costSink: vi.fn(),
+        resolvePricing: () => ({
+          modelKey: null,
+          inputPerMtok: null,
+          outputPerMtok: null,
+          cacheReadPerMtok: null,
+          cacheWritePerMtok: null,
+          maxContextTokens: null,
+        }),
         now: () => new Date("2026-01-02T00:00:00.000Z"),
         log: vi.fn(),
       },

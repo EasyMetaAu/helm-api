@@ -45,10 +45,10 @@ import {
   makeGeminiError,
   makeProxyFetch,
   maybeEnqueueDecayJobs,
+  maybeEnqueueIdleObserverJobs,
   type OAuthPoolMember,
   type OAuthTokenStore,
   type ObserveDeps,
-  type ObserverCompactionPolicy,
   type ObserverDeps,
   type PoliciesConfig,
   type ProviderClient,
@@ -61,6 +61,7 @@ import {
   type ResponsesSSEEvent,
   type RouteOptions,
   redact,
+  resolveCompactionPricing,
   resolveCostUsd,
   responsesTransformer,
   routeRequest,
@@ -78,7 +79,6 @@ import type {
   CatalogEntry,
   ClassifierConfig,
   ErrorClass,
-  HelmConfig,
   InternalRequest,
   Observation,
   ProviderConfig as ProviderConfigShared,
@@ -138,34 +138,6 @@ export interface ServerHandle {
 // content change (cache-friendly, docs/08 "reflections should be stable and slow-changing").
 const MEMORY_SUMMARY_MAX_CHARS = 2000;
 const MEMORY_REFLECTION_MAX_CHARS = 4000;
-
-function observerCompactionPolicy(
-  compaction: HelmConfig["memory"]["observer"]["compaction"],
-): ObserverCompactionPolicy {
-  if (compaction.mode === "fixed") {
-    return { mode: "fixed", recentKeep: compaction.recent_keep };
-  }
-  return {
-    mode: "economy",
-    minRecentMessages: compaction.min_recent_messages,
-    minKeepRatio: compaction.min_keep_ratio,
-    maxContextTokens: compaction.max_context_tokens,
-    forceAtContextRatio: compaction.force_at_context_ratio,
-    expectedRemainingCalls: compaction.expected_remaining_calls,
-    fixedPrefixTokens: compaction.fixed_prefix_tokens,
-    summaryOutputTokens: compaction.summary_output_tokens,
-    summaryInstructionTokens: compaction.summary_instruction_tokens,
-    averageInputTokens: compaction.average_input_tokens,
-    priceInputPerMtok: compaction.price_input_per_mtok,
-    priceCachePerMtok: compaction.price_cache_per_mtok,
-    priceOutputPerMtok: compaction.price_output_per_mtok,
-    retentionRate: compaction.retention_rate,
-    priorCompactionCount: compaction.prior_compaction_count,
-    distortionPenalty: compaction.distortion_penalty,
-    qualityPenalty: compaction.quality_penalty,
-    minNetBenefitUsd: compaction.min_net_benefit_usd,
-  };
-}
 
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -899,7 +871,11 @@ export async function buildServer(
       observationText: summarizeMessages(messages),
     }),
     costSink: () => {},
-    compaction: observerCompactionPolicy(config.memory.observer.compaction),
+    // Auto-compaction price resolution: resolve the thread's stamped model alias
+    // against the runtime catalog. The closure captures `catalog` (declared later
+    // in this same scope, built before the worker starts), so prices are looked
+    // up per job from live catalog data instead of hand-tuned config.
+    resolvePricing: (alias) => resolveCompactionPricing(catalog, alias),
     now: () => new Date(),
     log: memoryLog,
   };
@@ -1826,6 +1802,15 @@ export async function buildServer(
           memoryStore: store.memory,
           config: forgettingCfg,
           now: () => new Date(),
+          log: memoryLog,
+        });
+        // Idle-flush memory-formation backstop: enqueue idle-flush observer jobs
+        // for quiet threads with uncovered history. NOT gated behind forgetting
+        // (memory formation is baseline); fail-open inside.
+        await maybeEnqueueIdleObserverJobs({
+          memoryStore: store.memory,
+          now: () => new Date(),
+          batchSize: 10,
           log: memoryLog,
         });
       },

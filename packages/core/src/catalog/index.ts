@@ -4,6 +4,7 @@ import {
   type CatalogEntry,
   CatalogEntrySchema,
   type GeneratedCatalog,
+  type Pricing,
   PricingOverrideSchema,
 } from "@helm/shared";
 import type { z } from "zod";
@@ -18,6 +19,16 @@ const EMPTY_CAPABILITIES: Capabilities = {
   supportsStreaming: false,
   maxContextTokens: 0,
   maxOutputTokens: null,
+};
+
+// All-null pricing for a brand-new modelKey introduced by an override. Mirrors
+// EMPTY_CAPABILITIES: one source of truth so adding a pricing field can't leave
+// a required key undefined in one of the two override-introduced branches.
+const EMPTY_PRICING: Pricing = {
+  inputPerMTokUsd: null,
+  outputPerMTokUsd: null,
+  cacheReadPerMTokUsd: null,
+  cacheWritePerMTokUsd: null,
 };
 
 // Runtime catalog assembly: generated (supply-chain input) + manual overrides.
@@ -85,7 +96,7 @@ export function loadCatalog(deps: LoadCatalogDeps): Map<string, CatalogEntry> {
       result.set(modelKey, {
         modelKey,
         capabilities: { ...EMPTY_CAPABILITIES, ...caps },
-        pricing: { inputPerMTokUsd: null, outputPerMTokUsd: null },
+        pricing: { ...EMPTY_PRICING },
         source: "override",
       });
     }
@@ -102,8 +113,7 @@ export function loadCatalog(deps: LoadCatalogDeps): Map<string, CatalogEntry> {
         modelKey,
         capabilities: { ...EMPTY_CAPABILITIES },
         pricing: {
-          inputPerMTokUsd: null,
-          outputPerMTokUsd: null,
+          ...EMPTY_PRICING,
           ...price,
         },
         source: "override",

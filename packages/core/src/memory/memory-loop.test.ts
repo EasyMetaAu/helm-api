@@ -46,7 +46,9 @@ describe("memory background loop (observer → reflector → inject)", () => {
   it("a worker-written reflection is hydrated by the next inject request", async () => {
     const store = deterministicStore();
     await store.ensureThread({ id: "t1", projectId: "proj-1", ownerId: "acct-a" });
-    // 3 messages: RECENT_KEEP=2, so the observer compresses the oldest one.
+    // 3 tiny messages — below the auto policy's size trigger, so this loop runs
+    // through the IDLE-FLUSH path (the memory-formation backstop for short
+    // threads): the observer folds the whole history into one observation.
     await store.appendMessage({
       threadId: "t1",
       role: "user",
@@ -65,7 +67,7 @@ describe("memory background loop (observer → reflector → inject)", () => {
       content: "thanks",
       tokenEstimate: 1,
     });
-    await store.enqueueJob({ type: "observer", scope: SCOPE });
+    await store.enqueueJob({ type: "observer", scope: { ...SCOPE, trigger: "idle" } });
 
     const log = () => {};
     const costSink = () => {};
@@ -83,6 +85,14 @@ describe("memory background loop (observer → reflector → inject)", () => {
             observationText: `OBSERVED: ${messages.map((m) => m.content).join(" / ")}`,
           }),
           costSink,
+          resolvePricing: () => ({
+            modelKey: null,
+            inputPerMtok: null,
+            outputPerMtok: null,
+            cacheReadPerMtok: null,
+            cacheWritePerMtok: null,
+            maxContextTokens: null,
+          }),
           now,
           log,
         }),
@@ -160,7 +170,7 @@ describe("memory background loop (observer → reflector → inject)", () => {
       await store.appendMessage({ threadId, role: "user", content: "thanks", tokenEstimate: 1 });
       await store.enqueueJob({
         type: "observer",
-        scope: { accountId: "acct-a", projectId: "proj-1", threadId },
+        scope: { accountId: "acct-a", projectId: "proj-1", threadId, trigger: "idle" },
       });
     };
     await seedThread("t1", "thread one fact");
@@ -182,6 +192,14 @@ describe("memory background loop (observer → reflector → inject)", () => {
             observationText: `OBSERVED: ${messages.map((m) => m.content).join(" / ")}`,
           }),
           costSink,
+          resolvePricing: () => ({
+            modelKey: null,
+            inputPerMtok: null,
+            outputPerMtok: null,
+            cacheReadPerMtok: null,
+            cacheWritePerMtok: null,
+            maxContextTokens: null,
+          }),
           now,
           log,
         }),

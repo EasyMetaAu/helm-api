@@ -610,7 +610,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           // price it at the served alias. Fail-open — leave cost null on any miss.
           const rawSse = captured.join("");
           const finalAlias =
-            result.decision.final.status === "ok" ? result.decision.final.model_alias : null;
+            result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
           try {
             const usage = usageFromSSE(rawSse);
             if (usage && finalAlias && deps.costOf) {
@@ -641,10 +641,15 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             // final frame without a trailing \n\n is not dropped.
             flushOpenAIChunk(assistant);
             if (assistant.text.length > 0) {
-              await observeOutbound(deps.memory.observe, memoryScope, {
-                responseMessages: [{ role: "assistant", content: assistant.text }],
-                toolResults: [],
-              });
+              await observeOutbound(
+                deps.memory.observe,
+                memoryScope,
+                {
+                  responseMessages: [{ role: "assistant", content: assistant.text }],
+                  toolResults: [],
+                },
+                finalAlias,
+              );
             }
           }
         }
@@ -677,7 +682,14 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // tool messages) from the OpenAI body. observe self-gates on mode/thread and
     // never throws (fail-open) — it cannot turn a successful 200 into a 5xx.
     if (deps.memory !== undefined) {
-      await observeOutbound(deps.memory.observe, memoryScope, outboundFromOpenAIBody(result.body));
+      const finalAlias =
+        result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+      await observeOutbound(
+        deps.memory.observe,
+        memoryScope,
+        outboundFromOpenAIBody(result.body),
+        finalAlias,
+      );
     }
     // Usage-budget settle (non-stream, success): cost is already on the decision;
     // tokens from the body's usage. Fail-open.

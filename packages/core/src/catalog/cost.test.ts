@@ -1,10 +1,21 @@
-import type { Pricing } from "@helm/shared";
+import type { CatalogEntry, Pricing } from "@helm/shared";
 import { describe, expect, it } from "vitest";
-import { billedCostFromBody, computeCostUsd, resolveCostUsd, usageFromBody } from "./cost.js";
+import {
+  billedCostFromBody,
+  computeCostUsd,
+  resolveCompactionPricing,
+  resolveCostUsd,
+  usageFromBody,
+} from "./cost.js";
 
 // Pricing is per MILLION tokens. cost = prompt/1e6*input + completion/1e6*output.
 describe("computeCostUsd — token usage × catalog pricing", () => {
-  const gpt4o: Pricing = { inputPerMTokUsd: 2.5, outputPerMTokUsd: 10 };
+  const gpt4o: Pricing = {
+    inputPerMTokUsd: 2.5,
+    outputPerMTokUsd: 10,
+    cacheReadPerMTokUsd: null,
+    cacheWritePerMTokUsd: null,
+  };
 
   it("computes cost from prompt/completion tokens and per-MTok pricing", () => {
     // 1000 prompt * 2.5/1e6 = 0.0025 ; 500 completion * 10/1e6 = 0.005
@@ -24,13 +35,23 @@ describe("computeCostUsd — token usage × catalog pricing", () => {
   it("returns null when either price field is null (missing pricing data)", () => {
     expect(
       computeCostUsd(
-        { inputPerMTokUsd: null, outputPerMTokUsd: 10 },
+        {
+          inputPerMTokUsd: null,
+          outputPerMTokUsd: 10,
+          cacheReadPerMTokUsd: null,
+          cacheWritePerMTokUsd: null,
+        },
         { promptTokens: 1000, completionTokens: 500 },
       ),
     ).toBeNull();
     expect(
       computeCostUsd(
-        { inputPerMTokUsd: 2.5, outputPerMTokUsd: null },
+        {
+          inputPerMTokUsd: 2.5,
+          outputPerMTokUsd: null,
+          cacheReadPerMTokUsd: null,
+          cacheWritePerMTokUsd: null,
+        },
         { promptTokens: 1000, completionTokens: 500 },
       ),
     ).toBeNull();
@@ -122,7 +143,12 @@ describe("billedCostFromBody — upstream-returned cost", () => {
 // resolveCostUsd is the single override-or-preset rule: upstream-billed cost wins;
 // otherwise estimate from tokens × pricing; null only when neither is available.
 describe("resolveCostUsd — billed overrides preset estimate", () => {
-  const gpt4o: Pricing = { inputPerMTokUsd: 2.5, outputPerMTokUsd: 10 };
+  const gpt4o: Pricing = {
+    inputPerMTokUsd: 2.5,
+    outputPerMTokUsd: 10,
+    cacheReadPerMTokUsd: null,
+    cacheWritePerMTokUsd: null,
+  };
 
   it("uses the upstream-billed cost over the catalog estimate", () => {
     const body = { usage: { prompt_tokens: 1000, completion_tokens: 500, cost_usd: 0.99 } };
@@ -141,5 +167,82 @@ describe("resolveCostUsd — billed overrides preset estimate", () => {
 
   it("returns null when there is neither a billed cost nor pricing", () => {
     expect(resolveCostUsd(undefined, { usage: { prompt_tokens: 10 } })).toBeNull();
+  });
+});
+
+// resolveCompactionPricing: the memory compaction model's price/context lookup.
+// Pure catalog read — every field nullable, no heuristics here (the compaction
+// policy owns its own fallbacks so they stay unit-testable in one place).
+describe("resolveCompactionPricing — compaction inputs from the catalog", () => {
+  const entry: CatalogEntry = {
+    modelKey: "anthropic/claude-3-5-sonnet",
+    capabilities: {
+      supportsTools: true,
+      supportsJsonMode: false,
+      supportsVision: true,
+      supportsStreaming: true,
+      maxContextTokens: 200_000,
+      maxOutputTokens: 8_192,
+    },
+    pricing: {
+      inputPerMTokUsd: 3,
+      outputPerMTokUsd: 15,
+      cacheReadPerMTokUsd: 0.3,
+      cacheWritePerMTokUsd: 3.75,
+    },
+    source: "generated",
+  };
+  const catalog = new Map([[entry.modelKey, entry]]);
+
+  it("resolves all prices + context window for a known model", () => {
+    expect(resolveCompactionPricing(catalog, "anthropic/claude-3-5-sonnet")).toEqual({
+      modelKey: "anthropic/claude-3-5-sonnet",
+      inputPerMtok: 3,
+      outputPerMtok: 15,
+      cacheReadPerMtok: 0.3,
+      cacheWritePerMtok: 3.75,
+      maxContextTokens: 200_000,
+    });
+  });
+
+  it("returns all-null for an unknown model (fail-open, caller falls back)", () => {
+    expect(resolveCompactionPricing(catalog, "nope/unknown")).toEqual({
+      modelKey: null,
+      inputPerMtok: null,
+      outputPerMtok: null,
+      cacheReadPerMtok: null,
+      cacheWritePerMtok: null,
+      maxContextTokens: null,
+    });
+  });
+
+  it("returns all-null when no model key is known yet (first request of a thread)", () => {
+    const empty = resolveCompactionPricing(catalog, null);
+    expect(empty.modelKey).toBeNull();
+    expect(empty.inputPerMtok).toBeNull();
+    expect(empty.maxContextTokens).toBeNull();
+  });
+
+  it("passes through per-field nulls and treats a 0 context window as unknown", () => {
+    const sparse: CatalogEntry = {
+      ...entry,
+      modelKey: "local/llama",
+      capabilities: { ...entry.capabilities, maxContextTokens: 0 },
+      pricing: {
+        inputPerMTokUsd: null,
+        outputPerMTokUsd: null,
+        cacheReadPerMTokUsd: null,
+        cacheWritePerMTokUsd: null,
+      },
+    };
+    const resolved = resolveCompactionPricing(new Map([[sparse.modelKey, sparse]]), "local/llama");
+    expect(resolved).toEqual({
+      modelKey: "local/llama",
+      inputPerMtok: null,
+      outputPerMtok: null,
+      cacheReadPerMtok: null,
+      cacheWritePerMtok: null,
+      maxContextTokens: null,
+    });
   });
 });

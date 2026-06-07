@@ -38,6 +38,12 @@ export const CapabilitiesSchema = z.object({
 export const PricingSchema = z.object({
   inputPerMTokUsd: z.number().nonnegative().nullable(),
   outputPerMTokUsd: z.number().nonnegative().nullable(),
+  // Prompt-cache prices (memory compaction economics). Synced from LiteLLM's
+  // cache_read_input_token_cost / cache_creation_input_token_cost. `.default(null)`
+  // so pre-existing generated artifacts and partial overrides keep parsing; null
+  // means "unpublished" and the consumer applies its own heuristic, NOT zero.
+  cacheReadPerMTokUsd: z.number().nonnegative().nullable().default(null),
+  cacheWritePerMTokUsd: z.number().nonnegative().nullable().default(null),
 });
 
 export const CatalogSourceSchema = z.enum(["generated", "override"]);

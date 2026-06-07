@@ -119,7 +119,9 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // only they run — the minimal seed has no api_keys table for v9–v12/v16/v18, and
     // no memory_observations table for the v17 forgetting deltas, so both are
     // pre-marked applied to keep this test scoped to the v13–v15 jobs upgrade.
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18]) {
+    // v19 (memory_threads.last_served_model) is also pre-marked: this fixture
+    // never creates memory_threads, so the v19 ALTER would fail — out of scope.
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );

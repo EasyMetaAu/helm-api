@@ -9,6 +9,7 @@
     "max_output_tokens": 16384,
     "input_cost_per_token": 0.0000025,
     "output_cost_per_token": 0.00001,
+    "cache_read_input_token_cost": 0.00000125,
     "supports_function_calling": true,
     "supports_response_schema": true,
     "supports_vision": true,
@@ -19,6 +20,7 @@
     "max_output_tokens": 16384,
     "input_cost_per_token": 0.00000015,
     "output_cost_per_token": 0.0000006,
+    "cache_read_input_token_cost": 0.000000075,
     "supports_function_calling": true,
     "supports_response_schema": true,
     "supports_vision": true,
@@ -29,6 +31,8 @@
     "max_output_tokens": 8192,
     "input_cost_per_token": 0.000003,
     "output_cost_per_token": 0.000015,
+    "cache_creation_input_token_cost": 0.00000375,
+    "cache_read_input_token_cost": 0.0000003,
     "supports_function_calling": true,
     "supports_vision": true,
     "mode": "chat"
@@ -38,6 +42,8 @@
     "max_output_tokens": 8192,
     "input_cost_per_token": 0.0000008,
     "output_cost_per_token": 0.000004,
+    "cache_creation_input_token_cost": 0.000001,
+    "cache_read_input_token_cost": 0.00000008,
     "supports_function_calling": true,
     "supports_vision": false,
     "mode": "chat"
@@ -47,6 +53,7 @@
     "max_output_tokens": 8192,
     "input_cost_per_token": 0.00000125,
     "output_cost_per_token": 0.000005,
+    "cache_read_input_token_cost": 0.0000003125,
     "supports_function_calling": true,
     "supports_vision": true,
     "mode": "chat"

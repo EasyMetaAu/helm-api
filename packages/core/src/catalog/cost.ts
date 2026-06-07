@@ -1,4 +1,4 @@
-import type { Pricing } from "@helm/shared";
+import type { CatalogEntry, Pricing } from "@helm/shared";
 
 // Cost conversion: provider token usage × catalog pricing (docs/07 "cost breakdown").
 // Framework-/network-free (principle 1). Pricing is quoted per MILLION tokens
@@ -67,6 +67,49 @@ export function billedCostFromBody(body: unknown): number | null {
     if (v !== undefined) return v;
   }
   return null;
+}
+
+// The memory compaction model's auto-resolved inputs: per-MTok prices + the
+// model's context window, looked up from the SAME catalog path cost telemetry
+// trusts. Every field is nullable — null means "unknown", and the compaction
+// policy applies its own deterministic fallbacks (NOT here, so the heuristics
+// stay unit-testable in one place). Fail-open: an unknown/absent model key
+// resolves to all-null, never throws (principle 3).
+export interface ResolvedCompactionPricing {
+  modelKey: string | null; // echo of the matched key, for provenance logging
+  inputPerMtok: number | null;
+  outputPerMtok: number | null;
+  cacheReadPerMtok: number | null;
+  cacheWritePerMtok: number | null;
+  maxContextTokens: number | null;
+}
+
+export function resolveCompactionPricing(
+  catalog: ReadonlyMap<string, CatalogEntry>,
+  modelKey: string | null | undefined,
+): ResolvedCompactionPricing {
+  const entry = modelKey != null ? catalog.get(modelKey) : undefined;
+  if (entry === undefined) {
+    return {
+      modelKey: null,
+      inputPerMtok: null,
+      outputPerMtok: null,
+      cacheReadPerMtok: null,
+      cacheWritePerMtok: null,
+      maxContextTokens: null,
+    };
+  }
+  // maxContextTokens=0 is the catalog's "unknown" placeholder for
+  // override-introduced keys — surface it as null, not a real 0 window.
+  const maxContext = entry.capabilities.maxContextTokens;
+  return {
+    modelKey: entry.modelKey,
+    inputPerMtok: entry.pricing.inputPerMTokUsd ?? null,
+    outputPerMtok: entry.pricing.outputPerMTokUsd ?? null,
+    cacheReadPerMtok: entry.pricing.cacheReadPerMTokUsd ?? null,
+    cacheWritePerMtok: entry.pricing.cacheWritePerMTokUsd ?? null,
+    maxContextTokens: maxContext > 0 ? maxContext : null,
+  };
 }
 
 // Resolve one served attempt's USD cost from a raw upstream response body: prefer

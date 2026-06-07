@@ -86,7 +86,15 @@ describe("classify adapter — eval self-cost from usage × catalog pricing", ()
       now: () => Date.now(),
       log: () => {},
       catalog: new Map([
-        ["eval-model", priced("eval-model", { inputPerMTokUsd: 0.15, outputPerMTokUsd: 0.6 })],
+        [
+          "eval-model",
+          priced("eval-model", {
+            inputPerMTokUsd: 0.15,
+            outputPerMTokUsd: 0.6,
+            cacheReadPerMTokUsd: null,
+            cacheWritePerMTokUsd: null,
+          }),
+        ],
       ]),
     });
 

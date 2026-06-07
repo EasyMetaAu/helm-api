@@ -18,7 +18,12 @@ const generated: GeneratedCatalog = {
         maxContextTokens: 128_000,
         maxOutputTokens: 16_384,
       },
-      pricing: { inputPerMTokUsd: 2.5, outputPerMTokUsd: 10 },
+      pricing: {
+        inputPerMTokUsd: 2.5,
+        outputPerMTokUsd: 10,
+        cacheReadPerMTokUsd: null,
+        cacheWritePerMTokUsd: null,
+      },
     },
   ],
 };

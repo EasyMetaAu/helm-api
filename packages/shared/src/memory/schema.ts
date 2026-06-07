@@ -132,6 +132,13 @@ export const ReflectionScopeSchema = z.object({
   projectId: z.string().min(1).optional(),
   resourceId: z.string().min(1).optional(),
   threadId: z.string().min(1).optional(),
+  // Observer jobs only: 'idle' marks an idle-flush job (enqueued by the worker's
+  // idle sweep; compacts the WHOLE uncovered history so the sweep terminates).
+  // Lives on the scope so it rides the existing scope_id encoding without a
+  // migration; an idle job dedupes separately from the writeback job for the
+  // same thread (both are idempotent). reflectionTargetScope rebuilds clean
+  // project/resource scopes, so a trigger never leaks into reflector dedupe.
+  trigger: z.literal("idle").optional(),
 });
 
 // Input to upsert a new reflection version (docs/08). The store assigns the id +

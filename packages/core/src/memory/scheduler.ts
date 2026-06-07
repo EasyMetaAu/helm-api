@@ -87,6 +87,9 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
       jobId: job.jobId,
       accountId: job.scope.accountId,
       threadId,
+      // Idle-flush jobs (enqueued by the sweep) carry their trigger on the scope;
+      // absent = the request path's writeback enqueue.
+      ...(job.scope.trigger !== undefined ? { trigger: job.scope.trigger } : {}),
     });
     // D5: only promote a reflector when the observer actually wrote a new
     // observation — a noop observer leaves the reflection untouched. The reflector

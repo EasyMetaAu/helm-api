@@ -402,6 +402,16 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS name TEXT;
     `,
   },
+  {
+    // Auto-compaction model→price resolution — pg mirror of the sqlite v20
+    // migration. The alias of the model that served the thread's latest turn,
+    // stamped best-effort by observeOutbound and read by the background observer
+    // to price the compaction ledger. Additive + nullable + idempotent.
+    version: 19,
+    sql: `
+      ALTER TABLE memory_threads ADD COLUMN IF NOT EXISTS last_served_model TEXT;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

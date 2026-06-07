@@ -463,6 +463,16 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys ADD COLUMN name TEXT;
     `,
   },
+  {
+    // Auto-compaction model→price resolution: the alias of the model that served
+    // the thread's latest turn, stamped best-effort by observeOutbound and read
+    // back by the background observer to price the compaction ledger. Additive +
+    // nullable (NULL = never stamped → the policy's price heuristics apply).
+    version: 20,
+    sql: `
+      ALTER TABLE memory_threads ADD COLUMN last_served_model TEXT;
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

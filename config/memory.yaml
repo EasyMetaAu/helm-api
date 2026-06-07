@@ -1,9 +1,8 @@
-# Observer compaction defaults. fixed/recent_keep=2 preserves current runtime
-# behaviour. Switch mode to economy to use cache-aware dynamic compaction.
-observer:
-  compaction:
-    mode: fixed
-    recent_keep: 2
+# Observer compaction is NOT configurable: it is the gateway's internal
+# auto-adaptive behaviour. Prices and context windows resolve from the model
+# catalog (pin prices via config/pricing.yaml if needed); compaction triggers on
+# segment size, thread idleness, or context pressure. A leftover `observer:`
+# block from older versions refuses startup — delete it.
 
 # Memory forgetting layer (docs/12). enabled:false = byte-identical to pre-docs/12
 # behaviour; flip to true to turn on decay/reinforcement/facts. All knobs are
