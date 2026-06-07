@@ -7,6 +7,7 @@ import { registerLanesRoutes } from "./lanes.js";
 import { registerModelsRoutes } from "./models.js";
 import { registerOAuthRoutes } from "./oauth.js";
 import { registerPoliciesRoutes } from "./policies.js";
+import { registerReplayRoutes } from "./replay.js";
 import { registerRequestsRoutes } from "./requests.js";
 import { registerSettingsRoutes } from "./settings.js";
 
@@ -25,6 +26,7 @@ export function registerAdminApi(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   registerClassifierRoutes(app, deps);
   registerKeysRoutes(app, deps);
   registerRequestsRoutes(app, deps);
+  registerReplayRoutes(app, deps);
   registerSettingsRoutes(app, deps);
   registerOAuthRoutes(app, deps);
 }

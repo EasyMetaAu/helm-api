@@ -5,6 +5,7 @@
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
   import JsonViewer from '$lib/components/JsonViewer.svelte';
+  import RetryDialog from '$lib/components/RetryDialog.svelte';
   import StreamViewer from '$lib/components/StreamViewer.svelte';
   import { isSseStream } from '$lib/sse';
 
@@ -25,6 +26,7 @@
   } = $props();
 
   let copied = $state(false);
+  let showRetry = $state(false);
 
   async function copyTrace(): Promise<void> {
     try {
@@ -34,6 +36,17 @@
       // clipboard unavailable — degrade silently, never surface secrets in errors
     }
   }
+
+  // Retry is available only when the full request body was captured AND it is an
+  // OpenAI chat shape (a `messages` array) — the only protocol the replay endpoint
+  // re-issues today. Otherwise the button is disabled with a hint (capture off,
+  // pruned, or a non-OpenAI request).
+  const replayBody = $derived(data.payload?.captured === true ? data.payload.request : undefined);
+  const canRetry = $derived(
+    !!replayBody &&
+      typeof replayBody === 'object' &&
+      Array.isArray((replayBody as { messages?: unknown }).messages),
+  );
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
@@ -61,8 +74,24 @@
         <button type="button" data-testid="copy-trace" class="btn-secondary" onclick={copyTrace}
           >{copied ? $t('Copied') : $t('Copy trace ID')}</button
         >
+        <button
+          type="button"
+          data-testid="retry-request"
+          class="btn-primary"
+          disabled={!canRetry}
+          title={canRetry ? '' : $t('Retry unavailable — no captured request body.')}
+          onclick={() => (showRetry = true)}>{$t('Retry')}</button
+        >
       </div>
     </header>
+
+    {#if showRetry && canRetry}
+      <RetryDialog
+        traceId={d.trace_id}
+        initialRequest={replayBody}
+        onclose={() => (showRetry = false)}
+      />
+    {/if}
 
     <!-- Request: full captured body when capture_payloads is on, else metadata. -->
     <section class="card text-sm">

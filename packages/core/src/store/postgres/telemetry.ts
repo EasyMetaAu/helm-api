@@ -112,6 +112,17 @@ export class PgTelemetryStore implements TelemetryStore {
     return row ? this.toDecision(row) : null;
   }
 
+  // Narrow single-column lookup of the recorded key_id (replay identity rebuild).
+  // Selects only api_key_id so it never deserializes the decision blob.
+  async getApiKeyId(requestId: string): Promise<string | null> {
+    const rows = await this.db
+      .select({ apiKeyId: telemetry.apiKeyId })
+      .from(telemetry)
+      .where(eq(telemetry.requestId, requestId))
+      .limit(1);
+    return rows[0]?.apiKeyId ?? null;
+  }
+
   // POST-MVP Agentic Signals (docs/02): records whose createdAt is in
   // [startMs, endMs). Half-open so adjacent windows never overlap → re-collects
   // stay idempotent. createdAt stored as epoch ms (bigint) → compare ms directly.

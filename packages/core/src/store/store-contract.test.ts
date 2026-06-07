@@ -482,6 +482,20 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(await ctx.stores.telemetry.getByRequestId("nope")).toBeNull();
     });
 
+    it("getApiKeyId returns the recorded key_id, null on a miss", async () => {
+      ctx = await make();
+      await ctx.stores.telemetry.insert({
+        decision: decision("req_1"),
+        apiKeyId: "key_abc",
+        createdAt: new Date(),
+      });
+      // The redacted DecisionRecord carries key_prefix only — the replay path
+      // needs the api_key_id (separate column) to reconstruct the original
+      // identity, so it is surfaced by its own narrow lookup.
+      expect(await ctx.stores.telemetry.getApiKeyId("req_1")).toBe("key_abc");
+      expect(await ctx.stores.telemetry.getApiKeyId("nope")).toBeNull();
+    });
+
     it("stores no plaintext key and no raw message payload", async () => {
       ctx = await make();
       await ctx.stores.telemetry.insert({

@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-06-06 · 请求详情页「重试」按钮（可编辑重发 + 隔离重跑；用户决策；docs/07）
+
+- **动机**：线上调试（deepseek-v4-pro 把 5000 `max_tokens` 全烧在 reasoning，`finish:length`、正文为空，详情页正确显示「无可见输出」）后，需要在 admin 内「改一下（如调高 max_tokens）再发一次」并看新结果，无需离开界面/手搓 curl。
+- **两项用户拍板**：① **可编辑后重发**（弹窗预填录制的请求体，可改 max_tokens/messages 再发）；② **隔离 debug 重跑**——走真路由 + 真 provider、记**新** trace+payload，但**不计 budget、不写/注入记忆**（observe/inject/settle/oauth-usage 全略），身份/caps 从原请求的 key 重建（lane 白名单 / `allow_custom_model` 仍生效，faithful）。key 已删/吊销 → 409 拒绝，**绝不静默放宽权限**。
+- **后端**：① `TelemetryStore.getApiKeyId(reqId)` 新窄查询——脱敏 DecisionRecord 只带 `key_prefix`，`api_key_id` 在独立列，replay 需它重建身份（port + sqlite/pg 适配器，仅 select 一列、不反序列化 blob）；**未加 `getById`**，身份用 `keyStore.list().find`（port 本无 getById、admin 非热路径、量小，沿用 delete-key 同模式）。② 新 `admin/replay.ts`：`runReplay` 返回判别式 outcome（400 体非法 / 404 原请求不存在 / 409 key 不可用），route 映射状态码；`registerReplayRoutes` 挂 `POST /admin/api/requests/:traceId/replay`，`replay` wiring 缺省时 503。复用 `payload-capture.ts` 的 `persistPayload`/`usageFromSSE`/`backfillCompletionCost`——流式服务端 drain 后回填 completion cost，与 chat 路由同。③ `server.ts` 给 `AdminApiDeps` 注入 `replay`，**复刻 chat 路由同一批闭包**（route/redact/costOf/capture getters）+ `randomUUID` 作新 trace id，零重复编排逻辑。
+- **范围 v1 = openai_chat**：body 过 `OpenAIChatRequestSchema`，非 OpenAI 形态 422；对既有记录**无需新存 protocol**（按体 schema 推断即可），按钮仅在 `payload.captured` 且含 `messages` 数组时可点，否则 disabled + 提示。
+- **前端**：`replayRequest(traceId, request)` POST `{request}`；`RetryDialog.svelte`（Modal + 预填 JSON textarea，客户端先 `JSON.parse` 防 400 往返，成功 `goto` 新 trace）；详情页头部加 Retry 按钮（`$derived` 算 `canRetry`）。i18n 9 key 全 5 locale（意译）。`untrack` 快照初始 body 文本，消除 svelte `state_referenced_locally` 警告。
+- **测试（TDD 先红）**：store-contract 加 getApiKeyId（双驱动 sqlite+pglite）；`replay.test` 10 例（非流 / 流式 cost 回填 / 400 / 404 / 409 删+吊 / capture off 不写 payload / provider 失败仍记可看 trace / route 503 / 缺 request 字段 400）；ports/decision/admin 三处 fake 补 getApiKeyId。
+- **坑/注**：`pnpm test` 全跑时 32 例 **PGlite 超时（5s）** 失败——纯并行资源争用 flake（隔离单跑 170/170 绿，含那两个超时文件），**非本次引入**（既有 admin.spec 全跑 flake 同源）。隔离重跑不计 budget/不写记忆是有意取舍（debug 不该污染/计费），已在代码注释标注；线上手测（改 max_tokens 重发 → `finish` 由 length 变 stop、正文有内容）留用户在部署上验。
+- **Codex review 修复（3×P2 + 1×P3）**：(P2) replay 同时绕过按 key **限流/并发门**（不止 budget）——属有意取舍（那些 middleware 守的是 /v1 客户端面，replay 是 Basic auth 后的一次性运维动作，dialog `sending` 已串行化点击），在 replay.ts「DELIBERATE BYPASSES」+ ReplayWiring 注释显式成文，不接入。(P2) 流式 drain 包 `try/catch`——中途上游断流不再让 runReplay 抛出跳过持久化，**部分字节照存、失败重试仍可查看**（镜像 live stream 分支 finally 语义）。(P2) `telemetry.insert` 失败由吞错改 **fail-closed 返 500**——replay 的交付物就是那条记录（UI 直接 goto 新 trace），吞错会导航到 404；与 live 路由 fail-open 的取舍差异已注释成文。(P3) ports.test 内存 fake `getApiKeyId` 误返 `request_id` → 改存/返 `input.apiKeyId` 并补断言。两新测试（流中断仍持久化 / insert 失败 500）先红后绿，replay 12 例全绿。
+
+---
+
 ## 2026-06-06 · 已吊销 key 允许永久删除（两步销毁；用户决策；docs/06）
 
 - **动机**：原来 key 只能软吊销（`DELETE /admin/api/keys/:id` → `disabled:true`），行永久保留，admin 列表里已吊销 key 越积越多、无从清理。用户要求「吊销后允许删除」。
@@ -29,21 +42,11 @@
 
 ---
 
-## 2026-06-06 · 记忆默认开启（eval 维持默认关闭——依赖已配置 eval 模型）（用户决策；docs/08）
-
-- **动机**：用户要求「记忆 + 小模型 eval 默认都打开」，复核后**只开记忆、eval 仍默认关**。
-- **eval 维持 OFF（拍板）**：原本随手把 `classifier.eval.enabled` 翻 `true`，但 Layer-2 eval 客户端把 `model`（`deepseek-v4-flash`）**直发 providers[0]**——没有配好的 DeepSeek 兼容 provider 时，每个 uncertain 请求都先打一通失败调用再 fail-open 回 `balanced`（不 5xx，但纯浪费延迟/无意义）。结论：eval **必须有可用模型才该开**，留作 per-deployment opt-in，遵守 CLAUDE.md 原则 4「eval 默认关闭」。config 注释补上该依赖说明。
-- **memory（无全局开关，逐 key `memory_mode`）**：① 新 key 的 `keystore.create` 默认 `"off" → "inject"`（sqlite + pg 两个适配器）；② 请求兜底 `memory-scope.ts` `defaults?.mode ?? "off" → ?? "inject"`。**范围 = 仅新 key + 兜底，不迁移既有 key**：DB 列默认与已应用迁移仍保留 `"off"`（底线 + 迁移历史不重写），既有 key 维持其存储值。显式 `x-memory-mode`（含 `off`）与 key 存储 mode 仍永远优先；非法 mode 头仍归一 `off`（fail-safe，不继承宽松默认）。记忆走本地 store，无外部模型依赖，故可安全默认开。
-- **forgetting**：`config/memory.yaml` `enabled` 本会话稍早已置 `true`（PR #106）——与「记忆默认开」配套（衰减/巩固/facts 生效）。
-- **测试更新（随记忆默认翻转）**：`store-contract`（新 key → inject）、`memory-scope`（无头/无默认 → inject）、`messages.memory`（无记忆头 → memory_mode inject）；`classifier-samples` 仍断言 eval `false`（未动）。全单测 **2474 绿**，typecheck 净、lint exit 0（残留 warning 非本次引入）。
-- **文档同步**：README（根）+ docs/01/02/08 + docs/12 的记忆/遗忘「off/opt-in」表述改为「默认开启」；eval 相关（README/docs/02/03/09/README）维持「off by default」。
-- **坑/取舍**：兜底改 `inject` 触及 memory-scope 原「零回退（无配置 = off）」契约——但**真实认证流量恒携带 key 存储 mode**（auth.ts 注入 `record.memory_mode`），裸兜底仅管「完全无 key 配置」路径；且 `inject` 在 `threadId === null` 时 observe/inject 自闸为 no-op，无 thread 的请求不会真正注入。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-06 · 记忆默认开启（eval 维持默认关闭——依赖已配置 eval 模型）（用户决策；docs/08）：只开记忆不开 eval——Layer-2 eval 客户端把 `model`(deepseek-v4-flash) 直发 providers[0]，无配好 DeepSeek 兼容 provider 时每个 uncertain 请求先打一通失败再 fail-open 回 balanced，故 eval **必须有可用模型才开**、留 per-deployment opt-in（原则 4）。memory 无全局开关：新 key `keystore.create` mint `off→inject`（sqlite+pg）+ 请求兜底 `memory-scope` `?? off → ?? inject`，**仅新 key+兜底、不迁移既有 key**（DB 列默认/迁移仍 off）；显式 `x-memory-mode` 仍优先、非法头归一 off，`inject` 在 threadId===null 时自闸 no-op。`config/memory.yaml enabled` 早前置 true 配套。测试 store-contract/memory-scope/messages.memory 随翻转，2474 绿；README+docs/01/02/08/12 记忆表述改「默认开启」、eval 维持「off by default」。
 
 ### 2026-06-06 · 订阅 provider 绑定全程走代理，堵住绑定首步真实 IP 泄露（issue #38；docs/02/06/11）：所有 OAuth 出站硬编码全局 fetch → 绑定首通（Copilot device-code POST / Anthropic·Codex token 交换）+ 刷新从运营者真实 IP 发出，唯 chat 执行走代理。修：core OAuth kit 全网络函数加可选 `fetchImpl`（默认全局 fetch 向后兼容）+ `refreshToken(creds,fetchImpl?)`；连接对话框第 1 步加代理区，start 路由 validate 后 pin 进 login session，绑定成功写 account settings → refresh/execution/quota 复用。测试 stub 全局 fetch 成 throw 证明绑定走代理则永不调用全局 fetch。Codex 三修：(P1) buildServer primaryCred 漏传代理→preset-OAuth 刷新泄露，resolveProviderProxy 一次算 primaryProxy 同喂 buildCredential+createProviderClient；(P2) 持久化改「先代理后 token」fail-closed；(P2) UI 文案改「浏览器登录页不走代理」。
 

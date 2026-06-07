@@ -1,19 +1,23 @@
 import type {
   CreateKeyInput,
+  ExecutionResult,
   KeyStore,
   Lane,
   OAuthQuotaStore,
   OAuthUsageStore,
   PoliciesConfig,
+  RouteOptions,
   TelemetryStore,
 } from "@helm/core";
 import type {
   ClassifierConfig,
   DecisionRecord,
+  InternalRequest,
   OAuthQuotaWindow,
   RuntimeSettings,
 } from "@helm/shared";
 import type { ModelOption } from "../../oauth/effective-models.js";
+import type { PayloadCaptureDeps } from "../payload-capture.js";
 
 // Injected dependency contracts for the admin API. Per CLAUDE.md principle 1 the
 // route files are PURE HTTP glue — they own no business logic and never touch the
@@ -200,10 +204,43 @@ export interface AccountProxyInput {
   password?: string;
 }
 
+// Replay wiring (admin "Retry" button). An ISOLATED debug re-run: the route +
+// provider call is re-issued through the SAME core pipeline as a live request,
+// recording a NEW trace + payload — but deliberately WITHOUT the budget gate/
+// settle, memory observe/inject, OAuth-usage recording, per-key rate limiting,
+// or the concurrency gate a real client call carries (a debug retry must not
+// bill the key nor pollute conversation memory; the quota middlewares guard the
+// /v1 client surface, not a one-off operator action behind the admin Basic
+// auth — see replay.ts "DELIBERATE BYPASSES").
+// Reuses the composition root's `route`/`redact`/`costOf`/capture closures —
+// the SAME ones wired into the chat route — so routing stays faithful. Optional
+// so unit-test deps can omit it; the route 503s when absent (mirrors `oauth?`).
+export interface ReplayWiring {
+  route: (
+    req: InternalRequest,
+    opts: RouteOptions,
+    signal: AbortSignal,
+  ) => Promise<ExecutionResult>;
+  // Redact a DecisionRecord before it is persisted (principle 7) — the same
+  // redactor the chat route uses.
+  redact: (payload: unknown) => unknown;
+  // Wall clock (epoch ms) for the new record's createdAt + payload prune cutoff.
+  now: () => number;
+  // Mint the NEW request's trace id (the re-run is a distinct request).
+  genTraceId: () => string;
+  // LIVE getters for capture_payloads / payload_retention_days (admin settings),
+  // and the streamed-cost pricer — identical to the chat route's wiring.
+  capturePayloads?: PayloadCaptureDeps["capturePayloads"];
+  payloadRetentionMs?: PayloadCaptureDeps["payloadRetentionMs"];
+  costOf?: PayloadCaptureDeps["costOf"];
+}
+
 export interface AdminApiDeps {
   rules: RuleStore;
   keyStore: KeyStore;
   telemetry: TelemetryStore;
+  // Admin "Retry" replay surface. Optional — absent in unit tests; the route 503s.
+  replay?: ReplayWiring;
   // Admin OAuth-login seam (issue #38). Optional so existing tests that build a
   // partial deps object stay valid; the route 503s when it is absent.
   oauth?: OAuthAdminAccess;
