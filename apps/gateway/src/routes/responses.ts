@@ -9,6 +9,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
+import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/responses — OpenAI Responses API inbound, translated to IR, routed
 // through the SAME core pipeline as /v1/chat and /v1/messages, then translated
@@ -296,7 +297,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     sequenceNumber: nextErrorSequence,
                   })
                 : responsesStreamError({
-                    code: "internal_error",
+                    // Preserve a mid-stream idle timeout instead of internal_error.
+                    code: isUpstreamTimeout(err) ? "timeout" : "internal_error",
                     message: err instanceof Error ? err.message : "upstream error",
                     traceId,
                     sequenceNumber: nextErrorSequence,

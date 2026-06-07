@@ -159,8 +159,10 @@ classifier:
     model: deepseek-v4-flash       # a real bare id the primary (official DeepSeek) accepts; sent directly to it
     temperature: 0
     max_tokens: 256                # one JSON object; caps the cost
-    timeout_ms: 250                # inner runner timeout
-    outer_timeout_ms: 350          # outer backstop (strictly later than the inner)
+    extra_body:                    # merged VERBATIM onto the eval wire request (provider-specific knobs)
+      thinking: { type: disabled } # stop a reasoning eval model from burning max_tokens on a discarded CoT
+    timeout_ms: 1500               # inner runner timeout — covers a real ~1s round-trip with margin
+    outer_timeout_ms: 2000         # outer backstop (strictly later than the inner)
     on_failure: balanced           # timeout / parse failure → balanced
     cache:
       enabled: true
@@ -168,6 +170,16 @@ classifier:
       ttl_sec: 300
       max_entries: 5000            # LRU capacity
 ```
+
+`extra_body` is a config-driven escape hatch for provider knobs Helm does not
+model as first-class; it is merged onto the eval request **before** the locked
+fields, so `model` / `temperature` / `stream` / `max_tokens` always win over
+anything `extra_body` sets. The `thinking: { type: disabled }` above matters: an
+eval model that emits a chain-of-thought (e.g. `deepseek-v4-flash`) spends the
+256-token budget on reasoning the classifier discards, truncating the JSON
+verdict (`eval_not_json`) and adding ~2s of latency — which forces a too-tight
+`timeout_ms` to expire on every cache-miss. Disable reasoning and the call is a
+fast, clean ~1s probe, so the tight timeout is safe rather than self-defeating.
 
 The verdict is **decisive**: unlike a pure advisory probe, the eval output
 directly selects a lane (a JSON validation failure fails open to `balanced`).

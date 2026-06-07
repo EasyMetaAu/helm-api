@@ -7,6 +7,18 @@
 
 ---
 
+## 2026-06-07 · eval 快探针：关推理 + 配置驱动 extra_body 透传（修复线上恒 fallback；docs/03 Layer 2；CLAUDE.md 原则 2/4）
+
+- **现象（la.atmy.work 实测）**：`model:"auto"` 的中文请求详情页恒显 `fallback`，`fallback_reason: eval_timeout`。逐层定位：Layer-1 非拉丁守卫 → 升级 eval；eval 内层超时只有 **250ms**，而 eval 模型 `deepseek-v4-flash` 是**推理模型**（temperature:0 也吐 `reasoning_content`），LA 主机到 DeepSeek 真实往返 ~2–3s → 必然 `eval_timeout` → 降级 balanced。即「分类兜底」，**非执行兜底**（`fallback_count:0`，provider 全 ok），与流式无关。
+- **反面教训（硬调超时不对）**：先把 250→3500ms 止血，eval 确实开始 decide，但暴露第二坑——256 的 `max_tokens` 被 reasoning 吃光，`message.content` 截断/空 → `eval_not_json`；且 3500ms 内层超时给热路径加最多 3.5s 税。`contract.ts` 的 `extractFirstObject` 已够健壮，真因在上游 reasoning 占预算/占延迟。
+- **方案（让 eval 重新变快，而非容忍慢）**：① `EvalConfigSchema` 加 `extra_body: z.record(z.string(), z.unknown()).optional()`——**配置驱动的请求体透传**，provider 无关的逃生舱；② `EvalModelRequest.extra_body` 透传，`runEval` 仅在配置存在时挂上（不改无配置部署的请求形状）；③ `classify.ts` invokeModel **把 extra_body 铺在最前、锁定字段(model/temperature/stream/max_tokens)在后覆盖**——extra_body 能加旋钮、绝不能篡改锁定项；④ classifier.yaml 设 `extra_body.thinking.{type:disabled}`，实测往返 ~1.1s 且吐干净 JSON，于是超时**收回 1500/2000**（快且可靠，不再税热路径）。`ProviderForEval.chatCompletion(req: Record<string,unknown>)` 是松类型直接 `JSON.stringify`，故透传不受 `ChatCompletionRequestSchema` 约束。
+- **验证**：TDD 先红后绿——schema（extra_body 默认缺省/任意块原样透传）、client（配置存在则转发、缺省则不挂）、classify（敌意 extra_body 既加 thinking 又试图覆盖 model/temperature/stream → 锁定字段胜）。Codex review 抓出 P1（`classifier-samples.test.ts` 仍 pin `timeout_ms===250`）+ P2（docs/03 片段未更新）已修。typecheck/lint 净，全量 2546 绿。
+- **② 流式 idle/stall 超时（同日实现）**：`withTimeout` 在收到响应头即 `cleanup`，故 TTFB 后**流式读循环此前无任何超时**——上游 mid-stream 卡死会永久挂起（网关 timeout 中间件也在响应头返回时就 resolve，管不到流体）。新增 `provider/stream-idle.ts`：`readChunkWithIdle(reader, idleMs)` 把单次 `reader.read()` 与 idle deadline race，超时则 `reader.cancel()`（回收连接）并抛 `StreamStalledError`，由三个 client 转 `UpstreamError("timeout")`。**每次 read 各自计时 → 是「逐块静默上限」而非总时长上限**（持续吐字的长流不受限）。首个 chunk 前抛 = 可 fallback 的正常失败；之后抛 = 终止已在流的响应（无法 fallback）。**作用域取舍**：复用 `request_timeout_ms`（=TTFB 同一旋钮）当 idle 值，避免给 8 处 server.ts callsite 加新字段——语义统一为「上游必须在 N ms 内产出点东西」；专用 `stream_idle_timeout_ms` 旋钮留作未来细化。三 client（openai 内联、anthropic `translateAnthropicSSE`、responses `readResponsesEvents`，后两者加 `idleMs=0` 默认参，向后兼容）全部接入。TDD：helper 5 例（chunk 透传 / done 透传 / idleMs<=0 关闭 / 超时 cancel+抛 / 逐块计时不误杀）+ 三 client 各一 stall 集成例（首块送达后静默 → UpstreamError(timeout) 504 + reader 被 cancel）。
+- **② 的 Codex 二轮复审（3 个真 bug 已修）**：(P1) 终止 SSE 事件没停止读取——idle guard 会把**已完成**的响应变成 timeout：上游发 `message_stop`/`response.completed` 后若延迟关 body，下一次 idle read 就误触发。修：anthropic `message_stop` 后 `return`、responses `aggregateResponsesStream` 的 `response.completed` 后 `break`（`translateResponsesSSE` 本就 `return`，无恙）。各补一例「终止事件后 body 保持打开 → 不超时」回归。(P2) `stream-idle.ts` 超时路径先 `await reader.cancel()` 再抛——cancel 慢/不 resolve 会让超时形同虚设：改 `void reader.cancel().catch()` fire-and-forget，立即抛（cancel 同步发起，cancelReasons/cancelled 仍可断言）。(P3) 四个流式路由把非 `PipelineError` 的 throw 一律压成 `upstream_error`/`internal_error`，丢掉新的 timeout 分类：新增 `routes/stream-error.ts` 的 `isUpstreamTimeout(err)` 谓词，chat/responses/messages/gemini 终止错误帧统一 `isUpstreamTimeout ? "timeout" : <原兜底>`。补 helper 单测 + chat 路由集成例（流式首块后抛 UpstreamError(timeout) → 错误帧 `error_class:"timeout"`）。typecheck/lint 净，全量 2552 绿。
+- **部署坑（关键 TODO）**：①透传 + ②idle **代码都只在分支**，线上 0.8.3 镜像没有——服务器 config 现仍留**临时 3500/4000**（推理仍开）+ `HELM_REQUEST_TIMEOUT_MS=300000`。等本分支构建新镜像部署后：把服务器 classifier.yaml 切到 `extra_body.thinking + 1500/2000`；`request_timeout_ms` 现在身兼 TTFB+idle，300000 偏松（mid-stream 卡死需 5min 才回收），建议部署后下调到 ~60–90s（够推理 TTFB，又让卡死连接快速回收），或后续加专用 `stream_idle_timeout_ms` 再分离。
+
+---
+
 ## 2026-06-07 · 请求详情页时间显示「未记录时间」（修复；docs/07）
 
 - **Bug（用户报告）**：请求详情页头部恒显「未记录时间」。根因两处：① 网关详情接口 `GET /admin/api/requests/:traceId` 直接吐 `getByRequestId` 返回的 `DecisionRecord`，而该 record **schema 本身不含时间戳**（时间在独立的 `createdAt` 列里）；列表接口 `GET /requests` 早已 `created_at: r.createdAt.getTime()` 拍平上去，详情接口没拍。② 前端 `toDetail` 把 `ts` **写死成 `''`**（`toListItem` 早已正确从 `created_at` 映射），于是详情页永远落入 `{d.ts || '未记录时间'}` 兜底。
@@ -27,22 +39,11 @@
 
 ---
 
-## 2026-06-06 · 请求详情页「重试」按钮（可编辑重发 + 隔离重跑；用户决策；docs/07）
-
-- **动机**：线上调试（deepseek-v4-pro 把 5000 `max_tokens` 全烧在 reasoning，`finish:length`、正文为空，详情页正确显示「无可见输出」）后，需要在 admin 内「改一下（如调高 max_tokens）再发一次」并看新结果，无需离开界面/手搓 curl。
-- **两项用户拍板**：① **可编辑后重发**（弹窗预填录制的请求体，可改 max_tokens/messages 再发）；② **隔离 debug 重跑**——走真路由 + 真 provider、记**新** trace+payload，但**不计 budget、不写/注入记忆**（observe/inject/settle/oauth-usage 全略），身份/caps 从原请求的 key 重建（lane 白名单 / `allow_custom_model` 仍生效，faithful）。key 已删/吊销 → 409 拒绝，**绝不静默放宽权限**。
-- **后端**：① `TelemetryStore.getApiKeyId(reqId)` 新窄查询——脱敏 DecisionRecord 只带 `key_prefix`，`api_key_id` 在独立列，replay 需它重建身份（port + sqlite/pg 适配器，仅 select 一列、不反序列化 blob）；**未加 `getById`**，身份用 `keyStore.list().find`（port 本无 getById、admin 非热路径、量小，沿用 delete-key 同模式）。② 新 `admin/replay.ts`：`runReplay` 返回判别式 outcome（400 体非法 / 404 原请求不存在 / 409 key 不可用），route 映射状态码；`registerReplayRoutes` 挂 `POST /admin/api/requests/:traceId/replay`，`replay` wiring 缺省时 503。复用 `payload-capture.ts` 的 `persistPayload`/`usageFromSSE`/`backfillCompletionCost`——流式服务端 drain 后回填 completion cost，与 chat 路由同。③ `server.ts` 给 `AdminApiDeps` 注入 `replay`，**复刻 chat 路由同一批闭包**（route/redact/costOf/capture getters）+ `randomUUID` 作新 trace id，零重复编排逻辑。
-- **范围 v1 = openai_chat**：body 过 `OpenAIChatRequestSchema`，非 OpenAI 形态 422；对既有记录**无需新存 protocol**（按体 schema 推断即可），按钮仅在 `payload.captured` 且含 `messages` 数组时可点，否则 disabled + 提示。
-- **前端**：`replayRequest(traceId, request)` POST `{request}`；`RetryDialog.svelte`（Modal + 预填 JSON textarea，客户端先 `JSON.parse` 防 400 往返，成功 `goto` 新 trace）；详情页头部加 Retry 按钮（`$derived` 算 `canRetry`）。i18n 9 key 全 5 locale（意译）。`untrack` 快照初始 body 文本，消除 svelte `state_referenced_locally` 警告。
-- **测试（TDD 先红）**：store-contract 加 getApiKeyId（双驱动 sqlite+pglite）；`replay.test` 10 例（非流 / 流式 cost 回填 / 400 / 404 / 409 删+吊 / capture off 不写 payload / provider 失败仍记可看 trace / route 503 / 缺 request 字段 400）；ports/decision/admin 三处 fake 补 getApiKeyId。
-- **坑/注**：`pnpm test` 全跑时 32 例 **PGlite 超时（5s）** 失败——纯并行资源争用 flake（隔离单跑 170/170 绿，含那两个超时文件），**非本次引入**（既有 admin.spec 全跑 flake 同源）。隔离重跑不计 budget/不写记忆是有意取舍（debug 不该污染/计费），已在代码注释标注；线上手测（改 max_tokens 重发 → `finish` 由 length 变 stop、正文有内容）留用户在部署上验。
-- **Codex review 修复（3×P2 + 1×P3）**：(P2) replay 同时绕过按 key **限流/并发门**（不止 budget）——属有意取舍（那些 middleware 守的是 /v1 客户端面，replay 是 Basic auth 后的一次性运维动作，dialog `sending` 已串行化点击），在 replay.ts「DELIBERATE BYPASSES」+ ReplayWiring 注释显式成文，不接入。(P2) 流式 drain 包 `try/catch`——中途上游断流不再让 runReplay 抛出跳过持久化，**部分字节照存、失败重试仍可查看**（镜像 live stream 分支 finally 语义）。(P2) `telemetry.insert` 失败由吞错改 **fail-closed 返 500**——replay 的交付物就是那条记录（UI 直接 goto 新 trace），吞错会导航到 404；与 live 路由 fail-open 的取舍差异已注释成文。(P3) ports.test 内存 fake `getApiKeyId` 误返 `request_id` → 改存/返 `input.apiKeyId` 并补断言。两新测试（流中断仍持久化 / insert 失败 500）先红后绿，replay 12 例全绿。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-06 · 请求详情页「重试」按钮（可编辑重发 + 隔离重跑；用户决策；docs/07）：弹窗预填录制请求体可改 max_tokens/messages 再发；隔离 debug 重跑走真路由+真 provider、记新 trace+payload 但**不计 budget/不写记忆**，身份/caps 从原 key 重建（lane 白名单/allow_custom_model 仍生效，key 删/吊 → 409）。后端 `getApiKeyId` 窄查询重建身份 + `admin/replay.ts`（判别式 outcome 400/404/409，insert 失败 fail-closed 500 因交付物就是那条记录）；范围 v1=openai_chat（按体 schema 推断，无需新存 protocol）。Codex 修复：限流/并发门一并绕过属有意取舍（运维动作非客户端面）已成文；流式 drain try/catch 部分字节照存。
 
 ### 2026-06-06 · 已吊销 key 允许永久删除（两步销毁；用户决策；docs/06）：软吊销 `DELETE /:id` 契约不动，硬删作 `?purge=true` 旗标；路由 gate `list().find`——未找 404 / active 409（必先吊销）/ disabled 才 deleteKey。「必先吊销」是路由策略不进 store；UI 仅 disabled 行显 Delete 但 server 独立校验（纵深防御）。审计存活靠 telemetry/payload 的 `api_key_id` 是无 FK 纯文本列，硬删不级联、悬空引用仍可审计。贯穿 core `KeyStore.deleteKey`(throw on unknown)→admin route→api client→+page。坑：选旗标不破 revoke 契约；read→delete TOCTOU 在单管理员场景可忽略 + deleteKey throw 兜底。
 

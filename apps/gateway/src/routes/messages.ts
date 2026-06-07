@@ -7,6 +7,7 @@ import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
+import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/messages — Anthropic Messages inbound, translated to IR, routed, and
 // translated back to the Anthropic wire shape (docs/02 §API Gateway, docs/05).
@@ -340,7 +341,12 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             const re: RouteError =
               err instanceof PipelineError
                 ? { error_class: err.error_class, message: err.message, trace_id: traceId }
-                : { error_class: "upstream_error", message: "upstream error", trace_id: traceId };
+                : {
+                    // Preserve a mid-stream idle timeout instead of upstream_error.
+                    error_class: isUpstreamTimeout(err) ? "timeout" : "upstream_error",
+                    message: isUpstreamTimeout(err) ? "upstream timed out" : "upstream error",
+                    trace_id: traceId,
+                  };
             const out = anthropic.transformErrorOut(re);
             await sse.writeSSE({ event: "error", data: JSON.stringify(out.body) });
           }

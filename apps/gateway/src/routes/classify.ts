@@ -231,6 +231,10 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
   ): Promise<EvalModelResponse> => {
     const res = await provider.chatCompletion(
       {
+        // Provider-specific passthrough (config.extra_body) FIRST so the locked
+        // fields below always win — extra_body can add knobs (e.g. thinking:
+        // disabled) but can never override model/temperature/stream/max_tokens.
+        ...(modelReq.extra_body ?? {}),
         model: modelReq.model,
         messages: modelReq.messages,
         temperature: modelReq.temperature,

@@ -51,6 +51,16 @@ export const EvalConfigSchema = z
     // defaults rather than treating it as a bare {} (Zod v4 .default short-circuits
     // inner defaults).
     cache: EvalCacheConfigSchema.prefault({}),
+    // Provider-specific request-body passthrough, merged verbatim onto the eval
+    // model's wire request (eval.client → ProviderForEval.chatCompletion, a loose
+    // Record — NOT bound by ChatCompletionRequestSchema). Config-as-code escape
+    // hatch (principle 2) for knobs Helm does not model as first-class, e.g.
+    // `{ thinking: { type: disabled } }` to stop a *reasoning* eval model from
+    // burning the max_tokens budget on a chain-of-thought the classifier discards
+    // (that truncates the JSON verdict → eval_not_json, and adds ~2s latency). OFF
+    // unless set; an OpenAI-style eval model simply omits it. Kept untyped on
+    // purpose — the upstream owns this contract, not Helm.
+    extra_body: z.record(z.string(), z.unknown()).optional(),
   })
   .refine((c) => c.outer_timeout_ms > c.timeout_ms, {
     // The outer (consumer) race is the LATER backstop: it must outlive the inner

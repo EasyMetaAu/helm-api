@@ -186,8 +186,21 @@ classifier:
     model: deepseek-v4-flash
     temperature: 0
     max_tokens: 256
-    timeout_ms: 250                # inner (runner) timeout
-    outer_timeout_ms: 350          # outer (consumer) timeout — strictly-later backstop (> inner)
+    # extra_body is merged VERBATIM onto the eval model's wire request (eval.client →
+    # the loose ProviderForEval record). `thinking:{type:disabled}` stops deepseek-v4-flash
+    # from spending its reasoning budget on a chain-of-thought the classifier throws away:
+    # with reasoning ON the 256-token budget got eaten and the JSON verdict came back
+    # truncated/empty (→ eval_not_json), and the round-trip ran ~2–3s. Disabled, a real
+    # eval call from the LA host is ~1s and returns clean JSON — so the timeouts below can
+    # stay TIGHT instead of taxing the hot path. (Locked fields model/temperature/stream/
+    # max_tokens always win over extra_body; see classify.ts invokeModel.)
+    extra_body:
+      thinking: { type: disabled }
+    timeout_ms: 1500               # inner (runner) timeout — covers a real cross-region eval
+                                    # round-trip (~1s with reasoning disabled) with margin.
+                                    # 250ms lost every race in production → eval_timeout on
+                                    # every cache-miss prompt; balanced was the only outcome.
+    outer_timeout_ms: 2000         # outer (consumer) timeout — strictly-later backstop (> inner)
     on_failure: balanced
     cache:
       enabled: true

@@ -6,7 +6,7 @@ import type {
   RouteDeps,
   TelemetryStore,
 } from "@helm/core";
-import { hashKey, routeRequest } from "@helm/core";
+import { hashKey, routeRequest, UpstreamError } from "@helm/core";
 import { type InternalRequest, makeHelmError } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
@@ -194,6 +194,39 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     const text = await res.text();
     for (const ch of chunks) expect(text).toContain(ch.trim());
     expect(text.trimEnd().endsWith("[DONE]")).toBe(true);
+  });
+
+  it("preserves the timeout class in the terminal error frame when the stream stalls mid-flight", async () => {
+    // The provider idle guard throws UpstreamError("timeout") AFTER the first
+    // chunk; the route must surface that as a `timeout` frame, not a generic
+    // upstream_error (Codex P3 — the classification must survive to the client).
+    async function* sseThenTimeout(first: string): AsyncGenerator<string> {
+      yield first;
+      throw new UpstreamError("timeout", "upstream stream produced no data for 1500ms");
+    }
+    const { deps: d, harness } = deps();
+    harness.execute.mockResolvedValue({
+      ...nonStreamOutcome(null),
+      body: null,
+      stream: sseThenTimeout('data: {"a":1}\n\n'),
+    });
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(STREAM_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('data: {"a":1}'); // first chunk forwarded before the stall
+    const errLine = text.split("\n").find((l) => l.startsWith("data: ") && l.includes('"error"'));
+    expect(errLine).toBeDefined();
+    const parsed = JSON.parse((errLine as string).slice("data: ".length)) as {
+      error: { error_class: string };
+    };
+    expect(parsed.error.error_class).toBe("timeout");
   });
 
   it("does NOT bypass the pipeline (Phase 0 passthrough is gone)", async () => {

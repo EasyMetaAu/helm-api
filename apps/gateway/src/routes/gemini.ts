@@ -12,6 +12,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult, RouteError } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
+import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1beta/models/{model}:generateContent / :streamGenerateContent — Google
 // Gemini inbound, translated to IR, routed through the SAME core pipeline as
@@ -283,7 +284,12 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             const re: RouteError =
               err instanceof PipelineError
                 ? { error_class: err.error_class, message: err.message, trace_id: traceId }
-                : { error_class: "upstream_error", message: "upstream error", trace_id: traceId };
+                : {
+                    // Preserve a mid-stream idle timeout instead of upstream_error.
+                    error_class: isUpstreamTimeout(err) ? "timeout" : "upstream_error",
+                    message: isUpstreamTimeout(err) ? "upstream timed out" : "upstream error",
+                    trace_id: traceId,
+                  };
             const out = transformer.transformErrorOut(re);
             await sse.writeSSE({ data: JSON.stringify(out.body) });
           }

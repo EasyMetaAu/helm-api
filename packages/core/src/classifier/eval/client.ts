@@ -40,6 +40,10 @@ export interface EvalModelRequest {
   temperature: 0;
   stream: false;
   max_tokens: number;
+  /** Provider-specific body passthrough from `config.extra_body`, merged verbatim
+   *  onto the wire request by the invoker (e.g. `{ thinking: { type: disabled } }`).
+   *  Present only when configured; never set by runEval otherwise. */
+  extra_body?: Record<string, unknown>;
 }
 
 /** Raw, unparsed completion text from the small model, plus its self-cost when
@@ -126,6 +130,9 @@ export async function runEval<TInput>(
     temperature: 0,
     stream: false,
     max_tokens: config.max_tokens,
+    // Forward provider-specific passthrough ONLY when configured, so the request
+    // shape is unchanged for deployments that do not set it.
+    ...(config.extra_body ? { extra_body: config.extra_body } : {}),
   };
 
   // Inner runner: the upstream call raced against its own runner timeout. On
