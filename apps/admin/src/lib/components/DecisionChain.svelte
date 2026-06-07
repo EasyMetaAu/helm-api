@@ -12,6 +12,45 @@
 
   const cls = $derived(detail.classifier_output);
 
+  // Attribute the classifier verdict to the stage that actually produced it — the
+  // key insight this view fixes: a `decided_by:'eval'` verdict is the EVAL MODEL's
+  // output, not the Layer-1 rules. Each source has its own badge colour (app.css).
+  function decidedBy(source: RequestDetail['classifier_output']['decided_by']): {
+    badge: string;
+    key: string;
+  } {
+    switch (source) {
+      case 'eval':
+        return { badge: 'badge-eval', key: 'Decided by the Layer-2 eval model' };
+      case 'fallback':
+        return { badge: 'badge-fallback', key: 'Rules uncertain — fell back to the balanced lane' };
+      case 'default':
+        return { badge: 'badge-neutral', key: 'Default (explicit passthrough or fail-open)' };
+      default:
+        return { badge: 'badge-rules', key: 'Decided by Layer-1 rules' };
+    }
+  }
+
+  // Map a raw eval fail-open reason (e.g. 'eval_timeout') to a friendly i18n key.
+  // The cascade tags these as `eval_<reason>`; strip the prefix before mapping.
+  function evalReasonKey(reason: string): string {
+    const bare = reason.startsWith('eval_') ? reason.slice(5) : reason;
+    switch (bare) {
+      case 'timeout':
+        return 'timed out';
+      case 'provider_error':
+        return 'provider error';
+      case 'circuit_open':
+        return 'circuit open';
+      case 'not_json':
+        return 'returned non-JSON';
+      case 'schema_invalid':
+        return 'returned an invalid schema';
+      default:
+        return bare;
+    }
+  }
+
   function outcomeBadge(outcome: string): string {
     switch (outcome) {
       case 'success':
@@ -50,6 +89,11 @@
       <span class="badge-neutral">{cls.complexity}</span>
       <span class="text-ink-muted">{$t('confidence')} {cls.confidence.toFixed(2)}</span>
     </div>
+    <!-- Decision source: makes clear WHICH stage produced the verdict above, so an
+         eval-decided verdict is no longer mistaken for a Layer-1 rules verdict. -->
+    <div data-testid="chain-decided-by" class="mt-2">
+      <span class={decidedBy(cls.decided_by).badge}>{$t(decidedBy(cls.decided_by).key)}</span>
+    </div>
     {#if cls.matched_dimensions.length > 0}
       <div class="mt-2 flex flex-wrap gap-1">
         {#each cls.matched_dimensions as dim (dim)}
@@ -76,15 +120,43 @@
       )}
     </p>
     {#if detail.eval_triggered}
-      <span class="badge-eval">{$t('triggered')}</span>
-      <span class="ml-2 text-ink-body">
-        {$t('cache:')}
-        {detail.eval_cache_hit === null
-          ? $t('n/a')
-          : detail.eval_cache_hit
-            ? $t('hit')
-            : $t('miss')}
-      </span>
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span class="badge-eval">{$t('triggered')}</span>
+        {#if detail.eval_model}
+          <span class="text-ink-body">
+            {$t('model:')}
+            <span class="font-mono text-ink-strong">{detail.eval_model}</span>
+          </span>
+        {/if}
+        <span class="text-ink-body">
+          {$t('cache:')}
+          {detail.eval_cache_hit === null
+            ? $t('n/a')
+            : detail.eval_cache_hit
+              ? $t('hit')
+              : $t('miss')}
+        </span>
+        {#if detail.eval_latency_ms !== null}
+          <span class="text-ink-muted">{$t('latency:')} {detail.eval_latency_ms}ms</span>
+        {/if}
+      </div>
+      {#if cls.decided_by === 'eval'}
+        <!-- The verdict in the Classifier box above IS this eval's output — restate
+             it here, explicitly attributed, so its provenance is unambiguous. -->
+        <p data-testid="eval-verdict" class="mt-2 flex flex-wrap items-center gap-2 text-ink-body">
+          <span>{$t('Eval verdict:')}</span>
+          <span class="badge-neutral">{cls.task_type}</span>
+          <span class="badge-neutral">{cls.complexity}</span>
+          <span class="text-ink-muted">{$t('confidence')} {cls.confidence.toFixed(2)}</span>
+        </p>
+      {:else if detail.eval_fallback_reason}
+        <!-- Eval ran but failed open → routing fell back to balanced; say why. -->
+        <p data-testid="eval-failed" class="mt-2 text-amber-800">
+          {$t('Eval failed open ({reason}) — routing fell back to the balanced lane.', {
+            reason: $t(evalReasonKey(detail.eval_fallback_reason)),
+          })}
+        </p>
+      {/if}
     {:else}
       <span class="text-ink-muted">{$t('not triggered')}</span>
     {/if}

@@ -93,6 +93,8 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
       confidence: 0.87,
       decided_by: "rules",
       eval_cache_hit: null,
+      eval_model: null,
+      eval_latency_ms: null,
       constraints: { needs_tools: true },
       explanation: ["code-block"],
     },

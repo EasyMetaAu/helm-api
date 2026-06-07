@@ -336,6 +336,12 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
       // Layer-2 self-cost, threaded into cost_breakdown.eval_usd (separate from
       // completion cost; docs/07). Non-null only when a fresh eval call billed it.
       eval_usd: result.eval_usd,
+      // The eval model id + call latency, surfaced for the Debug UI. The model name
+      // lives ONLY here (the cascade is model-agnostic), so stamp it whenever eval
+      // actually ran — covering both a decided eval and one that ran then failed open
+      // (result.eval_used is true in both). null when eval never ran.
+      eval_model: result.eval_used ? evalCfg.model : null,
+      eval_latency_ms: result.eval_latency_ms,
       fallback_reason: result.fallback_reason ?? null,
       constraints: {
         needs_json: req.response_format !== null,

@@ -19,6 +19,8 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
       confidence: 0.9,
       decided_by: 'eval',
       eval_cache_hit: false,
+      eval_model: 'gpt-4o-mini',
+      eval_latency_ms: 1234,
       constraints: { needs_tools: true },
       explanation: ['matched: code-block'],
     },
@@ -86,6 +88,51 @@ describe('toDetail', () => {
     expect(d.cost_breakdown.eval_usd).toBeCloseTo(0.0002);
     expect(d.cost_breakdown.completion_usd).toBeCloseTo(0.01);
     expect(d.cost_breakdown.total_usd).toBeCloseTo(0.0102);
+  });
+
+  it('surfaces the eval model, latency and decision source (decided_by) for an eval-decided request', () => {
+    const d = toDetail(rawRecord());
+    expect(d.classifier_output.decided_by).toBe('eval');
+    expect(d.eval_triggered).toBe(true);
+    expect(d.eval_model).toBe('gpt-4o-mini');
+    expect(d.eval_latency_ms).toBe(1234);
+    expect(d.eval_fallback_reason).toBeNull();
+  });
+
+  it('maps an eval that ran then failed open (fallback_reason + null verdict model state)', () => {
+    const d = toDetail(
+      rawRecord({
+        classifier: {
+          task_type: 'chat',
+          complexity: 'standard',
+          confidence: 0.2,
+          decided_by: 'fallback',
+          eval_cache_hit: false,
+          eval_model: 'gpt-4o-mini',
+          eval_latency_ms: 50,
+          fallback_reason: 'eval_timeout',
+          constraints: {},
+          explanation: [],
+        },
+      }),
+    );
+    expect(d.classifier_output.decided_by).toBe('fallback');
+    // eval ran (cache_hit recorded as false, not null) → still "triggered".
+    expect(d.eval_triggered).toBe(true);
+    expect(d.eval_model).toBe('gpt-4o-mini');
+    expect(d.eval_fallback_reason).toBe('eval_timeout');
+  });
+
+  it('leaves eval fields null for a legacy record that never carried them', () => {
+    const legacy = rawRecord();
+    (legacy.classifier as Record<string, unknown>).decided_by = 'rules';
+    delete (legacy.classifier as Record<string, unknown>).eval_model;
+    delete (legacy.classifier as Record<string, unknown>).eval_latency_ms;
+    delete (legacy.classifier as Record<string, unknown>).eval_cache_hit;
+    const d = toDetail(legacy);
+    expect(d.eval_model).toBeNull();
+    expect(d.eval_latency_ms).toBeNull();
+    expect(d.eval_triggered).toBe(false);
   });
 
   it('defaults cost parts to 0 when the record has no cost_breakdown (legacy record)', () => {

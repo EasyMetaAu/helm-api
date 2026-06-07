@@ -487,5 +487,18 @@
   "Window (seconds)": "ウィンドウ（秒）",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "ポリシーがない場合、リクエストはタスクレーンのみによってルーティングされます。一致するリクエストに対してレーンを強制または制限するには、ポリシーを追加してください。",
   "yes": "はい",
-  "Your new API key": "新しい API キー"
+  "Your new API key": "新しい API キー",
+  "model:": "モデル：",
+  "latency:": "レイテンシ：",
+  "Eval verdict:": "評価結果：",
+  "Decided by Layer-1 rules": "Layer-1ルールにより判定",
+  "Decided by the Layer-2 eval model": "Layer-2評価モデルにより判定",
+  "Rules uncertain — fell back to the balanced lane": "ルールが不確実 — balancedレーンにフォールバック",
+  "Default (explicit passthrough or fail-open)": "デフォルト（明示的パススルーまたはフェイルオープン）",
+  "Eval failed open ({reason}) — routing fell back to the balanced lane.": "評価がフェイルオープン（{reason}）— ルーティングはbalancedレーンにフォールバックしました。",
+  "timed out": "タイムアウト",
+  "provider error": "プロバイダーエラー",
+  "circuit open": "サーキットオープン",
+  "returned non-JSON": "非JSONを返却",
+  "returned an invalid schema": "無効なスキーマを返却"
 }

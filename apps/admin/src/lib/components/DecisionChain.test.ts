@@ -22,11 +22,15 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       task_type: 'coding',
       complexity: 'high',
       confidence: 0.87,
+      decided_by: 'eval',
       matched_dimensions: ['has_code_fence', 'long_context'],
       constraints: { require_tools: true, require_json: false },
     },
     eval_triggered: true,
     eval_cache_hit: false,
+    eval_model: 'gpt-4o-mini',
+    eval_latency_ms: 1234,
+    eval_fallback_reason: null,
     matched_policy: 'policy_coding_premium',
     lane_candidates: ['premium', 'balanced', 'economy'],
     provider_attempts: [
@@ -80,7 +84,68 @@ describe('DecisionChain', () => {
     render(DecisionChain, { detail: detail() });
     const evalSec = screen.getByTestId('chain-eval');
     expect(within(evalSec).getByText(/triggered/i)).toBeInTheDocument();
-    expect(within(evalSec).getByText(/miss|false|no/i)).toBeInTheDocument();
+    expect(within(evalSec).getByText(/miss/i)).toBeInTheDocument();
+  });
+
+  it('shows WHICH model ran eval, its latency, and the eval verdict it produced', () => {
+    render(DecisionChain, { detail: detail() });
+    const evalSec = screen.getByTestId('chain-eval');
+    // The eval model name + latency answer "which model evaluated, how long".
+    expect(within(evalSec).getByText('gpt-4o-mini')).toBeInTheDocument();
+    expect(within(evalSec).getByText(/1234ms/)).toBeInTheDocument();
+    // The eval verdict is restated here, attributed, so it is not mistaken for rules.
+    const verdict = within(evalSec).getByTestId('eval-verdict');
+    expect(verdict).toHaveTextContent('coding');
+    expect(verdict).toHaveTextContent('high');
+    expect(verdict).toHaveTextContent('0.87');
+  });
+
+  it('attributes the classifier verdict to its decision source (eval vs rules)', () => {
+    render(DecisionChain, { detail: detail() });
+    expect(screen.getByTestId('chain-decided-by')).toHaveTextContent(/eval/i);
+    // A rules-decided request attributes to Layer-1 rules instead.
+    render(DecisionChain, {
+      detail: detail({
+        classifier_output: {
+          task_type: 'chat',
+          complexity: 'low',
+          confidence: 0.95,
+          decided_by: 'rules',
+          matched_dimensions: [],
+          constraints: {},
+        },
+        eval_triggered: false,
+        eval_model: null,
+        eval_latency_ms: null,
+      }),
+    });
+    expect(screen.getAllByTestId('chain-decided-by')[1]).toHaveTextContent(/rules/i);
+  });
+
+  it('explains an eval that ran then failed open (reason + balanced fallback)', () => {
+    render(DecisionChain, {
+      detail: detail({
+        classifier_output: {
+          task_type: 'chat',
+          complexity: 'standard',
+          confidence: 0.2,
+          decided_by: 'fallback',
+          matched_dimensions: [],
+          constraints: {},
+        },
+        eval_triggered: true,
+        eval_cache_hit: false,
+        eval_model: 'gpt-4o-mini',
+        eval_latency_ms: 50,
+        eval_fallback_reason: 'eval_timeout',
+      }),
+    });
+    const evalSec = screen.getByTestId('chain-eval');
+    const failed = within(evalSec).getByTestId('eval-failed');
+    expect(failed).toHaveTextContent(/timed out/i);
+    expect(failed).toHaveTextContent(/balanced/i);
+    // No verdict line on the failed-open path (eval produced no verdict).
+    expect(within(evalSec).queryByTestId('eval-verdict')).toBeNull();
   });
 
   it('renders the matched policy', () => {

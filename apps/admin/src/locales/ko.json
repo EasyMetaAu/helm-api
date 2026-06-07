@@ -487,5 +487,18 @@
   "Window (seconds)": "기간(초)",
   "Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.": "정책이 없으면 요청은 작업 레인에 의해서만 라우팅됩니다. 일치하는 요청에 대해 레인을 강제하거나 제한하려면 정책을 추가하세요.",
   "yes": "예",
-  "Your new API key": "새 API 키"
+  "Your new API key": "새 API 키",
+  "model:": "모델:",
+  "latency:": "지연시간:",
+  "Eval verdict:": "평가 결과:",
+  "Decided by Layer-1 rules": "Layer-1 규칙으로 결정됨",
+  "Decided by the Layer-2 eval model": "Layer-2 평가 모델로 결정됨",
+  "Rules uncertain — fell back to the balanced lane": "규칙 불확실 — balanced 레인으로 폴백",
+  "Default (explicit passthrough or fail-open)": "기본값 (명시적 패스스루 또는 페일오픈)",
+  "Eval failed open ({reason}) — routing fell back to the balanced lane.": "평가 페일오픈 ({reason}) — 라우팅이 balanced 레인으로 폴백되었습니다.",
+  "timed out": "시간 초과",
+  "provider error": "공급자 오류",
+  "circuit open": "서킷 오픈",
+  "returned non-JSON": "비 JSON 반환",
+  "returned an invalid schema": "잘못된 스키마 반환"
 }

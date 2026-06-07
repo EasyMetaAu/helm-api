@@ -19,6 +19,15 @@
 
 ---
 
+## 2026-06-07 · 请求详情页展示第二层 eval 的模型与复核结论（修复「不知道哪个模型 eval、结果是什么」；docs/03/07；CLAUDE.md 原则 5/7）
+
+- **Bug（用户报告）**：请求走了 Layer-2 eval，但详情页看不出①是哪个模型评估的、②评估结论是什么。根因：eval 决定时 cascade 用 eval 输出**替换**了 rules 的 complexity/task_type/confidence（cascade.ts:120），该 verdict 被存进 classifier 段——可详情页把它渲染在「分类器（第一层规则）」框里，无任何归属提示，用户误以为是规则结果；而 eval 模型名仅打日志、**从不持久化**。
+- **方案**：① **新增两个持久字段** `classifier.eval_model` / `eval_latency_ms`（shared schema，`.default(null)` 兼容 legacy）。模型名只在 classify 适配器有（`evalCfg.model`，cascade 对模型无感），故在适配器按 `eval_used` 盖章（覆盖「eval 决定」与「eval 跑了但 fail-open」两态）；latency 早在 `EvalDecision.latency_ms` 算好但被 cascade 丢弃，顺手穿过 `ClassificationResult`→`balancedFallback`。真正落库路径是 route-request.ts `plan()` 内联（`telemetry/decision.ts buildDecisionRecord` 实为死代码、零调用，仍同步改保持一致）。② **前端归因**：详情接口 `toDetail` 把 `decided_by` 透进 `classifier_output`，新增 `eval_model/eval_latency_ms/eval_fallback_reason`；DecisionChain 分类器框加「判定来源」徽章（rules/eval/fallback/default 各色 badge-*），eval 框重做为 模型 + 缓存 + 耗时 +（decided→复核结论 verdict / fail-open→失败原因 + 回退 balanced）。
+- **取舍/坑**：(用户拍板) 含 eval 耗时（动 core cascade + 其测试）+ 全 5 locale。`eval_model` 是模型 id 非密钥，过 `redact` 不变（原则 7）。`.default(null)` 让字段 z.infer **输出必填**，故 7 处 DecisionRecord 测试 fixture（core signals/store + gateway admin + admin routes）须补 `eval_model/eval_latency_ms: null`——typecheck 一路报出来补齐。legacy 旧记录：eval_model 缺→UI 隐藏模型行，但 `decided_by==='eval'` 的 verdict 仍照常显示（优雅降级）。
+- **验证**：TDD——schema（默认 null / 含值 round-trip / 负 latency 拒）、cascade（latency 在 rules/disabled→null，decided/fail-open→实测值）、classify 适配器（eval 跑→model=配置值、未跑→null）、requests.toDetail（decided_by/model/latency/fallback_reason 映射 + legacy null）、DecisionChain（显模型/耗时/verdict/失败行/归因徽章）。typecheck/svelte-check/lint/prettier 净，全量 2541 绿，build 通过。
+
+---
+
 ## 2026-06-07 · 请求详情页时间显示「未记录时间」（修复；docs/07）
 
 - **Bug（用户报告）**：请求详情页头部恒显「未记录时间」。根因两处：① 网关详情接口 `GET /admin/api/requests/:traceId` 直接吐 `getByRequestId` 返回的 `DecisionRecord`，而该 record **schema 本身不含时间戳**（时间在独立的 `createdAt` 列里）；列表接口 `GET /requests` 早已 `created_at: r.createdAt.getTime()` 拍平上去，详情接口没拍。② 前端 `toDetail` 把 `ts` **写死成 `''`**（`toListItem` 早已正确从 `created_at` 映射），于是详情页永远落入 `{d.ts || '未记录时间'}` 兜底。
@@ -27,21 +36,11 @@
 
 ---
 
-## 2026-06-06 · 管理界面规则编辑写回 YAML（修复「保存只活在内存、重启即回滚」；用户决策；docs/11；CLAUDE.md 原则 2）
-
-- **Bug（用户报告）**：分类器/Lanes/Policies 三页的「保存」只经 `createRuntimeRuleStore` 重绑**内存变量**（rule-store.ts 自注 "MVP…future YAML write-back adapter"），不落任何持久层——重启即回滚到 yaml。其余面（System Settings → config_kv、Keys/OAuth → DB）本就持久，仅这三页挥发。
-- **方案（用户拍板：YAML 写回，文件即真相）**：新增 `yaml-writeback.ts`（gateway admin），三特性：**保留注释**（eemeli/yaml Document API，`setIn` 原位改值，发行 yaml 重注释不可毁）、**原子写**（同目录 tmp + rename，绝不留半截文件给 fail-closed loader）、**fail-closed**（写失败 throw）。`RuntimeRuleStoreInit` 加可选 `persist*` 钩子，**先持久化后重绑**——写失败 → 路由 500、live config 不动，文件与内存永不分叉；重启 loader 读回的就是上次保存值。server.ts 用 `opts.configDir` 构造 persister（仅 adminAuth.enabled 时）。
-- **文件形状对齐 loader**：lanes.yaml = 顶层平铺 map（保存集合**精确镜像**：改原位、增追加、**缺失即删**——admin 删 lane 必须落文件）；policies.yaml = `{policies:[...]}`（列表整体替换，列表内逐项注释为文档化可接受损失）；classifier.yaml = `classifier:` 包裹（逐 scalar 原位）。Zod round-trip 会把可选字段的显式默认写进文件（如 lane `constraints.require_*: false`）——无害、自文档化。
-- **e2e 防误伤（关键）**：test-server.ts 原以**仓库签入 config/ 为 configDir**——写回上线后 admin.spec 的 lane 保存会改库内文件！改为每次拷贝 config → `.e2e-data/config`（与 DB 同抛弃式）。已验证：UI 保存后编辑落在拷贝、仓库 config 无 diff。
-- **顺手修 admin.spec 两个 pre-existing 本地挂**（e2e 不在 CI 门禁，无人发现）：① 种子 DecisionRecord 写死 `2026-05-31` + 请求列表默认 24h 窗 → 种子行老化出窗（**定时炸弹**），改 `Date.now()-1h`；② spec 仍找 `filter-range` testid，但 06-03 已重构成共享 RangeFilter 预设按钮（`range-<key>`），改断言 `range-24h`。admin.spec 现 9/9 绿。
-- **验证**：新增 yaml-writeback.test（注释存活/原子/缺文件创建/只读目录 throw 且原文件不动）+ rule-store.test（persist 先于 rebind；persist 失败 → 旧值保持 + onChange 不调）共 10 例 TDD 先红后绿；typecheck/lint 净；全量单测仅 PGlite 已知并行 flake（隔离 103/103 绿）。gateway 新增直接依赖 `yaml@^2.9`。
-- **部署坑（la.atmy.work）**：`/opt/helm-api/config` 现为 **root 属主**，容器用户 10001 无写权限 → 管理界面保存会 fail-closed 500。上线本特性前需 `chown` config 目录（与 data/ 同 10001 属主）；fail-closed 设计保证权限没改好时只是保存报错，绝不静默分叉。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-06 · 管理界面规则编辑写回 YAML（修复「保存只活内存、重启即回滚」；用户决策；docs/11；原则 2）：三页（分类器/Lanes/Policies）保存只重绑内存、重启回滚 → 新增 `yaml-writeback.ts`（保留注释 eemeli/yaml `setIn` + 原子 tmp+rename + fail-closed 写失败 throw），RuntimeRuleStore **先持久化后重绑**（写失败→500、内存不动、文件内存不分叉）。文件形状对齐 loader（lanes 平铺 map 缺失即删 / policies 列表整替 / classifier 包裹逐 scalar）。e2e 防误伤：test-server configDir 改拷贝到 `.e2e-data/config` 不碰仓库 config。部署坑：`/opt/helm-api/config` 须 `chown` 10001（root 属主则保存 fail-closed 500）。gateway 新增依赖 `yaml@^2.9`。
 
 ### 2026-06-06 · 请求详情页「重试」按钮（可编辑重发 + 隔离重跑；用户决策；docs/07）：弹窗预填录制请求体可改 max_tokens/messages 再发；隔离 debug 重跑走真路由+真 provider、记新 trace+payload 但**不计 budget/不写记忆**，身份/caps 从原 key 重建（lane 白名单/allow_custom_model 仍生效，key 删/吊 → 409）。后端 `getApiKeyId` 窄查询重建身份 + `admin/replay.ts`（判别式 outcome 400/404/409，insert 失败 fail-closed 500 因交付物就是那条记录）；范围 v1=openai_chat（按体 schema 推断，无需新存 protocol）。Codex 修复：限流/并发门一并绕过属有意取舍（运维动作非客户端面）已成文；流式 drain try/catch 部分字节照存。
 

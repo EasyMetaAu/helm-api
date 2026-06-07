@@ -77,11 +77,22 @@ export interface RequestDetail {
     task_type: string;
     complexity: string;
     confidence: number;
+    // Which stage produced the verdict above — so the UI can attribute it (a
+    // decided_by==='eval' verdict is the EVAL model's output, not Layer-1 rules).
+    decided_by: 'rules' | 'eval' | 'default' | 'fallback';
     matched_dimensions: string[];
     constraints: Record<string, boolean>;
   };
   eval_triggered: boolean;
   eval_cache_hit: boolean | null;
+  // The internal small-model that ran Layer-2 eval (e.g. 'gpt-4o-mini'); null when
+  // eval did not run. A model id, never a key (Principle 7).
+  eval_model: string | null;
+  // Layer-2 eval call latency (ms); null when eval did not run.
+  eval_latency_ms: number | null;
+  // WHY routing fell back when eval ran but failed open (e.g. 'eval_timeout');
+  // null on rules/eval/default paths. Lets the UI explain the balanced fallback.
+  eval_fallback_reason: string | null;
   matched_policy: string | null;
   lane_candidates: string[]; // primary + fallback[]
   provider_attempts: ProviderAttempt[];
@@ -146,6 +157,9 @@ interface RawDecisionRecord {
     confidence?: number;
     decided_by?: string;
     eval_cache_hit?: boolean | null;
+    eval_model?: string | null;
+    eval_latency_ms?: number | null;
+    fallback_reason?: string | null;
     constraints?: Record<string, unknown>;
     explanation?: unknown[];
   };
@@ -324,6 +338,7 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
       task_type: raw.classifier?.task_type ?? '',
       complexity: raw.classifier?.complexity ?? '',
       confidence: typeof raw.classifier?.confidence === 'number' ? raw.classifier.confidence : 0,
+      decided_by: normalizeDecidedBy(raw.classifier?.decided_by),
       matched_dimensions: Array.isArray(raw.classifier?.explanation)
         ? raw.classifier.explanation.map((d) => String(d))
         : [],
@@ -331,6 +346,12 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     },
     eval_triggered: raw.classifier?.decided_by === 'eval' || evalCacheHit !== null,
     eval_cache_hit: evalCacheHit,
+    eval_model:
+      typeof raw.classifier?.eval_model === 'string' ? raw.classifier.eval_model : null,
+    eval_latency_ms:
+      typeof raw.classifier?.eval_latency_ms === 'number' ? raw.classifier.eval_latency_ms : null,
+    eval_fallback_reason:
+      typeof raw.classifier?.fallback_reason === 'string' ? raw.classifier.fallback_reason : null,
     matched_policy: raw.policy?.matched_policy_id ?? null,
     lane_candidates: Array.isArray(raw.lane?.candidate_chain) ? raw.lane.candidate_chain : [],
     provider_attempts: attempts.map((a) => ({

@@ -142,6 +142,31 @@ describe("DecisionRecordSchema", () => {
     expect(DecisionRecordSchema.safeParse(missing).success).toBe(false);
   });
 
+  it("defaults eval_model / eval_latency_ms to null when omitted (legacy / non-eval records)", () => {
+    // The legacy fixture omits both → must parse as null (present, never undefined),
+    // so every stored classifier record carries the field even pre-eval.
+    const parsed = DecisionRecordSchema.parse(fullRecord());
+    expect(parsed.classifier.eval_model).toBeNull();
+    expect(parsed.classifier.eval_latency_ms).toBeNull();
+  });
+
+  it("round-trips an eval-decided classifier (model + latency present)", () => {
+    const r = fullRecord();
+    r.classifier.decided_by = "eval";
+    r.classifier.eval_cache_hit = false;
+    (r.classifier as Record<string, unknown>).eval_model = "gpt-4o-mini";
+    (r.classifier as Record<string, unknown>).eval_latency_ms = 1234;
+    const parsed = DecisionRecordSchema.parse(r);
+    expect(parsed.classifier.eval_model).toBe("gpt-4o-mini");
+    expect(parsed.classifier.eval_latency_ms).toBe(1234);
+  });
+
+  it("rejects a negative eval_latency_ms", () => {
+    const r = fullRecord();
+    (r.classifier as Record<string, unknown>).eval_latency_ms = -1;
+    expect(DecisionRecordSchema.safeParse(r).success).toBe(false);
+  });
+
   it("accepts an empty provider_attempts array", () => {
     const r = fullRecord();
     r.provider_attempts = [];

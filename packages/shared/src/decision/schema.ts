@@ -24,6 +24,18 @@ export const ClassifierDecisionSchema = z.object({
   confidence: z.number().min(0).max(1),
   decided_by: DecidedBySchema,
   eval_cache_hit: z.boolean().nullable(), // null when eval was not triggered
+  // The internal small-model id that ran Layer-2 eval (e.g. "gpt-4o-mini"), so the
+  // Debug UI can show WHICH model judged the lane. Non-null whenever eval actually
+  // ran — both when it decided (decided_by==="eval") and when it ran then failed
+  // open (decided_by==="fallback", eval_<reason>); null when eval never ran. A
+  // model id, never a key/payload (principle 7). `.default(null)` keeps pre-eval
+  // (Phase 0 / passthrough / legacy) records validating without it.
+  eval_model: z.string().nullable().default(null),
+  // Layer-2 eval call latency (ms), surfaced alongside provider-attempt latencies
+  // in the Debug UI. Non-null whenever eval ran (decided OR failed open); null when
+  // eval never ran. `.default(null)` for legacy records (principle 5: this is the
+  // CLASSIFICATION-stage eval timing, never the execution-stage attempt latency).
+  eval_latency_ms: z.number().nonnegative().nullable().default(null),
   // Present (non-null) ONLY when decided_by === "fallback": WHY we fell open to
   // balanced — `eval_disabled` (uncertain but eval off) vs `eval_<reason>` (eval
   // ran and failed). Null/absent on rules/eval/default paths. Optional so

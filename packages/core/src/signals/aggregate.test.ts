@@ -22,6 +22,8 @@ function makeRecord(over: {
       confidence: 0.9,
       decided_by: over.decidedBy ?? "rules",
       eval_cache_hit: null,
+      eval_model: null,
+      eval_latency_ms: null,
       constraints: {},
       explanation: [],
     },

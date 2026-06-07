@@ -56,6 +56,11 @@ export interface ClassificationResult {
   // provider reported a cost; null when eval was skipped/disabled or served from
   // cache. Kept SEPARATE from completion cost downstream (docs/07; principle 5).
   eval_usd: number | null;
+  // Layer-2 eval call latency (ms). Non-null whenever eval actually ran — both when
+  // it decided AND when it ran then failed open; null when eval was skipped/disabled
+  // (rules hit-stop / eval_disabled). CLASSIFICATION-stage timing, never the
+  // execution-stage attempt latency (principle 5).
+  eval_latency_ms: number | null;
   // Present ONLY when decided_by === "fallback". Distinguishes WHY we fell back:
   //   eval_disabled            — uncertain but eval is off (no Layer 2 ran)
   //   eval_<timeout|provider_error|circuit_open|not_json|schema_invalid>
@@ -105,14 +110,19 @@ export async function classify(
       eval_used: false,
       eval_cache_hit: false,
       eval_usd: null,
+      eval_latency_ms: null,
     };
   }
 
   // Layer 1 was uncertain. Layer 2 only runs when eval is enabled.
   if (!config.eval.enabled) {
     // Uncertain but eval is off → balanced, distinctly tagged so this is NOT
-    // confused with an eval that ran and failed.
-    return balancedFallback(r, "eval_disabled", { eval_used: false, eval_cache_hit: false });
+    // confused with an eval that ran and failed. No eval ran → no latency.
+    return balancedFallback(r, "eval_disabled", {
+      eval_used: false,
+      eval_cache_hit: false,
+      eval_latency_ms: null,
+    });
   }
 
   // ── Layer 2: eval. Already fail-open; returns decided / fail-open + cache_hit. ─
@@ -127,13 +137,16 @@ export async function classify(
       eval_used: true,
       eval_cache_hit: e.cache_hit,
       eval_usd: e.cost_usd,
+      eval_latency_ms: e.latency_ms,
     };
   }
 
   // ── Layer 3: eval failed open (timeout / provider_error / dirty output) → balanced. ─
+  // Eval DID run here, so carry its measured latency through the fallback.
   return balancedFallback(r, `eval_${e.reason}`, {
     eval_used: true,
     eval_cache_hit: e.cache_hit,
+    eval_latency_ms: e.latency_ms,
   });
 }
 
@@ -143,7 +156,7 @@ export async function classify(
 function balancedFallback(
   r: RulesResult,
   fallbackReason: string,
-  evalState: { eval_used: boolean; eval_cache_hit: boolean },
+  evalState: { eval_used: boolean; eval_cache_hit: boolean; eval_latency_ms: number | null },
 ): ClassificationResult {
   return {
     lane: BALANCED,
@@ -156,6 +169,8 @@ function balancedFallback(
     // No successful eval verdict to attribute a self-cost to (eval was off, or it
     // ran and failed open). Treat as unmeasured.
     eval_usd: null,
+    // null on eval_disabled (no eval ran); the measured latency when eval ran-then-failed.
+    eval_latency_ms: evalState.eval_latency_ms,
     fallback_reason: fallbackReason,
   };
 }

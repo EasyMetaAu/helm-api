@@ -6,6 +6,8 @@
     • routes/+layout.svelte      — sidebar nav `item.label` / `item.desc`, `activeLabel`
     • routes/+page.svelte        — dashboard quick-link `c.label` / `c.desc`
     • lib/components/DimensionTable.svelte — `dim.direction` ("up" / "down")
+    • lib/components/DecisionChain.svelte  — `decidedBy().key` (decision source),
+                                             `evalReasonKey()` (eval fail-open reason)
   Without a static reference, `pnpm i18n:sync` prunes them from every locale and
   they fall back to raw English (e.g. the nav showing "Dashboard" / English subtitles).
 
@@ -38,4 +40,12 @@
   {$t('Issue and revoke client keys, and cap the top lane each key may reach.')}
   <!-- DimensionTable direction -->
   {$t('up')}{$t('down')}
+  <!-- DecisionChain: classifier decision-source labels (decidedBy().key) -->
+  {$t('Decided by Layer-1 rules')}
+  {$t('Decided by the Layer-2 eval model')}
+  {$t('Rules uncertain — fell back to the balanced lane')}
+  {$t('Default (explicit passthrough or fail-open)')}
+  <!-- DecisionChain: eval fail-open reasons (evalReasonKey()) -->
+  {$t('timed out')}{$t('provider error')}{$t('circuit open')}
+  {$t('returned non-JSON')}{$t('returned an invalid schema')}
 {/if}

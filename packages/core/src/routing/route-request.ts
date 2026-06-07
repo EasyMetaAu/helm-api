@@ -49,9 +49,14 @@ export interface Classification {
   //   eval_usd — Layer-2 small-model self-cost, known ONLY when eval actually
   //     ran (the eval client surfaces it). Null when eval did not run; kept
   //     SEPARATE from completion cost in cost_breakdown (docs/07; principle 5).
+  //   eval_model — the internal small-model id that judged the lane; non-null
+  //     whenever eval ran (decided OR failed open), null otherwise.
+  //   eval_latency_ms — Layer-2 call latency; non-null whenever eval ran.
   eval_cache_hit?: boolean | null;
   fallback_reason?: string | null;
   eval_usd?: number | null;
+  eval_model?: string | null;
+  eval_latency_ms?: number | null;
   constraints: {
     needs_json?: boolean;
     needs_tools?: boolean;
@@ -253,6 +258,8 @@ function passthroughClassifier(): DecisionRecord["classifier"] {
     confidence: 1,
     decided_by: "default",
     eval_cache_hit: null,
+    eval_model: null,
+    eval_latency_ms: null,
     fallback_reason: null,
     constraints: {},
     explanation: [],
@@ -388,6 +395,8 @@ async function plan(
       // (cascade). null/undefined collapse to null so the record never carries
       // an ambiguous undefined (principle 5: classification fields only).
       eval_cache_hit: cls.eval_cache_hit ?? null,
+      eval_model: cls.eval_model ?? null,
+      eval_latency_ms: cls.eval_latency_ms ?? null,
       fallback_reason: cls.fallback_reason ?? null,
       constraints: cls.constraints as Record<string, unknown>,
       explanation: cls.explanation,
