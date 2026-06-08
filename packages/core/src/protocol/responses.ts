@@ -66,7 +66,12 @@ const ResponsesContentPartSchema = z.union([
 // —— Inbound Responses top-level items (the `input[]` stream). ————————————————————
 const ResponsesMessageItemSchema = z
   .object({
-    type: z.literal("message"),
+    // `type` is OPTIONAL per the Responses spec: the official openai SDK (and
+    // pi-ai) omit it on input messages, sending bare { role, content }. Default
+    // it to "message" so a typeless item folds here instead of 400ing on the
+    // union. The required `role` (which non-message items lack) keeps this from
+    // absorbing function_call/reasoning items in the non-discriminated union.
+    type: z.literal("message").optional().default("message"),
     role: z.enum(["user", "assistant", "system", "developer"]),
     // content may be a plain string or a content-part array.
     content: z.union([z.string(), z.array(ResponsesContentPartSchema)]),

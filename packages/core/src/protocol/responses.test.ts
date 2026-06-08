@@ -136,6 +136,44 @@ describe("responsesTransformer — request input items -> IR (folding)", () => {
     expect(ir.messages.map((m) => m.role)).toEqual(["developer", "user"]);
     expect(ir.messages[0]?.content).toEqual([{ type: "text", text: "Prefer metric units." }]);
   });
+
+  // The OpenAI SDK (and pi-ai) omit `type:"message"` on input messages — it is
+  // OPTIONAL in the Responses spec. A typeless { role, content } item must fold
+  // to a message, NOT 400 with invalid_union. Regression for SDK-shaped requests.
+  it("accepts a message item that omits type (content-part array)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    });
+    expect(ir.messages[0]?.role).toBe("user");
+    expect(ir.messages[0]?.content).toEqual([{ type: "text", text: "hi" }]);
+  });
+
+  it("accepts a message item that omits type (bare string content)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.messages[0]?.role).toBe("user");
+    expect(ir.messages[0]?.content).toBe("hi");
+  });
+
+  // Making `type` optional on the message variant must NOT cause a typed
+  // non-message item (which lacks `role`) to be absorbed as a message. A
+  // function_call item must still lift into an assistant tool_call. Guards the
+  // non-discriminated union ordering after the change.
+  it("still routes a typed function_call item, not as a typeless message", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        { role: "user", content: "hi" },
+        { type: "function_call", call_id: "call_x", name: "f", arguments: "{}" },
+      ],
+    });
+    const assistant = ir.messages.find((m) => m.role === "assistant");
+    expect(assistant?.tool_calls?.[0]?.id).toBe("call_x");
+    expect(ir.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+  });
 });
 
 describe("responsesTransformer — reasoning item inbound (test #2)", () => {
