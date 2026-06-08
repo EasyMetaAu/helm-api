@@ -7,7 +7,7 @@ import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
-import { type RecordServedDeps, recordServed } from "./payload-capture.js";
+import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/messages — Anthropic Messages inbound, translated to IR, routed, and
@@ -327,6 +327,12 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       throw err;
     }
 
+    // Capture the verbatim request/response bodies only when capture_payloads is ON
+    // (the telemetry row is always written regardless). Gating the buffering here
+    // stops long/concurrent streams from accumulating the full body when capture is
+    // off (review P2).
+    const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
+
     // 4) Protocol Adapter (outbound): stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
       // Claim the concurrency lease (issue #93): the guard middleware fires as
@@ -344,7 +350,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         try {
           for await (const event of result.streamIR()) {
             const frame = anthropic.transformStreamOut(event);
-            if (deps.record) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
+            if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
             await sse.writeSSE({ event: frame.event, data: frame.data });
           }
         } catch (err) {
@@ -363,7 +369,9 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                     trace_id: traceId,
                   };
             const out = anthropic.transformErrorOut(re);
-            await sse.writeSSE({ event: "error", data: JSON.stringify(out.body) });
+            const data = JSON.stringify(out.body);
+            if (captureBodies) captured.push(`event: error\ndata: ${data}\n\n`);
+            await sse.writeSSE({ event: "error", data });
           }
         } finally {
           releaseConcurrency?.();
@@ -379,7 +387,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                 apiKeyId: identity.keyId,
                 decision: result.decision,
                 requestJson: JSON.stringify(native),
-                responseJson: captured.join(""),
+                responseJson: captureBodies ? captured.join("") : null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
             );
@@ -431,7 +439,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson: JSON.stringify(native),
-          responseJson: JSON.stringify(body),
+          responseJson: captureBodies ? JSON.stringify(body) : null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
       );

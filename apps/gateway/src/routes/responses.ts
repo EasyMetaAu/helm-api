@@ -9,7 +9,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
-import { type RecordServedDeps, recordServed } from "./payload-capture.js";
+import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/responses — OpenAI Responses API inbound, translated to IR, routed
@@ -267,6 +267,12 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       throw err;
     }
 
+    // Capture the verbatim request/response bodies only when capture_payloads is ON
+    // (the telemetry row is always written regardless). Gating the buffering here
+    // stops long/concurrent streams from accumulating the full body when capture is
+    // off (review P2).
+    const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
+
     // 4) Outbound: stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
       // Claim the concurrency lease (issue #93): hold the slot until the stream
@@ -287,7 +293,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             if (typeof event.sequence_number === "number")
               nextErrorSequence = event.sequence_number + 1;
             const frame = deps.transformer.transformStreamOut(event);
-            if (deps.record) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
+            if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
             await sse.writeSSE({ event: frame.event, data: frame.data });
           }
         } catch (err) {
@@ -312,7 +318,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     traceId,
                     sequenceNumber: nextErrorSequence,
                   });
-            await sse.writeSSE({ event: "error", data: JSON.stringify(body) });
+            const data = JSON.stringify(body);
+            if (captureBodies) captured.push(`event: error\ndata: ${data}\n\n`);
+            await sse.writeSSE({ event: "error", data });
           }
         } finally {
           releaseConcurrency?.();
@@ -329,7 +337,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                 apiKeyId: identity.keyId,
                 decision: result.decision,
                 requestJson: JSON.stringify(native),
-                responseJson: captured.join(""),
+                responseJson: captureBodies ? captured.join("") : null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
             );
@@ -340,10 +348,13 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
 
     // Non-stream: collect() throws a PipelineError when routing failed (all
     // providers failed) — surface it as the OpenAI envelope instead of the empty
-    // 200 a synthesized placeholder body would produce.
-    let collected: unknown;
+    // 200 a synthesized placeholder body would produce. The outbound transform
+    // runs INSIDE this try too, so a transformer throw after a provider result was
+    // collected is ALSO recorded (review P3) — consistent with messages/gemini.
+    let body: Record<string, unknown>;
     try {
-      collected = await result.collect();
+      const collected = await result.collect();
+      body = deps.transformer.transformResponseOut(collected) as Record<string, unknown>;
     } catch (err) {
       // Record the FAILED served request before surfacing the error (mirrors
       // chat.ts, which records failures too) so an all-providers-failed request
@@ -365,7 +376,6 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
       throw err;
     }
-    const body = deps.transformer.transformResponseOut(collected);
     // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
     // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
     if (deps.record) {
@@ -376,11 +386,11 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson: JSON.stringify(native),
-          responseJson: JSON.stringify(body),
+          responseJson: captureBodies ? JSON.stringify(body) : null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
       );
     }
-    return c.json(body as Record<string, unknown>);
+    return c.json(body);
   });
 }

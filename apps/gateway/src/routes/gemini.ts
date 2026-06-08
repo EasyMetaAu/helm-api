@@ -12,7 +12,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult, RouteError } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
-import { type RecordServedDeps, recordServed } from "./payload-capture.js";
+import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1beta/models/{model}:generateContent / :streamGenerateContent — Google
@@ -269,6 +269,12 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       throw err;
     }
 
+    // Capture the verbatim request/response bodies only when capture_payloads is ON
+    // (the telemetry row is always written regardless). Gating the buffering here
+    // stops long/concurrent streams from accumulating the full body when capture is
+    // off (review P2).
+    const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
+
     // 4) Protocol Adapter (outbound). Gemini streaming events are incremental deltas,
     //    written as nameless `data:` frames — NO `event:` name, NO `[DONE]`.
     if (route.stream) {
@@ -284,7 +290,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         try {
           for await (const snapshot of result.streamIR()) {
             const data = JSON.stringify(snapshot);
-            if (deps.record) captured.push(`data: ${data}\n\n`);
+            if (captureBodies) captured.push(`data: ${data}\n\n`);
             await sse.writeSSE({ data });
           }
         } catch (err) {
@@ -302,7 +308,9 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
                     trace_id: traceId,
                   };
             const out = transformer.transformErrorOut(re);
-            await sse.writeSSE({ data: JSON.stringify(out.body) });
+            const data = JSON.stringify(out.body);
+            if (captureBodies) captured.push(`data: ${data}\n\n`);
+            await sse.writeSSE({ data });
           }
         } finally {
           releaseConcurrency?.();
@@ -318,7 +326,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
                 apiKeyId: identity.keyId,
                 decision: result.decision,
                 requestJson: JSON.stringify(native),
-                responseJson: captured.join(""),
+                responseJson: captureBodies ? captured.join("") : null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
             );
@@ -369,7 +377,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson: JSON.stringify(native),
-          responseJson: JSON.stringify(body),
+          responseJson: captureBodies ? JSON.stringify(body) : null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
       );
