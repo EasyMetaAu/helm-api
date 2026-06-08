@@ -1,4 +1,4 @@
-import type { BudgetCaps, RateLimitProbe, RateLimitResult } from "@helm/core";
+import type { BudgetCaps, DecisionRecord, RateLimitProbe, RateLimitResult } from "@helm/core";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -7,6 +7,7 @@ import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
+import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/messages — Anthropic Messages inbound, translated to IR, routed, and
@@ -70,6 +71,12 @@ export interface RouteError {
 /** Outcome of one routing run. Stream vs non-stream is decided by the caller via
  *  the IR's `stream` flag; the route consumes exactly one of the two accessors. */
 export interface PipelineRunResult {
+  /** The live DecisionRecord for this run (docs/07). Exposed so the three pipeline
+   *  faces can record telemetry AFTER consumption — the SAME object the pipeline
+   *  mutates in place (backfillCompletionCost during the stream finally), so once
+   *  the stream/collect has drained it carries the final cost. Present even on a
+   *  routing failure (final.status === "error"), so a failed face still records. */
+  readonly decision: DecisionRecord;
   /** Drain the full (non-stream) result into ONE IR response object. */
   collect(): Promise<unknown>;
   /** The outbound-protocol event stream: one object per wire event. For Anthropic
@@ -93,6 +100,10 @@ export interface MessagesRouteDeps {
    *  the chat middleware uses, so a key's in-flight count spans every surface.
    *  Optional — omitted = no gating (the gate also no-ops while disabled). */
   concurrencyGate?: ConcurrencyGatePort;
+  /** Telemetry + payload recorder (the /admin/requests fix). Optional so existing
+   *  tests that omit it record nothing; when wired, every served request (success
+   *  OR failure, stream OR non-stream) writes a telemetry row. */
+  record?: RecordServedDeps;
   auth: {
     /** Resolve the request credential to an identity, or null when invalid.
      *  Mandatory auth: a null result short-circuits to a 401 (no anonymous
@@ -316,6 +327,12 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       throw err;
     }
 
+    // Capture the verbatim request/response bodies only when capture_payloads is ON
+    // (the telemetry row is always written regardless). Gating the buffering here
+    // stops long/concurrent streams from accumulating the full body when capture is
+    // off (review P2).
+    const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
+
     // 4) Protocol Adapter (outbound): stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
       // Claim the concurrency lease (issue #93): the guard middleware fires as
@@ -324,12 +341,16 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       const releaseConcurrency = c.get("concurrencyRelease");
       c.set("concurrencyRelease", undefined);
       return streamSSE(c, async (sse) => {
+        // Accumulate the serialized wire frames so the served response body can be
+        // captured (verbatim) alongside the telemetry row in the finally below.
+        const captured: string[] = [];
         // Every IR event is mapped by the transformer's explicit state machine;
         // we NEVER forward a raw upstream chunk (CLAUDE.md principle 8). The
         // transformer already guards start-before-delta and idempotent close.
         try {
           for await (const event of result.streamIR()) {
             const frame = anthropic.transformStreamOut(event);
+            if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
             await sse.writeSSE({ event: frame.event, data: frame.data });
           }
         } catch (err) {
@@ -348,10 +369,29 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                     trace_id: traceId,
                   };
             const out = anthropic.transformErrorOut(re);
-            await sse.writeSSE({ event: "error", data: JSON.stringify(out.body) });
+            const data = JSON.stringify(out.body);
+            if (captureBodies) captured.push(`event: error\ndata: ${data}\n\n`);
+            await sse.writeSSE({ event: "error", data });
           }
         } finally {
           releaseConcurrency?.();
+          // Record AFTER releaseConcurrency (never extend the hold) and AFTER the
+          // for-await loop ended so the pipeline's own streamIR finally (cost
+          // backfill) already mutated result.decision. result.decision exists even
+          // on a pre-stream failure, so a failed stream still records. Fail-open.
+          if (deps.record) {
+            await recordServed(
+              deps.record,
+              {
+                requestId: traceId,
+                apiKeyId: identity.keyId,
+                decision: result.decision,
+                requestJson: JSON.stringify(native),
+                responseJson: captureBodies ? captured.join("") : null,
+              },
+              (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+            );
+          }
         }
       });
     }
@@ -363,6 +403,23 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     try {
       body = await anthropic.transformResponseOut(await result.collect());
     } catch (err) {
+      // Record the FAILED served request before surfacing the error (mirrors
+      // chat.ts) so an all-providers-failed request still appears in
+      // /admin/requests. responseJson null = no body. result.decision exists even
+      // on failure. Fail-open inside recordServed.
+      if (deps.record) {
+        await recordServed(
+          deps.record,
+          {
+            requestId: traceId,
+            apiKeyId: identity.keyId,
+            decision: result.decision,
+            requestJson: JSON.stringify(native),
+            responseJson: null,
+          },
+          (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+        );
+      }
       if (err instanceof PipelineError) {
         return sendError(c, {
           error_class: err.error_class,
@@ -371,6 +428,21 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         });
       }
       throw err;
+    }
+    // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
+    // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
+    if (deps.record) {
+      await recordServed(
+        deps.record,
+        {
+          requestId: traceId,
+          apiKeyId: identity.keyId,
+          decision: result.decision,
+          requestJson: JSON.stringify(native),
+          responseJson: captureBodies ? JSON.stringify(body) : null,
+        },
+        (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+      );
     }
     return c.json(body as Record<string, unknown>);
   });

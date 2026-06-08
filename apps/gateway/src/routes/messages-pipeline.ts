@@ -496,6 +496,10 @@ export function createMessagesPipeline(
           : null;
 
       return {
+        // The LIVE decision reference (mutated in place by backfillCompletionCost
+        // in the stream finally below), exposed so the route records the FINAL
+        // decision after consumption. Present even on a routing failure.
+        decision: result.decision,
         async collect(): Promise<unknown> {
           if (failure !== null) throw failure;
           // The route surfaces the OpenAI body; project it into the IR the

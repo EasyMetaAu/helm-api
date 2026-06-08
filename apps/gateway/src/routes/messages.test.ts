@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import {
   type MessagesIdentity,
@@ -6,6 +6,7 @@ import {
   registerMessagesRoute,
 } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
+import type { RecordServedDeps } from "./payload-capture.js";
 
 // POST /v1/messages — Anthropic Messages inbound. These tests pin the route's
 // CONTRACT: auth → translate(out) → route → translate(back), with all business
@@ -15,6 +16,10 @@ import { PipelineError } from "./messages-pipeline.js";
 const AUTH = { "x-api-key": "helm_live_secret", "Content-Type": "application/json" };
 
 const IDENTITY: MessagesIdentity = { keyId: "k1", accountId: "acct" };
+
+// A fake DecisionRecord stand-in the route hands opaquely to recordServed →
+// redact → telemetry.insert (it never inspects fields).
+const FAKE_DECISION = { final: { status: "ok", model_alias: "claude-3-5-sonnet" } } as never;
 
 // A minimal IR-ish object the stub transformer returns; the route must thread it
 // to the pipeline untouched (save trace_id) and never inspect its internals.
@@ -57,6 +62,7 @@ function makeDeps(
     transformRequestOut?: (native: unknown) => unknown;
     rateLimiter?: MessagesRouteDeps["rateLimiter"];
     identity?: MessagesIdentity;
+    record?: RecordServedDeps;
   } = {},
 ): { deps: MessagesRouteDeps; harness: Harness } {
   const harness: Harness = {
@@ -68,6 +74,7 @@ function makeDeps(
 
   const deps: MessagesRouteDeps = {
     rateLimiter: over.rateLimiter,
+    record: over.record,
     auth: {
       resolve: async (_key: string | null) => {
         harness.order.push("auth");
@@ -135,6 +142,7 @@ function makeDeps(
           });
         }
         return {
+          decision: FAKE_DECISION,
           collect: over.collect ?? (async () => ({ id: "ir-resp" })),
           streamIR:
             over.streamEvents ??
@@ -152,6 +160,26 @@ function buildApp(deps: MessagesRouteDeps) {
   const app = createApp({ logger: { log: () => {} } });
   registerMessagesRoute(app, deps);
   return app;
+}
+
+// Recording dep with insert + insertPayload spies (mirrors the chat telemetry
+// harness). redact is the identity so a test can assert it ran on the decision.
+function makeRecord(over: { capturePayloads?: boolean } = {}): {
+  record: RecordServedDeps;
+  insert: ReturnType<typeof vi.fn>;
+  insertPayload: ReturnType<typeof vi.fn>;
+  redact: ReturnType<typeof vi.fn>;
+} {
+  const insert = vi.fn().mockResolvedValue({ id: "1" });
+  const insertPayload = vi.fn().mockResolvedValue(undefined);
+  const redact = vi.fn((x: unknown) => x);
+  const record: RecordServedDeps = {
+    telemetry: { insert, insertPayload } as never,
+    redact: redact as never,
+    now: () => 1000,
+    capturePayloads: () => over.capturePayloads ?? true,
+  };
+  return { record, insert, insertPayload, redact };
 }
 
 const REQ_BODY = {
@@ -485,5 +513,110 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     });
     expect(res.status).toBe(200);
     expect(harness.order).toContain("route");
+  });
+
+  // ── Telemetry recording (the /admin/requests bug). /v1/messages served LLM
+  //    traffic but never recorded a telemetry row, so it was invisible in the
+  //    admin Debug list. recordServed must fire on every served request.
+  it("records a redacted telemetry row + payload for a served NON-STREAM request", async () => {
+    const { record, insert, insertPayload, redact } = makeRecord();
+    const { deps } = makeDeps({ record });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(insert).toHaveBeenCalledOnce();
+    const arg = insert.mock.calls[0]?.[0] as { apiKeyId: string };
+    expect(arg.apiKeyId).toBe("k1");
+    expect(redact).toHaveBeenCalled();
+    // The plaintext key must never reach the persisted telemetry row.
+    expect(JSON.stringify(arg)).not.toContain("helm_live_secret");
+    expect(insertPayload).toHaveBeenCalledOnce();
+  });
+
+  it("records a telemetry row for a served STREAM request after the stream drains", async () => {
+    async function* events() {
+      yield { type: "message_start" };
+      yield { type: "message_stop" };
+    }
+    const { record, insert } = makeRecord();
+    const { deps } = makeDeps({ record, isStream: true, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+    // Drain the stream fully so the finally (where recording lives) runs.
+    await res.text();
+
+    expect(insert).toHaveBeenCalledOnce();
+    const arg = insert.mock.calls[0]?.[0] as { apiKeyId: string };
+    expect(arg.apiKeyId).toBe("k1");
+  });
+
+  it("does not record when no record dep is wired (existing tests stay green)", async () => {
+    const { deps } = makeDeps();
+    const app = buildApp(deps);
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  // ── Capture-payloads gating (review P2). With capture_payloads OFF the route
+  //    must still write the telemetry row but NOT buffer/persist the body — the
+  //    stream buffer is the unbounded growth vector this gate closes.
+  it("capture_payloads OFF: a served stream records the telemetry row but NOT the payload", async () => {
+    async function* events() {
+      yield { type: "message_start" };
+      yield { type: "message_stop" };
+    }
+    const { record, insert, insertPayload } = makeRecord({ capturePayloads: false });
+    const { deps } = makeDeps({ record, isStream: true, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+    await res.text();
+
+    expect(insert).toHaveBeenCalledOnce();
+    expect(insertPayload).not.toHaveBeenCalled();
+  });
+
+  // ── Terminal stream error frame must be appended to the captured body (review
+  //    P2). A mid-stream upstream error writes an `event: error` frame to the
+  //    client; that frame has to land in the persisted responseJson too.
+  it("stream error frame is captured in the payload", async () => {
+    async function* events(): AsyncIterable<{ type: string }> {
+      yield { type: "message_start" };
+      throw new Error("upstream blew up mid-stream");
+    }
+    const { record, insertPayload } = makeRecord({ capturePayloads: true });
+    const { deps } = makeDeps({ record, isStream: true, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+    await res.text();
+
+    expect(insertPayload).toHaveBeenCalledOnce();
+    const arg = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
+    expect(arg.responseJson).toContain("event: error");
+    expect(arg.responseJson).toContain("error");
   });
 });

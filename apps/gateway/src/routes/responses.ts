@@ -9,6 +9,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
+import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/responses — OpenAI Responses API inbound, translated to IR, routed
@@ -46,6 +47,10 @@ export interface ResponsesRouteDeps {
   /** Per-key concurrency overflow queue (issue #93) — the SAME process-wide gate
    *  as the chat middleware. Optional — omitted = no gating. */
   concurrencyGate?: ConcurrencyGatePort;
+  /** Telemetry + payload recorder (the /admin/requests fix). Optional so existing
+   *  tests that omit it record nothing; when wired, every served request (success
+   *  OR failure, stream OR non-stream) writes a telemetry row. */
+  record?: RecordServedDeps;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   transformer: {
     /** native Responses request → IR (throws on a structurally invalid body). */
@@ -262,6 +267,12 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       throw err;
     }
 
+    // Capture the verbatim request/response bodies only when capture_payloads is ON
+    // (the telemetry row is always written regardless). Gating the buffering here
+    // stops long/concurrent streams from accumulating the full body when capture is
+    // off (review P2).
+    const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
+
     // 4) Outbound: stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
       // Claim the concurrency lease (issue #93): hold the slot until the stream
@@ -274,11 +285,15 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         // forward a raw upstream chunk). There is NO [DONE] sentinel; the terminal
         // response.completed closes the stream.
         let nextErrorSequence = 0;
+        // Accumulate the serialized wire frames so the served response body can be
+        // captured (verbatim) alongside the telemetry row in the finally below.
+        const captured: string[] = [];
         try {
           for await (const event of result.streamIR()) {
             if (typeof event.sequence_number === "number")
               nextErrorSequence = event.sequence_number + 1;
             const frame = deps.transformer.transformStreamOut(event);
+            if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
             await sse.writeSSE({ event: frame.event, data: frame.data });
           }
         } catch (err) {
@@ -303,25 +318,79 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     traceId,
                     sequenceNumber: nextErrorSequence,
                   });
-            await sse.writeSSE({ event: "error", data: JSON.stringify(body) });
+            const data = JSON.stringify(body);
+            if (captureBodies) captured.push(`event: error\ndata: ${data}\n\n`);
+            await sse.writeSSE({ event: "error", data });
           }
         } finally {
           releaseConcurrency?.();
+          // Record AFTER releaseConcurrency so the bookkeeping never extends the
+          // concurrency hold, and AFTER the for-await loop ended so the pipeline's
+          // own streamIR finally (cost backfill) already mutated result.decision.
+          // result.decision exists even on a pre-stream failure, so a failed stream
+          // still records. Fail-open inside recordServed.
+          if (deps.record) {
+            await recordServed(
+              deps.record,
+              {
+                requestId: traceId,
+                apiKeyId: identity.keyId,
+                decision: result.decision,
+                requestJson: JSON.stringify(native),
+                responseJson: captureBodies ? captured.join("") : null,
+              },
+              (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+            );
+          }
         }
       });
     }
 
     // Non-stream: collect() throws a PipelineError when routing failed (all
     // providers failed) — surface it as the OpenAI envelope instead of the empty
-    // 200 a synthesized placeholder body would produce.
-    let collected: unknown;
+    // 200 a synthesized placeholder body would produce. The outbound transform
+    // runs INSIDE this try too, so a transformer throw after a provider result was
+    // collected is ALSO recorded (review P3) — consistent with messages/gemini.
+    let body: Record<string, unknown>;
     try {
-      collected = await result.collect();
+      const collected = await result.collect();
+      body = deps.transformer.transformResponseOut(collected) as Record<string, unknown>;
     } catch (err) {
+      // Record the FAILED served request before surfacing the error (mirrors
+      // chat.ts, which records failures too) so an all-providers-failed request
+      // still appears in /admin/requests. responseJson null = no body produced.
+      // result.decision exists even on failure. Fail-open inside recordServed.
+      if (deps.record) {
+        await recordServed(
+          deps.record,
+          {
+            requestId: traceId,
+            apiKeyId: identity.keyId,
+            decision: result.decision,
+            requestJson: JSON.stringify(native),
+            responseJson: null,
+          },
+          (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+        );
+      }
       if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
       throw err;
     }
-    const body = deps.transformer.transformResponseOut(collected);
-    return c.json(body as Record<string, unknown>);
+    // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
+    // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
+    if (deps.record) {
+      await recordServed(
+        deps.record,
+        {
+          requestId: traceId,
+          apiKeyId: identity.keyId,
+          decision: result.decision,
+          requestJson: JSON.stringify(native),
+          responseJson: captureBodies ? JSON.stringify(body) : null,
+        },
+        (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+      );
+    }
+    return c.json(body);
   });
 }

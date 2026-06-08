@@ -37,6 +37,51 @@ export function captureEnabled(deps: PayloadCaptureDeps): boolean {
   return deps.capturePayloads?.() === true;
 }
 
+export interface RecordServedDeps extends PayloadCaptureDeps {
+  /** Redactor for the decision before it is persisted to telemetry (never store a
+   *  plaintext key / secret). Same redactor the chat route uses. */
+  redact: (decision: DecisionRecord) => DecisionRecord;
+  now: () => number;
+}
+
+// Record ONE served request: the telemetry row (always — this is what makes the
+// request appear in /admin/requests) plus the verbatim request/response payload
+// (gated by capture_payloads). Shared by the three pipeline faces (/v1/responses,
+// /v1/messages, gemini) so the recording logic can never drift between them again.
+// Fully FAIL-OPEN: a telemetry/payload failure must never turn a served response
+// into a 5xx or break a stream.
+export async function recordServed(
+  deps: RecordServedDeps,
+  args: {
+    requestId: string;
+    apiKeyId: string;
+    decision: DecisionRecord;
+    requestJson: string;
+    responseJson: string | null;
+  },
+  log: (msg: string) => void,
+): Promise<void> {
+  await persistPayload(
+    deps,
+    {
+      requestId: args.requestId,
+      requestJson: args.requestJson,
+      responseJson: args.responseJson,
+      now: deps.now(),
+    },
+    log,
+  );
+  try {
+    await deps.telemetry.insert({
+      decision: deps.redact(args.decision),
+      apiKeyId: args.apiKeyId,
+      createdAt: new Date(deps.now()),
+    });
+  } catch {
+    log("telemetry.insert_failed");
+  }
+}
+
 // Total served tokens (prompt + completion) from an OpenAI-style usage object, for
 // the per-key token budget (docs/06). Tolerant of a missing/partial usage: a field
 // absent counts as 0. Used by every face's post-served budget settle — the usage

@@ -1608,6 +1608,15 @@ export async function buildServer(
       },
     },
     pipeline: messagesPipeline,
+    // Telemetry + payload recorder (the /admin/requests fix): the SAME values the
+    // chat route uses, so /v1/messages records served requests like /v1/chat does.
+    record: {
+      telemetry,
+      redact: (payload) => redact(payload),
+      now: () => Date.now(),
+      capturePayloads: () => settings.capture_payloads,
+      payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
+    },
   } as Parameters<typeof registerMessagesRoute>[1] & { rateLimiter: RateLimiterPort });
 
   // OpenAI Responses route (/v1/responses). Reuses the SAME routing core via a
@@ -1680,6 +1689,15 @@ export async function buildServer(
       },
     },
     pipeline: responsesPipeline,
+    // Telemetry + payload recorder (the /admin/requests fix): the SAME values the
+    // chat route uses, so /v1/responses records served requests like /v1/chat does.
+    record: {
+      telemetry,
+      redact: (payload) => redact(payload),
+      now: () => Date.now(),
+      capturePayloads: () => settings.capture_payloads,
+      payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
+    },
   } as Parameters<typeof registerResponsesRoute>[1] & { rateLimiter: RateLimiterPort });
 
   // Gemini route (/v1beta/models/{model}:generateContent | :streamGenerateContent).
@@ -1752,6 +1770,15 @@ export async function buildServer(
         }),
     },
     pipeline: geminiPipeline,
+    // Telemetry + payload recorder (the /admin/requests fix): the SAME values the
+    // chat route uses, so the gemini face records served requests like /v1/chat does.
+    record: {
+      telemetry,
+      redact: (payload) => redact(payload),
+      now: () => Date.now(),
+      capturePayloads: () => settings.capture_payloads,
+      payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
+    },
   } as Parameters<typeof registerGeminiRoute>[1] & { rateLimiter: RateLimiterPort });
 
   // Start the Agentic Signals background scheduler — the OFF-the-request-path
