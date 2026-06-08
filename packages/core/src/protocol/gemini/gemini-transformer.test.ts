@@ -1184,3 +1184,103 @@ describe("Gemini multimodal input (P7) — inlineData/fileData + videoMetadata",
     expect(part.videoMetadata?.startOffset).toBe("1.5s");
   });
 });
+
+describe("Gemini Tier E fidelity (orders 26-31)", () => {
+  // order 26: a functionCall with finishReason STOP must surface as tool_calls (Gemini
+  // doesn't emit a TOOL_CALLS reason; it returns STOP alongside the call).
+  it("remaps finishReason STOP -> tool_calls when a functionCall is present (non-stream)", () => {
+    const native = {
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [{ functionCall: { name: "get_weather", args: { city: "SF" } } }],
+          },
+          finishReason: "STOP",
+        },
+      ],
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.choices[0]?.finish_reason).toBe("tool_calls");
+  });
+
+  it("honors an explicit TOOL_CALLS finishReason enum", () => {
+    const native = {
+      candidates: [
+        { content: { role: "model", parts: [{ text: "x" }] }, finishReason: "TOOL_CALLS" },
+      ],
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.choices[0]?.finish_reason).toBe("tool_calls");
+  });
+
+  it("remaps the streaming terminal finish to tool_calls when functionCalls were seen (order 26)", async () => {
+    const events: GeminiSSEEvent[] = [
+      {
+        candidates: [
+          {
+            content: { role: "model", parts: [{ functionCall: { name: "f", args: { a: 1 } } }] },
+          },
+        ],
+      },
+      { candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }] },
+    ] as unknown as GeminiSSEEvent[];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const terminal = chunks.at(-1) as IRChunk;
+    expect(terminal.choices?.[0]?.finish_reason).toBe("tool_calls");
+  });
+
+  // order 27: a streaming promptFeedback.blockReason means the prompt was rejected ->
+  // content_filter terminal finish (the non-stream path already does this).
+  it("maps streaming promptFeedback.blockReason to content_filter (order 27)", async () => {
+    const events = [{ promptFeedback: { blockReason: "SAFETY" } }] as unknown as GeminiSSEEvent[];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const terminal = chunks.at(-1) as IRChunk;
+    expect(terminal.choices?.[0]?.finish_reason).toBe("content_filter");
+  });
+
+  // order 28: cacheTokensDetails (per-modality cached split) must reach the IR cached
+  // count even when the aggregate cachedContentTokenCount is absent.
+  it("parses cacheTokensDetails into the IR cached token count (order 28)", () => {
+    const native = {
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: {
+        promptTokenCount: 100,
+        candidatesTokenCount: 5,
+        cacheTokensDetails: [{ modality: "TEXT", tokenCount: 30 }],
+      },
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.usage?.cached_tokens).toBe(30);
+    expect(ir.usage?.prompt_tokens_details?.cached_tokens).toBe(30);
+    expect(ir.usage?.prompt_tokens).toBe(70);
+  });
+
+  // order 29: a multimodal IR message with NO non-empty text part must gain a defensive
+  // text part on the outbound Gemini request (Gemini rejects a parts array with no text).
+  it("appends a defensive text part for an image-only message (order 29)", () => {
+    const native = geminiTransformer.transformRequestIn({
+      model: "gemini-1.5-pro",
+      messages: [{ role: "user", content: [{ type: "image", url: "https://x/y.png" }] }],
+    }) as GeminiGenerateContentRequest;
+    const parts = native.contents?.[0]?.parts ?? [];
+    const hasText = parts.some((p) => typeof p.text === "string" && p.text.length > 0);
+    expect(hasText).toBe(true);
+  });
+
+  // order 31: an unknown future modality's token count must not be silently dropped.
+  it("preserves an unknown modality's token count in prompt_tokens_details (order 31)", () => {
+    const native = {
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: {
+        promptTokenCount: 10,
+        candidatesTokenCount: 2,
+        promptTokensDetails: [{ modality: "HOLOGRAM", tokenCount: 7 }],
+      },
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    const details = ir.usage?.prompt_tokens_details as Record<string, number> | undefined;
+    const total = Object.values(details ?? {}).reduce((a, b) => a + b, 0);
+    expect(total).toBeGreaterThanOrEqual(7);
+  });
+});

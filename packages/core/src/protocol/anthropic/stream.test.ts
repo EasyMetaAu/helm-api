@@ -604,3 +604,66 @@ describe("convertOpenAIStreamToAnthropic — tool name sanitizer", () => {
     expect(toolNames).toEqual(["search_web", expect.stringMatching(/^search_web_[a-z0-9]{8}$/)]);
   });
 });
+
+// —— order 12: the terminal message_delta must carry cache_creation_input_tokens
+// (ephemeral cache WRITE) when the IR usage reports it, not just cache_read.
+describe("message_delta usage — cache_creation_input_tokens (order 12)", () => {
+  it("emits cache_creation_input_tokens on the terminal message_delta", async () => {
+    const resp: IRResponse = {
+      id: "resp-cache",
+      model: "claude-3-5-sonnet",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 5,
+        cached_tokens: 20,
+        cache_creation_tokens: 80,
+      },
+    };
+    const events = await collect(synthesizeSSEFromJSON(resp));
+    const delta = events.find((e) => e.type === "message_delta");
+    expect(delta).toBeDefined();
+    if (delta?.type === "message_delta") {
+      expect(
+        (delta.usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens,
+      ).toBe(80);
+    }
+  });
+});
+
+// —— order 5 regression: cache-hit / non-stream synthesis must emit the thinking
+// block when the IR response carries flat reasoning_content (not just live streams).
+describe("synthesizeSSEFromJSON — reasoning_content surfaces a thinking block (order 5)", () => {
+  it("emits a thinking content_block + thinking_delta from flat reasoning_content", async () => {
+    const resp: IRResponse = {
+      id: "resp-think",
+      model: "claude-3-7-sonnet",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "The answer is 4.",
+            reasoning_content: "2 + 2 = 4",
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const events = await collect(synthesizeSSEFromJSON(resp));
+    const thinkingStart = events.find(
+      (e) => e.type === "content_block_start" && e.content_block.type === "thinking",
+    );
+    expect(thinkingStart).toBeDefined();
+    const thinkingDelta = events.find(
+      (e) => e.type === "content_block_delta" && e.delta.type === "thinking_delta",
+    );
+    expect(thinkingDelta).toBeDefined();
+    if (
+      thinkingDelta?.type === "content_block_delta" &&
+      thinkingDelta.delta.type === "thinking_delta"
+    ) {
+      expect(thinkingDelta.delta.thinking).toBe("2 + 2 = 4");
+    }
+  });
+});

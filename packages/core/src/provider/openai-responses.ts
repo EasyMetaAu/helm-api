@@ -451,6 +451,35 @@ function openaiChunk(model: string, delta: Record<string, unknown>, finish: stri
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
 
+// include_usage terminal chunk (OpenAI convention: empty choices + usage). The
+// Responses API reports usage as input_tokens/output_tokens on response.completed.
+function openaiUsageChunk(model: string, usage: Record<string, unknown>): string {
+  const input = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+  const output = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
+  const details = (usage.input_tokens_details ?? {}) as Record<string, unknown>;
+  const cached = typeof details.cached_tokens === "number" ? details.cached_tokens : 0;
+  const outDetails = (usage.output_tokens_details ?? {}) as Record<string, unknown>;
+  const reasoning =
+    typeof outDetails.reasoning_tokens === "number" ? outDetails.reasoning_tokens : undefined;
+  const chunk = {
+    id: `chatcmpl-${Date.now()}`,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [] as never[],
+    usage: {
+      prompt_tokens: input,
+      completion_tokens: output,
+      total_tokens: input + output,
+      ...(cached > 0 ? { prompt_tokens_details: { cached_tokens: cached } } : {}),
+      ...(reasoning !== undefined
+        ? { completion_tokens_details: { reasoning_tokens: reasoning } }
+        : {}),
+    },
+  };
+  return `data: ${JSON.stringify(chunk)}\n\n`;
+}
+
 export async function* translateResponsesSSE(
   res: Response,
   model: string,
@@ -496,10 +525,15 @@ export async function* translateResponsesSSE(
           null,
         );
       }
-    } else if (type === "response.completed") {
+    } else if (type === "response.completed" || type === "response.incomplete") {
+      // response.incomplete is terminal too (max_output_tokens / content filter); it
+      // carries the same response object (status + usage) and must finalize cleanly.
       const response = (evt.response ?? {}) as Record<string, unknown>;
-      status = response.status ?? "completed";
+      status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
       yield openaiChunk(model, {}, finishReason(status, hadToolCall));
+      // include_usage terminal frame before [DONE] (order 14).
+      const usage = (response.usage ?? {}) as Record<string, unknown>;
+      yield openaiUsageChunk(model, usage);
       yield "data: [DONE]\n\n";
       return;
     } else if (type === "error" || type === "response.failed") {
@@ -564,9 +598,11 @@ export async function aggregateResponsesStream(
     } else if (type === "response.function_call_arguments.done") {
       const tc = toolById.get(currentCallId);
       if (tc && typeof evt.arguments === "string") tc.arguments = evt.arguments;
-    } else if (type === "response.completed") {
+    } else if (type === "response.completed" || type === "response.incomplete") {
+      // response.incomplete is terminal too (truncation / content filter): capture its
+      // status + usage and stop, else the idle guard could turn it into a timeout.
       const response = (evt.response ?? {}) as Record<string, unknown>;
-      status = response.status ?? "completed";
+      status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
       const usage = (response.usage ?? {}) as Record<string, unknown>;
       if (typeof usage.input_tokens === "number") inTok = usage.input_tokens;
       if (typeof usage.output_tokens === "number") outTok = usage.output_tokens;

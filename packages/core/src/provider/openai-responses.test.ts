@@ -144,6 +144,43 @@ describe("translateResponsesSSE", () => {
     expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
   });
 
+  // order 14: include_usage — a terminal usage chunk (choices:[] + usage) must
+  // precede [DONE] so an OpenAI client and the budget settle get token counts. The
+  // Responses API reports usage as input_tokens/output_tokens on response.completed.
+  it("emits a terminal usage chunk (include_usage) before [DONE]", async () => {
+    const res = sseResponse([
+      { type: "response.created", response: { id: "resp_1" } },
+      { type: "response.output_text.delta", delta: "Hi" },
+      {
+        type: "response.completed",
+        response: {
+          status: "completed",
+          usage: { input_tokens: 9, output_tokens: 4, input_tokens_details: { cached_tokens: 3 } },
+        },
+      },
+    ]);
+    const chunks: string[] = [];
+    for await (const c of translateResponsesSSE(res, "gpt-5.5")) chunks.push(c);
+    const dataFrames = chunks
+      .join("")
+      .trimEnd()
+      .split("\n\n")
+      .filter((f) => f.startsWith("data:"));
+    const doneIdx = dataFrames.findIndex((f) => f.includes("[DONE]"));
+    const usageFrame = dataFrames[doneIdx - 1];
+    expect(usageFrame).toBeDefined();
+    const parsed = JSON.parse((usageFrame as string).slice(5).trim()) as {
+      choices: unknown[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
+    expect(parsed.choices).toEqual([]);
+    expect(parsed.usage).toMatchObject({
+      prompt_tokens: 9,
+      completion_tokens: 4,
+      total_tokens: 13,
+    });
+  });
+
   it("maps a function_call (added + args deltas + completed) to tool_call deltas + finish=tool_calls", async () => {
     const res = sseResponse([
       {
@@ -173,6 +210,32 @@ describe("translateResponsesSSE", () => {
         // drain
       }
     }).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  // Codex P1: response.incomplete is terminal too (truncation/content filter). It must
+  // finalize with finish_reason=length + a usage frame + [DONE], not fall to the EOF path.
+  it("treats response.incomplete as terminal (finish=length + usage + [DONE])", async () => {
+    const res = sseResponse([
+      { type: "response.created", response: { id: "r" } },
+      { type: "response.output_text.delta", delta: "partial" },
+      {
+        type: "response.incomplete",
+        response: { status: "incomplete", usage: { input_tokens: 9, output_tokens: 4 } },
+      },
+    ]);
+    const chunks: string[] = [];
+    for await (const c of translateResponsesSSE(res, "gpt-5.5")) chunks.push(c);
+    const joined = chunks.join("");
+    expect(joined).toContain('"finish_reason":"length"');
+    const dataFrames = joined
+      .trimEnd()
+      .split("\n\n")
+      .filter((f) => f.startsWith("data:"));
+    const doneIdx = dataFrames.findIndex((f) => f.includes("[DONE]"));
+    const usageFrame = dataFrames[doneIdx - 1] as string;
+    expect(JSON.parse(usageFrame.slice(5).trim())).toMatchObject({
+      usage: { prompt_tokens: 9, completion_tokens: 4 },
+    });
   });
 
   it("throws UpstreamError(timeout) and cancels when the stream stalls past idleMs", async () => {
@@ -236,6 +299,22 @@ describe("aggregateResponsesStream", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Codex P1: the aggregator must also break on response.incomplete (truncation) and
+  // map it to finish_reason=length with the captured usage.
+  it("breaks on response.incomplete and maps finish_reason=length", async () => {
+    const res = sseResponse([
+      { type: "response.created", response: { id: "resp_i" } },
+      { type: "response.output_text.delta", delta: "partial" },
+      {
+        type: "response.incomplete",
+        response: { status: "incomplete", usage: { input_tokens: 5, output_tokens: 2 } },
+      },
+    ]);
+    const out = await aggregateResponsesStream(res, "m");
+    expect((out.choices as Array<{ finish_reason: string }>)[0]?.finish_reason).toBe("length");
+    expect(out.usage).toMatchObject({ prompt_tokens: 5, completion_tokens: 2 });
   });
 
   it("folds text + usage into a single chat response (Codex is stream-only)", async () => {

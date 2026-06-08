@@ -25,15 +25,38 @@ import type { NativeRequest, NativeResponse, Transformer } from "./transformer.j
 
 // —— Inbound OpenAI Chat request schema (minimal set). Used purely for
 // fail-closed validation; messages are validated structurally by the IR. ——————
+// response_format is validated FAIL-CLOSED (CLAUDE.md principle 2): a json_schema
+// missing its name/schema is a client error, not something to forward to the upstream
+// and let it 400 opaquely. text / json_object carry no required sub-fields.
+const OpenAIResponseFormatSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("text") }).passthrough(),
+  z.object({ type: z.literal("json_object") }).passthrough(),
+  z
+    .object({
+      type: z.literal("json_schema"),
+      json_schema: z
+        .object({
+          name: z.string(),
+          schema: z.unknown().refine((v) => v !== undefined, { message: "schema is required" }),
+          strict: z.boolean().nullable().optional(),
+          description: z.string().optional(),
+        })
+        .passthrough(),
+    })
+    .passthrough(),
+]);
+
 const OpenAIChatRequestSchema = z.object({
   model: z.string(),
   messages: z.array(z.unknown()),
   stream: z.boolean().optional(),
   temperature: z.number().optional(),
   max_tokens: z.number().int().positive().optional(),
+  // o-series models require max_completion_tokens; validated here and carried verbatim.
+  max_completion_tokens: z.number().int().positive().optional(),
   tools: z.array(z.unknown()).optional(),
   tool_choice: z.unknown().optional(),
-  response_format: z.unknown().optional(),
+  response_format: OpenAIResponseFormatSchema.optional(),
 });
 
 // —— OpenAI usage shape. `prompt_tokens` is the FULL prompt (cached + fresh);
@@ -68,6 +91,7 @@ const OpenAIResponseSchema = z
     model: z.string(),
     created: z.number().int().optional(),
     system_fingerprint: z.string().nullable().optional(),
+    service_tier: z.string().nullable().optional(),
     choices: z.array(OpenAIChoiceSchema),
     usage: OpenAIUsageSchema.optional(),
   })
@@ -301,6 +325,7 @@ function toIRResponse(res: NativeResponse): IRResponse {
       finish_reason: c.finish_reason,
       ...(c.logprobs !== undefined ? { logprobs: c.logprobs } : {}),
     })),
+    ...(parsed.service_tier != null ? { service_tier: parsed.service_tier } : {}),
     usage:
       rawUsage === undefined
         ? undefined
@@ -357,16 +382,22 @@ function toOpenAIResponse(res: IRResponse): NativeResponse {
     const nonCached = u.prompt_tokens ?? 0;
     const fullPrompt = nonCached + cached;
     const completion = u.completion_tokens ?? 0;
+    // OpenAI o-series clients read reasoning_tokens from completion_tokens_details, not
+    // the flat IR mirror. Prefer the upstream detail object; else synthesize it from
+    // the flat IR.usage.reasoning_tokens (e.g. an Anthropic->OpenAI thinking response
+    // that only set the flat field) so the detail is never lost on the outbound side.
+    const completionDetails =
+      u.completion_tokens_details !== undefined
+        ? u.completion_tokens_details
+        : u.reasoning_tokens !== undefined
+          ? { reasoning_tokens: u.reasoning_tokens }
+          : undefined;
     usage = {
       prompt_tokens: fullPrompt,
       completion_tokens: completion,
       total_tokens: fullPrompt + completion,
       ...(cached > 0 ? { prompt_tokens_details: { cached_tokens: cached } } : {}),
-      // Re-emit the reasoning/audio breakdown verbatim (OpenAI o-series clients
-      // read reasoning_tokens here, not from the flat IR mirror).
-      ...(u.completion_tokens_details !== undefined
-        ? { completion_tokens_details: u.completion_tokens_details }
-        : {}),
+      ...(completionDetails !== undefined ? { completion_tokens_details: completionDetails } : {}),
     };
   }
   // system_fingerprint round-trips through provider_raw (no IR-native home).
@@ -380,6 +411,7 @@ function toOpenAIResponse(res: IRResponse): NativeResponse {
     created: Math.floor(Date.now() / 1000),
     model: parsed.model,
     ...(systemFingerprint !== undefined ? { system_fingerprint: systemFingerprint } : {}),
+    ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
     choices: parsed.choices.map((c) => ({
       index: c.index,
       // OpenAI carries reasoning OUT-OF-BAND in message.reasoning_content — a

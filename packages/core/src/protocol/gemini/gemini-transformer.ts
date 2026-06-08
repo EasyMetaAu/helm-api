@@ -90,6 +90,8 @@ const GEMINI_TO_IR_FINISH: Record<string, string> = {
   MALFORMED_RESPONSE: "stop",
   FINISH_REASON_UNSPECIFIED: "stop",
   OTHER: "stop",
+  // Gemini rarely emits this, but when it does it means the turn ended on a tool call.
+  TOOL_CALLS: "tool_calls",
 };
 
 function mapFinishReasonToIR(reason: string | undefined): string | null {
@@ -241,7 +243,11 @@ function modalityDetailsToIR(
             ? "audio_tokens"
             : modality === "VIDEO"
               ? "video_tokens"
-              : undefined;
+              : // order 31: never drop a future/unknown modality — keep its count under a
+                // derived `<modality>_tokens` key (IRTokenDetailsSchema is .passthrough()).
+                modality !== ""
+                ? `${modality.toLowerCase()}_tokens`
+                : undefined;
     if (key === undefined) continue;
     out[key] = (out[key] ?? 0) + d.tokenCount;
   }
@@ -867,22 +873,31 @@ function transformResponseIn(native: unknown): IRResponse {
       : { role: "assistant", content: "" };
 
   const um = res.usageMetadata;
-  const promptDetails = modalityDetailsToIR(um?.promptTokensDetails);
   const candidateDetails = modalityDetailsToIR(um?.candidatesTokensDetails);
+  // order 28: the effective cached count is the aggregate cachedContentTokenCount when
+  // present, else the sum of the per-modality cacheTokensDetails (otherwise dropped).
+  const cachedFromDetails = (um?.cacheTokensDetails ?? []).reduce(
+    (sum, d) => sum + (d.tokenCount ?? 0),
+    0,
+  );
+  const effectiveCached =
+    um?.cachedContentTokenCount ?? (cachedFromDetails > 0 ? cachedFromDetails : undefined);
+  // Merge the cached count into prompt_tokens_details (alongside the modality split).
+  const basePromptDetails = modalityDetailsToIR(um?.promptTokensDetails);
+  const promptDetails =
+    effectiveCached !== undefined
+      ? { ...(basePromptDetails ?? {}), cached_tokens: effectiveCached }
+      : basePromptDetails;
   const usage =
     um !== undefined
       ? {
           ...(um.promptTokenCount !== undefined
-            ? {
-                prompt_tokens: Math.max(0, um.promptTokenCount - (um.cachedContentTokenCount ?? 0)),
-              }
+            ? { prompt_tokens: Math.max(0, um.promptTokenCount - (effectiveCached ?? 0)) }
             : {}),
           ...(um.candidatesTokenCount !== undefined
             ? { completion_tokens: um.candidatesTokenCount }
             : {}),
-          ...(um.cachedContentTokenCount !== undefined
-            ? { cached_tokens: um.cachedContentTokenCount }
-            : {}),
+          ...(effectiveCached !== undefined ? { cached_tokens: effectiveCached } : {}),
           // thoughtsTokenCount is the reasoning-token count (litellm parity).
           ...(um.thoughtsTokenCount !== undefined
             ? { reasoning_tokens: um.thoughtsTokenCount }
@@ -897,10 +912,14 @@ function transformResponseIn(native: unknown): IRResponse {
   // promptFeedback.blockReason means the PROMPT was rejected (no candidate). Surface
   // it as content_filter and keep the raw block; its blockReason is also the raw stop.
   const promptBlock = res.promptFeedback?.blockReason;
-  const finishReason =
+  const mappedFinish =
     promptBlock !== undefined && promptBlock !== ""
       ? "content_filter"
       : mapFinishReasonToIR(candidate?.finishReason);
+  // order 26: Gemini returns finishReason STOP alongside a functionCall (no TOOL_CALLS
+  // enum); remap to tool_calls so an OpenAI/Anthropic client sees the correct terminal.
+  const hasToolCalls = (message.tool_calls?.length ?? 0) > 0;
+  const finishReason = hasToolCalls && mappedFinish === "stop" ? "tool_calls" : mappedFinish;
 
   // logprobsResult -> IRChoice.logprobs (kept raw under the logprobs bag; IRLogprobs is
   // permissive/.passthrough()). safetyRatings + promptFeedback live in provider_raw.
@@ -953,6 +972,7 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
   let started = false;
   let lastModel: string | undefined;
   let pendingFinish: string | null = null;
+  let hasSeenToolCalls = false; // order 26: STOP + functionCalls -> tool_calls terminal
   let lastUsage: IRChunk["usage"];
   let groundingMeta: unknown; // latest grounding/citation metadata seen across frames
   let citationMeta: unknown;
@@ -981,6 +1001,11 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
     if (candidate?.groundingMetadata !== undefined) groundingMeta = candidate.groundingMetadata;
     if (candidate?.citationMetadata !== undefined) citationMeta = candidate.citationMetadata;
 
+    // order 27: a prompt-level block (no candidate) means the prompt was rejected —
+    // surface it as content_filter on the terminal chunk (mirrors the non-stream path).
+    const promptBlock = event.promptFeedback?.blockReason;
+    if (promptBlock !== undefined && promptBlock !== "") pendingFinish = "content_filter";
+
     const roleField = !started ? { role: "assistant" } : {};
     started = true;
 
@@ -1006,6 +1031,7 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
     // —— tool-call args: buffer the latest full args per name (no mid-stream emit). ——
     for (const part of parts) {
       if (part.functionCall === undefined) continue;
+      hasSeenToolCalls = true;
       const name = part.functionCall.name;
       let slot = toolNameToSlot.get(name);
       if (slot === undefined) {
@@ -1088,9 +1114,14 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
 
   // Terminal finish chunk, emitted exactly once after the tool flush (idempotent
   // close, docs/05 pit #4). No guard flag is needed — this runs once post-loop.
+  // order 26: a STOP (or absent) finish alongside emitted tool calls is really tool_calls.
+  const terminalFinish =
+    hasSeenToolCalls && (pendingFinish === null || pendingFinish === "stop")
+      ? "tool_calls"
+      : (pendingFinish ?? "stop");
   yield {
     ...(lastModel !== undefined ? { model: lastModel } : {}),
-    choices: [{ index: 0, delta: {}, finish_reason: pendingFinish ?? "stop" }],
+    choices: [{ index: 0, delta: {}, finish_reason: terminalFinish }],
     ...(lastUsage !== undefined ? { usage: lastUsage } : {}),
   };
 }

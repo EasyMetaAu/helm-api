@@ -141,6 +141,24 @@ describe("protocol-guards: guardRequestFor (per-target dispatch)", () => {
     expect(out).toBe(ir);
   });
 
+  // order 8: Anthropic Messages has no frequency/presence penalty, no seed, and no
+  // request-level cache_control — these were dropped SILENTLY. Now each records a
+  // data_loss warning so the degradation is observable (never silently vanish, P8).
+  it("anthropic warns on frequency_penalty / presence_penalty / seed / cache_control", () => {
+    const ir = baseIR({
+      frequency_penalty: 0.5,
+      presence_penalty: 0.3,
+      seed: 42,
+      cache_control: { type: "ephemeral" },
+    });
+    const out = guardRequestFor("anthropic", ir);
+    const codes = readWarnings(out).map((w) => `${w.code}:${w.param}`);
+    expect(codes).toContain("data_loss:frequency_penalty");
+    expect(codes).toContain("data_loss:presence_penalty");
+    expect(codes).toContain("data_loss:seed");
+    expect(codes).toContain("data_loss:cache_control");
+  });
+
   it("gemini honors n/logprobs/modalities natively -> no-op", () => {
     const ir = baseIR({ n: 4, logprobs: true, modalities: ["text", "image"] });
     const out = guardRequestFor("gemini", ir);

@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-06-08 · 四协议完整性审计 + 逐条修复（workflow 扇出审计 → worktree TDD 实现；docs/05 协议互译；CLAUDE.md 原则 5/7/8）
+
+- **缘起**：用 Workflow 扇出审计 helm 4 个 wire 协议（openai chat `/v1/chat/completions`、anthropic messages `/v1/messages`、openai-responses `/v1/responses`、gemini `/v1beta/models`）+ 统一 IR/流式核心，对照 `litellm` 参考实现找完整性缺口。51 个 agent（5 审计 + 逐发现对抗式核验 + 综合）确认 **36 条真实缺口**，去重成 **31 项依赖排序修复计划**（审计产物含本机绝对路径+修复前推理，**不签入**，完整记录见 workflow run transcript / git history）。在 git worktree（`worktree-protocol-completeness`）里 TDD 红→绿逐条实现；**修复全程留在主循环串行做**（不并行 edit agent——避免 [[workflow-shared-tree-revert-risk]] 的静默回退）。
+- **核心洞察（综合 agent）**：IR 设计本身够用——几乎所有缺口都是 transformer **没读** IR 已持有的字段，或**静默丢弃**而非记 `data_loss` 警告。故先改 IR/共享核心（order 1-8），再改依赖它们的各协议。
+- **已完成 29/31（按 tier）**：
+  - **共享 IR/核心**：Responses `text.format` → 规范 OpenAI `response_format.{type,json_schema}`（keystone：此前 Responses 结构化输出路由到 Anthropic/Gemini 被静默丢）；`service_tier`/`max_completion_tokens`/`logprobs.refusal` 进 IR（IR 无 `.catchall`，不显式加就被 inbound parse 剥掉）；OpenAI 出站从扁平 `reasoning_tokens` 反补 `completion_tokens_details`；anthropic mapStopReason 空值守卫（**已正确，加回归锁**）；protocol-guards 给 anthropic 加 `frequency_penalty/presence_penalty/seed/cache_control` 的 data_loss 警告。
+  - **Anthropic**：`REASONING_EFFORT_TO_BUDGET` 修成 litellm 精确值（minimal/low=1024、medium=2048、high=4096——原值 2-4× 虚高，**直接计费影响**）；`parallel_tool_calls:false` → `disable_parallel_tool_use`；`metadata` 出站回放；`cache_creation_input_tokens` 上 message_delta 流；per-block `cache_control` 经 IR 往返。
+  - **OpenAI chat**：`stream_options.include_usage` 终止 usage chunk——**在 provider 层** `translateAnthropicSSE` + `translateResponsesSSE` 补发 `{choices:[],usage}` 终帧（此前两 provider 把 Anthropic/Responses→OpenAI SSE 时丢掉了 usage，OpenAI 客户端 + budget settle 拿不到 token 数）；`response_format` json_schema fail-closed 校验；`openaiIndex` 上 IRToolCall（流式合成保序）。
+  - **Responses**：reasoning config→`reasoning_effort`、truncation、`incomplete_details.reason`、output_text annotations（双向）、`output_tokens_details.reasoning_tokens`（非流式+流式）、choice logprobs 上 output_text、**`response.incomplete` 独立终止事件**（此前总发 `response.completed{status:incomplete}`，不符 OpenAI 线协议；同步改反向 consumer + 2 个既有测试）、多模态出站保留（不再塌成纯文本）。
+  - **Gemini**：`TOOL_CALLS` finish_reason（非流式 STOP+functionCall 重映射 + 流式 hasSeenToolCalls 终止重映射）；流式 `promptFeedback.blockReason`→content_filter；`cacheTokensDetails` 解析进 cached（此前只读聚合 `cachedContentTokenCount`）；未知 modality token 不丢（catch-all 键）。
+- **有意未做（2 项，已知取舍，待用户裁决）**：
+  - **order 22**（Responses 流式 refusal/annotation 事件）：reasoning_text 非真缺口（helm 用 `reasoning_summary_text` 正确）；refusal/annotation 流式 delta 极罕见（需上游真发 `delta.refusal`/mid-stream annotation），且需往**头号风险**的流式状态机加新事件类型+state slot。非流式 refusal/annotation 已由 order 20 覆盖。**判断：收益边际、风险高，暂缓**。
+  - **order 30**（Gemini mid-stream reasoning_tokens chunk）：Gemini `?alt=sse` 一般只在终帧发 usage，前提行为可能不存在，speculative，暂缓。
+- **坑/取舍**：(1) **matrix usage 断言原本编码了 bug**——`expectTargetUsageNotDoubleBilled` 断言 Responses `input_tokens:10`（漏掉 cached:3），而 Responses API 本就有 `input_tokens_details.cached_tokens`；修复让 Responses 与 openai/gemini 一致（full 13 + cached 3），同步改断言（注 order 21）。(2) annotation 矩阵测试的 `ANNOTATION_NATIVE_SURFACE.responses` 从 `false`（documented gap）改 `true`（order 20 已原生渲染）。(3) order 5/7 经核验**本就正确**（synthesizeSSEFromJSON 已经 resolveReasoning；mapStopReason('') 已回 end_turn 保 raw）——对抗式核验过报，加回归测试锁定既有正确行为而非改实现。(4) provider 层 usage 终帧改动会让 budget settle 拿到**更准**的 token（此前 Anthropic/Responses provider 流式无 usage），属正向修正。
+- **验证**：每条 TDD 红→绿；全量 **core 1744 绿**、typecheck 净、改动文件 lint 净（仓库另有 9 条 `noNonNullAssertion` 预存于**未触碰**的 test 文件，非本次引入）、build（admin+core+gateway）通过。e2e（Playwright）本地另跑，不在此门禁。
+
+---
+
 ## 2026-06-07 · 修复 Anthropic 订阅配额页：`resets_at:null` 让整份用量解析失败、快照永久卡旧（线上实测；docs/06 providers 页 Tier 3；CLAUDE.md 原则 3 fail-open）
 
 - **现象（la.atmy.work 实测）**：providers 页两个 Claude Max 账号，`mylukin@gmail.com` 配额正确（5h 7%/7d 39%），`riverathomas6094@outlook.com` 恒显 9%/44%（真值应为 5%/5%，与并存的 claude-relay-service 对照），点刷新无效。
@@ -32,19 +50,13 @@
 - **Codex 评审修复（同日，4 条全修）**：(P1) idle 候选误用 `memory_threads.updated_at` 当"最后活动"——普通回合只 append 消息**不碰线程行**，活跃长线程 1h 后会被误判空闲、对话中途被压：改用 `MAX(memory_messages.created_at)` 判闲（两适配器；sqlite WHERE 引用 SELECT 别名是其方言扩展，pg 需重复子查询）。(P1) idle 路径丢 project/resource scope → 短线程 observation 永远不 promote 成 reflection：候选返回值带上线程行的 `project_id/resource_id`，idle-flush 入队 scope 透传，scheduler 的 promote 门自然命中。(P2) 压力触发误用全量 raw 史（`tokenSum(all)`）——压过一次后永久虚高、逼迫后续小段被强制压：改算**活跃足迹** = 未覆盖 raw + observation 文本 token（covered raw 在 inject 时本就被其 observation 顶替；reflection 是 project 级有界量，排除以保持线程局部纯估计）。(P3) docs/08、docs/02 仍写 `recent_keep`/`economy` 旧配置（照抄会拒绝启动）→ 同步改为 auto 行为描述。修后全量 **2608 绿**、typecheck/lint/build 净。
 ---
 
-## 2026-06-07 · 重试请求：原 key 失效时回退 root key（用户决策；docs/07；改写 2026-06-06「重试」条目的 409 行为）
-
-- **需求（用户拍板）**：重试一条原 key 已被删除/吊销的请求时返回 409「original key is unavailable」——对管理员毫无意义：他要的是**重试的结果**，不是一个解释为什么不能重试的错误。原 key 还活着就照旧用它（路由忠实）；不在了就用 root key 调试。
-- **方案**（`apps/gateway/src/routes/admin/replay.ts` 第 3 步）：原 key 存活 → 照旧；已删/已吊销 → 回退到**第一把存活的 root key**（`role==="root" && !disabled`，禁用的 root key 跳过），记日志 `replay.root_key_fallback`；只有连存活 root key 都没有（实际部署几乎不可能）才 409（错误文案改为 "…and no active root key exists"）。
-- **取舍（有意偏离原「绝不放宽权限」立场）**：原实现注释明写 "a deleted/revoked key blocks the replay rather than silently widening permissions"。推翻理由：replay 在 admin Basic auth 之后，**操作者本就持有 root 等价权力**（能看明文 payload、能铸 key），回退 root 是其主动调试选择而非提权泄露。代价是路由保真度（root 无 lane 白名单、`allow_custom_model:true`）——以日志 + 归因补偿。
-- **遥测归因改为「实际使用的 key」**：新 trace 的 `apiKeyId` 从原 keyId 改为 `key.key_id`——回退时诚实记在 root key 名下，且避免对已硬删 key 的悬空引用（审计链上「谁的身份发起了这次调用」必须真实）。
-- **验证**：TDD 先红后绿——4 个新 case（删除回退 / 吊销回退 / 跳过禁用 root / 双双失效才 409）+ 归因断言；replay 15/15、admin 路由 78/78 绿；typecheck/lint 净。前端零改动（弹窗只渲染服务端错误串）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-07 · 重试请求：原 key 失效时回退 root key（用户决策；docs/07）：原 key 存活照旧用（路由忠实），已删/吊销则回退**第一把存活 root key**（记 `replay.root_key_fallback`），连存活 root 都没有才 409。有意偏离「绝不放宽权限」——replay 在 admin Basic auth 后，操作者本就 root 等价，回退是主动调试非提权；代价是路由保真度（root 无 lane 白名单），靠日志+归因补偿。遥测 `apiKeyId` 改记**实际使用的 key**（避免悬空引用）。TDD 4 case，replay 15/15、admin 78/78 绿，前端零改。
 
 ### 2026-06-07 · eval 快探针 + 流式 idle 超时（修复线上恒 fallback；docs/03 Layer 2；原则 2/4）：① `model:"auto"` 中文请求恒 `eval_timeout` 降级——根因 eval 模型是推理模型、250ms 内层超时不够；方案 `EvalConfigSchema.extra_body` 配置驱动请求体透传（classify invokeModel 铺最前、锁定 model/temperature/stream/max_tokens 后覆盖），classifier.yaml 设 `thinking.{type:disabled}` 关推理 → ~1.1s 干净 JSON、超时收回 1500/2000。② 新增 `provider/stream-idle.ts` `readChunkWithIdle`：TTFB 后流式读循环此前**无超时**，mid-stream 卡死永久挂起；逐块计时（非总时长），首块前抛=可 fallback、之后抛=终止流；复用 `request_timeout_ms` 当 idle 值；三 client 接入。Codex 二轮修 3 真 bug（终止 SSE 事件后须停读否则误判 timeout、cancel 改 fire-and-forget、四路由用 `isUpstreamTimeout` 谓词保 timeout 分类）。**部署 TODO**：代码在分支，线上 0.8.3 无；新镜像部署后 classifier.yaml 切 `extra_body.thinking+1500/2000`、`request_timeout_ms` 由 300000 下调 ~60–90s（兼 TTFB+idle，卡死连接快回收）。全量 2552 绿。
 

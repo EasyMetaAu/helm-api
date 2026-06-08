@@ -169,6 +169,44 @@ describe("translateAnthropicSSE", () => {
     expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
   });
 
+  // order 14: an OpenAI client sends stream_options.include_usage (execute.ts forces
+  // it). The Anthropic->OpenAI SSE translation must emit a terminal usage-bearing
+  // chunk (choices:[] + usage) before [DONE], else the client (and budget settle) see
+  // no token counts. Anthropic carries input/cache on message_start, output on message_delta.
+  it("emits a terminal usage chunk (include_usage) before [DONE]", async () => {
+    const res = sseResponse([
+      {
+        type: "message_start",
+        message: { id: "m", usage: { input_tokens: 12, output_tokens: 1 } },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi" } },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 7 } },
+      { type: "message_stop" },
+    ]);
+    const chunks: string[] = [];
+    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    // The usage chunk is the last data frame before [DONE].
+    const dataFrames = chunks
+      .join("")
+      .trimEnd()
+      .split("\n\n")
+      .filter((f) => f.startsWith("data:"));
+    const doneIdx = dataFrames.findIndex((f) => f.includes("[DONE]"));
+    const usageFrame = dataFrames[doneIdx - 1];
+    expect(usageFrame).toBeDefined();
+    const parsed = JSON.parse((usageFrame as string).slice(5).trim()) as {
+      choices: unknown[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
+    expect(parsed.choices).toEqual([]);
+    expect(parsed.usage).toMatchObject({
+      prompt_tokens: 12,
+      completion_tokens: 7,
+      total_tokens: 19,
+    });
+  });
+
   it("returns at message_stop without waiting on the idle guard (terminal event stops the read)", async () => {
     vi.useFakeTimers();
     try {

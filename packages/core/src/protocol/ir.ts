@@ -23,6 +23,9 @@ import { z } from "zod";
 export const IRTextPartSchema = z.object({
   type: z.literal("text"),
   text: z.string(),
+  // Anthropic prompt-cache breakpoint on this block (e.g. {type:"ephemeral"}). No
+  // other protocol has a per-block cache knob, so it rides as an optional passthrough.
+  cache_control: z.unknown().optional(),
 });
 
 export const IRImagePartSchema = z.object({
@@ -32,6 +35,7 @@ export const IRImagePartSchema = z.object({
   // original structure goes into provider_raw.
   url: z.string(),
   mediaType: z.string().optional(),
+  cache_control: z.unknown().optional(), // Anthropic per-block cache breakpoint
 });
 
 export const IRThinkingPartSchema = z.object({
@@ -68,6 +72,7 @@ export const IRDocumentPartSchema = z.object({
   fileId: z.string().optional(), // provider-uploaded file handle (OpenAI file_id / Anthropic file source)
   mediaType: z.string().optional(),
   filename: z.string().optional(),
+  cache_control: z.unknown().optional(), // Anthropic per-block cache breakpoint
 });
 
 export const IRContentPartSchema = z.discriminatedUnion("type", [
@@ -126,7 +131,12 @@ export const IRLogprobTokenSchema = z.object({
   top_logprobs: z.array(IRTopLogprobSchema).optional(),
 });
 export const IRLogprobsSchema = z
-  .object({ content: z.array(IRLogprobTokenSchema).nullable().optional() })
+  .object({
+    content: z.array(IRLogprobTokenSchema).nullable().optional(),
+    // refusal track (OpenAI ChoiceLogprobs.refusal) — a structural home so
+    // cross-protocol consumers read it from the schema, not blind passthrough.
+    refusal: z.array(IRLogprobTokenSchema).nullable().optional(),
+  })
   .passthrough();
 export type IRLogprobs = z.infer<typeof IRLogprobsSchema>;
 
@@ -172,6 +182,10 @@ export const IRToolCallSchema = z.object({
     // fragmentation / jsonrepair is the transformer's job — IR does not parse it.
     arguments: z.string(),
   }),
+  // The OpenAI streaming integer index, when an upstream supplied an explicit
+  // (possibly non-sequential) one. Lets stream synthesis preserve parallel-tool-call
+  // ordering instead of blindly re-sequencing by array position.
+  openaiIndex: z.number().int().nonnegative().optional(),
 });
 export type IRToolCall = z.infer<typeof IRToolCallSchema>;
 
@@ -221,6 +235,9 @@ export const IRRequestSchema = z.object({
   tool_choice: z.unknown().optional(),
   temperature: z.number().optional(),
   max_tokens: z.number().int().positive().optional(),
+  // o-series models require max_completion_tokens instead of max_tokens. The IR has
+  // no .catchall, so without this explicit field it is stripped on inbound parse.
+  max_completion_tokens: z.number().int().positive().optional(),
   stream: z.boolean().optional(),
   response_format: z.unknown().optional(),
   cache_control: z.unknown().optional(), // extension: cache-control passthrough
@@ -286,6 +303,9 @@ export const IRResponseSchema = z.object({
   model: z.string(),
   choices: z.array(IRChoiceSchema),
   usage: IRUsageSchema.optional(),
+  // OpenAI Chat / Responses report the resolved service tier on the response; a
+  // first-class home so it survives cross-protocol (no .catchall on this schema).
+  service_tier: z.string().optional(),
   provider_raw: ProviderRawSchema.optional(),
 });
 export type IRResponse = z.infer<typeof IRResponseSchema>;

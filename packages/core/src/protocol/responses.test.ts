@@ -1,7 +1,64 @@
 import { describe, expect, it } from "vitest";
+import { anthropicTransformer } from "./anthropic/index.js";
+import { geminiTransformer } from "./gemini/gemini-transformer.js";
 import type { IRRequest, IRResponse } from "./ir.js";
 import { TransformerRegistry } from "./registry.js";
 import { responsesTransformer } from "./responses.js";
+
+describe("responsesTransformer — text.format structured output canonicalization (order 1)", () => {
+  // A Responses client sends structured output as text.format.{type,name,schema};
+  // the IR (OpenAI-Chat-shaped) must canonicalize it to response_format.{type,
+  // json_schema} so the Anthropic/Gemini renderers — which read that shape — can
+  // honor it. Previously the raw Responses shape was parked verbatim and dropped.
+  const schema = {
+    type: "object",
+    properties: { city: { type: "string" } },
+    required: ["city"],
+  };
+  const responsesReq = {
+    model: "gpt-4o",
+    input: "weather in SF?",
+    text: { format: { type: "json_schema", name: "weather", schema } },
+  };
+
+  it("canonicalizes text.format.json_schema to IR.response_format.{type,json_schema}", async () => {
+    const ir = await responsesTransformer.transformRequestOut(responsesReq);
+    expect(ir.response_format).toMatchObject({
+      type: "json_schema",
+      json_schema: { name: "weather", schema },
+    });
+  });
+
+  it("renders Anthropic output_format from a Responses structured-output request", async () => {
+    const ir = await responsesTransformer.transformRequestOut(responsesReq);
+    const anthropic = (await anthropicTransformer.transformRequestIn(ir)) as {
+      output_format?: { type: string; schema?: { properties?: Record<string, unknown> } };
+    };
+    expect(anthropic.output_format?.type).toBe("json_schema");
+    expect(anthropic.output_format?.schema?.properties).toMatchObject({ city: { type: "string" } });
+  });
+
+  it("renders Gemini responseSchema from a Responses structured-output request", async () => {
+    const ir = await responsesTransformer.transformRequestOut(responsesReq);
+    const gemini = (await geminiTransformer.transformRequestIn(ir)) as {
+      generationConfig?: { responseMimeType?: string; responseSchema?: { properties?: unknown } };
+    };
+    expect(gemini.generationConfig?.responseMimeType).toBe("application/json");
+    expect(gemini.generationConfig?.responseSchema?.properties).toMatchObject({
+      city: { type: "string" },
+    });
+  });
+
+  it("round-trips the native Responses text shape (responses -> IR -> responses)", async () => {
+    const ir = await responsesTransformer.transformRequestOut(responsesReq);
+    const back = (await responsesTransformer.transformRequestIn(ir)) as {
+      text?: { format?: { type?: string; name?: string; schema?: unknown } };
+    };
+    expect(back.text?.format?.type).toBe("json_schema");
+    expect(back.text?.format?.name).toBe("weather");
+    expect(back.text?.format?.schema).toMatchObject({ type: "object" });
+  });
+});
 
 // OpenAI Responses transformer (docs/05). Responses is a DIFFERENT request shape
 // from Chat Completions: instead of `messages[]` (role + content), the
@@ -11,6 +68,275 @@ import { responsesTransformer } from "./responses.js";
 // the item stream back into the OpenAI-Chat-shaped IR on the way in, and
 // explodes the IR back into the item stream on the way out. Correctness is
 // aligned item-by-item with litellm's messages_to_responses_mapping.
+
+describe("responsesTransformer — Tier D request/response fidelity (orders 17-25)", () => {
+  // order 17: reasoning config on the request maps effort -> IR.reasoning_effort and
+  // is preserved verbatim in provider_raw for reconstruction.
+  it("maps reasoning.effort to IR.reasoning_effort and stashes the config (order 17)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "o1",
+      input: "hi",
+      reasoning: { effort: "medium", summary: "auto" },
+    });
+    expect(ir.reasoning_effort).toBe("medium");
+    expect(ir.provider_raw?.reasoning_config).toEqual({ effort: "medium", summary: "auto" });
+  });
+
+  it("reconstructs reasoning config on the outbound Responses request (order 17)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "o1",
+      input: "hi",
+      reasoning: { effort: "high" },
+    });
+    const back = (await responsesTransformer.transformRequestIn(ir)) as {
+      reasoning?: { effort?: string };
+    };
+    expect(back.reasoning?.effort).toBe("high");
+  });
+
+  // order 18: truncation has no IR home -> rides provider_raw and round-trips.
+  it("round-trips the truncation parameter (order 18)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "hi",
+      truncation: "disabled",
+    });
+    expect(ir.provider_raw?.truncation).toBe("disabled");
+    const back = (await responsesTransformer.transformRequestIn(ir)) as { truncation?: string };
+    expect(back.truncation).toBe("disabled");
+  });
+
+  // order 19: an incomplete response must carry incomplete_details.reason.
+  it("sets incomplete_details.reason on a content-filtered response (order 19)", async () => {
+    const ir: IRResponse = {
+      id: "r",
+      model: "m",
+      choices: [
+        { index: 0, message: { role: "assistant", content: "x" }, finish_reason: "content_filter" },
+      ],
+    };
+    const out = (await responsesTransformer.transformResponseOut(ir)) as {
+      status: string;
+      incomplete_details?: { reason?: string };
+    };
+    expect(out.status).toBe("incomplete");
+    expect(out.incomplete_details?.reason).toBe("content_filter");
+  });
+
+  it("maps a length cap to incomplete_details.reason=max_tokens (order 19)", async () => {
+    const ir: IRResponse = {
+      id: "r",
+      model: "m",
+      choices: [
+        { index: 0, message: { role: "assistant", content: "x" }, finish_reason: "length" },
+      ],
+    };
+    const out = (await responsesTransformer.transformResponseOut(ir)) as {
+      incomplete_details?: { reason?: string };
+    };
+    expect(out.incomplete_details?.reason).toBe("max_tokens");
+  });
+
+  // order 20: output_text annotations (citations/grounding) must survive both ways.
+  it("emits output_text annotations on the Responses response (order 20)", async () => {
+    const ir: IRResponse = {
+      id: "r",
+      model: "m",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "see source",
+            annotations: [{ type: "url_citation", url: "https://x", start_index: 0, end_index: 3 }],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const out = (await responsesTransformer.transformResponseOut(ir)) as {
+      output: Array<{ type: string; content?: Array<{ annotations?: unknown[] }> }>;
+    };
+    const msg = out.output.find((o) => o.type === "message");
+    expect(msg?.content?.[0]?.annotations).toEqual([
+      { type: "url_citation", url: "https://x", start_index: 0, end_index: 3 },
+    ]);
+  });
+
+  it("folds inbound output_text annotations back onto the IR message (order 20)", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r",
+      model: "m",
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: "hi",
+              annotations: [{ type: "url_citation", url: "https://x" }],
+            },
+          ],
+        },
+      ],
+    });
+    expect(ir.choices[0]?.message.annotations?.[0]?.url).toBe("https://x");
+  });
+
+  // order 21: reasoning_tokens (+ cache_creation) lift into output_tokens_details.
+  it("lifts reasoning_tokens into usage.output_tokens_details (order 21)", async () => {
+    const ir: IRResponse = {
+      id: "r",
+      model: "o1",
+      choices: [{ index: 0, message: { role: "assistant", content: "x" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 20, reasoning_tokens: 15 },
+    };
+    const out = (await responsesTransformer.transformResponseOut(ir)) as {
+      usage: { output_tokens_details?: { reasoning_tokens?: number } };
+    };
+    expect(out.usage.output_tokens_details?.reasoning_tokens).toBe(15);
+  });
+
+  // order 23: per-choice logprobs ride the output_text part.
+  it("carries choice logprobs onto the output_text part (order 23)", async () => {
+    const ir: IRResponse = {
+      id: "r",
+      model: "m",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "hi" },
+          finish_reason: "stop",
+          logprobs: { content: [{ token: "hi", logprob: -0.1 }] },
+        },
+      ],
+    };
+    const out = (await responsesTransformer.transformResponseOut(ir)) as {
+      output: Array<{
+        type: string;
+        content?: Array<{ logprobs?: { content?: Array<{ token: string }> } }>;
+      }>;
+    };
+    const msg = out.output.find((o) => o.type === "message");
+    expect(msg?.content?.[0]?.logprobs?.content?.[0]?.token).toBe("hi");
+  });
+
+  // Codex P1: a native incomplete Responses response must yield a REAL IR finish_reason
+  // (length / content_filter), not the raw status "incomplete" which collapses to stop.
+  it("maps inbound incomplete_details.reason to a real finish_reason (max_output_tokens -> length)", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r",
+      model: "m",
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "x" }] },
+      ],
+    });
+    expect(ir.choices[0]?.finish_reason).toBe("length");
+  });
+
+  it("maps inbound incomplete content_filter to finish_reason=content_filter", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r",
+      model: "m",
+      status: "incomplete",
+      incomplete_details: { reason: "content_filter" },
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "x" }] },
+      ],
+    });
+    expect(ir.choices[0]?.finish_reason).toBe("content_filter");
+  });
+
+  it("round-trips a content-filtered incomplete response (responses -> IR -> responses)", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r",
+      model: "m",
+      status: "incomplete",
+      incomplete_details: { reason: "content_filter" },
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "x" }] },
+      ],
+    });
+    const back = (await responsesTransformer.transformResponseOut(ir)) as {
+      status: string;
+      incomplete_details?: { reason?: string };
+    };
+    expect(back.status).toBe("incomplete");
+    expect(back.incomplete_details?.reason).toBe("content_filter");
+  });
+
+  // Codex P2: an inbound Responses input_file part must fold into an IR document, not
+  // hit the unknown-part fallback (which turned it into JSON text and dropped the file).
+  it("folds an inbound input_file (file_id) into an IR document part", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "summarize" },
+            { type: "input_file", file_id: "file-abc" },
+          ],
+        },
+      ],
+    });
+    const parts = ir.messages.at(-1)?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts.some((p) => p.type === "document" && p.fileId === "file-abc")).toBe(true);
+  });
+
+  it("folds an inbound input_file (file_data PDF) into an IR document with base64 data", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_file",
+              filename: "r.pdf",
+              file_data: "data:application/pdf;base64,JVBE",
+            },
+          ],
+        },
+      ],
+    });
+    const parts = ir.messages.at(-1)?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({
+      type: "document",
+      data: "JVBE",
+      mediaType: "application/pdf",
+      filename: "r.pdf",
+    });
+  });
+
+  // order 25: multimodal content must not collapse to text on the outbound request.
+  it("preserves multimodal parts (input_text + input_image) on the outbound request (order 25)", async () => {
+    const back = (await responsesTransformer.transformRequestIn({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "look" },
+            { type: "image", url: "https://x/y.png" },
+          ],
+        },
+      ],
+    })) as { input: Array<{ type: string; content?: Array<{ type: string }> }> };
+    const msg = back.input.find((i) => i.type === "message");
+    const types = (msg?.content ?? []).map((c) => c.type);
+    expect(types).toContain("input_text");
+    expect(types).toContain("input_image");
+  });
+});
 
 describe("responsesTransformer — messages -> input items expansion (test #1)", () => {
   // An IR with user text + assistant tool_calls + a tool result must explode,

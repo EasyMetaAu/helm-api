@@ -60,6 +60,13 @@ describe("mapStopReason", () => {
     expect(mapStopReason("totally_unknown").raw).toBe("totally_unknown");
     expect(mapStopReason("stop").raw).toBe("stop");
   });
+  // order 7: a null/non-terminal finish_reason coalesces to "" at the call site; it
+  // must map to the legal `end_turn` and keep the raw ("") recoverable — never throw
+  // or land on an illegal enum mid-stream.
+  it("maps an empty (null-coalesced) finish_reason to end_turn, raw preserved", () => {
+    expect(mapStopReason("").stop_reason).toBe("end_turn");
+    expect(mapStopReason("").raw).toBe("");
+  });
 });
 
 describe("mapUsage", () => {
