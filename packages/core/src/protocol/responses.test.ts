@@ -158,19 +158,21 @@ describe("responsesTransformer — request input items -> IR (folding)", () => {
     expect(ir.messages[0]?.content).toBe("hi");
   });
 
-  // A typeless non-message item (no `role`) must NOT be absorbed as a message —
-  // it must still fall through to the fail-open unknown branch. Guards the
-  // non-discriminated union ordering after `type` is made optional.
-  it("does not absorb a typeless item lacking role as a message", async () => {
+  // Making `type` optional on the message variant must NOT cause a typed
+  // non-message item (which lacks `role`) to be absorbed as a message. A
+  // function_call item must still lift into an assistant tool_call. Guards the
+  // non-discriminated union ordering after the change.
+  it("still routes a typed function_call item, not as a typeless message", async () => {
     const ir = await responsesTransformer.transformRequestOut({
       model: "gpt-4o",
       input: [
         { role: "user", content: "hi" },
-        { foo: "bar" },
+        { type: "function_call", call_id: "call_x", name: "f", arguments: "{}" },
       ],
     });
-    // the unknown item produces no IR message; only the user turn folds.
-    expect(ir.messages.map((m) => m.role)).toEqual(["user"]);
+    const assistant = ir.messages.find((m) => m.role === "assistant");
+    expect(assistant?.tool_calls?.[0]?.id).toBe("call_x");
+    expect(ir.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
 });
 
