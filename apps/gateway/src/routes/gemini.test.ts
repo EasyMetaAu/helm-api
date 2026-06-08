@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { type GeminiRouteDeps, registerGeminiRoute } from "./gemini.js";
 import type { MessagesIdentity } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
+import type { RecordServedDeps } from "./payload-capture.js";
 
 // POST /v1beta/models/{model}:{generateContent|streamGenerateContent} — Gemini
 // inbound (issue #34). These tests pin the route CONTRACT: auth (x-goog-api-key
@@ -16,6 +17,10 @@ const GEMINI_AUTH = { "x-goog-api-key": "helm_live_secret", "Content-Type": "app
 const IDENTITY: MessagesIdentity = { keyId: "k1", accountId: "acct" };
 
 const REQ_BODY = { contents: [{ role: "user", parts: [{ text: "hi" }] }] };
+
+// A fake DecisionRecord stand-in the route hands opaquely to recordServed →
+// redact → telemetry.insert (it never inspects fields).
+const FAKE_DECISION = { final: { status: "ok", model_alias: "gemini-2.0-flash" } } as never;
 
 // A canned Gemini-native response the stub responseOut produces.
 const GEMINI_RESPONSE = {
@@ -38,12 +43,14 @@ function makeDeps(
     transformRequestOut?: (native: unknown) => unknown;
     identity?: MessagesIdentity;
     rateLimiter?: GeminiRouteDeps["rateLimiter"];
+    record?: RecordServedDeps;
   } = {},
 ): { deps: GeminiRouteDeps; harness: Harness } {
   const harness: Harness = { order: [], pipelineSawIR: null, pipelineSawAbort: false };
 
   const deps: GeminiRouteDeps = {
     rateLimiter: over.rateLimiter,
+    record: over.record,
     auth: {
       resolve: async (cred) => {
         harness.order.push(`auth:${cred ?? "null"}`);
@@ -94,6 +101,7 @@ function makeDeps(
           });
         }
         return {
+          decision: FAKE_DECISION,
           collect: over.collect ?? (async () => ({ id: "ir-resp" })),
           streamIR:
             over.streamEvents ??
@@ -111,6 +119,26 @@ function buildApp(deps: GeminiRouteDeps) {
   const app = createApp({ logger: { log: () => {} } });
   registerGeminiRoute(app, deps);
   return app;
+}
+
+// Recording dep with insert + insertPayload spies (mirrors the chat telemetry
+// harness). redact is the identity so a test can assert it ran on the decision.
+function makeRecord(over: { capturePayloads?: boolean } = {}): {
+  record: RecordServedDeps;
+  insert: ReturnType<typeof vi.fn>;
+  insertPayload: ReturnType<typeof vi.fn>;
+  redact: ReturnType<typeof vi.fn>;
+} {
+  const insert = vi.fn().mockResolvedValue({ id: "1" });
+  const insertPayload = vi.fn().mockResolvedValue(undefined);
+  const redact = vi.fn((x: unknown) => x);
+  const record: RecordServedDeps = {
+    telemetry: { insert, insertPayload } as never,
+    redact: redact as never,
+    now: () => 1000,
+    capturePayloads: () => over.capturePayloads ?? true,
+  };
+  return { record, insert, insertPayload, redact };
 }
 
 describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
@@ -274,6 +302,62 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     expect(res.status).toBe(502);
     const body = (await res.json()) as { error: { status: string } };
     expect(body.error.status).toBe("UNAVAILABLE");
+  });
+
+  // ── Telemetry recording (the /admin/requests bug). The gemini face served LLM
+  //    traffic but never recorded a telemetry row, so it was invisible in the
+  //    admin Debug list. recordServed must fire on every served request.
+  it("records a redacted telemetry row + payload for a served NON-STREAM request", async () => {
+    const { record, insert, insertPayload, redact } = makeRecord();
+    const { deps } = makeDeps({ record });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(insert).toHaveBeenCalledOnce();
+    const arg = insert.mock.calls[0]?.[0] as { apiKeyId: string };
+    expect(arg.apiKeyId).toBe("k1");
+    expect(redact).toHaveBeenCalled();
+    // The plaintext key must never reach the persisted telemetry row.
+    expect(JSON.stringify(arg)).not.toContain("helm_live_secret");
+    expect(insertPayload).toHaveBeenCalledOnce();
+  });
+
+  it("records a telemetry row for a served STREAM request after the stream drains", async () => {
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { candidates: [{ content: { role: "model", parts: [{ text: "Hi" }] } }] };
+    }
+    const { record, insert } = makeRecord();
+    const { deps } = makeDeps({ record, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    // Drain the stream fully so the finally (where recording lives) runs.
+    await res.text();
+
+    expect(insert).toHaveBeenCalledOnce();
+    const arg = insert.mock.calls[0]?.[0] as { apiKeyId: string };
+    expect(arg.apiKeyId).toBe("k1");
+  });
+
+  it("does not record when no record dep is wired (existing tests stay green)", async () => {
+    const { deps } = makeDeps();
+    const app = buildApp(deps);
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(res.status).toBe(200);
   });
 });
 
