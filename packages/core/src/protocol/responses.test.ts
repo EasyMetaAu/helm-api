@@ -136,6 +136,42 @@ describe("responsesTransformer — request input items -> IR (folding)", () => {
     expect(ir.messages.map((m) => m.role)).toEqual(["developer", "user"]);
     expect(ir.messages[0]?.content).toEqual([{ type: "text", text: "Prefer metric units." }]);
   });
+
+  // The OpenAI SDK (and pi-ai) omit `type:"message"` on input messages — it is
+  // OPTIONAL in the Responses spec. A typeless { role, content } item must fold
+  // to a message, NOT 400 with invalid_union. Regression for SDK-shaped requests.
+  it("accepts a message item that omits type (content-part array)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    });
+    expect(ir.messages[0]?.role).toBe("user");
+    expect(ir.messages[0]?.content).toEqual([{ type: "text", text: "hi" }]);
+  });
+
+  it("accepts a message item that omits type (bare string content)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.messages[0]?.role).toBe("user");
+    expect(ir.messages[0]?.content).toBe("hi");
+  });
+
+  // A typeless non-message item (no `role`) must NOT be absorbed as a message —
+  // it must still fall through to the fail-open unknown branch. Guards the
+  // non-discriminated union ordering after `type` is made optional.
+  it("does not absorb a typeless item lacking role as a message", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        { role: "user", content: "hi" },
+        { foo: "bar" },
+      ],
+    });
+    // the unknown item produces no IR message; only the user turn folds.
+    expect(ir.messages.map((m) => m.role)).toEqual(["user"]);
+  });
 });
 
 describe("responsesTransformer — reasoning item inbound (test #2)", () => {
