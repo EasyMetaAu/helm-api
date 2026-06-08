@@ -137,7 +137,11 @@ const ContentPartAddedSchema = z.object({
   item_id: z.string(),
   output_index: z.number().int().nonnegative(),
   content_index: z.number().int().nonnegative(),
-  part: z.object({ type: z.literal("output_text"), text: z.literal("") }),
+  // An output_text part opens empty; a refusal part opens with an empty refusal string.
+  part: z.union([
+    z.object({ type: z.literal("output_text"), text: z.literal("") }),
+    z.object({ type: z.literal("refusal"), refusal: z.literal("") }),
+  ]),
 });
 const OutputTextDeltaSchema = z.object({
   type: z.literal("response.output_text.delta"),
@@ -161,7 +165,38 @@ const ContentPartDoneSchema = z.object({
   item_id: z.string(),
   output_index: z.number().int().nonnegative(),
   content_index: z.number().int().nonnegative(),
-  part: z.object({ type: z.literal("output_text"), text: z.string() }),
+  part: z.union([
+    z.object({ type: z.literal("output_text"), text: z.string() }),
+    z.object({ type: z.literal("refusal"), refusal: z.string() }),
+  ]),
+});
+// Refusal streaming (order 22): a safety refusal streams as its own message-item
+// content part, parallel to output_text but with refusal.delta / refusal.done.
+const RefusalDeltaSchema = z.object({
+  type: z.literal("response.refusal.delta"),
+  sequence_number: z.number().int().nonnegative(),
+  item_id: z.string(),
+  output_index: z.number().int().nonnegative(),
+  content_index: z.number().int().nonnegative(),
+  delta: z.string(),
+});
+const RefusalDoneSchema = z.object({
+  type: z.literal("response.refusal.done"),
+  sequence_number: z.number().int().nonnegative(),
+  item_id: z.string(),
+  output_index: z.number().int().nonnegative(),
+  content_index: z.number().int().nonnegative(),
+  refusal: z.string(),
+});
+// Annotation added to an output_text part (citations/grounding) mid-stream.
+const OutputTextAnnotationAddedSchema = z.object({
+  type: z.literal("response.output_text.annotation.added"),
+  sequence_number: z.number().int().nonnegative(),
+  item_id: z.string(),
+  output_index: z.number().int().nonnegative(),
+  content_index: z.number().int().nonnegative(),
+  annotation_index: z.number().int().nonnegative(),
+  annotation: z.unknown(),
 });
 const FunctionCallArgumentsDeltaSchema = z.object({
   type: z.literal("response.function_call_arguments.delta"),
@@ -239,6 +274,9 @@ export const ResponsesSSEEventSchema = z.discriminatedUnion("type", [
   FunctionCallArgumentsDeltaSchema,
   FunctionCallArgumentsDoneSchema,
   OutputItemDoneSchema,
+  RefusalDeltaSchema,
+  RefusalDoneSchema,
+  OutputTextAnnotationAddedSchema,
   ResponseCompletedSchema,
   ResponseIncompleteSchema,
   ResponsesErrorEventSchema,
@@ -254,6 +292,15 @@ interface TextSlot {
   itemId: string;
   started: boolean; // output_item.added + content_part.added emitted?
   textBuffer: string; // accumulated text (flushed on output_text.done)
+  annotations: unknown[]; // citations attached to this output_text part (order 22)
+  annotationCount: number; // monotonic annotation_index allocator
+}
+
+interface RefusalSlot {
+  outputIndex: number;
+  itemId: string;
+  started: boolean; // output_item.added + content_part.added(refusal) emitted?
+  textBuffer: string; // accumulated refusal text (flushed on refusal.done)
 }
 
 interface ToolSlot {
@@ -280,6 +327,7 @@ interface StreamState {
   openItems: Set<number>; // started-but-not-done items (close guard)
   reasoningSlot: ReasoningSlot | null; // lazily allocated reasoning item
   textSlot: TextSlot | null; // lazily allocated text item
+  refusalSlot: RefusalSlot | null; // lazily allocated refusal item (order 22)
   toolIndexToSlot: Map<number, ToolSlot>; // OpenAI tool index → output slot
   finishReason: string | null; // terminal status source
   usage: IRUsage | null; // buffered; flushed on response.completed
@@ -294,6 +342,7 @@ function createState(model = "unknown"): StreamState {
     openItems: new Set(),
     reasoningSlot: null,
     textSlot: null,
+    refusalSlot: null,
     toolIndexToSlot: new Map(),
     finishReason: null,
     usage: null,
@@ -426,6 +475,43 @@ export async function* convertOpenAIStreamToResponses(
   yield* closeStream(state);
 }
 
+// Lazily open the assistant message item + its output_text content part, recording
+// the slot on state. Used by both the text-delta path and the annotation path (an
+// annotation must reference an existing output_text part). No-op once opened.
+function* ensureTextSlot(state: StreamState): Generator<ResponsesSSEEvent> {
+  if (state.textSlot !== null) return;
+  const outputIndex = allocOutputIndex(state);
+  const slot: TextSlot = {
+    outputIndex,
+    itemId: itemId(outputIndex),
+    started: true,
+    textBuffer: "",
+    annotations: [],
+    annotationCount: 0,
+  };
+  state.textSlot = slot;
+  yield ResponsesSSEEventSchema.parse({
+    type: "response.output_item.added",
+    sequence_number: nextSeq(state),
+    output_index: slot.outputIndex,
+    item: {
+      type: "message",
+      id: slot.itemId,
+      status: "in_progress",
+      role: "assistant",
+      content: [],
+    },
+  });
+  yield ResponsesSSEEventSchema.parse({
+    type: "response.content_part.added",
+    sequence_number: nextSeq(state),
+    item_id: slot.itemId,
+    output_index: slot.outputIndex,
+    content_index: 0,
+    part: { type: "output_text", text: "" },
+  });
+}
+
 // —— Per-chunk transition: reasoning -> text -> tool calls -> usage/finish. Split
 // out so the main generator can wrap the whole feed in a try/catch and emit an
 // `error` frame on a mid-stream upstream failure. ————————————————————————————————
@@ -474,15 +560,49 @@ function* handleChunk(state: StreamState, raw: OpenAIChunk): Generator<Responses
 
   // —— text: lazily open the text item + content part, then stream deltas. ——
   if (delta?.content) {
-    if (state.textSlot === null) {
+    yield* ensureTextSlot(state);
+    const slot = state.textSlot as TextSlot;
+    slot.textBuffer += delta.content;
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.output_text.delta",
+      sequence_number: nextSeq(state),
+      item_id: slot.itemId,
+      output_index: slot.outputIndex,
+      content_index: 0,
+      delta: delta.content,
+    });
+  }
+
+  // —— annotations (citations/grounding): attach to the output_text part (order 22). ——
+  if (delta?.annotations !== undefined && delta.annotations.length > 0) {
+    yield* ensureTextSlot(state);
+    const slot = state.textSlot as TextSlot;
+    for (const annotation of delta.annotations) {
+      slot.annotations.push(annotation);
+      yield ResponsesSSEEventSchema.parse({
+        type: "response.output_text.annotation.added",
+        sequence_number: nextSeq(state),
+        item_id: slot.itemId,
+        output_index: slot.outputIndex,
+        content_index: 0,
+        annotation_index: slot.annotationCount,
+        annotation,
+      });
+      slot.annotationCount += 1;
+    }
+  }
+
+  // —— refusal: a safety refusal streams as its own message-item refusal part (order 22). ——
+  if (delta?.refusal) {
+    if (state.refusalSlot === null) {
       const outputIndex = allocOutputIndex(state);
-      const slot: TextSlot = {
+      const slot: RefusalSlot = {
         outputIndex,
         itemId: itemId(outputIndex),
         started: true,
         textBuffer: "",
       };
-      state.textSlot = slot;
+      state.refusalSlot = slot;
       yield ResponsesSSEEventSchema.parse({
         type: "response.output_item.added",
         sequence_number: nextSeq(state),
@@ -501,18 +621,18 @@ function* handleChunk(state: StreamState, raw: OpenAIChunk): Generator<Responses
         item_id: slot.itemId,
         output_index: slot.outputIndex,
         content_index: 0,
-        part: { type: "output_text", text: "" },
+        part: { type: "refusal", refusal: "" },
       });
     }
-    const slot = state.textSlot;
-    slot.textBuffer += delta.content;
+    const slot = state.refusalSlot;
+    slot.textBuffer += delta.refusal;
     yield ResponsesSSEEventSchema.parse({
-      type: "response.output_text.delta",
+      type: "response.refusal.delta",
       sequence_number: nextSeq(state),
       item_id: slot.itemId,
       output_index: slot.outputIndex,
       content_index: 0,
-      delta: delta.content,
+      delta: delta.refusal,
     });
   }
 
@@ -639,6 +759,11 @@ function* closeStream(state: StreamState): Generator<ResponsesSSEEvent> {
       content_index: 0,
       text: slot.textBuffer,
     });
+    // Attach any accumulated citations onto the final output_text part (order 22).
+    const textPart =
+      slot.annotations.length > 0
+        ? { type: "output_text", text: slot.textBuffer, annotations: slot.annotations }
+        : { type: "output_text", text: slot.textBuffer };
     yield ResponsesSSEEventSchema.parse({
       type: "response.content_part.done",
       sequence_number: nextSeq(state),
@@ -652,8 +777,44 @@ function* closeStream(state: StreamState): Generator<ResponsesSSEEvent> {
       id: slot.itemId,
       status: "completed",
       role: "assistant",
-      content: [{ type: "output_text", text: slot.textBuffer }],
-    };
+      content: [textPart],
+    } as ResponsesOutputItem;
+    state.openItems.delete(slot.outputIndex);
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.output_item.done",
+      sequence_number: nextSeq(state),
+      output_index: slot.outputIndex,
+      item,
+    });
+    finalOutput.push(item);
+  }
+
+  // —— Close the refusal item (refusal done → part done → item done) (order 22). ——
+  if (state.refusalSlot !== null && state.openItems.has(state.refusalSlot.outputIndex)) {
+    const slot = state.refusalSlot;
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.refusal.done",
+      sequence_number: nextSeq(state),
+      item_id: slot.itemId,
+      output_index: slot.outputIndex,
+      content_index: 0,
+      refusal: slot.textBuffer,
+    });
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.content_part.done",
+      sequence_number: nextSeq(state),
+      item_id: slot.itemId,
+      output_index: slot.outputIndex,
+      content_index: 0,
+      part: { type: "refusal", refusal: slot.textBuffer },
+    });
+    const item: ResponsesOutputItem = {
+      type: "message",
+      id: slot.itemId,
+      status: "completed",
+      role: "assistant",
+      content: [{ type: "refusal", refusal: slot.textBuffer }],
+    } as ResponsesOutputItem;
     state.openItems.delete(slot.outputIndex);
     yield ResponsesSSEEventSchema.parse({
       type: "response.output_item.done",
@@ -816,6 +977,32 @@ export async function* convertResponsesEventStreamToOpenAI(
       case "response.reasoning_summary_text.delta": {
         yield {
           choices: [{ index: 0, delta: { reasoning_content: ev.delta }, finish_reason: null }],
+        };
+        break;
+      }
+      case "response.refusal.delta": {
+        // order 22: project a refusal fragment back onto the OpenAI delta.refusal.
+        yield {
+          choices: [
+            {
+              index: 0,
+              delta: { refusal: ev.delta } as Record<string, unknown>,
+              finish_reason: null,
+            },
+          ],
+        };
+        break;
+      }
+      case "response.output_text.annotation.added": {
+        // order 22: project a streamed annotation back onto delta.annotations.
+        yield {
+          choices: [
+            {
+              index: 0,
+              delta: { annotations: [ev.annotation] } as Record<string, unknown>,
+              finish_reason: null,
+            },
+          ],
         };
         break;
       }

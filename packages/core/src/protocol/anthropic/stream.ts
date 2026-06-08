@@ -63,6 +63,8 @@ const OpenAIChunkDeltaSchema = z.object({
   // the delta. Optional + shared shapes (ir.ts) so the identity OpenAI stream carries
   // them through to every downstream protocol consumer.
   reasoning_content: z.string().nullable().optional(),
+  // refusal fragments (OpenAI safety refusal); surfaced to the Responses refusal events.
+  refusal: z.string().nullable().optional(),
   annotations: z.array(IRAnnotationSchema).optional(),
   logprobs: IRLogprobsSchema.nullable().optional(),
 });

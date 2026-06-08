@@ -1268,6 +1268,28 @@ describe("Gemini Tier E fidelity (orders 26-31)", () => {
     expect(hasText).toBe(true);
   });
 
+  // order 30: the terminal stream chunk must carry reasoning_tokens (thoughtsTokenCount).
+  // Gemini ?alt=sse reports usage on the final frame; OpenAI streaming convention is a
+  // SINGLE usage frame, so we surface it on the terminal chunk (not mid-stream).
+  it("exposes reasoning_tokens on the terminal stream chunk usage (order 30)", async () => {
+    const events: GeminiSSEEvent[] = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "hi" }] } }] },
+      {
+        candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }],
+        usageMetadata: {
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          thoughtsTokenCount: 8,
+        },
+      },
+    ] as unknown as GeminiSSEEvent[];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const terminal = chunks.at(-1) as IRChunk;
+    expect(terminal.usage?.reasoning_tokens).toBe(8);
+    // Exactly one chunk carries usage (no mid-stream usage frames).
+    expect(chunks.filter((c) => c.usage !== undefined)).toHaveLength(1);
+  });
+
   // order 31: an unknown future modality's token count must not be silently dropped.
   it("preserves an unknown modality's token count in prompt_tokens_details (order 31)", () => {
     const native = {

@@ -35,6 +35,89 @@ function seqs(events: ResponsesSSEEvent[]): number[] {
   return events.map((e) => e.sequence_number);
 }
 
+// —— order 22: refusal + annotation streaming events ————————————————————————————
+describe("convertOpenAIStreamToResponses — refusal + annotation streaming (order 22)", () => {
+  it("emits response.refusal.delta×N + a terminal response.refusal.done", async () => {
+    const chunks: OpenAIChunk[] = [
+      { choices: [{ index: 0, delta: { role: "assistant", refusal: "I can" } }] },
+      { choices: [{ index: 0, delta: { refusal: "not help" } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+    ];
+    const events = await collect(convertOpenAIStreamToResponses(feed(chunks)));
+    const deltas = events.filter((e) => e.type === "response.refusal.delta");
+    expect(deltas.map((e) => (e as { delta: string }).delta)).toEqual(["I can", "not help"]);
+    const done = events.find((e) => e.type === "response.refusal.done") as
+      | { refusal: string }
+      | undefined;
+    expect(done?.refusal).toBe("I cannot help");
+    // The refusal item closes as a message item carrying a refusal content part.
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    const refusalItem = (completed.response.output as Array<{ content?: Array<{ type: string }> }>)
+      .flatMap((o) => o.content ?? [])
+      .find((p) => p.type === "refusal");
+    expect(refusalItem).toBeDefined();
+  });
+
+  it("emits response.output_text.annotation.added for delta.annotations", async () => {
+    const chunks: OpenAIChunk[] = [
+      { choices: [{ index: 0, delta: { role: "assistant", content: "see source" } }] },
+      {
+        choices: [
+          { index: 0, delta: { annotations: [{ type: "url_citation", url: "https://x" }] } },
+        ],
+      },
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+    ];
+    const events = await collect(convertOpenAIStreamToResponses(feed(chunks)));
+    const ann = events.find((e) => e.type === "response.output_text.annotation.added") as
+      | { annotation: { url?: string }; annotation_index: number }
+      | undefined;
+    expect(ann?.annotation?.url).toBe("https://x");
+    expect(ann?.annotation_index).toBe(0);
+  });
+
+  it("reverse: response.refusal.delta -> delta.refusal", async () => {
+    const irChunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.refusal.delta",
+            sequence_number: 0,
+            item_id: "i",
+            output_index: 0,
+            content_index: 0,
+            delta: "no",
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    const first = irChunks[0] as { choices?: Array<{ delta?: { refusal?: string } }> };
+    expect(first.choices?.[0]?.delta?.refusal).toBe("no");
+  });
+
+  it("reverse: response.output_text.annotation.added -> delta.annotations", async () => {
+    const irChunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.output_text.annotation.added",
+            sequence_number: 0,
+            item_id: "i",
+            output_index: 0,
+            content_index: 0,
+            annotation_index: 0,
+            annotation: { type: "url_citation", url: "https://x" },
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    const first = irChunks[0] as {
+      choices?: Array<{ delta?: { annotations?: Array<{ url?: string }> } }>;
+    };
+    expect(first.choices?.[0]?.delta?.annotations?.[0]?.url).toBe("https://x");
+  });
+});
+
 // —— 1. event sequence: pure text ————————————————————————————————————————————
 
 describe("convertOpenAIStreamToResponses — text event sequence", () => {
