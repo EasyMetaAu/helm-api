@@ -571,4 +571,52 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     });
     expect(res.status).toBe(200);
   });
+
+  // ── Capture-payloads gating (review P2). With capture_payloads OFF the route
+  //    must still write the telemetry row but NOT buffer/persist the body — the
+  //    stream buffer is the unbounded growth vector this gate closes.
+  it("capture_payloads OFF: a served stream records the telemetry row but NOT the payload", async () => {
+    async function* events() {
+      yield { type: "message_start" };
+      yield { type: "message_stop" };
+    }
+    const { record, insert, insertPayload } = makeRecord({ capturePayloads: false });
+    const { deps } = makeDeps({ record, isStream: true, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+    await res.text();
+
+    expect(insert).toHaveBeenCalledOnce();
+    expect(insertPayload).not.toHaveBeenCalled();
+  });
+
+  // ── Terminal stream error frame must be appended to the captured body (review
+  //    P2). A mid-stream upstream error writes an `event: error` frame to the
+  //    client; that frame has to land in the persisted responseJson too.
+  it("stream error frame is captured in the payload", async () => {
+    async function* events(): AsyncIterable<{ type: string }> {
+      yield { type: "message_start" };
+      throw new Error("upstream blew up mid-stream");
+    }
+    const { record, insertPayload } = makeRecord({ capturePayloads: true });
+    const { deps } = makeDeps({ record, isStream: true, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+    await res.text();
+
+    expect(insertPayload).toHaveBeenCalledOnce();
+    const arg = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
+    expect(arg.responseJson).toContain("event: error");
+    expect(arg.responseJson).toContain("error");
+  });
 });

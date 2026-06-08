@@ -359,6 +359,53 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     });
     expect(res.status).toBe(200);
   });
+
+  // ── Capture-payloads gating (review P2). With capture_payloads OFF the route
+  //    must still write the telemetry row but NOT buffer/persist the body — the
+  //    stream buffer is the unbounded growth vector this gate closes.
+  it("capture_payloads OFF: a served stream records the telemetry row but NOT the payload", async () => {
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { candidates: [{ content: { role: "model", parts: [{ text: "Hi" }] } }] };
+    }
+    const { record, insert, insertPayload } = makeRecord({ capturePayloads: false });
+    const { deps } = makeDeps({ record, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    await res.text();
+
+    expect(insert).toHaveBeenCalledOnce();
+    expect(insertPayload).not.toHaveBeenCalled();
+  });
+
+  // ── Terminal stream error frame must be appended to the captured body (review
+  //    P2). A mid-stream error writes a nameless `data:` error frame to the
+  //    client; that frame has to land in the persisted responseJson too.
+  it("stream error frame is captured in the payload", async () => {
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { candidates: [{ content: { role: "model", parts: [{ text: "Hi" }] } }] };
+      throw new PipelineError("all_providers_failed", "all providers failed", "trace-1");
+    }
+    const { record, insertPayload } = makeRecord({ capturePayloads: true });
+    const { deps } = makeDeps({ record, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    await res.text();
+
+    expect(insertPayload).toHaveBeenCalledOnce();
+    const arg = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
+    expect(arg.responseJson).toContain("UNAVAILABLE");
+    expect(arg.responseJson).toContain("all providers failed");
+  });
 });
 
 describe("POST /v1beta/models/{model}:streamGenerateContent?alt=sse (Gemini stream)", () => {

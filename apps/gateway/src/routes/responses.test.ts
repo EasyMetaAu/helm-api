@@ -442,4 +442,88 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
     expect(res.status).toBe(200);
   });
+
+  // ── Capture-payloads gating (review P2). With capture_payloads OFF the route
+  //    must still write the telemetry row but NOT buffer/persist the body — the
+  //    stream buffer is the unbounded growth vector this gate closes.
+  it("capture_payloads OFF: a served stream records the telemetry row but NOT the payload", async () => {
+    const { record, insert, insertPayload } = makeRecord({ capturePayloads: false });
+    const { deps } = makeDeps({
+      record,
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+
+    expect(insert).toHaveBeenCalledOnce();
+    expect(insertPayload).not.toHaveBeenCalled();
+  });
+
+  // ── Terminal stream error frame must be appended to the captured body (review
+  //    P2). A mid-stream upstream error writes an `event: error` frame to the
+  //    client; that frame has to land in the persisted responseJson too.
+  it("stream error frame is captured in the payload", async () => {
+    const { record, insertPayload } = makeRecord({ capturePayloads: true });
+    const { deps } = makeDeps({
+      record,
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      streamIR: async function* () {
+        yield { type: "response.created", sequence_number: 0 };
+        throw new Error("upstream exploded");
+      },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+
+    expect(insertPayload).toHaveBeenCalledOnce();
+    const arg = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
+    expect(arg.responseJson).toContain("event: error");
+    expect(arg.responseJson).toContain("upstream exploded");
+  });
+
+  // ── Finding 3: the non-stream outbound transform must run INSIDE the failure-
+  //    recording try, so a transformer throw after a provider result was collected
+  //    still writes a telemetry row (consistent with messages/gemini).
+  it("non-stream: an outbound transform failure still records telemetry", async () => {
+    const { record, insert } = makeRecord();
+    const { deps } = makeDeps({ record });
+    deps.transformer.transformResponseOut = () => {
+      throw new Error("transform blew up");
+    };
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    // The transform throw is not a PipelineError → it escapes to onError (a 5xx).
+    // The point of Finding 3 is that the telemetry row was STILL written because
+    // the transform now runs inside the failure-recording try.
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(insert).toHaveBeenCalledOnce();
+  });
 });
