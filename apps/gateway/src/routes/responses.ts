@@ -9,6 +9,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
+import { type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/responses — OpenAI Responses API inbound, translated to IR, routed
@@ -46,6 +47,10 @@ export interface ResponsesRouteDeps {
   /** Per-key concurrency overflow queue (issue #93) — the SAME process-wide gate
    *  as the chat middleware. Optional — omitted = no gating. */
   concurrencyGate?: ConcurrencyGatePort;
+  /** Telemetry + payload recorder (the /admin/requests fix). Optional so existing
+   *  tests that omit it record nothing; when wired, every served request (success
+   *  OR failure, stream OR non-stream) writes a telemetry row. */
+  record?: RecordServedDeps;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   transformer: {
     /** native Responses request → IR (throws on a structurally invalid body). */
@@ -274,11 +279,15 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         // forward a raw upstream chunk). There is NO [DONE] sentinel; the terminal
         // response.completed closes the stream.
         let nextErrorSequence = 0;
+        // Accumulate the serialized wire frames so the served response body can be
+        // captured (verbatim) alongside the telemetry row in the finally below.
+        const captured: string[] = [];
         try {
           for await (const event of result.streamIR()) {
             if (typeof event.sequence_number === "number")
               nextErrorSequence = event.sequence_number + 1;
             const frame = deps.transformer.transformStreamOut(event);
+            if (deps.record) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
             await sse.writeSSE({ event: frame.event, data: frame.data });
           }
         } catch (err) {
@@ -307,6 +316,24 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           }
         } finally {
           releaseConcurrency?.();
+          // Record AFTER releaseConcurrency so the bookkeeping never extends the
+          // concurrency hold, and AFTER the for-await loop ended so the pipeline's
+          // own streamIR finally (cost backfill) already mutated result.decision.
+          // result.decision exists even on a pre-stream failure, so a failed stream
+          // still records. Fail-open inside recordServed.
+          if (deps.record) {
+            await recordServed(
+              deps.record,
+              {
+                requestId: traceId,
+                apiKeyId: identity.keyId,
+                decision: result.decision,
+                requestJson: JSON.stringify(native),
+                responseJson: captured.join(""),
+              },
+              (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+            );
+          }
         }
       });
     }
@@ -318,10 +345,42 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     try {
       collected = await result.collect();
     } catch (err) {
+      // Record the FAILED served request before surfacing the error (mirrors
+      // chat.ts, which records failures too) so an all-providers-failed request
+      // still appears in /admin/requests. responseJson null = no body produced.
+      // result.decision exists even on failure. Fail-open inside recordServed.
+      if (deps.record) {
+        await recordServed(
+          deps.record,
+          {
+            requestId: traceId,
+            apiKeyId: identity.keyId,
+            decision: result.decision,
+            requestJson: JSON.stringify(native),
+            responseJson: null,
+          },
+          (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+        );
+      }
       if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
       throw err;
     }
     const body = deps.transformer.transformResponseOut(collected);
+    // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
+    // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
+    if (deps.record) {
+      await recordServed(
+        deps.record,
+        {
+          requestId: traceId,
+          apiKeyId: identity.keyId,
+          decision: result.decision,
+          requestJson: JSON.stringify(native),
+          responseJson: JSON.stringify(body),
+        },
+        (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+      );
+    }
     return c.json(body as Record<string, unknown>);
   });
 }

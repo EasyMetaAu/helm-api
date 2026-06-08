@@ -12,6 +12,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult, RouteError } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
+import { type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1beta/models/{model}:generateContent / :streamGenerateContent — Google
@@ -59,6 +60,10 @@ export interface GeminiRouteDeps {
   /** Per-key concurrency overflow queue (issue #93) — the SAME process-wide gate
    *  as the chat middleware. Optional — omitted = no gating. */
   concurrencyGate?: ConcurrencyGatePort;
+  /** Telemetry + payload recorder (the /admin/requests fix). Optional so existing
+   *  tests that omit it record nothing; when wired, every served request (success
+   *  OR failure, stream OR non-stream) writes a telemetry row. */
+  record?: RecordServedDeps;
   auth: {
     /** Resolve the request credential to an identity, or null when invalid. */
     resolve(credential: string | null): Promise<MessagesIdentity | null>;
@@ -272,9 +277,15 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       const releaseConcurrency = c.get("concurrencyRelease");
       c.set("concurrencyRelease", undefined);
       return streamSSE(c, async (sse) => {
+        // Accumulate the serialized wire frames so the served response body can be
+        // captured (verbatim) alongside the telemetry row in the finally below.
+        // Gemini frames are nameless `data:` frames (no `event:` name, no [DONE]).
+        const captured: string[] = [];
         try {
           for await (const snapshot of result.streamIR()) {
-            await sse.writeSSE({ data: JSON.stringify(snapshot) });
+            const data = JSON.stringify(snapshot);
+            if (deps.record) captured.push(`data: ${data}\n\n`);
+            await sse.writeSSE({ data });
           }
         } catch (err) {
           // A client disconnect / abort is a benign non-provider fault (docs/02):
@@ -295,6 +306,23 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           }
         } finally {
           releaseConcurrency?.();
+          // Record AFTER releaseConcurrency (never extend the hold) and AFTER the
+          // for-await loop ended so the pipeline's own streamIR finally (cost
+          // backfill) already mutated result.decision. result.decision exists even
+          // on a pre-stream failure, so a failed stream still records. Fail-open.
+          if (deps.record) {
+            await recordServed(
+              deps.record,
+              {
+                requestId: traceId,
+                apiKeyId: identity.keyId,
+                decision: result.decision,
+                requestJson: JSON.stringify(native),
+                responseJson: captured.join(""),
+              },
+              (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+            );
+          }
         }
       });
     }
@@ -305,6 +333,23 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     try {
       body = transformer.transformResponseOut(await result.collect());
     } catch (err) {
+      // Record the FAILED served request before surfacing the error (mirrors
+      // chat.ts) so an all-providers-failed request still appears in
+      // /admin/requests. responseJson null = no body. result.decision exists even
+      // on failure. Fail-open inside recordServed.
+      if (deps.record) {
+        await recordServed(
+          deps.record,
+          {
+            requestId: traceId,
+            apiKeyId: identity.keyId,
+            decision: result.decision,
+            requestJson: JSON.stringify(native),
+            responseJson: null,
+          },
+          (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+        );
+      }
       if (err instanceof PipelineError) {
         return sendError(c, {
           error_class: err.error_class,
@@ -313,6 +358,21 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         });
       }
       throw err;
+    }
+    // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
+    // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
+    if (deps.record) {
+      await recordServed(
+        deps.record,
+        {
+          requestId: traceId,
+          apiKeyId: identity.keyId,
+          decision: result.decision,
+          requestJson: JSON.stringify(native),
+          responseJson: JSON.stringify(body),
+        },
+        (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+      );
     }
     return c.json(body as Record<string, unknown>);
   });
