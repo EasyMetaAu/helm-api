@@ -117,6 +117,8 @@ export {
   type RateLimitQuotaOverride,
   RateLimitQuotaOverrideSchema,
   RateLimitQuotaSchema,
+  type RoutingSignalFeedbackConfig,
+  RoutingSignalFeedbackConfigSchema,
   type RuntimeConfig,
   RuntimeConfigSchema,
   type ServerConfig,

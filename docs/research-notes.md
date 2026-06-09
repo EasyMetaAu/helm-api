@@ -239,7 +239,7 @@ Valuable ideas:
 Worth borrowing:
 
 - A middleware boundary for Memory / Guardrails.
-- Signals as a future feedback layer.
+- Signals as a low-cost feedback layer.
 - The lane / alias abstraction.
 
 Do not copy blindly:

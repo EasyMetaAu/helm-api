@@ -6,9 +6,9 @@
 > inject + background workers, on by default), per-key budgets / rate limits /
 > concurrency limiting, runtime hot-reload settings with admin YAML write-back,
 > verbatim payload capture, four streaming inbound protocols, full OAuth subscription
-> providers, an admin-UI overhaul, observer-economy compaction, and permanent delete
-> of revoked keys. The "deferred" list below is what is genuinely still out of scope
-> or not yet wired.
+> providers, Agentic Signals feedback into ranked-lane routing, an admin-UI
+> overhaul, observer-economy compaction, and permanent delete of revoked keys. The
+> "deferred" list below is what is genuinely still out of scope or not yet wired.
 
 ## Delivered
 
@@ -90,6 +90,11 @@ and OpenAI Codex (ChatGPT):
   classifier/lanes/policies edits are also persisted back to `config/*.yaml`
   (comment-preserving, atomic, fail-closed) before the live config rebinds, so they
   survive restarts rather than being reverted on restart.
+- **Agentic Signals feedback.** The background collector aggregates redacted
+  per-(task type, lane) health signals from decision records. Opt-in
+  `runtime.signal_feedback` lets routing promote a degraded ranked lane to a
+  healthier stronger ranked lane, while preserving explicit passthrough, policy
+  pins, usage-budget degradation, and policy/key caps. Signal reads fail open.
 - **Verbatim payload capture.** Full request/response bodies recorded to a separate
   `request_payloads` table (default on, 30-day retention), toggleable in System
   Settings.
@@ -108,8 +113,6 @@ Verified against the code and `implementation-notes.md`:
   Helm is an internal/self-hosted gateway with no account/customer billing subject,
   so account-level / customer credit accounting is **out of scope** (not merely
   deferred). See [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
-- **Agentic Signals feedback layer.** The store ports and the redacted
-  `RoutingSignal` shape exist, but nothing reads signals back into routing yet.
 
 ## Success criteria
 

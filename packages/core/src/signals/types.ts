@@ -3,9 +3,9 @@ import type { DecisionRecord, RoutingSignal } from "@helm/shared";
 // Agentic Signals — POST-MVP low-cost production-feedback layer (docs/02
 // telemetry; research-notes「Plano」). A signal is an aggregated, REDACTED
 // observation rolled up by (task_type, lane) over a time window, distilled
-// ASYNCHRONOUSLY from already-persisted decision records. It NEVER adds latency
-// to the main request path and (this task) NEVER feeds back into routing —
-// observe-only. The consumption side is a future task.
+// ASYNCHRONOUSLY from already-persisted decision records. The collector never
+// adds latency to the main request path; the optional routeRequest consumer reads
+// only these aggregates and fails open when storage is unavailable.
 //
 // Zod is the single source of truth (CLAUDE.md): RoutingSignal is z.infer'd in
 // @helm/shared; we re-export it here so signals code reads one local type.

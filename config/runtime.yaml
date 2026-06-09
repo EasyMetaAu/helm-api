@@ -24,3 +24,14 @@ store:
   driver: sqlite
   # driver: supabase
   # url_env: HELM_STORE_URL
+
+# Agentic Signals feedback is opt-in. When enabled, the router can promote a
+# degraded ranked lane (economy/balanced) to a healthier stronger ranked lane
+# inside policy/key caps. Signal reads are fail-open; invalid config fails closed.
+# Env override: HELM_SIGNAL_FEEDBACK_ENABLED.
+signal_feedback:
+  enabled: false
+  min_samples: 20
+  max_error_rate: 0.25
+  max_fallback_rate: 0.5
+  min_success_rate_delta: 0.15

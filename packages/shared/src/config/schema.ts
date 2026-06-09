@@ -197,6 +197,21 @@ export const StoreConfigSchema = z.object({
   url_env: z.string().min(1).optional(),
 });
 
+// Opt-in routing feedback from aggregated Agentic Signals. Disabled by default
+// so first-boot routing remains deterministic; when enabled, the core may promote
+// a degraded ranked lane to a healthier stronger ranked lane inside policy/key
+// caps. Thresholds are validated fail-closed here and consumed fail-open at
+// runtime, so a signal-store problem never 5xxs a request.
+export const RoutingSignalFeedbackConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    min_samples: z.number().int().positive().default(20),
+    max_error_rate: z.number().min(0).max(1).default(0.25),
+    max_fallback_rate: z.number().min(0).max(1).default(0.5),
+    min_success_rate_delta: z.number().min(0).max(1).default(0.15),
+  })
+  .strict();
+
 export const RuntimeConfigSchema = z.object({
   max_request_bytes: z.number().int().positive().default(2_000_000),
   request_timeout_ms: z.number().int().positive().default(60_000),
@@ -204,6 +219,7 @@ export const RuntimeConfigSchema = z.object({
   // Store driver selection. Defaulted so an absent runtime.store stays on sqlite
   // (back-compat); overridable via HELM_STORE_DRIVER (see env-map).
   store: StoreConfigSchema.prefault({ driver: "sqlite" }),
+  signal_feedback: RoutingSignalFeedbackConfigSchema.prefault({}),
 });
 
 export const HelmConfigSchema = z.object({
@@ -257,6 +273,7 @@ export type RateLimitQuota = z.infer<typeof RateLimitQuotaSchema>;
 export type RateLimitQuotaOverride = z.infer<typeof RateLimitQuotaOverrideSchema>;
 export type RateLimitConfig = z.infer<typeof RateLimitConfigSchema>;
 export type StoreConfig = z.infer<typeof StoreConfigSchema>;
+export type RoutingSignalFeedbackConfig = z.infer<typeof RoutingSignalFeedbackConfigSchema>;
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 export type HelmConfig = z.infer<typeof HelmConfigSchema>;
 

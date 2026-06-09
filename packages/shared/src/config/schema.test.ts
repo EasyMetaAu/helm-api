@@ -69,6 +69,8 @@ describe("HelmConfigSchema", () => {
     expect(parsed.runtime.rate_limit.enabled).toBe(false);
     expect(parsed.runtime.rate_limit.default.rpm).toBe(0);
     expect(parsed.runtime.rate_limit.default.tpm).toBe(0);
+    expect(parsed.runtime.signal_feedback.enabled).toBe(false);
+    expect(parsed.runtime.signal_feedback.min_samples).toBe(20);
   });
 
   it("rejects an out-of-range port with a precise path", () => {
@@ -188,6 +190,37 @@ describe("HelmConfigSchema", () => {
     ok.runtime.store = { driver: "supabase", url_env: "HELM_STORE_URL" };
     const parsed = HelmConfigSchema.parse(ok);
     expect("url" in parsed.runtime.store).toBe(false);
+  });
+
+  it("accepts opt-in routing signal feedback thresholds", () => {
+    const ok = fullConfig() as Record<string, unknown> & { runtime: Record<string, unknown> };
+    ok.runtime.signal_feedback = {
+      enabled: true,
+      min_samples: 50,
+      max_error_rate: 0.2,
+      max_fallback_rate: 0.4,
+      min_success_rate_delta: 0.1,
+    };
+
+    const parsed = HelmConfigSchema.parse(ok);
+
+    expect(parsed.runtime.signal_feedback.enabled).toBe(true);
+    expect(parsed.runtime.signal_feedback.min_samples).toBe(50);
+    expect(parsed.runtime.signal_feedback.max_error_rate).toBe(0.2);
+  });
+
+  it("fails closed on invalid routing signal feedback thresholds", () => {
+    const bad = fullConfig() as Record<string, unknown> & { runtime: Record<string, unknown> };
+    bad.runtime.signal_feedback = { enabled: true, max_error_rate: 2 };
+
+    const res = HelmConfigSchema.safeParse(bad);
+
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(
+        res.error.issues.some((i) => i.path.join(".") === "runtime.signal_feedback.max_error_rate"),
+      ).toBe(true);
+    }
   });
 
   // --- providers-multi: unified provider shape (alias/name, type, base_url?,

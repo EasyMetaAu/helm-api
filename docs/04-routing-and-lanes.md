@@ -14,6 +14,7 @@ explicit model/lane            # client specified a concrete model/lane; skips c
   > server-side policy         # a policy pin (use_lane)
   > task-specific lane         # a lane named after the detected task_type
   > complexity-fallback lane   # simple→economy / medium→balanced / complex→premium
+  > signal feedback (opt-in)   # promote degraded ranked lanes inside caps
   > balanced                   # final default
 ```
 
@@ -31,6 +32,14 @@ not confident enough to steer," so they collapse to the safe terminal.
 Default lanes are deliberately few and easy to reason about. Any selected lane
 name that does not exist is skipped (fail-open); the terminal `balanced` is
 guaranteed to exist.
+
+When `runtime.signal_feedback.enabled` is true, the router performs one
+fail-open read of aggregated Agentic Signals after policy/key caps are applied
+and before expanding the execution chain. It can only promote a degraded ranked
+lane (`economy` or `balanced`) to a stronger ranked lane with healthier aggregate
+success/error/fallback rates. It never runs on explicit passthrough,
+classifier-default/fallback, policy `use_lane` pins, or over-budget degradation,
+and it never escapes policy/key caps.
 
 ### Explicit client model
 

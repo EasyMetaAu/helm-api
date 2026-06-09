@@ -63,7 +63,7 @@ docker compose logs helm | grep -i "root API key"
 | :---: | :--- | :--- |
 | 🔀 | **Four client protocols** | OpenAI Chat, Anthropic Messages, OpenAI Responses, Google Gemini — all streaming + non-streaming. One IR in the middle: any client reaches any backend with a consistent output shape, SSE included. |
 | 🧭 | **Three-layer classification** | Deterministic rules (pure, zero-network, unit-tested — always on) → optional small-model eval (`temperature: 0`, cached, off by default — needs a configured eval model) → `balanced` lane as the fail-open sink. |
-| 🛣️ | **Lanes + policies** | Requests route through lanes (`economy` / `balanced` / `premium`, plus task lanes `coding`, `json`, `vision`, `tool_use`), never raw provider names. First-match policies pin or cap the lane. Each lane = a primary model + a fallback chain, all in config. |
+| 🛣️ | **Lanes + policies** | Requests route through lanes (`economy` / `balanced` / `premium`, plus task lanes `coding`, `json`, `vision`, `tool_use`), never raw provider names. First-match policies pin or cap the lane. Each lane = a primary model + a fallback chain, all in config. Opt-in Agentic Signals can promote degraded ranked lanes inside those caps. |
 | 🛡️ | **Resilient execution** | Circuit breaker (OPEN/HALF_OPEN + single probe), capability filter with explicit skip reasons, `:free`-tier 429 skipping, per-key concurrency queueing. Client disconnects are never counted as provider faults. |
 | 🔐 | **OAuth subscriptions** | Route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, all hot-reloaded. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
 | 🔑 | **Keys with teeth** | Mandatory auth; keys stored as SHA-256 hashes only. Per key: lane whitelist, custom-model permission, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, memory mode. Revoke softly, then delete permanently. |
@@ -72,7 +72,7 @@ docker compose logs helm | grep -i "root API key"
 | 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic: overview, key CRUD, lane/policy/classifier editors, system settings, drill-down request log. Edits **write back to `config/*.yaml`** (comment-preserving, atomic) and rebind live — no restart, and they survive one. Five languages. |
 | 💾 | **Storage** | SQLite by default (one local file). Postgres / Supabase behind the same Store-port abstraction — switch with one env var. |
 
-**Roadmap:** LLM-backed memory summarization (today's observer/reflector summarize step is a deterministic stub) · Agentic Signals feedback into routing. Account/customer billing is intentionally out of scope. See [09 Roadmap](docs/09-roadmap.md).
+**Roadmap:** LLM-backed memory summarization (today's observer/reflector summarize step is a deterministic stub). Account/customer billing is intentionally out of scope. See [09 Roadmap](docs/09-roadmap.md).
 
 ## Two failure disciplines
 
@@ -178,7 +178,7 @@ Everything lives in `config/*.yaml`, Zod-validated on load. **Invalid config sto
 |---|---|---|
 | `server.yaml` | Host / port / base path | — |
 | `auth.yaml` | API key requirement + first-run root key | — |
-| `runtime.yaml` | Request limits, rate-limit defaults, storage driver | partial |
+| `runtime.yaml` | Request limits, rate-limit defaults, storage driver, opt-in signal feedback | partial |
 | `providers.yaml` | Upstream providers + model aliases (credentials by env-var **name** only) | — |
 | `lanes.yaml` | Each lane's primary model + fallback chain | ✅ persists |
 | `policies.yaml` | First-match rules that pick or cap the lane | ✅ persists |
