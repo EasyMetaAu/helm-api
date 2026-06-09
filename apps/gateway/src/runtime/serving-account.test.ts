@@ -1,7 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { servedByAccount } from "./serving-account.js";
+import {
+  markServingAccount,
+  servedByAccount,
+  withServingAccountCapture,
+} from "./serving-account.js";
 
 const ACCT = { providerId: "anthropic", account: "default" };
+
+describe("withServingAccountCapture + markServingAccount (ALS bridge)", () => {
+  it("captures the account marked by onSelect inside the run scope", async () => {
+    const { result, servingAccount } = await withServingAccountCapture(async () => {
+      // Simulates the pool's onSelect firing deep inside routeRequest/execute.
+      markServingAccount("anthropic", "default");
+      return "ok";
+    });
+    expect(result).toBe("ok");
+    expect(servingAccount).toEqual({ providerId: "anthropic", account: "default" });
+  });
+
+  it("captures null when nothing marks an account (configured / non-OAuth provider)", async () => {
+    const { result, servingAccount } = await withServingAccountCapture(async () => 42);
+    expect(result).toBe(42);
+    expect(servingAccount).toBeNull();
+  });
+
+  it("markServingAccount outside a run scope is a no-op (never throws)", () => {
+    // No active ALS store (e.g. a unit test / non-OAuth path) — fail-open.
+    expect(() => markServingAccount("anthropic", "default")).not.toThrow();
+  });
+});
 
 describe("servedByAccount", () => {
   it("attributes only when the served alias belongs to the marked account's provider", () => {
