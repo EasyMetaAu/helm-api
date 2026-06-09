@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-06-09 · LLM 记忆提取/压缩接线与可配置模型（docs/08 记忆；docs/12 遗忘/事实层；CLAUDE.md 原则 2/3/7）
+
+- **缘起**：记忆 observe/inject、worker、compaction trigger、forgetting/facts 已是生产接线，但 Observer/Reflector 仍用确定性 stub 做 summarize/merge/extractFacts；这让“记忆提取/压缩”可用但不具备真正 LLM 归纳能力。
+- **修复**：新增 `memory.llm` 配置子树（默认 `enabled:false`），支持 `model` 基础模型与 `observation_model` / `reflection_model` / `facts_model` 分任务覆盖；同组 `HELM_MEMORY_LLM_*` 环境变量可覆盖模型/开关/超时/温度/max_tokens。网关新增 `memory-llm.ts`，后台 Observer 用 LLM 压缩 raw messages -> observation，Reflector 用 LLM 合并 observations -> reflection，并用 LLM 提取 atomic facts。
+- **安全/降级**：LLM 调用只发生在 memory worker 后台 job，绝不进请求路径；配置错误 fail-closed（Zod strict + enabled 必须有 model），运行时模型不可用、上游失败、超时或 JSON 无效全部 fail-open 回原确定性 stub。日志只写 task/model alias/error class 等安全元数据，不写 prompt/response/memory 正文。
+- **模型解析**：memory model alias 复用执行层语义：OAuth 订阅别名受 live `oauthAliasSet` gate，providers.yaml alias 经 registry 解析，`provider/model` 结构化别名走对应 provider client，裸模型名走 primary provider passthrough；不会因为记忆任务跨过订阅/凭证边界。
+- **PR 评审修复**：LLM merge/fact prompt 不再包含 `previous_reflection`，避免旧 reflection 中已归档/剪枝内容绕过 active-observation filter 复活；LLM facts 强制 `valid_from_observation_id` 且必须命中 active observation，否则整次回退确定性 extractor；observation/reflection/fact 文本改 trim 后 min(1)，纯空白输出触发 fallback；LLM `priority` 标尺改 0–10，对齐 Observer 的 `priority/10` salience 推导。
+- **测试/取舍**：TDD 覆盖 schema 默认关闭与 fail-closed、loader YAML/env 覆盖、observer 使用配置模型、reflection JSON 无效 fallback、fact `valid_from_observation_id` 映射 observation 时间与 `[obs_id, obs_id]` 审计范围、模型不可用 fallback。暂不把 LLM usage 精确计入 cost bucket，沿用 observer/reflector 现有启发式 token 账本；后续若要精确计费可扩展 deps 成本接口。
+
+---
+
 ## 2026-06-09 · Agentic Signals 反馈接入 ranked-lane 路由（docs/02 架构；docs/04 路由；docs/07 可观测性）
 
 - **缘起**：路线图里 `RoutingSignal` 聚合、sqlite/pg store 与后台 collector 已存在，但请求路径从不读取信号，导致 Agentic Signals 只能观测不能反馈，仍属于“未接线”功能。
@@ -27,27 +38,11 @@
 
 ---
 
-## 2026-06-08 · 四协议完整性审计 + 逐条修复（workflow 扇出审计 → worktree TDD 实现；docs/05 协议互译；CLAUDE.md 原则 5/7/8）
-
-- **缘起**：用 Workflow 扇出审计 helm 4 个 wire 协议（openai chat `/v1/chat/completions`、anthropic messages `/v1/messages`、openai-responses `/v1/responses`、gemini `/v1beta/models`）+ 统一 IR/流式核心，对照 `litellm` 参考实现找完整性缺口。51 个 agent（5 审计 + 逐发现对抗式核验 + 综合）确认 **36 条真实缺口**，去重成 **31 项依赖排序修复计划**（审计产物含本机绝对路径+修复前推理，**不签入**，完整记录见 workflow run transcript / git history）。在 git worktree（`worktree-protocol-completeness`）里 TDD 红→绿逐条实现；**修复全程留在主循环串行做**（不并行 edit agent——避免 [[workflow-shared-tree-revert-risk]] 的静默回退）。
-- **核心洞察（综合 agent）**：IR 设计本身够用——几乎所有缺口都是 transformer **没读** IR 已持有的字段，或**静默丢弃**而非记 `data_loss` 警告。故先改 IR/共享核心（order 1-8），再改依赖它们的各协议。
-- **已完成 29/31（按 tier）**：
-  - **共享 IR/核心**：Responses `text.format` → 规范 OpenAI `response_format.{type,json_schema}`（keystone：此前 Responses 结构化输出路由到 Anthropic/Gemini 被静默丢）；`service_tier`/`max_completion_tokens`/`logprobs.refusal` 进 IR（IR 无 `.catchall`，不显式加就被 inbound parse 剥掉）；OpenAI 出站从扁平 `reasoning_tokens` 反补 `completion_tokens_details`；anthropic mapStopReason 空值守卫（**已正确，加回归锁**）；protocol-guards 给 anthropic 加 `frequency_penalty/presence_penalty/seed/cache_control` 的 data_loss 警告。
-  - **Anthropic**：`REASONING_EFFORT_TO_BUDGET` 修成 litellm 精确值（minimal/low=1024、medium=2048、high=4096——原值 2-4× 虚高，**直接计费影响**）；`parallel_tool_calls:false` → `disable_parallel_tool_use`；`metadata` 出站回放；`cache_creation_input_tokens` 上 message_delta 流；per-block `cache_control` 经 IR 往返。
-  - **OpenAI chat**：`stream_options.include_usage` 终止 usage chunk——**在 provider 层** `translateAnthropicSSE` + `translateResponsesSSE` 补发 `{choices:[],usage}` 终帧（此前两 provider 把 Anthropic/Responses→OpenAI SSE 时丢掉了 usage，OpenAI 客户端 + budget settle 拿不到 token 数）；`response_format` json_schema fail-closed 校验；`openaiIndex` 上 IRToolCall（流式合成保序）。
-  - **Responses**：reasoning config→`reasoning_effort`、truncation、`incomplete_details.reason`、output_text annotations（双向）、`output_tokens_details.reasoning_tokens`（非流式+流式）、choice logprobs 上 output_text、**`response.incomplete` 独立终止事件**（此前总发 `response.completed{status:incomplete}`，不符 OpenAI 线协议；同步改反向 consumer + 2 个既有测试）、多模态出站保留（不再塌成纯文本）。
-  - **Gemini**：`TOOL_CALLS` finish_reason（非流式 STOP+functionCall 重映射 + 流式 hasSeenToolCalls 终止重映射）；流式 `promptFeedback.blockReason`→content_filter；`cacheTokensDetails` 解析进 cached（此前只读聚合 `cachedContentTokenCount`）；未知 modality token 不丢（catch-all 键）。
-- **order 22/30（最初暂缓，后用户要求全部补齐，已完成）**：
-  - **order 22**（Responses 流式 refusal/annotation 事件）：`delta.refusal`（此前被静默丢）→ `response.refusal.delta/done`（自带 message-item 的 refusal content part，附加 `refusal` 到 chunk delta schema + 内容块联合类型 + `refusalSlot` 状态）；`delta.annotations` → `response.output_text.annotation.added`（用 `ensureTextSlot` 把 text item 提取成共享 helper，annotation 挂到 output_text part，终帧 part 带 annotations）；反向 converter 两路都回投到 `delta.refusal`/`delta.annotations`。**reasoning_text 仍不补**——经核验非真缺口（helm 用 `reasoning_summary_text` 正确）。新增 4 个 SSE 测试（正反向）。
-  - **order 30**（Gemini mid-stream usage）：经核验**本就正确**——终帧 chunk 已带 `reasoning_tokens`（`thoughtsTokenCount`），且只发**一帧** usage（OpenAI 单 usage 帧约定）。中途发 usage 反而破坏该约定，故**不做**，仅加锁定测试证明终帧带 reasoning_tokens + 全程仅一帧 usage。属 order 5/7 同类「对抗式核验过报」。
-- **坑/取舍**：(1) **matrix usage 断言原本编码了 bug**——`expectTargetUsageNotDoubleBilled` 断言 Responses `input_tokens:10`（漏掉 cached:3），而 Responses API 本就有 `input_tokens_details.cached_tokens`；修复让 Responses 与 openai/gemini 一致（full 13 + cached 3），同步改断言（注 order 21）。(2) annotation 矩阵测试的 `ANNOTATION_NATIVE_SURFACE.responses` 从 `false`（documented gap）改 `true`（order 20 已原生渲染）。(3) order 5/7 经核验**本就正确**（synthesizeSSEFromJSON 已经 resolveReasoning；mapStopReason('') 已回 end_turn 保 raw）——对抗式核验过报，加回归测试锁定既有正确行为而非改实现。(4) provider 层 usage 终帧改动会让 budget settle 拿到**更准**的 token（此前 Anthropic/Responses provider 流式无 usage），属正向修正。
-- **验证**：每条 TDD 红→绿；全量 **core 1744 绿**、typecheck 净、改动文件 lint 净（仓库另有 9 条 `noNonNullAssertion` 预存于**未触碰**的 test 文件，非本次引入）、build（admin+core+gateway）通过。e2e（Playwright）本地另跑，不在此门禁。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-08 · 四协议完整性审计 + 逐条修复：Workflow 扇出审计 4 个 wire 协议，对照 LiteLLM 找到并 TDD 修复 31 项生产协议/流式/usage/多模态缺口；最终 core 1744 绿、typecheck/lint/build 通过。
 
 ### 2026-06-07 · 修复 Anthropic 订阅配额页：`resets_at:null` 让整份用量解析失败、快照永久卡旧；修为 `utilization`/`resets_at` 双 `.nullish()`，保坏类型 fail-closed；TDD 锁线上 body，oauth/shared/core 验证通过。
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ForgettingSchema, MemoryConfigSchema } from "./memory-schema.js";
+import { ForgettingSchema, MemoryConfigSchema, MemoryLlmSchema } from "./memory-schema.js";
 
 // P1 (docs/12 "Config surface"): the forgetting config is config-as-code, Zod-
 // validated, fail-closed on bad input (CLAUDE.md principle 2). snake_case keys +
@@ -109,9 +109,54 @@ describe("CompactionOverridesSchema (via MemoryConfigSchema.compaction)", () => 
   });
 });
 
+describe("MemoryLlmSchema", () => {
+  it("defaults to disabled with no model selected", () => {
+    const llm = MemoryLlmSchema.parse({});
+    expect(llm.enabled).toBe(false);
+    expect(llm.model).toBeUndefined();
+    expect(llm.timeout_ms).toBe(30_000);
+    expect(llm.temperature).toBe(0);
+    expect(llm.max_tokens.observation).toBe(800);
+    expect(llm.max_tokens.reflection).toBe(1200);
+    expect(llm.max_tokens.facts).toBe(1000);
+  });
+
+  it("accepts a base model with task-specific extraction/compaction overrides", () => {
+    const llm = MemoryLlmSchema.parse({
+      enabled: true,
+      model: "deepseek/deepseek-v4-flash",
+      observation_model: "openai/gpt-4.1-mini",
+      reflection_model: "anthropic/claude-sonnet-4",
+      facts_model: "openai/gpt-4.1-nano",
+      timeout_ms: 10_000,
+      temperature: 0.1,
+      max_tokens: { observation: 256, reflection: 512, facts: 384 },
+    });
+    expect(llm.enabled).toBe(true);
+    expect(llm.model).toBe("deepseek/deepseek-v4-flash");
+    expect(llm.observation_model).toBe("openai/gpt-4.1-mini");
+    expect(llm.reflection_model).toBe("anthropic/claude-sonnet-4");
+    expect(llm.facts_model).toBe("openai/gpt-4.1-nano");
+    expect(llm.timeout_ms).toBe(10_000);
+    expect(llm.temperature).toBe(0.1);
+    expect(llm.max_tokens.facts).toBe(384);
+  });
+
+  it("fails closed when enabled without a base model or with misspelled/invalid knobs", () => {
+    expect(() => MemoryLlmSchema.parse({ enabled: true })).toThrow();
+    expect(() => MemoryLlmSchema.parse({ enabled: true, modle: "x" })).toThrow();
+    expect(() => MemoryLlmSchema.parse({ enabled: true, model: "x", timeout_ms: 0 })).toThrow();
+    expect(() => MemoryLlmSchema.parse({ enabled: true, model: "x", temperature: 2 })).toThrow();
+    expect(() =>
+      MemoryLlmSchema.parse({ enabled: true, model: "x", max_tokens: { observation: 0 } }),
+    ).toThrow();
+  });
+});
+
 describe("MemoryConfigSchema", () => {
   it("absent block → all defaults with forgetting.enabled:false", () => {
     const m = MemoryConfigSchema.parse({});
+    expect(m.llm.enabled).toBe(false);
     expect(m.forgetting.enabled).toBe(false);
     expect(m.forgetting.score.half_life_s).toBe(86400);
   });

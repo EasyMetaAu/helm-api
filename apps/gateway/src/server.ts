@@ -80,16 +80,14 @@ import type {
   ClassifierConfig,
   ErrorClass,
   InternalRequest,
-  Observation,
   ProviderConfig as ProviderConfigShared,
-  RawMessage,
-  Reflection,
   RuntimeSettings,
 } from "@helm/shared";
 import { ErrorClassSchema, isOAuthPreset } from "@helm/shared";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
+import { createMemoryLlmRuntime, type MemoryModelResolution } from "./memory-llm.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middleware/basic-auth.js";
 import { concurrencyMiddleware, createConcurrencyGate } from "./middleware/concurrency.js";
@@ -130,80 +128,6 @@ export interface ServerHandle {
   // Stop background workers (e.g. the Agentic Signals scheduler). Optional and
   // safe to skip — the timers are unref'd so they never block process exit.
   dispose?: () => void;
-}
-
-// D11 — DETERMINISTIC, non-LLM summarize/merge for the MVP memory background jobs.
-// A real LLM path is a follow-up issue; until then these keep reflection text a
-// pure function of its inputs so the Reflector only bumps a version on a genuine
-// content change (cache-friendly, docs/08 "reflections should be stable and slow-changing").
-const MEMORY_SUMMARY_MAX_CHARS = 2000;
-const MEMORY_REFLECTION_MAX_CHARS = 4000;
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text;
-}
-
-// Compress a slice of raw messages into one observation: concatenate the turns in
-// order (role-tagged), truncated to a cap. Deterministic — same input → same text.
-function summarizeMessages(messages: readonly RawMessage[]): string {
-  const body = messages.map((m) => `${m.role}: ${m.content}`).join("\n");
-  return truncate(body || "(no messages)", MEMORY_SUMMARY_MAX_CHARS);
-}
-
-// Merge a scope's observations (oldest-first) into one reflection text. Existing
-// reflection text is NOT re-prepended (it was already derived from earlier
-// observations) — we re-derive from the current observation set so the output is a
-// stable function of inputs. previousReflection is accepted for signature parity.
-function mergeObservations(
-  observations: readonly Observation[],
-  _previousReflection: Reflection | null,
-): string {
-  const body = observations.map((o) => `- ${o.observationText}`).join("\n");
-  return truncate(body || "(no observations)", MEMORY_REFLECTION_MAX_CHARS);
-}
-
-// docs/12 P6 (Codex review fix #4) — the DETERMINISTIC fact extractor wired into
-// the Reflector, mirroring the summarize/merge MVP stubs above: a real LLM
-// extractor that atomizes claims is the follow-up (docs/08 "real LLM … deferred"),
-// but the pipeline must be genuinely LIVE when forgetting.enabled, not dead config.
-// It surfaces one candidate fact per active observation — subject from its first
-// tag (else a slug of the leading words, the same key the Reflector normalizes for
-// same-subject supersede), assertion = the observation text. Pure + deterministic
-// (same observations → same facts), so content-hash dedup + supersede are stable.
-// Inert by default: the Reflector only calls this when the flag is on AND the
-// active-observation token sum crosses `consolidate.trigger_tokens`.
-function extractFactsFromObservations(observations: readonly Observation[]): Array<{
-  subjectText: string;
-  factText: string;
-  validFrom: Date;
-  sourceObservationRange: [string, string];
-}> {
-  const facts: Array<{
-    subjectText: string;
-    factText: string;
-    validFrom: Date;
-    sourceObservationRange: [string, string];
-  }> = [];
-  for (const o of observations) {
-    const text = o.observationText.trim();
-    if (text.length === 0 || text === "[pruned]") continue;
-    const subjectText = o.tags?.[0]?.trim() || text.split(/\s+/).slice(0, 6).join(" ") || "general";
-    facts.push({
-      subjectText,
-      factText: truncate(text, MEMORY_REFLECTION_MAX_CHARS),
-      // The fact became true when its observation was recorded — drives supersede
-      // ordering (Codex review fix), NOT the processing wall-clock.
-      validFrom: o.observedAt,
-      // Audit trail = the OBSERVATION's id (memory_facts.source_observation_range is
-      // [firstObservationId, lastObservationId] per the schema), NOT the raw
-      // message-id range — one fact derives from one observation here, so both ends
-      // are this observation's id. Codex review fix: previously stored
-      // o.sourceMessageRange (raw message ids), which would join against the wrong
-      // table.
-      sourceObservationRange: [o.id, o.id],
-    });
-  }
-  return facts;
 }
 
 // Pre-classification TPM token estimator. Extracted to middleware/estimate-tokens
@@ -861,44 +785,6 @@ export async function buildServer(
     Number.isFinite(injectTokenBudgetRaw) && injectTokenBudgetRaw > 0 ? injectTokenBudgetRaw : 4000;
   const inject = { deps: injectDeps, tokenBudget: injectTokenBudget };
 
-  // Observer/Reflector deps (docs/08 Phase 2). D11: MVP uses DETERMINISTIC, non-LLM
-  // summarize/merge (concatenate + truncate) so a reflection version only bumps on a
-  // real content change (cache-friendly); a real LLM path is a follow-up issue.
-  const observerDeps: ObserverDeps = {
-    memoryStore: store.memory,
-    summarize: async ({ messages }) => ({
-      observationText: summarizeMessages(messages),
-    }),
-    costSink: () => {},
-    // Auto-compaction price resolution: resolve the thread's stamped model alias
-    // against the runtime catalog. The closure captures `catalog` (declared later
-    // in this same scope, built before the worker starts), so prices are looked
-    // up per job from live catalog data instead of hand-tuned config.
-    resolvePricing: (alias) => resolveCompactionPricing(catalog, alias),
-    // Optional trigger overrides (config.memory.compaction). Empty by default —
-    // the internal AUTO_PRIORS apply; a written key is the only thing that wins.
-    compaction: config.memory.compaction,
-    now: () => new Date(),
-    log: memoryLog,
-  };
-  const reflectorDeps: ReflectorDeps = {
-    memoryStore: store.memory,
-    merge: async ({ observations, previousReflection }) => {
-      const reflectionText = mergeObservations(observations, previousReflection);
-      return { reflectionText, tokenEstimate: estimateMemoryTokens(reflectionText) };
-    },
-    costSink: () => {},
-    now: () => new Date(),
-    log: memoryLog,
-    // docs/12 P6 (Codex review fix #4) — wire the consolidate config + the
-    // deterministic extractor so fact extraction is LIVE when forgetting.enabled
-    // (default off ⇒ inert: the Reflector's gates short-circuit before any fact
-    // work, so this is byte-identical to today). `estimateTokens` matches the
-    // Observer/Reflector heuristic used for the consolidate trigger.
-    forgetting: forgettingCfg,
-    extractFacts: async ({ observations }) => extractFactsFromObservations(observations),
-    estimateTokens: estimateMemoryTokens,
-  };
   // Decay-sweep deps (docs/12 P5). The whole forgetting config drives the pure score +
   // archive threshold + the bounded-loop limits; gated behind forgetting.enabled so the
   // worker only ever receives a 'decay' job (and only ever triggers one) when the flag
@@ -1188,6 +1074,58 @@ export async function buildServer(
     lanes,
     fallbackBaseUrl,
   );
+  const resolveMemoryLlmModel = (alias: string): MemoryModelResolution | null => {
+    const slash = alias.indexOf("/");
+    const prefix = slash > 0 ? alias.slice(0, slash) : "";
+    if (prefix && ROUTABLE_OAUTH_IDS.has(prefix)) {
+      if (!oauthAliasSet.has(alias)) return null;
+      const client = providerClients.get(prefix);
+      return client ? { client, providerModel: alias.slice(slash + 1) } : null;
+    }
+
+    const resolved = registry.resolve(alias);
+    if (resolved.ok) {
+      const client = providerClients.get(resolved.value.providerName);
+      return client ? { client, providerModel: resolved.value.providerModel } : null;
+    }
+    if (prefix && providerClients.has(prefix)) {
+      const client = providerClients.get(prefix);
+      return client ? { client, providerModel: alias.slice(slash + 1) } : null;
+    }
+    return { client: provider, providerModel: alias };
+  };
+  const memoryLlm = createMemoryLlmRuntime({
+    config: config.memory.llm,
+    resolveModel: resolveMemoryLlmModel,
+    estimateTokens: estimateMemoryTokens,
+    log: memoryLog,
+  });
+
+  // Observer/Reflector deps (docs/08 Phase 2). The LLM path is opt-in via
+  // config.memory.llm and runs ONLY in these background jobs; disabled or failed
+  // model calls use the deterministic stubs in memory-llm.ts.
+  const observerDeps: ObserverDeps = {
+    memoryStore: store.memory,
+    summarize: memoryLlm.summarize,
+    costSink: () => {},
+    // Auto-compaction price resolution: resolve the thread's stamped model alias
+    // against the runtime catalog. Unknown aliases fall back to deterministic
+    // heuristics inside resolveCompactionPricing.
+    resolvePricing: (alias) => resolveCompactionPricing(catalog, alias),
+    compaction: config.memory.compaction,
+    now: () => new Date(),
+    log: memoryLog,
+  };
+  const reflectorDeps: ReflectorDeps = {
+    memoryStore: store.memory,
+    merge: memoryLlm.merge,
+    costSink: () => {},
+    now: () => new Date(),
+    log: memoryLog,
+    forgetting: forgettingCfg,
+    extractFacts: memoryLlm.extractFacts,
+    estimateTokens: estimateMemoryTokens,
+  };
   const breaker = createCircuitBreaker({
     config: { failureThreshold: 5, cooldownMs: 30_000 },
     now: () => Date.now(),

@@ -47,6 +47,52 @@ export const ENV_MAPPINGS: readonly EnvMapping[] = [
     path: ["runtime", "signal_feedback", "enabled"],
     kind: "boolean",
   },
+  {
+    env: "HELM_MEMORY_LLM_ENABLED",
+    path: ["memory", "llm", "enabled"],
+    kind: "boolean",
+  },
+  { env: "HELM_MEMORY_LLM_MODEL", path: ["memory", "llm", "model"], kind: "string" },
+  {
+    env: "HELM_MEMORY_LLM_OBSERVATION_MODEL",
+    path: ["memory", "llm", "observation_model"],
+    kind: "string",
+  },
+  {
+    env: "HELM_MEMORY_LLM_REFLECTION_MODEL",
+    path: ["memory", "llm", "reflection_model"],
+    kind: "string",
+  },
+  {
+    env: "HELM_MEMORY_LLM_FACTS_MODEL",
+    path: ["memory", "llm", "facts_model"],
+    kind: "string",
+  },
+  {
+    env: "HELM_MEMORY_LLM_TIMEOUT_MS",
+    path: ["memory", "llm", "timeout_ms"],
+    kind: "number",
+  },
+  {
+    env: "HELM_MEMORY_LLM_TEMPERATURE",
+    path: ["memory", "llm", "temperature"],
+    kind: "number",
+  },
+  {
+    env: "HELM_MEMORY_LLM_OBSERVATION_MAX_TOKENS",
+    path: ["memory", "llm", "max_tokens", "observation"],
+    kind: "number",
+  },
+  {
+    env: "HELM_MEMORY_LLM_REFLECTION_MAX_TOKENS",
+    path: ["memory", "llm", "max_tokens", "reflection"],
+    kind: "number",
+  },
+  {
+    env: "HELM_MEMORY_LLM_FACTS_MAX_TOKENS",
+    path: ["memory", "llm", "max_tokens", "facts"],
+    kind: "number",
+  },
 ];
 
 // Coerce a string env value into the declared kind. Returns the original string

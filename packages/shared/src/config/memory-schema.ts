@@ -135,6 +135,46 @@ export const CompactionOverridesSchema = z
   })
   .strict();
 
+// Optional LLM-backed memory formation. This controls ONLY the background memory
+// worker's summarize/merge/fact-extraction calls; request-path observe/inject
+// stays synchronous and deterministic. OFF by default keeps the existing
+// deterministic stubs byte-for-byte available as both the default and fail-open
+// fallback. When enabled, `model` is required and can be overridden per task:
+//   - observation_model: raw messages -> observation (Observer compaction)
+//   - reflection_model: observations -> stable reflection (Reflector compaction)
+//   - facts_model: observations -> atomic facts (memory extraction)
+// Unknown/misspelled keys are rejected at config load, but runtime model/provider
+// failures fall back to the deterministic path and log safe metadata only.
+export const MemoryLlmMaxTokensSchema = z
+  .object({
+    observation: z.number().int().positive().default(800),
+    reflection: z.number().int().positive().default(1200),
+    facts: z.number().int().positive().default(1000),
+  })
+  .strict();
+
+export const MemoryLlmSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    model: z.string().min(1).optional(),
+    observation_model: z.string().min(1).optional(),
+    reflection_model: z.string().min(1).optional(),
+    facts_model: z.string().min(1).optional(),
+    timeout_ms: z.number().int().positive().default(30_000),
+    temperature: z.number().min(0).max(1).default(0),
+    max_tokens: MemoryLlmMaxTokensSchema.prefault({}),
+  })
+  .strict()
+  .superRefine((cfg, ctx) => {
+    if (cfg.enabled === true && cfg.model === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["model"],
+        message: "memory.llm.model is required when memory.llm.enabled is true",
+      });
+    }
+  });
+
 // The `config.memory` subtree root. `compaction` carries OPTIONAL trigger
 // overrides (above); everything else about compaction is the gateway's internal
 // auto-adaptive behaviour (prices/context from the model catalog, workload
@@ -145,6 +185,7 @@ export const CompactionOverridesSchema = z
 export const MemoryConfigSchema = z
   .object({
     compaction: CompactionOverridesSchema.prefault({}),
+    llm: MemoryLlmSchema.prefault({}),
     forgetting: ForgettingSchema.prefault({}),
   })
   .strict();
@@ -152,4 +193,5 @@ export const MemoryConfigSchema = z
 export type ScoreConfig = z.infer<typeof ScoreSchema>;
 export type CompactionOverrides = z.infer<typeof CompactionOverridesSchema>;
 export type ForgettingConfig = z.infer<typeof ForgettingSchema>;
+export type MemoryLlmConfig = z.infer<typeof MemoryLlmSchema>;
 export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;

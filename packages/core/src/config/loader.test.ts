@@ -71,6 +71,31 @@ describe("loadConfig", () => {
     expect(cfg.runtime.signal_feedback.min_samples).toBe(20);
   });
 
+  it("lets env configure the memory LLM model and task-specific overrides", () => {
+    const cfg = loadConfig({
+      configDir: "config",
+      env: {
+        HELM_MEMORY_LLM_ENABLED: "true",
+        HELM_MEMORY_LLM_MODEL: "deepseek/deepseek-v4-flash",
+        HELM_MEMORY_LLM_OBSERVATION_MODEL: "openai/gpt-4.1-mini",
+        HELM_MEMORY_LLM_REFLECTION_MODEL: "anthropic/claude-sonnet-4",
+        HELM_MEMORY_LLM_FACTS_MODEL: "openai/gpt-4.1-nano",
+        HELM_MEMORY_LLM_TIMEOUT_MS: "12345",
+        HELM_MEMORY_LLM_TEMPERATURE: "0.2",
+        HELM_MEMORY_LLM_FACTS_MAX_TOKENS: "432",
+      },
+      readFile: fakeReadFile(VALID_YAML),
+    });
+    expect(cfg.memory.llm.enabled).toBe(true);
+    expect(cfg.memory.llm.model).toBe("deepseek/deepseek-v4-flash");
+    expect(cfg.memory.llm.observation_model).toBe("openai/gpt-4.1-mini");
+    expect(cfg.memory.llm.reflection_model).toBe("anthropic/claude-sonnet-4");
+    expect(cfg.memory.llm.facts_model).toBe("openai/gpt-4.1-nano");
+    expect(cfg.memory.llm.timeout_ms).toBe(12345);
+    expect(cfg.memory.llm.temperature).toBe(0.2);
+    expect(cfg.memory.llm.max_tokens.facts).toBe(432);
+  });
+
   it("fails closed when HELM_STORE_DRIVER is an unknown driver", () => {
     expect(() =>
       loadConfig({
@@ -202,6 +227,21 @@ describe("loadConfig", () => {
     expect(cfg.memory.forgetting.enabled).toBe(true);
     expect(cfg.memory.forgetting.score.half_life_s).toBe(3600);
     expect(cfg.memory.forgetting.inject.drop_order).toBe("score"); // untouched default
+  });
+
+  it("loads memory.yaml: memory LLM extraction/compaction model config round-trips", () => {
+    const memYaml =
+      "llm:\n  enabled: true\n  model: deepseek/deepseek-v4-flash\n  reflection_model: openai/gpt-4.1-mini\n  max_tokens:\n    observation: 512\n";
+    const cfg = loadConfig({
+      configDir: "config",
+      env: {},
+      readFile: fakeReadFile({ ...VALID_YAML, "config/memory.yaml": memYaml }),
+    });
+    expect(cfg.memory.llm.enabled).toBe(true);
+    expect(cfg.memory.llm.model).toBe("deepseek/deepseek-v4-flash");
+    expect(cfg.memory.llm.reflection_model).toBe("openai/gpt-4.1-mini");
+    expect(cfg.memory.llm.max_tokens.observation).toBe(512);
+    expect(cfg.memory.llm.max_tokens.reflection).toBe(1200);
   });
 
   it("fail-closed: an unknown/misspelled memory.yaml key (strict) throws ConfigError", () => {

@@ -16,6 +16,25 @@
 #   min_recent_messages: 4      # keep floor: at least this many recent messages…
 #   min_keep_ratio: 0.25        # …and this fraction of the segment stay raw
 
+# Optional LLM-backed memory formation/extraction. Disabled keeps the
+# deterministic local summarizer/merger/fact extractor. When enabled, the worker
+# calls the configured model only from background observer/reflector jobs; runtime
+# failures, invalid JSON, or unavailable models fall back to deterministic output.
+#
+# llm:
+#   enabled: false
+#   model: deepseek/deepseek-v4-flash      # base model for all memory LLM tasks
+#   # Optional per-task overrides:
+#   # observation_model: openai/gpt-4.1-mini
+#   # reflection_model: openai/gpt-4.1-mini
+#   # facts_model: openai/gpt-4.1-nano
+#   timeout_ms: 30000
+#   temperature: 0
+#   max_tokens:
+#     observation: 800
+#     reflection: 1200
+#     facts: 1000
+
 # Memory forgetting layer (docs/12). enabled:false = byte-identical to pre-docs/12
 # behaviour; flip to true to turn on decay/reinforcement/facts. All knobs are
 # fail-closed validated (snake_case, unknown keys refuse startup).
