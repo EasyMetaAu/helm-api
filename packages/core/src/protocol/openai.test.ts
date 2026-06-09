@@ -206,6 +206,13 @@ describe("openaiTransformer — litellm-parity request params", () => {
     reasoning_effort: "high",
     user: "user-123",
     service_tier: "auto",
+    prediction: { type: "content", content: "expected" },
+    audio: { voice: "alloy", format: "wav" },
+    logit_bias: { "42": -1 },
+    web_search_options: { search_context_size: "low" },
+    include_server_side_tool_invocations: true,
+    verbosity: "low",
+    safety_identifier: "safe-user",
   } as const;
 
   it("carries every new param into the IR (transformRequestOut)", async () => {
@@ -225,6 +232,13 @@ describe("openaiTransformer — litellm-parity request params", () => {
     expect(ir.reasoning_effort).toBe("high");
     expect(ir.user).toBe("user-123");
     expect(ir.service_tier).toBe("auto");
+    expect(ir.prediction).toEqual({ type: "content", content: "expected" });
+    expect(ir.audio).toEqual({ voice: "alloy", format: "wav" });
+    expect(ir.logit_bias).toEqual({ "42": -1 });
+    expect(ir.web_search_options).toEqual({ search_context_size: "low" });
+    expect(ir.include_server_side_tool_invocations).toBe(true);
+    expect(ir.verbosity).toBe("low");
+    expect(ir.safety_identifier).toBe("safe-user");
   });
 
   it("round-trips every new param back to native (transformRequestIn)", async () => {
@@ -245,6 +259,13 @@ describe("openaiTransformer — litellm-parity request params", () => {
     expect(back.reasoning_effort).toBe("high");
     expect(back.user).toBe("user-123");
     expect(back.service_tier).toBe("auto");
+    expect(back.prediction).toEqual({ type: "content", content: "expected" });
+    expect(back.audio).toEqual({ voice: "alloy", format: "wav" });
+    expect(back.logit_bias).toEqual({ "42": -1 });
+    expect(back.web_search_options).toEqual({ search_context_size: "low" });
+    expect(back.include_server_side_tool_invocations).toBe(true);
+    expect(back.verbosity).toBe("low");
+    expect(back.safety_identifier).toBe("safe-user");
   });
 
   it("accepts a bare string `stop`", async () => {

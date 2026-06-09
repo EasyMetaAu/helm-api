@@ -209,9 +209,11 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // 2) Parse + translate inbound. A malformed JSON body OR a structurally invalid
     //    Responses request (the transformer's Zod parse throws) is a CLIENT error →
     //    400 invalid_request, before routing (docs/07, principle 2 fail-closed).
+    let requestJson = "";
     let native: unknown;
     try {
-      native = await c.req.json();
+      requestJson = await c.req.text();
+      native = JSON.parse(requestJson);
     } catch {
       throw helmError("invalid_request", "malformed JSON request body", traceId);
     }
@@ -336,7 +338,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                 requestId: traceId,
                 apiKeyId: identity.keyId,
                 decision: result.decision,
-                requestJson: JSON.stringify(native),
+                requestJson,
                 responseJson: captureBodies ? captured.join("") : null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -367,7 +369,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             requestId: traceId,
             apiKeyId: identity.keyId,
             decision: result.decision,
-            requestJson: JSON.stringify(native),
+            requestJson,
             responseJson: null,
           },
           (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -385,7 +387,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           requestId: traceId,
           apiKeyId: identity.keyId,
           decision: result.decision,
-          requestJson: JSON.stringify(native),
+          requestJson,
           responseJson: captureBodies ? JSON.stringify(body) : null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),

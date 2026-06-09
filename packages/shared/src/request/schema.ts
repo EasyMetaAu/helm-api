@@ -19,6 +19,9 @@ export const MemoryModeSchema = z.enum(["off", "observe", "inject"]);
 // open to avoid prematurely locking per-protocol differences (narrowed later in
 // the docs/05 protocol-translation tasks).
 const MessageSchema = z.looseObject({ role: z.string(), content: z.unknown() });
+const UnknownRecordSchema = z.record(z.string(), z.unknown());
+const StreamOptionsSchema = z.object({ include_usage: z.boolean().optional() }).passthrough();
+const StopSchema = z.union([z.string(), z.array(z.string())]);
 
 export const RequestMetadataSchema = z.object({
   conversation_id: z.string().nullable(),
@@ -42,6 +45,39 @@ export const InternalRequestSchema = z.object({
   response_format: z.record(z.string(), z.unknown()).nullable(),
   attachments: z.array(z.unknown()).nullable(),
   max_tokens: z.number().int().positive().nullable(),
+  // LiteLLM/OpenAI-compatible optional request controls. They must survive the
+  // production route -> routing -> provider path; unsupported target protocols
+  // record data-loss warnings in the protocol layer instead of silently dropping.
+  max_completion_tokens: z.number().int().positive().optional(),
+  temperature: z.number().optional(),
+  top_p: z.number().optional(),
+  top_k: z.number().int().optional(),
+  frequency_penalty: z.number().optional(),
+  presence_penalty: z.number().optional(),
+  seed: z.number().int().optional(),
+  stop: StopSchema.optional(),
+  n: z.number().int().positive().optional(),
+  logprobs: z.boolean().optional(),
+  top_logprobs: z.number().int().nonnegative().optional(),
+  parallel_tool_calls: z.boolean().optional(),
+  stream_options: StreamOptionsSchema.optional(),
+  modalities: z.array(z.string()).optional(),
+  reasoning_effort: z.string().optional(),
+  user: z.string().optional(),
+  service_tier: z.string().optional(),
+  tool_choice: z.unknown().optional(),
+  cache_control: z.unknown().optional(),
+  thinking: z.unknown().optional(),
+  functions: z.array(z.unknown()).optional(),
+  function_call: z.unknown().optional(),
+  prediction: z.unknown().optional(),
+  audio: z.unknown().optional(),
+  logit_bias: z.record(z.string(), z.number()).optional(),
+  web_search_options: z.unknown().optional(),
+  include_server_side_tool_invocations: z.boolean().optional(),
+  verbosity: z.string().optional(),
+  safety_identifier: z.string().optional(),
+  provider_raw: UnknownRecordSchema.optional(),
   stream: z.boolean(),
   metadata: RequestMetadataSchema,
 });
@@ -60,6 +96,40 @@ export const OpenAIChatRequestSchema = z.looseObject({
   model: z.string().optional(),
   messages: z.array(OpenAIChatMessageSchema).min(1),
   stream: z.boolean().optional(),
+  max_tokens: z.number().int().positive().optional(),
+  max_completion_tokens: z.number().int().positive().optional(),
+  tools: z.array(z.unknown()).optional(),
+  tool_choice: z.unknown().optional(),
+  response_format: UnknownRecordSchema.optional(),
+  temperature: z.number().optional(),
+  top_p: z.number().optional(),
+  top_k: z.number().int().optional(),
+  frequency_penalty: z.number().optional(),
+  presence_penalty: z.number().optional(),
+  seed: z.number().int().optional(),
+  stop: StopSchema.optional(),
+  n: z.number().int().positive().optional(),
+  logprobs: z.boolean().optional(),
+  top_logprobs: z.number().int().nonnegative().optional(),
+  parallel_tool_calls: z.boolean().optional(),
+  stream_options: StreamOptionsSchema.optional(),
+  modalities: z.array(z.string()).optional(),
+  reasoning_effort: z.string().optional(),
+  user: z.string().optional(),
+  service_tier: z.string().optional(),
+  metadata: UnknownRecordSchema.optional(),
+  store: z.boolean().optional(),
+  cache_control: z.unknown().optional(),
+  thinking: z.unknown().optional(),
+  functions: z.array(z.unknown()).optional(),
+  function_call: z.unknown().optional(),
+  prediction: z.unknown().optional(),
+  audio: z.unknown().optional(),
+  logit_bias: z.record(z.string(), z.number()).optional(),
+  web_search_options: z.unknown().optional(),
+  include_server_side_tool_invocations: z.boolean().optional(),
+  verbosity: z.string().optional(),
+  safety_identifier: z.string().optional(),
 });
 
 export type OpenAIChatRequest = z.infer<typeof OpenAIChatRequestSchema>;

@@ -260,6 +260,19 @@ export const IRRequestSchema = z.object({
   reasoning_effort: IRReasoningEffortSchema.optional(),
   user: z.string().optional(),
   service_tier: z.string().optional(),
+  // Additional LiteLLM/OpenAI-compatible request knobs that have a native OpenAI
+  // Chat surface and therefore must survive OpenAI -> IR -> OpenAI and gateway
+  // execution. Provider-specific routing knobs such as api_key/base_url remain
+  // deliberately excluded for security.
+  functions: z.array(z.unknown()).optional(),
+  function_call: z.unknown().optional(),
+  prediction: z.unknown().optional(),
+  audio: z.unknown().optional(),
+  logit_bias: z.record(z.string(), z.number()).optional(),
+  web_search_options: z.unknown().optional(),
+  include_server_side_tool_invocations: z.boolean().optional(),
+  verbosity: z.string().optional(),
+  safety_identifier: z.string().optional(),
   provider_raw: ProviderRawSchema.optional(),
 });
 export type IRRequest = z.infer<typeof IRRequestSchema>;

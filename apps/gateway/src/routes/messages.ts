@@ -246,9 +246,11 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     //    malformed JSON body is a CLIENT error → 400 invalid_request (docs/07,
     //    principle 2 fail-closed), raised after auth but before translate/route so
     //    it never 5xx's as an upstream fault.
+    let requestJson = "";
     let native: unknown;
     try {
-      native = await c.req.json();
+      requestJson = await c.req.text();
+      native = JSON.parse(requestJson);
     } catch {
       return sendError(c, {
         error_class: "invalid_request",
@@ -386,7 +388,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                 requestId: traceId,
                 apiKeyId: identity.keyId,
                 decision: result.decision,
-                requestJson: JSON.stringify(native),
+                requestJson,
                 responseJson: captureBodies ? captured.join("") : null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -414,7 +416,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             requestId: traceId,
             apiKeyId: identity.keyId,
             decision: result.decision,
-            requestJson: JSON.stringify(native),
+            requestJson,
             responseJson: null,
           },
           (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -438,7 +440,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           requestId: traceId,
           apiKeyId: identity.keyId,
           decision: result.decision,
-          requestJson: JSON.stringify(native),
+          requestJson,
           responseJson: captureBodies ? JSON.stringify(body) : null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),

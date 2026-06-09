@@ -212,9 +212,11 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     // 2) Parse + translate inbound. A malformed JSON body OR a structurally invalid
     //    Gemini request (the transformer's Zod parse throws) is a CLIENT error →
     //    400 INVALID_ARGUMENT, before routing (docs/07, principle 2 fail-closed).
+    let requestJson = "";
     let native: unknown;
     try {
-      native = await c.req.json();
+      requestJson = await c.req.text();
+      native = JSON.parse(requestJson);
     } catch {
       return sendError(c, {
         error_class: "invalid_request",
@@ -325,7 +327,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
                 requestId: traceId,
                 apiKeyId: identity.keyId,
                 decision: result.decision,
-                requestJson: JSON.stringify(native),
+                requestJson,
                 responseJson: captureBodies ? captured.join("") : null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -352,7 +354,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             requestId: traceId,
             apiKeyId: identity.keyId,
             decision: result.decision,
-            requestJson: JSON.stringify(native),
+            requestJson,
             responseJson: null,
           },
           (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -376,7 +378,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           requestId: traceId,
           apiKeyId: identity.keyId,
           decision: result.decision,
-          requestJson: JSON.stringify(native),
+          requestJson,
           responseJson: captureBodies ? JSON.stringify(body) : null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),

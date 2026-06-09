@@ -25,6 +25,7 @@ import {
 } from "@helm/core";
 import type { InternalRequest, MemoryDecision, Protocol } from "@helm/shared";
 import type { ServingAccount } from "../runtime/serving-account.js";
+import { copyLiteLLMRequestParams, providerRawFromRequest } from "./internal-request-params.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import {
   backfillCompletionCost,
@@ -155,6 +156,7 @@ function toInternalRequest(
   // HTTP, principle 1). Read them back here so the InternalRequest carries the
   // same scope the OpenAI surface produces.
   const memoryScope = memoryScopeFromMeta(ir.metadata, accountId);
+  const providerRaw = providerRawFromRequest(ir, { includeMetadata: false });
 
   return {
     request_id: traceId,
@@ -172,6 +174,8 @@ function toInternalRequest(
         : null,
     attachments: null,
     max_tokens: typeof ir.max_tokens === "number" ? ir.max_tokens : null,
+    ...copyLiteLLMRequestParams(ir),
+    ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
     stream: ir.stream === true,
     metadata: {
       conversation_id: conversationId,

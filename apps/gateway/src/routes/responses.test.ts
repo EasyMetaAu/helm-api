@@ -410,11 +410,12 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const { record, insert, insertPayload, redact } = makeRecord();
     const { deps } = makeDeps({ record });
     const app = buildApp(deps);
+    const rawRequest = '{\n  "model":"auto",\n  "input":"Say hello",\n  "max_output_tokens":16\n}';
 
     const res = await app.request("/v1/responses", {
       method: "POST",
       headers: AUTH,
-      body: JSON.stringify(REQ),
+      body: rawRequest,
     });
 
     expect(res.status).toBe(200);
@@ -426,6 +427,8 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(JSON.stringify(arg)).not.toContain("helm_live_secret");
     // capture_payloads ON → the verbatim request/response body is persisted too.
     expect(insertPayload).toHaveBeenCalledOnce();
+    const payload = insertPayload.mock.calls[0]?.[0] as { requestJson: string };
+    expect(payload.requestJson).toBe(rawRequest);
   });
 
   it("records a telemetry row for a served STREAM request after the stream drains", async () => {

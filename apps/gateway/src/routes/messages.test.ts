@@ -547,11 +547,13 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     const { record, insert, insertPayload, redact } = makeRecord();
     const { deps } = makeDeps({ record });
     const app = buildApp(deps);
+    const rawRequest =
+      '{\n  "model":"claude-3-5-sonnet",\n  "messages":[{"role":"user","content":"hi"}],\n  "max_tokens":64\n}';
 
     const res = await app.request("/v1/messages", {
       method: "POST",
       headers: AUTH,
-      body: JSON.stringify(REQ_BODY),
+      body: rawRequest,
     });
 
     expect(res.status).toBe(200);
@@ -562,6 +564,8 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     // The plaintext key must never reach the persisted telemetry row.
     expect(JSON.stringify(arg)).not.toContain("helm_live_secret");
     expect(insertPayload).toHaveBeenCalledOnce();
+    const payload = insertPayload.mock.calls[0]?.[0] as { requestJson: string };
+    expect(payload.requestJson).toBe(rawRequest);
   });
 
   it("records a telemetry row for a served STREAM request after the stream drains", async () => {

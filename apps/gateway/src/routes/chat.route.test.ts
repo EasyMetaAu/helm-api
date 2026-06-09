@@ -354,6 +354,51 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     expect(harness.execute).toHaveBeenCalled();
   });
 
+  it("preserves LiteLLM/OpenAI request params into the execution request", async () => {
+    const { deps: d, harness } = deps();
+    harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
+    const app = buildApp(d);
+
+    const body = {
+      ...NONSTREAM_BODY,
+      temperature: 0.2,
+      top_p: 0.9,
+      stop: ["END"],
+      max_completion_tokens: 123,
+      tool_choice: "auto",
+      parallel_tool_calls: false,
+      reasoning_effort: "high",
+      user: "user-123",
+      service_tier: "auto",
+      metadata: { conversation_id: "conv-1", prompt_version: "v7" },
+      web_search_options: { search_context_size: "low" },
+    };
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(body),
+    });
+
+    expect(res.status).toBe(200);
+    const internal = harness.execute.mock.calls[0]?.[1] as InternalRequest;
+    expect(internal.temperature).toBe(0.2);
+    expect(internal.top_p).toBe(0.9);
+    expect(internal.stop).toEqual(["END"]);
+    expect(internal.max_completion_tokens).toBe(123);
+    expect(internal.tool_choice).toBe("auto");
+    expect(internal.parallel_tool_calls).toBe(false);
+    expect(internal.reasoning_effort).toBe("high");
+    expect(internal.user).toBe("user-123");
+    expect(internal.service_tier).toBe("auto");
+    expect(internal.metadata.conversation_id).toBe("conv-1");
+    expect(internal.provider_raw?.metadata).toEqual({
+      conversation_id: "conv-1",
+      prompt_version: "v7",
+    });
+    expect(internal.web_search_options).toEqual({ search_context_size: "low" });
+  });
+
   it("takes the explicit-model passthrough when the key allows custom models", async () => {
     const { deps: d, harness } = deps();
     harness.execute.mockResolvedValue({
@@ -536,15 +581,25 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
   // Telemetry double that records both the decision insert and the payload insert.
   function captureTelemetry() {
     const inserted: unknown[] = [];
-    const payloads: Array<{ requestId: string; responseJson: string | null }> = [];
+    const payloads: Array<{
+      requestId: string;
+      requestJson: string;
+      responseJson: string | null;
+    }> = [];
     const telemetry = {
       insert: vi.fn(async (i: { decision: unknown }) => {
         inserted.push(i.decision);
         return { id: "1" };
       }),
-      insertPayload: vi.fn(async (p: { requestId: string; responseJson: string | null }) => {
-        payloads.push({ requestId: p.requestId, responseJson: p.responseJson });
-      }),
+      insertPayload: vi.fn(
+        async (p: { requestId: string; requestJson: string; responseJson: string | null }) => {
+          payloads.push({
+            requestId: p.requestId,
+            requestJson: p.requestJson,
+            responseJson: p.responseJson,
+          });
+        },
+      ),
       prunePayloads: vi.fn(async () => {}),
     } as unknown as TelemetryStore;
     return { telemetry, inserted, payloads };
@@ -691,12 +746,14 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
     const upstream = { id: "cmpl-9", choices: [{ message: { content: "hello" } }] };
     harness.execute.mockResolvedValue(nonStreamOutcome(upstream));
     const app = buildApp(d);
+    const rawRequest = '{\n  "model":"auto",\n  "messages":[{"role":"user","content":"hi"}]\n}';
     await app.request("/v1/chat/completions", {
       method: "POST",
       headers: AUTH,
-      body: JSON.stringify(NONSTREAM_BODY),
+      body: rawRequest,
     });
     expect(cap.payloads).toHaveLength(1);
+    expect(cap.payloads[0]?.requestJson).toBe(rawRequest);
     expect(cap.payloads[0]?.responseJson).toBe(JSON.stringify(upstream));
   });
 });

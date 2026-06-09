@@ -112,6 +112,113 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[0]?.status).toBe("ok");
   });
 
+  it("forwards LiteLLM/OpenAI-compatible params to the upstream request body", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    await execute(
+      plan(["default_good_model"]),
+      req({
+        temperature: 0.2,
+        top_p: 0.9,
+        top_k: 32,
+        frequency_penalty: 0.1,
+        presence_penalty: -0.1,
+        seed: 42,
+        stop: ["END"],
+        n: 2,
+        logprobs: true,
+        top_logprobs: 3,
+        max_completion_tokens: 123,
+        tool_choice: "auto",
+        parallel_tool_calls: false,
+        modalities: ["text", "audio"],
+        reasoning_effort: "high",
+        user: "user-123",
+        service_tier: "auto",
+        prediction: { type: "content", content: "expected" },
+        audio: { voice: "alloy", format: "wav" },
+        logit_bias: { "42": -1 },
+        web_search_options: { search_context_size: "low" },
+        include_server_side_tool_invocations: true,
+        verbosity: "low",
+        safety_identifier: "safe-user",
+        provider_raw: { metadata: { prompt_version: "v1" }, store: false },
+      }),
+    );
+
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body).toMatchObject({
+      model: "gpt-x",
+      temperature: 0.2,
+      top_p: 0.9,
+      top_k: 32,
+      frequency_penalty: 0.1,
+      presence_penalty: -0.1,
+      seed: 42,
+      stop: ["END"],
+      n: 2,
+      logprobs: true,
+      top_logprobs: 3,
+      max_completion_tokens: 123,
+      tool_choice: "auto",
+      parallel_tool_calls: false,
+      modalities: ["text", "audio"],
+      reasoning_effort: "high",
+      user: "user-123",
+      service_tier: "auto",
+      prediction: { type: "content", content: "expected" },
+      audio: { voice: "alloy", format: "wav" },
+      logit_bias: { "42": -1 },
+      web_search_options: { search_context_size: "low" },
+      include_server_side_tool_invocations: true,
+      verbosity: "low",
+      safety_identifier: "safe-user",
+      metadata: { prompt_version: "v1" },
+      store: false,
+    });
+  });
+
+  it("merges streamed client stream_options while forcing include_usage for cost capture", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn().mockReturnValue(gen(["data: {}\n\n"])),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    await execute(
+      plan(["default_good_model"]),
+      req({ stream: true, stream_options: { include_usage: false, extra: "keep" } }),
+    );
+
+    const body = (provider.chatCompletionStream as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      stream_options?: Record<string, unknown>;
+    };
+    expect(body.stream_options).toEqual({ include_usage: true, extra: "keep" });
+  });
+
   it("falls back to the next candidate on a pre-first-chunk provider failure", async () => {
     const provider = {
       chatCompletion: vi

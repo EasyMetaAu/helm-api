@@ -1,4 +1,4 @@
-import { expect, request as playwrightRequest, test } from "@playwright/test";
+import { expect, type Page, request as playwrightRequest, test } from "@playwright/test";
 import {
   ADMIN_PASSWORD,
   ADMIN_USER,
@@ -18,6 +18,15 @@ import {
 // HTTP Basic challenge is observable (a credentialed context would auto-answer it).
 
 const BASE = "http://127.0.0.1:8090";
+const SEED_MODEL_FILTER = "best_reasoning_model";
+
+async function filterToSeededRequest(page: Page) {
+  await page.getByTestId("filter-model").fill(SEED_MODEL_FILTER);
+  await page.getByTestId("filter-model").press("Enter");
+  return page
+    .getByTestId("request-row")
+    .filter({ has: page.locator(`a[href$="/requests/${SEED_TRACE_ID}"]`) });
+}
 
 // ── 1. Basic Auth gate: none / wrong / correct (@noauth project) ─────────────
 test.describe("admin basic auth gate @noauth", () => {
@@ -86,9 +95,9 @@ test.describe("admin request debugging", () => {
 
     // The seeded row is identified by its detail link (carries the trace id) —
     // the list cells show derived columns (decided_by/lane/cost), not the raw id.
-    const row = page
-      .getByTestId("request-row")
-      .filter({ has: page.locator(`a[href$="/requests/${SEED_TRACE_ID}"]`) });
+    // Other e2e specs run first and add many request rows, so filter to the seeded
+    // request's unique served model instead of assuming it remains on page 1.
+    const row = await filterToSeededRequest(page);
     await expect(row).toBeVisible();
     // Classification-stage decision layer is shown (decided_by column, Principle 5).
     await expect(row.getByTestId("decided-by")).toHaveText("rules");
@@ -116,9 +125,7 @@ test.describe("admin request list filtering + pagination", () => {
   test("filters narrow the list and the pager reflects the filtered total", async ({ page }) => {
     await page.goto(`${BASE}/admin/requests`);
 
-    const seededRow = page
-      .getByTestId("request-row")
-      .filter({ has: page.locator(`a[href$="/requests/${SEED_TRACE_ID}"]`) });
+    const seededRow = await filterToSeededRequest(page);
     await expect(seededRow).toBeVisible();
 
     // Filter controls + numbered pager are present. The date range is the shared
@@ -136,20 +143,23 @@ test.describe("admin request list filtering + pagination", () => {
     await expect(page.getByTestId("requests-empty")).toBeVisible();
     await expect(seededRow).toHaveCount(0);
 
-    // Reset clears every filter → the row returns.
+    // Reset clears every filter; re-apply the seed filter so the assertion stays
+    // independent of request rows created by earlier e2e specs.
     await page.getByTestId("filter-reset").click();
+    await filterToSeededRequest(page);
     await expect(seededRow).toBeVisible();
 
     // decided_by=eval excludes the rules-decided seeded row (JSON-path filter).
     await page.getByTestId("filter-decided-by").selectOption("eval");
     await expect(page.getByTestId("requests-empty")).toBeVisible();
     await page.getByTestId("filter-reset").click();
+    await filterToSeededRequest(page);
     await expect(seededRow).toBeVisible();
 
     // Model search matches the served/requested model substring; a miss empties it.
-    await page.getByTestId("filter-model").fill("gpt-4o");
+    await page.getByTestId("filter-model").fill(SEED_MODEL_FILTER);
     await page.getByTestId("filter-model").press("Enter");
-    await expect(seededRow).toBeVisible(); // requested_model = gpt-4o-mini
+    await expect(seededRow).toBeVisible(); // served model = best_reasoning_model
     await page.getByTestId("filter-model").fill("does-not-exist");
     await page.getByTestId("filter-model").press("Enter");
     await expect(page.getByTestId("requests-empty")).toBeVisible();
