@@ -6,7 +6,7 @@ import type {
   ReflectionUpsertInput,
 } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
-import type { MemoryJobStatus, MemoryStore } from "../store/ports.js";
+import type { MemoryStore } from "../store/ports.js";
 import { factContentHash, normalizeSubjectKey } from "./forgetting/facts.js";
 import {
   type ExtractedFact,

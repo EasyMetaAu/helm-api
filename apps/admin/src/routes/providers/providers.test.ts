@@ -1,0 +1,177 @@
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { invalidateAll } from '$app/navigation';
+import type {
+  OAuthProviderStatus,
+  OAuthQuotaSnapshot,
+  OAuthUsageRow,
+} from '$lib/api/oauth.js';
+import ProvidersPage from './+page.svelte';
+
+const logoutOAuth = vi.fn();
+const setAccountSchedule = vi.fn();
+vi.mock('$lib/api/oauth.js', () => ({
+  completeManualPaste: vi.fn(),
+  getAccountModels: vi.fn(),
+  getAccountProxy: vi.fn(),
+  getAccountSchedule: vi.fn(),
+  logoutOAuth: (...args: unknown[]) => logoutOAuth(...args),
+  pollDeviceCode: vi.fn(),
+  setAccountModels: vi.fn(),
+  setAccountProxy: vi.fn(),
+  setAccountSchedule: (...args: unknown[]) => setAccountSchedule(...args),
+  startDeviceCode: vi.fn(),
+  startManualPaste: vi.fn(),
+}));
+
+const invalidateAllMock = vi.mocked(invalidateAll);
+
+function provider(overrides: Partial<OAuthProviderStatus> = {}): OAuthProviderStatus {
+  return {
+    id: 'anthropic',
+    name: 'Claude Max',
+    flow: 'manual_paste',
+    accounts: [
+      {
+        account: 'acct-claude',
+        expiresAt: null,
+        updatedAt: Date.now(),
+        healthy: true,
+        priority: 10,
+        schedulable: true,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+const usage: OAuthUsageRow[] = [
+  {
+    providerId: 'anthropic',
+    account: 'acct-claude',
+    requests: 42,
+    tokens: 1536,
+    costUsd: 0.034,
+    rpm: 0.7,
+  },
+];
+
+const quota: OAuthQuotaSnapshot[] = [
+  {
+    providerId: 'anthropic',
+    account: 'acct-claude',
+    windows: [{ key: '5h', usedPercent: 74, resetsAtMs: Date.now() + 3_600_000, windowMinutes: 300 }],
+    capturedAt: Date.now(),
+    source: 'anthropic',
+  },
+];
+
+function renderPage(
+  overrides: Partial<{
+    configured: boolean;
+    providers: OAuthProviderStatus[];
+    usage: OAuthUsageRow[];
+    quota: OAuthQuotaSnapshot[];
+    loadError?: string;
+  }> = {},
+) {
+  return render(ProvidersPage, {
+    data: {
+      configured: true,
+      providers: [provider()],
+      usage,
+      quota,
+      ...overrides,
+    },
+  });
+}
+
+describe('providers page', () => {
+  beforeEach(() => {
+    logoutOAuth.mockReset();
+    setAccountSchedule.mockReset();
+    invalidateAllMock.mockReset();
+    logoutOAuth.mockResolvedValue(undefined);
+    setAccountSchedule.mockResolvedValue(undefined);
+  });
+
+  it('renders connected subscription accounts with usage, quota, and scheduling controls', () => {
+    renderPage();
+
+    expect(screen.getByText('Subscription Providers')).toBeInTheDocument();
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('Claude Max')).toBeInTheDocument();
+    expect(within(row).getByText('acct-claude')).toBeInTheDocument();
+    expect(within(row).getByText('connected')).toBeInTheDocument();
+    expect(within(row).getByText('42 req')).toBeInTheDocument();
+    expect(within(row).getByText('1.5k tok')).toBeInTheDocument();
+    expect(within(row).getByText('$0.03')).toBeInTheDocument();
+    expect(within(row).getByText('74%')).toBeInTheDocument();
+    expect(within(row).getByDisplayValue('10')).toBeInTheDocument();
+    expect(within(row).getByRole('checkbox', { name: /schedulable/i })).toBeChecked();
+  });
+
+  it('shows the not-configured warning and disables Connect when OAuth is unavailable', () => {
+    renderPage({ configured: false, providers: [], usage: [], quota: [] });
+
+    expect(screen.getByText(/OAuth login is disabled/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /connect/i })).toBeDisabled();
+  });
+
+  it('saves a non-negative integer priority and refreshes the page data', async () => {
+    renderPage();
+    const row = screen.getByTestId('provider-account-row');
+    const priority = within(row).getByRole('spinbutton', { name: /priority/i });
+
+    await fireEvent.change(priority, { target: { value: '3' } });
+
+    await waitFor(() =>
+      expect(setAccountSchedule).toHaveBeenCalledWith('anthropic', 'acct-claude', {
+        priority: 3,
+      }),
+    );
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects invalid priority input without calling the gateway', async () => {
+    renderPage();
+    const row = screen.getByTestId('provider-account-row');
+    const priority = within(row).getByRole('spinbutton', { name: /priority/i });
+
+    await fireEvent.change(priority, { target: { value: '-1' } });
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Priority must be a non-negative integer');
+    expect(setAccountSchedule).not.toHaveBeenCalled();
+  });
+
+  it('toggles schedulability through the scheduling endpoint', async () => {
+    renderPage();
+    const checkbox = within(screen.getByTestId('provider-account-row')).getByRole('checkbox', {
+      name: /schedulable/i,
+    });
+
+    await fireEvent.click(checkbox);
+
+    await waitFor(() =>
+      expect(setAccountSchedule).toHaveBeenCalledWith('anthropic', 'acct-claude', {
+        schedulable: false,
+      }),
+    );
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('confirms and disconnects a stored account credential', async () => {
+    renderPage();
+    await fireEvent.click(
+      within(screen.getByTestId('provider-account-row')).getByRole('button', {
+        name: /disconnect/i,
+      }),
+    );
+
+    const dialog = screen.getByRole('dialog', { name: /confirm disconnect/i });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /^disconnect$/i }));
+
+    await waitFor(() => expect(logoutOAuth).toHaveBeenCalledWith('anthropic', 'acct-claude'));
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+  });
+});

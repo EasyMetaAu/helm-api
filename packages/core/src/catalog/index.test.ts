@@ -28,6 +28,14 @@ const generated: GeneratedCatalog = {
   ],
 };
 
+function firstGeneratedModel(): GeneratedCatalog["models"][number] {
+  const model = generated.models[0];
+  if (model === undefined) {
+    throw new Error("test generated catalog needs at least one model");
+  }
+  return model;
+}
+
 describe("loadCatalog", () => {
   it("seeds entries from the generated catalog with source=generated", () => {
     const cat = loadCatalog({
@@ -73,7 +81,7 @@ describe("loadCatalog", () => {
       ...generated,
       models: [
         {
-          ...generated.models[0]!,
+          ...firstGeneratedModel(),
           pricing: {
             inputPerMTokUsd: 2.5,
             outputPerMTokUsd: 10,
@@ -99,7 +107,7 @@ describe("loadCatalog", () => {
       ...generated,
       models: [
         {
-          ...generated.models[0]!,
+          ...firstGeneratedModel(),
           pricing: {
             inputPerMTokUsd: 2.5,
             outputPerMTokUsd: 10,

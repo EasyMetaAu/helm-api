@@ -254,7 +254,10 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
     // execute on the request tick), so flush a macrotask, not just microtasks.
     await new Promise((resolve) => setImmediate(resolve));
     expect(bumpReferences).toHaveBeenCalledTimes(1);
-    const call = bumpReferences.mock.calls[0]![0];
+    const call = bumpReferences.mock.calls[0]?.[0];
+    if (call === undefined) {
+      throw new Error("expected bumpReferences to receive injected observation ids");
+    }
     expect(call.accountId).toBe("acct-a");
     expect(call.observationIds).toEqual(["kept-newer"]); // dropped-older NOT bumped
   });
@@ -335,7 +338,10 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       forgetting: forgetting({ bumpReferences }),
     });
     await new Promise((resolve) => setImmediate(resolve)); // flush the deferred macrotask
-    const call = bumpReferences.mock.calls[0]![0];
+    const call = bumpReferences.mock.calls[0]?.[0];
+    if (call === undefined) {
+      throw new Error("expected bumpReferences to receive injected reflection ids");
+    }
     expect(call.accountId).toBe("acct-a");
     expect(call.reflectionIds).toContain("refl-p");
   });

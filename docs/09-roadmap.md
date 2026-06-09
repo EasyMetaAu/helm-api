@@ -1,6 +1,6 @@
 # 09 · Roadmap
 
-> Status: **shipped — 0.8.0.** The core gateway (routing, classification, provider
+> Status: **shipped — 0.9.0.** The core gateway (routing, classification, provider
 > execution, protocol translation, telemetry) runs in production, and several major
 > subsystems have landed since the early releases: a memory middleware (observe +
 > inject + background workers, on by default), per-key budgets / rate limits /

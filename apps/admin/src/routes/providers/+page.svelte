@@ -294,7 +294,7 @@
             {@const usage = usageByKey.get(k)}
             {@const quota = quotaByKey.get(k)}
             {@const saving = savingSchedule[k] === true}
-            <tr class="table-row align-top">
+            <tr class="table-row align-top" data-testid="provider-account-row">
               <!-- Provider / account + type badge -->
               <td class="px-3 py-3">
                 <div class="font-medium text-ink-body">{row.provider.name}</div>
