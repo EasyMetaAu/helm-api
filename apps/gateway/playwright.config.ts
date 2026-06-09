@@ -36,6 +36,11 @@ const e2eEnv = {
   // queue drain into memory_observations within the test window. Unref'd +
   // fail-open, so it never blocks the gateway or other specs.
   HELM_MEMORY_WORKER_INTERVAL_MS: "250",
+  // Coverage opt-in (pnpm test:e2e:coverage): when E2E_COVERAGE_DIR is set, route the
+  // gateway server process's V8 coverage into it. The test-server keys off the injected
+  // NODE_V8_COVERAGE to run from dist (on-disk sourcemaps) + flush periodically. Unset
+  // in a normal `pnpm test:e2e` run, so that path is completely unaffected.
+  ...(process.env.E2E_COVERAGE_DIR ? { NODE_V8_COVERAGE: process.env.E2E_COVERAGE_DIR } : {}),
 };
 
 export default defineConfig({

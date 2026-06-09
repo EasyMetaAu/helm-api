@@ -125,7 +125,12 @@ await telemetry.insert({
 // Close this handle; the server opens its own.
 (seedDb as unknown as { $sqlite: Database.Database }).$sqlite.close();
 
-const { buildServer } = await import("../../src/server.js");
+// Coverage opt-in: when V8 coverage is collecting (pnpm test:e2e:coverage), import the
+// BUILT gateway so c8 can remap via the on-disk .js.map — tsx transpiles src in-memory
+// with no disk sourcemap, which c8 cannot map. A normal e2e run imports src as before.
+const { buildServer } = process.env.NODE_V8_COVERAGE
+  ? await import("../../dist/server.js")
+  : await import("../../src/server.js");
 // Boot from a THROWAWAY COPY of the repo-root config dir (fresh each run, like
 // the DB above): admin rule edits now WRITE BACK to config/*.yaml (yaml-writeback),
 // so e2e admin saves (e.g. the lane edit in admin.spec) must land in the copy —
@@ -140,3 +145,26 @@ cpSync(repoConfigDir, configDir, { recursive: true });
 const { app, port, host } = await buildServer({ configDir });
 serve({ fetch: app.fetch, port, hostname: host });
 process.stdout.write(`e2e gateway listening on ${host}:${port}\n`);
+
+// Coverage opt-in: Playwright hard-kills (SIGKILL) this webServer at teardown, so
+// signal/exit handlers never run. Flush V8 coverage PERIODICALLY (cumulative
+// snapshots) so the latest snapshot before the kill captures the run; c8 merges them.
+if (process.env.NODE_V8_COVERAGE) {
+  const { takeCoverage } = await import("node:v8");
+  const snap = () => {
+    try {
+      takeCoverage();
+    } catch {
+      // best-effort
+    }
+  };
+  setInterval(snap, 300).unref();
+  process.on("SIGTERM", () => {
+    snap();
+    process.exit(0);
+  });
+  process.on("SIGINT", () => {
+    snap();
+    process.exit(0);
+  });
+}
