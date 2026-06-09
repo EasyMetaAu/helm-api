@@ -286,4 +286,6 @@ export {
   ForgettingSchema,
   type MemoryConfig,
   MemoryConfigSchema,
+  type MemoryLlmConfig,
+  MemoryLlmSchema,
 } from "./memory-schema.js";

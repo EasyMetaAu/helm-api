@@ -1,0 +1,365 @@
+import type { ExtractedFact, ObserverDeps, ProviderClient, ReflectorDeps } from "@helm/core";
+import type { MemoryLlmConfig, Observation, RawMessage, Reflection } from "@helm/shared";
+import { z } from "zod";
+
+const MEMORY_SUMMARY_MAX_CHARS = 2000;
+const MEMORY_REFLECTION_MAX_CHARS = 4000;
+
+const ObservationOutputSchema = z.object({
+  observation_text: z.string().min(1),
+  priority: z.number().int().min(1).max(5).optional(),
+  importance: z.number().min(0).max(1).optional(),
+  tags: z.array(z.string().min(1)).optional(),
+});
+
+const ReflectionOutputSchema = z.object({
+  reflection_text: z.string().min(1),
+});
+
+const FactOutputSchema = z.object({
+  subject_text: z.string().min(1),
+  fact_text: z.string().min(1),
+  valid_from_observation_id: z.string().min(1).optional(),
+  source_observation_id: z.string().min(1).optional(),
+});
+
+const FactsOutputSchema = z.object({
+  facts: z.array(FactOutputSchema).default([]),
+});
+
+type ObservationOutput = z.infer<typeof ObservationOutputSchema>;
+type ReflectionOutput = z.infer<typeof ReflectionOutputSchema>;
+type FactsOutput = z.infer<typeof FactsOutputSchema>;
+
+export interface MemoryModelResolution {
+  client: ProviderClient;
+  providerModel: string;
+}
+
+export interface CreateMemoryLlmRuntimeDeps {
+  config: MemoryLlmConfig;
+  resolveModel: (alias: string) => MemoryModelResolution | null;
+  estimateTokens: (text: string) => number;
+  log: (line: string, meta?: object) => void;
+}
+
+export interface MemoryLlmRuntime {
+  summarize: ObserverDeps["summarize"];
+  merge: ReflectorDeps["merge"];
+  extractFacts: NonNullable<ReflectorDeps["extractFacts"]>;
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}\u2026` : text;
+}
+
+export function summarizeMessagesDeterministic(messages: readonly RawMessage[]): string {
+  const body = messages.map((m) => `${m.role}: ${m.content}`).join("\n");
+  return truncate(body || "(no messages)", MEMORY_SUMMARY_MAX_CHARS);
+}
+
+export function mergeObservationsDeterministic(
+  observations: readonly Observation[],
+  _previousReflection: Reflection | null,
+): string {
+  const body = observations.map((o) => `- ${o.observationText}`).join("\n");
+  return truncate(body || "(no observations)", MEMORY_REFLECTION_MAX_CHARS);
+}
+
+export function extractFactsDeterministic(observations: readonly Observation[]): ExtractedFact[] {
+  const facts: ExtractedFact[] = [];
+  for (const o of observations) {
+    const text = o.observationText.trim();
+    if (text.length === 0 || text === "[pruned]") continue;
+    const subjectText = o.tags?.[0]?.trim() || text.split(/\s+/).slice(0, 6).join(" ") || "general";
+    facts.push({
+      subjectText,
+      factText: truncate(text, MEMORY_REFLECTION_MAX_CHARS),
+      validFrom: o.observedAt,
+      sourceObservationRange: [o.id, o.id],
+    });
+  }
+  return facts;
+}
+
+function cleanTags(tags: string[] | undefined): string[] | undefined {
+  if (!tags) return undefined;
+  const cleaned = [...new Set(tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0))].slice(
+    0,
+    16,
+  );
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+function assistantTextFromCompletion(response: Record<string, unknown>): string {
+  const choices = response.choices;
+  if (Array.isArray(choices) && choices.length > 0) {
+    const choice = choices[0] as Record<string, unknown>;
+    const message = choice.message;
+    if (message && typeof message === "object") {
+      const content = (message as Record<string, unknown>).content;
+      if (typeof content === "string") return content;
+      if (Array.isArray(content)) {
+        return content
+          .map((part) => {
+            if (typeof part === "string") return part;
+            if (part && typeof part === "object") {
+              const p = part as Record<string, unknown>;
+              if (typeof p.text === "string") return p.text;
+              if (typeof p.content === "string") return p.content;
+            }
+            return "";
+          })
+          .join("");
+      }
+    }
+  }
+  const outputText = response.output_text;
+  return typeof outputText === "string" ? outputText : "";
+}
+
+function parseJsonObject(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error("empty LLM response");
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const candidate = (fenced?.[1] ?? trimmed).trim();
+  try {
+    return JSON.parse(candidate);
+  } catch (err) {
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    if (start >= 0 && end > start) return JSON.parse(candidate.slice(start, end + 1));
+    throw err;
+  }
+}
+
+function safeError(err: unknown): string {
+  if (err instanceof Error) return `${err.name}: ${err.message}`;
+  return String(err);
+}
+
+function taskModel(config: MemoryLlmConfig, task: "observation" | "reflection" | "facts") {
+  switch (task) {
+    case "observation":
+      return config.observation_model ?? config.model;
+    case "reflection":
+      return config.reflection_model ?? config.model;
+    case "facts":
+      return config.facts_model ?? config.model;
+  }
+}
+
+async function callJsonModel<T>(args: {
+  deps: CreateMemoryLlmRuntimeDeps;
+  task: "observation" | "reflection" | "facts";
+  maxTokens: number;
+  messages: Array<{ role: "system" | "user"; content: string }>;
+  schema: z.ZodType<T>;
+  fallback: () => T;
+}): Promise<T> {
+  const { deps, task, maxTokens, messages, schema, fallback } = args;
+  if (deps.config.enabled !== true) return fallback();
+  const modelAlias = taskModel(deps.config, task);
+  if (!modelAlias) return fallback();
+
+  const resolved = deps.resolveModel(modelAlias);
+  if (!resolved) {
+    deps.log("memory.llm.model_unavailable", { task, model_alias: modelAlias });
+    return fallback();
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), deps.config.timeout_ms);
+  try {
+    const response = await resolved.client.chatCompletion(
+      {
+        model: resolved.providerModel,
+        messages,
+        temperature: deps.config.temperature,
+        stream: false,
+        max_tokens: maxTokens,
+        response_format: { type: "json_object" },
+      },
+      { signal: controller.signal },
+    );
+    const text = assistantTextFromCompletion(response);
+    const parsed = schema.parse(parseJsonObject(text));
+    deps.log("memory.llm.completed", { task, model_alias: modelAlias });
+    return parsed;
+  } catch (err) {
+    deps.log("memory.llm.fallback", {
+      task,
+      model_alias: modelAlias,
+      error: safeError(err),
+    });
+    return fallback();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function observationPrompt(input: { messages: RawMessage[]; now: Date }) {
+  return [
+    {
+      role: "system" as const,
+      content:
+        "Compress conversation turns into one durable memory observation. Return strict JSON only.",
+    },
+    {
+      role: "user" as const,
+      content: JSON.stringify({
+        now: input.now.toISOString(),
+        schema: {
+          observation_text: "string, one concise durable memory",
+          priority: "integer 1..5, optional",
+          importance: "number 0..1, optional",
+          tags: ["short lowercase tags, optional"],
+        },
+        messages: input.messages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          created_at: m.createdAt.toISOString(),
+        })),
+      }),
+    },
+  ];
+}
+
+function reflectionPrompt(input: {
+  observations: Observation[];
+  previousReflection: Reflection | null;
+  now: Date;
+}) {
+  return [
+    {
+      role: "system" as const,
+      content:
+        "Merge active memory observations into a stable, non-duplicative reflection. Return strict JSON only.",
+    },
+    {
+      role: "user" as const,
+      content: JSON.stringify({
+        now: input.now.toISOString(),
+        schema: { reflection_text: "string, concise stable reflection" },
+        previous_reflection: input.previousReflection?.reflectionText ?? null,
+        observations: input.observations.map((o) => ({
+          id: o.id,
+          observed_at: o.observedAt.toISOString(),
+          text: o.observationText,
+          tags: o.tags ?? [],
+        })),
+      }),
+    },
+  ];
+}
+
+function factsPrompt(input: {
+  observations: Observation[];
+  previousReflection: Reflection | null;
+  now: Date;
+}) {
+  return [
+    {
+      role: "system" as const,
+      content: "Extract atomic, durable facts from memory observations. Return strict JSON only.",
+    },
+    {
+      role: "user" as const,
+      content: JSON.stringify({
+        now: input.now.toISOString(),
+        schema: {
+          facts: [
+            {
+              subject_text: "topic string",
+              fact_text: "atomic assertion string",
+              valid_from_observation_id: "id of the supporting observation",
+            },
+          ],
+        },
+        previous_reflection: input.previousReflection?.reflectionText ?? null,
+        observations: input.observations.map((o) => ({
+          id: o.id,
+          observed_at: o.observedAt.toISOString(),
+          text: o.observationText,
+          tags: o.tags ?? [],
+        })),
+      }),
+    },
+  ];
+}
+
+export function createMemoryLlmRuntime(deps: CreateMemoryLlmRuntimeDeps): MemoryLlmRuntime {
+  return {
+    summarize: async (input) => {
+      const parsed = await callJsonModel<ObservationOutput>({
+        deps,
+        task: "observation",
+        maxTokens: deps.config.max_tokens.observation,
+        messages: observationPrompt(input),
+        schema: ObservationOutputSchema,
+        fallback: () => ({ observation_text: summarizeMessagesDeterministic(input.messages) }),
+      });
+      const tags = cleanTags(parsed.tags);
+      return {
+        observationText: parsed.observation_text.trim(),
+        ...(parsed.priority !== undefined ? { priority: parsed.priority } : {}),
+        ...(parsed.importance !== undefined ? { importance: parsed.importance } : {}),
+        ...(tags !== undefined ? { tags } : {}),
+      };
+    },
+    merge: async (input) => {
+      const parsed = await callJsonModel<ReflectionOutput>({
+        deps,
+        task: "reflection",
+        maxTokens: deps.config.max_tokens.reflection,
+        messages: reflectionPrompt(input),
+        schema: ReflectionOutputSchema,
+        fallback: () => ({
+          reflection_text: mergeObservationsDeterministic(
+            input.observations,
+            input.previousReflection,
+          ),
+        }),
+      });
+      const reflectionText = parsed.reflection_text.trim();
+      return { reflectionText, tokenEstimate: deps.estimateTokens(reflectionText) };
+    },
+    extractFacts: async (input) => {
+      const parsed = await callJsonModel<FactsOutput>({
+        deps,
+        task: "facts",
+        maxTokens: deps.config.max_tokens.facts,
+        messages: factsPrompt(input),
+        schema: FactsOutputSchema,
+        fallback: () => ({
+          facts: extractFactsDeterministic(input.observations).map((fact) => ({
+            subject_text: fact.subjectText,
+            fact_text: fact.factText,
+            valid_from_observation_id: fact.sourceObservationRange?.[0],
+          })),
+        }),
+      });
+      const byObservationId = new Map(input.observations.map((o) => [o.id, o]));
+      return parsed.facts.flatMap((fact, index): ExtractedFact[] => {
+        const subjectText = fact.subject_text.trim();
+        const factText = fact.fact_text.trim();
+        if (!subjectText || !factText) return [];
+        const sourceId = fact.valid_from_observation_id ?? fact.source_observation_id;
+        const supporting =
+          (sourceId ? byObservationId.get(sourceId) : undefined) ??
+          input.observations[Math.min(index, Math.max(0, input.observations.length - 1))];
+        return [
+          {
+            subjectText,
+            factText,
+            validFrom: supporting?.observedAt ?? input.now,
+            ...(supporting !== undefined
+              ? { sourceObservationRange: [supporting.id, supporting.id] as [string, string] }
+              : {}),
+          },
+        ];
+      });
+    },
+  };
+}

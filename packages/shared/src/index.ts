@@ -101,6 +101,8 @@ export {
   isOAuthPreset,
   type MemoryConfig,
   MemoryConfigSchema,
+  type MemoryLlmConfig,
+  MemoryLlmSchema,
   type OAuthConfig,
   OAuthConfigSchema,
   type OAuthCredential,
