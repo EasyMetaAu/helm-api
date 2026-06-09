@@ -71,7 +71,9 @@ plaintext key and no private payload. The record holds:
 - `classifier`: `task_type`, `complexity`, `confidence`, **`decided_by`**
   (`rules` / `eval` / `default` / `fallback`), `eval_cache_hit`,
   `fallback_reason`, `constraints`, and `explanation` (matched dimensions /
-  signals).
+  signals). When opt-in Agentic Signals feedback promotes a ranked lane, the
+  explanation includes a redacted `routing_signal_feedback` item with from/to
+  lanes, thresholds, and aggregate signal summaries.
 - `policy`: the matched policy id and a reason.
 - `lane`: the selected lane and the ordered candidate chain.
 - `provider_attempts[]`: per attempt — alias, `skipped` + `skip_reason`, status,

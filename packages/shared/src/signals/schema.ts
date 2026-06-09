@@ -14,9 +14,10 @@ import { z } from "zod";
 // the CLASSIFICATION fallback (classifier.decided_by → balanced); that lives in
 // `classifierFallbackRate` so the two mechanisms stay separately observable.
 //
-// This task is OBSERVE-ONLY: signals are produced and persisted, never fed back
-// into routing. The consumption side (influencing lane selection) is a future
-// task — keeping the MVP route deterministic.
+// Consumption is opt-in: when runtime.signal_feedback.enabled is true, routing
+// may read these aggregates to promote a degraded ranked lane to a healthier
+// stronger ranked lane inside policy/key caps. The signal itself remains
+// redacted and aggregate-only.
 export const RoutingSignalSchema = z
   .object({
     taskType: z.string(),

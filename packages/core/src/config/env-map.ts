@@ -42,6 +42,11 @@ export const ENV_MAPPINGS: readonly EnvMapping[] = [
   // config — mirrors providers[].api_key_env (principle 7).
   { env: "HELM_STORE_DRIVER", path: ["runtime", "store", "driver"], kind: "string" },
   { env: "HELM_STORE_URL_ENV", path: ["runtime", "store", "url_env"], kind: "string" },
+  {
+    env: "HELM_SIGNAL_FEEDBACK_ENABLED",
+    path: ["runtime", "signal_feedback", "enabled"],
+    kind: "boolean",
+  },
 ];
 
 // Coerce a string env value into the declared kind. Returns the original string

@@ -11,6 +11,7 @@ Client
   -> Task Classifier             # cascade: rules (always on) -> optional eval -> balanced
   -> Policy Engine
   -> Lane Resolver
+  -> (Signal Feedback)           # opt-in ranked-lane health promotion
   -> Capability Filter
   -> Circuit Breaker
   -> Provider Executor
@@ -106,6 +107,16 @@ Collapses the classifier + policy outcome into exactly one lane. Responsibilitie
 
 The resolver itself never trips circuit breakers or calls providers; that is the
 execution stage's job.
+
+### Signal Feedback
+
+Agentic Signals are aggregated, redacted health observations produced by the
+background signal collector from already-persisted decision records. When
+`runtime.signal_feedback.enabled` is true, `routeRequest` reads the latest signal
+for the selected ranked lane and may promote it to a stronger ranked lane with
+healthier aggregate success/error/fallback rates. This stage is fail-open and
+bounded by explicit passthrough, classifier fallback, policy pins, budget
+degradation, and policy/key caps.
 
 ### Capability Filter
 
@@ -223,7 +234,7 @@ config/
   capabilities.yaml    # manual capability overrides over the generated catalog
   pricing.yaml         # manual pricing overrides over the generated catalog
   auth.yaml            # require_api_key + admin auth source
-  runtime.yaml         # store driver, rate limit, timeouts, request size
+  runtime.yaml         # store driver, rate limit, timeouts, request size, signal feedback
   server.yaml          # host / port
   memory.yaml          # forgetting/decay layer (observer compaction is auto, not configured)
 ```

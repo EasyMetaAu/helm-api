@@ -89,8 +89,9 @@ export const usageBudgetBuckets = sqliteTable(
 // Agentic Signals (POST-MVP feedback layer; docs/02). One row per
 // (task_type, lane) — the latest rolled-up, REDACTED observation. NO key /
 // payload column (principle 7): only aggregate dimensions. avg_cost_usd is REAL
-// nullable. Written ASYNCHRONOUSLY by the background collector, never on the
-// request path. This table is observe-only: the MVP route never reads it.
+// nullable. Written ASYNCHRONOUSLY by the background collector. The opt-in
+// routing feedback path reads only these aggregates and fails open on storage
+// errors.
 export const routingSignals = sqliteTable(
   "routing_signals",
   {

@@ -575,6 +575,7 @@ export {
   type ProviderAttempt as RouteProviderAttempt,
   type RouteDeps,
   type RouteOptions,
+  type RoutingSignalFeedbackDeps,
   routeRequest,
 } from "./routing/route-request.js";
 // Runtime-mutable settings (admin "System Settings") — load/seed/persist the
@@ -586,11 +587,11 @@ export {
   type SettingsLog,
   saveRuntimeSettings,
 } from "./settings/runtime-settings.js";
-// Agentic Signals — POST-MVP low-cost production feedback layer (docs/02,
-// research-notes "Plano"). Pure aggregator + background collector that distill
-// REDACTED routing signals from already-persisted decision records, ASYNCHRONOUS
-// and OFF the request path. Observe-only: this task never feeds signals back into
-// routing. Framework-agnostic; fail-open.
+// Agentic Signals — low-cost production feedback layer (docs/02, research-notes
+// "Plano"). Pure aggregator + background collector distill REDACTED routing
+// signals from already-persisted decision records off the request path. The
+// optional routeRequest consumer reads them fail-open for ranked-lane promotion.
+// Framework-agnostic; fail-open.
 export { aggregateSignals } from "./signals/aggregate.js";
 export {
   createSignalCollector,

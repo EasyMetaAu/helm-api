@@ -59,6 +59,18 @@ describe("loadConfig", () => {
     expect(cfg.runtime.store.url_env).toBe("HELM_STORE_URL");
   });
 
+  it("defaults routing signal feedback off and lets HELM_SIGNAL_FEEDBACK_ENABLED turn it on", () => {
+    const dflt = loadConfig({ configDir: "config", env: {}, readFile: fakeReadFile(VALID_YAML) });
+    expect(dflt.runtime.signal_feedback.enabled).toBe(false);
+    const cfg = loadConfig({
+      configDir: "config",
+      env: { HELM_SIGNAL_FEEDBACK_ENABLED: "true" },
+      readFile: fakeReadFile(VALID_YAML),
+    });
+    expect(cfg.runtime.signal_feedback.enabled).toBe(true);
+    expect(cfg.runtime.signal_feedback.min_samples).toBe(20);
+  });
+
   it("fails closed when HELM_STORE_DRIVER is an unknown driver", () => {
     expect(() =>
       loadConfig({

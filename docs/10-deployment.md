@@ -81,6 +81,9 @@ Configuration comes from **files** and **environment variables**, and env vars
   - `HELM_HOST`, `HELM_PORT`, `HELM_BASE_PATH`
   - `HELM_ADMIN_USER`, `HELM_ADMIN_PASSWORD`, `HELM_ADMIN_ENABLED`
   - `HELM_RATE_LIMIT_ENABLED`, `HELM_REQUEST_TIMEOUT_MS`, `HELM_MAX_REQUEST_BYTES`
+  - `HELM_SIGNAL_FEEDBACK_ENABLED` — opt into Agentic Signals feedback for ranked
+    lane promotion (disabled by default; detailed thresholds live in
+    `config/runtime.yaml`).
   - `HELM_STORE_DRIVER` (`sqlite` | `supabase`), `HELM_STORE_URL_ENV`
   - `HELM_DATA_DIR` (data directory, default `./data`), `HELM_KEYS_PERSIST_TO`
   - `HELM_OAUTH_ENC_KEY` — a 32-byte key used to encrypt stored OAuth
@@ -109,9 +112,10 @@ never runs in a half-broken state (Principle 2).
    API Keys & Rate Limits](06-auth-and-rate-limits.md)).
 3. Start the HTTP server (the API plus the admin UI when admin credentials are
    configured; see [11 · Admin UI](11-admin-ui.md)).
-4. Start the two off-request-path background workers — the **signal scheduler**
-   and the **memory worker** — unless disabled by their env vars (above). Each
-   timer is unref'd and fail-open; no request ever touches them.
+4. Start the two background workers — the **signal scheduler** and the **memory
+   worker** — unless disabled by their env vars (above). Each timer is unref'd
+   and fail-open. Signal collection itself is off-request-path; routing reads the
+   aggregated rows only when `runtime.signal_feedback.enabled` is on.
 5. Begin serving once the health endpoint reports ready.
 
 ## Health & version
