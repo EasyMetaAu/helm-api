@@ -63,6 +63,8 @@ const OpenAIChunkDeltaSchema = z.object({
   // the delta. Optional + shared shapes (ir.ts) so the identity OpenAI stream carries
   // them through to every downstream protocol consumer.
   reasoning_content: z.string().nullable().optional(),
+  // refusal fragments (OpenAI safety refusal); surfaced to the Responses refusal events.
+  refusal: z.string().nullable().optional(),
   annotations: z.array(IRAnnotationSchema).optional(),
   logprobs: IRLogprobsSchema.nullable().optional(),
 });
@@ -80,8 +82,17 @@ const OpenAIChunkUsageSchema = z
     // Some upstreams flatten cached here; real OpenAI nests it under
     // prompt_tokens_details.cached_tokens (matching the non-stream openai.ts shape).
     cached_tokens: z.number().int().nonnegative().optional(),
+    // Ephemeral cache WRITE tokens (Anthropic origin via IR) — kept so synthesized
+    // streams (cache hit / non-stream) re-expose cache_creation on message_delta.
+    cache_creation_tokens: z.number().int().nonnegative().optional(),
     prompt_tokens_details: z
       .object({ cached_tokens: z.number().int().nonnegative().optional() })
+      .passthrough()
+      .optional(),
+    // o-series reasoning tokens ride here on a real OpenAI streaming usage chunk;
+    // lifted into IRUsage.reasoning_tokens so downstream usage projections expose it.
+    completion_tokens_details: z
+      .object({ reasoning_tokens: z.number().int().nonnegative().optional() })
       .passthrough()
       .optional(),
   })
@@ -307,6 +318,11 @@ function messageDeltaEvent(state: StreamState): AnthropicSSEEvent {
       input_tokens: usage.input_tokens,
       output_tokens: usage.output_tokens,
       cache_read_input_tokens: usage.cache_read_input_tokens,
+      // Ephemeral cache WRITE tokens — mapUsage computes it; surface it here too so a
+      // streaming client sees the same cache_creation the non-stream path reports.
+      ...(usage.cache_creation_input_tokens !== undefined
+        ? { cache_creation_input_tokens: usage.cache_creation_input_tokens }
+        : {}),
     },
   };
 }
@@ -422,6 +438,9 @@ export async function* convertOpenAIStreamToAnthropic(
           : {}),
         ...(u.completion_tokens !== undefined ? { completion_tokens: u.completion_tokens } : {}),
         ...(cached > 0 ? { cached_tokens: cached } : {}),
+        ...(u.cache_creation_tokens !== undefined
+          ? { cache_creation_tokens: u.cache_creation_tokens }
+          : {}),
       };
     }
     if (choice?.finish_reason != null) state.finishReason = choice.finish_reason;
@@ -495,8 +514,10 @@ export async function* synthesizeSSEFromJSON(resp: IRResponse): AsyncIterable<An
 
   const toolCalls = message?.tool_calls ?? [];
   if (toolCalls.length > 0) {
+    // Honor an explicit upstream openaiIndex (preserves non-sequential parallel
+    // tool-call ordering); fall back to array position when none was supplied.
     delta.tool_calls = toolCalls.map((tc, i) => ({
-      index: i,
+      index: tc.openaiIndex ?? i,
       id: tc.id,
       type: "function" as const,
       function: { name: tc.function.name, arguments: tc.function.arguments },

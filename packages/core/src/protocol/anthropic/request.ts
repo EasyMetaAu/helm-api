@@ -176,7 +176,16 @@ type IRThinkingExt = { type: "thinking"; text: string; signature?: string };
 // —— system: string | block[] -> IR message content (string or multipart). ————————
 function normalizeSystem(system: z.infer<typeof AnthropicSystemSchema>): IRMessage["content"] {
   if (typeof system === "string") return system;
-  return system.map((b) => ({ type: "text" as const, text: b.text }));
+  // Preserve a per-block cache_control breakpoint (common on big system prompts);
+  // AnthropicTextBlockSchema is .passthrough(), so it rode through inbound parse.
+  return system.map((b) => {
+    const cc = (b as { cache_control?: unknown }).cache_control;
+    return {
+      type: "text" as const,
+      text: b.text,
+      ...(cc !== undefined ? { cache_control: cc } : {}),
+    };
+  });
 }
 
 // —— image block source:{base64} -> IR image part. Anthropic only carries the raw
@@ -335,20 +344,35 @@ export function transformRequestOut(req: unknown): IRRequest {
     const toolResults: IRMessage[] = [];
 
     for (const block of m.content) {
+      // Per-block cache_control (prompt-cache breakpoint) is preserved onto the IR part
+      // so it round-trips back out — Anthropic caching is otherwise silently dropped.
+      const cacheControl = (block as { cache_control?: unknown }).cache_control;
       switch (block.type) {
         case "text":
-          parts.push({ type: "text", text: (block as { text: string }).text });
+          parts.push({
+            type: "text",
+            text: (block as { text: string }).text,
+            ...(cacheControl !== undefined ? { cache_control: cacheControl } : {}),
+          });
           break;
-        case "image":
-          parts.push(
-            imagePartFromSource((block as z.infer<typeof AnthropicImageBlockSchema>).source),
+        case "image": {
+          const part = imagePartFromSource(
+            (block as z.infer<typeof AnthropicImageBlockSchema>).source,
           );
+          if (cacheControl !== undefined && part.type === "image")
+            part.cache_control = cacheControl;
+          parts.push(part);
           break;
-        case "document":
-          parts.push(
-            documentPartFromSource((block as z.infer<typeof AnthropicDocumentBlockSchema>).source),
+        }
+        case "document": {
+          const part = documentPartFromSource(
+            (block as z.infer<typeof AnthropicDocumentBlockSchema>).source,
           );
+          if (cacheControl !== undefined && part.type === "document")
+            part.cache_control = cacheControl;
+          parts.push(part);
           break;
+        }
         case "thinking": {
           const b = block as z.infer<typeof AnthropicThinkingBlockSchema>;
           // Rule 4: kept in the IR extension, NOT in normal content.
@@ -475,10 +499,12 @@ export function transformRequestOut(req: unknown): IRRequest {
 export interface AnthropicTextBlockOut {
   type: "text";
   text: string;
+  cache_control?: unknown;
 }
 export interface AnthropicImageBlockOut {
   type: "image";
   source: { type: "base64"; media_type: string; data: string } | { type: "url"; url: string };
+  cache_control?: unknown;
 }
 export interface AnthropicDocumentBlockOut {
   type: "document";
@@ -486,6 +512,7 @@ export interface AnthropicDocumentBlockOut {
     | { type: "base64"; media_type: string; data: string }
     | { type: "url"; url: string }
     | { type: "file"; file_id: string };
+  cache_control?: unknown;
 }
 export interface AnthropicToolUseBlockOut {
   type: "tool_use";
@@ -517,10 +544,10 @@ export interface AnthropicOutboundTool {
 }
 
 export type AnthropicToolChoiceOut =
-  | { type: "auto" }
-  | { type: "any" }
+  | { type: "auto"; disable_parallel_tool_use?: boolean }
+  | { type: "any"; disable_parallel_tool_use?: boolean }
   | { type: "none" }
-  | { type: "tool"; name: string };
+  | { type: "tool"; name: string; disable_parallel_tool_use?: boolean };
 
 export interface AnthropicThinkingConfigOut {
   type: string;
@@ -542,6 +569,7 @@ export interface AnthropicOutboundRequest {
   output_format?: AnthropicOutputFormat;
   thinking?: AnthropicThinkingConfigOut;
   service_tier?: string;
+  metadata?: unknown;
 }
 
 const DEFAULT_MAX_TOKENS = 4096;
@@ -550,11 +578,15 @@ const DEFAULT_MAX_TOKENS = 4096;
 // minimal|low|medium|high; LiteLLM derives a per-tier budget (referenced, NOT copied).
 // All non-disabled efforts emit type:"enabled" with a positive budget so the request
 // is a valid extended-thinking call.
+// Exact litellm parity (constants.py + _map_reasoning_effort): minimal/low both
+// floor at ANTHROPIC_MIN_THINKING_BUDGET_TOKENS=1024, medium=2048, high=4096. The
+// previous helm values (low:2048, medium:8192, high:16384) over-budgeted 2-4x —
+// a direct billing/latency inflation since thinking tokens are charged output.
 const REASONING_EFFORT_TO_BUDGET: Record<string, number> = {
   minimal: 1024,
-  low: 2048,
-  medium: 8192,
-  high: 16384,
+  low: 1024,
+  medium: 2048,
+  high: 4096,
 };
 
 function thinkingFromIR(ir: IRRequest): AnthropicThinkingConfigOut | undefined {
@@ -633,11 +665,18 @@ function contentToBlocks(content: IRMessage["content"]): AnthropicRequestBlock[]
   }
   const blocks: AnthropicRequestBlock[] = [];
   for (const part of content) {
-    if (part.type === "text") blocks.push({ type: "text", text: part.text });
-    else if (part.type === "image") blocks.push(imageBlockFromPart(part));
-    else if (part.type === "document") blocks.push(documentBlockFromPart(part));
+    let block: AnthropicRequestBlock | undefined;
+    if (part.type === "text") block = { type: "text", text: part.text };
+    else if (part.type === "image") block = imageBlockFromPart(part);
+    else if (part.type === "document") block = documentBlockFromPart(part);
     // thinking/audio/video parts are not re-emitted on the Anthropic request path
     // (Anthropic Messages has no audio/video content block today).
+    if (block === undefined) continue;
+    // Re-attach the prompt-cache breakpoint preserved on the IR part (only text/image/
+    // document blocks are built here; tool blocks have no cache_control surface).
+    const cc = (part as { cache_control?: unknown }).cache_control;
+    if (cc !== undefined) (block as { cache_control?: unknown }).cache_control = cc;
+    blocks.push(block);
   }
   return blocks;
 }
@@ -653,24 +692,36 @@ function systemFromMessages(
     }
   }
   if (blocks.length === 0) return undefined;
-  if (blocks.length === 1 && blocks[0] !== undefined) return blocks[0].text;
+  // Collapse to a bare string ONLY when nothing carries a cache_control breakpoint —
+  // a string has no place for it, so a single cached block must stay a block array.
+  const hasCacheControl = blocks.some(
+    (b) => (b as { cache_control?: unknown }).cache_control !== undefined,
+  );
+  if (!hasCacheControl && blocks.length === 1 && blocks[0] !== undefined) return blocks[0].text;
   return blocks;
 }
 
 function mapToolChoice(
   toolChoice: unknown,
   toolNameMap: ReturnType<typeof createAnthropicToolNameMap>,
+  parallelToolCalls?: boolean,
 ): AnthropicToolChoiceOut | undefined {
-  if (toolChoice === "auto") return { type: "auto" };
-  if (toolChoice === "required") return { type: "any" };
+  // parallel_tool_calls:false -> Anthropic disable_parallel_tool_use:true (valid only
+  // on auto/any/tool, NOT none). `undefined` means "client didn't ask" -> omit.
+  const disable = parallelToolCalls === false ? { disable_parallel_tool_use: true } : {};
+  if (toolChoice === "auto") return { type: "auto", ...disable };
+  if (toolChoice === "required") return { type: "any", ...disable };
   if (toolChoice === "none") return { type: "none" };
   if (typeof toolChoice === "object" && toolChoice !== null) {
     const choice = toolChoice as { type?: unknown; function?: { name?: unknown } };
     const name = choice.function?.name;
     if (choice.type === "function" && typeof name === "string" && name !== "") {
-      return { type: "tool", name: toolNameMap.toAnthropic(name) };
+      return { type: "tool", name: toolNameMap.toAnthropic(name), ...disable };
     }
   }
+  // No explicit tool_choice, but the client disabled parallel tool use: Anthropic
+  // requires the flag to ride a tool_choice, so synthesize the default {type:auto}.
+  if (parallelToolCalls === false) return { type: "auto", disable_parallel_tool_use: true };
   return undefined;
 }
 
@@ -779,7 +830,7 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
       : undefined;
 
   const system = systemFromMessages(parsed.messages);
-  const toolChoice = mapToolChoice(parsed.tool_choice, toolNameMap);
+  const toolChoice = mapToolChoice(parsed.tool_choice, toolNameMap, parsed.parallel_tool_calls);
   // responseFormatToOutputFormat invokes filterAnthropicOutputSchema internally, so
   // the outbound output_format drops Anthropic-unsupported constraint keywords.
   const outputFormat = responseFormatToOutputFormat(parsed.response_format);
@@ -810,6 +861,10 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
     ...(outputFormat !== undefined ? { output_format: outputFormat } : {}),
     ...(thinking !== undefined ? { thinking } : {}),
     ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
+    // metadata (Anthropic user-attribution) was stashed in provider_raw inbound; re-emit it.
+    ...(parsed.provider_raw?.metadata !== undefined
+      ? { metadata: parsed.provider_raw.metadata }
+      : {}),
   };
   return out;
 }

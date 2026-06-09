@@ -347,7 +347,28 @@ describe("anthropic transformRequestOut", () => {
     expect(ir.provider_raw?.metadata).toEqual({ user_id: "u-123" });
   });
 
-  it("accepts per-block cache_control without failing (fail-open passthrough)", () => {
+  // Codex P2: a prompt-cache breakpoint placed on a top-level `system` block must
+  // survive the round-trip — system blocks are a common cache breakpoint site.
+  it("preserves cache_control on a top-level system block (round-trip)", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      system: [{ type: "text", text: "big system prompt", cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const sysContent = ir.messages[0]?.content as Array<Record<string, unknown>>;
+    expect(sysContent[0]).toMatchObject({ cache_control: { type: "ephemeral" } });
+
+    const out = transformRequestIn(ir);
+    // Must stay a block array (not collapse to a bare string, which has no cache_control).
+    expect(Array.isArray(out.system)).toBe(true);
+    const block = (out.system as Array<{ cache_control?: unknown }>)[0];
+    expect(block?.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  // order 13: per-block cache_control must be PRESERVED through the IR (not just
+  // tolerated) and re-emitted on the outbound block, so prompt-cache breakpoints survive.
+  it("preserves per-block cache_control through the IR and round-trips it outbound", () => {
     const ir = transformRequestOut({
       model: "claude-3-5-sonnet",
       max_tokens: 64,
@@ -360,7 +381,15 @@ describe("anthropic transformRequestOut", () => {
     });
     expect(() => IRRequestSchema.parse(ir)).not.toThrow();
     const parts = ir.messages[0]?.content as Array<Record<string, unknown>>;
-    expect(parts[0]).toMatchObject({ type: "text", text: "long context" });
+    expect(parts[0]).toMatchObject({
+      type: "text",
+      text: "long context",
+      cache_control: { type: "ephemeral" },
+    });
+
+    const out = transformRequestIn(ir);
+    const block = out.messages[0]?.content[0] as { type: string; cache_control?: unknown };
+    expect(block.cache_control).toEqual({ type: "ephemeral" });
   });
 });
 
@@ -412,6 +441,65 @@ describe("anthropic transformRequestIn — P4 params", () => {
     });
     expect(out.thinking).toMatchObject({ type: "enabled" });
     expect((out.thinking as { budget_tokens?: number }).budget_tokens).toBeGreaterThan(0);
+  });
+
+  // order 9: budget must match litellm exactly (billing impact). Previously bloated
+  // 2-4x (low:2048, medium:8192, high:16384). litellm: minimal/low=1024 (the
+  // ANTHROPIC_MIN floor), medium=2048, high=4096.
+  it("maps reasoning_effort to the exact litellm thinking budget per tier", () => {
+    const budget = (effort: IRRequest["reasoning_effort"]) => {
+      const out = transformRequestIn({
+        model: "claude-3-7-sonnet",
+        messages: [{ role: "user", content: "hi" }],
+        reasoning_effort: effort,
+      });
+      return (out.thinking as { budget_tokens?: number }).budget_tokens;
+    };
+    expect(budget("minimal")).toBe(1024);
+    expect(budget("low")).toBe(1024);
+    expect(budget("medium")).toBe(2048);
+    expect(budget("high")).toBe(4096);
+  });
+
+  // order 10: client parallel_tool_calls:false -> Anthropic disable_parallel_tool_use.
+  it("maps parallel_tool_calls:false to tool_choice.disable_parallel_tool_use (with explicit tool_choice)", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: "auto",
+      parallel_tool_calls: false,
+    });
+    expect(out.tool_choice).toMatchObject({ type: "auto", disable_parallel_tool_use: true });
+  });
+
+  it("synthesizes tool_choice:{type:auto,disable_parallel_tool_use} when only parallel_tool_calls:false is set", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      parallel_tool_calls: false,
+    });
+    expect(out.tool_choice).toEqual({ type: "auto", disable_parallel_tool_use: true });
+  });
+
+  it("does not set disable_parallel_tool_use when parallel_tool_calls is true/absent", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: "auto",
+      parallel_tool_calls: true,
+    });
+    expect(out.tool_choice).toEqual({ type: "auto" });
+  });
+
+  // order 11: Anthropic metadata (user_id) stashed inbound in provider_raw must be
+  // re-emitted on the outbound request.
+  it("re-emits metadata from provider_raw onto the outbound request", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      provider_raw: { metadata: { user_id: "u-123" } },
+    });
+    expect((out as { metadata?: unknown }).metadata).toEqual({ user_id: "u-123" });
   });
 
   it("passes IR.service_tier through to the outbound request", () => {

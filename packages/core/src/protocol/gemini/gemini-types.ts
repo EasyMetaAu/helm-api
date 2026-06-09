@@ -167,6 +167,10 @@ export const GeminiUsageMetadataSchema = z
     thoughtsTokenCount: z.number().int().nonnegative().optional(),
     promptTokensDetails: z.array(GeminiModalityTokenCountSchema).optional(),
     candidatesTokensDetails: z.array(GeminiModalityTokenCountSchema).optional(),
+    // The per-modality breakdown of the CACHED prompt tokens (distinct from the
+    // aggregate cachedContentTokenCount). Without this the cached count is dropped
+    // entirely when Gemini reports only the breakdown.
+    cacheTokensDetails: z.array(GeminiModalityTokenCountSchema).optional(),
   })
   .passthrough();
 export type GeminiUsageMetadata = z.infer<typeof GeminiUsageMetadataSchema>;

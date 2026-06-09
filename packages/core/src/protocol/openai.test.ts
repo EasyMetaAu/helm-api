@@ -589,6 +589,168 @@ describe("openaiTransformer — model-generated audio output round-trip (P7)", (
   });
 });
 
+describe("openaiTransformer — max_completion_tokens (o-series, order 4)", () => {
+  // o-series models require max_completion_tokens instead of max_tokens. The IR
+  // has no .catchall, so without an explicit field it is stripped on inbound parse
+  // and never reaches the wire request.
+  it("preserves max_completion_tokens through native -> IR -> native", async () => {
+    const native = {
+      model: "o1",
+      messages: [{ role: "user", content: "x" }],
+      max_completion_tokens: 1000,
+    };
+    const ir = await openaiTransformer.transformRequestOut(native);
+    expect(ir.max_completion_tokens).toBe(1000);
+    const back = (await openaiTransformer.transformRequestIn(ir)) as {
+      max_completion_tokens?: number;
+    };
+    expect(back.max_completion_tokens).toBe(1000);
+  });
+});
+
+describe("openaiTransformer — service_tier response round-trip (order 2)", () => {
+  // OpenAI Chat responses carry a service_tier field; it must survive native -> IR
+  // -> native (the IR gains a first-class home so every protocol can read it).
+  it("captures and re-emits response.service_tier", async () => {
+    const upstream = {
+      id: "chatcmpl-st",
+      model: "gpt-4o",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+      service_tier: "default",
+    };
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    expect(ir.service_tier).toBe("default");
+    const back = (await openaiTransformer.transformResponseOut(ir)) as { service_tier?: string };
+    expect(back.service_tier).toBe("default");
+  });
+});
+
+describe("openaiTransformer — refusal logprobs track (order 3)", () => {
+  // logprobs carries a refusal track alongside content; it must have a structural
+  // IR home so cross-protocol consumers can read it (not just blind passthrough).
+  it("carries logprobs.refusal through native -> IR -> native", async () => {
+    const upstream = {
+      id: "chatcmpl-ref",
+      model: "gpt-4o",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "ok" },
+          finish_reason: "stop",
+          logprobs: {
+            content: [{ token: "ok", logprob: -0.1 }],
+            refusal: [{ token: "no", logprob: -0.2 }],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    };
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    expect(ir.choices[0]?.logprobs?.refusal?.[0]?.token).toBe("no");
+    const back = (await openaiTransformer.transformResponseOut(ir)) as {
+      choices: Array<{ logprobs?: { refusal?: Array<{ token: string }> } }>;
+    };
+    expect(back.choices[0]?.logprobs?.refusal?.[0]?.token).toBe("no");
+  });
+});
+
+describe("openaiTransformer — completion_tokens_details backfill (order 6)", () => {
+  // Anthropic->OpenAI: the IR carries flat reasoning_tokens but no
+  // completion_tokens_details. OpenAI clients read reasoning_tokens from the detail
+  // object, so the outbound transform must synthesize it from the flat mirror.
+  it("synthesizes completion_tokens_details.reasoning_tokens from flat IR.usage", async () => {
+    const ir: IRResponse = {
+      id: "claude-x",
+      model: "claude-3-7-sonnet",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 20, reasoning_tokens: 15 },
+    };
+    const back = (await openaiTransformer.transformResponseOut(ir)) as {
+      usage: { completion_tokens_details?: { reasoning_tokens?: number } };
+    };
+    expect(back.usage.completion_tokens_details?.reasoning_tokens).toBe(15);
+  });
+});
+
+describe("openaiTransformer — response_format fail-closed validation (order 15)", () => {
+  const reqWith = (rf: unknown) => async () =>
+    openaiTransformer.transformRequestOut({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "x" }],
+      response_format: rf,
+    });
+
+  it("accepts {type:'json_object'} and {type:'text'}", async () => {
+    await expect(reqWith({ type: "json_object" })()).resolves.toBeDefined();
+    await expect(reqWith({ type: "text" })()).resolves.toBeDefined();
+  });
+
+  it("accepts a well-formed json_schema {name, schema}", async () => {
+    const ir = await reqWith({
+      type: "json_schema",
+      json_schema: { name: "out", schema: { type: "object" } },
+    })();
+    expect((ir.response_format as { type: string }).type).toBe("json_schema");
+  });
+
+  it("rejects json_schema missing schema (fail-closed)", async () => {
+    await expect(
+      reqWith({ type: "json_schema", json_schema: { name: "broken" } })(),
+    ).rejects.toThrow(ZodError);
+  });
+
+  it("rejects json_schema missing name (fail-closed)", async () => {
+    await expect(
+      reqWith({ type: "json_schema", json_schema: { schema: { type: "object" } } })(),
+    ).rejects.toThrow(ZodError);
+  });
+});
+
+describe("openaiTransformer — tool-call index stability (order 16)", () => {
+  it("preserves an explicit openaiIndex through IRResponse synthesis ordering", async () => {
+    // The IR tool_calls array order IS the index; an explicit openaiIndex (when a
+    // proxy supplied non-sequential indices) must be honored, not re-sequenced.
+    const ir: IRResponse = {
+      id: "x",
+      model: "gpt-4o",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "a",
+                type: "function",
+                function: { name: "f0", arguments: "{}" },
+                openaiIndex: 0,
+              },
+              {
+                id: "b",
+                type: "function",
+                function: { name: "f2", arguments: "{}" },
+                openaiIndex: 2,
+              },
+              {
+                id: "c",
+                type: "function",
+                function: { name: "f1", arguments: "{}" },
+                openaiIndex: 1,
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    };
+    // The IR schema must carry openaiIndex (not strip it).
+    const calls = ir.choices[0]?.message.tool_calls;
+    expect(calls?.map((c) => c.openaiIndex)).toEqual([0, 2, 1]);
+  });
+});
+
 // Type-level sanity: the transformer satisfies the IR contract shapes.
 const _irReq: IRRequest = { model: "m", messages: [] };
 void _irReq;

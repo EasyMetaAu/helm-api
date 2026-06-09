@@ -92,6 +92,15 @@ const ResponsesOutputItemSchema = z.union([
 const ResponsesUsageSchema = z.object({
   input_tokens: z.number().int().nonnegative(),
   output_tokens: z.number().int().nonnegative(),
+  input_tokens_details: z
+    .object({
+      cached_tokens: z.number().int().nonnegative().optional(),
+      cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
+  output_tokens_details: z
+    .object({ reasoning_tokens: z.number().int().nonnegative().optional() })
+    .optional(),
 });
 
 const ResponseObjectSchema = z.object({
@@ -99,6 +108,9 @@ const ResponseObjectSchema = z.object({
   object: z.literal("response"),
   model: z.string(),
   status: z.string(),
+  // Why an incomplete response stopped (content_filter / max_tokens) — rides the
+  // terminal response.incomplete event so clients & the reverse path keep the reason.
+  incomplete_details: z.object({ reason: z.string().optional() }).optional(),
   output: z.array(z.unknown()),
   usage: ResponsesUsageSchema.optional(),
 });
@@ -125,7 +137,11 @@ const ContentPartAddedSchema = z.object({
   item_id: z.string(),
   output_index: z.number().int().nonnegative(),
   content_index: z.number().int().nonnegative(),
-  part: z.object({ type: z.literal("output_text"), text: z.literal("") }),
+  // An output_text part opens empty; a refusal part opens with an empty refusal string.
+  part: z.union([
+    z.object({ type: z.literal("output_text"), text: z.literal("") }),
+    z.object({ type: z.literal("refusal"), refusal: z.literal("") }),
+  ]),
 });
 const OutputTextDeltaSchema = z.object({
   type: z.literal("response.output_text.delta"),
@@ -149,7 +165,38 @@ const ContentPartDoneSchema = z.object({
   item_id: z.string(),
   output_index: z.number().int().nonnegative(),
   content_index: z.number().int().nonnegative(),
-  part: z.object({ type: z.literal("output_text"), text: z.string() }),
+  part: z.union([
+    z.object({ type: z.literal("output_text"), text: z.string() }),
+    z.object({ type: z.literal("refusal"), refusal: z.string() }),
+  ]),
+});
+// Refusal streaming (order 22): a safety refusal streams as its own message-item
+// content part, parallel to output_text but with refusal.delta / refusal.done.
+const RefusalDeltaSchema = z.object({
+  type: z.literal("response.refusal.delta"),
+  sequence_number: z.number().int().nonnegative(),
+  item_id: z.string(),
+  output_index: z.number().int().nonnegative(),
+  content_index: z.number().int().nonnegative(),
+  delta: z.string(),
+});
+const RefusalDoneSchema = z.object({
+  type: z.literal("response.refusal.done"),
+  sequence_number: z.number().int().nonnegative(),
+  item_id: z.string(),
+  output_index: z.number().int().nonnegative(),
+  content_index: z.number().int().nonnegative(),
+  refusal: z.string(),
+});
+// Annotation added to an output_text part (citations/grounding) mid-stream.
+const OutputTextAnnotationAddedSchema = z.object({
+  type: z.literal("response.output_text.annotation.added"),
+  sequence_number: z.number().int().nonnegative(),
+  item_id: z.string(),
+  output_index: z.number().int().nonnegative(),
+  content_index: z.number().int().nonnegative(),
+  annotation_index: z.number().int().nonnegative(),
+  annotation: z.unknown(),
 });
 const FunctionCallArgumentsDeltaSchema = z.object({
   type: z.literal("response.function_call_arguments.delta"),
@@ -205,6 +252,14 @@ const ResponseCompletedSchema = z.object({
   sequence_number: z.number().int().nonnegative(),
   response: ResponseObjectSchema,
 });
+// Distinct terminal event for an incomplete result (max_output_tokens / content
+// filter). OpenAI's Responses wire emits this INSTEAD of response.completed — a
+// client switches on the event type, not just response.status.
+const ResponseIncompleteSchema = z.object({
+  type: z.literal("response.incomplete"),
+  sequence_number: z.number().int().nonnegative(),
+  response: ResponseObjectSchema,
+});
 
 export const ResponsesSSEEventSchema = z.discriminatedUnion("type", [
   ResponseCreatedSchema,
@@ -219,7 +274,11 @@ export const ResponsesSSEEventSchema = z.discriminatedUnion("type", [
   FunctionCallArgumentsDeltaSchema,
   FunctionCallArgumentsDoneSchema,
   OutputItemDoneSchema,
+  RefusalDeltaSchema,
+  RefusalDoneSchema,
+  OutputTextAnnotationAddedSchema,
   ResponseCompletedSchema,
+  ResponseIncompleteSchema,
   ResponsesErrorEventSchema,
 ]);
 export type ResponsesSSEEvent = z.infer<typeof ResponsesSSEEventSchema>;
@@ -233,6 +292,15 @@ interface TextSlot {
   itemId: string;
   started: boolean; // output_item.added + content_part.added emitted?
   textBuffer: string; // accumulated text (flushed on output_text.done)
+  annotations: unknown[]; // citations attached to this output_text part (order 22)
+  annotationCount: number; // monotonic annotation_index allocator
+}
+
+interface RefusalSlot {
+  outputIndex: number;
+  itemId: string;
+  started: boolean; // output_item.added + content_part.added(refusal) emitted?
+  textBuffer: string; // accumulated refusal text (flushed on refusal.done)
 }
 
 interface ToolSlot {
@@ -259,6 +327,7 @@ interface StreamState {
   openItems: Set<number>; // started-but-not-done items (close guard)
   reasoningSlot: ReasoningSlot | null; // lazily allocated reasoning item
   textSlot: TextSlot | null; // lazily allocated text item
+  refusalSlot: RefusalSlot | null; // lazily allocated refusal item (order 22)
   toolIndexToSlot: Map<number, ToolSlot>; // OpenAI tool index → output slot
   finishReason: string | null; // terminal status source
   usage: IRUsage | null; // buffered; flushed on response.completed
@@ -273,6 +342,7 @@ function createState(model = "unknown"): StreamState {
     openItems: new Set(),
     reasoningSlot: null,
     textSlot: null,
+    refusalSlot: null,
     toolIndexToSlot: new Map(),
     finishReason: null,
     usage: null,
@@ -309,21 +379,39 @@ function itemId(outputIndex: number): string {
 // inline it rather than reference a non-existent symbol). ——————————————————————
 function projectUsage(usage: IRUsage | null): z.infer<typeof ResponsesUsageSchema> | undefined {
   if (usage === null) return undefined;
+  const cached = usage.cached_tokens ?? 0;
+  const inputDetails: Record<string, number> = {};
+  if (cached > 0) inputDetails.cached_tokens = cached;
+  if (usage.cache_creation_tokens !== undefined)
+    inputDetails.cache_creation_input_tokens = usage.cache_creation_tokens;
+  const outputDetails: Record<string, number> = {};
+  if (usage.reasoning_tokens !== undefined) outputDetails.reasoning_tokens = usage.reasoning_tokens;
   return {
-    input_tokens: usage.prompt_tokens ?? 0,
+    // Reconstruct the FULL input (cached + non-cached); state buffered prompt as non-cached.
+    input_tokens: (usage.prompt_tokens ?? 0) + cached,
     output_tokens: usage.completion_tokens ?? 0,
+    ...(Object.keys(inputDetails).length > 0 ? { input_tokens_details: inputDetails } : {}),
+    ...(Object.keys(outputDetails).length > 0 ? { output_tokens_details: outputDetails } : {}),
   };
 }
 
 function responseObject(
   state: StreamState,
-  opts: { status: string; output?: unknown[]; usage?: z.infer<typeof ResponsesUsageSchema> },
+  opts: {
+    status: string;
+    output?: unknown[];
+    usage?: z.infer<typeof ResponsesUsageSchema>;
+    incompleteReason?: string;
+  },
 ): z.infer<typeof ResponseObjectSchema> {
   return {
     id: state.responseId,
     object: "response",
     model: state.model,
     status: opts.status,
+    ...(opts.incompleteReason !== undefined
+      ? { incomplete_details: { reason: opts.incompleteReason } }
+      : {}),
     output: opts.output ?? [],
     ...(opts.usage !== undefined ? { usage: opts.usage } : {}),
   };
@@ -387,6 +475,43 @@ export async function* convertOpenAIStreamToResponses(
   yield* closeStream(state);
 }
 
+// Lazily open the assistant message item + its output_text content part, recording
+// the slot on state. Used by both the text-delta path and the annotation path (an
+// annotation must reference an existing output_text part). No-op once opened.
+function* ensureTextSlot(state: StreamState): Generator<ResponsesSSEEvent> {
+  if (state.textSlot !== null) return;
+  const outputIndex = allocOutputIndex(state);
+  const slot: TextSlot = {
+    outputIndex,
+    itemId: itemId(outputIndex),
+    started: true,
+    textBuffer: "",
+    annotations: [],
+    annotationCount: 0,
+  };
+  state.textSlot = slot;
+  yield ResponsesSSEEventSchema.parse({
+    type: "response.output_item.added",
+    sequence_number: nextSeq(state),
+    output_index: slot.outputIndex,
+    item: {
+      type: "message",
+      id: slot.itemId,
+      status: "in_progress",
+      role: "assistant",
+      content: [],
+    },
+  });
+  yield ResponsesSSEEventSchema.parse({
+    type: "response.content_part.added",
+    sequence_number: nextSeq(state),
+    item_id: slot.itemId,
+    output_index: slot.outputIndex,
+    content_index: 0,
+    part: { type: "output_text", text: "" },
+  });
+}
+
 // —— Per-chunk transition: reasoning -> text -> tool calls -> usage/finish. Split
 // out so the main generator can wrap the whole feed in a try/catch and emit an
 // `error` frame on a mid-stream upstream failure. ————————————————————————————————
@@ -435,15 +560,49 @@ function* handleChunk(state: StreamState, raw: OpenAIChunk): Generator<Responses
 
   // —— text: lazily open the text item + content part, then stream deltas. ——
   if (delta?.content) {
-    if (state.textSlot === null) {
+    yield* ensureTextSlot(state);
+    const slot = state.textSlot as TextSlot;
+    slot.textBuffer += delta.content;
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.output_text.delta",
+      sequence_number: nextSeq(state),
+      item_id: slot.itemId,
+      output_index: slot.outputIndex,
+      content_index: 0,
+      delta: delta.content,
+    });
+  }
+
+  // —— annotations (citations/grounding): attach to the output_text part (order 22). ——
+  if (delta?.annotations !== undefined && delta.annotations.length > 0) {
+    yield* ensureTextSlot(state);
+    const slot = state.textSlot as TextSlot;
+    for (const annotation of delta.annotations) {
+      slot.annotations.push(annotation);
+      yield ResponsesSSEEventSchema.parse({
+        type: "response.output_text.annotation.added",
+        sequence_number: nextSeq(state),
+        item_id: slot.itemId,
+        output_index: slot.outputIndex,
+        content_index: 0,
+        annotation_index: slot.annotationCount,
+        annotation,
+      });
+      slot.annotationCount += 1;
+    }
+  }
+
+  // —— refusal: a safety refusal streams as its own message-item refusal part (order 22). ——
+  if (delta?.refusal) {
+    if (state.refusalSlot === null) {
       const outputIndex = allocOutputIndex(state);
-      const slot: TextSlot = {
+      const slot: RefusalSlot = {
         outputIndex,
         itemId: itemId(outputIndex),
         started: true,
         textBuffer: "",
       };
-      state.textSlot = slot;
+      state.refusalSlot = slot;
       yield ResponsesSSEEventSchema.parse({
         type: "response.output_item.added",
         sequence_number: nextSeq(state),
@@ -462,18 +621,18 @@ function* handleChunk(state: StreamState, raw: OpenAIChunk): Generator<Responses
         item_id: slot.itemId,
         output_index: slot.outputIndex,
         content_index: 0,
-        part: { type: "output_text", text: "" },
+        part: { type: "refusal", refusal: "" },
       });
     }
-    const slot = state.textSlot;
-    slot.textBuffer += delta.content;
+    const slot = state.refusalSlot;
+    slot.textBuffer += delta.refusal;
     yield ResponsesSSEEventSchema.parse({
-      type: "response.output_text.delta",
+      type: "response.refusal.delta",
       sequence_number: nextSeq(state),
       item_id: slot.itemId,
       output_index: slot.outputIndex,
       content_index: 0,
-      delta: delta.content,
+      delta: delta.refusal,
     });
   }
 
@@ -540,12 +699,17 @@ function* handleChunk(state: StreamState, raw: OpenAIChunk): Generator<Responses
   if (chunk.usage) {
     const u = chunk.usage;
     const cached = u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+    const reasoning = u.completion_tokens_details?.reasoning_tokens;
     state.usage = {
       ...(u.prompt_tokens !== undefined
         ? { prompt_tokens: Math.max(0, u.prompt_tokens - cached) }
         : {}),
       ...(u.completion_tokens !== undefined ? { completion_tokens: u.completion_tokens } : {}),
       ...(cached > 0 ? { cached_tokens: cached } : {}),
+      ...(reasoning !== undefined ? { reasoning_tokens: reasoning } : {}),
+      ...(u.cache_creation_tokens !== undefined
+        ? { cache_creation_tokens: u.cache_creation_tokens }
+        : {}),
     };
   }
   if (choice?.finish_reason != null) state.finishReason = choice.finish_reason;
@@ -595,6 +759,11 @@ function* closeStream(state: StreamState): Generator<ResponsesSSEEvent> {
       content_index: 0,
       text: slot.textBuffer,
     });
+    // Attach any accumulated citations onto the final output_text part (order 22).
+    const textPart =
+      slot.annotations.length > 0
+        ? { type: "output_text", text: slot.textBuffer, annotations: slot.annotations }
+        : { type: "output_text", text: slot.textBuffer };
     yield ResponsesSSEEventSchema.parse({
       type: "response.content_part.done",
       sequence_number: nextSeq(state),
@@ -608,8 +777,44 @@ function* closeStream(state: StreamState): Generator<ResponsesSSEEvent> {
       id: slot.itemId,
       status: "completed",
       role: "assistant",
-      content: [{ type: "output_text", text: slot.textBuffer }],
-    };
+      content: [textPart],
+    } as ResponsesOutputItem;
+    state.openItems.delete(slot.outputIndex);
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.output_item.done",
+      sequence_number: nextSeq(state),
+      output_index: slot.outputIndex,
+      item,
+    });
+    finalOutput.push(item);
+  }
+
+  // —— Close the refusal item (refusal done → part done → item done) (order 22). ——
+  if (state.refusalSlot !== null && state.openItems.has(state.refusalSlot.outputIndex)) {
+    const slot = state.refusalSlot;
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.refusal.done",
+      sequence_number: nextSeq(state),
+      item_id: slot.itemId,
+      output_index: slot.outputIndex,
+      content_index: 0,
+      refusal: slot.textBuffer,
+    });
+    yield ResponsesSSEEventSchema.parse({
+      type: "response.content_part.done",
+      sequence_number: nextSeq(state),
+      item_id: slot.itemId,
+      output_index: slot.outputIndex,
+      content_index: 0,
+      part: { type: "refusal", refusal: slot.textBuffer },
+    });
+    const item: ResponsesOutputItem = {
+      type: "message",
+      id: slot.itemId,
+      status: "completed",
+      role: "assistant",
+      content: [{ type: "refusal", refusal: slot.textBuffer }],
+    } as ResponsesOutputItem;
     state.openItems.delete(slot.outputIndex);
     yield ResponsesSSEEventSchema.parse({
       type: "response.output_item.done",
@@ -659,15 +864,24 @@ function* closeStream(state: StreamState): Generator<ResponsesSSEEvent> {
     finalOutput.push(item);
   }
 
-  // —— Terminal response.completed: status via mapResponsesStatus (cannot diverge
-  // from the non-stream path), usage flushed exactly once here. ——
+  // —— Terminal event: status via mapResponsesStatus (cannot diverge from the
+  // non-stream path), usage flushed exactly once. An incomplete result terminates
+  // with the distinct response.incomplete event (order 24), not response.completed.
   const { status } = mapResponsesStatus(state.finishReason);
+  // Preserve WHY it's incomplete (content_filter vs max_tokens) on the terminal event.
+  const incompleteReason =
+    status === "incomplete"
+      ? state.finishReason === "content_filter"
+        ? "content_filter"
+        : "max_tokens"
+      : undefined;
   yield ResponsesSSEEventSchema.parse({
-    type: "response.completed",
+    type: status === "incomplete" ? "response.incomplete" : "response.completed",
     sequence_number: nextSeq(state),
     response: responseObject(state, {
       status,
       output: finalOutput,
+      ...(incompleteReason !== undefined ? { incompleteReason } : {}),
       ...(projectUsage(state.usage) !== undefined ? { usage: projectUsage(state.usage) } : {}),
     }),
   });
@@ -766,6 +980,32 @@ export async function* convertResponsesEventStreamToOpenAI(
         };
         break;
       }
+      case "response.refusal.delta": {
+        // order 22: project a refusal fragment back onto the OpenAI delta.refusal.
+        yield {
+          choices: [
+            {
+              index: 0,
+              delta: { refusal: ev.delta } as Record<string, unknown>,
+              finish_reason: null,
+            },
+          ],
+        };
+        break;
+      }
+      case "response.output_text.annotation.added": {
+        // order 22: project a streamed annotation back onto delta.annotations.
+        yield {
+          choices: [
+            {
+              index: 0,
+              delta: { annotations: [ev.annotation] } as Record<string, unknown>,
+              finish_reason: null,
+            },
+          ],
+        };
+        break;
+      }
       case "response.output_item.added": {
         if (ev.item.type === "function_call") {
           const idx = nextToolIndex++;
@@ -805,9 +1045,18 @@ export async function* convertResponsesEventStreamToOpenAI(
         };
         break;
       }
+      case "response.incomplete":
       case "response.completed": {
         const u = ev.response.usage;
-        const finish = ev.response.status === "incomplete" ? "length" : "stop";
+        // An incomplete result maps to content_filter (when the reason says so) else
+        // length; a completed result is stop. The reason rides incomplete_details.
+        const isIncomplete =
+          ev.type === "response.incomplete" || ev.response.status === "incomplete";
+        const finish = !isIncomplete
+          ? "stop"
+          : ev.response.incomplete_details?.reason === "content_filter"
+            ? "content_filter"
+            : "length";
         yield {
           ...(ev.response.id !== "" ? { id: ev.response.id } : {}),
           ...(ev.response.model !== "" ? { model: ev.response.model } : {}),

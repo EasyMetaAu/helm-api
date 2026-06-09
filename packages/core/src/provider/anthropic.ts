@@ -388,6 +388,33 @@ function openaiChunk(model: string, delta: Record<string, unknown>, finish: stri
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
 
+// OpenAI's stream_options.include_usage convention: a FINAL chunk carrying empty
+// choices + a usage object (prompt = full input incl cache; cached reported via
+// prompt_tokens_details). execute.ts always sets include_usage on streaming, so an
+// OpenAI client (and the budget settle) depends on this frame being emitted.
+function openaiUsageChunk(
+  model: string,
+  usage: { input: number; output: number; cacheRead: number; cacheCreation: number },
+): string {
+  const promptTokens = usage.input + usage.cacheRead + usage.cacheCreation;
+  const chunk = {
+    id: `chatcmpl-${Date.now()}`,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [] as never[],
+    usage: {
+      prompt_tokens: promptTokens,
+      completion_tokens: usage.output,
+      total_tokens: promptTokens + usage.output,
+      ...(usage.cacheRead > 0 || usage.cacheCreation > 0
+        ? { prompt_tokens_details: { cached_tokens: usage.cacheRead } }
+        : {}),
+    },
+  };
+  return `data: ${JSON.stringify(chunk)}\n\n`;
+}
+
 export async function* translateAnthropicSSE(
   res: Response,
   model: string,
@@ -404,6 +431,12 @@ export async function* translateAnthropicSSE(
   // tool-call streaming state: anthropic emits one content_block per tool_use.
   let toolIndex = -1;
   let started = false;
+  // include_usage accumulation: input/cache land on message_start, output on
+  // message_delta. Emitted as a terminal usage chunk before [DONE] (OpenAI convention).
+  let usageInput = 0;
+  let usageOutput = 0;
+  let usageCacheRead = 0;
+  let usageCacheCreation = 0;
   try {
     while (true) {
       let read: { done: boolean; value?: Uint8Array };
@@ -430,6 +463,15 @@ export async function* translateAnthropicSSE(
         const type = evt.type;
         if (type === "message_start" && !started) {
           started = true;
+          const u = ((evt.message as Record<string, unknown> | undefined)?.usage ?? {}) as Record<
+            string,
+            unknown
+          >;
+          if (typeof u.input_tokens === "number") usageInput = u.input_tokens;
+          if (typeof u.cache_read_input_tokens === "number")
+            usageCacheRead = u.cache_read_input_tokens;
+          if (typeof u.cache_creation_input_tokens === "number")
+            usageCacheCreation = u.cache_creation_input_tokens;
           yield openaiChunk(model, { role: "assistant", content: "" }, null);
         } else if (type === "content_block_start") {
           const block = (evt.content_block ?? {}) as Record<string, unknown>;
@@ -467,10 +509,22 @@ export async function* translateAnthropicSSE(
           }
         } else if (type === "message_delta") {
           const d = (evt.delta ?? {}) as Record<string, unknown>;
+          const u = (evt.usage ?? {}) as Record<string, unknown>;
+          if (typeof u.output_tokens === "number") usageOutput = u.output_tokens;
+          if (typeof u.cache_read_input_tokens === "number")
+            usageCacheRead = Math.max(usageCacheRead, u.cache_read_input_tokens);
           if (typeof d.stop_reason === "string") {
             yield openaiChunk(model, {}, STOP_MAP[d.stop_reason] ?? "stop");
           }
         } else if (type === "message_stop") {
+          // include_usage: emit the terminal usage frame BEFORE [DONE] so an OpenAI
+          // client and the budget settle see the real token counts (order 14).
+          yield openaiUsageChunk(model, {
+            input: usageInput,
+            output: usageOutput,
+            cacheRead: usageCacheRead,
+            cacheCreation: usageCacheCreation,
+          });
           yield "data: [DONE]\n\n";
           // Terminal event: stop reading NOW. Otherwise the next read would block
           // on the idle guard and could turn a completed response into a spurious

@@ -35,6 +35,89 @@ function seqs(events: ResponsesSSEEvent[]): number[] {
   return events.map((e) => e.sequence_number);
 }
 
+// —— order 22: refusal + annotation streaming events ————————————————————————————
+describe("convertOpenAIStreamToResponses — refusal + annotation streaming (order 22)", () => {
+  it("emits response.refusal.delta×N + a terminal response.refusal.done", async () => {
+    const chunks: OpenAIChunk[] = [
+      { choices: [{ index: 0, delta: { role: "assistant", refusal: "I can" } }] },
+      { choices: [{ index: 0, delta: { refusal: "not help" } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+    ];
+    const events = await collect(convertOpenAIStreamToResponses(feed(chunks)));
+    const deltas = events.filter((e) => e.type === "response.refusal.delta");
+    expect(deltas.map((e) => (e as { delta: string }).delta)).toEqual(["I can", "not help"]);
+    const done = events.find((e) => e.type === "response.refusal.done") as
+      | { refusal: string }
+      | undefined;
+    expect(done?.refusal).toBe("I cannot help");
+    // The refusal item closes as a message item carrying a refusal content part.
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    const refusalItem = (completed.response.output as Array<{ content?: Array<{ type: string }> }>)
+      .flatMap((o) => o.content ?? [])
+      .find((p) => p.type === "refusal");
+    expect(refusalItem).toBeDefined();
+  });
+
+  it("emits response.output_text.annotation.added for delta.annotations", async () => {
+    const chunks: OpenAIChunk[] = [
+      { choices: [{ index: 0, delta: { role: "assistant", content: "see source" } }] },
+      {
+        choices: [
+          { index: 0, delta: { annotations: [{ type: "url_citation", url: "https://x" }] } },
+        ],
+      },
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+    ];
+    const events = await collect(convertOpenAIStreamToResponses(feed(chunks)));
+    const ann = events.find((e) => e.type === "response.output_text.annotation.added") as
+      | { annotation: { url?: string }; annotation_index: number }
+      | undefined;
+    expect(ann?.annotation?.url).toBe("https://x");
+    expect(ann?.annotation_index).toBe(0);
+  });
+
+  it("reverse: response.refusal.delta -> delta.refusal", async () => {
+    const irChunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.refusal.delta",
+            sequence_number: 0,
+            item_id: "i",
+            output_index: 0,
+            content_index: 0,
+            delta: "no",
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    const first = irChunks[0] as { choices?: Array<{ delta?: { refusal?: string } }> };
+    expect(first.choices?.[0]?.delta?.refusal).toBe("no");
+  });
+
+  it("reverse: response.output_text.annotation.added -> delta.annotations", async () => {
+    const irChunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.output_text.annotation.added",
+            sequence_number: 0,
+            item_id: "i",
+            output_index: 0,
+            content_index: 0,
+            annotation_index: 0,
+            annotation: { type: "url_citation", url: "https://x" },
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    const first = irChunks[0] as {
+      choices?: Array<{ delta?: { annotations?: Array<{ url?: string }> } }>;
+    };
+    expect(first.choices?.[0]?.delta?.annotations?.[0]?.url).toBe("https://x");
+  });
+});
+
 // —— 1. event sequence: pure text ————————————————————————————————————————————
 
 describe("convertOpenAIStreamToResponses — text event sequence", () => {
@@ -141,6 +224,35 @@ describe("convertOpenAIStreamToResponses — text event sequence", () => {
     expect(completed.type).toBe("response.completed");
     expect(completed.response.status).toBe("completed");
     expect(completed.response.usage).toEqual({ input_tokens: 10, output_tokens: 4 });
+  });
+
+  // order 21: reasoning_tokens (output) + cached (input) must ride the streamed usage
+  // projection, so an o-series streaming client gets the same detail as non-streaming.
+  it("projects reasoning_tokens + cached into response.completed usage details (order 21)", async () => {
+    const usageChunk: OpenAIChunk = {
+      id: "chatcmpl-x",
+      model: "gpt-x",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        prompt_tokens_details: { cached_tokens: 30 },
+        completion_tokens_details: { reasoning_tokens: 8 },
+      },
+    } as OpenAIChunk;
+    const events = await collect(
+      convertOpenAIStreamToResponses(feed([textChunk("hi"), usageChunk])),
+    );
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    const usage = completed.response.usage as {
+      input_tokens: number;
+      output_tokens: number;
+      input_tokens_details?: { cached_tokens?: number };
+      output_tokens_details?: { reasoning_tokens?: number };
+    };
+    expect(usage.input_tokens).toBe(100); // full prompt reconstructed (cached + non-cached)
+    expect(usage.input_tokens_details?.cached_tokens).toBe(30);
+    expect(usage.output_tokens_details?.reasoning_tokens).toBe(8);
   });
 });
 
@@ -366,12 +478,93 @@ describe("convertOpenAIStreamToResponses — tool calls", () => {
 // —— 3. terminal mapping + boundary sequences ————————————————————————————————
 
 describe("convertOpenAIStreamToResponses — terminal mapping & edge sequences", () => {
-  it("maps finish_reason length → status incomplete", async () => {
+  // order 24: an incomplete result terminates with a distinct response.incomplete
+  // event (OpenAI's wire contract), NOT response.completed with an incomplete status.
+  it("maps finish_reason length → terminal response.incomplete event", async () => {
     const events = await collect(
       convertOpenAIStreamToResponses(feed([textChunk("x"), textChunk("", "length")])),
     );
-    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
-    expect(completed.response.status).toBe("incomplete");
+    const terminal = events.at(-1) as ResponsesSSEEvent;
+    expect(terminal.type).toBe("response.incomplete");
+    if (terminal.type === "response.incomplete")
+      expect(terminal.response.status).toBe("incomplete");
+    expect(events.some((e) => e.type === "response.completed")).toBe(false);
+  });
+
+  // Codex P2: response.incomplete must carry incomplete_details.reason so a client (and
+  // the reverse path) can tell content_filter from max_tokens.
+  it("carries incomplete_details.reason=content_filter on a filtered stream", async () => {
+    const events = await collect(
+      convertOpenAIStreamToResponses(feed([textChunk("x"), textChunk("", "content_filter")])),
+    );
+    const terminal = events.at(-1) as ResponsesSSEEvent;
+    expect(terminal.type).toBe("response.incomplete");
+    if (terminal.type === "response.incomplete") {
+      expect(
+        (terminal.response as { incomplete_details?: { reason?: string } }).incomplete_details
+          ?.reason,
+      ).toBe("content_filter");
+    }
+  });
+
+  it("carries incomplete_details.reason=max_tokens on a length-capped stream", async () => {
+    const events = await collect(
+      convertOpenAIStreamToResponses(feed([textChunk("x"), textChunk("", "length")])),
+    );
+    const terminal = events.at(-1) as ResponsesSSEEvent;
+    if (terminal.type === "response.incomplete") {
+      expect(
+        (terminal.response as { incomplete_details?: { reason?: string } }).incomplete_details
+          ?.reason,
+      ).toBe("max_tokens");
+    }
+  });
+
+  it("reverse: response.incomplete{content_filter} maps to finish_reason=content_filter", async () => {
+    const irChunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.incomplete",
+            sequence_number: 0,
+            response: {
+              id: "r",
+              object: "response",
+              model: "m",
+              status: "incomplete",
+              incomplete_details: { reason: "content_filter" },
+              output: [],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            },
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    const last = irChunks.at(-1) as { choices?: Array<{ finish_reason?: string }> };
+    expect(last.choices?.[0]?.finish_reason).toBe("content_filter");
+  });
+
+  it("reverse: a response.incomplete upstream event maps to finish_reason=length", async () => {
+    const irChunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.incomplete",
+            sequence_number: 0,
+            response: {
+              id: "r",
+              object: "response",
+              model: "m",
+              status: "incomplete",
+              output: [],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            },
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    const last = irChunks.at(-1) as { choices?: Array<{ finish_reason?: string }> };
+    expect(last.choices?.[0]?.finish_reason).toBe("length");
   });
 
   it("empty stream still produces a legal created…completed sequence", async () => {

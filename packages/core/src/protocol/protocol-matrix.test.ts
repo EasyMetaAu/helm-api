@@ -383,11 +383,13 @@ function expectTargetUsageNotDoubleBilled(protocol: ProtocolName, native: unknow
     expect(serialized).toContain('"totalTokenCount":17');
   }
   if (protocol === "responses") {
-    // The Responses IR->native renderer emits the NON-cached input + output (it has
-    // no on-wire cached breakdown — the cache split survives in the IR / provider_raw,
-    // never double-billed). 10 = prompt_tokens (13 full − 3 cached).
-    expect(serialized).toContain('"input_tokens":10');
+    // The Responses renderer reports the FULL input (13 = 10 non-cached + 3 cached)
+    // with the cached split on input_tokens_details — parallel to openai/gemini, and
+    // matching the Responses API's own input_tokens_details.cached_tokens. Cache is
+    // shown for transparency, never double-billed (the 3 is part of the 13). (order 21)
+    expect(serialized).toContain('"input_tokens":13');
     expect(serialized).toContain('"output_tokens":4');
+    expect(serialized).toContain('"cached_tokens":3');
   }
 }
 
@@ -1003,7 +1005,8 @@ describe("citations/annotations cross-path render (P8)", () => {
   // as a documented gap until a native citation re-render exists (false).
   const ANNOTATION_NATIVE_SURFACE: Record<ProtocolName, boolean> = {
     openai: true,
-    responses: false,
+    // order 20: Responses now re-emits annotations natively onto the output_text part.
+    responses: true,
     anthropic: false,
     gemini: false,
   };

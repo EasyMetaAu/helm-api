@@ -55,11 +55,24 @@ const ResponsesInputImageSchema = z
     detail: z.string().optional(),
   })
   .passthrough();
+// Responses file input: a PDF/document via uploaded handle (file_id), inline base64
+// (file_data data-url) or a remote url (file_url). Mirrors the outbound input_file the
+// IR-document renderer emits, so a documents round-trip is lossless (Codex P2).
+const ResponsesInputFileSchema = z
+  .object({
+    type: z.literal("input_file"),
+    file_id: z.string().optional(),
+    file_data: z.string().optional(),
+    file_url: z.string().optional(),
+    filename: z.string().optional(),
+  })
+  .passthrough();
 const ResponsesUnknownPartSchema = z.object({ type: z.string() }).passthrough();
 const ResponsesContentPartSchema = z.union([
   ResponsesInputTextSchema,
   ResponsesOutputTextSchema,
   ResponsesInputImageSchema,
+  ResponsesInputFileSchema,
   ResponsesUnknownPartSchema,
 ]);
 
@@ -137,6 +150,17 @@ const ResponsesRequestSchema = z
     max_output_tokens: z.number().int().positive().optional(),
     stream: z.boolean().optional(),
     text: z.unknown().optional(), // Responses' structured-output config (response_format analogue)
+    // Reasoning config: effort maps onto the cross-protocol IR.reasoning_effort; the
+    // full object (incl summary) rides provider_raw for lossless reconstruction.
+    reasoning: z
+      .object({
+        effort: z.enum(["minimal", "low", "medium", "high"]).optional(),
+        summary: z.union([z.boolean(), z.string()]).optional(),
+      })
+      .passthrough()
+      .optional(),
+    // Context-window truncation control — no IR home, rides provider_raw.
+    truncation: z.enum(["auto", "disabled"]).optional(),
     // —— litellm-parity sampling/control params. The IR-backed ones (top_p, the two
     // penalties, seed, n, parallel_tool_calls) map straight onto the IR. The
     // Responses-only knobs (store/previous_response_id/metadata/logit_bias) have no
@@ -159,6 +183,47 @@ export type ResponsesRequest = z.infer<typeof ResponsesRequestSchema>;
 // IR thinking extension shape (mirrors the anthropic transformer's local type).
 type IRThinkingExt = { type: "thinking"; text: string; signature?: string };
 
+// —— Structured-output canonicalization (order 1, the keystone). Responses nests the
+// schema under `text.format.{type,name,schema,strict}`, but the IR is OpenAI-Chat-
+// shaped and the Anthropic/Gemini renderers read `response_format.{type, json_schema}`.
+// Without this fold a Responses structured-output request is silently dropped when
+// routed to a non-Responses backend. We canonicalize inbound and reverse outbound;
+// the RAW Responses `text` is also stashed in provider_raw.text for a lossless
+// responses->responses self round-trip. ————————————————————————————————————————————
+function responsesTextToResponseFormat(text: unknown): unknown {
+  if (typeof text !== "object" || text === null) return undefined;
+  const format = (text as { format?: unknown }).format;
+  if (typeof format !== "object" || format === null) return undefined;
+  const f = format as Record<string, unknown>;
+  if (f.type === "json_schema") {
+    const json_schema: Record<string, unknown> = {};
+    if (typeof f.name === "string") json_schema.name = f.name;
+    if (f.schema !== undefined) json_schema.schema = f.schema;
+    if (f.strict !== undefined) json_schema.strict = f.strict;
+    return { type: "json_schema", json_schema };
+  }
+  if (f.type === "json_object") return { type: "json_object" };
+  // `text` (plain) or an unknown format => no structured-output request.
+  return undefined;
+}
+
+function responseFormatToResponsesText(rf: unknown): unknown {
+  if (typeof rf !== "object" || rf === null) return undefined;
+  const f = rf as Record<string, unknown>;
+  if (f.type === "json_schema") {
+    const js = (
+      typeof f.json_schema === "object" && f.json_schema !== null ? f.json_schema : {}
+    ) as Record<string, unknown>;
+    const format: Record<string, unknown> = { type: "json_schema" };
+    if (typeof js.name === "string") format.name = js.name;
+    if (js.schema !== undefined) format.schema = js.schema;
+    if (js.strict !== undefined) format.strict = js.strict;
+    return { format };
+  }
+  if (f.type === "json_object") return { format: { type: "json_object" } };
+  return undefined;
+}
+
 // —— content-part folding: Responses parts -> IR parts. Unknown parts degrade to a
 // JSON text placeholder so nothing is silently dropped (fail-open). ————————————————
 function foldContentPart(part: z.infer<typeof ResponsesContentPartSchema>): IRContentPart {
@@ -169,6 +234,17 @@ function foldContentPart(part: z.infer<typeof ResponsesContentPartSchema>): IRCo
     case "input_image": {
       const p = part as z.infer<typeof ResponsesInputImageSchema>;
       return { type: "image", url: p.image_url ?? "" };
+    }
+    case "input_file": {
+      const p = part as z.infer<typeof ResponsesInputFileSchema>;
+      const name = p.filename !== undefined ? { filename: p.filename } : {};
+      if (p.file_id !== undefined) return { type: "document", fileId: p.file_id, ...name };
+      // file_data is a base64 data-url (data:<mime>;base64,<data>) when present.
+      const m = p.file_data !== undefined ? /^data:([^;]+);base64,(.*)$/.exec(p.file_data) : null;
+      if (m?.[1] !== undefined && m[2] !== undefined) {
+        return { type: "document", data: m[2], mediaType: m[1], ...name };
+      }
+      return { type: "document", url: p.file_url ?? p.file_data ?? "", ...name };
     }
     default:
       return { type: "text", text: JSON.stringify(part) };
@@ -276,6 +352,15 @@ function toIRRequest(req: NativeRequest): IRRequest {
     providerRaw.previous_response_id = parsed.previous_response_id;
   if (parsed.metadata !== undefined) providerRaw.metadata = parsed.metadata;
   if (parsed.logit_bias !== undefined) providerRaw.logit_bias = parsed.logit_bias;
+  // Reasoning config + truncation have no IR field of their own; preserve verbatim.
+  // NB: a distinct key — provider_raw.reasoning already holds inbound reasoning ITEMS.
+  if (parsed.reasoning !== undefined) providerRaw.reasoning_config = parsed.reasoning;
+  if (parsed.truncation !== undefined) providerRaw.truncation = parsed.truncation;
+  // Preserve the raw Responses `text` so a responses->responses round-trip is lossless
+  // even after we canonicalize it into IR.response_format for other backends.
+  if (parsed.text !== undefined) providerRaw.text = parsed.text;
+
+  const responseFormat = responsesTextToResponseFormat(parsed.text);
 
   const ir: IRRequest = {
     model: parsed.model,
@@ -285,7 +370,7 @@ function toIRRequest(req: NativeRequest): IRRequest {
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
     ...(parsed.max_output_tokens !== undefined ? { max_tokens: parsed.max_output_tokens } : {}),
     ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
-    ...(parsed.text !== undefined ? { response_format: parsed.text } : {}),
+    ...(responseFormat !== undefined ? { response_format: responseFormat } : {}),
     // IR-backed sampling/control params map straight through.
     ...(parsed.top_p !== undefined ? { top_p: parsed.top_p } : {}),
     ...(parsed.frequency_penalty !== undefined
@@ -296,6 +381,9 @@ function toIRRequest(req: NativeRequest): IRRequest {
     ...(parsed.n !== undefined ? { n: parsed.n } : {}),
     ...(parsed.parallel_tool_calls !== undefined
       ? { parallel_tool_calls: parsed.parallel_tool_calls }
+      : {}),
+    ...(parsed.reasoning?.effort !== undefined
+      ? { reasoning_effort: parsed.reasoning.effort }
       : {}),
     ...(thinking.length > 0 ? { thinking } : {}),
     ...(Object.keys(providerRaw).length > 0 ? { provider_raw: providerRaw } : {}),
@@ -354,20 +442,21 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
     input.push({
       type: "message",
       role: m.role,
-      content: [
-        {
-          type: m.role === "assistant" ? "output_text" : "input_text",
-          text: contentToText(m.content),
-        },
-      ],
+      content: contentToResponsesParts(m.content, m.role === "assistant"),
     });
   }
 
   const raw = parsed.provider_raw;
+  // Structured output: prefer the lossless raw Responses `text` (responses origin);
+  // else synthesize it from the canonical IR.response_format (chat/anthropic/gemini
+  // origin) so structured output is honored on the Responses wire either way.
+  const text =
+    raw?.text !== undefined ? raw.text : responseFormatToResponsesText(parsed.response_format);
   return {
     model: parsed.model,
     ...(instructions !== undefined ? { instructions } : {}),
     input,
+    ...(text !== undefined ? { text } : {}),
     ...(parsed.tools !== undefined ? { tools: parsed.tools } : {}),
     ...(parsed.tool_choice !== undefined ? { tool_choice: parsed.tool_choice } : {}),
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
@@ -391,6 +480,14 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
       : {}),
     ...(raw?.metadata !== undefined ? { metadata: raw.metadata } : {}),
     ...(raw?.logit_bias !== undefined ? { logit_bias: raw.logit_bias } : {}),
+    // Reasoning config: prefer the preserved native object, else synthesize from the
+    // cross-protocol IR.reasoning_effort so o-series reasoning survives chat->responses.
+    ...(raw?.reasoning_config !== undefined
+      ? { reasoning: raw.reasoning_config }
+      : parsed.reasoning_effort !== undefined
+        ? { reasoning: { effort: parsed.reasoning_effort } }
+        : {}),
+    ...(raw?.truncation !== undefined ? { truncation: raw.truncation } : {}),
   };
 }
 
@@ -401,6 +498,35 @@ function contentToText(content: IRMessage["content"]): string {
     .filter((p): p is Extract<IRContentPart, { type: "text" }> => p.type === "text")
     .map((p) => p.text)
     .join("");
+}
+
+// IR content -> Responses content parts, PRESERVING multimodality (order 25): text ->
+// input_text/output_text, image -> input_image, document -> input_file. Collapsing to
+// a single text part dropped images/files silently. audio/video/thinking have no
+// Responses input surface and are omitted (text already carries the prompt).
+function contentToResponsesParts(
+  content: IRMessage["content"],
+  isAssistant: boolean,
+): Array<Record<string, unknown>> {
+  const textType = isAssistant ? "output_text" : "input_text";
+  if (content === null) return [{ type: textType, text: "" }];
+  if (typeof content === "string") return [{ type: textType, text: content }];
+  const parts: Array<Record<string, unknown>> = [];
+  for (const p of content) {
+    if (p.type === "text") parts.push({ type: textType, text: p.text });
+    else if (p.type === "image") parts.push({ type: "input_image", image_url: p.url });
+    else if (p.type === "document") {
+      if (p.fileId !== undefined) parts.push({ type: "input_file", file_id: p.fileId });
+      else if (p.data !== undefined)
+        parts.push({
+          type: "input_file",
+          ...(p.filename !== undefined ? { filename: p.filename } : {}),
+          file_data: `data:${p.mediaType ?? "application/octet-stream"};base64,${p.data}`,
+        });
+      else if (p.url !== undefined) parts.push({ type: "input_file", file_url: p.url });
+    }
+  }
+  return parts.length > 0 ? parts : [{ type: textType, text: "" }];
 }
 
 // —— finish_reason -> Responses status (research-notes pit #1). The legal terminal
@@ -435,7 +561,7 @@ function toResponsesResponse(res: IRResponse): NativeResponse {
   const { status, raw } = mapResponsesStatus(choice?.finish_reason ?? null);
 
   const output: Array<Record<string, unknown>> = [];
-  const messageContent: Array<{ type: "output_text"; text: string }> = [];
+  const messageContent: Array<Record<string, unknown>> = [];
 
   // Reasoning (content-block thinking parts OR the flat reasoning_content/
   // thinking_blocks carriers — e.g. an OpenAI-Chat/Anthropic/Gemini origin) renders
@@ -458,6 +584,17 @@ function toResponsesResponse(res: IRResponse): NativeResponse {
     }
   }
 
+  // order 20/23: citations/grounding (message.annotations) and per-choice logprobs ride
+  // the output_text content part (litellm's shape), so a Responses client that reads
+  // annotations/logprobs off the part still sees them. Attach to the first text part.
+  const firstText = messageContent.find((p) => p.type === "output_text");
+  if (firstText !== undefined) {
+    if (message.annotations !== undefined && message.annotations.length > 0) {
+      firstText.annotations = message.annotations;
+    }
+    if (choice?.logprobs != null) firstText.logprobs = choice.logprobs;
+  }
+
   if (messageContent.length > 0) {
     output.push({ type: "message", role: "assistant", content: messageContent });
   }
@@ -471,20 +608,47 @@ function toResponsesResponse(res: IRResponse): NativeResponse {
     });
   }
 
+  // order 21: reconstruct the FULL input (cached + non-cached) and lift the per-modality
+  // / reasoning detail so o-series billing survives. Responses reports cache writes under
+  // input_tokens_details.cache_creation_input_tokens and reasoning under output_tokens_details.
+  let usage: Record<string, unknown> | undefined;
+  if (parsed.usage !== undefined) {
+    const u = parsed.usage;
+    const cached = u.cached_tokens ?? 0;
+    const inputDetails: Record<string, number> = {};
+    if (cached > 0) inputDetails.cached_tokens = cached;
+    if (u.cache_creation_tokens !== undefined)
+      inputDetails.cache_creation_input_tokens = u.cache_creation_tokens;
+    const outputDetails: Record<string, number> = {};
+    if (u.reasoning_tokens !== undefined) outputDetails.reasoning_tokens = u.reasoning_tokens;
+    usage = {
+      input_tokens: (u.prompt_tokens ?? 0) + cached,
+      output_tokens: u.completion_tokens ?? 0,
+      ...(Object.keys(inputDetails).length > 0 ? { input_tokens_details: inputDetails } : {}),
+      ...(Object.keys(outputDetails).length > 0 ? { output_tokens_details: outputDetails } : {}),
+    };
+  }
+
+  // order 19: an incomplete terminal status must name WHY (content_filter / max_tokens).
+  const incompleteReason =
+    status === "incomplete"
+      ? ((
+          {
+            content_filter: "content_filter",
+            length: "max_tokens",
+            max_tokens: "max_tokens",
+          } as Record<string, string>
+        )[raw ?? ""] ?? "server_error")
+      : undefined;
+
   return {
     id: parsed.id,
     object: "response",
     model: parsed.model,
     status,
+    ...(incompleteReason !== undefined ? { incomplete_details: { reason: incompleteReason } } : {}),
     output,
-    ...(parsed.usage !== undefined
-      ? {
-          usage: {
-            input_tokens: parsed.usage.prompt_tokens ?? 0,
-            output_tokens: parsed.usage.completion_tokens ?? 0,
-          },
-        }
-      : {}),
+    ...(usage !== undefined ? { usage } : {}),
     provider_raw: {
       stop_reason: raw,
       ...(parsed.usage !== undefined ? { usage: parsed.usage } : {}),
@@ -519,6 +683,9 @@ const ResponsesResponseSchema = z
     object: z.string().optional(),
     model: z.string(),
     status: z.string().optional(),
+    // Why the response is incomplete (max_output_tokens / content_filter); drives a
+    // real IR finish_reason so downstream protocols don't see "incomplete" -> stop.
+    incomplete_details: z.object({ reason: z.string().optional() }).passthrough().optional(),
     output: z.array(ResponsesInputItemSchema),
     usage: ResponsesUsageSchema.optional(),
     // Echo fields the Responses API returns on the response object. They have no IR
@@ -534,11 +701,28 @@ function toIRResponse(res: NativeResponse): IRResponse {
 
   const parts: IRContentPart[] = [];
   const toolCalls: IRToolCall[] = [];
+  // order 20/23: collect annotations + logprobs riding the output_text parts so they
+  // fold back onto the IR message/choice (otherwise citations/grounding are stripped).
+  const annotations: unknown[] = [];
+  let foldedLogprobs: unknown;
 
   for (const item of parsed.output) {
     switch (item.type) {
       case "message": {
         const m = item as z.infer<typeof ResponsesMessageItemSchema>;
+        if (Array.isArray(m.content)) {
+          for (const part of m.content) {
+            const p = part as { type?: unknown; annotations?: unknown; logprobs?: unknown };
+            if (p.type === "output_text" && Array.isArray(p.annotations))
+              annotations.push(...p.annotations);
+            if (
+              p.type === "output_text" &&
+              p.logprobs !== undefined &&
+              foldedLogprobs === undefined
+            )
+              foldedLogprobs = p.logprobs;
+          }
+        }
         const folded = foldMessageContent(m.content);
         if (typeof folded === "string") {
           if (folded !== "") parts.push({ type: "text", text: folded });
@@ -580,7 +764,20 @@ function toIRResponse(res: NativeResponse): IRResponse {
     role: "assistant",
     content: parts.length > 0 ? parts : null,
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    ...(annotations.length > 0 ? { annotations: annotations as IRMessage["annotations"] } : {}),
   });
+
+  // Map status + incomplete_details.reason -> a REAL IR finish_reason (not the raw
+  // "incomplete" string, which collapses to stop downstream and hides truncation).
+  const incompleteReasonIn = parsed.incomplete_details?.reason;
+  const finishReason =
+    parsed.status === "incomplete"
+      ? incompleteReasonIn === "content_filter"
+        ? "content_filter"
+        : "length" // max_output_tokens / unspecified truncation
+      : parsed.status === "completed"
+        ? "stop"
+        : (parsed.status ?? null);
 
   const ir = {
     id: parsed.id,
@@ -589,9 +786,10 @@ function toIRResponse(res: NativeResponse): IRResponse {
       {
         index: 0,
         message,
-        // Keep the native status as the IR finish_reason surrogate; the raw value
-        // also rides in provider_raw.stop_reason.
-        finish_reason: parsed.status ?? null,
+        // Real finish_reason (above); the raw status still rides provider_raw.stop_reason.
+        finish_reason: finishReason,
+        // order 23: logprobs that rode the output_text part fold back onto the choice.
+        ...(foldedLogprobs !== undefined ? { logprobs: foldedLogprobs } : {}),
       },
     ],
     ...(parsed.usage !== undefined
