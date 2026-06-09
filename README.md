@@ -9,7 +9,7 @@
 Open-source · self-hosted · MIT
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.8.6-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-3c873a.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](tsconfig.base.json)
 [![Built with Hono](https://img.shields.io/badge/gateway-Hono-ff5e00.svg)](https://hono.dev)
@@ -72,7 +72,7 @@ docker compose logs helm | grep -i "root API key"
 | 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic: overview, key CRUD, lane/policy/classifier editors, system settings, drill-down request log. Edits **write back to `config/*.yaml`** (comment-preserving, atomic) and rebind live — no restart, and they survive one. Five languages. |
 | 💾 | **Storage** | SQLite by default (one local file). Postgres / Supabase behind the same Store-port abstraction — switch with one env var. |
 
-**Roadmap:** LLM-backed memory summarization (today's observer/reflector summarize step is a deterministic stub) · finer-grained quotas / account-level billing. See [09 Roadmap](docs/09-roadmap.md).
+**Roadmap:** LLM-backed memory summarization (today's observer/reflector summarize step is a deterministic stub) · Agentic Signals feedback into routing. Account/customer billing is intentionally out of scope. See [09 Roadmap](docs/09-roadmap.md).
 
 ## Two failure disciplines
 
@@ -227,7 +227,10 @@ Requires **Node ≥ 22** and **pnpm 10**.
 pnpm install
 pnpm dev          # admin dashboard dev server (Vite) — see note below
 pnpm test         # Vitest unit tests
+pnpm exec vitest run --coverage # unit coverage with source-only include/exclude + thresholds
 pnpm test:e2e     # Playwright end-to-end tests
+pnpm test:e2e:coverage       # protocol-focused gateway/server E2E coverage
+pnpm test:e2e:coverage:full  # full Playwright suite gateway/server E2E coverage
 pnpm typecheck    # tsc --noEmit across the workspace
 pnpm lint         # Biome
 pnpm build        # build the gateway + dashboard
@@ -262,7 +265,7 @@ Start at [`docs/README.md`](docs/README.md) and read in order:
 
 ## Status
 
-Helm API is at **0.8.6** — a real, end-to-end implementation, not a scaffold. The full pipeline (config → auth → classify → route → execute with circuit-breaking and fallback → protocol translation → telemetry) is wired and covered by an extensive Vitest suite plus Playwright e2e specs.
+Helm API is at **0.9.0** — a real, end-to-end implementation, not a scaffold. The full pipeline (config → auth → classify → route → execute with circuit-breaking and fallback → protocol translation → telemetry) is wired and covered by an extensive Vitest suite plus Playwright e2e specs.
 
 ## License
 

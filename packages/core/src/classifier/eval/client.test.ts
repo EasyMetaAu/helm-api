@@ -67,6 +67,14 @@ function makeDeps(
   };
 }
 
+function firstCall<T>(calls: readonly T[]): T {
+  const call = calls[0];
+  if (call === undefined) {
+    throw new Error("expected the mock to have at least one call");
+  }
+  return call;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
 });
@@ -102,7 +110,7 @@ describe("runEval", () => {
     });
     await runEval(INPUT, deps);
     expect(invokeModel).toHaveBeenCalledTimes(1);
-    const [req, signal] = invokeModel.mock.calls[0]!;
+    const [req, signal] = firstCall(invokeModel.mock.calls);
     expect(req.temperature).toBe(0);
     expect(req.stream).toBe(false);
     expect(req.max_tokens).toBe(128);
@@ -121,7 +129,7 @@ describe("runEval", () => {
       invokeModel,
     });
     await runEval(INPUT, deps);
-    const [req] = invokeModel.mock.calls[0]!;
+    const [req] = firstCall(invokeModel.mock.calls);
     expect(req.extra_body).toEqual({ thinking: { type: "disabled" } });
   });
 
@@ -133,7 +141,7 @@ describe("runEval", () => {
     );
     const deps = makeDeps({ invokeModel });
     await runEval(INPUT, deps);
-    const [req] = invokeModel.mock.calls[0]!;
+    const [req] = firstCall(invokeModel.mock.calls);
     expect(req.extra_body).toBeUndefined();
   });
 

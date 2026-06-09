@@ -15,6 +15,7 @@
     "test:watch": "vitest",
     "test:e2e": "pnpm --filter @helm/gateway test:e2e",
     "test:e2e:coverage": "bash scripts/e2e-coverage.sh",
+    "test:e2e:coverage:full": "bash scripts/e2e-coverage-full.sh",
     "lint": "biome check .",
     "format": "biome format --write .",
     "lint:fix": "biome check --write .",

@@ -423,15 +423,21 @@ describe("footgun #5 — system hoist, same-role merge, image source split", () 
     expect(userMsgs).toHaveLength(1);
     // No two consecutive messages share a (non-tool) role.
     for (let i = 1; i < ir.messages.length; i++) {
-      const prev = ir.messages[i - 1]!;
-      const cur = ir.messages[i]!;
+      const prev = ir.messages[i - 1];
+      const cur = ir.messages[i];
+      if (prev === undefined || cur === undefined) {
+        throw new Error("unexpected missing transformed message");
+      }
       if (prev.role !== "tool" && cur.role !== "tool") {
         expect(prev.role).not.toBe(cur.role);
       }
     }
 
     // The image part survives with its media_type and base64 data intact.
-    const user = userMsgs[0]!;
+    const user = userMsgs[0];
+    if (user === undefined) {
+      throw new Error("expected merged user message");
+    }
     expect(Array.isArray(user.content)).toBe(true);
     if (Array.isArray(user.content)) {
       const image = user.content.find((p) => p.type === "image");

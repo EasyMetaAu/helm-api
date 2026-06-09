@@ -11,6 +11,7 @@ build/
 # Test / coverage
 coverage/
 .e2e-coverage/
+.e2e-coverage-full/
 test-results/
 playwright-report/
 

@@ -23,6 +23,14 @@ async function collect<T>(it: AsyncIterable<T>): Promise<T[]> {
   return out;
 }
 
+function nth<T>(items: readonly T[], index: number): T {
+  const item = items[index];
+  if (item === undefined) {
+    throw new Error(`expected item at index ${index}`);
+  }
+  return item;
+}
+
 /** A text-only OpenAI chunk carrying a content delta. */
 function textChunk(content: string, finish: string | null = null): OpenAIChunk {
   return {
@@ -53,7 +61,7 @@ describe("convertOpenAIStreamToAnthropic — text event sequence", () => {
     ]);
 
     // First text block is index 0, content_block_start carries an empty text block.
-    const start = events[1]!;
+    const start = nth(events, 1);
     expect(start.type).toBe("content_block_start");
     if (start.type === "content_block_start") {
       expect(start.index).toBe(0);
@@ -61,14 +69,14 @@ describe("convertOpenAIStreamToAnthropic — text event sequence", () => {
     }
 
     // text_delta carries the fragment and nothing else.
-    const d1 = events[2]!;
+    const d1 = nth(events, 2);
     if (d1.type === "content_block_delta") {
       expect(d1.index).toBe(0);
       expect(d1.delta).toEqual({ type: "text_delta", text: "Hel" });
     }
 
     // message_delta carries a legal stop_reason.
-    const md = events[5]!;
+    const md = nth(events, 5);
     if (md.type === "message_delta") {
       expect(md.delta.stop_reason).toBe("end_turn");
     }
@@ -125,14 +133,16 @@ describe("convertOpenAIStreamToAnthropic — parallel tool calls", () => {
         e.type === "content_block_start",
     );
     expect(starts).toHaveLength(2);
-    expect(starts[0]!.index).toBe(0);
-    expect(starts[0]!.content_block).toMatchObject({
+    const firstStart = nth(starts, 0);
+    const secondStart = nth(starts, 1);
+    expect(firstStart.index).toBe(0);
+    expect(firstStart.content_block).toMatchObject({
       type: "tool_use",
       id: "call_a",
       name: "alpha",
     });
-    expect(starts[1]!.index).toBe(1);
-    expect(starts[1]!.content_block).toMatchObject({
+    expect(secondStart.index).toBe(1);
+    expect(secondStart.content_block).toMatchObject({
       type: "tool_use",
       id: "call_b",
       name: "beta",
@@ -379,11 +389,11 @@ describe("synthesizeSSEFromJSON — cache hit / non-streaming upstream", () => {
       "message_delta",
       "message_stop",
     ]);
-    const delta = events[2]!;
+    const delta = nth(events, 2);
     if (delta.type === "content_block_delta" && delta.delta.type === "text_delta") {
       expect(delta.delta.text).toBe("Hello world");
     }
-    const md = events[4]!;
+    const md = nth(events, 4);
     if (md.type === "message_delta") {
       expect(md.delta.stop_reason).toBe("end_turn");
       expect(md.usage.input_tokens).toBe(10);
@@ -488,7 +498,7 @@ describe("convertOpenAIStreamToAnthropic — thinking streaming (outbound)", () 
     expect(starts[0]?.content_block.type).toBe("thinking");
 
     // thinking_delta fragments carry the reasoning text on the thinking block index.
-    const thinkingIndex = starts[0]!.index;
+    const thinkingIndex = nth(starts, 0).index;
     const thinkingText = events
       .filter(
         (e): e is Extract<AnthropicSSEEvent, { type: "content_block_delta" }> =>

@@ -24,10 +24,14 @@ const MOCK = "http://127.0.0.1:8181";
 const TEST_KEY = "helm_live_oauth_e2e";
 const AUTH = { Authorization: `Bearer ${TEST_KEY}`, "Content-Type": "application/json" };
 
-// biome-ignore lint/suspicious/noExplicitAny: Hono app handle from buildServer
 let app: { fetch: (req: Request) => Promise<Response> } | null = null;
 let dataDir = "";
 let configDir = "";
+
+function requireApp(): { fetch: (req: Request) => Promise<Response> } {
+  if (app === null) throw new Error("OAuth e2e gateway app was not initialized");
+  return app;
+}
 
 function writeConfig(dir: string): void {
   writeFileSync(join(dir, "server.yaml"), "host: 127.0.0.1\nport: 8099\nbase_path: /\n");
@@ -119,8 +123,7 @@ function chat(content: string, extra: Record<string, unknown> = {}) {
 }
 
 test("routes an OpenAI request through an OAuth provider with a fetched Bearer", async () => {
-  expect(app).not.toBeNull();
-  const res = await app!.fetch(
+  const res = await requireApp().fetch(
     new Request("http://local/v1/chat/completions", {
       method: "POST",
       headers: AUTH,
@@ -134,9 +137,8 @@ test("routes an OpenAI request through an OAuth provider with a fetched Bearer",
 });
 
 test("refreshes + retries once on an upstream 401 and succeeds", async () => {
-  expect(app).not.toBeNull();
   await fetch(`${MOCK}${OAUTH_RESET_PATH}`, { method: "POST" });
-  const res = await app!.fetch(
+  const res = await requireApp().fetch(
     new Request("http://local/v1/chat/completions", {
       method: "POST",
       headers: AUTH,
@@ -156,8 +158,7 @@ test("refreshes + retries once on an upstream 401 and succeeds", async () => {
 });
 
 test("streams through an OAuth provider end-to-end", async () => {
-  expect(app).not.toBeNull();
-  const res = await app!.fetch(
+  const res = await requireApp().fetch(
     new Request("http://local/v1/chat/completions", {
       method: "POST",
       headers: AUTH,
@@ -174,8 +175,7 @@ test("streams through an OAuth provider end-to-end", async () => {
 test("never leaks the OAuth Bearer prefix into the response body", async () => {
   // Defense-in-depth sanity: the dynamic Bearer lives in the Authorization header,
   // never in the chat body (principle 7). The echoed mock body must not carry it.
-  expect(app).not.toBeNull();
-  const res = await app!.fetch(
+  const res = await requireApp().fetch(
     new Request("http://local/v1/chat/completions", {
       method: "POST",
       headers: AUTH,

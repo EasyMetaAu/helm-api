@@ -9,7 +9,7 @@
 开源 · 自托管 · MIT
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.8.6-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-3c873a.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](tsconfig.base.json)
 [![Built with Hono](https://img.shields.io/badge/gateway-Hono-ff5e00.svg)](https://hono.dev)
@@ -72,7 +72,7 @@ docker compose logs helm | grep -i "root API key"
 | 🖥️ | **管理面板** | `/admin` 上的 SvelteKit SPA，HTTP Basic 把守：概览、key 增删改、lane / 策略 / 分类器编辑器、系统设置、可下钻的请求日志。编辑会**写回 `config/*.yaml`**（保留注释、原子写入）并实时重绑——无需重启，重启也不丢。支持 5 种语言。 |
 | 💾 | **存储** | 默认 SQLite（一个本地文件）。Postgres / Supabase 走同一套 Store 端口抽象——改一个环境变量即可切换。 |
 
-**路线图：** 接 LLM 的记忆摘要（observer/reflector 的摘要步骤目前是确定性桩）· 更细粒度的配额 / 账户级计费。详见 [09 路线图](docs/09-roadmap.md)。
+**路线图：** 接 LLM 的记忆摘要（observer/reflector 的摘要步骤目前是确定性桩）· Agentic Signals 反馈参与路由。账户 / 客户级计费明确不在范围内。详见 [09 路线图](docs/09-roadmap.md)。
 
 ## 两套失败纪律
 
@@ -227,7 +227,10 @@ curl http://localhost:8080/v1/chat/completions \
 pnpm install
 pnpm dev          # 管理面板开发服务器（Vite）—— 见下方说明
 pnpm test         # Vitest 单元测试
+pnpm exec vitest run --coverage # 单元测试覆盖率（只统计源码，并带阈值）
 pnpm test:e2e     # Playwright 端到端测试
+pnpm test:e2e:coverage       # 协议重点的网关 / 服务端 E2E 覆盖率
+pnpm test:e2e:coverage:full  # 全量 Playwright 套件的网关 / 服务端 E2E 覆盖率
 pnpm typecheck    # 全仓库 tsc --noEmit
 pnpm lint         # Biome
 pnpm build        # 构建网关 + 面板
@@ -264,7 +267,7 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
 
 ## 项目状态
 
-Helm API 当前版本 **0.8.6**——一套端到端的真实实现，不是空架子。完整链路（配置 → 鉴权 → 分类 → 路由 → 执行（含熔断与兜底）→ 协议互译 → 遥测）已全部打通，背后是一套相当完整的 Vitest 单测加 Playwright e2e 用例。
+Helm API 当前版本 **0.9.0**——一套端到端的真实实现，不是空架子。完整链路（配置 → 鉴权 → 分类 → 路由 → 执行（含熔断与兜底）→ 协议互译 → 遥测）已全部打通，背后是一套相当完整的 Vitest 单测加 Playwright e2e 用例。
 
 ## 许可
 

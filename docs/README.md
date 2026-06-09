@@ -59,4 +59,4 @@ These keep Helm more focused than its predecessor `llm-router`:
 | Specification | Implemented (these documents describe the shipping system) |
 | Core gateway (routing, classification, protocol translation, store) | Implemented |
 | Admin UI | Implemented |
-| Release | 0.8.0 |
+| Release | 0.9.0 |

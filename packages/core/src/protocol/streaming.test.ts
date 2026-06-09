@@ -68,6 +68,14 @@ function parseWire(wire: string): Array<{ event?: string; data: string }> {
   return frames;
 }
 
+function nth<T>(items: readonly T[], index: number): T {
+  const item = items[index];
+  if (item === undefined) {
+    throw new Error(`expected item at index ${index}`);
+  }
+  return item;
+}
+
 // —— 1. SSE splitting across chunk boundaries ————————————————————————————————
 
 describe("readSSE — generic SSE splitter", () => {
@@ -234,7 +242,7 @@ describe("synthesizeSSE — JSON → SSE for cache hit / non-streaming upstream"
     });
     expect(types).toEqual(["start", "delta", "finish", "[DONE]"]);
     // lossless: the delta carries the full content.
-    const delta = JSON.parse(frames[1]!.data) as { text: string };
+    const delta = JSON.parse(nth(frames, 1).data) as { text: string };
     expect(delta.text).toBe("Hello world");
   });
 
