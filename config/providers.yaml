@@ -27,6 +27,8 @@
 #
 # Unified shape (HelmConfigSchema.ProviderConfig): name, type (openai|anthropic),
 # base_url?, api_key_env (env-var NAME), models[] { alias -> provider_model }.
+# OpenAI-compatible providers that reject OpenAI's newer `developer` role can set
+# map_developer_role_to_system: true as a provider-scoped compatibility shim.
 # A duplicate alias across providers is rejected at build time (fail-closed,
 # principle 2). The test/e2e harness overrides every provider's base_url via
 # HELM_PROVIDER_BASE_URL so the mock upstream serves all of them.
@@ -52,6 +54,9 @@ providers:
     type: openai
     base_url: https://api.deepseek.com/v1
     api_key_env: DEEPSEEK_API_KEY
+    # Official DeepSeek rejects `messages[].role="developer"` with HTTP 400; map
+    # it to `system` before the upstream call while preserving true OpenAI/Codex.
+    map_developer_role_to_system: true
     models:
       # deepseek-v4-pro — balanced/default primary, json-capable, big context.
       - alias: deepseek/deepseek-v4-pro

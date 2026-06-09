@@ -44,6 +44,34 @@ describe("createOpenAIClient (Phase 0 passthrough)", () => {
     expect(JSON.parse(init.body as string)).toEqual(req);
   });
 
+  it("maps developer role messages to system only when the provider opts in", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+    const client = createOpenAIClient({
+      config: { ...CONFIG, mapDeveloperRoleToSystem: true },
+      fetch,
+    });
+    const req = {
+      model: "deepseek-v4-flash",
+      messages: [
+        { role: "developer", content: "Prefer concise answers." },
+        { role: "user", content: "hi" },
+      ],
+    };
+
+    await client.chatCompletion(req);
+
+    const init = fetch.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toEqual({
+      model: "deepseek-v4-flash",
+      messages: [
+        { role: "system", content: "Prefer concise answers." },
+        { role: "user", content: "hi" },
+      ],
+    });
+    // The caller's request object stays immutable for telemetry/replay fidelity.
+    expect(req.messages[0]?.role).toBe("developer");
+  });
+
   it("yields upstream SSE chunks byte-for-byte (streaming)", async () => {
     const chunks = ['data: {"a":1}\n\n', 'data: {"b":2}\n\n', "data: [DONE]\n\n"];
     const fetch = vi.fn().mockResolvedValue(sseResponse(chunks));
