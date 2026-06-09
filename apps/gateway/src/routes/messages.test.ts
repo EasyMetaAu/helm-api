@@ -61,6 +61,7 @@ function makeDeps(
     authed?: boolean;
     transformRequestOut?: (native: unknown) => unknown;
     rateLimiter?: MessagesRouteDeps["rateLimiter"];
+    concurrencyGate?: MessagesRouteDeps["concurrencyGate"];
     identity?: MessagesIdentity;
     record?: RecordServedDeps;
   } = {},
@@ -74,6 +75,7 @@ function makeDeps(
 
   const deps: MessagesRouteDeps = {
     rateLimiter: over.rateLimiter,
+    concurrencyGate: over.concurrencyGate,
     record: over.record,
     auth: {
       resolve: async (_key: string | null) => {
@@ -436,6 +438,29 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(text).toContain("event: message_start");
     // A terminal Anthropic error frame must follow the partial stream.
     expect(text).toContain("event: error");
+  });
+
+  it("429s an Anthropic rate_limited envelope when the concurrency gate rejects, without routing", async () => {
+    const { deps, harness } = makeDeps({
+      concurrencyGate: {
+        acquire: async () => ({
+          ok: false as const,
+          reason: "queue_full" as const,
+          retryAfterSeconds: 4,
+        }),
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("4");
+    const body = (await res.json()) as { type: string };
+    expect(body.type).toBe("error");
+    expect(harness.order).not.toContain("route");
   });
 
   it("429s a throttled key on /v1/messages with an Anthropic rate_limited envelope", async () => {

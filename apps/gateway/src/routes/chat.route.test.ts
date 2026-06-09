@@ -150,6 +150,117 @@ const NONSTREAM_BODY = {
 };
 const STREAM_BODY = { ...NONSTREAM_BODY, stream: true };
 
+// A key carrying budget caps so auth populates identity.caps.budget and the gate runs.
+const BUDGET_RECORD: Partial<ApiKeyRecord> = {
+  budget_requests: 100,
+  budget_window_seconds: 60,
+  over_budget_behavior: "reject",
+};
+
+describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overrides", () => {
+  it("rejects an over-budget request with 429 before routing (behavior=reject)", async () => {
+    const budgetGate = {
+      check: vi.fn(async () => ({
+        overBudget: true,
+        limitedBy: "req" as const,
+        behavior: "reject" as const,
+        degradeLane: null,
+      })),
+    };
+    const { deps: d, harness } = deps({ budgetGate });
+    const app = buildApp(d, { record: BUDGET_RECORD });
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("rate_limited");
+    expect(budgetGate.check).toHaveBeenCalledOnce();
+    expect(harness.execute).not.toHaveBeenCalled(); // never routed
+  });
+
+  it("degrades an over-budget request to the degrade lane and still serves (behavior=degrade)", async () => {
+    const budgetGate = {
+      check: vi.fn(async () => ({
+        overBudget: true,
+        limitedBy: "req" as const,
+        behavior: "degrade" as const,
+        degradeLane: "economy",
+      })),
+    };
+    const { deps: d, harness } = deps({ budgetGate });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({ id: "c", choices: [{ message: { content: "ok" } }] }),
+    );
+    const app = buildApp(d, {
+      record: { ...BUDGET_RECORD, over_budget_behavior: "degrade", degrade_lane: "economy" },
+    });
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(res.status).toBe(200);
+    // The degrade lane caps THIS request's lane to economy.
+    const plan = harness.execute.mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+  });
+
+  it("records per-account OAuth usage and settles the budget on a served request", async () => {
+    const recordOAuthUsage = vi.fn();
+    const settleBudget = vi.fn(async () => {});
+    const { deps: d, harness } = deps({ recordOAuthUsage, settleBudget });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({ id: "c", choices: [{ message: { content: "ok" } }] }),
+    );
+    const app = buildApp(d, { record: BUDGET_RECORD });
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(res.status).toBe(200);
+    expect(recordOAuthUsage).toHaveBeenCalledOnce();
+    expect(settleBudget).toHaveBeenCalledOnce();
+  });
+
+  it("a settleBudget failure is swallowed (logged, never 5xx's a served request)", async () => {
+    const settleBudget = vi.fn(async () => {
+      throw new Error("store down");
+    });
+    const { deps: d, harness } = deps({ settleBudget });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({ id: "c", choices: [{ message: { content: "ok" } }] }),
+    );
+    const app = buildApp(d, { record: BUDGET_RECORD });
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(res.status).toBe(200); // settle error is fail-open
+    expect(settleBudget).toHaveBeenCalledOnce();
+  });
+
+  it("honors the e2e x-helm-eval / x-helm-rules-threshold overrides when evalHeaderOverride is on", async () => {
+    const { deps: d, harness } = deps({ evalHeaderOverride: true });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({ id: "c", choices: [{ message: { content: "ok" } }] }),
+    );
+    const app = buildApp(d);
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { ...AUTH, "x-helm-eval": "on", "x-helm-rules-threshold": "0.9" },
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(res.status).toBe(200);
+    // The override is threaded into route() as the 4th arg.
+    expect(harness.classify).toHaveBeenCalledOnce();
+  });
+});
+
 describe("POST /v1/chat/completions (routing pipeline)", () => {
   it("routes a non-stream request through the pipeline and returns the OpenAI body", async () => {
     const upstream = { id: "cmpl-1", choices: [{ message: { content: "hello" } }] };
