@@ -47,17 +47,29 @@ describe('JsonViewer', () => {
   });
 
   it('renders placeholders for empty / null values', () => {
-    expect(
-      render(JsonViewer, { value: {} }).getByText('(empty object)'),
-    ).toBeInTheDocument();
-    expect(
-      render(JsonViewer, { value: [] }).getByText('(empty array)'),
-    ).toBeInTheDocument();
+    expect(render(JsonViewer, { value: {} }).getByText('(empty object)')).toBeInTheDocument();
+    expect(render(JsonViewer, { value: [] }).getByText('(empty array)')).toBeInTheDocument();
     expect(render(JsonViewer, { value: null }).getByText('(null)')).toBeInTheDocument();
   });
 
   it('passes a testid through to its root for e2e selectors', () => {
     render(JsonViewer, { value: { ok: true }, testid: 'request-body' });
     expect(screen.getByTestId('request-body')).toBeInTheDocument();
+  });
+
+  it('wraps formatted/raw JSON panels without horizontal scrolling', async () => {
+    render(JsonViewer, { value: { prompt: 'x'.repeat(1200) } });
+
+    await fireEvent.click(screen.getByRole('button', { name: /Formatted/i }));
+    const formatted = screen.getByTestId('jsonviewer-formatted');
+    expect(formatted.className).toContain('overflow-x-hidden');
+    expect(formatted.className).toContain('whitespace-pre-wrap');
+    expect(formatted.className).toContain('[overflow-wrap:anywhere]');
+
+    await fireEvent.click(screen.getByRole('button', { name: /Raw/i }));
+    const raw = screen.getByTestId('jsonviewer-raw');
+    expect(raw.className).toContain('overflow-x-hidden');
+    expect(raw.className).toContain('whitespace-pre-wrap');
+    expect(raw.className).toContain('[overflow-wrap:anywhere]');
   });
 });

@@ -31,7 +31,9 @@
   });
 
   const data = $derived(normalized.data);
-  const formatted = $derived(normalized.parsedOk ? JSON.stringify(data, null, 2) : (data as string));
+  const formatted = $derived(
+    normalized.parsedOk ? JSON.stringify(data, null, 2) : (data as string),
+  );
 
   // Empty/null get a friendly placeholder instead of a bare, confusing tree root.
   const emptyPlaceholder = $derived.by((): string | null => {
@@ -48,7 +50,8 @@
 
   const tabActive = 'border-action bg-action text-white';
   const tabInactive = 'border-border bg-surface text-ink-muted hover:bg-canvas';
-  const panelCls = 'max-h-96 overflow-auto rounded bg-canvas p-2 font-mono text-xs text-ink-body';
+  const panelCls =
+    'max-h-96 overflow-y-auto overflow-x-hidden rounded bg-canvas p-2 font-mono text-xs whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-ink-body';
 </script>
 
 <div data-testid={testid}>
@@ -70,7 +73,10 @@
     {/if}
   </div>
 
-  <pre data-testid="jsonviewer-formatted" hidden={tab !== 'formatted'} class={panelCls}>{formatted}</pre>
+  <pre
+    data-testid="jsonviewer-formatted"
+    hidden={tab !== 'formatted'}
+    class={panelCls}>{formatted}</pre>
 
   <pre data-testid="jsonviewer-raw" hidden={tab !== 'raw'} class={panelCls}>{normalized.raw}</pre>
 </div>

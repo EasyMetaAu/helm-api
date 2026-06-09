@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-09 · 请求详情页 Responses API 流式回放与 JSON 换行修复（docs/05 协议互译；docs/07 可观测性；docs/11 管理界面）
+
+- **缘起**：线上请求详情页的 captured payload 里，响应是 OpenAI Responses API SSE（`event: response.output_text.delta` / `response.completed`），但 admin 侧 `StreamViewer` 只会组装 OpenAI Chat chunk 与 Anthropic events；`response.*` 事件被误走 Anthropic 分支，最终显示 “No visible output”。同页请求 JSON viewer 使用 `overflow-auto` + `<pre>` 默认不换行，长 prompt/request body 触发横向滚动条。
+- **修复**：`parseSseStream` 新增 Responses API `response.*` 分支，在 Anthropic 分支前匹配，累积 `response.output_text.delta` 为最终可见 content，并读取 `response.completed.response.usage/model/status`；`output_text.done` / `content_part.done` / `output_item.done` 只作截断捕获的兜底快照，不把完成态全文再次 append，避免重复。顺带支持 Responses API reasoning 与 function_call argument delta 的基础合并。
+- **UI 取舍**：`JsonViewer` 三个 tab 统一 `overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere]`；`JsonTree` scalar 同样允许长字符串强制断行。保留垂直最大高度滚动，移除横向滚动；长不可断 token 也会按 anywhere 折行。
+- **验证**：TDD 新增 Responses API SSE parser / StreamViewer 用例，以及 JSON formatted/raw panel 与 scalar wrap 用例。定向 Vitest 40/40 绿；Prettier check 绿；同一线上 trace 的 payload 经本地新 parser 解析为 37 events、`protocol=openai`、`finishReason=completed`、content 正常非空。
+- **部署提示**：本次只改本地源码与测试，未执行生产部署。线上要生效需构建并发布新的 admin 静态资源/网关镜像。
+
+---
+
 ## 2026-06-09 · LLM 记忆提取/压缩接线与可配置模型（docs/08 记忆；docs/12 遗忘/事实层；CLAUDE.md 原则 2/3/7）
 
 - **缘起**：记忆 observe/inject、worker、compaction trigger、forgetting/facts 已是生产接线，但 Observer/Reflector 仍用确定性 stub 做 summarize/merge/extractFacts；这让“记忆提取/压缩”可用但不具备真正 LLM 归纳能力。
@@ -28,19 +38,11 @@
 
 ---
 
-## 2026-06-09 · 生产路径四协议 LiteLLM 参数保真 + payload 原文记录修复（docs/05 协议互译；docs/07 可观测性；CLAUDE.md 原则 7/8）
-
-- **缘起**：复审发现 transformer 层已覆盖大量 OpenAI/Anthropic/Responses/Gemini 字段，但生产路径 `route -> InternalRequest -> execute` 仍只保留 `messages/tools/response_format/max_tokens/stream`，导致 `temperature/top_p/tool_choice/parallel_tool_calls/reasoning_effort/max_completion_tokens` 等 LiteLLM/OpenAI 参数被静默丢弃；同时 payload capture 用 `JSON.stringify(parsed)` 重建请求体，不符合 docs/07 的 verbatim 记录承诺。
-- **修复**：扩展 `InternalRequestSchema` 与 OpenAI Chat 边界 schema，新增共享 `copyLiteLLMRequestParams`/`providerRawFromRequest`，让 OpenAI Chat、Anthropic Messages、OpenAI Responses、Gemini 三条 pipeline face 都把 LiteLLM 兼容参数带进执行层；`execute.stripInternal` 转发这些字段，并对流式请求合并客户端 `stream_options` 后强制 `include_usage:true` 以保留成本回填；Responses transformer 补 `user/service_tier/web_search_options/context_management`，Anthropic native provider 补 `max_completion_tokens -> max_tokens`、`top_k/thinking/tool_choice/parallel_tool_calls:false`。
-- **记录修复**：四个 HTTP route 改为先读取 `c.req.text()` 再 `JSON.parse`，payload 表保存原始请求 JSON 文本（保留空白/顺序等原文细节），响应仍保存实际组装出的响应体；记录路径仍 fail-open，`capture_payloads` 关闭时不写 payload 但 telemetry row 保持。
-- **测试**：新增/加强生产边界测试：OpenAI Chat route -> execution request、三种非 chat protocol pipeline -> InternalRequest、execute -> provider request body、四 route payload requestJson 原文断言，以及 OpenAI/Responses/Anthropic provider 参数回归。重点锁定“transformer 测试通过但生产路径丢参”的老问题。
-- **取舍/TODO**：`metadata` 与网关内部 `metadata` 字段同名，provider metadata 存在 `provider_raw.metadata`，执行前再恢复到上游 body，避免污染 memory/session metadata。未把 auth/rate-limit/concurrency 等 pre-pipeline 拒绝统一写入 request history；当前修复范围是已认证且进入协议/路由面的 served/failure 请求。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-09 · 生产路径四协议 LiteLLM 参数保真 + payload 原文记录修复：生产路径补齐 OpenAI Chat/Anthropic/Responses/Gemini LiteLLM 参数透传，流式强制 usage 回填，payload 表保存原始请求 JSON 文本；TDD 覆盖 route/pipeline/execute/provider/payload 边界。TODO：pre-pipeline 拒绝仍未统一写入 request history。
 
 ### 2026-06-08 · 四协议完整性审计 + 逐条修复：Workflow 扇出审计 4 个 wire 协议，对照 LiteLLM 找到并 TDD 修复 31 项生产协议/流式/usage/多模态缺口；最终 core 1744 绿、typecheck/lint/build 通过。
 

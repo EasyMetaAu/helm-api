@@ -13,11 +13,7 @@
   const STRING_LIMIT = 512;
   const MAX_RENDER_DEPTH = 24;
 
-  let {
-    value,
-    name,
-    depth = 0,
-  }: { value: unknown; name?: string; depth?: number } = $props();
+  let { value, name, depth = 0 }: { value: unknown; name?: string; depth?: number } = $props();
 
   type Kind = 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null';
   function kindOf(v: unknown): Kind {
@@ -88,14 +84,16 @@
   </div>
 {:else}
   <div class="json-node" data-testid="json-node">
-    {#if name != null}<span class="text-link">{name}: </span>{/if}<span class="json-scalar"
+    {#if name != null}<span class="text-link">{name}: </span>{/if}<span
+      class="json-scalar whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
       >{scalarText}</span
     >
     {#if isLongString}
       <button
         type="button"
         class="ml-2 text-link underline"
-        onclick={() => (expandedStr = !expandedStr)}>{expandedStr ? $t('Collapse') : $t('Expand')}</button
+        onclick={() => (expandedStr = !expandedStr)}
+        >{expandedStr ? $t('Collapse') : $t('Expand')}</button
       >
     {/if}
   </div>
