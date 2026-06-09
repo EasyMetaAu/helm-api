@@ -119,7 +119,7 @@ describe("createMemoryLlmRuntime", () => {
     const { runtime, client, resolveModel } = runtimeArgs({
       response: {
         observation_text: "Invoices for Project Alpha require PO #123.",
-        priority: 3,
+        priority: 8,
         importance: 0.82,
         tags: ["project-alpha", "billing"],
       },
@@ -145,10 +145,44 @@ describe("createMemoryLlmRuntime", () => {
     );
     expect(result).toEqual({
       observationText: "Invoices for Project Alpha require PO #123.",
-      priority: 3,
+      priority: 8,
       importance: 0.82,
       tags: ["project-alpha", "billing"],
     });
+  });
+
+  it("accepts the observer's 0..10 priority scale so priority can derive salience above 0.5", async () => {
+    const { runtime } = runtimeArgs({
+      response: {
+        observation_text: "The user strongly prefers bilingual explanations.",
+        priority: 10,
+        tags: ["preference"],
+      },
+      resolveAlias: "openai/observer",
+    });
+
+    const result = await runtime.summarize({
+      messages: [rawMessage("m1", "user", "Always explain in English and Chinese.")],
+      now: new Date("2026-06-09T00:00:00Z"),
+    });
+
+    expect(result.priority).toBe(10);
+    expect(result.importance).toBeUndefined();
+  });
+
+  it("falls back to deterministic observation text when the LLM returns whitespace-only text", async () => {
+    const { runtime, logs } = runtimeArgs({
+      response: { observation_text: "   " },
+      resolveAlias: "openai/observer",
+    });
+
+    const result = await runtime.summarize({
+      messages: [rawMessage("m1", "user", "Project Alpha invoices require PO #123.")],
+      now: new Date("2026-06-09T00:00:00Z"),
+    });
+
+    expect(result.observationText).toBe("user: Project Alpha invoices require PO #123.");
+    expect(logs.some((l) => l.line === "memory.llm.fallback")).toBe(true);
   });
 
   it("falls back to deterministic reflection compaction when the LLM returns invalid JSON", async () => {
@@ -179,6 +213,47 @@ describe("createMemoryLlmRuntime", () => {
 
     expect(result.reflectionText).toBe("- User prefers concise English explanations.");
     expect(result.tokenEstimate).toBe(Math.ceil(result.reflectionText.length / 4));
+    expect(logs.some((l) => l.line === "memory.llm.fallback")).toBe(true);
+  });
+
+  it("does not send previous reflection text to the LLM merge prompt", async () => {
+    const { runtime, client } = runtimeArgs({
+      response: { reflection_text: "Only active observations should survive." },
+    });
+
+    await runtime.merge({
+      observations: [
+        observation("obs-1", "Active observation stays visible.", new Date("2026-06-01")),
+      ],
+      previousReflection: {
+        ...reflection(),
+        reflectionText: "FORGOTTEN_SECRET should never be available to the model.",
+      },
+      now: new Date("2026-06-09T00:00:00Z"),
+    });
+
+    const body = client.chatCompletion.mock.calls[0]?.[0] as {
+      messages: Array<{ content: string }>;
+    };
+    expect(JSON.stringify(body.messages)).not.toContain("FORGOTTEN_SECRET");
+    expect(JSON.stringify(body.messages)).not.toContain("previous_reflection");
+  });
+
+  it("falls back to deterministic reflection text when the LLM returns whitespace-only text", async () => {
+    const { runtime, logs } = runtimeArgs({
+      response: { reflection_text: "   " },
+    });
+    const observations = [
+      observation("obs-1", "User prefers concise English explanations.", new Date("2026-06-01")),
+    ];
+
+    const result = await runtime.merge({
+      observations,
+      previousReflection: reflection(),
+      now: new Date("2026-06-09T00:00:00Z"),
+    });
+
+    expect(result.reflectionText).toBe("- User prefers concise English explanations.");
     expect(logs.some((l) => l.line === "memory.llm.fallback")).toBe(true);
   });
 
@@ -221,6 +296,89 @@ describe("createMemoryLlmRuntime", () => {
         sourceObservationRange: ["obs-2", "obs-2"],
       },
     ]);
+  });
+
+  it("does not send previous reflection text to the LLM fact-extraction prompt", async () => {
+    const { runtime, client } = runtimeArgs({
+      response: {
+        facts: [
+          {
+            subject_text: "Project Alpha",
+            fact_text: "Project Alpha invoices require PO #123.",
+            valid_from_observation_id: "obs-1",
+          },
+        ],
+      },
+      resolveAlias: "openai/facts",
+    });
+
+    await runtime.extractFacts({
+      observations: [
+        observation("obs-1", "Project Alpha invoices require PO #123.", new Date("2026-06-01")),
+      ],
+      previousReflection: {
+        ...reflection(),
+        reflectionText: "FORGOTTEN_SECRET should never be available to fact extraction.",
+      },
+      now: new Date("2026-06-09T00:00:00Z"),
+    });
+
+    const body = client.chatCompletion.mock.calls[0]?.[0] as {
+      messages: Array<{ content: string }>;
+    };
+    expect(JSON.stringify(body.messages)).not.toContain("FORGOTTEN_SECRET");
+    expect(JSON.stringify(body.messages)).not.toContain("previous_reflection");
+  });
+
+  it("falls back to deterministic facts when any LLM fact has a missing or invalid citation", async () => {
+    const { runtime, logs } = runtimeArgs({
+      response: {
+        facts: [
+          {
+            subject_text: "Hallucinated",
+            fact_text: "This fact has no valid supporting observation.",
+            valid_from_observation_id: "obs-missing",
+          },
+        ],
+      },
+      resolveAlias: "openai/facts",
+    });
+    const obsAt = new Date("2026-06-01T00:00:00Z");
+
+    const facts = await runtime.extractFacts({
+      observations: [observation("obs-1", "Project Alpha invoices require PO #123.", obsAt)],
+      previousReflection: null,
+      now: new Date("2026-06-09T00:00:00Z"),
+    });
+
+    expect(facts).toEqual([
+      {
+        subjectText: "project-alpha",
+        factText: "Project Alpha invoices require PO #123.",
+        validFrom: obsAt,
+        sourceObservationRange: ["obs-1", "obs-1"],
+      },
+    ]);
+    expect(logs.some((l) => l.line === "memory.llm.fact_citation_invalid")).toBe(true);
+  });
+
+  it("falls back to deterministic facts when an LLM fact omits valid_from_observation_id", async () => {
+    const { runtime } = runtimeArgs({
+      response: {
+        facts: [{ subject_text: "Hallucinated", fact_text: "This fact has no citation." }],
+      },
+      resolveAlias: "openai/facts",
+    });
+
+    const facts = await runtime.extractFacts({
+      observations: [
+        observation("obs-1", "Project Alpha invoices require PO #123.", new Date("2026-06-01")),
+      ],
+      previousReflection: null,
+      now: new Date("2026-06-09T00:00:00Z"),
+    });
+
+    expect(facts[0]?.factText).toBe("Project Alpha invoices require PO #123.");
   });
 
   it("falls back to deterministic fact extraction when the configured model is unavailable", async () => {

@@ -6,21 +6,21 @@ const MEMORY_SUMMARY_MAX_CHARS = 2000;
 const MEMORY_REFLECTION_MAX_CHARS = 4000;
 
 const ObservationOutputSchema = z.object({
-  observation_text: z.string().min(1),
-  priority: z.number().int().min(1).max(5).optional(),
+  observation_text: z.string().trim().min(1),
+  // Matches runObserverJob's priority/10 salience derivation.
+  priority: z.number().int().min(0).max(10).optional(),
   importance: z.number().min(0).max(1).optional(),
-  tags: z.array(z.string().min(1)).optional(),
+  tags: z.array(z.string().trim().min(1)).optional(),
 });
 
 const ReflectionOutputSchema = z.object({
-  reflection_text: z.string().min(1),
+  reflection_text: z.string().trim().min(1),
 });
 
 const FactOutputSchema = z.object({
-  subject_text: z.string().min(1),
-  fact_text: z.string().min(1),
-  valid_from_observation_id: z.string().min(1).optional(),
-  source_observation_id: z.string().min(1).optional(),
+  subject_text: z.string().trim().min(1),
+  fact_text: z.string().trim().min(1),
+  valid_from_observation_id: z.string().trim().min(1),
 });
 
 const FactsOutputSchema = z.object({
@@ -211,7 +211,7 @@ function observationPrompt(input: { messages: RawMessage[]; now: Date }) {
         now: input.now.toISOString(),
         schema: {
           observation_text: "string, one concise durable memory",
-          priority: "integer 1..5, optional",
+          priority: "integer 0..10, optional",
           importance: "number 0..1, optional",
           tags: ["short lowercase tags, optional"],
         },
@@ -226,11 +226,7 @@ function observationPrompt(input: { messages: RawMessage[]; now: Date }) {
   ];
 }
 
-function reflectionPrompt(input: {
-  observations: Observation[];
-  previousReflection: Reflection | null;
-  now: Date;
-}) {
+function reflectionPrompt(input: { observations: Observation[]; now: Date }) {
   return [
     {
       role: "system" as const,
@@ -242,7 +238,6 @@ function reflectionPrompt(input: {
       content: JSON.stringify({
         now: input.now.toISOString(),
         schema: { reflection_text: "string, concise stable reflection" },
-        previous_reflection: input.previousReflection?.reflectionText ?? null,
         observations: input.observations.map((o) => ({
           id: o.id,
           observed_at: o.observedAt.toISOString(),
@@ -254,11 +249,7 @@ function reflectionPrompt(input: {
   ];
 }
 
-function factsPrompt(input: {
-  observations: Observation[];
-  previousReflection: Reflection | null;
-  now: Date;
-}) {
+function factsPrompt(input: { observations: Observation[]; now: Date }) {
   return [
     {
       role: "system" as const,
@@ -277,7 +268,6 @@ function factsPrompt(input: {
             },
           ],
         },
-        previous_reflection: input.previousReflection?.reflectionText ?? null,
         observations: input.observations.map((o) => ({
           id: o.id,
           observed_at: o.observedAt.toISOString(),
@@ -313,7 +303,7 @@ export function createMemoryLlmRuntime(deps: CreateMemoryLlmRuntimeDeps): Memory
         deps,
         task: "reflection",
         maxTokens: deps.config.max_tokens.reflection,
-        messages: reflectionPrompt(input),
+        messages: reflectionPrompt({ observations: input.observations, now: input.now }),
         schema: ReflectionOutputSchema,
         fallback: () => ({
           reflection_text: mergeObservationsDeterministic(
@@ -330,35 +320,44 @@ export function createMemoryLlmRuntime(deps: CreateMemoryLlmRuntimeDeps): Memory
         deps,
         task: "facts",
         maxTokens: deps.config.max_tokens.facts,
-        messages: factsPrompt(input),
+        messages: factsPrompt({ observations: input.observations, now: input.now }),
         schema: FactsOutputSchema,
         fallback: () => ({
-          facts: extractFactsDeterministic(input.observations).map((fact) => ({
-            subject_text: fact.subjectText,
-            fact_text: fact.factText,
-            valid_from_observation_id: fact.sourceObservationRange?.[0],
-          })),
+          facts: extractFactsDeterministic(input.observations).flatMap((fact) => {
+            const sourceObservationId = fact.sourceObservationRange?.[0];
+            if (sourceObservationId === undefined) return [];
+            return [
+              {
+                subject_text: fact.subjectText,
+                fact_text: fact.factText,
+                valid_from_observation_id: sourceObservationId,
+              },
+            ];
+          }),
         }),
       });
       const byObservationId = new Map(input.observations.map((o) => [o.id, o]));
-      return parsed.facts.flatMap((fact, index): ExtractedFact[] => {
-        const subjectText = fact.subject_text.trim();
-        const factText = fact.fact_text.trim();
-        if (!subjectText || !factText) return [];
-        const sourceId = fact.valid_from_observation_id ?? fact.source_observation_id;
-        const supporting =
-          (sourceId ? byObservationId.get(sourceId) : undefined) ??
-          input.observations[Math.min(index, Math.max(0, input.observations.length - 1))];
-        return [
-          {
-            subjectText,
-            factText,
-            validFrom: supporting?.observedAt ?? input.now,
-            ...(supporting !== undefined
-              ? { sourceObservationRange: [supporting.id, supporting.id] as [string, string] }
-              : {}),
-          },
-        ];
+      const invalidCitation = parsed.facts.find(
+        (fact) => !byObservationId.has(fact.valid_from_observation_id),
+      );
+      if (invalidCitation !== undefined) {
+        deps.log("memory.llm.fact_citation_invalid", {
+          observation_id: invalidCitation.valid_from_observation_id,
+        });
+        return extractFactsDeterministic(input.observations);
+      }
+      return parsed.facts.map((fact): ExtractedFact => {
+        const supporting = byObservationId.get(fact.valid_from_observation_id);
+        if (supporting === undefined) {
+          // Guarded above; keep the type invariant explicit.
+          throw new Error("memory LLM fact citation disappeared");
+        }
+        return {
+          subjectText: fact.subject_text,
+          factText: fact.fact_text,
+          validFrom: supporting.observedAt,
+          sourceObservationRange: [supporting.id, supporting.id],
+        };
       });
     },
   };

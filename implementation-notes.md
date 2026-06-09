@@ -13,6 +13,7 @@
 - **修复**：新增 `memory.llm` 配置子树（默认 `enabled:false`），支持 `model` 基础模型与 `observation_model` / `reflection_model` / `facts_model` 分任务覆盖；同组 `HELM_MEMORY_LLM_*` 环境变量可覆盖模型/开关/超时/温度/max_tokens。网关新增 `memory-llm.ts`，后台 Observer 用 LLM 压缩 raw messages -> observation，Reflector 用 LLM 合并 observations -> reflection，并用 LLM 提取 atomic facts。
 - **安全/降级**：LLM 调用只发生在 memory worker 后台 job，绝不进请求路径；配置错误 fail-closed（Zod strict + enabled 必须有 model），运行时模型不可用、上游失败、超时或 JSON 无效全部 fail-open 回原确定性 stub。日志只写 task/model alias/error class 等安全元数据，不写 prompt/response/memory 正文。
 - **模型解析**：memory model alias 复用执行层语义：OAuth 订阅别名受 live `oauthAliasSet` gate，providers.yaml alias 经 registry 解析，`provider/model` 结构化别名走对应 provider client，裸模型名走 primary provider passthrough；不会因为记忆任务跨过订阅/凭证边界。
+- **PR 评审修复**：LLM merge/fact prompt 不再包含 `previous_reflection`，避免旧 reflection 中已归档/剪枝内容绕过 active-observation filter 复活；LLM facts 强制 `valid_from_observation_id` 且必须命中 active observation，否则整次回退确定性 extractor；observation/reflection/fact 文本改 trim 后 min(1)，纯空白输出触发 fallback；LLM `priority` 标尺改 0–10，对齐 Observer 的 `priority/10` salience 推导。
 - **测试/取舍**：TDD 覆盖 schema 默认关闭与 fail-closed、loader YAML/env 覆盖、observer 使用配置模型、reflection JSON 无效 fallback、fact `valid_from_observation_id` 映射 observation 时间与 `[obs_id, obs_id]` 审计范围、模型不可用 fallback。暂不把 LLM usage 精确计入 cost bucket，沿用 observer/reflector 现有启发式 token 账本；后续若要精确计费可扩展 deps 成本接口。
 
 ---
