@@ -106,6 +106,55 @@ const ANTHROPIC_STREAM = [
   `event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
 ].join('');
 
+const RESPONSES_STREAM = [
+  `event: response.created\ndata: ${JSON.stringify({
+    type: 'response.created',
+    sequence_number: 0,
+    response: { id: 'resp_1', object: 'response', model: 'gpt-5.5', status: 'in_progress' },
+  })}\n\n`,
+  `event: response.output_item.added\ndata: ${JSON.stringify({
+    type: 'response.output_item.added',
+    sequence_number: 1,
+    output_index: 0,
+    item: { type: 'message', id: 'item_0', status: 'in_progress', role: 'assistant' },
+  })}\n\n`,
+  `event: response.output_text.delta\ndata: ${JSON.stringify({
+    type: 'response.output_text.delta',
+    sequence_number: 2,
+    item_id: 'item_0',
+    output_index: 0,
+    content_index: 0,
+    delta: '我',
+  })}\n\n`,
+  `event: response.output_text.delta\ndata: ${JSON.stringify({
+    type: 'response.output_text.delta',
+    sequence_number: 3,
+    item_id: 'item_0',
+    output_index: 0,
+    content_index: 0,
+    delta: '在',
+  })}\n\n`,
+  `event: response.output_text.done\ndata: ${JSON.stringify({
+    type: 'response.output_text.done',
+    sequence_number: 4,
+    item_id: 'item_0',
+    output_index: 0,
+    content_index: 0,
+    text: '我在',
+  })}\n\n`,
+  `event: response.completed\ndata: ${JSON.stringify({
+    type: 'response.completed',
+    sequence_number: 5,
+    response: {
+      id: 'resp_1',
+      object: 'response',
+      model: 'gpt-5.5',
+      status: 'completed',
+      usage: { input_tokens: 10, output_tokens: 2 },
+    },
+  })}\n\n`,
+].join('');
+
 describe('isSseStream', () => {
   it('detects OpenAI-style data: streams', () => {
     expect(isSseStream(OPENAI_STREAM)).toBe(true);
@@ -113,6 +162,10 @@ describe('isSseStream', () => {
 
   it('detects Anthropic-style event: streams', () => {
     expect(isSseStream(ANTHROPIC_STREAM)).toBe(true);
+  });
+
+  it('detects OpenAI Responses API event streams', () => {
+    expect(isSseStream(RESPONSES_STREAM)).toBe(true);
   });
 
   it('rejects plain JSON bodies, objects, and unrelated strings', () => {
@@ -185,6 +238,29 @@ describe('parseSseStream — Anthropic events', () => {
     expect(kinds).toContain('reasoning');
     expect(kinds).toContain('content');
     expect(kinds[kinds.length - 2]).toBe('finish'); // message_delta w/ stop_reason
+  });
+});
+
+describe('parseSseStream — OpenAI Responses API events', () => {
+  const parsed = parseSseStream(RESPONSES_STREAM);
+
+  it('assembles output_text deltas into the visible final content', () => {
+    expect(parsed.assembled.protocol).toBe('openai');
+    expect(parsed.assembled.content).toBe('我在');
+  });
+
+  it('captures model, usage, completion status and per-event kinds', () => {
+    expect(parsed.assembled.model).toBe('gpt-5.5');
+    expect(parsed.assembled.usage).toMatchObject({ input_tokens: 10, output_tokens: 2 });
+    expect(parsed.assembled.finishReason).toBe('completed');
+    expect(parsed.events.map((e) => e.kind)).toEqual([
+      'meta',
+      'meta',
+      'content',
+      'content',
+      'content',
+      'finish',
+    ]);
   });
 });
 

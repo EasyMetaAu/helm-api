@@ -47,6 +47,15 @@ describe('JsonTree', () => {
     expect(screen.getByText(/NEEDLE/)).toBeInTheDocument();
   });
 
+  it('allows long scalar strings to wrap instead of forcing horizontal scroll', async () => {
+    const long = `${'a'.repeat(520)}NEEDLE`;
+    render(JsonTree, { value: long, name: 'blob' });
+    await fireEvent.click(screen.getByRole('button', { name: /Expand/i }));
+    const scalar = screen.getByText(/NEEDLE/);
+    expect(scalar.className).toContain('whitespace-pre-wrap');
+    expect(scalar.className).toContain('[overflow-wrap:anywhere]');
+  });
+
   it('paginates large arrays at 200 entries with a "show remaining" control', async () => {
     const big = Array.from({ length: 250 }, (_, i) => i);
     render(JsonTree, { value: big });

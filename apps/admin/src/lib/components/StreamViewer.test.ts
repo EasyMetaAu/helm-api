@@ -28,6 +28,24 @@ const STREAM = [
   'data: [DONE]\n\n',
 ].join('');
 
+const RESPONSES_STREAM = [
+  `event: response.output_text.delta\ndata: ${JSON.stringify({
+    type: 'response.output_text.delta',
+    sequence_number: 0,
+    delta: '我',
+  })}\n\n`,
+  `event: response.output_text.delta\ndata: ${JSON.stringify({
+    type: 'response.output_text.delta',
+    sequence_number: 1,
+    delta: '在',
+  })}\n\n`,
+  `event: response.completed\ndata: ${JSON.stringify({
+    type: 'response.completed',
+    sequence_number: 2,
+    response: { model: 'gpt-5.5', status: 'completed' },
+  })}\n\n`,
+].join('');
+
 describe('StreamViewer', () => {
   it('defaults to the Assembled tab with the final content prominent', () => {
     render(StreamViewer, { raw: STREAM });
@@ -100,5 +118,11 @@ describe('StreamViewer', () => {
   it('passes a testid through to its root for e2e selectors', () => {
     render(StreamViewer, { raw: STREAM, testid: 'response-body' });
     expect(screen.getByTestId('response-body')).toBeInTheDocument();
+  });
+
+  it('renders OpenAI Responses API output_text.delta streams as assembled content', () => {
+    render(StreamViewer, { raw: RESPONSES_STREAM });
+    expect(screen.getByTestId('stream-final-content')).toHaveTextContent('我在');
+    expect(screen.queryByText(/No visible output/)).not.toBeInTheDocument();
   });
 });

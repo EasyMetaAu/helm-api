@@ -121,6 +121,31 @@ function mergeUsage(acc: Accumulator, usage: unknown): void {
   acc.assembled.usage = { ...(acc.assembled.usage ?? {}), ...u };
 }
 
+function extractOutputText(value: unknown): string {
+  const record = asRecord(value);
+  if (!record) return '';
+
+  const direct = str(record.text);
+  if (direct !== null) return direct;
+
+  const content = Array.isArray(record.content) ? record.content : [];
+  let out = '';
+  for (const part of content) out += extractOutputText(part);
+
+  const output = Array.isArray(record.output) ? record.output : [];
+  for (const item of output) out += extractOutputText(item);
+
+  return out;
+}
+
+function fillContentFromFinalText(acc: Accumulator, value: unknown): string {
+  const text = extractOutputText(value);
+  // Responses API sends both token deltas and authoritative done snapshots. The
+  // snapshot is a fallback for truncated captures, not another delta to append.
+  if (text && !acc.assembled.content) acc.assembled.content = text;
+  return text;
+}
+
 /** Classify + accumulate one OpenAI `chat.completion.chunk`. */
 function consumeOpenAiChunk(
   chunk: Record<string, unknown>,
@@ -171,6 +196,85 @@ function consumeOpenAiChunk(
   }
   // role opener / empty keep-alive chunk
   return { kind: 'meta', text: str(delta.role) ?? '' };
+}
+
+/** Classify + accumulate OpenAI Responses API `response.*` SSE events. */
+function consumeOpenAiResponseEvent(
+  payload: Record<string, unknown>,
+  acc: Accumulator,
+): Omit<SseEvent, 'index' | 'event' | 'data' | 'raw'> {
+  acc.assembled.protocol = 'openai';
+  const type = str(payload.type) ?? '';
+  const response = asRecord(payload.response);
+  acc.assembled.model ??= str(response?.model);
+  if (payload.usage) mergeUsage(acc, payload.usage);
+  if (response?.usage) mergeUsage(acc, response.usage);
+
+  switch (type) {
+    case 'response.output_text.delta': {
+      const delta = str(payload.delta) ?? '';
+      acc.assembled.content += delta;
+      return { kind: 'content', text: delta };
+    }
+    case 'response.output_text.done': {
+      const text = str(payload.text) ?? '';
+      if (text && !acc.assembled.content) acc.assembled.content = text;
+      return { kind: 'content', text };
+    }
+    case 'response.reasoning_summary_text.delta':
+    case 'response.reasoning_text.delta': {
+      const delta = str(payload.delta) ?? '';
+      acc.assembled.reasoning += delta;
+      return { kind: 'reasoning', text: delta };
+    }
+    case 'response.reasoning_summary_text.done':
+    case 'response.reasoning_text.done': {
+      const text = str(payload.text) ?? '';
+      if (text && !acc.assembled.reasoning) acc.assembled.reasoning = text;
+      return { kind: 'reasoning', text };
+    }
+    case 'response.function_call_arguments.delta': {
+      const delta = str(payload.delta) ?? '';
+      const last = acc.assembled.toolCalls[acc.assembled.toolCalls.length - 1];
+      if (last) last.arguments += delta;
+      return { kind: 'tool_call', text: delta };
+    }
+    case 'response.function_call_arguments.done': {
+      const args = str(payload.arguments) ?? '';
+      const last = acc.assembled.toolCalls[acc.assembled.toolCalls.length - 1];
+      if (last && args && !last.arguments) last.arguments = args;
+      return { kind: 'tool_call', text: args };
+    }
+    case 'response.output_item.added': {
+      const item = asRecord(payload.item);
+      if (str(item?.type) === 'function_call') {
+        acc.assembled.toolCalls.push({
+          id: str(item?.call_id) ?? str(item?.id),
+          name: str(item?.name) ?? '',
+          arguments: str(item?.arguments) ?? '',
+        });
+        return { kind: 'tool_call', text: str(item?.name) ?? '' };
+      }
+      return { kind: 'meta', text: type };
+    }
+    case 'response.content_part.done': {
+      const text = fillContentFromFinalText(acc, payload.part);
+      return text ? { kind: 'content', text } : { kind: 'meta', text: type };
+    }
+    case 'response.output_item.done': {
+      const text = fillContentFromFinalText(acc, payload.item);
+      return text ? { kind: 'content', text } : { kind: 'meta', text: type };
+    }
+    case 'response.completed':
+    case 'response.incomplete':
+    case 'response.failed': {
+      fillContentFromFinalText(acc, response);
+      acc.assembled.finishReason = str(response?.status) ?? type.replace('response.', '');
+      return { kind: 'finish', text: acc.assembled.finishReason };
+    }
+    default:
+      return { kind: 'meta', text: type };
+  }
 }
 
 /** Classify + accumulate one Anthropic stream event (by its `type`). */
@@ -274,10 +378,14 @@ export function parseSseStream(raw: string): ParsedSseStream {
       events.push({ ...base, kind: 'other', text: wire.data, data: null });
       continue;
     }
-    // Anthropic events carry a `type` discriminator (or an `event:` field);
-    // OpenAI chunks carry `choices`. Prefer the explicit discriminator.
-    const consumed =
-      typeof payload.type === 'string' || wire.event !== null
+    // OpenAI Responses API events and Anthropic events both carry `event:` /
+    // `type`; route `response.*` first so Responses streams do not get mistaken
+    // for Anthropic and render as "No visible output".
+    const type = str(payload.type);
+    const isResponsesEvent = type?.startsWith('response.') || wire.event?.startsWith('response.');
+    const consumed = isResponsesEvent
+      ? consumeOpenAiResponseEvent(payload, acc)
+      : typeof payload.type === 'string' || wire.event !== null
         ? consumeAnthropicEvent(payload, acc)
         : consumeOpenAiChunk(payload, acc);
     events.push({ ...base, ...consumed, data: payload });
