@@ -706,7 +706,7 @@ describe("responsesTransformer — unknown item type (fail-open)", () => {
 });
 
 describe("responsesTransformer — request sampling/control params (litellm parity)", () => {
-  it("maps IR-backed params (top_p/frequency_penalty/presence_penalty/seed/n/parallel_tool_calls) onto IR", async () => {
+  it("maps IR-backed params (top_p/penalties/seed/n/parallel/user/service/web_search) onto IR", async () => {
     const ir = await responsesTransformer.transformRequestOut({
       model: "gpt-4o",
       input: "hi",
@@ -716,6 +716,9 @@ describe("responsesTransformer — request sampling/control params (litellm pari
       seed: 42,
       n: 2,
       parallel_tool_calls: false,
+      user: "user-123",
+      service_tier: "auto",
+      web_search_options: { search_context_size: "low" },
     });
     expect(ir.top_p).toBe(0.9);
     expect(ir.frequency_penalty).toBe(0.5);
@@ -723,9 +726,12 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(ir.seed).toBe(42);
     expect(ir.n).toBe(2);
     expect(ir.parallel_tool_calls).toBe(false);
+    expect(ir.user).toBe("user-123");
+    expect(ir.service_tier).toBe("auto");
+    expect(ir.web_search_options).toEqual({ search_context_size: "low" });
   });
 
-  it("stashes Responses-only params (store/previous_response_id/metadata/logit_bias) in provider_raw", async () => {
+  it("stashes Responses-only params (store/previous_response_id/metadata/logit_bias/context_management) in provider_raw", async () => {
     const ir = await responsesTransformer.transformRequestOut({
       model: "gpt-4o",
       input: "hi",
@@ -733,11 +739,13 @@ describe("responsesTransformer — request sampling/control params (litellm pari
       previous_response_id: "resp_prev",
       metadata: { trace: "abc" },
       logit_bias: { "123": -100 },
+      context_management: { truncation: "auto" },
     });
     expect(ir.provider_raw?.store).toBe(true);
     expect(ir.provider_raw?.previous_response_id).toBe("resp_prev");
     expect(ir.provider_raw?.metadata).toEqual({ trace: "abc" });
     expect(ir.provider_raw?.logit_bias).toEqual({ "123": -100 });
+    expect(ir.provider_raw?.context_management).toEqual({ truncation: "auto" });
   });
 
   it("round-trips IR-backed params back onto the native Responses request (transformRequestIn)", async () => {
@@ -750,6 +758,10 @@ describe("responsesTransformer — request sampling/control params (litellm pari
       seed: 7,
       n: 3,
       parallel_tool_calls: true,
+      user: "user-123",
+      service_tier: "auto",
+      web_search_options: { search_context_size: "low" },
+      provider_raw: { context_management: { truncation: "auto" } },
     })) as {
       top_p?: number;
       frequency_penalty?: number;
@@ -757,6 +769,10 @@ describe("responsesTransformer — request sampling/control params (litellm pari
       seed?: number;
       n?: number;
       parallel_tool_calls?: boolean;
+      user?: string;
+      service_tier?: string;
+      web_search_options?: unknown;
+      context_management?: unknown;
     };
     expect(native.top_p).toBe(0.8);
     expect(native.frequency_penalty).toBe(0.1);
@@ -764,6 +780,10 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(native.seed).toBe(7);
     expect(native.n).toBe(3);
     expect(native.parallel_tool_calls).toBe(true);
+    expect(native.user).toBe("user-123");
+    expect(native.service_tier).toBe("auto");
+    expect(native.web_search_options).toEqual({ search_context_size: "low" });
+    expect(native.context_management).toEqual({ truncation: "auto" });
   });
 });
 

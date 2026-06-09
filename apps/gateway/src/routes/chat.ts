@@ -32,6 +32,7 @@ import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import type { ServingAccount } from "../runtime/serving-account.js";
+import { copyLiteLLMRequestParams, providerRawFromRequest } from "./internal-request-params.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import {
   backfillCompletionCost,
@@ -165,6 +166,8 @@ function toInternalRequest(
       ? bodyMeta.conversation_id
       : null;
   const conversationId = bodyConversationId ?? sessionKey;
+  const bodyRec = body as Record<string, unknown>;
+  const providerRaw = providerRawFromRequest(bodyRec);
 
   return {
     request_id: traceId,
@@ -182,6 +185,8 @@ function toInternalRequest(
         : null,
     attachments: null,
     max_tokens: typeof body.max_tokens === "number" ? body.max_tokens : null,
+    ...copyLiteLLMRequestParams(bodyRec),
+    ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
     stream: body.stream === true,
     metadata: {
       conversation_id: conversationId,
@@ -315,9 +320,11 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // invalid_request, raised BEFORE classify/route so it never 5xx's as an
     // upstream fault nor burns a provider fallback chain. Parse errors and schema
     // violations both map to the same structured invalid_request.
+    let requestJson = "";
     let raw: unknown;
     try {
-      raw = await c.req.json();
+      requestJson = await c.req.text();
+      raw = JSON.parse(requestJson);
     } catch {
       throw invalidRequest("malformed JSON request body", traceId);
     }
@@ -623,7 +630,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             deps,
             {
               requestId: traceId,
-              requestJson: JSON.stringify(raw),
+              requestJson,
               responseJson: captureOn ? rawSse : null,
               now: deps.now(),
             },
@@ -664,7 +671,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       deps,
       {
         requestId: traceId,
-        requestJson: JSON.stringify(raw),
+        requestJson,
         responseJson: result.body !== null ? JSON.stringify(result.body) : null,
         now: deps.now(),
       },

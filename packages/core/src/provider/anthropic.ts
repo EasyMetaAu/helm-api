@@ -162,7 +162,12 @@ export function openaiToAnthropicRequest(
     model: r.model,
     system: buildSystem(messages),
     messages: toAnthropicMessages(messages),
-    max_tokens: typeof r.max_tokens === "number" ? r.max_tokens : DEFAULT_MAX_TOKENS,
+    max_tokens:
+      typeof r.max_completion_tokens === "number"
+        ? r.max_completion_tokens
+        : typeof r.max_tokens === "number"
+          ? r.max_tokens
+          : DEFAULT_MAX_TOKENS,
   };
   // Anti-ban stable device identity: forward the ready-made, per-account-stable
   // user_id verbatim. Anthropic's metadata.user_id is an opaque ≤256-char string;
@@ -170,6 +175,8 @@ export function openaiToAnthropicRequest(
   if (opts?.metadataUserId) body.metadata = { user_id: opts.metadataUserId };
   if (typeof r.temperature === "number") body.temperature = r.temperature;
   if (typeof r.top_p === "number") body.top_p = r.top_p;
+  if (typeof r.top_k === "number") body.top_k = r.top_k;
+  if (r.thinking && typeof r.thinking === "object") body.thinking = r.thinking;
   if (r.stream === true) body.stream = true;
   if (typeof r.stop === "string") body.stop_sequences = [r.stop];
   else if (Array.isArray(r.stop)) body.stop_sequences = r.stop;
@@ -188,7 +195,32 @@ export function openaiToAnthropicRequest(
     });
     if (tools.length) body.tools = tools;
   }
+  const toolChoice = anthropicToolChoice(r.tool_choice, r.parallel_tool_calls);
+  if (toolChoice !== undefined) body.tool_choice = toolChoice;
   return body;
+}
+
+function anthropicToolChoice(
+  toolChoice: unknown,
+  parallelToolCalls: unknown,
+): Record<string, unknown> | undefined {
+  let out: Record<string, unknown> | undefined;
+  if (toolChoice === "auto") out = { type: "auto" };
+  else if (toolChoice === "required") out = { type: "any" };
+  else if (toolChoice === "none" || toolChoice === undefined || toolChoice === null)
+    out = undefined;
+  else if (typeof toolChoice === "object") {
+    const tc = toolChoice as { type?: unknown; function?: { name?: unknown }; name?: unknown };
+    if (tc.type === "function" && typeof tc.function?.name === "string") {
+      out = { type: "tool", name: tc.function.name };
+    } else {
+      out = toolChoice as Record<string, unknown>;
+    }
+  }
+  if (parallelToolCalls === false) {
+    return { ...(out ?? { type: "auto" }), disable_parallel_tool_use: true };
+  }
+  return out;
 }
 
 // ── response translation: Anthropic Messages -> OpenAI-Chat ──────────────────

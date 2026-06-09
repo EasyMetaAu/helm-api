@@ -1,5 +1,5 @@
 import type { ExecutionResult, RouteOptions } from "@helm/core";
-import { makeHelmError } from "@helm/shared";
+import { type InternalRequest, makeHelmError, type Protocol } from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import type { MessagesIdentity } from "./messages.js";
 import { createMessagesPipeline, PipelineError, type RouteFn } from "./messages-pipeline.js";
@@ -201,5 +201,58 @@ describe("createMessagesPipeline — failure surfaces", () => {
       allowedLanes: null,
       degradeLane: null,
     });
+  });
+});
+
+describe("createMessagesPipeline — production IR params", () => {
+  it.each<Protocol>([
+    "anthropic_messages",
+    "openai_responses",
+    "gemini",
+  ])("preserves LiteLLM params into InternalRequest for %s", async (protocol) => {
+    let seen: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route, protocol);
+    await pipeline.run(
+      irOf({
+        temperature: 0.4,
+        top_p: 0.8,
+        top_k: 32,
+        stop: ["END"],
+        n: 2,
+        logprobs: true,
+        top_logprobs: 3,
+        tool_choice: "auto",
+        parallel_tool_calls: false,
+        reasoning_effort: "medium",
+        user: "user-123",
+        service_tier: "auto",
+        web_search_options: { search_context_size: "low" },
+        provider_raw: { metadata: { request_id: "client-meta" } },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+
+    expect(seen).not.toBeNull();
+    const captured = seen as unknown as InternalRequest;
+    expect(captured.protocol).toBe(protocol);
+    expect(captured.temperature).toBe(0.4);
+    expect(captured.top_p).toBe(0.8);
+    expect(captured.top_k).toBe(32);
+    expect(captured.stop).toEqual(["END"]);
+    expect(captured.n).toBe(2);
+    expect(captured.logprobs).toBe(true);
+    expect(captured.top_logprobs).toBe(3);
+    expect(captured.tool_choice).toBe("auto");
+    expect(captured.parallel_tool_calls).toBe(false);
+    expect(captured.reasoning_effort).toBe("medium");
+    expect(captured.user).toBe("user-123");
+    expect(captured.service_tier).toBe("auto");
+    expect(captured.web_search_options).toEqual({ search_context_size: "low" });
+    expect(captured.provider_raw?.metadata).toEqual({ request_id: "client-meta" });
   });
 });

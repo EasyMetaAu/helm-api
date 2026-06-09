@@ -172,6 +172,10 @@ const ResponsesRequestSchema = z
     seed: z.number().int().optional(),
     n: z.number().int().positive().optional(),
     parallel_tool_calls: z.boolean().optional(),
+    user: z.string().optional(),
+    service_tier: z.string().optional(),
+    web_search_options: z.unknown().optional(),
+    context_management: z.unknown().optional(),
     store: z.boolean().optional(),
     previous_response_id: z.string().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
@@ -352,6 +356,8 @@ function toIRRequest(req: NativeRequest): IRRequest {
     providerRaw.previous_response_id = parsed.previous_response_id;
   if (parsed.metadata !== undefined) providerRaw.metadata = parsed.metadata;
   if (parsed.logit_bias !== undefined) providerRaw.logit_bias = parsed.logit_bias;
+  if (parsed.context_management !== undefined)
+    providerRaw.context_management = parsed.context_management;
   // Reasoning config + truncation have no IR field of their own; preserve verbatim.
   // NB: a distinct key — provider_raw.reasoning already holds inbound reasoning ITEMS.
   if (parsed.reasoning !== undefined) providerRaw.reasoning_config = parsed.reasoning;
@@ -381,6 +387,11 @@ function toIRRequest(req: NativeRequest): IRRequest {
     ...(parsed.n !== undefined ? { n: parsed.n } : {}),
     ...(parsed.parallel_tool_calls !== undefined
       ? { parallel_tool_calls: parsed.parallel_tool_calls }
+      : {}),
+    ...(parsed.user !== undefined ? { user: parsed.user } : {}),
+    ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
+    ...(parsed.web_search_options !== undefined
+      ? { web_search_options: parsed.web_search_options }
       : {}),
     ...(parsed.reasoning?.effort !== undefined
       ? { reasoning_effort: parsed.reasoning.effort }
@@ -473,6 +484,11 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
     ...(parsed.parallel_tool_calls !== undefined
       ? { parallel_tool_calls: parsed.parallel_tool_calls }
       : {}),
+    ...(parsed.user !== undefined ? { user: parsed.user } : {}),
+    ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
+    ...(parsed.web_search_options !== undefined
+      ? { web_search_options: parsed.web_search_options }
+      : {}),
     // Responses-only knobs come back out of provider_raw if they were stashed there.
     ...(raw?.store !== undefined ? { store: raw.store } : {}),
     ...(raw?.previous_response_id !== undefined
@@ -480,6 +496,9 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
       : {}),
     ...(raw?.metadata !== undefined ? { metadata: raw.metadata } : {}),
     ...(raw?.logit_bias !== undefined ? { logit_bias: raw.logit_bias } : {}),
+    ...(raw?.context_management !== undefined
+      ? { context_management: raw.context_management }
+      : {}),
     // Reasoning config: prefer the preserved native object, else synthesize from the
     // cross-protocol IR.reasoning_effort so o-series reasoning survives chat->responses.
     ...(raw?.reasoning_config !== undefined

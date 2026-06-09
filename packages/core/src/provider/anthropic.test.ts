@@ -76,6 +76,35 @@ describe("openaiToAnthropicRequest", () => {
     expect(without.metadata).toBeUndefined();
   });
 
+  it("maps max_completion_tokens to Anthropic max_tokens (LiteLLM parity)", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      max_completion_tokens: 321,
+    });
+
+    expect(body.max_tokens).toBe(321);
+  });
+
+  it("forwards Anthropic/LiteLLM-native controls: top_k, thinking, and tool_choice", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      top_k: 20,
+      thinking: { type: "enabled", budget_tokens: 1024 },
+      tool_choice: { type: "function", function: { name: "get_weather" } },
+      parallel_tool_calls: false,
+    });
+
+    expect(body.top_k).toBe(20);
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
+    expect(body.tool_choice).toEqual({
+      type: "tool",
+      name: "get_weather",
+      disable_parallel_tool_use: true,
+    });
+  });
+
   it("folds the `developer` role into system (after spoof, in message order), never a user turn (issue #50)", () => {
     // `developer` is OpenAI's renamed system tier. On the native Anthropic
     // subscription path it must fold into the top-level system param (like

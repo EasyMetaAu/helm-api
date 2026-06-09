@@ -539,6 +539,39 @@ async function peekStream(
 // Project the InternalRequest back to an OpenAI-compatible body for the upstream
 // passthrough provider. (Protocol re-emit is the docs/05 tasks; here the loose
 // normalized shape maps 1:1.)
+const FORWARDED_REQUEST_PARAM_KEYS = [
+  "max_completion_tokens",
+  "temperature",
+  "top_p",
+  "top_k",
+  "frequency_penalty",
+  "presence_penalty",
+  "seed",
+  "stop",
+  "n",
+  "logprobs",
+  "top_logprobs",
+  "parallel_tool_calls",
+  "modalities",
+  "reasoning_effort",
+  "user",
+  "service_tier",
+  "tool_choice",
+  "cache_control",
+  "thinking",
+  "functions",
+  "function_call",
+  "prediction",
+  "audio",
+  "logit_bias",
+  "web_search_options",
+  "include_server_side_tool_invocations",
+  "verbosity",
+  "safety_identifier",
+] as const satisfies ReadonlyArray<keyof InternalRequest>;
+
+const PROVIDER_RAW_FORWARD_KEYS = ["metadata", "store", "context_management"] as const;
+
 function stripInternal(req: InternalRequest, providerModel: string): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: providerModel,
@@ -548,11 +581,26 @@ function stripInternal(req: InternalRequest, providerModel: string): Record<stri
   if (req.tools) body.tools = req.tools;
   if (req.response_format) body.response_format = req.response_format;
   if (req.max_tokens !== null) body.max_tokens = req.max_tokens;
+  for (const key of FORWARDED_REQUEST_PARAM_KEYS) {
+    const value = req[key];
+    if (value !== undefined && value !== null) body[key] = value;
+  }
+  const providerRaw = req.provider_raw;
+  if (providerRaw !== undefined) {
+    for (const key of PROVIDER_RAW_FORWARD_KEYS) {
+      const value = providerRaw[key];
+      if (value !== undefined && value !== null) body[key] = value;
+    }
+  }
   // Streamed usage (cost #6): OpenAI-compatible upstreams only emit a trailing
   // `usage` chunk when asked. Opt in so the gateway can price streamed calls
   // (the route parses that chunk to backfill completion cost). Harmless to the
   // client — it is the standard final usage frame.
-  if (req.stream) body.stream_options = { include_usage: true };
+  if (req.stream) {
+    const streamOptions =
+      req.stream_options && typeof req.stream_options === "object" ? req.stream_options : {};
+    body.stream_options = { ...streamOptions, include_usage: true };
+  }
   return body;
 }
 

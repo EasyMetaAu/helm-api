@@ -336,11 +336,12 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     const { record, insert, insertPayload, redact } = makeRecord();
     const { deps } = makeDeps({ record });
     const app = buildApp(deps);
+    const rawRequest = '{\n  "contents":[{"role":"user","parts":[{"text":"hi"}]}]\n}';
 
     const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
       method: "POST",
       headers: GEMINI_AUTH,
-      body: JSON.stringify(REQ_BODY),
+      body: rawRequest,
     });
 
     expect(res.status).toBe(200);
@@ -351,6 +352,8 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     // The plaintext key must never reach the persisted telemetry row.
     expect(JSON.stringify(arg)).not.toContain("helm_live_secret");
     expect(insertPayload).toHaveBeenCalledOnce();
+    const payload = insertPayload.mock.calls[0]?.[0] as { requestJson: string };
+    expect(payload.requestJson).toBe(rawRequest);
   });
 
   it("records a telemetry row for a served STREAM request after the stream drains", async () => {

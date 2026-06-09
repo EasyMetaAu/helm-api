@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-09 · 生产路径四协议 LiteLLM 参数保真 + payload 原文记录修复（docs/05 协议互译；docs/07 可观测性；CLAUDE.md 原则 7/8）
+
+- **缘起**：复审发现 transformer 层已覆盖大量 OpenAI/Anthropic/Responses/Gemini 字段，但生产路径 `route -> InternalRequest -> execute` 仍只保留 `messages/tools/response_format/max_tokens/stream`，导致 `temperature/top_p/tool_choice/parallel_tool_calls/reasoning_effort/max_completion_tokens` 等 LiteLLM/OpenAI 参数被静默丢弃；同时 payload capture 用 `JSON.stringify(parsed)` 重建请求体，不符合 docs/07 的 verbatim 记录承诺。
+- **修复**：扩展 `InternalRequestSchema` 与 OpenAI Chat 边界 schema，新增共享 `copyLiteLLMRequestParams`/`providerRawFromRequest`，让 OpenAI Chat、Anthropic Messages、OpenAI Responses、Gemini 三条 pipeline face 都把 LiteLLM 兼容参数带进执行层；`execute.stripInternal` 转发这些字段，并对流式请求合并客户端 `stream_options` 后强制 `include_usage:true` 以保留成本回填；Responses transformer 补 `user/service_tier/web_search_options/context_management`，Anthropic native provider 补 `max_completion_tokens -> max_tokens`、`top_k/thinking/tool_choice/parallel_tool_calls:false`。
+- **记录修复**：四个 HTTP route 改为先读取 `c.req.text()` 再 `JSON.parse`，payload 表保存原始请求 JSON 文本（保留空白/顺序等原文细节），响应仍保存实际组装出的响应体；记录路径仍 fail-open，`capture_payloads` 关闭时不写 payload 但 telemetry row 保持。
+- **测试**：新增/加强生产边界测试：OpenAI Chat route -> execution request、三种非 chat protocol pipeline -> InternalRequest、execute -> provider request body、四 route payload requestJson 原文断言，以及 OpenAI/Responses/Anthropic provider 参数回归。重点锁定“transformer 测试通过但生产路径丢参”的老问题。
+- **取舍/TODO**：`metadata` 与网关内部 `metadata` 字段同名，provider metadata 存在 `provider_raw.metadata`，执行前再恢复到上游 body，避免污染 memory/session metadata。未把 auth/rate-limit/concurrency 等 pre-pipeline 拒绝统一写入 request history；当前修复范围是已认证且进入协议/路由面的 served/failure 请求。
+
+---
+
 ## 2026-06-08 · 四协议完整性审计 + 逐条修复（workflow 扇出审计 → worktree TDD 实现；docs/05 协议互译；CLAUDE.md 原则 5/7/8）
 
 - **缘起**：用 Workflow 扇出审计 helm 4 个 wire 协议（openai chat `/v1/chat/completions`、anthropic messages `/v1/messages`、openai-responses `/v1/responses`、gemini `/v1beta/models`）+ 统一 IR/流式核心，对照 `litellm` 参考实现找完整性缺口。51 个 agent（5 审计 + 逐发现对抗式核验 + 综合）确认 **36 条真实缺口**，去重成 **31 项依赖排序修复计划**（审计产物含本机绝对路径+修复前推理，**不签入**，完整记录见 workflow run transcript / git history）。在 git worktree（`worktree-protocol-completeness`）里 TDD 红→绿逐条实现；**修复全程留在主循环串行做**（不并行 edit agent——避免 [[workflow-shared-tree-revert-risk]] 的静默回退）。
@@ -36,25 +46,11 @@
 
 ---
 
-## 2026-06-07 · 记忆压缩重写为单一 auto 模式：零配置 + 价格自适应（删除 fixed/economy；docs/08/12；CLAUDE.md 原则 1/2/3/4）
-
-- **动机（四领域专家评审）**：旧 `observer.compaction` 有 `fixed`/`economy` 两模式、economy 17 个手调旋钮，从未投产，且评审发现三处「配置撒谎」级缺陷：① `prior_compaction_count` 静态 0 → 失真项永远按首压算（真值=该线程已有 observation 数，数据本就在手）；② `retention_rate:0.8` 与现实脱节——生产 summarize 是 2000 字符截断桩，压 10k token 真实保留 ~5%；③ 失真按 input 价货币化是范畴错误（模型越贵越怕遗忘，因果倒置），质量项二次方曲率与 context-rot 研究（凹形）相反，且 catalog 无 cache 价字段而 economy 最依赖它。
-- **决定（用户拍板，逐步收敛）**：先删 economy 留 fixed/auto 两模式 → 再砍成**唯一 auto** → 最终**连 mode 配置都删**。压缩不再是用户选项，而是网关内部行为：`config.memory.observer` 子树整体删除，`memory.yaml` 关于压缩零配置；价格/上下文窗口从 model catalog 自动解析，工作负载统计从已加载数据现场推导，专家先验是 `AUTO_PRIORS` 代码常量（不进配置）。`MemoryConfigSchema` 收缩为仅 `forgetting`；`.strict()` 下遗留的 `observer:` 块**拒绝启动**（有意 fail-closed，提醒运营者旋钮已消失，杜绝撒谎旋钮）。
-- **三触发决策（纯函数 `chooseAutoCompaction`，任一触发即压）**：① **size**——未覆盖段 ≥2048 token 必压（记忆形成是整条管线的原料，非经济奢侈品）；② **idle**——线程闲置 ≥1h 有未覆盖消息（worker 扫描入队 `trigger:"idle"`），全量压 `keepRecent=0` 兜住短线程，压完候选查询不再命中 → 自然终止；③ **pressure**——线程 token/上下文窗口 ≥0.80 强制压（keep 下限放到 1）。无「软经济区」：子阈值小段在任何价位都不值得压（摘要输出成本主导小切片），多一道门即死代码。
-- **netBenefit v2**：cache 价拆 **read/write**（Anthropic 写有溢价、OpenAI/DeepSeek 写免费——v1 单一 cache 价对两者都错）；质量项**线性** `(before−after)`（context-rot 是凹形，v1 二次方曲率反了）且与失真共用**单一** `qualityCoeff`（同一合成美元轴权衡，v1 两个无关旋钮不自洽）；`retained` 用**实测压缩比**（该线程已有 observation 的 输出/源 token 比，clamp[0.05,0.95]）；`priorCompactionCount=existing.length`（修 bug，天然防抖：压得越多次失真越高、边际收益单调收缩）。
-- **价格自适应通路**：catalog 加 `cacheRead/WritePerMTokUsd`（sync-catalog 从 LiteLLM `cache_read/creation_input_token_cost` + DeepSeek `input_cost_per_token_cache_hit` 映射，null=未发布）；`resolveCompactionPricing(catalog, alias)` 复用 cost telemetry 同款查表路径。后台 job 不知模型 → `observeOutbound` 执行后把 served model 戳到 `memory_threads.last_served_model`（sqlite v20 / pg v19 列），observer 读回定价。降级链全程 fail-open：未戳/未知模型→字段级启发式（read=0.1×input、write=0、output=5×input）；input 也缺（本地模型）→纯上下文/记忆决策，无钱可省。
-- **坑/取舍**：(1) **部署破坏性**——运营者持有的 `memory.yaml` 若含 `observer:` 块，升级后**拒绝启动**（有意），发布说明须写明手删该块（la.atmy.work 适用，deploy 不覆盖 config）。(2) idle 候选用**覆盖前沿**检测（range 末尾 join 回 message 比 created_at，非 observed_at——observer 跑在它覆盖的消息之后，observed_at 会误判 writeback 留下的 kept-recent 尾部已覆盖）。(3) `trigger:"idle"` 挂在 ReflectionScope 上随 scope_id JSON 编码走，无迁移；`reflectionTargetScope` 重建干净的 project/resource scope，trigger 不泄漏进 reflector 去重。(4) cache TTL 未建模（Anthropic 5min/1h 写溢价差异），v1 范围外。(5) 行为变化：小线程从「立刻压」变「攒 2k token 或闲置 1h 再压」，observation 形成略滞后但摘要质量更好。(6) summarize 仍是截断桩，retention 实测会经常 ~5%——真 LLM 摘要器落地后 retained 自然抬升，公式无需改。
-- **验证**：TDD 全程红→绿。新增/重写 compaction-policy.test（三触发/双阈值/v2 公式/纯质量模式/防抖单调）、observer.test（输入组装/idle/model→pricing）、idle-flush.test、双适配器 memory-auto-compaction.test（stamp 账号隔离 + idle 候选前沿/终止）。typecheck 净、lint 0 错、全量 **2605 绿**、build 通过。catalog.json 已 `pnpm sync:catalog` 重新生成签入。
-- **后续放开触发参数（同日，用户拍板「部分参数应允许覆盖，否则无从下手」）**：新增 `config.memory.compaction` 可选覆盖面——仅 5 个有运维语义的**触发/保留**参数（`segment_min_tokens`/`idle_flush_s`/`force_context_ratio`/`min_recent_messages`/`min_keep_ratio`），全 optional **无 `.default()`**（吸取 PricingOverride 的 Zod 物化坑），缺省即 `AUTO_PRIORS`、写了才生效；经济学先验（质量系数/价格启发式/retention clamp 等）仍留代码内。实现：`resolveCompactionTunables(overrides) → CompactionTunables` 注入 `AutoCompactionInputs.tunables`（决策函数保持纯）；observer 的运行时 idle 判定与 idle-flush sweep 的 cutoff 同吃 `idle_flush_s`；旧 `observer:` 块继续拒启动。memory.yaml 留注释示例（默认值标注）；CLAUDE.md 原则 2 例外措辞同步（"默认零配置 + 少量触发覆盖"）。测试：schema（缺省不物化/越界拒/未知键拒）、resolveCompactionTunables（逐字段覆盖）、决策级"覆盖真生效"（size/pressure 线被移动）、sweep cutoff 覆盖。全量 2629 绿。
-- **Codex 评审 II–IV 轮（同日，全修）**：II-(P1) trigger 进 scope_id 绕开单锁去重 → **彻底移除 trigger**：writeback/idle 入队同一 plain scope（DB 层每线程单 open-job 锁），idle 改 observer **运行时**从最新消息年龄推导（抗竞态：入队后有新活动即视为活跃）；II-(P1) 同毫秒前沿漏尾 → 比较 `(created_at,id)` 完整元组；II-(P2) 压力误算 archived/pruned → footprint 只数可见（active+未 expired）observation。III-(P2) `PricingSchema.partial()` 叠 `.default(null)` 会把省略的 cache 字段**物化成 null** 擦掉 generated 价 → override schema 显式声明纯 optional 无默认（**Zod 坑：`.partial()` 不剥离字段 `.default()`**）；III-(P2) 空响应/纯 tool-call 流不戳模型 → `observeOutbound` 无条件调用（空 messages 不持久化、stamp 照常）。IV-(P1 设计裁决) "配置即代码"与零配置冲突 → 用户拍板**例外化**，已写入 CLAUDE.md 原则 2；IV-(P2) forced 单消息段 no-op → forced 时 floor 挡不住安全阀，整段折叠 keepRecent=0；IV-(P2) 候选检测全局前沿漏 sparse gap → 改 interval containment（与 `alreadyObservedMessageIds` 同语义）。各补回归测试，终态全量 2619 绿。
-- **Codex 评审修复（同日，4 条全修）**：(P1) idle 候选误用 `memory_threads.updated_at` 当"最后活动"——普通回合只 append 消息**不碰线程行**，活跃长线程 1h 后会被误判空闲、对话中途被压：改用 `MAX(memory_messages.created_at)` 判闲（两适配器；sqlite WHERE 引用 SELECT 别名是其方言扩展，pg 需重复子查询）。(P1) idle 路径丢 project/resource scope → 短线程 observation 永远不 promote 成 reflection：候选返回值带上线程行的 `project_id/resource_id`，idle-flush 入队 scope 透传，scheduler 的 promote 门自然命中。(P2) 压力触发误用全量 raw 史（`tokenSum(all)`）——压过一次后永久虚高、逼迫后续小段被强制压：改算**活跃足迹** = 未覆盖 raw + observation 文本 token（covered raw 在 inject 时本就被其 observation 顶替；reflection 是 project 级有界量，排除以保持线程局部纯估计）。(P3) docs/08、docs/02 仍写 `recent_keep`/`economy` 旧配置（照抄会拒绝启动）→ 同步改为 auto 行为描述。修后全量 **2608 绿**、typecheck/lint/build 净。
----
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-07 · 记忆压缩重写为单一 auto 模式：删除 fixed/economy，改为默认零配置 auto + 少量触发覆盖；价格/上下文窗口从 catalog 自适应，三触发 size/idle/pressure，修复多轮评审发现的 idle/前沿/范围/配置漂移问题；最终 typecheck/lint/build/full test 通过。
 
 ### 2026-06-07 · 重试请求：原 key 失效时回退 root key（用户决策；docs/07）：原 key 存活照旧用（路由忠实），已删/吊销则回退**第一把存活 root key**（记 `replay.root_key_fallback`），连存活 root 都没有才 409。有意偏离「绝不放宽权限」——replay 在 admin Basic auth 后，操作者本就 root 等价，回退是主动调试非提权；代价是路由保真度（root 无 lane 白名单），靠日志+归因补偿。遥测 `apiKeyId` 改记**实际使用的 key**（避免悬空引用）。TDD 4 case，replay 15/15、admin 78/78 绿，前端零改。
 

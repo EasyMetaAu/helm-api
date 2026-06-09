@@ -8,6 +8,7 @@ import {
 } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
+import { copyLiteLLMRequestParams, providerRawFromRequest } from "../internal-request-params.js";
 import {
   backfillCompletionCost,
   type PayloadCaptureDeps,
@@ -206,6 +207,7 @@ function buildInternal(
 ): InternalRequest {
   const bag = body as Record<string, unknown>;
   const model = typeof body.model === "string" && body.model.length > 0 ? body.model : "auto";
+  const providerRaw = providerRawFromRequest(bag);
   return {
     request_id: traceId,
     protocol: "openai_chat",
@@ -222,6 +224,8 @@ function buildInternal(
         : null,
     attachments: null,
     max_tokens: typeof bag.max_tokens === "number" ? bag.max_tokens : null,
+    ...copyLiteLLMRequestParams(bag),
+    ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
     stream: body.stream === true,
     metadata: {
       conversation_id: null,
