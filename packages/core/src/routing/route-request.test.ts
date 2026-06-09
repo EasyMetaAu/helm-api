@@ -1,4 +1,4 @@
-import { type InternalRequest, makeHelmError } from "@helm/shared";
+import { type InternalRequest, makeHelmError, type RoutingSignal } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import type { LanesConfig } from "../lanes/schema.js";
 import type { PoliciesConfig } from "./policy-schema.js";
@@ -57,6 +57,25 @@ function classification(over: Partial<Classification> = {}): Classification {
     decided_by: "rules",
     constraints: {},
     explanation: [],
+    ...over,
+  };
+}
+
+function routingSignal(over: Partial<RoutingSignal> = {}): RoutingSignal {
+  return {
+    taskType: "general",
+    lane: "balanced",
+    windowStart: 1,
+    windowEnd: 2,
+    samples: 100,
+    successRate: 0.95,
+    fallbackRate: 0.02,
+    classifierFallbackRate: 0,
+    errorRate: 0.03,
+    p50LatencyMs: 100,
+    p95LatencyMs: 200,
+    avgCostUsd: 0.001,
+    updatedAt: 2,
     ...over,
   };
 }
@@ -395,6 +414,139 @@ describe("routeRequest — orchestration", () => {
     await routeRequest(req(), d);
     const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
     expect(plan.selected_lane).toBe("coding");
+  });
+
+  it("signal feedback promotes a degraded ranked lane to a healthier stronger lane", async () => {
+    const getSignal = vi.fn(async (taskType: string, lane: string) => {
+      if (taskType !== "general") return null;
+      if (lane === "balanced") {
+        return routingSignal({
+          taskType,
+          lane,
+          successRate: 0.45,
+          fallbackRate: 0.7,
+          errorRate: 0.55,
+        });
+      }
+      if (lane === "premium") {
+        return routingSignal({
+          taskType,
+          lane,
+          successRate: 0.94,
+          fallbackRate: 0.03,
+          errorRate: 0.02,
+        });
+      }
+      return null;
+    });
+    const d = deps({
+      classify: vi.fn(async () =>
+        classification({ task_type: "general", complexity: "medium", constraints: {} }),
+      ),
+      policies: { policies: [] },
+      signalFeedback: {
+        enabled: true,
+        minSamples: 20,
+        getSignal,
+      },
+    });
+
+    const result = await routeRequest(req(), d);
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("premium");
+    expect(plan.candidate_chain[0]).toBe("best_reasoning_model");
+    expect(result.decision.lane.selected_lane).toBe("premium");
+    expect(result.decision.classifier.explanation).toContainEqual(
+      expect.objectContaining({
+        kind: "routing_signal_feedback",
+        from_lane: "balanced",
+        to_lane: "premium",
+      }),
+    );
+    expect(getSignal).toHaveBeenCalledWith("general", "balanced");
+    expect(getSignal).toHaveBeenCalledWith("general", "premium");
+  });
+
+  it("signal feedback stays fail-open when the signal store read fails", async () => {
+    const d = deps({
+      classify: vi.fn(async () =>
+        classification({ task_type: "general", complexity: "medium", constraints: {} }),
+      ),
+      policies: { policies: [] },
+      signalFeedback: {
+        enabled: true,
+        getSignal: vi.fn(async () => {
+          throw new Error("signal store unavailable");
+        }),
+      },
+    });
+
+    const result = await routeRequest(req(), d);
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("balanced");
+    expect(result.final.status).toBe("ok");
+  });
+
+  it("signal feedback respects key allowedLanes and does not promote outside the key cap", async () => {
+    const d = deps({
+      classify: vi.fn(async () =>
+        classification({ task_type: "general", complexity: "medium", constraints: {} }),
+      ),
+      policies: { policies: [] },
+      signalFeedback: {
+        enabled: true,
+        minSamples: 20,
+        getSignal: vi.fn(async (_taskType, lane) =>
+          lane === "balanced"
+            ? routingSignal({ lane, successRate: 0.4, fallbackRate: 0.8, errorRate: 0.6 })
+            : routingSignal({ lane, successRate: 0.99, fallbackRate: 0, errorRate: 0 }),
+        ),
+      },
+    });
+
+    await routeRequest(req(), d, { keyCaps: { allowedLanes: ["economy", "balanced"] } });
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("balanced");
+  });
+
+  it("signal feedback does not override policy pins, explicit passthrough, or over-budget degradation", async () => {
+    const getSignal = vi.fn(async (_taskType: string, lane: string) =>
+      routingSignal({ lane, successRate: lane === "premium" ? 0.99 : 0.2, errorRate: 0.8 }),
+    );
+    const signalFeedback = { enabled: true, getSignal };
+
+    const pinned = deps({
+      classify: vi.fn(async () =>
+        classification({ task_type: "general", complexity: "medium", constraints: {} }),
+      ),
+      policies: { policies: [{ id: "pin-balanced", match: {}, use_lane: "balanced" }] },
+      signalFeedback,
+    });
+    await routeRequest(req(), pinned);
+    let plan = (pinned.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("balanced");
+
+    const explicit = deps({ signalFeedback });
+    await routeRequest(req({ requested_model: "gpt-4o" }), explicit, { allowCustomModel: true });
+    plan = (explicit.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.explicit_model).toBe("gpt-4o");
+
+    const degraded = deps({
+      classify: vi.fn(async () =>
+        classification({ task_type: "general", complexity: "medium", constraints: {} }),
+      ),
+      policies: { policies: [] },
+      signalFeedback,
+    });
+    await routeRequest(req(), degraded, {
+      keyCaps: { allowedLanes: null, degradeLane: "economy" },
+    });
+    plan = (degraded.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+    expect(getSignal).not.toHaveBeenCalled();
   });
 
   it("explicit LANE passthrough expands the lane's chain (full fallback semantics)", async () => {

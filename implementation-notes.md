@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-09 · Agentic Signals 反馈接入 ranked-lane 路由（docs/02 架构；docs/04 路由；docs/07 可观测性）
+
+- **缘起**：路线图里 `RoutingSignal` 聚合、sqlite/pg store 与后台 collector 已存在，但请求路径从不读取信号，导致 Agentic Signals 只能观测不能反馈，仍属于“未接线”功能。
+- **修复**：新增 `runtime.signal_feedback` 配置（默认 `enabled:false`，`HELM_SIGNAL_FEEDBACK_ENABLED` 可覆盖；阈值在 `config/runtime.yaml`），网关把 `store.signals.getSignal` 接入 `routeRequest`。启用后，只有当当前 **ranked lane**（`economy/balanced`）在同一 `task_type` 下样本数达标且 error/fallback 率超阈值时，才会提升到更强且更健康的 ranked lane；不会降级，也不会越过 explicit passthrough、policy `use_lane` pin、usage-budget degrade、policy/key caps。
+- **安全/可观测**：信号只含聚合计数/率/延迟/成本，不含 key/payload；读取异常完全 fail-open，保持原 lane 并继续请求。发生提升时在 `classifier.explanation` 追加 `routing_signal_feedback`（from/to lane、阈值、信号摘要），不新增敏感字段。
+- **取舍/TODO**：本次只做 ranked-lane 健康提升，暂不让信号改写未排名任务 lane（如 `coding`）或做成本驱动降档，避免生产反馈绕过 operator 明确策略。若后续要对 task lane 做反馈，应先定义“task lane → ranked lane”的可解释映射和更细粒度的决策字段。
+- **测试**：TDD 新增 route tests 覆盖 degraded balanced → premium、signal store fail-open、key allowed_lanes 不越界、policy pin / explicit passthrough / budget degrade 不被覆盖；config schema + loader 覆盖默认关闭、阈值 fail-closed 与 env 开关。
+
+---
+
 ## 2026-06-09 · 生产路径四协议 LiteLLM 参数保真 + payload 原文记录修复（docs/05 协议互译；docs/07 可观测性；CLAUDE.md 原则 7/8）
 
 - **缘起**：复审发现 transformer 层已覆盖大量 OpenAI/Anthropic/Responses/Gemini 字段，但生产路径 `route -> InternalRequest -> execute` 仍只保留 `messages/tools/response_format/max_tokens/stream`，导致 `temperature/top_p/tool_choice/parallel_tool_calls/reasoning_effort/max_completion_tokens` 等 LiteLLM/OpenAI 参数被静默丢弃；同时 payload capture 用 `JSON.stringify(parsed)` 重建请求体，不符合 docs/07 的 verbatim 记录承诺。
@@ -35,20 +45,11 @@
 
 ---
 
-## 2026-06-07 · 修复 Anthropic 订阅配额页：`resets_at:null` 让整份用量解析失败、快照永久卡旧（线上实测；docs/06 providers 页 Tier 3；CLAUDE.md 原则 3 fail-open）
-
-- **现象（la.atmy.work 实测）**：providers 页两个 Claude Max 账号，`mylukin@gmail.com` 配额正确（5h 7%/7d 39%），`riverathomas6094@outlook.com` 恒显 9%/44%（真值应为 5%/5%，与并存的 claude-relay-service 对照），点刷新无效。
-- **定位（直连线上数据库 + 解密 token 实打 usage 端点）**：① `oauth_quota` 表里 river 账号快照 `captured_at` 已 **22.9 小时**未更新（mylukin 是 4.9 分钟），即 PULL 从不写回；② token 正常（`updated_at` 新鲜、刷新成功）；③ 解密 river 的 access token 实打 `GET /api/oauth/usage` 返回 **200 + 合法 body**（5h 5%/7d 5%），HTTP 层无错。差异只在 body 形状：mylukin 的 `seven_day_sonnet.resets_at` 是 ISO 串，river 的是 **`null`**（周 Sonnet 额度未动用、无倒计时）。
-- **根因**：`AnthropicWindowSchema` 内层 `resets_at: z.string().optional()` —— `.optional()` 接受 `string|undefined` 但**拒绝 `null`**。顶层窗口已是 `.nullish()`（容忍整窗为 null），却漏了**存在的窗口内部字段为 null** 这一情况。river 的 `seven_day_sonnet` 是个对象（非 null）→ 进内层校验 → `resets_at:null` 失败 → 整份 `AnthropicOAuthUsageSchema.safeParse` 失败 → `parseAnthropicUsageBody` 返回 `[]` → 路由 `if (windows.length>0)` 跳过 upsert → 旧快照永久留存，每次刷新同样失败。完美解释四个症状（账号1对、账号2卡、刷新无效、快照近一天前）。
-- **修复（最小且正确）**：`utilization`/`resets_at` 双双改 `.nullish()`，接受 API 合法的 `null`。下游 `anthropicUsageToWindows` 早已健壮（`typeof utilization!=="number"` 跳过、`resets_at` 非串 → `resetsAtMs:null`），故仅 schema 一处改动。保留 `utilization:"x"`（字符串）仍失败的防御性（坏类型≠合法 null）。
-- **取舍/坑**：(1) 当前设计是「任一窗口坏 → 整份 fail-open 到 []」的全有全无，本次只把**合法 null** 从「坏」里摘出；真要每窗独立容错是更大改动，未做。(2) 路由 `if (windows && windows.length>0)` 才 upsert 的逻辑放大了本 bug——解析失败时宁可留旧也不写空，导致静默卡死且**无任何日志**（catch 全吞）。已知观测盲点，TODO：PULL 失败/空至少记一条 warn。(3) **部署**：修复在 `packages/shared`，需重建镜像部署；la.atmy.work 现有 river 旧快照会在新镜像首次成功 PULL 后自动覆盖（5min TTL 内）。
-- **验证**：TDD 先红后绿——新增「存在窗口含 `resets_at:null`（逐字照搬线上 body）」用例，修前返回 `[]`、修后正确返回 5h/7d/7d-sonnet（sonnet `resetsAtMs:null`）。anthropic-quota 6/6、oauth 全组 67/67、shared+core typecheck 净、lint 净。全量 node 项目 2376 绿（4 红均为 `apps/admin/build` 未构建的 admin-static 环境失败，与本改无关）。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-07 · 修复 Anthropic 订阅配额页：`resets_at:null` 让整份用量解析失败、快照永久卡旧；修为 `utilization`/`resets_at` 双 `.nullish()`，保坏类型 fail-closed；TDD 锁线上 body，oauth/shared/core 验证通过。
 
 ### 2026-06-07 · 记忆压缩重写为单一 auto 模式：删除 fixed/economy，改为默认零配置 auto + 少量触发覆盖；价格/上下文窗口从 catalog 自适应，三触发 size/idle/pressure，修复多轮评审发现的 idle/前沿/范围/配置漂移问题；最终 typecheck/lint/build/full test 通过。
 

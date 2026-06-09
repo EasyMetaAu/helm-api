@@ -286,17 +286,17 @@ export interface TelemetryStore {
 
 // SignalStore — persistence for the POST-MVP Agentic Signals feedback layer
 // (docs/02; research-notes "Plano"). A signal is an aggregated, REDACTED
-// observation rolled up by (taskType, lane). This is an OBSERVABILITY artifact:
-// the collector writes it asynchronously off the request path, and (this task)
-// nothing reads it back into routing — `getSignal` exists for a FUTURE
-// consumption task. One logical row per (taskType, lane); `upsertSignals`
-// overwrites so re-collecting a window never double-counts. Pure types — no SQL.
+// observation rolled up by (taskType, lane). The collector writes it
+// asynchronously off the request path; the optional routing feedback consumer
+// reads it fail-open when runtime.signal_feedback.enabled is true. One logical
+// row per (taskType, lane); `upsertSignals` overwrites so re-collecting a window
+// never double-counts. Pure types — no SQL.
 export interface SignalStore {
   // Idempotent upsert keyed by (taskType, lane). Overwrites the prior signal for
   // each pair; a failure here is fail-open (the collector logs, never 5xx).
   upsertSignals(signals: readonly RoutingSignal[]): Promise<void>;
-  // Read the latest signal for a (taskType, lane), or null if none yet. Reserved
-  // for the future routing-feedback consumer; unused by the MVP route.
+  // Read the latest signal for a (taskType, lane), or null if none yet. Used only
+  // by opt-in routing feedback; callers must treat failures as fail-open.
   getSignal(taskType: string, lane: string): Promise<RoutingSignal | null>;
 }
 

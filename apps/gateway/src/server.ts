@@ -791,11 +791,10 @@ export async function buildServer(
       tpm: next.rate_limit_default_tpm,
     };
   };
-  // Agentic Signals (POST-MVP feedback layer, docs/02). The collector consumes
-  // ALREADY-persisted telemetry and writes aggregated, REDACTED signals — it is
-  // started as a BACKGROUND interval below (NEVER on the request path), so it
-  // adds zero latency to any served request. Observe-only this phase: nothing
-  // reads these signals back into routing.
+  // Agentic Signals (docs/02). The collector consumes ALREADY-persisted telemetry
+  // and writes aggregated, REDACTED signals in the background. The optional
+  // routing feedback consumer below reads only those aggregates and remains
+  // fail-open, so signal storage never becomes a request-path availability risk.
   const signalCollector = createSignalCollector({
     telemetry,
     signals: store.signals,
@@ -1311,6 +1310,14 @@ export async function buildServer(
             // Structural `provider/...` fallback: the named client forwards the bare id.
             if (prefix && providerClients.has(prefix)) return true;
             return false; // bare unknown name: rejected (no Phase-0 silent fallback)
+          },
+          signalFeedback: {
+            enabled: config.runtime.signal_feedback.enabled,
+            minSamples: config.runtime.signal_feedback.min_samples,
+            maxErrorRate: config.runtime.signal_feedback.max_error_rate,
+            maxFallbackRate: config.runtime.signal_feedback.max_fallback_rate,
+            minSuccessRateDelta: config.runtime.signal_feedback.min_success_rate_delta,
+            getSignal: (taskType, lane) => store.signals.getSignal(taskType, lane),
           },
         },
         routeOpts,

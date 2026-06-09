@@ -4,11 +4,12 @@ import {
   type HelmError,
   type InternalRequest,
   makeHelmError,
+  type RoutingSignal,
 } from "@helm/shared";
 import { expandLaneChain } from "../lanes/expand-chain.js";
 import type { LanesConfig } from "../lanes/schema.js";
 import { type Classification as ResolverClassification, resolveLane } from "./lane-resolver.js";
-import { applyCaps, evaluatePolicies, type PolicyContext } from "./policy-engine.js";
+import { applyCaps, evaluatePolicies, LANE_RANK, type PolicyContext } from "./policy-engine.js";
 import type { PoliciesConfig } from "./policy-schema.js";
 
 // routeRequest — the SINGLE, framework-agnostic orchestrator for one request
@@ -139,6 +140,11 @@ export interface RouteDeps {
    *  absent (headless core / tests) → validation is skipped. Lane names are
    *  checked FIRST and never reach this. */
   isKnownModel?: (alias: string) => boolean;
+  /** Opt-in Agentic Signals feedback. Reads aggregated, redacted signal rows and
+   *  may promote a degraded ranked lane to a healthier stronger ranked lane,
+   *  never overriding explicit passthrough, policy pins, budget degradation, or
+   *  policy/key caps. Signal reads are fail-open. */
+  signalFeedback?: RoutingSignalFeedbackDeps;
 }
 
 export interface RouteOptions {
@@ -163,6 +169,34 @@ export interface RouteOptions {
    *  still clamped to `allowedLanes` (the harder security bound). */
   keyCaps?: { allowedLanes: string[] | null; degradeLane?: string | null };
 }
+
+export interface RoutingSignalFeedbackDeps {
+  enabled: boolean;
+  getSignal: (taskType: string, lane: string) => Promise<RoutingSignal | null>;
+  minSamples?: number;
+  maxErrorRate?: number;
+  maxFallbackRate?: number;
+  minSuccessRateDelta?: number;
+}
+
+interface SignalFeedbackThresholds {
+  minSamples: number;
+  maxErrorRate: number;
+  maxFallbackRate: number;
+  minSuccessRateDelta: number;
+}
+
+interface SignalFeedbackAdjustment {
+  lane: string;
+  explanation: Record<string, unknown>;
+}
+
+const DEFAULT_SIGNAL_FEEDBACK: SignalFeedbackThresholds = {
+  minSamples: 20,
+  maxErrorRate: 0.25,
+  maxFallbackRate: 0.5,
+  minSuccessRateDelta: 0.15,
+};
 
 // Fail-open classification default (principle 3 + 5): a degraded classifier
 // result that pins `balanced` via the resolver's decided_by==="default" path.
@@ -246,6 +280,135 @@ interface PlanRejection {
 
 function isRejection(p: PlanDecision | PlanRejection): p is PlanRejection {
   return "reject" in p;
+}
+
+function hasLane(lanes: LanesConfig, lane: string): boolean {
+  return Object.hasOwn(lanes, lane);
+}
+
+function signalThresholds(feedback: RoutingSignalFeedbackDeps): SignalFeedbackThresholds {
+  return {
+    minSamples: feedback.minSamples ?? DEFAULT_SIGNAL_FEEDBACK.minSamples,
+    maxErrorRate: feedback.maxErrorRate ?? DEFAULT_SIGNAL_FEEDBACK.maxErrorRate,
+    maxFallbackRate: feedback.maxFallbackRate ?? DEFAULT_SIGNAL_FEEDBACK.maxFallbackRate,
+    minSuccessRateDelta:
+      feedback.minSuccessRateDelta ?? DEFAULT_SIGNAL_FEEDBACK.minSuccessRateDelta,
+  };
+}
+
+function signalSummary(signal: RoutingSignal): Record<string, unknown> {
+  return {
+    samples: signal.samples,
+    success_rate: signal.successRate,
+    fallback_rate: signal.fallbackRate,
+    error_rate: signal.errorRate,
+    p95_latency_ms: signal.p95LatencyMs,
+    avg_cost_usd: signal.avgCostUsd,
+    updated_at: signal.updatedAt,
+  };
+}
+
+function isDegradedSignal(signal: RoutingSignal, thresholds: SignalFeedbackThresholds): boolean {
+  if (signal.samples < thresholds.minSamples) return false;
+  return (
+    signal.errorRate >= thresholds.maxErrorRate || signal.fallbackRate >= thresholds.maxFallbackRate
+  );
+}
+
+function isHealthyPromotion(
+  candidate: RoutingSignal,
+  current: RoutingSignal,
+  thresholds: SignalFeedbackThresholds,
+): boolean {
+  if (candidate.samples < thresholds.minSamples) return false;
+  if (candidate.errorRate >= thresholds.maxErrorRate) return false;
+  if (candidate.fallbackRate >= thresholds.maxFallbackRate) return false;
+  return candidate.successRate >= current.successRate + thresholds.minSuccessRateDelta;
+}
+
+function strongerRankedLanes(selectedLane: string, lanes: LanesConfig): string[] {
+  const selectedRank = LANE_RANK[selectedLane];
+  if (selectedRank === undefined) return [];
+  return Object.entries(LANE_RANK)
+    .filter(([lane, rank]) => rank > selectedRank && hasLane(lanes, lane))
+    .sort(([, a], [, b]) => a - b)
+    .map(([lane]) => lane);
+}
+
+function candidateAllowedByCaps(
+  candidateLane: string,
+  policyOutcome: ReturnType<typeof evaluatePolicies>,
+  keyCaps: RouteOptions["keyCaps"],
+): boolean {
+  if (applyCaps(candidateLane, policyOutcome) !== candidateLane) return false;
+  if (keyCaps === undefined) return true;
+  const capped = applyCaps(candidateLane, {
+    matched_policy_id: null,
+    use_lane: null,
+    max_lane: null,
+    allowed_lanes: keyCaps.allowedLanes,
+    reason: "key caps",
+  });
+  return capped === candidateLane;
+}
+
+async function maybeApplySignalFeedback(args: {
+  selectedLane: string;
+  classification: Classification;
+  policyOutcome: ReturnType<typeof evaluatePolicies>;
+  lanes: LanesConfig;
+  keyCaps: RouteOptions["keyCaps"];
+  feedback: RoutingSignalFeedbackDeps | undefined;
+}): Promise<SignalFeedbackAdjustment | null> {
+  const { feedback, classification, selectedLane, lanes, policyOutcome, keyCaps } = args;
+  if (feedback?.enabled !== true) return null;
+  // Never let production feedback override deterministic terminal paths or
+  // operator/client hard constraints.
+  if (classification.decided_by === "default" || classification.decided_by === "fallback") {
+    return null;
+  }
+  if (policyOutcome.use_lane !== null) return null;
+  if (keyCaps?.degradeLane !== undefined && keyCaps.degradeLane !== null) return null;
+
+  const thresholds = signalThresholds(feedback);
+  const candidates = strongerRankedLanes(selectedLane, lanes).filter((candidate) =>
+    candidateAllowedByCaps(candidate, policyOutcome, keyCaps),
+  );
+  if (candidates.length === 0) return null;
+
+  try {
+    const current = await feedback.getSignal(classification.task_type, selectedLane);
+    if (current === null || !isDegradedSignal(current, thresholds)) return null;
+
+    for (const candidateLane of candidates) {
+      const candidate = await feedback.getSignal(classification.task_type, candidateLane);
+      if (candidate === null) continue;
+      if (!isHealthyPromotion(candidate, current, thresholds)) continue;
+      return {
+        lane: candidateLane,
+        explanation: {
+          kind: "routing_signal_feedback",
+          reason: "promoted degraded ranked lane to healthier stronger lane",
+          task_type: classification.task_type,
+          from_lane: selectedLane,
+          to_lane: candidateLane,
+          selected_signal: signalSummary(current),
+          candidate_signal: signalSummary(candidate),
+          thresholds: {
+            min_samples: thresholds.minSamples,
+            max_error_rate: thresholds.maxErrorRate,
+            max_fallback_rate: thresholds.maxFallbackRate,
+            min_success_rate_delta: thresholds.minSuccessRateDelta,
+          },
+        },
+      };
+    }
+  } catch {
+    // Fail-open: stale/missing/corrupt signal storage must not change or break a
+    // request. The normal route.decision still records the unadjusted lane.
+    return null;
+  }
+  return null;
 }
 
 // The classifier segment shared by ALL explicit-passthrough outcomes (model,
@@ -387,7 +550,20 @@ async function plan(
       reason: "key caps",
     });
   }
+  const signalAdjustment = await maybeApplySignalFeedback({
+    selectedLane: cappedLane,
+    classification: cls,
+    policyOutcome: outcome,
+    lanes: deps.lanes,
+    keyCaps: opts.keyCaps,
+    feedback: deps.signalFeedback,
+  });
+  if (signalAdjustment !== null) cappedLane = signalAdjustment.lane;
   const chain = expandChain(cappedLane, deps.lanes);
+  const explanation =
+    signalAdjustment === null
+      ? cls.explanation
+      : [...cls.explanation, signalAdjustment.explanation];
 
   return {
     plan: { selected_lane: cappedLane, candidate_chain: chain, explicit_model: null },
@@ -405,7 +581,7 @@ async function plan(
       eval_latency_ms: cls.eval_latency_ms ?? null,
       fallback_reason: cls.fallback_reason ?? null,
       constraints: cls.constraints as Record<string, unknown>,
-      explanation: cls.explanation,
+      explanation,
     },
     policy: { matched_policy_id: outcome.matched_policy_id, reason: outcome.reason },
     evalUsd: cls.eval_usd ?? null,
