@@ -113,4 +113,29 @@ describe("rateLimitMiddleware", () => {
       expect(res.headers.get("x-ratelimit-limit")).toBeNull();
     }
   });
+
+  it("passes through unmetered when no identity is resolved (never invents a key)", async () => {
+    // No identity-seeding middleware → keyId is undefined: the limiter is never
+    // consulted and the request is admitted with no x-ratelimit-* headers.
+    const limiter = createRateLimiter({ config: cfg(), store: new InMemoryRateLimitStore() });
+    let checked = false;
+    const app = new Hono();
+    app.use(
+      "*",
+      rateLimitMiddleware({
+        limiter: {
+          check: async (p) => {
+            checked = true;
+            return limiter.check(p);
+          },
+        },
+        now: () => 0,
+      }),
+    );
+    app.get("/v1/chat/completions", (c) => c.json({ ok: true }));
+    const res = await app.request("/v1/chat/completions");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-ratelimit-limit")).toBeNull();
+    expect(checked).toBe(false); // limiter.check never called without a key
+  });
 });

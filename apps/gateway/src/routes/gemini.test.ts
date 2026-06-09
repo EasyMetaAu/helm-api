@@ -43,6 +43,7 @@ function makeDeps(
     transformRequestOut?: (native: unknown) => unknown;
     identity?: MessagesIdentity;
     rateLimiter?: GeminiRouteDeps["rateLimiter"];
+    concurrencyGate?: GeminiRouteDeps["concurrencyGate"];
     record?: RecordServedDeps;
   } = {},
 ): { deps: GeminiRouteDeps; harness: Harness } {
@@ -50,6 +51,7 @@ function makeDeps(
 
   const deps: GeminiRouteDeps = {
     rateLimiter: over.rateLimiter,
+    concurrencyGate: over.concurrencyGate,
     record: over.record,
     auth: {
       resolve: async (cred) => {
@@ -253,6 +255,29 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     expect(body.error).toMatchObject({ code: 429, status: "RESOURCE_EXHAUSTED" });
     expect(harness.order).toEqual(["auth:helm_live_secret", "rate-limit:k1"]);
     expect(harness.pipelineSawIR).toBeNull();
+  });
+
+  it("returns a 429 RESOURCE_EXHAUSTED Gemini envelope when the concurrency gate rejects, without routing", async () => {
+    const { deps, harness } = makeDeps({
+      concurrencyGate: {
+        acquire: async () => ({
+          ok: false as const,
+          reason: "timeout" as const,
+          retryAfterSeconds: 9,
+        }),
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("9");
+    const body = (await res.json()) as { error: { status: string } };
+    expect(body.error.status).toBe("RESOURCE_EXHAUSTED");
+    expect(harness.pipelineSawIR).toBeNull(); // never routed
   });
 
   it("maps a malformed JSON body to 400 INVALID_ARGUMENT, after auth, without routing", async () => {

@@ -24,6 +24,7 @@ function makeDeps(
     collect?: () => Promise<unknown>;
     streamIR?: () => AsyncIterable<{ type: string; [k: string]: unknown }>;
     rateLimiter?: ResponsesRouteDeps["rateLimiter"];
+    concurrencyGate?: ResponsesRouteDeps["concurrencyGate"];
     identity?: MessagesIdentity;
     record?: RecordServedDeps;
   } = {},
@@ -31,6 +32,7 @@ function makeDeps(
   const order: string[] = [];
   const deps: ResponsesRouteDeps = {
     rateLimiter: over.rateLimiter,
+    concurrencyGate: over.concurrencyGate,
     record: over.record,
     auth: {
       resolve: async (cred) => {
@@ -148,6 +150,26 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(((await res.json()) as { error: { type: string } }).error.type).toBe(
       "invalid_request_error",
     );
+    expect(order).not.toContain("route");
+  });
+
+  it("returns 429 rate_limited when the concurrency gate rejects (queue full), without routing", async () => {
+    const concurrencyGate = {
+      acquire: async () => ({
+        ok: false as const,
+        reason: "queue_full" as const,
+        retryAfterSeconds: 7,
+      }),
+    };
+    const { deps, order } = makeDeps({ concurrencyGate });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("7");
     expect(order).not.toContain("route");
   });
 
