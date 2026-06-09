@@ -48,6 +48,7 @@ describe("checked-in config samples", () => {
     expect(cfg.auth.require_api_key).toBe(true);
     expect(cfg.server.port).toBe(8080);
     expect(cfg.providers[0]?.api_key_env).toBe("DEEPSEEK_API_KEY");
+    expect(cfg.providers[0]?.map_developer_role_to_system).toBe(true);
   });
 
   it("loads the shipped lanes.yaml (economy/balanced/premium + task lanes)", () => {

@@ -35,6 +35,20 @@ describe("loadConfig", () => {
     expect(cfg.auth.require_api_key).toBe(true);
     expect(cfg.server.port).toBe(8080);
     expect(cfg.providers[0]?.api_key_env).toBe("OPENAI_API_KEY");
+    expect(cfg.providers[0]?.map_developer_role_to_system).toBe(false);
+  });
+
+  it("loads the provider developer-role compatibility flag", () => {
+    const cfg = loadConfig({
+      configDir: "config",
+      env: {},
+      readFile: fakeReadFile({
+        ...VALID_YAML,
+        "config/providers.yaml":
+          "providers:\n  - alias: deepseek\n    type: openai\n    base_url: https://api.deepseek.com/v1\n    api_key_env: DEEPSEEK_API_KEY\n    map_developer_role_to_system: true\n",
+      }),
+    });
+    expect(cfg.providers[0]?.map_developer_role_to_system).toBe(true);
   });
 
   it("lets env override file values (env wins) with coercion", () => {

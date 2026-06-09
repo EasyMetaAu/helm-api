@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-09 · DeepSeek provider developer-role 兼容开关（docs/05 协议互译；docs/04 路由执行兜底；CLAUDE.md 原则 2/3/5）
+
+- **缘起**：线上 trace `f51049a7-0d14-4250-9d93-2e057d153f3e` 进入 `economy` lane，首选 `deepseek/deepseek-v4-flash` 失败后 fallback 到 `openai-codex/gpt-5.4-mini` 成功。DeepSeek 真实错误为 HTTP 400：`messages[0].role: unknown variant developer`。根因是 OpenAI Responses/OpenAI Chat 请求中的 `developer` 角色被 OpenAI-compatible client 原样透传给官方 DeepSeek，而 DeepSeek 只接受 `system/user/assistant/tool/...`。
+- **修复**：新增 provider-scoped config `map_developer_role_to_system`（默认 `false`，fail-closed Zod 校验），并在 `createOpenAIClient` 中仅当该开关开启时复制请求体，把 `messages[].role === "developer"` 改为 `system`。`config/providers.yaml` 的官方 `deepseek` provider 启用该开关；真实 OpenAI/Codex 继续保留 `developer` 语义，不做全局降级。
+- **取舍**：这是执行层 provider 兼容 shim，不改变分类与 lane 选择；DeepSeek 仍可作为 economy/balanced 候选，只是不再因角色不兼容白白失败一次。原始请求对象不被 mutate，payload/replay 仍保留客户端原文；仅上游 wire body 做兼容转换。
+- **测试/验证**：TDD 覆盖 OpenAI client opt-in 映射且不修改 caller request、config loader 默认 false/YAML true、checked-in DeepSeek sample、server.ts provider flag 接线。定向 Vitest 70/70 绿；`@helm/shared`/`@helm/core`/`@helm/gateway` typecheck 与 build 均通过。
+- **部署提示**：本次只改本地源码与默认 config，未改线上 `/opt/helm-api/config` 或执行部署。线上要消除该 400，需要发布新镜像/代码，并确保生产 DeepSeek provider 配置包含 `map_developer_role_to_system: true`。
+
+---
+
 ## 2026-06-09 · 请求详情页 Responses API 流式回放与 JSON 换行修复（docs/05 协议互译；docs/07 可观测性；docs/11 管理界面）
 
 - **缘起**：线上请求详情页的 captured payload 里，响应是 OpenAI Responses API SSE（`event: response.output_text.delta` / `response.completed`），但 admin 侧 `StreamViewer` 只会组装 OpenAI Chat chunk 与 Anthropic events；`response.*` 事件被误走 Anthropic 分支，最终显示 “No visible output”。同页请求 JSON viewer 使用 `overflow-auto` + `<pre>` 默认不换行，长 prompt/request body 触发横向滚动条。
@@ -28,19 +38,11 @@
 
 ---
 
-## 2026-06-09 · Agentic Signals 反馈接入 ranked-lane 路由（docs/02 架构；docs/04 路由；docs/07 可观测性）
-
-- **缘起**：路线图里 `RoutingSignal` 聚合、sqlite/pg store 与后台 collector 已存在，但请求路径从不读取信号，导致 Agentic Signals 只能观测不能反馈，仍属于“未接线”功能。
-- **修复**：新增 `runtime.signal_feedback` 配置（默认 `enabled:false`，`HELM_SIGNAL_FEEDBACK_ENABLED` 可覆盖；阈值在 `config/runtime.yaml`），网关把 `store.signals.getSignal` 接入 `routeRequest`。启用后，只有当当前 **ranked lane**（`economy/balanced`）在同一 `task_type` 下样本数达标且 error/fallback 率超阈值时，才会提升到更强且更健康的 ranked lane；不会降级，也不会越过 explicit passthrough、policy `use_lane` pin、usage-budget degrade、policy/key caps。
-- **安全/可观测**：信号只含聚合计数/率/延迟/成本，不含 key/payload；读取异常完全 fail-open，保持原 lane 并继续请求。发生提升时在 `classifier.explanation` 追加 `routing_signal_feedback`（from/to lane、阈值、信号摘要），不新增敏感字段。
-- **取舍/TODO**：本次只做 ranked-lane 健康提升，暂不让信号改写未排名任务 lane（如 `coding`）或做成本驱动降档，避免生产反馈绕过 operator 明确策略。若后续要对 task lane 做反馈，应先定义“task lane → ranked lane”的可解释映射和更细粒度的决策字段。
-- **测试**：TDD 新增 route tests 覆盖 degraded balanced → premium、signal store fail-open、key allowed_lanes 不越界、policy pin / explicit passthrough / budget degrade 不被覆盖；config schema + loader 覆盖默认关闭、阈值 fail-closed 与 env 开关。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-09 · Agentic Signals 反馈接入 ranked-lane 路由：新增默认关闭的 `runtime.signal_feedback`，请求路径读取聚合 signals 后仅可在 ranked lane 内健康提升，不降级、不越过 policy/key/budget caps；读取异常 fail-open。TODO：若后续支持 task lane 反馈，需先定义 task lane → ranked lane 映射。
 
 ### 2026-06-09 · 生产路径四协议 LiteLLM 参数保真 + payload 原文记录修复：生产路径补齐 OpenAI Chat/Anthropic/Responses/Gemini LiteLLM 参数透传，流式强制 usage 回填，payload 表保存原始请求 JSON 文本；TDD 覆盖 route/pipeline/execute/provider/payload 边界。TODO：pre-pipeline 拒绝仍未统一写入 request history。
 

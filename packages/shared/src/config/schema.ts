@@ -123,6 +123,10 @@ export function isOAuthPreset(
 //     credential (both / neither) refuses to start.
 //   - `models[]`: per-model alias mapping. OPTIONAL (defaults to []) so the
 //     Phase-0 OpenAI-compatible passthrough provider (no models[]) keeps working.
+//   - `map_developer_role_to_system`: opt-in compatibility shim for OpenAI-
+//     compatible upstreams that reject OpenAI's newer `developer` role (e.g.
+//     official DeepSeek). Kept provider-scoped so true OpenAI/Codex can preserve
+//     the higher-priority role.
 // Credentials are stored as a REFERENCE (env var name) only — never plaintext.
 export const ProviderConfigSchema = z
   .object({
@@ -139,6 +143,7 @@ export const ProviderConfigSchema = z
     api_key_env: z.string().min(1).optional(),
     oauth: OAuthCredentialSchema.optional(),
     models: z.array(ProviderModelSchema).default([]),
+    map_developer_role_to_system: z.boolean().default(false),
   })
   .refine((p) => p.name !== undefined || p.alias !== undefined, {
     message: "provider requires `name` or `alias`",

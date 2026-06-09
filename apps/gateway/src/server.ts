@@ -616,13 +616,17 @@ function createProviderClient(
         ...base,
         ...cred,
         extraHeaders: () => ({ ...COPILOT_HEADERS }),
+        mapDeveloperRoleToSystem: p.map_developer_role_to_system,
         resolveBaseUrl: async () =>
           getGitHubCopilotBaseUrl((await getAuth()).replace(/^Bearer /, "")),
       },
       fetch: proxyFetch,
     });
   }
-  return createOpenAIClient({ config: { ...base, ...cred }, fetch: proxyFetch });
+  return createOpenAIClient({
+    config: { ...base, ...cred, mapDeveloperRoleToSystem: p.map_developer_role_to_system },
+    fetch: proxyFetch,
+  });
 }
 
 // Full wiring: config -> store -> bootstrap key -> provider -> routing pipeline.

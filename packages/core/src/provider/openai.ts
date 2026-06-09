@@ -30,6 +30,9 @@ export interface ProviderConfig {
   // static `baseUrl`. Copilot derives its API host from the current token's
   // `proxy-ep`, which changes when the short-lived Copilot token is re-minted.
   resolveBaseUrl?: () => Promise<string>;
+  // Compatibility shim for OpenAI-compatible providers that have not adopted the
+  // newer `developer` role. Disabled by default to keep true OpenAI passthrough.
+  mapDeveloperRoleToSystem?: boolean;
 }
 
 export interface OpenAIClientDeps {
@@ -134,6 +137,24 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     };
   }
 
+  function prepareRequest(req: ChatCompletionRequest): ChatCompletionRequest {
+    if (!cfg.mapDeveloperRoleToSystem || !Array.isArray(req.messages)) return req;
+    let changed = false;
+    const messages = req.messages.map((message) => {
+      if (
+        message !== null &&
+        typeof message === "object" &&
+        !Array.isArray(message) &&
+        (message as { role?: unknown }).role === "developer"
+      ) {
+        changed = true;
+        return { ...message, role: "system" };
+      }
+      return message;
+    });
+    return changed ? { ...req, messages } : req;
+  }
+
   // Strip any echoed credential from an upstream error body before it is carried
   // in UpstreamError.providerRaw (defense in depth; redact() is the main gate).
   // Static path scrubs the apiKey; OAuth path scrubs every LIVE token (access +
@@ -174,7 +195,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       return await doFetch(await chatUrl(), {
         method: "POST",
         headers: await headers(),
-        body: JSON.stringify(req),
+        body: JSON.stringify(prepareRequest(req)),
         signal: t.signal,
       });
     } catch (err) {

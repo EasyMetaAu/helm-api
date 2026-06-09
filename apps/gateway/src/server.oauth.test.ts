@@ -140,6 +140,32 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
     expect(clients.has("openai")).toBe(true);
     expect(clients.has("claude-sub")).toBe(false);
   });
+
+  it("threads the provider developer-role compatibility flag into OpenAI-compatible clients", async () => {
+    ADDED_KEYS.push(...setEnv({ DEEPSEEK_API_KEY: "sk-deepseek" }));
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const deepseek = provider({
+      name: "deepseek",
+      type: "openai",
+      base_url: "https://api.deepseek.com/v1",
+      api_key_env: "DEEPSEEK_API_KEY",
+      map_developer_role_to_system: true,
+      models: [{ alias: "deepseek/deepseek-v4-flash", provider_model: "deepseek-v4-flash" }],
+    });
+
+    const clients = buildProviderClients([deepseek], "https://fallback/v1", 60_000);
+    await clients.get("deepseek")?.chatCompletion({
+      model: "deepseek-v4-flash",
+      messages: [{ role: "developer", content: "Be concise." }],
+    });
+
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      messages: [{ role: "system", content: "Be concise." }],
+    });
+  });
 });
 
 // ── synthesizeOAuthProviders (Stage 3: priority + round-robin account pool) ────
