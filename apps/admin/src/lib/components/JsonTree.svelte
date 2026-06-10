@@ -46,7 +46,8 @@
   // mount (nonce 0) — that keeps each node's default depth-based open state on first
   // render. Expanding cascades for free: opening a node renders its children, which
   // mount and read the still-active command. Scalars carry an unused `open`, so the
-  // assignment is harmless for them.
+  // assignment is harmless for them. Collapse all keeps the root (depth 0) open so
+  // the top-level keys stay visible — only the descendants fold.
   const treeCtl = getJsonTreeCtl();
   let appliedNonce = 0;
   $effect(() => {
@@ -54,7 +55,7 @@
     const n = treeCtl.nonce;
     if (n === 0 || n === appliedNonce) return;
     appliedNonce = n;
-    open = treeCtl.allOpen;
+    open = treeCtl.allOpen || depth === 0;
   });
 
   const isLongString = $derived(kind === 'string' && (value as string).length > STRING_LIMIT);

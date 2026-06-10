@@ -89,20 +89,24 @@ describe('JsonViewer', () => {
     expect(screen.getByText(/c:/)).toBeInTheDocument();
   });
 
-  it('folds the tree back to the root when Collapse all is clicked', async () => {
-    render(JsonViewer, { value: { a: { b: 1 } } });
-    // a/b are open by default at depth < 2
-    expect(screen.getByText(/a:/)).toBeInTheDocument();
+  it('folds descendants but keeps the root open on Collapse all', async () => {
+    render(JsonViewer, { value: { a: { b: { c: 1 } } } });
+    // expand everything first so the deep nodes are in the DOM
+    await fireEvent.click(screen.getByRole('button', { name: /Expand all/i }));
+    expect(screen.getByText(/c:/)).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: /Collapse all/i }));
-    // every node folds, including the root — only the Object(1) summary remains
-    expect(screen.queryByText(/a:/)).not.toBeInTheDocument();
-    expect(screen.getByText(/Object\(1\)/)).toBeInTheDocument();
+    // the root stays open, so its direct children are still visible...
+    expect(screen.getByText(/a:/)).toBeInTheDocument();
+    // ...but everything below the root is folded away
+    expect(screen.queryByText(/b:/)).not.toBeInTheDocument();
   });
 
   it('re-expands after a collapse all (broadcast nonce re-fires)', async () => {
     render(JsonViewer, { value: { a: { b: { c: 1 } } } });
     await fireEvent.click(screen.getByRole('button', { name: /Collapse all/i }));
-    expect(screen.queryByText(/a:/)).not.toBeInTheDocument();
+    // root stays open (a visible) but its subtree is collapsed (b hidden)
+    expect(screen.getByText(/a:/)).toBeInTheDocument();
+    expect(screen.queryByText(/b:/)).not.toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: /Expand all/i }));
     expect(screen.getByText(/c:/)).toBeInTheDocument();
   });
