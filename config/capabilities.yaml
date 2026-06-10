@@ -99,7 +99,7 @@ openrouter/deepseek-v4-flash:
   supportsStreaming: true
   maxContextTokens: 1048576
   maxOutputTokens: 131072
-zenmux/claude-opus-4.7:
+zenmux/claude-opus-4.8:
   supportsTools: true
   supportsJsonMode: true
   supportsVision: true
@@ -114,7 +114,7 @@ zenmux/claude-sonnet-4.6:
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
-  # Same document-input story as opus-4.7 (PDF/text, no audio/video).
+  # Same document-input story as opus-4.8 (PDF/text, no audio/video).
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000

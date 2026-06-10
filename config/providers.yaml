@@ -79,9 +79,9 @@ providers:
     base_url: https://zenmux.ai/api/v1
     api_key_env: ZENMUX_API_KEY
     models:
-      # anthropic/claude-opus-4.7 — premium fallback, vision+json (zenmux real id).
-      - alias: zenmux/claude-opus-4.7
-        provider_model: anthropic/claude-opus-4.7
+      # anthropic/claude-opus-4.8 — premium fallback, vision+json (zenmux real id).
+      - alias: zenmux/claude-opus-4.8
+        provider_model: anthropic/claude-opus-4.8
       # anthropic/claude-sonnet-4.6 — balanced fallback, vision+json (zenmux real id).
       - alias: zenmux/claude-sonnet-4.6
         provider_model: anthropic/claude-sonnet-4.6
