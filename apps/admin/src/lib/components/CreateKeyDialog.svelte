@@ -5,6 +5,7 @@
     createKey,
     type CreatedKey,
   } from '$lib/api/keys.js';
+  import ConnectClientDialog from '$lib/components/ConnectClientDialog.svelte';
   import KeyCapsForm, { emptyKeyCaps } from '$lib/components/KeyCapsForm.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
@@ -41,6 +42,11 @@
   // cleared on close. While set, the form is replaced by the one-time reveal.
   let revealed = $state<CreatedKey | null>(null);
   let copied = $state<boolean>(false);
+  // The "Connect a client" guide, opened from the reveal step with the fresh
+  // plaintext injected (one-time). It is a child of THIS component so the secret
+  // never leaves the dialog that owns it — never lifted to the page or persisted
+  // (CLAUDE.md 原则7 / docs/06). Wiped alongside `revealed` on confirmSaved.
+  let showConnect = $state<boolean>(false);
 
   async function handleCreate(): Promise<void> {
     error = null;
@@ -125,6 +131,7 @@
     // Wipe transient secret state from the component.
     revealed = null;
     copied = false;
+    showConnect = false;
     onclose();
   }
 </script>
@@ -150,9 +157,19 @@
         >{copied ? $t('Copied') : $t('Copy')}</button
       >
     </div>
-    <div class="mt-4 flex justify-end">
+    <div class="mt-4 flex justify-end gap-2">
+      <button type="button" class="btn-secondary" onclick={() => (showConnect = true)}
+        >{$t('Connect a client')}</button
+      >
       <button type="button" class="btn-success" onclick={confirmSaved}>{$t('I saved it')}</button>
     </div>
+
+    {#if showConnect}
+      <ConnectClientDialog
+        plaintextKey={revealed.plaintext}
+        onclose={() => (showConnect = false)}
+      />
+    {/if}
   {:else}
     <h2 class="section-header">{$t('Create API key')}</h2>
 
