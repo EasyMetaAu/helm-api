@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-10 · 请求详情页：多行/长字符串「预览」弹窗（docs/07 可观测性；docs/11 管理界面）
+
+- **缘起**：请求详情页 JSON 树里，字符串值用 `JSON.stringify(s)` 渲染，真实换行被转义成字面量两字符 `\n`，长 system/developer prompt 挤成一坨；`whitespace-pre-wrap` 无真换行可断，用户每次都要 copy 出来手动把 `\n` 换成回车才能读。
+- **修复**：新增 `TextPreview.svelte`——对多行或长（>512）字符串在树节点旁挂一个「Preview」按钮，点开复用 `Modal` 渲染**解码后原文**（`whitespace-pre-wrap` 真换行）+ 一键 Copy。`Modal` 加可选 `wide` prop（`max-w-3xl`，靠 utility 层覆盖 `.modal-panel` 的 `@apply max-w-lg`）。`JsonTree` 触发条件 `includes('\n') || isLongString`；保留原 inline Expand（仍显示转义 JSON 形态）不动，避免破坏既有测试。修复落在 `JsonTree`，请求与响应两个 `JsonViewer` 自动都受益。
+- **取舍**：只读视图，零 core/config 改动；短单行标量不挂按钮保持干净。i18n 仅新增 `Preview` 一个 key（Copy/Copied/Close 复用），五语言齐补。
+- **验证**：TDD 先红后绿——`TextPreview.test.ts`（解码换行、wide 面板、Copy 调 clipboard、Close 关闭、label 作标题）+ `JsonTree.test.ts` 扩两例（多行短串有按钮、单行短串无按钮）。admin 全量 31 文件 279 绿；`pnpm lint`、Prettier check 绿；`svelte-check` 仅剩 3 条**预存在**的 `oauth.test.ts` tuple 报错（main 上已有，CI 的 `tsc` typecheck 跳过 `*.test.ts`，与本改无关）。
+- **部署提示**：admin 静态资源改动，线上需构建发布新 admin/网关镜像才生效。
+
+---
+
 ## 2026-06-10 · Responses API flat function tools 规范化为 Chat tools（docs/05 协议互译；docs/04 路由执行兜底；CLAUDE.md 原则 2/3/8）
 
 - **缘起**：线上 trace `9b18966a-6f1a-40b0-bae1-d69455005571` 已经不再卡在 DeepSeek `developer` 角色，但官方 DeepSeek 首选候选仍 HTTP 400：`tools[0]: missing field function`。根因是 OpenAI Responses API 的 function tool 输入是扁平形状（`{type:"function", name, description, parameters, strict}`），而网关把它折进 OpenAI-Chat-shaped IR 后又原样发给 Chat Completions upstream；DeepSeek 期望的是 Chat tools 形状（`{type:"function", function:{...}}`）。
@@ -27,19 +37,11 @@
 
 ---
 
-## 2026-06-09 · 请求详情页 Responses API 流式回放与 JSON 换行修复（docs/05 协议互译；docs/07 可观测性；docs/11 管理界面）
-
-- **缘起**：线上请求详情页的 captured payload 里，响应是 OpenAI Responses API SSE（`event: response.output_text.delta` / `response.completed`），但 admin 侧 `StreamViewer` 只会组装 OpenAI Chat chunk 与 Anthropic events；`response.*` 事件被误走 Anthropic 分支，最终显示 “No visible output”。同页请求 JSON viewer 使用 `overflow-auto` + `<pre>` 默认不换行，长 prompt/request body 触发横向滚动条。
-- **修复**：`parseSseStream` 新增 Responses API `response.*` 分支，在 Anthropic 分支前匹配，累积 `response.output_text.delta` 为最终可见 content，并读取 `response.completed.response.usage/model/status`；`output_text.done` / `content_part.done` / `output_item.done` 只作截断捕获的兜底快照，不把完成态全文再次 append，避免重复。顺带支持 Responses API reasoning 与 function_call argument delta 的基础合并。
-- **UI 取舍**：`JsonViewer` 三个 tab 统一 `overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere]`；`JsonTree` scalar 同样允许长字符串强制断行。保留垂直最大高度滚动，移除横向滚动；长不可断 token 也会按 anywhere 折行。
-- **验证**：TDD 新增 Responses API SSE parser / StreamViewer 用例，以及 JSON formatted/raw panel 与 scalar wrap 用例。定向 Vitest 40/40 绿；Prettier check 绿；同一线上 trace 的 payload 经本地新 parser 解析为 37 events、`protocol=openai`、`finishReason=completed`、content 正常非空。
-- **部署提示**：本次只改本地源码与测试，未执行生产部署。线上要生效需构建并发布新的 admin 静态资源/网关镜像。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-09 · 请求详情页 Responses API 流式回放与 JSON 换行修复：`parseSseStream` 加 Responses `response.*` 分支（Anthropic 前匹配，累积 `output_text.delta`、读 `response.completed` usage/model/status、done 事件仅兜底快照不重复 append）；`JsonViewer` 三 tab 与 `JsonTree` scalar 统一 `whitespace-pre-wrap break-words [overflow-wrap:anywhere]` 去横向滚动。Vitest 40/40 绿。
 
 ### 2026-06-09 · LLM 记忆提取/压缩接线与可配置模型：新增默认关闭的 `memory.llm`，后台 Observer/Reflector/facts 可用配置模型替代 deterministic stub；LLM 失败/无效 JSON/空白输出均 fail-open 回 stub，prompt 去掉 `previous_reflection` 并强制 fact citation 命中 active observation。
 

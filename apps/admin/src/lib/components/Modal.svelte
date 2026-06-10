@@ -10,15 +10,20 @@
   // be acknowledged (e.g. the one-time API-key plaintext reveal — CLAUDE.md 原则7):
   // there is then no scrim and Escape is ignored, so the only exit is an explicit
   // action the caller wires up.
+  // `wide` widens the panel from the default max-w-lg to max-w-3xl, for content
+  // that reads better with room (e.g. a multi-line prompt preview). The utility
+  // is appended so it overrides the @apply max-w-lg baked into .modal-panel.
   let {
     label,
     onclose,
     dismissible = true,
+    wide = false,
     children,
   }: {
     label: string;
     onclose: () => void;
     dismissible?: boolean;
+    wide?: boolean;
     children: Snippet;
   } = $props();
 
@@ -59,7 +64,7 @@
   {/if}
   <div
     bind:this={panel}
-    class="modal-panel"
+    class={`modal-panel${wide ? ' max-w-3xl' : ''}`}
     role="dialog"
     aria-modal="true"
     aria-label={label}

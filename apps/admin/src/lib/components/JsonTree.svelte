@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { t } from '$lib/i18n';
   import Self from './JsonTree.svelte';
+  import TextPreview from './TextPreview.svelte';
 
   // One node of the collapsible JSON tree (ported from llm-router's vanilla-JS
   // detail viewer, src/api/admin/views/detail.ts). Recursive: objects/arrays render
@@ -40,6 +41,11 @@
   let expandedStr = $state(false);
 
   const isLongString = $derived(kind === 'string' && (value as string).length > STRING_LIMIT);
+  // A "Preview" opens the DECODED text (real line breaks) in a roomy modal. Offer it
+  // whenever the inline escaped form is hard to read: multi-line OR long strings.
+  const previewable = $derived(
+    kind === 'string' && ((value as string).includes('\n') || isLongString),
+  );
   const scalarText = $derived.by(() => {
     if (kind === 'string') {
       const s = value as string;
@@ -95,6 +101,9 @@
         onclick={() => (expandedStr = !expandedStr)}
         >{expandedStr ? $t('Collapse') : $t('Expand')}</button
       >
+    {/if}
+    {#if previewable}
+      <TextPreview text={value as string} label={name} />
     {/if}
   </div>
 {/if}
