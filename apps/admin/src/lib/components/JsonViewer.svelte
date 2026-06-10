@@ -1,6 +1,7 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
   import JsonTree from './JsonTree.svelte';
+  import { type JsonTreeCtl, setJsonTreeCtl } from './jsonTreeContext';
 
   // Tabbed JSON viewer: Tree (collapsible, default) / Formatted (pretty JSON) / Raw.
   // Mirrors llm-router's per-panel viewer. `value` is `unknown` because captured
@@ -44,6 +45,30 @@
     return null;
   });
 
+  // A collapsible tree only exists when the root is a non-empty object/array.
+  // Scalars and the empty/null placeholders have nothing to expand or collapse.
+  const hasTree = $derived(
+    emptyPlaceholder === null &&
+      data !== null &&
+      typeof data === 'object' &&
+      (Array.isArray(data) ? data.length > 0 : Object.keys(data as object).length > 0),
+  );
+
+  // Broadcast channel for Expand all / Collapse all. Each JsonTree node owns its
+  // own open state and reacts to `nonce` bumps (see jsonTreeContext). Bumping the
+  // nonce re-fires even when `allOpen` is unchanged across two clicks of the same
+  // button, and is what lets a collapse → expand round-trip re-open everything.
+  const treeCtl = $state<JsonTreeCtl>({ allOpen: false, nonce: 0 });
+  setJsonTreeCtl(treeCtl);
+  function expandAll(): void {
+    treeCtl.allOpen = true;
+    treeCtl.nonce += 1;
+  }
+  function collapseAll(): void {
+    treeCtl.allOpen = false;
+    treeCtl.nonce += 1;
+  }
+
   function tabLabel(id: Tab): string {
     return id === 'tree' ? $t('Tree') : id === 'formatted' ? $t('Formatted') : $t('Raw');
   }
@@ -59,7 +84,7 @@
 </script>
 
 <div data-testid={testid}>
-  <div class="mb-2 flex flex-wrap gap-2">
+  <div class="mb-2 flex flex-wrap items-center gap-2">
     {#each TABS as id (id)}
       <button
         type="button"
@@ -67,6 +92,22 @@
         onclick={() => (tab = id)}>{tabLabel(id)}</button
       >
     {/each}
+    {#if tab === 'tree' && hasTree}
+      <div class="ml-auto flex gap-2">
+        <button
+          type="button"
+          class={`rounded border px-3 py-1 text-sm ${tabInactive}`}
+          data-testid="jsontree-expand-all"
+          onclick={expandAll}>{$t('Expand all')}</button
+        >
+        <button
+          type="button"
+          class={`rounded border px-3 py-1 text-sm ${tabInactive}`}
+          data-testid="jsontree-collapse-all"
+          onclick={collapseAll}>{$t('Collapse all')}</button
+        >
+      </div>
+    {/if}
   </div>
 
   <div data-testid="jsonviewer-tree" hidden={tab !== 'tree'} class={treePanelCls}>
@@ -82,7 +123,8 @@
     hidden={tab !== 'formatted'}
     class={textPanelCls}>{formatted}</pre>
 
-  <pre data-testid="jsonviewer-raw" hidden={tab !== 'raw'} class={textPanelCls}
-    >{normalized.raw}</pre
-  >
+  <pre
+    data-testid="jsonviewer-raw"
+    hidden={tab !== 'raw'}
+    class={textPanelCls}>{normalized.raw}</pre>
 </div>
