@@ -104,14 +104,12 @@ claude-opus:
   purpose: Anthropic Claude Opus tier — strongest Claude
   primary: anthropic/claude-opus-4-8
   fallback:
-    - zenmux/claude-opus-4.8
     - premium
 
 claude-sonnet:
   purpose: Anthropic Claude Sonnet tier — balanced Claude
   primary: anthropic/claude-sonnet-4-6
   fallback:
-    - zenmux/claude-sonnet-4.6
     - balanced
 
 # ZenMux exposes no Claude Haiku, so this cheap/fast tier degrades straight to
@@ -129,5 +127,5 @@ claude-haiku:
   purpose: OpenAI GPT-5.5 tier
   primary: openai-codex/gpt-5.5
   fallback:
-    - zenmux/gpt-5.5
+    - anthropic/claude-opus-4-8
     - premium
