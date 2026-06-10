@@ -53,6 +53,12 @@ const CONFIG_FILES: ReadonlyArray<{
   // applies (forgetting.enabled:false → behaviour identical to today; the gateway
   // still boots). A present-but-invalid file fails closed (strict/refine throws).
   { file: "memory.yaml", key: "memory", optional: true },
+  // model-aliases.yaml is a FLAT map (vendor model id -> lane | "auto"), so the
+  // whole file becomes the `model_aliases` key (mirrors lanes.yaml). Optional:
+  // absent → config.model_aliases undefined → no virtual rewrite. A present-but-
+  // invalid file (non-string entries) fails closed; the lane-target semantic check
+  // is fail-closed at boot (validateModelAliasTargets, server wiring).
+  { file: "model-aliases.yaml", key: "model_aliases", optional: true },
 ];
 
 type Mutable = Record<string, unknown>;

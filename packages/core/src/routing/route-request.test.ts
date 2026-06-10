@@ -725,3 +725,124 @@ describe("routeRequest — orchestration", () => {
     expect(rec.key_prefix).toBe("helm_live_ab12");
   });
 });
+
+// Virtual model-alias map (docs/04): a vendor model id (e.g. Claude Code's
+// "claude-opus-4-8") is rewritten onto a lane / "auto" BEFORE the passthrough
+// gate, so a fixed-model client routes without a 400 even on a default key.
+describe("routeRequest — virtual model aliases", () => {
+  it("maps a vendor model id onto a lane for a DEFAULT key (no allow_custom_model)", async () => {
+    const d = deps({ modelAliases: { "claude-opus-4-8": "premium" } });
+    const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
+      allowCustomModel: false,
+    });
+
+    // Resolved as a lane passthrough — classifier never runs.
+    expect(d.classify).not.toHaveBeenCalled();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("premium");
+    expect(plan.explicit_model).toBeNull();
+    expect(plan.candidate_chain).toEqual(["best_reasoning_model", "default_good_model"]);
+    expect(result.final.status).toBe("ok");
+
+    // The decision records the ORIGINAL vendor id, and the reason names the alias.
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.requested_model).toBe("claude-opus-4-8");
+    expect(rec.lane.selected_lane).toBe("premium");
+    expect(rec.policy.reason).toContain("alias");
+  });
+
+  it("resolves the alias BEFORE the unknown-model 400 on an allow_custom_model key", async () => {
+    // The exact bug: claude-opus-4-8 is not a known model, so without the alias an
+    // allow_custom_model key 400s. The alias rewrite must win first.
+    const d = deps({
+      isKnownModel: () => false,
+      modelAliases: { "claude-opus-4-8": "premium" },
+    });
+    const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
+      allowCustomModel: true,
+    });
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("premium");
+  });
+
+  it("matches a glob alias (Claude Code appends a date suffix)", async () => {
+    const d = deps({ modelAliases: { "claude-opus-*": "premium" } });
+    const result = await routeRequest(req({ requested_model: "claude-opus-4-8-20260115" }), d, {
+      allowCustomModel: false,
+    });
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("premium");
+    expect(result.final.status).toBe("ok");
+  });
+
+  it("an alias mapped to `auto` runs the classifier (does not short-circuit)", async () => {
+    const d = deps({ modelAliases: { "claude-*": "auto" } });
+    await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
+      allowCustomModel: false,
+    });
+    expect(d.classify).toHaveBeenCalledOnce();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("coding"); // from the default classification + policy
+  });
+
+  it("an alias-mapped lane is CLAMPED (not rejected) by the key's allowedLanes", async () => {
+    // Unlike an EXPLICIT lane ask (which loud-rejects a forbidden lane), an alias
+    // is a compatibility convenience: it silently clamps to the permitted set so a
+    // fixed-model client keeps working instead of 400ing.
+    const d = deps({ modelAliases: { "claude-opus-4-8": "premium" } });
+    const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
+      allowCustomModel: false,
+      keyCaps: { allowedLanes: ["economy"] },
+    });
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+  });
+
+  it("an alias-mapped lane is bounded by a POLICY cap — no cap bypass (review P1)", async () => {
+    // An identity-scoped policy caps org 'acme' to balanced. A standard key must
+    // NOT be able to use the operator alias to escape that cap up to premium.
+    const orgCap: PoliciesConfig = {
+      policies: [{ id: "org-cap", match: { org_id: "acme" }, max_lane: "balanced" }],
+    };
+    const capped = deps({ modelAliases: { "claude-opus-4-8": "premium" }, policies: orgCap });
+    const result = await routeRequest(
+      req({ requested_model: "claude-opus-4-8", org_id: "acme" }),
+      capped,
+      { allowCustomModel: false },
+    );
+    expect(result.final.status).toBe("ok");
+    const plan = (capped.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("balanced"); // premium clamped down by the org cap
+    const rec = (capped.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.policy.reason).toContain("capped");
+
+    // Control: a DIFFERENT org is not bound by that cap → the alias keeps premium.
+    const free = deps({ modelAliases: { "claude-opus-4-8": "premium" }, policies: orgCap });
+    await routeRequest(req({ requested_model: "claude-opus-4-8", org_id: "other" }), free, {
+      allowCustomModel: false,
+    });
+    const plan2 = (free.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan2.selected_lane).toBe("premium");
+  });
+
+  it("a non-matching model with a map present falls through to classified routing", async () => {
+    const d = deps({ modelAliases: { "claude-*": "premium" } });
+    await routeRequest(req({ requested_model: "gpt-4o" }), d, { allowCustomModel: false });
+    expect(d.classify).toHaveBeenCalledOnce();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("coding");
+  });
+
+  it("keyCaps.degradeLane suppresses an alias-mapped lane too (no over-budget bypass)", async () => {
+    const d = deps({ modelAliases: { "claude-opus-4-8": "premium" } });
+    const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
+      allowCustomModel: false,
+      keyCaps: { allowedLanes: null, degradeLane: "economy" },
+    });
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+  });
+});

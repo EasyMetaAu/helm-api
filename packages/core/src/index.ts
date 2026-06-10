@@ -551,6 +551,14 @@ export {
   type ResolveLaneInput,
   resolveLane,
 } from "./routing/lane-resolver.js";
+// Virtual model-alias map (docs/04 compatibility shim) — resolver + boot-time
+// fail-closed target validator, consumed by route-request (rewrite) and the
+// gateway composition root (boot validation).
+export {
+  type ModelAliasMap,
+  resolveModelAlias,
+  validateModelAliasTargets,
+} from "./routing/model-alias.js";
 export {
   applyCaps,
   evaluatePolicies,

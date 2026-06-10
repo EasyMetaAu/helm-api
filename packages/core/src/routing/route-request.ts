@@ -9,6 +9,7 @@ import {
 import { expandLaneChain } from "../lanes/expand-chain.js";
 import type { LanesConfig } from "../lanes/schema.js";
 import { type Classification as ResolverClassification, resolveLane } from "./lane-resolver.js";
+import { type ModelAliasMap, resolveModelAlias } from "./model-alias.js";
 import { applyCaps, evaluatePolicies, LANE_RANK, type PolicyContext } from "./policy-engine.js";
 import type { PoliciesConfig } from "./policy-schema.js";
 
@@ -140,6 +141,15 @@ export interface RouteDeps {
    *  absent (headless core / tests) → validation is skipped. Lane names are
    *  checked FIRST and never reach this. */
   isKnownModel?: (alias: string) => boolean;
+  /** Operator-configured virtual model-name map (docs/04 compatibility shim).
+   *  Rewrites an inbound VENDOR model id (e.g. Claude Code's "claude-opus-4-8",
+   *  which is neither a lane nor an internal alias) onto a LANE name or "auto"
+   *  BEFORE the allow_custom_model gate — so a fixed-model client routes without a
+   *  400 even on a default key. Targets are validated at boot (the gateway calls
+   *  validateModelAliasTargets) to be a known lane or "auto", fail-closed. Absent
+   *  (headless core / tests) → no rewrite. See model-alias.resolveModelAlias for
+   *  the exact/glob match order. */
+  modelAliases?: ModelAliasMap;
   /** Opt-in Agentic Signals feedback. Reads aggregated, redacted signal rows and
    *  may promote a degraded ranked lane to a healthier stronger ranked lane,
    *  never overriding explicit passthrough, policy pins, budget degradation, or
@@ -246,6 +256,25 @@ function policyContext(req: InternalRequest, cls: Classification): PolicyContext
     // — memory must never rewrite routing (docs/08). user_id/org_id come from the
     // trusted auth identity; project-scoped routing needs an equivalent trusted
     // source (auth/account), which does not exist yet, so it is null.
+    project_id: null,
+  };
+}
+
+// PolicyContext for an alias-mapped lane (step 0a). An alias request is NOT
+// classified, so task/complexity/needs_* are neutral (`task_type:"passthrough"`
+// matches no shipped task policy) — only IDENTITY-scoped policies (org_id/user_id,
+// e.g. the shipped budget_org_cap) match, and their caps still clamp the lane.
+// This is what keeps an operator alias from becoming a policy-cap bypass.
+function aliasPolicyContext(req: InternalRequest): PolicyContext {
+  return {
+    task_type: "passthrough",
+    complexity: "medium",
+    needs_json: false,
+    needs_tools: false,
+    needs_vision: false,
+    user_id: req.user_id,
+    org_id: req.org_id,
+    // project_id stays a non-routing memory field (mirrors policyContext above).
     project_id: null,
   };
 }
@@ -442,6 +471,59 @@ async function plan(
   deps: RouteDeps,
   opts: RouteOptions,
 ): Promise<PlanDecision | PlanRejection> {
+  // 0) Virtual model-alias resolution (docs/04 compatibility shim). An operator
+  //    map rewrites an inbound vendor model id (e.g. Claude Code's "claude-opus-4-8")
+  //    onto a LANE name or the "auto" sentinel so a fixed-model client routes
+  //    without a 400. Boot-validated to a lane or "auto".
+  const aliasTarget = resolveModelAlias(req.requested_model, deps.modelAliases);
+  const aliasToAuto = aliasTarget === "auto";
+
+  // 0a) Alias -> LANE: a CAP-BOUNDED lane selection — NOT an allow_custom_model
+  //     passthrough. It works for ANY key (the operator authorized it by
+  //     configuring the map), but unlike explicit passthrough it does NOT bypass
+  //     the routing brain's caps: policy caps (identity-scoped org/user caps still
+  //     bind; task/complexity-scoped policies do NOT fire — an alias request is not
+  //     classified) AND the key's allowed_lanes both SILENTLY clamp the lane, just
+  //     like classified routing. So a standard key can never use an operator alias
+  //     to escape a policy/key cap it would otherwise be bound by. The original
+  //     req.requested_model is preserved for the DecisionRecord. Suppressed while
+  //     over-budget degrading (no bypass — fall through to the forced degrade lane)
+  //     and for an alias to "auto" (handled by classification below).
+  if (
+    aliasTarget !== null &&
+    !aliasToAuto &&
+    Object.hasOwn(deps.lanes, aliasTarget) &&
+    (opts.keyCaps?.degradeLane === undefined || opts.keyCaps.degradeLane === null)
+  ) {
+    const outcome = evaluatePolicies(aliasPolicyContext(req), deps.policies);
+    let lane = applyCaps(aliasTarget, outcome);
+    if (opts.keyCaps !== undefined) {
+      lane = applyCaps(lane, {
+        matched_policy_id: null,
+        use_lane: null,
+        max_lane: null,
+        allowed_lanes: opts.keyCaps.allowedLanes,
+        reason: "key caps",
+      });
+    }
+    const clamped = lane !== aliasTarget;
+    return {
+      plan: {
+        selected_lane: lane,
+        candidate_chain: expandChain(lane, deps.lanes),
+        explicit_model: null,
+      },
+      classifier: passthroughClassifier(),
+      policy: {
+        matched_policy_id: outcome.matched_policy_id,
+        reason: clamped
+          ? `model alias "${req.requested_model}" -> lane "${aliasTarget}" (capped to "${lane}")`
+          : `model alias "${req.requested_model}" -> lane "${aliasTarget}"`,
+      },
+      evalUsd: null,
+    };
+  }
+
   // 1) Explicit passthrough — bypass the whole routing brain. The model field
   //    may name a concrete MODEL (chain = [model]) or a LANE (chain = the lane's
   //    expanded fallback chain, docs/04 "explicit model/lane").
@@ -449,6 +531,8 @@ async function plan(
   //    treated as an explicit model, even for an allow_custom_model key — otherwise
   //    it short-circuits classify/lane-resolve and gets sent upstream as the literal
   //    model "auto" (the llm-router #391 regression). Fall through to classify.
+  //    An alias that resolved to "auto" likewise must classify, never passthrough
+  //    the original vendor id — so it is excluded here too.
   //    A key that is OVER its usage budget and set to `degrade` (opts.keyCaps.
   //    degradeLane is populated for this request) must NOT be able to bypass the
   //    downgrade by naming an expensive explicit model OR lane — so suppress
@@ -456,6 +540,7 @@ async function plan(
   //    below (docs/06).
   if (
     opts.allowCustomModel === true &&
+    !aliasToAuto &&
     req.requested_model.length > 0 &&
     req.requested_model !== "auto" &&
     (opts.keyCaps?.degradeLane === undefined || opts.keyCaps.degradeLane === null)
