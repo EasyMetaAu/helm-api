@@ -169,6 +169,30 @@ export class PgMemoryStore implements MemoryStore {
     return id;
   }
 
+  // Single multi-row INSERT = one round-trip / one implicit transaction for the
+  // whole turn (vs N from the appendMessage loop). createdAt is stamped base+i so
+  // listMessages (ordered by createdAt, id) returns rows in append order even
+  // though randomUUID ids do not sort. Mirrors the sqlite adapter's batch path.
+  async appendMessages(inputs: MemoryMessageInput[]): Promise<string[]> {
+    if (inputs.length === 0) return [];
+    const base = this.now().getTime();
+    const ids: string[] = [];
+    const rows = inputs.map((input, i) => {
+      const id = this.genId();
+      ids.push(id);
+      return {
+        id,
+        threadId: input.threadId,
+        role: input.role,
+        content: input.content,
+        tokenEstimate: input.tokenEstimate,
+        createdAt: base + i,
+      };
+    });
+    await this.db.insert(memoryMessages).values(rows);
+    return ids;
+  }
+
   async listMessages(scope: { threadId: string; accountId: string }): Promise<RawMessage[]> {
     const rows = await this.db
       .select()

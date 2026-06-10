@@ -825,6 +825,39 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(msgs[0]?.createdAt).toBeInstanceOf(Date);
     });
 
+    it("appendMessages batches a whole turn in one commit and preserves insertion order", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      // Both real adapters MUST implement the batch path — it is the hot-path fix
+      // (observe inbound runs before the upstream call). A missing impl here means
+      // observe silently falls back to N synchronous commits.
+      expect(typeof store.appendMessages).toBe("function");
+      await store.ensureThread({ id: "batch-t", ownerId: "acct-a" });
+      const ids = await store.appendMessages?.([
+        { threadId: "batch-t", role: "user", content: "m0", tokenEstimate: 1 },
+        { threadId: "batch-t", role: "assistant", content: "m1", tokenEstimate: 1 },
+        { threadId: "batch-t", role: "user", content: "m2", tokenEstimate: 1 },
+      ]);
+      // Returns one generated id per input, in order.
+      expect(ids).toHaveLength(3);
+      expect(new Set(ids).size).toBe(3);
+      const msgs = await store.listMessages({ threadId: "batch-t", accountId: "acct-a" });
+      // listMessages orders by (createdAt, id); batched rows must come back in the
+      // exact order they were appended even though they share one wall-clock now().
+      expect(msgs.map((m) => m.content)).toEqual(["m0", "m1", "m2"]);
+    });
+
+    it("appendMessages on an empty batch writes nothing and returns []", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      await store.ensureThread({ id: "empty-t", ownerId: "acct-a" });
+      const ids = await store.appendMessages?.([]);
+      expect(ids).toEqual([]);
+      expect(await store.listMessages({ threadId: "empty-t", accountId: "acct-a" })).toHaveLength(
+        0,
+      );
+    });
+
     it("ensureThread fills missing owner/project/resource scope when the same id is re-seen", async () => {
       ctx = await make();
       await ctx.stores.memory.ensureThread({ id: "t-upsert" });

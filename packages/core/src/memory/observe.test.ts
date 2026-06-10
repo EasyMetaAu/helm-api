@@ -36,6 +36,22 @@ function makeFakeStore() {
   return { store, threads, messages, stamps };
 }
 
+// A fake that ALSO implements the batch path (appendMessages). observe must prefer
+// it over the per-message loop so a whole turn commits once. Records each batch
+// AND mirrors rows into `messages` so content assertions reuse the same shape.
+function makeBatchingFakeStore() {
+  const base = makeFakeStore();
+  const batches: MemoryMessageInput[][] = [];
+  base.store.appendMessages = vi.fn(async (inputs: MemoryMessageInput[]) => {
+    batches.push(inputs);
+    return inputs.map((input) => {
+      base.messages.push(input);
+      return `msg-${base.messages.length}`;
+    });
+  });
+  return { ...base, batches };
+}
+
 function makeDeps(store: MemoryStore, overrides: Partial<ObserveDeps> = {}): ObserveDeps {
   return {
     memoryStore: store,
@@ -88,6 +104,23 @@ describe("observeInbound", () => {
       content: "hello there",
       tokenEstimate: "hello there".length,
     });
+  });
+
+  it("uses appendMessages (one batched commit) when the store supports it", async () => {
+    const { store, threads, messages, batches } = makeBatchingFakeStore();
+    const deps = makeDeps(store);
+
+    const out = await observeInbound(deps, scope(), SAMPLE_MESSAGES);
+
+    expect(out.persisted).toBe(true);
+    expect(threads).toHaveLength(1);
+    // ONE batched call for the whole turn — never the per-message appendMessage.
+    expect(store.appendMessages).toHaveBeenCalledTimes(1);
+    expect(store.appendMessage).not.toHaveBeenCalled();
+    // System turn filtered out before batching; only the user message is persisted.
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toHaveLength(1);
+    expect(messages.map((m) => m.content)).toEqual(["hello there"]);
   });
 
   it("does NOT inject: messages handed to the classifier are byte-for-byte unchanged, and no observation/reflection is read", async () => {
@@ -171,6 +204,21 @@ describe("observeOutbound", () => {
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({ role: "assistant", content: "hi back" });
     expect(messages[1]).toMatchObject({ role: "tool", content: "tool output" });
+  });
+
+  it("batches response + tool messages in one appendMessages call when supported", async () => {
+    const { store, messages, batches } = makeBatchingFakeStore();
+    const deps = makeDeps(store);
+
+    await observeOutbound(deps, scope(), {
+      responseMessages: [{ role: "assistant", content: "hi back" }],
+      toolResults: [{ role: "tool", content: "tool output", tool_call_id: "call-1" }],
+    });
+
+    expect(store.appendMessages).toHaveBeenCalledTimes(1);
+    expect(store.appendMessage).not.toHaveBeenCalled();
+    expect(batches[0]).toHaveLength(2);
+    expect(messages.map((m) => m.content)).toEqual(["hi back", "tool output"]);
   });
 
   it("off mode does not write outbound", async () => {

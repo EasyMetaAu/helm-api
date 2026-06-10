@@ -310,6 +310,15 @@ export interface MemoryStore {
   ensureThread(input: MemoryThreadInput): Promise<void>;
   // Persist one raw message; returns the generated message id.
   appendMessage(input: MemoryMessageInput): Promise<string>;
+  // Batch variant of appendMessage: persist a whole turn's messages in ONE
+  // transaction (a single commit/fsync) instead of N. observe's INBOUND path runs
+  // BEFORE the upstream call, so on a long thread the per-message loop adds N
+  // synchronous commits of latency to every request (better-sqlite3 blocks the
+  // event loop per commit). Returns the generated ids in input order; an empty
+  // batch is a no-op returning []. OPTIONAL on the port: callers fall back to
+  // appendMessage in a loop when an adapter (or a pre-existing test fake) does not
+  // implement it, so adding it never breaks an existing MemoryStore fixture.
+  appendMessages?(inputs: MemoryMessageInput[]): Promise<string[]>;
   // POST-MVP Phase 2 (Observer). Read a thread's raw messages oldest-first so the
   // background Observer can compress the older ones into an observation. Returns
   // the persisted rows (with ids + createdAt) for an auditable source range.

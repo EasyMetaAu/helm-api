@@ -496,12 +496,39 @@ function applyMigrations(db: Database.Database): void {
   if (pending.length > 0) runAll(pending);
 }
 
+// Performance/durability pragmas applied to EVERY connection we open.
+//
+// better-sqlite3 is synchronous: each commit blocks Node's single event-loop
+// thread, so write cost is felt by ALL in-flight requests, not just the writer.
+// The default synchronous=FULL fsync()s on every commit — under concurrent
+// streaming that serialises requests behind disk syncs and is the dominant source
+// of "feels slow with 2 concurrent" latency. The pragmas below remove that cost:
+//
+//   - journal_mode=WAL   readers never block the single writer.
+//   - synchronous=NORMAL drops the per-commit fsync; durability syncs move to
+//                        checkpoint time. Safe under WAL — a crash/power-loss can
+//                        lose the last few commits but NEVER corrupts the file. For
+//                        a routing gateway's telemetry/usage bookkeeping that is an
+//                        acceptable trade for the throughput.
+//   - busy_timeout=5000  wait up to 5s for a lock instead of throwing SQLITE_BUSY
+//                        instantly (defensive: migrations + the runtime handle can
+//                        briefly contend the same file).
+//   - temp_store=MEMORY  keep transient B-trees/sorts in RAM, off the disk path.
+//   - cache_size=-16000  ~16MB page cache (negative => KiB) for the hot tables.
+function applyPragmas(sqlite: Database.Database): void {
+  sqlite.pragma("journal_mode = WAL");
+  sqlite.pragma("synchronous = NORMAL");
+  sqlite.pragma("busy_timeout = 5000");
+  sqlite.pragma("temp_store = MEMORY");
+  sqlite.pragma("cache_size = -16000");
+}
+
 // Apply migrations to a fresh or existing sqlite file (or ":memory:"). Idempotent.
 // Throws on failure so the caller can fail-closed at startup.
 export function runMigrations(dbPath: string): void {
   const db = new Database(dbPath);
   try {
-    db.pragma("journal_mode = WAL");
+    applyPragmas(db);
     applyMigrations(db);
   } finally {
     db.close();
@@ -512,7 +539,7 @@ export function runMigrations(dbPath: string): void {
 // schema. The underlying better-sqlite3 handle is exposed for lifecycle control.
 export function createSqliteDb(dbPath: string): SqliteDb {
   const sqlite = new Database(dbPath);
-  sqlite.pragma("journal_mode = WAL");
+  applyPragmas(sqlite);
   applyMigrations(sqlite);
   const db = drizzle(sqlite, { schema });
   return Object.assign(db, { $sqlite: sqlite });
