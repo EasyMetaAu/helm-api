@@ -759,7 +759,11 @@ describe("synthesizeResponsesSSEFromJSON — isomorphic with the live stream", (
       "response.completed",
     ]);
     const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
-    expect(completed.response.usage).toEqual({ input_tokens: 7, output_tokens: 2, total_tokens: 9 });
+    expect(completed.response.usage).toEqual({
+      input_tokens: 7,
+      output_tokens: 2,
+      total_tokens: 9,
+    });
   });
 
   it("tool-only response → function_call item sequence", async () => {
