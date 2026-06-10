@@ -72,4 +72,11 @@ describe('JsonViewer', () => {
     expect(raw.className).toContain('whitespace-pre-wrap');
     expect(raw.className).toContain('[overflow-wrap:anywhere]');
   });
+
+  it('does not preserve template whitespace in the Tree panel', () => {
+    render(JsonViewer, { value: { input: [{ role: 'user', content: 'hi' }] } });
+    const tree = screen.getByTestId('jsonviewer-tree');
+    expect(tree.className).toContain('whitespace-normal');
+    expect(tree.className).not.toContain('whitespace-pre-wrap');
+  });
 });
