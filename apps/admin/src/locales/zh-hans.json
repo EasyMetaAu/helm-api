@@ -319,6 +319,7 @@
   "Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.": "每个密钥的速率限制。留空则使用系统默认值。0 表示该维度不限。",
   "Policies": "策略",
   "Port": "端口",
+  "Preview": "预览",
   "Previous": "上一页",
   "Primary": "主用",
   "Primary is required and cannot be empty.": "主用为必填，不能为空。",

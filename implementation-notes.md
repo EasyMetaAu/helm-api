@@ -17,6 +17,16 @@
 
 ---
 
+## 2026-06-10 · 请求详情页：多行/长字符串「预览」弹窗（docs/07 可观测性；docs/11 管理界面）
+
+- **缘起**：请求详情页 JSON 树里，字符串值用 `JSON.stringify(s)` 渲染，真实换行被转义成字面量两字符 `\n`，长 system/developer prompt 挤成一坨；`whitespace-pre-wrap` 无真换行可断，用户每次都要 copy 出来手动把 `\n` 换成回车才能读。
+- **修复**：新增 `TextPreview.svelte`——对多行或长（>512）字符串在树节点旁挂一个「Preview」按钮，点开复用 `Modal` 渲染**解码后原文**（`whitespace-pre-wrap` 真换行）+ 一键 Copy。`Modal` 加可选 `wide` prop（`max-w-3xl`，靠 utility 层覆盖 `.modal-panel` 的 `@apply max-w-lg`）。`JsonTree` 触发条件 `includes('\n') || isLongString`；保留原 inline Expand（仍显示转义 JSON 形态）不动，避免破坏既有测试。修复落在 `JsonTree`，请求与响应两个 `JsonViewer` 自动都受益。
+- **取舍**：只读视图，零 core/config 改动；短单行标量不挂按钮保持干净。i18n 仅新增 `Preview` 一个 key（Copy/Copied/Close 复用），五语言齐补。
+- **验证**：TDD 先红后绿——`TextPreview.test.ts`（解码换行、wide 面板、Copy 调 clipboard、Close 关闭、label 作标题）+ `JsonTree.test.ts` 扩两例（多行短串有按钮、单行短串无按钮）。admin 全量 31 文件 279 绿；`pnpm lint`、Prettier check 绿；`svelte-check` 仅剩 3 条**预存在**的 `oauth.test.ts` tuple 报错（main 上已有，CI 的 `tsc` typecheck 跳过 `*.test.ts`，与本改无关）。
+- **部署提示**：admin 静态资源改动，线上需构建发布新 admin/网关镜像才生效。
+
+---
+
 ## 2026-06-10 · Responses API flat function tools 规范化为 Chat tools（docs/05 协议互译；docs/04 路由执行兜底；CLAUDE.md 原则 2/3/8）
 
 - **缘起**：线上 trace `9b18966a-6f1a-40b0-bae1-d69455005571` 已经不再卡在 DeepSeek `developer` 角色，但官方 DeepSeek 首选候选仍 HTTP 400：`tools[0]: missing field function`。根因是 OpenAI Responses API 的 function tool 输入是扁平形状（`{type:"function", name, description, parameters, strict}`），而网关把它折进 OpenAI-Chat-shaped IR 后又原样发给 Chat Completions upstream；DeepSeek 期望的是 Chat tools 形状（`{type:"function", function:{...}}`）。
@@ -27,21 +37,13 @@
 
 ---
 
-## 2026-06-09 · DeepSeek provider developer-role 兼容开关（docs/05 协议互译；docs/04 路由执行兜底；CLAUDE.md 原则 2/3/5）
-
-- **缘起**：线上 trace `f51049a7-0d14-4250-9d93-2e057d153f3e` 进入 `economy` lane，首选 `deepseek/deepseek-v4-flash` 失败后 fallback 到 `openai-codex/gpt-5.4-mini` 成功。DeepSeek 真实错误为 HTTP 400：`messages[0].role: unknown variant developer`。根因是 OpenAI Responses/OpenAI Chat 请求中的 `developer` 角色被 OpenAI-compatible client 原样透传给官方 DeepSeek，而 DeepSeek 只接受 `system/user/assistant/tool/...`。
-- **修复**：新增 provider-scoped config `map_developer_role_to_system`（默认 `false`，fail-closed Zod 校验），并在 `createOpenAIClient` 中仅当该开关开启时复制请求体，把 `messages[].role === "developer"` 改为 `system`。`config/providers.yaml` 的官方 `deepseek` provider 启用该开关；真实 OpenAI/Codex 继续保留 `developer` 语义，不做全局降级。
-- **取舍**：这是执行层 provider 兼容 shim，不改变分类与 lane 选择；DeepSeek 仍可作为 economy/balanced 候选，只是不再因角色不兼容白白失败一次。原始请求对象不被 mutate，payload/replay 仍保留客户端原文；仅上游 wire body 做兼容转换。
-- **测试/验证**：TDD 覆盖 OpenAI client opt-in 映射且不修改 caller request、config loader 默认 false/YAML true、checked-in DeepSeek sample、server.ts provider flag 接线。定向 Vitest 70/70 绿；`@helm/shared`/`@helm/core`/`@helm/gateway` typecheck 与 build 均通过。
-- **部署提示**：本次只改本地源码与默认 config，未改线上 `/opt/helm-api/config` 或执行部署。线上要消除该 400，需要发布新镜像/代码，并确保生产 DeepSeek provider 配置包含 `map_developer_role_to_system: true`。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
-### 2026-06-09 · 请求详情页 Responses API 流式回放与 JSON 换行修复：StreamViewer 新增 Responses API SSE 合并（response.output_text.delta / completed usage），JSON viewer/tree 强制换行移除横向滚动；定向 parser/UI 测试与线上 trace 本地解析通过。
+### 2026-06-09 · DeepSeek provider developer-role 兼容开关：新增 provider-scoped `map_developer_role_to_system` 并在官方 DeepSeek provider 开启，避免 OpenAI `developer` 角色被 DeepSeek 400；原始 payload 保真，上游 wire body 做兼容转换，需部署新镜像/生产配置才生效。
+
+### 2026-06-09 · 请求详情页 Responses API 流式回放与 JSON 换行修复：`parseSseStream` 加 Responses `response.*` 分支（Anthropic 前匹配，累积 `output_text.delta`、读 `response.completed` usage/model/status、done 事件仅兜底快照不重复 append）；`JsonViewer` 三 tab 与 `JsonTree` scalar 统一 `whitespace-pre-wrap break-words [overflow-wrap:anywhere]` 去横向滚动。Vitest 40/40 绿。
 
 ### 2026-06-09 · LLM 记忆提取/压缩接线与可配置模型：新增默认关闭的 `memory.llm`，后台 Observer/Reflector/facts 可用配置模型替代 deterministic stub；LLM 失败/无效 JSON/空白输出均 fail-open 回 stub，prompt 去掉 `previous_reflection` 并强制 fact citation 命中 active observation。
 
