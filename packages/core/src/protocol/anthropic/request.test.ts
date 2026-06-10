@@ -289,6 +289,58 @@ describe("anthropic transformRequestOut", () => {
     expect(parts[0]?.type).toBe("text");
   });
 
+  // Claude Code (and other clients) send injected system content — e.g. MCP server
+  // instructions — as a role:"system" MESSAGE in the array, alongside the top-level
+  // `system`. A compatible gateway must accept these and fold them into the system
+  // prompt (the outbound transform already does — systemFromMessages). Regression for
+  // the Claude Code boot failure: `400 invalid_value messages[1].role` (only
+  // user/assistant were accepted inbound).
+  it('accepts a role:"system" message and folds it into the system prompt', () => {
+    const req = {
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      system: "top-level system",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "system", content: "# MCP Server Instructions" },
+      ],
+    };
+
+    // Inbound must NOT throw (the schema previously rejected role:"system").
+    const ir = transformRequestOut(req);
+    expect(() => IRRequestSchema.parse(ir)).not.toThrow();
+    const systemTexts = ir.messages
+      .filter((m) => m.role === "system")
+      .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)));
+    expect(systemTexts).toContain("top-level system");
+    expect(systemTexts).toContain("# MCP Server Instructions");
+    expect(ir.messages.some((m) => m.role === "user")).toBe(true);
+
+    // Outbound round-trip: BOTH system chunks fold into the Anthropic `system` param,
+    // leaving messages with only user/assistant turns (a valid Anthropic request).
+    const out = transformRequestIn(ir);
+    expect(out.messages.every((m) => m.role === "user" || m.role === "assistant")).toBe(true);
+    const sys = typeof out.system === "string" ? out.system : JSON.stringify(out.system);
+    expect(sys).toContain("top-level system");
+    expect(sys).toContain("# MCP Server Instructions");
+  });
+
+  // Block-array content on a system message must also map to a system IR message,
+  // not silently become a user turn (the block path used to hardcode role:"user").
+  it('maps a block-array role:"system" message to a system IR message', () => {
+    const ir = transformRequestOut({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "system", content: [{ type: "text", text: "rules here" }] },
+      ],
+    });
+    const sys = ir.messages.find((m) => m.role === "system");
+    expect(sys).toBeDefined();
+    expect(JSON.stringify(sys?.content)).toContain("rules here");
+  });
+
   // fail-closed on a structurally invalid request (missing required fields).
   it("throws on a structurally invalid request", () => {
     expect(() => transformRequestOut({ messages: [] })).toThrow();
