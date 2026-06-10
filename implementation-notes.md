@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-10 · admin 导航进度条 NavProgress（admin UX；CLAUDE.md 原则 1）
+
+- **缘起**：用户点击侧栏链接切换页面时没有任何加载反馈——页面在 `+page.ts` 的 `load`（即发起 admin API 请求处）跑完前看起来"卡住"，操作者无法判断点击是否生效、是否在请求 API。
+- **实现**：新增 `NavProgress.svelte`，纯消费 SvelteKit `navigating` store（导航开始→`load` 跑完期间非 null），渲染为固定在顶部的细进度条（indigo、`fixed inset-x-0 top-0 z-50 h-[3px]`）。导航开始立即跳 8% 让点击"被确认"，随后 trickle 异步逼近 92%（永不到顶），导航 resolve 时瞬间补满 100%、短暂保持后淡出归零。`$effect` 仅以 `$navigating` 为依赖（`untrack` 包住 `active`/`progress` 写入，避免 trickle 自触发重启）。挂在 `+layout.svelte` shell 最顶层。
+- **取舍（关键）**：进度条**只覆盖路由导航**（含其 `load` 内的 API 调用），**不**做全局 fetch 拦截器。理由：用户诉求是"点链接没反馈"，导航正是 `navigating` 的语义边界；页内动作（保存/创建/重试、StatusCluster 30s 轮询）各有自己的按钮 loading 态，套全局条反而误导。Occam's razor——不引入 nprogress 依赖，~70 行自给自足。
+- **坑/TODO**：① 不反映页内非导航 fetch（刻意为之，见上）。② 依赖 `navigating`，若将来某页改用页内手动 fetch 取数而非 `load`，该页切换将不再触发进度条。③ 纯 admin 静态资源改动，需发新 admin 镜像才生效。
+- **验证**：TDD 先红后绿——`NavProgress.test.ts`(3) 用可写 `navigating` mock 断言：idle 隐藏且归零、导航起→可见且进度>0、resolve→补满 100% 后隐藏。admin 全量 296 绿、Biome lint 绿、typecheck（4 包）绿、build（admin static + gateway + core）绿。
+
 ## 2026-06-10 · Anthropic tool_result 邻接兼容修复（docs/05 协议互译；CLAUDE.md 原则 3/8）
 
 - **缘起**：线上请求 `5cd63ac6-798e-4b31-a497-575d92033f64` 在 `anthropic/claude-opus-4-8` 与 `zenmux/claude-opus-4.8` 返回 400：Anthropic 报 `messages.2` 的 `tool_use` 没有在下一条消息里紧跟对应 `tool_result`。捕获 payload 显示客户端把 114 个 `tool_result` 与新的用户文本放在同一个 Anthropic user turn；这是可兼容形态，但 Helm 入站转换先发普通 user 文本、再 fan-out tool 结果，订阅 provider 又把连续 tool 结果拆成多个 user turn，最终破坏 Anthropic 的 tool-result adjacency。
@@ -29,24 +37,11 @@
 
 ---
 
-## 2026-06-10 · publish.yml 版本号升级自动发布 Release（CI/CD；CLAUDE.md Git 工作流 / 原则 2）
-
-- **缘起**：用户发现 push main 触发的 `publish.yml` 只刷 GHCR `:latest` + `:sha-<short>`，**从不创建 GitHub Release**；版本 tag 与 Release 一直靠手工 `git tag` + `gh release create`（见 [[release-procedure]]）。用户希望「提交后自动发」。AskUserQuestion 选定**「版本号自动发布」**方案。
-- **实现**：在 `publish.yml` 的 main-push 路径加版本探测——读 `package.json` 版本 V，若 `refs/tags/vV` 不存在即判定该 commit 升了版本：额外构建/推 `:V` 镜像，并用 GitHub REST `POST /repos/{repo}/releases`（`tag_name=vV`、`target_commitish=GITHUB_SHA`、`name="vV"`、`generate_release_notes:true`）一次性建 tag + Release。普通 commit（tag 已存在）行为完全不变，仍只 `:latest` + `:sha`。
-- **取舍/坑**：
-  - 用 `curl` + REST 而非 `gh` CLI——不假设 self-hosted runner 装了 gh。
-  - GITHUB_TOKEN 创建的 tag **不会**再触发本 workflow 的 `tags: v*` 路径（GitHub 防递归），正好**避免重复构建**；`tags: ['v*']` 触发保留，仅作手工 escape hatch（手工推 tag→只建 `:version` 镜像、不建 Release）。
-  - 必需 `permissions: contents: write` + checkout `fetch-depth: 0`（探测已存在 tag）。
-  - publish.yml 仍与 ci.yml 独立（无 `needs`）：发布不等 CI——但版本升 commit 来自已 CI 绿的 release PR squash，合并即受信，沿用既有设计。
-  - Release 标题 = `vX.Y.Z`（与最近三次 release 一致，[[release-procedure]] 的「仅版本号、无描述后缀」原则保留）。
-- **新发布流程**：`release/vX.Y.Z` 分支只 bump 根 `package.json` 版本 → PR `chore(release): vX.Y.Z` → CI 绿 → squash 合并 main → publish.yml 自动打 tag/Release/`:version`/`:latest`。**不再手工 `git tag` / `gh release create`**。
-- **验证**：YAML 通过 `yaml.safe_load`；bump 探测对真实 tag 实测正确（v0.10.2 存在→不发；v0.11.0 缺失→会发）。线上首次生效需此 PR 合并后下次版本升 commit 才能端到端确认。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-10 · publish.yml 版本号升级自动发布 Release：main push 读根 `package.json` 版本 V，若 `vV` tag 不存在即判定版本升级——额外推 `:V` 镜像并用 GitHub REST 建 tag+Release（generate_release_notes）；普通 commit 行为不变（仅 `:latest`/`:sha`）。GITHUB_TOKEN 建的 tag 不递归触发本 workflow（避免重复构建），`tags:[v*]` 保留作手工 escape hatch；需 `contents:write` + `fetch-depth:0`。新流程：bump package.json → release PR → squash main → 自动发布。
 
 ### 2026-06-10 · Prompt caching 参数保真与缓存计费修复：补齐 `prompt_cache_key`/`prompt_cache_retention`/`cached_content`/Anthropic `cache_control` 透传与 cache read/write 成本拆分；Gemini cachedContent 加能力门禁；风险是运营侧需准确标记 `supportsCachedContent`，缺失则对 cached-content 请求 fail-closed。
 
