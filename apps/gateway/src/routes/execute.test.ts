@@ -122,7 +122,9 @@ describe("createExecute — gateway execution adapter", () => {
       providers: new Map([["mock", provider]]),
       registry: registry({ default_good_model: "gpt-x" }),
       breaker: breaker(),
-      catalog: new Map(),
+      catalog: new Map([
+        ["default_good_model", entry("default_good_model", { supportsCachedContent: true })],
+      ]),
       now: clock(),
       signal: new AbortController().signal,
     });
@@ -147,6 +149,9 @@ describe("createExecute — gateway execution adapter", () => {
         reasoning_effort: "high",
         user: "user-123",
         service_tier: "auto",
+        prompt_cache_key: "thread-123",
+        prompt_cache_retention: "24h",
+        cached_content: "cachedContents/gemini-ctx",
         prediction: { type: "content", content: "expected" },
         audio: { voice: "alloy", format: "wav" },
         logit_bias: { "42": -1 },
@@ -181,6 +186,9 @@ describe("createExecute — gateway execution adapter", () => {
       reasoning_effort: "high",
       user: "user-123",
       service_tier: "auto",
+      prompt_cache_key: "thread-123",
+      prompt_cache_retention: "24h",
+      cached_content: "cachedContents/gemini-ctx",
       prediction: { type: "content", content: "expected" },
       audio: { voice: "alloy", format: "wav" },
       logit_bias: { "42": -1 },
@@ -983,6 +991,39 @@ describe("createExecute — gateway execution adapter", () => {
     if (out.final.status === "ok") expect(out.final.alias).toBe("doc");
   });
 
+  it("cached_content prunes non-cachedContent candidates and lands on a supporting Gemini target", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "cached" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ openai: "gpt-x", gemini: "google/gemini" }),
+      breaker: breaker(),
+      catalog: new Map([
+        ["openai", entry("openai")],
+        ["gemini", entry("gemini", { supportsCachedContent: true })],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["openai", "gemini"]),
+      req({ cached_content: "cachedContents/context-123" }),
+    );
+    expect(out.attempts[0]?.skipped).toBe(true);
+    expect(out.attempts[0]?.skip_reason).toBe("no_cached_content_support");
+    expect(out.final.status).toBe("ok");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("gemini");
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.cached_content).toBe("cachedContents/context-123");
+  });
+
   it("no qualifying candidate (all pruned by capability) → capability_unsatisfiable 422", async () => {
     const provider = {
       chatCompletion: vi.fn(),
@@ -1035,6 +1076,35 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.final.status).toBe("ok");
     if (out.final.status === "ok") expect(out.final.alias).toBe("u");
     expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fail-open a cached_content request to a model with no catalog capability data", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ unknown: "m-unknown" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["unknown"]),
+      req({ cached_content: "cachedContents/context-123" }),
+    );
+    expect(out.attempts[0]?.skipped).toBe(true);
+    expect(out.attempts[0]?.skip_reason).toBe("no_cached_content_support");
+    expect(out.final.status).toBe("error");
+    if (out.final.status === "error") {
+      expect(out.final.error.error_class).toBe("capability_unsatisfiable");
+      expect(out.final.error.http_status).toBe(422);
+    }
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
   });
 
   // ── cost-wire (docs/07): populate cost_usd from provider usage × catalog pricing.

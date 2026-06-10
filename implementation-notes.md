@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-10 · Prompt caching 参数保真与缓存计费修复（docs/05 协议互译；docs/07 成本计量；CLAUDE.md 原则 2/3/8）
+
+- **缘起**：对全网关缓存路径做重点 review 时发现多处缓存字段只被 UI/记忆层读取，却没有稳定进入 provider wire body：OpenAI/Responses 的 `prompt_cache_key`/`prompt_cache_retention` 会被 IR/schema/execute 过滤；Anthropic 订阅 provider 会丢 per-block/tool/top-level `cache_control`；Gemini `cachedContent` 没有 IR home；成本估算也把 cache read/write tokens 当普通 input 计费。
+- **修复**：把 `prompt_cache_key`、`prompt_cache_retention`、`cached_content` 加入 Shared InternalRequest、IR、OpenAI Chat、Responses、Gemini 与执行层透传白名单；Responses provider 优先保留客户端 `prompt_cache_key`，否则回退订阅 session；Gemini `cachedContent` 通过 IR `cached_content` 双向 round-trip，并由 `supportsCachedContent` 硬能力门禁保护，避免混合 fallback 链把必需 cached context 发到会忽略/拒绝它的非 Gemini 目标。
+- **Anthropic 取舍**：按当前 Anthropic/LiteLLM 行为支持 top-level `cache_control`（automatic prompt caching）以及 system/user/tool cache_control；协议 guard 不再把 request-level `cache_control` 标为 data_loss。订阅 provider 仍保留 Claude-Code spoof system[0]，用户 cache breakpoint 只贴在用户/系统原文块上，不贴在 spoof 上；若请求同时有 top-level automatic cache_control 与显式 block/tool cache_control，出站时丢弃 top-level，避免 Anthropic 因 breakpoint TTL 冲突返回 400。
+- **成本计量**：`resolveCostUsd` 现在按 LiteLLM 语义拆分 fresh input、cache read、cache write、output：`prompt_tokens` / Responses `input_tokens` 视为包含 cache tokens；Anthropic-style `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` 会先规范化成 full prompt；cache 价格缺失时回退 input 价而不是 0，避免低估。流式 Responses/Anthropic/Codex usage tail 也保留 cache read/write 细分，避免 streamed path 和 non-stream path 计费分叉。
+- **测试/验证**：新增/更新 OpenAI、Responses、Gemini、Anthropic native/provider、protocol guard、execute route、capability filter、cost calculator 定向回归。风险：`supportsCachedContent` 需要运营侧只标记真实支持 Gemini/LiteLLM cached-content handle 的目标；缺失能力数据会对 `cached_content` 请求 fail-closed 为 `capability_unsatisfiable`，这是有意保护成本与上下文正确性的取舍。
+
+---
+
 ## 2026-06-10 · Responses API flat function tools 规范化为 Chat tools（docs/05 协议互译；docs/04 路由执行兜底；CLAUDE.md 原则 2/3/8）
 
 - **缘起**：线上 trace `9b18966a-6f1a-40b0-bae1-d69455005571` 已经不再卡在 DeepSeek `developer` 角色，但官方 DeepSeek 首选候选仍 HTTP 400：`tools[0]: missing field function`。根因是 OpenAI Responses API 的 function tool 输入是扁平形状（`{type:"function", name, description, parameters, strict}`），而网关把它折进 OpenAI-Chat-shaped IR 后又原样发给 Chat Completions upstream；DeepSeek 期望的是 Chat tools 形状（`{type:"function", function:{...}}`）。
@@ -27,19 +37,11 @@
 
 ---
 
-## 2026-06-09 · 请求详情页 Responses API 流式回放与 JSON 换行修复（docs/05 协议互译；docs/07 可观测性；docs/11 管理界面）
-
-- **缘起**：线上请求详情页的 captured payload 里，响应是 OpenAI Responses API SSE（`event: response.output_text.delta` / `response.completed`），但 admin 侧 `StreamViewer` 只会组装 OpenAI Chat chunk 与 Anthropic events；`response.*` 事件被误走 Anthropic 分支，最终显示 “No visible output”。同页请求 JSON viewer 使用 `overflow-auto` + `<pre>` 默认不换行，长 prompt/request body 触发横向滚动条。
-- **修复**：`parseSseStream` 新增 Responses API `response.*` 分支，在 Anthropic 分支前匹配，累积 `response.output_text.delta` 为最终可见 content，并读取 `response.completed.response.usage/model/status`；`output_text.done` / `content_part.done` / `output_item.done` 只作截断捕获的兜底快照，不把完成态全文再次 append，避免重复。顺带支持 Responses API reasoning 与 function_call argument delta 的基础合并。
-- **UI 取舍**：`JsonViewer` 三个 tab 统一 `overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere]`；`JsonTree` scalar 同样允许长字符串强制断行。保留垂直最大高度滚动，移除横向滚动；长不可断 token 也会按 anywhere 折行。
-- **验证**：TDD 新增 Responses API SSE parser / StreamViewer 用例，以及 JSON formatted/raw panel 与 scalar wrap 用例。定向 Vitest 40/40 绿；Prettier check 绿；同一线上 trace 的 payload 经本地新 parser 解析为 37 events、`protocol=openai`、`finishReason=completed`、content 正常非空。
-- **部署提示**：本次只改本地源码与测试，未执行生产部署。线上要生效需构建并发布新的 admin 静态资源/网关镜像。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-09 · 请求详情页 Responses API 流式回放与 JSON 换行修复：StreamViewer 新增 Responses API SSE 合并（response.output_text.delta / completed usage），JSON viewer/tree 强制换行移除横向滚动；定向 parser/UI 测试与线上 trace 本地解析通过。
 
 ### 2026-06-09 · LLM 记忆提取/压缩接线与可配置模型：新增默认关闭的 `memory.llm`，后台 Observer/Reflector/facts 可用配置模型替代 deterministic stub；LLM 失败/无效 JSON/空白输出均 fail-open 回 stub，prompt 去掉 `previous_reflection` 并强制 fact citation 命中 active observation。
 

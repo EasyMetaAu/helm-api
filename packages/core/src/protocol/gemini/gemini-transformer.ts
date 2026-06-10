@@ -455,6 +455,7 @@ function transformRequestOut(native: unknown): IRRequest {
     ...(modalities !== undefined && modalities.length > 0 ? { modalities } : {}),
     ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
     ...(responseFormat !== undefined ? { response_format: responseFormat } : {}),
+    ...(req.cachedContent !== undefined ? { cached_content: req.cachedContent } : {}),
     ...(geminiToolConfigToToolChoice(req.toolConfig) !== undefined
       ? { tool_choice: geminiToolConfigToToolChoice(req.toolConfig) }
       : {}),
@@ -757,6 +758,7 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
     ...(tools !== undefined ? { tools } : {}),
     ...(toolConfig !== undefined ? { toolConfig } : {}),
     ...(generationConfig !== undefined ? { generationConfig } : {}),
+    ...(parsed.cached_content !== undefined ? { cachedContent: parsed.cached_content } : {}),
   };
 }
 
@@ -764,7 +766,8 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
 
 function irUsageToMetadata(usage: IRResponse["usage"]): GeminiUsageMetadata | undefined {
   if (usage === undefined) return undefined;
-  const prompt = (usage.prompt_tokens ?? 0) + (usage.cached_tokens ?? 0);
+  const prompt =
+    (usage.prompt_tokens ?? 0) + (usage.cached_tokens ?? 0) + (usage.cache_creation_tokens ?? 0);
   const candidates = usage.completion_tokens ?? 0;
   return {
     promptTokenCount: prompt,
@@ -1161,6 +1164,8 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
   };
 
   const toUsageMetadata = (usage: NonNullable<IRChunk["usage"]>): GeminiUsageMetadata => {
+    const nestedPromptDetails = usage.prompt_tokens_details;
+    const cached = usage.cached_tokens ?? nestedPromptDetails?.cached_tokens;
     const prompt = usage.prompt_tokens;
     const candidates = usage.completion_tokens;
     return {
@@ -1173,9 +1178,7 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
       ...(usage.reasoning_tokens !== undefined
         ? { thoughtsTokenCount: usage.reasoning_tokens }
         : {}),
-      ...(usage.cached_tokens !== undefined
-        ? { cachedContentTokenCount: usage.cached_tokens }
-        : {}),
+      ...(cached !== undefined ? { cachedContentTokenCount: cached } : {}),
     };
   };
 

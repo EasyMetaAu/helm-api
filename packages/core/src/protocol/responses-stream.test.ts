@@ -226,9 +226,9 @@ describe("convertOpenAIStreamToResponses — text event sequence", () => {
     expect(completed.response.usage).toEqual({ input_tokens: 10, output_tokens: 4 });
   });
 
-  // order 21: reasoning_tokens (output) + cached (input) must ride the streamed usage
-  // projection, so an o-series streaming client gets the same detail as non-streaming.
-  it("projects reasoning_tokens + cached into response.completed usage details (order 21)", async () => {
+  // order 21: reasoning_tokens (output) + cache read/write (input) must ride the
+  // streamed usage projection, so a streaming client gets the same detail as non-streaming.
+  it("projects reasoning_tokens + cache read/write into response.completed usage details (order 21)", async () => {
     const usageChunk: OpenAIChunk = {
       id: "chatcmpl-x",
       model: "gpt-x",
@@ -236,7 +236,7 @@ describe("convertOpenAIStreamToResponses — text event sequence", () => {
       usage: {
         prompt_tokens: 100,
         completion_tokens: 20,
-        prompt_tokens_details: { cached_tokens: 30 },
+        prompt_tokens_details: { cached_tokens: 30, cache_creation_tokens: 10 },
         completion_tokens_details: { reasoning_tokens: 8 },
       },
     } as OpenAIChunk;
@@ -247,11 +247,12 @@ describe("convertOpenAIStreamToResponses — text event sequence", () => {
     const usage = completed.response.usage as {
       input_tokens: number;
       output_tokens: number;
-      input_tokens_details?: { cached_tokens?: number };
+      input_tokens_details?: { cached_tokens?: number; cache_creation_input_tokens?: number };
       output_tokens_details?: { reasoning_tokens?: number };
     };
     expect(usage.input_tokens).toBe(100); // full prompt reconstructed (cached + non-cached)
     expect(usage.input_tokens_details?.cached_tokens).toBe(30);
+    expect(usage.input_tokens_details?.cache_creation_input_tokens).toBe(10);
     expect(usage.output_tokens_details?.reasoning_tokens).toBe(8);
   });
 });

@@ -139,6 +139,7 @@ export const GeminiGenerateContentRequestSchema = z
     toolConfig: z.unknown().optional(),
     generationConfig: GeminiGenerationConfigSchema.optional(),
     safetySettings: z.array(z.unknown()).optional(),
+    cachedContent: z.string().optional(),
     thinkingConfig: z.unknown().optional(),
   })
   .passthrough();

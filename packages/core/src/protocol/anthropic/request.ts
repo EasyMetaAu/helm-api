@@ -163,6 +163,7 @@ const AnthropicMessagesRequestSchema = z
     // and has no IR home, so it is preserved verbatim in provider_raw. ——
     thinking: AnthropicThinkingConfigSchema.optional(),
     service_tier: z.string().optional(),
+    cache_control: z.unknown().optional(),
     metadata: z.unknown().optional(),
   })
   .passthrough();
@@ -277,6 +278,9 @@ function toIRTool(tool: z.infer<typeof AnthropicToolSchema>) {
       ...(tool.description !== undefined ? { description: tool.description } : {}),
       ...(tool.input_schema !== undefined ? { parameters: tool.input_schema } : {}),
     },
+    ...((tool as { cache_control?: unknown }).cache_control !== undefined
+      ? { cache_control: (tool as { cache_control?: unknown }).cache_control }
+      : {}),
   };
 }
 
@@ -460,6 +464,7 @@ export function transformRequestOut(req: unknown): IRRequest {
     // bag), distinct from the per-message `thinking` block extension built above.
     ...(parsed.thinking !== undefined ? { thinking: parsed.thinking } : {}),
     ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
+    ...(parsed.cache_control !== undefined ? { cache_control: parsed.cache_control } : {}),
     ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
   };
 
@@ -541,6 +546,7 @@ export interface AnthropicOutboundTool {
   name: string;
   description?: string;
   input_schema: unknown;
+  cache_control?: unknown;
 }
 
 export type AnthropicToolChoiceOut =
@@ -569,6 +575,7 @@ export interface AnthropicOutboundRequest {
   output_format?: AnthropicOutputFormat;
   thinking?: AnthropicThinkingConfigOut;
   service_tier?: string;
+  cache_control?: unknown;
   metadata?: unknown;
 }
 
@@ -679,6 +686,14 @@ function contentToBlocks(content: IRMessage["content"]): AnthropicRequestBlock[]
     blocks.push(block);
   }
   return blocks;
+}
+
+function hasExplicitCacheControl(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasExplicitCacheControl);
+  if (value === null || typeof value !== "object") return false;
+  const obj = value as Record<string, unknown>;
+  if (Object.hasOwn(obj, "cache_control")) return true;
+  return Object.values(obj).some(hasExplicitCacheControl);
 }
 
 function systemFromMessages(
@@ -816,15 +831,27 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
       ? parsed.tools.map((t) => {
           const fn = (
             t as {
-              function?: { name?: unknown; description?: unknown; parameters?: unknown };
+              cache_control?: unknown;
+              function?: {
+                name?: unknown;
+                description?: unknown;
+                parameters?: unknown;
+                cache_control?: unknown;
+              };
             }
           ).function;
+          const toolCacheControl = (t as { cache_control?: unknown }).cache_control;
           const rawName = typeof fn?.name === "string" ? fn.name : "";
           return {
             name:
               rawName === "" ? sanitizeAnthropicToolName("tool") : toolNameMap.toAnthropic(rawName),
             ...(typeof fn?.description === "string" ? { description: fn.description } : {}),
             input_schema: fn?.parameters ?? { type: "object" },
+            ...(toolCacheControl !== undefined
+              ? { cache_control: toolCacheControl }
+              : fn?.cache_control !== undefined
+                ? { cache_control: fn.cache_control }
+                : {}),
           };
         })
       : undefined;
@@ -861,6 +888,9 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
     ...(outputFormat !== undefined ? { output_format: outputFormat } : {}),
     ...(thinking !== undefined ? { thinking } : {}),
     ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
+    ...(parsed.cache_control !== undefined && !hasExplicitCacheControl([system, merged, tools])
+      ? { cache_control: parsed.cache_control }
+      : {}),
     // metadata (Anthropic user-attribution) was stashed in provider_raw inbound; re-emit it.
     ...(parsed.provider_raw?.metadata !== undefined
       ? { metadata: parsed.provider_raw.metadata }

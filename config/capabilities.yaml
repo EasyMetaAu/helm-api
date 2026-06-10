@@ -24,6 +24,11 @@
 # (no_audio_support / no_video_support / no_document_support). Absent ⇒ none.
 # "openai/gpt-4o-audio-preview":
 #   modalities: [audio]
+#
+# `supportsCachedContent` (optional, default false) marks providers that accept
+# Gemini/LiteLLM cached-content handles (`cached_content` / `cachedContent`). This
+# is hard request context, not a cache-affinity hint, so fallback chains skip every
+# candidate that does not advertise it.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SUBSCRIPTION / AGGREGATOR MODELS (drop-openai-crs-relay 2026-06-03). These live
@@ -127,6 +132,7 @@ zenmux/gemini-3.5-flash:
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
+  supportsCachedContent: true
   # Gemini is fully multimodal on input: audio, video, and documents (P7).
   modalities: [audio, video, document]
   maxContextTokens: 1048576

@@ -26,13 +26,15 @@ export type SkipReason =
   | "no_document_support" // request carries a document (PDF/text), candidate advertises no document modality
   | "context_too_small" // prompt(+max_tokens) exceeds candidate's window
   | "no_streaming_support" // request wants stream, candidate can't stream
-  | "no_nonstream_support"; // request is non-stream, candidate is stream-ONLY (relay requires stream:true)
+  | "no_nonstream_support" // request is non-stream, candidate is stream-ONLY (relay requires stream:true)
+  | "no_cached_content_support"; // request carries a provider-side cachedContent reference
 
 export interface CapabilityRequest {
   needsTools: boolean;
   needsJson: boolean; // response_format = JSON / lane.require_json
   needsVision: boolean; // has attachments / images
   needsStreaming: boolean; // request.stream === true
+  needsCachedContent?: boolean; // Gemini/LiteLLM cachedContent reference is hard context
   estimatedPromptTokens: number;
   maxTokens: number | null; // client-requested output cap, counted in budget
   // Extra INPUT modalities this request carries beyond text+image (P7). A modality
@@ -103,6 +105,13 @@ export function checkCapability(
   if (!req.needsStreaming && caps.requiresStreaming === true) {
     return skip("no_nonstream_support");
   }
-  // 7. all gates passed
+  // 7. provider-side cached context reference. Unlike prompt_cache_key, this is not
+  //    an affinity hint; it points at already-created prompt content. Running on a
+  //    target that ignores/rejects it would either lose required context or burn a
+  //    guaranteed 400, so absent support is a hard skip.
+  if (req.needsCachedContent === true && caps.supportsCachedContent !== true) {
+    return skip("no_cached_content_support");
+  }
+  // 8. all gates passed
   return PASS;
 }

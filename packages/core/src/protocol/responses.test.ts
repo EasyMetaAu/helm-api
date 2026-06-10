@@ -237,6 +237,34 @@ describe("responsesTransformer — Tier D request/response fidelity (orders 17-2
     expect(out.usage.output_tokens_details?.reasoning_tokens).toBe(15);
   });
 
+  it("reconstructs Responses input_tokens with cache read and cache creation tokens", async () => {
+    const ir: IRResponse = {
+      id: "r-cache",
+      model: "gpt-4o",
+      choices: [{ index: 0, message: { role: "assistant", content: "x" }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 60,
+        cached_tokens: 30,
+        cache_creation_tokens: 10,
+        completion_tokens: 20,
+      },
+    };
+    const out = (await responsesTransformer.transformResponseOut(ir)) as {
+      usage: {
+        input_tokens?: number;
+        input_tokens_details?: {
+          cached_tokens?: number;
+          cache_creation_input_tokens?: number;
+        };
+      };
+    };
+    expect(out.usage.input_tokens).toBe(100);
+    expect(out.usage.input_tokens_details).toMatchObject({
+      cached_tokens: 30,
+      cache_creation_input_tokens: 10,
+    });
+  });
+
   // order 23: per-choice logprobs ride the output_text part.
   it("carries choice logprobs onto the output_text part (order 23)", async () => {
     const ir: IRResponse = {
@@ -744,7 +772,7 @@ describe("responsesTransformer — unknown item type (fail-open)", () => {
 });
 
 describe("responsesTransformer — request sampling/control params (litellm parity)", () => {
-  it("maps IR-backed params (top_p/penalties/seed/n/parallel/user/service/web_search) onto IR", async () => {
+  it("maps IR-backed params including prompt-cache controls onto IR", async () => {
     const ir = await responsesTransformer.transformRequestOut({
       model: "gpt-4o",
       input: "hi",
@@ -756,6 +784,8 @@ describe("responsesTransformer — request sampling/control params (litellm pari
       parallel_tool_calls: false,
       user: "user-123",
       service_tier: "auto",
+      prompt_cache_key: "thread-123",
+      prompt_cache_retention: "24h",
       web_search_options: { search_context_size: "low" },
     });
     expect(ir.top_p).toBe(0.9);
@@ -766,6 +796,8 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(ir.parallel_tool_calls).toBe(false);
     expect(ir.user).toBe("user-123");
     expect(ir.service_tier).toBe("auto");
+    expect(ir.prompt_cache_key).toBe("thread-123");
+    expect(ir.prompt_cache_retention).toBe("24h");
     expect(ir.web_search_options).toEqual({ search_context_size: "low" });
   });
 
@@ -798,6 +830,8 @@ describe("responsesTransformer — request sampling/control params (litellm pari
       parallel_tool_calls: true,
       user: "user-123",
       service_tier: "auto",
+      prompt_cache_key: "thread-123",
+      prompt_cache_retention: "24h",
       web_search_options: { search_context_size: "low" },
       provider_raw: { context_management: { truncation: "auto" } },
     })) as {
@@ -809,6 +843,8 @@ describe("responsesTransformer — request sampling/control params (litellm pari
       parallel_tool_calls?: boolean;
       user?: string;
       service_tier?: string;
+      prompt_cache_key?: string;
+      prompt_cache_retention?: string;
       web_search_options?: unknown;
       context_management?: unknown;
     };
@@ -820,6 +856,8 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(native.parallel_tool_calls).toBe(true);
     expect(native.user).toBe("user-123");
     expect(native.service_tier).toBe("auto");
+    expect(native.prompt_cache_key).toBe("thread-123");
+    expect(native.prompt_cache_retention).toBe("24h");
     expect(native.web_search_options).toEqual({ search_context_size: "low" });
     expect(native.context_management).toEqual({ truncation: "auto" });
   });
@@ -846,8 +884,8 @@ describe("responsesTransformer — usage detail mapping (transformResponseIn)", 
     expect(ir.usage?.reasoning_tokens).toBe(8);
     expect(ir.usage?.cached_tokens).toBe(30);
     expect(ir.usage?.cache_creation_tokens).toBe(10);
-    // prompt = input - cached
-    expect(ir.usage?.prompt_tokens).toBe(70);
+    // prompt = input - cache read - cache creation
+    expect(ir.usage?.prompt_tokens).toBe(60);
   });
 });
 

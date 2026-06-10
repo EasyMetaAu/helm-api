@@ -41,6 +41,8 @@ const fullRequest = {
   max_tokens: 256,
   stream: true,
   response_format: { type: "json_object" },
+  prompt_cache_key: "thread-123",
+  prompt_cache_retention: "24h",
 } as const;
 
 describe("openaiTransformer — request identity round-trip", () => {
@@ -57,6 +59,8 @@ describe("openaiTransformer — request identity round-trip", () => {
     expect(back.max_tokens).toBe(256);
     expect(back.stream).toBe(true);
     expect(back.response_format).toEqual({ type: "json_object" });
+    expect(back.prompt_cache_key).toBe("thread-123");
+    expect(back.prompt_cache_retention).toBe("24h");
     // tool_call arguments stay a JSON string, never a parsed object
     expect(back.messages[2]?.tool_calls?.[0]?.function.arguments).toBe('{"city":"SF"}');
     expect(back.messages[3]?.tool_call_id).toBe("call_abc");
@@ -146,6 +150,36 @@ describe("openaiTransformer — usage split (pit #2)", () => {
     // it must add cached back so we do not under/over-report (no ~10x error).
     expect(back.usage.prompt_tokens).toBe(100);
     expect(back.usage.prompt_tokens_details?.cached_tokens).toBe(30);
+  });
+
+  it("splits cache creation tokens separately from fresh input", async () => {
+    const upstream = {
+      id: "chatcmpl-cache-write",
+      model: "gpt-4o",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 5,
+        total_tokens: 105,
+        prompt_tokens_details: { cached_tokens: 30, cache_creation_tokens: 10 },
+      },
+    };
+    const ir = await openaiTransformer.transformResponseIn(upstream);
+    expect(ir.usage?.prompt_tokens).toBe(60);
+    expect(ir.usage?.cached_tokens).toBe(30);
+    expect(ir.usage?.cache_creation_tokens).toBe(10);
+
+    const back = (await openaiTransformer.transformResponseOut(ir)) as {
+      usage: {
+        prompt_tokens: number;
+        prompt_tokens_details?: { cached_tokens?: number; cache_creation_tokens?: number };
+      };
+    };
+    expect(back.usage.prompt_tokens).toBe(100);
+    expect(back.usage.prompt_tokens_details).toMatchObject({
+      cached_tokens: 30,
+      cache_creation_tokens: 10,
+    });
   });
 });
 

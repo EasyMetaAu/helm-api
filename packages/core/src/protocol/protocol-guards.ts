@@ -129,10 +129,6 @@ const TARGET_GUARDS: Record<string, TargetGuardSpec> = {
       },
       { param: "presence_penalty", reason: "Anthropic Messages has no presence_penalty control." },
       { param: "seed", reason: "Anthropic Messages does not accept a sampling seed." },
-      {
-        param: "cache_control",
-        reason: "Anthropic caches via per-block cache_control, not a request-level knob.",
-      },
     ],
   },
   // openai / gemini intentionally absent: every guarded knob has a native home.

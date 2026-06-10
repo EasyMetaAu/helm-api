@@ -230,8 +230,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     //     filter (known-incompatible).
     //   • attemptedAny — at least one candidate actually reached the upstream
     //     invoke (so a failure here is a provider fault, not a capability gap).
-    //     A model with NO catalog entry is fail-open: it is attempted, so it
+    //     A model with NO catalog entry is usually fail-open: it is attempted, so it
     //     counts here and never yields capability_unsatisfiable (don't over-prune).
+    //     Exception: `cached_content` is a hard provider-side context reference; an
+    //     unknown-capability target must not run without that required context.
     //   • circuitSkipped — at least one candidate was skipped only because its
     //     breaker was OPEN; that is a transient health signal, not a capability
     //     gap, so it must NOT be reported as capability_unsatisfiable.
@@ -242,6 +244,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     // Request-level modality detection (audio/video/document) — computed once and
     // applied to every candidate's capability gate (P7 capability-aware routing).
     const reqModalities = detectRequestModalities(req);
+    const needsCachedContent =
+      typeof req.cached_content === "string" && req.cached_content.length > 0;
 
     for (const alias of plan.candidate_chain) {
       const startedAt = now();
@@ -324,8 +328,15 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         continue;
       }
 
-      // 2) Capability filter (only when we have catalog data for the alias).
+      // 2) Capability filter. Missing catalog data remains fail-open for generic
+      // requests, but not for cached_content: that field is a required Gemini/LiteLLM
+      // cached context handle, not an optional affinity hint.
       const caps = catalog.get(alias)?.capabilities;
+      if (!caps && needsCachedContent) {
+        capabilityPruned = true;
+        attempts.push(skipRow(alias, "no_cached_content_support", elapsed()));
+        continue;
+      }
       if (caps) {
         const verdict = checkCapability(caps, {
           needsTools: Array.isArray(req.tools) && req.tools.length > 0,
@@ -333,6 +344,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           needsVision:
             (Array.isArray(req.attachments) && req.attachments.length > 0) || reqModalities.image,
           needsStreaming: req.stream,
+          needsCachedContent,
           estimatedPromptTokens: approxPromptTokens(req),
           maxTokens: req.max_tokens,
           needsAudio: reqModalities.audio,
@@ -558,6 +570,9 @@ const FORWARDED_REQUEST_PARAM_KEYS = [
   "service_tier",
   "tool_choice",
   "cache_control",
+  "prompt_cache_key",
+  "prompt_cache_retention",
+  "cached_content",
   "thinking",
   "functions",
   "function_call",

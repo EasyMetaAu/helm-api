@@ -174,6 +174,8 @@ const ResponsesRequestSchema = z
     parallel_tool_calls: z.boolean().optional(),
     user: z.string().optional(),
     service_tier: z.string().optional(),
+    prompt_cache_key: z.string().optional(),
+    prompt_cache_retention: z.string().optional(),
     web_search_options: z.unknown().optional(),
     context_management: z.unknown().optional(),
     store: z.boolean().optional(),
@@ -433,6 +435,10 @@ function toIRRequest(req: NativeRequest): IRRequest {
       : {}),
     ...(parsed.user !== undefined ? { user: parsed.user } : {}),
     ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
+    ...(parsed.prompt_cache_key !== undefined ? { prompt_cache_key: parsed.prompt_cache_key } : {}),
+    ...(parsed.prompt_cache_retention !== undefined
+      ? { prompt_cache_retention: parsed.prompt_cache_retention }
+      : {}),
     ...(parsed.web_search_options !== undefined
       ? { web_search_options: parsed.web_search_options }
       : {}),
@@ -533,6 +539,10 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
       : {}),
     ...(parsed.user !== undefined ? { user: parsed.user } : {}),
     ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
+    ...(parsed.prompt_cache_key !== undefined ? { prompt_cache_key: parsed.prompt_cache_key } : {}),
+    ...(parsed.prompt_cache_retention !== undefined
+      ? { prompt_cache_retention: parsed.prompt_cache_retention }
+      : {}),
     ...(parsed.web_search_options !== undefined
       ? { web_search_options: parsed.web_search_options }
       : {}),
@@ -681,14 +691,14 @@ function toResponsesResponse(res: IRResponse): NativeResponse {
   if (parsed.usage !== undefined) {
     const u = parsed.usage;
     const cached = u.cached_tokens ?? 0;
+    const cacheCreation = u.cache_creation_tokens ?? 0;
     const inputDetails: Record<string, number> = {};
     if (cached > 0) inputDetails.cached_tokens = cached;
-    if (u.cache_creation_tokens !== undefined)
-      inputDetails.cache_creation_input_tokens = u.cache_creation_tokens;
+    if (cacheCreation > 0) inputDetails.cache_creation_input_tokens = cacheCreation;
     const outputDetails: Record<string, number> = {};
     if (u.reasoning_tokens !== undefined) outputDetails.reasoning_tokens = u.reasoning_tokens;
     usage = {
-      input_tokens: (u.prompt_tokens ?? 0) + cached,
+      input_tokens: (u.prompt_tokens ?? 0) + cached + cacheCreation,
       output_tokens: u.completion_tokens ?? 0,
       ...(Object.keys(inputDetails).length > 0 ? { input_tokens_details: inputDetails } : {}),
       ...(Object.keys(outputDetails).length > 0 ? { output_tokens_details: outputDetails } : {}),
@@ -820,7 +830,7 @@ function toIRResponse(res: NativeResponse): IRResponse {
   }
 
   const cached = parsed.usage?.input_tokens_details?.cached_tokens ?? 0;
-  const cacheCreation = parsed.usage?.input_tokens_details?.cache_creation_input_tokens;
+  const cacheCreation = parsed.usage?.input_tokens_details?.cache_creation_input_tokens ?? 0;
   const reasoningTokens = parsed.usage?.output_tokens_details?.reasoning_tokens;
   const fullInput = parsed.usage?.input_tokens;
 
@@ -861,7 +871,9 @@ function toIRResponse(res: NativeResponse): IRResponse {
     ...(parsed.usage !== undefined
       ? {
           usage: {
-            ...(fullInput !== undefined ? { prompt_tokens: fullInput - cached } : {}),
+            ...(fullInput !== undefined
+              ? { prompt_tokens: Math.max(0, fullInput - cached - cacheCreation) }
+              : {}),
             ...(parsed.usage.output_tokens !== undefined
               ? { completion_tokens: parsed.usage.output_tokens }
               : {}),
@@ -869,7 +881,7 @@ function toIRResponse(res: NativeResponse): IRResponse {
             // output_tokens_details.reasoning_tokens -> IRUsage.reasoning_tokens;
             // input_tokens_details.cache_creation_input_tokens -> cache_creation_tokens.
             ...(reasoningTokens !== undefined ? { reasoning_tokens: reasoningTokens } : {}),
-            ...(cacheCreation !== undefined ? { cache_creation_tokens: cacheCreation } : {}),
+            ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
           },
         }
       : {}),

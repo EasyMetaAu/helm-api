@@ -308,6 +308,10 @@ function thinkingDeltaEvent(index: number, thinking: string): AnthropicSSEEvent 
   return { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking } };
 }
 
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 function messageDeltaEvent(state: StreamState): AnthropicSSEEvent {
   const stop = mapStopReason(state.finishReason ?? "");
   const usage: AnthropicUsage = mapUsage(state.usage ?? {});
@@ -425,22 +429,26 @@ export async function* convertOpenAIStreamToAnthropic(
     }
 
     // Buffer usage; never billed mid-stream (pit #2). Raw upstream `prompt_tokens` is
-    // the FULL prompt (cached + fresh), but mapUsage() expects IR usage where prompt
-    // has ALREADY had cached subtracted (the non-stream openai.ts path does the same).
-    // Normalize here: prompt = max(0, prompt − cached), carry cached separately. Read
-    // cached from the flat field OR the real OpenAI prompt_tokens_details nesting.
+    // the FULL prompt (cached + fresh + cache creation), but mapUsage() expects IR
+    // usage where prompt has ALREADY had cache read/write subtracted (the non-stream
+    // openai.ts path does the same). Read cache details from flat fields OR the real
+    // OpenAI prompt_tokens_details nesting.
     if (chunk.usage) {
       const u = chunk.usage;
       const cached = u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+      const cacheCreation =
+        u.cache_creation_tokens ??
+        tokenCount(u.prompt_tokens_details?.cache_creation_tokens) ??
+        tokenCount(u.prompt_tokens_details?.cache_creation_input_tokens) ??
+        tokenCount(u.prompt_tokens_details?.cache_write_tokens) ??
+        0;
       state.usage = {
         ...(u.prompt_tokens !== undefined
-          ? { prompt_tokens: Math.max(0, u.prompt_tokens - cached) }
+          ? { prompt_tokens: Math.max(0, u.prompt_tokens - cached - cacheCreation) }
           : {}),
         ...(u.completion_tokens !== undefined ? { completion_tokens: u.completion_tokens } : {}),
         ...(cached > 0 ? { cached_tokens: cached } : {}),
-        ...(u.cache_creation_tokens !== undefined
-          ? { cache_creation_tokens: u.cache_creation_tokens }
-          : {}),
+        ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
       };
     }
     if (choice?.finish_reason != null) state.finishReason = choice.finish_reason;

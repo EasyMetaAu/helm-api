@@ -241,6 +241,11 @@ export const IRRequestSchema = z.object({
   stream: z.boolean().optional(),
   response_format: z.unknown().optional(),
   cache_control: z.unknown().optional(), // extension: cache-control passthrough
+  // Provider prompt-cache controls that affect request affinity / cached-content reuse.
+  // OpenAI-compatible clients use prompt_cache_*; Gemini/LiteLLM use cached_content.
+  prompt_cache_key: z.string().optional(),
+  prompt_cache_retention: z.string().optional(),
+  cached_content: z.string().optional(),
   thinking: z.unknown().optional(), // extension: provider-shaped reasoning/thinking config
   // —— litellm-parity sampling + control params (all optional). The IR holds them;
   // each transformer maps the subset its protocol supports and warns/passes through
@@ -277,9 +282,9 @@ export const IRRequestSchema = z.object({
 });
 export type IRRequest = z.infer<typeof IRRequestSchema>;
 
-// —— Usage (input = prompt − cached; see docs/research-notes pit #2). The IR
-// only needs room to hold these; the prompt−cached arithmetic is the
-// transformer's job. ————————————————————————————————————————————————————————
+// —— Usage (input = prompt minus cache read/write; see docs/research-notes pit #2).
+// The IR only needs room to hold these; the cache arithmetic is the transformer's job.
+// ————————————————————————————————————————————————————————————————————————————
 
 export const IRUsageSchema = z
   .object({
@@ -288,8 +293,8 @@ export const IRUsageSchema = z
     cached_tokens: z.number().int().nonnegative().optional(),
     // —— litellm-parity usage detail (all optional). reasoning_tokens (o-series /
     // Gemini thoughtsTokenCount), cache_creation_tokens (Anthropic ephemeral write),
-    // and per-modality breakdowns. The prompt−cached arithmetic stays the
-    // transformer's job; the IR only needs room to hold the detail. ————————————————
+    // and per-modality breakdowns. The cache arithmetic stays the transformer's job;
+    // the IR only needs room to hold the detail. ————————————————————————————————
     reasoning_tokens: z.number().int().nonnegative().optional(),
     cache_creation_tokens: z.number().int().nonnegative().optional(),
     prompt_tokens_details: IRTokenDetailsSchema.optional(),

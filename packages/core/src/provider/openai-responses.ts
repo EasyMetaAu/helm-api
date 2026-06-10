@@ -201,8 +201,13 @@ export function openaiToResponsesRequest(
     tool_choice: "auto",
     parallel_tool_calls: true,
   };
-  // Stable per-account prompt cache key (matches the session id we send on headers).
-  if (opts?.sessionId) body.prompt_cache_key = opts.sessionId;
+  // Stable prompt cache key. Client-supplied keys preserve OpenAI/Codex cache
+  // affinity; otherwise fall back to the per-account subscription session id.
+  if (typeof r.prompt_cache_key === "string" && r.prompt_cache_key.length > 0)
+    body.prompt_cache_key = r.prompt_cache_key;
+  else if (opts?.sessionId) body.prompt_cache_key = opts.sessionId;
+  if (typeof r.prompt_cache_retention === "string")
+    body.prompt_cache_retention = r.prompt_cache_retention;
   if (typeof r.temperature === "number") body.temperature = r.temperature;
   if (Array.isArray(r.tools)) {
     const tools = (r.tools as Array<Record<string, unknown>>).flatMap((t) => {
@@ -458,6 +463,10 @@ function openaiUsageChunk(model: string, usage: Record<string, unknown>): string
   const output = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
   const details = (usage.input_tokens_details ?? {}) as Record<string, unknown>;
   const cached = typeof details.cached_tokens === "number" ? details.cached_tokens : 0;
+  const cacheCreation =
+    typeof details.cache_creation_input_tokens === "number"
+      ? details.cache_creation_input_tokens
+      : 0;
   const outDetails = (usage.output_tokens_details ?? {}) as Record<string, unknown>;
   const reasoning =
     typeof outDetails.reasoning_tokens === "number" ? outDetails.reasoning_tokens : undefined;
@@ -471,7 +480,14 @@ function openaiUsageChunk(model: string, usage: Record<string, unknown>): string
       prompt_tokens: input,
       completion_tokens: output,
       total_tokens: input + output,
-      ...(cached > 0 ? { prompt_tokens_details: { cached_tokens: cached } } : {}),
+      ...(cached > 0 || cacheCreation > 0
+        ? {
+            prompt_tokens_details: {
+              cached_tokens: cached,
+              ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+            },
+          }
+        : {}),
       ...(reasoning !== undefined
         ? { completion_tokens_details: { reasoning_tokens: reasoning } }
         : {}),
@@ -567,6 +583,8 @@ export async function aggregateResponsesStream(
   let status: unknown = "completed";
   let inTok = 0;
   let outTok = 0;
+  let cacheRead = 0;
+  let cacheCreation = 0;
   // call_id -> accumulated arguments, preserving first-seen order.
   const toolOrder: string[] = [];
   const toolById = new Map<string, { id: string; name: string; arguments: string }>();
@@ -606,6 +624,10 @@ export async function aggregateResponsesStream(
       const usage = (response.usage ?? {}) as Record<string, unknown>;
       if (typeof usage.input_tokens === "number") inTok = usage.input_tokens;
       if (typeof usage.output_tokens === "number") outTok = usage.output_tokens;
+      const details = (usage.input_tokens_details ?? {}) as Record<string, unknown>;
+      if (typeof details.cached_tokens === "number") cacheRead = details.cached_tokens;
+      if (typeof details.cache_creation_input_tokens === "number")
+        cacheCreation = details.cache_creation_input_tokens;
       // Terminal event: stop reading NOW so the idle guard cannot turn a completed
       // aggregation into a timeout if the upstream delays closing the body.
       break;
@@ -638,6 +660,18 @@ export async function aggregateResponsesStream(
     created: Math.floor(Date.now() / 1000),
     model,
     choices: [{ index: 0, message, finish_reason: finishReason(status, toolCalls.length > 0) }],
-    usage: { prompt_tokens: inTok, completion_tokens: outTok, total_tokens: inTok + outTok },
+    usage: {
+      prompt_tokens: inTok,
+      completion_tokens: outTok,
+      total_tokens: inTok + outTok,
+      ...(cacheRead > 0 || cacheCreation > 0
+        ? {
+            prompt_tokens_details: {
+              cached_tokens: cacheRead,
+              ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+            },
+          }
+        : {}),
+    },
   } as ChatCompletionResponse;
 }
