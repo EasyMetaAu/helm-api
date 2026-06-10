@@ -374,21 +374,25 @@ function itemId(outputIndex: number): string {
   return `item_${outputIndex}`;
 }
 
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 // —— usage projection: IR usage → Responses { input_tokens, output_tokens }. The
 // same 2-line shape `toResponsesResponse` produces (that helper is unexported, so
 // inline it rather than reference a non-existent symbol). ——————————————————————
 function projectUsage(usage: IRUsage | null): z.infer<typeof ResponsesUsageSchema> | undefined {
   if (usage === null) return undefined;
   const cached = usage.cached_tokens ?? 0;
+  const cacheCreation = usage.cache_creation_tokens ?? 0;
   const inputDetails: Record<string, number> = {};
   if (cached > 0) inputDetails.cached_tokens = cached;
-  if (usage.cache_creation_tokens !== undefined)
-    inputDetails.cache_creation_input_tokens = usage.cache_creation_tokens;
+  if (cacheCreation > 0) inputDetails.cache_creation_input_tokens = cacheCreation;
   const outputDetails: Record<string, number> = {};
   if (usage.reasoning_tokens !== undefined) outputDetails.reasoning_tokens = usage.reasoning_tokens;
   return {
     // Reconstruct the FULL input (cached + non-cached); state buffered prompt as non-cached.
-    input_tokens: (usage.prompt_tokens ?? 0) + cached,
+    input_tokens: (usage.prompt_tokens ?? 0) + cached + cacheCreation,
     output_tokens: usage.completion_tokens ?? 0,
     ...(Object.keys(inputDetails).length > 0 ? { input_tokens_details: inputDetails } : {}),
     ...(Object.keys(outputDetails).length > 0 ? { output_tokens_details: outputDetails } : {}),
@@ -694,22 +698,26 @@ function* handleChunk(state: StreamState, raw: OpenAIChunk): Generator<Responses
   }
 
   // Buffer usage; never billed mid-stream (pit #2). Raw upstream prompt_tokens is
-  // the FULL prompt; normalize prompt = max(0, prompt − cached) so the projection
+  // the FULL prompt; normalize prompt = max(0, prompt - cache read/write) so the projection
   // matches the non-stream toResponsesResponse path.
   if (chunk.usage) {
     const u = chunk.usage;
     const cached = u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+    const cacheCreation =
+      u.cache_creation_tokens ??
+      tokenCount(u.prompt_tokens_details?.cache_creation_tokens) ??
+      tokenCount(u.prompt_tokens_details?.cache_creation_input_tokens) ??
+      tokenCount(u.prompt_tokens_details?.cache_write_tokens) ??
+      0;
     const reasoning = u.completion_tokens_details?.reasoning_tokens;
     state.usage = {
       ...(u.prompt_tokens !== undefined
-        ? { prompt_tokens: Math.max(0, u.prompt_tokens - cached) }
+        ? { prompt_tokens: Math.max(0, u.prompt_tokens - cached - cacheCreation) }
         : {}),
       ...(u.completion_tokens !== undefined ? { completion_tokens: u.completion_tokens } : {}),
       ...(cached > 0 ? { cached_tokens: cached } : {}),
       ...(reasoning !== undefined ? { reasoning_tokens: reasoning } : {}),
-      ...(u.cache_creation_tokens !== undefined
-        ? { cache_creation_tokens: u.cache_creation_tokens }
-        : {}),
+      ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
     };
   }
   if (choice?.finish_reason != null) state.finishReason = choice.finish_reason;

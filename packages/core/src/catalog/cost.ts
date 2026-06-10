@@ -11,6 +11,8 @@ import type { CatalogEntry, Pricing } from "@helm/shared";
 export interface TokenUsage {
   promptTokens?: number;
   completionTokens?: number;
+  cachedPromptTokens?: number;
+  cacheCreationPromptTokens?: number;
 }
 
 // Compute the USD cost of one attempt/eval from its token usage and the model's
@@ -23,7 +25,17 @@ export function computeCostUsd(pricing: Pricing | undefined, usage: TokenUsage):
   if (inputPerMTokUsd === null || outputPerMTokUsd === null) return null;
   const prompt = usage.promptTokens ?? 0;
   const completion = usage.completionTokens ?? 0;
-  return (prompt * inputPerMTokUsd) / 1_000_000 + (completion * outputPerMTokUsd) / 1_000_000;
+  const cached = usage.cachedPromptTokens ?? 0;
+  const cacheCreation = usage.cacheCreationPromptTokens ?? 0;
+  const regularPrompt = Math.max(0, prompt - cached - cacheCreation);
+  const cacheReadPerMTok = pricing.cacheReadPerMTokUsd ?? inputPerMTokUsd;
+  const cacheWritePerMTok = pricing.cacheWritePerMTokUsd ?? inputPerMTokUsd;
+  return (
+    (regularPrompt * inputPerMTokUsd) / 1_000_000 +
+    (cached * cacheReadPerMTok) / 1_000_000 +
+    (cacheCreation * cacheWritePerMTok) / 1_000_000 +
+    (completion * outputPerMTokUsd) / 1_000_000
+  );
 }
 
 // Extract OpenAI-shaped token usage from a raw upstream response body. Defensive:
@@ -39,11 +51,65 @@ function finiteNonNegative(x: unknown): number | undefined {
 export function usageFromBody(body: unknown): TokenUsage {
   const usage = (body as { usage?: unknown } | null | undefined)?.usage;
   if (!usage || typeof usage !== "object") return {};
-  const u = usage as { prompt_tokens?: unknown; completion_tokens?: unknown };
-  return {
-    promptTokens: finiteNonNegative(u.prompt_tokens),
-    completionTokens: finiteNonNegative(u.completion_tokens),
+  const u = usage as {
+    prompt_tokens?: unknown;
+    completion_tokens?: unknown;
+    input_tokens?: unknown;
+    output_tokens?: unknown;
+    cache_read_input_tokens?: unknown;
+    cache_creation_input_tokens?: unknown;
+    input_tokens_details?: unknown;
+    prompt_tokens_details?: unknown;
   };
+  const inputDetails =
+    u.input_tokens_details && typeof u.input_tokens_details === "object"
+      ? (u.input_tokens_details as {
+          cached_tokens?: unknown;
+          cache_write_tokens?: unknown;
+          cache_creation_tokens?: unknown;
+          cache_creation_input_tokens?: unknown;
+        })
+      : undefined;
+  const promptDetails =
+    u.prompt_tokens_details && typeof u.prompt_tokens_details === "object"
+      ? (u.prompt_tokens_details as {
+          cached_tokens?: unknown;
+          cache_write_tokens?: unknown;
+          cache_creation_tokens?: unknown;
+          cache_creation_input_tokens?: unknown;
+        })
+      : undefined;
+  const cachedPromptTokens =
+    finiteNonNegative(promptDetails?.cached_tokens) ??
+    finiteNonNegative(inputDetails?.cached_tokens) ??
+    finiteNonNegative(u.cache_read_input_tokens);
+  const cacheCreationPromptTokens =
+    finiteNonNegative(promptDetails?.cache_write_tokens) ??
+    finiteNonNegative(promptDetails?.cache_creation_tokens) ??
+    finiteNonNegative(promptDetails?.cache_creation_input_tokens) ??
+    finiteNonNegative(inputDetails?.cache_write_tokens) ??
+    finiteNonNegative(inputDetails?.cache_creation_tokens) ??
+    finiteNonNegative(inputDetails?.cache_creation_input_tokens) ??
+    finiteNonNegative(u.cache_creation_input_tokens);
+  const basePrompt = finiteNonNegative(u.prompt_tokens);
+  const inputTokens = finiteNonNegative(u.input_tokens);
+  const anthropicSeparateCache =
+    finiteNonNegative(u.cache_read_input_tokens) !== undefined ||
+    finiteNonNegative(u.cache_creation_input_tokens) !== undefined;
+  const anthropicStylePrompt =
+    inputTokens !== undefined && anthropicSeparateCache
+      ? inputTokens +
+        (finiteNonNegative(u.cache_read_input_tokens) ?? 0) +
+        (finiteNonNegative(u.cache_creation_input_tokens) ?? 0)
+      : undefined;
+  const promptTokens = basePrompt ?? anthropicStylePrompt ?? inputTokens;
+  const completionTokens =
+    finiteNonNegative(u.completion_tokens) ?? finiteNonNegative(u.output_tokens);
+  const out: TokenUsage = { promptTokens, completionTokens };
+  if (cachedPromptTokens !== undefined) out.cachedPromptTokens = cachedPromptTokens;
+  if (cacheCreationPromptTokens !== undefined)
+    out.cacheCreationPromptTokens = cacheCreationPromptTokens;
+  return out;
 }
 
 // An upstream-BILLED cost the provider returned alongside the response — the

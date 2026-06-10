@@ -4,6 +4,7 @@ import {
   backfillCompletionCost,
   type PayloadCaptureDeps,
   persistPayload,
+  tokensFromUsage,
   usageFromSSE,
 } from "./payload-capture.js";
 
@@ -26,6 +27,23 @@ describe("usageFromSSE", () => {
   it("skips non-JSON keepalive lines without throwing", () => {
     const sse = ': keepalive\n\ndata: {"usage":{"prompt_tokens":1,"completion_tokens":2}}\n\n';
     expect(usageFromSSE(sse)).toEqual({ prompt_tokens: 1, completion_tokens: 2 });
+  });
+});
+
+describe("tokensFromUsage", () => {
+  it("counts Responses-style input/output usage", () => {
+    expect(tokensFromUsage({ input_tokens: 100, output_tokens: 20 })).toBe(120);
+  });
+
+  it("counts Anthropic separate cache tokens with input/output usage", () => {
+    expect(
+      tokensFromUsage({
+        input_tokens: 60,
+        output_tokens: 20,
+        cache_read_input_tokens: 30,
+        cache_creation_input_tokens: 10,
+      }),
+    ).toBe(120);
   });
 });
 

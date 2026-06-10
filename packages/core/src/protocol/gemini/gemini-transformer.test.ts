@@ -642,6 +642,31 @@ describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
     expect(withFinish[0]?.candidates?.[0]?.finishReason).toBe("STOP");
   });
 
+  it("emits cached token counts from OpenAI-style streaming usage details", async () => {
+    const chunks: IRChunk[] = [
+      {
+        id: "c",
+        model: "m",
+        choices: [{ index: 0, delta: { role: "assistant", content: "Hi" } }],
+      },
+      {
+        id: "c",
+        model: "m",
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          prompt_tokens_details: { cached_tokens: 30, cache_creation_tokens: 10 },
+        },
+      },
+    ];
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(chunks)));
+    const terminal = events.find((e) => e.usageMetadata !== undefined);
+    expect(terminal?.usageMetadata?.promptTokenCount).toBe(100);
+    expect(terminal?.usageMetadata?.cachedContentTokenCount).toBe(30);
+    expect(terminal?.usageMetadata?.totalTokenCount).toBe(120);
+  });
+
   // test #4: outbound streaming must surface tool calls as a complete functionCall part
   // (one delta event), flushed once args are complete — never a half-parsed JSON.
   it("emits a single complete functionCall part from streamed tool_calls", async () => {
@@ -739,6 +764,18 @@ describe("generationConfig param round-trip (litellm parity)", () => {
     expect(native.generationConfig?.stopSequences).toEqual(["DONE"]);
   });
 
+  it("round-trips Gemini cachedContent via IR.cached_content", () => {
+    const nativeIn: GeminiGenerateContentRequest = {
+      cachedContent: "cachedContents/context-123",
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+    };
+    const ir = geminiTransformer.transformRequestOut(nativeIn) as IRRequest;
+    expect(ir.cached_content).toBe("cachedContents/context-123");
+
+    const nativeOut = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    expect(nativeOut.cachedContent).toBe("cachedContents/context-123");
+  });
+
   it("maps reasoning_effort -> thinkingConfig (low/medium/high), minimal allowed", () => {
     const mk = (effort: "minimal" | "low" | "medium" | "high"): GeminiGenerateContentRequest =>
       geminiTransformer.transformRequestIn({
@@ -821,14 +858,20 @@ describe("usage detail (thoughtsTokenCount + per-modality details)", () => {
       id: "r",
       model: "m",
       choices: [{ index: 0, message: { role: "assistant", content: "x" }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 30, completion_tokens: 10, cached_tokens: 5, reasoning_tokens: 4 },
+      usage: {
+        prompt_tokens: 30,
+        completion_tokens: 10,
+        cached_tokens: 5,
+        cache_creation_tokens: 2,
+        reasoning_tokens: 4,
+      },
     };
     const native = geminiTransformer.transformResponseOut(ir) as GeminiGenerateContentResponse;
     const um = native.usageMetadata;
-    // prompt = prompt_tokens + cached; total = prompt + completion.
-    expect(um?.promptTokenCount).toBe(35);
+    // prompt = prompt_tokens + cached + cache creation; total = prompt + completion.
+    expect(um?.promptTokenCount).toBe(37);
     expect(um?.candidatesTokenCount).toBe(10);
-    expect(um?.totalTokenCount).toBe(45);
+    expect(um?.totalTokenCount).toBe(47);
     expect(um?.cachedContentTokenCount).toBe(5);
     expect(um?.thoughtsTokenCount).toBe(4);
   });

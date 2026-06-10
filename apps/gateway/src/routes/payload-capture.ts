@@ -27,6 +27,24 @@ export interface PayloadCaptureDeps {
 export interface StreamUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  input_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+    cache_creation_tokens?: number;
+    cache_creation_input_tokens?: number;
+    [k: string]: unknown;
+  };
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+    cache_creation_tokens?: number;
+    cache_creation_input_tokens?: number;
+    [k: string]: unknown;
+  };
   /** Upstream-billed cost, when the relay reports it in the usage chunk. OpenRouter
    *  uses `cost`; others `cost_usd`. resolveCostUsd prefers these over the estimate. */
   cost?: number;
@@ -88,7 +106,13 @@ export async function recordServed(
 // always rides the UPSTREAM OpenAI stream/body, so one extractor serves all.
 export function tokensFromUsage(usage: StreamUsage | null | undefined): number {
   if (!usage) return 0;
-  return (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+  const prompt = usage.prompt_tokens ?? usage.input_tokens ?? 0;
+  const completion = usage.completion_tokens ?? usage.output_tokens ?? 0;
+  const anthropicSeparateCache =
+    usage.prompt_tokens === undefined && usage.input_tokens !== undefined
+      ? (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)
+      : 0;
+  return prompt + completion + anthropicSeparateCache;
 }
 
 // Extract the OpenAI `usage` object from a NON-streaming response body (the

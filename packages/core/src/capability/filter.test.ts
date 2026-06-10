@@ -137,6 +137,19 @@ describe("checkCapability", () => {
     expect(result).toEqual({ ok: true, skipReason: null });
   });
 
+  it("skips with no_cached_content_support when cachedContent is required but unsupported", () => {
+    const result = checkCapability(caps(), req({ needsCachedContent: true }));
+    expect(result).toEqual({ ok: false, skipReason: "no_cached_content_support" });
+  });
+
+  it("passes cachedContent only when the candidate advertises cached-content support", () => {
+    const result = checkCapability(
+      caps({ supportsCachedContent: true }),
+      req({ needsCachedContent: true }),
+    );
+    expect(result).toEqual({ ok: true, skipReason: null });
+  });
+
   it("skips with no_audio_support when audio is required but the modality is absent", () => {
     const result = checkCapability(caps({ modalities: [] }), req({ needsAudio: true }));
     expect(result).toEqual({ ok: false, skipReason: "no_audio_support" });

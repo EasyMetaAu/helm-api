@@ -105,6 +105,53 @@ describe("openaiToAnthropicRequest", () => {
     });
   });
 
+  it("preserves top-level automatic cache_control when no explicit cache breakpoints exist", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      cache_control: { type: "ephemeral" },
+      messages: [{ role: "user", content: "long context" }],
+    });
+
+    expect(body.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("drops top-level automatic cache_control when explicit block/tool cache controls exist", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      cache_control: { type: "ephemeral" },
+      messages: [
+        {
+          role: "system",
+          content: [{ type: "text", text: "long system", cache_control: { type: "ephemeral" } }],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "long context", cache_control: { type: "ephemeral", ttl: "1h" } },
+          ],
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            parameters: { type: "object" },
+            cache_control: { type: "ephemeral" },
+          },
+        },
+      ],
+    });
+
+    expect(body.cache_control).toBeUndefined();
+    const system = body.system as Array<Record<string, unknown>>;
+    expect(system[1]?.cache_control).toEqual({ type: "ephemeral" });
+    const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(messages[0]?.content[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools[0]?.cache_control).toEqual({ type: "ephemeral" });
+  });
+
   it("folds the `developer` role into system (after spoof, in message order), never a user turn (issue #50)", () => {
     // `developer` is OpenAI's renamed system tier. On the native Anthropic
     // subscription path it must fold into the top-level system param (like
@@ -169,6 +216,30 @@ describe("anthropicToOpenAIResponse", () => {
     expect((tc[0]?.function as Record<string, unknown>).arguments).toBe('{"x":1}');
     expect(choice?.finish_reason).toBe("tool_calls");
   });
+
+  it("maps Anthropic cache read/write usage into OpenAI prompt token details", () => {
+    const out = anthropicToOpenAIResponse(
+      {
+        id: "msg_cache",
+        content: [{ type: "text", text: "cached" }],
+        stop_reason: "end_turn",
+        usage: {
+          input_tokens: 100,
+          cache_read_input_tokens: 40,
+          cache_creation_input_tokens: 10,
+          output_tokens: 5,
+        },
+      },
+      "m",
+    ) as Record<string, unknown>;
+
+    expect(out.usage).toEqual({
+      prompt_tokens: 150,
+      completion_tokens: 5,
+      total_tokens: 155,
+      prompt_tokens_details: { cached_tokens: 40, cache_creation_tokens: 10 },
+    });
+  });
 });
 
 function sseResponse(events: object[]): Response {
@@ -206,7 +277,15 @@ describe("translateAnthropicSSE", () => {
     const res = sseResponse([
       {
         type: "message_start",
-        message: { id: "m", usage: { input_tokens: 12, output_tokens: 1 } },
+        message: {
+          id: "m",
+          usage: {
+            input_tokens: 12,
+            output_tokens: 1,
+            cache_read_input_tokens: 3,
+            cache_creation_input_tokens: 2,
+          },
+        },
       },
       { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
       { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi" } },
@@ -226,13 +305,19 @@ describe("translateAnthropicSSE", () => {
     expect(usageFrame).toBeDefined();
     const parsed = JSON.parse((usageFrame as string).slice(5).trim()) as {
       choices: unknown[];
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+        prompt_tokens_details?: { cached_tokens?: number; cache_creation_tokens?: number };
+      };
     };
     expect(parsed.choices).toEqual([]);
     expect(parsed.usage).toMatchObject({
-      prompt_tokens: 12,
+      prompt_tokens: 17,
       completion_tokens: 7,
-      total_tokens: 19,
+      total_tokens: 24,
+      prompt_tokens_details: { cached_tokens: 3, cache_creation_tokens: 2 },
     });
   });
 

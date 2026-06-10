@@ -83,6 +83,20 @@ describe("openaiToResponsesRequest", () => {
     expect(without.prompt_cache_key).toBeUndefined();
   });
 
+  it("preserves client prompt_cache_key and prompt_cache_retention over the session fallback", () => {
+    const body = openaiToResponsesRequest(
+      {
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "Hi" }],
+        prompt_cache_key: "client-thread",
+        prompt_cache_retention: "24h",
+      },
+      { sessionId: "sess-123" },
+    );
+    expect(body.prompt_cache_key).toBe("client-thread");
+    expect(body.prompt_cache_retention).toBe("24h");
+  });
+
   it("maps assistant tool_calls -> function_call items and tool results -> function_call_output", () => {
     const body = openaiToResponsesRequest({
       model: "gpt-5.5",
@@ -155,7 +169,11 @@ describe("translateResponsesSSE", () => {
         type: "response.completed",
         response: {
           status: "completed",
-          usage: { input_tokens: 9, output_tokens: 4, input_tokens_details: { cached_tokens: 3 } },
+          usage: {
+            input_tokens: 9,
+            output_tokens: 4,
+            input_tokens_details: { cached_tokens: 3, cache_creation_input_tokens: 2 },
+          },
         },
       },
     ]);
@@ -171,13 +189,19 @@ describe("translateResponsesSSE", () => {
     expect(usageFrame).toBeDefined();
     const parsed = JSON.parse((usageFrame as string).slice(5).trim()) as {
       choices: unknown[];
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+        prompt_tokens_details?: { cached_tokens?: number; cache_creation_tokens?: number };
+      };
     };
     expect(parsed.choices).toEqual([]);
     expect(parsed.usage).toMatchObject({
       prompt_tokens: 9,
       completion_tokens: 4,
       total_tokens: 13,
+      prompt_tokens_details: { cached_tokens: 3, cache_creation_tokens: 2 },
     });
   });
 
@@ -325,7 +349,14 @@ describe("aggregateResponsesStream", () => {
       { type: "response.output_text.delta", delta: "there" },
       {
         type: "response.completed",
-        response: { status: "completed", usage: { input_tokens: 5, output_tokens: 2 } },
+        response: {
+          status: "completed",
+          usage: {
+            input_tokens: 5,
+            output_tokens: 2,
+            input_tokens_details: { cached_tokens: 1, cache_creation_input_tokens: 1 },
+          },
+        },
       },
     ]);
     const out = await aggregateResponsesStream(res, "gpt-5.5");
@@ -336,7 +367,12 @@ describe("aggregateResponsesStream", () => {
     >;
     expect(msg.content).toBe("Hi there");
     expect((out.choices as Array<Record<string, unknown>>)[0]?.finish_reason).toBe("stop");
-    expect(out.usage).toMatchObject({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
+    expect(out.usage).toMatchObject({
+      prompt_tokens: 5,
+      completion_tokens: 2,
+      total_tokens: 7,
+      prompt_tokens_details: { cached_tokens: 1, cache_creation_tokens: 1 },
+    });
   });
 
   it("folds a function_call into tool_calls with finish_reason tool_calls", async () => {

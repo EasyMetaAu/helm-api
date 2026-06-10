@@ -370,6 +370,8 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
       reasoning_effort: "high",
       user: "user-123",
       service_tier: "auto",
+      prompt_cache_key: "thread-123",
+      prompt_cache_retention: "24h",
       metadata: { conversation_id: "conv-1", prompt_version: "v7" },
       web_search_options: { search_context_size: "low" },
     };
@@ -391,6 +393,8 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     expect(internal.reasoning_effort).toBe("high");
     expect(internal.user).toBe("user-123");
     expect(internal.service_tier).toBe("auto");
+    expect(internal.prompt_cache_key).toBe("thread-123");
+    expect(internal.prompt_cache_retention).toBe("24h");
     expect(internal.metadata.conversation_id).toBe("conv-1");
     expect(internal.provider_raw?.metadata).toEqual({
       conversation_id: "conv-1",

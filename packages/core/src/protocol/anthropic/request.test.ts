@@ -347,6 +347,65 @@ describe("anthropic transformRequestOut", () => {
     expect(ir.provider_raw?.metadata).toEqual({ user_id: "u-123" });
   });
 
+  it("preserves top-level cache_control for automatic prompt caching", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      cache_control: { type: "ephemeral" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.cache_control).toEqual({ type: "ephemeral" });
+
+    const out = transformRequestIn(ir);
+    expect(out.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("drops top-level automatic cache_control when explicit block/tool cache controls exist", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      cache_control: { type: "ephemeral" },
+      tools: [
+        {
+          name: "lookup",
+          input_schema: { type: "object" },
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "long context", cache_control: { type: "ephemeral" } }],
+        },
+      ],
+    });
+
+    const out = transformRequestIn(ir);
+    expect(out.cache_control).toBeUndefined();
+    const block = out.messages[0]?.content[0] as { cache_control?: unknown };
+    expect(block.cache_control).toEqual({ type: "ephemeral" });
+    expect(out.tools?.[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  it("preserves tool cache_control through Anthropic tool mapping", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      tools: [
+        {
+          name: "lookup",
+          input_schema: { type: "object" },
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.tools?.[0]).toMatchObject({ cache_control: { type: "ephemeral" } });
+
+    const out = transformRequestIn(ir);
+    expect(out.tools?.[0]?.cache_control).toEqual({ type: "ephemeral" });
+  });
+
   // Codex P2: a prompt-cache breakpoint placed on a top-level `system` block must
   // survive the round-trip — system blocks are a common cache breakpoint site.
   it("preserves cache_control on a top-level system block (round-trip)", () => {

@@ -23,6 +23,33 @@ describe("computeCostUsd — token usage × catalog pricing", () => {
     expect(cost).toBeCloseTo(0.0075, 12);
   });
 
+  it("prices cache read/write tokens with cache-specific rates", () => {
+    const pricing: Pricing = {
+      inputPerMTokUsd: 3,
+      outputPerMTokUsd: 15,
+      cacheReadPerMTokUsd: 0.3,
+      cacheWritePerMTokUsd: 3.75,
+    };
+    const cost = computeCostUsd(pricing, {
+      promptTokens: 1000,
+      cachedPromptTokens: 300,
+      cacheCreationPromptTokens: 100,
+      completionTokens: 200,
+    });
+    // fresh 600*3 + read 300*0.3 + write 100*3.75 + output 200*15, all per 1M.
+    expect(cost).toBeCloseTo((1800 + 90 + 375 + 3000) / 1_000_000, 12);
+  });
+
+  it("falls back cache rates to input pricing when cache-specific rates are unknown", () => {
+    const cost = computeCostUsd(gpt4o, {
+      promptTokens: 1000,
+      cachedPromptTokens: 300,
+      cacheCreationPromptTokens: 100,
+      completionTokens: 500,
+    });
+    expect(cost).toBeCloseTo(1000 * 2.5e-6 + 500 * 10e-6, 12);
+  });
+
   it("treats absent token counts as zero (still a measured number, not null)", () => {
     expect(computeCostUsd(gpt4o, { promptTokens: 0, completionTokens: 0 })).toBe(0);
     expect(computeCostUsd(gpt4o, {})).toBe(0);
@@ -66,6 +93,64 @@ describe("usageFromBody — defensive token extraction", () => {
     expect(usageFromBody({ usage: { prompt_tokens: 1000, completion_tokens: 500 } })).toEqual({
       promptTokens: 1000,
       completionTokens: 500,
+    });
+  });
+
+  it("extracts OpenAI-compatible cache read/write token details", () => {
+    expect(
+      usageFromBody({
+        usage: {
+          prompt_tokens: 1000,
+          completion_tokens: 500,
+          prompt_tokens_details: {
+            cached_tokens: 300,
+            cache_creation_tokens: 100,
+          },
+        },
+      }),
+    ).toEqual({
+      promptTokens: 1000,
+      completionTokens: 500,
+      cachedPromptTokens: 300,
+      cacheCreationPromptTokens: 100,
+    });
+  });
+
+  it("normalizes Anthropic-style input/cache usage into full prompt tokens", () => {
+    expect(
+      usageFromBody({
+        usage: {
+          input_tokens: 600,
+          cache_read_input_tokens: 300,
+          cache_creation_input_tokens: 100,
+          output_tokens: 200,
+        },
+      }),
+    ).toEqual({
+      promptTokens: 1000,
+      completionTokens: 200,
+      cachedPromptTokens: 300,
+      cacheCreationPromptTokens: 100,
+    });
+  });
+
+  it("extracts Responses-style input token details", () => {
+    expect(
+      usageFromBody({
+        usage: {
+          input_tokens: 1000,
+          output_tokens: 200,
+          input_tokens_details: {
+            cached_tokens: 300,
+            cache_creation_input_tokens: 100,
+          },
+        },
+      }),
+    ).toEqual({
+      promptTokens: 1000,
+      completionTokens: 200,
+      cachedPromptTokens: 300,
+      cacheCreationPromptTokens: 100,
     });
   });
 
@@ -159,6 +244,23 @@ describe("resolveCostUsd — billed overrides preset estimate", () => {
   it("falls back to the catalog estimate when no billed cost is present", () => {
     const body = { usage: { prompt_tokens: 1000, completion_tokens: 500 } };
     expect(resolveCostUsd(gpt4o, body)).toBeCloseTo(0.0075, 12);
+  });
+
+  it("uses cache-specific catalog prices when estimating from usage details", () => {
+    const pricing: Pricing = {
+      inputPerMTokUsd: 3,
+      outputPerMTokUsd: 15,
+      cacheReadPerMTokUsd: 0.3,
+      cacheWritePerMTokUsd: 3.75,
+    };
+    const body = {
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 200,
+        prompt_tokens_details: { cached_tokens: 300, cache_write_tokens: 100 },
+      },
+    };
+    expect(resolveCostUsd(pricing, body)).toBeCloseTo((1800 + 90 + 375 + 3000) / 1_000_000, 12);
   });
 
   it("honors a billed cost even when pricing is unknown (no catalog entry)", () => {

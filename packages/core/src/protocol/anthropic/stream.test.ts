@@ -272,7 +272,7 @@ describe("convertOpenAIStreamToAnthropic — usage buffering", () => {
     }
   });
 
-  it("reads cached from prompt_tokens_details.cached_tokens (real OpenAI nesting)", async () => {
+  it("reads cache read/write from prompt_tokens_details (real OpenAI nesting)", async () => {
     const events = await collect(
       convertOpenAIStreamToAnthropic(
         feed([
@@ -284,7 +284,7 @@ describe("convertOpenAIStreamToAnthropic — usage buffering", () => {
             usage: {
               prompt_tokens: 100,
               completion_tokens: 20,
-              prompt_tokens_details: { cached_tokens: 30 },
+              prompt_tokens_details: { cached_tokens: 30, cache_creation_tokens: 10 },
             },
           },
           textChunk("", "stop"),
@@ -294,8 +294,9 @@ describe("convertOpenAIStreamToAnthropic — usage buffering", () => {
 
     const md = events.find((e) => e.type === "message_delta");
     if (md?.type === "message_delta") {
-      expect(md.usage.input_tokens).toBe(70);
+      expect(md.usage.input_tokens).toBe(60);
       expect(md.usage.cache_read_input_tokens).toBe(30);
+      expect(md.usage.cache_creation_input_tokens).toBe(10);
     }
   });
 });

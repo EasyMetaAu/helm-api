@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-10 · Prompt caching 参数保真与缓存计费修复（docs/05 协议互译；docs/07 成本计量；CLAUDE.md 原则 2/3/8）
+
+- **缘起**：对全网关缓存路径做重点 review 时发现多处缓存字段只被 UI/记忆层读取，却没有稳定进入 provider wire body：OpenAI/Responses 的 `prompt_cache_key`/`prompt_cache_retention` 会被 IR/schema/execute 过滤；Anthropic 订阅 provider 会丢 per-block/tool/top-level `cache_control`；Gemini `cachedContent` 没有 IR home；成本估算也把 cache read/write tokens 当普通 input 计费。
+- **修复**：把 `prompt_cache_key`、`prompt_cache_retention`、`cached_content` 加入 Shared InternalRequest、IR、OpenAI Chat、Responses、Gemini 与执行层透传白名单；Responses provider 优先保留客户端 `prompt_cache_key`，否则回退订阅 session；Gemini `cachedContent` 通过 IR `cached_content` 双向 round-trip，并由 `supportsCachedContent` 硬能力门禁保护，避免混合 fallback 链把必需 cached context 发到会忽略/拒绝它的非 Gemini 目标。
+- **Anthropic 取舍**：按当前 Anthropic/LiteLLM 行为支持 top-level `cache_control`（automatic prompt caching）以及 system/user/tool cache_control；协议 guard 不再把 request-level `cache_control` 标为 data_loss。订阅 provider 仍保留 Claude-Code spoof system[0]，用户 cache breakpoint 只贴在用户/系统原文块上，不贴在 spoof 上；若请求同时有 top-level automatic cache_control 与显式 block/tool cache_control，出站时丢弃 top-level，避免 Anthropic 因 breakpoint TTL 冲突返回 400。
+- **成本计量**：`resolveCostUsd` 现在按 LiteLLM 语义拆分 fresh input、cache read、cache write、output：`prompt_tokens` / Responses `input_tokens` 视为包含 cache tokens；Anthropic-style `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` 会先规范化成 full prompt；cache 价格缺失时回退 input 价而不是 0，避免低估。流式 Responses/Anthropic/Codex usage tail 也保留 cache read/write 细分，避免 streamed path 和 non-stream path 计费分叉。
+- **测试/验证**：新增/更新 OpenAI、Responses、Gemini、Anthropic native/provider、protocol guard、execute route、capability filter、cost calculator 定向回归。风险：`supportsCachedContent` 需要运营侧只标记真实支持 Gemini/LiteLLM cached-content handle 的目标；缺失能力数据会对 `cached_content` 请求 fail-closed 为 `capability_unsatisfiable`，这是有意保护成本与上下文正确性的取舍。
+
+---
+
 ## 2026-06-10 · 请求详情页：多行/长字符串「预览」弹窗（docs/07 可观测性；docs/11 管理界面）
 
 - **缘起**：请求详情页 JSON 树里，字符串值用 `JSON.stringify(s)` 渲染，真实换行被转义成字面量两字符 `\n`，长 system/developer prompt 挤成一坨；`whitespace-pre-wrap` 无真换行可断，用户每次都要 copy 出来手动把 `\n` 换成回车才能读。
@@ -27,19 +37,11 @@
 
 ---
 
-## 2026-06-09 · DeepSeek provider developer-role 兼容开关（docs/05 协议互译；docs/04 路由执行兜底；CLAUDE.md 原则 2/3/5）
-
-- **缘起**：线上 trace `f51049a7-0d14-4250-9d93-2e057d153f3e` 进入 `economy` lane，首选 `deepseek/deepseek-v4-flash` 失败后 fallback 到 `openai-codex/gpt-5.4-mini` 成功。DeepSeek 真实错误为 HTTP 400：`messages[0].role: unknown variant developer`。根因是 OpenAI Responses/OpenAI Chat 请求中的 `developer` 角色被 OpenAI-compatible client 原样透传给官方 DeepSeek，而 DeepSeek 只接受 `system/user/assistant/tool/...`。
-- **修复**：新增 provider-scoped config `map_developer_role_to_system`（默认 `false`，fail-closed Zod 校验），并在 `createOpenAIClient` 中仅当该开关开启时复制请求体，把 `messages[].role === "developer"` 改为 `system`。`config/providers.yaml` 的官方 `deepseek` provider 启用该开关；真实 OpenAI/Codex 继续保留 `developer` 语义，不做全局降级。
-- **取舍**：这是执行层 provider 兼容 shim，不改变分类与 lane 选择；DeepSeek 仍可作为 economy/balanced 候选，只是不再因角色不兼容白白失败一次。原始请求对象不被 mutate，payload/replay 仍保留客户端原文；仅上游 wire body 做兼容转换。
-- **测试/验证**：TDD 覆盖 OpenAI client opt-in 映射且不修改 caller request、config loader 默认 false/YAML true、checked-in DeepSeek sample、server.ts provider flag 接线。定向 Vitest 70/70 绿；`@helm/shared`/`@helm/core`/`@helm/gateway` typecheck 与 build 均通过。
-- **部署提示**：本次只改本地源码与默认 config，未改线上 `/opt/helm-api/config` 或执行部署。线上要消除该 400，需要发布新镜像/代码，并确保生产 DeepSeek provider 配置包含 `map_developer_role_to_system: true`。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-09 · DeepSeek provider developer-role 兼容开关：新增 provider-scoped `map_developer_role_to_system` 并在官方 DeepSeek provider 开启，避免 OpenAI `developer` 角色被 DeepSeek 400；原始 payload 保真，上游 wire body 做兼容转换，需部署新镜像/生产配置才生效。
 
 ### 2026-06-09 · 请求详情页 Responses API 流式回放与 JSON 换行修复：`parseSseStream` 加 Responses `response.*` 分支（Anthropic 前匹配，累积 `output_text.delta`、读 `response.completed` usage/model/status、done 事件仅兜底快照不重复 append）；`JsonViewer` 三 tab 与 `JsonTree` scalar 统一 `whitespace-pre-wrap break-words [overflow-wrap:anywhere]` 去横向滚动。Vitest 40/40 绿。
 

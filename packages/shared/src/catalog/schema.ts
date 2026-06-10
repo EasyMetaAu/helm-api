@@ -31,6 +31,10 @@ export const CapabilitiesSchema = z.object({
   // (no_nonstream_support) so it never burns an attempt nor poisons the breaker;
   // streaming requests still use it normally.
   requiresStreaming: z.boolean().optional(),
+  // Gemini/LiteLLM cachedContent is a REQUIRED provider-side context reference, not
+  // a harmless passthrough. Absent ⇒ false so mixed fallback chains never run a
+  // cached-content request on a provider that would ignore or reject the reference.
+  supportsCachedContent: z.boolean().optional(),
   maxContextTokens: z.number().int().nonnegative(),
   maxOutputTokens: z.number().int().nonnegative().nullable(),
 });

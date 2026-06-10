@@ -61,21 +61,41 @@ interface AnthropicMessage {
   content: AnthropicBlock[];
 }
 
-function textBlocksFromContent(content: unknown): AnthropicBlock[] {
-  if (typeof content === "string") return content ? [{ type: "text", text: content }] : [];
+function withCacheControl<T extends AnthropicBlock>(block: T, cacheControl: unknown): T {
+  if (cacheControl !== undefined) (block as AnthropicBlock).cache_control = cacheControl;
+  return block;
+}
+
+function hasExplicitCacheControl(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasExplicitCacheControl);
+  if (value === null || typeof value !== "object") return false;
+  const obj = value as Record<string, unknown>;
+  if (Object.hasOwn(obj, "cache_control")) return true;
+  return Object.values(obj).some(hasExplicitCacheControl);
+}
+
+function textBlocksFromContent(content: unknown, messageCacheControl?: unknown): AnthropicBlock[] {
+  if (typeof content === "string")
+    return content ? [withCacheControl({ type: "text", text: content }, messageCacheControl)] : [];
   if (Array.isArray(content)) {
     return content.flatMap((part): AnthropicBlock[] => {
       if (part && typeof part === "object") {
         const p = part as Record<string, unknown>;
+        const cacheControl = p.cache_control ?? messageCacheControl;
         if (p.type === "text" && typeof p.text === "string")
-          return [{ type: "text", text: p.text }];
+          return [withCacheControl({ type: "text", text: p.text }, cacheControl)];
         // image_url -> anthropic image block (base64 data URLs only; http passes through name)
         if (p.type === "image_url" && p.image_url && typeof p.image_url === "object") {
           const urlVal = (p.image_url as Record<string, unknown>).url;
           if (typeof urlVal === "string" && urlVal.startsWith("data:")) {
             const m = urlVal.match(/^data:([^;]+);base64,(.*)$/);
             if (m) {
-              return [{ type: "image", source: { type: "base64", media_type: m[1], data: m[2] } }];
+              return [
+                withCacheControl(
+                  { type: "image", source: { type: "base64", media_type: m[1], data: m[2] } },
+                  cacheControl,
+                ),
+              ];
             }
           }
         }
@@ -97,7 +117,7 @@ function buildSystem(messages: Array<Record<string, unknown>>): AnthropicBlock[]
   const sys: AnthropicBlock[] = [{ type: "text", text: SYSTEM_SPOOF }];
   for (const m of messages) {
     if (m.role !== "system" && m.role !== "developer") continue;
-    for (const b of textBlocksFromContent(m.content)) sys.push(b);
+    for (const b of textBlocksFromContent(m.content, m.cache_control)) sys.push(b);
   }
   return sys;
 }
@@ -117,13 +137,14 @@ function toAnthropicMessages(messages: Array<Record<string, unknown>>): Anthropi
             type: "tool_result",
             tool_use_id: String(m.tool_call_id ?? ""),
             content: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
+            ...(m.cache_control !== undefined ? { cache_control: m.cache_control } : {}),
           },
         ],
       });
       continue;
     }
     if (role === "assistant") {
-      const blocks: AnthropicBlock[] = textBlocksFromContent(m.content);
+      const blocks: AnthropicBlock[] = textBlocksFromContent(m.content, m.cache_control);
       const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls : [];
       for (const tc of toolCalls as Array<Record<string, unknown>>) {
         const fn = (tc.function ?? {}) as Record<string, unknown>;
@@ -147,7 +168,7 @@ function toAnthropicMessages(messages: Array<Record<string, unknown>>): Anthropi
       continue;
     }
     // user (default)
-    out.push({ role: "user", content: textBlocksFromContent(m.content) });
+    out.push({ role: "user", content: textBlocksFromContent(m.content, m.cache_control) });
   }
   return out;
 }
@@ -190,6 +211,11 @@ export function openaiToAnthropicRequest(
           name: fn.name,
           description: fn.description ?? "",
           input_schema: fn.parameters ?? { type: "object" },
+          ...(t.cache_control !== undefined
+            ? { cache_control: t.cache_control }
+            : fn.cache_control !== undefined
+              ? { cache_control: fn.cache_control }
+              : {}),
         },
       ];
     });
@@ -197,6 +223,14 @@ export function openaiToAnthropicRequest(
   }
   const toolChoice = anthropicToolChoice(r.tool_choice, r.parallel_tool_calls);
   if (toolChoice !== undefined) body.tool_choice = toolChoice;
+  if (
+    r.cache_control !== undefined &&
+    typeof r.cache_control === "object" &&
+    r.cache_control !== null &&
+    !hasExplicitCacheControl([body.system, body.messages, body.tools])
+  ) {
+    body.cache_control = r.cache_control;
+  }
   return body;
 }
 
@@ -254,6 +288,11 @@ export function anthropicToOpenAIResponse(
   const usage = (resp.usage ?? {}) as Record<string, unknown>;
   const inTok = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
   const outTok = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
+  const cacheRead =
+    typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0;
+  const cacheCreation =
+    typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : 0;
+  const promptTokens = inTok + cacheRead + cacheCreation;
   const message: Record<string, unknown> = { role: "assistant", content: text || null };
   if (toolCalls.length) message.tool_calls = toolCalls;
   return {
@@ -268,7 +307,19 @@ export function anthropicToOpenAIResponse(
         finish_reason: STOP_MAP[String(resp.stop_reason)] ?? "stop",
       },
     ],
-    usage: { prompt_tokens: inTok, completion_tokens: outTok, total_tokens: inTok + outTok },
+    usage: {
+      prompt_tokens: promptTokens,
+      completion_tokens: outTok,
+      total_tokens: promptTokens + outTok,
+      ...(cacheRead > 0 || cacheCreation > 0
+        ? {
+            prompt_tokens_details: {
+              cached_tokens: cacheRead,
+              ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+            },
+          }
+        : {}),
+    },
   };
 }
 
@@ -440,7 +491,12 @@ function openaiUsageChunk(
       completion_tokens: usage.output,
       total_tokens: promptTokens + usage.output,
       ...(usage.cacheRead > 0 || usage.cacheCreation > 0
-        ? { prompt_tokens_details: { cached_tokens: usage.cacheRead } }
+        ? {
+            prompt_tokens_details: {
+              cached_tokens: usage.cacheRead,
+              ...(usage.cacheCreation > 0 ? { cache_creation_tokens: usage.cacheCreation } : {}),
+            },
+          }
         : {}),
     },
   };
@@ -545,6 +601,8 @@ export async function* translateAnthropicSSE(
           if (typeof u.output_tokens === "number") usageOutput = u.output_tokens;
           if (typeof u.cache_read_input_tokens === "number")
             usageCacheRead = Math.max(usageCacheRead, u.cache_read_input_tokens);
+          if (typeof u.cache_creation_input_tokens === "number")
+            usageCacheCreation = Math.max(usageCacheCreation, u.cache_creation_input_tokens);
           if (typeof d.stop_reason === "string") {
             yield openaiChunk(model, {}, STOP_MAP[d.stop_reason] ?? "stop");
           }

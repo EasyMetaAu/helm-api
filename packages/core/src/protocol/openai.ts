@@ -73,6 +73,9 @@ const OpenAIChatRequestSchema = z.object({
   reasoning_effort: IRReasoningEffortSchema.optional(),
   user: z.string().optional(),
   service_tier: z.string().optional(),
+  prompt_cache_key: z.string().optional(),
+  prompt_cache_retention: z.string().optional(),
+  cached_content: z.string().optional(),
   functions: z.array(z.unknown()).optional(),
   function_call: z.unknown().optional(),
   prediction: z.unknown().optional(),
@@ -94,7 +97,12 @@ const OpenAIUsageSchema = z
     completion_tokens: z.number().int().nonnegative().optional(),
     total_tokens: z.number().int().nonnegative().optional(),
     prompt_tokens_details: z
-      .object({ cached_tokens: z.number().int().nonnegative().optional() })
+      .object({
+        cached_tokens: z.number().int().nonnegative().optional(),
+        cache_write_tokens: z.number().int().nonnegative().optional(),
+        cache_creation_tokens: z.number().int().nonnegative().optional(),
+        cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+      })
       .passthrough()
       .optional(),
     completion_tokens_details: IRTokenDetailsSchema.optional(),
@@ -121,6 +129,10 @@ const OpenAIResponseSchema = z
     usage: OpenAIUsageSchema.optional(),
   })
   .passthrough();
+
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
 
 // —— finish_reason -> legal OpenAI value (pit #1). OpenAI clients only accept this
 // closed set; any out-of-vocabulary upstream value (e.g. a proxied Anthropic
@@ -333,6 +345,11 @@ function toIRResponse(res: NativeResponse): IRResponse {
   const parsed = OpenAIResponseSchema.parse(res);
   const rawUsage = parsed.usage;
   const cached = rawUsage?.prompt_tokens_details?.cached_tokens ?? 0;
+  const cacheCreation =
+    rawUsage?.prompt_tokens_details?.cache_write_tokens ??
+    rawUsage?.prompt_tokens_details?.cache_creation_tokens ??
+    rawUsage?.prompt_tokens_details?.cache_creation_input_tokens ??
+    0;
   const fullPrompt = rawUsage?.prompt_tokens;
   // reasoning_tokens lives under completion_tokens_details (OpenAI o-series); lift it
   // to the flat IRUsage.reasoning_tokens too so cross-protocol billing has one home.
@@ -355,12 +372,18 @@ function toIRResponse(res: NativeResponse): IRResponse {
       rawUsage === undefined
         ? undefined
         : {
-            // input = prompt - cached (pit #2: never bill cached at full price).
-            ...(fullPrompt !== undefined ? { prompt_tokens: fullPrompt - cached } : {}),
+            // input = prompt - cache read/write (pit #2: never bill cached at full price).
+            ...(fullPrompt !== undefined
+              ? { prompt_tokens: Math.max(0, fullPrompt - cached - cacheCreation) }
+              : {}),
             ...(rawUsage.completion_tokens !== undefined
               ? { completion_tokens: rawUsage.completion_tokens }
               : {}),
             ...(cached > 0 ? { cached_tokens: cached } : {}),
+            ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+            ...(rawUsage.prompt_tokens_details !== undefined
+              ? { prompt_tokens_details: rawUsage.prompt_tokens_details }
+              : {}),
             ...(reasoningTokens !== undefined ? { reasoning_tokens: reasoningTokens } : {}),
             ...(completionDetails !== undefined
               ? { completion_tokens_details: completionDetails }
@@ -403,9 +426,15 @@ function toOpenAIResponse(res: IRResponse): NativeResponse {
   const u = parsed.usage;
   let usage: Record<string, unknown> | undefined;
   if (u !== undefined) {
-    const cached = u.cached_tokens ?? 0;
+    const cached = u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+    const cacheCreation =
+      u.cache_creation_tokens ??
+      tokenCount(u.prompt_tokens_details?.cache_creation_tokens) ??
+      tokenCount(u.prompt_tokens_details?.cache_creation_input_tokens) ??
+      tokenCount(u.prompt_tokens_details?.cache_write_tokens) ??
+      0;
     const nonCached = u.prompt_tokens ?? 0;
-    const fullPrompt = nonCached + cached;
+    const fullPrompt = nonCached + cached + cacheCreation;
     const completion = u.completion_tokens ?? 0;
     // OpenAI o-series clients read reasoning_tokens from completion_tokens_details, not
     // the flat IR mirror. Prefer the upstream detail object; else synthesize it from
@@ -421,7 +450,17 @@ function toOpenAIResponse(res: IRResponse): NativeResponse {
       prompt_tokens: fullPrompt,
       completion_tokens: completion,
       total_tokens: fullPrompt + completion,
-      ...(cached > 0 ? { prompt_tokens_details: { cached_tokens: cached } } : {}),
+      ...(cached > 0 || cacheCreation > 0
+        ? {
+            prompt_tokens_details: {
+              cached_tokens: cached,
+              ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+              ...(u.prompt_tokens_details !== undefined ? u.prompt_tokens_details : {}),
+            },
+          }
+        : u.prompt_tokens_details !== undefined
+          ? { prompt_tokens_details: u.prompt_tokens_details }
+          : {}),
       ...(completionDetails !== undefined ? { completion_tokens_details: completionDetails } : {}),
     };
   }
