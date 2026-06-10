@@ -1,10 +1,19 @@
 name: Publish image
 
-# Builds the gateway image with real build info and pushes it to GHCR.
-#   - push to main      -> ghcr.io/easymetaau/helm-api:latest + :sha-<short>
-#   - push tag v1.2.3   -> ghcr.io/easymetaau/helm-api:latest + :1.2.3
+# Builds the gateway image with real build info, pushes it to GHCR, and — when a
+# commit to main bumps package.json to a not-yet-released version — automatically
+# cuts the matching tag + GitHub Release.
+#   - push to main (normal commit)  -> :latest + :sha-<short>
+#   - push to main (version bump)   -> :latest + :sha-<short> + :<version>,
+#                                      plus tag v<version> + GitHub Release (auto notes)
+#   - push tag v1.2.3 (manual)      -> :latest + :1.2.3   (escape hatch; no Release)
 # Runs on the org self-hosted runners (same pool as CI). Build info is injected
 # via the Dockerfile build-args (docs/10) so GET /version reports real values.
+#
+# The "version bump" path makes a release as soon as a PR bumping the root
+# package.json lands on main: no manual `git tag` / `gh release create` needed.
+# The GitHub Release (and its tag) are created with GITHUB_TOKEN, which by design
+# does NOT re-trigger this workflow's `tags: v*` path — so there is no double build.
 on:
   push:
     branches: [main]
@@ -18,10 +27,12 @@ jobs:
   publish:
     runs-on: [self-hosted, Linux, X64, docker]
     permissions:
-      contents: read
+      contents: write   # create the tag + GitHub Release on a version bump
       packages: write
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # need full tag list to detect "already released"
       - name: Resolve tags + build info
         id: meta
         run: |
@@ -29,17 +40,27 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           SHA=$(git rev-parse --short HEAD)
           BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          RELEASE=false
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"            # v0.1.0 -> 0.1.0
             TAGS="${IMAGE}:latest ${IMAGE}:${VERSION}"
           else
             TAGS="${IMAGE}:latest ${IMAGE}:sha-${SHA}"
+            # On main: a package.json version with no matching tag means this commit
+            # bumped the version -> also publish :<version> and cut a Release for it.
+            if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+              echo "v${VERSION} already released; normal commit, no Release."
+            else
+              RELEASE=true
+              TAGS="${TAGS} ${IMAGE}:${VERSION}"
+            fi
           fi
           {
             echo "version=${VERSION}"
             echo "sha=${SHA}"
             echo "built_at=${BUILT_AT}"
             echo "tags=${TAGS}"
+            echo "release=${RELEASE}"
           } >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -53,7 +74,27 @@ jobs:
             --build-arg HELM_BUILT_AT="${{ steps.meta.outputs.built_at }}" \
             "${args[@]}" .
           for t in ${{ steps.meta.outputs.tags }}; do docker push "$t"; done
+      - name: Cut GitHub Release
+        if: steps.meta.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ steps.meta.outputs.version }}"
+          # REST instead of `gh` so it works on runners without the gh CLI. Creating
+          # a release with target_commitish also creates the tag v<version>.
+          code=$(curl -sS -o /tmp/release.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases" \
+            -d "{\"tag_name\":\"v${V}\",\"target_commitish\":\"${GITHUB_SHA}\",\"name\":\"v${V}\",\"generate_release_notes\":true}")
+          if [ "$code" != "201" ]; then
+            echo "::error::release create for v${V} failed (HTTP ${code})"
+            cat /tmp/release.json
+            exit 1
+          fi
+          echo "Created GitHub Release v${V}"
       - name: Summary
         run: |
           echo "Pushed: ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "version=${{ steps.meta.outputs.version }} sha=${{ steps.meta.outputs.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "version=${{ steps.meta.outputs.version }} sha=${{ steps.meta.outputs.sha }} release=${{ steps.meta.outputs.release }}" >> "$GITHUB_STEP_SUMMARY"
