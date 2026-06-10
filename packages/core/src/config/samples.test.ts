@@ -75,9 +75,10 @@ describe("checked-in config samples", () => {
     const laneNames = Object.keys(cfg.lanes ?? {});
     const opusTarget = resolveModelAlias("claude-opus-4-8", aliases);
     expect(opusTarget && laneNames.includes(opusTarget)).toBe(true);
-    // The small/fast background model maps to economy even with a date suffix
-    // (the common dated Haiku id shape) — not the broad claude-* catch-all.
-    expect(resolveModelAlias("claude-3-5-haiku-20241022", aliases)).toBe("economy");
+    // The small/fast background model maps to the dedicated claude-haiku lane even
+    // with a date suffix (the common dated Haiku id shape) — the haiku-specific glob
+    // wins over the broad claude-* catch-all (which still falls through to balanced).
+    expect(resolveModelAlias("claude-3-5-haiku-20241022", aliases)).toBe("claude-haiku");
     // The shipped aliases must validate against the SHIPPED lanes (no drift): every
     // target is a configured lane or "auto", or the gateway would refuse to boot.
     expect(validateModelAliasTargets(aliases, laneNames)).toEqual([]);
