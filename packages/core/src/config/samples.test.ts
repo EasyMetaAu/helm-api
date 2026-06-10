@@ -79,9 +79,25 @@ describe("checked-in config samples", () => {
     // with a date suffix (the common dated Haiku id shape) — the haiku-specific glob
     // wins over the broad claude-* catch-all (which still falls through to balanced).
     expect(resolveModelAlias("claude-3-5-haiku-20241022", aliases)).toBe("claude-haiku");
+    // GPT families route to their dedicated vendor-family lanes. The cheap mini must
+    // NOT be swallowed by the broad `gpt-5*` -> premium catch-all (longest-literal
+    // wins): a dated mini id still lands on the cheap gpt-5.4-mini lane.
+    expect(resolveModelAlias("gpt-5.4", aliases)).toBe("gpt-5.4");
+    expect(resolveModelAlias("gpt-5.4-mini", aliases)).toBe("gpt-5.4-mini");
+    expect(resolveModelAlias("gpt-5.4-mini-2026-01-01", aliases)).toBe("gpt-5.4-mini");
     // The shipped aliases must validate against the SHIPPED lanes (no drift): every
     // target is a configured lane or "auto", or the gateway would refuse to boot.
     expect(validateModelAliasTargets(aliases, laneNames)).toEqual([]);
+  });
+
+  it("loads the shipped gpt-5.4 vendor-family lanes leading with the real codex models", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const lanes = cfg.lanes;
+    if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
+    expect(lanes["gpt-5.4"]?.primary).toBe("openai-codex/gpt-5.4");
+    expect(lanes["gpt-5.4"]?.fallback).toEqual(["premium"]);
+    expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.4-mini");
+    expect(lanes["gpt-5.4-mini"]?.fallback).toEqual(["economy"]);
   });
 
   it("loads the shipped policies.yaml as first-match rules", () => {

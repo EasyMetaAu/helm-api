@@ -131,3 +131,23 @@ claude-haiku:
   fallback:
     - zenmux/gpt-5.5
     - premium
+
+# GPT-5.4 — strong reasoning one tier below 5.5 ($2.5/$15 vs 5.5's $5/$30). Leads
+# with the Codex subscription's real gpt-5.4. ZenMux exposes NO 5.4 static key, so
+# it degrades to the GPT-led `premium` lane (gpt-5.5 -> static zenmux/gpt-5.5 ->
+# Opus) rather than dropping straight to the cheap tier on the first hiccup.
+"gpt-5.4":
+  purpose: OpenAI GPT-5.4 tier — strong reasoning
+  primary: openai-codex/gpt-5.4
+  fallback:
+    - premium
+
+# GPT-5.4-mini — the cheap/fast GPT tier ($0.75/$4.5). Leads with the Codex
+# subscription's real gpt-5.4-mini, then degrades to `economy` (where this SAME
+# model already sits as a fallback), keeping a mini request cheap instead of
+# bumping it onto a premium model.
+"gpt-5.4-mini":
+  purpose: OpenAI GPT-5.4 mini tier — cheap/fast
+  primary: openai-codex/gpt-5.4-mini
+  fallback:
+    - economy
