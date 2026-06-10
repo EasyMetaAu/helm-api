@@ -112,9 +112,15 @@ const AnthropicContentBlockSchema = z.union([
   AnthropicUnknownBlockSchema,
 ]);
 
+// Anthropic documents only user/assistant message roles (system lives top-level),
+// but real clients — notably Claude Code — inject system content (MCP server
+// instructions, system-reminders) as a role:"system" MESSAGE in the array. We accept
+// system/developer here and fold them into the system prompt downstream (transformOut
+// keeps the role; systemFromMessages collapses it), matching LiteLLM parity. Rejecting
+// them 400'd every Claude Code request ("invalid_value messages[].role").
 const AnthropicMessageSchema = z
   .object({
-    role: z.enum(["user", "assistant"]),
+    role: z.enum(["user", "assistant", "system", "developer"]),
     content: z.union([z.string(), z.array(AnthropicContentBlockSchema)]),
   })
   .passthrough();
@@ -420,6 +426,11 @@ export function transformRequestOut(req: unknown): IRRequest {
         content: parts.length > 0 ? parts : null,
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
       });
+    } else if (m.role === "system" || m.role === "developer") {
+      // system/developer turn: keep the role so it folds into the system prompt
+      // downstream (systemFromMessages) instead of being mistaken for a user turn.
+      // (The string-content fast path above already preserves m.role.)
+      if (parts.length > 0) messages.push({ role: m.role, content: parts });
     } else {
       // user: emit the user turn (if it has any non-tool_result content), then the
       // fanned-out tool_result messages as standalone role:"tool" turns.
