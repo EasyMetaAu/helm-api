@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-06-10 · publish.yml 版本号升级自动发布 Release（CI/CD；CLAUDE.md Git 工作流 / 原则 2）
+
+- **缘起**：用户发现 push main 触发的 `publish.yml` 只刷 GHCR `:latest` + `:sha-<short>`，**从不创建 GitHub Release**；版本 tag 与 Release 一直靠手工 `git tag` + `gh release create`（见 [[release-procedure]]）。用户希望「提交后自动发」。AskUserQuestion 选定**「版本号自动发布」**方案。
+- **实现**：在 `publish.yml` 的 main-push 路径加版本探测——读 `package.json` 版本 V，若 `refs/tags/vV` 不存在即判定该 commit 升了版本：额外构建/推 `:V` 镜像，并用 GitHub REST `POST /repos/{repo}/releases`（`tag_name=vV`、`target_commitish=GITHUB_SHA`、`name="vV"`、`generate_release_notes:true`）一次性建 tag + Release。普通 commit（tag 已存在）行为完全不变，仍只 `:latest` + `:sha`。
+- **取舍/坑**：
+  - 用 `curl` + REST 而非 `gh` CLI——不假设 self-hosted runner 装了 gh。
+  - GITHUB_TOKEN 创建的 tag **不会**再触发本 workflow 的 `tags: v*` 路径（GitHub 防递归），正好**避免重复构建**；`tags: ['v*']` 触发保留，仅作手工 escape hatch（手工推 tag→只建 `:version` 镜像、不建 Release）。
+  - 必需 `permissions: contents: write` + checkout `fetch-depth: 0`（探测已存在 tag）。
+  - publish.yml 仍与 ci.yml 独立（无 `needs`）：发布不等 CI——但版本升 commit 来自已 CI 绿的 release PR squash，合并即受信，沿用既有设计。
+  - Release 标题 = `vX.Y.Z`（与最近三次 release 一致，[[release-procedure]] 的「仅版本号、无描述后缀」原则保留）。
+- **新发布流程**：`release/vX.Y.Z` 分支只 bump 根 `package.json` 版本 → PR `chore(release): vX.Y.Z` → CI 绿 → squash 合并 main → publish.yml 自动打 tag/Release/`:version`/`:latest`。**不再手工 `git tag` / `gh release create`**。
+- **验证**：YAML 通过 `yaml.safe_load`；bump 探测对真实 tag 实测正确（v0.10.2 存在→不发；v0.11.0 缺失→会发）。线上首次生效需此 PR 合并后下次版本升 commit 才能端到端确认。
+
+---
+
 ## 2026-06-10 · Prompt caching 参数保真与缓存计费修复（docs/05 协议互译；docs/07 成本计量；CLAUDE.md 原则 2/3/8）
 
 - **缘起**：对全网关缓存路径做重点 review 时发现多处缓存字段只被 UI/记忆层读取，却没有稳定进入 provider wire body：OpenAI/Responses 的 `prompt_cache_key`/`prompt_cache_retention` 会被 IR/schema/execute 过滤；Anthropic 订阅 provider 会丢 per-block/tool/top-level `cache_control`；Gemini `cachedContent` 没有 IR home；成本估算也把 cache read/write tokens 当普通 input 计费。
@@ -27,19 +42,11 @@
 
 ---
 
-## 2026-06-10 · Responses API flat function tools 规范化为 Chat tools（docs/05 协议互译；docs/04 路由执行兜底；CLAUDE.md 原则 2/3/8）
-
-- **缘起**：线上 trace `9b18966a-6f1a-40b0-bae1-d69455005571` 已经不再卡在 DeepSeek `developer` 角色，但官方 DeepSeek 首选候选仍 HTTP 400：`tools[0]: missing field function`。根因是 OpenAI Responses API 的 function tool 输入是扁平形状（`{type:"function", name, description, parameters, strict}`），而网关把它折进 OpenAI-Chat-shaped IR 后又原样发给 Chat Completions upstream；DeepSeek 期望的是 Chat tools 形状（`{type:"function", function:{...}}`）。
-- **修复**：`responsesTransformer.transformRequestOut` 在 Responses → IR 时把扁平 function tools 规范化为 Chat tools，确保所有 OpenAI-compatible Chat upstream 都收到合法 `tools[].function`；原始 Responses tools 同时存入 `provider_raw.responses_tools`，`transformRequestIn` 优先用该原文恢复，避免 Responses round-trip 变形。
-- **取舍**：只转换 `type:"function"` 且带 `name` 的扁平 tool；未知/未来 tool 类型继续 fail-open 保留原样，不在协议层臆造能力。非 Responses 来源的 Chat tools 在输出到 Responses 时会尽量反向扁平化；已有 raw Responses tools 时以 raw 为准。
-- **测试/验证**：TDD 新增 Responses flat function tool → IR Chat tool → Responses raw tool 的回归测试；定向 `pnpm exec vitest run packages/core/src/protocol/responses.test.ts --project node` 43/43 绿；`@helm/core` typecheck 绿。部署前还用生产 DeepSeek key 直连验证：包含 Chat-shaped tools、`reasoning_effort`、`store:false` 的 `deepseek-v4-flash` 请求返回 200。
-- **部署提示**：这是代码路径修复，不是配置修复；线上需要发布新镜像/重启后才会消除 DeepSeek `tools[0].function` 400。历史 trace 仍会保留旧错误。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-10 · Responses API flat function tools 规范化为 Chat tools：`responsesTransformer.transformRequestOut` 把扁平 `{type:"function",name,...}` 规范成 Chat `tools[].function`（修官方 DeepSeek `tools[0]: missing field function` 400），原文存 `provider_raw.responses_tools` 供 round-trip 恢复；只转带 name 的 function tool，未知类型 fail-open。core 43/43 绿，生产 DeepSeek 直连 200。需发新镜像生效。
 
 ### 2026-06-09 · DeepSeek provider developer-role 兼容开关：新增 provider-scoped `map_developer_role_to_system` 并在官方 DeepSeek provider 开启，避免 OpenAI `developer` 角色被 DeepSeek 400；原始 payload 保真，上游 wire body 做兼容转换，需部署新镜像/生产配置才生效。
 
