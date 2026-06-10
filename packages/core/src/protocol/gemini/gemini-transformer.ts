@@ -1,4 +1,11 @@
-import type { IRContentPart, IRMessage, IRRequest, IRResponse, IRToolCall } from "../ir.js";
+import type {
+  IRContentPart,
+  IRMessage,
+  IRReasoningEffort,
+  IRRequest,
+  IRResponse,
+  IRToolCall,
+} from "../ir.js";
 import { IRRequestSchema, IRResponseSchema } from "../ir.js";
 import { liftReasoningToFlat, resolveReasoning } from "../reasoning.js";
 import type { Transformer } from "../transformer.js";
@@ -133,18 +140,26 @@ const GEMINI_TO_IR_MODALITY: Record<string, "text" | "image" | "audio" | "video"
 // increasing defaults (minimal < low < medium < high) so the level is honored and
 // budgets order correctly. The raw effort survives in provider_raw at the request
 // layer if needed; here we only need a valid, ordered thinkingConfig.
-const REASONING_EFFORT_BUDGET: Record<"minimal" | "low" | "medium" | "high", number> = {
+// Keyed over the FULL IR effort union (exhaustive) so it never indexes to an
+// undefined budget when a newer tier (xhigh/max) or `none` reaches Gemini. Budgets
+// are representative + monotonically increasing; xhigh/max sit at Gemini's ceiling.
+const REASONING_EFFORT_BUDGET: Record<IRReasoningEffort, number> = {
+  none: 0,
   minimal: 128,
   low: 1024,
   medium: 8192,
   high: 24576,
+  xhigh: 32768,
+  max: 32768,
 };
 
 function reasoningEffortToThinkingConfig(
-  effort: "minimal" | "low" | "medium" | "high" | undefined,
+  effort: IRReasoningEffort | undefined,
 ): { thinkingBudget: number; includeThoughts: boolean } | undefined {
   if (effort === undefined) return undefined;
-  return { thinkingBudget: REASONING_EFFORT_BUDGET[effort], includeThoughts: true };
+  const thinkingBudget = REASONING_EFFORT_BUDGET[effort];
+  // `none` => budget 0 disables Gemini thinking (and no thought summaries).
+  return { thinkingBudget, includeThoughts: thinkingBudget > 0 };
 }
 
 function thinkingConfigToReasoningEffort(

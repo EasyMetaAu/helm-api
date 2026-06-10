@@ -209,6 +209,12 @@ export function openaiToResponsesRequest(
   if (typeof r.prompt_cache_retention === "string")
     body.prompt_cache_retention = r.prompt_cache_retention;
   if (typeof r.temperature === "number") body.temperature = r.temperature;
+  // Forward the client's reasoning effort to the Codex backend (Responses speaks
+  // `reasoning.effort`). Without this the subscription always ran at its DEFAULT —
+  // a real Codex `model_reasoning_effort` (incl. high/xhigh/max) was silently
+  // dropped here. The IR has already normalized any unknown tier to a known one.
+  if (typeof r.reasoning_effort === "string" && r.reasoning_effort.length > 0)
+    body.reasoning = { effort: r.reasoning_effort };
   if (Array.isArray(r.tools)) {
     const tools = (r.tools as Array<Record<string, unknown>>).flatMap((t) => {
       const fn = (t.function ?? {}) as Record<string, unknown>;

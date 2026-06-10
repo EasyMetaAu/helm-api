@@ -91,8 +91,35 @@ export type IRContentPart = z.infer<typeof IRContentPartSchema>;
 // detail have ONE shape across every protocol. All permissive (.passthrough() where
 // upstreams add fields) and fail-open on unknown extras. ——————————————————————————
 
-/** Reasoning effort knob (OpenAI o-series / Anthropic budget / Gemini level). */
-export const IRReasoningEffortSchema = z.enum(["minimal", "low", "medium", "high"]);
+/**
+ * Reasoning effort knob (OpenAI o-series / Anthropic budget / Gemini level).
+ *
+ * Tolerant by design (litellm parity): the type stays a finite union — so budget
+ * tables and the Gemini thinking-config map stay exhaustive/type-safe — but the
+ * PARSE never throws. Real clients ship new tiers over time (Codex added `xhigh`;
+ * `max` exists too), so any UNRECOGNIZED string is clamped to `high` instead of
+ * 400ing the request (an over-strict enum is exactly what broke Codex with
+ * `effort:"xhigh"`). Known tiers (incl. none/xhigh/max) round-trip losslessly and
+ * are forwarded to upstreams that understand them; budget-based providers
+ * (Anthropic/Gemini) map them to a thinking budget. Mirrors litellm
+ * REASONING_EFFORT = none|minimal|low|medium|high|xhigh (+max) and its
+ * passthrough-or-clamp model — never a hard reject.
+ */
+export const IR_REASONING_EFFORTS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+export const IRReasoningEffortSchema = z.preprocess(
+  (v) =>
+    typeof v === "string" && !(IR_REASONING_EFFORTS as readonly string[]).includes(v) ? "high" : v,
+  z.enum(IR_REASONING_EFFORTS),
+);
+export type IRReasoningEffort = z.infer<typeof IRReasoningEffortSchema>;
 
 /** A thinking/redacted-thinking block (Anthropic-shaped; reused for streaming). */
 export const IRThinkingBlockSchema = z

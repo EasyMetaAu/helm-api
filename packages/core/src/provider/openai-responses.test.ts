@@ -70,6 +70,24 @@ describe("openaiToResponsesRequest", () => {
     });
   });
 
+  it("forwards reasoning_effort to the Codex body as reasoning.effort (incl. xhigh)", () => {
+    // Load-bearing: the Codex subscription speaks Responses; without this map the
+    // client's effort was silently dropped and the backend ran at its default.
+    const withEffort = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Hi" }],
+      reasoning_effort: "xhigh",
+    });
+    expect(withEffort.reasoning).toEqual({ effort: "xhigh" });
+    // Absent -> no reasoning key (preserve the existing Codex contract).
+    const without = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "Hi" }],
+    });
+    expect(without.reasoning).toBeUndefined();
+    expect(without.text).toEqual({ verbosity: "low" });
+  });
+
   it("sets prompt_cache_key from a stable sessionId (omitted when absent)", () => {
     const withSession = openaiToResponsesRequest(
       { model: "gpt-5.5", messages: [{ role: "user", content: "Hi" }] },

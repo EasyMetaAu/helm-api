@@ -592,19 +592,22 @@ export interface AnthropicOutboundRequest {
 
 const DEFAULT_MAX_TOKENS = 4096;
 
-// reasoning_effort -> Anthropic extended-thinking budget (tokens). The IR enum is
-// minimal|low|medium|high; LiteLLM derives a per-tier budget (referenced, NOT copied).
-// All non-disabled efforts emit type:"enabled" with a positive budget so the request
-// is a valid extended-thinking call.
-// Exact litellm parity (constants.py + _map_reasoning_effort): minimal/low both
-// floor at ANTHROPIC_MIN_THINKING_BUDGET_TOKENS=1024, medium=2048, high=4096. The
-// previous helm values (low:2048, medium:8192, high:16384) over-budgeted 2-4x —
-// a direct billing/latency inflation since thinking tokens are charged output.
+// reasoning_effort -> Anthropic extended-thinking budget (tokens). Anthropic has no
+// native effort tiers, so each IR tier maps to a thinking budget (LiteLLM referenced,
+// NOT copied). A positive budget emits type:"enabled"; `none` (budget 0) disables
+// thinking (handled in thinkingFromIR).
+// Exact litellm parity (constants.py + _map_reasoning_effort): minimal/low both floor
+// at ANTHROPIC_MIN_THINKING_BUDGET_TOKENS=1024, medium=2048, high=4096, xhigh=8192,
+// max=16384, none=0. (The previous helm values low:2048/medium:8192/high:16384 over-
+// budgeted 2-4x — a direct billing/latency inflation since thinking tokens bill as output.)
 const REASONING_EFFORT_TO_BUDGET: Record<string, number> = {
+  none: 0,
   minimal: 1024,
   low: 1024,
   medium: 2048,
   high: 4096,
+  xhigh: 8192,
+  max: 16384,
 };
 
 function thinkingFromIR(ir: IRRequest): AnthropicThinkingConfigOut | undefined {
@@ -620,9 +623,11 @@ function thinkingFromIR(ir: IRRequest): AnthropicThinkingConfigOut | undefined {
     }
   }
   // Otherwise derive a budget from reasoning_effort (the cross-protocol knob).
+  // `none` maps to budget 0 = disable thinking entirely (Anthropic rejects
+  // type:"enabled" with a 0 budget), so only a POSITIVE budget enables it.
   if (ir.reasoning_effort !== undefined) {
     const budget = REASONING_EFFORT_TO_BUDGET[ir.reasoning_effort];
-    if (budget !== undefined) return { type: "enabled", budget_tokens: budget };
+    if (budget !== undefined && budget > 0) return { type: "enabled", budget_tokens: budget };
   }
   return undefined;
 }

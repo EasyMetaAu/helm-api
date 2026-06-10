@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   type IRContentPart,
   type IRMessage,
+  IRReasoningEffortSchema,
   type IRRequest,
   IRRequestSchema,
   type IRResponse,
@@ -154,7 +155,10 @@ const ResponsesRequestSchema = z
     // full object (incl summary) rides provider_raw for lossless reconstruction.
     reasoning: z
       .object({
-        effort: z.enum(["minimal", "low", "medium", "high"]).optional(),
+        // Tolerant (litellm parity): a real client (Codex) sends newer tiers like
+        // `xhigh`; the shared IR schema accepts any string and clamps unknowns to
+        // `high` rather than 400ing. Known tiers (incl. xhigh/max/none) survive.
+        effort: IRReasoningEffortSchema.optional(),
         summary: z.union([z.boolean(), z.string()]).optional(),
       })
       .passthrough()
@@ -697,9 +701,14 @@ function toResponsesResponse(res: IRResponse): NativeResponse {
     if (cacheCreation > 0) inputDetails.cache_creation_input_tokens = cacheCreation;
     const outputDetails: Record<string, number> = {};
     if (u.reasoning_tokens !== undefined) outputDetails.reasoning_tokens = u.reasoning_tokens;
+    const inputTokens = (u.prompt_tokens ?? 0) + cached + cacheCreation;
+    const outputTokens = u.completion_tokens ?? 0;
     usage = {
-      input_tokens: (u.prompt_tokens ?? 0) + cached + cacheCreation,
-      output_tokens: u.completion_tokens ?? 0,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      // total_tokens is part of OpenAI's Responses usage shape — Codex's deserializer
+      // rejects a completed response without it ("missing field total_tokens").
+      total_tokens: inputTokens + outputTokens,
       ...(Object.keys(inputDetails).length > 0 ? { input_tokens_details: inputDetails } : {}),
       ...(Object.keys(outputDetails).length > 0 ? { output_tokens_details: outputDetails } : {}),
     };
@@ -738,6 +747,7 @@ const ResponsesUsageSchema = z
   .object({
     input_tokens: z.number().int().nonnegative().optional(),
     output_tokens: z.number().int().nonnegative().optional(),
+    total_tokens: z.number().int().nonnegative().optional(),
     input_tokens_details: z
       .object({
         cached_tokens: z.number().int().nonnegative().optional(),
