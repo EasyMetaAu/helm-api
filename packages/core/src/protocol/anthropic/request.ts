@@ -432,10 +432,11 @@ export function transformRequestOut(req: unknown): IRRequest {
       // (The string-content fast path above already preserves m.role.)
       if (parts.length > 0) messages.push({ role: m.role, content: parts });
     } else {
-      // user: emit the user turn (if it has any non-tool_result content), then the
-      // fanned-out tool_result messages as standalone role:"tool" turns.
-      if (parts.length > 0) messages.push({ role: "user", content: parts });
+      // user: tool_result blocks must remain immediately after the assistant
+      // tool_use turn. If a client appends normal text to the same Anthropic user
+      // message, keep that text as the next user turn after the fanned-out tools.
       for (const tr of toolResults) messages.push(tr);
+      if (parts.length > 0) messages.push({ role: "user", content: parts });
     }
   }
 

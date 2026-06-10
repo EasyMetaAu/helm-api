@@ -150,6 +150,39 @@ describe("anthropic transformRequestOut", () => {
     expect(toolMsgs[1]?.tool_call_id).toBe("toolu_2");
   });
 
+  it("places tool_result messages before trailing user text in a mixed user turn", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_1", name: "lookup", input: { q: "a" } },
+            { type: "tool_use", id: "toolu_2", name: "lookup", input: { q: "b" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "a" },
+            { type: "tool_result", tool_use_id: "toolu_2", content: "b" },
+            { type: "text", text: "next question" },
+          ],
+        },
+      ],
+    };
+
+    const ir = transformRequestOut(req);
+    expect(ir.messages.map((m) => m.role)).toEqual(["assistant", "tool", "tool", "user"]);
+    expect(ir.messages[1]).toMatchObject({ role: "tool", tool_call_id: "toolu_1" });
+    expect(ir.messages[2]).toMatchObject({ role: "tool", tool_call_id: "toolu_2" });
+    expect(ir.messages[3]).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "next question" }],
+    });
+  });
+
   // Rule 4: thinking + signature kept in the IR extension, not normal content.
   it("preserves thinking + signature in the IR extension field", () => {
     const req = {
