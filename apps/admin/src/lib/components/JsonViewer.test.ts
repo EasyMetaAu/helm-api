@@ -79,4 +79,45 @@ describe('JsonViewer', () => {
     expect(tree.className).toContain('whitespace-normal');
     expect(tree.className).not.toContain('whitespace-pre-wrap');
   });
+
+  it('reveals every nested node when Expand all is clicked', async () => {
+    // Default depth opens to 2, so `c` (depth 3, under a closed depth-2 node) is
+    // not in the DOM. Expand all must cascade through the lazily-rendered children.
+    render(JsonViewer, { value: { a: { b: { c: 1 } } } });
+    expect(screen.queryByText(/c:/)).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: /Expand all/i }));
+    expect(screen.getByText(/c:/)).toBeInTheDocument();
+  });
+
+  it('folds the tree back to the root when Collapse all is clicked', async () => {
+    render(JsonViewer, { value: { a: { b: 1 } } });
+    // a/b are open by default at depth < 2
+    expect(screen.getByText(/a:/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: /Collapse all/i }));
+    // every node folds, including the root — only the Object(1) summary remains
+    expect(screen.queryByText(/a:/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Object\(1\)/)).toBeInTheDocument();
+  });
+
+  it('re-expands after a collapse all (broadcast nonce re-fires)', async () => {
+    render(JsonViewer, { value: { a: { b: { c: 1 } } } });
+    await fireEvent.click(screen.getByRole('button', { name: /Collapse all/i }));
+    expect(screen.queryByText(/a:/)).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: /Expand all/i }));
+    expect(screen.getByText(/c:/)).toBeInTheDocument();
+  });
+
+  it('hides the expand/collapse controls when there is no collapsible tree', () => {
+    // a bare scalar string has no nested structure to expand
+    render(JsonViewer, { value: 'just text' });
+    expect(screen.queryByRole('button', { name: /Expand all/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Collapse all/i })).not.toBeInTheDocument();
+  });
+
+  it('only shows the expand/collapse controls on the Tree tab', async () => {
+    render(JsonViewer, { value: { a: 1 } });
+    expect(screen.getByRole('button', { name: /Expand all/i })).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: /Raw/i }));
+    expect(screen.queryByRole('button', { name: /Expand all/i })).not.toBeInTheDocument();
+  });
 });

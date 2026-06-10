@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { t } from '$lib/i18n';
   import Self from './JsonTree.svelte';
+  import { getJsonTreeCtl } from './jsonTreeContext';
   import TextPreview from './TextPreview.svelte';
 
   // One node of the collapsible JSON tree (ported from llm-router's vanilla-JS
@@ -39,6 +40,22 @@
   let open = $state(untrack(() => depth < DEFAULT_DEPTH));
   let visible = $state(VISIBLE_LIMIT);
   let expandedStr = $state(false);
+
+  // Expand all / Collapse all broadcast from JsonViewer. We track the last applied
+  // nonce so the effect only reacts to a genuine button press, never to the initial
+  // mount (nonce 0) — that keeps each node's default depth-based open state on first
+  // render. Expanding cascades for free: opening a node renders its children, which
+  // mount and read the still-active command. Scalars carry an unused `open`, so the
+  // assignment is harmless for them.
+  const treeCtl = getJsonTreeCtl();
+  let appliedNonce = 0;
+  $effect(() => {
+    if (!treeCtl) return;
+    const n = treeCtl.nonce;
+    if (n === 0 || n === appliedNonce) return;
+    appliedNonce = n;
+    open = treeCtl.allOpen;
+  });
 
   const isLongString = $derived(kind === 'string' && (value as string).length > STRING_LIMIT);
   // A "Preview" opens the DECODED text (real line breaks) in a roomy modal. Offer it
