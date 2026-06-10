@@ -34,7 +34,7 @@
 
 <button
   type="button"
-  class="ml-2 text-link underline"
+  class="ml-2 cursor-pointer text-link underline"
   data-testid="text-preview-open"
   onclick={show}>{$t('Preview')}</button
 >

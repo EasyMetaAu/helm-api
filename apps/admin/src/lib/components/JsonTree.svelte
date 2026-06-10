@@ -97,7 +97,7 @@
     {#if isLongString}
       <button
         type="button"
-        class="ml-2 text-link underline"
+        class="ml-2 cursor-pointer text-link underline"
         onclick={() => (expandedStr = !expandedStr)}
         >{expandedStr ? $t('Collapse') : $t('Expand')}</button
       >
