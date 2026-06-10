@@ -7,6 +7,18 @@
 
 ---
 
+## 2026-06-10 · SQLite 写入热路径性能修复（Phase A，无 Redis；CLAUDE.md 原则 1/8）
+
+- **缘起**：用户反馈线上 la.atmy.work「两个并发就很慢」，怀疑写入太多，提议参考 [[la-atmy-work-deployment]] 旁的 claude-relay-service 引入 Redis 写缓冲再落 SQLite。诊断后发现**根因不是 SQLite 并发能力**，而是 **better-sqlite3 同步阻塞 Node 单线程 + 默认 `synchronous=FULL`（每次 commit 都 fsync）**：写代价由整个进程（含其它在途请求的事件循环）承担。对 Claude Code 这类**每轮重发整段历史 + 工具定义**的客户端，`capture_payloads`（默认开）把数百 KB~MB 的 request_json 同步 + fsync 落库，直接冻结事件循环；memory observe 又**逐条消息**同步写（inbound 在上游调用前、关键路径上）。两个并发流互相卡 fsync，无法重叠。
+- **取舍（已与用户拍板：先量后扩）**：**本 PR = Phase A：只做 SQLite 快修，不开发 Redis**（用户明确「先修慢的问题 redis 先不开发」）。Redis 写回层留作 Phase B——它真正的收益是**多实例横向扩展**（跨进程共享限流/预算状态），而非单机吞吐；单机慢用一行 PRAGMA + 批量写即可解。保住「自托管、默认 SQLite、零配置」身份（原则 1）。
+- **修复 1（头号）**：`migrate.ts` 抽 `applyPragmas()`，对每个连接设 `journal_mode=WAL` + **`synchronous=NORMAL`**（WAL 下安全：崩溃/断电最多丢最后几条 commit，绝不损坏文件）+ `busy_timeout=5000` + `temp_store=MEMORY` + `cache_size=-16000`。NORMAL 去掉 per-commit fsync，是消除事件循环阻塞的关键。`createSqliteDb` 与 `runMigrations` 同源应用。
+- **修复 2**：`MemoryStore` 端口加**可选** `appendMessages(inputs[])` 批量写：sqlite 走单个 `$sqlite.transaction`、postgres 走单条多行 INSERT，整轮一次 commit（替代 N 次）。`createdAt` 按 `base+i` 落戳，保证 `listMessages`（按 createdAt,id 排序）严格还原插入顺序（**比旧逐条循环更确定**——旧路径同毫秒碰撞后退化为随机 UUID 排序）。`observe.ts` 抽 `toMessageInputs` + `persistMessages`：有 `appendMessages` 走批量，否则回退逐条循环（端口可选，旧 store/测试 fake 零改动仍可用）。inbound/outbound 同享，inbound 在关键路径上收益最大。
+- **未做（有意，Phase A 范围外）**：① 非流式 post-serve 写入「后置/fire-and-forget」——Claude Code 用流式，post-serve 写已在 stream 结束后、不在客户端延迟路径上，故略；② payload 压缩/截断——原则 8 要求全量正文可审计，不静默截断；③ Redis（Phase B）。
+- **坑/TODO**：① PRAGMA 为内部性能调优、硬编码（同 `journal_mode` 既有做法），不暴露 config（与 observer 自适应同理，不加「会撒谎的旋钮」）。② 重新部署 la.atmy.work 后需**实测两并发延迟**确认收益，再决定是否上 Phase B Redis（部署只 pull + up，不覆盖 operator config，见 [[deploy-never-overwrite-config]]）。③ `synchronous=NORMAL` 的弱持久性已知并接受（遥测/用量记账可容忍丢尾）。
+- **验证**：TDD 红→绿。新增 `migrate.pragmas.test.ts`(3)、store-contract 批量有序/空批 2 例（双驱动 sqlite+pglite）、observe 批量 inbound/outbound 2 例（+既有 fallback/fail-open 用例覆盖回退路径）。core store+memory 487 绿、gateway memory 路由 73 绿、**全量 node 2601 绿**（唯 4 例 admin-static 因 worktree 未构建 admin SPA 假红，`pnpm --filter @helm/admin build` 后转绿）、typecheck（core+gateway）+ biome 绿。
+
+---
+
 ## 2026-06-10 · admin 导航进度条 NavProgress（admin UX；CLAUDE.md 原则 1）
 
 - **缘起**：用户点击侧栏链接切换页面时没有任何加载反馈——页面在 `+page.ts` 的 `load`（即发起 admin API 请求处）跑完前看起来"卡住"，操作者无法判断点击是否生效、是否在请求 API。
@@ -22,24 +34,11 @@
 - **取舍**：不拒绝这类客户端 payload，也不丢弃尾随用户文本；选择做结构化归一化，让 Anthropic strict validation 接收，同时尽量保留用户原意。若客户端已经发送纯 tool-result turn，行为不变。
 - **验证**：TDD 新增两个回归：混合 Anthropic user turn 中 `tool_result` 必须排在尾随文本前；连续 OpenAI tool results 必须合并成一个即时 Anthropic user turn。`pnpm exec vitest run packages/core/src/protocol/anthropic/request.test.ts packages/core/src/provider/anthropic.test.ts` → 63 passed。用线上捕获 payload 本地重放后，provider-facing Anthropic 消息变为 assistant 后紧跟 115-block user turn：前 114 个 `tool_result`，最后 1 个文本 prompt，移除 400 根因。
 
-## 2026-06-10 · 虚拟模型别名映射 model-aliases.yaml（docs/04 路由；CLAUDE.md 原则 1/2/6）
-
-- **缘起**：用户把网关接入 Claude CLI 失败——CLI 发来 `model: "claude-opus-4-8"`（裸厂商 id），但网关只认三种 `model`：`auto`、lane 名、内部 `provider/model` 别名。在 `allow_custom_model` key 上 `claude-opus-4-8` 命中 `route-request.ts` 的 explicit-MODEL 严格校验（`isKnownModel` 假）→ 400 `unknown model`。需要一层「虚拟名 → 真实目标」映射做兼容。
-- **决定（关键取舍）**：映射目标限定为 **lane 名或 `auto`**，**不**映射到具体 provider 别名——守住「只暴露 lane 抽象、不暴露模型市场」（原则 6），且天然保留 lane 的 fallback/failover。新增纯函数模块 `packages/core/src/routing/model-alias.ts`：`resolveModelAlias(model, map)` + `validateModelAliasTargets(map, laneNames)`。
-- **解析位置 + cap-bounded（关键，含 Codex review P1 修复）**：在 `plan()` 最顶端 step-0 解析，alias→lane 走**独立的 0a 分支**——**不是** `allow_custom_model` 直通。它对**任何 key**生效（操作者配置即授权），但**不绕过路由大脑的 cap**：用 `aliasPolicyContext(req)`（中性 `task_type:"passthrough"`，只带真实 org_id/user_id）跑 `evaluatePolicies` + `applyCaps`，再叠加 key 的 `allowed_lanes`，**两层 cap 都静默 clamp**（与分类路径一致）。⇒ 身份维度的 policy cap（如出厂 `budget_org_cap`）与 key cap 仍然约束别名 lane，标准 key 无法借别名越过它本应受的 cap。任务/复杂度维度的 policy 不命中（别名请求未分类，本就不该被重分类）。`req.requested_model` 不改写（DecisionRecord 记原值），`policy.reason` 记 `model alias "x" -> lane "y"`（被 clamp 时追加 `(capped to "z")`）。
-- **与 explicit/auto 的边界**：`allow_custom_model` 显式分支（1a/1b）**保持原样不变**（back-compat）——只有裸厂商 id 命中别名表才走 0a，allow_custom_model key 仍可直接发 lane 名/内部 `provider/model` 别名走显式直通。alias→`auto` 不进 0a，也被显式分支用 `!aliasToAuto` 排除，落到 classify（不会把原始厂商 id 当显式 model 透传）。degradeLane（超预算）压制 0a，落到强制降级 lane，杜绝绕过。
-- **匹配规则**：精确键优先；否则取「字面字符最多」的 `*`-glob（`claude-opus-*` 胜过 `claude-*`，与声明顺序无关），吸收 Claude Code 追加的日期后缀；大小写敏感（沿用 eval-cache-key「不 lowercase」约定）；glob 把模型名当字面串匹配（`gpt-5.5` 的 `.` 不是通配）。
-- **fail-closed**：`ModelAliasesSchema = z.record(string,string)` 只校验形状；语义校验（每个目标是已配置 lane 或 `auto`）在 server boot 用 `validateModelAliasTargets` 对**有效 lane 集**（`config.lanes` 或 `DEFAULT_LANES`）跑，非法即抛、拒绝启动（原则 2）。`config/model-aliases.yaml` 可选，缺省即不改写（行为与今日一致）。
-- **Codex review P3 修复**：出厂 Haiku 映射补 `claude-3-5-haiku-*: economy`，覆盖带日期的 `claude-3-5-haiku-20241022`（否则落到宽泛 `claude-*: balanced`，small/fast 后台模型映射不完整）。samples.test 加断言锁定。
-- **默认配置**：仓库 `config/model-aliases.yaml` 出厂带激活映射（claude-haiku→economy、claude-opus→premium、claude-sonnet/claude-*→balanced、gpt-* 若干），让新装 + Claude CLI 开箱即用。裸 id 才匹配；内部别名是 `provider/model`（不以 `claude`/`gpt` 开头），allow_custom_model key 仍可显式寻址。
-- **坑/TODO**：① 模型别名为**静态配置**（非 admin 可改），boot 时一次性校验；admin 运行时删 lane 若孤立某别名，仅对该裸 id 退化为请求时 400，不崩。② `/v1/models` 未列出虚拟别名（Claude CLI 不靠它路由），有需要可后续补。③ **线上 la.atmy.work 部署不会覆盖 operator 的 `config/` 目录（见 [[deploy-never-overwrite-config]]）——需手动在 `/opt/helm-api/config` 放 `model-aliases.yaml` 才生效**。
-- **验证**：TDD 先红后绿——`model-alias.test.ts`(12) + `route-request.test.ts` 新增「虚拟别名」8 例（默认 key 命中、先于 400 解析、glob、`auto` 走分类、allowed_lanes 静默 clamp、**policy cap 约束/不越权 review P1**、不匹配落分类、degradeLane 压制）+ samples.test 加出厂 yaml↔lanes 一致性 + 日期 Haiku→economy 守卫。core 全量 1812 绿、gateway 路由/server boot 绿、typecheck/lint 绿。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-10 · 虚拟模型别名映射 model-aliases.yaml：裸厂商 id（如 `claude-opus-4-8`）→ lane 名/`auto` 的兼容映射（`routing/model-alias.ts`），`plan()` step-0 独立 0a 分支解析，对任意 key 生效但经 `aliasPolicyContext` 跑 policy+key 双层 cap 静默 clamp（不提权，Codex review P1）；精确键优先、否则最长字面 `*`-glob、大小写敏感；`ModelAliasesSchema` 形状校验 + boot 时 `validateModelAliasTargets` 对有效 lane 集 fail-closed。出厂 `config/model-aliases.yaml` 带 claude-*/gpt-* 激活映射。**坑：线上需手动在 `/opt/helm-api/config` 放该 yaml 才生效（见 [[deploy-never-overwrite-config]]）。**
 
 ### 2026-06-10 · publish.yml 版本号升级自动发布 Release：main push 读根 `package.json` 版本 V，若 `vV` tag 不存在即判定版本升级——额外推 `:V` 镜像并用 GitHub REST 建 tag+Release（generate_release_notes）；普通 commit 行为不变（仅 `:latest`/`:sha`）。GITHUB_TOKEN 建的 tag 不递归触发本 workflow（避免重复构建），`tags:[v*]` 保留作手工 escape hatch；需 `contents:write` + `fetch-depth:0`。新流程：bump package.json → release PR → squash main → 自动发布。
 

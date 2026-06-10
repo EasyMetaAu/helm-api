@@ -180,6 +180,36 @@ export class SqliteMemoryStore implements MemoryStore {
     return id;
   }
 
+  // ONE synchronous transaction = ONE commit for the whole turn (vs N from the
+  // appendMessage loop). createdAt is stamped base+i so listMessages (ordered by
+  // createdAt, id) returns rows in append order even though randomUUID ids do not
+  // sort — strictly more deterministic than the per-message loop, which collides
+  // on the millisecond and then falls back to arbitrary id order.
+  async appendMessages(inputs: MemoryMessageInput[]): Promise<string[]> {
+    if (inputs.length === 0) return [];
+    const base = this.now().getTime();
+    const ids: string[] = [];
+    const run = this.db.$sqlite.transaction(() => {
+      inputs.forEach((input, i) => {
+        const id = this.genId();
+        ids.push(id);
+        this.db
+          .insert(memoryMessages)
+          .values({
+            id,
+            threadId: input.threadId,
+            role: input.role,
+            content: input.content,
+            tokenEstimate: input.tokenEstimate,
+            createdAt: new Date(base + i),
+          })
+          .run();
+      });
+    });
+    run();
+    return ids;
+  }
+
   // POST-MVP Phase 2 (Observer): read a thread's raw messages oldest-first.
   async listMessages(scope: { threadId: string; accountId: string }): Promise<RawMessage[]> {
     const rows = this.db

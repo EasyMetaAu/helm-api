@@ -1,4 +1,4 @@
-import { MemoryModeSchema, type MemoryRole } from "@helm/shared";
+import { type MemoryMessageInput, MemoryModeSchema, type MemoryRole } from "@helm/shared";
 import type { IRMessage } from "../protocol/ir.js";
 import type { MemoryStore } from "../store/ports.js";
 import type { MemoryMeta, MemoryScope } from "./types.js";
@@ -47,6 +47,38 @@ function serializeContent(content: IRMessage["content"]): string {
   if (content === null) return "";
   if (typeof content === "string") return content;
   return JSON.stringify(content);
+}
+
+// Map IR messages to the rows we persist: drop system/developer turns (execution
+// policy, not memory), serialize content, estimate tokens. Shared by inbound +
+// outbound so both build one batch with identical filtering.
+function toMessageInputs(
+  messages: IRMessage[],
+  threadId: string,
+  estimateTokens: (text: string) => number,
+): MemoryMessageInput[] {
+  const inputs: MemoryMessageInput[] = [];
+  for (const message of messages) {
+    const role = toMemoryRole(message.role);
+    if (role === null) continue;
+    const content = serializeContent(message.content);
+    inputs.push({ threadId, role, content, tokenEstimate: estimateTokens(content) });
+  }
+  return inputs;
+}
+
+// Persist a turn's messages in ONE commit via the batch path when the store
+// supports it; otherwise fall back to the per-message loop so stores/fakes that
+// predate appendMessages keep working. Empty input is a no-op. The INBOUND caller
+// runs this BEFORE the upstream request, so collapsing N synchronous commits into
+// one is a direct latency win on every turn (CLAUDE.md principle 1: framework-free).
+async function persistMessages(store: MemoryStore, inputs: MemoryMessageInput[]): Promise<void> {
+  if (inputs.length === 0) return;
+  if (store.appendMessages) {
+    await store.appendMessages(inputs);
+    return;
+  }
+  for (const input of inputs) await store.appendMessage(input);
 }
 
 export function ownerScopedThreadId(accountId: string, threadId: string): string {
@@ -104,17 +136,10 @@ export async function observeInbound(
       ...(scope.projectId !== null ? { projectId: scope.projectId } : {}),
       ...(scope.resourceId !== null ? { resourceId: scope.resourceId } : {}),
     });
-    for (const message of messages) {
-      const role = toMemoryRole(message.role);
-      if (role === null) continue;
-      const content = serializeContent(message.content);
-      await deps.memoryStore.appendMessage({
-        threadId,
-        role,
-        content,
-        tokenEstimate: deps.estimateTokens(content),
-      });
-    }
+    await persistMessages(
+      deps.memoryStore,
+      toMessageInputs(messages, threadId, deps.estimateTokens),
+    );
     return { persisted: true, memoryMeta: meta };
   } catch (err) {
     // fail-open: never throw to the main request path; record + continue.
@@ -147,17 +172,14 @@ export async function observeOutbound(
   if (threadId === null) return;
 
   try {
-    for (const message of [...result.responseMessages, ...result.toolResults]) {
-      const role = toMemoryRole(message.role);
-      if (role === null) continue;
-      const content = serializeContent(message.content);
-      await deps.memoryStore.appendMessage({
+    await persistMessages(
+      deps.memoryStore,
+      toMessageInputs(
+        [...result.responseMessages, ...result.toolResults],
         threadId,
-        role,
-        content,
-        tokenEstimate: deps.estimateTokens(content),
-      });
-    }
+        deps.estimateTokens,
+      ),
+    );
   } catch (err) {
     deps.log("memory.observe.outbound_failed", {
       memory_mode: scope.mode,
