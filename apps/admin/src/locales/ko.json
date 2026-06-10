@@ -313,6 +313,7 @@
   "Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.": "키별 속도 제한입니다. 비워 두면 시스템 기본값을 사용합니다. 0은 해당 항목이 무제한임을 의미합니다.",
   "Policies": "정책",
   "Port": "포트",
+  "Preview": "미리보기",
   "Previous": "이전",
   "Primary": "기본",
   "Primary is required and cannot be empty.": "기본은 필수이며 비워둘 수 없습니다.",

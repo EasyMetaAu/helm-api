@@ -56,6 +56,19 @@ describe('JsonTree', () => {
     expect(scalar.className).toContain('[overflow-wrap:anywhere]');
   });
 
+  it('offers a Preview affordance for a multi-line string (even when short)', () => {
+    render(JsonTree, { value: 'first line\nsecond line', name: 'content' });
+    // Short enough that there is no inline Expand toggle, but multi-line — so the
+    // roomy decoded Preview is what makes it readable.
+    expect(screen.queryByRole('button', { name: /Expand/i })).not.toBeInTheDocument();
+    expect(screen.getByTestId('text-preview-open')).toBeInTheDocument();
+  });
+
+  it('does not offer Preview for a plain short single-line string', () => {
+    render(JsonTree, { value: 'hello', name: 'greeting' });
+    expect(screen.queryByTestId('text-preview-open')).not.toBeInTheDocument();
+  });
+
   it('paginates large arrays at 200 entries with a "show remaining" control', async () => {
     const big = Array.from({ length: 250 }, (_, i) => i);
     render(JsonTree, { value: big });

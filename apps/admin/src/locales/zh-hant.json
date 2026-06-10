@@ -313,6 +313,7 @@
   "Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.": "每個金鑰的速率限制。留空則使用系統預設值。0 表示該維度不限。",
   "Policies": "策略",
   "Port": "連接埠",
+  "Preview": "預覽",
   "Previous": "上一頁",
   "Primary": "主用",
   "Primary is required and cannot be empty.": "主用為必填，不能為空。",

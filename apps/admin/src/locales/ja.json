@@ -313,6 +313,7 @@
   "Per-key rate limits. Leave blank to use the system default. 0 means unlimited for that dimension.": "キーごとのレート制限。空欄の場合はシステムのデフォルトを使用します。0 はその項目が無制限であることを意味します。",
   "Policies": "ポリシー",
   "Port": "ポート",
+  "Preview": "プレビュー",
   "Previous": "前へ",
   "Primary": "プライマリ",
   "Primary is required and cannot be empty.": "プライマリは必須で、空にできません。",
