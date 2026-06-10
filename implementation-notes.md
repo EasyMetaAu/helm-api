@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-10 · Responses API flat function tools 规范化为 Chat tools（docs/05 协议互译；docs/04 路由执行兜底；CLAUDE.md 原则 2/3/8）
+
+- **缘起**：线上 trace `9b18966a-6f1a-40b0-bae1-d69455005571` 已经不再卡在 DeepSeek `developer` 角色，但官方 DeepSeek 首选候选仍 HTTP 400：`tools[0]: missing field function`。根因是 OpenAI Responses API 的 function tool 输入是扁平形状（`{type:"function", name, description, parameters, strict}`），而网关把它折进 OpenAI-Chat-shaped IR 后又原样发给 Chat Completions upstream；DeepSeek 期望的是 Chat tools 形状（`{type:"function", function:{...}}`）。
+- **修复**：`responsesTransformer.transformRequestOut` 在 Responses → IR 时把扁平 function tools 规范化为 Chat tools，确保所有 OpenAI-compatible Chat upstream 都收到合法 `tools[].function`；原始 Responses tools 同时存入 `provider_raw.responses_tools`，`transformRequestIn` 优先用该原文恢复，避免 Responses round-trip 变形。
+- **取舍**：只转换 `type:"function"` 且带 `name` 的扁平 tool；未知/未来 tool 类型继续 fail-open 保留原样，不在协议层臆造能力。非 Responses 来源的 Chat tools 在输出到 Responses 时会尽量反向扁平化；已有 raw Responses tools 时以 raw 为准。
+- **测试/验证**：TDD 新增 Responses flat function tool → IR Chat tool → Responses raw tool 的回归测试；定向 `pnpm exec vitest run packages/core/src/protocol/responses.test.ts --project node` 43/43 绿；`@helm/core` typecheck 绿。部署前还用生产 DeepSeek key 直连验证：包含 Chat-shaped tools、`reasoning_effort`、`store:false` 的 `deepseek-v4-flash` 请求返回 200。
+- **部署提示**：这是代码路径修复，不是配置修复；线上需要发布新镜像/重启后才会消除 DeepSeek `tools[0].function` 400。历史 trace 仍会保留旧错误。
+
+---
+
 ## 2026-06-09 · DeepSeek provider developer-role 兼容开关（docs/05 协议互译；docs/04 路由执行兜底；CLAUDE.md 原则 2/3/5）
 
 - **缘起**：线上 trace `f51049a7-0d14-4250-9d93-2e057d153f3e` 进入 `economy` lane，首选 `deepseek/deepseek-v4-flash` 失败后 fallback 到 `openai-codex/gpt-5.4-mini` 成功。DeepSeek 真实错误为 HTTP 400：`messages[0].role: unknown variant developer`。根因是 OpenAI Responses/OpenAI Chat 请求中的 `developer` 角色被 OpenAI-compatible client 原样透传给官方 DeepSeek，而 DeepSeek 只接受 `system/user/assistant/tool/...`。
@@ -27,20 +37,11 @@
 
 ---
 
-## 2026-06-09 · LLM 记忆提取/压缩接线与可配置模型（docs/08 记忆；docs/12 遗忘/事实层；CLAUDE.md 原则 2/3/7）
-
-- **缘起**：记忆 observe/inject、worker、compaction trigger、forgetting/facts 已是生产接线，但 Observer/Reflector 仍用确定性 stub 做 summarize/merge/extractFacts；这让“记忆提取/压缩”可用但不具备真正 LLM 归纳能力。
-- **修复**：新增 `memory.llm` 配置子树（默认 `enabled:false`），支持 `model` 基础模型与 `observation_model` / `reflection_model` / `facts_model` 分任务覆盖；同组 `HELM_MEMORY_LLM_*` 环境变量可覆盖模型/开关/超时/温度/max_tokens。网关新增 `memory-llm.ts`，后台 Observer 用 LLM 压缩 raw messages -> observation，Reflector 用 LLM 合并 observations -> reflection，并用 LLM 提取 atomic facts。
-- **安全/降级**：LLM 调用只发生在 memory worker 后台 job，绝不进请求路径；配置错误 fail-closed（Zod strict + enabled 必须有 model），运行时模型不可用、上游失败、超时或 JSON 无效全部 fail-open 回原确定性 stub。日志只写 task/model alias/error class 等安全元数据，不写 prompt/response/memory 正文。
-- **模型解析**：memory model alias 复用执行层语义：OAuth 订阅别名受 live `oauthAliasSet` gate，providers.yaml alias 经 registry 解析，`provider/model` 结构化别名走对应 provider client，裸模型名走 primary provider passthrough；不会因为记忆任务跨过订阅/凭证边界。
-- **PR 评审修复**：LLM merge/fact prompt 不再包含 `previous_reflection`，避免旧 reflection 中已归档/剪枝内容绕过 active-observation filter 复活；LLM facts 强制 `valid_from_observation_id` 且必须命中 active observation，否则整次回退确定性 extractor；observation/reflection/fact 文本改 trim 后 min(1)，纯空白输出触发 fallback；LLM `priority` 标尺改 0–10，对齐 Observer 的 `priority/10` salience 推导。
-- **测试/取舍**：TDD 覆盖 schema 默认关闭与 fail-closed、loader YAML/env 覆盖、observer 使用配置模型、reflection JSON 无效 fallback、fact `valid_from_observation_id` 映射 observation 时间与 `[obs_id, obs_id]` 审计范围、模型不可用 fallback。暂不把 LLM usage 精确计入 cost bucket，沿用 observer/reflector 现有启发式 token 账本；后续若要精确计费可扩展 deps 成本接口。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-09 · LLM 记忆提取/压缩接线与可配置模型：新增默认关闭的 `memory.llm`，后台 Observer/Reflector/facts 可用配置模型替代 deterministic stub；LLM 失败/无效 JSON/空白输出均 fail-open 回 stub，prompt 去掉 `previous_reflection` 并强制 fact citation 命中 active observation。
 
 ### 2026-06-09 · Agentic Signals 反馈接入 ranked-lane 路由：新增默认关闭的 `runtime.signal_feedback`，请求路径读取聚合 signals 后仅可在 ranked lane 内健康提升，不降级、不越过 policy/key/budget caps；读取异常 fail-open。TODO：若后续支持 task lane 反馈，需先定义 task lane → ranked lane 映射。
 

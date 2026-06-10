@@ -228,6 +228,46 @@ function responseFormatToResponsesText(rf: unknown): unknown {
   return undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Responses function tools are flat (`{type:"function", name, parameters}`), while
+// Chat Completions upstreams require `{type:"function", function:{...}}`.
+function responsesToolToChatTool(tool: unknown): unknown {
+  if (!isRecord(tool) || tool.type !== "function" || isRecord(tool.function)) return tool;
+  if (typeof tool.name !== "string") return tool;
+
+  const fn: Record<string, unknown> = { name: tool.name };
+  if (typeof tool.description === "string") fn.description = tool.description;
+  if (tool.parameters !== undefined) fn.parameters = tool.parameters;
+  if (tool.strict !== undefined) fn.strict = tool.strict;
+  return { type: "function", function: fn };
+}
+
+function chatToolToResponsesTool(tool: unknown): unknown {
+  if (!isRecord(tool) || tool.type !== "function") return tool;
+  if (typeof tool.name === "string" && !isRecord(tool.function)) return tool;
+  if (!isRecord(tool.function) || typeof tool.function.name !== "string") return tool;
+
+  const fn = tool.function;
+  const out: Record<string, unknown> = { type: "function", name: fn.name };
+  if (typeof fn.description === "string") out.description = fn.description;
+  if (fn.parameters !== undefined) out.parameters = fn.parameters;
+  if (fn.strict !== undefined) out.strict = fn.strict;
+  return out;
+}
+
+function normalizeResponsesTools(tools: unknown[] | undefined): {
+  tools?: unknown[];
+  rawTools?: unknown[];
+} {
+  if (tools === undefined) return {};
+  const normalized = tools.map(responsesToolToChatTool);
+  const changed = normalized.some((tool, index) => tool !== tools[index]);
+  return { tools: normalized, ...(changed ? { rawTools: tools } : {}) };
+}
+
 // —— content-part folding: Responses parts -> IR parts. Unknown parts degrade to a
 // JSON text placeholder so nothing is silently dropped (fail-open). ————————————————
 function foldContentPart(part: z.infer<typeof ResponsesContentPartSchema>): IRContentPart {
@@ -269,6 +309,7 @@ function foldMessageContent(
 function toIRRequest(req: NativeRequest): IRRequest {
   // fail-closed: a structurally invalid request never enters the pipeline.
   const parsed = ResponsesRequestSchema.parse(req);
+  const normalizedTools = normalizeResponsesTools(parsed.tools);
 
   const messages: IRMessage[] = [];
   const thinking: IRThinkingExt[] = [];
@@ -358,6 +399,8 @@ function toIRRequest(req: NativeRequest): IRRequest {
   if (parsed.logit_bias !== undefined) providerRaw.logit_bias = parsed.logit_bias;
   if (parsed.context_management !== undefined)
     providerRaw.context_management = parsed.context_management;
+  if (normalizedTools.rawTools !== undefined)
+    providerRaw.responses_tools = normalizedTools.rawTools;
   // Reasoning config + truncation have no IR field of their own; preserve verbatim.
   // NB: a distinct key — provider_raw.reasoning already holds inbound reasoning ITEMS.
   if (parsed.reasoning !== undefined) providerRaw.reasoning_config = parsed.reasoning;
@@ -371,7 +414,7 @@ function toIRRequest(req: NativeRequest): IRRequest {
   const ir: IRRequest = {
     model: parsed.model,
     messages,
-    ...(parsed.tools !== undefined ? { tools: parsed.tools } : {}),
+    ...(normalizedTools.tools !== undefined ? { tools: normalizedTools.tools } : {}),
     ...(parsed.tool_choice !== undefined ? { tool_choice: parsed.tool_choice } : {}),
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
     ...(parsed.max_output_tokens !== undefined ? { max_tokens: parsed.max_output_tokens } : {}),
@@ -468,7 +511,11 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
     ...(instructions !== undefined ? { instructions } : {}),
     input,
     ...(text !== undefined ? { text } : {}),
-    ...(parsed.tools !== undefined ? { tools: parsed.tools } : {}),
+    ...(Array.isArray(raw?.responses_tools)
+      ? { tools: raw.responses_tools }
+      : parsed.tools !== undefined
+        ? { tools: parsed.tools.map(chatToolToResponsesTool) }
+        : {}),
     ...(parsed.tool_choice !== undefined ? { tool_choice: parsed.tool_choice } : {}),
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
     ...(parsed.max_tokens !== undefined ? { max_output_tokens: parsed.max_tokens } : {}),

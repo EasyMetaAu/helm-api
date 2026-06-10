@@ -60,6 +60,44 @@ describe("responsesTransformer — text.format structured output canonicalizatio
   });
 });
 
+describe("responsesTransformer — function tool canonicalization", () => {
+  it("maps Responses flat function tools to OpenAI Chat tools and preserves the raw shape", async () => {
+    const flatTool = {
+      type: "function",
+      name: "read",
+      description: "Read a file",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+      strict: false,
+    };
+
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "read README.md",
+      tools: [flatTool],
+    });
+
+    expect(ir.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "read",
+          description: "Read a file",
+          parameters: flatTool.parameters,
+          strict: false,
+        },
+      },
+    ]);
+    expect(ir.provider_raw?.responses_tools).toEqual([flatTool]);
+
+    const back = (await responsesTransformer.transformRequestIn?.(ir)) as { tools?: unknown[] };
+    expect(back.tools).toEqual([flatTool]);
+  });
+});
+
 // OpenAI Responses transformer (docs/05). Responses is a DIFFERENT request shape
 // from Chat Completions: instead of `messages[]` (role + content), the
 // conversation is flattened into a top-level `input[]` ITEM stream — user/
