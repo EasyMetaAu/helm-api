@@ -50,8 +50,12 @@
 
   const tabActive = 'border-action bg-action text-white';
   const tabInactive = 'border-border bg-surface text-ink-muted hover:bg-canvas';
-  const panelCls =
-    'max-h-96 overflow-y-auto overflow-x-hidden rounded bg-canvas p-2 font-mono text-xs whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-ink-body';
+  const basePanelCls =
+    'max-h-96 overflow-y-auto overflow-x-hidden rounded bg-canvas p-2 font-mono text-xs break-words [overflow-wrap:anywhere] text-ink-body';
+  // Tree markup contains recursive <details> with template newlines between nodes.
+  // Keep whitespace normal here so those source newlines do not render as blank rows.
+  const treePanelCls = `${basePanelCls} whitespace-normal`;
+  const textPanelCls = `${basePanelCls} whitespace-pre-wrap`;
 </script>
 
 <div data-testid={testid}>
@@ -65,7 +69,7 @@
     {/each}
   </div>
 
-  <div data-testid="jsonviewer-tree" hidden={tab !== 'tree'} class={panelCls}>
+  <div data-testid="jsonviewer-tree" hidden={tab !== 'tree'} class={treePanelCls}>
     {#if emptyPlaceholder}
       <div class="text-ink-muted">{emptyPlaceholder}</div>
     {:else}
@@ -76,7 +80,9 @@
   <pre
     data-testid="jsonviewer-formatted"
     hidden={tab !== 'formatted'}
-    class={panelCls}>{formatted}</pre>
+    class={textPanelCls}>{formatted}</pre>
 
-  <pre data-testid="jsonviewer-raw" hidden={tab !== 'raw'} class={panelCls}>{normalized.raw}</pre>
+  <pre data-testid="jsonviewer-raw" hidden={tab !== 'raw'} class={textPanelCls}
+    >{normalized.raw}</pre
+  >
 </div>
