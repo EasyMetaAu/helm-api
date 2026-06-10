@@ -92,6 +92,10 @@ const ResponsesOutputItemSchema = z.union([
 const ResponsesUsageSchema = z.object({
   input_tokens: z.number().int().nonnegative(),
   output_tokens: z.number().int().nonnegative(),
+  // OpenAI's Responses usage always carries total_tokens; Codex's strict deserializer
+  // rejects a response.completed without it. Optional on the schema (tolerant inbound)
+  // but ALWAYS emitted by projectUsage below.
+  total_tokens: z.number().int().nonnegative().optional(),
   input_tokens_details: z
     .object({
       cached_tokens: z.number().int().nonnegative().optional(),
@@ -390,10 +394,13 @@ function projectUsage(usage: IRUsage | null): z.infer<typeof ResponsesUsageSchem
   if (cacheCreation > 0) inputDetails.cache_creation_input_tokens = cacheCreation;
   const outputDetails: Record<string, number> = {};
   if (usage.reasoning_tokens !== undefined) outputDetails.reasoning_tokens = usage.reasoning_tokens;
+  // Reconstruct the FULL input (cached + non-cached); state buffered prompt as non-cached.
+  const inputTokens = (usage.prompt_tokens ?? 0) + cached + cacheCreation;
+  const outputTokens = usage.completion_tokens ?? 0;
   return {
-    // Reconstruct the FULL input (cached + non-cached); state buffered prompt as non-cached.
-    input_tokens: (usage.prompt_tokens ?? 0) + cached + cacheCreation,
-    output_tokens: usage.completion_tokens ?? 0,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: inputTokens + outputTokens,
     ...(Object.keys(inputDetails).length > 0 ? { input_tokens_details: inputDetails } : {}),
     ...(Object.keys(outputDetails).length > 0 ? { output_tokens_details: outputDetails } : {}),
   };

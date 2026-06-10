@@ -570,6 +570,16 @@ describe("anthropic transformRequestIn — P4 params", () => {
     expect(budget("low")).toBe(1024);
     expect(budget("medium")).toBe(2048);
     expect(budget("high")).toBe(4096);
+    // Extended tiers (litellm parity): xhigh=8192, max=16384.
+    expect(budget("xhigh")).toBe(8192);
+    expect(budget("max")).toBe(16384);
+    // `none` disables thinking entirely (no type:"enabled" with a 0 budget).
+    const noneOut = transformRequestIn({
+      model: "claude-3-7-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "none",
+    });
+    expect(noneOut.thinking).toBeUndefined();
   });
 
   // order 10: client parallel_tool_calls:false -> Anthropic disable_parallel_tool_use.

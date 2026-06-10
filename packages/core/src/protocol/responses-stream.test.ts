@@ -223,7 +223,13 @@ describe("convertOpenAIStreamToResponses — text event sequence", () => {
     const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
     expect(completed.type).toBe("response.completed");
     expect(completed.response.status).toBe("completed");
-    expect(completed.response.usage).toEqual({ input_tokens: 10, output_tokens: 4 });
+    // total_tokens is REQUIRED by OpenAI's Responses usage shape (Codex rejects a
+    // completed response without it: "missing field total_tokens").
+    expect(completed.response.usage).toEqual({
+      input_tokens: 10,
+      output_tokens: 4,
+      total_tokens: 14,
+    });
   });
 
   // order 21: reasoning_tokens (output) + cache read/write (input) must ride the
@@ -753,7 +759,7 @@ describe("synthesizeResponsesSSEFromJSON — isomorphic with the live stream", (
       "response.completed",
     ]);
     const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
-    expect(completed.response.usage).toEqual({ input_tokens: 7, output_tokens: 2 });
+    expect(completed.response.usage).toEqual({ input_tokens: 7, output_tokens: 2, total_tokens: 9 });
   });
 
   it("tool-only response → function_call item sequence", async () => {
