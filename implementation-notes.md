@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-10 · Anthropic tool_result 邻接兼容修复（docs/05 协议互译；CLAUDE.md 原则 3/8）
+
+- **缘起**：线上请求 `5cd63ac6-798e-4b31-a497-575d92033f64` 在 `anthropic/claude-opus-4-8` 与 `zenmux/claude-opus-4.8` 返回 400：Anthropic 报 `messages.2` 的 `tool_use` 没有在下一条消息里紧跟对应 `tool_result`。捕获 payload 显示客户端把 114 个 `tool_result` 与新的用户文本放在同一个 Anthropic user turn；这是可兼容形态，但 Helm 入站转换先发普通 user 文本、再 fan-out tool 结果，订阅 provider 又把连续 tool 结果拆成多个 user turn，最终破坏 Anthropic 的 tool-result adjacency。
+- **修复**：`transformRequestOut` 对混合 user turn 先输出 fanned-out `role:"tool"` 结果，再输出尾随 user 文本，确保 IR 保持 assistant tool_calls → tool results → next user text 的顺序。订阅 provider 的 `openaiToAnthropicRequest` 增加相邻同角色合并，连续 OpenAI `role:"tool"` 会合并成同一个 Anthropic `role:"user"`，并在其中保持 `tool_result` 块先于尾随文本。
+- **取舍**：不拒绝这类客户端 payload，也不丢弃尾随用户文本；选择做结构化归一化，让 Anthropic strict validation 接收，同时尽量保留用户原意。若客户端已经发送纯 tool-result turn，行为不变。
+- **验证**：TDD 新增两个回归：混合 Anthropic user turn 中 `tool_result` 必须排在尾随文本前；连续 OpenAI tool results 必须合并成一个即时 Anthropic user turn。`pnpm exec vitest run packages/core/src/protocol/anthropic/request.test.ts packages/core/src/provider/anthropic.test.ts` → 63 passed。用线上捕获 payload 本地重放后，provider-facing Anthropic 消息变为 assistant 后紧跟 115-block user turn：前 114 个 `tool_result`，最后 1 个文本 prompt，移除 400 根因。
+
 ## 2026-06-10 · 虚拟模型别名映射 model-aliases.yaml（docs/04 路由；CLAUDE.md 原则 1/2/6）
 
 - **缘起**：用户把网关接入 Claude CLI 失败——CLI 发来 `model: "claude-opus-4-8"`（裸厂商 id），但网关只认三种 `model`：`auto`、lane 名、内部 `provider/model` 别名。在 `allow_custom_model` key 上 `claude-opus-4-8` 命中 `route-request.ts` 的 explicit-MODEL 严格校验（`isKnownModel` 假）→ 400 `unknown model`。需要一层「虚拟名 → 真实目标」映射做兼容。
@@ -37,19 +44,11 @@
 
 ---
 
-## 2026-06-10 · Prompt caching 参数保真与缓存计费修复（docs/05 协议互译；docs/07 成本计量；CLAUDE.md 原则 2/3/8）
-
-- **缘起**：对全网关缓存路径做重点 review 时发现多处缓存字段只被 UI/记忆层读取，却没有稳定进入 provider wire body：OpenAI/Responses 的 `prompt_cache_key`/`prompt_cache_retention` 会被 IR/schema/execute 过滤；Anthropic 订阅 provider 会丢 per-block/tool/top-level `cache_control`；Gemini `cachedContent` 没有 IR home；成本估算也把 cache read/write tokens 当普通 input 计费。
-- **修复**：把 `prompt_cache_key`、`prompt_cache_retention`、`cached_content` 加入 Shared InternalRequest、IR、OpenAI Chat、Responses、Gemini 与执行层透传白名单；Responses provider 优先保留客户端 `prompt_cache_key`，否则回退订阅 session；Gemini `cachedContent` 通过 IR `cached_content` 双向 round-trip，并由 `supportsCachedContent` 硬能力门禁保护，避免混合 fallback 链把必需 cached context 发到会忽略/拒绝它的非 Gemini 目标。
-- **Anthropic 取舍**：按当前 Anthropic/LiteLLM 行为支持 top-level `cache_control`（automatic prompt caching）以及 system/user/tool cache_control；协议 guard 不再把 request-level `cache_control` 标为 data_loss。订阅 provider 仍保留 Claude-Code spoof system[0]，用户 cache breakpoint 只贴在用户/系统原文块上，不贴在 spoof 上；若请求同时有 top-level automatic cache_control 与显式 block/tool cache_control，出站时丢弃 top-level，避免 Anthropic 因 breakpoint TTL 冲突返回 400。
-- **成本计量**：`resolveCostUsd` 现在按 LiteLLM 语义拆分 fresh input、cache read、cache write、output：`prompt_tokens` / Responses `input_tokens` 视为包含 cache tokens；Anthropic-style `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` 会先规范化成 full prompt；cache 价格缺失时回退 input 价而不是 0，避免低估。流式 Responses/Anthropic/Codex usage tail 也保留 cache read/write 细分，避免 streamed path 和 non-stream path 计费分叉。
-- **测试/验证**：新增/更新 OpenAI、Responses、Gemini、Anthropic native/provider、protocol guard、execute route、capability filter、cost calculator 定向回归。风险：`supportsCachedContent` 需要运营侧只标记真实支持 Gemini/LiteLLM cached-content handle 的目标；缺失能力数据会对 `cached_content` 请求 fail-closed 为 `capability_unsatisfiable`，这是有意保护成本与上下文正确性的取舍。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-10 · Prompt caching 参数保真与缓存计费修复：补齐 `prompt_cache_key`/`prompt_cache_retention`/`cached_content`/Anthropic `cache_control` 透传与 cache read/write 成本拆分；Gemini cachedContent 加能力门禁；风险是运营侧需准确标记 `supportsCachedContent`，缺失则对 cached-content 请求 fail-closed。
 
 ### 2026-06-10 · 请求详情页多行/长字符串「预览」弹窗：新增 `TextPreview.svelte`，对多行或 >512 字符串在 `JsonTree` 节点挂「Preview」按钮，复用 `Modal`（新增 `wide` prop）渲染解码后原文 + Copy；只读、零 core/config 改动；admin 279 绿。需发新 admin 镜像生效。
 

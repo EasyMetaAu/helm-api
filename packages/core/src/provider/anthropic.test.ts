@@ -58,6 +58,33 @@ describe("openaiToAnthropicRequest", () => {
     expect(body.tools as unknown[]).toHaveLength(1);
   });
 
+  it("groups consecutive tool results into one immediate Anthropic user turn", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "t1", type: "function", function: { name: "get", arguments: "{}" } },
+            { id: "t2", type: "function", function: { name: "get", arguments: "{}" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "t1", content: "one" },
+        { role: "tool", tool_call_id: "t2", content: "two" },
+        { role: "user", content: "next question" },
+      ],
+    });
+
+    const msgs = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    expect(msgs.map((m) => m.role)).toEqual(["assistant", "user"]);
+    expect(msgs[1]?.content).toEqual([
+      { type: "tool_result", tool_use_id: "t1", content: "one" },
+      { type: "tool_result", tool_use_id: "t2", content: "two" },
+      { type: "text", text: "next question" },
+    ]);
+  });
+
   it("emits metadata.user_id when provided, omits it otherwise (anti-ban stable device identity)", () => {
     // The Claude subscription anti-ban measure (ref claude-relay-service): a STABLE
     // per-account identity travels in metadata.user_id. The transformer only forwards

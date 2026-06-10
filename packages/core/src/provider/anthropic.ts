@@ -124,13 +124,22 @@ function buildSystem(messages: Array<Record<string, unknown>>): AnthropicBlock[]
 
 function toAnthropicMessages(messages: Array<Record<string, unknown>>): AnthropicMessage[] {
   const out: AnthropicMessage[] = [];
+  const push = (message: AnthropicMessage): void => {
+    const prev = out[out.length - 1];
+    if (prev !== undefined && prev.role === message.role) {
+      prev.content.push(...message.content);
+      return;
+    }
+    out.push(message);
+  };
+
   for (const m of messages) {
     const role = m.role;
     // system + developer both fold into the top-level system param (buildSystem).
     if (role === "system" || role === "developer") continue;
     if (role === "tool") {
       // OpenAI tool result -> anthropic tool_result block on a user message.
-      out.push({
+      push({
         role: "user",
         content: [
           {
@@ -161,14 +170,14 @@ function toAnthropicMessages(messages: Array<Record<string, unknown>>): Anthropi
           input: args,
         });
       }
-      out.push({
+      push({
         role: "assistant",
         content: blocks.length ? blocks : [{ type: "text", text: "" }],
       });
       continue;
     }
     // user (default)
-    out.push({ role: "user", content: textBlocksFromContent(m.content, m.cache_control) });
+    push({ role: "user", content: textBlocksFromContent(m.content, m.cache_control) });
   }
   return out;
 }
