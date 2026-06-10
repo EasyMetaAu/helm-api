@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
+  import NavProgress from '$lib/components/NavProgress.svelte';
   import StatusCluster from '$lib/components/StatusCluster.svelte';
   import { initI18n, t } from '$lib/i18n';
 
@@ -85,6 +86,9 @@
 
   const activeLabel = $derived(nav.find((n) => isActive(n.seg))?.label ?? 'Dashboard');
 </script>
+
+<!-- Top navigation progress bar — fixed overlay, sits above the whole shell. -->
+<NavProgress />
 
 <div class="flex h-screen overflow-hidden bg-slate-50 text-slate-900">
   <!-- Mobile backdrop -->
