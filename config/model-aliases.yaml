@@ -21,24 +21,25 @@
 # the gateway refuses to boot. This file is OPTIONAL — delete it for no rewrite.
 #
 # NOTE: only BARE vendor ids are matched here. Internal provider aliases are
-# `provider/model` (e.g. `zenmux/claude-opus-4.7`), which never start with
+# `provider/model` (e.g. `zenmux/claude-opus-4.8`), which never start with
 # `claude`/`gpt`, so an allow_custom_model key can still address them explicitly.
 
 # ── Anthropic / Claude Code ──────────────────────────────────────────────────
 # Claude Code sends two classes: the main model and a small/fast background model
-# (ANTHROPIC_SMALL_FAST_MODEL, usually Haiku). Map the small one to economy, the
-# strong ones to premium/balanced. Tip: you can also just set ANTHROPIC_MODEL=auto
-# in Claude Code to let Helm's classifier pick per request.
-"claude-3-5-haiku": economy
-"claude-3-5-haiku-*": economy # dated id, e.g. claude-3-5-haiku-20241022
-"claude-haiku-*": economy
-"claude-opus-*": premium
-"claude-sonnet-*": balanced
+# (ANTHROPIC_SMALL_FAST_MODEL, usually Haiku). Each Claude family maps to its
+# DEDICATED vendor-family lane (config/lanes.yaml) so the request leads with that
+# family's real model and keeps its full fallback chain. Tip: you can also just set
+# ANTHROPIC_MODEL=auto in Claude Code to let Helm's classifier pick per request.
+"claude-3-5-haiku": claude-haiku
+"claude-3-5-haiku-*": claude-haiku # dated id, e.g. claude-3-5-haiku-20241022
+"claude-haiku-*": claude-haiku
+"claude-opus-*": claude-opus
+"claude-sonnet-*": claude-sonnet
 "claude-*": balanced # catch-all for any other / future Claude id
 
 # ── OpenAI-compatible clients (Codex, Cursor, …) ─────────────────────────────
 # Bare GPT ids → lanes. Comment these out if you don't front any GPT clients.
-"gpt-5.5": premium
+"gpt-5.5": gpt-5.5 # dedicated vendor-family lane (config/lanes.yaml)
 "gpt-5-codex": coding
 "gpt-5*": premium
 "gpt-*": balanced

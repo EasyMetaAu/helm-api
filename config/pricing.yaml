@@ -41,9 +41,9 @@ openrouter/deepseek-v4-pro:
 openrouter/deepseek-v4-flash:
   inputPerMTokUsd: 0.0983
   outputPerMTokUsd: 0.1966
-zenmux/claude-opus-4.7:
-  inputPerMTokUsd: 30.0
-  outputPerMTokUsd: 150.0
+zenmux/claude-opus-4.8:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 25.0
 zenmux/claude-sonnet-4.6:
   inputPerMTokUsd: 3.0
   outputPerMTokUsd: 15.0

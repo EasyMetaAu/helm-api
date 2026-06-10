@@ -42,7 +42,7 @@ premium:
   purpose: Strong reasoning and high quality
   primary: openai-codex/gpt-5.5
   fallback:
-    - zenmux/claude-opus-4.7
+    - zenmux/claude-opus-4.8
     - zenmux/gpt-5.5
     - balanced
 
@@ -84,3 +84,50 @@ tool_use:
     - premium
   constraints:
     require_tools: true
+
+# —— vendor-family lanes (targets of config/model-aliases.yaml) ——
+# A client that pins a FIXED vendor model id (Claude Code's `claude-opus-4-8`, an
+# SDK locked to `gpt-5.5`) has its `model` rewritten onto one of THESE lanes BEFORE
+# routing (model-aliases.yaml glob -> lane). Each LEADS with the requested family's
+# real model, so an explicit `claude-opus` lands on a Claude-Opus-led chain instead
+# of the GPT-led `premium` lane, then degrades through the matching generic lane.
+# The lane abstraction still holds (principle 6): the client never names a provider
+# alias. Every chain inherits balanced's json-capable body + `*/auto` tail, so a
+# strict-JSON request still lands deterministically (the auto aliases get pruned).
+#
+# The Claude lanes LEAD with the NATIVE Anthropic subscription alias (`anthropic/*`,
+# the Claude Pro/Max OAuth pool — connect it in admin → Providers). Like the
+# `openai-codex/*` primaries above, an unconnected `anthropic/*` candidate fails
+# OPEN (skip to the next fallback), never a 5xx — so each lane is backed by a static
+# `zenmux/*` key that keeps it serving without a subscription.
+claude-opus:
+  purpose: Anthropic Claude Opus tier — strongest Claude
+  primary: anthropic/claude-opus-4-8
+  fallback:
+    - zenmux/claude-opus-4.8
+    - premium
+
+claude-sonnet:
+  purpose: Anthropic Claude Sonnet tier — balanced Claude
+  primary: anthropic/claude-sonnet-4-6
+  fallback:
+    - zenmux/claude-sonnet-4.6
+    - balanced
+
+# ZenMux exposes no Claude Haiku, so this cheap/fast tier degrades straight to
+# `economy` (deepseek-flash) after the native Anthropic Haiku.
+claude-haiku:
+  purpose: Anthropic Claude Haiku tier — cheap/fast
+  primary: anthropic/claude-haiku-4-5-20251001
+  fallback:
+    - economy
+
+# Stays on GPT-5.5 ACROSS providers (Codex subscription -> static ZenMux key) before
+# degrading to the GPT-led `premium` lane, so an explicit gpt-5.5 request is not
+# bumped onto Claude Opus on the first hiccup.
+"gpt-5.5":
+  purpose: OpenAI GPT-5.5 tier
+  primary: openai-codex/gpt-5.5
+  fallback:
+    - zenmux/gpt-5.5
+    - premium

@@ -97,7 +97,7 @@ balanced:
 premium:
   purpose: Strong reasoning and high quality
   primary: openai-codex/gpt-5.5
-  fallback: [zenmux/claude-opus-4.7, zenmux/gpt-5.5, balanced]
+  fallback: [zenmux/claude-opus-4.8, zenmux/gpt-5.5, balanced]
 ```
 
 `balanced` is **required** and must be healthy — it is the terminal of the
