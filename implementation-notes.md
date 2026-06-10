@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-06-10 · 虚拟模型别名映射 model-aliases.yaml（docs/04 路由；CLAUDE.md 原则 1/2/6）
+
+- **缘起**：用户把网关接入 Claude CLI 失败——CLI 发来 `model: "claude-opus-4-8"`（裸厂商 id），但网关只认三种 `model`：`auto`、lane 名、内部 `provider/model` 别名。在 `allow_custom_model` key 上 `claude-opus-4-8` 命中 `route-request.ts` 的 explicit-MODEL 严格校验（`isKnownModel` 假）→ 400 `unknown model`。需要一层「虚拟名 → 真实目标」映射做兼容。
+- **决定（关键取舍）**：映射目标限定为 **lane 名或 `auto`**，**不**映射到具体 provider 别名——守住「只暴露 lane 抽象、不暴露模型市场」（原则 6），且天然保留 lane 的 fallback/failover。新增纯函数模块 `packages/core/src/routing/model-alias.ts`：`resolveModelAlias(model, map)` + `validateModelAliasTargets(map, laneNames)`。
+- **解析位置 + cap-bounded（关键，含 Codex review P1 修复）**：在 `plan()` 最顶端 step-0 解析，alias→lane 走**独立的 0a 分支**——**不是** `allow_custom_model` 直通。它对**任何 key**生效（操作者配置即授权），但**不绕过路由大脑的 cap**：用 `aliasPolicyContext(req)`（中性 `task_type:"passthrough"`，只带真实 org_id/user_id）跑 `evaluatePolicies` + `applyCaps`，再叠加 key 的 `allowed_lanes`，**两层 cap 都静默 clamp**（与分类路径一致）。⇒ 身份维度的 policy cap（如出厂 `budget_org_cap`）与 key cap 仍然约束别名 lane，标准 key 无法借别名越过它本应受的 cap。任务/复杂度维度的 policy 不命中（别名请求未分类，本就不该被重分类）。`req.requested_model` 不改写（DecisionRecord 记原值），`policy.reason` 记 `model alias "x" -> lane "y"`（被 clamp 时追加 `(capped to "z")`）。
+- **与 explicit/auto 的边界**：`allow_custom_model` 显式分支（1a/1b）**保持原样不变**（back-compat）——只有裸厂商 id 命中别名表才走 0a，allow_custom_model key 仍可直接发 lane 名/内部 `provider/model` 别名走显式直通。alias→`auto` 不进 0a，也被显式分支用 `!aliasToAuto` 排除，落到 classify（不会把原始厂商 id 当显式 model 透传）。degradeLane（超预算）压制 0a，落到强制降级 lane，杜绝绕过。
+- **匹配规则**：精确键优先；否则取「字面字符最多」的 `*`-glob（`claude-opus-*` 胜过 `claude-*`，与声明顺序无关），吸收 Claude Code 追加的日期后缀；大小写敏感（沿用 eval-cache-key「不 lowercase」约定）；glob 把模型名当字面串匹配（`gpt-5.5` 的 `.` 不是通配）。
+- **fail-closed**：`ModelAliasesSchema = z.record(string,string)` 只校验形状；语义校验（每个目标是已配置 lane 或 `auto`）在 server boot 用 `validateModelAliasTargets` 对**有效 lane 集**（`config.lanes` 或 `DEFAULT_LANES`）跑，非法即抛、拒绝启动（原则 2）。`config/model-aliases.yaml` 可选，缺省即不改写（行为与今日一致）。
+- **Codex review P3 修复**：出厂 Haiku 映射补 `claude-3-5-haiku-*: economy`，覆盖带日期的 `claude-3-5-haiku-20241022`（否则落到宽泛 `claude-*: balanced`，small/fast 后台模型映射不完整）。samples.test 加断言锁定。
+- **默认配置**：仓库 `config/model-aliases.yaml` 出厂带激活映射（claude-haiku→economy、claude-opus→premium、claude-sonnet/claude-*→balanced、gpt-* 若干），让新装 + Claude CLI 开箱即用。裸 id 才匹配；内部别名是 `provider/model`（不以 `claude`/`gpt` 开头），allow_custom_model key 仍可显式寻址。
+- **坑/TODO**：① 模型别名为**静态配置**（非 admin 可改），boot 时一次性校验；admin 运行时删 lane 若孤立某别名，仅对该裸 id 退化为请求时 400，不崩。② `/v1/models` 未列出虚拟别名（Claude CLI 不靠它路由），有需要可后续补。③ **线上 la.atmy.work 部署不会覆盖 operator 的 `config/` 目录（见 [[deploy-never-overwrite-config]]）——需手动在 `/opt/helm-api/config` 放 `model-aliases.yaml` 才生效**。
+- **验证**：TDD 先红后绿——`model-alias.test.ts`(12) + `route-request.test.ts` 新增「虚拟别名」8 例（默认 key 命中、先于 400 解析、glob、`auto` 走分类、allowed_lanes 静默 clamp、**policy cap 约束/不越权 review P1**、不匹配落分类、degradeLane 压制）+ samples.test 加出厂 yaml↔lanes 一致性 + 日期 Haiku→economy 守卫。core 全量 1812 绿、gateway 路由/server boot 绿、typecheck/lint 绿。
+
+---
+
 ## 2026-06-10 · publish.yml 版本号升级自动发布 Release（CI/CD；CLAUDE.md Git 工作流 / 原则 2）
 
 - **缘起**：用户发现 push main 触发的 `publish.yml` 只刷 GHCR `:latest` + `:sha-<short>`，**从不创建 GitHub Release**；版本 tag 与 Release 一直靠手工 `git tag` + `gh release create`（见 [[release-procedure]]）。用户希望「提交后自动发」。AskUserQuestion 选定**「版本号自动发布」**方案。
@@ -32,19 +47,11 @@
 
 ---
 
-## 2026-06-10 · 请求详情页：多行/长字符串「预览」弹窗（docs/07 可观测性；docs/11 管理界面）
-
-- **缘起**：请求详情页 JSON 树里，字符串值用 `JSON.stringify(s)` 渲染，真实换行被转义成字面量两字符 `\n`，长 system/developer prompt 挤成一坨；`whitespace-pre-wrap` 无真换行可断，用户每次都要 copy 出来手动把 `\n` 换成回车才能读。
-- **修复**：新增 `TextPreview.svelte`——对多行或长（>512）字符串在树节点旁挂一个「Preview」按钮，点开复用 `Modal` 渲染**解码后原文**（`whitespace-pre-wrap` 真换行）+ 一键 Copy。`Modal` 加可选 `wide` prop（`max-w-3xl`，靠 utility 层覆盖 `.modal-panel` 的 `@apply max-w-lg`）。`JsonTree` 触发条件 `includes('\n') || isLongString`；保留原 inline Expand（仍显示转义 JSON 形态）不动，避免破坏既有测试。修复落在 `JsonTree`，请求与响应两个 `JsonViewer` 自动都受益。
-- **取舍**：只读视图，零 core/config 改动；短单行标量不挂按钮保持干净。i18n 仅新增 `Preview` 一个 key（Copy/Copied/Close 复用），五语言齐补。
-- **验证**：TDD 先红后绿——`TextPreview.test.ts`（解码换行、wide 面板、Copy 调 clipboard、Close 关闭、label 作标题）+ `JsonTree.test.ts` 扩两例（多行短串有按钮、单行短串无按钮）。admin 全量 31 文件 279 绿；`pnpm lint`、Prettier check 绿；`svelte-check` 仅剩 3 条**预存在**的 `oauth.test.ts` tuple 报错（main 上已有，CI 的 `tsc` typecheck 跳过 `*.test.ts`，与本改无关）。
-- **部署提示**：admin 静态资源改动，线上需构建发布新 admin/网关镜像才生效。
-
----
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-10 · 请求详情页多行/长字符串「预览」弹窗：新增 `TextPreview.svelte`，对多行或 >512 字符串在 `JsonTree` 节点挂「Preview」按钮，复用 `Modal`（新增 `wide` prop）渲染解码后原文 + Copy；只读、零 core/config 改动；admin 279 绿。需发新 admin 镜像生效。
 
 ### 2026-06-10 · Responses API flat function tools 规范化为 Chat tools：`responsesTransformer.transformRequestOut` 把扁平 `{type:"function",name,...}` 规范成 Chat `tools[].function`（修官方 DeepSeek `tools[0]: missing field function` 400），原文存 `provider_raw.responses_tools` 供 round-trip 恢复；只转带 name 的 function tool，未知类型 fail-open。core 43/43 绿，生产 DeepSeek 直连 200。需发新镜像生效。
 

@@ -227,6 +227,18 @@ export const RuntimeConfigSchema = z.object({
   signal_feedback: RoutingSignalFeedbackConfigSchema.prefault({}),
 });
 
+// Virtual model-alias map (docs/04) — config/model-aliases.yaml, a FLAT map of an
+// inbound VENDOR model id (an exact key OR a single-`*` glob) -> a lane name or the
+// "auto" sentinel. A compatibility shim: a fixed-model client (Claude CLI, an SDK
+// pinned to a vendor id like "claude-opus-4-8") has its `model` field rewritten
+// onto a lane BEFORE routing, so it no longer 400s on an unknown model. Only the
+// SHAPE is validated here (non-empty string keys/values); the SEMANTIC check —
+// every target is a configured lane or "auto" — runs fail-closed at boot
+// (validateModelAliasTargets in @helm/core), where the effective lane set (incl.
+// DEFAULT_LANES) is known. Optional at the config level: absent => no rewrite
+// (behaviour identical to today). Resolver: @helm/core model-alias.resolveModelAlias.
+export const ModelAliasesSchema = z.record(z.string().min(1), z.string().min(1));
+
 export const HelmConfigSchema = z.object({
   server: ServerConfigSchema,
   auth: AuthConfigSchema,
@@ -264,6 +276,11 @@ export const HelmConfigSchema = z.object({
   // invalid file still fails closed (principle 2). Empty prefault lets
   // MemoryConfigSchema's own field defaults supply the nested tree.
   memory: MemoryConfigSchema.prefault({}),
+  // Virtual model aliases (config/model-aliases.yaml). OPTIONAL: absent →
+  // config.model_aliases undefined → no rewrite (today's behaviour). A present-
+  // but-malformed file (non-string key/value) fails closed here; the lane-target
+  // semantic check is fail-closed at boot (validateModelAliasTargets).
+  model_aliases: ModelAliasesSchema.optional(),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -280,6 +297,7 @@ export type RateLimitConfig = z.infer<typeof RateLimitConfigSchema>;
 export type StoreConfig = z.infer<typeof StoreConfigSchema>;
 export type RoutingSignalFeedbackConfig = z.infer<typeof RoutingSignalFeedbackConfigSchema>;
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
+export type ModelAliases = z.infer<typeof ModelAliasesSchema>;
 export type HelmConfig = z.infer<typeof HelmConfigSchema>;
 
 // Re-export the memory subtree's public surface from the config barrel so

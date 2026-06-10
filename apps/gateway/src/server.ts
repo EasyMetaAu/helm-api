@@ -74,6 +74,7 @@ import {
   startMemoryWorker,
   startSignalScheduler,
   toRegistryProviders,
+  validateModelAliasTargets,
 } from "@helm/core";
 import type {
   CatalogEntry,
@@ -989,6 +990,21 @@ export async function buildServer(
   // via the schema, so an absent policies.yaml is a no-op.
   let lanes: LanesConfig = config.lanes ?? parseLanesConfig(DEFAULT_LANES);
   let policies: PoliciesConfig = config.policies;
+  // Virtual model aliases (docs/04 compatibility shim): a fixed-model client
+  // (Claude CLI, an SDK pinned to a vendor id like "claude-opus-4-8") has its
+  // `model` rewritten onto a lane/"auto" before routing, so it no longer 400s.
+  // Validate every target against the EFFECTIVE lane set (config.lanes or
+  // DEFAULT_LANES) — fail-closed (principle 2) so a typo'd target refuses to boot
+  // rather than 400ing per request. Static config (not admin-editable), so it is
+  // captured once; an admin lane deletion that orphans an alias degrades to a
+  // request-time 400 for that one vendor id, never a crash.
+  const modelAliases = config.model_aliases;
+  const aliasErrors = validateModelAliasTargets(modelAliases, Object.keys(lanes));
+  if (aliasErrors.length > 0) {
+    throw new Error(
+      `invalid model-aliases.yaml:\n${aliasErrors.map((e) => `  - ${e}`).join("\n")}`,
+    );
+  }
   // Live classifier config. `let` so an admin edit (via the runtime RuleStore's
   // onClassifier callback below) re-binds the value the classify adapter reads
   // per request — classifier changes hot-apply WITHOUT a restart (closes the
@@ -1221,6 +1237,7 @@ export async function buildServer(
           classify: (r) => classify(r, classifyOverrides),
           policies,
           lanes,
+          modelAliases,
           execute: createExecute({
             defaultProvider: provider,
             providers: providerClients,

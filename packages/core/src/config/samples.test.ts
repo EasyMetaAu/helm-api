@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { HelmConfigSchema } from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
+import { resolveModelAlias, validateModelAliasTargets } from "../routing/model-alias.js";
 import { loadConfig } from "./loader.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -64,6 +65,22 @@ describe("checked-in config samples", () => {
     expect(lanes.json?.constraints.require_json).toBe(true);
     expect(lanes.vision?.constraints.require_vision).toBe(true);
     expect(lanes.tool_use?.constraints.require_tools).toBe(true);
+  });
+
+  it("loads the shipped model-aliases.yaml with every target a real shipped lane or auto", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const aliases = cfg.model_aliases;
+    if (aliases === undefined) throw new Error("config/model-aliases.yaml must load");
+    // Covers the Claude Code default (claude-opus-4-8 -> a lane), proving the shim.
+    const laneNames = Object.keys(cfg.lanes ?? {});
+    const opusTarget = resolveModelAlias("claude-opus-4-8", aliases);
+    expect(opusTarget && laneNames.includes(opusTarget)).toBe(true);
+    // The small/fast background model maps to economy even with a date suffix
+    // (the common dated Haiku id shape) — not the broad claude-* catch-all.
+    expect(resolveModelAlias("claude-3-5-haiku-20241022", aliases)).toBe("economy");
+    // The shipped aliases must validate against the SHIPPED lanes (no drift): every
+    // target is a configured lane or "auto", or the gateway would refuse to boot.
+    expect(validateModelAliasTargets(aliases, laneNames)).toEqual([]);
   });
 
   it("loads the shipped policies.yaml as first-match rules", () => {
