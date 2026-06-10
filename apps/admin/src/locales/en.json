@@ -516,5 +516,18 @@
   "The verdict that routed this request — the badge shows which layer decided it.": "The verdict that routed this request — the badge shows which layer decided it.",
   "Layer-1 rules were uncertain (confidence {confidence}) — escalated to the eval model; the verdict and confidence above are the eval model’s.": "Layer-1 rules were uncertain (confidence {confidence}) — escalated to the eval model; the verdict and confidence above are the eval model’s.",
   "Layer-1 rules were uncertain — escalated to the eval model; the verdict and confidence above are the eval model’s.": "Layer-1 rules were uncertain — escalated to the eval model; the verdict and confidence above are the eval model’s.",
-  "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.": "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane."
+  "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.": "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.",
+  "Connect a client": "Connect a client",
+  "Point your tool at Helm by setting its base URL and API key, then send model \"auto\" (or a lane name) — the gateway picks the model.": "Point your tool at Helm by setting its base URL and API key, then send model \"auto\" (or a lane name) — the gateway picks the model.",
+  "These snippets include your new key, shown only this once. Copy what you need now — we store only a hash, so it cannot be recovered later.": "These snippets include your new key, shown only this once. Copy what you need now — we store only a hash, so it cannot be recovered later.",
+  "Claude Code": "Claude Code",
+  "Codex CLI": "Codex CLI",
+  "Gemini": "Gemini",
+  "OpenClaw": "OpenClaw",
+  "OpenAI / Anthropic SDK": "OpenAI / Anthropic SDK",
+  "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).": "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).",
+  "Add a provider to ~/.codex/config.toml. The base URL MUST end in /v1 (Codex appends /responses).": "Add a provider to ~/.codex/config.toml. The base URL MUST end in /v1 (Codex appends /responses).",
+  "Use Helm's native Gemini route. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.": "Use Helm's native Gemini route. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.",
+  "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.",
+  "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one."
 }

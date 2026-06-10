@@ -102,6 +102,20 @@ describe('CreateKeyDialog', () => {
     expect(screen.getByRole('button', { name: /copy/i })).toBeInTheDocument();
   });
 
+  it('offers a "Connect a client" guide carrying the freshly-minted plaintext', async () => {
+    setup();
+    await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
+    await waitFor(() => expect(screen.getByTestId('plaintext-reveal')).toBeInTheDocument());
+
+    // The reveal step offers a guide; opening it injects the real key into a snippet
+    // (one-time), so the operator can copy a complete config without leaving the flow.
+    await fireEvent.click(screen.getByRole('button', { name: /connect a client/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog', { name: /connect a client/i })).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('snippet-claude')).toHaveTextContent(PLAINTEXT);
+  });
+
   it('wipes the plaintext from the DOM once saved/closed — not re-viewable', async () => {
     const { oncreated, onclose } = setup();
     await fireEvent.click(screen.getByRole('button', { name: /create key/i }));

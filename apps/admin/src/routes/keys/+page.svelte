@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { type ApiKeyView, deleteKey, revokeKey } from '$lib/api/keys.js';
+  import ConnectClientDialog from '$lib/components/ConnectClientDialog.svelte';
   import CreateKeyDialog from '$lib/components/CreateKeyDialog.svelte';
   import EditKeyDialog from '$lib/components/EditKeyDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
@@ -19,6 +20,10 @@
 
   let error = $state<string | null>(null);
   let showCreate = $state<boolean>(false);
+  // The "Connect a client" guide, opened from the header with no minted key (so it
+  // shows a <your-helm-key> placeholder). The post-creation flow opens its own
+  // instance pre-filled with the fresh plaintext (see CreateKeyDialog).
+  let showConnect = $state<boolean>(false);
   // The key_id currently pending a revoke confirmation, if any.
   let confirmingRevoke = $state<string | null>(null);
   let revoking = $state<string | null>(null);
@@ -135,9 +140,14 @@
         )}
       </p>
     </div>
-    <button type="button" class="btn-primary shrink-0" onclick={() => (showCreate = true)}
-      >{$t('New key')}</button
-    >
+    <div class="flex shrink-0 gap-2">
+      <button type="button" class="btn-secondary" onclick={() => (showConnect = true)}
+        >{$t('Connect a client')}</button
+      >
+      <button type="button" class="btn-primary" onclick={() => (showCreate = true)}
+        >{$t('New key')}</button
+      >
+    </div>
   </header>
 
   {#if error}
@@ -148,6 +158,10 @@
 
   {#if showCreate}
     <CreateKeyDialog {lanes} oncreated={onCreated} onclose={() => (showCreate = false)} />
+  {/if}
+
+  {#if showConnect}
+    <ConnectClientDialog onclose={() => (showConnect = false)} />
   {/if}
 
   {#if editingKey}

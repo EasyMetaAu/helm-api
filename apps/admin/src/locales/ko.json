@@ -507,5 +507,18 @@
   "The verdict that routed this request — the badge shows which layer decided it.": "이 요청을 라우팅한 판정 결과 — 배지가 어느 레이어의 판정인지 표시합니다.",
   "Layer-1 rules were uncertain (confidence {confidence}) — escalated to the eval model; the verdict and confidence above are the eval model’s.": "Layer-1 규칙이 불확실하여(신뢰도 {confidence}) 평가 모델로 에스컬레이션됨 — 위의 판정과 신뢰도는 평가 모델의 결과입니다.",
   "Layer-1 rules were uncertain — escalated to the eval model; the verdict and confidence above are the eval model’s.": "Layer-1 규칙이 불확실하여 평가 모델로 에스컬레이션됨 — 위의 판정과 신뢰도는 평가 모델의 결과입니다.",
-  "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.": "— 평가가 비활성화되어 있습니다. 규칙이 불확실하여 라우팅이 balanced 레인으로 폴백되었습니다."
+  "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.": "— 평가가 비활성화되어 있습니다. 규칙이 불확실하여 라우팅이 balanced 레인으로 폴백되었습니다.",
+  "Connect a client": "클라이언트 연결",
+  "Point your tool at Helm by setting its base URL and API key, then send model \"auto\" (or a lane name) — the gateway picks the model.": "도구의 base URL과 API 키를 Helm으로 설정한 뒤 model에 “auto”(또는 레인 이름)를 보내세요. 어떤 모델을 쓸지는 게이트웨이가 고릅니다.",
+  "These snippets include your new key, shown only this once. Copy what you need now — we store only a hash, so it cannot be recovered later.": "아래 스니펫에는 새 키가 포함되어 있으며 이번 한 번만 표시됩니다. 필요한 것은 지금 복사하세요. 해시만 저장하므로 나중에 복구할 수 없습니다.",
+  "Claude Code": "Claude Code",
+  "Codex CLI": "Codex CLI",
+  "Gemini": "Gemini",
+  "OpenClaw": "OpenClaw",
+  "OpenAI / Anthropic SDK": "OpenAI / Anthropic SDK",
+  "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).": "다음 환경 변수를 설정하세요. base URL은 오리진 그대로이며 /v1을 붙이지 마세요(Anthropic 클라이언트가 /v1/messages를 직접 붙입니다).",
+  "Add a provider to ~/.codex/config.toml. The base URL MUST end in /v1 (Codex appends /responses).": "~/.codex/config.toml에 provider를 추가하세요. base URL은 반드시 /v1로 끝나야 합니다(Codex가 /responses를 붙입니다).",
+  "Use Helm's native Gemini route. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.": "Helm의 네이티브 Gemini 경로를 사용하세요. base URL은 오리진 그대로이고, 요청 경로에 /v1beta/models/{model}:generateContent를 붙이며 인증은 x-goog-api-key를 사용합니다.",
+  "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "OpenAI 호환 provider를 설정하세요. base URL은 /v1로 끝납니다. Anthropic 경로에서는 오리진 그대로를 사용하세요.",
+  "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "OpenAI 또는 Anthropic 호환 SDK라면 무엇이든 동작합니다 — base URL과 키만 바꾸면 됩니다. OpenAI base URL에는 /v1이 붙고 Anthropic에는 붙지 않는 점에 유의하세요."
 }

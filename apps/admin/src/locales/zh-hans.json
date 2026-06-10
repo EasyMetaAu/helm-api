@@ -516,5 +516,18 @@
   "The verdict that routed this request — the badge shows which layer decided it.": "本请求最终采用的分类结论——徽章标明由哪一层判定。",
   "Layer-1 rules were uncertain (confidence {confidence}) — escalated to the eval model; the verdict and confidence above are the eval model’s.": "第一层规则不确定（置信度 {confidence}），已升级到 eval 模型复核；上方的结论与置信度均为 eval 模型给出。",
   "Layer-1 rules were uncertain — escalated to the eval model; the verdict and confidence above are the eval model’s.": "第一层规则不确定，已升级到 eval 模型复核；上方的结论与置信度均为 eval 模型给出。",
-  "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.": "——eval 未启用；第一层规则不确定，路由已回退到 balanced lane。"
+  "— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.": "——eval 未启用；第一层规则不确定，路由已回退到 balanced lane。",
+  "Connect a client": "接入客户端",
+  "Point your tool at Helm by setting its base URL and API key, then send model \"auto\" (or a lane name) — the gateway picks the model.": "把你的工具指向 Helm：填好 base URL 和 API key，再把 model 设为 “auto”（或某个 lane 名称）——具体用哪个模型交给网关来挑。",
+  "These snippets include your new key, shown only this once. Copy what you need now — we store only a hash, so it cannot be recovered later.": "下面的代码已经带上了你的新密钥，且仅此一次展示。需要的现在就复制——我们只保存哈希，之后无法找回。",
+  "Claude Code": "Claude Code",
+  "Codex CLI": "Codex CLI",
+  "Gemini": "Gemini",
+  "OpenClaw": "OpenClaw",
+  "OpenAI / Anthropic SDK": "OpenAI / Anthropic SDK",
+  "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).": "设置下面这几个环境变量。base URL 用裸域名即可——千万别加 /v1（Anthropic 客户端会自己补上 /v1/messages）。",
+  "Add a provider to ~/.codex/config.toml. The base URL MUST end in /v1 (Codex appends /responses).": "在 ~/.codex/config.toml 里加一个 provider。base URL 必须以 /v1 结尾（Codex 会自己补上 /responses）。",
+  "Use Helm's native Gemini route. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.": "使用 Helm 的原生 Gemini 路由。base URL 用裸域名；请求路径再加 /v1beta/models/{model}:generateContent，认证使用 x-goog-api-key。",
+  "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "配置一个兼容 OpenAI 的 provider。base URL 以 /v1 结尾；若走 Anthropic 路径，则改用裸域名。",
+  "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "任何兼容 OpenAI 或 Anthropic 的 SDK 都能用——只需改 base URL 和密钥。留意：OpenAI 的 base URL 带 /v1，Anthropic 的不带。"
 }

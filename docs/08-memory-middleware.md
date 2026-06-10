@@ -206,6 +206,24 @@ export ANTHROPIC_AUTH_TOKEN="helm_live_..."
 export ANTHROPIC_CUSTOM_HEADERS="x-project-id: my-project"  # optional
 ```
 
+**Gemini native REST / SDKs** — Helm exposes the native Gemini surface, not the
+OpenAI-compatible Gemini shim. Use the bare origin plus `/v1beta/models/...`;
+auth is `x-goog-api-key` (Gemini SDK / REST default), with `Authorization: Bearer`
+as a Helm fallback:
+
+```bash
+curl "https://helm.example.com/v1beta/models/auto:generateContent" \
+  -H "Content-Type: application/json" \
+  -H "x-goog-api-key: helm_live_..." \
+  -d '{"contents":[{"parts":[{"text":"Hello from Helm"}]}]}'
+```
+
+Streaming uses the Gemini SSE endpoint:
+
+```text
+POST /v1beta/models/auto:streamGenerateContent?alt=sse
+```
+
 **OpenClaw** — static headers via provider `request.headers`; thread derives from
 `prompt_cache_key` (OpenAI path) or `metadata.user_id` (Anthropic path). OpenClaw
 also ships its own local vector memory — gateway memory is the cross-agent shared
