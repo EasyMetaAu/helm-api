@@ -97,6 +97,14 @@ describe("redact", () => {
     expect((redact({ api_key: "sk-secret" }) as { api_key: string }).api_key).toMatch(/^sha256:/);
   });
 
+  it("preserves the DecisionRecord protocol verbatim (drives Retry's native re-issue)", () => {
+    // `protocol` is routing metadata, not credential material — it must survive
+    // redaction so the admin Retry path can recover the original protocol from the
+    // stored (redacted) DecisionRecord and re-issue the request in its native shape.
+    const input = { protocol: "openai_responses", trace_id: "t1" };
+    expect(redact(input)).toEqual(input);
+  });
+
   it("is pure: does not mutate the input", () => {
     const input = { api_key: "sk-xxx", messages: [{ content: "hi" }], trace_id: "t1" };
     const clone = structuredClone(input);

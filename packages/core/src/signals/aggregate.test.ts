@@ -16,6 +16,7 @@ function makeRecord(over: {
     request_id: `r-${Math.random()}`,
     trace_id: "t",
     requested_model: "auto",
+    protocol: "openai_chat",
     classifier: {
       task_type: over.taskType,
       complexity: "medium",

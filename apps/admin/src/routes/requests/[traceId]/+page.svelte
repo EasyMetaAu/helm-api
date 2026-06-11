@@ -38,16 +38,15 @@
     }
   }
 
-  // Retry is available only when the full request body was captured AND it is an
-  // OpenAI chat shape (a `messages` array) — the only protocol the replay endpoint
-  // re-issues today. Otherwise the button is disabled with a hint (capture off,
-  // pruned, or a non-OpenAI request).
+  // Retry is available whenever the full request body was captured (any of the four
+  // protocols — OpenAI chat `messages[]`, Anthropic `messages[]`, Responses `input`,
+  // Gemini `contents[]`). The server recovers the original protocol and re-issues in
+  // its NATIVE shape, returning a precise 400 if a body genuinely can't be replayed —
+  // so the client doesn't enumerate shapes here (that would wrongly disable e.g. a
+  // string-`input` Responses body). Disabled only when nothing was captured (capture
+  // off, or the payload was pruned).
   const replayBody = $derived(data.payload?.captured === true ? data.payload.request : undefined);
-  const canRetry = $derived(
-    !!replayBody &&
-      typeof replayBody === 'object' &&
-      Array.isArray((replayBody as { messages?: unknown }).messages),
-  );
+  const canRetry = $derived(!!replayBody && typeof replayBody === 'object');
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">

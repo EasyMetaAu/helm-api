@@ -273,6 +273,42 @@ describe('requests detail page', () => {
     expect(screen.getByTestId('response-body')).toHaveTextContent(/"ok": true/);
   });
 
+  it('enables Retry for any captured protocol body, disabled only when nothing was captured', () => {
+    // Responses (input[]) and Gemini (contents[]) bodies have NO `messages` array —
+    // the old gate wrongly disabled Retry for them. The server now recovers the
+    // protocol and re-issues natively, so the button is enabled whenever a body was
+    // captured (regression: the GPT/Codex requests that were stuck disabled).
+    const responses = render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: { captured: true, request: { model: 'gpt-5.5', input: 'hi' }, response: {} },
+        traceId: 'tr_resp',
+      },
+    });
+    expect(screen.getByTestId('retry-request')).not.toBeDisabled();
+    responses.unmount();
+
+    const gemini = render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: {
+          captured: true,
+          request: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] },
+          response: {},
+        },
+        traceId: 'tr_gem',
+      },
+    });
+    expect(screen.getByTestId('retry-request')).not.toBeDisabled();
+    gemini.unmount();
+
+    // Capture off → no body to re-issue → the button stays disabled.
+    render(DetailPage, {
+      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_off' },
+    });
+    expect(screen.getByTestId('retry-request')).toBeDisabled();
+  });
+
   it('surfaces a structured error with class, status, redacted message and redacted provider_raw', () => {
     render(DetailPage, {
       data: {

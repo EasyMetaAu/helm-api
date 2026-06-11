@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ProtocolSchema } from "../request/schema.js";
 
 // Decision record — the full routing trail for one request: classification,
 // matched policy, selected lane + candidate chain, every provider attempt, and
@@ -151,6 +152,12 @@ export const DecisionRecordSchema = z.object({
   // equals request_id (the orchestrator uses request_id as the trace id).
   trace_id: z.string().min(1),
   requested_model: z.string(),
+  // Which client protocol this request arrived on (openai_chat / anthropic_messages
+  // / openai_responses / gemini). Stamped by the routing core from the
+  // InternalRequest so the admin "Retry" path can re-issue a recorded request in
+  // its NATIVE shape (not just OpenAI chat). `.nullable().default(null)` keeps
+  // pre-existing records — and the routing core's pre-protocol builders — valid.
+  protocol: ProtocolSchema.nullable().default(null),
   // Display-only key fingerprint for the Debug UI key column (docs/07
   // "API key / user / org"). PREFIX ONLY — the resolved auth identity's
   // ApiKeyRecord.prefix (e.g. helm_live_ab12), NEVER the plaintext key

@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-06-11 · 「重试」按钮支持全部四协议（faithful 原生回放；CLAUDE.md 原则 1/5/7；docs/05/07）
+
+- **缘起**：admin 请求详情页「重试」按钮对所有 GPT 请求禁用、对所有 Claude 请求可用（生产 la.atmy.work 实证）。根因：回放只认 OpenAI chat 形状——客户端 `canRetry` 要求 `messages[]`（Responses 的 `input[]`、Gemini 的 `contents[]` 落空），服务端 `runReplay` 用 `OpenAIChatRequestSchema` 校验且**硬编码 `protocol:"openai_chat"`**。顺带挖出潜伏 bug：Claude 回放其实也走 openai_chat 路径，**静默丢掉顶层 `system` 提示词 + 错形 Anthropic 工具**——只因 `messages[]` 碰巧过 schema 才「看起来能用」。
+- **修复思路（faithful 原生回放）**：复用 live 路由的同一套入站/出站翻译器（`anthropicTransformer`/`responsesTransformer`/`geminiTransformer` 单例）+ 共享 `createMessagesPipeline`，让回放在请求的**原生协议形状**下重发并记录，而非归一成 OpenAI。
+- **协议恢复（零迁移）**：协议本未持久化。给 `DecisionRecordSchema` 加可选 `protocol`（`.nullable().default(null)`，沿用既有向后兼容约定），在 `route-request.ts` 两处 + `telemetry/decision.ts` builder 用 `req.protocol` 盖戳。它随 `decision_json` 落库、经既有 `getByRequestId` 取回——**无需 DB 迁移、无需新端口方法**；`redact()` 保留它（非密钥串，已加测试钉死）。旧记录无 protocol → 按 body 形状推断（`input[]`→responses、`contents[]`→gemini、否则 openai_chat，与旧行为一致并 log）。
+- **服务端 dispatch（`replay.ts`）**：openai_chat 走原有直连路径不变；anthropic/responses/gemini 走 `transformRequestOut → createMessagesPipeline(route, protocol)（不接 memory/budget/oauth/writes，保持隔离调试语义）→ 原生出站捕获`（非流式 `transformResponseOut`，流式按各面序列化：anthropic/responses 为 `event: <type>\ndata: …`、gemini 为无名 `data:` 帧）。坏 body → 400（transformer 抛 ZodError）；路由失败仍记一条可查的失败 trace（responseJson null/partial）。
+- **Gemini 特例**：Gemini 的 model 与 stream-ness 走 URL 不在 body，故捕获的 body 两者皆缺——model 从原 decision 的 `requested_model` 恢复（缺省 `auto` 重分类），回放固定**非流式**（调试要的是完整响应）。
+- **客户端 `canRetry`**：放宽为「捕获到对象 body 即可重试」（不再枚举形状，避免误禁 string-`input` 的 Responses body）；服务端为协议权威，真无法回放时回精确 400。
+- **取舍/已知限制**：非 chat 的**流式**回放不回填 `completion_usd`（pipeline 仅在接了 budget dep 时回填，回放有意不接——与无预算 key 的 live 行为一致）；openai_chat 回放保留 `usageFromSSE` 成本回填。
+- **验证**：TDD 红→绿。新测：shared decision schema 协议 round-trip(3)、core redaction 保留 protocol(1)、gateway replay 四协议（Anthropic system 保真 + input[] 推断 + Gemini model 恢复 + 坏 body 400 + Responses 流式原生 SSE，共 6 例）、admin canRetry 放宽 1 例；补了 6 个既有 DecisionRecord fixture 的 protocol（**core/gateway typecheck 含 test**）。gateway 路由 166 绿、admin 39 绿、replay 21 绿；typecheck（shared+core+gateway）/ lint / build 全绿。**坑：admin svelte-check 3 个 `oauth.test.ts` 报错是 main 既有（与本改无关）；需发新 admin 镜像生效。**
+
 ## 2026-06-11 · 请求页自动刷新控件 RefreshControl（admin UX；CLAUDE.md 原则 1）
 
 - **缘起**：用户要求在 `/admin/requests` 页右上角加一个刷新按钮，支持自动刷新，样式参考某监控面板的「Refresh ▾」分体按钮（下拉含 关/Auto/5s…1d）。
@@ -26,22 +37,13 @@
 - **部署顺序/坑**：先合代码+迁移（启动即去重+加约束+新写入停止累积）→ **再**跑运维脚本（**先备份** helm.db/-wal/-shm → dry-run → 正式 → VACUUM，空闲窗口；VACUUM 取排他锁、重写整库、不能在事务内）。
 - **验证**：TDD 红→绿。新测 `message-hash`(6)、store-contract 双驱动去重/重复文本保留 4 例、`observe` 真实 store 重灌 + 重复文本保留 2 例、sqlite/pg 迁移升级各测、sqlite/pg dedup 脚本 smoke；review fix 追加 SQLite 满批冲突不死循环、Postgres 清理路径、重复 `yes` 不丢。全量 **2954 绿**（首跑 1 红是 [[pnpm-test-pglite-flake]]，复跑全绿）、typecheck（4 包）/ lint(Biome) / build(admin+core+gateway) 全绿。
 
-## 2026-06-11 · 四个 AI API 高并发热路径性能优化（Phase B；CLAUDE.md 原则 1/3/7/8）
-
-- **缘起**：用户要求四个对 AI 的 API（`/v1/chat/completions`、`/v1/messages`、`/v1/responses`、`/v1beta/…:generateContent`）支持高并发，且 SQLite 写入绝不拖慢响应。全链路 review（鉴权中间件 / store / 路由执行 / 流式四面）确认根因仍是 [[sqlite-write-perf-root-cause]]：**better-sqlite3 同步阻塞事件循环**——每请求 1 次未缓存鉴权读 +（provider 已应答后）同步 telemetry/payload 写都 `await` 在响应关键路径上；memory observeInbound 在路由前同步提交。承接 Phase A（PRAGMA + memory 批量）。
-- **修复 1 鉴权缓存**：`packages/core/src/store/cached-keystore.ts` `createCachedKeyStore` 包 KeyStore，对 `getByHash` 做 LRU+TTL（命中+未命中都缓，挡无效 key 洪水），任意 mutation 整表失效。composition root 在 `store.keys` 外包一层（同一实例被 auth 中间件 + 三个 self-auth 面 + admin key 路由共享，故 admin 改 key 自动失效）。TTL 默认 30s（`HELM_AUTH_CACHE_TTL_MS`）。**坑：多实例共享 Postgres 时，A 实例吊销的 key 在 B 实例最多续命 TTL。**
-- **修复 2 延迟+批量写队列（核心）**：`TelemetryStore` 加可选 `insertMany?`/`insertPayloads?`（sqlite 单事务 / postgres 多行，N commit→1，仿 appendMessages 先例）。新 `apps/gateway/src/runtime/write-queue.ts`：telemetry/payload 入缓冲按 25ms / 批量阈值合并 flush；副作用任务（memory observe、prune）走单条 FIFO 串行链（保 inbound 先于 outbound）；有界深度（溢出丢最旧+日志）；`flush()/stop()` 排空。chat.ts + recordServed（三面共用）+ pipeline 接**可选 `writes` dep：缺省=今日 inline await（全量存量测试零改动），存在=响应后延迟批量**。**budget settle 永不延迟**（配额正确性：下一请求 pre-route gate 必须看到本次 spend）。`index.ts` 加 SIGTERM/SIGINT → `dispose()` 先 flush 队列再关 store（优雅部署零丢，`HELM_WRITE_QUEUE_FLUSH_MS`/`_MAX_DEPTH`）。**坑：硬崩溃最多丢 flush 窗口内 telemetry/payload；memory 在 flush 窗口内最终一致（连发自动化轮可能漏最后一轮，fail-open）。**
-- **修复 3 undici 出口连接复用**：`apps/gateway/src/runtime/egress.ts` boot 时（buildServer 前）`setGlobalDispatcher(new Agent({keepAliveTimeout:30s,…}))`（`HELM_UNDICI_*`），消除默认 4s keep-alive 导致的反复 TLS 握手；pool size 默认不动（仅显式 `HELM_UNDICI_CONNECTIONS` 才设），per-account proxy 自带 dispatcher 不冲突。gateway 加 `undici` 直接依赖。
-- **修复 4 流式抓包尾缓冲**：`createSseCapture(full)`——capture 开=留全量（原文落库），capture 关=只留 ~16KB 尾（够 `usageFromSSE` 从尾扫成本回填），不再为成本回填把整条流钉内存；不碰转发字节（原则 8）。
-- **取舍/back-compat 关键**：四修复彼此独立、各藏在可选 dep / boot 调用后——任一可单独回滚；写队列出问题只需不接 `writes` dep，路由即退回 inline await。无 DB schema 改动、无客户端可见 API 改动、无新必填配置（新旋钮全是可选 env + 安全默认）。
-- **Codex review 二次修复（两处 P1）**：① 写队列批量 insert 容错——`insertMany` 整批多行写到唯一列，单条重复 `request_id`（客户端复用 `X-Request-Id`→trace_id）会让整批抛错、原实现 catch 后丢掉整个 25ms 窗口的无关行；改为 `writeTelemetry/writePayloads` **批量失败回退逐条**（多行 INSERT 原子，失败不提交，回退不双写），只丢肇事行。② 优雅停机时序——`index.ts` 原先 `server.close()` 未 await 就 dispose（停队列+关 store），在途请求的响应后 enqueue 会被丢、同步 settle 可能打到已关闭 DB；抽 `runtime/shutdown.ts::closeServer`（先丢空闲 keep-alive、await 在途排空、超 `HELM_SHUTDOWN_DRAIN_MS` 默认 10s 再 force-close），**先 await closeServer 再 dispose**。
-- **验证**：TDD 红→绿。新单测：cached-keystore(10)、write-queue(10，含批量回退)、shutdown(3)、egress(3)、createSseCapture(3)、telemetry batch 契约（sqlite+PGlite）、chat/recordServed 延迟路径。全量 `pnpm test` 2935 测试（9 个 PGlite 5s 超时是 [[pnpm-test-pglite-flake]]，隔离重跑 143 全绿）；typecheck（4 包）/ lint(Biome) / build（admin+core+gateway）全绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-11 · 四个 AI API 高并发热路径性能优化（Phase B）：根因仍是 [[sqlite-write-perf-root-cause]] better-sqlite3 同步阻塞事件循环。四独立修复（各藏可选 dep / boot 调用后，可单独回滚）：① `cached-keystore.ts` `createCachedKeyStore` 对 `getByHash` 做 LRU+TTL（默认 30s `HELM_AUTH_CACHE_TTL_MS`，mutation 整表失效；多实例 Postgres 下吊销最多续命 TTL）；② **延迟+批量写队列** `runtime/write-queue.ts`（`TelemetryStore.insertMany?`/`insertPayloads?`，25ms/阈值合并 flush，副作用走 FIFO 串行，有界深度；接可选 `writes` dep——缺省 inline await，存在=响应后批量；**budget settle 永不延迟**；SIGTERM→flush 再关 store；批量失败回退逐条）；③ `runtime/egress.ts` boot 设 undici 全局 `Agent`（keepAlive 30s，消反复 TLS 握手）；④ `createSseCapture(full)` capture 关只留 ~16KB 尾够成本回填。无 DB schema/客户端 API/必填配置改动。全量 2935 绿。
 
 ### 2026-06-10 · SQLite 写入热路径性能修复（Phase A，无 Redis）：根因非 SQLite 并发能力，而是 better-sqlite3 同步阻塞 Node 单线程 + 默认 `synchronous=FULL`（每 commit fsync）；修复 = `migrate.ts::applyPragmas()` 每连接设 WAL + `synchronous=NORMAL` + busy_timeout/temp_store/cache_size，外加 `MemoryStore` 可选 `appendMessages` 批量写（单事务 / 多行 INSERT，N commit→1，`createdAt=base+i` 保序）。坑：PRAGMA 硬编码不入 config；NORMAL 弱持久性已接受；部署后需实测两并发延迟再定 Phase B（Redis 是多实例扩展、非单机吞吐）。migrate.pragmas.test(3)+store-contract/observe 批量例、全量 2601 绿。
 
