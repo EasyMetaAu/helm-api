@@ -44,6 +44,12 @@
   let codexToml = $derived(
     `# ~/.codex/config.toml\n[model_providers.helm]\nname = "Helm"\nbase_url = "${baseV1}"\nenv_key = "HELM_API_KEY"\nwire_api = "responses"\n\n# then, in your shell:\nexport HELM_API_KEY="${keyShown}"`,
   );
+  // Gemini CLI / Google GenAI SDK read GOOGLE_GEMINI_BASE_URL and append the
+  // /v1beta/models/{model}:generateContent path themselves — so this is the BARE
+  // origin, mirroring the Anthropic footgun (a trailing /v1 double-prefixes).
+  let geminiEnv = $derived(
+    `export GOOGLE_GEMINI_BASE_URL="${baseBare}"\nexport GEMINI_API_KEY="${keyShown}"`,
+  );
   let geminiCurl = $derived(
     `curl "${baseBare}/v1beta/models/auto:generateContent" \\\n  -H "Content-Type: application/json" \\\n  -H "x-goog-api-key: ${keyShown}" \\\n  -d '{"contents":[{"parts":[{"text":"Hello from Helm"}]}]}'`,
   );
@@ -134,7 +140,11 @@
         {@render codeBlock('codex-toml', codexToml, 'snippet-codex')}
       {:else if tab === 'gemini'}
         <p class="mb-2 text-sm text-ink-body">
-          {$t('Use Helm\'s native Gemini route. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.')}
+          {$t('Point the Gemini CLI at Helm with these environment variables. The base URL is the bare origin — the CLI appends /v1beta/models/{model}:generateContent itself.')}
+        </p>
+        {@render codeBlock('gemini-env', geminiEnv, 'snippet-gemini-env')}
+        <p class="mb-2 mt-3 text-sm text-ink-body">
+          {$t('Or call Helm\'s native Gemini route directly. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.')}
         </p>
         {@render codeBlock('gemini-curl', geminiCurl, 'snippet-gemini')}
       {:else if tab === 'openclaw'}
