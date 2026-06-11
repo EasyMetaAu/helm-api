@@ -160,12 +160,14 @@ export class PgMemoryStore implements MemoryStore {
   async appendMessage(input: MemoryMessageInput): Promise<string> {
     const id = this.genId();
     // Idempotent ingest (pg v20 mirror of sqlite v21): a re-sent
-    // (thread_id, role, content) collapses to a no-op via the UNIQUE index.
+    // (thread_id, message_index, role, content) collapses to a no-op via the
+    // UNIQUE index while repeated text at a new transcript position persists.
     await this.db
       .insert(memoryMessages)
       .values({
         id,
         threadId: input.threadId,
+        messageIndex: input.messageIndex ?? 0,
         role: input.role,
         content: input.content,
         tokenEstimate: input.tokenEstimate,
@@ -173,7 +175,12 @@ export class PgMemoryStore implements MemoryStore {
         contentHash: sha256Hex(input.content),
       })
       .onConflictDoNothing({
-        target: [memoryMessages.threadId, memoryMessages.role, memoryMessages.contentHash],
+        target: [
+          memoryMessages.threadId,
+          memoryMessages.messageIndex,
+          memoryMessages.role,
+          memoryMessages.contentHash,
+        ],
       });
     return id;
   }
@@ -190,12 +197,14 @@ export class PgMemoryStore implements MemoryStore {
     // multi-row INSERT cannot dedupe rows against EACH OTHER within the same
     // VALUES list — two identical messages in one turn (e.g. a repeated empty
     // assistant turn) would both be inserted. So collapse intra-batch dups by
-    // (thread_id, role, content_hash) here, keeping the first. ids stays one-per-
-    // input (caller discards it; the contract only requires length + uniqueness).
+    // (thread_id, message_index, role, content_hash) here, keeping the first. ids
+    // stays one-per-input (caller discards it; the contract only requires length +
+    // uniqueness).
     const seen = new Set<string>();
     const rows: Array<{
       id: string;
       threadId: string;
+      messageIndex: number;
       role: MemoryMessageInput["role"];
       content: string;
       tokenEstimate: number;
@@ -206,12 +215,14 @@ export class PgMemoryStore implements MemoryStore {
       const id = this.genId();
       ids.push(id);
       const contentHash = sha256Hex(input.content);
-      const key = `${input.threadId} ${input.role} ${contentHash}`;
+      const messageIndex = input.messageIndex ?? i;
+      const key = JSON.stringify([input.threadId, messageIndex, input.role, contentHash]);
       if (seen.has(key)) return;
       seen.add(key);
       rows.push({
         id,
         threadId: input.threadId,
+        messageIndex,
         role: input.role,
         content: input.content,
         tokenEstimate: input.tokenEstimate,
@@ -223,7 +234,12 @@ export class PgMemoryStore implements MemoryStore {
       .insert(memoryMessages)
       .values(rows)
       .onConflictDoNothing({
-        target: [memoryMessages.threadId, memoryMessages.role, memoryMessages.contentHash],
+        target: [
+          memoryMessages.threadId,
+          memoryMessages.messageIndex,
+          memoryMessages.role,
+          memoryMessages.contentHash,
+        ],
       });
     return ids;
   }
@@ -238,7 +254,12 @@ export class PgMemoryStore implements MemoryStore {
           sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryMessages.threadId} AND mt.owner_id = ${scope.accountId})`,
         ),
       )
-      .orderBy(asc(memoryMessages.createdAt), asc(memoryMessages.id));
+      .orderBy(
+        sql`CASE WHEN ${memoryMessages.messageIndex} IS NULL THEN 1 ELSE 0 END`,
+        asc(memoryMessages.messageIndex),
+        asc(memoryMessages.createdAt),
+        asc(memoryMessages.id),
+      );
     return rows.map((row) => ({
       id: row.id,
       threadId: row.threadId,

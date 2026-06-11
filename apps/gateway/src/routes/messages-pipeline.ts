@@ -538,7 +538,12 @@ export function createMessagesPipeline(
             const memoryObserve = memory.observe;
             const outbound = outboundFromIR(irResponse);
             await runObserve(() =>
-              observeOutbound(memoryObserve, memoryScope, outbound, finalAlias),
+              observeOutbound(
+                memoryObserve,
+                memoryScope,
+                { ...outbound, messageIndexOffset: originalMessagesForMemory.length },
+                finalAlias,
+              ),
             );
           }
           // Settle the budget on the served (non-stream) response: cost is already
@@ -621,7 +626,11 @@ export function createMessagesPipeline(
                 observeOutbound(
                   memoryObserve,
                   memoryScope,
-                  { responseMessages, toolResults: [] },
+                  {
+                    responseMessages,
+                    toolResults: [],
+                    messageIndexOffset: originalMessagesForMemory.length,
+                  },
                   finalAlias,
                 ),
               );

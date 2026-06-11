@@ -56,13 +56,20 @@ function toMessageInputs(
   messages: IRMessage[],
   threadId: string,
   estimateTokens: (text: string) => number,
+  indexOffset = 0,
 ): MemoryMessageInput[] {
   const inputs: MemoryMessageInput[] = [];
-  for (const message of messages) {
+  for (const [i, message] of messages.entries()) {
     const role = toMemoryRole(message.role);
     if (role === null) continue;
     const content = serializeContent(message.content);
-    inputs.push({ threadId, role, content, tokenEstimate: estimateTokens(content) });
+    inputs.push({
+      threadId,
+      messageIndex: indexOffset + i,
+      role,
+      content,
+      tokenEstimate: estimateTokens(content),
+    });
   }
   return inputs;
 }
@@ -164,7 +171,11 @@ export async function observeInbound(
 export async function observeOutbound(
   deps: ObserveDeps,
   scope: MemoryScope,
-  result: { responseMessages: IRMessage[]; toolResults: IRToolResult[] },
+  result: {
+    responseMessages: IRMessage[];
+    toolResults: IRToolResult[];
+    messageIndexOffset?: number;
+  },
   servedModel?: string | null,
 ): Promise<void> {
   if (scope.mode === "off") return;
@@ -178,6 +189,7 @@ export async function observeOutbound(
         [...result.responseMessages, ...result.toolResults],
         threadId,
         deps.estimateTokens,
+        result.messageIndexOffset ?? 0,
       ),
     );
   } catch (err) {

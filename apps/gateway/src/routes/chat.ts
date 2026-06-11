@@ -712,7 +712,11 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
               observeOutbound(
                 memoryObserve,
                 memoryScope,
-                { responseMessages, toolResults: [] },
+                {
+                  responseMessages,
+                  toolResults: [],
+                  messageIndexOffset: originalMessagesForMemory.length,
+                },
                 finalAlias,
               ),
             );
@@ -742,7 +746,14 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
       const memoryObserve = deps.memory.observe;
       const outbound = outboundFromOpenAIBody(result.body);
-      await runObserve(() => observeOutbound(memoryObserve, memoryScope, outbound, finalAlias));
+      await runObserve(() =>
+        observeOutbound(
+          memoryObserve,
+          memoryScope,
+          { ...outbound, messageIndexOffset: originalMessagesForMemory.length },
+          finalAlias,
+        ),
+      );
     }
     // Usage-budget settle (non-stream, success): cost is already on the decision;
     // tokens from the body's usage. Fail-open.

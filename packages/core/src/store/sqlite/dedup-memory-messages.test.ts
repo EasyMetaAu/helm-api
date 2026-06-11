@@ -16,13 +16,13 @@ function seed() {
   // memory_messages.thread_id has an FK to memory_threads — seed the thread.
   s.prepare("INSERT INTO memory_threads (id, created_at, updated_at) VALUES ('t1', 1, 1)").run();
   const insMsg = s.prepare(
-    "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at, content_hash) VALUES (?, ?, ?, ?, 1, ?, ?)",
+    "INSERT INTO memory_messages (id, thread_id, message_index, role, content, token_estimate, created_at, content_hash) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
   );
   // Historical NULL-hash rows (pre-v21-backfill state).
-  insMsg.run("h-y", "t1", "user", "y", 1, null); // unique → backfilled
-  insMsg.run("h-x", "t1", "user", "x", 2, null); // collides with the hashed twin below
+  insMsg.run("h-y", "t1", null, "user", "y", 1, null); // unique -> backfilled
+  insMsg.run("h-x", "t1", null, "user", "x", 2, null); // collides with the hashed twin below
   // A row the running gateway already re-inserted post-migration WITH a hash.
-  insMsg.run("app-x", "t1", "user", "x", 3, sha256Hex("x"));
+  insMsg.run("app-x", "t1", 1, "user", "x", 3, sha256Hex("x"));
 
   s.prepare(
     "INSERT INTO memory_observations (id, thread_id, source_message_range, observation_text, observed_at) VALUES (?, ?, ?, ?, ?)",
@@ -60,12 +60,16 @@ describe("dedupMemory ops script", () => {
       // "y" got a hash; the historical "x" duplicate (collides with app-x) was deleted.
       expect(out.backfilled).toBe(1);
       expect(out.deletedDuplicates).toBe(1);
-      const yHash = (
-        s.prepare("SELECT content_hash AS h FROM memory_messages WHERE id='h-y'").get() as {
-          h: string | null;
-        }
-      ).h;
-      expect(yHash).toBe(sha256Hex("y"));
+      const yRow = s
+        .prepare(
+          "SELECT content_hash AS h, message_index AS idx FROM memory_messages WHERE id='h-y'",
+        )
+        .get() as {
+        h: string | null;
+        idx: number | null;
+      };
+      expect(yRow.h).toBe(sha256Hex("y"));
+      expect(yRow.idx).toBe(0);
       const xRows = s.prepare("SELECT id FROM memory_messages WHERE content='x'").all() as Array<{
         id: string;
       }>;
@@ -73,7 +77,9 @@ describe("dedupMemory ops script", () => {
       expect(
         (
           s
-            .prepare("SELECT COUNT(*) AS c FROM memory_messages WHERE content_hash IS NULL")
+            .prepare(
+              "SELECT COUNT(*) AS c FROM memory_messages WHERE content_hash IS NULL OR message_index IS NULL",
+            )
             .get() as { c: number }
         ).c,
       ).toBe(0);
@@ -87,6 +93,41 @@ describe("dedupMemory ops script", () => {
       const jobs = s.prepare("SELECT id FROM memory_jobs").all() as Array<{ id: string }>;
       expect(jobs.map((j) => j.id)).toEqual(["j-pending"]);
       expect(out.vacuumed).toBe(true);
+    } finally {
+      s.close();
+    }
+  });
+
+  it("makes progress when a full selected batch only contains collision leftovers", () => {
+    const db = createSqliteDb(":memory:");
+    const s = db.$sqlite;
+    try {
+      s.prepare(
+        "INSERT INTO memory_threads (id, created_at, updated_at) VALUES ('t1', 1, 1)",
+      ).run();
+      const ins = s.prepare(
+        "INSERT INTO memory_messages (id, thread_id, message_index, role, content, token_estimate, created_at, content_hash) VALUES (?, 't1', ?, 'user', ?, 1, ?, ?)",
+      );
+      for (let i = 0; i < 5000; i += 1) {
+        const content = `same-${i}`;
+        ins.run(`null-${i}`, null, content, i, null);
+      }
+      for (let i = 0; i < 5000; i += 1) {
+        const content = `same-${i}`;
+        ins.run(`hashed-${i}`, i, content, 10_000 + i, sha256Hex(content));
+      }
+
+      const out = dedupMemory(s, {});
+      expect(out.deletedDuplicates).toBe(5000);
+      expect(
+        (
+          s
+            .prepare(
+              "SELECT COUNT(*) AS c FROM memory_messages WHERE content_hash IS NULL OR message_index IS NULL",
+            )
+            .get() as { c: number }
+        ).c,
+      ).toBe(0);
     } finally {
       s.close();
     }

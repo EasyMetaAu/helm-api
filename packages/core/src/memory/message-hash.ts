@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 
-// Dedup fingerprint for raw memory messages (the idempotency key behind the
-// memory_messages UNIQUE(thread_id, role, content_hash) constraint). The client
-// re-sends the FULL transcript every turn; without an idempotency key the store
-// blind-inserts the whole history each time (O(n²) row growth — the re-ingestion
-// bug). Hashing content lets the write path collapse a re-sent message to a
-// no-op via ON CONFLICT DO NOTHING.
+// Dedup fingerprint for raw memory messages. The full idempotency key is
+// (thread_id, message_index, role, content_hash): message_index keeps legitimate
+// repeated text at later transcript positions, while content_hash keeps the index
+// compact and safe for Postgres btree limits. The client re-sends the FULL
+// transcript every turn; without this key the store blind-inserts the whole
+// history each time (O(n²) row growth — the re-ingestion bug).
 //
 // DELIBERATELY VERBATIM — unlike forgetting/facts.ts `normalizeFactText`, this
 // does NOT lowercase or collapse whitespace. Memory messages are exact text /
