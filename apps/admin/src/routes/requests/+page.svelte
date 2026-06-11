@@ -1,9 +1,10 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { goto } from '$app/navigation';
+  import { goto, invalidateAll } from '$app/navigation';
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
+  import RefreshControl from '$lib/components/RefreshControl.svelte';
   import { formatTimestamp, formatUsd } from '$lib/format.js';
   import { paginationItems } from '$lib/pagination.js';
   import {
@@ -139,13 +140,20 @@
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
-  <header>
-    <h1 class="page-title">{$t('Requests')}</h1>
-    <p class="section-desc">
-      {$t(
-        'Routing trail for each request — classification layer, lane, served model, fallbacks, cost and errors. Keys are shown by prefix only.',
-      )}
-    </p>
+  <header class="flex items-start justify-between gap-3">
+    <div class="min-w-0">
+      <h1 class="page-title">{$t('Requests')}</h1>
+      <p class="section-desc">
+        {$t(
+          'Routing trail for each request — classification layer, lane, served model, fallbacks, cost and errors. Keys are shown by prefix only.',
+        )}
+      </p>
+    </div>
+    <!-- Refresh now + auto-refresh cadence. Re-runs the loader (invalidateAll),
+         which re-reads the URL filters and refetches the current page. -->
+    <div class="shrink-0">
+      <RefreshControl onRefresh={() => invalidateAll()} />
+    </div>
   </header>
 
   <!-- Date-range presets, pulled out as a standalone button row (the shared

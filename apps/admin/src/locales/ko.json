@@ -39,6 +39,7 @@
   "Apply the configured per-key request and token limits.": "구성된 키별 요청 및 토큰 제한을 적용합니다.",
   "Assembled": "조합 결과",
   "Auto (derive from client signals)": "자동(클라이언트 신호에서 파생)",
+  "Auto refresh": "자동 새로고침",
   "auto thread": "스레드 자동 추론",
   "auto-renews": "자동 갱신",
   "Avg latency": "평균 지연",

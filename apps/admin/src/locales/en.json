@@ -40,6 +40,7 @@
   "Apply the configured per-key request and token limits.": "Apply the configured per-key request and token limits.",
   "Assembled": "Assembled",
   "Auto (derive from client signals)": "Auto (derive from client signals)",
+  "Auto refresh": "Auto refresh",
   "auto thread": "auto thread",
   "auto-renews": "auto-renews",
   "Avg latency": "Avg latency",

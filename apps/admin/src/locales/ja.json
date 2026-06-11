@@ -39,6 +39,7 @@
   "Apply the configured per-key request and token limits.": "設定されたキーごとのリクエスト数とトークン数の制限を適用します。",
   "Assembled": "結合結果",
   "Auto (derive from client signals)": "自動（クライアント信号から派生）",
+  "Auto refresh": "自動更新",
   "auto thread": "スレッド自動推定",
   "auto-renews": "自動更新",
   "Avg latency": "平均レイテンシ",
