@@ -3,16 +3,15 @@ import Database from "better-sqlite3";
 
 // One-time production maintenance for the memory_messages re-ingestion bug
 // (fix/memory-message-dedup). The v21 migration already (a) collapsed exact
-// duplicate rows and (b) added UNIQUE(thread_id, role, content_hash) on STARTUP —
-// but historical rows keep content_hash = NULL (no sha256 SQL fn in sqlite). This
-// closes the loop on a live helm.db:
+// legacy duplicate rows and (b) added UNIQUE(thread_id, message_index, role,
+// content_hash) on STARTUP — but historical rows keep message_index/content_hash
+// NULL (no sha256 SQL fn in sqlite). This closes the loop on a live helm.db:
 //
-//   1. Backfill content_hash for every historical NULL-hash row (JS sha256,
-//      batched). UPDATE OR IGNORE: a historical row whose hash would collide with
-//      an already-hashed twin (one the running gateway re-inserted between the
-//      migration and this run) is left NULL …
-//   2. … then deleted — a NULL-hash row that survives backfill is, by definition,
-//      a duplicate of a hashed row.
+//   1. Backfill content_hash + message_index for historical incomplete rows (JS
+//      sha256 + row_number over each thread's current order, zero-based; batched).
+//   2. UPDATE OR IGNORE leaves a historical row whose key would collide with an
+//      already-indexed/hashed twin incomplete; delete it in the same batch so the
+//      loop always makes progress.
 //   3. Wipe memory_observations — they were formed from the duplicate-laden data
 //      (measured_retention ~0.6%); the observer rebuilds them on clean data.
 //   4. Prune terminal (done/failed) memory_jobs.
@@ -44,12 +43,16 @@ export function dedupMemory(db: Database.Database, opts: DedupOptions = {}): Ded
   const dryRun = opts.dryRun === true;
   const log = opts.log ?? (() => {});
 
-  const nullCount = (
-    db.prepare("SELECT COUNT(*) AS c FROM memory_messages WHERE content_hash IS NULL").get() as {
+  const pendingCount = (
+    db
+      .prepare(
+        "SELECT COUNT(*) AS c FROM memory_messages WHERE content_hash IS NULL OR message_index IS NULL",
+      )
+      .get() as {
       c: number;
     }
   ).c;
-  log(`memory_messages with NULL content_hash: ${nullCount}`);
+  log(`memory_messages needing index/hash backfill: ${pendingCount}`);
 
   const summary: DedupSummary = {
     backfilled: 0,
@@ -68,34 +71,53 @@ export function dedupMemory(db: Database.Database, opts: DedupOptions = {}): Ded
         .get() as { c: number }
     ).c;
     log(
-      `[dry-run] would backfill ${nullCount} hashes, wipe ${obs} observations, prune ${jobs} jobs`,
+      `[dry-run] would backfill ${pendingCount} messages, wipe ${obs} observations, prune ${jobs} jobs`,
     );
     return summary;
   }
 
   // 1+2. Backfill in batches. UPDATE OR IGNORE leaves a colliding historical row
-  // NULL; we delete those leftovers afterwards (they duplicate a hashed twin).
+  // incomplete; delete those leftovers within the same batch so progress cannot
+  // stall on a full batch of collisions.
   const selectBatch = db.prepare(
-    "SELECT id, content FROM memory_messages WHERE content_hash IS NULL LIMIT ?",
+    `SELECT id, content, rn - 1 AS message_index
+       FROM (
+         SELECT id,
+                content,
+                ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY created_at ASC, id ASC) AS rn
+           FROM memory_messages
+       )
+      WHERE id IN (
+        SELECT id FROM memory_messages
+         WHERE content_hash IS NULL OR message_index IS NULL
+         ORDER BY thread_id ASC, created_at ASC, id ASC
+         LIMIT ?
+      )`,
   );
-  const update = db.prepare("UPDATE OR IGNORE memory_messages SET content_hash = ? WHERE id = ?");
+  const update = db.prepare(
+    "UPDATE OR IGNORE memory_messages SET content_hash = ?, message_index = ? WHERE id = ?",
+  );
+  const deleteIncomplete = db.prepare(
+    "DELETE FROM memory_messages WHERE id = ? AND (content_hash IS NULL OR message_index IS NULL)",
+  );
   for (;;) {
-    const rows = selectBatch.all(BACKFILL_BATCH) as Array<{ id: string; content: string }>;
+    const rows = selectBatch.all(BACKFILL_BATCH) as Array<{
+      id: string;
+      content: string;
+      message_index: number;
+    }>;
     if (rows.length === 0) break;
     const tx = db.transaction((batch: typeof rows) => {
       for (const r of batch) {
-        const res = update.run(sha256Hex(r.content), r.id);
+        const res = update.run(sha256Hex(r.content), r.message_index, r.id);
         if (res.changes === 1) summary.backfilled += 1;
+        summary.deletedDuplicates += deleteIncomplete.run(r.id).changes;
       }
     });
     tx(rows);
-    if (rows.length < BACKFILL_BATCH) break;
   }
-  summary.deletedDuplicates = db
-    .prepare("DELETE FROM memory_messages WHERE content_hash IS NULL")
-    .run().changes;
   log(
-    `backfilled ${summary.backfilled} hashes, deleted ${summary.deletedDuplicates} leftover duplicates`,
+    `backfilled ${summary.backfilled} messages, deleted ${summary.deletedDuplicates} collision duplicates`,
   );
 
   // 3. Observations were built from duplicate-laden data — let the observer rebuild.

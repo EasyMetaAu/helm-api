@@ -140,14 +140,23 @@ export const memoryMessages = pgTable(
     content: text("content").notNull(),
     tokenEstimate: integer("token_estimate").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // Stable client-transcript position. This keeps repeated text at different
+    // positions distinct while still making re-sent history idempotent.
+    messageIndex: integer("message_index"),
     // Idempotency key (pg v20): sha256(content) hex, NO normalization. pg mirror
-    // of the sqlite v21 dedup column — UNIQUE(thread_id, role, content_hash) +
-    // ON CONFLICT DO NOTHING collapses the re-sent transcript to a no-op. hash
-    // (not raw content) because a pg btree index row is capped at ~2704 bytes.
+    // of the sqlite v21 dedup column — UNIQUE(thread_id, message_index, role,
+    // content_hash) + ON CONFLICT DO NOTHING collapses the re-sent transcript to a
+    // no-op. hash (not raw content) because a pg btree index row is capped at
+    // ~2704 bytes.
     contentHash: text("content_hash"),
   },
   (t) => [
-    uniqueIndex("uniq_memory_messages_thread_role_hash").on(t.threadId, t.role, t.contentHash),
+    uniqueIndex("uniq_memory_messages_thread_idx_role_hash").on(
+      t.threadId,
+      t.messageIndex,
+      t.role,
+      t.contentHash,
+    ),
   ],
 );
 

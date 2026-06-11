@@ -248,19 +248,26 @@ describe("runPgMigrations — per-migration atomicity", () => {
     };
     expect(rows.rows.map((r) => r.id)).toEqual(["first", "other"]);
 
-    // The UNIQUE index rejects a duplicate (thread_id, role, content_hash).
+    // The UNIQUE index rejects a duplicate (thread_id, message_index, role, content_hash).
     await db.execute(
       sql.raw(
-        "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at, content_hash) VALUES ('h1', 't2', 'user', 'x', 1, 1, 'hash-x')",
+        "INSERT INTO memory_messages (id, thread_id, message_index, role, content, token_estimate, created_at, content_hash) VALUES ('h1', 't2', 0, 'user', 'x', 1, 1, 'hash-x')",
       ),
     );
     await expect(
       db.execute(
         sql.raw(
-          "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at, content_hash) VALUES ('h2', 't2', 'user', 'x', 1, 2, 'hash-x')",
+          "INSERT INTO memory_messages (id, thread_id, message_index, role, content, token_estimate, created_at, content_hash) VALUES ('h2', 't2', 0, 'user', 'x', 1, 2, 'hash-x')",
         ),
       ),
     ).rejects.toThrow();
+    await expect(
+      db.execute(
+        sql.raw(
+          "INSERT INTO memory_messages (id, thread_id, message_index, role, content, token_estimate, created_at, content_hash) VALUES ('h3', 't2', 1, 'user', 'x', 1, 3, 'hash-x')",
+        ),
+      ),
+    ).resolves.toBeDefined();
     await db.$close();
   });
 });

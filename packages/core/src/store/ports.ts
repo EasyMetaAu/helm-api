@@ -315,11 +315,13 @@ export interface MemoryStore {
   // Idempotent upsert of a thread; safe to call on every observed request.
   ensureThread(input: MemoryThreadInput): Promise<void>;
   // Persist one raw message; returns the generated message id. Ingest is
-  // IDEMPOTENT: a row duplicating an existing (thread_id, role, content) is a
-  // no-op (UNIQUE(thread_id, role, content_hash) + ON CONFLICT DO NOTHING) — the
-  // client re-sends the whole transcript each turn, so without this the store
-  // grows O(n²). The returned id is generated per call; ON a conflict it is inert
-  // (the existing row keeps its original id — callers must not assume it persisted).
+  // IDEMPOTENT: a row duplicating an existing (thread_id, message_index, role,
+  // content) is a no-op (UNIQUE(thread_id, message_index, role, content_hash) +
+  // ON CONFLICT DO NOTHING). The client re-sends the whole transcript each turn,
+  // so without this the store grows O(n²); message_index preserves legitimate
+  // repeated text at later transcript positions. The returned id is generated per
+  // call; ON a conflict it is inert (the existing row keeps its original id —
+  // callers must not assume it persisted).
   appendMessage(input: MemoryMessageInput): Promise<string>;
   // Batch variant of appendMessage: persist a whole turn's messages in ONE
   // transaction (a single commit/fsync) instead of N. observe's INBOUND path runs

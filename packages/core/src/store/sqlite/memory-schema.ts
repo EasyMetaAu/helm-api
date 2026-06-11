@@ -30,15 +30,24 @@ export const memoryMessages = sqliteTable(
     content: text("content").notNull(), // raw message text / JSON
     tokenEstimate: integer("token_estimate").notNull(),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    // Stable client-transcript position. This keeps repeated text at different
+    // positions distinct while still making re-sent history idempotent.
+    messageIndex: integer("message_index"),
     // Idempotency key (v21): sha256(content) hex, NO normalization. The client
-    // re-sends the full transcript every turn; the UNIQUE(thread_id, role,
-    // content_hash) index + ON CONFLICT DO NOTHING collapses re-ingestion to a
-    // no-op (fixes O(n²) row growth). NULL only for pre-v21 rows the ops script
-    // backfills — NULLs are distinct in a UNIQUE index, so the index still builds.
+    // re-sends the full transcript every turn; the UNIQUE(thread_id,
+    // message_index, role, content_hash) index + ON CONFLICT DO NOTHING collapses
+    // re-ingestion to a no-op while preserving repeated text at new positions.
+    // NULL only for pre-v21 rows the ops script backfills — NULLs are distinct in
+    // a UNIQUE index, so the index still builds.
     contentHash: text("content_hash"),
   },
   (t) => [
-    uniqueIndex("uniq_memory_messages_thread_role_hash").on(t.threadId, t.role, t.contentHash),
+    uniqueIndex("uniq_memory_messages_thread_idx_role_hash").on(
+      t.threadId,
+      t.messageIndex,
+      t.role,
+      t.contentHash,
+    ),
   ],
 );
 

@@ -22,6 +22,10 @@ export const MemoryThreadInputSchema = z.object({
 // Input to append a raw message to a thread (observe phase persists originals).
 export const MemoryMessageInputSchema = z.object({
   threadId: z.string().min(1),
+  // Stable zero-based position within the client-visible transcript. Production
+  // observe writes always supply it; it stays optional at the port boundary so
+  // older low-level tests/fakes can still write single messages.
+  messageIndex: z.number().int().nonnegative().optional(),
   role: MemoryRoleSchema,
   content: z.string(), // raw message text / JSON string
   tokenEstimate: z.number().int().nonnegative(),

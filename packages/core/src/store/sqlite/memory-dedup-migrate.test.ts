@@ -7,9 +7,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createSqliteDb } from "./migrate.js";
 
 // Migration v21 upgrade path: a real pre-v21 memory_messages table (no
-// content_hash, no unique index) carrying duplicate rows must, on upgrade,
-// (a) collapse exact duplicates keeping the EARLIEST row, (b) gain the
-// content_hash column, (c) gain the UNIQUE(thread_id, role, content_hash) index.
+// content_hash/message_index, no unique index) carrying duplicate rows must, on
+// upgrade, (a) collapse exact legacy duplicates keeping the EARLIEST row, (b)
+// gain the content_hash/message_index columns, (c) gain the occurrence-aware
+// UNIQUE(thread_id, message_index, role, content_hash) index.
 // Mirrors the postgres migrate.test.ts pre-unique-index upgrade test.
 
 const dirs: string[] = [];
@@ -52,7 +53,7 @@ function seedPreV21(): string {
 }
 
 describe("memory_messages dedup migration (v21)", () => {
-  it("collapses duplicates to the earliest row and adds the content_hash column", () => {
+  it("collapses duplicates to the earliest row and adds the dedup columns", () => {
     const db = createSqliteDb(seedPreV21());
     try {
       const rows = db.$sqlite
@@ -65,27 +66,28 @@ describe("memory_messages dedup migration (v21)", () => {
         db.$sqlite.prepare("PRAGMA table_info(memory_messages)").all() as Array<{ name: string }>
       ).map((c) => c.name);
       expect(cols).toContain("content_hash");
+      expect(cols).toContain("message_index");
     } finally {
       db.$sqlite.close();
     }
   });
 
-  it("creates the UNIQUE index that rejects a duplicate (thread, role, content_hash)", () => {
+  it("creates the UNIQUE index that rejects a duplicate occurrence key", () => {
     const db = createSqliteDb(seedPreV21());
     try {
       const idx = db.$sqlite
         .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?")
-        .get("uniq_memory_messages_thread_role_hash");
+        .get("uniq_memory_messages_thread_idx_role_hash");
       expect(idx).toBeDefined();
 
-      // A raw duplicate insert (same thread/role/content_hash) must be rejected.
+      // A raw duplicate insert (same thread/message_index/role/content_hash) must be rejected.
       const ins = db.$sqlite.prepare(
-        "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO memory_messages (id, thread_id, message_index, role, content, token_estimate, created_at, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       );
-      ins.run(randomUUID(), "t2", "user", "x", 1, 1, "hash-x");
-      expect(() => ins.run(randomUUID(), "t2", "user", "x", 1, 2, "hash-x")).toThrow();
-      // Different hash on the same (thread, role) is fine.
-      expect(() => ins.run(randomUUID(), "t2", "user", "y", 1, 3, "hash-y")).not.toThrow();
+      ins.run(randomUUID(), "t2", 0, "user", "x", 1, 1, "hash-x");
+      expect(() => ins.run(randomUUID(), "t2", 0, "user", "x", 1, 2, "hash-x")).toThrow();
+      // Same content hash at a later transcript position is legitimate.
+      expect(() => ins.run(randomUUID(), "t2", 1, "user", "x", 1, 3, "hash-x")).not.toThrow();
     } finally {
       db.$sqlite.close();
     }
