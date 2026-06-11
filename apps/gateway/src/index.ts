@@ -5,6 +5,8 @@
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { createJsonLogger } from "./logging.js";
+import { configureEgress } from "./runtime/egress.js";
+import { type ClosableServer, closeServer } from "./runtime/shutdown.js";
 import { buildServer } from "./server.js";
 
 export { type AppDeps, type AppEnv, createApp } from "./app.js";
@@ -40,9 +42,39 @@ export function buildDefaultApp() {
 async function main(): Promise<void> {
   const logger = createJsonLogger();
   try {
-    const { app, port, host } = await buildServer({ logger });
-    serve({ fetch: app.fetch, port, hostname: host });
-    logger.log("info", "gateway.listening", { host, port });
+    // Tune the process-global undici dispatcher (keep-alive) BEFORE any upstream
+    // call can be made — it is a process global, so it cannot live inside buildServer.
+    configureEgress(process.env);
+    const handle = await buildServer({ logger });
+    const server = serve({ fetch: handle.app.fetch, port: handle.port, hostname: handle.host });
+    logger.log("info", "gateway.listening", { host: handle.host, port: handle.port });
+
+    // Graceful shutdown: FIRST stop accepting connections and wait for in-flight
+    // requests to finish (so their post-response enqueue()s land while the queue is
+    // still running), THEN drain the deferred write queue + close the store
+    // (handle.dispose). Ordering matters — disposing before requests drain would drop
+    // their telemetry/payload writes and run budget/store work against a closed DB.
+    // Idempotent across repeated signals. The drain is bounded by HELM_SHUTDOWN_DRAIN_MS.
+    const drainRaw = Number(process.env.HELM_SHUTDOWN_DRAIN_MS);
+    const drainMs = Number.isFinite(drainRaw) && drainRaw > 0 ? drainRaw : 10_000;
+    let shuttingDown = false;
+    const shutdown = async (signal: string): Promise<void> => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      logger.log("info", "gateway.shutdown", { signal });
+      try {
+        await closeServer(server as unknown as ClosableServer, drainMs);
+        await handle.dispose?.();
+      } catch (err) {
+        logger.log("error", "gateway.shutdown_failed", {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        process.exit(0);
+      }
+    };
+    process.on("SIGTERM", () => void shutdown("SIGTERM"));
+    process.on("SIGINT", () => void shutdown("SIGINT"));
   } catch (err) {
     logger.log("error", "gateway.startup_failed", {
       message: err instanceof Error ? err.message : String(err),

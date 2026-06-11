@@ -1,4 +1,5 @@
 import type { DecisionRecord, TelemetryStore } from "@helm/core";
+import type { WriteQueue } from "../runtime/write-queue.js";
 
 // Shared full request/response capture + streamed-cost backfill helpers, used by
 // BOTH the OpenAI (chat.ts) and Anthropic (messages-pipeline.ts) routes.
@@ -55,11 +56,54 @@ export function captureEnabled(deps: PayloadCaptureDeps): boolean {
   return deps.capturePayloads?.() === true;
 }
 
+// Default retained-tail size (chars) when NOT persisting the body. The trailing
+// usage frame (include_usage) is tiny and always last, so a few KB is ample for
+// usageFromSSE; this caps per-stream memory instead of pinning the whole response.
+const SSE_TAIL_CHARS = 16_384;
+
+export interface SseCapture {
+  push(chunk: string): void;
+  /** The retained text: the FULL body when capturing, else a bounded trailing tail. */
+  value(): string;
+}
+
+// Accumulate forwarded SSE chunks for end-of-stream use (verbatim capture +
+// streamed-cost backfill) WITHOUT pinning the whole response in memory when capture
+// is off. `full=true` keeps everything (it will be persisted verbatim). `full=false`
+// keeps only a bounded trailing tail — enough for usageFromSSE, which scans from the
+// END — so a large stream under high concurrency costs O(tail), not O(response). The
+// caller always feeds a COPY after writing the chunk downstream, so this never
+// touches the bytes forwarded to the client (principle 8).
+export function createSseCapture(full: boolean, tailChars: number = SSE_TAIL_CHARS): SseCapture {
+  const parts: string[] = [];
+  let size = 0;
+  return {
+    push(chunk: string): void {
+      parts.push(chunk);
+      if (full) return;
+      size += chunk.length;
+      // Drop oldest parts while over budget, but always retain at least the last one.
+      while (size > tailChars && parts.length > 1) {
+        const dropped = parts.shift();
+        if (dropped !== undefined) size -= dropped.length;
+      }
+    },
+    value(): string {
+      return parts.join("");
+    },
+  };
+}
+
 export interface RecordServedDeps extends PayloadCaptureDeps {
   /** Redactor for the decision before it is persisted to telemetry (never store a
    *  plaintext key / secret). Same redactor the chat route uses. */
   redact: (decision: DecisionRecord) => DecisionRecord;
   now: () => number;
+  /** Deferred + batched write queue (perf). ABSENT = today's behavior (the
+   *  telemetry + payload writes are awaited inline). PRESENT = both are enqueued to
+   *  run AFTER the response, batched off the request's critical path. Fail-open
+   *  either way. Wired in the composition root for the three pipeline faces. */
+  writes?: WriteQueue;
 }
 
 // Record ONE served request: the telemetry row (always — this is what makes the
@@ -79,6 +123,33 @@ export async function recordServed(
   },
   log: (msg: string) => void,
 ): Promise<void> {
+  // Deferred + batched path: enqueue both writes to run AFTER the response, off the
+  // hot path. The redaction is done HERE (synchronously) so the enqueued snapshot is
+  // independent of anything that touches the decision later.
+  const w = deps.writes;
+  if (w !== undefined) {
+    if (captureEnabled(deps)) {
+      w.enqueuePayload({
+        requestId: args.requestId,
+        requestJson: args.requestJson,
+        responseJson: args.responseJson,
+        createdAt: new Date(deps.now()),
+      });
+      const retentionMs = deps.payloadRetentionMs?.();
+      if (retentionMs !== undefined && retentionMs > 0) {
+        const cutoff = deps.now() - retentionMs;
+        w.enqueueTask(() => deps.telemetry.prunePayloads(cutoff));
+      }
+    }
+    w.enqueueTelemetry({
+      decision: deps.redact(args.decision),
+      apiKeyId: args.apiKeyId,
+      createdAt: new Date(deps.now()),
+    });
+    return;
+  }
+
+  // Inline path (no write queue): today's behavior, byte-for-byte.
   await persistPayload(
     deps,
     {

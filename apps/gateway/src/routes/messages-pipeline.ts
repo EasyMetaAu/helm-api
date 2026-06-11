@@ -25,6 +25,7 @@ import {
 } from "@helm/core";
 import type { InternalRequest, MemoryDecision, Protocol } from "@helm/shared";
 import type { ServingAccount } from "../runtime/serving-account.js";
+import type { WriteQueue } from "../runtime/write-queue.js";
 import { copyLiteLLMRequestParams, providerRawFromRequest } from "./internal-request-params.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import {
@@ -346,9 +347,25 @@ export function createMessagesPipeline(
   // no recording (existing tests unchanged). Called for EVERY served request,
   // independent of budgets; fail-open in the composition root.
   recordOAuthUsage?: RecordOAuthUsageFn,
+  // Deferred + batched write queue (perf). ABSENT = today's behavior (memory observe
+  // is awaited inline; observeInbound blocks before routing). PRESENT = the fail-open
+  // observe writes are enqueued (FIFO, so inbound still settles before outbound) to
+  // run AFTER the response. The budget settle is NEVER deferred (quota correctness).
+  writes?: WriteQueue,
 ): {
   run(ir: PipelineIR, identity: MessagesIdentity, signal: AbortSignal): Promise<PipelineRunResult>;
 } {
+  // Run a fail-open memory observe: deferred (FIFO) when a write queue is wired, else
+  // inline await (today). FIFO ordering keeps inbound before outbound per thread.
+  const runObserve = async (task: () => Promise<unknown>): Promise<void> => {
+    if (writes !== undefined) {
+      writes.enqueueTask(async () => {
+        await task();
+      });
+      return;
+    }
+    await task();
+  };
   return {
     async run(ir, identity, signal) {
       const meta = ir.metadata;
@@ -414,7 +431,10 @@ export function createMessagesPipeline(
       // Memory observe (inbound): persist the original raw messages after
       // inject. It is write-only and fail-open; delaying it prevents self-pollution.
       if (memory !== undefined) {
-        await observeInbound(memory.observe, memoryScope, originalMessagesForMemory);
+        const memoryObserve = memory.observe;
+        await runObserve(() =>
+          observeInbound(memoryObserve, memoryScope, originalMessagesForMemory),
+        );
       }
 
       const caps = identity.caps as
@@ -515,11 +535,10 @@ export function createMessagesPipeline(
           if (memory !== undefined) {
             const finalAlias =
               result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
-            await observeOutbound(
-              memory.observe,
-              memoryScope,
-              outboundFromIR(irResponse),
-              finalAlias,
+            const memoryObserve = memory.observe;
+            const outbound = outboundFromIR(irResponse);
+            await runObserve(() =>
+              observeOutbound(memoryObserve, memoryScope, outbound, finalAlias),
             );
           }
           // Settle the budget on the served (non-stream) response: cost is already
@@ -595,17 +614,16 @@ export function createMessagesPipeline(
             if (memory !== undefined) {
               const finalAlias =
                 result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
-              await observeOutbound(
-                memory.observe,
-                memoryScope,
-                {
-                  responseMessages:
-                    assistant.text.length > 0
-                      ? [{ role: "assistant", content: assistant.text }]
-                      : [],
-                  toolResults: [],
-                },
-                finalAlias,
+              const memoryObserve = memory.observe;
+              const responseMessages: IRMessage[] =
+                assistant.text.length > 0 ? [{ role: "assistant", content: assistant.text }] : [];
+              await runObserve(() =>
+                observeOutbound(
+                  memoryObserve,
+                  memoryScope,
+                  { responseMessages, toolResults: [] },
+                  finalAlias,
+                ),
               );
             }
             // Streamed-cost backfill + budget settle (docs/06). Zero-touch when

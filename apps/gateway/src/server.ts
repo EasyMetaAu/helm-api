@@ -9,6 +9,7 @@ import {
   type ConfigStore,
   createAnthropicClient,
   createBudgetGate,
+  createCachedKeyStore,
   createCircuitBreaker,
   createCodexResponsesClient,
   createKeyedSemaphore,
@@ -121,6 +122,7 @@ import {
   servedByAccount,
   withServingAccountCapture,
 } from "./runtime/serving-account.js";
+import { createWriteQueue } from "./runtime/write-queue.js";
 
 export interface ServerHandle {
   app: ReturnType<typeof createApp>;
@@ -128,7 +130,7 @@ export interface ServerHandle {
   host: string;
   // Stop background workers (e.g. the Agentic Signals scheduler). Optional and
   // safe to skip — the timers are unref'd so they never block process exit.
-  dispose?: () => void;
+  dispose?: () => void | Promise<void>;
 }
 
 // Pre-classification TPM token estimator. Extracted to middleware/estimate-tokens
@@ -656,8 +658,33 @@ export async function buildServer(
     );
   }
   const store: StoreSet = await createStore({ store: storeCfg, dataDir, connectionString });
-  const keyStore = store.keys;
+  // Auth-lookup cache (perf): getByHash runs synchronously on the event-loop thread
+  // for EVERY request on all four AI faces (better-sqlite3 is sync). Wrap the shared
+  // KeyStore once so repeat lookups of the same bearer key hit an in-process LRU
+  // instead of the DB. Mutations flow through this SAME instance (auth + admin key
+  // routes + the self-auth faces all use `keyStore`), so an admin create/revoke/edit
+  // busts the cache automatically. TTL bounds cross-instance staleness (shared
+  // Postgres) — a revoked key keeps serving on another instance for at most TTL.
+  const authCacheTtlMs = Number(process.env.HELM_AUTH_CACHE_TTL_MS ?? 30_000);
+  const keyStore = createCachedKeyStore(store.keys, {
+    ttlMs: Number.isFinite(authCacheTtlMs) && authCacheTtlMs >= 0 ? authCacheTtlMs : 30_000,
+    maxEntries: 5_000,
+    now: () => Date.now(),
+  });
   const telemetry = store.telemetry;
+  // Deferred + batched write queue (perf): the four AI faces enqueue their fail-open
+  // telemetry/payload/observe writes here so a synchronous better-sqlite3 commit never
+  // sits on a request's critical path; batched flushes (N commits → 1) relieve the
+  // single event-loop thread under concurrency. Drained on dispose() so a graceful
+  // deploy loses nothing. Env knobs are optional (safe code defaults otherwise).
+  const flushMsEnv = Number(process.env.HELM_WRITE_QUEUE_FLUSH_MS);
+  const maxDepthEnv = Number(process.env.HELM_WRITE_QUEUE_MAX_DEPTH);
+  const writeQueue = createWriteQueue({
+    telemetry,
+    log: (message) => logger.log("warn", "writequeue", { message }),
+    flushIntervalMs: Number.isFinite(flushMsEnv) && flushMsEnv > 0 ? flushMsEnv : 25,
+    maxDepth: Number.isFinite(maxDepthEnv) && maxDepthEnv > 0 ? maxDepthEnv : 10_000,
+  });
 
   // OAuth subscription runtime (issue #38). PRESET providers store their (rotating)
   // credentials encrypted at rest, so an at-rest key is REQUIRED when any preset is
@@ -1319,6 +1346,7 @@ export async function buildServer(
   registerChatRoutes(app, {
     route,
     telemetry,
+    writes: writeQueue,
     redact: (payload) => redact(payload),
     now: () => Date.now(),
     recordOAuthUsage,
@@ -1486,6 +1514,7 @@ export async function buildServer(
     { observe, inject },
     pipelineBudget,
     recordOAuthUsage,
+    writeQueue,
   );
   // Inject the SAME per-key limiter instance the chat surface uses so the
   // Anthropic /v1/messages handler can meter per-key AFTER its self-auth (closes
@@ -1578,6 +1607,7 @@ export async function buildServer(
     // chat route uses, so /v1/messages records served requests like /v1/chat does.
     record: {
       telemetry,
+      writes: writeQueue,
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
@@ -1595,6 +1625,7 @@ export async function buildServer(
     { observe, inject },
     pipelineBudget,
     recordOAuthUsage,
+    writeQueue,
   );
   registerResponsesRoute(app, {
     // Same per-key limiter, same cast rationale as the messages route above —
@@ -1659,6 +1690,7 @@ export async function buildServer(
     // chat route uses, so /v1/responses records served requests like /v1/chat does.
     record: {
       telemetry,
+      writes: writeQueue,
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
@@ -1678,6 +1710,7 @@ export async function buildServer(
     { observe, inject },
     pipelineBudget,
     recordOAuthUsage,
+    writeQueue,
   );
   registerGeminiRoute(app, {
     rateLimiter,
@@ -1740,6 +1773,7 @@ export async function buildServer(
     // chat route uses, so the gemini face records served requests like /v1/chat does.
     record: {
       telemetry,
+      writes: writeQueue,
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
@@ -1822,12 +1856,15 @@ export async function buildServer(
     app,
     port: config.server.port,
     host: config.server.host,
-    dispose: () => {
+    dispose: async () => {
       signalScheduler?.stop();
       memoryWorker?.stop();
+      // Drain the deferred write queue BEFORE closing the DB so a graceful shutdown
+      // persists every buffered telemetry/payload/observe write (no loss on deploy).
+      await writeQueue.stop();
       // Close the underlying DB connection (sqlite file handle / pg pool). Best
       // effort: a close error must not mask a clean shutdown.
-      void store.close().catch(() => {});
+      await store.close().catch(() => {});
     },
   };
 }

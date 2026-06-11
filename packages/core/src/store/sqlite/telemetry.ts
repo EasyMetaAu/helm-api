@@ -27,25 +27,39 @@ export class SqliteTelemetryStore implements TelemetryStore {
     private readonly genId: () => string = randomUUID,
   ) {}
 
-  async insert(input: InsertTelemetryInput): Promise<{ id: string }> {
-    const id = this.genId();
+  // Build one telemetry row (fresh id + denormalized status/cost). Shared by the
+  // single and batch inserts so they can never drift.
+  private toRow(input: InsertTelemetryInput): typeof telemetry.$inferInsert {
     const finalCost = input.decision.provider_attempts.reduce<number | null>((acc, a) => {
       if (a.cost_usd === null) return acc;
       return (acc ?? 0) + a.cost_usd;
     }, null);
+    return {
+      id: this.genId(),
+      requestId: input.decision.request_id,
+      apiKeyId: input.apiKeyId,
+      decisionJson: JSON.stringify(input.decision),
+      finalStatus: input.decision.final.status,
+      costUsd: finalCost,
+      createdAt: input.createdAt,
+    };
+  }
+
+  async insert(input: InsertTelemetryInput): Promise<{ id: string }> {
+    const row = this.toRow(input);
+    this.db.insert(telemetry).values(row).run();
+    return { id: row.id };
+  }
+
+  // Batch insert (perf): ONE multi-row statement = ONE commit on the synchronous
+  // writer (vs N from a per-row loop). No conflict handling — telemetry rows are
+  // append-only with unique ids.
+  async insertMany(inputs: InsertTelemetryInput[]): Promise<void> {
+    if (inputs.length === 0) return;
     this.db
       .insert(telemetry)
-      .values({
-        id,
-        requestId: input.decision.request_id,
-        apiKeyId: input.apiKeyId,
-        decisionJson: JSON.stringify(input.decision),
-        finalStatus: input.decision.final.status,
-        costUsd: finalCost,
-        createdAt: input.createdAt,
-      })
+      .values(inputs.map((input) => this.toRow(input)))
       .run();
-    return { id };
   }
 
   async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
@@ -150,7 +164,8 @@ export class SqliteTelemetryStore implements TelemetryStore {
   // Full-payload capture. Upsert by request_id so the stream path can write the
   // request first then backfill the assembled response. Verbatim bytes — no
   // redaction (the table holds no plaintext key; see schema/ports comments).
-  async insertPayload(input: InsertPayloadInput): Promise<void> {
+  // Upsert one payload row (request first, then response backfill — same key).
+  private upsertPayload(input: InsertPayloadInput): void {
     this.db
       .insert(requestPayloads)
       .values({
@@ -168,6 +183,20 @@ export class SqliteTelemetryStore implements TelemetryStore {
         },
       })
       .run();
+  }
+
+  async insertPayload(input: InsertPayloadInput): Promise<void> {
+    this.upsertPayload(input);
+  }
+
+  // Batch payload upsert (perf): all rows in ONE transaction = ONE commit. Reuses
+  // the single-row upsert so the per-row conflict semantics are identical.
+  async insertPayloads(inputs: InsertPayloadInput[]): Promise<void> {
+    if (inputs.length === 0) return;
+    const run = this.db.$sqlite.transaction(() => {
+      for (const input of inputs) this.upsertPayload(input);
+    });
+    run();
   }
 
   async getPayload(requestId: string): Promise<RequestPayload | null> {

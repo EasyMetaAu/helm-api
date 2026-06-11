@@ -1,9 +1,13 @@
 import type { DecisionRecord, InsertPayloadInput } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
+import { createWriteQueue } from "../runtime/write-queue.js";
 import {
   backfillCompletionCost,
+  createSseCapture,
   type PayloadCaptureDeps,
   persistPayload,
+  type RecordServedDeps,
+  recordServed,
   tokensFromUsage,
   usageFromSSE,
 } from "./payload-capture.js";
@@ -27,6 +31,43 @@ describe("usageFromSSE", () => {
   it("skips non-JSON keepalive lines without throwing", () => {
     const sse = ': keepalive\n\ndata: {"usage":{"prompt_tokens":1,"completion_tokens":2}}\n\n';
     expect(usageFromSSE(sse)).toEqual({ prompt_tokens: 1, completion_tokens: 2 });
+  });
+});
+
+describe("createSseCapture", () => {
+  const usageFrame =
+    'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}\n\n';
+
+  it("retains the FULL body when capturing (verbatim persistence)", () => {
+    const cap = createSseCapture(true);
+    const chunks = [
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+      usageFrame,
+      "data: [DONE]\n\n",
+    ];
+    for (const c of chunks) cap.push(c);
+    expect(cap.value()).toBe(chunks.join(""));
+  });
+
+  it("keeps only a bounded tail when NOT capturing, still enough for usageFromSSE", () => {
+    const cap = createSseCapture(false, 1024);
+    // A big stream: 500 content frames (well over the 1KB tail) then the usage frame.
+    for (let i = 0; i < 500; i++)
+      cap.push(`data: {"choices":[{"delta":{"content":"tok${i}"}}]}\n\n`);
+    cap.push(usageFrame);
+    cap.push("data: [DONE]\n\n");
+
+    const tail = cap.value();
+    // The retained tail is bounded — nowhere near the full body...
+    expect(tail.length).toBeLessThan(4000);
+    // ...yet cost backfill still finds the usage (it scans from the end).
+    expect(usageFromSSE(tail)).toEqual({ prompt_tokens: 100, completion_tokens: 50 });
+  });
+
+  it("never drops the only/last chunk even if it exceeds the tail budget", () => {
+    const cap = createSseCapture(false, 8);
+    cap.push(usageFrame); // single chunk larger than the budget
+    expect(usageFromSSE(cap.value())).toEqual({ prompt_tokens: 100, completion_tokens: 50 });
   });
 });
 
@@ -149,5 +190,65 @@ describe("persistPayload", () => {
       persistPayload(d, { requestId: "req_1", requestJson: "{}", responseJson: null, now: 1 }, log),
     ).resolves.toBeUndefined();
     expect(log).toHaveBeenCalledWith("payload.capture_failed");
+  });
+});
+
+describe("recordServed — deferred write queue (the three pipeline faces)", () => {
+  function sink() {
+    const inserted: DecisionRecord[] = [];
+    const payloads: InsertPayloadInput[] = [];
+    const telemetry = {
+      insert: vi.fn(async (i: { decision: DecisionRecord }) => {
+        inserted.push(i.decision);
+        return { id: "1" };
+      }),
+      insertPayload: vi.fn(async (p: InsertPayloadInput) => {
+        payloads.push(p);
+      }),
+      prunePayloads: vi.fn(async () => {}),
+    } as unknown as RecordServedDeps["telemetry"];
+    return { telemetry, inserted, payloads };
+  }
+  const args = {
+    requestId: "req_1",
+    apiKeyId: "k1",
+    decision: decision(),
+    requestJson: "{}",
+    responseJson: "{}",
+  };
+
+  it("defers telemetry + payload off the response, written only on flush", async () => {
+    const s = sink();
+    const q = createWriteQueue({ telemetry: s.telemetry, log: () => {}, flushIntervalMs: 10_000 });
+    const d: RecordServedDeps = {
+      telemetry: s.telemetry,
+      writes: q,
+      redact: (x) => x,
+      now: () => 5000,
+      capturePayloads: () => true,
+      payloadRetentionMs: () => 1000,
+    };
+    await recordServed(d, args, () => {});
+    expect(s.inserted).toHaveLength(0);
+    expect(s.payloads).toHaveLength(0);
+
+    await q.flush();
+    expect(s.inserted).toHaveLength(1);
+    expect(s.payloads).toHaveLength(1);
+    expect(s.payloads[0]?.requestId).toBe("req_1");
+  });
+
+  it("writes inline (today's behavior) when no queue is wired", async () => {
+    const s = sink();
+    const d: RecordServedDeps = {
+      telemetry: s.telemetry,
+      redact: (x) => x,
+      now: () => 5000,
+      capturePayloads: () => true,
+      payloadRetentionMs: () => 1000,
+    };
+    await recordServed(d, { ...args, requestId: "req_2" }, () => {});
+    expect(s.inserted).toHaveLength(1);
+    expect(s.payloads).toHaveLength(1);
   });
 });

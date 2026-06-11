@@ -6,6 +6,7 @@ import type {
   DecisionRecord,
   ExecutionResult,
   InjectDeps,
+  InsertTelemetryInput,
   IRMessage,
   MemoryScope,
   ObserveDeps,
@@ -32,11 +33,13 @@ import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import type { ServingAccount } from "../runtime/serving-account.js";
+import type { WriteQueue } from "../runtime/write-queue.js";
 import { copyLiteLLMRequestParams, providerRawFromRequest } from "./internal-request-params.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import {
   backfillCompletionCost,
   captureEnabled,
+  createSseCapture,
   type PayloadCaptureDeps,
   persistPayload,
   tokensFromUsage,
@@ -65,6 +68,13 @@ export interface ChatRouteDeps {
     classifyOverrides?: { evalEnabled?: boolean; rulesThreshold?: number },
   ) => Promise<ExecutionResult & { servingAccount?: ServingAccount | null }>;
   telemetry: TelemetryStore;
+  /** Deferred + batched write queue (perf). Optional: ABSENT = today's behavior —
+   *  telemetry/payload/observe writes are awaited inline (the entire existing test
+   *  suite runs unchanged). PRESENT = those fail-open writes are enqueued to run
+   *  AFTER the response (batched), so a synchronous SQLite commit never sits on the
+   *  request's critical path. The budget `settle` is NEVER deferred (quota
+   *  correctness). Wired in the composition root. */
+  writes?: WriteQueue;
   redact: (payload: unknown) => unknown;
   now: () => number;
   /** Per-account OAuth subscription usage recorder (providers page Tier 2).
@@ -367,17 +377,66 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     const originalMessagesForMemory = [...(internal.messages as IRMessage[])];
 
     // Persist a (redacted) telemetry record. Fail-open: a telemetry failure must
-    // never turn a successful request into a 5xx or break an in-flight stream.
+    // never turn a successful request into a 5xx or break an in-flight stream. The
+    // redaction is done HERE (synchronously) so the enqueued snapshot can never be
+    // affected by anything that touches the decision after the response returns.
+    // With a write queue wired, the insert is deferred + batched off the hot path.
     const persist = async (decision: DecisionRecord) => {
+      const input: InsertTelemetryInput = {
+        decision: deps.redact(decision) as DecisionRecord,
+        apiKeyId: identity.keyId,
+        createdAt: new Date(),
+      };
+      if (deps.writes !== undefined) {
+        deps.writes.enqueueTelemetry(input);
+        return;
+      }
       try {
-        await deps.telemetry.insert({
-          decision: deps.redact(decision) as DecisionRecord,
-          apiKeyId: identity.keyId,
-          createdAt: new Date(),
-        });
+        await deps.telemetry.insert(input);
       } catch {
         c.get("logger").log("error", "telemetry.insert_failed", { trace_id: traceId });
       }
+    };
+
+    // Capture the verbatim request/response bodies. Mirrors `persist`: deferred +
+    // batched when a write queue is wired, else the inline await (today's behavior).
+    // Self-gates on capture_payloads exactly like persistPayload. The retention
+    // prune rides along as a deferred task so it never blocks the response.
+    const capturePayload = async (responseJson: string | null) => {
+      if (deps.writes !== undefined) {
+        if (!captureEnabled(deps)) return;
+        deps.writes.enqueuePayload({
+          requestId: traceId,
+          requestJson,
+          responseJson,
+          createdAt: new Date(deps.now()),
+        });
+        const retentionMs = deps.payloadRetentionMs?.();
+        if (retentionMs !== undefined && retentionMs > 0) {
+          const cutoff = deps.now() - retentionMs;
+          deps.writes.enqueueTask(() => deps.telemetry.prunePayloads(cutoff));
+        }
+        return;
+      }
+      await persistPayload(
+        deps,
+        { requestId: traceId, requestJson, responseJson, now: deps.now() },
+        (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+      );
+    };
+
+    // Run the memory observe write-back: deferred (FIFO) when a write queue is
+    // wired, else inline await (today). observeInbound/observeOutbound are fail-open
+    // inside core. FIFO ordering guarantees inbound (enqueued before route) settles
+    // before outbound (enqueued in the finally) for the same thread.
+    const runObserve = async (task: () => Promise<unknown>) => {
+      if (deps.writes !== undefined) {
+        deps.writes.enqueueTask(async () => {
+          await task();
+        });
+        return;
+      }
+      await task();
     };
 
     // Post-served usage-budget settle (docs/06). Fail-OPEN — mirrors `persist`: a
@@ -504,7 +563,8 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // inject hydration. observe is write-only and fail-open; delaying it avoids
     // same-turn self-pollution while still capturing the turn for future calls.
     if (deps.memory !== undefined) {
-      await observeInbound(deps.memory.observe, memoryScope, originalMessagesForMemory);
+      const memoryObserve = deps.memory.observe;
+      await runObserve(() => observeInbound(memoryObserve, memoryScope, originalMessagesForMemory));
     }
 
     const result = await deps.route(
@@ -580,9 +640,11 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       // couldn't know it at peek time). This runs REGARDLESS of capture_payloads:
       // cost telemetry must not depend on full-body capture (an operator may turn
       // capture off for privacy yet still want costs). `captureOn` gates only
-      // whether the buffered body is PERSISTED, not whether it is collected.
+      // whether the buffered body is PERSISTED, not whether it is collected — so
+      // when capture is OFF we retain only a bounded TAIL (enough for usageFromSSE),
+      // not the whole response, capping per-stream memory under high concurrency.
       const captureOn = captureEnabled(deps);
-      const captured: string[] = [];
+      const captured = createSseCapture(captureOn);
       // Concurrency slot handoff (issue #93, feature A): streamSSE returns its
       // Response BEFORE the stream body finishes, so claim the lease from the
       // middleware and release it in the stream's OWN finally — the slot stays
@@ -615,7 +677,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           releaseConcurrency?.();
           // Streamed completion-cost backfill (#6): parse the trailing usage and
           // price it at the served alias. Fail-open — leave cost null on any miss.
-          const rawSse = captured.join("");
+          const rawSse = captured.value();
           const finalAlias =
             result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
           try {
@@ -626,20 +688,12 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           } catch {
             c.get("logger").log("warn", "cost.stream_backfill_failed", { trace_id: traceId });
           }
-          await persistPayload(
-            deps,
-            {
-              requestId: traceId,
-              requestJson,
-              responseJson: captureOn ? rawSse : null,
-              now: deps.now(),
-            },
-            (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
-          );
+          await capturePayload(captureOn ? rawSse : null);
           await persist(result.decision);
           // Usage-budget settle (streamed): runs HERE — after the usage tail
           // backfilled the streamed cost — so the spend dimension settles the real
-          // total. Tokens come from the same usage tail. Fail-open.
+          // total. Tokens come from the same usage tail. Fail-open. NEVER deferred
+          // (quota correctness): the next request's pre-route gate must see this spend.
           await settle(result.decision, tokensFromUsage(usageFromSSE(rawSse)));
           // Memory observe (outbound, streamed): persist the reconstructed
           // assistant turn AFTER the bytes were forwarded. Fail-open inside core.
@@ -651,15 +705,16 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             // Flush the last partial event the \n\n-split loop held back, so a
             // final frame without a trailing \n\n is not dropped.
             flushOpenAIChunk(assistant);
-            await observeOutbound(
-              deps.memory.observe,
-              memoryScope,
-              {
-                responseMessages:
-                  assistant.text.length > 0 ? [{ role: "assistant", content: assistant.text }] : [],
-                toolResults: [],
-              },
-              finalAlias,
+            const memoryObserve = deps.memory.observe;
+            const responseMessages: IRMessage[] =
+              assistant.text.length > 0 ? [{ role: "assistant", content: assistant.text }] : [];
+            await runObserve(() =>
+              observeOutbound(
+                memoryObserve,
+                memoryScope,
+                { responseMessages, toolResults: [] },
+                finalAlias,
+              ),
             );
           }
         }
@@ -667,16 +722,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     }
 
     // --- non-streaming branch ---
-    await persistPayload(
-      deps,
-      {
-        requestId: traceId,
-        requestJson,
-        responseJson: result.body !== null ? JSON.stringify(result.body) : null,
-        now: deps.now(),
-      },
-      (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
-    );
+    await capturePayload(result.body !== null ? JSON.stringify(result.body) : null);
     await persist(result.decision);
     if (result.final.status === "error" || result.body === null) {
       const error =
@@ -694,12 +740,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     if (deps.memory !== undefined) {
       const finalAlias =
         result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
-      await observeOutbound(
-        deps.memory.observe,
-        memoryScope,
-        outboundFromOpenAIBody(result.body),
-        finalAlias,
-      );
+      const memoryObserve = deps.memory.observe;
+      const outbound = outboundFromOpenAIBody(result.body);
+      await runObserve(() => observeOutbound(memoryObserve, memoryScope, outbound, finalAlias));
     }
     // Usage-budget settle (non-stream, success): cost is already on the decision;
     // tokens from the body's usage. Fail-open.
