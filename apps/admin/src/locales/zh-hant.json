@@ -39,6 +39,7 @@
   "Apply the configured per-key request and token limits.": "套用已設定的每個金鑰請求和權杖限制。",
   "Assembled": "合併結果",
   "Auto (derive from client signals)": "自動（從客戶端信號推導）",
+  "Auto refresh": "自動重新整理",
   "auto thread": "執行緒自動推導",
   "auto-renews": "自動續訂",
   "Avg latency": "平均延遲",

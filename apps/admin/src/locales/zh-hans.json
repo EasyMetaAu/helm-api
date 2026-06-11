@@ -40,6 +40,7 @@
   "Apply the configured per-key request and token limits.": "应用已配置的每个密钥请求和令牌限制。",
   "Assembled": "合并结果",
   "Auto (derive from client signals)": "自动（从客户端信号推导）",
+  "Auto refresh": "自动刷新",
   "auto thread": "线程自动推导",
   "auto-renews": "自动续订",
   "Avg latency": "平均延迟",

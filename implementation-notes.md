@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-11 · 请求页自动刷新控件 RefreshControl（admin UX；CLAUDE.md 原则 1）
+
+- **缘起**：用户要求在 `/admin/requests` 页右上角加一个刷新按钮，支持自动刷新，样式参考某监控面板的「Refresh ▾」分体按钮（下拉含 关/Auto/5s…1d）。
+- **实现**：新增可复用 `RefreshControl.svelte`——分体按钮：左「↻ Refresh」立即刷新（在途时图标 `animate-spin`），右「▾」开下拉选自动刷新节奏（关 + 5s/10s/30s/1m/5m/15m/30m/1h/2h/1d）。`setInterval` 驱动，`onDestroy` 清理；选中节奏后主按钮显示「· 30s」激活反馈。`<svelte:window onpointerdown>` 做 click-outside、Escape 关闭。组件**对数据无状态**（纯触发器），parent 通过 `onRefresh` 注入语义；请求页传 `() => invalidateAll()`——重跑 `+page.ts` loader，按 URL filter 重取当前页。请求页 `<header>` 改 `flex justify-between`，控件居右（仿 providers 页）。
+- **取舍（关键）**：① 参考图里的「Auto」判为**分组标题而非可选项**（图中顶部高亮的是当前选中的「关」，Auto 是其下区间列表的小标题），故下拉做成「关 + Auto refresh 分组 + 区间」，不引入语义含糊的「Auto」选项（呼应 CLAUDE.md「会撒谎的旋钮比没有旋钮更糟」）。② 选中节奏**只设定节拍、不立即刷一次**（仿 Grafana，避免点选即触发的意外突发）；`runRefresh` 带 `refreshing` 重入守卫，慢加载不堆叠 tick。③ 区间标签（5s/1h…）是语言中性字面量，**不进 i18n**（仿 RangeFilter 的 1h/6h）；只「Auto refresh」入 5 语言包。
+- **坑/TODO**：① 纯 admin 静态资源改动，需发新 admin 镜像才生效（部署见 [[deploy-never-overwrite-config]]）。② 自动刷新仅本页生命周期内有效，离开页面即停；刷新节奏不持久化（刻意——避免后台无意义轮询）。③ 控件通用，后续可复用到 Dashboard/Providers 等页。
+- **验证**：TDD 红→绿。新 `RefreshControl.test.ts`(7，fake timers)：手动点击触发 onRefresh、菜单开列区间、选中后逐 tick 刷新（非立即）、激活标签、选「关」停、卸载清理。requests 页 17 例不回归；admin 全量 **304 绿**；svelte-check 对新文件零错（仅既有 oauth.test.ts 3 处预存错，未触碰）；Biome lint(432 文件) + Prettier(.svelte) + vite build 全绿。
+
 ## 2026-06-11 · 记忆消息重复写入根治 + 历史脏数据清理（CLAUDE.md 原则 1/3；docs/08）
 
 - **缘起**：线上 la.atmy.work「死循环」排查（直连 helm.db + 源码 + 容器日志）锁定根因在**记忆入站写入**：`observeInbound`（`memory/observe.ts`）每轮把客户端重发的**整段历史全量盲插入**，`appendMessage/appendMessages` 用全新随机 UUID 插入、**无幂等键/冲突处理**。Claude Code 每轮重发完整 transcript → `memory_messages` 呈 **O(n²)** 增长（实测 57,560 行 / 1,543 distinct = **97.3% 重复**，DB **489MB**）。重复行带**全新 id + created_at**，永不被旧 observation 的 `source_message_range` 覆盖（`observer.ts` `alreadyObservedMessageIds` 按 id 区间判覆盖）→ observer 每分钟 `memory_formation` 反复压缩同一线程（`measured_retention 0.6%`、`prior_compaction_count 9→17`）——这就是用户看到的「一直做同一件事」。
@@ -29,21 +37,13 @@
 - **Codex review 二次修复（两处 P1）**：① 写队列批量 insert 容错——`insertMany` 整批多行写到唯一列，单条重复 `request_id`（客户端复用 `X-Request-Id`→trace_id）会让整批抛错、原实现 catch 后丢掉整个 25ms 窗口的无关行；改为 `writeTelemetry/writePayloads` **批量失败回退逐条**（多行 INSERT 原子，失败不提交，回退不双写），只丢肇事行。② 优雅停机时序——`index.ts` 原先 `server.close()` 未 await 就 dispose（停队列+关 store），在途请求的响应后 enqueue 会被丢、同步 settle 可能打到已关闭 DB；抽 `runtime/shutdown.ts::closeServer`（先丢空闲 keep-alive、await 在途排空、超 `HELM_SHUTDOWN_DRAIN_MS` 默认 10s 再 force-close），**先 await closeServer 再 dispose**。
 - **验证**：TDD 红→绿。新单测：cached-keystore(10)、write-queue(10，含批量回退)、shutdown(3)、egress(3)、createSseCapture(3)、telemetry batch 契约（sqlite+PGlite）、chat/recordServed 延迟路径。全量 `pnpm test` 2935 测试（9 个 PGlite 5s 超时是 [[pnpm-test-pglite-flake]]，隔离重跑 143 全绿）；typecheck（4 包）/ lint(Biome) / build（admin+core+gateway）全绿。
 
-## 2026-06-10 · SQLite 写入热路径性能修复（Phase A，无 Redis；CLAUDE.md 原则 1/8）
-
-- **缘起**：用户反馈线上 la.atmy.work「两个并发就很慢」，怀疑写入太多，提议参考 [[la-atmy-work-deployment]] 旁的 claude-relay-service 引入 Redis 写缓冲再落 SQLite。诊断后发现**根因不是 SQLite 并发能力**，而是 **better-sqlite3 同步阻塞 Node 单线程 + 默认 `synchronous=FULL`（每次 commit 都 fsync）**：写代价由整个进程（含其它在途请求的事件循环）承担。对 Claude Code 这类**每轮重发整段历史 + 工具定义**的客户端，`capture_payloads`（默认开）把数百 KB~MB 的 request_json 同步 + fsync 落库，直接冻结事件循环；memory observe 又**逐条消息**同步写（inbound 在上游调用前、关键路径上）。两个并发流互相卡 fsync，无法重叠。
-- **取舍（已与用户拍板：先量后扩）**：**本 PR = Phase A：只做 SQLite 快修，不开发 Redis**（用户明确「先修慢的问题 redis 先不开发」）。Redis 写回层留作 Phase B——它真正的收益是**多实例横向扩展**（跨进程共享限流/预算状态），而非单机吞吐；单机慢用一行 PRAGMA + 批量写即可解。保住「自托管、默认 SQLite、零配置」身份（原则 1）。
-- **修复 1（头号）**：`migrate.ts` 抽 `applyPragmas()`，对每个连接设 `journal_mode=WAL` + **`synchronous=NORMAL`**（WAL 下安全：崩溃/断电最多丢最后几条 commit，绝不损坏文件）+ `busy_timeout=5000` + `temp_store=MEMORY` + `cache_size=-16000`。NORMAL 去掉 per-commit fsync，是消除事件循环阻塞的关键。`createSqliteDb` 与 `runMigrations` 同源应用。
-- **修复 2**：`MemoryStore` 端口加**可选** `appendMessages(inputs[])` 批量写：sqlite 走单个 `$sqlite.transaction`、postgres 走单条多行 INSERT，整轮一次 commit（替代 N 次）。`createdAt` 按 `base+i` 落戳，保证 `listMessages`（按 createdAt,id 排序）严格还原插入顺序（**比旧逐条循环更确定**——旧路径同毫秒碰撞后退化为随机 UUID 排序）。`observe.ts` 抽 `toMessageInputs` + `persistMessages`：有 `appendMessages` 走批量，否则回退逐条循环（端口可选，旧 store/测试 fake 零改动仍可用）。inbound/outbound 同享，inbound 在关键路径上收益最大。
-- **未做（有意，Phase A 范围外）**：① 非流式 post-serve 写入「后置/fire-and-forget」——Claude Code 用流式，post-serve 写已在 stream 结束后、不在客户端延迟路径上，故略；② payload 压缩/截断——原则 8 要求全量正文可审计，不静默截断；③ Redis（Phase B）。
-- **坑/TODO**：① PRAGMA 为内部性能调优、硬编码（同 `journal_mode` 既有做法），不暴露 config（与 observer 自适应同理，不加「会撒谎的旋钮」）。② 重新部署 la.atmy.work 后需**实测两并发延迟**确认收益，再决定是否上 Phase B Redis（部署只 pull + up，不覆盖 operator config，见 [[deploy-never-overwrite-config]]）。③ `synchronous=NORMAL` 的弱持久性已知并接受（遥测/用量记账可容忍丢尾）。
-- **验证**：TDD 红→绿。新增 `migrate.pragmas.test.ts`(3)、store-contract 批量有序/空批 2 例（双驱动 sqlite+pglite）、observe 批量 inbound/outbound 2 例（+既有 fallback/fail-open 用例覆盖回退路径）。core store+memory 487 绿、gateway memory 路由 73 绿、**全量 node 2601 绿**（唯 4 例 admin-static 因 worktree 未构建 admin SPA 假红，`pnpm --filter @helm/admin build` 后转绿）、typecheck（core+gateway）+ biome 绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-10 · SQLite 写入热路径性能修复（Phase A，无 Redis）：根因非 SQLite 并发能力，而是 better-sqlite3 同步阻塞 Node 单线程 + 默认 `synchronous=FULL`（每 commit fsync）；修复 = `migrate.ts::applyPragmas()` 每连接设 WAL + `synchronous=NORMAL` + busy_timeout/temp_store/cache_size，外加 `MemoryStore` 可选 `appendMessages` 批量写（单事务 / 多行 INSERT，N commit→1，`createdAt=base+i` 保序）。坑：PRAGMA 硬编码不入 config；NORMAL 弱持久性已接受；部署后需实测两并发延迟再定 Phase B（Redis 是多实例扩展、非单机吞吐）。migrate.pragmas.test(3)+store-contract/observe 批量例、全量 2601 绿。
 
 ### 2026-06-10 · admin 导航进度条 NavProgress：纯消费 SvelteKit `navigating` store 的顶部细进度条（8% 起跳→trickle 逼近 92%→resolve 补满淡出），`$effect` 仅依赖 `$navigating` + `untrack` 防 trickle 自触发，挂 `+layout.svelte` 最顶层；**只覆盖路由导航（含其 `load` 内 API），不做全局 fetch 拦截**（Occam，~70 行无 nprogress 依赖）。坑：页内非导航 fetch 不反映；改页内手动取数的页将不触发；需发新 admin 镜像。NavProgress.test 3 绿。
 
