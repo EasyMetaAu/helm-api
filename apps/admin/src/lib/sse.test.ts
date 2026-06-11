@@ -155,6 +155,50 @@ const RESPONSES_STREAM = [
   })}\n\n`,
 ].join('');
 
+// Gemini native streaming: bare `data:` lines (no `event:`, no top-level `type`)
+// whose payload carries `candidates[].content.parts[]`. Reasoning parts are
+// flagged `thought: true`; tool calls are `functionCall` with an *object* `args`;
+// usage is the top-level `usageMetadata`; model is `modelVersion`. This is the
+// format a Gemini-CLI client speaks end-to-end — the gateway stores it verbatim.
+const GEMINI_STREAM = [
+  `data: ${JSON.stringify({
+    candidates: [{ content: { role: 'model', parts: [{ text: 'Hello!' }] }, index: 0 }],
+    modelVersion: 'gemini-3.5-flash',
+  })}\n\n`,
+  `data: ${JSON.stringify({
+    candidates: [{ content: { role: 'model', parts: [{ text: ' I am Gemini.' }] }, index: 0 }],
+  })}\n\n`,
+  `data: ${JSON.stringify({
+    candidates: [{ content: { role: 'model', parts: [] }, finishReason: 'STOP', index: 0 }],
+    usageMetadata: {
+      promptTokenCount: 10051,
+      candidatesTokenCount: 321,
+      totalTokenCount: 10372,
+    },
+  })}\n\n`,
+].join('');
+
+const GEMINI_TOOL_STREAM = [
+  `data: ${JSON.stringify({
+    candidates: [
+      { content: { role: 'model', parts: [{ thought: true, text: 'Need the weather.' }] }, index: 0 },
+    ],
+  })}\n\n`,
+  `data: ${JSON.stringify({
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: [{ functionCall: { name: 'get_weather', args: { city: 'Paris' } } }],
+        },
+        finishReason: 'STOP',
+        index: 0,
+      },
+    ],
+    usageMetadata: { promptTokenCount: 8, candidatesTokenCount: 12, totalTokenCount: 20 },
+  })}\n\n`,
+].join('');
+
 describe('isSseStream', () => {
   it('detects OpenAI-style data: streams', () => {
     expect(isSseStream(OPENAI_STREAM)).toBe(true);
@@ -166,6 +210,10 @@ describe('isSseStream', () => {
 
   it('detects OpenAI Responses API event streams', () => {
     expect(isSseStream(RESPONSES_STREAM)).toBe(true);
+  });
+
+  it('detects Gemini-native data: streams', () => {
+    expect(isSseStream(GEMINI_STREAM)).toBe(true);
   });
 
   it('rejects plain JSON bodies, objects, and unrelated strings', () => {
@@ -261,6 +309,39 @@ describe('parseSseStream — OpenAI Responses API events', () => {
       'content',
       'finish',
     ]);
+  });
+});
+
+describe('parseSseStream — Gemini native events', () => {
+  const parsed = parseSseStream(GEMINI_STREAM);
+
+  it('assembles parts[].text into the visible final content', () => {
+    expect(parsed.assembled.protocol).toBe('gemini');
+    expect(parsed.assembled.content).toBe('Hello! I am Gemini.');
+    expect(parsed.assembled.reasoning).toBe('');
+  });
+
+  it('captures finishReason, usageMetadata and modelVersion', () => {
+    expect(parsed.assembled.finishReason).toBe('STOP');
+    expect(parsed.assembled.usage).toMatchObject({ totalTokenCount: 10372 });
+    expect(parsed.assembled.model).toBe('gemini-3.5-flash');
+  });
+
+  it('classifies each event for the chunk table', () => {
+    expect(parsed.events.map((e) => e.kind)).toEqual(['content', 'content', 'finish']);
+    expect(parsed.events[0]?.text).toBe('Hello!');
+    expect(parsed.events[2]?.text).toBe('STOP');
+  });
+
+  it('separates thought parts as reasoning and serializes functionCall args', () => {
+    const tools = parseSseStream(GEMINI_TOOL_STREAM);
+    expect(tools.assembled.reasoning).toBe('Need the weather.');
+    expect(tools.assembled.content).toBe('');
+    expect(tools.assembled.toolCalls).toEqual([
+      { id: null, name: 'get_weather', arguments: '{"city":"Paris"}' },
+    ]);
+    expect(tools.assembled.finishReason).toBe('STOP');
+    expect(tools.events.map((e) => e.kind)).toEqual(['reasoning', 'tool_call']);
   });
 });
 
