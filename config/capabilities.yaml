@@ -137,6 +137,16 @@ zenmux/gemini-3.5-flash:
   modalities: [audio, video, document]
   maxContextTokens: 1048576
   maxOutputTokens: 65536
+zenmux/gemini-3.1-pro:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  supportsCachedContent: true
+  # Same fully-multimodal input as 3.5-flash (audio, video, documents; P7).
+  modalities: [audio, video, document]
+  maxContextTokens: 1048576
+  maxOutputTokens: 65536
 # */auto aggregators: JSON-INCAPABLE on purpose — the capability filter prunes
 # them for strict-JSON requests so a json lane lands on a deterministic model.
 zenmux/auto:

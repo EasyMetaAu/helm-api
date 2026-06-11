@@ -52,3 +52,14 @@
 "gpt-5-codex": coding
 "gpt-5*": premium
 "gpt-*": balanced
+
+# ── Google Gemini (Gemini CLI, AI Studio / Vertex SDKs, …) ───────────────────
+# Bare Gemini ids → vendor-family lanes (config/lanes.yaml). Any `*pro*` id leads
+# with the Gemini Pro tier; any `*flash*` (incl. flash-lite) with the cheaper
+# Flash tier; the bare `gemini-*` catch-all degrades to balanced. Longest-literal
+# wins, so `gemini-*flash*` (12 literal chars) and `gemini-*pro*` (10) both beat
+# the `gemini-*` catch-all (7). The middle `*` absorbs the version + any `-preview`
+# / `-latest` / date suffix (gemini-3.1-pro-preview, gemini-3.5-flash, gemini-2.5-pro…).
+"gemini-*flash*": gemini-flash
+"gemini-*pro*": gemini-pro
+"gemini-*": balanced

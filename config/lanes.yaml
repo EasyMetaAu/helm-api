@@ -149,3 +149,21 @@ claude-haiku:
   primary: openai-codex/gpt-5.4-mini
   fallback:
     - economy
+
+# Google Gemini has NO subscription channel in Helm; both tiers lead with the
+# static ZenMux key (the only Gemini upstream wired here), then degrade to the
+# matching generic quality lane. gemini-3.1-pro is the latest Pro ZenMux serves
+# (3.5 Pro is announced but not yet GA upstream); gemini-3.5-flash is the latest
+# GA Flash. Both are fully multimodal, so a vision/audio/video request that pins a
+# Gemini id stays on Gemini before the capability filter takes over downstream.
+gemini-pro:
+  purpose: Google Gemini Pro tier — strong multimodal reasoning
+  primary: zenmux/gemini-3.1-pro
+  fallback:
+    - premium
+
+gemini-flash:
+  purpose: Google Gemini Flash tier — fast multimodal
+  primary: zenmux/gemini-3.5-flash
+  fallback:
+    - balanced
