@@ -2,6 +2,8 @@ import type { MemoryMessageInput, MemoryThreadInput } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import type { IRMessage } from "../protocol/ir.js";
 import type { MemoryStore } from "../store/ports.js";
+import { SqliteMemoryStore } from "../store/sqlite/memory-store.js";
+import { createSqliteDb } from "../store/sqlite/migrate.js";
 import { type ObserveDeps, observeInbound, observeOutbound, resolveMemoryMode } from "./observe.js";
 import type { MemoryScope } from "./types.js";
 
@@ -321,5 +323,60 @@ describe("resolveMemoryMode (gateway header normalization helper)", () => {
     expect(resolveMemoryMode("off")).toBe("off");
     expect(resolveMemoryMode("observe")).toBe("observe");
     expect(resolveMemoryMode("inject")).toBe("inject");
+  });
+});
+
+// End-to-end re-ingestion guard against the REAL sqlite store (the fakes blindly
+// push, so only a real store proves the dedup constraint actually holds). This is
+// the regression test for the production O(n²) bug: a client re-sending its full
+// transcript every turn must NOT duplicate rows — only the new delta persists.
+describe("observeInbound re-ingestion (real SqliteMemoryStore)", () => {
+  function realDeps(): ObserveDeps {
+    const db = createSqliteDb(":memory:");
+    let seq = 0;
+    const store = new SqliteMemoryStore(
+      db,
+      () => `id-${++seq}`,
+      () => new Date("2026-01-01T00:00:00.000Z"),
+    );
+    return {
+      memoryStore: store,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+      estimateTokens: (t) => t.length,
+      log: vi.fn(),
+    };
+  }
+
+  it("re-sending the full transcript every turn persists only the new delta", async () => {
+    const deps = realDeps();
+    const sc = scope();
+
+    // Turn 1: user asks.
+    await observeInbound(deps, sc, [
+      { role: "system", content: "you are helpful" }, // policy, never persisted
+      { role: "user", content: "u1" },
+    ]);
+    // Turn 2: client re-sends turn 1 + the assistant reply + a new user message.
+    await observeInbound(deps, sc, [
+      { role: "system", content: "you are helpful" },
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: "u2" },
+    ]);
+    // Turn 3: re-send everything again + one more.
+    await observeInbound(deps, sc, [
+      { role: "system", content: "you are helpful" },
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: "u2" },
+      { role: "assistant", content: "a2" },
+    ]);
+
+    const msgs = await deps.memoryStore.listMessages({
+      threadId: "acct-a:thread-1",
+      accountId: "acct-a",
+    });
+    // 4 distinct turns (u1,a1,u2,a2) — NOT 2+4+5=11 blind re-inserts.
+    expect(msgs.map((m) => m.content)).toEqual(["u1", "a1", "u2", "a2"]);
   });
 });

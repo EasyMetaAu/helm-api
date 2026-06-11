@@ -1,0 +1,93 @@
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Database from "better-sqlite3";
+import { afterEach, describe, expect, it } from "vitest";
+import { createSqliteDb } from "./migrate.js";
+
+// Migration v21 upgrade path: a real pre-v21 memory_messages table (no
+// content_hash, no unique index) carrying duplicate rows must, on upgrade,
+// (a) collapse exact duplicates keeping the EARLIEST row, (b) gain the
+// content_hash column, (c) gain the UNIQUE(thread_id, role, content_hash) index.
+// Mirrors the postgres migrate.test.ts pre-unique-index upgrade test.
+
+const dirs: string[] = [];
+
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+// Seed a pre-v21 DB on disk (two connections can't share ":memory:") with the
+// v1–v20 ledger marked applied so createSqliteDb runs ONLY v21.
+function seedPreV21(): string {
+  const dir = mkdtempSync(join(tmpdir(), "helm-dedup-"));
+  dirs.push(dir);
+  const dbPath = join(dir, "test.db");
+  const raw = new Database(dbPath);
+  raw.exec("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);");
+  const ins = raw.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, 1)");
+  for (let v = 1; v <= 20; v += 1) ins.run(v);
+  raw.exec(`
+    CREATE TABLE memory_messages (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      token_estimate INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  const insMsg = raw.prepare(
+    "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+  );
+  // Three copies of the SAME (thread, role, content) at increasing created_at,
+  // plus one distinct message. Earliest of the dup group is "first".
+  insMsg.run("first", "t1", "user", "dup", 1, 100);
+  insMsg.run("second", "t1", "user", "dup", 1, 200);
+  insMsg.run("third", "t1", "user", "dup", 1, 300);
+  insMsg.run("other", "t1", "assistant", "unique", 1, 150);
+  raw.close();
+  return dbPath;
+}
+
+describe("memory_messages dedup migration (v21)", () => {
+  it("collapses duplicates to the earliest row and adds the content_hash column", () => {
+    const db = createSqliteDb(seedPreV21());
+    try {
+      const rows = db.$sqlite
+        .prepare("SELECT id, content FROM memory_messages ORDER BY created_at")
+        .all() as Array<{ id: string; content: string }>;
+      // dup group collapsed to its earliest ("first"); distinct row kept.
+      expect(rows.map((r) => r.id).sort()).toEqual(["first", "other"]);
+
+      const cols = (
+        db.$sqlite.prepare("PRAGMA table_info(memory_messages)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      expect(cols).toContain("content_hash");
+    } finally {
+      db.$sqlite.close();
+    }
+  });
+
+  it("creates the UNIQUE index that rejects a duplicate (thread, role, content_hash)", () => {
+    const db = createSqliteDb(seedPreV21());
+    try {
+      const idx = db.$sqlite
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?")
+        .get("uniq_memory_messages_thread_role_hash");
+      expect(idx).toBeDefined();
+
+      // A raw duplicate insert (same thread/role/content_hash) must be rejected.
+      const ins = db.$sqlite.prepare(
+        "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      );
+      ins.run(randomUUID(), "t2", "user", "x", 1, 1, "hash-x");
+      expect(() => ins.run(randomUUID(), "t2", "user", "x", 1, 2, "hash-x")).toThrow();
+      // Different hash on the same (thread, role) is fine.
+      expect(() => ins.run(randomUUID(), "t2", "user", "y", 1, 3, "hash-y")).not.toThrow();
+    } finally {
+      db.$sqlite.close();
+    }
+  });
+});

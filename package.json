@@ -20,7 +20,8 @@
     "format": "biome format --write .",
     "lint:fix": "biome check --write .",
     "build": "pnpm -r build",
-    "sync:catalog": "tsx scripts/sync-catalog.ts"
+    "sync:catalog": "tsx scripts/sync-catalog.ts",
+    "memory:dedup": "tsx packages/core/src/store/sqlite/dedup-memory-messages.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",

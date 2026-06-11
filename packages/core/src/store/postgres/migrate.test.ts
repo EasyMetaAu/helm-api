@@ -121,7 +121,10 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // pre-marked applied to keep this test scoped to the v13–v15 jobs upgrade.
     // v19 (memory_threads.last_served_model) is also pre-marked: this fixture
     // never creates memory_threads, so the v19 ALTER would fail — out of scope.
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19]) {
+    // v20 (memory_messages dedup) likewise: this fixture never creates
+    // memory_messages, so its dedup DELETE would fail — out of scope here (it has
+    // its own dedicated test below).
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );
@@ -198,6 +201,66 @@ describe("runPgMigrations — per-migration atomicity", () => {
         ),
       ),
     ).resolves.toBeDefined();
+    await db.$close();
+  });
+
+  it("upgrades a real pre-v20 memory_messages table: dedupes + adds the unique index", async () => {
+    const client = new PGlite();
+    const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
+    await db.execute(
+      sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
+    );
+    // Mark everything EXCEPT v20 applied so only the dedup migration runs. This
+    // fixture only creates memory_messages, so other migrations' tables are absent
+    // — pre-marking keeps the test scoped to the v20 message-dedup upgrade.
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]) {
+      await db.execute(
+        sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
+      );
+    }
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE memory_messages (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          token_estimate INTEGER NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at) VALUES
+        ('first', 't1', 'user', 'dup', 1, 100),
+        ('second', 't1', 'user', 'dup', 1, 200),
+        ('third', 't1', 'user', 'dup', 1, 300),
+        ('other', 't1', 'assistant', 'unique', 1, 150)
+      `),
+    );
+
+    await expect(runPgMigrations(db)).resolves.toBeUndefined();
+
+    // dup group collapsed to its earliest row; distinct row kept.
+    const rows = (await db.execute(sql.raw("SELECT id FROM memory_messages ORDER BY id"))) as {
+      rows: Array<{ id: string }>;
+    };
+    expect(rows.rows.map((r) => r.id)).toEqual(["first", "other"]);
+
+    // The UNIQUE index rejects a duplicate (thread_id, role, content_hash).
+    await db.execute(
+      sql.raw(
+        "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at, content_hash) VALUES ('h1', 't2', 'user', 'x', 1, 1, 'hash-x')",
+      ),
+    );
+    await expect(
+      db.execute(
+        sql.raw(
+          "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at, content_hash) VALUES ('h2', 't2', 'user', 'x', 1, 2, 'hash-x')",
+        ),
+      ),
+    ).rejects.toThrow();
     await db.$close();
   });
 });

@@ -314,16 +314,24 @@ export interface SignalStore {
 export interface MemoryStore {
   // Idempotent upsert of a thread; safe to call on every observed request.
   ensureThread(input: MemoryThreadInput): Promise<void>;
-  // Persist one raw message; returns the generated message id.
+  // Persist one raw message; returns the generated message id. Ingest is
+  // IDEMPOTENT: a row duplicating an existing (thread_id, role, content) is a
+  // no-op (UNIQUE(thread_id, role, content_hash) + ON CONFLICT DO NOTHING) — the
+  // client re-sends the whole transcript each turn, so without this the store
+  // grows O(n²). The returned id is generated per call; ON a conflict it is inert
+  // (the existing row keeps its original id — callers must not assume it persisted).
   appendMessage(input: MemoryMessageInput): Promise<string>;
   // Batch variant of appendMessage: persist a whole turn's messages in ONE
   // transaction (a single commit/fsync) instead of N. observe's INBOUND path runs
   // BEFORE the upstream call, so on a long thread the per-message loop adds N
   // synchronous commits of latency to every request (better-sqlite3 blocks the
-  // event loop per commit). Returns the generated ids in input order; an empty
-  // batch is a no-op returning []. OPTIONAL on the port: callers fall back to
-  // appendMessage in a loop when an adapter (or a pre-existing test fake) does not
-  // implement it, so adding it never breaks an existing MemoryStore fixture.
+  // event loop per commit). Returns ONE generated id per input, in input order
+  // (length preserved); an id for a row skipped on conflict is inert. Ingest is
+  // idempotent like appendMessage — re-sent and intra-batch duplicate messages
+  // collapse to one row. An empty batch is a no-op returning []. OPTIONAL on the
+  // port: callers fall back to appendMessage in a loop when an adapter (or a
+  // pre-existing test fake) does not implement it, so adding it never breaks an
+  // existing MemoryStore fixture.
   appendMessages?(inputs: MemoryMessageInput[]): Promise<string[]>;
   // POST-MVP Phase 2 (Observer). Read a thread's raw messages oldest-first so the
   // background Observer can compress the older ones into an observation. Returns

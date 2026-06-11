@@ -7,6 +7,7 @@ import {
   pgTable,
   primaryKey,
   text,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 // Postgres (Drizzle pg-core) table definitions for the supabase Store adapter.
@@ -130,14 +131,25 @@ export const memoryThreads = pgTable("memory_threads", {
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
 });
 
-export const memoryMessages = pgTable("memory_messages", {
-  id: text("id").primaryKey(),
-  threadId: text("thread_id").notNull(), // references memory_threads.id only
-  role: text("role").notNull(), // 'user' | 'assistant' | 'tool' (IR-aligned)
-  content: text("content").notNull(),
-  tokenEstimate: integer("token_estimate").notNull(),
-  createdAt: bigint("created_at", { mode: "number" }).notNull(),
-});
+export const memoryMessages = pgTable(
+  "memory_messages",
+  {
+    id: text("id").primaryKey(),
+    threadId: text("thread_id").notNull(), // references memory_threads.id only
+    role: text("role").notNull(), // 'user' | 'assistant' | 'tool' (IR-aligned)
+    content: text("content").notNull(),
+    tokenEstimate: integer("token_estimate").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // Idempotency key (pg v20): sha256(content) hex, NO normalization. pg mirror
+    // of the sqlite v21 dedup column — UNIQUE(thread_id, role, content_hash) +
+    // ON CONFLICT DO NOTHING collapses the re-sent transcript to a no-op. hash
+    // (not raw content) because a pg btree index row is capped at ~2704 bytes.
+    contentHash: text("content_hash"),
+  },
+  (t) => [
+    uniqueIndex("uniq_memory_messages_thread_role_hash").on(t.threadId, t.role, t.contentHash),
+  ],
+);
 
 export const memoryObservations = pgTable("memory_observations", {
   id: text("id").primaryKey(),

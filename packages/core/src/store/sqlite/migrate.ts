@@ -473,6 +473,38 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE memory_threads ADD COLUMN last_served_model TEXT;
     `,
   },
+  {
+    // Idempotent memory-message ingest (re-ingestion bug fix). The client re-sends
+    // the FULL transcript every turn; the old blind INSERT grew memory_messages
+    // O(n²) (97% duplicate rows in prod) and starved the observer (re-inserted
+    // rows get new ids, never covered by old observations → endless re-compaction).
+    // Steps, ORDERED: (a) collapse existing exact duplicates keeping the EARLIEST
+    // row per (thread_id, role, content); (b) add the content_hash dedup key
+    // (nullable — there is no sha256 SQL fn in better-sqlite3, so historical rows
+    // stay NULL and the ops script backfills them; NULLs are DISTINCT in a sqlite
+    // UNIQUE index, so the index still builds over deduped historical rows); (c)
+    // the UNIQUE boundary the write path targets via ON CONFLICT DO NOTHING.
+    version: 21,
+    sql: `
+      DELETE FROM memory_messages
+      WHERE rowid IN (
+        SELECT rowid FROM (
+          SELECT rowid,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY thread_id, role, content
+                   ORDER BY created_at ASC, id ASC
+                 ) AS rn
+          FROM memory_messages
+        )
+        WHERE rn > 1
+      );
+
+      ALTER TABLE memory_messages ADD COLUMN content_hash TEXT;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_memory_messages_thread_role_hash
+        ON memory_messages (thread_id, role, content_hash);
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {
