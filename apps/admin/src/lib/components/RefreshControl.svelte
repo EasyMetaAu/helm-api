@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { t } from '$lib/i18n';
 
   // Split refresh control (Grafana-style): the left button refreshes the page
@@ -9,8 +9,13 @@
   // Stateless w.r.t. data — purely a trigger, so it stays reusable across pages.
   let {
     onRefresh,
+    storageKey,
   }: {
     onRefresh: () => void | Promise<void>;
+    // When set, the chosen cadence is persisted to localStorage under this key and
+    // restored on mount, so the setting survives navigation (e.g. opening a request
+    // detail and coming back). Omit it to keep the control purely in-memory/reusable.
+    storageKey?: string;
   } = $props();
 
   // Cadence choices in seconds (0 handled separately as "Off"). Labels are
@@ -57,12 +62,9 @@
     }
   }
 
-  // Apply a cadence: 0 stops auto-refresh, anything else (re)starts the timer.
-  // Selecting a cadence sets the rhythm only — the first tick fires one interval
-  // later, matching how monitoring dashboards behave (no surprise burst on pick).
-  function selectInterval(seconds: number): void {
-    intervalSeconds = seconds;
-    open = false;
+  // (Re)start the timer for the active cadence: 0 stops auto-refresh, anything
+  // else schedules ticks. First tick fires one interval later (no surprise burst).
+  function applyTimer(seconds: number): void {
     stopTimer();
     if (seconds > 0) {
       timer = setInterval(() => {
@@ -70,6 +72,50 @@
       }, seconds * 1000);
     }
   }
+
+  // Persist the cadence so it survives navigation. Best-effort: storage may be
+  // unavailable (private mode) — the setting still applies for the session.
+  function persist(seconds: number): void {
+    if (!storageKey || typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(storageKey, String(seconds));
+    } catch {
+      // ignore — auto-refresh keeps working without persistence
+    }
+  }
+
+  // Apply a cadence chosen from the menu: update state, restart the timer, persist.
+  function selectInterval(seconds: number): void {
+    intervalSeconds = seconds;
+    open = false;
+    applyTimer(seconds);
+    persist(seconds);
+  }
+
+  // Restore a saved cadence on mount and resume ticking. A missing/corrupt value
+  // (legacy, hand-edited, unknown option) is ignored — we stay Off rather than guess.
+  // `storageKey` is a fixed prop, so reading its initial value once (untrack) is the
+  // intent — this is a one-shot init, not a reactive effect. The read is best-effort:
+  // localStorage access can throw (private mode, or jsdom's opaque-origin stub), so a
+  // failure just leaves auto-refresh Off rather than breaking the whole page render.
+  untrack(() => {
+    if (!storageKey || typeof localStorage === 'undefined') return;
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem(storageKey);
+    } catch {
+      return; // storage unavailable — stay Off for the session
+    }
+    if (saved === null) return;
+    const seconds = Number(saved);
+    if (
+      Number.isFinite(seconds) &&
+      (seconds === 0 || INTERVALS.some((o) => o.seconds === seconds))
+    ) {
+      intervalSeconds = seconds;
+      applyTimer(seconds);
+    }
+  });
 
   // Close the menu on any pointer-down outside the control (click-outside).
   function onWindowPointerDown(event: PointerEvent): void {

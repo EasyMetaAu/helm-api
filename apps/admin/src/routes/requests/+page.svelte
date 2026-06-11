@@ -152,7 +152,10 @@
     <!-- Refresh now + auto-refresh cadence. Re-runs the loader (invalidateAll),
          which re-reads the URL filters and refetches the current page. -->
     <div class="shrink-0">
-      <RefreshControl onRefresh={() => invalidateAll()} />
+      <RefreshControl
+        onRefresh={() => invalidateAll()}
+        storageKey="helm_admin_requests_refresh_interval"
+      />
     </div>
   </header>
 

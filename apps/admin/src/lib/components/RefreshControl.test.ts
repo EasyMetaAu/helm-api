@@ -88,4 +88,68 @@ describe('RefreshControl', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(onRefresh).not.toHaveBeenCalled();
   });
+
+  // When a storageKey is supplied the chosen cadence survives navigation: it is
+  // written to localStorage on every pick and restored (timer resumed) on mount,
+  // so leaving for a detail page and coming back keeps auto-refresh running.
+  describe('persistence (storageKey)', () => {
+    const KEY = 'helm_admin_requests_refresh_interval';
+
+    // jsdom's localStorage is non-functional under the opaque `about:blank`
+    // origin this suite runs in (methods are undefined), so install a real
+    // in-memory Storage on the global — same approach as github.test.ts.
+    beforeEach(() => {
+      const map = new Map<string, string>();
+      vi.stubGlobal('localStorage', {
+        getItem: (k: string) => (map.has(k) ? map.get(k)! : null),
+        setItem: (k: string, v: string) => void map.set(k, String(v)),
+        removeItem: (k: string) => void map.delete(k),
+        clear: () => map.clear(),
+        key: (i: number) => [...map.keys()][i] ?? null,
+        get length() {
+          return map.size;
+        },
+      } as Storage);
+    });
+    afterEach(() => vi.unstubAllGlobals());
+
+    it('persists the selected cadence to localStorage', async () => {
+      render(RefreshControl, { onRefresh: vi.fn(), storageKey: KEY });
+      await fireEvent.click(screen.getByTestId('refresh-toggle'));
+      await fireEvent.click(screen.getByTestId('refresh-interval-30'));
+      expect(localStorage.getItem(KEY)).toBe('30');
+    });
+
+    it('persists Off (0) when auto-refresh is turned off', async () => {
+      render(RefreshControl, { onRefresh: vi.fn(), storageKey: KEY });
+      await fireEvent.click(screen.getByTestId('refresh-toggle'));
+      await fireEvent.click(screen.getByTestId('refresh-interval-30'));
+      await fireEvent.click(screen.getByTestId('refresh-toggle'));
+      await fireEvent.click(screen.getByTestId('refresh-interval-off'));
+      expect(localStorage.getItem(KEY)).toBe('0');
+    });
+
+    it('restores the saved cadence on mount and resumes ticking', async () => {
+      localStorage.setItem(KEY, '5');
+      const onRefresh = vi.fn();
+      render(RefreshControl, { onRefresh, storageKey: KEY });
+      // Cadence reflected immediately, timer already running.
+      expect(screen.getByTestId('refresh-active')).toHaveTextContent('5s');
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(onRefresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores a corrupt / unknown stored value', async () => {
+      localStorage.setItem(KEY, 'not-a-number');
+      render(RefreshControl, { onRefresh: vi.fn(), storageKey: KEY });
+      expect(screen.queryByTestId('refresh-active')).not.toBeInTheDocument();
+    });
+
+    it('does not persist when no storageKey is given', async () => {
+      render(RefreshControl, { onRefresh: vi.fn() });
+      await fireEvent.click(screen.getByTestId('refresh-toggle'));
+      await fireEvent.click(screen.getByTestId('refresh-interval-30'));
+      expect(localStorage.getItem(KEY)).toBeNull();
+    });
+  });
 });
