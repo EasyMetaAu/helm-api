@@ -100,6 +100,29 @@ describe("checked-in config samples", () => {
     expect(lanes["gpt-5.4-mini"]?.fallback).toEqual(["economy"]);
   });
 
+  it("routes bare Gemini ids onto the gemini vendor-family lanes (pro vs flash vs catch-all)", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const lanes = cfg.lanes;
+    const aliases = cfg.model_aliases;
+    if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
+    if (aliases === undefined) throw new Error("config/model-aliases.yaml must load");
+    // Vendor-family lanes lead with the static ZenMux Gemini keys (the only Gemini
+    // upstream wired): pro -> gemini-3.1-pro (latest Pro ZenMux serves), flash ->
+    // gemini-3.5-flash (latest GA Flash).
+    expect(lanes["gemini-pro"]?.primary).toBe("zenmux/gemini-3.1-pro");
+    expect(lanes["gemini-pro"]?.fallback).toEqual(["premium"]);
+    expect(lanes["gemini-flash"]?.primary).toBe("zenmux/gemini-3.5-flash");
+    expect(lanes["gemini-flash"]?.fallback).toEqual(["balanced"]);
+    // Longest-literal wins: `*pro*` / `*flash*` beat the `gemini-*` catch-all, and
+    // the middle `*` absorbs the version + any -preview/-latest suffix.
+    expect(resolveModelAlias("gemini-3.1-pro-preview", aliases)).toBe("gemini-pro");
+    expect(resolveModelAlias("gemini-2.5-pro", aliases)).toBe("gemini-pro");
+    expect(resolveModelAlias("gemini-3.5-flash", aliases)).toBe("gemini-flash");
+    expect(resolveModelAlias("gemini-3.1-flash-lite", aliases)).toBe("gemini-flash");
+    // An id matching neither tier falls through the catch-all to balanced.
+    expect(resolveModelAlias("gemini-embedding-001", aliases)).toBe("balanced");
+  });
+
   it("loads the shipped policies.yaml as first-match rules", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const ids = cfg.policies.policies.map((p) => p.id);

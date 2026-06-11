@@ -89,9 +89,16 @@ providers:
       # (zenmux real id).
       - alias: zenmux/gpt-5.5
         provider_model: openai/gpt-5.5
-      # google/gemini-3.5-flash — vision lane primary (multimodal; zenmux real id).
+      # google/gemini-3.5-flash — vision lane + gemini-flash lane primary (latest
+      # GA Flash, multimodal; zenmux real id).
       - alias: zenmux/gemini-3.5-flash
         provider_model: google/gemini-3.5-flash
+      # gemini-3.1-pro — gemini-pro lane primary. The latest Gemini Pro ZenMux
+      # serves (3.5 Pro is announced but not yet GA upstream). The alias keeps the
+      # clean `gemini-3.1-pro` routing key; the upstream id is still the `-preview`
+      # slug, so only provider_model changes when it graduates to GA.
+      - alias: zenmux/gemini-3.1-pro
+        provider_model: google/gemini-3.1-pro-preview
       # auto — platform auto-route. JSON-INCAPABLE on purpose (see
       # catalog supports_json_schema:false): the capability filter skips it for
       # strict-JSON requests so the `json` lane prunes to a deterministic model.
