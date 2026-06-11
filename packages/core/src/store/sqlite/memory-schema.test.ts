@@ -38,7 +38,9 @@ describe("sqlite memory schema + migrations", () => {
         "role",
         "content",
         "token_estimate",
+        "message_index",
         "created_at",
+        "content_hash",
       ]),
     );
     expect(tableCols(raw, "memory_observations")).toEqual(
@@ -121,15 +123,19 @@ describe("sqlite memory schema + migrations", () => {
     });
     expect(msgId).toBeTruthy();
     const row = db.$sqlite
-      .prepare("SELECT thread_id, role, content, token_estimate FROM memory_messages WHERE id = ?")
+      .prepare(
+        "SELECT thread_id, message_index, role, content, token_estimate FROM memory_messages WHERE id = ?",
+      )
       .get(msgId) as {
       thread_id: string;
+      message_index: number;
       role: string;
       content: string;
       token_estimate: number;
     };
     expect(row).toMatchObject({
       thread_id: "t1",
+      message_index: 0,
       role: "assistant",
       content: "hello",
       token_estimate: 3,

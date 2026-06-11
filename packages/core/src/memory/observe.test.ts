@@ -102,6 +102,7 @@ describe("observeInbound", () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
       threadId: "acct-a:thread-1",
+      messageIndex: 1,
       role: "user",
       content: "hello there",
       tokenEstimate: "hello there".length,
@@ -122,6 +123,7 @@ describe("observeInbound", () => {
     // System turn filtered out before batching; only the user message is persisted.
     expect(batches).toHaveLength(1);
     expect(batches[0]).toHaveLength(1);
+    expect(messages[0]?.messageIndex).toBe(1);
     expect(messages.map((m) => m.content)).toEqual(["hello there"]);
   });
 
@@ -201,11 +203,12 @@ describe("observeOutbound", () => {
     await observeOutbound(deps, scope(), {
       responseMessages: [{ role: "assistant", content: "hi back" }],
       toolResults: [{ role: "tool", content: "tool output", tool_call_id: "call-1" }],
+      messageIndexOffset: 2,
     });
 
     expect(messages).toHaveLength(2);
-    expect(messages[0]).toMatchObject({ role: "assistant", content: "hi back" });
-    expect(messages[1]).toMatchObject({ role: "tool", content: "tool output" });
+    expect(messages[0]).toMatchObject({ messageIndex: 2, role: "assistant", content: "hi back" });
+    expect(messages[1]).toMatchObject({ messageIndex: 3, role: "tool", content: "tool output" });
   });
 
   it("batches response + tool messages in one appendMessages call when supported", async () => {
@@ -378,5 +381,23 @@ describe("observeInbound re-ingestion (real SqliteMemoryStore)", () => {
     });
     // 4 distinct turns (u1,a1,u2,a2) — NOT 2+4+5=11 blind re-inserts.
     expect(msgs.map((m) => m.content)).toEqual(["u1", "a1", "u2", "a2"]);
+  });
+
+  it("preserves legitimate repeated content at a later transcript position", async () => {
+    const deps = realDeps();
+    const sc = scope();
+
+    await observeInbound(deps, sc, [{ role: "user", content: "yes" }]);
+    await observeInbound(deps, sc, [
+      { role: "user", content: "yes" },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "yes" },
+    ]);
+
+    const msgs = await deps.memoryStore.listMessages({
+      threadId: "acct-a:thread-1",
+      accountId: "acct-a",
+    });
+    expect(msgs.map((m) => m.content)).toEqual(["yes", "ok", "yes"]);
   });
 });

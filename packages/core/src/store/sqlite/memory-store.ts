@@ -175,6 +175,7 @@ export class SqliteMemoryStore implements MemoryStore {
       .values({
         id,
         threadId: input.threadId,
+        messageIndex: input.messageIndex ?? 0,
         role: input.role,
         content: input.content,
         tokenEstimate: input.tokenEstimate,
@@ -182,7 +183,12 @@ export class SqliteMemoryStore implements MemoryStore {
         contentHash: sha256Hex(input.content),
       })
       .onConflictDoNothing({
-        target: [memoryMessages.threadId, memoryMessages.role, memoryMessages.contentHash],
+        target: [
+          memoryMessages.threadId,
+          memoryMessages.messageIndex,
+          memoryMessages.role,
+          memoryMessages.contentHash,
+        ],
       })
       .run();
     return id;
@@ -206,6 +212,7 @@ export class SqliteMemoryStore implements MemoryStore {
           .values({
             id,
             threadId: input.threadId,
+            messageIndex: input.messageIndex ?? i,
             role: input.role,
             content: input.content,
             tokenEstimate: input.tokenEstimate,
@@ -213,7 +220,12 @@ export class SqliteMemoryStore implements MemoryStore {
             contentHash: sha256Hex(input.content),
           })
           .onConflictDoNothing({
-            target: [memoryMessages.threadId, memoryMessages.role, memoryMessages.contentHash],
+            target: [
+              memoryMessages.threadId,
+              memoryMessages.messageIndex,
+              memoryMessages.role,
+              memoryMessages.contentHash,
+            ],
           })
           .run();
       });
@@ -233,7 +245,12 @@ export class SqliteMemoryStore implements MemoryStore {
           sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryMessages.threadId} AND mt.owner_id = ${scope.accountId})`,
         ),
       )
-      .orderBy(asc(memoryMessages.createdAt), asc(memoryMessages.id))
+      .orderBy(
+        sql`CASE WHEN ${memoryMessages.messageIndex} IS NULL THEN 1 ELSE 0 END`,
+        asc(memoryMessages.messageIndex),
+        asc(memoryMessages.createdAt),
+        asc(memoryMessages.id),
+      )
       .all();
     return rows.map((row) => ({
       id: row.id,

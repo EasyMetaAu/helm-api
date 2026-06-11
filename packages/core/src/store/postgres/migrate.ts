@@ -74,6 +74,7 @@ const MIGRATIONS: readonly Migration[] = [
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         token_estimate INTEGER NOT NULL,
+        message_index INTEGER,
         created_at BIGINT NOT NULL
       );
 
@@ -413,15 +414,18 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Idempotent memory-message ingest — pg mirror of the sqlite v21 fix. (a) The
-    // dedup DELETE is ONE statement (CTE + DELETE): splitStatements splits on ';',
-    // so it must carry no internal ';'. (b) ADD COLUMN IF NOT EXISTS (idempotent).
-    // (c) the UNIQUE index the write path targets. Historical rows keep
-    // content_hash NULL (no sha256 SQL fn without pgcrypto; the ops script
-    // backfills); NULLs are DISTINCT in a pg UNIQUE index, so it builds fine and
-    // app-layer writes (which carry a real hash) dedupe going forward.
+    // Idempotent memory-message ingest — pg mirror of the sqlite v21 fix.
+    // Historical rows lack transcript positions, so the migration keeps only the
+    // earliest legacy duplicate per (thread_id, role, content), adds nullable
+    // message_index/content_hash columns, and creates the occurrence-aware UNIQUE
+    // index the write path targets. The pg ops script backfills message_index +
+    // content_hash and wipes stale observations.
     version: 20,
     sql: `
+      ALTER TABLE memory_messages ADD COLUMN IF NOT EXISTS message_index INTEGER;
+
+      ALTER TABLE memory_messages ADD COLUMN IF NOT EXISTS content_hash TEXT;
+
       WITH ranked AS (
         SELECT id,
                ROW_NUMBER() OVER (
@@ -434,10 +438,8 @@ const MIGRATIONS: readonly Migration[] = [
       USING ranked
       WHERE memory_messages.id = ranked.id AND ranked.rn > 1;
 
-      ALTER TABLE memory_messages ADD COLUMN IF NOT EXISTS content_hash TEXT;
-
-      CREATE UNIQUE INDEX IF NOT EXISTS uniq_memory_messages_thread_role_hash
-        ON memory_messages (thread_id, role, content_hash);
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_memory_messages_thread_idx_role_hash
+        ON memory_messages (thread_id, message_index, role, content_hash);
     `,
   },
 ];
