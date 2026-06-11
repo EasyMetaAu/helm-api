@@ -214,15 +214,18 @@ describe("transformResponseIn", () => {
   it("sanitizes invalid and colliding tool names while keeping a reverse map", () => {
     const nameA = "search-web";
     const nameB = "search web";
+    const mcpName = "mcp__codegraph__codegraph_context";
     const empty = "";
     const long = `${"x".repeat(64)}!`;
-    const map = createAnthropicToolNameMap([nameA, nameB, empty, long]);
+    const map = createAnthropicToolNameMap([nameA, nameB, mcpName, empty, long]);
 
     expect(map.toAnthropic(nameA)).toBe("search_web");
     expect(map.toAnthropic(nameB)).toMatch(/^search_web_[a-z0-9]{8}$/);
+    expect(map.toAnthropic(mcpName)).toBe(mcpName);
     expect(map.toAnthropic(empty)).toBe("tool");
     expect(map.toAnthropic(long)).toHaveLength(64);
     expect(map.toOriginal(map.toAnthropic(nameB))).toBe(nameB);
+    expect(map.toOriginal(mcpName)).toBe(mcpName);
   });
 
   it("emits sanitized tool_use names and records reverse map provenance", () => {
