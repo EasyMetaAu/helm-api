@@ -114,7 +114,7 @@ class InMemoryTelemetryStore implements TelemetryStore {
     const rows = matched
       .sort((a, b) => b.at.getTime() - a.at.getTime())
       .slice(query.offset, query.offset + query.limit)
-      .map((r) => ({ record: r.rec, createdAt: r.at }));
+      .map((r) => ({ record: r.rec, createdAt: r.at, apiKeyId: r.keyId }));
     return { rows, total: matched.length };
   }
   async getByRequestId(requestId: string): Promise<DecisionRecord | null> {

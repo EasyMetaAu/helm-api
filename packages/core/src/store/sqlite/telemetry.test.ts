@@ -166,6 +166,27 @@ describe("SqliteTelemetryStore", () => {
     expect(page3.rows.map((r) => r.record.request_id)).toEqual(["r0"]);
   });
 
+  it("surfaces the recorded api_key_id on each page row (for key-name resolution)", async () => {
+    const store = freshStore();
+    await store.insert({
+      decision: decision("a"),
+      apiKeyId: "key_alpha",
+      createdAt: new Date(2000),
+    });
+    await store.insert({
+      decision: decision("b"),
+      apiKeyId: "key_beta",
+      createdAt: new Date(1000),
+    });
+    const page = await store.queryPage({ limit: 50, offset: 0 });
+    // The redacted record carries only key_prefix; the page row exposes the
+    // canonical api_key_id so the admin route can join it to the key's name.
+    expect(page.rows.map((r) => [r.record.request_id, r.apiKeyId])).toEqual([
+      ["a", "key_alpha"],
+      ["b", "key_beta"],
+    ]);
+  });
+
   it("filters by status using the denormalized final_status column", async () => {
     const store = freshStore();
     await seed(store, "ok1", 1000, { status: "ok" });

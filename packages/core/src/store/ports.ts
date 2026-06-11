@@ -244,10 +244,19 @@ export interface TelemetryPageQuery {
   model?: string;
 }
 
+// One queryPage row: a recent decision record + the recorded api_key_id (key_id).
+// queryRecent's RecentDecisionRecord deliberately omits the key id (no consumer
+// needs it); the admin Debug list does — it resolves the key's human NAME for
+// display by joining this id to the keystore in the route (core stays headless,
+// Principle 1). key_id only — never a hash/plaintext (Principle 7).
+export interface TelemetryPageRow extends RecentDecisionRecord {
+  apiKeyId: string;
+}
+
 // One page of decision rows + the TOTAL matching the same filters (NOT just this
 // page) so the UI can render "Page X of Y" without a second round-trip.
 export interface TelemetryPage {
-  rows: RecentDecisionRecord[];
+  rows: TelemetryPageRow[];
   total: number;
 }
 

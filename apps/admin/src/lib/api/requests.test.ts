@@ -75,6 +75,18 @@ describe('toListItem', () => {
     expect(row.key_prefix).toBe('—');
   });
 
+  it('reads the resolved key_name when present; null (with prefix kept) when absent/empty', () => {
+    expect(toListItem(rawRecord({ key_name: 'Production backend' })).key_name).toBe(
+      'Production backend',
+    );
+    // Prefix is still carried so the view can fall back to it.
+    const named = toListItem(rawRecord({ key_name: 'Mobile app' }));
+    expect(named.key_prefix).toBe('helm_live_ab12');
+    // Unnamed key (or legacy record) → null, never an empty-string label.
+    expect(toListItem(rawRecord()).key_name).toBeNull();
+    expect(toListItem(rawRecord({ key_name: '' })).key_name).toBeNull();
+  });
+
   it('maps the recorded created_at (epoch ms) to an ISO ts; legacy records stay empty', () => {
     const row = toListItem(rawRecord({ created_at: 1717155600000 }));
     expect(row.ts).toBe(new Date(1717155600000).toISOString());
