@@ -1,3 +1,4 @@
+export { type CachedKeyStoreOptions, createCachedKeyStore } from "./cached-keystore.js";
 export { type CreateStoreOptions, createStore, type StoreSet } from "./factory.js";
 export type {
   BudgetDim,

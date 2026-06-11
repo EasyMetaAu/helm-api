@@ -253,6 +253,12 @@ export interface TelemetryPage {
 
 export interface TelemetryStore {
   insert(input: InsertTelemetryInput): Promise<{ id: string }>;
+  // Optional batch variants (perf): collapse N rows into ONE commit on the
+  // synchronous SQLite writer, mirroring MemoryStore.appendMessages. The deferred
+  // write queue prefers these; adapters lacking them fall back to per-row insert.
+  // An empty array is a no-op.
+  insertMany?(inputs: InsertTelemetryInput[]): Promise<void>;
+  insertPayloads?(inputs: InsertPayloadInput[]): Promise<void>;
   queryRecent(limit: number): Promise<RecentDecisionRecord[]>; // most recent N, createdAt desc
   // Filtered + paginated recent list for the admin Debug UI. Same createdAt DESC
   // ordering as queryRecent; returns the page plus the full filtered total.

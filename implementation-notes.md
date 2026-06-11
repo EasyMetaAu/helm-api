@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-06-11 · 四个 AI API 高并发热路径性能优化（Phase B；CLAUDE.md 原则 1/3/7/8）
+
+- **缘起**：用户要求四个对 AI 的 API（`/v1/chat/completions`、`/v1/messages`、`/v1/responses`、`/v1beta/…:generateContent`）支持高并发，且 SQLite 写入绝不拖慢响应。全链路 review（鉴权中间件 / store / 路由执行 / 流式四面）确认根因仍是 [[sqlite-write-perf-root-cause]]：**better-sqlite3 同步阻塞事件循环**——每请求 1 次未缓存鉴权读 +（provider 已应答后）同步 telemetry/payload 写都 `await` 在响应关键路径上；memory observeInbound 在路由前同步提交。承接 Phase A（PRAGMA + memory 批量）。
+- **修复 1 鉴权缓存**：`packages/core/src/store/cached-keystore.ts` `createCachedKeyStore` 包 KeyStore，对 `getByHash` 做 LRU+TTL（命中+未命中都缓，挡无效 key 洪水），任意 mutation 整表失效。composition root 在 `store.keys` 外包一层（同一实例被 auth 中间件 + 三个 self-auth 面 + admin key 路由共享，故 admin 改 key 自动失效）。TTL 默认 30s（`HELM_AUTH_CACHE_TTL_MS`）。**坑：多实例共享 Postgres 时，A 实例吊销的 key 在 B 实例最多续命 TTL。**
+- **修复 2 延迟+批量写队列（核心）**：`TelemetryStore` 加可选 `insertMany?`/`insertPayloads?`（sqlite 单事务 / postgres 多行，N commit→1，仿 appendMessages 先例）。新 `apps/gateway/src/runtime/write-queue.ts`：telemetry/payload 入缓冲按 25ms / 批量阈值合并 flush；副作用任务（memory observe、prune）走单条 FIFO 串行链（保 inbound 先于 outbound）；有界深度（溢出丢最旧+日志）；`flush()/stop()` 排空。chat.ts + recordServed（三面共用）+ pipeline 接**可选 `writes` dep：缺省=今日 inline await（全量存量测试零改动），存在=响应后延迟批量**。**budget settle 永不延迟**（配额正确性：下一请求 pre-route gate 必须看到本次 spend）。`index.ts` 加 SIGTERM/SIGINT → `dispose()` 先 flush 队列再关 store（优雅部署零丢，`HELM_WRITE_QUEUE_FLUSH_MS`/`_MAX_DEPTH`）。**坑：硬崩溃最多丢 flush 窗口内 telemetry/payload；memory 在 flush 窗口内最终一致（连发自动化轮可能漏最后一轮，fail-open）。**
+- **修复 3 undici 出口连接复用**：`apps/gateway/src/runtime/egress.ts` boot 时（buildServer 前）`setGlobalDispatcher(new Agent({keepAliveTimeout:30s,…}))`（`HELM_UNDICI_*`），消除默认 4s keep-alive 导致的反复 TLS 握手；pool size 默认不动（仅显式 `HELM_UNDICI_CONNECTIONS` 才设），per-account proxy 自带 dispatcher 不冲突。gateway 加 `undici` 直接依赖。
+- **修复 4 流式抓包尾缓冲**：`createSseCapture(full)`——capture 开=留全量（原文落库），capture 关=只留 ~16KB 尾（够 `usageFromSSE` 从尾扫成本回填），不再为成本回填把整条流钉内存；不碰转发字节（原则 8）。
+- **取舍/back-compat 关键**：四修复彼此独立、各藏在可选 dep / boot 调用后——任一可单独回滚；写队列出问题只需不接 `writes` dep，路由即退回 inline await。无 DB schema 改动、无客户端可见 API 改动、无新必填配置（新旋钮全是可选 env + 安全默认）。
+- **Codex review 二次修复（两处 P1）**：① 写队列批量 insert 容错——`insertMany` 整批多行写到唯一列，单条重复 `request_id`（客户端复用 `X-Request-Id`→trace_id）会让整批抛错、原实现 catch 后丢掉整个 25ms 窗口的无关行；改为 `writeTelemetry/writePayloads` **批量失败回退逐条**（多行 INSERT 原子，失败不提交，回退不双写），只丢肇事行。② 优雅停机时序——`index.ts` 原先 `server.close()` 未 await 就 dispose（停队列+关 store），在途请求的响应后 enqueue 会被丢、同步 settle 可能打到已关闭 DB；抽 `runtime/shutdown.ts::closeServer`（先丢空闲 keep-alive、await 在途排空、超 `HELM_SHUTDOWN_DRAIN_MS` 默认 10s 再 force-close），**先 await closeServer 再 dispose**。
+- **验证**：TDD 红→绿。新单测：cached-keystore(10)、write-queue(10，含批量回退)、shutdown(3)、egress(3)、createSseCapture(3)、telemetry batch 契约（sqlite+PGlite）、chat/recordServed 延迟路径。全量 `pnpm test` 2935 测试（9 个 PGlite 5s 超时是 [[pnpm-test-pglite-flake]]，隔离重跑 143 全绿）；typecheck（4 包）/ lint(Biome) / build（admin+core+gateway）全绿。
+
 ## 2026-06-10 · SQLite 写入热路径性能修复（Phase A，无 Redis；CLAUDE.md 原则 1/8）
 
 - **缘起**：用户反馈线上 la.atmy.work「两个并发就很慢」，怀疑写入太多，提议参考 [[la-atmy-work-deployment]] 旁的 claude-relay-service 引入 Redis 写缓冲再落 SQLite。诊断后发现**根因不是 SQLite 并发能力**，而是 **better-sqlite3 同步阻塞 Node 单线程 + 默认 `synchronous=FULL`（每次 commit 都 fsync）**：写代价由整个进程（含其它在途请求的事件循环）承担。对 Claude Code 这类**每轮重发整段历史 + 工具定义**的客户端，`capture_payloads`（默认开）把数百 KB~MB 的 request_json 同步 + fsync 落库，直接冻结事件循环；memory observe 又**逐条消息**同步写（inbound 在上游调用前、关键路径上）。两个并发流互相卡 fsync，无法重叠。
@@ -27,16 +38,11 @@
 - **坑/TODO**：① 不反映页内非导航 fetch（刻意为之，见上）。② 依赖 `navigating`，若将来某页改用页内手动 fetch 取数而非 `load`，该页切换将不再触发进度条。③ 纯 admin 静态资源改动，需发新 admin 镜像才生效。
 - **验证**：TDD 先红后绿——`NavProgress.test.ts`(3) 用可写 `navigating` mock 断言：idle 隐藏且归零、导航起→可见且进度>0、resolve→补满 100% 后隐藏。admin 全量 296 绿、Biome lint 绿、typecheck（4 包）绿、build（admin static + gateway + core）绿。
 
-## 2026-06-10 · Anthropic tool_result 邻接兼容修复（docs/05 协议互译；CLAUDE.md 原则 3/8）
-
-- **缘起**：线上请求 `5cd63ac6-798e-4b31-a497-575d92033f64` 在 `anthropic/claude-opus-4-8` 与 `zenmux/claude-opus-4.8` 返回 400：Anthropic 报 `messages.2` 的 `tool_use` 没有在下一条消息里紧跟对应 `tool_result`。捕获 payload 显示客户端把 114 个 `tool_result` 与新的用户文本放在同一个 Anthropic user turn；这是可兼容形态，但 Helm 入站转换先发普通 user 文本、再 fan-out tool 结果，订阅 provider 又把连续 tool 结果拆成多个 user turn，最终破坏 Anthropic 的 tool-result adjacency。
-- **修复**：`transformRequestOut` 对混合 user turn 先输出 fanned-out `role:"tool"` 结果，再输出尾随 user 文本，确保 IR 保持 assistant tool_calls → tool results → next user text 的顺序。订阅 provider 的 `openaiToAnthropicRequest` 增加相邻同角色合并，连续 OpenAI `role:"tool"` 会合并成同一个 Anthropic `role:"user"`，并在其中保持 `tool_result` 块先于尾随文本。
-- **取舍**：不拒绝这类客户端 payload，也不丢弃尾随用户文本；选择做结构化归一化，让 Anthropic strict validation 接收，同时尽量保留用户原意。若客户端已经发送纯 tool-result turn，行为不变。
-- **验证**：TDD 新增两个回归：混合 Anthropic user turn 中 `tool_result` 必须排在尾随文本前；连续 OpenAI tool results 必须合并成一个即时 Anthropic user turn。`pnpm exec vitest run packages/core/src/protocol/anthropic/request.test.ts packages/core/src/provider/anthropic.test.ts` → 63 passed。用线上捕获 payload 本地重放后，provider-facing Anthropic 消息变为 assistant 后紧跟 115-block user turn：前 114 个 `tool_result`，最后 1 个文本 prompt，移除 400 根因。
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-10 · Anthropic tool_result 邻接兼容修复：`transformRequestOut` 对混合 user turn 先发 fanned-out `role:"tool"` 结果再发尾随文本；订阅 provider `openaiToAnthropicRequest` 合并相邻同角色（连续 OpenAI tool→单个 Anthropic user turn，`tool_result` 块先于文本），修线上 `messages.N` 的 `tool_use` 无紧邻 `tool_result` 的 400；纯结构归一化、不拒绝 payload、不丢用户文本，纯 tool-result turn 行为不变。core 63 绿。
 
 ### 2026-06-10 · 虚拟模型别名映射 model-aliases.yaml：裸厂商 id（如 `claude-opus-4-8`）→ lane 名/`auto` 的兼容映射（`routing/model-alias.ts`），`plan()` step-0 独立 0a 分支解析，对任意 key 生效但经 `aliasPolicyContext` 跑 policy+key 双层 cap 静默 clamp（不提权，Codex review P1）；精确键优先、否则最长字面 `*`-glob、大小写敏感；`ModelAliasesSchema` 形状校验 + boot 时 `validateModelAliasTargets` 对有效 lane 集 fail-closed。出厂 `config/model-aliases.yaml` 带 claude-*/gpt-* 激活映射。**坑：线上需手动在 `/opt/helm-api/config` 放该 yaml 才生效（见 [[deploy-never-overwrite-config]]）。**
 

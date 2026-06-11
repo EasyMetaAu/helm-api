@@ -246,4 +246,49 @@ describe("SqliteTelemetryStore", () => {
     expect(got?.classifier.eval_cache_hit).toBe(true);
     expect(Array.isArray(got?.provider_attempts)).toBe(true);
   });
+
+  // Batch variants (perf): the deferred write queue collapses N inserts into ONE
+  // commit. The result must be indistinguishable from N single inserts.
+  it("insertMany persists every decision (batch == N singles)", async () => {
+    const store = freshStore();
+    const at = new Date(1717155600000);
+    await store.insertMany([
+      { decision: decision("req_a"), apiKeyId: "k1", createdAt: at },
+      { decision: decision("req_b"), apiKeyId: "k1", createdAt: at },
+      { decision: decision("req_c"), apiKeyId: "k2", createdAt: at },
+    ]);
+    const recent = await store.queryRecent(10);
+    expect(recent.map((r) => r.record.request_id).sort()).toEqual(["req_a", "req_b", "req_c"]);
+    expect(await store.getApiKeyId("req_c")).toBe("k2");
+    expect(await store.getByRequestId("req_a")).toEqual(decision("req_a"));
+  });
+
+  it("insertMany([]) is a no-op", async () => {
+    const store = freshStore();
+    await expect(store.insertMany([])).resolves.toBeUndefined();
+    expect(await store.queryRecent(10)).toHaveLength(0);
+  });
+
+  it("insertPayloads persists every payload and upserts by request_id", async () => {
+    const store = freshStore();
+    const at = new Date(1717155600000);
+    await store.insertPayloads([
+      { requestId: "req_a", requestJson: '{"a":1}', responseJson: '{"r":1}', createdAt: at },
+      { requestId: "req_b", requestJson: '{"b":2}', responseJson: null, createdAt: at },
+    ]);
+    expect((await store.getPayload("req_a"))?.responseJson).toBe('{"r":1}');
+    expect((await store.getPayload("req_b"))?.responseJson).toBeNull();
+
+    // Re-batch the same request_id with a backfilled response → upsert, not dup.
+    await store.insertPayloads([
+      { requestId: "req_b", requestJson: '{"b":2}', responseJson: '{"r":2}', createdAt: at },
+    ]);
+    expect((await store.getPayload("req_b"))?.responseJson).toBe('{"r":2}');
+  });
+
+  it("insertPayloads([]) is a no-op", async () => {
+    const store = freshStore();
+    await expect(store.insertPayloads([])).resolves.toBeUndefined();
+    expect(await store.getPayload("nope")).toBeNull();
+  });
 });

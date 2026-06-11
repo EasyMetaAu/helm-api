@@ -11,6 +11,7 @@ import { type InternalRequest, makeHelmError } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { createWriteQueue } from "../runtime/write-queue.js";
 import { type ChatRouteDeps, registerChatRoutes } from "./chat.js";
 
 // ── auth fixtures ─────────────────────────────────────────────────────────────
@@ -759,6 +760,82 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
     expect(cap.payloads).toHaveLength(1);
     expect(cap.payloads[0]?.requestJson).toBe(rawRequest);
     expect(cap.payloads[0]?.responseJson).toBe(JSON.stringify(upstream));
+  });
+});
+
+// ── deferred write queue (perf): writes leave the response's critical path ─────
+describe("POST /v1/chat/completions — deferred write queue", () => {
+  function captureTelemetry() {
+    const inserted: unknown[] = [];
+    const payloads: Array<{ requestId: string; responseJson: string | null }> = [];
+    const telemetry = {
+      insert: vi.fn(async (i: { decision: unknown }) => {
+        inserted.push(i.decision);
+        return { id: "1" };
+      }),
+      insertPayload: vi.fn(async (p: { requestId: string; responseJson: string | null }) => {
+        payloads.push({ requestId: p.requestId, responseJson: p.responseJson });
+      }),
+      prunePayloads: vi.fn(async () => {}),
+    } as unknown as TelemetryStore;
+    return { telemetry, inserted, payloads };
+  }
+
+  it("defers telemetry + payload off the response, then writes them on flush", async () => {
+    const cap = captureTelemetry();
+    const q = createWriteQueue({
+      telemetry: cap.telemetry,
+      log: () => {},
+      flushIntervalMs: 10_000,
+    });
+    const { deps: d, harness } = deps({
+      telemetry: cap.telemetry,
+      writes: q,
+      capturePayloads: () => true,
+      payloadRetentionMs: () => 1000,
+      costOf: () => 0,
+    });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({ id: "c", choices: [{ message: { content: "ok" } }] }),
+    );
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(res.status).toBe(200);
+    // The response has already returned — nothing has hit the store yet.
+    expect(cap.inserted).toHaveLength(0);
+    expect(cap.payloads).toHaveLength(0);
+
+    await q.flush();
+    expect(cap.inserted).toHaveLength(1);
+    expect(cap.payloads).toHaveLength(1);
+  });
+
+  it("a failing deferred write never affects the served response (fail-open)", async () => {
+    const cap = captureTelemetry();
+    (cap.telemetry.insert as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("db down"));
+    const q = createWriteQueue({
+      telemetry: cap.telemetry,
+      log: () => {},
+      flushIntervalMs: 10_000,
+    });
+    const { deps: d, harness } = deps({ telemetry: cap.telemetry, writes: q });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({ id: "c", choices: [{ message: { content: "ok" } }] }),
+    );
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(res.status).toBe(200);
+    await expect(q.flush()).resolves.toBeUndefined();
   });
 });
 

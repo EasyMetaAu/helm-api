@@ -620,7 +620,9 @@ export {
   loadEncKeyFromEnv,
 } from "./store/crypto/token-cipher.js";
 export {
+  type CachedKeyStoreOptions,
   type CreateStoreOptions,
+  createCachedKeyStore,
   createPgDb,
   createPgliteDb,
   createSqliteDb,

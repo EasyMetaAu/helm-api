@@ -430,6 +430,36 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(recent[0]?.createdAt).toBeInstanceOf(Date);
     });
 
+    // Batch variants the deferred write queue prefers — both adapters implement
+    // them and a batch must be indistinguishable from N single inserts/upserts.
+    it("insertMany + insertPayloads batch identically to single writes", async () => {
+      ctx = await make();
+      const t = ctx.stores.telemetry;
+      if (!t.insertMany || !t.insertPayloads) throw new Error("batch methods required");
+      const at = new Date(1_700_000_000_000);
+      await t.insertMany([
+        { decision: decision("req_a"), apiKeyId: "k1", createdAt: at },
+        { decision: decision("req_b"), apiKeyId: "k2", createdAt: at },
+      ]);
+      const recent = await t.queryRecent(10);
+      expect(recent.map((r) => r.record.request_id).sort()).toEqual(["req_a", "req_b"]);
+      expect(await t.getApiKeyId("req_b")).toBe("k2");
+
+      await t.insertPayloads([
+        { requestId: "req_a", requestJson: '{"q":1}', responseJson: '{"r":1}', createdAt: at },
+        { requestId: "req_b", requestJson: '{"q":2}', responseJson: null, createdAt: at },
+      ]);
+      expect((await t.getPayload("req_a"))?.responseJson).toBe('{"r":1}');
+      // Re-batch the same id with a backfilled response → upsert, not duplicate.
+      await t.insertPayloads([
+        { requestId: "req_b", requestJson: '{"q":2}', responseJson: '{"r":2}', createdAt: at },
+      ]);
+      expect((await t.getPayload("req_b"))?.responseJson).toBe('{"r":2}');
+
+      await expect(t.insertMany([])).resolves.toBeUndefined();
+      await expect(t.insertPayloads([])).resolves.toBeUndefined();
+    });
+
     it("round-trips a populated per-attempt error_detail (upstream status + message + raw body)", async () => {
       ctx = await make();
       const withDetail = decision("req_detail", {

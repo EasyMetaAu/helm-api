@@ -27,22 +27,35 @@ export class PgTelemetryStore implements TelemetryStore {
     private readonly genId: () => string = randomUUID,
   ) {}
 
-  async insert(input: InsertTelemetryInput): Promise<{ id: string }> {
-    const id = this.genId();
+  // Build one telemetry row (fresh id + denormalized status/cost). Shared by the
+  // single and batch inserts so they can never drift. jsonb stored natively.
+  private toRow(input: InsertTelemetryInput): typeof telemetry.$inferInsert {
     const finalCost = input.decision.provider_attempts.reduce<number | null>((acc, a) => {
       if (a.cost_usd === null) return acc;
       return (acc ?? 0) + a.cost_usd;
     }, null);
-    await this.db.insert(telemetry).values({
-      id,
+    return {
+      id: this.genId(),
       requestId: input.decision.request_id,
       apiKeyId: input.apiKeyId,
       decisionJson: input.decision,
       finalStatus: input.decision.final.status,
       costUsd: finalCost,
       createdAt: input.createdAt.getTime(),
-    });
-    return { id };
+    };
+  }
+
+  async insert(input: InsertTelemetryInput): Promise<{ id: string }> {
+    const row = this.toRow(input);
+    await this.db.insert(telemetry).values(row);
+    return { id: row.id };
+  }
+
+  // Batch insert (perf): ONE multi-row statement. Postgres is async/non-blocking,
+  // so the win is one round-trip + one txn instead of N. Empty array is a no-op.
+  async insertMany(inputs: InsertTelemetryInput[]): Promise<void> {
+    if (inputs.length === 0) return;
+    await this.db.insert(telemetry).values(inputs.map((input) => this.toRow(input)));
   }
 
   async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
@@ -168,6 +181,32 @@ export class PgTelemetryStore implements TelemetryStore {
           createdAt: input.createdAt.getTime(),
         },
       });
+  }
+
+  // Batch payload upsert (perf): all rows in ONE transaction. Per-row upsert keeps
+  // the conflict semantics identical to insertPayload. Empty array is a no-op.
+  async insertPayloads(inputs: InsertPayloadInput[]): Promise<void> {
+    if (inputs.length === 0) return;
+    await this.db.transaction(async (tx) => {
+      for (const input of inputs) {
+        await tx
+          .insert(requestPayloads)
+          .values({
+            requestId: input.requestId,
+            requestJson: input.requestJson,
+            responseJson: input.responseJson,
+            createdAt: input.createdAt.getTime(),
+          })
+          .onConflictDoUpdate({
+            target: requestPayloads.requestId,
+            set: {
+              requestJson: input.requestJson,
+              responseJson: input.responseJson,
+              createdAt: input.createdAt.getTime(),
+            },
+          });
+      }
+    });
   }
 
   async getPayload(requestId: string): Promise<RequestPayload | null> {
