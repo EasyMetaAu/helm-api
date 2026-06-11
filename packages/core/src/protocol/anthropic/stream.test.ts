@@ -576,6 +576,44 @@ describe("convertAnthropicStreamToIR — thinking streaming (inbound)", () => {
 });
 
 describe("convertOpenAIStreamToAnthropic — tool name sanitizer", () => {
+  it("preserves MCP double-underscore tool names in streaming tool_use blocks", async () => {
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "call_mcp",
+                      function: {
+                        name: "mcp__codegraph__codegraph_context",
+                        arguments: '{"task":"inspect"}',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          { choices: [{ finish_reason: "tool_calls" }] },
+        ]),
+      ),
+    );
+
+    const start = events.find(
+      (e): e is Extract<AnthropicSSEEvent, { type: "content_block_start" }> =>
+        e.type === "content_block_start" && e.content_block.type === "tool_use",
+    );
+    expect(start?.content_block).toMatchObject({
+      type: "tool_use",
+      id: "call_mcp",
+      name: "mcp__codegraph__codegraph_context",
+    });
+  });
+
   it("sanitizes colliding tool names in parallel streaming tool_use blocks", async () => {
     const events = await collect(
       convertOpenAIStreamToAnthropic(

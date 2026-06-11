@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-12 · Anthropic streaming 保留 MCP 双下划线工具名（CLAUDE.md 原则 8；docs/05）
+
+- **缘起**：线上 Claude Code 经 Helm 调用 `codegraph` MCP 时，工具 schema 是正确的 `mcp__codegraph__codegraph_context`，但返回给客户端的流式 `tool_use.name` 变成 `mcp_codegraph_codegraph_context`。Claude Code 无法执行该单下划线工具名，连续把 `No such tool available` 带回下一轮，模型反复输出 “Worktree created / worktree is ready” 并再次调用错误工具。
+- **根因**：Anthropic 出站 stream 转换复用 `createAnthropicToolNameMap()`，其 sanitizer 把非法字符替换为 `_` 后又折叠连续 `_`。连续下划线在 Anthropic tool name 规则里本来合法，且 MCP 工具名把双下划线作为命名空间分隔符；折叠它会破坏工具名语义。
+- **修复**：`sanitizeAnthropicToolName` 不再折叠 `_+`，仍保留非法字符替换、首尾 `_` 裁剪、空名兜底和冲突 hash 后缀。这样 `search-web`/`search web` 仍按既有行为产生冲突后缀，而 `mcp__server__tool` 这类合法名称原样通过。
+- **验证**：TDD 红→绿。新增 streaming 回归测试钉死 `mcp__codegraph__codegraph_context` 在 `content_block_start(tool_use)` 中原样返回；扩展 response-level sanitizer 测试确认 MCP 双下划线名可正向/反向 round-trip。定向 `pnpm vitest run packages/core/src/protocol/anthropic/stream.test.ts packages/core/src/protocol/anthropic/response.test.ts packages/core/src/protocol/anthropic/request.test.ts` 通过。
+
 ## 2026-06-11 · 「重试」按钮支持全部四协议（faithful 原生回放；CLAUDE.md 原则 1/5/7；docs/05/07）
 
 - **缘起**：admin 请求详情页「重试」按钮对所有 GPT 请求禁用、对所有 Claude 请求可用（生产 la.atmy.work 实证）。根因：回放只认 OpenAI chat 形状——客户端 `canRetry` 要求 `messages[]`（Responses 的 `input[]`、Gemini 的 `contents[]` 落空），服务端 `runReplay` 用 `OpenAIChatRequestSchema` 校验且**硬编码 `protocol:"openai_chat"`**。顺带挖出潜伏 bug：Claude 回放其实也走 openai_chat 路径，**静默丢掉顶层 `system` 提示词 + 错形 Anthropic 工具**——只因 `messages[]` 碰巧过 schema 才「看起来能用」。
@@ -26,22 +33,13 @@
 - **坑/TODO**：① 纯 admin 静态资源改动，需发新 admin 镜像才生效（部署见 [[deploy-never-overwrite-config]]）。② 自动刷新仅本页生命周期内有效，离开页面即停；刷新节奏不持久化（刻意——避免后台无意义轮询）。③ 控件通用，后续可复用到 Dashboard/Providers 等页。
 - **验证**：TDD 红→绿。新 `RefreshControl.test.ts`(7，fake timers)：手动点击触发 onRefresh、菜单开列区间、选中后逐 tick 刷新（非立即）、激活标签、选「关」停、卸载清理。requests 页 17 例不回归；admin 全量 **304 绿**；svelte-check 对新文件零错（仅既有 oauth.test.ts 3 处预存错，未触碰）；Biome lint(432 文件) + Prettier(.svelte) + vite build 全绿。
 
-## 2026-06-11 · 记忆消息重复写入根治 + 历史脏数据清理（CLAUDE.md 原则 1/3；docs/08）
-
-- **缘起**：线上 la.atmy.work「死循环」排查（直连 helm.db + 源码 + 容器日志）锁定根因在**记忆入站写入**：`observeInbound`（`memory/observe.ts`）每轮把客户端重发的**整段历史全量盲插入**，`appendMessage/appendMessages` 用全新随机 UUID 插入、**无幂等键/冲突处理**。Claude Code 每轮重发完整 transcript → `memory_messages` 呈 **O(n²)** 增长（实测 57,560 行 / 1,543 distinct = **97.3% 重复**，DB **489MB**）。重复行带**全新 id + created_at**，永不被旧 observation 的 `source_message_range` 覆盖（`observer.ts` `alreadyObservedMessageIds` 按 id 区间判覆盖）→ observer 每分钟 `memory_formation` 反复压缩同一线程（`measured_retention 0.6%`、`prior_compaction_count 9→17`）——这就是用户看到的「一直做同一件事」。
-- **用户拍板**：① 清理范围 = 去重消息 + **清空 bug 期 observation** 让 observer 在干净数据上重建（保留 threads/keys/facts）；② 修复 = **去重根治即可**，不碰 observer 经济学核心（`compaction-policy.ts`/`AUTO_PRIORS`/`netBenefitUsd` 一律不动）。
-- **修复（防复发护栏在 DB 层）**：新 `memory/message-hash.ts::sha256Hex`（逐字节 sha256，**不 normalize/不 lowercase**，区别于 facts 的 `normalizeFactText`——消息是精确文本/代码，与 eval 缓存键约定一致）；两方言 `memory_messages` 加 `message_index` + `content_hash` 列 + `UNIQUE(thread_id, message_index, role, content_hash)`。`message_index` 是客户端 transcript 里的稳定位置：同一位置被重发会折叠；稍后再次说同一句话（不同位置）会保留。`appendMessage/appendMessages` 算 hash + `onConflictDoNothing`。pg 多行 INSERT 额外按同一复合 key 做**批内去重**（ON CONFLICT 只挡**已存在**行）。用 hash 而非 raw content 做索引键：**pg btree 索引行 ~2704B 上限**，大 TEXT 不可直接索引。
-- **迁移（sqlite v21 / pg v20，纯 SQL，有序）**：先 `ADD COLUMN message_index/content_hash`（可空）→ 窗口函数 `ROW_NUMBER()` DELETE 旧库 legacy exact duplicate（老数据没有 transcript 位置，只能保留最早行）→ `CREATE UNIQUE INDEX`。**坑：迁移 SQL 算不了 sha256**（better-sqlite3 无 sha256 函数 / pg 需 pgcrypto），故历史行 index/hash 留 NULL——**两方言 UNIQUE 索引里 NULL 互不冲突**，索引照建；新写入带真 index/hash 向后去重；历史 NULL 边界由运维脚本关闭。
-- **运维脚本**：SQLite `store/sqlite/dedup-memory-messages.ts`（`pnpm memory:dedup <db>`，放 sqlite 适配器内而非 `scripts/` 以解析 better-sqlite3）+ Postgres `store/postgres/dedup-memory-messages.ts`（`pnpm memory:dedup:pg <url>`）。两者回填历史 `message_index`（按 thread 内 `created_at,id` 顺序）+ hash；碰撞行在**同批**删除，避免满批冲突无限循环；清空 observations；删 done/failed jobs；SQLite 额外 `VACUUM`；支持 `--dry-run`；幂等。
-- **取舍**：`appendMessages` 返回值仍**每 input 一个生成 id**（length 不变），冲突跳过的 id 为「惰性」（行未落库）——唯一调用方 `persistMessages` 丢弃返回值，端口契约/测试不破。**注意 inject 非元凶**：D7 纯文本闸门对带工具调用的 turn 跳过注入（日志 `memory.inject.skipped_non_plain_text`），损害全在 observe 写入侧——observe 与 inject 两模式都会触发它。
-- **部署顺序/坑**：先合代码+迁移（启动即去重+加约束+新写入停止累积）→ **再**跑运维脚本（**先备份** helm.db/-wal/-shm → dry-run → 正式 → VACUUM，空闲窗口；VACUUM 取排他锁、重写整库、不能在事务内）。
-- **验证**：TDD 红→绿。新测 `message-hash`(6)、store-contract 双驱动去重/重复文本保留 4 例、`observe` 真实 store 重灌 + 重复文本保留 2 例、sqlite/pg 迁移升级各测、sqlite/pg dedup 脚本 smoke；review fix 追加 SQLite 满批冲突不死循环、Postgres 清理路径、重复 `yes` 不丢。全量 **2954 绿**（首跑 1 红是 [[pnpm-test-pglite-flake]]，复跑全绿）、typecheck（4 包）/ lint(Biome) / build(admin+core+gateway) 全绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-11 · 记忆消息重复写入根治 + 历史脏数据清理：根因是 observeInbound 全量盲插客户端重发 transcript，`memory_messages` O(n²) 膨胀并让 observer 反复压缩；修复为 `message_index + content_hash` 幂等键、sqlite/pg 迁移与 dedup 运维脚本，清理 observations 后重建。坑：历史 NULL hash 需脚本补齐；部署先迁移后备份/dry-run/正式/VACUUM。
 
 ### 2026-06-11 · 四个 AI API 高并发热路径性能优化（Phase B）：根因仍是 [[sqlite-write-perf-root-cause]] better-sqlite3 同步阻塞事件循环。四独立修复（各藏可选 dep / boot 调用后，可单独回滚）：① `cached-keystore.ts` `createCachedKeyStore` 对 `getByHash` 做 LRU+TTL（默认 30s `HELM_AUTH_CACHE_TTL_MS`，mutation 整表失效；多实例 Postgres 下吊销最多续命 TTL）；② **延迟+批量写队列** `runtime/write-queue.ts`（`TelemetryStore.insertMany?`/`insertPayloads?`，25ms/阈值合并 flush，副作用走 FIFO 串行，有界深度；接可选 `writes` dep——缺省 inline await，存在=响应后批量；**budget settle 永不延迟**；SIGTERM→flush 再关 store；批量失败回退逐条）；③ `runtime/egress.ts` boot 设 undici 全局 `Agent`（keepAlive 30s，消反复 TLS 握手）；④ `createSseCapture(full)` capture 关只留 ~16KB 尾够成本回填。无 DB schema/客户端 API/必填配置改动。全量 2935 绿。
 
