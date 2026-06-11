@@ -170,6 +170,7 @@ describe("Store ports are implementable contracts", () => {
       request_id: "req_1",
       trace_id: "req_1",
       requested_model: "m",
+      protocol: "openai_chat",
       classifier: {
         task_type: "passthrough",
         complexity: "passthrough",

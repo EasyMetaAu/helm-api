@@ -61,7 +61,7 @@ interface Recorded {
 function fakeTelemetry(
   keyId: string | null,
   rec: Recorded,
-  opts: { failInsert?: boolean } = {},
+  opts: { failInsert?: boolean; original?: DecisionRecord | null } = {},
 ): TelemetryStore {
   return {
     async getApiKeyId() {
@@ -85,8 +85,11 @@ function fakeTelemetry(
     async queryPage() {
       return { rows: [], total: 0 };
     },
+    // The ORIGINAL request's (redacted) DecisionRecord — carries the client
+    // `protocol` + `requested_model` the replay path recovers. Default null so the
+    // legacy / openai_chat tests exercise the body-shape inference fallback.
     async getByRequestId() {
-      return null;
+      return opts.original ?? null;
     },
     async queryWindow() {
       return [];
@@ -94,6 +97,24 @@ function fakeTelemetry(
     async getPayload() {
       return null;
     },
+  };
+}
+
+// A minimal stored DecisionRecord stub for protocol/model recovery — runReplay only
+// reads `.protocol` and `.requested_model` off it.
+function storedDecision(protocol: string, requestedModel = "auto"): DecisionRecord {
+  return { protocol, requested_model: requestedModel } as unknown as DecisionRecord;
+}
+
+// An OpenAI chat.completion body the routing core surfaces (the pipeline projects it
+// to IR, then the protocol adapter renders the NATIVE response for capture).
+function openAIResultBody(text = "yo"): Record<string, unknown> {
+  return {
+    id: "chatcmpl-1",
+    object: "chat.completion",
+    model: "gpt-4",
+    choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
   };
 }
 
@@ -471,6 +492,185 @@ describe("runReplay", () => {
       { originalTraceId: "orig", body: okBody, signal: new AbortController().signal, log: noop },
     );
     expect(out).toEqual({ ok: true, traceId: "new_trace" });
+    expect(rec.inserts).toHaveLength(1);
+  });
+});
+
+// ── runReplay: non-OpenAI protocols (faithful native re-issue) ───────────────
+
+describe("runReplay (anthropic_messages / openai_responses / gemini)", () => {
+  it("anthropic_messages: preserves the top-level system prompt and records a native response", async () => {
+    const rec = emptyRec();
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id),
+      final: { status: "ok", alias: "openai/gpt-4" },
+      body: openAIResultBody("hello back"),
+      stream: null,
+      error: null,
+    });
+    const body = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      system: "You are terse.",
+      messages: [{ role: "user", content: "hi" }],
+    };
+    const out = await runReplay(
+      {
+        replay: wiring(route, rec),
+        telemetry: fakeTelemetry("key_1", rec, { original: storedDecision("anthropic_messages") }),
+        keyStore: fakeKeyStore([fakeKey()]),
+      },
+      { originalTraceId: "orig", body, signal: new AbortController().signal, log: noop },
+    );
+    expect(out).toEqual({ ok: true, traceId: "new_trace" });
+    const routed = rec.routeCalls[0]?.req;
+    // Routed in the ANTHROPIC protocol …
+    expect(routed?.protocol).toBe("anthropic_messages");
+    // … with the top-level `system` HOISTED into a leading system message — the
+    // fidelity the old openai_chat-only replay path silently dropped.
+    expect(routed?.messages[0]).toEqual({ role: "system", content: "You are terse." });
+    // The recorded response is NATIVE Anthropic (a `message` object), not OpenAI.
+    const resp = JSON.parse(rec.payloads[0]?.responseJson ?? "{}");
+    expect(resp.type).toBe("message");
+    expect(rec.payloads[0]?.responseJson).toContain("hello back");
+    expect(rec.inserts).toHaveLength(1);
+  });
+
+  it("openai_responses: re-issues the body and records a native Responses object", async () => {
+    const rec = emptyRec();
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id),
+      final: { status: "ok", alias: "openai/gpt-4" },
+      body: openAIResultBody(),
+      stream: null,
+      error: null,
+    });
+    const body = { model: "gpt-5.5", input: "say hi", max_output_tokens: 16 };
+    const out = await runReplay(
+      {
+        replay: wiring(route, rec),
+        telemetry: fakeTelemetry("key_1", rec, { original: storedDecision("openai_responses") }),
+        keyStore: fakeKeyStore([fakeKey()]),
+      },
+      { originalTraceId: "orig", body, signal: new AbortController().signal, log: noop },
+    );
+    expect(out).toEqual({ ok: true, traceId: "new_trace" });
+    expect(rec.routeCalls[0]?.req.protocol).toBe("openai_responses");
+    // Native Responses envelope (`object: "response"`), NOT the raw OpenAI body.
+    const resp = JSON.parse(rec.payloads[0]?.responseJson ?? "{}");
+    expect(resp.object).toBe("response");
+    expect(resp.choices).toBeUndefined();
+    expect(rec.payloads[0]?.responseJson).toContain("yo");
+  });
+
+  it("infers openai_responses from an input[] body when the protocol was not stored (legacy)", async () => {
+    const rec = emptyRec();
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id),
+      final: { status: "ok", alias: "openai/gpt-4" },
+      body: openAIResultBody(),
+      stream: null,
+      error: null,
+    });
+    const body = {
+      model: "gpt-5.5",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    };
+    const out = await runReplay(
+      {
+        replay: wiring(route, rec),
+        telemetry: fakeTelemetry("key_1", rec), // no stored decision → infer from input[]
+        keyStore: fakeKeyStore([fakeKey()]),
+      },
+      { originalTraceId: "orig", body, signal: new AbortController().signal, log: noop },
+    );
+    expect(out).toEqual({ ok: true, traceId: "new_trace" });
+    expect(rec.routeCalls[0]?.req.protocol).toBe("openai_responses");
+  });
+
+  it("gemini: recovers the model from the stored decision (the body has none) and records native", async () => {
+    const rec = emptyRec();
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id),
+      final: { status: "ok", alias: "gemini/gemini-2.5-pro" },
+      body: openAIResultBody(),
+      stream: null,
+      error: null,
+    });
+    const body = { contents: [{ role: "user", parts: [{ text: "hi" }] }] };
+    const out = await runReplay(
+      {
+        replay: wiring(route, rec),
+        telemetry: fakeTelemetry("key_1", rec, {
+          original: storedDecision("gemini", "gemini-2.5-pro"),
+        }),
+        keyStore: fakeKeyStore([fakeKey()]),
+      },
+      { originalTraceId: "orig", body, signal: new AbortController().signal, log: noop },
+    );
+    expect(out).toEqual({ ok: true, traceId: "new_trace" });
+    const routed = rec.routeCalls[0]?.req;
+    expect(routed?.protocol).toBe("gemini");
+    // The model rode the URL on the live request, so it is recovered from the
+    // stored decision (not the body).
+    expect(routed?.requested_model).toBe("gemini-2.5-pro");
+    // Native Gemini response (a `candidates` array).
+    const resp = JSON.parse(rec.payloads[0]?.responseJson ?? "{}");
+    expect(Array.isArray(resp.candidates)).toBe(true);
+  });
+
+  it("400s on a structurally invalid native body (transformer throws), without recording", async () => {
+    const rec = emptyRec();
+    const out = await runReplay(
+      {
+        replay: wiring(async () => ({}) as never, rec),
+        telemetry: fakeTelemetry("key_1", rec, { original: storedDecision("anthropic_messages") }),
+        keyStore: fakeKeyStore([fakeKey()]),
+      },
+      // Anthropic requires max_tokens + a non-empty messages array → transform throws.
+      {
+        originalTraceId: "orig",
+        body: { messages: [] },
+        signal: new AbortController().signal,
+        log: noop,
+      },
+    );
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.status).toBe(400);
+    expect(rec.routeCalls).toHaveLength(0);
+    expect(rec.inserts).toHaveLength(0);
+  });
+
+  it("openai_responses streaming: captures the assembled NATIVE Responses SSE", async () => {
+    const rec = emptyRec();
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id),
+      final: { status: "ok", alias: "openai/gpt-4" },
+      body: null,
+      stream: sse([
+        'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n',
+      ]),
+      error: null,
+    });
+    const out = await runReplay(
+      {
+        replay: wiring(route, rec),
+        telemetry: fakeTelemetry("key_1", rec, { original: storedDecision("openai_responses") }),
+        keyStore: fakeKeyStore([fakeKey()]),
+      },
+      {
+        originalTraceId: "orig",
+        body: { model: "gpt-5.5", input: "hi", stream: true },
+        signal: new AbortController().signal,
+        log: noop,
+      },
+    );
+    expect(out).toEqual({ ok: true, traceId: "new_trace" });
+    // The captured body is the NATIVE Responses SSE event sequence (response.* events),
+    // not raw OpenAI chat chunks.
+    expect(rec.payloads[0]?.responseJson).toContain("event: response.");
     expect(rec.inserts).toHaveLength(1);
   });
 });

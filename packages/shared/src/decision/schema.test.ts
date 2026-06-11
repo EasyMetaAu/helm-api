@@ -327,4 +327,29 @@ describe("DecisionRecordSchema", () => {
     } as unknown as DecisionRecordInput);
     expect(junk.success).toBe(false);
   });
+
+  it("defaults protocol to null when omitted (legacy records round-trip)", () => {
+    const parsed = DecisionRecordSchema.parse(fullRecord());
+    expect(parsed.protocol).toBeNull();
+  });
+
+  it("round-trips each client protocol (Retry re-issues in the native shape)", () => {
+    for (const protocol of [
+      "openai_chat",
+      "anthropic_messages",
+      "openai_responses",
+      "gemini",
+    ] as const) {
+      const parsed = DecisionRecordSchema.parse({ ...fullRecord(), protocol });
+      expect(parsed.protocol).toBe(protocol);
+    }
+  });
+
+  it("rejects an unknown protocol (fail-closed)", () => {
+    const bad = DecisionRecordSchema.safeParse({
+      ...fullRecord(),
+      protocol: "cohere",
+    } as unknown as DecisionRecordInput);
+    expect(bad.success).toBe(false);
+  });
 });

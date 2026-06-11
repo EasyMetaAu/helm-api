@@ -201,6 +201,7 @@ function decision(traceId: string, lane: string): DecisionRecord {
     request_id: traceId,
     trace_id: traceId,
     requested_model: "auto",
+    protocol: "openai_chat",
     classifier: {
       task_type: "coding",
       complexity: "complex",

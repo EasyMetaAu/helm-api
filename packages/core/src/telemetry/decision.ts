@@ -129,6 +129,7 @@ export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
     request_id: request.request_id,
     trace_id: request.request_id,
     requested_model: request.requested_model,
+    protocol: request.protocol,
     key_prefix: keyPrefix,
     classifier: {
       task_type: classification.task_type,
