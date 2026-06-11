@@ -85,7 +85,11 @@ export class PgTelemetryStore implements TelemetryStore {
       .offset(query.offset);
     const totalRows = await this.db.select({ value: count() }).from(telemetry).where(where);
     return {
-      rows: rows.map((r) => ({ record: this.toDecision(r), createdAt: new Date(r.createdAt) })),
+      rows: rows.map((r) => ({
+        record: this.toDecision(r),
+        createdAt: new Date(r.createdAt),
+        apiKeyId: r.apiKeyId,
+      })),
       total: totalRows[0]?.value ?? 0,
     };
   }

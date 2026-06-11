@@ -29,6 +29,10 @@ export interface RequestListItem {
   trace_id: string;
   ts: string; // timestamp
   key_prefix: string; // display prefix only — NEVER plaintext
+  // Operator-assigned key NAME, resolved by the backend (api_key_id -> keystore).
+  // null when the key is unnamed (or was since deleted) — the view then falls back
+  // to key_prefix. Cosmetic label only, never key material (Principle 7).
+  key_name: string | null;
   user_id?: string;
   org_id?: string;
   requested_model: string | null;
@@ -146,6 +150,9 @@ interface RawDecisionRecord {
   // Display prefix only (helm_live_ab12) — the record NEVER carries the plaintext
   // key (Principle 7). Null/absent on legacy (pre-enrichment) records.
   key_prefix?: string | null;
+  // Operator-assigned key name, joined onto the row by GET /admin/api/requests
+  // (api_key_id -> keystore). Absent/null when the key is unnamed or was deleted.
+  key_name?: string | null;
   // Enriched telemetry (admin.requests-richfields): Σ attempt latency, execution
   // fallback count, and the eval/completion cost split. Absent on legacy records.
   latency_total_ms?: number;
@@ -273,6 +280,9 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     // plaintext key (Principle 7). '—' when the record carries none (legacy / unknown).
     key_prefix:
       typeof raw.key_prefix === 'string' && raw.key_prefix.length > 0 ? raw.key_prefix : '—',
+    // The key's display NAME when the backend resolved one; null lets the view fall
+    // back to the prefix (so an unnamed/deleted key still renders something).
+    key_name: typeof raw.key_name === 'string' && raw.key_name.length > 0 ? raw.key_name : null,
     requested_model: raw.requested_model ?? null,
     task_type: raw.classifier?.task_type ?? '',
     complexity: raw.classifier?.complexity ?? '',

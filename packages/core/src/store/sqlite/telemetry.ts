@@ -86,7 +86,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .limit(query.limit)
       .offset(query.offset)
       .all()
-      .map((r) => ({ record: this.toDecision(r), createdAt: r.createdAt }));
+      .map((r) => ({ record: this.toDecision(r), createdAt: r.createdAt, apiKeyId: r.apiKeyId }));
     const totalRow = this.db.select({ value: count() }).from(telemetry).where(where).get();
     return { rows, total: totalRow?.value ?? 0 };
   }

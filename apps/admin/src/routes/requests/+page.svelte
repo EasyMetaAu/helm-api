@@ -332,7 +332,16 @@
               </td>
               <td class="px-3 py-2 text-ink-body">{formatTs(r.ts)}</td>
               <td class="px-3 py-2">
-                <code class="font-mono text-ink-strong">{r.key_prefix}</code>
+                {#if r.key_name}
+                  <!-- Operator-assigned NAME when the key has one — far more
+                       recognizable than the opaque prefix. The prefix follows as
+                       a muted subtitle so the row is still traceable to the key. -->
+                  <span class="text-ink-strong" title={r.key_prefix}>{r.key_name}</span>
+                  <code class="block font-mono text-xs text-ink-muted">{r.key_prefix}</code>
+                {:else}
+                  <!-- Unnamed (or deleted) key — fall back to the prefix as before. -->
+                  <code class="font-mono text-ink-strong">{r.key_prefix}</code>
+                {/if}
               </td>
               <td class="px-3 py-2 text-ink-body">{r.requested_model ?? '—'}</td>
               <td class="px-3 py-2 text-ink-body">{r.task_type || '—'}</td>

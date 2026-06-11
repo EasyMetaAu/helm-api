@@ -149,6 +149,7 @@ function makeTelemetry(seed: DecisionRecord[] = []): TelemetryStore {
       const stamped = rows.map((record, i) => ({
         record,
         createdAt: new Date(1_700_000_000_000 - i * 1000),
+        apiKeyId: "k1",
       }));
       const m = query.model?.toLowerCase();
       const matched = stamped.filter(({ record, createdAt }) => {
@@ -839,6 +840,33 @@ describe("admin.api requests", () => {
     expect(p2.page).toBe(2);
     expect(p2.pageSize).toBe(2);
     expect(p2.items.map((r) => r.trace_id)).toEqual(["ok-2"]);
+  });
+
+  it("resolves each row's api_key_id to the key's name (falls back to prefix when unnamed/deleted)", async () => {
+    const deps = buildDeps({ telemetry: makeTelemetry([decision("trace-1", "premium")]) });
+    // The fake telemetry records every row under api_key_id "k1"; give that key a
+    // human name so the route surfaces it for the SPA. A second, differently-id'd
+    // key proves we join by the RECORDED id, not just "any name".
+    await deps.keyStore.createKey({
+      keyId: "k1",
+      hash: "h_named",
+      prefix: "helm_live_aaaa",
+      accountId: "acct",
+      role: "user",
+      name: "Production backend",
+    });
+    const app = buildApp(deps);
+    const named = (await (await app.request("/admin/api/requests")).json()) as {
+      items: Array<{ key_name: string | null }>;
+    };
+    expect(named.items[0]?.key_name).toBe("Production backend");
+
+    // An UNNAMED key (or one since deleted) → key_name null, so the SPA shows the prefix.
+    const depsUnnamed = buildDeps({ telemetry: makeTelemetry([decision("trace-2", "premium")]) });
+    const unnamed = (await (
+      await buildApp(depsUnnamed).request("/admin/api/requests")
+    ).json()) as { items: Array<{ key_name: string | null }> };
+    expect(unnamed.items[0]?.key_name).toBeNull();
   });
 
   it("fails open on a malformed query (never 5xx) and serves page 1", async () => {

@@ -21,6 +21,7 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     trace_id: traceId,
     ts: '2026-05-31T10:00:00Z',
     key_prefix: 'helm_live_ab12',
+    key_name: null,
     requested_model: 'gpt-4o',
     task_type: 'coding',
     complexity: 'high',
@@ -122,6 +123,22 @@ describe('requests list page', () => {
     expect(rows[1]).toHaveTextContent('all_providers_failed');
     // No plaintext-like long secret anywhere.
     expect(document.body.textContent ?? '').not.toMatch(/helm_live_[A-Za-z0-9]{16,}/);
+  });
+
+  it('shows the key NAME when set (prefix as a subtitle), and the bare prefix when unnamed', () => {
+    render(ListPage, {
+      data: listData([
+        item('tr_named', { key_name: 'Production backend' }),
+        item('tr_unnamed', { key_name: null }),
+      ]),
+    });
+    const rows = screen.getAllByTestId('request-row');
+    // Named key: the recognizable name shows, with the prefix still present for traceability.
+    expect(rows[0]).toHaveTextContent('Production backend');
+    expect(rows[0]).toHaveTextContent('helm_live_ab12');
+    // Unnamed key: only the prefix (no stray name).
+    expect(rows[1]).toHaveTextContent('helm_live_ab12');
+    expect(rows[1]).not.toHaveTextContent('Production backend');
   });
 
   it('labels the decision layer distinctly for rules / eval / default', () => {

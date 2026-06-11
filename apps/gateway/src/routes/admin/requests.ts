@@ -38,8 +38,21 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       lane: q.lane,
       model: q.model,
     });
+    // Resolve each row's recorded api_key_id (key_id) to the key's human NAME so the
+    // SPA can show a recognizable label instead of the opaque prefix. The redacted
+    // DecisionRecord deliberately omits the key_id (it carries only key_prefix), so the
+    // store surfaces it per page row; we join it to the keystore HERE (the route owns
+    // keyStore — core stays headless, Principle 1). One list() per page, not per row.
+    // The name is cosmetic (no key material — Principle 7); null when the key is
+    // unnamed OR was since deleted, so the SPA falls back to the prefix.
+    const keys = await deps.keyStore.list();
+    const nameById = new Map(keys.map((k) => [k.key_id, k.name]));
     return c.json({
-      items: rows.map((r) => ({ ...r.record, created_at: r.createdAt.getTime() })),
+      items: rows.map((r) => ({
+        ...r.record,
+        created_at: r.createdAt.getTime(),
+        key_name: nameById.get(r.apiKeyId) ?? null,
+      })),
       total,
       page: q.page,
       pageSize: q.pageSize,
