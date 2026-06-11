@@ -3,8 +3,10 @@
 // The payload store keeps streaming bodies verbatim (the raw `data:` wire text —
 // immutable source of truth, Principle 7). This module is the *view* layer's pure
 // counterpart: it never throws (fail-soft like JsonViewer), recomputes nothing the
-// gateway decided, and understands both client protocols the gateway speaks
-// (docs/05): OpenAI `chat.completion.chunk` and Anthropic `event:`-typed messages.
+// gateway decided, and understands every client protocol the gateway speaks
+// (docs/05): OpenAI `chat.completion.chunk`, OpenAI Responses `response.*`,
+// Anthropic `event:`-typed messages, and Gemini-native `candidates[].parts[]`
+// (a Gemini-CLI client talks this end-to-end; the gateway stores it verbatim).
 
 /** How a single SSE event participates in the stream, for the chunk table. */
 export type SseEventKind =
@@ -37,7 +39,7 @@ export interface AssembledToolCall {
 }
 
 export interface AssembledStream {
-  protocol: 'openai' | 'anthropic' | 'unknown';
+  protocol: 'openai' | 'anthropic' | 'gemini' | 'unknown';
   /** Concatenated reasoning/thinking deltas. */
   reasoning: string;
   /** Concatenated visible text deltas — the final answer. */
@@ -345,6 +347,62 @@ function consumeAnthropicEvent(
   }
 }
 
+/** Classify + accumulate one Gemini-native streamGenerateContent chunk.
+ * Gemini chunks carry no `type`/`event:` field — they are bare `data:` JSON with
+ * a `candidates[]` array whose `content.parts[]` hold text (`thought: true` marks
+ * reasoning), `functionCall` tool calls (args is an *object*, not a string), and
+ * the candidate's `finishReason`; usage is the top-level `usageMetadata`. */
+function consumeGeminiEvent(
+  payload: Record<string, unknown>,
+  acc: Accumulator,
+): Omit<SseEvent, 'index' | 'event' | 'data' | 'raw'> {
+  acc.assembled.protocol = 'gemini';
+  acc.assembled.model ??= str(payload.modelVersion);
+  if (payload.usageMetadata) mergeUsage(acc, payload.usageMetadata);
+
+  const candidate = asRecord((payload.candidates as unknown[] | undefined)?.[0]);
+  const parts = Array.isArray(asRecord(candidate?.content)?.parts)
+    ? (asRecord(candidate?.content)?.parts as unknown[])
+    : [];
+
+  // A chunk can carry several parts; accumulate all, then report the highest-
+  // priority kind for the chunk table (tool_call > reasoning > content).
+  let kind: SseEventKind | null = null;
+  let label = '';
+  for (const rawPart of parts) {
+    const part = asRecord(rawPart);
+    if (!part) continue;
+    const fnCall = asRecord(part.functionCall);
+    const text = str(part.text);
+    if (fnCall) {
+      const args = fnCall.args;
+      const call: AssembledToolCall = {
+        id: null,
+        name: str(fnCall.name) ?? '',
+        arguments: args === undefined ? '' : JSON.stringify(args),
+      };
+      acc.assembled.toolCalls.push(call);
+      kind = 'tool_call';
+      label = call.name;
+    } else if (part.thought === true && text !== null) {
+      acc.assembled.reasoning += text;
+      if (kind !== 'tool_call') kind = 'reasoning';
+      if (kind === 'reasoning') label = text;
+    } else if (text !== null) {
+      acc.assembled.content += text;
+      if (kind === null) kind = 'content';
+      if (kind === 'content') label = text;
+    }
+  }
+
+  const finish = str(candidate?.finishReason);
+  if (finish) acc.assembled.finishReason = finish;
+
+  if (kind) return { kind, text: label };
+  if (finish) return { kind: 'finish', text: finish };
+  return { kind: 'meta', text: '' };
+}
+
 /** Parse a raw SSE body into classified events + the assembled final message.
  * Never throws: broken lines become `other` events and assembly continues. */
 export function parseSseStream(raw: string): ParsedSseStream {
@@ -383,11 +441,18 @@ export function parseSseStream(raw: string): ParsedSseStream {
     // for Anthropic and render as "No visible output".
     const type = str(payload.type);
     const isResponsesEvent = type?.startsWith('response.') || wire.event?.startsWith('response.');
+    // Gemini native: bare `data:` JSON (no `type`, no `event:`) with a
+    // `candidates[]` array — route before the OpenAI fallback, which would find
+    // no `choices` and render "No visible output".
+    const isGeminiEvent =
+      type === null && wire.event === null && Array.isArray(payload.candidates);
     const consumed = isResponsesEvent
       ? consumeOpenAiResponseEvent(payload, acc)
-      : typeof payload.type === 'string' || wire.event !== null
-        ? consumeAnthropicEvent(payload, acc)
-        : consumeOpenAiChunk(payload, acc);
+      : isGeminiEvent
+        ? consumeGeminiEvent(payload, acc)
+        : typeof payload.type === 'string' || wire.event !== null
+          ? consumeAnthropicEvent(payload, acc)
+          : consumeOpenAiChunk(payload, acc);
     events.push({ ...base, ...consumed, data: payload });
   }
 
