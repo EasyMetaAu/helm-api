@@ -863,9 +863,9 @@ describe("admin.api requests", () => {
 
     // An UNNAMED key (or one since deleted) → key_name null, so the SPA shows the prefix.
     const depsUnnamed = buildDeps({ telemetry: makeTelemetry([decision("trace-2", "premium")]) });
-    const unnamed = (await (
-      await buildApp(depsUnnamed).request("/admin/api/requests")
-    ).json()) as { items: Array<{ key_name: string | null }> };
+    const unnamed = (await (await buildApp(depsUnnamed).request("/admin/api/requests")).json()) as {
+      items: Array<{ key_name: string | null }>;
+    };
     expect(unnamed.items[0]?.key_name).toBeNull();
   });
 

@@ -168,8 +168,16 @@ describe("SqliteTelemetryStore", () => {
 
   it("surfaces the recorded api_key_id on each page row (for key-name resolution)", async () => {
     const store = freshStore();
-    await store.insert({ decision: decision("a"), apiKeyId: "key_alpha", createdAt: new Date(2000) });
-    await store.insert({ decision: decision("b"), apiKeyId: "key_beta", createdAt: new Date(1000) });
+    await store.insert({
+      decision: decision("a"),
+      apiKeyId: "key_alpha",
+      createdAt: new Date(2000),
+    });
+    await store.insert({
+      decision: decision("b"),
+      apiKeyId: "key_beta",
+      createdAt: new Date(1000),
+    });
     const page = await store.queryPage({ limit: 50, offset: 0 });
     // The redacted record carries only key_prefix; the page row exposes the
     // canonical api_key_id so the admin route can join it to the key's name.
