@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-06-11 · 记忆消息重复写入根治 + 历史脏数据清理（CLAUDE.md 原则 1/3；docs/08）
+
+- **缘起**：线上 la.atmy.work「死循环」排查（直连 helm.db + 源码 + 容器日志）锁定根因在**记忆入站写入**：`observeInbound`（`memory/observe.ts`）每轮把客户端重发的**整段历史全量盲插入**，`appendMessage/appendMessages` 用全新随机 UUID 插入、**无幂等键/冲突处理**。Claude Code 每轮重发完整 transcript → `memory_messages` 呈 **O(n²)** 增长（实测 57,560 行 / 1,543 distinct = **97.3% 重复**，DB **489MB**）。重复行带**全新 id + created_at**，永不被旧 observation 的 `source_message_range` 覆盖（`observer.ts` `alreadyObservedMessageIds` 按 id 区间判覆盖）→ observer 每分钟 `memory_formation` 反复压缩同一线程（`measured_retention 0.6%`、`prior_compaction_count 9→17`）——这就是用户看到的「一直做同一件事」。
+- **用户拍板**：① 清理范围 = 去重消息 + **清空 bug 期 observation** 让 observer 在干净数据上重建（保留 threads/keys/facts）；② 修复 = **去重根治即可**，不碰 observer 经济学核心（`compaction-policy.ts`/`AUTO_PRIORS`/`netBenefitUsd` 一律不动）。
+- **修复（防复发护栏在 DB 层）**：新 `memory/message-hash.ts::sha256Hex`（逐字节 sha256，**不 normalize/不 lowercase**，区别于 facts 的 `normalizeFactText`——消息是精确文本/代码，与 eval 缓存键约定一致）；两方言 `memory_messages` 加 `content_hash` 列 + `UNIQUE(thread_id, role, content_hash)`；`appendMessage/appendMessages` 算 hash + `onConflictDoNothing`。pg 多行 INSERT 额外做**批内去重**（ON CONFLICT 只挡**已存在**行，挡不住同批内重复）。用 hash 而非 raw content 做索引键：**pg btree 索引行 ~2704B 上限**，大 TEXT 不可直接索引。
+- **迁移（sqlite v21 / pg v20，纯 SQL，有序）**：窗口函数 `ROW_NUMBER()` DELETE 去重保留最早行 → `ADD COLUMN content_hash`（可空）→ `CREATE UNIQUE INDEX`。**坑：迁移 SQL 算不了 sha256**（better-sqlite3 无 sha256 函数 / pg 需 pgcrypto），故历史行 hash 留 NULL——**两方言 UNIQUE 索引里 NULL 互不冲突**，索引照建于去重后的历史行；新写入带真 hash 向后去重；残留边界（历史 NULL-hash 行被回填前不与未来同内容写入去重）由运维脚本关闭。
+- **运维脚本** `store/sqlite/dedup-memory-messages.ts`（`pnpm memory:dedup <db>`，放 sqlite 适配器内而非 `scripts/` 以解析 better-sqlite3）：回填历史 hash（`UPDATE OR IGNORE`，碰撞历史行留 NULL 后 DELETE——它是已 hash 行的重复）+ 清空 observations + 删 done/failed jobs + `VACUUM`；`--dry-run`；幂等。
+- **取舍**：`appendMessages` 返回值仍**每 input 一个生成 id**（length 不变），冲突跳过的 id 为「惰性」（行未落库）——唯一调用方 `persistMessages` 丢弃返回值，端口契约/测试不破。**注意 inject 非元凶**：D7 纯文本闸门对带工具调用的 turn 跳过注入（日志 `memory.inject.skipped_non_plain_text`），损害全在 observe 写入侧——observe 与 inject 两模式都会触发它。
+- **部署顺序/坑**：先合代码+迁移（启动即去重+加约束+新写入停止累积）→ **再**跑运维脚本（**先备份** helm.db/-wal/-shm → dry-run → 正式 → VACUUM，空闲窗口；VACUUM 取排他锁、重写整库、不能在事务内）。
+- **验证**：TDD 红→绿。新测 `message-hash`(6)、store-contract 双驱动去重 3 例、`observe` 真实 store 重灌 1 例、sqlite/pg 迁移升级各测、dedup 脚本 smoke 2 例；修了 4 个既有迁移 fixture（pre-mark v21/v20 applied——同 v18/v20 既有做法，这些 fixture 标 v2 applied 即不建 memory_messages）。全量 **2954 绿**（首跑 1 红是 [[pnpm-test-pglite-flake]]，复跑全绿）、typecheck（4 包）/ lint(Biome) / build(admin+core+gateway) 全绿。
+
 ## 2026-06-11 · 四个 AI API 高并发热路径性能优化（Phase B；CLAUDE.md 原则 1/3/7/8）
 
 - **缘起**：用户要求四个对 AI 的 API（`/v1/chat/completions`、`/v1/messages`、`/v1/responses`、`/v1beta/…:generateContent`）支持高并发，且 SQLite 写入绝不拖慢响应。全链路 review（鉴权中间件 / store / 路由执行 / 流式四面）确认根因仍是 [[sqlite-write-perf-root-cause]]：**better-sqlite3 同步阻塞事件循环**——每请求 1 次未缓存鉴权读 +（provider 已应答后）同步 telemetry/payload 写都 `await` 在响应关键路径上；memory observeInbound 在路由前同步提交。承接 Phase A（PRAGMA + memory 批量）。
@@ -30,17 +41,11 @@
 
 ---
 
-## 2026-06-10 · admin 导航进度条 NavProgress（admin UX；CLAUDE.md 原则 1）
-
-- **缘起**：用户点击侧栏链接切换页面时没有任何加载反馈——页面在 `+page.ts` 的 `load`（即发起 admin API 请求处）跑完前看起来"卡住"，操作者无法判断点击是否生效、是否在请求 API。
-- **实现**：新增 `NavProgress.svelte`，纯消费 SvelteKit `navigating` store（导航开始→`load` 跑完期间非 null），渲染为固定在顶部的细进度条（indigo、`fixed inset-x-0 top-0 z-50 h-[3px]`）。导航开始立即跳 8% 让点击"被确认"，随后 trickle 异步逼近 92%（永不到顶），导航 resolve 时瞬间补满 100%、短暂保持后淡出归零。`$effect` 仅以 `$navigating` 为依赖（`untrack` 包住 `active`/`progress` 写入，避免 trickle 自触发重启）。挂在 `+layout.svelte` shell 最顶层。
-- **取舍（关键）**：进度条**只覆盖路由导航**（含其 `load` 内的 API 调用），**不**做全局 fetch 拦截器。理由：用户诉求是"点链接没反馈"，导航正是 `navigating` 的语义边界；页内动作（保存/创建/重试、StatusCluster 30s 轮询）各有自己的按钮 loading 态，套全局条反而误导。Occam's razor——不引入 nprogress 依赖，~70 行自给自足。
-- **坑/TODO**：① 不反映页内非导航 fetch（刻意为之，见上）。② 依赖 `navigating`，若将来某页改用页内手动 fetch 取数而非 `load`，该页切换将不再触发进度条。③ 纯 admin 静态资源改动，需发新 admin 镜像才生效。
-- **验证**：TDD 先红后绿——`NavProgress.test.ts`(3) 用可写 `navigating` mock 断言：idle 隐藏且归零、导航起→可见且进度>0、resolve→补满 100% 后隐藏。admin 全量 296 绿、Biome lint 绿、typecheck（4 包）绿、build（admin static + gateway + core）绿。
-
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-10 · admin 导航进度条 NavProgress：纯消费 SvelteKit `navigating` store 的顶部细进度条（8% 起跳→trickle 逼近 92%→resolve 补满淡出），`$effect` 仅依赖 `$navigating` + `untrack` 防 trickle 自触发，挂 `+layout.svelte` 最顶层；**只覆盖路由导航（含其 `load` 内 API），不做全局 fetch 拦截**（Occam，~70 行无 nprogress 依赖）。坑：页内非导航 fetch 不反映；改页内手动取数的页将不触发；需发新 admin 镜像。NavProgress.test 3 绿。
 
 ### 2026-06-10 · Anthropic tool_result 邻接兼容修复：`transformRequestOut` 对混合 user turn 先发 fanned-out `role:"tool"` 结果再发尾随文本；订阅 provider `openaiToAnthropicRequest` 合并相邻同角色（连续 OpenAI tool→单个 Anthropic user turn，`tool_result` 块先于文本），修线上 `messages.N` 的 `tool_use` 无紧邻 `tool_result` 的 400；纯结构归一化、不拒绝 payload、不丢用户文本，纯 tool-result turn 行为不变。core 63 绿。
 

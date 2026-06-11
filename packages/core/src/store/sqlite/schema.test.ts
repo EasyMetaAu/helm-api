@@ -53,7 +53,9 @@ describe("sqlite schema + migrations", () => {
       // v20 (memory_threads.last_served_model) is also pre-marked: this fixture
       // never creates memory_threads (v2 is marked applied without the CREATE),
       // so the v20 ALTER would fail — out of scope for this v14–v16 test.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20])
+      // v21 (memory_messages dedup) likewise: v2 is applied without the
+      // memory_messages CREATE, so its dedup DELETE would fail — out of scope.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21])
         rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -191,7 +193,9 @@ describe("sqlite schema + migrations", () => {
       // from this minimal fixture, so v18 is pre-marked applied to keep the test
       // scoped to v6's cost_usd rebuild.
       // v20 alters memory_threads (absent from this fixture) → pre-mark applied.
-      for (const v of [1, 2, 3, 4, 5, 18, 20]) rec.run(v, Date.now());
+      // v21 dedups memory_messages (absent: v2 marked applied without the CREATE)
+      // → pre-mark applied.
+      for (const v of [1, 2, 3, 4, 5, 18, 20, 21]) rec.run(v, Date.now());
       seed
         .prepare(
           "INSERT INTO telemetry (id, request_id, api_key_id, decision_json, cost_usd, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -252,7 +256,8 @@ describe("sqlite schema + migrations", () => {
       // memory tables (absent here), so v18 is pre-marked applied to keep the
       // test scoped to v10's max_lane DROP COLUMN forward step.
       // v20 alters memory_threads (absent from this fixture) → pre-mark applied.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20]) rec.run(v, Date.now());
+      // v21 dedups memory_messages (absent here) → pre-mark applied.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21]) rec.run(v, Date.now());
       seed
         .prepare(
           `INSERT INTO api_keys (key_id, hash, prefix, account_id, role, max_lane, allowed_lanes, created_at)

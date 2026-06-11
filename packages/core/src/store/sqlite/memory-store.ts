@@ -16,6 +16,7 @@ import {
   type ReflectionUpsertInput,
 } from "@helm/shared";
 import { and, asc, desc, eq, isNull, type SQL, sql } from "drizzle-orm";
+import { sha256Hex } from "../../memory/message-hash.js";
 import type { MemoryJobStatus, MemoryStore } from "../ports.js";
 import {
   memoryFacts,
@@ -166,6 +167,9 @@ export class SqliteMemoryStore implements MemoryStore {
 
   async appendMessage(input: MemoryMessageInput): Promise<string> {
     const id = this.genId();
+    // Idempotent ingest: a re-sent (thread_id, role, content) collapses to a
+    // no-op via the v21 UNIQUE index (re-ingestion fix). Returned id is still
+    // generated per call; on conflict it is inert (the row was left untouched).
     this.db
       .insert(memoryMessages)
       .values({
@@ -175,6 +179,10 @@ export class SqliteMemoryStore implements MemoryStore {
         content: input.content,
         tokenEstimate: input.tokenEstimate,
         createdAt: this.now(),
+        contentHash: sha256Hex(input.content),
+      })
+      .onConflictDoNothing({
+        target: [memoryMessages.threadId, memoryMessages.role, memoryMessages.contentHash],
       })
       .run();
     return id;
@@ -202,6 +210,10 @@ export class SqliteMemoryStore implements MemoryStore {
             content: input.content,
             tokenEstimate: input.tokenEstimate,
             createdAt: new Date(base + i),
+            contentHash: sha256Hex(input.content),
+          })
+          .onConflictDoNothing({
+            target: [memoryMessages.threadId, memoryMessages.role, memoryMessages.contentHash],
           })
           .run();
       });

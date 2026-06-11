@@ -16,6 +16,7 @@ import {
   type ReflectionUpsertInput,
 } from "@helm/shared";
 import { and, asc, desc, eq, isNull, type SQL, sql } from "drizzle-orm";
+import { sha256Hex } from "../../memory/message-hash.js";
 import type { MemoryJobStatus, MemoryStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import {
@@ -158,14 +159,22 @@ export class PgMemoryStore implements MemoryStore {
 
   async appendMessage(input: MemoryMessageInput): Promise<string> {
     const id = this.genId();
-    await this.db.insert(memoryMessages).values({
-      id,
-      threadId: input.threadId,
-      role: input.role,
-      content: input.content,
-      tokenEstimate: input.tokenEstimate,
-      createdAt: this.now().getTime(),
-    });
+    // Idempotent ingest (pg v20 mirror of sqlite v21): a re-sent
+    // (thread_id, role, content) collapses to a no-op via the UNIQUE index.
+    await this.db
+      .insert(memoryMessages)
+      .values({
+        id,
+        threadId: input.threadId,
+        role: input.role,
+        content: input.content,
+        tokenEstimate: input.tokenEstimate,
+        createdAt: this.now().getTime(),
+        contentHash: sha256Hex(input.content),
+      })
+      .onConflictDoNothing({
+        target: [memoryMessages.threadId, memoryMessages.role, memoryMessages.contentHash],
+      });
     return id;
   }
 
@@ -177,19 +186,45 @@ export class PgMemoryStore implements MemoryStore {
     if (inputs.length === 0) return [];
     const base = this.now().getTime();
     const ids: string[] = [];
-    const rows = inputs.map((input, i) => {
+    // ON CONFLICT DO NOTHING dedupes against EXISTING rows, but a single pg
+    // multi-row INSERT cannot dedupe rows against EACH OTHER within the same
+    // VALUES list — two identical messages in one turn (e.g. a repeated empty
+    // assistant turn) would both be inserted. So collapse intra-batch dups by
+    // (thread_id, role, content_hash) here, keeping the first. ids stays one-per-
+    // input (caller discards it; the contract only requires length + uniqueness).
+    const seen = new Set<string>();
+    const rows: Array<{
+      id: string;
+      threadId: string;
+      role: MemoryMessageInput["role"];
+      content: string;
+      tokenEstimate: number;
+      createdAt: number;
+      contentHash: string;
+    }> = [];
+    inputs.forEach((input, i) => {
       const id = this.genId();
       ids.push(id);
-      return {
+      const contentHash = sha256Hex(input.content);
+      const key = `${input.threadId} ${input.role} ${contentHash}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      rows.push({
         id,
         threadId: input.threadId,
         role: input.role,
         content: input.content,
         tokenEstimate: input.tokenEstimate,
         createdAt: base + i,
-      };
+        contentHash,
+      });
     });
-    await this.db.insert(memoryMessages).values(rows);
+    await this.db
+      .insert(memoryMessages)
+      .values(rows)
+      .onConflictDoNothing({
+        target: [memoryMessages.threadId, memoryMessages.role, memoryMessages.contentHash],
+      });
     return ids;
   }
 

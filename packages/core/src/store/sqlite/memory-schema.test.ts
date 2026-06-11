@@ -344,6 +344,9 @@ describe("sqlite v18 forgetting schema deltas", () => {
       // v19 (api_keys.name) is pre-marked applied too: this minimal seed has no
       // api_keys table, so its ALTER would fail — keep the test scoped to v18.
       rec.run(19, Date.now());
+      // v21 dedups memory_messages, which this fixture never creates → pre-mark
+      // applied (out of scope for the v18 forgetting-deltas test).
+      rec.run(21, Date.now());
       seed.close();
 
       expect(() => runMigrations(path)).not.toThrow();

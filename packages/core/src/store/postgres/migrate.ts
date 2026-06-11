@@ -412,6 +412,34 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE memory_threads ADD COLUMN IF NOT EXISTS last_served_model TEXT;
     `,
   },
+  {
+    // Idempotent memory-message ingest — pg mirror of the sqlite v21 fix. (a) The
+    // dedup DELETE is ONE statement (CTE + DELETE): splitStatements splits on ';',
+    // so it must carry no internal ';'. (b) ADD COLUMN IF NOT EXISTS (idempotent).
+    // (c) the UNIQUE index the write path targets. Historical rows keep
+    // content_hash NULL (no sha256 SQL fn without pgcrypto; the ops script
+    // backfills); NULLs are DISTINCT in a pg UNIQUE index, so it builds fine and
+    // app-layer writes (which carry a real hash) dedupe going forward.
+    version: 20,
+    sql: `
+      WITH ranked AS (
+        SELECT id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY thread_id, role, content
+                 ORDER BY created_at ASC, id ASC
+               ) AS rn
+        FROM memory_messages
+      )
+      DELETE FROM memory_messages
+      USING ranked
+      WHERE memory_messages.id = ranked.id AND ranked.rn > 1;
+
+      ALTER TABLE memory_messages ADD COLUMN IF NOT EXISTS content_hash TEXT;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_memory_messages_thread_role_hash
+        ON memory_messages (thread_id, role, content_hash);
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

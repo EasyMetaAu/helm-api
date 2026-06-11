@@ -1,4 +1,4 @@
-import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 // SQLite (Drizzle) table definitions for the memory middleware (docs/08
 // "storage model"). POST-MVP persistence floor: build + migrate only — no read /
@@ -21,14 +21,26 @@ export const memoryThreads = sqliteTable("memory_threads", {
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
-export const memoryMessages = sqliteTable("memory_messages", {
-  id: text("id").primaryKey(),
-  threadId: text("thread_id").notNull(), // references memory_threads.id only
-  role: text("role").notNull(), // 'user' | 'assistant' | 'tool' (IR-aligned)
-  content: text("content").notNull(), // raw message text / JSON
-  tokenEstimate: integer("token_estimate").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-});
+export const memoryMessages = sqliteTable(
+  "memory_messages",
+  {
+    id: text("id").primaryKey(),
+    threadId: text("thread_id").notNull(), // references memory_threads.id only
+    role: text("role").notNull(), // 'user' | 'assistant' | 'tool' (IR-aligned)
+    content: text("content").notNull(), // raw message text / JSON
+    tokenEstimate: integer("token_estimate").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    // Idempotency key (v21): sha256(content) hex, NO normalization. The client
+    // re-sends the full transcript every turn; the UNIQUE(thread_id, role,
+    // content_hash) index + ON CONFLICT DO NOTHING collapses re-ingestion to a
+    // no-op (fixes O(n²) row growth). NULL only for pre-v21 rows the ops script
+    // backfills — NULLs are distinct in a UNIQUE index, so the index still builds.
+    contentHash: text("content_hash"),
+  },
+  (t) => [
+    uniqueIndex("uniq_memory_messages_thread_role_hash").on(t.threadId, t.role, t.contentHash),
+  ],
+);
 
 export const memoryObservations = sqliteTable("memory_observations", {
   id: text("id").primaryKey(),

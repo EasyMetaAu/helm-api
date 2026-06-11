@@ -888,6 +888,85 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       );
     });
 
+    it("appendMessage is idempotent on re-ingest of the same (thread, role, content)", async () => {
+      // The re-ingestion fix: the client re-sends the whole transcript each turn.
+      // Persisting the same message twice must collapse to ONE row, not two.
+      ctx = await make();
+      const store = ctx.stores.memory;
+      await store.ensureThread({ id: "dup-t", ownerId: "acct-a" });
+      await store.appendMessage({
+        threadId: "dup-t",
+        role: "user",
+        content: "same",
+        tokenEstimate: 1,
+      });
+      await store.appendMessage({
+        threadId: "dup-t",
+        role: "user",
+        content: "same",
+        tokenEstimate: 1,
+      });
+      const msgs = await store.listMessages({ threadId: "dup-t", accountId: "acct-a" });
+      expect(msgs).toHaveLength(1);
+    });
+
+    it("appendMessages dedupes re-sent history and intra-batch duplicates, length preserved", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      await store.ensureThread({ id: "redup-t", ownerId: "acct-a" });
+      // Turn 1 includes an intra-batch duplicate (m0 twice).
+      const ids1 = await store.appendMessages?.([
+        { threadId: "redup-t", role: "user", content: "m0", tokenEstimate: 1 },
+        { threadId: "redup-t", role: "user", content: "m0", tokenEstimate: 1 },
+        { threadId: "redup-t", role: "assistant", content: "m1", tokenEstimate: 1 },
+      ]);
+      // Contract: one id per input (length preserved), all distinct.
+      expect(ids1).toHaveLength(3);
+      expect(new Set(ids1).size).toBe(3);
+      // Turn 2 re-sends the full history + one new message (mirrors a real client).
+      await store.appendMessages?.([
+        { threadId: "redup-t", role: "user", content: "m0", tokenEstimate: 1 },
+        { threadId: "redup-t", role: "assistant", content: "m1", tokenEstimate: 1 },
+        { threadId: "redup-t", role: "user", content: "m2", tokenEstimate: 1 },
+      ]);
+      const msgs = await store.listMessages({ threadId: "redup-t", accountId: "acct-a" });
+      // Only the 3 distinct contents survive — no O(n²) re-ingestion.
+      expect(msgs.map((m) => m.content)).toEqual(["m0", "m1", "m2"]);
+    });
+
+    it("dedup is scoped by thread and by role (same content elsewhere still persists)", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      await store.ensureThread({ id: "scope-a", ownerId: "acct-a" });
+      await store.ensureThread({ id: "scope-b", ownerId: "acct-a" });
+      await store.appendMessage({
+        threadId: "scope-a",
+        role: "user",
+        content: "x",
+        tokenEstimate: 1,
+      });
+      // Same content, DIFFERENT thread -> distinct row.
+      await store.appendMessage({
+        threadId: "scope-b",
+        role: "user",
+        content: "x",
+        tokenEstimate: 1,
+      });
+      // Same content + thread, DIFFERENT role -> distinct row.
+      await store.appendMessage({
+        threadId: "scope-a",
+        role: "assistant",
+        content: "x",
+        tokenEstimate: 1,
+      });
+      expect(await store.listMessages({ threadId: "scope-a", accountId: "acct-a" })).toHaveLength(
+        2,
+      );
+      expect(await store.listMessages({ threadId: "scope-b", accountId: "acct-a" })).toHaveLength(
+        1,
+      );
+    });
+
     it("ensureThread fills missing owner/project/resource scope when the same id is re-seen", async () => {
       ctx = await make();
       await ctx.stores.memory.ensureThread({ id: "t-upsert" });
