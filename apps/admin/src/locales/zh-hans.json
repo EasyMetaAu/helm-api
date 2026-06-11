@@ -527,7 +527,8 @@
   "OpenAI / Anthropic SDK": "OpenAI / Anthropic SDK",
   "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).": "设置下面这几个环境变量。base URL 用裸域名即可——千万别加 /v1（Anthropic 客户端会自己补上 /v1/messages）。",
   "Add a provider to ~/.codex/config.toml. The base URL MUST end in /v1 (Codex appends /responses).": "在 ~/.codex/config.toml 里加一个 provider。base URL 必须以 /v1 结尾（Codex 会自己补上 /responses）。",
-  "Use Helm's native Gemini route. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.": "使用 Helm 的原生 Gemini 路由。base URL 用裸域名；请求路径再加 /v1beta/models/{model}:generateContent，认证使用 x-goog-api-key。",
+  "Point the Gemini CLI at Helm with these environment variables. The base URL is the bare origin — the CLI appends /v1beta/models/{model}:generateContent itself.": "把 Gemini CLI 指向 Helm，只需设置这两个环境变量。base URL 用裸域名——CLI 会自行补上 /v1beta/models/{model}:generateContent。",
+  "Or call Helm's native Gemini route directly. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.": "或者直接调用 Helm 的原生 Gemini 路由。base URL 用裸域名；请求路径再加 /v1beta/models/{model}:generateContent，认证使用 x-goog-api-key。",
   "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "配置一个兼容 OpenAI 的 provider。base URL 以 /v1 结尾；若走 Anthropic 路径，则改用裸域名。",
   "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "任何兼容 OpenAI 或 Anthropic 的 SDK 都能用——只需改 base URL 和密钥。留意：OpenAI 的 base URL 带 /v1，Anthropic 的不带。"
 }

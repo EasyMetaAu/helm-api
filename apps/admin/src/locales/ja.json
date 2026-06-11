@@ -518,7 +518,8 @@
   "OpenAI / Anthropic SDK": "OpenAI / Anthropic SDK",
   "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).": "次の環境変数を設定します。base URL はオリジンそのままで——/v1 は付けないでください（Anthropic クライアントが自分で /v1/messages を付けます）。",
   "Add a provider to ~/.codex/config.toml. The base URL MUST end in /v1 (Codex appends /responses).": "~/.codex/config.toml に provider を追加します。base URL は必ず /v1 で終わらせてください（Codex が /responses を付けます）。",
-  "Use Helm's native Gemini route. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.": "Helm のネイティブ Gemini ルートを使います。base URL はオリジンそのまま、リクエストパスに /v1beta/models/{model}:generateContent を付け、認証には x-goog-api-key を使います。",
+  "Point the Gemini CLI at Helm with these environment variables. The base URL is the bare origin — the CLI appends /v1beta/models/{model}:generateContent itself.": "Gemini CLI を Helm に向けるには、この環境変数を設定します。base URL はオリジンそのまま——CLI が /v1beta/models/{model}:generateContent を自動で付けます。",
+  "Or call Helm's native Gemini route directly. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.": "または Helm のネイティブ Gemini ルートを直接呼び出します。base URL はオリジンそのまま、リクエストパスに /v1beta/models/{model}:generateContent を付け、認証には x-goog-api-key を使います。",
   "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "OpenAI 互換の provider を設定します。base URL は /v1 で終わります。Anthropic 経路の場合はオリジンそのままを使ってください。",
   "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "OpenAI または Anthropic 互換の SDK ならどれでも使えます——変えるのは base URL とキーだけ。OpenAI の base URL には /v1 が付き、Anthropic には付かない点に注意してください。"
 }

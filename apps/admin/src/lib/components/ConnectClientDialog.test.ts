@@ -72,6 +72,18 @@ describe('ConnectClientDialog', () => {
     expect(snippet).not.toContain(`${ORIGIN}/v1/`);
   });
 
+  it('renders a Gemini CLI env snippet with GOOGLE_GEMINI_BASE_URL at the bare origin', async () => {
+    // The official Gemini CLI / Google GenAI SDK reads GOOGLE_GEMINI_BASE_URL and
+    // appends /v1beta/models/{model}:generateContent itself — so the base URL must
+    // be the BARE origin. A trailing /v1 (or /v1beta) here double-prefixes the path.
+    setup({ plaintextKey: 'helm_live_GEMINI' });
+    await fireEvent.click(screen.getByRole('tab', { name: /gemini/i }));
+    const env = screen.getByTestId('snippet-gemini-env').textContent ?? '';
+    expect(env).toContain(`export GOOGLE_GEMINI_BASE_URL="${ORIGIN}"`);
+    expect(env).not.toContain(`${ORIGIN}/v1`);
+    expect(env).toContain('export GEMINI_API_KEY="helm_live_GEMINI"');
+  });
+
   it('shows a placeholder key when no plaintext is supplied (opened from the header)', () => {
     setup();
     expect(screen.getByTestId('snippet-claude').textContent ?? '').toContain('<your-helm-key>');
