@@ -1,4 +1,10 @@
-import type { BudgetCaps, DecisionRecord, RateLimitProbe, RateLimitResult } from "@helm/core";
+import {
+  type BudgetCaps,
+  type DecisionRecord,
+  extractBillingHeaderIdentity,
+  type RateLimitProbe,
+  type RateLimitResult,
+} from "@helm/core";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -349,6 +355,17 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       return sendError(c, { error_class: "invalid_request", message: detail, trace_id: traceId });
     }
     ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
+
+    // Capture the real CLI's billing identity (version + entrypoint) from the native
+    // system[0] block BEFORE transformRequestOut stripped it, and stamp it onto the IR
+    // metadata bag (core never parses HTTP — principle 1; this reads the already-parsed
+    // body). The native-Anthropic subscription executor re-emits the client's own
+    // version with a cache-stable cch instead of a pinned spoof (anti-ban). Null/absent
+    // for non-CLI traffic → the executor uses its baked fallback version.
+    const clientBilling = extractBillingHeaderIdentity(
+      (native as { system?: unknown } | null)?.system,
+    );
+    if (clientBilling !== null) ir.metadata.client_billing_header = clientBilling;
 
     // Map the `x-session-key` request header into the conversation-dimension key
     // session momentum keys off (metadata.conversation_id) — only when the IR did

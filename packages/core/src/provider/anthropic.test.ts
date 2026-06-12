@@ -290,6 +290,37 @@ describe("openaiToAnthropicRequest — Claude-Code billing header (anti-ban + ca
       );
     expect(withSystem("alpha")).not.toBe(withSystem("beta"));
   });
+
+  it("re-emits the CLIENT's real version/entrypoint verbatim when the route captured it", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        { role: "system", content: "house rules" },
+        { role: "user", content: "hi" },
+      ],
+      // The route stamps the inbound CLI's identity here (cch dropped).
+      metadata: { client_billing_header: "cc_version=2.1.173.d11; cc_entrypoint=cli" },
+    } as unknown as Parameters<typeof openaiToAnthropicRequest>[0]);
+    // Real version 2.1.173.d11 passed through; only a stable 5-hex cch is appended.
+    expect(billingOf(body)).toMatch(
+      /^x-anthropic-billing-header: cc_version=2\.1\.173\.d11; cc_entrypoint=cli; cch=[0-9a-f]{5};$/,
+    );
+  });
+
+  it("still stabilizes cch (cache) even with a passed-through client identity", () => {
+    const turn = (last: string) =>
+      billingOf(
+        openaiToAnthropicRequest({
+          model: "m",
+          messages: [
+            { role: "system", content: "stable system" },
+            { role: "user", content: last },
+          ],
+          metadata: { client_billing_header: "cc_version=2.1.173.d11; cc_entrypoint=cli" },
+        } as unknown as Parameters<typeof openaiToAnthropicRequest>[0]),
+      );
+    expect(turn("q1")).toBe(turn("a longer q2"));
+  });
 });
 
 describe("anthropicToOpenAIResponse", () => {
@@ -548,6 +579,36 @@ describe("createAnthropicClient", () => {
       ((resp.choices as Array<Record<string, unknown>>)[0]?.message as Record<string, unknown>)
         .content,
     ).toBe("ok");
+  });
+
+  it("derives the user-agent from the CLIENT's captured version so header + billing block agree", async () => {
+    let seenUA = "";
+    let seenBilling = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seenUA = new Headers(init?.headers).get("user-agent") ?? "";
+      seenBilling =
+        (JSON.parse(String(init?.body)) as { system: Array<{ text: string }> }).system[0]?.text ??
+        "";
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "k" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await client.chatCompletion({
+      model: "claude-x",
+      messages: [{ role: "user", content: "hi" }],
+      metadata: { client_billing_header: "cc_version=2.1.173.d11; cc_entrypoint=cli" },
+    } as unknown as Parameters<typeof client.chatCompletion>[0]);
+    // user-agent uses the client's semver (no 3-hex suffix); billing block carries the
+    // full version+suffix — both reflect 2.1.173, never the fallback 2.1.175.
+    expect(seenUA).toBe("claude-cli/2.1.173 (external, cli)");
+    expect(seenBilling).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.173\.d11;/);
   });
 
   it("sends openclaw header parity + a STABLE metadata.user_id on every request (Device ID never rotates)", async () => {

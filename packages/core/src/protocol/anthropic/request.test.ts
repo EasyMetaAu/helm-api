@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { type IRRequest, IRRequestSchema } from "../ir.js";
 import { guardRequestFor, readWarnings } from "../protocol-guards.js";
 import {
+  extractBillingHeaderIdentity,
   transformRequestIn,
   transformRequestInWithWarnings,
   transformRequestOut,
@@ -967,5 +968,52 @@ describe("anthropic billing-header strip (inbound)", () => {
       messages: [{ role: "user", content: BILLING }],
     });
     expect(ir.messages).toEqual([{ role: "user", content: BILLING }]);
+  });
+});
+
+// The route captures the inbound CLI's real version/entrypoint from the same block
+// that gets stripped, so the subscription executor can re-emit the client's own
+// identity (anti-ban) instead of a pinned spoof.
+describe("extractBillingHeaderIdentity", () => {
+  it("returns version+entrypoint (cch dropped) from a block-array system", () => {
+    expect(
+      extractBillingHeaderIdentity([
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.173.d11; cc_entrypoint=cli; cch=fd3e2;",
+        },
+        { type: "text", text: "You are Claude Code." },
+      ]),
+    ).toBe("cc_version=2.1.173.d11; cc_entrypoint=cli");
+  });
+
+  it("returns it from a string system too", () => {
+    expect(
+      extractBillingHeaderIdentity(
+        "x-anthropic-billing-header: cc_version=2.1.99.0a1; cc_entrypoint=vscode; cch=abc12;",
+      ),
+    ).toBe("cc_version=2.1.99.0a1; cc_entrypoint=vscode");
+  });
+
+  it("null when no billing block is present", () => {
+    expect(
+      extractBillingHeaderIdentity([{ type: "text", text: "You are Claude Code." }]),
+    ).toBeNull();
+    expect(extractBillingHeaderIdentity("be terse")).toBeNull();
+    expect(extractBillingHeaderIdentity(undefined)).toBeNull();
+  });
+
+  it("null (→ fallback) when the version/entrypoint shape is abnormal — never echoes untrusted bytes", () => {
+    // injection attempt: extra header segment / spaces / non-conforming version
+    expect(
+      extractBillingHeaderIdentity(
+        "x-anthropic-billing-header: cc_version=9.9; cc_entrypoint=cli; cch=00000;",
+      ),
+    ).toBeNull();
+    expect(
+      extractBillingHeaderIdentity(
+        "x-anthropic-billing-header: cc_version=2.1.0.zzz evil-stuff; cc_entrypoint=cli;",
+      ),
+    ).toBeNull();
   });
 });

@@ -184,6 +184,13 @@ function toInternalRequest(
       resource_id: memoryScope.resourceId,
       project_id: memoryScope.projectId,
       memory_mode: memoryScope.mode,
+      // The CLI's captured billing identity (anthropic route stamps it; absent on the
+      // OpenAI/Gemini surfaces). The native-Anthropic executor reads it to re-emit the
+      // client's own version. Length-capped: it is re-emitted into the upstream header.
+      ...(typeof ir.metadata?.client_billing_header === "string" &&
+      ir.metadata.client_billing_header.length <= 128
+        ? { client_billing_header: ir.metadata.client_billing_header }
+        : {}),
     },
   };
 }

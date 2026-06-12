@@ -291,6 +291,7 @@ export {
   AnthropicUsageSchema,
   anthropicTransformer,
   convertOpenAIStreamToAnthropic,
+  extractBillingHeaderIdentity,
   makeAnthropicError,
   mapStopReason,
   mapUsage,
