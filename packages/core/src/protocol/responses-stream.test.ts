@@ -714,6 +714,34 @@ describe("convertResponsesEventStreamToOpenAI — reasoning delta -> IR (reverse
       .join("");
     expect(reasoning).toBe("deep thought");
   });
+
+  it("folds response.reasoning_text.delta back into an IR chunk reasoning_content", async () => {
+    async function* events(): AsyncIterable<ResponsesSSEEvent> {
+      yield {
+        type: "response.reasoning_text.delta",
+        sequence_number: 0,
+        item_id: "rs_1",
+        output_index: 0,
+        content_index: 0,
+        delta: "visible ",
+      } as ResponsesSSEEvent;
+      yield {
+        type: "response.reasoning_text.delta",
+        sequence_number: 1,
+        item_id: "rs_1",
+        output_index: 0,
+        content_index: 0,
+        delta: "reasoning",
+      } as ResponsesSSEEvent;
+    }
+    const chunks = await collect(convertResponsesEventStreamToOpenAI(events()));
+    const reasoning = chunks
+      .flatMap((c) => c.choices ?? [])
+      .map((ch) => ch.delta?.reasoning_content)
+      .filter((r): r is string => typeof r === "string")
+      .join("");
+    expect(reasoning).toBe("visible reasoning");
+  });
 });
 
 describe("convertOpenAIStreamToResponses — mid-stream error event", () => {

@@ -63,6 +63,12 @@ const ORIGINATOR = "helm"; // matches the OAuth login `originator` (openai-codex
 // originator/UA/body — impersonating codex_cli_rs changed nothing.)
 const DEFAULT_USER_AGENT = "helm-codex/1.0.0";
 
+const RESPONSES_REASONING_DELTA_TYPES = new Set([
+  "response.reasoning_summary.delta",
+  "response.reasoning_summary_text.delta",
+  "response.reasoning_text.delta",
+]);
+
 // ── account id from the access-token JWT (chatgpt_account_id claim) ───────────
 // Same recipe as the login-time capture in oauth/openai-codex.ts, applied at
 // request time so it always reflects the current token. Returns "" when absent.
@@ -406,6 +412,41 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
 
 // ── low-level SSE event reader (shared by stream + aggregate) ─────────────────
 
+function parseResponsesSSEFrame(raw: string): Record<string, unknown> | null {
+  let eventName = "";
+  const dataLines: string[] = [];
+  for (const line of raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
+    if (line === "" || line.startsWith(":")) continue;
+    const colon = line.indexOf(":");
+    const field = colon === -1 ? line : line.slice(0, colon);
+    let value = colon === -1 ? "" : line.slice(colon + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "event") eventName = value;
+    else if (field === "data") dataLines.push(value);
+  }
+
+  const payload = dataLines.join("\n");
+  const trimmed = payload.trim();
+  if (trimmed === "" || trimmed === "[DONE]") return null;
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const evt = parsed as Record<string, unknown>;
+    if (typeof evt.type !== "string" && eventName !== "") return { ...evt, type: eventName };
+    return evt;
+  } catch {
+    // skip malformed event
+    return null;
+  }
+}
+
+function splitCompleteSSEFrames(buffer: string): { frames: string[]; tail: string } {
+  const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const parts = normalized.split("\n\n");
+  const tail = parts.pop() ?? "";
+  return { frames: parts, tail };
+}
+
 export async function* readResponsesEvents(
   res: Response,
   // Inter-chunk liveness deadline (ms); 0 disables. Threaded from the client's
@@ -428,20 +469,20 @@ export async function* readResponsesEvents(
         throw err;
       }
       const { done, value } = read;
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split("\n\n");
-      buffer = events.pop() ?? "";
-      for (const raw of events) {
-        const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));
-        if (!dataLine) continue;
-        const payload = dataLine.slice(5).trim();
-        if (!payload || payload === "[DONE]") continue;
-        try {
-          yield JSON.parse(payload) as Record<string, unknown>;
-        } catch {
-          // skip malformed event
+      if (done) {
+        buffer += decoder.decode();
+        if (buffer.trim() !== "") {
+          const evt = parseResponsesSSEFrame(buffer);
+          if (evt !== null) yield evt;
         }
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const { frames, tail } = splitCompleteSSEFrames(buffer);
+      buffer = tail;
+      for (const raw of frames) {
+        const evt = parseResponsesSSEFrame(raw);
+        if (evt !== null) yield evt;
       }
     }
   } finally {
@@ -539,6 +580,10 @@ export async function* translateResponsesSSE(
       }
     } else if (type === "response.output_text.delta") {
       if (typeof evt.delta === "string") yield openaiChunk(model, { content: evt.delta }, null);
+    } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
+      if (typeof evt.delta === "string") {
+        yield openaiChunk(model, { reasoning_content: evt.delta }, null);
+      }
     } else if (type === "response.function_call_arguments.delta") {
       if (typeof evt.delta === "string") {
         yield openaiChunk(
@@ -591,6 +636,7 @@ export async function aggregateResponsesStream(
   let outTok = 0;
   let cacheRead = 0;
   let cacheCreation = 0;
+  let reasoning = "";
   // call_id -> accumulated arguments, preserving first-seen order.
   const toolOrder: string[] = [];
   const toolById = new Map<string, { id: string; name: string; arguments: string }>();
@@ -616,6 +662,8 @@ export async function aggregateResponsesStream(
       }
     } else if (type === "response.output_text.delta") {
       if (typeof evt.delta === "string") text += evt.delta;
+    } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
+      if (typeof evt.delta === "string") reasoning += evt.delta;
     } else if (type === "response.function_call_arguments.delta") {
       const tc = toolById.get(currentCallId);
       if (tc && typeof evt.delta === "string") tc.arguments += evt.delta;
@@ -659,6 +707,7 @@ export async function aggregateResponsesStream(
     };
   });
   const message: Record<string, unknown> = { role: "assistant", content: text || null };
+  if (reasoning !== "") message.reasoning_content = reasoning;
   if (toolCalls.length) message.tool_calls = toolCalls;
   return {
     id,

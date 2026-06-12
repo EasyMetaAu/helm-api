@@ -152,6 +152,41 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     }
   });
 
+  it("returns OpenAI-shaped errors for unsupported Responses lifecycle endpoints", async () => {
+    const cases: Array<[string, string]> = [
+      ["GET", "/v1/responses/resp_123"],
+      ["DELETE", "/v1/responses/resp_123"],
+      ["POST", "/v1/responses/resp_123/cancel"],
+      ["GET", "/v1/responses/resp_123/input_items"],
+      ["POST", "/v1/responses/compact"],
+      ["POST", "/v1/responses/input_tokens"],
+      ["GET", "/responses/resp_123"],
+      ["DELETE", "/openai/v1/responses/resp_123"],
+    ];
+
+    for (const [method, path] of cases) {
+      const { deps, order } = makeDeps();
+      const app = buildApp(deps);
+      const res = await app.request(path, { method, headers: AUTH });
+      expect(res.status, `${method} ${path}`).toBe(400);
+      const body = (await res.json()) as { error: Record<string, string> };
+      expect(body.error.type).toBe("invalid_request_error");
+      expect(body.error.code).toBe("invalid_request");
+      expect(body.error.message).toContain("not implemented");
+      expect(order).toEqual(["auth"]);
+    }
+  });
+
+  it("authenticates unsupported Responses lifecycle endpoints before returning unsupported", async () => {
+    const { deps, order } = makeDeps({ authed: false });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses/resp_123", { method: "GET" });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: Record<string, string> };
+    expect(body.error.code).toBe("invalid_api_key");
+    expect(order).toEqual(["auth"]);
+  });
+
   it("rejects a missing key with 401 (OpenAI error envelope) and never routes", async () => {
     const { deps, order } = makeDeps({ authed: false });
     const app = buildApp(deps);

@@ -5,6 +5,7 @@ import {
   codexAccountIdFromToken,
   createCodexResponsesClient,
   openaiToResponsesRequest,
+  readResponsesEvents,
   translateResponsesSSE,
 } from "./openai-responses.js";
 
@@ -19,6 +20,10 @@ function jwt(accountId: string): string {
 // Codex Responses SSE: one `data: {json}` block per event.
 function sseResponse(events: object[]): Response {
   const body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
+function rawSSEResponse(body: string): Response {
   return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
@@ -158,6 +163,26 @@ describe("openaiToResponsesRequest", () => {
 });
 
 describe("translateResponsesSSE", () => {
+  it("parses CRLF, multi-line data, event fallback, and an unterminated tail event", async () => {
+    const res = rawSSEResponse(
+      [
+        "event: response.output_text.delta\r\n",
+        'data: {"delta":"Hel"}\r\n',
+        "\r\n",
+        'data: {"type":"response.completed",\r\n',
+        'data: "response":{"status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}',
+      ].join(""),
+    );
+    const events: Array<Record<string, unknown>> = [];
+    for await (const evt of readResponsesEvents(res)) events.push(evt);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ type: "response.output_text.delta", delta: "Hel" });
+    expect(events[1]).toMatchObject({
+      type: "response.completed",
+      response: { status: "completed", usage: { input_tokens: 2, output_tokens: 1 } },
+    });
+  });
+
   it("maps output_text deltas + completed to OpenAI chunks + finish + [DONE]", async () => {
     const res = sseResponse([
       { type: "response.created", response: { id: "resp_1" } },
@@ -174,6 +199,21 @@ describe("translateResponsesSSE", () => {
     expect(joined).toContain('"content":"lo"');
     expect(joined).toContain('"finish_reason":"stop"');
     expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("maps Responses reasoning deltas to OpenAI reasoning_content chunks", async () => {
+    const res = sseResponse([
+      { type: "response.reasoning_summary_text.delta", delta: "plan " },
+      { type: "response.reasoning_text.delta", delta: "more" },
+      { type: "response.output_text.delta", delta: "Answer" },
+      { type: "response.completed", response: { status: "completed", usage: {} } },
+    ]);
+    const chunks: string[] = [];
+    for await (const c of translateResponsesSSE(res, "gpt-5.5")) chunks.push(c);
+    const joined = chunks.join("");
+    expect(joined).toContain('"reasoning_content":"plan "');
+    expect(joined).toContain('"reasoning_content":"more"');
+    expect(joined).toContain('"content":"Answer"');
   });
 
   // order 14: include_usage — a terminal usage chunk (choices:[] + usage) must
@@ -391,6 +431,22 @@ describe("aggregateResponsesStream", () => {
       total_tokens: 7,
       prompt_tokens_details: { cached_tokens: 1, cache_creation_tokens: 1 },
     });
+  });
+
+  it("folds Responses reasoning deltas onto message.reasoning_content", async () => {
+    const res = sseResponse([
+      { type: "response.reasoning_summary_text.delta", delta: "think " },
+      { type: "response.reasoning_text.delta", delta: "hard" },
+      { type: "response.output_text.delta", delta: "done" },
+      { type: "response.completed", response: { status: "completed", usage: {} } },
+    ]);
+    const out = await aggregateResponsesStream(res, "m");
+    const msg = (out.choices as Array<Record<string, unknown>>)[0]?.message as Record<
+      string,
+      unknown
+    >;
+    expect(msg.content).toBe("done");
+    expect(msg.reasoning_content).toBe("think hard");
   });
 
   it("folds a function_call into tool_calls with finish_reason tool_calls", async () => {

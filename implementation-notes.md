@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-12 · Codex/Responses 流式兼容修复（状态可见 + 生命周期路由形状；CLAUDE.md 原则 1/7/8；docs/05/07）
+
+- **缘起**：继续按官方 OpenAI OpenAPI / openai-node、LiteLLM Responses 实现和既有 wiki review 四协议兼容性。用户侧现象是 Codex 经常看不到状态、感觉 API 慢；代码侧问题集中在 native Codex Responses SSE 解析和 Helm `/v1/responses` route family 的协议形状。
+- **修复**：`openai-responses` provider 的 SSE reader 不再只找第一条 `data:`，现在支持 CRLF、multi-line `data:`、`event:` fallback（JSON 无 `type` 时）、最后一个未以空行终止的 SSE frame；`response.reasoning_summary.delta` / `response.reasoning_summary_text.delta` / `response.reasoning_text.delta` 都映射到 OpenAI Chat `reasoning_content`，非流式聚合也保留 `message.reasoning_content`。共享 Responses reverse bridge 同步接受官方 `response.reasoning_text.delta`，避免 native Responses 上游的推理文本被 drop。gateway 现在注册官方/LiteLLM Responses lifecycle/helper URL family（retrieve/delete/cancel/input_items/input_tokens/compact，含 `/v1/responses`、`/responses`、`/openai/v1/responses` 前缀），先鉴权再返回 OpenAI-shaped `invalid_request`，不再漏成 Hono raw 404。
+- **取舍/仍开放**：这不是完整 Responses object store 或 token counter。GET/DELETE/cancel/input_items/input_tokens/compact 目前是**协议形状兼容 + fail-closed unsupported**，不是假成功；真实现需要 response-object 存储、background polling 状态、provider-native executor contract、cursor/input-items 数据源，或 Responses-native token counting。Codex “慢”的主要结构性原因仍是 subscription Codex backend stream-only：非流式 Helm 请求必须聚合完整 upstream SSE 后才能返回一个 Chat response；客户端要低首 token 延迟应使用 `stream:true`。
+- **验证**：TDD 红→绿。新增/更新 provider、shared Responses stream、gateway route 测试覆盖 CRLF/multi-line/tail SSE、event fallback、reasoning deltas、lifecycle endpoint auth-first structured unsupported。定向 `responses.test.ts` 与 `responses-stream.test.ts` 已通过；提交前还需跑四协议 focused suite + typecheck/lint/build/full unit/e2e。
+
 ## 2026-06-12 · LiteLLM 协议兼容面修复（四协议路由 + Gemini usage；CLAUDE.md 原则 1/7/8；docs/05/07）
 
 - **缘起**：基于 `/Users/lukin/Projects/llm-router-packages/wiki/comparisons/protocol-compatibility-gap-analysis.md` 对照 LiteLLM，当前 `main` 仍有几类 drop-in 兼容缺口：Gemini 只认 `/v1beta/models/{singleSegment}` 且 `streamGenerateContent` 没有 `alt=sse` 会被当成非流；Gemini 流式出站 usage 没把 cache read/write 加回 `promptTokenCount`；OpenAI Chat / Responses create 缺 LiteLLM 常用别名；Anthropic `/api/event_logging/batch` 与 `/v1/messages/count_tokens` 缺兼容端点。
@@ -21,22 +28,13 @@
 - **修复**：`sanitizeAnthropicToolName` 不再折叠 `_+`，仍保留非法字符替换、首尾 `_` 裁剪、空名兜底和冲突 hash 后缀。这样 `search-web`/`search web` 仍按既有行为产生冲突后缀，而 `mcp__server__tool` 这类合法名称原样通过。
 - **验证**：TDD 红→绿。新增 streaming 回归测试钉死 `mcp__codegraph__codegraph_context` 在 `content_block_start(tool_use)` 中原样返回；扩展 response-level sanitizer 测试确认 MCP 双下划线名可正向/反向 round-trip。定向 `pnpm vitest run packages/core/src/protocol/anthropic/stream.test.ts packages/core/src/protocol/anthropic/response.test.ts packages/core/src/protocol/anthropic/request.test.ts` 通过。
 
-## 2026-06-11 · 「重试」按钮支持全部四协议（faithful 原生回放；CLAUDE.md 原则 1/5/7；docs/05/07）
-
-- **缘起**：admin 请求详情页「重试」按钮对所有 GPT 请求禁用、对所有 Claude 请求可用（生产 la.atmy.work 实证）。根因：回放只认 OpenAI chat 形状——客户端 `canRetry` 要求 `messages[]`（Responses 的 `input[]`、Gemini 的 `contents[]` 落空），服务端 `runReplay` 用 `OpenAIChatRequestSchema` 校验且**硬编码 `protocol:"openai_chat"`**。顺带挖出潜伏 bug：Claude 回放其实也走 openai_chat 路径，**静默丢掉顶层 `system` 提示词 + 错形 Anthropic 工具**——只因 `messages[]` 碰巧过 schema 才「看起来能用」。
-- **修复思路（faithful 原生回放）**：复用 live 路由的同一套入站/出站翻译器（`anthropicTransformer`/`responsesTransformer`/`geminiTransformer` 单例）+ 共享 `createMessagesPipeline`，让回放在请求的**原生协议形状**下重发并记录，而非归一成 OpenAI。
-- **协议恢复（零迁移）**：协议本未持久化。给 `DecisionRecordSchema` 加可选 `protocol`（`.nullable().default(null)`，沿用既有向后兼容约定），在 `route-request.ts` 两处 + `telemetry/decision.ts` builder 用 `req.protocol` 盖戳。它随 `decision_json` 落库、经既有 `getByRequestId` 取回——**无需 DB 迁移、无需新端口方法**；`redact()` 保留它（非密钥串，已加测试钉死）。旧记录无 protocol → 按 body 形状推断（`input[]`→responses、`contents[]`→gemini、否则 openai_chat，与旧行为一致并 log）。
-- **服务端 dispatch（`replay.ts`）**：openai_chat 走原有直连路径不变；anthropic/responses/gemini 走 `transformRequestOut → createMessagesPipeline(route, protocol)（不接 memory/budget/oauth/writes，保持隔离调试语义）→ 原生出站捕获`（非流式 `transformResponseOut`，流式按各面序列化：anthropic/responses 为 `event: <type>\ndata: …`、gemini 为无名 `data:` 帧）。坏 body → 400（transformer 抛 ZodError）；路由失败仍记一条可查的失败 trace（responseJson null/partial）。
-- **Gemini 特例**：Gemini 的 model 与 stream-ness 走 URL 不在 body，故捕获的 body 两者皆缺——model 从原 decision 的 `requested_model` 恢复（缺省 `auto` 重分类），回放固定**非流式**（调试要的是完整响应）。
-- **客户端 `canRetry`**：放宽为「捕获到对象 body 即可重试」（不再枚举形状，避免误禁 string-`input` 的 Responses body）；服务端为协议权威，真无法回放时回精确 400。
-- **取舍/已知限制**：非 chat 的**流式**回放不回填 `completion_usd`（pipeline 仅在接了 budget dep 时回填，回放有意不接——与无预算 key 的 live 行为一致）；openai_chat 回放保留 `usageFromSSE` 成本回填。
-- **验证**：TDD 红→绿。新测：shared decision schema 协议 round-trip(3)、core redaction 保留 protocol(1)、gateway replay 四协议（Anthropic system 保真 + input[] 推断 + Gemini model 恢复 + 坏 body 400 + Responses 流式原生 SSE，共 6 例）、admin canRetry 放宽 1 例；补了 6 个既有 DecisionRecord fixture 的 protocol（**core/gateway typecheck 含 test**）。gateway 路由 166 绿、admin 39 绿、replay 21 绿；typecheck（shared+core+gateway）/ lint / build 全绿。**坑：admin svelte-check 3 个 `oauth.test.ts` 报错是 main 既有（与本改无关）；需发新 admin 镜像生效。**
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-11 · 「重试」按钮支持全部四协议：admin retry 从 OpenAI-chat-only 改为 faithful 原生回放；DecisionRecord 增可选 `protocol` 零迁移盖戳，旧记录按 body 形状推断；Anthropic/Responses/Gemini 复用 live transformers + shared pipeline 捕获原生响应，客户端 `canRetry` 放宽为对象 body 即可；限制是非 chat 流式回放不回填 `completion_usd`，需发新 admin 镜像。
 
 ### 2026-06-11 · 请求页自动刷新控件 RefreshControl：新增请求页分体刷新按钮 + 下拉自动刷新节奏（关/5s…1d），`onRefresh` 注入 `invalidateAll()`，定时器生命周期内有效且不持久化；admin tests/build/lint 当时通过，需发新 admin 镜像生效。
 

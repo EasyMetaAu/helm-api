@@ -142,13 +142,33 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
   app.use("/responses", concurrencyReleaseGuard());
   app.use("/openai/v1/responses", concurrencyReleaseGuard());
 
+  const authenticateResponsesRequest = async (c: Context<AppEnv>): Promise<MessagesIdentity> => {
+    const traceId = c.get("trace_id");
+    const credential = extractCredential(c.req.header("Authorization"));
+    const identity = await deps.auth.resolve(credential);
+    if (identity === null) throw helmError("auth_error", "missing or invalid API key", traceId);
+    return identity;
+  };
+
+  const unsupportedLifecycle = (operation: string) => async (c: Context<AppEnv>) => {
+    const traceId = c.get("trace_id");
+
+    // Match OpenAI/LiteLLM route coverage while failing closed for lifecycle
+    // state Helm does not persist yet. Auth still runs first so unsupported
+    // operations do not become unauthenticated route probes.
+    await authenticateResponsesRequest(c);
+    throw helmError(
+      "invalid_request",
+      `Responses ${operation} is not implemented by this Helm API deployment`,
+      traceId,
+    );
+  };
+
   const handleResponses = async (c: Context<AppEnv>) => {
     const traceId = c.get("trace_id");
 
     // 1) Auth FIRST (docs/02 pipeline order).
-    const credential = extractCredential(c.req.header("Authorization"));
-    const identity = await deps.auth.resolve(credential);
-    if (identity === null) throw helmError("auth_error", "missing or invalid API key", traceId);
+    const identity = await authenticateResponsesRequest(c);
 
     // 1b) Rate limit AFTER auth (needs the resolved key_id) and BEFORE translate/
     //     route. OpenAI surface → the structured rate_limited envelope via onError
@@ -398,7 +418,13 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     return c.json(body);
   };
 
-  app.post("/v1/responses", handleResponses);
-  app.post("/responses", handleResponses);
-  app.post("/openai/v1/responses", handleResponses);
+  for (const prefix of ["/v1/responses", "/responses", "/openai/v1/responses"]) {
+    app.post(`${prefix}/compact`, unsupportedLifecycle("compact"));
+    app.post(`${prefix}/input_tokens`, unsupportedLifecycle("input_tokens"));
+    app.get(`${prefix}/:response_id/input_items`, unsupportedLifecycle("input_items"));
+    app.post(`${prefix}/:response_id/cancel`, unsupportedLifecycle("cancel"));
+    app.get(`${prefix}/:response_id`, unsupportedLifecycle("retrieve"));
+    app.delete(`${prefix}/:response_id`, unsupportedLifecycle("delete"));
+    app.post(prefix, handleResponses);
+  }
 }
