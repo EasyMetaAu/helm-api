@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { RateLimitProbe, RateLimitResult } from "@helm/core";
 import { type ErrorClass, ErrorClassSchema, makeHelmError } from "@helm/shared";
 import type { Context, Hono } from "hono";
@@ -123,6 +124,32 @@ function responsesStreamError(args: {
     sequence_number: args.sequenceNumber,
     trace_id: args.traceId,
   };
+}
+
+function responseStreamId(traceId: string): string {
+  const stable = traceId.replace(/[^A-Za-z0-9]/g, "_").replace(/^_+|_+$/g, "");
+  return `resp_${stable || randomUUID().replace(/-/g, "")}`;
+}
+
+function responseStreamPrelude(args: {
+  responseId: string;
+  model: string;
+}): Array<Record<string, unknown>> {
+  const response = {
+    id: args.responseId,
+    object: "response",
+    model: args.model,
+    status: "in_progress",
+    output: [],
+  };
+  return [
+    { type: "response.created", sequence_number: 0, response },
+    { type: "response.in_progress", sequence_number: 1, response },
+  ];
+}
+
+function isResponsesPreludeEvent(event: Record<string, unknown>): boolean {
+  return event.type === "response.created" || event.type === "response.in_progress";
 }
 
 function pipelineToHelm(err: PipelineError, traceId: string): HelmHttpError {
@@ -277,20 +304,6 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       memory_thread_source: memoryScope.threadSource,
     };
 
-    // 3) Route through the shared core. The pipeline throws a PipelineError when
-    //    routing failed (all_providers_failed) or for an empty request
-    //    (invalid_request) — surface it as the matching OpenAI envelope instead of
-    //    an empty 200. `run` itself throws for the empty-request case (pre-stream,
-    //    so it still reaches onError as a 400/502); the per-accessor failure
-    //    (collect/streamIR) covers the routing-failure case.
-    let result: PipelineRunResult;
-    try {
-      result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
-    } catch (err) {
-      if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
-      throw err;
-    }
-
     // Capture the verbatim request/response bodies only when capture_payloads is ON
     // (the telemetry row is always written regardless). Gating the buffering here
     // stops long/concurrent streams from accumulating the full body when capture is
@@ -299,6 +312,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
 
     // 4) Outbound: stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
+      const responseId = responseStreamId(traceId);
+      const responseModel = typeof ir.model === "string" && ir.model.length > 0 ? ir.model : "auto";
+      ir.metadata = { ...(ir.metadata ?? {}), responses_stream_id: responseId };
       // Claim the concurrency lease (issue #93): hold the slot until the stream
       // body fully drains — release in the stream's own finally, not the guard.
       const releaseConcurrency = c.get("concurrencyRelease");
@@ -312,8 +328,17 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         // Accumulate the serialized wire frames so the served response body can be
         // captured (verbatim) alongside the telemetry row in the finally below.
         const captured: string[] = [];
+        let result: PipelineRunResult | null = null;
         try {
+          for (const event of responseStreamPrelude({ responseId, model: responseModel })) {
+            nextErrorSequence = 2;
+            const frame = deps.transformer.transformStreamOut(event);
+            if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
+            await sse.writeSSE({ event: frame.event, data: frame.data });
+          }
+          result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
           for await (const event of result.streamIR()) {
+            if (isResponsesPreludeEvent(event)) continue;
             if (typeof event.sequence_number === "number")
               nextErrorSequence = event.sequence_number + 1;
             const frame = deps.transformer.transformStreamOut(event);
@@ -353,7 +378,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           // own streamIR finally (cost backfill) already mutated result.decision.
           // result.decision exists even on a pre-stream failure, so a failed stream
           // still records. Fail-open inside recordServed.
-          if (deps.record) {
+          if (deps.record && result !== null) {
             await recordServed(
               deps.record,
               {
@@ -368,6 +393,19 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           }
         }
       });
+    }
+
+    // 3) Route through the shared core. The pipeline throws a PipelineError when
+    //    routing failed (all_providers_failed) or for an empty request
+    //    (invalid_request) — surface it as the matching OpenAI envelope instead of
+    //    an empty 200. For streaming requests this wait happens inside streamSSE
+    //    after the Responses prelude has already reached the client.
+    let result: PipelineRunResult;
+    try {
+      result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
+    } catch (err) {
+      if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
+      throw err;
     }
 
     // Non-stream: collect() throws a PipelineError when routing failed (all

@@ -97,6 +97,24 @@ describe("createMessagesPipeline — streamIR protocol branch", () => {
     expect(types.some((t) => t.startsWith("message_"))).toBe(false);
   });
 
+  it("openai_responses uses the route-stamped response id for every streamed event", async () => {
+    const route: RouteFn = async () => streamOkResult(sseTextStream());
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const run = await pipeline.run(
+      irOf({ stream: true, metadata: { trace_id: "trace-1", responses_stream_id: "resp_route" } }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    const events: Array<Record<string, unknown>> = [];
+    for await (const ev of run.streamIR()) events.push(ev);
+
+    const responseIds = events
+      .map((event) => (event.response as { id?: unknown } | undefined)?.id)
+      .filter((id): id is string => typeof id === "string");
+    expect(responseIds.length).toBeGreaterThan(0);
+    expect(new Set(responseIds)).toEqual(new Set(["resp_route"]));
+  });
+
   it("parses OpenAI SSE with CRLF separators and multi-data lines", async () => {
     const splitJson = JSON.stringify({
       id: "chatcmpl-x",

@@ -648,6 +648,11 @@ export function createMessagesPipeline(
               const events =
                 protocol === "openai_responses"
                   ? convertOpenAIStreamToResponses(source as AsyncIterable<never>, {
+                      id:
+                        typeof ir.metadata?.responses_stream_id === "string" &&
+                        ir.metadata.responses_stream_id.length > 0
+                          ? ir.metadata.responses_stream_id
+                          : undefined,
                       model:
                         typeof ir.model === "string" && ir.model.length > 0 ? ir.model : "auto",
                     })
