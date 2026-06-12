@@ -67,8 +67,12 @@
   // pop a blank window and drop the decoded <img> into it rather than linking the
   // data: URL directly (which would just be blocked or download).
   function openInNewTab(): void {
-    const win = window.open('', '_blank', 'noopener,noreferrer');
+    // NB: do NOT pass `noopener` — a no-opener window is spec'd to return null, which
+    // would leave us no handle to write the <img> into and the tab would stay blank.
+    // We sever `opener` ourselves instead; the page only ever shows our own data: URL.
+    const win = window.open('', '_blank');
     if (!win) return;
+    win.opener = null;
     win.document.title = label ?? 'image';
     win.document.body.style.margin = '0';
     win.document.body.style.background = '#0b0b0b';

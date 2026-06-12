@@ -90,6 +90,10 @@ describe('ImagePreview', () => {
     await fireEvent.click(screen.getByTestId('image-preview-open-tab'));
 
     expect(openSpy).toHaveBeenCalledOnce();
+    // Must NOT pass `noopener`: a no-opener window is spec'd to return null, so we'd
+    // never get the handle needed to write the <img> — the tab would stay blank.
+    const features = openSpy.mock.calls[0][2] ?? '';
+    expect(features).not.toContain('noopener');
     expect(appended).toHaveLength(1);
     expect(appended[0].src).toBe(SRC);
     openSpy.mockRestore();
