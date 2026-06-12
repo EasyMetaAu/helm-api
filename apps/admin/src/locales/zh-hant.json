@@ -546,5 +546,7 @@
   "Point the Gemini CLI at Helm with these environment variables. The base URL is the bare origin — the CLI appends /v1beta/models/{model}:generateContent itself.": "把 Gemini CLI 指向 Helm，只需設定這兩個環境變數。base URL 用裸網域——CLI 會自行補上 /v1beta/models/{model}:generateContent。",
   "Or call Helm's native Gemini route directly. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.": "或者直接呼叫 Helm 的原生 Gemini 路由。base URL 用裸網域；請求路徑再加 /v1beta/models/{model}:generateContent，認證使用 x-goog-api-key。",
   "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "設定一個相容 OpenAI 的 provider。base URL 以 /v1 結尾；若走 Anthropic 路徑，則改用裸網域。",
-  "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "任何相容 OpenAI 或 Anthropic 的 SDK 都能用——只需改 base URL 和密鑰。留意：OpenAI 的 base URL 帶 /v1，Anthropic 的不帶。"
+  "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "任何相容 OpenAI 或 Anthropic 的 SDK 都能用——只需改 base URL 和密鑰。留意：OpenAI 的 base URL 帶 /v1，Anthropic 的不帶。",
+  "Concurrency": "並發",
+  "Memory": "記憶"
 }

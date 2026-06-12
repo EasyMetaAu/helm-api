@@ -57,6 +57,10 @@
     if (key.budget_requests !== null) parts.push(`${key.budget_requests} req`);
     if (key.budget_tokens !== null) parts.push(`${key.budget_tokens} tok`);
     if (key.budget_spend_usd !== null) parts.push(`$${key.budget_spend_usd}`);
+    // The rolling window only matters once a cap exists (no cap = no budget at all).
+    if (parts.length > 0 && key.budget_window_seconds !== null) {
+      parts.push(`${key.budget_window_seconds}s`);
+    }
     return parts;
   }
 
@@ -183,6 +187,7 @@
             <th class="px-3 py-2">{$t('Caps')}</th>
             <th class="px-3 py-2">{$t('Rate limit')}</th>
             <th class="px-3 py-2">{$t('Budget')}</th>
+            <th class="px-3 py-2">{$t('Memory')}</th>
             <th class="px-3 py-2">{$t('Status')}</th>
             <th class="px-3 py-2"></th>
           </tr>
@@ -218,6 +223,10 @@
               <td class="px-3 py-2 text-ink-muted">
                 <div>{$t('RPM')}: {limitLabel(key.rate_limit_rpm)}</div>
                 <div>{$t('TPM')}: {limitLabel(key.rate_limit_tpm)}</div>
+                <!-- Concurrency null = unlimited (NOT inherit), unlike the rate limits above. -->
+                <div>
+                  {$t('Concurrency')}: {key.concurrency_limit ?? $t('Unlimited')}
+                </div>
               </td>
               <td class="px-3 py-2 text-ink-muted">
                 {#if budgetParts(key).length > 0}
@@ -229,6 +238,21 @@
                   </div>
                 {:else}
                   <span>{$t('None')}</span>
+                {/if}
+              </td>
+              <td class="px-3 py-2 text-ink-muted">
+                {#if key.memory_mode === 'off'}
+                  <span>{$t('Off')}</span>
+                {:else}
+                  <div>
+                    <span>{key.memory_mode === 'observe' ? $t('Observe') : $t('Inject')}</span>
+                    {#if key.memory_thread_source === 'auto'}
+                      <span class="text-xs">· {$t('auto thread')}</span>
+                    {/if}
+                  </div>
+                  {#if key.memory_project_id}
+                    <div class="text-xs"><span>{key.memory_project_id}</span></div>
+                  {/if}
                 {/if}
               </td>
               <td class="px-3 py-2">

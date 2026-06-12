@@ -543,5 +543,7 @@
   "Point the Gemini CLI at Helm with these environment variables. The base URL is the bare origin — the CLI appends /v1beta/models/{model}:generateContent itself.": "Gemini CLI를 Helm으로 향하게 하려면 다음 환경 변수를 설정하세요. base URL은 오리진 그대로이며 — CLI가 /v1beta/models/{model}:generateContent를 자동으로 붙입니다.",
   "Or call Helm's native Gemini route directly. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.": "또는 Helm의 네이티브 Gemini 경로를 직접 호출하세요. base URL은 오리진 그대로이고, 요청 경로에 /v1beta/models/{model}:generateContent를 붙이며 인증은 x-goog-api-key를 사용합니다.",
   "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "OpenAI 호환 provider를 설정하세요. base URL은 /v1로 끝납니다. Anthropic 경로에서는 오리진 그대로를 사용하세요.",
-  "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "OpenAI 또는 Anthropic 호환 SDK라면 무엇이든 동작합니다 — base URL과 키만 바꾸면 됩니다. OpenAI base URL에는 /v1이 붙고 Anthropic에는 붙지 않는 점에 유의하세요."
+  "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "OpenAI 또는 Anthropic 호환 SDK라면 무엇이든 동작합니다 — base URL과 키만 바꾸면 됩니다. OpenAI base URL에는 /v1이 붙고 Anthropic에는 붙지 않는 점에 유의하세요.",
+  "Concurrency": "동시성",
+  "Memory": "메모리"
 }

@@ -552,5 +552,7 @@
   "Point the Gemini CLI at Helm with these environment variables. The base URL is the bare origin — the CLI appends /v1beta/models/{model}:generateContent itself.": "Point the Gemini CLI at Helm with these environment variables. The base URL is the bare origin — the CLI appends /v1beta/models/{model}:generateContent itself.",
   "Or call Helm's native Gemini route directly. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.": "Or call Helm's native Gemini route directly. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.",
   "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.",
-  "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one."
+  "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.",
+  "Concurrency": "Concurrency",
+  "Memory": "Memory"
 }
