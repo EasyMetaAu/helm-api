@@ -224,6 +224,14 @@ const ReasoningSummaryTextDeltaSchema = z.object({
   summary_index: z.number().int().nonnegative(),
   delta: z.string(),
 });
+const ReasoningTextDeltaSchema = z.object({
+  type: z.literal("response.reasoning_text.delta"),
+  sequence_number: z.number().int().nonnegative(),
+  item_id: z.string(),
+  output_index: z.number().int().nonnegative(),
+  content_index: z.number().int().nonnegative().optional(),
+  delta: z.string(),
+});
 const ReasoningSummaryTextDoneSchema = z.object({
   type: z.literal("response.reasoning_summary_text.done"),
   sequence_number: z.number().int().nonnegative(),
@@ -274,6 +282,7 @@ export const ResponsesSSEEventSchema = z.discriminatedUnion("type", [
   OutputTextDoneSchema,
   ContentPartDoneSchema,
   ReasoningSummaryTextDeltaSchema,
+  ReasoningTextDeltaSchema,
   ReasoningSummaryTextDoneSchema,
   FunctionCallArgumentsDeltaSchema,
   FunctionCallArgumentsDoneSchema,
@@ -969,6 +978,7 @@ export async function* synthesizeResponsesSSEFromJSON(
 // consumer sees a uniform feed:
 //   • output_text.delta              → choices[0].delta.content
 //   • reasoning_summary_text.delta   → choices[0].delta.reasoning_content
+//   • reasoning_text.delta           → choices[0].delta.reasoning_content
 //   • function_call_arguments.delta  → choices[0].delta.tool_calls[].function.arguments
 //   • output_item.added(function_call)→ choices[0].delta.tool_calls[] (id + name)
 //   • completed                      → finish_reason + usage (flushed once)
@@ -990,6 +1000,12 @@ export async function* convertResponsesEventStreamToOpenAI(
         break;
       }
       case "response.reasoning_summary_text.delta": {
+        yield {
+          choices: [{ index: 0, delta: { reasoning_content: ev.delta }, finish_reason: null }],
+        };
+        break;
+      }
+      case "response.reasoning_text.delta": {
         yield {
           choices: [{ index: 0, delta: { reasoning_content: ev.delta }, finish_reason: null }],
         };
