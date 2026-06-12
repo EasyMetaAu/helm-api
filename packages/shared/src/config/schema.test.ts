@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { HelmConfigSchema, isOAuthPreset, ProviderConfigSchema, type OAuthConfig } from "./schema.js";
+import {
+  HelmConfigSchema,
+  isOAuthPreset,
+  ProviderConfigSchema,
+  type OAuthConfig,
+} from "./schema.js";
 
 // Narrow a provider's oauth union to the CONFIDENTIAL block for assertions
 // (fails loudly if it is actually a preset block).
