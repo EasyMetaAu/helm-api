@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TargetProviderProtocolSchema } from "../request/schema.js";
 import { ClassifierConfigSchema } from "./classifier-schema.js";
 import { LanesConfigSchema } from "./lanes-schema.js";
 import { MemoryConfigSchema } from "./memory-schema.js";
@@ -39,6 +40,13 @@ export const ProviderModelSchema = z.object({
   alias: z.string().min(1),
   provider_model: z.string().min(1),
 });
+
+function inferTargetProviderProtocol(type: string): z.infer<typeof TargetProviderProtocolSchema> {
+  if (type === "openai-responses") return "openai_responses";
+  if (type === "anthropic") return "anthropic_messages";
+  if (type === "gemini") return "gemini";
+  return "openai_chat";
+}
 
 // OAuth credential reference for subscription / SSO upstreams (issue #38). Like
 // api_key_env, this carries env-var NAMES only — never a plaintext token, secret,
@@ -143,6 +151,10 @@ export const ProviderConfigSchema = z
     api_key_env: z.string().min(1).optional(),
     oauth: OAuthCredentialSchema.optional(),
     models: z.array(ProviderModelSchema).default([]),
+    // Provider wire protocol for #217 same-protocol serialization decisions.
+    // OpenAI-compatible chat providers default to openai_chat; Codex/native
+    // Responses and other provider wires must be distinguishable metadata.
+    target_provider_protocol: TargetProviderProtocolSchema.optional(),
     map_developer_role_to_system: z.boolean().default(false),
   })
   .refine((p) => p.name !== undefined || p.alias !== undefined, {
@@ -164,6 +176,7 @@ export const ProviderConfigSchema = z
     ...p,
     name: p.name ?? (p.alias as string),
     alias: p.alias ?? (p.name as string),
+    targetProviderProtocol: p.target_provider_protocol ?? inferTargetProviderProtocol(p.type),
   }));
 
 // A single quota dimension pair. 0 = that dimension is unlimited (skip the check).

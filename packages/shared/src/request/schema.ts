@@ -13,6 +13,10 @@ export const ProtocolSchema = z.enum([
   "gemini",
 ]);
 
+// Provider wire protocol selected by routing/execution. This is intentionally
+// separate from the inbound source protocol and the client response protocol.
+export const TargetProviderProtocolSchema = ProtocolSchema;
+
 export const MemoryModeSchema = z.enum(["off", "observe", "inject"]);
 
 // MVP does not deep-validate message/tool internals: keep the normalized shape
@@ -151,6 +155,7 @@ export type OpenAIChatRequest = z.infer<typeof OpenAIChatRequestSchema>;
 
 // Single source of truth: types via z.infer — no duplicate interfaces.
 export type Protocol = z.infer<typeof ProtocolSchema>;
+export type TargetProviderProtocol = z.infer<typeof TargetProviderProtocolSchema>;
 export type MemoryMode = z.infer<typeof MemoryModeSchema>;
 export type RequestMetadata = z.infer<typeof RequestMetadataSchema>;
 export type InternalRequest = z.infer<typeof InternalRequestSchema>;

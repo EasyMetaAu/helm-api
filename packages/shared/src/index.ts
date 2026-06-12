@@ -266,6 +266,8 @@ export {
   ProtocolSchema,
   type RequestMetadata,
   RequestMetadataSchema,
+  type TargetProviderProtocol,
+  TargetProviderProtocolSchema,
 } from "./request/schema.js";
 // Routing signal (POST-MVP Agentic Signals feedback layer; docs/02 telemetry).
 export { type RoutingSignal, RoutingSignalSchema } from "./signals/schema.js";

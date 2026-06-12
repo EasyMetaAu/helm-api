@@ -28,7 +28,7 @@ const anthropic: ProviderConfig = {
 };
 
 describe("createProviderRegistry / resolve", () => {
-  it("resolves an alias to its provider + model + base_url + api_key_env", () => {
+  it("resolves an alias to provider metadata including targetProviderProtocol", () => {
     const reg = createProviderRegistry([openai]);
     const res = reg.resolve("cheap_model");
     expect(res.ok).toBe(true);
@@ -39,8 +39,26 @@ describe("createProviderRegistry / resolve", () => {
         providerModel: "gpt-4o-mini",
         baseUrl: "https://api.openai.com/v1",
         apiKeyEnv: "OPENAI_API_KEY",
+        targetProviderProtocol: "openai_chat",
       });
     }
+  });
+
+  it("distinguishes Codex Responses from OpenAI-compatible chat providers", () => {
+    const codex: ProviderConfig = {
+      name: "openai-codex",
+      base_url: "https://chatgpt.com/backend-api/codex",
+      api_key_env: "OPENAI_CODEX_TOKEN",
+      targetProviderProtocol: "openai_responses",
+      models: [{ alias: "openai-codex/gpt-5.5", provider_model: "gpt-5.5" }],
+    };
+    const reg = createProviderRegistry([openai, codex]);
+
+    const chat = reg.resolve("cheap_model");
+    const responses = reg.resolve("openai-codex/gpt-5.5");
+
+    expect(chat.ok && chat.value.targetProviderProtocol).toBe("openai_chat");
+    expect(responses.ok && responses.value.targetProviderProtocol).toBe("openai_responses");
   });
 
   it("returns a structured unknown_alias error (no throw) for an unknown alias", () => {
