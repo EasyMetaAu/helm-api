@@ -17,12 +17,25 @@ const AUTH = { Authorization: "Bearer helm_live_secret", "Content-Type": "applic
 // insert call.
 const FAKE_DECISION = { final: { status: "ok", model_alias: "gpt-4o" } } as never;
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+function shortTimeout(): Promise<"timeout"> {
+  return new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 10));
+}
+
 function makeDeps(
   over: {
     authed?: boolean;
     transformRequestOut?: (n: unknown) => { stream?: boolean; metadata?: Record<string, unknown> };
     collect?: () => Promise<unknown>;
     streamIR?: () => AsyncIterable<{ type: string; [k: string]: unknown }>;
+    run?: ResponsesRouteDeps["pipeline"]["run"];
     rateLimiter?: ResponsesRouteDeps["rateLimiter"];
     concurrencyGate?: ResponsesRouteDeps["concurrencyGate"];
     identity?: MessagesIdentity;
@@ -60,19 +73,21 @@ function makeDeps(
       }),
     },
     pipeline: {
-      run: async (_ir, _identity, _signal) => {
-        order.push("route");
-        return {
-          decision: FAKE_DECISION,
-          collect: over.collect ?? (async () => ({ id: "ir-resp", choices: [] })),
-          streamIR:
-            over.streamIR ??
-            async function* () {
-              yield { type: "response.created", sequence_number: 0 };
-              yield { type: "response.completed", sequence_number: 1 };
-            },
-        };
-      },
+      run:
+        over.run ??
+        (async (_ir, _identity, _signal) => {
+          order.push("route");
+          return {
+            decision: FAKE_DECISION,
+            collect: over.collect ?? (async () => ({ id: "ir-resp", choices: [] })),
+            streamIR:
+              over.streamIR ??
+              async function* () {
+                yield { type: "response.created", sequence_number: 0 };
+                yield { type: "response.completed", sequence_number: 1 };
+              },
+          };
+        }),
     },
   };
   return { deps, order };
@@ -257,6 +272,55 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(frames.at(-1)?.event).toBe("response.completed");
     // No [DONE] sentinel on the Responses surface.
     expect(frames.some((f) => f.data === "[DONE]")).toBe(false);
+  });
+
+  it("stream:true opens the Responses SSE before routing resolves", async () => {
+    let releaseRoute!: () => void;
+    const routeStarted = deferred<void>();
+    const routeMayFinish = new Promise<void>((resolve) => {
+      releaseRoute = resolve;
+    });
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      run: async () => {
+        routeStarted.resolve(undefined);
+        await routeMayFinish;
+        return {
+          decision: FAKE_DECISION,
+          collect: async () => ({ id: "ir-resp", choices: [] }),
+          streamIR: async function* () {
+            yield { type: "response.completed", sequence_number: 2 };
+          },
+        };
+      },
+    });
+    const app = buildApp(deps);
+
+    const responsePromise = app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+
+    const early = await Promise.race([responsePromise, shortTimeout()]);
+    expect(early).not.toBe("timeout");
+    const res = early as Response;
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+    const reader = res.body?.getReader();
+    expect(reader).toBeDefined();
+    const firstRead = await Promise.race([reader?.read(), shortTimeout()]);
+    expect(firstRead).not.toBe("timeout");
+    const firstText = new TextDecoder().decode((firstRead as { value?: Uint8Array }).value);
+    expect(parseSSE(firstText)[0]?.event).toBe("response.created");
+    await routeStarted.promise;
+    releaseRoute();
+    await reader?.cancel();
   });
 
   it("mid-stream provider failure emits exactly one Responses-shaped error frame", async () => {
