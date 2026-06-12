@@ -6,7 +6,7 @@
   import type { DashboardStats } from '$lib/api/stats.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
   import TokensCell from '$lib/components/TokensCell.svelte';
-  import { formatTimestamp, formatTokens, formatUsd } from '$lib/format.js';
+  import { formatCount, formatTimestamp, formatTokens, formatUsd } from '$lib/format.js';
   import { DEFAULT_PAGE_SIZE, filtersToSearch, type RangeKey } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
 
@@ -49,9 +49,24 @@
     })),
   );
   const TREND_SERIES = $derived([
-    { key: 'input', label: $t('Input tokens'), value: (d: TrendPoint) => d.input, color: 'hsl(217 91% 60%)' },
-    { key: 'output', label: $t('Output tokens'), value: (d: TrendPoint) => d.output, color: 'hsl(160 84% 39%)' },
-    { key: 'cached', label: $t('Cached tokens'), value: (d: TrendPoint) => d.cached, color: 'hsl(38 92% 50%)' },
+    {
+      key: 'input',
+      label: $t('Input tokens'),
+      value: (d: TrendPoint) => d.input,
+      color: 'hsl(217 91% 60%)',
+    },
+    {
+      key: 'output',
+      label: $t('Output tokens'),
+      value: (d: TrendPoint) => d.output,
+      color: 'hsl(160 84% 39%)',
+    },
+    {
+      key: 'cached',
+      label: $t('Cached tokens'),
+      value: (d: TrendPoint) => d.cached,
+      color: 'hsl(38 92% 50%)',
+    },
   ]);
 
   // By-model: total tokens per served model. Legacy/unstamped rows carry a null
@@ -162,7 +177,7 @@
   <div class="grid grid-cols-2 gap-3 md:grid-cols-4 md:gap-4">
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Requests')}</div>
-      <div class="mt-1 text-2xl font-semibold text-slate-900">{stats.total}</div>
+      <div class="mt-1 text-2xl font-semibold text-slate-900">{formatCount(stats.total)}</div>
     </div>
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
@@ -172,7 +187,7 @@
         {stats.successRate === null ? '—' : `${stats.successRate}%`}
       </div>
       <div class="mt-0.5 text-xs text-slate-400">
-        {$t('Errors: {count}', { count: stats.errors })}
+        {$t('Errors: {count}', { count: formatCount(stats.errors) })}
       </div>
     </div>
     <div class="card">

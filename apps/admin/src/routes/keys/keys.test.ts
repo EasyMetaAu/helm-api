@@ -184,11 +184,33 @@ describe('keys page', () => {
     expect(within(rows[2]).getByText(/^off$/i)).toBeInTheDocument();
   });
 
-  it('shows the budget window alongside the caps in the budget cell', () => {
+  it('shows the budget window alongside the caps in the budget cell, as a duration', () => {
     renderPage([key('k1', { budget_requests: 100, budget_window_seconds: 3600 })]);
     const row = screen.getByTestId('key-row');
     expect(within(row).getByText(/100 req/)).toBeInTheDocument();
-    expect(within(row).getByText(/3600\s*s/i)).toBeInTheDocument();
+    // The raw "3600s" is unreadable — the window renders as a coarse duration.
+    expect(within(row).getByText(/1h/)).toBeInTheDocument();
+    expect(within(row).queryByText(/3600/)).not.toBeInTheDocument();
+  });
+
+  it('abbreviates large budget caps and rate limits with K/M/B units', () => {
+    renderPage([
+      key('k1', {
+        rate_limit_tpm: 2_000_000,
+        budget_requests: 50_000,
+        budget_tokens: 100_000_000,
+        budget_spend_usd: 5,
+        budget_window_seconds: 2_592_000, // 30 days
+      }),
+    ]);
+    const row = screen.getByTestId('key-row');
+    expect(within(row).getByText(/TPM.*2M/)).toBeInTheDocument();
+    expect(within(row).getByText(/50K req/)).toBeInTheDocument();
+    expect(within(row).getByText(/100M tok/)).toBeInTheDocument();
+    expect(within(row).getByText(/\$5\.00/)).toBeInTheDocument();
+    expect(within(row).getByText(/30d/)).toBeInTheDocument();
+    // No raw long number may leak through anywhere in the row.
+    expect(row.textContent).not.toMatch(/\d{5,}/);
   });
 
   it('Edit opens a dialog and PATCHes the full editable cap set via updateKey', async () => {

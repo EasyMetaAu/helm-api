@@ -67,6 +67,13 @@ export function formatTokens(n: number | null | undefined): string {
   return String(Math.round(v));
 }
 
+// Generic compact count (requests, errors, rows…): the abbreviation rules are
+// identical to token counts, so this is the same function under a name that
+// doesn't lie about what it formats. Callers pick the alias that matches the
+// quantity so a future divergence (e.g. tokens gaining a unit suffix) only has
+// to touch one signature.
+export const formatCount = formatTokens;
+
 // Coarse, magnitude-aware breakdown of a duration (in ms) — the SINGLE source of
 // truth for "anything past 24h rolls up to days". Returns just the numbers +
 // which bucket they fall in; callers map the bucket to their own phrasing/i18n

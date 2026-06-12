@@ -5,6 +5,7 @@
   import CreateKeyDialog from '$lib/components/CreateKeyDialog.svelte';
   import EditKeyDialog from '$lib/components/EditKeyDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import { durationParts, formatCount, formatTokens, formatUsd } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
   // API key management view. HARD security line (CLAUDE.md Principle 7 / docs/06): the
@@ -42,11 +43,22 @@
   // are editable there EXCEPT the immutable identity and role (see EditKeyDialog).
   let editingKey = $state<ApiKeyView | null>(null);
 
-  // Render a stored limit for display: a number as-is (0 → "unlimited"), null as
-  // the inherit/"default" copy.
+  // Render a stored limit for display: a number compacted (a 2,000,000 TPM cap
+  // reads "2M", not a 7-digit wall), 0 → "unlimited", null → the inherit/"default"
+  // copy.
   function limitLabel(v: number | null): string {
     if (v === null) return $t('Default');
-    return v === 0 ? $t('Unlimited') : String(v);
+    return v === 0 ? $t('Unlimited') : formatCount(v);
+  }
+
+  // Budget rolling window, coarsened to the largest sensible unit ("1h", "30d") —
+  // raw seconds ("2592000s") are unreadable. Shares durationParts with the
+  // providers page so every duration label agrees on the >24h ⇒ days rule.
+  function windowText(seconds: number): string {
+    const p = durationParts(seconds * 1000);
+    if (p.unit === 'dh') return p.h > 0 ? `${p.d}d ${p.h}h` : `${p.d}d`;
+    if (p.unit === 'hm') return p.m > 0 ? `${p.h}h ${p.m}m` : `${p.h}h`;
+    return `${p.m}m`;
   }
 
   // Compact per-key usage-budget summary for the list (docs/06). Shows only the
@@ -54,12 +66,12 @@
   // (degrade lane / reject) is appended so operators see the cost-control posture.
   function budgetParts(key: ApiKeyView): string[] {
     const parts: string[] = [];
-    if (key.budget_requests !== null) parts.push(`${key.budget_requests} req`);
-    if (key.budget_tokens !== null) parts.push(`${key.budget_tokens} tok`);
-    if (key.budget_spend_usd !== null) parts.push(`$${key.budget_spend_usd}`);
+    if (key.budget_requests !== null) parts.push(`${formatCount(key.budget_requests)} req`);
+    if (key.budget_tokens !== null) parts.push(`${formatTokens(key.budget_tokens)} tok`);
+    if (key.budget_spend_usd !== null) parts.push(formatUsd(key.budget_spend_usd));
     // The rolling window only matters once a cap exists (no cap = no budget at all).
     if (parts.length > 0 && key.budget_window_seconds !== null) {
-      parts.push(`${key.budget_window_seconds}s`);
+      parts.push(windowText(key.budget_window_seconds));
     }
     return parts;
   }
