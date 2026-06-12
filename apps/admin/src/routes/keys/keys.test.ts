@@ -72,10 +72,7 @@ describe('keys page', () => {
   });
 
   it('shows the key name in the row, and an "unnamed" placeholder when null', () => {
-    renderPage([
-      key('k1', { name: 'Production backend' }),
-      key('k2', { name: null }),
-    ]);
+    renderPage([key('k1', { name: 'Production backend' }), key('k2', { name: null })]);
     const rows = screen.getAllByTestId('key-row');
     expect(within(rows[0]).getByText('Production backend')).toBeInTheDocument();
     expect(within(rows[1]).getByText(/unnamed/i)).toBeInTheDocument();
@@ -97,7 +94,9 @@ describe('keys page', () => {
 
     // Re-open and clear the name → PATCH sends null (cleared), not undefined.
     updateKey.mockClear();
-    await fireEvent.click(within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }));
+    await fireEvent.click(
+      within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }),
+    );
     dialog = screen.getByRole('dialog', { name: /edit key/i });
     await fireEvent.input(within(dialog).getByLabelText(/^name$/i), { target: { value: '   ' } });
     await fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
@@ -157,6 +156,39 @@ describe('keys page', () => {
     // on both the RPM and TPM lines.
     expect(within(rows[0]).getByText(/60/)).toBeInTheDocument();
     expect(within(rows[1]).getAllByText(/default/i).length).toBeGreaterThan(0);
+  });
+
+  it('shows the concurrency limit in the row (number, and "unlimited" when null)', () => {
+    renderPage([key('k1', { concurrency_limit: 5 }), key('k2', { concurrency_limit: null })]);
+    const rows = screen.getAllByTestId('key-row');
+    expect(within(rows[0]).getByText(/concurrency.*5/i)).toBeInTheDocument();
+    expect(within(rows[1]).getByText(/concurrency.*unlimited/i)).toBeInTheDocument();
+  });
+
+  it('shows the memory defaults in the row (mode + thread source + project; "Off" when off)', () => {
+    renderPage([
+      key('k1', {
+        memory_mode: 'inject',
+        memory_thread_source: 'auto',
+        memory_project_id: 'proj-a',
+      }),
+      key('k2', { memory_mode: 'observe', memory_thread_source: 'header' }),
+      key('k3', { memory_mode: 'off' }),
+    ]);
+    const rows = screen.getAllByTestId('key-row');
+    expect(within(rows[0]).getByText(/inject/i)).toBeInTheDocument();
+    expect(within(rows[0]).getByText(/auto thread/i)).toBeInTheDocument();
+    expect(within(rows[0]).getByText('proj-a')).toBeInTheDocument();
+    expect(within(rows[1]).getByText(/observe/i)).toBeInTheDocument();
+    expect(within(rows[1]).queryByText(/auto thread/i)).not.toBeInTheDocument();
+    expect(within(rows[2]).getByText(/^off$/i)).toBeInTheDocument();
+  });
+
+  it('shows the budget window alongside the caps in the budget cell', () => {
+    renderPage([key('k1', { budget_requests: 100, budget_window_seconds: 3600 })]);
+    const row = screen.getByTestId('key-row');
+    expect(within(row).getByText(/100 req/)).toBeInTheDocument();
+    expect(within(row).getByText(/3600\s*s/i)).toBeInTheDocument();
   });
 
   it('Edit opens a dialog and PATCHes the full editable cap set via updateKey', async () => {
@@ -222,7 +254,9 @@ describe('keys page', () => {
 
   it('presents the Edit dialog as a centered modal dismissible via scrim and Escape', async () => {
     renderPage([key('k1')]);
-    await fireEvent.click(within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }));
+    await fireEvent.click(
+      within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }),
+    );
     expect(screen.getByRole('dialog', { name: /edit key/i })).toBeInTheDocument();
     // Clicking the backdrop scrim closes the modal.
     await fireEvent.click(screen.getByTestId('modal-scrim'));
@@ -231,7 +265,9 @@ describe('keys page', () => {
     );
 
     // Re-open and close via Escape.
-    await fireEvent.click(within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }));
+    await fireEvent.click(
+      within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }),
+    );
     expect(screen.getByRole('dialog', { name: /edit key/i })).toBeInTheDocument();
     await fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() =>
@@ -241,7 +277,9 @@ describe('keys page', () => {
 
   it('presents the revoke confirmation as a centered modal', async () => {
     renderPage([key('k1', { prefix: 'helm_live_ab12' })]);
-    await fireEvent.click(within(screen.getByTestId('key-row')).getByRole('button', { name: /revoke/i }));
+    await fireEvent.click(
+      within(screen.getByTestId('key-row')).getByRole('button', { name: /revoke/i }),
+    );
     const dialog = screen.getByRole('dialog', { name: /confirm revoke/i });
     expect(within(dialog).getByRole('button', { name: /confirm/i })).toBeInTheDocument();
     // The scrim dismisses the confirmation (same as Cancel) without revoking.
@@ -259,10 +297,7 @@ describe('keys page', () => {
   });
 
   it('offers Delete (not Edit/Revoke) only on a revoked key', () => {
-    renderPage([
-      key('active', { disabled: false }),
-      key('revoked', { disabled: true }),
-    ]);
+    renderPage([key('active', { disabled: false }), key('revoked', { disabled: true })]);
     const rows = screen.getAllByTestId('key-row');
     // Active row: Edit + Revoke, no Delete.
     expect(within(rows[0]).getByRole('button', { name: /^edit$/i })).toBeInTheDocument();
