@@ -450,6 +450,41 @@ describe("scoreRequest — Layer-1 orchestration", () => {
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
   });
 
+  it("shipped zh: Simplified math prompt has dimension grip when task keywords match", () => {
+    const cfg = shippedRules();
+    const req = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content:
+            "请计算这个矩阵方程的导数和积分步骤，详细解释每一步推导过程，并说明最终结果的数学含义，还要列出可能的代数变形和校验方法",
+        },
+      ],
+    });
+    const out = scoreRequest(req, { cfg, approxTokens: 70 });
+
+    expect(out.task_type).toBe("math");
+    expect(out.uncertain).toBe(false);
+    expect(out.explanation.some((e) => e.detail === "math_zh_kw")).toBe(true);
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  it("shipped zh: Traditional web prompt has dimension grip when task keywords match", () => {
+    const cfg = shippedRules();
+    const req = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content: "請搜尋網頁並查找網頁上的最新公告，整理來源、時間、重點和可信度。",
+        },
+      ],
+    });
+    const out = scoreRequest(req, { cfg, approxTokens: 60 });
+
+    expect(out.explanation.some((e) => e.detail === "web_zh_kw")).toBe(true);
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
   it("shipped zh: unmatched long Chinese still trips language guard", () => {
     const cfg = shippedRules();
     const req = makeRequest({ messages: [{ role: "user", content: longZh }] });
