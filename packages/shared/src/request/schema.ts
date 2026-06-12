@@ -15,7 +15,12 @@ export const ProtocolSchema = z.enum([
 
 // Provider wire protocol selected by routing/execution. This is intentionally
 // separate from the inbound source protocol and the client response protocol.
-export const TargetProviderProtocolSchema = ProtocolSchema;
+export const TargetProviderProtocolSchema = z.enum([
+  "openai_chat",
+  "anthropic_messages",
+  "openai_responses",
+  "gemini",
+]);
 
 export const MemoryModeSchema = z.enum(["off", "observe", "inject"]);
 

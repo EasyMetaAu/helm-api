@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HelmConfigSchema, isOAuthPreset, type OAuthConfig } from "./schema.js";
+import { HelmConfigSchema, isOAuthPreset, ProviderConfigSchema, type OAuthConfig } from "./schema.js";
 
 // Narrow a provider's oauth union to the CONFIDENTIAL block for assertions
 // (fails loudly if it is actually a preset block).
@@ -50,6 +50,40 @@ function minimalConfig() {
     runtime: { rate_limit: { default: {} } },
   };
 }
+
+describe("ProviderConfigSchema targetProviderProtocol", () => {
+  function provider(overrides: Record<string, unknown> = {}) {
+    return ProviderConfigSchema.parse({
+      name: "provider",
+      api_key_env: "PROVIDER_API_KEY",
+      ...overrides,
+    });
+  }
+
+  it("uses openai_chat for default and explicit openai provider types", () => {
+    expect(provider().targetProviderProtocol).toBe("openai_chat");
+    expect(provider({ type: "openai" }).targetProviderProtocol).toBe("openai_chat");
+  });
+
+  it.each([
+    ["openai-responses", "openai_responses"],
+    ["anthropic", "anthropic_messages"],
+    ["gemini", "gemini"],
+  ] as const)("infers targetProviderProtocol for type %s", (type, targetProviderProtocol) => {
+    expect(provider({ type }).targetProviderProtocol).toBe(targetProviderProtocol);
+  });
+
+  it("transforms explicit target_provider_protocol override to targetProviderProtocol", () => {
+    expect(
+      provider({ type: "openai", target_provider_protocol: "openai_responses" })
+        .targetProviderProtocol,
+    ).toBe("openai_responses");
+  });
+
+  it("intentionally defaults unknown provider type to openai_chat", () => {
+    expect(provider({ type: "unknown-provider" }).targetProviderProtocol).toBe("openai_chat");
+  });
+});
 
 describe("HelmConfigSchema", () => {
   it("accepts a full valid config", () => {

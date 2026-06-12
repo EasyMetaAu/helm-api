@@ -92,6 +92,17 @@ describe("canUseSameProtocolSerializationFastPath", () => {
     });
   });
 
+  it.each([
+    "anthropic_messages",
+    "gemini",
+    "openai_responses",
+  ] as const)("disables non-chat response protocol %s", (responseProtocol) => {
+    expect(canUseSameProtocolSerializationFastPath(input({ responseProtocol }))).toEqual({
+      ok: false,
+      reason: "response_protocol_not_openai_chat",
+    });
+  });
+
   it("disables provider compatibility rewrites such as developer-role or tool/schema remaps", () => {
     expect(
       canUseSameProtocolSerializationFastPath(

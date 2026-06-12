@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InternalRequestSchema } from "./schema.js";
+import { InternalRequestSchema, ProtocolSchema, TargetProviderProtocolSchema } from "./schema.js";
 
 // Minimal valid normalized request: every optional field is explicitly present
 // (nullable, not omitted) per the "fields always present" contract.
@@ -97,5 +97,17 @@ describe("InternalRequestSchema", () => {
     if (!res.success) {
       expect(res.error.issues[0]?.path).toEqual(["messages"]);
     }
+  });
+});
+
+describe("TargetProviderProtocolSchema", () => {
+  it("is a provider wire protocol enum independent from the inbound ProtocolSchema", () => {
+    expect(TargetProviderProtocolSchema).not.toBe(ProtocolSchema);
+    expect(TargetProviderProtocolSchema.options).toEqual([
+      "openai_chat",
+      "anthropic_messages",
+      "openai_responses",
+      "gemini",
+    ]);
   });
 });
