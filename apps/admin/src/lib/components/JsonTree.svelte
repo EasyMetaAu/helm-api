@@ -1,6 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { t } from '$lib/i18n';
+  import { imageDataUrl } from './imageData';
+  import ImagePreview from './ImagePreview.svelte';
   import Self from './JsonTree.svelte';
   import { getJsonTreeCtl } from './jsonTreeContext';
   import TextPreview from './TextPreview.svelte';
@@ -59,10 +61,15 @@
   });
 
   const isLongString = $derived(kind === 'string' && (value as string).length > STRING_LIMIT);
+  // A base64 image field is an unreadable wall of characters — sniff it (by magic
+  // prefix, no sibling media_type needed) and offer a "View image" affordance that
+  // renders the decoded picture. Takes precedence over the text Preview/Expand,
+  // which are meaningless for image bytes.
+  const imageSrc = $derived(kind === 'string' ? imageDataUrl(value) : null);
   // A "Preview" opens the DECODED text (real line breaks) in a roomy modal. Offer it
   // whenever the inline escaped form is hard to read: multi-line OR long strings.
   const previewable = $derived(
-    kind === 'string' && ((value as string).includes('\n') || isLongString),
+    !imageSrc && kind === 'string' && ((value as string).includes('\n') || isLongString),
   );
   const scalarText = $derived.by(() => {
     if (kind === 'string') {
@@ -112,13 +119,16 @@
       class="json-scalar whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
       >{scalarText}</span
     >
-    {#if isLongString}
+    {#if isLongString && !imageSrc}
       <button
         type="button"
         class="ml-2 cursor-pointer text-link underline"
         onclick={() => (expandedStr = !expandedStr)}
         >{expandedStr ? $t('Collapse') : $t('Expand')}</button
       >
+    {/if}
+    {#if imageSrc}
+      <ImagePreview src={imageSrc} label={name} />
     {/if}
     {#if previewable}
       <TextPreview text={value as string} label={name} />
