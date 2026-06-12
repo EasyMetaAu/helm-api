@@ -13,6 +13,7 @@
 // ⚠️ ToS: subscription use via a third-party gateway may violate Anthropic's terms
 // (see README disclaimer). Identity recipe ported from openclaw (MIT).
 
+import { createHash } from "node:crypto";
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
@@ -46,7 +47,14 @@ const DEFAULT_MAX_TOKENS = 4096;
 const ANTHROPIC_VERSION = "2023-06-01";
 // Claude-Code identity (openclaw src/llm/providers/anthropic.ts). All load-bearing
 // for the OAuth subscription endpoint — without them it 401/403s.
-const CLAUDE_CODE_VERSION = "1.0.0";
+// Spoofed Claude-Code client identity. MUST stay a REAL, current released version:
+// a stale or fake version is itself an anti-ban fingerprint, and the billing header
+// + user-agent below are emitted in this version's exact shape. Verified field-for-
+// field against the Claude Code 2.1.175 binary (user-agent `claude-cli/<v> (external,
+// cli)`, billing block, and the beta set below all match). Bump together with the
+// betas when refreshing the spoof.
+const CLAUDE_CODE_VERSION = "2.1.175";
+const CLAUDE_CODE_ENTRYPOINT = "cli";
 const OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
 const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
 const COMPACT_BETA = "compact-2026-01-12";
@@ -137,20 +145,45 @@ function textBlocksFromContent(content: unknown, messageCacheControl?: unknown):
   return [];
 }
 
-// Extract the system prompt (string or array) and ALWAYS prepend the Claude-Code
-// spoof as system[0] (mandatory for the OAuth subscription endpoint). Both
-// `system` AND `developer` turns fold here, in original message order — Anthropic
-// has no `developer` role (it is OpenAI's renamed system tier), so dropping it to
-// a user turn would shift instruction precedence and leak hidden instructions.
-// Mirrors LiteLLM map_developer_role_to_system_role + the Gemini collectSystemText
-// policy (developer == system, order preserved).
+// Reproduce Claude Code's `x-anthropic-billing-header` attribution block as the FIRST
+// system entry — the exact slot (system[0], ahead of the "You are Claude Code…"
+// preamble) real CC emits it. Real CC derives BOTH the cc_version 3-hex suffix AND the
+// 5-hex cch from request CONTENT and recomputes them every request; because the block
+// lives inside the cached prefix, that per-turn churn is precisely what guts prompt
+// caching (cached_tokens=0, full prefix re-write each turn). We instead derive both
+// from the STABLE system text, so to Anthropic the block is an ordinary content hash
+// (indistinguishable from real CC's) yet stays byte-identical across the turns of a
+// conversation — it only changes when the system prompt changes, exactly when the
+// cache would invalidate anyway. The optional cc_workload / cc_is_subagent fields are
+// omitted, matching a normal interactive main-session request. Absence of this block
+// (the inbound strip path) is also legitimate — it's what `CLAUDE_CODE_ATTRIBUTION_
+// HEADER=0` produces — but on the subscription path we present the coherent positive.
+function billingHeaderBlock(systemText: string): AnthropicBlock {
+  const digest = createHash("sha256").update(systemText, "utf8").digest("hex");
+  const versionSuffix = digest.slice(0, 3);
+  const cch = digest.slice(3, 8);
+  return {
+    type: "text",
+    text: `x-anthropic-billing-header: cc_version=${CLAUDE_CODE_VERSION}.${versionSuffix}; cc_entrypoint=${CLAUDE_CODE_ENTRYPOINT}; cch=${cch};`,
+  };
+}
+
+// Build the Anthropic system param: the Claude-Code billing block at system[0], the
+// spoof preamble at system[1], then the folded client system. Both `system` AND
+// `developer` turns fold here, in original message order — Anthropic has no
+// `developer` role (it is OpenAI's renamed system tier), so dropping it to a user turn
+// would shift instruction precedence and leak hidden instructions. Mirrors LiteLLM
+// map_developer_role_to_system_role + the Gemini collectSystemText policy (developer
+// == system, order preserved).
 function buildSystem(messages: Array<Record<string, unknown>>): AnthropicBlock[] {
   const sys: AnthropicBlock[] = [{ type: "text", text: SYSTEM_SPOOF }];
   for (const m of messages) {
     if (m.role !== "system" && m.role !== "developer") continue;
     for (const b of textBlocksFromContent(m.content, m.cache_control)) sys.push(b);
   }
-  return sys;
+  // Derive the billing block from the (stable) text it precedes, then put it first.
+  const systemText = sys.map((b) => String(b.text ?? "")).join("\n");
+  return [billingHeaderBlock(systemText), ...sys];
 }
 
 function toAnthropicMessages(messages: Array<Record<string, unknown>>): AnthropicMessage[] {
@@ -405,7 +438,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-version": ANTHROPIC_VERSION,
       "anthropic-beta": betaHeaderForBody(body),
-      "user-agent": `claude-cli/${CLAUDE_CODE_VERSION}`,
+      "user-agent": `claude-cli/${CLAUDE_CODE_VERSION} (external, ${CLAUDE_CODE_ENTRYPOINT})`,
       "x-app": "cli",
     };
     if (cfg.getAuthHeader) h.Authorization = await cfg.getAuthHeader();

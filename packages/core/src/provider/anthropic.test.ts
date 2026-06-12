@@ -19,8 +19,11 @@ describe("openaiToAnthropicRequest", () => {
       temperature: 0.5,
     });
     const sys = body.system as Array<{ text: string }>;
-    expect(sys[0]?.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
-    expect(sys[1]?.text).toBe("Be terse.");
+    // system[0] is the Claude-Code billing attribution block; the spoof + folded
+    // client system follow it (real-CC layout).
+    expect(sys[0]?.text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.175\./);
+    expect(sys[1]?.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
+    expect(sys[2]?.text).toBe("Be terse.");
     expect(body.max_tokens).toBe(4096); // defaulted
     expect(body.temperature).toBe(0.5);
     const msgs = body.messages as Array<{
@@ -194,7 +197,8 @@ describe("openaiToAnthropicRequest", () => {
 
     expect(body.cache_control).toBeUndefined();
     const system = body.system as Array<Record<string, unknown>>;
-    expect(system[1]?.cache_control).toEqual({ type: "ephemeral" });
+    // [0]=billing, [1]=spoof, [2]=client system block (carries the cache_control).
+    expect(system[2]?.cache_control).toEqual({ type: "ephemeral" });
     const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
     expect(messages[0]?.content[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     const tools = body.tools as Array<Record<string, unknown>>;
@@ -217,7 +221,8 @@ describe("openaiToAnthropicRequest", () => {
       ],
     });
     const sys = body.system as Array<{ text: string }>;
-    expect(sys.map((b) => b.text)).toEqual([
+    expect(sys[0]?.text).toMatch(/^x-anthropic-billing-header:/);
+    expect(sys.slice(1).map((b) => b.text)).toEqual([
       "You are Claude Code, Anthropic's official CLI for Claude.",
       "Be terse.",
       "Prefer metric units.",
@@ -227,6 +232,63 @@ describe("openaiToAnthropicRequest", () => {
     expect(msgs).toHaveLength(1);
     expect(msgs[0]?.role).toBe("user");
     expect(JSON.stringify(body.messages)).not.toContain("Prefer metric units.");
+  });
+});
+
+// The OAuth subscription endpoint expects real Claude-Code traffic. Real CC injects
+// an x-anthropic-billing-header block as system[0] whose cc_version suffix + cch are
+// content-derived and recomputed every request — that per-turn churn is what guts
+// prompt caching. helm reproduces the block (real 2.1.175 version, system[0] slot)
+// but derives the hash from the STABLE system text, so it reads as a normal content
+// hash to Anthropic yet stays byte-identical across a conversation's turns. (Pairs
+// with the inbound strip of the CLIENT's own rotating header in protocol/anthropic.)
+describe("openaiToAnthropicRequest — Claude-Code billing header (anti-ban + cacheable)", () => {
+  const billingOf = (b: Record<string, unknown>): string =>
+    (b.system as Array<{ text: string }>)[0]?.text ?? "";
+
+  it("emits the billing block as system[0] with the real version, cli entrypoint, and a 5-hex cch", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        { role: "system", content: "house rules" },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(billingOf(body)).toMatch(
+      /^x-anthropic-billing-header: cc_version=2\.1\.175\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5};$/,
+    );
+    // No cache_control on the billing block (matches real CC — the breakpoints ride
+    // the prompt blocks that follow, not the attribution line).
+    expect((body.system as Array<Record<string, unknown>>)[0]?.cache_control).toBeUndefined();
+  });
+
+  it("stays byte-identical across turns of the same conversation (cache prefix holds)", () => {
+    const turn = (last: string) =>
+      billingOf(
+        openaiToAnthropicRequest({
+          model: "m",
+          messages: [
+            { role: "system", content: "stable system prompt" },
+            { role: "user", content: last },
+          ],
+        }),
+      );
+    // Same system, different latest user message → identical billing header.
+    expect(turn("first question")).toBe(turn("a much longer follow-up question"));
+  });
+
+  it("changes when the system text changes (genuine content derivation)", () => {
+    const withSystem = (s: string) =>
+      billingOf(
+        openaiToAnthropicRequest({
+          model: "m",
+          messages: [
+            { role: "system", content: s },
+            { role: "user", content: "x" },
+          ],
+        }),
+      );
+    expect(withSystem("alpha")).not.toBe(withSystem("beta"));
   });
 });
 
@@ -453,7 +515,9 @@ describe("createAnthropicClient", () => {
       expect(h.get("user-agent")).toContain("claude-cli/");
       expect(h.get("x-app")).toBe("cli");
       const sys = (JSON.parse(String(init?.body)) as { system: Array<{ text: string }> }).system;
-      expect(sys[0]?.text).toContain("You are Claude Code");
+      expect(sys[0]?.text).toMatch(/^x-anthropic-billing-header:/);
+      expect(sys[1]?.text).toContain("You are Claude Code");
+      expect(h.get("user-agent")).toBe("claude-cli/2.1.175 (external, cli)");
       if (calls === 1) return jsonResponse({ error: "expired" }, 401);
       return jsonResponse({
         id: "msg",

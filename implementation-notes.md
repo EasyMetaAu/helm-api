@@ -7,12 +7,15 @@
 
 ---
 
-## 2026-06-12 · 剥离 Claude Code 计费归因块，修复上游缓存全 miss（docs/05；LiteLLM parity；原则 4/7）
+## 2026-06-12 · Claude Code 计费归因块：入站剥离客户端轮换头 + 订阅路重注入「真实版本、可缓存」头（docs/05；anti-ban；原则 4/7）
 
-- **缘起**：用户报告 admin 请求详情里捕获的 payload「数据全是重复的」，怀疑 helm 拼接有 bug。调查结论：**helm 无 bug**（`messages.ts` 在 parse 前 `c.req.text()` 原样捕获），畸形是 Claude Code ≥2.1.29 的客户端行为——它把 `x-anthropic-billing-header: cc_version=…; cc_entrypoint=cli; cch=<hash>;` 注入为 top-level `system[0]`，且 `cch` 哈希**每请求轮换**（实测同会话 `fd3e2`→`8f46b`）。prompt cache 是严格前缀匹配 → 首块一变全部失效：生产实测该会话**每轮 `cached_tokens=0` + ~42.8K cache 重写 + 150–200K Opus 输入全额未缓存计费**（≈10× 成本）。上游已知：anthropics/claude-code#24168（Bedrock 400 reserved keyword）、#40652（cch 替换改写历史 tool_result，closed not-planned）、motiful/cc-cache-audit（A/B 实测省 ~85% 系统提示词 token）。
-- **修复**：`protocol/anthropic/request.ts` 的 `transformRequestOut`（native→IR）新增 `stripBillingHeader`——**无条件**丢弃以 `x-anthropic-billing-header:` 开头的 system 块（string 形式整体即 header → 不发 system；数组过滤后为空 → 不发；prefix 锚定 `startsWith`，正文里仅提及不受影响；user/assistant 内容不动）。LiteLLM 是 per-provider 开关（base `should_strip_billing_metadata()=False`，Bedrock/Vertex/Azure/DeepSeek/MiniMax 覆写 True）；helm 不需要开关——上游永远见 helm 自己的凭证，归因块零价值（Occam，不留撒谎的旋钮）。**capture 在 parse 之前 → admin payload 仍显示客户端原文，只有上游 body 被清理**（可观测性保留）。
-- **顺带发现（用户应知）**：Claude Code（≥2.1.17x，API-key 模式实测）发送**按角色折叠**的 5 消息会话：[首条 user，system(MCP)，assistant(全部轮次合并)，user(全部 tool_result 合并)，system(周期性 task 提醒串接成单条——admin 里看到的「重复」即此)]，图片被剥成文本占位。这是客户端线格式，网关不重写。折叠使 tool_result 桶每轮整体位移 → 剥离 header 后**只有 tools+system 前缀（~42.8K/轮）恢复缓存命中**，会话主体仍受客户端格式限制。客户端侧可另设 `CLAUDE_CODE_ATTRIBUTION_HEADER=0`（用户选择不改客户端，故网关兜底）。
-- **验证**：TDD 红（3 失败钉死 strip 语义）→绿；anthropic protocol 117 绿、gateway messages 路由 64 绿、`pnpm typecheck`/`lint` 绿。
+- **缘起**：用户报告 admin 捕获 payload「数据全是重复的」，怀疑 helm 拼接 bug。结论：**helm 无 bug**（`messages.ts` parse 前 `c.req.text()` 原样捕获）。畸形是 Claude Code ≥2.1.29 客户端行为——把 `x-anthropic-billing-header: cc_version=<v>.<3hex>; cc_entrypoint=cli; cch=<5hex>;` 注入为 top-level `system[0]`，且 **3hex 后缀和 cch 都按请求内容哈希、逐请求轮换**（从真实 2.1.175 二进制 `z76()` 确认：`cch=00000` 是 JS 里的 sentinel，native 层 egress 前替换成真实 5hex，所以 helm 收到的 body 已是 `fd3e2`/`8f46b` 真值）。prompt cache 严格前缀匹配 → 首块每轮变 → 生产实测**每轮 `cached_tokens=0` + ~42.8K 缓存重写 + 150–200K Opus 输入全额未缓存**（≈10×）。上游已知：anthropics/claude-code#24168、#40652、motiful/cc-cache-audit。
+- **两层修复（用户拍板 Plan B）**：
+  1. **入站剥离**（`protocol/anthropic/request.ts` `transformRequestOut`）：`stripBillingHeader` 无条件丢弃以 `x-anthropic-billing-header:` 开头的 top-level system 块（string 整块即头→不发 system；数组过滤空→不发；prefix 锚定 `startsWith`，正文提及不误伤）。去掉客户端那个**轮换且与 helm 伪装版本不符**的头（否则会折进订阅 system 砸缓存 + 暴露矛盾）。OpenAI 中继路也因此免受污染。
+  2. **订阅路重注入**（`provider/anthropic.ts`）：`buildSystem` 现在把 `billingHeaderBlock(systemText)` 放 `system[0]`（spoof 退到 `system[1]`，复刻真 CC 布局）。后缀+cch 由 **SHA-256(稳定 system 文本) 切片**派生（`slice(0,3)` / `slice(3,8)`）——对 Anthropic 是普通内容哈希、不可分辨，但**只在 system 提示变化时才变**（那时缓存本就失效），跨同会话多轮字节恒定 → **缓存命中**。`CLAUDE_CODE_VERSION` 从假的 `1.0.0` 升到**真实 `2.1.175`**，user-agent 改 `claude-cli/2.1.175 (external, cli)`（与二进制逐字对齐）。betas（`claude-code-20250219,oauth-2025-04-20` + context-mgmt/compact/fast）经核对本就与 2.1.175 一致；`anthropic-version: 2023-06-01` 一致。
+- **关键取舍（已与用户敲定）**：真 CC 的头逐请求轮换（后缀+cch 都是内容哈希），所以「字节级仿真」与「命中缓存」**本质冲突**。三选项里用户选**按缓存前缀算哈希**：authentic-looking + 真实版本 + 可缓存；唯一弱差异是同会话内 cch 不像真 CC 每轮变（但 cch 是归因 telemetry，Anthropic 几乎不可能据此封号）。另两个未选：①逐请求轮换=字节级最逼真但放弃缓存（同默认 CC 用户）；②每账号固定=缓存最好但偏离最大。**「无头」本身也合法**（=`CLAUDE_CODE_ATTRIBUTION_HEADER=0`），但订阅路选呈现正向一致身份。
+- **维护坑**：`CLAUDE_CODE_VERSION` 是会过期的反封号常量——**必须随真实 CC 版本同步 bump**（连同 betas）；陈旧版本号本身就是指纹。`metadataUserId`（per-account 稳定 device id）仍是账号级身份来源，billing 头是内容派生（与真 CC 一致，非 per-account）。
+- **验证**：TDD 红→绿。strip 5 例 + billing 重注入 3 例（system[0] 形状 / 跨轮恒定 / system 变则变）+ 改 4 处既有 system-index 断言（spoof 右移一位）。provider+protocol+gateway messages 361 绿、`pnpm typecheck`/`lint` 绿。
 
 ## 2026-06-12 · 首页 Token 计量 dashboard（持久化 + 聚合端点 + LayerChart 图表；CLAUDE.md 原则 1/3/7；docs/02/07）
 
