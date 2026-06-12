@@ -193,7 +193,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   // can never drift in what they reveal. null in ⇒ null out (direct connection).
   function redactProxy(
     proxy:
-      | { type: "http" | "https" | "socks5"; host: string; port: number; username?: string; password?: string }
+      | {
+          type: "http" | "https" | "socks5";
+          host: string;
+          port: number;
+          username?: string;
+          password?: string;
+        }
       | undefined,
   ): AccountProxyView | null {
     if (!proxy) return null;
