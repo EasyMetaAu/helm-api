@@ -218,7 +218,7 @@ export const RoutingSignalFeedbackConfigSchema = z
   .strict();
 
 export const RuntimeConfigSchema = z.object({
-  max_request_bytes: z.number().int().positive().default(2_000_000),
+  max_request_bytes: z.number().int().positive().default(20_000_000),
   request_timeout_ms: z.number().int().positive().default(60_000),
   rate_limit: RateLimitConfigSchema,
   // Store driver selection. Defaulted so an absent runtime.store stays on sqlite
