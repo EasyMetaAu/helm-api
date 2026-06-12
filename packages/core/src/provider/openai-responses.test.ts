@@ -153,6 +153,19 @@ describe("openaiToResponsesRequest", () => {
     });
   });
 
+  it("normalizes Chat tool_choice to the Responses top-level-name shape", () => {
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "weather?" }],
+      tools: [
+        { type: "function", function: { name: "get_weather", parameters: { type: "object" } } },
+      ],
+      tool_choice: { type: "function", function: { name: "get_weather" } },
+    });
+
+    expect(body.tool_choice).toEqual({ type: "function", name: "get_weather" });
+  });
+
   it("defaults instructions when no system message is present", () => {
     const body = openaiToResponsesRequest({
       model: "m",

@@ -776,6 +776,22 @@ describe("generationConfig param round-trip (litellm parity)", () => {
     expect(nativeOut.cachedContent).toBe("cachedContents/context-123");
   });
 
+  it("round-trips Gemini safetySettings through provider_raw", () => {
+    const safetySettings = [
+      { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" },
+    ];
+    const nativeIn: GeminiGenerateContentRequest = {
+      safetySettings,
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+    };
+
+    const ir = geminiTransformer.transformRequestOut(nativeIn) as IRRequest;
+    expect(ir.provider_raw?.safety_settings).toEqual(safetySettings);
+
+    const nativeOut = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    expect(nativeOut.safetySettings).toEqual(safetySettings);
+  });
+
   it("maps reasoning_effort -> thinkingConfig (low/medium/high), minimal allowed", () => {
     const mk = (effort: "minimal" | "low" | "medium" | "high"): GeminiGenerateContentRequest =>
       geminiTransformer.transformRequestIn({

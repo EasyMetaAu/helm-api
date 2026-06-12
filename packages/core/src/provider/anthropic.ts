@@ -48,6 +48,9 @@ const ANTHROPIC_VERSION = "2023-06-01";
 // for the OAuth subscription endpoint — without them it 401/403s.
 const CLAUDE_CODE_VERSION = "1.0.0";
 const OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
+const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
+const COMPACT_BETA = "compact-2026-01-12";
+const FAST_MODE_BETA = "fast-mode-2026-02-01";
 const SYSTEM_SPOOF = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // ── request translation: OpenAI-Chat IR -> Anthropic Messages ────────────────
@@ -72,6 +75,34 @@ function hasExplicitCacheControl(value: unknown): boolean {
   const obj = value as Record<string, unknown>;
   if (Object.hasOwn(obj, "cache_control")) return true;
   return Object.values(obj).some(hasExplicitCacheControl);
+}
+
+function normalizeAnthropicContextManagement(value: unknown): unknown {
+  return Array.isArray(value) ? { edits: value } : value;
+}
+
+function contextManagementEdits(value: unknown): unknown[] {
+  const normalized = normalizeAnthropicContextManagement(value);
+  if (normalized && typeof normalized === "object" && !Array.isArray(normalized)) {
+    const edits = (normalized as Record<string, unknown>).edits;
+    return Array.isArray(edits) ? edits : [];
+  }
+  return [];
+}
+
+function betaHeaderForBody(body: Record<string, unknown>): string {
+  const betas = new Set(OAUTH_BETA.split(","));
+  if (body.context_management !== undefined) {
+    betas.add(CONTEXT_MANAGEMENT_BETA);
+    for (const edit of contextManagementEdits(body.context_management)) {
+      if (edit && typeof edit === "object") {
+        const type = (edit as Record<string, unknown>).type;
+        if (type === "compact_20260112" || type === "compaction") betas.add(COMPACT_BETA);
+      }
+    }
+  }
+  if (body.speed === "fast") betas.add(FAST_MODE_BETA);
+  return [...betas].join(",");
 }
 
 function textBlocksFromContent(content: unknown, messageCacheControl?: unknown): AnthropicBlock[] {
@@ -207,6 +238,13 @@ export function openaiToAnthropicRequest(
   if (typeof r.top_p === "number") body.top_p = r.top_p;
   if (typeof r.top_k === "number") body.top_k = r.top_k;
   if (r.thinking && typeof r.thinking === "object") body.thinking = r.thinking;
+  if (r.context_management !== undefined) {
+    body.context_management = normalizeAnthropicContextManagement(r.context_management);
+  }
+  if (r.mcp_servers !== undefined) body.mcp_servers = r.mcp_servers;
+  if (r.container !== undefined) body.container = r.container;
+  if (r.speed !== undefined) body.speed = r.speed;
+  if (r.output_config !== undefined) body.output_config = r.output_config;
   if (r.stream === true) body.stream = true;
   if (typeof r.stop === "string") body.stop_sequences = [r.stop];
   else if (Array.isArray(r.stop)) body.stop_sequences = r.stop;
@@ -358,7 +396,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     throw new Error("anthropic client requires exactly one of `apiKey` or `getAuthHeader`");
   }
 
-  async function headers(): Promise<Record<string, string>> {
+  async function headers(body: Record<string, unknown>): Promise<Record<string, string>> {
     const h: Record<string, string> = {
       "Content-Type": "application/json",
       // Header parity with openclaw's OAuth recipe — both are load-bearing for the
@@ -366,7 +404,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       accept: "application/json",
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-version": ANTHROPIC_VERSION,
-      "anthropic-beta": OAUTH_BETA,
+      "anthropic-beta": betaHeaderForBody(body),
       "user-agent": `claude-cli/${CLAUDE_CODE_VERSION}`,
       "x-app": "cli",
     };
@@ -402,7 +440,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     try {
       return await doFetch(url, {
         method: "POST",
-        headers: await headers(),
+        headers: await headers(body),
         body: JSON.stringify(body),
         signal: t.signal,
       });

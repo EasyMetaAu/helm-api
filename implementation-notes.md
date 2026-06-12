@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-12 · 四协议互译保真补丁（Responses tool_choice / Anthropic native controls / Gemini safety；CLAUDE.md 原则 1/7/8；docs/05/07）
+
+- **缘起**：继续对照本地 LiteLLM review 四协议互译缺口。剩余问题集中在“字段形状接近但不完全相同”的边缘：Responses `tool_choice` 在 Responses 与 Chat 之间形状不同；Responses `previous_response_id` 的 tool-output continuation 需要服务端历史；Anthropic native/control 参数进 IR 后丢失；Gemini `safetySettings` 没有 round-trip；Anthropic provider 使用 `context_management` / `speed:"fast"` 时缺 feature beta header。
+- **修复**：Responses transformer 把 inbound `{type:"function",name}` 规范成 OpenAI Chat `{type:"function",function:{name}}`，outbound 反向还原；Codex Responses provider 同步把 Chat `tool_choice` 发成 Responses 顶层 `name` 形状。Anthropic transformer 将 `context_management`、`mcp_servers`、`container`、`speed`、`output_config` 保存在 `provider_raw` 并在 Anthropic native out 重新发出，`context_management` 数组按 LiteLLM 兼容形状包成 `{edits:[...]}`。Anthropic provider 透传这些 native controls，并按 body 动态补 `context-management-2025-06-27`、`compact-2026-01-12`、`fast-mode-2026-02-01` beta。Gemini transformer 将 `safetySettings` 存入 `provider_raw.safety_settings` 并在 Gemini native out 恢复。
+- **取舍/仍开放**：Helm 目前没有 Responses object/session/history store，所以带 `previous_response_id` 且只提交历史 tool-output continuation 的请求不能假装可处理；本轮选择 **fail-closed**，返回明确错误，避免把缺少本地 `function_call` 上下文的 `function_call_output` 转成无效 Chat tool message。单纯携带 `previous_response_id` 的普通字符串 input 仍保留在 `provider_raw` 用于后续 Responses-native round-trip；完整 continuation 支持需要 response store、input_items/history 查询和 tool-call correlation。
+- **验证**：TDD 红→绿。新增/更新 focused regression 覆盖 Responses `tool_choice` 双向规范化、`previous_response_id` continuation fail-closed、Codex provider `tool_choice`、Anthropic native passthrough + beta headers、Gemini `safetySettings` round-trip，以及 gateway 不把 `previous_response_id` / `truncation` 泄漏到 OpenAI-compatible upstream。验证命令：focused Vitest 244 绿；`pnpm typecheck` 绿；`pnpm lint` 绿；`pnpm test` 初跑因本地 `better-sqlite3` ABI 137 vs Node 25 ABI 141 失败，执行 `pnpm --filter @helm/core rebuild better-sqlite3` 后完整 `pnpm test` 240 files / 3036 tests 绿。
+
 ## 2026-06-12 · Codex/Responses 流式兼容修复（状态可见 + 生命周期路由形状；CLAUDE.md 原则 1/7/8；docs/05/07）
 
 - **缘起**：继续按官方 OpenAI OpenAPI / openai-node、LiteLLM Responses 实现和既有 wiki review 四协议兼容性。用户侧现象是 Codex 经常看不到状态、感觉 API 慢；代码侧问题集中在 native Codex Responses SSE 解析和 Helm `/v1/responses` route family 的协议形状。
@@ -22,18 +29,13 @@
 - **取舍/仍开放**：LiteLLM 的 Responses GET/DELETE/cancel/input_items/compact/background polling/Cursor bridge 需要 response-object store 或 provider-native executor 合同，不能用假 stub 冒充已实现；本轮只补 create aliases。Gemini `countTokens` 仍是显式未实现的 SDK 兼容缺口。LiteLLM 会 fetch 远程媒体并转 base64；Helm core transformer 仍不做网络 fetch，远程 http(s) 图像到 Gemini nativeOut 继续文档化降级为文本占位，避免在协议层引入隐式网络 I/O。
 - **验证**：新增/更新 route + protocol regression：Gemini `/models`、path-style model、`streamGenerateContent` 无 `alt=sse`、流式 cached usage；Chat 三类别名 + 路径 model 覆盖；Responses create aliases；Anthropic event logging/count_tokens。TDD 红例覆盖 Gemini gateway 流式 double-count（先见 `expected 140 to be 100`，再最小修复）。已跑 `pnpm typecheck`、`pnpm lint`、`pnpm -r build`、`pnpm test`（3020 绿）、`pnpm --filter @helm/gateway test:e2e`（64 绿）、`git diff --check`。
 
-## 2026-06-12 · Anthropic streaming 保留 MCP 双下划线工具名（CLAUDE.md 原则 8；docs/05）
-
-- **缘起**：线上 Claude Code 经 Helm 调用 `codegraph` MCP 时，工具 schema 是正确的 `mcp__codegraph__codegraph_context`，但返回给客户端的流式 `tool_use.name` 变成 `mcp_codegraph_codegraph_context`。Claude Code 无法执行该单下划线工具名，连续把 `No such tool available` 带回下一轮，模型反复输出 “Worktree created / worktree is ready” 并再次调用错误工具。
-- **根因**：Anthropic 出站 stream 转换复用 `createAnthropicToolNameMap()`，其 sanitizer 把非法字符替换为 `_` 后又折叠连续 `_`。连续下划线在 Anthropic tool name 规则里本来合法，且 MCP 工具名把双下划线作为命名空间分隔符；折叠它会破坏工具名语义。
-- **修复**：`sanitizeAnthropicToolName` 不再折叠 `_+`，仍保留非法字符替换、首尾 `_` 裁剪、空名兜底和冲突 hash 后缀。这样 `search-web`/`search web` 仍按既有行为产生冲突后缀，而 `mcp__server__tool` 这类合法名称原样通过。
-- **验证**：TDD 红→绿。新增 streaming 回归测试钉死 `mcp__codegraph__codegraph_context` 在 `content_block_start(tool_use)` 中原样返回；扩展 response-level sanitizer 测试确认 MCP 双下划线名可正向/反向 round-trip。定向 `pnpm vitest run packages/core/src/protocol/anthropic/stream.test.ts packages/core/src/protocol/anthropic/response.test.ts packages/core/src/protocol/anthropic/request.test.ts` 通过。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-12 · Anthropic streaming 保留 MCP 双下划线工具名：修复出站 stream sanitizer 折叠连续 `_` 导致 `mcp__server__tool` 变 `mcp_server_tool`、Claude Code 无法执行 MCP 工具；保留合法双下划线，非法字符替换/首尾裁剪/冲突 hash 仍保留；定向 Anthropic stream/response/request 测试绿。
 
 ### 2026-06-11 · 「重试」按钮支持全部四协议：admin retry 从 OpenAI-chat-only 改为 faithful 原生回放；DecisionRecord 增可选 `protocol` 零迁移盖戳，旧记录按 body 形状推断；Anthropic/Responses/Gemini 复用 live transformers + shared pipeline 捕获原生响应，客户端 `canRetry` 放宽为对象 body 即可；限制是非 chat 流式回放不回填 `completion_usd`，需发新 admin 镜像。
 

@@ -184,6 +184,18 @@ function toResponsesInput(messages: Array<Record<string, unknown>>): ResponsesIt
   return out;
 }
 
+function chatToolChoiceToResponses(toolChoice: unknown): unknown {
+  if (typeof toolChoice !== "object" || toolChoice === null || Array.isArray(toolChoice)) {
+    return toolChoice;
+  }
+  const choice = toolChoice as { type?: unknown; name?: unknown; function?: unknown };
+  if (choice.type !== "function") return toolChoice;
+  if (typeof choice.name === "string") return toolChoice;
+  if (typeof choice.function !== "object" || choice.function === null) return toolChoice;
+  const fn = choice.function as { name?: unknown };
+  return typeof fn.name === "string" ? { type: "function", name: fn.name } : toolChoice;
+}
+
 export function openaiToResponsesRequest(
   req: ChatCompletionRequest,
   opts?: { sessionId?: string },
@@ -221,6 +233,7 @@ export function openaiToResponsesRequest(
   // dropped here. The IR has already normalized any unknown tier to a known one.
   if (typeof r.reasoning_effort === "string" && r.reasoning_effort.length > 0)
     body.reasoning = { effort: r.reasoning_effort };
+  if (r.tool_choice !== undefined) body.tool_choice = chatToolChoiceToResponses(r.tool_choice);
   if (Array.isArray(r.tools)) {
     const tools = (r.tools as Array<Record<string, unknown>>).flatMap((t) => {
       const fn = (t.function ?? {}) as Record<string, unknown>;

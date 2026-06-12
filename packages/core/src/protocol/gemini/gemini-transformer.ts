@@ -483,6 +483,9 @@ function transformRequestOut(native: unknown): IRRequest {
     ...(geminiToolConfigToToolChoice(req.toolConfig) !== undefined
       ? { tool_choice: geminiToolConfigToToolChoice(req.toolConfig) }
       : {}),
+    ...(req.safetySettings !== undefined
+      ? { provider_raw: { safety_settings: req.safetySettings } }
+      : {}),
   };
 
   return IRRequestSchema.parse(ir);
@@ -775,6 +778,9 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
     responseFormatToGenerationConfig(parsed.response_format),
   );
   const toolConfig = irToolChoiceToGeminiToolConfig(parsed.tool_choice);
+  const safetySettings = Array.isArray(parsed.provider_raw?.safety_settings)
+    ? parsed.provider_raw.safety_settings
+    : undefined;
 
   return {
     contents,
@@ -783,6 +789,7 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
     ...(toolConfig !== undefined ? { toolConfig } : {}),
     ...(generationConfig !== undefined ? { generationConfig } : {}),
     ...(parsed.cached_content !== undefined ? { cachedContent: parsed.cached_content } : {}),
+    ...(safetySettings !== undefined ? { safetySettings } : {}),
   };
 }
 

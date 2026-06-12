@@ -861,6 +861,36 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(native.web_search_options).toEqual({ search_context_size: "low" });
     expect(native.context_management).toEqual({ truncation: "auto" });
   });
+
+  it("normalizes Responses tool_choice into OpenAI Chat format on inbound conversion", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "weather?",
+      tool_choice: { type: "function", name: "get_weather" },
+    });
+
+    expect(ir.tool_choice).toEqual({ type: "function", function: { name: "get_weather" } });
+  });
+
+  it("normalizes OpenAI Chat tool_choice into Responses format on outbound conversion", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "weather?" }],
+      tool_choice: { type: "function", function: { name: "get_weather" } },
+    })) as { tool_choice?: unknown };
+
+    expect(native.tool_choice).toEqual({ type: "function", name: "get_weather" });
+  });
+
+  it("rejects stateful tool-output continuation when previous_response_id history is unavailable", async () => {
+    expect(() =>
+      responsesTransformer.transformRequestOut({
+        model: "gpt-4o",
+        previous_response_id: "resp_prev",
+        input: [{ type: "function_call_output", call_id: "call_1", output: "done" }],
+      }),
+    ).toThrow(/previous_response_id continuation is not supported/);
+  });
 });
 
 describe("responsesTransformer — usage detail mapping (transformResponseIn)", () => {

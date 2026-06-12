@@ -422,14 +422,28 @@ describe("anthropic transformRequestOut", () => {
     expect(ir.service_tier).toBe("standard_only");
   });
 
-  it("preserves metadata in provider_raw (only documented Anthropic field)", () => {
+  it("preserves Anthropic-native passthrough params in provider_raw", () => {
     const ir = transformRequestOut({
       model: "claude-3-5-sonnet",
       max_tokens: 64,
       metadata: { user_id: "u-123" },
+      context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+      mcp_servers: [{ type: "url", url: "https://mcp.example/sse", name: "docs" }],
+      container: { id: "container_1" },
+      speed: "fast",
+      output_config: { effort: "medium" },
       messages: [{ role: "user", content: "hi" }],
     });
     expect(ir.provider_raw?.metadata).toEqual({ user_id: "u-123" });
+    expect(ir.provider_raw?.context_management).toEqual({
+      edits: [{ type: "clear_tool_uses_20250919" }],
+    });
+    expect(ir.provider_raw?.mcp_servers).toEqual([
+      { type: "url", url: "https://mcp.example/sse", name: "docs" },
+    ]);
+    expect(ir.provider_raw?.container).toEqual({ id: "container_1" });
+    expect(ir.provider_raw?.speed).toBe("fast");
+    expect(ir.provider_raw?.output_config).toEqual({ effort: "medium" });
   });
 
   it("preserves top-level cache_control for automatic prompt caching", () => {
@@ -651,9 +665,25 @@ describe("anthropic transformRequestIn — P4 params", () => {
     const out = transformRequestIn({
       model: "claude-3-5-sonnet",
       messages: [{ role: "user", content: "hi" }],
-      provider_raw: { metadata: { user_id: "u-123" } },
+      provider_raw: {
+        metadata: { user_id: "u-123" },
+        context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+        mcp_servers: [{ type: "url", url: "https://mcp.example/sse", name: "docs" }],
+        container: { id: "container_1" },
+        speed: "fast",
+        output_config: { effort: "medium" },
+      },
     });
     expect((out as { metadata?: unknown }).metadata).toEqual({ user_id: "u-123" });
+    expect((out as { context_management?: unknown }).context_management).toEqual({
+      edits: [{ type: "clear_tool_uses_20250919" }],
+    });
+    expect((out as { mcp_servers?: unknown }).mcp_servers).toEqual([
+      { type: "url", url: "https://mcp.example/sse", name: "docs" },
+    ]);
+    expect((out as { container?: unknown }).container).toEqual({ id: "container_1" });
+    expect((out as { speed?: unknown }).speed).toBe("fast");
+    expect((out as { output_config?: unknown }).output_config).toEqual({ effort: "medium" });
   });
 
   it("passes IR.service_tier through to the outbound request", () => {

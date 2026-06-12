@@ -132,6 +132,28 @@ describe("openaiToAnthropicRequest", () => {
     });
   });
 
+  it("forwards Anthropic-native context, speed, output_config, mcp, and container controls", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+      speed: "fast",
+      output_config: { effort: "medium" },
+      mcp_servers: [{ type: "url", url: "https://mcp.example/sse", name: "docs" }],
+      container: { id: "container_1" },
+    });
+
+    expect(body.context_management).toEqual({
+      edits: [{ type: "clear_tool_uses_20250919" }],
+    });
+    expect(body.speed).toBe("fast");
+    expect(body.output_config).toEqual({ effort: "medium" });
+    expect(body.mcp_servers).toEqual([
+      { type: "url", url: "https://mcp.example/sse", name: "docs" },
+    ]);
+    expect(body.container).toEqual({ id: "container_1" });
+  });
+
   it("preserves top-level automatic cache_control when no explicit cache breakpoints exist", () => {
     const body = openaiToAnthropicRequest({
       model: "m",
@@ -495,6 +517,34 @@ describe("createAnthropicClient", () => {
     expect(seenMeta).toHaveLength(2);
     expect(seenMeta[0]).toEqual({ user_id: uid });
     expect(seenMeta[1]).toEqual(seenMeta[0]); // identical across requests → no rotation
+  });
+
+  it("adds feature beta headers for Anthropic context_management and fast mode", async () => {
+    let seen: Headers | null = null;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen = new Headers(init?.headers);
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.chatCompletion({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+      speed: "fast",
+    });
+
+    const beta = (seen as unknown as Headers).get("anthropic-beta") ?? "";
+    expect(beta).toContain("context-management-2025-06-27");
+    expect(beta).toContain("fast-mode-2026-02-01");
   });
 
   it("throws UpstreamError on a persistent non-401 error", async () => {
