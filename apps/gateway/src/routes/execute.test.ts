@@ -201,6 +201,37 @@ describe("createExecute — gateway execution adapter", () => {
     });
   });
 
+  it("does not forward Responses-only previous_response_id/truncation to OpenAI-compatible upstreams", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    await execute(
+      plan(["default_good_model"]),
+      req({
+        provider_raw: { previous_response_id: "resp_prev", truncation: "auto", store: false },
+      }),
+    );
+
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.previous_response_id).toBeUndefined();
+    expect(body.truncation).toBeUndefined();
+    expect(body.store).toBe(false);
+  });
+
   it("merges streamed client stream_options while forcing include_usage for cost capture", async () => {
     const provider = {
       chatCompletion: vi.fn(),

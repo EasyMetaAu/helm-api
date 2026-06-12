@@ -171,6 +171,11 @@ const AnthropicMessagesRequestSchema = z
     service_tier: z.string().optional(),
     cache_control: z.unknown().optional(),
     metadata: z.unknown().optional(),
+    context_management: z.unknown().optional(),
+    mcp_servers: z.unknown().optional(),
+    container: z.unknown().optional(),
+    speed: z.unknown().optional(),
+    output_config: z.unknown().optional(),
   })
   .passthrough();
 
@@ -454,9 +459,17 @@ export function transformRequestOut(req: unknown): IRRequest {
         }
       : undefined;
 
-  // metadata has no IR home (Anthropic-only user-attribution); preserve it verbatim
-  // in provider_raw so an anthropic->anthropic round-trip is lossless.
-  const providerRaw = parsed.metadata !== undefined ? { metadata: parsed.metadata } : undefined;
+  // Anthropic-native controls with no IR home are preserved in provider_raw so an
+  // anthropic->anthropic round-trip is lossless.
+  const providerRaw: Record<string, unknown> = {};
+  if (parsed.metadata !== undefined) providerRaw.metadata = parsed.metadata;
+  if (parsed.context_management !== undefined) {
+    providerRaw.context_management = normalizeAnthropicContextManagement(parsed.context_management);
+  }
+  if (parsed.mcp_servers !== undefined) providerRaw.mcp_servers = parsed.mcp_servers;
+  if (parsed.container !== undefined) providerRaw.container = parsed.container;
+  if (parsed.speed !== undefined) providerRaw.speed = parsed.speed;
+  if (parsed.output_config !== undefined) providerRaw.output_config = parsed.output_config;
 
   const ir: IRRequest = {
     model: parsed.model,
@@ -477,7 +490,7 @@ export function transformRequestOut(req: unknown): IRRequest {
     ...(parsed.thinking !== undefined ? { thinking: parsed.thinking } : {}),
     ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
     ...(parsed.cache_control !== undefined ? { cache_control: parsed.cache_control } : {}),
-    ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
+    ...(Object.keys(providerRaw).length > 0 ? { provider_raw: providerRaw } : {}),
   };
 
   // Per-message thinking BLOCKS (kept out of prompt content) live on provider_raw,
@@ -589,6 +602,11 @@ export interface AnthropicOutboundRequest {
   service_tier?: string;
   cache_control?: unknown;
   metadata?: unknown;
+  context_management?: unknown;
+  mcp_servers?: unknown;
+  container?: unknown;
+  speed?: unknown;
+  output_config?: unknown;
 }
 
 const DEFAULT_MAX_TOKENS = 4096;
@@ -637,6 +655,10 @@ function thinkingFromIR(ir: IRRequest): AnthropicThinkingConfigOut | undefined {
 function stopSequencesFromIR(stop: IRRequest["stop"]): string[] | undefined {
   if (stop === undefined) return undefined;
   return typeof stop === "string" ? [stop] : stop;
+}
+
+function normalizeAnthropicContextManagement(value: unknown): unknown {
+  return Array.isArray(value) ? { edits: value } : value;
 }
 
 function parseToolInput(raw: string): unknown {
@@ -911,6 +933,23 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
     // metadata (Anthropic user-attribution) was stashed in provider_raw inbound; re-emit it.
     ...(parsed.provider_raw?.metadata !== undefined
       ? { metadata: parsed.provider_raw.metadata }
+      : {}),
+    ...(parsed.provider_raw?.context_management !== undefined
+      ? {
+          context_management: normalizeAnthropicContextManagement(
+            parsed.provider_raw.context_management,
+          ),
+        }
+      : {}),
+    ...(parsed.provider_raw?.mcp_servers !== undefined
+      ? { mcp_servers: parsed.provider_raw.mcp_servers }
+      : {}),
+    ...(parsed.provider_raw?.container !== undefined
+      ? { container: parsed.provider_raw.container }
+      : {}),
+    ...(parsed.provider_raw?.speed !== undefined ? { speed: parsed.provider_raw.speed } : {}),
+    ...(parsed.provider_raw?.output_config !== undefined
+      ? { output_config: parsed.provider_raw.output_config }
       : {}),
   };
   return out;

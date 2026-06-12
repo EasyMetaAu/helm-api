@@ -264,6 +264,45 @@ function chatToolToResponsesTool(tool: unknown): unknown {
   return out;
 }
 
+function responsesToolChoiceToChat(toolChoice: unknown): unknown {
+  if (!isRecord(toolChoice) || toolChoice.type !== "function") return toolChoice;
+  if (typeof toolChoice.name !== "string" || isRecord(toolChoice.function)) return toolChoice;
+  return { type: "function", function: { name: toolChoice.name } };
+}
+
+function chatToolChoiceToResponses(toolChoice: unknown): unknown {
+  if (!isRecord(toolChoice) || toolChoice.type !== "function") return toolChoice;
+  if (typeof toolChoice.name === "string" && !isRecord(toolChoice.function)) return toolChoice;
+  if (!isRecord(toolChoice.function) || typeof toolChoice.function.name !== "string") {
+    return toolChoice;
+  }
+  return { type: "function", name: toolChoice.function.name };
+}
+
+function rejectUnsupportedPreviousResponseContinuation(
+  parsed: z.infer<typeof ResponsesRequestSchema>,
+): void {
+  if (parsed.previous_response_id === undefined || typeof parsed.input === "string") return;
+
+  const localFunctionCalls = new Set<string>();
+  for (const item of parsed.input) {
+    if (item.type === "function_call") {
+      const call = item as z.infer<typeof ResponsesFunctionCallItemSchema>;
+      const id = call.call_id ?? call.id;
+      if (id !== undefined) localFunctionCalls.add(id);
+      continue;
+    }
+    if (item.type !== "function_call_output") continue;
+
+    const output = item as z.infer<typeof ResponsesFunctionCallOutputItemSchema>;
+    if (output.call_id === undefined || !localFunctionCalls.has(output.call_id)) {
+      throw new Error(
+        "previous_response_id continuation is not supported without local function_call history",
+      );
+    }
+  }
+}
+
 function normalizeResponsesTools(tools: unknown[] | undefined): {
   tools?: unknown[];
   rawTools?: unknown[];
@@ -315,6 +354,7 @@ function foldMessageContent(
 function toIRRequest(req: NativeRequest): IRRequest {
   // fail-closed: a structurally invalid request never enters the pipeline.
   const parsed = ResponsesRequestSchema.parse(req);
+  rejectUnsupportedPreviousResponseContinuation(parsed);
   const normalizedTools = normalizeResponsesTools(parsed.tools);
 
   const messages: IRMessage[] = [];
@@ -421,7 +461,9 @@ function toIRRequest(req: NativeRequest): IRRequest {
     model: parsed.model,
     messages,
     ...(normalizedTools.tools !== undefined ? { tools: normalizedTools.tools } : {}),
-    ...(parsed.tool_choice !== undefined ? { tool_choice: parsed.tool_choice } : {}),
+    ...(parsed.tool_choice !== undefined
+      ? { tool_choice: responsesToolChoiceToChat(parsed.tool_choice) }
+      : {}),
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
     ...(parsed.max_output_tokens !== undefined ? { max_tokens: parsed.max_output_tokens } : {}),
     ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
@@ -526,7 +568,9 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
       : parsed.tools !== undefined
         ? { tools: parsed.tools.map(chatToolToResponsesTool) }
         : {}),
-    ...(parsed.tool_choice !== undefined ? { tool_choice: parsed.tool_choice } : {}),
+    ...(parsed.tool_choice !== undefined
+      ? { tool_choice: chatToolChoiceToResponses(parsed.tool_choice) }
+      : {}),
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
     ...(parsed.max_tokens !== undefined ? { max_output_tokens: parsed.max_tokens } : {}),
     ...(parsed.stream !== undefined ? { stream: parsed.stream } : {}),
