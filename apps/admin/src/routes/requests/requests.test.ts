@@ -32,6 +32,7 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     status: 'ok',
     latency_ms: 460,
     cost_usd: 0.0123,
+    usage: { input: 1200, output: 340, cached: 800, cacheCreation: 64, nonCached: 400, total: 1540 },
     ...overrides,
   };
 }
@@ -90,6 +91,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       completion_usd: 0.01,
       total_usd: 0.0103,
     },
+    usage: { input: 1200, output: 340, cached: 800, cacheCreation: 64, nonCached: 400, total: 1540 },
     ...overrides,
   };
 }

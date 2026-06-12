@@ -5,6 +5,7 @@
   import type { RequestListItem } from '$lib/api/requests.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
   import RefreshControl from '$lib/components/RefreshControl.svelte';
+  import TokensCell from '$lib/components/TokensCell.svelte';
   import { formatTimestamp, formatUsd } from '$lib/format.js';
   import { paginationItems } from '$lib/pagination.js';
   import {
@@ -308,6 +309,11 @@
             <th class="px-3 py-2" title={$t('End-to-end response time in milliseconds.')}
               >{$t('Latency')}</th
             >
+            <th
+              class="px-3 py-2"
+              title={$t('Token usage: input / output, with cached input tokens.')}
+              >{$t('Tokens')}</th
+            >
             <th class="px-3 py-2" title={$t('Estimated cost of the request in US dollars.')}
               >{$t('Cost')}</th
             >
@@ -365,6 +371,7 @@
                 {/if}
               </td>
               <td class="px-3 py-2 font-mono text-ink-body">{r.latency_ms}ms</td>
+              <td class="px-3 py-2"><TokensCell usage={r.usage} /></td>
               <td class="px-3 py-2 font-mono text-ink-body">{formatUsd(r.cost_usd)}</td>
               <td class="px-3 py-2 {r.error_class ? 'text-red-600' : 'text-ink-muted'}"
                 >{r.error_class ?? '—'}</td

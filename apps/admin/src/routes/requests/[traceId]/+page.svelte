@@ -5,6 +5,7 @@
   import { t } from '$lib/i18n';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
+  import TokenUsage from '$lib/components/TokenUsage.svelte';
   import JsonViewer from '$lib/components/JsonViewer.svelte';
   import RetryDialog from '$lib/components/RetryDialog.svelte';
   import StreamViewer from '$lib/components/StreamViewer.svelte';
@@ -126,6 +127,15 @@
         {$t('What this single request cost, split across routing, optional eval, and completion.')}
       </p>
       <CostBreakdown cost={d.cost_breakdown} />
+    </section>
+
+    <!-- Token usage: input / output / cached / non-cached split for this request -->
+    <section class="card">
+      <h2 class="section-header">{$t('Token usage')}</h2>
+      <p class="field-help mb-2">
+        {$t('How many tokens this single request used — input, output, and how much was cached.')}
+      </p>
+      <TokenUsage usage={d.usage} />
     </section>
 
     <!-- Final response meta or structured error -->

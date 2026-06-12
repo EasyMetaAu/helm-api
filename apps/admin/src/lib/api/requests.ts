@@ -48,7 +48,27 @@ export interface RequestListItem {
   // rendered as '—'. A number is a real cost. Crucially distinct from 0 so an
   // unmeasured request never looks like a free one (#6).
   cost_usd: number | null;
+  // Served-completion token counts (see TokenUsageView). Every leaf is null on a
+  // legacy/un-stamped record → the cell renders '—'.
+  usage: TokenUsageView;
   error_class?: string;
+}
+
+// Per-request token accounting for the UI (mirrors the gateway's DecisionRecord
+// `usage` block, derived for display). Every leaf is `number | null`, where null =
+// "not measured" (no usage reported) — kept DISTINCT from a measured 0, exactly
+// like the cost null-vs-0 convention (#6). `nonCached`/`total` are DERIVED for the
+// view; the gateway is the single source of the raw counts (Principle 1 — we only
+// render, never recompute the upstream figures).
+export interface TokenUsageView {
+  input: number | null; // prompt_tokens (TOTAL input, includes cached)
+  output: number | null; // completion_tokens
+  cached: number | null; // cache-READ prompt tokens (served from cache)
+  cacheCreation: number | null; // cache-WRITE prompt tokens (Anthropic prompt-cache writes)
+  // input − cached (clamped ≥0) = input tokens NOT served from cache; null when
+  // either side is unmeasured. Derived for the view, never billed.
+  nonCached: number | null;
+  total: number | null; // input + output when present; null when neither is measured
 }
 
 // Redacted per-attempt upstream failure detail (admin-debug-error-detail).
@@ -117,6 +137,9 @@ export interface RequestDetail {
     completion_usd: number;
     total_usd: number;
   };
+  // Served-completion token accounting (see TokenUsageView). Every leaf is null on
+  // a legacy/un-stamped record → the card renders '—'.
+  usage: TokenUsageView;
 }
 
 // ── Raw backend shapes (mirror @helm/shared DecisionRecord; admin must not import
@@ -162,6 +185,15 @@ interface RawDecisionRecord {
     completion_usd?: number | null;
     total_usd?: number | null;
   };
+  // Served-completion token accounting, stamped by the gateway after the usage
+  // tail is parsed (TokenUsageSchema). Each leaf is null when not reported; the
+  // whole block is null/absent on a legacy (pre-feature) record.
+  usage?: {
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+    cached_tokens?: number | null;
+    cache_creation_tokens?: number | null;
+  } | null;
   classifier?: {
     task_type?: string;
     complexity?: string;
@@ -259,6 +291,27 @@ function attemptOutcome(a: RawAttempt): ProviderAttempt['outcome'] {
   return 'error';
 }
 
+// Project the recorded `usage` block -> the UI token view. Reads only the four
+// recorded counts (Principle 1 — never recomputes upstream figures); DERIVES
+// `nonCached` (input − cached, clamped ≥0) and `total` (input + output) for the
+// view. Each leaf is null = "not measured" (kept DISTINCT from a measured 0); a
+// legacy/absent `usage` block yields all-null.
+function num(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+export function toUsage(raw: RawDecisionRecord): TokenUsageView {
+  const u = raw.usage ?? undefined;
+  const input = num(u?.prompt_tokens);
+  const output = num(u?.completion_tokens);
+  const cached = num(u?.cached_tokens);
+  const cacheCreation = num(u?.cache_creation_tokens);
+  // input − cached only when BOTH are measured (else "not measured", not a guess).
+  const nonCached = input !== null && cached !== null ? Math.max(0, input - cached) : null;
+  // Sum the parts that ARE measured; all-unmeasured stays null (never a fake 0).
+  const total = input !== null || output !== null ? (input ?? 0) + (output ?? 0) : null;
+  return { input, output, cached, cacheCreation, nonCached, total };
+}
+
 // Project the raw DecisionRecord -> the list row (docs/07 list fields). Fields the
 // record does not carry are derived or safely defaulted; NEVER fabricated.
 export function toListItem(raw: RawDecisionRecord): RequestListItem {
@@ -297,6 +350,7 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     latency_ms:
       typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : sumLatency(attempts),
     cost_usd: listCost(raw, attempts),
+    usage: toUsage(raw),
     error_class: errorClass ?? undefined,
   };
 }
@@ -417,6 +471,9 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     // summed attempts as completion. The backend does not bill a separate routing
     // self-cost, so routing_usd stays 0.
     cost_breakdown: buildCostBreakdown(raw, completion),
+    // Served-completion token accounting (same source + derivation as the list
+    // row), for the detail "Token usage" card. All-null on a legacy record.
+    usage: toUsage(raw),
   };
 }
 

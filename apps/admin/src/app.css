@@ -1,5 +1,12 @@
 @import 'tailwindcss';
 
+/* LayerChart ships its own class strings (Tooltip/Axis/Grid/PieChart) inside
+   node_modules — Tailwind v4 won't scan a dependency unless told to. Without this
+   the tooltip's bg-surface-100 / text-surface-content and the axis/grid strokes
+   are never generated, so the tooltip renders with NO background (text blends in)
+   and the axes look broken. @source makes Tailwind emit those utilities. */
+@source '../node_modules/layerchart/dist';
+
 /* ============================================================================
    Helm admin — design tokens & component recipes (Tailwind v4, CSS-first).
    Single source of truth for the UI. Pages compose the .recipe classes below
@@ -37,9 +44,42 @@
   --color-link: var(--color-sky-600); /* inline links + Layer-1 "rules" */
   --color-eval: var(--color-violet-600); /* Layer-2 "eval" */
 
+  /* — Chart surfaces (LayerChart / LayerStack tokens) —
+     LayerChart's Tooltip/Axis/Grid style themselves with `bg-surface-100`,
+     `text-surface-content`, `stroke-surface-content/…` utilities. They are NOT
+     defined by Tailwind, so without these the tooltip renders with no background
+     (text blends into the chart) and the axes/grid strokes never appear. Mapped
+     onto our slate ramp so charts read on-brand. */
+  --color-surface-100: var(--color-white); /* tooltip background */
+  --color-surface-200: var(--color-slate-50);
+  --color-surface-300: var(--color-slate-100);
+  --color-surface-content: var(--color-slate-700); /* tooltip text, axis/grid strokes */
+
   /* — Radius: two tiers only — */
   --radius-control: 0.25rem; /* buttons, inputs, pills (rounded) */
   --radius-container: 0.5rem; /* cards, dialogs, tables (rounded-lg) */
+}
+
+/* LayerChart's PieChart fills each slice with `hsl(var(--color-primary))` …
+   `--color-danger)` — bare HSL TRIPLETS consumed inside hsl(), NOT Tailwind
+   utilities (so they live here as plain custom props, not in @theme). Without
+   them the hsl() is invalid and every slice falls back to BLACK. Reuse our
+   brand/status hues as "H S% L%" triples so the pie matches the trend areas. */
+:root {
+  --color-primary: 217 91% 60%; /* blue   — matches TREND_SERIES input */
+  --color-secondary: 160 84% 39%; /* green  — matches TREND_SERIES output */
+  --color-info: 199 89% 48%; /* sky */
+  --color-success: 142 71% 45%; /* emerald */
+  --color-warning: 38 92% 50%; /* amber  — matches TREND_SERIES cached */
+  --color-danger: 0 84% 60%; /* red */
+}
+
+/* The soft drop shadow LayerChart's tooltip applies via `elevation-1`. Without
+   it the floating tooltip has no lift off the chart. */
+@utility elevation-1 {
+  box-shadow:
+    0 1px 3px rgb(0 0 0 / 0.12),
+    0 1px 2px rgb(0 0 0 / 0.08);
 }
 
 @layer components {

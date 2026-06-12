@@ -5,6 +5,7 @@
   import type { RequestListItem } from '$lib/api/requests.js';
   import type { DashboardStats } from '$lib/api/stats.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
+  import TokensCell from '$lib/components/TokensCell.svelte';
   import { formatTimestamp, formatTokens, formatUsd } from '$lib/format.js';
   import { DEFAULT_PAGE_SIZE, filtersToSearch, type RangeKey } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
@@ -306,6 +307,7 @@
               <th class="px-3 py-2 font-medium">{$t('Served model')}</th>
               <th class="px-3 py-2 font-medium">{$t('Status')}</th>
               <th class="px-3 py-2 font-medium">{$t('Latency')}</th>
+              <th class="px-3 py-2 font-medium">{$t('Tokens')}</th>
               <th class="px-3 py-2 font-medium">{$t('Cost')}</th>
             </tr>
           </thead>
@@ -350,6 +352,7 @@
                   {/if}
                 </td>
                 <td class="px-3 py-2 font-mono text-ink-body">{r.latency_ms}ms</td>
+                <td class="px-3 py-2"><TokensCell usage={r.usage} /></td>
                 <td class="px-3 py-2 font-mono text-ink-body">{formatUsd(r.cost_usd)}</td>
               </tr>
             {/each}

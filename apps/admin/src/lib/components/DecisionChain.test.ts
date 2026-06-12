@@ -66,6 +66,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     response_meta: { model_alias: 'claude-x' },
     error: null,
     cost_breakdown: { routing_usd: 0, eval_usd: 0, completion_usd: 0.01, total_usd: 0.01 },
+    usage: { input: 1200, output: 340, cached: 800, cacheCreation: 64, nonCached: 400, total: 1540 },
     ...overrides,
   };
 }
