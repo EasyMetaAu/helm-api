@@ -120,8 +120,10 @@ wrapped so a degenerate input yields a safe default instead of throwing
   from any boundary approaches 1 (most certain). When confidence is below
   `rules.confidence_threshold`, Layer 1 is treated as uncertain and the cascade
   enters Layer 2 (if eval is enabled), otherwise Layer 3.
-- **Language-coverage guard** (`engine.ts` + `signals.ts`): the keyword lists are
-  an English + small high-confidence CJK fast path. Non-covered languages, and CJK
+- **Language-coverage guard** (`engine.ts` + `signals.ts`): Layer 1 has an
+  English keyword layer plus an international keyword layer. The current
+  international seed is Simplified/Traditional Chinese; future Japanese/Korean/
+  Vietnamese/etc. terms should extend `*_intl_kw`. Non-covered languages, and
   prompts that miss those lists, are forced `uncertain` (confidence 0) when no
   content-type structural grip exists, so the cascade escalates to multilingual
   Layer-2 eval. **Operator contract**: to serve broad non-English traffic, enable

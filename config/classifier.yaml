@@ -80,8 +80,10 @@ classifier:
       analysis_kw: { weight: 0.76, keywords: ["analyze", "compare", "evaluate", "implications", "root cause", "assess", "critique", "pros and cons", "diagnose", "investigate"] }
       writing_kw: { weight: 0.14, keywords: ["essay", "rewrite", "draft", "tone", "polish", "summarize", "summary", "paraphrase", "proofread", "article", "headline", "grammar"] }
       security_kw: { weight: 1.40, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "rce", "csrf", "malware", "auth bypass", "auth check", "access control"] }
-      # CJK keyword dimensions are separate from English dimensions so they can
-      # suppress the language guard without diluting English keywordSignal.
+      # International keyword dimensions are separate from English dimensions so
+      # they can suppress the language guard without diluting English keywordSignal.
+      # Current seed is Simplified/Traditional Chinese; future Japanese/Korean/
+      # Vietnamese/etc. terms should extend *_intl_kw.
       coding_intl_kw: { weight: 0.56, keywords: ["重构", "重構", "调试", "除錯", "编译", "編譯", "函数", "函式", "单元测试", "單元測試", "堆栈跟踪", "堆疊追蹤"] }
       analysis_intl_kw: { weight: 0.68, keywords: ["分析", "比較", "比较", "评估", "評估", "根因", "诊断", "診斷", "利弊", "因果关系"] }
       writing_intl_kw: { weight: 0.12, keywords: ["改写", "改寫", "润色", "潤色", "摘要", "校对", "校對", "文章", "标题", "標題"] }

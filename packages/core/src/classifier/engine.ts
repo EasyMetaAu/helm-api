@@ -136,9 +136,11 @@ export function scoreRequest(req: InternalRequest, deps: ScoreRequestDeps): Clas
   explanation.push({ source: "task", detail: task.task_type });
 
   // ── 5.5 language-coverage guard ───────────────────────────────────────────
-  // Layer-1 has English plus small high-confidence CJK keyword lists. A non-covered
-  // non-Latin prompt therefore cannot be scored by them, so a high-confidence keyword
-  // verdict on it would be a lie. Force `uncertain` so the
+  // Layer-1 has an English keyword layer plus an international keyword layer. The
+  // current seed is Simplified/Traditional Chinese; future Japanese/Korean/
+  // Vietnamese/etc. terms should extend *_intl_kw. A non-covered non-Latin prompt
+  // therefore cannot be scored by them, so a high-confidence keyword verdict on it
+  // would be a lie. Force `uncertain` so the
   // cascade escalates to the (multilingual) Layer-2 eval — or, with eval OFF, lands
   // `balanced` deterministically rather than by luck of where the structural-only
   // rawScore fell. Suppressed when (a) the message is trivially short (already pinned
@@ -146,7 +148,7 @@ export function scoreRequest(req: InternalRequest, deps: ScoreRequestDeps): Clas
   // gave real, language-agnostic grip (code block / stack / table / attachment / …).
   // Ambient signals (msg_length / turn_count) fire on every request and are NOT grip.
   // Overrides the exact-confirmation / tier confidence computed above only when the
-  // prompt lacks English/CJK keyword grip, so legitimate CJK confirmations or keyword
+  // prompt lacks English/international keyword grip, so legitimate confirmations or keyword
   // matches are not undone.
   if (safe(() => languageGuardTrips(req, cfg), false)) {
     confidence = 0;

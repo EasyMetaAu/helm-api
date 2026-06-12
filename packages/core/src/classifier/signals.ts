@@ -64,7 +64,9 @@ export function lengthSignal(text: string): number {
 
 // Fraction of LETTERS (\p{L}) that are NOT Latin script, in [0,1]; 0 when there are
 // no letters. Digits, punctuation and whitespace are ignored so they never skew the
-// ratio. Layer-1 has English plus small high-confidence CJK keyword lists, so a
+// ratio. Layer-1 has an English keyword layer plus an international keyword layer
+// (currently seeded with Simplified/Traditional Chinese, extendable for Japanese/
+// Korean/Vietnamese/etc.), so a
 // non-covered non-Latin prompt is unscoreable by keywords — the engine's
 // language-coverage guard uses this to force `uncertain` and escalate to the
 // (multilingual) Layer-2 eval. Pure: same input => same output, zero I/O.
