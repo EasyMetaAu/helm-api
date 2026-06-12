@@ -474,6 +474,7 @@
   "Using system defaults": "システムデフォルトを使用",
   "view": "表示",
   "View all": "すべて表示",
+  "View image": "画像を表示",
   "Waiting for authorization…": "認可を待機中…",
   "Waiting longer than this returns 429.": "これより長く待機すると 429 が返されます。",
   "Waiting longer than this returns 503.": "これより長く待機すると 503 が返されます。",
