@@ -89,6 +89,17 @@ export interface OAuthAdminStatus {
     // the account (kept connected, never routed).
     priority: number;
     schedulable: boolean;
+    // The account's egress proxy, REDACTED (principle 7: never the password, only
+    // `hasPassword`) — or null for a direct connection. Folded into the list from the
+    // SAME already-loaded settings blob as priority/schedulable, so the providers page
+    // shows "which proxy" without the per-account GET the Manage dialog uses.
+    proxy: AccountProxyView | null;
+    // The effective routable models for this account (network-FREE): the operator's
+    // curated `enabledModels` verbatim, else the provider's curated fallback. Mirrors
+    // exactly what synthesizeOAuthProviders exposes to Lanes, so the list never claims
+    // a model that won't route. Live discovery (Copilot /models) stays in the Manage
+    // dialog — never on this hot-ish page load (principle 1: no network fan-out here).
+    models: string[];
   }>;
 }
 

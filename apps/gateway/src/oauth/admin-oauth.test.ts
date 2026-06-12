@@ -572,6 +572,63 @@ describe("createOAuthAdmin", () => {
     });
   });
 
+  it("listStatus surfaces each account's redacted proxy + effective models (network-free)", async () => {
+    const { tokens, config } = makeStores();
+    let seq = 0;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      genSessionId: () => `s${++seq}`,
+    });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+      ]),
+    );
+    for (const account of ["proxied", "bare"]) {
+      const { sessionId, authorizeUrl } = await admin.startManualPaste({ providerId: "anthropic" });
+      const state = new URL(authorizeUrl).searchParams.get("state");
+      await admin.completeManualPaste({
+        sessionId,
+        redirectInput: `https://x/cb?code=C&state=${state}`,
+        account,
+      });
+    }
+    // One account pins a proxy (with a password) + a curated model subset; the other
+    // is left untouched (direct connection, curated-fallback models).
+    await admin.setAccountProxy({
+      providerId: "anthropic",
+      account: "proxied",
+      proxy: { type: "socks5", host: "10.0.0.1", port: 1080, username: "u", password: "secret" },
+    });
+    await admin.setEnabledModels({
+      providerId: "anthropic",
+      account: "proxied",
+      models: ["claude-opus-4-6"],
+    });
+    const accts = (await admin.listStatus()).find((p) => p.id === "anthropic")?.accounts ?? [];
+
+    const proxied = accts.find((a) => a.account === "proxied");
+    // Proxy is surfaced REDACTED (principle 7: hasPassword, never the secret).
+    expect(proxied?.proxy).toEqual({
+      type: "socks5",
+      host: "10.0.0.1",
+      port: 1080,
+      username: "u",
+      hasPassword: true,
+    });
+    expect(JSON.stringify(proxied)).not.toContain("secret");
+    // Effective models = the operator's curated subset verbatim.
+    expect(proxied?.models).toEqual(["claude-opus-4-6"]);
+
+    const bare = accts.find((a) => a.account === "bare");
+    // No proxy configured → null (direct connection); models fall back to curated.
+    expect(bare?.proxy).toBeNull();
+    expect(bare?.models).toEqual(["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]);
+  });
+
   // ── per-account pool scheduling (Stage 3) ──────────────────────────────────
   it("getAccountSchedule returns the defaults (priority 50, schedulable true)", async () => {
     const { tokens, config } = makeStores();
