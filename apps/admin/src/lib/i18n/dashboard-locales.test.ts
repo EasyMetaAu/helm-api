@@ -14,6 +14,14 @@ const dashboardTokenKeys = [
   'Output tokens',
   'Cached tokens',
   'No token usage recorded in this window yet.',
+  // Per-request token usage (list column + detail card): every locale must
+  // translate these instead of falling back to the English source.
+  'Tokens',
+  'Token usage',
+  'Non-cached tokens',
+  'Cache write tokens',
+  'cached',
+  'input {input} · output {output} · cached {cached} · non-cached {nonCached}',
 ] as const;
 
 const translatedLocales = {

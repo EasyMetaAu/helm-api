@@ -56,6 +56,12 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
     latency_total_ms: 460,
     fallback_count: 1,
     cost_breakdown: { eval_usd: 0.0002, completion_usd: 0.01, total_usd: 0.0102 },
+    usage: {
+      prompt_tokens: 1200,
+      completion_tokens: 340,
+      cached_tokens: 800,
+      cache_creation_tokens: 64,
+    },
     ...overrides,
   };
 }
@@ -92,6 +98,34 @@ describe('toListItem', () => {
     expect(row.ts).toBe(new Date(1717155600000).toISOString());
     // No created_at on a legacy record → empty (never fabricated).
     expect(toListItem(rawRecord()).ts).toBe('');
+  });
+
+  it('maps the recorded token usage, deriving non-cached = prompt − cached and a prompt+completion total', () => {
+    const row = toListItem(rawRecord());
+    expect(row.usage.input).toBe(1200);
+    expect(row.usage.output).toBe(340);
+    expect(row.usage.cached).toBe(800);
+    expect(row.usage.cacheCreation).toBe(64);
+    // non-cached = input − cached (clamped ≥ 0); total = input + output.
+    expect(row.usage.nonCached).toBe(400);
+    expect(row.usage.total).toBe(1540);
+  });
+
+  it('clamps non-cached to 0 when cached exceeds the reported prompt (never negative)', () => {
+    const row = toListItem(rawRecord({ usage: { prompt_tokens: 500, cached_tokens: 800 } }));
+    expect(row.usage.nonCached).toBe(0);
+  });
+
+  it('leaves every usage leaf null for a legacy record that carried no usage block', () => {
+    const legacy = rawRecord();
+    delete legacy.usage;
+    const u = toListItem(legacy).usage;
+    expect(u.input).toBeNull();
+    expect(u.output).toBeNull();
+    expect(u.cached).toBeNull();
+    expect(u.cacheCreation).toBeNull();
+    expect(u.nonCached).toBeNull();
+    expect(u.total).toBeNull();
   });
 });
 
