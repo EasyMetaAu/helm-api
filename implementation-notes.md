@@ -14,6 +14,14 @@
 - **取舍/仍开放**：Helm 目前没有 Responses object/session/history store，所以带 `previous_response_id` 且只提交历史 tool-output continuation 的请求不能假装可处理；本轮选择 **fail-closed**，返回明确错误，避免把缺少本地 `function_call` 上下文的 `function_call_output` 转成无效 Chat tool message。单纯携带 `previous_response_id` 的普通字符串 input 仍保留在 `provider_raw` 用于后续 Responses-native round-trip；完整 continuation 支持需要 response store、input_items/history 查询和 tool-call correlation。
 - **验证**：TDD 红→绿。新增/更新 focused regression 覆盖 Responses `tool_choice` 双向规范化、`previous_response_id` continuation fail-closed、Codex provider `tool_choice`、Anthropic native passthrough + beta headers、Gemini `safetySettings` round-trip，以及 gateway 不把 `previous_response_id` / `truncation` 泄漏到 OpenAI-compatible upstream。验证命令：focused Vitest 244 绿；`pnpm typecheck` 绿；`pnpm lint` 绿；`pnpm test` 初跑因本地 `better-sqlite3` ABI 137 vs Node 25 ABI 141 失败，执行 `pnpm --filter @helm/core rebuild better-sqlite3` 后完整 `pnpm test` 240 files / 3036 tests 绿。
 
+## 2026-06-12 · 新增 claude-fable-5 配置支持（CLAUDE.md 原则 2/6；docs/04；实现约定「能力与定价数据源」）
+
+- **缘起**：用户要求为 `config/` 增加 Claude Fable 5 支持，能力/定价从 OpenRouter API 现场下载。
+- **数据来源**：`GET https://openrouter.ai/api/v1/models` 的 `anthropic/claude-fable-5`（2026-06-12）——ctx 1,000,000、max_completion_tokens 128,000、input modalities text+image+**file**（→ 我们的 `document`）。pricing 当时记录在案但本轮**未落库**（见取舍）。
+- **实现（完全镜像 `claude-opus` lane 模式）**：① `lanes.yaml` 新增 `claude-fable` lane，与 opus 一样**以 native `anthropic/claude-fable-5` OAuth 别名领衔**（未连接订阅 fail-open 跳过），直接降级进 GPT 领衔的 `premium` 链（`fallback: [premium]`）。② `model-aliases.yaml` 加 `claude-fable-*` glob（最长字面胜过广义 `claude-*` → balanced 兜底），吸收日期后缀。
+- **取舍（用户决策）**：最初版本另加了 `openrouter/claude-fable-5` 静态镜像兜底（providers/capabilities/pricing 三处 + lane fallback 首项），用户明确要求**去掉、不要 fallback 到 OpenRouter**，故回退为与 `claude-opus` 完全一致：无静态 Fable 镜像，无订阅时经 `premium` 服务。native `anthropic/claude-fable-5` 主选项不在 `providers.yaml` 静态注册——与现有 `anthropic/claude-opus-4-8` 等一致，靠运行时 admin OAuth pool 注册（无 boot 时 lane→provider 解析校验，不会 fail-closed 拒启动）。
+- **验证**：TDD 红→绿。`samples.test.ts` 新增 lane primary/fallback + alias glob 断言，`catalog/load.test.ts` 端到端断言 shipped yaml 加载出 Fable 能力+cache 定价。先确认两测试红（lane primary `undefined`、catalog entry `undefined`），实现后 `pnpm exec vitest run packages/core/src/config packages/core/src/catalog` 98 绿、`pnpm typecheck`、`pnpm lint` 全通过。**部署坑**：线上 `/opt/helm-api/config` 是运营者属主，需手动同步这两个 yaml 才生效（见 [[deploy-never-overwrite-config]]）。
+
 ## 2026-06-12 · Codex/Responses 流式兼容修复（状态可见 + 生命周期路由形状；CLAUDE.md 原则 1/7/8；docs/05/07）
 
 - **缘起**：继续按官方 OpenAI OpenAPI / openai-node、LiteLLM Responses 实现和既有 wiki review 四协议兼容性。用户侧现象是 Codex 经常看不到状态、感觉 API 慢；代码侧问题集中在 native Codex Responses SSE 解析和 Helm `/v1/responses` route family 的协议形状。
@@ -22,20 +30,15 @@
 - **取舍/仍开放**：这不是完整 Responses object store 或 token counter。GET/DELETE/cancel/input_items/input_tokens/compact 目前是**协议形状兼容 + fail-closed unsupported**，不是假成功；真实现需要 response-object 存储、background polling 状态、provider-native executor contract、cursor/input-items 数据源，或 Responses-native token counting。非流式 Helm 请求仍必须聚合完整 upstream SSE 后才能返回一个 Chat response；客户端要低首 token 延迟必须走 `stream:true`，但流式 route 现在会先给协议 prelude，而不是等上游首 chunk。
 - **验证**：TDD 红→绿。新增/更新 provider、shared Responses stream、gateway route 测试覆盖 CRLF/multi-line/tail SSE、event fallback、reasoning deltas、lifecycle endpoint auth-first structured unsupported，以及 `stream:true` route 在 routing promise 未 resolve 前返回 SSE/首帧 prelude、pipeline 使用 route-stamped response id。定向 `responses.test.ts`、`messages-pipeline.test.ts`、`responses-stream.test.ts` 已通过；提交前还需跑四协议 focused suite + typecheck/lint/build/full unit/e2e。
 
-## 2026-06-12 · LiteLLM 协议兼容面修复（四协议路由 + Gemini usage；CLAUDE.md 原则 1/7/8；docs/05/07）
-
-- **缘起**：基于 `/Users/lukin/Projects/llm-router-packages/wiki/comparisons/protocol-compatibility-gap-analysis.md` 对照 LiteLLM，当前 `main` 仍有几类 drop-in 兼容缺口：Gemini 只认 `/v1beta/models/{singleSegment}` 且 `streamGenerateContent` 没有 `alt=sse` 会被当成非流；Gemini 流式出站 usage 没把 cache read/write 加回 `promptTokenCount`；OpenAI Chat / Responses create 缺 LiteLLM 常用别名；Anthropic `/api/event_logging/batch` 与 `/v1/messages/count_tokens` 缺兼容端点。
-- **修复**：Gemini `parseGeminiPath` 支持 `/v1beta/models/{model:path}` 与 `/models/{model:path}`，`streamGenerateContent` 按操作名一律流式；gateway 同一 handler 挂载两套 Gemini 路径，保持 auth/rate-limit/concurrency/memory/telemetry/payload 语义一致。Gemini `transformStreamOut` 的 `usageMetadata.promptTokenCount` 改为 `prompt_tokens + cached_tokens + cache_creation_tokens`（与非流式一致），仍保留 `cachedContentTokenCount`；gateway Gemini 流式分支在渲染前把原始 OpenAI SSE usage 先标准化为 IR usage，避免 `prompt_tokens` 已含 cached/write tokens 时被重复加回。OpenAI Chat 增加 `/chat/completions`、`/engines/{model:path}/chat/completions`、`/openai/deployments/{model:path}/chat/completions`，并在 server 组合根给这些别名挂同一套 auth/rate-limit/concurrency 中间件；engine/deployment 路径 model 覆盖 body model，但 payload capture 保留原始 body。Responses create 增加 `/responses` 与 `/openai/v1/responses` 别名。Anthropic 增加已鉴权的 Claude Code event logging stub（`{"status":"ok"}`）和本地确定性 `count_tokens` 估算端点。
-- **取舍/仍开放**：LiteLLM 的 Responses GET/DELETE/cancel/input_items/compact/background polling/Cursor bridge 需要 response-object store 或 provider-native executor 合同，不能用假 stub 冒充已实现；本轮只补 create aliases。Gemini `countTokens` 仍是显式未实现的 SDK 兼容缺口。LiteLLM 会 fetch 远程媒体并转 base64；Helm core transformer 仍不做网络 fetch，远程 http(s) 图像到 Gemini nativeOut 继续文档化降级为文本占位，避免在协议层引入隐式网络 I/O。
-- **验证**：新增/更新 route + protocol regression：Gemini `/models`、path-style model、`streamGenerateContent` 无 `alt=sse`、流式 cached usage；Chat 三类别名 + 路径 model 覆盖；Responses create aliases；Anthropic event logging/count_tokens。TDD 红例覆盖 Gemini gateway 流式 double-count（先见 `expected 140 to be 100`，再最小修复）。已跑 `pnpm typecheck`、`pnpm lint`、`pnpm -r build`、`pnpm test`（3020 绿）、`pnpm --filter @helm/gateway test:e2e`（64 绿）、`git diff --check`。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
-### 2026-06-12 · Anthropic streaming 保留 MCP 双下划线工具名：修复出站 stream sanitizer 折叠连续 `_` 导致 `mcp__server__tool` 变 `mcp_server_tool`、Claude Code 无法执行 MCP 工具；保留合法双下划线，非法字符替换/首尾裁剪/冲突 hash 仍保留；定向 Anthropic stream/response/request 测试绿。
+### 2026-06-12 · LiteLLM 协议兼容面修复（四协议路由 + Gemini usage；原则 1/7/8；docs/05/07）：对照 LiteLLM 补 drop-in 缺口——Gemini `parseGeminiPath` 接受 `/v1beta/models/{model:path}` 与 `/models/{model:path}`、`streamGenerateContent` 一律流式；Gemini 流式 `promptTokenCount` 加回 cache read/write（gateway 渲染前先标准化 usage 防重复加）；OpenAI Chat 增 `/chat/completions`+engine/deployment 路径别名、Responses 增 `/responses`+`/openai/v1/responses`、Anthropic 加 event_logging stub + 本地 count_tokens 估算。取舍：Responses GET/DELETE/cancel/input_items/compact 仍需 object store，本轮只补 create aliases；core transformer 不做网络 fetch。TDD 红例钉死 Gemini 流式 double-count（140→100）。typecheck/lint/build/test(3020)/e2e(64) 绿。
+
+### 2026-06-12 · Anthropic streaming 保留 MCP 双下划线工具名（原则 8；docs/05）：线上 Claude Code 经 Helm 调 `codegraph` MCP，流式 `tool_use.name` 把 `mcp__codegraph__codegraph_context` 折叠成单下划线 → 客户端 `No such tool available` 死循环。根因 = `sanitizeAnthropicToolName` 把非法字符替换后又折叠连续 `_`，破坏 MCP 双下划线命名空间语义。修复：不再折叠 `_+`，保留非法字符替换/首尾裁剪/空名兜底/冲突 hash 后缀（`search web` 仍产冲突后缀，`mcp__server__tool` 原样通过）。TDD 钉死 streaming round-trip。
 
 ### 2026-06-11 · 「重试」按钮支持全部四协议：admin retry 从 OpenAI-chat-only 改为 faithful 原生回放；DecisionRecord 增可选 `protocol` 零迁移盖戳，旧记录按 body 形状推断；Anthropic/Responses/Gemini 复用 live transformers + shared pipeline 捕获原生响应，客户端 `canRetry` 放宽为对象 body 即可；限制是非 chat 流式回放不回填 `completion_usd`，需发新 admin 镜像。
 

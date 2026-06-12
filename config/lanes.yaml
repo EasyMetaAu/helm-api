@@ -106,6 +106,17 @@ claude-opus:
   fallback:
     - premium
 
+# Claude Fable 5 — the Mythos-class Claude (autonomous knowledge work + coding),
+# 1M context. Mirrors claude-opus: LEADS with the native Anthropic OAuth alias (an
+# unconnected `anthropic/*` candidate fails OPEN to the next fallback) and degrades
+# straight into the GPT-led `premium` chain. No static Fable mirror is wired, so
+# without a Claude subscription this lane serves via `premium`.
+claude-fable:
+  purpose: Anthropic Claude Fable tier — Mythos-class autonomous work
+  primary: anthropic/claude-fable-5
+  fallback:
+    - premium
+
 claude-sonnet:
   purpose: Anthropic Claude Sonnet tier — balanced Claude
   primary: anthropic/claude-sonnet-4-6

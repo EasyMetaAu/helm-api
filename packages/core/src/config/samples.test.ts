@@ -123,6 +123,25 @@ describe("checked-in config samples", () => {
     expect(resolveModelAlias("gemini-embedding-001", aliases)).toBe("balanced");
   });
 
+  it("loads the shipped claude-fable vendor-family lane (native anthropic primary, premium fallback)", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const lanes = cfg.lanes;
+    const aliases = cfg.model_aliases;
+    if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
+    if (aliases === undefined) throw new Error("config/model-aliases.yaml must load");
+    // Mirrors claude-opus exactly: LEADS with the native Anthropic OAuth alias and
+    // degrades straight into the GPT-led `premium` chain (no static Fable mirror is
+    // wired), so an unconnected `anthropic/*` candidate fails OPEN to `premium`.
+    expect(lanes["claude-fable"]?.primary).toBe("anthropic/claude-fable-5");
+    expect(lanes["claude-fable"]?.fallback).toEqual(["premium"]);
+    // A bare / dated Fable id routes to the dedicated lane: the `claude-fable-*` glob
+    // (longest literal) beats the broad `claude-*` -> balanced catch-all.
+    expect(resolveModelAlias("claude-fable-5", aliases)).toBe("claude-fable");
+    expect(resolveModelAlias("claude-fable-5-20260115", aliases)).toBe("claude-fable");
+    // No drift: the shipped aliases still validate against the shipped lanes.
+    expect(validateModelAliasTargets(aliases, Object.keys(lanes))).toEqual([]);
+  });
+
   it("loads the shipped policies.yaml as first-match rules", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const ids = cfg.policies.policies.map((p) => p.id);

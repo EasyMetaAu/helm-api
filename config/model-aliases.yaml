@@ -35,6 +35,7 @@
 "claude-haiku-*": claude-haiku
 "claude-opus-*": claude-opus
 "claude-sonnet-*": claude-sonnet
+"claude-fable-*": claude-fable # Mythos-class Claude (claude-fable-5[-date])
 "claude-*": balanced # catch-all for any other / future Claude id
 
 # ── OpenAI-compatible clients (Codex, Cursor, …) ─────────────────────────────
