@@ -1190,18 +1190,29 @@ export async function buildServer(
   });
 
   // Mandatory auth for the OpenAI chat surface (Hono middleware -> HelmError on
-  // failure). The Anthropic /v1/messages route self-authenticates so its errors
-  // are translated to the Anthropic envelope (docs/07) — see registerMessagesRoute.
-  app.use(
+  // failure). Includes LiteLLM-compatible chat aliases; Anthropic /v1/messages
+  // self-authenticates so its errors are translated to the Anthropic envelope
+  // (docs/07) — see registerMessagesRoute.
+  const chatRoutePatterns = [
     "/v1/chat/*",
-    authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
-  );
+    "/chat/*",
+    "/engines/*",
+    "/openai/deployments/*",
+  ] as const;
+  for (const pattern of chatRoutePatterns) {
+    app.use(
+      pattern,
+      authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
+    );
+  }
   // Rate limit AFTER auth (needs the resolved key_id) and BEFORE classify/route
   // (cut off cost before classification/eval). No-op when disabled (docs/06).
-  app.use(
-    "/v1/chat/*",
-    rateLimitMiddleware({ limiter: rateLimiter, estimateTokens: estimateRequestTokens }),
-  );
+  for (const pattern of chatRoutePatterns) {
+    app.use(
+      pattern,
+      rateLimitMiddleware({ limiter: rateLimiter, estimateTokens: estimateRequestTokens }),
+    );
+  }
   // Per-key concurrency overflow queue (issue #93, feature A): AFTER rate-limit
   // (a hard-rejected request must not hold a queue slot), BEFORE classify/route.
   // ONE process-wide gate shared with the self-auth routes (messages / responses
@@ -1218,7 +1229,9 @@ export async function buildServer(
       waitTimeoutMs: settings.concurrency_queue_wait_timeout_ms,
     }),
   });
-  app.use("/v1/chat/*", concurrencyMiddleware(concurrencyGate));
+  for (const pattern of chatRoutePatterns) {
+    app.use(pattern, concurrencyMiddleware(concurrencyGate));
+  }
 
   // Model discovery (GET /v1/models) is key-aware: it requires the SAME mandatory
   // key auth as the chat surface so the listing reflects the authenticated key's

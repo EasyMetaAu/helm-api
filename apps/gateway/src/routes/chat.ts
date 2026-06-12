@@ -28,7 +28,7 @@ import {
   makeHelmError,
   OpenAIChatRequestSchema,
 } from "@helm/shared";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
@@ -321,7 +321,7 @@ function flushOpenAIChunk(buffer: SSEAccumulator): void {
 }
 
 export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void {
-  app.post("/v1/chat/completions", async (c) => {
+  const handleChat = async (c: Context<AppEnv>, pathModel?: string) => {
     const traceId = c.get("trace_id");
     const identity = c.get("identity") as unknown as ChatIdentity;
 
@@ -337,6 +337,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       raw = JSON.parse(requestJson);
     } catch {
       throw invalidRequest("malformed JSON request body", traceId);
+    }
+    if (pathModel !== undefined && raw !== null && typeof raw === "object") {
+      raw = { ...(raw as Record<string, unknown>), model: decodeURIComponent(pathModel) };
     }
     const parsed = OpenAIChatRequestSchema.safeParse(raw);
     if (!parsed.success) {
@@ -759,5 +762,12 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // tokens from the body's usage. Fail-open.
     await settle(result.decision, tokensFromUsage(usageFromBody(result.body)));
     return c.json(result.body as Record<string, unknown>);
-  });
+  };
+
+  app.post("/v1/chat/completions", (c) => handleChat(c));
+  app.post("/chat/completions", (c) => handleChat(c));
+  app.post("/engines/:model{.+}/chat/completions", (c) => handleChat(c, c.req.param("model")));
+  app.post("/openai/deployments/:model{.+}/chat/completions", (c) =>
+    handleChat(c, c.req.param("model")),
+  );
 }

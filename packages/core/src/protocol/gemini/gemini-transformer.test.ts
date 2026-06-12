@@ -642,7 +642,7 @@ describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
     expect(withFinish[0]?.candidates?.[0]?.finishReason).toBe("STOP");
   });
 
-  it("emits cached token counts from OpenAI-style streaming usage details", async () => {
+  it("reconstructs full Gemini promptTokenCount from streaming cache usage details", async () => {
     const chunks: IRChunk[] = [
       {
         id: "c",
@@ -662,9 +662,9 @@ describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
     ];
     const events = await collect(geminiTransformer.transformStreamOut(fromArray(chunks)));
     const terminal = events.find((e) => e.usageMetadata !== undefined);
-    expect(terminal?.usageMetadata?.promptTokenCount).toBe(100);
+    expect(terminal?.usageMetadata?.promptTokenCount).toBe(140);
     expect(terminal?.usageMetadata?.cachedContentTokenCount).toBe(30);
-    expect(terminal?.usageMetadata?.totalTokenCount).toBe(120);
+    expect(terminal?.usageMetadata?.totalTokenCount).toBe(160);
   });
 
   // test #4: outbound streaming must surface tool calls as a complete functionCall part
@@ -1082,6 +1082,11 @@ describe("endPoint routing (/v1beta/...)", () => {
     expect(parsed?.stream).toBe(false);
   });
 
+  it("parses LiteLLM-compatible /models paths and path-style model names", () => {
+    const parsed = parseGeminiPath("/models/google/gemini-2.5-pro:generateContent", "");
+    expect(parsed).toEqual({ model: "google/gemini-2.5-pro", stream: false });
+  });
+
   it("parses streamGenerateContent?alt=sse path: streaming true", () => {
     const parsed = parseGeminiPath(
       "/v1beta/models/gemini-1.5-pro:streamGenerateContent",
@@ -1089,6 +1094,11 @@ describe("endPoint routing (/v1beta/...)", () => {
     );
     expect(parsed?.model).toBe("gemini-1.5-pro");
     expect(parsed?.stream).toBe(true);
+  });
+
+  it("treats streamGenerateContent as streaming even without alt=sse", () => {
+    const parsed = parseGeminiPath("/v1beta/models/gemini-1.5-pro:streamGenerateContent", "");
+    expect(parsed).toEqual({ model: "gemini-1.5-pro", stream: true });
   });
 
   it("returns null for a non-Gemini path", () => {

@@ -48,7 +48,7 @@ const ECONOMY_NEXT_WIRE = "deepseek-v4-pro";
 
 function chat(content: string, extra: Record<string, unknown> = {}) {
   return {
-    model: "gpt-4o-mini",
+    model: "auto",
     messages: [{ role: "user", content }],
     stream: false,
     ...extra,

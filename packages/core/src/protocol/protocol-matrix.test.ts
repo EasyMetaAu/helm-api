@@ -621,7 +621,8 @@ describe("protocol cross-path executable harness", () => {
     expect(anthropicSerialized).toContain("Melbourne");
     expect(anthropicSerialized).toContain('"input_tokens":7');
     expect(anthropicSerialized).toContain('"cache_read_input_tokens":3');
-    expect(geminiEvents.at(-1)?.usageMetadata?.promptTokenCount).toBe(10);
+    expect(geminiEvents.at(-1)?.usageMetadata?.promptTokenCount).toBe(13);
+    expect(geminiEvents.at(-1)?.usageMetadata?.cachedContentTokenCount).toBe(3);
     expect(geminiSerialized).toContain("functionCall");
     expect(geminiSerialized).toContain("get_weather");
     expect(geminiSerialized).toContain("Melbourne");

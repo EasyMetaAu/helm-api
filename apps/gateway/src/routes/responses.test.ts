@@ -138,6 +138,20 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(order).toEqual(["auth", "translate-out", "route", "translate-back"]);
   });
 
+  it("accepts LiteLLM-compatible create aliases", async () => {
+    for (const path of ["/responses", "/openai/v1/responses"]) {
+      const { deps, order } = makeDeps();
+      const app = buildApp(deps);
+      const res = await app.request(path, {
+        method: "POST",
+        headers: AUTH,
+        body: JSON.stringify(REQ),
+      });
+      expect(res.status).toBe(200);
+      expect(order).toEqual(["auth", "translate-out", "route", "translate-back"]);
+    }
+  });
+
   it("rejects a missing key with 401 (OpenAI error envelope) and never routes", async () => {
     const { deps, order } = makeDeps({ authed: false });
     const app = buildApp(deps);

@@ -138,6 +138,31 @@ test.describe("OpenAI client → upstream", () => {
     expect(typeof body.choices[0].message.content).toBe("string");
   });
 
+  test("LiteLLM aliases: /chat/completions and engine path model override", async ({ request }) => {
+    const aliasRes = await request.post("/chat/completions", {
+      headers: OPENAI_AUTH,
+      data: {
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "translate this sentence to french: hello" }],
+        stream: false,
+      },
+    });
+    expect(aliasRes.ok()).toBeTruthy();
+    expect((await aliasRes.json()).choices[0].message.role).toBe("assistant");
+
+    const engineRes = await request.post("/engines/gpt-5.4-mini/chat/completions", {
+      headers: OPENAI_AUTH,
+      data: {
+        model: "ignored-body-model",
+        messages: [{ role: "user", content: "translate this sentence to french: hello" }],
+        stream: false,
+      },
+    });
+    expect(engineRes.ok()).toBeTruthy();
+    const upstream = await lastUpstreamRequest(request);
+    expect(upstream.body.model).toBe("deepseek-v4-flash");
+  });
+
   test("stream: first chunk carries role, last carries finish_reason, ends [DONE]", async ({
     request,
   }) => {
@@ -249,6 +274,23 @@ test.describe("OpenAI Responses client → upstream (streaming)", () => {
     expect(doneText).toBe(deltas);
   });
 
+  test("create aliases /responses and /openai/v1/responses are accepted", async ({ request }) => {
+    for (const path of ["/responses", "/openai/v1/responses"]) {
+      const res = await request.post(path, {
+        headers: OPENAI_AUTH,
+        data: {
+          model: "auto",
+          input: "translate this sentence to french: hello",
+          stream: false,
+        },
+      });
+      expect(res.ok()).toBeTruthy();
+      const body = await res.json();
+      expect(body.object).toBe("response");
+      expect(body.status).toBe("completed");
+    }
+  });
+
   test("tool-call stream: function_call item + arguments deltas", async ({ request }) => {
     const res = await request.post("/v1/responses", {
       headers: OPENAI_AUTH,
@@ -336,5 +378,29 @@ test.describe("bidirectional isomorphism", () => {
     // Anthropic-shaped error envelope.
     expect(body.type).toBe("error");
     expect(body.error.type).toBe("authentication_error");
+  });
+
+  test("Anthropic compatibility helpers are authenticated and protocol-shaped", async ({
+    request,
+  }) => {
+    const eventLog = await request.post("/api/event_logging/batch", {
+      headers: ANTHROPIC_AUTH,
+      data: { events: [{ type: "client_event" }] },
+    });
+    expect(eventLog.ok()).toBeTruthy();
+    expect(await eventLog.json()).toEqual({ status: "ok" });
+
+    const count = await request.post("/v1/messages/count_tokens", {
+      headers: ANTHROPIC_AUTH,
+      data: {
+        model: "claude-3-5-sonnet",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "translate this sentence to french: hello" }],
+      },
+    });
+    expect(count.ok()).toBeTruthy();
+    const body = (await count.json()) as { input_tokens?: number };
+    expect(typeof body.input_tokens).toBe("number");
+    expect(body.input_tokens).toBeGreaterThan(0);
   });
 });

@@ -59,6 +59,22 @@ test.describe("Gemini client → upstream", () => {
     expect(upstream.body.model).not.toBe("gemini");
   });
 
+  test("LiteLLM-compatible /models alias accepts path-style model names", async ({ request }) => {
+    const res = await request.post("/models/google/gemini-2.5-pro:generateContent", {
+      headers: GEMINI_AUTH,
+      data: {
+        contents: [{ role: "user", parts: [{ text: "translate this sentence to french: hello" }] }],
+      },
+    });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    expect(body.candidates[0].content.role).toBe("model");
+
+    const upstream = await lastUpstreamRequest(request);
+    expect(Array.isArray(upstream.body.messages)).toBeTruthy();
+    expect(upstream.body.model).not.toBe("gemini");
+  });
+
   test("stream: alt=sse emits snapshot data frames with NO event: name and NO [DONE]", async ({
     request,
   }) => {
@@ -86,6 +102,21 @@ test.describe("Gemini client → upstream", () => {
     expect(text).toContain("candidates");
     // the terminal snapshot carries the mapped finishReason.
     expect(text).toContain("STOP");
+  });
+
+  test("streamGenerateContent streams even without alt=sse", async ({ request }) => {
+    const res = await request.post("/v1beta/models/gemini-2.0-flash:streamGenerateContent", {
+      headers: GEMINI_AUTH,
+      data: {
+        contents: [{ role: "user", parts: [{ text: "translate this sentence to french: hola" }] }],
+      },
+    });
+    expect(res.ok()).toBeTruthy();
+    expect(res.headers()["content-type"]).toContain("text/event-stream");
+    const text = await res.text();
+    expect(text).toContain("data:");
+    expect(text).toContain("candidates");
+    expect(text).not.toContain("[DONE]");
   });
 
   test("tool-call: upstream function call → client sees a functionCall part", async ({

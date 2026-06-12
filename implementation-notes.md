@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-12 · LiteLLM 协议兼容面修复（四协议路由 + Gemini usage；CLAUDE.md 原则 1/7/8；docs/05/07）
+
+- **缘起**：基于 `/Users/lukin/Projects/llm-router-packages/wiki/comparisons/protocol-compatibility-gap-analysis.md` 对照 LiteLLM，当前 `main` 仍有几类 drop-in 兼容缺口：Gemini 只认 `/v1beta/models/{singleSegment}` 且 `streamGenerateContent` 没有 `alt=sse` 会被当成非流；Gemini 流式出站 usage 没把 cache read/write 加回 `promptTokenCount`；OpenAI Chat / Responses create 缺 LiteLLM 常用别名；Anthropic `/api/event_logging/batch` 与 `/v1/messages/count_tokens` 缺兼容端点。
+- **修复**：Gemini `parseGeminiPath` 支持 `/v1beta/models/{model:path}` 与 `/models/{model:path}`，`streamGenerateContent` 按操作名一律流式；gateway 同一 handler 挂载两套 Gemini 路径，保持 auth/rate-limit/concurrency/memory/telemetry/payload 语义一致。Gemini `transformStreamOut` 的 `usageMetadata.promptTokenCount` 改为 `prompt_tokens + cached_tokens + cache_creation_tokens`（与非流式一致），仍保留 `cachedContentTokenCount`；gateway Gemini 流式分支在渲染前把原始 OpenAI SSE usage 先标准化为 IR usage，避免 `prompt_tokens` 已含 cached/write tokens 时被重复加回。OpenAI Chat 增加 `/chat/completions`、`/engines/{model:path}/chat/completions`、`/openai/deployments/{model:path}/chat/completions`，并在 server 组合根给这些别名挂同一套 auth/rate-limit/concurrency 中间件；engine/deployment 路径 model 覆盖 body model，但 payload capture 保留原始 body。Responses create 增加 `/responses` 与 `/openai/v1/responses` 别名。Anthropic 增加已鉴权的 Claude Code event logging stub（`{"status":"ok"}`）和本地确定性 `count_tokens` 估算端点。
+- **取舍/仍开放**：LiteLLM 的 Responses GET/DELETE/cancel/input_items/compact/background polling/Cursor bridge 需要 response-object store 或 provider-native executor 合同，不能用假 stub 冒充已实现；本轮只补 create aliases。Gemini `countTokens` 仍是显式未实现的 SDK 兼容缺口。LiteLLM 会 fetch 远程媒体并转 base64；Helm core transformer 仍不做网络 fetch，远程 http(s) 图像到 Gemini nativeOut 继续文档化降级为文本占位，避免在协议层引入隐式网络 I/O。
+- **验证**：新增/更新 route + protocol regression：Gemini `/models`、path-style model、`streamGenerateContent` 无 `alt=sse`、流式 cached usage；Chat 三类别名 + 路径 model 覆盖；Responses create aliases；Anthropic event logging/count_tokens。TDD 红例覆盖 Gemini gateway 流式 double-count（先见 `expected 140 to be 100`，再最小修复）。已跑 `pnpm typecheck`、`pnpm lint`、`pnpm -r build`、`pnpm test`（3020 绿）、`pnpm --filter @helm/gateway test:e2e`（64 绿）、`git diff --check`。
+
 ## 2026-06-12 · Anthropic streaming 保留 MCP 双下划线工具名（CLAUDE.md 原则 8；docs/05）
 
 - **缘起**：线上 Claude Code 经 Helm 调用 `codegraph` MCP 时，工具 schema 是正确的 `mcp__codegraph__codegraph_context`，但返回给客户端的流式 `tool_use.name` 变成 `mcp_codegraph_codegraph_context`。Claude Code 无法执行该单下划线工具名，连续把 `No such tool available` 带回下一轮，模型反复输出 “Worktree created / worktree is ready” 并再次调用错误工具。
@@ -25,19 +32,13 @@
 - **取舍/已知限制**：非 chat 的**流式**回放不回填 `completion_usd`（pipeline 仅在接了 budget dep 时回填，回放有意不接——与无预算 key 的 live 行为一致）；openai_chat 回放保留 `usageFromSSE` 成本回填。
 - **验证**：TDD 红→绿。新测：shared decision schema 协议 round-trip(3)、core redaction 保留 protocol(1)、gateway replay 四协议（Anthropic system 保真 + input[] 推断 + Gemini model 恢复 + 坏 body 400 + Responses 流式原生 SSE，共 6 例）、admin canRetry 放宽 1 例；补了 6 个既有 DecisionRecord fixture 的 protocol（**core/gateway typecheck 含 test**）。gateway 路由 166 绿、admin 39 绿、replay 21 绿；typecheck（shared+core+gateway）/ lint / build 全绿。**坑：admin svelte-check 3 个 `oauth.test.ts` 报错是 main 既有（与本改无关）；需发新 admin 镜像生效。**
 
-## 2026-06-11 · 请求页自动刷新控件 RefreshControl（admin UX；CLAUDE.md 原则 1）
-
-- **缘起**：用户要求在 `/admin/requests` 页右上角加一个刷新按钮，支持自动刷新，样式参考某监控面板的「Refresh ▾」分体按钮（下拉含 关/Auto/5s…1d）。
-- **实现**：新增可复用 `RefreshControl.svelte`——分体按钮：左「↻ Refresh」立即刷新（在途时图标 `animate-spin`），右「▾」开下拉选自动刷新节奏（关 + 5s/10s/30s/1m/5m/15m/30m/1h/2h/1d）。`setInterval` 驱动，`onDestroy` 清理；选中节奏后主按钮显示「· 30s」激活反馈。`<svelte:window onpointerdown>` 做 click-outside、Escape 关闭。组件**对数据无状态**（纯触发器），parent 通过 `onRefresh` 注入语义；请求页传 `() => invalidateAll()`——重跑 `+page.ts` loader，按 URL filter 重取当前页。请求页 `<header>` 改 `flex justify-between`，控件居右（仿 providers 页）。
-- **取舍（关键）**：① 参考图里的「Auto」判为**分组标题而非可选项**（图中顶部高亮的是当前选中的「关」，Auto 是其下区间列表的小标题），故下拉做成「关 + Auto refresh 分组 + 区间」，不引入语义含糊的「Auto」选项（呼应 CLAUDE.md「会撒谎的旋钮比没有旋钮更糟」）。② 选中节奏**只设定节拍、不立即刷一次**（仿 Grafana，避免点选即触发的意外突发）；`runRefresh` 带 `refreshing` 重入守卫，慢加载不堆叠 tick。③ 区间标签（5s/1h…）是语言中性字面量，**不进 i18n**（仿 RangeFilter 的 1h/6h）；只「Auto refresh」入 5 语言包。
-- **坑/TODO**：① 纯 admin 静态资源改动，需发新 admin 镜像才生效（部署见 [[deploy-never-overwrite-config]]）。② 自动刷新仅本页生命周期内有效，离开页面即停；刷新节奏不持久化（刻意——避免后台无意义轮询）。③ 控件通用，后续可复用到 Dashboard/Providers 等页。
-- **验证**：TDD 红→绿。新 `RefreshControl.test.ts`(7，fake timers)：手动点击触发 onRefresh、菜单开列区间、选中后逐 tick 刷新（非立即）、激活标签、选「关」停、卸载清理。requests 页 17 例不回归；admin 全量 **304 绿**；svelte-check 对新文件零错（仅既有 oauth.test.ts 3 处预存错，未触碰）；Biome lint(432 文件) + Prettier(.svelte) + vite build 全绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-11 · 请求页自动刷新控件 RefreshControl：新增请求页分体刷新按钮 + 下拉自动刷新节奏（关/5s…1d），`onRefresh` 注入 `invalidateAll()`，定时器生命周期内有效且不持久化；admin tests/build/lint 当时通过，需发新 admin 镜像生效。
 
 ### 2026-06-11 · 记忆消息重复写入根治 + 历史脏数据清理：根因是 observeInbound 全量盲插客户端重发 transcript，`memory_messages` O(n²) 膨胀并让 observer 反复压缩；修复为 `message_index + content_hash` 幂等键、sqlite/pg 迁移与 dedup 运维脚本，清理 observations 后重建。坑：历史 NULL hash 需脚本补齐；部署先迁移后备份/dry-run/正式/VACUUM。
 
