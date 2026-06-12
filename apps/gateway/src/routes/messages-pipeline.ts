@@ -694,27 +694,23 @@ export function createMessagesPipeline(
                 ),
               );
             }
-            // Streamed-cost backfill + budget settle (docs/06). Zero-touch when
-            // budgets are unwired/unmetered. The pipeline faces never settled
-            // streamed cost before — price the usage tail at the served alias so the
-            // decision's total_usd is real, THEN settle the budget. Fail-open.
-            if (budget !== undefined && budgetCaps !== undefined) {
-              const finalAlias =
-                result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
-              if (lastUsage) {
-                try {
-                  // Token stamp needs no pricing — land it whenever the usage tail
-                  // is present (dashboard accounting); price the cost only when the
-                  // served alias + costOf are wired. Decoupled, like the chat path.
-                  const cost =
-                    finalAlias && budget.costOf ? budget.costOf(finalAlias, lastUsage) : null;
-                  backfillCompletionCost(result.decision, finalAlias, cost, lastUsage);
-                } catch {
-                  /* fail-open: leave cost null on any pricing miss */
-                }
+            // Streamed token accounting + cost backfill. The token stamp is NOT a
+            // budget feature: admin replay intentionally omits budget deps but still
+            // records telemetry, so stamp usage whenever the provider emitted a
+            // usage tail. Cost pricing is opportunistic when the composition root
+            // wired costOf. Budget settlement remains gated inside settleBudget().
+            const finalAlias =
+              result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+            if (lastUsage) {
+              try {
+                const cost =
+                  finalAlias && budget?.costOf ? budget.costOf(finalAlias, lastUsage) : null;
+                backfillCompletionCost(result.decision, finalAlias, cost, lastUsage);
+              } catch {
+                /* fail-open: leave cost/usage null on any mapping miss */
               }
-              await settleBudget(tokensFromUsage(lastUsage));
             }
+            await settleBudget(tokensFromUsage(lastUsage));
             // Per-account OAuth usage (providers page Tier 2) — recorded for every
             // served stream, independent of budgets. The served alias drops a STALE
             // account after a fallback. completion_usd is null for flat-rate

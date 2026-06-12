@@ -689,6 +689,12 @@ describe("runReplay (anthropic_messages / openai_responses / gemini)", () => {
     // not raw OpenAI chat chunks.
     expect(rec.payloads[0]?.responseJson).toContain("event: response.");
     expect(rec.inserts).toHaveLength(1);
+    expect(rec.inserts[0]?.decision.usage).toEqual({
+      prompt_tokens: 3,
+      completion_tokens: 1,
+      cached_tokens: null,
+      cache_creation_tokens: null,
+    });
   });
 });
 
