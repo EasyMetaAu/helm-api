@@ -185,6 +185,28 @@ export type AnthropicMessagesRequest = z.infer<typeof AnthropicMessagesRequestSc
 // `thinking` extension (the request-level reasoning/thinking passthrough bag).
 type IRThinkingExt = { type: "thinking"; text: string; signature?: string };
 
+// Claude Code ≥2.1.29 injects a per-request billing attribution block as the FIRST
+// top-level system entry: "x-anthropic-billing-header: cc_version=…; cch=<hash>;".
+// The cch hash is recomputed on EVERY request, so forwarding the block upstream
+// breaks prompt caching (strict prefix match) for the entire conversation —
+// cached_tokens=0 + a full prefix re-write per turn (anthropics/claude-code #24168,
+// #40652). Through a gateway it carries no attribution value (the upstream sees
+// helm's credentials, not the client's), so it is stripped unconditionally on the
+// way in. LiteLLM strips the same prefix for providers that choke on it
+// (translate_system_message); helm has no first-party-attribution case to preserve.
+const BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
+
+// undefined = nothing left to hoist (the system param was only the billing block).
+function stripBillingHeader(
+  system: z.infer<typeof AnthropicSystemSchema>,
+): z.infer<typeof AnthropicSystemSchema> | undefined {
+  if (typeof system === "string") {
+    return system.startsWith(BILLING_HEADER_PREFIX) ? undefined : system;
+  }
+  const kept = system.filter((b) => !b.text.startsWith(BILLING_HEADER_PREFIX));
+  return kept.length > 0 ? kept : undefined;
+}
+
 // —— system: string | block[] -> IR message content (string or multipart). ————————
 function normalizeSystem(system: z.infer<typeof AnthropicSystemSchema>): IRMessage["content"] {
   if (typeof system === "string") return system;
@@ -342,9 +364,13 @@ export function transformRequestOut(req: unknown): IRRequest {
   const messages: IRMessage[] = [];
   const thinking: IRThinkingExt[] = [];
 
-  // Rule 1: hoist the top-level system prompt to the head of messages.
+  // Rule 1: hoist the top-level system prompt to the head of messages (after
+  // dropping the cache-busting Claude Code billing block, see stripBillingHeader).
   if (parsed.system !== undefined) {
-    messages.push({ role: "system", content: normalizeSystem(parsed.system) });
+    const system = stripBillingHeader(parsed.system);
+    if (system !== undefined) {
+      messages.push({ role: "system", content: normalizeSystem(system) });
+    }
   }
 
   for (const m of parsed.messages) {

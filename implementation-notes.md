@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-12 · 剥离 Claude Code 计费归因块，修复上游缓存全 miss（docs/05；LiteLLM parity；原则 4/7）
+
+- **缘起**：用户报告 admin 请求详情里捕获的 payload「数据全是重复的」，怀疑 helm 拼接有 bug。调查结论：**helm 无 bug**（`messages.ts` 在 parse 前 `c.req.text()` 原样捕获），畸形是 Claude Code ≥2.1.29 的客户端行为——它把 `x-anthropic-billing-header: cc_version=…; cc_entrypoint=cli; cch=<hash>;` 注入为 top-level `system[0]`，且 `cch` 哈希**每请求轮换**（实测同会话 `fd3e2`→`8f46b`）。prompt cache 是严格前缀匹配 → 首块一变全部失效：生产实测该会话**每轮 `cached_tokens=0` + ~42.8K cache 重写 + 150–200K Opus 输入全额未缓存计费**（≈10× 成本）。上游已知：anthropics/claude-code#24168（Bedrock 400 reserved keyword）、#40652（cch 替换改写历史 tool_result，closed not-planned）、motiful/cc-cache-audit（A/B 实测省 ~85% 系统提示词 token）。
+- **修复**：`protocol/anthropic/request.ts` 的 `transformRequestOut`（native→IR）新增 `stripBillingHeader`——**无条件**丢弃以 `x-anthropic-billing-header:` 开头的 system 块（string 形式整体即 header → 不发 system；数组过滤后为空 → 不发；prefix 锚定 `startsWith`，正文里仅提及不受影响；user/assistant 内容不动）。LiteLLM 是 per-provider 开关（base `should_strip_billing_metadata()=False`，Bedrock/Vertex/Azure/DeepSeek/MiniMax 覆写 True）；helm 不需要开关——上游永远见 helm 自己的凭证，归因块零价值（Occam，不留撒谎的旋钮）。**capture 在 parse 之前 → admin payload 仍显示客户端原文，只有上游 body 被清理**（可观测性保留）。
+- **顺带发现（用户应知）**：Claude Code（≥2.1.17x，API-key 模式实测）发送**按角色折叠**的 5 消息会话：[首条 user，system(MCP)，assistant(全部轮次合并)，user(全部 tool_result 合并)，system(周期性 task 提醒串接成单条——admin 里看到的「重复」即此)]，图片被剥成文本占位。这是客户端线格式，网关不重写。折叠使 tool_result 桶每轮整体位移 → 剥离 header 后**只有 tools+system 前缀（~42.8K/轮）恢复缓存命中**，会话主体仍受客户端格式限制。客户端侧可另设 `CLAUDE_CODE_ATTRIBUTION_HEADER=0`（用户选择不改客户端，故网关兜底）。
+- **验证**：TDD 红（3 失败钉死 strip 语义）→绿；anthropic protocol 117 绿、gateway messages 路由 64 绿、`pnpm typecheck`/`lint` 绿。
+
 ## 2026-06-12 · 首页 Token 计量 dashboard（持久化 + 聚合端点 + LayerChart 图表；CLAUDE.md 原则 1/3/7；docs/02/07）
 
 - **缘起**：用户要在 `/admin` 首页看到「总/输入/输出/缓存 Token」与两张图（用量趋势 + 各模型占比），参考 `claude-relay-service` dashboard。阻塞点：helm-api **从不持久化 token 计数**——`catalog/cost.ts::usageFromBody()` 早就能解析 OpenAI/Anthropic 两种 usage 形状，但 `resolveCostUsd()` 只留 USD、丢掉 token 数；telemetry 表只存 `cost_usd`；无聚合端点（首页此前 client 侧 reduce ≤200 行样本）；无图表库。决策（已与用户敲定）：**cards + 2 charts / LayerChart / forward-only 不回填**。
@@ -25,19 +32,13 @@
 - **取舍/仍开放**：Helm 目前没有 Responses object/session/history store，所以带 `previous_response_id` 且只提交历史 tool-output continuation 的请求不能假装可处理；本轮选择 **fail-closed**，返回明确错误，避免把缺少本地 `function_call` 上下文的 `function_call_output` 转成无效 Chat tool message。单纯携带 `previous_response_id` 的普通字符串 input 仍保留在 `provider_raw` 用于后续 Responses-native round-trip；完整 continuation 支持需要 response store、input_items/history 查询和 tool-call correlation。
 - **验证**：TDD 红→绿。新增/更新 focused regression 覆盖 Responses `tool_choice` 双向规范化、`previous_response_id` continuation fail-closed、Codex provider `tool_choice`、Anthropic native passthrough + beta headers、Gemini `safetySettings` round-trip，以及 gateway 不把 `previous_response_id` / `truncation` 泄漏到 OpenAI-compatible upstream。验证命令：focused Vitest 244 绿；`pnpm typecheck` 绿；`pnpm lint` 绿；`pnpm test` 初跑因本地 `better-sqlite3` ABI 137 vs Node 25 ABI 141 失败，执行 `pnpm --filter @helm/core rebuild better-sqlite3` 后完整 `pnpm test` 240 files / 3036 tests 绿。
 
-## 2026-06-12 · 新增 claude-fable-5 配置支持（CLAUDE.md 原则 2/6；docs/04；实现约定「能力与定价数据源」）
-
-- **缘起**：用户要求为 `config/` 增加 Claude Fable 5 支持，能力/定价从 OpenRouter API 现场下载。
-- **数据来源**：`GET https://openrouter.ai/api/v1/models` 的 `anthropic/claude-fable-5`（2026-06-12）——ctx 1,000,000、max_completion_tokens 128,000、input modalities text+image+**file**（→ 我们的 `document`）。pricing 当时记录在案但本轮**未落库**（见取舍）。
-- **实现（完全镜像 `claude-opus` lane 模式）**：① `lanes.yaml` 新增 `claude-fable` lane，与 opus 一样**以 native `anthropic/claude-fable-5` OAuth 别名领衔**（未连接订阅 fail-open 跳过），直接降级进 GPT 领衔的 `premium` 链（`fallback: [premium]`）。② `model-aliases.yaml` 加 `claude-fable-*` glob（最长字面胜过广义 `claude-*` → balanced 兜底），吸收日期后缀。
-- **取舍（用户决策）**：最初版本另加了 `openrouter/claude-fable-5` 静态镜像兜底（providers/capabilities/pricing 三处 + lane fallback 首项），用户明确要求**去掉、不要 fallback 到 OpenRouter**，故回退为与 `claude-opus` 完全一致：无静态 Fable 镜像，无订阅时经 `premium` 服务。native `anthropic/claude-fable-5` 主选项不在 `providers.yaml` 静态注册——与现有 `anthropic/claude-opus-4-8` 等一致，靠运行时 admin OAuth pool 注册（无 boot 时 lane→provider 解析校验，不会 fail-closed 拒启动）。
-- **验证**：TDD 红→绿。`samples.test.ts` 新增 lane primary/fallback + alias glob 断言，`catalog/load.test.ts` 端到端断言 shipped yaml 加载出 Fable 能力+cache 定价。先确认两测试红（lane primary `undefined`、catalog entry `undefined`），实现后 `pnpm exec vitest run packages/core/src/config packages/core/src/catalog` 98 绿、`pnpm typecheck`、`pnpm lint` 全通过。**部署坑**：线上 `/opt/helm-api/config` 是运营者属主，需手动同步这两个 yaml 才生效（见 [[deploy-never-overwrite-config]]）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-12 · 新增 claude-fable-5 配置支持（原则 2/6；docs/04）：能力取自 OpenRouter API（ctx 1M / max_out 128K / text+image+file→document，pricing 未落库）；完全镜像 claude-opus 模式——`lanes.yaml` 新 `claude-fable` lane 以 native OAuth 别名领衔、`fallback:[premium]`，`model-aliases.yaml` 加 `claude-fable-*` glob；用户拍板**去掉 OpenRouter 静态镜像兜底**；native 别名靠运行时 OAuth pool 注册不进 providers.yaml。TDD samples+catalog 98 绿。部署坑：需手动同步 `/opt/helm-api/config` 两个 yaml（[[deploy-never-overwrite-config]]）。
 
 ### 2026-06-12 · Codex/Responses 流式兼容修复（状态可见 + 生命周期路由形状；原则 1/7/8；docs/05/07）：修 Responses SSE 解析（CRLF/multi-line/tail/event fallback/reasoning deltas）、补 `/v1/responses` lifecycle/helper URL family auth-first structured unsupported；`stream:true` 路由立即发 `response.created`/`in_progress` prelude 并复用 route-stamped response id，Codex 客户端可低首 token 延迟看到状态。取舍：非完整 Responses object store/token counter，helper endpoints fail-closed unsupported。
 

@@ -893,3 +893,79 @@ describe("anthropic document input (P7 multimodal)", () => {
     expect(codes).toContain("data_loss:modalities");
   });
 });
+
+// Claude Code ≥2.1.29 injects a per-request billing attribution block as the FIRST
+// top-level system entry: "x-anthropic-billing-header: cc_version=…; cch=<hash>;".
+// The cch hash is recomputed EVERY request, so passing it upstream breaks prompt
+// caching (strict prefix match) for the whole conversation — measured in prod as
+// cached_tokens=0 + a full ~42K prefix re-write per turn (anthropics/claude-code
+// #24168, #40652). Through a gateway the block carries no attribution value (helm
+// substitutes its own upstream credentials), so the inbound transform strips it
+// unconditionally — LiteLLM parity (translate_system_message billing strip).
+describe("anthropic billing-header strip (inbound)", () => {
+  const BILLING =
+    "x-anthropic-billing-header: cc_version=2.1.173.d11; cc_entrypoint=cli; cch=fd3e2;";
+
+  it("drops the billing block from a block-array system, preserving the rest + cache_control", () => {
+    const ir = transformRequestOut({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      system: [
+        { type: "text", text: BILLING },
+        { type: "text", text: "You are Claude Code.", cache_control: { type: "ephemeral" } },
+        { type: "text", text: "main prompt", cache_control: { type: "ephemeral" } },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(() => IRRequestSchema.parse(ir)).not.toThrow();
+    expect(ir.messages[0]?.role).toBe("system");
+    expect(ir.messages[0]?.content).toEqual([
+      { type: "text", text: "You are Claude Code.", cache_control: { type: "ephemeral" } },
+      { type: "text", text: "main prompt", cache_control: { type: "ephemeral" } },
+    ]);
+    // Outbound round-trip: the upstream body must not resurrect the block.
+    expect(JSON.stringify(transformRequestIn(ir))).not.toContain("x-anthropic-billing-header");
+  });
+
+  it("drops a string system that IS the billing header (no empty system turn emitted)", () => {
+    const ir = transformRequestOut({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      system: BILLING,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(() => IRRequestSchema.parse(ir)).not.toThrow();
+    expect(ir.messages).toEqual([{ role: "user", content: "hi" }]);
+  });
+
+  it("emits no system turn when ALL system blocks are billing headers", () => {
+    const ir = transformRequestOut({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      system: [{ type: "text", text: BILLING }],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(() => IRRequestSchema.parse(ir)).not.toThrow();
+    expect(ir.messages).toEqual([{ role: "user", content: "hi" }]);
+  });
+
+  it("keeps blocks that merely MENTION the header mid-text (strip is prefix-anchored)", () => {
+    const mention = `discussing the x-anthropic-billing-header: cch=fd3e2; bug`;
+    const ir = transformRequestOut({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      system: [{ type: "text", text: mention }],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.messages[0]).toEqual({ role: "system", content: [{ type: "text", text: mention }] });
+  });
+
+  it("leaves user/assistant content untouched even when it starts with the prefix", () => {
+    const ir = transformRequestOut({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      messages: [{ role: "user", content: BILLING }],
+    });
+    expect(ir.messages).toEqual([{ role: "user", content: BILLING }]);
+  });
+});
