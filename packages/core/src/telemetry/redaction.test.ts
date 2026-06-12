@@ -71,6 +71,25 @@ describe("redact", () => {
     expect(redact(input)).toEqual(input);
   });
 
+  // Load-bearing guard for the dashboard token-accounting block (DecisionRecord
+  // `usage`). The container key is `usage` — deliberately NOT matching the secret
+  // pattern — so the object is recursed and its scalar `*_tokens` COUNT leaves pass
+  // through verbatim. If anyone renames the block to a "token"-matching key the
+  // whole object would summarize to {redacted:true,kind:"object"} and the counts
+  // would vanish from telemetry. This pins that the counts survive.
+  it("preserves the DecisionRecord usage token-count block verbatim", () => {
+    const input = {
+      usage: {
+        prompt_tokens: 1234,
+        completion_tokens: 567,
+        cached_tokens: 800,
+        cache_creation_tokens: 0,
+      },
+      trace_id: "t1",
+    };
+    expect(redact(input)).toEqual(input);
+  });
+
   it("boolean/null under a secret-matching key pass through; strings/objects stay redacted", () => {
     const out = redact({
       token_present: true, // boolean — not a credential

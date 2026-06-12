@@ -328,6 +328,46 @@ describe("DecisionRecordSchema", () => {
     expect(junk.success).toBe(false);
   });
 
+  it("defaults usage to null when omitted (legacy records round-trip)", () => {
+    // Dashboard token accounting: the routing core emits null and pre-feature
+    // records have no `usage`, so an absent block must parse as null (present,
+    // never undefined) — the gateway stamps the real counts post-served.
+    const parsed = DecisionRecordSchema.parse(fullRecord());
+    expect(parsed.usage).toBeNull();
+  });
+
+  it("round-trips a stamped usage token-count block", () => {
+    const parsed = DecisionRecordSchema.parse({
+      ...fullRecord(),
+      usage: {
+        prompt_tokens: 1200,
+        completion_tokens: 340,
+        cached_tokens: 800,
+        cache_creation_tokens: 64,
+      },
+    });
+    expect(parsed.usage?.prompt_tokens).toBe(1200);
+    expect(parsed.usage?.completion_tokens).toBe(340);
+    expect(parsed.usage?.cached_tokens).toBe(800);
+    expect(parsed.usage?.cache_creation_tokens).toBe(64);
+  });
+
+  it("defaults absent usage leaves to null and rejects a negative count", () => {
+    // A partially-known block validates (each leaf .nullable().default(null))…
+    const parsed = DecisionRecordSchema.parse({
+      ...fullRecord(),
+      usage: { prompt_tokens: 10 },
+    });
+    expect(parsed.usage?.prompt_tokens).toBe(10);
+    expect(parsed.usage?.completion_tokens).toBeNull();
+    // …but a negative token count is fail-closed.
+    const bad = DecisionRecordSchema.safeParse({
+      ...fullRecord(),
+      usage: { prompt_tokens: -1 },
+    });
+    expect(bad.success).toBe(false);
+  });
+
   it("defaults protocol to null when omitted (legacy records round-trip)", () => {
     const parsed = DecisionRecordSchema.parse(fullRecord());
     expect(parsed.protocol).toBeNull();

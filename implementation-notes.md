@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-06-12 · 首页 Token 计量 dashboard（持久化 + 聚合端点 + LayerChart 图表；CLAUDE.md 原则 1/3/7；docs/02/07）
+
+- **缘起**：用户要在 `/admin` 首页看到「总/输入/输出/缓存 Token」与两张图（用量趋势 + 各模型占比），参考 `claude-relay-service` dashboard。阻塞点：helm-api **从不持久化 token 计数**——`catalog/cost.ts::usageFromBody()` 早就能解析 OpenAI/Anthropic 两种 usage 形状，但 `resolveCostUsd()` 只留 USD、丢掉 token 数；telemetry 表只存 `cost_usd`；无聚合端点（首页此前 client 侧 reduce ≤200 行样本）；无图表库。决策（已与用户敲定）：**cards + 2 charts / LayerChart / forward-only 不回填**。
+- **三层改动**：
+  1. **持久化**：`DecisionRecord` 加可选 `usage` 块（`TokenUsageSchema`，4 个整数计数）。**容器键必须叫 `usage`**——redactor 的 `DEFAULT_SECRET_PATTERN` 含 `token`，若键名带 "token" 整个对象会被 summarize 成 `{redacted:true}`；标量 `*_tokens` 叶子本身能原样通过（[[已修的 memory_tokens_injected]] 同理）。由 pinned redaction 测试钉死。gateway `backfillCompletionCost` 加第 4 参 `usage?`，复用 **core 的** `usageFromBody`（别名导入；gateway 本地同名函数只返回原始对象）映射后盖戳；token 盖戳与 cost **解耦**（null cost + 有 usage 仍盖 token，非流式路径也补盖）。telemetry 表反范式化 5 列（`prompt/completion/cached/cache_creation_tokens` + `served_model`）便于 SQL 聚合；迁移 **sqlite v22 / pg v21**（两套 ledger 独立编号，sqlite 因早期重建领先一号）。
+  2. **聚合端点**：`TelemetryStore.aggregate(start,end,bucket)` 返回 `{totals, series[], byModel[]}`，三条 SQL 全走 `SUM`/`COUNT`/`GROUP BY`（绝不逐行 JS）。分桶用 epoch-ms 整除（窗口大小经 `sql.raw` 内联，确保两方言都做整数除法），排序在共享 `aggregate-shape.ts` 里用 JS 做（方言无关）。token sum 用 `COALESCE(...,0)`，cost/latency 保持 nullable（「未测量」≠ 0）。新 `GET /admin/api/stats`，查询用 fail-open 的 `StatsQuerySchema`（默认末 24h / day）。
+  3. **前端**：`layerchart@^1.0.13`（Svelte5 兼容，SSR 已关无需 guard）；`lib/api/stats.ts` 客户端 + `+page.ts` loader 改调 `getStats`（recent-requests 表仍用 `listRequests`）；4 张 token card + AreaChart 趋势 + PieChart（`innerRadius:-40` 甜甜圈）各模型占比；`formatTokens`（1.2M/34.5K）；i18n en/zh-hans/zh-hant/ja/ko。
+- **坑/取舍**：**forward-only**——历史行 token 列与 `served_model` 为 NULL，趋势从部署起、by-model 旧流量归到 "unknown" 桶。avg latency 仍从 decision JSON 读（`json_extract`/`->>`），有界窗口可接受；变热再反范式化。LayerChart 的 `AreaChart`/`PieChart` 用 Svelte4 风格 props 但 runes 模式下渲染正常；类型上需给两图显式 point 类型，否则各 series accessor 把 `TData` 收窄成不同内联形状无法统一。WebFetch/Context7 当时都取不到 LayerChart API，最终读包内 `.d.ts` 作为 ground truth。
+- **追加修复**：review 发现 non-chat 协议的 admin 流式 replay 没有 budget deps 时会跳过 streamed usage 盖戳，导致 replay telemetry 被 dashboard 少算；已把 shared `messages-pipeline` 的 token stamp 从 budget-only 分支移出，budget settle 仍保持 gated。
+- **验证**：`pnpm typecheck`/`lint` 全绿；`pnpm test` 绿（唯一 full-run 红是已知 PGlite 5s 超时 flake `memory-jobs.test.ts`，隔离重跑 8/8 过——见 [[pnpm-test-pglite-flake]]）。新覆盖：redaction guard、schema round-trip、gateway token-stamp（OpenAI+Anthropic）、aggregate contract（**两 adapter** sqlite+pglite）、stats route、`formatTokens`、dashboard locale coverage。13 个迁移-scoped 测试因预置 applied 版本列表少了 v22/v21 而红，已补齐（图表渲染本身 jsdom 不可测）。
+
 ## 2026-06-12 · 四协议互译保真补丁（Responses tool_choice / Anthropic native controls / Gemini safety；CLAUDE.md 原则 1/7/8；docs/05/07）
 
 - **缘起**：继续对照本地 LiteLLM review 四协议互译缺口。剩余问题集中在“字段形状接近但不完全相同”的边缘：Responses `tool_choice` 在 Responses 与 Chat 之间形状不同；Responses `previous_response_id` 的 tool-output continuation 需要服务端历史；Anthropic native/control 参数进 IR 后丢失；Gemini `safetySettings` 没有 round-trip；Anthropic provider 使用 `context_management` / `speed:"fast"` 时缺 feature beta header。
@@ -22,19 +33,13 @@
 - **取舍（用户决策）**：最初版本另加了 `openrouter/claude-fable-5` 静态镜像兜底（providers/capabilities/pricing 三处 + lane fallback 首项），用户明确要求**去掉、不要 fallback 到 OpenRouter**，故回退为与 `claude-opus` 完全一致：无静态 Fable 镜像，无订阅时经 `premium` 服务。native `anthropic/claude-fable-5` 主选项不在 `providers.yaml` 静态注册——与现有 `anthropic/claude-opus-4-8` 等一致，靠运行时 admin OAuth pool 注册（无 boot 时 lane→provider 解析校验，不会 fail-closed 拒启动）。
 - **验证**：TDD 红→绿。`samples.test.ts` 新增 lane primary/fallback + alias glob 断言，`catalog/load.test.ts` 端到端断言 shipped yaml 加载出 Fable 能力+cache 定价。先确认两测试红（lane primary `undefined`、catalog entry `undefined`），实现后 `pnpm exec vitest run packages/core/src/config packages/core/src/catalog` 98 绿、`pnpm typecheck`、`pnpm lint` 全通过。**部署坑**：线上 `/opt/helm-api/config` 是运营者属主，需手动同步这两个 yaml 才生效（见 [[deploy-never-overwrite-config]]）。
 
-## 2026-06-12 · Codex/Responses 流式兼容修复（状态可见 + 生命周期路由形状；CLAUDE.md 原则 1/7/8；docs/05/07）
-
-- **缘起**：继续按官方 OpenAI OpenAPI / openai-node、LiteLLM Responses 实现和既有 wiki review 四协议兼容性。用户侧现象是 Codex 经常看不到状态、感觉 API 慢；代码侧问题集中在 native Codex Responses SSE 解析和 Helm `/v1/responses` route family 的协议形状。
-- **修复**：`openai-responses` provider 的 SSE reader 不再只找第一条 `data:`，现在支持 CRLF、multi-line `data:`、`event:` fallback（JSON 无 `type` 时）、最后一个未以空行终止的 SSE frame；`response.reasoning_summary.delta` / `response.reasoning_summary_text.delta` / `response.reasoning_text.delta` 都映射到 OpenAI Chat `reasoning_content`，非流式聚合也保留 `message.reasoning_content`。共享 Responses reverse bridge 同步接受官方 `response.reasoning_text.delta`，避免 native Responses 上游的推理文本被 drop。gateway 现在注册官方/LiteLLM Responses lifecycle/helper URL family（retrieve/delete/cancel/input_items/input_tokens/compact，含 `/v1/responses`、`/responses`、`/openai/v1/responses` 前缀），先鉴权再返回 OpenAI-shaped `invalid_request`，不再漏成 Hono raw 404。
-- **追加修复（低首 token/状态可见）**：`/v1/responses` 的 `stream:true` 分支不再等 `pipeline.run()` 完成才返回 `streamSSE`。route 在鉴权/限流/并发/JSON/入站转换完成后，立即写出合法 `response.created` + `response.in_progress` prelude，并把同一个 `responses_stream_id` 盖到 IR metadata；共享 pipeline 的 Responses stream 用该 id 生成后续 terminal response object，route 跳过 pipeline 内部重复 prelude。这样 Codex 客户端能立刻看到 Responses 状态帧，后续 provider 选择、upstream TTFB、memory/budget 等延迟不再表现为“完全没状态”。
-- **取舍/仍开放**：这不是完整 Responses object store 或 token counter。GET/DELETE/cancel/input_items/input_tokens/compact 目前是**协议形状兼容 + fail-closed unsupported**，不是假成功；真实现需要 response-object 存储、background polling 状态、provider-native executor contract、cursor/input-items 数据源，或 Responses-native token counting。非流式 Helm 请求仍必须聚合完整 upstream SSE 后才能返回一个 Chat response；客户端要低首 token 延迟必须走 `stream:true`，但流式 route 现在会先给协议 prelude，而不是等上游首 chunk。
-- **验证**：TDD 红→绿。新增/更新 provider、shared Responses stream、gateway route 测试覆盖 CRLF/multi-line/tail SSE、event fallback、reasoning deltas、lifecycle endpoint auth-first structured unsupported，以及 `stream:true` route 在 routing promise 未 resolve 前返回 SSE/首帧 prelude、pipeline 使用 route-stamped response id。定向 `responses.test.ts`、`messages-pipeline.test.ts`、`responses-stream.test.ts` 已通过；提交前还需跑四协议 focused suite + typecheck/lint/build/full unit/e2e。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-12 · Codex/Responses 流式兼容修复（状态可见 + 生命周期路由形状；原则 1/7/8；docs/05/07）：修 Responses SSE 解析（CRLF/multi-line/tail/event fallback/reasoning deltas）、补 `/v1/responses` lifecycle/helper URL family auth-first structured unsupported；`stream:true` 路由立即发 `response.created`/`in_progress` prelude 并复用 route-stamped response id，Codex 客户端可低首 token 延迟看到状态。取舍：非完整 Responses object store/token counter，helper endpoints fail-closed unsupported。
 
 ### 2026-06-12 · LiteLLM 协议兼容面修复（四协议路由 + Gemini usage；原则 1/7/8；docs/05/07）：对照 LiteLLM 补 drop-in 缺口——Gemini `parseGeminiPath` 接受 `/v1beta/models/{model:path}` 与 `/models/{model:path}`、`streamGenerateContent` 一律流式；Gemini 流式 `promptTokenCount` 加回 cache read/write（gateway 渲染前先标准化 usage 防重复加）；OpenAI Chat 增 `/chat/completions`+engine/deployment 路径别名、Responses 增 `/responses`+`/openai/v1/responses`、Anthropic 加 event_logging stub + 本地 count_tokens 估算。取舍：Responses GET/DELETE/cancel/input_items/compact 仍需 object store，本轮只补 create aliases；core transformer 不做网络 fetch。TDD 红例钉死 Gemini 流式 double-count（140→100）。typecheck/lint/build/test(3020)/e2e(64) 绿。
 

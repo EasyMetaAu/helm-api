@@ -114,6 +114,26 @@ export const CostBreakdownSchema = z.object({
   total_usd: z.number().nullable(),
 });
 
+// Token accounting for the SERVED completion (docs/07). Mirrors cost_breakdown:
+// stamped by the GATEWAY after the served usage tail is parsed
+// (backfillCompletionCost), NOT by the routing core (which is headless about token
+// counts, exactly as it is about streamed cost). Every leaf is an INTEGER COUNT;
+// null = "not measured" (no usage reported), kept DISTINCT from a measured 0.
+//
+// REDACTION (principle 7, load-bearing): the telemetry redactor SUMMARIZES any
+// object whose KEY matches /(api[_-]?key|authorization|password|secret|token|
+// credential)/i. The container key is `usage` — it deliberately does NOT contain
+// the substring "token" — so the block is recursed normally and its scalar
+// `*_tokens` leaves pass through verbatim (scalars are never credentials). NEVER
+// rename this block to anything containing "token" or the whole object is lost to
+// {redacted:true,kind:"object"}. Pinned by redaction.test.ts.
+export const TokenUsageSchema = z.object({
+  prompt_tokens: z.number().int().nonnegative().nullable().default(null),
+  completion_tokens: z.number().int().nonnegative().nullable().default(null),
+  cached_tokens: z.number().int().nonnegative().nullable().default(null),
+  cache_creation_tokens: z.number().int().nonnegative().nullable().default(null),
+});
+
 // Memory inject observability (docs/08 Phase 2 Step 10). Stamped onto the record
 // by the GATEWAY after the inject phase ran (the routing core never touches
 // memory — it is a middleware); null when memory inject was off / skipped /
@@ -187,6 +207,12 @@ export const DecisionRecordSchema = z.object({
   // (see MemoryDecisionSchema). `.default(null)` keeps the routing core's
   // builders and all pre-existing records valid without knowing about memory.
   memory: MemoryDecisionSchema.nullable().default(null),
+  // Served-completion token accounting (see TokenUsageSchema). Stamped by the
+  // GATEWAY after the served usage tail is parsed (backfillCompletionCost), like
+  // cost_breakdown; the routing core emits null (headless about token counts).
+  // `.nullable().default(null)` keeps the core builders and all pre-existing
+  // records valid without it.
+  usage: TokenUsageSchema.nullable().default(null),
 });
 
 export type DecidedBy = z.infer<typeof DecidedBySchema>;
@@ -198,5 +224,6 @@ export type AttemptErrorDetail = z.infer<typeof AttemptErrorDetailSchema>;
 export type ProviderAttempt = z.infer<typeof ProviderAttemptSchema>;
 export type FinalDecision = z.infer<typeof FinalDecisionSchema>;
 export type CostBreakdown = z.infer<typeof CostBreakdownSchema>;
+export type TokenUsageBreakdown = z.infer<typeof TokenUsageSchema>;
 export type MemoryDecision = z.infer<typeof MemoryDecisionSchema>;
 export type DecisionRecord = z.infer<typeof DecisionRecordSchema>;

@@ -1,4 +1,6 @@
 import type { DecisionRecord, TelemetryStore } from "@helm/core";
+import { usageFromBody as parseUsage } from "@helm/core";
+import type { TokenUsageBreakdown } from "@helm/shared";
 import type { WriteQueue } from "../runtime/write-queue.js";
 
 // Shared full request/response capture + streamed-cost backfill helpers, used by
@@ -243,16 +245,36 @@ export function usageFromSSE(raw: string): StreamUsage | null {
   return null;
 }
 
-// Backfill the streamed completion cost onto the decision record IN PLACE (#6:
-// streamed usage is unknown at peek time, so execute() recorded cost null). Sets
-// the matching ok attempt's cost and the cost_breakdown completion/total. No-op
-// when cost is null (pricing unknown / no usage) — the record keeps its honest
-// "not measured" null rather than a misleading 0.
+// Map the served upstream usage tail to the DecisionRecord token block (dashboard
+// token accounting). Reuses CORE's usageFromBody — the single source of truth for
+// the OpenAI/Anthropic cache-field precedence — so the gateway never re-implements
+// that parsing (its LOCAL usageFromBody only unwraps the raw usage object). Each
+// leaf is null when not reported, kept DISTINCT from a measured 0.
+function tokenBreakdownFromUsage(u: StreamUsage): TokenUsageBreakdown {
+  const t = parseUsage({ usage: u });
+  return {
+    prompt_tokens: t.promptTokens ?? null,
+    completion_tokens: t.completionTokens ?? null,
+    cached_tokens: t.cachedPromptTokens ?? null,
+    cache_creation_tokens: t.cacheCreationPromptTokens ?? null,
+  };
+}
+
+// Backfill the streamed completion cost AND the served token counts onto the
+// decision record IN PLACE (#6: streamed usage is unknown at peek time, so
+// execute() recorded cost null). The two stamps are DECOUPLED: the token stamp
+// rides `usage` and needs no pricing, so it lands whenever a usage tail is present
+// (dashboard accounting must work even when pricing is unwired); the cost stamp is
+// a no-op when `cost` is null (pricing unknown) — the record keeps its honest
+// "not measured" null rather than a misleading 0. Pass null cost + a usage tail to
+// stamp tokens only (non-stream paths, where execute() already settled the cost).
 export function backfillCompletionCost(
   decision: DecisionRecord,
   alias: string | null,
   cost: number | null,
+  usage?: StreamUsage | null,
 ): void {
+  if (usage) decision.usage = tokenBreakdownFromUsage(usage);
   if (cost === null) return;
   if (alias) {
     for (const a of decision.provider_attempts) {

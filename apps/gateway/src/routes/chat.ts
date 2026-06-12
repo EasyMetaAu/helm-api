@@ -685,8 +685,12 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
           try {
             const usage = usageFromSSE(rawSse);
-            if (usage && finalAlias && deps.costOf) {
-              backfillCompletionCost(result.decision, finalAlias, deps.costOf(finalAlias, usage));
+            if (usage) {
+              // Cost backfill needs the served alias + pricing closure; the TOKEN
+              // stamp does not. Stamp usage whenever the tail has it (dashboard
+              // accounting) and price the cost only when costOf is wired.
+              const cost = finalAlias && deps.costOf ? deps.costOf(finalAlias, usage) : null;
+              backfillCompletionCost(result.decision, finalAlias, cost, usage);
             }
           } catch {
             c.get("logger").log("warn", "cost.stream_backfill_failed", { trace_id: traceId });
@@ -729,6 +733,16 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     }
 
     // --- non-streaming branch ---
+    // Stamp the served token counts onto the decision BEFORE it is persisted
+    // (cost is already settled by execute() on this path, so pass null cost — only
+    // usage is written). usage rides the assembled OpenAI body. Fail-open.
+    if (result.body !== null) {
+      try {
+        backfillCompletionCost(result.decision, null, null, usageFromBody(result.body));
+      } catch {
+        c.get("logger").log("warn", "tokens.backfill_failed", { trace_id: traceId });
+      }
+    }
     await capturePayload(result.body !== null ? JSON.stringify(result.body) : null);
     await persist(result.decision);
     if (result.final.status === "error" || result.body === null) {

@@ -8,6 +8,7 @@ import type {
   KeyStore,
   RecentDecisionRecord,
   RequestPayload,
+  TelemetryAggregate,
   TelemetryPage,
   TelemetryPageQuery,
   TelemetryStore,
@@ -144,6 +145,70 @@ class InMemoryTelemetryStore implements TelemetryStore {
       if (p.createdAt.getTime() < olderThanMs) this.payloads.delete(id);
     }
   }
+  // Dashboard token-accounting aggregate — a minimal in-memory roll-up over the
+  // half-open window so the in-memory store satisfies the full port contract.
+  async aggregate(
+    startMs: number,
+    endMs: number,
+    bucket: "hour" | "day",
+  ): Promise<TelemetryAggregate> {
+    const inWindow = this.rows.filter((r) => r.at.getTime() >= startMs && r.at.getTime() < endMs);
+    const bucketMs = bucket === "hour" ? 3_600_000 : 86_400_000;
+    const num = (n: number | null | undefined) => n ?? 0;
+    const totals = {
+      requests: inWindow.length,
+      okCount: inWindow.filter((r) => r.rec.final.status === "ok").length,
+      errorCount: inWindow.filter((r) => r.rec.final.status === "error").length,
+      totalCostUsd: null as number | null,
+      promptTokens: inWindow.reduce((s, r) => s + num(r.rec.usage?.prompt_tokens), 0),
+      completionTokens: inWindow.reduce((s, r) => s + num(r.rec.usage?.completion_tokens), 0),
+      cachedTokens: inWindow.reduce((s, r) => s + num(r.rec.usage?.cached_tokens), 0),
+      cacheCreationTokens: inWindow.reduce(
+        (s, r) => s + num(r.rec.usage?.cache_creation_tokens),
+        0,
+      ),
+      avgLatencyMs: null as number | null,
+    };
+    const seriesMap = new Map<number, TelemetryAggregate["series"][number]>();
+    for (const r of inWindow) {
+      const k = Math.floor(r.at.getTime() / bucketMs) * bucketMs;
+      const b = seriesMap.get(k) ?? {
+        bucketStartMs: k,
+        promptTokens: 0,
+        completionTokens: 0,
+        cachedTokens: 0,
+        cacheCreationTokens: 0,
+        requests: 0,
+      };
+      b.promptTokens += num(r.rec.usage?.prompt_tokens);
+      b.completionTokens += num(r.rec.usage?.completion_tokens);
+      b.cachedTokens += num(r.rec.usage?.cached_tokens);
+      b.cacheCreationTokens += num(r.rec.usage?.cache_creation_tokens);
+      b.requests += 1;
+      seriesMap.set(k, b);
+    }
+    const byModelMap = new Map<string | null, TelemetryAggregate["byModel"][number]>();
+    for (const r of inWindow) {
+      const m = r.rec.final.provider_model ?? null;
+      const b = byModelMap.get(m) ?? {
+        servedModel: m,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        requests: 0,
+      };
+      b.promptTokens += num(r.rec.usage?.prompt_tokens);
+      b.completionTokens += num(r.rec.usage?.completion_tokens);
+      b.totalTokens = b.promptTokens + b.completionTokens;
+      b.requests += 1;
+      byModelMap.set(m, b);
+    }
+    return {
+      totals,
+      series: [...seriesMap.values()].sort((a, b) => a.bucketStartMs - b.bucketStartMs),
+      byModel: [...byModelMap.values()].sort((a, b) => b.totalTokens - a.totalTokens),
+    };
+  }
 }
 
 describe("Store ports are implementable contracts", () => {
@@ -192,6 +257,7 @@ describe("Store ports are implementable contracts", () => {
       fallback_count: 0,
       cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
       memory: null,
+      usage: null,
     } satisfies DecisionRecord;
     await store.insert({ decision, apiKeyId: "k1", createdAt: new Date() });
     expect(await store.queryRecent(10)).toHaveLength(1);

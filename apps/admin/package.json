@@ -26,6 +26,7 @@
     "@testing-library/user-event": "^14.6.1",
     "@vitest/coverage-v8": "^3.2.4",
     "jsdom": "^25.0.1",
+    "layerchart": "^1.0.13",
     "postcss": "^8.5.15",
     "prettier": "^3.4.0",
     "prettier-plugin-svelte": "^3.4.0",

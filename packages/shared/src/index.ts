@@ -159,7 +159,11 @@ export {
   PolicyDecisionSchema,
   type ProviderAttempt,
   ProviderAttemptSchema,
+  type TokenUsageBreakdown,
+  TokenUsageSchema,
 } from "./decision/schema.js";
+// Admin dashboard token-accounting aggregate query model.
+export { type StatsQuery, StatsQuerySchema } from "./decision/stats-query.js";
 // Structured error model + error_class -> HTTP map (docs/07).
 export {
   ERROR_CLASS_HTTP_STATUS,

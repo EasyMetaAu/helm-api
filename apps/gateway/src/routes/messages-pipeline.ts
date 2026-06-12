@@ -592,7 +592,16 @@ export function createMessagesPipeline(
           }
           // Settle the budget on the served (non-stream) response: cost is already
           // on the decision; tokens from the OpenAI body's usage.
-          const servedTokens = tokensFromUsage(usageFromBody(result.body));
+          const servedUsage = usageFromBody(result.body);
+          // Stamp the served token counts onto the decision BEFORE recordServed
+          // persists it (cost is already settled on this path → pass null cost; only
+          // `usage` is written). Dashboard token accounting. Fail-open.
+          try {
+            backfillCompletionCost(result.decision, null, null, servedUsage);
+          } catch {
+            /* fail-open: leave usage null on any mapping miss */
+          }
+          const servedTokens = tokensFromUsage(servedUsage);
           await settleBudget(servedTokens);
           // Per-account OAuth usage (providers page Tier 2) — recorded regardless of
           // budgets. The served alias lets the recorder drop a STALE account after a
@@ -685,26 +694,23 @@ export function createMessagesPipeline(
                 ),
               );
             }
-            // Streamed-cost backfill + budget settle (docs/06). Zero-touch when
-            // budgets are unwired/unmetered. The pipeline faces never settled
-            // streamed cost before — price the usage tail at the served alias so the
-            // decision's total_usd is real, THEN settle the budget. Fail-open.
-            if (budget !== undefined && budgetCaps !== undefined) {
-              const finalAlias =
-                result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
-              if (lastUsage && finalAlias && budget.costOf) {
-                try {
-                  backfillCompletionCost(
-                    result.decision,
-                    finalAlias,
-                    budget.costOf(finalAlias, lastUsage),
-                  );
-                } catch {
-                  /* fail-open: leave cost null on any pricing miss */
-                }
+            // Streamed token accounting + cost backfill. The token stamp is NOT a
+            // budget feature: admin replay intentionally omits budget deps but still
+            // records telemetry, so stamp usage whenever the provider emitted a
+            // usage tail. Cost pricing is opportunistic when the composition root
+            // wired costOf. Budget settlement remains gated inside settleBudget().
+            const finalAlias =
+              result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+            if (lastUsage) {
+              try {
+                const cost =
+                  finalAlias && budget?.costOf ? budget.costOf(finalAlias, lastUsage) : null;
+                backfillCompletionCost(result.decision, finalAlias, cost, lastUsage);
+              } catch {
+                /* fail-open: leave cost/usage null on any mapping miss */
               }
-              await settleBudget(tokensFromUsage(lastUsage));
             }
+            await settleBudget(tokensFromUsage(lastUsage));
             // Per-account OAuth usage (providers page Tier 2) — recorded for every
             // served stream, independent of budgets. The served alias drops a STALE
             // account after a fallback. completion_usd is null for flat-rate

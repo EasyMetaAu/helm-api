@@ -188,6 +188,23 @@ function makeTelemetry(seed: DecisionRecord[] = []): TelemetryStore {
     async queryWindow() {
       return [...rows];
     },
+    async aggregate() {
+      return {
+        totals: {
+          requests: 0,
+          okCount: 0,
+          errorCount: 0,
+          totalCostUsd: null,
+          promptTokens: 0,
+          completionTokens: 0,
+          cachedTokens: 0,
+          cacheCreationTokens: 0,
+          avgLatencyMs: null,
+        },
+        series: [],
+        byModel: [],
+      };
+    },
     async insertPayload() {},
     async getPayload() {
       return null;
@@ -239,6 +256,7 @@ function decision(traceId: string, lane: string): DecisionRecord {
     fallback_count: 0,
     cost_breakdown: { eval_usd: null, completion_usd: 0.002, total_usd: 0.002 },
     memory: null,
+    usage: null,
   };
 }
 
@@ -883,6 +901,88 @@ describe("admin.api requests", () => {
     const app = buildApp(buildDeps());
     const res = await app.request("/admin/api/requests/nope");
     expect(res.status).toBe(404);
+  });
+});
+
+describe("admin.api stats (dashboard token accounting)", () => {
+  // A minimal aggregate result the stub returns verbatim — the route is pure glue
+  // (parse window → call store → return JSON), so the assertion is on the
+  // passthrough, not the SQL (that is the store-contract test's job).
+  const AGG = {
+    totals: {
+      requests: 3,
+      okCount: 2,
+      errorCount: 1,
+      totalCostUsd: 0.05,
+      promptTokens: 1200,
+      completionTokens: 340,
+      cachedTokens: 800,
+      cacheCreationTokens: 64,
+      avgLatencyMs: 410,
+    },
+    series: [
+      {
+        bucketStartMs: 86_400_000,
+        promptTokens: 1200,
+        completionTokens: 340,
+        cachedTokens: 800,
+        cacheCreationTokens: 64,
+        requests: 3,
+      },
+    ],
+    byModel: [
+      {
+        servedModel: "gpt-4o",
+        promptTokens: 1200,
+        completionTokens: 340,
+        totalTokens: 1540,
+        requests: 3,
+      },
+    ],
+  };
+
+  // Telemetry stub that records the aggregate(start,end,bucket) args so the test
+  // can assert the route parsed the window correctly, and returns AGG.
+  function statsTelemetry(
+    calls: Array<{ start: number; end: number; bucket: string }>,
+  ): TelemetryStore {
+    return {
+      async aggregate(start: number, end: number, bucket: "hour" | "day") {
+        calls.push({ start, end, bucket });
+        return AGG;
+      },
+    } as unknown as TelemetryStore;
+  }
+
+  it("returns the aggregate JSON for an explicit window + bucket", async () => {
+    const calls: Array<{ start: number; end: number; bucket: string }> = [];
+    const app = buildApp(buildDeps({ telemetry: statsTelemetry(calls) }));
+    const res = await app.request("/admin/api/stats?start=1000&end=5000&bucket=hour");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(AGG);
+    // The route parsed the explicit window + bucket and passed them through.
+    expect(calls).toEqual([{ start: 1000, end: 5000, bucket: "hour" }]);
+  });
+
+  it("defaults to the last 24h / day bucket when the window is omitted", async () => {
+    const calls: Array<{ start: number; end: number; bucket: string }> = [];
+    const app = buildApp(buildDeps({ telemetry: statsTelemetry(calls) }));
+    const res = await app.request("/admin/api/stats");
+    expect(res.status).toBe(200);
+    const c = calls[0];
+    expect(c?.bucket).toBe("day");
+    // end defaults to ~now, start to ~now-24h: assert the span, not the absolute ms.
+    expect((c?.end ?? 0) - (c?.start ?? 0)).toBe(86_400_000);
+  });
+
+  it("fails open on a malformed query (never 5xx): junk bucket → day", async () => {
+    const calls: Array<{ start: number; end: number; bucket: string }> = [];
+    const app = buildApp(buildDeps({ telemetry: statsTelemetry(calls) }));
+    const res = await app.request("/admin/api/stats?bucket=decade&start=-9");
+    expect(res.status).toBe(200);
+    // bucket coerces to the "day" default; the negative start is dropped → 24h default span.
+    expect(calls[0]?.bucket).toBe("day");
+    expect((calls[0]?.end ?? 0) - (calls[0]?.start ?? 0)).toBe(86_400_000);
   });
 });
 

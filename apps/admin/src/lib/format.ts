@@ -38,6 +38,35 @@ export function formatUsd(n: number | null | undefined): string {
   return `$${s}`;
 }
 
+// Compact token count for the dashboard stat cards + chart axes/tooltips. Token
+// totals run large (millions), so a raw "1234567" is unreadable on a card; we
+// abbreviate to ~3 significant figures with a K/M/B suffix (1.23M, 34.5K), the
+// same convention the reference dashboard uses. The SINGLE source of truth for
+// rendering a token COUNT — never re-summed here, only formatted.
+//
+// Sentinels mirror formatUsd: null/undefined/NaN → "—" (not measured); a measured
+// 0 → "0" (distinct). Negative inputs are clamped to 0 (a count is never < 0).
+export function formatTokens(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—';
+  const v = Math.max(0, n);
+  if (v < 1000) return String(Math.round(v));
+  // Pick the largest unit that leaves a value ≥ 1, then show ~3 sig-figs: one
+  // decimal under 100 (12.3K), none at/above (345K). Trailing ".0" is trimmed.
+  const units: Array<{ limit: number; suffix: string }> = [
+    { limit: 1_000_000_000, suffix: 'B' },
+    { limit: 1_000_000, suffix: 'M' },
+    { limit: 1_000, suffix: 'K' },
+  ];
+  for (const { limit, suffix } of units) {
+    if (v >= limit) {
+      const scaled = v / limit;
+      const s = scaled >= 100 ? String(Math.round(scaled)) : scaled.toFixed(1).replace(/\.0$/, '');
+      return `${s}${suffix}`;
+    }
+  }
+  return String(Math.round(v));
+}
+
 // Coarse, magnitude-aware breakdown of a duration (in ms) — the SINGLE source of
 // truth for "anything past 24h rolls up to days". Returns just the numbers +
 // which bucket they fall in; callers map the bucket to their own phrasing/i18n

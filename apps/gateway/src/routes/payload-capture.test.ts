@@ -96,6 +96,7 @@ function decision(): DecisionRecord {
       { alias: "openai/other", status: "error", cost_usd: null },
     ],
     cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
+    usage: null,
     final: { status: "ok", model_alias: "openai/gpt" },
   } as unknown as DecisionRecord;
 }
@@ -122,6 +123,55 @@ describe("backfillCompletionCost", () => {
     backfillCompletionCost(d, "openai/gpt", null);
     expect(d.provider_attempts[0]?.cost_usd).toBeNull();
     expect(d.cost_breakdown.completion_usd).toBeNull();
+  });
+
+  // Dashboard token accounting: the 4th arg stamps decision.usage from the served
+  // usage tail, reusing core's OpenAI/Anthropic parser. Decoupled from cost.
+  it("stamps the token breakdown from an OpenAI usage tail (cost + usage together)", () => {
+    const d = decision();
+    backfillCompletionCost(d, "openai/gpt", 0.01, {
+      prompt_tokens: 120,
+      completion_tokens: 34,
+      prompt_tokens_details: { cached_tokens: 80 },
+    });
+    expect(d.usage).toEqual({
+      prompt_tokens: 120,
+      completion_tokens: 34,
+      cached_tokens: 80,
+      cache_creation_tokens: null,
+    });
+    expect(d.cost_breakdown.completion_usd).toBe(0.01); // cost still stamped
+  });
+
+  it("stamps Anthropic-shaped usage (input/output + separate cache tokens)", () => {
+    const d = decision();
+    backfillCompletionCost(d, "anthropic/claude", null, {
+      input_tokens: 50,
+      output_tokens: 20,
+      cache_read_input_tokens: 30,
+      cache_creation_input_tokens: 10,
+    });
+    // prompt = input + cache_read + cache_creation (core's Anthropic normalization).
+    expect(d.usage).toEqual({
+      prompt_tokens: 90,
+      completion_tokens: 20,
+      cached_tokens: 30,
+      cache_creation_tokens: 10,
+    });
+  });
+
+  it("stamps usage even when cost is null (token accounting is decoupled from pricing)", () => {
+    const d = decision();
+    backfillCompletionCost(d, "openai/gpt", null, { prompt_tokens: 5, completion_tokens: 7 });
+    expect(d.usage?.prompt_tokens).toBe(5);
+    expect(d.usage?.completion_tokens).toBe(7);
+    expect(d.cost_breakdown.completion_usd).toBeNull(); // cost left untouched
+  });
+
+  it("leaves usage null when no usage tail is provided", () => {
+    const d = decision();
+    backfillCompletionCost(d, "openai/gpt", 0.01);
+    expect(d.usage).toBeNull();
   });
 });
 
