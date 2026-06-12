@@ -507,6 +507,26 @@ const MIGRATIONS: readonly Migration[] = [
         ON memory_messages (thread_id, message_index, role, content_hash);
     `,
   },
+  {
+    // Dashboard token accounting: denormalize the served completion's token counts
+    // + served model onto telemetry for cheap SQL aggregation (SUM / GROUP BY) on
+    // the admin homepage. All additive + nullable (NULL = pre-feature row / usage
+    // not measured); forward-only — legacy rows stay NULL. The counts come from the
+    // gateway's post-served usage stamp (DecisionRecord.usage); served_model mirrors
+    // final.provider_model so the by-model breakdown needs no json_extract.
+    version: 22,
+    sql: `
+      ALTER TABLE telemetry ADD COLUMN prompt_tokens INTEGER;
+
+      ALTER TABLE telemetry ADD COLUMN completion_tokens INTEGER;
+
+      ALTER TABLE telemetry ADD COLUMN cached_tokens INTEGER;
+
+      ALTER TABLE telemetry ADD COLUMN cache_creation_tokens INTEGER;
+
+      ALTER TABLE telemetry ADD COLUMN served_model TEXT;
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

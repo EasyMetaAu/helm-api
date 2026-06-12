@@ -182,6 +182,10 @@ export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
     // Stamped by the GATEWAY after inject ran (memory is a middleware) — the
     // builder always emits null.
     memory: null,
+    // Token counts ride the served upstream usage tail, unknown to the routing
+    // core (like streamed completion cost) — the gateway stamps them post-served
+    // via backfillCompletionCost. The builder always emits null.
+    usage: null,
   };
 
   // Last gate before the record leaves core: irreversibly fingerprint any

@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
 import { and, asc, count, desc, eq, gte, lt, type SQL, sql } from "drizzle-orm";
+import { shapeTelemetryAggregate } from "../aggregate-shape.js";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
   RecentDecisionRecord,
   RequestPayload,
+  TelemetryAggregate,
   TelemetryPage,
   TelemetryPageQuery,
   TelemetryStore,
@@ -34,6 +36,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
       if (a.cost_usd === null) return acc;
       return (acc ?? 0) + a.cost_usd;
     }, null);
+    const usage = input.decision.usage;
     return {
       id: this.genId(),
       requestId: input.decision.request_id,
@@ -41,6 +44,13 @@ export class SqliteTelemetryStore implements TelemetryStore {
       decisionJson: JSON.stringify(input.decision),
       finalStatus: input.decision.final.status,
       costUsd: finalCost,
+      // Denormalized token counts + served model (migration v22) for cheap
+      // aggregation. NULL when the gateway never stamped usage (forward-only).
+      promptTokens: usage?.prompt_tokens ?? null,
+      completionTokens: usage?.completion_tokens ?? null,
+      cachedTokens: usage?.cached_tokens ?? null,
+      cacheCreationTokens: usage?.cache_creation_tokens ?? null,
+      servedModel: input.decision.final.provider_model ?? null,
       createdAt: input.createdAt,
     };
   }
@@ -159,6 +169,74 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .orderBy(asc(telemetry.createdAt))
       .all()
       .map((r) => this.toDecision(r));
+  }
+
+  // Dashboard token-accounting aggregate (admin homepage). THREE SQL queries —
+  // headline totals, a per-bucket time series, a per-served-model breakdown — all
+  // SUM/COUNT/GROUP BY over the denormalized token columns (never row-by-row JS).
+  // Token sums are COALESCE'd to 0; cost/latency stay nullable (honest "not
+  // measured"). Bucketing is integer division on epoch-ms with the window size
+  // INLINED via sql.raw (so both dialects do INTEGER division — a bound JS number
+  // could be typed float in pg and break the bucket floor). Ordering is done in the
+  // shared shaper (JS) so it can't drift between sqlite and pg. Read-only.
+  async aggregate(
+    startMs: number,
+    endMs: number,
+    bucket: "hour" | "day",
+  ): Promise<TelemetryAggregate> {
+    const where = and(
+      gte(telemetry.createdAt, new Date(startMs)),
+      lt(telemetry.createdAt, new Date(endMs)),
+    );
+    const bucketMs = sql.raw(String(bucket === "hour" ? 3_600_000 : 86_400_000));
+    const bucketStart = sql<number>`(${telemetry.createdAt} / ${bucketMs}) * ${bucketMs}`;
+
+    const totals = this.db
+      .select({
+        requests: count(),
+        okCount: sql<number>`SUM(CASE WHEN ${telemetry.finalStatus} = 'ok' THEN 1 ELSE 0 END)`,
+        errorCount: sql<number>`SUM(CASE WHEN ${telemetry.finalStatus} = 'error' THEN 1 ELSE 0 END)`,
+        totalCostUsd: sql<number | null>`SUM(${telemetry.costUsd})`,
+        promptTokens: sql<number>`COALESCE(SUM(${telemetry.promptTokens}), 0)`,
+        completionTokens: sql<number>`COALESCE(SUM(${telemetry.completionTokens}), 0)`,
+        cachedTokens: sql<number>`COALESCE(SUM(${telemetry.cachedTokens}), 0)`,
+        cacheCreationTokens: sql<number>`COALESCE(SUM(${telemetry.cacheCreationTokens}), 0)`,
+        avgLatencyMs: sql<
+          number | null
+        >`AVG(json_extract(${telemetry.decisionJson}, '$.latency_total_ms'))`,
+      })
+      .from(telemetry)
+      .where(where)
+      .get();
+
+    const series = this.db
+      .select({
+        bucketStartMs: bucketStart,
+        requests: count(),
+        promptTokens: sql<number>`COALESCE(SUM(${telemetry.promptTokens}), 0)`,
+        completionTokens: sql<number>`COALESCE(SUM(${telemetry.completionTokens}), 0)`,
+        cachedTokens: sql<number>`COALESCE(SUM(${telemetry.cachedTokens}), 0)`,
+        cacheCreationTokens: sql<number>`COALESCE(SUM(${telemetry.cacheCreationTokens}), 0)`,
+      })
+      .from(telemetry)
+      .where(where)
+      .groupBy(bucketStart)
+      .all();
+
+    const byModel = this.db
+      .select({
+        servedModel: telemetry.servedModel,
+        requests: count(),
+        promptTokens: sql<number>`COALESCE(SUM(${telemetry.promptTokens}), 0)`,
+        completionTokens: sql<number>`COALESCE(SUM(${telemetry.completionTokens}), 0)`,
+        totalTokens: sql<number>`COALESCE(SUM(${telemetry.promptTokens}), 0) + COALESCE(SUM(${telemetry.completionTokens}), 0)`,
+      })
+      .from(telemetry)
+      .where(where)
+      .groupBy(telemetry.servedModel)
+      .all();
+
+    return shapeTelemetryAggregate(totals, series, byModel);
   }
 
   // Full-payload capture. Upsert by request_id so the stream path can write the

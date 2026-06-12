@@ -60,6 +60,15 @@ export const telemetry = pgTable("telemetry", {
   decisionJson: jsonb("decision_json").notNull(), // redacted DecisionRecord (native jsonb)
   finalStatus: text("final_status"),
   costUsd: doublePrecision("cost_usd"), // nullable; summed attempt cost
+  // Dashboard token accounting (pg migration v21) — mirror of the sqlite v22
+  // columns. Nullable integers; NULL = pre-feature row / usage not measured
+  // (forward-only). Counts come from DecisionRecord.usage; servedModel mirrors
+  // final.provider_model for a plain GROUP BY.
+  promptTokens: integer("prompt_tokens"),
+  completionTokens: integer("completion_tokens"),
+  cachedTokens: integer("cached_tokens"),
+  cacheCreationTokens: integer("cache_creation_tokens"),
+  servedModel: text("served_model"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(), // epoch ms
 });
 

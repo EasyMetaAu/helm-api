@@ -1,41 +1,73 @@
 import { listRequests, type RequestListItem } from '$lib/api/requests.js';
-import { parseRange, resolveWindow } from '$lib/requests-filters.js';
+import { type DashboardStats, EMPTY_STATS, getStats } from '$lib/api/stats.js';
+import { parseRange, type RangeKey, resolveWindow } from '$lib/requests-filters.js';
 import type { PageLoad } from './$types.js';
 
 // Dashboard load (SPA, client-side): read the date-range preset from the URL
 // (?range=…, default 24h — a live dashboard cares about recent traffic), resolve
 // it to an absolute window in client-local time (the gateway stays
-// timezone-agnostic), and pull that window's recent rows to derive at-a-glance
-// stats. A wider page (200) makes the sampled stats more representative than the
-// 6-row preview; `total` is the real filtered count from the backend. Fail-soft —
-// a fresh gateway with no telemetry (or an admin API hiccup) shows an empty
-// dashboard rather than an error page. Re-runs on every navigation (range change /
-// back-button) since it depends on `url`.
+// timezone-agnostic), and pull TWO things for that window:
+//   1. the token-accounting aggregate (getStats) — a real SQL SUM/GROUP BY over
+//      the whole window, NOT a client-side reduce of a sample. This feeds the
+//      headline cards + the trend / by-model charts.
+//   2. a small recent-requests page (listRequests) — still needed for the table
+//      preview; only its first 10 rows are shown, so a modest page is plenty.
+// Both fail SOFT independently — a fresh gateway with no telemetry (or an admin
+// API hiccup) shows a zeroed dashboard rather than an error page. Re-runs on every
+// navigation (range change / back-button) since it depends on `url`.
+
+// Short windows want an hourly trend (you can see the shape of a day); long
+// windows want a daily trend (a month of hourly points is noise). The boundary is
+// the sub-day presets.
+function bucketFor(range: RangeKey): 'hour' | 'day' {
+  return range === '1h' || range === '6h' || range === '24h' || range === 'today'
+    ? 'hour'
+    : 'day';
+}
+
 export const load: PageLoad = async ({ url }) => {
   const range = parseRange(url.searchParams.get('range'), '24h');
   const { start, end } = resolveWindow(range, Date.now());
+  const bucket = bucketFor(range);
 
-  let items: RequestListItem[] = [];
-  let total = 0;
+  // The aggregate (cards + charts). Fail-soft to an empty aggregate.
+  let agg: DashboardStats = EMPTY_STATS;
   try {
-    const res = await listRequests({ start, end, pageSize: 200 });
-    items = res.items;
-    total = res.total;
+    agg = await getStats({ start, end, bucket });
   } catch {
-    items = [];
-    total = 0;
+    agg = EMPTY_STATS;
   }
 
-  const sample = items.length;
-  const ok = items.filter((r) => r.status !== 'error').length;
-  const errors = sample - ok;
-  const successRate = sample === 0 ? null : Math.round((ok / sample) * 100);
-  const avgLatency =
-    sample === 0 ? null : Math.round(items.reduce((s, r) => s + (r.latency_ms || 0), 0) / sample);
-  const totalCost = items.reduce((s, r) => s + (r.cost_usd || 0), 0);
+  // The recent-requests table preview (first 10 rows shown). Fail-soft to [].
+  let items: RequestListItem[] = [];
+  try {
+    const res = await listRequests({ start, end, pageSize: 10 });
+    items = res.items;
+  } catch {
+    items = [];
+  }
 
-  // `total` = real filtered count (may exceed the 200-row sample); rate/latency/spend
-  // are derived from the sample, so they read as a recent-activity snapshot, not an
-  // exact all-time aggregate (consistent with the dashboard's at-a-glance intent).
-  return { items, range, stats: { total, ok, errors, successRate, avgLatency, totalCost } };
+  // Derive the headline card numbers from the SQL aggregate (the real totals over
+  // the whole window, not a sample). Token totals: Input = prompt, Output =
+  // completion, Total = the two summed, Cached = cached prompt tokens.
+  const t = agg.totals;
+  const successRate = t.requests === 0 ? null : Math.round((t.okCount / t.requests) * 100);
+
+  return {
+    range,
+    agg,
+    items,
+    stats: {
+      total: t.requests,
+      ok: t.okCount,
+      errors: t.errorCount,
+      successRate,
+      avgLatency: t.avgLatencyMs === null ? null : Math.round(t.avgLatencyMs),
+      totalCost: t.totalCostUsd,
+      totalTokens: t.promptTokens + t.completionTokens,
+      inputTokens: t.promptTokens,
+      outputTokens: t.completionTokens,
+      cachedTokens: t.cachedTokens,
+    },
+  };
 };

@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { AreaChart, PieChart } from 'layerchart';
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
+  import type { DashboardStats } from '$lib/api/stats.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
-  import { formatTimestamp, formatUsd } from '$lib/format.js';
+  import { formatTimestamp, formatTokens, formatUsd } from '$lib/format.js';
   import { DEFAULT_PAGE_SIZE, filtersToSearch, type RangeKey } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
 
@@ -13,13 +15,51 @@
     errors: number;
     successRate: number | null;
     avgLatency: number | null;
-    totalCost: number;
+    totalCost: number | null;
+    totalTokens: number;
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens: number;
   };
 
-  let { data }: { data: { items: RequestListItem[]; range: RangeKey; stats: Stats } } = $props();
+  let {
+    data,
+  }: { data: { items: RequestListItem[]; range: RangeKey; stats: Stats; agg: DashboardStats } } =
+    $props();
 
   const stats = $derived(data.stats);
   const recent = $derived(data.items.slice(0, 10));
+
+  // ── Chart data (derived from the SQL aggregate) ──────────────────────────────
+  // Explicit point types so EVERY series/accessor shares one TData — without them
+  // each inline `(d: {input})` lambda narrows TData to a different shape and the
+  // LayerChart generic can't unify them.
+  type TrendPoint = { date: Date; input: number; output: number; cached: number };
+  type ModelSlice = { model: string; tokens: number };
+
+  // Trend: each bucket carries a real Date (x axis) + the three token series. The
+  // chart plots input/output/cached as overlaid areas over time.
+  const trend = $derived<TrendPoint[]>(
+    data.agg.series.map((b) => ({
+      date: new Date(b.bucketStartMs),
+      input: b.promptTokens,
+      output: b.completionTokens,
+      cached: b.cachedTokens,
+    })),
+  );
+  const TREND_SERIES = $derived([
+    { key: 'input', label: $t('Input tokens'), value: (d: TrendPoint) => d.input, color: 'hsl(217 91% 60%)' },
+    { key: 'output', label: $t('Output tokens'), value: (d: TrendPoint) => d.output, color: 'hsl(160 84% 39%)' },
+    { key: 'cached', label: $t('Cached tokens'), value: (d: TrendPoint) => d.cached, color: 'hsl(38 92% 50%)' },
+  ]);
+
+  // By-model: total tokens per served model. Legacy/unstamped rows carry a null
+  // model → bucket them under a localized "unknown" label so the slice is honest.
+  const byModel = $derived<ModelSlice[]>(
+    data.agg.byModel
+      .filter((m) => m.totalTokens > 0)
+      .map((m) => ({ model: m.servedModel ?? $t('unknown'), tokens: m.totalTokens })),
+  );
 
   // The dashboard window lives in the URL (?range=…) so the loader re-fetches and
   // the view is shareable / back-button friendly — '24h' is the default, written
@@ -146,6 +186,76 @@
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Spend')}</div>
       <div class="mt-1 text-2xl font-semibold text-slate-900">{formatUsd(stats.totalCost)}</div>
     </div>
+  </div>
+
+  <!-- Token stat cards: Total / Input / Output / Cached — the real SQL aggregate
+       over the selected window (not a sampled client-side reduce). -->
+  <div class="mt-3 grid grid-cols-2 gap-3 md:mt-4 md:grid-cols-4 md:gap-4">
+    <div class="card">
+      <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
+        {$t('Total tokens')}
+      </div>
+      <div class="mt-1 text-2xl font-semibold text-slate-900">
+        {formatTokens(stats.totalTokens)}
+      </div>
+    </div>
+    <div class="card">
+      <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
+        {$t('Input tokens')}
+      </div>
+      <div class="mt-1 text-2xl font-semibold text-slate-900">
+        {formatTokens(stats.inputTokens)}
+      </div>
+    </div>
+    <div class="card">
+      <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
+        {$t('Output tokens')}
+      </div>
+      <div class="mt-1 text-2xl font-semibold text-slate-900">
+        {formatTokens(stats.outputTokens)}
+      </div>
+    </div>
+    <div class="card">
+      <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
+        {$t('Cached tokens')}
+      </div>
+      <div class="mt-1 text-2xl font-semibold text-slate-900">
+        {formatTokens(stats.cachedTokens)}
+      </div>
+    </div>
+  </div>
+
+  <!-- Token charts: usage trend over time + per-served-model breakdown. Both are
+       LayerChart (client-only; SSR is off). Each falls back to the empty-state
+       placeholder when the window has no token-bearing traffic yet. -->
+  <div class="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
+    <section class="card lg:col-span-2">
+      <h2 class="section-header mb-3">{$t('Token usage over time')}</h2>
+      {#if trend.length > 0}
+        <div class="h-64">
+          <AreaChart data={trend} x={(d) => d.date} series={TREND_SERIES} legend />
+        </div>
+      {:else}
+        <div class="empty-state">{$t('No token usage recorded in this window yet.')}</div>
+      {/if}
+    </section>
+
+    <section class="card">
+      <h2 class="section-header mb-3">{$t('Tokens by model')}</h2>
+      {#if byModel.length > 0}
+        <div class="h-64">
+          <PieChart
+            data={byModel}
+            key={(d: ModelSlice) => d.model}
+            value={(d: ModelSlice) => d.tokens}
+            innerRadius={-40}
+            legend
+          />
+        </div>
+      {:else}
+        <div class="empty-state">{$t('No token usage recorded in this window yet.')}</div>
+      {/if}
+    </section>
   </div>
 
   <!-- Recent requests -->

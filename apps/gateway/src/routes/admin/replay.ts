@@ -233,8 +233,12 @@ async function replayOpenAIChat(
     // cost is unknown at peek time, so price the trailing usage tail here.
     try {
       const usage = usageFromSSE(rawSse);
-      if (usage && finalAlias && deps.replay.costOf) {
-        backfillCompletionCost(result.decision, finalAlias, deps.replay.costOf(finalAlias, usage));
+      if (usage) {
+        // Token stamp needs no pricing — land it whenever the tail has usage;
+        // price the cost only when costOf is wired (identical to the live path).
+        const cost =
+          finalAlias && deps.replay.costOf ? deps.replay.costOf(finalAlias, usage) : null;
+        backfillCompletionCost(result.decision, finalAlias, cost, usage);
       }
     } catch {
       args.log("replay.cost_backfill_failed");

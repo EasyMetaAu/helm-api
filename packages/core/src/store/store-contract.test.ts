@@ -130,6 +130,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
     fallback_count: 0,
     cost_breakdown: { eval_usd: null, completion_usd: 0.004, total_usd: 0.004 },
     memory: null,
+    usage: null,
     ...overrides,
   };
 }
@@ -594,6 +595,146 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       }
       const win = await ctx.stores.telemetry.queryWindow(1000, 3000);
       expect(win.map((r) => r.request_id)).toEqual(["a", "b"]); // c at 3000 excluded
+    });
+
+    // Dashboard token-accounting aggregate (admin homepage). ONE method, three
+    // shapes — totals / per-bucket series / per-served-model — all computed in SQL.
+    // Runs against BOTH adapters so the integer-division bucketing + COALESCE/SUM
+    // semantics are pinned identical across sqlite and postgres (the dialect-parity
+    // guard the plan calls out). The fixture spans two UTC days with known
+    // usage + served_model so every returned number is hand-checkable.
+    it("aggregate rolls up totals, a day-bucketed series, and a by-model breakdown", async () => {
+      ctx = await make();
+      const DAY = 86_400_000;
+      const day0 = 10 * DAY; // arbitrary UTC-midnight-aligned epoch ms
+      const day1 = 11 * DAY;
+      // Helper: a served decision carrying a token usage block + served model.
+      const served = (
+        id: string,
+        servedModel: string,
+        usage: { prompt: number; completion: number; cached?: number; cacheCreation?: number },
+        status: "ok" | "error" = "ok",
+      ) =>
+        decision(id, {
+          usage: {
+            prompt_tokens: usage.prompt,
+            completion_tokens: usage.completion,
+            cached_tokens: usage.cached ?? null,
+            cache_creation_tokens: usage.cacheCreation ?? null,
+          },
+          final: {
+            model_alias: servedModel,
+            provider_model: servedModel,
+            status,
+            error_reason: status === "error" ? "upstream_error" : null,
+          },
+        });
+      // Day 0: two gpt-4o rows (one ok, one error) + one claude row.
+      await ctx.stores.telemetry.insert({
+        decision: served("d0a", "gpt-4o", { prompt: 100, completion: 20, cached: 80 }),
+        apiKeyId: "k1",
+        createdAt: new Date(day0 + 1000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: served("d0b", "gpt-4o", { prompt: 50, completion: 10 }, "error"),
+        apiKeyId: "k1",
+        createdAt: new Date(day0 + 2000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: served("d0c", "claude-x", { prompt: 200, completion: 40, cacheCreation: 16 }),
+        apiKeyId: "k1",
+        createdAt: new Date(day0 + 3000),
+      });
+      // Day 1: one gpt-4o row.
+      await ctx.stores.telemetry.insert({
+        decision: served("d1a", "gpt-4o", { prompt: 10, completion: 5 }),
+        apiKeyId: "k1",
+        createdAt: new Date(day1 + 1000),
+      });
+
+      const agg = await ctx.stores.telemetry.aggregate(day0, day1 + DAY, "day");
+
+      // Totals: 4 requests, 1 error, summed tokens.
+      expect(agg.totals.requests).toBe(4);
+      expect(agg.totals.okCount).toBe(3);
+      expect(agg.totals.errorCount).toBe(1);
+      expect(agg.totals.promptTokens).toBe(360); // 100+50+200+10
+      expect(agg.totals.completionTokens).toBe(75); // 20+10+40+5
+      expect(agg.totals.cachedTokens).toBe(80);
+      expect(agg.totals.cacheCreationTokens).toBe(16);
+
+      // Series: two day buckets, chronological, summed per day.
+      expect(agg.series).toHaveLength(2);
+      expect(agg.series[0]?.bucketStartMs).toBe(day0);
+      expect(agg.series[0]?.requests).toBe(3);
+      expect(agg.series[0]?.promptTokens).toBe(350); // 100+50+200
+      expect(agg.series[0]?.completionTokens).toBe(70); // 20+10+40
+      expect(agg.series[1]?.bucketStartMs).toBe(day1);
+      expect(agg.series[1]?.requests).toBe(1);
+      expect(agg.series[1]?.promptTokens).toBe(10);
+
+      // By-model: ordered by total tokens desc — gpt-4o (185) before claude-x (240)?
+      // claude-x total = 200+40 = 240 > gpt-4o 100+20+50+10+10+5 = 195. claude first.
+      expect(agg.byModel.map((m) => m.servedModel)).toEqual(["claude-x", "gpt-4o"]);
+      const gpt = agg.byModel.find((m) => m.servedModel === "gpt-4o");
+      expect(gpt?.requests).toBe(3);
+      expect(gpt?.promptTokens).toBe(160); // 100+50+10
+      expect(gpt?.completionTokens).toBe(35); // 20+10+5
+      expect(gpt?.totalTokens).toBe(195);
+      const claude = agg.byModel.find((m) => m.servedModel === "claude-x");
+      expect(claude?.totalTokens).toBe(240);
+    });
+
+    it("aggregate reads an empty window as zeros (not nulls), hour buckets honored", async () => {
+      ctx = await make();
+      const HOUR = 3_600_000;
+      const base = 100 * HOUR;
+      // Two rows in the SAME hour + one the next hour, no usage block on one row
+      // (legacy/forward-only): its token columns are null and must COALESCE to 0.
+      await ctx.stores.telemetry.insert({
+        decision: decision("h0", {
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            cached_tokens: null,
+            cache_creation_tokens: null,
+          },
+        }),
+        apiKeyId: "k1",
+        createdAt: new Date(base + 60_000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: decision("h0b"), // usage: null (legacy row)
+        apiKeyId: "k1",
+        createdAt: new Date(base + 120_000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: decision("h1", {
+          usage: {
+            prompt_tokens: 5,
+            completion_tokens: 1,
+            cached_tokens: null,
+            cache_creation_tokens: null,
+          },
+        }),
+        apiKeyId: "k1",
+        createdAt: new Date(base + HOUR + 1000),
+      });
+
+      const agg = await ctx.stores.telemetry.aggregate(base, base + 2 * HOUR, "hour");
+      expect(agg.series).toHaveLength(2);
+      expect(agg.series[0]?.bucketStartMs).toBe(base);
+      expect(agg.series[0]?.requests).toBe(2);
+      expect(agg.series[0]?.promptTokens).toBe(10); // legacy null row contributes 0
+      expect(agg.series[1]?.bucketStartMs).toBe(base + HOUR);
+      expect(agg.totals.promptTokens).toBe(15);
+
+      // A window with no rows: zero counters, no buckets, no models.
+      const empty = await ctx.stores.telemetry.aggregate(0, 1000, "day");
+      expect(empty.totals.requests).toBe(0);
+      expect(empty.totals.promptTokens).toBe(0);
+      expect(empty.series).toEqual([]);
+      expect(empty.byModel).toEqual([]);
     });
 
     // queryPage drives the admin Debug list: numbered pagination + the error/role

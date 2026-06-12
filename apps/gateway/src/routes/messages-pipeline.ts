@@ -592,7 +592,16 @@ export function createMessagesPipeline(
           }
           // Settle the budget on the served (non-stream) response: cost is already
           // on the decision; tokens from the OpenAI body's usage.
-          const servedTokens = tokensFromUsage(usageFromBody(result.body));
+          const servedUsage = usageFromBody(result.body);
+          // Stamp the served token counts onto the decision BEFORE recordServed
+          // persists it (cost is already settled on this path → pass null cost; only
+          // `usage` is written). Dashboard token accounting. Fail-open.
+          try {
+            backfillCompletionCost(result.decision, null, null, servedUsage);
+          } catch {
+            /* fail-open: leave usage null on any mapping miss */
+          }
+          const servedTokens = tokensFromUsage(servedUsage);
           await settleBudget(servedTokens);
           // Per-account OAuth usage (providers page Tier 2) — recorded regardless of
           // budgets. The served alias lets the recorder drop a STALE account after a
@@ -692,13 +701,14 @@ export function createMessagesPipeline(
             if (budget !== undefined && budgetCaps !== undefined) {
               const finalAlias =
                 result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
-              if (lastUsage && finalAlias && budget.costOf) {
+              if (lastUsage) {
                 try {
-                  backfillCompletionCost(
-                    result.decision,
-                    finalAlias,
-                    budget.costOf(finalAlias, lastUsage),
-                  );
+                  // Token stamp needs no pricing — land it whenever the usage tail
+                  // is present (dashboard accounting); price the cost only when the
+                  // served alias + costOf are wired. Decoupled, like the chat path.
+                  const cost =
+                    finalAlias && budget.costOf ? budget.costOf(finalAlias, lastUsage) : null;
+                  backfillCompletionCost(result.decision, finalAlias, cost, lastUsage);
                 } catch {
                   /* fail-open: leave cost null on any pricing miss */
                 }

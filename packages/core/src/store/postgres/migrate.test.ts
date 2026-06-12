@@ -124,7 +124,9 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // v20 (memory_messages dedup) likewise: this fixture never creates
     // memory_messages, so its dedup DELETE would fail — out of scope here (it has
     // its own dedicated test below).
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20]) {
+    // v21 (telemetry token columns): this fixture never creates telemetry, so the
+    // ALTER would fail — pre-mark applied, out of scope for this jobs upgrade.
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );
@@ -213,7 +215,9 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // Mark everything EXCEPT v20 applied so only the dedup migration runs. This
     // fixture only creates memory_messages, so other migrations' tables are absent
     // — pre-marking keeps the test scoped to the v20 message-dedup upgrade.
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]) {
+    // v21 (telemetry token columns) is pre-marked too: no telemetry table here, so
+    // its ALTER would fail — keep the test scoped to v20.
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );

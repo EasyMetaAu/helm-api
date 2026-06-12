@@ -353,6 +353,8 @@ describe("sqlite v18 forgetting schema deltas", () => {
       // v21 dedups memory_messages, which this fixture never creates → pre-mark
       // applied (out of scope for the v18 forgetting-deltas test).
       rec.run(21, Date.now());
+      // v22 alters telemetry (absent from this memory-only fixture) → pre-mark applied.
+      rec.run(22, Date.now());
       seed.close();
 
       expect(() => runMigrations(path)).not.toThrow();

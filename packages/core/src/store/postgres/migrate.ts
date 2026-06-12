@@ -442,6 +442,24 @@ const MIGRATIONS: readonly Migration[] = [
         ON memory_messages (thread_id, message_index, role, content_hash);
     `,
   },
+  {
+    // Dashboard token accounting — pg mirror of the sqlite v22 migration.
+    // Denormalized served-completion token counts + served model on telemetry for
+    // cheap SQL aggregation. Additive + nullable + idempotent (IF NOT EXISTS);
+    // forward-only — legacy rows stay NULL.
+    version: 21,
+    sql: `
+      ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS prompt_tokens INTEGER;
+
+      ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS completion_tokens INTEGER;
+
+      ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS cached_tokens INTEGER;
+
+      ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER;
+
+      ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS served_model TEXT;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

@@ -94,6 +94,23 @@ function fakeTelemetry(
     async queryWindow() {
       return [];
     },
+    async aggregate() {
+      return {
+        totals: {
+          requests: 0,
+          okCount: 0,
+          errorCount: 0,
+          totalCostUsd: null,
+          promptTokens: 0,
+          completionTokens: 0,
+          cachedTokens: 0,
+          cacheCreationTokens: 0,
+          avgLatencyMs: null,
+        },
+        series: [],
+        byModel: [],
+      };
+    },
     async getPayload() {
       return null;
     },

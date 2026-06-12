@@ -1,5 +1,36 @@
 import { describe, expect, it } from 'vitest';
-import { durationParts, formatTimestamp, formatUsd } from './format.js';
+import { durationParts, formatTimestamp, formatTokens, formatUsd } from './format.js';
+
+describe('formatTokens — compact token counts for the dashboard', () => {
+  it('renders not-measured (null/undefined/NaN) as an em dash', () => {
+    expect(formatTokens(null)).toBe('—');
+    expect(formatTokens(undefined)).toBe('—');
+    expect(formatTokens(Number.NaN)).toBe('—');
+  });
+
+  it('shows a measured zero as "0" (distinct from not-measured)', () => {
+    expect(formatTokens(0)).toBe('0');
+  });
+
+  it('shows raw integers under 1000', () => {
+    expect(formatTokens(1)).toBe('1');
+    expect(formatTokens(999)).toBe('999');
+    expect(formatTokens(42.6)).toBe('43');
+  });
+
+  it('abbreviates thousands/millions/billions to ~3 significant figures', () => {
+    expect(formatTokens(1000)).toBe('1K');
+    expect(formatTokens(1234)).toBe('1.2K');
+    expect(formatTokens(34_500)).toBe('34.5K');
+    expect(formatTokens(345_000)).toBe('345K');
+    expect(formatTokens(1_234_567)).toBe('1.2M');
+    expect(formatTokens(2_000_000_000)).toBe('2B');
+  });
+
+  it('clamps a negative count to 0', () => {
+    expect(formatTokens(-5)).toBe('0');
+  });
+});
 
 describe('formatUsd — adaptive USD precision', () => {
   it('renders not-measured (null/undefined/NaN) as an em dash', () => {

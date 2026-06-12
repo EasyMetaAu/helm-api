@@ -260,6 +260,50 @@ export interface TelemetryPage {
   total: number;
 }
 
+// Dashboard token-accounting aggregate over a half-open window [startMs, endMs)
+// (admin homepage). ONE method returns all three shapes the dashboard needs in a
+// single round-trip: headline `totals`, a time-bucketed `series` for the trend
+// chart, and a per-served-model `byModel` breakdown for the doughnut. Computed at
+// the SQL layer (SUM / COUNT / GROUP BY over the denormalized token columns — never
+// row-by-row in JS) so a wide window stays cheap. Token sums are COALESCE'd to 0
+// (an empty window reads 0, not null); cost/latency stay NULLABLE so "not measured"
+// stays DISTINCT from a measured 0 (principle 3). Pre-feature / unmeasured rows
+// have NULL token columns and contribute 0 (forward-only — no backfill).
+export interface TelemetryTotals {
+  requests: number;
+  okCount: number;
+  errorCount: number;
+  totalCostUsd: number | null; // null = no priced attempt in the window
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
+  cacheCreationTokens: number;
+  avgLatencyMs: number | null; // null = empty window
+}
+
+export interface TelemetrySeriesBucket {
+  bucketStartMs: number; // UTC bucket floor (epoch ms): hour or day, by `bucket`
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
+  cacheCreationTokens: number;
+  requests: number;
+}
+
+export interface TelemetryModelUsage {
+  servedModel: string | null; // null = pre-feature / unstamped row (UI shows "unknown")
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number; // prompt + completion — the doughnut value, ordered desc
+  requests: number;
+}
+
+export interface TelemetryAggregate {
+  totals: TelemetryTotals;
+  series: TelemetrySeriesBucket[];
+  byModel: TelemetryModelUsage[];
+}
+
 export interface TelemetryStore {
   insert(input: InsertTelemetryInput): Promise<{ id: string }>;
   // Optional batch variants (perf): collapse N rows into ONE commit on the
@@ -289,6 +333,11 @@ export interface TelemetryStore {
   // aggregate a window AFTER the fact. Half-open interval keeps adjacent windows
   // non-overlapping → idempotent re-collect. NEVER called on the request path.
   queryWindow(startMs: number, endMs: number): Promise<DecisionRecord[]>;
+  // Dashboard token-accounting aggregate over [startMs, endMs), bucketed by hour or
+  // day (admin homepage). SQL-level SUM/COUNT/GROUP BY over the denormalized token
+  // columns — see TelemetryAggregate. READ-ONLY; never on the request path. Both
+  // adapters implement it; the contract test pins sqlite/pg parity.
+  aggregate(startMs: number, endMs: number, bucket: "hour" | "day"): Promise<TelemetryAggregate>;
   // Full-payload capture (opt-out via runtime settings capture_payloads). Upsert
   // by request_id (idempotent: the stream path may write the request first, then
   // backfill the assembled response). Stores verbatim bodies — never redacted.

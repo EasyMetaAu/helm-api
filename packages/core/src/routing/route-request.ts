@@ -707,6 +707,8 @@ export async function routeRequest(
       // Stamped by the GATEWAY after inject ran (memory is a middleware) — the
       // routing core always emits null.
       memory: null,
+      // Token counts come from the served usage tail (gateway-stamped) — null here.
+      usage: null,
     };
     deps.log(decision);
     return {
@@ -771,6 +773,8 @@ export async function routeRequest(
     // Stamped by the GATEWAY after inject ran (memory is a middleware) — the
     // routing core always emits null.
     memory: null,
+    // Token counts come from the served usage tail (gateway-stamped) — null here.
+    usage: null,
   };
 
   deps.log(decision);
