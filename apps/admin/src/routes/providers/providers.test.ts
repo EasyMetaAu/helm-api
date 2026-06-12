@@ -1,11 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidateAll } from '$app/navigation';
-import type {
-  OAuthProviderStatus,
-  OAuthQuotaSnapshot,
-  OAuthUsageRow,
-} from '$lib/api/oauth.js';
+import type { OAuthProviderStatus, OAuthQuotaSnapshot, OAuthUsageRow } from '$lib/api/oauth.js';
 import ProvidersPage from './+page.svelte';
 
 const logoutOAuth = vi.fn();
@@ -64,7 +60,9 @@ const quota: OAuthQuotaSnapshot[] = [
   {
     providerId: 'anthropic',
     account: 'acct-claude',
-    windows: [{ key: '5h', usedPercent: 74, resetsAtMs: Date.now() + 3_600_000, windowMinutes: 300 }],
+    windows: [
+      { key: '5h', usedPercent: 74, resetsAtMs: Date.now() + 3_600_000, windowMinutes: 300 },
+    ],
     capturedAt: Date.now(),
     source: 'anthropic',
   },
@@ -108,8 +106,8 @@ describe('providers page', () => {
     expect(within(row).getByText('acct-claude')).toBeInTheDocument();
     expect(within(row).getByText('connected')).toBeInTheDocument();
     expect(within(row).getByText('42 req')).toBeInTheDocument();
-    expect(within(row).getByText('1.5k tok')).toBeInTheDocument();
-    expect(within(row).getByText('$0.03')).toBeInTheDocument();
+    expect(within(row).getByText('1.5K tok')).toBeInTheDocument();
+    expect(within(row).getByText('$0.034')).toBeInTheDocument();
     expect(within(row).getByText('74%')).toBeInTheDocument();
     expect(within(row).getByDisplayValue('10')).toBeInTheDocument();
     expect(within(row).getByRole('checkbox', { name: /schedulable/i })).toBeChecked();

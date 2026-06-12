@@ -12,7 +12,7 @@
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
   import ManageAccountDialog from '$lib/components/ManageAccountDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
-  import { durationParts } from '$lib/format';
+  import { durationParts, formatCount, formatTokens, formatUsd } from '$lib/format';
   import { t } from '$lib/i18n';
 
   // Subscription OAuth login (issue #38). Pure consumer (Principle 1): the gateway
@@ -103,19 +103,6 @@
     if (p.unit === 'dh') return $t('in {d}d {h}h', { d: p.d, h: p.h });
     if (p.unit === 'hm') return $t('in {h}h {m}m', { h: p.h, m: p.m });
     return $t('in {m}m', { m: p.m });
-  }
-
-  // Compact token formatting (240.09M / 18.2k / 412) so a dense cell stays readable.
-  function fmtTokens(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-    return String(n);
-  }
-
-  // Cost is null for flat-rate subscriptions (unpriced) — show "—", not "$0".
-  function fmtCost(n: number | null): string {
-    if (n == null) return '—';
-    return n >= 0.01 || n === 0 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
   }
 
   // Friendly window labels (provider-specific keys → display).
@@ -372,9 +359,11 @@
               <!-- Today's usage -->
               <td class="px-3 py-3 text-xs">
                 {#if usage && usage.requests > 0}
-                  <div class="text-ink-body">{$t('{n} req', { n: usage.requests })}</div>
-                  <div class="text-ink-muted">{fmtTokens(usage.tokens)} tok</div>
-                  <div class="text-ink-muted">{fmtCost(usage.costUsd)}</div>
+                  <div class="text-ink-body">
+                    {$t('{n} req', { n: formatCount(usage.requests) })}
+                  </div>
+                  <div class="text-ink-muted">{formatTokens(usage.tokens)} tok</div>
+                  <div class="text-ink-muted">{formatUsd(usage.costUsd)}</div>
                   <div class="text-ink-muted">{usage.rpm} RPM</div>
                 {:else}
                   <span class="text-ink-muted">—</span>
@@ -432,7 +421,11 @@
                   disabled={saving}
                   aria-label={$t('Schedulable')}
                   onchange={(e) =>
-                    toggleSchedulable(row.provider.id, row.account.account, e.currentTarget.checked)}
+                    toggleSchedulable(
+                      row.provider.id,
+                      row.account.account,
+                      e.currentTarget.checked,
+                    )}
                 />
               </td>
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { durationParts, formatTimestamp, formatTokens, formatUsd } from './format.js';
+import { durationParts, formatCount, formatTimestamp, formatTokens, formatUsd } from './format.js';
 
 describe('formatTokens — compact token counts for the dashboard', () => {
   it('renders not-measured (null/undefined/NaN) as an em dash', () => {
@@ -29,6 +29,15 @@ describe('formatTokens — compact token counts for the dashboard', () => {
 
   it('clamps a negative count to 0', () => {
     expect(formatTokens(-5)).toBe('0');
+  });
+});
+
+describe('formatCount — compact generic counts (requests, errors)', () => {
+  it('shares the token abbreviation rules: K/M/B at ~3 significant figures', () => {
+    expect(formatCount(42)).toBe('42');
+    expect(formatCount(50_000)).toBe('50K');
+    expect(formatCount(2_000_000)).toBe('2M');
+    expect(formatCount(null)).toBe('—');
   });
 });
 
