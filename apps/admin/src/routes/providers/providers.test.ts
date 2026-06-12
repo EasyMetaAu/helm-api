@@ -39,6 +39,10 @@ function provider(overrides: Partial<OAuthProviderStatus> = {}): OAuthProviderSt
         healthy: true,
         priority: 10,
         schedulable: true,
+        // Redacted egress proxy (password never crosses) + effective routable models,
+        // both folded onto the row by the gateway — the two new list columns.
+        proxy: { type: 'socks5', host: '10.0.0.1', port: 1080, hasPassword: true },
+        models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
       },
     ],
     ...overrides,
@@ -109,6 +113,37 @@ describe('providers page', () => {
     expect(within(row).getByText('74%')).toBeInTheDocument();
     expect(within(row).getByDisplayValue('10')).toBeInTheDocument();
     expect(within(row).getByRole('checkbox', { name: /schedulable/i })).toBeChecked();
+    // Proxy column: the redacted egress hop, compact "type · host:port".
+    expect(within(row).getByText('socks5 · 10.0.0.1:1080')).toBeInTheDocument();
+    // Models column: each effective model as a pill (3 ≤ cap, so all show, no "+N").
+    expect(within(row).getByText('claude-opus-4-6')).toBeInTheDocument();
+    expect(within(row).getByText('claude-haiku-4-5')).toBeInTheDocument();
+  });
+
+  it('renders "Direct" and caps the models list with a +N pill', () => {
+    renderPage({
+      providers: [
+        provider({
+          accounts: [
+            {
+              account: 'acct-copilot',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null, // direct connection
+              models: ['m1', 'm2', 'm3', 'm4', 'm5'], // 5 > cap of 3 → "+2"
+            },
+          ],
+        }),
+      ],
+    });
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('Direct')).toBeInTheDocument();
+    expect(within(row).getByText('m3')).toBeInTheDocument();
+    expect(within(row).queryByText('m4')).not.toBeInTheDocument(); // collapsed
+    expect(within(row).getByText('+2')).toBeInTheDocument();
   });
 
   it('shows the not-configured warning and disables Connect when OAuth is unavailable', () => {

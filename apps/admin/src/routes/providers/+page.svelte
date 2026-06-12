@@ -67,6 +67,30 @@
     return p.flow === 'device_code' ? $t('Device') : 'OAuth';
   }
 
+  // How many model pills to render inline before collapsing the rest into a "+N"
+  // pill (Copilot can expose 20+; the full list rides in the cell's title tooltip).
+  const MODELS_SHOWN = 3;
+
+  // Compact egress-proxy label ("socks5 · 10.0.0.1:1080"), or null when the account
+  // connects directly. The gateway already REDACTED the password (only `hasPassword`
+  // crosses), so nothing secret is rendered.
+  function proxyLabel(p: OAuthAccount['proxy']): string | null {
+    if (!p) return null;
+    return `${p.type} · ${p.host}:${p.port}`;
+  }
+
+  // Fuller proxy detail for the hover tooltip — adds the auth shape (username +
+  // whether a password is set) WITHOUT the secret itself.
+  function proxyTitle(p: OAuthAccount['proxy']): string {
+    if (!p) return '';
+    const auth = p.username
+      ? ` · ${p.username}${p.hasPassword ? ':••••' : ''}`
+      : p.hasPassword
+        ? ' · ••••'
+        : '';
+    return `${p.type}://${p.host}:${p.port}${auth}`;
+  }
+
   // The access token is short-lived and auto-renewed by the gateway, so a lapsed one
   // is NOT an alarm — show "auto-renews"; when valid, the remaining time hints at the
   // next renewal. Coarsening (incl. the ">24h ⇒ days" rule) lives in `durationParts`
@@ -280,6 +304,8 @@
           <tr>
             <th class="px-3 py-2">{$t('Provider')}</th>
             <th class="px-3 py-2">{$t('Status')}</th>
+            <th class="px-3 py-2">{$t('Proxy')}</th>
+            <th class="px-3 py-2">{$t('Models')}</th>
             <th class="px-3 py-2">{$t('Today')}</th>
             <th class="px-3 py-2">{$t('Quota')}</th>
             <th class="px-3 py-2">{$t('Priority')}</th>
@@ -311,6 +337,35 @@
                 {/if}
                 {#if !row.account.schedulable}
                   <div class="mt-1"><span class="badge-neutral">{$t('parked')}</span></div>
+                {/if}
+              </td>
+
+              <!-- Egress proxy (redacted; "Direct" when none) -->
+              <td class="px-3 py-3 text-xs">
+                {#if proxyLabel(row.account.proxy)}
+                  <span class="badge-neutral font-mono" title={proxyTitle(row.account.proxy)}
+                    >{proxyLabel(row.account.proxy)}</span
+                  >
+                {:else}
+                  <span class="text-ink-muted">{$t('Direct')}</span>
+                {/if}
+              </td>
+
+              <!-- Effective routable models (network-free; pills capped +N) -->
+              <td class="px-3 py-3">
+                {#if row.account.models.length > 0}
+                  {@const shown = row.account.models.slice(0, MODELS_SHOWN)}
+                  {@const extra = row.account.models.length - shown.length}
+                  <div class="flex w-48 flex-wrap gap-1" title={row.account.models.join('\n')}>
+                    {#each shown as m (m)}
+                      <span class="badge-neutral font-mono text-[10px]">{m}</span>
+                    {/each}
+                    {#if extra > 0}
+                      <span class="badge-neutral text-[10px]">+{extra}</span>
+                    {/if}
+                  </div>
+                {:else}
+                  <span class="text-xs text-ink-muted">—</span>
                 {/if}
               </td>
 

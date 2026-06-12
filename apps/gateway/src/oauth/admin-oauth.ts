@@ -32,6 +32,7 @@ import type {
   OAuthAdminStatus,
 } from "../routes/admin/deps.js";
 import { getAccountSettings, loadAccountSettings, setAccountSettings } from "./account-settings.js";
+import { effectiveAccountModels } from "./effective-models.js";
 
 // Admin OAuth-login orchestration (issue #38) — the implementation behind the
 // OAuthAdminAccess seam the /admin/api/oauth routes call. Owns the ephemeral
@@ -186,6 +187,24 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     if (!proxy) return;
     await setAccountSettings(deps.config, deps.encKey, providerId, account, { proxy });
   }
+  // Project a stored proxy into the REDACTED admin view (principle 7): the password
+  // is NEVER echoed, only whether one is set. Shared by listStatus (folds it onto
+  // every row) and getAccountProxy (the Manage dialog's per-account read) so the two
+  // can never drift in what they reveal. null in ⇒ null out (direct connection).
+  function redactProxy(
+    proxy:
+      | { type: "http" | "https" | "socks5"; host: string; port: number; username?: string; password?: string }
+      | undefined,
+  ): AccountProxyView | null {
+    if (!proxy) return null;
+    return {
+      type: proxy.type,
+      host: proxy.host,
+      port: proxy.port,
+      ...(proxy.username !== undefined ? { username: proxy.username } : {}),
+      hasPassword: typeof proxy.password === "string" && proxy.password.length > 0,
+    };
+  }
   const sessions = new Map<string, Session>();
   // Per-account Anthropic quota cache (5-min TTL): key `anthropic <account>`.
   // Caches the OUTCOME of a usage fetch — windows on success, `null` on failure —
@@ -285,6 +304,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
             )),
             priority: sch.priority ?? 50,
             schedulable: sch.schedulable ?? true,
+            // Both folded from the SAME settings blob (zero extra network): the
+            // redacted egress proxy (principle 7) and the effective routable models
+            // — the SAME network-free set synthesizeOAuthProviders exposes to Lanes
+            // (operator curation verbatim, else the curated fallback). Live discovery
+            // stays in the Manage dialog; the list never fans out per account.
+            proxy: redactProxy(sch.proxy),
+            models: effectiveAccountModels(sch, r.providerId),
           };
         }),
       );
@@ -455,21 +481,12 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     },
 
     async getAccountProxy({ providerId, account }): Promise<AccountProxyView | null> {
-      const proxy = getAccountSettings(
-        await loadAccountSettings(deps.config, deps.encKey),
-        providerId,
-        account,
-      ).proxy;
-      if (!proxy) return null;
       // REDACT the password (principle 7): the admin read surface returns only
-      // whether one is set, never the secret itself.
-      return {
-        type: proxy.type,
-        host: proxy.host,
-        port: proxy.port,
-        ...(proxy.username !== undefined ? { username: proxy.username } : {}),
-        hasPassword: typeof proxy.password === "string" && proxy.password.length > 0,
-      };
+      // whether one is set, never the secret itself. Shared with listStatus.
+      return redactProxy(
+        getAccountSettings(await loadAccountSettings(deps.config, deps.encKey), providerId, account)
+          .proxy,
+      );
     },
 
     async setAccountProxy({ providerId, account, proxy }): Promise<void> {

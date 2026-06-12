@@ -16,6 +16,15 @@ export interface OAuthAccount {
   // priority = served first; schedulable false parks the account out of rotation.
   priority: number;
   schedulable: boolean;
+  // The account's egress proxy, REDACTED (never the password — only `hasPassword`),
+  // or null for a direct connection. Folded onto the row by the gateway so the list
+  // shows which proxy each account tunnels through without the per-account GET the
+  // Manage dialog uses.
+  proxy: AccountProxyView | null;
+  // The effective routable models for this account (network-free): the operator's
+  // curated subset, else the provider's curated default. The SAME set the Lanes
+  // catalog exposes, so the list never claims a model that won't route.
+  models: string[];
 }
 
 export interface OAuthProviderStatus {
