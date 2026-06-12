@@ -31,11 +31,13 @@
 # Golden set grown 29->38 (9 real-world prompts); cascade/calibrate lock 42 real
 # prompts with 0 fallbacks and confidence spread ~0.43-0.98.
 #
-# CJK VOCABULARY + MULTILINGUAL GUARD (2026-06-12, classifier.zh-layer1): Layer-1
-# is now an English + high-confidence CJK fast path. Simplified/Traditional Chinese
-# keywords live in separate *_zh_kw dimensions so English keywordSignal calibration is
-# not diluted. Other non-covered languages, and Chinese prompts that miss these small
-# CJK lists, still trip `rules.language` and escalate to multilingual Layer-2 eval.
+# INTERNATIONAL VOCABULARY + MULTILINGUAL GUARD (2026-06-12, classifier.intl-layer1): Layer-1
+# has an English keyword layer plus a separate international keyword layer. The
+# initial seed covers high-confidence Simplified/Traditional Chinese terms; future
+# Japanese/Korean/Vietnamese/etc. terms should extend the *_intl_kw dimensions, not
+# the English *_kw lists, so English keywordSignal calibration is not diluted.
+# Non-covered languages, and prompts that miss these small intl lists, still trip
+# `rules.language` and escalate to multilingual Layer-2 eval.
 # CONTRACT: serve broad non-English traffic → enable `eval`; with eval OFF uncovered
 # non-Latin prompts degrade deterministically to `balanced`.
 classifier:
@@ -73,21 +75,21 @@ classifier:
       reasoning_kw: { weight: 0.65, keywords: ["prove", "derive", "theorem", "step by step", "reason about", "deduce", "infer", "justify", "rationale", "explain why"] }
       coding_kw: { weight: 0.62, keywords: ["refactor", "debug", "stack trace", "function", "compile", "implement", "unit test", "exception", "traceback", "syntax error", "endpoint", "regex"] }
       math_kw: { weight: 0.20, keywords: ["integral", "matrix", "equation", "probability", "derivative", "calculus", "algebra", "solve for", "polynomial", "summation"] }
-      math_zh_kw: { weight: 0.20, keywords: ["积分", "積分", "矩阵", "矩陣", "方程", "导数", "導數", "代数", "代數", "推导", "推導"] }
+      math_intl_kw: { weight: 0.20, keywords: ["积分", "積分", "矩阵", "矩陣", "方程", "导数", "導數", "代数", "代數", "推导", "推導"] }
       planning_kw: { weight: 0.38, keywords: ["plan", "architecture", "design doc", "trade-off", "strategy", "roadmap", "milestone", "break down", "blueprint", "trade-offs"] }
       analysis_kw: { weight: 0.76, keywords: ["analyze", "compare", "evaluate", "implications", "root cause", "assess", "critique", "pros and cons", "diagnose", "investigate"] }
       writing_kw: { weight: 0.14, keywords: ["essay", "rewrite", "draft", "tone", "polish", "summarize", "summary", "paraphrase", "proofread", "article", "headline", "grammar"] }
       security_kw: { weight: 1.40, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "rce", "csrf", "malware", "auth bypass", "auth check", "access control"] }
       # CJK keyword dimensions are separate from English dimensions so they can
       # suppress the language guard without diluting English keywordSignal.
-      coding_zh_kw: { weight: 0.56, keywords: ["重构", "重構", "调试", "除錯", "编译", "編譯", "函数", "函式", "单元测试", "單元測試", "堆栈跟踪", "堆疊追蹤"] }
-      analysis_zh_kw: { weight: 0.68, keywords: ["分析", "比較", "比较", "评估", "評估", "根因", "诊断", "診斷", "利弊", "因果关系"] }
-      writing_zh_kw: { weight: 0.12, keywords: ["改写", "改寫", "润色", "潤色", "摘要", "校对", "校對", "文章", "标题", "標題"] }
-      data_zh_kw: { weight: 0.18, keywords: ["数据集", "資料集", "聚合", "透视表", "樞紐分析表", "查询", "查詢", "电子表格", "試算表"] }
-      security_zh_kw: { weight: 1.10, keywords: ["缓冲区溢出", "緩衝區溢位", "命令注入", "权限提升", "權限提升", "越权", "越權", "恶意软件", "惡意軟體", "访问控制", "存取控制"] }
-      vision_zh_kw: { weight: 0.14, keywords: ["截图", "截圖", "屏幕截图", "螢幕截圖", "照片", "图像", "影像", "流程图", "流程圖", "图表", "圖表"] }
-      web_zh_kw: { weight: 0.06, keywords: ["搜索网页", "搜尋網頁", "查找网页", "查找網頁", "最新公告", "最新消息", "在线资料", "線上資料"] }
-      extraction_zh_kw: { weight: 0.11, keywords: ["提取字段", "擷取欄位", "抽取实体", "擷取實體", "结构化数据", "結構化資料", "解析 JSON", "抓取資料"] }
+      coding_intl_kw: { weight: 0.56, keywords: ["重构", "重構", "调试", "除錯", "编译", "編譯", "函数", "函式", "单元测试", "單元測試", "堆栈跟踪", "堆疊追蹤"] }
+      analysis_intl_kw: { weight: 0.68, keywords: ["分析", "比較", "比较", "评估", "評估", "根因", "诊断", "診斷", "利弊", "因果关系"] }
+      writing_intl_kw: { weight: 0.12, keywords: ["改写", "改寫", "润色", "潤色", "摘要", "校对", "校對", "文章", "标题", "標題"] }
+      data_intl_kw: { weight: 0.18, keywords: ["数据集", "資料集", "聚合", "透视表", "樞紐分析表", "查询", "查詢", "电子表格", "試算表"] }
+      security_intl_kw: { weight: 1.10, keywords: ["缓冲区溢出", "緩衝區溢位", "命令注入", "权限提升", "權限提升", "越权", "越權", "恶意软件", "惡意軟體", "访问控制", "存取控制"] }
+      vision_intl_kw: { weight: 0.14, keywords: ["截图", "截圖", "屏幕截图", "螢幕截圖", "照片", "图像", "影像", "流程图", "流程圖", "图表", "圖表"] }
+      web_intl_kw: { weight: 0.06, keywords: ["搜索网页", "搜尋網頁", "查找网页", "查找網頁", "最新公告", "最新消息", "在线资料", "線上資料"] }
+      extraction_intl_kw: { weight: 0.11, keywords: ["提取字段", "擷取欄位", "抽取实体", "擷取實體", "结构化数据", "結構化資料", "解析 JSON", "抓取資料"] }
       # Short diagnostics/security fragments are meaningful despite being tiny;
       # give them enough positive signal to escape the simple/economy shortcut.
       diagnostic_short_kw: { weight: 3.60, keywords: ["no output", "no stack trace", "no auth check", "no command injection"] }
@@ -168,8 +170,8 @@ classifier:
       short_message_max_chars: 30
       disable_above_chars: 100
       max_history_weight: 0.6
-    # Language-coverage guard. Layer-1 has English plus small high-confidence CJK
-    # keyword lists. Non-covered languages, and CJK prompts that miss those lists,
+    # Language-coverage guard. Layer-1 has English plus small high-confidence
+    # international keyword lists. Non-covered languages, and prompts that miss those lists,
     # cannot be scored by keywords. With this on, such a prompt is forced `uncertain`
     # → the cascade escalates to the (multilingual) Layer-2 eval. CONTRACT: if you
     # serve broad non-English traffic, ENABLE eval below — with eval OFF an uncovered

@@ -285,8 +285,8 @@ describe("scoreRequest — Layer-1 orchestration", () => {
   });
 
   // ── language-coverage guard ────────────────────────────────────────────────
-  // Layer-1 has English plus small high-confidence CJK keyword lists. A non-covered
-  // non-Latin prompt, or a CJK prompt that misses those lists, is forced `uncertain`
+  // Layer-1 has English plus small high-confidence international keyword lists.
+  // A non-covered non-Latin prompt, or a prompt that misses those lists, is forced `uncertain`
   // (confidence 0) so the cascade escalates to multilingual Layer-2 eval — UNLESS a
   // content-type structural signal gave real grip, or the message is trivially short.
   const longZh =
@@ -410,11 +410,11 @@ describe("scoreRequest — Layer-1 orchestration", () => {
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
   });
 
-  // ── shipped Chinese Layer-1 keywords ─────────────────────────────────────
-  // Config-only CJK expansion must add real positive dimensions, not merely task
-  // keywords. These tests assert Layer-1 rules catch high-confidence zh prompts
-  // and suppress low_keyword_coverage via *_zh_kw grip.
-  it("shipped zh: Simplified analysis prompt is handled by rules without language guard", () => {
+  // ── shipped international Layer-1 keywords ───────────────────────────────
+  // Config-only international expansion must add real positive dimensions, not merely task
+  // keywords. These tests assert Layer-1 rules catch high-confidence international prompts
+  // and suppress low_keyword_coverage via *_intl_kw grip.
+  it("shipped intl: Simplified analysis prompt is handled by rules without language guard", () => {
     const cfg = shippedRules();
     const req = makeRequest({
       messages: [
@@ -428,11 +428,11 @@ describe("scoreRequest — Layer-1 orchestration", () => {
 
     expect(out.decided_by).toBe("rules");
     expect(out.uncertain).toBe(false);
-    expect(out.explanation.some((e) => e.detail === "analysis_zh_kw")).toBe(true);
+    expect(out.explanation.some((e) => e.detail === "analysis_intl_kw")).toBe(true);
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
   });
 
-  it("shipped zh: Traditional analysis prompt is handled by rules without language guard", () => {
+  it("shipped intl: Traditional analysis prompt is handled by rules without language guard", () => {
     const cfg = shippedRules();
     const req = makeRequest({
       messages: [
@@ -446,11 +446,11 @@ describe("scoreRequest — Layer-1 orchestration", () => {
 
     expect(out.decided_by).toBe("rules");
     expect(out.uncertain).toBe(false);
-    expect(out.explanation.some((e) => e.detail === "analysis_zh_kw")).toBe(true);
+    expect(out.explanation.some((e) => e.detail === "analysis_intl_kw")).toBe(true);
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
   });
 
-  it("shipped zh: Simplified math prompt has dimension grip when task keywords match", () => {
+  it("shipped intl: Simplified math prompt has dimension grip when task keywords match", () => {
     const cfg = shippedRules();
     const req = makeRequest({
       messages: [
@@ -465,11 +465,11 @@ describe("scoreRequest — Layer-1 orchestration", () => {
 
     expect(out.task_type).toBe("math");
     expect(out.uncertain).toBe(false);
-    expect(out.explanation.some((e) => e.detail === "math_zh_kw")).toBe(true);
+    expect(out.explanation.some((e) => e.detail === "math_intl_kw")).toBe(true);
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
   });
 
-  it("shipped zh: Traditional web prompt has dimension grip when task keywords match", () => {
+  it("shipped intl: Traditional web prompt has dimension grip when task keywords match", () => {
     const cfg = shippedRules();
     const req = makeRequest({
       messages: [
@@ -481,11 +481,11 @@ describe("scoreRequest — Layer-1 orchestration", () => {
     });
     const out = scoreRequest(req, { cfg, approxTokens: 60 });
 
-    expect(out.explanation.some((e) => e.detail === "web_zh_kw")).toBe(true);
+    expect(out.explanation.some((e) => e.detail === "web_intl_kw")).toBe(true);
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
   });
 
-  it("shipped zh: unmatched long Chinese still trips language guard", () => {
+  it("shipped intl: unmatched long Chinese still trips language guard", () => {
     const cfg = shippedRules();
     const req = makeRequest({ messages: [{ role: "user", content: longZh }] });
     const out = scoreRequest(req, { cfg, approxTokens: 50 });
