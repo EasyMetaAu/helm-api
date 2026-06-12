@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   HelmConfigSchema,
   isOAuthPreset,
-  ProviderConfigSchema,
   type OAuthConfig,
+  ProviderConfigSchema,
 } from "./schema.js";
 
 // Narrow a provider's oauth union to the CONFIDENTIAL block for assertions
