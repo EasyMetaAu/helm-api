@@ -185,6 +185,63 @@ export type AnthropicMessagesRequest = z.infer<typeof AnthropicMessagesRequestSc
 // `thinking` extension (the request-level reasoning/thinking passthrough bag).
 type IRThinkingExt = { type: "thinking"; text: string; signature?: string };
 
+// Claude Code ≥2.1.29 injects a per-request billing attribution block as the FIRST
+// top-level system entry: "x-anthropic-billing-header: cc_version=<v>.<3hex>;
+// cc_entrypoint=<entry>; cch=<5hex>;". The `cch` is recomputed EVERY request, so
+// forwarding the block verbatim breaks prompt caching (strict prefix match) for the
+// whole conversation — cached_tokens=0 + a full prefix re-write per turn
+// (anthropics/claude-code #24168, #40652). So it is stripped from the IR here on the
+// way in (keeps it out of the OpenAI-relay lanes entirely). The native-Anthropic
+// subscription executor then re-emits a coherent, cache-stable header of its own —
+// reusing the client's REAL version/entrypoint when the route captured them via
+// extractBillingHeaderIdentity (anti-ban), else a baked fallback version.
+const BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
+
+// undefined = nothing left to hoist (the system param was only the billing block).
+function stripBillingHeader(
+  system: z.infer<typeof AnthropicSystemSchema>,
+): z.infer<typeof AnthropicSystemSchema> | undefined {
+  if (typeof system === "string") {
+    return system.startsWith(BILLING_HEADER_PREFIX) ? undefined : system;
+  }
+  const kept = system.filter((b) => !b.text.startsWith(BILLING_HEADER_PREFIX));
+  return kept.length > 0 ? kept : undefined;
+}
+
+// Capture the inbound CLI's billing identity — "cc_version=<v>; cc_entrypoint=<e>" with
+// the rotating `cch` (and any optional cc_workload / cc_is_subagent) dropped — from the
+// SAME system[0] block stripBillingHeader removes. The route stamps the result onto IR
+// metadata so the subscription executor can re-emit the client's OWN version instead of
+// a pinned spoof. Returns null unless BOTH tokens match a tight shape: the value is
+// client-controlled and gets re-emitted into the upstream identity, so an
+// abnormal/unparseable header falls back (null) rather than echoing untrusted bytes.
+const CC_VERSION_RE = /cc_version=([0-9]+(?:\.[0-9]+)*\.[0-9a-f]{3})(?:;|\s|$)/;
+const CC_ENTRYPOINT_RE = /cc_entrypoint=([a-z][a-z0-9_-]{0,31})(?:;|\s|$)/;
+
+export function extractBillingHeaderIdentity(system: unknown): string | null {
+  const header = billingHeaderText(system);
+  if (header === null) return null;
+  const version = header.match(CC_VERSION_RE)?.[1];
+  const entrypoint = header.match(CC_ENTRYPOINT_RE)?.[1];
+  if (version === undefined || entrypoint === undefined) return null;
+  return `cc_version=${version}; cc_entrypoint=${entrypoint}`;
+}
+
+// The verbatim billing-header text from a native Anthropic `system` (string | block[]),
+// or null when absent. Defensive about shape — the route hands us the raw parsed body.
+function billingHeaderText(system: unknown): string | null {
+  if (typeof system === "string") {
+    return system.startsWith(BILLING_HEADER_PREFIX) ? system : null;
+  }
+  if (Array.isArray(system)) {
+    for (const b of system) {
+      const text = (b as { text?: unknown } | null)?.text;
+      if (typeof text === "string" && text.startsWith(BILLING_HEADER_PREFIX)) return text;
+    }
+  }
+  return null;
+}
+
 // —— system: string | block[] -> IR message content (string or multipart). ————————
 function normalizeSystem(system: z.infer<typeof AnthropicSystemSchema>): IRMessage["content"] {
   if (typeof system === "string") return system;
@@ -342,9 +399,13 @@ export function transformRequestOut(req: unknown): IRRequest {
   const messages: IRMessage[] = [];
   const thinking: IRThinkingExt[] = [];
 
-  // Rule 1: hoist the top-level system prompt to the head of messages.
+  // Rule 1: hoist the top-level system prompt to the head of messages (after
+  // dropping the cache-busting Claude Code billing block, see stripBillingHeader).
   if (parsed.system !== undefined) {
-    messages.push({ role: "system", content: normalizeSystem(parsed.system) });
+    const system = stripBillingHeader(parsed.system);
+    if (system !== undefined) {
+      messages.push({ role: "system", content: normalizeSystem(system) });
+    }
   }
 
   for (const m of parsed.messages) {

@@ -13,6 +13,7 @@
 // ⚠️ ToS: subscription use via a third-party gateway may violate Anthropic's terms
 // (see README disclaimer). Identity recipe ported from openclaw (MIT).
 
+import { createHash } from "node:crypto";
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
@@ -46,7 +47,18 @@ const DEFAULT_MAX_TOKENS = 4096;
 const ANTHROPIC_VERSION = "2023-06-01";
 // Claude-Code identity (openclaw src/llm/providers/anthropic.ts). All load-bearing
 // for the OAuth subscription endpoint — without them it 401/403s.
-const CLAUDE_CODE_VERSION = "1.0.0";
+//
+// FALLBACK version + entrypoint, used ONLY when the inbound request did NOT come from
+// the real Claude Code CLI (e.g. an OpenAI/Gemini-shaped request routed to a Claude
+// subscription lane), so no client billing identity was captured. For genuine CLI
+// traffic the request's OWN version/entrypoint are passed through (see
+// `req.metadata.client_billing_header`), which is both zero-maintenance and the most
+// authentic. This fallback still wants to be a REAL recent version (a stale one is an
+// anti-ban fingerprint) — verified field-for-field against the Claude Code 2.1.175
+// binary (user-agent `claude-cli/<v> (external, cli)`, billing block, beta set) — but
+// it is only hit by non-CLI traffic, so its staleness rarely matters. Bump with betas.
+const FALLBACK_CLAUDE_CODE_VERSION = "2.1.175";
+const FALLBACK_CLAUDE_CODE_ENTRYPOINT = "cli";
 const OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
 const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
 const COMPACT_BETA = "compact-2026-01-12";
@@ -137,20 +149,70 @@ function textBlocksFromContent(content: unknown, messageCacheControl?: unknown):
   return [];
 }
 
-// Extract the system prompt (string or array) and ALWAYS prepend the Claude-Code
-// spoof as system[0] (mandatory for the OAuth subscription endpoint). Both
-// `system` AND `developer` turns fold here, in original message order — Anthropic
-// has no `developer` role (it is OpenAI's renamed system tier), so dropping it to
-// a user turn would shift instruction precedence and leak hidden instructions.
-// Mirrors LiteLLM map_developer_role_to_system_role + the Gemini collectSystemText
-// policy (developer == system, order preserved).
-function buildSystem(messages: Array<Record<string, unknown>>): AnthropicBlock[] {
+// Reproduce Claude Code's `x-anthropic-billing-header` attribution block as the FIRST
+// system entry — the exact slot (system[0], ahead of the "You are Claude Code…"
+// preamble) real CC emits it. `clientIdentity` is the inbound CLI's own
+// "cc_version=<v>; cc_entrypoint=<e>" the route captured (cch dropped); we re-emit it
+// verbatim for the most authentic, zero-maintenance fingerprint. When it is absent
+// (non-CLI traffic) we synthesize a coherent header from the FALLBACK version instead.
+//
+// Either way the `cch` is the part that matters for caching: real CC derives it (and
+// the version suffix) from request CONTENT and recomputes it every request, and because
+// the block lives in the cached prefix that per-turn churn is precisely what guts prompt
+// caching (cached_tokens=0, full prefix re-write each turn). We derive `cch` from the
+// STABLE system text instead, so to Anthropic it reads as an ordinary content hash yet
+// stays byte-identical across a conversation's turns — it only changes when the system
+// prompt changes, exactly when the cache would invalidate anyway. The optional
+// cc_workload / cc_is_subagent fields are omitted, matching a normal interactive
+// main-session request. (Absence of the whole block is also legitimate — it is what
+// `CLAUDE_CODE_ATTRIBUTION_HEADER=0` produces — but the subscription path presents the
+// coherent positive.)
+function billingHeaderBlock(systemText: string, clientIdentity?: string | null): AnthropicBlock {
+  const digest = createHash("sha256").update(systemText, "utf8").digest("hex");
+  const cch = digest.slice(0, 5);
+  const identity =
+    clientIdentity != null && clientIdentity.length > 0
+      ? clientIdentity
+      : `cc_version=${FALLBACK_CLAUDE_CODE_VERSION}.${digest.slice(5, 8)}; cc_entrypoint=${FALLBACK_CLAUDE_CODE_ENTRYPOINT}`;
+  return { type: "text", text: `x-anthropic-billing-header: ${identity}; cch=${cch};` };
+}
+
+// Build the Anthropic system param: the Claude-Code billing block at system[0], the
+// spoof preamble at system[1], then the folded client system. Both `system` AND
+// `developer` turns fold here, in original message order — Anthropic has no
+// `developer` role (it is OpenAI's renamed system tier), so dropping it to a user turn
+// would shift instruction precedence and leak hidden instructions. Mirrors LiteLLM
+// map_developer_role_to_system_role + the Gemini collectSystemText policy (developer
+// == system, order preserved).
+function buildSystem(
+  messages: Array<Record<string, unknown>>,
+  clientIdentity?: string | null,
+): AnthropicBlock[] {
   const sys: AnthropicBlock[] = [{ type: "text", text: SYSTEM_SPOOF }];
   for (const m of messages) {
     if (m.role !== "system" && m.role !== "developer") continue;
     for (const b of textBlocksFromContent(m.content, m.cache_control)) sys.push(b);
   }
-  return sys;
+  // Derive the billing block from the (stable) text it precedes, then put it first.
+  const systemText = sys.map((b) => String(b.text ?? "")).join("\n");
+  return [billingHeaderBlock(systemText, clientIdentity), ...sys];
+}
+
+// Build the `claude-cli/<version> (external, <entrypoint>)` user-agent from the billing
+// block at system[0] (the version WITHOUT its 3-hex build suffix, matching real CC's
+// user-agent). Reading it back from the assembled body keeps the header in lockstep
+// with whatever identity buildSystem emitted — the client's real one or the fallback —
+// so the two can never drift. Falls back to the baked default if the block is missing.
+const UA_VERSION_RE = /cc_version=([0-9]+(?:\.[0-9]+)*)\.[0-9a-f]{3}(?:;|\s|$)/;
+const UA_ENTRYPOINT_RE = /cc_entrypoint=([a-z][a-z0-9_-]{0,31})(?:;|\s|$)/;
+
+function userAgentFromBody(body: Record<string, unknown>): string {
+  const sys = body.system;
+  const first = Array.isArray(sys) ? (sys[0] as { text?: unknown } | undefined) : undefined;
+  const text = typeof first?.text === "string" ? first.text : "";
+  const version = text.match(UA_VERSION_RE)?.[1] ?? FALLBACK_CLAUDE_CODE_VERSION;
+  const entrypoint = text.match(UA_ENTRYPOINT_RE)?.[1] ?? FALLBACK_CLAUDE_CODE_ENTRYPOINT;
+  return `claude-cli/${version} (external, ${entrypoint})`;
 }
 
 function toAnthropicMessages(messages: Array<Record<string, unknown>>): AnthropicMessage[] {
@@ -219,9 +281,16 @@ export function openaiToAnthropicRequest(
 ): Record<string, unknown> {
   const r = req as Record<string, unknown>;
   const messages = Array.isArray(r.messages) ? (r.messages as Array<Record<string, unknown>>) : [];
+  // The inbound CLI's own billing identity (version + entrypoint), captured by the
+  // route; re-emitted verbatim in the billing block so the upstream fingerprint is the
+  // client's REAL version, not a pinned spoof. Absent for non-CLI traffic → fallback.
+  const clientIdentity =
+    typeof (r.metadata as Record<string, unknown> | undefined)?.client_billing_header === "string"
+      ? ((r.metadata as Record<string, unknown>).client_billing_header as string)
+      : null;
   const body: Record<string, unknown> = {
     model: r.model,
-    system: buildSystem(messages),
+    system: buildSystem(messages, clientIdentity),
     messages: toAnthropicMessages(messages),
     max_tokens:
       typeof r.max_completion_tokens === "number"
@@ -405,7 +474,10 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-version": ANTHROPIC_VERSION,
       "anthropic-beta": betaHeaderForBody(body),
-      "user-agent": `claude-cli/${CLAUDE_CODE_VERSION}`,
+      // Keep the user-agent coherent with the billing block at system[0]: derive its
+      // version + entrypoint from the SAME identity emitted there (the client's real
+      // one when present, else the fallback) so the two never disagree.
+      "user-agent": userAgentFromBody(body),
       "x-app": "cli",
     };
     if (cfg.getAuthHeader) h.Authorization = await cfg.getAuthHeader();

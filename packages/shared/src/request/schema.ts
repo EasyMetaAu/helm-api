@@ -30,6 +30,15 @@ export const RequestMetadataSchema = z.object({
   resource_id: z.string().nullable(),
   project_id: z.string().nullable(),
   memory_mode: MemoryModeSchema,
+  // The inbound client's Claude-Code billing-attribution prefix —
+  // "cc_version=<v>.<3hex>; cc_entrypoint=<entry>" with the per-request `cch` dropped
+  // — captured at the Anthropic route from the real CLI's system[0] block before it
+  // is stripped. Gateway-only metadata (never forwarded to providers as a body field):
+  // the native-Anthropic subscription executor reads it to re-emit the client's OWN
+  // version/entrypoint (anti-ban) with a cache-stable cch, instead of a pinned spoof.
+  // Null/absent for non-CLI traffic (e.g. an OpenAI-shaped request routed to a Claude
+  // subscription lane) → the executor falls back to its baked default version.
+  client_billing_header: z.string().nullish(),
 });
 
 export const InternalRequestSchema = z.object({

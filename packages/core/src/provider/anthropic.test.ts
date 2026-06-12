@@ -19,8 +19,11 @@ describe("openaiToAnthropicRequest", () => {
       temperature: 0.5,
     });
     const sys = body.system as Array<{ text: string }>;
-    expect(sys[0]?.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
-    expect(sys[1]?.text).toBe("Be terse.");
+    // system[0] is the Claude-Code billing attribution block; the spoof + folded
+    // client system follow it (real-CC layout).
+    expect(sys[0]?.text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.175\./);
+    expect(sys[1]?.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
+    expect(sys[2]?.text).toBe("Be terse.");
     expect(body.max_tokens).toBe(4096); // defaulted
     expect(body.temperature).toBe(0.5);
     const msgs = body.messages as Array<{
@@ -194,7 +197,8 @@ describe("openaiToAnthropicRequest", () => {
 
     expect(body.cache_control).toBeUndefined();
     const system = body.system as Array<Record<string, unknown>>;
-    expect(system[1]?.cache_control).toEqual({ type: "ephemeral" });
+    // [0]=billing, [1]=spoof, [2]=client system block (carries the cache_control).
+    expect(system[2]?.cache_control).toEqual({ type: "ephemeral" });
     const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
     expect(messages[0]?.content[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     const tools = body.tools as Array<Record<string, unknown>>;
@@ -217,7 +221,8 @@ describe("openaiToAnthropicRequest", () => {
       ],
     });
     const sys = body.system as Array<{ text: string }>;
-    expect(sys.map((b) => b.text)).toEqual([
+    expect(sys[0]?.text).toMatch(/^x-anthropic-billing-header:/);
+    expect(sys.slice(1).map((b) => b.text)).toEqual([
       "You are Claude Code, Anthropic's official CLI for Claude.",
       "Be terse.",
       "Prefer metric units.",
@@ -227,6 +232,94 @@ describe("openaiToAnthropicRequest", () => {
     expect(msgs).toHaveLength(1);
     expect(msgs[0]?.role).toBe("user");
     expect(JSON.stringify(body.messages)).not.toContain("Prefer metric units.");
+  });
+});
+
+// The OAuth subscription endpoint expects real Claude-Code traffic. Real CC injects
+// an x-anthropic-billing-header block as system[0] whose cc_version suffix + cch are
+// content-derived and recomputed every request — that per-turn churn is what guts
+// prompt caching. helm reproduces the block (real 2.1.175 version, system[0] slot)
+// but derives the hash from the STABLE system text, so it reads as a normal content
+// hash to Anthropic yet stays byte-identical across a conversation's turns. (Pairs
+// with the inbound strip of the CLIENT's own rotating header in protocol/anthropic.)
+describe("openaiToAnthropicRequest — Claude-Code billing header (anti-ban + cacheable)", () => {
+  const billingOf = (b: Record<string, unknown>): string =>
+    (b.system as Array<{ text: string }>)[0]?.text ?? "";
+
+  it("emits the billing block as system[0] with the real version, cli entrypoint, and a 5-hex cch", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        { role: "system", content: "house rules" },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(billingOf(body)).toMatch(
+      /^x-anthropic-billing-header: cc_version=2\.1\.175\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5};$/,
+    );
+    // No cache_control on the billing block (matches real CC — the breakpoints ride
+    // the prompt blocks that follow, not the attribution line).
+    expect((body.system as Array<Record<string, unknown>>)[0]?.cache_control).toBeUndefined();
+  });
+
+  it("stays byte-identical across turns of the same conversation (cache prefix holds)", () => {
+    const turn = (last: string) =>
+      billingOf(
+        openaiToAnthropicRequest({
+          model: "m",
+          messages: [
+            { role: "system", content: "stable system prompt" },
+            { role: "user", content: last },
+          ],
+        }),
+      );
+    // Same system, different latest user message → identical billing header.
+    expect(turn("first question")).toBe(turn("a much longer follow-up question"));
+  });
+
+  it("changes when the system text changes (genuine content derivation)", () => {
+    const withSystem = (s: string) =>
+      billingOf(
+        openaiToAnthropicRequest({
+          model: "m",
+          messages: [
+            { role: "system", content: s },
+            { role: "user", content: "x" },
+          ],
+        }),
+      );
+    expect(withSystem("alpha")).not.toBe(withSystem("beta"));
+  });
+
+  it("re-emits the CLIENT's real version/entrypoint verbatim when the route captured it", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        { role: "system", content: "house rules" },
+        { role: "user", content: "hi" },
+      ],
+      // The route stamps the inbound CLI's identity here (cch dropped).
+      metadata: { client_billing_header: "cc_version=2.1.173.d11; cc_entrypoint=cli" },
+    } as unknown as Parameters<typeof openaiToAnthropicRequest>[0]);
+    // Real version 2.1.173.d11 passed through; only a stable 5-hex cch is appended.
+    expect(billingOf(body)).toMatch(
+      /^x-anthropic-billing-header: cc_version=2\.1\.173\.d11; cc_entrypoint=cli; cch=[0-9a-f]{5};$/,
+    );
+  });
+
+  it("still stabilizes cch (cache) even with a passed-through client identity", () => {
+    const turn = (last: string) =>
+      billingOf(
+        openaiToAnthropicRequest({
+          model: "m",
+          messages: [
+            { role: "system", content: "stable system" },
+            { role: "user", content: last },
+          ],
+          metadata: { client_billing_header: "cc_version=2.1.173.d11; cc_entrypoint=cli" },
+        } as unknown as Parameters<typeof openaiToAnthropicRequest>[0]),
+      );
+    expect(turn("q1")).toBe(turn("a longer q2"));
   });
 });
 
@@ -453,7 +546,9 @@ describe("createAnthropicClient", () => {
       expect(h.get("user-agent")).toContain("claude-cli/");
       expect(h.get("x-app")).toBe("cli");
       const sys = (JSON.parse(String(init?.body)) as { system: Array<{ text: string }> }).system;
-      expect(sys[0]?.text).toContain("You are Claude Code");
+      expect(sys[0]?.text).toMatch(/^x-anthropic-billing-header:/);
+      expect(sys[1]?.text).toContain("You are Claude Code");
+      expect(h.get("user-agent")).toBe("claude-cli/2.1.175 (external, cli)");
       if (calls === 1) return jsonResponse({ error: "expired" }, 401);
       return jsonResponse({
         id: "msg",
@@ -484,6 +579,36 @@ describe("createAnthropicClient", () => {
       ((resp.choices as Array<Record<string, unknown>>)[0]?.message as Record<string, unknown>)
         .content,
     ).toBe("ok");
+  });
+
+  it("derives the user-agent from the CLIENT's captured version so header + billing block agree", async () => {
+    let seenUA = "";
+    let seenBilling = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seenUA = new Headers(init?.headers).get("user-agent") ?? "";
+      seenBilling =
+        (JSON.parse(String(init?.body)) as { system: Array<{ text: string }> }).system[0]?.text ??
+        "";
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "k" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await client.chatCompletion({
+      model: "claude-x",
+      messages: [{ role: "user", content: "hi" }],
+      metadata: { client_billing_header: "cc_version=2.1.173.d11; cc_entrypoint=cli" },
+    } as unknown as Parameters<typeof client.chatCompletion>[0]);
+    // user-agent uses the client's semver (no 3-hex suffix); billing block carries the
+    // full version+suffix — both reflect 2.1.173, never the fallback 2.1.175.
+    expect(seenUA).toBe("claude-cli/2.1.173 (external, cli)");
+    expect(seenBilling).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.173\.d11;/);
   });
 
   it("sends openclaw header parity + a STABLE metadata.user_id on every request (Device ID never rotates)", async () => {

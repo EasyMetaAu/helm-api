@@ -31,6 +31,7 @@ export {
   type AnthropicRequestBlock,
   type AnthropicRequestMessage,
   type AnthropicToolChoiceOut,
+  extractBillingHeaderIdentity,
   transformRequestIn,
   transformRequestInWithWarnings,
   transformRequestOut,

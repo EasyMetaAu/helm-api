@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-06-12 · Claude Code 计费归因块：入站剥离 + 透传客户端真实版本重注入「可缓存」头（docs/05；anti-ban；原则 1/4/7）
+
+- **缘起**：用户报告 admin 捕获 payload「数据全是重复的」，怀疑 helm 拼接 bug。结论：**helm 无 bug**（`messages.ts` parse 前 `c.req.text()` 原样捕获）。畸形是 Claude Code ≥2.1.29 客户端行为——把 `x-anthropic-billing-header: cc_version=<v>.<3hex>; cc_entrypoint=cli; cch=<5hex>;` 注入为 top-level `system[0]`，且 **3hex 后缀和 cch 都按请求内容哈希、逐请求轮换**（从真实 2.1.175 二进制 `z76()` 确认：`cch=00000` 是 JS 里的 sentinel，native 层 egress 前替换成真实 5hex，所以 helm 收到的 body 已是 `fd3e2`/`8f46b` 真值）。prompt cache 严格前缀匹配 → 首块每轮变 → 生产实测**每轮 `cached_tokens=0` + ~42.8K 缓存重写 + 150–200K Opus 输入全额未缓存**（≈10×）。上游已知：anthropics/claude-code#24168、#40652、motiful/cc-cache-audit。
+- **三层修复（用户拍板 Plan B，并进一步要求「用客户端真实版本、别硬编码」）**：
+  1. **入站剥离 + 捕获**（`protocol/anthropic/request.ts` `transformRequestOut`）：`stripBillingHeader` 丢弃以 `x-anthropic-billing-header:` 开头的 top-level system 块（去掉客户端轮换头，OpenAI 中继路免受污染）。同文件新增 `extractBillingHeaderIdentity(system)`：从**同一个**被剥离的块里抓出 `cc_version=<v>; cc_entrypoint=<e>`（丢 cch），**只在两段都匹配严格正则时返回**——值是客户端可控且要回写进上游身份，畸形/注入则返回 null（回退兜底，绝不回显不可信字节）。
+  2. **路由→provider 透传**（`messages.ts` 在剥离前从 `native.system` 抓取并盖到 `ir.metadata.client_billing_header`；`messages-pipeline.toInternalRequest` 复制到 `InternalRequest.metadata.client_billing_header`，≤128 长度封顶；`shared` 的 `RequestMetadataSchema` 加该 `.nullish()` 字段）。这是**网关元数据，绝不作为 body 字段转发给 provider**——只有 native-Anthropic 执行器读它。
+  3. **订阅路重注入**（`provider/anthropic.ts`）：`billingHeaderBlock(systemText, clientIdentity?)` 放 `system[0]`：**有客户端身份就原样回写**（`cc_version=2.1.173.d11; cc_entrypoint=cli`），无则用兜底版本合成；两种情况 **cch 都由 SHA-256(稳定 system 文本) 切片**派生（只随 system 提示变 → 跨同会话多轮字节恒定 → **缓存命中**）。user-agent 改为 `userAgentFromBody(body)`——从 `system[0]` 的 billing 块解析版本+entrypoint，与块**永不矛盾**（客户端真值或兜底）。
+- **`CLAUDE_CODE_VERSION` 不删、降级为兜底**（`FALLBACK_CLAUDE_CODE_VERSION`，仍 = 真实 `2.1.175`）：用户说「客户端一定会发、直接删」——但**订阅执行器不止服务 Claude Code**。`claude-opus` lane 主候选就是 `anthropic/claude-opus-4-8`（`lanes.yaml:105`），所以 `curl /v1/chat/completions -d '{"model":"claude-opus"}'`（OpenAI 形、无 `claude-cli` UA、无 billing 块）也会打到它；执行器自注释也说它收 "OpenAI-Chat IR"。这类请求没有客户端身份可透传，没兜底则 UA 变 `claude-cli/undefined` 直接 401/403（身份头 load-bearing）。故：**CLI 流量走透传（零维护、最真），非 CLI 流量走兜底**（兜底极少命中，陈旧风险可忽略）。
+- **关键取舍（已敲定）**：真 CC 的头逐请求轮换（后缀+cch 都是内容哈希），「字节级仿真」与「命中缓存」**本质冲突**。用户选**按缓存前缀算 cch**：真实版本 + authentic-looking + 可缓存；唯一弱差异是同会话内 cch 不每轮变（cch 是归因 telemetry，几乎不可能据此封号）。**经验数据**（同会话 6 请求）证实客户端 `cc_version=2.1.173.d11` **跨请求恒定**、只有 `cch` 轮换——所以透传客户端版本既零维护又比硬编码更真（硬编码必然和客户端实际版本错位，且拿不到真实 build 后缀 `.d11`）。
+- **验证**：TDD 红→绿。新增 extract 4 例（version+entrypoint / string system / 无块→null / 注入畸形→null）+ provider 透传 2 例（回写客户端版本 / 透传时 cch 仍稳定）+ UA-from-client 1 例（UA 用客户端 semver，块带后缀，都 2.1.173 非兜底 2.1.175）；既有 fallback 路径断言不变（无 metadata → 2.1.175）。provider+protocol+gateway+shared **1071 绿**、`pnpm typecheck`/`lint` 全绿。
+
 ## 2026-06-12 · 首页 Token 计量 dashboard（持久化 + 聚合端点 + LayerChart 图表；CLAUDE.md 原则 1/3/7；docs/02/07）
 
 - **缘起**：用户要在 `/admin` 首页看到「总/输入/输出/缓存 Token」与两张图（用量趋势 + 各模型占比），参考 `claude-relay-service` dashboard。阻塞点：helm-api **从不持久化 token 计数**——`catalog/cost.ts::usageFromBody()` 早就能解析 OpenAI/Anthropic 两种 usage 形状，但 `resolveCostUsd()` 只留 USD、丢掉 token 数；telemetry 表只存 `cost_usd`；无聚合端点（首页此前 client 侧 reduce ≤200 行样本）；无图表库。决策（已与用户敲定）：**cards + 2 charts / LayerChart / forward-only 不回填**。
@@ -25,19 +36,13 @@
 - **取舍/仍开放**：Helm 目前没有 Responses object/session/history store，所以带 `previous_response_id` 且只提交历史 tool-output continuation 的请求不能假装可处理；本轮选择 **fail-closed**，返回明确错误，避免把缺少本地 `function_call` 上下文的 `function_call_output` 转成无效 Chat tool message。单纯携带 `previous_response_id` 的普通字符串 input 仍保留在 `provider_raw` 用于后续 Responses-native round-trip；完整 continuation 支持需要 response store、input_items/history 查询和 tool-call correlation。
 - **验证**：TDD 红→绿。新增/更新 focused regression 覆盖 Responses `tool_choice` 双向规范化、`previous_response_id` continuation fail-closed、Codex provider `tool_choice`、Anthropic native passthrough + beta headers、Gemini `safetySettings` round-trip，以及 gateway 不把 `previous_response_id` / `truncation` 泄漏到 OpenAI-compatible upstream。验证命令：focused Vitest 244 绿；`pnpm typecheck` 绿；`pnpm lint` 绿；`pnpm test` 初跑因本地 `better-sqlite3` ABI 137 vs Node 25 ABI 141 失败，执行 `pnpm --filter @helm/core rebuild better-sqlite3` 后完整 `pnpm test` 240 files / 3036 tests 绿。
 
-## 2026-06-12 · 新增 claude-fable-5 配置支持（CLAUDE.md 原则 2/6；docs/04；实现约定「能力与定价数据源」）
-
-- **缘起**：用户要求为 `config/` 增加 Claude Fable 5 支持，能力/定价从 OpenRouter API 现场下载。
-- **数据来源**：`GET https://openrouter.ai/api/v1/models` 的 `anthropic/claude-fable-5`（2026-06-12）——ctx 1,000,000、max_completion_tokens 128,000、input modalities text+image+**file**（→ 我们的 `document`）。pricing 当时记录在案但本轮**未落库**（见取舍）。
-- **实现（完全镜像 `claude-opus` lane 模式）**：① `lanes.yaml` 新增 `claude-fable` lane，与 opus 一样**以 native `anthropic/claude-fable-5` OAuth 别名领衔**（未连接订阅 fail-open 跳过），直接降级进 GPT 领衔的 `premium` 链（`fallback: [premium]`）。② `model-aliases.yaml` 加 `claude-fable-*` glob（最长字面胜过广义 `claude-*` → balanced 兜底），吸收日期后缀。
-- **取舍（用户决策）**：最初版本另加了 `openrouter/claude-fable-5` 静态镜像兜底（providers/capabilities/pricing 三处 + lane fallback 首项），用户明确要求**去掉、不要 fallback 到 OpenRouter**，故回退为与 `claude-opus` 完全一致：无静态 Fable 镜像，无订阅时经 `premium` 服务。native `anthropic/claude-fable-5` 主选项不在 `providers.yaml` 静态注册——与现有 `anthropic/claude-opus-4-8` 等一致，靠运行时 admin OAuth pool 注册（无 boot 时 lane→provider 解析校验，不会 fail-closed 拒启动）。
-- **验证**：TDD 红→绿。`samples.test.ts` 新增 lane primary/fallback + alias glob 断言，`catalog/load.test.ts` 端到端断言 shipped yaml 加载出 Fable 能力+cache 定价。先确认两测试红（lane primary `undefined`、catalog entry `undefined`），实现后 `pnpm exec vitest run packages/core/src/config packages/core/src/catalog` 98 绿、`pnpm typecheck`、`pnpm lint` 全通过。**部署坑**：线上 `/opt/helm-api/config` 是运营者属主，需手动同步这两个 yaml 才生效（见 [[deploy-never-overwrite-config]]）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-12 · 新增 claude-fable-5 配置支持（原则 2/6；docs/04）：能力取自 OpenRouter API（ctx 1M / max_out 128K / text+image+file→document，pricing 未落库）；完全镜像 claude-opus 模式——`lanes.yaml` 新 `claude-fable` lane 以 native OAuth 别名领衔、`fallback:[premium]`，`model-aliases.yaml` 加 `claude-fable-*` glob；用户拍板**去掉 OpenRouter 静态镜像兜底**；native 别名靠运行时 OAuth pool 注册不进 providers.yaml。TDD samples+catalog 98 绿。部署坑：需手动同步 `/opt/helm-api/config` 两个 yaml（[[deploy-never-overwrite-config]]）。
 
 ### 2026-06-12 · Codex/Responses 流式兼容修复（状态可见 + 生命周期路由形状；原则 1/7/8；docs/05/07）：修 Responses SSE 解析（CRLF/multi-line/tail/event fallback/reasoning deltas）、补 `/v1/responses` lifecycle/helper URL family auth-first structured unsupported；`stream:true` 路由立即发 `response.created`/`in_progress` prelude 并复用 route-stamped response id，Codex 客户端可低首 token 延迟看到状态。取舍：非完整 Responses object store/token counter，helper endpoints fail-closed unsupported。
 
