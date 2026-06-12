@@ -1,6 +1,6 @@
 import type { RateLimitProbe, RateLimitResult } from "@helm/core";
 import { type ErrorClass, ErrorClassSchema, makeHelmError } from "@helm/shared";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
@@ -139,8 +139,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
   // Frees an unclaimed concurrency lease on every exit path — incl. a throw into
   // onError (the handler below acquires AFTER its self-auth).
   app.use("/v1/responses", concurrencyReleaseGuard());
+  app.use("/responses", concurrencyReleaseGuard());
+  app.use("/openai/v1/responses", concurrencyReleaseGuard());
 
-  app.post("/v1/responses", async (c) => {
+  const handleResponses = async (c: Context<AppEnv>) => {
     const traceId = c.get("trace_id");
 
     // 1) Auth FIRST (docs/02 pipeline order).
@@ -394,5 +396,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       );
     }
     return c.json(body);
-  });
+  };
+
+  app.post("/v1/responses", handleResponses);
+  app.post("/responses", handleResponses);
+  app.post("/openai/v1/responses", handleResponses);
 }

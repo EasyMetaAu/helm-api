@@ -149,6 +149,30 @@ function extractCredential(apiKey: string | undefined, auth: string | undefined)
   return null;
 }
 
+function estimateAnthropicInputTokens(value: unknown): number {
+  const seen = new WeakSet<object>();
+  const collect = (v: unknown): string => {
+    if (typeof v === "string") return v;
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    if (v === null || v === undefined) return "";
+    if (Array.isArray(v)) return v.map(collect).join("\n");
+    if (typeof v === "object") {
+      if (seen.has(v)) return "";
+      seen.add(v);
+      return Object.values(v as Record<string, unknown>)
+        .map(collect)
+        .join("\n");
+    }
+    return "";
+  };
+  const obj = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const text = [obj.system, obj.messages, obj.tools, obj.tool_choice]
+    .map(collect)
+    .filter((s) => s.length > 0)
+    .join("\n");
+  return Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 4));
+}
+
 // Client disconnect / abort detection — mirrors chat.ts. Used to suppress a
 // terminal error frame for a benign disconnect (NOT a provider fault, docs/02).
 function isAbort(err: unknown, signal: AbortSignal): boolean {
@@ -169,13 +193,68 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
   // acquires AFTER its self-auth, so the slot cannot be taken by middleware).
   app.use("/v1/messages", concurrencyReleaseGuard());
 
+  const resolveIdentity = async (c: Context<AppEnv>): Promise<MessagesIdentity | null> => {
+    const credential = extractCredential(c.req.header("x-api-key"), c.req.header("Authorization"));
+    return deps.auth.resolve(credential);
+  };
+
+  app.post("/api/event_logging/batch", async (c) => {
+    const traceId = c.get("trace_id");
+    const identity = await resolveIdentity(c);
+    if (identity === null) {
+      return sendError(c, {
+        error_class: "auth_error",
+        message: "missing or invalid API key",
+        trace_id: traceId,
+      });
+    }
+    return c.json({ status: "ok" });
+  });
+
+  app.post("/v1/messages/count_tokens", async (c) => {
+    const traceId = c.get("trace_id");
+    const identity = await resolveIdentity(c);
+    if (identity === null) {
+      return sendError(c, {
+        error_class: "auth_error",
+        message: "missing or invalid API key",
+        trace_id: traceId,
+      });
+    }
+    let native: unknown;
+    try {
+      native = JSON.parse(await c.req.text());
+    } catch {
+      return sendError(c, {
+        error_class: "invalid_request",
+        message: "malformed JSON request body",
+        trace_id: traceId,
+      });
+    }
+    const obj = native && typeof native === "object" ? (native as Record<string, unknown>) : null;
+    if (obj === null || typeof obj.model !== "string" || obj.model.length === 0) {
+      return sendError(c, {
+        error_class: "invalid_request",
+        message: "model parameter is required",
+        trace_id: traceId,
+      });
+    }
+    if (!Array.isArray(obj.messages) || obj.messages.length === 0) {
+      return sendError(c, {
+        error_class: "invalid_request",
+        message: "messages parameter is required",
+        trace_id: traceId,
+      });
+    }
+    return c.json({ input_tokens: estimateAnthropicInputTokens(native) });
+  });
+
   app.post("/v1/messages", async (c) => {
     const traceId = c.get("trace_id");
 
     // 1) Auth FIRST (docs/02 pipeline: Auth precedes the Protocol Adapter). A
     //    missing/invalid key never reaches the translator or the pipeline.
-    const credential = extractCredential(c.req.header("x-api-key"), c.req.header("Authorization"));
-    const identity = await deps.auth.resolve(credential);
+    const identity = await resolveIdentity(c);
     if (identity === null) {
       return sendError(c, {
         error_class: "auth_error",

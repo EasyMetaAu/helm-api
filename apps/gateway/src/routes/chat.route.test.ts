@@ -115,7 +115,9 @@ function buildApp(
   const getByHash = vi
     .fn()
     .mockResolvedValue(opts.authed === false ? null : keyRecord(opts.record ?? {}));
-  app.use("/v1/*", authMiddleware({ keyStore: { getByHash }, log: () => {} }));
+  for (const pattern of ["/v1/*", "/chat/*", "/engines/*", "/openai/deployments/*"]) {
+    app.use(pattern, authMiddleware({ keyStore: { getByHash }, log: () => {} }));
+  }
   registerChatRoutes(app, d);
   return app;
 }
@@ -283,6 +285,57 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     const plan = harness.execute.mock.calls[0]?.[0] as ExecutionPlan;
     expect(plan.selected_lane).toBe("balanced");
     expect(harness.log).toHaveBeenCalledOnce();
+  });
+
+  it("accepts the LiteLLM-compatible /chat/completions alias", async () => {
+    const upstream = { id: "cmpl-1", choices: [{ message: { content: "hello" } }] };
+    const { deps: d, harness } = deps();
+    harness.execute.mockResolvedValue(nonStreamOutcome(upstream));
+    const app = buildApp(d);
+
+    const res = await app.request("/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(upstream);
+    expect(harness.execute).toHaveBeenCalledOnce();
+  });
+
+  it("uses the /engines/{model}/chat/completions path model as the effective request model", async () => {
+    const { deps: d, harness } = deps();
+    harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
+    const app = buildApp(d, { record: { allow_custom_model: true } });
+
+    const res = await app.request("/engines/openai/gpt-4.1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...NONSTREAM_BODY, model: "ignored-body-model" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(harness.classify).not.toHaveBeenCalled();
+    const plan = harness.execute.mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.candidate_chain).toEqual(["openai/gpt-4.1"]);
+  });
+
+  it("uses the Azure /openai/deployments/{model}/chat/completions path model", async () => {
+    const { deps: d, harness } = deps();
+    harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
+    const app = buildApp(d, { record: { allow_custom_model: true } });
+
+    const res = await app.request("/openai/deployments/azure-gpt-4o/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...NONSTREAM_BODY, model: "ignored-body-model" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(harness.classify).not.toHaveBeenCalled();
+    const plan = harness.execute.mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.candidate_chain).toEqual(["azure-gpt-4o"]);
   });
 
   it("keeps SSE end-to-end for stream:true and ends with [DONE]", async () => {

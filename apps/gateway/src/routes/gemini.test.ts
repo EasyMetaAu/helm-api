@@ -181,6 +181,20 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     expect(harness.pipelineSawIR?.model).toBe("gemini-1.5-pro");
   });
 
+  it("accepts the LiteLLM-compatible /models alias and path-style model names", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+
+    const res = await app.request("/models/google/gemini-2.5-pro:generateContent", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(harness.pipelineSawIR?.model).toBe("google/gemini-2.5-pro");
+  });
+
   it("prefers x-goog-api-key but falls back to Authorization: Bearer", async () => {
     const { deps, harness } = makeDeps();
     const app = buildApp(deps);
@@ -464,6 +478,27 @@ describe("POST /v1beta/models/{model}:streamGenerateContent?alt=sse (Gemini stre
     expect(text).not.toContain("[DONE]");
     // Each frame is a full snapshot; the final carries finishReason.
     expect(text).toContain("STOP");
+  });
+
+  it("treats streamGenerateContent without alt=sse as streaming", async () => {
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { candidates: [{ content: { role: "model", parts: [{ text: "Hel" }] } }] };
+      yield {
+        candidates: [{ content: { role: "model", parts: [{ text: "lo" }] }, finishReason: "STOP" }],
+      };
+    }
+    const { deps, harness } = makeDeps({ streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:streamGenerateContent", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    expect(harness.pipelineSawIR?.stream).toBe(true);
   });
 
   it("passes the abort signal to the pipeline and emits NO error frame on client disconnect", async () => {

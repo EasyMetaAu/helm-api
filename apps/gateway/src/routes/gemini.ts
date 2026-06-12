@@ -15,10 +15,11 @@ import { PipelineError } from "./messages-pipeline.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
-// POST /v1beta/models/{model}:generateContent / :streamGenerateContent — Google
-// Gemini inbound, translated to IR, routed through the SAME core pipeline as
-// /v1/chat and /v1/messages, then translated back to the native Gemini wire shape
-// (docs/05, issue #34). The FOURTH client-presentation surface.
+// POST /v1beta/models/{model}:generateContent / :streamGenerateContent and
+// POST /models/{model}:generateContent / :streamGenerateContent — Google Gemini
+// inbound, translated to IR, routed through the SAME core pipeline as /v1/chat
+// and /v1/messages, then translated back to the native Gemini wire shape (docs/05,
+// issue #34). The FOURTH client-presentation surface.
 //
 // PURE HTTP ↔ IR glue (CLAUDE.md principle 1): auth → translate(out) → route →
 // translate(back). No classify/route/translate logic lives here; each business
@@ -115,12 +116,13 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
   // Frees an unclaimed concurrency lease on every exit path (the handler below
   // acquires AFTER its self-auth).
   app.use("/v1beta/models/*", concurrencyReleaseGuard());
+  app.use("/models/*", concurrencyReleaseGuard());
 
   // Hono cannot match the literal ':' in `{model}:generateContent` with a named
-  // param, so we mount a catch-all under /v1beta/models and hand the full path +
-  // query to the core `parseGeminiPath`. A non-Gemini path → null → 404 (never a
-  // silent 200 on a mis-routed /v1beta/* request).
-  app.post("/v1beta/models/:rest{.+}", async (c) => {
+  // param, so we mount catch-alls under both Gemini path families and hand the
+  // full path + query to the core `parseGeminiPath`. A non-Gemini path → null →
+  // 404 (never a silent 200 on a mis-routed Gemini request).
+  const handleGemini = async (c: Context<AppEnv>) => {
     const traceId = c.get("trace_id");
 
     // 0) Route parse FIRST (cheap, pure). The pathname is the part before '?'; the
@@ -385,5 +387,8 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       );
     }
     return c.json(body as Record<string, unknown>);
-  });
+  };
+
+  app.post("/v1beta/models/:rest{.+}", handleGemini);
+  app.post("/models/:rest{.+}", handleGemini);
 }

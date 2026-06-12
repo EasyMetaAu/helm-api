@@ -191,6 +191,70 @@ const REQ_BODY = {
 };
 
 describe("POST /v1/messages (Anthropic inbound)", () => {
+  it("accepts the Claude Code event logging compatibility endpoint after auth", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+
+    const res = await app.request("/api/event_logging/batch", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ events: [{ type: "client_event" }] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "ok" });
+    expect(harness.order).toEqual(["auth"]);
+    expect(harness.order).not.toContain("route");
+  });
+
+  it("requires auth on the event logging compatibility endpoint", async () => {
+    const { deps, harness } = makeDeps({ authed: false });
+    const app = buildApp(deps);
+
+    const res = await app.request("/api/event_logging/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ events: [] }),
+    });
+
+    expect(res.status).toBe(401);
+    expect(harness.order).toEqual(["auth"]);
+  });
+
+  it("returns an authenticated Anthropic count_tokens estimate without routing", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { input_tokens: number };
+    expect(body.input_tokens).toBeGreaterThan(0);
+    expect(harness.order).toEqual(["auth"]);
+    expect(harness.order).not.toContain("route");
+  });
+
+  it("validates count_tokens requests before returning an estimate", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "claude-3-5-sonnet", messages: [] }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { type: string; message: string } };
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.message).toContain("messages parameter is required");
+    expect(harness.order).toEqual(["auth"]);
+  });
+
   it("non-stream: auth → translate-out → route → translate-back, returns Anthropic JSON", async () => {
     const { deps, harness } = makeDeps();
     const app = buildApp(deps);

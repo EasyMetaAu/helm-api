@@ -56,23 +56,28 @@ export const GEMINI_API_KEY_HEADER = "x-goog-api-key" as const;
 export interface GeminiRoute {
   /** model parsed out of the `{model}` path segment, fed into IR.model. */
   model: string;
-  /** true for :streamGenerateContent with ?alt=sse. */
+  /** true for :streamGenerateContent; alt=sse is not required for compatibility. */
   stream: boolean;
 }
 
 /**
- * Parse a Gemini `/v1beta/models/{model}:{op}` path. Returns the model and whether
- * it is a streaming call (`:streamGenerateContent` + `alt=sse`), or null if the path
- * is not a Gemini generateContent endpoint. Pure string parsing — the gateway maps
- * its framework request onto this (core never reads a framework object).
+ * Parse a Gemini `/v1beta/models/{model}:{op}` or `/models/{model}:{op}` path.
+ * Returns the model and whether it is a streaming call, or null if the path is not
+ * a Gemini generateContent endpoint. Pure string parsing — the gateway maps its
+ * framework request onto this (core never reads a framework object).
  */
 export function parseGeminiPath(pathname: string, query: string): GeminiRoute | null {
-  const m = /^\/v1beta\/models\/([^:/?]+):(generateContent|streamGenerateContent)$/.exec(pathname);
+  const m = /^\/(?:v1beta\/models|models)\/(.+):(generateContent|streamGenerateContent)$/.exec(
+    pathname,
+  );
   if (m === null || m[1] === undefined || m[2] === undefined) return null;
   const model = decodeURIComponent(m[1]);
   const op = m[2];
-  const params = new URLSearchParams(query);
-  const stream = op === "streamGenerateContent" && params.get("alt") === "sse";
+  // LiteLLM's Gemini stream route forces stream=true from the operation name. The
+  // `alt=sse` query affects the Google wire format, but silently downgrading a
+  // `streamGenerateContent` request to non-stream corrupts client expectations.
+  void query;
+  const stream = op === "streamGenerateContent";
   return { model, stream };
 }
 
@@ -172,6 +177,10 @@ function thinkingConfigToReasoningEffort(
   if (budget <= REASONING_EFFORT_BUDGET.low) return "low";
   if (budget <= REASONING_EFFORT_BUDGET.medium) return "medium";
   return "high";
+}
+
+function nonNegativeToken(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 // —— Synthesize a deterministic tool-call id. Gemini functionCall has no id; we make
@@ -1180,8 +1189,16 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
 
   const toUsageMetadata = (usage: NonNullable<IRChunk["usage"]>): GeminiUsageMetadata => {
     const nestedPromptDetails = usage.prompt_tokens_details;
-    const cached = usage.cached_tokens ?? nestedPromptDetails?.cached_tokens;
-    const prompt = usage.prompt_tokens;
+    const cached = usage.cached_tokens ?? nonNegativeToken(nestedPromptDetails?.cached_tokens);
+    const cacheCreation =
+      usage.cache_creation_tokens ??
+      nonNegativeToken(nestedPromptDetails?.cache_creation_tokens) ??
+      nonNegativeToken(nestedPromptDetails?.cache_creation_input_tokens) ??
+      nonNegativeToken(nestedPromptDetails?.cache_write_tokens);
+    const prompt =
+      usage.prompt_tokens !== undefined
+        ? usage.prompt_tokens + (cached ?? 0) + (cacheCreation ?? 0)
+        : undefined;
     const candidates = usage.completion_tokens;
     return {
       ...(prompt !== undefined ? { promptTokenCount: prompt } : {}),

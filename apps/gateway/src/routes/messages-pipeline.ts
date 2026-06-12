@@ -324,6 +324,50 @@ function parseFrame(event: string): Record<string, unknown> | null {
   return null;
 }
 
+function nonNegativeToken(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function normalizeOpenAIStreamUsageForIR(chunk: Record<string, unknown>): Record<string, unknown> {
+  const usage = objectRecord(chunk.usage);
+  if (usage === undefined) return chunk;
+  const promptDetails = objectRecord(usage.prompt_tokens_details);
+  const completionDetails = objectRecord(usage.completion_tokens_details);
+  const cached =
+    nonNegativeToken(usage.cached_tokens) ?? nonNegativeToken(promptDetails?.cached_tokens) ?? 0;
+  const cacheCreation =
+    nonNegativeToken(usage.cache_creation_tokens) ??
+    nonNegativeToken(promptDetails?.cache_creation_tokens) ??
+    nonNegativeToken(promptDetails?.cache_creation_input_tokens) ??
+    nonNegativeToken(promptDetails?.cache_write_tokens) ??
+    0;
+  const prompt = nonNegativeToken(usage.prompt_tokens);
+  const completion = nonNegativeToken(usage.completion_tokens);
+  const reasoning =
+    nonNegativeToken(usage.reasoning_tokens) ??
+    nonNegativeToken(completionDetails?.reasoning_tokens);
+  return {
+    ...chunk,
+    usage: {
+      ...(prompt !== undefined
+        ? { prompt_tokens: Math.max(0, prompt - cached - cacheCreation) }
+        : {}),
+      ...(completion !== undefined ? { completion_tokens: completion } : {}),
+      ...(cached > 0 ? { cached_tokens: cached } : {}),
+      ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+      ...(promptDetails !== undefined ? { prompt_tokens_details: promptDetails } : {}),
+      ...(reasoning !== undefined ? { reasoning_tokens: reasoning } : {}),
+      ...(completionDetails !== undefined ? { completion_tokens_details: completionDetails } : {}),
+    },
+  };
+}
+
 // Build the pipeline the Anthropic route consumes. `run` returns the two-accessor
 // PipelineRunResult: `collect` (non-stream IR response) and `streamIR` (Anthropic
 // SSE events). The route picks exactly one based on the IR's stream flag.
@@ -578,17 +622,18 @@ export function createMessagesPipeline(
             for await (const ch of chunks) {
               if (memory !== undefined) accumulateAssistantText(assistant, ch);
               if (ch.usage && typeof ch.usage === "object") lastUsage = ch.usage as StreamUsage;
-              yield ch;
+              yield protocol === "gemini" ? normalizeOpenAIStreamUsageForIR(ch) : ch;
             }
           })();
           try {
             // Outbound stream mapping is chosen by the pipeline's stamped protocol
             // (principle 5: surfaces never conflate). Gemini consumes the SAME
             // OpenAI-shaped chunks parseOpenAISSE produces (its IRChunk IS the
-            // OpenAI chat.completion.chunk), so we feed them straight into the
-            // Gemini delta state machine — no Anthropic adapter (docs/05). Each
-            // yielded object is a GenerateContentResponse delta frame (no `type`);
-            // the route writes it as a nameless `data:` SSE frame with no [DONE].
+            // OpenAI chat.completion.chunk). The source generator above normalizes
+            // raw OpenAI usage into IR usage first, then feeds the Gemini delta
+            // state machine — no Anthropic adapter (docs/05). Each yielded object
+            // is a GenerateContentResponse delta frame (no `type`); the route
+            // writes it as a nameless `data:` SSE frame with no [DONE].
             if (protocol === "gemini") {
               for await (const snapshot of geminiTransformer.transformStreamOut(
                 source as AsyncIterable<IRChunk>,

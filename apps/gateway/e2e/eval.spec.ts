@@ -70,7 +70,7 @@ function ambiguous(tag: string): string {
 }
 
 function chat(content: string, extra: Record<string, unknown> = {}) {
-  return { model: "gpt-4o-mini", messages: [{ role: "user", content }], stream: false, ...extra };
+  return { model: "auto", messages: [{ role: "user", content }], stream: false, ...extra };
 }
 
 // Read + reset the mock's eval-endpoint call counter (the hardest external

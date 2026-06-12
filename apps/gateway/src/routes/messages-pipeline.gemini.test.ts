@@ -89,6 +89,30 @@ describe("createMessagesPipeline (gemini) — streamIR yields Gemini delta event
     expect(serialized).not.toContain("content_block_delta");
   });
 
+  it("does not double-count cached tokens from raw OpenAI streaming usage", async () => {
+    const frames = [
+      'data: {"id":"c","choices":[{"delta":{"role":"assistant","content":"Hi"}}]}\n\n',
+      'data: {"id":"c","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":30,"cache_creation_tokens":10}}}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const route: RouteFn = async () => streamResult(openAISSE(frames));
+    const pipeline = createMessagesPipeline(route, "gemini");
+    const run = await pipeline.run(irOf(), IDENTITY, new AbortController().signal);
+
+    const events = (await drain(run.streamIR())) as Array<{
+      usageMetadata?: {
+        promptTokenCount?: number;
+        cachedContentTokenCount?: number;
+        totalTokenCount?: number;
+      };
+    }>;
+    const terminal = events.find((e) => e.usageMetadata !== undefined);
+
+    expect(terminal?.usageMetadata?.promptTokenCount).toBe(100);
+    expect(terminal?.usageMetadata?.cachedContentTokenCount).toBe(30);
+    expect(terminal?.usageMetadata?.totalTokenCount).toBe(120);
+  });
+
   it("emits a functionCall part accumulated across fragmented tool-call chunks", async () => {
     const frames = [
       'data: {"id":"c","choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_0","type":"function","function":{"name":"get_weather"}}]}}]}\n\n',
