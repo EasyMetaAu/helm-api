@@ -136,18 +136,18 @@ export function scoreRequest(req: InternalRequest, deps: ScoreRequestDeps): Clas
   explanation.push({ source: "task", detail: task.task_type });
 
   // ── 5.5 language-coverage guard ───────────────────────────────────────────
-  // The keyword lists are ENGLISH-ONLY (CLAUDE.md: Layer-1 is the English fast
-  // path). A predominantly non-Latin prompt therefore cannot be scored by them, so
-  // a high-confidence keyword verdict on it would be a lie. Force `uncertain` so the
+  // Layer-1 has English plus small high-confidence CJK keyword lists. A non-covered
+  // non-Latin prompt therefore cannot be scored by them, so a high-confidence keyword
+  // verdict on it would be a lie. Force `uncertain` so the
   // cascade escalates to the (multilingual) Layer-2 eval — or, with eval OFF, lands
   // `balanced` deterministically rather than by luck of where the structural-only
   // rawScore fell. Suppressed when (a) the message is trivially short (already pinned
   // `simple` by the short_message override) or (b) a CONTENT-TYPE structural signal
   // gave real, language-agnostic grip (code block / stack / table / attachment / …).
   // Ambient signals (msg_length / turn_count) fire on every request and are NOT grip.
-  // Overrides the exact-confirmation / tier confidence computed above (a non-Latin
-  // prompt cannot have matched an English exact-confirmation token, so this only
-  // ever lowers confidence — never undoes a legitimate confirmation shortcut).
+  // Overrides the exact-confirmation / tier confidence computed above only when the
+  // prompt lacks English/CJK keyword grip, so legitimate CJK confirmations or keyword
+  // matches are not undone.
   if (safe(() => languageGuardTrips(req, cfg), false)) {
     confidence = 0;
     uncertain = true;

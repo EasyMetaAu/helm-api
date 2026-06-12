@@ -60,8 +60,8 @@ export const ClassifierRulesConfigSchema = z.object({
     disable_above_chars: z.number().int().positive().default(100),
     max_history_weight: z.number().min(0).max(1).default(0.6),
   }),
-  // Language-coverage guard. The keyword lists above are ENGLISH-ONLY, so a
-  // predominantly non-Latin prompt (Chinese / Japanese / Korean / Cyrillic / …)
+  // Language-coverage guard. Layer-1 has English plus small high-confidence CJK
+  // keyword lists. Non-covered languages, and CJK prompts that miss those lists,
   // cannot be scored by keywords. When `non_latin_uncertain` is on, such a prompt
   // is forced `uncertain` so the cascade escalates to the (multilingual) Layer-2
   // eval — or, with eval OFF, degrades deterministically to `balanced` instead of

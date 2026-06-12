@@ -4,6 +4,7 @@ import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
 import { ClassifierRulesConfigSchema } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../config/loader.js";
+import { scoreRequest } from "./engine.js";
 import { detectTask } from "./taskdetect.js";
 
 // Minimal classifier rules config mirroring config/classifier.yaml's task layer:
@@ -285,6 +286,45 @@ describe("detectTask", () => {
         shipped,
       );
       expect(res.task_type).toBe("security");
+    });
+
+    it("activates Simplified and Traditional Chinese coding keywords", () => {
+      const zhHans = detectTask(makeReq("请重构这个函数并补上单元测试"), shipped);
+      expect(zhHans.task_type).toBe("coding");
+
+      const zhHant = detectTask(makeReq("請重構這個函式並補上單元測試"), shipped);
+      expect(zhHant.task_type).toBe("coding");
+    });
+
+    it("keeps short Chinese confirmations simple at the engine layer", () => {
+      const cfg = shipped;
+      const req = {
+        request_id: "req-confirm",
+        protocol: "openai_chat",
+        account_id: "acc-1",
+        api_key_id: "key-1",
+        user_id: null,
+        org_id: null,
+        requested_model: "auto",
+        messages: [{ role: "user", content: "好的" }],
+        tools: null,
+        response_format: null,
+        attachments: null,
+        max_tokens: null,
+        stream: false,
+        metadata: {
+          conversation_id: null,
+          thread_id: null,
+          resource_id: null,
+          project_id: null,
+          memory_mode: "off",
+        },
+      } satisfies InternalRequest;
+
+      const out = scoreRequest(req, { cfg, approxTokens: 1 });
+      expect(out.complexity).toBe("simple");
+      expect(out.uncertain).toBe(false);
+      expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
     });
   });
 

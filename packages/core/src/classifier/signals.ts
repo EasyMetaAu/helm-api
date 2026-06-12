@@ -64,10 +64,10 @@ export function lengthSignal(text: string): number {
 
 // Fraction of LETTERS (\p{L}) that are NOT Latin script, in [0,1]; 0 when there are
 // no letters. Digits, punctuation and whitespace are ignored so they never skew the
-// ratio. The Layer-1 keyword lists are English-only, so a predominantly non-Latin
-// prompt is unscoreable by keywords — the engine's language-coverage guard uses this
-// to force `uncertain` and escalate to the (multilingual) Layer-2 eval. Pure: same
-// input => same output, zero I/O (CLAUDE.md principle 4).
+// ratio. Layer-1 has English plus small high-confidence CJK keyword lists, so a
+// non-covered non-Latin prompt is unscoreable by keywords — the engine's
+// language-coverage guard uses this to force `uncertain` and escalate to the
+// (multilingual) Layer-2 eval. Pure: same input => same output, zero I/O.
 const LETTER = /\p{L}/u;
 const LATIN_LETTER = /\p{Script=Latin}/u;
 export function nonLatinRatio(text: string): number {

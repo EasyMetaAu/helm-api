@@ -31,11 +31,13 @@
 # Golden set grown 29->38 (9 real-world prompts); cascade/calibrate lock 42 real
 # prompts with 0 fallbacks and confidence spread ~0.43-0.98.
 #
-# MULTILINGUAL (2026-06-02, classifier.multilingual-guard): the keyword lists are
-# ENGLISH-ONLY, so Layer-1 is an English fast path. A predominantly non-Latin prompt
-# is forced `uncertain` by the `rules.language` guard (below) → escalates to the
-# multilingual Layer-2 eval. CONTRACT: serve non-English traffic → enable `eval`;
-# with eval OFF a non-Latin prompt degrades deterministically to `balanced`.
+# CJK VOCABULARY + MULTILINGUAL GUARD (2026-06-12, classifier.zh-layer1): Layer-1
+# is now an English + high-confidence CJK fast path. Simplified/Traditional Chinese
+# keywords live in separate *_zh_kw dimensions so English keywordSignal calibration is
+# not diluted. Other non-covered languages, and Chinese prompts that miss these small
+# CJK lists, still trip `rules.language` and escalate to multilingual Layer-2 eval.
+# CONTRACT: serve broad non-English traffic → enable `eval`; with eval OFF uncovered
+# non-Latin prompts degrade deterministically to `balanced`.
 classifier:
   rules:
     enabled: true
@@ -75,6 +77,15 @@ classifier:
       analysis_kw: { weight: 0.76, keywords: ["analyze", "compare", "evaluate", "implications", "root cause", "assess", "critique", "pros and cons", "diagnose", "investigate"] }
       writing_kw: { weight: 0.14, keywords: ["essay", "rewrite", "draft", "tone", "polish", "summarize", "summary", "paraphrase", "proofread", "article", "headline", "grammar"] }
       security_kw: { weight: 1.40, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "rce", "csrf", "malware", "auth bypass", "auth check", "access control"] }
+      # CJK keyword dimensions are separate from English dimensions so they can
+      # suppress the language guard without diluting English keywordSignal.
+      coding_zh_kw: { weight: 0.56, keywords: ["重构", "重構", "调试", "除錯", "编译", "編譯", "函数", "函式", "单元测试", "單元測試", "堆栈跟踪", "堆疊追蹤"] }
+      analysis_zh_kw: { weight: 0.68, keywords: ["分析", "比較", "比较", "评估", "評估", "根因", "诊断", "診斷", "利弊", "因果关系"] }
+      writing_zh_kw: { weight: 0.12, keywords: ["改写", "改寫", "润色", "潤色", "摘要", "校对", "校對", "文章", "标题", "標題"] }
+      data_zh_kw: { weight: 0.18, keywords: ["数据集", "資料集", "聚合", "透视表", "樞紐分析表", "查询", "查詢", "电子表格", "試算表"] }
+      security_zh_kw: { weight: 1.10, keywords: ["缓冲区溢出", "緩衝區溢位", "命令注入", "权限提升", "權限提升", "越权", "越權", "恶意软件", "惡意軟體", "访问控制", "存取控制"] }
+      vision_zh_kw: { weight: 0.14, keywords: ["截图", "截圖", "屏幕截图", "螢幕截圖", "照片", "图像", "影像", "流程图", "流程圖", "图表", "圖表"] }
+      extraction_zh_kw: { weight: 0.11, keywords: ["提取字段", "擷取欄位", "抽取实体", "擷取實體", "结构化数据", "結構化資料", "解析 JSON", "抓取資料"] }
       # Short diagnostics/security fragments are meaningful despite being tiny;
       # give them enough positive signal to escape the simple/economy shortcut.
       diagnostic_short_kw: { weight: 3.60, keywords: ["no output", "no stack trace", "no auth check", "no command injection"] }
@@ -118,20 +129,20 @@ classifier:
     # match "source"/"force", so it lives ONLY in the boundary-matched
     # security_kw dimension, never here). Expanded 2026-06-02.
     task_keywords:
-      coding: ["function", "class", "bug", "compile", "npm", "git", "refactor", "debug", "implement", "unit test", "stack trace", "typescript"]
-      math: ["integral", "matrix", "equation", "derivative", "calculus", "algebra", "polynomial"]
+      coding: ["function", "class", "bug", "compile", "npm", "git", "refactor", "debug", "implement", "unit test", "stack trace", "typescript", "重构", "重構", "调试", "除錯", "编译", "編譯", "函数", "函式", "单元测试", "單元測試", "堆栈跟踪", "堆疊追蹤"]
+      math: ["integral", "matrix", "equation", "derivative", "calculus", "algebra", "polynomial", "积分", "積分", "矩阵", "矩陣", "方程", "导数", "導數"]
       # "tone" dropped from task detection: as a SUBSTRING it false-matches
       # "mile{stone}s" → spurious writing task. It stays in the writing_kw
       # dimension (word-boundary matched there, so it is safe).
-      writing: ["essay", "rewrite", "draft", "summarize", "paraphrase", "proofread", "article"]
-      extraction: ["extract", "parse", "json from", "fields", "pull out", "structured data"]
-      web: ["search the web", "browse", "look up online", "latest news", "google for"]
-      data: ["csv", "dataframe", "aggregate", "sql", "group by", "spreadsheet", "pivot table"]
-      vision: ["image", "screenshot", "this picture", "photo", "this diagram", "this chart"]
+      writing: ["essay", "rewrite", "draft", "summarize", "paraphrase", "proofread", "article", "改写", "改寫", "润色", "潤色", "校对", "校對", "文章"]
+      extraction: ["extract", "parse", "json from", "fields", "pull out", "structured data", "提取字段", "擷取欄位", "抽取实体", "擷取實體", "结构化数据", "結構化資料"]
+      web: ["search the web", "browse", "look up online", "latest news", "google for", "搜索网页", "搜尋網頁", "查找网页", "查找網頁"]
+      data: ["csv", "dataframe", "aggregate", "sql", "group by", "spreadsheet", "pivot table", "数据集", "資料集", "聚合", "透视表", "樞紐分析表", "查询", "查詢"]
+      vision: ["image", "screenshot", "this picture", "photo", "this diagram", "this chart", "截图", "截圖", "屏幕截图", "螢幕截圖", "照片", "流程图", "流程圖", "图表", "圖表"]
       # security (eval-v2 cybersecurity domain). Conservative, multi-word
       # keywords; paired with a raised task_activation.security (>= 2.0) so a
       # single lone hit (e.g. "explain what XSS is") does NOT false-activate.
-      security: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "remote code execution"]
+      security: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "remote code execution", "缓冲区溢出", "緩衝區溢位", "命令注入", "权限提升", "權限提升", "越权", "越權", "访问控制", "存取控制"]
     tool_prefixes:
       web: ["browser_", "web_"]
       coding: ["code_", "shell_", "fs_"]
@@ -142,8 +153,8 @@ classifier:
     task_activation: { web: 3.0, security: 2.0 }
     overrides:
       heartbeat_tokens: ["HEARTBEAT_OK"]
-      exact_confirmation_tokens: ["yes", "no", "sure", "got it", "ok", "thanks"]
-      formal_logic_keywords: ["⊢", "∴", "modus ponens", "first-order logic"]
+      exact_confirmation_tokens: ["yes", "no", "sure", "got it", "ok", "thanks", "是", "否", "可以", "好的", "谢谢", "謝謝"]
+      formal_logic_keywords: ["⊢", "∴", "modus ponens", "first-order logic", "充分必要", "反证法", "反證法", "归纳法", "歸納法"]
       tools_floor: standard
       long_context_token_threshold: 64000  # capability signal (NOT a task_type); bumped 50k->64k to match llm-router lanes.yaml long_context anchor
       long_context_floor: complex
@@ -155,14 +166,14 @@ classifier:
       short_message_max_chars: 30
       disable_above_chars: 100
       max_history_weight: 0.6
-    # Language-coverage guard. The keyword lists above are ENGLISH-ONLY, so a
-    # predominantly non-Latin prompt (Chinese / Japanese / Korean / Cyrillic / …)
-    # cannot be scored by them. With this on, such a prompt is forced `uncertain` →
-    # the cascade escalates to the (multilingual) Layer-2 eval. CONTRACT: if you
-    # serve non-English traffic, ENABLE eval below — with eval OFF a non-Latin prompt
-    # degrades deterministically to `balanced` (fail-open, no 5xx) rather than being
-    # routed by an English keyword score that never matched anything. The guard is
-    # suppressed for trivially-short prompts (pinned `simple`) and for prompts with a
+    # Language-coverage guard. Layer-1 has English plus small high-confidence CJK
+    # keyword lists. Non-covered languages, and CJK prompts that miss those lists,
+    # cannot be scored by keywords. With this on, such a prompt is forced `uncertain`
+    # → the cascade escalates to the (multilingual) Layer-2 eval. CONTRACT: if you
+    # serve broad non-English traffic, ENABLE eval below — with eval OFF an uncovered
+    # non-Latin prompt degrades deterministically to `balanced` (fail-open, no 5xx)
+    # rather than being routed by a keyword score that never matched anything. The
+    # guard is suppressed for trivially-short prompts (pinned `simple`) and for prompts with a
     # content-type structural signal (code block / table / attachment / …) that gives
     # real language-agnostic grip. Latin-script non-English (es/fr/de) is NOT flagged
     # by ratio; it already produces ~0 keyword signal → low confidence → eval anyway.
