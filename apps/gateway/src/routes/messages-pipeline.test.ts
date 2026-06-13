@@ -547,6 +547,275 @@ describe("createMessagesPipeline — native passthrough streamIR()", () => {
   });
 });
 
+// ── openai_responses (Codex) native passthrough (#217 Phase 3) ────────────────
+
+// A VERBATIM Codex Responses NON-stream body — what provider.nativePassthrough
+// returns and the pipeline must hand back UNTOUCHED on the passthrough path. Carries
+// the native Responses `output` array (NOT OpenAI choices) + a Responses usage block
+// (cache counted INSIDE input_tokens, surfaced via input_tokens_details).
+const NATIVE_RESPONSES_BODY = {
+  id: "resp_native_1",
+  object: "response",
+  status: "completed",
+  model: "gpt-5.5",
+  output: [
+    {
+      type: "message",
+      role: "assistant",
+      content: [
+        { type: "output_text", text: "Hello from Codex" },
+        { type: "output_text", text: " passthrough" },
+      ],
+    },
+  ],
+  usage: {
+    input_tokens: 12,
+    output_tokens: 9,
+    input_tokens_details: { cached_tokens: 4 },
+  },
+};
+
+function passthroughResponsesOkResult(body: unknown = NATIVE_RESPONSES_BODY): ExecutionResult {
+  return {
+    decision: {
+      lane: { selected_lane: "balanced" },
+      final: { status: "ok", model_alias: "openai-codex/gpt-5.5" },
+      cost_breakdown: { total_usd: 0.03, completion_usd: 0.01, eval_usd: null },
+      provider_attempts: [],
+    } as unknown as ExecutionResult["decision"],
+    final: { status: "ok", alias: "openai-codex/gpt-5.5" },
+    body,
+    stream: null,
+    error: null,
+    nativePassthrough: true,
+  };
+}
+
+// A canned Codex Responses SSE byte stream (what provider.nativePassthroughStream
+// emits). The `data:` payloads carry DELIBERATELY non-canonical spacing so a test can
+// prove byte-verbatim forwarding (no JSON.parse→stringify). Usage rides the TERMINAL
+// response.completed event (Responses counts cache inside input_tokens). Output text
+// arrives as response.output_text.delta events whose `delta` is a plain STRING.
+const NATIVE_RESPONSES_SSE_FRAMES = [
+  'event: response.created\ndata: {"type":"response.created","sequence_number":0,"response":{"id":"resp_x","status":"in_progress"}}\n\n',
+  'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"message","role":"assistant"}}\n\n',
+  'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hello"}\n\n',
+  'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":" Codex"}\n\n',
+  'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{ "input_tokens":12 ,"output_tokens":9,"input_tokens_details":{"cached_tokens":4}}}}\n\n',
+];
+
+function nativeResponsesSseTextStream(): AsyncIterable<string> {
+  const joined = NATIVE_RESPONSES_SSE_FRAMES.join("");
+  const pieces: string[] = [];
+  for (let i = 0; i < joined.length; i += 19) pieces.push(joined.slice(i, i + 19));
+  return (async function* () {
+    for (const p of pieces) yield p;
+  })();
+}
+
+function passthroughResponsesStreamResult(
+  stream: AsyncIterable<string> = nativeResponsesSseTextStream(),
+): ExecutionResult {
+  return {
+    decision: {
+      lane: { selected_lane: "balanced" },
+      final: { status: "ok", model_alias: "openai-codex/gpt-5.5" },
+      cost_breakdown: { total_usd: 0, completion_usd: null, eval_usd: null },
+      provider_attempts: [],
+    } as unknown as ExecutionResult["decision"],
+    final: { status: "ok", alias: "openai-codex/gpt-5.5" },
+    body: null,
+    stream,
+    error: null,
+    nativePassthrough: true,
+  };
+}
+
+describe("createMessagesPipeline — openai_responses native passthrough streamIR()", () => {
+  it("byte-relays the upstream Responses SSE: yields {event,data} with the VERBATIM data string", async () => {
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughResponsesStreamResult()),
+      "openai_responses",
+    );
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const frames: Array<{ event: string; data: string }> = [];
+    for await (const ev of run.streamIR()) frames.push(ev as { event: string; data: string });
+
+    // The event names are the verbatim upstream `event:` lines (no IR `type` key).
+    expect(frames.map((f) => f.event)).toEqual([
+      "response.created",
+      "response.output_item.added",
+      "response.output_text.delta",
+      "response.output_text.delta",
+      "response.completed",
+    ]);
+    // The terminal frame's data is forwarded BYTE-FOR-BYTE — the deliberately non-
+    // canonical spacing ("input_tokens":12 ,) survives, proving no JSON round-trip.
+    const completed = frames.at(-1);
+    expect(completed?.data).toBe(
+      '{"type":"response.completed","response":{"status":"completed","usage":{ "input_tokens":12 ,"output_tokens":9,"input_tokens_details":{"cached_tokens":4}}}}',
+    );
+    expect((frames[0] as unknown as { type?: unknown }).type).toBeUndefined();
+  });
+
+  it("backfills the decision usage from the terminal response.completed event (cache inside input_tokens)", async () => {
+    const decisionRef = passthroughResponsesStreamResult().decision;
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...passthroughResponsesStreamResult(), decision: decisionRef }),
+      "openai_responses",
+    );
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    // Responses counts cache INSIDE input_tokens → prompt = input(12), completion =
+    // output(9); the cached split (4) rides prompt_tokens_details, NOT added to prompt.
+    expect(decisionRef.usage).toMatchObject({
+      prompt_tokens: 12,
+      completion_tokens: 9,
+      cached_tokens: 4,
+    });
+  });
+
+  it("settles the per-key budget using the Responses SSE tokens (input + output)", async () => {
+    let settledTokens: number | null = null;
+    const budget: PipelineBudgetDeps = {
+      gate: { check: async () => ({ overBudget: false }) as never },
+      settle: async (_keyId, _caps, usage) => {
+        settledTokens = usage.tokens;
+      },
+      now: () => 0,
+    };
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      caps: { budget: { spend_usd: { day: 1 } } as never },
+    };
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughResponsesStreamResult()),
+      "openai_responses",
+      undefined,
+      budget,
+    );
+    const run = await pipeline.run(irOf({ stream: true }), identity, new AbortController().signal);
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    // Responses: input(12) + output(9) = 21 served tokens (cache already inside input).
+    expect(settledTokens).toBe(21);
+  });
+
+  it("observe-outbound records the assistant text from response.output_text.delta", async () => {
+    const { observe, persisted } = makeObserveSpy();
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughResponsesStreamResult()),
+      "openai_responses",
+      { observe },
+    );
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    const assistant = persisted.find((m) => m.role === "assistant");
+    expect(assistant).toBeDefined();
+    // The two string deltas concatenate into one assistant turn.
+    expect(assistant?.content).toBe("Hello Codex");
+  });
+
+  it("Anthropic passthrough stream stays byte-identical (no Responses tee leakage)", async () => {
+    // Regression guard: the protocol-aware tee must NOT change the anthropic_messages
+    // passthrough behavior — same verbatim frames as before Phase 3.
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughStreamResult()),
+      "anthropic_messages",
+    );
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const frames: Array<{ event: string; data: string }> = [];
+    for await (const ev of run.streamIR()) frames.push(ev as { event: string; data: string });
+    expect(frames.map((f) => f.event)).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+  });
+});
+
+describe("createMessagesPipeline — openai_responses native passthrough collect()", () => {
+  it("returns the native Responses body UNTOUCHED (no openAIBodyToIR projection)", async () => {
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughResponsesOkResult()),
+      "openai_responses",
+    );
+    const run = await pipeline.run(irOf(), IDENTITY, new AbortController().signal);
+    const body = (await run.collect()) as Record<string, unknown>;
+    expect(body).toBe(NATIVE_RESPONSES_BODY);
+    expect(body.output).toEqual(NATIVE_RESPONSES_BODY.output);
+    expect(body.choices).toBeUndefined();
+  });
+
+  it("settles the budget + stamps tokens from the Responses usage block", async () => {
+    let settledTokens: number | null = null;
+    const budget: PipelineBudgetDeps = {
+      gate: { check: async () => ({ overBudget: false }) as never },
+      settle: async (_keyId, _caps, usage) => {
+        settledTokens = usage.tokens;
+      },
+      now: () => 0,
+    };
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      caps: { budget: { spend_usd: { day: 1 } } as never },
+    };
+    const decisionRef = passthroughResponsesOkResult().decision;
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...passthroughResponsesOkResult(), decision: decisionRef }),
+      "openai_responses",
+      undefined,
+      budget,
+    );
+    const run = await pipeline.run(irOf(), identity, new AbortController().signal);
+    await run.collect();
+    // Responses: prompt = input(12), completion = output(9) → 21 served tokens (cache
+    // already counted inside input_tokens, NOT re-added like Anthropic).
+    expect(settledTokens).toBe(21);
+    expect(decisionRef.usage).toMatchObject({
+      prompt_tokens: 12,
+      completion_tokens: 9,
+      cached_tokens: 4,
+    });
+  });
+
+  it("observe-outbound records the assistant text from output[].content[].output_text", async () => {
+    const { observe, persisted } = makeObserveSpy();
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughResponsesOkResult()),
+      "openai_responses",
+      { observe },
+    );
+    const run = await pipeline.run(
+      irOf({ metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" } }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    await run.collect();
+    const assistant = persisted.find((m) => m.role === "assistant");
+    expect(assistant).toBeDefined();
+    expect(assistant?.content).toBe("Hello from Codex passthrough");
+  });
+});
+
 describe("createMessagesPipeline — production IR params", () => {
   it.each<Protocol>([
     "anthropic_messages",

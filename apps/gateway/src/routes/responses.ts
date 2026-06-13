@@ -149,7 +149,14 @@ function responseStreamPrelude(args: {
 }
 
 function isResponsesPreludeEvent(event: Record<string, unknown>): boolean {
-  return event.type === "response.created" || event.type === "response.in_progress";
+  // Translate path: the pipeline yields IR events keyed by `type`. Native-passthrough
+  // path (#217 Phase 3): the pipeline yields VERBATIM {event,data} frames keyed by
+  // `event`. Either way the route already emitted a synthetic prelude (with the route-
+  // assigned response id), so the upstream's own response.created / response.in_progress
+  // is dropped to avoid a duplicate prelude — the rest of the upstream stream (content,
+  // deltas, the terminal response.completed) is relayed byte-for-byte.
+  const name = typeof event.type === "string" ? event.type : event.event;
+  return name === "response.created" || name === "response.in_progress";
 }
 
 function pipelineToHelm(err: PipelineError, traceId: string): HelmHttpError {
@@ -304,6 +311,18 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       memory_thread_source: memoryScope.threadSource,
     };
 
+    // Native protocol passthrough carrier (#217 Phase 3). Stamp the VERBATIM parsed
+    // inbound Responses body onto the IR metadata bag (same HTTP→core hand-off as the
+    // /v1/messages route); the pipeline reads it into InternalRequest.native_request and
+    // the routing core's guard decides whether to forward it untranslated to the Codex
+    // (openai_responses) upstream. NEVER logged. Covers BOTH stream and non-stream: the
+    // real Codex CLI is stream-only (store:false + stream:true), so the same verbatim
+    // body is the carrier on either branch — the guard + executor decide whether to
+    // actually forward it.
+    if (native !== null && typeof native === "object") {
+      ir.metadata.native_request = native;
+    }
+
     // Capture the verbatim request/response bodies only when capture_payloads is ON
     // (the telemetry row is always written regardless). Gating the buffering here
     // stops long/concurrent streams from accumulating the full body when capture is
@@ -320,10 +339,20 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       const releaseConcurrency = c.get("concurrencyRelease");
       c.set("concurrencyRelease", undefined);
       return streamSSE(c, async (sse) => {
-        // Each IR event is serialized by the transformer's stream mapping; the
-        // pipeline already ran the Responses state machine (principle 8 — we never
-        // forward a raw upstream chunk). There is NO [DONE] sentinel; the terminal
-        // response.completed closes the stream.
+        // Translate path: each IR event is serialized by the transformer's stream
+        // mapping; the pipeline already ran the Responses state machine (principle 8 —
+        // we never forward a raw upstream chunk through a blind re-mapper). There is NO
+        // [DONE] sentinel; the terminal response.completed closes the stream.
+        // Native-passthrough path (#217 Phase 3): the pipeline already byte-relayed the
+        // upstream Codex Responses SSE into VERBATIM {event,data} frames (the data
+        // payload is the exact upstream JSON string, INCLUDING reasoning.encrypted_content
+        // and native tool-call events) — forward them directly, BYPASSING transformStreamOut
+        // so the bytes reach the client byte-for-byte. The synthetic prelude is still
+        // emitted (the stream opens before routing resolves); the upstream's own
+        // response.created / response.in_progress is dropped by isResponsesPreludeEvent to
+        // avoid a duplicate. Capture stays native on both ends; an upstream error mid-
+        // passthrough still surfaces the Responses terminal error frame below (catch
+        // is unchanged).
         let nextErrorSequence = 0;
         // Accumulate the serialized wire frames so the served response body can be
         // captured (verbatim) alongside the telemetry row in the finally below.
@@ -341,7 +370,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             if (isResponsesPreludeEvent(event)) continue;
             if (typeof event.sequence_number === "number")
               nextErrorSequence = event.sequence_number + 1;
-            const frame = deps.transformer.transformStreamOut(event);
+            const frame =
+              result.nativePassthrough === true
+                ? (event as { event: string; data: string })
+                : deps.transformer.transformStreamOut(event);
             if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
             await sse.writeSSE({ event: frame.event, data: frame.data });
           }
@@ -416,7 +448,15 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     let body: Record<string, unknown>;
     try {
       const collected = await result.collect();
-      body = deps.transformer.transformResponseOut(collected) as Record<string, unknown>;
+      // Native protocol passthrough (#217 Phase 3): collect() already returned the
+      // upstream's VERBATIM native Responses body (it bypassed openAIBodyToIR). Skip
+      // transformResponseOut so the native body reaches the client BYTE-FOR-BYTE; the
+      // translate path is unchanged for every non-passthrough request. (Codex is
+      // stream-only, so this branch is rarely hit but kept correct.)
+      body =
+        result.nativePassthrough === true
+          ? (collected as Record<string, unknown>)
+          : (deps.transformer.transformResponseOut(collected) as Record<string, unknown>);
     } catch (err) {
       // Record the FAILED served request before surfacing the error (mirrors
       // chat.ts, which records failures too) so an all-providers-failed request

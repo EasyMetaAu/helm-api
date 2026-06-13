@@ -11,6 +11,8 @@ import {
   tokensFromUsage,
   usageFromAnthropicResponse,
   usageFromAnthropicSSE,
+  usageFromResponsesResponse,
+  usageFromResponsesSSE,
   usageFromSSE,
 } from "./payload-capture.js";
 
@@ -197,6 +199,124 @@ describe("usageFromAnthropicSSE", () => {
     ].join("");
     expect(usageFromAnthropicSSE(sse)).toBeNull();
     expect(usageFromAnthropicSSE("")).toBeNull();
+  });
+});
+
+// Native-protocol-passthrough cost for openai_responses (#217 Phase 3 Stage 1): the
+// upstream Codex Responses NON-stream response carries usage as
+// usage:{input_tokens, output_tokens, input_tokens_details:{cached_tokens,
+// cache_creation_input_tokens}}. Cache is ALREADY included in input_tokens (unlike
+// Anthropic, where it is separate), so usageFromResponsesResponse maps prompt_tokens =
+// input_tokens directly — the SAME math as core's aggregateResponsesStream — and
+// surfaces the cache split under prompt_tokens_details for the dashboard.
+describe("usageFromResponsesResponse", () => {
+  it("maps Responses usage to OpenAI-shaped StreamUsage (prompt = input_tokens, cache already included)", () => {
+    const body = {
+      id: "resp_1",
+      object: "response",
+      status: "completed",
+      usage: {
+        input_tokens: 1000,
+        output_tokens: 500,
+        input_tokens_details: { cached_tokens: 200, cache_creation_input_tokens: 50 },
+      },
+    };
+    expect(usageFromResponsesResponse(body)).toEqual({
+      prompt_tokens: 1000, // cache already counted inside input_tokens
+      completion_tokens: 500,
+      total_tokens: 1500,
+      prompt_tokens_details: { cached_tokens: 200, cache_creation_tokens: 50 },
+    });
+    // The summed budget tokens are prompt + completion (no separate cache add).
+    expect(tokensFromUsage(usageFromResponsesResponse(body))).toBe(1500);
+  });
+
+  it("omits prompt_tokens_details when there are no cache tokens", () => {
+    const body = { usage: { input_tokens: 10, output_tokens: 7 } };
+    expect(usageFromResponsesResponse(body)).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 7,
+      total_tokens: 17,
+    });
+  });
+
+  it("tolerates cached_tokens without cache_creation", () => {
+    const body = {
+      usage: { input_tokens: 80, output_tokens: 12, input_tokens_details: { cached_tokens: 30 } },
+    };
+    expect(usageFromResponsesResponse(body)).toEqual({
+      prompt_tokens: 80,
+      completion_tokens: 12,
+      total_tokens: 92,
+      prompt_tokens_details: { cached_tokens: 30 },
+    });
+  });
+
+  it("returns null when the body has no usage object", () => {
+    expect(usageFromResponsesResponse({ id: "resp" })).toBeNull();
+    expect(usageFromResponsesResponse(null)).toBeNull();
+    expect(usageFromResponsesResponse(undefined)).toBeNull();
+    expect(usageFromResponsesResponse({ usage: "nope" })).toBeNull();
+  });
+});
+
+// Native-protocol-passthrough STREAMING cost for openai_responses (#217 Phase 3
+// Stage 1): the upstream Codex Responses SSE carries the totals on the terminal
+// `response.completed` (or `response.incomplete`) event's `response.usage`. Byte-
+// faithful passthrough forwards these frames VERBATIM, so cost extraction scans the
+// accumulated SSE for that event. usageFromResponsesSSE returns the same OpenAI-shaped
+// StreamUsage as the non-stream extractor, mirroring aggregateResponsesStream.
+describe("usageFromResponsesSSE", () => {
+  it("extracts totals from the terminal response.completed event", () => {
+    const sse = [
+      'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+      'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1000,"output_tokens":500,"input_tokens_details":{"cached_tokens":200,"cache_creation_input_tokens":50}}}}\n\n',
+    ].join("");
+    expect(usageFromResponsesSSE(sse)).toEqual({
+      prompt_tokens: 1000,
+      completion_tokens: 500,
+      total_tokens: 1500,
+      prompt_tokens_details: { cached_tokens: 200, cache_creation_tokens: 50 },
+    });
+    expect(tokensFromUsage(usageFromResponsesSSE(sse))).toBe(1500);
+  });
+
+  it("falls back to a response.incomplete terminal event (truncation / content filter)", () => {
+    const sse = [
+      'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_2"}}\n\n',
+      'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"status":"incomplete","usage":{"input_tokens":40,"output_tokens":3}}}\n\n',
+    ].join("");
+    expect(usageFromResponsesSSE(sse)).toEqual({
+      prompt_tokens: 40,
+      completion_tokens: 3,
+      total_tokens: 43,
+    });
+  });
+
+  it("skips ping / [DONE] / non-JSON frames without throwing", () => {
+    const sse = [
+      'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n',
+      ": keepalive comment\n\n",
+      "data: not json at all\n\n",
+      'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":8,"output_tokens":2}}}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    expect(usageFromResponsesSSE(sse)).toEqual({
+      prompt_tokens: 8,
+      completion_tokens: 2,
+      total_tokens: 10,
+    });
+  });
+
+  it("returns null when no terminal usage event is present", () => {
+    const sse = [
+      'event: response.created\ndata: {"type":"response.created","response":{"id":"resp"}}\n\n',
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    expect(usageFromResponsesSSE(sse)).toBeNull();
+    expect(usageFromResponsesSSE("")).toBeNull();
   });
 });
 

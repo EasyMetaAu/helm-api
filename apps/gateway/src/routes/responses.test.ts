@@ -34,15 +34,17 @@ function makeDeps(
     authed?: boolean;
     transformRequestOut?: (n: unknown) => { stream?: boolean; metadata?: Record<string, unknown> };
     collect?: () => Promise<unknown>;
-    streamIR?: () => AsyncIterable<{ type: string; [k: string]: unknown }>;
+    streamIR?: () => AsyncIterable<{ [k: string]: unknown }>;
+    nativePassthrough?: boolean;
     run?: ResponsesRouteDeps["pipeline"]["run"];
     rateLimiter?: ResponsesRouteDeps["rateLimiter"];
     concurrencyGate?: ResponsesRouteDeps["concurrencyGate"];
     identity?: MessagesIdentity;
     record?: RecordServedDeps;
   } = {},
-): { deps: ResponsesRouteDeps; order: string[] } {
+): { deps: ResponsesRouteDeps; order: string[]; harness: { pipelineSawIR: unknown } } {
   const order: string[] = [];
+  const harness: { pipelineSawIR: unknown } = { pipelineSawIR: null };
   const deps: ResponsesRouteDeps = {
     rateLimiter: over.rateLimiter,
     concurrencyGate: over.concurrencyGate,
@@ -75,10 +77,12 @@ function makeDeps(
     pipeline: {
       run:
         over.run ??
-        (async (_ir, _identity, _signal) => {
+        (async (ir, _identity, _signal) => {
           order.push("route");
+          harness.pipelineSawIR = ir;
           return {
             decision: FAKE_DECISION,
+            ...(over.nativePassthrough === true ? { nativePassthrough: true } : {}),
             collect: over.collect ?? (async () => ({ id: "ir-resp", choices: [] })),
             streamIR:
               over.streamIR ??
@@ -90,7 +94,7 @@ function makeDeps(
         }),
     },
   };
-  return { deps, order };
+  return { deps, order, harness };
 }
 
 // Parse an SSE response body into [event, dataJSON] frames.
@@ -663,5 +667,166 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     // the transform now runs inside the failure-recording try.
     expect(res.status).toBeGreaterThanOrEqual(500);
     expect(insert).toHaveBeenCalledOnce();
+  });
+
+  // ── Native protocol passthrough (#217 Phase 3, Codex Responses). The route mirrors
+  //    /v1/messages: stamp the verbatim inbound body onto ir.metadata.native_request
+  //    (both stream + non-stream), and when the pipeline reports nativePassthrough,
+  //    BYPASS transformStreamOut (stream) / transformResponseOut (non-stream) so the
+  //    upstream's native Responses bytes reach the client unchanged.
+  it("stamps the verbatim parsed inbound body onto ir.metadata.native_request (non-stream)", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+
+    await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    const meta = (harness.pipelineSawIR as { metadata?: { native_request?: unknown } } | null)
+      ?.metadata;
+    expect(meta?.native_request).toEqual(REQ);
+  });
+
+  it("stamps native_request on a STREAMING request too (Codex is stream-only)", async () => {
+    const { deps, harness } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+
+    const meta = (harness.pipelineSawIR as { metadata?: { native_request?: unknown } } | null)
+      ?.metadata;
+    expect(meta?.native_request).toEqual({ ...REQ, stream: true });
+  });
+
+  it("non-stream passthrough: returns the verbatim native Responses body, skipping translate-back", async () => {
+    const upstreamNative = {
+      id: "resp_passthrough_1",
+      object: "response",
+      status: "completed",
+      model: "gpt-5.5",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "verbatim" }],
+        },
+      ],
+      usage: { input_tokens: 5, output_tokens: 4 },
+    };
+    const { deps, order } = makeDeps({
+      nativePassthrough: true,
+      collect: async () => upstreamNative,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // BYTE-EQUALITY: the client gets the exact native upstream body — no translate-back
+    // wrapper, no __ir marker the stub responseOut adds.
+    expect(body).toEqual(upstreamNative);
+    expect((body as { __ir?: unknown }).__ir).toBeUndefined();
+    expect(order).toEqual(["auth", "translate-out", "route"]);
+    expect(order).not.toContain("translate-back");
+  });
+
+  it("stream passthrough: writes the VERBATIM upstream frames byte-for-byte (no transformStreamOut)", async () => {
+    // Non-canonical spacing inside the data payload proves the route forwards the
+    // {event,data} item directly instead of re-shaping it via transformStreamOut.
+    const deltaData = '{"type":"response.output_text.delta","delta":"hi"}';
+    const completedData =
+      '{"type":"response.completed","response":{"status":"completed","usage":{ "input_tokens":5 ,"output_tokens":4}}}';
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      // The upstream's OWN response.created must be dropped (the route already emitted a
+      // synthetic prelude) — assert it does NOT duplicate below.
+      yield { event: "response.created", data: '{"type":"response.created"}' };
+      yield { event: "response.output_text.delta", data: deltaData };
+      yield { event: "response.completed", data: completedData };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const text = await res.text();
+    // The verbatim data payloads (with their non-canonical spacing) reach the wire —
+    // NOT the stub transformStreamOut shape (which would JSON.stringify the bag).
+    expect(text).toContain(`event: response.output_text.delta\ndata: ${deltaData}`);
+    expect(text).toContain(`event: response.completed\ndata: ${completedData}`);
+    const frames = parseSSE(text);
+    // Exactly ONE response.created (the synthetic prelude); the upstream's own
+    // response.created prelude frame is dropped to avoid a duplicate.
+    expect(frames.filter((f) => f.event === "response.created")).toHaveLength(1);
+    // The synthetic prelude's response.created is the IR-shaped one (JSON object), NOT
+    // the upstream's verbatim '{"type":"response.created"}' — proves dedup hit upstream.
+    const created = frames.find((f) => f.event === "response.created");
+    expect(created?.data).not.toBe('{"type":"response.created"}');
+  });
+
+  it("stream NON-passthrough (default): still maps via transformStreamOut as today", async () => {
+    async function* events() {
+      yield { type: "response.created", sequence_number: 0 };
+      yield { type: "response.output_text.delta", delta: "hi", sequence_number: 1 };
+      yield { type: "response.completed", sequence_number: 2 };
+    }
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    const text = await res.text();
+    // The stub transformStreamOut maps {type} → {event:type, data:JSON.stringify(ev)},
+    // so the delta frame's data is the re-serialized IR event bag (translate path).
+    const frames = parseSSE(text);
+    const delta = frames.find((f) => f.event === "response.output_text.delta");
+    expect(JSON.parse(delta?.data ?? "{}")).toMatchObject({
+      type: "response.output_text.delta",
+      delta: "hi",
+    });
   });
 });

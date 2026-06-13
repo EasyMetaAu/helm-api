@@ -420,6 +420,33 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateResponsesSSE(res, model, timeoutMs);
     },
+
+    // Native protocol passthrough (issue #217, Phase 3): the inbound /v1/responses body
+    // is ALREADY a native Responses body (the real Codex CLI supplies store:false +
+    // stream:true + include + reasoning + tools …), so forward it VERBATIM and return the
+    // upstream's native JSON untranslated. Reuses the same HTTP core (headers/withTimeout/
+    // 401-retry/scrub/errorFromResponse/onResponseMeta) but SKIPS both translators —
+    // `openaiToResponsesRequest` (no instructions/input rewrite, no store/include
+    // injection) and `aggregateResponsesStream` (no Responses→Chat folding). The ChatGPT
+    // identity headers (Bearer + chatgpt-account-id + originator + OpenAI-Beta) are applied
+    // by `headers()` inside the shared core, so they ride on the native body unchanged.
+    async nativePassthrough(body, opts) {
+      const res = await requestWithRetry(body, opts?.signal);
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
+    },
+
+    // Streaming native passthrough (issue #217, Phase 3). The native body from a STREAMING
+    // /v1/responses client ALREADY carries `stream:true`, so it is forwarded VERBATIM — NO
+    // `stream:true` injection, NO `openaiToResponsesRequest` translation. The 401-retry /
+    // non-2xx error path runs BEFORE the first chunk (same as chatCompletionStream), then
+    // the upstream Responses SSE is BYTE-RELAYED unchanged via readResponsesSSERaw — no SSE
+    // re-mapping state machine to mangle reasoning.encrypted_content / tools (principle 8).
+    async *nativePassthroughStream(body, opts) {
+      const res = await requestWithRetry(body, opts?.signal);
+      if (!res.ok) throw await errorFromResponse(res);
+      yield* readResponsesSSERaw(res, timeoutMs);
+    },
   };
 }
 
@@ -497,6 +524,44 @@ export async function* readResponsesEvents(
         const evt = parseResponsesSSEFrame(raw);
         if (evt !== null) yield evt;
       }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+// Byte-faithful Responses SSE reader for native passthrough (issue #217, Phase 3).
+// Yields the upstream body's decoded text VERBATIM using the SAME reader pattern as
+// readResponsesEvents (getReader + TextDecoder + readChunkWithIdle idle guard +
+// StreamStalledError → UpstreamError("timeout")), but with NO frame splitting and NO
+// translation. The raw bytes (the `data:` JSON payload, INCLUDING reasoning.encrypted_content
+// and the native tool-call events) reach the client untouched; only the standard SSE
+// envelope is reframed downstream by Hono's writeSSE (semantically identical). This
+// ELIMINATES the responses→IR(openai-chat)→responses round trip — the reasoning/tool
+// mangling source — instead of replacing it.
+export async function* readResponsesSSERaw(
+  res: Response,
+  // Inter-chunk liveness deadline (ms); 0 disables. Threaded from the client's request
+  // timeout so a stream that wedges mid-flight is reclaimed (the connect/TTFB timeout was
+  // already cleared once headers arrived). Identical semantics to readResponsesEvents.
+  idleMs = 0,
+): AsyncGenerator<string> {
+  const body = res.body;
+  if (!body) return;
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      let read: { done: boolean; value?: Uint8Array };
+      try {
+        read = await readChunkWithIdle(reader, idleMs);
+      } catch (err) {
+        if (err instanceof StreamStalledError) throw new UpstreamError("timeout", err.message);
+        throw err;
+      }
+      const { done, value } = read;
+      if (done) break;
+      if (value) yield decoder.decode(value, { stream: true });
     }
   } finally {
     reader.releaseLock();
