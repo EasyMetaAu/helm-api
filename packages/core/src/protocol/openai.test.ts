@@ -93,7 +93,7 @@ describe("openaiTransformer — developer role survives + round-trips (issue #50
 });
 
 describe("openaiTransformer — cross-provider private field stripping", () => {
-  it("does not leak IR thinking_blocks onto OpenAI request wire messages", async () => {
+  it("does not leak IR thinking_blocks or provider_raw onto OpenAI request wire messages", async () => {
     const wire = (await openaiTransformer.transformRequestIn({
       model: "gpt-4o",
       messages: [
@@ -102,15 +102,17 @@ describe("openaiTransformer — cross-provider private field stripping", () => {
           content: "answer",
           reasoning_content: "visible reasoning",
           thinking_blocks: [{ type: "redacted_thinking", data: "encrypted-blob" }],
+          provider_raw: { gemini_function_response: { temp: 72 } },
         },
       ],
     })) as { messages: Array<Record<string, unknown>> };
 
     expect(wire.messages[0]?.thinking_blocks).toBeUndefined();
+    expect(wire.messages[0]?.provider_raw).toBeUndefined();
     expect(wire.messages[0]?.reasoning_content).toBe("visible reasoning");
   });
 
-  it("does not leak IR thinking_blocks onto OpenAI response wire messages", async () => {
+  it("does not leak IR thinking_blocks or provider_raw onto OpenAI response wire messages", async () => {
     const wire = (await openaiTransformer.transformResponseOut({
       id: "chatcmpl-thinking",
       model: "gpt-4o",
@@ -122,6 +124,7 @@ describe("openaiTransformer — cross-provider private field stripping", () => {
             content: "answer",
             reasoning_content: "visible reasoning",
             thinking_blocks: [{ type: "redacted_thinking", data: "encrypted-blob" }],
+            provider_raw: { gemini_function_response: { temp: 72 } },
           },
           finish_reason: "stop",
         },
@@ -129,6 +132,7 @@ describe("openaiTransformer — cross-provider private field stripping", () => {
     })) as { choices: Array<{ message: Record<string, unknown> }> };
 
     expect(wire.choices[0]?.message.thinking_blocks).toBeUndefined();
+    expect(wire.choices[0]?.message.provider_raw).toBeUndefined();
     expect(wire.choices[0]?.message.reasoning_content).toBe("visible reasoning");
   });
 });
@@ -567,6 +571,31 @@ describe("openaiTransformer — multimodal input content normalization (P7)", ()
     expect(parts[2]).toMatchObject({ type: "image", url: "https://x/y.png" });
   });
 
+  it("round-trips image_url.detail through the IR", async () => {
+    const native = {
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image_url", image_url: { url: "https://x/y.png", detail: "high" } }],
+        },
+      ],
+    };
+
+    const ir = await openaiTransformer.transformRequestOut(native);
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "image", url: "https://x/y.png", detail: "high" });
+
+    const back = (await openaiTransformer.transformRequestIn(ir)) as {
+      messages: Array<{ content: Array<{ image_url?: { url?: string; detail?: string } }> }>;
+    };
+    expect(back.messages[0]?.content[0]?.image_url).toEqual({
+      url: "https://x/y.png",
+      detail: "high",
+    });
+  });
+
   it("normalizes input_audio into an IR audio part and back to native (round-trip)", async () => {
     const native = {
       model: "gpt-4o-audio-preview",
@@ -636,22 +665,32 @@ describe("openaiTransformer — multimodal input content normalization (P7)", ()
   it("round-trips an uploaded file_id reference (not corrupted into file_data)", async () => {
     const native = {
       model: "gpt-4o",
-      messages: [{ role: "user", content: [{ type: "file", file: { file_id: "file-abc123" } }] }],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", file: { file_id: "file-abc123", format: "application/pdf" } }],
+        },
+      ],
     };
     const ir = await openaiTransformer.transformRequestOut(native);
     const parts = ir.messages[0]?.content;
     if (!Array.isArray(parts)) throw new Error("expected parts");
-    expect(parts[0]).toMatchObject({ type: "document", fileId: "file-abc123" });
+    expect(parts[0]).toMatchObject({
+      type: "document",
+      fileId: "file-abc123",
+      mediaType: "application/pdf",
+    });
     expect((parts[0] as { url?: string }).url).toBeUndefined();
 
     const back = (await openaiTransformer.transformRequestIn(ir)) as {
       messages: Array<{ content: Array<Record<string, unknown>> }>;
     };
     const out = back.messages[0]?.content?.[0] as {
-      file?: { file_id?: string; file_data?: string };
+      file?: { file_id?: string; file_data?: string; format?: string };
     };
     expect(out.file?.file_id).toBe("file-abc123");
     expect(out.file?.file_data).toBeUndefined();
+    expect(out.file?.format).toBe("application/pdf");
   });
 });
 

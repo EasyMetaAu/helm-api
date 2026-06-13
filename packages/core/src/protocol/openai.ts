@@ -205,10 +205,16 @@ function nativePartToIR(part: unknown): IRContentPart {
               typeof (iu as { url?: unknown }).url === "string"
             ? (iu as { url: string }).url
             : "";
+      const detail =
+        typeof iu === "object" &&
+        iu !== null &&
+        typeof (iu as { detail?: unknown }).detail === "string"
+          ? { detail: (iu as { detail: string }).detail }
+          : {};
       const parsed = parseDataUrl(url);
       return parsed !== null
-        ? { type: "image", url, mediaType: parsed.mediaType }
-        : { type: "image", url };
+        ? { type: "image", url, mediaType: parsed.mediaType, ...detail }
+        : { type: "image", url, ...detail };
     }
     case "input_audio": {
       const ia = (p.input_audio ?? {}) as { data?: unknown; format?: unknown };
@@ -279,15 +285,19 @@ function irPartToNative(part: IRContentPart): unknown {
     case "text":
       return { type: "text", text: part.text };
     case "image":
-      return { type: "image_url", image_url: { url: part.url } };
+      return {
+        type: "image_url",
+        image_url: { url: part.url, ...(part.detail !== undefined ? { detail: part.detail } : {}) },
+      };
     case "audio":
       return { type: "input_audio", input_audio: { data: part.data, format: part.format } };
     case "document": {
       // An uploaded-file handle round-trips back to file.file_id (OpenAI's expected
       // shape); else inline base64 -> file_data data-url; else a remote url -> file_data.
       const name = part.filename !== undefined ? { filename: part.filename } : {};
+      const format = part.mediaType !== undefined ? { format: part.mediaType } : {};
       if (part.fileId !== undefined) {
-        return { type: "file", file: { file_id: part.fileId, ...name } };
+        return { type: "file", file: { file_id: part.fileId, ...name, ...format } };
       }
       const fileData =
         part.data !== undefined
@@ -298,6 +308,7 @@ function irPartToNative(part: IRContentPart): unknown {
         file: {
           ...(fileData !== undefined ? { file_data: fileData } : {}),
           ...name,
+          ...format,
         },
       };
     }
@@ -309,7 +320,11 @@ function irPartToNative(part: IRContentPart): unknown {
 }
 
 function stripOpenAIPrivateMessageFields(message: IRMessage): IRMessage {
-  const { thinking_blocks: _thinking_blocks, ...wireMessage } = message;
+  const {
+    thinking_blocks: _thinking_blocks,
+    provider_raw: _provider_raw,
+    ...wireMessage
+  } = message;
   return wireMessage;
 }
 
@@ -414,9 +429,9 @@ function toIRResponse(res: NativeResponse): IRResponse {
 // {type:"thinking"} content block. A message that already carries reasoning_content
 // (native OpenAI origin) is preserved. (P6) ————————————————————————————————————————
 function toOpenAIMessage(message: IRMessage): IRMessage {
+  const wireMessage = stripOpenAIPrivateMessageFields(message);
   const { reasoningText } = resolveReasoning(message);
   const content = stripThinkingFromContent(message.content);
-  const wireMessage = stripOpenAIPrivateMessageFields(message);
   if (reasoningText === undefined && content === wireMessage.content) return wireMessage;
   return {
     ...wireMessage,

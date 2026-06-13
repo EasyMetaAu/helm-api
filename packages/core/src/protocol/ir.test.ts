@@ -53,11 +53,20 @@ describe("IRContentPartSchema — multipart typed content", () => {
       role: "assistant",
       content: [
         { type: "text", text: "here" },
-        { type: "image", url: "https://example.com/a.png", mediaType: "image/png" },
+        {
+          type: "image",
+          url: "https://example.com/a.png",
+          mediaType: "image/png",
+          detail: "high",
+        },
         { type: "thinking", text: "let me reason", signature: "sig-123" },
       ],
     });
     expect(Array.isArray(parsed.content)).toBe(true);
+    expect(Array.isArray(parsed.content) ? parsed.content[1] : undefined).toMatchObject({
+      type: "image",
+      detail: "high",
+    });
   });
 
   it("rejects an unknown content part `type` via discriminatedUnion", () => {

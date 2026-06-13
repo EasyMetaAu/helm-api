@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-13 · OpenAI/Responses/Gemini 协议互译保真补丁（docs/05；原则 1/7/8）
+
+- **缘起**：在 Anthropic 互译修复后继续核对另外三种协议的 native→IR→native 保真。确认不是页面显示问题，而是协议层存在若干“字段有原生语义但 IR 没有稳定家”的丢失点：OpenAI/Responses 图片 `detail`、Responses tool output 多模态内容与 `input_file.filename`、Gemini `functionResponse.response` 原始对象，以及 Gemini 流式同名并行 tool call。
+- **修复**：`IRImagePart` 新增 `detail`，OpenAI Chat 与 Responses 双向映射保留该字段；OpenAI `file` 内容的 `format` 随 `IRDocumentPart.mediaType` 重新发出。Responses `function_call_output.output` 如果入站是 multipart，出站仍发 content-part array（文本用 `output_text`，图片/文件保留 `input_image`/`input_file`），并在 `file_id`/`file_url` 分支保留 `filename`；入站 `reasoning` items 会在 Responses request out 重放但继续去掉 OpenAI 拒收的 `status`。Gemini tool-result message 增加 message-level `provider_raw.gemini_function_response`，用于恢复原始 object response；OpenAI 出站显式剥离 message-level `provider_raw`，避免内部元数据泄漏到 wire。Gemini `transformStreamIn` 的 tool slot 从按 function name 改为按 `name + frame occurrence` 分配，修复同名并行 functionCall 被覆盖为一个 tool call 的问题。
+- **取舍**：message-level `provider_raw` 只用于无法放入通用 IR 字段的 native tool-result 结构，不作为通用业务字段；OpenAI/Responses 可表达的内容仍优先放一等 IR 字段。Responses reasoning item 的 `status` 虽可被捕获，但继续不重放，因为 Responses input 明确拒绝它，保真与可执行性冲突时优先可执行并保留 raw。
+- **验证**：新增 TDD 回归覆盖 OpenAI `image_url.detail`/file `format`、Responses `input_image.detail`/`input_file.filename`/multipart `function_call_output`/reasoning item replay、Gemini raw `functionResponse.response` 与流式同名并行 tool call；focused protocol tests 177 绿。
+
 ## 2026-06-13 · Anthropic 互译保真：tool_result 多模态 + thinking/redacted_thinking 历史块（docs/05；原则 1/7/8）
 
 - **缘起**：继续追查 Anthropic 原生请求经 IR 再回 Anthropic 时的保真问题。上轮已修普通 user content 的 image/document 透传，但进一步审计发现三处仍会丢 Anthropic 原生信息：`tool_result.content` 为 block[] 时只保留 text，image/document 被 JSON 字符串化；document `title` 没有进 IR `filename`；assistant 历史里的 `thinking` / `redacted_thinking` request/response block 与缓存命中合成 SSE 路径无法按原块恢复。这类丢失会让模型看不到工具返回的截图/文档，或破坏 Claude extended-thinking conversation history，属于协议根因，不是 UI/循环保护问题。
@@ -25,24 +32,15 @@
 - **关键取舍（已敲定）**：真 CC 的头逐请求轮换（后缀+cch 都是内容哈希），「字节级仿真」与「命中缓存」**本质冲突**。用户选**按缓存前缀算 cch**：真实版本 + authentic-looking + 可缓存；唯一弱差异是同会话内 cch 不每轮变（cch 是归因 telemetry，几乎不可能据此封号）。**经验数据**（同会话 6 请求）证实客户端 `cc_version=2.1.173.d11` **跨请求恒定**、只有 `cch` 轮换——所以透传客户端版本既零维护又比硬编码更真（硬编码必然和客户端实际版本错位，且拿不到真实 build 后缀 `.d11`）。
 - **验证**：TDD 红→绿。新增 extract 4 例（version+entrypoint / string system / 无块→null / 注入畸形→null）+ provider 透传 2 例（回写客户端版本 / 透传时 cch 仍稳定）+ UA-from-client 1 例（UA 用客户端 semver，块带后缀，都 2.1.173 非兜底 2.1.175）；既有 fallback 路径断言不变（无 metadata → 2.1.175）。provider+protocol+gateway+shared **1071 绿**、`pnpm typecheck`/`lint` 全绿。
 
-## 2026-06-12 · 首页 Token 计量 dashboard（持久化 + 聚合端点 + LayerChart 图表；CLAUDE.md 原则 1/3/7；docs/02/07）
-
-- **缘起**：用户要在 `/admin` 首页看到「总/输入/输出/缓存 Token」与两张图（用量趋势 + 各模型占比），参考 `claude-relay-service` dashboard。阻塞点：helm-api **从不持久化 token 计数**——`catalog/cost.ts::usageFromBody()` 早就能解析 OpenAI/Anthropic 两种 usage 形状，但 `resolveCostUsd()` 只留 USD、丢掉 token 数；telemetry 表只存 `cost_usd`；无聚合端点（首页此前 client 侧 reduce ≤200 行样本）；无图表库。决策（已与用户敲定）：**cards + 2 charts / LayerChart / forward-only 不回填**。
-- **三层改动**：
-  1. **持久化**：`DecisionRecord` 加可选 `usage` 块（`TokenUsageSchema`，4 个整数计数）。**容器键必须叫 `usage`**——redactor 的 `DEFAULT_SECRET_PATTERN` 含 `token`，若键名带 "token" 整个对象会被 summarize 成 `{redacted:true}`；标量 `*_tokens` 叶子本身能原样通过（[[已修的 memory_tokens_injected]] 同理）。由 pinned redaction 测试钉死。gateway `backfillCompletionCost` 加第 4 参 `usage?`，复用 **core 的** `usageFromBody`（别名导入；gateway 本地同名函数只返回原始对象）映射后盖戳；token 盖戳与 cost **解耦**（null cost + 有 usage 仍盖 token，非流式路径也补盖）。telemetry 表反范式化 5 列（`prompt/completion/cached/cache_creation_tokens` + `served_model`）便于 SQL 聚合；迁移 **sqlite v22 / pg v21**（两套 ledger 独立编号，sqlite 因早期重建领先一号）。
-  2. **聚合端点**：`TelemetryStore.aggregate(start,end,bucket)` 返回 `{totals, series[], byModel[]}`，三条 SQL 全走 `SUM`/`COUNT`/`GROUP BY`（绝不逐行 JS）。分桶用 epoch-ms 整除（窗口大小经 `sql.raw` 内联，确保两方言都做整数除法），排序在共享 `aggregate-shape.ts` 里用 JS 做（方言无关）。token sum 用 `COALESCE(...,0)`，cost/latency 保持 nullable（「未测量」≠ 0）。新 `GET /admin/api/stats`，查询用 fail-open 的 `StatsQuerySchema`（默认末 24h / day）。
-  3. **前端**：`layerchart@^1.0.13`（Svelte5 兼容，SSR 已关无需 guard）；`lib/api/stats.ts` 客户端 + `+page.ts` loader 改调 `getStats`（recent-requests 表仍用 `listRequests`）；4 张 token card + AreaChart 趋势 + PieChart（`innerRadius:-40` 甜甜圈）各模型占比；`formatTokens`（1.2M/34.5K）；i18n en/zh-hans/zh-hant/ja/ko。
-- **坑/取舍**：**forward-only**——历史行 token 列与 `served_model` 为 NULL，趋势从部署起、by-model 旧流量归到 "unknown" 桶。avg latency 仍从 decision JSON 读（`json_extract`/`->>`），有界窗口可接受；变热再反范式化。LayerChart 的 `AreaChart`/`PieChart` 用 Svelte4 风格 props 但 runes 模式下渲染正常；类型上需给两图显式 point 类型，否则各 series accessor 把 `TData` 收窄成不同内联形状无法统一。WebFetch/Context7 当时都取不到 LayerChart API，最终读包内 `.d.ts` 作为 ground truth。
-- **追加修复**：review 发现 non-chat 协议的 admin 流式 replay 没有 budget deps 时会跳过 streamed usage 盖戳，导致 replay telemetry 被 dashboard 少算；已把 shared `messages-pipeline` 的 token stamp 从 budget-only 分支移出，budget settle 仍保持 gated。
-- **验证**：`pnpm typecheck`/`lint` 全绿；`pnpm test` 绿（唯一 full-run 红是已知 PGlite 5s 超时 flake `memory-jobs.test.ts`，隔离重跑 8/8 过——见 [[pnpm-test-pglite-flake]]）。新覆盖：redaction guard、schema round-trip、gateway token-stamp（OpenAI+Anthropic）、aggregate contract（**两 adapter** sqlite+pglite）、stats route、`formatTokens`、dashboard locale coverage。13 个迁移-scoped 测试因预置 applied 版本列表少了 v22/v21 而红，已补齐（图表渲染本身 jsdom 不可测）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
-### 2026-06-12 · 四协议互译保真补丁：Responses `tool_choice` 双向规范化、`previous_response_id` continuation fail-closed、Anthropic native controls/provider beta 透传、Gemini `safetySettings` round-trip；缺完整 Responses object/session store 前不伪装支持历史 tool-output continuation。
+### 2026-06-12 · 首页 Token 计量 dashboard：新增 usage 反范式化持久化、`/admin/api/stats` SQL 聚合、LayerChart token 趋势/模型占比；forward-only 不回填历史，SQLite/PG 迁移分别 v22/v21，typecheck/lint/test 验证。
+
+### 2026-06-12 · 四协议互译保真补丁（Responses tool_choice / Anthropic native controls / Gemini safety；docs/05/07）：Responses `tool_choice` 双向规范化并对缺本地历史的 `previous_response_id` tool-output continuation fail-closed；Anthropic native controls 进 `provider_raw` 并补 beta header；Gemini `safetySettings` round-trip；focused 244、typecheck、lint、完整 test 绿。
 
 ### 2026-06-12 · 新增 claude-fable-5 配置支持（原则 2/6；docs/04）：能力取自 OpenRouter API（ctx 1M / max_out 128K / text+image+file→document，pricing 未落库）；完全镜像 claude-opus 模式——`lanes.yaml` 新 `claude-fable` lane 以 native OAuth 别名领衔、`fallback:[premium]`，`model-aliases.yaml` 加 `claude-fable-*` glob；用户拍板**去掉 OpenRouter 静态镜像兜底**；native 别名靠运行时 OAuth pool 注册不进 providers.yaml。TDD samples+catalog 98 绿。部署坑：需手动同步 `/opt/helm-api/config` 两个 yaml（[[deploy-never-overwrite-config]]）。
 

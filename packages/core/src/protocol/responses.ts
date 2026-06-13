@@ -322,7 +322,11 @@ function foldContentPart(part: z.infer<typeof ResponsesContentPartSchema>): IRCo
       return { type: "text", text: (part as { text: string }).text };
     case "input_image": {
       const p = part as z.infer<typeof ResponsesInputImageSchema>;
-      return { type: "image", url: p.image_url ?? "" };
+      return {
+        type: "image",
+        url: p.image_url ?? "",
+        ...(p.detail !== undefined ? { detail: p.detail } : {}),
+      };
     }
     case "input_file": {
       const p = part as z.infer<typeof ResponsesInputFileSchema>;
@@ -508,6 +512,15 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
   const input: Array<Record<string, unknown>> = [];
   let instructions: string | undefined;
 
+  const rawReasoning = parsed.provider_raw?.reasoning;
+  if (Array.isArray(rawReasoning)) {
+    for (const item of rawReasoning) {
+      if (!isRecord(item) || item.type !== "reasoning") continue;
+      const { status: _status, ...sanitized } = item;
+      input.push(sanitized);
+    }
+  }
+
   for (const m of parsed.messages) {
     if (m.role === "system") {
       // The first system message folds to top-level instructions; any later one
@@ -521,7 +534,7 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
       input.push({
         type: "function_call_output",
         ...(m.tool_call_id !== undefined ? { call_id: m.tool_call_id } : {}),
-        output: contentToText(m.content),
+        output: contentToFunctionCallOutput(m.content),
       });
       continue;
     }
@@ -624,6 +637,13 @@ function contentToText(content: IRMessage["content"]): string {
     .join("");
 }
 
+function contentToFunctionCallOutput(
+  content: IRMessage["content"],
+): string | Array<Record<string, unknown>> {
+  if (content === null || typeof content === "string") return contentToText(content);
+  return contentToResponsesParts(content, true);
+}
+
 // IR content -> Responses content parts, PRESERVING multimodality (order 25): text ->
 // input_text/output_text, image -> input_image, document -> input_file. Collapsing to
 // a single text part dropped images/files silently. audio/video/thinking have no
@@ -638,16 +658,22 @@ function contentToResponsesParts(
   const parts: Array<Record<string, unknown>> = [];
   for (const p of content) {
     if (p.type === "text") parts.push({ type: textType, text: p.text });
-    else if (p.type === "image") parts.push({ type: "input_image", image_url: p.url });
-    else if (p.type === "document") {
-      if (p.fileId !== undefined) parts.push({ type: "input_file", file_id: p.fileId });
+    else if (p.type === "image") {
+      parts.push({
+        type: "input_image",
+        image_url: p.url,
+        ...(p.detail !== undefined ? { detail: p.detail } : {}),
+      });
+    } else if (p.type === "document") {
+      const name = p.filename !== undefined ? { filename: p.filename } : {};
+      if (p.fileId !== undefined) parts.push({ type: "input_file", file_id: p.fileId, ...name });
       else if (p.data !== undefined)
         parts.push({
           type: "input_file",
-          ...(p.filename !== undefined ? { filename: p.filename } : {}),
+          ...name,
           file_data: `data:${p.mediaType ?? "application/octet-stream"};base64,${p.data}`,
         });
-      else if (p.url !== undefined) parts.push({ type: "input_file", file_url: p.url });
+      else if (p.url !== undefined) parts.push({ type: "input_file", file_url: p.url, ...name });
     }
   }
   return parts.length > 0 ? parts : [{ type: textType, text: "" }];

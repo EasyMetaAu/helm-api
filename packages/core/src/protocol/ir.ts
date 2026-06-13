@@ -35,6 +35,10 @@ export const IRImagePartSchema = z.object({
   // original structure goes into provider_raw.
   url: z.string(),
   mediaType: z.string().optional(),
+  // OpenAI Chat and Responses both expose an image detail hint (auto/low/high today,
+  // but kept open-ended for forward compatibility). It has to live in the IR or an
+  // OpenAI/Responses self round-trip silently drops it.
+  detail: z.string().optional(),
   cache_control: z.unknown().optional(), // Anthropic per-block cache breakpoint
 });
 
@@ -216,6 +220,18 @@ export const IRToolCallSchema = z.object({
 });
 export type IRToolCall = z.infer<typeof IRToolCallSchema>;
 
+// —— provider_raw passthrough bag: upstream-native fields that cannot be mapped
+// losslessly. `.catchall(z.unknown())` is REQUIRED — without it unknown upstream
+// fields would be stripped, breaking the lossless-passthrough goal. ——————————
+
+export const ProviderRawSchema = z
+  .object({
+    stop_reason: z.unknown().optional(), // raw upstream finish/stop value (pre-mapping)
+    usage: z.unknown().optional(), // raw upstream usage (billing / reconstruction)
+  })
+  .catchall(z.unknown()); // any other native field is retained verbatim
+export type ProviderRaw = z.infer<typeof ProviderRawSchema>;
+
 // —— Message (role=tool carries tool_call_id; content is a string or multipart,
 // and may be null for an assistant turn that only emits tool_calls). `developer`
 // is OpenAI's renamed system tier — kept as a FIRST-CLASS role so it survives the
@@ -238,20 +254,9 @@ export const IRMessageSchema = z.object({
   annotations: z.array(IRAnnotationSchema).optional(),
   images: z.array(IRImageOutSchema).optional(),
   audio: IRAudioOutSchema.optional(),
+  provider_raw: ProviderRawSchema.optional(),
 });
 export type IRMessage = z.infer<typeof IRMessageSchema>;
-
-// —— provider_raw passthrough bag: upstream-native fields that cannot be mapped
-// losslessly. `.catchall(z.unknown())` is REQUIRED — without it unknown upstream
-// fields would be stripped, breaking the lossless-passthrough goal. ——————————
-
-export const ProviderRawSchema = z
-  .object({
-    stop_reason: z.unknown().optional(), // raw upstream finish/stop value (pre-mapping)
-    usage: z.unknown().optional(), // raw upstream usage (billing / reconstruction)
-  })
-  .catchall(z.unknown()); // any other native field is retained verbatim
-export type ProviderRaw = z.infer<typeof ProviderRawSchema>;
 
 // —— Request ————————————————————————————————————————————————————————————————
 

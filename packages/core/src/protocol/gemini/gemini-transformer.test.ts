@@ -267,6 +267,41 @@ describe("tool-call id synthesis (the core pit)", () => {
     expect(response.functionResponse.name).toBe("get_weather");
   });
 
+  it("round-trips native functionResponse.response objects through provider_raw", () => {
+    const native: GeminiGenerateContentRequest = {
+      contents: [
+        {
+          role: "model",
+          parts: [{ functionCall: { name: "get_weather", args: { city: "SF" } } }],
+        },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                name: "get_weather",
+                response: { temp: 60, unit: "F", nested: { ok: true } },
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const toolMsg = ir.messages.find((m) => m.role === "tool");
+    expect(toolMsg?.content).toBe(JSON.stringify({ temp: 60, unit: "F", nested: { ok: true } }));
+
+    const back = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const response = back.contents[1]?.parts[0] as {
+      functionResponse: { name: string; response: unknown };
+    };
+    expect(response.functionResponse).toEqual({
+      name: "get_weather",
+      response: { temp: 60, unit: "F", nested: { ok: true } },
+    });
+  });
+
   it("drops synthesized ids when going IR -> Gemini (outbound)", () => {
     const ir: IRRequest = {
       model: "gemini-1.5-pro",
@@ -582,6 +617,70 @@ describe("streaming alt=sse (snapshot events -> IR chunks)", () => {
       .map((tc) => tc.function?.name)
       .filter(Boolean);
     expect(toolNames).toContain("search");
+  });
+
+  it("keeps same-name parallel function calls in separate streaming slots", async () => {
+    const events: GeminiSSEEvent[] = [
+      {
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [
+                { functionCall: { name: "search", args: { q: "alpha" } } },
+                { functionCall: { name: "search", args: { q: "beta" } } },
+              ],
+            },
+            finishReason: "STOP",
+          },
+        ],
+      },
+    ];
+
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const toolCalls = chunks.flatMap((c) => c.choices?.[0]?.delta?.tool_calls ?? []);
+    expect(toolCalls).toHaveLength(2);
+    expect(toolCalls.map((tc) => tc.index)).toEqual([0, 1]);
+    expect(toolCalls.map((tc) => tc.id)).toEqual(["call_search_0", "call_search_1"]);
+    expect(toolCalls.map((tc) => JSON.parse(tc.function?.arguments ?? "{}"))).toEqual([
+      { q: "alpha" },
+      { q: "beta" },
+    ]);
+  });
+
+  it("keeps same-name parallel function calls split across streaming frames", async () => {
+    const events: GeminiSSEEvent[] = [
+      {
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [{ functionCall: { name: "search", args: { q: "alpha" } } }],
+            },
+          },
+        ],
+      },
+      {
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [{ functionCall: { name: "search", args: { q: "beta" } } }],
+            },
+            finishReason: "STOP",
+          },
+        ],
+      },
+    ];
+
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const toolCalls = chunks.flatMap((c) => c.choices?.[0]?.delta?.tool_calls ?? []);
+    expect(toolCalls).toHaveLength(2);
+    expect(new Set(toolCalls.map((tc) => tc.id)).size).toBe(2);
+    expect(toolCalls.map((tc) => JSON.parse(tc.function?.arguments ?? "{}"))).toEqual([
+      { q: "alpha" },
+      { q: "beta" },
+    ]);
   });
 
   // test #3: streaming usage subtracts cachedContentTokenCount (matches non-stream).

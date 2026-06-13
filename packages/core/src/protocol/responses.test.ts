@@ -356,6 +356,28 @@ describe("responsesTransformer — Tier D request/response fidelity (orders 17-2
     expect(parts.some((p) => p.type === "document" && p.fileId === "file-abc")).toBe(true);
   });
 
+  it("round-trips input_image.detail through the IR", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_image", image_url: "https://x/y.png", detail: "high" }],
+        },
+      ],
+    });
+    const parts = ir.messages.at(-1)?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "image", url: "https://x/y.png", detail: "high" });
+
+    const back = (await responsesTransformer.transformRequestIn(ir)) as {
+      input: Array<{ type: string; content?: Array<{ type: string; detail?: string }> }>;
+    };
+    const image = back.input[0]?.content?.[0];
+    expect(image).toMatchObject({ type: "input_image", detail: "high" });
+  });
+
   it("folds an inbound input_file (file_data PDF) into an IR document with base64 data", async () => {
     const ir = await responsesTransformer.transformRequestOut({
       model: "gpt-4o",
@@ -401,6 +423,42 @@ describe("responsesTransformer — Tier D request/response fidelity (orders 17-2
     const types = (msg?.content ?? []).map((c) => c.type);
     expect(types).toContain("input_text");
     expect(types).toContain("input_image");
+  });
+
+  it("round-trips input_file filename for file_id and file_url", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_file", file_id: "file-abc", filename: "uploaded.pdf" },
+            {
+              type: "input_file",
+              file_url: "https://x/r.pdf",
+              filename: "remote.pdf",
+            },
+          ],
+        },
+      ],
+    });
+
+    const back = (await responsesTransformer.transformRequestIn(ir)) as {
+      input: Array<{
+        type: string;
+        content?: Array<{
+          type: string;
+          file_id?: string;
+          file_url?: string;
+          filename?: string;
+        }>;
+      }>;
+    };
+    expect(back.input[0]?.content).toEqual([
+      { type: "input_file", file_id: "file-abc", filename: "uploaded.pdf" },
+      { type: "input_file", file_url: "https://x/r.pdf", filename: "remote.pdf" },
+    ]);
   });
 });
 
@@ -491,6 +549,37 @@ describe("responsesTransformer — request input items -> IR (folding)", () => {
     const toolMsg = ir.messages.find((m) => m.role === "tool");
     expect(toolMsg?.tool_call_id).toBe("call_abc");
     expect(toolMsg?.content).toBe("72F sunny");
+  });
+
+  it("round-trips multipart function_call_output output", async () => {
+    const native = {
+      model: "gpt-4o",
+      input: [
+        {
+          type: "function_call_output",
+          call_id: "call_abc",
+          output: [
+            { type: "output_text", text: "chart:" },
+            { type: "input_image", image_url: "https://x/chart.png", detail: "low" },
+            { type: "input_file", file_url: "https://x/data.csv", filename: "data.csv" },
+          ],
+        },
+      ],
+    };
+
+    const ir = await responsesTransformer.transformRequestOut(native);
+    const toolMsg = ir.messages.find((m) => m.role === "tool");
+    expect(toolMsg?.tool_call_id).toBe("call_abc");
+    expect(toolMsg?.content).toEqual([
+      { type: "text", text: "chart:" },
+      { type: "image", url: "https://x/chart.png", detail: "low" },
+      { type: "document", url: "https://x/data.csv", filename: "data.csv" },
+    ]);
+
+    const back = (await responsesTransformer.transformRequestIn(ir)) as {
+      input: Array<{ type: string; output?: unknown }>;
+    };
+    expect(back.input[0]?.output).toEqual(native.input[0]?.output);
   });
 
   it("folds top-level instructions into the leading IR system message", async () => {
@@ -599,6 +688,33 @@ describe("responsesTransformer — reasoning item inbound (test #2)", () => {
     // raw reasoning item preserved (with status) in provider_raw
     const rawReasoning = ir.provider_raw?.reasoning as Array<{ status?: string }> | undefined;
     expect(rawReasoning?.[0]?.status).toBe("completed");
+  });
+
+  it("replays inbound reasoning items on a Responses request without rejected status", async () => {
+    const native = {
+      model: "gpt-4o",
+      input: [
+        {
+          type: "reasoning",
+          id: "rs_1",
+          status: "completed",
+          summary: [{ type: "summary_text", text: "thinking about SF weather" }],
+        },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "weather?" }] },
+      ],
+    };
+
+    const ir = await responsesTransformer.transformRequestOut(native);
+    const back = (await responsesTransformer.transformRequestIn(ir)) as {
+      input: Array<Record<string, unknown>>;
+    };
+
+    expect(back.input[0]).toEqual({
+      type: "reasoning",
+      id: "rs_1",
+      summary: [{ type: "summary_text", text: "thinking about SF weather" }],
+    });
+    expect(JSON.stringify(back.input[0])).not.toContain("status");
   });
 });
 
