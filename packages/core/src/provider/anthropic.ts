@@ -682,7 +682,70 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateAnthropicSSE(res, model, timeoutMs);
     },
+
+    // Native protocol passthrough (issue #217, Phase 1): the inbound /v1/messages body
+    // is ALREADY Anthropic-native, so forward it VERBATIM and return the upstream's
+    // native JSON untranslated. Reuses the same HTTP core (headers/withTimeout/
+    // 401-retry/scrub/errorFromResponse) but SKIPS both translators —
+    // `openaiToAnthropicRequest` (no spoof injection / no openai->anthropic mangling)
+    // and `anthropicToOpenAIResponse` (no response wrapping). `headers(body)` derives
+    // beta/user-agent/auth from the native body's own system[0]/context_management/speed,
+    // so the same closure works unchanged on a native body.
+    async nativePassthrough(body, opts) {
+      const res = await requestWithRetry(body, opts?.signal);
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
+    },
+
+    // Streaming native passthrough (issue #217, Phase 2). The native body from a
+    // STREAMING /v1/messages client ALREADY carries `stream:true`, so it is forwarded
+    // VERBATIM — NO `stream:true` injection, NO `openaiToAnthropicRequest` translation.
+    // The 401-retry / non-2xx error path runs BEFORE the first chunk (same as
+    // chatCompletionStream), then the upstream SSE is BYTE-RELAYED unchanged via
+    // readAnthropicSSERaw — no SSE re-mapping state machine to mis-translate (principle 8).
+    async *nativePassthroughStream(body, opts) {
+      const res = await requestWithRetry(body, opts?.signal);
+      if (!res.ok) throw await errorFromResponse(res);
+      yield* readAnthropicSSERaw(res, timeoutMs);
+    },
   };
+}
+
+// Byte-faithful Anthropic SSE reader for native passthrough (issue #217, Phase 2).
+// Yields the upstream body's decoded text VERBATIM using the SAME reader pattern as
+// translateAnthropicSSE (getReader + TextDecoder + readChunkWithIdle idle guard +
+// StreamStalledError → UpstreamError("timeout")), but with NO frame splitting and NO
+// translation. The raw bytes (the `data:` JSON payload) reach the client untouched; only
+// the standard SSE envelope is reframed downstream by Hono's writeSSE (semantically
+// identical). This ELIMINATES the convertOpenAIStreamToAnthropic state machine — the
+// real #221/#222 bug source — instead of replacing it.
+export async function* readAnthropicSSERaw(
+  res: Response,
+  // Inter-chunk liveness deadline (ms); 0 disables. Threaded from the client's request
+  // timeout so a stream that wedges mid-flight is reclaimed (the connect/TTFB timeout was
+  // already cleared once headers arrived). Identical semantics to translateAnthropicSSE.
+  idleMs = 0,
+): AsyncGenerator<string> {
+  const body = res.body;
+  if (!body) return;
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      let read: { done: boolean; value?: Uint8Array };
+      try {
+        read = await readChunkWithIdle(reader, idleMs);
+      } catch (err) {
+        if (err instanceof StreamStalledError) throw new UpstreamError("timeout", err.message);
+        throw err;
+      }
+      const { done, value } = read;
+      if (done) break;
+      if (value) yield decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 // ── streaming translation: Anthropic SSE -> OpenAI-Chat SSE strings ──────────

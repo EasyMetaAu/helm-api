@@ -45,6 +45,7 @@ function registry(map: Record<string, string>): ProviderRegistry {
           baseUrl: "http://x",
           apiKeyEnv: "X",
           targetProviderProtocol: "openai_chat",
+          providerRequiresCompatibilityRewrite: false,
         },
       };
     },
@@ -68,6 +69,7 @@ function registryWithProviders(
           baseUrl: "http://x",
           apiKeyEnv: "X",
           targetProviderProtocol: "openai_chat",
+          providerRequiresCompatibilityRewrite: false,
         },
       };
     },
@@ -519,6 +521,7 @@ describe("createExecute — gateway execution adapter", () => {
               baseUrl: "http://a",
               apiKeyEnv: "A_KEY",
               targetProviderProtocol: "openai_chat",
+              providerRequiresCompatibilityRewrite: false,
             },
           };
         if (alias === "b")
@@ -531,6 +534,7 @@ describe("createExecute — gateway execution adapter", () => {
               baseUrl: "http://b",
               apiKeyEnv: "B_KEY",
               targetProviderProtocol: "openai_chat",
+              providerRequiresCompatibilityRewrite: false,
             },
           };
         return { ok: false, error: { kind: "unknown_alias", alias } };
@@ -1227,6 +1231,692 @@ describe("createExecute — gateway execution adapter", () => {
     const out = await execute(plan(["unknown_model"]), req());
     expect(out.final.status).toBe("ok");
     expect(out.attempts[0]?.cost_usd).toBeNull();
+  });
+});
+
+// Native protocol passthrough (issue #217, Phase 1). The executor forwards a
+// VERBATIM native Anthropic body to an Anthropic upstream (skipping the 4 lossy
+// translations) and returns the native response untouched, ONLY when the runtime
+// flag is on, the inbound protocol matches the target wire protocol, the chain is
+// homogeneous, and the provider client implements nativePassthrough. The branch is a
+// body+response substitution INSIDE the existing per-candidate try/catch — so
+// breaker / abort / free-429 / chain-advance semantics are identical.
+describe("createExecute — native protocol passthrough (#217)", () => {
+  const NATIVE = {
+    model: "claude-x",
+    max_tokens: 16,
+    messages: [{ role: "user", content: "hi" }],
+  } as const;
+
+  // Registry whose aliases resolve to a chosen targetProviderProtocol per provider.
+  function protocolRegistry(
+    map: Record<
+      string,
+      { providerName: string; providerModel: string; targetProviderProtocol: string }
+    >,
+  ): ProviderRegistry {
+    return {
+      resolve(alias: string) {
+        const hit = map[alias];
+        if (hit === undefined) return { ok: false, error: { kind: "unknown_alias", alias } };
+        return {
+          ok: true,
+          value: {
+            alias,
+            providerName: hit.providerName,
+            providerModel: hit.providerModel,
+            baseUrl: "http://x",
+            apiKeyEnv: "X",
+            targetProviderProtocol: hit.targetProviderProtocol as
+              | "openai_chat"
+              | "anthropic_messages",
+            providerRequiresCompatibilityRewrite: false,
+          },
+        };
+      },
+      list: () => Object.keys(map),
+    };
+  }
+
+  function anthropicProvider(resp: Record<string, unknown>) {
+    return {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "translated" }),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(resp),
+    } as unknown as ProviderClient & {
+      chatCompletion: ReturnType<typeof vi.fn>;
+      nativePassthrough: ReturnType<typeof vi.fn>;
+    };
+  }
+
+  // Anthropic inbound request carrying the verbatim native body.
+  function anthropicReq(over: Partial<InternalRequest> = {}): InternalRequest {
+    return req({
+      protocol: "anthropic_messages",
+      native_request: { ...NATIVE },
+      ...over,
+    });
+  }
+
+  const NATIVE_RESP = {
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
+    content: [{ type: "text", text: "hello back" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 1000, output_tokens: 500 },
+  };
+
+  it("flag ON + anthropic target + native_request present → calls nativePassthrough (NOT chatCompletion) and returns the native body", async () => {
+    const provider = anthropicProvider(NATIVE_RESP);
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a"]), anthropicReq());
+    expect(out.final.status).toBe("ok");
+    expect(provider.nativePassthrough).toHaveBeenCalledTimes(1);
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    // The native body was forwarded VERBATIM, and the native response returned as-is.
+    expect(provider.nativePassthrough.mock.calls[0]?.[0]).toEqual(NATIVE);
+    expect(out.body).toBe(NATIVE_RESP);
+    expect(out.nativePassthrough).toBe(true);
+    const okRow = out.attempts[0];
+    expect(okRow?.status).toBe("ok");
+    expect(okRow?.passthrough_considered).toBe(true);
+    expect(okRow?.passthrough_used).toBe(true);
+    expect(okRow?.passthrough_disable_reason ?? null).toBeNull();
+    expect(okRow?.source_protocol).toBe("anthropic_messages");
+    expect(okRow?.target_provider_protocol).toBe("anthropic_messages");
+    expect(okRow?.response_protocol).toBe("anthropic_messages");
+    expect(okRow?.provider_name).toBe("anthro");
+    expect(okRow?.provider_model).toBe("claude-x");
+  });
+
+  it("flag OFF → translates via chatCompletion(stripInternal), passthrough_used:false reason feature_flag_disabled, nativePassthrough absent", async () => {
+    const provider = anthropicProvider(NATIVE_RESP);
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      // flag not provided → defaults OFF
+    });
+
+    const out = await execute(plan(["a"]), anthropicReq());
+    expect(out.final.status).toBe("ok");
+    expect(provider.nativePassthrough).not.toHaveBeenCalled();
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+    // stripInternal carries the IR model id, not the native carrier verbatim.
+    expect(provider.chatCompletion.mock.calls[0]?.[0]).toMatchObject({ model: "claude-x" });
+    expect(out.body).toEqual({ id: "translated" });
+    expect(out.nativePassthrough ?? false).toBe(false);
+    const okRow = out.attempts[0];
+    expect(okRow?.passthrough_considered).toBe(true);
+    expect(okRow?.passthrough_used).toBe(false);
+    expect(okRow?.passthrough_disable_reason).toBe("feature_flag_disabled");
+  });
+
+  it("cross-protocol fallback chain [anthropic, openai], flag ON → head attempt disabled (fallback_may_change_provider_protocol) and translates", async () => {
+    const provider = anthropicProvider(NATIVE_RESP);
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        b: {
+          providerName: "anthro",
+          providerModel: "gpt-x",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a", "b"]), anthropicReq());
+    expect(out.final.status).toBe("ok");
+    // The HEAD candidate (anthropic) is served, but via translate — a later candidate
+    // resolves to a DIFFERENT provider protocol, so passthrough is disabled.
+    expect(provider.nativePassthrough).not.toHaveBeenCalled();
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+    const okRow = out.attempts[0];
+    expect(okRow?.passthrough_used).toBe(false);
+    expect(okRow?.passthrough_disable_reason).toBe("fallback_may_change_provider_protocol");
+  });
+
+  it("an UpstreamError from nativePassthrough records a breaker failure and advances the chain", async () => {
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockRejectedValue(new UpstreamError("upstream_error", "boom")),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const tail = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(NATIVE_RESP),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["anthro-a", head],
+        ["anthro-b", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro-a",
+          providerModel: "claude-a",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        b: {
+          providerName: "anthro-b",
+          providerModel: "claude-b",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a", "b"]), anthropicReq());
+    expect(head.nativePassthrough).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith("a");
+    expect(out.attempts[0]?.status).toBe("error");
+    expect(out.attempts[0]?.error_class).toBe("upstream_error");
+    // The chain advanced and the second anthropic candidate served via passthrough.
+    expect(tail.nativePassthrough).toHaveBeenCalledTimes(1);
+    expect(out.final.status).toBe("ok");
+    expect(out.body).toBe(NATIVE_RESP);
+    expect(out.nativePassthrough).toBe(true);
+  });
+
+  it("a client abort during nativePassthrough records client_abort without a breaker failure", async () => {
+    const ac = new AbortController();
+    const abortErr = new Error("aborted");
+    abortErr.name = "AbortError";
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockRejectedValue(abortErr),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: ac.signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a"]), anthropicReq());
+    expect(provider.nativePassthrough).toHaveBeenCalledTimes(1);
+    expect(out.attempts[0]?.error_class).toBe("client_abort");
+    expect(recordFailure).not.toHaveBeenCalled();
+    if (out.final.status === "error") {
+      expect(out.final.error.error_class).not.toBe("all_providers_failed");
+    }
+  });
+
+  it("a :free 429 from nativePassthrough skips without a breaker failure", async () => {
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi
+        .fn()
+        .mockRejectedValue(new UpstreamError("upstream_error", "429", null, 429)),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const tail = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(NATIVE_RESP),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["anthro-a", head],
+        ["anthro-b", tail],
+      ]),
+      registry: protocolRegistry({
+        "free-a:free": {
+          providerName: "anthro-a",
+          providerModel: "claude-a",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        b: {
+          providerName: "anthro-b",
+          providerModel: "claude-b",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["free-a:free", "b"]), anthropicReq());
+    expect(out.attempts[0]?.skipped).toBe(true);
+    expect(out.attempts[0]?.skip_reason).toBe("free_429");
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(out.final.status).toBe("ok");
+    expect(tail.nativePassthrough).toHaveBeenCalledTimes(1);
+  });
+
+  it("prices the served ok row from the native Anthropic usage", async () => {
+    const provider = anthropicProvider({
+      ...NATIVE_RESP,
+      usage: { input_tokens: 1000, output_tokens: 500 },
+    });
+    // $2.5/MTok in, $10/MTok out → 1000/1e6*2.5 + 500/1e6*10 = 0.0025 + 0.005 = 0.0075.
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([
+        [
+          "a",
+          {
+            modelKey: "a",
+            capabilities: {
+              supportsTools: true,
+              supportsJsonMode: true,
+              supportsVision: true,
+              supportsStreaming: true,
+              maxContextTokens: 200000,
+              maxOutputTokens: 8192,
+            },
+            pricing: {
+              inputPerMTokUsd: 2.5,
+              outputPerMTokUsd: 10,
+              cacheReadPerMTokUsd: null,
+              cacheWritePerMTokUsd: null,
+            },
+            source: "generated",
+          } satisfies CatalogEntry,
+        ],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a"]), anthropicReq());
+    expect(out.final.status).toBe("ok");
+    expect(out.nativePassthrough).toBe(true);
+    expect(out.attempts[0]?.cost_usd).toBeCloseTo(0.0075, 12);
+  });
+
+  it("flag ON but provider has NO nativePassthrough → translates, reason provider_lacks_passthrough", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "translated" }),
+      chatCompletionStream: vi.fn(),
+      // no nativePassthrough method
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a"]), anthropicReq());
+    expect(out.final.status).toBe("ok");
+    expect(out.nativePassthrough ?? false).toBe(false);
+    expect(out.attempts[0]?.passthrough_used).toBe(false);
+    expect(out.attempts[0]?.passthrough_disable_reason).toBe("provider_lacks_passthrough");
+  });
+});
+
+// Native protocol passthrough — STREAMING (issue #217, Phase 2). For a stream:true
+// Anthropic→Anthropic request the executor forwards the VERBATIM native body to
+// nativePassthroughStream and BYTE-RELAYS the upstream SSE back, eliminating the
+// SSE re-mapping state machine (principle 8) rather than replacing it. The breaker
+// contract is unchanged: peek the first chunk (pre-first-chunk failure → recordFailure
+// + chain advance; healthy → recordSuccess). The stream-passthrough decision is
+// stream-AWARE — providerSupportsPassthrough feature-detects nativePassthroughStream.
+describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)", () => {
+  const NATIVE_STREAM = {
+    model: "claude-x",
+    max_tokens: 16,
+    stream: true,
+    messages: [{ role: "user", content: "hi" }],
+  } as const;
+
+  function protocolRegistry(
+    map: Record<
+      string,
+      { providerName: string; providerModel: string; targetProviderProtocol: string }
+    >,
+  ): ProviderRegistry {
+    return {
+      resolve(alias: string) {
+        const hit = map[alias];
+        if (hit === undefined) return { ok: false, error: { kind: "unknown_alias", alias } };
+        return {
+          ok: true,
+          value: {
+            alias,
+            providerName: hit.providerName,
+            providerModel: hit.providerModel,
+            baseUrl: "http://x",
+            apiKeyEnv: "X",
+            targetProviderProtocol: hit.targetProviderProtocol as
+              | "openai_chat"
+              | "anthropic_messages",
+            providerRequiresCompatibilityRewrite: false,
+          },
+        };
+      },
+      list: () => Object.keys(map),
+    };
+  }
+
+  // Anthropic STREAM inbound carrying the verbatim native body (stream:true already
+  // baked into the native body — the client asked to stream).
+  function anthropicStreamReq(over: Partial<InternalRequest> = {}): InternalRequest {
+    return req({
+      protocol: "anthropic_messages",
+      stream: true,
+      native_request: { ...NATIVE_STREAM },
+      ...over,
+    });
+  }
+
+  // Anthropic SSE frames the upstream byte-relays back, verbatim.
+  const SSE = [
+    'event: message_start\ndata: {"type":"message_start"}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ];
+
+  it("flag ON + anthropic target + stream + native_request → opens nativePassthroughStream (NOT chatCompletionStream), recordSuccess, returns { stream, nativePassthrough:true }", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(gen(SSE)),
+    } as unknown as ProviderClient & {
+      chatCompletionStream: ReturnType<typeof vi.fn>;
+      nativePassthroughStream: ReturnType<typeof vi.fn>;
+    };
+    const cb = breaker();
+    const recordSuccess = vi.spyOn(cb, "recordSuccess");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a"]), anthropicStreamReq());
+    expect(out.final.status).toBe("ok");
+    // The native (stream) body was forwarded VERBATIM to the stream passthrough method.
+    expect(provider.nativePassthroughStream).toHaveBeenCalledTimes(1);
+    expect(provider.nativePassthroughStream.mock.calls[0]?.[0]).toEqual(NATIVE_STREAM);
+    expect(provider.chatCompletionStream).not.toHaveBeenCalled();
+    // recordSuccess fired on the first peeked chunk (breaker contract unchanged).
+    expect(recordSuccess).toHaveBeenCalledTimes(1);
+    expect(recordSuccess).toHaveBeenCalledWith("a");
+    // The stream handle is returned and byte-relays the upstream SSE intact.
+    expect(out.stream).not.toBeNull();
+    expect(out.body).toBeNull();
+    expect(out.nativePassthrough).toBe(true);
+    const seen: string[] = [];
+    for await (const ch of out.stream as AsyncIterable<string>) seen.push(ch);
+    expect(seen).toEqual(SSE);
+    // okRow carries the real passthrough telemetry; cost is null (streamed usage
+    // unknown at peek, backfilled later).
+    const okRow = out.attempts[0];
+    expect(okRow?.status).toBe("ok");
+    expect(okRow?.passthrough_considered).toBe(true);
+    expect(okRow?.passthrough_used).toBe(true);
+    expect(okRow?.cost_usd).toBeNull();
+    expect(okRow?.source_protocol).toBe("anthropic_messages");
+    expect(okRow?.target_provider_protocol).toBe("anthropic_messages");
+  });
+
+  it("flag OFF + stream → chatCompletionStream(stripInternal) translate path, passthrough_used:false, nativePassthrough absent", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn().mockReturnValue(gen(["data: {}\n\n"])),
+      nativePassthrough: vi.fn(),
+      nativePassthroughStream: vi.fn(),
+    } as unknown as ProviderClient & {
+      chatCompletionStream: ReturnType<typeof vi.fn>;
+      nativePassthroughStream: ReturnType<typeof vi.fn>;
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      // flag not provided → defaults OFF
+    });
+
+    const out = await execute(plan(["a"]), anthropicStreamReq());
+    expect(out.final.status).toBe("ok");
+    expect(provider.nativePassthroughStream).not.toHaveBeenCalled();
+    expect(provider.chatCompletionStream).toHaveBeenCalledTimes(1);
+    // stripInternal carries the IR model id (claude-x) + forced include_usage.
+    expect(provider.chatCompletionStream.mock.calls[0]?.[0]).toMatchObject({ model: "claude-x" });
+    expect(out.stream).not.toBeNull();
+    expect(out.nativePassthrough ?? false).toBe(false);
+    expect(out.attempts[0]?.passthrough_used).toBe(false);
+    expect(out.attempts[0]?.passthrough_disable_reason).toBe("feature_flag_disabled");
+  });
+
+  it("flag ON + stream but provider has nativePassthrough (non-stream) only → provider_lacks_passthrough → translate path", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn().mockReturnValue(gen(["data: {}\n\n"])),
+      nativePassthrough: vi.fn(), // non-stream method present, but NO stream sibling
+    } as unknown as ProviderClient & {
+      chatCompletionStream: ReturnType<typeof vi.fn>;
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a"]), anthropicStreamReq());
+    expect(out.final.status).toBe("ok");
+    expect(provider.chatCompletionStream).toHaveBeenCalledTimes(1);
+    expect(out.stream).not.toBeNull();
+    expect(out.nativePassthrough ?? false).toBe(false);
+    expect(out.attempts[0]?.passthrough_used).toBe(false);
+    expect(out.attempts[0]?.passthrough_disable_reason).toBe("provider_lacks_passthrough");
+  });
+
+  it("a pre-first-chunk UpstreamError on the passthrough stream records a breaker failure and advances the chain", async () => {
+    // biome-ignore lint/correctness/useYield: pre-first-chunk failure throws before any yield
+    async function* diesBeforeFirst(): AsyncGenerator<string> {
+      throw new UpstreamError("upstream_error", "connect failed");
+    }
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(diesBeforeFirst()),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const tail = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(gen(SSE)),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["anthro-a", head],
+        ["anthro-b", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro-a",
+          providerModel: "claude-a",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        b: {
+          providerName: "anthro-b",
+          providerModel: "claude-b",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a", "b"]), anthropicStreamReq());
+    expect(head.nativePassthroughStream).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith("a");
+    expect(out.attempts[0]?.status).toBe("error");
+    expect(out.attempts[0]?.error_class).toBe("upstream_error");
+    // The chain advanced and the second anthropic candidate streamed via passthrough.
+    expect(tail.nativePassthroughStream).toHaveBeenCalledTimes(1);
+    expect(out.final.status).toBe("ok");
+    expect(out.stream).not.toBeNull();
+    expect(out.nativePassthrough).toBe(true);
+  });
+
+  it("a client abort during the stream peek records client_abort without a breaker failure", async () => {
+    const ac = new AbortController();
+    const abortErr = new Error("aborted");
+    abortErr.name = "AbortError";
+    // biome-ignore lint/correctness/useYield: client abort throws before any yield
+    async function* abortsBeforeFirst(): AsyncGenerator<string> {
+      throw abortErr;
+    }
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(abortsBeforeFirst()),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: ac.signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a"]), anthropicStreamReq());
+    expect(provider.nativePassthroughStream).toHaveBeenCalledTimes(1);
+    expect(out.attempts[0]?.error_class).toBe("client_abort");
+    expect(recordFailure).not.toHaveBeenCalled();
+    if (out.final.status === "error") {
+      expect(out.final.error.error_class).not.toBe("all_providers_failed");
+    }
   });
 });
 

@@ -96,6 +96,19 @@ export interface ProviderAttempt {
   /** Upstream failure detail for THIS attempt (admin-debug-error-detail). Non-null
    *  only for a genuine upstream failure; null for ok/skipped rows. Redacted. */
   error_detail: AttemptErrorDetail | null;
+  // ——— Native-protocol-passthrough telemetry (issue #217) ———
+  // Per-attempt trail for the verbatim-forward decision, field-for-field aligned
+  // with @helm/shared ProviderAttemptSchema. All OPTIONAL so okRow/skipRow spreads
+  // and legacy rows typecheck without these. DecisionRecord stays body-free
+  // (principle 7): protocol/name metadata only, never request/response content.
+  passthrough_considered?: boolean;
+  passthrough_used?: boolean;
+  passthrough_disable_reason?: string | null;
+  source_protocol?: InternalRequest["protocol"] | null;
+  target_provider_protocol?: InternalRequest["protocol"] | null;
+  response_protocol?: InternalRequest["protocol"] | null;
+  provider_name?: string | null;
+  provider_model?: string | null;
 }
 
 // What execute() returns: the provider_attempts trail, the final landing, and
@@ -108,6 +121,11 @@ export interface ExecuteOutcome {
     | { status: "error"; error: HelmError };
   body: unknown | null;
   stream: AsyncIterable<string> | null;
+  // Native protocol passthrough (issue #217): true when `body` is the upstream's
+  // VERBATIM native response (NOT an OpenAI-Chat IR body). The presentation surface
+  // reads this to BYPASS `openAIBodyToIR`/`transformResponseOut` and return the
+  // native body to the client untouched. Absent/false → the normal translate path.
+  nativePassthrough?: boolean;
 }
 
 // The orchestrator's return value: the executor outcome enriched with the
@@ -118,6 +136,10 @@ export interface ExecutionResult {
   body: unknown | null;
   stream: AsyncIterable<string> | null;
   error: HelmError | null;
+  // Forwarded from ExecuteOutcome.nativePassthrough (issue #217): true when `body`
+  // is the upstream's verbatim native response, so the gateway skips response
+  // translation. Only set on the ok branch.
+  nativePassthrough?: boolean;
 }
 
 export interface RouteDeps {
@@ -786,6 +808,9 @@ export async function routeRequest(
       body: outcome.body,
       stream: outcome.stream,
       error: null,
+      // Forward the verbatim-native-response marker so the presentation surface
+      // can bypass response translation (issue #217).
+      nativePassthrough: outcome.nativePassthrough,
     };
   }
   return {

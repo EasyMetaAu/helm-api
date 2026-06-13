@@ -52,6 +52,26 @@ export interface ProviderClient {
     req: ChatCompletionRequest,
     opts?: { signal?: AbortSignal },
   ): AsyncIterable<string>;
+  // Native protocol passthrough (issue #217, Phase 1). OPTIONAL so every existing
+  // client and test double stays valid without change; the executor feature-detects
+  // it. When present, it forwards the client's VERBATIM native body to the upstream
+  // (NO OpenAI-Chat translation) and returns the upstream's native response
+  // untranslated. Only same-protocol native clients (Anthropic→Anthropic in Phase 1)
+  // implement it; the guard (canUseNativePassthrough) gates when it may be used.
+  nativePassthrough?(
+    body: Record<string, unknown>,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Record<string, unknown>>;
+  // Streaming native protocol passthrough (issue #217, Phase 2). The streaming sibling
+  // of nativePassthrough: forwards the client's VERBATIM native body (which ALREADY
+  // carries stream:true) to the upstream and BYTE-RELAYS the upstream SSE back without
+  // translation — eliminating the SSE re-mapping state machine (principle 8) rather than
+  // replacing it. OPTIONAL (feature-detected by the executor); only same-protocol native
+  // clients implement it, gated by the same guard as nativePassthrough.
+  nativePassthroughStream?(
+    body: Record<string, unknown>,
+    opts?: { signal?: AbortSignal },
+  ): AsyncIterable<string>;
 }
 
 // Upstream non-2xx / network error / timeout. The gateway maps this to an

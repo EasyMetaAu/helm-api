@@ -33,6 +33,7 @@ describe("defaultSettingsFromConfig", () => {
   it("seeds rate_limit_enabled from runtime config, schema defaults for the rest", () => {
     expect(defaultSettingsFromConfig(cfg(true))).toEqual({
       capture_payloads: true,
+      native_protocol_passthrough: false,
       payload_retention_days: 30,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 0,
@@ -102,6 +103,7 @@ describe("saveRuntimeSettings", () => {
     const store = fakeConfigStore();
     const saved = await saveRuntimeSettings(store, {
       capture_payloads: false,
+      native_protocol_passthrough: false,
       payload_retention_days: 7,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 0,

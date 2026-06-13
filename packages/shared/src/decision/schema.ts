@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ProtocolSchema } from "../request/schema.js";
+import { ProtocolSchema, TargetProviderProtocolSchema } from "../request/schema.js";
 
 // Decision record — the full routing trail for one request: classification,
 // matched policy, selected lane + candidate chain, every provider attempt, and
@@ -93,6 +93,19 @@ export const ProviderAttemptSchema = z.object({
   // null for ok / skipped rows and for legacy records. `.default(null)` keeps
   // stored pre-feature records round-tripping (always present, never undefined).
   error_detail: AttemptErrorDetailSchema.nullable().default(null),
+  // ——— Native-protocol-passthrough telemetry (issue #217) ———
+  // Per-attempt trail for the same-protocol verbatim-forward decision. All
+  // OPTIONAL so legacy rows + non-passthrough attempts round-trip untouched.
+  // DecisionRecord stays body-free (principle 7): these are protocol/name
+  // metadata only, never request/response content.
+  passthrough_considered: z.boolean().optional(),
+  passthrough_used: z.boolean().optional(),
+  passthrough_disable_reason: z.string().nullable().optional(),
+  source_protocol: ProtocolSchema.nullable().optional(),
+  target_provider_protocol: TargetProviderProtocolSchema.nullable().optional(),
+  response_protocol: ProtocolSchema.nullable().optional(),
+  provider_name: z.string().nullable().optional(),
+  provider_model: z.string().nullable().optional(),
 });
 
 export const FinalDecisionSchema = z.object({

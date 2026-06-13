@@ -94,3 +94,134 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(selected).toEqual(["a", "b"]);
   });
 });
+
+// Native protocol passthrough (issue #217, Phase 1): a subscription alias is fronted by
+// the pool, so unless the pool FORWARDS nativePassthrough the executor's feature-detect
+// (`provider.nativePassthrough`) is forever undefined and the branch never fires. The
+// pool must select() synchronously (rotation + onSelect) then delegate to the picked
+// member's nativePassthrough — and fail-closed if the picked member lacks it (never
+// silently falls back to a translating sibling).
+describe("createOAuthPoolClient — nativePassthrough", () => {
+  function ptMember(
+    account: string,
+    priority: number,
+    ptCalls: string[],
+    opts?: { withPassthrough?: boolean },
+  ): OAuthPoolMember {
+    const base: ProviderClient = {
+      async chatCompletion(_req: ChatCompletionRequest) {
+        return { served_by: account };
+      },
+      async *chatCompletionStream(_req: ChatCompletionRequest) {
+        yield `data: ${account}\n\n`;
+      },
+    };
+    if (opts?.withPassthrough !== false) {
+      base.nativePassthrough = async (body: Record<string, unknown>) => {
+        ptCalls.push(account);
+        return { served_by: account, body };
+      };
+    }
+    return { account, priority, schedulable: true, client: base };
+  }
+
+  const NATIVE: Record<string, unknown> = { model: "claude-x", messages: [] };
+
+  it("selects + rotates + fires onSelect + delegates to the member's nativePassthrough", async () => {
+    const pt: string[] = [];
+    const selected: string[] = [];
+    let clock = 1;
+    const pool = createOAuthPoolClient({
+      members: [ptMember("a", 50, pt), ptMember("b", 50, pt)],
+      now: () => clock++,
+      onSelect: (acc) => selected.push(acc),
+    });
+    const r1 = await pool.nativePassthrough?.(NATIVE);
+    const r2 = await pool.nativePassthrough?.(NATIVE);
+    // Round-robins like the other methods; onSelect fired with the picked account.
+    expect(pt).toEqual(["a", "b"]);
+    expect(selected).toEqual(["a", "b"]);
+    // Delegated verbatim — body forwarded, response carries the serving account.
+    expect(r1).toEqual({ served_by: "a", body: NATIVE });
+    expect(r2).toEqual({ served_by: "b", body: NATIVE });
+  });
+
+  it("throws fail-closed when the selected member lacks nativePassthrough (never falls back to a sibling)", async () => {
+    const pt: string[] = [];
+    // The lowest-priority (preferred) member has NO nativePassthrough; the pool must
+    // throw rather than silently route to the translating sibling.
+    const pool = createOAuthPoolClient({
+      members: [ptMember("no-pt", 10, pt, { withPassthrough: false }), ptMember("has-pt", 50, pt)],
+    });
+    await expect(pool.nativePassthrough?.(NATIVE)).rejects.toThrow();
+    // The sibling that CAN passthrough was never reached.
+    expect(pt).toEqual([]);
+  });
+});
+
+// Native protocol passthrough STREAMING (issue #217, Phase 2): the streaming sibling.
+// Like chatCompletionStream, the pool must select() SYNCHRONOUSLY on the call turn
+// (rotation + onSelect) BEFORE the first await — a stream method returns a lazy async
+// iterable, so deferring select() into the body would skip rotation until the consumer
+// drains. Fail-closed if the picked member lacks nativePassthroughStream.
+describe("createOAuthPoolClient — nativePassthroughStream", () => {
+  function ptStreamMember(
+    account: string,
+    priority: number,
+    ptCalls: string[],
+    opts?: { withPassthroughStream?: boolean },
+  ): OAuthPoolMember {
+    const base: ProviderClient = {
+      async chatCompletion(_req: ChatCompletionRequest) {
+        return { served_by: account };
+      },
+      async *chatCompletionStream(_req: ChatCompletionRequest) {
+        yield `data: ${account}\n\n`;
+      },
+    };
+    if (opts?.withPassthroughStream !== false) {
+      base.nativePassthroughStream = async function* (_body: Record<string, unknown>) {
+        ptCalls.push(account);
+        yield `data: ${account}\n\n`;
+      };
+    }
+    return { account, priority, schedulable: true, client: base };
+  }
+
+  const NATIVE: Record<string, unknown> = { model: "claude-x", stream: true, messages: [] };
+
+  it("selects SYNCHRONOUSLY on the call turn (rotation + onSelect) before draining", async () => {
+    const pt: string[] = [];
+    const selected: string[] = [];
+    let clock = 1;
+    const pool = createOAuthPoolClient({
+      members: [ptStreamMember("a", 50, pt), ptStreamMember("b", 50, pt)],
+      now: () => clock++,
+      onSelect: (acc) => selected.push(acc),
+    });
+    // Open both streams WITHOUT draining yet. select() (and thus onSelect + rotation)
+    // must already have fired on the call turn — exactly like chatCompletionStream.
+    const s1 = pool.nativePassthroughStream?.(NATIVE);
+    const s2 = pool.nativePassthroughStream?.(NATIVE);
+    expect(selected).toEqual(["a", "b"]);
+    // Now drain both: the member generators run and record which account served.
+    const chunks: string[] = [];
+    for await (const c of s1 ?? []) chunks.push(c);
+    for await (const c of s2 ?? []) chunks.push(c);
+    expect(pt).toEqual(["a", "b"]);
+    expect(chunks).toEqual(["data: a\n\n", "data: b\n\n"]);
+  });
+
+  it("throws fail-closed when the selected member lacks nativePassthroughStream", async () => {
+    const pt: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        ptStreamMember("no-pt", 10, pt, { withPassthroughStream: false }),
+        ptStreamMember("has-pt", 50, pt),
+      ],
+    });
+    expect(() => pool.nativePassthroughStream?.(NATIVE)).toThrow();
+    // The sibling that CAN passthrough-stream was never reached.
+    expect(pt).toEqual([]);
+  });
+});

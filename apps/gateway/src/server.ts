@@ -84,6 +84,7 @@ import type {
   InternalRequest,
   ProviderConfig as ProviderConfigShared,
   RuntimeSettings,
+  TargetProviderProtocol,
 } from "@helm/shared";
 import { ErrorClassSchema, isOAuthPreset } from "@helm/shared";
 import { createApp } from "./app.js";
@@ -163,7 +164,8 @@ function coerceErrorClass(value: string): ErrorClass {
 //
 // A duplicate alias ACROSS providers in (1) fails closed at build time inside
 // createProviderRegistry (principle 2); back-fill (2) never overrides (1).
-function buildRegistry(
+// Exported for unit tests (server.test.ts) — not part of the public API.
+export function buildRegistry(
   providers: ReadonlyArray<ProviderConfigShared>,
   primaryName: string,
   primaryBaseUrl: string,
@@ -193,10 +195,22 @@ function buildRegistry(
   }
   const cfgs: RegistryProviderConfig[] = [...explicit];
   if (backfill.size > 0) {
+    // Carry the PRIMARY's protocol metadata onto the back-fill entry (issue #217).
+    // Without this, a bare lane alias backed by a NON-OpenAI primary (e.g. an
+    // Anthropic primary) would resolve with the default `openai_chat`/no-rewrite
+    // and be mislabeled — the native passthrough guard would see a fake protocol
+    // mismatch. `toRegistryProviders` already stamps EXPLICIT providers; the
+    // back-fill branch must do the same for the primary it synthesizes here.
+    const primary = providers.find((p) => p.name === primaryName || p.alias === primaryName);
+    const providerRequiresCompatibilityRewrite =
+      (primary as { providerRequiresCompatibilityRewrite?: boolean } | undefined)
+        ?.providerRequiresCompatibilityRewrite ?? primary?.map_developer_role_to_system === true;
     cfgs.push({
       name: primaryName,
       base_url: primaryBaseUrl,
       api_key_env: primaryApiKeyEnv ?? "", // OAuth primary has none; registry never reads it
+      targetProviderProtocol: primary?.targetProviderProtocol ?? "openai_chat",
+      providerRequiresCompatibilityRewrite,
       models: [...backfill].map((alias) => ({ alias, provider_model: alias })),
     });
   }
@@ -229,17 +243,56 @@ export interface OAuthRuntimeCtx {
 // For Copilot the base URL is derived per-request from the token, so none is set
 // here. This map is the SINGLE gate for "which subscriptions route" — the live
 // model catalog (effectiveOAuthAliases) reads its keys (ROUTABLE_OAUTH_IDS).
-const ROUTABLE_OAUTH: Record<string, { type: string; baseUrl?: string }> = {
-  anthropic: { type: "anthropic", baseUrl: "https://api.anthropic.com" },
-  "github-copilot": { type: "openai" },
+// Each entry also pins the upstream wire protocol (targetProviderProtocol) +
+// whether a compatibility rewrite mutates the body (issue #217). Native protocol
+// passthrough reads these to decide a same-protocol forward is byte-safe: the
+// OAuth pool aliases bypass the registry, so the executor can't infer the wire
+// protocol from a ResolvedProvider — it gets the prefix→protocol map instead.
+const ROUTABLE_OAUTH: Record<
+  string,
+  {
+    type: string;
+    baseUrl?: string;
+    targetProviderProtocol: TargetProviderProtocol;
+    providerRequiresCompatibilityRewrite: boolean;
+  }
+> = {
+  anthropic: {
+    type: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    targetProviderProtocol: "anthropic_messages",
+    providerRequiresCompatibilityRewrite: false,
+  },
+  "github-copilot": {
+    type: "openai",
+    targetProviderProtocol: "openai_chat",
+    providerRequiresCompatibilityRewrite: false,
+  },
   // ChatGPT Codex via the native Responses executor (the endpoint is
   // baseUrl + /responses). No list-models API → hasLiveModelDiscovery stays false
   // (curated list only; the Manage dialog hides "Pull from provider").
-  "openai-codex": { type: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex" },
+  "openai-codex": {
+    type: "openai-responses",
+    baseUrl: "https://chatgpt.com/backend-api/codex",
+    targetProviderProtocol: "openai_responses",
+    providerRequiresCompatibilityRewrite: false,
+  },
 };
 // The single gate for "which subscriptions route". Keys of ROUTABLE_OAUTH, reused
 // by the live model catalog so it can never offer a model whose executor is unwired.
 const ROUTABLE_OAUTH_IDS: ReadonlySet<string> = new Set(Object.keys(ROUTABLE_OAUTH));
+// The prefix→protocol map the executor consults for native passthrough (issue
+// #217). Derived from ROUTABLE_OAUTH so the two never drift; keyed by provider id
+// (the OAuth alias prefix), the SAME key as ROUTABLE_OAUTH_IDS / the pool clients.
+const ROUTABLE_OAUTH_PROTOCOLS = new Map(
+  Object.entries(ROUTABLE_OAUTH).map(([providerId, spec]) => [
+    providerId,
+    {
+      targetProviderProtocol: spec.targetProviderProtocol,
+      providerRequiresCompatibilityRewrite: spec.providerRequiresCompatibilityRewrite,
+    },
+  ]),
+);
 
 // The synthesis result (issue #38, Stage 3): one synthetic provider config per
 // routable subscription, plus the POOL client that serves ALL its accounts. The
@@ -365,6 +418,8 @@ export async function synthesizeOAuthProviders(
         base_url: spec.baseUrl,
         oauth: { provider: providerId, account },
         models: [],
+        targetProviderProtocol: spec.targetProviderProtocol,
+        providerRequiresCompatibilityRewrite: spec.providerRequiresCompatibilityRewrite,
       } as unknown as ProviderConfigShared;
       const cred = buildCredential(accountConfig, oauthCtx, proxy);
       if (!cred) continue; // unreachable (token just refreshed) — fail-open guard
@@ -439,7 +494,9 @@ export async function synthesizeOAuthProviders(
       // client below overrides any single-account client for this provider name.
       oauth: { provider: providerId, account: members[0]?.account ?? "default" },
       models: [...unionModels].map((m) => ({ alias: `${providerId}/${m}`, provider_model: m })),
-    } as ProviderConfigShared);
+      targetProviderProtocol: spec.targetProviderProtocol,
+      providerRequiresCompatibilityRewrite: spec.providerRequiresCompatibilityRewrite,
+    } as unknown as ProviderConfigShared);
     log("info", "oauth.autoroute", {
       providerId,
       accounts: members.length,
@@ -1286,12 +1343,23 @@ export async function buildServer(
             // disconnect take effect immediately and never cross provider boundaries.
             knownOAuthPrefixes: ROUTABLE_OAUTH_IDS,
             oauthAliases: () => oauthAliasSet,
+            // Native protocol passthrough (issue #217): the OAuth pool aliases never
+            // reach the registry, so hand the executor the prefix→wire-protocol map
+            // so it knows an Anthropic-subscription alias forwards on the
+            // `anthropic_messages` wire (and thus may passthrough a same-protocol body).
+            oauthProviderProtocols: ROUTABLE_OAUTH_PROTOCOLS,
             registry,
             breaker,
             catalog,
             now: () => Date.now(),
             signal,
             log: (level, msg, fields) => logger.log(level as "info", msg, fields),
+            // Live-binding read of the runtime flag (default OFF), SAME pattern as
+            // capturePayloads: () => settings.capture_payloads — an admin toggle
+            // applies on the next request with no restart. The messages-pipeline
+            // route is the SAME `route` closure as chat.ts, so this one wiring edit
+            // covers BOTH the OpenAI chat and Anthropic /v1/messages surfaces.
+            nativeProtocolPassthroughEnabled: () => settings.native_protocol_passthrough,
           }),
           now: () => new Date(),
           log: (record) => logger.log("info", "route.decision", { trace_id: record.request_id }),

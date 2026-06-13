@@ -84,5 +84,41 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): ProviderClient {
       // rotation + onSelect fire even though the body is a lazy async iterable.
       return select().member.client.chatCompletionStream(req, opts);
     },
+    // Native protocol passthrough (issue #217, Phase 1): forward it like the other
+    // methods so the executor's feature-detect (`provider.nativePassthrough`) sees a
+    // real method on a subscription alias — otherwise the branch could never fire.
+    // Select FIRST (rotation + onSelect), then delegate to the picked member. If that
+    // member's client has no nativePassthrough, throw fail-closed (principle 2): never
+    // silently route to a translating sibling — the executor records the failure and
+    // advances the chain. The `nativePassthrough` member is also wired ONLY when the
+    // whole pool's provider speaks the same native protocol, so a missing method here
+    // signals a real wiring fault, not a normal heterogeneous-chain case.
+    async nativePassthrough(
+      body: Record<string, unknown>,
+      opts?: { signal?: AbortSignal },
+    ): Promise<ChatCompletionResponse> {
+      // select() runs SYNCHRONOUSLY at the top of the async body (before any await),
+      // so rotation + onSelect fire on the call turn, exactly like the other methods.
+      const { client } = select().member;
+      if (!client.nativePassthrough) {
+        throw new Error("oauth pool member does not support native passthrough");
+      }
+      return client.nativePassthrough(body, opts);
+    },
+    // Streaming native passthrough (issue #217, Phase 2). A SYNCHRONOUS method (NOT an
+    // async fn) so select() — and thus rotation + onSelect — fires on the CALL turn,
+    // exactly like chatCompletionStream: the returned value is a lazy async iterable, so
+    // deferring select() into an async body would skip rotation until the consumer drains.
+    // Fail-closed (principle 2) if the picked member lacks the method, on the call turn.
+    nativePassthroughStream(
+      body: Record<string, unknown>,
+      opts?: { signal?: AbortSignal },
+    ): AsyncIterable<string> {
+      const { client } = select().member;
+      if (!client.nativePassthroughStream) {
+        throw new Error("oauth pool member does not support native passthrough streaming");
+      }
+      return client.nativePassthroughStream(body, opts);
+    },
   };
 }

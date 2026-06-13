@@ -9,6 +9,8 @@ import {
   type RecordServedDeps,
   recordServed,
   tokensFromUsage,
+  usageFromAnthropicResponse,
+  usageFromAnthropicSSE,
   usageFromSSE,
 } from "./payload-capture.js";
 
@@ -31,6 +33,170 @@ describe("usageFromSSE", () => {
   it("skips non-JSON keepalive lines without throwing", () => {
     const sse = ': keepalive\n\ndata: {"usage":{"prompt_tokens":1,"completion_tokens":2}}\n\n';
     expect(usageFromSSE(sse)).toEqual({ prompt_tokens: 1, completion_tokens: 2 });
+  });
+});
+
+// Native-protocol-passthrough cost (#217 C-cost): the upstream Anthropic NON-stream
+// response carries usage in Anthropic shape (input_tokens / output_tokens / cache_*).
+// usageFromAnthropicResponse normalizes it to OpenAI-shaped StreamUsage with the SAME
+// token math as core's anthropicToOpenAIResponse (prompt = input + cache_read +
+// cache_creation; completion = output) so costOf/resolveCostUsd price a passthrough
+// attempt identically to a translated one.
+describe("usageFromAnthropicResponse", () => {
+  it("maps Anthropic usage to OpenAI-shaped StreamUsage (prompt = input + cache_read + cache_creation)", () => {
+    const body = {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: "hi" }],
+      usage: {
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_read_input_tokens: 200,
+        cache_creation_input_tokens: 50,
+      },
+    };
+    expect(usageFromAnthropicResponse(body)).toEqual({
+      prompt_tokens: 1250, // 1000 + 200 + 50
+      completion_tokens: 500,
+      total_tokens: 1750,
+      prompt_tokens_details: { cached_tokens: 200, cache_creation_tokens: 50 },
+    });
+  });
+
+  it("omits prompt_tokens_details when there are no cache tokens", () => {
+    const body = { usage: { input_tokens: 10, output_tokens: 7 } };
+    expect(usageFromAnthropicResponse(body)).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 7,
+      total_tokens: 17,
+    });
+  });
+
+  it("tolerates missing cache_creation but present cache_read", () => {
+    const body = { usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 4 } };
+    expect(usageFromAnthropicResponse(body)).toEqual({
+      prompt_tokens: 9, // 5 + 4
+      completion_tokens: 3,
+      total_tokens: 12,
+      prompt_tokens_details: { cached_tokens: 4 },
+    });
+  });
+
+  it("returns null when the body has no usage object", () => {
+    expect(usageFromAnthropicResponse({ id: "msg" })).toBeNull();
+    expect(usageFromAnthropicResponse(null)).toBeNull();
+    expect(usageFromAnthropicResponse(undefined)).toBeNull();
+    expect(usageFromAnthropicResponse({ usage: "nope" })).toBeNull();
+  });
+});
+
+// Native-protocol-passthrough STREAMING cost (#217 Phase 2 Stage 1): the upstream
+// Anthropic SSE carries usage SPLIT across events — input/cache on `message_start`
+// (message.usage), output on the LAST `message_delta` (usage.output_tokens). The
+// byte-faithful passthrough forwards these frames VERBATIM, so cost extraction must
+// scan the accumulated SSE itself. usageFromAnthropicSSE returns an Anthropic-shaped
+// StreamUsage that tokensFromUsage already sums (input + output + cache_*), mirroring
+// translateAnthropicSSE's accumulation (input on message_start, output on message_delta).
+describe("usageFromAnthropicSSE", () => {
+  it("reads input_tokens from message_start (input-only, no message_delta yet)", () => {
+    const sse = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1000}}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+    ].join("");
+    expect(usageFromAnthropicSSE(sse)).toEqual({
+      input_tokens: 1000,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+  });
+
+  it("combines input from message_start with output from message_delta", () => {
+    const sse = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1000}}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":500}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ].join("");
+    expect(usageFromAnthropicSSE(sse)).toEqual({
+      input_tokens: 1000,
+      output_tokens: 500,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+    // tokensFromUsage sums input + output + cache_* for the budget settle.
+    expect(tokensFromUsage(usageFromAnthropicSSE(sse))).toBe(1500);
+  });
+
+  it("collects the cache split from message_start (cache_read + cache_creation)", () => {
+    const sse = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":200,"cache_creation_input_tokens":50}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":300}}\n\n',
+    ].join("");
+    const result = usageFromAnthropicSSE(sse);
+    expect(result).toEqual({
+      input_tokens: 1000,
+      output_tokens: 300,
+      cache_read_input_tokens: 200,
+      cache_creation_input_tokens: 50,
+    });
+    // input + output + cache_read + cache_creation = 1000 + 300 + 200 + 50
+    expect(tokensFromUsage(result)).toBe(1550);
+  });
+
+  it("takes the MAX output_tokens across multiple message_delta frames", () => {
+    const sse = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{},"usage":{"output_tokens":7}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}\n\n',
+    ].join("");
+    expect(usageFromAnthropicSSE(sse)).toEqual({
+      input_tokens: 10,
+      output_tokens: 42,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+  });
+
+  it("restates cache_* on message_delta (takes the max with message_start)", () => {
+    const sse = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":4}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{},"usage":{"output_tokens":5,"cache_read_input_tokens":9,"cache_creation_input_tokens":3}}\n\n',
+    ].join("");
+    expect(usageFromAnthropicSSE(sse)).toEqual({
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_input_tokens: 9,
+      cache_creation_input_tokens: 3,
+    });
+  });
+
+  it("skips ping / [DONE] / non-JSON frames without throwing", () => {
+    const sse = [
+      'event: ping\ndata: {"type":"ping"}\n\n',
+      ": keepalive comment\n\n",
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":8}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{},"usage":{"output_tokens":2}}\n\n',
+      "data: [DONE]\n\n",
+      "data: not json at all\n\n",
+    ].join("");
+    expect(usageFromAnthropicSSE(sse)).toEqual({
+      input_tokens: 8,
+      output_tokens: 2,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+  });
+
+  it("returns null when no usage-bearing event is present", () => {
+    const sse = [
+      'event: ping\ndata: {"type":"ping"}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    expect(usageFromAnthropicSSE(sse)).toBeNull();
+    expect(usageFromAnthropicSSE("")).toBeNull();
   });
 });
 

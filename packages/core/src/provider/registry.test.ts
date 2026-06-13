@@ -40,8 +40,20 @@ describe("createProviderRegistry / resolve", () => {
         baseUrl: "https://api.openai.com/v1",
         apiKeyEnv: "OPENAI_API_KEY",
         targetProviderProtocol: "openai_chat",
+        providerRequiresCompatibilityRewrite: false,
       });
     }
+  });
+
+  it("propagates provider compatibility rewrite metadata", () => {
+    const reg = createProviderRegistry([
+      {
+        ...openai,
+        providerRequiresCompatibilityRewrite: true,
+      },
+    ]);
+    const res = reg.resolve("cheap_model");
+    expect(res.ok && res.value.providerRequiresCompatibilityRewrite).toBe(true);
   });
 
   it("distinguishes Codex Responses from OpenAI-compatible chat providers", () => {
@@ -50,6 +62,7 @@ describe("createProviderRegistry / resolve", () => {
       base_url: "https://chatgpt.com/backend-api/codex",
       api_key_env: "OPENAI_CODEX_TOKEN",
       targetProviderProtocol: "openai_responses",
+      providerRequiresCompatibilityRewrite: true,
       models: [{ alias: "openai-codex/gpt-5.5", provider_model: "gpt-5.5" }],
     };
     const reg = createProviderRegistry([openai, codex]);
@@ -196,5 +209,17 @@ describe("toRegistryProviders — adapt the unified shared ProviderConfig", () =
     const reg = createProviderRegistry(providers);
     const r = reg.resolve("cheap_model");
     expect(r.ok && r.value.baseUrl).toBe("https://fallback.example/v1");
+  });
+
+  it("derives providerRequiresCompatibilityRewrite from map_developer_role_to_system", () => {
+    const off = createProviderRegistry(
+      toRegistryProviders([shared({ map_developer_role_to_system: false })]),
+    ).resolve("cheap_model");
+    expect(off.ok && off.value.providerRequiresCompatibilityRewrite).toBe(false);
+
+    const on = createProviderRegistry(
+      toRegistryProviders([shared({ map_developer_role_to_system: true })]),
+    ).resolve("cheap_model");
+    expect(on.ok && on.value.providerRequiresCompatibilityRewrite).toBe(true);
   });
 });

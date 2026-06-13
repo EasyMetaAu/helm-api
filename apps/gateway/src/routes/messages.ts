@@ -83,6 +83,11 @@ export interface PipelineRunResult {
    *  the stream/collect has drained it carries the final cost. Present even on a
    *  routing failure (final.status === "error"), so a failed face still records. */
   readonly decision: DecisionRecord;
+  /** Native protocol passthrough (#217): true when the routing core forwarded the
+   *  request untranslated and `collect()` returns the upstream's VERBATIM native
+   *  response. The route reads this to BYPASS transformResponseOut and hand the
+   *  native body back byte-for-byte. Absent/false → today's translate path. */
+  readonly nativePassthrough?: boolean;
   /** Drain the full (non-stream) result into ONE IR response object. */
   collect(): Promise<unknown>;
   /** The outbound-protocol event stream: one object per wire event. For Anthropic
@@ -405,6 +410,17 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     ir.metadata.memory_mode = memoryScope.mode;
     ir.metadata.memory_thread_source = memoryScope.threadSource;
 
+    // Native protocol passthrough carrier (#217). Stamp the VERBATIM parsed inbound
+    // body onto the IR metadata bag (same HTTP→core hand-off as client_billing_header
+    // above); the pipeline reads it into InternalRequest.native_request and the routing
+    // core's guard decides whether to forward it untranslated. NEVER logged. Covers
+    // BOTH stream and non-stream (Phase 2 added streaming passthrough): the native
+    // streaming body already carries stream:true, so the same verbatim body is the
+    // carrier — the guard + executor decide whether to actually forward it.
+    if (native !== null && typeof native === "object") {
+      ir.metadata.native_request = native;
+    }
+
     // 3) Routing pipeline (framework-agnostic core). The per-request abort signal
     //    rides along so a client disconnect is a non-provider fault, not a breaker
     //    trip (CLAUDE.md / docs/02). Auxiliary failures (classify/eval/cache) are
@@ -442,12 +458,23 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         // Accumulate the serialized wire frames so the served response body can be
         // captured (verbatim) alongside the telemetry row in the finally below.
         const captured: string[] = [];
-        // Every IR event is mapped by the transformer's explicit state machine;
-        // we NEVER forward a raw upstream chunk (CLAUDE.md principle 8). The
+        // Translate path: every IR event is mapped by the transformer's explicit
+        // state machine; we NEVER forward a raw upstream chunk through the
+        // convertOpenAIStreamToAnthropic machine blind (CLAUDE.md principle 8). The
         // transformer already guards start-before-delta and idempotent close.
+        // Native passthrough path (#217 Phase 2): the pipeline already split the
+        // upstream Anthropic SSE into VERBATIM {event,data} frames (the data payload
+        // is the exact upstream JSON string) — forward them directly, BYPASSING
+        // transformStreamOut so the bytes reach the client byte-for-byte. The state
+        // machine (the #221/#222 bug source) is ELIMINATED on this path, not replaced.
+        // Capture stays native on both ends; an upstream error mid-passthrough still
+        // surfaces the Anthropic terminal error frame below (catch is unchanged).
         try {
           for await (const event of result.streamIR()) {
-            const frame = anthropic.transformStreamOut(event);
+            const frame =
+              result.nativePassthrough === true
+                ? (event as { event: string; data: string })
+                : anthropic.transformStreamOut(event);
             if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
             await sse.writeSSE({ event: frame.event, data: frame.data });
           }
@@ -499,7 +526,15 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     // empty 200 a synthesized placeholder body would produce.
     let body: unknown;
     try {
-      body = await anthropic.transformResponseOut(await result.collect());
+      const collected = await result.collect();
+      // Native protocol passthrough (#217): collect() already returned the upstream's
+      // VERBATIM native response (it bypassed openAIBodyToIR). Skip transformResponseOut
+      // so the native body reaches the client BYTE-FOR-BYTE; the translate path is
+      // unchanged for every non-passthrough request.
+      body =
+        result.nativePassthrough === true
+          ? collected
+          : await anthropic.transformResponseOut(collected);
     } catch (err) {
       // Record the FAILED served request before surfacing the error (mirrors
       // chat.ts) so an all-providers-failed request still appears in

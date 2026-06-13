@@ -1,8 +1,18 @@
-import type { ExecutionResult, RouteOptions } from "@helm/core";
-import { type InternalRequest, makeHelmError, type Protocol } from "@helm/shared";
+import type { ExecutionResult, ObserveDeps, RouteOptions } from "@helm/core";
+import {
+  type InternalRequest,
+  type MemoryMessageInput,
+  makeHelmError,
+  type Protocol,
+} from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import type { MessagesIdentity } from "./messages.js";
-import { createMessagesPipeline, PipelineError, type RouteFn } from "./messages-pipeline.js";
+import {
+  createMessagesPipeline,
+  type PipelineBudgetDeps,
+  PipelineError,
+  type RouteFn,
+} from "./messages-pipeline.js";
 
 // messages-pipeline — the framework-agnostic bridge injected into both
 // /v1/messages and /v1/responses. These tests pin the FAILURE seams the route
@@ -30,6 +40,45 @@ function okResult(body: unknown): ExecutionResult {
     body,
     stream: null,
     error: null,
+  };
+}
+
+// A VERBATIM Anthropic-native non-stream response — what provider.nativePassthrough
+// returns and the pipeline must hand back UNTOUCHED on the passthrough path. Carries
+// Anthropic content blocks (NOT OpenAI choices) + an Anthropic usage block.
+const NATIVE_ANTHROPIC_BODY = {
+  id: "msg_native_1",
+  type: "message",
+  role: "assistant",
+  model: "claude-3-5-sonnet",
+  content: [
+    { type: "text", text: "Hello from native" },
+    { type: "text", text: " passthrough" },
+  ],
+  stop_reason: "end_turn",
+  stop_sequence: null,
+  usage: {
+    input_tokens: 7,
+    output_tokens: 11,
+    cache_read_input_tokens: 3,
+    cache_creation_input_tokens: 2,
+  },
+};
+
+// An ExecutionResult marked nativePassthrough:true carrying the verbatim native body.
+function passthroughOkResult(body: unknown = NATIVE_ANTHROPIC_BODY): ExecutionResult {
+  return {
+    decision: {
+      lane: { selected_lane: "balanced" },
+      final: { status: "ok", model_alias: "anthropic/claude-3-5-sonnet" },
+      cost_breakdown: { total_usd: 0.05, completion_usd: 0.02, eval_usd: null },
+      provider_attempts: [],
+    } as unknown as ExecutionResult["decision"],
+    final: { status: "ok", alias: "anthropic/claude-3-5-sonnet" },
+    body,
+    stream: null,
+    error: null,
+    nativePassthrough: true,
   };
 }
 
@@ -219,6 +268,282 @@ describe("createMessagesPipeline — failure surfaces", () => {
       allowedLanes: null,
       degradeLane: null,
     });
+  });
+});
+
+// A minimal MemoryStore fake that records the message inputs observeOutbound
+// persists, so a test can assert the reconstructed assistant turn (from the native
+// response content) reaches storage. ensureThread/stampThreadModel are no-ops.
+function makeObserveSpy(): {
+  observe: ObserveDeps;
+  persisted: MemoryMessageInput[];
+} {
+  const persisted: MemoryMessageInput[] = [];
+  const memoryStore = {
+    ensureThread: async () => {},
+    appendMessages: async (inputs: MemoryMessageInput[]) => {
+      persisted.push(...inputs);
+    },
+    appendMessage: async (input: MemoryMessageInput) => {
+      persisted.push(input);
+    },
+  } as unknown as ObserveDeps["memoryStore"];
+  const observe: ObserveDeps = {
+    memoryStore,
+    now: () => new Date(0),
+    estimateTokens: (text: string) => text.length,
+    log: () => {},
+  };
+  return { observe, persisted };
+}
+
+describe("createMessagesPipeline — native passthrough collect()", () => {
+  it("returns the native body UNTOUCHED (no openAIBodyToIR projection) on passthrough", async () => {
+    const route: RouteFn = async () => passthroughOkResult();
+    const pipeline = createMessagesPipeline(route);
+    const run = await pipeline.run(irOf(), IDENTITY, new AbortController().signal);
+    const body = (await run.collect()) as Record<string, unknown>;
+    // Identity passthrough: the exact native object reference is returned, with its
+    // Anthropic content blocks intact (NOT projected into OpenAI `choices`).
+    expect(body).toBe(NATIVE_ANTHROPIC_BODY);
+    expect(body.content).toEqual([
+      { type: "text", text: "Hello from native" },
+      { type: "text", text: " passthrough" },
+    ]);
+    expect(body.choices).toBeUndefined();
+  });
+
+  it("threads nativePassthrough:true onto the PipelineRunResult", async () => {
+    const route: RouteFn = async () => passthroughOkResult();
+    const pipeline = createMessagesPipeline(route);
+    const run = await pipeline.run(irOf(), IDENTITY, new AbortController().signal);
+    expect((run as { nativePassthrough?: boolean }).nativePassthrough).toBe(true);
+  });
+
+  it("the NON-passthrough path stays the IR projection (nativePassthrough absent)", async () => {
+    const route: RouteFn = async () =>
+      okResult({ id: "x", choices: [{ index: 0, message: { role: "assistant", content: "hi" } }] });
+    const pipeline = createMessagesPipeline(route);
+    const run = await pipeline.run(irOf(), IDENTITY, new AbortController().signal);
+    const body = (await run.collect()) as Record<string, unknown>;
+    // The translate path projects into an IRResponse (OpenAI-shaped `choices`).
+    expect(Array.isArray(body.choices)).toBe(true);
+    expect((run as { nativePassthrough?: boolean }).nativePassthrough).toBeFalsy();
+  });
+
+  it("settles the budget + stamps tokens from the Anthropic usage block", async () => {
+    let settledTokens: number | null = null;
+    const budget: PipelineBudgetDeps = {
+      gate: { check: async () => ({ overBudget: false }) as never },
+      settle: async (_keyId, _caps, usage) => {
+        settledTokens = usage.tokens;
+      },
+      now: () => 0,
+    };
+    const route: RouteFn = async () => passthroughOkResult();
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      caps: { budget: { spend_usd: { day: 1 } } as never },
+    };
+    const decisionRef = passthroughOkResult().decision;
+    const pipeline = createMessagesPipeline(
+      (_req, _opts, _signal) =>
+        Promise.resolve({ ...passthroughOkResult(), decision: decisionRef }),
+      "anthropic_messages",
+      undefined,
+      budget,
+    );
+    void route;
+    const run = await pipeline.run(irOf(), identity, new AbortController().signal);
+    await run.collect();
+    // The passthrough body carries an ANTHROPIC usage block. The settle must read it
+    // (via usageFromAnthropicResponse): prompt = input(7)+cache_read(3)+cache_creation(2)
+    // = 12, completion = output(11) → 23 served tokens. A regression guard that the
+    // passthrough collect still settles the per-key budget off the native usage.
+    expect(settledTokens).toBe(23);
+    // The decision's served-token breakdown is stamped from the same anthropic usage
+    // (cache split collapsed into prompt; cached/cache_creation distinct).
+    expect(decisionRef.usage).toMatchObject({
+      prompt_tokens: 12,
+      completion_tokens: 11,
+      cached_tokens: 3,
+      cache_creation_tokens: 2,
+    });
+  });
+
+  it("observe-outbound records the assistant text reconstructed from native content[].text", async () => {
+    const { observe, persisted } = makeObserveSpy();
+    const route: RouteFn = async () => passthroughOkResult();
+    const pipeline = createMessagesPipeline(route, "anthropic_messages", { observe });
+    const run = await pipeline.run(
+      irOf({ metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" } }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    await run.collect();
+    const assistant = persisted.find((m) => m.role === "assistant");
+    expect(assistant).toBeDefined();
+    // The two native text blocks are concatenated into one assistant turn.
+    expect(assistant?.content).toBe("Hello from native passthrough");
+  });
+});
+
+// A canned Anthropic SSE byte stream (what provider.nativePassthroughStream emits).
+// The `data:` payloads carry DELIBERATELY non-canonical JSON formatting (key order +
+// spacing) so a test can prove the pipeline forwards the bytes VERBATIM rather than
+// JSON.parse→re-stringify (which would canonicalize them). Usage rides message_start
+// (input + cache) and the trailing message_delta (output). Split across odd byte
+// boundaries (NOT frame-aligned) to exercise the cross-chunk frame buffering.
+const NATIVE_SSE_FRAMES = [
+  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x","usage":{ "input_tokens":7 ,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}}\n\n',
+  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}\n\n',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" native"}}\n\n',
+  'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":11}}\n\n',
+  'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+];
+
+// Re-chunk the joined SSE text into arbitrary 17-byte pieces so frames straddle the
+// chunk boundaries — the passthrough generator MUST buffer across chunks.
+function nativeSseTextStream(): AsyncIterable<string> {
+  const joined = NATIVE_SSE_FRAMES.join("");
+  const pieces: string[] = [];
+  for (let i = 0; i < joined.length; i += 17) pieces.push(joined.slice(i, i + 17));
+  return (async function* () {
+    for (const p of pieces) yield p;
+  })();
+}
+
+// An ExecutionResult marked nativePassthrough:true carrying the raw Anthropic SSE
+// text stream (NOT OpenAI SSE). The pipeline's streamIR must byte-relay it.
+function passthroughStreamResult(
+  stream: AsyncIterable<string> = nativeSseTextStream(),
+): ExecutionResult {
+  return {
+    decision: {
+      lane: { selected_lane: "balanced" },
+      final: { status: "ok", model_alias: "anthropic/claude-3-5-sonnet" },
+      cost_breakdown: { total_usd: 0, completion_usd: null, eval_usd: null },
+      provider_attempts: [],
+    } as unknown as ExecutionResult["decision"],
+    final: { status: "ok", alias: "anthropic/claude-3-5-sonnet" },
+    body: null,
+    stream,
+    error: null,
+    nativePassthrough: true,
+  };
+}
+
+describe("createMessagesPipeline — native passthrough streamIR()", () => {
+  it("byte-relays the upstream SSE: yields {event,data} with the VERBATIM data string", async () => {
+    const route: RouteFn = async () => passthroughStreamResult();
+    const pipeline = createMessagesPipeline(route);
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const frames: Array<{ event: string; data: string }> = [];
+    for await (const ev of run.streamIR()) frames.push(ev as { event: string; data: string });
+
+    // The event names are the verbatim upstream `event:` lines.
+    expect(frames.map((f) => f.event)).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+    // The data payloads are forwarded BYTE-FOR-BYTE — the deliberately non-canonical
+    // spacing inside message_start ("input_tokens":7 ,) survives, proving there is NO
+    // JSON.parse→stringify round-trip (which would have canonicalized it).
+    const startFrame = frames[0];
+    expect(startFrame?.data).toBe(
+      '{"type":"message_start","message":{"id":"msg_x","usage":{ "input_tokens":7 ,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}}',
+    );
+    // No `type` key — the passthrough path yields {event,data}, NOT the IR event bag.
+    expect((frames[0] as unknown as { type?: unknown }).type).toBeUndefined();
+  });
+
+  it("backfills the decision usage from the native SSE (input from message_start, output from message_delta)", async () => {
+    const decisionRef = passthroughStreamResult().decision;
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...passthroughStreamResult(), decision: decisionRef }),
+      "anthropic_messages",
+    );
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    // prompt = input(7) + cache_read(3) + cache_creation(2) = 12, completion = output(11)
+    expect(decisionRef.usage).toMatchObject({
+      prompt_tokens: 12,
+      completion_tokens: 11,
+      cached_tokens: 3,
+      cache_creation_tokens: 2,
+    });
+  });
+
+  it("settles the per-key budget using the native SSE tokens", async () => {
+    let settledTokens: number | null = null;
+    const budget: PipelineBudgetDeps = {
+      gate: { check: async () => ({ overBudget: false }) as never },
+      settle: async (_keyId, _caps, usage) => {
+        settledTokens = usage.tokens;
+      },
+      now: () => 0,
+    };
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      caps: { budget: { spend_usd: { day: 1 } } as never },
+    };
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughStreamResult()),
+      "anthropic_messages",
+      undefined,
+      budget,
+    );
+    const run = await pipeline.run(irOf({ stream: true }), identity, new AbortController().signal);
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    // input(7)+cache_read(3)+cache_creation(2)+output(11) = 23 served tokens.
+    expect(settledTokens).toBe(23);
+  });
+
+  it("observe-outbound records the assistant text reconstructed from text_delta", async () => {
+    const { observe, persisted } = makeObserveSpy();
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughStreamResult()),
+      "anthropic_messages",
+      { observe },
+    );
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    const assistant = persisted.find((m) => m.role === "assistant");
+    expect(assistant).toBeDefined();
+    // The two text_delta fragments concatenate into one assistant turn.
+    expect(assistant?.content).toBe("Hello native");
+  });
+
+  it("the NON-passthrough stream path is unchanged (OpenAI SSE → Anthropic events)", async () => {
+    const route: RouteFn = async () => streamOkResult(sseTextStream());
+    const pipeline = createMessagesPipeline(route);
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const types = await drain(run.streamIR());
+    // Still the translated Anthropic state machine (yields `type`, not `event`/`data`).
+    expect(types[0]).toBe("message_start");
+    expect(types).toContain("message_stop");
   });
 });
 

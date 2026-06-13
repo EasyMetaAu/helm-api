@@ -3,6 +3,7 @@ import {
   anthropicToOpenAIResponse,
   createAnthropicClient,
   openaiToAnthropicRequest,
+  readAnthropicSSERaw,
   translateAnthropicSSE,
 } from "./anthropic.js";
 import { UpstreamError } from "./openai.js";
@@ -812,5 +813,406 @@ describe("createAnthropicClient", () => {
         config: { baseUrl: "https://x", apiKey: "k", getAuthHeader: async () => "Bearer y" },
       }),
     ).toThrow(/exactly one/);
+  });
+});
+
+// Native protocol passthrough (issue #217, Phase 1): an Anthropic-native /v1/messages
+// body routed to an Anthropic subscription backend skips BOTH translators — the body
+// is forwarded VERBATIM (no openai->anthropic mangling, no system spoof injection) and
+// the upstream JSON is returned VERBATIM (no anthropic->openai response translation).
+// Reuses the same HTTP core (headers/withTimeout/401-retry/scrub/errorFromResponse).
+describe("createAnthropicClient — nativePassthrough", () => {
+  // The verbatim native Anthropic body a real Claude Code request would send. Note it
+  // ALREADY carries its own system[0] billing block + spoof preamble; passthrough must
+  // NOT re-derive or inject anything.
+  function nativeBody(): Record<string, unknown> {
+    return {
+      model: "claude-opus-4-6",
+      system: [
+        { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.173.d11; cch=abcde;" },
+        { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+        { type: "text", text: "house rules" },
+      ],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      max_tokens: 1024,
+      context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+      speed: "fast",
+    };
+  }
+
+  it("forwards the native body VERBATIM (no spoof injection, no openai->anthropic mangling)", async () => {
+    const body = nativeBody();
+    let sentBody: unknown;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body));
+      return jsonResponse({
+        id: "msg_pt",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await client.nativePassthrough?.(body);
+    // Byte-for-byte equal to the input — the body is the carrier, unmodified.
+    expect(sentBody).toEqual(body);
+  });
+
+  it("returns the upstream native JSON VERBATIM (no anthropicToOpenAIResponse translation)", async () => {
+    const upstream = {
+      id: "msg_pt",
+      type: "message",
+      role: "assistant",
+      content: [
+        { type: "text", text: "native answer" },
+        { type: "tool_use", id: "tu1", name: "Bash", input: { cmd: "ls" } },
+      ],
+      stop_reason: "tool_use",
+      usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 3 },
+    };
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => jsonResponse(upstream)) as unknown as typeof fetch,
+    });
+    const out = await client.nativePassthrough?.(nativeBody());
+    // Native shape preserved — `content` blocks survive, no `choices` wrapping.
+    expect(out).toEqual(upstream);
+  });
+
+  it("derives anthropic-version/beta/auth headers from the native body (system/context_management/speed)", async () => {
+    let seen: Headers | null = null;
+    let seenUrl = "";
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      seen = new Headers(init?.headers);
+      seenUrl = url;
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", getAuthHeader: async () => "Bearer ATX" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await client.nativePassthrough?.(nativeBody());
+    const h = seen as unknown as Headers;
+    expect(seenUrl).toBe("https://api.anthropic.com/v1/messages");
+    expect(h.get("anthropic-version")).toBe("2023-06-01");
+    expect(h.get("Authorization")).toBe("Bearer ATX");
+    const beta = h.get("anthropic-beta") ?? "";
+    // Betas derived from the native body's context_management + speed:fast.
+    expect(beta).toContain("oauth-2025-04-20");
+    expect(beta).toContain("context-management-2025-06-27");
+    expect(beta).toContain("fast-mode-2026-02-01");
+    // user-agent derived from the body's system[0] billing version (2.1.173).
+    expect(h.get("user-agent")).toBe("claude-cli/2.1.173 (external, cli)");
+  });
+
+  it("throws UpstreamError with the real upstreamStatus + scrubbed body on a non-2xx", async () => {
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => "Bearer SECRET-TOKEN",
+        currentSecrets: () => ["SECRET-TOKEN"],
+      },
+      fetch: (async () =>
+        jsonResponse(
+          { error: { type: "rate_limit", token: "SECRET-TOKEN" } },
+          429,
+        )) as unknown as typeof fetch,
+    });
+    let caught: unknown;
+    try {
+      await client.nativePassthrough?.(nativeBody());
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    const err = caught as UpstreamError;
+    expect(err.upstreamStatus).toBe(429);
+    // The redacted body must not leak the secret token.
+    expect(JSON.stringify(err.providerRaw)).not.toContain("SECRET-TOKEN");
+    expect(JSON.stringify(err.providerRaw)).toContain("[redacted]");
+  });
+
+  it("triggers onUnauthorized and replays once on a 401", async () => {
+    let calls = 0;
+    let token = "AT1";
+    const seenAuth: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      seenAuth.push(new Headers(init?.headers).get("Authorization") ?? "");
+      if (calls === 1) return jsonResponse({ error: "expired" }, 401);
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => `Bearer ${token}`,
+        onUnauthorized: () => {
+          token = "AT2";
+        },
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const out = await client.nativePassthrough?.(nativeBody());
+    expect(calls).toBe(2);
+    expect(seenAuth).toEqual(["Bearer AT1", "Bearer AT2"]);
+    expect((out as Record<string, unknown>).id).toBe("m");
+  });
+});
+
+// readAnthropicSSERaw (issue #217, Phase 2): the BYTE-FAITHFUL passthrough reader.
+// It yields the upstream Anthropic SSE body's decoded text VERBATIM — same reader
+// pattern (getReader + TextDecoder + readChunkWithIdle idle guard + StreamStalledError
+// → UpstreamError("timeout")) as translateAnthropicSSE, but with NO frame splitting and
+// NO translation. The data JSON payload reaches the client untouched; this ELIMINATES
+// the convertOpenAIStreamToAnthropic state machine (the #221/#222 bug source) instead
+// of replacing it.
+describe("readAnthropicSSERaw", () => {
+  it("yields the upstream SSE chunks VERBATIM (no openai chunk shape, no translation)", async () => {
+    // Two distinct upstream writes; each must surface unchanged (raw passthrough, not
+    // re-framed per-event, not converted to chat.completion.chunk).
+    const enc = new TextEncoder();
+    const writes = [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"m","usage":{"input_tokens":10}}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ];
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const w of writes) controller.enqueue(enc.encode(w));
+        controller.close();
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    const chunks: string[] = [];
+    for await (const c of readAnthropicSSERaw(res)) chunks.push(c);
+    // Each decoded chunk equals the upstream write byte-for-byte (no per-event split).
+    expect(chunks).toEqual(writes);
+    const joined = chunks.join("");
+    // Native Anthropic event names survive; nothing got converted to OpenAI shape.
+    expect(joined).toContain("message_start");
+    expect(joined).toContain("content_block_delta");
+    expect(joined).toContain("message_stop");
+    expect(joined).not.toContain("chat.completion.chunk");
+    expect(joined).not.toContain("[DONE]");
+  });
+
+  it("returns immediately on an empty body", async () => {
+    const res = new Response(null, { status: 200 });
+    const chunks: string[] = [];
+    for await (const c of readAnthropicSSERaw(res)) chunks.push(c);
+    expect(chunks).toEqual([]);
+  });
+
+  it("throws UpstreamError(timeout) and cancels when the stream stalls past idleMs", async () => {
+    vi.useFakeTimers();
+    try {
+      let cancelled = false;
+      // Emit one chunk then hang (no close) so the next read pends past the deadline.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"m"}}\n\n',
+            ),
+          );
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const res = new Response(stream, { status: 200 });
+      const run = (async () => {
+        for await (const _ of readAnthropicSSERaw(res, 500)) {
+          // drain
+        }
+      })();
+      const assertion = expect(run).rejects.toMatchObject({ errorClass: "timeout" });
+      await vi.advanceTimersByTimeAsync(500);
+      await assertion;
+      expect(cancelled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// nativePassthroughStream (issue #217, Phase 2): the streaming sibling of
+// nativePassthrough. The native body (from a STREAMING client) ALREADY carries
+// stream:true, so it is forwarded VERBATIM (no stream:true injection, no
+// openaiToAnthropicRequest). The upstream SSE is byte-relayed via readAnthropicSSERaw.
+describe("createAnthropicClient — nativePassthroughStream", () => {
+  // A verbatim native Anthropic STREAMING body: it carries its own stream:true and
+  // system[0] billing block — passthrough must NOT re-derive or inject anything.
+  function nativeStreamBody(): Record<string, unknown> {
+    return {
+      model: "claude-opus-4-6",
+      stream: true,
+      system: [
+        { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.173.d11; cch=abcde;" },
+        { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+      ],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      max_tokens: 1024,
+      context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+      speed: "fast",
+    };
+  }
+
+  function sseStreamResponse(writes: string[]): Response {
+    const enc = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const w of writes) controller.enqueue(enc.encode(w));
+        controller.close();
+      },
+    });
+    return new Response(stream, { status: 200 });
+  }
+
+  it("forwards the native body VERBATIM and yields upstream SSE chunks unchanged", async () => {
+    const body = nativeStreamBody();
+    let sentBody: unknown;
+    const writes = [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"m"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"yo"}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body));
+      return sseStreamResponse(writes);
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const chunks: string[] = [];
+    for await (const c of client.nativePassthroughStream?.(body) ?? []) chunks.push(c);
+    // Body sent byte-for-byte equal to the input — stream:true was already present, NOT
+    // injected; no openaiToAnthropicRequest spoof mangling.
+    expect(sentBody).toEqual(body);
+    // Each upstream chunk relayed verbatim (no translation, no [DONE]).
+    expect(chunks).toEqual(writes);
+    expect(chunks.join("")).not.toContain("chat.completion.chunk");
+  });
+
+  it("does NOT inject stream:true when the native body omits it (forwards verbatim)", async () => {
+    // A native body WITHOUT stream:true is forwarded exactly as given — the method must
+    // not mutate it (the streaming face is the caller's contract, not the client's).
+    const body = nativeStreamBody();
+    delete body.stream;
+    let sentBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body));
+      return sseStreamResponse(['event: message_stop\ndata: {"type":"message_stop"}\n\n']);
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    for await (const _ of client.nativePassthroughStream?.(body) ?? []) {
+      // drain
+    }
+    expect(sentBody).toEqual(body);
+    expect(Object.hasOwn(sentBody ?? {}, "stream")).toBe(false);
+  });
+
+  it("derives version/beta/auth headers from the native body and hits /v1/messages", async () => {
+    let seen: Headers | null = null;
+    let seenUrl = "";
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      seen = new Headers(init?.headers);
+      seenUrl = url;
+      return sseStreamResponse(['event: message_stop\ndata: {"type":"message_stop"}\n\n']);
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", getAuthHeader: async () => "Bearer ATX" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    for await (const _ of client.nativePassthroughStream?.(nativeStreamBody()) ?? []) {
+      // drain
+    }
+    const h = seen as unknown as Headers;
+    expect(seenUrl).toBe("https://api.anthropic.com/v1/messages");
+    expect(h.get("anthropic-version")).toBe("2023-06-01");
+    expect(h.get("Authorization")).toBe("Bearer ATX");
+    const beta = h.get("anthropic-beta") ?? "";
+    expect(beta).toContain("oauth-2025-04-20");
+    expect(beta).toContain("context-management-2025-06-27");
+    expect(beta).toContain("fast-mode-2026-02-01");
+    expect(h.get("user-agent")).toBe("claude-cli/2.1.173 (external, cli)");
+  });
+
+  it("throws UpstreamError with the real upstreamStatus + scrubbed body before the first chunk on a non-2xx", async () => {
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => "Bearer SECRET-TOKEN",
+        currentSecrets: () => ["SECRET-TOKEN"],
+      },
+      fetch: (async () =>
+        jsonResponse(
+          { error: { type: "rate_limit", token: "SECRET-TOKEN" } },
+          429,
+        )) as unknown as typeof fetch,
+    });
+    let caught: unknown;
+    try {
+      for await (const _ of client.nativePassthroughStream?.(nativeStreamBody()) ?? []) {
+        // should never yield
+      }
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    const err = caught as UpstreamError;
+    expect(err.upstreamStatus).toBe(429);
+    expect(JSON.stringify(err.providerRaw)).not.toContain("SECRET-TOKEN");
+    expect(JSON.stringify(err.providerRaw)).toContain("[redacted]");
+  });
+
+  it("triggers onUnauthorized and replays once on a 401 before yielding", async () => {
+    let calls = 0;
+    let token = "AT1";
+    const seenAuth: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      seenAuth.push(new Headers(init?.headers).get("Authorization") ?? "");
+      if (calls === 1) return jsonResponse({ error: "expired" }, 401);
+      return sseStreamResponse([
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"m"}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ]);
+    });
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => `Bearer ${token}`,
+        onUnauthorized: () => {
+          token = "AT2";
+        },
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const chunks: string[] = [];
+    for await (const c of client.nativePassthroughStream?.(nativeStreamBody()) ?? []) {
+      chunks.push(c);
+    }
+    expect(calls).toBe(2);
+    expect(seenAuth).toEqual(["Bearer AT1", "Bearer AT2"]);
+    expect(chunks.join("")).toContain("message_start");
   });
 });

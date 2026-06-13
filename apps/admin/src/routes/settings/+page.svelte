@@ -17,6 +17,9 @@
   const DEFAULTS: RuntimeSettings = {
     capture_payloads: true,
     payload_retention_days: 30,
+    // Native protocol passthrough (issue #217): default OFF. No UI control yet —
+    // the field rides through Save untouched so toggling it via the API persists.
+    native_protocol_passthrough: false,
     rate_limit_enabled: false,
     rate_limit_default_rpm: 0,
     rate_limit_default_tpm: 0,

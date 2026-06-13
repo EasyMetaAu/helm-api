@@ -31,6 +31,11 @@ export interface ProviderConfig {
   // acceptable for OAuth providers.
   api_key_env?: string;
   targetProviderProtocol?: TargetProviderProtocol;
+  // The provider needs a compatibility rewrite before its body can leave (e.g.
+  // the developer-role→system shim, tool/schema remaps). Native passthrough is
+  // DISABLED for such providers because the body cannot be forwarded verbatim
+  // (issue #217). Defaults false (true OpenAI-compatible passthrough).
+  providerRequiresCompatibilityRewrite?: boolean;
   models: Array<{
     alias: string; // internal alias, e.g. "cheap_model", "openai/auto"
     provider_model: string; // the provider's real model id, e.g. "gpt-4o-mini"
@@ -49,6 +54,10 @@ export interface ResolvedProvider {
   // by providerName to a pre-built client).
   apiKeyEnv?: string;
   targetProviderProtocol: TargetProviderProtocol;
+  // Resolved compatibility-rewrite flag (issue #217). Always present; defaults
+  // false. The executor reads it to disable native passthrough for providers
+  // whose body cannot be forwarded byte-for-byte.
+  providerRequiresCompatibilityRewrite: boolean;
 }
 
 // Structured resolve/build errors — unknown alias (resolve-time) and duplicate
@@ -95,6 +104,8 @@ export function createProviderRegistry(providers: ProviderConfig[]): ProviderReg
         baseUrl: provider.base_url,
         apiKeyEnv: provider.api_key_env,
         targetProviderProtocol: provider.targetProviderProtocol ?? "openai_chat",
+        providerRequiresCompatibilityRewrite:
+          provider.providerRequiresCompatibilityRewrite ?? false,
       });
     }
   }
@@ -141,6 +152,9 @@ export function toRegistryProviders(
     // pre-built in providerClients).
     api_key_env: p.api_key_env ?? "",
     targetProviderProtocol: p.targetProviderProtocol,
+    // The developer-role→system shim is the one shipped compatibility rewrite that
+    // mutates the wire body, so it disables verbatim native passthrough (issue #217).
+    providerRequiresCompatibilityRewrite: p.map_developer_role_to_system === true,
     models: p.models.map((m) => ({ alias: m.alias, provider_model: m.provider_model })),
   }));
 }
