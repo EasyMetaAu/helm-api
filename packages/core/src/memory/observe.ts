@@ -43,7 +43,13 @@ function toMemoryRole(role: IRMessage["role"]): MemoryRole | null {
 // Serialize IR content (string | multipart parts | null) to the raw string the
 // memory_messages.content column stores. Multipart is JSON-stringified so it is
 // auditable against the original (docs/08 raw message persistence).
-function serializeContent(content: IRMessage["content"]): string {
+//
+// EXPORTED so the inject bridge's window-aware dedup hashes the current request's
+// live messages the SAME way storage hashed them (sha256Hex(serializeContent(...)))
+// — otherwise a live turn's hash would never match its persisted content_hash and
+// dedup would silently never fire. This is the SINGLE source of "how a message's
+// content becomes its dedup fingerprint".
+export function serializeContent(content: IRMessage["content"]): string {
   if (content === null) return "";
   if (typeof content === "string") return content;
   return JSON.stringify(content);

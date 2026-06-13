@@ -105,12 +105,16 @@ describe("canUseNativePassthrough", () => {
     });
   });
 
-  it("6) disables when memory inject may rewrite the request before execute", () => {
+  it("memory inject mode is NO LONGER a blocker (#217 Phase 4 PREFIX model)", () => {
+    // Inject is now ADDITIVE: the pipeline prepends the memory block into the native
+    // carrier's system/instructions and leaves messages/input verbatim, so native_request
+    // stays consistent and passthrough can fire WITH memory. The guard therefore makes no
+    // inject-specific decision — an inject-mode same-protocol request is ok:true.
     expect(
       canUseNativePassthrough(
         input({ request: request({ metadata: { ...request().metadata, memory_mode: "inject" } }) }),
       ),
-    ).toEqual({ ok: false, reason: "memory_inject_may_rewrite_request" });
+    ).toEqual({ ok: true });
   });
 
   it("7) disables when a heterogeneous fallback chain may pick a different provider protocol", () => {

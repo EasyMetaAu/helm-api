@@ -2,11 +2,17 @@ import type { Observation, RawMessage, Reflection } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import type { MemoryStore } from "../store/ports.js";
 import { assembleInjectedContext, type InjectDeps, type InjectInput } from "./inject.js";
+import { sha256Hex } from "./message-hash.js";
 
-// Recording fake MemoryStore for the inject phase. It serves a scope's reflections
-// (project + resource), the thread's active observations, and the thread's recent
-// raw messages. Read methods can be made to throw to exercise fail-open. Memory is
-// a MIDDLEWARE — this fake never touches routing/lane state.
+// docs/08 Phase 2 (#217 Phase 4) — the inject assembler PREFIX model. The assembler
+// no longer FULL-REPLACES the conversation: it produces ONE system-level memory TEXT
+// BLOCK (reflections + window-deduped thread observations, trimmed to a token
+// budget) which the pipeline PREPENDS to the client's verbatim live conversation.
+// The live messages (tool_calls, images, tool results) are never reassembled here —
+// so the assembler is structure-agnostic and works for every turn type. These tests
+// pin the block FORMAT, the window-aware dedup, the budget trim, the empty/degraded
+// → null paths, and the preserved cost/writeback/forgetting wiring.
+
 function makeReflection(over: Partial<Reflection> & { reflectionText: string }): Reflection {
   return {
     id: "refl-1",
@@ -23,11 +29,16 @@ function makeReflection(over: Partial<Reflection> & { reflectionText: string }):
   };
 }
 
-function makeObservation(id: string, text: string, observedAt: string): Observation {
+function makeObservation(
+  id: string,
+  text: string,
+  observedAt: string,
+  sourceMessageRange: [string, string] = ["m1", "m2"],
+): Observation {
   return {
     id,
     threadId: "thread-1",
-    sourceMessageRange: ["m1", "m2"],
+    sourceMessageRange,
     observationText: text,
     observedAt: new Date(observedAt),
     referenceCount: 0,
@@ -54,7 +65,7 @@ interface FakeStoreData {
   projectReflection?: Reflection | null;
   resourceReflection?: Reflection | null;
   observations?: Observation[];
-  recentMessages?: RawMessage[];
+  threadMessages?: RawMessage[];
   throwOn?: "getReflection" | "listObservations" | "listMessages";
 }
 
@@ -67,7 +78,7 @@ function makeFakeStore(data: FakeStoreData) {
     appendMessage: vi.fn(async () => "unused"),
     listMessages: vi.fn(async () => {
       maybeThrow("listMessages");
-      return data.recentMessages ?? [];
+      return data.threadMessages ?? [];
     }),
     appendObservation: vi.fn(async () => "unused"),
     listObservations: vi.fn(async () => {
@@ -90,7 +101,6 @@ function makeFakeStore(data: FakeStoreData) {
 }
 
 const NOW = new Date("2026-05-31T12:00:00.000Z");
-const CURRENT = makeRaw("cur", "user", "current question");
 
 // ~1 token per word — deterministic, assertable estimator.
 const estimateTokens = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
@@ -110,15 +120,13 @@ function makeDeps(store: MemoryStore, over: Partial<InjectDeps> = {}): InjectDep
 function baseInput(over: Partial<InjectInput> = {}): InjectInput {
   return {
     scope: { accountId: "acct-a", projectId: "proj-1", resourceId: "res-1", threadId: "thread-1" },
-    currentUserMessage: CURRENT,
-    systemPrompt: "you are helpful",
     tokenBudget: 1000,
     ...over,
   };
 }
 
-describe("assembleInjectedContext", () => {
-  it("assembles the fixed docs/08 order within budget and reports injected tokens", async () => {
+describe("assembleInjectedContext — memory TEXT BLOCK (prefix model)", () => {
+  it("assembles a single system-level block with section headers in deterministic order", async () => {
     const store = makeFakeStore({
       projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "project memory" }),
       resourceReflection: makeReflection({
@@ -129,101 +137,269 @@ describe("assembleInjectedContext", () => {
         makeObservation("o1", "older observation", "2026-05-20T00:00:00.000Z"),
         makeObservation("o2", "newer observation", "2026-05-28T00:00:00.000Z"),
       ],
-      recentMessages: [makeRaw("r1", "user", "earlier turn"), makeRaw("r2", "assistant", "reply")],
     });
-    const deps = makeDeps(store);
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store));
 
-    const out = await assembleInjectedContext(baseInput(), deps);
-
-    // Strict fixed order: system → project reflection → resource reflection →
-    // thread observations (oldest..newest) → recent raw → current.
-    expect(out.messages.map((m) => m.source)).toEqual([
-      "system",
-      "project_reflection",
-      "resource_reflection",
-      "thread_observation",
-      "thread_observation",
-      "recent_raw",
-      "recent_raw",
-      "current",
-    ]);
-    expect(out.messages[0]?.content).toBe("you are helpful");
-    expect(out.messages.at(-1)?.content).toBe("current question");
+    expect(out.memoryBlock).not.toBeNull();
+    const block = out.memoryBlock ?? "";
+    // A single deterministic block: header + only the sections that have content,
+    // reflections first (project → resource) then observations oldest-first.
+    expect(block).toContain("# Persistent memory (injected by helm)");
+    expect(block).toContain("## Project knowledge");
+    expect(block).toContain("project memory");
+    expect(block).toContain("## Resource knowledge");
+    expect(block).toContain("resource memory");
+    expect(block).toContain("## Earlier context (summarized)");
+    // Observations appear oldest-first.
+    expect(block.indexOf("older observation")).toBeLessThan(block.indexOf("newer observation"));
+    // Reflections come before observations.
+    expect(block.indexOf("project memory")).toBeLessThan(block.indexOf("older observation"));
 
     expect(out.metadata.memory_hydrated).toBe(true);
     expect(out.metadata.reflection_version).toBe(1);
     expect(out.metadata.observation_count).toBe(2);
     expect(out.metadata.memory_writeback_status).toBe("queued");
-
-    // memory_tokens_injected = tokens of the INJECTED memory layers only
-    // (project + resource reflection + observations + recent raw), excluding the
-    // mandatory system + current parts.
-    const injectedText = [
-      "project memory",
-      "resource memory",
-      "older observation",
-      "newer observation",
-      "earlier turn",
-      "reply",
-    ].join(" ");
-    expect(out.metadata.memory_tokens_injected).toBe(estimateTokens(injectedText));
+    // memory_tokens_injected = estimated tokens of the final block string.
+    expect(out.metadata.memory_tokens_injected).toBe(estimateTokens(block));
   });
 
-  it("trims oldest observations first when over budget but keeps recent raw + current", async () => {
+  it("omits sections that have no content (only project reflection → no resource/observation headers)", async () => {
     const store = makeFakeStore({
-      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "P" }),
-      observations: [
-        makeObservation("o1", "drop me oldest", "2026-05-10T00:00:00.000Z"),
-        makeObservation("o2", "keep me newer", "2026-05-28T00:00:00.000Z"),
-      ],
-      recentMessages: [makeRaw("r1", "user", "must keep recent raw")],
+      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "only project" }),
     });
-    // Budget only allows a couple of injected tokens — forces dropping observations.
-    const deps = makeDeps(store);
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 6 }), deps);
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store));
+    const block = out.memoryBlock ?? "";
+    expect(block).toContain("## Project knowledge");
+    expect(block).toContain("only project");
+    expect(block).not.toContain("## Resource knowledge");
+    expect(block).not.toContain("## Earlier context (summarized)");
+  });
 
-    const sources = out.messages.map((m) => m.source);
-    const contents = out.messages.map((m) => m.content);
+  it("returns null when there is nothing to inject (no reflections, no observations)", async () => {
+    const store = makeFakeStore({ threadMessages: [] });
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store));
+    expect(out.memoryBlock).toBeNull();
+    expect(out.metadata.memory_hydrated).toBe(false);
+    expect(out.metadata.observation_count).toBe(0);
+    expect(out.metadata.memory_tokens_injected).toBe(0);
+  });
 
-    // recent raw + current are NEVER dropped.
-    expect(contents).toContain("must keep recent raw");
-    expect(contents.at(-1)).toBe("current question");
-    expect(sources.at(-1)).toBe("current");
-    // The OLDEST observation is the first to be sacrificed.
-    expect(contents).not.toContain("drop me oldest");
-    // Budget is a hard cap on injected tokens.
-    expect(out.metadata.memory_tokens_injected).toBeLessThanOrEqual(6);
+  it("reflections are ALWAYS included regardless of the live window (cross-thread recall)", async () => {
+    const store = makeFakeStore({
+      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "proj refl" }),
+      resourceReflection: makeReflection({ resourceId: "res-1", reflectionText: "res refl" }),
+    });
+    // Even with a non-empty window, reflections are never deduped against it.
+    const out = await assembleInjectedContext(
+      baseInput({ windowContentHashes: new Set([sha256Hex("anything")]) }),
+      makeDeps(store),
+    );
+    const block = out.memoryBlock ?? "";
+    expect(block).toContain("proj refl");
+    expect(block).toContain("res refl");
+  });
+
+  it("SKIPS a thread observation whose covered turns are ALL already in the live window", async () => {
+    // The client still sends r1+r2 verbatim, so the observation covering exactly
+    // them is redundant — injecting it would duplicate turns the client still holds.
+    const threadMessages = [
+      makeRaw("r1", "user", "turn one"),
+      makeRaw("r2", "assistant", "reply one"),
+    ];
+    const obs = makeObservation("o1", "compressed r1..r2", "2026-05-30T00:00:00.000Z", [
+      "r1",
+      "r2",
+    ]);
+    const store = makeFakeStore({ observations: [obs], threadMessages });
+
+    const windowContentHashes = new Set([sha256Hex("turn one"), sha256Hex("reply one")]);
+    const out = await assembleInjectedContext(baseInput({ windowContentHashes }), makeDeps(store));
+
+    expect(out.memoryBlock).toBeNull();
+    expect(out.metadata.observation_count).toBe(0);
+  });
+
+  it("INCLUDES a thread observation when its covered turns are NOT all in the window (recall of dropped turns)", async () => {
+    const threadMessages = [
+      makeRaw("r1", "user", "dropped turn one"),
+      makeRaw("r2", "assistant", "dropped reply one"),
+    ];
+    const obs = makeObservation("o1", "compressed dropped turns", "2026-05-30T00:00:00.000Z", [
+      "r1",
+      "r2",
+    ]);
+    const store = makeFakeStore({ observations: [obs], threadMessages });
+
+    // The window holds NONE of the covered turns → the observation must be injected.
+    const windowContentHashes = new Set([sha256Hex("a brand new turn")]);
+    const out = await assembleInjectedContext(baseInput({ windowContentHashes }), makeDeps(store));
+
+    const block = out.memoryBlock ?? "";
+    expect(block).toContain("compressed dropped turns");
+    expect(out.metadata.observation_count).toBe(1);
+  });
+
+  it("INCLUDES an observation when only SOME of its covered turns are in the window", async () => {
+    const threadMessages = [
+      makeRaw("r1", "user", "still in window"),
+      makeRaw("r2", "assistant", "dropped by client"),
+    ];
+    const obs = makeObservation("o1", "covers r1..r2", "2026-05-30T00:00:00.000Z", ["r1", "r2"]);
+    const store = makeFakeStore({ observations: [obs], threadMessages });
+
+    // Only r1 is in the window; r2 was dropped → not ALL covered → must include.
+    const windowContentHashes = new Set([sha256Hex("still in window")]);
+    const out = await assembleInjectedContext(baseInput({ windowContentHashes }), makeDeps(store));
+
+    expect(out.memoryBlock ?? "").toContain("covers r1..r2");
+    expect(out.metadata.observation_count).toBe(1);
+  });
+
+  it("with NO window set, no observation is deduped (every active observation is considered)", async () => {
+    const store = makeFakeStore({
+      observations: [makeObservation("o1", "obs text", "2026-05-20T00:00:00.000Z", ["r1", "r2"])],
+      threadMessages: [makeRaw("r1", "user", "x"), makeRaw("r2", "assistant", "y")],
+    });
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store));
+    expect(out.memoryBlock ?? "").toContain("obs text");
+    expect(out.metadata.observation_count).toBe(1);
+  });
+
+  it("token budget trims OBSERVATIONS (oldest-first) but never reflections under a generous budget", async () => {
+    const store = makeFakeStore({
+      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "keep this proj" }),
+      observations: [
+        makeObservation("o1", "drop me oldest", "2026-05-10T00:00:00.000Z", ["a", "b"]),
+        makeObservation("o2", "keep me newer", "2026-05-28T00:00:00.000Z", ["c", "d"]),
+      ],
+    });
+    // Budget fits the reflection (3 tokens) + exactly one 3-token observation.
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 6 }), makeDeps(store));
+    const block = out.memoryBlock ?? "";
+    // reflection survives.
+    expect(block).toContain("keep this proj");
+    // newer observation survives; oldest is the first sacrificed.
+    expect(block).toContain("keep me newer");
+    expect(block).not.toContain("drop me oldest");
+    expect(out.metadata.observation_count).toBe(1);
+    // The CONTENT selected (reflection + kept observation text) respects the budget;
+    // the rendered block adds fixed section-header overhead on top, so
+    // memory_tokens_injected (the final string) is reported separately.
+    const selectedContentTokens =
+      estimateTokens("keep this proj") + estimateTokens("keep me newer");
+    expect(selectedContentTokens).toBeLessThanOrEqual(6);
+  });
+
+  it("trims reflections (resource before project) only when the budget cannot fit them, and signals overflow", async () => {
+    const store = makeFakeStore({
+      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "PROJ" }),
+      resourceReflection: makeReflection({ resourceId: "res-1", reflectionText: "RES" }),
+    });
+    const log = vi.fn();
+    // Budget fits exactly one 1-token reflection → project kept, resource dropped.
+    const out = await assembleInjectedContext(
+      baseInput({ tokenBudget: 1 }),
+      makeDeps(store, { log }),
+    );
+    const block = out.memoryBlock ?? "";
+    expect(block).toContain("PROJ");
+    expect(block).not.toContain("RES");
+    const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toMatch(/memory.inject.*overflow/i);
+  });
+
+  it("produces a valid block for a TOOL / MULTIMODAL current turn (no plain-text restriction in the assembler)", async () => {
+    // The assembler is window-hash + memory only; it never inspects the live turn's
+    // structure. A window containing tool/multipart hashes is just opaque strings.
+    const store = makeFakeStore({
+      projectReflection: makeReflection({
+        projectId: "proj-1",
+        reflectionText: "tool-thread memory",
+      }),
+      observations: [
+        makeObservation("o1", "earlier tool summary", "2026-05-20T00:00:00.000Z", ["x", "y"]),
+      ],
+      threadMessages: [
+        makeRaw("x", "user", '[{"type":"image","url":"data:..."}]'),
+        makeRaw("y", "tool", "tool out"),
+      ],
+    });
+    const windowContentHashes = new Set([sha256Hex('[{"type":"text","text":"now"}]')]);
+    const out = await assembleInjectedContext(baseInput({ windowContentHashes }), makeDeps(store));
+    const block = out.memoryBlock ?? "";
+    expect(block).toContain("tool-thread memory");
+    expect(block).toContain("earlier tool summary");
+    expect(out.metadata.memory_hydrated).toBe(true);
+  });
+
+  it("books the block tokens into the dedicated hydrate cost bucket", async () => {
+    const store = makeFakeStore({
+      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "alpha beta" }),
+    });
+    const costSink = vi.fn();
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store, { costSink }));
+    expect(costSink).toHaveBeenCalledWith("hydrate", out.metadata.memory_tokens_injected);
+    for (const [bucket] of costSink.mock.calls) {
+      expect(bucket).toBe("hydrate");
+    }
   });
 
   it("enqueues an observer job and reports its id as queued writeback", async () => {
-    const store = makeFakeStore({ recentMessages: [makeRaw("r1", "user", "hi")] });
+    const store = makeFakeStore({});
     const enqueueObserverJob = vi.fn(async () => "observer-job-42");
-    const deps = makeDeps(store, { enqueueObserverJob });
-
-    const out = await assembleInjectedContext(baseInput(), deps);
-
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store, { enqueueObserverJob }));
     expect(enqueueObserverJob).toHaveBeenCalledWith(baseInput().scope);
     expect(out.metadata.observer_job_id).toBe("observer-job-42");
     expect(out.metadata.memory_writeback_status).toBe("queued");
   });
 
-  it("fail-open: when memory load throws, request continues with system + current only + logs it", async () => {
+  it("reports 'skipped' writeback and does NOT enqueue when there is no thread target", async () => {
+    const store = makeFakeStore({});
+    const enqueueObserverJob = vi.fn(async () => "observer-job-1");
+    const out = await assembleInjectedContext(
+      baseInput({ scope: { accountId: "acct-a", projectId: "proj-1" } }),
+      makeDeps(store, { enqueueObserverJob }),
+    );
+    expect(enqueueObserverJob).not.toHaveBeenCalled();
+    expect(out.metadata.memory_writeback_status).toBe("skipped");
+    expect(out.metadata.observer_job_id).toBeNull();
+  });
+
+  it("only reads observations from the thread (thread-anchored store contract)", async () => {
+    const store = makeFakeStore({
+      observations: [makeObservation("o1", "should not load", "2026-05-20T00:00:00.000Z")],
+    });
+    const out = await assembleInjectedContext(
+      baseInput({ scope: { accountId: "acct-a", projectId: "proj-1", resourceId: "res-1" } }),
+      makeDeps(store),
+    );
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(out.metadata.observation_count).toBe(0);
+  });
+
+  it("queries listObservations with the threadId only (no project/resource spread)", async () => {
+    const store = makeFakeStore({
+      observations: [makeObservation("o1", "obs", "2026-05-20T00:00:00.000Z")],
+    });
+    await assembleInjectedContext(baseInput(), makeDeps(store));
+    expect(store.listObservations).toHaveBeenCalledWith({
+      accountId: "acct-a",
+      threadId: "thread-1",
+    });
+  });
+
+  it("fail-open: when memory load throws, returns null block + degraded metadata + logs it", async () => {
     const store = makeFakeStore({ throwOn: "listObservations" });
     const log = vi.fn();
-    const enqueueObserverJob = vi.fn(async () => "observer-job-1");
-    const deps = makeDeps(store, { log, enqueueObserverJob });
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store, { log }));
 
-    const out = await assembleInjectedContext(baseInput(), deps);
-
-    // Minimal context = system + current ONLY.
-    expect(out.messages.map((m) => m.source)).toEqual(["system", "current"]);
+    expect(out.memoryBlock).toBeNull();
+    expect(out.metadata.degraded).toBe(true);
     expect(out.metadata.memory_hydrated).toBe(false);
     expect(out.metadata.reflection_version).toBeNull();
     expect(out.metadata.observation_count).toBe(0);
     expect(out.metadata.memory_tokens_injected).toBe(0);
     expect(out.metadata.memory_writeback_status).toBe("failed");
-    // The failure must be RECORDED (CLAUDE.md principle 3).
-    expect(log).toHaveBeenCalled();
     const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
     expect(logged).toMatch(/memory.inject.*fail/i);
   });
@@ -233,165 +409,18 @@ describe("assembleInjectedContext", () => {
     const enqueueObserverJob = vi.fn(async () => {
       throw new Error("queue down");
     });
-    const deps = makeDeps(store, { enqueueObserverJob });
-
-    await expect(assembleInjectedContext(baseInput(), deps)).resolves.toBeDefined();
+    await expect(
+      assembleInjectedContext(baseInput(), makeDeps(store, { enqueueObserverJob })),
+    ).resolves.toBeDefined();
   });
 
-  it("books injected tokens into the dedicated hydrate cost bucket", async () => {
-    const store = makeFakeStore({
-      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "alpha beta" }),
-      recentMessages: [makeRaw("r1", "user", "gamma")],
-    });
-    const costSink = vi.fn();
-    const deps = makeDeps(store, { costSink });
-
-    const out = await assembleInjectedContext(baseInput(), deps);
-
-    expect(costSink).toHaveBeenCalledWith("hydrate", out.metadata.memory_tokens_injected);
-    // Only the hydrate bucket — never actor/observer/reflector from inject.
-    for (const [bucket] of costSink.mock.calls) {
-      expect(bucket).toBe("hydrate");
-    }
-  });
-
-  it("only reads observations from the thread (thread-anchored store contract)", async () => {
-    // With no threadId, listObservations must NOT be called — observations are
-    // thread-anchored by schema; project/resource-only scopes return nothing.
-    const store = makeFakeStore({
-      observations: [makeObservation("o1", "should not load", "2026-05-20T00:00:00.000Z")],
-    });
-    const deps = makeDeps(store);
-    const out = await assembleInjectedContext(
-      baseInput({ scope: { accountId: "acct-a", projectId: "proj-1", resourceId: "res-1" } }),
-      deps,
-    );
-
-    expect(store.listObservations).not.toHaveBeenCalled();
-    expect(out.metadata.observation_count).toBe(0);
-  });
-
-  it("queries listObservations with the threadId only (no project/resource spread)", async () => {
-    const store = makeFakeStore({
-      observations: [makeObservation("o1", "obs", "2026-05-20T00:00:00.000Z")],
-      recentMessages: [],
-    });
-    const deps = makeDeps(store);
-    await assembleInjectedContext(baseInput(), deps);
-
-    // Aligned with the thread-only store contract: project/resource are NOT spread
-    // into the observation lookup (the adapters ignore them anyway).
-    expect(store.listObservations).toHaveBeenCalledWith({
-      accountId: "acct-a",
-      threadId: "thread-1",
-    });
-  });
-
-  it("does NOT re-inject raw messages already covered by an observation source range", async () => {
-    // The observer compresses old turns into observations but keeps the raw rows
-    // for audit. Inject must not feed both forms into the prompt — covered raw is
-    // represented by its observation; only UN-observed raw rides as recent_raw.
-    const obs = {
-      ...makeObservation("o1", "compressed summary", "2026-05-30T00:00:00.000Z"),
-      sourceMessageRange: ["r1", "r2"] as [string, string],
-    };
-    const store = makeFakeStore({
-      observations: [obs],
-      recentMessages: [
-        makeRaw("r1", "user", "old turn one"),
-        makeRaw("r2", "assistant", "old reply"),
-        makeRaw("r3", "user", "newer turn"),
-        makeRaw("r4", "assistant", "newest reply"),
-      ],
-    });
-    const out = await assembleInjectedContext(baseInput(), makeDeps(store));
-
-    const recentRaw = out.messages.filter((m) => m.source === "recent_raw").map((m) => m.content);
-    expect(recentRaw).toEqual(["newer turn", "newest reply"]);
-    // The compressed turns still reach the prompt — as the observation, never verbatim.
-    expect(
-      out.messages.some(
-        (m) => m.source === "thread_observation" && m.content === "compressed summary",
-      ),
-    ).toBe(true);
-  });
-
-  it("reports 'skipped' writeback and does NOT enqueue when there is no thread target", async () => {
-    const store = makeFakeStore({});
-    const enqueueObserverJob = vi.fn(async () => "observer-job-1");
-    const deps = makeDeps(store, { enqueueObserverJob });
-    const out = await assembleInjectedContext(
-      baseInput({ scope: { accountId: "acct-a", projectId: "proj-1" } }),
-      deps,
-    );
-
-    expect(enqueueObserverJob).not.toHaveBeenCalled();
-    expect(out.metadata.memory_writeback_status).toBe("skipped");
-    expect(out.metadata.observer_job_id).toBeNull();
-  });
-
-  it("honors the token budget as a hard cap: trims reflections under pressure (resource first) before observations and signals overflow", async () => {
-    // fixedTokens (reflections + recent raw) alone exceed the budget. recent raw is
-    // spec-mandated and survives; reflections are trimmed resource-first, then
-    // project; an overflow must be signalled via the log.
-    const store = makeFakeStore({
-      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "proj reflection" }),
-      resourceReflection: makeReflection({
-        resourceId: "res-1",
-        reflectionText: "resource reflection text",
-      }),
-      observations: [makeObservation("o1", "an observation", "2026-05-20T00:00:00.000Z")],
-      recentMessages: [makeRaw("r1", "user", "recent raw must survive")],
-    });
-    const log = vi.fn();
-    // recent raw alone = 4 tokens; allow only 4 → both reflections + observations must go.
-    const deps = makeDeps(store, { log });
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 4 }), deps);
-
-    const contents = out.messages.map((m) => m.content);
-    // recent raw is NEVER sacrificed.
-    expect(contents).toContain("recent raw must survive");
-    // both reflections trimmed away under hard budget pressure.
-    expect(contents).not.toContain("resource reflection text");
-    expect(contents).not.toContain("proj reflection");
-    // hard cap honored.
-    expect(out.metadata.memory_tokens_injected).toBeLessThanOrEqual(4);
-    // overflow must be SIGNALLED.
-    const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(logged).toMatch(/memory.inject.*overflow/i);
-  });
-
-  it("trims resource reflection before project reflection when only one fits", async () => {
-    const store = makeFakeStore({
-      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "PROJ" }),
-      resourceReflection: makeReflection({ resourceId: "res-1", reflectionText: "RES" }),
-      recentMessages: [],
-    });
-    // Budget fits exactly one 1-token reflection → project (higher priority) kept,
-    // resource dropped first.
-    const deps = makeDeps(store);
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), deps);
-
-    const contents = out.messages.map((m) => m.content);
-    expect(contents).toContain("PROJ");
-    expect(contents).not.toContain("RES");
-  });
-
-  it("does not emit any lane / routing field — only context text", async () => {
+  it("does not emit any lane / routing field — only the block + metadata", async () => {
     const store = makeFakeStore({
       projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "x" }),
-      recentMessages: [makeRaw("r1", "user", "y")],
     });
-    const out = await assembleInjectedContext(baseInput(), deps(store));
-
-    for (const m of out.messages) {
-      expect(Object.keys(m).sort()).toEqual(["content", "role", "source"]);
-    }
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store));
+    expect(Object.keys(out).sort()).toEqual(["memoryBlock", "metadata"]);
     expect(out).not.toHaveProperty("lane");
     expect(out.metadata).not.toHaveProperty("lane");
   });
 });
-
-function deps(store: MemoryStore): InjectDeps {
-  return makeDeps(store);
-}

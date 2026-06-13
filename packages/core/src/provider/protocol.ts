@@ -20,7 +20,6 @@ export type NativePassthroughDisableReason =
   | "missing_native_request"
   | "source_protocol_is_lingua_franca"
   | "protocol_mismatch"
-  | "memory_inject_may_rewrite_request"
   | "fallback_may_change_provider_protocol"
   | "provider_requires_compatibility_rewrite"
   | "provider_lacks_passthrough";
@@ -77,9 +76,12 @@ export function canUseNativePassthrough(
   // stream requests, nativePassthrough for non-stream), so a stream is no longer a
   // blocker here. The byte-faithful SSE forward ELIMINATES the SSE re-mapping state
   // machine (principle 8) rather than replacing it.
-  if (input.request.metadata.memory_mode === "inject") {
-    return { ok: false, reason: "memory_inject_may_rewrite_request" };
-  }
+  // Memory inject is NO LONGER a blocker (#217 Phase 4 PREFIX model). Inject is now
+  // ADDITIVE: the pipeline prepends the assembled memory block into the native
+  // carrier's `system`/`instructions` and keeps `messages`/`input` VERBATIM, so the
+  // native_request stays self-consistent (memory in the system level, live turns
+  // untouched). Passthrough can therefore fire WITH memory — there is no longer a
+  // request rewrite for the guard to defend against.
   if (input.fallbackMayUseDifferentProviderProtocol) {
     return { ok: false, reason: "fallback_may_change_provider_protocol" };
   }
