@@ -15,7 +15,7 @@
 //    (principle 2), rather than letting a later provider silently shadow an
 //    earlier one at runtime.
 
-import type { ProviderConfig as SharedProviderConfig } from "@helm/shared";
+import type { ProviderConfig as SharedProviderConfig, TargetProviderProtocol } from "@helm/shared";
 
 // A single provider's config (post-validation). This is structurally a SUBSET of
 // `@helm/shared`'s unified ProviderConfig (which now also carries name + models[]
@@ -30,6 +30,7 @@ export interface ProviderConfig {
   // (the per-name client is pre-built in providerClients), so an empty value is
   // acceptable for OAuth providers.
   api_key_env?: string;
+  targetProviderProtocol?: TargetProviderProtocol;
   models: Array<{
     alias: string; // internal alias, e.g. "cheap_model", "openai/auto"
     provider_model: string; // the provider's real model id, e.g. "gpt-4o-mini"
@@ -47,6 +48,7 @@ export interface ResolvedProvider {
   // (issue #38) carry no api_key_env and the executor never reads it (it dispatches
   // by providerName to a pre-built client).
   apiKeyEnv?: string;
+  targetProviderProtocol: TargetProviderProtocol;
 }
 
 // Structured resolve/build errors — unknown alias (resolve-time) and duplicate
@@ -92,6 +94,7 @@ export function createProviderRegistry(providers: ProviderConfig[]): ProviderReg
         providerModel: model.provider_model,
         baseUrl: provider.base_url,
         apiKeyEnv: provider.api_key_env,
+        targetProviderProtocol: provider.targetProviderProtocol ?? "openai_chat",
       });
     }
   }
@@ -137,6 +140,7 @@ export function toRegistryProviders(
     // registry never reads it to fetch a credential (the per-name client is
     // pre-built in providerClients).
     api_key_env: p.api_key_env ?? "",
+    targetProviderProtocol: p.targetProviderProtocol,
     models: p.models.map((m) => ({ alias: m.alias, provider_model: m.provider_model })),
   }));
 }

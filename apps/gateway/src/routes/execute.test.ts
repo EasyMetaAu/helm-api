@@ -44,6 +44,7 @@ function registry(map: Record<string, string>): ProviderRegistry {
           providerModel: pm,
           baseUrl: "http://x",
           apiKeyEnv: "X",
+          targetProviderProtocol: "openai_chat",
         },
       };
     },
@@ -66,6 +67,7 @@ function registryWithProviders(
           providerModel: hit.providerModel,
           baseUrl: "http://x",
           apiKeyEnv: "X",
+          targetProviderProtocol: "openai_chat",
         },
       };
     },
@@ -516,6 +518,7 @@ describe("createExecute — gateway execution adapter", () => {
               providerModel: "model-a",
               baseUrl: "http://a",
               apiKeyEnv: "A_KEY",
+              targetProviderProtocol: "openai_chat",
             },
           };
         if (alias === "b")
@@ -527,6 +530,7 @@ describe("createExecute — gateway execution adapter", () => {
               providerModel: "model-b",
               baseUrl: "http://b",
               apiKeyEnv: "B_KEY",
+              targetProviderProtocol: "openai_chat",
             },
           };
         return { ok: false, error: { kind: "unknown_alias", alias } };
