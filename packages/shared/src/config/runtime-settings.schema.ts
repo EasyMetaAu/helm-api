@@ -26,8 +26,14 @@ export const RuntimeSettingsSchema = z.object({
   // posture. When off, the capture path is skipped entirely (zero storage).
   capture_payloads: z.boolean().default(true),
   // Forward a same-protocol request body verbatim to the native upstream,
-  // bypassing the lossy IR translation round-trip. Default OFF (merge ≠ enable).
-  native_protocol_passthrough: z.boolean().default(false),
+  // bypassing the lossy IR translation round-trip. Default ON: when the inbound
+  // protocol already equals the upstream wire protocol (e.g. Anthropic
+  // /v1/messages → an Anthropic backend) the verbatim forward is higher-fidelity
+  // and cache-friendlier than translating. The guard still falls back to
+  // translation for openai_chat (lingua franca), cross-protocol routes, and
+  // heterogeneous fallback chains, so turning this ON is safe; flip it OFF here to
+  // force every request back through the IR round-trip.
+  native_protocol_passthrough: z.boolean().default(true),
   // Auto-prune captured payloads older than this many days. Bounds the storage
   // footprint and the plaintext-exposure window. Capped at 10 years.
   payload_retention_days: z.number().int().positive().max(3650).default(30),

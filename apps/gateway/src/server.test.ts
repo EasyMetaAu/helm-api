@@ -55,11 +55,12 @@ describe("estimateRequestTokens", () => {
 });
 
 describe("native_protocol_passthrough runtime flag", () => {
-  it("defaults OFF (merging the feature must not enable it)", () => {
+  it("defaults ON (same-protocol passthrough is the default posture)", () => {
     // The whole-object default — the SAME schema the gateway loads runtime
-    // settings through. An empty blob must parse to passthrough OFF.
+    // settings through. An empty blob must parse to passthrough ON; cross-protocol
+    // and openai_chat traffic still falls back to translation inside the guard.
     const parsed = RuntimeSettingsSchema.parse({});
-    expect(parsed.native_protocol_passthrough).toBe(false);
+    expect(parsed.native_protocol_passthrough).toBe(true);
   });
 });
 

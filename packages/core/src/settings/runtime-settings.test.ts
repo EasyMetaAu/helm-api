@@ -33,7 +33,7 @@ describe("defaultSettingsFromConfig", () => {
   it("seeds rate_limit_enabled from runtime config, schema defaults for the rest", () => {
     expect(defaultSettingsFromConfig(cfg(true))).toEqual({
       capture_payloads: true,
-      native_protocol_passthrough: false,
+      native_protocol_passthrough: true,
       payload_retention_days: 30,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 0,

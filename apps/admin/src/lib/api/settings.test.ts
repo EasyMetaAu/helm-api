@@ -47,7 +47,7 @@ describe('settings api client', () => {
     expect(s).toEqual({
       capture_payloads: true,
       payload_retention_days: 30,
-      native_protocol_passthrough: false,
+      native_protocol_passthrough: true,
       rate_limit_enabled: false,
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
