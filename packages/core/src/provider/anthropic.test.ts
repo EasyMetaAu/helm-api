@@ -61,6 +61,97 @@ describe("openaiToAnthropicRequest", () => {
     expect(body.tools as unknown[]).toHaveLength(1);
   });
 
+  it("preserves multipart tool-result content blocks for native Anthropic", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "t1", type: "function", function: { name: "inspect", arguments: "{}" } },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "t1",
+          content: [
+            { type: "text", text: "chart screenshot" },
+            { type: "image", url: "data:image/png;base64,abc123", mediaType: "image/png" },
+            { type: "document", data: "JVBERi0=", mediaType: "application/pdf", filename: "r.pdf" },
+          ],
+        },
+      ],
+    });
+
+    const msgs = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    expect(msgs[1]?.content[0]).toEqual({
+      type: "tool_result",
+      tool_use_id: "t1",
+      content: [
+        { type: "text", text: "chart screenshot" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "abc123" } },
+        {
+          type: "document",
+          source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+          title: "r.pdf",
+        },
+      ],
+    });
+  });
+
+  it("preserves document filename for uploaded file and remote url sources", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "document", fileId: "file_123", filename: "uploaded.pdf" },
+            { type: "document", url: "https://example.com/report.pdf", filename: "remote.pdf" },
+          ],
+        },
+      ],
+    });
+
+    const msgs = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content).toEqual([
+      {
+        type: "document",
+        source: { type: "file", file_id: "file_123" },
+        title: "uploaded.pdf",
+      },
+      {
+        type: "document",
+        source: { type: "url", url: "https://example.com/report.pdf" },
+        title: "remote.pdf",
+      },
+    ]);
+  });
+
+  it("preserves assistant thinking history blocks for native Anthropic", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "assistant",
+          content: "visible answer",
+          thinking_blocks: [
+            { type: "thinking", thinking: "private chain", signature: "sig-1" },
+            { type: "redacted_thinking", data: "encrypted" },
+          ],
+        },
+      ],
+    });
+
+    const msgs = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content).toEqual([
+      { type: "thinking", thinking: "private chain", signature: "sig-1" },
+      { type: "redacted_thinking", data: "encrypted" },
+      { type: "text", text: "visible answer" },
+    ]);
+  });
+
   it("groups consecutive tool results into one immediate Anthropic user turn", () => {
     const body = openaiToAnthropicRequest({
       model: "m",

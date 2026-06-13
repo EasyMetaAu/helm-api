@@ -295,6 +295,52 @@ describe("transformResponseIn", () => {
     const text = out.content.find((b) => b.type === "text");
     expect(text).toMatchObject({ type: "text", text: "the answer is 42" });
   });
+
+  it("back-translates thinking_blocks -> redacted_thinking blocks", () => {
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: "answer",
+              thinking_blocks: [{ type: "redacted_thinking", data: "encrypted-blob" }],
+            },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+
+    expect(out.content[0]).toEqual({ type: "redacted_thinking", data: "encrypted-blob" });
+    expect(out.content[1]).toEqual({ type: "text", text: "answer" });
+  });
+
+  it("preserves visible reasoning_content alongside redacted_thinking blocks", () => {
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: "answer",
+              reasoning_content: "visible reasoning",
+              thinking_blocks: [{ type: "redacted_thinking", data: "encrypted-blob" }],
+            },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+
+    expect(out.content).toEqual([
+      { type: "redacted_thinking", data: "encrypted-blob" },
+      { type: "thinking", thinking: "visible reasoning" },
+      { type: "text", text: "answer" },
+    ]);
+  });
 });
 
 // —— P4: usage cache_creation breakdown + thinking_tokens ——————————————————————
@@ -441,6 +487,30 @@ describe("transformNativeResponseToIR — P4 usage + stop_reason", () => {
       usage: { input_tokens: 5, output_tokens: 0 },
     });
     expect(ir.provider_raw?.stop_details).toEqual({ type: "refusal", reason: "policy" });
+  });
+
+  it("preserves inbound redacted_thinking blocks in IR thinking_blocks", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      type: "message",
+      role: "assistant",
+      model: "claude",
+      content: [
+        { type: "redacted_thinking", data: "encrypted-blob" },
+        { type: "text", text: "ok" },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 2 },
+    });
+
+    const message = ir.choices[0]?.message;
+    expect(message?.thinking_blocks).toEqual([
+      { type: "redacted_thinking", data: "encrypted-blob" },
+    ]);
+    expect(message?.content).toEqual([{ type: "text", text: "ok" }]);
+
+    const roundTrip = transformResponseIn(ir);
+    expect(roundTrip.content[0]).toEqual({ type: "redacted_thinking", data: "encrypted-blob" });
   });
 });
 

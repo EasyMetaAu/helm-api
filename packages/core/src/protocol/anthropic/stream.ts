@@ -1,6 +1,12 @@
 import { z } from "zod";
 import type { IRChunk } from "../gemini/gemini-types.js";
-import { IRAnnotationSchema, IRLogprobsSchema, type IRResponse, type IRUsage } from "../ir.js";
+import {
+  IRAnnotationSchema,
+  IRLogprobsSchema,
+  type IRResponse,
+  type IRThinkingBlock,
+  type IRUsage,
+} from "../ir.js";
 import { resolveReasoning } from "../reasoning.js";
 import {
   type AnthropicStopReason,
@@ -63,6 +69,12 @@ const OpenAIChunkDeltaSchema = z.object({
   // the delta. Optional + shared shapes (ir.ts) so the identity OpenAI stream carries
   // them through to every downstream protocol consumer.
   reasoning_content: z.string().nullable().optional(),
+  // Internal synthesis extension: real OpenAI chunks do not set this. It lets a
+  // cached/non-stream Anthropic response keep opaque redacted_thinking blocks while
+  // still using the same stream state machine.
+  thinking_blocks: z
+    .array(z.object({ type: z.string(), data: z.string().optional() }).passthrough())
+    .optional(),
   // refusal fragments (OpenAI safety refusal); surfaced to the Responses refusal events.
   refusal: z.string().nullable().optional(),
   annotations: z.array(IRAnnotationSchema).optional(),
@@ -125,10 +137,15 @@ const AnthropicThinkingBlockStartSchema = z.object({
   type: z.literal("thinking"),
   thinking: z.string(),
 });
+const AnthropicRedactedThinkingBlockStartSchema = z.object({
+  type: z.literal("redacted_thinking"),
+  data: z.string(),
+});
 const AnthropicStartContentBlockSchema = z.discriminatedUnion("type", [
   AnthropicTextBlockStartSchema,
   AnthropicToolUseBlockStartSchema,
   AnthropicThinkingBlockStartSchema,
+  AnthropicRedactedThinkingBlockStartSchema,
 ]);
 
 const AnthropicTextDeltaSchema = z.object({ type: z.literal("text_delta"), text: z.string() });
@@ -376,6 +393,18 @@ export async function* convertOpenAIStreamToAnthropic(
       yield thinkingDeltaEvent(state.thinkingBlockIndex, delta.reasoning_content);
     }
 
+    // —— redacted thinking: opaque block start/stop, no deltas. Used by synthesized
+    // Anthropic streams so native redacted history survives cache hits/non-stream relays.
+    for (const block of delta?.thinking_blocks ?? []) {
+      if (block.type !== "redacted_thinking" || typeof block.data !== "string") continue;
+      const i = allocBlock(state);
+      yield {
+        type: "content_block_start",
+        index: i,
+        content_block: { type: "redacted_thinking", data: block.data },
+      };
+    }
+
     // —— text: lazily open the text block, then stream text_delta. ——
     if (delta?.content) {
       if (state.textBlockIndex === null) {
@@ -518,6 +547,11 @@ export async function* synthesizeSSEFromJSON(resp: IRResponse): AsyncIterable<An
     const { reasoningText } = resolveReasoning(message);
     if (reasoningText !== undefined && reasoningText !== "")
       delta.reasoning_content = reasoningText;
+    const redactedThinking = (message.thinking_blocks ?? []).filter(
+      (block): block is IRThinkingBlock & { type: "redacted_thinking"; data: string } =>
+        block.type === "redacted_thinking" && typeof block.data === "string",
+    );
+    if (redactedThinking.length > 0) delta.thinking_blocks = redactedThinking;
   }
 
   const toolCalls = message?.tool_calls ?? [];
@@ -635,6 +669,16 @@ export async function* convertAnthropicStreamToIR(
                     },
                   ],
                 },
+              },
+            ],
+          };
+        } else if (block.type === "redacted_thinking") {
+          yield {
+            ...base(),
+            choices: [
+              {
+                index: 0,
+                delta: { thinking_blocks: [{ type: "redacted_thinking", data: block.data }] },
               },
             ],
           };

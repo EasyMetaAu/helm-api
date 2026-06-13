@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-13 · Anthropic 互译保真：tool_result 多模态 + thinking/redacted_thinking 历史块（docs/05；原则 1/7/8）
+
+- **缘起**：继续追查 Anthropic 原生请求经 IR 再回 Anthropic 时的保真问题。上轮已修普通 user content 的 image/document 透传，但进一步审计发现三处仍会丢 Anthropic 原生信息：`tool_result.content` 为 block[] 时只保留 text，image/document 被 JSON 字符串化；document `title` 没有进 IR `filename`；assistant 历史里的 `thinking` / `redacted_thinking` request/response block 与缓存命中合成 SSE 路径无法按原块恢复。这类丢失会让模型看不到工具返回的截图/文档，或破坏 Claude extended-thinking conversation history，属于协议根因，不是 UI/循环保护问题。
+- **修复**：`protocol/anthropic/request.ts` 把 `tool_result.content` 的 text/image/document block 映射成 IR multipart tool message，并在 `transformRequestIn` 重新输出 block[]；document `title` ↔ IR `filename` 双向保留；assistant `thinking_blocks` 改为挂在对应 IR message 上，出站时排在可见 text/tool_use 之前恢复。`provider/anthropic.ts` 同步修订 native subscription 执行器，避免生产路径继续把 multipart tool result JSON.stringify 或丢 thinking history。
+- **响应/流式补齐**：`response.ts` 与 `stream.ts` 新增 `redacted_thinking` 支持：非流式 native response 入站进 `message.thinking_blocks`，IR→Anthropic response 精确保留 redacted block；Anthropic SSE 入站把 redacted block start 映射为 IR `thinking_blocks` delta；非流式/缓存命中合成 Anthropic SSE 也通过同一状态机输出 redacted block start/stop。`reasoning.ts` 不再把 redacted block 解析成空 visible thinking，避免把 opaque payload 变成错误推理文本。
+- **验证**：TDD 红→绿，新增 request/provider/response/stream 回归覆盖 multipart tool_result、document title、assistant thinking/redacted_thinking 历史、redacted response 与 synthesized SSE。Focused 验证 203 绿（Anthropic protocol + provider + gateway pipeline/execute）；`pnpm typecheck`、`pnpm lint` 全绿。
+
 ## 2026-06-12 · Claude Code 计费归因块：入站剥离 + 透传客户端真实版本重注入「可缓存」头（docs/05；anti-ban；原则 1/4/7）
 
 - **缘起**：用户报告 admin 捕获 payload「数据全是重复的」，怀疑 helm 拼接 bug。结论：**helm 无 bug**（`messages.ts` parse 前 `c.req.text()` 原样捕获）。畸形是 Claude Code ≥2.1.29 客户端行为——把 `x-anthropic-billing-header: cc_version=<v>.<3hex>; cc_entrypoint=cli; cch=<5hex>;` 注入为 top-level `system[0]`，且 **3hex 后缀和 cch 都按请求内容哈希、逐请求轮换**（从真实 2.1.175 二进制 `z76()` 确认：`cch=00000` 是 JS 里的 sentinel，native 层 egress 前替换成真实 5hex，所以 helm 收到的 body 已是 `fd3e2`/`8f46b` 真值）。prompt cache 严格前缀匹配 → 首块每轮变 → 生产实测**每轮 `cached_tokens=0` + ~42.8K 缓存重写 + 150–200K Opus 输入全额未缓存**（≈10×）。上游已知：anthropics/claude-code#24168、#40652、motiful/cc-cache-audit。
@@ -29,18 +36,13 @@
 - **追加修复**：review 发现 non-chat 协议的 admin 流式 replay 没有 budget deps 时会跳过 streamed usage 盖戳，导致 replay telemetry 被 dashboard 少算；已把 shared `messages-pipeline` 的 token stamp 从 budget-only 分支移出，budget settle 仍保持 gated。
 - **验证**：`pnpm typecheck`/`lint` 全绿；`pnpm test` 绿（唯一 full-run 红是已知 PGlite 5s 超时 flake `memory-jobs.test.ts`，隔离重跑 8/8 过——见 [[pnpm-test-pglite-flake]]）。新覆盖：redaction guard、schema round-trip、gateway token-stamp（OpenAI+Anthropic）、aggregate contract（**两 adapter** sqlite+pglite）、stats route、`formatTokens`、dashboard locale coverage。13 个迁移-scoped 测试因预置 applied 版本列表少了 v22/v21 而红，已补齐（图表渲染本身 jsdom 不可测）。
 
-## 2026-06-12 · 四协议互译保真补丁（Responses tool_choice / Anthropic native controls / Gemini safety；CLAUDE.md 原则 1/7/8；docs/05/07）
-
-- **缘起**：继续对照本地 LiteLLM review 四协议互译缺口。剩余问题集中在“字段形状接近但不完全相同”的边缘：Responses `tool_choice` 在 Responses 与 Chat 之间形状不同；Responses `previous_response_id` 的 tool-output continuation 需要服务端历史；Anthropic native/control 参数进 IR 后丢失；Gemini `safetySettings` 没有 round-trip；Anthropic provider 使用 `context_management` / `speed:"fast"` 时缺 feature beta header。
-- **修复**：Responses transformer 把 inbound `{type:"function",name}` 规范成 OpenAI Chat `{type:"function",function:{name}}`，outbound 反向还原；Codex Responses provider 同步把 Chat `tool_choice` 发成 Responses 顶层 `name` 形状。Anthropic transformer 将 `context_management`、`mcp_servers`、`container`、`speed`、`output_config` 保存在 `provider_raw` 并在 Anthropic native out 重新发出，`context_management` 数组按 LiteLLM 兼容形状包成 `{edits:[...]}`。Anthropic provider 透传这些 native controls，并按 body 动态补 `context-management-2025-06-27`、`compact-2026-01-12`、`fast-mode-2026-02-01` beta。Gemini transformer 将 `safetySettings` 存入 `provider_raw.safety_settings` 并在 Gemini native out 恢复。
-- **取舍/仍开放**：Helm 目前没有 Responses object/session/history store，所以带 `previous_response_id` 且只提交历史 tool-output continuation 的请求不能假装可处理；本轮选择 **fail-closed**，返回明确错误，避免把缺少本地 `function_call` 上下文的 `function_call_output` 转成无效 Chat tool message。单纯携带 `previous_response_id` 的普通字符串 input 仍保留在 `provider_raw` 用于后续 Responses-native round-trip；完整 continuation 支持需要 response store、input_items/history 查询和 tool-call correlation。
-- **验证**：TDD 红→绿。新增/更新 focused regression 覆盖 Responses `tool_choice` 双向规范化、`previous_response_id` continuation fail-closed、Codex provider `tool_choice`、Anthropic native passthrough + beta headers、Gemini `safetySettings` round-trip，以及 gateway 不把 `previous_response_id` / `truncation` 泄漏到 OpenAI-compatible upstream。验证命令：focused Vitest 244 绿；`pnpm typecheck` 绿；`pnpm lint` 绿；`pnpm test` 初跑因本地 `better-sqlite3` ABI 137 vs Node 25 ABI 141 失败，执行 `pnpm --filter @helm/core rebuild better-sqlite3` 后完整 `pnpm test` 240 files / 3036 tests 绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-12 · 四协议互译保真补丁：Responses `tool_choice` 双向规范化、`previous_response_id` continuation fail-closed、Anthropic native controls/provider beta 透传、Gemini `safetySettings` round-trip；缺完整 Responses object/session store 前不伪装支持历史 tool-output continuation。
 
 ### 2026-06-12 · 新增 claude-fable-5 配置支持（原则 2/6；docs/04）：能力取自 OpenRouter API（ctx 1M / max_out 128K / text+image+file→document，pricing 未落库）；完全镜像 claude-opus 模式——`lanes.yaml` 新 `claude-fable` lane 以 native OAuth 别名领衔、`fallback:[premium]`，`model-aliases.yaml` 加 `claude-fable-*` glob；用户拍板**去掉 OpenRouter 静态镜像兜底**；native 别名靠运行时 OAuth pool 注册不进 providers.yaml。TDD samples+catalog 98 绿。部署坑：需手动同步 `/opt/helm-api/config` 两个 yaml（[[deploy-never-overwrite-config]]）。
 
