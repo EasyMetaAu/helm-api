@@ -78,6 +78,10 @@ const AnthropicThinkingBlockSchema = z.object({
   thinking: z.string(),
   signature: z.string().optional(),
 });
+const AnthropicRedactedThinkingBlockSchema = z.object({
+  type: z.literal("redacted_thinking"),
+  data: z.string(),
+});
 // Model-generated image block on the response (P7). source is base64 (data+media_type)
 // or a remote url; mirrors the request-side image block shape.
 const AnthropicImageBlockSchema = z.object({
@@ -95,6 +99,7 @@ const AnthropicContentBlockSchema = z.discriminatedUnion("type", [
   AnthropicTextBlockSchema,
   AnthropicToolUseBlockSchema,
   AnthropicThinkingBlockSchema,
+  AnthropicRedactedThinkingBlockSchema,
   AnthropicImageBlockSchema,
 ]);
 type AnthropicContentBlock = z.infer<typeof AnthropicContentBlockSchema>;
@@ -321,17 +326,31 @@ function toContentBlocks(
   const blocks: AnthropicContentBlock[] = [];
   const { content } = message;
 
-  // Reasoning may arrive on EITHER the content-block thinking parts OR the flat
-  // reasoning_content/thinking_blocks carriers (e.g. an OpenAI-origin response).
-  // resolveReasoning unifies them; Anthropic emits thinking blocks FIRST (the
-  // native order — reasoning precedes the answer). (P6)
-  const { thinkingParts } = resolveReasoning(message);
-  for (const part of thinkingParts) {
-    blocks.push({
-      type: "thinking",
-      thinking: part.text,
-      ...(part.signature !== undefined ? { signature: part.signature } : {}),
-    });
+  // Anthropic-native thinking history may include redacted_thinking blocks. When the
+  // structured carrier is present, render it exactly so redacted payloads do not turn
+  // into empty visible thinking blocks. Otherwise fall back to resolveReasoning for
+  // OpenAI/Gemini/Responses-origin flat reasoning. (P6)
+  if (message.thinking_blocks !== undefined && message.thinking_blocks.length > 0) {
+    for (const block of message.thinking_blocks) {
+      if (block.type === "redacted_thinking" && typeof block.data === "string") {
+        blocks.push({ type: "redacted_thinking", data: block.data });
+      } else if (typeof block.thinking === "string") {
+        blocks.push({
+          type: "thinking",
+          thinking: block.thinking,
+          ...(block.signature !== undefined ? { signature: block.signature } : {}),
+        });
+      }
+    }
+  } else {
+    const { thinkingParts } = resolveReasoning(message);
+    for (const part of thinkingParts) {
+      blocks.push({
+        type: "thinking",
+        thinking: part.text,
+        ...(part.signature !== undefined ? { signature: part.signature } : {}),
+      });
+    }
   }
 
   if (typeof content === "string") {
@@ -447,6 +466,9 @@ const InboundToolUseBlockSchema = z
 const InboundThinkingBlockSchema = z
   .object({ type: z.literal("thinking"), thinking: z.string(), signature: z.string().optional() })
   .passthrough();
+const InboundRedactedThinkingBlockSchema = z
+  .object({ type: z.literal("redacted_thinking"), data: z.string() })
+  .passthrough();
 // Model-generated image block on an inbound native response (P7) -> IRMessage.images.
 const InboundImageBlockSchema = z
   .object({
@@ -466,6 +488,7 @@ const InboundContentBlockSchema = z.union([
   InboundTextBlockSchema,
   InboundToolUseBlockSchema,
   InboundThinkingBlockSchema,
+  InboundRedactedThinkingBlockSchema,
   InboundImageBlockSchema,
   InboundUnknownBlockSchema,
 ]);
@@ -512,6 +535,7 @@ export function transformNativeResponseToIR(
   const parts: IRContentPart[] = [];
   const toolCalls: IRToolCall[] = [];
   const images: NonNullable<IRMessage["images"]> = [];
+  const redactedThinkingBlocks: NonNullable<IRMessage["thinking_blocks"]> = [];
   for (const block of res.content) {
     if (block.type === "text") {
       parts.push({ type: "text", text: (block as z.infer<typeof InboundTextBlockSchema>).text });
@@ -533,6 +557,9 @@ export function transformNativeResponseToIR(
         text: b.thinking,
         ...(b.signature !== undefined ? { signature: b.signature } : {}),
       });
+    } else if (block.type === "redacted_thinking") {
+      const b = block as z.infer<typeof InboundRedactedThinkingBlockSchema>;
+      redactedThinkingBlocks.push({ type: "redacted_thinking", data: b.data });
     } else if (block.type === "tool_use") {
       const b = block as z.infer<typeof InboundToolUseBlockSchema>;
       // Restore the ORIGINAL tool name when the request-side sanitizer map is
@@ -553,12 +580,19 @@ export function transformNativeResponseToIR(
   // Lift the thinking content parts onto the flat reasoning_content/thinking_blocks
   // carriers so a downstream OpenAI client (which reads message.reasoning_content,
   // not a content-block thinking part) receives the reasoning losslessly (P6).
-  const message: IRMessage = liftReasoningToFlat({
+  const lifted = liftReasoningToFlat({
     role: "assistant",
     content: parts.length > 0 ? parts : toolCalls.length > 0 || images.length > 0 ? null : "",
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
     ...(images.length > 0 ? { images } : {}),
   });
+  const message: IRMessage =
+    redactedThinkingBlocks.length > 0
+      ? {
+          ...lifted,
+          thinking_blocks: [...(lifted.thinking_blocks ?? []), ...redactedThinkingBlocks],
+        }
+      : lifted;
 
   const rawStop = res.stop_reason ?? null;
   const finishReason = rawStop !== null ? (STOP_REASON_TO_FINISH[rawStop] ?? "stop") : null;

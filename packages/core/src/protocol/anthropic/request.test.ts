@@ -184,8 +184,68 @@ describe("anthropic transformRequestOut", () => {
     });
   });
 
-  // Rule 4: thinking + signature kept in the IR extension, not normal content.
-  it("preserves thinking + signature in the IR extension field", () => {
+  it("preserves multipart tool_result content through an Anthropic round-trip", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_1", name: "inspect", input: {} }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [
+                { type: "text", text: "chart screenshot" },
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/png", data: "abc123" },
+                },
+                {
+                  type: "document",
+                  source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+                  title: "report.pdf",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const ir = transformRequestOut(req);
+    expect(() => IRRequestSchema.parse(ir)).not.toThrow();
+    const toolMsg = ir.messages.find((m) => m.role === "tool");
+    expect(toolMsg?.content).toEqual([
+      { type: "text", text: "chart screenshot" },
+      { type: "image", url: "data:image/png;base64,abc123", mediaType: "image/png" },
+      { type: "document", data: "JVBERi0=", mediaType: "application/pdf", filename: "report.pdf" },
+    ]);
+
+    const out = transformRequestIn(ir);
+    const outboundToolResult = out.messages[1]?.content[0] as {
+      type?: string;
+      content?: unknown;
+    };
+    expect(outboundToolResult).toMatchObject({ type: "tool_result", tool_use_id: "toolu_1" });
+    expect(outboundToolResult.content).toEqual([
+      { type: "text", text: "chart screenshot" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "abc123" } },
+      {
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+        title: "report.pdf",
+      },
+    ]);
+  });
+
+  // Rule 4: thinking + signature kept out of normal content, but attached to the
+  // assistant message so Anthropic conversation history can round-trip.
+  it("preserves thinking + signature on the assistant message and round-trips it", () => {
     const req = {
       model: "claude-3-5-sonnet",
       max_tokens: 256,
@@ -208,14 +268,20 @@ describe("anthropic transformRequestOut", () => {
     const parts = assistantMsg?.content as Array<Record<string, unknown>>;
     expect(parts).toEqual([{ type: "text", text: "the answer is 42" }]);
 
-    // It is retained as per-message thinking blocks in provider_raw (distinct from
-    // the request-level thinking CONFIG, which rides ir.thinking).
-    expect(ir.provider_raw?.thinking_blocks).toEqual([
-      { type: "thinking", text: "step 1: reason", signature: "sig-xyz" },
+    // It is retained on the assistant message (distinct from the request-level
+    // thinking CONFIG, which rides ir.thinking).
+    expect(assistantMsg?.thinking_blocks).toEqual([
+      { type: "thinking", thinking: "step 1: reason", signature: "sig-xyz" },
+    ]);
+
+    const out = transformRequestIn(ir);
+    expect(out.messages[0]?.content).toEqual([
+      { type: "thinking", thinking: "step 1: reason", signature: "sig-xyz" },
+      { type: "text", text: "the answer is 42" },
     ]);
   });
 
-  it("preserves redacted_thinking blocks too", () => {
+  it("preserves redacted_thinking blocks on the assistant message and round-trips them", () => {
     const req = {
       model: "claude-3-5-sonnet",
       max_tokens: 256,
@@ -231,7 +297,16 @@ describe("anthropic transformRequestOut", () => {
     };
     const ir = transformRequestOut(req);
     expect(() => IRRequestSchema.parse(ir)).not.toThrow();
-    expect(ir.provider_raw?.thinking_blocks).toHaveLength(1);
+    const assistantMsg = ir.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg?.thinking_blocks).toEqual([
+      { type: "redacted_thinking", data: "encrypted-blob" },
+    ]);
+
+    const out = transformRequestIn(ir);
+    expect(out.messages[0]?.content).toEqual([
+      { type: "redacted_thinking", data: "encrypted-blob" },
+      { type: "text", text: "ok" },
+    ]);
   });
 
   // Rule 7: tools input_schema -> function.parameters; cross-cutting fields pass through.
@@ -751,6 +826,33 @@ describe("anthropic document input (P7 multimodal)", () => {
       data: "JVBERi0=",
       mediaType: "application/pdf",
     });
+  });
+
+  it("round-trips an Anthropic document title as an IR filename", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    });
+
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "document", filename: "report.pdf" });
+
+    const out = transformRequestIn(ir);
+    const block = out.messages[0]?.content[0] as { title?: string };
+    expect(block.title).toBe("report.pdf");
   });
 
   it("normalizes a url document block into an IR document part", () => {

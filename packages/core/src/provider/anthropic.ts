@@ -217,6 +217,35 @@ function textBlocksFromContent(content: unknown, messageCacheControl?: unknown):
   return [];
 }
 
+function thinkingBlocksFromMessage(message: Record<string, unknown>): AnthropicBlock[] {
+  const blocks = message.thinking_blocks;
+  if (!Array.isArray(blocks)) return [];
+  return blocks.flatMap((block): AnthropicBlock[] => {
+    if (!block || typeof block !== "object") return [];
+    const b = block as Record<string, unknown>;
+    if (b.type === "redacted_thinking" && typeof b.data === "string") {
+      return [{ type: "redacted_thinking", data: b.data }];
+    }
+    if (typeof b.thinking === "string") {
+      return [
+        {
+          type: "thinking",
+          thinking: b.thinking,
+          ...(typeof b.signature === "string" ? { signature: b.signature } : {}),
+        },
+      ];
+    }
+    return [];
+  });
+}
+
+function toolResultContentFromContent(content: unknown): string | AnthropicBlock[] {
+  if (content === null || content === undefined) return "";
+  if (typeof content === "string") return content;
+  const blocks = textBlocksFromContent(content);
+  return blocks.length > 0 ? blocks : JSON.stringify(content);
+}
+
 // Reproduce Claude Code's `x-anthropic-billing-header` attribution block as the FIRST
 // system entry — the exact slot (system[0], ahead of the "You are Claude Code…"
 // preamble) real CC emits it. `clientIdentity` is the inbound CLI's own
@@ -306,7 +335,7 @@ function toAnthropicMessages(messages: Array<Record<string, unknown>>): Anthropi
           {
             type: "tool_result",
             tool_use_id: String(m.tool_call_id ?? ""),
-            content: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
+            content: toolResultContentFromContent(m.content),
             ...(m.cache_control !== undefined ? { cache_control: m.cache_control } : {}),
           },
         ],
@@ -314,7 +343,10 @@ function toAnthropicMessages(messages: Array<Record<string, unknown>>): Anthropi
       continue;
     }
     if (role === "assistant") {
-      const blocks: AnthropicBlock[] = textBlocksFromContent(m.content, m.cache_control);
+      const blocks: AnthropicBlock[] = [
+        ...thinkingBlocksFromMessage(m),
+        ...textBlocksFromContent(m.content, m.cache_control),
+      ];
       const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls : [];
       for (const tc of toolCalls as Array<Record<string, unknown>>) {
         const fn = (tc.function ?? {}) as Record<string, unknown>;

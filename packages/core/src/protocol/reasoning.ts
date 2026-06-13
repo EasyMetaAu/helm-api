@@ -92,11 +92,16 @@ export function resolveReasoning(message: IRMessage): {
   }
 
   if (message.thinking_blocks !== undefined && message.thinking_blocks.length > 0) {
-    const parts: IRThinkingPart[] = message.thinking_blocks.map((b) => ({
-      type: "thinking",
-      text: b.thinking ?? "",
-      ...(b.signature !== undefined ? { signature: b.signature } : {}),
-    }));
+    const parts: IRThinkingPart[] = message.thinking_blocks.flatMap((b): IRThinkingPart[] => {
+      if (b.type === "redacted_thinking") return [];
+      return [
+        {
+          type: "thinking",
+          text: b.thinking ?? "",
+          ...(b.signature !== undefined ? { signature: b.signature } : {}),
+        },
+      ];
+    });
     const text = parts
       .map((p) => p.text)
       .filter((t) => t !== "")

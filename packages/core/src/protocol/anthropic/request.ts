@@ -55,6 +55,7 @@ const AnthropicImageBlockSchema = z
 const AnthropicDocumentBlockSchema = z
   .object({
     type: z.literal("document"),
+    title: z.string().optional(),
     source: z
       .object({
         type: z.string(),
@@ -181,9 +182,11 @@ const AnthropicMessagesRequestSchema = z
 
 export type AnthropicMessagesRequest = z.infer<typeof AnthropicMessagesRequestSchema>;
 
-// Thinking blocks are kept out of the prompt content and stashed in the IR
-// `thinking` extension (the request-level reasoning/thinking passthrough bag).
-type IRThinkingExt = { type: "thinking"; text: string; signature?: string };
+// Thinking blocks are kept out of normal prompt text but attached to their assistant
+// message so Anthropic conversation history can be reconstructed in order.
+type AnthropicThinkingHistoryBlock =
+  | { type: "thinking"; thinking: string; signature?: string }
+  | { type: "redacted_thinking"; data: string };
 
 // Claude Code ≥2.1.29 injects a per-request billing attribution block as the FIRST
 // top-level system entry: "x-anthropic-billing-header: cc_version=<v>.<3hex>;
@@ -278,14 +281,15 @@ function imagePartFromSource(
 // —— document block source -> IR document part. base64 keeps data+media_type inline;
 // a url source -> document.url; an uploaded-file source -> document.fileId, so the
 // upload handle round-trips back to a {type:"file"} source losslessly (P7). ——————————
-function documentPartFromSource(
-  source: z.infer<typeof AnthropicDocumentBlockSchema>["source"],
-): IRContentPart {
+function documentPartFromBlock(block: z.infer<typeof AnthropicDocumentBlockSchema>): IRContentPart {
+  const source = block.source;
+  const title = typeof (block as { title?: unknown }).title === "string" ? block.title : undefined;
   if (source.type === "url" && source.url !== undefined) {
     return {
       type: "document",
       url: source.url,
       ...(source.media_type ? { mediaType: source.media_type } : {}),
+      ...(title !== undefined ? { filename: title } : {}),
     };
   }
   if (source.type === "file" && source.file_id !== undefined) {
@@ -293,6 +297,7 @@ function documentPartFromSource(
       type: "document",
       fileId: source.file_id,
       ...(source.media_type ? { mediaType: source.media_type } : {}),
+      ...(title !== undefined ? { filename: title } : {}),
     };
   }
   // base64 (or any inline-data source): keep data + media_type on the IR part.
@@ -300,6 +305,7 @@ function documentPartFromSource(
     type: "document",
     data: source.data ?? "",
     ...(source.media_type ? { mediaType: source.media_type } : {}),
+    ...(title !== undefined ? { filename: title } : {}),
   };
 }
 
@@ -323,10 +329,40 @@ function normalizeToolResultContent(content: unknown): IRMessage["content"] {
     const parts: IRContentPart[] = [];
     for (const block of content) {
       if (block && typeof block === "object" && "type" in block) {
-        const b = block as { type: string; text?: string };
+        const b = block as {
+          type: string;
+          text?: string;
+          source?: unknown;
+          cache_control?: unknown;
+        };
+        const cacheControl = b.cache_control;
         if (b.type === "text" && typeof b.text === "string") {
-          parts.push({ type: "text", text: b.text });
+          parts.push({
+            type: "text",
+            text: b.text,
+            ...(cacheControl !== undefined ? { cache_control: cacheControl } : {}),
+          });
           continue;
+        }
+        if (b.type === "image") {
+          const parsed = AnthropicImageBlockSchema.safeParse(block);
+          if (parsed.success) {
+            const part = imagePartFromSource(parsed.data.source);
+            if (cacheControl !== undefined && part.type === "image")
+              part.cache_control = cacheControl;
+            parts.push(part);
+            continue;
+          }
+        }
+        if (b.type === "document") {
+          const parsed = AnthropicDocumentBlockSchema.safeParse(block);
+          if (parsed.success) {
+            const part = documentPartFromBlock(parsed.data);
+            if (cacheControl !== undefined && part.type === "document")
+              part.cache_control = cacheControl;
+            parts.push(part);
+            continue;
+          }
         }
       }
       // Unknown tool_result sub-block: degrade to a JSON text placeholder (fail-open).
@@ -397,8 +433,6 @@ export function transformRequestOut(req: unknown): IRRequest {
   const parsed = AnthropicMessagesRequestSchema.parse(req);
 
   const messages: IRMessage[] = [];
-  const thinking: IRThinkingExt[] = [];
-
   // Rule 1: hoist the top-level system prompt to the head of messages (after
   // dropping the cache-busting Claude Code billing block, see stripBillingHeader).
   if (parsed.system !== undefined) {
@@ -418,6 +452,7 @@ export function transformRequestOut(req: unknown): IRRequest {
     const parts: IRContentPart[] = [];
     const toolCalls: IRToolCall[] = [];
     const toolResults: IRMessage[] = [];
+    const thinkingBlocks: AnthropicThinkingHistoryBlock[] = [];
 
     for (const block of m.content) {
       // Per-block cache_control (prompt-cache breakpoint) is preserved onto the IR part
@@ -441,9 +476,7 @@ export function transformRequestOut(req: unknown): IRRequest {
           break;
         }
         case "document": {
-          const part = documentPartFromSource(
-            (block as z.infer<typeof AnthropicDocumentBlockSchema>).source,
-          );
+          const part = documentPartFromBlock(block as z.infer<typeof AnthropicDocumentBlockSchema>);
           if (cacheControl !== undefined && part.type === "document")
             part.cache_control = cacheControl;
           parts.push(part);
@@ -452,16 +485,16 @@ export function transformRequestOut(req: unknown): IRRequest {
         case "thinking": {
           const b = block as z.infer<typeof AnthropicThinkingBlockSchema>;
           // Rule 4: kept in the IR extension, NOT in normal content.
-          thinking.push({
+          thinkingBlocks.push({
             type: "thinking",
-            text: b.thinking,
+            thinking: b.thinking,
             ...(b.signature !== undefined ? { signature: b.signature } : {}),
           });
           break;
         }
         case "redacted_thinking": {
           const b = block as z.infer<typeof AnthropicRedactedThinkingBlockSchema>;
-          thinking.push({ type: "thinking", text: b.data });
+          thinkingBlocks.push({ type: "redacted_thinking", data: b.data });
           break;
         }
         case "tool_use":
@@ -491,6 +524,7 @@ export function transformRequestOut(req: unknown): IRRequest {
         role: "assistant",
         content: parts.length > 0 ? parts : null,
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+        ...(thinkingBlocks.length > 0 ? { thinking_blocks: thinkingBlocks } : {}),
       });
     } else if (m.role === "system" || m.role === "developer") {
       // system/developer turn: keep the role so it folds into the system prompt
@@ -554,12 +588,6 @@ export function transformRequestOut(req: unknown): IRRequest {
     ...(Object.keys(providerRaw).length > 0 ? { provider_raw: providerRaw } : {}),
   };
 
-  // Per-message thinking BLOCKS (kept out of prompt content) live on provider_raw,
-  // never colliding with the request-level thinking CONFIG above. Merge if both.
-  if (thinking.length > 0) {
-    ir.provider_raw = { ...(ir.provider_raw ?? {}), thinking_blocks: thinking };
-  }
-
   // Final structural validation: the IR we hand downstream is always well-formed.
   return IRRequestSchema.parse(ir);
 }
@@ -603,8 +631,22 @@ export interface AnthropicDocumentBlockOut {
     | { type: "base64"; media_type: string; data: string }
     | { type: "url"; url: string }
     | { type: "file"; file_id: string };
+  title?: string;
   cache_control?: unknown;
 }
+export interface AnthropicThinkingBlockOut {
+  type: "thinking";
+  thinking: string;
+  signature?: string;
+}
+export interface AnthropicRedactedThinkingBlockOut {
+  type: "redacted_thinking";
+  data: string;
+}
+type AnthropicToolResultContentBlockOut =
+  | AnthropicTextBlockOut
+  | AnthropicImageBlockOut
+  | AnthropicDocumentBlockOut;
 export interface AnthropicToolUseBlockOut {
   type: "tool_use";
   id: string;
@@ -614,12 +656,14 @@ export interface AnthropicToolUseBlockOut {
 export interface AnthropicToolResultBlockOut {
   type: "tool_result";
   tool_use_id: string;
-  content: string;
+  content: string | AnthropicToolResultContentBlockOut[];
 }
 export type AnthropicRequestBlock =
   | AnthropicTextBlockOut
   | AnthropicImageBlockOut
   | AnthropicDocumentBlockOut
+  | AnthropicThinkingBlockOut
+  | AnthropicRedactedThinkingBlockOut
   | AnthropicToolUseBlockOut
   | AnthropicToolResultBlockOut;
 
@@ -750,7 +794,11 @@ function documentBlockFromPart(
   part: Extract<IRContentPart, { type: "document" }>,
 ): AnthropicDocumentBlockOut {
   if (part.fileId !== undefined) {
-    return { type: "document", source: { type: "file", file_id: part.fileId } };
+    return {
+      type: "document",
+      source: { type: "file", file_id: part.fileId },
+      ...(part.filename !== undefined ? { title: part.filename } : {}),
+    };
   }
   if (part.data !== undefined) {
     return {
@@ -760,9 +808,26 @@ function documentBlockFromPart(
         media_type: part.mediaType ?? "application/pdf",
         data: part.data,
       },
+      ...(part.filename !== undefined ? { title: part.filename } : {}),
     };
   }
-  return { type: "document", source: { type: "url", url: part.url ?? "" } };
+  return {
+    type: "document",
+    source: { type: "url", url: part.url ?? "" },
+    ...(part.filename !== undefined ? { title: part.filename } : {}),
+  };
+}
+
+function toolResultContentFromIR(
+  content: IRMessage["content"],
+): string | AnthropicToolResultContentBlockOut[] {
+  if (content === null) return "";
+  if (typeof content === "string") return content;
+  const blocks = contentToBlocks(content).filter(
+    (block): block is AnthropicToolResultContentBlockOut =>
+      block.type === "text" || block.type === "image" || block.type === "document",
+  );
+  return blocks.length > 0 ? blocks : "";
 }
 
 function contentToBlocks(content: IRMessage["content"]): AnthropicRequestBlock[] {
@@ -786,6 +851,37 @@ function contentToBlocks(content: IRMessage["content"]): AnthropicRequestBlock[]
     blocks.push(block);
   }
   return blocks;
+}
+
+function thinkingBlocksFromMessage(message: IRMessage): AnthropicRequestBlock[] {
+  if (message.thinking_blocks !== undefined && message.thinking_blocks.length > 0) {
+    return message.thinking_blocks.flatMap((block): AnthropicRequestBlock[] => {
+      if (block.type === "redacted_thinking" && typeof block.data === "string") {
+        return [{ type: "redacted_thinking", data: block.data }];
+      }
+      if (typeof block.thinking === "string") {
+        return [
+          {
+            type: "thinking",
+            thinking: block.thinking,
+            ...(block.signature !== undefined ? { signature: block.signature } : {}),
+          },
+        ];
+      }
+      return [];
+    });
+  }
+  if (!Array.isArray(message.content)) return [];
+  return message.content.flatMap((part): AnthropicRequestBlock[] => {
+    if (part.type !== "thinking") return [];
+    return [
+      {
+        type: "thinking",
+        thinking: part.text,
+        ...(part.signature !== undefined ? { signature: part.signature } : {}),
+      },
+    ];
+  });
 }
 
 function hasExplicitCacheControl(value: unknown): boolean {
@@ -893,22 +989,14 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
           {
             type: "tool_result",
             tool_use_id: m.tool_call_id ?? "",
-            content:
-              typeof m.content === "string"
-                ? m.content
-                : m.content === null
-                  ? ""
-                  : m.content
-                      .filter((p): p is { type: "text"; text: string } => p.type === "text")
-                      .map((p) => p.text)
-                      .join(""),
+            content: toolResultContentFromIR(m.content),
           },
         ],
       });
       continue;
     }
     if (m.role === "assistant") {
-      const blocks = contentToBlocks(m.content);
+      const blocks = [...thinkingBlocksFromMessage(m), ...contentToBlocks(m.content)];
       for (const call of m.tool_calls ?? []) {
         blocks.push({
           type: "tool_use",

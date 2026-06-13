@@ -426,6 +426,36 @@ describe("synthesizeSSEFromJSON — cache hit / non-streaming upstream", () => {
     expect(text).toBe("let me think");
   });
 
+  it("carries redacted thinking blocks into synthesized Anthropic SSE", async () => {
+    const res: IRResponse = {
+      id: "resp_redacted",
+      model: "claude-3-7-sonnet",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            thinking_blocks: [{ type: "redacted_thinking", data: "encrypted-blob" }],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+
+    const events = await collect(synthesizeSSEFromJSON(res));
+    const redactedStart = events.find(
+      (e) => e.type === "content_block_start" && e.content_block.type === "redacted_thinking",
+    );
+    expect(redactedStart).toBeDefined();
+    if (redactedStart?.type === "content_block_start") {
+      expect(redactedStart.content_block).toEqual({
+        type: "redacted_thinking",
+        data: "encrypted-blob",
+      });
+    }
+  });
+
   it("synthesizes a tool_use block: start (id+name) before input_json_delta", async () => {
     const res: IRResponse = {
       id: "resp_2",
@@ -572,6 +602,45 @@ describe("convertAnthropicStreamToIR — thinking streaming (inbound)", () => {
       c.choices?.[0]?.delta?.thinking_blocks?.some((b) => b.signature === "sig-xyz"),
     );
     expect(sigChunk).toBeDefined();
+  });
+
+  it("maps redacted_thinking block starts to IR thinking_blocks", async () => {
+    const chunks = await collect<IRChunk>(
+      convertAnthropicStreamToIR(
+        events([
+          {
+            type: "message_start",
+            message: {
+              id: "m",
+              type: "message",
+              role: "assistant",
+              model: "claude",
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { input_tokens: 5, output_tokens: 1 },
+            },
+          },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "redacted_thinking", data: "encrypted-blob" },
+          },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn", stop_sequence: null },
+            usage: { output_tokens: 7 },
+          },
+          { type: "message_stop" },
+        ]),
+      ),
+    );
+
+    const redactedChunk = chunks.find((c) =>
+      c.choices?.[0]?.delta?.thinking_blocks?.some((b) => b.data === "encrypted-blob"),
+    );
+    expect(redactedChunk).toBeDefined();
   });
 });
 
