@@ -92,6 +92,47 @@ describe("openaiTransformer — developer role survives + round-trips (issue #50
   });
 });
 
+describe("openaiTransformer — cross-provider private field stripping", () => {
+  it("does not leak IR thinking_blocks onto OpenAI request wire messages", async () => {
+    const wire = (await openaiTransformer.transformRequestIn({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "assistant",
+          content: "answer",
+          reasoning_content: "visible reasoning",
+          thinking_blocks: [{ type: "redacted_thinking", data: "encrypted-blob" }],
+        },
+      ],
+    })) as { messages: Array<Record<string, unknown>> };
+
+    expect(wire.messages[0]?.thinking_blocks).toBeUndefined();
+    expect(wire.messages[0]?.reasoning_content).toBe("visible reasoning");
+  });
+
+  it("does not leak IR thinking_blocks onto OpenAI response wire messages", async () => {
+    const wire = (await openaiTransformer.transformResponseOut({
+      id: "chatcmpl-thinking",
+      model: "gpt-4o",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            reasoning_content: "visible reasoning",
+            thinking_blocks: [{ type: "redacted_thinking", data: "encrypted-blob" }],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    })) as { choices: Array<{ message: Record<string, unknown> }> };
+
+    expect(wire.choices[0]?.message.thinking_blocks).toBeUndefined();
+    expect(wire.choices[0]?.message.reasoning_content).toBe("visible reasoning");
+  });
+});
+
 describe("openaiTransformer — response identity round-trip", () => {
   // test #2: res -> IR -> res is lossless on choices/message/finish_reason/usage.
   it("round-trips a representative response losslessly", async () => {

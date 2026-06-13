@@ -308,13 +308,19 @@ function irPartToNative(part: IRContentPart): unknown {
   }
 }
 
+function stripOpenAIPrivateMessageFields(message: IRMessage): IRMessage {
+  const { thinking_blocks: _thinking_blocks, ...wireMessage } = message;
+  return wireMessage;
+}
+
 function normalizeMessageContentToNative(message: IRMessage): IRMessage {
-  if (!Array.isArray(message.content)) return message;
+  const wireMessage = stripOpenAIPrivateMessageFields(message);
+  if (!Array.isArray(wireMessage.content)) return wireMessage;
   // The IR message type only allows IRContentPart[]; the native shapes we emit are
   // wire-only, so we widen through unknown rather than fight the IR union here.
   return {
-    ...message,
-    content: message.content.map(irPartToNative) as unknown as IRMessage["content"],
+    ...wireMessage,
+    content: wireMessage.content.map(irPartToNative) as unknown as IRMessage["content"],
   };
 }
 
@@ -410,9 +416,10 @@ function toIRResponse(res: NativeResponse): IRResponse {
 function toOpenAIMessage(message: IRMessage): IRMessage {
   const { reasoningText } = resolveReasoning(message);
   const content = stripThinkingFromContent(message.content);
-  if (reasoningText === undefined && content === message.content) return message;
+  const wireMessage = stripOpenAIPrivateMessageFields(message);
+  if (reasoningText === undefined && content === wireMessage.content) return wireMessage;
   return {
-    ...message,
+    ...wireMessage,
     content,
     ...(reasoningText !== undefined ? { reasoning_content: reasoningText } : {}),
   };
