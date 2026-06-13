@@ -54,7 +54,7 @@ interface Harness {
 function makeDeps(
   over: {
     collect?: () => Promise<unknown>;
-    streamEvents?: () => AsyncIterable<{ type: string; [k: string]: unknown }>;
+    streamEvents?: () => AsyncIterable<Record<string, unknown>>;
     isStream?: boolean;
     failOpen?: boolean;
     abort?: boolean;
@@ -64,6 +64,10 @@ function makeDeps(
     concurrencyGate?: MessagesRouteDeps["concurrencyGate"];
     identity?: MessagesIdentity;
     record?: RecordServedDeps;
+    // Native passthrough (#217 C3): when true the stubbed pipeline run reports
+    // nativePassthrough so the route must return collect()'s body UNTOUCHED (skip
+    // transformResponseOut). collect() should be set to return the verbatim native body.
+    nativePassthrough?: boolean;
   } = {},
 ): { deps: MessagesRouteDeps; harness: Harness } {
   const harness: Harness = {
@@ -151,6 +155,7 @@ function makeDeps(
             async function* () {
               yield { type: "message_start" };
             },
+          ...(over.nativePassthrough === true ? { nativePassthrough: true } : {}),
         };
       },
     },
@@ -686,6 +691,179 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
 
     expect(insert).toHaveBeenCalledOnce();
     expect(insertPayload).not.toHaveBeenCalled();
+  });
+
+  // ── Native protocol passthrough (#217 C3). When the pipeline reports
+  //    nativePassthrough the route MUST return collect()'s body UNTOUCHED (skip
+  //    transformResponseOut), so the verbatim Anthropic upstream body reaches the
+  //    client byte-for-byte. The translate path (flag OFF / no passthrough) stays
+  //    exactly as today.
+  it("non-stream passthrough: returns the verbatim native body byte-for-byte, skipping translate-back", async () => {
+    // The verbatim Anthropic-native upstream body the (stubbed) provider produced.
+    const upstreamNative = {
+      id: "msg_passthrough_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-3-5-sonnet",
+      content: [{ type: "text", text: "verbatim native" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 5, output_tokens: 4, cache_read_input_tokens: 0 },
+    };
+    const { record, insertPayload } = makeRecord({ capturePayloads: true });
+    const { deps, harness } = makeDeps({
+      record,
+      nativePassthrough: true,
+      collect: async () => upstreamNative,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // BYTE-EQUALITY: the response handed to the client is the exact native upstream
+    // body — no translate-back wrapper, no __ir marker the stub responseOut adds.
+    expect(body).toEqual(upstreamNative);
+    expect((body as { __ir?: unknown }).__ir).toBeUndefined();
+    // translate-back (transformResponseOut) is BYPASSED on the passthrough path.
+    expect(harness.order).toEqual(["auth", "translate-out", "route"]);
+    expect(harness.order).not.toContain("translate-back");
+    // request_payloads captures NATIVE on both ends: the response body is the native
+    // upstream body, the request body is the raw inbound (also native).
+    expect(insertPayload).toHaveBeenCalledOnce();
+    const payload = insertPayload.mock.calls[0]?.[0] as {
+      requestJson: string;
+      responseJson: string;
+    };
+    expect(JSON.parse(payload.responseJson)).toEqual(upstreamNative);
+    expect(JSON.parse(payload.requestJson)).toEqual(REQ_BODY);
+  });
+
+  it("stamps the verbatim parsed inbound body onto ir.metadata.native_request (non-stream)", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+
+    await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    const meta = (harness.pipelineSawIR?.metadata ?? {}) as { native_request?: unknown };
+    // The carrier the core guard/executor reads: the verbatim parsed inbound body.
+    expect(meta.native_request).toEqual(REQ_BODY);
+  });
+
+  it("stamps native_request on a STREAMING request too (Phase 2 streaming passthrough)", async () => {
+    // Phase 2: the carrier now covers streams. The native streaming body already
+    // carries stream:true; the guard + executor decide whether to actually forward it.
+    const { deps, harness } = makeDeps({ isStream: true });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+    await res.text();
+
+    const meta = (harness.pipelineSawIR?.metadata ?? {}) as { native_request?: unknown };
+    expect(meta.native_request).toEqual({ ...REQ_BODY, stream: true });
+  });
+
+  // ── Native protocol passthrough STREAMING (#217 Phase 2, C3). When the pipeline
+  //    reports nativePassthrough on a STREAM, each yielded item is ALREADY an
+  //    {event,data} frame carrying the VERBATIM upstream Anthropic data payload. The
+  //    route MUST write it directly (skip transformStreamOut) so the bytes reach the
+  //    client byte-for-byte. The translate path (flag OFF) stays exactly as today.
+  it("stream passthrough: writes the VERBATIM upstream frames byte-for-byte (no transformStreamOut)", async () => {
+    // Deliberately non-canonical spacing inside the data payload proves the route
+    // forwards the {event,data} item directly instead of re-shaping it.
+    const startData =
+      '{"type":"message_start","message":{"id":"msg_x","usage":{ "input_tokens":7 }}}';
+    const deltaData =
+      '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}';
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { event: "message_start", data: startData };
+      yield { event: "content_block_delta", data: deltaData };
+      yield { event: "message_stop", data: '{"type":"message_stop"}' };
+    }
+    const { record, insertPayload } = makeRecord({ capturePayloads: true });
+    const { deps, harness } = makeDeps({
+      record,
+      isStream: true,
+      nativePassthrough: true,
+      streamEvents: events,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const text = await res.text();
+    // The verbatim data payloads (with their non-canonical spacing) reach the wire —
+    // NOT the stub transformStreamOut shape (which would JSON.stringify the {type} bag).
+    expect(text).toContain(`event: message_start\ndata: ${startData}`);
+    expect(text).toContain(`event: content_block_delta\ndata: ${deltaData}`);
+    expect(text).toContain("event: message_stop");
+    // request_payloads captures the NATIVE frames verbatim on the response side.
+    await Promise.resolve();
+    expect(insertPayload).toHaveBeenCalledOnce();
+    const payload = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
+    expect(payload.responseJson).toContain(`data: ${startData}`);
+    // native_request stamped on the streaming IR (Phase 2 carrier).
+    const meta = (harness.pipelineSawIR?.metadata ?? {}) as { native_request?: unknown };
+    expect(meta.native_request).toEqual({ ...REQ_BODY, stream: true });
+  });
+
+  it("stream NON-passthrough (flag OFF): still maps via transformStreamOut as today", async () => {
+    async function* events() {
+      yield { type: "message_start" };
+      yield { type: "content_block_delta", index: 0 };
+      yield { type: "message_stop" };
+    }
+    const { deps } = makeDeps({ isStream: true, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+    const text = await res.text();
+    // The stub transformStreamOut maps {type} → {event:type, data:JSON.stringify(ev)},
+    // so the data payload is the re-serialized IR event bag (translate path).
+    expect(text).toContain("event: message_start");
+    expect(text).toContain('data: {"type":"message_start"}');
+    expect(text).toContain("event: content_block_delta");
+  });
+
+  it("non-stream NON-passthrough (default): still runs translate-back as today", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { type: string; __ir?: unknown };
+    expect(body.type).toBe("message");
+    // The translate-back transformer ran (stub stamps __ir onto the response).
+    expect(body.__ir).toBeDefined();
+    expect(harness.order).toEqual(["auth", "translate-out", "route", "translate-back"]);
   });
 
   // ── Terminal stream error frame must be appended to the captured body (review

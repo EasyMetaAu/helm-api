@@ -99,6 +99,10 @@ export const InternalRequestSchema = z.object({
   verbosity: z.string().optional(),
   safety_identifier: z.string().optional(),
   provider_raw: UnknownRecordSchema.optional(),
+  // Verbatim native request body in InternalRequest.protocol, captured at the
+  // route boundary; used ONLY by execute's native-passthrough branch after
+  // governance gates prove same-protocol non-stream safe.
+  native_request: UnknownRecordSchema.optional(),
   stream: z.boolean(),
   metadata: RequestMetadataSchema,
 });

@@ -30,6 +30,7 @@ export interface PayloadCaptureDeps {
 export interface StreamUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
+  total_tokens?: number;
   input_tokens?: number;
   output_tokens?: number;
   cache_read_input_tokens?: number;
@@ -197,6 +198,38 @@ export function usageFromBody(body: unknown): StreamUsage | null {
   return null;
 }
 
+// Native-protocol-passthrough cost (#217 C-cost): normalize a VERBATIM Anthropic
+// non-stream response's usage block into the OpenAI-shaped StreamUsage the gateway's
+// costOf/resolveCostUsd already understand. The token math MIRRORS core's
+// anthropicToOpenAIResponse (anthropic.ts: prompt = input_tokens + cache_read +
+// cache_creation; completion = output_tokens; prompt_tokens_details carries the
+// cached/cache_creation split) so a passthrough attempt is priced identically to a
+// translated one. Tolerant of missing fields (each absent → 0); null when the body
+// carries no usage object at all.
+export function usageFromAnthropicResponse(body: unknown): StreamUsage | null {
+  const usage = (body as { usage?: unknown } | null)?.usage;
+  if (!usage || typeof usage !== "object") return null;
+  const u = usage as Record<string, unknown>;
+  const inTok = typeof u.input_tokens === "number" ? u.input_tokens : 0;
+  const outTok = typeof u.output_tokens === "number" ? u.output_tokens : 0;
+  const cacheRead = typeof u.cache_read_input_tokens === "number" ? u.cache_read_input_tokens : 0;
+  const cacheCreation =
+    typeof u.cache_creation_input_tokens === "number" ? u.cache_creation_input_tokens : 0;
+  const promptTokens = inTok + cacheRead + cacheCreation;
+  const normalized: StreamUsage = {
+    prompt_tokens: promptTokens,
+    completion_tokens: outTok,
+    total_tokens: promptTokens + outTok,
+  };
+  if (cacheRead > 0 || cacheCreation > 0) {
+    normalized.prompt_tokens_details = {
+      cached_tokens: cacheRead,
+      ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+    };
+  }
+  return normalized;
+}
+
 // Persist the verbatim request/response bodies + opportunistically prune expired
 // rows. Never throws — logs via the provided sink on failure.
 export async function persistPayload(
@@ -243,6 +276,82 @@ export function usageFromSSE(raw: string): StreamUsage | null {
     }
   }
   return null;
+}
+
+// Native-protocol-passthrough STREAMING cost (#217 Phase 2). Unlike OpenAI's single
+// trailing usage chunk, the Anthropic SSE carries usage SPLIT across events:
+//   - `message_start` → message.usage.input_tokens (+ cache_read / cache_creation)
+//   - the LAST `message_delta` → usage.output_tokens (Anthropic may RESTATE cache_*)
+// Byte-faithful passthrough forwards these frames verbatim, so cost extraction scans
+// the accumulated SSE itself. The accumulation MIRRORS core's translateAnthropicSSE
+// (anthropic.ts: input/cache on message_start, output on message_delta, cache_* via
+// max). Returns an Anthropic-shaped StreamUsage — tokensFromUsage already sums it
+// (input + output + cache_read + cache_creation). null when no usage event is present.
+export function usageFromAnthropicSSE(raw: string): StreamUsage | null {
+  let seenUsage = false;
+  let input = 0;
+  let output = 0;
+  let cacheRead = 0;
+  let cacheCreation = 0;
+  for (const frame of raw.split("\n\n")) {
+    // Each frame may have multiple lines (event:/data:); read the data line only.
+    let payload: string | null = null;
+    for (const line of frame.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("data:")) {
+        payload = trimmed.slice("data:".length).trim();
+        break;
+      }
+    }
+    if (payload === null || payload === "" || payload === "[DONE]") continue;
+    let evt: { type?: unknown; message?: unknown; usage?: unknown };
+    try {
+      evt = JSON.parse(payload);
+    } catch {
+      // ping / keepalive / non-JSON line — ignore
+      continue;
+    }
+    if (!evt || typeof evt !== "object") continue;
+    if (evt.type === "message_start") {
+      const u = ((evt.message as { usage?: unknown } | undefined)?.usage ?? {}) as Record<
+        string,
+        unknown
+      >;
+      if (typeof u.input_tokens === "number") {
+        input = u.input_tokens;
+        seenUsage = true;
+      }
+      if (typeof u.cache_read_input_tokens === "number") {
+        cacheRead = u.cache_read_input_tokens;
+        seenUsage = true;
+      }
+      if (typeof u.cache_creation_input_tokens === "number") {
+        cacheCreation = u.cache_creation_input_tokens;
+        seenUsage = true;
+      }
+    } else if (evt.type === "message_delta") {
+      const u = (evt.usage ?? {}) as Record<string, unknown>;
+      if (typeof u.output_tokens === "number") {
+        output = Math.max(output, u.output_tokens);
+        seenUsage = true;
+      }
+      if (typeof u.cache_read_input_tokens === "number") {
+        cacheRead = Math.max(cacheRead, u.cache_read_input_tokens);
+        seenUsage = true;
+      }
+      if (typeof u.cache_creation_input_tokens === "number") {
+        cacheCreation = Math.max(cacheCreation, u.cache_creation_input_tokens);
+        seenUsage = true;
+      }
+    }
+  }
+  if (!seenUsage) return null;
+  return {
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_input_tokens: cacheRead,
+    cache_creation_input_tokens: cacheCreation,
+  };
 }
 
 // Map the served upstream usage tail to the DecisionRecord token block (dashboard

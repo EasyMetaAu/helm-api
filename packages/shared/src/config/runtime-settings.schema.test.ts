@@ -10,6 +10,7 @@ describe("RuntimeSettingsSchema", () => {
   it("backfills documented defaults from an empty object", () => {
     const parsed = RuntimeSettingsSchema.parse({});
     expect(parsed.capture_payloads).toBe(true);
+    expect(parsed.native_protocol_passthrough).toBe(false);
     expect(parsed.payload_retention_days).toBe(30);
     expect(parsed.rate_limit_enabled).toBe(false);
     expect(parsed.rate_limit_default_rpm).toBe(0);
@@ -20,6 +21,7 @@ describe("RuntimeSettingsSchema", () => {
   it("parses a full settings object field-by-field", () => {
     const parsed = RuntimeSettingsSchema.parse({
       capture_payloads: false,
+      native_protocol_passthrough: false,
       payload_retention_days: 7,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 60,
@@ -28,6 +30,7 @@ describe("RuntimeSettingsSchema", () => {
     });
     expect(parsed).toEqual({
       capture_payloads: false,
+      native_protocol_passthrough: false,
       payload_retention_days: 7,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 60,

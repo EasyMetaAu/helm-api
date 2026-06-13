@@ -482,10 +482,10 @@ export {
   translateResponsesSSE,
 } from "./provider/openai-responses.js";
 export {
-  canUseSameProtocolSerializationFastPath,
-  type SameProtocolSerializationFastPathDecision,
-  type SameProtocolSerializationFastPathDecisionInput,
-  type SameProtocolSerializationFastPathDisableReason,
+  canUseNativePassthrough,
+  type NativePassthroughDecision,
+  type NativePassthroughDecisionInput,
+  type NativePassthroughDisableReason,
 } from "./provider/protocol.js";
 // Per-account egress proxy (issue #38 follow-up): a drop-in `fetch` that tunnels
 // upstream traffic through an http/https/socks5 proxy, so distinct subscription

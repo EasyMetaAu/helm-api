@@ -25,6 +25,9 @@ export const RuntimeSettingsSchema = z.object({
   // owns the data on a self-hosted box); toggle off for a stricter privacy
   // posture. When off, the capture path is skipped entirely (zero storage).
   capture_payloads: z.boolean().default(true),
+  // Forward a same-protocol request body verbatim to the native upstream,
+  // bypassing the lossy IR translation round-trip. Default OFF (merge ≠ enable).
+  native_protocol_passthrough: z.boolean().default(false),
   // Auto-prune captured payloads older than this many days. Bounds the storage
   // footprint and the plaintext-exposure window. Capped at 10 years.
   payload_retention_days: z.number().int().positive().max(3650).default(30),

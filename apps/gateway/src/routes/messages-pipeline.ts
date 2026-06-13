@@ -32,6 +32,8 @@ import {
   backfillCompletionCost,
   type StreamUsage,
   tokensFromUsage,
+  usageFromAnthropicResponse,
+  usageFromAnthropicSSE,
   usageFromBody,
 } from "./payload-capture.js";
 
@@ -158,6 +160,19 @@ function toInternalRequest(
   // same scope the OpenAI surface produces.
   const memoryScope = memoryScopeFromMeta(ir.metadata, accountId);
   const providerRaw = providerRawFromRequest(ir, { includeMetadata: false });
+  // Native-protocol-passthrough carrier (#217): the verbatim parsed inbound body
+  // the route stamped onto ir.metadata (same HTTP→core hand-off bag as
+  // client_billing_header). The core guard + executor read it to forward the
+  // request UNTRANSLATED when the inbound protocol matches the upstream's native
+  // one. Present only on the anthropic /v1/messages non-stream face (the route
+  // stamps it there); absent everywhere else → the field stays unset and routing
+  // is identical to today.
+  const nativeRequest =
+    ir.metadata?.native_request !== null &&
+    typeof ir.metadata?.native_request === "object" &&
+    !Array.isArray(ir.metadata.native_request)
+      ? (ir.metadata.native_request as Record<string, unknown>)
+      : undefined;
 
   return {
     request_id: traceId,
@@ -177,6 +192,7 @@ function toInternalRequest(
     max_tokens: typeof ir.max_tokens === "number" ? ir.max_tokens : null,
     ...copyLiteLLMRequestParams(ir),
     ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
+    ...(nativeRequest !== undefined ? { native_request: nativeRequest } : {}),
     stream: ir.stream === true,
     metadata: {
       conversation_id: conversationId,
@@ -246,6 +262,23 @@ function outboundFromIR(ir: IRResponse): {
     }
   }
   return { responseMessages, toolResults };
+}
+
+// Reconstruct a minimal assistant turn from a VERBATIM Anthropic-native response
+// for observeOutbound on the native-passthrough path (#217). The native body was
+// NOT projected into an IR (that is the whole point of passthrough), so this reads
+// the response's content[].text blocks directly and concatenates them. Fail-open:
+// a missing/degraded content yields an empty turn (observeOutbound then persists
+// nothing but still stamps the served model). NEVER throws.
+function assistantTurnFromNativeAnthropic(body: unknown): IRMessage[] {
+  const content = (body as { content?: unknown } | null)?.content;
+  if (!Array.isArray(content)) return [];
+  let text = "";
+  for (const block of content) {
+    const b = block as { type?: unknown; text?: unknown } | null;
+    if (b?.type === "text" && typeof b.text === "string") text += b.text;
+  }
+  return text.length > 0 ? [{ role: "assistant", content: text }] : [];
 }
 
 // —— OpenAI chat.completion body → IRResponse. The upstream is OpenAI-compatible
@@ -329,6 +362,76 @@ function parseFrame(event: string): Record<string, unknown> | null {
     }
   }
   return null;
+}
+
+// —— Native-passthrough SSE frame splitter (#217 Phase 2). The raw Anthropic SSE
+// text (AsyncIterable<string>, NOT frame-aligned) is buffered across chunks and
+// split on the blank-line `\n\n` event boundary — the SAME buffering as
+// parseOpenAISSE, but it NEVER JSON-parses/re-serializes. For each complete frame it
+// extracts the VERBATIM `event:` line value and the VERBATIM `data:` payload STRING
+// (everything after `data:`, with at most one leading space stripped per the SSE
+// spec) and yields them alongside the frame's raw text. The data payload reaches the
+// client byte-for-byte — only the SSE envelope is reframed downstream by Hono's
+// writeSSE (semantically identical). This ELIMINATES the convertOpenAIStreamToAnthropic
+// state machine (the #221/#222 bug source) instead of replacing it (principle 8).
+interface RawSSEFrame {
+  /** The verbatim `event:` line value (empty when the frame carries no event line). */
+  event: string;
+  /** The verbatim `data:` payload string (the exact upstream JSON), unparsed. */
+  data: string;
+  /** The frame's raw text incl. event/data lines + trailing blank line, for the
+   *  usage tee (usageFromAnthropicSSE scans data lines off this). */
+  raw: string;
+}
+
+function parseRawSSEFrame(event: string): RawSSEFrame | null {
+  let evtName = "";
+  const dataLines: string[] = [];
+  for (const line of event.split("\n")) {
+    if (line.startsWith("event:")) {
+      evtName = line.slice("event:".length).replace(/^ /, "");
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).replace(/^ /, ""));
+    }
+  }
+  // A frame with no data line (a bare `event:` or a keepalive) carries nothing to
+  // forward — skip it. Anthropic always pairs event+data, so this only drops pings.
+  if (dataLines.length === 0) return null;
+  // Multi-line data is joined with \n per the SSE spec (Anthropic uses single-line).
+  return { event: evtName, data: dataLines.join("\n"), raw: `${event}\n\n` };
+}
+
+async function* splitAnthropicSSEFrames(raw: AsyncIterable<string>): AsyncIterable<RawSSEFrame> {
+  let buffer = "";
+  for await (const piece of raw) {
+    buffer += piece.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    let sep = buffer.indexOf("\n\n");
+    while (sep !== -1) {
+      const frame = parseRawSSEFrame(buffer.slice(0, sep));
+      buffer = buffer.slice(sep + 2);
+      if (frame !== null) yield frame;
+      sep = buffer.indexOf("\n\n");
+    }
+  }
+  const tail = parseRawSSEFrame(buffer);
+  if (tail !== null) yield tail;
+}
+
+// Accumulate assistant text from a VERBATIM Anthropic content_block_delta data
+// payload for observeOutbound on the native-passthrough stream (#217 Phase 2). Reads
+// `delta.type==='text_delta' → delta.text` off the parsed frame data. Fail-open: a
+// non-JSON / non-text-delta frame contributes nothing. NEVER throws.
+function accumulateAnthropicAssistantText(buffer: { text: string }, dataPayload: string): void {
+  if (dataPayload === "" || dataPayload === "[DONE]") return;
+  let evt: { type?: unknown; delta?: unknown };
+  try {
+    evt = JSON.parse(dataPayload) as { type?: unknown; delta?: unknown };
+  } catch {
+    return;
+  }
+  if (evt?.type !== "content_block_delta") return;
+  const delta = evt.delta as { type?: unknown; text?: unknown } | undefined;
+  if (delta?.type === "text_delta" && typeof delta.text === "string") buffer.text += delta.text;
 }
 
 function nonNegativeToken(value: unknown): number | undefined {
@@ -575,8 +678,61 @@ export function createMessagesPipeline(
         // in the stream finally below), exposed so the route records the FINAL
         // decision after consumption. Present even on a routing failure.
         decision: result.decision,
+        // Native-protocol-passthrough flag (#217): true when route() forwarded the
+        // request untranslated and `result.body` is the upstream's VERBATIM native
+        // response. The route reads this to BYPASS transformResponseOut and hand the
+        // native body back byte-for-byte. Absent/false → today's translate path.
+        nativePassthrough: result.nativePassthrough === true,
         async collect(): Promise<unknown> {
           if (failure !== null) throw failure;
+          // Native passthrough (#217): the upstream's response is already in the
+          // client's native protocol. Return result.body UNTOUCHED (skip
+          // openAIBodyToIR) — the route then skips transformResponseOut too, so the
+          // verbatim native body reaches the client byte-for-byte. Governance is
+          // fully preserved: usage is normalized from the NATIVE (Anthropic) usage
+          // block so cost/budget/OAuth settle identically to a translated attempt,
+          // and observe-outbound persists the assistant turn reconstructed from the
+          // native content. The decision record stays body-free (principle 7).
+          if (result.nativePassthrough === true) {
+            // Memory observe (outbound): reconstruct the assistant turn from the
+            // native response content[].text (the body was never projected into an
+            // IR). Fail-open — an empty/degraded body persists nothing.
+            if (memory !== undefined) {
+              const finalAlias =
+                result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+              const memoryObserve = memory.observe;
+              const responseMessages = assistantTurnFromNativeAnthropic(result.body);
+              await runObserve(() =>
+                observeOutbound(
+                  memoryObserve,
+                  memoryScope,
+                  {
+                    responseMessages,
+                    toolResults: [],
+                    messageIndexOffset: originalMessagesForMemory.length,
+                  },
+                  finalAlias,
+                ),
+              );
+            }
+            // Cost/budget settle: normalize the native Anthropic usage block into the
+            // OpenAI-shaped StreamUsage the helpers understand (cost was already
+            // settled on the decision by execute()).
+            const servedUsage = usageFromAnthropicResponse(result.body);
+            try {
+              backfillCompletionCost(result.decision, null, null, servedUsage);
+            } catch {
+              /* fail-open: leave usage null on any mapping miss */
+            }
+            const servedTokens = tokensFromUsage(servedUsage);
+            await settleBudget(servedTokens);
+            recordOAuthUsage?.(servingAccount, result.decision.final.model_alias, {
+              tokens: servedTokens,
+              costUsd: result.decision.cost_breakdown.completion_usd,
+            });
+            return result.body;
+          }
+
           // The route surfaces the OpenAI body; project it into the IR the
           // outbound Anthropic transformer expects.
           const irResponse = openAIBodyToIR(result.body);
@@ -624,6 +780,79 @@ export function createMessagesPipeline(
           // can write a terminal error frame instead of an empty (silent) stream.
           if (failure !== null) throw failure;
           if (result.stream === null) return;
+
+          // Native-passthrough stream (#217 Phase 2): route() byte-relayed the
+          // upstream Anthropic SSE into result.stream (raw decoded text). Forward it
+          // VERBATIM as {event,data} frames — NO parseOpenAISSE → convertOpenAIStream
+          // ToAnthropic translation (the #221/#222 state machine is ELIMINATED here,
+          // principle 8). A COPY of each frame feeds usage extraction + assistant-text
+          // accumulation for governance WITHOUT altering the forwarded bytes (tee).
+          if (result.nativePassthrough === true) {
+            const passthroughStream = result.stream;
+            // Bounded usage buffer: keep ONLY the usage-bearing frames (message_start
+            // carries input/cache, the trailing message_delta carries output). This is
+            // O(usage frames), not O(response), regardless of body length — the
+            // assistant text (which can be large) is never retained, only its running
+            // concatenation in `assistant.text` which observeOutbound consumes once.
+            let usageBuffer = "";
+            const passthroughAssistant = { text: "" };
+            try {
+              for await (const frame of splitAnthropicSSEFrames(passthroughStream)) {
+                // Tee (read-only): usage carriers feed the SSE usage extractor; every
+                // frame's text delta feeds the assistant-turn reconstruction. Neither
+                // touches the bytes yielded downstream (byte-faithful forward).
+                if (frame.data.includes("message_start") || frame.data.includes("message_delta")) {
+                  usageBuffer += frame.raw;
+                }
+                if (memory !== undefined) {
+                  accumulateAnthropicAssistantText(passthroughAssistant, frame.data);
+                }
+                // Yield the VERBATIM frame: data is the exact upstream JSON string.
+                yield { event: frame.event, data: frame.data };
+              }
+            } finally {
+              // Mirror the non-passthrough finally below: observe-outbound (assistant
+              // turn from the reconstructed text), streamed token/cost backfill,
+              // budget settle, and per-account OAuth usage. All fail-open.
+              const nativeUsage = usageFromAnthropicSSE(usageBuffer);
+              const finalAlias =
+                result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+              if (memory !== undefined) {
+                const memoryObserve = memory.observe;
+                const responseMessages: IRMessage[] =
+                  passthroughAssistant.text.length > 0
+                    ? [{ role: "assistant", content: passthroughAssistant.text }]
+                    : [];
+                await runObserve(() =>
+                  observeOutbound(
+                    memoryObserve,
+                    memoryScope,
+                    {
+                      responseMessages,
+                      toolResults: [],
+                      messageIndexOffset: originalMessagesForMemory.length,
+                    },
+                    finalAlias,
+                  ),
+                );
+              }
+              if (nativeUsage) {
+                try {
+                  const cost =
+                    finalAlias && budget?.costOf ? budget.costOf(finalAlias, nativeUsage) : null;
+                  backfillCompletionCost(result.decision, finalAlias, cost, nativeUsage);
+                } catch {
+                  /* fail-open: leave cost/usage null on any mapping miss */
+                }
+              }
+              await settleBudget(tokensFromUsage(nativeUsage));
+              recordOAuthUsage?.(servingAccount, result.decision.final.model_alias, {
+                tokens: tokensFromUsage(nativeUsage),
+                costUsd: result.decision.cost_breakdown.completion_usd,
+              });
+            }
+            return;
+          }
           // Accumulate the assistant text from the OpenAI-side chunks (one
           // accumulator serves ALL protocols) WITHOUT buffering or altering the
           // events forwarded downstream (principle 8). observeOutbound runs in a

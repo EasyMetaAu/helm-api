@@ -81,7 +81,7 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
     );
   }
 
-  return {
+  const client: ProviderClient = {
     async chatCompletion(
       req: ChatCompletionRequest,
       opts?: { signal?: AbortSignal },
@@ -117,4 +117,42 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
       })();
     },
   };
+
+  // Native protocol passthrough (issue #217): the same serial-queue discipline must
+  // wrap a verbatim-native call, so a subscription account still serves at most one
+  // user turn in flight whether the body was translated or forwarded. Expose these
+  // ONLY when the wrapped member actually implements them, so the pool's
+  // feature-detect (`typeof member.client.nativePassthrough === "function"`) stays
+  // truthful — an inner that can't passthrough must not appear to via this decorator.
+  const innerNative = deps.inner.nativePassthrough;
+  if (innerNative) {
+    client.nativePassthrough = async (req, opts) => {
+      const lease = await admit(req, opts?.signal);
+      if (lease === null) return innerNative(req, opts);
+      try {
+        return await innerNative(req, opts);
+      } finally {
+        lease.release();
+      }
+    };
+  }
+
+  const innerNativeStream = deps.inner.nativePassthroughStream;
+  if (innerNativeStream) {
+    client.nativePassthroughStream = (req, opts) =>
+      (async function* () {
+        const lease = await admit(req, opts?.signal);
+        if (lease === null) {
+          yield* innerNativeStream(req, opts);
+          return;
+        }
+        try {
+          yield* innerNativeStream(req, opts);
+        } finally {
+          lease.release();
+        }
+      })();
+  }
+
+  return client;
 }

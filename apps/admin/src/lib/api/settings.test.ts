@@ -8,6 +8,7 @@ import { getSettings, type RuntimeSettings, saveSettings } from './settings.js';
 const FULL: RuntimeSettings = {
   capture_payloads: false,
   payload_retention_days: 7,
+  native_protocol_passthrough: true,
   rate_limit_enabled: true,
   rate_limit_default_rpm: 60,
   rate_limit_default_tpm: 90000,
@@ -46,6 +47,7 @@ describe('settings api client', () => {
     expect(s).toEqual({
       capture_payloads: true,
       payload_retention_days: 30,
+      native_protocol_passthrough: false,
       rate_limit_enabled: false,
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
@@ -70,6 +72,23 @@ describe('settings api client', () => {
     expect(init.method).toBe('PUT');
     expect(JSON.parse(init.body as string)).toEqual(FULL);
     expect(saved).toEqual(FULL);
+  });
+
+  it('preserves native protocol passthrough when saving an unrelated field', async () => {
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(new Response(JSON.stringify(FULL), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ...FULL, log_level: 'warn' }), { status: 200 }),
+      );
+
+    const current = await getSettings();
+    await saveSettings({ ...current, log_level: 'warn' });
+
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      log_level: 'warn',
+      native_protocol_passthrough: true,
+    });
   });
 
   it('throws on a non-OK response (fail-closed surfacing)', async () => {

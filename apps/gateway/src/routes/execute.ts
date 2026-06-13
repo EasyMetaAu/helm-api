@@ -6,9 +6,22 @@ import type {
   ProviderRegistry,
   RouteProviderAttempt,
 } from "@helm/core";
-import { checkCapability, resolveCostUsd, UpstreamError } from "@helm/core";
-import type { AttemptErrorDetail, CatalogEntry, InternalRequest } from "@helm/shared";
+import {
+  canUseNativePassthrough,
+  checkCapability,
+  type NativePassthroughDisableReason,
+  resolveCostUsd,
+  UpstreamError,
+} from "@helm/core";
+import type {
+  AttemptErrorDetail,
+  CatalogEntry,
+  InternalRequest,
+  Protocol,
+  TargetProviderProtocol,
+} from "@helm/shared";
 import { makeHelmError } from "@helm/shared";
+import { usageFromAnthropicResponse } from "./payload-capture.js";
 
 // Gateway execution adapter — the `execute` injected into routeRequest. It walks
 // the resolved candidate chain (ExecutionPlan.candidate_chain) honoring the
@@ -32,6 +45,11 @@ import { makeHelmError } from "@helm/shared";
 // failure (matching the breaker contract), then hand back a generator that
 // re-emits that first chunk followed by the rest — byte-for-byte, in order.
 
+interface ProviderProtocolMetadata {
+  targetProviderProtocol: TargetProviderProtocol;
+  providerRequiresCompatibilityRewrite: boolean;
+}
+
 export interface ExecuteAdapterDeps {
   /** Default/fallback provider client: used only for unknown aliases
    *  (Phase-0 single-provider passthrough). */
@@ -53,6 +71,13 @@ export interface ExecuteAdapterDeps {
    *  effect immediately: a subscription alias NOT in this set fails CLOSED
    *  (provider_unavailable), never routes stale. Rebuilt alongside the pool. */
   oauthAliases?: () => ReadonlySet<string>;
+  /** Provider protocol metadata for OAuth subscription prefixes, keyed by provider id
+   *  (native protocol passthrough, issue #217). The OAuth pool aliases never reach the
+   *  registry, so the executor needs the prefix→protocol map here to know an
+   *  Anthropic-subscription alias forwards on the `anthropic_messages` wire. Absent →
+   *  the metadata defaults to `openai_chat`/no-rewrite (back-compat for tests that
+   *  don't wire OAuth protocols → passthrough is `protocol_mismatch`-disabled). */
+  oauthProviderProtocols?: ReadonlyMap<string, ProviderProtocolMetadata>;
   breaker: CircuitBreaker;
   /** modelKey -> capabilities; missing entry => capability filter is skipped. */
   catalog: Map<string, CatalogEntry>;
@@ -63,6 +88,36 @@ export interface ExecuteAdapterDeps {
    *  Optional: used to record a MISSING-pricing miss (cost left null, not a
    *  crash). Absent → the miss is silent. */
   log?: (level: string, msg: string, fields: Record<string, unknown>) => void;
+  /** Runtime feature flag `native_protocol_passthrough` (default OFF). Read per
+   *  attempt for live rollback: when true (and the guard passes) the executor
+   *  forwards the verbatim native body and returns the native response untranslated.
+   *  Absent → OFF. */
+  nativeProtocolPassthroughEnabled?: () => boolean;
+}
+
+interface ResolvedAttemptTarget {
+  provider: ProviderClient | undefined;
+  providerName: string | null;
+  providerModel: string;
+  targetProviderProtocol: TargetProviderProtocol;
+  providerRequiresCompatibilityRewrite: boolean;
+}
+
+// Per-attempt native-protocol-passthrough telemetry (issue #217), field-for-field
+// aligned with @helm/shared ProviderAttemptSchema. Body-free (principle 7): protocol
+// and provider metadata only, never request/response content. Spread onto EVERY
+// attempts.push so the trail is uniform; the skip/abort/queue-timeout/free-429/generic
+// rows use the default (considered:false), and the genuinely-evaluated rows (served-ok
+// and the genuine-failure row) carry the real decision.
+interface PassthroughTelemetry {
+  passthrough_considered: boolean;
+  passthrough_used: boolean;
+  passthrough_disable_reason: NativePassthroughDisableReason | null;
+  source_protocol: Protocol | null;
+  target_provider_protocol: TargetProviderProtocol | null;
+  response_protocol: Protocol | null;
+  provider_name: string | null;
+  provider_model: string | null;
 }
 
 function approxPromptTokens(req: InternalRequest): number {
@@ -144,6 +199,157 @@ function isFreeAlias(alias: string): boolean {
   return alias.endsWith(":free");
 }
 
+// Resolve one candidate alias to its provider client + the metadata native
+// passthrough needs (issue #217). This is the SAME resolution the inline block did
+// (subscription gate → registry → structural prefix → default), now returning the
+// target provider protocol + compat-rewrite flag alongside the client/model so the
+// passthrough guard can run without re-resolving. Behavior is byte-identical for the
+// provider/providerModel it returns — only the protocol metadata is new.
+function resolveAttemptTarget(input: {
+  alias: string;
+  defaultProvider: ProviderClient;
+  providers?: Map<string, ProviderClient>;
+  registry: ProviderRegistry;
+  knownOAuthPrefixes?: ReadonlySet<string>;
+  oauthAliases?: () => ReadonlySet<string>;
+  oauthProviderProtocols?: ReadonlyMap<string, ProviderProtocolMetadata>;
+}): ResolvedAttemptTarget {
+  const {
+    alias,
+    defaultProvider,
+    providers,
+    registry,
+    knownOAuthPrefixes,
+    oauthAliases,
+    oauthProviderProtocols,
+  } = input;
+  const slash = alias.indexOf("/");
+  const prefix = slash > 0 ? alias.slice(0, slash) : "";
+
+  if (prefix && (knownOAuthPrefixes?.has(prefix) ?? false)) {
+    // SUBSCRIPTION alias (issue #38). The live curation set + the pool are the SINGLE
+    // source of truth — re-read per request so a Manage-dialog removal/disconnect takes
+    // effect immediately. A subscription alias not CURRENTLY exposed, or whose pool is
+    // gone, has no provider here → it fails CLOSED at the caller's !provider check; it
+    // NEVER falls through to the registry snapshot or defaultProvider (crossing a
+    // subscription/credential boundary). The pool client forwards the bare model.
+    const exposed = oauthAliases?.().has(alias) ?? false;
+    const pool = providers?.get(prefix);
+    const metadata = oauthProviderProtocols?.get(prefix);
+    return {
+      provider: exposed ? pool : undefined,
+      providerName: prefix,
+      providerModel: slash > 0 ? alias.slice(slash + 1) : alias,
+      targetProviderProtocol: metadata?.targetProviderProtocol ?? "openai_chat",
+      providerRequiresCompatibilityRewrite: metadata?.providerRequiresCompatibilityRewrite ?? false,
+    };
+  }
+
+  // Non-subscription alias. `alias` is the ROUTING key (catalog/pricing/breaker/
+  // decision id); `providerModel` is the wire `model`. A resolved alias selects BOTH
+  // the upstream model id AND the provider client (so the chain can cross providers).
+  const resolved = registry.resolve(alias);
+  if (resolved.ok) {
+    return {
+      provider: providers?.get(resolved.value.providerName),
+      providerName: resolved.value.providerName,
+      providerModel: resolved.value.providerModel,
+      targetProviderProtocol: resolved.value.targetProviderProtocol,
+      providerRequiresCompatibilityRewrite: resolved.value.providerRequiresCompatibilityRewrite,
+    };
+  }
+
+  if (prefix && providers?.has(prefix)) {
+    // Structural fallback for a NON-subscription `provider/model` alias the registry
+    // never enumerated but whose provider client IS registered by name. Subscription
+    // prefixes never reach here (they took the gated branch above).
+    const metadata = oauthProviderProtocols?.get(prefix);
+    return {
+      provider: providers.get(prefix),
+      providerName: prefix,
+      providerModel: alias.slice(slash + 1),
+      targetProviderProtocol: metadata?.targetProviderProtocol ?? "openai_chat",
+      providerRequiresCompatibilityRewrite: metadata?.providerRequiresCompatibilityRewrite ?? false,
+    };
+  }
+
+  // A BARE alias (no provider prefix): Phase-0 passthrough to the default provider
+  // with the alias as the upstream model id (single-provider deploys; never
+  // substitute a different model silently).
+  return {
+    provider: defaultProvider,
+    providerName: null,
+    providerModel: alias,
+    targetProviderProtocol: "openai_chat",
+    providerRequiresCompatibilityRewrite: false,
+  };
+}
+
+// Decide whether THIS attempt may forward the verbatim native body (issue #217), and
+// build the body-free telemetry trail. The guard (core protocol.ts) is the pure
+// decision; here we only assemble its inputs: the runtime flag, whether a verbatim
+// native body rode the request, whether the resolved client implements
+// nativePassthrough, and a LOOKAHEAD over later candidates — if any resolves to a
+// DIFFERENT provider protocol the chain is heterogeneous, so passthrough must stay off
+// (the response must be IR-normalizable to feed any fallback translator).
+function decideNativePassthroughForAttempt(input: {
+  req: InternalRequest;
+  plan: ExecutionPlan;
+  candidateIndex: number;
+  target: ResolvedAttemptTarget;
+  defaultProvider: ProviderClient;
+  providers?: Map<string, ProviderClient>;
+  registry: ProviderRegistry;
+  knownOAuthPrefixes?: ReadonlySet<string>;
+  oauthAliases?: () => ReadonlySet<string>;
+  oauthProviderProtocols?: ReadonlyMap<string, ProviderProtocolMetadata>;
+  enabled: boolean;
+}): PassthroughTelemetry {
+  const { req, plan, candidateIndex, target } = input;
+  const fallbackMayUseDifferentProviderProtocol = plan.candidate_chain
+    .slice(candidateIndex + 1)
+    .some((fallbackAlias) => {
+      const fallback = resolveAttemptTarget({
+        alias: fallbackAlias,
+        defaultProvider: input.defaultProvider,
+        providers: input.providers,
+        registry: input.registry,
+        knownOAuthPrefixes: input.knownOAuthPrefixes,
+        oauthAliases: input.oauthAliases,
+        oauthProviderProtocols: input.oauthProviderProtocols,
+      });
+      return fallback.targetProviderProtocol !== target.targetProviderProtocol;
+    });
+
+  const decision = canUseNativePassthrough({
+    enabled: input.enabled,
+    hasNativeRequest: req.native_request !== undefined,
+    request: req,
+    targetProviderProtocol: target.targetProviderProtocol,
+    fallbackMayUseDifferentProviderProtocol,
+    providerRequiresCompatibilityRewrite: target.providerRequiresCompatibilityRewrite,
+    // Stream-aware feature detection: a stream request needs the streaming sibling
+    // (nativePassthroughStream); a non-stream request needs nativePassthrough. A
+    // provider that implements only one is `provider_lacks_passthrough` for the other.
+    providerSupportsPassthrough: req.stream
+      ? typeof target.provider?.nativePassthroughStream === "function"
+      : typeof target.provider?.nativePassthrough === "function",
+  });
+
+  return {
+    passthrough_considered: true,
+    passthrough_used: decision.ok,
+    passthrough_disable_reason: decision.ok ? null : decision.reason,
+    source_protocol: req.protocol,
+    target_provider_protocol: target.targetProviderProtocol,
+    // Phase 1: passthrough is same-protocol, so the response protocol equals the
+    // source (the client gets a native response it understands).
+    response_protocol: req.protocol,
+    provider_name: target.providerName,
+    provider_model: target.providerModel,
+  };
+}
+
 function upstreamStatusOf(err: unknown): number | null {
   return err instanceof UpstreamError ? err.upstreamStatus : null;
 }
@@ -193,9 +399,20 @@ function errorDetailOf(err: unknown): AttemptErrorDetail {
 
 // Build the `execute` callback bound to a single request's deps.
 export function createExecute(deps: ExecuteAdapterDeps) {
-  const { defaultProvider, providers, registry, breaker, catalog, now, signal, log } = deps;
+  const {
+    defaultProvider,
+    providers,
+    registry,
+    breaker,
+    catalog,
+    now,
+    signal,
+    log,
+    nativeProtocolPassthroughEnabled,
+  } = deps;
   const knownOAuthPrefixes = deps.knownOAuthPrefixes;
   const oauthAliases = deps.oauthAliases;
+  const oauthProviderProtocols = deps.oauthProviderProtocols;
 
   // Cost of one served attempt = provider usage × catalog pricing (docs/07).
   // Keyed by the candidate ALIAS — the catalog/pricing modelKey is the routing
@@ -247,7 +464,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     const needsCachedContent =
       typeof req.cached_content === "string" && req.cached_content.length > 0;
 
-    for (const alias of plan.candidate_chain) {
+    for (const [candidateIndex, alias] of plan.candidate_chain.entries()) {
       const startedAt = now();
       const elapsed = () => Math.max(0, now() - startedAt);
 
@@ -266,55 +483,16 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // the provider client (so the fallback chain can cross providers). If that
       // resolved provider has no client, skip fail-closed; falling back to the
       // default would cross credential/subscription boundaries.
-      let providerModel: string;
-      let provider: ProviderClient | undefined;
-      const slash = alias.indexOf("/");
-      const prefix = slash > 0 ? alias.slice(0, slash) : "";
-      if (prefix && (knownOAuthPrefixes?.has(prefix) ?? false)) {
-        // SUBSCRIPTION alias (issue #38). The live curation set + the pool are the
-        // SINGLE source of truth — re-read per request so a Manage-dialog removal,
-        // parking, or disconnect takes effect immediately. A subscription alias that
-        // is not CURRENTLY exposed, or whose pool is gone, fails CLOSED here; it must
-        // NEVER fall through to the registry's startup snapshot or to defaultProvider
-        // (that would route a removed/disconnected subscription model, or cross a
-        // subscription/credential boundary). The pool client forwards the bare model.
-        const exposed = oauthAliases?.().has(alias) ?? false;
-        const pool = providers?.get(prefix);
-        if (!exposed || !pool) {
-          attempts.push(skipRow(alias, "provider_unavailable", elapsed()));
-          continue;
-        }
-        provider = pool;
-        providerModel = alias.slice(slash + 1);
-      } else {
-        // Non-subscription alias. Resolve alias -> { provider name, upstream model }.
-        // Two DISTINCT ids come out and must not be conflated (fix-upstream-model-id
-        // 2026-05-31): `alias` is the ROUTING key (catalog/pricing/breaker/decision
-        // id); `providerModel` is the wire `model`. An unknown alias is a config gap:
-        // keep the alias as the upstream model id too and use the default provider
-        // (fail-open Phase-0 passthrough — never substitute a different model). A
-        // resolved alias selects BOTH the upstream model id AND the provider client
-        // (so the fallback chain can cross providers); a resolved provider with no
-        // client skips fail-closed rather than crossing credentials.
-        const resolved = registry.resolve(alias);
-        if (resolved.ok) {
-          providerModel = resolved.value.providerModel;
-          provider = providers?.get(resolved.value.providerName);
-        } else if (prefix && providers?.has(prefix)) {
-          // Structural fallback for a NON-subscription `provider/model` alias the
-          // registry never enumerated but whose provider client IS registered by name
-          // (the pool/client forwards the bare model id). Subscription prefixes never
-          // reach here — they took the gated branch above.
-          providerModel = alias.slice(slash + 1);
-          provider = providers.get(prefix);
-        } else {
-          // A BARE alias (no provider prefix): Phase-0 passthrough to the default
-          // provider with the alias as the upstream model id (single-provider
-          // deploys; never substitute a different model silently).
-          providerModel = alias;
-          provider = defaultProvider;
-        }
-      }
+      const target = resolveAttemptTarget({
+        alias,
+        defaultProvider,
+        providers,
+        registry,
+        knownOAuthPrefixes,
+        oauthAliases,
+        oauthProviderProtocols,
+      });
+      const { provider, providerModel } = target;
       if (!provider) {
         attempts.push(skipRow(alias, "provider_unavailable", elapsed()));
         continue;
@@ -361,15 +539,82 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // failure from here on is a PROVIDER fault, not a capability gap.
       attemptedAny = true;
 
+      // Native protocol passthrough decision for THIS attempt (issue #217). Pure
+      // guard + body-free telemetry; computed AFTER the capability filter so the
+      // passthrough never bypasses a hard capability skip. The decision is a
+      // body+response SUBSTITUTION inside the existing per-candidate try/catch — so
+      // breaker / abort / free-429 / chain-advance below are identical either way.
+      const passthrough = decideNativePassthroughForAttempt({
+        req,
+        plan,
+        candidateIndex,
+        target,
+        defaultProvider,
+        providers,
+        registry,
+        knownOAuthPrefixes,
+        oauthAliases,
+        oauthProviderProtocols,
+        enabled: nativeProtocolPassthroughEnabled?.() === true,
+      });
+
       // 3) Invoke the provider (stream or non-stream). We send the RESOLVED
       //    provider model (not the originally-requested alias) — the gateway
       //    picked this model, so the upstream must be told which one to run.
       try {
+        if (req.stream && passthrough.passthrough_used) {
+          // Native STREAMING passthrough (issue #217, Phase 2): forward the client's
+          // VERBATIM native body (which ALREADY carries stream:true) to the upstream and
+          // BYTE-RELAY the upstream SSE back — NO translation. peekStream peeks the first
+          // chunk for the breaker contract (pre-first-chunk failure → recordFailure +
+          // chain advance below; healthy → recordSuccess), only the SOURCE iterable
+          // differs (nativePassthroughStream vs chatCompletionStream). The method +
+          // native body are guaranteed present (the guard's providerSupportsPassthrough
+          // feature-detected nativePassthroughStream, hasNativeRequest proved the body);
+          // narrow defensively for type-safety (unreachable after the guard).
+          const passthroughStream = provider.nativePassthroughStream;
+          const nativeBody = req.native_request;
+          if (!passthroughStream || !nativeBody) {
+            throw new Error(
+              "native streaming passthrough invoked without a native request or client method",
+            );
+          }
+          // Patch ONLY `model` to the RESOLVED upstream id (issue #217): the gateway
+          // chose this provider/model, so the upstream must be told which one to run —
+          // the client's `model` is the routing alias (e.g. `anthropic/claude-…`), not
+          // a real upstream model id. Everything else is forwarded verbatim. Mirrors
+          // stripInternal's `model: providerModel`; without it the upstream 404s.
+          const passthroughBody = { ...nativeBody, model: providerModel };
+          const stream = await peekStream(
+            () => passthroughStream(passthroughBody, { signal }),
+            signal,
+            alias,
+            log,
+          );
+          breaker.recordSuccess(alias);
+          // Streamed usage is not known at peek time → cost null, backfilled later.
+          attempts.push(okRow(alias, elapsed(), null, passthrough));
+          return {
+            attempts,
+            final: { status: "ok", alias, providerModel },
+            body: null,
+            stream,
+            nativePassthrough: true,
+          };
+        }
         if (req.stream) {
-          const stream = await peekStream(provider, req, signal, providerModel, alias, log);
+          // Translate stream path (passthrough disabled): the existing byte-for-byte
+          // forward. peekStream opens chatCompletionStream(stripInternal); the row
+          // carries the (used:false) passthrough telemetry. No nativePassthrough marker.
+          const stream = await peekStream(
+            () => provider.chatCompletionStream(stripInternal(req, providerModel), { signal }),
+            signal,
+            alias,
+            log,
+          );
           breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null (not measured).
-          attempts.push(okRow(alias, elapsed(), null));
+          attempts.push(okRow(alias, elapsed(), null, passthrough));
           return {
             attempts,
             final: { status: "ok", alias, providerModel },
@@ -377,10 +622,41 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             stream,
           };
         }
+        if (passthrough.passthrough_used) {
+          // Native passthrough: forward the client's VERBATIM native body to the
+          // upstream (NO OpenAI-Chat translation) and return the native response
+          // untouched. provider.nativePassthrough is guaranteed present here — the
+          // guard's providerSupportsPassthrough feature-detected it. Cost is priced
+          // off the native usage, normalized to OpenAI shape (usageFromAnthropicResponse)
+          // so resolveCostUsd applies the same token math as a translated attempt.
+          const passthroughInvoke = provider.nativePassthrough;
+          const nativeBody = req.native_request;
+          if (!passthroughInvoke || !nativeBody) {
+            // Unreachable: the guard's providerSupportsPassthrough + hasNativeRequest
+            // checks already proved both present. Narrow defensively for type-safety.
+            throw new Error("native passthrough invoked without a native request or client method");
+          }
+          // Patch ONLY `model` to the RESOLVED upstream id (issue #217): the client's
+          // `model` is the routing alias (e.g. `anthropic/claude-…`), but the gateway
+          // picked this upstream model — forward it so the upstream doesn't 404 on the
+          // alias. Everything else verbatim. Mirrors stripInternal's `model: providerModel`.
+          const body = await passthroughInvoke({ ...nativeBody, model: providerModel }, { signal });
+          breaker.recordSuccess(alias);
+          const usage = usageFromAnthropicResponse(body);
+          const pricedBody = usage ? { ...body, usage } : body;
+          attempts.push(okRow(alias, elapsed(), costOf(alias, pricedBody), passthrough));
+          return {
+            attempts,
+            final: { status: "ok", alias, providerModel },
+            body,
+            stream: null,
+            nativePassthrough: true,
+          };
+        }
         const bodyReq = stripInternal(req, providerModel);
         const body = await provider.chatCompletion(bodyReq, { signal });
         breaker.recordSuccess(alias);
-        attempts.push(okRow(alias, elapsed(), costOf(alias, body)));
+        attempts.push(okRow(alias, elapsed(), costOf(alias, body), passthrough));
         return {
           attempts,
           final: { status: "ok", alias, providerModel },
@@ -401,6 +677,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             latency_ms: elapsed(),
             cost_usd: null,
             error_detail: null,
+            ...defaultPassthroughTelemetry(),
           });
           return {
             attempts,
@@ -433,6 +710,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             latency_ms: elapsed(),
             cost_usd: null,
             error_detail: null,
+            ...defaultPassthroughTelemetry(),
           });
           return {
             attempts,
@@ -462,11 +740,15 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             latency_ms: elapsed(),
             cost_usd: null,
             error_detail: errorDetailOf(err),
+            ...defaultPassthroughTelemetry(),
           });
           continue;
         }
 
-        // Genuine pre-first-chunk failure: record on the breaker, try next.
+        // Genuine pre-first-chunk failure: record on the breaker, try next. This row
+        // carries the REAL passthrough telemetry: a failure during nativePassthrough
+        // (UpstreamError) lands HERE just like a chatCompletion failure — the trail
+        // shows the verbatim-forward was attempted on this candidate before it failed.
         breaker.recordFailure(alias);
         attempts.push({
           alias,
@@ -477,6 +759,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           latency_ms: elapsed(),
           cost_usd: null,
           error_detail: errorDetailOf(err),
+          ...passthrough,
         });
       }
     }
@@ -516,16 +799,19 @@ export function createExecute(deps: ExecuteAdapterDeps) {
 
 // Open the provider stream and peek the first chunk so a pre-first-chunk failure
 // (connect/handshake/upstream 5xx) rejects HERE (breaker contract), while a
-// healthy stream is re-emitted intact — first chunk then the remainder.
+// healthy stream is re-emitted intact — first chunk then the remainder. The
+// SOURCE iterable is supplied by `open` (a thunk), so the SAME peek/relay/breaker
+// logic serves BOTH the translate path (chatCompletionStream(stripInternal)) and the
+// native-streaming-passthrough path (nativePassthroughStream(native_request)). The
+// thunk is invoked HERE (inside peekStream) so any synchronous throw from opening the
+// iterable is caught by the caller's per-candidate try/catch, exactly as before.
 async function peekStream(
-  provider: ProviderClient,
-  req: InternalRequest,
-  signal: AbortSignal,
-  providerModel: string,
+  open: () => AsyncIterable<string>,
+  _signal: AbortSignal,
   alias: string,
   log?: (level: string, msg: string, fields: Record<string, unknown>) => void,
 ): Promise<AsyncIterable<string>> {
-  const iterable = provider.chatCompletionStream(stripInternal(req, providerModel), { signal });
+  const iterable = open();
   const iterator = iterable[Symbol.asyncIterator]();
   const first = await iterator.next(); // may throw (pre-first-chunk failure)
 
@@ -633,6 +919,22 @@ function isJson(rf: InternalRequest["response_format"]): boolean {
   return t === "json_object" || t === "json_schema";
 }
 
+// Inert passthrough telemetry (issue #217): considered:false — for attempt rows that
+// never reached the passthrough decision (skip/circuit-open/abort/queue-timeout/
+// free-429) so EVERY row carries the same field set.
+function defaultPassthroughTelemetry(): PassthroughTelemetry {
+  return {
+    passthrough_considered: false,
+    passthrough_used: false,
+    passthrough_disable_reason: null,
+    source_protocol: null,
+    target_provider_protocol: null,
+    response_protocol: null,
+    provider_name: null,
+    provider_model: null,
+  };
+}
+
 function skipRow(alias: string, reason: string, latencyMs: number): RouteProviderAttempt {
   return {
     alias,
@@ -643,10 +945,16 @@ function skipRow(alias: string, reason: string, latencyMs: number): RouteProvide
     latency_ms: latencyMs,
     cost_usd: null,
     error_detail: null,
+    ...defaultPassthroughTelemetry(),
   };
 }
 
-function okRow(alias: string, latencyMs: number, costUsd: number | null): RouteProviderAttempt {
+function okRow(
+  alias: string,
+  latencyMs: number,
+  costUsd: number | null,
+  passthrough: PassthroughTelemetry,
+): RouteProviderAttempt {
   return {
     alias,
     skipped: false,
@@ -656,5 +964,6 @@ function okRow(alias: string, latencyMs: number, costUsd: number | null): RouteP
     latency_ms: latencyMs,
     cost_usd: costUsd,
     error_detail: null,
+    ...passthrough,
   };
 }
