@@ -1,6 +1,9 @@
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
 import { ClassifierDecisionSchema, ClassifierRulesConfigSchema } from "@helm/shared";
 import { describe, expect, it } from "vitest";
+import { loadConfig } from "../config/loader.js";
 import { type ScoreRequestDeps, scoreRequest } from "./engine.js";
 import { type MomentumDeps, type MomentumEntry, recordMomentum } from "./momentum.js";
 import { createMemoryMomentumStore } from "./momentum-store.js";
@@ -72,6 +75,11 @@ function makeRequest(over: Partial<InternalRequest> = {}): InternalRequest {
 }
 
 const NOW = 1_700_000_000_000;
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(__dirname, "../../../..");
+const shippedRules = () =>
+  loadConfig({ configDir: join(repoRoot, "config"), env: {} }).classifier.rules;
 
 function momentumDeps(opts: {
   cfg: ClassifierRulesConfig;
@@ -277,13 +285,12 @@ describe("scoreRequest — Layer-1 orchestration", () => {
   });
 
   // ── language-coverage guard ────────────────────────────────────────────────
-  // The keyword lists are English-only, so a predominantly non-Latin prompt can't
-  // be scored by them. The guard forces `uncertain` (confidence 0) so the cascade
-  // escalates to the multilingual Layer-2 eval — UNLESS a content-type structural
-  // signal gave real grip, or the message is trivially short. See plan / notes
-  // (classifier.multilingual-guard).
+  // Layer-1 has English plus small high-confidence international keyword lists.
+  // A non-covered non-Latin prompt, or a prompt that misses those lists, is forced `uncertain`
+  // (confidence 0) so the cascade escalates to multilingual Layer-2 eval — UNLESS a
+  // content-type structural signal gave real grip, or the message is trivially short.
   const longZh =
-    "请帮我详细分析这家公司过去三年的财务状况和现金流情况，并结合所在行业的整体趋势给出具体的投资建议以及主要风险点的评估和应对措施";
+    "请帮我整理这家公司过去三年的营收现金流资产负债变化以及行业背景信息，列出关键事实、时间线、主要事件和可量化指标，保持客观中立不要给投资建议";
 
   it("language guard: long non-Latin prose with no structural grip is forced uncertain", () => {
     const cfg = makeConfig();
@@ -372,7 +379,7 @@ describe("scoreRequest — Layer-1 orchestration", () => {
   it.each([
     [
       "Japanese",
-      "この会社の過去三年間の財務状況とキャッシュフローを詳しく分析し、業界動向も踏まえて投資判断と主要なリスクを具体的に説明してください",
+      "この会社の過去三年間の財務状況とキャッシュフローを詳しくまとめ、業界動向も踏まえて投資判断と主要なリスクを具体的に説明してください",
     ],
     [
       "Korean",
@@ -401,6 +408,157 @@ describe("scoreRequest — Layer-1 orchestration", () => {
     const req = makeRequest({ messages: [{ role: "user", content: longZh }] });
     const out = scoreRequest(req, { cfg, approxTokens: 40 });
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  // ── shipped international Layer-1 keywords ───────────────────────────────
+  // Config-only international expansion must add real positive dimensions, not merely task
+  // keywords. These tests assert Layer-1 rules catch high-confidence international prompts
+  // and suppress low_keyword_coverage via *_intl_kw grip.
+  it("shipped intl: Simplified analysis prompt is handled by rules without language guard", () => {
+    const cfg = shippedRules();
+    const req = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content: "请深入分析这家公司过去三年的现金流变化，比较行业趋势，并评估主要风险和根因。",
+        },
+      ],
+    });
+    const out = scoreRequest(req, { cfg, approxTokens: 50 });
+
+    expect(out.decided_by).toBe("rules");
+    expect(out.uncertain).toBe(false);
+    expect(out.explanation.some((e) => e.detail === "analysis_intl_kw")).toBe(true);
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  it("shipped intl: Simplified reasoning and planning prompts are handled by rules", () => {
+    const cfg = shippedRules();
+    const reasoningReq = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content: "请逐步证明这个定理，并解释原因、推导过程和每一步论证的理由。",
+        },
+      ],
+    });
+    const planningReq = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content: "请拆解这个项目的架构计划、路线图、里程碑和关键权衡，形成方案设计蓝图。",
+        },
+      ],
+    });
+    const reasoning = scoreRequest(reasoningReq, { cfg, approxTokens: 40 });
+    const planning = scoreRequest(planningReq, { cfg, approxTokens: 45 });
+
+    expect(reasoning.explanation.some((e) => e.detail === "reasoning_intl_kw")).toBe(true);
+    expect(reasoning.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+    expect(planning.explanation.some((e) => e.detail === "planning_intl_kw")).toBe(true);
+    expect(planning.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  it("shipped intl: Simplified math prompt has dimension grip when task keywords match", () => {
+    const cfg = shippedRules();
+    const req = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content:
+            "请计算这个矩阵方程的导数和积分步骤，详细解释每一步推导过程，并说明最终结果的数学含义，还要列出可能的代数变形和校验方法",
+        },
+      ],
+    });
+    const out = scoreRequest(req, { cfg, approxTokens: 70 });
+
+    expect(out.task_type).toBe("math");
+    expect(out.uncertain).toBe(false);
+    expect(out.explanation.some((e) => e.detail === "math_intl_kw")).toBe(true);
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  it("shipped intl: Simplified web prompt has dimension grip when task keywords match", () => {
+    const cfg = shippedRules();
+    const req = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content: "请搜索网页并查找网页上的最新公告，整理来源、时间、重点和可信度。",
+        },
+      ],
+    });
+    const out = scoreRequest(req, { cfg, approxTokens: 60 });
+
+    expect(out.explanation.some((e) => e.detail === "web_intl_kw")).toBe(true);
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  it("shipped intl: Simplified keyword seed contains no Traditional Chinese entries", () => {
+    const cfg = shippedRules();
+    const candidateKeywords = [
+      ...Object.entries(cfg.dimensions)
+        .filter(([name]) => name.endsWith("_intl_kw"))
+        .flatMap(([, dim]) => dim.keywords),
+      ...Object.values(cfg.task_keywords).flat(),
+      ...cfg.overrides.exact_confirmation_tokens,
+      ...cfg.overrides.formal_logic_keywords,
+    ];
+    const forbiddenTraditionalTerms = [
+      "積分",
+      "矩陣",
+      "導數",
+      "代數",
+      "推導",
+      "重構",
+      "除錯",
+      "編譯",
+      "函式",
+      "單元測試",
+      "堆疊追蹤",
+      "比較",
+      "評估",
+      "診斷",
+      "改寫",
+      "潤色",
+      "校對",
+      "標題",
+      "資料集",
+      "樞紐分析表",
+      "查詢",
+      "緩衝區溢位",
+      "權限提升",
+      "越權",
+      "惡意軟體",
+      "存取控制",
+      "截圖",
+      "螢幕截圖",
+      "流程圖",
+      "圖表",
+      "搜尋網頁",
+      "查找網頁",
+      "線上資料",
+      "擷取欄位",
+      "擷取實體",
+      "結構化資料",
+      "謝謝",
+      "反證法",
+      "歸納法",
+    ];
+
+    expect(
+      candidateKeywords.filter((kw) => forbiddenTraditionalTerms.some((term) => kw.includes(term))),
+    ).toEqual([]);
+  });
+
+  it("shipped intl: unmatched long Chinese still trips language guard", () => {
+    const cfg = shippedRules();
+    const req = makeRequest({ messages: [{ role: "user", content: longZh }] });
+    const out = scoreRequest(req, { cfg, approxTokens: 50 });
+
+    expect(out.uncertain).toBe(true);
+    expect(out.confidence).toBe(0);
+    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(true);
   });
 
   it("records final tier back into momentum history (write-back)", () => {

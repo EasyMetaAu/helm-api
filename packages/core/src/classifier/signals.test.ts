@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { nonLatinRatio } from "./signals.js";
 
 // nonLatinRatio measures the fraction of *letters* (\p{L}) that are NOT Latin
-// script. It feeds the Layer-1 language-coverage guard (engine.ts): the keyword
-// lists are English-only, so a predominantly non-Latin prompt cannot be scored by
-// keywords and must be marked uncertain → escalate to the (multilingual) Layer-2
-// eval. Punctuation, digits and whitespace are NOT letters and so never skew the
-// ratio. Pure: same input => same output (CLAUDE.md principle 4).
+// script. It feeds the Layer-1 language-coverage guard (engine.ts): Layer-1 has
+// English plus small high-confidence international keyword lists, so non-covered
+// languages and prompts that miss those lists must be marked uncertain → escalate to the
+// (multilingual) Layer-2 eval. Punctuation, digits and whitespace are NOT letters,
+// so they never skew the ratio. Pure: same input => same output.
 describe("nonLatinRatio", () => {
   it("is 0 for pure English/Latin prose", () => {
     expect(nonLatinRatio("please analyze this company's financials")).toBe(0);
