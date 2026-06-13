@@ -249,7 +249,19 @@
       <h2 class="section-header mb-3">{$t('Token usage over time')}</h2>
       {#if trend.length > 0}
         <div class="h-64">
-          <AreaChart data={trend} x={(d) => d.date} series={TREND_SERIES} legend />
+          <!-- Compact the Y-axis ticks (15M, not 15,000,000) and the per-series
+               tooltip values via the shared formatTokens; LayerChart formats
+               both itself unless we override props.yAxis / props.tooltip.item. -->
+          <AreaChart
+            data={trend}
+            x={(d) => d.date}
+            series={TREND_SERIES}
+            legend
+            props={{
+              yAxis: { format: formatTokens },
+              tooltip: { item: { format: formatTokens } },
+            }}
+          />
         </div>
       {:else}
         <div class="empty-state">{$t('No token usage recorded in this window yet.')}</div>
@@ -260,12 +272,15 @@
       <h2 class="section-header mb-3">{$t('Tokens by model')}</h2>
       {#if byModel.length > 0}
         <div class="h-64">
+          <!-- Slice-hover tooltip shows the model's token total — compact it
+               (1.2M) through the same formatter as everything else. -->
           <PieChart
             data={byModel}
             key={(d: ModelSlice) => d.model}
             value={(d: ModelSlice) => d.tokens}
             innerRadius={-40}
             legend
+            props={{ tooltip: { item: { format: formatTokens } } }}
           />
         </div>
       {:else}
