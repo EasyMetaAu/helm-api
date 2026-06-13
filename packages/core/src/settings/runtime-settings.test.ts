@@ -34,6 +34,7 @@ describe("defaultSettingsFromConfig", () => {
     expect(defaultSettingsFromConfig(cfg(true))).toEqual({
       capture_payloads: true,
       native_protocol_passthrough: false,
+      same_protocol_serialization_fast_path: false,
       payload_retention_days: 30,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 0,
@@ -104,6 +105,7 @@ describe("saveRuntimeSettings", () => {
     const saved = await saveRuntimeSettings(store, {
       capture_payloads: false,
       native_protocol_passthrough: false,
+      same_protocol_serialization_fast_path: false,
       payload_retention_days: 7,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 0,

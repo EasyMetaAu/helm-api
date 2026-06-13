@@ -8,9 +8,11 @@ import type {
 } from "@helm/core";
 import {
   canUseNativePassthrough,
+  canUseSameProtocolSerializationFastPath,
   checkCapability,
   type NativePassthroughDisableReason,
   resolveCostUsd,
+  type SameProtocolSerializationFastPathDisableReason,
   UpstreamError,
 } from "@helm/core";
 import type {
@@ -93,6 +95,8 @@ export interface ExecuteAdapterDeps {
    *  forwards the verbatim native body and returns the native response untranslated.
    *  Absent → OFF. */
   nativeProtocolPassthroughEnabled?: () => boolean;
+  /** Runtime feature flag `same_protocol_serialization_fast_path` (default OFF). */
+  sameProtocolSerializationFastPathEnabled?: () => boolean;
 }
 
 interface ResolvedAttemptTarget {
@@ -118,6 +122,12 @@ interface PassthroughTelemetry {
   response_protocol: Protocol | null;
   provider_name: string | null;
   provider_model: string | null;
+}
+
+interface FastPathTelemetry {
+  fast_path_considered: boolean;
+  fast_path_used: boolean;
+  fast_path_disable_reason: SameProtocolSerializationFastPathDisableReason | null;
 }
 
 function approxPromptTokens(req: InternalRequest): number {
@@ -350,6 +360,52 @@ function decideNativePassthroughForAttempt(input: {
   };
 }
 
+function decideFastPathForAttempt(input: {
+  req: InternalRequest;
+  plan: ExecutionPlan;
+  candidateIndex: number;
+  target: ResolvedAttemptTarget;
+  defaultProvider: ProviderClient;
+  providers?: Map<string, ProviderClient>;
+  registry: ProviderRegistry;
+  knownOAuthPrefixes?: ReadonlySet<string>;
+  oauthAliases?: () => ReadonlySet<string>;
+  oauthProviderProtocols?: ReadonlyMap<string, ProviderProtocolMetadata>;
+  enabled: boolean;
+}): FastPathTelemetry {
+  const { req, plan, candidateIndex, target } = input;
+  const fallbackMayUseDifferentProviderProtocol = plan.candidate_chain
+    .slice(candidateIndex + 1)
+    .some((fallbackAlias) => {
+      const fallback = resolveAttemptTarget({
+        alias: fallbackAlias,
+        defaultProvider: input.defaultProvider,
+        providers: input.providers,
+        registry: input.registry,
+        knownOAuthPrefixes: input.knownOAuthPrefixes,
+        oauthAliases: input.oauthAliases,
+        oauthProviderProtocols: input.oauthProviderProtocols,
+      });
+      return fallback.targetProviderProtocol !== target.targetProviderProtocol;
+    });
+
+  const decision = canUseSameProtocolSerializationFastPath({
+    request: req,
+    responseProtocol: req.protocol,
+    targetProviderProtocol: target.targetProviderProtocol,
+    fallbackMayUseDifferentProviderProtocol,
+    providerRequiresCompatibilityRewrite: target.providerRequiresCompatibilityRewrite,
+    enabled: input.enabled,
+    hasGovernedNativePayload: req.native_openai_chat_request !== undefined,
+  });
+
+  return {
+    fast_path_considered: true,
+    fast_path_used: decision.ok,
+    fast_path_disable_reason: decision.ok ? null : decision.reason,
+  };
+}
+
 function upstreamStatusOf(err: unknown): number | null {
   return err instanceof UpstreamError ? err.upstreamStatus : null;
 }
@@ -409,6 +465,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     signal,
     log,
     nativeProtocolPassthroughEnabled,
+    sameProtocolSerializationFastPathEnabled,
   } = deps;
   const knownOAuthPrefixes = deps.knownOAuthPrefixes;
   const oauthAliases = deps.oauthAliases;
@@ -557,6 +614,19 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         oauthProviderProtocols,
         enabled: nativeProtocolPassthroughEnabled?.() === true,
       });
+      const fastPath = decideFastPathForAttempt({
+        req,
+        plan,
+        candidateIndex,
+        target,
+        defaultProvider,
+        providers,
+        registry,
+        knownOAuthPrefixes,
+        oauthAliases,
+        oauthProviderProtocols,
+        enabled: sameProtocolSerializationFastPathEnabled?.() === true,
+      });
 
       // 3) Invoke the provider (stream or non-stream). We send the RESOLVED
       //    provider model (not the originally-requested alias) — the gateway
@@ -593,7 +663,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           );
           breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null, backfilled later.
-          attempts.push(okRow(alias, elapsed(), null, passthrough));
+          attempts.push(okRow(alias, elapsed(), null, passthrough, fastPath));
           return {
             attempts,
             final: { status: "ok", alias, providerModel },
@@ -614,7 +684,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           );
           breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null (not measured).
-          attempts.push(okRow(alias, elapsed(), null, passthrough));
+          attempts.push(okRow(alias, elapsed(), null, passthrough, fastPath));
           return {
             attempts,
             final: { status: "ok", alias, providerModel },
@@ -644,7 +714,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           breaker.recordSuccess(alias);
           const usage = usageFromAnthropicResponse(body);
           const pricedBody = usage ? { ...body, usage } : body;
-          attempts.push(okRow(alias, elapsed(), costOf(alias, pricedBody), passthrough));
+          attempts.push(okRow(alias, elapsed(), costOf(alias, pricedBody), passthrough, fastPath));
           return {
             attempts,
             final: { status: "ok", alias, providerModel },
@@ -653,10 +723,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             nativePassthrough: true,
           };
         }
-        const bodyReq = stripInternal(req, providerModel);
+        const bodyReq = fastPath.fast_path_used
+          ? buildOpenAIChatFastPathBody(req, providerModel)
+          : stripInternal(req, providerModel);
         const body = await provider.chatCompletion(bodyReq, { signal });
         breaker.recordSuccess(alias);
-        attempts.push(okRow(alias, elapsed(), costOf(alias, body), passthrough));
+        attempts.push(okRow(alias, elapsed(), costOf(alias, body), passthrough, fastPath));
         return {
           attempts,
           final: { status: "ok", alias, providerModel },
@@ -678,6 +750,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             cost_usd: null,
             error_detail: null,
             ...defaultPassthroughTelemetry(),
+            ...defaultFastPathTelemetry(),
           });
           return {
             attempts,
@@ -711,6 +784,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             cost_usd: null,
             error_detail: null,
             ...defaultPassthroughTelemetry(),
+            ...defaultFastPathTelemetry(),
           });
           return {
             attempts,
@@ -741,6 +815,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             cost_usd: null,
             error_detail: errorDetailOf(err),
             ...defaultPassthroughTelemetry(),
+            ...defaultFastPathTelemetry(),
           });
           continue;
         }
@@ -760,6 +835,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           cost_usd: null,
           error_detail: errorDetailOf(err),
           ...passthrough,
+          ...fastPath,
         });
       }
     }
@@ -881,6 +957,38 @@ const PROVIDER_RAW_FORWARD_KEYS = [
   "output_config",
 ] as const;
 
+function buildOpenAIChatFastPathBody(
+  req: InternalRequest,
+  providerModel: string,
+): Record<string, unknown> {
+  const native = req.native_openai_chat_request ?? {};
+  const body: Record<string, unknown> = {
+    model: providerModel,
+    messages: Array.isArray(native.messages) ? native.messages : req.messages,
+    stream: false,
+  };
+  if (Array.isArray(native.tools)) body.tools = native.tools;
+  else if (req.tools) body.tools = req.tools;
+  if (native.response_format && typeof native.response_format === "object") {
+    body.response_format = native.response_format;
+  } else if (req.response_format) body.response_format = req.response_format;
+  if (typeof native.max_tokens === "number") body.max_tokens = native.max_tokens;
+  else if (req.max_tokens !== null) body.max_tokens = req.max_tokens;
+  for (const key of FORWARDED_REQUEST_PARAM_KEYS) {
+    const nativeValue = native[key];
+    const value = nativeValue !== undefined && nativeValue !== null ? nativeValue : req[key];
+    if (value !== undefined && value !== null) body[key] = value;
+  }
+  for (const key of PROVIDER_RAW_FORWARD_KEYS) {
+    const nativeValue = native[key];
+    const providerRawValue = req.provider_raw?.[key];
+    const value =
+      nativeValue !== undefined && nativeValue !== null ? nativeValue : providerRawValue;
+    if (value !== undefined && value !== null) body[key] = value;
+  }
+  return body;
+}
+
 function stripInternal(req: InternalRequest, providerModel: string): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: providerModel,
@@ -935,6 +1043,14 @@ function defaultPassthroughTelemetry(): PassthroughTelemetry {
   };
 }
 
+function defaultFastPathTelemetry(): FastPathTelemetry {
+  return {
+    fast_path_considered: false,
+    fast_path_used: false,
+    fast_path_disable_reason: null,
+  };
+}
+
 function skipRow(alias: string, reason: string, latencyMs: number): RouteProviderAttempt {
   return {
     alias,
@@ -946,6 +1062,7 @@ function skipRow(alias: string, reason: string, latencyMs: number): RouteProvide
     cost_usd: null,
     error_detail: null,
     ...defaultPassthroughTelemetry(),
+    ...defaultFastPathTelemetry(),
   };
 }
 
@@ -954,6 +1071,7 @@ function okRow(
   latencyMs: number,
   costUsd: number | null,
   passthrough: PassthroughTelemetry,
+  fastPath: FastPathTelemetry,
 ): RouteProviderAttempt {
   return {
     alias,
@@ -965,5 +1083,6 @@ function okRow(
     cost_usd: costUsd,
     error_detail: null,
     ...passthrough,
+    ...fastPath,
   };
 }

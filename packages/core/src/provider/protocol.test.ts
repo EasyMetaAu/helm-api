@@ -1,6 +1,11 @@
 import type { InternalRequest } from "@helm/shared";
 import { describe, expect, it } from "vitest";
-import { canUseNativePassthrough, type NativePassthroughDecisionInput } from "./protocol.js";
+import {
+  canUseNativePassthrough,
+  canUseSameProtocolSerializationFastPath,
+  type NativePassthroughDecisionInput,
+  type SameProtocolSerializationFastPathDecisionInput,
+} from "./protocol.js";
 
 // canUseNativePassthrough — the framework-agnostic guard for native protocol
 // passthrough (issue #217, Phase 1). It decides whether execute may forward the
@@ -165,5 +170,94 @@ describe("canUseNativePassthrough", () => {
       "request",
       "targetProviderProtocol",
     ]);
+  });
+});
+
+
+function fastPathRequest(overrides: Partial<InternalRequest> = {}): InternalRequest {
+  return request({ protocol: "openai_chat", ...overrides });
+}
+
+function fastPathInput(
+  overrides: Partial<SameProtocolSerializationFastPathDecisionInput> = {},
+): SameProtocolSerializationFastPathDecisionInput {
+  return {
+    enabled: true,
+    hasGovernedNativePayload: true,
+    request: fastPathRequest(),
+    responseProtocol: "openai_chat",
+    targetProviderProtocol: "openai_chat",
+    fallbackMayUseDifferentProviderProtocol: false,
+    providerRequiresCompatibilityRewrite: false,
+    ...overrides,
+  };
+}
+
+describe("canUseSameProtocolSerializationFastPath", () => {
+  it("enables the OpenAI Chat same-protocol non-stream serialization fast path", () => {
+    expect(canUseSameProtocolSerializationFastPath(fastPathInput())).toEqual({ ok: true });
+  });
+
+  it("pins disable-reason order", () => {
+    expect(
+      canUseSameProtocolSerializationFastPath(
+        fastPathInput({
+          enabled: false,
+          hasGovernedNativePayload: false,
+          request: fastPathRequest({ protocol: "anthropic_messages", stream: true }),
+          responseProtocol: "anthropic_messages",
+          targetProviderProtocol: "anthropic_messages",
+          fallbackMayUseDifferentProviderProtocol: true,
+          providerRequiresCompatibilityRewrite: true,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: "feature_flag_disabled" });
+  });
+
+  it("disables unsafe OpenAI fast-path cases", () => {
+    expect(
+      canUseSameProtocolSerializationFastPath(
+        fastPathInput({ hasGovernedNativePayload: false }),
+      ),
+    ).toEqual({ ok: false, reason: "missing_governed_native_payload" });
+    expect(
+      canUseSameProtocolSerializationFastPath(
+        fastPathInput({ request: fastPathRequest({ protocol: "anthropic_messages" }) }),
+      ),
+    ).toEqual({ ok: false, reason: "source_protocol_not_openai_chat" });
+    expect(
+      canUseSameProtocolSerializationFastPath(
+        fastPathInput({ responseProtocol: "anthropic_messages" }),
+      ),
+    ).toEqual({ ok: false, reason: "response_protocol_not_openai_chat" });
+    expect(
+      canUseSameProtocolSerializationFastPath(
+        fastPathInput({ targetProviderProtocol: "anthropic_messages" }),
+      ),
+    ).toEqual({ ok: false, reason: "target_provider_protocol_not_openai_chat" });
+    expect(
+      canUseSameProtocolSerializationFastPath(
+        fastPathInput({ request: fastPathRequest({ stream: true }) }),
+      ),
+    ).toEqual({ ok: false, reason: "stream_not_supported" });
+    expect(
+      canUseSameProtocolSerializationFastPath(
+        fastPathInput({
+          request: fastPathRequest({
+            metadata: { ...fastPathRequest().metadata, memory_mode: "inject" },
+          }),
+        }),
+      ),
+    ).toEqual({ ok: false, reason: "memory_inject_may_rewrite_request" });
+    expect(
+      canUseSameProtocolSerializationFastPath(
+        fastPathInput({ fallbackMayUseDifferentProviderProtocol: true }),
+      ),
+    ).toEqual({ ok: false, reason: "fallback_may_change_provider_protocol" });
+    expect(
+      canUseSameProtocolSerializationFastPath(
+        fastPathInput({ providerRequiresCompatibilityRewrite: true }),
+      ),
+    ).toEqual({ ok: false, reason: "provider_requires_compatibility_rewrite" });
   });
 });

@@ -11,6 +11,7 @@ describe("RuntimeSettingsSchema", () => {
     const parsed = RuntimeSettingsSchema.parse({});
     expect(parsed.capture_payloads).toBe(true);
     expect(parsed.native_protocol_passthrough).toBe(false);
+    expect(parsed.same_protocol_serialization_fast_path).toBe(false);
     expect(parsed.payload_retention_days).toBe(30);
     expect(parsed.rate_limit_enabled).toBe(false);
     expect(parsed.rate_limit_default_rpm).toBe(0);
@@ -22,6 +23,7 @@ describe("RuntimeSettingsSchema", () => {
     const parsed = RuntimeSettingsSchema.parse({
       capture_payloads: false,
       native_protocol_passthrough: false,
+      same_protocol_serialization_fast_path: true,
       payload_retention_days: 7,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 60,
@@ -31,6 +33,7 @@ describe("RuntimeSettingsSchema", () => {
     expect(parsed).toEqual({
       capture_payloads: false,
       native_protocol_passthrough: false,
+      same_protocol_serialization_fast_path: true,
       payload_retention_days: 7,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 60,

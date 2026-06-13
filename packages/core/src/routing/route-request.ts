@@ -104,6 +104,9 @@ export interface ProviderAttempt {
   passthrough_considered?: boolean;
   passthrough_used?: boolean;
   passthrough_disable_reason?: string | null;
+  fast_path_considered?: boolean;
+  fast_path_used?: boolean;
+  fast_path_disable_reason?: string | null;
   source_protocol?: InternalRequest["protocol"] | null;
   target_provider_protocol?: InternalRequest["protocol"] | null;
   response_protocol?: InternalRequest["protocol"] | null;

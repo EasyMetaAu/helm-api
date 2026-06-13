@@ -1,4 +1,4 @@
-import type { InternalRequest, TargetProviderProtocol } from "@helm/shared";
+import type { InternalRequest, Protocol, TargetProviderProtocol } from "@helm/shared";
 
 // Native protocol passthrough guard (issue #217, Phase 1). Decides whether the
 // executor may forward the client's VERBATIM native request body to the upstream
@@ -88,6 +88,69 @@ export function canUseNativePassthrough(
   }
   if (!input.providerSupportsPassthrough) {
     return { ok: false, reason: "provider_lacks_passthrough" };
+  }
+  return { ok: true };
+}
+
+
+export type SameProtocolSerializationFastPathDisableReason =
+  | "feature_flag_disabled"
+  | "missing_governed_native_payload"
+  | "source_protocol_not_openai_chat"
+  | "response_protocol_not_openai_chat"
+  | "target_provider_protocol_not_openai_chat"
+  | "stream_not_supported"
+  | "memory_inject_may_rewrite_request"
+  | "fallback_may_change_provider_protocol"
+  | "provider_requires_compatibility_rewrite";
+
+export type SameProtocolSerializationFastPathDecision =
+  | { ok: true }
+  | { ok: false; reason: SameProtocolSerializationFastPathDisableReason };
+
+export interface SameProtocolSerializationFastPathDecisionInput {
+  request: InternalRequest;
+  responseProtocol: Protocol;
+  targetProviderProtocol: TargetProviderProtocol;
+  fallbackMayUseDifferentProviderProtocol: boolean;
+  providerRequiresCompatibilityRewrite: boolean;
+  enabled: boolean;
+  hasGovernedNativePayload: boolean;
+}
+
+// OpenAI Chat serialization fast path is narrower than native passthrough: it
+// keeps the normal provider client/response translation path, but reuses the
+// already-governed OpenAI body to avoid lossy IR re-serialization on safe
+// non-stream openai_chat -> openai_chat attempts.
+export function canUseSameProtocolSerializationFastPath(
+  input: SameProtocolSerializationFastPathDecisionInput,
+): SameProtocolSerializationFastPathDecision {
+  if (!input.enabled) {
+    return { ok: false, reason: "feature_flag_disabled" };
+  }
+  if (!input.hasGovernedNativePayload) {
+    return { ok: false, reason: "missing_governed_native_payload" };
+  }
+  if (input.request.protocol !== "openai_chat") {
+    return { ok: false, reason: "source_protocol_not_openai_chat" };
+  }
+  if (input.responseProtocol !== "openai_chat") {
+    return { ok: false, reason: "response_protocol_not_openai_chat" };
+  }
+  if (input.targetProviderProtocol !== "openai_chat") {
+    return { ok: false, reason: "target_provider_protocol_not_openai_chat" };
+  }
+  if (input.request.stream) {
+    return { ok: false, reason: "stream_not_supported" };
+  }
+  if (input.request.metadata.memory_mode === "inject") {
+    return { ok: false, reason: "memory_inject_may_rewrite_request" };
+  }
+  if (input.fallbackMayUseDifferentProviderProtocol) {
+    return { ok: false, reason: "fallback_may_change_provider_protocol" };
+  }
+  if (input.providerRequiresCompatibilityRewrite) {
+    return { ok: false, reason: "provider_requires_compatibility_rewrite" };
   }
   return { ok: true };
 }

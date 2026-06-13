@@ -30,6 +30,15 @@ function req(over: Partial<InternalRequest> = {}): InternalRequest {
   };
 }
 
+function nativeOpenAIChat(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    model: "client-alias",
+    messages: [{ role: "user", content: "hello" }],
+    stream: false,
+    ...over,
+  };
+}
+
 // Registry: alias -> providerModel passthrough.
 function registry(map: Record<string, string>): ProviderRegistry {
   return {
@@ -54,7 +63,15 @@ function registry(map: Record<string, string>): ProviderRegistry {
 }
 
 function registryWithProviders(
-  map: Record<string, { providerName: string; providerModel: string }>,
+  map: Record<
+    string,
+    {
+      providerName: string;
+      providerModel: string;
+      targetProviderProtocol?: "openai_chat" | "anthropic_messages" | "openai_responses" | "gemini";
+      providerRequiresCompatibilityRewrite?: boolean;
+    }
+  >,
 ): ProviderRegistry {
   return {
     resolve(alias: string) {
@@ -68,8 +85,8 @@ function registryWithProviders(
           providerModel: hit.providerModel,
           baseUrl: "http://x",
           apiKeyEnv: "X",
-          targetProviderProtocol: "openai_chat",
-          providerRequiresCompatibilityRewrite: false,
+          targetProviderProtocol: hit.targetProviderProtocol ?? "openai_chat",
+          providerRequiresCompatibilityRewrite: hit.providerRequiresCompatibilityRewrite ?? false,
         },
       };
     },
@@ -114,6 +131,162 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.final.status).toBe("ok");
     expect(out.body).toEqual({ id: "ok" });
     expect(out.attempts[0]?.status).toBe("ok");
+  });
+
+  it("keeps same-protocol serialization fast path disabled by default", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["default_good_model"]),
+      req({ native_openai_chat_request: nativeOpenAIChat() } as Partial<InternalRequest>),
+    );
+
+    expect(provider.chatCompletion).toHaveBeenCalledWith(
+      { model: "gpt-x", messages: [{ role: "user", content: "hello" }], stream: false },
+      expect.anything(),
+    );
+    expect(out.attempts[0]).toMatchObject({
+      fast_path_considered: true,
+      fast_path_used: false,
+      fast_path_disable_reason: "feature_flag_disabled",
+      source_protocol: "openai_chat",
+      target_provider_protocol: "openai_chat",
+      response_protocol: "openai_chat",
+      provider_name: "mock",
+      provider_model: "gpt-x",
+    });
+  });
+
+  it("uses the guarded OpenAI Chat non-stream fast path when enabled", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: { total_tokens: 3 } }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      sameProtocolSerializationFastPathEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["default_good_model"]),
+      req({
+        native_openai_chat_request: nativeOpenAIChat({
+          temperature: 0.2,
+          metadata: { trace: "safe" },
+          store: false,
+          previous_response_id: "must-not-forward",
+        }),
+        temperature: 0.2,
+        provider_raw: {
+          metadata: { trace: "safe" },
+          store: false,
+          previous_response_id: "must-not-forward",
+        },
+      } as Partial<InternalRequest>),
+    );
+
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body).toEqual({
+      model: "gpt-x",
+      messages: [{ role: "user", content: "hello" }],
+      stream: false,
+      temperature: 0.2,
+      metadata: { trace: "safe" },
+      store: false,
+    });
+    expect(JSON.stringify(body)).not.toContain("previous_response_id");
+    expect(out.attempts[0]).toMatchObject({
+      fast_path_considered: true,
+      fast_path_used: true,
+      fast_path_disable_reason: null,
+    });
+  });
+
+  it("disables fast path for stream, memory inject, compatibility rewrite, and cross-protocol fallback", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok" }),
+      chatCompletionStream: vi.fn().mockReturnValue(gen(['data: {"id":"s"}\n\n'])),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registryWithProviders({
+        openai: { providerName: "mock", providerModel: "gpt-x" },
+        anthropic: {
+          providerName: "mock",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        compat: {
+          providerName: "mock",
+          providerModel: "deepseek-x",
+          providerRequiresCompatibilityRewrite: true,
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      sameProtocolSerializationFastPathEnabled: () => true,
+    });
+
+    const withNative = req({
+      native_openai_chat_request: nativeOpenAIChat(),
+    } as Partial<InternalRequest>);
+    const stream = await execute(
+      plan(["openai"]),
+      req({
+        native_openai_chat_request: nativeOpenAIChat({ stream: true }),
+        stream: true,
+        stream_options: { include_usage: false },
+      } as Partial<InternalRequest>),
+    );
+    expect(stream.attempts[0]?.fast_path_disable_reason).toBe("stream_not_supported");
+
+    const memory = await execute(
+      plan(["openai"]),
+      req({
+        native_openai_chat_request: nativeOpenAIChat(),
+        metadata: { ...req().metadata, memory_mode: "inject" },
+      } as Partial<InternalRequest>),
+    );
+    expect(memory.attempts[0]?.fast_path_disable_reason).toBe("memory_inject_may_rewrite_request");
+
+    const compat = await execute(plan(["compat"]), withNative);
+    expect(compat.attempts[0]?.fast_path_disable_reason).toBe(
+      "provider_requires_compatibility_rewrite",
+    );
+
+    const fallback = await execute(plan(["openai", "anthropic"]), withNative);
+    expect(fallback.attempts[0]?.fast_path_disable_reason).toBe(
+      "fallback_may_change_provider_protocol",
+    );
+
+    const target = await execute(plan(["anthropic"]), withNative);
+    expect(target.attempts[0]?.fast_path_disable_reason).toBe(
+      "target_provider_protocol_not_openai_chat",
+    );
   });
 
   it("forwards LiteLLM/OpenAI-compatible params to the upstream request body", async () => {

@@ -197,6 +197,7 @@ function toInternalRequest(
     max_tokens: typeof body.max_tokens === "number" ? body.max_tokens : null,
     ...copyLiteLLMRequestParams(bodyRec),
     ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
+    native_openai_chat_request: bodyRec,
     stream: body.stream === true,
     metadata: {
       conversation_id: conversationId,

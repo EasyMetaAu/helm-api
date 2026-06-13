@@ -1360,6 +1360,8 @@ export async function buildServer(
             // route is the SAME `route` closure as chat.ts, so this one wiring edit
             // covers BOTH the OpenAI chat and Anthropic /v1/messages surfaces.
             nativeProtocolPassthroughEnabled: () => settings.native_protocol_passthrough,
+            sameProtocolSerializationFastPathEnabled: () =>
+              settings.same_protocol_serialization_fast_path,
           }),
           now: () => new Date(),
           log: (record) => logger.log("info", "route.decision", { trace_id: record.request_id }),

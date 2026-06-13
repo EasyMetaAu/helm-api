@@ -28,6 +28,9 @@ export const RuntimeSettingsSchema = z.object({
   // Forward a same-protocol request body verbatim to the native upstream,
   // bypassing the lossy IR translation round-trip. Default OFF (merge ≠ enable).
   native_protocol_passthrough: z.boolean().default(false),
+  // Guarded provider-attempt OpenAI Chat same-protocol serialization fast path.
+  // Default OFF until the governance ledger and negative matrix are fully proven.
+  same_protocol_serialization_fast_path: z.boolean().default(false),
   // Auto-prune captured payloads older than this many days. Bounds the storage
   // footprint and the plaintext-exposure window. Capped at 10 years.
   payload_retention_days: z.number().int().positive().max(3650).default(30),

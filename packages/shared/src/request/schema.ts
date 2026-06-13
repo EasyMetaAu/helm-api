@@ -103,6 +103,10 @@ export const InternalRequestSchema = z.object({
   // route boundary; used ONLY by execute's native-passthrough branch after
   // governance gates prove same-protocol non-stream safe.
   native_request: UnknownRecordSchema.optional(),
+  // Validated OpenAI Chat body captured after route-boundary parsing/path-model
+  // patching. It is never enough to bypass governance on its own; execute can use
+  // it only after routing/budget/memory gates prove same-protocol non-stream safe.
+  native_openai_chat_request: UnknownRecordSchema.optional(),
   stream: z.boolean(),
   metadata: RequestMetadataSchema,
 });
