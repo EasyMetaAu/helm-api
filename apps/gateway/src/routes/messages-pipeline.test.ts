@@ -1,14 +1,15 @@
-import type { ExecutionResult, ObserveDeps, RouteOptions } from "@helm/core";
+import type { ExecutionResult, InjectDeps, ObserveDeps, RouteOptions } from "@helm/core";
 import {
   type InternalRequest,
   type MemoryMessageInput,
   makeHelmError,
   type Protocol,
 } from "@helm/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { MessagesIdentity } from "./messages.js";
 import {
   createMessagesPipeline,
+  type InjectWiring,
   type PipelineBudgetDeps,
   PipelineError,
   type RouteFn,
@@ -880,5 +881,262 @@ describe("createMessagesPipeline — production IR params", () => {
     expect(captured.provider_raw?.container).toEqual({ id: "container_123" });
     expect(captured.provider_raw?.speed).toBe("fast");
     expect(captured.provider_raw?.output_config).toEqual({ effort: "xhigh" });
+  });
+});
+
+// ── Memory inject = additive PREFIX (#217 Phase 4) ────────────────────────────
+// The inject phase no longer full-replaces the conversation. It assembles ONE memory
+// TEXT BLOCK and the pipeline PREPENDS it at the system level: into the IR system
+// message on the TRANSLATE path, and into native_request.system / .instructions on the
+// PASSTHROUGH path. The live conversation (incl. tool turns) is kept VERBATIM, so memory
+// works for tool-using/multimodal turns AND for native passthrough.
+
+// A fake MemoryStore that returns one project reflection, so assembleInjectedContext
+// produces a non-null memory block. No observations / recent messages are needed to
+// exercise the splice. listMessages/listObservations return empty.
+function injectStore(reflection = "PROJECT MEMORY") {
+  return {
+    ensureThread: vi.fn(async () => {}),
+    appendMessage: vi.fn(async () => "m"),
+    listMessages: vi.fn(async () => []),
+    appendObservation: vi.fn(async () => "o"),
+    listObservations: vi.fn(async () => []),
+    getReflection: vi.fn(async (scope: { projectId?: string }) =>
+      scope.projectId !== undefined
+        ? {
+            id: "ref",
+            projectId: scope.projectId,
+            resourceId: null,
+            threadId: null,
+            reflectionText: reflection,
+            version: 1,
+            tokenEstimate: 4,
+            updatedAt: new Date(2026, 0, 1),
+          }
+        : null,
+    ),
+    upsertReflection: vi.fn(async () => "r"),
+    updateJobStatus: vi.fn(async () => {}),
+    enqueueJob: vi.fn(async () => "job-1"),
+    claimPendingJobs: vi.fn(async () => []),
+  };
+}
+
+function injectWiring(store: ReturnType<typeof injectStore>): InjectWiring {
+  const deps: InjectDeps = {
+    memoryStore: store as unknown as InjectDeps["memoryStore"],
+    estimateTokens: (t: string) => Math.ceil(t.length / 4),
+    enqueueObserverJob: async () => "job-x",
+    costSink: vi.fn(),
+    now: () => new Date("2026-01-01T00:00:00.000Z"),
+    log: vi.fn(),
+  };
+  return { deps, tokenBudget: 4000 };
+}
+
+const INJECT_META = {
+  trace_id: "trace-1",
+  memory_mode: "inject",
+  thread_id: "t1",
+  project_id: "p1",
+};
+
+describe("createMessagesPipeline — memory inject additive prefix", () => {
+  it("translate path: merges memory into the leading IR system message, other turns verbatim", async () => {
+    let seen: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      seen = JSON.parse(JSON.stringify(req)) as InternalRequest;
+      return okResult({ id: "x", choices: [{ index: 0, message: { content: "ok" } }] });
+    };
+    const store = injectStore();
+    const pipeline = createMessagesPipeline(route, "anthropic_messages", {
+      observe: makeObserveSpy().observe,
+      inject: injectWiring(store),
+    });
+    const run = await pipeline.run(
+      irOf({
+        metadata: INJECT_META,
+        messages: [
+          { role: "system", content: "be terse" },
+          { role: "user", content: "hi" },
+          { role: "tool", content: "tool result", tool_call_id: "c1" },
+        ],
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    await run.collect();
+    const msgs = (seen as InternalRequest | null)?.messages as Array<{
+      role: string;
+      content: string;
+    }>;
+    // Leading system message now carries the memory block PREPENDED ahead of "be terse".
+    expect(msgs[0]?.role).toBe("system");
+    expect(msgs[0]?.content).toContain("PROJECT MEMORY");
+    expect(msgs[0]?.content.endsWith("be terse")).toBe(true);
+    // The user + tool turns are kept VERBATIM and in order (no full-replace).
+    expect(msgs.slice(1)).toEqual([
+      { role: "user", content: "hi" },
+      { role: "tool", content: "tool result", tool_call_id: "c1" },
+    ]);
+  });
+
+  it("anthropic passthrough: block spliced into native_request.system, messages verbatim, passthrough usable", async () => {
+    const NATIVE = {
+      model: "claude-x",
+      system: "be terse",
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "search", input: {} }],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "done" }] },
+      ],
+    };
+    let seen: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      // Capture by reference so the test reads the SPLICED native_request the pipeline
+      // assigned (the executor would forward exactly this).
+      seen = req;
+      return passthroughOkResult();
+    };
+    const store = injectStore();
+    const pipeline = createMessagesPipeline(route, "anthropic_messages", {
+      observe: makeObserveSpy().observe,
+      inject: injectWiring(store),
+    });
+    const run = await pipeline.run(
+      irOf({
+        metadata: { ...INJECT_META, native_request: { ...NATIVE } },
+        messages: [
+          { role: "system", content: "be terse" },
+          { role: "user", content: "hi" },
+        ],
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    await run.collect();
+    const native = (seen as InternalRequest | null)?.native_request as
+      | { system?: unknown; messages?: unknown }
+      | undefined;
+    expect(native).toBeDefined();
+    // Memory block prepended into the native top-level `system` (string carrier).
+    expect(typeof native?.system).toBe("string");
+    expect(native?.system as string).toContain("PROJECT MEMORY");
+    expect((native?.system as string).endsWith("be terse")).toBe(true);
+    // The native messages (incl. the tool_use / tool_result turns) are VERBATIM.
+    expect(native?.messages).toEqual(NATIVE.messages);
+    // Passthrough is still usable: the run reports the upstream native body untouched.
+    expect((run as { nativePassthrough?: boolean }).nativePassthrough).toBe(true);
+    const body = (await run.collect()) as Record<string, unknown>;
+    expect(body).toBe(NATIVE_ANTHROPIC_BODY);
+  });
+
+  it("anthropic passthrough: prepends a text block when native system is an ARRAY", async () => {
+    const NATIVE = {
+      model: "claude-x",
+      system: [{ type: "text", text: "be terse" }],
+      messages: [{ role: "user", content: "hi" }],
+    };
+    let seen: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req;
+      return passthroughOkResult();
+    };
+    const store = injectStore();
+    const pipeline = createMessagesPipeline(route, "anthropic_messages", {
+      observe: makeObserveSpy().observe,
+      inject: injectWiring(store),
+    });
+    const run = await pipeline.run(
+      irOf({
+        metadata: { ...INJECT_META, native_request: { ...NATIVE } },
+        messages: [
+          { role: "system", content: "be terse" },
+          { role: "user", content: "hi" },
+        ],
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    await run.collect();
+    const native = (seen as InternalRequest | null)?.native_request as { system?: unknown };
+    expect(Array.isArray(native.system)).toBe(true);
+    const blocks = native.system as Array<{ type: string; text: string }>;
+    expect(blocks[0]?.type).toBe("text");
+    expect(blocks[0]?.text).toContain("PROJECT MEMORY");
+    expect(blocks[1]).toEqual({ type: "text", text: "be terse" });
+  });
+
+  it("openai_responses passthrough: block spliced into native_request.instructions, input verbatim", async () => {
+    const NATIVE = {
+      model: "gpt-5.5",
+      instructions: "be terse",
+      input: [
+        { role: "user", content: "hi" },
+        { type: "function_call", call_id: "c1", name: "search", arguments: "{}" },
+      ],
+    };
+    let seen: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req;
+      return passthroughResponsesOkResult();
+    };
+    const store = injectStore();
+    const pipeline = createMessagesPipeline(route, "openai_responses", {
+      observe: makeObserveSpy().observe,
+      inject: injectWiring(store),
+    });
+    const run = await pipeline.run(
+      irOf({
+        metadata: { ...INJECT_META, native_request: { ...NATIVE } },
+        messages: [
+          { role: "system", content: "be terse" },
+          { role: "user", content: "hi" },
+        ],
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    await run.collect();
+    const native = (seen as InternalRequest | null)?.native_request as
+      | { instructions?: unknown; input?: unknown }
+      | undefined;
+    expect(typeof native?.instructions).toBe("string");
+    expect(native?.instructions as string).toContain("PROJECT MEMORY");
+    expect((native?.instructions as string).endsWith("be terse")).toBe(true);
+    // input (incl. the function_call item) is kept VERBATIM.
+    expect(native?.input).toEqual(NATIVE.input);
+    expect((run as { nativePassthrough?: boolean }).nativePassthrough).toBe(true);
+  });
+
+  it("does NOT touch native_request when there is no memory to inject (empty block)", async () => {
+    const NATIVE = { model: "claude-x", system: "be terse", messages: [] };
+    let seen: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req;
+      return passthroughOkResult();
+    };
+    // No reflection → memory block is null → native_request stays byte-identical.
+    const store = injectStore();
+    store.getReflection.mockResolvedValue(null);
+    const pipeline = createMessagesPipeline(route, "anthropic_messages", {
+      observe: makeObserveSpy().observe,
+      inject: injectWiring(store),
+    });
+    const run = await pipeline.run(
+      irOf({
+        metadata: { ...INJECT_META, native_request: { ...NATIVE } },
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    await run.collect();
+    const native = (seen as InternalRequest | null)?.native_request as { system?: unknown };
+    // No memory → system is left exactly as the client sent it.
+    expect(native.system).toBe("be terse");
   });
 });

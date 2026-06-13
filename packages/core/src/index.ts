@@ -224,13 +224,14 @@ export {
   type InjectInput,
   type InjectResult,
 } from "./memory/inject.js";
-// Memory middleware — inject↔IR bridge (docs/08 Phase 2). The D7 plain-text gate +
-// D8 RawMessage synthesis / source→IR restoration shared by all request surfaces.
+// Memory middleware — inject↔IR bridge (docs/08 Phase 2, #217 Phase 4 PREFIX
+// model). Computes the live-window content_hashes for window-aware dedup, runs the
+// assembler, and merges the memory TEXT BLOCK into the system message — the live
+// conversation (tool_calls / images / tool results) is KEPT VERBATIM. No D7 gate.
 export {
   type InjectBridgeDeps,
   type InjectBridgeResult,
   injectIntoIR,
-  isPlainTextTurn,
 } from "./memory/inject-bridge.js";
 // Memory middleware — observe phase (docs/08 Phase 1). Framework-agnostic
 // write-only persistence; never injects memory or changes routing.
@@ -241,6 +242,7 @@ export {
   observeOutbound,
   ownerScopedThreadId,
   resolveMemoryMode,
+  serializeContent,
 } from "./memory/observe.js";
 // Memory middleware — background Observer (docs/08 Phase 2). Off the request path:
 // compresses a thread's older raw messages into one auditable observation.

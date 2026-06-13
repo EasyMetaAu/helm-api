@@ -1,4 +1,4 @@
-import type { Observation, RawMessage, Reflection } from "@helm/shared";
+import type { Observation, Reflection } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import type { MemoryStore } from "../store/ports.js";
 import type { ScoreConfig } from "./forgetting/score.js";
@@ -9,17 +9,21 @@ import {
   type InjectInput,
 } from "./inject.js";
 
-// docs/12 P3 (Access reinforcement) + P4 (score-driven inject trim) — the two
-// inject-path forgetting changes, ALL gated behind forgetting.enabled. With the
-// flag off (or absent) the assembler is byte-identical to today (see the explicit
-// regression case below + the untouched inject.test.ts). With the flag on:
+// docs/12 P3 (Access reinforcement) + P4 (score-driven inject trim), under the
+// #217 Phase 4 PREFIX model. The two inject-path forgetting changes are ALL gated
+// behind forgetting.enabled. With the flag off (or absent) the assembler trims
+// observations oldest-first and never reinforces. With the flag on:
 //   P4 — the observation budget trim drops LOWEST-SCORE-first instead of
 //        oldest-first, so a high-reference_count old observation outlives a
 //        never-referenced newer one; a throwing comparator falls back to
 //        oldest-first (fail-open); archived/expired rows are never injected.
-//   P3 — after the prefix is assembled, bumpReferences is fired (fire-and-forget)
-//        with EXACTLY the post-trim injected ids; a throwing bump never changes
-//        the returned messages; only the request account's rows are bumped.
+//   P3 — after the block is assembled, bumpReferences is fired (fire-and-forget)
+//        with EXACTLY the post-trim injected ids; a throwing bump never changes the
+//        returned block; only the request account's rows are bumped.
+//
+// The assembler now returns a single memory TEXT BLOCK (string | null) instead of
+// an AssembledMessage[] — each observation's text in these fixtures IS its id, so
+// "which observation survived" is asserted via block.includes(id) / the bump spy.
 
 function makeObservation(over: Partial<Observation> & { id: string }): Observation {
   return {
@@ -34,17 +38,6 @@ function makeObservation(over: Partial<Observation> & { id: string }): Observati
     archivedAt: null,
     expiredAt: null,
     ...over,
-  };
-}
-
-function makeRaw(id: string, content: string): RawMessage {
-  return {
-    id,
-    threadId: "thread-1",
-    role: "user",
-    content,
-    tokenEstimate: 0,
-    createdAt: new Date("2026-05-29T00:00:00.000Z"),
   };
 }
 
@@ -77,7 +70,6 @@ type BumpInput = {
 const makeBumpSpy = () => vi.fn<(input: BumpInput) => Promise<void>>(async () => {});
 
 const NOW = new Date("2026-05-31T12:00:00.000Z");
-const CURRENT = makeRaw("cur", "current question");
 const estimateTokens = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
 
 const SCORE_CONFIG: ScoreConfig = {
@@ -112,15 +104,20 @@ function makeDeps(store: MemoryStore, over: Partial<InjectDeps> = {}): InjectDep
 function baseInput(over: Partial<InjectInput> = {}): InjectInput {
   return {
     scope: { accountId: "acct-a", projectId: "proj-1", resourceId: "res-1", threadId: "thread-1" },
-    currentUserMessage: CURRENT,
-    systemPrompt: "you are helpful",
     tokenBudget: 1000,
     ...over,
   };
 }
 
-describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
-  it("flag OFF (no forgetting dep): output is byte-identical to today and never bumps", async () => {
+// Each fixture observation's text == its id, so the kept-observation ids are the
+// observation section lines of the block. Empty when nothing was injected.
+function injectedObservationIds(block: string | null, ids: string[]): string[] {
+  if (block === null) return [];
+  return ids.filter((id) => block.includes(id));
+}
+
+describe("assembleInjectedContext — forgetting gated (P3 + P4), prefix model", () => {
+  it("flag OFF (no forgetting dep): legacy oldest-first trim and never bumps", async () => {
     const bumpReferences = vi.fn(async () => {});
     const store = makeFakeStore(
       [
@@ -129,12 +126,10 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       ],
       { bumpReferences },
     );
-    // Budget forces a single observation through → the legacy oldest-first drop
-    // must keep "newer".
+    // Budget forces a single observation through → legacy oldest-first keeps "newer".
     const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), makeDeps(store));
 
-    const obs = out.messages.filter((m) => m.source === "thread_observation").map((m) => m.content);
-    expect(obs).toEqual(["newer"]); // legacy oldest-first
+    expect(injectedObservationIds(out.memoryBlock, ["older", "newer"])).toEqual(["newer"]);
     expect(bumpReferences).not.toHaveBeenCalled(); // no reinforcement when flag off
   });
 
@@ -153,13 +148,13 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       ],
       { bumpReferences },
     );
-    const deps = makeDeps(store);
     const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), {
-      ...deps,
+      ...makeDeps(store),
       forgetting: forgetting({ enabled: false, bumpReferences }),
     });
-    const obs = out.messages.filter((m) => m.source === "thread_observation").map((m) => m.content);
-    expect(obs).toEqual(["fresh"]); // legacy oldest-first wins, not score
+    expect(injectedObservationIds(out.memoryBlock, ["old-but-popular", "fresh"])).toEqual([
+      "fresh",
+    ]);
     expect(bumpReferences).not.toHaveBeenCalled();
   });
 
@@ -183,8 +178,9 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       ...makeDeps(store),
       forgetting: forgetting(),
     });
-    const obs = out.messages.filter((m) => m.source === "thread_observation").map((m) => m.content);
-    expect(obs).toEqual(["old-popular"]); // score-trim kept the reinforced one
+    expect(injectedObservationIds(out.memoryBlock, ["old-popular", "new-cold"])).toEqual([
+      "old-popular",
+    ]);
   });
 
   it("flag ON: a throwing score comparator falls back to legacy oldest-first (fail-open)", async () => {
@@ -193,8 +189,6 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       makeObservation({ id: "newer", observedAt: new Date("2026-05-28T00:00:00.000Z") }),
     ]);
     const log = vi.fn();
-    // A scoreConfig that makes the score throw: half_life_s = 0 would divide, but
-    // recency clamps; instead inject a NaN-producing config via a poisoned getter.
     const poisoned = forgetting({
       scoreConfig: new Proxy(SCORE_CONFIG, {
         get() {
@@ -206,8 +200,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       ...makeDeps(store, { log }),
       forgetting: poisoned,
     });
-    const obs = out.messages.filter((m) => m.source === "thread_observation").map((m) => m.content);
-    expect(obs).toEqual(["newer"]); // fell back to oldest-first
+    expect(injectedObservationIds(out.memoryBlock, ["older", "newer"])).toEqual(["newer"]);
     const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
     expect(logged).toMatch(/memory.inject.*(score|forgetting).*fallback/i);
   });
@@ -231,8 +224,9 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       ...makeDeps(store),
       forgetting: forgetting(),
     });
-    const obs = out.messages.filter((m) => m.source === "thread_observation").map((m) => m.content);
-    expect(obs).toEqual(["active"]);
+    expect(injectedObservationIds(out.memoryBlock, ["active", "archived", "expired"])).toEqual([
+      "active",
+    ]);
   });
 
   it("flag ON: bumpReferences is called with EXACTLY the post-trim injected ids", async () => {
@@ -249,9 +243,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       ...makeDeps(store),
       forgetting: forgetting({ dropOrder: "oldest", bumpReferences }),
     });
-    // Allow the fire-and-forget write to settle: the invocation itself is DEFERRED
-    // to a macrotask (setImmediate — Codex review fix: a sync sqlite .run() must not
-    // execute on the request tick), so flush a macrotask, not just microtasks.
+    // The invocation is DEFERRED to a macrotask (setImmediate) — flush a macrotask.
     await new Promise((resolve) => setImmediate(resolve));
     expect(bumpReferences).toHaveBeenCalledTimes(1);
     const call = bumpReferences.mock.calls[0]?.[0];
@@ -266,8 +258,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
   // request tick: the default sqlite adapter's writes are synchronous (.run()), so
   // an inline (even un-awaited) call would still spend the write on the request
   // path. assemble must return BEFORE the bump executes; a SYNCHRONOUSLY-throwing
-  // bump inside the macrotask must be caught (an uncaught macrotask throw would
-  // crash the process), logged, and change nothing.
+  // bump inside the macrotask must be caught, logged, and change nothing.
   it("flag ON: the bump runs AFTER assemble returns (deferred macrotask) and a sync throw is contained", async () => {
     const bumpReferences = vi.fn(() => {
       throw new Error("sync boom"); // SYNCHRONOUS throw — not a rejected promise
@@ -284,7 +275,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
 
     // assemble has returned, the macrotask has NOT run yet — nothing bumped.
     expect(bumpReferences).not.toHaveBeenCalled();
-    expect(out.messages.at(-1)?.source).toBe("current");
+    expect(out.memoryBlock).not.toBeNull();
 
     await new Promise((resolve) => setImmediate(resolve)); // run the deferred task
     expect(bumpReferences).toHaveBeenCalledTimes(1);
@@ -293,7 +284,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
     expect(logged).toContain("memory.inject.reinforce_failed");
   });
 
-  it("flag ON: a throwing bumpReferences does not change the returned messages (fail-open)", async () => {
+  it("flag ON: a throwing bumpReferences does not change the returned block (fail-open)", async () => {
     const bumpReferences = vi.fn(async () => {
       throw new Error("bump down");
     });
@@ -307,9 +298,8 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4)", () => {
       forgetting: forgetting({ bumpReferences }),
     });
     await new Promise((resolve) => setImmediate(resolve)); // flush the deferred macrotask
-    // The prefix still includes the observation and ends with current — unaffected.
-    expect(out.messages.map((m) => m.source)).toContain("thread_observation");
-    expect(out.messages.at(-1)?.source).toBe("current");
+    // The block still includes the observation — unaffected by the bump failure.
+    expect(out.memoryBlock).toContain("o1");
   });
 
   it("flag ON: bumpReferences includes the injected reflection ids and is account-guarded", async () => {

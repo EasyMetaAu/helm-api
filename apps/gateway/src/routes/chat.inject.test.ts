@@ -14,10 +14,11 @@ import { createApp } from "../app.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { type ChatRouteDeps, type InjectWiring, registerChatRoutes } from "./chat.js";
 
-// gateway.chat.inject (docs/08 Phase 2) — PROVE the inject-phase wiring on
-// /v1/chat/completions: on x-memory-mode=inject the assembled docs/08 prefix
-// reaches route() in order; non-inject modes never touch the messages; a thrown
-// inject is fail-open; a tool-call request is NOT replaced (tool calls preserved).
+// gateway.chat.inject (docs/08 Phase 2, #217 Phase 4 PREFIX model) — PROVE the
+// inject-phase wiring on /v1/chat/completions: on x-memory-mode=inject the assembled
+// memory block is PREPENDED into ONE system-level message ahead of the VERBATIM live
+// conversation (additive, no full-replace, no D7 gate); non-inject modes never touch the
+// messages; a thrown inject is fail-open; tool-call turns ride through untouched.
 
 function keyRecord(over: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
   return {
@@ -189,7 +190,7 @@ const INJECT_HEADERS = {
 const BODY = { model: "auto", messages: [{ role: "user", content: "hi" }], stream: false };
 
 describe("gateway.chat.inject — assembled prefix reaches route()", () => {
-  it("injects reflection + observations + recent raw in docs/08 order ahead of the current turn", async () => {
+  it("PREFIX-merges reflection + observations into the system message ahead of the verbatim turn (#217 Phase 4)", async () => {
     const { store } = makeFakeStore({
       reflection: { project: "PROJECT REFLECTION" },
       observations: ["OBS-1"],
@@ -216,13 +217,16 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
 
     expect(res.status).toBe(200);
     const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
-    expect(msgs).toEqual([
-      { role: "system", content: "be terse" },
-      { role: "user", content: "PROJECT REFLECTION" },
-      { role: "user", content: "OBS-1" },
-      { role: "user", content: "earlier turn" },
-      { role: "user", content: "hi" },
-    ]);
+    // PREFIX model: memory is ONE system-level block merged into the leading system
+    // message (reflection + observation inside it), NOT interleaved as separate user
+    // turns. The client's "be terse" stays at the TAIL of the block (D8-bis); the live
+    // user turn rides through VERBATIM. "earlier turn" was loaded only for window-dedup.
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0]?.role).toBe("system");
+    expect(msgs[0]?.content).toContain("PROJECT REFLECTION");
+    expect(msgs[0]?.content).toContain("OBS-1");
+    expect(msgs[0]?.content.endsWith("be terse")).toBe(true);
+    expect(msgs[1]).toEqual({ role: "user", content: "hi" });
   });
 
   it("preserves developer instructions under x-memory-mode=inject instead of silently dropping them", async () => {
@@ -249,7 +253,14 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(seen[0]?.messages).toEqual(original);
+    // PREFIX model: the leading turn is `developer` (not a system message), so the bridge
+    // splices a NEW leading system message carrying the memory block and keeps EVERY
+    // original turn verbatim, in order — developer instructions are preserved, the live
+    // conversation untouched.
+    const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
+    expect(msgs[0]?.role).toBe("system");
+    expect(msgs[0]?.content).toContain("PROJECT REFLECTION");
+    expect(msgs.slice(1)).toEqual(original);
   });
 
   it("hydrates before observing this turn so current input is not duplicated as recent_raw", async () => {
@@ -475,7 +486,7 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
     });
   });
 
-  it("skips replacement for a tool-call request (tool calls preserved, write-back still enqueued)", async () => {
+  it("keeps a tool-call request VERBATIM (tool calls preserved, write-back still enqueued)", async () => {
     const { store } = makeFakeStore({ reflection: { project: "R" }, observations: ["O"] });
     const enqueueObserverJob = vi.fn(async () => "job-tool");
     const { deps, seen } = captureRouteDeps({
@@ -505,11 +516,12 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
 
     expect(res.status).toBe(200);
     const msgs = seen[0]?.messages as Array<{ role: string; tool_calls?: unknown[] }>;
-    // The tool_calls survived — inject did NOT replace the messages.
+    // The tool_calls + tool role survived — the PREFIX model is purely additive (memory
+    // rides a prepended system message; the live tool turns are kept verbatim). This is
+    // exactly why the legacy D7 plain-text gate is gone: there is no replacement to skip.
     expect(msgs.some((m) => Array.isArray(m.tool_calls) && m.tool_calls.length > 0)).toBe(true);
     expect(msgs.some((m) => m.role === "tool")).toBe(true);
-    // But the observer WRITE-BACK still fired — tool-heavy threads must keep
-    // compressing even though replacement is unsafe (D7 gates only the replace).
+    // The observer WRITE-BACK still fired — tool-heavy threads keep compressing.
     expect(enqueueObserverJob).toHaveBeenCalledTimes(1);
   });
 });
@@ -545,8 +557,11 @@ describe("gateway.chat.inject — per-key defaults + signal fallback (issue #97)
 
     expect(res.status).toBe(200);
     const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
-    // The key default project's reflection was hydrated in.
-    expect(msgs.some((m) => m.content === "PROJECT REFLECTION")).toBe(true);
+    // The key default project's reflection was hydrated INTO the system-level memory
+    // block (PREFIX model) — part of a system message's content, not a standalone turn.
+    expect(msgs.some((m) => m.role === "system" && m.content.includes("PROJECT REFLECTION"))).toBe(
+      true,
+    );
     // Observability: the decision records WHICH chain link produced the thread.
     const insert = deps.telemetry.insert as ReturnType<typeof vi.fn>;
     const arg = insert.mock.calls[0]?.[0] as {

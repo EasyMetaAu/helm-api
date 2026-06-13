@@ -66,9 +66,11 @@ Modes:
 - `off` — no memory read/write; routing behavior is unchanged. Zero DB touch.
 - `observe` — record request messages, response messages, and tool outputs;
   enqueue an observer write-back job. Does not inject memory or change routing.
-- `inject` — synchronously load + assemble the memory context, **full-replace**
-  the request message array BEFORE classification/execution, then also write back
-  (same persistence + enqueue as `observe`).
+- `inject` — synchronously load + assemble memory into **one system-level text
+  block** and **prepend** it to the request BEFORE classification/execution
+  (additive — the client's live conversation is kept verbatim), then also write
+  back (same persistence + enqueue as `observe`). This is a **PREFIX** model, not
+  a full-replace: see "Inject is additive (prefix model)" below.
 
 ## End-to-end flow
 
@@ -76,9 +78,10 @@ Modes:
 Request comes in
   -> observeInbound: persist raw request messages        (observe | inject)
   -> if inject: assembleInjectedContext + injectIntoIR
-       load reflections + active observations + recent raw
-       full-replace the message array within the token budget
-  -> classifier uses the (possibly injected) message context
+       load reflections + active observations (+ thread raw rows for dedup)
+       assemble ONE system-level memory text block within the token budget
+       PREPEND it at the system level; the live conversation is kept verbatim
+  -> classifier uses the (memory-prefixed) message context
   -> route + provider execute
   -> observeOutbound: persist response + tool results     (observe | inject)
   -> enqueue observer write-back job
@@ -94,41 +97,103 @@ load/assembly failure falls back to the minimal context (system + current
 message), marks the decision `degraded: true`, and still attempts the write-back
 enqueue.
 
-### Context assembly order (inject phase — live)
+### Inject is additive (prefix model)
+
+`inject` does **not** rewrite or replace the request. It assembles memory into
+**one system-level text block** and **prepends** it; the client's live
+conversation — `messages` / `input`, including `tool_calls`, tool results, and
+multimodal (image) content — is kept **verbatim**. This is the #217 Phase 4
+PREFIX model that superseded the original full-replace compaction (see the
+tradeoff note below).
+
+The memory block is a single deterministic, cache-friendly text section:
 
 ```text
-system prompt
-+ project reflection
-+ resource reflection
-+ thread observations
-+ recent raw messages (an uncompressed suffix the auto-compaction policy keeps)
-+ current user message
+# Persistent memory (injected by helm)
+## Project knowledge      <- project reflection (if any)
+## Resource knowledge     <- resource reflection (if any)
+## Earlier context (summarized)
+<thread observations, time-anchored, window-deduped>
 ```
+
+Only sections with content are emitted (a project-only memory yields just the
+header + Project knowledge). The block is merged at the **system level**:
+
+- **Translate path** (`injectIntoIR`, core): if the conversation opens with a
+  system message, the block is prepended to its content with a blank-line
+  separator; otherwise a new leading system message is spliced in. Every other IR
+  message is kept by reference, in order. The input array is never mutated.
+- **Native passthrough path** (`native-memory-inject.ts`, gateway): the same
+  block is spliced into the protocol-native system field — Anthropic top-level
+  `system` (string → prepend + separator; array → one leading `{type:"text"}`
+  block) and Responses `instructions` (string → prepend + separator). `messages`
+  / `input` are forwarded byte-faithfully; only the system carrier gains the
+  prefix. See "Native passthrough" below.
 
 Rules:
 
+- **Works for every turn type.** Because inject is additive and never touches the
+  live turns, there is **no plain-text gate** — tool-using, multipart/image,
+  `developer`, and `tool` turns inject exactly like plain text turns. (The legacy
+  D7 `isPlainTextTurn` skip that existed only to protect full-replace from
+  destroying structure is **removed**.)
+- **Window-aware dedup.** The current request's `messages` are the client's live
+  window. Project/resource reflections are **always** injected (cross-thread
+  recall the client never re-sends). A thread **observation is injected only when
+  at least one of its covered turns is missing from the live window** — i.e. the
+  client has dropped (compacted) it and helm recalls the summary. An observation
+  whose covered turns are **all** still in the window is **skipped** (the client
+  re-sends them verbatim — injecting the summary too would duplicate). The window
+  fingerprint is `sha256Hex(serializeContent(content))`, byte-identical to how
+  storage hashes `memory_messages.content`, so a live turn matches its persisted
+  hash. An observation whose source range cannot be resolved against the loaded
+  raw rows is **kept** (never silently drop recall on a missing audit row). With
+  no window (e.g. a caller that supplies none) nothing is deduped.
 - Reflections are stable and slow-changing (the Reflector only bumps the version
   when the merged text actually changes).
-- Compaction is **not configurable** — there is no `memory.observer` block (a
-  leftover one fails startup). The Observer runs a single, internal auto-adaptive
-  policy: it preserves a recent raw suffix so compression never loses the live
-  working set, and turns already covered by an observation's source range are not
-  re-injected (no duplication). Three triggers compact (any one suffices):
-  **size** (the uncovered segment crosses an internal token threshold —
-  observations are the raw material of reflections and facts), **idle** (a quiet
-  thread with uncovered history is swept on the worker tick so short threads still
-  form memories), and **context pressure** (the active footprint nears the served
-  model's context window — a safety valve). Prices and the context window are
-  resolved per job from the model catalog (pin a price via `pricing.yaml`); the
-  economics weigh summary cost, cache-prefix churn, measured information loss, and
-  long-context quality benefit, with no tuning knobs to set.
 - Observation text carries a time anchor.
-- Injected memory stays within a token budget — `HELM_MEMORY_INJECT_TOKEN_BUDGET`
-  (default `4000`), counting injected memory layers only (the system prompt and
-  current message are excluded).
-- The plain-text inject path applies only to plain message turns. Tool-call,
-  multipart, `developer`, and `tool` turns keep their original messages (no
-  full-replace) but still enqueue the observer write-back.
+- The block stays within a token budget — `HELM_MEMORY_INJECT_TOKEN_BUDGET`
+  (default `4000`), counting injected memory only (the host system prompt and the
+  live conversation are excluded). Under budget pressure reflections are kept and
+  observations are trimmed first (oldest-first, or lowest-forgetting-score first
+  when `forgetting.enabled` with `dropOrder: "score"`).
+- **Compaction (Observer side) is not configurable** — there is no
+  `memory.observer` block (a leftover one fails startup). The Observer's
+  auto-adaptive write-back policy (size / idle / context-pressure triggers,
+  catalog-resolved economics) is unchanged; it governs how raw history becomes
+  observations in the background. Inject only *reads* those observations — it no
+  longer compacts the live request.
+
+### Tradeoff: live-conversation compaction is dropped
+
+The prefix model intentionally gives up the old behavior of shrinking the
+client's live message array in place. **Helm no longer compacts the request the
+client sends** — the client owns its own context window; helm contributes
+**long-term recall** (cross-thread reflections + summaries of turns the client
+has dropped) as an additive system prefix. This is what makes inject safe for
+tool/multimodal/native-passthrough turns (no structure can be lost) at the cost
+of helm no longer trimming an over-long live window for the client.
+
+**Prompt-cache caveat.** Prepending memory to the system carrier shifts the
+upstream prompt-cache prefix: memory-mode sessions may see **reduced upstream
+prompt caching** versus a non-memory session, and a reflection version bump
+changes the prefix (a stable reflection keeps it stable across turns). The block
+is deliberately deterministic and slow-changing to minimize churn, but a session
+that opts into memory accepts this as the cost of recall. Sessions on
+`x-memory-mode: off` are byte-identical to no-memory and keep full caching.
+
+### Native passthrough
+
+When native protocol passthrough (issue #217) forwards the client's verbatim
+native body upstream (Anthropic ↔ Anthropic, Responses ↔ Responses), inject is
+**no longer a blocker**. Because the memory block lives at the system level and
+the live turns are forwarded byte-faithfully, the native request stays
+self-consistent: `prependMemoryToAnthropicBody` / `prependMemoryToResponsesBody`
+splice the block into `system` / `instructions`, and `messages` / `input` pass
+through unchanged. `canUseNativePassthrough` therefore dropped its
+`memory_mode === "inject"` disable — passthrough fires **with** memory. (Before
+the prefix model, full-replace rewrote the message array, so passthrough had to
+be disabled whenever inject ran.)
 
 ## Background worker
 
@@ -326,6 +391,10 @@ until the LLM summarizer lands.
 - Reflector (`runReflectorJob`): observations → reflections.
 - Inject-phase context assembly (`assembleInjectedContext` + `injectIntoIR`),
   wired into the chat / messages / responses surfaces and the background worker.
+  Inject is now the **additive PREFIX model** (#217 Phase 4): a system-level
+  memory block prepended to a verbatim live conversation — works for tool /
+  multimodal / native-passthrough turns, with window-aware dedup. See "Inject is
+  additive (prefix model)" above.
 - The summarize/merge steps are deterministic stubs pending an LLM.
 
 ### Phase 3 — Project memory · implemented

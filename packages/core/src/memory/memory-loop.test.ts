@@ -119,19 +119,12 @@ describe("memory background loop (observer → reflector → inject)", () => {
     expect(reflection?.reflectionText).toContain("the user prefers dark mode");
     expect(reflection?.version).toBe(1);
 
-    // And the NEXT inject request for the same scope hydrates it.
+    // And the NEXT inject request for the same scope hydrates it into the memory
+    // TEXT BLOCK (#217 Phase 4 PREFIX model — the block is prepended at the system
+    // level; the live conversation is kept verbatim by the pipeline, never here).
     const result = await assembleInjectedContext(
       {
         scope: SCOPE,
-        currentUserMessage: {
-          id: "cur-1",
-          threadId: "t1",
-          role: "user",
-          content: "what theme do I like?",
-          tokenEstimate: 5,
-          createdAt: now(),
-        },
-        systemPrompt: "sys",
         tokenBudget: 4000,
       },
       {
@@ -144,21 +137,16 @@ describe("memory background loop (observer → reflector → inject)", () => {
       },
     );
 
-    expect(
-      result.messages.some(
-        (m) => m.source === "project_reflection" && m.content.includes("dark mode"),
-      ),
-    ).toBe(true);
+    // The project reflection rides the block under its section header — the
+    // compressed turn reaches the prompt ONLY as the merged reflection text, never
+    // as a reassembled raw conversation (the assembler no longer rebuilds messages;
+    // the live conversation stays with the pipeline).
+    expect(result.memoryBlock).not.toBeNull();
+    expect(result.memoryBlock).toContain("# Persistent memory (injected by helm)");
+    expect(result.memoryBlock).toContain("## Project knowledge");
+    expect(result.memoryBlock).toContain("dark mode");
     expect(result.metadata.memory_hydrated).toBe(true);
     expect(result.metadata.reflection_version).toBe(1);
-
-    // The compressed turn is represented by its observation/reflection — never
-    // re-injected VERBATIM as recent_raw (that would double it and grow forever).
-    expect(
-      result.messages.some(
-        (m) => m.source === "recent_raw" && m.content === "the user prefers dark mode",
-      ),
-    ).toBe(false);
   });
 
   it("a project reflection aggregates observations from ALL the project's threads (no last-writer-wins)", async () => {

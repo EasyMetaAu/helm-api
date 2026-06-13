@@ -519,15 +519,16 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // Memory inject runs before inbound observe, so the current turn cannot be
     // loaded back as recent_raw and duplicated in the same upstream request.
 
-    // Memory inject (docs/08 Phase 2): when x-memory-mode=inject, load + assemble a
-    // budgeted, cache-friendly context prefix and FULL-REPLACE internal.messages
-    // BEFORE routing — so classification/execution see the hydrated context. The
-    // BRIDGE owns the D7 plain-text gate: a tool-call / structured request keeps
-    // its original messages (the memory model can't represent tool calls) but the
-    // observer write-back still fires. Fully fail-open: a bridge failure leaves
-    // the original messages untouched (never 5xx, never alters routing —
-    // principle 3). Runs AFTER observe (observe writes the raw turn; inject only
-    // reads + assembles).
+    // Memory inject (docs/08 Phase 2, #217 Phase 4 PREFIX model): when
+    // x-memory-mode=inject, load + assemble a budgeted, cache-friendly memory TEXT
+    // BLOCK and PREPEND it into the leading system message BEFORE routing — so
+    // classification/execution see the hydrated context. The bridge is purely ADDITIVE:
+    // every other turn (incl. tool_calls / structured / multipart content) rides through
+    // VERBATIM, so there is no longer a D7 plain-text gate (no replacement ⇒ no structure
+    // loss). The OpenAI chat surface is the lingua franca (no native passthrough), so the
+    // splice is only the IR system merge. Fully fail-open: a bridge failure leaves the
+    // original messages untouched (never 5xx, never alters routing — principle 3). Runs
+    // AFTER observe (observe writes the raw turn; inject only reads + assembles).
     // Inject metadata for the DecisionRecord (docs/08 Step 10) — held here and
     // stamped AFTER route() returns (the routing core never learns about memory).
     let memoryMeta: Omit<MemoryDecision, "thread_source"> | null = null;
