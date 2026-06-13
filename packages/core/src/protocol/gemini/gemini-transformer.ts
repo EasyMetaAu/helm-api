@@ -402,6 +402,7 @@ function transformRequestOut(native: unknown): IRRequest {
       }
       if (part.functionResponse !== undefined) {
         const name = part.functionResponse.name;
+        const response = part.functionResponse.response;
         // Pair by name + occurrence order within this same turn's calls would not
         // span turns; the call ids were assigned in the assistant turn, so re-derive
         // the deterministic id from name + the response's own occurrence index.
@@ -409,11 +410,9 @@ function transformRequestOut(native: unknown): IRRequest {
         responseSeenByName.set(name, seen + 1);
         toolResultMessages.push({
           role: "tool",
-          content:
-            typeof part.functionResponse.response === "string"
-              ? part.functionResponse.response
-              : JSON.stringify(part.functionResponse.response ?? {}),
+          content: typeof response === "string" ? response : JSON.stringify(response ?? {}),
           tool_call_id: synthToolCallId(name, seen),
+          provider_raw: { gemini_function_response: response ?? {} },
         });
         continue;
       }
@@ -724,7 +723,9 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
                   ? toolNameById.get(message.tool_call_id)
                   : undefined) ??
                 "tool",
-              response: { content: irMessageContentToText(message.content) },
+              response: message.provider_raw?.gemini_function_response ?? {
+                content: irMessageContentToText(message.content),
+              },
             },
           },
         ],
@@ -1000,6 +1001,33 @@ interface StreamToolSlot {
   index: number;
   name: string;
   fullArgs: string; // latest complete args JSON from the most recent snapshot
+  argsValue: unknown;
+}
+
+function isSnapshotCompatible(previous: unknown, current: unknown): boolean {
+  if (Object.is(previous, current)) return true;
+  if (typeof previous === "string" && typeof current === "string") {
+    return current.startsWith(previous);
+  }
+  if (Array.isArray(previous) && Array.isArray(current)) {
+    return (
+      current.length >= previous.length &&
+      previous.every((value, index) => isSnapshotCompatible(value, current[index]))
+    );
+  }
+  if (
+    previous !== null &&
+    current !== null &&
+    typeof previous === "object" &&
+    typeof current === "object" &&
+    !Array.isArray(previous) &&
+    !Array.isArray(current)
+  ) {
+    return Object.entries(previous as Record<string, unknown>).every(([key, value]) =>
+      isSnapshotCompatible(value, (current as Record<string, unknown>)[key]),
+    );
+  }
+  return false;
 }
 
 async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIterable<IRChunk> {
@@ -1015,8 +1043,11 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
   // not as a strict prefix extension). So we BUFFER the latest full args per tool and
   // flush a single complete `arguments` string at stream end — tolerating arbitrary
   // fragmentation without ever emitting a half-parsed JSON delta (docs/05 pit:
-  // "tolerate partial JSON; accumulate to complete before parse").
-  const toolNameToSlot = new Map<string, StreamToolSlot>();
+  // "tolerate partial JSON; accumulate to complete before parse"). Duplicate parallel
+  // calls can share the same name and may arrive across separate frames. Gemini gives
+  // no stable id/index, so only reuse a same-name slot when the new args look like a
+  // compatible snapshot extension; otherwise allocate a new parallel slot.
+  const toolSlots: StreamToolSlot[] = [];
 
   for await (const raw of src) {
     const event = GeminiSSEEventSchema.parse(raw);
@@ -1062,17 +1093,26 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
       .map((p) => p.text ?? "")
       .join("");
 
-    // —— tool-call args: buffer the latest full args per name (no mid-stream emit). ——
+    // —— tool-call args: buffer the latest full args per inferred tool slot. ——
+    const usedToolIndexes = new Set<number>();
     for (const part of parts) {
       if (part.functionCall === undefined) continue;
       hasSeenToolCalls = true;
       const name = part.functionCall.name;
-      let slot = toolNameToSlot.get(name);
+      const argsValue = part.functionCall.args ?? {};
+      let slot = toolSlots.find(
+        (candidate) =>
+          candidate.name === name &&
+          !usedToolIndexes.has(candidate.index) &&
+          isSnapshotCompatible(candidate.argsValue, argsValue),
+      );
       if (slot === undefined) {
-        slot = { index: toolNameToSlot.size, name, fullArgs: "" };
-        toolNameToSlot.set(name, slot);
+        slot = { index: toolSlots.length, name, fullArgs: "", argsValue };
+        toolSlots.push(slot);
       }
-      slot.fullArgs = JSON.stringify(part.functionCall.args ?? {});
+      usedToolIndexes.add(slot.index);
+      slot.argsValue = argsValue;
+      slot.fullArgs = JSON.stringify(argsValue);
     }
 
     const finish = mapFinishReasonToIR(candidate?.finishReason);
@@ -1125,7 +1165,7 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
 
   // —— Stream end: flush complete tool-call args (each a fully-parseable JSON), then
   // the terminal finish_reason exactly once (idempotent close, docs/05 pit #4). ——
-  for (const slot of toolNameToSlot.values()) {
+  for (const slot of toolSlots) {
     yield {
       ...(lastModel !== undefined ? { model: lastModel } : {}),
       choices: [
