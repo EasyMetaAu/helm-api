@@ -1,5 +1,5 @@
 import { serveStatic } from "@hono/node-server/serve-static";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { type AdminAuthConfig, basicAuth } from "../middleware/basic-auth.js";
 
 // admin.static-serve — Hono serves the admin SPA's static build at /admin
@@ -36,13 +36,46 @@ function stripAdminPrefix(path: string): string {
   return rest === "" ? "/" : rest;
 }
 
+// Cache policy for the admin SPA — the missing piece that made a deploy "not take"
+// in an already-open browser:
+//   • /admin/_app/immutable/** are content-hashed build artifacts: a given URL's
+//     bytes never change (the hash IS the content), so cache them for a year as
+//     `immutable` — the browser never even revalidates them.
+//   • Everything else — crucially index.html, the SPA *shell* that hard-codes the
+//     current build's hashed chunk URLs — MUST be revalidated on every load. By
+//     default serveStatic emits only Last-Modified (no Cache-Control), so the
+//     browser applies heuristic freshness and keeps replaying the OLD shell across
+//     a deploy → it points at the previous build's chunks → the UI looks unchanged
+//     until a manual hard-refresh. `no-cache` ("store, but always revalidate")
+//     keeps the cheap 304 when nothing changed, yet picks up a new shell — and thus
+//     the new chunks — the instant we ship.
+//
+// MUST run as middleware BEFORE serveStatic, not via its `onFound` hook:
+// @hono/node-server's serveStatic fires `onFound` AFTER it has already built the
+// response with `c.body(...)`, so a `c.header()` there never lands on the response.
+// Setting it in a pre-pass (while `c.res` is still unset) buffers the header into
+// `c.#headers`, which c.body() then merges — so it actually ships.
+function setSpaCacheHeaders(c: Context): void {
+  if (c.req.path.includes("/_app/immutable/")) {
+    c.header("Cache-Control", "public, max-age=31536000, immutable");
+  } else {
+    c.header("Cache-Control", "no-cache");
+  }
+}
+
 export function mountAdminStatic(auth: AdminAuthConfig): Hono {
   const admin = new Hono();
 
   // 1) The whole /admin goes through Basic first (foremost): unauthenticated -> 401 + WWW-Authenticate, no content leaked.
   admin.use("*", basicAuth(auth));
 
-  // 2) Real file hit (/admin/_app/..., .js/.css) -> serve that file directly with the correct MIME.
+  // 2) Cache policy, set BEFORE the static handlers build the body (see setSpaCacheHeaders).
+  admin.use("/*", async (c, next) => {
+    setSpaCacheHeaders(c);
+    await next();
+  });
+
+  // 3) Real file hit (/admin/_app/..., .js/.css) -> serve that file directly with the correct MIME.
   admin.use(
     "/*",
     serveStatic({
@@ -51,7 +84,7 @@ export function mountAdminStatic(auth: AdminAuthConfig): Hono {
     }),
   );
 
-  // 3) SPA fallback: non-API routes with no physical file -> fall back to index.html (frontend router takes over).
+  // 4) SPA fallback: non-API routes with no physical file -> fall back to index.html (frontend router takes over).
   //    `/admin/api/*` is let through, to avoid swallowing API endpoints.
   admin.get("*", (c, next) => {
     if (c.req.path.startsWith("/admin/api/")) return next();
