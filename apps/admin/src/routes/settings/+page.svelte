@@ -17,9 +17,9 @@
   const DEFAULTS: RuntimeSettings = {
     capture_payloads: true,
     payload_retention_days: 30,
-    // Native protocol passthrough (issue #217): default OFF. No UI control yet —
-    // the field rides through Save untouched so toggling it via the API persists.
-    native_protocol_passthrough: false,
+    // Native protocol passthrough (issue #217): default ON. Toggled by the
+    // "Protocol passthrough" section below.
+    native_protocol_passthrough: true,
     rate_limit_enabled: false,
     rate_limit_default_rpm: 0,
     rate_limit_default_tpm: 0,
@@ -168,6 +168,34 @@
       </label>
     </section>
 
+    <!-- Protocol passthrough (issue #217) -->
+    <section class="card flex flex-col gap-3 text-sm">
+      <h2 class="section-header">{$t('Protocol passthrough')}</h2>
+
+      <label class="flex items-start gap-3">
+        <input
+          type="checkbox"
+          data-testid="native-protocol-passthrough"
+          class="checkbox mt-0.5"
+          bind:checked={form.native_protocol_passthrough}
+        />
+        <span>
+          <span class="font-medium">{$t('Forward same-protocol requests without translation')}</span
+          >
+          <span class="field-help block"
+            >{$t(
+              'When a request already speaks the upstream’s protocol (e.g. Anthropic /v1/messages → an Anthropic backend), forward it verbatim and return the native response untranslated — skipping the internal translation round-trip for higher fidelity and better prompt-cache reuse.',
+            )}</span
+          >
+          <span class="field-help mt-1 block"
+            >{$t(
+              'Only same-protocol traffic is affected. OpenAI-style requests and routes to a different provider always use translation and are unchanged.',
+            )}</span
+          >
+        </span>
+      </label>
+    </section>
+
     <!-- Request queueing (issue #93) -->
     <section class="card flex flex-col gap-3 text-sm">
       <h2 class="section-header">{$t('Request queueing')}</h2>
@@ -214,7 +242,9 @@
             bind:value={form.concurrency_queue_size_multiplier}
           />
           <span class="field-help"
-            >{$t('Max queue = MAX(multiplier × key limit, minimum). 0 uses the minimum only.')}</span
+            >{$t(
+              'Max queue = MAX(multiplier × key limit, minimum). 0 uses the minimum only.',
+            )}</span
           >
         </label>
         <label class="flex flex-col gap-1">

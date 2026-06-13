@@ -13,7 +13,8 @@ export interface RuntimeSettings {
   // Native protocol passthrough (issue #217). When ON, a same-protocol request
   // (e.g. Anthropic /v1/messages → an Anthropic subscription) forwards the
   // verbatim native body and returns the native response untranslated. Default
-  // OFF: merging the feature must NOT enable it.
+  // ON: cross-protocol / openai_chat / heterogeneous-chain traffic still falls
+  // back to translation inside the gateway guard, so this is safe by default.
   native_protocol_passthrough: boolean;
   rate_limit_enabled: boolean;
   // System DEFAULT quota any key without its own per-key override falls back to.
@@ -60,10 +61,10 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
     capture_payloads: raw.capture_payloads !== false,
     payload_retention_days:
       typeof raw.payload_retention_days === 'number' ? raw.payload_retention_days : 30,
-    // Default OFF, and — critically — KEEP it across an admin save. normalize()
-    // drops any key it doesn't name, so omitting this would silently reset the
-    // flag to false on every save (the #225 lesson).
-    native_protocol_passthrough: raw.native_protocol_passthrough === true,
+    // Default ON (a missing field reads as true), and — critically — KEEP it
+    // across an admin save. normalize() drops any key it doesn't name, so omitting
+    // this would silently reset the flag on every save (the #225 lesson).
+    native_protocol_passthrough: raw.native_protocol_passthrough !== false,
     rate_limit_enabled: raw.rate_limit_enabled === true,
     rate_limit_default_rpm:
       typeof raw.rate_limit_default_rpm === 'number' ? raw.rate_limit_default_rpm : 0,
