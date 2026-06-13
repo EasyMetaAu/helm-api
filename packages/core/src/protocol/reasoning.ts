@@ -102,6 +102,16 @@ export function resolveReasoning(message: IRMessage): {
         },
       ];
     });
+    if (
+      parts.length === 0 &&
+      message.reasoning_content != null &&
+      message.reasoning_content !== ""
+    ) {
+      return {
+        reasoningText: message.reasoning_content,
+        thinkingParts: [{ type: "thinking", text: message.reasoning_content }],
+      };
+    }
     const text = parts
       .map((p) => p.text)
       .filter((t) => t !== "")

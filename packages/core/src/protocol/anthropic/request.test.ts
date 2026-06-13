@@ -126,6 +126,31 @@ describe("anthropic transformRequestOut", () => {
     }
   });
 
+  it("preserves thinking_blocks when merging adjacent assistant messages", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "first thought", signature: "sig-1" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "redacted_thinking", data: "encrypted-second" }],
+        },
+      ],
+    };
+
+    const ir = transformRequestOut(req);
+    const assistantMsgs = ir.messages.filter((m) => m.role === "assistant");
+    expect(assistantMsgs).toHaveLength(1);
+    expect(assistantMsgs[0]?.thinking_blocks).toEqual([
+      { type: "thinking", thinking: "first thought", signature: "sig-1" },
+      { type: "redacted_thinking", data: "encrypted-second" },
+    ]);
+  });
+
   // Rule 6 (tool_result fan-out): multiple tool_results in one user turn expand
   // to adjacent role:"tool" messages — these must NOT be merged (distinct ids).
   it("keeps multiple tool_result messages distinct (not merged) by id", () => {

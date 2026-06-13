@@ -331,14 +331,26 @@ function toContentBlocks(
   // into empty visible thinking blocks. Otherwise fall back to resolveReasoning for
   // OpenAI/Gemini/Responses-origin flat reasoning. (P6)
   if (message.thinking_blocks !== undefined && message.thinking_blocks.length > 0) {
+    let emittedVisibleThinking = false;
     for (const block of message.thinking_blocks) {
       if (block.type === "redacted_thinking" && typeof block.data === "string") {
         blocks.push({ type: "redacted_thinking", data: block.data });
       } else if (typeof block.thinking === "string") {
+        emittedVisibleThinking = true;
         blocks.push({
           type: "thinking",
           thinking: block.thinking,
           ...(block.signature !== undefined ? { signature: block.signature } : {}),
+        });
+      }
+    }
+    if (!emittedVisibleThinking) {
+      const { thinkingParts } = resolveReasoning(message);
+      for (const part of thinkingParts) {
+        blocks.push({
+          type: "thinking",
+          thinking: part.text,
+          ...(part.signature !== undefined ? { signature: part.signature } : {}),
         });
       }
     }

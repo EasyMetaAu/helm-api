@@ -123,7 +123,11 @@ function imageBlockFromPart(part: Record<string, unknown>): AnthropicBlock | nul
 
 function documentBlockFromPart(part: Record<string, unknown>): AnthropicBlock | null {
   if (typeof part.fileId === "string") {
-    return { type: "document", source: { type: "file", file_id: part.fileId } };
+    return {
+      type: "document",
+      source: { type: "file", file_id: part.fileId },
+      ...(typeof part.filename === "string" ? { title: part.filename } : {}),
+    };
   }
   if (typeof part.data === "string") {
     return {
@@ -145,7 +149,11 @@ function documentBlockFromPart(part: Record<string, unknown>): AnthropicBlock | 
         ...(typeof part.filename === "string" ? { title: part.filename } : {}),
       };
     }
-    return { type: "document", source: { type: "url", url: part.url } };
+    return {
+      type: "document",
+      source: { type: "url", url: part.url },
+      ...(typeof part.filename === "string" ? { title: part.filename } : {}),
+    };
   }
   return null;
 }

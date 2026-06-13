@@ -411,10 +411,15 @@ function mergeConsecutiveSameRole(messages: IRMessage[]): IRMessage[] {
       // Merge: concatenate content as multipart, union tool_calls.
       const mergedParts = [...asParts(prev.content), ...asParts(msg.content)];
       const mergedCalls = [...(prev.tool_calls ?? []), ...(msg.tool_calls ?? [])];
+      const mergedThinkingBlocks = [
+        ...(prev.thinking_blocks ?? []),
+        ...(msg.thinking_blocks ?? []),
+      ];
       out[out.length - 1] = {
         ...prev,
         content: mergedParts.length > 0 ? mergedParts : null,
         ...(mergedCalls.length > 0 ? { tool_calls: mergedCalls } : {}),
+        ...(mergedThinkingBlocks.length > 0 ? { thinking_blocks: mergedThinkingBlocks } : {}),
       };
       continue;
     }

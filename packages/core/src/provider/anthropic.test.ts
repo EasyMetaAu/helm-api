@@ -100,6 +100,35 @@ describe("openaiToAnthropicRequest", () => {
     });
   });
 
+  it("preserves document filename for uploaded file and remote url sources", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "document", fileId: "file_123", filename: "uploaded.pdf" },
+            { type: "document", url: "https://example.com/report.pdf", filename: "remote.pdf" },
+          ],
+        },
+      ],
+    });
+
+    const msgs = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content).toEqual([
+      {
+        type: "document",
+        source: { type: "file", file_id: "file_123" },
+        title: "uploaded.pdf",
+      },
+      {
+        type: "document",
+        source: { type: "url", url: "https://example.com/report.pdf" },
+        title: "remote.pdf",
+      },
+    ]);
+  });
+
   it("preserves assistant thinking history blocks for native Anthropic", () => {
     const body = openaiToAnthropicRequest({
       model: "m",

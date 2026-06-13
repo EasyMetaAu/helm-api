@@ -316,6 +316,31 @@ describe("transformResponseIn", () => {
     expect(out.content[0]).toEqual({ type: "redacted_thinking", data: "encrypted-blob" });
     expect(out.content[1]).toEqual({ type: "text", text: "answer" });
   });
+
+  it("preserves visible reasoning_content alongside redacted_thinking blocks", () => {
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: "answer",
+              reasoning_content: "visible reasoning",
+              thinking_blocks: [{ type: "redacted_thinking", data: "encrypted-blob" }],
+            },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+
+    expect(out.content).toEqual([
+      { type: "redacted_thinking", data: "encrypted-blob" },
+      { type: "thinking", thinking: "visible reasoning" },
+      { type: "text", text: "answer" },
+    ]);
+  });
 });
 
 // —— P4: usage cache_creation breakdown + thinking_tokens ——————————————————————
