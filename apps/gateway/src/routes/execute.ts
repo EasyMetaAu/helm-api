@@ -579,8 +579,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               "native streaming passthrough invoked without a native request or client method",
             );
           }
+          // Patch ONLY `model` to the RESOLVED upstream id (issue #217): the gateway
+          // chose this provider/model, so the upstream must be told which one to run —
+          // the client's `model` is the routing alias (e.g. `anthropic/claude-…`), not
+          // a real upstream model id. Everything else is forwarded verbatim. Mirrors
+          // stripInternal's `model: providerModel`; without it the upstream 404s.
+          const passthroughBody = { ...nativeBody, model: providerModel };
           const stream = await peekStream(
-            () => passthroughStream(nativeBody, { signal }),
+            () => passthroughStream(passthroughBody, { signal }),
             signal,
             alias,
             log,
@@ -630,7 +636,11 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             // checks already proved both present. Narrow defensively for type-safety.
             throw new Error("native passthrough invoked without a native request or client method");
           }
-          const body = await passthroughInvoke(nativeBody, { signal });
+          // Patch ONLY `model` to the RESOLVED upstream id (issue #217): the client's
+          // `model` is the routing alias (e.g. `anthropic/claude-…`), but the gateway
+          // picked this upstream model — forward it so the upstream doesn't 404 on the
+          // alias. Everything else verbatim. Mirrors stripInternal's `model: providerModel`.
+          const body = await passthroughInvoke({ ...nativeBody, model: providerModel }, { signal });
           breaker.recordSuccess(alias);
           const usage = usageFromAnthropicResponse(body);
           const pricedBody = usage ? { ...body, usage } : body;

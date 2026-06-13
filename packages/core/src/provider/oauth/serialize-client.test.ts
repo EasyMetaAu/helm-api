@@ -42,6 +42,33 @@ function makeInner(chunks: string[] = ["a", "b"]): ProviderClient & {
   return inner;
 }
 
+// Inner that ALSO implements native passthrough (issue #217) — an Anthropic-style
+// member. Counts native calls separately so the lease/forwarding can be asserted.
+function makeNativeInner(chunks: string[] = ["c1", "c2", "c3"]): ProviderClient & {
+  nativeCalls: number;
+  nativeStreamCalls: number;
+} {
+  const inner = {
+    nativeCalls: 0,
+    nativeStreamCalls: 0,
+    async chatCompletion() {
+      return RESPONSE;
+    },
+    async *chatCompletionStream() {
+      for (const c of chunks) yield c;
+    },
+    async nativePassthrough() {
+      inner.nativeCalls += 1;
+      return RESPONSE;
+    },
+    async *nativePassthroughStream() {
+      inner.nativeStreamCalls += 1;
+      for (const c of chunks) yield c;
+    },
+  };
+  return inner;
+}
+
 function makeClient(
   inner: ProviderClient,
   config: { enabled: boolean; delayMs: number; timeoutMs: number },
@@ -217,5 +244,54 @@ describe("createSerializingClient", () => {
     for await (const c of client.chatCompletionStream(USER_REQ)) out.push(c);
     expect(out).toEqual(["a", "b"]);
     expect(warnings.length).toBeGreaterThan(0);
+  });
+
+  // ── native protocol passthrough (issue #217): the decorator must forward the
+  // new optional methods through the SAME serial-queue lease, and must NOT expose
+  // them when the wrapped member can't passthrough (honest feature-detect). ──
+  it("serializes two user-message nativePassthrough calls with the configured delay", async () => {
+    const inner = makeNativeInner();
+    const client = makeClient(inner, { enabled: true, delayMs: 200, timeoutMs: 5_000 });
+    expect(typeof client.nativePassthrough).toBe("function");
+    const t0 = Date.now();
+    const first = client.nativePassthrough?.(USER_REQ);
+    let secondDoneAt: number | null = null;
+    const second = client.nativePassthrough?.(USER_REQ).then((r) => {
+      secondDoneAt = Date.now();
+      return r;
+    });
+    await first;
+    await vi.advanceTimersByTimeAsync(200);
+    await second;
+    expect((secondDoneAt ?? 0) - t0).toBeGreaterThanOrEqual(200);
+    expect(inner.nativeCalls).toBe(2);
+  });
+
+  it("holds the lock across the FULL nativePassthroughStream drain", async () => {
+    const inner = makeNativeInner(["c1", "c2", "c3"]);
+    const client = makeClient(inner, { enabled: true, delayMs: 0, timeoutMs: 5_000 });
+    expect(typeof client.nativePassthroughStream).toBe("function");
+    const it = client.nativePassthroughStream?.(USER_REQ)[Symbol.asyncIterator]();
+    await it?.next(); // stream open, lock held
+    let secondGranted = false;
+    const second = client.nativePassthrough?.(USER_REQ).then((r) => {
+      secondGranted = true;
+      return r;
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(secondGranted).toBe(false); // still locked mid-stream
+    await it?.next();
+    await it?.next();
+    await it?.next(); // done:true — generator finally releases
+    await second;
+    expect(secondGranted).toBe(true);
+    expect(inner.nativeStreamCalls).toBe(1);
+  });
+
+  it("does NOT expose native passthrough when the inner member lacks it (honest feature-detect)", () => {
+    const inner = makeInner(); // openai-style member: no native methods
+    const client = makeClient(inner, { enabled: true, delayMs: 0, timeoutMs: 5_000 });
+    expect(client.nativePassthrough).toBeUndefined();
+    expect(client.nativePassthroughStream).toBeUndefined();
   });
 });

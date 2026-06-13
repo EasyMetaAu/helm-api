@@ -1242,8 +1242,11 @@ describe("createExecute — gateway execution adapter", () => {
 // body+response substitution INSIDE the existing per-candidate try/catch — so
 // breaker / abort / free-429 / chain-advance semantics are identical.
 describe("createExecute — native protocol passthrough (#217)", () => {
+  // model is the ROUTING ALIAS a client sends (e.g. `anthropic/claude-x`), NOT a
+  // real upstream id — execute must patch it to the resolved providerModel before
+  // forwarding (else the upstream 404s on the alias). Rest of the body is verbatim.
   const NATIVE = {
-    model: "claude-x",
+    model: "anthropic/claude-x",
     max_tokens: 16,
     messages: [{ role: "user", content: "hi" }],
   } as const;
@@ -1330,8 +1333,9 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(out.final.status).toBe("ok");
     expect(provider.nativePassthrough).toHaveBeenCalledTimes(1);
     expect(provider.chatCompletion).not.toHaveBeenCalled();
-    // The native body was forwarded VERBATIM, and the native response returned as-is.
-    expect(provider.nativePassthrough.mock.calls[0]?.[0]).toEqual(NATIVE);
+    // The native body is forwarded with `model` patched to the RESOLVED upstream id
+    // (the client's routing alias would 404 upstream); everything else is verbatim.
+    expect(provider.nativePassthrough.mock.calls[0]?.[0]).toEqual({ ...NATIVE, model: "claude-x" });
     expect(out.body).toBe(NATIVE_RESP);
     expect(out.nativePassthrough).toBe(true);
     const okRow = out.attempts[0];
@@ -1640,8 +1644,10 @@ describe("createExecute — native protocol passthrough (#217)", () => {
 // + chain advance; healthy → recordSuccess). The stream-passthrough decision is
 // stream-AWARE — providerSupportsPassthrough feature-detects nativePassthroughStream.
 describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)", () => {
+  // model is the ROUTING ALIAS a client sends; execute patches it to providerModel
+  // before forwarding the verbatim native stream body (else upstream 404s on alias).
   const NATIVE_STREAM = {
-    model: "claude-x",
+    model: "anthropic/claude-x",
     max_tokens: 16,
     stream: true,
     messages: [{ role: "user", content: "hi" }],
@@ -1727,7 +1733,10 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.final.status).toBe("ok");
     // The native (stream) body was forwarded VERBATIM to the stream passthrough method.
     expect(provider.nativePassthroughStream).toHaveBeenCalledTimes(1);
-    expect(provider.nativePassthroughStream.mock.calls[0]?.[0]).toEqual(NATIVE_STREAM);
+    expect(provider.nativePassthroughStream.mock.calls[0]?.[0]).toEqual({
+      ...NATIVE_STREAM,
+      model: "claude-x",
+    });
     expect(provider.chatCompletionStream).not.toHaveBeenCalled();
     // recordSuccess fired on the first peeked chunk (breaker contract unchanged).
     expect(recordSuccess).toHaveBeenCalledTimes(1);
