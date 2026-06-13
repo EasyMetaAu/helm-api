@@ -2138,8 +2138,6 @@ describe("createExecute — OAuth subscription alias guard (fail-closed)", () =>
     ).not.toHaveBeenCalled();
   });
 
-
-
   it("keeps OAuth subscription provider protocol metadata so fast path cannot hit Anthropic pools", async () => {
     const pool = ok("pool");
     const execute = createExecute({

@@ -173,7 +173,6 @@ describe("canUseNativePassthrough", () => {
   });
 });
 
-
 function fastPathRequest(overrides: Partial<InternalRequest> = {}): InternalRequest {
   return request({ protocol: "openai_chat", ...overrides });
 }
@@ -216,9 +215,7 @@ describe("canUseSameProtocolSerializationFastPath", () => {
 
   it("disables unsafe OpenAI fast-path cases", () => {
     expect(
-      canUseSameProtocolSerializationFastPath(
-        fastPathInput({ hasGovernedNativePayload: false }),
-      ),
+      canUseSameProtocolSerializationFastPath(fastPathInput({ hasGovernedNativePayload: false })),
     ).toEqual({ ok: false, reason: "missing_governed_native_payload" });
     expect(
       canUseSameProtocolSerializationFastPath(

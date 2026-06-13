@@ -92,7 +92,6 @@ export function canUseNativePassthrough(
   return { ok: true };
 }
 
-
 export type SameProtocolSerializationFastPathDisableReason =
   | "feature_flag_disabled"
   | "missing_governed_native_payload"
