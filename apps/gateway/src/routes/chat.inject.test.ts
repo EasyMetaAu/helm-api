@@ -14,11 +14,12 @@ import { createApp } from "../app.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { type ChatRouteDeps, type InjectWiring, registerChatRoutes } from "./chat.js";
 
-// gateway.chat.inject (docs/08 Phase 2, #217 Phase 4 PREFIX model) — PROVE the
-// inject-phase wiring on /v1/chat/completions: on x-memory-mode=inject the assembled
-// memory block is PREPENDED into ONE system-level message ahead of the VERBATIM live
-// conversation (additive, no full-replace, no D7 gate); non-inject modes never touch the
-// messages; a thrown inject is fail-open; tool-call turns ride through untouched.
+// gateway.chat.inject (docs/08 Phase 2, #217 Phase 4 TRAILING-REMINDER model) — PROVE
+// the inject-phase wiring on /v1/chat/completions: on x-memory-mode=inject the assembled
+// memory block is APPENDED as ONE trailing <system-reminder> user turn AFTER the VERBATIM
+// live conversation (additive, no full-replace, no system-prefix edit, no D7 gate) — so
+// the client's cached prefix is untouched; non-inject modes never touch the messages; a
+// thrown inject is fail-open; tool-call turns ride through untouched.
 
 function keyRecord(over: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
   return {
@@ -189,8 +190,8 @@ const INJECT_HEADERS = {
 };
 const BODY = { model: "auto", messages: [{ role: "user", content: "hi" }], stream: false };
 
-describe("gateway.chat.inject — assembled prefix reaches route()", () => {
-  it("PREFIX-merges reflection + observations into the system message ahead of the verbatim turn (#217 Phase 4)", async () => {
+describe("gateway.chat.inject — assembled reminder reaches route()", () => {
+  it("APPENDS reflection + observations as a trailing <system-reminder> turn, conversation verbatim (#217 Phase 4)", async () => {
     const { store } = makeFakeStore({
       reflection: { project: "PROJECT REFLECTION" },
       observations: ["OBS-1"],
@@ -217,16 +218,18 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
 
     expect(res.status).toBe(200);
     const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
-    // PREFIX model: memory is ONE system-level block merged into the leading system
-    // message (reflection + observation inside it), NOT interleaved as separate user
-    // turns. The client's "be terse" stays at the TAIL of the block (D8-bis); the live
-    // user turn rides through VERBATIM. "earlier turn" was loaded only for window-dedup.
-    expect(msgs).toHaveLength(2);
-    expect(msgs[0]?.role).toBe("system");
-    expect(msgs[0]?.content).toContain("PROJECT REFLECTION");
-    expect(msgs[0]?.content).toContain("OBS-1");
-    expect(msgs[0]?.content.endsWith("be terse")).toBe(true);
+    // TRAILING-REMINDER model: the client's system prompt and live turn ride through
+    // VERBATIM (cached prefix untouched); memory is ONE trailing <system-reminder> user
+    // turn carrying reflection + observation. "earlier turn" was loaded only for
+    // window-dedup, never re-injected.
+    expect(msgs).toHaveLength(3);
+    expect(msgs[0]).toEqual({ role: "system", content: "be terse" });
     expect(msgs[1]).toEqual({ role: "user", content: "hi" });
+    expect(msgs[2]?.role).toBe("user");
+    expect(msgs[2]?.content).toContain("PROJECT REFLECTION");
+    expect(msgs[2]?.content).toContain("OBS-1");
+    expect(msgs[2]?.content.startsWith("<system-reminder>")).toBe(true);
+    expect(msgs[2]?.content.endsWith("</system-reminder>")).toBe(true);
   });
 
   it("preserves developer instructions under x-memory-mode=inject instead of silently dropping them", async () => {
@@ -253,14 +256,14 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
     });
 
     expect(res.status).toBe(200);
-    // PREFIX model: the leading turn is `developer` (not a system message), so the bridge
-    // splices a NEW leading system message carrying the memory block and keeps EVERY
-    // original turn verbatim, in order — developer instructions are preserved, the live
-    // conversation untouched.
+    // TRAILING-REMINDER model: EVERY original turn (developer + system + user) rides
+    // verbatim, in order; the memory block is appended as ONE trailing <system-reminder>
+    // user turn — developer instructions preserved, the live conversation untouched.
     const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
-    expect(msgs[0]?.role).toBe("system");
-    expect(msgs[0]?.content).toContain("PROJECT REFLECTION");
-    expect(msgs.slice(1)).toEqual(original);
+    expect(msgs.slice(0, 3)).toEqual(original);
+    expect(msgs[3]?.role).toBe("user");
+    expect(msgs[3]?.content).toContain("PROJECT REFLECTION");
+    expect(msgs[3]?.content.startsWith("<system-reminder>")).toBe(true);
   });
 
   it("hydrates before observing this turn so current input is not duplicated as recent_raw", async () => {
@@ -516,9 +519,10 @@ describe("gateway.chat.inject — assembled prefix reaches route()", () => {
 
     expect(res.status).toBe(200);
     const msgs = seen[0]?.messages as Array<{ role: string; tool_calls?: unknown[] }>;
-    // The tool_calls + tool role survived — the PREFIX model is purely additive (memory
-    // rides a prepended system message; the live tool turns are kept verbatim). This is
-    // exactly why the legacy D7 plain-text gate is gone: there is no replacement to skip.
+    // The tool_calls + tool role survived — the TRAILING-REMINDER model is purely additive
+    // (memory rides a trailing <system-reminder> turn; the live tool turns are kept
+    // verbatim). This is exactly why the legacy D7 plain-text gate is gone: there is no
+    // replacement to skip.
     expect(msgs.some((m) => Array.isArray(m.tool_calls) && m.tool_calls.length > 0)).toBe(true);
     expect(msgs.some((m) => m.role === "tool")).toBe(true);
     // The observer WRITE-BACK still fired — tool-heavy threads keep compressing.
@@ -557,11 +561,17 @@ describe("gateway.chat.inject — per-key defaults + signal fallback (issue #97)
 
     expect(res.status).toBe(200);
     const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
-    // The key default project's reflection was hydrated INTO the system-level memory
-    // block (PREFIX model) — part of a system message's content, not a standalone turn.
-    expect(msgs.some((m) => m.role === "system" && m.content.includes("PROJECT REFLECTION"))).toBe(
-      true,
-    );
+    // The key default project's reflection was hydrated into the trailing <system-reminder>
+    // user turn (TRAILING-REMINDER model) — appended after the conversation, not merged
+    // into a system message.
+    expect(
+      msgs.some(
+        (m) =>
+          m.role === "user" &&
+          m.content.includes("PROJECT REFLECTION") &&
+          m.content.startsWith("<system-reminder>"),
+      ),
+    ).toBe(true);
     // Observability: the decision records WHICH chain link produced the thread.
     const insert = deps.telemetry.insert as ReturnType<typeof vi.fn>;
     const arg = insert.mock.calls[0]?.[0] as {

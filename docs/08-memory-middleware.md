@@ -66,11 +66,13 @@ Modes:
 - `off` — no memory read/write; routing behavior is unchanged. Zero DB touch.
 - `observe` — record request messages, response messages, and tool outputs;
   enqueue an observer write-back job. Does not inject memory or change routing.
-- `inject` — synchronously load + assemble memory into **one system-level text
-  block** and **prepend** it to the request BEFORE classification/execution
-  (additive — the client's live conversation is kept verbatim), then also write
-  back (same persistence + enqueue as `observe`). This is a **PREFIX** model, not
-  a full-replace: see "Inject is additive (prefix model)" below.
+- `inject` — synchronously load + assemble memory into **one text block** and
+  **append** it as a trailing **`<system-reminder>`** turn AFTER the request's
+  conversation, BEFORE classification/execution (additive — the client's live
+  conversation AND its cached prompt prefix are kept verbatim), then also write
+  back (same persistence + enqueue as `observe`). This is a **TRAILING-REMINDER**
+  model, not a full-replace and not a system-prefix edit: see "Inject is additive
+  (trailing-reminder model)" below.
 
 ## End-to-end flow
 
@@ -79,9 +81,10 @@ Request comes in
   -> observeInbound: persist raw request messages        (observe | inject)
   -> if inject: assembleInjectedContext + injectIntoIR
        load reflections + active observations (+ thread raw rows for dedup)
-       assemble ONE system-level memory text block within the token budget
-       PREPEND it at the system level; the live conversation is kept verbatim
-  -> classifier uses the (memory-prefixed) message context
+       assemble ONE memory text block within the token budget
+       APPEND it as a trailing <system-reminder> turn; the conversation (and the
+         client's cached system prefix) is kept verbatim
+  -> classifier uses the (memory-augmented) message context
   -> route + provider execute
   -> observeOutbound: persist response + tool results     (observe | inject)
   -> enqueue observer write-back job
@@ -97,38 +100,47 @@ load/assembly failure falls back to the minimal context (system + current
 message), marks the decision `degraded: true`, and still attempts the write-back
 enqueue.
 
-### Inject is additive (prefix model)
+### Inject is additive (trailing-reminder model)
 
-`inject` does **not** rewrite or replace the request. It assembles memory into
-**one system-level text block** and **prepends** it; the client's live
+`inject` does **not** rewrite or replace the request, and does **not** edit the
+system prefix. It assembles memory into **one text block** and **appends** it as a
+trailing `<system-reminder>` turn AFTER the conversation; the client's live
 conversation — `messages` / `input`, including `tool_calls`, tool results, and
-multimodal (image) content — is kept **verbatim**. This is the #217 Phase 4
-PREFIX model that superseded the original full-replace compaction (see the
-tradeoff note below).
+multimodal (image) content — **and** the system-level field (`system` /
+`instructions`) are kept **verbatim**. This is the #217 Phase 4 trailing-reminder
+model. (It superseded the original full-replace compaction and the short-lived
+system-prefix cut — see the cache rationale below.)
 
-The memory block is a single deterministic, cache-friendly text section:
+The memory block is a single deterministic text section, wrapped in a
+`<system-reminder>` envelope so the model reads it as injected operator context
+rather than as the user speaking (the same framing Claude Code uses internally —
+no model-gated beta required):
 
 ```text
+<system-reminder>
 # Persistent memory (injected by helm)
 ## Project knowledge      <- project reflection (if any)
 ## Resource knowledge     <- resource reflection (if any)
 ## Earlier context (summarized)
 <thread observations, time-anchored, window-deduped>
+</system-reminder>
 ```
 
 Only sections with content are emitted (a project-only memory yields just the
-header + Project knowledge). The block is merged at the **system level**:
+header + Project knowledge). The wrapped block is appended **after the cached
+prefix** as the last turn:
 
-- **Translate path** (`injectIntoIR`, core): if the conversation opens with a
-  system message, the block is prepended to its content with a blank-line
-  separator; otherwise a new leading system message is spliced in. Every other IR
-  message is kept by reference, in order. The input array is never mutated.
+- **Translate path** (`injectIntoIR`, core): the block is appended as one trailing
+  `{ role: "user" }` IR message. The leading system message (and any client
+  `cache_control` on it) and every other IR message are kept by reference, in
+  order. The input array is never mutated.
 - **Native passthrough path** (`native-memory-inject.ts`, gateway): the same
-  block is spliced into the protocol-native system field — Anthropic top-level
-  `system` (string → prepend + separator; array → one leading `{type:"text"}`
-  block) and Responses `instructions` (string → prepend + separator). `messages`
-  / `input` are forwarded byte-faithfully; only the system carrier gains the
-  prefix. See "Native passthrough" below.
+  block is appended as a trailing turn on the protocol-native conversation field —
+  Anthropic `messages` (one trailing `{ role:"user" }` turn) and Responses `input`
+  (array → trailing `{ role:"user" }` item; string → trailing text). `system` /
+  `instructions` (and every existing turn) are forwarded byte-faithfully — the
+  cached prefix is never touched. `wrapMemoryReminder` (core) is the single
+  `<system-reminder>` envelope both paths share. See "Native passthrough" below.
 
 Rules:
 
@@ -166,34 +178,39 @@ Rules:
 
 ### Tradeoff: live-conversation compaction is dropped
 
-The prefix model intentionally gives up the old behavior of shrinking the
-client's live message array in place. **Helm no longer compacts the request the
-client sends** — the client owns its own context window; helm contributes
+The trailing-reminder model intentionally gives up the old behavior of shrinking
+the client's live message array in place. **Helm no longer compacts the request
+the client sends** — the client owns its own context window; helm contributes
 **long-term recall** (cross-thread reflections + summaries of turns the client
-has dropped) as an additive system prefix. This is what makes inject safe for
+has dropped) as an additive trailing turn. This is what makes inject safe for
 tool/multimodal/native-passthrough turns (no structure can be lost) at the cost
 of helm no longer trimming an over-long live window for the client.
 
-**Prompt-cache caveat.** Prepending memory to the system carrier shifts the
-upstream prompt-cache prefix: memory-mode sessions may see **reduced upstream
-prompt caching** versus a non-memory session, and a reflection version bump
-changes the prefix (a stable reflection keeps it stable across turns). The block
-is deliberately deterministic and slow-changing to minimize churn, but a session
-that opts into memory accepts this as the cost of recall. Sessions on
-`x-memory-mode: off` are byte-identical to no-memory and keep full caching.
+**Prompt cache is preserved.** Anthropic/Responses prompt caching is a strict
+prefix match (`tools → system → messages`); any byte change in the prefix
+invalidates everything after it. Appending memory as the **last** turn — after the
+client's cached prefix — leaves `tools` / `system` (and their `cache_control`
+breakpoints) and the entire conversation history byte-identical, so the upstream
+cache still hits; only the small trailing reminder turn is uncached. This is why
+the placement is trailing rather than a system prefix: the memory block is itself
+**window-variable** (the window-dedup set changes as the client's window slides),
+so it could never settle inside a cached prefix — prepending it would bust the
+cache every memory-mode turn. Sessions on `x-memory-mode: off` remain
+byte-identical to no-memory and keep full caching.
 
 ### Native passthrough
 
 When native protocol passthrough (issue #217) forwards the client's verbatim
 native body upstream (Anthropic ↔ Anthropic, Responses ↔ Responses), inject is
-**no longer a blocker**. Because the memory block lives at the system level and
-the live turns are forwarded byte-faithfully, the native request stays
-self-consistent: `prependMemoryToAnthropicBody` / `prependMemoryToResponsesBody`
-splice the block into `system` / `instructions`, and `messages` / `input` pass
-through unchanged. `canUseNativePassthrough` therefore dropped its
+**no longer a blocker**. Because the memory block is appended as a trailing turn
+and the cached prefix is forwarded byte-faithfully, the native request stays
+self-consistent: `appendMemoryToAnthropicBody` / `appendMemoryToResponsesBody`
+append the `<system-reminder>` turn to `messages` / `input`, and `system` /
+`instructions` (plus every existing turn) pass through unchanged — so passthrough
+keeps the upstream prompt cache. `canUseNativePassthrough` therefore dropped its
 `memory_mode === "inject"` disable — passthrough fires **with** memory. (Before
-the prefix model, full-replace rewrote the message array, so passthrough had to
-be disabled whenever inject ran.)
+the trailing-reminder model, full-replace rewrote the message array, so
+passthrough had to be disabled whenever inject ran.)
 
 ## Background worker
 
@@ -391,10 +408,11 @@ until the LLM summarizer lands.
 - Reflector (`runReflectorJob`): observations → reflections.
 - Inject-phase context assembly (`assembleInjectedContext` + `injectIntoIR`),
   wired into the chat / messages / responses surfaces and the background worker.
-  Inject is now the **additive PREFIX model** (#217 Phase 4): a system-level
-  memory block prepended to a verbatim live conversation — works for tool /
-  multimodal / native-passthrough turns, with window-aware dedup. See "Inject is
-  additive (prefix model)" above.
+  Inject is now the **additive TRAILING-REMINDER model** (#217 Phase 4): a memory
+  block appended as a trailing `<system-reminder>` turn after a verbatim live
+  conversation — works for tool / multimodal / native-passthrough turns, with
+  window-aware dedup, and preserves the upstream prompt cache (the cached prefix is
+  never touched). See "Inject is additive (trailing-reminder model)" above.
 - The summarize/merge steps are deterministic stubs pending an LLM.
 
 ### Phase 3 — Project memory · implemented

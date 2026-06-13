@@ -9,14 +9,15 @@ import {
 } from "./messages.js";
 import { createMessagesPipeline, type InjectWiring, type RouteFn } from "./messages-pipeline.js";
 
-// gateway.messages.inject (docs/08 Phase 2, #217 Phase 4 PREFIX model) — PROVE the
-// inject-phase wiring through the shared pipeline that backs /v1/messages,
+// gateway.messages.inject (docs/08 Phase 2, #217 Phase 4 TRAILING-REMINDER model) —
+// PROVE the inject-phase wiring through the shared pipeline that backs /v1/messages,
 // /v1/responses AND the Gemini surface. The pipeline is identical across the surfaces
 // (only the stamped Protocol differs for telemetry), so we exercise it over the
 // /v1/messages route with ALL THREE Protocol values: the assembled memory block is
-// merged into ONE system-level message ahead of the VERBATIM live conversation (no
-// full-replace, no D7 gate), the hoisted system prompt is NOT lost (D8-bis), non-inject
-// modes leave messages untouched, and inject is fail-open.
+// APPENDED as ONE trailing <system-reminder> user turn AFTER the VERBATIM live
+// conversation (no full-replace, no system-prefix edit, no D7 gate) so the client's
+// cached prefix is untouched; non-inject modes leave messages untouched; inject is
+// fail-open.
 
 const AUTH = { "x-api-key": "helm_live_secret", "Content-Type": "application/json" };
 const IDENTITY: MessagesIdentity = { keyId: "k1", accountId: "acct" };
@@ -151,7 +152,7 @@ const SURFACE = "/v1/messages";
 for (const protocol of ["anthropic_messages", "openai_responses", "gemini"] as const) {
   const surface = SURFACE;
   describe(`gateway.inject — pipeline protocol=${protocol}`, () => {
-    it("PREFIX-merges memory into the system message ahead of the verbatim turn (#217 Phase 4)", async () => {
+    it("APPENDS memory as a trailing <system-reminder> turn, conversation verbatim (#217 Phase 4)", async () => {
       const { store } = makeFakeStore({
         reflection: "PROJECT REFLECTION",
         observations: ["OBS-1"],
@@ -176,19 +177,18 @@ for (const protocol of ["anthropic_messages", "openai_responses", "gemini"] as c
 
       expect(res.status).toBe(200);
       const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
-      // PREFIX model: memory is a single SYSTEM-level block merged into the leading
-      // system message — NOT interleaved as separate user messages (which would have
-      // destroyed live structure for tool/multimodal turns). The reflection + the
-      // observation live inside that block; the client's hoisted system prompt
-      // "be terse" stays at the TAIL of it (D8-bis: never lost).
-      expect(msgs).toHaveLength(2);
-      expect(msgs[0]?.role).toBe("system");
-      expect(msgs[0]?.content).toContain("PROJECT REFLECTION");
-      expect(msgs[0]?.content).toContain("OBS-1");
-      expect(msgs[0]?.content.endsWith("be terse")).toBe(true);
-      // The live turn rides through VERBATIM after the system block. "earlier turn" was
-      // only loaded for window-dedup, never re-injected (the client may resend it itself).
+      // TRAILING-REMINDER model: the hoisted system prompt "be terse" and the live turn
+      // ride through VERBATIM (cached prefix untouched); memory is ONE trailing
+      // <system-reminder> user turn carrying the reflection + observation. "earlier turn"
+      // was only loaded for window-dedup, never re-injected.
+      expect(msgs).toHaveLength(3);
+      expect(msgs[0]).toEqual({ role: "system", content: "be terse" });
       expect(msgs[1]).toEqual({ role: "user", content: "hi" });
+      expect(msgs[2]?.role).toBe("user");
+      expect(msgs[2]?.content).toContain("PROJECT REFLECTION");
+      expect(msgs[2]?.content).toContain("OBS-1");
+      expect(msgs[2]?.content.startsWith("<system-reminder>")).toBe(true);
+      expect(msgs[2]?.content.endsWith("</system-reminder>")).toBe(true);
     });
 
     it("preserves developer instructions under x-memory-mode=inject instead of silently dropping them", async () => {
@@ -218,18 +218,19 @@ for (const protocol of ["anthropic_messages", "openai_responses", "gemini"] as c
       });
 
       expect(res.status).toBe(200);
-      // PREFIX model: the leading turn is `developer` (NOT a system message), so the
-      // bridge splices a NEW leading system message carrying the memory block and keeps
-      // EVERY original turn verbatim, in order — developer instructions are preserved,
-      // never silently dropped, and the live conversation is untouched.
+      // TRAILING-REMINDER model: EVERY original turn (developer + system + user) rides
+      // verbatim, in order; the memory block is appended as ONE trailing <system-reminder>
+      // user turn — developer instructions preserved, never silently dropped, the live
+      // conversation untouched.
       const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
-      expect(msgs[0]?.role).toBe("system");
-      expect(msgs[0]?.content).toContain("PROJECT REFLECTION");
-      expect(msgs.slice(1)).toEqual([
+      expect(msgs.slice(0, 3)).toEqual([
         { role: "developer", content: "Always answer in JSON." },
         { role: "system", content: "be terse" },
         { role: "user", content: "hi" },
       ]);
+      expect(msgs[3]?.role).toBe("user");
+      expect(msgs[3]?.content).toContain("PROJECT REFLECTION");
+      expect(msgs[3]?.content.startsWith("<system-reminder>")).toBe(true);
     });
 
     it("leaves messages untouched when mode is observe (not inject)", async () => {
@@ -390,12 +391,17 @@ describe("gateway.inject — per-key defaults + metadata.user_id fallback (issue
 
     expect(res.status).toBe(200);
     const msgs = seen[0]?.messages as Array<{ role: string; content: string }>;
-    // The key default project's reflection was hydrated INTO the system-level memory
-    // block (PREFIX model) — it is part of a system message's content, not a standalone
-    // turn, so assert containment rather than an exact-message match.
-    expect(msgs.some((m) => m.role === "system" && m.content.includes("PROJECT REFLECTION"))).toBe(
-      true,
-    );
+    // The key default project's reflection was hydrated into the trailing <system-reminder>
+    // user turn (TRAILING-REMINDER model) — appended after the conversation, not merged
+    // into a system message, so assert containment on that trailing turn.
+    expect(
+      msgs.some(
+        (m) =>
+          m.role === "user" &&
+          m.content.includes("PROJECT REFLECTION") &&
+          m.content.startsWith("<system-reminder>"),
+      ),
+    ).toBe(true);
     // The derived thread is owner-scoped (account prefix) like an explicit one.
     expect(store.ensureThread).toHaveBeenCalledWith(
       expect.objectContaining({ id: "acct:cc-session-hash-1" }),

@@ -884,12 +884,14 @@ describe("createMessagesPipeline — production IR params", () => {
   });
 });
 
-// ── Memory inject = additive PREFIX (#217 Phase 4) ────────────────────────────
-// The inject phase no longer full-replaces the conversation. It assembles ONE memory
-// TEXT BLOCK and the pipeline PREPENDS it at the system level: into the IR system
-// message on the TRANSLATE path, and into native_request.system / .instructions on the
-// PASSTHROUGH path. The live conversation (incl. tool turns) is kept VERBATIM, so memory
-// works for tool-using/multimodal turns AND for native passthrough.
+// ── Memory inject = additive TRAILING REMINDER (#217 Phase 4) ─────────────────
+// The inject phase no longer full-replaces the conversation, nor edits the system
+// prefix. It assembles ONE memory TEXT BLOCK and the pipeline APPENDS it as a trailing
+// <system-reminder> turn: at the END of the IR messages on the TRANSLATE path, and at
+// the END of native_request.messages / .input on the PASSTHROUGH path. The system-level
+// field (IR system message / native system / instructions) AND every existing turn —
+// i.e. the client's cached prompt prefix — are kept VERBATIM, so memory works for
+// tool-using/multimodal turns AND for native passthrough WITHOUT busting the cache.
 
 // A fake MemoryStore that returns one project reflection, so assembleInjectedContext
 // produces a non-null memory block. No observations / recent messages are needed to
@@ -941,8 +943,8 @@ const INJECT_META = {
   project_id: "p1",
 };
 
-describe("createMessagesPipeline — memory inject additive prefix", () => {
-  it("translate path: merges memory into the leading IR system message, other turns verbatim", async () => {
+describe("createMessagesPipeline — memory inject additive trailing reminder", () => {
+  it("translate path: appends memory as a trailing reminder turn, all turns verbatim", async () => {
     let seen: InternalRequest | null = null;
     const route: RouteFn = async (req) => {
       seen = JSON.parse(JSON.stringify(req)) as InternalRequest;
@@ -970,18 +972,19 @@ describe("createMessagesPipeline — memory inject additive prefix", () => {
       role: string;
       content: string;
     }>;
-    // Leading system message now carries the memory block PREPENDED ahead of "be terse".
-    expect(msgs[0]?.role).toBe("system");
-    expect(msgs[0]?.content).toContain("PROJECT MEMORY");
-    expect(msgs[0]?.content.endsWith("be terse")).toBe(true);
-    // The user + tool turns are kept VERBATIM and in order (no full-replace).
-    expect(msgs.slice(1)).toEqual([
+    // The system + user + tool turns ride VERBATIM, in order (cached prefix untouched).
+    expect(msgs.slice(0, 3)).toEqual([
+      { role: "system", content: "be terse" },
       { role: "user", content: "hi" },
       { role: "tool", content: "tool result", tool_call_id: "c1" },
     ]);
+    // Memory rides ONE trailing <system-reminder> user turn at the END.
+    expect(msgs[3]?.role).toBe("user");
+    expect(msgs[3]?.content).toContain("PROJECT MEMORY");
+    expect(msgs[3]?.content.startsWith("<system-reminder>")).toBe(true);
   });
 
-  it("anthropic passthrough: block spliced into native_request.system, messages verbatim, passthrough usable", async () => {
+  it("anthropic passthrough: native system VERBATIM, reminder appended to messages, passthrough usable", async () => {
     const NATIVE = {
       model: "claude-x",
       system: "be terse",
@@ -1019,22 +1022,24 @@ describe("createMessagesPipeline — memory inject additive prefix", () => {
     );
     await run.collect();
     const native = (seen as InternalRequest | null)?.native_request as
-      | { system?: unknown; messages?: unknown }
+      | { system?: unknown; messages?: Array<{ role: string; content: string }> }
       | undefined;
     expect(native).toBeDefined();
-    // Memory block prepended into the native top-level `system` (string carrier).
-    expect(typeof native?.system).toBe("string");
-    expect(native?.system as string).toContain("PROJECT MEMORY");
-    expect((native?.system as string).endsWith("be terse")).toBe(true);
-    // The native messages (incl. the tool_use / tool_result turns) are VERBATIM.
-    expect(native?.messages).toEqual(NATIVE.messages);
+    // The native top-level `system` (the cached prefix) is left BYTE-IDENTICAL.
+    expect(native?.system).toBe("be terse");
+    // The native messages (incl. the tool_use / tool_result turns) ride VERBATIM, in
+    // order, with the memory reminder appended as ONE trailing user turn.
+    expect(native?.messages?.slice(0, 3)).toEqual(NATIVE.messages);
+    expect(native?.messages?.[3]?.role).toBe("user");
+    expect(native?.messages?.[3]?.content).toContain("PROJECT MEMORY");
+    expect(native?.messages?.[3]?.content.startsWith("<system-reminder>")).toBe(true);
     // Passthrough is still usable: the run reports the upstream native body untouched.
     expect((run as { nativePassthrough?: boolean }).nativePassthrough).toBe(true);
     const body = (await run.collect()) as Record<string, unknown>;
     expect(body).toBe(NATIVE_ANTHROPIC_BODY);
   });
 
-  it("anthropic passthrough: prepends a text block when native system is an ARRAY", async () => {
+  it("anthropic passthrough: native system ARRAY kept VERBATIM, reminder appended to messages", async () => {
     const NATIVE = {
       model: "claude-x",
       system: [{ type: "text", text: "be terse" }],
@@ -1062,15 +1067,20 @@ describe("createMessagesPipeline — memory inject additive prefix", () => {
       new AbortController().signal,
     );
     await run.collect();
-    const native = (seen as InternalRequest | null)?.native_request as { system?: unknown };
-    expect(Array.isArray(native.system)).toBe(true);
-    const blocks = native.system as Array<{ type: string; text: string }>;
-    expect(blocks[0]?.type).toBe("text");
-    expect(blocks[0]?.text).toContain("PROJECT MEMORY");
-    expect(blocks[1]).toEqual({ type: "text", text: "be terse" });
+    const native = (seen as InternalRequest | null)?.native_request as {
+      system?: unknown;
+      messages?: Array<{ role: string; content: string }>;
+    };
+    // The cached system block array is left VERBATIM — its cache_control survives.
+    expect(native.system).toEqual([{ type: "text", text: "be terse" }]);
+    // Memory rides a trailing <system-reminder> user turn after the verbatim message.
+    expect(native.messages?.[0]).toEqual({ role: "user", content: "hi" });
+    expect(native.messages?.[1]?.role).toBe("user");
+    expect(native.messages?.[1]?.content).toContain("PROJECT MEMORY");
+    expect(native.messages?.[1]?.content.startsWith("<system-reminder>")).toBe(true);
   });
 
-  it("openai_responses passthrough: block spliced into native_request.instructions, input verbatim", async () => {
+  it("openai_responses passthrough: native instructions VERBATIM, reminder appended to input", async () => {
     const NATIVE = {
       model: "gpt-5.5",
       instructions: "be terse",
@@ -1102,13 +1112,15 @@ describe("createMessagesPipeline — memory inject additive prefix", () => {
     );
     await run.collect();
     const native = (seen as InternalRequest | null)?.native_request as
-      | { instructions?: unknown; input?: unknown }
+      | { instructions?: unknown; input?: Array<{ role?: string; content?: string }> }
       | undefined;
-    expect(typeof native?.instructions).toBe("string");
-    expect(native?.instructions as string).toContain("PROJECT MEMORY");
-    expect((native?.instructions as string).endsWith("be terse")).toBe(true);
-    // input (incl. the function_call item) is kept VERBATIM.
-    expect(native?.input).toEqual(NATIVE.input);
+    // `instructions` (the Responses system-equivalent, cached prefix) is VERBATIM.
+    expect(native?.instructions).toBe("be terse");
+    // input (incl. the function_call item) rides VERBATIM, reminder appended last.
+    expect(native?.input?.slice(0, 2)).toEqual(NATIVE.input);
+    expect(native?.input?.[2]?.role).toBe("user");
+    expect(native?.input?.[2]?.content).toContain("PROJECT MEMORY");
+    expect(native?.input?.[2]?.content?.startsWith("<system-reminder>")).toBe(true);
     expect((run as { nativePassthrough?: boolean }).nativePassthrough).toBe(true);
   });
 
