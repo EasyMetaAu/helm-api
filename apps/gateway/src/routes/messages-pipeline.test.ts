@@ -249,6 +249,11 @@ describe("createMessagesPipeline — production IR params", () => {
         user: "user-123",
         service_tier: "auto",
         web_search_options: { search_context_size: "low" },
+        context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+        mcp_servers: [{ type: "url", url: "https://mcp.example.test" }],
+        container: { id: "container_123" },
+        speed: "fast",
+        output_config: { effort: "xhigh" },
         provider_raw: { metadata: { request_id: "client-meta" } },
       }),
       IDENTITY,
@@ -272,5 +277,14 @@ describe("createMessagesPipeline — production IR params", () => {
     expect(captured.service_tier).toBe("auto");
     expect(captured.web_search_options).toEqual({ search_context_size: "low" });
     expect(captured.provider_raw?.metadata).toEqual({ request_id: "client-meta" });
+    expect(captured.provider_raw?.context_management).toEqual({
+      edits: [{ type: "clear_tool_uses_20250919" }],
+    });
+    expect(captured.provider_raw?.mcp_servers).toEqual([
+      { type: "url", url: "https://mcp.example.test" },
+    ]);
+    expect(captured.provider_raw?.container).toEqual({ id: "container_123" });
+    expect(captured.provider_raw?.speed).toBe("fast");
+    expect(captured.provider_raw?.output_config).toEqual({ effort: "xhigh" });
   });
 });

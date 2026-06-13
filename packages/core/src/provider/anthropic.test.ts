@@ -88,6 +88,39 @@ describe("openaiToAnthropicRequest", () => {
     ]);
   });
 
+  it("keeps image parts when a tool-result continuation carries a fresh user correction", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "assistant",
+          content: "I will inspect the chart.",
+          tool_calls: [{ id: "t1", type: "function", function: { name: "Bash", arguments: "{}" } }],
+        },
+        { role: "tool", tool_call_id: "t1", content: "ok" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "这些图表上的数字都应该格式化一下" },
+            { type: "image", url: "data:image/png;base64,abc123", mediaType: "image/png" },
+          ],
+        },
+      ],
+    });
+
+    const msgs = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    expect(msgs.map((m) => m.role)).toEqual(["assistant", "user"]);
+    expect(msgs[1]?.content).toContainEqual({
+      type: "tool_result",
+      tool_use_id: "t1",
+      content: "ok",
+    });
+    expect(msgs[1]?.content).toContainEqual({
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: "abc123" },
+    });
+  });
+
   it("emits metadata.user_id when provided, omits it otherwise (anti-ban stable device identity)", () => {
     // The Claude subscription anti-ban measure (ref claude-relay-service): a STABLE
     // per-account identity travels in metadata.user_id. The transformer only forwards

@@ -61,8 +61,27 @@ export function providerRawFromRequest(
   // has gateway metadata. Keep the provider value in provider_raw to avoid collision.
   const keys =
     options.includeMetadata === false
-      ? ["store", "previous_response_id", "truncation", "context_management"]
-      : ["metadata", "store", "previous_response_id", "truncation", "context_management"];
+      ? [
+          "store",
+          "previous_response_id",
+          "truncation",
+          "context_management",
+          "mcp_servers",
+          "container",
+          "speed",
+          "output_config",
+        ]
+      : [
+          "metadata",
+          "store",
+          "previous_response_id",
+          "truncation",
+          "context_management",
+          "mcp_servers",
+          "container",
+          "speed",
+          "output_config",
+        ];
   for (const key of keys) {
     const value = source[key];
     if (value !== undefined) raw[key] = value;

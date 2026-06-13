@@ -585,7 +585,15 @@ const FORWARDED_REQUEST_PARAM_KEYS = [
   "safety_identifier",
 ] as const satisfies ReadonlyArray<keyof InternalRequest>;
 
-const PROVIDER_RAW_FORWARD_KEYS = ["metadata", "store", "context_management"] as const;
+const PROVIDER_RAW_FORWARD_KEYS = [
+  "metadata",
+  "store",
+  "context_management",
+  "mcp_servers",
+  "container",
+  "speed",
+  "output_config",
+] as const;
 
 function stripInternal(req: InternalRequest, providerModel: string): Record<string, unknown> {
   const body: Record<string, unknown> = {

@@ -93,6 +93,63 @@ function normalizeAnthropicContextManagement(value: unknown): unknown {
   return Array.isArray(value) ? { edits: value } : value;
 }
 
+function dataUrlSource(url: string): { mediaType: string; data: string } | null {
+  const m = url.match(/^data:([^;]+);base64,(.*)$/);
+  return m?.[1] !== undefined && m[2] !== undefined ? { mediaType: m[1], data: m[2] } : null;
+}
+
+function imageBlockFromPart(part: Record<string, unknown>): AnthropicBlock | null {
+  if (typeof part.data === "string") {
+    return {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: typeof part.mediaType === "string" ? part.mediaType : "image/png",
+        data: part.data,
+      },
+    };
+  }
+  if (typeof part.url === "string") {
+    const source = dataUrlSource(part.url);
+    if (source !== null) {
+      return {
+        type: "image",
+        source: { type: "base64", media_type: source.mediaType, data: source.data },
+      };
+    }
+  }
+  return null;
+}
+
+function documentBlockFromPart(part: Record<string, unknown>): AnthropicBlock | null {
+  if (typeof part.fileId === "string") {
+    return { type: "document", source: { type: "file", file_id: part.fileId } };
+  }
+  if (typeof part.data === "string") {
+    return {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: typeof part.mediaType === "string" ? part.mediaType : "application/pdf",
+        data: part.data,
+      },
+      ...(typeof part.filename === "string" ? { title: part.filename } : {}),
+    };
+  }
+  if (typeof part.url === "string") {
+    const source = dataUrlSource(part.url);
+    if (source !== null) {
+      return {
+        type: "document",
+        source: { type: "base64", media_type: source.mediaType, data: source.data },
+        ...(typeof part.filename === "string" ? { title: part.filename } : {}),
+      };
+    }
+    return { type: "document", source: { type: "url", url: part.url } };
+  }
+  return null;
+}
+
 function contextManagementEdits(value: unknown): unknown[] {
   const normalized = normalizeAnthropicContextManagement(value);
   if (normalized && typeof normalized === "object" && !Array.isArray(normalized)) {
@@ -127,15 +184,26 @@ function textBlocksFromContent(content: unknown, messageCacheControl?: unknown):
         const cacheControl = p.cache_control ?? messageCacheControl;
         if (p.type === "text" && typeof p.text === "string")
           return [withCacheControl({ type: "text", text: p.text }, cacheControl)];
+        if (p.type === "image") {
+          const block = imageBlockFromPart(p);
+          return block === null ? [] : [withCacheControl(block, cacheControl)];
+        }
+        if (p.type === "document") {
+          const block = documentBlockFromPart(p);
+          return block === null ? [] : [withCacheControl(block, cacheControl)];
+        }
         // image_url -> anthropic image block (base64 data URLs only; http passes through name)
         if (p.type === "image_url" && p.image_url && typeof p.image_url === "object") {
           const urlVal = (p.image_url as Record<string, unknown>).url;
           if (typeof urlVal === "string" && urlVal.startsWith("data:")) {
-            const m = urlVal.match(/^data:([^;]+);base64,(.*)$/);
-            if (m) {
+            const source = dataUrlSource(urlVal);
+            if (source !== null) {
               return [
                 withCacheControl(
-                  { type: "image", source: { type: "base64", media_type: m[1], data: m[2] } },
+                  {
+                    type: "image",
+                    source: { type: "base64", media_type: source.mediaType, data: source.data },
+                  },
                   cacheControl,
                 ),
               ];

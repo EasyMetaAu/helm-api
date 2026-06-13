@@ -159,7 +159,15 @@ describe("createExecute — gateway execution adapter", () => {
         include_server_side_tool_invocations: true,
         verbosity: "low",
         safety_identifier: "safe-user",
-        provider_raw: { metadata: { prompt_version: "v1" }, store: false },
+        provider_raw: {
+          metadata: { prompt_version: "v1" },
+          store: false,
+          context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+          mcp_servers: [{ type: "url", url: "https://mcp.example.test" }],
+          container: { id: "container_123" },
+          speed: "fast",
+          output_config: { effort: "xhigh" },
+        },
       }),
     );
 
@@ -198,6 +206,11 @@ describe("createExecute — gateway execution adapter", () => {
       safety_identifier: "safe-user",
       metadata: { prompt_version: "v1" },
       store: false,
+      context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+      mcp_servers: [{ type: "url", url: "https://mcp.example.test" }],
+      container: { id: "container_123" },
+      speed: "fast",
+      output_config: { effort: "xhigh" },
     });
   });
 
