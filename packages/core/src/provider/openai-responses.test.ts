@@ -6,6 +6,7 @@ import {
   createCodexResponsesClient,
   openaiToResponsesRequest,
   readResponsesEvents,
+  readResponsesSSERaw,
   translateResponsesSSE,
 } from "./openai-responses.js";
 
@@ -624,5 +625,399 @@ describe("createCodexResponsesClient", () => {
     expect(() => createCodexResponsesClient({ config: { baseUrl: "https://x/codex" } })).toThrow(
       /getAuthHeader/,
     );
+  });
+});
+
+// readResponsesSSERaw (issue #217, Phase 3): the BYTE-FAITHFUL Responses passthrough
+// reader. It yields the upstream Responses SSE body's decoded text VERBATIM — same
+// reader pattern (getReader + TextDecoder + readChunkWithIdle idle guard +
+// StreamStalledError → UpstreamError("timeout")) as readResponsesEvents, but with NO
+// frame splitting and NO translation. The `data:` JSON payload (reasoning.encrypted_content
+// included) reaches the client untouched; this ELIMINATES the responses→IR→responses
+// round trip (the reasoning/tool mangling source) instead of replacing it.
+describe("readResponsesSSERaw", () => {
+  it("yields the upstream SSE chunks VERBATIM (no openai chunk shape, no translation)", async () => {
+    // Two distinct upstream writes; each must surface unchanged (raw passthrough, not
+    // re-framed per-event, not converted to chat.completion.chunk).
+    const enc = new TextEncoder();
+    const writes = [
+      'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hi"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+    ];
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const w of writes) controller.enqueue(enc.encode(w));
+        controller.close();
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    const chunks: string[] = [];
+    for await (const c of readResponsesSSERaw(res)) chunks.push(c);
+    // Each decoded chunk equals the upstream write byte-for-byte (no per-event split).
+    expect(chunks).toEqual(writes);
+    const joined = chunks.join("");
+    // Native Responses event names survive; nothing got converted to OpenAI-Chat shape.
+    expect(joined).toContain("response.created");
+    expect(joined).toContain("response.output_text.delta");
+    expect(joined).toContain("response.completed");
+    expect(joined).not.toContain("chat.completion.chunk");
+  });
+
+  it("returns immediately on an empty body", async () => {
+    const res = new Response(null, { status: 200 });
+    const chunks: string[] = [];
+    for await (const c of readResponsesSSERaw(res)) chunks.push(c);
+    expect(chunks).toEqual([]);
+  });
+
+  it("throws UpstreamError(timeout) and cancels when the stream stalls past idleMs", async () => {
+    vi.useFakeTimers();
+    try {
+      let cancelled = false;
+      // Emit one chunk then hang (no close) so the next read pends past the deadline.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'event: response.created\ndata: {"type":"response.created","response":{}}\n\n',
+            ),
+          );
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const res = new Response(stream, { status: 200 });
+      const run = (async () => {
+        for await (const _ of readResponsesSSERaw(res, 500)) {
+          // drain
+        }
+      })();
+      const assertion = expect(run).rejects.toMatchObject({ errorClass: "timeout" });
+      await vi.advanceTimersByTimeAsync(500);
+      await assertion;
+      expect(cancelled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// nativePassthrough / nativePassthroughStream (issue #217, Phase 3): same-protocol
+// Codex Responses passthrough. The inbound /v1/responses body is ALREADY a native
+// Responses body (the real Codex CLI supplies store:false + stream:true + include +
+// reasoning + tools …), so it is forwarded VERBATIM (NO openaiToResponsesRequest) and
+// the upstream's native Responses SSE / JSON is relayed untranslated. The ChatGPT
+// identity headers (Bearer + chatgpt-account-id + originator + OpenAI-Beta) still ride
+// via the shared HTTP core, applied automatically to both methods.
+describe("createCodexResponsesClient — nativePassthroughStream", () => {
+  // A verbatim native Codex Responses STREAMING body, as the real Codex CLI sends it.
+  // It carries store:false + stream:true + include + reasoning + tools — passthrough
+  // must NOT re-derive, strip, or inject anything (no openaiToResponsesRequest).
+  function nativeStreamBody(): Record<string, unknown> {
+    return {
+      model: "gpt-5.5",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      instructions: "You are Codex.",
+      include: ["reasoning.encrypted_content"],
+      reasoning: { effort: "high" },
+      store: false,
+      stream: true,
+      tools: [{ type: "function", name: "run", parameters: { type: "object" } }],
+      tool_choice: "auto",
+      parallel_tool_calls: true,
+      text: { verbosity: "low" },
+      prompt_cache_key: "codex-sess-1",
+    };
+  }
+
+  function sseStreamResponse(writes: string[], extraHeaders?: Record<string, string>): Response {
+    const enc = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const w of writes) controller.enqueue(enc.encode(w));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream", ...extraHeaders },
+    });
+  }
+
+  it("forwards the native body VERBATIM and yields upstream Responses SSE unchanged", async () => {
+    const body = nativeStreamBody();
+    let sentBody: unknown;
+    const writes = [
+      'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"yo"}\n\n',
+      'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+    ];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body));
+      return sseStreamResponse(writes);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const chunks: string[] = [];
+    for await (const c of client.nativePassthroughStream?.(body) ?? []) chunks.push(c);
+    // Body sent byte-for-byte equal to the input — no openaiToResponsesRequest mangling,
+    // no store/stream/include injection (the native body already carries them).
+    expect(sentBody).toEqual(body);
+    // Each upstream chunk relayed verbatim (native Responses event names, no chat shape).
+    expect(chunks).toEqual(writes);
+    const joined = chunks.join("");
+    expect(joined).toContain("response.created");
+    expect(joined).not.toContain("chat.completion.chunk");
+  });
+
+  it("does NOT call openaiToResponsesRequest (the verbatim body has no instructions rewrite)", async () => {
+    // openaiToResponsesRequest would REPLACE instructions/build input from `messages`;
+    // passthrough must leave the client's own `instructions` + `input` untouched.
+    const body = nativeStreamBody();
+    body.instructions = "VERBATIM-INSTRUCTIONS-SENTINEL";
+    let sentBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body));
+      return sseStreamResponse([
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ]);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    for await (const _ of client.nativePassthroughStream?.(body) ?? []) {
+      // drain
+    }
+    expect(sentBody).toEqual(body);
+    expect(sentBody?.instructions).toBe("VERBATIM-INSTRUCTIONS-SENTINEL");
+  });
+
+  it("applies the ChatGPT identity headers (Bearer + account-id + originator + beta) via the HTTP core", async () => {
+    let seen: Headers | null = null;
+    let seenUrl = "";
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      seen = new Headers(init?.headers);
+      seenUrl = url;
+      return sseStreamResponse([
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ]);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_codex")}`,
+        sessionId: "sess-z",
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    for await (const _ of client.nativePassthroughStream?.(nativeStreamBody()) ?? []) {
+      // drain
+    }
+    const h = seen as unknown as Headers;
+    expect(seenUrl).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(h.get("Authorization")).toContain("Bearer ");
+    // account-id derived by the HTTP core from the access-token JWT claim.
+    expect(h.get("chatgpt-account-id")).toBe("acct_codex");
+    expect(h.get("originator")).toBe("helm");
+    expect(h.get("OpenAI-Beta")).toBe("responses=experimental");
+    expect(h.get("session_id")).toBe("sess-z");
+  });
+
+  it("throws UpstreamError with the real upstreamStatus + scrubbed body before the first chunk on a non-2xx", async () => {
+    const token = jwt("acct_secret_value_1234");
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${token}`,
+        currentSecrets: () => [token],
+      },
+      fetch: (async () =>
+        jsonResponse({ error: `rate_limit ${token}` }, 429)) as unknown as typeof fetch,
+    });
+    let caught: unknown;
+    try {
+      for await (const _ of client.nativePassthroughStream?.(nativeStreamBody()) ?? []) {
+        // should never yield
+      }
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    const err = caught as UpstreamError;
+    expect(err.upstreamStatus).toBe(429);
+    expect(JSON.stringify(err.providerRaw)).not.toContain(token);
+    expect(JSON.stringify(err.providerRaw)).toContain("[redacted]");
+  });
+
+  it("triggers onUnauthorized and replays once on a 401 before yielding", async () => {
+    let calls = 0;
+    let token = jwt("acct_a");
+    const seenAuth: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      seenAuth.push(new Headers(init?.headers).get("Authorization") ?? "");
+      if (calls === 1) return jsonResponse({ error: "expired" }, 401);
+      return sseStreamResponse([
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"m"}}\n\n',
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ]);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${token}`,
+        onUnauthorized: () => {
+          token = jwt("acct_b");
+        },
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const chunks: string[] = [];
+    for await (const c of client.nativePassthroughStream?.(nativeStreamBody()) ?? []) {
+      chunks.push(c);
+    }
+    expect(calls).toBe(2);
+    expect(seenAuth[0]).toContain("Bearer ");
+    expect(chunks.join("")).toContain("response.created");
+  });
+
+  it("fires onResponseMeta exactly once with the upstream quota headers", async () => {
+    const fetchMock = vi.fn(async () =>
+      sseStreamResponse(
+        [
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+        ],
+        { "x-codex-primary-used-percent": "11" },
+      ),
+    );
+    const seen: Headers[] = [];
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        onResponseMeta: (h) => seen.push(h),
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    for await (const _ of client.nativePassthroughStream?.(nativeStreamBody()) ?? []) {
+      // drain
+    }
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.get("x-codex-primary-used-percent")).toBe("11");
+  });
+});
+
+// nativePassthrough (non-stream, issue #217, Phase 3). Codex is stream-only in
+// practice (store:false + stream:true), but the non-stream method is implemented for
+// completeness: it forwards the body VERBATIM and returns the upstream JSON untranslated
+// (NO aggregateResponsesStream, NO openaiToResponsesRequest).
+describe("createCodexResponsesClient — nativePassthrough", () => {
+  function nativeBody(): Record<string, unknown> {
+    return {
+      model: "gpt-5.5",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      instructions: "You are Codex.",
+      include: ["reasoning.encrypted_content"],
+      store: false,
+    };
+  }
+
+  it("forwards the native body VERBATIM (no openaiToResponsesRequest)", async () => {
+    const body = nativeBody();
+    let sentBody: unknown;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body));
+      return jsonResponse({ id: "resp_pt", object: "response", status: "completed" });
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await client.nativePassthrough?.(body);
+    expect(sentBody).toEqual(body);
+  });
+
+  it("returns the upstream native Responses JSON VERBATIM (no aggregateResponsesStream)", async () => {
+    const upstream = {
+      id: "resp_pt",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          type: "reasoning",
+          encrypted_content: "ENC-OPAQUE",
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "native answer" }],
+        },
+      ],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    };
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: (async () => jsonResponse(upstream)) as unknown as typeof fetch,
+    });
+    const out = await client.nativePassthrough?.(nativeBody());
+    // Native Responses shape preserved — `output` blocks (incl. encrypted reasoning)
+    // survive, no `choices` wrapping.
+    expect(out).toEqual(upstream);
+  });
+
+  it("throws UpstreamError with upstreamStatus + scrubbed body on a non-2xx", async () => {
+    const token = jwt("acct_secret_value_1234");
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${token}`,
+        currentSecrets: () => [token],
+      },
+      fetch: (async () => jsonResponse({ error: `boom ${token}` }, 500)) as unknown as typeof fetch,
+    });
+    let caught: unknown;
+    try {
+      await client.nativePassthrough?.(nativeBody());
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    const err = caught as UpstreamError;
+    expect(err.upstreamStatus).toBe(500);
+    expect(JSON.stringify(err.providerRaw)).not.toContain(token);
+    expect(JSON.stringify(err.providerRaw)).toContain("[redacted]");
+  });
+});
+
+// Sanity (Phase 2, no change): the OAuth pool + serialize-client forward
+// nativePassthrough / nativePassthroughStream generically, so a codex pool member
+// exposes both methods. The codex client created above defines them as functions —
+// the pool's select-then-delegate wiring (pool.test.ts) simply forwards the calls.
+describe("createCodexResponsesClient — passthrough methods are defined (pool feature-detect)", () => {
+  it("exposes nativePassthrough and nativePassthroughStream as functions", () => {
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+    });
+    expect(typeof client.nativePassthrough).toBe("function");
+    expect(typeof client.nativePassthroughStream).toBe("function");
   });
 });

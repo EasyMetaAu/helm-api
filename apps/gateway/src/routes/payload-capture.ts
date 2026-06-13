@@ -230,6 +230,86 @@ export function usageFromAnthropicResponse(body: unknown): StreamUsage | null {
   return normalized;
 }
 
+// Native-protocol-passthrough cost for openai_responses (#217 Phase 3): normalize a
+// VERBATIM Codex Responses NON-stream response's usage block into the OpenAI-shaped
+// StreamUsage the gateway's costOf/resolveCostUsd already understand. The token math
+// MIRRORS core's aggregateResponsesStream (openai-responses.ts): Responses already
+// COUNTS the cache hit INSIDE input_tokens (unlike Anthropic, where cache is separate),
+// so prompt_tokens = input_tokens directly; completion_tokens = output_tokens; the
+// cache split (cached_tokens / cache_creation_input_tokens) rides input_tokens_details
+// and is surfaced under prompt_tokens_details for the dashboard. Tolerant of missing
+// fields (each absent → 0); null when the body carries no usage object at all.
+export function usageFromResponsesResponse(body: unknown): StreamUsage | null {
+  const usage = (body as { usage?: unknown } | null)?.usage;
+  if (!usage || typeof usage !== "object") return null;
+  return normalizeResponsesUsage(usage as Record<string, unknown>);
+}
+
+// Shared Responses-usage normalization for the non-stream body and the terminal SSE
+// event (both carry the identical `usage` shape). Cache is already included in
+// input_tokens, so the budget total is simply prompt + completion.
+function normalizeResponsesUsage(u: Record<string, unknown>): StreamUsage {
+  const inTok = typeof u.input_tokens === "number" ? u.input_tokens : 0;
+  const outTok = typeof u.output_tokens === "number" ? u.output_tokens : 0;
+  const details = (u.input_tokens_details ?? {}) as Record<string, unknown>;
+  const cacheRead = typeof details.cached_tokens === "number" ? details.cached_tokens : 0;
+  const cacheCreation =
+    typeof details.cache_creation_input_tokens === "number"
+      ? details.cache_creation_input_tokens
+      : 0;
+  const normalized: StreamUsage = {
+    prompt_tokens: inTok,
+    completion_tokens: outTok,
+    total_tokens: inTok + outTok,
+  };
+  if (cacheRead > 0 || cacheCreation > 0) {
+    normalized.prompt_tokens_details = {
+      cached_tokens: cacheRead,
+      ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+    };
+  }
+  return normalized;
+}
+
+// Native-protocol-passthrough STREAMING cost for openai_responses (#217 Phase 3).
+// Unlike Anthropic (usage split across message_start/message_delta), the Codex
+// Responses SSE carries the totals on the TERMINAL event — `response.completed` or
+// `response.incomplete` (truncation / content filter) — under `response.usage`. The
+// byte-faithful passthrough forwards these frames VERBATIM, so cost extraction scans
+// the accumulated SSE for that event and normalizes its usage the SAME way as the
+// non-stream extractor (mirroring aggregateResponsesStream). Frames are split on the
+// SSE record separator (\n\n); the `data:` line is read with a tolerant JSON.parse so
+// ping / keepalive / `[DONE]` / non-JSON lines are skipped. null when no terminal
+// usage-bearing event is present.
+export function usageFromResponsesSSE(raw: string): StreamUsage | null {
+  for (const frame of raw.split("\n\n")) {
+    // Each frame may have multiple lines (event:/data:); read the data line only.
+    let payload: string | null = null;
+    for (const line of frame.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("data:")) {
+        payload = trimmed.slice("data:".length).trim();
+        break;
+      }
+    }
+    if (payload === null || payload === "" || payload === "[DONE]") continue;
+    let evt: { type?: unknown; response?: unknown };
+    try {
+      evt = JSON.parse(payload);
+    } catch {
+      // ping / keepalive / non-JSON line — ignore
+      continue;
+    }
+    if (!evt || typeof evt !== "object") continue;
+    if (evt.type !== "response.completed" && evt.type !== "response.incomplete") continue;
+    const response = (evt.response ?? {}) as Record<string, unknown>;
+    const usage = response.usage;
+    if (!usage || typeof usage !== "object") continue;
+    return normalizeResponsesUsage(usage as Record<string, unknown>);
+  }
+  return null;
+}
+
 // Persist the verbatim request/response bodies + opportunistically prune expired
 // rows. Never throws — logs via the provided sink on failure.
 export async function persistPayload(
