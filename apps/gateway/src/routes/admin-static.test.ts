@@ -106,4 +106,33 @@ describe("mountAdminStatic", () => {
     const body = await res.text();
     expect(body).toContain("<!doctype html>");
   });
+
+  // Cache policy (DoD: a deploy must take effect in an already-open browser).
+  // The SPA shell (index.html) hard-codes the current build's hashed chunk URLs;
+  // if it is heuristically cached the browser keeps replaying the OLD build after
+  // a deploy. So the shell must revalidate every load, while the content-hashed
+  // immutable assets (hash == content) can be cached for a year.
+  it("sets Cache-Control: no-cache on the SPA shell so a deploy is picked up", async () => {
+    const res = await appWith(ENABLED).request("/admin", { headers: { Authorization: CRED } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("text/html");
+    expect(res.headers.get("Cache-Control")).toBe("no-cache");
+  });
+
+  it("sets Cache-Control: no-cache on SPA deep-link fallbacks (index.html)", async () => {
+    const res = await appWith(ENABLED).request("/admin/keys", {
+      headers: { Authorization: CRED },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("text/html");
+    expect(res.headers.get("Cache-Control")).toBe("no-cache");
+  });
+
+  it("caches content-hashed immutable assets for a year", async () => {
+    const res = await appWith(ENABLED).request(findCssAsset(), {
+      headers: { Authorization: CRED },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
+  });
 });
