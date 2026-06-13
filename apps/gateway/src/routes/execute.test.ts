@@ -2138,6 +2138,51 @@ describe("createExecute — OAuth subscription alias guard (fail-closed)", () =>
     ).not.toHaveBeenCalled();
   });
 
+
+
+  it("keeps OAuth subscription provider protocol metadata so fast path cannot hit Anthropic pools", async () => {
+    const pool = ok("pool");
+    const execute = createExecute({
+      defaultProvider: ok("default"),
+      providers: new Map([["anthropic", pool]]),
+      knownOAuthPrefixes: new Set(["anthropic"]),
+      oauthAliases: () => new Set(["anthropic/claude-x"]),
+      oauthProviderProtocols: new Map([
+        [
+          "anthropic",
+          {
+            targetProviderProtocol: "anthropic_messages",
+            providerRequiresCompatibilityRewrite: false,
+          },
+        ],
+      ]),
+      registry: registry({}),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      sameProtocolSerializationFastPathEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["anthropic/claude-x"]),
+      req({ native_openai_chat_request: nativeOpenAIChat() } as Partial<InternalRequest>),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(out.attempts[0]).toMatchObject({
+      fast_path_used: false,
+      fast_path_disable_reason: "target_provider_protocol_not_openai_chat",
+      target_provider_protocol: "anthropic_messages",
+      provider_name: "anthropic",
+      provider_model: "claude-x",
+    });
+    expect(pool.chatCompletion).toHaveBeenCalledWith(
+      { model: "claude-x", messages: [{ role: "user", content: "hello" }], stream: false },
+      expect.anything(),
+    );
+  });
+
   it("fails CLOSED for a DE-CURATED subscription alias — never the registry, never defaultProvider", async () => {
     const pool = ok("pool");
     const dflt = ok("default");

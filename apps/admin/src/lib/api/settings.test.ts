@@ -20,6 +20,7 @@ const FULL: RuntimeSettings = {
   user_message_queue_enabled: true,
   user_message_queue_delay_ms: 300,
   user_message_queue_wait_timeout_ms: 8000,
+  same_protocol_serialization_fast_path: true,
 };
 
 describe('settings api client', () => {
@@ -60,6 +61,24 @@ describe('settings api client', () => {
       user_message_queue_enabled: false,
       user_message_queue_delay_ms: 200,
       user_message_queue_wait_timeout_ms: 5000,
+      same_protocol_serialization_fast_path: false,
+    });
+  });
+
+  it('preserves same-protocol fast path when saving an unrelated field', async () => {
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(new Response(JSON.stringify(FULL), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ...FULL, log_level: 'warn' }), { status: 200 }),
+      );
+
+    const current = await getSettings();
+    await saveSettings({ ...current, log_level: 'warn' });
+
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      log_level: 'warn',
+      same_protocol_serialization_fast_path: true,
     });
   });
 

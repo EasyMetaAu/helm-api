@@ -15,6 +15,7 @@ export interface RuntimeSettings {
   // verbatim native body and returns the native response untranslated. Default
   // OFF: merging the feature must NOT enable it.
   native_protocol_passthrough: boolean;
+  same_protocol_serialization_fast_path: boolean;
   rate_limit_enabled: boolean;
   // System DEFAULT quota any key without its own per-key override falls back to.
   // 0 = unlimited (mirrors the quota convention). Runtime-editable here.
@@ -62,8 +63,9 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
       typeof raw.payload_retention_days === 'number' ? raw.payload_retention_days : 30,
     // Default OFF, and — critically — KEEP it across an admin save. normalize()
     // drops any key it doesn't name, so omitting this would silently reset the
-    // flag to false on every save (the #225 lesson).
+    // flags to false on every save (the #225 lesson).
     native_protocol_passthrough: raw.native_protocol_passthrough === true,
+    same_protocol_serialization_fast_path: raw.same_protocol_serialization_fast_path === true,
     rate_limit_enabled: raw.rate_limit_enabled === true,
     rate_limit_default_rpm:
       typeof raw.rate_limit_default_rpm === 'number' ? raw.rate_limit_default_rpm : 0,
