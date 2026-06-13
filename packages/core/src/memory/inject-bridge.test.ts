@@ -1,20 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IRMessage } from "../protocol/ir.js";
-import { type InjectBridgeDeps, injectIntoIR } from "./inject-bridge.js";
+import { type InjectBridgeDeps, injectIntoIR, wrapMemoryReminder } from "./inject-bridge.js";
 import { sha256Hex } from "./message-hash.js";
 import { serializeContent } from "./observe.js";
 
-// docs/08 Phase 2 (#217 Phase 4 PREFIX model) — the framework-agnostic bridge that
-// wires the inject assembler onto the IR message array shared by all three request
-// surfaces (chat / messages / responses). Under the PREFIX model the bridge:
+// docs/08 Phase 2 (#217 Phase 4 TRAILING-REMINDER model) — the framework-agnostic
+// bridge that wires the inject assembler onto the IR message array shared by all three
+// request surfaces (chat / messages / responses). Under the trailing-reminder model the
+// bridge:
 //   1. computes the current request's live-window content_hashes (the SAME way
 //      storage hashes a message) and hands them to the assembler for window-aware
 //      dedup;
 //   2. keeps the live conversation VERBATIM (tool_calls / images / tool results /
 //      developer turns are never destroyed — there is no D7 plain-text gate);
-//   3. MERGES the assembled memory TEXT BLOCK into the system message (system-level,
-//      decision #3): replacing an existing leading system message's content, or
-//      PREPENDING a new system message when none exists;
+//   3. APPENDS the assembled memory TEXT BLOCK as ONE trailing `<system-reminder>`
+//      user turn AFTER the verbatim conversation — the leading system message (and any
+//      client cache_control on it) is left byte-identical, so the upstream prompt-cache
+//      prefix (tools → system → history) is preserved (cache-preserve revision of
+//      decision #3: system-AUTHORITY framing via <system-reminder>, but POSITIONED after
+//      the cached prefix instead of at the front of `system`);
 //   4. always surfaces the raw `memoryBlock` so the pipeline can splice it natively;
 //   5. preserves the "write-back always fires" guarantee for EVERY turn — including
 //      the no-memory / degraded / throw paths.
@@ -53,8 +57,8 @@ const BLOCK = "# Persistent memory (injected by helm)\n## Project knowledge\npro
 // The content_hash the assembler should receive for a string-content message.
 const hashOf = (content: IRMessage["content"]): string => sha256Hex(serializeContent(content));
 
-describe("injectIntoIR — prefix model", () => {
-  it("merges the memory block into an EXISTING leading system message and keeps the rest verbatim", async () => {
+describe("injectIntoIR — trailing-reminder model", () => {
+  it("APPENDS a trailing <system-reminder> user turn and keeps the leading system message + all turns verbatim", async () => {
     const deps = makeDeps(BLOCK);
     const original: IRMessage[] = [
       { role: "system", content: "You are helpful." },
@@ -65,20 +69,24 @@ describe("injectIntoIR — prefix model", () => {
 
     expect(result.memoryBlock).toBe(BLOCK);
     expect(result.metadata?.memory_hydrated).toBe(true);
-    // system content = block + "\n\n" + original system content.
-    expect(result.messages[0]).toEqual({
-      role: "system",
-      content: `${BLOCK}\n\nYou are helpful.`,
-    });
-    // Every other message is the SAME object, in order (verbatim).
+    // The leading system message is kept BYTE-IDENTICAL (same object) — its cache_control
+    // and the upstream cache prefix (system → history) survive untouched.
+    expect(result.messages[0]).toBe(original[0]);
     expect(result.messages[1]).toBe(original[1]);
     expect(result.messages[2]).toBe(original[2]);
-    expect(result.messages).toHaveLength(3);
+    // Memory rides ONE trailing <system-reminder> user turn AFTER the conversation.
+    expect(result.messages).toHaveLength(4);
+    expect(result.messages[3]).toEqual({
+      role: "user",
+      content: `<system-reminder>\n${BLOCK}\n</system-reminder>`,
+    });
+    expect(result.messages[3]?.content).toBe(wrapMemoryReminder(BLOCK));
     // The original array is not mutated.
+    expect(original).toHaveLength(3);
     expect(original[0]).toEqual({ role: "system", content: "You are helpful." });
   });
 
-  it("PREPENDS a new system message when the turn has NO leading system message", async () => {
+  it("appends the trailing reminder with NO leading system message (none is synthesized)", async () => {
     const deps = makeDeps(BLOCK);
     const original: IRMessage[] = [
       { role: "user", content: "old" },
@@ -88,14 +96,15 @@ describe("injectIntoIR — prefix model", () => {
     const result = await injectIntoIR(original, "", SCOPE, deps);
 
     expect(result.messages).toHaveLength(4);
-    expect(result.messages[0]).toEqual({ role: "system", content: BLOCK });
-    expect(result.messages[1]).toBe(original[0]);
-    expect(result.messages[2]).toBe(original[1]);
-    expect(result.messages[3]).toBe(original[2]);
+    // No system message is invented — the live turns ride verbatim, reminder last.
+    expect(result.messages[0]).toBe(original[0]);
+    expect(result.messages[1]).toBe(original[1]);
+    expect(result.messages[2]).toBe(original[2]);
+    expect(result.messages[3]).toEqual({ role: "user", content: wrapMemoryReminder(BLOCK) });
     expect(result.memoryBlock).toBe(BLOCK);
   });
 
-  it("a TOOL turn INJECTS — block prepended at system level, tool_calls message kept verbatim", async () => {
+  it("a TOOL turn INJECTS — trailing reminder appended, tool_calls message kept verbatim", async () => {
     const deps = makeDeps(BLOCK);
     const toolCallMsg: IRMessage = {
       role: "assistant",
@@ -107,14 +116,15 @@ describe("injectIntoIR — prefix model", () => {
 
     const result = await injectIntoIR(original, "", SCOPE, deps);
 
-    expect(result.messages[0]).toEqual({ role: "system", content: BLOCK });
     // The tool_calls + tool result survive byte-for-byte (same object references).
-    expect(result.messages[1]).toBe(toolCallMsg);
-    expect(result.messages[2]).toBe(toolResultMsg);
+    expect(result.messages[0]).toBe(toolCallMsg);
+    expect(result.messages[1]).toBe(toolResultMsg);
+    expect(result.messages[2]).toBe(original[2]);
+    expect(result.messages.at(-1)).toEqual({ role: "user", content: wrapMemoryReminder(BLOCK) });
     expect(result.memoryBlock).toBe(BLOCK);
   });
 
-  it("a MULTIMODAL turn INJECTS — multipart content preserved, block in system", async () => {
+  it("a MULTIMODAL turn INJECTS — multipart content preserved, reminder appended last", async () => {
     const deps = makeDeps(BLOCK);
     const imageMsg: IRMessage = {
       role: "user",
@@ -127,12 +137,12 @@ describe("injectIntoIR — prefix model", () => {
 
     const result = await injectIntoIR(original, "", SCOPE, deps);
 
-    expect(result.messages[0]).toEqual({ role: "system", content: BLOCK });
-    expect(result.messages[1]).toBe(imageMsg);
-    expect(result.messages[1]?.content).toEqual([
+    expect(result.messages[0]).toBe(imageMsg);
+    expect(result.messages[0]?.content).toEqual([
       { type: "text", text: "what is this?" },
       { type: "image", url: "data:image/png;base64,AAAA" },
     ]);
+    expect(result.messages.at(-1)).toEqual({ role: "user", content: wrapMemoryReminder(BLOCK) });
   });
 
   it("passes the live-window content_hashes (storage-equivalent) to the assembler", async () => {

@@ -3,30 +3,39 @@ import type { InjectInput, InjectResult } from "./inject.js";
 import { sha256Hex } from "./message-hash.js";
 import { serializeContent } from "./observe.js";
 
-// docs/08 Phase 2 (#217 Phase 4 PREFIX model) — the framework-agnostic bridge
-// between the inject assembler and the IR message array every request surface
+// docs/08 Phase 2 (#217 Phase 4 TRAILING-REMINDER model) — the framework-agnostic
+// bridge between the inject assembler and the IR message array every request surface
 // (chat / messages / responses) shares.
 //
-// THE PREFIX MODEL replaces the legacy full-replace compaction. The assembler no
-// longer rebuilds the conversation into plain-text AssembledMessage[]; it produces
-// ONE system-level memory TEXT BLOCK. The bridge's job is therefore purely
-// ADDITIVE and structure-preserving:
+// THE TRAILING-REMINDER MODEL replaces the legacy full-replace compaction AND the
+// short-lived system-PREFIX merge. The assembler produces ONE memory TEXT BLOCK; the
+// bridge's job is purely ADDITIVE and structure-preserving:
 //   1. WINDOW HASH — fingerprint the current request's live messages the SAME way
 //      storage hashes them (sha256Hex(serializeContent(content))), so the assembler
 //      can window-dedup thread observations whose covered turns the client still
 //      sends. Computed HERE because the live IR window only exists at the request
 //      surface (the assembler reads stored rows, not the live request).
 //   2. ASSEMBLE — run the bound assembler with the window hashes + token budget.
-//   3. MERGE — splice the memory block into the SYSTEM message (decision #3):
-//      replace an existing leading system message's content, else PREPEND a new
-//      one. EVERY other message (user / assistant / tool, incl. tool_calls and
-//      multipart/image content) is kept VERBATIM and in order. No replacement of
-//      live turns ⇒ no structure can be lost ⇒ the legacy D7 plain-text gate is
-//      GONE: tool-using / multimodal / developer turns inject just like text turns.
+//   3. APPEND — splice the memory block as ONE trailing `<system-reminder>` user turn
+//      AFTER the verbatim conversation. EVERY existing message (system / user /
+//      assistant / tool, incl. tool_calls and multipart/image content) is kept VERBATIM
+//      and in order — including the LEADING system message, which is left byte-identical
+//      so any client `cache_control` on it (and the whole upstream cache prefix
+//      tools → system → history) survives. No replacement of live turns ⇒ no structure
+//      can be lost ⇒ the legacy D7 plain-text gate is GONE.
+//
+//      WHY TRAILING, not system-PREFIX (cache-preserve revision of decision #3): prompt
+//      caching is a strict prefix match (tools → system → messages). Prepending memory
+//      into `system` shifts the client's cached prefix and busts it every memory-mode
+//      turn — and the memory block is itself window-variable, so it can never settle in
+//      a cached prefix. Appending memory AFTER the cached prefix leaves the cache intact;
+//      only the small reminder turn is uncached. The `<system-reminder>` wrapper keeps
+//      system-AUTHORITY framing (Claude is trained to treat it as injected operator
+//      context, not the user speaking) without needing a model-gated beta.
 //
 // The raw `memoryBlock` is ALSO surfaced unchanged so the pipeline can splice it
-// into a NATIVE passthrough request's system/instructions (P4-3) without re-running
-// the assembler.
+// into a NATIVE passthrough request's messages/input (P4-3) without re-running the
+// assembler.
 //
 // Lives in core so it imports no web framework and is unit-testable directly.
 
@@ -81,34 +90,33 @@ function windowContentHashes(messages: IRMessage[]): Set<string> {
   return hashes;
 }
 
-// Merge the memory block into the SYSTEM message (decision #3). If the conversation
-// already opens with a system message, prepend the block to its content with a blank
-// line separator; otherwise splice a NEW leading system message carrying the block.
-// Returns a NEW array — the input array and its messages are never mutated. All
-// non-system (and trailing) messages are kept by reference, in order, VERBATIM.
-function mergeMemoryIntoSystem(messages: IRMessage[], memoryBlock: string): IRMessage[] {
-  const leading = messages[0];
-  if (leading?.role === "system") {
-    const original =
-      typeof leading.content === "string"
-        ? leading.content
-        : // A non-string system content (rare; multipart) — keep memory first as
-          // text and re-serialize the original alongside, never dropping it.
-          serializeContent(leading.content);
-    const mergedSystem: IRMessage = {
-      ...leading,
-      content: original.length > 0 ? `${memoryBlock}\n\n${original}` : memoryBlock,
-    };
-    return [mergedSystem, ...messages.slice(1)];
-  }
-  return [{ role: "system", content: memoryBlock }, ...messages];
+// Wrap the assembled memory block in a `<system-reminder>` envelope — the single
+// source of truth for the injected text on BOTH the translate path (the trailing IR
+// user turn below) and the native passthrough path (the gateway splices the SAME
+// wrapped text into the native carrier). The envelope gives the block system-AUTHORITY
+// framing (Claude is trained to read `<system-reminder>` as injected operator context,
+// not as the user speaking) without a model-gated beta header. Pure + deterministic so
+// the text is byte-stable for a given block.
+export function wrapMemoryReminder(memoryBlock: string): string {
+  return `<system-reminder>\n${memoryBlock}\n</system-reminder>`;
 }
 
-// Run the inject phase and return the IR messages to route with (memory merged at
-// the system level) + the raw memory block + assembler metadata. The PREFIX model
-// keeps the live conversation VERBATIM — memory is additive at the system level,
-// never a replacement — so this never destroys tool_calls / images / tool results,
-// and the legacy D7 plain-text gate is no longer needed.
+// Append the memory block as ONE trailing `<system-reminder>` user turn AFTER the
+// verbatim conversation. The leading system message (and any client cache_control on
+// it) and EVERY existing turn are kept by reference, in order — the upstream prompt-cache
+// prefix (tools → system → history) is left byte-identical, so only the small reminder
+// turn is uncached. Returns a NEW array; the input array and its messages are never
+// mutated.
+function appendMemoryReminder(messages: IRMessage[], memoryBlock: string): IRMessage[] {
+  return [...messages, { role: "user", content: wrapMemoryReminder(memoryBlock) }];
+}
+
+// Run the inject phase and return the IR messages to route with (memory appended as a
+// trailing `<system-reminder>` turn) + the raw memory block + assembler metadata. The
+// trailing-reminder model keeps the live conversation VERBATIM — memory is additive at
+// the END, never a replacement — so this never destroys tool_calls / images / tool
+// results, never disturbs the client's cached prefix, and the legacy D7 plain-text gate
+// is no longer needed.
 //
 // FAIL-OPEN (principle 3): a degraded assembler result returns the ORIGINAL messages
 // + null block + the metadata; an assembler THROW returns the original messages +
@@ -140,9 +148,10 @@ export async function injectIntoIR(
       return { messages, memoryBlock: null, metadata: result.metadata };
     }
 
-    // Splice the block at the system level; the live turns stay verbatim.
+    // Append the block as a trailing <system-reminder> turn; the live turns (and the
+    // client's cached system prefix) stay verbatim.
     return {
-      messages: mergeMemoryIntoSystem(messages, result.memoryBlock),
+      messages: appendMemoryReminder(messages, result.memoryBlock),
       memoryBlock: result.memoryBlock,
       metadata: result.metadata,
     };

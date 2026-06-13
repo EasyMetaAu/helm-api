@@ -29,8 +29,8 @@ import type { WriteQueue } from "../runtime/write-queue.js";
 import { copyLiteLLMRequestParams, providerRawFromRequest } from "./internal-request-params.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import {
-  prependMemoryToAnthropicBody,
-  prependMemoryToResponsesBody,
+  appendMemoryToAnthropicBody,
+  appendMemoryToResponsesBody,
 } from "./native-memory-inject.js";
 import {
   backfillCompletionCost,
@@ -590,21 +590,20 @@ export function createMessagesPipeline(
       // be loaded as recent_raw and duplicated in the same upstream request.
       const memoryScope = memoryScopeFromMeta(ir.metadata, identity.accountId);
 
-      // Memory inject (docs/08 Phase 2, #217 Phase 4 PREFIX model): on
-      // x-memory-mode=inject the assembler produces ONE system-level memory TEXT
-      // BLOCK and the bridge PREPENDS it additively — never a full replace. The
-      // Anthropic inbound transformer HOISTS the top-level `system` into a leading IR
-      // system message (ir.messages[0]) for BOTH the /v1/messages and /v1/responses
-      // surfaces (D8-bis), so the translate path's system prompt is read from there and
-      // memory is merged into it; every other turn (user / assistant / tool, incl.
-      // tool_calls + multipart/image content) is kept VERBATIM. No replacement ⇒ no
-      // structure loss ⇒ the legacy D7 plain-text gate is GONE.
+      // Memory inject (docs/08 Phase 2, #217 Phase 4 TRAILING-REMINDER model): on
+      // x-memory-mode=inject the assembler produces ONE memory TEXT BLOCK and the bridge
+      // APPENDS it additively as a trailing <system-reminder> turn — never a full
+      // replace, never a system-prefix edit. The translate path keeps the leading IR
+      // system message (and any client cache_control on it) and every other turn (user /
+      // assistant / tool, incl. tool_calls + multipart/image content) VERBATIM, with the
+      // reminder last. No replacement ⇒ no structure loss ⇒ the legacy D7 plain-text gate
+      // is GONE.
       //
       // For a NATIVE passthrough request (native_request present) the same memory block
-      // is spliced into the VERBATIM native carrier at the system level
-      // (system / instructions), leaving messages / input untouched — so passthrough
-      // can fire WITH memory (the guard no longer disables inject). Fully fail-open
-      // (never 5xx, never reroute).
+      // is spliced into the VERBATIM native carrier as a trailing reminder turn on
+      // messages / input, leaving system / instructions (and the client's cached prefix)
+      // untouched — so passthrough fires WITH memory (the guard no longer disables inject)
+      // AND keeps the upstream prompt cache. Fully fail-open (never 5xx, never reroute).
       // Inject metadata for the DecisionRecord (docs/08 Step 10) — held here and
       // stamped AFTER route() returns (the routing core never learns about memory).
       let memoryMeta: Omit<MemoryDecision, "thread_source"> | null = null;
@@ -640,18 +639,20 @@ export function createMessagesPipeline(
         memoryMeta = injected.metadata;
 
         // NATIVE passthrough path: splice the SAME block into the verbatim native
-        // carrier's system-level field (decision #3) so the body the executor forwards
-        // is memory-augmented yet self-consistent (memory in system/instructions,
-        // messages/input verbatim). Reassign the spliced (NEW) body; absent block /
-        // absent native_request / a non-native protocol ⇒ leave native_request as-is.
+        // carrier as a trailing <system-reminder> turn (cache-preserve revision of
+        // decision #3) so the body the executor forwards is memory-augmented yet self-
+        // consistent (memory appended AFTER the conversation; system/instructions and
+        // every existing turn — including the client's cached prefix — verbatim).
+        // Reassign the spliced (NEW) body; absent block / absent native_request / a
+        // non-native protocol ⇒ leave native_request as-is.
         if (injected.memoryBlock !== null && internal.native_request !== undefined) {
           if (protocol === "anthropic_messages") {
-            internal.native_request = prependMemoryToAnthropicBody(
+            internal.native_request = appendMemoryToAnthropicBody(
               internal.native_request,
               injected.memoryBlock,
             );
           } else if (protocol === "openai_responses") {
-            internal.native_request = prependMemoryToResponsesBody(
+            internal.native_request = appendMemoryToResponsesBody(
               internal.native_request,
               injected.memoryBlock,
             );

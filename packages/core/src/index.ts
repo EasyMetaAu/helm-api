@@ -226,12 +226,15 @@ export {
 } from "./memory/inject.js";
 // Memory middleware — inject↔IR bridge (docs/08 Phase 2, #217 Phase 4 PREFIX
 // model). Computes the live-window content_hashes for window-aware dedup, runs the
-// assembler, and merges the memory TEXT BLOCK into the system message — the live
-// conversation (tool_calls / images / tool results) is KEPT VERBATIM. No D7 gate.
+// assembler, and APPENDS the memory TEXT BLOCK as a trailing <system-reminder> turn —
+// the live conversation (tool_calls / images / tool results) AND the client's cached
+// system prefix are KEPT VERBATIM. No D7 gate. `wrapMemoryReminder` is the shared
+// <system-reminder> envelope the native passthrough splice reuses.
 export {
   type InjectBridgeDeps,
   type InjectBridgeResult,
   injectIntoIR,
+  wrapMemoryReminder,
 } from "./memory/inject-bridge.js";
 // Memory middleware — observe phase (docs/08 Phase 1). Framework-agnostic
 // write-only persistence; never injects memory or changes routing.
