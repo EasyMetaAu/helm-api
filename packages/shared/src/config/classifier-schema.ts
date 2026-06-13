@@ -61,8 +61,8 @@ export const ClassifierRulesConfigSchema = z.object({
     max_history_weight: z.number().min(0).max(1).default(0.6),
   }),
   // Language-coverage guard. Layer-1 has an English keyword layer plus an
-  // international keyword layer. The current seed is Simplified/Traditional Chinese;
-  // future Japanese/Korean/Vietnamese/etc. terms should extend *_intl_kw.
+  // international keyword layer. The current seed is Simplified Chinese; future
+  // Japanese/Korean/Vietnamese/etc. terms should extend *_intl_kw.
   // Non-covered languages, and prompts that miss those lists,
   // cannot be scored by keywords. When `non_latin_uncertain` is on, such a prompt
   // is forced `uncertain` so the cascade escalates to the (multilingual) Layer-2

@@ -122,8 +122,7 @@ wrapped so a degenerate input yields a safe default instead of throwing
   enters Layer 2 (if eval is enabled), otherwise Layer 3.
 - **Language-coverage guard** (`engine.ts` + `signals.ts`): Layer 1 has an
   English keyword layer plus an international keyword layer. The current
-  international seed is Simplified/Traditional Chinese; future Japanese/Korean/
-  Vietnamese/etc. terms should extend `*_intl_kw`. Non-covered languages, and
+  international seed is Simplified Chinese; future Japanese/Korean/Vietnamese/etc. terms should extend `*_intl_kw`. Non-covered languages, and
   prompts that miss those lists, are forced `uncertain` (confidence 0) when no
   content-type structural grip exists, so the cascade escalates to multilingual
   Layer-2 eval. **Operator contract**: to serve broad non-English traffic, enable

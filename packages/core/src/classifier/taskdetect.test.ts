@@ -288,12 +288,9 @@ describe("detectTask", () => {
       expect(res.task_type).toBe("security");
     });
 
-    it("activates Simplified and Traditional Chinese coding keywords", () => {
+    it("activates Simplified Chinese coding keywords", () => {
       const zhHans = detectTask(makeReq("请重构这个函数并补上单元测试"), shipped);
       expect(zhHans.task_type).toBe("coding");
-
-      const zhHant = detectTask(makeReq("請重構這個函式並補上單元測試"), shipped);
-      expect(zhHant.task_type).toBe("coding");
     });
 
     it("keeps short Chinese confirmations simple at the engine layer", () => {

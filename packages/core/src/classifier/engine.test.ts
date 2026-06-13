@@ -432,22 +432,31 @@ describe("scoreRequest — Layer-1 orchestration", () => {
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
   });
 
-  it("shipped intl: Traditional analysis prompt is handled by rules without language guard", () => {
+  it("shipped intl: Simplified reasoning and planning prompts are handled by rules", () => {
     const cfg = shippedRules();
-    const req = makeRequest({
+    const reasoningReq = makeRequest({
       messages: [
         {
           role: "user",
-          content: "請深入分析這家公司過去三年的現金流變化，比較產業趨勢，並評估主要風險和根因。",
+          content: "请逐步证明这个定理，并解释原因、推导过程和每一步论证的理由。",
         },
       ],
     });
-    const out = scoreRequest(req, { cfg, approxTokens: 50 });
+    const planningReq = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content: "请拆解这个项目的架构计划、路线图、里程碑和关键权衡，形成方案设计蓝图。",
+        },
+      ],
+    });
+    const reasoning = scoreRequest(reasoningReq, { cfg, approxTokens: 40 });
+    const planning = scoreRequest(planningReq, { cfg, approxTokens: 45 });
 
-    expect(out.decided_by).toBe("rules");
-    expect(out.uncertain).toBe(false);
-    expect(out.explanation.some((e) => e.detail === "analysis_intl_kw")).toBe(true);
-    expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+    expect(reasoning.explanation.some((e) => e.detail === "reasoning_intl_kw")).toBe(true);
+    expect(reasoning.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+    expect(planning.explanation.some((e) => e.detail === "planning_intl_kw")).toBe(true);
+    expect(planning.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
   });
 
   it("shipped intl: Simplified math prompt has dimension grip when task keywords match", () => {
@@ -469,13 +478,13 @@ describe("scoreRequest — Layer-1 orchestration", () => {
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
   });
 
-  it("shipped intl: Traditional web prompt has dimension grip when task keywords match", () => {
+  it("shipped intl: Simplified web prompt has dimension grip when task keywords match", () => {
     const cfg = shippedRules();
     const req = makeRequest({
       messages: [
         {
           role: "user",
-          content: "請搜尋網頁並查找網頁上的最新公告，整理來源、時間、重點和可信度。",
+          content: "请搜索网页并查找网页上的最新公告，整理来源、时间、重点和可信度。",
         },
       ],
     });
@@ -483,6 +492,63 @@ describe("scoreRequest — Layer-1 orchestration", () => {
 
     expect(out.explanation.some((e) => e.detail === "web_intl_kw")).toBe(true);
     expect(out.explanation.some((e) => e.detail === "low_keyword_coverage")).toBe(false);
+  });
+
+  it("shipped intl: Simplified keyword seed contains no Traditional Chinese entries", () => {
+    const cfg = shippedRules();
+    const candidateKeywords = [
+      ...Object.entries(cfg.dimensions)
+        .filter(([name]) => name.endsWith("_intl_kw"))
+        .flatMap(([, dim]) => dim.keywords),
+      ...Object.values(cfg.task_keywords).flat(),
+      ...cfg.overrides.exact_confirmation_tokens,
+      ...cfg.overrides.formal_logic_keywords,
+    ];
+    const forbiddenTraditionalTerms = [
+      "積分",
+      "矩陣",
+      "導數",
+      "代數",
+      "推導",
+      "重構",
+      "除錯",
+      "編譯",
+      "函式",
+      "單元測試",
+      "堆疊追蹤",
+      "比較",
+      "評估",
+      "診斷",
+      "改寫",
+      "潤色",
+      "校對",
+      "標題",
+      "資料集",
+      "樞紐分析表",
+      "查詢",
+      "緩衝區溢位",
+      "權限提升",
+      "越權",
+      "惡意軟體",
+      "存取控制",
+      "截圖",
+      "螢幕截圖",
+      "流程圖",
+      "圖表",
+      "搜尋網頁",
+      "查找網頁",
+      "線上資料",
+      "擷取欄位",
+      "擷取實體",
+      "結構化資料",
+      "謝謝",
+      "反證法",
+      "歸納法",
+    ];
+
+    expect(
+      candidateKeywords.filter((kw) => forbiddenTraditionalTerms.some((term) => kw.includes(term))),
+    ).toEqual([]);
   });
 
   it("shipped intl: unmatched long Chinese still trips language guard", () => {

@@ -137,8 +137,8 @@ export function scoreRequest(req: InternalRequest, deps: ScoreRequestDeps): Clas
 
   // ── 5.5 language-coverage guard ───────────────────────────────────────────
   // Layer-1 has an English keyword layer plus an international keyword layer. The
-  // current seed is Simplified/Traditional Chinese; future Japanese/Korean/
-  // Vietnamese/etc. terms should extend *_intl_kw. A non-covered non-Latin prompt
+  // current seed is Simplified Chinese; future Japanese/Korean/Vietnamese/etc.
+  // terms should extend *_intl_kw. A non-covered non-Latin prompt
   // therefore cannot be scored by them, so a high-confidence keyword verdict on it
   // would be a lie. Force `uncertain` so the
   // cascade escalates to the (multilingual) Layer-2 eval — or, with eval OFF, lands

@@ -3,8 +3,8 @@ import { nonLatinRatio } from "./signals.js";
 
 // nonLatinRatio measures the fraction of *letters* (\p{L}) that are NOT Latin
 // script. It feeds the Layer-1 language-coverage guard (engine.ts): Layer-1 has
-// English plus small high-confidence CJK keyword lists, so non-covered languages and
-// CJK prompts that miss those lists must be marked uncertain → escalate to the
+// English plus small high-confidence international keyword lists, so non-covered
+// languages and prompts that miss those lists must be marked uncertain → escalate to the
 // (multilingual) Layer-2 eval. Punctuation, digits and whitespace are NOT letters,
 // so they never skew the ratio. Pure: same input => same output.
 describe("nonLatinRatio", () => {
