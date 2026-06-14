@@ -1,7 +1,9 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
   import { parseSseStream, type SseEventKind } from '$lib/sse';
+  import FullscreenToggle from './FullscreenToggle.svelte';
   import JsonTree from './JsonTree.svelte';
+  import { VIEWER_FS_CONTAINER, viewerSizing } from './viewerChrome';
 
   // Stream-aware viewer for captured SSE responses. JsonViewer's fail-soft path
   // showed streams as an unreadable wall of `data:` lines; this renders the same
@@ -18,6 +20,9 @@
   let { raw, testid }: { raw: string; testid?: string } = $props();
 
   let tab = $state<Tab>('assembled');
+  // Fullscreen lifts the whole viewer into a fixed overlay (see viewerChrome.ts);
+  // FullscreenToggle owns the Escape-to-exit shortcut.
+  let fullscreen = $state(false);
 
   const parsed = $derived(parseSseStream(raw));
   const assembled = $derived(parsed.assembled);
@@ -49,11 +54,15 @@
 
   const tabActive = 'border-action bg-action text-white';
   const tabInactive = 'border-border bg-surface text-ink-muted hover:bg-canvas';
-  const panelCls = 'max-h-96 overflow-auto rounded bg-canvas p-2 font-mono text-xs text-ink-body';
+  // Shared height/resize chrome (capped+resizable, or flex-fill when fullscreen),
+  // applied to every tab so Assembled / Chunks / Raw behave identically.
+  const panelCls = $derived(
+    `${viewerSizing(fullscreen)} overflow-auto rounded bg-canvas p-2 font-mono text-xs text-ink-body`,
+  );
 </script>
 
-<div data-testid={testid}>
-  <div class="mb-2 flex flex-wrap gap-2">
+<div data-testid={testid} class={fullscreen ? VIEWER_FS_CONTAINER : ''}>
+  <div class="mb-2 flex flex-wrap items-center gap-2">
     {#each TABS as id (id)}
       <button
         type="button"
@@ -61,10 +70,17 @@
         onclick={() => (tab = id)}>{tabLabel(id)}</button
       >
     {/each}
+    <div class="ml-auto">
+      <FullscreenToggle bind:active={fullscreen} testid="streamviewer-fullscreen" />
+    </div>
   </div>
 
   <!-- Assembled: what the client ultimately received. -->
-  <div data-testid="streamviewer-assembled" hidden={tab !== 'assembled'}>
+  <div
+    data-testid="streamviewer-assembled"
+    hidden={tab !== 'assembled'}
+    class={`${viewerSizing(fullscreen)} overflow-auto`}
+  >
     <div class="mb-2 flex flex-wrap items-center gap-2 text-xs">
       {#if assembled.model}
         <span class="badge-neutral font-mono">{assembled.model}</span>
@@ -130,7 +146,7 @@
   <div
     data-testid="streamviewer-chunks"
     hidden={tab !== 'chunks'}
-    class="max-h-96 overflow-auto rounded bg-canvas"
+    class={`${viewerSizing(fullscreen)} overflow-auto rounded bg-canvas`}
   >
     <ul class="divide-y divide-border/60">
       {#each parsed.events as ev (ev.index)}
