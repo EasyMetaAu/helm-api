@@ -10,7 +10,7 @@ import {
 } from "./inject.js";
 
 // docs/12 P3 (Access reinforcement) + P4 (score-driven inject trim), under the
-// #217 Phase 4 PREFIX model. The two inject-path forgetting changes are ALL gated
+// #217 Phase 4 trailing-reminder model. The two inject-path forgetting changes are ALL gated
 // behind forgetting.enabled. With the flag off (or absent) the assembler trims
 // observations oldest-first and never reinforces. With the flag on:
 //   P4 — the observation budget trim drops LOWEST-SCORE-first instead of
@@ -116,7 +116,7 @@ function injectedObservationIds(block: string | null, ids: string[]): string[] {
   return ids.filter((id) => block.includes(id));
 }
 
-describe("assembleInjectedContext — forgetting gated (P3 + P4), prefix model", () => {
+describe("assembleInjectedContext — forgetting gated (P3 + P4), trailing-reminder model", () => {
   it("flag OFF (no forgetting dep): legacy oldest-first trim and never bumps", async () => {
     const bumpReferences = vi.fn(async () => {});
     const store = makeFakeStore(

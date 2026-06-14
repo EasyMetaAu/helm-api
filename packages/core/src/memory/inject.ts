@@ -37,14 +37,16 @@ export interface InjectInput {
   // Upper bound for INJECTED memory tokens (the assembled block). Reflections are
   // kept first; observations get whatever remains and are trimmed under pressure.
   tokenBudget: number;
-  // WINDOW-AWARE DEDUP (#217 Phase 4). content_hashes of the current request's live
-  // messages — the client's live window. Computed the SAME way storage hashes a
-  // message (sha256Hex(serializeContent(content))) so they match
-  // memory_messages.content_hash. A thread observation whose covered turns are ALL
-  // in this set is SKIPPED (the client still sends them verbatim — injecting the
-  // summary too would duplicate). ABSENT/empty ⇒ no observation is deduped (every
-  // active observation is considered) — so a caller that has no window still works.
-  windowContentHashes?: Set<string>;
+  // WINDOW-AWARE DEDUP (#217 Phase 4). Occurrence counts of content_hashes in the
+  // current request's live messages — the client's live window. Computed the SAME
+  // way storage hashes a message (sha256Hex(serializeContent(content))) so they
+  // match memory_messages.content_hash. A thread observation whose covered turns
+  // are ALL still present in this counted window is SKIPPED (the client still
+  // sends them verbatim — injecting the summary too would duplicate). Counts matter:
+  // two historical "yes" turns require two live "yes" turns, not just one matching
+  // hash. ABSENT/empty ⇒ no observation is deduped (every active observation is
+  // considered) — so a caller that has no window still works.
+  windowContentHashCounts?: Map<string, number>;
 }
 
 // docs/12 P3 + P4 — the OPTIONAL forgetting wiring inject receives. Defaulting to
@@ -216,15 +218,20 @@ function latestReflectionVersion(
 function observationIsRedundant(
   observation: Observation,
   threadMessages: RawMessage[],
-  windowContentHashes: Set<string>,
+  windowContentHashCounts: Map<string, number>,
 ): boolean {
-  if (windowContentHashes.size === 0) return false;
+  if (windowContentHashCounts.size === 0) return false;
   const coveredIds = alreadyObservedMessageIds(threadMessages, [observation.sourceMessageRange]);
   if (coveredIds.size === 0) return false; // unresolved range → keep (don't lose recall)
+  const required = new Map<string, number>();
   for (const message of threadMessages) {
     if (!coveredIds.has(message.id)) continue;
-    // A covered turn the client no longer sends ⇒ the observation still recalls it.
-    if (!windowContentHashes.has(sha256Hex(message.content))) return false;
+    const hash = sha256Hex(message.content);
+    required.set(hash, (required.get(hash) ?? 0) + 1);
+  }
+  for (const [hash, count] of required) {
+    // A covered turn occurrence the client no longer sends ⇒ the observation still recalls it.
+    if ((windowContentHashCounts.get(hash) ?? 0) < count) return false;
   }
   return true; // every covered turn is still in the window → redundant
 }
@@ -265,7 +272,7 @@ export async function assembleInjectedContext(
 
   const { projectReflection, resourceReflection, observations, threadMessages } = loaded;
   const forgettingOn = deps.forgetting?.enabled === true;
-  const windowContentHashes = input.windowContentHashes ?? new Set<string>();
+  const windowContentHashCounts = input.windowContentHashCounts ?? new Map<string, number>();
 
   // docs/12 (P4/P7) — archived (decay), pruned (retention tombstone), and expired
   // rows are INVISIBLE to injection: a forgotten observation must never ride the
@@ -280,7 +287,7 @@ export async function assembleInjectedContext(
   // sends. Done BEFORE the budget trim so the budget is spent only on observations
   // that actually add recall (not duplicates of live turns).
   const relevantObservations = visibleObservations.filter(
-    (o) => !observationIsRedundant(o, threadMessages, windowContentHashes),
+    (o) => !observationIsRedundant(o, threadMessages, windowContentHashCounts),
   );
 
   // Observations are sorted oldest-first so the budget trimmer can drop the oldest
