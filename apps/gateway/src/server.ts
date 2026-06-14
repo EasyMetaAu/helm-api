@@ -1847,9 +1847,39 @@ export async function buildServer(
     return null;
   };
   const responsesRegistryStore = new Map<string, ResponsesRegistryRecord>();
+  // Bound the process-local registry: expired/deleted entries are swept periodically
+  // (not only on a same-id get), and a hard cap evicts the oldest insertions so a
+  // long-running gateway that creates many never-retrieved response ids cannot grow
+  // without limit. (Best-effort, single-process; a Store-backed registry would persist.)
+  const REGISTRY_MAX_ENTRIES = 10_000;
+  const REGISTRY_PRUNE_EVERY = 256;
+  let registryPutsSincePrune = 0;
+  const pruneResponsesRegistry = (now: number): void => {
+    for (const [id, record] of responsesRegistryStore) {
+      if (record.expiresAt <= now || record.status === "deleted") {
+        responsesRegistryStore.delete(id);
+      }
+    }
+    if (responsesRegistryStore.size > REGISTRY_MAX_ENTRIES) {
+      let excess = responsesRegistryStore.size - REGISTRY_MAX_ENTRIES;
+      for (const id of responsesRegistryStore.keys()) {
+        if (excess <= 0) break;
+        responsesRegistryStore.delete(id); // Map preserves insertion order → drop oldest
+        excess -= 1;
+      }
+    }
+  };
   const responsesRegistry: ResponsesRouteDeps["registry"] = {
     put(record) {
       responsesRegistryStore.set(record.responseId, record);
+      registryPutsSincePrune += 1;
+      if (
+        registryPutsSincePrune >= REGISTRY_PRUNE_EVERY ||
+        responsesRegistryStore.size > REGISTRY_MAX_ENTRIES
+      ) {
+        registryPutsSincePrune = 0;
+        pruneResponsesRegistry(Date.now());
+      }
     },
     get(responseId, identity) {
       const record = responsesRegistryStore.get(responseId);

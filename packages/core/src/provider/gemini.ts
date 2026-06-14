@@ -1,5 +1,10 @@
 import { lookup as nodeDnsLookup } from "node:dns/promises";
+import https from "node:https";
+import { Readable } from "node:stream";
 import { type NativePassthroughInput, nativePassthroughBody } from "@helm/shared";
+import { geminiTransformer } from "../protocol/gemini/gemini-transformer.js";
+import type { GeminiSSEEvent } from "../protocol/gemini/gemini-types.js";
+import { openaiTransformer } from "../protocol/openai.js";
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
@@ -16,6 +21,121 @@ const defaultDnsLookup: HostnameLookup = async (hostname) => {
   const results = await nodeDnsLookup(hostname, { all: true });
   return results.map((r) => r.address);
 };
+
+// Remote-media fetcher. SEPARATE from the API `fetch` (which may route through the LLM
+// proxy): media must connect to the EXACT address the SSRF guard validated, so the
+// default implementation pins the connection to `pinnedAddress` (closes the DNS-
+// rebinding window between validation and connection). Injectable for hermetic tests.
+export type GeminiMediaFetch = (
+  url: URL,
+  init: { signal?: AbortSignal; pinnedAddress?: string },
+) => Promise<Response>;
+
+// Default media fetcher: node:https GET pinned to the pre-validated address via a
+// custom `lookup`, with SNI/cert validation still bound to the real hostname. Does NOT
+// follow redirects (the caller validates each hop). Global `fetch` cannot pin the
+// connection IP without re-resolving, which is exactly the rebinding hole.
+const pinnedHttpsMediaFetch: GeminiMediaFetch = (url, init) =>
+  new Promise<Response>((resolve, reject) => {
+    const pinned = init.pinnedAddress;
+    const request = https.request(
+      url,
+      {
+        method: "GET",
+        servername: url.hostname,
+        ...(init.signal !== undefined ? { signal: init.signal } : {}),
+        ...(pinned !== undefined
+          ? {
+              lookup: (
+                _hostname: string,
+                _options: unknown,
+                callback: (err: Error | null, address: string, family: number) => void,
+              ) => callback(null, pinned, pinned.includes(":") ? 6 : 4),
+            }
+          : {}),
+      },
+      (res) => {
+        const status = res.statusCode ?? 502;
+        const headers = new Headers();
+        for (const [key, value] of Object.entries(res.headers)) {
+          if (typeof value === "string") headers.set(key, value);
+          else if (Array.isArray(value)) headers.set(key, value.join(", "));
+        }
+        const hasBody = status !== 204 && status !== 304;
+        const body = hasBody
+          ? (Readable.toWeb(res) as unknown as ReadableStream<Uint8Array>)
+          : null;
+        resolve(new Response(body, { status, headers }));
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
+
+// The protocol transformers declare `T | Promise<T>`; openai + gemini are synchronous.
+// Assert that here so the translated path stays a simple sequence (mirrors execute.ts).
+function expectSync<T>(value: T | Promise<T>, label: string): T {
+  if (value !== null && typeof (value as Promise<T>).then === "function") {
+    throw new UpstreamError("upstream_error", `${label} unexpectedly returned a Promise`);
+  }
+  return value as T;
+}
+
+// Translated path (cross-protocol, or passthrough disabled): an OpenAI-Chat IR request
+// must reach a Gemini upstream and come back OpenAI-shaped. Compose the two
+// transformers through the IR: OpenAI → IR → Gemini native (request), Gemini native →
+// IR → OpenAI (response). Gemini carries the model in the URL, so it rides separately.
+function openAIChatToGeminiBody(req: ChatCompletionRequest): {
+  model: string;
+  body: Record<string, unknown>;
+} {
+  const ir = expectSync(openaiTransformer.transformRequestOut(req), "OpenAI->IR");
+  const native = expectSync(geminiTransformer.transformRequestIn(ir), "IR->Gemini") as Record<
+    string,
+    unknown
+  >;
+  return { model: String((req as Record<string, unknown>).model ?? ""), body: native };
+}
+
+function geminiResponseToOpenAIChat(json: unknown): ChatCompletionResponse {
+  const ir = expectSync(geminiTransformer.transformResponseIn(json), "Gemini->IR");
+  return expectSync(
+    openaiTransformer.transformResponseOut(ir),
+    "IR->OpenAI",
+  ) as ChatCompletionResponse;
+}
+
+// Re-frame raw Gemini SSE bytes into parsed GenerateContent frames for transformStreamIn
+// (which re-validates each via Zod). Buffers across non-frame-aligned chunks.
+async function* parseGeminiStreamEvents(raw: AsyncIterable<string>): AsyncIterable<GeminiSSEEvent> {
+  let buffer = "";
+  const flushFrame = (frame: string): GeminiSSEEvent | null => {
+    for (const line of frame.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice("data:".length).trim();
+      if (payload === "" || payload === "[DONE]") return null;
+      try {
+        return JSON.parse(payload) as GeminiSSEEvent;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+  for await (const chunk of raw) {
+    buffer += chunk;
+    let idx = buffer.indexOf("\n\n");
+    while (idx !== -1) {
+      const event = flushFrame(buffer.slice(0, idx));
+      buffer = buffer.slice(idx + 2);
+      if (event !== null) yield event;
+      idx = buffer.indexOf("\n\n");
+    }
+  }
+  const tail = flushFrame(buffer);
+  if (tail !== null) yield tail;
+}
 
 export interface GeminiClientConfig {
   baseUrl: string;
@@ -40,6 +160,9 @@ export interface GeminiClientDeps {
   fetch?: typeof globalThis.fetch;
   /** Override hostname resolution for the remote-media SSRF guard (tests). */
   dnsLookup?: HostnameLookup;
+  /** Override the remote-media fetcher (tests). Production uses the pinned node:https
+   *  fetcher so the connection cannot re-resolve to a private host. */
+  mediaFetch?: GeminiMediaFetch;
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -165,7 +288,15 @@ function isBlockedHostname(host: string): boolean {
   return h === "localhost" || h.endsWith(".localhost");
 }
 
-async function assertPublicHttpsTarget(target: URL, lookup: HostnameLookup): Promise<void> {
+// Validates the target and returns the PINNED address the connection must use. For an
+// IP literal that is the literal itself; for a DNS name it is the first validated
+// resolved address (so the media fetch connects to exactly what we vetted — no second
+// resolution that a rebinding response could redirect to a private host). Returns
+// undefined only when the host is unresolvable (the fetch then fails naturally).
+async function assertPublicHttpsTarget(
+  target: URL,
+  lookup: HostnameLookup,
+): Promise<string | undefined> {
   if (target.protocol !== "https:") {
     throw new UpstreamError("upstream_error", "Gemini remote media fetch only allows https URLs");
   }
@@ -177,7 +308,7 @@ async function assertPublicHttpsTarget(target: URL, lookup: HostnameLookup): Pro
         "Gemini remote media fetch blocked a private or reserved address",
       );
     }
-    return;
+    return host;
   }
   if (isBlockedHostname(host)) {
     throw new UpstreamError("upstream_error", "Gemini remote media fetch blocked a local hostname");
@@ -187,7 +318,7 @@ async function assertPublicHttpsTarget(target: URL, lookup: HostnameLookup): Pro
     addresses = await lookup(host);
   } catch {
     // Unresolvable host → the fetch itself cannot reach anything; let it fail naturally.
-    return;
+    return undefined;
   }
   for (const address of addresses) {
     if (isBlockedIp(address)) {
@@ -197,13 +328,53 @@ async function assertPublicHttpsTarget(target: URL, lookup: HostnameLookup): Pro
       );
     }
   }
+  return addresses[0];
+}
+
+// Read a response body with a HARD byte cap enforced WHILE streaming (abort once the
+// limit is crossed — never allocate an unbounded buffer) and a per-chunk idle timeout,
+// so a missing/lying Content-Length or a slow/endless body cannot exhaust memory or hang.
+async function readBodyWithLimit(
+  res: Response,
+  maxBytes: number,
+  idleTimeoutMs: number,
+): Promise<Buffer> {
+  const reader = res.body?.getReader();
+  if (reader === undefined) return Buffer.alloc(0);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      let read: { done: boolean; value?: Uint8Array };
+      try {
+        read = await readChunkWithIdle(reader, idleTimeoutMs);
+      } catch (err) {
+        if (err instanceof StreamStalledError) {
+          throw new UpstreamError("timeout", "Gemini remote media fetch stalled");
+        }
+        throw err;
+      }
+      if (read.done) break;
+      if (read.value !== undefined) {
+        total += read.value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw new UpstreamError("upstream_error", "remote media exceeds configured max_bytes");
+        }
+        chunks.push(Buffer.from(read.value));
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks);
 }
 
 async function fetchRemoteMediaInlineData(
   url: string,
   mimeHint: string | undefined,
   config: GeminiRemoteMediaFetchConfig,
-  doFetch: typeof globalThis.fetch,
+  mediaFetch: GeminiMediaFetch,
   lookup: HostnameLookup,
   external?: AbortSignal,
 ): Promise<{ mimeType: string; data: string }> {
@@ -213,12 +384,13 @@ async function fetchRemoteMediaInlineData(
   let current = new URL(url);
   for (let redirect = 0; redirect <= maxRedirects; redirect += 1) {
     // SSRF guard: validate https + reject private/reserved targets on EVERY hop,
-    // before any bytes are sent — the original URL and each redirect destination.
-    await assertPublicHttpsTarget(current, lookup);
+    // before any bytes are sent — the original URL and each redirect destination —
+    // and pin the connection to the exact validated address.
+    const pinnedAddress = await assertPublicHttpsTarget(current, lookup);
     const t = remoteMediaSignal(timeoutMs, external);
     let res: Response;
     try {
-      res = await doFetch(current, { method: "GET", redirect: "manual", signal: t.signal });
+      res = await mediaFetch(current, { signal: t.signal, pinnedAddress });
     } catch (err) {
       if (t.signal.aborted && external?.aborted !== true) {
         throw new UpstreamError("timeout", "Gemini remote media fetch timed out");
@@ -256,10 +428,7 @@ async function fetchRemoteMediaInlineData(
         `remote media mime type is not allowed: ${mimeType}`,
       );
     }
-    const bytes = Buffer.from(await res.arrayBuffer());
-    if (bytes.byteLength > maxBytes) {
-      throw new UpstreamError("upstream_error", "remote media exceeds configured max_bytes");
-    }
+    const bytes = await readBodyWithLimit(res, maxBytes, timeoutMs);
     return { mimeType, data: bytes.toString("base64") };
   }
   throw new UpstreamError("upstream_error", "remote media exceeded redirect limit");
@@ -268,7 +437,7 @@ async function fetchRemoteMediaInlineData(
 async function materializeGeminiPart(
   part: unknown,
   config: GeminiRemoteMediaFetchConfig,
-  doFetch: typeof globalThis.fetch,
+  mediaFetch: GeminiMediaFetch,
   lookup: HostnameLookup,
   signal?: AbortSignal,
 ): Promise<{ part: unknown; changed: boolean }> {
@@ -281,7 +450,7 @@ async function materializeGeminiPart(
         fileUri,
         typeof fileData.mimeType === "string" ? fileData.mimeType : undefined,
         config,
-        doFetch,
+        mediaFetch,
         lookup,
         signal,
       );
@@ -295,7 +464,7 @@ async function materializeGeminiPart(
         match[1],
         "image/png",
         config,
-        doFetch,
+        mediaFetch,
         lookup,
         signal,
       );
@@ -308,7 +477,7 @@ async function materializeGeminiPart(
 export async function materializeGeminiRemoteMediaBody(
   body: Record<string, unknown>,
   config: GeminiRemoteMediaFetchConfig | undefined,
-  doFetch: typeof globalThis.fetch,
+  mediaFetch: GeminiMediaFetch,
   signal?: AbortSignal,
   lookup: HostnameLookup = defaultDnsLookup,
 ): Promise<Record<string, unknown>> {
@@ -319,7 +488,7 @@ export async function materializeGeminiRemoteMediaBody(
       if (!isRecord(content) || !Array.isArray(content.parts)) return content;
       const parts = await Promise.all(
         content.parts.map(async (part) => {
-          const out = await materializeGeminiPart(part, config, doFetch, lookup, signal);
+          const out = await materializeGeminiPart(part, config, mediaFetch, lookup, signal);
           if (out.changed) changed = true;
           return out.part;
         }),
@@ -333,6 +502,7 @@ export async function materializeGeminiRemoteMediaBody(
 export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const dnsLookup = deps.dnsLookup ?? defaultDnsLookup;
+  const mediaFetch = deps.mediaFetch ?? pinnedHttpsMediaFetch;
   const cfg = deps.config;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -382,7 +552,7 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
       const materializedBody = await materializeGeminiRemoteMediaBody(
         body,
         cfg.remoteMediaFetch,
-        doFetch,
+        mediaFetch,
         t.signal,
         dnsLookup,
       );
@@ -461,12 +631,32 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
   return {
     nativeProtocolProfile: "gemini",
 
-    async chatCompletion(): Promise<ChatCompletionResponse> {
-      throw new UpstreamError("upstream_error", "gemini client requires native passthrough");
+    // Translated path (#251 review P1): a non-Gemini client routed here, or native
+    // passthrough disabled. Translate OpenAI-Chat → Gemini → OpenAI via the
+    // transformers instead of failing — mirrors the anthropic client's translated path.
+    async chatCompletion(req, opts) {
+      const { model, body } = openAIChatToGeminiBody(req);
+      const res = await requestWithAuthRetry("generateContent", { ...body, model }, opts?.signal);
+      if (!res.ok) throw await errorFromResponse(res);
+      return geminiResponseToOpenAIChat(await res.json());
     },
 
-    chatCompletionStream(): AsyncIterable<string> {
-      throw new UpstreamError("upstream_error", "gemini client requires native passthrough");
+    async *chatCompletionStream(req, opts) {
+      const { model, body } = openAIChatToGeminiBody(req);
+      const res = await requestWithAuthRetry(
+        "streamGenerateContent",
+        { ...body, model },
+        opts?.signal,
+      );
+      if (!res.ok) throw await errorFromResponse(res);
+      // Gemini native SSE → IR chunks → OpenAI SSE strings. IRChunk IS the OpenAI
+      // chat.completion.chunk, so the pipeline's parseOpenAISSE consumes these directly.
+      for await (const chunk of geminiTransformer.transformStreamIn(
+        parseGeminiStreamEvents(readRawSSE(res)),
+      )) {
+        yield `data: ${JSON.stringify(chunk)}\n\n`;
+      }
+      yield "data: [DONE]\n\n";
     },
 
     async nativePassthrough(input, opts) {

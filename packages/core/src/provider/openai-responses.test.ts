@@ -1786,6 +1786,54 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
     expect((out.choices[0]?.message.tool_calls as unknown[]).length).toBe(1);
   });
 
+  it("redacts a static apiKey echoed in a generic Responses upstream error body", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ error: { message: "invalid key sk-secret-1234 supplied" } }, 500),
+    );
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-secret-1234" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await expect(client.nativePassthrough?.({ model: "gpt-5.5", input: "hi" })).rejects.toThrow();
+    try {
+      await client.nativePassthrough?.({ model: "gpt-5.5", input: "hi" });
+      throw new Error("expected throw");
+    } catch (err) {
+      const raw = JSON.stringify((err as UpstreamError).providerRaw);
+      expect(raw).not.toContain("sk-secret-1234");
+      expect(raw).toContain("[redacted]");
+    }
+  });
+
+  it("rebuilds the Authorization header after a 401 so the OAuth retry uses the refreshed token", async () => {
+    let token = "old-token";
+    const seen: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get("Authorization") ?? "";
+      seen.push(auth);
+      if (auth === "Bearer old-token") return jsonResponse({ error: "unauthorized" }, 401);
+      return jsonResponse({ id: "resp_ok", object: "response", status: "completed" });
+    });
+    const client = createGenericOpenAIResponsesClient({
+      config: {
+        baseUrl: "https://api.openai.test/v1",
+        getAuthHeader: async () => `Bearer ${token}`,
+        onUnauthorized: () => {
+          token = "new-token";
+        },
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const out = (await client.nativePassthrough?.({ model: "gpt-5.5", input: "hi" })) as {
+      id: string;
+    };
+    // Retry carried the REFRESHED token, not the stale one.
+    expect(seen).toEqual(["Bearer old-token", "Bearer new-token"]);
+    expect(out.id).toBe("resp_ok");
+  });
+
   it("calls generic lifecycle endpoints with OpenAI-shaped auth only", async () => {
     const calls: Array<{ url: string; method: string; body?: unknown }> = [];
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {

@@ -604,6 +604,10 @@ export function createGenericOpenAIResponsesClient(
   function scrub(raw: unknown): unknown {
     if (raw === null) return raw;
     const secrets = cfg.currentSecrets ? cfg.currentSecrets() : [];
+    // Mirror the openai/anthropic/gemini clients: a static apiKey must also be
+    // redacted from upstream error bodies (else it can leak into error_detail/
+    // telemetry if the upstream echoes the Authorization value).
+    if (cfg.apiKey !== undefined) secrets.push(cfg.apiKey);
     const replace = (value: string): { value: string; changed: boolean } => {
       let v = value;
       let changed = false;
@@ -685,9 +689,24 @@ export function createGenericOpenAIResponsesClient(
     if (res.status === 401 && cfg.onUnauthorized !== undefined) {
       await res.body?.cancel().catch(() => {});
       cfg.onUnauthorized();
+      // Rebuild headers AFTER onUnauthorized so an OAuth provider's retry carries the
+      // refreshed token — reusing the original headers would resend the expired one
+      // and the refresh would never recover the request.
+      const refreshedHeaders = await providerHeaders(init.accept);
+      let retryHeaders = refreshedHeaders;
+      let retryBodyText = bodyText;
+      if (init.body !== undefined) {
+        const prepared = prepareNativePassthroughRequest(init.body, refreshedHeaders);
+        retryHeaders = prepared.headers;
+        retryBodyText = prepared.bodyText;
+      }
       return await fetchWithTimeout(
         await endpoint(path),
-        { method: init.method, headers: requestHeaders, ...(bodyText ? { body: bodyText } : {}) },
+        {
+          method: init.method,
+          headers: retryHeaders,
+          ...(retryBodyText ? { body: retryBodyText } : {}),
+        },
         init.signal,
       );
     }
