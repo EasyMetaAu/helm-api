@@ -32,7 +32,7 @@
     <button
       type="button"
       data-testid="range-{opt.key}"
-      class={value === opt.key ? 'btn-primary-sm' : 'btn-secondary'}
+      class="{value === opt.key ? 'btn-primary-sm' : 'btn-secondary'} min-h-11 md:min-h-0"
       aria-pressed={value === opt.key}
       onclick={() => onChange(opt.key)}
     >

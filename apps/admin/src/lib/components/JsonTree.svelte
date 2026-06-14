@@ -90,7 +90,7 @@
 {#if isBranch}
   <div class="json-node" data-testid="json-node">
     <details bind:open>
-      <summary class="cursor-pointer select-none">
+      <summary class="cursor-pointer select-none py-1 md:py-0">
         {#if name != null}<span class="text-link">{name}: </span>{/if}<span class="text-ink-muted"
           >{kind === 'array' ? `Array(${entries.length})` : `Object(${entries.length})`}</span
         >

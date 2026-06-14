@@ -235,7 +235,7 @@
     </div>
   </form>
 
-  <div class="card flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
+  <div class="card flex flex-col gap-2 lg:flex-row lg:items-center lg:gap-6">
     <span class="text-xs font-medium uppercase tracking-wide text-ink-muted"
       >{$t('Decided by')}</span
     >
@@ -334,7 +334,7 @@
             >
               <td class="px-3 py-2">
                 <a
-                  class="link-inline font-mono text-ink-strong"
+                  class="link-inline block max-w-[7rem] truncate font-mono text-ink-strong lg:max-w-none"
                   href={detailHref(r.trace_id)}
                   title={r.trace_id}>{r.trace_id}</a
                 >

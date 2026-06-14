@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-14 · Admin 管理界面移动端/响应式走查 + 修复（docs/10/11；原则 1）
+
+- **背景**：用户要求对 admin 全部 9 个页面做移动端/PC 走查（Playwright 截图三视口：iPhone 12 Pro 390×844 / iPad mini 768×1024 / 桌面 1920×1080），找出不合理处并修，移动端必须方便触控。流程：先把本地 main 重新构建部署到 Docker（localhost:8080）→ 截 29 张图（含移动 nav drawer、New key 弹层）→ Workflow 扇出 10 个 reviewer（每页读截图+源码）→ 对抗式验证 → 综合，25 处真实问题归并为 12 条（1 blocker / 3 major / 6 minor / 2 polish）。控制台零报错。
+- **核心修复（全在 `apps/admin`，CSS/Tailwind 为主）**：① **宽表→卡片**（Providers 10 列=blocker、API Keys 9 列）：新增 `.cards-table` / `.cards-table-frame` 配方——`<lg` 每行 reflow 成带框卡片、每格变「label/value」(label 由 `data-label` 经 CSS `::before` 注入)，`lg+` 仍是普通表（含横向滚动框）。② Requests/Dashboard 表首列 UUID 加 `block max-w-[7rem] truncate lg:max-w-none`（移动端不再霸屏，整行仍可点进详情）。③ 触控目标：`btn-icon` `h-7→h-10 md:h-7`，`btn-primary/secondary/success/danger/danger-outline` 配方加 `min-h-11 md:min-h-0`，hamburger 44px，RangeFilter/RefreshControl/settings 输入与 select 同补。④ 768px 挤压：dashboard 统计网格、requests 图例、settings 多字段队列行从 `md/sm` 推迟到 `lg`（rate-limit 行留 `sm`）。⑤ a11y：健康点文字 `sr-only sm:not-sr-only`、wrapper title 改 live healthLabel。⑥ 其它：classifier eval-details `grid-cols-2→[max-content_1fr]` + Layer-2 toggle 行 44px、policies 保存条移动端 `sticky bottom-0`、request-detail trace chip `basis-full md:basis-auto`、JsonTree summary / FullscreenToggle 触控。
+- **关键决定（CSS reflow 而非双 DOM 卡片）**：用户选「Providers+Keys 都用卡片」。但 `hidden lg:block`+`lg:hidden` 会让表与卡片**同时**留在 DOM（jsdom 不跑 CSS、testing-library 不看 display），`keys.test.ts`(20) / `providers.test.ts` 大量 `getByTestId('key-row')` 单行断言 + 全局 `getByText(prefix)` 会因重复而全红。故改为**单 `<tr>` 卡片化 reflow**（CSS 改 display + `::before` 注 label，`data-label` 上 `<td>`，`<tr>` 去掉 `.table-row`，外层换 `.cards-table-frame`）：每记录 DOM 仍只一行 → 单元测试 + 屏幕阅读器零改即过，移动端同时呈现真卡片、无横向滚动、操作全可触达。
+- **验证**：admin `pnpm build` 绿、vitest **364 全绿**（含 keys/providers reflow 后）、Biome lint 绿、svelte-check 仅剩既有 `oauth.test.ts` 3 报错（非回归，与 origin/main 逐字相同、admin 不在 `-r typecheck` 门禁）。Docker 从 worktree 源构建 `:latest` 重新部署后用 Playwright 三视口复测对比。分支 `worktree-admin-mobile-ui`（git worktree，已 rebase 到 main）。截图存 `ui-review/{iphone12pro,ipadmini,desktop}/`，PR #255。
+
 ## 2026-06-14 · 协议互译剩余项 PR review 修复（review of fix/protocol-litellm-remaining；原则 2/3/7）
 
 - **背景**：对 #251（LiteLLM 协议互译剩余项）做 review，发现 Gemini native passthrough 引入了治理漏洞，并加固远程媒体抓取。三处真实问题修复 + 两处误报澄清。
@@ -25,18 +32,13 @@
 - **取舍/TODO**：Codex web 流同有 localhost 死链，但 OpenAI 无等价托管码页，本轮**不动 Codex**（已知 follow-up）。redirect_uri 必须是 client_id `9d1c250a-…` 注册的回调——relay 用同一 client_id/scopes/`code=true` 配同值、helm token 端点本就 `platform.claude.com`，高置信被接受；最终需真订阅 admin 手验。
 - **验证**：TDD 红→绿——`web-login.test.ts` 钉死 begin/complete 的 console redirect_uri + `code#state` 粘贴，`anthropic.test.ts` 钉死 CLI 仍用 localhost。core OAuth + gateway OAuth 全绿（202）、typecheck/lint 绿、svelte-check 仅剩既有 `oauth.test.ts` 3 报错（非回归）。分支 `worktree-claude-oauth-copy-code`（git worktree）。
 
-## 2026-06-14 · 评估并否决引入 `@earendil-works/pi-ai` 替换 OAuth 实现（原则 1/6；docs/02/06/11）
-
-- **背景**：用户想直接引入 pi-coding-agent 同源的 `@earendil-works/pi-ai`（npm，v0.79.3）当 SDK，外包「登录各家 AI（OAuth）」的协议代码，并「支持它支持的所有 OAuth provider」。
-- **调研结论（决策依据）**：① pi-ai 内置 OAuth provider 正好 3 个（`anthropic`/`openai-codex`/`github-copilot`，见 `packages/ai/src/utils/oauth/index.ts` 的 `BUILT_IN_OAUTH_PROVIDERS`）——与 helm 现支持的**完全一致**，无 Gemini/Qwen；pi 文档里「很多 Supported Providers」绝大多数是 **API-key** 类（Gemini/DeepSeek/Mistral/Groq/xAI/OpenRouter/Bedrock…），不是 OAuth。② helm 两层都已覆盖：API-key 改 `config/providers.yaml` 加 `api_key_env` 即可（零代码，已接 DeepSeek/ZenMux/OpenRouter）；OAuth 三家已实现（加密 token 存储/多账号池/代理/调度/admin UI 登录）。③ 形态失配：pi-ai 公开 API 只有「阻塞式 `login*()`（内部强制绑本地回调端口 53692/1455，Anthropic 端口占用即 `reject`）+ `refresh*Token()`」，**不导出** `exchangeAuthorizationCode`/`generatePKCE`；helm 专门写了 `web-login.ts` 做无状态 begin/complete，正因 CLI 流程不适合 web 管理界面。④ 二者**同源**（都出自 openclaw 血统，authorize URL/client_id/token URL/PKCE 近乎一字不差），引入不是「换更好代码」而是「换更不顺手形态 + 加一层桥接 + 运行时绑端口」。
-- **决定（用户拍板「那就不动了」）**：**不引入依赖、保持现状**，无代码改动、无 worktree。唯一真实收益（端点/client_id/未来新 provider 维护外包给上游）不足以抵消「写 ~500–900 行桥接 + 删 ~1.5k 行有测试覆盖的同源协议代码」的净风险（净风险为负）。
-- **TODO / 重评触发条件**：若 pi-ai 日后新增**真正的 OAuth**（非 API-key）provider（如 Gemini/Qwen 订阅登录），再评估「仅接管 `refresh*Token`」这一最小边界（不碰 helm 的 web 登录编排）。现有 helm OAuth 协议代码全部保留：`packages/core/src/provider/oauth/*`（web-login/anthropic/openai-codex/github-copilot/runtime）+ 存储/池/admin/UI。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-14 · 评估并否决引入 `@earendil-works/pi-ai` 替换 OAuth 实现（原则 1/6）：pi-ai（v0.79.3）内置 OAuth provider 与 helm 完全一致（anthropic/codex/copilot），其文档「众多 Supported」多为 API-key 类（非 OAuth）；其公开 API 只 `login*()`（强绑本地端口 53692/1455）+`refresh*Token`、不导出 `exchangeAuthorizationCode`/PKCE，与 helm web begin/complete 形态失配；二者同源（openclaw 血统）。用户拍板**不引入、保持现状**，无代码改动。重评触发：pi-ai 新增真 OAuth（Gemini/Qwen 订阅）时仅评估接管 `refresh*Token`，不碰 web 登录编排。
 
 ### 2026-06-14 · LiteLLM 协议互译剩余项完成（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）：Anthropic/Gemini token helper 改 provider-first + 估算兜底；Responses `previous_response_id` 不再入站拒绝（同协议直通、跨协议 fail-closed）；Responses input_tokens / registry-bound retrieve/delete/cancel/input_items / compact 接线；Gemini native provider（generate/stream/countTokens、parametersJsonSchema/responseJsonSchema/google_genai 保真）；OpenAI Chat response_model_policy；Gemini remote media materializer（默认关）。后续 review 两轮修治理/SSRF/翻译路径（见顶部完整条目）。
 
