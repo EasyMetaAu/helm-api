@@ -854,4 +854,446 @@ describe("synthesizeResponsesSSEFromJSON — isomorphic with the live stream", (
     ).toBe(true);
     expect(events.at(-1)?.type).toBe("response.completed");
   });
+
+  it("extracts text from an array-of-parts content (multipart message)", async () => {
+    // content as IRContentPart[] exercises the Array.isArray branch (lines 936-941).
+    const resp: IRResponse = {
+      id: "resp_arr",
+      model: "gpt-x",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Hello " },
+              { type: "text", text: "world" },
+            ],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const events = await collect(synthesizeResponsesSSEFromJSON(resp));
+    const done = events.find((e) => e.type === "response.output_text.done") as
+      | Extract<ResponsesSSEEvent, { type: "response.output_text.done" }>
+      | undefined;
+    expect(done?.text).toBe("Hello world");
+  });
+
+  it("synthesizes a response id when the IR response carries no id/model", async () => {
+    // resp.id and resp.model both undefined → the synthetic chunk omits them
+    // (lines 962-963) and a response id is generated (synthResponseId).
+    const resp: IRResponse = {
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+    } as IRResponse;
+    const events = await collect(synthesizeResponsesSSEFromJSON(resp));
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    expect(completed.response.id).toMatch(/^resp_/);
+    expect(completed.response.model).toBe("unknown");
+  });
+
+  it("an array-content message with no text parts yields no text item", async () => {
+    // Array content that contains only non-text parts → text stays "" → branch on
+    // line 940 (`if (text !== "")`) is false, so no output_text item is opened.
+    const resp: IRResponse = {
+      id: "resp_arr_empty",
+      model: "gpt-x",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: [{ type: "image", url: "data:image/png;base64,AAAA" }],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const events = await collect(synthesizeResponsesSSEFromJSON(resp));
+    expect(events.some((e) => e.type === "response.output_text.delta")).toBe(false);
+    expect(events.at(-1)?.type).toBe("response.completed");
+  });
+});
+
+// —— reverse: native Responses event stream → OpenAI chunks (the cases the existing
+// suite leaves uncovered: output_text.delta, output_item.added(function_call),
+// function_call_arguments.delta, completed→stop, and the dropped framing default). —
+
+describe("convertResponsesEventStreamToOpenAI — forward-projection cases (reverse path)", () => {
+  it("response.output_text.delta → delta.content", async () => {
+    const chunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.output_text.delta",
+            sequence_number: 0,
+            item_id: "i",
+            output_index: 0,
+            content_index: 0,
+            delta: "hi there",
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    expect(chunks[0]?.choices?.[0]?.delta?.content).toBe("hi there");
+    expect(chunks[0]?.choices?.[0]?.finish_reason).toBeNull();
+  });
+
+  it("output_item.added(function_call) → a tool_call delta with id+name, then args.delta accumulate", async () => {
+    const chunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.output_item.added",
+            sequence_number: 0,
+            output_index: 3,
+            item: {
+              type: "function_call",
+              id: "item_3",
+              status: "in_progress",
+              call_id: "call_xyz",
+              name: "get_weather",
+              arguments: "",
+            },
+          } as ResponsesSSEEvent;
+          yield {
+            type: "response.function_call_arguments.delta",
+            sequence_number: 1,
+            item_id: "item_3",
+            output_index: 3,
+            delta: '{"city',
+          } as ResponsesSSEEvent;
+          yield {
+            type: "response.function_call_arguments.delta",
+            sequence_number: 2,
+            item_id: "item_3",
+            output_index: 3,
+            delta: '":"NYC"}',
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    // First chunk: the tool-call header (index 0, id + name, empty args).
+    const head = chunks[0]?.choices?.[0]?.delta?.tool_calls?.[0];
+    expect(head).toMatchObject({
+      index: 0,
+      id: "call_xyz",
+      type: "function",
+      function: { name: "get_weather", arguments: "" },
+    });
+    // The two arg deltas map onto the SAME stream index allocated at .added time.
+    const argDeltas = chunks
+      .slice(1)
+      .map((c) => c.choices?.[0]?.delta?.tool_calls?.[0])
+      .filter((tc): tc is NonNullable<typeof tc> => tc !== undefined);
+    expect(argDeltas.map((tc) => tc.index)).toEqual([0, 0]);
+    expect(argDeltas.map((tc) => tc.function?.arguments).join("")).toBe('{"city":"NYC"}');
+  });
+
+  it("function_call_arguments.delta with NO preceding .added self-allocates a tool index", async () => {
+    // No output_item.added(function_call) seen first → the delta case must lazily
+    // allocate an index (line 1066-1067 `?? nextToolIndex++` + the !has set branch).
+    const chunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.function_call_arguments.delta",
+            sequence_number: 0,
+            item_id: "item_9",
+            output_index: 9,
+            delta: "{}",
+          } as ResponsesSSEEvent;
+          // a second delta on the same output_index must reuse the allocated index.
+          yield {
+            type: "response.function_call_arguments.delta",
+            sequence_number: 1,
+            item_id: "item_9",
+            output_index: 9,
+            delta: "",
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    const indexes = chunks
+      .map((c) => c.choices?.[0]?.delta?.tool_calls?.[0]?.index)
+      .filter((i): i is number => typeof i === "number");
+    expect(indexes).toEqual([0, 0]);
+  });
+
+  it("response.completed → finish_reason=stop + usage projection", async () => {
+    const chunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.completed",
+            sequence_number: 0,
+            response: {
+              id: "resp_c",
+              object: "response",
+              model: "gpt-x",
+              status: "completed",
+              output: [],
+              usage: { input_tokens: 12, output_tokens: 5, total_tokens: 17 },
+            },
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    const last = chunks.at(-1);
+    expect(last?.choices?.[0]?.finish_reason).toBe("stop");
+    expect(last?.id).toBe("resp_c");
+    expect(last?.model).toBe("gpt-x");
+    expect(last?.usage).toEqual({ prompt_tokens: 12, completion_tokens: 5 });
+  });
+
+  it("a completed response with status=incomplete maps to finish_reason=length", async () => {
+    // Exercises the `ev.response.status === 'incomplete'` arm of the isIncomplete OR
+    // even though the event type is response.completed (line 1085).
+    const chunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.completed",
+            sequence_number: 0,
+            response: {
+              id: "",
+              object: "response",
+              model: "",
+              status: "incomplete",
+              output: [],
+            },
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    const last = chunks.at(-1);
+    expect(last?.choices?.[0]?.finish_reason).toBe("length");
+    // empty id/model are dropped from the projected chunk.
+    expect(last?.id).toBeUndefined();
+    expect(last?.model).toBeUndefined();
+    expect(last?.usage).toBeUndefined();
+  });
+
+  it("a non-function_call output_item.added (message item) projects no tool_call", async () => {
+    // The output_item.added case only acts on function_call items; a message item
+    // falls through (line 1063 break with no yield).
+    const chunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.output_item.added",
+            sequence_number: 0,
+            output_index: 0,
+            item: {
+              type: "message",
+              id: "item_0",
+              status: "in_progress",
+              role: "assistant",
+              content: [],
+            },
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    expect(chunks).toHaveLength(0);
+  });
+
+  it("pure framing events (created/in_progress/part/done) are dropped (default branch)", async () => {
+    const chunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.created",
+            sequence_number: 0,
+            response: {
+              id: "r",
+              object: "response",
+              model: "m",
+              status: "in_progress",
+              output: [],
+            },
+          } as ResponsesSSEEvent;
+          yield {
+            type: "response.content_part.done",
+            sequence_number: 1,
+            item_id: "i",
+            output_index: 0,
+            content_index: 0,
+            part: { type: "output_text", text: "x" },
+          } as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    expect(chunks).toHaveLength(0);
+  });
+
+  it("a mid-stream error event re-throws to engage the gateway error path", async () => {
+    await expect(
+      collect(
+        convertResponsesEventStreamToOpenAI(
+          (async function* () {
+            yield {
+              type: "error",
+              sequence_number: 0,
+              error: { type: "error", code: "upstream", message: "kaboom" },
+            } as ResponsesSSEEvent;
+          })(),
+        ),
+      ),
+    ).rejects.toThrow("kaboom");
+  });
+});
+
+// —— forward path: edge branches in convertOpenAIStreamToResponses not yet hit. ——
+
+describe("convertOpenAIStreamToResponses — forward-path edge branches", () => {
+  it("synthesizes a call_id when a tool call never carries an id (synthCallId)", async () => {
+    // No id ever arrives, only a name → call_id is synthesized as call_<outputIndex>
+    // both on .added (line 696) and on the close args.done/item.done (line 865/383-385).
+    const chunks: OpenAIChunk[] = [
+      {
+        choices: [
+          {
+            index: 0,
+            delta: { tool_calls: [{ index: 0, function: { name: "noid", arguments: "{}" } }] },
+          },
+        ],
+      },
+      { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+    ];
+    const events = await collect(convertOpenAIStreamToResponses(feed(chunks)));
+    const added = events.find((e) => e.type === "response.output_item.added") as Extract<
+      ResponsesSSEEvent,
+      { type: "response.output_item.added" }
+    >;
+    expect((added.item as { call_id: string }).call_id).toBe("call_0");
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    expect((completed.response.output[0] as { call_id: string }).call_id).toBe("call_0");
+  });
+
+  it("drops a pure husk tool item (never named, never produced an arg fragment)", async () => {
+    // A tool_call fragment with NO id, NO name, NO arguments leaves the slot un-started
+    // → no .added emitted, husk dropped at close (line 858-861). A real text item still
+    // closes, proving the husk-drop does not abort the rest of the close.
+    const chunks: OpenAIChunk[] = [
+      { choices: [{ index: 0, delta: { content: "hi" } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0 }] } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+    ];
+    const events = await collect(convertOpenAIStreamToResponses(feed(chunks)));
+    expect(
+      events.some(
+        (e) =>
+          e.type === "response.output_item.added" &&
+          (e as Extract<ResponsesSSEEvent, { type: "response.output_item.added" }>).item.type ===
+            "function_call",
+      ),
+    ).toBe(false);
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    // only the text message item survives.
+    expect(completed.response.output).toHaveLength(1);
+    expect((completed.response.output[0] as { type: string }).type).toBe("message");
+  });
+
+  it("settles a deferred tool item when a later fragment first supplies the name", async () => {
+    // First fragment carries ONLY an id (no name/args) → started, header emitted with
+    // empty name; a later fragment backfills the name (slot-exists branch, line 674-675).
+    const chunks: OpenAIChunk[] = [
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_a" }] } }] },
+      {
+        choices: [
+          { index: 0, delta: { tool_calls: [{ index: 0, function: { name: "later_name" } }] } },
+        ],
+      },
+      { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+    ];
+    const events = await collect(convertOpenAIStreamToResponses(feed(chunks)));
+    const done = events.find((e) => e.type === "response.output_item.done") as Extract<
+      ResponsesSSEEvent,
+      { type: "response.output_item.done" }
+    >;
+    expect(done.item).toMatchObject({
+      type: "function_call",
+      name: "later_name",
+      call_id: "call_a",
+    });
+  });
+
+  it("reconstructs the full prompt from cache_creation_tokens in prompt_tokens_details", async () => {
+    // Exercises the cacheCreation fallback chain (line 722-727): only
+    // prompt_tokens_details.cache_creation_input_tokens is present.
+    const usageChunk: OpenAIChunk = {
+      id: "chatcmpl-x",
+      model: "gpt-x",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 50,
+        completion_tokens: 5,
+        prompt_tokens_details: { cache_creation_input_tokens: 12 },
+      },
+    } as OpenAIChunk;
+    const events = await collect(
+      convertOpenAIStreamToResponses(feed([textChunk("hi"), usageChunk])),
+    );
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    const usage = completed.response.usage as {
+      input_tokens: number;
+      input_tokens_details?: { cache_creation_input_tokens?: number };
+    };
+    // full input = non-cached(38) + cacheCreation(12) = 50.
+    expect(usage.input_tokens).toBe(50);
+    expect(usage.input_tokens_details?.cache_creation_input_tokens).toBe(12);
+  });
+
+  it("buffers usage that carries completion_tokens but no prompt_tokens", async () => {
+    // prompt_tokens undefined → the spread on line 730-732 omits prompt_tokens; the
+    // projection reconstructs input_tokens from the (zero) parts only.
+    const usageChunk: OpenAIChunk = {
+      id: "chatcmpl-x",
+      model: "gpt-x",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      usage: { completion_tokens: 7 },
+    } as OpenAIChunk;
+    const events = await collect(
+      convertOpenAIStreamToResponses(feed([textChunk("hi"), usageChunk])),
+    );
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    expect(completed.response.usage).toEqual({
+      input_tokens: 0,
+      output_tokens: 7,
+      total_tokens: 7,
+    });
+  });
+
+  it("buffers usage that carries prompt_tokens but no completion_tokens", async () => {
+    // completion_tokens undefined → projectUsage falls back to 0 output tokens (line 408).
+    const usageChunk: OpenAIChunk = {
+      id: "chatcmpl-x",
+      model: "gpt-x",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      usage: { prompt_tokens: 9 },
+    } as OpenAIChunk;
+    const events = await collect(
+      convertOpenAIStreamToResponses(feed([textChunk("hi"), usageChunk])),
+    );
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    expect(completed.response.usage).toEqual({
+      input_tokens: 9,
+      output_tokens: 0,
+      total_tokens: 9,
+    });
+  });
+
+  it("seeds the response model from a string seed id but defaults model to 'unknown'", async () => {
+    // A bare string seed sets responseId but leaves model defaulted to "unknown"
+    // (seedModel branch, line 458-462); the first chunk's model does NOT overwrite a
+    // non-empty model, so "unknown" survives.
+    const events = await collect(
+      convertOpenAIStreamToResponses(feed([textChunk("hi"), textChunk("", "stop")]), "resp_seed"),
+    );
+    const completed = events.at(-1) as Extract<ResponsesSSEEvent, { type: "response.completed" }>;
+    expect(completed.response.model).toBe("unknown");
+    expect(completed.response.id).toBe("resp_seed");
+  });
 });

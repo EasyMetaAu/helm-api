@@ -1534,3 +1534,915 @@ describe("Gemini Tier E fidelity (orders 26-31)", () => {
     expect(total).toBeGreaterThanOrEqual(7);
   });
 });
+
+// —— inbound media routing: the fileData / inlineData branches not yet hit. ——
+describe("Gemini inbound media routing (inlineData + fileData by MIME)", () => {
+  it("routes a remote audio fileData uri to an IR document part (lossless)", () => {
+    const native = {
+      contents: [
+        {
+          role: "user",
+          parts: [{ fileData: { mimeType: "audio/mpeg", fileUri: "gs://b/song.mp3" } }],
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({
+      type: "document",
+      url: "gs://b/song.mp3",
+      mediaType: "audio/mpeg",
+    });
+  });
+
+  it("routes a remote image fileData uri to an IR image part", () => {
+    const native = {
+      contents: [
+        {
+          role: "user",
+          parts: [{ fileData: { mimeType: "image/jpeg", fileUri: "gs://b/pic.jpg" } }],
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({
+      type: "image",
+      url: "gs://b/pic.jpg",
+      mediaType: "image/jpeg",
+    });
+  });
+
+  it("routes a generic fileData (no MIME) to a document part with just the uri", () => {
+    const native = {
+      contents: [{ role: "user", parts: [{ fileData: { fileUri: "gs://b/file.bin" } }] }],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toEqual({ type: "document", url: "gs://b/file.bin" });
+  });
+
+  it("routes a fileData with only videoMetadata (no MIME) to a video part", () => {
+    // mime === "" but videoMetadata present → the video branch (line 236) fires.
+    const native = {
+      contents: [
+        {
+          role: "user",
+          parts: [{ fileData: { fileUri: "gs://b/clip" }, videoMetadata: { fps: 4 } }],
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "video", url: "gs://b/clip", fps: 4 });
+  });
+
+  it("degrades an unknown part shape to a JSON text placeholder (fail-open)", () => {
+    // A part with none of text/inlineData/fileData/functionCall/functionResponse → the
+    // catch-all JSON.stringify placeholder (lines 420-421).
+    const native = {
+      contents: [{ role: "user", parts: [{ executableCode: { code: "print(1)" } }] }],
+    } as unknown as GeminiGenerateContentRequest;
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "text" });
+    expect((parts[0] as { text: string }).text).toContain("executableCode");
+  });
+});
+
+// —— inbound request: tools + response_format branches in transformRequestOut. ——
+describe("Gemini transformRequestOut — tools + response_format", () => {
+  it("maps functionDeclarations into IR tools (with description + parameters)", () => {
+    const native: GeminiGenerateContentRequest = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      tools: [
+        {
+          functionDeclarations: [
+            {
+              name: "lookup",
+              description: "look something up",
+              parameters: { type: "object", properties: { q: { type: "string" } } },
+            },
+          ],
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "lookup",
+          description: "look something up",
+          parameters: { type: "object", properties: { q: { type: "string" } } },
+        },
+      },
+    ]);
+  });
+
+  it("maps responseMimeType application/json + responseSchema to a json_schema response_format", () => {
+    const native: GeminiGenerateContentRequest = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: { type: "object", properties: { n: { type: "number" } } },
+      },
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.response_format).toEqual({
+      type: "json_schema",
+      json_schema: { type: "object", properties: { n: { type: "number" } } },
+    });
+  });
+
+  it("maps responseMimeType application/json with NO schema to a bare json_object", () => {
+    const native: GeminiGenerateContentRequest = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      generationConfig: { responseMimeType: "application/json" },
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.response_format).toEqual({ type: "json_object" });
+  });
+});
+
+// —— outbound media + reasoning: irContentPartToGeminiParts / irMessageToParts. ——
+describe("Gemini outbound part rendering (irMessageToParts)", () => {
+  it("renders an IR document part with a remote uri as Gemini fileData", () => {
+    // document with `url` (no data) → fileData branch (lines 569-578).
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "document", url: "gs://b/doc.pdf", mediaType: "application/pdf" }],
+        },
+      ],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const part = native.contents[0]?.parts?.find((p) => "fileData" in p) as {
+      fileData?: { fileUri?: string; mimeType?: string };
+    };
+    expect(part?.fileData?.fileUri).toBe("gs://b/doc.pdf");
+    expect(part?.fileData?.mimeType).toBe("application/pdf");
+  });
+
+  it("renders an IR video part with inline base64 data as Gemini inlineData", () => {
+    // video with `data` (no url) → inlineData branch (lines 601-608) + videoMetadata.
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "video", data: "VklE", mediaType: "video/webm", fps: 3 }],
+        },
+      ],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const part = native.contents[0]?.parts?.find((p) => "inlineData" in p) as {
+      inlineData?: { mimeType?: string; data?: string };
+      videoMetadata?: { fps?: number };
+    };
+    expect(part?.inlineData?.mimeType).toBe("video/webm");
+    expect(part?.inlineData?.data).toBe("VklE");
+    expect(part?.videoMetadata?.fps).toBe(3);
+  });
+
+  it("emits IR thinking content parts as Gemini thought parts (P6)", () => {
+    // A thinking content part → Gemini { text, thought:true, thoughtSignature } (625-630).
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", text: "let me think", signature: "sig123" },
+            { type: "text", text: "answer" },
+          ],
+        },
+      ],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const parts = native.contents[0]?.parts ?? [];
+    const thought = parts.find((p) => (p as { thought?: boolean }).thought === true) as {
+      text?: string;
+      thoughtSignature?: string;
+    };
+    expect(thought?.text).toBe("let me think");
+    expect(thought?.thoughtSignature).toBe("sig123");
+  });
+
+  it("emits IR audio output (message.audio) as a Gemini audio/wav inlineData part", () => {
+    // message.audio output carrier → inlineData audio/wav (lines 657-658).
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [{ role: "assistant", content: null, audio: { data: "QVVE" } }],
+    } as unknown as IRRequest;
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const part = native.contents[0]?.parts?.find((p) => "inlineData" in p) as {
+      inlineData?: { mimeType?: string; data?: string };
+    };
+    expect(part?.inlineData?.mimeType).toBe("audio/wav");
+    expect(part?.inlineData?.data).toBe("QVVE");
+  });
+});
+
+// —— tool_choice ANY → functionCallingConfig and the reverse single/multi-name. ——
+describe("Gemini tool_choice / functionCallingConfig ANY mode", () => {
+  it("maps a single-name ANY functionCallingConfig to a specific-function tool_choice", () => {
+    const native = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      toolConfig: {
+        functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["only_this"] },
+      },
+    } as unknown as GeminiGenerateContentRequest;
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.tool_choice).toEqual({ type: "function", function: { name: "only_this" } });
+  });
+
+  it("maps a multi-name ANY functionCallingConfig to 'required'", () => {
+    const native = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      toolConfig: { functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["a", "b"] } },
+    } as unknown as GeminiGenerateContentRequest;
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.tool_choice).toBe("required");
+  });
+
+  it("maps an ANY config with no allowedFunctionNames to 'required'", () => {
+    const native = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      toolConfig: { functionCallingConfig: { mode: "ANY" } },
+    } as unknown as GeminiGenerateContentRequest;
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.tool_choice).toBe("required");
+  });
+
+  it("ignores a toolConfig with an unknown mode (no tool_choice)", () => {
+    const native = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      toolConfig: { functionCallingConfig: { mode: "WHATEVER" } },
+    } as unknown as GeminiGenerateContentRequest;
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.tool_choice).toBeUndefined();
+  });
+});
+
+// —— inbound response edge cases: thought parts, non-image inlineData, no candidate. ——
+describe("Gemini transformResponseIn — candidate part edge cases", () => {
+  it("maps a thought response part to an IR thinking part + flat reasoning_content", () => {
+    // part.thought===true → thinking part (lines 903-906); liftReasoningToFlat mirrors it.
+    const native = {
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [
+              { text: "deliberating", thought: true, thoughtSignature: "sg" },
+              { text: "final answer" },
+            ],
+          },
+          finishReason: "STOP",
+        },
+      ],
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    const msg = ir.choices[0]?.message;
+    const parts = msg?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts.find((p) => p.type === "thinking")).toMatchObject({
+      type: "thinking",
+      text: "deliberating",
+      signature: "sg",
+    });
+    expect(msg?.reasoning_content).toBe("deliberating");
+  });
+
+  it("degrades a non-image/non-audio inlineData response part to an image data-url part", () => {
+    // inlineData mime is neither image/* nor audio/* → fallback inlineDataToImagePart
+    // pushes a data-url image content part (lines 918-919).
+    const native = {
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [{ inlineData: { mimeType: "application/pdf", data: "JVBE" } }],
+          },
+          finishReason: "STOP",
+        },
+      ],
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    const parts = ir.choices[0]?.message?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({
+      type: "image",
+      url: "data:application/pdf;base64,JVBE",
+    });
+  });
+
+  it("returns an empty assistant message when the response has no candidate", () => {
+    // candidates absent → the `{ role:'assistant', content:'' }` default (line 959).
+    const native = {
+      usageMetadata: { promptTokenCount: 3 },
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.choices[0]?.message).toMatchObject({ role: "assistant", content: "" });
+    expect(ir.usage?.prompt_tokens).toBe(3);
+  });
+
+  it("surfaces a promptFeedback.blockReason as content_filter and keeps it as raw stop_reason", () => {
+    // No candidate + promptFeedback.blockReason → content_filter + provider_raw.stop_reason
+    // from the block (lines 1001-1004, 1031-1033).
+    const native = {
+      promptFeedback: { blockReason: "SAFETY" },
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.choices[0]?.finish_reason).toBe("content_filter");
+    expect((ir.provider_raw as { stop_reason?: string }).stop_reason).toBe("SAFETY");
+  });
+});
+
+// —— transformResponseOut: finishReason omitted when the IR carries none. ——
+describe("Gemini transformResponseOut — finishReason presence", () => {
+  it("omits finishReason when the IR choice has a null finish_reason", () => {
+    const ir: IRResponse = {
+      id: "r",
+      model: "gemini",
+      choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: null }],
+    };
+    const native = geminiTransformer.transformResponseOut(ir) as GeminiGenerateContentResponse;
+    expect(native.candidates?.[0]?.finishReason).toBeUndefined();
+  });
+});
+
+// —— streaming inbound: snapshot-compatibility recursion for parallel same-name calls. ——
+describe("Gemini transformStreamIn — snapshot compatibility recursion", () => {
+  it("reuses one slot for a same-name call whose args object grows compatibly across frames", async () => {
+    // Frame 1: { a: 1 }; Frame 2: { a: 1, b: 2 } — object recursion in isSnapshotCompatible
+    // (lines 1069-1081) deems them compatible → ONE tool slot, latest full args flushed.
+    const events: GeminiSSEEvent[] = [
+      {
+        candidates: [
+          { content: { role: "model", parts: [{ functionCall: { name: "f", args: { a: 1 } } }] } },
+        ],
+      },
+      {
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [{ functionCall: { name: "f", args: { a: 1, b: 2 } } }],
+            },
+          },
+        ],
+      },
+      { candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }] },
+    ] as unknown as GeminiSSEEvent[];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const toolChunks = chunks.filter((c) => (c.choices?.[0]?.delta?.tool_calls?.length ?? 0) > 0);
+    expect(toolChunks).toHaveLength(1);
+    const tc = toolChunks[0]?.choices?.[0]?.delta?.tool_calls?.[0];
+    expect(tc?.function?.name).toBe("f");
+    expect(JSON.parse(tc?.function?.arguments ?? "{}")).toEqual({ a: 1, b: 2 });
+  });
+
+  it("subtracts streaming cachedContentTokenCount from prompt_tokens (lines 1177-1179)", async () => {
+    const events: GeminiSSEEvent[] = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "ok" }] } }] },
+      {
+        candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }],
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 4,
+          cachedContentTokenCount: 40,
+        },
+      },
+    ] as unknown as GeminiSSEEvent[];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const terminal = chunks.at(-1) as IRChunk;
+    expect(terminal.usage?.prompt_tokens).toBe(60);
+    expect(terminal.usage?.cached_tokens).toBe(40);
+  });
+});
+
+// —— streaming outbound: usage cache details + late-name backfill + abort path. ——
+describe("Gemini transformStreamOut — usage details, late name, abort", () => {
+  it("reconstructs promptTokenCount from cache_creation in prompt_tokens_details", async () => {
+    // The cacheCreation fallback (lines 1291-1295) + prompt reconstruction (1296-1299).
+    const irChunks: IRChunk[] = [
+      { choices: [{ index: 0, delta: { content: "hi" } }] },
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 50,
+          completion_tokens: 5,
+          prompt_tokens_details: { cache_creation_input_tokens: 12, cached_tokens: 8 },
+        },
+      },
+    ] as unknown as IRChunk[];
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(irChunks)));
+    const terminal = events.at(-1) as GeminiSSEEvent;
+    // promptTokenCount = prompt(50) + cached(8) + cacheCreation(12) = 70.
+    expect(terminal.usageMetadata?.promptTokenCount).toBe(70);
+    expect(terminal.usageMetadata?.cachedContentTokenCount).toBe(8);
+    expect(terminal.usageMetadata?.totalTokenCount).toBe(75);
+  });
+
+  it("backfills a late-arriving tool name across IR chunks (line 1331-1333)", async () => {
+    const irChunks: IRChunk[] = [
+      {
+        choices: [
+          { index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"x":' } }] } },
+        ],
+      },
+      {
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, function: { name: "late", arguments: "1}" } }],
+            },
+          },
+        ],
+      },
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+    ] as unknown as IRChunk[];
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(irChunks)));
+    const terminal = events.at(-1) as GeminiSSEEvent;
+    const fc = terminal.candidates?.[0]?.content?.parts?.find((p) => "functionCall" in p) as {
+      functionCall?: { name?: string; args?: unknown };
+    };
+    expect(fc?.functionCall?.name).toBe("late");
+    expect(fc?.functionCall?.args).toEqual({ x: 1 });
+  });
+
+  it("emits a terminal frame carrying both a reasoning thought part and the text", async () => {
+    // Terminal chunk delta has BOTH reasoning_content and content (lines 1342-1345).
+    const irChunks: IRChunk[] = [
+      {
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning_content: "pondered", content: "the answer" },
+            finish_reason: "stop",
+          },
+        ],
+      },
+    ] as unknown as IRChunk[];
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(irChunks)));
+    const terminal = events.at(-1) as GeminiSSEEvent;
+    const parts = terminal.candidates?.[0]?.content?.parts ?? [];
+    expect(parts.find((p) => (p as { thought?: boolean }).thought === true)).toMatchObject({
+      text: "pondered",
+    });
+    expect(parts.find((p) => p.text === "the answer")).toBeDefined();
+  });
+
+  it("flushes buffered tool calls + usage when the IR stream ends WITHOUT a finish chunk (abort)", async () => {
+    // No finish_reason ever arrives → defensive tail flush (lines 1383-1389).
+    const irChunks: IRChunk[] = [
+      {
+        choices: [
+          {
+            index: 0,
+            delta: { tool_calls: [{ index: 0, function: { name: "g", arguments: "{}" } }] },
+          },
+        ],
+      },
+      { choices: [{ index: 0, delta: {} }], usage: { prompt_tokens: 5, completion_tokens: 1 } },
+    ] as unknown as IRChunk[];
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(irChunks)));
+    const last = events.at(-1) as GeminiSSEEvent;
+    const fc = last.candidates?.[0]?.content?.parts?.find((p) => "functionCall" in p) as {
+      functionCall?: { name?: string };
+    };
+    expect(fc?.functionCall?.name).toBe("g");
+    expect(last.usageMetadata?.promptTokenCount).toBe(5);
+    // no finishReason on a never-finished stream.
+    expect(last.candidates?.[0]?.finishReason).toBeUndefined();
+  });
+});
+
+// —— thinkingConfig reverse band mapping (low/medium/high). ——
+describe("Gemini thinkingConfig -> reasoning_effort reverse bands", () => {
+  it.each([
+    [1024, "low"],
+    [8192, "medium"],
+    [24576, "high"],
+  ])("maps a thinkingBudget of %i to reasoning_effort %s", (budget, effort) => {
+    const native = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      generationConfig: { thinkingConfig: { thinkingBudget: budget } },
+    } as unknown as GeminiGenerateContentRequest;
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.reasoning_effort).toBe(effort);
+  });
+});
+
+// —— tool message name fallback (toolNameById + literal default). ——
+describe("Gemini outbound tool message name resolution", () => {
+  it("derives the functionResponse name from a prior tool_call id when the tool msg omits name", () => {
+    // tool message has only tool_call_id → name resolved via toolNameById (lines 760-765).
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_w_0", type: "function", function: { name: "weather", arguments: "{}" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_w_0", content: "sunny" },
+      ],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const fnResp = native.contents
+      .flatMap((c) => c.parts ?? [])
+      .find((p) => "functionResponse" in p) as {
+      functionResponse?: { name?: string };
+    };
+    expect(fnResp?.functionResponse?.name).toBe("weather");
+  });
+
+  it("falls back to the literal 'tool' name when neither name nor a known id is present", () => {
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [{ role: "tool", tool_call_id: "unknown_id", content: "result" }],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const fnResp = native.contents
+      .flatMap((c) => c.parts ?? [])
+      .find((p) => "functionResponse" in p) as {
+      functionResponse?: { name?: string };
+    };
+    expect(fnResp?.functionResponse?.name).toBe("tool");
+  });
+
+  it("falls back to 'tool' when the tool message has neither name NOR tool_call_id", () => {
+    // tool_call_id undefined → the ternary's `: undefined` arm (line 764) is taken.
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [{ role: "tool", content: "orphan result" }],
+    } as unknown as IRRequest;
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const fnResp = native.contents
+      .flatMap((c) => c.parts ?? [])
+      .find((p) => "functionResponse" in p) as { functionResponse?: { name?: string } };
+    expect(fnResp?.functionResponse?.name).toBe("tool");
+  });
+});
+
+// —— remaining small branch/statement gaps gathered into one block. ——
+describe("Gemini transformer — residual coverage gaps", () => {
+  it("routes inline video/* inlineData to an IR video part (inbound)", () => {
+    // inlineDataToIRPart video branch (lines 213-215).
+    const native = {
+      contents: [
+        { role: "user", parts: [{ inlineData: { mimeType: "video/mp4", data: "VklE" } }] },
+      ],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    const parts = ir.messages[0]?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({ type: "video", data: "VklE", mediaType: "video/mp4" });
+  });
+
+  it("maps image/audio/video modality token details into the IR token-detail keys", () => {
+    // modalityDetailsToIR IMAGE/AUDIO/VIDEO branches (lines 266-274).
+    const native = {
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: {
+        promptTokenCount: 30,
+        candidatesTokenCount: 5,
+        promptTokensDetails: [
+          { modality: "IMAGE", tokenCount: 10 },
+          { modality: "AUDIO", tokenCount: 6 },
+          { modality: "VIDEO", tokenCount: 4 },
+        ],
+      },
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    const details = ir.usage?.prompt_tokens_details as Record<string, number>;
+    expect(details.image_tokens).toBe(10);
+    expect(details.audio_tokens).toBe(6);
+    expect(details.video_tokens).toBe(4);
+  });
+
+  it("flattens citationMetadata.citationSources into url_citation annotations", () => {
+    // groundingToAnnotations citationMetadata branch (lines 323-345) — entirely untested.
+    const native = {
+      candidates: [
+        {
+          content: { role: "model", parts: [{ text: "cited" }] },
+          finishReason: "STOP",
+          citationMetadata: {
+            citationSources: [
+              { uri: "https://src/a", title: "A", startIndex: 0, endIndex: 5 },
+              { startIndex: 6, endIndex: 9 },
+            ],
+          },
+        },
+      ],
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    const annotations = ir.choices[0]?.message?.annotations ?? [];
+    expect(annotations[0]).toMatchObject({
+      type: "url_citation",
+      url: "https://src/a",
+      title: "A",
+      start_index: 0,
+      end_index: 5,
+    });
+    // a source with only offsets (no uri/title) still produces an annotation.
+    expect(annotations[1]).toMatchObject({ type: "url_citation", start_index: 6, end_index: 9 });
+  });
+
+  it("renders an IR document part with neither data nor url as no Gemini part", () => {
+    // document part with no data AND no url → returns [] (line 579).
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [{ role: "user", content: [{ type: "document", mediaType: "application/pdf" }] }],
+    } as unknown as IRRequest;
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const hasFileOrInline = (native.contents[0]?.parts ?? []).some(
+      (p) => "fileData" in p || "inlineData" in p,
+    );
+    expect(hasFileOrInline).toBe(false);
+  });
+
+  it("renders an IR video part with neither url nor data as no Gemini media part", () => {
+    // video part missing both url and data → returns [] (lines 609-610); a defensive
+    // text part is appended (order 29) so the turn is never empty.
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [{ role: "user", content: [{ type: "video", mediaType: "video/mp4" }] }],
+    } as unknown as IRRequest;
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const hasMedia = (native.contents[0]?.parts ?? []).some(
+      (p) => "fileData" in p || "inlineData" in p,
+    );
+    expect(hasMedia).toBe(false);
+  });
+
+  it("renders an inline IR video part WITHOUT metadata as a plain inlineData part", () => {
+    // video with data but no fps/offsets → videoMetadata undefined branch (line 589/605).
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [
+        { role: "user", content: [{ type: "video", data: "VklE", mediaType: "video/mp4" }] },
+      ],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const part = native.contents[0]?.parts?.find((p) => "inlineData" in p) as {
+      inlineData?: { mimeType?: string };
+      videoMetadata?: unknown;
+    };
+    expect(part?.inlineData?.mimeType).toBe("video/mp4");
+    expect(part?.videoMetadata).toBeUndefined();
+  });
+
+  it("treats malformed tool-call arguments as empty object args (parseArgs catch)", () => {
+    // Non-JSON arguments string → parseArgs catch returns {} (lines 673-675).
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "c0", type: "function", function: { name: "f", arguments: "not json" } },
+          ],
+        },
+      ],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const fc = native.contents[0]?.parts?.find((p) => "functionCall" in p) as {
+      functionCall?: { args?: unknown };
+    };
+    expect(fc?.functionCall?.args).toEqual({});
+  });
+
+  it("maps an IR json_object response_format to responseMimeType only (outbound)", () => {
+    // responseFormatToGenerationConfig json_object branch (line 714/721).
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: { type: "json_object" },
+    } as unknown as IRRequest;
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    expect(native.generationConfig?.responseMimeType).toBe("application/json");
+    expect("responseSchema" in (native.generationConfig ?? {})).toBe(false);
+  });
+
+  it("returns an empty-string content assistant message for a candidate with no usable parts", () => {
+    // No text/inlineData/functionCall parts → content '' fallback (line 945).
+    const native = {
+      candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }],
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.choices[0]?.message).toMatchObject({ role: "assistant", content: "" });
+  });
+
+  it("allocates a SECOND streaming slot for a same-name call with incompatible args", async () => {
+    // Frame 1 args { a: 1 }; Frame 2 args { a: 2 } — NOT a compatible snapshot
+    // extension (isSnapshotCompatible false, line 1081) → two parallel tool slots.
+    const events: GeminiSSEEvent[] = [
+      {
+        candidates: [
+          { content: { role: "model", parts: [{ functionCall: { name: "f", args: { a: 1 } } }] } },
+        ],
+      },
+      {
+        candidates: [
+          { content: { role: "model", parts: [{ functionCall: { name: "f", args: { a: 2 } } }] } },
+        ],
+      },
+      { candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }] },
+    ] as unknown as GeminiSSEEvent[];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const toolChunks = chunks.filter((c) => (c.choices?.[0]?.delta?.tool_calls?.length ?? 0) > 0);
+    expect(toolChunks).toHaveLength(2);
+  });
+
+  it("reuses a slot for same-name calls whose ARRAY args grow compatibly (array recursion)", async () => {
+    // args is an array → isSnapshotCompatible array branch (lines 1063-1067).
+    const events: GeminiSSEEvent[] = [
+      {
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [{ functionCall: { name: "f", args: { items: [1] } } }],
+            },
+          },
+        ],
+      },
+      {
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [{ functionCall: { name: "f", args: { items: [1, 2] } } }],
+            },
+          },
+        ],
+      },
+      { candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }] },
+    ] as unknown as GeminiSSEEvent[];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const toolChunks = chunks.filter((c) => (c.choices?.[0]?.delta?.tool_calls?.length ?? 0) > 0);
+    expect(toolChunks).toHaveLength(1);
+    const tc = toolChunks[0]?.choices?.[0]?.delta?.tool_calls?.[0];
+    expect(JSON.parse(tc?.function?.arguments ?? "{}")).toEqual({ items: [1, 2] });
+  });
+
+  it("reuses a slot for same-name calls whose STRING args extend by prefix (string branch)", async () => {
+    // args carries a string field that grows by prefix → string branch (lines 1060-1061).
+    const events: GeminiSSEEvent[] = [
+      {
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [{ functionCall: { name: "f", args: { q: "hel" } } }],
+            },
+          },
+        ],
+      },
+      {
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [{ functionCall: { name: "f", args: { q: "hello" } } }],
+            },
+          },
+        ],
+      },
+      { candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }] },
+    ] as unknown as GeminiSSEEvent[];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const toolChunks = chunks.filter((c) => (c.choices?.[0]?.delta?.tool_calls?.length ?? 0) > 0);
+    expect(toolChunks).toHaveLength(1);
+    const tc = toolChunks[0]?.choices?.[0]?.delta?.tool_calls?.[0];
+    expect(JSON.parse(tc?.function?.arguments ?? "{}")).toEqual({ q: "hello" });
+  });
+
+  it("emits streaming usage carrying only candidatesTokenCount (no prompt)", async () => {
+    // promptTokenCount undefined → the prompt_tokens spread arm is skipped (line 1179);
+    // candidatesTokenCount present → completion_tokens kept (covers the asymmetric usage).
+    const events: GeminiSSEEvent[] = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "ok" }] } }] },
+      {
+        candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }],
+        usageMetadata: { candidatesTokenCount: 9 },
+      },
+    ] as unknown as GeminiSSEEvent[];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const terminal = chunks.at(-1) as IRChunk;
+    expect(terminal.usage?.completion_tokens).toBe(9);
+    expect(terminal.usage?.prompt_tokens).toBeUndefined();
+  });
+
+  it("emits an outbound terminal usage frame with only candidatesTokenCount (prompt undefined)", async () => {
+    // transformStreamOut toUsageMetadata: prompt undefined → totalTokenCount from
+    // candidates alone (lines 1299, 1305-1307) + reasoning thoughtsTokenCount (1308-1309).
+    const irChunks: IRChunk[] = [
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { completion_tokens: 6, reasoning_tokens: 2 },
+      },
+    ] as unknown as IRChunk[];
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(irChunks)));
+    const terminal = events.at(-1) as GeminiSSEEvent;
+    expect(terminal.usageMetadata?.candidatesTokenCount).toBe(6);
+    expect(terminal.usageMetadata?.totalTokenCount).toBe(6);
+    expect(terminal.usageMetadata?.thoughtsTokenCount).toBe(2);
+    expect(terminal.usageMetadata?.promptTokenCount).toBeUndefined();
+  });
+
+  it("emits an outbound terminal usage frame with NEITHER prompt nor candidates (reasoning-only)", async () => {
+    // Both prompt and candidates undefined → totalTokenCount spread is skipped (line 1307);
+    // only thoughtsTokenCount rides the frame.
+    const irChunks: IRChunk[] = [
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { reasoning_tokens: 3 },
+      },
+    ] as unknown as IRChunk[];
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(irChunks)));
+    const terminal = events.at(-1) as GeminiSSEEvent;
+    expect(terminal.usageMetadata?.thoughtsTokenCount).toBe(3);
+    expect(terminal.usageMetadata?.totalTokenCount).toBeUndefined();
+    expect(terminal.usageMetadata?.promptTokenCount).toBeUndefined();
+    expect(terminal.usageMetadata?.candidatesTokenCount).toBeUndefined();
+  });
+
+  it("emits streaming usage carrying only promptTokenCount (no candidates)", async () => {
+    // candidatesTokenCount undefined in streaming usage → completion_tokens skipped (line 1182).
+    const events: GeminiSSEEvent[] = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "ok" }] } }] },
+      {
+        candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 11 },
+      },
+    ] as unknown as GeminiSSEEvent[];
+    const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
+    const terminal = chunks.at(-1) as IRChunk;
+    expect(terminal.usage?.prompt_tokens).toBe(11);
+    expect(terminal.usage?.completion_tokens).toBeUndefined();
+  });
+
+  it("maps a non-stream usageMetadata that omits promptTokenCount (candidates only)", () => {
+    // promptTokenCount absent in transformResponseIn → prompt_tokens spread skipped (line 982).
+    const native = {
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: { candidatesTokenCount: 4 },
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.usage?.completion_tokens).toBe(4);
+    expect(ir.usage?.prompt_tokens).toBeUndefined();
+  });
+
+  it("keeps an empty-modality token detail from producing a key (modality === '')", () => {
+    // A token detail with no modality string → key undefined → skipped (line 272-275).
+    const native = {
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: {
+        promptTokenCount: 10,
+        candidatesTokenCount: 2,
+        promptTokensDetails: [{ tokenCount: 5 }, { modality: "TEXT", tokenCount: 10 }],
+      },
+    } as unknown as GeminiGenerateContentResponse;
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    const details = ir.usage?.prompt_tokens_details as Record<string, number>;
+    // only the TEXT detail produced a key; the empty-modality one was dropped.
+    expect(details.text_tokens).toBe(10);
+    // the empty-modality count (5) never appears under any *_tokens key.
+    expect(Object.values(details)).not.toContain(5);
+  });
+
+  it("maps an IR json_schema response_format whose json_schema is a BARE schema (not wrapped)", () => {
+    // json_schema given directly (no nested { schema } key) → the `: rawSchema` arm (line 721).
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: { type: "object", properties: { ok: { type: "boolean" } } },
+      },
+    } as unknown as IRRequest;
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    expect(native.generationConfig?.responseMimeType).toBe("application/json");
+    const schema = native.generationConfig?.responseSchema as {
+      properties?: Record<string, unknown>;
+    };
+    expect(schema?.properties?.ok).toBeDefined();
+  });
+});

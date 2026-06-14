@@ -43,6 +43,20 @@ describe("codexAccountIdFromToken", () => {
     expect(codexAccountIdFromToken("opaque")).toBe("");
     expect(codexAccountIdFromToken(`eyJ.${Buffer.from("{}").toString("base64url")}.s`)).toBe("");
   });
+
+  it("returns '' when the payload segment is not valid JSON (decode/parse throws)", () => {
+    // A 3-part token whose middle segment decodes to non-JSON bytes -> JSON.parse throws
+    // -> the catch returns "" (lines 87-89).
+    const garbage = Buffer.from("not-json-at-all").toString("base64url");
+    expect(codexAccountIdFromToken(`hdr.${garbage}.sig`)).toBe("");
+  });
+
+  it("returns '' when the auth claim is present but chatgpt_account_id is not a string", () => {
+    const payload = Buffer.from(
+      JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: 42 } }),
+    ).toString("base64url");
+    expect(codexAccountIdFromToken(`hdr.${payload}.sig`)).toBe("");
+  });
 });
 
 describe("openaiToResponsesRequest", () => {
@@ -173,6 +187,177 @@ describe("openaiToResponsesRequest", () => {
       messages: [{ role: "user", content: "x" }],
     });
     expect(body.instructions).toBe("You are a helpful assistant.");
+  });
+
+  it("maps multimodal user content (text + image_url) to Responses input_text / input_image parts", () => {
+    // inputPartsFromContent array branch: text -> input_text, image_url -> input_image.
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "describe" },
+            { type: "image_url", image_url: { url: "https://img/x.png" } },
+            // Unknown part shapes are dropped.
+            { type: "audio", data: "..." },
+          ],
+        },
+      ],
+    });
+    const input = body.input as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    expect(input[0]?.content).toEqual([
+      { type: "input_text", text: "describe" },
+      { type: "input_image", image_url: "https://img/x.png" },
+    ]);
+  });
+
+  it("joins assistant array content via plainText when building Responses input", () => {
+    // plainText array branch (lines 126-133): assistant content as parts is flattened.
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "part one " },
+            { type: "text", text: "part two" },
+            { foo: "ignored" },
+          ],
+        },
+      ],
+    });
+    const input = body.input as Array<{ role?: string; content?: Array<Record<string, unknown>> }>;
+    expect(input[0]?.content?.[0]).toEqual({ type: "output_text", text: "part one part two" });
+  });
+
+  it("joins multiple system messages into instructions and skips empty ones", () => {
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [
+        { role: "system", content: "Rule A." },
+        { role: "system", content: "" },
+        { role: "system", content: "Rule B." },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(body.instructions).toBe("Rule A.\n\nRule B.");
+  });
+
+  it("serializes a non-string tool result (object) to JSON in function_call_output", () => {
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "tool", tool_call_id: "c1", content: { ok: true } }],
+    });
+    const input = body.input as Array<Record<string, unknown>>;
+    expect(input[0]).toMatchObject({
+      type: "function_call_output",
+      call_id: "c1",
+      output: '{"ok":true}',
+    });
+  });
+
+  it("serializes non-string assistant tool_call arguments to JSON", () => {
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "c1", type: "function", function: { name: "run", arguments: { x: 1 } } },
+          ],
+        },
+      ],
+    });
+    const input = body.input as Array<Record<string, unknown>>;
+    expect(input[0]).toMatchObject({ type: "function_call", arguments: '{"x":1}' });
+  });
+
+  it("treats a non-string, non-array user content as empty input parts", () => {
+    // inputPartsFromContent final return (lines 120-121): content that is neither a
+    // string nor an array (here null) yields no parts.
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: null }],
+    });
+    const input = body.input as Array<{ role: string; content: unknown[] }>;
+    expect(input[0]).toEqual({ type: "message", role: "user", content: [] });
+  });
+
+  it("passes a non-object tool_choice (a bare string) through unchanged", () => {
+    // chatToolChoiceToResponses early-return for non-object input (lines 188-190).
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: "required",
+    });
+    expect(body.tool_choice).toBe("required");
+  });
+
+  it("leaves a tool_choice that already carries a top-level name untouched", () => {
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: { type: "function", name: "already" } as never,
+    });
+    expect(body.tool_choice).toEqual({ type: "function", name: "already" });
+  });
+
+  it("passes through an object tool_choice whose type is not 'function' unchanged", () => {
+    // chatToolChoiceToResponses: a non-function object (e.g. {type:"allowed_tools"})
+    // returns the original (line 192).
+    const choice = { type: "allowed_tools", tools: ["a"] };
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: choice as never,
+    });
+    expect(body.tool_choice).toEqual(choice);
+  });
+
+  it("passes through a function tool_choice whose nested function is not an object", () => {
+    // type:"function" with no usable name and a non-object `function` -> returned as-is
+    // (line 194).
+    const choice = { type: "function", function: "oops" };
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: choice as never,
+    });
+    expect(body.tool_choice).toEqual(choice);
+  });
+
+  it("emits an empty call_id for a tool result missing tool_call_id", () => {
+    // The `m.tool_call_id ?? ""` fallback (line 154).
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "tool", content: "orphan result" }],
+    });
+    const input = body.input as Array<Record<string, unknown>>;
+    expect(input[0]).toMatchObject({
+      type: "function_call_output",
+      call_id: "",
+      output: "orphan result",
+    });
+  });
+
+  it("omits an assistant text item when the assistant message has no textual content", () => {
+    // plainText("") is empty -> no `message` item is pushed for the assistant, only the
+    // function_call (covers the `if (text)` false arm at line 161).
+    const body = openaiToResponsesRequest({
+      model: "gpt-5.5",
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "c1", type: "function", function: { name: "run", arguments: "{}" } }],
+        },
+      ],
+    });
+    const input = body.input as Array<Record<string, unknown>>;
+    expect(input).toHaveLength(1);
+    expect(input[0]).toMatchObject({ type: "function_call", name: "run" });
   });
 });
 
@@ -306,6 +491,105 @@ describe("translateResponsesSSE", () => {
         // drain
       }
     }).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  it("throws UpstreamError on response.failed using the nested response.error.message", async () => {
+    // response.failed without a top-level message -> pull response.error.message
+    // (lines 684-693). Distinct from a plain `error` event.
+    const res = sseResponse([
+      { type: "response.created", response: { id: "r" } },
+      { type: "response.failed", response: { error: { message: "model exploded" } } },
+    ]);
+    let caught: unknown;
+    try {
+      for await (const _ of translateResponsesSSE(res, "m")) {
+        // drain
+      }
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect((caught as UpstreamError).message).toBe("model exploded");
+  });
+
+  it("falls back to a generic message when response.failed carries no error message", async () => {
+    const res = sseResponse([{ type: "response.failed", response: {} }]);
+    let caught: unknown;
+    try {
+      for await (const _ of translateResponsesSSE(res, "m")) {
+        // drain
+      }
+    } catch (e) {
+      caught = e;
+    }
+    expect((caught as UpstreamError).message).toBe("codex responses stream error");
+  });
+
+  it("closes cleanly with finish + [DONE] when the stream ends without response.completed (EOF path)", async () => {
+    // No response.completed/incomplete: after the events drain, the `if (started)` tail
+    // emits a finish chunk + [DONE] (lines 696-700).
+    const res = sseResponse([
+      { type: "response.output_item.added", item: { type: "message", role: "assistant" } },
+      { type: "response.output_text.delta", delta: "partial" },
+    ]);
+    const chunks: string[] = [];
+    for await (const c of translateResponsesSSE(res, "gpt-5.5")) chunks.push(c);
+    const joined = chunks.join("");
+    expect(joined).toContain('"content":"partial"');
+    expect(joined).toContain('"finish_reason":"stop"');
+    expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("does not emit any chunk when the stream is empty (started stays false)", async () => {
+    const res = sseResponse([]);
+    const chunks: string[] = [];
+    for await (const c of translateResponsesSSE(res, "m")) chunks.push(c);
+    expect(chunks).toEqual([]);
+  });
+
+  it("includes reasoning_tokens in the terminal usage chunk when reported by the backend", async () => {
+    // openaiUsageChunk reads output_tokens_details.reasoning_tokens (lines 595-597, 616-618).
+    const res = sseResponse([
+      { type: "response.output_text.delta", delta: "Hi" },
+      {
+        type: "response.completed",
+        response: {
+          status: "completed",
+          usage: {
+            input_tokens: 8,
+            output_tokens: 20,
+            output_tokens_details: { reasoning_tokens: 12 },
+          },
+        },
+      },
+    ]);
+    const chunks: string[] = [];
+    for await (const c of translateResponsesSSE(res, "gpt-5.5")) chunks.push(c);
+    const dataFrames = chunks
+      .join("")
+      .trimEnd()
+      .split("\n\n")
+      .filter((fr) => fr.startsWith("data:"));
+    const doneIdx = dataFrames.findIndex((fr) => fr.includes("[DONE]"));
+    const usageFrame = dataFrames[doneIdx - 1] as string;
+    expect(JSON.parse(usageFrame.slice(5).trim())).toMatchObject({
+      usage: { completion_tokens_details: { reasoning_tokens: 12 } },
+    });
+  });
+
+  it("re-throws a non-stall reader error unchanged (translateResponsesSSE)", async () => {
+    const boom = new Error("stream broke");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(boom);
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    await expect(async () => {
+      for await (const _ of translateResponsesSSE(res, "m")) {
+        // drain
+      }
+    }).rejects.toBe(boom);
   });
 
   // Codex P1: response.incomplete is terminal too (truncation/content filter). It must
@@ -486,6 +770,140 @@ describe("aggregateResponsesStream", () => {
     });
     expect((out.choices as Array<Record<string, unknown>>)[0]?.finish_reason).toBe("tool_calls");
   });
+
+  it("defaults a tool_call's arguments to '{}' when none were streamed", async () => {
+    // toolOrder map: a function_call that never received argument deltas serializes to
+    // "{}" (the `tc.arguments || "{}"` fallback).
+    const res = sseResponse([
+      {
+        type: "response.output_item.added",
+        item: { type: "function_call", call_id: "c0", name: "noargs" },
+      },
+      { type: "response.completed", response: { status: "completed" } },
+    ]);
+    const out = await aggregateResponsesStream(res, "m");
+    const msg = (out.choices as Array<Record<string, unknown>>)[0]?.message as Record<
+      string,
+      unknown
+    >;
+    const calls = msg.tool_calls as Array<Record<string, unknown>>;
+    expect((calls[0]?.function as Record<string, unknown>).arguments).toBe("{}");
+  });
+
+  it("throws UpstreamError on an error event mid-aggregation (with the event message)", async () => {
+    const res = sseResponse([
+      { type: "response.created", response: { id: "r" } },
+      { type: "error", message: "aggregation boom" },
+    ]);
+    let caught: unknown;
+    try {
+      await aggregateResponsesStream(res, "m");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect((caught as UpstreamError).message).toBe("aggregation boom");
+  });
+
+  it("throws UpstreamError on response.failed using the nested error message (aggregation)", async () => {
+    const res = sseResponse([
+      { type: "response.failed", response: { error: { message: "nested failure" } } },
+    ]);
+    await expect(aggregateResponsesStream(res, "m")).rejects.toMatchObject({
+      message: "nested failure",
+    });
+  });
+
+  it("re-throws a non-stall reader error unchanged (aggregateResponsesStream)", async () => {
+    const boom = new Error("stream broke");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(boom);
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    await expect(aggregateResponsesStream(res, "m")).rejects.toBe(boom);
+  });
+});
+
+// readResponsesEvents (the shared low-level SSE event reader): exercises the EOF
+// trailing-buffer flush, empty-body short-circuit, and the non-stall reader-error
+// re-throw arm directly (the translator + aggregator both consume it).
+describe("readResponsesEvents", () => {
+  it("flushes a final event held in the buffer when the stream ends without a trailing blank line", async () => {
+    // A last frame with NO terminating \n\n stays in `buffer` until EOF; the done-branch
+    // decodes + parses it (lines 512-518).
+    const enc = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          enc.encode('data: {"type":"response.created","response":{"id":"r"}}\n\n'),
+        );
+        // No trailing blank line on this final frame.
+        controller.enqueue(
+          enc.encode('data: {"type":"response.output_text.delta","delta":"tail"}'),
+        );
+        controller.close();
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    const events: Array<Record<string, unknown>> = [];
+    for await (const evt of readResponsesEvents(res)) events.push(evt);
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ type: "response.output_text.delta", delta: "tail" });
+  });
+
+  it("returns immediately on an empty body", async () => {
+    const res = new Response(null, { status: 200 });
+    const events: Array<Record<string, unknown>> = [];
+    for await (const evt of readResponsesEvents(res)) events.push(evt);
+    expect(events).toEqual([]);
+  });
+
+  it("skips frames whose data is valid JSON but not an object, and frames with malformed JSON", async () => {
+    // A `data:` array (line 473 filter -> null) and a `data:` with broken JSON (the
+    // JSON.parse catch -> null, lines 477-479) are both dropped; the real event survives.
+    const res = rawSSEResponse(
+      [
+        "data: [1,2,3]\n\n", // valid JSON, not an object -> skipped
+        "data: {broken json\n\n", // unparseable -> catch -> skipped
+        'data: {"type":"response.created","response":{"id":"r"}}\n\n',
+      ].join(""),
+    );
+    const events: Array<Record<string, unknown>> = [];
+    for await (const evt of readResponsesEvents(res)) events.push(evt);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "response.created" });
+  });
+
+  it("ignores a trailing-buffer that is only whitespace at EOF", async () => {
+    const enc = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode('data: {"type":"response.created","response":{}}\n\n   '));
+        controller.close();
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    const events: Array<Record<string, unknown>> = [];
+    for await (const evt of readResponsesEvents(res)) events.push(evt);
+    expect(events).toHaveLength(1);
+  });
+
+  it("re-throws a non-stall reader error unchanged", async () => {
+    const boom = new Error("stream broke");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(boom);
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    await expect(async () => {
+      for await (const _ of readResponsesEvents(res)) {
+        // drain
+      }
+    }).rejects.toBe(boom);
+  });
 });
 
 describe("createCodexResponsesClient", () => {
@@ -626,6 +1044,155 @@ describe("createCodexResponsesClient", () => {
       /getAuthHeader/,
     );
   });
+
+  it("uses the baseUrl verbatim when it already ends in /responses (no double suffix)", async () => {
+    let seenUrl = "";
+    const fetchMock = vi.fn(async (url: string) => {
+      seenUrl = url;
+      return sseResponse([
+        { type: "response.output_text.delta", delta: "ok" },
+        { type: "response.completed", response: { status: "completed", usage: {} } },
+      ]);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex/responses",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await client.chatCompletion({ model: "gpt-5.5", messages: [{ role: "user", content: "hi" }] });
+    expect(seenUrl).toBe("https://chatgpt.com/backend-api/codex/responses");
+  });
+
+  it("maps a connect/TTFB timeout (internal abort, no external signal) to UpstreamError(timeout)", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+        const signal = init?.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new Error("aborted"));
+            return;
+          }
+          signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      });
+      const client = createCodexResponsesClient({
+        config: {
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+          timeoutMs: 50,
+        },
+        fetch: fetchMock as unknown as typeof fetch,
+      });
+      const run = client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] });
+      const assertion = expect(run).rejects.toMatchObject({ errorClass: "timeout" });
+      await vi.advanceTimersByTimeAsync(50);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does NOT convert an external client abort into a timeout (client disconnect is not a provider failure)", async () => {
+    const ext = new AbortController();
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      const signal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(new Error("aborted"));
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        timeoutMs: 600_000,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const run = client.chatCompletion(
+      { model: "m", messages: [{ role: "user", content: "x" }] },
+      { signal: ext.signal },
+    );
+    ext.abort();
+    const caught = await run.catch((e: unknown) => e);
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(UpstreamError);
+  });
+
+  it("re-throws a real network error (not a timeout) unchanged", async () => {
+    const boom = new Error("ECONNREFUSED");
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: (async () => {
+        throw boom;
+      }) as unknown as typeof fetch,
+    });
+    await expect(
+      client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] }),
+    ).rejects.toBe(boom);
+  });
+
+  it("preserves a non-JSON upstream error body as raw text in the UpstreamError", async () => {
+    // errorFromResponse: res.text() is not JSON -> the raw string is kept (lines 388-390).
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: (async () =>
+        new Response("Service Unavailable (plain text)", {
+          status: 503,
+        })) as unknown as typeof fetch,
+    });
+    let caught: unknown;
+    try {
+      await client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    const err = caught as UpstreamError;
+    expect(err.upstreamStatus).toBe(503);
+    expect(err.providerRaw).toBe("Service Unavailable (plain text)");
+  });
+
+  it("swallows a throwing onResponseMeta hook (quota observability never breaks the request)", async () => {
+    // fireResponseMeta wraps the hook in try/catch (lines 360-363): a throw is swallowed
+    // and the streamed body is unaffected.
+    const fetchMock = vi.fn(async () =>
+      sseResponse([
+        { type: "response.output_text.delta", delta: "ok" },
+        { type: "response.completed", response: { status: "completed", usage: {} } },
+      ]),
+    );
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        onResponseMeta: () => {
+          throw new Error("hook blew up");
+        },
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const out = (await client.chatCompletion({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+    })) as Record<string, unknown>;
+    expect(
+      ((out.choices as Array<Record<string, unknown>>)[0]?.message as Record<string, unknown>)
+        .content,
+    ).toBe("ok");
+  });
 });
 
 // readResponsesSSERaw (issue #217, Phase 3): the BYTE-FAITHFUL Responses passthrough
@@ -668,6 +1235,21 @@ describe("readResponsesSSERaw", () => {
     const chunks: string[] = [];
     for await (const c of readResponsesSSERaw(res)) chunks.push(c);
     expect(chunks).toEqual([]);
+  });
+
+  it("re-throws a non-stall reader error unchanged", async () => {
+    const boom = new Error("stream broke");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(boom);
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    await expect(async () => {
+      for await (const _ of readResponsesSSERaw(res)) {
+        // drain
+      }
+    }).rejects.toBe(boom);
   });
 
   it("throws UpstreamError(timeout) and cancels when the stream stalls past idleMs", async () => {

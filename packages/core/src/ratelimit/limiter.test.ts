@@ -129,6 +129,59 @@ describe("createRateLimiter — probe override (per-key quota carried by Auth)",
   });
 });
 
+describe("createRateLimiter — both dimensions active (RPM + TPM)", () => {
+  it("both admit: reports the TPM dimension when it has less headroom", async () => {
+    const store = new InMemoryRateLimitStore();
+    // rpm:10 (1 used -> 90% left) vs tpm:100 (90 used -> 10% left). TPM is tighter,
+    // so the surfaced headers must describe TPM, not RPM.
+    const limiter = createRateLimiter({ config: cfg({ default: { rpm: 10, tpm: 100 } }), store });
+    const r = await limiter.check({ keyId: "k1", estimatedTokens: 90, now: 0 });
+    expect(r.allowed).toBe(true);
+    expect(r.limitedBy).toBeNull();
+    expect(r.limit).toBe(100);
+    expect(r.remaining).toBe(10);
+    expect(r.retryAfterSeconds).toBe(0);
+  });
+
+  it("both admit: reports the RPM dimension when it has less headroom", async () => {
+    const store = new InMemoryRateLimitStore();
+    // rpm:2 (1 used -> 50% left) vs tpm:1000 (10 used -> 99% left). RPM is tighter.
+    const limiter = createRateLimiter({ config: cfg({ default: { rpm: 2, tpm: 1000 } }), store });
+    const r = await limiter.check({ keyId: "k1", estimatedTokens: 10, now: 0 });
+    expect(r.allowed).toBe(true);
+    expect(r.limitedBy).toBeNull();
+    expect(r.limit).toBe(2);
+    expect(r.remaining).toBe(1);
+  });
+
+  it("RPM admits but TPM rejects: limitedBy tpm with a retry hint", async () => {
+    const store = new InMemoryRateLimitStore();
+    const limiter = createRateLimiter({ config: cfg({ default: { rpm: 10, tpm: 100 } }), store });
+    const r = await limiter.check({ keyId: "k1", estimatedTokens: 150, now: 0 });
+    expect(r.allowed).toBe(false);
+    expect(r.limitedBy).toBe("tpm");
+    expect(r.limit).toBe(100);
+    expect(r.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
+  it("RPM rejection short-circuits before the TPM bucket is touched", async () => {
+    const consume = vi.fn<RateLimitStore["consume"]>().mockResolvedValue({
+      ok: false,
+      remaining: 0,
+      resetSeconds: 30,
+      state: { tokens: 0, lastRefillMs: 0 },
+    });
+    const store: RateLimitStore = { consume };
+    const limiter = createRateLimiter({ config: cfg({ default: { rpm: 1, tpm: 100 } }), store });
+    const r = await limiter.check({ keyId: "k1", estimatedTokens: 50, now: 0 });
+    expect(r.allowed).toBe(false);
+    expect(r.limitedBy).toBe("rpm");
+    // Only the RPM dimension was consumed — a refused request never debits TPM.
+    expect(consume).toHaveBeenCalledTimes(1);
+    expect(consume).toHaveBeenCalledWith("k1", "rpm", null, 1, 1, 0);
+  });
+});
+
 describe("createRateLimiter — headers / fields", () => {
   it("remaining decreases with consumption", async () => {
     const store = new InMemoryRateLimitStore();
