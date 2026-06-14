@@ -147,7 +147,7 @@
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
-  <header class="flex items-start justify-between gap-3">
+  <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div class="min-w-0">
       <h1 class="page-title">{$t('API Keys')}</h1>
       <p class="section-desc">
@@ -189,8 +189,8 @@
       <p>{$t('No API keys yet. Create one to let a client authenticate against the gateway.')}</p>
     </div>
   {:else}
-    <div class="table-wrap">
-      <table class="table-base">
+    <div class="cards-table-frame">
+      <table class="cards-table">
         <thead class="table-head">
           <tr>
             <th class="px-3 py-2">{$t('Name')}</th>
@@ -206,18 +206,18 @@
         </thead>
         <tbody>
           {#each keys as key (key.key_id)}
-            <tr data-testid="key-row" class="table-row align-top">
-              <td class="px-3 py-2">
+            <tr data-testid="key-row" class="align-top">
+              <td data-label={$t('Name')} class="px-3 py-2">
                 {#if key.name}
                   <span class="text-ink-strong">{key.name}</span>
                 {:else}
                   <span class="text-ink-muted">{$t('Unnamed')}</span>
                 {/if}
               </td>
-              <td class="px-3 py-2">
+              <td data-label={$t('Key (prefix)')} class="px-3 py-2">
                 <code class="font-mono text-ink-strong">{key.prefix}</code>
               </td>
-              <td class="px-3 py-2">
+              <td data-label={$t('Role')} class="px-3 py-2">
                 <span class="text-ink-body">{key.role}</span>
                 {#if key.role === 'root'}
                   <p
@@ -228,11 +228,11 @@
                   </p>
                 {/if}
               </td>
-              <td class="px-3 py-2 text-ink-muted">
+              <td data-label={$t('Caps')} class="px-3 py-2 text-ink-muted">
                 <div>{$t('Allowed lanes')}: {key.allowed_lanes?.join(', ') || $t('No cap')}</div>
                 <div>{$t('Custom model')}: {key.allow_custom_model ? $t('yes') : $t('no')}</div>
               </td>
-              <td class="px-3 py-2 text-ink-muted">
+              <td data-label={$t('Rate limit')} class="px-3 py-2 text-ink-muted">
                 <div>{$t('RPM')}: {limitLabel(key.rate_limit_rpm)}</div>
                 <div>{$t('TPM')}: {limitLabel(key.rate_limit_tpm)}</div>
                 <!-- Concurrency null = unlimited (NOT inherit), unlike the rate limits above. -->
@@ -240,7 +240,7 @@
                   {$t('Concurrency')}: {key.concurrency_limit ?? $t('Unlimited')}
                 </div>
               </td>
-              <td class="px-3 py-2 text-ink-muted">
+              <td data-label={$t('Budget')} class="px-3 py-2 text-ink-muted">
                 {#if budgetParts(key).length > 0}
                   <div>{budgetParts(key).join(' · ')}</div>
                   <div class="text-xs">
@@ -252,7 +252,7 @@
                   <span>{$t('None')}</span>
                 {/if}
               </td>
-              <td class="px-3 py-2 text-ink-muted">
+              <td data-label={$t('Memory')} class="px-3 py-2 text-ink-muted">
                 {#if key.memory_mode === 'off'}
                   <span>{$t('Off')}</span>
                 {:else}
@@ -267,14 +267,14 @@
                   {/if}
                 {/if}
               </td>
-              <td class="px-3 py-2">
+              <td data-label={$t('Status')} class="px-3 py-2">
                 {#if key.disabled}
                   <span class="badge-neutral">{$t('disabled')}</span>
                 {:else}
                   <span class="badge-ok">{$t('active')}</span>
                 {/if}
               </td>
-              <td class="px-3 py-2 text-right">
+              <td data-label={$t('Actions')} class="px-3 py-2 lg:text-right">
                 {#if !key.disabled}
                   <div class="flex justify-end gap-2">
                     <button type="button" class="btn-secondary" onclick={() => startEdit(key)}

@@ -174,7 +174,7 @@
   </div>
 
   <!-- Stat cards -->
-  <div class="grid grid-cols-2 gap-3 md:grid-cols-4 md:gap-4">
+  <div class="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Requests')}</div>
       <div class="mt-1 text-2xl font-semibold text-slate-900">{formatCount(stats.total)}</div>
@@ -206,7 +206,7 @@
 
   <!-- Token stat cards: Total / Input / Output / Cached — the real SQL aggregate
        over the selected window (not a sampled client-side reduce). -->
-  <div class="mt-3 grid grid-cols-2 gap-3 md:mt-4 md:grid-cols-4 md:gap-4">
+  <div class="mt-3 grid grid-cols-2 gap-3 md:mt-4 lg:grid-cols-4 lg:gap-4">
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
         {$t('Total tokens')}
@@ -353,7 +353,7 @@
               >
                 <td class="px-3 py-2">
                   <a
-                    class="link-inline font-mono text-ink-strong"
+                    class="link-inline block max-w-[7rem] truncate font-mono text-ink-strong lg:max-w-none"
                     href={detailHref(r.trace_id)}
                     title={r.trace_id}>{r.trace_id}</a
                   >

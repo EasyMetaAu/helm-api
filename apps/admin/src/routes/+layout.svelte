@@ -158,7 +158,7 @@
       class="flex h-16 shrink-0 items-center gap-3 border-b border-slate-200 bg-white/80 px-4 backdrop-blur md:px-6"
     >
       <button
-        class="-ml-1 rounded-lg p-2 text-slate-500 hover:bg-slate-100 md:hidden"
+        class="-ml-1 flex h-11 w-11 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 md:hidden"
         aria-label={$t('Open navigation')}
         onclick={() => (navOpen = true)}
       >

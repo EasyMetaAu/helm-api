@@ -73,11 +73,11 @@
   <!-- Live gateway health -->
   <span
     class="flex items-center gap-1.5 text-slate-500"
-    title={$t('Gateway status')}
+    title={$t(healthLabel)}
     data-testid="gateway-health"
   >
     <span class="h-2 w-2 shrink-0 rounded-full {dotClass}"></span>
-    <span class="hidden sm:inline">{$t(healthLabel)}</span>
+    <span class="sr-only sm:not-sr-only sm:inline">{$t(healthLabel)}</span>
   </span>
 
   {#if showVersion && version}

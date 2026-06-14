@@ -116,7 +116,9 @@
     {/each}
   </div>
 
-  <div class="flex items-center justify-between gap-3">
+  <div
+    class="sticky bottom-0 -mx-4 flex items-center justify-between gap-3 border-t border-border bg-canvas/95 px-4 py-3 backdrop-blur sm:static sm:m-0 sm:border-0 sm:bg-transparent sm:p-0 sm:backdrop-blur-none"
+  >
     <button type="button" class="btn-secondary" onclick={addRow}>{$t('Add policy')}</button>
     <div class="flex items-center gap-3">
       {#if saved}

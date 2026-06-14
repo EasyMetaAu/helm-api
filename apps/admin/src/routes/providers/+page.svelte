@@ -305,8 +305,8 @@
       </p>
     </div>
   {:else}
-    <div class="table-wrap">
-      <table class="table-base">
+    <div class="cards-table-frame">
+      <table class="cards-table">
         <thead class="table-head">
           <tr>
             <th class="px-3 py-2">{$t('Provider')}</th>
@@ -327,16 +327,16 @@
             {@const usage = usageByKey.get(k)}
             {@const quota = quotaByKey.get(k)}
             {@const saving = savingSchedule[k] === true}
-            <tr class="table-row align-top" data-testid="provider-account-row">
+            <tr class="align-top" data-testid="provider-account-row">
               <!-- Provider / account + type badge -->
-              <td class="px-3 py-3">
+              <td data-label={$t('Provider')} class="px-3 py-3">
                 <div class="font-medium text-ink-body">{row.provider.name}</div>
                 <code class="font-mono text-xs text-ink-strong">{row.account.account}</code>
                 <div class="mt-1"><span class="badge-neutral">{typeBadge(row.provider)}</span></div>
               </td>
 
               <!-- Status (+ parked pill) -->
-              <td class="px-3 py-3">
+              <td data-label={$t('Status')} class="px-3 py-3">
                 {#if row.account.healthy}
                   <span class="badge-ok">{$t('connected')}</span>
                 {:else}
@@ -348,7 +348,7 @@
               </td>
 
               <!-- Egress proxy (redacted; "Direct" when none) -->
-              <td class="px-3 py-3 text-xs">
+              <td data-label={$t('Proxy')} class="px-3 py-3 text-xs">
                 {#if proxyLabel(row.account.proxy)}
                   <span class="badge-neutral font-mono" title={proxyTitle(row.account.proxy)}
                     >{proxyLabel(row.account.proxy)}</span
@@ -359,7 +359,7 @@
               </td>
 
               <!-- Effective routable models (network-free; pills capped +N) -->
-              <td class="px-3 py-3">
+              <td data-label={$t('Models')} class="px-3 py-3">
                 {#if row.account.models.length > 0}
                   {@const shown = row.account.models.slice(0, MODELS_SHOWN)}
                   {@const extra = row.account.models.length - shown.length}
@@ -377,7 +377,7 @@
               </td>
 
               <!-- Today's usage -->
-              <td class="px-3 py-3 text-xs">
+              <td data-label={$t('Today')} class="px-3 py-3 text-xs">
                 {#if usage && usage.requests > 0}
                   <div class="text-ink-body">
                     {$t('{n} req', { n: formatCount(usage.requests) })}
@@ -391,7 +391,7 @@
               </td>
 
               <!-- Quota / session windows -->
-              <td class="px-3 py-3">
+              <td data-label={$t('Quota')} class="px-3 py-3">
                 {#if quota && quota.windows.length > 0}
                   <div class="flex w-40 flex-col gap-1.5">
                     {#each quota.windows as w (w.key)}
@@ -418,12 +418,12 @@
               </td>
 
               <!-- Priority (inline, lower = served first) -->
-              <td class="px-3 py-3">
+              <td data-label={$t('Priority')} class="px-3 py-3">
                 <input
                   type="number"
                   min="0"
                   step="1"
-                  class="w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50"
+                  class="min-h-11 w-16 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50 md:min-h-0"
                   value={row.account.priority}
                   disabled={saving}
                   aria-label={$t('Priority')}
@@ -433,10 +433,10 @@
               </td>
 
               <!-- Schedulable (inline toggle) -->
-              <td class="px-3 py-3">
+              <td data-label={$t('Schedulable')} class="px-3 py-3">
                 <input
                   type="checkbox"
-                  class="h-4 w-4 disabled:opacity-50"
+                  class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
                   checked={row.account.schedulable}
                   disabled={saving}
                   aria-label={$t('Schedulable')}
@@ -450,11 +450,11 @@
               </td>
 
               <!-- Token expiry -->
-              <td class="px-3 py-3 text-ink-muted">{expiryLabel(row.account)}</td>
+              <td data-label={$t('Expires')} class="px-3 py-3 text-ink-muted">{expiryLabel(row.account)}</td>
 
               <!-- Actions -->
-              <td class="px-3 py-3 text-right">
-                <div class="inline-flex gap-2">
+              <td data-label={$t('Actions')} class="px-3 py-3 lg:text-right">
+                <div class="flex flex-wrap gap-2 lg:inline-flex lg:flex-nowrap">
                   <button
                     type="button"
                     class="btn-secondary"

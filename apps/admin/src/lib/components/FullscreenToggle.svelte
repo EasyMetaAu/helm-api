@@ -22,7 +22,7 @@
   aria-label={label}
   title={label}
   aria-pressed={active}
-  class="rounded border border-border bg-surface px-2 py-1 text-ink-muted hover:bg-canvas"
+  class="inline-flex h-9 w-9 items-center justify-center rounded border border-border bg-surface text-ink-muted hover:bg-canvas md:h-7 md:w-7"
   onclick={() => (active = !active)}
 >
   {#if active}

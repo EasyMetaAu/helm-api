@@ -70,8 +70,9 @@
           {formatTimestamp(d.ts) || $t('time not recorded')}
         </p>
       </div>
-      <div class="flex items-center gap-2">
-        <code class="rounded bg-slate-100 px-2 py-1 font-mono text-xs text-slate-700"
+      <div class="flex flex-wrap items-center gap-2">
+        <code
+          class="basis-full rounded bg-slate-100 px-2 py-1 font-mono text-xs text-slate-700 md:basis-auto"
           >{d.trace_id}</code
         >
         <button type="button" data-testid="copy-trace" class="btn-secondary" onclick={copyTrace}

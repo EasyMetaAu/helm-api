@@ -85,7 +85,7 @@
       </p>
     </div>
 
-    <label class="flex items-center gap-3">
+    <label class="flex min-h-11 items-center gap-3 py-1.5 md:min-h-0 md:py-0">
       <input type="checkbox" class="checkbox" name="eval_enabled" bind:checked={evalEnabled} />
       <span class="field-label">{$t('Enable Layer-2 eval')}</span>
       <span class="badge-eval">{$t('Layer-2')}</span>
@@ -191,7 +191,7 @@
         <code>classifier.yaml</code>.
       </p>
     </div>
-    <dl data-testid="eval-details" class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+    <dl data-testid="eval-details" class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm">
       <dt class="text-ink-muted">{$t('Model')}</dt>
       <dd class="font-mono text-ink-strong">{cfg.eval.model}</dd>
       <dt class="text-ink-muted">{$t('Temperature')}</dt>

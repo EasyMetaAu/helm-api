@@ -165,7 +165,7 @@
   <button
     type="button"
     data-testid="refresh-toggle"
-    class="btn-secondary -ml-px rounded-l-none px-1.5"
+    class="btn-secondary -ml-px min-w-11 rounded-l-none px-1.5 md:min-w-0"
     aria-haspopup="menu"
     aria-expanded={open}
     aria-label={$t('Auto refresh')}

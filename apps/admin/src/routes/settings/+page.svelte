@@ -102,7 +102,7 @@
           min="1"
           max="3650"
           data-testid="retention-days"
-          class="input-sm w-32"
+          class="input-sm w-32 min-h-11 md:min-h-0"
           bind:value={form.payload_retention_days}
         />
         <span class="field-help">{$t('Older bodies are deleted automatically.')}</span>
@@ -136,7 +136,7 @@
             min="0"
             step="1"
             data-testid="rate-limit-default-rpm"
-            class="input-sm w-32"
+            class="input-sm w-32 min-h-11 md:min-h-0"
             bind:value={form.rate_limit_default_rpm}
           />
         </label>
@@ -147,7 +147,7 @@
             min="0"
             step="1"
             data-testid="rate-limit-default-tpm"
-            class="input-sm w-32"
+            class="input-sm w-32 min-h-11 md:min-h-0"
             bind:value={form.rate_limit_default_tpm}
           />
         </label>
@@ -160,7 +160,7 @@
 
       <label class="flex flex-col gap-1">
         <span class="font-medium">{$t('Log level')}</span>
-        <select data-testid="log-level" class="select w-40" bind:value={form.log_level}>
+        <select data-testid="log-level" class="select w-40 min-h-11 md:min-h-0" bind:value={form.log_level}>
           {#each LOG_LEVEL_OPTIONS as level (level)}
             <option value={level}>{level}</option>
           {/each}
@@ -190,7 +190,7 @@
         </span>
       </label>
 
-      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 sm:flex-row sm:gap-6">
+      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 lg:flex-row lg:gap-6">
         <label class="flex flex-col gap-1">
           <span class="font-medium">{$t('Minimum queue size')}</span>
           <input
@@ -199,7 +199,7 @@
             max="100"
             step="1"
             data-testid="concurrency-queue-min-size"
-            class="input-sm w-32"
+            class="input-sm w-32 min-h-11 md:min-h-0"
             bind:value={form.concurrency_queue_min_size}
           />
           <span class="field-help">{$t('Fixed lower bound on how many requests may wait.')}</span>
@@ -211,7 +211,7 @@
             min="0"
             step="0.5"
             data-testid="concurrency-queue-multiplier"
-            class="input-sm w-32"
+            class="input-sm w-32 min-h-11 md:min-h-0"
             bind:value={form.concurrency_queue_size_multiplier}
           />
           <span class="field-help"
@@ -228,7 +228,7 @@
             max="300000"
             step="1000"
             data-testid="concurrency-queue-timeout"
-            class="input-sm w-32"
+            class="input-sm w-32 min-h-11 md:min-h-0"
             bind:value={form.concurrency_queue_wait_timeout_ms}
           />
           <span class="field-help">{$t('Waiting longer than this returns 429.')}</span>
@@ -252,7 +252,7 @@
         </span>
       </label>
 
-      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 sm:flex-row sm:gap-6">
+      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 lg:flex-row lg:gap-6">
         <label class="flex flex-col gap-1">
           <span class="font-medium">{$t('Gap between requests (ms)')}</span>
           <input
@@ -261,7 +261,7 @@
             max="10000"
             step="50"
             data-testid="user-message-queue-delay"
-            class="input-sm w-32"
+            class="input-sm w-32 min-h-11 md:min-h-0"
             bind:value={form.user_message_queue_delay_ms}
           />
           <span class="field-help"
@@ -276,7 +276,7 @@
             max="300000"
             step="500"
             data-testid="user-message-queue-timeout"
-            class="input-sm w-32"
+            class="input-sm w-32 min-h-11 md:min-h-0"
             bind:value={form.user_message_queue_wait_timeout_ms}
           />
           <span class="field-help">{$t('Waiting longer than this returns 503.')}</span>
