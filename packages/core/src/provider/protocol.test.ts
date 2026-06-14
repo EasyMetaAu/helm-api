@@ -45,7 +45,6 @@ function input(
     hasNativeRequest: true,
     request: request(),
     targetProviderProtocol: "anthropic_messages",
-    fallbackMayUseDifferentProviderProtocol: false,
     providerRequiresCompatibilityRewrite: false,
     providerSupportsPassthrough: true,
     ...overrides,
@@ -117,20 +116,18 @@ describe("canUseNativePassthrough", () => {
     ).toEqual({ ok: true });
   });
 
-  it("7) disables when a heterogeneous fallback chain may pick a different provider protocol", () => {
-    expect(
-      canUseNativePassthrough(input({ fallbackMayUseDifferentProviderProtocol: true })),
-    ).toEqual({ ok: false, reason: "fallback_may_change_provider_protocol" });
+  it("does not inspect later fallback candidates; passthrough is per-attempt", () => {
+    expect(canUseNativePassthrough(input())).toEqual({ ok: true });
   });
 
-  it("8) disables when the provider requires a compatibility rewrite (developer-role / schema remap)", () => {
+  it("7) disables when the provider requires a compatibility rewrite (developer-role / schema remap)", () => {
     expect(canUseNativePassthrough(input({ providerRequiresCompatibilityRewrite: true }))).toEqual({
       ok: false,
       reason: "provider_requires_compatibility_rewrite",
     });
   });
 
-  it("9) disables when the resolved provider client has no nativePassthrough method", () => {
+  it("8) disables when the resolved provider client has no nativePassthrough method", () => {
     expect(canUseNativePassthrough(input({ providerSupportsPassthrough: false }))).toEqual({
       ok: false,
       reason: "provider_lacks_passthrough",
@@ -146,7 +143,6 @@ describe("canUseNativePassthrough", () => {
           hasNativeRequest: false,
           request: request({ protocol: "openai_chat", stream: true }),
           targetProviderProtocol: "anthropic_messages",
-          fallbackMayUseDifferentProviderProtocol: true,
           providerRequiresCompatibilityRewrite: true,
           providerSupportsPassthrough: false,
         }),
@@ -162,7 +158,6 @@ describe("canUseNativePassthrough", () => {
     // memory, fallback and breaker must already have run before execute asks this.
     expect(Object.keys(input()).sort()).toEqual([
       "enabled",
-      "fallbackMayUseDifferentProviderProtocol",
       "hasNativeRequest",
       "providerRequiresCompatibilityRewrite",
       "providerSupportsPassthrough",

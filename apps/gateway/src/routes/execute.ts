@@ -309,44 +309,20 @@ function resolveAttemptTarget(input: {
 // build the body-free telemetry trail. The guard (core protocol.ts) is the pure
 // decision; here we only assemble its inputs: the runtime flag, whether a verbatim
 // native body rode the request, whether the resolved client implements
-// nativePassthrough, and a LOOKAHEAD over later candidates — if any resolves to a
-// DIFFERENT provider protocol the chain is heterogeneous, so passthrough must stay off
-// (the response must be IR-normalizable to feed any fallback translator).
+// nativePassthrough. This is intentionally PER-ATTEMPT: a same-protocol Anthropic
+// head can passthrough, while a later OpenAI/Responses fallback translates if reached.
 function decideNativePassthroughForAttempt(input: {
   req: InternalRequest;
-  plan: ExecutionPlan;
-  candidateIndex: number;
   target: ResolvedAttemptTarget;
-  defaultProvider: ProviderClient;
-  providers?: Map<string, ProviderClient>;
-  registry: ProviderRegistry;
-  knownOAuthPrefixes?: ReadonlySet<string>;
-  oauthAliases?: () => ReadonlySet<string>;
-  oauthProviderProtocols?: ReadonlyMap<string, ProviderProtocolMetadata>;
   enabled: boolean;
 }): PassthroughTelemetry {
-  const { req, plan, candidateIndex, target } = input;
-  const fallbackMayUseDifferentProviderProtocol = plan.candidate_chain
-    .slice(candidateIndex + 1)
-    .some((fallbackAlias) => {
-      const fallback = resolveAttemptTarget({
-        alias: fallbackAlias,
-        defaultProvider: input.defaultProvider,
-        providers: input.providers,
-        registry: input.registry,
-        knownOAuthPrefixes: input.knownOAuthPrefixes,
-        oauthAliases: input.oauthAliases,
-        oauthProviderProtocols: input.oauthProviderProtocols,
-      });
-      return fallback.targetProviderProtocol !== target.targetProviderProtocol;
-    });
+  const { req, target } = input;
 
   const decision = canUseNativePassthrough({
     enabled: input.enabled,
     hasNativeRequest: req.native_request !== undefined,
     request: req,
     targetProviderProtocol: target.targetProviderProtocol,
-    fallbackMayUseDifferentProviderProtocol,
     providerRequiresCompatibilityRewrite: target.providerRequiresCompatibilityRewrite,
     // Stream-aware feature detection: a stream request needs the streaming sibling
     // (nativePassthroughStream); a non-stream request needs nativePassthrough. A
@@ -601,7 +577,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     const needsCachedContent =
       typeof req.cached_content === "string" && req.cached_content.length > 0;
 
-    for (const [candidateIndex, alias] of plan.candidate_chain.entries()) {
+    for (const alias of plan.candidate_chain) {
       const startedAt = now();
       const elapsed = () => Math.max(0, now() - startedAt);
 
@@ -683,15 +659,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // breaker / abort / free-429 / chain-advance below are identical either way.
       const passthrough = decideNativePassthroughForAttempt({
         req,
-        plan,
-        candidateIndex,
         target,
-        defaultProvider,
-        providers,
-        registry,
-        knownOAuthPrefixes,
-        oauthAliases,
-        oauthProviderProtocols,
         enabled: nativeProtocolPassthroughEnabled?.() === true,
       });
 

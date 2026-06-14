@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-14 · 原生直通按 attempt 判断 + Anthropic SSE 元数据修复（docs/02/05；原则 5/7/8）
+
+- **背景**：线上 tuned `claude-opus -> premium` 链被 `fallback_may_change_provider_protocol` 整链否决，导致首个 Anthropic→Anthropic attempt 也被迫走翻译；这会放大 Anthropic SSE 翻译瑕疵并拖慢 Claude Code。用户明确要求保持 lanes 不变，只修代码。
+- **核心改动**：① native passthrough guard 删除“后续 fallback 可能跨协议”的输入与禁用原因，改为只判断**当前 attempt**：source protocol == target provider protocol、runtime flag on、native carrier 存在、provider 支持且无需兼容性 rewrite 即直通；② `execute` 不再 lookahead 解析后续候选，Anthropic head 可以直通，若首包前失败再让后续 `openai_chat` / `openai_responses` fallback 走翻译；③ `convertOpenAIStreamToAnthropic` 的 `message_start` 不再发空 `id/model`，优先取首个 upstream chunk，缺失时用 pipeline 传入的 `request_id/final.provider_model` 兜底并规范成 `msg_*` id。
+- **治理与取舍**：治理路径不变，auth/routing/budget/capture/memory/telemetry 仍先于 execute；`provider_attempts[]` 逐 attempt 记录 `passthrough_used` / `protocol_mismatch`，`final.provider_model` 仍记录实际落点。流式 fallback 只发生在首包前，首包后仍不能换模型，这是既有 contract。
+- **验证**：补回归测试覆盖 heterogeneous chain 的 head Anthropic passthrough、Anthropic passthrough 首包前失败后 fallback 到 translated OpenAI、stream 同场景，以及 translated Anthropic `message_start.id/model` 非空。focused `pnpm exec vitest run packages/core/src/provider/protocol.test.ts apps/gateway/src/routes/execute.test.ts packages/core/src/protocol/anthropic/stream.test.ts` 绿（96 tests）。
+
 ## 2026-06-14 · LiteLLM 协议互译首批 P1 修复（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）
 
 - **背景**：基于本地 LiteLLM 对照和 wiki/spec，本轮先落地最小高风险修复：Responses 非原生流式 prelude 重复、Anthropic-only provider_raw 泄露到 OpenAI-compatible target、Anthropic native 空文本块导致上游 400、OpenAI target 收到 Anthropic `cache_control`。
@@ -25,21 +32,13 @@
 - **TODO**：未提交/未部署（用户要求时再 commit/push）；e2e（Playwright）真账号手验待做；reasoning delta 展示 + 模型严格校验为可选增强。
 
 
-## 2026-06-14 · 原生直通保真实施 + 可执行验收（docs/native-passthrough-fidelity-spec；原则 7/8）
-
-- **背景**：用户要求 Anthropic Messages 和 OpenAI Responses 的 native passthrough 尽量保持客户端原协议与原请求内容，同时保留 Helm 自身治理、优化和 memory 注入，并参考 `claude-relay-service` 的账号安全策略（尤其防封号策略）。本次按 TDD 先补可执行验收，再收敛实现。
-- **核心改动**：① 新增 typed `NativePassthroughCarrier`（`protocol/body/raw_body/headers/mutations`）和共享 helper，route 在 `/v1/messages`、`/v1/responses` 盖戳 raw body + client headers；② provider native 请求统一走 `prepareNativePassthroughRequest`，drop auth/hop-by-hop/`x-helm-*`/cookie/secret-like client headers，替换 provider auth，默认保留安全 identity/session headers（UA、accept、session_id、x-client-request-id、originator 等），合并 Anthropic/OpenAI beta，并在 body 未变时转发 raw JSON text；③ streaming native path 改为 route 可写 raw SSE frame，comments/keepalives/no-data frames 与 CRLF 边界不再被 splitter 丢弃，Responses native stream 不再合成 prelude、不改写 upstream id；④ Responses/Codex profile 对 `store:true` 强制 `store:false` 并记录 `body_shims_applied:["store_forced_false"]` + `provider_profile_applied:"codex_official_safe"`；Anthropic dynamic-auth stream 的 `accept-encoding: identity` 仅在 official-safe profile 触发并记录；⑤ OAuth pool 增加 native sticky session（session_id/x-session-id/x-client-request-id/prompt_cache_key/conversation_id/metadata），同一 session 在 TTL 内绑定同一账号。
-- **治理与可观测性**：native path 仍经过 auth、rate limit、concurrency、budget、route/fallback guard、payload capture、memory inject/observe 和 telemetry；每次 attempt 的 `passthrough_*` 字段与 mutation ledger 进 `DecisionRecord.provider_attempts[]`，ledger 只记录修改类型，不写 secrets 或完整 body。memory 注入保持尾部 `<system-reminder>` 追加；修改 body 时自动清掉 raw body，避免伪装 byte-identical。
-- **验收体系**：新增 `scripts/passthrough/*` 和 package scripts：`test:passthrough:unit`（helper/provider/route/pipeline focused tests）、`test:passthrough:e2e`（fake upstream + route/execute deterministic golden cases）、`test:passthrough:live:*`（真实 Claude CLI / Codex CLI + telemetry proof）和 `test:passthrough:final`。live 脚本 fail-closed：必须看到 CLI sentinel、真实 CLI exit 0、admin telemetry 中 `passthrough_used:true`、协议一致、ledger 不含 Helm API key；live report 的 stdout/stderr 只写长度/行数/hash/sentinel/secret-redaction 摘要，不写完整 prompt 或输出正文。
-- **验证**：`ast-grep` 已用于 native carrier / route glue / mutation ledger 检查；`pnpm lint` 绿；`pnpm typecheck` 绿；`pnpm build` 绿；`pnpm test:passthrough` 绿（323 focused unit + 11 deterministic e2e）；`pnpm test` 绿（255 files / 3578 tests）；`pnpm test:passthrough:final` 绿。live final 使用本地 Helm 测试实例代理真实 upstream，Claude Code `2.1.175` 与 Codex CLI `0.139.0` 均返回 `HELM_LIVE_OK`，并从本地 admin telemetry 证明 `anthropic_messages` / `openai_responses` native passthrough。live 报告只作验收产物，不提交。
-- **取舍 / TODO**：provider profile 目前以代码路径记录（`codex_official_safe` / `anthropic_official_safe`），尚未做成完整 YAML 配置面；admin request detail 已有原始 attempt 字段，但 SPA 专门展示 passthrough ledger 可作为后续 UX 增强；Responses live CLI 本身未必发送 `store:true`，因此 `store_forced_false` 的强断言放在 deterministic fake-upstream case。
-
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-14 · 原生直通保真实施 + 可执行验收（docs/native-passthrough-fidelity-spec；原则 7/8）：建立 native carrier、provider safe profile、raw SSE byte relay、Responses/Codex passthrough、OAuth sticky session 与 live/fake 验收脚本；证明 native path 保持治理/telemetry/memory/预算，mutation ledger 只记修改类型不泄露正文；focused/unit/e2e/live final 当时全绿，TODO 为 provider profile YAML 化与 admin ledger UX。
 
 ### 2026-06-14 · 协议层 review 修复：4 协议保真 + memory 注释纠偏（多 spec；原则 1/7/8）：修 Anthropic stream cache_creation 计费、Gemini 媒体/tool_result、Responses input_audio、Anthropic tool_choice、远端 audio document 模态误判，并把 memory/native passthrough 过期注释改成实际尾部 system-reminder/default ON 模型；focused protocol/gateway suites + typecheck/lint 绿。
 

@@ -1465,9 +1465,10 @@ describe("createExecute — gateway execution adapter", () => {
 // Native protocol passthrough (issue #217, Phase 1). The executor forwards a
 // VERBATIM native Anthropic body to an Anthropic upstream (skipping the 4 lossy
 // translations) and returns the native response untouched, ONLY when the runtime
-// flag is on, the inbound protocol matches the target wire protocol, the chain is
-// homogeneous, and the provider client implements nativePassthrough. The branch is a
-// body+response substitution INSIDE the existing per-candidate try/catch — so
+// flag is on, the inbound protocol matches THIS target wire protocol, and the
+// provider client implements nativePassthrough. The branch is a body+response
+// substitution INSIDE the existing per-candidate try/catch — so heterogeneous later
+// fallback candidates remain free to translate if this candidate fails before output.
 // breaker / abort / free-429 / chain-advance semantics are identical.
 describe("createExecute — native protocol passthrough (#217)", () => {
   // model is the ROUTING ALIAS a client sends (e.g. `anthropic/claude-x`), NOT a
@@ -1732,7 +1733,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(okRow?.passthrough_disable_reason).toBe("feature_flag_disabled");
   });
 
-  it("cross-protocol fallback chain [anthropic, openai], flag ON → head attempt disabled (fallback_may_change_provider_protocol) and translates", async () => {
+  it("cross-protocol fallback chain [anthropic, openai], flag ON → head attempt still uses same-protocol passthrough", async () => {
     const provider = anthropicProvider(NATIVE_RESP);
     const execute = createExecute({
       defaultProvider: provider,
@@ -1758,13 +1759,62 @@ describe("createExecute — native protocol passthrough (#217)", () => {
 
     const out = await execute(plan(["a", "b"]), anthropicReq());
     expect(out.final.status).toBe("ok");
-    // The HEAD candidate (anthropic) is served, but via translate — a later candidate
-    // resolves to a DIFFERENT provider protocol, so passthrough is disabled.
-    expect(provider.nativePassthrough).not.toHaveBeenCalled();
-    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+    // The HEAD candidate is same-protocol, so it passthroughs even though a later
+    // fallback candidate would need translation.
+    expect(provider.nativePassthrough).toHaveBeenCalledTimes(1);
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
     const okRow = out.attempts[0];
-    expect(okRow?.passthrough_used).toBe(false);
-    expect(okRow?.passthrough_disable_reason).toBe("fallback_may_change_provider_protocol");
+    expect(okRow?.passthrough_used).toBe(true);
+    expect(okRow?.passthrough_disable_reason).toBeNull();
+  });
+
+  it("cross-protocol fallback chain: failed Anthropic passthrough advances to translated OpenAI attempt", async () => {
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockRejectedValue(new UpstreamError("upstream_error", "boom")),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const tail = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "translated-tail" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient & { chatCompletion: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map<string, ProviderClient>([
+        ["anthro", head],
+        ["openai", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        b: {
+          providerName: "openai",
+          providerModel: "gpt-x",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a", "b"]), anthropicReq());
+    expect(head.nativePassthrough).toHaveBeenCalledTimes(1);
+    expect(tail.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(tail.chatCompletion.mock.calls[0]?.[0]).toMatchObject({ model: "gpt-x" });
+    expect(out.final).toEqual({ status: "ok", alias: "b", providerModel: "gpt-x" });
+    expect(out.body).toEqual({ id: "translated-tail" });
+    expect(out.attempts[0]?.status).toBe("error");
+    expect(out.attempts[0]?.passthrough_used).toBe(true);
+    expect(out.attempts[1]?.status).toBe("ok");
+    expect(out.attempts[1]?.target_provider_protocol).toBe("openai_chat");
+    expect(out.attempts[1]?.passthrough_used).toBe(false);
+    expect(out.attempts[1]?.passthrough_disable_reason).toBe("protocol_mismatch");
   });
 
   it("an UpstreamError from nativePassthrough records a breaker failure and advances the chain", async () => {
@@ -2408,6 +2458,57 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.final.status).toBe("ok");
     expect(out.stream).not.toBeNull();
     expect(out.nativePassthrough).toBe(true);
+  });
+
+  it("stream cross-protocol fallback: failed Anthropic passthrough advances to translated OpenAI stream", async () => {
+    // biome-ignore lint/correctness/useYield: pre-first-chunk failure throws before any yield
+    async function* diesBeforeFirst(): AsyncGenerator<string> {
+      throw new UpstreamError("upstream_error", "connect failed");
+    }
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(diesBeforeFirst()),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const tail = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn().mockReturnValue(gen(["data: {}\n\n"])),
+    } as unknown as ProviderClient & { chatCompletionStream: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map<string, ProviderClient>([
+        ["anthro", head],
+        ["openai", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        b: {
+          providerName: "openai",
+          providerModel: "gpt-x",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a", "b"]), anthropicStreamReq());
+
+    expect(head.nativePassthroughStream).toHaveBeenCalledTimes(1);
+    expect(tail.chatCompletionStream).toHaveBeenCalledTimes(1);
+    expect(out.final).toEqual({ status: "ok", alias: "b", providerModel: "gpt-x" });
+    expect(out.stream).not.toBeNull();
+    expect(out.attempts[0]?.passthrough_used).toBe(true);
+    expect(out.attempts[1]?.target_provider_protocol).toBe("openai_chat");
+    expect(out.attempts[1]?.passthrough_used).toBe(false);
+    expect(out.attempts[1]?.passthrough_disable_reason).toBe("protocol_mismatch");
   });
 
   it("a client abort during the stream peek records client_abort without a breaker failure", async () => {

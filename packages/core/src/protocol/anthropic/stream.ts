@@ -120,6 +120,13 @@ export const OpenAIChunkSchema = z
   .passthrough();
 export type OpenAIChunk = z.infer<typeof OpenAIChunkSchema>;
 
+export interface OpenAIToAnthropicStreamOptions {
+  /** Fallback id used when the upstream stream does not expose one before message_start. */
+  id?: string;
+  /** Fallback served model used when the upstream stream does not expose one. */
+  model?: string;
+}
+
 // —— Anthropic SSE event schemas (the output alphabet of the state machine). ————
 // One discriminated union on `type`, mirroring the Anthropic Messages streaming
 // wire events. Deltas are themselves a discriminated union (text vs tool args).
@@ -292,15 +299,25 @@ function tempId(blockIndex: number): string {
 
 // —— Event constructors ————————————————————————————————————————————————————————
 
-function messageStartEvent(): AnthropicSSEEvent {
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function toAnthropicMessageId(value: string | undefined): string {
+  const raw = value ?? "helm_stream";
+  const safe = raw.replace(/[^A-Za-z0-9_-]/g, "_");
+  return safe.startsWith("msg_") ? safe : `msg_${safe}`;
+}
+
+function messageStartEvent(meta: { id?: string; model?: string }): AnthropicSSEEvent {
   // The skeleton usage carries zeros; the real input/output land on message_delta.
   return {
     type: "message_start",
     message: {
-      id: "",
+      id: toAnthropicMessageId(meta.id),
       type: "message",
       role: "assistant",
-      model: "",
+      model: meta.model ?? "unknown",
       content: [],
       stop_reason: null,
       stop_sequence: null,
@@ -364,6 +381,7 @@ function messageDeltaEvent(state: StreamState): AnthropicSSEEvent {
  */
 export async function* convertOpenAIStreamToAnthropic(
   chunks: AsyncIterable<OpenAIChunk>,
+  options: OpenAIToAnthropicStreamOptions = {},
 ): AsyncIterable<AnthropicSSEEvent> {
   const state = createState();
 
@@ -372,7 +390,10 @@ export async function* convertOpenAIStreamToAnthropic(
 
     if (!state.messageStarted) {
       state.messageStarted = true;
-      yield messageStartEvent();
+      yield messageStartEvent({
+        id: nonEmptyString(chunk.id) ?? nonEmptyString(options.id),
+        model: nonEmptyString(chunk.model) ?? nonEmptyString(options.model),
+      });
     }
 
     const choice = chunk.choices?.[0];
