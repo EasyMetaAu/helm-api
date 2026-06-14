@@ -1290,7 +1290,11 @@ describe("createExecute — native protocol passthrough (#217)", () => {
   function protocolRegistry(
     map: Record<
       string,
-      { providerName: string; providerModel: string; targetProviderProtocol: TargetProviderProtocol }
+      {
+        providerName: string;
+        providerModel: string;
+        targetProviderProtocol: TargetProviderProtocol;
+      }
     >,
   ): ProviderRegistry {
     return {
