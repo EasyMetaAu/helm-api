@@ -358,6 +358,290 @@ describe("openaiToAnthropicRequest", () => {
     expect(msgs[0]?.role).toBe("user");
     expect(JSON.stringify(body.messages)).not.toContain("Prefer metric units.");
   });
+
+  it("maps a raw base64 image part (data + mediaType) into an Anthropic base64 image block", () => {
+    // The `{ type:"image", data, mediaType }` shape (imageBlockFromPart's data branch):
+    // raw base64 bytes, no URL — distinct from the image_url data: path.
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", data: "QUJD", mediaType: "image/jpeg" },
+            // Missing mediaType -> defaults to image/png.
+            { type: "image", data: "REVG" },
+          ],
+        },
+      ],
+    });
+    const msgs = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content).toEqual([
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "QUJD" } },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "REVG" } },
+    ]);
+  });
+
+  it("drops an image part that carries neither data nor a usable url (imageBlockFromPart -> null)", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "look" },
+            // No data, and a non-data: url -> imageBlockFromPart returns null (dropped).
+            { type: "image", url: "https://example.com/cat.png" },
+          ],
+        },
+      ],
+    });
+    const msgs = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content).toEqual([{ type: "text", text: "look" }]);
+  });
+
+  it("maps a document part with a base64 data: url into an Anthropic base64 document block", () => {
+    // documentBlockFromPart's `url` branch where the url IS a data: URL -> base64 source.
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              url: "data:application/pdf;base64,JVBERi0=",
+              filename: "inline.pdf",
+            },
+          ],
+        },
+      ],
+    });
+    const msgs = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content[0]).toEqual({
+      type: "document",
+      source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+      title: "inline.pdf",
+    });
+  });
+
+  it("drops a document part with neither fileId, data, nor url (documentBlockFromPart -> null)", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: [{ type: "document", note: "nothing usable" }] }],
+    });
+    const msgs = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content).toEqual([]);
+  });
+
+  it("maps a base64 data: image_url inline image to an Anthropic base64 image block", () => {
+    // The OpenAI `image_url` content part with a data: URL -> base64 image (the
+    // image_url branch in textBlocksFromContent, lines 205-220).
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "what is this" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,SU1H" } },
+          ],
+        },
+      ],
+    });
+    const msgs = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content).toEqual([
+      { type: "text", text: "what is this" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "SU1H" } },
+    ]);
+  });
+
+  it("drops a non-data image_url (http urls are not inlined as base64)", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "remote" },
+            { type: "image_url", image_url: { url: "https://example.com/x.png" } },
+          ],
+        },
+      ],
+    });
+    const msgs = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content).toEqual([{ type: "text", text: "remote" }]);
+  });
+
+  it("falls back to {} when an assistant tool_call carries unparseable arguments", () => {
+    // The JSON.parse catch (lines 365-366): malformed arguments must not throw — the
+    // tool_use input degrades to an empty object.
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "t1", type: "function", function: { name: "run", arguments: "{not json" } },
+          ],
+        },
+      ],
+    });
+    const msgs = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content[0]).toEqual({ type: "tool_use", id: "t1", name: "run", input: {} });
+  });
+
+  it("emits an empty-text assistant turn when an assistant message has no content or tool_calls", () => {
+    // blocks.length === 0 -> the `[{ type:"text", text:"" }]` fallback (line 376).
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "assistant", content: null }],
+    });
+    const msgs = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]).toEqual({ role: "assistant", content: [{ type: "text", text: "" }] });
+  });
+
+  it("ignores a non-object thinking_blocks entry and a block missing both thinking and data", () => {
+    // thinkingBlocksFromMessage: a null entry and a block with neither `thinking` nor
+    // redacted `data` both yield [] (line 246 / the flatMap empty returns).
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "assistant",
+          content: "answer",
+          thinking_blocks: [null, { type: "thinking" }, { type: "thinking", thinking: "kept" }],
+        },
+      ],
+    });
+    const msgs = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(msgs[0]?.content).toEqual([
+      { type: "thinking", thinking: "kept" },
+      { type: "text", text: "answer" },
+    ]);
+  });
+
+  it("normalizes a bare context_management array into { edits: [...] } and derives the compact beta", () => {
+    // contextManagementEdits + normalizeAnthropicContextManagement: a bare array form
+    // (not { edits }) is wrapped; a compaction edit adds the compact beta downstream.
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      context_management: [{ type: "compaction" }],
+    });
+    expect(body.context_management).toEqual({ edits: [{ type: "compaction" }] });
+  });
+
+  it("uses r.max_tokens when max_completion_tokens is absent", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 99,
+    });
+    expect(body.max_tokens).toBe(99);
+  });
+
+  it("forwards a top-level tool cache_control breakpoint (preferred over the function-level one)", () => {
+    // The t.cache_control branch (line 438-439) takes precedence over fn.cache_control.
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          type: "function",
+          cache_control: { type: "ephemeral", ttl: "5m" },
+          function: {
+            name: "lookup",
+            parameters: { type: "object" },
+            cache_control: { type: "ephemeral" },
+          },
+        },
+      ],
+    });
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "5m" });
+  });
+
+  it("forwards a per-tool function cache_control breakpoint", () => {
+    // The fn.cache_control branch (not the top-level t.cache_control) lands on the tool.
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            parameters: { type: "object" },
+            cache_control: { type: "ephemeral" },
+          },
+        },
+      ],
+    });
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools[0]?.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("passes a non-function object tool_choice through verbatim (Anthropic-native shape)", () => {
+    // anthropicToolChoice else-branch (lines 474-476): an already-Anthropic
+    // { type:"tool", name } is forwarded unchanged.
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "x", parameters: { type: "object" } } }],
+      tool_choice: { type: "tool", name: "x" } as never,
+    });
+    expect(body.tool_choice).toEqual({ type: "tool", name: "x" });
+  });
+
+  it("maps tool_choice 'required' to Anthropic { type: 'any' } and 'none' to undefined", () => {
+    const required = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "x", parameters: { type: "object" } } }],
+      tool_choice: "required",
+    });
+    expect(required.tool_choice).toEqual({ type: "any" });
+    const none = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "x", parameters: { type: "object" } } }],
+      tool_choice: "none",
+    });
+    expect(none.tool_choice).toBeUndefined();
+  });
+
+  it("derives the context-management beta even when context_management is a non-object primitive", () => {
+    // contextManagementEdits short-circuits to [] for a non-object normalized value
+    // (line 167) while the header still flags context-management.
+    let seenBeta = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seenBeta = new Headers(init?.headers).get("anthropic-beta") ?? "";
+      return new Response(
+        JSON.stringify({
+          id: "m",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    return client
+      .chatCompletion({
+        model: "m",
+        messages: [{ role: "user", content: "hi" }],
+        context_management: "verbatim" as never,
+      })
+      .then(() => {
+        expect(seenBeta).toContain("context-management-2025-06-27");
+      });
+  });
 });
 
 // The OAuth subscription endpoint expects real Claude-Code traffic. Real CC injects
@@ -484,6 +768,30 @@ describe("anthropicToOpenAIResponse", () => {
     expect(choice?.finish_reason).toBe("tool_calls");
   });
 
+  it("tolerates a missing/non-array content and usage (defaults to empty text + zero tokens)", () => {
+    // content is not an array -> [] (line 499); usage absent -> all token counts 0.
+    const out = anthropicToOpenAIResponse(
+      { id: "msg_empty", stop_reason: "end_turn" },
+      "m",
+    ) as Record<string, unknown>;
+    const choice = (out.choices as Array<Record<string, unknown>>)[0];
+    expect((choice?.message as Record<string, unknown>).content).toBeNull();
+    expect(out.usage).toEqual({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  });
+
+  it("defaults the finish_reason to 'stop' for an unknown stop_reason", () => {
+    const out = anthropicToOpenAIResponse(
+      {
+        id: "x",
+        content: [{ type: "text", text: "hi" }],
+        stop_reason: "something_new",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      "m",
+    ) as Record<string, unknown>;
+    expect((out.choices as Array<Record<string, unknown>>)[0]?.finish_reason).toBe("stop");
+  });
+
   it("maps Anthropic cache read/write usage into OpenAI prompt token details", () => {
     const out = anthropicToOpenAIResponse(
       {
@@ -586,6 +894,145 @@ describe("translateAnthropicSSE", () => {
       total_tokens: 24,
       prompt_tokens_details: { cached_tokens: 3, cache_creation_tokens: 2 },
     });
+  });
+
+  it("maps a streaming tool_use (content_block_start + input_json_delta) to OpenAI tool_call deltas", async () => {
+    // content_block_start{type:tool_use} -> tool_call header; input_json_delta ->
+    // streamed arguments (lines 856-887). finish_reason=tool_calls on tool_use stop.
+    const res = sseResponse([
+      { type: "message_start", message: { id: "m" } },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "tu1", name: "get_weather" },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '{"city":' },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '"SF"}' },
+      },
+      { type: "message_delta", delta: { stop_reason: "tool_use" } },
+      { type: "message_stop" },
+    ]);
+    const chunks: string[] = [];
+    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    const joined = chunks.join("");
+    expect(joined).toContain('"id":"tu1"');
+    expect(joined).toContain('"name":"get_weather"');
+    // The first tool_call delta carries index 0 + the function header.
+    expect(joined).toContain('"index":0');
+    // Streamed args land inside the chunk JSON (inner quotes escaped).
+    expect(joined).toContain('{\\"city\\":');
+    expect(joined).toContain('\\"SF\\"}');
+    expect(joined).toContain('"finish_reason":"tool_calls"');
+    expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("accumulates cache tokens reported on message_delta and falls back to 'stop' for an unknown stop_reason", async () => {
+    // message_delta may carry cache usage (cache_read/creation) and an unmapped
+    // stop_reason; the cache fields accumulate (lines 892-895) and the finish falls
+    // back to "stop" (line 897 default), while the terminal usage chunk reflects them.
+    const res = sseResponse([
+      { type: "message_start", message: { id: "m", usage: { input_tokens: 5 } } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "pause_turn" },
+        usage: {
+          output_tokens: 3,
+          cache_read_input_tokens: 7,
+          cache_creation_input_tokens: 2,
+        },
+      },
+      { type: "message_stop" },
+    ]);
+    const chunks: string[] = [];
+    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    const joined = chunks.join("");
+    // Unmapped "pause_turn" -> default "stop".
+    expect(joined).toContain('"finish_reason":"stop"');
+    // Terminal usage frame carries the message_delta cache numbers.
+    const dataFrames = joined
+      .trimEnd()
+      .split("\n\n")
+      .filter((fr) => fr.startsWith("data:"));
+    const doneIdx = dataFrames.findIndex((fr) => fr.includes("[DONE]"));
+    const usageFrame = dataFrames[doneIdx - 1] as string;
+    expect(JSON.parse(usageFrame.slice(5).trim())).toMatchObject({
+      usage: {
+        prompt_tokens: 14, // 5 input + 7 cacheRead + 2 cacheCreation
+        completion_tokens: 3,
+        prompt_tokens_details: { cached_tokens: 7, cache_creation_tokens: 2 },
+      },
+    });
+  });
+
+  it("skips a content_block_start that is not a tool_use (e.g. a text block start)", async () => {
+    // The content_block_start branch only emits for tool_use; a text block start is a
+    // no-op (the else-of-if path inside content_block_start).
+    const res = sseResponse([
+      { type: "message_start", message: { id: "m" } },
+      { type: "content_block_start", index: 0, content_block: { type: "text" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "yo" } },
+      { type: "message_stop" },
+    ]);
+    const chunks: string[] = [];
+    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    const joined = chunks.join("");
+    expect(joined).toContain('"content":"yo"');
+    expect(joined).not.toContain("tool_calls");
+  });
+
+  it("skips malformed SSE frames and frames without a data line", async () => {
+    // A frame whose data: is not valid JSON is skipped (JSON.parse catch); a frame with
+    // no data: line is skipped too. The valid frames around them still translate.
+    const enc = new TextEncoder();
+    const body = [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"m"}}\n\n',
+      "event: ping\n\n", // no data line -> skipped
+      "event: junk\ndata: {not json}\n\n", // unparseable -> skipped
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ].join("");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(body));
+        controller.close();
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    const chunks: string[] = [];
+    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    const joined = chunks.join("");
+    expect(joined).toContain('"content":"ok"');
+    expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("returns immediately on an empty body (no events, no [DONE])", async () => {
+    const res = new Response(null, { status: 200 });
+    const chunks: string[] = [];
+    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    expect(chunks).toEqual([]);
+  });
+
+  it("re-throws a non-stall reader error unchanged (not wrapped as a timeout)", async () => {
+    const boom = new Error("stream broke");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(boom);
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    await expect(async () => {
+      for await (const _ of translateAnthropicSSE(res, "m")) {
+        // drain
+      }
+    }).rejects.toBe(boom);
   });
 
   it("returns at message_stop without waiting on the idle guard (terminal event stops the read)", async () => {
@@ -814,6 +1261,167 @@ describe("createAnthropicClient", () => {
       }),
     ).toThrow(/exactly one/);
   });
+
+  it("streams: translates the Anthropic SSE to OpenAI chunks (chatCompletionStream) and injects stream:true", async () => {
+    let sentBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body));
+      return sseResponse([
+        { type: "message_start", message: { id: "m", usage: { input_tokens: 4 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi" } },
+        { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } },
+        { type: "message_stop" },
+      ]);
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const chunks: string[] = [];
+    for await (const c of client.chatCompletionStream({
+      model: "claude-x",
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      chunks.push(c);
+    }
+    // The chat-stream path forces stream:true onto the translated Anthropic body.
+    expect(sentBody?.stream).toBe(true);
+    const joined = chunks.join("");
+    expect(joined).toContain('"role":"assistant"');
+    expect(joined).toContain('"content":"Hi"');
+    expect(joined).toContain('"finish_reason":"stop"');
+    expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("streams: throws UpstreamError before the first chunk on a non-2xx (no breaker-tripping mid-stream)", async () => {
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => jsonResponse({ error: "rate" }, 429)) as unknown as typeof fetch,
+    });
+    let caught: unknown;
+    try {
+      for await (const _ of client.chatCompletionStream({
+        model: "m",
+        messages: [{ role: "user", content: "x" }],
+      })) {
+        // must never yield
+      }
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect((caught as UpstreamError).upstreamStatus).toBe(429);
+  });
+
+  it("streams: 401-retries once before the first chunk (chatCompletionStream)", async () => {
+    let calls = 0;
+    let token = "AT1";
+    const seenAuth: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      seenAuth.push(new Headers(init?.headers).get("Authorization") ?? "");
+      if (calls === 1) return jsonResponse({ error: "expired" }, 401);
+      return sseResponse([
+        { type: "message_start", message: { id: "m" } },
+        { type: "message_stop" },
+      ]);
+    });
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => `Bearer ${token}`,
+        onUnauthorized: () => {
+          token = "AT2";
+        },
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const chunks: string[] = [];
+    for await (const c of client.chatCompletionStream({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      chunks.push(c);
+    }
+    expect(calls).toBe(2);
+    expect(seenAuth).toEqual(["Bearer AT1", "Bearer AT2"]);
+    expect(chunks.join("").trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("maps a connect/TTFB timeout (internal abort, no external signal) to UpstreamError(timeout)", async () => {
+    vi.useFakeTimers();
+    try {
+      // fetch that rejects the moment its signal aborts — the internal withTimeout
+      // controller fires at timeoutMs. isTimeout() && !isExternalAbort() -> timeout.
+      const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+        const signal = init?.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new Error("aborted"));
+            return;
+          }
+          signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      });
+      const client = createAnthropicClient({
+        config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static", timeoutMs: 50 },
+        fetch: fetchMock as unknown as typeof fetch,
+      });
+      const run = client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] });
+      const assertion = expect(run).rejects.toMatchObject({ errorClass: "timeout" });
+      await vi.advanceTimersByTimeAsync(50);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-throws a real network error (not a timeout) unchanged", async () => {
+    // The non-timeout catch arm: fetch rejects for a reason OTHER than the internal
+    // abort -> the original error propagates (executor treats it as a provider failure).
+    const boom = new Error("ECONNREFUSED");
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => {
+        throw boom;
+      }) as unknown as typeof fetch,
+    });
+    await expect(
+      client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] }),
+    ).rejects.toBe(boom);
+  });
+
+  it("does NOT convert an external client abort into a timeout (client disconnect is not a provider failure)", async () => {
+    // Real timers: the internal timeout is huge so it never fires; the CLIENT aborts.
+    // isExternalAbort() is then true, so the catch re-throws the raw abort error, NOT
+    // UpstreamError(timeout) (a client disconnect must not look like a provider fault).
+    const ext = new AbortController();
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      const signal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        // The combined signal may already be aborted by the time fetch is invoked
+        // (a listener added to an already-aborted signal never fires), so check first.
+        if (signal?.aborted) {
+          reject(new Error("aborted"));
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static", timeoutMs: 600_000 },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const run = client.chatCompletion(
+      { model: "m", messages: [{ role: "user", content: "x" }] },
+      { signal: ext.signal },
+    );
+    ext.abort();
+    const caught = await run.catch((e: unknown) => e);
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(UpstreamError);
+  });
 });
 
 // Native protocol passthrough (issue #217, Phase 1): an Anthropic-native /v1/messages
@@ -1015,6 +1623,23 @@ describe("readAnthropicSSERaw", () => {
     const chunks: string[] = [];
     for await (const c of readAnthropicSSERaw(res)) chunks.push(c);
     expect(chunks).toEqual([]);
+  });
+
+  it("re-throws a non-stall reader error unchanged (not wrapped as a timeout)", async () => {
+    // A stream that errors mid-read rejects reader.read() with a NON-StreamStalledError,
+    // exercising the `throw err` re-throw arm (the error is propagated verbatim).
+    const boom = new Error("stream broke");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(boom);
+      },
+    });
+    const res = new Response(stream, { status: 200 });
+    await expect(async () => {
+      for await (const _ of readAnthropicSSERaw(res)) {
+        // drain
+      }
+    }).rejects.toBe(boom);
   });
 
   it("throws UpstreamError(timeout) and cancels when the stream stalls past idleMs", async () => {

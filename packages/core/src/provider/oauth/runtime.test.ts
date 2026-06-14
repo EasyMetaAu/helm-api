@@ -104,6 +104,47 @@ describe("abort helpers", () => {
     await expect(withOAuthLoginAbort(Promise.resolve(42))).resolves.toBe(42);
   });
 
+  it("withOAuthLoginAbort rejects + runs onAbort synchronously when already aborted", async () => {
+    const c = new AbortController();
+    c.abort();
+    let cleaned = false;
+    const p = withOAuthLoginAbort(Promise.resolve("never"), c.signal, () => {
+      cleaned = true;
+    });
+    await expect(p).rejects.toThrow("Login cancelled");
+    expect(cleaned).toBe(true);
+  });
+
+  it("withOAuthLoginAbort resolves the wrapped value when a (non-aborted) signal is present", async () => {
+    const c = new AbortController();
+    await expect(withOAuthLoginAbort(Promise.resolve("ok"), c.signal)).resolves.toBe("ok");
+  });
+
+  it("withOAuthLoginAbort propagates an Error rejection with a signal present", async () => {
+    const c = new AbortController();
+    await expect(withOAuthLoginAbort(Promise.reject(new Error("boom")), c.signal)).rejects.toThrow(
+      "boom",
+    );
+  });
+
+  it("withOAuthLoginAbort wraps a non-Error rejection into an Error with a signal present", async () => {
+    const c = new AbortController();
+    // A non-Error rejection value (string) must be coerced to `new Error(String(e))`.
+    const nonError: unknown = "str-fail";
+    const rejecting = Promise.reject(nonError);
+    rejecting.catch(() => {}); // pre-attach to avoid an unhandled-rejection warning
+    await expect(withOAuthLoginAbort(rejecting, c.signal)).rejects.toThrow("str-fail");
+  });
+
+  it("buildOAuthRequestSignal combines the caller signal with a timeout signal", () => {
+    const c = new AbortController();
+    const sig = buildOAuthRequestSignal({ signal: c.signal, timeoutMs: 1000 });
+    expect(sig).toBeInstanceOf(AbortSignal);
+    expect(sig.aborted).toBe(false);
+    c.abort();
+    expect(sig.aborted).toBe(true); // combined signal reflects the caller abort
+  });
+
   it("buildOAuthRequestSignal returns an AbortSignal", () => {
     expect(buildOAuthRequestSignal({ timeoutMs: 1000 })).toBeInstanceOf(AbortSignal);
   });
