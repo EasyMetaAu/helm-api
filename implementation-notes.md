@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-14 · Claude OAuth web 登录改用 console callback「copy code」流（docs/06；原则 1/7）
+
+- **背景**：admin web UI 连接 Claude 订阅时，authorize URL 的 `redirect_uri` 写死 `http://localhost:53692/callback`；批准后浏览器跳到该 localhost 死链（web 环境无回调服务器），运营者要从地址栏抠出报错 URL 粘回——困惑。参考用户指定的 `claude-relay-service`：它用 Anthropic 托管的 console callback，批准后页面**直接显示授权码**（`<code>#<state>`）供复制，干净的 "copy code" 流。
+- **核心改动（外科手术式，仅 Anthropic）**：`provider/oauth/anthropic.ts` 新增 `CONSOLE_REDIRECT_URI="https://platform.claude.com/oauth/code/callback"`，`exchangeAuthorizationCode` 参数化 `redirectUri`；**web 路**（`beginAnthropicLogin` 授权 URL + `completeAnthropicLogin` 交换）改用 console callback，**CLI 路**（`loginAnthropic`）保留 localhost 回调服务器（自动捕获是最佳 CLI UX、且非用户抱怨点）。两路 redirect_uri 现刻意分叉——授权 URL 与 token 交换必须用同一值否则 grant 被拒。admin 编排（`admin-oauth.ts` `MANUAL_FLOWS`）零改（begin/complete 签名不变）。
+- **关键发现（少改两处）**：① `parseOAuthAuthorizationInput`（runtime.ts）**早已**支持 `code#state` 格式（console 页展示形态），无需改 parser；② helm 授权 URL **早已**带 `code=true`（请求 Anthropic 渲染码页），唯一坏的就是 redirect_uri，所以是单点修复。
+- **UI**：`ConnectProviderDialog.svelte` 加 `isAnthropic` 派生，manual 步骤对 Anthropic 改文案「复制页面上显示的授权码」+ 占位符，Codex 仍是「复制重定向 URL」；新增 3 条 i18n 串补 en/zh-hans/zh-hant/ja/ko。
+- **取舍/TODO**：Codex web 流同有 localhost 死链，但 OpenAI 无等价托管码页，本轮**不动 Codex**（已知 follow-up）。redirect_uri 必须是 client_id `9d1c250a-…` 注册的回调——relay 用同一 client_id/scopes/`code=true` 配同值、helm token 端点本就 `platform.claude.com`，高置信被接受；最终需真订阅 admin 手验。
+- **验证**：TDD 红→绿——`web-login.test.ts` 钉死 begin/complete 的 console redirect_uri + `code#state` 粘贴，`anthropic.test.ts` 钉死 CLI 仍用 localhost。core OAuth + gateway OAuth 全绿（202）、typecheck/lint 绿、svelte-check 仅剩既有 `oauth.test.ts` 3 报错（非回归）。分支 `worktree-claude-oauth-copy-code`（git worktree）。
+
 ## 2026-06-14 · 移除「协议直通」设置 UI，保持运行时默认 ON（issue #236；原则 1/2）
 
 - **背景**：Admin → System Settings 的「Protocol passthrough / 协议直通」开关（`data-testid=native-protocol-passthrough`，默认勾选）让用户手动开关 `native_protocol_passthrough`；用户拍板**只删 UI**，不改 gateway runtime 行为、不把默认改成 false（schema `z.boolean().default(true)` 不动）。
@@ -22,18 +31,13 @@
 - **治理与取舍**：治理路径不变，auth/routing/budget/capture/memory/telemetry 仍先于 execute；`provider_attempts[]` 逐 attempt 记录 `passthrough_used` / `protocol_mismatch`，`final.provider_model` 仍记录实际落点。流式 fallback 只发生在首包前，首包后仍不能换模型，这是既有 contract。
 - **验证**：补回归测试覆盖 heterogeneous chain 的 head Anthropic passthrough、Anthropic passthrough 首包前失败后 fallback 到 translated OpenAI、stream 同场景，以及 translated Anthropic `message_start.id/model` 非空。focused `pnpm exec vitest run packages/core/src/provider/protocol.test.ts apps/gateway/src/routes/execute.test.ts packages/core/src/protocol/anthropic/stream.test.ts` 绿（96 tests）。
 
-## 2026-06-14 · LiteLLM 协议互译首批 P1 修复（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）
-
-- **背景**：基于本地 LiteLLM 对照和 wiki/spec，本轮先落地最小高风险修复：Responses 非原生流式 prelude 重复、Anthropic-only provider_raw 泄露到 OpenAI-compatible target、Anthropic native 空文本块导致上游 400、OpenAI target 收到 Anthropic `cache_control`。
-- **核心改动**：① `/v1/responses` route 不再额外合成 `response.created`/`response.in_progress`，只序列化 pipeline 已产生的 Responses SSE state machine，native passthrough 继续以上游帧为准；② `execute.stripInternal` 改为 target-protocol-aware renderer，OpenAI target 只转发 OpenAI-compatible provider_raw，并递归移除 messages/tools/top-level `cache_control`；③ Anthropic native passthrough 在发送上游前 strip 空白或非字符串 text blocks，保留 tool_use/tool_result/媒体/非空文本，并在 carrier mutation ledger 记录 `empty_anthropic_text_blocks_stripped`。
-- **取舍**：本轮先做 deterministic 修复与测试；provider_raw/cache_control 被过滤时尚未接入统一 warning ledger（translated path 现有 attempt 结构缺少 mutation channel），后续可补可观测字段。payload capture 仍保留客户端原始请求；native carrier body 被改动时清除 raw_body，避免伪装 byte-identical。Anthropic empty-text sanitizer 对齐 LiteLLM：非字符串或空白 text block 都删除；如果某条 message 只剩空 text block，则整条 message 省略，避免发出 `content: []`。
-- **验证**：按 TDD 先补红例，再实现；focused `pnpm vitest run apps/gateway/src/routes/responses.test.ts apps/gateway/src/routes/execute.test.ts` 绿（90 tests），`pnpm test:protocol-compat:ast` 绿，`pnpm test:passthrough:final` 绿（Claude CLI trace `d4967705-066b-462c-b075-c3dfb66ef042`，Codex CLI trace `2a5eb79d-b336-41c8-bd90-ce9ae3c075b5`，均证明 native passthrough）。`pnpm test:e2e` 的 protocol/gemini slice 绿；全量 e2e 仍有既存 memory inject 2 例红（上游请求未包含旧 memory 文本），与本轮协议改动无关，PR 中需记录。标准 `pnpm test` 在本机两次卡在 PGlite 首例 5s timeout；相关 Postgres timeout 文件用 `pnpm exec vitest run --testTimeout 15000 ...` 绿，协议相关 full/focused suites 绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-14 · LiteLLM 协议互译首批 P1 修复（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）：最小高风险修复——`/v1/responses` route 不再重复合成 `response.created`/`in_progress`（只序列化 pipeline 已产 SSE）、`execute.stripInternal` 改 target-protocol-aware（OpenAI target 只转发 OpenAI-compatible provider_raw 并递归删 messages/tools/`cache_control`）、Anthropic native passthrough 发送前 strip 空/非字符串 text block（保 tool_use/media/非空文本，只剩空块的 message 整条省略，ledger 记 `empty_anthropic_text_blocks_stripped`）。取舍：provider_raw/cache_control 过滤暂未接统一 warning ledger（translated path 缺 mutation channel）。TDD 红→绿，focused responses/execute 90 绿、protocol-compat:ast/passthrough:final 绿（真 Claude/Codex CLI trace 证明 native passthrough）；全量 e2e 仍有既存 memory inject 2 红（与协议无关）；标准 test 偶卡 PGlite 5s timeout。
 
 ### 2026-06-14 · Subscription Providers 账号「测试」按钮 + 流式连通性检查（docs/06/11；原则 1/3/7）：OAuth『Subscription Providers』页按账号加「Test」按钮（helm 无截图里的 API-key provider 列表，用户拍板按账号测），弹层发单条 user turn 流式**真返回**。后端 TDD 三件：`routes/admin/oauth-test.ts`（`createOpenAiStreamParser` 跨非帧对齐字节重组归一 content/finish/usage、fail-open + `createOAuthAccountTester` 注入 buildClient）、`POST /admin/api/oauth/:provider/test`（streamSSE，无 tester→503/缺参→400/上游失败→**带内 error 事件不 5xx**/断连静默）、`server.ts` 抽 `buildOAuthAccountClient` 与 synthesis 共用且每次测试重载 account proxy。隔离防封号：走全新一次性 client（raw client 本无熔断），**不写 telemetry/不扰生产 pool**，anti-ban 头由 provider client 自动注入故裸 user 请求被 Claude Max/Codex 接受、parked 账号也可测。前端 `streamAccountTest`(永不抛) + `TestAccountDialog.svelte` + i18n 13 串补 en/zh-hans/zh-hant/ja/ko。坑：测试是真实上游调用（真计费、不入 Requests 日志）、只 surface content delta。gateway 732 绿 / admin 358 绿，typecheck/lint/build 绿；oauth.test.ts 3 处 svelte-check 报错为既有非回归。分支 feat/oauth-account-test-button。
 

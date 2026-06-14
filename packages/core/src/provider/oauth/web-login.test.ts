@@ -24,6 +24,11 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => vi.unstubAllGlobals());
 
+// Anthropic's hosted console callback that renders the code on-screen for the
+// operator to copy (the web "copy code" flow). MUST match between the authorize
+// URL and the token exchange, else the upstream rejects the grant.
+const CONSOLE_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
+
 describe("Anthropic web login (begin/complete)", () => {
   it("begin returns an authorize URL carrying the PKCE challenge + state", () => {
     const start: AnthropicLoginStart = beginAnthropicLogin();
@@ -35,23 +40,51 @@ describe("Anthropic web login (begin/complete)", () => {
     expect(start.verifier).toBeTruthy();
   });
 
-  it("complete exchanges a pasted redirect URL for credentials", async () => {
+  it("begin points the redirect at Anthropic's console callback (the copy-code page)", () => {
+    const url = new URL(beginAnthropicLogin().authorizeUrl);
+    // NOT the localhost callback (which dead-ends in the web UI) — the console page
+    // renders the code so the operator copies it instead of a broken localhost URL.
+    expect(url.searchParams.get("redirect_uri")).toBe(CONSOLE_REDIRECT_URI);
+    // `code=true` asks the upstream to render the code rather than auto-redirect.
+    expect(url.searchParams.get("code")).toBe("true");
+  });
+
+  it("complete exchanges the copied code (code#state) and echoes the console redirect_uri", async () => {
     const start = beginAnthropicLogin();
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       expect(body.grant_type).toBe("authorization_code");
       expect(body.code).toBe("the-code");
       expect(body.code_verifier).toBe(start.verifier);
+      // The redirect_uri sent here MUST equal the one in the authorize URL.
+      expect(body.redirect_uri).toBe(CONSOLE_REDIRECT_URI);
       return jsonResponse({ access_token: "at", refresh_token: "rt", expires_in: 3600 });
     });
     vi.stubGlobal("fetch", fetchMock);
+    // The console page shows the code as "<code>#<state>" — paste that verbatim.
     const creds = await completeAnthropicLogin({
-      redirectInput: `http://localhost:53692/callback?code=the-code&state=${start.state}`,
+      redirectInput: `the-code#${start.state}`,
       verifier: start.verifier,
       state: start.state,
     });
     expect(creds.access).toBe("at");
     expect(creds.refresh).toBe("rt");
+  });
+
+  it("complete still accepts a full pasted redirect URL", async () => {
+    const start = beginAnthropicLogin();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ access_token: "at", refresh_token: "rt", expires_in: 3600 }),
+      ),
+    );
+    const creds = await completeAnthropicLogin({
+      redirectInput: `${CONSOLE_REDIRECT_URI}?code=the-code&state=${start.state}`,
+      verifier: start.verifier,
+      state: start.state,
+    });
+    expect(creds.access).toBe("at");
   });
 
   it("complete rejects a state mismatch (CSRF guard)", async () => {

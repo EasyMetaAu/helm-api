@@ -119,6 +119,9 @@ describe("loginAnthropic — interactive CLI flow + callback server", () => {
     >;
     expect(sentBody.grant_type).toBe("authorization_code");
     expect(sentBody.code).toBe("server-code");
+    // The CLI flow keeps its localhost callback (the web flow diverges to the
+    // console callback) — the exchange must echo that same localhost redirect_uri.
+    expect(sentBody.redirect_uri).toBe("http://localhost:53692/callback");
   });
 
   it("the callback server returns 404 for a wrong path and 400 for state mismatch", async () => {
