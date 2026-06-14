@@ -1,7 +1,9 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
+  import FullscreenToggle from './FullscreenToggle.svelte';
   import JsonTree from './JsonTree.svelte';
   import { type JsonTreeCtl, setJsonTreeCtl } from './jsonTreeContext';
+  import { VIEWER_FS_CONTAINER, viewerSizing } from './viewerChrome';
 
   // Tabbed JSON viewer: Tree (collapsible, default) / Formatted (pretty JSON) / Raw.
   // Mirrors llm-router's per-panel viewer. `value` is `unknown` because captured
@@ -14,6 +16,9 @@
   let { value, testid }: { value: unknown; testid?: string } = $props();
 
   let tab = $state<Tab>('tree');
+  // Fullscreen lifts the whole viewer into a fixed overlay (see viewerChrome.ts);
+  // FullscreenToggle owns the Escape-to-exit shortcut.
+  let fullscreen = $state(false);
 
   const normalized = $derived.by((): { data: unknown; raw: string; parsedOk: boolean } => {
     if (typeof value === 'string') {
@@ -75,15 +80,18 @@
 
   const tabActive = 'border-action bg-action text-white';
   const tabInactive = 'border-border bg-surface text-ink-muted hover:bg-canvas';
-  const basePanelCls =
-    'max-h-96 overflow-y-auto overflow-x-hidden rounded bg-canvas p-2 font-mono text-xs break-words [overflow-wrap:anywhere] text-ink-body';
+  // Height/resize comes from the shared helper (capped+resizable, or flex-fill when
+  // fullscreen); the rest of the recipe is unchanged.
+  const basePanelCls = $derived(
+    `${viewerSizing(fullscreen)} overflow-y-auto overflow-x-hidden rounded bg-canvas p-2 font-mono text-xs break-words [overflow-wrap:anywhere] text-ink-body`,
+  );
   // Tree markup contains recursive <details> with template newlines between nodes.
   // Keep whitespace normal here so those source newlines do not render as blank rows.
-  const treePanelCls = `${basePanelCls} whitespace-normal`;
-  const textPanelCls = `${basePanelCls} whitespace-pre-wrap`;
+  const treePanelCls = $derived(`${basePanelCls} whitespace-normal`);
+  const textPanelCls = $derived(`${basePanelCls} whitespace-pre-wrap`);
 </script>
 
-<div data-testid={testid}>
+<div data-testid={testid} class={fullscreen ? VIEWER_FS_CONTAINER : ''}>
   <div class="mb-2 flex flex-wrap items-center gap-2">
     {#each TABS as id (id)}
       <button
@@ -92,8 +100,8 @@
         onclick={() => (tab = id)}>{tabLabel(id)}</button
       >
     {/each}
-    {#if tab === 'tree' && hasTree}
-      <div class="ml-auto flex gap-2">
+    <div class="ml-auto flex items-center gap-2">
+      {#if tab === 'tree' && hasTree}
         <button
           type="button"
           class={`rounded border px-3 py-1 text-sm ${tabInactive}`}
@@ -106,8 +114,9 @@
           data-testid="jsontree-collapse-all"
           onclick={collapseAll}>{$t('Collapse all')}</button
         >
-      </div>
-    {/if}
+      {/if}
+      <FullscreenToggle bind:active={fullscreen} testid="jsonviewer-fullscreen" />
+    </div>
   </div>
 
   <div data-testid="jsonviewer-tree" hidden={tab !== 'tree'} class={treePanelCls}>

@@ -124,4 +124,39 @@ describe('JsonViewer', () => {
     await fireEvent.click(screen.getByRole('button', { name: /Raw/i }));
     expect(screen.queryByRole('button', { name: /Expand all/i })).not.toBeInTheDocument();
   });
+
+  it('makes the panels vertically resizable by default', () => {
+    render(JsonViewer, { value: { a: 1 } });
+    expect(screen.getByTestId('jsonviewer-tree').className).toContain('resize-y');
+  });
+
+  it('always offers a fullscreen toggle, even for a bare scalar', () => {
+    render(JsonViewer, { value: 'just text' });
+    expect(screen.getByTestId('jsonviewer-fullscreen')).toBeInTheDocument();
+  });
+
+  it('toggles a fullscreen container on the root and fills it with the panel', async () => {
+    render(JsonViewer, { value: { a: 1 }, testid: 'jv' });
+    const root = screen.getByTestId('jv');
+    expect(root.className).not.toContain('fixed');
+
+    await fireEvent.click(screen.getByTestId('jsonviewer-fullscreen'));
+    expect(root.className).toContain('fixed');
+    expect(root.className).toContain('inset-0');
+    // active panel grows to fill the screen instead of staying capped/resizable
+    const tree = screen.getByTestId('jsonviewer-tree');
+    expect(tree.className).toContain('flex-1');
+    expect(tree.className).not.toContain('resize-y');
+
+    await fireEvent.click(screen.getByTestId('jsonviewer-fullscreen'));
+    expect(root.className).not.toContain('fixed');
+  });
+
+  it('exits fullscreen on Escape', async () => {
+    render(JsonViewer, { value: { a: 1 }, testid: 'jv' });
+    await fireEvent.click(screen.getByTestId('jsonviewer-fullscreen'));
+    expect(screen.getByTestId('jv').className).toContain('fixed');
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByTestId('jv').className).not.toContain('fixed');
+  });
 });

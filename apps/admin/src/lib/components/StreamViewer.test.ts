@@ -125,4 +125,25 @@ describe('StreamViewer', () => {
     expect(screen.getByTestId('stream-final-content')).toHaveTextContent('我在');
     expect(screen.queryByText(/No visible output/)).not.toBeInTheDocument();
   });
+
+  it('makes the raw and chunks panels vertically resizable', async () => {
+    render(StreamViewer, { raw: STREAM });
+    await fireEvent.click(screen.getByRole('button', { name: /Raw/i }));
+    expect(screen.getByTestId('streamviewer-raw').className).toContain('resize-y');
+    await fireEvent.click(screen.getByRole('button', { name: /Chunks/i }));
+    expect(screen.getByTestId('streamviewer-chunks').className).toContain('resize-y');
+  });
+
+  it('toggles a fullscreen container on the root and exits on Escape', async () => {
+    render(StreamViewer, { raw: STREAM, testid: 'sv' });
+    const root = screen.getByTestId('sv');
+    expect(root.className).not.toContain('fixed');
+
+    await fireEvent.click(screen.getByTestId('streamviewer-fullscreen'));
+    expect(root.className).toContain('fixed');
+    expect(root.className).toContain('inset-0');
+
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(root.className).not.toContain('fixed');
+  });
 });
