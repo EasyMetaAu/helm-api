@@ -371,6 +371,65 @@ function decideNativePassthroughForAttempt(input: {
   };
 }
 
+function stripCacheControlDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => stripCacheControlDeep(item));
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "cache_control") continue;
+    out[key] = stripCacheControlDeep(child);
+  }
+  return out;
+}
+
+function isEmptyAnthropicTextBlock(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const part = value as Record<string, unknown>;
+  if (part.type !== "text") return false;
+  return typeof part.text !== "string" || part.text.trim() === "";
+}
+
+function stripEmptyAnthropicTextBlocks(value: unknown): {
+  messages: unknown;
+  stripped: number;
+} {
+  if (!Array.isArray(value)) return { messages: value, stripped: 0 };
+  let stripped = 0;
+  const messages: unknown[] = [];
+  for (const message of value) {
+    if (message === null || typeof message !== "object" || Array.isArray(message)) {
+      messages.push(message);
+      continue;
+    }
+    const record = message as Record<string, unknown>;
+    if (!Array.isArray(record.content)) {
+      messages.push(message);
+      continue;
+    }
+    const content = record.content.filter((block) => {
+      const isEmptyText = isEmptyAnthropicTextBlock(block);
+      if (isEmptyText) stripped += 1;
+      return !isEmptyText;
+    });
+    if (content.length === record.content.length) {
+      messages.push(message);
+    } else if (content.length > 0) {
+      messages.push({ ...record, content });
+    }
+  }
+  return { messages, stripped };
+}
+
+function sanitizeAnthropicNativeBody(body: Record<string, unknown>): {
+  body: Record<string, unknown>;
+  strippedEmptyTextBlocks: number;
+} {
+  const { messages, stripped } = stripEmptyAnthropicTextBlocks(body.messages);
+  return stripped > 0
+    ? { body: { ...body, messages }, strippedEmptyTextBlocks: stripped }
+    : { body, strippedEmptyTextBlocks: 0 };
+}
+
 function prepareNativeRequestForUpstream(
   nativeRequest: InternalRequest["native_request"],
   providerModel: string,
@@ -403,6 +462,20 @@ function prepareNativeRequestForUpstream(
     if (mutations) {
       appendMutationList(mutations, "body_shims_applied", ["store_forced_false"]);
       mutations.provider_profile_applied = "codex_official_safe";
+    }
+  }
+
+  if (protocol === "anthropic_messages") {
+    const sanitized = sanitizeAnthropicNativeBody(body);
+    if (sanitized.strippedEmptyTextBlocks > 0) {
+      body = sanitized.body;
+      bodyChanged = true;
+      if (mutations) {
+        appendMutationList(mutations, "body_shims_applied", [
+          "empty_anthropic_text_blocks_stripped",
+        ]);
+        mutations.empty_anthropic_text_blocks_stripped = sanitized.strippedEmptyTextBlocks;
+      }
     }
   }
 
@@ -677,7 +750,11 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // forward. peekStream opens chatCompletionStream(stripInternal); the row
           // carries the (used:false) passthrough telemetry. No nativePassthrough marker.
           const stream = await peekStream(
-            () => provider.chatCompletionStream(stripInternal(req, providerModel), { signal }),
+            () =>
+              provider.chatCompletionStream(
+                stripInternal(req, providerModel, target.targetProviderProtocol),
+                { signal },
+              ),
             signal,
             alias,
             log,
@@ -733,7 +810,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             nativePassthrough: true,
           };
         }
-        const bodyReq = stripInternal(req, providerModel);
+        const bodyReq = stripInternal(req, providerModel, target.targetProviderProtocol);
         const body = await provider.chatCompletion(bodyReq, { signal });
         breaker.recordSuccess(alias);
         attempts.push(okRow(alias, elapsed(), costOf(alias, body), passthrough));
@@ -935,7 +1012,6 @@ const FORWARDED_REQUEST_PARAM_KEYS = [
   "user",
   "service_tier",
   "tool_choice",
-  "cache_control",
   "prompt_cache_key",
   "prompt_cache_retention",
   "cached_content",
@@ -951,35 +1027,61 @@ const FORWARDED_REQUEST_PARAM_KEYS = [
   "safety_identifier",
 ] as const satisfies ReadonlyArray<keyof InternalRequest>;
 
-const PROVIDER_RAW_FORWARD_KEYS = [
-  "metadata",
-  "store",
-  "context_management",
-  "mcp_servers",
-  "container",
-  "speed",
-  "output_config",
-] as const;
+const PROVIDER_RAW_FORWARD_KEYS_BY_PROTOCOL = {
+  openai_chat: ["metadata", "store"],
+  anthropic_messages: [
+    "metadata",
+    "store",
+    "context_management",
+    "mcp_servers",
+    "container",
+    "speed",
+    "output_config",
+  ],
+  openai_responses: ["metadata", "store", "container"],
+  gemini: ["metadata"],
+} as const satisfies Record<TargetProviderProtocol, readonly string[]>;
 
-function stripInternal(req: InternalRequest, providerModel: string): Record<string, unknown> {
+function renderProviderRawForTarget(
+  providerRaw: Record<string, unknown> | undefined,
+  targetProviderProtocol: TargetProviderProtocol,
+): Record<string, unknown> {
+  if (providerRaw === undefined) return {};
+  const out: Record<string, unknown> = {};
+  for (const key of PROVIDER_RAW_FORWARD_KEYS_BY_PROTOCOL[targetProviderProtocol]) {
+    const value = providerRaw[key];
+    if (value !== undefined && value !== null) out[key] = value;
+  }
+  return out;
+}
+
+function stripInternal(
+  req: InternalRequest,
+  providerModel: string,
+  targetProviderProtocol: TargetProviderProtocol,
+): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: providerModel,
-    messages: req.messages,
+    messages:
+      targetProviderProtocol === "openai_chat" ? stripCacheControlDeep(req.messages) : req.messages,
     stream: req.stream,
   };
-  if (req.tools) body.tools = req.tools;
+  if (req.tools)
+    body.tools =
+      targetProviderProtocol === "openai_chat" ? stripCacheControlDeep(req.tools) : req.tools;
   if (req.response_format) body.response_format = req.response_format;
   if (req.max_tokens !== null) body.max_tokens = req.max_tokens;
   for (const key of FORWARDED_REQUEST_PARAM_KEYS) {
     const value = req[key];
     if (value !== undefined && value !== null) body[key] = value;
   }
-  const providerRaw = req.provider_raw;
-  if (providerRaw !== undefined) {
-    for (const key of PROVIDER_RAW_FORWARD_KEYS) {
-      const value = providerRaw[key];
-      if (value !== undefined && value !== null) body[key] = value;
-    }
+  if (targetProviderProtocol === "anthropic_messages" && req.cache_control !== undefined) {
+    body.cache_control = req.cache_control;
+  }
+  for (const [key, value] of Object.entries(
+    renderProviderRawForTarget(req.provider_raw, targetProviderProtocol),
+  )) {
+    body[key] = value;
   }
   // Streamed usage (cost #6): OpenAI-compatible upstreams only emit a trailing
   // `usage` chunk when asked. Opt in so the gateway can price streamed calls

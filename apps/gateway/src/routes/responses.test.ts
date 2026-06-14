@@ -298,6 +298,33 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(frames.some((f) => f.data === "[DONE]")).toBe(false);
   });
 
+  it("stream:true does not duplicate the Responses prelude produced by the pipeline", async () => {
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      streamIR: async function* () {
+        yield { type: "response.created", sequence_number: 0 };
+        yield { type: "response.in_progress", sequence_number: 1 };
+        yield { type: "response.completed", sequence_number: 2 };
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+
+    const frames = parseSSE(await res.text());
+    expect(frames.filter((f) => f.event === "response.created")).toHaveLength(1);
+    expect(frames.filter((f) => f.event === "response.in_progress")).toHaveLength(1);
+    expect(frames.at(-1)?.event).toBe("response.completed");
+  });
+
   it("stream:true waits for routing before writing the first Responses SSE frame", async () => {
     let releaseRoute!: () => void;
     const routeStarted = deferred<void>();
@@ -338,13 +365,25 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
 
     const reader = res.body?.getReader();
     expect(reader).toBeDefined();
-    const firstReadBeforeRoute = await Promise.race([reader?.read(), shortTimeout()]);
+    const pendingFirstRead = reader?.read();
+    const firstReadBeforeRoute = await Promise.race([pendingFirstRead, shortTimeout()]);
     expect(firstReadBeforeRoute).toBe("timeout");
     await routeStarted.promise;
     releaseRoute();
-    const firstRead = await Promise.race([reader?.read(), shortTimeout()]);
+    const firstRead = await Promise.race([pendingFirstRead, shortTimeout()]);
     expect(firstRead).not.toBe("timeout");
-    const firstText = new TextDecoder().decode((firstRead as { value?: Uint8Array }).value);
+    const decoder = new TextDecoder();
+    const firstChunk = firstRead as { done: boolean; value?: Uint8Array };
+    expect(firstChunk.done).toBe(false);
+    let firstText = decoder.decode(firstChunk.value);
+    while (!firstText.includes("\n\n")) {
+      const next = await Promise.race([reader?.read(), shortTimeout()]);
+      expect(next).not.toBe("timeout");
+      const chunk = next as { done: boolean; value?: Uint8Array };
+      if (chunk.done) break;
+      firstText += decoder.decode(chunk.value);
+    }
+    expect(firstText).toContain("\n\n");
     expect(["response.created", "response.in_progress", "response.completed"]).toContain(
       parseSSE(firstText)[0]?.event,
     );

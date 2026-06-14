@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-14 · LiteLLM 协议互译首批 P1 修复（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）
+
+- **背景**：基于本地 LiteLLM 对照和 wiki/spec，本轮先落地最小高风险修复：Responses 非原生流式 prelude 重复、Anthropic-only provider_raw 泄露到 OpenAI-compatible target、Anthropic native 空文本块导致上游 400、OpenAI target 收到 Anthropic `cache_control`。
+- **核心改动**：① `/v1/responses` route 不再额外合成 `response.created`/`response.in_progress`，只序列化 pipeline 已产生的 Responses SSE state machine，native passthrough 继续以上游帧为准；② `execute.stripInternal` 改为 target-protocol-aware renderer，OpenAI target 只转发 OpenAI-compatible provider_raw，并递归移除 messages/tools/top-level `cache_control`；③ Anthropic native passthrough 在发送上游前 strip 空白或非字符串 text blocks，保留 tool_use/tool_result/媒体/非空文本，并在 carrier mutation ledger 记录 `empty_anthropic_text_blocks_stripped`。
+- **取舍**：本轮先做 deterministic 修复与测试；provider_raw/cache_control 被过滤时尚未接入统一 warning ledger（translated path 现有 attempt 结构缺少 mutation channel），后续可补可观测字段。payload capture 仍保留客户端原始请求；native carrier body 被改动时清除 raw_body，避免伪装 byte-identical。Anthropic empty-text sanitizer 对齐 LiteLLM：非字符串或空白 text block 都删除；如果某条 message 只剩空 text block，则整条 message 省略，避免发出 `content: []`。
+- **验证**：按 TDD 先补红例，再实现；focused `pnpm vitest run apps/gateway/src/routes/responses.test.ts apps/gateway/src/routes/execute.test.ts` 绿（90 tests），`pnpm test:protocol-compat:ast` 绿，`pnpm test:passthrough:final` 绿（Claude CLI trace `7d3fb991-9bf0-4bd2-8837-ec22e2228219`，Codex CLI trace `215aa64b-feba-40bf-a1f9-18874508142d`，均证明 native passthrough）。`pnpm test:e2e` 的 protocol/gemini slice 绿；全量 e2e 仍有既存 memory inject 2 例红（上游请求未包含旧 memory 文本），与本轮协议改动无关，PR 中需记录。标准 `pnpm test` 在本机两次卡在 PGlite 首例 5s timeout；相关 Postgres timeout 文件用 `pnpm exec vitest run --testTimeout 15000 ...` 绿，协议相关 full/focused suites 绿。
+
 ## 2026-06-14 · Subscription Providers 账号「测试」按钮 + 流式连通性检查（docs/06/11；原则 1/3/7）
 
 - **背景**：用户要求在 providers 列表给每个 provider 加「测试」按钮，弹层点测试后发一条测试内容、流式输出**真实返回**（参考 claude-relay-service，简单为主，不要只出「测试成功」）。截图里那种 API-key provider 配置列表（qwen/zhipuai/… 带 Enabled/Edit/Delete）**helm 并不存在**（查遍所有分支）；helm 唯一 provider 列表是 OAuth『Subscription Providers』页（按账号一行，Manage/Disconnect）。**用户拍板：按钮加在该页、按账号测**。
@@ -17,6 +24,7 @@
 - **验证**：红→绿 TDD。gateway 全量 **732 绿**（含 parser 10 + route 4 + synthesis 12 未回归）、admin 全量 **358 绿**（providers 页 +2：开弹层 / 流式成功）；`pnpm typecheck` 绿、`pnpm lint`(biome) 绿、admin `pnpm build` 绿（弹层/页 prod 编译通过）。admin svelte-check 仅剩 `oauth.test.ts` 3 处**既有**报错（`vi.fn` mock.calls 元组类型，与 origin/main 逐字相同，且 admin 不在 `-r typecheck` CI 门禁），**非本次回归**。分支 `feat/oauth-account-test-button`（git worktree）。
 - **TODO**：未提交/未部署（用户要求时再 commit/push）；e2e（Playwright）真账号手验待做；reasoning delta 展示 + 模型严格校验为可选增强。
 
+
 ## 2026-06-14 · 原生直通保真实施 + 可执行验收（docs/native-passthrough-fidelity-spec；原则 7/8）
 
 - **背景**：用户要求 Anthropic Messages 和 OpenAI Responses 的 native passthrough 尽量保持客户端原协议与原请求内容，同时保留 Helm 自身治理、优化和 memory 注入，并参考 `claude-relay-service` 的账号安全策略（尤其防封号策略）。本次按 TDD 先补可执行验收，再收敛实现。
@@ -26,21 +34,14 @@
 - **验证**：`ast-grep` 已用于 native carrier / route glue / mutation ledger 检查；`pnpm lint` 绿；`pnpm typecheck` 绿；`pnpm build` 绿；`pnpm test:passthrough` 绿（323 focused unit + 11 deterministic e2e）；`pnpm test` 绿（255 files / 3578 tests）；`pnpm test:passthrough:final` 绿。live final 使用本地 Helm 测试实例代理真实 upstream，Claude Code `2.1.175` 与 Codex CLI `0.139.0` 均返回 `HELM_LIVE_OK`，并从本地 admin telemetry 证明 `anthropic_messages` / `openai_responses` native passthrough。live 报告只作验收产物，不提交。
 - **取舍 / TODO**：provider profile 目前以代码路径记录（`codex_official_safe` / `anthropic_official_safe`），尚未做成完整 YAML 配置面；admin request detail 已有原始 attempt 字段，但 SPA 专门展示 passthrough ledger 可作为后续 UX 增强；Responses live CLI 本身未必发送 `store:true`，因此 `store_forced_false` 的强断言放在 deterministic fake-upstream case。
 
-## 2026-06-14 · 协议层 review 修复：4 协议保真 + memory 注释纠偏（多 spec；原则 1/7/8）
-
-- **背景**：用 Workflow（codex finder + opus 对抗验证）做人类式 review，覆盖 4 协议客户端支持（多模态/工具）、互译完整性、原生直通、memory 注入/压缩、治理限额。25 条经对抗验证 confirmed；验证把**所有 high 降级**——真问题止于 medium。本次修复全部 confirmed 功能 bug + 过期注释（红→绿 TDD），设计取舍类只 surface。
-- **修复（功能 bug，含红→绿测试）**：① **STREAM-01**（`anthropic/stream.ts` `convertAnthropicStreamToIR`）漏累加 `cache_creation_input_tokens`——补 `cacheCreationTokens` 累加器，message_stop flush 出 `usage.cache_creation_tokens`（schema 早支持，仅累加缺失，致流式 Anthropic 缓存写计费漏报）；② **GEM-05**（`gemini-transformer.ts` `irMessageToParts`，响应构造器复用它）漏发 `message.images`/`message.audio` 生成媒体——补 inlineData/fileData 出站分支；③ **MULTI-01**（同文件 role:"tool" 分支）多模态 tool_result 经 `irMessageContentToText` 静默丢非文本——抽 `irContentPartToGeminiParts` 单部件映射器（保序、thinking 返 []），text 进 functionResponse.content、媒体作同 turn sibling part（docs/05 不静默丢）；④ **RESP-01**（`responses.ts` `foldContentPart`）`input_audio` 落 default→JSON 文本——加 `ResponsesInputAudioSchema` + `case "input_audio"` 镜像 openai.ts；⑤ **ANT-02**（`anthropic/request.ts`）入站 `tool_choice` 原样进 IR——加 `anthropicToolChoiceToIR`（`mapToolChoice` 逆）规范化 any→required / tool→function / none / auto + `disable_parallel_tool_use`→`parallel_tool_calls:false`，未知形 verbatim；⑥ **GEM-02**（`execute.ts` `detectRequestModalities`，导出供单测）远端 audio/* fileData 落 IR document → 路由误判——按 `mediaType` 把 audio//video//image/ 的 document 重归对应模态（最小修复；IR audio 远端 url 的 schema 改作为已知约束推迟，避免跨 4 协议 mapper 涟漪）。
-- **过期注释纠偏（零功能改动）**：MEM-08/09/10/11（`provider/protocol.ts`、`memory/inject.ts`、`inject-bridge.ts` `InjectBridgeResult.messages` docstring、`chat.ts`）把残留「PREFIX/PREPEND 进 system」改成实际的「尾部 `<system-reminder>` 追加」模型（与 2026-06-13 缓存修复一致——旧注释描述的是代码的**反面**，会误导后人重新引入 cache-busting）；PT-07（`execute.ts`）`native_protocol_passthrough`「default OFF」改「default ON since #232」（dep 缺省仍 OFF 的防御回落保留并澄清）；server.ts 经核查无过期注释（只读 setting）。
-- **surface 不改（设计取舍/已知约束，留给用户决定）**：**PT-08**（Responses 直通：合成 prelude 用 helm trace id、上游 verbatim `response.completed` 用真实 id → 同流两个 `response.id`）——修法须在直通帧改写 id，**牺牲 byte-fidelity 换自洽**；且 helm 的 Responses lifecycle 端点皆「not implemented」、early id 本不可用 → 低危。**GEM-04**（Gemini toolConfig ANY 多 allowedFunctionNames → IR "required"，丢子集限制）——OpenAI-canonical IR **无**「限定 N 个具名函数子集」表示，Anthropic/全协议同此限；"required" 回落正确且 fail-open 宽松，记为**已知 IR 约束**（要观测可加 ProtocolWarning，但 Gemini transformer 现零 warning 基建，推迟）。
-- **测试覆盖缺口（review 指出，未补——非回归）**：STREAM-02/03（matrix 缺 X→Responses 流式 case）、MATRIX-01、GUARD-02（Responses 无 guardRequestFor 项）、GOV-09/10/12（payload prune 机会式、无 per-route max-messages、共享 timeout 既往已拍板不改 [[timeout-connect-vs-stream-idle]]）、MULTI-02/03、STREAM-04、RESP-06、MEM-07（Gemini 无原生 client、不盖 `native_request` → memory 走翻译路、无静默 skip，非 bug）。
-- **验证**：红→绿 TDD 全程；`pnpm typecheck` 干净；`pnpm lint` 446 文件绿；focused 全绿——protocol 全量 585（含 interop matrix 176，ANT-02 改 IR `tool_choice` 形**不破** matrix）、gateway execute/passthrough/pipeline 105、touched 套件 256。`.passthrough()` 的 TS 6385 弃用是既存全仓告警、非本次引入、非 error。改动严格限于协议层 + memory 注释 + execute 模态检测（**未碰 config**）。分支 `review-fixes-protocol-memory`，未提交。
-- **TODO**：PT-08/GEM-04 设计决定待用户拍板；若补，STREAM-02/03 matrix 流式覆盖与 GEM-04 ProtocolWarning 基建是后续小项。
 
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-14 · 协议层 review 修复：4 协议保真 + memory 注释纠偏（多 spec；原则 1/7/8）：修 Anthropic stream cache_creation 计费、Gemini 媒体/tool_result、Responses input_audio、Anthropic tool_choice、远端 audio document 模态误判，并把 memory/native passthrough 过期注释改成实际尾部 system-reminder/default ON 模型；focused protocol/gateway suites + typecheck/lint 绿。
 
 ### 2026-06-13 · 原生协议直通默认 ON + 系统设置开关（runtime-settings；原则 2）：`native_protocol_passthrough` schema 默认 `false→true`（z.infer 传播）、admin 客户端 normalize `===true→!==false`（仍命名该字段防 #225 静默重置）、settings 页加独立「Protocol passthrough」开关（`data-testid=native-protocol-passthrough`）+ i18n en/zh。安全论证：`openai_chat` 入站两道独立闸恒翻译、跨协议/异构 fallback 自动退翻译，直通只换 execute invoke、分类/路由/治理/fail-open 全留。prod 坑：仅影响无持久 runtime_settings 行或行内未显式写该字段的部署（overlay 显式 false 仍赢）→ la.atmy.work 若存过 false 须 admin 手动开。TDD 4 个默认派生值断言 false→true 绿。
 
