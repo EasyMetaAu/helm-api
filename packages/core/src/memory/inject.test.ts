@@ -4,10 +4,10 @@ import type { MemoryStore } from "../store/ports.js";
 import { assembleInjectedContext, type InjectDeps, type InjectInput } from "./inject.js";
 import { sha256Hex } from "./message-hash.js";
 
-// docs/08 Phase 2 (#217 Phase 4) — the inject assembler PREFIX model. The assembler
+// docs/08 Phase 2 (#217 Phase 4) — the inject assembler TRAILING-REMINDER model. The assembler
 // no longer FULL-REPLACES the conversation: it produces ONE system-level memory TEXT
 // BLOCK (reflections + window-deduped thread observations, trimmed to a token
-// budget) which the pipeline PREPENDS to the client's verbatim live conversation.
+// budget) which the pipeline appends after the client's verbatim live conversation.
 // The live messages (tool_calls, images, tool results) are never reassembled here —
 // so the assembler is structure-agnostic and works for every turn type. These tests
 // pin the block FORMAT, the window-aware dedup, the budget trim, the empty/degraded
@@ -125,7 +125,7 @@ function baseInput(over: Partial<InjectInput> = {}): InjectInput {
   };
 }
 
-describe("assembleInjectedContext — memory TEXT BLOCK (prefix model)", () => {
+describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model)", () => {
   it("assembles a single system-level block with section headers in deterministic order", async () => {
     const store = makeFakeStore({
       projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "project memory" }),
@@ -191,7 +191,7 @@ describe("assembleInjectedContext — memory TEXT BLOCK (prefix model)", () => {
     });
     // Even with a non-empty window, reflections are never deduped against it.
     const out = await assembleInjectedContext(
-      baseInput({ windowContentHashes: new Set([sha256Hex("anything")]) }),
+      baseInput({ windowContentHashCounts: new Map([[sha256Hex("anything"), 1]]) }),
       makeDeps(store),
     );
     const block = out.memoryBlock ?? "";
@@ -212,8 +212,69 @@ describe("assembleInjectedContext — memory TEXT BLOCK (prefix model)", () => {
     ]);
     const store = makeFakeStore({ observations: [obs], threadMessages });
 
-    const windowContentHashes = new Set([sha256Hex("turn one"), sha256Hex("reply one")]);
-    const out = await assembleInjectedContext(baseInput({ windowContentHashes }), makeDeps(store));
+    const windowContentHashCounts = new Map([
+      [sha256Hex("turn one"), 1],
+      [sha256Hex("reply one"), 1],
+    ]);
+    const out = await assembleInjectedContext(
+      baseInput({ windowContentHashCounts }),
+      makeDeps(store),
+    );
+
+    expect(out.memoryBlock).toBeNull();
+    expect(out.metadata.observation_count).toBe(0);
+  });
+
+  it("INCLUDES an observation when repeated covered content appears fewer times in the live window", async () => {
+    const threadMessages = [
+      makeRaw("r1", "user", "yes"),
+      makeRaw("r2", "assistant", "ok"),
+      makeRaw("r3", "user", "yes"),
+    ];
+    const obs = makeObservation("o1", "compressed repeated yes turns", "2026-05-30T00:00:00.000Z", [
+      "r1",
+      "r3",
+    ]);
+    const store = makeFakeStore({ observations: [obs], threadMessages });
+
+    // The range r1..r3 covers both "yes" turns AND the "ok" turn between them.
+    // The client kept "ok" and only ONE "yes" occurrence. The observation still
+    // recalls the other "yes", so a set-based hash check would wrongly suppress it.
+    const windowContentHashCounts = new Map([
+      [sha256Hex("yes"), 1],
+      [sha256Hex("ok"), 1],
+    ]);
+    const out = await assembleInjectedContext(
+      baseInput({ windowContentHashCounts }),
+      makeDeps(store),
+    );
+
+    expect(out.memoryBlock ?? "").toContain("compressed repeated yes turns");
+    expect(out.metadata.observation_count).toBe(1);
+  });
+
+  it("SKIPS an observation when repeated covered content appears enough times in the live window", async () => {
+    const threadMessages = [
+      makeRaw("r1", "user", "yes"),
+      makeRaw("r2", "assistant", "ok"),
+      makeRaw("r3", "user", "yes"),
+    ];
+    const obs = makeObservation("o1", "compressed repeated yes turns", "2026-05-30T00:00:00.000Z", [
+      "r1",
+      "r3",
+    ]);
+    const store = makeFakeStore({ observations: [obs], threadMessages });
+
+    // Every covered turn (both "yes" + the "ok" between them) is still present in
+    // the window with sufficient count → the observation is fully redundant.
+    const windowContentHashCounts = new Map([
+      [sha256Hex("yes"), 2],
+      [sha256Hex("ok"), 1],
+    ]);
+    const out = await assembleInjectedContext(
+      baseInput({ windowContentHashCounts }),
+      makeDeps(store),
+    );
 
     expect(out.memoryBlock).toBeNull();
     expect(out.metadata.observation_count).toBe(0);
@@ -231,8 +292,11 @@ describe("assembleInjectedContext — memory TEXT BLOCK (prefix model)", () => {
     const store = makeFakeStore({ observations: [obs], threadMessages });
 
     // The window holds NONE of the covered turns → the observation must be injected.
-    const windowContentHashes = new Set([sha256Hex("a brand new turn")]);
-    const out = await assembleInjectedContext(baseInput({ windowContentHashes }), makeDeps(store));
+    const windowContentHashCounts = new Map([[sha256Hex("a brand new turn"), 1]]);
+    const out = await assembleInjectedContext(
+      baseInput({ windowContentHashCounts }),
+      makeDeps(store),
+    );
 
     const block = out.memoryBlock ?? "";
     expect(block).toContain("compressed dropped turns");
@@ -248,8 +312,11 @@ describe("assembleInjectedContext — memory TEXT BLOCK (prefix model)", () => {
     const store = makeFakeStore({ observations: [obs], threadMessages });
 
     // Only r1 is in the window; r2 was dropped → not ALL covered → must include.
-    const windowContentHashes = new Set([sha256Hex("still in window")]);
-    const out = await assembleInjectedContext(baseInput({ windowContentHashes }), makeDeps(store));
+    const windowContentHashCounts = new Map([[sha256Hex("still in window"), 1]]);
+    const out = await assembleInjectedContext(
+      baseInput({ windowContentHashCounts }),
+      makeDeps(store),
+    );
 
     expect(out.memoryBlock ?? "").toContain("covers r1..r2");
     expect(out.metadata.observation_count).toBe(1);
@@ -310,7 +377,7 @@ describe("assembleInjectedContext — memory TEXT BLOCK (prefix model)", () => {
 
   it("produces a valid block for a TOOL / MULTIMODAL current turn (no plain-text restriction in the assembler)", async () => {
     // The assembler is window-hash + memory only; it never inspects the live turn's
-    // structure. A window containing tool/multipart hashes is just opaque strings.
+    // structure. A window containing tool/multipart hash counts is just opaque data.
     const store = makeFakeStore({
       projectReflection: makeReflection({
         projectId: "proj-1",
@@ -324,8 +391,11 @@ describe("assembleInjectedContext — memory TEXT BLOCK (prefix model)", () => {
         makeRaw("y", "tool", "tool out"),
       ],
     });
-    const windowContentHashes = new Set([sha256Hex('[{"type":"text","text":"now"}]')]);
-    const out = await assembleInjectedContext(baseInput({ windowContentHashes }), makeDeps(store));
+    const windowContentHashCounts = new Map([[sha256Hex('[{"type":"text","text":"now"}]'), 1]]);
+    const out = await assembleInjectedContext(
+      baseInput({ windowContentHashCounts }),
+      makeDeps(store),
+    );
     const block = out.memoryBlock ?? "";
     expect(block).toContain("tool-thread memory");
     expect(block).toContain("earlier tool summary");

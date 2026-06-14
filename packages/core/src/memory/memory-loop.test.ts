@@ -120,8 +120,8 @@ describe("memory background loop (observer → reflector → inject)", () => {
     expect(reflection?.version).toBe(1);
 
     // And the NEXT inject request for the same scope hydrates it into the memory
-    // TEXT BLOCK (#217 Phase 4 PREFIX model — the block is prepended at the system
-    // level; the live conversation is kept verbatim by the pipeline, never here).
+    // TEXT BLOCK (#217 Phase 4 trailing-reminder model — the pipeline appends the
+    // block after the live conversation; the assembler never rebuilds messages).
     const result = await assembleInjectedContext(
       {
         scope: SCOPE,

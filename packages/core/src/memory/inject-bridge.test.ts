@@ -8,9 +8,9 @@ import { serializeContent } from "./observe.js";
 // bridge that wires the inject assembler onto the IR message array shared by all three
 // request surfaces (chat / messages / responses). Under the trailing-reminder model the
 // bridge:
-//   1. computes the current request's live-window content_hashes (the SAME way
-//      storage hashes a message) and hands them to the assembler for window-aware
-//      dedup;
+//   1. computes the current request's live-window content_hash occurrence counts
+//      (the SAME way storage hashes a message) and hands them to the assembler for
+//      window-aware dedup;
 //   2. keeps the live conversation VERBATIM (tool_calls / images / tool results /
 //      developer turns are never destroyed — there is no D7 plain-text gate);
 //   3. APPENDS the assembled memory TEXT BLOCK as ONE trailing `<system-reminder>`
@@ -145,7 +145,7 @@ describe("injectIntoIR — trailing-reminder model", () => {
     expect(result.messages.at(-1)).toEqual({ role: "user", content: wrapMemoryReminder(BLOCK) });
   });
 
-  it("passes the live-window content_hashes (storage-equivalent) to the assembler", async () => {
+  it("passes live-window content_hash occurrence counts (storage-equivalent) to the assembler", async () => {
     const assemble = vi.fn<InjectBridgeDeps["assemble"]>(async () => ({
       memoryBlock: BLOCK,
       metadata: {
@@ -169,11 +169,70 @@ describe("injectIntoIR — trailing-reminder model", () => {
     const input = assemble.mock.calls[0]?.[0];
     expect(input?.tokenBudget).toBe(4000);
     expect(input?.scope).toEqual(SCOPE);
-    const hashes = input?.windowContentHashes;
-    expect(hashes).toBeInstanceOf(Set);
+    const counts = input?.windowContentHashCounts;
+    expect(counts).toBeInstanceOf(Map);
     // Hashes match storage's sha256Hex(serializeContent(content)).
-    expect(hashes?.has(hashOf("hi there"))).toBe(true);
-    expect(hashes?.has(hashOf("hello"))).toBe(true);
+    expect(counts?.get(hashOf("hi there"))).toBe(1);
+    expect(counts?.get(hashOf("hello"))).toBe(1);
+  });
+
+  it("counts repeated live-window content occurrences instead of collapsing them", async () => {
+    const assemble = vi.fn<InjectBridgeDeps["assemble"]>(async () => ({
+      memoryBlock: BLOCK,
+      metadata: {
+        memory_hydrated: true,
+        reflection_version: 1,
+        observation_count: 0,
+        memory_tokens_injected: 10,
+        observer_job_id: "job-1",
+        memory_writeback_status: "queued" as const,
+        degraded: false,
+      },
+    }));
+    const deps = makeDeps(BLOCK, { assemble });
+    await injectIntoIR(
+      [
+        { role: "user", content: "yes" },
+        { role: "assistant", content: "ok" },
+        { role: "user", content: "yes" },
+      ],
+      "",
+      SCOPE,
+      deps,
+    );
+
+    const counts = assemble.mock.calls[0]?.[0]?.windowContentHashCounts;
+    expect(counts?.get(hashOf("yes"))).toBe(2);
+    expect(counts?.get(hashOf("ok"))).toBe(1);
+  });
+
+  it("does not count system/developer turns in the live-window dedup view", async () => {
+    const assemble = vi.fn<InjectBridgeDeps["assemble"]>(async () => ({
+      memoryBlock: BLOCK,
+      metadata: {
+        memory_hydrated: true,
+        reflection_version: 1,
+        observation_count: 0,
+        memory_tokens_injected: 10,
+        observer_job_id: "job-1",
+        memory_writeback_status: "queued" as const,
+        degraded: false,
+      },
+    }));
+    const deps = makeDeps(BLOCK, { assemble });
+    await injectIntoIR(
+      [
+        { role: "system", content: "same" },
+        { role: "developer", content: "same" },
+        { role: "user", content: "same" },
+      ],
+      "same",
+      SCOPE,
+      deps,
+    );
+
+    const counts = assemble.mock.calls[0]?.[0]?.windowContentHashCounts;
+    expect(counts?.get(hashOf("same"))).toBe(1);
   });
 
   it("window-hashes a MULTIPART message via serializeContent (JSON-stringified)", async () => {
@@ -196,8 +255,8 @@ describe("injectIntoIR — trailing-reminder model", () => {
     };
     await injectIntoIR([multipart], "", SCOPE, deps);
 
-    const hashes = assemble.mock.calls[0]?.[0]?.windowContentHashes;
-    expect(hashes?.has(hashOf([{ type: "text", text: "now" }]))).toBe(true);
+    const counts = assemble.mock.calls[0]?.[0]?.windowContentHashCounts;
+    expect(counts?.get(hashOf([{ type: "text", text: "now" }]))).toBe(1);
   });
 
   it("no-memory: null block → messages UNCHANGED (same array) and block null", async () => {

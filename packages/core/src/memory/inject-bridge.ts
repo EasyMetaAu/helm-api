@@ -75,20 +75,22 @@ export interface InjectBridgeResult {
   metadata: InjectResult["metadata"] | null;
 }
 
-// Fingerprint the current request's live messages as the dedup WINDOW. Each hash is
-// sha256Hex(serializeContent(content)) — byte-identical to how observe.ts persisted
-// the turn's content_hash — so a stored thread observation whose covered turns are
-// all still in this window is recognized as redundant by the assembler (the client
-// re-sends them verbatim; injecting the summary too would duplicate). Roles that
-// storage drops (system/developer) are still hashed; extra entries are harmless
-// (they can only collide with genuinely identical content) and keep this a pure,
-// allocation-cheap projection of the request.
-function windowContentHashes(messages: IRMessage[]): Set<string> {
-  const hashes = new Set<string>();
+// Fingerprint the current request's persisted live messages as the dedup WINDOW.
+// Each hash is sha256Hex(serializeContent(content)) — byte-identical to how
+// observe.ts persisted the turn's content_hash — so a stored thread observation
+// whose covered turns are all still in this window is recognized as redundant by
+// the assembler (the client re-sends them verbatim; injecting the summary too
+// would duplicate). Occurrence counts matter: one live "yes" cannot satisfy two
+// historical "yes" turns. Only storage-persisted roles are counted; system/
+// developer policy text must never suppress user-memory recall.
+function windowContentHashCounts(messages: IRMessage[]): Map<string, number> {
+  const counts = new Map<string, number>();
   for (const m of messages) {
-    hashes.add(sha256Hex(serializeContent(m.content)));
+    if (m.role !== "user" && m.role !== "assistant" && m.role !== "tool") continue;
+    const hash = sha256Hex(serializeContent(m.content));
+    counts.set(hash, (counts.get(hash) ?? 0) + 1);
   }
-  return hashes;
+  return counts;
 }
 
 // Wrap the assembled memory block in a `<system-reminder>` envelope — the single
@@ -140,7 +142,7 @@ export async function injectIntoIR(
     const result = await deps.assemble({
       scope,
       tokenBudget: deps.tokenBudget,
-      windowContentHashes: windowContentHashes(messages),
+      windowContentHashCounts: windowContentHashCounts(messages),
     });
 
     // Nothing to inject (no memory) or a degraded load: keep the live conversation
