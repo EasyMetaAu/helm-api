@@ -666,9 +666,10 @@ function contentToFunctionCallOutput(
 }
 
 // IR content -> Responses content parts, PRESERVING multimodality (order 25): text ->
-// input_text/output_text, image -> input_image, document -> input_file. Collapsing to
-// a single text part dropped images/files silently. audio/video/thinking have no
-// Responses input surface and are omitted (text already carries the prompt).
+// input_text/output_text, image -> input_image, audio -> input_audio, document ->
+// input_file. Collapsing to a single text part dropped media silently. video/thinking
+// have no Responses input surface and are omitted (text already carries the prompt;
+// response-side thinking renders as reasoning items elsewhere).
 function contentToResponsesParts(
   content: IRMessage["content"],
   isAssistant: boolean,
@@ -684,6 +685,11 @@ function contentToResponsesParts(
         type: "input_image",
         image_url: p.url,
         ...(p.detail !== undefined ? { detail: p.detail } : {}),
+      });
+    } else if (p.type === "audio") {
+      parts.push({
+        type: "input_audio",
+        input_audio: { data: p.data, format: p.format },
       });
     } else if (p.type === "document") {
       const name = p.filename !== undefined ? { filename: p.filename } : {};

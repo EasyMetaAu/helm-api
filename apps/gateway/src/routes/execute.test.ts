@@ -1,6 +1,6 @@
 import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } from "@helm/core";
 import { createCircuitBreaker, UpstreamError } from "@helm/core";
-import type { CatalogEntry, InternalRequest } from "@helm/shared";
+import type { CatalogEntry, InternalRequest, TargetProviderProtocol } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createExecute, detectRequestModalities } from "./execute.js";
 
@@ -1290,7 +1290,11 @@ describe("createExecute — native protocol passthrough (#217)", () => {
   function protocolRegistry(
     map: Record<
       string,
-      { providerName: string; providerModel: string; targetProviderProtocol: string }
+      {
+        providerName: string;
+        providerModel: string;
+        targetProviderProtocol: TargetProviderProtocol;
+      }
     >,
   ): ProviderRegistry {
     return {
@@ -1305,9 +1309,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
             providerModel: hit.providerModel,
             baseUrl: "http://x",
             apiKeyEnv: "X",
-            targetProviderProtocol: hit.targetProviderProtocol as
-              | "openai_chat"
-              | "anthropic_messages",
+            targetProviderProtocol: hit.targetProviderProtocol,
             providerRequiresCompatibilityRewrite: false,
           },
         };
@@ -1638,6 +1640,80 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(out.final.status).toBe("ok");
     expect(out.nativePassthrough).toBe(true);
     expect(out.attempts[0]?.cost_usd).toBeCloseTo(0.0075, 12);
+  });
+
+  it("prices native Responses passthrough with Responses cache details", async () => {
+    const responsesBody = {
+      id: "resp_1",
+      object: "response",
+      status: "completed",
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+      ],
+      usage: {
+        input_tokens: 1000,
+        output_tokens: 500,
+        input_tokens_details: { cached_tokens: 600, cache_creation_input_tokens: 100 },
+      },
+    };
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["codex", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "codex",
+          providerModel: "gpt-5-codex",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([
+        [
+          "r",
+          {
+            modelKey: "r",
+            capabilities: {
+              supportsTools: true,
+              supportsJsonMode: true,
+              supportsVision: true,
+              supportsStreaming: true,
+              maxContextTokens: 200000,
+              maxOutputTokens: 8192,
+            },
+            pricing: {
+              inputPerMTokUsd: 10,
+              outputPerMTokUsd: 20,
+              cacheReadPerMTokUsd: 1,
+              cacheWritePerMTokUsd: 5,
+            },
+            source: "generated",
+          } satisfies CatalogEntry,
+        ],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["r"]),
+      req({
+        protocol: "openai_responses",
+        native_request: { model: "codex/gpt-5-codex", input: "hi" },
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(out.nativePassthrough).toBe(true);
+    expect(provider.nativePassthrough.mock.calls[0]?.[0]).toMatchObject({ model: "gpt-5-codex" });
+    // Responses input_tokens already include cache tokens: regular=300, cached=600,
+    // cache write=100, output=500 => 0.003 + 0.0006 + 0.0005 + 0.01 = 0.0141.
+    expect(out.attempts[0]?.cost_usd).toBeCloseTo(0.0141, 12);
   });
 
   it("flag ON but provider has NO nativePassthrough → translates, reason provider_lacks_passthrough", async () => {
