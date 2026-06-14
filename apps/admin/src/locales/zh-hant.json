@@ -553,5 +553,18 @@
   "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "設定一個相容 OpenAI 的 provider。base URL 以 /v1 結尾；若走 Anthropic 路徑，則改用裸網域。",
   "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "任何相容 OpenAI 或 Anthropic 的 SDK 都能用——只需改 base URL 和密鑰。留意：OpenAI 的 base URL 帶 /v1，Anthropic 的不帶。",
   "Concurrency": "並發",
-  "Memory": "記憶"
+  "Memory": "記憶",
+  "Test": "測試",
+  "Test connection": "連線測試",
+  "Run test": "開始測試",
+  "Testing…": "測試中…",
+  "Stop": "停止",
+  "Ready": "就緒",
+  "Success": "測試成功",
+  "Failed": "測試失敗",
+  "Waiting for response…": "等待回應…",
+  "No routable models for this account.": "此帳號暫無可路由的模型。",
+  "Done in {ms} ms": "耗時 {ms} 毫秒",
+  "{n} chars": "{n} 字元",
+  "Send a short message through this account and stream the reply.": "透過此帳號傳送一則簡短訊息，並串流顯示回應。"
 }

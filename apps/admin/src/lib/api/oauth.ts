@@ -190,6 +190,90 @@ export async function logoutOAuth(provider: string, account = 'default'): Promis
   if (!res.ok && res.status !== 204) await asJson(res);
 }
 
+// ── per-account connectivity test (providers page "Test" button) ─────────────
+
+// One normalized event from POST /oauth/:provider/test, mirroring the gateway's
+// oauth-test event shapes. The dialog appends `content` deltas live and ends on
+// `done` (success) or `error` (failure surfaced in-band, never a thrown 5xx).
+export type AccountTestEvent =
+  | { type: 'start'; model?: string }
+  | { type: 'content'; text: string }
+  | { type: 'finish'; reason?: string }
+  | { type: 'usage'; promptTokens?: number; completionTokens?: number; totalTokens?: number }
+  | { type: 'done'; durationMs?: number }
+  | { type: 'error'; error: string };
+
+// Pull one normalized event out of an SSE `data:` line (ignores comments, blanks,
+// `[DONE]`, and unparseable payloads — fail-open like the gateway parser).
+function parseTestLine(line: string): AccountTestEvent | null {
+  if (!line.startsWith('data:')) return null;
+  const payload = line.slice(5).trim();
+  if (!payload || payload === '[DONE]') return null;
+  try {
+    const obj = JSON.parse(payload) as AccountTestEvent;
+    return obj && typeof obj === 'object' && typeof obj.type === 'string' ? obj : null;
+  } catch {
+    return null;
+  }
+}
+
+// POST /oauth/:provider/test → stream the test reply, yielding each parsed event.
+// A pre-flight failure (503 oauth-off / 400 bad input) is normalized into a single
+// `error` event so the caller has ONE uniform channel. An abort (modal close / Stop)
+// ends the generator quietly. Never throws — every failure becomes an `error` event.
+export async function* streamAccountTest(
+  provider: string,
+  body: { account: string; model: string; prompt?: string },
+  signal?: AbortSignal,
+): AsyncGenerator<AccountTestEvent> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/${encodeURIComponent(provider)}/test`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (e) {
+    if (signal?.aborted) return;
+    yield { type: 'error', error: e instanceof Error ? e.message : 'request failed' };
+    return;
+  }
+  if (!res.ok || !res.body) {
+    let detail = `test failed (${res.status})`;
+    try {
+      const j = (await res.json()) as { error?: unknown };
+      if (typeof j.error === 'string') detail = j.error;
+    } catch {
+      // not JSON — keep the status-only detail
+    }
+    yield { type: 'error', error: detail };
+    return;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl = buf.indexOf('\n');
+      while (nl !== -1) {
+        const ev = parseTestLine(buf.slice(0, nl).trimEnd());
+        buf = buf.slice(nl + 1);
+        if (ev) yield ev;
+        nl = buf.indexOf('\n');
+      }
+    }
+    const last = parseTestLine(buf.trim());
+    if (last) yield last;
+  } catch (e) {
+    if (signal?.aborted) return;
+    yield { type: 'error', error: e instanceof Error ? e.message : 'stream interrupted' };
+  }
+}
+
 // ── per-account model curation ───────────────────────────────────────────────
 
 // The discovered models for one account + the operator's exposed subset.

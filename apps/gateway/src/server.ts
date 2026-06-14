@@ -105,6 +105,7 @@ import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { anthropicMetadataUserId, stableSessionId } from "./oauth/device-identity.js";
 import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
 import { registerAdminApi } from "./routes/admin/index.js";
+import { createOAuthAccountTester, type OAuthTester } from "./routes/admin/oauth-test.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
 import { createYamlRulePersister } from "./routes/admin/yaml-writeback.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
@@ -305,6 +306,55 @@ export interface SynthesizedOAuth {
   poolClients: Map<string, ProviderClient>;
 }
 
+// Build a FRESH, standalone executor client for ONE oauth account: its token manager
+// + egress proxy + executor type + stable anti-ban identity — exactly the per-account
+// binding the routing pool uses, minus the pool/serial wrap. Shared by
+// synthesizeOAuthProviders (production routing) AND the admin connectivity tester so
+// the test path is FAITHFUL to production and the two never drift. Returns null when
+// no credential can be built (fail-open). The raw client carries NO circuit breaker
+// (that lives in the executor layer), so a one-off test client is fully isolated from
+// the live pool's breaker/telemetry state.
+function buildOAuthAccountClient(
+  providerId: string,
+  account: string,
+  oauthCtx: OAuthRuntimeCtx,
+  proxy: ProxyConfig | undefined,
+  base: { baseUrl: string; timeoutMs: number },
+  onResponseMeta?: (headers: Headers) => void,
+): ProviderClient | null {
+  const spec = ROUTABLE_OAUTH[providerId];
+  if (!spec) return null;
+  const accountConfig = {
+    name: providerId,
+    alias: providerId,
+    type: spec.type,
+    base_url: spec.baseUrl,
+    oauth: { provider: providerId, account },
+    models: [],
+    targetProviderProtocol: spec.targetProviderProtocol,
+    providerRequiresCompatibilityRewrite: spec.providerRequiresCompatibilityRewrite,
+  } as unknown as ProviderConfigShared;
+  const cred = buildCredential(accountConfig, oauthCtx, proxy);
+  if (!cred) return null;
+  // Stable per-account anti-ban identity (never rotates): Anthropic gets a
+  // metadata.user_id; Codex a stable session_id. Both deterministic from
+  // (providerId, account) salted by the at-rest key — no DB write-back.
+  const identity =
+    providerId === "anthropic"
+      ? { metadataUserId: anthropicMetadataUserId(providerId, account, oauthCtx.encKey) }
+      : providerId === "openai-codex"
+        ? { sessionId: stableSessionId(providerId, account, oauthCtx.encKey) }
+        : undefined;
+  return createProviderClient(
+    accountConfig,
+    { baseUrl: spec.baseUrl ?? base.baseUrl, timeoutMs: base.timeoutMs },
+    cred,
+    proxy,
+    identity,
+    onResponseMeta,
+  );
+}
+
 // Turn bound subscription credentials into routable providers (issue #38, "connect
 // = routable"): for each executor-ready provider NOT already declared in
 // providers.yaml, build a POOL over ALL its SCHEDULABLE bound accounts. Each
@@ -408,44 +458,24 @@ export async function synthesizeOAuthProviders(
         continue;
       }
       for (const m of discovered) unionModels.add(m);
-      // The per-account config drives createProviderClient (type + oauth preset +
-      // base). The egress proxy (resolved above) is threaded into the credential's
-      // token manager AND the executor client, so refresh + execution egress alike.
-      const accountConfig = {
-        name: providerId,
-        alias: providerId,
-        type: spec.type,
-        base_url: spec.baseUrl,
-        oauth: { provider: providerId, account },
-        models: [],
-        targetProviderProtocol: spec.targetProviderProtocol,
-        providerRequiresCompatibilityRewrite: spec.providerRequiresCompatibilityRewrite,
-      } as unknown as ProviderConfigShared;
-      const cred = buildCredential(accountConfig, oauthCtx, proxy);
-      if (!cred) continue; // unreachable (token just refreshed) — fail-open guard
-      // Stable per-account anti-ban identity (never rotates): Anthropic gets a
-      // metadata.user_id; Codex a stable session_id. Both deterministic from
-      // (providerId, account) salted by the at-rest key — no DB write-back.
-      const identity =
-        providerId === "anthropic"
-          ? { metadataUserId: anthropicMetadataUserId(providerId, account, oauthCtx.encKey) }
-          : providerId === "openai-codex"
-            ? { sessionId: stableSessionId(providerId, account, oauthCtx.encKey) }
-            : undefined;
       // Bind the quota-header scrape to THIS account (providers page Tier 3): the
       // Codex client invokes it with each reply's headers; synthesis closes over the
       // account so the snapshot is attributed correctly. undefined ⇒ no capture.
       const onResponseMeta = onQuotaHeaders
         ? (headers: Headers) => onQuotaHeaders(providerId, account, headers)
         : undefined;
-      const client = createProviderClient(
-        accountConfig,
-        { baseUrl: spec.baseUrl ?? fallbackBaseUrl, timeoutMs },
-        cred,
+      // Per-account executor client: type + oauth preset + base, threaded with the
+      // egress proxy + stable anti-ban identity. Extracted to buildOAuthAccountClient
+      // so the admin connectivity tester binds IDENTICALLY (it shares this builder).
+      const client = buildOAuthAccountClient(
+        providerId,
+        account,
+        oauthCtx,
         proxy,
-        identity,
+        { baseUrl: fallbackBaseUrl, timeoutMs },
         onResponseMeta,
       );
+      if (!client) continue; // unreachable (token just refreshed) — fail-open guard
       // Serialize user-message requests per account (issue #93, feature B). The
       // wrap sits INSIDE the pool member so the gate key is the concrete account
       // the pool selected; non-user turns and a disabled setting pass through.
@@ -1509,6 +1539,29 @@ export async function buildServer(
       for (const opt of oauthOptions) byAlias.set(opt.alias, opt);
       return [...byAlias.values()].sort((a, b) => a.alias.localeCompare(b.alias));
     };
+    // Per-account connectivity tester for the providers page "Test" button. Builds a
+    // FRESH, isolated client per test (its own token + CURRENT proxy + executor type)
+    // via buildOAuthAccountClient — the same binding synthesis uses — so a test is
+    // faithful to production yet records no telemetry and never perturbs the routing
+    // pool. Account settings are reloaded per call so a just-saved proxy edit applies
+    // without a restart. Present only when OAuth is configured (mirrors `oauth`).
+    let oauthTester: OAuthTester | undefined;
+    if (oauthCtx) {
+      const ctx = oauthCtx;
+      oauthTester = createOAuthAccountTester({
+        buildClient: async (providerId, account) => {
+          const acctSettings = await loadAccountSettings(store.config, ctx.encKey);
+          const proxy = resolveProviderProxy(
+            { oauth: { provider: providerId, account } } as unknown as ProviderConfigShared,
+            acctSettings,
+          );
+          return buildOAuthAccountClient(providerId, account, ctx, proxy, {
+            baseUrl: synthBaseUrl,
+            timeoutMs,
+          });
+        },
+      });
+    }
     registerAdminApi(app, {
       rules: ruleStore,
       keyStore,
@@ -1562,6 +1615,8 @@ export async function buildServer(
       // /oauth/usage + /oauth/quota admin routes (fail-open to empty when absent).
       oauthUsage: store.oauthUsage,
       oauthQuota: store.oauthQuota,
+      // Per-account connectivity tester (providers page "Test" button); see above.
+      oauthTester,
       // Hot-reload the routable OAuth pool after any admin mutation (proxy /
       // priority / schedulable / curation / connect / disconnect) so it applies on
       // the next request without a restart.

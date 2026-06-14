@@ -6,6 +6,7 @@ import ProvidersPage from './+page.svelte';
 
 const logoutOAuth = vi.fn();
 const setAccountSchedule = vi.fn();
+const streamAccountTest = vi.fn();
 vi.mock('$lib/api/oauth.js', () => ({
   completeManualPaste: vi.fn(),
   getAccountModels: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock('$lib/api/oauth.js', () => ({
   setAccountSchedule: (...args: unknown[]) => setAccountSchedule(...args),
   startDeviceCode: vi.fn(),
   startManualPaste: vi.fn(),
+  streamAccountTest: (...args: unknown[]) => streamAccountTest(...args),
 }));
 
 const invalidateAllMock = vi.mocked(invalidateAll);
@@ -92,6 +94,7 @@ describe('providers page', () => {
   beforeEach(() => {
     logoutOAuth.mockReset();
     setAccountSchedule.mockReset();
+    streamAccountTest.mockReset();
     invalidateAllMock.mockReset();
     logoutOAuth.mockResolvedValue(undefined);
     setAccountSchedule.mockResolvedValue(undefined);
@@ -191,6 +194,46 @@ describe('providers page', () => {
       }),
     );
     expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the Test dialog seeded with the account’s routable models', async () => {
+    renderPage();
+    const row = screen.getByTestId('provider-account-row');
+
+    await fireEvent.click(within(row).getByRole('button', { name: /^test$/i }));
+
+    const dialog = screen.getByRole('dialog', { name: /test connection/i });
+    expect(within(dialog).getByText('acct-claude')).toBeInTheDocument();
+    // The picker offers the row's effective models; the first is selected by default.
+    expect(within(dialog).getByRole('option', { name: 'claude-opus-4-6' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: /run test/i })).toBeInTheDocument();
+  });
+
+  it('streams the test reply through the gateway and reports success', async () => {
+    streamAccountTest.mockImplementation(async function* () {
+      yield { type: 'content', text: 'Hello' };
+      yield { type: 'content', text: ' there' };
+      yield { type: 'done', durationMs: 12 };
+    });
+    renderPage();
+    await fireEvent.click(
+      within(screen.getByTestId('provider-account-row')).getByRole('button', { name: /^test$/i }),
+    );
+    const dialog = screen.getByRole('dialog', { name: /test connection/i });
+
+    await fireEvent.click(within(dialog).getByRole('button', { name: /run test/i }));
+
+    await waitFor(() =>
+      expect(streamAccountTest).toHaveBeenCalledWith(
+        'anthropic',
+        { account: 'acct-claude', model: 'claude-opus-4-6', prompt: undefined },
+        expect.any(AbortSignal),
+      ),
+    );
+    await waitFor(() =>
+      expect(within(dialog).getByTestId('test-response')).toHaveTextContent('Hello there'),
+    );
+    expect(within(dialog).getByText('Success')).toBeInTheDocument();
   });
 
   it('confirms and disconnects a stored account credential', async () => {

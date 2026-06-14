@@ -559,5 +559,18 @@
   "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "配置一个兼容 OpenAI 的 provider。base URL 以 /v1 结尾；若走 Anthropic 路径，则改用裸域名。",
   "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "任何兼容 OpenAI 或 Anthropic 的 SDK 都能用——只需改 base URL 和密钥。留意：OpenAI 的 base URL 带 /v1，Anthropic 的不带。",
   "Concurrency": "并发",
-  "Memory": "记忆"
+  "Memory": "记忆",
+  "Test": "测试",
+  "Test connection": "连通性测试",
+  "Run test": "开始测试",
+  "Testing…": "测试中…",
+  "Stop": "停止",
+  "Ready": "就绪",
+  "Success": "测试成功",
+  "Failed": "测试失败",
+  "Waiting for response…": "等待响应…",
+  "No routable models for this account.": "该账号暂无可路由的模型。",
+  "Done in {ms} ms": "耗时 {ms} 毫秒",
+  "{n} chars": "{n} 字符",
+  "Send a short message through this account and stream the reply.": "通过该账号发送一条简短消息，并流式显示返回结果。"
 }

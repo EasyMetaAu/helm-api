@@ -18,6 +18,7 @@ import type {
 } from "@helm/shared";
 import type { ModelOption } from "../../oauth/effective-models.js";
 import type { PayloadCaptureDeps } from "../payload-capture.js";
+import type { OAuthTester } from "./oauth-test.js";
 
 // Injected dependency contracts for the admin API. Per CLAUDE.md principle 1 the
 // route files are PURE HTTP glue — they own no business logic and never touch the
@@ -261,6 +262,12 @@ export interface AdminApiDeps {
   // list when absent (fail-open; never 503 the whole page over observability).
   oauthUsage?: OAuthUsageStore;
   oauthQuota?: OAuthQuotaStore;
+  // Per-account connectivity tester (Subscription Providers "Test" button). Streams
+  // a single short completion through a FRESH, isolated per-account client — its own
+  // token + proxy + executor type, and its OWN no-op breaker — so a test records NO
+  // telemetry / request_payloads and never perturbs the live routing pool. Optional:
+  // the /oauth/:provider/test route 503s when absent (present iff OAuth is wired).
+  oauthTester?: OAuthTester;
   // The catalog of routable model options the Lanes admin UI offers as combobox
   // suggestions (so an operator picks a real alias instead of hand-typing one — a
   // typo would silently break a fallback chain). Each option is `{ alias, accounts }`
