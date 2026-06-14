@@ -31,7 +31,14 @@ const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const CALLBACK_HOST = process.env.HELM_OAUTH_CALLBACK_HOST || "127.0.0.1";
 const CALLBACK_PORT = 53692;
 const CALLBACK_PATH = "/callback";
+// CLI flow: a localhost callback server auto-captures the redirect (best CLI UX).
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`;
+// Web admin UI: it can't host the localhost callback, so it uses Anthropic's hosted
+// console callback instead. With `code=true` the upstream RENDERS the authorization
+// code on that page ("<code>#<state>") for the operator to copy — the "copy code"
+// flow — rather than redirecting the browser to a dead localhost URL. The redirect_uri
+// MUST be identical in the authorize URL and the token exchange, or the grant is rejected.
+const CONSOLE_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
 const SCOPES =
   "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
@@ -148,6 +155,9 @@ async function exchangeAuthorizationCode(
   code: string,
   state: string,
   verifier: string,
+  // The redirect_uri must equal the one used in the authorize URL of THIS flow
+  // (localhost for the CLI callback server, the console callback for the web UI).
+  redirectUri: string,
   signal?: AbortSignal,
   fetchImpl: typeof globalThis.fetch = fetch,
 ): Promise<OAuthCredentials> {
@@ -158,7 +168,7 @@ async function exchangeAuthorizationCode(
       client_id: CLIENT_ID,
       code,
       state,
-      redirect_uri: REDIRECT_URI,
+      redirect_uri: redirectUri,
       code_verifier: verifier,
     },
     signal,
@@ -256,6 +266,7 @@ export async function loginAnthropic(callbacks: OAuthLoginCallbacks): Promise<OA
       code,
       state ?? expectedState,
       verifier,
+      REDIRECT_URI,
       callbacks.signal,
     );
   } finally {
@@ -264,10 +275,14 @@ export async function loginAnthropic(callbacks: OAuthLoginCallbacks): Promise<OA
 }
 
 // ── stateless two-step login (for the admin WEB UI; no callback server) ───────
-// The web flow can't host the hardcoded localhost:53692 redirect, so it is a
-// manual-paste exchange: begin -> show authorizeUrl -> user logs in -> pastes the
-// final redirect URL/code -> complete. The PKCE `verifier` + `state` are returned
-// by begin and MUST be held server-side (ephemeral) and handed back to complete.
+// The web flow can't host the localhost:53692 callback, so it points the redirect at
+// Anthropic's hosted CONSOLE callback. With `code=true` the upstream renders the
+// authorization code on that page ("<code>#<state>") for the operator to copy — the
+// "copy code" flow: begin -> show authorizeUrl -> user logs in -> copies the shown
+// code -> complete. (The old localhost redirect dead-ended the browser on an
+// unreachable URL the operator had to scrape from the address bar.) The PKCE
+// `verifier` + `state` are returned by begin and MUST be held server-side (ephemeral)
+// and handed back to complete.
 export interface AnthropicLoginStart {
   authorizeUrl: string;
   verifier: string;
@@ -281,7 +296,7 @@ export function beginAnthropicLogin(): AnthropicLoginStart {
     code: "true",
     client_id: CLIENT_ID,
     response_type: "code",
-    redirect_uri: REDIRECT_URI,
+    redirect_uri: CONSOLE_REDIRECT_URI,
     scope: SCOPES,
     code_challenge: challenge,
     code_challenge_method: "S256",
@@ -305,6 +320,8 @@ export async function completeAnthropicLogin(
     parsed.code,
     parsed.state ?? input.state,
     input.verifier,
+    // Must match the console redirect_uri the authorize URL used in beginAnthropicLogin.
+    CONSOLE_REDIRECT_URI,
     undefined,
     fetchImpl,
   );

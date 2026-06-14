@@ -69,6 +69,11 @@
 
   let selected = $derived(providers.find((p) => p.id === providerId));
 
+  // Anthropic's manual-paste flow lands on a hosted console page that SHOWS the auth
+  // code to copy (no dead-localhost redirect), so its copy/paste wording differs from
+  // the other manual-paste provider (Codex), which still pastes a redirect URL.
+  let isAnthropic = $derived(providerId === 'anthropic');
+
   // Suggest a unique label for the chosen provider: first is "default", then
   // account-2, account-3… (used when the operator leaves the field blank).
   let suggestion = $derived.by(() => {
@@ -167,9 +172,13 @@
           {/each}
         </select>
         <span class="field-help">
-          {selected?.flow === 'manual_paste'
-            ? $t('Sign in in your browser, then paste the redirect URL back here.')
-            : $t('Enter a one-time device code on GitHub to authorize.')}
+          {#if selected?.flow !== 'manual_paste'}
+            {$t('Enter a one-time device code on GitHub to authorize.')}
+          {:else if isAnthropic}
+            {$t('Sign in in your browser, then paste the authorization code back here.')}
+          {:else}
+            {$t('Sign in in your browser, then paste the redirect URL back here.')}
+          {/if}
         </span>
       </label>
 
@@ -250,7 +259,11 @@
   {:else if step === 'manual'}
     <ol class="mt-3 ml-4 list-decimal text-sm text-ink-body">
       <li>{$t('A sign-in page opened in a new tab — approve access there.')}</li>
-      <li>{$t('Copy the full URL it redirects to, and paste it below.')}</li>
+      <li>
+        {isAnthropic
+          ? $t('Copy the authorization code shown on the page, and paste it below.')
+          : $t('Copy the full URL it redirects to, and paste it below.')}
+      </li>
     </ol>
     <a
       class="mt-1 inline-block text-xs text-blue-600 hover:underline"
@@ -264,7 +277,7 @@
       class="input mt-2 font-mono text-xs"
       rows="2"
       bind:value={paste}
-      placeholder="http://localhost/...?code=…&state=…"
+      placeholder={isAnthropic ? $t('Paste the authorization code') : 'http://localhost/...?code=…&state=…'}
     ></textarea>
     <div class="mt-4 flex justify-end gap-2">
       <button type="button" class="btn-secondary" onclick={onclose}>{$t('Cancel')}</button>
