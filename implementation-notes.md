@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-14 · 协议互译剩余项 PR review 修复（review of fix/protocol-litellm-remaining；原则 2/3/7）
+
+- **背景**：对 #251（LiteLLM 协议互译剩余项）做 review，发现 Gemini native passthrough 引入了治理漏洞，并加固远程媒体抓取。三处真实问题修复 + 两处误报澄清。
+- **核心修复**：① **Gemini native passthrough 计费/记忆漏洞**——pipeline `collect()`/`streamIR()` 与 `execute()` 的 usage/记忆提取只分 `openai_responses` vs Anthropic，Gemini 落入 Anthropic 分支 → 把 `usageMetadata` 解析为 0 tokens、且不 observeOutbound（预算/遥测/记忆被绕过，违反原则 2；仅在配置了 `type: gemini` provider 时触发，默认 config 无此 provider）。新增 `usageFromGeminiResponse`/`usageFromGeminiSSE`（promptTokenCount 已含 cache，thoughtsTokenCount 计入 completion）+ `assistantTurnFromNativeGemini`/`accumulateGeminiAssistantText`，三处提取点改 3-way 协议分支（Gemini SSE 的 usageMetadata 累积型，stream tee 只保最后一帧以维持有界内存）。② **远程媒体 SSRF 加固**——`fetchRemoteMediaInlineData` 之前只校验 https，新增 `assertPublicHttpsTarget`：拒绝私有/保留/loopback/link-local/ULA（含 169.254.169.254 元数据端点）IP 字面量 + DNS 解析校验（防 rebinding）+ localhost 主机名，每个 redirect hop 重查；`dnsLookup` 可注入以便 hermetic 测试。③ **Generic Responses→Chat 桥丢工具调用**——`responsesJsonToChatResponse` 之前只取文本、`finish_reason` 恒为 `stop`，现把 `function_call` output 项映射为 chat `tool_calls`、纯工具回合 `content=null`、`finish_reason=tool_calls`。
+- **澄清（非 bug，未改行为）**：chat route 对缺失/空 `messages` 的 400 是 `OpenAIChatRequestSchema.safeParse` 在 route 边界先于 `toInternalRequest` 拦下（main commit b2d3076 既有，schema 要求非空 messages），并非本 PR 收紧——曾试加宽松 fallback，确认是 dead code 后回退、仅留澄清注释。
+- **已知限制（保留，非本轮修）**：Responses registry 仅在非流式响应路径写入（流式 response id 在 SSE 帧内，未提取）；registry 仍是进程内 Map，重启不留、多实例不共享——后续若需，提升为 Store 端口。
+- **验证**：TDD 红→绿（payload-capture +9、messages-pipeline +6 Gemini passthrough 预算/记忆回归、gemini provider +4 SSRF、openai-responses +2 tool_calls）；新增 ast gate（5-arg materializer 签名 + `assertPublicHttpsTarget`）；`typecheck`/`lint`/`test:protocol-compat:ast` 绿，changed-area 512 tests 绿。
+- **Codex review round 2（同 PR 6 项再修，原则 2/3/7）**：① **P1 Gemini 翻译路径**——Gemini client 的 `chatCompletion`/`chatCompletionStream` 原本恒 throw，导致非 Gemini 客户端路由到 Gemini provider（混合 lane）或关闭 passthrough 时整条 attempt 失败；改为经 transformer 组合翻译 OpenAI-Chat ⇄ Gemini（`openaiTransformer.transformRequestOut`→`geminiTransformer.transformRequestIn`→fetch→`transformResponseIn`→`openaiTransformer.transformResponseOut`；流式 Gemini SSE→`transformStreamIn`→OpenAI chunk+`[DONE]`），返回 OpenAI 形态供 pipeline 消费。② **P1 DNS 钉死（rebinding）**——guard 解析校验后 `fetch` 会二次解析；新增独立 `mediaFetch`（默认 `node:https`，`lookup` 钉死到已校验地址、SNI 仍按真实 hostname 验证），`assertPublicHttpsTarget` 返回 pinned 地址逐 hop 钉死（无 undici 依赖）。③ **P1 静态 key 脱敏**——generic Responses `scrub()` 补 `cfg.apiKey` 进脱敏集，防上游 error body 回显泄露。④ **P2 媒体边读边限**——`readBodyWithLimit` 用 `readChunkWithIdle` 流式读 + 超限即 abort（不再先 `arrayBuffer()` 全量分配）。⑤ **P2 401 重建头**——generic Responses 401 重试前 `providerHeaders()` 重取刷新后 token。⑥ **P2 registry 有界**——周期清理过期项 + 1 万条硬上限 LRU 淘汰。验证：TDD 新增 gemini +4 / openai-responses +2；`typecheck`/`lint`/ast 绿，changed-area 474 tests 绿。
+
 ## 2026-06-14 · Claude OAuth web 登录改用 console callback「copy code」流（docs/06；原则 1/7）
 
 - **背景**：admin web UI 连接 Claude 订阅时，authorize URL 的 `redirect_uri` 写死 `http://localhost:53692/callback`；批准后浏览器跳到该 localhost 死链（web 环境无回调服务器），运营者要从地址栏抠出报错 URL 粘回——困惑。参考用户指定的 `claude-relay-service`：它用 Anthropic 托管的 console callback，批准后页面**直接显示授权码**（`<code>#<state>`）供复制，干净的 "copy code" 流。
@@ -23,23 +32,21 @@
 - **决定（用户拍板「那就不动了」）**：**不引入依赖、保持现状**，无代码改动、无 worktree。唯一真实收益（端点/client_id/未来新 provider 维护外包给上游）不足以抵消「写 ~500–900 行桥接 + 删 ~1.5k 行有测试覆盖的同源协议代码」的净风险（净风险为负）。
 - **TODO / 重评触发条件**：若 pi-ai 日后新增**真正的 OAuth**（非 API-key）provider（如 Gemini/Qwen 订阅登录），再评估「仅接管 `refresh*Token`」这一最小边界（不碰 helm 的 web 登录编排）。现有 helm OAuth 协议代码全部保留：`packages/core/src/provider/oauth/*`（web-login/anthropic/openai-codex/github-copilot/runtime）+ 存储/池/admin/UI。
 
-## 2026-06-14 · 移除「协议直通」设置 UI，保持运行时默认 ON（issue #236；原则 1/2）
-
-- **背景**：Admin → System Settings 的「Protocol passthrough / 协议直通」开关（`data-testid=native-protocol-passthrough`，默认勾选）让用户手动开关 `native_protocol_passthrough`；用户拍板**只删 UI**，不改 gateway runtime 行为、不把默认改成 false（schema `z.boolean().default(true)` 不动）。
-- **核心改动（纯前端，5 文件）**：① `routes/settings/+page.svelte` 删整块「Protocol passthrough」section（checkbox + 两段说明），并改 DEFAULTS 注释；② `lib/api/settings.ts` **保留** `native_protocol_passthrough` 字段、type 与 `normalize()` 的 `!== false` 默认（仅补注释说明 UI 已删但字段留作 round-trip）；③ 删 en/zh-hans/zh-hant 三处各 4 条 i18n 串（ja/ko 本就没有这些串、运行时回退英文 key）。
-- **关键决定（为何保留字段而非一并删）**：删 UI 但字段留在数据模型——form 从 GET 载入该值、Save 时原样 PUT 回去，保证 GET→form→PUT round-trip 不变、**绝不在保存其它设置时被静默重置为 false**（#225 教训，`settings.test.ts` 的 "preserves native protocol passthrough when saving an unrelated field" 用例钉死）。若改为删字段靠后端 `.default(true)` 兜底，会在每次 PUT 把运营者显式设的 false 强制翻 true（覆盖 overlay），语义更糟。
-- **验证**：admin vitest `settings.test.ts`(5) + `dashboard-locales.test.ts`(4) 全绿；`prettier --check` 改动文件绿；admin `pnpm build` 绿。svelte-check 仅剩 `oauth.test.ts` 3 处**既有**报错（vi.fn mock.calls 元组类型，来自 v0.12.11 连通性测试特性，与本改动无关、与 origin/main 逐字相同，且 admin 不在 `-r typecheck` CI 门禁）。分支 `worktree-issue-236-remove-passthrough-ui`（git worktree）。
-- **TODO**：未 commit/push（用户要求时再做）；若后续要彻底下线 passthrough，再单独决定是否从 schema/数据模型移除该字段。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
-### 2026-06-14 · 原生直通按 attempt 判断 + Anthropic SSE 元数据修复（docs/02/05；原则 5/7/8）：native passthrough guard 删「后续 fallback 可能跨协议」输入，改为只判**当前 attempt**（source==target protocol + runtime flag on + native carrier 存在 + 无需兼容 rewrite 即直通）；`execute` 不再 lookahead，Anthropic head 可直通、首包前失败再 fallback 到 translated `openai_chat`/`openai_responses`；`convertOpenAIStreamToAnthropic` 的 `message_start` 不再发空 id/model（优先首个 upstream chunk，缺失用 pipeline `request_id`/`final.provider_model` 兜底成 `msg_*`）。治理路径不变、流式 fallback 仅首包前。focused protocol/execute/anthropic-stream 96 绿。
+### 2026-06-14 · LiteLLM 协议互译剩余项完成（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）：Anthropic/Gemini token helper 改 provider-first + 估算兜底；Responses `previous_response_id` 不再入站拒绝（同协议直通、跨协议 fail-closed）；Responses input_tokens / registry-bound retrieve/delete/cancel/input_items / compact 接线；Gemini native provider（generate/stream/countTokens、parametersJsonSchema/responseJsonSchema/google_genai 保真）；OpenAI Chat response_model_policy；Gemini remote media materializer（默认关）。后续 review 两轮修治理/SSRF/翻译路径（见顶部完整条目）。
 
-### 2026-06-14 · LiteLLM 协议互译首批 P1 修复（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）：最小高风险修复——`/v1/responses` route 不再重复合成 `response.created`/`in_progress`（只序列化 pipeline 已产 SSE）、`execute.stripInternal` 改 target-protocol-aware（OpenAI target 只转发 OpenAI-compatible provider_raw 并递归删 messages/tools/`cache_control`）、Anthropic native passthrough 发送前 strip 空/非字符串 text block（保 tool_use/media/非空文本，只剩空块的 message 整条省略，ledger 记 `empty_anthropic_text_blocks_stripped`）。取舍：provider_raw/cache_control 过滤暂未接统一 warning ledger（translated path 缺 mutation channel）。TDD 红→绿，focused responses/execute 90 绿、protocol-compat:ast/passthrough:final 绿（真 Claude/Codex CLI trace 证明 native passthrough）；全量 e2e 仍有既存 memory inject 2 红（与协议无关）；标准 test 偶卡 PGlite 5s timeout。
+### 2026-06-14 · 移除「协议直通」设置 UI，保持运行时默认 ON（issue #236；原则 1/2）：删 admin System Settings 的 `native_protocol_passthrough` 开关 UI（纯前端 5 文件），schema/字段/runtime 默认 `true` 不动（保字段防 PUT round-trip 静默重置为 false，#225 教训）；i18n 删 en/zh-hans/zh-hant 各 4 串。
+
+### 2026-06-14 · 原生直通按 attempt 判断 + Anthropic SSE 元数据修复（docs/02/05；原则 5/7/8）：native passthrough guard 改为只判当前 attempt（删除 lookahead 后续 fallback 协议的整链否决），Anthropic head 可直通、首包前失败再翻译 fallback；`convertOpenAIStreamToAnthropic` 的 `message_start` 不再发空 id/model（取首 chunk，缺失用 request_id/provider_model 兜底成 `msg_*`）。focused 96 tests 绿。
+
+### 2026-06-14 · OpenAI-compatible reasoning alias opt-in（docs/protocol-translation-litellm-gap-spec P2-CHAT-03/04；原则 7/8）：新增 provider 配置 `normalize_reasoning_delta_alias`，只在显式 opt-in 时把 streaming `choices[].delta.reasoning` 归一为 `reasoning_content`，默认保持 byte-forwarding；后续剩余项已补 `response_model_policy`。
+
+### 2026-06-14 · LiteLLM 协议互译首批 P1 修复（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）：修 Responses duplicate prelude、target-aware `provider_raw`、Anthropic empty text sanitizer、OpenAI target `cache_control` 清理；focused tests、ast gates、passthrough deterministic/live 当时通过，memory e2e 既有红另记。
 
 ### 2026-06-14 · Subscription Providers 账号「测试」按钮 + 流式连通性检查（docs/06/11；原则 1/3/7）：OAuth『Subscription Providers』页按账号加「Test」按钮（helm 无截图里的 API-key provider 列表，用户拍板按账号测），弹层发单条 user turn 流式**真返回**。后端 TDD 三件：`routes/admin/oauth-test.ts`（`createOpenAiStreamParser` 跨非帧对齐字节重组归一 content/finish/usage、fail-open + `createOAuthAccountTester` 注入 buildClient）、`POST /admin/api/oauth/:provider/test`（streamSSE，无 tester→503/缺参→400/上游失败→**带内 error 事件不 5xx**/断连静默）、`server.ts` 抽 `buildOAuthAccountClient` 与 synthesis 共用且每次测试重载 account proxy。隔离防封号：走全新一次性 client（raw client 本无熔断），**不写 telemetry/不扰生产 pool**，anti-ban 头由 provider client 自动注入故裸 user 请求被 Claude Max/Codex 接受、parked 账号也可测。前端 `streamAccountTest`(永不抛) + `TestAccountDialog.svelte` + i18n 13 串补 en/zh-hans/zh-hant/ja/ko。坑：测试是真实上游调用（真计费、不入 Requests 日志）、只 surface content delta。gateway 732 绿 / admin 358 绿，typecheck/lint/build 绿；oauth.test.ts 3 处 svelte-check 报错为既有非回归。分支 feat/oauth-account-test-button。
 

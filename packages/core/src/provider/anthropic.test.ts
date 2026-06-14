@@ -1107,6 +1107,15 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("createAnthropicClient", () => {
+  it("marks the client as the Anthropic Messages native protocol profile", () => {
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: vi.fn() as unknown as typeof fetch,
+    });
+
+    expect(client.nativeProtocolProfile).toBe("anthropic_messages");
+  });
+
   it("sends Bearer + Claude-Code identity headers + system spoof; 401-retries once", async () => {
     let calls = 0;
     const seenAuth: string[] = [];
@@ -1242,6 +1251,67 @@ describe("createAnthropicClient", () => {
     const beta = (seen as unknown as Headers).get("anthropic-beta") ?? "";
     expect(beta).toContain("context-management-2025-06-27");
     expect(beta).toContain("fast-mode-2026-02-01");
+  });
+
+  it("adds feature beta headers for structured output, advisor, and tool search", async () => {
+    let seen: Headers | null = null;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen = new Headers(init?.headers);
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.nativePassthrough?.({
+      model: "claude-x",
+      max_tokens: 64,
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      output_config: { type: "json_schema", schema: { type: "object" } },
+      tools: [
+        { type: "advisor_20260301", name: "advisor" },
+        { type: "tool_search_tool_bm25_20251119", name: "search" },
+      ],
+    });
+
+    const beta = (seen as unknown as Headers).get("anthropic-beta") ?? "";
+    expect(beta).toContain("structured-outputs-2025-11-13");
+    expect(beta).toContain("advisor-tool-2026-03-01");
+    expect(beta).toContain("advanced-tool-use-2025-11-20");
+  });
+
+  it("calls the Anthropic count_tokens endpoint with token-counting beta", async () => {
+    let seenUrl = "";
+    let seen: Headers | null = null;
+    let sentBody: unknown;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      seenUrl = url;
+      seen = new Headers(init?.headers);
+      sentBody = JSON.parse(String(init?.body));
+      return jsonResponse({ input_tokens: 123 });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const body = {
+      model: "claude-x",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    };
+    const out = await client.countTokens?.(body);
+
+    expect(out).toEqual({ input_tokens: 123 });
+    expect(seenUrl).toBe("https://api.anthropic.com/v1/messages/count_tokens");
+    expect(sentBody).toEqual(body);
+    const beta = (seen as unknown as Headers).get("anthropic-beta") ?? "";
+    expect(beta).toContain("token-counting-2024-11-01");
   });
 
   it("throws UpstreamError on a persistent non-401 error", async () => {

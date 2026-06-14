@@ -959,7 +959,7 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(ir.web_search_options).toEqual({ search_context_size: "low" });
   });
 
-  it("stashes Responses-only params (store/previous_response_id/metadata/logit_bias/context_management) in provider_raw", async () => {
+  it("stashes Responses-only params (store/previous_response_id/metadata/logit_bias/context_management/include/background) in provider_raw", async () => {
     const ir = await responsesTransformer.transformRequestOut({
       model: "gpt-4o",
       input: "hi",
@@ -968,12 +968,16 @@ describe("responsesTransformer — request sampling/control params (litellm pari
       metadata: { trace: "abc" },
       logit_bias: { "123": -100 },
       context_management: { truncation: "auto" },
+      include: ["reasoning.encrypted_content"],
+      background: true,
     });
     expect(ir.provider_raw?.store).toBe(true);
     expect(ir.provider_raw?.previous_response_id).toBe("resp_prev");
     expect(ir.provider_raw?.metadata).toEqual({ trace: "abc" });
     expect(ir.provider_raw?.logit_bias).toEqual({ "123": -100 });
     expect(ir.provider_raw?.context_management).toEqual({ truncation: "auto" });
+    expect(ir.provider_raw?.include).toEqual(["reasoning.encrypted_content"]);
+    expect(ir.provider_raw?.background).toBe(true);
   });
 
   it("round-trips IR-backed params back onto the native Responses request (transformRequestIn)", async () => {
@@ -991,7 +995,11 @@ describe("responsesTransformer — request sampling/control params (litellm pari
       prompt_cache_key: "thread-123",
       prompt_cache_retention: "24h",
       web_search_options: { search_context_size: "low" },
-      provider_raw: { context_management: { truncation: "auto" } },
+      provider_raw: {
+        context_management: { truncation: "auto" },
+        include: ["reasoning.encrypted_content"],
+        background: true,
+      },
     })) as {
       top_p?: number;
       frequency_penalty?: number;
@@ -1005,6 +1013,8 @@ describe("responsesTransformer — request sampling/control params (litellm pari
       prompt_cache_retention?: string;
       web_search_options?: unknown;
       context_management?: unknown;
+      include?: unknown;
+      background?: unknown;
     };
     expect(native.top_p).toBe(0.8);
     expect(native.frequency_penalty).toBe(0.1);
@@ -1018,6 +1028,8 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(native.prompt_cache_retention).toBe("24h");
     expect(native.web_search_options).toEqual({ search_context_size: "low" });
     expect(native.context_management).toEqual({ truncation: "auto" });
+    expect(native.include).toEqual(["reasoning.encrypted_content"]);
+    expect(native.background).toBe(true);
   });
 
   it("normalizes Responses tool_choice into OpenAI Chat format on inbound conversion", async () => {
@@ -1040,14 +1052,33 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(native.tool_choice).toEqual({ type: "function", name: "get_weather" });
   });
 
-  it("rejects stateful tool-output continuation when previous_response_id history is unavailable", async () => {
-    expect(() =>
-      responsesTransformer.transformRequestOut({
-        model: "gpt-4o",
-        previous_response_id: "resp_prev",
-        input: [{ type: "function_call_output", call_id: "call_1", output: "done" }],
-      }),
-    ).toThrow(/previous_response_id continuation is not supported/);
+  it("preserves stateful previous_response_id tool-output continuations for native passthrough guards", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      previous_response_id: "resp_prev",
+      input: [{ type: "function_call_output", call_id: "call_1", output: "done" }],
+    });
+    expect(ir.provider_raw?.previous_response_id).toBe("resp_prev");
+    expect(ir.messages).toEqual([{ role: "tool", content: "done", tool_call_id: "call_1" }]);
+  });
+
+  it("keeps native-only Responses tools out of IR tools and preserves them in provider_raw", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "hi",
+      tools: [
+        { type: "mcp", server_label: "local" },
+        { type: "file_search", vector_store_ids: ["vs_1"] },
+        { type: "function", name: "lookup", parameters: { type: "object" } },
+      ],
+    });
+    expect(ir.tools).toEqual([
+      { type: "function", function: { name: "lookup", parameters: { type: "object" } } },
+    ]);
+    expect(ir.provider_raw?.responses_native_tools).toEqual([
+      { type: "mcp", server_label: "local" },
+      { type: "file_search", vector_store_ids: ["vs_1"] },
+    ]);
   });
 });
 

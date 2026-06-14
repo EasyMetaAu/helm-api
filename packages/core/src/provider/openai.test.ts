@@ -83,6 +83,48 @@ describe("createOpenAIClient (Phase 0 passthrough)", () => {
     expect(received.join("")).toBe(chunks.join(""));
   });
 
+  it("keeps OpenAI-compatible reasoning deltas byte-for-byte unless the provider opts in", async () => {
+    const chunks = [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"reasoning":"think"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const fetch = vi.fn().mockResolvedValue(sseResponse(chunks));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+    const received: string[] = [];
+
+    for await (const c of client.chatCompletionStream({ model: "m", stream: true })) {
+      received.push(c);
+    }
+
+    expect(received.join("")).toBe(chunks.join(""));
+  });
+
+  it("normalizes OpenAI-compatible stream delta.reasoning when the provider opts in", async () => {
+    const chunks = [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"reasoning":"think","content":"visible"}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"answer"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const fetch = vi.fn().mockResolvedValue(sseResponse(chunks));
+    const client = createOpenAIClient({
+      config: { ...CONFIG, normalizeReasoningDeltaAlias: true },
+      fetch,
+    });
+    const received: string[] = [];
+
+    for await (const c of client.chatCompletionStream({ model: "m", stream: true })) {
+      received.push(c);
+    }
+
+    const body = received.join("");
+    expect(body).toContain('"reasoning_content":"think"');
+    expect(body).not.toContain('"reasoning":"think"');
+    expect(body).toContain(
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"answer"}}]}\n\n',
+    );
+    expect(body).toContain("data: [DONE]\n\n");
+  });
+
   it("aborts a stream that goes silent past the idle deadline with UpstreamError(timeout)", async () => {
     vi.useFakeTimers();
     try {

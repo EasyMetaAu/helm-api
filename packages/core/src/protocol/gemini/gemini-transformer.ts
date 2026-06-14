@@ -56,6 +56,7 @@ export const GEMINI_API_KEY_HEADER = "x-goog-api-key" as const;
 export interface GeminiRoute {
   /** model parsed out of the `{model}` path segment, fed into IR.model. */
   model: string;
+  operation: "generateContent" | "streamGenerateContent" | "countTokens";
   /** true for :streamGenerateContent; alt=sse is not required for compatibility. */
   stream: boolean;
 }
@@ -67,18 +68,19 @@ export interface GeminiRoute {
  * framework request onto this (core never reads a framework object).
  */
 export function parseGeminiPath(pathname: string, query: string): GeminiRoute | null {
-  const m = /^\/(?:v1beta\/models|models)\/(.+):(generateContent|streamGenerateContent)$/.exec(
-    pathname,
-  );
+  const m =
+    /^\/(?:v1beta\/models|models)\/(.+):(generateContent|streamGenerateContent|countTokens)$/.exec(
+      pathname,
+    );
   if (m === null || m[1] === undefined || m[2] === undefined) return null;
   const model = decodeURIComponent(m[1]);
-  const op = m[2];
+  const op = m[2] as GeminiRoute["operation"];
   // LiteLLM's Gemini stream route forces stream=true from the operation name. The
   // `alt=sse` query affects the Google wire format, but silently downgrading a
   // `streamGenerateContent` request to non-stream corrupts client expectations.
   void query;
   const stream = op === "streamGenerateContent";
-  return { model, stream };
+  return { model, operation: op, stream };
 }
 
 // —— finishReason mapping (docs/05 pit #1). Gemini -> legal IR/OpenAI finish_reason;
@@ -438,16 +440,19 @@ function transformRequestOut(native: unknown): IRRequest {
       function: {
         name: d.name,
         ...(d.description !== undefined ? { description: d.description } : {}),
-        ...(d.parameters !== undefined ? { parameters: d.parameters } : {}),
+        ...(d.parametersJsonSchema !== undefined || d.parameters !== undefined
+          ? { parameters: d.parametersJsonSchema ?? d.parameters }
+          : {}),
       },
     })),
   );
 
   const gc = req.generationConfig;
+  const responseSchema = gc?.responseJsonSchema ?? gc?.response_json_schema ?? gc?.responseSchema;
   const responseFormat =
     gc?.responseMimeType === "application/json"
-      ? gc.responseSchema !== undefined
-        ? { type: "json_schema", json_schema: gc.responseSchema }
+      ? responseSchema !== undefined
+        ? { type: "json_schema", json_schema: responseSchema }
         : { type: "json_object" }
       : undefined;
 
@@ -482,9 +487,34 @@ function transformRequestOut(native: unknown): IRRequest {
     ...(geminiToolConfigToToolChoice(req.toolConfig) !== undefined
       ? { tool_choice: geminiToolConfigToToolChoice(req.toolConfig) }
       : {}),
-    ...(req.safetySettings !== undefined
-      ? { provider_raw: { safety_settings: req.safetySettings } }
-      : {}),
+    ...((): Partial<Pick<IRRequest, "provider_raw">> => {
+      const providerRaw: Record<string, unknown> = {};
+      if (req.safetySettings !== undefined) providerRaw.safety_settings = req.safetySettings;
+      const googleGenAIKeys = [
+        "routing_config",
+        "routingConfig",
+        "model_selection_config",
+        "modelSelectionConfig",
+        "labels",
+        "media_resolution",
+        "mediaResolution",
+        "speech_config",
+        "speechConfig",
+        "audio_timestamp",
+        "audioTimestamp",
+        "automatic_function_calling",
+        "automaticFunctionCalling",
+        "image_config",
+        "imageConfig",
+      ];
+      const googleGenAI: Record<string, unknown> = {};
+      const rawReq = req as Record<string, unknown>;
+      for (const key of googleGenAIKeys) {
+        if (rawReq[key] !== undefined) googleGenAI[key] = rawReq[key];
+      }
+      if (Object.keys(googleGenAI).length > 0) providerRaw.google_genai = googleGenAI;
+      return Object.keys(providerRaw).length > 0 ? { provider_raw: providerRaw } : {};
+    })(),
   };
 
   return IRRequestSchema.parse(ir);
@@ -493,16 +523,21 @@ function transformRequestOut(native: unknown): IRRequest {
 // —— Outbound: IR request -> native Gemini request. Drops synthesized tool ids;
 // sanitizes functionDeclarations parameters (format pit). ——————————————————————————
 
-function irToolToFunctionDeclaration(tool: unknown) {
+function irToolToFunctionDeclaration(tool: unknown, schemaStyle: "rest" | "google_genai" = "rest") {
   // IR tools are OpenAI-shaped: { type:"function", function:{ name, description?, parameters? } }
   const t = tool as {
     function?: { name?: string; description?: string; parameters?: unknown };
   };
   const fn = t.function ?? {};
+  const parameters = fn.parameters !== undefined ? sanitizeSchema(fn.parameters) : undefined;
   return {
     name: fn.name ?? "",
     ...(fn.description !== undefined ? { description: fn.description } : {}),
-    ...(fn.parameters !== undefined ? { parameters: sanitizeSchema(fn.parameters) } : {}),
+    ...(parameters !== undefined
+      ? schemaStyle === "google_genai"
+        ? { parametersJsonSchema: parameters }
+        : { parameters }
+      : {}),
   };
 }
 
@@ -708,6 +743,7 @@ function irToolChoiceToGeminiToolConfig(toolChoice: unknown): unknown {
 
 function responseFormatToGenerationConfig(
   responseFormat: unknown,
+  schemaStyle: "rest" | "google_genai" = "rest",
 ): Record<string, unknown> | undefined {
   if (typeof responseFormat !== "object" || responseFormat === null) return undefined;
   const rf = responseFormat as { type?: unknown; json_schema?: unknown };
@@ -721,7 +757,11 @@ function responseFormatToGenerationConfig(
       : rawSchema;
   return {
     responseMimeType: "application/json",
-    ...(schema !== undefined ? { responseSchema: sanitizeSchema(schema) } : {}),
+    ...(schema !== undefined
+      ? schemaStyle === "google_genai"
+        ? { responseJsonSchema: sanitizeSchema(schema) }
+        : { responseSchema: sanitizeSchema(schema) }
+      : {}),
   };
 }
 
@@ -745,6 +785,11 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
   const systemInstruction: GeminiContent | undefined =
     systemText !== "" ? { parts: [{ text: systemText }] } : undefined;
   const toolNameById = new Map<string, string>();
+  const schemaStyle =
+    parsed.provider_raw?.gemini_schema_style === "google_genai" ||
+    parsed.provider_raw?.google_genai_schema_style === "google_genai"
+      ? "google_genai"
+      : "rest";
 
   for (const message of parsed.messages) {
     for (const call of message.tool_calls ?? []) {
@@ -789,7 +834,13 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
 
   const tools =
     parsed.tools !== undefined && parsed.tools.length > 0
-      ? [{ functionDeclarations: parsed.tools.map(irToolToFunctionDeclaration) }]
+      ? [
+          {
+            functionDeclarations: parsed.tools.map((tool) =>
+              irToolToFunctionDeclaration(tool, schemaStyle),
+            ),
+          },
+        ]
       : undefined;
 
   // —— Map the flat IR sampling/control knobs onto Gemini's camelCase generationConfig
@@ -827,12 +878,18 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
 
   const generationConfig = mergeGenerationConfig(
     Object.keys(samplingConfig).length > 0 ? samplingConfig : undefined,
-    responseFormatToGenerationConfig(parsed.response_format),
+    responseFormatToGenerationConfig(parsed.response_format, schemaStyle),
   );
   const toolConfig = irToolChoiceToGeminiToolConfig(parsed.tool_choice);
   const safetySettings = Array.isArray(parsed.provider_raw?.safety_settings)
     ? parsed.provider_raw.safety_settings
     : undefined;
+  const googleGenAI =
+    parsed.provider_raw?.google_genai !== null &&
+    typeof parsed.provider_raw?.google_genai === "object" &&
+    !Array.isArray(parsed.provider_raw.google_genai)
+      ? (parsed.provider_raw.google_genai as Record<string, unknown>)
+      : undefined;
 
   return {
     contents,
@@ -842,6 +899,7 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
     ...(generationConfig !== undefined ? { generationConfig } : {}),
     ...(parsed.cached_content !== undefined ? { cachedContent: parsed.cached_content } : {}),
     ...(safetySettings !== undefined ? { safetySettings } : {}),
+    ...(googleGenAI !== undefined ? googleGenAI : {}),
   };
 }
 

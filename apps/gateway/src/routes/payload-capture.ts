@@ -271,6 +271,73 @@ function normalizeResponsesUsage(u: Record<string, unknown>): StreamUsage {
   return normalized;
 }
 
+// Native-protocol-passthrough cost for Gemini (P2-GEM-01 governance): normalize a
+// VERBATIM Gemini GenerateContent NON-stream response's `usageMetadata` into the
+// OpenAI-shaped StreamUsage the gateway's costOf/resolveCostUsd already understand.
+// Token math MIRRORS core's gemini transformResponseIn: Gemini's promptTokenCount
+// ALREADY INCLUDES the cached slice (like Responses, unlike Anthropic), so
+// prompt_tokens = promptTokenCount and the cache rides prompt_tokens_details;
+// thoughtsTokenCount (reasoning) is billed as output, so it folds into
+// completion_tokens. Tolerant of missing fields (each absent → 0); null when the
+// body carries no usageMetadata object at all.
+export function usageFromGeminiResponse(body: unknown): StreamUsage | null {
+  const um = (body as { usageMetadata?: unknown } | null)?.usageMetadata;
+  if (!um || typeof um !== "object") return null;
+  return normalizeGeminiUsage(um as Record<string, unknown>);
+}
+
+// Shared Gemini-usage normalization for the non-stream body and the streamed
+// cumulative usageMetadata (identical shape). Cache is already included in
+// promptTokenCount, so the budget total is simply prompt + completion.
+function normalizeGeminiUsage(um: Record<string, unknown>): StreamUsage {
+  const prompt = typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0;
+  const candidates = typeof um.candidatesTokenCount === "number" ? um.candidatesTokenCount : 0;
+  const thoughts = typeof um.thoughtsTokenCount === "number" ? um.thoughtsTokenCount : 0;
+  const cached = typeof um.cachedContentTokenCount === "number" ? um.cachedContentTokenCount : 0;
+  const completion = candidates + thoughts;
+  const normalized: StreamUsage = {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+  };
+  if (cached > 0) {
+    normalized.prompt_tokens_details = { cached_tokens: cached };
+  }
+  return normalized;
+}
+
+// Native-protocol-passthrough STREAMING cost for Gemini. The streamGenerateContent
+// SSE emits nameless `data:` frames carrying CUMULATIVE `usageMetadata` (the final
+// frame holds the complete count), so cost extraction scans the accumulated SSE and
+// keeps the LAST usageMetadata seen. Frames split on the SSE record separator (\n\n);
+// the `data:` line is read with a tolerant JSON.parse so keepalive / `[DONE]` / non-
+// JSON lines are skipped. null when no usageMetadata frame is present.
+export function usageFromGeminiSSE(raw: string): StreamUsage | null {
+  let last: StreamUsage | null = null;
+  for (const frame of raw.split("\n\n")) {
+    let payload: string | null = null;
+    for (const line of frame.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("data:")) {
+        payload = trimmed.slice("data:".length).trim();
+        break;
+      }
+    }
+    if (payload === null || payload === "" || payload === "[DONE]") continue;
+    let evt: { usageMetadata?: unknown };
+    try {
+      evt = JSON.parse(payload);
+    } catch {
+      // ping / keepalive / non-JSON line — ignore
+      continue;
+    }
+    if (!evt || typeof evt !== "object") continue;
+    const um = evt.usageMetadata;
+    if (um && typeof um === "object") last = normalizeGeminiUsage(um as Record<string, unknown>);
+  }
+  return last;
+}
+
 // Native-protocol-passthrough STREAMING cost for openai_responses (#217 Phase 3).
 // Unlike Anthropic (usage split across message_start/message_delta), the Codex
 // Responses SSE carries the totals on the TERMINAL event — `response.completed` or

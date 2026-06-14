@@ -40,10 +40,12 @@ function makeDeps(
     streamEvents?: () => AsyncIterable<Record<string, unknown>>;
     authed?: boolean;
     abort?: boolean;
+    nativePassthrough?: boolean;
     transformRequestOut?: (native: unknown) => unknown;
     identity?: MessagesIdentity;
     rateLimiter?: GeminiRouteDeps["rateLimiter"];
     concurrencyGate?: GeminiRouteDeps["concurrencyGate"];
+    countTokens?: GeminiRouteDeps["countTokens"];
     record?: RecordServedDeps;
   } = {},
 ): { deps: GeminiRouteDeps; harness: Harness } {
@@ -52,6 +54,7 @@ function makeDeps(
   const deps: GeminiRouteDeps = {
     rateLimiter: over.rateLimiter,
     concurrencyGate: over.concurrencyGate,
+    countTokens: over.countTokens,
     record: over.record,
     auth: {
       resolve: async (cred) => {
@@ -110,6 +113,7 @@ function makeDeps(
             async function* () {
               yield { candidates: [{ content: { role: "model", parts: [{ text: "Hi" }] } }] };
             },
+          ...(over.nativePassthrough === true ? { nativePassthrough: true } : {}),
         };
       },
     },
@@ -141,6 +145,19 @@ function makeRecord(over: { capturePayloads?: boolean } = {}): {
     capturePayloads: () => over.capturePayloads ?? true,
   };
   return { record, insert, insertPayload, redact };
+}
+
+function expectGeminiCarrier(value: unknown, body: unknown, rawBody?: string): void {
+  expect(value).toMatchObject({
+    protocol: "gemini",
+    body,
+    headers: expect.objectContaining({
+      "content-type": expect.stringContaining("application/json"),
+    }),
+  });
+  if (rawBody !== undefined) {
+    expect((value as { raw_body?: string }).raw_body).toBe(rawBody);
+  }
 }
 
 describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
@@ -224,7 +241,7 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     expect(harness.order).not.toContain("route");
   });
 
-  it("returns 404 for a non-generateContent path (parseGeminiPath null)", async () => {
+  it("serves countTokens after auth without translating or routing", async () => {
     const { deps, harness } = makeDeps();
     const app = buildApp(deps);
     const res = await app.request("/v1beta/models/gemini-2.0-flash:countTokens", {
@@ -232,8 +249,114 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
       headers: GEMINI_AUTH,
       body: JSON.stringify(REQ_BODY),
     });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ totalTokens: 14, estimated: true });
+    expect(harness.order).toEqual(["auth:helm_live_secret"]);
+    expect(harness.pipelineSawIR).toBeNull();
+  });
+
+  it("uses provider-backed countTokens when available", async () => {
+    const countTokens = vi.fn().mockResolvedValue({ totalTokens: 99 });
+    const { deps, harness } = makeDeps({ countTokens });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:countTokens", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ totalTokens: 99 });
+    expect(countTokens).toHaveBeenCalledWith(
+      { ...REQ_BODY, model: "gemini-2.0-flash" },
+      IDENTITY,
+      expect.any(AbortSignal),
+    );
+    expect(harness.order).toEqual(["auth:helm_live_secret"]);
+    expect(harness.pipelineSawIR).toBeNull();
+  });
+
+  it("falls back to an estimated countTokens result if provider counting fails", async () => {
+    const countTokens = vi.fn().mockRejectedValue(new Error("provider unavailable"));
+    const { deps, harness } = makeDeps({ countTokens });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:countTokens", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ totalTokens: 14, estimated: true });
+    expect(countTokens).toHaveBeenCalledOnce();
+    expect(harness.order).toEqual(["auth:helm_live_secret"]);
+  });
+
+  it("serves countTokens on the publisher model path alias", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+    const res = await app.request("/models/publishers/google/models/gemini-2.0-flash:countTokens", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ totalTokens: 14, estimated: true });
     expect(harness.order).not.toContain("route");
+  });
+
+  it("rejects malformed countTokens JSON as INVALID_ARGUMENT before routing", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:countTokens", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: '{"contents":',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { status: string } };
+    expect(body.error.status).toBe("INVALID_ARGUMENT");
+    expect(harness.order).toEqual(["auth:helm_live_secret"]);
+    expect(harness.pipelineSawIR).toBeNull();
+  });
+
+  it("stamps the verbatim Gemini request body as a native passthrough carrier", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+    const rawRequest = JSON.stringify(REQ_BODY);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: rawRequest,
+    });
+
+    expect(res.status).toBe(200);
+    const meta = (harness.pipelineSawIR?.metadata ?? {}) as { native_request?: unknown };
+    expectGeminiCarrier(meta.native_request, REQ_BODY, rawRequest);
+  });
+
+  it("non-stream native passthrough returns the native Gemini body without translate-back", async () => {
+    const nativeBody = {
+      candidates: [{ content: { role: "model", parts: [{ text: "passthrough" }] } }],
+    };
+    const { deps, harness } = makeDeps({
+      nativePassthrough: true,
+      collect: async () => nativeBody,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(nativeBody);
+    expect(harness.order).toEqual(["auth:helm_live_secret", "translate-out", "route"]);
   });
 
   it("rate-limits after auth with a 429 Gemini envelope and limit headers, without translating or routing", async () => {
@@ -478,6 +601,40 @@ describe("POST /v1beta/models/{model}:streamGenerateContent?alt=sse (Gemini stre
     expect(text).not.toContain("[DONE]");
     // Each frame is a full snapshot; the final carries finishReason.
     expect(text).toContain("STOP");
+  });
+
+  it("stream passthrough writes verbatim Gemini nameless SSE frames without wrapping them", async () => {
+    const rawFrames = [
+      'data: {"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}\n\n',
+      'data: {"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}]}\n\n',
+    ];
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield {
+        event: "",
+        data: '{"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}',
+        raw: rawFrames[0],
+      };
+      yield {
+        event: "",
+        data: '{"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}]}',
+        raw: rawFrames[1],
+      };
+    }
+    const { deps } = makeDeps({ nativePassthrough: true, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toBe(rawFrames.join(""));
+    expect(text).not.toContain("event:");
+    expect(text).not.toContain("[DONE]");
+    expect(text).not.toContain('"raw"');
   });
 
   it("treats streamGenerateContent without alt=sse as streaming", async () => {

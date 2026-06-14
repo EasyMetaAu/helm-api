@@ -19,6 +19,7 @@ import {
   injectIntoIR,
   observeInbound,
   observeOutbound,
+  openaiTransformer,
   ownerScopedThreadId,
 } from "@helm/core";
 import {
@@ -98,6 +99,10 @@ export interface ChatRouteDeps {
    *  Gated by HELM_E2E in the composition root; production never sets this so
    *  classification stays config-driven (fail-closed). */
   evalHeaderOverride?: boolean;
+  /** OpenAI Chat compatibility policy for the response body's `model` field.
+   *  Default preserves the provider's real model identity; requested_alias is a
+   *  compatibility shim for clients that expect their requested model echoed. */
+  responseModelPolicy?: "provider" | "requested_alias" | "both";
   /** Memory observe-phase wiring (docs/08 Phase 1). Optional — absent = no-op
    *  (existing tests run unchanged). When present, observeInbound persists the
    *  request before routing and observeOutbound persists the assistant turn
@@ -118,6 +123,71 @@ export interface ChatRouteDeps {
     usage: { requests: number; tokens: number; costUsd: number | null },
     nowMs: number,
   ) => Promise<void>;
+}
+
+function applyResponseModelPolicy(
+  body: Record<string, unknown>,
+  requestedModel: string,
+  policy: "provider" | "requested_alias" | "both",
+): Record<string, unknown> {
+  if (policy !== "requested_alias") return body;
+  return { ...body, model: requestedModel };
+}
+
+function restampOpenAIStreamEventModel(event: string, requestedModel: string): string {
+  return event
+    .split("\n")
+    .map((line) => {
+      const match = /^data:(\s?)(.*)$/.exec(line);
+      if (match === null) return line;
+      const [, spacing = "", data = ""] = match;
+      const payload = data.trim();
+      if (payload === "" || payload === "[DONE]") return line;
+      try {
+        const parsed = JSON.parse(payload) as unknown;
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return line;
+        if (typeof (parsed as { model?: unknown }).model !== "string") return line;
+        return `data:${spacing}${JSON.stringify({ ...(parsed as Record<string, unknown>), model: requestedModel })}`;
+      } catch {
+        return line;
+      }
+    })
+    .join("\n");
+}
+
+function createOpenAIStreamModelRestamper(requestedModel: string): {
+  push(chunk: string): string;
+  flush(): string;
+} {
+  let pending = "";
+  const nextSeparator = (value: string): { index: number; separator: string } | null => {
+    const lf = value.indexOf("\n\n");
+    const crlf = value.indexOf("\r\n\r\n");
+    if (lf === -1 && crlf === -1) return null;
+    if (crlf !== -1 && (lf === -1 || crlf <= lf)) return { index: crlf, separator: "\r\n\r\n" };
+    return { index: lf, separator: "\n\n" };
+  };
+  return {
+    push(chunk: string): string {
+      let buffer = pending + chunk;
+      let out = "";
+      while (true) {
+        const sep = nextSeparator(buffer);
+        if (sep === null) break;
+        const event = buffer.slice(0, sep.index);
+        out += restampOpenAIStreamEventModel(event, requestedModel) + sep.separator;
+        buffer = buffer.slice(sep.index + sep.separator.length);
+      }
+      pending = buffer;
+      return out;
+    },
+    flush(): string {
+      if (pending === "") return "";
+      const out = restampOpenAIStreamEventModel(pending, requestedModel);
+      pending = "";
+      return out;
+    },
+  };
 }
 
 // Gateway-side inject wiring (docs/08 Phase 2). Bundles the core InjectDeps with
@@ -158,10 +228,22 @@ function toInternalRequest(
   sessionKey: string | null,
   memoryScope: MemoryScope,
 ): InternalRequest {
-  const messages = Array.isArray(body.messages)
-    ? (body.messages as InternalRequest["messages"])
-    : [{ role: "user", content: "" }];
   const model = typeof body.model === "string" && body.model.length > 0 ? body.model : "auto";
+  // messages is already schema-validated as a non-empty array at the route boundary
+  // (OpenAIChatRequestSchema.safeParse → 400 fail-closed). P1-CHAT-01: reuse the
+  // OpenAI transformer's content normalization so the route and transformer share ONE
+  // source of truth (bare-string image_url → {url}, default filenames, …).
+  let messages: InternalRequest["messages"];
+  try {
+    const normalized = openaiTransformer.transformRequestOut({ ...(body as object), model });
+    if (normalized && typeof (normalized as Promise<unknown>).then === "function") {
+      throw new Error("OpenAI request normalizer unexpectedly returned a Promise");
+    }
+    messages = (normalized as { messages: InternalRequest["messages"] }).messages;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : "invalid OpenAI chat request";
+    throw invalidRequest(detail, traceId);
+  }
 
   // Session momentum keys off metadata.conversation_id (classifier engine). An
   // explicit conversation_id in the body wins; otherwise the `x-session-key`
@@ -617,6 +699,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       const fin = result.decision.final;
       if (fin.model_alias !== null) c.header("x-helm-final-model", fin.model_alias);
       if (fin.provider_model !== null) c.header("x-helm-provider-model", fin.provider_model);
+      if (deps.responseModelPolicy === "both") {
+        c.header("x-helm-requested-model", internal.requested_model);
+      }
     }
 
     // Classification-decision headers (e2e.eval): expose the cascade's decision
@@ -651,6 +736,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       // not the whole response, capping per-stream memory under high concurrency.
       const captureOn = captureEnabled(deps);
       const captured = createSseCapture(captureOn);
+      const streamModelRestamper =
+        (deps.responseModelPolicy ?? "provider") === "requested_alias"
+          ? createOpenAIStreamModelRestamper(internal.requested_model)
+          : null;
       // Concurrency slot handoff (issue #93, feature A): streamSSE returns its
       // Response BEFORE the stream body finishes, so claim the lease from the
       // middleware and release it in the stream's OWN finally — the slot stays
@@ -659,9 +748,17 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       return streamSSE(c, async (sse) => {
         try {
           for await (const chunk of stream) {
-            captured.push(chunk);
-            await sse.write(chunk);
-            if (deps.memory !== undefined) accumulateOpenAIChunk(assistant, chunk);
+            const outboundChunk = streamModelRestamper?.push(chunk) ?? chunk;
+            if (outboundChunk === "") continue;
+            captured.push(outboundChunk);
+            await sse.write(outboundChunk);
+            if (deps.memory !== undefined) accumulateOpenAIChunk(assistant, outboundChunk);
+          }
+          const tail = streamModelRestamper?.flush() ?? "";
+          if (tail !== "") {
+            captured.push(tail);
+            await sse.write(tail);
+            if (deps.memory !== undefined) accumulateOpenAIChunk(assistant, tail);
           }
         } catch (err) {
           // A client disconnect / abort is NOT a provider fault: do not 5xx, do
@@ -778,7 +875,13 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // Usage-budget settle (non-stream, success): cost is already on the decision;
     // tokens from the body's usage. Fail-open.
     await settle(result.decision, tokensFromUsage(usageFromBody(result.body)));
-    return c.json(result.body as Record<string, unknown>);
+    return c.json(
+      applyResponseModelPolicy(
+        result.body as Record<string, unknown>,
+        internal.requested_model,
+        deps.responseModelPolicy ?? "provider",
+      ),
+    );
   };
 
   app.post("/v1/chat/completions", (c) => handleChat(c));

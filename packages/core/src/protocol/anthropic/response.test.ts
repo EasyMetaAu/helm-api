@@ -13,8 +13,8 @@ import {
 // protocol.anthropic-resp). Two high-risk mismatches are pinned here:
 //   1. finish_reason (OpenAI) <-> stop_reason (Anthropic) enum mapping — an illegal
 //      enum makes the OpenAI SDK drop the whole response; collapsing everything to
-//      `end_turn` makes agents silently misjudge. We map to a LEGAL enum AND stash
-//      the raw value in provider_raw.stop_reason.
+//      `end_turn` makes agents silently misjudge. We map to a LEGAL enum without
+//      leaking Helm-internal provider_raw into the public response body.
 //   2. usage / cached billing — input = prompt - cached (never double-bill cache).
 // Pure function: no network, no framework.
 
@@ -94,7 +94,7 @@ describe("transformResponseIn", () => {
     expect(out.role).toBe("assistant");
   });
 
-  it("maps finish_reason -> stop_reason AND stashes the raw value in provider_raw", () => {
+  it("maps finish_reason -> stop_reason without leaking provider_raw", () => {
     const out = transformResponseIn(
       makeIR({
         choices: [
@@ -103,10 +103,10 @@ describe("transformResponseIn", () => {
       }),
     );
     expect(out.stop_reason).toBe("max_tokens");
-    expect(out.provider_raw?.stop_reason).toBe("length");
+    expect("provider_raw" in out).toBe(false);
   });
 
-  it("stashes the raw stop_reason even for an unknown finish_reason", () => {
+  it("maps an unknown finish_reason to a legal stop_reason without leaking provider_raw", () => {
     const out = transformResponseIn(
       makeIR({
         choices: [
@@ -115,7 +115,7 @@ describe("transformResponseIn", () => {
       }),
     );
     expect(out.stop_reason).toBe("end_turn");
-    expect(out.provider_raw?.stop_reason).toBe("weird_one");
+    expect("provider_raw" in out).toBe(false);
   });
 
   it("usage: input = prompt - cached, cache_read split out (pit #2)", () => {
@@ -142,10 +142,10 @@ describe("transformResponseIn", () => {
     expect(out.usage.input_tokens).toBeGreaterThanOrEqual(0);
   });
 
-  it("preserves the raw upstream usage verbatim in provider_raw.usage", () => {
+  it("does not expose raw upstream usage in the public response body", () => {
     const rawUsage = { prompt_tokens: 200, cached_tokens: 800, completion_tokens: 50 };
     const out = transformResponseIn(makeIR({ usage: rawUsage }));
-    expect(out.provider_raw?.usage).toEqual(rawUsage);
+    expect("provider_raw" in out).toBe(false);
   });
 
   it("back-translates tool_calls -> tool_use block with id/name/parsed input", () => {
@@ -262,10 +262,7 @@ describe("transformResponseIn", () => {
     const secondName = toolUses[1]?.name;
     expect(secondName).toEqual(expect.stringMatching(/^search_web_[a-z0-9]{8}$/));
     expect(toolUses.map((b) => b.name)).toEqual(["search_web", secondName]);
-    expect(out.provider_raw?.anthropic_tool_name_map).toEqual({
-      search_web: "search-web",
-      [secondName as string]: "search web",
-    });
+    expect("provider_raw" in out).toBe(false);
   });
 
   it("back-translates thinking parts -> thinking block preserving signature", () => {

@@ -49,7 +49,7 @@ export const NativePassthroughMutationLedgerSchema = z
   .passthrough();
 
 export const NativePassthroughCarrierSchema = z.object({
-  protocol: z.enum(["anthropic_messages", "openai_responses"]),
+  protocol: z.enum(["anthropic_messages", "openai_responses", "gemini"]),
   body: UnknownRecordSchema,
   raw_body: z.string().optional(),
   headers: z.record(z.string(), NativeHeaderValueSchema),

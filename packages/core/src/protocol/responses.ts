@@ -194,6 +194,8 @@ const ResponsesRequestSchema = z
     prompt_cache_retention: z.string().optional(),
     web_search_options: z.unknown().optional(),
     context_management: z.unknown().optional(),
+    include: z.array(z.string()).optional(),
+    background: z.boolean().optional(),
     store: z.boolean().optional(),
     previous_response_id: z.string().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
@@ -291,38 +293,30 @@ function chatToolChoiceToResponses(toolChoice: unknown): unknown {
   return { type: "function", name: toolChoice.function.name };
 }
 
-function rejectUnsupportedPreviousResponseContinuation(
-  parsed: z.infer<typeof ResponsesRequestSchema>,
-): void {
-  if (parsed.previous_response_id === undefined || typeof parsed.input === "string") return;
-
-  const localFunctionCalls = new Set<string>();
-  for (const item of parsed.input) {
-    if (item.type === "function_call") {
-      const call = item as z.infer<typeof ResponsesFunctionCallItemSchema>;
-      const id = call.call_id ?? call.id;
-      if (id !== undefined) localFunctionCalls.add(id);
-      continue;
-    }
-    if (item.type !== "function_call_output") continue;
-
-    const output = item as z.infer<typeof ResponsesFunctionCallOutputItemSchema>;
-    if (output.call_id === undefined || !localFunctionCalls.has(output.call_id)) {
-      throw new Error(
-        "previous_response_id continuation is not supported without local function_call history",
-      );
-    }
-  }
-}
-
 function normalizeResponsesTools(tools: unknown[] | undefined): {
   tools?: unknown[];
   rawTools?: unknown[];
+  nativeTools?: unknown[];
 } {
   if (tools === undefined) return {};
-  const normalized = tools.map(responsesToolToChatTool);
-  const changed = normalized.some((tool, index) => tool !== tools[index]);
-  return { tools: normalized, ...(changed ? { rawTools: tools } : {}) };
+  const normalized: unknown[] = [];
+  const nativeTools: unknown[] = [];
+  let changed = false;
+  for (const tool of tools) {
+    if (isRecord(tool) && tool.type !== "function") {
+      nativeTools.push(tool);
+      changed = true;
+      continue;
+    }
+    const next = responsesToolToChatTool(tool);
+    normalized.push(next);
+    if (next !== tool) changed = true;
+  }
+  return {
+    ...(normalized.length > 0 ? { tools: normalized } : {}),
+    ...(changed ? { rawTools: tools } : {}),
+    ...(nativeTools.length > 0 ? { nativeTools } : {}),
+  };
 }
 
 // —— content-part folding: Responses parts -> IR parts. Unknown parts degrade to a
@@ -379,7 +373,6 @@ function foldMessageContent(
 function toIRRequest(req: NativeRequest): IRRequest {
   // fail-closed: a structurally invalid request never enters the pipeline.
   const parsed = ResponsesRequestSchema.parse(req);
-  rejectUnsupportedPreviousResponseContinuation(parsed);
   const normalizedTools = normalizeResponsesTools(parsed.tools);
 
   const messages: IRMessage[] = [];
@@ -470,8 +463,12 @@ function toIRRequest(req: NativeRequest): IRRequest {
   if (parsed.logit_bias !== undefined) providerRaw.logit_bias = parsed.logit_bias;
   if (parsed.context_management !== undefined)
     providerRaw.context_management = parsed.context_management;
+  if (parsed.include !== undefined) providerRaw.include = parsed.include;
+  if (parsed.background !== undefined) providerRaw.background = parsed.background;
   if (normalizedTools.rawTools !== undefined)
     providerRaw.responses_tools = normalizedTools.rawTools;
+  if (normalizedTools.nativeTools !== undefined)
+    providerRaw.responses_native_tools = normalizedTools.nativeTools;
   // Reasoning config + truncation have no IR field of their own; preserve verbatim.
   // NB: a distinct key — provider_raw.reasoning already holds inbound reasoning ITEMS.
   if (parsed.reasoning !== undefined) providerRaw.reasoning_config = parsed.reasoning;
@@ -638,6 +635,8 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
     ...(raw?.context_management !== undefined
       ? { context_management: raw.context_management }
       : {}),
+    ...(raw?.include !== undefined ? { include: raw.include } : {}),
+    ...(raw?.background !== undefined ? { background: raw.background } : {}),
     // Reasoning config: prefer the preserved native object, else synthesize from the
     // cross-protocol IR.reasoning_effort so o-series reasoning survives chat->responses.
     ...(raw?.reasoning_config !== undefined

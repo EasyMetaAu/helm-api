@@ -12,6 +12,8 @@ import {
   createCachedKeyStore,
   createCircuitBreaker,
   createCodexResponsesClient,
+  createGeminiClient,
+  createGenericOpenAIResponsesClient,
   createKeyedSemaphore,
   createKeyedSerialGate,
   createMemoryMomentumStore,
@@ -86,7 +88,7 @@ import type {
   RuntimeSettings,
   TargetProviderProtocol,
 } from "@helm/shared";
-import { ErrorClassSchema, isOAuthPreset } from "@helm/shared";
+import { ErrorClassSchema, isOAuthPreset, makeHelmError } from "@helm/shared";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
@@ -94,6 +96,7 @@ import { createMemoryLlmRuntime, type MemoryModelResolution } from "./memory-llm
 import { authMiddleware } from "./middleware/auth.js";
 import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middleware/basic-auth.js";
 import { concurrencyMiddleware, createConcurrencyGate } from "./middleware/concurrency.js";
+import { HelmHttpError } from "./middleware/error-handler.js";
 import { estimateRequestTokens } from "./middleware/estimate-tokens.js";
 import { type RateLimiterPort, rateLimitMiddleware } from "./middleware/rate-limit.js";
 import {
@@ -117,7 +120,11 @@ import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
 import { registerModelsRoute } from "./routes/models.js";
-import { registerResponsesRoute } from "./routes/responses.js";
+import {
+  type ResponsesRegistryRecord,
+  type ResponsesRouteDeps,
+  registerResponsesRoute,
+} from "./routes/responses.js";
 import {
   markServingAccount,
   type ServingAccount,
@@ -688,6 +695,35 @@ function createProviderClient(
       fetch: proxyFetch,
     });
   }
+  if (
+    p.type === "openai-responses" ||
+    p.type === "openai-responses-generic" ||
+    p.type === "openai_responses_generic"
+  ) {
+    return createGenericOpenAIResponsesClient({
+      config: { ...base, ...cred },
+      fetch: proxyFetch,
+    });
+  }
+  if (p.type === "gemini") {
+    return createGeminiClient({
+      config: {
+        ...base,
+        ...cred,
+        remoteMediaFetch:
+          p.remote_media_fetch !== undefined
+            ? {
+                enabled: p.remote_media_fetch.enabled,
+                maxBytes: p.remote_media_fetch.max_bytes,
+                timeoutMs: p.remote_media_fetch.timeout_ms,
+                maxRedirects: p.remote_media_fetch.max_redirects,
+                allowedMimeTypes: p.remote_media_fetch.allowed_mime_types,
+              }
+            : undefined,
+      },
+      fetch: proxyFetch,
+    });
+  }
   // GitHub Copilot is OpenAI-compatible, BUT: (1) it requires editor identity
   // headers on every call, and (2) its API host comes from the current token's
   // `proxy-ep` (the short-lived Copilot token rotates, so the host can change).
@@ -707,6 +743,7 @@ function createProviderClient(
         ...cred,
         extraHeaders: () => ({ ...COPILOT_HEADERS }),
         mapDeveloperRoleToSystem: p.map_developer_role_to_system,
+        normalizeReasoningDeltaAlias: p.normalize_reasoning_delta_alias,
         resolveBaseUrl: async () =>
           getGitHubCopilotBaseUrl((await getAuth()).replace(/^Bearer /, "")),
       },
@@ -714,7 +751,12 @@ function createProviderClient(
     });
   }
   return createOpenAIClient({
-    config: { ...base, ...cred, mapDeveloperRoleToSystem: p.map_developer_role_to_system },
+    config: {
+      ...base,
+      ...cred,
+      mapDeveloperRoleToSystem: p.map_developer_role_to_system,
+      normalizeReasoningDeltaAlias: p.normalize_reasoning_delta_alias,
+    },
     fetch: proxyFetch,
   });
 }
@@ -1470,6 +1512,7 @@ export async function buildServer(
     // post-served settle, threaded from the composition root.
     budgetGate,
     settleBudget: settleKeyBudget,
+    responseModelPolicy: first.response_model_policy,
     // e2e-only: allow the `x-helm-eval` header to toggle Layer-2 eval per request
     // so the eval cascade can be black-boxed without a config reload. Production
     // leaves HELM_E2E unset → eval stays config-driven (fail-closed, principle 2).
@@ -1652,6 +1695,18 @@ export async function buildServer(
     recordOAuthUsage,
     writeQueue,
   );
+  const anthropicCountClient = (): ProviderClient | null => {
+    for (const client of providerClients.values()) {
+      if (
+        client.nativeProtocolProfile === "anthropic_messages" &&
+        typeof client.countTokens === "function"
+      ) {
+        return client;
+      }
+    }
+    return null;
+  };
+  const anthropicCountProvider = anthropicCountClient();
   // Inject the SAME per-key limiter instance the chat surface uses so the
   // Anthropic /v1/messages handler can meter per-key AFTER its self-auth (closes
   // the rate-limit bypass on /v1/messages + /v1/responses). The Wave2 handlers
@@ -1667,6 +1722,15 @@ export async function buildServer(
     // SAME process-wide gate as the chat middleware (issue #93): a key's
     // in-flight count spans every surface.
     concurrencyGate,
+    ...(anthropicCountProvider?.countTokens
+      ? {
+          countTokens: async (body, _identity, signal) => {
+            const client = anthropicCountClient();
+            if (!client?.countTokens) throw new Error("Anthropic countTokens provider unavailable");
+            return await client.countTokens(body, { signal });
+          },
+        }
+      : {}),
     auth: {
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;
@@ -1763,6 +1827,118 @@ export async function buildServer(
     recordOAuthUsage,
     writeQueue,
   );
+  const responsesClientWith = (
+    method:
+      | "responsesRetrieve"
+      | "responsesDelete"
+      | "responsesCancel"
+      | "responsesInputItems"
+      | "responsesCompact"
+      | "responsesInputTokens",
+    providerName?: string | null,
+  ): ProviderClient | null => {
+    if (providerName !== undefined && providerName !== null) {
+      const client = providerClients.get(providerName);
+      return client !== undefined && typeof client[method] === "function" ? client : null;
+    }
+    for (const client of providerClients.values()) {
+      if (typeof client[method] === "function") return client;
+    }
+    return null;
+  };
+  const responsesRegistryStore = new Map<string, ResponsesRegistryRecord>();
+  // Bound the process-local registry: expired/deleted entries are swept periodically
+  // (not only on a same-id get), and a hard cap evicts the oldest insertions so a
+  // long-running gateway that creates many never-retrieved response ids cannot grow
+  // without limit. (Best-effort, single-process; a Store-backed registry would persist.)
+  const REGISTRY_MAX_ENTRIES = 10_000;
+  const REGISTRY_PRUNE_EVERY = 256;
+  let registryPutsSincePrune = 0;
+  const pruneResponsesRegistry = (now: number): void => {
+    for (const [id, record] of responsesRegistryStore) {
+      if (record.expiresAt <= now || record.status === "deleted") {
+        responsesRegistryStore.delete(id);
+      }
+    }
+    if (responsesRegistryStore.size > REGISTRY_MAX_ENTRIES) {
+      let excess = responsesRegistryStore.size - REGISTRY_MAX_ENTRIES;
+      for (const id of responsesRegistryStore.keys()) {
+        if (excess <= 0) break;
+        responsesRegistryStore.delete(id); // Map preserves insertion order → drop oldest
+        excess -= 1;
+      }
+    }
+  };
+  const responsesRegistry: ResponsesRouteDeps["registry"] = {
+    put(record) {
+      responsesRegistryStore.set(record.responseId, record);
+      registryPutsSincePrune += 1;
+      if (
+        registryPutsSincePrune >= REGISTRY_PRUNE_EVERY ||
+        responsesRegistryStore.size > REGISTRY_MAX_ENTRIES
+      ) {
+        registryPutsSincePrune = 0;
+        pruneResponsesRegistry(Date.now());
+      }
+    },
+    get(responseId, identity) {
+      const record = responsesRegistryStore.get(responseId);
+      if (record === undefined) return null;
+      if (record.accountId !== identity.accountId || record.keyId !== identity.keyId) return null;
+      if (record.expiresAt <= Date.now() || record.status === "deleted") {
+        responsesRegistryStore.delete(responseId);
+        return null;
+      }
+      return record;
+    },
+  };
+  const responsesLifecycleUnsupported = (operation: string): HelmHttpError =>
+    new HelmHttpError(
+      makeHelmError({
+        error_class: "capability_unsatisfiable",
+        message: `Responses ${operation} is not supported by the selected provider`,
+        trace_id: "responses_lifecycle",
+      }),
+    );
+  const responsesLifecycle: ResponsesRouteDeps["lifecycle"] = {};
+  responsesLifecycle.retrieve = async (responseId, _identity, signal, record) => {
+    const client = responsesClientWith("responsesRetrieve", record?.providerName);
+    if (!client?.responsesRetrieve) throw responsesLifecycleUnsupported("retrieve");
+    return await client.responsesRetrieve(responseId, { signal });
+  };
+  responsesLifecycle.delete = async (responseId, _identity, signal, record) => {
+    const client = responsesClientWith("responsesDelete", record?.providerName);
+    if (!client?.responsesDelete) throw responsesLifecycleUnsupported("delete");
+    return await client.responsesDelete(responseId, { signal });
+  };
+  responsesLifecycle.cancel = async (responseId, _identity, signal, record) => {
+    const client = responsesClientWith("responsesCancel", record?.providerName);
+    if (!client?.responsesCancel) throw responsesLifecycleUnsupported("cancel");
+    return await client.responsesCancel(responseId, { signal });
+  };
+  responsesLifecycle.inputItems = async (responseId, _identity, signal, record) => {
+    const client = responsesClientWith("responsesInputItems", record?.providerName);
+    if (!client?.responsesInputItems) {
+      throw responsesLifecycleUnsupported("input_items");
+    }
+    return await client.responsesInputItems(responseId, { signal });
+  };
+  if (responsesClientWith("responsesCompact")?.responsesCompact) {
+    responsesLifecycle.compact = async (body, _identity, signal) => {
+      const client = responsesClientWith("responsesCompact");
+      if (!client?.responsesCompact) throw new Error("Responses compact provider unavailable");
+      return await client.responsesCompact(body as Record<string, unknown>, { signal });
+    };
+  }
+  if (responsesClientWith("responsesInputTokens")?.responsesInputTokens) {
+    responsesLifecycle.inputTokens = async (body, _identity, signal) => {
+      const client = responsesClientWith("responsesInputTokens");
+      if (!client?.responsesInputTokens) {
+        throw new Error("Responses input_tokens provider unavailable");
+      }
+      return await client.responsesInputTokens(body as Record<string, unknown>, { signal });
+    };
+  }
   registerResponsesRoute(app, {
     // Same per-key limiter, same cast rationale as the messages route above —
     // closes the rate-limit bypass on /v1/responses.
@@ -1822,6 +1998,8 @@ export async function buildServer(
       },
     },
     pipeline: responsesPipeline,
+    lifecycle: responsesLifecycle,
+    registry: responsesRegistry,
     // Telemetry + payload recorder (the /admin/requests fix): the SAME values the
     // chat route uses, so /v1/responses records served requests like /v1/chat does.
     record: {
@@ -1848,9 +2026,27 @@ export async function buildServer(
     recordOAuthUsage,
     writeQueue,
   );
+  const geminiCountClient = (): ProviderClient | null => {
+    for (const client of providerClients.values()) {
+      if (client.nativeProtocolProfile === "gemini" && typeof client.countTokens === "function") {
+        return client;
+      }
+    }
+    return null;
+  };
+  const geminiCountProvider = geminiCountClient();
   registerGeminiRoute(app, {
     rateLimiter,
     concurrencyGate,
+    ...(geminiCountProvider?.countTokens
+      ? {
+          countTokens: async (body, _identity, signal) => {
+            const client = geminiCountClient();
+            if (!client?.countTokens) throw new Error("Gemini countTokens provider unavailable");
+            return await client.countTokens(body, { signal });
+          },
+        }
+      : {}),
     auth: {
       resolve: async (credential): Promise<MessagesIdentity | null> => {
         if (credential === null) return null;

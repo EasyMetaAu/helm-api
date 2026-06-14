@@ -111,6 +111,8 @@ export interface ProviderAttempt {
   provider_name?: string | null;
   provider_model?: string | null;
   passthrough_mutations?: NativePassthroughMutationLedger;
+  /** Body-free translated-path request shims/warnings (field names + counters only). */
+  request_mutations?: NativePassthroughMutationLedger;
 }
 
 // What execute() returns: the provider_attempts trail, the final landing, and

@@ -247,6 +247,98 @@ describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overr
     expect(settleBudget).toHaveBeenCalledOnce();
   });
 
+  it("preserves the provider response model by default", async () => {
+    const { deps: d, harness } = deps();
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({
+        id: "c",
+        model: "provider-model",
+        choices: [{ message: { content: "ok" } }],
+      }),
+    );
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...NONSTREAM_BODY, model: "client-alias" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { model: string }).model).toBe("provider-model");
+  });
+
+  it("can restamp the OpenAI Chat response model to the requested alias", async () => {
+    const { deps: d, harness } = deps({ responseModelPolicy: "requested_alias" });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({
+        id: "c",
+        model: "provider-model",
+        choices: [{ message: { content: "ok" } }],
+      }),
+    );
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...NONSTREAM_BODY, model: "client-alias" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { model: string }).model).toBe("client-alias");
+    expect(res.headers.get("x-helm-provider-model")).toBe("gpt-x");
+  });
+
+  it("can expose both requested and provider model identities in headers", async () => {
+    const { deps: d, harness } = deps({ responseModelPolicy: "both" });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({
+        id: "c",
+        model: "provider-model",
+        choices: [{ message: { content: "ok" } }],
+      }),
+    );
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...NONSTREAM_BODY, model: "client-alias" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { model: string }).model).toBe("provider-model");
+    expect(res.headers.get("x-helm-requested-model")).toBe("client-alias");
+    expect(res.headers.get("x-helm-provider-model")).toBe("gpt-x");
+  });
+
+  it("can restamp streamed OpenAI Chat chunk models to the requested alias", async () => {
+    const chunks = [
+      'data: {"id":"c","object":"chat.completion.chunk","model":"provider-model","choices":[{"delta":{"content":"hi"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const { deps: d, harness } = deps({ responseModelPolicy: "requested_alias" });
+    harness.execute.mockResolvedValue({
+      ...nonStreamOutcome(null),
+      body: null,
+      stream: sse(chunks),
+    });
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...STREAM_BODY, model: "client-alias" }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('"model":"client-alias"');
+    expect(text).not.toContain('"model":"provider-model"');
+    expect(text.trimEnd().endsWith("[DONE]")).toBe(true);
+  });
+
   it("honors the e2e x-helm-eval / x-helm-rules-threshold overrides when evalHeaderOverride is on", async () => {
     const { deps: d, harness } = deps({ evalHeaderOverride: true });
     harness.execute.mockResolvedValue(
@@ -455,6 +547,49 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
       prompt_version: "v7",
     });
     expect(internal.web_search_options).toEqual({ search_context_size: "low" });
+  });
+
+  it("normalizes OpenAI Chat multimodal content before the execution pipeline", async () => {
+    const { deps: d, harness } = deps();
+    harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        model: "auto",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "inspect" },
+              { type: "image_url", image_url: "https://example.test/cat.png" },
+              {
+                type: "file",
+                file: { file_data: "data:application/pdf;base64,JVBERi0=" },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const internal = harness.execute.mock.calls[0]?.[1] as InternalRequest;
+    const content = internal.messages[0]?.content;
+    expect(Array.isArray(content)).toBe(true);
+    const parts = content as Array<Record<string, unknown>>;
+    expect(parts[1]).toMatchObject({
+      type: "image",
+      url: "https://example.test/cat.png",
+    });
+    expect(parts[2]).toMatchObject({
+      type: "document",
+      data: "JVBERi0=",
+      mediaType: "application/pdf",
+      filename: "document.pdf",
+    });
   });
 
   it("takes the explicit-model passthrough when the key allows custom models", async () => {

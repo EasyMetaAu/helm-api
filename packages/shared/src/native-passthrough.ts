@@ -15,7 +15,7 @@ export interface NativePassthroughMutationLedger {
 }
 
 export interface NativePassthroughCarrier {
-  protocol: Extract<Protocol, "anthropic_messages" | "openai_responses">;
+  protocol: Extract<Protocol, "anthropic_messages" | "openai_responses" | "gemini">;
   body: Record<string, unknown>;
   raw_body?: string;
   headers: Record<string, string | string[]>;
@@ -28,7 +28,9 @@ export function isNativePassthroughCarrier(value: unknown): value is NativePasst
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return (
-    (record.protocol === "anthropic_messages" || record.protocol === "openai_responses") &&
+    (record.protocol === "anthropic_messages" ||
+      record.protocol === "openai_responses" ||
+      record.protocol === "gemini") &&
     record.body !== null &&
     typeof record.body === "object" &&
     !Array.isArray(record.body) &&

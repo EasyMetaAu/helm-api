@@ -65,6 +65,10 @@ const OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
 const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
 const COMPACT_BETA = "compact-2026-01-12";
 const FAST_MODE_BETA = "fast-mode-2026-02-01";
+const STRUCTURED_OUTPUT_BETA = "structured-outputs-2025-11-13";
+const ADVISOR_TOOL_BETA = "advisor-tool-2026-03-01";
+const ADVANCED_TOOL_USE_BETA = "advanced-tool-use-2025-11-20";
+const TOKEN_COUNTING_BETA = "token-counting-2024-11-01";
 const SYSTEM_SPOOF = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // ── request translation: OpenAI-Chat IR -> Anthropic Messages ────────────────
@@ -169,7 +173,22 @@ function contextManagementEdits(value: unknown): unknown[] {
   return [];
 }
 
-function betaHeaderForBody(body: Record<string, unknown>): string {
+function toolTypeMatches(
+  body: Record<string, unknown>,
+  predicate: (type: string) => boolean,
+): boolean {
+  if (!Array.isArray(body.tools)) return false;
+  return body.tools.some((tool) => {
+    if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return false;
+    const type = (tool as Record<string, unknown>).type;
+    return typeof type === "string" && predicate(type);
+  });
+}
+
+function betaHeaderForBody(
+  body: Record<string, unknown>,
+  extraBetas: readonly string[] = [],
+): string {
   const betas = new Set(OAUTH_BETA.split(","));
   if (body.context_management !== undefined) {
     betas.add(CONTEXT_MANAGEMENT_BETA);
@@ -181,6 +200,16 @@ function betaHeaderForBody(body: Record<string, unknown>): string {
     }
   }
   if (body.speed === "fast") betas.add(FAST_MODE_BETA);
+  if (body.output_format !== undefined || body.output_config !== undefined) {
+    betas.add(STRUCTURED_OUTPUT_BETA);
+  }
+  if (toolTypeMatches(body, (type) => type === "advisor_20260301")) {
+    betas.add(ADVISOR_TOOL_BETA);
+  }
+  if (toolTypeMatches(body, (type) => type.startsWith("tool_search_tool_"))) {
+    betas.add(ADVANCED_TOOL_USE_BETA);
+  }
+  for (const beta of extraBetas) betas.add(beta);
   return [...betas].join(",");
 }
 
@@ -568,6 +597,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
   const cfg = deps.config;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const url = `${cfg.baseUrl}/v1/messages`;
+  const countTokensUrl = `${cfg.baseUrl}/v1/messages/count_tokens`;
 
   const hasStatic = cfg.apiKey !== undefined;
   const hasDynamic = cfg.getAuthHeader !== undefined;
@@ -575,7 +605,10 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     throw new Error("anthropic client requires exactly one of `apiKey` or `getAuthHeader`");
   }
 
-  async function headers(body: Record<string, unknown>): Promise<Record<string, string>> {
+  async function headers(
+    body: Record<string, unknown>,
+    extraBetas: readonly string[] = [],
+  ): Promise<Record<string, string>> {
     const h: Record<string, string> = {
       "Content-Type": "application/json",
       // Header parity with openclaw's OAuth recipe — both are load-bearing for the
@@ -583,7 +616,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       accept: "application/json",
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-version": ANTHROPIC_VERSION,
-      "anthropic-beta": betaHeaderForBody(body),
+      "anthropic-beta": betaHeaderForBody(body, extraBetas),
       // Keep the user-agent coherent with the billing block at system[0]: derive its
       // version + entrypoint from the SAME identity emitted there (the client's real
       // one when present, else the fallback) so the two never disagree.
@@ -617,9 +650,14 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     return changed ? JSON.parse(value) : raw;
   }
 
-  async function request(input: NativePassthroughInput, external?: AbortSignal): Promise<Response> {
+  async function request(
+    input: NativePassthroughInput,
+    external?: AbortSignal,
+    endpointUrl = url,
+    extraBetas: readonly string[] = [],
+  ): Promise<Response> {
     const body = nativePassthroughBody(input);
-    const prepared = prepareNativePassthroughRequest(input, await headers(body), {
+    const prepared = prepareNativePassthroughRequest(input, await headers(body, extraBetas), {
       mergeHeaders: ["anthropic-beta"],
       forceAcceptEncodingIdentity: cfg.getAuthHeader !== undefined && body.stream === true,
       ...(cfg.getAuthHeader !== undefined && body.stream === true
@@ -628,7 +666,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     });
     const t = withTimeout(timeoutMs, external);
     try {
-      return await doFetch(url, {
+      return await doFetch(endpointUrl, {
         method: "POST",
         headers: prepared.headers,
         body: prepared.bodyText,
@@ -647,12 +685,14 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
   async function requestWithRetry(
     body: NativePassthroughInput,
     external?: AbortSignal,
+    endpointUrl = url,
+    extraBetas: readonly string[] = [],
   ): Promise<Response> {
-    const res = await request(body, external);
+    const res = await request(body, external, endpointUrl, extraBetas);
     if (res.status === 401 && cfg.onUnauthorized !== undefined) {
       await res.body?.cancel().catch(() => {});
       cfg.onUnauthorized();
-      return await request(body, external);
+      return await request(body, external, endpointUrl, extraBetas);
     }
     return res;
   }
@@ -671,6 +711,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
   }
 
   return {
+    nativeProtocolProfile: "anthropic_messages",
+
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
       const res = await requestWithRetry(
@@ -703,6 +745,12 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     // so the same closure works unchanged on a native body.
     async nativePassthrough(body, opts) {
       const res = await requestWithRetry(body, opts?.signal);
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
+    },
+
+    async countTokens(req, opts) {
+      const res = await requestWithRetry(req, opts?.signal, countTokensUrl, [TOKEN_COUNTING_BETA]);
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as Record<string, unknown>;
     },

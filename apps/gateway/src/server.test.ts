@@ -5,7 +5,7 @@ import { RuntimeSettingsSchema } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import { createExecute } from "./routes/execute.js";
-import { buildRegistry, estimateRequestTokens } from "./server.js";
+import { buildProviderClients, buildRegistry, estimateRequestTokens } from "./server.js";
 
 // A minimal Hono context whose request carries the given content-length header.
 // We never read the body here — the estimator must derive its estimate WITHOUT
@@ -61,6 +61,74 @@ describe("native_protocol_passthrough runtime flag", () => {
     // and openai_chat traffic still falls back to translation inside the guard.
     const parsed = RuntimeSettingsSchema.parse({});
     expect(parsed.native_protocol_passthrough).toBe(true);
+  });
+});
+
+describe("buildProviderClients provider dispatch", () => {
+  it("creates an Anthropic-native client with provider-backed count_tokens", () => {
+    const previous = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "anthropic-secret";
+    try {
+      const clients = buildProviderClients(
+        [
+          {
+            name: "anthropic",
+            alias: "anthropic",
+            type: "anthropic",
+            base_url: "https://api.anthropic.com",
+            api_key_env: "ANTHROPIC_API_KEY",
+            models: [{ alias: "claude/sonnet", provider_model: "claude-sonnet" }],
+            targetProviderProtocol: "anthropic_messages",
+            map_developer_role_to_system: false,
+            normalize_reasoning_delta_alias: false,
+            response_model_policy: "provider",
+          },
+        ],
+        "https://fallback.invalid",
+        1_000,
+      );
+
+      const client = clients.get("anthropic");
+      expect(client?.nativeProtocolProfile).toBe("anthropic_messages");
+      expect(typeof client?.countTokens).toBe("function");
+    } finally {
+      if (previous === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previous;
+    }
+  });
+
+  it("creates a Gemini-native client for provider type gemini", () => {
+    const previous = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = "gemini-secret";
+    try {
+      const clients = buildProviderClients(
+        [
+          {
+            name: "google",
+            alias: "google",
+            type: "gemini",
+            base_url: "https://generativelanguage.googleapis.com/v1beta",
+            api_key_env: "GEMINI_API_KEY",
+            models: [{ alias: "gemini/flash", provider_model: "gemini-2.0-flash" }],
+            targetProviderProtocol: "gemini",
+            map_developer_role_to_system: false,
+            normalize_reasoning_delta_alias: false,
+            response_model_policy: "provider",
+          },
+        ],
+        "https://fallback.invalid",
+        1_000,
+      );
+
+      const client = clients.get("google");
+      expect(client?.nativeProtocolProfile).toBe("gemini");
+      expect(typeof client?.nativePassthrough).toBe("function");
+      expect(typeof client?.nativePassthroughStream).toBe("function");
+      expect(typeof client?.countTokens).toBe("function");
+    } finally {
+      if (previous === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = previous;
+    }
   });
 });
 
@@ -138,6 +206,8 @@ describe("buildRegistry backfill metadata through execute", () => {
           models: [],
           targetProviderProtocol: "anthropic_messages",
           map_developer_role_to_system: false,
+          normalize_reasoning_delta_alias: false,
+          response_model_policy: "provider",
         },
       ],
       "anthropic",
@@ -200,6 +270,8 @@ describe("buildRegistry backfill metadata through execute", () => {
           // The compatibility shim disables verbatim passthrough — even though the
           // provider implements nativePassthrough and the protocols match.
           map_developer_role_to_system: true,
+          normalize_reasoning_delta_alias: false,
+          response_model_policy: "provider",
         },
       ],
       "anthropic",

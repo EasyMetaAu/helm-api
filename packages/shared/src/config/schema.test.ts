@@ -88,6 +88,36 @@ describe("ProviderConfigSchema targetProviderProtocol", () => {
   it("intentionally defaults unknown provider type to openai_chat", () => {
     expect(provider({ type: "unknown-provider" }).targetProviderProtocol).toBe("openai_chat");
   });
+
+  it("defaults reasoning alias stream normalization off and accepts opt-in", () => {
+    expect(provider().normalize_reasoning_delta_alias).toBe(false);
+    expect(
+      provider({ normalize_reasoning_delta_alias: true }).normalize_reasoning_delta_alias,
+    ).toBe(true);
+  });
+
+  it("defaults response model policy to provider identity and accepts compatibility modes", () => {
+    expect(provider().response_model_policy).toBe("provider");
+    expect(provider({ response_model_policy: "requested_alias" }).response_model_policy).toBe(
+      "requested_alias",
+    );
+    expect(provider({ response_model_policy: "both" }).response_model_policy).toBe("both");
+  });
+
+  it("accepts Gemini remote media fetch safety limits", () => {
+    expect(
+      provider({
+        type: "gemini",
+        remote_media_fetch: { enabled: true, max_bytes: 1024, allowed_mime_types: ["image/*"] },
+      }).remote_media_fetch,
+    ).toMatchObject({
+      enabled: true,
+      max_bytes: 1024,
+      timeout_ms: 5_000,
+      max_redirects: 2,
+      allowed_mime_types: ["image/*"],
+    });
+  });
 });
 
 describe("HelmConfigSchema", () => {

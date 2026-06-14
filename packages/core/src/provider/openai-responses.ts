@@ -23,6 +23,7 @@ import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
   type ProviderClient,
+  type ProviderConfig,
   UpstreamError,
 } from "./openai.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
@@ -52,6 +53,11 @@ export interface CodexResponsesClientConfig {
 
 export interface CodexResponsesClientDeps {
   config: CodexResponsesClientConfig;
+  fetch?: typeof globalThis.fetch;
+}
+
+export interface GenericOpenAIResponsesClientDeps {
+  config: ProviderConfig;
   fetch?: typeof globalThis.fetch;
 }
 
@@ -255,6 +261,107 @@ export function openaiToResponsesRequest(
   return body;
 }
 
+export function openaiToGenericResponsesRequest(
+  req: ChatCompletionRequest,
+): Record<string, unknown> {
+  const r = req as Record<string, unknown>;
+  const messages = Array.isArray(r.messages) ? (r.messages as Array<Record<string, unknown>>) : [];
+  const body: Record<string, unknown> = {
+    model: r.model,
+    instructions: buildInstructions(messages),
+    input: toResponsesInput(messages),
+  };
+  if (r.stream === true) body.stream = true;
+  const maxOutput = r.max_output_tokens ?? r.max_completion_tokens ?? r.max_tokens;
+  if (typeof maxOutput === "number") body.max_output_tokens = maxOutput;
+  if (typeof r.temperature === "number") body.temperature = r.temperature;
+  if (typeof r.top_p === "number") body.top_p = r.top_p;
+  if (typeof r.reasoning_effort === "string" && r.reasoning_effort.length > 0) {
+    body.reasoning = { effort: r.reasoning_effort };
+  }
+  if (r.tool_choice !== undefined) body.tool_choice = chatToolChoiceToResponses(r.tool_choice);
+  if (Array.isArray(r.tools)) {
+    const tools = (r.tools as Array<Record<string, unknown>>).flatMap((t) => {
+      const fn = (t.function ?? {}) as Record<string, unknown>;
+      if (!fn.name) return [];
+      return [
+        {
+          type: "function",
+          name: fn.name,
+          description: fn.description ?? "",
+          parameters: fn.parameters ?? { type: "object" },
+          strict: false,
+        },
+      ];
+    });
+    if (tools.length) body.tools = tools;
+  }
+  return body;
+}
+
+function responsesJsonToChatResponse(
+  response: Record<string, unknown>,
+  model: string,
+): ChatCompletionResponse {
+  const output = Array.isArray(response.output) ? response.output : [];
+  const text = output
+    .flatMap((item) => {
+      if (item === null || typeof item !== "object") return [];
+      const content = (item as { content?: unknown }).content;
+      if (!Array.isArray(content)) return [];
+      return content.flatMap((part) =>
+        part !== null &&
+        typeof part === "object" &&
+        typeof (part as { text?: unknown }).text === "string"
+          ? [(part as { text: string }).text]
+          : [],
+      );
+    })
+    .join("");
+  // Responses `function_call` output items → OpenAI chat `tool_calls` so a
+  // cross-protocol (chat→generic-responses) caller still sees the tool invocation
+  // instead of silently losing it. Mirrors the streaming aggregator's mapping.
+  const toolCalls = output.flatMap((item) => {
+    if (item === null || typeof item !== "object") return [];
+    const it = item as Record<string, unknown>;
+    if (it.type !== "function_call") return [];
+    const name = typeof it.name === "string" ? it.name : undefined;
+    if (name === undefined) return [];
+    const callId =
+      typeof it.call_id === "string" ? it.call_id : typeof it.id === "string" ? it.id : name;
+    const args =
+      typeof it.arguments === "string" ? it.arguments : JSON.stringify(it.arguments ?? {});
+    return [{ id: callId, type: "function", function: { name, arguments: args } }];
+  });
+  const usage = response.usage && typeof response.usage === "object" ? response.usage : {};
+  const inputTokens =
+    typeof (usage as { input_tokens?: unknown }).input_tokens === "number"
+      ? ((usage as { input_tokens: number }).input_tokens ?? 0)
+      : 0;
+  const outputTokens =
+    typeof (usage as { output_tokens?: unknown }).output_tokens === "number"
+      ? ((usage as { output_tokens: number }).output_tokens ?? 0)
+      : 0;
+  // OpenAI convention: content is null (not "") when the turn is purely tool calls.
+  const message: Record<string, unknown> = {
+    role: "assistant",
+    content: text.length > 0 ? text : toolCalls.length > 0 ? null : "",
+    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+  };
+  return {
+    id: typeof response.id === "string" ? response.id : `chatcmpl-${Date.now()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, message, finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop" }],
+    usage: {
+      prompt_tokens: inputTokens,
+      completion_tokens: outputTokens,
+      total_tokens: inputTokens + outputTokens,
+    },
+  };
+}
+
 // ── response status -> OpenAI finish_reason ──────────────────────────────────
 
 function finishReason(status: unknown, hadToolCall: boolean): string {
@@ -412,6 +519,8 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   }
 
   return {
+    nativeProtocolProfile: "codex_responses",
+
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
       const res = await requestWithRetry(
@@ -458,6 +567,253 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       const res = await requestWithRetry(body, opts?.signal);
       if (!res.ok) throw await errorFromResponse(res);
       yield* readResponsesSSERaw(res, timeoutMs);
+    },
+  };
+}
+
+export function createGenericOpenAIResponsesClient(
+  deps: GenericOpenAIResponsesClientDeps,
+): ProviderClient {
+  const doFetch = deps.fetch ?? globalThis.fetch;
+  const cfg = deps.config;
+  const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  const rootUrl = async (): Promise<string> => {
+    const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
+    const trimmed = base.replace(/\/$/, "");
+    return trimmed.endsWith("/responses") ? trimmed.slice(0, -"/responses".length) : trimmed;
+  };
+
+  const endpoint = async (path: string): Promise<string> => `${await rootUrl()}/${path}`;
+
+  async function providerHeaders(accept = "application/json"): Promise<Record<string, string>> {
+    const authorization =
+      cfg.getAuthHeader !== undefined
+        ? await cfg.getAuthHeader()
+        : cfg.apiKey !== undefined
+          ? `Bearer ${cfg.apiKey}`
+          : "";
+    return {
+      "Content-Type": "application/json",
+      accept,
+      ...(authorization.length > 0 ? { Authorization: authorization } : {}),
+      ...(cfg.extraHeaders ? cfg.extraHeaders() : {}),
+    };
+  }
+
+  function scrub(raw: unknown): unknown {
+    if (raw === null) return raw;
+    const secrets = cfg.currentSecrets ? cfg.currentSecrets() : [];
+    // Mirror the openai/anthropic/gemini clients: a static apiKey must also be
+    // redacted from upstream error bodies (else it can leak into error_detail/
+    // telemetry if the upstream echoes the Authorization value).
+    if (cfg.apiKey !== undefined) secrets.push(cfg.apiKey);
+    const replace = (value: string): { value: string; changed: boolean } => {
+      let v = value;
+      let changed = false;
+      for (const s of secrets) {
+        if (s.length < 4) continue;
+        if (v.includes(s)) {
+          v = v.split(s).join("[redacted]");
+          changed = true;
+        }
+      }
+      return { value: v, changed };
+    };
+    if (typeof raw === "string") return replace(raw).value;
+    if (typeof raw !== "object") return raw;
+    const { value, changed } = replace(JSON.stringify(raw));
+    return changed ? JSON.parse(value) : raw;
+  }
+
+  async function fetchWithTimeout(
+    url: string,
+    init: RequestInit,
+    external?: AbortSignal,
+  ): Promise<Response> {
+    const t = withTimeout(timeoutMs, external);
+    try {
+      return await doFetch(url, { ...init, signal: t.signal });
+    } catch (err) {
+      if (t.isTimeout() && !t.isExternalAbort()) {
+        throw new UpstreamError("timeout", "upstream request timed out");
+      }
+      throw err;
+    } finally {
+      t.cleanup();
+    }
+  }
+
+  async function errorFromResponse(res: Response): Promise<UpstreamError> {
+    const providerRaw = await res
+      .text()
+      .then((t) => {
+        try {
+          return JSON.parse(t);
+        } catch {
+          return t;
+        }
+      })
+      .catch(() => null)
+      .then(scrub);
+    return new UpstreamError(
+      "upstream_error",
+      `upstream returned ${res.status}`,
+      providerRaw,
+      res.status,
+    );
+  }
+
+  async function requestJson(
+    path: string,
+    init: {
+      method: "GET" | "POST" | "DELETE";
+      body?: NativePassthroughInput;
+      accept?: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<Response> {
+    const headers = await providerHeaders(init.accept);
+    let bodyText: string | undefined;
+    let requestHeaders = headers;
+    if (init.body !== undefined) {
+      const prepared = prepareNativePassthroughRequest(init.body, headers);
+      requestHeaders = prepared.headers;
+      bodyText = prepared.bodyText;
+    }
+    const res = await fetchWithTimeout(
+      await endpoint(path),
+      { method: init.method, headers: requestHeaders, ...(bodyText ? { body: bodyText } : {}) },
+      init.signal,
+    );
+    if (res.status === 401 && cfg.onUnauthorized !== undefined) {
+      await res.body?.cancel().catch(() => {});
+      cfg.onUnauthorized();
+      // Rebuild headers AFTER onUnauthorized so an OAuth provider's retry carries the
+      // refreshed token — reusing the original headers would resend the expired one
+      // and the refresh would never recover the request.
+      const refreshedHeaders = await providerHeaders(init.accept);
+      let retryHeaders = refreshedHeaders;
+      let retryBodyText = bodyText;
+      if (init.body !== undefined) {
+        const prepared = prepareNativePassthroughRequest(init.body, refreshedHeaders);
+        retryHeaders = prepared.headers;
+        retryBodyText = prepared.bodyText;
+      }
+      return await fetchWithTimeout(
+        await endpoint(path),
+        {
+          method: init.method,
+          headers: retryHeaders,
+          ...(retryBodyText ? { body: retryBodyText } : {}),
+        },
+        init.signal,
+      );
+    }
+    return res;
+  }
+
+  return {
+    nativeProtocolProfile: "generic_openai_responses",
+
+    async chatCompletion(req, opts) {
+      const model = String((req as Record<string, unknown>).model ?? "");
+      const res = await requestJson("responses", {
+        method: "POST",
+        body: openaiToGenericResponsesRequest(req),
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return responsesJsonToChatResponse((await res.json()) as Record<string, unknown>, model);
+    },
+
+    async *chatCompletionStream(req, opts) {
+      const model = String((req as Record<string, unknown>).model ?? "");
+      const res = await requestJson("responses", {
+        method: "POST",
+        body: { ...openaiToGenericResponsesRequest(req), stream: true },
+        accept: "text/event-stream",
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      yield* translateResponsesSSE(res, model, timeoutMs);
+    },
+
+    async nativePassthrough(body, opts) {
+      const res = await requestJson("responses", {
+        method: "POST",
+        body,
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
+    },
+
+    async *nativePassthroughStream(body, opts) {
+      const res = await requestJson("responses", {
+        method: "POST",
+        body,
+        accept: "text/event-stream",
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      yield* readResponsesSSERaw(res, timeoutMs);
+    },
+
+    async responsesRetrieve(responseId, opts) {
+      const res = await requestJson(`responses/${encodeURIComponent(responseId)}`, {
+        method: "GET",
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
+    },
+
+    async responsesDelete(responseId, opts) {
+      const res = await requestJson(`responses/${encodeURIComponent(responseId)}`, {
+        method: "DELETE",
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
+    },
+
+    async responsesCancel(responseId, opts) {
+      const res = await requestJson(`responses/${encodeURIComponent(responseId)}/cancel`, {
+        method: "POST",
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
+    },
+
+    async responsesInputItems(responseId, opts) {
+      const res = await requestJson(`responses/${encodeURIComponent(responseId)}/input_items`, {
+        method: "GET",
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
+    },
+
+    async responsesCompact(req, opts) {
+      const res = await requestJson("responses/compact", {
+        method: "POST",
+        body: req,
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
+    },
+
+    async responsesInputTokens(req, opts) {
+      const res = await requestJson("responses/input_tokens", {
+        method: "POST",
+        body: req,
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
     },
   };
 }
