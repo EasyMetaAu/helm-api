@@ -3,10 +3,9 @@ import type { InternalRequest, TargetProviderProtocol } from "@helm/shared";
 // Native protocol passthrough guard (issue #217, Phase 1). Decides whether the
 // executor may forward the client's VERBATIM native request body to the upstream
 // and return the upstream's native response untranslated — skipping the 4 lossy
-// translations (`Anthropic-native → IR → OpenAI-Chat → Anthropic wire` and back)
-// that only exist to normalize a heterogeneous chain. When the inbound protocol
-// already equals the upstream's native protocol, those translations are pure
-// waste and pure risk, so passthrough sends the body as-is.
+// translations (`Anthropic-native → IR → OpenAI-Chat → Anthropic wire` and back).
+// When the inbound protocol already equals THIS attempt's upstream native protocol,
+// those translations are pure waste and pure risk, so passthrough sends the body as-is.
 //
 // This generalizes the #218 same-protocol-serialization guard: the previous guard
 // hard-coded `openai_chat` (which was a no-op — openai_chat IS the lingua franca,
@@ -20,7 +19,6 @@ export type NativePassthroughDisableReason =
   | "missing_native_request"
   | "source_protocol_is_lingua_franca"
   | "protocol_mismatch"
-  | "fallback_may_change_provider_protocol"
   | "provider_requires_compatibility_rewrite"
   | "provider_lacks_passthrough";
 
@@ -36,10 +34,6 @@ export interface NativePassthroughDecisionInput {
   request: InternalRequest;
   /** The resolved candidate's upstream wire protocol. */
   targetProviderProtocol: TargetProviderProtocol;
-  /** True when a LATER candidate in the fallback chain resolves to a different
-   *  provider protocol (a heterogeneous chain) — passthrough must stay off so the
-   *  response can be normalized to IR for any fallback translator. */
-  fallbackMayUseDifferentProviderProtocol: boolean;
   /** The provider needs a compatibility rewrite (e.g. developer-role / tool /
    *  schema remap) — the body cannot be forwarded byte-for-byte. */
   providerRequiresCompatibilityRewrite: boolean;
@@ -83,9 +77,6 @@ export function canUseNativePassthrough(
   // cached prefix (tools → system → history) survives and the native_request stays
   // self-consistent. Passthrough can therefore fire WITH memory — there is no longer a
   // request rewrite for the guard to defend against.
-  if (input.fallbackMayUseDifferentProviderProtocol) {
-    return { ok: false, reason: "fallback_may_change_provider_protocol" };
-  }
   if (input.providerRequiresCompatibilityRewrite) {
     return { ok: false, reason: "provider_requires_compatibility_rewrite" };
   }

@@ -1032,7 +1032,17 @@ export function createMessagesPipeline(
                       model:
                         typeof ir.model === "string" && ir.model.length > 0 ? ir.model : "auto",
                     })
-                  : convertOpenAIStreamToAnthropic(source as AsyncIterable<never>);
+                  : convertOpenAIStreamToAnthropic(source as AsyncIterable<never>, {
+                      id: result.decision.request_id,
+                      model:
+                        result.decision.final?.status === "ok"
+                          ? (result.decision.final.provider_model ??
+                            result.decision.final.model_alias ??
+                            (typeof ir.model === "string" ? ir.model : undefined))
+                          : typeof ir.model === "string"
+                            ? ir.model
+                            : undefined,
+                    });
               for await (const ev of events) {
                 yield ev as (AnthropicSSEEvent | ResponsesSSEEvent) & { type: string };
               }

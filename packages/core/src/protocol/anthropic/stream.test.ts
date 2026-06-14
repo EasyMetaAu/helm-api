@@ -81,6 +81,31 @@ describe("convertOpenAIStreamToAnthropic — text event sequence", () => {
       expect(md.delta.stop_reason).toBe("end_turn");
     }
   });
+
+  it("fills message_start id/model from the first upstream chunk", async () => {
+    const events = await collect(convertOpenAIStreamToAnthropic(feed([textChunk("x")])));
+    const start = nth(events, 0);
+    expect(start.type).toBe("message_start");
+    if (start.type === "message_start") {
+      expect(start.message.id).toBe("msg_chatcmpl-x");
+      expect(start.message.model).toBe("gpt-x");
+    }
+  });
+
+  it("uses supplied fallback id/model when the first upstream chunk omits them", async () => {
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([{ choices: [{ index: 0, delta: { content: "x" }, finish_reason: null }] }]),
+        { id: "req-123", model: "gpt-5.5" },
+      ),
+    );
+    const start = nth(events, 0);
+    expect(start.type).toBe("message_start");
+    if (start.type === "message_start") {
+      expect(start.message.id).toBe("msg_req-123");
+      expect(start.message.model).toBe("gpt-5.5");
+    }
+  });
 });
 
 // —— 2. parallel tool-call streaming ——————————————————————————————————————————

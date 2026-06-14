@@ -29,10 +29,9 @@ export const RuntimeSettingsSchema = z.object({
   // bypassing the lossy IR translation round-trip. Default ON: when the inbound
   // protocol already equals the upstream wire protocol (e.g. Anthropic
   // /v1/messages → an Anthropic backend) the verbatim forward is higher-fidelity
-  // and cache-friendlier than translating. The guard still falls back to
-  // translation for openai_chat (lingua franca), cross-protocol routes, and
-  // heterogeneous fallback chains, so turning this ON is safe; flip it OFF here to
-  // force every request back through the IR round-trip.
+  // and cache-friendlier than translating. The guard is per-attempt: it still falls
+  // back to translation for openai_chat (lingua franca) and cross-protocol attempts,
+  // so a later heterogeneous fallback can translate if reached.
   native_protocol_passthrough: z.boolean().default(true),
   // Auto-prune captured payloads older than this many days. Bounds the storage
   // footprint and the plaintext-exposure window. Capped at 10 years.
