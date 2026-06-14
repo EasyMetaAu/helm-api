@@ -1,4 +1,5 @@
 import type { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
 import type { AccountProxyInput, AdminApiDeps, OAuthAdminAccess } from "./deps.js";
 
@@ -19,6 +20,14 @@ const DEFAULT_ACCOUNT = "default";
 // so echoing the message is safe; anything else degrades to a generic string.
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : "oauth request failed";
+}
+
+// A client disconnect / modal close surfaces as an aborted signal or an AbortError.
+// Treated as NOT a provider failure (Principle: client disconnect ≠ upstream fault),
+// so the /test stream ends silently instead of emitting a spurious error event.
+function isAbort(e: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted) return true;
+  return e instanceof Error && (e.name === "AbortError" || /abort/i.test(e.message));
 }
 
 // A malformed proxy body — thrown by parseProxyInput, caught at the route to map to
@@ -447,6 +456,43 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
     }
+  });
+
+  // POST /oauth/:provider/test -> SSE connectivity check for ONE account. Streams a
+  // single short completion through a FRESH isolated client (deps.oauthTester) and
+  // relays normalized events so the admin UI shows the real, streamed reply — not a
+  // bare "ok". Fail-open (Principle 3): a missing tester 503s before streaming;
+  // missing account/model 400s; any upstream failure is surfaced as an in-band
+  // `error` event (HTTP 200, never a 5xx) so the dialog can show what went wrong. A
+  // client/modal abort is silent (not a provider fault). No telemetry is recorded —
+  // the fresh client carries its own no-op breaker (see oauth-test.ts).
+  app.post("/admin/api/oauth/:provider/test", async (c) => {
+    const tester = deps.oauthTester;
+    if (!tester) return c.json({ error: "oauth login not configured" }, 503);
+    const providerId = c.req.param("provider");
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const account = typeof body.account === "string" ? body.account : "";
+    const model = typeof body.model === "string" ? body.model : "";
+    const prompt = typeof body.prompt === "string" ? body.prompt : undefined;
+    if (!account) return c.json({ error: "account is required" }, 400);
+    if (!model) return c.json({ error: "model is required" }, 400);
+    const signal = c.req.raw.signal;
+    return streamSSE(c, async (sse) => {
+      const startedAt = Date.now();
+      await sse.writeSSE({ data: JSON.stringify({ type: "start", model }) });
+      try {
+        for await (const ev of tester.test({ providerId, account, model, prompt, signal })) {
+          await sse.writeSSE({ data: JSON.stringify(ev) });
+        }
+        await sse.writeSSE({
+          data: JSON.stringify({ type: "done", durationMs: Date.now() - startedAt }),
+        });
+      } catch (e) {
+        // A client disconnect / modal close is not a provider failure — stay quiet.
+        if (isAbort(e, signal)) return;
+        await sse.writeSSE({ data: JSON.stringify({ type: "error", error: errMessage(e) }) });
+      }
+    });
   });
 
   // DELETE /oauth/:provider?account=... -> 204 (log out / forget a credential)

@@ -12,6 +12,7 @@
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
   import ManageAccountDialog from '$lib/components/ManageAccountDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import TestAccountDialog from '$lib/components/TestAccountDialog.svelte';
   import { durationParts, formatCount, formatTokens, formatUsd } from '$lib/format';
   import { t } from '$lib/i18n';
 
@@ -37,6 +38,15 @@
   let refreshing = $state<boolean>(false);
   let showConnect = $state<boolean>(false);
   let managing = $state<{ providerId: string; providerName: string; account: string } | null>(null);
+  // The account whose connectivity-test dialog is open (providers page "Test"
+  // button). Carries the row's effective models so the dialog's picker offers only
+  // routable ids — no extra fetch.
+  let testing = $state<{
+    providerId: string;
+    providerName: string;
+    account: string;
+    models: string[];
+  } | null>(null);
   let confirming = $state<{ providerId: string; account: string } | null>(null);
   let disconnecting = $state<boolean>(false);
   // Accounts whose inline schedule edit is in flight (keyed provider/account) — used
@@ -276,6 +286,16 @@
     />
   {/if}
 
+  {#if testing}
+    <TestAccountDialog
+      provider={testing.providerId}
+      providerName={testing.providerName}
+      account={testing.account}
+      models={testing.models}
+      onclose={() => (testing = null)}
+    />
+  {/if}
+
   {#if rows.length === 0}
     <div class="empty-state">
       <p>
@@ -435,6 +455,17 @@
               <!-- Actions -->
               <td class="px-3 py-3 text-right">
                 <div class="inline-flex gap-2">
+                  <button
+                    type="button"
+                    class="btn-secondary"
+                    onclick={() =>
+                      (testing = {
+                        providerId: row.provider.id,
+                        providerName: row.provider.name,
+                        account: row.account.account,
+                        models: row.account.models,
+                      })}>{$t('Test')}</button
+                  >
                   <button
                     type="button"
                     class="btn-secondary"

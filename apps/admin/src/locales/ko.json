@@ -546,5 +546,18 @@
   "Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.": "OpenAI 호환 provider를 설정하세요. base URL은 /v1로 끝납니다. Anthropic 경로에서는 오리진 그대로를 사용하세요.",
   "Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.": "OpenAI 또는 Anthropic 호환 SDK라면 무엇이든 동작합니다 — base URL과 키만 바꾸면 됩니다. OpenAI base URL에는 /v1이 붙고 Anthropic에는 붙지 않는 점에 유의하세요.",
   "Concurrency": "동시성",
-  "Memory": "메모리"
+  "Memory": "메모리",
+  "Test": "테스트",
+  "Test connection": "연결 테스트",
+  "Run test": "테스트 실행",
+  "Testing…": "테스트 중…",
+  "Stop": "중지",
+  "Ready": "준비됨",
+  "Success": "성공",
+  "Failed": "실패",
+  "Waiting for response…": "응답 대기 중…",
+  "No routable models for this account.": "이 계정에 라우팅 가능한 모델이 없습니다.",
+  "Done in {ms} ms": "{ms} ms 소요",
+  "{n} chars": "{n}자",
+  "Send a short message through this account and stream the reply.": "이 계정으로 짧은 메시지를 보내고 응답을 스트리밍합니다."
 }

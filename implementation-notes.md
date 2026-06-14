@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-14 · Subscription Providers 账号「测试」按钮 + 流式连通性检查（docs/06/11；原则 1/3/7）
+
+- **背景**：用户要求在 providers 列表给每个 provider 加「测试」按钮，弹层点测试后发一条测试内容、流式输出**真实返回**（参考 claude-relay-service，简单为主，不要只出「测试成功」）。截图里那种 API-key provider 配置列表（qwen/zhipuai/… 带 Enabled/Edit/Delete）**helm 并不存在**（查遍所有分支）；helm 唯一 provider 列表是 OAuth『Subscription Providers』页（按账号一行，Manage/Disconnect）。**用户拍板：按钮加在该页、按账号测**。
+- **后端（三件，TDD）**：① `routes/admin/oauth-test.ts` 纯件——`createOpenAiStreamParser`（缓冲式把 provider client 的 OpenAI `chat.completion.chunk` SSE 归一成 content/finish/usage 事件，跨**非帧对齐**字节块重组、`[DONE]`/注释/不可解析帧 fail-open）+ `createOAuthAccountTester`（注入 `buildClient` 造账号 client，发单条 user turn 流式产事件）。② `routes/admin/oauth.ts` 加 `POST /admin/api/oauth/:provider/test` → `streamSSE` 发 start/content/finish/usage/done/error；无 tester→503、缺 account/model→400、上游失败→**带内 `error` 事件（HTTP 200 不 5xx）**、客户端断连静默。③ `server.ts` 抽模块级 `buildOAuthAccountClient`（synthesis 与 tester **共用**，绑定 100% 一致，behavior-preserving 重构），`buildServer` 内按 `oauthCtx` 造 tester（每次测试**重载 account settings 取当前 proxy** → 改完代理不必重启）穿进 `AdminApiDeps.oauthTester`。
+- **隔离与防封号（关键设计，已核对代码）**：测试走**全新一次性 client**而非 routing pool 成员——raw provider client **本就无熔断器**（熔断在 executor 层，openai.ts 头注释明示），故测试**不写 telemetry/request_payloads、不扰动生产 pool 熔断/健康**；anti-ban 由 provider client 自动注入（`anthropic.ts` 的 `openaiToAnthropicRequest` 自动加「You are Claude Code」spoof + 计费块 + 稳定 `metadata.user_id`，Codex 走稳定 session_id），所以**裸 `{role:user}` 测试请求对 Claude Max/Codex OAuth 即被接受**。停泊（parked）账号也可测（按需构建，不受 schedulable 限制）。
+- **前端**：`lib/api/oauth.ts` 加 `streamAccountTest`（POST + 读 ReadableStream 缓冲分行 parse，**永不抛**、pre-flight 503/400 归一成单 error 事件、断连静默）；`lib/components/TestAccountDialog.svelte`（Modal，模型选择来自该行 effective models、可选 prompt、实时流式响应框 + 状态 idle/testing/success/failed + 耗时 + 字符数，关闭/停止即 abort；`untrack` 取首个 model 同 EditKeyDialog 约定）；providers 页 Actions 加「Test」按钮 + 弹层接线；i18n **13** 新串补齐 en/zh-hans/zh-hant/ja/ko（zh 意译）。
+- **取舍 / 坑**：测试请求是**真实上游调用**（真实计费/配额扣减），只是不入 Requests 日志；默认 prompt 常量 + `max_tokens:512`（够看到可见流式内容，含 reasoning 模型）；只 surface `content` delta（reasoning 不展示，留作后续）；模型不做严格校验（admin-only + 来自该行 models，仅要求非空）。
+- **验证**：红→绿 TDD。gateway 全量 **732 绿**（含 parser 10 + route 4 + synthesis 12 未回归）、admin 全量 **358 绿**（providers 页 +2：开弹层 / 流式成功）；`pnpm typecheck` 绿、`pnpm lint`(biome) 绿、admin `pnpm build` 绿（弹层/页 prod 编译通过）。admin svelte-check 仅剩 `oauth.test.ts` 3 处**既有**报错（`vi.fn` mock.calls 元组类型，与 origin/main 逐字相同，且 admin 不在 `-r typecheck` CI 门禁），**非本次回归**。分支 `feat/oauth-account-test-button`（git worktree）。
+- **TODO**：未提交/未部署（用户要求时再 commit/push）；e2e（Playwright）真账号手验待做；reasoning delta 展示 + 模型严格校验为可选增强。
+
 ## 2026-06-14 · 原生直通保真实施 + 可执行验收（docs/native-passthrough-fidelity-spec；原则 7/8）
 
 - **背景**：用户要求 Anthropic Messages 和 OpenAI Responses 的 native passthrough 尽量保持客户端原协议与原请求内容，同时保留 Helm 自身治理、优化和 memory 注入，并参考 `claude-relay-service` 的账号安全策略（尤其防封号策略）。本次按 TDD 先补可执行验收，再收敛实现。
@@ -26,20 +36,13 @@
 - **验证**：红→绿 TDD 全程；`pnpm typecheck` 干净；`pnpm lint` 446 文件绿；focused 全绿——protocol 全量 585（含 interop matrix 176，ANT-02 改 IR `tool_choice` 形**不破** matrix）、gateway execute/passthrough/pipeline 105、touched 套件 256。`.passthrough()` 的 TS 6385 弃用是既存全仓告警、非本次引入、非 error。改动严格限于协议层 + memory 注释 + execute 模态检测（**未碰 config**）。分支 `review-fixes-protocol-memory`，未提交。
 - **TODO**：PT-08/GEM-04 设计决定待用户拍板；若补，STREAM-02/03 matrix 流式覆盖与 GEM-04 ProtocolWarning 基建是后续小项。
 
-## 2026-06-13 · 原生协议直通默认 ON + 系统设置开关（runtime-settings；原则 2）
-
-- **背景**：原生协议直通（同协议 verbatim 转发，Phase 1–3 已落地）此前 schema 默认 `false`（"merge ≠ enable" 的保守姿态）、且 admin 无可见开关，只能改 API。用户拍板：默认翻 `true`，并在「系统设置」加可见开关。
-- **改动（单一真源 + 加性 UI）**：① `packages/shared/.../runtime-settings.schema.ts` 的 `native_protocol_passthrough` `.default(false)→.default(true)`（z.infer 自动传播到所有消费方）；② admin 客户端 `settings.ts` 的 `normalize()` 由 `=== true`→`!== false`（与同为 default-true 的 `capture_payloads` 一致，legacy/partial 缺字段回落 true，且**仍命名该字段**防 #225 静默重置）；③ `settings/+page.svelte` 新增独立「Protocol passthrough」section（checkbox `data-testid=native-protocol-passthrough` + 两段 field-help），`DEFAULTS` 同步 true；④ i18n：en（identity）/zh-hans/zh-hant 加 4 串（zh 意译，help 串经脚本从 svelte 提取保 U+2019/→/— 字节一致；ja/ko 走英文回退）。
-- **安全论证（已写进开关文案）**：默认 ON 安全——`openai_chat` 入站（OpenAI SDK + `model=lane`）走**两道独立闸**（`/v1/chat/completions` 不捕获 `native_request` + 守卫 `source_protocol_is_lingua_franca`）永远翻译 + 正常 lane 路由；跨协议、异构 fallback 链同样自动退回翻译。直通只替换 execute 的 invoke，分类/路由/治理全程保留、fail-open。
-- **prod 盲区（运维坑）**：翻 schema 默认只影响**无持久化 runtime_settings 行、或行内未显式写该字段**的部署（`loadRuntimeSettings` = `{...defaults, ...overlay}`，overlay 显式 `false` 会赢）。若 la.atmy.work 之前存过带 `native_protocol_passthrough:false` 的设置 blob，默认翻转**不改变它**——须部署后在 admin 开关手动打开。
-- **验证**：TDD 红→绿——4 个断言默认派生值的测试 `false→true`（shared schema / gateway server / core settings `defaultSettingsFromConfig` / admin settings client「defaults missing fields」；显式传 `false` 的 fixture 不动）。分包单测 + `pnpm typecheck` + `pnpm lint`。
-- **不在本次范围**：部署到 prod（需 cut release + build 镜像）、ja/ko 文案补全。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-13 · 原生协议直通默认 ON + 系统设置开关（runtime-settings；原则 2）：`native_protocol_passthrough` schema 默认 `false→true`（z.infer 传播）、admin 客户端 normalize `===true→!==false`（仍命名该字段防 #225 静默重置）、settings 页加独立「Protocol passthrough」开关（`data-testid=native-protocol-passthrough`）+ i18n en/zh。安全论证：`openai_chat` 入站两道独立闸恒翻译、跨协议/异构 fallback 自动退翻译，直通只换 execute invoke、分类/路由/治理/fail-open 全留。prod 坑：仅影响无持久 runtime_settings 行或行内未显式写该字段的部署（overlay 显式 false 仍赢）→ la.atmy.work 若存过 false 须 admin 手动开。TDD 4 个默认派生值断言 false→true 绿。
 
 ### 2026-06-13 · memory prompt-cache 优化 — 系统前缀注入 → 尾部 system-reminder（docs/08；原则 8）：用户拍板尾部 `<system-reminder>`，translate 路和 native passthrough 路都把 memory 追加到对话末尾而非前置 system，保住 Anthropic/Responses prompt-cache 前缀；`wrapMemoryReminder` 成单一真相源，system/instructions 与历史回合逐字不动。TDD 覆盖 inject bridge/native-memory/chat/messages/pipeline，typecheck/lint 绿；TODO 是 live e2e 手验缓存命中与 memory 召回。
 
