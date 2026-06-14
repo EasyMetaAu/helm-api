@@ -59,11 +59,12 @@ export interface InjectBridgeDeps {
 }
 
 export interface InjectBridgeResult {
-  // The IR messages to route with. Under the PREFIX model this is the live
-  // conversation with the memory block MERGED into the system message (verbatim
-  // user/assistant/tool turns preserved); when there is nothing to inject it is the
-  // ORIGINAL array reference, untouched. The pipeline assigns this to the TRANSLATE
-  // path's request; the NATIVE passthrough path uses `memoryBlock` directly.
+  // The IR messages to route with. Under the TRAILING-REMINDER model this is the live
+  // conversation with the memory block APPENDED as one trailing `<system-reminder>`
+  // user turn (every existing turn — and the leading system message — kept verbatim);
+  // when there is nothing to inject it is the ORIGINAL array reference, untouched. The
+  // pipeline assigns this to the TRANSLATE path's request; the NATIVE passthrough path
+  // uses `memoryBlock` directly.
   messages: IRMessage[];
   // The assembled memory TEXT BLOCK (system-level). null when there is nothing to
   // inject / inject was skipped / failed — the pipeline then leaves native

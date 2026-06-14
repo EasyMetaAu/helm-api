@@ -625,6 +625,7 @@ export async function* convertAnthropicStreamToIR(
   // a single terminal usage on message_stop. `sawUsage` gates emission.
   let inputTokens = 0;
   let cacheTokens = 0;
+  let cacheCreationTokens = 0;
   let outputTokens = 0;
   let sawUsage = false;
 
@@ -645,6 +646,7 @@ export async function* convertAnthropicStreamToIR(
         const u = event.message.usage;
         inputTokens = Math.max(inputTokens, u.input_tokens);
         cacheTokens = Math.max(cacheTokens, u.cache_read_input_tokens ?? 0);
+        cacheCreationTokens = Math.max(cacheCreationTokens, u.cache_creation_input_tokens ?? 0);
         yield { ...base(), choices: [{ index: 0, delta: { role: "assistant" } }] };
         break;
       }
@@ -742,6 +744,10 @@ export async function* convertAnthropicStreamToIR(
         outputTokens = event.usage.output_tokens;
         inputTokens = Math.max(inputTokens, event.usage.input_tokens ?? 0);
         cacheTokens = Math.max(cacheTokens, event.usage.cache_read_input_tokens ?? 0);
+        cacheCreationTokens = Math.max(
+          cacheCreationTokens,
+          event.usage.cache_creation_input_tokens ?? 0,
+        );
         sawUsage = true;
         break;
       }
@@ -754,6 +760,7 @@ export async function* convertAnthropicStreamToIR(
               prompt_tokens: inputTokens,
               completion_tokens: outputTokens,
               ...(cacheTokens > 0 ? { cached_tokens: cacheTokens } : {}),
+              ...(cacheCreationTokens > 0 ? { cache_creation_tokens: cacheCreationTokens } : {}),
             }
           : undefined;
         yield {

@@ -536,6 +536,84 @@ export function collectSystemText(messages: readonly IRMessage[]): string {
   return segments.join("\n\n");
 }
 
+// Map a SINGLE IR content part to zero+ Gemini parts, preserving order when the
+// caller concatenates. `thinking` returns [] (reasoning is emitted separately via
+// resolveReasoning). Shared by irMessageToParts AND the role:"tool" branch so a
+// multimodal tool_result reuses the exact same media mapping. (MULTI-01)
+function irContentPartToGeminiParts(part: IRContentPart): GeminiPart[] {
+  switch (part.type) {
+    case "text":
+      return [{ text: part.text }];
+    case "image": {
+      // data-url -> inlineData{mimeType,data}; a remote http(s) image url degrades to
+      // an explicit text placeholder (no fetch/proxy — issue #49 non-goal). An
+      // arbitrary web image is NOT a Gemini-accessible fileData uri.
+      const match = /^data:([^;]+);base64,(.*)$/.exec(part.url);
+      if (match !== null && match[1] !== undefined && match[2] !== undefined) {
+        return [{ inlineData: { mimeType: match[1], data: match[2] } }];
+      }
+      return [{ text: `[remote image unsupported by Gemini nativeOut: ${part.url}]` }];
+    }
+    case "audio":
+      // IR audio is inline base64 + a format subtype -> inlineData audio/<format>.
+      return [{ inlineData: { mimeType: `audio/${part.format}`, data: part.data } }];
+    case "document":
+      // Inline base64 -> inlineData; a remote uri -> fileData.
+      if (part.data !== undefined) {
+        return [
+          {
+            inlineData: { mimeType: part.mediaType ?? "application/octet-stream", data: part.data },
+          },
+        ];
+      }
+      if (part.url !== undefined) {
+        return [
+          {
+            fileData: {
+              fileUri: part.url,
+              ...(part.mediaType !== undefined ? { mimeType: part.mediaType } : {}),
+            },
+          },
+        ];
+      }
+      return [];
+    case "video": {
+      // Remote uri -> fileData (+ videoMetadata); inline base64 -> inlineData.
+      const videoMetadata =
+        part.fps !== undefined || part.startOffset !== undefined || part.endOffset !== undefined
+          ? {
+              ...(part.fps !== undefined ? { fps: part.fps } : {}),
+              ...(part.startOffset !== undefined ? { startOffset: part.startOffset } : {}),
+              ...(part.endOffset !== undefined ? { endOffset: part.endOffset } : {}),
+            }
+          : undefined;
+      if (part.url !== undefined) {
+        return [
+          {
+            fileData: {
+              fileUri: part.url,
+              ...(part.mediaType !== undefined ? { mimeType: part.mediaType } : {}),
+            },
+            ...(videoMetadata !== undefined ? { videoMetadata } : {}),
+          },
+        ];
+      }
+      if (part.data !== undefined) {
+        return [
+          {
+            inlineData: { mimeType: part.mediaType ?? "video/mp4", data: part.data },
+            ...(videoMetadata !== undefined ? { videoMetadata } : {}),
+          },
+        ];
+      }
+      return [];
+    }
+    default:
+      // thinking parts are emitted via resolveReasoning, not here.
+      return [];
+  }
+}
+
 function irMessageToParts(message: IRMessage): GeminiPart[] {
   const parts: GeminiPart[] = [];
   const { content } = message;
@@ -553,66 +631,30 @@ function irMessageToParts(message: IRMessage): GeminiPart[] {
   if (typeof content === "string") {
     if (content !== "") parts.push({ text: content });
   } else if (Array.isArray(content)) {
-    for (const part of content) {
-      if (part.type === "text") parts.push({ text: part.text });
-      // thinking parts already emitted via resolveReasoning above.
-      else if (part.type === "image") {
-        // data-url -> inlineData{mimeType,data}; a remote http(s) image url degrades to
-        // an explicit text placeholder (no fetch/proxy — issue #49 non-goal). (Remote
-        // gs:// / Files-API references for video/document use fileData below; an
-        // arbitrary web image is NOT a Gemini-accessible fileData uri.)
-        const match = /^data:([^;]+);base64,(.*)$/.exec(part.url);
-        if (match !== null && match[1] !== undefined && match[2] !== undefined) {
-          parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
-        } else {
-          parts.push({ text: `[remote image unsupported by Gemini nativeOut: ${part.url}]` });
-        }
-      } else if (part.type === "audio") {
-        // IR audio is inline base64 + a format subtype -> inlineData audio/<format>.
-        parts.push({ inlineData: { mimeType: `audio/${part.format}`, data: part.data } });
-      } else if (part.type === "document") {
-        // Inline base64 -> inlineData; a remote uri -> fileData.
-        if (part.data !== undefined) {
-          parts.push({
-            inlineData: {
-              mimeType: part.mediaType ?? "application/octet-stream",
-              data: part.data,
-            },
-          });
-        } else if (part.url !== undefined) {
-          parts.push({
-            fileData: {
-              fileUri: part.url,
-              ...(part.mediaType !== undefined ? { mimeType: part.mediaType } : {}),
-            },
-          });
-        }
-      } else if (part.type === "video") {
-        // Remote uri -> fileData (+ videoMetadata); inline base64 -> inlineData.
-        const videoMetadata =
-          part.fps !== undefined || part.startOffset !== undefined || part.endOffset !== undefined
-            ? {
-                ...(part.fps !== undefined ? { fps: part.fps } : {}),
-                ...(part.startOffset !== undefined ? { startOffset: part.startOffset } : {}),
-                ...(part.endOffset !== undefined ? { endOffset: part.endOffset } : {}),
-              }
-            : undefined;
-        if (part.url !== undefined) {
-          parts.push({
-            fileData: {
-              fileUri: part.url,
-              ...(part.mediaType !== undefined ? { mimeType: part.mediaType } : {}),
-            },
-            ...(videoMetadata !== undefined ? { videoMetadata } : {}),
-          });
-        } else if (part.data !== undefined) {
-          parts.push({
-            inlineData: { mimeType: part.mediaType ?? "video/mp4", data: part.data },
-            ...(videoMetadata !== undefined ? { videoMetadata } : {}),
-          });
-        }
-      }
+    // thinking parts already emitted via resolveReasoning above; the shared mapper
+    // returns [] for them, so order is preserved for the remaining parts.
+    for (const part of content) parts.push(...irContentPartToGeminiParts(part));
+  }
+  // Generated media (image/audio-out models) rides on the IR OUTPUT carriers
+  // message.images / message.audio — distinct from the input image/audio content
+  // parts above. Emit them so a Gemini client receives generated media instead of a
+  // silent drop. (GEM-05) Inline base64 -> inlineData; a remote url -> fileData.
+  for (const img of message.images ?? []) {
+    if (img.b64_json !== undefined) {
+      parts.push({ inlineData: { mimeType: img.mediaType ?? "image/png", data: img.b64_json } });
+    } else if (img.url !== undefined) {
+      parts.push({
+        fileData: {
+          fileUri: img.url,
+          ...(img.mediaType !== undefined ? { mimeType: img.mediaType } : {}),
+        },
+      });
     }
+  }
+  // IRAudioOut carries no mime/format; default to audio/wav (OpenAI's default audio
+  // output container). Better a sensible default than dropping the bytes entirely.
+  if (message.audio?.data !== undefined) {
+    parts.push({ inlineData: { mimeType: "audio/wav", data: message.audio.data } });
   }
   for (const call of message.tool_calls ?? []) {
     // DROP the synthesized id; Gemini accepts only name + args.
@@ -712,24 +754,33 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
     if (message.role === "system" || message.role === "developer") continue;
     if (message.role === "tool") {
       // role:"tool" -> a user turn carrying functionResponse (Gemini convention).
-      contents.push({
-        role: "user",
-        parts: [
-          {
-            functionResponse: {
-              name:
-                message.name ??
-                (message.tool_call_id !== undefined
-                  ? toolNameById.get(message.tool_call_id)
-                  : undefined) ??
-                "tool",
-              response: message.provider_raw?.gemini_function_response ?? {
-                content: irMessageContentToText(message.content),
-              },
+      const toolParts: GeminiPart[] = [
+        {
+          functionResponse: {
+            name:
+              message.name ??
+              (message.tool_call_id !== undefined
+                ? toolNameById.get(message.tool_call_id)
+                : undefined) ??
+              "tool",
+            response: message.provider_raw?.gemini_function_response ?? {
+              content: irMessageContentToText(message.content),
             },
           },
-        ],
-      });
+        },
+      ];
+      // MULTI-01: a multimodal tool_result (image/document/audio/video from an
+      // Anthropic or Responses client) carries non-text parts that
+      // functionResponse.content cannot hold. Emit them as sibling parts in the SAME
+      // user turn (Gemini accepts a parts array) instead of silently dropping them —
+      // the text already rode along in functionResponse.response.content above.
+      if (Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (part.type === "text" || part.type === "thinking") continue;
+          toolParts.push(...irContentPartToGeminiParts(part));
+        }
+      }
+      contents.push({ role: "user", parts: toolParts });
       continue;
     }
     const role = message.role === "assistant" ? "model" : "user";

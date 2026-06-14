@@ -433,6 +433,28 @@ function mergeConsecutiveSameRole(messages: IRMessage[]): IRMessage[] {
  * Pure: no network, no environment, no framework. fail-closed on an invalid request,
  * fail-open on unknown content blocks.
  */
+// Canonicalize a native Anthropic tool_choice to the OpenAI-shaped IR form so
+// downstream (non-passthrough) transformers read ONE shape — the exact inverse of
+// mapToolChoice. disable_parallel_tool_use is hoisted to the IR top-level
+// parallel_tool_calls (the field the outbound transformers already consume); a bare
+// string or unknown object shape is preserved verbatim (fail-open). (ANT-02)
+function anthropicToolChoiceToIR(toolChoice: unknown): {
+  tool_choice?: unknown;
+  parallel_tool_calls?: boolean;
+} {
+  if (toolChoice === undefined) return {};
+  if (typeof toolChoice !== "object" || toolChoice === null) return { tool_choice: toolChoice };
+  const tc = toolChoice as { type?: unknown; name?: unknown; disable_parallel_tool_use?: unknown };
+  const parallel = tc.disable_parallel_tool_use === true ? { parallel_tool_calls: false } : {};
+  if (tc.type === "auto") return { tool_choice: "auto", ...parallel };
+  if (tc.type === "any") return { tool_choice: "required", ...parallel };
+  if (tc.type === "none") return { tool_choice: "none" }; // disable_* is invalid on none
+  if (tc.type === "tool" && typeof tc.name === "string" && tc.name !== "") {
+    return { tool_choice: { type: "function", function: { name: tc.name } }, ...parallel };
+  }
+  return { tool_choice: toolChoice }; // unknown shape: keep verbatim
+}
+
 export function transformRequestOut(req: unknown): IRRequest {
   // fail-closed: a structurally invalid request never enters the pipeline.
   const parsed = AnthropicMessagesRequestSchema.parse(req);
@@ -571,11 +593,16 @@ export function transformRequestOut(req: unknown): IRRequest {
   if (parsed.speed !== undefined) providerRaw.speed = parsed.speed;
   if (parsed.output_config !== undefined) providerRaw.output_config = parsed.output_config;
 
+  const toolChoiceIR = anthropicToolChoiceToIR(parsed.tool_choice);
+
   const ir: IRRequest = {
     model: parsed.model,
     messages: merged,
     ...(parsed.tools !== undefined ? { tools: parsed.tools.map(toIRTool) } : {}),
-    ...(parsed.tool_choice !== undefined ? { tool_choice: parsed.tool_choice } : {}),
+    ...(toolChoiceIR.tool_choice !== undefined ? { tool_choice: toolChoiceIR.tool_choice } : {}),
+    ...(toolChoiceIR.parallel_tool_calls !== undefined
+      ? { parallel_tool_calls: toolChoiceIR.parallel_tool_calls }
+      : {}),
     ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
     ...(parsed.top_p !== undefined ? { top_p: parsed.top_p } : {}),
     ...(parsed.top_k !== undefined ? { top_k: parsed.top_k } : {}),

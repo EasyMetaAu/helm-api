@@ -60,6 +60,26 @@ describe("responsesTransformer — text.format structured output canonicalizatio
   });
 });
 
+describe("responsesTransformer — input_audio content (RESP-01)", () => {
+  it("folds an input_audio part into an IR audio part instead of a JSON text placeholder", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o-audio",
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: "transcribe this" },
+            { type: "input_audio", input_audio: { data: "AUDIO64", format: "mp3" } },
+          ],
+        },
+      ],
+    });
+    const userMsg = ir.messages.find((m) => m.role === "user");
+    const parts = Array.isArray(userMsg?.content) ? userMsg?.content : [];
+    expect(parts).toContainEqual({ type: "audio", data: "AUDIO64", format: "mp3" });
+  });
+});
+
 describe("responsesTransformer — function tool canonicalization", () => {
   it("maps Responses flat function tools to OpenAI Chat tools and preserves the raw shape", async () => {
     const flatTool = {

@@ -17,6 +17,41 @@ import {
 // transformRequestOut flattens all of this so routing/providers see ONE shape.
 // Pure function: no network, no framework. Output is a valid IRRequest.
 
+describe("anthropic transformRequestOut — tool_choice canonicalization (ANT-02)", () => {
+  const base = {
+    model: "claude-3-5-sonnet",
+    max_tokens: 256,
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ name: "get_weather", input_schema: { type: "object" } }],
+  };
+
+  it("maps native {type:'any'} to IR tool_choice 'required'", () => {
+    const ir = transformRequestOut({ ...base, tool_choice: { type: "any" } });
+    expect(ir.tool_choice).toBe("required");
+  });
+
+  it("maps native {type:'tool',name} to IR {type:'function',function:{name}}", () => {
+    const ir = transformRequestOut({ ...base, tool_choice: { type: "tool", name: "get_weather" } });
+    expect(ir.tool_choice).toEqual({ type: "function", function: { name: "get_weather" } });
+  });
+
+  it("maps {type:'auto'} to 'auto' and hoists disable_parallel_tool_use into parallel_tool_calls:false", () => {
+    const ir = transformRequestOut({
+      ...base,
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+    });
+    expect(ir.tool_choice).toBe("auto");
+    expect(ir.parallel_tool_calls).toBe(false);
+  });
+
+  it("maps {type:'none'} to 'none' and leaves a bare string tool_choice untouched", () => {
+    expect(transformRequestOut({ ...base, tool_choice: { type: "none" } }).tool_choice).toBe(
+      "none",
+    );
+    expect(transformRequestOut({ ...base, tool_choice: "auto" }).tool_choice).toBe("auto");
+  });
+});
+
 describe("anthropic transformRequestOut", () => {
   // Rule 1+2+3+5: a mixed request exercising system, text, image, tool_use,
   // tool_result in one shot.
