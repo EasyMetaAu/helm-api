@@ -415,10 +415,8 @@ interface RawSSEFrame {
   event: string;
   /** The verbatim `data:` payload string (the exact upstream JSON), unparsed. */
   data: string;
-  /** Whether this frame had at least one data line; comments/keepalives do not. */
-  hasData: boolean;
-  /** The frame's raw text incl. event/data lines + trailing blank line, for the
-   *  usage tee (usageFromAnthropicSSE scans data lines off this). */
+  /** The frame's raw text incl. event/data lines + trailing blank line. The route's
+   *  raw writer forwards this byte-for-byte; the usage tee scans data lines off it. */
   raw: string;
 }
 
@@ -434,7 +432,7 @@ function parseRawSSEFrame(event: string, raw: string): RawSSEFrame | null {
     }
   }
   // Multi-line data is joined with \n per the SSE spec (both protocols use single-line).
-  return { event: evtName, data: dataLines.join("\n"), hasData: dataLines.length > 0, raw };
+  return { event: evtName, data: dataLines.join("\n"), raw };
 }
 
 function nextSSEBoundary(buffer: string): { index: number; length: number } | null {
@@ -937,7 +935,6 @@ export function createMessagesPipeline(
                   event: frame.event,
                   data: frame.data,
                   raw: frame.raw,
-                  hasData: frame.hasData,
                 };
               }
             } finally {

@@ -5,6 +5,16 @@ import {
   type NativePassthroughInput,
 } from "@helm/shared";
 
+// Client-header handling is FORWARD-BY-DEFAULT (for fingerprint fidelity) MINUS the
+// exclusions below — an allowlist-by-exclusion, not a strict allowlist. The
+// load-bearing guarantee (principle 7) is that the Helm credential, cookies, and
+// obviously secret-shaped headers NEVER leave the gateway; provider auth replaces the
+// upstream credential. Limitation by design: the secret detection in
+// `isUnsafeClientHeader` is shape-based, so a generic secret header that matches none
+// of these shapes (e.g. `x-functions-key`) can still ride to the upstream. That is
+// acceptable because the only passthrough upstreams are trusted first-party providers
+// (Anthropic / ChatGPT), and broadening to a bare `*-key` would wrongly drop legitimate
+// headers (`idempotency-key`, beta/feature keys, …). Keep the shapes tight + explicit.
 const DENY_HEADERS = new Set([
   "authorization",
   "proxy-authorization",

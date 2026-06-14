@@ -477,21 +477,19 @@ describe("createMessagesPipeline — native passthrough streamIR()", () => {
     const route: RouteFn = async () => passthroughStreamResult(stream());
     const pipeline = createMessagesPipeline(route);
     const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
-    const frames: Array<{ event: string; data: string; raw?: string; hasData?: boolean }> = [];
+    const frames: Array<{ event: string; data: string; raw?: string }> = [];
     for await (const ev of run.streamIR()) {
-      frames.push(ev as { event: string; data: string; raw?: string; hasData?: boolean });
+      frames.push(ev as { event: string; data: string; raw?: string });
     }
 
     expect(frames[0]).toMatchObject({
       event: "",
       data: "",
-      hasData: false,
       raw: ": keepalive\r\n\r\n",
     });
     expect(frames[1]).toMatchObject({
       event: "ping",
       data: "",
-      hasData: false,
       raw: "event: ping\r\n\r\n",
     });
     expect(frames[2]?.raw).toContain("\r\n");
