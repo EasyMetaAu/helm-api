@@ -797,6 +797,57 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(created?.data).not.toBe('{"type":"response.created"}');
   });
 
+  it("stream passthrough: rewrites upstream response.id on relayed frames to match the synthetic prelude (PT-08)", async () => {
+    // The upstream completed frame carries the UPSTREAM's response.id; the synthetic
+    // prelude used the route-assigned id. Without a rewrite the client sees two different
+    // response.id values in one stream. The route must splice the prelude id onto relayed
+    // id-bearing lifecycle frames so the stream is self-consistent.
+    const completedData = JSON.stringify({
+      type: "response.completed",
+      response: {
+        id: "resp_upstream_xyz",
+        status: "completed",
+        usage: { input_tokens: 5, output_tokens: 4 },
+      },
+    });
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { event: "response.completed", data: completedData };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+
+    const frames = parseSSE(await res.text());
+    const preludeId = (
+      JSON.parse(frames.find((f) => f.event === "response.created")?.data ?? "{}") as {
+        response?: { id?: string };
+      }
+    ).response?.id;
+    const completedId = (
+      JSON.parse(frames.find((f) => f.event === "response.completed")?.data ?? "{}") as {
+        response?: { id?: string };
+      }
+    ).response?.id;
+    expect(preludeId).toBeTruthy();
+    // The relayed completed frame now carries the route id, not the upstream's.
+    expect(completedId).toBe(preludeId);
+    expect(completedId).not.toBe("resp_upstream_xyz");
+  });
+
   it("stream NON-passthrough (default): still maps via transformStreamOut as today", async () => {
     async function* events() {
       yield { type: "response.created", sequence_number: 0 };

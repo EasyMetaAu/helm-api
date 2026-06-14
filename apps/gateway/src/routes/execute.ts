@@ -88,10 +88,11 @@ export interface ExecuteAdapterDeps {
    *  Optional: used to record a MISSING-pricing miss (cost left null, not a
    *  crash). Absent → the miss is silent. */
   log?: (level: string, msg: string, fields: Record<string, unknown>) => void;
-  /** Runtime feature flag `native_protocol_passthrough` (default OFF). Read per
-   *  attempt for live rollback: when true (and the guard passes) the executor
+  /** Runtime feature flag `native_protocol_passthrough` (default ON since #232). Read
+   *  per attempt for live rollback: when true (and the guard passes) the executor
    *  forwards the verbatim native body and returns the native response untranslated.
-   *  Absent → OFF. */
+   *  This dep is OPTIONAL: when absent (a caller that never wires it) the executor treats
+   *  passthrough as OFF — a defensive fallback, independent of the setting's own default. */
   nativeProtocolPassthroughEnabled?: () => boolean;
 }
 
@@ -150,7 +151,7 @@ function approxPromptTokens(req: InternalRequest): number {
 // IR-normalized part types (image/audio/video/document) in case content was already
 // normalized upstream. `image` here is the vision gate for in-message images — the
 // legacy `attachments` array is the OTHER vision source (see needsVision below).
-function detectRequestModalities(req: InternalRequest): {
+export function detectRequestModalities(req: InternalRequest): {
   image: boolean;
   audio: boolean;
   video: boolean;
@@ -169,7 +170,17 @@ function detectRequestModalities(req: InternalRequest): {
       if (type === "image_url" || type === "input_image" || type === "image") image = true;
       else if (type === "input_audio" || type === "audio") audio = true;
       else if (type === "video") video = true;
-      else if (type === "file" || type === "document") document = true;
+      else if (type === "file" || type === "document") {
+        // A remote audio/video/image blob with no inline-base64 IR home rides as a
+        // `document` (e.g. Gemini fileData audio/* -> IR document, GEM-02). Route it by
+        // its real modality via mediaType so the capability filter picks an
+        // audio/video/vision-capable backend, not merely a document-capable one.
+        const mediaType = (part as { mediaType?: unknown }).mediaType;
+        if (typeof mediaType === "string" && mediaType.startsWith("audio/")) audio = true;
+        else if (typeof mediaType === "string" && mediaType.startsWith("video/")) video = true;
+        else if (typeof mediaType === "string" && mediaType.startsWith("image/")) image = true;
+        else document = true;
+      }
     }
   }
   return { image, audio, video, document };

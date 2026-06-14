@@ -2,7 +2,7 @@ import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } 
 import { createCircuitBreaker, UpstreamError } from "@helm/core";
 import type { CatalogEntry, InternalRequest } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
-import { createExecute } from "./execute.js";
+import { createExecute, detectRequestModalities } from "./execute.js";
 
 function req(over: Partial<InternalRequest> = {}): InternalRequest {
   return {
@@ -29,6 +29,41 @@ function req(over: Partial<InternalRequest> = {}): InternalRequest {
     ...over,
   };
 }
+
+describe("detectRequestModalities — remote media-as-document routing (GEM-02)", () => {
+  it("routes an audio/* document part to the audio modality, not document", () => {
+    const r = req({
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "transcribe" },
+            { type: "document", mediaType: "audio/mp3", url: "gs://bucket/clip.mp3" },
+          ],
+        },
+      ] as InternalRequest["messages"],
+    });
+    expect(detectRequestModalities(r)).toEqual({
+      image: false,
+      audio: true,
+      video: false,
+      document: false,
+    });
+  });
+
+  it("still routes a real application/pdf document to the document modality", () => {
+    const r = req({
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "document", mediaType: "application/pdf", url: "gs://b/x.pdf" }],
+        },
+      ] as InternalRequest["messages"],
+    });
+    expect(detectRequestModalities(r).document).toBe(true);
+    expect(detectRequestModalities(r).audio).toBe(false);
+  });
+});
 
 // Registry: alias -> providerModel passthrough.
 function registry(map: Record<string, string>): ProviderRegistry {

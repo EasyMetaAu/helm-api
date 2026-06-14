@@ -68,12 +68,24 @@ const ResponsesInputFileSchema = z
     filename: z.string().optional(),
   })
   .passthrough();
+// Responses audio input: mirrors OpenAI Chat's input_audio.{data,format} so audio is
+// folded into an IR audio part instead of degrading to a JSON text placeholder. (RESP-01)
+const ResponsesInputAudioSchema = z
+  .object({
+    type: z.literal("input_audio"),
+    input_audio: z
+      .object({ data: z.string().optional(), format: z.string().optional() })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
 const ResponsesUnknownPartSchema = z.object({ type: z.string() }).passthrough();
 const ResponsesContentPartSchema = z.union([
   ResponsesInputTextSchema,
   ResponsesOutputTextSchema,
   ResponsesInputImageSchema,
   ResponsesInputFileSchema,
+  ResponsesInputAudioSchema,
   ResponsesUnknownPartSchema,
 ]);
 
@@ -326,6 +338,15 @@ function foldContentPart(part: z.infer<typeof ResponsesContentPartSchema>): IRCo
         type: "image",
         url: p.image_url ?? "",
         ...(p.detail !== undefined ? { detail: p.detail } : {}),
+      };
+    }
+    case "input_audio": {
+      const p = part as z.infer<typeof ResponsesInputAudioSchema>;
+      const ia = p.input_audio ?? {};
+      return {
+        type: "audio",
+        data: typeof ia.data === "string" ? ia.data : "",
+        format: typeof ia.format === "string" ? ia.format : "wav",
       };
     }
     case "input_file": {

@@ -76,11 +76,12 @@ export function canUseNativePassthrough(
   // stream requests, nativePassthrough for non-stream), so a stream is no longer a
   // blocker here. The byte-faithful SSE forward ELIMINATES the SSE re-mapping state
   // machine (principle 8) rather than replacing it.
-  // Memory inject is NO LONGER a blocker (#217 Phase 4 PREFIX model). Inject is now
-  // ADDITIVE: the pipeline prepends the assembled memory block into the native
-  // carrier's `system`/`instructions` and keeps `messages`/`input` VERBATIM, so the
-  // native_request stays self-consistent (memory in the system level, live turns
-  // untouched). Passthrough can therefore fire WITH memory — there is no longer a
+  // Memory inject is NO LONGER a blocker (#217 Phase 4 TRAILING-REMINDER model). Inject
+  // is purely ADDITIVE: the pipeline appends the assembled memory block as ONE trailing
+  // `<system-reminder>` turn on the native carrier's `messages`/`input` and keeps the
+  // `system`/`instructions` field and every existing turn VERBATIM, so the upstream
+  // cached prefix (tools → system → history) survives and the native_request stays
+  // self-consistent. Passthrough can therefore fire WITH memory — there is no longer a
   // request rewrite for the guard to defend against.
   if (input.fallbackMayUseDifferentProviderProtocol) {
     return { ok: false, reason: "fallback_may_change_provider_protocol" };

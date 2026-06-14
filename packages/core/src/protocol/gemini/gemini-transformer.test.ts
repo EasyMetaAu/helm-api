@@ -128,6 +128,35 @@ describe("GeminiTransformer.transformResponseOut (IR -> Gemini response)", () =>
     const native = geminiTransformer.transformResponseOut(ir) as GeminiGenerateContentResponse;
     expect(native.candidates?.[0]?.finishReason).toBe("SAFETY");
   });
+
+  // GEM-05: generated media rides on the IR OUTPUT carriers message.images /
+  // message.audio (distinct from input content parts). The response builder reuses
+  // irMessageToParts, which previously read only content + tool_calls — so an
+  // image-out model's result was silently dropped on the way to a Gemini client.
+  it("emits generated images (message.images) as inlineData / fileData parts", () => {
+    const ir: IRResponse = {
+      id: "r",
+      model: "gemini-2.5-flash-image",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "",
+            images: [
+              { b64_json: "GENIMG", mediaType: "image/png" },
+              { url: "https://files/img-1" },
+            ],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const native = geminiTransformer.transformResponseOut(ir) as GeminiGenerateContentResponse;
+    const parts = native.candidates?.[0]?.content.parts ?? [];
+    expect(parts).toContainEqual({ inlineData: { mimeType: "image/png", data: "GENIMG" } });
+    expect(parts).toContainEqual({ fileData: { fileUri: "https://files/img-1" } });
+  });
 });
 
 describe("GeminiTransformer.transformResponseIn (Gemini response -> IR)", () => {
@@ -1108,6 +1137,37 @@ describe("generated media parts (inlineData image/audio -> IRMessage)", () => {
     };
     const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
     expect(ir.choices[0]?.message.audio?.data).toBe("AUDIODATA");
+  });
+});
+
+describe("multimodal tool results -> Gemini (MULTI-01)", () => {
+  it("emits non-text tool_result parts as sibling media instead of dropping them", () => {
+    const ir: IRRequest = {
+      model: "gemini-2.5-pro",
+      messages: [
+        { role: "user", content: "screenshot?" },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          name: "screenshot",
+          content: [
+            { type: "text", text: "see image" },
+            { type: "image", url: "data:image/png;base64,SHOT" },
+          ],
+        },
+      ],
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const toolTurn = native.contents.find((ct) =>
+      ct.parts.some((p) => p.functionResponse !== undefined),
+    );
+    const parts = toolTurn?.parts ?? [];
+    // text still rides on functionResponse.content …
+    expect(
+      parts.some((p) => JSON.stringify(p.functionResponse?.response ?? {}).includes("see image")),
+    ).toBe(true);
+    // … and the image survives as a sibling inlineData part (not silently dropped).
+    expect(parts).toContainEqual({ inlineData: { mimeType: "image/png", data: "SHOT" } });
   });
 });
 

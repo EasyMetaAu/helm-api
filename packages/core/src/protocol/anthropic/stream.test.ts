@@ -642,6 +642,51 @@ describe("convertAnthropicStreamToIR — thinking streaming (inbound)", () => {
     );
     expect(redactedChunk).toBeDefined();
   });
+
+  // STREAM-01: cache_creation_input_tokens (ephemeral cache WRITE) is parsed by the
+  // event schema but must also be accumulated and re-exposed on the terminal IR usage,
+  // symmetric to the non-stream response.ts path — otherwise billing under-reports
+  // cache writes for any Anthropic streaming provider.
+  it("accumulates cache_creation_input_tokens into terminal IR usage.cache_creation_tokens", async () => {
+    const chunks = await collect<IRChunk>(
+      convertAnthropicStreamToIR(
+        events([
+          {
+            type: "message_start",
+            message: {
+              id: "m",
+              type: "message",
+              role: "assistant",
+              model: "claude",
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: {
+                input_tokens: 100,
+                output_tokens: 1,
+                cache_read_input_tokens: 20,
+                cache_creation_input_tokens: 7,
+              },
+            },
+          },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn", stop_sequence: null },
+            usage: { output_tokens: 12 },
+          },
+          { type: "message_stop" },
+        ]),
+      ),
+    );
+
+    const terminal = chunks.at(-1);
+    expect(terminal?.usage).toMatchObject({
+      prompt_tokens: 100,
+      completion_tokens: 12,
+      cached_tokens: 20,
+      cache_creation_tokens: 7,
+    });
+  });
 });
 
 describe("convertOpenAIStreamToAnthropic — tool name sanitizer", () => {

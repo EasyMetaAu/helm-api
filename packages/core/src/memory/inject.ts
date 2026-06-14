@@ -4,15 +4,16 @@ import { forgettingScore, type ScoreConfig } from "./forgetting/score.js";
 import { sha256Hex } from "./message-hash.js";
 import { alreadyObservedMessageIds } from "./observer.js";
 
-// Memory middleware — INJECT phase (docs/08 Phase 2, #217 Phase 4 PREFIX model).
-// When x-memory-mode=inject, this runs SYNCHRONOUSLY on the main request path,
+// Memory middleware — INJECT phase (docs/08 Phase 2, #217 Phase 4 TRAILING-REMINDER
+// model). When x-memory-mode=inject, this runs SYNCHRONOUSLY on the main request path,
 // BEFORE classification/execution. Unlike the original full-replace design, the
-// assembler no longer rebuilds the conversation: it produces ONE system-level
-// memory TEXT BLOCK that the pipeline PREPENDS to the client's verbatim live
-// conversation. The live messages (tool_calls, images, tool results, developer
-// instructions) are KEPT untouched by the pipeline — memory is purely additive,
-// so it works for every turn type (tool-using / multimodal / native passthrough)
-// and can never destroy live structure. This module does three things:
+// assembler no longer rebuilds the conversation: it produces ONE memory TEXT BLOCK
+// that the pipeline APPENDS as a trailing `<system-reminder>` turn AFTER the client's
+// verbatim live conversation. The live messages (tool_calls, images, tool results,
+// developer instructions) and the cached system prefix are KEPT untouched by the
+// pipeline — memory is purely additive, so it works for every turn type (tool-using /
+// multimodal / native passthrough) and can never destroy live structure. This module
+// does three things:
 //   1. load memory (project/resource reflections + thread observations) and
 //      assemble a STABLE, cache-friendly memory text block;
 //   2. WINDOW-AWARE DEDUP — drop any thread observation whose covered turns are
