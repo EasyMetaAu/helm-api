@@ -1523,6 +1523,79 @@ describe("createAnthropicClient — nativePassthrough", () => {
     expect(h.get("user-agent")).toBe("claude-cli/2.1.173 (external, cli)");
   });
 
+  it("preserves client headers/raw body through the native carrier while replacing auth", async () => {
+    const body = nativeBody();
+    const rawBody = JSON.stringify(body, null, 2);
+    let sentBody = "";
+    let seen: Headers | null = null;
+    const carrier = {
+      protocol: "anthropic_messages" as const,
+      body,
+      raw_body: rawBody,
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "client-beta-2026-01-01",
+        "user-agent": "client-claude/9.9.9",
+        "x-client-feature": "keep-me",
+        authorization: "Bearer client-secret",
+        "x-api-key": "client-key",
+        connection: "keep-alive",
+        "content-length": "999",
+        "x-helm-trace": "internal",
+      },
+      mutations: {},
+    };
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = String(init?.body);
+      seen = new Headers(init?.headers);
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", getAuthHeader: async () => "Bearer ATX" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.nativePassthrough?.(carrier);
+
+    const h = seen as unknown as Headers;
+    expect(sentBody).toBe(rawBody);
+    expect(h.get("x-client-feature")).toBe("keep-me");
+    expect(h.get("Authorization")).toBe("Bearer ATX");
+    expect(h.get("x-api-key")).toBeNull();
+    expect(h.get("connection")).toBeNull();
+    expect(h.get("content-length")).toBeNull();
+    expect(h.get("x-helm-trace")).toBeNull();
+    expect(h.get("user-agent")).toBe("client-claude/9.9.9");
+    const beta = h.get("anthropic-beta") ?? "";
+    expect(beta).toContain("client-beta-2026-01-01");
+    expect(beta).toContain("oauth-2025-04-20");
+    expect(beta).toContain("context-management-2025-06-27");
+    expect(carrier.mutations).toMatchObject({
+      auth_replaced: true,
+      content_length_recomputed: true,
+    });
+    expect((carrier.mutations as Record<string, unknown>).headers_dropped).toEqual(
+      expect.arrayContaining([
+        "authorization",
+        "content-length",
+        "connection",
+        "x-api-key",
+        "x-helm-trace",
+      ]),
+    );
+    expect((carrier.mutations as Record<string, unknown>).headers_overwritten).toEqual(
+      expect.arrayContaining(["anthropic-beta"]),
+    );
+    expect((carrier.mutations as Record<string, unknown>).headers_overwritten).not.toContain(
+      "user-agent",
+    );
+  });
+
   it("throws UpstreamError with the real upstreamStatus + scrubbed body on a non-2xx", async () => {
     const client = createAnthropicClient({
       config: {
@@ -1779,6 +1852,35 @@ describe("createAnthropicClient — nativePassthroughStream", () => {
     expect(beta).toContain("context-management-2025-06-27");
     expect(beta).toContain("fast-mode-2026-02-01");
     expect(h.get("user-agent")).toBe("claude-cli/2.1.173 (external, cli)");
+  });
+
+  it("forces accept-encoding: identity only for dynamic-auth native streams", async () => {
+    let seen: Headers | null = null;
+    const carrier = {
+      protocol: "anthropic_messages" as const,
+      body: nativeStreamBody(),
+      raw_body: JSON.stringify(nativeStreamBody(), null, 2),
+      headers: {
+        "accept-encoding": "br, gzip",
+        "content-type": "application/json",
+      },
+      mutations: {},
+    };
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen = new Headers(init?.headers);
+      return sseStreamResponse(['event: message_stop\ndata: {"type":"message_stop"}\n\n']);
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", getAuthHeader: async () => "Bearer ATX" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    for await (const _ of client.nativePassthroughStream?.(carrier) ?? []) {
+      // drain
+    }
+
+    expect((seen as unknown as Headers).get("accept-encoding")).toBe("identity");
+    expect(carrier.mutations).toMatchObject({ accept_encoding_forced_identity: true });
   });
 
   it("throws UpstreamError with the real upstreamStatus + scrubbed body before the first chunk on a non-2xx", async () => {

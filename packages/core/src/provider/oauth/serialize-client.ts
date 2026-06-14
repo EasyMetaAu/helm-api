@@ -15,6 +15,7 @@
 // request flows unserialized with a warn (principle 3 — an auxiliary mechanism
 // must never 5xx a request).
 
+import { nativePassthroughBody } from "@helm/shared";
 import type { KeyedSerialGate, SerialAcquireResult } from "../../queue/keyed-serial-gate.js";
 import type { ChatCompletionRequest, ChatCompletionResponse, ProviderClient } from "../openai.js";
 
@@ -127,7 +128,7 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
   const innerNative = deps.inner.nativePassthrough;
   if (innerNative) {
     client.nativePassthrough = async (req, opts) => {
-      const lease = await admit(req, opts?.signal);
+      const lease = await admit(nativePassthroughBody(req), opts?.signal);
       if (lease === null) return innerNative(req, opts);
       try {
         return await innerNative(req, opts);
@@ -141,7 +142,7 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
   if (innerNativeStream) {
     client.nativePassthroughStream = (req, opts) =>
       (async function* () {
-        const lease = await admit(req, opts?.signal);
+        const lease = await admit(nativePassthroughBody(req), opts?.signal);
         if (lease === null) {
           yield* innerNativeStream(req, opts);
           return;

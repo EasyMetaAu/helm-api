@@ -466,6 +466,37 @@ describe("createMessagesPipeline — native passthrough streamIR()", () => {
     expect((frames[0] as unknown as { type?: unknown }).type).toBeUndefined();
   });
 
+  it("preserves no-data native SSE comment/keepalive frames for the route raw writer", async () => {
+    async function* stream(): AsyncIterable<string> {
+      yield [
+        ": keepalive\r\n\r\n",
+        "event: ping\r\n\r\n",
+        'event: message_start\r\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1}}}\r\n\r\n',
+      ].join("");
+    }
+    const route: RouteFn = async () => passthroughStreamResult(stream());
+    const pipeline = createMessagesPipeline(route);
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const frames: Array<{ event: string; data: string; raw?: string; hasData?: boolean }> = [];
+    for await (const ev of run.streamIR()) {
+      frames.push(ev as { event: string; data: string; raw?: string; hasData?: boolean });
+    }
+
+    expect(frames[0]).toMatchObject({
+      event: "",
+      data: "",
+      hasData: false,
+      raw: ": keepalive\r\n\r\n",
+    });
+    expect(frames[1]).toMatchObject({
+      event: "ping",
+      data: "",
+      hasData: false,
+      raw: "event: ping\r\n\r\n",
+    });
+    expect(frames[2]?.raw).toContain("\r\n");
+  });
+
   it("backfills the decision usage from the native SSE (input from message_start, output from message_delta)", async () => {
     const decisionRef = passthroughStreamResult().decision;
     const pipeline = createMessagesPipeline(
@@ -1037,6 +1068,57 @@ describe("createMessagesPipeline — memory inject additive trailing reminder", 
     expect((run as { nativePassthrough?: boolean }).nativePassthrough).toBe(true);
     const body = (await run.collect()) as Record<string, unknown>;
     expect(body).toBe(NATIVE_ANTHROPIC_BODY);
+  });
+
+  it("anthropic passthrough carrier: records memory_appended and invalidates raw_body", async () => {
+    const NATIVE = {
+      model: "claude-x",
+      system: "be terse",
+      messages: [{ role: "user", content: "hi" }],
+    };
+    let seen: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req;
+      return passthroughOkResult();
+    };
+    const store = injectStore();
+    const pipeline = createMessagesPipeline(route, "anthropic_messages", {
+      observe: makeObserveSpy().observe,
+      inject: injectWiring(store),
+    });
+
+    const run = await pipeline.run(
+      irOf({
+        metadata: {
+          ...INJECT_META,
+          native_request: {
+            protocol: "anthropic_messages",
+            body: NATIVE,
+            raw_body: JSON.stringify(NATIVE),
+            headers: { "content-type": "application/json" },
+            mutations: {},
+          },
+        },
+        messages: [
+          { role: "system", content: "be terse" },
+          { role: "user", content: "hi" },
+        ],
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    await run.collect();
+
+    const carrier = (seen as InternalRequest | null)?.native_request as
+      | {
+          body?: { messages?: Array<{ role: string; content: string }> };
+          raw_body?: string;
+          mutations?: { memory_appended?: boolean };
+        }
+      | undefined;
+    expect(carrier?.body?.messages?.[1]?.content).toContain("PROJECT MEMORY");
+    expect(carrier?.raw_body).toBeUndefined();
+    expect(carrier?.mutations?.memory_appended).toBe(true);
   });
 
   it("anthropic passthrough: native system ARRAY kept VERBATIM, reminder appended to messages", async () => {

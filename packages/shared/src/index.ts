@@ -239,6 +239,15 @@ export {
   type ModelsList,
   ModelsListSchema,
 } from "./models/schema.js";
+export {
+  appendMutationList,
+  cloneCarrierWithBody,
+  createNativePassthroughCarrier,
+  isNativePassthroughCarrier,
+  type NativePassthroughInput,
+  nativePassthroughBody,
+  nativePassthroughMutations,
+} from "./native-passthrough.js";
 // Per-account OAuth subscription usage + quota observability (providers page).
 // Fail-open artifacts: usage = today's served traffic; quota = latest rate-limit
 // window snapshot; plus the (untrusted) Anthropic usage-endpoint response shape.
@@ -260,6 +269,10 @@ export {
   InternalRequestSchema,
   type MemoryMode,
   MemoryModeSchema,
+  type NativePassthroughCarrier,
+  NativePassthroughCarrierSchema,
+  type NativePassthroughMutationLedger,
+  NativePassthroughMutationLedgerSchema,
   type OpenAIChatRequest,
   OpenAIChatRequestSchema,
   type Protocol,

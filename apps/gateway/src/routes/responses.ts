@@ -10,6 +10,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
+import { nativeCarrierFromParsedBody } from "./native-carrier.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
@@ -146,42 +147,6 @@ function responseStreamPrelude(args: {
     { type: "response.created", sequence_number: 0, response },
     { type: "response.in_progress", sequence_number: 1, response },
   ];
-}
-
-// PT-08: the synthetic prelude announced the route-assigned responseId, but a
-// verbatim-relayed upstream lifecycle frame (response.completed / .incomplete / …)
-// carries the UPSTREAM's own response.id — leaving the client with TWO different
-// response.id values in one stream. Splice the route id onto any relayed frame that
-// carries a `response.id` so the stream is self-consistent. FAIL-OPEN: a frame that
-// is not parseable JSON, or carries no `response.id` (every delta / content frame, and
-// the no-id terminal frames), is returned BYTE-FOR-BYTE untouched — this is the ONLY
-// spot native passthrough trades byte-fidelity for protocol self-consistency, and it
-// only fires on the small set of id-bearing envelope frames. `response.model` is left
-// as the upstream's real value (more truthful than the client-supplied alias).
-function rewriteRelayedResponseId(data: string, responseId: string): string {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(data);
-  } catch {
-    return data; // not JSON we understand — relay verbatim
-  }
-  const obj = parsed as { response?: { id?: unknown } };
-  if (typeof obj?.response?.id !== "string" || obj.response.id === responseId) {
-    return data; // no id to rewrite (or already matches) — relay verbatim, no reshape
-  }
-  obj.response.id = responseId;
-  return JSON.stringify(obj);
-}
-
-function isResponsesPreludeEvent(event: Record<string, unknown>): boolean {
-  // Translate path: the pipeline yields IR events keyed by `type`. Native-passthrough
-  // path (#217 Phase 3): the pipeline yields VERBATIM {event,data} frames keyed by
-  // `event`. Either way the route already emitted a synthetic prelude (with the route-
-  // assigned response id), so the upstream's own response.created / response.in_progress
-  // is dropped to avoid a duplicate prelude — the rest of the upstream stream (content,
-  // deltas, the terminal response.completed) is relayed byte-for-byte.
-  const name = typeof event.type === "string" ? event.type : event.event;
-  return name === "response.created" || name === "response.in_progress";
 }
 
 function pipelineToHelm(err: PipelineError, traceId: string): HelmHttpError {
@@ -344,8 +309,14 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // real Codex CLI is stream-only (store:false + stream:true), so the same verbatim
     // body is the carrier on either branch — the guard + executor decide whether to
     // actually forward it.
-    if (native !== null && typeof native === "object") {
-      ir.metadata.native_request = native;
+    const nativeCarrier = nativeCarrierFromParsedBody({
+      protocol: "openai_responses",
+      native,
+      rawBody: requestJson,
+      headers: c.req.raw.headers,
+    });
+    if (nativeCarrier !== null) {
+      ir.metadata.native_request = nativeCarrier;
     }
 
     // Capture the verbatim request/response bodies only when capture_payloads is ON
@@ -372,41 +343,45 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         // upstream Codex Responses SSE into VERBATIM {event,data} frames (the data
         // payload is the exact upstream JSON string, INCLUDING reasoning.encrypted_content
         // and native tool-call events) — forward them directly, BYPASSING transformStreamOut
-        // so the bytes reach the client byte-for-byte. The synthetic prelude is still
-        // emitted (the stream opens before routing resolves); the upstream's own
-        // response.created / response.in_progress is dropped by isResponsesPreludeEvent to
-        // avoid a duplicate. Capture stays native on both ends; an upstream error mid-
-        // passthrough still surfaces the Responses terminal error frame below (catch
-        // is unchanged).
+        // so the bytes reach the client byte-for-byte. Native passthrough deliberately
+        // suppresses Helm's synthetic prelude, keeping the upstream response.created /
+        // response.in_progress authoritative. Capture stays native on both ends; an
+        // upstream error mid-passthrough still surfaces the Responses terminal error
+        // frame below (catch is unchanged).
         let nextErrorSequence = 0;
         // Accumulate the serialized wire frames so the served response body can be
         // captured (verbatim) alongside the telemetry row in the finally below.
         const captured: string[] = [];
         let result: PipelineRunResult | null = null;
         try {
-          for (const event of responseStreamPrelude({ responseId, model: responseModel })) {
-            nextErrorSequence = 2;
-            const frame = deps.transformer.transformStreamOut(event);
-            if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
-            await sse.writeSSE({ event: frame.event, data: frame.data });
-          }
           result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
+          if (result.nativePassthrough !== true) {
+            for (const event of responseStreamPrelude({ responseId, model: responseModel })) {
+              nextErrorSequence = 2;
+              const frame = deps.transformer.transformStreamOut(event);
+              if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
+              await sse.writeSSE({ event: frame.event, data: frame.data });
+            }
+          }
           for await (const event of result.streamIR()) {
-            if (isResponsesPreludeEvent(event)) continue;
             if (typeof event.sequence_number === "number")
               nextErrorSequence = event.sequence_number + 1;
             const frame =
               result.nativePassthrough === true
                 ? {
                     event: (event as { event: string }).event,
-                    // PT-08: keep the stream's response.id self-consistent — splice the
-                    // route id onto any relayed id-bearing lifecycle frame (the synthetic
-                    // prelude announced it). Frames with no response.id are byte-identical.
-                    data: rewriteRelayedResponseId((event as { data: string }).data, responseId),
+                    data: (event as { data: string }).data,
+                    raw: (event as { raw?: string }).raw,
                   }
-                : deps.transformer.transformStreamOut(event);
-            if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
-            await sse.writeSSE({ event: frame.event, data: frame.data });
+                : { ...deps.transformer.transformStreamOut(event), raw: undefined };
+            const raw = frame.raw;
+            if (captureBodies)
+              captured.push(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
+            if (raw !== undefined) {
+              await sse.write(raw);
+            } else {
+              await sse.writeSSE({ event: frame.event, data: frame.data });
+            }
           }
         } catch (err) {
           // A client disconnect / abort is benign (docs/02): emit NO error frame.

@@ -195,6 +195,26 @@ const REQ_BODY = {
   max_tokens: 64,
 };
 
+function expectNativeCarrier(
+  value: unknown,
+  protocol: "anthropic_messages",
+  body: Record<string, unknown>,
+): void {
+  const carrier = value as {
+    protocol?: unknown;
+    body?: unknown;
+    raw_body?: unknown;
+    headers?: Record<string, string>;
+    mutations?: unknown;
+  };
+  expect(carrier.protocol).toBe(protocol);
+  expect(carrier.body).toEqual(body);
+  expect(carrier.raw_body).toBe(JSON.stringify(body));
+  expect(carrier.headers?.["content-type"]).toBe("application/json");
+  expect(carrier.headers?.["x-api-key"]).toBe("helm_live_secret");
+  expect(carrier.mutations).toEqual({});
+}
+
 describe("POST /v1/messages (Anthropic inbound)", () => {
   it("accepts the Claude Code event logging compatibility endpoint after auth", async () => {
     const { deps, harness } = makeDeps();
@@ -755,8 +775,8 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     });
 
     const meta = (harness.pipelineSawIR?.metadata ?? {}) as { native_request?: unknown };
-    // The carrier the core guard/executor reads: the verbatim parsed inbound body.
-    expect(meta.native_request).toEqual(REQ_BODY);
+    // The core guard/executor reads a carrier: parsed body + raw body + client headers.
+    expectNativeCarrier(meta.native_request, "anthropic_messages", REQ_BODY);
   });
 
   it("stamps native_request on a STREAMING request too (Phase 2 streaming passthrough)", async () => {
@@ -773,7 +793,7 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     await res.text();
 
     const meta = (harness.pipelineSawIR?.metadata ?? {}) as { native_request?: unknown };
-    expect(meta.native_request).toEqual({ ...REQ_BODY, stream: true });
+    expectNativeCarrier(meta.native_request, "anthropic_messages", { ...REQ_BODY, stream: true });
   });
 
   // ── Native protocol passthrough STREAMING (#217 Phase 2, C3). When the pipeline
@@ -823,7 +843,7 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(payload.responseJson).toContain(`data: ${startData}`);
     // native_request stamped on the streaming IR (Phase 2 carrier).
     const meta = (harness.pipelineSawIR?.metadata ?? {}) as { native_request?: unknown };
-    expect(meta.native_request).toEqual({ ...REQ_BODY, stream: true });
+    expectNativeCarrier(meta.native_request, "anthropic_messages", { ...REQ_BODY, stream: true });
   });
 
   it("stream NON-passthrough (flag OFF): still maps via transformStreamOut as today", async () => {

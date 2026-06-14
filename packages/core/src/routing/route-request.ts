@@ -4,6 +4,7 @@ import {
   type HelmError,
   type InternalRequest,
   makeHelmError,
+  type NativePassthroughMutationLedger,
   type RoutingSignal,
 } from "@helm/shared";
 import { expandLaneChain } from "../lanes/expand-chain.js";
@@ -109,6 +110,7 @@ export interface ProviderAttempt {
   response_protocol?: InternalRequest["protocol"] | null;
   provider_name?: string | null;
   provider_model?: string | null;
+  passthrough_mutations?: NativePassthroughMutationLedger;
 }
 
 // What execute() returns: the provider_attempts trail, the final landing, and

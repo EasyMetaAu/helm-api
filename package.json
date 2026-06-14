@@ -22,7 +22,14 @@
     "build": "pnpm -r build",
     "sync:catalog": "tsx scripts/sync-catalog.ts",
     "memory:dedup": "tsx packages/core/src/store/sqlite/dedup-memory-messages.ts",
-    "memory:dedup:pg": "tsx packages/core/src/store/postgres/dedup-memory-messages.ts"
+    "memory:dedup:pg": "tsx packages/core/src/store/postgres/dedup-memory-messages.ts",
+    "test:passthrough:unit": "vitest run --config scripts/passthrough/vitest.unit.config.ts",
+    "test:passthrough:e2e": "NODE_OPTIONS=--conditions=development tsx scripts/passthrough/deterministic-e2e.ts",
+    "test:passthrough": "pnpm test:passthrough:unit && pnpm test:passthrough:e2e",
+    "test:passthrough:live:claude-cli": "NODE_OPTIONS=--conditions=development tsx scripts/passthrough/live-cli.ts claude-cli",
+    "test:passthrough:live:codex-cli": "NODE_OPTIONS=--conditions=development tsx scripts/passthrough/live-cli.ts codex-cli",
+    "test:passthrough:live": "NODE_OPTIONS=--conditions=development tsx scripts/passthrough/live-cli.ts all",
+    "test:passthrough:final": "pnpm test:passthrough && pnpm test:passthrough:live"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",

@@ -13,6 +13,7 @@ import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
+import { nativeCarrierFromParsedBody } from "./native-carrier.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
@@ -417,8 +418,14 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     // BOTH stream and non-stream (Phase 2 added streaming passthrough): the native
     // streaming body already carries stream:true, so the same verbatim body is the
     // carrier — the guard + executor decide whether to actually forward it.
-    if (native !== null && typeof native === "object") {
-      ir.metadata.native_request = native;
+    const nativeCarrier = nativeCarrierFromParsedBody({
+      protocol: "anthropic_messages",
+      native,
+      rawBody: requestJson,
+      headers: c.req.raw.headers,
+    });
+    if (nativeCarrier !== null) {
+      ir.metadata.native_request = nativeCarrier;
     }
 
     // 3) Routing pipeline (framework-agnostic core). The per-request abort signal
@@ -473,10 +480,16 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           for await (const event of result.streamIR()) {
             const frame =
               result.nativePassthrough === true
-                ? (event as { event: string; data: string })
-                : anthropic.transformStreamOut(event);
-            if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
-            await sse.writeSSE({ event: frame.event, data: frame.data });
+                ? (event as { event: string; data: string; raw?: string })
+                : { ...anthropic.transformStreamOut(event), raw: undefined };
+            const raw = frame.raw;
+            if (captureBodies)
+              captured.push(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
+            if (raw !== undefined) {
+              await sse.write(raw);
+            } else {
+              await sse.writeSSE({ event: frame.event, data: frame.data });
+            }
           }
         } catch (err) {
           // A client disconnect / abort is a benign non-provider fault (docs/02):

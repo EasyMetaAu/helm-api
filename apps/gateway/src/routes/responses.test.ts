@@ -142,6 +142,26 @@ function makeRecord(over: { capturePayloads?: boolean } = {}): {
 
 const REQ = { model: "auto", input: "Say hello", max_output_tokens: 16 };
 
+function expectNativeCarrier(
+  value: unknown,
+  protocol: "openai_responses",
+  body: Record<string, unknown>,
+): void {
+  const carrier = value as {
+    protocol?: unknown;
+    body?: unknown;
+    raw_body?: unknown;
+    headers?: Record<string, string>;
+    mutations?: unknown;
+  };
+  expect(carrier.protocol).toBe(protocol);
+  expect(carrier.body).toEqual(body);
+  expect(carrier.raw_body).toBe(JSON.stringify(body));
+  expect(carrier.headers?.authorization).toBe("Bearer helm_live_secret");
+  expect(carrier.headers?.["content-type"]).toBe("application/json");
+  expect(carrier.mutations).toEqual({});
+}
+
 describe("POST /v1/responses (OpenAI Responses inbound)", () => {
   it("non-stream: auth → translate-out → route → translate-back, returns Responses JSON", async () => {
     const { deps, order } = makeDeps();
@@ -278,7 +298,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(frames.some((f) => f.data === "[DONE]")).toBe(false);
   });
 
-  it("stream:true opens the Responses SSE before routing resolves", async () => {
+  it("stream:true waits for routing before writing the first Responses SSE frame", async () => {
     let releaseRoute!: () => void;
     const routeStarted = deferred<void>();
     const routeMayFinish = new Promise<void>((resolve) => {
@@ -318,12 +338,16 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
 
     const reader = res.body?.getReader();
     expect(reader).toBeDefined();
+    const firstReadBeforeRoute = await Promise.race([reader?.read(), shortTimeout()]);
+    expect(firstReadBeforeRoute).toBe("timeout");
+    await routeStarted.promise;
+    releaseRoute();
     const firstRead = await Promise.race([reader?.read(), shortTimeout()]);
     expect(firstRead).not.toBe("timeout");
     const firstText = new TextDecoder().decode((firstRead as { value?: Uint8Array }).value);
-    expect(parseSSE(firstText)[0]?.event).toBe("response.created");
-    await routeStarted.promise;
-    releaseRoute();
+    expect(["response.created", "response.in_progress", "response.completed"]).toContain(
+      parseSSE(firstText)[0]?.event,
+    );
     await reader?.cancel();
   });
 
@@ -686,7 +710,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
 
     const meta = (harness.pipelineSawIR as { metadata?: { native_request?: unknown } } | null)
       ?.metadata;
-    expect(meta?.native_request).toEqual(REQ);
+    expectNativeCarrier(meta?.native_request, "openai_responses", REQ);
   });
 
   it("stamps native_request on a STREAMING request too (Codex is stream-only)", async () => {
@@ -709,7 +733,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
 
     const meta = (harness.pipelineSawIR as { metadata?: { native_request?: unknown } } | null)
       ?.metadata;
-    expect(meta?.native_request).toEqual({ ...REQ, stream: true });
+    expectNativeCarrier(meta?.native_request, "openai_responses", { ...REQ, stream: true });
   });
 
   it("non-stream passthrough: returns the verbatim native Responses body, skipping translate-back", async () => {
@@ -756,8 +780,6 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const completedData =
       '{"type":"response.completed","response":{"status":"completed","usage":{ "input_tokens":5 ,"output_tokens":4}}}';
     async function* events(): AsyncIterable<Record<string, unknown>> {
-      // The upstream's OWN response.created must be dropped (the route already emitted a
-      // synthetic prelude) — assert it does NOT duplicate below.
       yield { event: "response.created", data: '{"type":"response.created"}' };
       yield { event: "response.output_text.delta", data: deltaData };
       yield { event: "response.completed", data: completedData };
@@ -788,20 +810,16 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(text).toContain(`event: response.output_text.delta\ndata: ${deltaData}`);
     expect(text).toContain(`event: response.completed\ndata: ${completedData}`);
     const frames = parseSSE(text);
-    // Exactly ONE response.created (the synthetic prelude); the upstream's own
-    // response.created prelude frame is dropped to avoid a duplicate.
+    // Exactly ONE response.created: the upstream's own native prelude. The route
+    // must not synthesize, drop, or rewrite it on the passthrough path.
     expect(frames.filter((f) => f.event === "response.created")).toHaveLength(1);
-    // The synthetic prelude's response.created is the IR-shaped one (JSON object), NOT
-    // the upstream's verbatim '{"type":"response.created"}' — proves dedup hit upstream.
     const created = frames.find((f) => f.event === "response.created");
-    expect(created?.data).not.toBe('{"type":"response.created"}');
+    expect(created?.data).toBe('{"type":"response.created"}');
   });
 
-  it("stream passthrough: rewrites upstream response.id on relayed frames to match the synthetic prelude (PT-08)", async () => {
-    // The upstream completed frame carries the UPSTREAM's response.id; the synthetic
-    // prelude used the route-assigned id. Without a rewrite the client sees two different
-    // response.id values in one stream. The route must splice the prelude id onto relayed
-    // id-bearing lifecycle frames so the stream is self-consistent.
+  it("stream passthrough: preserves upstream response.id without a synthetic prelude", async () => {
+    // Native passthrough keeps the upstream Responses stream authoritative: no route
+    // prelude and no response.id rewrite.
     const completedData = JSON.stringify({
       type: "response.completed",
       response: {
@@ -832,20 +850,13 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
 
     const frames = parseSSE(await res.text());
-    const preludeId = (
-      JSON.parse(frames.find((f) => f.event === "response.created")?.data ?? "{}") as {
-        response?: { id?: string };
-      }
-    ).response?.id;
     const completedId = (
       JSON.parse(frames.find((f) => f.event === "response.completed")?.data ?? "{}") as {
         response?: { id?: string };
       }
     ).response?.id;
-    expect(preludeId).toBeTruthy();
-    // The relayed completed frame now carries the route id, not the upstream's.
-    expect(completedId).toBe(preludeId);
-    expect(completedId).not.toBe("resp_upstream_xyz");
+    expect(frames.some((f) => f.event === "response.created")).toBe(false);
+    expect(completedId).toBe("resp_upstream_xyz");
   });
 
   it("stream NON-passthrough (default): still maps via transformStreamOut as today", async () => {

@@ -15,6 +15,11 @@
 // silently picks a parked account. Streaming and non-streaming share the SAME
 // selection (one pick per call), so a streamed request also rotates the pool.
 
+import {
+  isNativePassthroughCarrier,
+  type NativePassthroughInput,
+  nativePassthroughBody,
+} from "@helm/shared";
 import type { ChatCompletionRequest, ChatCompletionResponse, ProviderClient } from "../openai.js";
 
 // One account in the pool: its scheduling knobs plus the fully-wired client that
@@ -32,6 +37,9 @@ export interface OAuthPoolDeps {
   members: OAuthPoolMember[];
   // Injected clock (default Date.now) so the LRU cursor is testable.
   now?: () => number;
+  // Native CLI safety: bind repeated requests with the same client/session
+  // fingerprint to the same OAuth account for this TTL.
+  stickyTtlMs?: number;
   // Fires with the selected account on each served call — the seam the gateway
   // uses to record the serving subscription in telemetry / logs (no secrets).
   onSelect?: (account: string) => void;
@@ -45,13 +53,81 @@ interface PoolEntry {
 
 export function createOAuthPoolClient(deps: OAuthPoolDeps): ProviderClient {
   const now = deps.now ?? (() => Date.now());
+  const stickyTtlMs = deps.stickyTtlMs ?? 10 * 60 * 1000;
   const entries: PoolEntry[] = deps.members.map((member) => ({ member, lastUsedAt: 0 }));
+  const stickySessions = new Map<string, { account: string; expiresAt: number }>();
+
+  function headerValue(headers: Record<string, string | string[]>, name: string): string | null {
+    const lower = name.toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() !== lower) continue;
+      const text = Array.isArray(value) ? value[0] : value;
+      return text && text.trim().length > 0 ? text.trim() : null;
+    }
+    return null;
+  }
+
+  function bodyString(body: Record<string, unknown>, key: string): string | null {
+    const value = body[key];
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function stickyKeyFromNative(input: NativePassthroughInput): string | null {
+    const body = nativePassthroughBody(input);
+    if (isNativePassthroughCarrier(input)) {
+      for (const header of [
+        "session_id",
+        "x-session-id",
+        "x-client-request-id",
+        "prompt_cache_key",
+        "conversation_id",
+      ]) {
+        const value = headerValue(input.headers, header);
+        if (value !== null) return `${header}:${value}`;
+      }
+    }
+    for (const key of [
+      "session_id",
+      "prompt_cache_key",
+      "conversation_id",
+      "previous_response_id",
+    ]) {
+      const value = bodyString(body, key);
+      if (value !== null) return `${key}:${value}`;
+    }
+    const metadata = body.metadata;
+    if (metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)) {
+      for (const key of ["session_id", "conversation_id", "thread_id"]) {
+        const value = bodyString(metadata as Record<string, unknown>, key);
+        if (value !== null) return `metadata.${key}:${value}`;
+      }
+    }
+    return null;
+  }
 
   // Pick the next account: lowest priority, then oldest lastUsedAt (LRU round-
   // robin within equal priority). Bumps the winner's cursor and notifies onSelect.
   // Throws when no member is schedulable (fail-closed — the caller treats it as a
   // provider failure and advances the fallback chain).
-  function select(): PoolEntry {
+  function select(stickyKey?: string | null): PoolEntry {
+    const nowMs = now();
+    if (stickyKey) {
+      const sticky = stickySessions.get(stickyKey);
+      if (sticky !== undefined && sticky.expiresAt > nowMs) {
+        const entry = entries.find(
+          (candidate) =>
+            candidate.member.account === sticky.account && candidate.member.schedulable,
+        );
+        if (entry !== undefined) {
+          entry.lastUsedAt = nowMs;
+          sticky.expiresAt = nowMs + stickyTtlMs;
+          deps.onSelect?.(entry.member.account);
+          return entry;
+        }
+      }
+      stickySessions.delete(stickyKey);
+    }
+
     let best: PoolEntry | undefined;
     for (const e of entries) {
       if (!e.member.schedulable) continue;
@@ -64,7 +140,13 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): ProviderClient {
       }
     }
     if (!best) throw new Error("oauth pool has no schedulable account");
-    best.lastUsedAt = now();
+    best.lastUsedAt = nowMs;
+    if (stickyKey) {
+      stickySessions.set(stickyKey, {
+        account: best.member.account,
+        expiresAt: nowMs + stickyTtlMs,
+      });
+    }
     deps.onSelect?.(best.member.account);
     return best;
   }
@@ -94,12 +176,12 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): ProviderClient {
     // whole pool's provider speaks the same native protocol, so a missing method here
     // signals a real wiring fault, not a normal heterogeneous-chain case.
     async nativePassthrough(
-      body: Record<string, unknown>,
+      body: NativePassthroughInput,
       opts?: { signal?: AbortSignal },
     ): Promise<ChatCompletionResponse> {
       // select() runs SYNCHRONOUSLY at the top of the async body (before any await),
       // so rotation + onSelect fire on the call turn, exactly like the other methods.
-      const { client } = select().member;
+      const { client } = select(stickyKeyFromNative(body)).member;
       if (!client.nativePassthrough) {
         throw new Error("oauth pool member does not support native passthrough");
       }
@@ -111,10 +193,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): ProviderClient {
     // deferring select() into an async body would skip rotation until the consumer drains.
     // Fail-closed (principle 2) if the picked member lacks the method, on the call turn.
     nativePassthroughStream(
-      body: Record<string, unknown>,
+      body: NativePassthroughInput,
       opts?: { signal?: AbortSignal },
     ): AsyncIterable<string> {
-      const { client } = select().member;
+      const { client } = select(stickyKeyFromNative(body)).member;
       if (!client.nativePassthroughStream) {
         throw new Error("oauth pool member does not support native passthrough streaming");
       }

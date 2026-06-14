@@ -14,6 +14,8 @@
 // (see README disclaimer). Identity recipe ported from openclaw (MIT).
 
 import { createHash } from "node:crypto";
+import { type NativePassthroughInput, nativePassthroughBody } from "@helm/shared";
+import { prepareNativePassthroughRequest } from "./native-passthrough.js";
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
@@ -615,13 +617,21 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     return changed ? JSON.parse(value) : raw;
   }
 
-  async function request(body: Record<string, unknown>, external?: AbortSignal): Promise<Response> {
+  async function request(input: NativePassthroughInput, external?: AbortSignal): Promise<Response> {
+    const body = nativePassthroughBody(input);
+    const prepared = prepareNativePassthroughRequest(input, await headers(body), {
+      mergeHeaders: ["anthropic-beta"],
+      forceAcceptEncodingIdentity: cfg.getAuthHeader !== undefined && body.stream === true,
+      ...(cfg.getAuthHeader !== undefined && body.stream === true
+        ? { providerProfileApplied: "anthropic_official_safe" }
+        : {}),
+    });
     const t = withTimeout(timeoutMs, external);
     try {
       return await doFetch(url, {
         method: "POST",
-        headers: await headers(body),
-        body: JSON.stringify(body),
+        headers: prepared.headers,
+        body: prepared.bodyText,
         signal: t.signal,
       });
     } catch (err) {
@@ -635,7 +645,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
   }
 
   async function requestWithRetry(
-    body: Record<string, unknown>,
+    body: NativePassthroughInput,
     external?: AbortSignal,
   ): Promise<Response> {
     const res = await request(body, external);
