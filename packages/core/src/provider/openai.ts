@@ -34,6 +34,9 @@ export interface ProviderConfig {
   // Compatibility shim for OpenAI-compatible providers that have not adopted the
   // newer `developer` role. Disabled by default to keep true OpenAI passthrough.
   mapDeveloperRoleToSystem?: boolean;
+  // Compatibility shim for OpenAI-compatible providers that stream reasoning as
+  // choices[].delta.reasoning. Disabled by default to preserve byte forwarding.
+  normalizeReasoningDeltaAlias?: boolean;
 }
 
 export interface OpenAIClientDeps {
@@ -43,8 +46,15 @@ export interface OpenAIClientDeps {
 
 export type ChatCompletionRequest = Record<string, unknown>;
 export type ChatCompletionResponse = Record<string, unknown>;
+export type NativeProtocolProfile =
+  | "anthropic_messages"
+  | "codex_responses"
+  | "generic_openai_responses"
+  | "gemini";
 
 export interface ProviderClient {
+  nativeProtocolProfile?: NativeProtocolProfile;
+  streamReframed?: boolean;
   chatCompletion(
     req: ChatCompletionRequest,
     opts?: { signal?: AbortSignal },
@@ -73,6 +83,34 @@ export interface ProviderClient {
     request: NativePassthroughInput,
     opts?: { signal?: AbortSignal },
   ): AsyncIterable<string>;
+  countTokens?(
+    req: ChatCompletionRequest,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Record<string, unknown>>;
+  responsesInputTokens?(
+    req: ChatCompletionRequest,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Record<string, unknown>>;
+  responsesRetrieve?(
+    responseId: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Record<string, unknown>>;
+  responsesDelete?(
+    responseId: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Record<string, unknown>>;
+  responsesCancel?(
+    responseId: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Record<string, unknown>>;
+  responsesInputItems?(
+    responseId: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Record<string, unknown>>;
+  responsesCompact?(
+    req: ChatCompletionRequest,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Record<string, unknown>>;
 }
 
 // Upstream non-2xx / network error / timeout. The gateway maps this to an
@@ -102,6 +140,62 @@ export class UpstreamError extends Error {
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+function nextSseFrameBoundary(buffer: string): { index: number; separator: string } | null {
+  const lf = buffer.indexOf("\n\n");
+  const crlf = buffer.indexOf("\r\n\r\n");
+  if (lf === -1 && crlf === -1) return null;
+  if (lf === -1) return { index: crlf, separator: "\r\n\r\n" };
+  if (crlf === -1) return { index: lf, separator: "\n\n" };
+  return crlf < lf ? { index: crlf, separator: "\r\n\r\n" } : { index: lf, separator: "\n\n" };
+}
+
+function normalizeOpenAIReasoningPayload(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const choices = (value as { choices?: unknown }).choices;
+  if (!Array.isArray(choices)) return false;
+
+  let changed = false;
+  for (const choice of choices) {
+    if (choice === null || typeof choice !== "object" || Array.isArray(choice)) continue;
+    const delta = (choice as { delta?: unknown }).delta;
+    if (delta === null || typeof delta !== "object" || Array.isArray(delta)) continue;
+    const record = delta as Record<string, unknown>;
+    if (!Object.hasOwn(record, "reasoning")) continue;
+    if (!Object.hasOwn(record, "reasoning_content")) {
+      record.reasoning_content = record.reasoning;
+    }
+    delete record.reasoning;
+    changed = true;
+  }
+  return changed;
+}
+
+function normalizeReasoningDeltaFrame(frame: string): string {
+  let changed = false;
+  const lines = frame.split("\n").map((line) => {
+    const hasCarriageReturn = line.endsWith("\r");
+    const core = hasCarriageReturn ? line.slice(0, -1) : line;
+    const match = /^data:\s*/.exec(core);
+    if (!match) return line;
+
+    const payload = core.slice(match[0].length);
+    if (payload.trim() === "[DONE]") return line;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return line;
+    }
+
+    if (!normalizeOpenAIReasoningPayload(parsed)) return line;
+    changed = true;
+    return `${match[0]}${JSON.stringify(parsed)}${hasCarriageReturn ? "\r" : ""}`;
+  });
+
+  return changed ? lines.join("\n") : frame;
+}
 
 // Merge the caller's signal (client disconnect) with a timeout signal. Returns
 // the combined signal plus a marker so the caller can distinguish a timeout
@@ -263,6 +357,8 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   }
 
   return {
+    ...(cfg.normalizeReasoningDeltaAlias ? { streamReframed: true } : {}),
+
     async chatCompletion(req, opts) {
       const res = await requestWithAuthRetry(req, opts?.signal);
       if (!res.ok) throw await errorFromResponse(res);
@@ -279,6 +375,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       if (!body) return;
       const reader = body.getReader();
       const decoder = new TextDecoder();
+      let pendingFrame = "";
       try {
         while (true) {
           // Inter-chunk liveness: `withTimeout` already cleared once headers
@@ -288,7 +385,23 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
           // normal fallback-eligible failure; after, it terminates the response.
           const { done, value } = await readChunkWithIdle(reader, timeoutMs);
           if (done) break;
-          if (value) yield decoder.decode(value, { stream: true });
+          if (!value) continue;
+          const chunk = decoder.decode(value, { stream: true });
+          if (!cfg.normalizeReasoningDeltaAlias) {
+            yield chunk;
+            continue;
+          }
+          pendingFrame += chunk;
+          while (true) {
+            const boundary = nextSseFrameBoundary(pendingFrame);
+            if (!boundary) break;
+            const frame = pendingFrame.slice(0, boundary.index);
+            pendingFrame = pendingFrame.slice(boundary.index + boundary.separator.length);
+            yield `${normalizeReasoningDeltaFrame(frame)}${boundary.separator}`;
+          }
+        }
+        if (cfg.normalizeReasoningDeltaAlias && pendingFrame.length > 0) {
+          yield normalizeReasoningDeltaFrame(pendingFrame);
         }
       } catch (err) {
         if (err instanceof StreamStalledError) {

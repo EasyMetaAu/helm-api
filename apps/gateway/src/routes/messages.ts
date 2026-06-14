@@ -116,6 +116,14 @@ export interface MessagesRouteDeps {
    *  tests that omit it record nothing; when wired, every served request (success
    *  OR failure, stream OR non-stream) writes a telemetry row. */
   record?: RecordServedDeps;
+  /** Optional provider-backed Anthropic token counter. Missing/failing counter
+   *  falls back to a deterministic local estimate, so helper failures never
+   *  affect normal generation. */
+  countTokens?(
+    body: Record<string, unknown>,
+    identity: MessagesIdentity,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>>;
   auth: {
     /** Resolve the request credential to an identity, or null when invalid.
      *  Mandatory auth: a null result short-circuits to a 401 (no anonymous
@@ -258,7 +266,15 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         trace_id: traceId,
       });
     }
-    return c.json({ input_tokens: estimateAnthropicInputTokens(native) });
+    if (deps.countTokens !== undefined) {
+      try {
+        return c.json(await deps.countTokens(obj, identity, c.req.raw.signal));
+      } catch {
+        // Token helpers are compatibility helpers, not generation. Fall back to a
+        // deterministic estimate instead of making /v1/messages/count_tokens flaky.
+      }
+    }
+    return c.json({ input_tokens: estimateAnthropicInputTokens(native), estimated: true });
   });
 
   app.post("/v1/messages", async (c) => {

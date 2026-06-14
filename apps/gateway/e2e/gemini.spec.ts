@@ -168,16 +168,37 @@ test.describe("Gemini auth + error envelopes", () => {
     expect(body.error.code).toBe(401);
   });
 
-  test("a non-generateContent operation returns 404 (Gemini NOT_FOUND envelope)", async ({
-    request,
-  }) => {
+  test("countTokens returns a deterministic local estimate", async ({ request }) => {
     const res = await request.post("/v1beta/models/gemini-2.0-flash:countTokens", {
       headers: GEMINI_AUTH,
       data: { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
     });
-    expect(res.status()).toBe(404);
+    expect(res.status()).toBe(200);
     const body = await res.json();
-    expect(body.error.status).toBe("NOT_FOUND");
+    expect(body).toEqual({ totalTokens: 14, estimated: true });
+  });
+
+  test("countTokens accepts publisher model paths", async ({ request }) => {
+    const res = await request.post(
+      "/models/publishers/google/models/gemini-2.0-flash:countTokens",
+      {
+        headers: GEMINI_AUTH,
+        data: { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
+      },
+    );
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ totalTokens: 14, estimated: true });
+  });
+
+  test("malformed countTokens body returns 400 INVALID_ARGUMENT", async ({ request }) => {
+    const res = await request.post("/v1beta/models/gemini-2.0-flash:countTokens", {
+      headers: GEMINI_AUTH,
+      data: {},
+    });
+    expect(res.status()).toBe(400);
+    const body = await res.json();
+    expect(body.error.status).toBe("INVALID_ARGUMENT");
   });
 
   test("a structurally invalid body returns 400 INVALID_ARGUMENT", async ({ request }) => {

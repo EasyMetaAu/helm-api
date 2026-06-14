@@ -422,6 +422,11 @@ export {
   openaiToAnthropicRequest,
   translateAnthropicSSE,
 } from "./provider/anthropic.js";
+export {
+  createGeminiClient,
+  type GeminiClientConfig,
+  type GeminiClientDeps,
+} from "./provider/gemini.js";
 // Interactive OAuth subscription-provider kit (issue #38): authorization-code +
 // PKCE / device-code login flows, built-in provider registry (anthropic,
 // github-copilot), and the flow primitives. Ported from openclaw (MIT).
@@ -483,6 +488,8 @@ export {
   type CodexResponsesClientDeps,
   codexAccountIdFromToken,
   createCodexResponsesClient,
+  createGenericOpenAIResponsesClient,
+  type GenericOpenAIResponsesClientDeps,
   openaiToResponsesRequest,
   translateResponsesSSE,
 } from "./provider/openai-responses.js";

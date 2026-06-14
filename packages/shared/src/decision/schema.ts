@@ -111,6 +111,9 @@ export const ProviderAttemptSchema = z.object({
   provider_name: z.string().nullable().optional(),
   provider_model: z.string().nullable().optional(),
   passthrough_mutations: NativePassthroughMutationLedgerSchema.optional(),
+  // Target-protocol request shims on translated attempts. Body-free: codes,
+  // counters, and field names only; never payload values.
+  request_mutations: NativePassthroughMutationLedgerSchema.optional(),
 });
 
 export const FinalDecisionSchema = z.object({

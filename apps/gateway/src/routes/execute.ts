@@ -10,6 +10,7 @@ import {
   canUseNativePassthrough,
   checkCapability,
   type NativePassthroughDisableReason,
+  openaiTransformer,
   resolveCostUsd,
   UpstreamError,
 } from "@helm/core";
@@ -128,6 +129,7 @@ interface PassthroughTelemetry {
   provider_name: string | null;
   provider_model: string | null;
   passthrough_mutations?: NativePassthroughCarrier["mutations"];
+  request_mutations?: NativePassthroughCarrier["mutations"];
 }
 
 function approxPromptTokens(req: InternalRequest): number {
@@ -347,15 +349,69 @@ function decideNativePassthroughForAttempt(input: {
   };
 }
 
-function stripCacheControlDeep(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((item) => stripCacheControlDeep(item));
-  if (value === null || typeof value !== "object") return value;
-  const out: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (key === "cache_control") continue;
-    out[key] = stripCacheControlDeep(child);
+function stripCacheControlDeep(value: unknown): { value: unknown; stripped: number } {
+  if (Array.isArray(value)) {
+    let stripped = 0;
+    const next = value.map((item) => {
+      const child = stripCacheControlDeep(item);
+      stripped += child.stripped;
+      return child.value;
+    });
+    return { value: next, stripped };
   }
-  return out;
+  if (value === null || typeof value !== "object") return { value, stripped: 0 };
+  const out: Record<string, unknown> = {};
+  let stripped = 0;
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "cache_control") {
+      stripped += 1;
+      continue;
+    }
+    const next = stripCacheControlDeep(child);
+    stripped += next.stripped;
+    out[key] = next.value;
+  }
+  return { value: out, stripped };
+}
+
+function remoteUrlFromPart(part: Record<string, unknown>): string | null {
+  if (typeof part.url === "string") return part.url;
+  if (typeof part.file_id === "string") return part.file_id;
+  const imageUrl = part.image_url;
+  if (typeof imageUrl === "string") return imageUrl;
+  if (imageUrl !== null && typeof imageUrl === "object" && !Array.isArray(imageUrl)) {
+    const url = (imageUrl as Record<string, unknown>).url;
+    if (typeof url === "string") return url;
+  }
+  const file = part.file;
+  if (file !== null && typeof file === "object" && !Array.isArray(file)) {
+    const fileId = (file as Record<string, unknown>).file_id;
+    if (typeof fileId === "string") return fileId;
+  }
+  return null;
+}
+
+function isRemoteMediaPart(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const part = value as Record<string, unknown>;
+  const type = typeof part.type === "string" ? part.type : "";
+  if (!["image", "image_url", "audio", "video", "document", "file"].includes(type)) {
+    return false;
+  }
+  const url = remoteUrlFromPart(part);
+  return typeof url === "string" && /^https?:\/\//i.test(url);
+}
+
+function countRemoteMediaParts(messages: InternalRequest["messages"]): number {
+  let count = 0;
+  for (const message of messages) {
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (isRemoteMediaPart(part)) count += 1;
+    }
+  }
+  return count;
 }
 
 function isEmptyAnthropicTextBlock(value: unknown): boolean {
@@ -411,6 +467,7 @@ function prepareNativeRequestForUpstream(
   providerModel: string,
   protocol: Protocol,
   streamReframed: boolean,
+  nativeProtocolProfile: ProviderClient["nativeProtocolProfile"] | undefined,
 ): NativePassthroughCarrier | Record<string, unknown> {
   if (nativeRequest === undefined) {
     throw new Error("native passthrough invoked without a native request");
@@ -432,7 +489,9 @@ function prepareNativeRequestForUpstream(
     }
   }
 
-  if (protocol === "openai_responses" && body.store !== false) {
+  const needsCodexResponsesShim =
+    protocol === "openai_responses" && nativeProtocolProfile !== "generic_openai_responses";
+  if (needsCodexResponsesShim && body.store !== false) {
     body = { ...body, store: false };
     bodyChanged = true;
     if (mutations) {
@@ -461,6 +520,33 @@ function prepareNativeRequestForUpstream(
   return bodyChanged
     ? cloneCarrierWithBody(carrier, body)
     : cloneCarrierWithBody(carrier, body, { preserveRawBody: true });
+}
+
+function hasResponsesHistoryGap(req: InternalRequest): boolean {
+  if (req.protocol !== "openai_responses") return false;
+  if (typeof req.provider_raw?.previous_response_id !== "string") return false;
+  let hasToolOutput = false;
+  let hasLocalToolCall = false;
+  for (const message of req.messages) {
+    if (message.role === "tool") hasToolOutput = true;
+    if (Array.isArray((message as { tool_calls?: unknown }).tool_calls)) hasLocalToolCall = true;
+  }
+  return hasToolOutput && !hasLocalToolCall;
+}
+
+function protocolGuardSkipReason(
+  req: InternalRequest,
+  targetProviderProtocol: TargetProviderProtocol,
+): string | null {
+  if (req.protocol !== "openai_responses" || targetProviderProtocol === "openai_responses") {
+    return null;
+  }
+  if (hasResponsesHistoryGap(req)) return "responses_previous_response_id_cross_protocol_blocked";
+  if (Array.isArray(req.provider_raw?.responses_native_tools)) {
+    return "responses_native_tools_cross_protocol_blocked";
+  }
+  if (req.provider_raw?.background === true) return "responses_background_cross_protocol_blocked";
+  return null;
 }
 
 function upstreamStatusOf(err: unknown): number | null {
@@ -648,6 +734,13 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           continue;
         }
       }
+
+      const protocolSkip = protocolGuardSkipReason(req, target.targetProviderProtocol);
+      if (protocolSkip !== null) {
+        capabilityPruned = true;
+        attempts.push(skipRow(alias, protocolSkip, elapsed()));
+        continue;
+      }
       // Past the gates → this candidate is attempted against the upstream. A
       // failure from here on is a PROVIDER fault, not a capability gap.
       attemptedAny = true;
@@ -662,6 +755,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         target,
         enabled: nativeProtocolPassthroughEnabled?.() === true,
       });
+      let attemptTelemetry: PassthroughTelemetry = passthrough;
 
       // 3) Invoke the provider (stream or non-stream). We send the RESOLVED
       //    provider model (not the originally-requested alias) — the gateway
@@ -694,7 +788,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             providerModel,
             req.protocol,
             true,
+            provider.nativeProtocolProfile,
           );
+          if (hasResponsesHistoryGap(req)) {
+            const mutations = nativePassthroughMutations(passthroughBody);
+            if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
+          }
           passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
           const stream = await peekStream(
             () => passthroughStream(passthroughBody, { signal }),
@@ -717,19 +816,23 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // Translate stream path (passthrough disabled): the existing byte-for-byte
           // forward. peekStream opens chatCompletionStream(stripInternal); the row
           // carries the (used:false) passthrough telemetry. No nativePassthrough marker.
+          const rendered = stripInternal(req, providerModel, target.targetProviderProtocol);
+          attemptTelemetry = withRequestMutations(
+            passthrough,
+            mergeRequestMutations(
+              rendered.request_mutations,
+              provider.streamReframed === true ? { stream_reframed: true } : undefined,
+            ),
+          );
           const stream = await peekStream(
-            () =>
-              provider.chatCompletionStream(
-                stripInternal(req, providerModel, target.targetProviderProtocol),
-                { signal },
-              ),
+            () => provider.chatCompletionStream(rendered.body, { signal }),
             signal,
             alias,
             log,
           );
           breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null (not measured).
-          attempts.push(okRow(alias, elapsed(), null, passthrough));
+          attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
           return {
             attempts,
             final: { status: "ok", alias, providerModel },
@@ -760,7 +863,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             providerModel,
             req.protocol,
             false,
+            provider.nativeProtocolProfile,
           );
+          if (hasResponsesHistoryGap(req)) {
+            const mutations = nativePassthroughMutations(passthroughBody);
+            if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
+          }
           passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
           const body = await passthroughInvoke(passthroughBody, { signal });
           breaker.recordSuccess(alias);
@@ -779,9 +887,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           };
         }
         const bodyReq = stripInternal(req, providerModel, target.targetProviderProtocol);
-        const body = await provider.chatCompletion(bodyReq, { signal });
+        attemptTelemetry = withRequestMutations(passthrough, bodyReq.request_mutations);
+        const body = await provider.chatCompletion(bodyReq.body, { signal });
         breaker.recordSuccess(alias);
-        attempts.push(okRow(alias, elapsed(), costOf(alias, body), passthrough));
+        attempts.push(okRow(alias, elapsed(), costOf(alias, body), attemptTelemetry));
         return {
           attempts,
           final: { status: "ok", alias, providerModel },
@@ -884,7 +993,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           latency_ms: elapsed(),
           cost_usd: null,
           error_detail: errorDetailOf(err),
-          ...passthrough,
+          ...attemptTelemetry,
         });
       }
     }
@@ -1013,30 +1122,97 @@ const PROVIDER_RAW_FORWARD_KEYS_BY_PROTOCOL = {
 function renderProviderRawForTarget(
   providerRaw: Record<string, unknown> | undefined,
   targetProviderProtocol: TargetProviderProtocol,
-): Record<string, unknown> {
-  if (providerRaw === undefined) return {};
+): { body: Record<string, unknown>; strippedKeys: string[] } {
+  if (providerRaw === undefined) return { body: {}, strippedKeys: [] };
   const out: Record<string, unknown> = {};
+  const allowed = new Set<string>(PROVIDER_RAW_FORWARD_KEYS_BY_PROTOCOL[targetProviderProtocol]);
   for (const key of PROVIDER_RAW_FORWARD_KEYS_BY_PROTOCOL[targetProviderProtocol]) {
     const value = providerRaw[key];
     if (value !== undefined && value !== null) out[key] = value;
   }
-  return out;
+  const strippedKeys = Object.keys(providerRaw).filter((key) => {
+    const value = providerRaw[key];
+    return value !== undefined && value !== null && !allowed.has(key);
+  });
+  return { body: out, strippedKeys };
+}
+
+function renderOpenAINativeBody(body: Record<string, unknown>): Record<string, unknown> {
+  const normalized = openaiTransformer.transformRequestOut({
+    model: typeof body.model === "string" ? body.model : "model",
+    messages: Array.isArray(body.messages) ? body.messages : [],
+    ...body,
+  });
+  if (normalized && typeof (normalized as Promise<unknown>).then === "function") {
+    throw new Error("OpenAI request normalizer unexpectedly returned a Promise");
+  }
+  const rendered = openaiTransformer.transformRequestIn(normalized as never);
+  if (rendered && typeof (rendered as Promise<unknown>).then === "function") {
+    throw new Error("OpenAI request renderer unexpectedly returned a Promise");
+  }
+  const renderedMessages = (rendered as { messages?: unknown }).messages;
+  return Array.isArray(renderedMessages) ? { ...body, messages: renderedMessages } : body;
+}
+
+function withRequestMutations(
+  passthrough: PassthroughTelemetry,
+  requestMutations: NativePassthroughCarrier["mutations"] | undefined,
+): PassthroughTelemetry {
+  if (requestMutations === undefined || Object.keys(requestMutations).length === 0) {
+    return passthrough;
+  }
+  return { ...passthrough, request_mutations: requestMutations };
+}
+
+function mergeRequestMutations(
+  ...mutations: Array<NativePassthroughCarrier["mutations"] | undefined>
+): NativePassthroughCarrier["mutations"] | undefined {
+  const out: NativePassthroughCarrier["mutations"] = {};
+  for (const mutation of mutations) {
+    if (mutation === undefined) continue;
+    Object.assign(out, mutation);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function stripInternal(
   req: InternalRequest,
   providerModel: string,
   targetProviderProtocol: TargetProviderProtocol,
-): Record<string, unknown> {
+): { body: Record<string, unknown>; request_mutations?: NativePassthroughCarrier["mutations"] } {
+  const requestMutations: NativePassthroughCarrier["mutations"] = {};
+  const openAICompatibleWire =
+    targetProviderProtocol === "openai_chat" || targetProviderProtocol === "openai_responses";
+  const messages = openAICompatibleWire
+    ? stripCacheControlDeep(req.messages)
+    : { value: req.messages, stripped: 0 };
   const body: Record<string, unknown> = {
     model: providerModel,
-    messages:
-      targetProviderProtocol === "openai_chat" ? stripCacheControlDeep(req.messages) : req.messages,
+    messages: messages.value,
     stream: req.stream,
   };
-  if (req.tools)
-    body.tools =
-      targetProviderProtocol === "openai_chat" ? stripCacheControlDeep(req.tools) : req.tools;
+  if (targetProviderProtocol === "gemini") {
+    const remoteMediaCount = countRemoteMediaParts(req.messages);
+    if (remoteMediaCount > 0) {
+      requestMutations.remote_media_not_materialized = remoteMediaCount;
+      appendMutationList(requestMutations, "body_shims_applied", ["remote_media_not_materialized"]);
+    }
+  }
+  if (messages.stripped > 0) {
+    requestMutations.cache_control_stripped_for_openai = messages.stripped;
+  }
+  if (req.tools) {
+    const tools = openAICompatibleWire
+      ? stripCacheControlDeep(req.tools)
+      : { value: req.tools, stripped: 0 };
+    body.tools = tools.value;
+    if (tools.stripped > 0) {
+      requestMutations.cache_control_stripped_for_openai =
+        (typeof requestMutations.cache_control_stripped_for_openai === "number"
+          ? requestMutations.cache_control_stripped_for_openai
+          : 0) + tools.stripped;
+    }
+  }
   if (req.response_format) body.response_format = req.response_format;
   if (req.max_tokens !== null) body.max_tokens = req.max_tokens;
   for (const key of FORWARDED_REQUEST_PARAM_KEYS) {
@@ -1046,9 +1222,13 @@ function stripInternal(
   if (targetProviderProtocol === "anthropic_messages" && req.cache_control !== undefined) {
     body.cache_control = req.cache_control;
   }
-  for (const [key, value] of Object.entries(
-    renderProviderRawForTarget(req.provider_raw, targetProviderProtocol),
-  )) {
+  const renderedRaw = renderProviderRawForTarget(req.provider_raw, targetProviderProtocol);
+  if (targetProviderProtocol === "openai_chat" && renderedRaw.strippedKeys.length > 0) {
+    requestMutations.provider_raw_stripped_for_openai = renderedRaw.strippedKeys;
+  } else if (renderedRaw.strippedKeys.length > 0) {
+    requestMutations.provider_raw_stripped_for_target = renderedRaw.strippedKeys;
+  }
+  for (const [key, value] of Object.entries(renderedRaw.body)) {
     body[key] = value;
   }
   // Streamed usage (cost #6): OpenAI-compatible upstreams only emit a trailing
@@ -1060,7 +1240,14 @@ function stripInternal(
       req.stream_options && typeof req.stream_options === "object" ? req.stream_options : {};
     body.stream_options = { ...streamOptions, include_usage: true };
   }
-  return body;
+  const renderedBody =
+    targetProviderProtocol === "openai_chat" || targetProviderProtocol === "openai_responses"
+      ? renderOpenAINativeBody(body)
+      : body;
+  return {
+    body: renderedBody,
+    ...(Object.keys(requestMutations).length > 0 ? { request_mutations: requestMutations } : {}),
+  };
 }
 
 function isJson(rf: InternalRequest["response_format"]): boolean {

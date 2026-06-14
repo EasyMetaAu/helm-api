@@ -12,6 +12,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult, RouteError } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
+import { nativeCarrierFromParsedBody } from "./native-carrier.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
@@ -61,6 +62,11 @@ export interface GeminiRouteDeps {
   /** Per-key concurrency overflow queue (issue #93) — the SAME process-wide gate
    *  as the chat middleware. Optional — omitted = no gating. */
   concurrencyGate?: ConcurrencyGatePort;
+  countTokens?(
+    body: Record<string, unknown>,
+    identity: MessagesIdentity,
+    signal: AbortSignal,
+  ): Promise<unknown>;
   /** Telemetry + payload recorder (the /admin/requests fix). Optional so existing
    *  tests that omit it record nothing; when wired, every served request (success
    *  OR failure, stream OR non-stream) writes a telemetry row. */
@@ -84,6 +90,24 @@ export interface GeminiRouteDeps {
       signal: AbortSignal,
     ): Promise<PipelineRunResult>;
   };
+}
+
+function hasCountTokensContent(native: unknown): boolean {
+  if (typeof native !== "object" || native === null || Array.isArray(native)) return false;
+  const body = native as {
+    contents?: unknown;
+    generateContentRequest?: { contents?: unknown };
+  };
+  return (
+    Array.isArray(body.contents) ||
+    (typeof body.generateContentRequest === "object" &&
+      body.generateContentRequest !== null &&
+      Array.isArray(body.generateContentRequest.contents))
+  );
+}
+
+function estimateGeminiCountTokens(requestJson: string): number {
+  return Math.max(1, Math.ceil(requestJson.length / 4));
 }
 
 // Extract the plaintext credential from x-goog-api-key (Gemini SDK default) or the
@@ -211,7 +235,47 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       c.set("concurrencyRelease", acquired.release);
     }
 
-    // 2) Parse + translate inbound. A malformed JSON body OR a structurally invalid
+    // 2) countTokens is a local deterministic estimate. It shares auth / rate /
+    //    concurrency with generation, but it must never enter the generation
+    //    transformer or provider pipeline.
+    if (route.operation === "countTokens") {
+      let requestJson = "";
+      let native: unknown;
+      try {
+        requestJson = await c.req.text();
+        native = JSON.parse(requestJson);
+      } catch {
+        return sendError(c, {
+          error_class: "invalid_request",
+          message: "malformed JSON request body",
+          trace_id: traceId,
+        });
+      }
+      if (!hasCountTokensContent(native)) {
+        return sendError(c, {
+          error_class: "invalid_request",
+          message: "invalid Gemini countTokens request body",
+          trace_id: traceId,
+        });
+      }
+      if (deps.countTokens !== undefined) {
+        try {
+          const counted = await deps.countTokens(
+            { ...(native as Record<string, unknown>), model: route.model },
+            identity,
+            c.req.raw.signal,
+          );
+          return c.json(counted as Record<string, unknown>);
+        } catch {
+          // Token helpers are SDK compatibility helpers. A provider counter
+          // outage must not turn the route into a 5xx when deterministic local
+          // estimation is available.
+        }
+      }
+      return c.json({ totalTokens: estimateGeminiCountTokens(requestJson), estimated: true });
+    }
+
+    // 3) Parse + translate inbound. A malformed JSON body OR a structurally invalid
     //    Gemini request (the transformer's Zod parse throws) is a CLIENT error →
     //    400 INVALID_ARGUMENT, before routing (docs/07, principle 2 fail-closed).
     let requestJson = "";
@@ -256,6 +320,16 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     ir.metadata.memory_mode = memoryScope.mode;
     ir.metadata.memory_thread_source = memoryScope.threadSource;
 
+    const nativeCarrier = nativeCarrierFromParsedBody({
+      protocol: "gemini",
+      native,
+      rawBody: requestJson,
+      headers: c.req.raw.headers,
+    });
+    if (nativeCarrier !== null) {
+      ir.metadata.native_request = nativeCarrier;
+    }
+
     // 3) Route through the shared core. The per-request abort signal rides along so
     //    a client disconnect is a non-provider fault (docs/02). run() throws a
     //    PipelineError(invalid_request) for an empty request.
@@ -293,9 +367,21 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         const captured: string[] = [];
         try {
           for await (const snapshot of result.streamIR()) {
-            const data = JSON.stringify(snapshot);
-            if (captureBodies) captured.push(`data: ${data}\n\n`);
-            await sse.writeSSE({ data });
+            if (result.nativePassthrough === true) {
+              const frame = snapshot as { data?: unknown; raw?: unknown };
+              if (typeof frame.raw === "string") {
+                if (captureBodies) captured.push(frame.raw);
+                await sse.write(frame.raw);
+              } else {
+                const data = typeof frame.data === "string" ? frame.data : JSON.stringify(snapshot);
+                if (captureBodies) captured.push(`data: ${data}\n\n`);
+                await sse.writeSSE({ data });
+              }
+            } else {
+              const data = JSON.stringify(snapshot);
+              if (captureBodies) captured.push(`data: ${data}\n\n`);
+              await sse.writeSSE({ data });
+            }
           }
         } catch (err) {
           // A client disconnect / abort is a benign non-provider fault (docs/02):
@@ -343,7 +429,9 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     // providers failed) — surface it as the Gemini envelope, never an empty 200.
     let body: unknown;
     try {
-      body = transformer.transformResponseOut(await result.collect());
+      const collected = await result.collect();
+      body =
+        result.nativePassthrough === true ? collected : transformer.transformResponseOut(collected);
     } catch (err) {
       // Record the FAILED served request before surfacing the error (mirrors
       // chat.ts) so an all-providers-failed request still appears in

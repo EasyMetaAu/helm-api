@@ -1,5 +1,5 @@
 import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } from "@helm/core";
-import { createCircuitBreaker, UpstreamError } from "@helm/core";
+import { createCircuitBreaker, createGeminiClient, UpstreamError } from "@helm/core";
 import type { CatalogEntry, InternalRequest, TargetProviderProtocol } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createExecute, detectRequestModalities } from "./execute.js";
@@ -104,6 +104,37 @@ function registryWithProviders(
           baseUrl: "http://x",
           apiKeyEnv: "X",
           targetProviderProtocol: "openai_chat",
+          providerRequiresCompatibilityRewrite: false,
+        },
+      };
+    },
+    list: () => Object.keys(map),
+  };
+}
+
+function protocolRegistry(
+  map: Record<
+    string,
+    {
+      providerName: string;
+      providerModel: string;
+      targetProviderProtocol: TargetProviderProtocol;
+    }
+  >,
+): ProviderRegistry {
+  return {
+    resolve(alias: string) {
+      const hit = map[alias];
+      if (hit === undefined) return { ok: false, error: { kind: "unknown_alias", alias } };
+      return {
+        ok: true,
+        value: {
+          alias,
+          providerName: hit.providerName,
+          providerModel: hit.providerModel,
+          baseUrl: "http://x",
+          apiKeyEnv: "X",
+          targetProviderProtocol: hit.targetProviderProtocol,
           providerRequiresCompatibilityRewrite: false,
         },
       };
@@ -289,7 +320,7 @@ describe("createExecute — gateway execution adapter", () => {
       signal: new AbortController().signal,
     });
 
-    await execute(
+    const out = await execute(
       plan(["default_good_model"]),
       req({
         protocol: "anthropic_messages",
@@ -316,6 +347,15 @@ describe("createExecute — gateway execution adapter", () => {
     expect(body.container).toBeUndefined();
     expect(body.speed).toBeUndefined();
     expect(body.output_config).toBeUndefined();
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      provider_raw_stripped_for_openai: [
+        "context_management",
+        "mcp_servers",
+        "container",
+        "speed",
+        "output_config",
+      ],
+    });
   });
 
   it("strips Anthropic cache_control markers before OpenAI-compatible upstream calls", async () => {
@@ -333,7 +373,7 @@ describe("createExecute — gateway execution adapter", () => {
       signal: new AbortController().signal,
     });
 
-    await execute(
+    const out = await execute(
       plan(["default_good_model"]),
       req({
         cache_control: { type: "ephemeral" },
@@ -373,6 +413,198 @@ describe("createExecute — gateway execution adapter", () => {
       unknown
     >;
     expect(JSON.stringify(body)).not.toContain("cache_control");
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      cache_control_stripped_for_openai: 4,
+    });
+  });
+
+  it("renders normalized IR multimodal parts back to OpenAI-native content for OpenAI targets", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    await execute(
+      plan(["default_good_model"]),
+      req({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "look" },
+              { type: "image", url: "https://example.test/cat.png", detail: "low" },
+              {
+                type: "document",
+                data: "JVBERi0=",
+                mediaType: "application/pdf",
+                filename: "document.pdf",
+              },
+            ],
+          },
+        ] as unknown as InternalRequest["messages"],
+      }),
+    );
+
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      messages?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const parts = body.messages?.[0]?.content ?? [];
+    expect(parts[1]).toEqual({
+      type: "image_url",
+      image_url: { url: "https://example.test/cat.png", detail: "low" },
+    });
+    expect(parts[2]).toEqual({
+      type: "file",
+      file: {
+        file_data: "data:application/pdf;base64,JVBERi0=",
+        filename: "document.pdf",
+        format: "application/pdf",
+      },
+    });
+  });
+
+  it("records a Gemini remote-media warning when translated media is not materialized", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", choices: [], usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["gemini", provider]]),
+      registry: protocolRegistry({
+        g: {
+          providerName: "gemini",
+          providerModel: "gemini-2.0-flash",
+          targetProviderProtocol: "gemini",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["g"]),
+      req({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "describe" },
+              { type: "image", url: "https://example.test/cat.png", mediaType: "image/png" },
+            ],
+          },
+        ] as InternalRequest["messages"],
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      remote_media_not_materialized: 1,
+    });
+  });
+
+  it("blocks Responses previous_response_id tool-output continuations on non-Responses targets", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-call" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["default_good_model"]),
+      req({
+        protocol: "openai_responses",
+        messages: [{ role: "tool", content: "done", tool_call_id: "call_1" }],
+        provider_raw: { previous_response_id: "resp_prev" },
+      }),
+    );
+
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected error result");
+    expect(out.final.error.error_class).toBe("capability_unsatisfiable");
+    expect(out.attempts[0]?.skip_reason).toBe(
+      "responses_previous_response_id_cross_protocol_blocked",
+    );
+  });
+
+  it.each([
+    ["mcp", { type: "mcp", server_label: "local" }],
+    ["file_search", { type: "file_search", vector_store_ids: ["vs_1"] }],
+  ])("blocks Responses native %s tools on non-Responses targets", async (_label, nativeTool) => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-call" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["default_good_model"]),
+      req({
+        protocol: "openai_responses",
+        provider_raw: { responses_native_tools: [nativeTool] },
+      }),
+    );
+
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected error result");
+    expect(out.final.error.error_class).toBe("capability_unsatisfiable");
+    expect(out.attempts[0]?.skip_reason).toBe("responses_native_tools_cross_protocol_blocked");
+  });
+
+  it("blocks Responses background mode on non-Responses targets", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-call" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["default_good_model"]),
+      req({ protocol: "openai_responses", provider_raw: { background: true } }),
+    );
+
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected error result");
+    expect(out.final.error.error_class).toBe("capability_unsatisfiable");
+    expect(out.attempts[0]?.skip_reason).toBe("responses_background_cross_protocol_blocked");
   });
 
   it("does not forward top-level cache_control to non-Anthropic target protocols", async () => {
@@ -670,6 +902,28 @@ describe("createExecute — gateway execution adapter", () => {
     const seen: string[] = [];
     for await (const ch of out.stream as AsyncIterable<string>) seen.push(ch);
     expect(seen).toEqual(chunks);
+  });
+
+  it("records stream_reframed when an OpenAI-compatible provider applies a stream shim", async () => {
+    const provider = {
+      streamReframed: true,
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn().mockReturnValue(gen(["data: {}\n\n"])),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ a: "m-a" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["a"]), req({ stream: true }));
+
+    expect(out.final.status).toBe("ok");
+    expect(out.attempts[0]?.request_mutations).toMatchObject({ stream_reframed: true });
   });
 
   it("logs a structured truncated-stream event when the relay throws AFTER the first chunk", async () => {
@@ -1581,6 +1835,62 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(okRow?.provider_model).toBe("claude-x");
   });
 
+  it("Gemini target + native_request sends GenerateContent body to the Gemini client, not OpenAI Chat", async () => {
+    const upstreamBodies: unknown[] = [];
+    let upstreamUrl = "";
+    const provider = createGeminiClient({
+      config: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", apiKey: "g" },
+      fetch: vi.fn(async (url, init) => {
+        upstreamUrl = String(url);
+        upstreamBodies.push(JSON.parse(String(init?.body)));
+        return new Response(
+          JSON.stringify({
+            candidates: [{ content: { role: "model", parts: [{ text: "native" }] } }],
+            usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["google", provider]]),
+      registry: protocolRegistry({
+        g: {
+          providerName: "google",
+          providerModel: "gemini-2.0-flash",
+          targetProviderProtocol: "gemini",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const nativeBody = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      generationConfig: { temperature: 0 },
+    };
+
+    const out = await execute(
+      plan(["g"]),
+      req({
+        protocol: "gemini",
+        requested_model: "gemini-2.0-flash",
+        messages: [{ role: "user", content: "hi" }],
+        native_request: nativeBody,
+      }),
+    );
+
+    expect(out.nativePassthrough).toBe(true);
+    expect(upstreamUrl).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+    );
+    expect(upstreamBodies).toEqual([nativeBody]);
+    expect(JSON.stringify(upstreamBodies[0])).not.toContain('"messages"');
+  });
+
   it("strips empty Anthropic text blocks before native passthrough dispatch", async () => {
     const provider = anthropicProvider(NATIVE_RESP);
     const execute = createExecute({
@@ -2132,6 +2442,120 @@ describe("createExecute — native protocol passthrough (#217)", () => {
       body_shims_applied: ["store_forced_false"],
     });
     expect(out.attempts[0]?.passthrough_mutations).toMatchObject(forwarded.mutations);
+  });
+
+  it("does not apply Codex store:false shim to generic OpenAI Responses providers", async () => {
+    const responsesBody = {
+      id: "resp_generic",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const provider = {
+      nativeProtocolProfile: "generic_openai_responses",
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["openai", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "openai",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: { model: "gpt-5.5", input: "hi", store: true, background: true },
+      headers: {},
+      mutations: {},
+    };
+
+    const out = await execute(
+      plan(["r"]),
+      req({
+        protocol: "openai_responses",
+        native_request: carrier,
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body).toEqual({
+      model: "gpt-5.5",
+      input: "hi",
+      store: true,
+      background: true,
+    });
+    expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toBeUndefined();
+  });
+
+  it("records native passthrough telemetry for Responses previous_response_id continuations", async () => {
+    const responsesBody = {
+      id: "resp_next",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const provider = {
+      nativeProtocolProfile: "generic_openai_responses",
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["openai", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "openai",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: {
+        model: "gpt-5.5",
+        previous_response_id: "resp_prev",
+        input: [{ type: "function_call_output", call_id: "call_1", output: "done" }],
+      },
+      headers: {},
+      mutations: {},
+    };
+
+    const out = await execute(
+      plan(["r"]),
+      req({
+        protocol: "openai_responses",
+        messages: [{ role: "tool", content: "done", tool_call_id: "call_1" }],
+        provider_raw: { previous_response_id: "resp_prev" },
+        native_request: carrier,
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(provider.nativePassthrough).toHaveBeenCalledOnce();
+    expect(out.attempts[0]?.passthrough_mutations).toMatchObject({
+      responses_previous_response_id_native_passthrough: true,
+    });
   });
 
   it("flag ON but provider has NO nativePassthrough → translates, reason provider_lacks_passthrough", async () => {

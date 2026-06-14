@@ -104,12 +104,6 @@ const AnthropicContentBlockSchema = z.discriminatedUnion("type", [
 ]);
 type AnthropicContentBlock = z.infer<typeof AnthropicContentBlockSchema>;
 
-// —— provider_raw passthrough bag carried on the response (raw upstream
-// stop_reason / usage, for cross-protocol reconstruction + billing). —————————————
-const ProviderRawSchema = z
-  .object({ stop_reason: z.unknown().optional(), usage: z.unknown().optional() })
-  .catchall(z.unknown());
-
 export interface AnthropicToolNameMap {
   toAnthropic(name: string): string;
   toOriginal(name: string): string | undefined;
@@ -188,7 +182,6 @@ export const AnthropicMessagesResponseSchema = z.object({
   stop_reason: AnthropicStopReasonSchema,
   stop_sequence: z.string().nullable(),
   usage: AnthropicUsageSchema,
-  provider_raw: ProviderRawSchema.optional(),
 });
 export type AnthropicMessagesResponse = z.infer<typeof AnthropicMessagesResponseSchema>;
 
@@ -413,18 +406,17 @@ function toToolUseBlock(
 
 /**
  * IR response -> native Anthropic Messages response. Pure. Always lands on a legal
- * stop_reason and a well-formed usage; the raw upstream stop_reason/usage ride
- * along in provider_raw so a client (or billing) can reconstruct the original.
+ * stop_reason and a well-formed usage. Internal raw values remain available on the
+ * IR/telemetry path; the public Anthropic response body never exposes provider_raw.
  */
 export function transformResponseIn(ir: IRResponse): AnthropicMessagesResponse {
   const choice = ir.choices[0];
   const message = choice?.message ?? { role: "assistant" as const, content: null };
-  const { stop_reason, raw } = mapStopReason(choice?.finish_reason ?? "");
+  const { stop_reason } = mapStopReason(choice?.finish_reason ?? "");
   const usage = mapUsage(ir.usage ?? {});
   const toolNameMap = createAnthropicToolNameMap(
     (message.tool_calls ?? []).map((call) => call.function.name),
   );
-  const reverseMap = toolNameMap.reverse;
 
   const out: AnthropicMessagesResponse = {
     id: ir.id,
@@ -435,11 +427,6 @@ export function transformResponseIn(ir: IRResponse): AnthropicMessagesResponse {
     stop_reason,
     stop_sequence: null,
     usage,
-    provider_raw: {
-      stop_reason: raw,
-      ...(ir.usage !== undefined ? { usage: ir.usage } : {}),
-      ...(Object.keys(reverseMap).length > 0 ? { anthropic_tool_name_map: reverseMap } : {}),
-    },
   };
 
   // Final structural validation: the response handed to the client is well-formed.

@@ -44,6 +44,56 @@ export interface ResponsesRateLimiterPort {
   check(probe: RateLimitProbe): Promise<RateLimitResult>;
 }
 
+export interface ResponsesLifecyclePort {
+  retrieve?(
+    responseId: string,
+    identity: MessagesIdentity,
+    signal: AbortSignal,
+    record?: ResponsesRegistryRecord,
+  ): Promise<unknown>;
+  delete?(
+    responseId: string,
+    identity: MessagesIdentity,
+    signal: AbortSignal,
+    record?: ResponsesRegistryRecord,
+  ): Promise<unknown>;
+  cancel?(
+    responseId: string,
+    identity: MessagesIdentity,
+    signal: AbortSignal,
+    record?: ResponsesRegistryRecord,
+  ): Promise<unknown>;
+  inputItems?(
+    responseId: string,
+    identity: MessagesIdentity,
+    signal: AbortSignal,
+    record?: ResponsesRegistryRecord,
+  ): Promise<unknown>;
+  compact?(body: unknown, identity: MessagesIdentity, signal: AbortSignal): Promise<unknown>;
+  inputTokens?(body: unknown, identity: MessagesIdentity, signal: AbortSignal): Promise<unknown>;
+}
+
+export interface ResponsesRegistryRecord {
+  responseId: string;
+  accountId: string;
+  keyId: string;
+  providerAlias: string | null;
+  providerName: string | null;
+  providerModel: string | null;
+  providerProtocol: "openai_chat" | "anthropic_messages" | "openai_responses" | "gemini" | null;
+  createdAt: number;
+  expiresAt: number;
+  status: string;
+}
+
+export interface ResponsesRegistryPort {
+  put(record: ResponsesRegistryRecord): void | Promise<void>;
+  get(
+    responseId: string,
+    identity: MessagesIdentity,
+  ): ResponsesRegistryRecord | null | Promise<ResponsesRegistryRecord | null>;
+}
+
 export interface ResponsesRouteDeps {
   rateLimiter?: ResponsesRateLimiterPort;
   /** Per-key concurrency overflow queue (issue #93) — the SAME process-wide gate
@@ -53,6 +103,13 @@ export interface ResponsesRouteDeps {
    *  tests that omit it record nothing; when wired, every served request (success
    *  OR failure, stream OR non-stream) writes a telemetry row. */
   record?: RecordServedDeps;
+  /** Optional provider-backed Responses lifecycle facade. Missing methods mean
+   *  unsupported capability, except input_tokens which can be locally estimated. */
+  lifecycle?: ResponsesLifecyclePort;
+  /** Optional response object registry. When present, lifecycle methods first
+   *  prove the response id belongs to the calling key/account and can dispatch to
+   *  the provider that created it instead of the first global capable provider. */
+  registry?: ResponsesRegistryPort;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   transformer: {
     /** native Responses request → IR (throws on a structurally invalid body). */
@@ -91,11 +148,44 @@ function extractCredential(auth: string | undefined): string | null {
 }
 
 function helmError(
-  error_class: "auth_error" | "invalid_request",
+  error_class: "auth_error" | "invalid_request" | "capability_unsatisfiable",
   message: string,
   traceId: string,
 ) {
   return new HelmHttpError(makeHelmError({ error_class, message, trace_id: traceId }));
+}
+
+function responseNotFound(c: Context<AppEnv>, responseId: string, traceId: string): Response {
+  return c.json(
+    {
+      error: {
+        message: `Responses response '${responseId}' was not found`,
+        type: "invalid_request_error",
+        code: "response_not_found",
+        trace_id: traceId,
+      },
+    },
+    404,
+  );
+}
+
+function successfulAttempt(decision: unknown): Record<string, unknown> | null {
+  const attempts =
+    decision !== null &&
+    typeof decision === "object" &&
+    Array.isArray((decision as { provider_attempts?: unknown }).provider_attempts)
+      ? (decision as { provider_attempts: Array<Record<string, unknown>> }).provider_attempts
+      : [];
+  return attempts.find((attempt) => attempt.status === "ok" && attempt.skipped !== true) ?? null;
+}
+
+function statusFromResponseBody(body: Record<string, unknown>): string {
+  return typeof body.status === "string" && body.status.length > 0 ? body.status : "completed";
+}
+
+function isUsableRegistryRecord(record: ResponsesRegistryRecord): boolean {
+  if (record.expiresAt <= Date.now()) return false;
+  return record.status !== "deleted";
 }
 
 // Validate a PipelineError's free-form `error_class` against the known ErrorClass
@@ -142,6 +232,30 @@ function pipelineToHelm(err: PipelineError, traceId: string): HelmHttpError {
   );
 }
 
+function estimateResponsesInputTokens(value: unknown): number {
+  const seen = new WeakSet<object>();
+  const collect = (v: unknown): string => {
+    if (typeof v === "string") return v;
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    if (v === null || v === undefined) return "";
+    if (Array.isArray(v)) return v.map(collect).join("\n");
+    if (typeof v === "object") {
+      if (seen.has(v)) return "";
+      seen.add(v);
+      return Object.values(v as Record<string, unknown>)
+        .map(collect)
+        .join("\n");
+    }
+    return "";
+  };
+  const obj = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const text = [obj.instructions, obj.input, obj.tools, obj.tool_choice, obj.response_format]
+    .map(collect)
+    .filter((s) => s.length > 0)
+    .join("\n");
+  return Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 4));
+}
+
 export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDeps): void {
   // Frees an unclaimed concurrency lease on every exit path — incl. a throw into
   // onError (the handler below acquires AFTER its self-auth).
@@ -157,18 +271,88 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     return identity;
   };
 
-  const unsupportedLifecycle = (operation: string) => async (c: Context<AppEnv>) => {
-    const traceId = c.get("trace_id");
-
-    // Match OpenAI/LiteLLM route coverage while failing closed for lifecycle
-    // state Helm does not persist yet. Auth still runs first so unsupported
-    // operations do not become unauthenticated route probes.
-    await authenticateResponsesRequest(c);
-    throw helmError(
-      "invalid_request",
-      `Responses ${operation} is not implemented by this Helm API deployment`,
+  const lifecycleUnsupported = (operation: string, traceId: string): HelmHttpError =>
+    helmError(
+      "capability_unsatisfiable",
+      `Responses ${operation} is not supported by the selected provider or this Helm API deployment`,
       traceId,
     );
+
+  const parseJsonBody = async (c: Context<AppEnv>, traceId: string): Promise<unknown> => {
+    try {
+      return JSON.parse(await c.req.text());
+    } catch {
+      throw helmError("invalid_request", "malformed JSON request body", traceId);
+    }
+  };
+
+  const handleProviderLifecycle =
+    (operation: "retrieve" | "delete" | "cancel" | "inputItems") => async (c: Context<AppEnv>) => {
+      const traceId = c.get("trace_id");
+      const identity = await authenticateResponsesRequest(c);
+      const method = deps.lifecycle?.[operation];
+      if (method === undefined) throw lifecycleUnsupported(operation, traceId);
+      const responseId = c.req.param("response_id");
+      if (responseId === undefined) {
+        throw helmError("invalid_request", "missing response_id", traceId);
+      }
+      const registryRecord =
+        deps.registry !== undefined ? await deps.registry.get(responseId, identity) : null;
+      if (deps.registry !== undefined && registryRecord === null) {
+        return responseNotFound(c, responseId, traceId);
+      }
+      if (
+        registryRecord !== null &&
+        registryRecord !== undefined &&
+        !isUsableRegistryRecord(registryRecord)
+      ) {
+        return responseNotFound(c, responseId, traceId);
+      }
+      const body =
+        deps.registry !== undefined
+          ? await method(responseId, identity, c.req.raw.signal, registryRecord ?? undefined)
+          : await method(responseId, identity, c.req.raw.signal);
+      return c.json(body as Record<string, unknown>);
+    };
+
+  const handleCompact = async (c: Context<AppEnv>) => {
+    const traceId = c.get("trace_id");
+    const identity = await authenticateResponsesRequest(c);
+    const native = await parseJsonBody(c, traceId);
+    const method = deps.lifecycle?.compact;
+    if (method === undefined) {
+      let ir: ResponsesIRLike;
+      try {
+        ir = deps.transformer.transformRequestOut(native);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : "invalid Responses compact request";
+        throw helmError("invalid_request", detail, traceId);
+      }
+      ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
+      let result: PipelineRunResult;
+      try {
+        result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
+        const collected = await result.collect();
+        return c.json(deps.transformer.transformResponseOut(collected) as Record<string, unknown>);
+      } catch (err) {
+        if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
+        throw err;
+      }
+    }
+    const body = await method(native, identity, c.req.raw.signal);
+    return c.json(body as Record<string, unknown>);
+  };
+
+  const handleInputTokens = async (c: Context<AppEnv>) => {
+    const traceId = c.get("trace_id");
+    const identity = await authenticateResponsesRequest(c);
+    const native = await parseJsonBody(c, traceId);
+    const providerMethod = deps.lifecycle?.inputTokens;
+    if (providerMethod !== undefined) {
+      const body = await providerMethod(native, identity, c.req.raw.signal);
+      return c.json(body as Record<string, unknown>);
+    }
+    return c.json({ input_tokens: estimateResponsesInputTokens(native), estimated: true });
   };
 
   const handleResponses = async (c: Context<AppEnv>) => {
@@ -457,6 +641,27 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
       throw err;
     }
+    if (deps.registry !== undefined && typeof body.id === "string" && body.id.length > 0) {
+      const attempt = successfulAttempt(result.decision);
+      await deps.registry.put({
+        responseId: body.id,
+        accountId: identity.accountId,
+        keyId: identity.keyId,
+        providerAlias: typeof attempt?.alias === "string" ? attempt.alias : null,
+        providerName: typeof attempt?.provider_name === "string" ? attempt.provider_name : null,
+        providerModel: typeof attempt?.provider_model === "string" ? attempt.provider_model : null,
+        providerProtocol:
+          attempt?.target_provider_protocol === "openai_chat" ||
+          attempt?.target_provider_protocol === "anthropic_messages" ||
+          attempt?.target_provider_protocol === "openai_responses" ||
+          attempt?.target_provider_protocol === "gemini"
+            ? attempt.target_provider_protocol
+            : null,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 86_400_000,
+        status: statusFromResponseBody(body),
+      });
+    }
     // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
     // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
     if (deps.record) {
@@ -476,12 +681,12 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
   };
 
   for (const prefix of ["/v1/responses", "/responses", "/openai/v1/responses"]) {
-    app.post(`${prefix}/compact`, unsupportedLifecycle("compact"));
-    app.post(`${prefix}/input_tokens`, unsupportedLifecycle("input_tokens"));
-    app.get(`${prefix}/:response_id/input_items`, unsupportedLifecycle("input_items"));
-    app.post(`${prefix}/:response_id/cancel`, unsupportedLifecycle("cancel"));
-    app.get(`${prefix}/:response_id`, unsupportedLifecycle("retrieve"));
-    app.delete(`${prefix}/:response_id`, unsupportedLifecycle("delete"));
+    app.post(`${prefix}/compact`, handleCompact);
+    app.post(`${prefix}/input_tokens`, handleInputTokens);
+    app.get(`${prefix}/:response_id/input_items`, handleProviderLifecycle("inputItems"));
+    app.post(`${prefix}/:response_id/cancel`, handleProviderLifecycle("cancel"));
+    app.get(`${prefix}/:response_id`, handleProviderLifecycle("retrieve"));
+    app.delete(`${prefix}/:response_id`, handleProviderLifecycle("delete"));
     app.post(prefix, handleResponses);
   }
 }

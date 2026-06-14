@@ -86,6 +86,7 @@ export const GeminiFunctionDeclarationSchema = z
     name: z.string(),
     description: z.string().optional(),
     parameters: z.unknown().optional(),
+    parametersJsonSchema: z.unknown().optional(),
   })
   .passthrough();
 
@@ -104,6 +105,8 @@ export const GeminiGenerationConfigSchema = z
     temperature: z.number().optional(),
     responseMimeType: z.string().optional(),
     responseSchema: z.unknown().optional(),
+    responseJsonSchema: z.unknown().optional(),
+    response_json_schema: z.unknown().optional(),
     // —— litellm-parity sampling/control knobs (camelCase Gemini wire names). All
     // optional; the transformer maps the IR's flat OpenAI-shaped params onto these.
     topP: z.number().optional(),

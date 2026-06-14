@@ -1259,7 +1259,11 @@ describe("endPoint routing (/v1beta/...)", () => {
 
   it("parses LiteLLM-compatible /models paths and path-style model names", () => {
     const parsed = parseGeminiPath("/models/google/gemini-2.5-pro:generateContent", "");
-    expect(parsed).toEqual({ model: "google/gemini-2.5-pro", stream: false });
+    expect(parsed).toEqual({
+      model: "google/gemini-2.5-pro",
+      operation: "generateContent",
+      stream: false,
+    });
   });
 
   it("parses streamGenerateContent?alt=sse path: streaming true", () => {
@@ -1273,7 +1277,11 @@ describe("endPoint routing (/v1beta/...)", () => {
 
   it("treats streamGenerateContent as streaming even without alt=sse", () => {
     const parsed = parseGeminiPath("/v1beta/models/gemini-1.5-pro:streamGenerateContent", "");
-    expect(parsed).toEqual({ model: "gemini-1.5-pro", stream: true });
+    expect(parsed).toEqual({
+      model: "gemini-1.5-pro",
+      operation: "streamGenerateContent",
+      stream: true,
+    });
   });
 
   it("returns null for a non-Gemini path", () => {
@@ -1645,6 +1653,30 @@ describe("Gemini transformRequestOut — tools + response_format", () => {
     ]);
   });
 
+  it("maps Google GenAI parametersJsonSchema into IR tool parameters", () => {
+    const native: GeminiGenerateContentRequest = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      tools: [
+        {
+          functionDeclarations: [
+            {
+              name: "lookup",
+              parametersJsonSchema: { type: "object", properties: { q: { type: "string" } } },
+            },
+          ],
+        },
+      ],
+    };
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.tools?.[0]).toEqual({
+      type: "function",
+      function: {
+        name: "lookup",
+        parameters: { type: "object", properties: { q: { type: "string" } } },
+      },
+    });
+  });
+
   it("maps responseMimeType application/json + responseSchema to a json_schema response_format", () => {
     const native: GeminiGenerateContentRequest = {
       contents: [{ role: "user", parts: [{ text: "hi" }] }],
@@ -1660,6 +1692,24 @@ describe("Gemini transformRequestOut — tools + response_format", () => {
     });
   });
 
+  it.each([
+    "responseJsonSchema",
+    "response_json_schema",
+  ] as const)("maps responseMimeType application/json + %s to a json_schema response_format", (field) => {
+    const native = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        [field]: { type: "object", properties: { ok: { type: "boolean" } } },
+      },
+    } as unknown as GeminiGenerateContentRequest;
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.response_format).toEqual({
+      type: "json_schema",
+      json_schema: { type: "object", properties: { ok: { type: "boolean" } } },
+    });
+  });
+
   it("maps responseMimeType application/json with NO schema to a bare json_object", () => {
     const native: GeminiGenerateContentRequest = {
       contents: [{ role: "user", parts: [{ text: "hi" }] }],
@@ -1667,6 +1717,80 @@ describe("Gemini transformRequestOut — tools + response_format", () => {
     };
     const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
     expect(ir.response_format).toEqual({ type: "json_object" });
+  });
+
+  it("emits Google GenAI parametersJsonSchema and responseJsonSchema when requested", () => {
+    const ir: IRRequest = {
+      model: "gemini-2.0-flash",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            parameters: { type: "object", properties: { q: { type: "string" } } },
+          },
+        },
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: { type: "object", properties: { ok: { type: "boolean" } } },
+      },
+      provider_raw: { gemini_schema_style: "google_genai" },
+    };
+    const native = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    const decl = native.tools?.[0]?.functionDeclarations?.[0] as {
+      parameters?: unknown;
+      parametersJsonSchema?: unknown;
+    };
+    expect(decl.parameters).toBeUndefined();
+    expect(decl.parametersJsonSchema).toEqual({
+      type: "object",
+      properties: { q: { type: "string" } },
+    });
+    expect(native.generationConfig?.responseSchema).toBeUndefined();
+    expect(native.generationConfig?.responseJsonSchema).toEqual({
+      type: "object",
+      properties: { ok: { type: "boolean" } },
+    });
+  });
+
+  it("preserves Google GenAI advanced optional params in provider_raw and native replay", () => {
+    const native = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      routing_config: { manual: true },
+      model_selection_config: { featureSelectionPreference: "PRIORITIZE_QUALITY" },
+      labels: { env: "test" },
+      media_resolution: "MEDIA_RESOLUTION_MEDIUM",
+      speech_config: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } },
+      audio_timestamp: true,
+      automatic_function_calling: { disable: true },
+      image_config: { aspectRatio: "1:1" },
+    } as unknown as GeminiGenerateContentRequest;
+
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(ir.provider_raw?.google_genai).toEqual({
+      routing_config: { manual: true },
+      model_selection_config: { featureSelectionPreference: "PRIORITIZE_QUALITY" },
+      labels: { env: "test" },
+      media_resolution: "MEDIA_RESOLUTION_MEDIUM",
+      speech_config: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } },
+      audio_timestamp: true,
+      automatic_function_calling: { disable: true },
+      image_config: { aspectRatio: "1:1" },
+    });
+
+    const replay = geminiTransformer.transformRequestIn(ir) as Record<string, unknown>;
+    expect(replay).toMatchObject({
+      routing_config: { manual: true },
+      model_selection_config: { featureSelectionPreference: "PRIORITIZE_QUALITY" },
+      labels: { env: "test" },
+      media_resolution: "MEDIA_RESOLUTION_MEDIUM",
+      speech_config: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } },
+      audio_timestamp: true,
+      automatic_function_calling: { disable: true },
+      image_config: { aspectRatio: "1:1" },
+    });
   });
 });
 

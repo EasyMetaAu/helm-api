@@ -4,6 +4,7 @@ import {
   aggregateResponsesStream,
   codexAccountIdFromToken,
   createCodexResponsesClient,
+  createGenericOpenAIResponsesClient,
   openaiToResponsesRequest,
   readResponsesEvents,
   readResponsesSSERaw,
@@ -1674,5 +1675,82 @@ describe("createCodexResponsesClient — passthrough methods are defined (pool f
     });
     expect(typeof client.nativePassthrough).toBe("function");
     expect(typeof client.nativePassthroughStream).toBe("function");
+  });
+});
+
+describe("createGenericOpenAIResponsesClient — native passthrough", () => {
+  it("forwards generic Responses bodies without Codex-only defaults or headers", async () => {
+    const body = {
+      model: "gpt-5.5",
+      input: "hi",
+      include: ["file_search_call.results"],
+      background: true,
+      max_output_tokens: 128,
+      store: true,
+    };
+    let seenUrl = "";
+    let seenHeaders = new Headers();
+    let seenBody: unknown;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      seenUrl = String(url);
+      seenHeaders = new Headers(init?.headers);
+      seenBody = JSON.parse(String(init?.body));
+      return jsonResponse({ id: "resp_generic", object: "response", status: "completed" });
+    });
+
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const out = await client.nativePassthrough?.(body);
+
+    expect(client.nativeProtocolProfile).toBe("generic_openai_responses");
+    expect(seenUrl).toBe("https://api.openai.test/v1/responses");
+    expect(seenHeaders.get("Authorization")).toBe("Bearer sk-test");
+    expect(seenHeaders.get("OpenAI-Beta")).toBeNull();
+    expect(seenHeaders.get("chatgpt-account-id")).toBeNull();
+    expect(seenBody).toEqual(body);
+    expect(out).toEqual({ id: "resp_generic", object: "response", status: "completed" });
+  });
+
+  it("calls generic lifecycle endpoints with OpenAI-shaped auth only", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({
+        url: String(url),
+        method: String(init?.method ?? "GET"),
+        ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+      });
+      return jsonResponse({ ok: true });
+    });
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.responsesRetrieve?.("resp_1");
+    await client.responsesDelete?.("resp_1");
+    await client.responsesCancel?.("resp_1");
+    await client.responsesInputItems?.("resp_1");
+    await client.responsesCompact?.({ model: "gpt-5.5", input: "compact me" });
+    await client.responsesInputTokens?.({ model: "gpt-5.5", input: "count me" });
+
+    expect(calls).toEqual([
+      { url: "https://api.openai.test/v1/responses/resp_1", method: "GET" },
+      { url: "https://api.openai.test/v1/responses/resp_1", method: "DELETE" },
+      { url: "https://api.openai.test/v1/responses/resp_1/cancel", method: "POST" },
+      { url: "https://api.openai.test/v1/responses/resp_1/input_items", method: "GET" },
+      {
+        url: "https://api.openai.test/v1/responses/compact",
+        method: "POST",
+        body: { model: "gpt-5.5", input: "compact me" },
+      },
+      {
+        url: "https://api.openai.test/v1/responses/input_tokens",
+        method: "POST",
+        body: { model: "gpt-5.5", input: "count me" },
+      },
+    ]);
   });
 });

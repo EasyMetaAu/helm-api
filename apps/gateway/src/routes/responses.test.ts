@@ -41,6 +41,8 @@ function makeDeps(
     concurrencyGate?: ResponsesRouteDeps["concurrencyGate"];
     identity?: MessagesIdentity;
     record?: RecordServedDeps;
+    lifecycle?: ResponsesRouteDeps["lifecycle"];
+    registry?: ResponsesRouteDeps["registry"];
   } = {},
 ): { deps: ResponsesRouteDeps; order: string[]; harness: { pipelineSawIR: unknown } } {
   const order: string[] = [];
@@ -49,6 +51,8 @@ function makeDeps(
     rateLimiter: over.rateLimiter,
     concurrencyGate: over.concurrencyGate,
     record: over.record,
+    lifecycle: over.lifecycle,
+    registry: over.registry,
     auth: {
       resolve: async (cred) => {
         order.push("auth");
@@ -191,7 +195,15 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     }
   });
 
-  it("returns OpenAI-shaped errors for unsupported Responses lifecycle endpoints", async () => {
+  it("authenticates Responses lifecycle endpoints before provider dispatch or local fallback", async () => {
+    const lifecycle: ResponsesRouteDeps["lifecycle"] = {
+      retrieve: vi.fn(),
+      delete: vi.fn(),
+      cancel: vi.fn(),
+      inputItems: vi.fn(),
+      compact: vi.fn(),
+      inputTokens: vi.fn(),
+    };
     const cases: Array<[string, string]> = [
       ["GET", "/v1/responses/resp_123"],
       ["DELETE", "/v1/responses/resp_123"],
@@ -199,6 +211,297 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       ["GET", "/v1/responses/resp_123/input_items"],
       ["POST", "/v1/responses/compact"],
       ["POST", "/v1/responses/input_tokens"],
+    ];
+
+    for (const [method, path] of cases) {
+      const { deps, order } = makeDeps({ authed: false, lifecycle });
+      const app = buildApp(deps);
+      const res = await app.request(path, {
+        method,
+        headers: method === "POST" ? AUTH : { Authorization: AUTH.Authorization },
+        body: method === "POST" ? JSON.stringify(REQ) : undefined,
+      });
+      expect(res.status, `${method} ${path}`).toBe(401);
+      const body = (await res.json()) as { error: Record<string, string> };
+      expect(body.error.code).toBe("invalid_api_key");
+      expect(order).toEqual(["auth"]);
+    }
+    expect(lifecycle.retrieve).not.toHaveBeenCalled();
+    expect(lifecycle.delete).not.toHaveBeenCalled();
+    expect(lifecycle.cancel).not.toHaveBeenCalled();
+    expect(lifecycle.inputItems).not.toHaveBeenCalled();
+    expect(lifecycle.compact).not.toHaveBeenCalled();
+    expect(lifecycle.inputTokens).not.toHaveBeenCalled();
+  });
+
+  it("/input_tokens calls the provider lifecycle method when it is available", async () => {
+    const inputTokens = vi.fn().mockResolvedValue({ input_tokens: 123, estimated: false });
+    const { deps, order } = makeDeps({ lifecycle: { inputTokens } });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/input_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ input_tokens: 123, estimated: false });
+    expect(inputTokens).toHaveBeenCalledWith(
+      REQ,
+      { keyId: "k1", accountId: "acct" },
+      expect.any(AbortSignal),
+    );
+    expect(order).toEqual(["auth"]);
+  });
+
+  it("/input_tokens falls back to a deterministic local estimate when no provider method exists", async () => {
+    const { deps, order } = makeDeps();
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/input_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "auto", input: "hello world", instructions: "be brief" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { input_tokens: number; estimated: boolean };
+    expect(body.input_tokens).toBeGreaterThan(1);
+    expect(body.estimated).toBe(true);
+    expect(order).toEqual(["auth"]);
+  });
+
+  it("/compact falls back to normal Responses routing when no provider lifecycle method exists", async () => {
+    const { deps, order } = makeDeps();
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { object: string; status: string };
+    expect(body.object).toBe("response");
+    expect(body.status).toBe("completed");
+    expect(order).toEqual(["auth", "translate-out", "route", "translate-back"]);
+  });
+
+  it("calls provider-supported Responses lifecycle endpoints", async () => {
+    const lifecycle: ResponsesRouteDeps["lifecycle"] = {
+      retrieve: vi
+        .fn()
+        .mockResolvedValue({ id: "resp_123", object: "response", status: "completed" }),
+      delete: vi
+        .fn()
+        .mockResolvedValue({ id: "resp_123", object: "response.deleted", deleted: true }),
+      cancel: vi
+        .fn()
+        .mockResolvedValue({ id: "resp_123", object: "response", status: "cancelled" }),
+      inputItems: vi.fn().mockResolvedValue({ object: "list", data: [], has_more: false }),
+      compact: vi
+        .fn()
+        .mockResolvedValue({ id: "resp_compact", object: "response", status: "completed" }),
+    };
+    const { deps } = makeDeps({ lifecycle });
+    const app = buildApp(deps);
+
+    const cases: Array<[string, string, unknown]> = [
+      [
+        "GET",
+        "/v1/responses/resp_123",
+        { id: "resp_123", object: "response", status: "completed" },
+      ],
+      [
+        "DELETE",
+        "/v1/responses/resp_123",
+        { id: "resp_123", object: "response.deleted", deleted: true },
+      ],
+      [
+        "POST",
+        "/v1/responses/resp_123/cancel",
+        { id: "resp_123", object: "response", status: "cancelled" },
+      ],
+      ["GET", "/v1/responses/resp_123/input_items", { object: "list", data: [], has_more: false }],
+      [
+        "POST",
+        "/v1/responses/compact",
+        { id: "resp_compact", object: "response", status: "completed" },
+      ],
+    ];
+
+    for (const [method, path, expected] of cases) {
+      const res = await app.request(path, {
+        method,
+        headers: method === "POST" ? AUTH : { Authorization: AUTH.Authorization },
+        body: method === "POST" ? JSON.stringify(REQ) : undefined,
+      });
+      expect(res.status, `${method} ${path}`).toBe(200);
+      expect(await res.json()).toEqual(expected);
+    }
+    expect(lifecycle.retrieve).toHaveBeenCalledWith(
+      "resp_123",
+      { keyId: "k1", accountId: "acct" },
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.delete).toHaveBeenCalledWith(
+      "resp_123",
+      { keyId: "k1", accountId: "acct" },
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.cancel).toHaveBeenCalledWith(
+      "resp_123",
+      { keyId: "k1", accountId: "acct" },
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.inputItems).toHaveBeenCalledWith(
+      "resp_123",
+      { keyId: "k1", accountId: "acct" },
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.compact).toHaveBeenCalledWith(
+      REQ,
+      { keyId: "k1", accountId: "acct" },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("records persistent Responses ids in the lifecycle registry after create", async () => {
+    const put = vi.fn();
+    const decision = {
+      final: { status: "ok", model_alias: "responses/gpt-5.5", provider_model: "gpt-5.5" },
+      provider_attempts: [
+        {
+          alias: "responses/gpt-5.5",
+          status: "ok",
+          skipped: false,
+          provider_name: "openai",
+          provider_model: "gpt-5.5",
+          target_provider_protocol: "openai_responses",
+        },
+      ],
+    } as never;
+    const { deps } = makeDeps({
+      collect: async () => ({ id: "resp_persisted", object: "response", status: "completed" }),
+      run: async () => ({
+        decision,
+        nativePassthrough: true,
+        collect: async () => ({ id: "resp_persisted", object: "response", status: "completed" }),
+        streamIR: async function* () {},
+      }),
+      registry: { put, get: vi.fn() },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, store: true }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responseId: "resp_persisted",
+        accountId: "acct",
+        keyId: "k1",
+        providerAlias: "responses/gpt-5.5",
+        providerName: "openai",
+        providerModel: "gpt-5.5",
+        providerProtocol: "openai_responses",
+        status: "completed",
+      }),
+    );
+  });
+
+  it("returns an OpenAI-shaped 404 for unknown registry response ids without provider dispatch", async () => {
+    const retrieve = vi.fn();
+    const registry = { put: vi.fn(), get: vi.fn().mockResolvedValue(null) };
+    const { deps } = makeDeps({ lifecycle: { retrieve }, registry });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/resp_missing", {
+      headers: { Authorization: AUTH.Authorization },
+    });
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: Record<string, string> };
+    expect(body.error.code).toBe("response_not_found");
+    expect(body.error.trace_id).toBeTruthy();
+    expect(retrieve).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for expired registry response ids without provider dispatch", async () => {
+    const retrieve = vi.fn();
+    const registryRecord = {
+      responseId: "resp_expired",
+      accountId: "acct",
+      keyId: "k1",
+      providerAlias: "responses/gpt-5.5",
+      providerName: "openai",
+      providerModel: "gpt-5.5",
+      providerProtocol: "openai_responses" as const,
+      createdAt: 1,
+      expiresAt: 1,
+      status: "completed",
+    };
+    const { deps } = makeDeps({
+      lifecycle: { retrieve },
+      registry: { put: vi.fn(), get: vi.fn().mockResolvedValue(registryRecord) },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/resp_expired", {
+      headers: { Authorization: AUTH.Authorization },
+    });
+
+    expect(res.status).toBe(404);
+    expect(retrieve).not.toHaveBeenCalled();
+  });
+
+  it("passes registry records to lifecycle methods for provider-bound dispatch", async () => {
+    const registryRecord = {
+      responseId: "resp_123",
+      accountId: "acct",
+      keyId: "k1",
+      providerAlias: "responses/gpt-5.5",
+      providerName: "openai",
+      providerModel: "gpt-5.5",
+      providerProtocol: "openai_responses" as const,
+      createdAt: 1,
+      expiresAt: Date.now() + 60_000,
+      status: "completed",
+    };
+    const retrieve = vi
+      .fn()
+      .mockResolvedValue({ id: "resp_123", object: "response", status: "completed" });
+    const { deps } = makeDeps({
+      lifecycle: { retrieve },
+      registry: { put: vi.fn(), get: vi.fn().mockResolvedValue(registryRecord) },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/resp_123", {
+      headers: { Authorization: AUTH.Authorization },
+    });
+
+    expect(res.status).toBe(200);
+    expect(retrieve).toHaveBeenCalledWith(
+      "resp_123",
+      { keyId: "k1", accountId: "acct" },
+      expect.any(AbortSignal),
+      registryRecord,
+    );
+  });
+
+  it("returns capability-shaped errors for provider-unsupported lifecycle endpoints", async () => {
+    const cases: Array<[string, string]> = [
+      ["GET", "/v1/responses/resp_123"],
+      ["DELETE", "/v1/responses/resp_123"],
+      ["POST", "/v1/responses/resp_123/cancel"],
+      ["GET", "/v1/responses/resp_123/input_items"],
       ["GET", "/responses/resp_123"],
       ["DELETE", "/openai/v1/responses/resp_123"],
     ];
@@ -206,24 +509,18 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     for (const [method, path] of cases) {
       const { deps, order } = makeDeps();
       const app = buildApp(deps);
-      const res = await app.request(path, { method, headers: AUTH });
-      expect(res.status, `${method} ${path}`).toBe(400);
+      const res = await app.request(path, {
+        method,
+        headers: method === "POST" ? AUTH : { Authorization: AUTH.Authorization },
+        body: method === "POST" ? JSON.stringify(REQ) : undefined,
+      });
+      expect(res.status, `${method} ${path}`).toBe(422);
       const body = (await res.json()) as { error: Record<string, string> };
       expect(body.error.type).toBe("invalid_request_error");
-      expect(body.error.code).toBe("invalid_request");
-      expect(body.error.message).toContain("not implemented");
+      expect(body.error.code).toBe("capability_unsatisfiable");
+      expect(body.error.message).toContain("not supported");
       expect(order).toEqual(["auth"]);
     }
-  });
-
-  it("authenticates unsupported Responses lifecycle endpoints before returning unsupported", async () => {
-    const { deps, order } = makeDeps({ authed: false });
-    const app = buildApp(deps);
-    const res = await app.request("/v1/responses/resp_123", { method: "GET" });
-    expect(res.status).toBe(401);
-    const body = (await res.json()) as { error: Record<string, string> };
-    expect(body.error.code).toBe("invalid_api_key");
-    expect(order).toEqual(["auth"]);
   });
 
   it("rejects a missing key with 401 (OpenAI error envelope) and never routes", async () => {

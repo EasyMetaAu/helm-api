@@ -70,9 +70,9 @@ describe("footgun #1 — finish/stop enum mismatch never produces an illegal enu
     expect(raw).toBe("totally_made_up_reason");
   });
 
-  it("transformResponseIn lands on a legal stop_reason and stashes the raw in provider_raw", () => {
+  it("transformResponseIn lands on a legal stop_reason without leaking provider_raw", () => {
     // content_filter has no perfect Anthropic equivalent: it must map to a legal enum,
-    // and the raw "content_filter" must survive in provider_raw.stop_reason.
+    // and no Helm-internal raw metadata may leak into the public body.
     const ir: IRResponse = {
       id: "resp_cf",
       model: "gpt-x",
@@ -87,7 +87,7 @@ describe("footgun #1 — finish/stop enum mismatch never produces an illegal enu
     };
     const out = transformResponseIn(ir);
     expect(LEGAL_STOP_REASONS).toContain(out.stop_reason);
-    expect(out.provider_raw?.stop_reason).toBe("content_filter");
+    expect("provider_raw" in out).toBe(false);
   });
 
   it("never produces an illegal enum for a null/empty finish_reason (bottoms out at end_turn)", () => {
@@ -101,8 +101,7 @@ describe("footgun #1 — finish/stop enum mismatch never produces an illegal enu
     const out = transformResponseIn(ir);
     expect(out.stop_reason).toBe("end_turn");
     expect(LEGAL_STOP_REASONS).toContain(out.stop_reason);
-    // raw of a null/absent finish_reason is recorded as "" (the original absence).
-    expect(out.provider_raw?.stop_reason).toBe("");
+    expect("provider_raw" in out).toBe(false);
   });
 });
 

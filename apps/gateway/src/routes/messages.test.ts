@@ -60,6 +60,7 @@ function makeDeps(
     abort?: boolean;
     authed?: boolean;
     transformRequestOut?: (native: unknown) => unknown;
+    countTokens?: MessagesRouteDeps["countTokens"];
     rateLimiter?: MessagesRouteDeps["rateLimiter"];
     concurrencyGate?: MessagesRouteDeps["concurrencyGate"];
     identity?: MessagesIdentity;
@@ -80,6 +81,7 @@ function makeDeps(
   const deps: MessagesRouteDeps = {
     rateLimiter: over.rateLimiter,
     concurrencyGate: over.concurrencyGate,
+    countTokens: over.countTokens,
     record: over.record,
     auth: {
       resolve: async (_key: string | null) => {
@@ -246,7 +248,25 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(harness.order).toEqual(["auth"]);
   });
 
-  it("returns an authenticated Anthropic count_tokens estimate without routing", async () => {
+  it("uses provider-backed Anthropic count_tokens when available", async () => {
+    const countTokens = vi.fn().mockResolvedValue({ input_tokens: 42 });
+    const { deps, harness } = makeDeps({ countTokens });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ input_tokens: 42 });
+    expect(countTokens).toHaveBeenCalledWith(REQ_BODY, IDENTITY, expect.any(AbortSignal));
+    expect(harness.order).toEqual(["auth"]);
+    expect(harness.order).not.toContain("route");
+  });
+
+  it("returns an authenticated Anthropic count_tokens estimate without routing when no provider is available", async () => {
     const { deps, harness } = makeDeps();
     const app = buildApp(deps);
 
@@ -257,10 +277,30 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { input_tokens: number };
+    const body = (await res.json()) as { input_tokens: number; estimated: boolean };
     expect(body.input_tokens).toBeGreaterThan(0);
+    expect(body.estimated).toBe(true);
     expect(harness.order).toEqual(["auth"]);
     expect(harness.order).not.toContain("route");
+  });
+
+  it("falls back to an estimated Anthropic count_tokens result if provider counting fails", async () => {
+    const countTokens = vi.fn().mockRejectedValue(new Error("provider unavailable"));
+    const { deps, harness } = makeDeps({ countTokens });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { input_tokens: number; estimated: boolean };
+    expect(body.input_tokens).toBeGreaterThan(0);
+    expect(body.estimated).toBe(true);
+    expect(countTokens).toHaveBeenCalledOnce();
+    expect(harness.order).toEqual(["auth"]);
   });
 
   it("validates count_tokens requests before returning an estimate", async () => {

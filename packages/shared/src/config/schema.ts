@@ -43,6 +43,8 @@ export const ProviderModelSchema = z.object({
 
 function inferTargetProviderProtocol(type: string): z.infer<typeof TargetProviderProtocolSchema> {
   if (type === "openai-responses") return "openai_responses";
+  if (type === "openai-responses-generic" || type === "openai_responses_generic")
+    return "openai_responses";
   if (type === "anthropic") return "anthropic_messages";
   if (type === "gemini") return "gemini";
   return "openai_chat";
@@ -109,6 +111,14 @@ export const OAuthPresetConfigSchema = z
 // first; a preset object (no token_url / *_env) falls through to the preset branch.
 export const OAuthCredentialSchema = z.union([OAuthConfigSchema, OAuthPresetConfigSchema]);
 
+const RemoteMediaFetchConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  max_bytes: z.number().int().positive().default(5_000_000),
+  timeout_ms: z.number().int().positive().default(5_000),
+  max_redirects: z.number().int().nonnegative().default(2),
+  allowed_mime_types: z.array(z.string().min(1)).optional(),
+});
+
 // Discriminate the two oauth modes at the use site (server wiring): a preset block
 // is the one carrying a `provider` field.
 export function isOAuthPreset(
@@ -135,6 +145,8 @@ export function isOAuthPreset(
 //     compatible upstreams that reject OpenAI's newer `developer` role (e.g.
 //     official DeepSeek). Kept provider-scoped so true OpenAI/Codex can preserve
 //     the higher-priority role.
+//   - `normalize_reasoning_delta_alias`: opt-in stream shim for OpenAI-compatible
+//     upstreams that send choices[].delta.reasoning instead of reasoning_content.
 // Credentials are stored as a REFERENCE (env var name) only — never plaintext.
 export const ProviderConfigSchema = z
   .object({
@@ -156,6 +168,9 @@ export const ProviderConfigSchema = z
     // Responses and other provider wires must be distinguishable metadata.
     target_provider_protocol: TargetProviderProtocolSchema.optional(),
     map_developer_role_to_system: z.boolean().default(false),
+    normalize_reasoning_delta_alias: z.boolean().default(false),
+    response_model_policy: z.enum(["provider", "requested_alias", "both"]).default("provider"),
+    remote_media_fetch: RemoteMediaFetchConfigSchema.optional(),
   })
   .refine((p) => p.name !== undefined || p.alias !== undefined, {
     message: "provider requires `name` or `alias`",

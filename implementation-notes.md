@@ -7,21 +7,12 @@
 
 ---
 
-## 2026-06-14 · Claude OAuth web 登录改用 console callback「copy code」流（docs/06；原则 1/7）
+## 2026-06-14 · LiteLLM 协议互译剩余项完成（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）
 
-- **背景**：admin web UI 连接 Claude 订阅时，authorize URL 的 `redirect_uri` 写死 `http://localhost:53692/callback`；批准后浏览器跳到该 localhost 死链（web 环境无回调服务器），运营者要从地址栏抠出报错 URL 粘回——困惑。参考用户指定的 `claude-relay-service`：它用 Anthropic 托管的 console callback，批准后页面**直接显示授权码**（`<code>#<state>`）供复制，干净的 "copy code" 流。
-- **核心改动（外科手术式，仅 Anthropic）**：`provider/oauth/anthropic.ts` 新增 `CONSOLE_REDIRECT_URI="https://platform.claude.com/oauth/code/callback"`，`exchangeAuthorizationCode` 参数化 `redirectUri`；**web 路**（`beginAnthropicLogin` 授权 URL + `completeAnthropicLogin` 交换）改用 console callback，**CLI 路**（`loginAnthropic`）保留 localhost 回调服务器（自动捕获是最佳 CLI UX、且非用户抱怨点）。两路 redirect_uri 现刻意分叉——授权 URL 与 token 交换必须用同一值否则 grant 被拒。admin 编排（`admin-oauth.ts` `MANUAL_FLOWS`）零改（begin/complete 签名不变）。
-- **关键发现（少改两处）**：① `parseOAuthAuthorizationInput`（runtime.ts）**早已**支持 `code#state` 格式（console 页展示形态），无需改 parser；② helm 授权 URL **早已**带 `code=true`（请求 Anthropic 渲染码页），唯一坏的就是 redirect_uri，所以是单点修复。
-- **UI**：`ConnectProviderDialog.svelte` 加 `isAnthropic` 派生，manual 步骤对 Anthropic 改文案「复制页面上显示的授权码」+ 占位符，Codex 仍是「复制重定向 URL」；新增 3 条 i18n 串补 en/zh-hans/zh-hant/ja/ko。
-- **取舍/TODO**：Codex web 流同有 localhost 死链，但 OpenAI 无等价托管码页，本轮**不动 Codex**（已知 follow-up）。redirect_uri 必须是 client_id `9d1c250a-…` 注册的回调——relay 用同一 client_id/scopes/`code=true` 配同值、helm token 端点本就 `platform.claude.com`，高置信被接受；最终需真订阅 admin 手验。
-- **验证**：TDD 红→绿——`web-login.test.ts` 钉死 begin/complete 的 console redirect_uri + `code#state` 粘贴，`anthropic.test.ts` 钉死 CLI 仍用 localhost。core OAuth + gateway OAuth 全绿（202）、typecheck/lint 绿、svelte-check 仅剩既有 `oauth.test.ts` 3 报错（非回归）。分支 `worktree-claude-oauth-copy-code`（git worktree）。
-
-## 2026-06-14 · 评估并否决引入 `@earendil-works/pi-ai` 替换 OAuth 实现（原则 1/6；docs/02/06/11）
-
-- **背景**：用户想直接引入 pi-coding-agent 同源的 `@earendil-works/pi-ai`（npm，v0.79.3）当 SDK，外包「登录各家 AI（OAuth）」的协议代码，并「支持它支持的所有 OAuth provider」。
-- **调研结论（决策依据）**：① pi-ai 内置 OAuth provider 正好 3 个（`anthropic`/`openai-codex`/`github-copilot`，见 `packages/ai/src/utils/oauth/index.ts` 的 `BUILT_IN_OAUTH_PROVIDERS`）——与 helm 现支持的**完全一致**，无 Gemini/Qwen；pi 文档里「很多 Supported Providers」绝大多数是 **API-key** 类（Gemini/DeepSeek/Mistral/Groq/xAI/OpenRouter/Bedrock…），不是 OAuth。② helm 两层都已覆盖：API-key 改 `config/providers.yaml` 加 `api_key_env` 即可（零代码，已接 DeepSeek/ZenMux/OpenRouter）；OAuth 三家已实现（加密 token 存储/多账号池/代理/调度/admin UI 登录）。③ 形态失配：pi-ai 公开 API 只有「阻塞式 `login*()`（内部强制绑本地回调端口 53692/1455，Anthropic 端口占用即 `reject`）+ `refresh*Token()`」，**不导出** `exchangeAuthorizationCode`/`generatePKCE`；helm 专门写了 `web-login.ts` 做无状态 begin/complete，正因 CLI 流程不适合 web 管理界面。④ 二者**同源**（都出自 openclaw 血统，authorize URL/client_id/token URL/PKCE 近乎一字不差），引入不是「换更好代码」而是「换更不顺手形态 + 加一层桥接 + 运行时绑端口」。
-- **决定（用户拍板「那就不动了」）**：**不引入依赖、保持现状**，无代码改动、无 worktree。唯一真实收益（端点/client_id/未来新 provider 维护外包给上游）不足以抵消「写 ~500–900 行桥接 + 删 ~1.5k 行有测试覆盖的同源协议代码」的净风险（净风险为负）。
-- **TODO / 重评触发条件**：若 pi-ai 日后新增**真正的 OAuth**（非 API-key）provider（如 Gemini/Qwen 订阅登录），再评估「仅接管 `refresh*Token`」这一最小边界（不碰 helm 的 web 登录编排）。现有 helm OAuth 协议代码全部保留：`packages/core/src/provider/oauth/*`（web-login/anthropic/openai-codex/github-copilot/runtime）+ 存储/池/admin/UI。
+- **背景**：继续完成 LiteLLM 对照 spec 剩余 P1/P2 项，目标是 native/same-protocol 尽量保真，跨协议不可表达能力必须有 guard/warning，不再靠隐式 404、假成功或提前丢字段。
+- **核心改动**：Anthropic 与 Gemini token helper 改 provider-first + estimated fallback；Responses `previous_response_id` 入站不再提前拒绝，同协议 native passthrough 记录正向 mutation，跨协议 continuation/native tools/background fail-closed；Responses `input_tokens`、registry-bound retrieve/delete/cancel/input_items、`compact` provider 或正常 routing fallback 已接线；Gemini native provider 支持 generate/stream/countTokens，`parametersJsonSchema`/`responseJsonSchema`/Google GenAI raw params 保真；OpenAI Chat `response_model_policy` 覆盖非流式与流式 chunk；Gemini remote media fetch 新增 provider 层 materializer（默认关闭，https-only，大小/mime/timeout/redirect 限制），关闭时记录 `remote_media_not_materialized`。
+- **取舍 / 坑**：Responses object registry 目前是进程内 Map，并检查 account/key、`expiresAt`、`status`；这满足单进程生命周期 dispatch 与防串号，但重启不保留，后续若要多实例/重启后 retrieve，应把 registry 提升为 Store 端口 + SQLite/Postgres migration。Gemini remote media materializer 在 provider 层实现，core transformer 继续纯函数、无 fetch/http import。
+- **验证**：TDD 红→绿；新增/收紧 `pnpm test:protocol-compat:ast` gates，覆盖 previous_response_id、lifecycle stub、Gemini countTokens/profile、Anthropic token-counting beta、response_model_policy、remote media materializer、file_search guard 与 core transformer 无网络 I/O。focused suites、`lint`、`typecheck`、`build`、`test` 均已通过；`test:e2e` 仅剩 memory inject 2 个既有失败，protocol/gemini e2e slice 23/23 绿。
 
 ## 2026-06-14 · 移除「协议直通」设置 UI，保持运行时默认 ON（issue #236；原则 1/2）
 
@@ -31,15 +22,22 @@
 - **验证**：admin vitest `settings.test.ts`(5) + `dashboard-locales.test.ts`(4) 全绿；`prettier --check` 改动文件绿；admin `pnpm build` 绿。svelte-check 仅剩 `oauth.test.ts` 3 处**既有**报错（vi.fn mock.calls 元组类型，来自 v0.12.11 连通性测试特性，与本改动无关、与 origin/main 逐字相同，且 admin 不在 `-r typecheck` CI 门禁）。分支 `worktree-issue-236-remove-passthrough-ui`（git worktree）。
 - **TODO**：未 commit/push（用户要求时再做）；若后续要彻底下线 passthrough，再单独决定是否从 schema/数据模型移除该字段。
 
+## 2026-06-14 · 原生直通按 attempt 判断 + Anthropic SSE 元数据修复（docs/02/05；原则 5/7/8）
+
+- **背景**：线上 tuned `claude-opus -> premium` 链被 `fallback_may_change_provider_protocol` 整链否决，导致首个 Anthropic→Anthropic attempt 也被迫走翻译；这会放大 Anthropic SSE 翻译瑕疵并拖慢 Claude Code。用户明确要求保持 lanes 不变，只修代码。
+- **核心改动**：① native passthrough guard 删除“后续 fallback 可能跨协议”的输入与禁用原因，改为只判断**当前 attempt**：source protocol == target provider protocol、runtime flag on、native carrier 存在、provider 支持且无需兼容性 rewrite 即直通；② `execute` 不再 lookahead 解析后续候选，Anthropic head 可以直通，若首包前失败再让后续 `openai_chat` / `openai_responses` fallback 走翻译；③ `convertOpenAIStreamToAnthropic` 的 `message_start` 不再发空 `id/model`，优先取首个 upstream chunk，缺失时用 pipeline 传入的 `request_id/final.provider_model` 兜底并规范成 `msg_*` id。
+- **治理与取舍**：治理路径不变，auth/routing/budget/capture/memory/telemetry 仍先于 execute；`provider_attempts[]` 逐 attempt 记录 `passthrough_used` / `protocol_mismatch`，`final.provider_model` 仍记录实际落点。流式 fallback 只发生在首包前，首包后仍不能换模型，这是既有 contract。
+- **验证**：补回归测试覆盖 heterogeneous chain 的 head Anthropic passthrough、Anthropic passthrough 首包前失败后 fallback 到 translated OpenAI、stream 同场景，以及 translated Anthropic `message_start.id/model` 非空。focused `pnpm exec vitest run packages/core/src/provider/protocol.test.ts apps/gateway/src/routes/execute.test.ts packages/core/src/protocol/anthropic/stream.test.ts` 绿（96 tests）。
+
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
-### 2026-06-14 · 原生直通按 attempt 判断 + Anthropic SSE 元数据修复（docs/02/05；原则 5/7/8）：native passthrough guard 删「后续 fallback 可能跨协议」输入，改为只判**当前 attempt**（source==target protocol + runtime flag on + native carrier 存在 + 无需兼容 rewrite 即直通）；`execute` 不再 lookahead，Anthropic head 可直通、首包前失败再 fallback 到 translated `openai_chat`/`openai_responses`；`convertOpenAIStreamToAnthropic` 的 `message_start` 不再发空 id/model（优先首个 upstream chunk，缺失用 pipeline `request_id`/`final.provider_model` 兜底成 `msg_*`）。治理路径不变、流式 fallback 仅首包前。focused protocol/execute/anthropic-stream 96 绿。
+### 2026-06-14 · OpenAI-compatible reasoning alias opt-in（docs/protocol-translation-litellm-gap-spec P2-CHAT-03/04；原则 7/8）：新增 provider 配置 `normalize_reasoning_delta_alias`，只在显式 opt-in 时把 streaming `choices[].delta.reasoning` 归一为 `reasoning_content`，默认保持 byte-forwarding；后续剩余项已补 `response_model_policy`。
 
-### 2026-06-14 · LiteLLM 协议互译首批 P1 修复（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）：最小高风险修复——`/v1/responses` route 不再重复合成 `response.created`/`in_progress`（只序列化 pipeline 已产 SSE）、`execute.stripInternal` 改 target-protocol-aware（OpenAI target 只转发 OpenAI-compatible provider_raw 并递归删 messages/tools/`cache_control`）、Anthropic native passthrough 发送前 strip 空/非字符串 text block（保 tool_use/media/非空文本，只剩空块的 message 整条省略，ledger 记 `empty_anthropic_text_blocks_stripped`）。取舍：provider_raw/cache_control 过滤暂未接统一 warning ledger（translated path 缺 mutation channel）。TDD 红→绿，focused responses/execute 90 绿、protocol-compat:ast/passthrough:final 绿（真 Claude/Codex CLI trace 证明 native passthrough）；全量 e2e 仍有既存 memory inject 2 红（与协议无关）；标准 test 偶卡 PGlite 5s timeout。
+### 2026-06-14 · LiteLLM 协议互译首批 P1 修复（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）：修 Responses duplicate prelude、target-aware `provider_raw`、Anthropic empty text sanitizer、OpenAI target `cache_control` 清理；focused tests、ast gates、passthrough deterministic/live 当时通过，memory e2e 既有红另记。
 
 ### 2026-06-14 · Subscription Providers 账号「测试」按钮 + 流式连通性检查（docs/06/11；原则 1/3/7）：OAuth『Subscription Providers』页按账号加「Test」按钮（helm 无截图里的 API-key provider 列表，用户拍板按账号测），弹层发单条 user turn 流式**真返回**。后端 TDD 三件：`routes/admin/oauth-test.ts`（`createOpenAiStreamParser` 跨非帧对齐字节重组归一 content/finish/usage、fail-open + `createOAuthAccountTester` 注入 buildClient）、`POST /admin/api/oauth/:provider/test`（streamSSE，无 tester→503/缺参→400/上游失败→**带内 error 事件不 5xx**/断连静默）、`server.ts` 抽 `buildOAuthAccountClient` 与 synthesis 共用且每次测试重载 account proxy。隔离防封号：走全新一次性 client（raw client 本无熔断），**不写 telemetry/不扰生产 pool**，anti-ban 头由 provider client 自动注入故裸 user 请求被 Claude Max/Codex 接受、parked 账号也可测。前端 `streamAccountTest`(永不抛) + `TestAccountDialog.svelte` + i18n 13 串补 en/zh-hans/zh-hant/ja/ko。坑：测试是真实上游调用（真计费、不入 Requests 日志）、只 surface content delta。gateway 732 绿 / admin 358 绿，typecheck/lint/build 绿；oauth.test.ts 3 处 svelte-check 报错为既有非回归。分支 feat/oauth-account-test-button。
 

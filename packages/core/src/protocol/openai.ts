@@ -87,6 +87,13 @@ const OpenAIChatRequestSchema = z.object({
   safety_identifier: z.string().optional(),
 });
 
+function defaultFilenameForMediaType(mediaType: string | undefined): string {
+  if (mediaType === "application/pdf") return "document.pdf";
+  if (mediaType?.startsWith("image/")) return `image.${mediaType.slice("image/".length) || "bin"}`;
+  if (mediaType?.startsWith("audio/")) return `audio.${mediaType.slice("audio/".length) || "bin"}`;
+  return "document.bin";
+}
+
 // —— OpenAI usage shape. `prompt_tokens` is the FULL prompt (cached + fresh);
 // `prompt_tokens_details.cached_tokens` is the cached slice (pit #2).
 // `completion_tokens_details` carries the litellm-parity reasoning/audio breakdown
@@ -241,7 +248,7 @@ function nativePartToIR(part: unknown): IRContentPart {
           type: "document",
           data: parsed.data,
           mediaType: parsed.mediaType,
-          ...(filename !== undefined ? { filename } : {}),
+          filename: filename ?? defaultFilenameForMediaType(parsed.mediaType),
         };
       }
       // An uploaded-file handle is preserved as fileId (NOT url) so it round-trips
