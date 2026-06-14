@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-14 · 上游瞬时断连的幂等重试 + SSE 心跳保活（docs/02/05；原则 3/8）
+
+- **背景**：客户端偶发 `The socket connection was closed unexpectedly…`（Bun fetch 文案 → 客户端↔helm 的 TCP 被无干净 HTTP 错误地掐断）。排查：helm 正常错误路径**不产生裸 socket 关闭**（首包前→结构化 JSON 502/504，流中→`event: error` 帧），裸断 ⇒ 代理 idle/read 超时 / 进程重启 / keepalive 复用竞争。helm 旧行为只有「换模型」execution fallback，**无「重试同一上游」**——单候选链遇瞬时抖动即 502。用户拍板做两件且对流式/非流式都健壮：(A) 幂等重试 (B) SSE 心跳；慢首包覆盖（early-commit）走**否决**（保留 peek-before-commit、低风险）。
+- **Change A — 幂等重试（`provider/retry.ts`）**：`isTransientConnectionError` 严格白名单（ECONNRESET/ECONNREFUSED/EPIPE/ETIMEDOUT/UND_ERR_SOCKET + 跨运行时 message 子串含 Bun 文案；递归查 `err.cause`；`name==="AbortError"` 短路 false），`withConnectionRetry(fn,{retries,backoffMs,sleep,signal})` 默认 2×[200,500]ms、abort 期间停。落在三 client（openai/anthropic/openai-responses）的 `request()` **fetch 边界**——stream/non-stream 共用唯一 fetch 入口、首字节前 ⇒ 幂等、**对单候选链也生效**；嵌于 401-retry 之内（401 是成功响应不触发连接重试，二者正交）；timeout→非 transient 不重试（交给跨模型 fallback）。三 client 加可选 `connectRetries`/`connectRetryBackoffMs`（缺省走 helper 默认，亦作测试 seam）。**非目标**：non-stream body-read / stream 首包读取阶段 reset 仍靠跨模型 fallback。
+- **Change B — SSE chunk 间心跳（`routes/heartbeat.ts`）**：`withHeartbeat` 纯时序生成器把**同一**待决 `next()` 与心跳定时器反复赛跑（绝不重复调 next ⇒ 不丢/不重 chunk），产出 `{type:beat|chunk}`；`heartbeatMs=0` 关闭、early-return 取消定时器并 `iterator.return()`。**边界抑制在路由**（元素类型各异，生成器不懂字节）：`atEventBoundary(lastRawWrite)`——`writeSSE` 整帧恒边界、raw 直传按 `\n\n` 收尾判断 ⇒ `:\n\n` 永不插进半帧（principle 8 关键）。心跳帧 wire-only：**不进 capture、不喂 accumulator、不计 cost**。接入**4 个**流式面（chat/messages/responses/**gemini**——超出原计划 3 个，为一致性扩到 Gemini）。配置 `runtime.sse_heartbeat_ms`（默认 15000、`HELM_SSE_HEARTBEAT_MS`、0 关、`nonnegative` 允许 0）经 4 处 register 注入；**仅覆盖 chunk 间 idle**——首包 peek 仍在 `execute()` 内（早于 200 提交），pre-first-chunk fallback 语义不变。
+- **取舍/坑/TODO**：① 慢首包（首 token 耗时 > 代理 read-timeout，如推理模型）**未在 helm 侧覆盖**——若复现优先核对 nginx/haproxy/CF 超时，或后续再评估 early-commit（会把流式错误从干净 502/504 变成 in-band `event:error` 帧）。② 心跳默认 15s 远低于 nginx 60s/CF ~100s；运营者按前置代理调 `HELM_SSE_HEARTBEAT_MS`。③ schema 改了须重建 `@helm/shared`。
+- **验证**：TDD 红→绿——`retry.test.ts`(25) + `heartbeat.test.ts`(7, 含边界/disabled/error/early-return) + 三 client wiring + chat 路由 `:\n\n` 端到端集成（断言数据帧逐字 + 心跳非 data 事件）。provider 208 / 路由+schema 全绿，`pnpm typecheck`、`pnpm lint`、`pnpm build` 绿。分支 `fix/upstream-transient-retry-sse-heartbeat`。
+
 ## 2026-06-14 · Admin 管理界面移动端/响应式走查 + 修复（docs/10/11；原则 1）
 
 - **背景**：用户要求对 admin 全部 9 个页面做移动端/PC 走查（Playwright 截图三视口：iPhone 12 Pro 390×844 / iPad mini 768×1024 / 桌面 1920×1080），找出不合理处并修，移动端必须方便触控。流程：先把本地 main 重新构建部署到 Docker（localhost:8080）→ 截 29 张图（含移动 nav drawer、New key 弹层）→ Workflow 扇出 10 个 reviewer（每页读截图+源码）→ 对抗式验证 → 综合，25 处真实问题归并为 12 条（1 blocker / 3 major / 6 minor / 2 polish）。控制台零报错。
@@ -23,20 +31,13 @@
 - **验证**：TDD 红→绿（payload-capture +9、messages-pipeline +6 Gemini passthrough 预算/记忆回归、gemini provider +4 SSRF、openai-responses +2 tool_calls）；新增 ast gate（5-arg materializer 签名 + `assertPublicHttpsTarget`）；`typecheck`/`lint`/`test:protocol-compat:ast` 绿，changed-area 512 tests 绿。
 - **Codex review round 2（同 PR 6 项再修，原则 2/3/7）**：① **P1 Gemini 翻译路径**——Gemini client 的 `chatCompletion`/`chatCompletionStream` 原本恒 throw，导致非 Gemini 客户端路由到 Gemini provider（混合 lane）或关闭 passthrough 时整条 attempt 失败；改为经 transformer 组合翻译 OpenAI-Chat ⇄ Gemini（`openaiTransformer.transformRequestOut`→`geminiTransformer.transformRequestIn`→fetch→`transformResponseIn`→`openaiTransformer.transformResponseOut`；流式 Gemini SSE→`transformStreamIn`→OpenAI chunk+`[DONE]`），返回 OpenAI 形态供 pipeline 消费。② **P1 DNS 钉死（rebinding）**——guard 解析校验后 `fetch` 会二次解析；新增独立 `mediaFetch`（默认 `node:https`，`lookup` 钉死到已校验地址、SNI 仍按真实 hostname 验证），`assertPublicHttpsTarget` 返回 pinned 地址逐 hop 钉死（无 undici 依赖）。③ **P1 静态 key 脱敏**——generic Responses `scrub()` 补 `cfg.apiKey` 进脱敏集，防上游 error body 回显泄露。④ **P2 媒体边读边限**——`readBodyWithLimit` 用 `readChunkWithIdle` 流式读 + 超限即 abort（不再先 `arrayBuffer()` 全量分配）。⑤ **P2 401 重建头**——generic Responses 401 重试前 `providerHeaders()` 重取刷新后 token。⑥ **P2 registry 有界**——周期清理过期项 + 1 万条硬上限 LRU 淘汰。验证：TDD 新增 gemini +4 / openai-responses +2；`typecheck`/`lint`/ast 绿，changed-area 474 tests 绿。
 
-## 2026-06-14 · Claude OAuth web 登录改用 console callback「copy code」流（docs/06；原则 1/7）
-
-- **背景**：admin web UI 连接 Claude 订阅时，authorize URL 的 `redirect_uri` 写死 `http://localhost:53692/callback`；批准后浏览器跳到该 localhost 死链（web 环境无回调服务器），运营者要从地址栏抠出报错 URL 粘回——困惑。参考用户指定的 `claude-relay-service`：它用 Anthropic 托管的 console callback，批准后页面**直接显示授权码**（`<code>#<state>`）供复制，干净的 "copy code" 流。
-- **核心改动（外科手术式，仅 Anthropic）**：`provider/oauth/anthropic.ts` 新增 `CONSOLE_REDIRECT_URI="https://platform.claude.com/oauth/code/callback"`，`exchangeAuthorizationCode` 参数化 `redirectUri`；**web 路**（`beginAnthropicLogin` 授权 URL + `completeAnthropicLogin` 交换）改用 console callback，**CLI 路**（`loginAnthropic`）保留 localhost 回调服务器（自动捕获是最佳 CLI UX、且非用户抱怨点）。两路 redirect_uri 现刻意分叉——授权 URL 与 token 交换必须用同一值否则 grant 被拒。admin 编排（`admin-oauth.ts` `MANUAL_FLOWS`）零改（begin/complete 签名不变）。
-- **关键发现（少改两处）**：① `parseOAuthAuthorizationInput`（runtime.ts）**早已**支持 `code#state` 格式（console 页展示形态），无需改 parser；② helm 授权 URL **早已**带 `code=true`（请求 Anthropic 渲染码页），唯一坏的就是 redirect_uri，所以是单点修复。
-- **UI**：`ConnectProviderDialog.svelte` 加 `isAnthropic` 派生，manual 步骤对 Anthropic 改文案「复制页面上显示的授权码」+ 占位符，Codex 仍是「复制重定向 URL」；新增 3 条 i18n 串补 en/zh-hans/zh-hant/ja/ko。
-- **取舍/TODO**：Codex web 流同有 localhost 死链，但 OpenAI 无等价托管码页，本轮**不动 Codex**（已知 follow-up）。redirect_uri 必须是 client_id `9d1c250a-…` 注册的回调——relay 用同一 client_id/scopes/`code=true` 配同值、helm token 端点本就 `platform.claude.com`，高置信被接受；最终需真订阅 admin 手验。
-- **验证**：TDD 红→绿——`web-login.test.ts` 钉死 begin/complete 的 console redirect_uri + `code#state` 粘贴，`anthropic.test.ts` 钉死 CLI 仍用 localhost。core OAuth + gateway OAuth 全绿（202）、typecheck/lint 绿、svelte-check 仅剩既有 `oauth.test.ts` 3 报错（非回归）。分支 `worktree-claude-oauth-copy-code`（git worktree）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-14 · Claude OAuth web 登录改用 console callback「copy code」流（docs/06；原则 1/7）：admin web 连 Claude 订阅时 authorize 的 `redirect_uri` 写死 localhost 死链（web 无回调服务器）；改用 Anthropic 托管 console callback `https://platform.claude.com/oauth/code/callback`（批准后页面直接显示 `code#state` 供复制）。外科式仅改 Anthropic：`provider/oauth/anthropic.ts` 参数化 `exchangeAuthorizationCode(redirectUri)`，**web 路** begin/complete 用 console callback、**CLI 路** `loginAnthropic` 保留 localhost；两路 redirect_uri 刻意分叉（授权 URL 与 token 交换须同值）。`parseOAuthAuthorizationInput` 早已认 `code#state`、授权 URL 早已带 `code=true`，故单点修复。Codex web 同有死链但 OpenAI 无托管码页，未动（follow-up）。TDD web-login/anthropic 绿、core+gateway OAuth 202 绿。
 
 ### 2026-06-14 · 评估并否决引入 `@earendil-works/pi-ai` 替换 OAuth 实现（原则 1/6）：pi-ai（v0.79.3）内置 OAuth provider 与 helm 完全一致（anthropic/codex/copilot），其文档「众多 Supported」多为 API-key 类（非 OAuth）；其公开 API 只 `login*()`（强绑本地端口 53692/1455）+`refresh*Token`、不导出 `exchangeAuthorizationCode`/PKCE，与 helm web begin/complete 形态失配；二者同源（openclaw 血统）。用户拍板**不引入、保持现状**，无代码改动。重评触发：pi-ai 新增真 OAuth（Gemini/Qwen 订阅）时仅评估接管 `refresh*Token`，不碰 web 登录编排。
 

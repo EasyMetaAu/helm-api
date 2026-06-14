@@ -31,6 +31,11 @@ export const ENV_MAPPINGS: readonly EnvMapping[] = [
     kind: "number",
   },
   {
+    env: "HELM_SSE_HEARTBEAT_MS",
+    path: ["runtime", "sse_heartbeat_ms"],
+    kind: "number",
+  },
+  {
     env: "HELM_RATE_LIMIT_ENABLED",
     path: ["runtime", "rate_limit", "enabled"],
     kind: "boolean",

@@ -502,3 +502,66 @@ describe("createOpenAIClient (extraHeaders + resolveBaseUrl — Copilot path, is
     expect(seenUrl).toBe("https://upstream.test/v1/chat/completions");
   });
 });
+
+describe("createOpenAIClient (transient-connection retry)", () => {
+  const econnreset = () => Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+  // [0, 0] backoff keeps the test instant; the retry path itself is unchanged.
+  const RETRY_CONFIG = { ...CONFIG, connectRetryBackoffMs: [0, 0] as const };
+
+  it("retries a transient connection error then succeeds (non-streaming)", async () => {
+    let calls = 0;
+    const fetch = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw econnreset();
+      return jsonResponse({ ok: true });
+    });
+    const client = createOpenAIClient({
+      config: RETRY_CONFIG,
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    const out = await client.chatCompletion({ model: "m" });
+    expect(out).toEqual({ ok: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a transient connection error before the first stream chunk", async () => {
+    let calls = 0;
+    const fetch = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw econnreset();
+      return sseResponse(["data: a\n\n", "data: b\n\n"]);
+    });
+    const client = createOpenAIClient({
+      config: RETRY_CONFIG,
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    const chunks: string[] = [];
+    for await (const c of client.chatCompletionStream({ model: "m" })) chunks.push(c);
+    expect(chunks.join("")).toBe("data: a\n\ndata: b\n\n");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a non-transient upstream status", async () => {
+    const fetch = vi.fn(async () => jsonResponse({ error: "bad" }, 400));
+    const client = createOpenAIClient({
+      config: RETRY_CONFIG,
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    await expect(client.chatCompletion({ model: "m" })).rejects.toBeInstanceOf(UpstreamError);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a client abort", async () => {
+    const ac = new AbortController();
+    const fetch = vi.fn(async () => {
+      ac.abort();
+      throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    });
+    const client = createOpenAIClient({
+      config: RETRY_CONFIG,
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    await expect(client.chatCompletion({ model: "m" }, { signal: ac.signal })).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});

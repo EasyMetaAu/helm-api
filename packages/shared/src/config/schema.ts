@@ -248,6 +248,13 @@ export const RoutingSignalFeedbackConfigSchema = z
 export const RuntimeConfigSchema = z.object({
   max_request_bytes: z.number().int().positive().default(20_000_000),
   request_timeout_ms: z.number().int().positive().default(60_000),
+  // SSE keep-alive heartbeat (ms). While a STREAMING response idles between upstream
+  // chunks, emit an SSE comment (`:\n\n` — ignored by every compliant SSE parser) at
+  // this cadence so a front proxy / client idle-timeout does not sever a long but
+  // healthy stream (slow generation, tool pauses). 0 disables. Covers ONLY the
+  // inter-chunk gap: the first chunk is peeked before the response commits, so
+  // pre-first-chunk fallback is unaffected. Overridable via HELM_SSE_HEARTBEAT_MS.
+  sse_heartbeat_ms: z.number().int().nonnegative().default(15_000),
   rate_limit: RateLimitConfigSchema,
   // Store driver selection. Defaulted so an absent runtime.store stays on sqlite
   // (back-compat); overridable via HELM_STORE_DRIVER (see env-map).

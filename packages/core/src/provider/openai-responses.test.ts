@@ -1126,20 +1126,25 @@ describe("createCodexResponsesClient", () => {
     expect(caught).not.toBeInstanceOf(UpstreamError);
   });
 
-  it("re-throws a real network error (not a timeout) unchanged", async () => {
+  it("retries a transient network error then re-throws it unchanged", async () => {
+    // ECONNREFUSED is transient → retried at the fetch boundary ([0,0] backoff keeps
+    // the test instant); the ORIGINAL error propagates once the budget is exhausted.
     const boom = new Error("ECONNREFUSED");
+    const fetch = vi.fn(async () => {
+      throw boom;
+    });
     const client = createCodexResponsesClient({
       config: {
         baseUrl: "https://chatgpt.com/backend-api/codex",
         getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        connectRetryBackoffMs: [0, 0],
       },
-      fetch: (async () => {
-        throw boom;
-      }) as unknown as typeof fetch,
+      fetch: fetch as unknown as typeof globalThis.fetch,
     });
     await expect(
       client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] }),
     ).rejects.toBe(boom);
+    expect(fetch).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
   });
 
   it("preserves a non-JSON upstream error body as raw text in the UpstreamError", async () => {

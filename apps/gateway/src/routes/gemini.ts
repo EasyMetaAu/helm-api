@@ -9,6 +9,7 @@ import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult, RouteError } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
@@ -90,6 +91,9 @@ export interface GeminiRouteDeps {
       signal: AbortSignal,
     ): Promise<PipelineRunResult>;
   };
+  /** SSE keep-alive cadence (ms) for streaming responses; read fresh per request from
+   *  runtime.sse_heartbeat_ms. Optional — absent/0 = no heartbeat. Inter-chunk only. */
+  sseHeartbeatMs?: () => number;
 }
 
 function hasCountTokensContent(native: unknown): boolean {
@@ -365,22 +369,39 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         // captured (verbatim) alongside the telemetry row in the finally below.
         // Gemini frames are nameless `data:` frames (no `event:` name, no [DONE]).
         const captured: string[] = [];
+        // SSE keep-alive: emit a `:` comment during inter-chunk idle (wire-only, never
+        // captured) so a proxy/client idle-timeout does not sever a long healthy stream.
+        // Gemini frames are whole `data:` frames (writeSSE) → always at a boundary.
+        // 0 = disabled (today's behavior).
+        const heartbeatMs = deps.sseHeartbeatMs?.() ?? 0;
+        let lastWrite: string | null = null;
         try {
-          for await (const snapshot of result.streamIR()) {
+          for await (const item of withHeartbeat(result.streamIR(), {
+            heartbeatMs,
+            signal: c.req.raw.signal,
+          })) {
+            if (item.type === "beat") {
+              if (atEventBoundary(lastWrite)) await sse.write(HEARTBEAT_COMMENT);
+              continue;
+            }
+            const snapshot = item.value;
             if (result.nativePassthrough === true) {
               const frame = snapshot as { data?: unknown; raw?: unknown };
               if (typeof frame.raw === "string") {
                 if (captureBodies) captured.push(frame.raw);
                 await sse.write(frame.raw);
+                lastWrite = frame.raw; // verbatim bytes may end mid-frame
               } else {
                 const data = typeof frame.data === "string" ? frame.data : JSON.stringify(snapshot);
                 if (captureBodies) captured.push(`data: ${data}\n\n`);
                 await sse.writeSSE({ data });
+                lastWrite = "\n\n";
               }
             } else {
               const data = JSON.stringify(snapshot);
               if (captureBodies) captured.push(`data: ${data}\n\n`);
               await sse.writeSSE({ data });
+              lastWrite = "\n\n"; // writeSSE emits a complete frame — always a boundary
             }
           }
         } catch (err) {

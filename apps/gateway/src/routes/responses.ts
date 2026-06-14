@@ -7,6 +7,7 @@ import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
@@ -130,6 +131,9 @@ export interface ResponsesRouteDeps {
       signal: AbortSignal,
     ): Promise<PipelineRunResult>;
   };
+  /** SSE keep-alive cadence (ms) for streaming responses; read fresh per request from
+   *  runtime.sse_heartbeat_ms. Optional — absent/0 = no heartbeat. Inter-chunk only. */
+  sseHeartbeatMs?: () => number;
 }
 
 // Client disconnect / abort detection — mirrors messages.ts. Used to suppress a
@@ -518,9 +522,23 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         // captured (verbatim) alongside the telemetry row in the finally below.
         const captured: string[] = [];
         let result: PipelineRunResult | null = null;
+        // SSE keep-alive: emit a `:` comment during inter-chunk idle (wire-only, never
+        // captured) so a proxy/client idle-timeout does not sever a long healthy stream.
+        // Gated on an event boundary so it can never split a verbatim-relayed frame.
+        // 0 = disabled (today's behavior).
+        const heartbeatMs = deps.sseHeartbeatMs?.() ?? 0;
+        let lastWrite: string | null = null;
         try {
           result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
-          for await (const event of result.streamIR()) {
+          for await (const item of withHeartbeat(result.streamIR(), {
+            heartbeatMs,
+            signal: c.req.raw.signal,
+          })) {
+            if (item.type === "beat") {
+              if (atEventBoundary(lastWrite)) await sse.write(HEARTBEAT_COMMENT);
+              continue;
+            }
+            const event = item.value;
             if (typeof event.sequence_number === "number")
               nextErrorSequence = event.sequence_number + 1;
             const frame =
@@ -536,8 +554,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               captured.push(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
             if (raw !== undefined) {
               await sse.write(raw);
+              lastWrite = raw;
             } else {
               await sse.writeSSE({ event: frame.event, data: frame.data });
+              lastWrite = "\n\n"; // writeSSE emits a complete frame — always a boundary
             }
           }
         } catch (err) {

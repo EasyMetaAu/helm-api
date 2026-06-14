@@ -1502,6 +1502,8 @@ export async function buildServer(
     writes: writeQueue,
     redact: (payload) => redact(payload),
     now: () => Date.now(),
+    // SSE keep-alive cadence (runtime.sse_heartbeat_ms / HELM_SSE_HEARTBEAT_MS); 0 = off.
+    sseHeartbeatMs: () => config.runtime.sse_heartbeat_ms,
     recordOAuthUsage,
     // Full request/response capture + streamed-cost backfill. The getters read the
     // LIVE runtime settings so the admin toggle/retention apply without a restart.
@@ -1803,6 +1805,7 @@ export async function buildServer(
       },
     },
     pipeline: messagesPipeline,
+    sseHeartbeatMs: () => config.runtime.sse_heartbeat_ms,
     // Telemetry + payload recorder (the /admin/requests fix): the SAME values the
     // chat route uses, so /v1/messages records served requests like /v1/chat does.
     record: {
@@ -2000,6 +2003,7 @@ export async function buildServer(
     pipeline: responsesPipeline,
     lifecycle: responsesLifecycle,
     registry: responsesRegistry,
+    sseHeartbeatMs: () => config.runtime.sse_heartbeat_ms,
     // Telemetry + payload recorder (the /admin/requests fix): the SAME values the
     // chat route uses, so /v1/responses records served requests like /v1/chat does.
     record: {
@@ -2101,6 +2105,7 @@ export async function buildServer(
         }),
     },
     pipeline: geminiPipeline,
+    sseHeartbeatMs: () => config.runtime.sse_heartbeat_ms,
     // Telemetry + payload recorder (the /admin/requests fix): the SAME values the
     // chat route uses, so the gemini face records served requests like /v1/chat does.
     record: {
