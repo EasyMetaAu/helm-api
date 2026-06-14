@@ -1415,6 +1415,79 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     expect(h.get("session_id")).toBe("sess-z");
   });
 
+  it("preserves client headers/raw body through the native carrier while replacing auth", async () => {
+    const body = nativeStreamBody();
+    const rawBody = JSON.stringify(body, null, 2);
+    let sentBody = "";
+    let seen: Headers | null = null;
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body,
+      raw_body: rawBody,
+      headers: {
+        authorization: "Bearer client-secret",
+        "content-type": "application/json",
+        accept: "application/json",
+        "openai-beta": "client-beta=1",
+        "user-agent": "codex-client/9.9.9",
+        session_id: "client-session",
+        "x-client-request-id": "client-request-id",
+        "x-client-feature": "keep-me",
+        "x-helm-trace": "internal",
+        "content-length": "999",
+      },
+      mutations: {},
+    };
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = String(init?.body);
+      seen = new Headers(init?.headers);
+      return sseStreamResponse([
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ]);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_carrier")}`,
+        sessionId: "sess-z",
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    for await (const _ of client.nativePassthroughStream?.(carrier) ?? []) {
+      // drain
+    }
+
+    const h = seen as unknown as Headers;
+    expect(sentBody).toBe(rawBody);
+    expect(h.get("x-client-feature")).toBe("keep-me");
+    expect(h.get("Authorization")).toContain("Bearer ");
+    expect(h.get("Authorization")).not.toContain("client-secret");
+    expect(h.get("chatgpt-account-id")).toBe("acct_carrier");
+    expect(h.get("user-agent")).toBe("codex-client/9.9.9");
+    expect(h.get("session_id")).toBe("client-session");
+    expect(h.get("x-client-request-id")).toBe("client-request-id");
+    expect(h.get("content-length")).toBeNull();
+    expect(h.get("x-helm-trace")).toBeNull();
+    expect(h.get("accept")).toBe("application/json");
+    const beta = h.get("openai-beta") ?? "";
+    expect(beta).toContain("client-beta=1");
+    expect(beta).toContain("responses=experimental");
+    expect(carrier.mutations).toMatchObject({
+      auth_replaced: true,
+      content_length_recomputed: true,
+    });
+    expect((carrier.mutations as Record<string, unknown>).headers_dropped).toEqual(
+      expect.arrayContaining(["authorization", "content-length", "x-helm-trace"]),
+    );
+    expect((carrier.mutations as Record<string, unknown>).headers_overwritten).toEqual(
+      expect.arrayContaining(["openai-beta"]),
+    );
+    expect((carrier.mutations as Record<string, unknown>).headers_overwritten).not.toEqual(
+      expect.arrayContaining(["accept", "session_id", "x-client-request-id", "user-agent"]),
+    );
+  });
+
   it("throws UpstreamError with the real upstreamStatus + scrubbed body before the first chunk on a non-2xx", async () => {
     const token = jwt("acct_secret_value_1234");
     const client = createCodexResponsesClient({

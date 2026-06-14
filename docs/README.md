@@ -33,6 +33,7 @@ interface ships with the gateway for basic rule management.
 | 11 | [Admin UI](11-admin-ui.md) | Web console, rule management, HTTP Basic auth. |
 | 12 | [Memory: Forgetting & Tiering](12-memory-forgetting-and-tiering.md) | Short/mid/long-term tiers + a deterministic forgetting strategy (decay, reinforcement, soft-archive, supersede) layered on 08. **Shipped but opt-in** — gated by `config.memory.forgetting.enabled` (schema default `false`); with it off, runtime is byte-identical to before. |
 | — | [Protocol Compatibility](protocol-compatibility.md) | Per-pair data-loss matrix, the `n>1` cap / `data_loss` warning policy, the `provider_raw` passthrough list, capability-gated modalities, and the litellm parity scorecard. |
+| — | [原生直通保真规范](native-passthrough-fidelity-spec.md) | Anthropic Messages 和 OpenAI Responses 原生直通的中文设计草案：header/body 保真、允许的修改、流式策略、治理边界、CRS 借鉴项和验收标准。 |
 | — | [Research Notes](research-notes.md) | Appendix: open-source references and comparisons for the rule engine, protocol translation, probes, etc. |
 
 ## Design principles

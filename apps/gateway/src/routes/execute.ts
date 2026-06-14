@@ -17,10 +17,18 @@ import type {
   AttemptErrorDetail,
   CatalogEntry,
   InternalRequest,
+  NativePassthroughCarrier,
   Protocol,
   TargetProviderProtocol,
 } from "@helm/shared";
-import { makeHelmError } from "@helm/shared";
+import {
+  appendMutationList,
+  cloneCarrierWithBody,
+  isNativePassthroughCarrier,
+  makeHelmError,
+  nativePassthroughBody,
+  nativePassthroughMutations,
+} from "@helm/shared";
 import { usageFromAnthropicResponse, usageFromResponsesResponse } from "./payload-capture.js";
 
 // Gateway execution adapter — the `execute` injected into routeRequest. It walks
@@ -119,6 +127,7 @@ interface PassthroughTelemetry {
   response_protocol: Protocol | null;
   provider_name: string | null;
   provider_model: string | null;
+  passthrough_mutations?: NativePassthroughCarrier["mutations"];
 }
 
 function approxPromptTokens(req: InternalRequest): number {
@@ -358,7 +367,51 @@ function decideNativePassthroughForAttempt(input: {
     response_protocol: req.protocol,
     provider_name: target.providerName,
     provider_model: target.providerModel,
+    passthrough_mutations: nativePassthroughMutations(req.native_request as never),
   };
+}
+
+function prepareNativeRequestForUpstream(
+  nativeRequest: InternalRequest["native_request"],
+  providerModel: string,
+  protocol: Protocol,
+  streamReframed: boolean,
+): NativePassthroughCarrier | Record<string, unknown> {
+  if (nativeRequest === undefined) {
+    throw new Error("native passthrough invoked without a native request");
+  }
+  const nativeBody = nativePassthroughBody(nativeRequest);
+  let body = nativeBody;
+  let bodyChanged = false;
+  const carrier = isNativePassthroughCarrier(nativeRequest) ? nativeRequest : null;
+  const mutations = carrier?.mutations;
+
+  if (nativeBody.model !== providerModel) {
+    body = { ...body, model: providerModel };
+    bodyChanged = true;
+    if (mutations) {
+      mutations.model_rewritten = {
+        from: typeof nativeBody.model === "string" ? nativeBody.model : null,
+        to: providerModel,
+      };
+    }
+  }
+
+  if (protocol === "openai_responses" && body.store !== false) {
+    body = { ...body, store: false };
+    bodyChanged = true;
+    if (mutations) {
+      appendMutationList(mutations, "body_shims_applied", ["store_forced_false"]);
+      mutations.provider_profile_applied = "codex_official_safe";
+    }
+  }
+
+  if (streamReframed && mutations) mutations.stream_reframed = true;
+
+  if (carrier === null) return body;
+  return bodyChanged
+    ? cloneCarrierWithBody(carrier, body)
+    : cloneCarrierWithBody(carrier, body, { preserveRawBody: true });
 }
 
 function upstreamStatusOf(err: unknown): number | null {
@@ -595,7 +648,13 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // the client's `model` is the routing alias (e.g. `anthropic/claude-…`), not
           // a real upstream model id. Everything else is forwarded verbatim. Mirrors
           // stripInternal's `model: providerModel`; without it the upstream 404s.
-          const passthroughBody = { ...nativeBody, model: providerModel };
+          const passthroughBody = prepareNativeRequestForUpstream(
+            nativeBody,
+            providerModel,
+            req.protocol,
+            true,
+          );
+          passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
           const stream = await peekStream(
             () => passthroughStream(passthroughBody, { signal }),
             signal,
@@ -651,7 +710,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // `model` is the routing alias (e.g. `anthropic/claude-…`), but the gateway
           // picked this upstream model — forward it so the upstream doesn't 404 on the
           // alias. Everything else verbatim. Mirrors stripInternal's `model: providerModel`.
-          const body = await passthroughInvoke({ ...nativeBody, model: providerModel }, { signal });
+          const passthroughBody = prepareNativeRequestForUpstream(
+            nativeBody,
+            providerModel,
+            req.protocol,
+            false,
+          );
+          passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
+          const body = await passthroughInvoke(passthroughBody, { signal });
           breaker.recordSuccess(alias);
           const usage =
             req.protocol === "openai_responses"

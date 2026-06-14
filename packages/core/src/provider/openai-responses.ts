@@ -17,6 +17,8 @@
 // ⚠️ ToS: reverse-engineered first-party Codex client; the operator opts in (issue
 // #38 README disclaimer). Request/SSE shapes + identity ported from openclaw (MIT).
 
+import { isNativePassthroughCarrier, type NativePassthroughInput } from "@helm/shared";
+import { prepareNativePassthroughRequest } from "./native-passthrough.js";
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
@@ -331,13 +333,23 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     return changed ? JSON.parse(value) : raw;
   }
 
-  async function request(body: Record<string, unknown>, external?: AbortSignal): Promise<Response> {
+  async function request(input: NativePassthroughInput, external?: AbortSignal): Promise<Response> {
+    const providerHeaders = await headers();
+    if (isNativePassthroughCarrier(input) && cfg.userAgent === undefined) {
+      const hasClientUserAgent = Object.keys(input.headers).some(
+        (name) => name.toLowerCase() === "user-agent",
+      );
+      if (hasClientUserAgent) delete providerHeaders["User-Agent"];
+    }
+    const prepared = prepareNativePassthroughRequest(input, providerHeaders, {
+      mergeHeaders: ["openai-beta"],
+    });
     const t = withTimeout(timeoutMs, external);
     try {
       return await doFetch(url, {
         method: "POST",
-        headers: await headers(),
-        body: JSON.stringify(body),
+        headers: prepared.headers,
+        body: prepared.bodyText,
         signal: t.signal,
       });
     } catch (err) {
@@ -364,7 +376,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   }
 
   async function requestWithRetry(
-    body: Record<string, unknown>,
+    body: NativePassthroughInput,
     external?: AbortSignal,
   ): Promise<Response> {
     const res = await request(body, external);

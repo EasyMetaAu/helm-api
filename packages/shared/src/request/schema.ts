@@ -31,6 +31,32 @@ const MessageSchema = z.looseObject({ role: z.string(), content: z.unknown() });
 const UnknownRecordSchema = z.record(z.string(), z.unknown());
 const StreamOptionsSchema = z.object({ include_usage: z.boolean().optional() }).passthrough();
 const StopSchema = z.union([z.string(), z.array(z.string())]);
+const NativeHeaderValueSchema = z.union([z.string(), z.array(z.string())]);
+
+export const NativePassthroughMutationLedgerSchema = z
+  .object({
+    model_rewritten: z.object({ from: z.string().nullable(), to: z.string() }).optional(),
+    memory_appended: z.boolean().optional(),
+    headers_dropped: z.array(z.string()).optional(),
+    headers_overwritten: z.array(z.string()).optional(),
+    auth_replaced: z.boolean().optional(),
+    content_length_recomputed: z.boolean().optional(),
+    accept_encoding_forced_identity: z.boolean().optional(),
+    provider_profile_applied: z.string().nullable().optional(),
+    body_shims_applied: z.array(z.string()).optional(),
+    stream_reframed: z.boolean().optional(),
+  })
+  .passthrough();
+
+export const NativePassthroughCarrierSchema = z.object({
+  protocol: z.enum(["anthropic_messages", "openai_responses"]),
+  body: UnknownRecordSchema,
+  raw_body: z.string().optional(),
+  headers: z.record(z.string(), NativeHeaderValueSchema),
+  mutations: NativePassthroughMutationLedgerSchema,
+});
+
+const NativeRequestSchema = z.union([NativePassthroughCarrierSchema, UnknownRecordSchema]);
 
 export const RequestMetadataSchema = z.object({
   conversation_id: z.string().nullable(),
@@ -102,7 +128,7 @@ export const InternalRequestSchema = z.object({
   // Verbatim native request body in InternalRequest.protocol, captured at the
   // route boundary; used ONLY by execute's native-passthrough branch after
   // governance gates prove same-protocol non-stream safe.
-  native_request: UnknownRecordSchema.optional(),
+  native_request: NativeRequestSchema.optional(),
   stream: z.boolean(),
   metadata: RequestMetadataSchema,
 });
@@ -168,3 +194,5 @@ export type TargetProviderProtocol = z.infer<typeof TargetProviderProtocolSchema
 export type MemoryMode = z.infer<typeof MemoryModeSchema>;
 export type RequestMetadata = z.infer<typeof RequestMetadataSchema>;
 export type InternalRequest = z.infer<typeof InternalRequestSchema>;
+export type NativePassthroughCarrier = z.infer<typeof NativePassthroughCarrierSchema>;
+export type NativePassthroughMutationLedger = z.infer<typeof NativePassthroughMutationLedgerSchema>;

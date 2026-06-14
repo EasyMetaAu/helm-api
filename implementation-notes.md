@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-14 · 原生直通保真实施 + 可执行验收（docs/native-passthrough-fidelity-spec；原则 7/8）
+
+- **背景**：用户要求 Anthropic Messages 和 OpenAI Responses 的 native passthrough 尽量保持客户端原协议与原请求内容，同时保留 Helm 自身治理、优化和 memory 注入，并参考 `claude-relay-service` 的账号安全策略（尤其防封号策略）。本次按 TDD 先补可执行验收，再收敛实现。
+- **核心改动**：① 新增 typed `NativePassthroughCarrier`（`protocol/body/raw_body/headers/mutations`）和共享 helper，route 在 `/v1/messages`、`/v1/responses` 盖戳 raw body + client headers；② provider native 请求统一走 `prepareNativePassthroughRequest`，drop auth/hop-by-hop/`x-helm-*`/cookie/secret-like client headers，替换 provider auth，默认保留安全 identity/session headers（UA、accept、session_id、x-client-request-id、originator 等），合并 Anthropic/OpenAI beta，并在 body 未变时转发 raw JSON text；③ streaming native path 改为 route 可写 raw SSE frame，comments/keepalives/no-data frames 与 CRLF 边界不再被 splitter 丢弃，Responses native stream 不再合成 prelude、不改写 upstream id；④ Responses/Codex profile 对 `store:true` 强制 `store:false` 并记录 `body_shims_applied:["store_forced_false"]` + `provider_profile_applied:"codex_official_safe"`；Anthropic dynamic-auth stream 的 `accept-encoding: identity` 仅在 official-safe profile 触发并记录；⑤ OAuth pool 增加 native sticky session（session_id/x-session-id/x-client-request-id/prompt_cache_key/conversation_id/metadata），同一 session 在 TTL 内绑定同一账号。
+- **治理与可观测性**：native path 仍经过 auth、rate limit、concurrency、budget、route/fallback guard、payload capture、memory inject/observe 和 telemetry；每次 attempt 的 `passthrough_*` 字段与 mutation ledger 进 `DecisionRecord.provider_attempts[]`，ledger 只记录修改类型，不写 secrets 或完整 body。memory 注入保持尾部 `<system-reminder>` 追加；修改 body 时自动清掉 raw body，避免伪装 byte-identical。
+- **验收体系**：新增 `scripts/passthrough/*` 和 package scripts：`test:passthrough:unit`（helper/provider/route/pipeline focused tests）、`test:passthrough:e2e`（fake upstream + route/execute deterministic golden cases）、`test:passthrough:live:*`（真实 Claude CLI / Codex CLI + telemetry proof）和 `test:passthrough:final`。live 脚本 fail-closed：必须看到 CLI sentinel、真实 CLI exit 0、admin telemetry 中 `passthrough_used:true`、协议一致、ledger 不含 Helm API key；live report 的 stdout/stderr 只写长度/行数/hash/sentinel/secret-redaction 摘要，不写完整 prompt 或输出正文。
+- **验证**：`ast-grep` 已用于 native carrier / route glue / mutation ledger 检查；`pnpm lint` 绿；`pnpm typecheck` 绿；`pnpm build` 绿；`pnpm test:passthrough` 绿（323 focused unit + 11 deterministic e2e）；`pnpm test` 绿（255 files / 3578 tests）；`pnpm test:passthrough:final` 绿。live final 使用本地 Helm 测试实例代理真实 upstream，Claude Code `2.1.175` 与 Codex CLI `0.139.0` 均返回 `HELM_LIVE_OK`，并从本地 admin telemetry 证明 `anthropic_messages` / `openai_responses` native passthrough。live 报告只作验收产物，不提交。
+- **取舍 / TODO**：provider profile 目前以代码路径记录（`codex_official_safe` / `anthropic_official_safe`），尚未做成完整 YAML 配置面；admin request detail 已有原始 attempt 字段，但 SPA 专门展示 passthrough ledger 可作为后续 UX 增强；Responses live CLI 本身未必发送 `store:true`，因此 `store_forced_false` 的强断言放在 deterministic fake-upstream case。
+
 ## 2026-06-14 · 协议层 review 修复：4 协议保真 + memory 注释纠偏（多 spec；原则 1/7/8）
 
 - **背景**：用 Workflow（codex finder + opus 对抗验证）做人类式 review，覆盖 4 协议客户端支持（多模态/工具）、互译完整性、原生直通、memory 注入/压缩、治理限额。25 条经对抗验证 confirmed；验证把**所有 high 降级**——真问题止于 medium。本次修复全部 confirmed 功能 bug + 过期注释（红→绿 TDD），设计取舍类只 surface。
@@ -26,20 +35,13 @@
 - **验证**：TDD 红→绿——4 个断言默认派生值的测试 `false→true`（shared schema / gateway server / core settings `defaultSettingsFromConfig` / admin settings client「defaults missing fields」；显式传 `false` 的 fixture 不动）。分包单测 + `pnpm typecheck` + `pnpm lint`。
 - **不在本次范围**：部署到 prod（需 cut release + build 镜像）、ja/ko 文案补全。
 
-## 2026-06-13 · memory prompt-cache 优化 — 系统前缀注入 → 尾部 system-reminder（docs/08；原则 8）
-
-- **问题（Phase 4 遗留权衡）**：Phase 4 把 memory 前置进 `system`（translate 路 `mergeMemoryIntoSystem` / 直通路 `prependMemoryTo{Anthropic,Responses}Body`）。Anthropic/Responses prompt cache 是**严格前缀匹配**（`tools→system→messages`），前缀任一字节变动使其后全部失效。前置 memory **位移客户端缓存前缀**（Claude Code 给 `system` 块打的 `cache_control` 断点），每个 memory 回合都 bust 掉 system+messages 缓存；而 memory 块本身**窗口可变**（window-dedup 集随客户端窗口滑动而变），永远无法落进可缓存前缀。
-- **修复（用户在 3 选项里拍板「尾部 system-reminder 块」——最稳）**：memory 改为**追加**为对话**末尾一条** `<system-reminder>` 包裹的 user 回合，落在客户端缓存前缀**之后**——`tools`/`system`（及其 `cache_control` 断点）与整段历史**逐字节不变** → 上游缓存照命中，只有那条小小的 reminder 回合不缓存。`<system-reminder>` 框定给 memory **系统权威**语义（Claude 训练为视其为注入的 operator 上下文、非用户发言），且**无需** model-gated 的 `mid-conversation-system` beta（`role:"system"` 消息对 Sonnet/旧模型会 400，与 fail-open 直通冲突；尾部 reminder 全模型通用、零 beta）。
-- **落点（两路同改，单一 wrap 真相源 = core `wrapMemoryReminder`，从 `@helm/core` 导出）**：translate 路 `injectIntoIR`（core `inject-bridge.ts`）`mergeMemoryIntoSystem` → `appendMemoryReminder`（追加一条尾部 user IR 消息；leading system 及所有回合按引用、原序保留）；直通路（gateway `native-memory-inject.ts`）`prependMemoryTo{Anthropic,Responses}Body` → `appendMemoryTo*`（Anthropic 追加尾部 `messages` user 回合；Responses `input` array→追加 user item、string→尾部文本拼接；`system`/`instructions` 逐字不动）。`messages-pipeline.ts` 调用点与注释同步改名。
-- **取舍 / 边界**：① memory 现出现在用户当前问题**之后**（而非 system 前言）——`<system-reminder>` 框定 + Claude 读完整 message 数组后再答，召回语义保持；② 连续两条 user 回合（客户端末条 + reminder）由 Anthropic API 合并为一个 turn，合法；③ Responses string-input 用尾部文本拼接保前缀；④ 这是 **Phase-4 决定 #3 的「位置面」修订**（仍「系统权威」语义、但位于缓存前缀**之后**而非 `system` 最前），docs/08 三节（Inject is additive / Tradeoff / Native passthrough）+ Phases changelog 同步重写（PREFIX→TRAILING-REMINDER，缓存「警示」改「保留」）。
-- **验证**：TDD 红→绿。重写落点断言：`inject-bridge.test.ts`(13)、`native-memory-inject.test.ts`(10)、`chat.inject.test.ts`(11)、`messages.inject.test.ts`(14)、`messages-pipeline.test.ts`(36)（system 合并→尾部 reminder）。`pnpm typecheck` + `pnpm lint` 干净；`pnpm test` 仅 7 红、全在 classifier（engine/taskdetect/classifier-samples）——证为工作树未提交的**生产 `config/classifier.yaml`**（docker 用，不提交）所致：临时 `git checkout HEAD config/classifier.yaml` 后 50/50 全绿、再恢复生产 config（[[config-edits-run-config-samples-test]]）。改动文件严格限于 memory/inject + docs + notes（**未碰 config**）。
-- **TODO**：live e2e 手验——真实 Claude Code/Codex 指向本网关 + memory inject ON + 直通 ON，确认 `usage.cache_read_input_tokens > 0`（memory 回合缓存命中恢复）且 memory 仍被召回（`memory_hydrated:true`）。需重建 docker 镜像。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-13 · memory prompt-cache 优化 — 系统前缀注入 → 尾部 system-reminder（docs/08；原则 8）：用户拍板尾部 `<system-reminder>`，translate 路和 native passthrough 路都把 memory 追加到对话末尾而非前置 system，保住 Anthropic/Responses prompt-cache 前缀；`wrapMemoryReminder` 成单一真相源，system/instructions 与历史回合逐字不动。TDD 覆盖 inject bridge/native-memory/chat/messages/pipeline，typecheck/lint 绿；TODO 是 live e2e 手验缓存命中与 memory 召回。
 
 ### 2026-06-13 · Phase 4 — memory 前缀注入（docs/08；tool/多模态 + 直通；原则 1/3/7/8）：inject 从 full-replace 改**加性前缀**——assembler 不再重建会话，只产一个系统级 memory 文本块（`buildMemoryBlock`，确定性/缓存友好），pipeline 前置到逐字保留的实时会话之上 → 删 D7 纯文本闸、tool/多模态/直通回合一视同仁注入。**窗口感知去重**：project/resource reflection 恒注入、thread observation 仅当覆盖回合已不在实时窗口才注入，指纹 `sha256Hex(serializeContent)` 与 storage `content_hash` 字节恒等；无法解析覆盖范围则保留、无窗口不去重。落点：translate `injectIntoIR`（前置/插 leading system）、直通 `native-memory-inject.ts`（Anthropic `system`/Responses `instructions`，`messages`/`input` 逐字）；guard 删 `memory_mode==="inject"` 禁用项 → **直通可与 memory 同触发**。observe 路零改。取舍：放弃实时会话压缩（helm 只贡献长期召回）、memory 前置**位移 prompt-cache 前缀**（次日 [[尾部 system-reminder 修订]]改为缓存保留）。旧 full-replace/D7/recent_raw 测试全按前缀模型重写、新增 `native-memory-inject.test.ts`；3263/3264 绿（唯一红=admin-oauth 预存 flake）。
 

@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { ProtocolSchema, TargetProviderProtocolSchema } from "../request/schema.js";
+import {
+  NativePassthroughMutationLedgerSchema,
+  ProtocolSchema,
+  TargetProviderProtocolSchema,
+} from "../request/schema.js";
 
 // Decision record — the full routing trail for one request: classification,
 // matched policy, selected lane + candidate chain, every provider attempt, and
@@ -106,6 +110,7 @@ export const ProviderAttemptSchema = z.object({
   response_protocol: ProtocolSchema.nullable().optional(),
   provider_name: z.string().nullable().optional(),
   provider_model: z.string().nullable().optional(),
+  passthrough_mutations: NativePassthroughMutationLedgerSchema.optional(),
 });
 
 export const FinalDecisionSchema = z.object({

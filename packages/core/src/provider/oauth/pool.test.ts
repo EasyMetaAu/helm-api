@@ -146,6 +146,61 @@ describe("createOAuthPoolClient — nativePassthrough", () => {
     expect(r2).toEqual({ served_by: "b", body: NATIVE });
   });
 
+  it("keeps the same native session on the same OAuth account while the sticky TTL is live", async () => {
+    const pt: string[] = [];
+    const selected: string[] = [];
+    let clock = 1_000;
+    const pool = createOAuthPoolClient({
+      members: [ptMember("a", 50, pt), ptMember("b", 50, pt)],
+      now: () => clock,
+      stickyTtlMs: 100,
+      onSelect: (acc) => selected.push(acc),
+    });
+    const firstSession = {
+      protocol: "openai_responses" as const,
+      body: { model: "gpt-5-codex", input: "hi" },
+      headers: { session_id: "sess-1" },
+      mutations: {},
+    };
+    const secondSession = {
+      protocol: "openai_responses" as const,
+      body: { model: "gpt-5-codex", input: "hi" },
+      headers: { session_id: "sess-2" },
+      mutations: {},
+    };
+
+    await pool.nativePassthrough?.(firstSession);
+    clock += 10;
+    await pool.nativePassthrough?.(firstSession);
+    clock += 10;
+    await pool.nativePassthrough?.(secondSession);
+
+    expect(pt).toEqual(["a", "a", "b"]);
+    expect(selected).toEqual(["a", "a", "b"]);
+  });
+
+  it("expires native sticky sessions and returns to LRU selection", async () => {
+    const pt: string[] = [];
+    let clock = 1_000;
+    const pool = createOAuthPoolClient({
+      members: [ptMember("a", 50, pt), ptMember("b", 50, pt)],
+      now: () => clock,
+      stickyTtlMs: 50,
+    });
+    const native = {
+      protocol: "anthropic_messages" as const,
+      body: { model: "claude", messages: [] },
+      headers: { "x-session-id": "sess-expire" },
+      mutations: {},
+    };
+
+    await pool.nativePassthrough?.(native);
+    clock += 100;
+    await pool.nativePassthrough?.(native);
+
+    expect(pt).toEqual(["a", "b"]);
+  });
+
   it("throws fail-closed when the selected member lacks nativePassthrough (never falls back to a sibling)", async () => {
     const pt: string[] = [];
     // The lowest-priority (preferred) member has NO nativePassthrough; the pool must

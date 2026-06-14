@@ -3,6 +3,7 @@
 // (all Phase 1/2). Framework-agnostic (no Hono). Credentials come only from the
 // injected config (env-sourced) and are never logged or echoed. See docs/02.
 
+import type { NativePassthroughInput } from "@helm/shared";
 // Provider credential: EXACTLY ONE of a static `apiKey` or a dynamic
 // `getAuthHeader` (issue #38 OAuth). The dynamic path also accepts:
 //   - `onUnauthorized`: invoked once on an upstream 401 to force a token refresh
@@ -59,7 +60,7 @@ export interface ProviderClient {
   // untranslated. Only same-protocol native clients (Anthropic→Anthropic in Phase 1)
   // implement it; the guard (canUseNativePassthrough) gates when it may be used.
   nativePassthrough?(
-    body: Record<string, unknown>,
+    request: NativePassthroughInput,
     opts?: { signal?: AbortSignal },
   ): Promise<Record<string, unknown>>;
   // Streaming native protocol passthrough (issue #217, Phase 2). The streaming sibling
@@ -69,7 +70,7 @@ export interface ProviderClient {
   // replacing it. OPTIONAL (feature-detected by the executor); only same-protocol native
   // clients implement it, gated by the same guard as nativePassthrough.
   nativePassthroughStream?(
-    body: Record<string, unknown>,
+    request: NativePassthroughInput,
     opts?: { signal?: AbortSignal },
   ): AsyncIterable<string>;
 }

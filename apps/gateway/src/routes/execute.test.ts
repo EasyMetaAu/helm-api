@@ -1716,6 +1716,62 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(out.attempts[0]?.cost_usd).toBeCloseTo(0.0141, 12);
   });
 
+  it("records model/store mutations on an OpenAI Responses native carrier", async () => {
+    const responsesBody = {
+      id: "resp_1",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["codex", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "codex",
+          providerModel: "gpt-5-codex",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: { model: "codex/gpt-5-codex", input: "hi", store: true },
+      raw_body: '{"model":"codex/gpt-5-codex","input":"hi","store":true}',
+      headers: { authorization: "Bearer client" },
+      mutations: {},
+    };
+
+    const out = await execute(
+      plan(["r"]),
+      req({
+        protocol: "openai_responses",
+        native_request: carrier,
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body).toEqual({ model: "gpt-5-codex", input: "hi", store: false });
+    expect(forwarded.raw_body).toBeUndefined();
+    expect(forwarded.mutations).toMatchObject({
+      model_rewritten: { from: "codex/gpt-5-codex", to: "gpt-5-codex" },
+      body_shims_applied: ["store_forced_false"],
+    });
+    expect(out.attempts[0]?.passthrough_mutations).toMatchObject(forwarded.mutations);
+  });
+
   it("flag ON but provider has NO nativePassthrough → translates, reason provider_lacks_passthrough", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "translated" }),
@@ -1868,6 +1924,50 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(okRow?.cost_usd).toBeNull();
     expect(okRow?.source_protocol).toBe("anthropic_messages");
     expect(okRow?.target_provider_protocol).toBe("anthropic_messages");
+  });
+
+  it("records model rewrite + stream reframing mutations on a native stream carrier", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(gen(SSE)),
+    } as unknown as ProviderClient & {
+      nativePassthroughStream: ReturnType<typeof vi.fn>;
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "anthropic_messages" as const,
+      body: { ...NATIVE_STREAM },
+      raw_body: JSON.stringify(NATIVE_STREAM),
+      headers: { "x-api-key": "client" },
+      mutations: {},
+    };
+
+    const out = await execute(plan(["a"]), anthropicStreamReq({ native_request: carrier }));
+
+    const forwarded = provider.nativePassthroughStream.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body).toEqual({ ...NATIVE_STREAM, model: "claude-x" });
+    expect(forwarded.mutations).toMatchObject({
+      model_rewritten: { from: "anthropic/claude-x", to: "claude-x" },
+      stream_reframed: true,
+    });
+    expect(out.attempts[0]?.passthrough_mutations).toMatchObject(forwarded.mutations);
   });
 
   it("flag OFF + stream → chatCompletionStream(stripInternal) translate path, passthrough_used:false, nativePassthrough absent", async () => {

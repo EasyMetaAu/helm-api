@@ -24,6 +24,11 @@ import {
   resolveMemoryMode,
 } from "@helm/core";
 import type { InternalRequest, MemoryDecision, Protocol } from "@helm/shared";
+import {
+  cloneCarrierWithBody,
+  isNativePassthroughCarrier,
+  nativePassthroughBody,
+} from "@helm/shared";
 import type { ServingAccount } from "../runtime/serving-account.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
 import { copyLiteLLMRequestParams, providerRawFromRequest } from "./internal-request-params.js";
@@ -177,7 +182,7 @@ function toInternalRequest(
     ir.metadata?.native_request !== null &&
     typeof ir.metadata?.native_request === "object" &&
     !Array.isArray(ir.metadata.native_request)
-      ? (ir.metadata.native_request as Record<string, unknown>)
+      ? (ir.metadata.native_request as InternalRequest["native_request"])
       : undefined;
 
   return {
@@ -410,42 +415,51 @@ interface RawSSEFrame {
   event: string;
   /** The verbatim `data:` payload string (the exact upstream JSON), unparsed. */
   data: string;
-  /** The frame's raw text incl. event/data lines + trailing blank line, for the
-   *  usage tee (usageFromAnthropicSSE scans data lines off this). */
+  /** The frame's raw text incl. event/data lines + trailing blank line. The route's
+   *  raw writer forwards this byte-for-byte; the usage tee scans data lines off it. */
   raw: string;
 }
 
-function parseRawSSEFrame(event: string): RawSSEFrame | null {
+function parseRawSSEFrame(event: string, raw: string): RawSSEFrame | null {
+  if (event.length === 0 && raw.length === 0) return null;
   let evtName = "";
   const dataLines: string[] = [];
-  for (const line of event.split("\n")) {
+  for (const line of event.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
     if (line.startsWith("event:")) {
       evtName = line.slice("event:".length).replace(/^ /, "");
     } else if (line.startsWith("data:")) {
       dataLines.push(line.slice("data:".length).replace(/^ /, ""));
     }
   }
-  // A frame with no data line (a bare `event:` or a keepalive) carries nothing to
-  // forward — skip it. Anthropic + Responses always pair event+data, so this only
-  // drops pings/keepalives.
-  if (dataLines.length === 0) return null;
   // Multi-line data is joined with \n per the SSE spec (both protocols use single-line).
-  return { event: evtName, data: dataLines.join("\n"), raw: `${event}\n\n` };
+  return { event: evtName, data: dataLines.join("\n"), raw };
+}
+
+function nextSSEBoundary(buffer: string): { index: number; length: number } | null {
+  const candidates = [
+    { index: buffer.indexOf("\r\n\r\n"), length: 4 },
+    { index: buffer.indexOf("\n\n"), length: 2 },
+    { index: buffer.indexOf("\r\r"), length: 2 },
+  ].filter((candidate) => candidate.index >= 0);
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => a.index - b.index || b.length - a.length);
+  return candidates[0] ?? null;
 }
 
 async function* splitSSEFrames(raw: AsyncIterable<string>): AsyncIterable<RawSSEFrame> {
   let buffer = "";
   for await (const piece of raw) {
-    buffer += piece.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-    let sep = buffer.indexOf("\n\n");
-    while (sep !== -1) {
-      const frame = parseRawSSEFrame(buffer.slice(0, sep));
-      buffer = buffer.slice(sep + 2);
+    buffer += piece;
+    let sep = nextSSEBoundary(buffer);
+    while (sep !== null) {
+      const rawFrame = buffer.slice(0, sep.index + sep.length);
+      const frame = parseRawSSEFrame(buffer.slice(0, sep.index), rawFrame);
+      buffer = buffer.slice(sep.index + sep.length);
       if (frame !== null) yield frame;
-      sep = buffer.indexOf("\n\n");
+      sep = nextSSEBoundary(buffer);
     }
   }
-  const tail = parseRawSSEFrame(buffer);
+  const tail = parseRawSSEFrame(buffer, buffer);
   if (tail !== null) yield tail;
 }
 
@@ -646,16 +660,20 @@ export function createMessagesPipeline(
         // Reassign the spliced (NEW) body; absent block / absent native_request / a
         // non-native protocol ⇒ leave native_request as-is.
         if (injected.memoryBlock !== null && internal.native_request !== undefined) {
+          const nativeBody = nativePassthroughBody(internal.native_request);
           if (protocol === "anthropic_messages") {
-            internal.native_request = appendMemoryToAnthropicBody(
-              internal.native_request,
-              injected.memoryBlock,
-            );
+            const body = appendMemoryToAnthropicBody(nativeBody, injected.memoryBlock);
+            internal.native_request = isNativePassthroughCarrier(internal.native_request)
+              ? cloneCarrierWithBody(internal.native_request, body)
+              : body;
           } else if (protocol === "openai_responses") {
-            internal.native_request = appendMemoryToResponsesBody(
-              internal.native_request,
-              injected.memoryBlock,
-            );
+            const body = appendMemoryToResponsesBody(nativeBody, injected.memoryBlock);
+            internal.native_request = isNativePassthroughCarrier(internal.native_request)
+              ? cloneCarrierWithBody(internal.native_request, body)
+              : body;
+          }
+          if (isNativePassthroughCarrier(internal.native_request)) {
+            internal.native_request.mutations.memory_appended = true;
           }
         }
       }
@@ -911,8 +929,13 @@ export function createMessagesPipeline(
                     accumulateAnthropicAssistantText(passthroughAssistant, frame.data);
                   }
                 }
-                // Yield the VERBATIM frame: data is the exact upstream JSON string.
-                yield { event: frame.event, data: frame.data };
+                // Yield the VERBATIM frame: routes use `raw` when present, so comment
+                // frames / keepalives / CRLF boundaries survive the Hono boundary too.
+                yield {
+                  event: frame.event,
+                  data: frame.data,
+                  raw: frame.raw,
+                };
               }
             } finally {
               // Mirror the non-passthrough finally below: observe-outbound (assistant
