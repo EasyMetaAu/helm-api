@@ -453,6 +453,41 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     expect(text.trimEnd().endsWith("[DONE]")).toBe(true);
   });
 
+  it("emits an SSE heartbeat comment during an inter-chunk idle gap without corrupting frames", async () => {
+    // A healthy-but-slow stream: a real idle gap between chunks. With a short cadence
+    // the route must interleave `:\n\n` keep-alive comments and still forward the data
+    // frames byte-intact (principle 8). The comment is wire-only — never a data event.
+    async function* slow(): AsyncGenerator<string> {
+      yield 'data: {"a":1}\n\n';
+      await new Promise((r) => setTimeout(r, 60)); // idle gap > heartbeat cadence
+      yield 'data: {"b":2}\n\n';
+      yield "data: [DONE]\n\n";
+    }
+    const { deps: d, harness } = deps({ sseHeartbeatMs: () => 15 });
+    harness.execute.mockResolvedValue({
+      ...nonStreamOutcome(null),
+      body: null,
+      stream: slow(),
+    });
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(STREAM_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain(":\n\n"); // at least one keep-alive comment landed
+    expect(text).toContain('data: {"a":1}'); // data frames intact + uncorrupted
+    expect(text).toContain('data: {"b":2}');
+    expect(text.trimEnd().endsWith("[DONE]")).toBe(true);
+    // The beat is an SSE comment, NOT a data event — no extra `data:` frame appears.
+    const dataLines = text.split("\n").filter((l) => l.startsWith("data: "));
+    expect(dataLines.length).toBe(3); // a, b, [DONE]
+  });
+
   it("preserves the timeout class in the terminal error frame when the stream stalls mid-flight", async () => {
     // The provider idle guard throws UpstreamError("timeout") AFTER the first
     // chunk; the route must surface that as a `timeout` frame, not a generic

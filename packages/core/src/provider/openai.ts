@@ -13,6 +13,7 @@ import type { NativePassthroughInput } from "@helm/shared";
 //   - `currentSecrets`: live access + refresh tokens, used by `scrub()` to strip
 //     any echoed credential from an upstream error body (principle 7).
 // Credentials are runtime-only: from env, never persisted/logged.
+import { withConnectionRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface ProviderConfig {
@@ -37,6 +38,13 @@ export interface ProviderConfig {
   // Compatibility shim for OpenAI-compatible providers that stream reasoning as
   // choices[].delta.reasoning. Disabled by default to preserve byte forwarding.
   normalizeReasoningDeltaAlias?: boolean;
+  // Transient-connection retry at the fetch boundary (provider/retry.ts). Both
+  // optional — omitted falls back to withConnectionRetry's defaults (2 retries,
+  // [200,500] ms). Safe here because a retry happens BEFORE any byte reaches the
+  // client (idempotent); it absorbs a keepalive-reuse race / ECONNRESET so a hiccup
+  // does not burn a candidate or 502 a single-candidate chain.
+  connectRetries?: number;
+  connectRetryBackoffMs?: readonly number[];
 }
 
 export interface OpenAIClientDeps {
@@ -305,23 +313,32 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     req: ChatCompletionRequest,
     external: AbortSignal | undefined,
   ): Promise<Response> {
-    const t = withTimeout(timeoutMs, external);
-    try {
-      return await doFetch(await chatUrl(), {
-        method: "POST",
-        headers: await headers(),
-        body: JSON.stringify(prepareRequest(req)),
-        signal: t.signal,
-      });
-    } catch (err) {
-      if (t.isTimeout() && !t.isExternalAbort()) {
-        throw new UpstreamError("timeout", "upstream request timed out");
-      }
-      // Client abort is NOT a provider fault — rethrow as-is for the caller.
-      throw err;
-    } finally {
-      t.cleanup();
-    }
+    // Retry transient connection blips at the fetch boundary (pre-first-byte, so
+    // idempotent). A timeout is rethrown as UpstreamError (non-transient → no retry,
+    // the chain falls back); a client abort rethrows as-is. Each attempt gets a fresh
+    // timeout + freshly resolved url/headers (tracks a rotating token).
+    return withConnectionRetry(
+      async () => {
+        const t = withTimeout(timeoutMs, external);
+        try {
+          return await doFetch(await chatUrl(), {
+            method: "POST",
+            headers: await headers(),
+            body: JSON.stringify(prepareRequest(req)),
+            signal: t.signal,
+          });
+        } catch (err) {
+          if (t.isTimeout() && !t.isExternalAbort()) {
+            throw new UpstreamError("timeout", "upstream request timed out");
+          }
+          // Client abort is NOT a provider fault — rethrow as-is for the caller.
+          throw err;
+        } finally {
+          t.cleanup();
+        }
+      },
+      { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+    );
   }
 
   // Issue the request, applying the OAuth 401 single-retry (D2): on a 401 with an

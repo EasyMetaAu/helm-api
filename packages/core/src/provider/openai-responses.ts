@@ -26,6 +26,7 @@ import {
   type ProviderConfig,
   UpstreamError,
 } from "./openai.js";
+import { withConnectionRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface CodexResponsesClientConfig {
@@ -49,6 +50,11 @@ export interface CodexResponsesClientConfig {
   // caller wraps its own fail-open); a throw here is swallowed so it never breaks a
   // served request.
   onResponseMeta?: (headers: Headers) => void;
+  // Transient-connection retry at the fetch boundary (provider/retry.ts). Optional —
+  // omitted falls back to defaults (2 retries, [200,500] ms). Pre-first-byte, so the
+  // retry is idempotent. See ProviderConfig for the rationale.
+  connectRetries?: number;
+  connectRetryBackoffMs?: readonly number[];
 }
 
 export interface CodexResponsesClientDeps {
@@ -451,22 +457,29 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     const prepared = prepareNativePassthroughRequest(input, providerHeaders, {
       mergeHeaders: ["openai-beta"],
     });
-    const t = withTimeout(timeoutMs, external);
-    try {
-      return await doFetch(url, {
-        method: "POST",
-        headers: prepared.headers,
-        body: prepared.bodyText,
-        signal: t.signal,
-      });
-    } catch (err) {
-      if (t.isTimeout() && !t.isExternalAbort()) {
-        throw new UpstreamError("timeout", "upstream request timed out");
-      }
-      throw err;
-    } finally {
-      t.cleanup();
-    }
+    // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
+    // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
+    return withConnectionRetry(
+      async () => {
+        const t = withTimeout(timeoutMs, external);
+        try {
+          return await doFetch(url, {
+            method: "POST",
+            headers: prepared.headers,
+            body: prepared.bodyText,
+            signal: t.signal,
+          });
+        } catch (err) {
+          if (t.isTimeout() && !t.isExternalAbort()) {
+            throw new UpstreamError("timeout", "upstream request timed out");
+          }
+          throw err;
+        } finally {
+          t.cleanup();
+        }
+      },
+      { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+    );
   }
 
   // Scrape the upstream rate-limit window headers (providers page Tier 3) the moment

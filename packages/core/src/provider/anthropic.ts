@@ -22,6 +22,7 @@ import {
   type ProviderClient,
   UpstreamError,
 } from "./openai.js";
+import { withConnectionRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface AnthropicClientConfig {
@@ -37,6 +38,11 @@ export interface AnthropicClientConfig {
   // the device identity never rotates — the real-client posture Anthropic expects.
   // Undefined → no `metadata` is sent (back-compat; matches openclaw's default).
   metadataUserId?: string;
+  // Transient-connection retry at the fetch boundary (provider/retry.ts). Optional —
+  // omitted falls back to defaults (2 retries, [200,500] ms). Pre-first-byte, so the
+  // retry is idempotent. See ProviderConfig for the rationale.
+  connectRetries?: number;
+  connectRetryBackoffMs?: readonly number[];
 }
 
 export interface AnthropicClientDeps {
@@ -664,22 +670,29 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         ? { providerProfileApplied: "anthropic_official_safe" }
         : {}),
     });
-    const t = withTimeout(timeoutMs, external);
-    try {
-      return await doFetch(endpointUrl, {
-        method: "POST",
-        headers: prepared.headers,
-        body: prepared.bodyText,
-        signal: t.signal,
-      });
-    } catch (err) {
-      if (t.isTimeout() && !t.isExternalAbort()) {
-        throw new UpstreamError("timeout", "upstream request timed out");
-      }
-      throw err;
-    } finally {
-      t.cleanup();
-    }
+    // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
+    // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
+    return withConnectionRetry(
+      async () => {
+        const t = withTimeout(timeoutMs, external);
+        try {
+          return await doFetch(endpointUrl, {
+            method: "POST",
+            headers: prepared.headers,
+            body: prepared.bodyText,
+            signal: t.signal,
+          });
+        } catch (err) {
+          if (t.isTimeout() && !t.isExternalAbort()) {
+            throw new UpstreamError("timeout", "upstream request timed out");
+          }
+          throw err;
+        } finally {
+          t.cleanup();
+        }
+      },
+      { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+    );
   }
 
   async function requestWithRetry(

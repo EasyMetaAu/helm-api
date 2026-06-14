@@ -11,6 +11,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
 import { nativeCarrierFromParsedBody } from "./native-carrier.js";
@@ -148,6 +149,9 @@ export interface MessagesRouteDeps {
      *  fault (does not trip the circuit breaker). */
     run(ir: IRLike, identity: MessagesIdentity, signal: AbortSignal): Promise<PipelineRunResult>;
   };
+  /** SSE keep-alive cadence (ms) for streaming responses; read fresh per request from
+   *  runtime.sse_heartbeat_ms. Optional — absent/0 = no heartbeat. Inter-chunk only. */
+  sseHeartbeatMs?: () => number;
 }
 
 // The route treats the IR as an opaque bag with the two fields it must read
@@ -492,8 +496,23 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         // machine (the #221/#222 bug source) is ELIMINATED on this path, not replaced.
         // Capture stays native on both ends; an upstream error mid-passthrough still
         // surfaces the Anthropic terminal error frame below (catch is unchanged).
+        // SSE keep-alive: emit a `:` comment during inter-chunk idle (wire-only, never
+        // captured) so a proxy/client idle-timeout does not sever a long healthy stream.
+        // Gated on an event boundary so it can never split a verbatim-relayed frame
+        // (writeSSE frames are always whole; raw passthrough chunks may be partial).
+        // 0 = disabled (today's behavior).
+        const heartbeatMs = deps.sseHeartbeatMs?.() ?? 0;
+        let lastWrite: string | null = null;
         try {
-          for await (const event of result.streamIR()) {
+          for await (const item of withHeartbeat(result.streamIR(), {
+            heartbeatMs,
+            signal: c.req.raw.signal,
+          })) {
+            if (item.type === "beat") {
+              if (atEventBoundary(lastWrite)) await sse.write(HEARTBEAT_COMMENT);
+              continue;
+            }
+            const event = item.value;
             const frame =
               result.nativePassthrough === true
                 ? (event as { event: string; data: string; raw?: string })
@@ -503,8 +522,10 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
               captured.push(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
             if (raw !== undefined) {
               await sse.write(raw);
+              lastWrite = raw;
             } else {
               await sse.writeSSE({ event: frame.event, data: frame.data });
+              lastWrite = "\n\n"; // writeSSE emits a complete frame — always a boundary
             }
           }
         } catch (err) {

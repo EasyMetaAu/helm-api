@@ -1447,19 +1447,27 @@ describe("createAnthropicClient", () => {
     }
   });
 
-  it("re-throws a real network error (not a timeout) unchanged", async () => {
+  it("retries a transient network error then re-throws it unchanged", async () => {
     // The non-timeout catch arm: fetch rejects for a reason OTHER than the internal
-    // abort -> the original error propagates (executor treats it as a provider failure).
+    // abort. ECONNREFUSED is a transient connection error, so it is retried at the
+    // fetch boundary ([0,0] backoff keeps the test instant); once the budget is
+    // exhausted the ORIGINAL error propagates (executor treats it as a provider failure).
     const boom = new Error("ECONNREFUSED");
+    const fetch = vi.fn(async () => {
+      throw boom;
+    });
     const client = createAnthropicClient({
-      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
-      fetch: (async () => {
-        throw boom;
-      }) as unknown as typeof fetch,
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        apiKey: "sk-static",
+        connectRetryBackoffMs: [0, 0],
+      },
+      fetch: fetch as unknown as typeof globalThis.fetch,
     });
     await expect(
       client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] }),
     ).rejects.toBe(boom);
+    expect(fetch).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
   });
 
   it("does NOT convert an external client abort into a timeout (client disconnect is not a provider failure)", async () => {

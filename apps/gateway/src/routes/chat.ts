@@ -35,6 +35,7 @@ import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import type { ServingAccount } from "../runtime/serving-account.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
+import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { copyLiteLLMRequestParams, providerRawFromRequest } from "./internal-request-params.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import {
@@ -78,6 +79,10 @@ export interface ChatRouteDeps {
   writes?: WriteQueue;
   redact: (payload: unknown) => unknown;
   now: () => number;
+  /** SSE keep-alive cadence (ms) for streaming responses; read fresh per request
+   *  from runtime.sse_heartbeat_ms. Optional — absent/0 = no heartbeat (existing
+   *  tests run unchanged). Covers only the inter-chunk idle gap. */
+  sseHeartbeatMs?: () => number;
   /** Per-account OAuth subscription usage recorder (providers page Tier 2).
    *  Optional — absent in unit tests. Called once per served request from the
    *  settle path with the subscription that served it (null for a configured /
@@ -745,20 +750,35 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       // middleware and release it in the stream's OWN finally — the slot stays
       // held until the bytes are fully drained (or the client disconnects).
       const releaseConcurrency = c.get("concurrencyClaim")?.();
+      // SSE keep-alive: emit a `:` comment during inter-chunk idle so a proxy/client
+      // idle-timeout does not sever a long but healthy stream. The comment is wire-only
+      // (never captured, accumulated, or priced) and is gated on an event boundary so it
+      // can never split a partial SSE frame (principle 8). 0 = disabled (today's behavior).
+      const heartbeatMs = deps.sseHeartbeatMs?.() ?? 0;
+      let lastWrite: string | null = null;
       return streamSSE(c, async (sse) => {
         try {
-          for await (const chunk of stream) {
-            const outboundChunk = streamModelRestamper?.push(chunk) ?? chunk;
+          for await (const item of withHeartbeat(stream, {
+            heartbeatMs,
+            signal: c.req.raw.signal,
+          })) {
+            if (item.type === "beat") {
+              if (atEventBoundary(lastWrite)) await sse.write(HEARTBEAT_COMMENT);
+              continue;
+            }
+            const outboundChunk = streamModelRestamper?.push(item.value) ?? item.value;
             if (outboundChunk === "") continue;
             captured.push(outboundChunk);
             await sse.write(outboundChunk);
             if (deps.memory !== undefined) accumulateOpenAIChunk(assistant, outboundChunk);
+            lastWrite = outboundChunk;
           }
           const tail = streamModelRestamper?.flush() ?? "";
           if (tail !== "") {
             captured.push(tail);
             await sse.write(tail);
             if (deps.memory !== undefined) accumulateOpenAIChunk(assistant, tail);
+            lastWrite = tail;
           }
         } catch (err) {
           // A client disconnect / abort is NOT a provider fault: do not 5xx, do
