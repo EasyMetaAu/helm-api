@@ -148,6 +148,31 @@ function responseStreamPrelude(args: {
   ];
 }
 
+// PT-08: the synthetic prelude announced the route-assigned responseId, but a
+// verbatim-relayed upstream lifecycle frame (response.completed / .incomplete / …)
+// carries the UPSTREAM's own response.id — leaving the client with TWO different
+// response.id values in one stream. Splice the route id onto any relayed frame that
+// carries a `response.id` so the stream is self-consistent. FAIL-OPEN: a frame that
+// is not parseable JSON, or carries no `response.id` (every delta / content frame, and
+// the no-id terminal frames), is returned BYTE-FOR-BYTE untouched — this is the ONLY
+// spot native passthrough trades byte-fidelity for protocol self-consistency, and it
+// only fires on the small set of id-bearing envelope frames. `response.model` is left
+// as the upstream's real value (more truthful than the client-supplied alias).
+function rewriteRelayedResponseId(data: string, responseId: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return data; // not JSON we understand — relay verbatim
+  }
+  const obj = parsed as { response?: { id?: unknown } };
+  if (typeof obj?.response?.id !== "string" || obj.response.id === responseId) {
+    return data; // no id to rewrite (or already matches) — relay verbatim, no reshape
+  }
+  obj.response.id = responseId;
+  return JSON.stringify(obj);
+}
+
 function isResponsesPreludeEvent(event: Record<string, unknown>): boolean {
   // Translate path: the pipeline yields IR events keyed by `type`. Native-passthrough
   // path (#217 Phase 3): the pipeline yields VERBATIM {event,data} frames keyed by
@@ -372,7 +397,13 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               nextErrorSequence = event.sequence_number + 1;
             const frame =
               result.nativePassthrough === true
-                ? (event as { event: string; data: string })
+                ? {
+                    event: (event as { event: string }).event,
+                    // PT-08: keep the stream's response.id self-consistent — splice the
+                    // route id onto any relayed id-bearing lifecycle frame (the synthetic
+                    // prelude announced it). Frames with no response.id are byte-identical.
+                    data: rewriteRelayedResponseId((event as { data: string }).data, responseId),
+                  }
                 : deps.transformer.transformStreamOut(event);
             if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
             await sse.writeSSE({ event: frame.event, data: frame.data });
