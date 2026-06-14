@@ -236,7 +236,7 @@
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
-  <header class="flex items-start justify-between gap-3">
+  <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div class="min-w-0">
       <h1 class="page-title">{$t('Subscription Providers')}</h1>
       <p class="section-desc">
@@ -245,13 +245,13 @@
         )}
       </p>
     </div>
-    <div class="flex shrink-0 gap-2">
-      <button type="button" class="btn-secondary" disabled={refreshing} onclick={refresh}
+    <div class="flex w-full shrink-0 gap-2 sm:w-auto">
+      <button type="button" class="btn-secondary flex-1 sm:flex-none" disabled={refreshing} onclick={refresh}
         >{refreshing ? $t('Refreshing…') : $t('Refresh')}</button
       >
       <button
         type="button"
-        class="btn-primary"
+        class="btn-primary flex-1 sm:flex-none"
         disabled={!data.configured}
         onclick={() => (showConnect = true)}>{$t('Connect')}</button
       >
@@ -363,7 +363,7 @@
                 {#if row.account.models.length > 0}
                   {@const shown = row.account.models.slice(0, MODELS_SHOWN)}
                   {@const extra = row.account.models.length - shown.length}
-                  <div class="flex w-48 flex-wrap gap-1" title={row.account.models.join('\n')}>
+                  <div class="flex max-w-full flex-wrap gap-1 lg:w-48" title={row.account.models.join('\n')}>
                     {#each shown as m (m)}
                       <span class="badge-neutral font-mono text-[10px]">{m}</span>
                     {/each}
@@ -393,7 +393,7 @@
               <!-- Quota / session windows -->
               <td data-label={$t('Quota')} class="px-3 py-3">
                 {#if quota && quota.windows.length > 0}
-                  <div class="flex w-40 flex-col gap-1.5">
+                  <div class="flex w-full flex-col gap-1.5 lg:w-40">
                     {#each quota.windows as w (w.key)}
                       <div>
                         <div class="flex items-center justify-between text-xs text-ink-muted">
@@ -454,7 +454,7 @@
 
               <!-- Actions -->
               <td data-label={$t('Actions')} class="px-3 py-3 lg:text-right">
-                <div class="flex flex-wrap gap-2 lg:inline-flex lg:flex-nowrap">
+                <div class="grid grid-cols-2 gap-2 sm:inline-flex sm:flex-wrap lg:flex-nowrap">
                   <button
                     type="button"
                     class="btn-secondary"
@@ -478,7 +478,7 @@
                   >
                   <button
                     type="button"
-                    class="btn-danger-outline"
+                    class="btn-danger-outline col-span-2 sm:col-span-1"
                     disabled={disconnecting}
                     onclick={() =>
                       (confirming = { providerId: row.provider.id, account: row.account.account })}
