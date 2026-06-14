@@ -15,6 +15,8 @@ export interface RuntimeSettings {
   // verbatim native body and returns the native response untranslated. Default
   // ON: cross-protocol / openai_chat / heterogeneous-chain traffic still falls
   // back to translation inside the gateway guard, so this is safe by default.
+  // The admin toggle was removed in #236, but the field stays in the model so it
+  // round-trips through Save unchanged (never reset to false — the #225 lesson).
   native_protocol_passthrough: boolean;
   rate_limit_enabled: boolean;
   // System DEFAULT quota any key without its own per-key override falls back to.

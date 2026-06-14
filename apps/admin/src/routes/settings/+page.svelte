@@ -17,8 +17,9 @@
   const DEFAULTS: RuntimeSettings = {
     capture_payloads: true,
     payload_retention_days: 30,
-    // Native protocol passthrough (issue #217): default ON. Toggled by the
-    // "Protocol passthrough" section below.
+    // Native protocol passthrough (issue #217): default ON. No longer surfaced as
+    // a toggle (UI removed in #236) — kept in the working copy so it round-trips
+    // through Save unchanged and is never reset to false (the #225 lesson).
     native_protocol_passthrough: true,
     rate_limit_enabled: false,
     rate_limit_default_rpm: 0,
@@ -165,34 +166,6 @@
           {/each}
         </select>
         <span class="field-help">{$t('How much detail the gateway writes to its logs.')}</span>
-      </label>
-    </section>
-
-    <!-- Protocol passthrough (issue #217) -->
-    <section class="card flex flex-col gap-3 text-sm">
-      <h2 class="section-header">{$t('Protocol passthrough')}</h2>
-
-      <label class="flex items-start gap-3">
-        <input
-          type="checkbox"
-          data-testid="native-protocol-passthrough"
-          class="checkbox mt-0.5"
-          bind:checked={form.native_protocol_passthrough}
-        />
-        <span>
-          <span class="font-medium">{$t('Forward same-protocol requests without translation')}</span
-          >
-          <span class="field-help block"
-            >{$t(
-              'When a request already speaks the upstream’s protocol (e.g. Anthropic /v1/messages → an Anthropic backend), forward it verbatim and return the native response untranslated — skipping the internal translation round-trip for higher fidelity and better prompt-cache reuse.',
-            )}</span
-          >
-          <span class="field-help mt-1 block"
-            >{$t(
-              'Only same-protocol traffic is affected. OpenAI-style requests and routes to a different provider always use translation and are unchanged.',
-            )}</span
-          >
-        </span>
       </label>
     </section>
 

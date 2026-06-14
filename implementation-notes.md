@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-14 · 移除「协议直通」设置 UI，保持运行时默认 ON（issue #236；原则 1/2）
+
+- **背景**：Admin → System Settings 的「Protocol passthrough / 协议直通」开关（`data-testid=native-protocol-passthrough`，默认勾选）让用户手动开关 `native_protocol_passthrough`；用户拍板**只删 UI**，不改 gateway runtime 行为、不把默认改成 false（schema `z.boolean().default(true)` 不动）。
+- **核心改动（纯前端，5 文件）**：① `routes/settings/+page.svelte` 删整块「Protocol passthrough」section（checkbox + 两段说明），并改 DEFAULTS 注释；② `lib/api/settings.ts` **保留** `native_protocol_passthrough` 字段、type 与 `normalize()` 的 `!== false` 默认（仅补注释说明 UI 已删但字段留作 round-trip）；③ 删 en/zh-hans/zh-hant 三处各 4 条 i18n 串（ja/ko 本就没有这些串、运行时回退英文 key）。
+- **关键决定（为何保留字段而非一并删）**：删 UI 但字段留在数据模型——form 从 GET 载入该值、Save 时原样 PUT 回去，保证 GET→form→PUT round-trip 不变、**绝不在保存其它设置时被静默重置为 false**（#225 教训，`settings.test.ts` 的 "preserves native protocol passthrough when saving an unrelated field" 用例钉死）。若改为删字段靠后端 `.default(true)` 兜底，会在每次 PUT 把运营者显式设的 false 强制翻 true（覆盖 overlay），语义更糟。
+- **验证**：admin vitest `settings.test.ts`(5) + `dashboard-locales.test.ts`(4) 全绿；`prettier --check` 改动文件绿；admin `pnpm build` 绿。svelte-check 仅剩 `oauth.test.ts` 3 处**既有**报错（vi.fn mock.calls 元组类型，来自 v0.12.11 连通性测试特性，与本改动无关、与 origin/main 逐字相同，且 admin 不在 `-r typecheck` CI 门禁）。分支 `worktree-issue-236-remove-passthrough-ui`（git worktree）。
+- **TODO**：未 commit/push（用户要求时再做）；若后续要彻底下线 passthrough，再单独决定是否从 schema/数据模型移除该字段。
+
 ## 2026-06-14 · 原生直通按 attempt 判断 + Anthropic SSE 元数据修复（docs/02/05；原则 5/7/8）
 
 - **背景**：线上 tuned `claude-opus -> premium` 链被 `fallback_may_change_provider_protocol` 整链否决，导致首个 Anthropic→Anthropic attempt 也被迫走翻译；这会放大 Anthropic SSE 翻译瑕疵并拖慢 Claude Code。用户明确要求保持 lanes 不变，只修代码。
@@ -21,22 +29,13 @@
 - **取舍**：本轮先做 deterministic 修复与测试；provider_raw/cache_control 被过滤时尚未接入统一 warning ledger（translated path 现有 attempt 结构缺少 mutation channel），后续可补可观测字段。payload capture 仍保留客户端原始请求；native carrier body 被改动时清除 raw_body，避免伪装 byte-identical。Anthropic empty-text sanitizer 对齐 LiteLLM：非字符串或空白 text block 都删除；如果某条 message 只剩空 text block，则整条 message 省略，避免发出 `content: []`。
 - **验证**：按 TDD 先补红例，再实现；focused `pnpm vitest run apps/gateway/src/routes/responses.test.ts apps/gateway/src/routes/execute.test.ts` 绿（90 tests），`pnpm test:protocol-compat:ast` 绿，`pnpm test:passthrough:final` 绿（Claude CLI trace `d4967705-066b-462c-b075-c3dfb66ef042`，Codex CLI trace `2a5eb79d-b336-41c8-bd90-ce9ae3c075b5`，均证明 native passthrough）。`pnpm test:e2e` 的 protocol/gemini slice 绿；全量 e2e 仍有既存 memory inject 2 例红（上游请求未包含旧 memory 文本），与本轮协议改动无关，PR 中需记录。标准 `pnpm test` 在本机两次卡在 PGlite 首例 5s timeout；相关 Postgres timeout 文件用 `pnpm exec vitest run --testTimeout 15000 ...` 绿，协议相关 full/focused suites 绿。
 
-## 2026-06-14 · Subscription Providers 账号「测试」按钮 + 流式连通性检查（docs/06/11；原则 1/3/7）
-
-- **背景**：用户要求在 providers 列表给每个 provider 加「测试」按钮，弹层点测试后发一条测试内容、流式输出**真实返回**（参考 claude-relay-service，简单为主，不要只出「测试成功」）。截图里那种 API-key provider 配置列表（qwen/zhipuai/… 带 Enabled/Edit/Delete）**helm 并不存在**（查遍所有分支）；helm 唯一 provider 列表是 OAuth『Subscription Providers』页（按账号一行，Manage/Disconnect）。**用户拍板：按钮加在该页、按账号测**。
-- **后端（三件，TDD）**：① `routes/admin/oauth-test.ts` 纯件——`createOpenAiStreamParser`（缓冲式把 provider client 的 OpenAI `chat.completion.chunk` SSE 归一成 content/finish/usage 事件，跨**非帧对齐**字节块重组、`[DONE]`/注释/不可解析帧 fail-open）+ `createOAuthAccountTester`（注入 `buildClient` 造账号 client，发单条 user turn 流式产事件）。② `routes/admin/oauth.ts` 加 `POST /admin/api/oauth/:provider/test` → `streamSSE` 发 start/content/finish/usage/done/error；无 tester→503、缺 account/model→400、上游失败→**带内 `error` 事件（HTTP 200 不 5xx）**、客户端断连静默。③ `server.ts` 抽模块级 `buildOAuthAccountClient`（synthesis 与 tester **共用**，绑定 100% 一致，behavior-preserving 重构），`buildServer` 内按 `oauthCtx` 造 tester（每次测试**重载 account settings 取当前 proxy** → 改完代理不必重启）穿进 `AdminApiDeps.oauthTester`。
-- **隔离与防封号（关键设计，已核对代码）**：测试走**全新一次性 client**而非 routing pool 成员——raw provider client **本就无熔断器**（熔断在 executor 层，openai.ts 头注释明示），故测试**不写 telemetry/request_payloads、不扰动生产 pool 熔断/健康**；anti-ban 由 provider client 自动注入（`anthropic.ts` 的 `openaiToAnthropicRequest` 自动加「You are Claude Code」spoof + 计费块 + 稳定 `metadata.user_id`，Codex 走稳定 session_id），所以**裸 `{role:user}` 测试请求对 Claude Max/Codex OAuth 即被接受**。停泊（parked）账号也可测（按需构建，不受 schedulable 限制）。
-- **前端**：`lib/api/oauth.ts` 加 `streamAccountTest`（POST + 读 ReadableStream 缓冲分行 parse，**永不抛**、pre-flight 503/400 归一成单 error 事件、断连静默）；`lib/components/TestAccountDialog.svelte`（Modal，模型选择来自该行 effective models、可选 prompt、实时流式响应框 + 状态 idle/testing/success/failed + 耗时 + 字符数，关闭/停止即 abort；`untrack` 取首个 model 同 EditKeyDialog 约定）；providers 页 Actions 加「Test」按钮 + 弹层接线；i18n **13** 新串补齐 en/zh-hans/zh-hant/ja/ko（zh 意译）。
-- **取舍 / 坑**：测试请求是**真实上游调用**（真实计费/配额扣减），只是不入 Requests 日志；默认 prompt 常量 + `max_tokens:512`（够看到可见流式内容，含 reasoning 模型）；只 surface `content` delta（reasoning 不展示，留作后续）；模型不做严格校验（admin-only + 来自该行 models，仅要求非空）。
-- **验证**：红→绿 TDD。gateway 全量 **732 绿**（含 parser 10 + route 4 + synthesis 12 未回归）、admin 全量 **358 绿**（providers 页 +2：开弹层 / 流式成功）；`pnpm typecheck` 绿、`pnpm lint`(biome) 绿、admin `pnpm build` 绿（弹层/页 prod 编译通过）。admin svelte-check 仅剩 `oauth.test.ts` 3 处**既有**报错（`vi.fn` mock.calls 元组类型，与 origin/main 逐字相同，且 admin 不在 `-r typecheck` CI 门禁），**非本次回归**。分支 `feat/oauth-account-test-button`（git worktree）。
-- **TODO**：未提交/未部署（用户要求时再 commit/push）；e2e（Playwright）真账号手验待做；reasoning delta 展示 + 模型严格校验为可选增强。
-
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-14 · Subscription Providers 账号「测试」按钮 + 流式连通性检查（docs/06/11；原则 1/3/7）：OAuth『Subscription Providers』页按账号加「Test」按钮（helm 无截图里的 API-key provider 列表，用户拍板按账号测），弹层发单条 user turn 流式**真返回**。后端 TDD 三件：`routes/admin/oauth-test.ts`（`createOpenAiStreamParser` 跨非帧对齐字节重组归一 content/finish/usage、fail-open + `createOAuthAccountTester` 注入 buildClient）、`POST /admin/api/oauth/:provider/test`（streamSSE，无 tester→503/缺参→400/上游失败→**带内 error 事件不 5xx**/断连静默）、`server.ts` 抽 `buildOAuthAccountClient` 与 synthesis 共用且每次测试重载 account proxy。隔离防封号：走全新一次性 client（raw client 本无熔断），**不写 telemetry/不扰生产 pool**，anti-ban 头由 provider client 自动注入故裸 user 请求被 Claude Max/Codex 接受、parked 账号也可测。前端 `streamAccountTest`(永不抛) + `TestAccountDialog.svelte` + i18n 13 串补 en/zh-hans/zh-hant/ja/ko。坑：测试是真实上游调用（真计费、不入 Requests 日志）、只 surface content delta。gateway 732 绿 / admin 358 绿，typecheck/lint/build 绿；oauth.test.ts 3 处 svelte-check 报错为既有非回归。分支 feat/oauth-account-test-button。
 
 ### 2026-06-14 · 原生直通保真实施 + 可执行验收（docs/native-passthrough-fidelity-spec；原则 7/8）：建立 native carrier、provider safe profile、raw SSE byte relay、Responses/Codex passthrough、OAuth sticky session 与 live/fake 验收脚本；证明 native path 保持治理/telemetry/memory/预算，mutation ledger 只记修改类型不泄露正文；focused/unit/e2e/live final 当时全绿，TODO 为 provider profile YAML 化与 admin ledger UX。
 
