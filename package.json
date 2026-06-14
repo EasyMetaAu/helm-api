@@ -29,7 +29,8 @@
     "test:passthrough:live:claude-cli": "NODE_OPTIONS=--conditions=development tsx scripts/passthrough/live-cli.ts claude-cli",
     "test:passthrough:live:codex-cli": "NODE_OPTIONS=--conditions=development tsx scripts/passthrough/live-cli.ts codex-cli",
     "test:passthrough:live": "NODE_OPTIONS=--conditions=development tsx scripts/passthrough/live-cli.ts all",
-    "test:passthrough:final": "pnpm test:passthrough && pnpm test:passthrough:live"
+    "test:passthrough:final": "pnpm test:passthrough && pnpm test:passthrough:live",
+    "test:protocol-compat:ast": "bash scripts/protocol-compat/ast-grep-gates.sh"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",

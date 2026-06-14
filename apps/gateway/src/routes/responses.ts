@@ -132,23 +132,6 @@ function responseStreamId(traceId: string): string {
   return `resp_${stable || randomUUID().replace(/-/g, "")}`;
 }
 
-function responseStreamPrelude(args: {
-  responseId: string;
-  model: string;
-}): Array<Record<string, unknown>> {
-  const response = {
-    id: args.responseId,
-    object: "response",
-    model: args.model,
-    status: "in_progress",
-    output: [],
-  };
-  return [
-    { type: "response.created", sequence_number: 0, response },
-    { type: "response.in_progress", sequence_number: 1, response },
-  ];
-}
-
 function pipelineToHelm(err: PipelineError, traceId: string): HelmHttpError {
   return new HelmHttpError(
     makeHelmError({
@@ -328,7 +311,6 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // 4) Outbound: stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
       const responseId = responseStreamId(traceId);
-      const responseModel = typeof ir.model === "string" && ir.model.length > 0 ? ir.model : "auto";
       ir.metadata = { ...(ir.metadata ?? {}), responses_stream_id: responseId };
       // Claim the concurrency lease (issue #93): hold the slot until the stream
       // body fully drains — release in the stream's own finally, not the guard.
@@ -343,11 +325,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         // upstream Codex Responses SSE into VERBATIM {event,data} frames (the data
         // payload is the exact upstream JSON string, INCLUDING reasoning.encrypted_content
         // and native tool-call events) — forward them directly, BYPASSING transformStreamOut
-        // so the bytes reach the client byte-for-byte. Native passthrough deliberately
-        // suppresses Helm's synthetic prelude, keeping the upstream response.created /
-        // response.in_progress authoritative. Capture stays native on both ends; an
-        // upstream error mid-passthrough still surfaces the Responses terminal error
-        // frame below (catch is unchanged).
+        // so the bytes reach the client byte-for-byte. Both translated and native
+        // paths use exactly one Responses state machine; the route never adds an
+        // extra synthetic prelude. Capture stays native on both ends; an upstream
+        // error mid-passthrough still surfaces the terminal error frame below.
         let nextErrorSequence = 0;
         // Accumulate the serialized wire frames so the served response body can be
         // captured (verbatim) alongside the telemetry row in the finally below.
@@ -355,14 +336,6 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         let result: PipelineRunResult | null = null;
         try {
           result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
-          if (result.nativePassthrough !== true) {
-            for (const event of responseStreamPrelude({ responseId, model: responseModel })) {
-              nextErrorSequence = 2;
-              const frame = deps.transformer.transformStreamOut(event);
-              if (captureBodies) captured.push(`event: ${frame.event}\ndata: ${frame.data}\n\n`);
-              await sse.writeSSE({ event: frame.event, data: frame.data });
-            }
-          }
           for await (const event of result.streamIR()) {
             if (typeof event.sequence_number === "number")
               nextErrorSequence = event.sequence_number + 1;

@@ -201,11 +201,6 @@ describe("createExecute — gateway execution adapter", () => {
         provider_raw: {
           metadata: { prompt_version: "v1" },
           store: false,
-          context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
-          mcp_servers: [{ type: "url", url: "https://mcp.example.test" }],
-          container: { id: "container_123" },
-          speed: "fast",
-          output_config: { effort: "xhigh" },
         },
       }),
     );
@@ -245,11 +240,6 @@ describe("createExecute — gateway execution adapter", () => {
       safety_identifier: "safe-user",
       metadata: { prompt_version: "v1" },
       store: false,
-      context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
-      mcp_servers: [{ type: "url", url: "https://mcp.example.test" }],
-      container: { id: "container_123" },
-      speed: "fast",
-      output_config: { effort: "xhigh" },
     });
   });
 
@@ -282,6 +272,209 @@ describe("createExecute — gateway execution adapter", () => {
     expect(body.previous_response_id).toBeUndefined();
     expect(body.truncation).toBeUndefined();
     expect(body.store).toBe(false);
+  });
+
+  it("does not forward Anthropic-only provider_raw keys to OpenAI-compatible upstreams", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    await execute(
+      plan(["default_good_model"]),
+      req({
+        protocol: "anthropic_messages",
+        provider_raw: {
+          metadata: { prompt_version: "v1" },
+          store: false,
+          context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+          mcp_servers: [{ type: "url", url: "https://mcp.example.test" }],
+          container: { id: "container_123" },
+          speed: "fast",
+          output_config: { effort: "xhigh" },
+        },
+      }),
+    );
+
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.metadata).toEqual({ prompt_version: "v1" });
+    expect(body.store).toBe(false);
+    expect(body.context_management).toBeUndefined();
+    expect(body.mcp_servers).toBeUndefined();
+    expect(body.container).toBeUndefined();
+    expect(body.speed).toBeUndefined();
+    expect(body.output_config).toBeUndefined();
+  });
+
+  it("strips Anthropic cache_control markers before OpenAI-compatible upstream calls", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    await execute(
+      plan(["default_good_model"]),
+      req({
+        cache_control: { type: "ephemeral" },
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "hello",
+                cache_control: { type: "ephemeral" },
+              },
+            ],
+            cache_control: { type: "ephemeral" },
+          },
+        ] as unknown as InternalRequest["messages"],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "search",
+              parameters: {
+                type: "object",
+                properties: {
+                  query: { type: "string", cache_control: { type: "ephemeral" } },
+                },
+              },
+            },
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      }),
+    );
+
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(JSON.stringify(body)).not.toContain("cache_control");
+  });
+
+  it("does not forward top-level cache_control to non-Anthropic target protocols", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const registryFor = (targetProviderProtocol: TargetProviderProtocol): ProviderRegistry => ({
+      resolve(alias: string) {
+        if (alias !== "candidate") {
+          return { ok: false, error: { kind: "unknown_alias", alias } };
+        }
+        return {
+          ok: true,
+          value: {
+            alias,
+            providerName: "mock",
+            providerModel: "upstream-model",
+            baseUrl: "http://x",
+            apiKeyEnv: "X",
+            targetProviderProtocol,
+            providerRequiresCompatibilityRewrite: false,
+          },
+        };
+      },
+      list: () => ["candidate"],
+    });
+
+    for (const targetProtocol of ["openai_responses", "gemini"] as const) {
+      (provider.chatCompletion as ReturnType<typeof vi.fn>).mockClear();
+      const execute = createExecute({
+        defaultProvider: provider,
+        providers: new Map([["mock", provider]]),
+        registry: registryFor(targetProtocol),
+        breaker: breaker(),
+        catalog: new Map(),
+        now: clock(),
+        signal: new AbortController().signal,
+      });
+
+      await execute(
+        plan(["candidate"]),
+        req({
+          protocol: "anthropic_messages",
+          cache_control: { type: "ephemeral" },
+        }),
+      );
+
+      const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock
+        .calls[0]?.[0] as Record<string, unknown>;
+      expect(body.cache_control).toBeUndefined();
+    }
+  });
+
+  it("preserves top-level cache_control for Anthropic target protocols", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const anthroRegistry: ProviderRegistry = {
+      resolve(alias: string) {
+        if (alias !== "candidate") {
+          return { ok: false, error: { kind: "unknown_alias", alias } };
+        }
+        return {
+          ok: true,
+          value: {
+            alias,
+            providerName: "mock",
+            providerModel: "claude-x",
+            baseUrl: "http://x",
+            apiKeyEnv: "X",
+            targetProviderProtocol: "anthropic_messages",
+            providerRequiresCompatibilityRewrite: false,
+          },
+        };
+      },
+      list: () => ["candidate"],
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: anthroRegistry,
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    await execute(
+      plan(["candidate"]),
+      req({
+        protocol: "anthropic_messages",
+        cache_control: { type: "ephemeral" },
+      }),
+    );
+
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.cache_control).toEqual({ type: "ephemeral" });
   });
 
   it("merges streamed client stream_options while forcing include_usage for cost capture", async () => {
@@ -1385,6 +1578,125 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(okRow?.response_protocol).toBe("anthropic_messages");
     expect(okRow?.provider_name).toBe("anthro");
     expect(okRow?.provider_model).toBe("claude-x");
+  });
+
+  it("strips empty Anthropic text blocks before native passthrough dispatch", async () => {
+    const provider = anthropicProvider(NATIVE_RESP);
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "anthropic_messages" as const,
+      body: {
+        model: "anthropic/claude-x",
+        max_tokens: 16,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "" },
+              { type: "text", text: "   " },
+              { type: "tool_use", id: "toolu_1", name: "search", input: { q: "helm" } },
+              { type: "text", text: "keep me" },
+            ],
+          },
+        ],
+      },
+      raw_body: "client raw body keeps empty text blocks",
+      headers: { "x-api-key": "client" },
+      mutations: {},
+    };
+
+    const out = await execute(plan(["a"]), anthropicReq({ native_request: carrier }));
+
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body.messages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "toolu_1", name: "search", input: { q: "helm" } },
+          { type: "text", text: "keep me" },
+        ],
+      },
+    ]);
+    expect(forwarded.raw_body).toBeUndefined();
+    expect(forwarded.mutations).toMatchObject({
+      body_shims_applied: ["empty_anthropic_text_blocks_stripped"],
+      empty_anthropic_text_blocks_stripped: 2,
+    });
+    expect(out.attempts[0]?.passthrough_mutations).toMatchObject(forwarded.mutations);
+  });
+
+  it("omits Anthropic messages that become empty after empty-text sanitizing", async () => {
+    const provider = anthropicProvider(NATIVE_RESP);
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "anthropic_messages" as const,
+      body: {
+        model: "anthropic/claude-x",
+        max_tokens: 16,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "" },
+              { type: "text", text: " \n\t " },
+              { type: "text" },
+              { type: "text", text: null },
+            ],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }],
+          },
+        ],
+      },
+      headers: { "x-api-key": "client" },
+      mutations: {},
+    };
+
+    const out = await execute(plan(["a"]), anthropicReq({ native_request: carrier }));
+
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body.messages).toEqual([
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }],
+      },
+    ]);
+    expect(forwarded.mutations).toMatchObject({
+      body_shims_applied: ["empty_anthropic_text_blocks_stripped"],
+      empty_anthropic_text_blocks_stripped: 4,
+    });
+    expect(out.attempts[0]?.passthrough_mutations).toMatchObject(forwarded.mutations);
   });
 
   it("flag OFF → translates via chatCompletion(stripInternal), passthrough_used:false reason feature_flag_disabled, nativePassthrough absent", async () => {
