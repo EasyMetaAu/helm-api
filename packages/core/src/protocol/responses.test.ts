@@ -78,6 +78,28 @@ describe("responsesTransformer — input_audio content (RESP-01)", () => {
     const parts = Array.isArray(userMsg?.content) ? userMsg?.content : [];
     expect(parts).toContainEqual({ type: "audio", data: "AUDIO64", format: "mp3" });
   });
+
+  it("renders an IR audio part back to native Responses input_audio", async () => {
+    const native = (await responsesTransformer.transformRequestIn({
+      model: "gpt-4o-audio",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "transcribe this" },
+            { type: "audio", data: "AUDIO64", format: "mp3" },
+          ],
+        },
+      ],
+    } as IRRequest)) as {
+      input: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+
+    expect(native.input[0]?.content).toContainEqual({
+      type: "input_audio",
+      input_audio: { data: "AUDIO64", format: "mp3" },
+    });
+  });
 });
 
 describe("responsesTransformer — function tool canonicalization", () => {

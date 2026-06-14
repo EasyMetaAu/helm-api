@@ -21,7 +21,7 @@ import type {
   TargetProviderProtocol,
 } from "@helm/shared";
 import { makeHelmError } from "@helm/shared";
-import { usageFromAnthropicResponse } from "./payload-capture.js";
+import { usageFromAnthropicResponse, usageFromResponsesResponse } from "./payload-capture.js";
 
 // Gateway execution adapter — the `execute` injected into routeRequest. It walks
 // the resolved candidate chain (ExecutionPlan.candidate_chain) honoring the
@@ -653,7 +653,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // alias. Everything else verbatim. Mirrors stripInternal's `model: providerModel`.
           const body = await passthroughInvoke({ ...nativeBody, model: providerModel }, { signal });
           breaker.recordSuccess(alias);
-          const usage = usageFromAnthropicResponse(body);
+          const usage =
+            req.protocol === "openai_responses"
+              ? usageFromResponsesResponse(body)
+              : usageFromAnthropicResponse(body);
           const pricedBody = usage ? { ...body, usage } : body;
           attempts.push(okRow(alias, elapsed(), costOf(alias, pricedBody), passthrough));
           return {
