@@ -1714,6 +1714,78 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
     expect(out).toEqual({ id: "resp_generic", object: "response", status: "completed" });
   });
 
+  it("chatCompletion maps Responses function_call output items to chat tool_calls", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        id: "resp_fc",
+        object: "response",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "calling a tool" }],
+          },
+          {
+            type: "function_call",
+            call_id: "call_1",
+            name: "get_weather",
+            arguments: '{"city":"SF"}',
+          },
+        ],
+        usage: { input_tokens: 5, output_tokens: 3 },
+      }),
+    );
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const out = (await client.chatCompletion({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "weather?" }],
+    })) as {
+      choices: Array<{
+        message: { content: unknown; tool_calls?: unknown };
+        finish_reason: string;
+      }>;
+    };
+    const choice = out.choices[0];
+    expect(choice?.message.content).toBe("calling a tool");
+    expect(choice?.message.tool_calls).toEqual([
+      {
+        id: "call_1",
+        type: "function",
+        function: { name: "get_weather", arguments: '{"city":"SF"}' },
+      },
+    ]);
+    expect(choice?.finish_reason).toBe("tool_calls");
+  });
+
+  it("chatCompletion returns null content + finish_reason tool_calls for a pure function_call response", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        id: "resp_fc2",
+        output: [{ type: "function_call", id: "c2", name: "noop", arguments: "{}" }],
+        usage: {},
+      }),
+    );
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const out = (await client.chatCompletion({ model: "gpt-5.5", messages: [] })) as {
+      choices: Array<{
+        message: { content: unknown; tool_calls?: unknown };
+        finish_reason: string;
+      }>;
+    };
+    expect(out.choices[0]?.message.content).toBeNull();
+    expect(out.choices[0]?.finish_reason).toBe("tool_calls");
+    expect((out.choices[0]?.message.tool_calls as unknown[]).length).toBe(1);
+  });
+
   it("calls generic lifecycle endpoints with OpenAI-shaped auth only", async () => {
     const calls: Array<{ url: string; method: string; body?: unknown }> = [];
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {

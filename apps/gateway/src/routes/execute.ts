@@ -30,7 +30,11 @@ import {
   nativePassthroughBody,
   nativePassthroughMutations,
 } from "@helm/shared";
-import { usageFromAnthropicResponse, usageFromResponsesResponse } from "./payload-capture.js";
+import {
+  usageFromAnthropicResponse,
+  usageFromGeminiResponse,
+  usageFromResponsesResponse,
+} from "./payload-capture.js";
 
 // Gateway execution adapter — the `execute` injected into routeRequest. It walks
 // the resolved candidate chain (ExecutionPlan.candidate_chain) honoring the
@@ -875,7 +879,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           const usage =
             req.protocol === "openai_responses"
               ? usageFromResponsesResponse(body)
-              : usageFromAnthropicResponse(body);
+              : req.protocol === "gemini"
+                ? usageFromGeminiResponse(body)
+                : usageFromAnthropicResponse(body);
           const pricedBody = usage ? { ...body, usage } : body;
           attempts.push(okRow(alias, elapsed(), costOf(alias, pricedBody), passthrough));
           return {

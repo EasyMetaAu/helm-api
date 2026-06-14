@@ -107,7 +107,11 @@ require_match \
 
 require_match \
   "Gemini remote media materializer must be implemented outside the pure transformer" \
-  --lang ts -p 'materializeGeminiRemoteMediaBody($BODY, $CONFIG, $FETCH, $SIGNAL)' packages/core/src/provider/gemini.ts
+  --lang ts -p 'materializeGeminiRemoteMediaBody($BODY, $CONFIG, $FETCH, $SIGNAL, $LOOKUP)' packages/core/src/provider/gemini.ts
+
+require_rg \
+  "Gemini remote media fetch must SSRF-guard private/reserved targets" \
+  'assertPublicHttpsTarget' packages/core/src/provider/gemini.ts
 
 if rg -n 'from "node:http"|from "node:https"|fetch\(' packages/core/src/protocol/gemini >/tmp/helm-gemini-core-fetch.txt; then
   echo 'forbidden structure found: Gemini core transformer must stay network-I/O free' >&2

@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-14 · 协议互译剩余项 PR review 修复（review of fix/protocol-litellm-remaining；原则 2/3/7）
+
+- **背景**：对 #251（LiteLLM 协议互译剩余项）做 review，发现 Gemini native passthrough 引入了治理漏洞，并加固远程媒体抓取。三处真实问题修复 + 两处误报澄清。
+- **核心修复**：① **Gemini native passthrough 计费/记忆漏洞**——pipeline `collect()`/`streamIR()` 与 `execute()` 的 usage/记忆提取只分 `openai_responses` vs Anthropic，Gemini 落入 Anthropic 分支 → 把 `usageMetadata` 解析为 0 tokens、且不 observeOutbound（预算/遥测/记忆被绕过，违反原则 2；仅在配置了 `type: gemini` provider 时触发，默认 config 无此 provider）。新增 `usageFromGeminiResponse`/`usageFromGeminiSSE`（promptTokenCount 已含 cache，thoughtsTokenCount 计入 completion）+ `assistantTurnFromNativeGemini`/`accumulateGeminiAssistantText`，三处提取点改 3-way 协议分支（Gemini SSE 的 usageMetadata 累积型，stream tee 只保最后一帧以维持有界内存）。② **远程媒体 SSRF 加固**——`fetchRemoteMediaInlineData` 之前只校验 https，新增 `assertPublicHttpsTarget`：拒绝私有/保留/loopback/link-local/ULA（含 169.254.169.254 元数据端点）IP 字面量 + DNS 解析校验（防 rebinding）+ localhost 主机名，每个 redirect hop 重查；`dnsLookup` 可注入以便 hermetic 测试。③ **Generic Responses→Chat 桥丢工具调用**——`responsesJsonToChatResponse` 之前只取文本、`finish_reason` 恒为 `stop`，现把 `function_call` output 项映射为 chat `tool_calls`、纯工具回合 `content=null`、`finish_reason=tool_calls`。
+- **澄清（非 bug，未改行为）**：chat route 对缺失/空 `messages` 的 400 是 `OpenAIChatRequestSchema.safeParse` 在 route 边界先于 `toInternalRequest` 拦下（main commit b2d3076 既有，schema 要求非空 messages），并非本 PR 收紧——曾试加宽松 fallback，确认是 dead code 后回退、仅留澄清注释。
+- **已知限制（保留，非本轮修）**：Responses registry 仅在非流式响应路径写入（流式 response id 在 SSE 帧内，未提取）；registry 仍是进程内 Map，重启不留、多实例不共享——后续若需，提升为 Store 端口。
+- **验证**：TDD 红→绿（payload-capture +9、messages-pipeline +6 Gemini passthrough 预算/记忆回归、gemini provider +4 SSRF、openai-responses +2 tool_calls）；新增 ast gate（5-arg materializer 签名 + `assertPublicHttpsTarget`）；`typecheck`/`lint`/`test:protocol-compat:ast` 绿，changed-area 512 tests 绿。
+
 ## 2026-06-14 · LiteLLM 协议互译剩余项完成（docs/protocol-translation-litellm-gap-spec；原则 1/7/8）
 
 - **背景**：继续完成 LiteLLM 对照 spec 剩余 P1/P2 项，目标是 native/same-protocol 尽量保真，跨协议不可表达能力必须有 guard/warning，不再靠隐式 404、假成功或提前丢字段。
@@ -22,18 +30,13 @@
 - **验证**：admin vitest `settings.test.ts`(5) + `dashboard-locales.test.ts`(4) 全绿；`prettier --check` 改动文件绿；admin `pnpm build` 绿。svelte-check 仅剩 `oauth.test.ts` 3 处**既有**报错（vi.fn mock.calls 元组类型，来自 v0.12.11 连通性测试特性，与本改动无关、与 origin/main 逐字相同，且 admin 不在 `-r typecheck` CI 门禁）。分支 `worktree-issue-236-remove-passthrough-ui`（git worktree）。
 - **TODO**：未 commit/push（用户要求时再做）；若后续要彻底下线 passthrough，再单独决定是否从 schema/数据模型移除该字段。
 
-## 2026-06-14 · 原生直通按 attempt 判断 + Anthropic SSE 元数据修复（docs/02/05；原则 5/7/8）
-
-- **背景**：线上 tuned `claude-opus -> premium` 链被 `fallback_may_change_provider_protocol` 整链否决，导致首个 Anthropic→Anthropic attempt 也被迫走翻译；这会放大 Anthropic SSE 翻译瑕疵并拖慢 Claude Code。用户明确要求保持 lanes 不变，只修代码。
-- **核心改动**：① native passthrough guard 删除“后续 fallback 可能跨协议”的输入与禁用原因，改为只判断**当前 attempt**：source protocol == target provider protocol、runtime flag on、native carrier 存在、provider 支持且无需兼容性 rewrite 即直通；② `execute` 不再 lookahead 解析后续候选，Anthropic head 可以直通，若首包前失败再让后续 `openai_chat` / `openai_responses` fallback 走翻译；③ `convertOpenAIStreamToAnthropic` 的 `message_start` 不再发空 `id/model`，优先取首个 upstream chunk，缺失时用 pipeline 传入的 `request_id/final.provider_model` 兜底并规范成 `msg_*` id。
-- **治理与取舍**：治理路径不变，auth/routing/budget/capture/memory/telemetry 仍先于 execute；`provider_attempts[]` 逐 attempt 记录 `passthrough_used` / `protocol_mismatch`，`final.provider_model` 仍记录实际落点。流式 fallback 只发生在首包前，首包后仍不能换模型，这是既有 contract。
-- **验证**：补回归测试覆盖 heterogeneous chain 的 head Anthropic passthrough、Anthropic passthrough 首包前失败后 fallback 到 translated OpenAI、stream 同场景，以及 translated Anthropic `message_start.id/model` 非空。focused `pnpm exec vitest run packages/core/src/provider/protocol.test.ts apps/gateway/src/routes/execute.test.ts packages/core/src/protocol/anthropic/stream.test.ts` 绿（96 tests）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-14 · 原生直通按 attempt 判断 + Anthropic SSE 元数据修复（docs/02/05；原则 5/7/8）：native passthrough guard 改为只判当前 attempt（删除 lookahead 后续 fallback 协议的整链否决），Anthropic head 可直通、首包前失败再翻译 fallback；`convertOpenAIStreamToAnthropic` 的 `message_start` 不再发空 id/model（取首 chunk，缺失用 request_id/provider_model 兜底成 `msg_*`）。focused 96 tests 绿。
 
 ### 2026-06-14 · OpenAI-compatible reasoning alias opt-in（docs/protocol-translation-litellm-gap-spec P2-CHAT-03/04；原则 7/8）：新增 provider 配置 `normalize_reasoning_delta_alias`，只在显式 opt-in 时把 streaming `choices[].delta.reasoning` 归一为 `reasoning_content`，默认保持 byte-forwarding；后续剩余项已补 `response_model_policy`。
 

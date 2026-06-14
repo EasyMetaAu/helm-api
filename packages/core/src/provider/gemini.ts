@@ -1,3 +1,4 @@
+import { lookup as nodeDnsLookup } from "node:dns/promises";
 import { type NativePassthroughInput, nativePassthroughBody } from "@helm/shared";
 import {
   type ChatCompletionRequest,
@@ -6,6 +7,15 @@ import {
   UpstreamError,
 } from "./openai.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
+
+// Resolve a hostname to its candidate addresses. Injectable so the SSRF guard can be
+// tested hermetically (no real DNS) — production uses node:dns lookup(all).
+export type HostnameLookup = (hostname: string) => Promise<string[]>;
+
+const defaultDnsLookup: HostnameLookup = async (hostname) => {
+  const results = await nodeDnsLookup(hostname, { all: true });
+  return results.map((r) => r.address);
+};
 
 export interface GeminiClientConfig {
   baseUrl: string;
@@ -28,6 +38,8 @@ export interface GeminiRemoteMediaFetchConfig {
 export interface GeminiClientDeps {
   config: GeminiClientConfig;
   fetch?: typeof globalThis.fetch;
+  /** Override hostname resolution for the remote-media SSRF guard (tests). */
+  dnsLookup?: HostnameLookup;
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -98,21 +110,111 @@ function remoteMediaSignal(timeoutMs: number, external?: AbortSignal) {
   };
 }
 
+// —— SSRF guard for remote media fetch (P2-GEM-02). Remote fetch is opt-in, but once
+// enabled a client-supplied URL must not be able to reach internal infrastructure
+// (cloud metadata at 169.254.169.254, loopback, RFC1918, ULA/link-local v6, …). We
+// reject literal private/reserved IPs AND resolve DNS names to catch a public name
+// that points at a private address (rebinding). Re-checked on every redirect hop.
+
+function parseIpv4Octets(host: string): [number, number, number, number] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m === null) return null;
+  const octets = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])] as const;
+  if (octets.some((o) => o > 255)) return null;
+  return [octets[0], octets[1], octets[2], octets[3]];
+}
+
+function isBlockedIpv4([a, b]: [number, number, number, number]): boolean {
+  if (a === 0) return true; // 0.0.0.0/8 "this network"
+  if (a === 10) return true; // RFC1918
+  if (a === 127) return true; // loopback
+  if (a === 169 && b === 254) return true; // link-local (incl. 169.254.169.254 metadata)
+  if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
+  if (a === 192 && b === 168) return true; // RFC1918
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT (RFC6598)
+  if (a === 192 && b === 0) return true; // 192.0.0/24 IETF + 192.0.2/24 TEST-NET-1
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
+  if (a >= 224) return true; // multicast (224/4), reserved (240/4), broadcast
+  return false;
+}
+
+function isBlockedIpv6(host: string): boolean {
+  const lower = host.toLowerCase();
+  if (lower === "::1" || lower === "::") return true; // loopback / unspecified
+  if (/^f[cd]/.test(lower)) return true; // fc00::/7 unique-local
+  if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
+  // IPv4-mapped (::ffff:a.b.c.d) — validate the embedded v4 address.
+  const mapped = /(?:^|:)((?:\d{1,3}\.){3}\d{1,3})$/.exec(lower);
+  const v4 = mapped?.[1] !== undefined ? parseIpv4Octets(mapped[1]) : null;
+  return v4 !== null && isBlockedIpv4(v4);
+}
+
+function isIpLiteral(host: string): boolean {
+  return parseIpv4Octets(host) !== null || host.includes(":");
+}
+
+function isBlockedIp(host: string): boolean {
+  const v4 = parseIpv4Octets(host);
+  if (v4 !== null) return isBlockedIpv4(v4);
+  if (host.includes(":")) return isBlockedIpv6(host);
+  return false; // not an IP literal
+}
+
+function isBlockedHostname(host: string): boolean {
+  const h = host.toLowerCase().replace(/\.$/, "");
+  return h === "localhost" || h.endsWith(".localhost");
+}
+
+async function assertPublicHttpsTarget(target: URL, lookup: HostnameLookup): Promise<void> {
+  if (target.protocol !== "https:") {
+    throw new UpstreamError("upstream_error", "Gemini remote media fetch only allows https URLs");
+  }
+  const host = target.hostname.replace(/^\[|\]$/g, ""); // URL keeps IPv6 in brackets
+  if (isIpLiteral(host)) {
+    if (isBlockedIp(host)) {
+      throw new UpstreamError(
+        "upstream_error",
+        "Gemini remote media fetch blocked a private or reserved address",
+      );
+    }
+    return;
+  }
+  if (isBlockedHostname(host)) {
+    throw new UpstreamError("upstream_error", "Gemini remote media fetch blocked a local hostname");
+  }
+  let addresses: string[];
+  try {
+    addresses = await lookup(host);
+  } catch {
+    // Unresolvable host → the fetch itself cannot reach anything; let it fail naturally.
+    return;
+  }
+  for (const address of addresses) {
+    if (isBlockedIp(address)) {
+      throw new UpstreamError(
+        "upstream_error",
+        "Gemini remote media host resolved to a private or reserved address",
+      );
+    }
+  }
+}
+
 async function fetchRemoteMediaInlineData(
   url: string,
   mimeHint: string | undefined,
   config: GeminiRemoteMediaFetchConfig,
   doFetch: typeof globalThis.fetch,
+  lookup: HostnameLookup,
   external?: AbortSignal,
 ): Promise<{ mimeType: string; data: string }> {
-  if (!url.startsWith("https://")) {
-    throw new UpstreamError("upstream_error", "Gemini remote media fetch only allows https URLs");
-  }
   const maxBytes = config.maxBytes ?? DEFAULT_REMOTE_MEDIA_MAX_BYTES;
   const timeoutMs = config.timeoutMs ?? DEFAULT_REMOTE_MEDIA_TIMEOUT_MS;
   const maxRedirects = config.maxRedirects ?? DEFAULT_REMOTE_MEDIA_MAX_REDIRECTS;
   let current = new URL(url);
   for (let redirect = 0; redirect <= maxRedirects; redirect += 1) {
+    // SSRF guard: validate https + reject private/reserved targets on EVERY hop,
+    // before any bytes are sent — the original URL and each redirect destination.
+    await assertPublicHttpsTarget(current, lookup);
     const t = remoteMediaSignal(timeoutMs, external);
     let res: Response;
     try {
@@ -167,6 +269,7 @@ async function materializeGeminiPart(
   part: unknown,
   config: GeminiRemoteMediaFetchConfig,
   doFetch: typeof globalThis.fetch,
+  lookup: HostnameLookup,
   signal?: AbortSignal,
 ): Promise<{ part: unknown; changed: boolean }> {
   if (!isRecord(part)) return { part, changed: false };
@@ -179,6 +282,7 @@ async function materializeGeminiPart(
         typeof fileData.mimeType === "string" ? fileData.mimeType : undefined,
         config,
         doFetch,
+        lookup,
         signal,
       );
       return { part: { ...part, fileData: undefined, inlineData }, changed: true };
@@ -192,6 +296,7 @@ async function materializeGeminiPart(
         "image/png",
         config,
         doFetch,
+        lookup,
         signal,
       );
       return { part: { inlineData }, changed: true };
@@ -205,6 +310,7 @@ export async function materializeGeminiRemoteMediaBody(
   config: GeminiRemoteMediaFetchConfig | undefined,
   doFetch: typeof globalThis.fetch,
   signal?: AbortSignal,
+  lookup: HostnameLookup = defaultDnsLookup,
 ): Promise<Record<string, unknown>> {
   if (config?.enabled !== true || !Array.isArray(body.contents)) return body;
   let changed = false;
@@ -213,7 +319,7 @@ export async function materializeGeminiRemoteMediaBody(
       if (!isRecord(content) || !Array.isArray(content.parts)) return content;
       const parts = await Promise.all(
         content.parts.map(async (part) => {
-          const out = await materializeGeminiPart(part, config, doFetch, signal);
+          const out = await materializeGeminiPart(part, config, doFetch, lookup, signal);
           if (out.changed) changed = true;
           return out.part;
         }),
@@ -226,6 +332,7 @@ export async function materializeGeminiRemoteMediaBody(
 
 export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
   const doFetch = deps.fetch ?? globalThis.fetch;
+  const dnsLookup = deps.dnsLookup ?? defaultDnsLookup;
   const cfg = deps.config;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -277,6 +384,7 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
         cfg.remoteMediaFetch,
         doFetch,
         t.signal,
+        dnsLookup,
       );
       return await doFetch(endpoint(cfg.baseUrl, model, operation), {
         method: "POST",

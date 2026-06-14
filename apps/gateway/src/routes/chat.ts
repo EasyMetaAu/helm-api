@@ -229,6 +229,10 @@ function toInternalRequest(
   memoryScope: MemoryScope,
 ): InternalRequest {
   const model = typeof body.model === "string" && body.model.length > 0 ? body.model : "auto";
+  // messages is already schema-validated as a non-empty array at the route boundary
+  // (OpenAIChatRequestSchema.safeParse → 400 fail-closed). P1-CHAT-01: reuse the
+  // OpenAI transformer's content normalization so the route and transformer share ONE
+  // source of truth (bare-string image_url → {url}, default filenames, …).
   let messages: InternalRequest["messages"];
   try {
     const normalized = openaiTransformer.transformRequestOut({ ...(body as object), model });

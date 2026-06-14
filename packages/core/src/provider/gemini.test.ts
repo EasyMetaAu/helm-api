@@ -139,6 +139,8 @@ describe("createGeminiClient — native passthrough", () => {
           allowedMimeTypes: ["image/*"],
         },
       },
+      // Hermetic DNS: example.test resolves to a public address (no real lookup).
+      dnsLookup: async () => ["93.184.216.34"],
       fetch: vi.fn(async (url, init) => {
         calls.push({ url: String(url), init: init ?? {} });
         if (String(url) === "https://example.test/cat.png") {
@@ -220,5 +222,98 @@ describe("createGeminiClient — native passthrough", () => {
         },
       ],
     });
+  });
+
+  // SSRF guard (P2-GEM-02 security): remote media fetch is opt-in, but once enabled a
+  // client-supplied URL must NOT be able to reach internal/link-local/loopback targets
+  // (e.g. the cloud metadata endpoint 169.254.169.254). The guard runs BEFORE the
+  // fetch, so a blocked target is never contacted at all.
+  function fetchSpyOk() {
+    return vi.fn(async () =>
+      jsonResponse({ candidates: [{ content: { role: "model", parts: [{ text: "native" }] } }] }),
+    );
+  }
+
+  function fileUriRequest(fileUri: string) {
+    return {
+      model: "gemini-2.0-flash",
+      contents: [{ role: "user", parts: [{ fileData: { fileUri, mimeType: "image/png" } }] }],
+    };
+  }
+
+  it("blocks a remote media fetch to a private/reserved IP literal without contacting it", async () => {
+    const fetch = fetchSpyOk();
+    const client = createGeminiClient({
+      config: {
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+        apiKey: "g",
+        remoteMediaFetch: { enabled: true },
+      },
+      fetch,
+    });
+    await expect(
+      client.nativePassthrough?.(fileUriRequest("https://169.254.169.254/latest/meta-data/")),
+    ).rejects.toThrow(/private or reserved/);
+    // Fail-closed: neither the metadata endpoint NOR the upstream generateContent was hit.
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("blocks a remote media fetch to a loopback hostname", async () => {
+    const fetch = fetchSpyOk();
+    const client = createGeminiClient({
+      config: {
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+        apiKey: "g",
+        remoteMediaFetch: { enabled: true },
+      },
+      fetch,
+    });
+    await expect(
+      client.nativePassthrough?.(fileUriRequest("https://localhost/secret.png")),
+    ).rejects.toThrow(/local hostname/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("blocks a hostname that DNS-resolves to a private address (rebinding guard)", async () => {
+    const fetch = fetchSpyOk();
+    const client = createGeminiClient({
+      config: {
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+        apiKey: "g",
+        remoteMediaFetch: { enabled: true },
+      },
+      dnsLookup: async () => ["10.0.0.5"],
+      fetch,
+    });
+    await expect(
+      client.nativePassthrough?.(fileUriRequest("https://internal.evil.example/x.png")),
+    ).rejects.toThrow(/resolved to a private/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("blocks a redirect that lands on a private address", async () => {
+    const fetch = vi.fn(async (url: unknown) => {
+      if (String(url) === "https://cdn.example.test/img.png") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://169.254.169.254/x" },
+        });
+      }
+      return jsonResponse({ candidates: [{ content: { role: "model", parts: [{ text: "x" }] } }] });
+    });
+    const client = createGeminiClient({
+      config: {
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+        apiKey: "g",
+        remoteMediaFetch: { enabled: true },
+      },
+      dnsLookup: async () => ["93.184.216.34"],
+      fetch,
+    });
+    await expect(
+      client.nativePassthrough?.(fileUriRequest("https://cdn.example.test/img.png")),
+    ).rejects.toThrow(/private or reserved/);
+    // The first (public) hop was contacted; the upstream generateContent never ran.
+    expect(fetch.mock.calls.map((c) => String(c[0]))).toEqual(["https://cdn.example.test/img.png"]);
   });
 });

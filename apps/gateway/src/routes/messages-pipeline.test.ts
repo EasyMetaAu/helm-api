@@ -846,6 +846,215 @@ describe("createMessagesPipeline — openai_responses native passthrough collect
   });
 });
 
+// A VERBATIM Gemini GenerateContent NON-stream body — what provider.nativePassthrough
+// returns and the pipeline must hand back UNTOUCHED on the passthrough path. Carries
+// the native `candidates[].content.parts[]` (NOT OpenAI choices) + a Gemini
+// usageMetadata block (cache counted INSIDE promptTokenCount, like Responses).
+const NATIVE_GEMINI_BODY = {
+  candidates: [
+    {
+      content: { role: "model", parts: [{ text: "Hello from Gemini" }, { text: " passthrough" }] },
+      finishReason: "STOP",
+    },
+  ],
+  usageMetadata: {
+    promptTokenCount: 12,
+    candidatesTokenCount: 9,
+    cachedContentTokenCount: 4,
+    totalTokenCount: 21,
+  },
+};
+
+function passthroughGeminiOkResult(body: unknown = NATIVE_GEMINI_BODY): ExecutionResult {
+  return {
+    decision: {
+      lane: { selected_lane: "balanced" },
+      final: { status: "ok", model_alias: "gemini/gemini-2.0-flash" },
+      cost_breakdown: { total_usd: 0.02, completion_usd: 0.01, eval_usd: null },
+      provider_attempts: [],
+    } as unknown as ExecutionResult["decision"],
+    final: { status: "ok", alias: "gemini/gemini-2.0-flash" },
+    body,
+    stream: null,
+    error: null,
+    nativePassthrough: true,
+  };
+}
+
+// A canned Gemini streamGenerateContent SSE byte stream. Nameless `data:` frames carry
+// CUMULATIVE usageMetadata (final frame holds the complete count) with DELIBERATELY
+// non-canonical spacing so a test can prove byte-verbatim forwarding (no JSON
+// round-trip). Output text rides candidates[].content.parts[].text.
+const NATIVE_GEMINI_SSE_FRAMES = [
+  'data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":2}}\n\n',
+  'data: {"candidates":[{"content":{"parts":[{"text":" Gemini"}]},"finishReason":"STOP"}],"usageMetadata":{ "promptTokenCount":12 ,"candidatesTokenCount":9,"cachedContentTokenCount":4}}\n\n',
+];
+
+function nativeGeminiSseTextStream(): AsyncIterable<string> {
+  const joined = NATIVE_GEMINI_SSE_FRAMES.join("");
+  const pieces: string[] = [];
+  for (let i = 0; i < joined.length; i += 19) pieces.push(joined.slice(i, i + 19));
+  return (async function* () {
+    for (const p of pieces) yield p;
+  })();
+}
+
+function passthroughGeminiStreamResult(
+  stream: AsyncIterable<string> = nativeGeminiSseTextStream(),
+): ExecutionResult {
+  return {
+    decision: {
+      lane: { selected_lane: "balanced" },
+      final: { status: "ok", model_alias: "gemini/gemini-2.0-flash" },
+      cost_breakdown: { total_usd: 0, completion_usd: null, eval_usd: null },
+      provider_attempts: [],
+    } as unknown as ExecutionResult["decision"],
+    final: { status: "ok", alias: "gemini/gemini-2.0-flash" },
+    body: null,
+    stream,
+    error: null,
+    nativePassthrough: true,
+  };
+}
+
+describe("createMessagesPipeline — gemini native passthrough collect()", () => {
+  it("returns the native Gemini body UNTOUCHED (no openAIBodyToIR projection)", async () => {
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughGeminiOkResult()),
+      "gemini",
+    );
+    const run = await pipeline.run(irOf(), IDENTITY, new AbortController().signal);
+    const body = (await run.collect()) as Record<string, unknown>;
+    expect(body).toBe(NATIVE_GEMINI_BODY);
+    expect(body.candidates).toEqual(NATIVE_GEMINI_BODY.candidates);
+    expect(body.choices).toBeUndefined();
+  });
+
+  it("settles the budget + stamps tokens from the Gemini usageMetadata (cache inside prompt)", async () => {
+    let settledTokens: number | null = null;
+    const budget: PipelineBudgetDeps = {
+      gate: { check: async () => ({ overBudget: false }) as never },
+      settle: async (_keyId, _caps, usage) => {
+        settledTokens = usage.tokens;
+      },
+      now: () => 0,
+    };
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      caps: { budget: { spend_usd: { day: 1 } } as never },
+    };
+    const decisionRef = passthroughGeminiOkResult().decision;
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...passthroughGeminiOkResult(), decision: decisionRef }),
+      "gemini",
+      undefined,
+      budget,
+    );
+    const run = await pipeline.run(irOf(), identity, new AbortController().signal);
+    await run.collect();
+    // Gemini: prompt = promptTokenCount(12), completion = candidates(9) → 21 served
+    // tokens (cache already counted inside promptTokenCount, NOT re-added). REGRESSION
+    // GUARD: before the fix this fell into the Anthropic branch → usage null → 0 tokens.
+    expect(settledTokens).toBe(21);
+    expect(decisionRef.usage).toMatchObject({
+      prompt_tokens: 12,
+      completion_tokens: 9,
+      cached_tokens: 4,
+    });
+  });
+
+  it("observe-outbound records the assistant text from candidates[].content.parts[].text", async () => {
+    const { observe, persisted } = makeObserveSpy();
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughGeminiOkResult()),
+      "gemini",
+      { observe },
+    );
+    const run = await pipeline.run(
+      irOf({ metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" } }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    await run.collect();
+    const assistant = persisted.find((m) => m.role === "assistant");
+    expect(assistant).toBeDefined();
+    expect(assistant?.content).toBe("Hello from Gemini passthrough");
+  });
+});
+
+describe("createMessagesPipeline — gemini native passthrough streamIR()", () => {
+  it("byte-relays the upstream Gemini SSE: yields the VERBATIM nameless data frames", async () => {
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughGeminiStreamResult()),
+      "gemini",
+    );
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const frames: Array<{ event: string; data: string }> = [];
+    for await (const ev of run.streamIR()) frames.push(ev as { event: string; data: string });
+    // Gemini frames are nameless (no `event:` line) → event "".
+    expect(frames.map((f) => f.event)).toEqual(["", ""]);
+    // The terminal frame's data is forwarded BYTE-FOR-BYTE — the deliberately non-
+    // canonical spacing ("promptTokenCount":12 ,) survives, proving no JSON round-trip.
+    expect(frames.at(-1)?.data).toBe(
+      '{"candidates":[{"content":{"parts":[{"text":" Gemini"}]},"finishReason":"STOP"}],"usageMetadata":{ "promptTokenCount":12 ,"candidatesTokenCount":9,"cachedContentTokenCount":4}}',
+    );
+  });
+
+  it("settles the per-key budget using the cumulative Gemini usageMetadata", async () => {
+    let settledTokens: number | null = null;
+    const budget: PipelineBudgetDeps = {
+      gate: { check: async () => ({ overBudget: false }) as never },
+      settle: async (_keyId, _caps, usage) => {
+        settledTokens = usage.tokens;
+      },
+      now: () => 0,
+    };
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      caps: { budget: { spend_usd: { day: 1 } } as never },
+    };
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughGeminiStreamResult()),
+      "gemini",
+      undefined,
+      budget,
+    );
+    const run = await pipeline.run(irOf({ stream: true }), identity, new AbortController().signal);
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    // Final cumulative usageMetadata: prompt(12) + candidates(9) = 21 served tokens.
+    // REGRESSION GUARD: before the fix, the Anthropic carrier filter never matched a
+    // Gemini frame → 0 tokens settled.
+    expect(settledTokens).toBe(21);
+  });
+
+  it("observe-outbound records the assistant text from streamed parts[].text", async () => {
+    const { observe, persisted } = makeObserveSpy();
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughGeminiStreamResult()),
+      "gemini",
+      { observe },
+    );
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    const assistant = persisted.find((m) => m.role === "assistant");
+    expect(assistant).toBeDefined();
+    expect(assistant?.content).toBe("Hello Gemini");
+  });
+});
+
 describe("createMessagesPipeline — production IR params", () => {
   it.each<Protocol>([
     "anthropic_messages",

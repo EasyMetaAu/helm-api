@@ -11,6 +11,8 @@ import {
   tokensFromUsage,
   usageFromAnthropicResponse,
   usageFromAnthropicSSE,
+  usageFromGeminiResponse,
+  usageFromGeminiSSE,
   usageFromResponsesResponse,
   usageFromResponsesSSE,
   usageFromSSE,
@@ -317,6 +319,101 @@ describe("usageFromResponsesSSE", () => {
     ].join("");
     expect(usageFromResponsesSSE(sse)).toBeNull();
     expect(usageFromResponsesSSE("")).toBeNull();
+  });
+});
+
+// Native-protocol-passthrough cost for Gemini (P2-GEM-01 governance): a VERBATIM
+// Gemini GenerateContent response carries usage under `usageMetadata`. Like
+// Responses (and UNLIKE Anthropic), Gemini's promptTokenCount already INCLUDES the
+// cached slice, so prompt_tokens = promptTokenCount and cached rides
+// prompt_tokens_details. thoughtsTokenCount (reasoning) is billed as output, so it
+// folds into completion_tokens alongside candidatesTokenCount.
+describe("usageFromGeminiResponse", () => {
+  it("maps Gemini usageMetadata to OpenAI-shaped StreamUsage (cache inside prompt)", () => {
+    const body = {
+      candidates: [{ content: { role: "model", parts: [{ text: "hi" }] } }],
+      usageMetadata: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        cachedContentTokenCount: 200,
+        totalTokenCount: 1500,
+      },
+    };
+    expect(usageFromGeminiResponse(body)).toEqual({
+      prompt_tokens: 1000, // cache already counted inside promptTokenCount
+      completion_tokens: 500,
+      total_tokens: 1500,
+      prompt_tokens_details: { cached_tokens: 200 },
+    });
+    expect(tokensFromUsage(usageFromGeminiResponse(body))).toBe(1500);
+  });
+
+  it("folds thoughtsTokenCount (reasoning) into completion tokens", () => {
+    const body = {
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 7, thoughtsTokenCount: 4 },
+    };
+    expect(usageFromGeminiResponse(body)).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 11, // candidates(7) + thoughts(4)
+      total_tokens: 21,
+    });
+  });
+
+  it("omits prompt_tokens_details when there are no cached tokens", () => {
+    const body = { usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 3 } };
+    expect(usageFromGeminiResponse(body)).toEqual({
+      prompt_tokens: 12,
+      completion_tokens: 3,
+      total_tokens: 15,
+    });
+  });
+
+  it("returns null when the body has no usageMetadata object", () => {
+    expect(usageFromGeminiResponse({ candidates: [] })).toBeNull();
+    expect(usageFromGeminiResponse(null)).toBeNull();
+    expect(usageFromGeminiResponse(undefined)).toBeNull();
+    expect(usageFromGeminiResponse({ usageMetadata: "nope" })).toBeNull();
+  });
+});
+
+// Native-protocol-passthrough STREAMING cost for Gemini: the streamGenerateContent
+// SSE emits cumulative `usageMetadata` on its frames (the final frame carries the
+// complete count). Byte-faithful passthrough forwards these nameless `data:` frames
+// VERBATIM, so cost extraction scans the accumulated SSE and keeps the LAST seen
+// usageMetadata.
+describe("usageFromGeminiSSE", () => {
+  it("extracts the final cumulative usageMetadata frame", () => {
+    const sse = [
+      'data: {"candidates":[{"content":{"parts":[{"text":"Hel"}]}}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":1}}\n\n',
+      'data: {"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":500,"cachedContentTokenCount":200}}\n\n',
+    ].join("");
+    expect(usageFromGeminiSSE(sse)).toEqual({
+      prompt_tokens: 1000,
+      completion_tokens: 500,
+      total_tokens: 1500,
+      prompt_tokens_details: { cached_tokens: 200 },
+    });
+    expect(tokensFromUsage(usageFromGeminiSSE(sse))).toBe(1500);
+  });
+
+  it("skips keepalive / [DONE] / non-JSON frames without throwing", () => {
+    const sse = [
+      ": keepalive comment\n\n",
+      "data: not json at all\n\n",
+      'data: {"candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":2}}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    expect(usageFromGeminiSSE(sse)).toEqual({
+      prompt_tokens: 8,
+      completion_tokens: 2,
+      total_tokens: 10,
+    });
+  });
+
+  it("returns null when no usageMetadata frame is present", () => {
+    const sse = 'data: {"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}\n\n';
+    expect(usageFromGeminiSSE(sse)).toBeNull();
+    expect(usageFromGeminiSSE("")).toBeNull();
   });
 });
 

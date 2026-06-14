@@ -318,6 +318,21 @@ function responsesJsonToChatResponse(
       );
     })
     .join("");
+  // Responses `function_call` output items → OpenAI chat `tool_calls` so a
+  // cross-protocol (chat→generic-responses) caller still sees the tool invocation
+  // instead of silently losing it. Mirrors the streaming aggregator's mapping.
+  const toolCalls = output.flatMap((item) => {
+    if (item === null || typeof item !== "object") return [];
+    const it = item as Record<string, unknown>;
+    if (it.type !== "function_call") return [];
+    const name = typeof it.name === "string" ? it.name : undefined;
+    if (name === undefined) return [];
+    const callId =
+      typeof it.call_id === "string" ? it.call_id : typeof it.id === "string" ? it.id : name;
+    const args =
+      typeof it.arguments === "string" ? it.arguments : JSON.stringify(it.arguments ?? {});
+    return [{ id: callId, type: "function", function: { name, arguments: args } }];
+  });
   const usage = response.usage && typeof response.usage === "object" ? response.usage : {};
   const inputTokens =
     typeof (usage as { input_tokens?: unknown }).input_tokens === "number"
@@ -327,12 +342,18 @@ function responsesJsonToChatResponse(
     typeof (usage as { output_tokens?: unknown }).output_tokens === "number"
       ? ((usage as { output_tokens: number }).output_tokens ?? 0)
       : 0;
+  // OpenAI convention: content is null (not "") when the turn is purely tool calls.
+  const message: Record<string, unknown> = {
+    role: "assistant",
+    content: text.length > 0 ? text : toolCalls.length > 0 ? null : "",
+    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+  };
   return {
     id: typeof response.id === "string" ? response.id : `chatcmpl-${Date.now()}`,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,
-    choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+    choices: [{ index: 0, message, finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop" }],
     usage: {
       prompt_tokens: inputTokens,
       completion_tokens: outputTokens,

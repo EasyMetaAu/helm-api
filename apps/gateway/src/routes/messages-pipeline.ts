@@ -44,6 +44,8 @@ import {
   usageFromAnthropicResponse,
   usageFromAnthropicSSE,
   usageFromBody,
+  usageFromGeminiResponse,
+  usageFromGeminiSSE,
   usageFromResponsesResponse,
   usageFromResponsesSSE,
 } from "./payload-capture.js";
@@ -314,6 +316,27 @@ function assistantTurnFromNativeResponses(body: unknown): IRMessage[] {
   return text.length > 0 ? [{ role: "assistant", content: text }] : [];
 }
 
+// Reconstruct a minimal assistant turn from a VERBATIM Gemini GenerateContent
+// non-stream response for observeOutbound on the native-passthrough path (P2-GEM-01
+// governance). The native body was NOT projected into an IR, so this reads the Gemini
+// `candidates[].content.parts[]` directly, concatenating each part's `text`. Fail-open:
+// a missing/degraded body yields an empty turn (observeOutbound persists nothing but
+// still stamps the served model). NEVER throws.
+function assistantTurnFromNativeGemini(body: unknown): IRMessage[] {
+  const candidates = (body as { candidates?: unknown } | null)?.candidates;
+  if (!Array.isArray(candidates)) return [];
+  let text = "";
+  for (const candidate of candidates) {
+    const parts = (candidate as { content?: { parts?: unknown } } | null)?.content?.parts;
+    if (!Array.isArray(parts)) continue;
+    for (const part of parts) {
+      const p = part as { text?: unknown } | null;
+      if (typeof p?.text === "string") text += p.text;
+    }
+  }
+  return text.length > 0 ? [{ role: "assistant", content: text }] : [];
+}
+
 // —— OpenAI chat.completion body → IRResponse. The upstream is OpenAI-compatible
 // and the IR takes the OpenAI shape as its skeleton, so this is a near-identity
 // projection: content/tool_calls/finish_reason/usage map 1:1. Tolerant of a
@@ -495,6 +518,30 @@ function accumulateResponsesAssistantText(buffer: { text: string }, dataPayload:
   }
   if (evt?.type !== "response.output_text.delta") return;
   if (typeof evt.delta === "string") buffer.text += evt.delta;
+}
+
+// Accumulate assistant text from a VERBATIM Gemini streamGenerateContent SSE data
+// payload for observeOutbound on the native-passthrough stream (P2-GEM-01 governance).
+// Gemini frames are nameless `data:` GenerateContent deltas carrying
+// `candidates[].content.parts[].text` (no `type` discriminator). Fail-open: a non-JSON
+// frame contributes nothing. NEVER throws.
+function accumulateGeminiAssistantText(buffer: { text: string }, dataPayload: string): void {
+  if (dataPayload === "" || dataPayload === "[DONE]") return;
+  let evt: { candidates?: unknown };
+  try {
+    evt = JSON.parse(dataPayload) as { candidates?: unknown };
+  } catch {
+    return;
+  }
+  if (!Array.isArray(evt?.candidates)) return;
+  for (const candidate of evt.candidates) {
+    const parts = (candidate as { content?: { parts?: unknown } } | null)?.content?.parts;
+    if (!Array.isArray(parts)) continue;
+    for (const part of parts) {
+      const p = part as { text?: unknown } | null;
+      if (typeof p?.text === "string") buffer.text += p.text;
+    }
+  }
 }
 
 function nonNegativeToken(value: unknown): number | undefined {
@@ -790,18 +837,21 @@ export function createMessagesPipeline(
           // and observe-outbound persists the assistant turn reconstructed from the
           // native content. The decision record stays body-free (principle 7).
           if (result.nativePassthrough === true) {
-            const isResponses = protocol === "openai_responses";
             // Memory observe (outbound): reconstruct the assistant turn from the
             // native response (the body was never projected into an IR). Protocol-
             // aware: Anthropic reads content[].text, Responses reads output[].content[]
-            // .output_text. Fail-open — an empty/degraded body persists nothing.
+            // .output_text, Gemini reads candidates[].content.parts[].text. Fail-open —
+            // an empty/degraded body persists nothing.
             if (memory !== undefined) {
               const finalAlias =
                 result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
               const memoryObserve = memory.observe;
-              const responseMessages = isResponses
-                ? assistantTurnFromNativeResponses(result.body)
-                : assistantTurnFromNativeAnthropic(result.body);
+              const responseMessages =
+                protocol === "openai_responses"
+                  ? assistantTurnFromNativeResponses(result.body)
+                  : protocol === "gemini"
+                    ? assistantTurnFromNativeGemini(result.body)
+                    : assistantTurnFromNativeAnthropic(result.body);
               await runObserve(() =>
                 observeOutbound(
                   memoryObserve,
@@ -817,11 +867,14 @@ export function createMessagesPipeline(
             }
             // Cost/budget settle: normalize the native usage block into the OpenAI-
             // shaped StreamUsage the helpers understand (cost was already settled on the
-            // decision by execute()). Protocol-aware: Responses counts cache INSIDE
-            // input_tokens, Anthropic reports it separately.
-            const servedUsage = isResponses
-              ? usageFromResponsesResponse(result.body)
-              : usageFromAnthropicResponse(result.body);
+            // decision by execute()). Protocol-aware: Responses + Gemini count cache
+            // INSIDE the prompt count, Anthropic reports it separately.
+            const servedUsage =
+              protocol === "openai_responses"
+                ? usageFromResponsesResponse(result.body)
+                : protocol === "gemini"
+                  ? usageFromGeminiResponse(result.body)
+                  : usageFromAnthropicResponse(result.body);
             try {
               backfillCompletionCost(result.decision, null, null, servedUsage);
             } catch {
@@ -898,7 +951,16 @@ export function createMessagesPipeline(
           // stamped `protocol`. The byte-faithful forward itself is identical.
           if (result.nativePassthrough === true) {
             const passthroughStream = result.stream;
-            const isResponses = protocol === "openai_responses";
+            // Per-protocol usage extraction: Anthropic splits usage across
+            // message_start/message_delta; Responses carries totals on the terminal
+            // response.completed/incomplete; Gemini emits CUMULATIVE usageMetadata on
+            // every frame (the last frame wins).
+            const isUsageCarrierFrame = (data: string): boolean =>
+              protocol === "openai_responses"
+                ? data.includes("response.completed") || data.includes("response.incomplete")
+                : protocol === "gemini"
+                  ? data.includes("usageMetadata")
+                  : data.includes("message_start") || data.includes("message_delta");
             // Bounded usage buffer: keep ONLY the usage-bearing frames. Anthropic
             // carries usage on message_start (input/cache) + the trailing message_delta
             // (output); Responses carries the totals on the terminal response.completed/
@@ -914,17 +976,17 @@ export function createMessagesPipeline(
                 // frame's text delta feeds the assistant-turn reconstruction. Neither
                 // touches the bytes yielded downstream (byte-faithful forward). The
                 // usage-frame filter is generalized to catch BOTH protocols' carriers.
-                if (
-                  isResponses
-                    ? frame.data.includes("response.completed") ||
-                      frame.data.includes("response.incomplete")
-                    : frame.data.includes("message_start") || frame.data.includes("message_delta")
-                ) {
-                  usageBuffer += frame.raw;
+                if (isUsageCarrierFrame(frame.data)) {
+                  // Gemini's usageMetadata is CUMULATIVE per frame → keep ONLY the latest
+                  // (stays bounded). Anthropic/Responses need their distinct carriers
+                  // appended (input on message_start, output on message_delta / terminal).
+                  usageBuffer = protocol === "gemini" ? frame.raw : usageBuffer + frame.raw;
                 }
                 if (memory !== undefined) {
-                  if (isResponses) {
+                  if (protocol === "openai_responses") {
                     accumulateResponsesAssistantText(passthroughAssistant, frame.data);
+                  } else if (protocol === "gemini") {
+                    accumulateGeminiAssistantText(passthroughAssistant, frame.data);
                   } else {
                     accumulateAnthropicAssistantText(passthroughAssistant, frame.data);
                   }
@@ -943,9 +1005,12 @@ export function createMessagesPipeline(
               // budget settle, and per-account OAuth usage. All fail-open. The usage
               // extractor matches the inbound protocol (Responses totals on the terminal
               // event; Anthropic split across message_start/message_delta).
-              const nativeUsage = isResponses
-                ? usageFromResponsesSSE(usageBuffer)
-                : usageFromAnthropicSSE(usageBuffer);
+              const nativeUsage =
+                protocol === "openai_responses"
+                  ? usageFromResponsesSSE(usageBuffer)
+                  : protocol === "gemini"
+                    ? usageFromGeminiSSE(usageBuffer)
+                    : usageFromAnthropicSSE(usageBuffer);
               const finalAlias =
                 result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
               if (memory !== undefined) {
