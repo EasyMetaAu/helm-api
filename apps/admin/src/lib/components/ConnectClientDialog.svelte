@@ -109,20 +109,24 @@
     {/if}
 
     <!-- One tab per client; the base-URL convention differs across them by design. -->
-    <div class="mt-4 flex gap-4 border-b border-slate-200" role="tablist" aria-label={$t('Connect a client')}>
-      <button type="button" role="tab" class="tab-btn" aria-selected={tab === 'claude'}
+    <div
+      class="mt-4 flex max-w-full gap-4 overflow-x-auto border-b border-slate-200 [scrollbar-width:thin]"
+      role="tablist"
+      aria-label={$t('Connect a client')}
+    >
+      <button type="button" role="tab" class="tab-btn shrink-0 whitespace-nowrap" aria-selected={tab === 'claude'}
         onclick={() => (tab = 'claude')}>{$t('Claude Code')}</button
       >
-      <button type="button" role="tab" class="tab-btn" aria-selected={tab === 'codex'}
+      <button type="button" role="tab" class="tab-btn shrink-0 whitespace-nowrap" aria-selected={tab === 'codex'}
         onclick={() => (tab = 'codex')}>{$t('Codex CLI')}</button
       >
-      <button type="button" role="tab" class="tab-btn" aria-selected={tab === 'gemini'}
+      <button type="button" role="tab" class="tab-btn shrink-0 whitespace-nowrap" aria-selected={tab === 'gemini'}
         onclick={() => (tab = 'gemini')}>{$t('Gemini')}</button
       >
-      <button type="button" role="tab" class="tab-btn" aria-selected={tab === 'openclaw'}
+      <button type="button" role="tab" class="tab-btn shrink-0 whitespace-nowrap" aria-selected={tab === 'openclaw'}
         onclick={() => (tab = 'openclaw')}>{$t('OpenClaw')}</button
       >
-      <button type="button" role="tab" class="tab-btn" aria-selected={tab === 'sdk'}
+      <button type="button" role="tab" class="tab-btn shrink-0 whitespace-nowrap" aria-selected={tab === 'sdk'}
         onclick={() => (tab = 'sdk')}>{$t('OpenAI / Anthropic SDK')}</button
       >
     </div>
