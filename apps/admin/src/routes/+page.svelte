@@ -280,7 +280,15 @@
             value={(d: ModelSlice) => d.tokens}
             innerRadius={-40}
             legend
-            props={{ tooltip: { item: { format: formatTokens } } }}
+            props={{
+              legend: {
+                classes: {
+                  swatches: 'max-w-full flex-wrap justify-center',
+                  label: 'max-w-28 whitespace-normal break-all text-left leading-tight',
+                },
+              },
+              tooltip: { item: { format: formatTokens } },
+            }}
           />
         </div>
       {:else}

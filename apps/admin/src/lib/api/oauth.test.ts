@@ -138,7 +138,9 @@ describe('admin oauth api client', () => {
   });
 
   it('posts manual-paste proxy settings to the gateway start endpoint', async () => {
-    const fetchFn = vi.fn(async () => resp({ sessionId: 'sess-1', authorizeUrl: 'https://login' }));
+    const fetchFn = vi.fn<typeof fetch>(async () =>
+      resp({ sessionId: 'sess-1', authorizeUrl: 'https://login' }),
+    );
     vi.stubGlobal('fetch', fetchFn);
 
     await expect(
@@ -170,7 +172,7 @@ describe('admin oauth api client', () => {
   });
 
   it('updates per-account scheduling with a partial patch', async () => {
-    const fetchFn = vi.fn(async () => resp(null, { ok: true, status: 204 }));
+    const fetchFn = vi.fn<typeof fetch>(async () => resp(null, { ok: true, status: 204 }));
     vi.stubGlobal('fetch', fetchFn);
 
     await setAccountSchedule('anthropic', 'acct-a', { priority: 5, schedulable: false });
@@ -187,7 +189,7 @@ describe('admin oauth api client', () => {
   });
 
   it('deletes a URL-encoded account credential on logout', async () => {
-    const fetchFn = vi.fn(async () => resp(null, { ok: true, status: 204 }));
+    const fetchFn = vi.fn<typeof fetch>(async () => resp(null, { ok: true, status: 204 }));
     vi.stubGlobal('fetch', fetchFn);
 
     await logoutOAuth('github-copilot', 'user+team@example.com');
