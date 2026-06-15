@@ -11,6 +11,7 @@
 
 import {
   nonNegativeSecondsToSafeMs,
+  OAuthHttpError,
   resolveExpiresAtMsFromDurationSeconds,
   resolveExpiresAtMsFromEpochSeconds,
 } from "./runtime.js";
@@ -85,7 +86,7 @@ async function fetchJson(
   });
   if (!res.ok) {
     await res.text().catch(() => "");
-    throw new Error(`GitHub Copilot HTTP ${res.status}`);
+    throw new OAuthHttpError("GitHub Copilot", res.status);
   }
   return res.json();
 }

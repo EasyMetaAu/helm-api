@@ -51,7 +51,7 @@ describe("fetchJson error path (non-ok)", () => {
       "fetch",
       vi.fn(async () => jsonResponse({ error: "bad", leak: "secret" }, 403)),
     );
-    await expect(refreshGitHubCopilotToken("gh")).rejects.toThrow(/GitHub Copilot HTTP 403/);
+    await expect(refreshGitHubCopilotToken("gh")).rejects.toThrow(/GitHub Copilot OAuth HTTP 403/);
     await expect(refreshGitHubCopilotToken("gh")).rejects.not.toThrow(/secret/);
   });
 });

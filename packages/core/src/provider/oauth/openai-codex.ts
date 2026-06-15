@@ -13,6 +13,7 @@ import {
   buildOAuthRequestSignal,
   generateOAuthState,
   generatePKCE,
+  OAuthHttpError,
   parseOAuthAuthorizationInput,
   resolveOAuthTokenExpiresAt,
   throwIfOAuthLoginAborted,
@@ -70,7 +71,7 @@ async function postTokenForm(
   });
   if (!res.ok) {
     await res.text().catch(() => "");
-    throw new Error(`OpenAI Codex OAuth HTTP ${res.status}`);
+    throw new OAuthHttpError("OpenAI Codex", res.status);
   }
   return (await res.json()) as TokenResponseJson;
 }

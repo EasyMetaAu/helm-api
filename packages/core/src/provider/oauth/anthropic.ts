@@ -15,6 +15,7 @@ import {
   buildOAuthRequestSignal,
   generateOAuthState,
   generatePKCE,
+  OAuthHttpError,
   oauthErrorHtml,
   oauthSuccessHtml,
   parseOAuthAuthorizationInput,
@@ -145,8 +146,9 @@ async function postJson(
   });
   const text = await res.text();
   if (!res.ok) {
-    // Never echo the body — an OAuth error body can carry credential material.
-    throw new Error(`Anthropic OAuth HTTP ${res.status}`);
+    // Never echo the body — an OAuth error body can carry credential material. The
+    // status alone is safe and lets the token manager surface a diagnosable reason.
+    throw new OAuthHttpError("Anthropic", res.status);
   }
   return text;
 }
