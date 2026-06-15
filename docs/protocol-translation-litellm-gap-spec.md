@@ -10,7 +10,7 @@
 - Google Gemini GenerateContent
 
 
-状态说明：本文是完整缺口 backlog 和验收规格；证据索引中的“现状”来自本轮分析时的快照。首个实施 PR 先覆盖低风险高收益子集：P1-RESP-03、P1-ANT-01、P1-ANT-02，以及 P1-CHAT-02 的 OpenAI-compatible `cache_control` 清理。其他 P1/P2 项仍按本文实施顺序继续推进。
+状态说明：本文是完整缺口 backlog 和验收规格；证据索引和第 3 节各项的“现状”块来自本轮分析时的快照，不一定反映当前代码。截至目前，全部 P1 项（P1-RESP-01/02/03、P1-ANT-01/02、P1-CHAT-02、P1-GEM-01/02/03）以及本文列出的大部分 P2 项（P2-GEM-01/02、P2-RESP-03/04、P2-ANT-01、P2-CHAT-03/04）均已落地，并由 `scripts/protocol-compat/ast-grep-gates.sh`（经 `pnpm test:protocol-compat:ast` 调用）正向门禁强制保证实现存在。真正仍未实现的剩余项是 P3（P3-ANT-02 thinking-signature retry、P3-RESP-06 WebSocket）以及第 4 节明确声明的非目标。
 
 相关实现已经整理到 wiki：
 
@@ -325,11 +325,11 @@ LiteLLM 支持较新的 Google GenAI `response_json_schema` / `responseJsonSchem
 - `response_json_schema` SDK-shape 输入不丢。
 - outbound profile 测试证明字段名可配置。
 
-### P2-ANT-03：Anthropic 响应不能暴露内部 `provider_raw`
+### P2-ANT-03：Anthropic 响应不能暴露内部 `provider_raw`（已解决）
 
 **现状**
 
-Helm 的 Anthropic response schema 允许 `provider_raw`，`transformResponseOut()` 也会把 raw stop reason、usage、tool-name map 放入响应 body。
+已解决：客户端可见的 Anthropic response body 不再暴露 `provider_raw`。`packages/core/src/protocol/anthropic/response.ts:410` 的注释明确说明 the public Anthropic response body never exposes provider_raw；raw stop reason、usage、tool-name map 仅存在于 IR/telemetry 路径，不进入客户端响应 body。下文保留为最初分析快照与验收口径。
 
 **问题**
 

@@ -18,10 +18,15 @@ interface ships with the gateway for basic rule management.
 
 ## Reading order
 
+> **New to the codebase?** [Architecture & Data Flow](architecture.md) draws the
+> whole pipeline as sequence, flow, and state diagrams — the fastest way to see
+> how a request moves through the system.
+
 | # | Document | Contents |
 |---|----------|----------|
 | 01 | [Overview & Positioning](01-overview.md) | What Helm is, the nginx analogy, goals & non-goals, the core product loop. |
 | 02 | [Architecture](02-architecture.md) | Pipeline, component responsibilities, internal request shape, decision record, config layout, security rules. |
+| — | [Architecture & Data Flow](architecture.md) | Visual companion to 02 — Mermaid sequence/flow/state diagrams for the request lifecycle, classification, routing, execution, protocol translation, memory, and OAuth. |
 | 03 | [Classification Cascade](03-classification.md) | The three-layer cascade (rules → optional eval → balanced fallback), task detection, the rule engine, small-model eval. |
 | 04 | [Routing & Lanes](04-routing-and-lanes.md) | Routing priority, default & task lanes, policies, execution and the two fallbacks. |
 | 05 | [Protocol Translation](05-protocol-translation.md) | Protocol Adapter design (OpenAI Chat, Anthropic, OpenAI Responses, Google Gemini), the unified IR, the streaming state machine, the footguns that are handled. |
@@ -61,4 +66,4 @@ These keep Helm more focused than its predecessor `llm-router`:
 | Specification | Implemented (these documents describe the shipping system) |
 | Core gateway (routing, classification, protocol translation, store) | Implemented |
 | Admin UI | Implemented |
-| Release | 0.9.0 |
+| Release | Production — see [`package.json`](../package.json) for the current version |

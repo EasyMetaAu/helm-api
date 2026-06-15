@@ -8,10 +8,15 @@
 > (`apps/gateway/src/routes/memory-scope.ts`); mode normalization and
 > owner-scoping live in core (`packages/core/src/memory/observe.ts`).
 >
-> The only genuinely deferred piece is the **real LLM summarize/merge**: the
-> Observer, Reflector, and fact-extraction summarizers are currently
-> **deterministic non-LLM stubs** (concatenate / truncate) behind an injected
-> interface. Swapping in an LLM is a drop-in replacement.
+> **LLM-backed summarize / merge / fact-extraction has also shipped** and is
+> wired into the Observer and Reflector (`createMemoryLlmRuntime` in
+> `apps/gateway/src/memory-llm.ts`), gated behind `config.memory.llm.enabled`
+> (Zod schema default `false`). When enabled, the background jobs call a real
+> model via `client.chatCompletion` with `response_format: json_object` and
+> parse strict JSON. The **deterministic concatenate / truncate path is the
+> default** — and the fail-open fallback whenever the LLM is disabled, the model
+> is unavailable, or a call / parse / timeout fails. See "`config.memory.llm`"
+> below.
 >
 > The forgetting & tiering layer ([12 · Memory: Forgetting & Tiering](12-memory-forgetting-and-tiering.md))
 > has also shipped, gated behind `config.memory.forgetting.enabled`. Although the
@@ -336,7 +341,7 @@ memory_messages
 memory_observations
   id, thread_id, source_message_range, observation_text, observed_at,
   referenced_at, priority, tags,
-  reference_count, importance, status (active | archived), archived_at, expired_at
+  reference_count, importance, status (active | archived | pruned), archived_at, expired_at
 
 memory_reflections
   id, owner_id, project_id, resource_id, thread_id, reflection_text, version,
@@ -354,10 +359,14 @@ memory_jobs
 ```
 
 `source_message_range` is required so compressed memory can be audited against the
-original raw messages. The forgetting-score columns on observations / reflections
-and the `memory_facts` table back the docs/12 layer; with `forgetting.enabled`
-false every row stays `status='active'` / `expired_at=null`, so those columns are
-inert.
+original raw messages. The shared `MemoryStatusSchema` enum — `active | archived |
+pruned` — backs observations, reflections, and facts alike. `pruned` is the
+retention **tombstone**: the row's text is freed (e.g. `observation_text` blanked to
+`[pruned]`) but the row itself **and** its `source_message_range` are kept, so the
+pruned observation still marks its raw messages as covered (audit + window-dedup
+stay intact). The forgetting-score columns on observations / reflections and the
+`memory_facts` table back the docs/12 layer; with `forgetting.enabled` false every
+row stays `status='active'` / `expired_at=null`, so those columns are inert.
 
 ## Routing integration
 
@@ -391,9 +400,44 @@ Observability](07-observability.md)).
 Memory maintenance has its own token/cost buckets so it is visible in cost
 reports and not hidden inside provider execution cost: actor request tokens,
 actor response tokens, memory hydrate tokens, Observer tokens, Reflector tokens.
-The buckets and sinks exist today; the Observer bucket is currently a no-op sink
-(deterministic stub), and full memory-maintenance cost reporting is deferred
-until the LLM summarizer lands.
+The buckets and sinks are real: when the LLM path runs (`config.memory.llm.enabled`)
+the Observer and Reflector buckets bill the measured tokens of the summarize /
+merge / fact-extraction calls. Under the default deterministic-stub path those
+buckets are a no-op sink — the concatenate / truncate work spends no model
+tokens.
+
+## `config.memory.llm`
+
+LLM-backed memory formation is **opt-in**. The `llm:` block (validated by
+`MemoryLlmSchema`, `.strict()` — unknown keys refuse startup) controls **only** the
+background Observer / Reflector summarize / merge / fact-extraction calls; the
+request-path observe / inject stays synchronous and deterministic. With
+`enabled: false` (the default) the deterministic concatenate / truncate stubs run,
+and they also remain the **fail-open fallback** at runtime — an unavailable model,
+invalid JSON, or a timeout degrades that one job to the deterministic output (never
+a 5xx).
+
+```yaml
+# config/memory.yaml
+llm:
+  enabled: false                          # opt-in master switch (default false)
+  model: deepseek/deepseek-v4-flash       # base model for all memory LLM tasks
+                                          #   (required when enabled: true)
+  # Optional per-task overrides (each falls back to `model`):
+  # observation_model: openai/gpt-4.1-mini   # raw messages → observation (Observer)
+  # reflection_model:  openai/gpt-4.1-mini   # observations → reflection (Reflector)
+  # facts_model:       openai/gpt-4.1-nano   # observations → atomic facts
+  timeout_ms: 30000                       # per-call abort budget (default 30000)
+  temperature: 0                          # default 0 (deterministic)
+  max_tokens:                             # per-task output caps
+    observation: 800
+    reflection: 1200
+    facts: 1000
+```
+
+Calls go through `client.chatCompletion` with `response_format: json_object` and
+the result is parsed against a strict Zod schema; anything that does not parse
+falls back to the deterministic path.
 
 ## Phases
 
@@ -413,7 +457,9 @@ until the LLM summarizer lands.
   conversation — works for tool / multimodal / native-passthrough turns, with
   window-aware dedup, and preserves the upstream prompt cache (the cached prefix is
   never touched). See "Inject is additive (trailing-reminder model)" above.
-- The summarize/merge steps are deterministic stubs pending an LLM.
+- The summarize / merge / fact-extraction steps default to deterministic stubs,
+  with an opt-in LLM-backed path behind `config.memory.llm.enabled` (see
+  "`config.memory.llm`").
 
 ### Phase 3 — Project memory · implemented
 

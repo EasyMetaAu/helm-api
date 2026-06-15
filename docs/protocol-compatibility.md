@@ -26,10 +26,13 @@ all four streaming-capable:
 | OpenAI Responses | `POST /v1/responses` | `openai-responses` | `Authorization: Bearer` |
 | Google Gemini | `POST /v1beta/models/{model}:generateContent` (+ `:streamGenerateContent?alt=sse`) | `gemini` | `x-goog-api-key` |
 
-Gemini is mounted as a catch-all `POST /v1beta/models/:rest{.+}`; any operation
-other than `generateContent` / `streamGenerateContent` returns 404 in the native
-Gemini error shape. The Gemini and Responses faces authenticate **inside** the
-handler so they can emit their own native error envelopes.
+Gemini is mounted as catch-alls under both `POST /v1beta/models/:rest{.+}` and
+`POST /models/:rest{.+}`. `generateContent` / `streamGenerateContent` run the
+full pipeline; `countTokens` returns a Gemini-shaped count (provider-native or a
+deterministic local estimate, the latter flagged `estimated: true`); any other
+operation returns 404 in the native Gemini error shape. The Gemini and Responses
+faces authenticate **inside** the handler so they can emit their own native error
+envelopes.
 
 ---
 
@@ -100,9 +103,12 @@ Notes (only what the table can't show):
   targets honor multiple candidates: OpenAI Chat and Responses pass `n` through,
   Gemini maps it to `candidateCount`.
 - **Remote `http(s)` images → Gemini output.** Gemini's request shape wants
-  inline base64 or a `gs://` / Files-API URI; an arbitrary remote image URL
-  degrades to an explicit text placeholder (issue #49 non-goal). Inline base64
-  images round-trip cleanly.
+  inline base64 or a `gs://` / Files-API URI. By default an arbitrary remote
+  image URL degrades to an explicit text placeholder — the pure core transformer
+  does no network I/O. An optional, default-off provider-layer media materializer
+  (`materializeGeminiRemoteMediaBody`, config-gated by `remoteMediaFetch` and
+  SSRF-guarded via `assertPublicHttpsTarget`) can fetch the `https` image into
+  `inlineData` when enabled. Inline base64 images round-trip cleanly.
 - **Responses statefulness → others.** `store` / `previous_response_id` describe
   a server-side conversation that other protocols don't model; they ride
   `provider_raw` so a Responses→Responses round-trip is lossless, but they are
@@ -151,9 +157,13 @@ thinking knob. The band values differ per target:
 | effort | Anthropic (thinking budget) | Gemini (`thinkingConfig`) |
 |---|---|---|
 | minimal | 1024 | 128 |
-| low | 2048 | 1024 |
-| medium | 8192 | 8192 |
-| high | 16384 | 24576 |
+| low | 1024 | 1024 |
+| medium | 2048 | 8192 |
+| high | 4096 | 24576 |
+
+The Anthropic column is exact litellm parity (`minimal`/`low` both floor at 1024,
+`medium` 2048, `high` 4096); the extended tiers `xhigh` → 8192 and `max` → 16384
+continue above the four standard bands.
 
 Anthropic Messages also defaults `max_tokens` to **4096** when the client omits
 it (the field is required upstream but optional on the Helm face).
@@ -213,6 +223,8 @@ provider-execution (OAuth) concern, not protocol-translation `provider_raw`.
 
 Field coverage is asserted path-by-path against the litellm reference in
 `protocol-matrix.test.ts`. The remaining gaps are provider-specific edges —
-litellm's Vertex-only fields, true Responses session continuation, and
-remote-image fetch on the Gemini output path — each a documented non-goal above,
-not a silent loss.
+litellm's Vertex-only fields and true Responses session continuation — each a
+documented non-goal above, not a silent loss. Remote-image fetch on the Gemini
+output path is no longer unconditional: it degrades to a text placeholder by
+default but can be materialized into `inlineData` by the optional, default-off
+provider-layer `remoteMediaFetch` materializer (SSRF-guarded).

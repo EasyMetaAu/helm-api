@@ -9,7 +9,7 @@
 开源 · 自托管 · MIT
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/github/package-json/v/EasyMetaAu/helm-api)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-3c873a.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](tsconfig.base.json)
 [![Built with Hono](https://img.shields.io/badge/gateway-Hono-ff5e00.svg)](https://hono.dev)
@@ -63,16 +63,17 @@ docker compose logs helm | grep -i "root API key"
 | :---: | :--- | :--- |
 | 🔀 | **四种客户端协议** | OpenAI Chat、Anthropic Messages、OpenAI Responses、Google Gemini——全部支持流式 + 非流式。中间是同一套 IR：任意客户端触达任意后端，输出格式一致，SSE 也不例外。 |
 | 🧭 | **三层分类** | 确定性规则（纯函数、零网络、有单测——常驻开启）→ 可选的小模型 eval（`temperature: 0`、带缓存、默认关闭——需要先配好 eval 模型）→ `balanced` lane 作为 fail-open 兜底口。 |
-| 🛣️ | **Lane + 策略路由** | 请求走 lane（`economy` / `balanced` / `premium`，外加任务 lane `coding`、`json`、`vision`、`tool_use`），从不直接面对供应商名。首条命中的策略可以钉死或封顶 lane。每条 lane = 一个主模型 + 一条兜底链，全在配置里。可选的 Agentic Signals 能在这些上限内把异常的分级 lane 提升到更健康的强档 lane。 |
+| 🛣️ | **Lane + 策略路由** | 请求走 lane（`economy` / `balanced` / `premium`，外加任务 lane `coding`、`json`、`vision`、`tool_use`），从不直接面对供应商名。首条命中的策略可以钉死或封顶 lane。每条 lane = 一个主模型 + 一条兜底链，全在配置里。可选的 Agentic Signals 能在这些上限内，把异常的 lane 提升到更健康的强档 lane。 |
+| 🪪 | **固定模型的客户端也能即插即用** | 一个兼容垫片把客户端写死的厂商模型 id（Claude Code 的 `claude-opus-4-8`、锁定 `gpt-5.5` 的 SDK）映射到某条 lane——老客户端不改一行代码，就不再吃到 *400 unknown model*，还照样享受 lane 路由与失败兜底。由运维方配置，对任何 key 都生效。 |
 | 🛡️ | **稳健的执行层** | 熔断器（OPEN/HALF_OPEN + 单探针）、能力过滤（跳过候选时记下明确原因）、`:free` 档 429 跳过、按 key 并发排队。客户端断连永远不算供应商故障。 |
 | 🔐 | **OAuth 订阅** | 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的**订阅**当后端来路由——多账号组池，逐账号做模型策展 / 出口代理 / 调度，全部热重载。*（可选功能，先读 [ToS 警告](#oauth-订阅类供应商claude-promaxchatgpt-codexgithub-copilot)。）* |
 | 🔑 | **带约束力的 key** | 强制鉴权；key 只存 SHA-256 哈希。每把 key 可设：lane 白名单、自定义模型权限、RPM/TPM 限流、用量预算（降级或拒绝）、并发上限、记忆模式。先软吊销，再永久删除。 |
-| 🧠 | **Memory 中间件** | 默认开启：路由前把记忆注入上下文；后台 worker 负责压缩与归并——压缩**全自动、零配置**（价格与上下文窗口取自模型目录；按体量 / 空闲 / 上下文压力三种时机触发）；遗忘/分层机制（衰减、强化、保留期）防止记忆膨胀。可按 key 或按请求关闭（`x-memory-mode: off`）。 |
-| 📊 | **全程可观测** | 每个请求一条脱敏决策记录——分类、策略、lane、每次供应商尝试、延迟、兜底、成本。正文逐字捕获单独存表（默认开，保留 30 天）。可编辑的 **Retry** 按钮能重放任何已捕获的请求。 |
+| 🧠 | **Memory 中间件** | 默认开启：路由前把记忆作为一轮追加消息注入上下文；后台 worker 负责压缩与归并——压缩**全自动、零配置**（价格与上下文窗口取自模型目录；按体量 / 空闲 / 上下文压力三种时机触发）。摘要与归并默认走确定性的本地逻辑，另有**可选的 LLM 路径**（`config.memory.llm`，默认关闭）；遗忘/分层机制（衰减、强化、保留期）防止记忆膨胀。可按 key 或按请求关闭（`x-memory-mode: off`）。 |
+| 📊 | **全程可观测** | 每个请求一条脱敏决策记录——分类、策略、lane、每次供应商尝试、延迟、兜底、成本。正文逐字捕获单独存表（默认开，保留 30 天）。可编辑的 **Retry** 按钮能按原协议重放任何已捕获的请求。 |
 | 🖥️ | **管理面板** | `/admin` 上的 SvelteKit SPA，HTTP Basic 把守：概览、key 增删改、lane / 策略 / 分类器编辑器、系统设置、可下钻的请求日志。编辑会**写回 `config/*.yaml`**（保留注释、原子写入）并实时重绑——无需重启，重启也不丢。支持 5 种语言。 |
 | 💾 | **存储** | 默认 SQLite（一个本地文件）。Postgres / Supabase 走同一套 Store 端口抽象——改一个环境变量即可切换。 |
 
-**路线图：** 接 LLM 的记忆摘要（observer/reflector 的摘要步骤目前是确定性桩）。账户 / 客户级计费明确不在范围内。详见 [09 路线图](docs/09-roadmap.md)。
+**路线图：** 账户 / 客户级计费明确不在范围内。详见 [09 路线图](docs/09-roadmap.md)。
 
 ## 两套失败纪律
 
@@ -85,7 +86,7 @@ docker compose logs helm | grep -i "root API key"
 
 ## 架构
 
-四种客户端协议进入同一套稳定接口；一个不依赖框架的内核干所有活；配置驱动每一个阶段。
+四种客户端协议进入同一套稳定接口；一个不依赖框架的内核干所有活；配置驱动每一个阶段。（想看同一条流水线的时序图、流程图与状态图，见 **[架构与数据流](docs/architecture.md)**。）
 
 ```text
 CLIENT ── OpenAI · Anthropic · OpenAI Responses · Google Gemini
@@ -101,7 +102,8 @@ CORE      packages/core · 路由大脑（不 import 任何 Web 框架）
              ├─ gate        限流（默认关）· 用量预算（默认关）       · fail-closed
              ├─ memory      把记忆注入上下文（默认开）               · fail-open
              ├─ classify    L1 规则 ─不确定→ L2 eval（默认关）─→ balanced · fail-open
-             ├─ resolve     首条命中策略 → lane → 限额 → 兜底链
+             ├─ resolve     别名垫片 · 显式模型 · 首条命中策略
+             │                  └─▶ lane → 限额（+ 信号）→ 兜底链
              ├─ execute     能力过滤 → 熔断器 → provider
              │                  └── 失败时：切到链内下一个模型
              └─ translate   provider 原生  ⇄  IR  ⇄  客户端协议（流式 SSE）
@@ -126,8 +128,8 @@ helm-api/
 ├─ packages/
 │  ├─ core/      # 路由、分类、provider、协议互译、存储端口（不依赖框架）
 │  └─ shared/    # Zod schema + 共享类型（类型唯一来源）
-├─ config/       # 默认 lanes / policies / classifier / providers / … YAML
-├─ docs/         # 文档（按 01 → 12 顺序读）
+├─ config/       # 默认 lanes / policies / classifier / providers / model-aliases / … YAML
+├─ docs/         # 文档（从 docs/README.md 开始读）
 └─ scripts/      # sync:catalog 等构建期工具
 ```
 
@@ -151,16 +153,18 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ |
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ✅ |
-| `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅（走 `:streamGenerateContent?alt=sse`；用 `x-goog-api-key` 鉴权） |
+| `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅（走 `:streamGenerateContent`；用 `x-goog-api-key` 鉴权） |
 
 **`model` 字段填什么：**
 
 | 取值 | Helm 的行为 |
 |---|---|
 | `auto`（推荐） | 对请求做分类，路由到最合适的 lane。 |
-| 模型别名，如 `deepseek/deepseek-v4-pro` | 精确使用该模型、跳过路由——仅对有「自定义模型」权限的 key 生效。 |
+| lane 名，如 `premium` | 直接进入该 lane（受 key 的 lane 白名单约束）。 |
+| 写死的厂商 id，如 `claude-opus-4-8` | 兼容垫片把它改写到某条 lane（见 `config/model-aliases.yaml`）——对任何 key 都生效。 |
+| 具体模型别名，如 `deepseek/deepseek-v4-pro` | 精确使用该模型、跳过路由——仅对有「自定义模型」权限的 key 生效。 |
 
-> 用普通 key 时，路由永远是自动的——直接填 `auto`。Lane 由运维方配置（`lanes.yaml` + 面板），客户端不在单次调用里挑 lane。
+> 用普通 key 时，直接填 `auto`（或某个 lane 名）即可，路由全自动。Lane 由运维方配置（`lanes.yaml` + 面板），客户端不在单次调用里定义 lane。
 
 **其余端点**（交互式文档在 `/docs`，原始规格在 `/openapi.json`）：
 
@@ -168,7 +172,7 @@ curl http://localhost:8080/v1/chat/completions \
 |---|---|---|
 | `GET /` · `GET /healthz` · `GET /version` | — | 落地页 · 就绪探针 · 构建信息 |
 | `GET /v1/models` · `GET /v1/models/{id}` | API key | 列出该 key 能路由到的模型（lane + `auto`；自定义模型 key 还会看到带能力与定价的具体别名） |
-| `/admin` · `/admin/api/*` | Basic auth | 面板 + 其 JSON 后端（仅在设置了面板凭证时才挂载） |
+| `/admin` · `/admin/api/*` | Basic auth | 面板 + 其 JSON 后端（仅在启用面板时才挂载） |
 
 ## 配置
 
@@ -180,10 +184,11 @@ curl http://localhost:8080/v1/chat/completions \
 | `auth.yaml` | 是否强制 API key + 首次启动的 root key | — |
 | `runtime.yaml` | 请求限额、限流默认值、存储驱动、可选信号反馈 | 部分 |
 | `providers.yaml` | 上游供应商 + 模型别名（凭证只引用环境变量**名**） | — |
-| `lanes.yaml` | 每条 lane 的主模型 + 兜底链 | ✅ 持久化 |
+| `lanes.yaml` | 每条 lane 的主模型 + 兜底链（质量 lane、任务 lane、厂商家族 lane） | ✅ 持久化 |
 | `policies.yaml` | 首条命中、用来挑选或封顶 lane 的规则 | ✅ 持久化 |
 | `classifier.yaml` | 内置规则 + 可选的 eval 模型 | ✅ 持久化 |
-| `memory.yaml` | 遗忘/分层旋钮（出厂配置即开启）+ 可选的压缩触发覆盖（`compaction:`——体量/空闲/压力阈值；经济学部分保持全自动）。旧版遗留的 `observer:` 配置块会导致启动失败 | ✅ |
+| `model-aliases.yaml` | 把写死的厂商模型 id 映射到 lane / `auto`（兼容垫片，可选） | — |
+| `memory.yaml` | 遗忘/分层旋钮（出厂配置即开启）· 可选的压缩触发覆盖（`compaction:`）· 可选的 LLM 摘要器（`llm:`，默认关闭）。旧版遗留的 `observer:` 配置块会导致启动失败 | ✅ |
 | `capabilities.yaml` / `pricing.yaml` | 对模型目录的手动覆盖项（含 prompt 缓存读/写价格） | — |
 
 最常用的环境变量（env 优先于 YAML；完整列表见 [`.env.example`](.env.example)）：
@@ -229,8 +234,6 @@ pnpm dev          # 管理面板开发服务器（Vite）—— 见下方说明
 pnpm test         # Vitest 单元测试
 pnpm exec vitest run --coverage # 单元测试覆盖率（只统计源码，并带阈值）
 pnpm test:e2e     # Playwright 端到端测试
-pnpm test:e2e:coverage       # 协议重点的网关 / 服务端 E2E 覆盖率
-pnpm test:e2e:coverage:full  # 全量 Playwright 套件的网关 / 服务端 E2E 覆盖率
 pnpm typecheck    # 全仓库 tsc --noEmit
 pnpm lint         # Biome
 pnpm build        # 构建网关 + 面板
@@ -239,7 +242,7 @@ pnpm sync:catalog # 刷新生成的模型目录（能力 + 定价）
 
 > `pnpm dev` 只起 admin SPA。网关没有 watch 脚本——构建后运行（`pnpm build` 再 `node apps/gateway/dist/index.js`），或用 Docker。
 >
-> 文档目前仅有英文版。
+> 规格文档目前仅有英文版。
 
 测试先行：core 用 Vitest，完整链路用 Playwright。设计决策记录在 [`implementation-notes.md`](implementation-notes.md)。开 PR 前：
 
@@ -249,7 +252,7 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
 
 ## 文档
 
-从 [`docs/README.md`](docs/README.md) 开始，按顺序读：
+从 [`docs/README.md`](docs/README.md) 开始。想先看流水线全貌，读 **[架构与数据流](docs/architecture.md)**。编号规格按顺序读：
 
 [01 概览](docs/01-overview.md) ·
 [02 架构](docs/02-architecture.md) ·
@@ -267,7 +270,7 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
 
 ## 项目状态
 
-Helm API 当前版本 **0.9.0**——一套端到端的真实实现，不是空架子。完整链路（配置 → 鉴权 → 分类 → 路由 → 执行（含熔断与兜底）→ 协议互译 → 遥测）已全部打通，背后是一套相当完整的 Vitest 单测加 Playwright e2e 用例。
+Helm API 是一套端到端的真实实现，不是空架子。完整链路（配置 → 鉴权 → 分类 → 路由 → 执行（含熔断与兜底）→ 协议互译 → 遥测 → 记忆）已全部打通，背后是一套相当完整的 Vitest 单测加 Playwright e2e 用例。上方的版本徽章会跟踪当前发布版本。
 
 ## 许可
 

@@ -2,6 +2,8 @@
 
 ## Overview
 
+> See also [Architecture & Data Flow (diagrams)](architecture.md) — the same pipeline as sequence, flow, and state diagrams.
+
 ```text
 Client
   -> API Gateway (Hono)
@@ -43,8 +45,10 @@ Built on Hono. Responsibilities:
   `runtime.request_timeout_ms`).
 - Dispatch to the correct protocol adapter.
 
-It also serves `/healthz` and `/version`, and (when admin credentials are
-configured) mounts the Admin UI and admin API under `/admin`.
+It also serves `/healthz` and `/version`, and mounts the Admin UI and admin
+API under `/admin` when admin is enabled — i.e. when credentials are configured
+(auto-enable) OR `HELM_ADMIN_ENABLED` / `admin.enabled` is set; otherwise
+`/admin` and `/admin/api` return 404.
 
 ### Protocol Adapter
 
@@ -237,6 +241,7 @@ config/
   runtime.yaml         # store driver, rate limit, timeouts, request size, signal feedback
   server.yaml          # host / port
   memory.yaml          # forgetting/decay layer (observer compaction is auto, not configured)
+  model-aliases.yaml   # virtual vendor-model-id → lane | "auto" rewrite map (compatibility shim, optional)
 ```
 
 Capability and pricing data originate from a checked-in **generated catalog**
@@ -262,8 +267,10 @@ console for basic rule management (lanes / policies / classifier / keys) and
 request debugging, plus a "System Settings" page for runtime-mutable settings
 (payload capture, retention, the rate-limit switch, log level) that apply without
 a restart. It is independent of API traffic and authenticated with HTTP Basic
-credentials (file / environment). The admin surface is mounted **only** when
-credentials are configured; otherwise `/admin` and `/admin/api` return 404. See
+credentials (file / environment). The admin surface is mounted when admin is
+enabled — i.e. when credentials are configured (auto-enable) OR
+`HELM_ADMIN_ENABLED` / `admin.enabled` is set; otherwise `/admin` and
+`/admin/api` return 404. See
 [11 · Admin UI](11-admin-ui.md).
 
 Deployment: **open-source, self-hosted, one-command Docker**, config-as-code,
