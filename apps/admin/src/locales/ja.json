@@ -564,5 +564,7 @@
   "No routable models for this account.": "このアカウントにルーティング可能なモデルがありません。",
   "Done in {ms} ms": "{ms} ms で完了",
   "{n} chars": "{n} 文字",
-  "Send a short message through this account and stream the reply.": "このアカウント経由で短いメッセージを送信し、応答をストリーミング表示します。"
+  "Send a short message through this account and stream the reply.": "このアカウント経由で短いメッセージを送信し、応答をストリーミング表示します。",
+  "Default fallback lane": "デフォルトのフォールバックレーン",
+  "Where a request lands when the classifier cannot decide or nothing else matches. Complexity tiers (simple/medium/complex) are unaffected. Defaults to balanced.": "分類器が判定できない、または他に一致する条件がない場合にリクエストが最終的に振り分けられるレーン。複雑度の段階(simple/medium/complex)には影響しません。既定は balanced です。"
 }

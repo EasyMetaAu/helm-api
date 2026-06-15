@@ -135,6 +135,11 @@ export interface ClassifyAdapterDeps {
    *  verdict computed under an old config is never served after the change. */
   getClassifierConfig: () => ClassifierConfig;
   lanes: LanesConfig;
+  /** Live getter for the operator-chosen terminal fallback lane
+   *  (runtime.default_lane). Read per resolve so an admin change hot-applies,
+   *  keeping the cascade's internal lane consistent with the real router. Absent
+   *  (tests) → resolver uses the "balanced" floor. */
+  defaultLane?: () => string;
   /** Provider used to invoke the internal eval small-model (same upstream, eval
    *  alias). Only its non-stream `chatCompletion` is used. */
   provider: ProviderForEval;
@@ -181,7 +186,7 @@ export type ClassifyFn = (
  * collapse onto a single eval call (the cache-hit invariant). Never throws.
  */
 export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
-  const { getClassifierConfig, lanes, provider, now, log, momentum, catalog } = deps;
+  const { getClassifierConfig, lanes, provider, now, log, momentum, catalog, defaultLane } = deps;
 
   // The eval cache is content-hash keyed and shared across requests so identical
   // prompts collapse onto one eval call. But a cached verdict is only valid under
@@ -219,6 +224,7 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
       },
       policy: { matched_policy_id: null, use_lane: null, reason: "eval cascade" },
       lanes,
+      defaultLane: defaultLane?.(),
     });
     return decision.selected_lane;
   };

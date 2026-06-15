@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-15 · 可配置的「默认兜底车道」系统设置（docs/04；原则 1/2/3/5）
+
+- **背景**：兜底终点写死 `balanced`（`lane-resolver.ts` 的 `BALANCED` 常量 + lanes schema 强制 `"balanced" in m`），运营者无法改。用户要「不想默认到 balanced 的人可定制」。讨论中**否决两个直觉方案**：① policies 加 catch-all 规则——policy 是 resolver **第 1 优先级（最高）**，底部 catch-all 会**盖过** task/complexity 路由（`use_lane` 钉死全部未匹配请求 / `max_lane` 全局封顶 premium 不可达），正是 shipped policies.yaml 注释当年特意避开的；② 靠 lanes map「最后一条」——lanes 是 `z.record` 无序，靠 key 顺序当兜底脆弱且违反原则 4。用户拍板：**系统设置里加一个可选 lane 的兜底项**，且**只改最终兜底**（不动 complexity 档）。
+- **方案**：`default_lane` 做成**热改 RuntimeSettings 字段**（DB `config_kv`，读 fail-open / 写 fail-closed），默认 `"balanced"` → 100% 向后兼容。resolver 仅在**两个 fail-open 终点**（classifier `default`/`fallback` 短路 + 完全未解析）用它，且**仅当该 lane 存在**否则回落字面 `"balanced"`（lanes schema 仍强制 balanced 存在=终极地板）→ **无新增 fail-close 路径**，不会重演 0.13.4 `org_id` 启动崩溃。**不动 `COMPLEXITY_FALLBACK`**（simple→economy/medium→balanced/complex→premium 保持）。
+- **接线**：schema 加 `default_lane`（runtime-settings.schema.ts）；resolver `ResolveLaneInput.defaultLane?`（缺省=balanced，旧 caller/测试不变，终点用 `defaultLane && has(lanes,…) ? : BALANCED`）；route-request `RouteDeps.defaultLane` + plan() 传入；`apps/gateway/.../classify.ts` eval-cascade 包装器加 live getter；server.ts route 闭包 `settings.default_lane`（每请求读=热生效）+ buildClassifyAdapter `() => settings.default_lane`；admin settings PUT **校验 lane 存在**（不存在 400，resolver 另有运行时守卫=纵深防御）；admin 系统设置加 lane 下拉（`+page.ts` listLanes + `+page.svelte` `<select>` 镜像 log_level）+ 5 语言 i18n（en/zh-hans/zh-hant/ja/ko）。
+- **取舍/坑/TODO**：① 因 balanced 恒存在且 medium→balanced 在终点前命中，`default_lane` 主要影响**分类器 fail-open 路径**（这正是「兜底」语义，用户认可只改这层）；② classify 适配器用 live getter 保持 cascade 内部 lane 与真实路由一致（route-request 才权威）；③ i18n 手工补 5 文件，无强制完整性测试覆盖新键，缺则回退英文。
+- **验证**：TDD——lane-resolver +5（配置终点 / 缺失回落 balanced / medium 不受影响 / 缺省 back-compat）、runtime-settings +1、admin 路由 +2（合法 lane 200 / 未知 lane 400 不持久化）、admin settings client round-trip。`pnpm typecheck`/`lint`/全量测试 + admin `svelte-check` 待 CI。分支 `feat/configurable-default-lane`，开 PR（不发版/不部署）。
+
 ## 2026-06-15 · 双人 code review 修复：org/user 策略拆除 + Anthropic 空流 + applyCaps + client_abort（docs/02/04/05/07；原则 3/5/7/8）
 
 - **背景**：文档审计后用户要求对架构做真实 bug review（我 + Codex 各一遍，对抗式合并）。覆盖互补：我审路由/执行/鉴权，Codex 审协议/流式（其 run 未出最终报告，关键发现从执行日志捞出并复核）。确认 2 bug + 1 设计问题 + 2 小问题，用户拍板全修。
@@ -26,19 +34,13 @@
 - **取舍/坑/TODO**：① 选 **core 局部闸**而非改 composition root 成「共享单实例注册表」——更小爆炸半径、不变量收敛在它该在的层、自动覆盖未来新增调用点。② 闸按 store 对象 scope，前提是**全进程共用同一个 OAuthTokenStore 对象**（实际如此）；若多个 store 对象包同一 DB 则不协调（非当前接线）。③ re-login `persist()` 直写 store **在闸外**，与并发刷新极小概率竞争（重登瞬间，罕见，超本轮范围）——靠 reload 自愈，最坏再登一次。④ **眼下应急**：若 token 家族已被上游作废，**无任何代码能复活**——需在 admin **重新登录**该 anthropic 账号。⑤ copilot 错误串由 `GitHub Copilot HTTP` 变 `GitHub Copilot OAuth HTTP`（统一 `OAuthHttpError`），已同步更新对应测试。
 - **验证**：TDD 红→绿——`token-manager.preset.test.ts` **+4**（两兄弟共享轮换 token 只刷一次 / 陈旧内存 token reload 后采纳不重放=生产 bug 回归 / invalidate 强制刷新 / 状态码透传且脱敏），保留既有 8 含「N 并发合并一次刷新」（曾因我误删 single-flight 回归、已修复）；core provider **429 绿**、gateway **796 绿**，`typecheck`/`lint`/`build` 绿。PGlite 满量并发偶发 5s 超时为既有 flake（隔离复跑绿）。
 
-## 2026-06-14 · 上游瞬时断连的幂等重试 + SSE 心跳保活（docs/02/05；原则 3/8）
-
-- **背景**：客户端偶发 `The socket connection was closed unexpectedly…`（Bun fetch 文案 → 客户端↔helm 的 TCP 被无干净 HTTP 错误地掐断）。排查：helm 正常错误路径**不产生裸 socket 关闭**（首包前→结构化 JSON 502/504，流中→`event: error` 帧），裸断 ⇒ 代理 idle/read 超时 / 进程重启 / keepalive 复用竞争。helm 旧行为只有「换模型」execution fallback，**无「重试同一上游」**——单候选链遇瞬时抖动即 502。用户拍板做两件且对流式/非流式都健壮：(A) 幂等重试 (B) SSE 心跳；慢首包覆盖（early-commit）走**否决**（保留 peek-before-commit、低风险）。
-- **Change A — 幂等重试（`provider/retry.ts`）**：`isTransientConnectionError` 严格白名单（ECONNRESET/ECONNREFUSED/EPIPE/ETIMEDOUT/UND_ERR_SOCKET + 跨运行时 message 子串含 Bun 文案；递归查 `err.cause`；`name==="AbortError"` 短路 false），`withConnectionRetry(fn,{retries,backoffMs,sleep,signal})` 默认 2×[200,500]ms、abort 期间停。落在三 client（openai/anthropic/openai-responses）的 `request()` **fetch 边界**——stream/non-stream 共用唯一 fetch 入口、首字节前 ⇒ 幂等、**对单候选链也生效**；嵌于 401-retry 之内（401 是成功响应不触发连接重试，二者正交）；timeout→非 transient 不重试（交给跨模型 fallback）。三 client 加可选 `connectRetries`/`connectRetryBackoffMs`（缺省走 helper 默认，亦作测试 seam）。**非目标**：non-stream body-read / stream 首包读取阶段 reset 仍靠跨模型 fallback。
-- **Change B — SSE chunk 间心跳（`routes/heartbeat.ts`）**：`withHeartbeat` 纯时序生成器把**同一**待决 `next()` 与心跳定时器反复赛跑（绝不重复调 next ⇒ 不丢/不重 chunk），产出 `{type:beat|chunk}`；`heartbeatMs=0` 关闭、early-return 取消定时器并 `iterator.return()`。**边界抑制在路由**（元素类型各异，生成器不懂字节）：`atEventBoundary(lastRawWrite)`——`writeSSE` 整帧恒边界、raw 直传按 `\n\n` 收尾判断 ⇒ `:\n\n` 永不插进半帧（principle 8 关键）。心跳帧 wire-only：**不进 capture、不喂 accumulator、不计 cost**。接入**4 个**流式面（chat/messages/responses/**gemini**——超出原计划 3 个，为一致性扩到 Gemini）。配置 `runtime.sse_heartbeat_ms`（默认 15000、`HELM_SSE_HEARTBEAT_MS`、0 关、`nonnegative` 允许 0）经 4 处 register 注入；**仅覆盖 chunk 间 idle**——首包 peek 仍在 `execute()` 内（早于 200 提交），pre-first-chunk fallback 语义不变。
-- **取舍/坑/TODO**：① 慢首包（首 token 耗时 > 代理 read-timeout，如推理模型）**未在 helm 侧覆盖**——若复现优先核对 nginx/haproxy/CF 超时，或后续再评估 early-commit（会把流式错误从干净 502/504 变成 in-band `event:error` 帧）。② 心跳默认 15s 远低于 nginx 60s/CF ~100s；运营者按前置代理调 `HELM_SSE_HEARTBEAT_MS`。③ schema 改了须重建 `@helm/shared`。
-- **验证**：TDD 红→绿——`retry.test.ts`(25) + `heartbeat.test.ts`(7, 含边界/disabled/error/early-return) + 三 client wiring + chat 路由 `:\n\n` 端到端集成（断言数据帧逐字 + 心跳非 data 事件）。provider 208 / 路由+schema 全绿，`pnpm typecheck`、`pnpm lint`、`pnpm build` 绿。分支 `fix/upstream-transient-retry-sse-heartbeat`。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-14 · 上游瞬时断连幂等重试 + SSE 心跳保活（docs/02/05；原则 3/8）：客户端裸 socket 断连 → (A) `provider/retry.ts` `withConnectionRetry` 严格白名单瞬时错误在三 client fetch 边界重试 2×[200,500]ms（首字节前=幂等，对单候选链也生效；timeout 不重试交跨模型 fallback）；(B) `routes/heartbeat.ts` `withHeartbeat` chunk 间心跳（同一 next 与定时器赛跑不丢/不重 chunk，`:\n\n` 仅在帧边界发=principle 8），接 chat/messages/responses/gemini 4 面，`runtime.sse_heartbeat_ms` 默认 15000、0 关。慢首包否决（保留 peek-before-commit）。TDD retry 25 + heartbeat 7 绿。分支 fix/upstream-transient-retry-sse-heartbeat。
 
 ### 2026-06-14 · Admin 移动端/响应式走查 + 修复（docs/10/11；原则 1）：Playwright 三视口截 29 图 + Workflow 扇出 10 reviewer，25 处归并 12 修复。核心：宽表（Providers 10 列/Keys 9 列）→ CSS reflow 单 `<tr>` 卡片化（`.cards-table` + `::before` 注 `data-label`，避免双 DOM 让 vitest 单行断言全红）、UUID 首列 truncate、触控 44px（btn-* `min-h-11 md:min-h-0`/hamburger）、768px 网格推迟 lg、a11y 健康点 sr-only。admin build/vitest 364/lint 绿、svelte-check 仅既有 oauth.test.ts 3 报错（非回归）。分支 worktree-admin-mobile-ui，PR #255。
 

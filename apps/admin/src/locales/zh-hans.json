@@ -573,5 +573,7 @@
   "No routable models for this account.": "该账号暂无可路由的模型。",
   "Done in {ms} ms": "耗时 {ms} 毫秒",
   "{n} chars": "{n} 字符",
-  "Send a short message through this account and stream the reply.": "通过该账号发送一条简短消息，并流式显示返回结果。"
+  "Send a short message through this account and stream the reply.": "通过该账号发送一条简短消息，并流式显示返回结果。",
+  "Default fallback lane": "默认兜底车道",
+  "Where a request lands when the classifier cannot decide or nothing else matches. Complexity tiers (simple/medium/complex) are unaffected. Defaults to balanced.": "当分类器无法判定、或没有其他规则匹配时,请求最终落到这条车道。复杂度档位(简单/中等/复杂)不受影响。默认为 balanced。"
 }

@@ -23,6 +23,21 @@ export function registerSettingsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     if (!parsed.success) {
       return c.json({ error: "invalid settings", issues: parsed.error.issues }, 400);
     }
+    // default_lane must name a lane that actually exists. The schema only checks
+    // it's a non-empty string (it can't see the lane set), so validate it here
+    // against the live lanes — fail-closed (Principle 2). The resolver ALSO guards
+    // at runtime (falls back to "balanced"), but rejecting at the boundary gives the
+    // operator a clear 400 instead of a silently-ignored setting.
+    const lanes = await deps.rules.getLanes();
+    if (!(parsed.data.default_lane in lanes)) {
+      return c.json(
+        {
+          error: "unknown lane",
+          detail: `default_lane '${parsed.data.default_lane}' is not a defined lane`,
+        },
+        400,
+      );
+    }
     const saved = await deps.settings.save(parsed.data);
     return c.json(saved);
   });

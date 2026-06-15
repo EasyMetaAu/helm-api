@@ -12,7 +12,10 @@
   // (capture_payloads, payload_retention_days, rate_limit_enabled, log_level).
   // Pure consumer (Principle 1): edits a local working copy, PUTs the whole object on Save;
   // the gateway validates + applies it live.
-  let { data }: { data: { settings: RuntimeSettings | null; loadError?: string } } = $props();
+  let {
+    data,
+  }: { data: { settings: RuntimeSettings | null; lanes?: string[]; loadError?: string } } =
+    $props();
 
   const DEFAULTS: RuntimeSettings = {
     capture_payloads: true,
@@ -25,6 +28,7 @@
     rate_limit_default_rpm: 0,
     rate_limit_default_tpm: 0,
     log_level: 'info' as LogLevel,
+    default_lane: 'balanced',
     concurrency_queue_enabled: false,
     concurrency_queue_min_size: 5,
     concurrency_queue_size_multiplier: 0,
@@ -40,6 +44,13 @@
   let error = $state<string | null>(untrack(() => data.loadError ?? null));
   let saving = $state(false);
   let saved = $state(false);
+
+  // Lane options for the default-lane dropdown: the loaded lanes, always including
+  // `balanced` (the guaranteed floor) and the current value (so a still-set lane
+  // that no longer loads doesn't vanish from the picker).
+  const laneOptions = $derived(
+    Array.from(new Set([...(data.lanes ?? []), 'balanced', form.default_lane])),
+  );
 
   async function handleSave(): Promise<void> {
     error = null;
@@ -166,6 +177,24 @@
           {/each}
         </select>
         <span class="field-help">{$t('How much detail the gateway writes to its logs.')}</span>
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span class="font-medium">{$t('Default fallback lane')}</span>
+        <select
+          data-testid="default-lane"
+          class="select w-40 min-h-11 md:min-h-0"
+          bind:value={form.default_lane}
+        >
+          {#each laneOptions as name (name)}
+            <option value={name}>{name}</option>
+          {/each}
+        </select>
+        <span class="field-help"
+          >{$t(
+            'Where a request lands when the classifier cannot decide or nothing else matches. Complexity tiers (simple/medium/complex) are unaffected. Defaults to balanced.',
+          )}</span
+        >
       </label>
     </section>
 

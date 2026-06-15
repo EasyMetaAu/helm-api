@@ -1050,6 +1050,32 @@ describe("admin.api settings (System Settings)", () => {
     expect(res.status).toBe(400);
     expect(settings.get().log_level).toBe("info"); // unchanged
   });
+
+  it("PUT accepts a default_lane that names an existing lane", async () => {
+    const settings = makeSettings();
+    const app = buildApp(buildDeps({ settings }));
+    const res = await app.request("/admin/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ default_lane: "economy" }), // exists in DEFAULT_LANES
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as RuntimeSettings).default_lane).toBe("economy");
+    expect(settings.get().default_lane).toBe("economy");
+  });
+
+  it("PUT rejects a default_lane that is not a defined lane (400, not persisted)", async () => {
+    const settings = makeSettings();
+    const app = buildApp(buildDeps({ settings }));
+    const res = await app.request("/admin/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ default_lane: "ghostlane" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toMatchObject({ error: "unknown lane" });
+    expect(settings.get().default_lane).toBe("balanced"); // unchanged factory default
+  });
 });
 
 describe("admin.api request payload", () => {
