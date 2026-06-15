@@ -730,10 +730,31 @@ describe("routeRequest — orchestration", () => {
 // "claude-opus-4-8") is rewritten onto a lane / "auto" BEFORE the passthrough
 // gate, so a fixed-model client routes without a 400 even on a default key.
 describe("routeRequest — virtual model aliases", () => {
-  it("maps a vendor model id onto a lane for a DEFAULT key (no allow_custom_model)", async () => {
+  it("a DEFAULT key (no allow_custom_model) IGNORES a matching alias and routes via auto", async () => {
+    // Honoring a pinned vendor id is a CUSTOM-MODEL capability. A key without
+    // allow_custom_model routes EVERYTHING through classification — the alias map is
+    // not consulted, the model field is ignored (no 400), the classifier runs.
     const d = deps({ modelAliases: { "claude-opus-4-8": "premium" } });
     const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
       allowCustomModel: false,
+    });
+
+    expect(d.classify).toHaveBeenCalledOnce(); // classified, NOT alias-mapped
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("coding"); // from the default classification + policy
+    expect(plan.explicit_model).toBeNull();
+    expect(result.final.status).toBe("ok");
+
+    // Telemetry still records the original vendor id, but it was routed by classification.
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.requested_model).toBe("claude-opus-4-8");
+    expect(rec.policy.reason).not.toContain("alias");
+  });
+
+  it("maps a vendor model id onto a lane for an allow_custom_model key", async () => {
+    const d = deps({ modelAliases: { "claude-opus-4-8": "premium" } });
+    const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
+      allowCustomModel: true,
     });
 
     // Resolved as a lane passthrough — classifier never runs.
@@ -769,7 +790,7 @@ describe("routeRequest — virtual model aliases", () => {
   it("matches a glob alias (Claude Code appends a date suffix)", async () => {
     const d = deps({ modelAliases: { "claude-opus-*": "premium" } });
     const result = await routeRequest(req({ requested_model: "claude-opus-4-8-20260115" }), d, {
-      allowCustomModel: false,
+      allowCustomModel: true,
     });
     const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
     expect(plan.selected_lane).toBe("premium");
@@ -792,7 +813,7 @@ describe("routeRequest — virtual model aliases", () => {
     // fixed-model client keeps working instead of 400ing.
     const d = deps({ modelAliases: { "claude-opus-4-8": "premium" } });
     const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
-      allowCustomModel: false,
+      allowCustomModel: true,
       keyCaps: { allowedLanes: ["economy"] },
     });
     expect(result.final.status).toBe("ok");
@@ -801,14 +822,14 @@ describe("routeRequest — virtual model aliases", () => {
   });
 
   it("an alias-mapped lane is bounded by a POLICY cap — no cap bypass (review P1)", async () => {
-    // A global cap policy (empty match) clamps everything to balanced. A standard
-    // key must NOT be able to use the operator alias to escape that cap up to premium.
+    // A global cap policy (empty match) clamps everything to balanced. Even an
+    // allow_custom_model key must NOT use the operator alias to escape that cap.
     const globalCap: PoliciesConfig = {
       policies: [{ id: "global-cap", match: {}, max_lane: "balanced" }],
     };
     const capped = deps({ modelAliases: { "claude-opus-4-8": "premium" }, policies: globalCap });
     const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), capped, {
-      allowCustomModel: false,
+      allowCustomModel: true,
     });
     expect(result.final.status).toBe("ok");
     const plan = (capped.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
@@ -822,7 +843,7 @@ describe("routeRequest — virtual model aliases", () => {
       policies: { policies: [] },
     });
     await routeRequest(req({ requested_model: "claude-opus-4-8" }), free, {
-      allowCustomModel: false,
+      allowCustomModel: true,
     });
     const plan2 = (free.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
     expect(plan2.selected_lane).toBe("premium");
@@ -839,7 +860,7 @@ describe("routeRequest — virtual model aliases", () => {
   it("keyCaps.degradeLane suppresses an alias-mapped lane too (no over-budget bypass)", async () => {
     const d = deps({ modelAliases: { "claude-opus-4-8": "premium" } });
     const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
-      allowCustomModel: false,
+      allowCustomModel: true,
       keyCaps: { allowedLanes: null, degradeLane: "economy" },
     });
     expect(result.final.status).toBe("ok");

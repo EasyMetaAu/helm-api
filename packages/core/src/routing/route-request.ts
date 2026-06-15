@@ -497,18 +497,20 @@ async function plan(
   const aliasTarget = resolveModelAlias(req.requested_model, deps.modelAliases);
   const aliasToAuto = aliasTarget === "auto";
 
-  // 0a) Alias -> LANE: a CAP-BOUNDED lane selection — NOT an allow_custom_model
-  //     passthrough. It works for ANY key (the operator authorized it by
-  //     configuring the map), but unlike explicit passthrough it does NOT bypass
-  //     the routing brain's caps: policy caps (identity-scoped org/user caps still
-  //     bind; task/complexity-scoped policies do NOT fire — an alias request is not
-  //     classified) AND the key's allowed_lanes both SILENTLY clamp the lane, just
-  //     like classified routing. So a standard key can never use an operator alias
-  //     to escape a policy/key cap it would otherwise be bound by. The original
-  //     req.requested_model is preserved for the DecisionRecord. Suppressed while
-  //     over-budget degrading (no bypass — fall through to the forced degrade lane)
-  //     and for an alias to "auto" (handled by classification below).
+  // 0a) Alias -> LANE: a CAP-BOUNDED lane selection, GATED on allow_custom_model.
+  //     Honoring a pinned vendor id is a custom-model capability: a key WITHOUT
+  //     allow_custom_model routes EVERYTHING through classification (auto) — its
+  //     model field, even a known vendor id, is ignored (it falls through to Step 2;
+  //     never a 400). For an allow_custom_model key the operator map rewrites the
+  //     vendor id onto a lane, but unlike explicit passthrough it does NOT bypass the
+  //     routing brain's caps: policy caps AND the key's allowed_lanes both SILENTLY
+  //     clamp the lane, just like classified routing — so even a custom-model key
+  //     cannot use an alias to escape a cap. The original req.requested_model is
+  //     preserved for the DecisionRecord. Suppressed while over-budget degrading
+  //     (fall through to the forced degrade lane) and for an alias to "auto"
+  //     (handled by classification below).
   if (
+    opts.allowCustomModel === true &&
     aliasTarget !== null &&
     !aliasToAuto &&
     Object.hasOwn(deps.lanes, aliasTarget) &&

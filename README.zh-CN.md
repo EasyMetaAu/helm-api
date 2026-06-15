@@ -64,7 +64,7 @@ docker compose logs helm | grep -i "root API key"
 | 🔀 | **四种客户端协议** | OpenAI Chat、Anthropic Messages、OpenAI Responses、Google Gemini——全部支持流式 + 非流式。中间是同一套 IR：任意客户端触达任意后端，输出格式一致，SSE 也不例外。 |
 | 🧭 | **三层分类** | 确定性规则（纯函数、零网络、有单测——常驻开启）→ 可选的小模型 eval（`temperature: 0`、带缓存、默认关闭——需要先配好 eval 模型）→ `balanced` lane 作为 fail-open 兜底口。 |
 | 🛣️ | **Lane + 策略路由** | 请求走 lane（`economy` / `balanced` / `premium`，外加任务 lane `coding`、`json`、`vision`、`tool_use`），从不直接面对供应商名。首条命中的策略可以钉死或封顶 lane。每条 lane = 一个主模型 + 一条兜底链，全在配置里。可选的 Agentic Signals 能在这些上限内，把异常的 lane 提升到更健康的强档 lane。 |
-| 🪪 | **固定模型的客户端也能即插即用** | 一个兼容垫片把客户端写死的厂商模型 id（Claude Code 的 `claude-opus-4-8`、锁定 `gpt-5.5` 的 SDK）映射到某条 lane——老客户端不改一行代码，就不再吃到 *400 unknown model*，还照样享受 lane 路由与失败兜底。由运维方配置，对任何 key 都生效。 |
+| 🪪 | **固定模型的客户端也能即插即用** | 客户端写死的厂商模型 id（Claude Code 的 `claude-opus-4-8`、锁定 `gpt-5.5` 的 SDK）照样能用——不再吃 *400 unknown model*。**标准 key** 把它当 `auto` 分类；**自定义模型 key** 可通过 `model-aliases.yaml` 把每个厂商家族映射到一条 lane（受 lane 白名单收口）。 |
 | 🛡️ | **稳健的执行层** | 熔断器（OPEN/HALF_OPEN + 单探针）、能力过滤（跳过候选时记下明确原因）、`:free` 档 429 跳过、按 key 并发排队。客户端断连永远不算供应商故障。 |
 | 🔐 | **OAuth 订阅** | 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的**订阅**当后端来路由——多账号组池，逐账号做模型策展 / 出口代理 / 调度，全部热重载。*（可选功能，先读 [ToS 警告](#oauth-订阅类供应商claude-promaxchatgpt-codexgithub-copilot)。）* |
 | 🔑 | **带约束力的 key** | 强制鉴权；key 只存 SHA-256 哈希。每把 key 可设：lane 白名单、自定义模型权限、RPM/TPM 限流、用量预算（降级或拒绝）、并发上限、记忆模式。先软吊销，再永久删除。 |
@@ -160,11 +160,11 @@ curl http://localhost:8080/v1/chat/completions \
 | 取值 | Helm 的行为 |
 |---|---|
 | `auto`（推荐） | 对请求做分类，路由到最合适的 lane。 |
-| lane 名，如 `premium` | 直接进入该 lane（受 key 的 lane 白名单约束）。 |
-| 写死的厂商 id，如 `claude-opus-4-8` | 兼容垫片把它改写到某条 lane（见 `config/model-aliases.yaml`）——对任何 key 都生效。 |
-| 具体模型别名，如 `deepseek/deepseek-v4-pro` | 精确使用该模型、跳过路由——仅对有「自定义模型」权限的 key 生效。 |
+| 标准 key 传任何 model/lane | **model 字段被忽略**——和传 `auto` 完全一样做分类路由（绝不 400）。 |
+| 写死的厂商 id，如 `claude-opus-4-8`——**自定义模型 key** | 兼容垫片把它映射到一条 lane（`config/model-aliases.yaml`），并受 key 的 lane 白名单收口。 |
+| lane 名（`premium`）或具体别名（`deepseek/deepseek-v4-pro`）——**自定义模型 key** | 直接进入该 lane / 模型，跳过分类。 |
 
-> 用普通 key 时，直接填 `auto`（或某个 lane 名）即可，路由全自动。Lane 由运维方配置（`lanes.yaml` + 面板），客户端不在单次调用里定义 lane。
+> 标准 key 永远只需 `auto`——Helm 全部分类路由，model 字段被忽略。要钉某条 lane、某个厂商家族或某个具体模型，需要**自定义模型** key（`allow_custom_model`）。Lane 由运维方配置（`lanes.yaml` + 面板）。
 
 **其余端点**（交互式文档在 `/docs`，原始规格在 `/openapi.json`）：
 
