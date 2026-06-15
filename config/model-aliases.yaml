@@ -8,9 +8,10 @@
 #
 # WHY a lane (not a provider model): Helm exposes the LANE abstraction, never the
 # model market (principle 6). A virtual id maps to a lane and keeps the lane's full
-# fallback chain + failover. The mapping is operator-authorized, so it works for
-# ANY key (allow_custom_model NOT required); a key's `allowed_lanes` whitelist is
-# still enforced.
+# fallback chain + failover. Honoring a pinned vendor id is a CUSTOM-MODEL feature:
+# the rewrite applies ONLY to keys with `allow_custom_model: true`. A key WITHOUT it
+# routes EVERYTHING through classification (auto) — the model field is ignored, never
+# a 400. A key's `allowed_lanes` whitelist still clamps the rewritten lane.
 #
 # MATCHING: an exact key wins; otherwise the matching `*`-glob with the most
 # literal characters wins (so `claude-opus-*` beats `claude-*` regardless of

@@ -64,7 +64,7 @@ docker compose logs helm | grep -i "root API key"
 | 🔀 | **Four client protocols** | OpenAI Chat, Anthropic Messages, OpenAI Responses, Google Gemini — all streaming + non-streaming. One IR in the middle: any client reaches any backend with a consistent output shape, SSE included. |
 | 🧭 | **Three-layer classification** | Deterministic rules (pure, zero-network, unit-tested — always on) → optional small-model eval (`temperature: 0`, cached, off by default — needs a configured eval model) → `balanced` lane as the fail-open sink. |
 | 🛣️ | **Lanes + policies** | Requests route through lanes (`economy` / `balanced` / `premium`, plus task lanes `coding`, `json`, `vision`, `tool_use`), never raw provider names. First-match policies pin or cap the lane. Each lane = a primary model + a fallback chain, all in config. Opt-in Agentic Signals can promote a degraded lane within those caps. |
-| 🪪 | **Drop-in for fixed-model clients** | A compatibility shim maps a pinned vendor model id (Claude Code's `claude-opus-4-8`, an SDK locked to `gpt-5.5`) onto a lane — so existing clients stop getting *400 unknown model* without giving up lane routing or failover. Operator-authored, works on any key. |
+| 🪪 | **Drop-in for fixed-model clients** | A client that hard-codes a vendor model id (Claude Code's `claude-opus-4-8`, an SDK locked to `gpt-5.5`) just works — no *400 unknown model*. A **standard key** classifies it like `auto`; a **custom-model key** can map each vendor family onto a lane via `model-aliases.yaml` (cap-bounded). |
 | 🛡️ | **Resilient execution** | Circuit breaker (OPEN/HALF_OPEN + single probe), capability filter with explicit skip reasons, `:free`-tier 429 skipping, per-key concurrency queueing. Client disconnects are never counted as provider faults. |
 | 🔐 | **OAuth subscriptions** | Route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, all hot-reloaded. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
 | 🔑 | **Keys with teeth** | Mandatory auth; keys stored as SHA-256 hashes only. Per key: lane whitelist, custom-model permission, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, memory mode. Revoke softly, then delete permanently. |
@@ -160,11 +160,11 @@ curl http://localhost:8080/v1/chat/completions \
 | Value | What Helm does |
 |---|---|
 | `auto` *(recommended)* | Classifies the request and routes it to the best lane. |
-| a lane name, e.g. `premium` | Routes straight into that lane (subject to the key's lane whitelist). |
-| a pinned vendor id, e.g. `claude-opus-4-8` | The compatibility shim rewrites it onto a lane (see `config/model-aliases.yaml`) — works on any key. |
-| a concrete model alias, e.g. `deepseek/deepseek-v4-pro` | Uses exactly that model, skipping routing — only for keys with custom-model permission. |
+| any model/lane on a **standard key** | The `model` field is **ignored** — Helm classifies and routes exactly as if you'd sent `auto` (never a 400). |
+| a pinned vendor id, e.g. `claude-opus-4-8` — **custom-model key** | The compatibility shim maps it onto a lane (`config/model-aliases.yaml`), cap-bounded by the key's lanes. |
+| a lane name (`premium`) or exact alias (`deepseek/deepseek-v4-pro`) — **custom-model key** | Routes straight into that lane / model, skipping classification. |
 
-> With a standard key, just use `auto` (or a lane name) and routing is automatic. Lanes are operator config (`lanes.yaml` + dashboard); clients don't define lanes per call.
+> A standard key only ever needs `auto` — Helm classifies everything and the `model` field is ignored. Pinning a lane, a vendor family, or an exact model requires a **custom-model** key (`allow_custom_model`). Lanes are operator config (`lanes.yaml` + dashboard).
 
 **Other endpoints** (full interactive docs at `/docs`, raw spec at `/openapi.json`):
 

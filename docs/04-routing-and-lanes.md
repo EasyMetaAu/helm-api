@@ -9,8 +9,8 @@ its ordered chain. The framework-agnostic orchestrator is `routeRequest`
 ## Lane routing priority
 
 ```text
-model-alias shim               # operator map rewrites a fixed vendor id onto a lane / `auto`; cap-bounded
-  > explicit model/lane        # client specified a concrete model/lane; skips classify + policy entirely
+model-alias shim               # fixed vendor id → lane / `auto`; cap-bounded; allow_custom_model keys only
+  > explicit model/lane        # concrete model/lane; skips classify + policy; allow_custom_model keys only
   > classifier short-circuit   # decided_by 'default' | 'fallback' → straight to balanced (classified branch only)
   > server-side policy         # a policy pin (use_lane)
   > task-specific lane         # a lane named after the detected task_type
@@ -19,13 +19,14 @@ model-alias shim               # operator map rewrites a fixed vendor id onto a 
   > balanced                   # final default
 ```
 
-The **model-alias compatibility shim** runs first (priority 0); see
-[Model-alias compatibility shim](#model-alias-compatibility-shim) below.
-
-Explicit model/lane passthrough is the next short-circuit: a request
-that names a concrete model or lane (gated by `allow_custom_model`, and
-suppressed while degrading) skips classification and policy entirely and is
-executed directly, so the classifier never runs for it.
+The **model-alias compatibility shim** and explicit model/lane passthrough are
+both **gated on `allow_custom_model`** (and suppressed while over-budget
+degrading). A key **without** `allow_custom_model` skips both — its `model` field
+is ignored and **every** request is classified (the `auto` path). For a
+custom-model key the shim runs first (priority 0; see
+[Model-alias compatibility shim](#model-alias-compatibility-shim) below), then
+explicit passthrough — a request naming a concrete model or lane skips
+classification and policy entirely and is executed directly.
 
 Within the classified branch, the resolver applies its own priority-0
 short-circuit: if the classifier `decided_by` is `default` (classify() itself
@@ -47,14 +48,16 @@ and it never escapes policy/key caps.
 
 ### Model-alias compatibility shim
 
-Before any passthrough gate, `plan()` runs a **priority-0** model-alias
-resolution step (route-request.ts steps 0 / 0a). Clients that pin a **fixed
-vendor model id** — Claude Code's `claude-opus-4-8`, or an SDK locked to
-`gpt-5.5` — know neither Helm's lanes nor its provider aliases, so left alone
-they would get a `400 unknown model`. The shim rewrites that inbound `model`
-field onto a lane (or the `auto` sentinel) **before** routing, so a fixed-model
-client routes cleanly while Helm still only exposes the lane abstraction
-(principle 6 — the literal vendor id is never sent upstream).
+For an `allow_custom_model` key, `plan()` runs a **priority-0** model-alias
+resolution step (route-request.ts steps 0 / 0a) ahead of explicit passthrough.
+Clients that pin a **fixed vendor model id** — Claude Code's `claude-opus-4-8`,
+or an SDK locked to `gpt-5.5` — know neither Helm's lanes nor its provider
+aliases, so left alone they would get a `400 unknown model`. The shim rewrites
+that inbound `model` field onto a lane (or the `auto` sentinel) **before**
+routing, so a fixed-model client routes cleanly while Helm still only exposes the
+lane abstraction (principle 6 — the literal vendor id is never sent upstream). A
+key **without** `allow_custom_model` does not use the shim at all: its `model`
+field is ignored and the request is classified like `auto` (still no `400`).
 
 The map is [`config/model-aliases.yaml`](../config/model-aliases.yaml): a flat
 table of vendor model id → a lane name or `auto`. Keys are glob-matchable and
@@ -64,18 +67,22 @@ order; `*` absorbs any date/suffix). Targets are boot-validated to a configured
 lane or `auto` (fail-closed, principle 2); the file is optional — delete it for
 no rewrite.
 
-Unlike explicit passthrough, the shim is **operator-authorized**, not
-client-authorized:
+The shim is **operator-authorized** (the operator owns the mapping) but is
+**gated on `allow_custom_model`** — honoring a pinned vendor id is a custom-model
+capability:
 
-1. It runs **before** the `allow_custom_model` gate and does **not** require
-   `allow_custom_model` on the key — a standard key routes through it too,
-   because the operator authorized the rewrite by configuring the map.
-2. It is **cap-bounded**, not a bypass. Identity-scoped policy caps (org/user
-   `max_lane` / `allowed_lanes`) and the key's own `allowed_lanes` whitelist
-   both still clamp the resolved lane. The clamp is **silent** (the same
-   `applyCaps` path classified routing uses), **not** the loud `invalid_request`
-   reject an explicit forbidden-lane ask gets — so a standard key can never use
-   an operator alias to escape a cap it would otherwise be bound by.
+1. It applies **only to `allow_custom_model` keys**. A key **without** that
+   capability routes **everything through classification (`auto`)** — its `model`
+   field, even a known vendor id, is **ignored** (never a 400) and the alias map
+   is not consulted (see "Explicit client model" below — one rule covers explicit
+   models, lanes, and alias-mapped ids).
+2. It runs **before** explicit-passthrough resolution (so a known vendor id maps
+   to a lane instead of 400ing as an unknown model), but it is **cap-bounded**,
+   not a bypass. Policy caps (`max_lane` / `allowed_lanes`) and the key's own
+   `allowed_lanes` whitelist both still clamp the resolved lane. The clamp is
+   **silent** (the same `applyCaps` path classified routing uses), **not** the
+   loud `invalid_request` reject an explicit forbidden-lane ask gets — so even a
+   custom-model key can never use an operator alias to escape a cap.
    (Task/complexity-scoped policies do not fire here: an alias request is not
    classified.)
 3. It is **suppressed while the key is over-budget/degrading** — the request
