@@ -19,7 +19,44 @@
 
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
 import type { OAuthTokenStore } from "../store/ports.js";
+import { OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
+
+// Cross-instance refresh serialization for PRESET credentials. The composition root
+// builds MANY TokenManager instances for the SAME (providerId, account) — the
+// executor pool, model discovery, the providers-page status refresh, the quota
+// scrape, admin connectivity tests — and they all share ONE rotating refresh token
+// in the store. Anthropic-style refresh tokens are SINGLE-USE: two instances that
+// refresh the same token concurrently make the second replay a consumed token, which
+// the upstream rejects (invalid_grant) and often revokes the whole token family →
+// the subscription goes permanently dead until a manual re-login. The per-instance
+// single-flight lock cannot see across instances, so we serialize every preset
+// refresh through one async mutex keyed by (providerId, account), SCOPED to the
+// shared store object (WeakMap) so the gate tracks the real shared resource and two
+// unrelated stores in a test never collide. Inside the gate each instance RE-READS
+// the store, so a sibling's just-rotated token is adopted rather than re-refreshed.
+const presetRefreshGates = new WeakMap<OAuthTokenStore, Map<string, Promise<unknown>>>();
+
+function runExclusive<T>(store: OAuthTokenStore, key: string, fn: () => Promise<T>): Promise<T> {
+  let gates = presetRefreshGates.get(store);
+  if (gates === undefined) {
+    gates = new Map();
+    presetRefreshGates.set(store, gates);
+  }
+  // Chain after the previous holder. The stored tail is swallowed so it never
+  // rejects — a failed refresh frees the gate for the next waiter instead of
+  // wedging the queue.
+  const prev = gates.get(key) ?? Promise.resolve();
+  const result = prev.then(fn);
+  gates.set(
+    key,
+    result.then(
+      () => {},
+      () => {},
+    ),
+  );
+  return result;
+}
 
 // CONFIDENTIAL-client OAuth (PR #43): generic token endpoint reached with a
 // client SECRET. Already-resolved values (NOT env names — the composition root
@@ -116,6 +153,14 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
   // through the store `meta` and re-merged into the provider refresh call.
   let presetExtra: Record<string, unknown> = {};
   let presetLoaded = false;
+  // Preset-only: invalidate() (an upstream 401) demands a NETWORK refresh even when
+  // the stored token still looks unexpired — but ONLY while the store holds the SAME
+  // token that was just rejected. `forcedRefresh` carries that intent across the gate
+  // re-read; `invalidatedAccess` is the rejected token we must not serve again. If a
+  // sibling has meanwhile rotated the credential, the re-read adopts the new token
+  // and the forced refresh is satisfied without burning another rotation.
+  let forcedRefresh = false;
+  let invalidatedAccess: string | null = null;
 
   // ── preset deps (validated up-front so a misconfig fails CLOSED, principle 2) ─
   if (isPreset) {
@@ -186,12 +231,12 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
     return Object.keys(rest).length > 0 ? JSON.stringify(rest) : null;
   }
 
-  // Lazily load the persisted credential on first use (preset only). Decrypts the
-  // stored access + refresh blobs so a still-valid token is reused WITHOUT a
-  // network refresh after a restart.
-  async function ensurePresetLoaded(): Promise<void> {
-    if (presetLoaded) return;
-    presetLoaded = true;
+  // (Re)load the persisted credential from the store (preset only), decrypting the
+  // access + refresh blobs into the in-memory cache. Called once lazily on first use
+  // AND again under the refresh gate, so a sibling instance's rotation is adopted
+  // instead of re-refreshed. A missing row leaves the current in-memory state intact
+  // (never wipes a working token just because the row was deleted out from under us).
+  async function loadFromStore(): Promise<void> {
     const p = oauth as PresetOAuth;
     const rec = await deps.tokenStore?.get(p.providerId, p.account);
     if (!rec) return;
@@ -200,6 +245,14 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
     refreshToken = rec.refreshEnc ? decryptSecret(rec.refreshEnc, encKey) : undefined;
     expiresAt = rec.expiresAt ?? 0;
     presetExtra = rec.meta ? (JSON.parse(rec.meta) as Record<string, unknown>) : {};
+  }
+
+  // First-use load: a still-valid stored token is reused WITHOUT a network refresh
+  // after a restart.
+  async function ensurePresetLoaded(): Promise<void> {
+    if (presetLoaded) return;
+    presetLoaded = true;
+    await loadFromStore();
   }
 
   // Preset refresh: delegate the wire shape to the subscription provider, then
@@ -228,9 +281,18 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
         },
         doFetch,
       );
-    } catch {
-      // Provider refresh failed — never echo its message (could carry a token).
-      throw new TokenRefreshError(`oauth refresh failed (${p.providerId})`);
+    } catch (err) {
+      // Provider refresh failed — never echo its message (could carry a token), but
+      // the numeric HTTP status from the token endpoint IS safe and turns an opaque
+      // "refresh failed" into a diagnosable one (e.g. 400 invalid_grant ⇒ re-login;
+      // 429 ⇒ rate limited; 5xx ⇒ upstream down).
+      const status = err instanceof OAuthHttpError ? err.httpStatus : null;
+      throw new TokenRefreshError(
+        status === null
+          ? `oauth refresh failed (${p.providerId})`
+          : `oauth refresh failed (${p.providerId}, status ${status})`,
+        status,
+      );
     }
     accessToken = provider.getApiKey(creds);
     refreshToken = creds.refresh;
@@ -254,19 +316,63 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
     return accessToken === null || now() + skew >= expiresAt;
   }
 
+  // The current in-memory token is still the one a 401 rejected — serving it again
+  // would just 401 again, so a forced refresh must proceed.
+  function reloadStillRejected(): boolean {
+    return invalidatedAccess !== null && accessToken === invalidatedAccess;
+  }
+
   async function ensureFresh(): Promise<void> {
-    // Preset: load the persisted token first so a still-valid one skips refresh.
-    if (isPreset) await ensurePresetLoaded();
-    if (!isExpired()) return;
-    // Coalesce concurrent refreshes. The first caller starts the fetch; everyone
-    // else awaits the same promise. Cleared in finally so a later expiry refreshes
-    // again (and a failed refresh does not poison the lock).
+    if (!isPreset) {
+      // Confidential grant: in-memory only, so the per-instance single-flight lock is
+      // sufficient (no shared rotating credential to coordinate with siblings).
+      if (!isExpired()) return;
+      if (refreshing === null) {
+        refreshing = doRefresh().finally(() => {
+          refreshing = null;
+        });
+      }
+      await refreshing;
+      return;
+    }
+
+    // Preset grant: the rotating refresh token is shared across instances via the
+    // store, so coordinate through the store-scoped gate (see presetRefreshGates).
+    await ensurePresetLoaded();
+    if (!isExpired() && !forcedRefresh) return;
+    // Per-instance single-flight: N concurrent callers of THIS manager coalesce into
+    // ONE refresh op (cleared in finally so a later expiry refreshes again, and a
+    // failed refresh never poisons the lock). That op then coordinates ACROSS sibling
+    // managers via the store-scoped gate inside runPresetRefresh.
     if (refreshing === null) {
-      refreshing = (isPreset ? doPresetRefresh() : doRefresh()).finally(() => {
+      refreshing = runPresetRefresh().finally(() => {
         refreshing = null;
       });
     }
     await refreshing;
+  }
+
+  // Run ONE preset refresh under the cross-instance gate: serialize against sibling
+  // managers that share this credential's store row, RE-READ the store first, and hit
+  // the network only when the re-read still shows an expired / rejected token — what
+  // stops two instances replaying the same single-use rotating refresh token.
+  async function runPresetRefresh(): Promise<void> {
+    const p = oauth as PresetOAuth;
+    const store = deps.tokenStore as OAuthTokenStore;
+    await runExclusive(store, `${p.providerId} ${p.account}`, async () => {
+      // A sibling may have rotated the credential while we waited for the gate —
+      // re-read before deciding so we adopt its token instead of replaying ours.
+      await loadFromStore();
+      if (!isExpired() && !(forcedRefresh && reloadStillRejected())) {
+        // The store already holds a usable, non-rejected token: adopt it, no refresh.
+        forcedRefresh = false;
+        invalidatedAccess = null;
+        return;
+      }
+      await doPresetRefresh();
+      forcedRefresh = false;
+      invalidatedAccess = null;
+    });
   }
 
   return {
@@ -281,9 +387,13 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
       return out;
     },
     invalidate(): void {
-      // Force the next getAuthHeader() to refresh. Do NOT clear the cached token
-      // synchronously: an in-flight refresh (if any) still resolves to the new one;
-      // expiring it is enough to make the next call refetch.
+      // Force the next getAuthHeader() to refresh. Remember WHICH token was rejected
+      // first: the preset path re-reads the store before refreshing, and must still
+      // force a network refresh when that re-read returns the same rejected token
+      // (rather than be fooled into re-serving it). A sibling's newer token clears
+      // the flag implicitly (reloadStillRejected() turns false).
+      invalidatedAccess = accessToken;
+      forcedRefresh = true;
       expiresAt = 0;
       accessToken = null;
     },

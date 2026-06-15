@@ -8,6 +8,20 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { OAuthAuthorizationInput } from "./types.js";
 
+// A token-endpoint HTTP failure (non-2xx) raised by a provider's login/refresh
+// helpers. Carries ONLY the numeric status — the response body is drained and
+// discarded by the caller, so this never echoes credential material (principle 7).
+// The token manager re-reads `httpStatus` to surface a diagnosable (but still
+// scrubbed) reason instead of an opaque "refresh failed".
+export class OAuthHttpError extends Error {
+  readonly httpStatus: number;
+  constructor(provider: string, httpStatus: number) {
+    super(`${provider} OAuth HTTP ${httpStatus}`);
+    this.name = "OAuthHttpError";
+    this.httpStatus = httpStatus;
+  }
+}
+
 // ── number coercion (inlined; finite-number guards only) ─────────────────────
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
