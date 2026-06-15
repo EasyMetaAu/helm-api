@@ -36,6 +36,8 @@ describe("RuntimeSettingsSchema", () => {
       rate_limit_default_rpm: 60,
       rate_limit_default_tpm: 90000,
       log_level: "debug",
+      // Terminal fallback lane backfilled by its schema default.
+      default_lane: "balanced",
       // Queueing fields backfilled by their schema defaults (both OFF).
       concurrency_queue_enabled: false,
       concurrency_queue_min_size: 5,
