@@ -75,10 +75,10 @@ describe('PolicyRow', () => {
     expect(complexitySelect.tagName).toBe('SELECT');
   });
 
-  it('action is mutually exclusive: choosing use_lane disables the max_lane select', async () => {
+  it('force-lane is the only action: the select updates use_lane (no max_lane cap)', async () => {
     const onchange = vi.fn();
     render(PolicyRow, {
-      policy: makePolicy({ use_lane: 'balanced', max_lane: undefined }),
+      policy: makePolicy({ use_lane: 'balanced' }),
       index: 0,
       total: 1,
       lanes: LANES,
@@ -87,19 +87,14 @@ describe('PolicyRow', () => {
       onmove: vi.fn(),
     });
 
-    // use_lane radio selected -> max_lane select disabled
-    await fireEvent.click(screen.getByLabelText(/use lane/i));
-    expect(screen.getByLabelText(/max lane/i)).toBeDisabled();
+    // the retired max_lane "cap" select is gone — force lane is the sole action.
+    expect(screen.queryByLabelText(/max lane/i)).toBeNull();
 
-    // switch to max_lane -> use_lane select disabled and payload carries only max_lane
-    await fireEvent.click(screen.getByLabelText(/max lane/i));
-    expect(screen.getByLabelText(/use lane/i)).toBeDisabled();
-    await fireEvent.change(screen.getByLabelText(/max lane/i), {
+    await fireEvent.change(screen.getByLabelText(/use lane/i), {
       target: { value: 'premium' },
     });
     const last = onchange.mock.calls.at(-1)?.[0] as Policy;
-    expect(last.max_lane).toBe('premium');
-    expect(last.use_lane).toBeUndefined();
+    expect(last.use_lane).toBe('premium');
   });
 
   it('empty match is flagged as a catch-all (warns it swallows later rules)', () => {

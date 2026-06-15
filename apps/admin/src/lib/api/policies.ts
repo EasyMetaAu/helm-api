@@ -18,8 +18,7 @@ export interface PolicyMatch {
 export interface Policy {
   id?: string;
   match: PolicyMatch; // all written fields AND together; empty match = catch-all
-  use_lane?: string; // force lane (mutually exclusive with max_lane)
-  max_lane?: string; // cap lane (mutually exclusive with use_lane)
+  use_lane?: string; // force matching requests onto this lane
 }
 
 // Dropdown enums. task_type MUST mirror the gateway's canonical TaskTypeSchema
@@ -75,8 +74,6 @@ function normalizePolicy(raw: Record<string, unknown>): Policy {
   };
   if (typeof raw.id === 'string') p.id = raw.id;
   if (typeof raw.use_lane === 'string') p.use_lane = raw.use_lane;
-  // use_lane wins if both somehow present (mutually exclusive); never send both.
-  if (p.use_lane == null && typeof raw.max_lane === 'string') p.max_lane = raw.max_lane;
   return p;
 }
 
@@ -90,9 +87,7 @@ function toServerBody(p: Policy): Record<string, unknown> {
 
   const out: Record<string, unknown> = { match };
   if (p.id) out.id = p.id;
-  // Mutually exclusive: prefer use_lane, else max_lane.
   if (p.use_lane) out.use_lane = p.use_lane;
-  else if (p.max_lane) out.max_lane = p.max_lane;
   return out;
 }
 

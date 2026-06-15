@@ -398,7 +398,6 @@ function candidateAllowedByCaps(
   const capped = applyCaps(candidateLane, {
     matched_policy_id: null,
     use_lane: null,
-    max_lane: null,
     allowed_lanes: keyCaps.allowedLanes,
     reason: "key caps",
   });
@@ -527,7 +526,6 @@ async function plan(
       lane = applyCaps(lane, {
         matched_policy_id: null,
         use_lane: null,
-        max_lane: null,
         allowed_lanes: opts.keyCaps.allowedLanes,
         reason: "key caps",
       });
@@ -646,7 +644,7 @@ async function plan(
   //
   // Over-budget degrade (docs/06): when `degradeLane` is set for this request, FORCE
   // the request onto it (a forced selection, not a rank ceiling) so it works for any
-  // target lane — ranked OR a task lane — which a `max_lane` ceiling would silently
+  // target lane — ranked OR a task lane — which a rank-based ceiling would silently
   // ignore. The forced lane is then clamped to the key's `allowedLanes` whitelist
   // (the harder security bound) via applyCaps, exactly as the normal lane is.
   let cappedLane: string;
@@ -657,7 +655,6 @@ async function plan(
     cappedLane = applyCaps(base, {
       matched_policy_id: null,
       use_lane: null,
-      max_lane: null,
       allowed_lanes: opts.keyCaps.allowedLanes,
       reason: "key caps",
     });

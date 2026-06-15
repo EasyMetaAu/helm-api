@@ -216,9 +216,9 @@ per key via `over_budget_behavior`:
 
 - **`degrade`** (default) — the request is **forced onto the cheaper
   `degrade_lane`** (default `economy`), then served normally, so cost is bounded
-  **without interrupting service**. This is a *forced lane selection*, not a
-  `max_lane` ceiling (`degradeLane` is applied with `max_lane: null`), so it works
-  even when the target is a task lane (`coding`, `json`, …). The forced lane is
+  **without interrupting service**. This is a *forced lane selection*, not a rank
+  ceiling, so it works even when the target is a task lane (`coding`, `json`, …).
+  The forced lane is
   still clamped to the key's `allowed_lanes`, and explicit-model/lane passthrough
   is **suppressed** while degrading — a degrading key cannot bypass the cap by
   naming an expensive model or lane.

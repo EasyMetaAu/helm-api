@@ -14,9 +14,9 @@ import { ALL_TASKS } from "./taskdetect.js";
 //   1. a `match.task_type` that is NOT in the CLOSED TaskType union (ALL_TASKS):
 //      the classifier can never emit it, so the policy can never match — a dead
 //      rule that looks alive.
-//   2. a `use_lane` / `max_lane` / `allowed_lanes` value that is NOT a key in
-//      lanes.yaml: the resolver silently skips a missing use_lane (lane-resolver
-//      step 1 "fall through") / applyCaps ignores an unrankable cap — the policy
+//   2. a `use_lane` / `allowed_lanes` value that is NOT a key in lanes.yaml: the
+//      resolver silently skips a missing use_lane (lane-resolver step 1 "fall
+//      through") / applyCaps ignores an unrankable allowed lane — the policy
 //      silently fails to do what it says.
 // These guards turn both into a RED test. They must be green for today's 3
 // policies and will protect Phase 1/2 policy additions.
@@ -51,7 +51,7 @@ describe("policies.yaml cross-reference guards", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("every use_lane / max_lane / allowed_lanes value is a real lanes.yaml key", () => {
+  it("every use_lane / allowed_lanes value is a real lanes.yaml key", () => {
     const offenders: Array<{ id: string; field: string; lane: string }> = [];
     policies.policies.forEach((p, i) => {
       const id = p.id ?? `policy[${i}]`;
@@ -61,7 +61,6 @@ describe("policies.yaml cross-reference guards", () => {
         }
       };
       check("use_lane", p.use_lane);
-      check("max_lane", p.max_lane);
       for (const lane of p.allowed_lanes ?? []) check("allowed_lanes", lane);
     });
     expect(offenders).toEqual([]);

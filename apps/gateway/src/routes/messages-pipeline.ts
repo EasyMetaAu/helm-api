@@ -743,7 +743,7 @@ export function createMessagesPipeline(
       // faces. FAIL-CLOSED: a peek store error propagates out of run() → the route
       // surfaces a 5xx, never a silent pass. Over budget → reject (a PipelineError
       // the route maps to a protocol-correct 429) or degrade (cap the lane via
-      // keyCaps.maxLane below).
+      // keyCaps.degradeLane below).
       let degradeLane: string | null = null;
       const budgetCaps = caps?.budget;
       if (budget !== undefined && budgetCaps !== undefined) {

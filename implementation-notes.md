@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-15 · 移除 policy 级 max_lane 上限（docs/02/04/06；原则 2/6）
+
+- **背景**：用户看到 admin 策略编辑器的「限制车道上限（最高）」(`Cap lane (maximum)` = policy `max_lane`)，问是否冗余可删。查证：**per-key max_lane 早已在 `feat/drop-key-max-lane` 移除**（sqlite v10 / pg v9 DROP COLUMN，理由「lanes 是平行的、非严格层级，allowed_lanes 白名单已涵盖」）；policy 级 max_lane 是同一冗余机制的最后残留。`LANE_RANK` 只排 3 条（economy<balanced<premium），task/厂商 lane 不可排序，故 rank 天花板对多数 lane 语义不明。shipped/线上 policies.yaml 均无 active max_lane（仅注释）。**用 ast-grep 结构化搜 `max_lane`/`maxLane` 定位全部引用**。
+- **决定（用户拍板硬删 breaking）**：`PolicySchema` `.strict()` **直接拒绝** `max_lane`（带 max_lane 的 policies.yaml 启动 fail-close）——release notes 标 BREAKING；线上那台无 max_lane（安全，部署前再走 [[config-schema-strict-removal-failclose]] 闸复核）。**保留 `allowed_lanes`**（更具表达力的白名单，且其 `applyCaps` 逻辑被 per-key restrict 路径共用，不能动）；保留 `LANE_RANK`/`lowestRankedLane`/`UNRANKED_CANDIDATE_RANK`（allowed_lanes 用）。
+- **改动**：`policy-schema.ts` 删字段 + refine 改「use_lane / allowed_lanes」；`policy-engine.ts` 删 PolicyOutcome.max_lane / 累加器 / `strictestMaxLane()` / applyCaps 的 max_lane 分支；route-request 三处 synthetic per-key outcome 去掉 `max_lane:null`；admin `PolicyRow.svelte` 降为**仅 use_lane（强制车道）**（去掉 Cap-lane select + 互斥），`policies.ts` 删 max_lane 类型/序列化；5 语言 i18n 删「Cap lane (maximum)」「max lane」并把策略文案「force or cap」改「force」；config/policies.yaml + .e2e-data 注释（e2e 还删了残留的 budget_org_cap：org_id+max_lane 双退役字段）；docs/02/04/06；chat.ts/messages-pipeline.ts 的过期 `keyCaps.maxLane` 注释改 `degradeLane`。
+- **取舍/坑/TODO**：① 删后**策略只能 force（use_lane）**，restrict 仍由 per-key allowed_lanes 承担（policy 编辑器本就没暴露 allowed_lanes）；想要 policy 级 restrict UI 是后续可选项。② 「全局成本上限」从 `max_lane: balanced` 改用 `allowed_lanes: [economy, balanced]`（catch-all 空 match），docs 例子已更。③ per-key max_lane 的退役迁移/测试（DROP COLUMN、key schema 拒收）**保留不动**——那是另一回事。
+- **验证**：TDD——policy-engine/schema(×2)/route-request/admin PolicyRow+policies/crossref 全改绿；`pnpm typecheck`/`lint`/全量 + admin `svelte-check` 待 CI。分支 `feat/drop-policy-max-lane`，开 PR（BREAKING，不发版/不部署）。
+
 ## 2026-06-15 · 可配置的「默认兜底车道」系统设置（docs/04；原则 1/2/3/5）
 
 - **背景**：兜底终点写死 `balanced`（`lane-resolver.ts` 的 `BALANCED` 常量 + lanes schema 强制 `"balanced" in m`），运营者无法改。用户要「不想默认到 balanced 的人可定制」。讨论中**否决两个直觉方案**：① policies 加 catch-all 规则——policy 是 resolver **第 1 优先级（最高）**，底部 catch-all 会**盖过** task/complexity 路由（`use_lane` 钉死全部未匹配请求 / `max_lane` 全局封顶 premium 不可达），正是 shipped policies.yaml 注释当年特意避开的；② 靠 lanes map「最后一条」——lanes 是 `z.record` 无序，靠 key 顺序当兜底脆弱且违反原则 4。用户拍板：**系统设置里加一个可选 lane 的兜底项**，且**只改最终兜底**（不动 complexity 档）。
@@ -27,18 +35,13 @@
 - **取舍/坑/TODO**：① #1 选「拆除」而非「接通 org/user」（用户明确不需要）；IR 字段暂留以不动 IR schema 的大量 fixture。② client_abort 用非标 499（gateway onError 早已用）；客户端已断时 body 多半送不达，价值在 telemetry 准确。③ 审过干净（无改）：熔断器状态机/单探针、fallback 顺序/abort/`:free`-429/空链 vs 耗尽链、expand-chain 防环去重、连接重试 abort-safe、鉴权拒禁用 key、（Codex）流式 usage 末尾缓冲与 tool-index 映射。
 - **验证**：TDD 新增回归（空流→`[message_start,message_delta,message_stop]`、不可排序候选→balanced、abort→client_abort/499、org_id/user_id 策略 fail-closed）+ 改写受影响 fixture（policy-engine/policy-matrix/route-request/admin.test/admin policies/两处 policy-schema）。`pnpm typecheck`（shared/core/gateway）+ `pnpm lint` + 全量 **3737 测试** + admin `svelte-check` 0 错 全绿。分支 `fix/review-routing-stream-errors`。
 
-## 2026-06-15 · 订阅 OAuth 轮换 refresh token 跨实例竞争修复 + 刷新状态码透传（docs/06；原则 1/3/7）
-
-- **背景**：la.atmy.work 上 anthropic 订阅请求报 `oauth refresh failed (anthropic)`（155ms→上游快速 4xx，几乎确定 invalid_grant），fail-open 已正确回退 gpt-5.5。用户疑「token 没提前刷新」。排查：刷新其实**已 ~6min 提前**（parseTokenCredentials `REFRESH_SKEW_MS` 5min + token-manager skew 60s），失败的是**刷新调用本身被拒**。真因：同一 (provider, account) 被建了 **5+ 个独立 TokenManager**（executor / 模型发现 / providers 页 `ensureFresh` 并发刷新 / Anthropic 配额 / 连通性测试），各自内存缓存但共用 store 里**同一个单次性轮换 refresh token**，无跨实例协调 → 两个并发刷新→第二个重放已消费 token→Anthropic invalid_grant 并常**作废整个 token 家族** → 永久失效需重登（in-process single-flight 看不到兄弟实例）。
-- **修复（全在 core `provider/token-manager.ts`，框架无关=原则 1，自动覆盖全部 7 个调用点）**：① **store 作用域跨实例刷新闸** `presetRefreshGates`（`WeakMap<store, Map<key, Promise>>` 串行化同 (provider, account) 的刷新；key 用 **store 对象**作 WeakMap 键→既追踪真实共享资源又使测试间不串扰），闸内**先 reload store**——兄弟实例刚轮换的 token 被采纳而非重刷。② 保留**每实例 single-flight**（`refreshing`）合并本实例并发 caller→一次刷新，外层再套跨实例闸（抽 `runPresetRefresh`）。③ `invalidate()`（上游 401）记 `invalidatedAccess`+`forcedRefresh`：reload 后**仅当 store 仍是被拒 token** 才强制网络刷新，兄弟已轮换则采纳新 token、不白烧一次轮换。④ **状态码透传**：新增 `OAuthHttpError{httpStatus}`（runtime.ts，三 provider 的 token 端点非 2xx 抛它，body 已 drain 只留数字状态码），`doPresetRefresh` 的 catch 把状态织入 `oauth refresh failed (anthropic, status 400)` 并塞 `TokenRefreshError.httpStatus`——脱敏不变（只数字 + provider id）。
-- **取舍/坑/TODO**：① 选 **core 局部闸**而非改 composition root 成「共享单实例注册表」——更小爆炸半径、不变量收敛在它该在的层、自动覆盖未来新增调用点。② 闸按 store 对象 scope，前提是**全进程共用同一个 OAuthTokenStore 对象**（实际如此）；若多个 store 对象包同一 DB 则不协调（非当前接线）。③ re-login `persist()` 直写 store **在闸外**，与并发刷新极小概率竞争（重登瞬间，罕见，超本轮范围）——靠 reload 自愈，最坏再登一次。④ **眼下应急**：若 token 家族已被上游作废，**无任何代码能复活**——需在 admin **重新登录**该 anthropic 账号。⑤ copilot 错误串由 `GitHub Copilot HTTP` 变 `GitHub Copilot OAuth HTTP`（统一 `OAuthHttpError`），已同步更新对应测试。
-- **验证**：TDD 红→绿——`token-manager.preset.test.ts` **+4**（两兄弟共享轮换 token 只刷一次 / 陈旧内存 token reload 后采纳不重放=生产 bug 回归 / invalidate 强制刷新 / 状态码透传且脱敏），保留既有 8 含「N 并发合并一次刷新」（曾因我误删 single-flight 回归、已修复）；core provider **429 绿**、gateway **796 绿**，`typecheck`/`lint`/`build` 绿。PGlite 满量并发偶发 5s 超时为既有 flake（隔离复跑绿）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-15 · 订阅 OAuth 轮换 refresh token 跨实例竞争修复 + 刷新状态码透传（docs/06；原则 1/3/7）：anthropic 订阅 `oauth refresh failed`=同 (provider,account) 被建 5+ 个独立 TokenManager 并发刷新、重放已消费的单次性轮换 token→invalid_grant 常作废整个家族需重登。修（全在 core `provider/token-manager.ts`）：store 作用域跨实例刷新闸 `presetRefreshGates`（`WeakMap<store,Map<key,Promise>>` 串行化 + 闸内先 reload store 采纳兄弟刚换的 token）+ 保留每实例 single-flight + invalidate 仅当 store 仍是被拒 token 才强制刷新 + `OAuthHttpError{httpStatus}` 状态码透传（脱敏只留数字+provider id）。坑：token 家族已被上游作废则无代码能复活，需 admin 重登。TDD preset.test +4，gateway 796 绿。分支 fix/oauth-rotating-refresh-token-race。
 
 ### 2026-06-14 · 上游瞬时断连幂等重试 + SSE 心跳保活（docs/02/05；原则 3/8）：客户端裸 socket 断连 → (A) `provider/retry.ts` `withConnectionRetry` 严格白名单瞬时错误在三 client fetch 边界重试 2×[200,500]ms（首字节前=幂等，对单候选链也生效；timeout 不重试交跨模型 fallback）；(B) `routes/heartbeat.ts` `withHeartbeat` chunk 间心跳（同一 next 与定时器赛跑不丢/不重 chunk，`:\n\n` 仅在帧边界发=principle 8），接 chat/messages/responses/gemini 4 面，`runtime.sse_heartbeat_ms` 默认 15000、0 关。慢首包否决（保留 peek-before-commit）。TDD retry 25 + heartbeat 7 绿。分支 fix/upstream-transient-retry-sse-heartbeat。
 

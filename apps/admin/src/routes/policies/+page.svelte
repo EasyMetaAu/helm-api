@@ -37,7 +37,7 @@
 
   async function addRow(): Promise<void> {
     // New rule defaults to a concrete action so it is never a silent no-op
-    // (server requires at least one of use_lane/max_lane). Appended LAST so it
+    // (server requires at least one of use_lane/allowed_lanes). Appended LAST so it
     // gets the lowest priority (first-match order) and can't shadow existing rules.
     policies = [...policies, { match: { task_type: TASK_TYPE_OPTIONS[0] }, use_lane: lanes[0] }];
     // The new row appends to the end of a potentially long list, so the click can
@@ -72,7 +72,7 @@
       <h1 class="page-title">{$t('Policies')}</h1>
       <p class="section-desc">
         {$t(
-          'Server-side routing rules. Each is a condition → action (force or cap a lane). Policies override task lanes but never the execution fallback chain.',
+          'Server-side routing rules. Each is a condition → action (force a lane). Policies override task lanes but never the execution fallback chain.',
         )}
       </p>
     </div>
@@ -96,7 +96,7 @@
       <p class="font-medium text-ink-body">{$t('No policies yet')}</p>
       <p class="mt-1 text-sm text-ink-muted">
         {$t(
-          'Without a policy, requests are routed only by their task lane. Add a policy to force or cap a lane for matching requests.',
+          'Without a policy, requests are routed only by their task lane. Add a policy to force a lane for matching requests.',
         )}
       </p>
     </div>

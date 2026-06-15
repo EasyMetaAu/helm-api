@@ -3,7 +3,7 @@ import { z } from "zod";
 // policies.yaml schema — server-side custom policies let operators customize
 // routing WITHOUT touching client code (docs/04 "policy configuration"). A policy declares a
 // `match` (AND of all written fields) and at least one action: pin a lane
-// (`use_lane`) and/or cap the candidate (`max_lane` / `allowed_lanes`).
+// (`use_lane`) and/or restrict the candidate to a whitelist (`allowed_lanes`).
 //
 // Per CLAUDE.md principle 2 (config-as-code, Zod-validated, invalid =>
 // fail-closed) and principle 4 (deterministic, inspectable — no hidden magic
@@ -43,12 +43,11 @@ export const PolicySchema = z
     id: z.string().min(1).optional(),
     match: PolicyMatchSchema,
     use_lane: z.string().min(1).optional(),
-    max_lane: z.string().min(1).optional(),
     allowed_lanes: z.array(z.string().min(1)).optional(),
   })
   .strict()
-  .refine((p) => p.use_lane != null || p.max_lane != null || p.allowed_lanes != null, {
-    message: "policy must specify at least one of use_lane / max_lane / allowed_lanes",
+  .refine((p) => p.use_lane != null || p.allowed_lanes != null, {
+    message: "policy must specify at least one of use_lane / allowed_lanes",
   });
 
 export const PoliciesConfigSchema = z
