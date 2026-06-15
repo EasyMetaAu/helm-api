@@ -24,6 +24,10 @@ export interface RuntimeSettings {
   rate_limit_default_rpm: number;
   rate_limit_default_tpm: number;
   log_level: LogLevel;
+  // Terminal fallback lane: where a request lands when the classifier fails open
+  // or nothing else resolves. A lane NAME (must be a defined lane — the gateway
+  // 400s an unknown lane on PUT). Default "balanced".
+  default_lane: string;
   // Per-key concurrency overflow queue (issue #93, feature A). When ON, a key
   // with a concurrency_limit queues excess requests instead of an instant 429.
   concurrency_queue_enabled: boolean;
@@ -75,6 +79,8 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
     log_level: (LOG_LEVEL_OPTIONS as readonly string[]).includes(level as string)
       ? (level as LogLevel)
       : 'info',
+    default_lane:
+      typeof raw.default_lane === 'string' && raw.default_lane ? raw.default_lane : 'balanced',
     concurrency_queue_enabled: raw.concurrency_queue_enabled === true,
     concurrency_queue_min_size:
       typeof raw.concurrency_queue_min_size === 'number' ? raw.concurrency_queue_min_size : 5,

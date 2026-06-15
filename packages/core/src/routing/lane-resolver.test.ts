@@ -154,6 +154,65 @@ describe("resolveLane — fail-open to balanced", () => {
   });
 });
 
+describe("resolveLane — configurable terminal (defaultLane)", () => {
+  it("classifier fail-open lands on the configured defaultLane when it exists", () => {
+    const out = resolveLane(
+      input({
+        lanes: lanes(["economy", "premium"]),
+        defaultLane: "economy",
+        classification: classification({ decided_by: "default" }),
+      }),
+    );
+    expect(out.selected_lane).toBe("economy");
+    expect(out.decided_by).toBe("complexity_fallback");
+    expect(out.reason.toLowerCase()).toContain("economy");
+  });
+
+  it("final unresolved lands on the configured defaultLane when it exists", () => {
+    const out = resolveLane(
+      input({
+        lanes: lanes(["economy"]), // only balanced + economy; no task/complexity lane resolves
+        defaultLane: "economy",
+        classification: classification({ task_type: "ghosttask", complexity: "complex" }),
+      }),
+    );
+    expect(out.selected_lane).toBe("economy");
+  });
+
+  it("falls back to balanced when the configured defaultLane does not exist", () => {
+    const out = resolveLane(
+      input({
+        lanes: lanes([]), // only balanced
+        defaultLane: "ghostlane",
+        classification: classification({ decided_by: "fallback" }),
+      }),
+    );
+    expect(out.selected_lane).toBe("balanced");
+  });
+
+  it("does NOT change the medium-complexity tier (still balanced even with defaultLane set)", () => {
+    const out = resolveLane(
+      input({
+        lanes: lanes(["economy", "premium"]),
+        defaultLane: "economy",
+        classification: classification({ task_type: "writing", complexity: "medium" }),
+      }),
+    );
+    expect(out.selected_lane).toBe("balanced");
+    expect(out.decided_by).toBe("complexity_fallback");
+  });
+
+  it("omitted defaultLane keeps the balanced terminal (back-compat)", () => {
+    const out = resolveLane(
+      input({
+        lanes: lanes([]),
+        classification: classification({ decided_by: "default" }),
+      }),
+    );
+    expect(out.selected_lane).toBe("balanced");
+  });
+});
+
 describe("resolveLane — determinism / purity", () => {
   it("returns an identical result for identical input across calls", () => {
     const i = input();

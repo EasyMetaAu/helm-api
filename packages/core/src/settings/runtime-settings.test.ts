@@ -39,6 +39,7 @@ describe("defaultSettingsFromConfig", () => {
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
       log_level: "info",
+      default_lane: "balanced",
       // Queueing fields (issue #93) come straight from the schema defaults.
       concurrency_queue_enabled: false,
       concurrency_queue_min_size: 5,
@@ -77,6 +78,18 @@ describe("loadRuntimeSettings", () => {
     expect(out.payload_retention_days).toBe(30);
   });
 
+  it("defaults default_lane to 'balanced' and lets a persisted row override it", async () => {
+    // unset -> schema default
+    const seeded = await loadRuntimeSettings(fakeConfigStore(), cfg(true));
+    expect(seeded.default_lane).toBe("balanced");
+    // persisted -> wins
+    const store = fakeConfigStore({
+      [RUNTIME_SETTINGS_KEY]: JSON.stringify({ default_lane: "economy" }),
+    });
+    const out = await loadRuntimeSettings(store, cfg(true));
+    expect(out.default_lane).toBe("economy");
+  });
+
   it("fails OPEN on invalid JSON (returns defaults + logs warn)", async () => {
     const store = fakeConfigStore({ [RUNTIME_SETTINGS_KEY]: "{not json" });
     const log = vi.fn();
@@ -109,6 +122,7 @@ describe("saveRuntimeSettings", () => {
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
       log_level: "warn",
+      default_lane: "balanced",
       concurrency_queue_enabled: false,
       concurrency_queue_min_size: 5,
       concurrency_queue_size_multiplier: 0,

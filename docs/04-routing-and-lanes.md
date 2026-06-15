@@ -11,12 +11,12 @@ its ordered chain. The framework-agnostic orchestrator is `routeRequest`
 ```text
 model-alias shim               # fixed vendor id → lane / `auto`; cap-bounded; allow_custom_model keys only
   > explicit model/lane        # concrete model/lane; skips classify + policy; allow_custom_model keys only
-  > classifier short-circuit   # decided_by 'default' | 'fallback' → straight to balanced (classified branch only)
+  > classifier short-circuit   # decided_by 'default' | 'fallback' → straight to the default fallback lane (classified branch only)
   > server-side policy         # a policy pin (use_lane)
   > task-specific lane         # a lane named after the detected task_type
-  > complexity-fallback lane   # simple→economy / medium→balanced / complex→premium
+  > complexity-fallback lane   # simple→economy / medium→balanced / complex→premium (NOT affected by default_lane)
   > signal feedback (opt-in)   # promote degraded ranked lanes inside caps
-  > balanced                   # final default
+  > default fallback lane      # System Settings `default_lane` (default `balanced`); used only if it exists, else `balanced`
 ```
 
 The **model-alias compatibility shim** and explicit model/lane passthrough are
@@ -31,8 +31,18 @@ classification and policy entirely and is executed directly.
 Within the classified branch, the resolver applies its own priority-0
 short-circuit: if the classifier `decided_by` is `default` (classify() itself
 threw — hard fail-open) or `fallback` (eval/rules abstained), the request goes
-**straight to `balanced`** without re-deriving a lane. Both signals mean "we are
-not confident enough to steer," so they collapse to the safe terminal.
+**straight to the default fallback lane** without re-deriving a lane. Both signals
+mean "we are not confident enough to steer," so they collapse to the safe terminal.
+
+The terminal fallback lane is operator-configurable via the admin **System
+Settings** (`runtime.default_lane`, hot-applied, default `balanced`). It is used at
+**both** fail-open terminals — the classifier short-circuit above and the final
+"nothing resolved" sink — **but only if the named lane exists**; otherwise the
+resolver falls back to the literal `balanced`. It does **not** change the
+complexity-fallback tiers (`simple→economy / medium→balanced / complex→premium`),
+which keep their fixed targets. An unknown lane is rejected (400) at the settings
+write boundary, so a stale value can only arise if a lane is deleted afterwards —
+in which case the `balanced` floor takes over.
 
 Default lanes are deliberately few and easy to reason about. Any selected lane
 name that does not exist is skipped (fail-open); the terminal `balanced` is

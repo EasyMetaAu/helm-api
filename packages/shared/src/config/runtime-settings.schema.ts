@@ -49,6 +49,15 @@ export const RuntimeSettingsSchema = z.object({
   rate_limit_default_tpm: z.number().int().nonnegative().default(0),
   // Structured-log verbosity floor. Applied live via logger.setLevel().
   log_level: LogLevelSchema.default("info"),
+  // Terminal fallback lane — where a request lands when the classifier fails open
+  // (decided_by "default"/"fallback") or nothing else resolves. Default "balanced"
+  // (the schema-guaranteed floor, so behaviour is unchanged when unset). The lane
+  // resolver only honours this if the named lane EXISTS, otherwise it falls back to
+  // "balanced" — so a stale/removed lane can never strand routing (no fail-close).
+  // Lane-existence is validated fail-closed at the admin PUT route. Only the
+  // terminal sink is affected; the complexity tiers (simple→economy / medium→
+  // balanced / complex→premium) are intentionally NOT changed by this setting.
+  default_lane: z.string().min(1).default("balanced"),
   // ——— Per-API-key concurrency overflow queue (docs issue #93, feature A) ———
   // When ON and a key has a concurrency_limit, requests beyond the limit WAIT in
   // a FIFO queue instead of an immediate 429. Default OFF: without it the limit

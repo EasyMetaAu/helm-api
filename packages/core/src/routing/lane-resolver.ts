@@ -42,6 +42,12 @@ export interface ResolveLaneInput {
   classification: Classification;
   policy: PolicyOutcome;
   lanes: LanesConfig;
+  // Operator-chosen terminal fallback lane (admin "System Settings"). Used ONLY at
+  // the fail-open terminal (classifier `default`/`fallback`, or fully-unresolved) —
+  // NOT for the complexity tiers. Honoured only if the lane EXISTS; otherwise the
+  // resolver uses the literal `balanced` floor (guaranteed by lanes.schema), so a
+  // stale/removed lane can never strand routing. Omitted ⇒ `balanced` (back-compat).
+  defaultLane?: string;
 }
 
 export interface LaneDecision {
@@ -74,14 +80,21 @@ function has(lanes: LanesConfig, name: string): boolean {
 export function resolveLane(input: ResolveLaneInput): LaneDecision {
   const { classification, policy, lanes } = input;
 
+  // Terminal fallback lane: the operator-chosen `defaultLane` if it names an
+  // existing lane, else the literal `balanced` floor (guaranteed by lanes.schema).
+  // This affects ONLY the two fail-open terminals below — never the complexity
+  // tiers (COMPLEXITY_FALLBACK), which keep their fixed economy/balanced/premium.
+  const terminal =
+    input.defaultLane && has(lanes, input.defaultLane) ? input.defaultLane : BALANCED;
+
   // The classifier already fell back to its terminal (hard fail-open `default`,
   // or Layer-3 cascade `fallback`) — do not re-derive a lane from
-  // task/complexity; go straight to the classification terminal `balanced`.
+  // task/complexity; go straight to the classification terminal.
   if (classification.decided_by === "default" || classification.decided_by === "fallback") {
     return {
-      selected_lane: BALANCED,
+      selected_lane: terminal,
       decided_by: "complexity_fallback",
-      reason: `classifier fell back (decided_by=${classification.decided_by}) -> balanced`,
+      reason: `classifier fell back (decided_by=${classification.decided_by}) -> ${terminal}`,
     };
   }
 
@@ -118,8 +131,8 @@ export function resolveLane(input: ResolveLaneInput): LaneDecision {
 
   // 4. fail-open terminal.
   return {
-    selected_lane: BALANCED,
+    selected_lane: terminal,
     decided_by: "complexity_fallback",
-    reason: `unresolved (no policy/task/complexity lane) -> balanced`,
+    reason: `unresolved (no policy/task/complexity lane) -> ${terminal}`,
   };
 }

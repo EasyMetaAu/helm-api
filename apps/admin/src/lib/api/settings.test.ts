@@ -13,6 +13,7 @@ const FULL: RuntimeSettings = {
   rate_limit_default_rpm: 60,
   rate_limit_default_tpm: 90000,
   log_level: 'debug',
+  default_lane: 'premium',
   concurrency_queue_enabled: true,
   concurrency_queue_min_size: 8,
   concurrency_queue_size_multiplier: 1.5,
@@ -52,6 +53,7 @@ describe('settings api client', () => {
       rate_limit_default_rpm: 0,
       rate_limit_default_tpm: 0,
       log_level: 'info',
+      default_lane: 'balanced',
       // Queueing fields default to the schema's documented values (both OFF).
       concurrency_queue_enabled: false,
       concurrency_queue_min_size: 5,

@@ -573,5 +573,7 @@
   "No routable models for this account.": "No routable models for this account.",
   "Done in {ms} ms": "Done in {ms} ms",
   "{n} chars": "{n} chars",
-  "Send a short message through this account and stream the reply.": "Send a short message through this account and stream the reply."
+  "Send a short message through this account and stream the reply.": "Send a short message through this account and stream the reply.",
+  "Default fallback lane": "Default fallback lane",
+  "Where a request lands when the classifier cannot decide or nothing else matches. Complexity tiers (simple/medium/complex) are unaffected. Defaults to balanced.": "Where a request lands when the classifier cannot decide or nothing else matches. Complexity tiers (simple/medium/complex) are unaffected. Defaults to balanced."
 }

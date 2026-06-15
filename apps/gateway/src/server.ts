@@ -1236,6 +1236,9 @@ export async function buildServer(
   const classify = buildClassifyAdapter({
     getClassifierConfig: () => classifierConfig,
     lanes,
+    // Live getter so an admin change to the terminal fallback lane keeps the eval
+    // cascade's internal lane consistent with the real router (read per resolve).
+    defaultLane: () => settings.default_lane,
     provider,
     now: () => Date.now(),
     log: (level, msg, fields) => logger.log(level as "info", msg, fields),
@@ -1406,6 +1409,11 @@ export async function buildServer(
           classify: (r) => classify(r, classifyOverrides),
           policies,
           lanes,
+          // Live-binding read of the operator-chosen terminal fallback lane (admin
+          // System Settings), SAME pattern as nativeProtocolPassthroughEnabled — an
+          // admin change applies on the next request with no restart. The resolver
+          // honours it only if the lane exists, else falls back to "balanced".
+          defaultLane: settings.default_lane,
           modelAliases,
           execute: createExecute({
             defaultProvider: provider,

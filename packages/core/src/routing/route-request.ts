@@ -152,6 +152,11 @@ export interface RouteDeps {
   classify: (req: InternalRequest) => Promise<Classification>;
   policies: PoliciesConfig;
   lanes: LanesConfig;
+  /** Operator-chosen terminal fallback lane (admin "System Settings",
+   *  runtime.default_lane). Passed to the lane resolver and used ONLY at the
+   *  fail-open terminal — honoured if the lane exists, else "balanced". Absent
+   *  (headless core / tests) → "balanced". See lane-resolver.ResolveLaneInput. */
+  defaultLane?: string;
   /** executor.fallback adapter — capability filter + circuit breaker + chain
    *  execution. Non-stream → body; stream → stream handle. */
   execute: (plan: ExecutionPlan, req: InternalRequest) => Promise<ExecuteOutcome>;
@@ -630,6 +635,7 @@ async function plan(
       reason: outcome.reason,
     },
     lanes: deps.lanes,
+    defaultLane: deps.defaultLane,
   });
   // Policy caps first (the resolver's lane choice, narrowed by matched policies).
   const policyCappedLane = applyCaps(laneDecision.selected_lane, outcome);
