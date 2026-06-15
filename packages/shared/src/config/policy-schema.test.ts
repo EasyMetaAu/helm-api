@@ -19,7 +19,7 @@ describe("policy-schema", () => {
     expect(cfg.policies[0]?.use_lane).toBe("coding");
   });
 
-  it("fail-closed: a policy with no action field (use_lane/max_lane/allowed_lanes) throws", () => {
+  it("fail-closed: a policy with no action field (use_lane/allowed_lanes) throws", () => {
     expect(() => parsePoliciesConfig({ policies: [{ match: { task_type: "coding" } }] })).toThrow();
   });
 
@@ -51,21 +51,25 @@ describe("policy-schema", () => {
     ).toThrow();
   });
 
-  it("accepts caps-only policy (max_lane / allowed_lanes without use_lane)", () => {
+  it("accepts a restrict-only policy (allowed_lanes without use_lane)", () => {
     const cfg = parsePoliciesConfig({
-      policies: [
-        { match: { task_type: "coding" }, max_lane: "balanced" },
-        { match: { complexity: "complex" }, allowed_lanes: ["economy", "balanced"] },
-      ],
+      policies: [{ match: { complexity: "complex" }, allowed_lanes: ["economy", "balanced"] }],
     });
-    expect(cfg.policies[0]?.max_lane).toBe("balanced");
-    expect(cfg.policies[1]?.allowed_lanes).toEqual(["economy", "balanced"]);
+    expect(cfg.policies[0]?.allowed_lanes).toEqual(["economy", "balanced"]);
+  });
+
+  it("fail-closed: the retired policy max_lane cap is rejected (.strict)", () => {
+    // max_lane was removed — lanes are parallel, not a strict hierarchy; use
+    // allowed_lanes (whitelist) instead. A leftover max_lane fails closed at boot.
+    expect(() =>
+      parsePoliciesConfig({ policies: [{ match: { task_type: "coding" }, max_lane: "balanced" }] }),
+    ).toThrow();
   });
 
   it("fail-closed: org_id / user_id are not match dimensions (.strict)", () => {
     // No org/user routing scope — per-key limits live on the API key, not policies.
     expect(() =>
-      parsePoliciesConfig({ policies: [{ match: { org_id: "acme" }, max_lane: "balanced" }] }),
+      parsePoliciesConfig({ policies: [{ match: { org_id: "acme" }, use_lane: "balanced" }] }),
     ).toThrow();
     expect(() =>
       parsePoliciesConfig({ policies: [{ match: { user_id: "vip" }, use_lane: "premium" }] }),

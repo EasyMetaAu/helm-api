@@ -2,8 +2,8 @@
 # customize routing WITHOUT touching client code. Each policy is a FIRST-MATCH
 # rule: the policy engine walks the list top-to-bottom and the FIRST policy whose
 # `match` fully holds (AND of every written field) wins. A policy must declare at
-# least one action: pin a lane (`use_lane`) and/or cap the candidate (`max_lane` /
-# `allowed_lanes`). `.strict()`-validated by PoliciesConfigSchema (@helm/shared):
+# least one action: pin a lane (`use_lane`) and/or restrict the candidate to a
+# whitelist (`allowed_lanes`). `.strict()`-validated by PoliciesConfigSchema (@helm/shared):
 # a typo in a field name fails the gateway boot (fail-closed, principle 2).
 #
 # These are SAMPLES — adjust to your own lane set / org structure.
@@ -74,7 +74,7 @@ policies:
 
   # Hard cybersecurity work (eval-v2 §5.1 security domain) -> premium. There is
   # NO `security` lane and Helm has NO raise-only floor (only use_lane PIN /
-  # max_lane cap), so we cannot express "security raises the floor to premium"
+  # allowed_lanes whitelist), so we cannot express "security raises the floor to premium"
   # without a hard pin. A FLAT pin would over-route benign security Q&A
   # ("what is XSS?") to premium, so we CONDITION on complexity: only complex
   # security is pinned; simple/medium security fall through to the normal
@@ -87,6 +87,6 @@ policies:
 
   # NOTE on usage / cost limits: there is no org/user policy dimension. Per-key
   # limits (RPM/TPM, usage budget, allowed_lanes, max-concurrency) live on the API
-  # KEY itself (docs/06), not in policies. A caps-only policy here can still clamp
-  # ALL traffic by lane — e.g. an unconstrained `max_lane: balanced` (empty match)
-  # caps everything — but it cannot target an org or user.
+  # KEY itself (docs/06), not in policies. A restrict-only policy here can still clamp
+  # ALL traffic by lane — e.g. an unconstrained `allowed_lanes: [economy, balanced]`
+  # (empty match) keeps everything at/below balanced — but it cannot target an org or user.

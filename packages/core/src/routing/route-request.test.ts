@@ -373,7 +373,7 @@ describe("routeRequest — orchestration", () => {
   });
 
   it("keyCaps.degradeLane forces even an UNRANKED task lane (a ceiling would no-op)", async () => {
-    // Degrade target is the unranked `coding` lane: a rank-based max_lane would do
+    // Degrade target is the unranked `coding` lane: a rank-based ceiling would do
     // nothing, but a forced selection routes the request onto it.
     const d = deps({
       classify: vi.fn(async () => classification({ task_type: "chat" })),
@@ -822,10 +822,11 @@ describe("routeRequest — virtual model aliases", () => {
   });
 
   it("an alias-mapped lane is bounded by a POLICY cap — no cap bypass (review P1)", async () => {
-    // A global cap policy (empty match) clamps everything to balanced. Even an
-    // allow_custom_model key must NOT use the operator alias to escape that cap.
+    // A global restrict policy (empty match, allowed_lanes whitelist) clamps
+    // everything to balanced. Even an allow_custom_model key must NOT use the
+    // operator alias to escape that cap.
     const globalCap: PoliciesConfig = {
-      policies: [{ id: "global-cap", match: {}, max_lane: "balanced" }],
+      policies: [{ id: "global-cap", match: {}, allowed_lanes: ["economy", "balanced"] }],
     };
     const capped = deps({ modelAliases: { "claude-opus-4-8": "premium" }, policies: globalCap });
     const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), capped, {

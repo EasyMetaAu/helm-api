@@ -47,7 +47,7 @@ describe('policies api client', () => {
   it('listPolicies GETs /admin/api/policies and returns the ordered array', async () => {
     const rows: Policy[] = [
       { match: { task_type: 'coding' }, use_lane: 'coding' },
-      { match: { complexity: 'complex' }, max_lane: 'premium' },
+      { match: { complexity: 'complex' }, use_lane: 'premium' },
       { match: {}, use_lane: 'balanced' },
     ];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -66,7 +66,7 @@ describe('policies api client', () => {
   it('savePolicies PUTs /admin/api/policies with the ordered list as the body', async () => {
     const list: Policy[] = [
       { match: { task_type: 'coding' }, use_lane: 'premium' },
-      { match: { needs_json: true }, max_lane: 'balanced' },
+      { match: { needs_json: true }, use_lane: 'balanced' },
     ];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify(list), { status: 200 }),
@@ -85,20 +85,16 @@ describe('policies api client', () => {
     expect(body[1].match.needs_json).toBe(true);
   });
 
-  it('savePolicies drops the action field NOT chosen (use_lane/max_lane mutually exclusive)', async () => {
-    // A policy carrying both must be normalized; the client never sends both.
-    const list: Policy[] = [{ match: {}, use_lane: 'balanced', max_lane: 'premium' }];
+  it('savePolicies sends use_lane as the policy action (force lane)', async () => {
+    const list: Policy[] = [{ match: {}, use_lane: 'balanced' }];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify(list), { status: 200 }),
     );
 
     await savePolicies(list);
     const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
-    const sent = body[0];
-    // exactly one action present
-    const hasUse = sent.use_lane != null;
-    const hasMax = sent.max_lane != null;
-    expect(hasUse !== hasMax).toBe(true);
+    expect(body[0].use_lane).toBe('balanced');
+    expect(body[0].max_lane).toBeUndefined();
   });
 
   it('savePolicies rejects when the server returns a non-2xx (fail-closed)', async () => {

@@ -29,14 +29,13 @@ export interface PolicyContext {
 export interface PolicyOutcome {
   matched_policy_id: string | null; // null = no policy matched
   use_lane: string | null; // matched policy's use_lane (may be null if caps-only)
-  max_lane: string | null;
   allowed_lanes: string[] | null;
   reason: string; // human-readable, inspectable in the Debug UI
 }
 
-// Lane ranking from "cheap" to "strong", used for max_lane / allowed_lanes
-// comparison. Default three tiers; task-specific lanes (coding/vision…) are NOT
-// ranked and are treated as incomparable (see applyCaps).
+// Lane ranking from "cheap" to "strong", used for allowed_lanes comparison.
+// Default three tiers; task-specific lanes (coding/vision…) are NOT ranked and
+// are treated as incomparable (see applyCaps).
 export const LANE_RANK: Record<string, number> = {
   economy: 0,
   balanced: 1,
@@ -51,7 +50,6 @@ const UNRANKED_CANDIDATE_RANK = LANE_RANK.balanced ?? 1;
 const EMPTY_OUTCOME: PolicyOutcome = {
   matched_policy_id: null,
   use_lane: null,
-  max_lane: null,
   allowed_lanes: null,
   reason: "no policy matched",
 };
@@ -90,15 +88,13 @@ function policyId(policy: Policy, index: number): string {
 
 // first-match PIN + caps ACCUMULATION: in declaration order, the FIRST policy
 // whose `match` is satisfied wins the lane PIN (matched_policy_id / use_lane /
-// reason) and STOPS pinning. But caps (max_lane / allowed_lanes) are NOT
-// abandoned at the first match — they accumulate across EVERY matching policy so
-// a cap policy placed after a use_lane policy (e.g. the shipped budget_org_cap,
-// last in config) still binds. Accumulation rules: intersect allowed_lanes
-// (strictest whitelist wins), keep the strictest max_lane by LANE_RANK (lowest).
-// No match => all-null outcome so the resolver falls back to task/complexity.
+// reason) and STOPS pinning. But the `allowed_lanes` whitelist is NOT abandoned
+// at the first match — it accumulates (intersection: strictest whitelist wins)
+// across EVERY matching policy, so a restrict-only policy placed after a use_lane
+// policy still binds. No match => all-null outcome so the resolver falls back to
+// task/complexity.
 export function evaluatePolicies(ctx: PolicyContext, cfg: PoliciesConfig): PolicyOutcome {
   let pinned: { id: string; use_lane: string | null; reason: string } | null = null;
-  let maxLane: string | null = null;
   let allowedLanes: string[] | null = null;
 
   for (let i = 0; i < cfg.policies.length; i++) {
@@ -116,9 +112,6 @@ export function evaluatePolicies(ctx: PolicyContext, cfg: PoliciesConfig): Polic
     }
 
     // ACCUMULATE caps from this match (regardless of whether it was the pin).
-    if (policy.max_lane != null) {
-      maxLane = strictestMaxLane(maxLane, policy.max_lane);
-    }
     if (policy.allowed_lanes != null) {
       allowedLanes = intersectAllowed(allowedLanes, policy.allowed_lanes);
     }
@@ -128,22 +121,9 @@ export function evaluatePolicies(ctx: PolicyContext, cfg: PoliciesConfig): Polic
   return {
     matched_policy_id: pinned.id,
     use_lane: pinned.use_lane,
-    max_lane: maxLane,
     allowed_lanes: allowedLanes,
     reason: pinned.reason,
   };
-}
-
-// Strictest (lowest LANE_RANK) of two max_lane caps. An unrankable lane is
-// treated as least-strict (it cannot tighten a rankable cap); two unrankables
-// keep the incumbent.
-function strictestMaxLane(current: string | null, next: string): string {
-  if (current === null) return next;
-  const cur = LANE_RANK[current];
-  const nxt = LANE_RANK[next];
-  if (nxt === undefined) return current;
-  if (cur === undefined) return next;
-  return nxt < cur ? next : current;
 }
 
 // Intersect two allowed_lanes whitelists, preserving the incumbent's order. The
@@ -167,20 +147,16 @@ function lowestRankedLane(lanes: string[]): string {
   return best;
 }
 
-// Converge a candidate lane into caps:
-//  - allowed_lanes: if the candidate is in the whitelist, keep it; else pick the
-//    highest-ranked allowed lane that is <= the candidate's rank, otherwise the
-//    lowest-ranked allowed lane (never upgrade past what the candidate wanted).
-//    An UNRANKABLE candidate (a task lane like `coding`/`json`, or a vendor-family
-//    lane like `claude-opus`) has no cost rank, so it is clamped as if it asked for
-//    the DEFAULT tier (`balanced`) — degrading toward balanced, never escalating to
-//    the most expensive allowed lane (e.g. `premium`).
-//  - max_lane: if LANE_RANK[lane] > LANE_RANK[max_lane], drop to max_lane. An
-//    unrankable candidate is incomparable => conservatively cap to max_lane.
+// Converge a candidate lane into the `allowed_lanes` whitelist: if the candidate
+// is in the whitelist, keep it; else pick the highest-ranked allowed lane that is
+// <= the candidate's rank, otherwise the lowest-ranked allowed lane (never upgrade
+// past what the candidate wanted). An UNRANKABLE candidate (a task lane like
+// `coding`/`json`, or a vendor-family lane like `claude-opus`) has no cost rank, so
+// it is clamped as if it asked for the DEFAULT tier (`balanced`) — degrading toward
+// balanced, never escalating to the most expensive allowed lane (e.g. `premium`).
 export function applyCaps(lane: string, outcome: PolicyOutcome): string {
   let result = lane;
 
-  // allowed_lanes first: narrow the candidate set, then max_lane can clamp.
   if (outcome.allowed_lanes != null && outcome.allowed_lanes.length > 0) {
     const allowed = outcome.allowed_lanes;
     if (!allowed.includes(result)) {
@@ -198,17 +174,6 @@ export function applyCaps(lane: string, outcome: PolicyOutcome): string {
         }
       }
       result = pick ?? lowestRankedLane(allowed);
-    }
-  }
-
-  if (outcome.max_lane != null) {
-    const maxRank = LANE_RANK[outcome.max_lane];
-    const laneRank = LANE_RANK[result];
-    if (maxRank === undefined) {
-      // max_lane itself unrankable: cannot reason about it — leave as-is.
-    } else if (laneRank === undefined || laneRank > maxRank) {
-      // Candidate above the cap, OR incomparable (task lane): conservatively cap.
-      result = outcome.max_lane;
     }
   }
 

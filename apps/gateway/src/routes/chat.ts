@@ -118,7 +118,7 @@ export interface ChatRouteDeps {
   /** Per-key usage-budget wiring (docs/06). Optional — absent = no budgets (existing
    *  tests unchanged). `budgetGate.check` runs BEFORE route (fail-CLOSED: a store
    *  error propagates → 5xx); over budget either rejects (429) or yields a degrade
-   *  lane fed into keyCaps.maxLane. `settleBudget` runs post-served inside the SAME
+   *  lane fed into keyCaps.degradeLane. `settleBudget` runs post-served inside the SAME
    *  fail-open envelope as telemetry persist (a settle failure is logged, never
    *  5xx's a served request). */
   budgetGate?: { check(probe: BudgetProbe): Promise<BudgetCheckResult> };
@@ -560,7 +560,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
 
     // Pre-route usage-budget gate (docs/06). FAIL-CLOSED: a store-read error
     // propagates (→ 5xx), never a silent pass. Over budget → reject (429) or
-    // degrade: cap THIS request's lane to the key's degrade lane via keyCaps.maxLane.
+    // degrade: cap THIS request's lane to the key's degrade lane via keyCaps.degradeLane.
     let degradeLane: string | null = null;
     if (deps.budgetGate !== undefined && identity.caps?.budget !== undefined) {
       const check = await deps.budgetGate.check({

@@ -128,7 +128,7 @@ describe("createYamlRulePersister — policies", () => {
     await p.persistPolicies({
       policies: [
         { match: { task_type: "coding" }, use_lane: "coding" },
-        { match: {}, max_lane: "balanced" },
+        { match: {}, allowed_lanes: ["economy", "balanced"] },
       ],
     } as never);
 

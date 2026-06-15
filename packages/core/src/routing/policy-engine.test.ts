@@ -26,39 +26,40 @@ describe("evaluatePolicies — first-match", () => {
     expect(out.use_lane).toBe("coding");
   });
 
-  it("PINs the first use_lane but ACCUMULATES caps from later matching policies", () => {
-    // First-match wins the PIN (use_lane), but a later matching cap-only policy
-    // (e.g. a global max_lane placed last) must NOT be discarded.
+  it("PINs the first use_lane but ACCUMULATES allowed_lanes from later matching policies", () => {
+    // First-match wins the PIN (use_lane), but a later matching restrict-only
+    // policy (allowed_lanes placed last) must NOT be discarded.
     const c = cfg([
       { id: "coding_to_premium", match: { task_type: "coding" }, use_lane: "premium" },
-      { id: "complex_cap", match: { complexity: "complex" }, max_lane: "balanced" },
+      {
+        id: "complex_restrict",
+        match: { complexity: "complex" },
+        allowed_lanes: ["economy", "balanced"],
+      },
     ]);
     const out = evaluatePolicies(baseCtx, c);
     expect(out.matched_policy_id).toBe("coding_to_premium");
     expect(out.use_lane).toBe("premium");
-    // the later cap policy's max_lane is accumulated.
-    expect(out.max_lane).toBe("balanced");
+    // the later restrict policy's allowed_lanes is accumulated.
+    expect(out.allowed_lanes).toEqual(["economy", "balanced"]);
   });
 
-  it("intersects allowed_lanes and takes the strictest max_lane across matches", () => {
+  it("intersects allowed_lanes across matches (strictest whitelist wins)", () => {
     const c = cfg([
       {
         id: "pin",
         match: { task_type: "coding" },
         use_lane: "premium",
         allowed_lanes: ["economy", "balanced", "premium"],
-        max_lane: "premium",
       },
       {
         id: "narrow",
         match: { complexity: "complex" },
         allowed_lanes: ["economy", "balanced"],
-        max_lane: "balanced",
       },
     ]);
     const out = evaluatePolicies(baseCtx, c);
     expect(out.use_lane).toBe("premium");
-    expect(out.max_lane).toBe("balanced"); // strictest (lowest LANE_RANK)
     expect(out.allowed_lanes).toEqual(["economy", "balanced"]); // intersection
   });
 
@@ -67,7 +68,6 @@ describe("evaluatePolicies — first-match", () => {
     const out = evaluatePolicies(baseCtx, c);
     expect(out.matched_policy_id).toBeNull();
     expect(out.use_lane).toBeNull();
-    expect(out.max_lane).toBeNull();
     expect(out.allowed_lanes).toBeNull();
   });
 
@@ -133,35 +133,10 @@ describe("evaluatePolicies — telemetry / determinism", () => {
   });
 });
 
-describe("applyCaps — max_lane", () => {
-  const outcome = {
-    matched_policy_id: "p",
-    use_lane: null,
-    max_lane: "balanced",
-    allowed_lanes: null,
-    reason: "",
-  };
-
-  it("caps a higher lane down to max_lane", () => {
-    expect(applyCaps("premium", outcome)).toBe("balanced");
-  });
-
-  it("leaves a lane already at/below max_lane untouched (no upgrade)", () => {
-    expect(applyCaps("economy", outcome)).toBe("economy");
-    expect(applyCaps("balanced", outcome)).toBe("balanced");
-  });
-
-  it("conservatively caps an unrankable candidate lane down to max_lane", () => {
-    // task lane like `coding` is not in LANE_RANK -> incomparable -> cap to max_lane
-    expect(applyCaps("coding", outcome)).toBe("balanced");
-  });
-});
-
 describe("applyCaps — allowed_lanes", () => {
   const outcome = {
     matched_policy_id: "p",
     use_lane: null,
-    max_lane: null,
     allowed_lanes: ["economy", "balanced"],
     reason: "",
   };
@@ -179,7 +154,6 @@ describe("applyCaps — allowed_lanes", () => {
     const out = {
       matched_policy_id: "p",
       use_lane: null,
-      max_lane: null,
       allowed_lanes: ["balanced", "premium"],
       reason: "",
     };
@@ -194,7 +168,6 @@ describe("applyCaps — allowed_lanes", () => {
     const out = {
       matched_policy_id: "p",
       use_lane: null,
-      max_lane: null,
       allowed_lanes: ["economy", "balanced", "premium"],
       reason: "",
     };
@@ -208,7 +181,6 @@ describe("applyCaps — no caps", () => {
     const out = {
       matched_policy_id: null,
       use_lane: null,
-      max_lane: null,
       allowed_lanes: null,
       reason: "",
     };

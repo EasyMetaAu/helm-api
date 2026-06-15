@@ -88,8 +88,8 @@ Applies explicit server-side policies. Responsibilities:
 
 - Walk the policy list in declaration order; the **first** policy whose `match`
   fully holds wins the lane pin (`use_lane`).
-- Accumulate caps (`max_lane` / `allowed_lanes`) across **every** matching policy,
-  so a cap policy placed after a pin policy still binds.
+- Accumulate the `allowed_lanes` whitelist (intersection) across **every** matching
+  policy, so a restrict policy placed after a pin policy still binds.
 - Produce a single matched-policy record for telemetry.
 
 ### Lane Resolver
@@ -107,7 +107,7 @@ Collapses the classifier + policy outcome into exactly one lane. Responsibilitie
   outcome is not re-derived).
 - Apply **per-key caps last** as the outer bound, after the policy caps. A per-key
   `degrade_lane` forces the request onto that lane (clamped to `allowed_lanes`) and
-  suppresses explicit-model passthrough; it is not a `max_lane` ceiling.
+  suppresses explicit-model passthrough; it is a forced selection, not a rank ceiling.
 
 The resolver itself never trips circuit breakers or calls providers; that is the
 execution stage's job.

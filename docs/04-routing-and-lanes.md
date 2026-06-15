@@ -88,8 +88,8 @@ capability:
    models, lanes, and alias-mapped ids).
 2. It runs **before** explicit-passthrough resolution (so a known vendor id maps
    to a lane instead of 400ing as an unknown model), but it is **cap-bounded**,
-   not a bypass. Policy caps (`max_lane` / `allowed_lanes`) and the key's own
-   `allowed_lanes` whitelist both still clamp the resolved lane. The clamp is
+   not a bypass. Policy `allowed_lanes` and the key's own `allowed_lanes`
+   whitelist both still clamp the resolved lane. The clamp is
    **silent** (the same `applyCaps` path classified routing uses), **not** the
    loud `invalid_request` reject an explicit forbidden-lane ask gets — so even a
    custom-model key can never use an operator alias to escape a cap.
@@ -164,8 +164,8 @@ classification fallback.
 
 The shipped task lanes (the lane resolver maps a classified `task_type` onto a
 same-named lane). These are **unranked** — incomparable to the quality/cost
-lanes, so `applyCaps` treats an unrankable task lane conservatively when a
-`max_lane` cap is in force:
+lanes, so `applyCaps` treats an unrankable task lane conservatively when an
+`allowed_lanes` whitelist is in force (degrading it toward `balanced`):
 
 ```yaml
 coding:
@@ -252,13 +252,12 @@ Policies (`config/policies.yaml`) let operators customize routing server-side
 without touching client code. Each policy is a **first-match** rule: the engine
 walks the list top-to-bottom, and the first policy whose `match` fully holds (an
 AND of every written field) wins the lane pin. A policy must declare at least one
-action — a pin (`use_lane`) and/or a cap (`max_lane` / `allowed_lanes`). The file
+action — a pin (`use_lane`) and/or a restrict (`allowed_lanes` whitelist). The file
 is `.strict()`-validated, so a typo in a field name fails the gateway boot.
 
 Caps behave differently from pins: while the **first** matching policy wins the
-pin, caps **accumulate** across every matching policy (intersect `allowed_lanes`,
-keep the strictest `max_lane`), so a cap policy placed after a pin policy still
-binds.
+pin, the `allowed_lanes` whitelist **accumulates** (intersection) across every
+matching policy, so a restrict policy placed after a pin policy still binds.
 
 The nine shipped policies, in evaluation order (`task_type × complexity → lane`,
 plus a JSON-contract pin first and a budget-org cap last):
@@ -297,9 +296,9 @@ policies:
     match: { task_type: security, complexity: complex }
     use_lane: premium
 
-  - id: budget_org_cap                     # caps-only; clamps the classified lane
-    match: { org_id: budget_org }
-    max_lane: balanced
+  - id: global_economy_cap                 # restrict-only catch-all; clamps ALL traffic
+    match: {}                              # empty match = applies to every request
+    allowed_lanes: [economy, balanced]     # premium becomes unreachable fleet-wide
 ```
 
 Policies must stay explicit and inspectable; there is no hidden, hard-to-debug
@@ -311,9 +310,9 @@ mapped output (see [03](03-classification.md)).
 
 Two cap layers apply, in order:
 
-1. **Policy caps** narrow the resolver's lane choice (`max_lane` /
-   `allowed_lanes`). `max_lane` only constrains the ranked lanes; an unranked
-   task lane is treated conservatively.
+1. **Policy `allowed_lanes`** narrow the resolver's lane choice to a whitelist.
+   An unranked task lane (not in `LANE_RANK`) is treated conservatively —
+   degraded toward `balanced`, never escalated to the strongest allowed lane.
 2. **Per-key caps** apply **last** as the outer, non-negotiable bound from the
    API key's auth record, so a key whose `allowed_lanes` whitelist is confined
    to (for example) `[economy]` is honored even over a policy `use_lane` pin. See
