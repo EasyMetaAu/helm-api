@@ -77,6 +77,19 @@
       .map((m) => ({ model: m.servedModel ?? $t('unknown'), tokens: m.totalTokens })),
   );
 
+  // Donut palette — these are LayerChart's own default slice colors, pinned here so
+  // we can disable its built-in (absolute, shrink-to-fit) legend and render a clean
+  // in-flow legend below the chart that reuses the EXACT same colors. The ordinal
+  // colour scale maps domain[i] → range[i] (cycling), so legend item i ↔ slice i.
+  const SLICE_COLORS = [
+    'hsl(var(--color-primary))',
+    'hsl(var(--color-secondary))',
+    'hsl(var(--color-info))',
+    'hsl(var(--color-success))',
+    'hsl(var(--color-warning))',
+    'hsl(var(--color-danger))',
+  ];
+
   // The dashboard window lives in the URL (?range=…) so the loader re-fetches and
   // the view is shareable / back-button friendly — '24h' is the default, written
   // as a clean URL (no query) to match the loader's fallback. The button row is the
@@ -271,7 +284,10 @@
     <section class="card">
       <h2 class="section-header mb-3">{$t('Tokens by model')}</h2>
       {#if byModel.length > 0}
-        <div class="h-64">
+        <!-- Donut only — its built-in legend is absolutely positioned and wraps
+             unpredictably, so we drive the slices with an explicit palette and
+             render our own in-flow legend below (see SLICE_COLORS). -->
+        <div class="h-56">
           <!-- Slice-hover tooltip shows the model's token total — compact it
                (1.2M) through the same formatter as everything else. -->
           <PieChart
@@ -279,18 +295,24 @@
             key={(d: ModelSlice) => d.model}
             value={(d: ModelSlice) => d.tokens}
             innerRadius={-40}
-            legend
-            props={{
-              legend: {
-                classes: {
-                  swatches: 'max-w-full flex-wrap justify-center',
-                  label: 'max-w-28 whitespace-normal break-all text-left leading-tight',
-                },
-              },
-              tooltip: { item: { format: formatTokens } },
-            }}
+            cRange={SLICE_COLORS}
+            props={{ tooltip: { item: { format: formatTokens } } }}
           />
         </div>
+        <!-- In-flow legend: normal-flow flex-wrap has correct line boxes, so a long
+             model name wraps at a hyphen without the dot/label colliding with the
+             next row. Item i reuses slice i's colour. -->
+        <ul class="mt-3 flex flex-wrap justify-center gap-x-4 gap-y-1.5">
+          {#each byModel as slice, i (slice.model)}
+            <li class="flex items-start gap-1.5 text-xs text-slate-600">
+              <span
+                class="mt-0.5 size-2.5 shrink-0 rounded-full"
+                style:background-color={SLICE_COLORS[i % SLICE_COLORS.length]}
+              ></span>
+              <span class="max-w-[10rem] break-words leading-tight">{slice.model}</span>
+            </li>
+          {/each}
+        </ul>
       {:else}
         <div class="empty-state">{$t('No token usage recorded in this window yet.')}</div>
       {/if}
