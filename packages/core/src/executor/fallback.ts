@@ -276,7 +276,9 @@ export async function runFallback(
           final: {
             status: "error",
             error: makeHelmError({
-              error_class: "upstream_error",
+              // Client disconnect — a dedicated class (499) so telemetry never
+              // counts it as an upstream provider fault (docs/02, docs/07).
+              error_class: "client_abort",
               message: "client aborted request",
               trace_id: req.request_id,
             }),

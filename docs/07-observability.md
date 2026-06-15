@@ -21,7 +21,7 @@ The unified internal error (`HelmError`, single source of truth in
 {
   error_class: "auth_error" | "invalid_request" | "lane_unavailable"
              | "all_providers_failed" | "capability_unsatisfiable"
-             | "upstream_error" | "timeout" | "rate_limited",
+             | "upstream_error" | "timeout" | "rate_limited" | "client_abort",
   http_status: number,                          // mapped from error_class (see below)
   message: string,                              // redacted, human-readable
   trace_id: string,                             // links the decision record; restorable in the Debug UI
@@ -43,6 +43,7 @@ callers cannot supply a mismatched status:
 | `upstream_error` | 502 | An upstream provider returned an error |
 | `timeout` | 504 | Timed out |
 | `rate_limited` | 429 | Rate limit tripped |
+| `client_abort` | 499 | Client disconnected mid-request (not a provider fault); the executor stops the chain and records this instead of `upstream_error` |
 
 Per **Principle 7**, `message` and `provider_raw` must already be redacted by the
 producer. The Protocol Adapter's response-out stage translates this unified error

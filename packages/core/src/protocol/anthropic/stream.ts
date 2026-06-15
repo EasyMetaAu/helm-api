@@ -504,6 +504,19 @@ export async function* convertOpenAIStreamToAnthropic(
     if (choice?.finish_reason != null) state.finishReason = choice.finish_reason;
   }
 
+  // Empty upstream stream (zero chunks): message_start is emitted lazily on the
+  // first chunk, so it was never sent. The Anthropic SSE contract requires it
+  // before any message_delta / message_stop — emit a skeleton start now so an
+  // empty completion still yields a valid event sequence (never an orphan
+  // message_delta a client would reject).
+  if (!state.messageStarted) {
+    state.messageStarted = true;
+    yield messageStartEvent({
+      id: nonEmptyString(options.id),
+      model: nonEmptyString(options.model),
+    });
+  }
+
   // —— Stream end: flush any tool block that never saw an argument fragment, close
   // every open block exactly once, then the terminal events. ——
   for (const slot of state.toolIndexToBlock.values()) {

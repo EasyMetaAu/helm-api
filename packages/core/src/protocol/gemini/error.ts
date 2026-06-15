@@ -25,6 +25,7 @@ const GEMINI_ERROR_STATUS: Record<ErrorClass, string> = {
   upstream_error: "INTERNAL",
   timeout: "DEADLINE_EXCEEDED",
   rate_limited: "RESOURCE_EXHAUSTED",
+  client_abort: "CANCELLED", // google.rpc.Code for a caller-cancelled operation
 };
 
 export interface GeminiErrorEnvelope {

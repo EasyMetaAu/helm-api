@@ -33,6 +33,7 @@ export const OPENAI_ERROR_SHAPE: Record<ErrorClass, { type: string; code: string
   upstream_error: { type: "api_error", code: "upstream_error" },
   timeout: { type: "api_error", code: "timeout" },
   rate_limited: { type: "rate_limit_error", code: "rate_limited" },
+  client_abort: { type: "api_error", code: "client_abort" },
 };
 
 export interface OpenAIErrorEnvelope {

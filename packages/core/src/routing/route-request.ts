@@ -267,40 +267,33 @@ async function classifySafe(
 const expandChain = expandLaneChain;
 
 // Build the PolicyContext the engine matches on, from the classification.
-function policyContext(req: InternalRequest, cls: Classification): PolicyContext {
+function policyContext(cls: Classification): PolicyContext {
   return {
     task_type: cls.task_type,
     complexity: cls.complexity,
     needs_json: cls.constraints.needs_json === true,
     needs_tools: cls.constraints.needs_tools === true,
     needs_vision: cls.constraints.needs_vision === true,
-    user_id: req.user_id,
-    org_id: req.org_id,
     // project_id is a MEMORY-scope field (client-controlled via the x-project-id
-    // header, docs/08), NOT a trusted routing attribute. Sourcing the client value
-    // here would let any caller spoof a project_id policy to change lane/cost/caps
-    // — memory must never rewrite routing (docs/08). user_id/org_id come from the
-    // trusted auth identity; project-scoped routing needs an equivalent trusted
-    // source (auth/account), which does not exist yet, so it is null.
+    // header, docs/08), NOT a trusted routing attribute — sourcing the client value
+    // here would let any caller spoof a project_id policy to change lane/cost. It is
+    // always null until a trusted (auth/account) project source exists.
     project_id: null,
   };
 }
 
 // PolicyContext for an alias-mapped lane (step 0a). An alias request is NOT
-// classified, so task/complexity/needs_* are neutral (`task_type:"passthrough"`
-// matches no shipped task policy) — only IDENTITY-scoped policies (org_id/user_id,
-// e.g. the shipped budget_org_cap) match, and their caps still clamp the lane.
-// This is what keeps an operator alias from becoming a policy-cap bypass.
-function aliasPolicyContext(req: InternalRequest): PolicyContext {
+// classified, so every classifier dimension is neutral: `task_type:"passthrough"`
+// (matches no shipped task policy) and `complexity:null` (matches no complexity
+// policy). Only an unconstrained / global-cap policy can bind here; the key's own
+// `allowed_lanes` whitelist is still applied separately by the caller.
+function aliasPolicyContext(): PolicyContext {
   return {
     task_type: "passthrough",
-    complexity: "medium",
+    complexity: null,
     needs_json: false,
     needs_tools: false,
     needs_vision: false,
-    user_id: req.user_id,
-    org_id: req.org_id,
-    // project_id stays a non-routing memory field (mirrors policyContext above).
     project_id: null,
   };
 }
@@ -521,7 +514,7 @@ async function plan(
     Object.hasOwn(deps.lanes, aliasTarget) &&
     (opts.keyCaps?.degradeLane === undefined || opts.keyCaps.degradeLane === null)
   ) {
-    const outcome = evaluatePolicies(aliasPolicyContext(req), deps.policies);
+    const outcome = evaluatePolicies(aliasPolicyContext(), deps.policies);
     let lane = applyCaps(aliasTarget, outcome);
     if (opts.keyCaps !== undefined) {
       lane = applyCaps(lane, {
@@ -626,7 +619,7 @@ async function plan(
 
   // 2) Classify (fail-open) → policy → lane-resolver (+caps).
   const cls = await classifySafe(req, deps.classify);
-  const outcome = evaluatePolicies(policyContext(req, cls), deps.policies);
+  const outcome = evaluatePolicies(policyContext(cls), deps.policies);
   const laneDecision = resolveLane({
     classification: forResolver(cls),
     policy: {

@@ -11,8 +11,8 @@ export interface PolicyMatch {
   task_type?: string; // enum: docs/03 task_type set (TASK_TYPE_OPTIONS)
   complexity?: string; // enum: server PolicyMatchSchema set (COMPLEXITY_OPTIONS)
   needs_json?: boolean;
-  user_id?: string;
-  org_id?: string;
+  // NOTE: no org_id / user_id — routing has no org/user scope (per-key limits live
+  // on the API key, not in policies). The server PolicyMatchSchema rejects them.
 }
 
 export interface Policy {
@@ -66,8 +66,6 @@ function normalizeMatch(raw: Record<string, unknown> | undefined): PolicyMatch {
   if (typeof m.task_type === 'string') out.task_type = m.task_type;
   if (typeof m.complexity === 'string') out.complexity = m.complexity;
   if (typeof m.needs_json === 'boolean') out.needs_json = m.needs_json;
-  if (typeof m.user_id === 'string') out.user_id = m.user_id;
-  if (typeof m.org_id === 'string') out.org_id = m.org_id;
   return out;
 }
 
@@ -89,8 +87,6 @@ function toServerBody(p: Policy): Record<string, unknown> {
   if (p.match.task_type) match.task_type = p.match.task_type;
   if (p.match.complexity) match.complexity = p.match.complexity;
   if (p.match.needs_json === true) match.needs_json = true;
-  if (p.match.user_id) match.user_id = p.match.user_id;
-  if (p.match.org_id) match.org_id = p.match.org_id;
 
   const out: Record<string, unknown> = { match };
   if (p.id) out.id = p.id;

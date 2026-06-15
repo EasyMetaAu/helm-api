@@ -15,6 +15,7 @@ const EXPECTED: ReadonlyArray<readonly [string, number]> = [
   ["upstream_error", 502],
   ["timeout", 504],
   ["rate_limited", 429],
+  ["client_abort", 499],
 ];
 
 describe("error_class -> HTTP status map", () => {

@@ -25,8 +25,12 @@ export const PolicyMatchSchema = z
     needs_json: z.boolean().optional(),
     needs_tools: z.boolean().optional(),
     needs_vision: z.boolean().optional(),
-    user_id: z.string().optional(),
-    org_id: z.string().optional(),
+    // NOTE: there is intentionally no org_id / user_id match dimension — usage and
+    // routing limits are scoped to the API key, not to an org/user identity. (The
+    // schema is `.strict()`, so a leftover org_id/user_id policy now fails closed at
+    // boot rather than silently never matching.) `project_id` is reserved but the
+    // runtime always supplies null (see PolicyContext), so it currently matches
+    // nothing — kept for forward-compat with a future trusted project source.
     project_id: z.string().optional(),
   })
   .strict();

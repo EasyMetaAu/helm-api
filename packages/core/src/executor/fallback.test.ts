@@ -250,9 +250,11 @@ describe("runFallback", () => {
     expect(breaker.recordFailure).not.toHaveBeenCalled();
     // abort terminates the chain: fallback is NOT attempted.
     expect(invoke).toHaveBeenCalledTimes(1);
-    // not all_providers_failed — abort is not a provider fault.
+    // not all_providers_failed — abort is its own client_abort class (499), so
+    // telemetry never miscounts a disconnect as an upstream fault (review fix #4).
     if (out.final.status === "error") {
-      expect(out.final.error.error_class).not.toBe("all_providers_failed");
+      expect(out.final.error.error_class).toBe("client_abort");
+      expect(out.final.error.http_status).toBe(499);
     }
   });
 

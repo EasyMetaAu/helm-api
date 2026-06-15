@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-06-15 · 双人 code review 修复：org/user 策略拆除 + Anthropic 空流 + applyCaps + client_abort（docs/02/04/05/07；原则 3/5/7/8）
+
+- **背景**：文档审计后用户要求对架构做真实 bug review（我 + Codex 各一遍，对抗式合并）。覆盖互补：我审路由/执行/鉴权，Codex 审协议/流式（其 run 未出最终报告，关键发现从执行日志捞出并复核）。确认 2 bug + 1 设计问题 + 2 小问题，用户拍板全修。
+- **#1〔major〕org/user 维度策略形同虚设——拆除（非接通）**：`auth.ts` 把 `orgId/userId` 写死 null（`ApiKeyRecord` 无该列可填），IR 的 `org_id/user_id` 取自此身份恒 null → 任何 `match:{org_id|user_id}` 策略**永不命中**，出厂示例 `budget_org_cap` 是死代码。用户「只按 API key 限用量，不需要 org/user 路由」→ 从 `PolicyMatchSchema`/`PolicyContext`/`MATCH_FIELDS`/两 context builder 删 org_id/user_id（schema `.strict()` 使遗留策略 fail-closed 拒启动而非静默不匹配），删 policies.yaml 示例，admin 策略编辑器（`PolicyRow.svelte` + `policies.ts` 类型/序列化）同步删 User/Org ID 输入。`project_id` 保留（已文档化的未接通占位）。IR 的 org_id/user_id 字段暂留（大量测试 fixture 在用，无害死字段，可后续清）。
+- **#2〔major，Codex 发现〕Anthropic 出站空流缺 message_start**：`convertOpenAIStreamToAnthropic` 的 message_start 在 for-await 内懒发，**零 chunk 流**跳过循环 → 收尾无条件发 message_delta/message_stop，客户端收到无 message_start 的非法 Anthropic 序列。修：收尾前加 `if(!messageStarted) yield messageStartEvent(...)` 守卫。
+- **#3〔medium〕applyCaps 把不可排序候选顶到最贵 allowed lane**：task/厂商家族 lane（rank=+∞）不在 allowed_lanes 时挑「最高 ≤ +∞」=最强（premium）。用户拍板回退 balanced：候选 rank 缺省改 `UNRANKED_CANDIDATE_RANK = LANE_RANK.balanced`，向 balanced 降级而非升 premium。
+- **#4〔minor〕client abort 被标 upstream_error**：fallback 终止链时 final.error_class=`upstream_error`，污染上游故障指标。新增 `client_abort`(499) ErrorClass（enum + 状态映射 anthropic `api_error`/gemini `CANCELLED`/openai `api_error` + docs/07 表 + 测试 EXPECTED），fallback.ts abort 路改用之。
+- **#5〔edge〕aliasPolicyContext 写死 complexity:"medium"**：会被 `complexity:medium` 单字段策略误命中（别名请求未分类）。`PolicyContext.complexity` 改 `…|null`，别名 context 设 null（不匹配任何 complexity 策略）。
+- **取舍/坑/TODO**：① #1 选「拆除」而非「接通 org/user」（用户明确不需要）；IR 字段暂留以不动 IR schema 的大量 fixture。② client_abort 用非标 499（gateway onError 早已用）；客户端已断时 body 多半送不达，价值在 telemetry 准确。③ 审过干净（无改）：熔断器状态机/单探针、fallback 顺序/abort/`:free`-429/空链 vs 耗尽链、expand-chain 防环去重、连接重试 abort-safe、鉴权拒禁用 key、（Codex）流式 usage 末尾缓冲与 tool-index 映射。
+- **验证**：TDD 新增回归（空流→`[message_start,message_delta,message_stop]`、不可排序候选→balanced、abort→client_abort/499、org_id/user_id 策略 fail-closed）+ 改写受影响 fixture（policy-engine/policy-matrix/route-request/admin.test/admin policies/两处 policy-schema）。`pnpm typecheck`（shared/core/gateway）+ `pnpm lint` + 全量 **3737 测试** + admin `svelte-check` 0 错 全绿。分支 `fix/review-routing-stream-errors`。
+
 ## 2026-06-15 · 订阅 OAuth 轮换 refresh token 跨实例竞争修复 + 刷新状态码透传（docs/06；原则 1/3/7）
 
 - **背景**：la.atmy.work 上 anthropic 订阅请求报 `oauth refresh failed (anthropic)`（155ms→上游快速 4xx，几乎确定 invalid_grant），fail-open 已正确回退 gpt-5.5。用户疑「token 没提前刷新」。排查：刷新其实**已 ~6min 提前**（parseTokenCredentials `REFRESH_SKEW_MS` 5min + token-manager skew 60s），失败的是**刷新调用本身被拒**。真因：同一 (provider, account) 被建了 **5+ 个独立 TokenManager**（executor / 模型发现 / providers 页 `ensureFresh` 并发刷新 / Anthropic 配额 / 连通性测试），各自内存缓存但共用 store 里**同一个单次性轮换 refresh token**，无跨实例协调 → 两个并发刷新→第二个重放已消费 token→Anthropic invalid_grant 并常**作废整个 token 家族** → 永久失效需重登（in-process single-flight 看不到兄弟实例）。
@@ -22,18 +33,13 @@
 - **取舍/坑/TODO**：① 慢首包（首 token 耗时 > 代理 read-timeout，如推理模型）**未在 helm 侧覆盖**——若复现优先核对 nginx/haproxy/CF 超时，或后续再评估 early-commit（会把流式错误从干净 502/504 变成 in-band `event:error` 帧）。② 心跳默认 15s 远低于 nginx 60s/CF ~100s；运营者按前置代理调 `HELM_SSE_HEARTBEAT_MS`。③ schema 改了须重建 `@helm/shared`。
 - **验证**：TDD 红→绿——`retry.test.ts`(25) + `heartbeat.test.ts`(7, 含边界/disabled/error/early-return) + 三 client wiring + chat 路由 `:\n\n` 端到端集成（断言数据帧逐字 + 心跳非 data 事件）。provider 208 / 路由+schema 全绿，`pnpm typecheck`、`pnpm lint`、`pnpm build` 绿。分支 `fix/upstream-transient-retry-sse-heartbeat`。
 
-## 2026-06-14 · Admin 管理界面移动端/响应式走查 + 修复（docs/10/11；原则 1）
-
-- **背景**：用户要求对 admin 全部 9 个页面做移动端/PC 走查（Playwright 截图三视口：iPhone 12 Pro 390×844 / iPad mini 768×1024 / 桌面 1920×1080），找出不合理处并修，移动端必须方便触控。流程：先把本地 main 重新构建部署到 Docker（localhost:8080）→ 截 29 张图（含移动 nav drawer、New key 弹层）→ Workflow 扇出 10 个 reviewer（每页读截图+源码）→ 对抗式验证 → 综合，25 处真实问题归并为 12 条（1 blocker / 3 major / 6 minor / 2 polish）。控制台零报错。
-- **核心修复（全在 `apps/admin`，CSS/Tailwind 为主）**：① **宽表→卡片**（Providers 10 列=blocker、API Keys 9 列）：新增 `.cards-table` / `.cards-table-frame` 配方——`<lg` 每行 reflow 成带框卡片、每格变「label/value」(label 由 `data-label` 经 CSS `::before` 注入)，`lg+` 仍是普通表（含横向滚动框）。② Requests/Dashboard 表首列 UUID 加 `block max-w-[7rem] truncate lg:max-w-none`（移动端不再霸屏，整行仍可点进详情）。③ 触控目标：`btn-icon` `h-7→h-10 md:h-7`，`btn-primary/secondary/success/danger/danger-outline` 配方加 `min-h-11 md:min-h-0`，hamburger 44px，RangeFilter/RefreshControl/settings 输入与 select 同补。④ 768px 挤压：dashboard 统计网格、requests 图例、settings 多字段队列行从 `md/sm` 推迟到 `lg`（rate-limit 行留 `sm`）。⑤ a11y：健康点文字 `sr-only sm:not-sr-only`、wrapper title 改 live healthLabel。⑥ 其它：classifier eval-details `grid-cols-2→[max-content_1fr]` + Layer-2 toggle 行 44px、policies 保存条移动端 `sticky bottom-0`、request-detail trace chip `basis-full md:basis-auto`、JsonTree summary / FullscreenToggle 触控。
-- **关键决定（CSS reflow 而非双 DOM 卡片）**：用户选「Providers+Keys 都用卡片」。但 `hidden lg:block`+`lg:hidden` 会让表与卡片**同时**留在 DOM（jsdom 不跑 CSS、testing-library 不看 display），`keys.test.ts`(20) / `providers.test.ts` 大量 `getByTestId('key-row')` 单行断言 + 全局 `getByText(prefix)` 会因重复而全红。故改为**单 `<tr>` 卡片化 reflow**（CSS 改 display + `::before` 注 label，`data-label` 上 `<td>`，`<tr>` 去掉 `.table-row`，外层换 `.cards-table-frame`）：每记录 DOM 仍只一行 → 单元测试 + 屏幕阅读器零改即过，移动端同时呈现真卡片、无横向滚动、操作全可触达。
-- **验证**：admin `pnpm build` 绿、vitest **364 全绿**（含 keys/providers reflow 后）、Biome lint 绿、svelte-check 仅剩既有 `oauth.test.ts` 3 报错（非回归，与 origin/main 逐字相同、admin 不在 `-r typecheck` 门禁）。Docker 从 worktree 源构建 `:latest` 重新部署后用 Playwright 三视口复测对比。分支 `worktree-admin-mobile-ui`（git worktree，已 rebase 到 main）。截图存 `ui-review/{iphone12pro,ipadmini,desktop}/`，PR #255。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-14 · Admin 移动端/响应式走查 + 修复（docs/10/11；原则 1）：Playwright 三视口截 29 图 + Workflow 扇出 10 reviewer，25 处归并 12 修复。核心：宽表（Providers 10 列/Keys 9 列）→ CSS reflow 单 `<tr>` 卡片化（`.cards-table` + `::before` 注 `data-label`，避免双 DOM 让 vitest 单行断言全红）、UUID 首列 truncate、触控 44px（btn-* `min-h-11 md:min-h-0`/hamburger）、768px 网格推迟 lg、a11y 健康点 sr-only。admin build/vitest 364/lint 绿、svelte-check 仅既有 oauth.test.ts 3 报错（非回归）。分支 worktree-admin-mobile-ui，PR #255。
 
 ### 2026-06-14 · 协议互译剩余项 PR review 修复（review of fix/protocol-litellm-remaining；原则 2/3/7）：修 Gemini native passthrough 计费/记忆漏洞（usage 改三路协议分支 + observeOutbound，默认 config 无 gemini provider 故不触发）、远程媒体 SSRF 加固（`assertPublicHttpsTarget` 拒私有/保留/元数据 IP + DNS pin 防 rebinding、独立 `mediaFetch` 钉死已校验地址）、Generic Responses→Chat 桥补 `tool_calls`；Codex review round2 再修 Gemini 翻译路径（transformer 组合双向译，不再恒 throw）、静态 key 脱敏、媒体边读边限、401 重建头、registry 有界 LRU。TDD changed-area 全绿。
 

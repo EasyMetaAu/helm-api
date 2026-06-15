@@ -404,7 +404,7 @@ describe("admin.api policies", () => {
     const app = buildApp(deps);
     const policies = [
       { match: { task_type: "coding" }, use_lane: "premium" },
-      { match: { org_id: "acme" }, max_lane: "balanced" },
+      { match: { complexity: "complex" }, max_lane: "balanced" },
     ];
     const put = await app.request("/admin/api/policies", {
       method: "PUT",
