@@ -65,7 +65,7 @@ describe('policies api client', () => {
 
   it('savePolicies PUTs /admin/api/policies with the ordered list as the body', async () => {
     const list: Policy[] = [
-      { match: { user_id: 'u1' }, use_lane: 'premium' },
+      { match: { task_type: 'coding' }, use_lane: 'premium' },
       { match: { needs_json: true }, max_lane: 'balanced' },
     ];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -81,7 +81,7 @@ describe('policies api client', () => {
     expect(Array.isArray(body)).toBe(true);
     expect(body).toHaveLength(2);
     // order preserved (= priority)
-    expect(body[0].match.user_id).toBe('u1');
+    expect(body[0].match.task_type).toBe('coding');
     expect(body[1].match.needs_json).toBe(true);
   });
 

@@ -106,6 +106,21 @@ describe("convertOpenAIStreamToAnthropic — text event sequence", () => {
       expect(start.message.model).toBe("gpt-5.5");
     }
   });
+
+  it("empty upstream stream still leads with message_start (no orphan message_delta)", async () => {
+    // A zero-chunk stream never enters the per-chunk loop, so message_start (lazy)
+    // would be skipped — the finalize-time guard emits it so the client never sees
+    // a message_delta / message_stop without a message_start (review fix #2).
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(feed([]), { id: "req-9", model: "gpt-5.5" }),
+    );
+    expect(events.map((e) => e.type)).toEqual(["message_start", "message_delta", "message_stop"]);
+    const start = nth(events, 0);
+    if (start.type === "message_start") {
+      expect(start.message.id).toBe("msg_req-9");
+      expect(start.message.model).toBe("gpt-5.5");
+    }
+  });
 });
 
 // —— 2. parallel tool-call streaming ——————————————————————————————————————————

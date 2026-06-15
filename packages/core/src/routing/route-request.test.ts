@@ -801,26 +801,27 @@ describe("routeRequest — virtual model aliases", () => {
   });
 
   it("an alias-mapped lane is bounded by a POLICY cap — no cap bypass (review P1)", async () => {
-    // An identity-scoped policy caps org 'acme' to balanced. A standard key must
-    // NOT be able to use the operator alias to escape that cap up to premium.
-    const orgCap: PoliciesConfig = {
-      policies: [{ id: "org-cap", match: { org_id: "acme" }, max_lane: "balanced" }],
+    // A global cap policy (empty match) clamps everything to balanced. A standard
+    // key must NOT be able to use the operator alias to escape that cap up to premium.
+    const globalCap: PoliciesConfig = {
+      policies: [{ id: "global-cap", match: {}, max_lane: "balanced" }],
     };
-    const capped = deps({ modelAliases: { "claude-opus-4-8": "premium" }, policies: orgCap });
-    const result = await routeRequest(
-      req({ requested_model: "claude-opus-4-8", org_id: "acme" }),
-      capped,
-      { allowCustomModel: false },
-    );
+    const capped = deps({ modelAliases: { "claude-opus-4-8": "premium" }, policies: globalCap });
+    const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), capped, {
+      allowCustomModel: false,
+    });
     expect(result.final.status).toBe("ok");
     const plan = (capped.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
-    expect(plan.selected_lane).toBe("balanced"); // premium clamped down by the org cap
+    expect(plan.selected_lane).toBe("balanced"); // premium clamped down by the global cap
     const rec = (capped.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
     expect(rec.policy.reason).toContain("capped");
 
-    // Control: a DIFFERENT org is not bound by that cap → the alias keeps premium.
-    const free = deps({ modelAliases: { "claude-opus-4-8": "premium" }, policies: orgCap });
-    await routeRequest(req({ requested_model: "claude-opus-4-8", org_id: "other" }), free, {
+    // Control: with NO cap policy, the alias keeps premium.
+    const free = deps({
+      modelAliases: { "claude-opus-4-8": "premium" },
+      policies: { policies: [] },
+    });
+    await routeRequest(req({ requested_model: "claude-opus-4-8" }), free, {
       allowCustomModel: false,
     });
     const plan2 = (free.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;

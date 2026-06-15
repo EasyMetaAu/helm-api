@@ -24,6 +24,7 @@ const ANTHROPIC_ERROR_TYPE: Record<ErrorClass, string> = {
   upstream_error: "api_error",
   timeout: "api_error",
   rate_limited: "rate_limit_error",
+  client_abort: "api_error", // client disconnected; body is rarely delivered
 };
 
 export interface AnthropicErrorEnvelope {

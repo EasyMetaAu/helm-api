@@ -85,9 +85,8 @@ policies:
       complexity: complex
     use_lane: premium
 
-  # Example cost cap: a budget org is never routed above `balanced` (caps-only;
-  # the lane is still chosen by classification, just clamped). Illustrative.
-  - id: budget_org_cap
-    match:
-      org_id: budget_org
-    max_lane: balanced
+  # NOTE on usage / cost limits: there is no org/user policy dimension. Per-key
+  # limits (RPM/TPM, usage budget, allowed_lanes, max-concurrency) live on the API
+  # KEY itself (docs/06), not in policies. A caps-only policy here can still clamp
+  # ALL traffic by lane — e.g. an unconstrained `max_lane: balanced` (empty match)
+  # caps everything — but it cannot target an org or user.

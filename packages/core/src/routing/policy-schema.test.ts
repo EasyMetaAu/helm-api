@@ -54,12 +54,24 @@ describe("policy-schema", () => {
   it("accepts caps-only policy (max_lane / allowed_lanes without use_lane)", () => {
     const cfg = parsePoliciesConfig({
       policies: [
-        { match: { org_id: "low_cost_org" }, max_lane: "balanced" },
-        { match: { org_id: "white_list_org" }, allowed_lanes: ["economy", "balanced"] },
+        { match: { task_type: "coding" }, max_lane: "balanced" },
+        { match: { complexity: "complex" }, allowed_lanes: ["economy", "balanced"] },
       ],
     });
     expect(cfg.policies[0]?.max_lane).toBe("balanced");
     expect(cfg.policies[1]?.allowed_lanes).toEqual(["economy", "balanced"]);
+  });
+
+  it("fail-closed: org_id / user_id are not match dimensions (.strict)", () => {
+    // Routing has no org/user scope — per-key limits live on the API KEY, not in
+    // policies. A leftover org_id/user_id policy must fail boot, never silently
+    // match-nothing (review fix #1).
+    expect(() =>
+      parsePoliciesConfig({ policies: [{ match: { org_id: "acme" }, max_lane: "balanced" }] }),
+    ).toThrow();
+    expect(() =>
+      parsePoliciesConfig({ policies: [{ match: { user_id: "vip" }, use_lane: "premium" }] }),
+    ).toThrow();
   });
 
   it("exposes inferred PoliciesConfig type via schema (compile-time)", () => {

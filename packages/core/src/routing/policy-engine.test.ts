@@ -8,8 +8,6 @@ const baseCtx: PolicyContext = {
   needs_json: false,
   needs_tools: false,
   needs_vision: false,
-  user_id: null,
-  org_id: null,
   project_id: null,
 };
 
@@ -29,14 +27,14 @@ describe("evaluatePolicies — first-match", () => {
   });
 
   it("PINs the first use_lane but ACCUMULATES caps from later matching policies", () => {
-    // First-match wins the PIN (use_lane), but a later matching cap policy
-    // (e.g. the shipped budget_org_cap, placed last) must NOT be discarded.
+    // First-match wins the PIN (use_lane), but a later matching cap-only policy
+    // (e.g. a global max_lane placed last) must NOT be discarded.
     const c = cfg([
-      { id: "chat_complex_to_premium", match: { task_type: "coding" }, use_lane: "premium" },
-      { id: "budget_org_cap", match: { complexity: "complex" }, max_lane: "balanced" },
+      { id: "coding_to_premium", match: { task_type: "coding" }, use_lane: "premium" },
+      { id: "complex_cap", match: { complexity: "complex" }, max_lane: "balanced" },
     ]);
     const out = evaluatePolicies(baseCtx, c);
-    expect(out.matched_policy_id).toBe("chat_complex_to_premium");
+    expect(out.matched_policy_id).toBe("coding_to_premium");
     expect(out.use_lane).toBe("premium");
     // the later cap policy's max_lane is accumulated.
     expect(out.max_lane).toBe("balanced");
@@ -111,22 +109,6 @@ describe("evaluatePolicies — AND semantics", () => {
   });
 });
 
-describe("evaluatePolicies — identity dimensions", () => {
-  it("matches on user_id and surfaces use_lane", () => {
-    const ctx: PolicyContext = { ...baseCtx, user_id: "vip_user" };
-    const c = cfg([{ id: "vip", match: { user_id: "vip_user" }, use_lane: "premium" }]);
-    const out = evaluatePolicies(ctx, c);
-    expect(out.matched_policy_id).toBe("vip");
-    expect(out.use_lane).toBe("premium");
-  });
-
-  it("does not match a different user_id", () => {
-    const ctx: PolicyContext = { ...baseCtx, user_id: "other" };
-    const c = cfg([{ id: "vip", match: { user_id: "vip_user" }, use_lane: "premium" }]);
-    expect(evaluatePolicies(ctx, c).matched_policy_id).toBeNull();
-  });
-});
-
 describe("evaluatePolicies — telemetry / determinism", () => {
   it("synthesizes a policy id from index when id omitted", () => {
     const c = cfg([{ match: { task_type: "coding" }, use_lane: "coding" }]);
@@ -134,11 +116,10 @@ describe("evaluatePolicies — telemetry / determinism", () => {
   });
 
   it("reason mentions the matched id and a triggering field", () => {
-    const c = cfg([{ id: "vip", match: { user_id: "x" }, use_lane: "premium" }]);
-    const ctx: PolicyContext = { ...baseCtx, user_id: "x" };
-    const out = evaluatePolicies(ctx, c);
+    const c = cfg([{ id: "vip", match: { task_type: "coding" }, use_lane: "premium" }]);
+    const out = evaluatePolicies(baseCtx, c);
     expect(out.reason).toContain("vip");
-    expect(out.reason).toContain("user_id");
+    expect(out.reason).toContain("task_type");
   });
 
   it("is deterministic across repeated calls", () => {
@@ -204,6 +185,21 @@ describe("applyCaps — allowed_lanes", () => {
     };
     // candidate economy is below all allowed -> lowest allowed = balanced
     expect(applyCaps("economy", out)).toBe("balanced");
+  });
+
+  it("clamps an unrankable (task/vendor) candidate toward balanced, not the strongest allowed", () => {
+    // review fix #3: a task lane like `coding` (or a vendor-family lane like
+    // `claude-opus`) has no cost rank, so it must degrade to balanced — never
+    // escalate to `premium` just because premium happens to be whitelisted.
+    const out = {
+      matched_policy_id: "p",
+      use_lane: null,
+      max_lane: null,
+      allowed_lanes: ["economy", "balanced", "premium"],
+      reason: "",
+    };
+    expect(applyCaps("coding", out)).toBe("balanced");
+    expect(applyCaps("claude-opus", out)).toBe("balanced");
   });
 });
 

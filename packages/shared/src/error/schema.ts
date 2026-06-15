@@ -6,7 +6,7 @@ import { z } from "zod";
 // truth (no magic numbers scattered in the gateway). Per CLAUDE.md principle 7,
 // message/provider_raw must already be redacted by the producer.
 
-// The 8 error classes from docs/07, in document order.
+// The error classes from docs/07, in document order.
 export const ErrorClassSchema = z.enum([
   "auth_error",
   "invalid_request",
@@ -16,6 +16,10 @@ export const ErrorClassSchema = z.enum([
   "upstream_error",
   "timeout",
   "rate_limited",
+  // Client-initiated disconnect during execution — NOT a provider fault. Carries
+  // the non-standard 499 the gateway already uses for client aborts, so telemetry
+  // never miscounts a disconnect as an `upstream_error` (docs/02, docs/07).
+  "client_abort",
 ]);
 
 export type ErrorClass = z.infer<typeof ErrorClassSchema>;
@@ -42,6 +46,7 @@ export const ERROR_CLASS_HTTP_STATUS: Record<ErrorClass, number> = {
   upstream_error: 502,
   timeout: 504,
   rate_limited: 429,
+  client_abort: 499,
 };
 
 // Factory: guarantees http_status matches the map; callers cannot supply a

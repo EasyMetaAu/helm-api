@@ -155,26 +155,6 @@
           {/each}
         </select>
       </label>
-
-      <label class="field">
-        <span class="field-label">{$t('User ID')}</span>
-        <input
-          class="input"
-          value={match.user_id ?? ''}
-          oninput={(e) => emitMatch({ user_id: e.currentTarget.value })}
-        />
-        <span class="field-help">{$t('Match a single end-user by their ID.')}</span>
-      </label>
-
-      <label class="field">
-        <span class="field-label">{$t('Organization ID')}</span>
-        <input
-          class="input"
-          value={match.org_id ?? ''}
-          oninput={(e) => emitMatch({ org_id: e.currentTarget.value })}
-        />
-        <span class="field-help">{$t('Match every request from one organization.')}</span>
-      </label>
     </div>
 
     <label class="checkbox-field items-start">

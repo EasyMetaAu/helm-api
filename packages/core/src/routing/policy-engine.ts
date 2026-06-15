@@ -7,16 +7,20 @@ import type { PoliciesConfig, Policy, PolicyMatch } from "./policy-schema.js";
 // consumes `PolicyOutcome`. Explicit and inspectable — no hidden magic scoring
 // (docs/04); telemetry records the single matched policy (docs/02).
 
-// Matching context: classifier result + auth identity (Auth Resolver / internal
-// request shape). All fields present; identity dims are `string | null`.
+// Matching context: classifier result + request shape. All fields present.
+// Routing is matched on task/complexity/capability only — there is intentionally
+// no org/user dimension (per-key caps live on the API key, not in policies).
 export interface PolicyContext {
   task_type: string;
-  complexity: "simple" | "medium" | "complex";
+  // null for an unclassified request (the model-alias passthrough path) so it
+  // matches no complexity-constrained policy.
+  complexity: "simple" | "medium" | "complex" | null;
   needs_json: boolean;
   needs_tools: boolean;
   needs_vision: boolean;
-  user_id: string | null;
-  org_id: string | null;
+  // Memory-scope field (client-controlled via x-project-id), NOT a trusted routing
+  // attribute — always null here (see route-request policyContext) so a caller can
+  // never spoof a project_id policy to change lane/cost.
   project_id: string | null;
 }
 
@@ -39,6 +43,11 @@ export const LANE_RANK: Record<string, number> = {
   premium: 2,
 };
 
+// Cost rank an UNRANKABLE candidate (task / vendor-family lane) is treated as when
+// clamped to an allowed_lanes whitelist — the default `balanced` tier, so it
+// degrades toward balanced instead of escalating to the strongest allowed lane.
+const UNRANKED_CANDIDATE_RANK = LANE_RANK.balanced ?? 1;
+
 const EMPTY_OUTCOME: PolicyOutcome = {
   matched_policy_id: null,
   use_lane: null,
@@ -58,8 +67,6 @@ const MATCH_FIELDS: ReadonlyArray<{
   { key: "needs_json", get: (c) => c.needs_json },
   { key: "needs_tools", get: (c) => c.needs_tools },
   { key: "needs_vision", get: (c) => c.needs_vision },
-  { key: "user_id", get: (c) => c.user_id },
-  { key: "org_id", get: (c) => c.org_id },
   { key: "project_id", get: (c) => c.project_id },
 ];
 
@@ -164,6 +171,10 @@ function lowestRankedLane(lanes: string[]): string {
 //  - allowed_lanes: if the candidate is in the whitelist, keep it; else pick the
 //    highest-ranked allowed lane that is <= the candidate's rank, otherwise the
 //    lowest-ranked allowed lane (never upgrade past what the candidate wanted).
+//    An UNRANKABLE candidate (a task lane like `coding`/`json`, or a vendor-family
+//    lane like `claude-opus`) has no cost rank, so it is clamped as if it asked for
+//    the DEFAULT tier (`balanced`) — degrading toward balanced, never escalating to
+//    the most expensive allowed lane (e.g. `premium`).
 //  - max_lane: if LANE_RANK[lane] > LANE_RANK[max_lane], drop to max_lane. An
 //    unrankable candidate is incomparable => conservatively cap to max_lane.
 export function applyCaps(lane: string, outcome: PolicyOutcome): string {
@@ -173,7 +184,9 @@ export function applyCaps(lane: string, outcome: PolicyOutcome): string {
   if (outcome.allowed_lanes != null && outcome.allowed_lanes.length > 0) {
     const allowed = outcome.allowed_lanes;
     if (!allowed.includes(result)) {
-      const candidateRank = LANE_RANK[result] ?? Number.POSITIVE_INFINITY;
+      // Unrankable (task / vendor-family) candidate => treat as the `balanced`
+      // tier so the clamp degrades toward balanced, not the strongest allowed.
+      const candidateRank = LANE_RANK[result] ?? UNRANKED_CANDIDATE_RANK;
       // Highest-ranked allowed lane whose rank is <= candidate's rank.
       let pick: string | null = null;
       let pickRank = Number.NEGATIVE_INFINITY;

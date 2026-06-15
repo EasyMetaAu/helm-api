@@ -63,8 +63,6 @@ function ctx(over: Partial<PolicyContext> = {}): PolicyContext {
     needs_json: false,
     needs_tools: false,
     needs_vision: false,
-    user_id: null,
-    org_id: null,
     project_id: null,
     ...over,
   };
@@ -81,7 +79,7 @@ function decide(c: PolicyContext): {
   const laneDecision = resolveLane({
     classification: {
       task_type: c.task_type,
-      complexity: c.complexity,
+      complexity: c.complexity ?? "medium",
       decided_by: "rules",
       constraints: {
         needs_json: c.needs_json,
