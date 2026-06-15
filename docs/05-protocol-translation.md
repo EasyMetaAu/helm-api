@@ -15,7 +15,7 @@ Four client protocols are wired and routed:
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes (SSE) and non-stream |
 | `POST /v1/messages` | Anthropic Messages | Yes (SSE) and non-stream |
 | `POST /v1/responses` | OpenAI Responses | Yes (SSE) and non-stream |
-| `POST /v1beta/models/{model}:generateContent` | Google Gemini | Yes (SSE via `:streamGenerateContent?alt=sse`) and non-stream |
+| `POST /v1beta/models/{model}:generateContent` | Google Gemini | Yes (SSE via `:streamGenerateContent`) and non-stream |
 
 **OpenAI Responses** streaming returns a native Responses SSE stream of
 `response.*` events terminated by a `response.completed` event. There is **no**
@@ -26,11 +26,16 @@ see `apps/gateway/src/routes/responses.ts` for the route.
 
 **Gemini** is mounted as a catch-all `POST /v1beta/models/:rest{.+}` (Hono can't
 match the literal `:` in `{model}:generateContent` with a named param). The core
-`parseGeminiPath` recognizes only `:generateContent` and `:streamGenerateContent`;
-any other op (`:countTokens`, `:embedContent`, …) returns a `404` in the **Gemini
-error shape**, never a generic gateway error. Auth is `x-goog-api-key` (the Gemini
-SDK default), with `Authorization: Bearer` as a fallback. Streaming via
-`:streamGenerateContent?alt=sse` emits nameless `data:` `GenerateContentResponse`
+`parseGeminiPath` recognizes `:generateContent`, `:streamGenerateContent`, and
+`:countTokens`; `:countTokens` is served (200) and returns a Gemini-shaped token
+count — either a provider-native count or a deterministic local estimate
+`{totalTokens, estimated:true}` — without routing through the generation pipeline.
+Any other op (`:embedContent`, …) returns a `404` in the **Gemini error shape**,
+never a generic gateway error. Auth is `x-goog-api-key` (the Gemini SDK default),
+with `Authorization: Bearer` as a fallback. Streaming is selected by the
+`:streamGenerateContent` operation name; `alt=sse` affects the Google wire format
+but is **not required** by the gateway — the query parameter is ignored when
+deciding stream vs. non-stream. Streaming emits nameless `data:` `GenerateContentResponse`
 frames each carrying an **incremental** text delta (matching real Gemini — clients
 accumulate `chunk.text`), with **no** `event:` name and **no** `[DONE]` sentinel;
 the terminal frame carries the completed `functionCall` parts, `finishReason`, and
@@ -84,12 +89,16 @@ correctness reference; the code is a clean reimplementation, not a copy.
   `reasoning_effort` maps to a per-protocol thinking-budget band
   (`anthropic/request.ts` `REASONING_EFFORT_TO_BUDGET` and
   `gemini/gemini-transformer.ts` `REASONING_EFFORT_BUDGET`) — Anthropic
-  `{minimal:1024, low:2048, medium:8192, high:16384}`, Gemini
+  `{none:0, minimal:1024, low:1024, medium:2048, high:4096, xhigh:8192, max:16384}`
+  (litellm parity; the previous low:2048/medium:8192/high:16384 over-budgeted 2–4×
+  and were replaced to avoid billing/latency inflation), Gemini
   `{minimal:128, low:1024, medium:8192, high:24576}`.
 - **Non-mappable knobs degrade observably, never silently**
   (`protocol/protocol-guards.ts`): guards fire **only for the Anthropic target** —
-  `n>1` is capped to 1 (`n_capped`), and `logprobs` / `top_logprobs` / `modalities`
-  are dropped with a `data_loss` warning. The `openai` and `gemini` targets are an
+  `n>1` is capped to 1 (`n_capped`), and `logprobs` / `top_logprobs` / `modalities` /
+  `frequency_penalty` / `presence_penalty` / `seed` are dropped with a `data_loss`
+  warning (Anthropic Messages has no native surface for these sampling knobs). The
+  `openai` and `gemini` targets are an
   intentional no-op: every guarded knob has a native home (Responses passes `n`
   through; Gemini maps `n` → `candidateCount`). Warnings ride
   `provider_raw.warnings` and are stripped before the wire — telemetry sees them,

@@ -1,13 +1,13 @@
 # 09 · Roadmap
 
-> Status: **shipped — 0.9.0.** The core gateway (routing, classification, provider
+> Status: **shipped — production.** The core gateway (routing, classification, provider
 > execution, protocol translation, telemetry) runs in production, and several major
 > subsystems have landed since the early releases: a memory middleware (observe +
 > inject + background workers, on by default), per-key budgets / rate limits /
 > concurrency limiting, runtime hot-reload settings with admin YAML write-back,
 > verbatim payload capture, four streaming inbound protocols, full OAuth subscription
 > providers, Agentic Signals feedback into ranked-lane routing, an admin-UI
-> overhaul, observer-economy compaction, and permanent delete of revoked keys. The
+> overhaul, auto-adaptive memory compaction, and permanent delete of revoked keys. The
 > "deferred" list below is what is genuinely still out of scope or not yet wired.
 
 ## Delivered
@@ -61,9 +61,12 @@ default of `off` to opt out (zero DB touch):
 - The `DecisionRecord` carries a redacted `memory` block (counts / ids only, never
   content). See [08 · Memory Middleware](08-memory-middleware.md).
 
-> Note: the observer / reflector / fact-extraction summarizers are currently
-> **deterministic non-LLM stubs** (concatenate + truncate). The real LLM
-> summarize / merge path is the one genuinely deferred piece of this subsystem.
+> Note: the observer / reflector / fact-extraction summarizers default to
+> **deterministic local logic** (concatenate + truncate). An optional LLM-backed
+> path (`config.memory.llm.enabled`, default `false`) calls the configured small
+> model from background jobs and falls back to the deterministic output on
+> failure, invalid JSON, or unavailable model. The `enable_llm_supersede`
+> contradiction-path remains gated and not yet wired.
 
 ### OAuth subscription providers
 
@@ -106,9 +109,6 @@ and OpenAI Codex (ChatGPT):
 
 Verified against the code and `implementation-notes.md`:
 
-- **LLM-backed memory summarization.** The observer / reflector / fact-extraction
-  paths use deterministic stubs today; swapping in a real small-model summarize +
-  merge step is the next memory milestone.
 - **Account-level credit accounting.** Per-key RPM/TPM and budgets have shipped.
   Helm is an internal/self-hosted gateway with no account/customer billing subject,
   so account-level / customer credit accounting is **out of scope** (not merely

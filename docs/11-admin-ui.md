@@ -142,9 +142,11 @@ never diverge.
   candidate chain, provider attempts, cost, error, and `trace_id`. When
   `capture_payloads` is on, the detail can load the full captured request/response
   bodies (`/admin/api/requests/:traceId/payload`). When the full request body was
-  captured and is an OpenAI-chat request (a `messages` array), the detail page
-  offers an editable **Retry** button that re-sends the (optionally edited) body
-  as an isolated, newly-traced debug re-run via the server replay endpoint.
+  captured, the detail page offers an editable **Retry** button. The server
+  recovers the original protocol (OpenAI chat, Anthropic messages, OpenAI
+  Responses, or Gemini) and re-sends the (optionally edited) body in its native
+  shape as an isolated, newly-traced debug re-run via the server replay endpoint;
+  a body that cannot be replayed returns a precise 400.
 
 ## Boundaries
 

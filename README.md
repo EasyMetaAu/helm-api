@@ -9,7 +9,7 @@
 Open-source · self-hosted · MIT
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/github/package-json/v/EasyMetaAu/helm-api)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-3c873a.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](tsconfig.base.json)
 [![Built with Hono](https://img.shields.io/badge/gateway-Hono-ff5e00.svg)](https://hono.dev)
@@ -63,16 +63,17 @@ docker compose logs helm | grep -i "root API key"
 | :---: | :--- | :--- |
 | 🔀 | **Four client protocols** | OpenAI Chat, Anthropic Messages, OpenAI Responses, Google Gemini — all streaming + non-streaming. One IR in the middle: any client reaches any backend with a consistent output shape, SSE included. |
 | 🧭 | **Three-layer classification** | Deterministic rules (pure, zero-network, unit-tested — always on) → optional small-model eval (`temperature: 0`, cached, off by default — needs a configured eval model) → `balanced` lane as the fail-open sink. |
-| 🛣️ | **Lanes + policies** | Requests route through lanes (`economy` / `balanced` / `premium`, plus task lanes `coding`, `json`, `vision`, `tool_use`), never raw provider names. First-match policies pin or cap the lane. Each lane = a primary model + a fallback chain, all in config. Opt-in Agentic Signals can promote degraded ranked lanes inside those caps. |
+| 🛣️ | **Lanes + policies** | Requests route through lanes (`economy` / `balanced` / `premium`, plus task lanes `coding`, `json`, `vision`, `tool_use`), never raw provider names. First-match policies pin or cap the lane. Each lane = a primary model + a fallback chain, all in config. Opt-in Agentic Signals can promote a degraded lane within those caps. |
+| 🪪 | **Drop-in for fixed-model clients** | A compatibility shim maps a pinned vendor model id (Claude Code's `claude-opus-4-8`, an SDK locked to `gpt-5.5`) onto a lane — so existing clients stop getting *400 unknown model* without giving up lane routing or failover. Operator-authored, works on any key. |
 | 🛡️ | **Resilient execution** | Circuit breaker (OPEN/HALF_OPEN + single probe), capability filter with explicit skip reasons, `:free`-tier 429 skipping, per-key concurrency queueing. Client disconnects are never counted as provider faults. |
 | 🔐 | **OAuth subscriptions** | Route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, all hot-reloaded. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
 | 🔑 | **Keys with teeth** | Mandatory auth; keys stored as SHA-256 hashes only. Per key: lane whitelist, custom-model permission, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, memory mode. Revoke softly, then delete permanently. |
-| 🧠 | **Memory middleware** | On by default: remembered context is injected before routing; a background worker compresses and consolidates — compaction is **auto-adaptive and zero-config** (prices and context windows resolve from the model catalog; size / idle / context-pressure triggers); a forgetting/tiering layer (decay, reinforcement, retention) keeps it honest. Opt out per key or per request (`x-memory-mode: off`). |
-| 📊 | **Total observability** | A redacted decision record per request — classifier, policy, lane, every provider attempt, latency, fallbacks, cost. Verbatim payload capture to a separate table (on by default, 30-day retention). An editable **Retry** button replays any captured request. |
+| 🧠 | **Memory middleware** | On by default: remembered context is injected before routing as a trailing turn; a background worker compresses and consolidates — compaction is **auto-adaptive and zero-config** (prices and context windows resolve from the model catalog; size / idle / context-pressure triggers). Summarize/merge default to deterministic local logic, with an **opt-in LLM path** (`config.memory.llm`, off by default). A forgetting/tiering layer (decay, reinforcement, retention) keeps it honest. Opt out per key or per request (`x-memory-mode: off`). |
+| 📊 | **Total observability** | A redacted decision record per request — classifier, policy, lane, every provider attempt, latency, fallbacks, cost. Verbatim payload capture to a separate table (on by default, 30-day retention). An editable **Retry** button replays any captured request in its own protocol. |
 | 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic: overview, key CRUD, lane/policy/classifier editors, system settings, drill-down request log. Edits **write back to `config/*.yaml`** (comment-preserving, atomic) and rebind live — no restart, and they survive one. Five languages. |
 | 💾 | **Storage** | SQLite by default (one local file). Postgres / Supabase behind the same Store-port abstraction — switch with one env var. |
 
-**Roadmap:** LLM-backed memory summarization (today's observer/reflector summarize step is a deterministic stub). Account/customer billing is intentionally out of scope. See [09 Roadmap](docs/09-roadmap.md).
+**Roadmap:** Account/customer billing is intentionally out of scope. See [09 Roadmap](docs/09-roadmap.md).
 
 ## Two failure disciplines
 
@@ -85,7 +86,7 @@ And two fallbacks that are never conflated: *classification fallback* (undecided
 
 ## Architecture
 
-Four client protocols enter one stable interface; one framework-agnostic core does the work; config drives every stage.
+Four client protocols enter one stable interface; one framework-agnostic core does the work; config drives every stage. (For the same pipeline as sequence, flow, and state diagrams, see **[Architecture & Data Flow](docs/architecture.md)**.)
 
 ```text
 CLIENT ── OpenAI · Anthropic · OpenAI Responses · Google Gemini
@@ -101,7 +102,8 @@ CORE      packages/core · the routing brain (imports no web framework)
              ├─ gate        rate limit (off) · usage budget (off)        · fail-closed
              ├─ memory      inject remembered context (on by default)    · fail-open
              ├─ classify    L1 rules ─uncertain→ L2 eval (off) ─→ balanced · fail-open
-             ├─ resolve     first-match policy → lane → caps → fallback chain
+             ├─ resolve     alias shim · explicit model · first-match policy
+             │                  └─▶ lane → caps (+ signals) → fallback chain
              ├─ execute     capability filter → circuit breaker → provider
              │                  └── on failure: advance to next model in the chain
              └─ translate   provider-native  ⇄  IR  ⇄  client protocol (streaming SSE)
@@ -126,8 +128,8 @@ helm-api/
 ├─ packages/
 │  ├─ core/      # routing, classification, providers, protocol translation, storage ports (no framework)
 │  └─ shared/    # Zod schemas + shared types (single source of truth)
-├─ config/       # default lanes / policies / classifier / providers / … YAML
-├─ docs/         # documentation (read 01 → 12)
+├─ config/       # default lanes / policies / classifier / providers / model-aliases / … YAML
+├─ docs/         # documentation (start at docs/README.md)
 └─ scripts/      # sync:catalog and other build-time tools
 ```
 
@@ -151,16 +153,18 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ |
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ✅ |
-| `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅ (via `:streamGenerateContent?alt=sse`; auth via `x-goog-api-key`) |
+| `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅ (via `:streamGenerateContent`; auth via `x-goog-api-key`) |
 
 **What to put in `model`:**
 
 | Value | What Helm does |
 |---|---|
 | `auto` *(recommended)* | Classifies the request and routes it to the best lane. |
-| a model alias, e.g. `deepseek/deepseek-v4-pro` | Uses exactly that model, skipping routing — only for keys with custom-model permission. |
+| a lane name, e.g. `premium` | Routes straight into that lane (subject to the key's lane whitelist). |
+| a pinned vendor id, e.g. `claude-opus-4-8` | The compatibility shim rewrites it onto a lane (see `config/model-aliases.yaml`) — works on any key. |
+| a concrete model alias, e.g. `deepseek/deepseek-v4-pro` | Uses exactly that model, skipping routing — only for keys with custom-model permission. |
 
-> With a standard key, routing is always automatic — just use `auto`. Lanes are operator config (`lanes.yaml` + dashboard); clients don't pick lanes per call.
+> With a standard key, just use `auto` (or a lane name) and routing is automatic. Lanes are operator config (`lanes.yaml` + dashboard); clients don't define lanes per call.
 
 **Other endpoints** (full interactive docs at `/docs`, raw spec at `/openapi.json`):
 
@@ -168,7 +172,7 @@ curl http://localhost:8080/v1/chat/completions \
 |---|---|---|
 | `GET /` · `GET /healthz` · `GET /version` | — | Landing page · readiness · build info |
 | `GET /v1/models` · `GET /v1/models/{id}` | API key | Models the key can route to (lanes + `auto`; concrete aliases with capabilities & pricing for custom-model keys) |
-| `/admin` · `/admin/api/*` | Basic auth | Dashboard + its JSON backend (mounted only when admin credentials are set) |
+| `/admin` · `/admin/api/*` | Basic auth | Dashboard + its JSON backend (mounted only when admin is enabled) |
 
 ## Configuration
 
@@ -180,10 +184,11 @@ Everything lives in `config/*.yaml`, Zod-validated on load. **Invalid config sto
 | `auth.yaml` | API key requirement + first-run root key | — |
 | `runtime.yaml` | Request limits, rate-limit defaults, storage driver, opt-in signal feedback | partial |
 | `providers.yaml` | Upstream providers + model aliases (credentials by env-var **name** only) | — |
-| `lanes.yaml` | Each lane's primary model + fallback chain | ✅ persists |
+| `lanes.yaml` | Each lane's primary model + fallback chain (quality, task, and vendor-family lanes) | ✅ persists |
 | `policies.yaml` | First-match rules that pick or cap the lane | ✅ persists |
 | `classifier.yaml` | Built-in rules + the optional eval model | ✅ persists |
-| `memory.yaml` | Forgetting/tiering knobs (on in the shipped config) + optional compaction trigger overrides (`compaction:` — size/idle/pressure thresholds; economics stay automatic). A leftover `observer:` block from older configs refuses startup | ✅ |
+| `model-aliases.yaml` | Maps a pinned vendor model id → lane / `auto` (compatibility shim, optional) | — |
+| `memory.yaml` | Forgetting/tiering knobs (on in the shipped config) · optional compaction trigger overrides (`compaction:`) · optional LLM summarizer (`llm:`, off by default). A leftover `observer:` block from older configs refuses startup | ✅ |
 | `capabilities.yaml` / `pricing.yaml` | Manual overrides on the model catalog (incl. prompt-cache read/write prices) | — |
 
 Most-used environment variables (env wins over YAML; full list in [`.env.example`](.env.example)):
@@ -229,8 +234,6 @@ pnpm dev          # admin dashboard dev server (Vite) — see note below
 pnpm test         # Vitest unit tests
 pnpm exec vitest run --coverage # unit coverage with source-only include/exclude + thresholds
 pnpm test:e2e     # Playwright end-to-end tests
-pnpm test:e2e:coverage       # protocol-focused gateway/server E2E coverage
-pnpm test:e2e:coverage:full  # full Playwright suite gateway/server E2E coverage
 pnpm typecheck    # tsc --noEmit across the workspace
 pnpm lint         # Biome
 pnpm build        # build the gateway + dashboard
@@ -247,7 +250,7 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
 
 ## Documentation
 
-Start at [`docs/README.md`](docs/README.md) and read in order:
+Start at [`docs/README.md`](docs/README.md). For a visual tour of the pipeline, read **[Architecture & Data Flow](docs/architecture.md)**. The numbered specification, in order:
 
 [01 Overview](docs/01-overview.md) ·
 [02 Architecture](docs/02-architecture.md) ·
@@ -265,7 +268,7 @@ Start at [`docs/README.md`](docs/README.md) and read in order:
 
 ## Status
 
-Helm API is at **0.9.0** — a real, end-to-end implementation, not a scaffold. The full pipeline (config → auth → classify → route → execute with circuit-breaking and fallback → protocol translation → telemetry) is wired and covered by an extensive Vitest suite plus Playwright e2e specs.
+Helm API is a real, end-to-end implementation, not a scaffold. The full pipeline (config → auth → classify → route → execute with circuit-breaking and fallback → protocol translation → telemetry → memory) is wired and covered by an extensive Vitest suite plus Playwright e2e specs. The version badge above tracks the current release.
 
 ## License
 

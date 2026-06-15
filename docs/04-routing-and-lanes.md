@@ -9,7 +9,8 @@ its ordered chain. The framework-agnostic orchestrator is `routeRequest`
 ## Lane routing priority
 
 ```text
-explicit model/lane            # client specified a concrete model/lane; skips classify + policy entirely
+model-alias shim               # operator map rewrites a fixed vendor id onto a lane / `auto`; cap-bounded
+  > explicit model/lane        # client specified a concrete model/lane; skips classify + policy entirely
   > classifier short-circuit   # decided_by 'default' | 'fallback' → straight to balanced (classified branch only)
   > server-side policy         # a policy pin (use_lane)
   > task-specific lane         # a lane named after the detected task_type
@@ -18,7 +19,10 @@ explicit model/lane            # client specified a concrete model/lane; skips c
   > balanced                   # final default
 ```
 
-Explicit model/lane passthrough is the **priority-0** short-circuit: a request
+The **model-alias compatibility shim** runs first (priority 0); see
+[Model-alias compatibility shim](#model-alias-compatibility-shim) below.
+
+Explicit model/lane passthrough is the next short-circuit: a request
 that names a concrete model or lane (gated by `allow_custom_model`, and
 suppressed while degrading) skips classification and policy entirely and is
 executed directly, so the classifier never runs for it.
@@ -40,6 +44,44 @@ lane (`economy` or `balanced`) to a stronger ranked lane with healthier aggregat
 success/error/fallback rates. It never runs on explicit passthrough,
 classifier-default/fallback, policy `use_lane` pins, or over-budget degradation,
 and it never escapes policy/key caps.
+
+### Model-alias compatibility shim
+
+Before any passthrough gate, `plan()` runs a **priority-0** model-alias
+resolution step (route-request.ts steps 0 / 0a). Clients that pin a **fixed
+vendor model id** — Claude Code's `claude-opus-4-8`, or an SDK locked to
+`gpt-5.5` — know neither Helm's lanes nor its provider aliases, so left alone
+they would get a `400 unknown model`. The shim rewrites that inbound `model`
+field onto a lane (or the `auto` sentinel) **before** routing, so a fixed-model
+client routes cleanly while Helm still only exposes the lane abstraction
+(principle 6 — the literal vendor id is never sent upstream).
+
+The map is [`config/model-aliases.yaml`](../config/model-aliases.yaml): a flat
+table of vendor model id → a lane name or `auto`. Keys are glob-matchable and
+**case-sensitive** — an exact key wins, otherwise the matching `*`-glob with the
+most literal characters wins (so `claude-opus-*` beats `claude-*` regardless of
+order; `*` absorbs any date/suffix). Targets are boot-validated to a configured
+lane or `auto` (fail-closed, principle 2); the file is optional — delete it for
+no rewrite.
+
+Unlike explicit passthrough, the shim is **operator-authorized**, not
+client-authorized:
+
+1. It runs **before** the `allow_custom_model` gate and does **not** require
+   `allow_custom_model` on the key — a standard key routes through it too,
+   because the operator authorized the rewrite by configuring the map.
+2. It is **cap-bounded**, not a bypass. Identity-scoped policy caps (org/user
+   `max_lane` / `allowed_lanes`) and the key's own `allowed_lanes` whitelist
+   both still clamp the resolved lane. The clamp is **silent** (the same
+   `applyCaps` path classified routing uses), **not** the loud `invalid_request`
+   reject an explicit forbidden-lane ask gets — so a standard key can never use
+   an operator alias to escape a cap it would otherwise be bound by.
+   (Task/complexity-scoped policies do not fire here: an alias request is not
+   classified.)
+3. It is **suppressed while the key is over-budget/degrading** — the request
+   falls through to the forced degrade lane (docs/06), no bypass.
+4. An alias that maps **to `auto`** does not passthrough the literal vendor id;
+   it falls through to classification, letting the router decide per request.
 
 ### Explicit client model
 
@@ -140,6 +182,28 @@ If no task-specific lane is configured, the resolver falls back to the three
 quality/cost lanes by complexity (`simple → economy`, `medium → balanced`,
 `complex → premium`).
 
+### Vendor-family lanes
+
+Beyond the 7 generic lanes above, `config/lanes.yaml` ships **9 vendor-family
+lanes** — the rewrite targets of the [model-alias compatibility
+shim](#model-alias-compatibility-shim):
+
+```text
+claude-opus   claude-fable   claude-sonnet   claude-haiku
+gpt-5.5       gpt-5.4        gpt-5.4-mini
+gemini-pro    gemini-flash
+```
+
+(16 lanes total.) These exist so a client that pins a fixed vendor id lands on
+that family's real model instead of the GPT-led `premium` lane. Each one
+**leads with the requested vendor's native/subscription alias** — the Claude
+lanes with the `anthropic/*` Claude OAuth pool, the GPT lanes with the
+`openai-codex/*` subscription, the Gemini lanes with the static `zenmux/*` key —
+then **degrades into a generic quality lane** (e.g. `claude-opus → premium`,
+`gpt-5.4-mini → economy`). An unconnected subscription alias **fails OPEN** (skip
+to the next fallback), never a 5xx, so an unbound subscription just serves the
+request from the generic-lane backing.
+
 ### Provider mix and the `*/auto` tail
 
 The cheap and default lanes anchor on the **always-available** official
@@ -152,7 +216,7 @@ backed by a static fallback so the lane **degrades gracefully**: an unconnected
 The `*/auto` aliases (`zenmux/auto`, `openrouter/auto`) sit only at the **tail of
 the `balanced` chain** — every other lane reaches them by falling through to
 `balanced`, not by carrying its own auto tail. Those auto aliases are
-deliberately JSON-incapable in the catalog (`supports_json_schema: false`), so a
+deliberately JSON-incapable in the catalog (`supportsJsonMode: false`), so a
 strict-JSON request prunes them via the Capability Filter and lands on a
 deterministic JSON-capable model — proving the filter fires on the default
 config.

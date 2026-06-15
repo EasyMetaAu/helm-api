@@ -13,13 +13,23 @@
 > job. This is the single inertness guarantee; the rest of the doc assumes the flag
 > is **on** unless it says otherwise.
 >
-> **Deterministic stubs, not LLM yet.** The fact extractor and the
-> reflection-merge/summarize behind the Observer/Reflector interfaces are
-> **deterministic MVP stubs** (docs/08): one candidate fact per active observation,
-> subject = its first tag (else a 6-word slug of the leading words), assertion = the
-> observation text. They are genuinely live when the flag is on, but the real LLM
-> summarize / merge / atomize path stays the deferred piece — don't read the tier
-> diagram as evidence of LLM-grade extraction quality.
+> **Deterministic by default; optional LLM memory-formation path ships behind
+> `config.memory.llm`.** The fact extractor and the reflection-merge/summarize
+> behind the Observer/Reflector interfaces are **deterministic** by default
+> (docs/08): one candidate fact per active observation, subject = its first tag
+> (else a 6-word slug of the leading words), assertion = the observation text. That
+> deterministic path is the **default** and the **fail-open fallback** — it is
+> genuinely live when the flag is on. On top of it, an **optional LLM-backed
+> summarize / merge / fact-extract path now exists and is fully wired**:
+> `MemoryLlmSchema` (`config.memory.llm`) drives `createMemoryLlmRuntime`
+> (`apps/gateway/src/memory-llm.ts`), whose real `summarize` / `merge` /
+> `extractFacts` are plugged into the Observer/Reflector deps in `server.ts`. It is
+> **off by default** (`enabled: false`) and any disabled-or-failed model call falls
+> back to the deterministic stubs, so it is implemented and configurable, not
+> deferred — don't read the tier diagram as a promise of LLM-grade extraction
+> quality unless that path is enabled. The only memory-formation piece still gated
+> and unimplemented is the `enable_llm_supersede` contradiction path
+> (`z.literal(false)` — setting it `true` refuses startup).
 
 ## Where it lives (spec → code)
 
@@ -29,7 +39,7 @@
 | Sweep job (archive / consolidate / supersede) | `packages/core/src/memory/forgetting/decay.ts` → `runDecayJob` |
 | Buffer-flush "should the sweep run" gate | `packages/core/src/memory/decay-trigger.ts` |
 | Retention (tombstone obs / hard-delete facts) | `packages/core/src/memory/forgetting/retention.ts` → `pruneRetainedMemory` |
-| Deterministic fact-extractor stub | `extractFactsFromObservations` in `apps/gateway/src/server.ts` |
+| Deterministic fact-extractor stub | `extractFactsDeterministic` in `apps/gateway/src/memory-llm.ts` (surfaced via `createMemoryLlmRuntime().extractFacts`, wired into the Reflector in `apps/gateway/src/server.ts`) |
 | Scheduler dispatch (`type='decay'`) + sweep `onTick` | `startMemoryWorker` wiring in `apps/gateway/src/server.ts` |
 | Config schema (snake_case, `.strict()`) | `packages/shared/src/config/memory-schema.ts` (`ForgettingSchema`; re-exported from `config/schema.ts`) |
 | Migration v18 + Zod row deltas | `packages/core/src/store/sqlite/migrate.ts`, `packages/shared/src/memory/schema.ts` |
@@ -548,7 +558,7 @@ shippable and gated.
 | **P3** | Reinforcement hook `bumpReferences({accountId, ids})` (gated) | bumps only when enabled; a throwing `bumpReferences` does not change returned `messages` (fail-open); only rows of the request's `accountId` are bumped. With flag off, `inject.ts` byte-identical. |
 | **P4** | Score-driven inject trim (gated) | under `score`, a high-`reference_count` old observation outlives a never-referenced newer one; comparator throw → oldest-first fallback. Legacy `oldest` path unchanged. |
 | **P5** | Extend `MemoryJobTypeSchema` with `decay` + scheduler dispatch + `runDecayJob` sweep (gated, off hot path) | **`MemoryJobTypeSchema.parse('decay')` succeeds and the scheduler routes it to `runDecayJob`**; `decay` job dedupe/enqueue works; archives only sub-threshold active rows of one account; never `recent_raw`; idempotent re-run; bounded loop (iterations / wallclock / consecutive-errors). |
-| **P6** | Fact extraction + supersede (gated, deterministic stub). Reflector reads **active observations only**; the deterministic `extractFactsFromObservations` extractor is wired in `server.ts` so the pipeline is live when enabled (pg insert+supersede in one transaction) | identical fact within an account → idempotent skip (`UNIQUE(owner_id, content_hash)`); newer same-`(owner_id, subject_key)` fact → old `expired_at` stamped; reads filter `owner_id = :accountId AND expired_at IS NULL`; an **archived/pruned observation is excluded from the merge + extraction**. Reflector versioning tests unchanged. |
+| **P6** | Fact extraction + supersede (gated, deterministic stub). Reflector reads **active observations only**; the deterministic `extractFactsDeterministic` extractor (in `apps/gateway/src/memory-llm.ts`, surfaced via `createMemoryLlmRuntime().extractFacts`) is wired into the Reflector in `server.ts` so the pipeline is live when enabled (pg insert+supersede in one transaction) | identical fact within an account → idempotent skip (`UNIQUE(owner_id, content_hash)`); newer same-`(owner_id, subject_key)` fact → old `expired_at` stamped; reads filter `owner_id = :accountId AND expired_at IS NULL`; an **archived/pruned observation is excluded from the merge + extraction**. Reflector versioning tests unchanged. |
 | **P7** | Retention (rare): observations **tombstoned** (`status='pruned'`, text freed, coverage kept); facts **hard-deleted** | tombstone keeps the row + `sourceMessageRange` visible to coverage reads (raw stays covered after prune); facts are the only `DELETE`; never touches `active` or recently-aged rows. |
 | **P8** | Hybrid fact retrieval (gated, own flag) — sqlite-vec/pgvector + FTS5 + forgetting-score, fused with RRF(k=60) | RRF fusion is order-stable and scale-free on a fixture; a superseded/archived fact never surfaces; empty/failed recall → request proceeds with the v1 prefix (fail-open); retrieved facts get the reinforcement bump. |
 
