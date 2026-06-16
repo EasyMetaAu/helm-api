@@ -737,6 +737,58 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(empty.byModel).toEqual([]);
     });
 
+    // Offset-aware bucketing — the "8am boundary" fix. The SAME rows bucket
+    // differently by the client's UTC offset: a row at 22:00 UTC day-19 sits in the
+    // day-19 UTC bucket, but in the LOCAL day-20 bucket for a UTC+8 (+480) client
+    // (it is 06:00 local on day 20). Runs against BOTH adapters so the
+    // shift-floor-unshift math stays identical across sqlite + pg, and the in-memory
+    // mock mirrors it. Hand-checkable: three rows straddling a UTC midnight.
+    it("aggregate buckets the series in the client's local day (tzOffsetMinutes)", async () => {
+      ctx = await make();
+      const DAY = 86_400_000;
+      const HOUR = 3_600_000;
+      const OFFSET = 480; // UTC+8
+      const offsetMs = OFFSET * 60_000; // 8h
+      const d20 = 20 * DAY; // a UTC-midnight-aligned epoch ms
+      const tok = (id: string, atMs: number, prompt: number) =>
+        ctx.stores.telemetry.insert({
+          decision: decision(id, {
+            usage: {
+              prompt_tokens: prompt,
+              completion_tokens: 0,
+              cached_tokens: null,
+              cache_creation_tokens: null,
+            },
+          }),
+          apiKeyId: "k1",
+          createdAt: new Date(atMs),
+        });
+      // C: 14:00 UTC day-19 → 22:00 local day-19. B: 22:00 UTC day-19 → 06:00 local
+      // day-20. A: 01:00 UTC day-20 → 09:00 local day-20.
+      await tok("c", d20 - 10 * HOUR, 7);
+      await tok("b", d20 - 2 * HOUR, 50);
+      await tok("a", d20 + 1 * HOUR, 100);
+      const start = 19 * DAY;
+      const end = 21 * DAY;
+
+      // UTC (offset 0 = legacy default): B groups with C in the day-19 UTC bucket.
+      const utc = await ctx.stores.telemetry.aggregate(start, end, "day", 0);
+      expect(utc.series.map((s) => [s.bucketStartMs, s.promptTokens])).toEqual([
+        [19 * DAY, 57], // C(7) + B(50)
+        [20 * DAY, 100], // A
+      ]);
+
+      // UTC+8: B moves to the LOCAL day-20 bucket with A; buckets floor to local
+      // midnight (= UTC midnight − 8h).
+      const local = await ctx.stores.telemetry.aggregate(start, end, "day", OFFSET);
+      expect(local.series.map((s) => [s.bucketStartMs, s.promptTokens])).toEqual([
+        [19 * DAY - offsetMs, 7], // C alone (local day-19)
+        [20 * DAY - offsetMs, 150], // B(50) + A(100) (local day-20)
+      ]);
+      // Totals are window-wide and offset-independent.
+      expect(local.totals.promptTokens).toBe(157);
+    });
+
     // queryPage drives the admin Debug list: numbered pagination + the error/role
     // filters. This runs against BOTH adapters so the JSON-path filtering (sqlite
     // json_extract vs postgres jsonb ->>) is verified against real engines.

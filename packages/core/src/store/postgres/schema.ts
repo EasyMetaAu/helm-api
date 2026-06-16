@@ -278,23 +278,25 @@ export const oauthTokens = pgTable(
 );
 
 // Per-account OAuth subscription USAGE aggregate (providers page Tier 2) — pg
-// mirror of the sqlite oauth_usage table. Additive daily counters per
-// (provider_id, account, day); day = UTC-midnight epoch ms (bigint). cost_usd
-// double precision nullable (flat-rate plans report no cost). Pure aggregate
-// observability — no key/payload column (principle 7).
+// mirror of the sqlite oauth_usage table. Additive counters per (provider_id,
+// account, bucket_ms); bucket_ms = UTC-HOUR floor epoch ms (bigint) — hour
+// granularity so the providers page rolls usage up by the ADMIN's LOCAL day at read
+// time (the gateway is tz-agnostic at write time). cost_usd double precision
+// nullable (flat-rate plans report no cost). Pure aggregate observability — no
+// key/payload column (principle 7).
 export const oauthUsage = pgTable(
   "oauth_usage",
   {
     providerId: text("provider_id").notNull(),
     account: text("account").notNull(),
-    day: bigint("day", { mode: "number" }).notNull(), // UTC-midnight epoch ms
+    bucketMs: bigint("bucket_ms", { mode: "number" }).notNull(), // UTC-hour floor epoch ms
     requests: integer("requests").notNull(),
     tokens: bigint("tokens", { mode: "number" }).notNull(),
     costUsd: doublePrecision("cost_usd"), // nullable; summed completion cost
     firstSeenMs: bigint("first_seen_ms", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [primaryKey({ columns: [t.providerId, t.account, t.day] })],
+  (t) => [primaryKey({ columns: [t.providerId, t.account, t.bucketMs] })],
 );
 
 // Per-account OAuth subscription QUOTA snapshot (providers page Tier 3) — pg

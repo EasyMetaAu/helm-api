@@ -21,8 +21,9 @@ afterEach(() => {
 
 // Seed a pre-v21 DB on disk (two connections can't share ":memory:") with the
 // v1–v20 ledger marked applied so createSqliteDb runs ONLY v21. v22 (telemetry
-// token columns) is also pre-marked: this fixture never creates telemetry, so the
-// ALTER would fail — keep the test scoped to the v21 message-dedup upgrade.
+// token columns) and v23 (oauth_usage day→bucket_ms rename) are also pre-marked:
+// this fixture never creates telemetry nor oauth_usage, so those ALTER/RENAMEs would
+// fail — keep the test scoped to the v21 message-dedup upgrade.
 function seedPreV21(): string {
   const dir = mkdtempSync(join(tmpdir(), "helm-dedup-"));
   dirs.push(dir);
@@ -32,6 +33,7 @@ function seedPreV21(): string {
   const ins = raw.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, 1)");
   for (let v = 1; v <= 20; v += 1) ins.run(v);
   ins.run(22);
+  ins.run(23);
   raw.exec(`
     CREATE TABLE memory_messages (
       id TEXT PRIMARY KEY,

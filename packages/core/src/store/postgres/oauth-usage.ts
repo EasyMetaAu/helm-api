@@ -1,10 +1,8 @@
 import { type OAuthUsageRow, OAuthUsageRowSchema } from "@helm/shared";
-import { eq, sql } from "drizzle-orm";
+import { and, gte, lt, sql } from "drizzle-orm";
 import type { OAuthUsageStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import { oauthUsage } from "./schema.js";
-
-type UsageRow = typeof oauthUsage.$inferSelect;
 
 // Postgres adapter for the OAuthUsageStore port (providers page Tier 2) — the
 // supabase mirror of the sqlite adapter. Additive upsert per (provider_id,
@@ -16,7 +14,7 @@ export class PgOAuthUsageStore implements OAuthUsageStore {
   async record(input: {
     providerId: string;
     account: string;
-    dayMs: number;
+    bucketMs: number;
     tokens: number;
     costUsd: number | null;
     nowMs: number;
@@ -26,7 +24,7 @@ export class PgOAuthUsageStore implements OAuthUsageStore {
       .values({
         providerId: input.providerId,
         account: input.account,
-        day: input.dayMs,
+        bucketMs: input.bucketMs,
         requests: 1,
         tokens: input.tokens,
         costUsd: input.costUsd,
@@ -34,7 +32,7 @@ export class PgOAuthUsageStore implements OAuthUsageStore {
         updatedAt: input.nowMs,
       })
       .onConflictDoUpdate({
-        target: [oauthUsage.providerId, oauthUsage.account, oauthUsage.day],
+        target: [oauthUsage.providerId, oauthUsage.account, oauthUsage.bucketMs],
         set: {
           requests: sql`${oauthUsage.requests} + 1`,
           tokens: sql`${oauthUsage.tokens} + ${input.tokens}`,
@@ -47,21 +45,49 @@ export class PgOAuthUsageStore implements OAuthUsageStore {
       });
   }
 
-  async queryDay(dayMs: number): Promise<OAuthUsageRow[]> {
-    const rows = await this.db.select().from(oauthUsage).where(eq(oauthUsage.day, dayMs));
+  // Roll the per-hour buckets up to per-(provider, account) totals over [startMs,
+  // endMs) — pg mirror of the sqlite adapter. SUM(cost_usd) is intrinsically
+  // null-aware (NULL only when every row is unpriced). firstSeenMs = MIN, updatedAt
+  // = MAX. Contract-tested for parity with sqlite.
+  async queryRange(startMs: number, endMs: number): Promise<OAuthUsageRow[]> {
+    const rows = await this.db
+      .select({
+        providerId: oauthUsage.providerId,
+        account: oauthUsage.account,
+        requests: sql<number>`COALESCE(SUM(${oauthUsage.requests}), 0)`,
+        tokens: sql<number>`COALESCE(SUM(${oauthUsage.tokens}), 0)`,
+        costUsd: sql<number | null>`SUM(${oauthUsage.costUsd})`,
+        firstSeenMs: sql<number>`MIN(${oauthUsage.firstSeenMs})`,
+        updatedAt: sql<number>`MAX(${oauthUsage.updatedAt})`,
+      })
+      .from(oauthUsage)
+      .where(and(gte(oauthUsage.bucketMs, startMs), lt(oauthUsage.bucketMs, endMs)))
+      .groupBy(oauthUsage.providerId, oauthUsage.account);
     return rows.map((r) => this.toRow(r));
   }
 
-  private toRow(row: UsageRow): OAuthUsageRow {
+  // Aggregated row -> OAuthUsageRow. pg marshals SUM()/MIN()/MAX() over bigint as
+  // STRINGS (avoids 2^53 loss), so Number() normalizes the integer counters;
+  // cost_usd is double precision (number|null). Re-validates through the shared
+  // schema so a corrupted row surfaces loudly.
+  private toRow(row: {
+    providerId: string;
+    account: string;
+    requests: unknown;
+    tokens: unknown;
+    costUsd: unknown;
+    firstSeenMs: unknown;
+    updatedAt: unknown;
+  }): OAuthUsageRow {
+    const num = (v: unknown): number => (v == null ? 0 : Number(v));
     return OAuthUsageRowSchema.parse({
       providerId: row.providerId,
       account: row.account,
-      day: row.day,
-      requests: row.requests,
-      tokens: row.tokens,
-      costUsd: row.costUsd,
-      firstSeenMs: row.firstSeenMs,
-      updatedAt: row.updatedAt,
+      requests: num(row.requests),
+      tokens: num(row.tokens),
+      costUsd: row.costUsd == null ? null : Number(row.costUsd),
+      firstSeenMs: num(row.firstSeenMs),
+      updatedAt: num(row.updatedAt),
     });
   }
 }

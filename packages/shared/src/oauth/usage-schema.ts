@@ -6,24 +6,25 @@ import { z } from "zod";
 // never 5xx a chat request nor break the admin page (CLAUDE.md Principle 3).
 // Single source of truth via z.infer.
 
-// ── Usage (Tier 2): today's served traffic per (provider, account) ───────────
+// ── Usage (Tier 2): served traffic per (provider, account) over a window ──────
 
-// One daily aggregate row, keyed by (providerId, account, day). `day` is the
-// UTC-midnight epoch-ms the traffic fell on. `requests` counts served calls;
-// `tokens` is the total served tokens (prompt+completion, summed across calls);
-// `costUsd` is the summed completion cost — NULLABLE because subscription plans
-// are flat-rate (no per-token price), so null = "unpriced", distinct from a
-// measured 0. `firstSeenMs` anchors the daily-average RPM derivation.
+// One usage row ROLLED UP over a query window (the providers page reads the admin's
+// local day). The store keeps finer per-hour buckets internally; `queryRange` sums
+// them per (providerId, account), so this shape carries NO bucket field. `requests`
+// counts served calls; `tokens` is the total served tokens (prompt+completion,
+// summed across calls); `costUsd` is the summed completion cost — NULLABLE because
+// subscription plans are flat-rate (no per-token price), so null = "unpriced",
+// distinct from a measured 0. `firstSeenMs` (MIN over the window) anchors the
+// daily-average RPM derivation; `updatedAt` is the latest write (MAX) in the window.
 export const OAuthUsageRowSchema = z
   .object({
     providerId: z.string(),
     account: z.string(),
-    day: z.number().int(), // UTC-midnight epoch ms
     requests: z.number().int().nonnegative(),
     tokens: z.number().int().nonnegative(),
     costUsd: z.number().nullable(),
-    firstSeenMs: z.number().int(), // epoch ms of the day's first served call
-    updatedAt: z.number().int(), // epoch ms of the last write
+    firstSeenMs: z.number().int(), // epoch ms of the window's first served call
+    updatedAt: z.number().int(), // epoch ms of the latest write in the window
   })
   .strict();
 

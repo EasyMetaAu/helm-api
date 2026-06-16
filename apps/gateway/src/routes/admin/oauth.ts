@@ -92,16 +92,25 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     return c.json({ providers: await s.listStatus() });
   });
 
-  // GET /oauth/usage -> today's per-account served traffic (providers page Tier 2).
-  // FAIL-OPEN: an absent store / read failure yields [] (the page renders zeros) —
-  // an observability read must never break the page. RPM is the daily AVERAGE
-  // (requests / minutes since the day's first served call), derived here so the
-  // store stays a plain counter. No secrets — aggregate counters only (principle 7).
+  // GET /oauth/usage?tzOffsetMinutes -> today's per-account served traffic (providers
+  // page Tier 2). FAIL-OPEN: an absent store / read failure yields [] (the page
+  // renders zeros) — an observability read must never break the page. "Today" is the
+  // ADMIN's LOCAL day: the browser sends its UTC offset (east-positive minutes) and
+  // we roll the per-hour buckets up over [local-midnight, +24h) in UTC. A missing /
+  // out-of-range offset fails open to 0 (UTC day). RPM is the daily AVERAGE (requests
+  // / minutes since the day's first served call), derived here so the store stays a
+  // plain counter. No secrets — aggregate counters only (principle 7).
   app.get("/admin/api/oauth/usage", async (c) => {
     const store = deps.oauthUsage;
     if (!store) return c.json({ usage: [] });
     const now = Date.now();
-    const dayMs = now - (now % 86_400_000); // UTC midnight (epoch ms is UTC)
+    // Fail-open tz offset (east-positive minutes; UTC-12 … UTC+14). Then floor to the
+    // viewer's local midnight and express that boundary back in UTC for the query.
+    const rawTz = Number(c.req.query("tzOffsetMinutes"));
+    const tzOffsetMinutes = Number.isInteger(rawTz) && rawTz >= -720 && rawTz <= 840 ? rawTz : 0;
+    const offsetMs = tzOffsetMinutes * 60_000;
+    const start = now + offsetMs - ((now + offsetMs) % 86_400_000) - offsetMs;
+    const end = start + 86_400_000;
     // Restrict to currently-bound accounts (listStatus = the OAuth tokens) so a
     // renamed / re-bound account does NOT linger as a phantom usage row — the same
     // guard the /quota route applies. Fail-open: no seam / a listing failure leaves
@@ -118,7 +127,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       }
     }
     try {
-      const rows = await store.queryDay(dayMs);
+      const rows = await store.queryRange(start, end);
       const usage = rows
         .filter((r) => !bound || bound.has(usageKey(r.providerId, r.account)))
         .map((r) => {

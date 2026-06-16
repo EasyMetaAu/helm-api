@@ -7,18 +7,21 @@ import { PgOAuthUsageStore } from "./oauth-usage.js";
 // supabase == hosted Postgres; pglite runs the SAME pg-dialect adapters in-process
 // so this validates the supabase path (incl. the null-aware cost CASE + LEAST) with
 // no server.
-const D1 = Date.UTC(2026, 5, 3);
-const T0 = D1 + 60_000;
-const T1 = D1 + 5 * 60_000;
+const HOUR = 3_600_000;
+const H0 = Date.UTC(2026, 5, 3, 0); // an hour floor
+const H1 = Date.UTC(2026, 5, 3, 1);
+const T0 = H0 + 60_000;
+const T1 = H0 + 5 * 60_000;
 
 describe("PgOAuthUsageStore (pglite)", () => {
-  it("record folds served calls into one additive daily row", async () => {
+  it("queryRange rolls per-hour buckets up per account (and coerces pg's string SUMs)", async () => {
     const db: PgDb = await createPgliteDb();
     const store = new PgOAuthUsageStore(db);
+    // Two calls in hour H0 + one in hour H1; all inside [H0, H0+2h).
     await store.record({
       providerId: "anthropic",
       account: "a",
-      dayMs: D1,
+      bucketMs: H0,
       tokens: 100,
       costUsd: 0.01,
       nowMs: T0,
@@ -26,15 +29,49 @@ describe("PgOAuthUsageStore (pglite)", () => {
     await store.record({
       providerId: "anthropic",
       account: "a",
-      dayMs: D1,
+      bucketMs: H0,
       tokens: 250,
       costUsd: 0.02,
       nowMs: T1,
     });
-    const rows = await store.queryDay(D1);
+    await store.record({
+      providerId: "anthropic",
+      account: "a",
+      bucketMs: H1,
+      tokens: 30,
+      costUsd: null,
+      nowMs: H1 + 60_000,
+    });
+    const rows = await store.queryRange(H0, H0 + 2 * HOUR);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ requests: 2, tokens: 350, firstSeenMs: T0 });
+    // Numbers, not pg's bigint strings — toRow must coerce with Number().
+    expect(rows[0]).toMatchObject({ requests: 3, tokens: 380, firstSeenMs: T0 });
     expect(rows[0]?.costUsd).toBeCloseTo(0.03, 6);
+    await db.$close();
+  });
+
+  it("excludes hour buckets outside the window", async () => {
+    const db: PgDb = await createPgliteDb();
+    const store = new PgOAuthUsageStore(db);
+    await store.record({
+      providerId: "anthropic",
+      account: "a",
+      bucketMs: H0 - HOUR, // before the window
+      tokens: 999,
+      costUsd: 9,
+      nowMs: H0 - HOUR + 1000,
+    });
+    await store.record({
+      providerId: "anthropic",
+      account: "a",
+      bucketMs: H0,
+      tokens: 5,
+      costUsd: null,
+      nowMs: T0,
+    });
+    const rows = await store.queryRange(H0, H0 + HOUR);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ requests: 1, tokens: 5 });
     await db.$close();
   });
 
@@ -44,21 +81,21 @@ describe("PgOAuthUsageStore (pglite)", () => {
     await store.record({
       providerId: "openai-codex",
       account: "a",
-      dayMs: D1,
+      bucketMs: H0,
       tokens: 10,
       costUsd: null,
       nowMs: T0,
     });
-    expect((await store.queryDay(D1))[0]?.costUsd).toBeNull();
+    expect((await store.queryRange(H0, H0 + HOUR))[0]?.costUsd).toBeNull();
     await store.record({
       providerId: "openai-codex",
       account: "a",
-      dayMs: D1,
+      bucketMs: H0,
       tokens: 10,
       costUsd: 0.05,
       nowMs: T1,
     });
-    expect((await store.queryDay(D1))[0]?.costUsd).toBeCloseTo(0.05, 6);
+    expect((await store.queryRange(H0, H0 + HOUR))[0]?.costUsd).toBeCloseTo(0.05, 6);
     await db.$close();
   });
 });

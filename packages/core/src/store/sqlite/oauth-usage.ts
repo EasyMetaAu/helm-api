@@ -1,10 +1,8 @@
 import { type OAuthUsageRow, OAuthUsageRowSchema } from "@helm/shared";
-import { eq, sql } from "drizzle-orm";
+import { and, gte, lt, sql } from "drizzle-orm";
 import type { OAuthUsageStore } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
 import { oauthUsage } from "./schema.js";
-
-type UsageRow = typeof oauthUsage.$inferSelect;
 
 // SQLite adapter for the OAuthUsageStore port (providers page Tier 2). One row per
 // (provider_id, account, day); `record` is an additive upsert via the composite
@@ -17,7 +15,7 @@ export class SqliteOAuthUsageStore implements OAuthUsageStore {
   async record(input: {
     providerId: string;
     account: string;
-    dayMs: number;
+    bucketMs: number;
     tokens: number;
     costUsd: number | null;
     nowMs: number;
@@ -27,7 +25,7 @@ export class SqliteOAuthUsageStore implements OAuthUsageStore {
       .values({
         providerId: input.providerId,
         account: input.account,
-        day: input.dayMs,
+        bucketMs: input.bucketMs,
         requests: 1,
         tokens: input.tokens,
         costUsd: input.costUsd,
@@ -35,7 +33,7 @@ export class SqliteOAuthUsageStore implements OAuthUsageStore {
         updatedAt: input.nowMs,
       })
       .onConflictDoUpdate({
-        target: [oauthUsage.providerId, oauthUsage.account, oauthUsage.day],
+        target: [oauthUsage.providerId, oauthUsage.account, oauthUsage.bucketMs],
         set: {
           requests: sql`${oauthUsage.requests} + 1`,
           tokens: sql`${oauthUsage.tokens} + ${input.tokens}`,
@@ -51,18 +49,44 @@ export class SqliteOAuthUsageStore implements OAuthUsageStore {
       .run();
   }
 
-  async queryDay(dayMs: number): Promise<OAuthUsageRow[]> {
-    const rows = this.db.select().from(oauthUsage).where(eq(oauthUsage.day, dayMs)).all();
+  // Roll the per-hour buckets up to per-(provider, account) totals over the
+  // half-open window [startMs, endMs). SUM(cost_usd) is intrinsically null-aware in
+  // SQL — it ignores NULL inputs and returns NULL only when EVERY row is unpriced,
+  // so "unpriced" stays distinct from a measured 0. firstSeenMs is the MIN across
+  // the window (anchors RPM); updatedAt is the latest write (MAX). The GROUP BY
+  // emits a row per account that had any traffic in the window.
+  async queryRange(startMs: number, endMs: number): Promise<OAuthUsageRow[]> {
+    const rows = this.db
+      .select({
+        providerId: oauthUsage.providerId,
+        account: oauthUsage.account,
+        requests: sql<number>`COALESCE(SUM(${oauthUsage.requests}), 0)`,
+        tokens: sql<number>`COALESCE(SUM(${oauthUsage.tokens}), 0)`,
+        costUsd: sql<number | null>`SUM(${oauthUsage.costUsd})`,
+        firstSeenMs: sql<number>`MIN(${oauthUsage.firstSeenMs})`,
+        updatedAt: sql<number>`MAX(${oauthUsage.updatedAt})`,
+      })
+      .from(oauthUsage)
+      .where(and(gte(oauthUsage.bucketMs, startMs), lt(oauthUsage.bucketMs, endMs)))
+      .groupBy(oauthUsage.providerId, oauthUsage.account)
+      .all();
     return rows.map((r) => this.toRow(r));
   }
 
-  // Row -> OAuthUsageRow. Re-validates through the shared schema so a corrupted
-  // row surfaces loudly rather than leaking a malformed shape.
-  private toRow(row: UsageRow): OAuthUsageRow {
+  // Aggregated row -> OAuthUsageRow. Re-validates through the shared schema so a
+  // corrupted row surfaces loudly rather than leaking a malformed shape.
+  private toRow(row: {
+    providerId: string;
+    account: string;
+    requests: number;
+    tokens: number;
+    costUsd: number | null;
+    firstSeenMs: number;
+    updatedAt: number;
+  }): OAuthUsageRow {
     return OAuthUsageRowSchema.parse({
       providerId: row.providerId,
       account: row.account,
-      day: row.day,
       requests: row.requests,
       tokens: row.tokens,
       costUsd: row.costUsd,

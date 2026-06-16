@@ -460,6 +460,21 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS served_model TEXT;
     `,
   },
+  {
+    // Timezone-aware OAuth usage — pg mirror of the sqlite v23 migration. Rebucket
+    // from UTC-DAY to UTC-HOUR so the providers page rolls usage up by the ADMIN's
+    // LOCAL day at read time (the gateway is tz-agnostic at write time). Pure rename;
+    // existing daily rows (UTC-midnight) remain valid hour-floor values (the 00:00
+    // UTC bucket), losing only their intra-day distribution (observability artifact).
+    version: 22,
+    sql: `
+      ALTER TABLE oauth_usage RENAME COLUMN day TO bucket_ms;
+
+      DROP INDEX IF EXISTS idx_oauth_usage_day;
+
+      CREATE INDEX IF NOT EXISTS idx_oauth_usage_bucket_ms ON oauth_usage (bucket_ms);
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

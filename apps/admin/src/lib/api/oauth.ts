@@ -3,6 +3,8 @@
 // no secrets ever cross this boundary. Two flows: manual_paste (Anthropic /
 // Claude Pro-Max) and device_code (GitHub Copilot).
 
+import { clientTzOffsetMinutes } from '$lib/requests-filters.js';
+
 export type OAuthFlow = 'manual_paste' | 'device_code';
 
 export interface OAuthAccount {
@@ -97,11 +99,13 @@ export interface OAuthQuotaSnapshot {
 // trips the catch and the page renders with [] for that section.
 const OBSERVABILITY_TIMEOUT_MS = 10_000;
 
-// GET /oauth/usage -> today's per-account usage. FAIL-OPEN: any failure (incl.
-// timeout) yields [] so the page renders (zeros) instead of breaking.
+// GET /oauth/usage -> today's per-account usage, bucketed by the VIEWER's local day
+// (send the browser UTC offset so "today" matches the dashboard, not 00:00 UTC).
+// FAIL-OPEN: any failure (incl. timeout) yields [] so the page renders (zeros)
+// instead of breaking.
 export async function getOAuthUsage(): Promise<OAuthUsageRow[]> {
   try {
-    const res = await fetch(`${BASE}/usage`, {
+    const res = await fetch(`${BASE}/usage?tzOffsetMinutes=${clientTzOffsetMinutes()}`, {
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(OBSERVABILITY_TIMEOUT_MS),
     });

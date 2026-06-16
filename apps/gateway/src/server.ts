@@ -1479,8 +1479,9 @@ export async function buildServer(
   // served request. No-op for a non-OAuth request. `servedByAccount` guards against
   // mis-attribution after a fallback: the pool marks the account at SELECTION time,
   // so a stale OAuth account is dropped unless the FINAL served alias is actually
-  // that provider's (`<providerId>/<model>`). `dayMs` is UTC midnight (epoch ms is
-  // UTC, so `ms - ms % 86_400_000` floors to the day).
+  // that provider's (`<providerId>/<model>`). `bucketMs` is the UTC-HOUR floor (epoch
+  // ms is UTC, so `ms - ms % 3_600_000` floors to the hour) — finer than a day so the
+  // providers page can roll usage up by the ADMIN's local day at read time.
   const recordOAuthUsage = (
     servingAccount: ServingAccount | null,
     servedAlias: string | null,
@@ -1492,7 +1493,7 @@ export async function buildServer(
       .record({
         providerId: servingAccount.providerId,
         account: servingAccount.account,
-        dayMs: nowMs - (nowMs % 86_400_000),
+        bucketMs: nowMs - (nowMs % 3_600_000),
         tokens: usage.tokens,
         costUsd: usage.costUsd,
         nowMs,
