@@ -1,4 +1,8 @@
-import type { InternalRequest, TargetProviderProtocol } from "@helm/shared";
+import {
+  type InternalRequest,
+  isNativePassthroughCarrier,
+  type TargetProviderProtocol,
+} from "@helm/shared";
 
 // Native protocol passthrough guard (issue #217, Phase 1). Decides whether the
 // executor may forward the client's VERBATIM native request body to the upstream
@@ -27,7 +31,8 @@ export type NativePassthroughDecision =
   | { ok: false; reason: NativePassthroughDisableReason };
 
 export interface NativePassthroughDecisionInput {
-  /** Runtime flag `native_protocol_passthrough` (default OFF). */
+  /** Runtime flag `native_protocol_passthrough` (default ON since #232; see the
+   *  runtime-settings schema). */
   enabled: boolean;
   /** Whether `request.native_request` carries the verbatim inbound body. */
   hasNativeRequest: boolean;
@@ -84,4 +89,33 @@ export function canUseNativePassthrough(
     return { ok: false, reason: "provider_lacks_passthrough" };
   }
   return { ok: true };
+}
+
+// Anthropic's Messages API carries `system` at the TOP LEVEL only. A `system`- or
+// `developer`-role entry INSIDE `messages[]` is the "mid-conversation system" shape
+// modern Claude Code emits (role-folded transcripts — e.g. MCP-server instructions as a
+// trailing system turn, CC ≥2.1.x). Anthropic's subscription endpoint REJECTS such a body
+// — `messages.N: role 'system' must precede an 'assistant' message or end the array` — so
+// it cannot be forwarded VERBATIM. It needs the compatibility rewrite that folds
+// system/developer turns into the top-level `system` param (provider/anthropic
+// openaiToAnthropicRequest / protocol/anthropic transformRequestIn), so passthrough must
+// be disabled for the attempt and the request routed through the translating path.
+//
+// Scope the CALL to anthropic_messages targets — OpenAI/Gemini accept inline
+// system/developer turns, so they neither need nor want this fold. `nativeRequest` is the
+// `InternalRequest.native_request` carrier (or a bare body); a non-Anthropic / message-less
+// body returns false (passthrough stays eligible). Pure + framework-agnostic
+// (CLAUDE.md principle 1), single-unit-testable (principle 4).
+export function anthropicNativeBodyRequiresSystemFold(nativeRequest: unknown): boolean {
+  if (nativeRequest === null || typeof nativeRequest !== "object") return false;
+  const body = isNativePassthroughCarrier(nativeRequest)
+    ? nativeRequest.body
+    : (nativeRequest as Record<string, unknown>);
+  const messages = body.messages;
+  if (!Array.isArray(messages)) return false;
+  return messages.some((m) => {
+    if (m === null || typeof m !== "object") return false;
+    const role = (m as { role?: unknown }).role;
+    return role === "system" || role === "developer";
+  });
 }
