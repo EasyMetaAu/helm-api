@@ -1,6 +1,10 @@
 import type { InternalRequest } from "@helm/shared";
 import { describe, expect, it } from "vitest";
-import { canUseNativePassthrough, type NativePassthroughDecisionInput } from "./protocol.js";
+import {
+  anthropicNativeBodyRequiresSystemFold,
+  canUseNativePassthrough,
+  type NativePassthroughDecisionInput,
+} from "./protocol.js";
 
 // canUseNativePassthrough — the framework-agnostic guard for native protocol
 // passthrough (issue #217, Phase 1). It decides whether execute may forward the
@@ -164,5 +168,85 @@ describe("canUseNativePassthrough", () => {
       "request",
       "targetProviderProtocol",
     ]);
+  });
+});
+
+// anthropicNativeBodyRequiresSystemFold — detects the "mid-conversation system" body
+// shape Claude Code ≥2.1.x emits (a system/developer turn INSIDE messages[]), which
+// Anthropic rejects verbatim ("messages.N: role 'system' must precede an 'assistant'
+// message or end the array"). When true, execute disables native passthrough so the
+// attempt folds system/developer into the top-level `system` param instead of 400ing.
+describe("anthropicNativeBodyRequiresSystemFold", () => {
+  // The exact production shape that 400'd (request 81f3fa9e...): Claude Code 2.1.175 put
+  // the MCP-server instructions as a TRAILING system message after the only user turn.
+  const claudeCodeBody = {
+    model: "claude-opus-4-8",
+    stream: true,
+    system: [
+      { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.175.6b7; cch=02b53;" },
+      { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+    ],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "我喜欢的数字是多少" }] },
+      { role: "system", content: "# MCP Server Instructions\n..." },
+    ],
+  };
+
+  it("flags a native carrier whose messages[] carries a trailing system turn", () => {
+    const carrier = {
+      protocol: "anthropic_messages" as const,
+      body: claudeCodeBody,
+      headers: {},
+      mutations: {},
+    };
+    expect(anthropicNativeBodyRequiresSystemFold(carrier)).toBe(true);
+  });
+
+  it("flags a bare native body (not wrapped in a carrier) with an inline system turn", () => {
+    expect(anthropicNativeBodyRequiresSystemFold(claudeCodeBody)).toBe(true);
+  });
+
+  it("flags an inline developer turn too (OpenAI's renamed system tier)", () => {
+    expect(
+      anthropicNativeBodyRequiresSystemFold({
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "developer", content: "be terse" },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("flags a leading system turn at messages[0] (also rejected by Anthropic)", () => {
+    expect(
+      anthropicNativeBodyRequiresSystemFold({
+        messages: [
+          { role: "system", content: "sys" },
+          { role: "user", content: "hi" },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("does NOT flag a canonical body (top-level system, only user/assistant in messages[])", () => {
+    expect(
+      anthropicNativeBodyRequiresSystemFold({
+        system: "You are helpful",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "hello" },
+          { role: "user", content: "again" },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("is safe on missing / non-object / message-less inputs (passthrough stays eligible)", () => {
+    expect(anthropicNativeBodyRequiresSystemFold(undefined)).toBe(false);
+    expect(anthropicNativeBodyRequiresSystemFold(null)).toBe(false);
+    expect(anthropicNativeBodyRequiresSystemFold("nope")).toBe(false);
+    expect(anthropicNativeBodyRequiresSystemFold({})).toBe(false);
+    expect(anthropicNativeBodyRequiresSystemFold({ messages: "not-an-array" })).toBe(false);
+    expect(anthropicNativeBodyRequiresSystemFold({ messages: [null, 7, "x"] })).toBe(false);
   });
 });

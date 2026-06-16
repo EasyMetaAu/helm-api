@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-16 · 修复原生直通对 Claude Code「会话中 system 消息」400（issue #217；原则 3/5/8）
+
+- **背景**：生产请求 `81f3fa9e-...`（`la.atmy.work`，SSH+sqlite3 取 `request_payloads` 正文复盘）：**Claude Code 2.1.175** 的「role-folded transcript」把 MCP server instructions 作为**末尾 `role:"system"` 消息**塞进 `messages[]`（顶层 `system` 仍在），即 `messages=[user, system]`。Anthropic 订阅端 400 `messages.1: role 'system' must precede an 'assistant' message or end the array`，请求 fail-open **回退到 gpt-5.5**（用户问 Claude 却被另一个模型/厂商应答——非仅报错，是错路由+错计费）。见 [[claude-code-billing-header-cache-buster]]。
+- **根因**：`native_protocol_passthrough` schema **默认 `true`**（`runtime-settings.schema.ts:35`，box 无 override 故 ON；`protocol.ts` 注释「default OFF」已陈旧，本次改正），故走**原生直通**（`provider/anthropic.ts nativePassthroughStream`）**逐字转发**客户端 body → `messages[]` 里的 system 消息原样上送被拒。非直通的 IR 翻译路（`openaiToAnthropicRequest`/`transformRequestIn`）本就把 system/developer **折叠进顶层 `system`**（LiteLLM `map_developer_role_to_system` 同款），产出合法请求——所以 bug 只在直通路。
+- **决定（外科式 per-request 关直通，而非全局关）**：新增纯函数 `anthropicNativeBodyRequiresSystemFold(nativeRequest)`（core `protocol.ts`，单测覆盖载体/裸 body/developer/首位 system/缺失各分支），在 `execute.ts decideNativePassthroughForAttempt` 把它（仅 `anthropic_messages` target）**OR 进 `providerRequiresCompatibilityRewrite`**——复用既有 `provider_requires_compatibility_rewrite` 这条 disable reason，让此类请求落回**翻译/折叠路**。否决「全局把默认翻回 false」（会废掉整个直通特性）与「直通内就地折叠 body」（破坏逐字保真且更复杂）。
+- **取舍/坑/TODO**：① 对**带 MCP 的 CC 流量直通保真丢失**（这些请求几乎每条都带 inline system）——但它们当前本就 400→回退，折叠路恰是带正确 Claude-Code 身份头/spoof/相干 billing 的原始 OAuth 路，是**修复**不是退化。② 错误文案「or end the array」具误导性：末位 system（`[user, system]`）按字面应合法，但订阅端实测仍拒——故折叠是稳妥解，不去赌 `mid-conversation-system-2026-04-07` beta（helm 全仓零感知该 beta；即便 merge 透传了客户端 beta，订阅端仍拒）。若日后确认订阅端支持该 beta，可改为「保直通+确保该 beta 上送」。③ 检查刻意宽（任何 system/developer in messages[] 都关直通，含首位 system，Anthropic 同样拒 messages[0] system）——折叠恒合法，宽即安全。
+- **验证**：TDD 红→绿（先临时回退 wiring 证明直通确会对该 body 触发=复现 bug，再恢复）。`protocol.test` **+7**（helper 各分支）、`execute.test` **+1**（inline system → `passthrough_used:false`/reason `provider_requires_compatibility_rewrite`/走 `chatCompletion` 不走 `nativePassthrough`）；focused 4 文件 **231** 绿，`pnpm typecheck`（shared/core/gateway）0、`biome` 0。worktree 分支 `worktree-fix-midconv-system-ordering`，**仅改本地仓库，未发版/未部署**。
+
 ## 2026-06-16 · classifier 中英文关键词对等 + 修复短消息捷径的 CJK 盲区（docs/03；原则 2/4）
 
 - **背景**：用户审查 `classifier.yaml` 发现部分维度只有英文、缺中文。逐 key 审计后定位到**真正的问题在代码不在配置**：短消息捷径（`overrides.ts isShortAndSimple → containsClassifierSignal`）只检查英文 `analysis_kw/security_kw/diagnostic_short_kw`，且 `overrides.ts` 自带的 `keywordMatcher` **没有 CJK 豁免**（与 `dimensions.ts` 的版本漂移）。后果：一条**短中文**分析/安全请求（"分析这个系统的根因"）被强钉 `simple`→economy，**即使开了 eval 也救不回**（set override 在 Layer-1 即决、不进 eval）。
@@ -23,19 +31,13 @@
 - **B · OAuth 每账号日用量（写路径 + schema 变更）**：旧行按 `(provider, account, day=UTC午夜)` **写时聚合**，读时无法按别的时区重分桶。改存 **UTC 小时桶**：`oauth_usage.day`→`bucket_ms` 重命名（迁移 **sqlite v23 / pg v22** `ALTER TABLE … RENAME COLUMN`，PK/索引随之），写路径 `server.ts` 落 `nowMs - nowMs%3_600_000`，`queryDay(dayMs)`→`queryRange(start,end)` 做 SQL `GROUP BY provider,account` 的 `SUM/MIN/MAX` 滚动，读路由 `oauth.ts` 用 admin 本地日窗口 `[本地午夜, +24h)` 查询。前端 `getOAuthUsage` 带 `tzOffsetMinutes`。
 - **取舍/坑/TODO**：① **offset 模型不追 DST**——多日窗口跨 DST 切换日偏 1h（UTC+8 无 DST 故精确）；半小时时区（+5:30）本地日边界落 :30，小时桶无法精确切分（整点时区精确）。两者已文档化。② **OAuth 历史行**：v23 把旧 UTC-午夜日行重解释为 00:00 UTC 小时桶（丢当日内分布，可观测性可接受，迁移注释已说明）；生产 la.atmy.work 有真实 oauth_usage 数据 → 加了**专门「升级保数据」测试**证明重命名不丢行。③ pg `SUM()` 对 bigint 返回**字符串**，`toRow` 用 `Number()` 归一；`SUM(cost_usd)` **本征 null-aware**（全 null 才 null）正合「未计价 ≠ 实测 0」语义。④ **无新增配置旋钮**：offset 浏览器自动探测（零配置，符合原则 2）。
 - **验证**：TDD 红→绿。shared stats-query **+5**、契约测试 **+1**（同数据 offset 0 vs 480 分桶不同，跑双适配器 + mock）、sqlite/pg oauth-usage 重写（小时桶 + queryRange 窗口滚动 + 排除窗外 + pg 字符串 SUM 归一）、oauth_usage **升级保数据 +1**、四处迁移测试预标 v23/v22（fixture 无 oauth_usage 故 RENAME 越界）、oauth 路由 **+2**（本地日窗口数学 + 非法 offset fail-open）、admin stats **+1**（透传 tz + fail-open）、前端 `clientTzOffsetMinutes` **+2**。`pnpm build`/`typecheck`/`lint` 绿，全量 **3761 测试** 绿，admin `svelte-check` 0 错。worktree 分支 `worktree-tz-aggregation-review`（未发版/未部署）。
-## 2026-06-15 · 移除 policy 级 max_lane 上限（docs/02/04/06；原则 2/6）
-
-- **背景**：用户看到 admin 策略编辑器的「限制车道上限（最高）」(`Cap lane (maximum)` = policy `max_lane`)，问是否冗余可删。查证：**per-key max_lane 早已在 `feat/drop-key-max-lane` 移除**（sqlite v10 / pg v9 DROP COLUMN，理由「lanes 是平行的、非严格层级，allowed_lanes 白名单已涵盖」）；policy 级 max_lane 是同一冗余机制的最后残留。`LANE_RANK` 只排 3 条（economy<balanced<premium），task/厂商 lane 不可排序，故 rank 天花板对多数 lane 语义不明。shipped/线上 policies.yaml 均无 active max_lane（仅注释）。**用 ast-grep 结构化搜 `max_lane`/`maxLane` 定位全部引用**。
-- **决定（用户拍板硬删 breaking）**：`PolicySchema` `.strict()` **直接拒绝** `max_lane`（带 max_lane 的 policies.yaml 启动 fail-close）——release notes 标 BREAKING；线上那台无 max_lane（安全，部署前再走 [[config-schema-strict-removal-failclose]] 闸复核）。**保留 `allowed_lanes`**（更具表达力的白名单，且其 `applyCaps` 逻辑被 per-key restrict 路径共用，不能动）；保留 `LANE_RANK`/`lowestRankedLane`/`UNRANKED_CANDIDATE_RANK`（allowed_lanes 用）。
-- **改动**：`policy-schema.ts` 删字段 + refine 改「use_lane / allowed_lanes」；`policy-engine.ts` 删 PolicyOutcome.max_lane / 累加器 / `strictestMaxLane()` / applyCaps 的 max_lane 分支；route-request 三处 synthetic per-key outcome 去掉 `max_lane:null`；admin `PolicyRow.svelte` 降为**仅 use_lane（强制车道）**（去掉 Cap-lane select + 互斥），`policies.ts` 删 max_lane 类型/序列化；5 语言 i18n 删「Cap lane (maximum)」「max lane」并把策略文案「force or cap」改「force」；config/policies.yaml + .e2e-data 注释（e2e 还删了残留的 budget_org_cap：org_id+max_lane 双退役字段）；docs/02/04/06；chat.ts/messages-pipeline.ts 的过期 `keyCaps.maxLane` 注释改 `degradeLane`。
-- **取舍/坑/TODO**：① 删后**策略只能 force（use_lane）**，restrict 仍由 per-key allowed_lanes 承担（policy 编辑器本就没暴露 allowed_lanes）；想要 policy 级 restrict UI 是后续可选项。② 「全局成本上限」从 `max_lane: balanced` 改用 `allowed_lanes: [economy, balanced]`（catch-all 空 match），docs 例子已更。③ per-key max_lane 的退役迁移/测试（DROP COLUMN、key schema 拒收）**保留不动**——那是另一回事。
-- **验证**：TDD——policy-engine/schema(×2)/route-request/admin PolicyRow+policies/crossref 全改绿；`pnpm typecheck`/`lint`/全量 + admin `svelte-check` 待 CI。分支 `feat/drop-policy-max-lane`，开 PR（BREAKING，不发版/不部署）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-15 · 移除 policy 级 max_lane 上限（docs/02/04/06；原则 2/6）：admin 策略编辑器「Cap lane (maximum)」(policy `max_lane`) 是已退役机制的最后残留（per-key max_lane 早在 `feat/drop-key-max-lane` 删，sqlite v10/pg v9 DROP COLUMN），`LANE_RANK` 只排 3 条、task/厂商 lane 不可排序故 rank 天花板语义不明。用户拍板硬删 breaking：`PolicySchema.strict()` 拒收 `max_lane`（旧 policies.yaml 启动 fail-close，部署前走 [[config-schema-strict-removal-failclose]] 复核），保留更具表达力的 `allowed_lanes`。改 policy-schema/engine、route-request 3 处 synthetic outcome、admin PolicyRow 降为仅 use_lane、5 语言 i18n、docs。「全局成本上限」改用 `allowed_lanes:[economy,balanced]`。TDD 全绿。分支 `feat/drop-policy-max-lane`（BREAKING，不发版/不部署）。
 
 ### 2026-06-15 · 可配置的「默认兜底车道」系统设置（docs/04；原则 1/2/3/5）：兜底写死 `balanced` 不可改 → 加**热改** RuntimeSettings `default_lane`（DB config_kv，读 fail-open/写 fail-closed，默认 balanced=向后兼容）。否决 policies catch-all（policy 最高优先级会盖过 task/complexity 路由）与 lanes 末条（z.record 无序）两方案。只在 resolver 两个 fail-open 终点用、且仅当该 lane 存在否则回落字面 balanced（**无新 fail-close 路径**，不重演 0.13.4）；不动 COMPLEXITY_FALLBACK。admin 系统设置加 lane 下拉 + 5 语言 i18n + PUT 校验 lane 存在。分支 feat/configurable-default-lane。
 

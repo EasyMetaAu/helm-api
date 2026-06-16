@@ -494,6 +494,7 @@ export {
   translateResponsesSSE,
 } from "./provider/openai-responses.js";
 export {
+  anthropicNativeBodyRequiresSystemFold,
   canUseNativePassthrough,
   type NativePassthroughDecision,
   type NativePassthroughDecisionInput,

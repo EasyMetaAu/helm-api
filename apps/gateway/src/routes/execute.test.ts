@@ -1835,6 +1835,55 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(okRow?.provider_model).toBe("claude-x");
   });
 
+  it("anthropic native body with an inline system turn DISABLES passthrough (folds via chatCompletion)", async () => {
+    // Regression for request 81f3fa9e...: Claude Code 2.1.175 emits the MCP-server
+    // instructions as a TRAILING system message ([user, system]). Forwarded verbatim,
+    // Anthropic 400s ("messages.1: role 'system' must precede an 'assistant' message or
+    // end the array") and the request fell back to a non-Claude model. Passthrough must
+    // be disabled for this shape so the request folds system into top-level `system`.
+    const provider = anthropicProvider(NATIVE_RESP);
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["a"]),
+      anthropicReq({
+        native_request: {
+          ...NATIVE,
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "system", content: "# MCP Server Instructions\n..." },
+          ],
+        },
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    // Folded via the translating path, NOT forwarded verbatim.
+    expect(provider.nativePassthrough).not.toHaveBeenCalled();
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(out.nativePassthrough).toBeFalsy();
+    const okRow = out.attempts[0];
+    expect(okRow?.status).toBe("ok");
+    expect(okRow?.passthrough_considered).toBe(true);
+    expect(okRow?.passthrough_used).toBe(false);
+    expect(okRow?.passthrough_disable_reason).toBe("provider_requires_compatibility_rewrite");
+  });
+
   it("Gemini target + native_request sends GenerateContent body to the Gemini client, not OpenAI Chat", async () => {
     const upstreamBodies: unknown[] = [];
     let upstreamUrl = "";

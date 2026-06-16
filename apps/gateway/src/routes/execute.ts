@@ -7,6 +7,7 @@ import type {
   RouteProviderAttempt,
 } from "@helm/core";
 import {
+  anthropicNativeBodyRequiresSystemFold,
   canUseNativePassthrough,
   checkCapability,
   type NativePassthroughDisableReason,
@@ -324,12 +325,22 @@ function decideNativePassthroughForAttempt(input: {
 }): PassthroughTelemetry {
   const { req, target } = input;
 
+  // A native Anthropic body with a system/developer turn INSIDE messages[] (the
+  // mid-conversation-system shape Claude Code ≥2.1.x emits) is rejected verbatim by
+  // Anthropic ("messages.N: role 'system' must precede an 'assistant' message or end the
+  // array"). Treat it as needing a compatibility rewrite so passthrough is disabled and
+  // the attempt folds system into the top-level `system` param via the translating path.
+  const requiresCompatibilityRewrite =
+    target.providerRequiresCompatibilityRewrite ||
+    (target.targetProviderProtocol === "anthropic_messages" &&
+      anthropicNativeBodyRequiresSystemFold(req.native_request));
+
   const decision = canUseNativePassthrough({
     enabled: input.enabled,
     hasNativeRequest: req.native_request !== undefined,
     request: req,
     targetProviderProtocol: target.targetProviderProtocol,
-    providerRequiresCompatibilityRewrite: target.providerRequiresCompatibilityRewrite,
+    providerRequiresCompatibilityRewrite: requiresCompatibilityRewrite,
     // Stream-aware feature detection: a stream request needs the streaming sibling
     // (nativePassthroughStream); a non-stream request needs nativePassthrough. A
     // provider that implements only one is `provider_lacks_passthrough` for the other.
