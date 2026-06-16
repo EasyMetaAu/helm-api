@@ -1104,6 +1104,7 @@ describe("admin.api request payload", () => {
               requestId: "req_1",
               requestJson: JSON.stringify({ model: "auto" }),
               responseJson: JSON.stringify({ ok: true }),
+              upstreamRequestJson: JSON.stringify({ model: "gpt-resolved", injected: true }),
               createdAt: new Date(1234),
             }
           : null,
@@ -1115,8 +1116,29 @@ describe("admin.api request payload", () => {
       captured: true,
       request: { model: "auto" },
       response: { ok: true },
+      upstream_request: { model: "gpt-resolved", injected: true },
       created_at: 1234,
     });
+  });
+
+  it("returns upstream_request:null when the forwarded body was not captured", async () => {
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayload: async (id: string) =>
+        id === "req_2"
+          ? {
+              requestId: "req_2",
+              requestJson: JSON.stringify({ model: "auto" }),
+              responseJson: null,
+              upstreamRequestJson: null,
+              createdAt: new Date(1234),
+            }
+          : null,
+    } as unknown as TelemetryStore;
+    const app = buildApp(buildDeps({ telemetry }));
+    const res = await app.request("/admin/api/requests/req_2/payload");
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { upstream_request: unknown }).upstream_request).toBeNull();
   });
 });
 

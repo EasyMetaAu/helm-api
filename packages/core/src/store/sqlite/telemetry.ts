@@ -255,6 +255,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
         requestId: input.requestId,
         requestJson: input.requestJson,
         responseJson: input.responseJson,
+        upstreamRequestJson: input.upstreamRequestJson ?? null,
         createdAt: input.createdAt,
       })
       .onConflictDoUpdate({
@@ -262,6 +263,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
         set: {
           requestJson: input.requestJson,
           responseJson: input.responseJson,
+          upstreamRequestJson: input.upstreamRequestJson ?? null,
           createdAt: input.createdAt,
         },
       })
@@ -293,6 +295,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
       requestId: row.requestId,
       requestJson: row.requestJson,
       responseJson: row.responseJson,
+      upstreamRequestJson: row.upstreamRequestJson ?? null,
       createdAt: row.createdAt, // timestamp_ms mode → Date
     };
   }

@@ -602,6 +602,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                 decision: result.decision,
                 requestJson,
                 responseJson: captureBodies ? captured.join("") : null,
+                upstreamRequestJson: result.upstreamRequest ?? null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
             );
@@ -654,6 +655,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             decision: result.decision,
             requestJson,
             responseJson: null,
+            upstreamRequestJson: result.upstreamRequest ?? null,
           },
           (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
         );
@@ -693,6 +695,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           decision: result.decision,
           requestJson,
           responseJson: captureBodies ? JSON.stringify(body) : null,
+          upstreamRequestJson: result.upstreamRequest ?? null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
       );

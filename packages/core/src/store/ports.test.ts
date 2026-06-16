@@ -135,7 +135,10 @@ class InMemoryTelemetryStore implements TelemetryStore {
   }
   private readonly payloads = new Map<string, RequestPayload>();
   async insertPayload(input: InsertPayloadInput): Promise<void> {
-    this.payloads.set(input.requestId, { ...input });
+    this.payloads.set(input.requestId, {
+      ...input,
+      upstreamRequestJson: input.upstreamRequestJson ?? null,
+    });
   }
   async getPayload(requestId: string): Promise<RequestPayload | null> {
     return this.payloads.get(requestId) ?? null;

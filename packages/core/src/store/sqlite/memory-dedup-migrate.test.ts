@@ -34,6 +34,9 @@ function seedPreV21(): string {
   for (let v = 1; v <= 20; v += 1) ins.run(v);
   ins.run(22);
   ins.run(23);
+  // v24 adds request_payloads.upstream_request_json; this fixture never creates
+  // request_payloads (memory_messages only) → pre-mark applied (out of scope).
+  ins.run(24);
   raw.exec(`
     CREATE TABLE memory_messages (
       id TEXT PRIMARY KEY,

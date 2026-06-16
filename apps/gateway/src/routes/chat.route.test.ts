@@ -813,6 +813,7 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
       requestId: string;
       requestJson: string;
       responseJson: string | null;
+      upstreamRequestJson: string | null;
     }> = [];
     const telemetry = {
       insert: vi.fn(async (i: { decision: unknown }) => {
@@ -820,11 +821,17 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
         return { id: "1" };
       }),
       insertPayload: vi.fn(
-        async (p: { requestId: string; requestJson: string; responseJson: string | null }) => {
+        async (p: {
+          requestId: string;
+          requestJson: string;
+          responseJson: string | null;
+          upstreamRequestJson?: string | null;
+        }) => {
           payloads.push({
             requestId: p.requestId,
             requestJson: p.requestJson,
             responseJson: p.responseJson,
+            upstreamRequestJson: p.upstreamRequestJson ?? null,
           });
         },
       ),
@@ -873,6 +880,42 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
     expect(decision.cost_breakdown.completion_usd).toBeCloseTo(100 * 1e-6 + 50 * 2e-6);
     const okAttempt = decision.provider_attempts.find((a) => a.alias === "default_good_model");
     expect(okAttempt?.cost_usd).toBeCloseTo(100 * 1e-6 + 50 * 2e-6);
+  });
+
+  it("captures the forwarded upstream request (post inject + translation) alongside the inbound body", async () => {
+    const cap = captureTelemetry();
+    const { deps: d, harness } = deps({
+      telemetry: cap.telemetry,
+      capturePayloads: () => true,
+    });
+    // The EXACT serialized wire body the executor captured at the provider boundary —
+    // model patched + memory turn appended. Differs from the inbound body (NONSTREAM_BODY).
+    const upstreamRequest = JSON.stringify({
+      model: "gpt-x",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "user", content: "<system-reminder># Persistent memory</system-reminder>" },
+      ],
+    });
+    harness.execute.mockResolvedValue({
+      ...nonStreamOutcome({ id: "cmpl-1", choices: [], usage: { completion_tokens: 1 } }),
+      upstreamRequest,
+    });
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+
+    expect(cap.payloads).toHaveLength(1);
+    // Inbound body captured verbatim (no memory turn) …
+    expect(cap.payloads[0]?.requestJson).not.toContain("Persistent memory");
+    // … and the forwarded upstream body captured verbatim (the wire bytes) WITH memory.
+    expect(cap.payloads[0]?.upstreamRequestJson).toBe(upstreamRequest);
   });
 
   it("backfills streamed cost even when capture_payloads is OFF (#6 ungated)", async () => {

@@ -661,6 +661,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     external?: AbortSignal,
     endpointUrl = url,
     extraBetas: readonly string[] = [],
+    capture?: (wireBody: string) => void,
   ): Promise<Response> {
     const body = nativePassthroughBody(input);
     const prepared = prepareNativePassthroughRequest(input, await headers(body, extraBetas), {
@@ -670,6 +671,10 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         ? { providerProfileApplied: "anthropic_official_safe" }
         : {}),
     });
+    // The exact Anthropic-native bytes POSTed upstream — for the translate path this is
+    // the OpenAI→Anthropic re-serialization, for native passthrough the verbatim body
+    // (model patched). Surfaced before the first fetch so the gateway captures it.
+    capture?.(prepared.bodyText);
     // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
     // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
     return withConnectionRetry(
@@ -700,12 +705,13 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     external?: AbortSignal,
     endpointUrl = url,
     extraBetas: readonly string[] = [],
+    capture?: (wireBody: string) => void,
   ): Promise<Response> {
-    const res = await request(body, external, endpointUrl, extraBetas);
+    const res = await request(body, external, endpointUrl, extraBetas, capture);
     if (res.status === 401 && cfg.onUnauthorized !== undefined) {
       await res.body?.cancel().catch(() => {});
       cfg.onUnauthorized();
-      return await request(body, external, endpointUrl, extraBetas);
+      return await request(body, external, endpointUrl, extraBetas, capture);
     }
     return res;
   }
@@ -731,6 +737,9 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       const res = await requestWithRetry(
         openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId }),
         opts?.signal,
+        url,
+        [],
+        opts?.captureUpstream,
       );
       if (!res.ok) throw await errorFromResponse(res);
       const anthResp = (await res.json()) as Record<string, unknown>;
@@ -743,7 +752,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         ...openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId }),
         stream: true,
       };
-      const res = await requestWithRetry(body, opts?.signal);
+      const res = await requestWithRetry(body, opts?.signal, url, [], opts?.captureUpstream);
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateAnthropicSSE(res, model, timeoutMs);
     },
@@ -757,7 +766,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     // beta/user-agent/auth from the native body's own system[0]/context_management/speed,
     // so the same closure works unchanged on a native body.
     async nativePassthrough(body, opts) {
-      const res = await requestWithRetry(body, opts?.signal);
+      const res = await requestWithRetry(body, opts?.signal, url, [], opts?.captureUpstream);
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as Record<string, unknown>;
     },
@@ -775,7 +784,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     // chatCompletionStream), then the upstream SSE is BYTE-RELAYED unchanged via
     // readAnthropicSSERaw — no SSE re-mapping state machine to mis-translate (principle 8).
     async *nativePassthroughStream(body, opts) {
-      const res = await requestWithRetry(body, opts?.signal);
+      const res = await requestWithRetry(body, opts?.signal, url, [], opts?.captureUpstream);
       if (!res.ok) throw await errorFromResponse(res);
       yield* readAnthropicSSERaw(res, timeoutMs);
     },

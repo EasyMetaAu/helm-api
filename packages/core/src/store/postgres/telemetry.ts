@@ -250,6 +250,7 @@ export class PgTelemetryStore implements TelemetryStore {
         requestId: input.requestId,
         requestJson: input.requestJson,
         responseJson: input.responseJson,
+        upstreamRequestJson: input.upstreamRequestJson ?? null,
         createdAt: input.createdAt.getTime(),
       })
       .onConflictDoUpdate({
@@ -257,6 +258,7 @@ export class PgTelemetryStore implements TelemetryStore {
         set: {
           requestJson: input.requestJson,
           responseJson: input.responseJson,
+          upstreamRequestJson: input.upstreamRequestJson ?? null,
           createdAt: input.createdAt.getTime(),
         },
       });
@@ -274,6 +276,7 @@ export class PgTelemetryStore implements TelemetryStore {
             requestId: input.requestId,
             requestJson: input.requestJson,
             responseJson: input.responseJson,
+            upstreamRequestJson: input.upstreamRequestJson ?? null,
             createdAt: input.createdAt.getTime(),
           })
           .onConflictDoUpdate({
@@ -281,6 +284,7 @@ export class PgTelemetryStore implements TelemetryStore {
             set: {
               requestJson: input.requestJson,
               responseJson: input.responseJson,
+              upstreamRequestJson: input.upstreamRequestJson ?? null,
               createdAt: input.createdAt.getTime(),
             },
           });
@@ -300,6 +304,7 @@ export class PgTelemetryStore implements TelemetryStore {
       requestId: row.requestId,
       requestJson: row.requestJson,
       responseJson: row.responseJson,
+      upstreamRequestJson: row.upstreamRequestJson ?? null,
       createdAt: new Date(row.createdAt), // epoch-ms bigint → Date
     };
   }

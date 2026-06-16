@@ -130,6 +130,12 @@ export interface ExecuteOutcome {
   // reads this to BYPASS `openAIBodyToIR`/`transformResponseOut` and return the
   // native body to the client untouched. Absent/false → the normal translate path.
   nativePassthrough?: boolean;
+  // The EXACT serialized request body bytes forwarded upstream for the SERVED attempt
+  // — AFTER memory injection + protocol translation (provider-native shape, model
+  // patched to the resolved upstream id). Captured at the provider's HTTP boundary, so
+  // it is the real wire body the model received, NOT the pre-translation adapter input.
+  // null when no provider served. The gateway records it to the payload table; never logged.
+  upstreamRequest?: string | null;
 }
 
 // The orchestrator's return value: the executor outcome enriched with the
@@ -144,6 +150,10 @@ export interface ExecutionResult {
   // is the upstream's verbatim native response, so the gateway skips response
   // translation. Only set on the ok branch.
   nativePassthrough?: boolean;
+  // Forwarded from ExecuteOutcome.upstreamRequest: the EXACT serialized wire body sent
+  // upstream for the served attempt (post inject + translation). The gateway writes it
+  // verbatim to the captured payload. Only set on the ok branch.
+  upstreamRequest?: string | null;
 }
 
 export interface RouteDeps {
@@ -813,6 +823,9 @@ export async function routeRequest(
       // Forward the verbatim-native-response marker so the presentation surface
       // can bypass response translation (issue #217).
       nativePassthrough: outcome.nativePassthrough,
+      // Forward the exact body sent upstream so the gateway can capture it into the
+      // payload table (what the model actually received, post inject + translation).
+      upstreamRequest: outcome.upstreamRequest,
     };
   }
   return {

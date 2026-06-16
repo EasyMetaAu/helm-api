@@ -123,6 +123,9 @@ export async function recordServed(
     decision: DecisionRecord;
     requestJson: string;
     responseJson: string | null;
+    // The exact body forwarded upstream (post inject + translation); null when no
+    // provider served or capture context lacks it.
+    upstreamRequestJson?: string | null;
   },
   log: (msg: string) => void,
 ): Promise<void> {
@@ -136,6 +139,7 @@ export async function recordServed(
         requestId: args.requestId,
         requestJson: args.requestJson,
         responseJson: args.responseJson,
+        upstreamRequestJson: args.upstreamRequestJson ?? null,
         createdAt: new Date(deps.now()),
       });
       const retentionMs = deps.payloadRetentionMs?.();
@@ -159,6 +163,7 @@ export async function recordServed(
       requestId: args.requestId,
       requestJson: args.requestJson,
       responseJson: args.responseJson,
+      upstreamRequestJson: args.upstreamRequestJson ?? null,
       now: deps.now(),
     },
     log,
@@ -381,7 +386,13 @@ export function usageFromResponsesSSE(raw: string): StreamUsage | null {
 // rows. Never throws — logs via the provided sink on failure.
 export async function persistPayload(
   deps: PayloadCaptureDeps,
-  args: { requestId: string; requestJson: string; responseJson: string | null; now: number },
+  args: {
+    requestId: string;
+    requestJson: string;
+    responseJson: string | null;
+    upstreamRequestJson?: string | null;
+    now: number;
+  },
   log: (msg: string) => void,
 ): Promise<void> {
   if (!captureEnabled(deps)) return;
@@ -390,6 +401,7 @@ export async function persistPayload(
       requestId: args.requestId,
       requestJson: args.requestJson,
       responseJson: args.responseJson,
+      upstreamRequestJson: args.upstreamRequestJson ?? null,
       createdAt: new Date(args.now),
     });
     const retentionMs = deps.payloadRetentionMs?.();

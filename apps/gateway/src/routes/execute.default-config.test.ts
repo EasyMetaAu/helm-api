@@ -208,6 +208,45 @@ describe("default config activates capability filter + cost (alias-namespace ali
     expect(calls).toEqual(["deepseek-v4-pro"]);
   });
 
+  it("threads a captureUpstream sink to the served provider and surfaces it as outcome.upstreamRequest", async () => {
+    // A stub that fires captureUpstream with the EXACT body it is about to POST — the
+    // execute layer must collect that string into ExecuteOutcome.upstreamRequest, NOT
+    // the pre-call stripInternal input (Codex P2: capture the real wire body).
+    let fired: string | null = null;
+    const client = {
+      chatCompletion: vi.fn(
+        async (body: Record<string, unknown>, opts?: { captureUpstream?: (b: string) => void }) => {
+          fired = JSON.stringify(body);
+          opts?.captureUpstream?.(fired);
+          return {
+            id: "chatcmpl-stub",
+            choices: [
+              { index: 0, message: { role: "assistant", content: "{}" }, finish_reason: "stop" },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          };
+        },
+      ),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: client,
+      providers: providerClients(client),
+      registry: buildRegistry(),
+      breaker: breaker(),
+      catalog,
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["deepseek/deepseek-v4-flash"]), req({}));
+    expect(out.final.status).toBe("ok");
+    expect(fired).not.toBeNull();
+    // outcome carries the EXACT captured wire string …
+    expect(out.upstreamRequest).toBe(fired);
+    // … and it is the RESOLVED bare upstream model (post stripInternal), not the alias.
+    expect(JSON.parse(out.upstreamRequest ?? "null").model).toBe("deepseek-v4-flash");
+  });
+
   it("the shipped `json` lane serves its json-capable primary and never reaches the */auto tail", async () => {
     const { client, calls } = stubProvider();
     const execute = createExecute({

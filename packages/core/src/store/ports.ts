@@ -207,6 +207,12 @@ export interface InsertPayloadInput {
   requestId: string;
   requestJson: string; // verbatim client request body, serialized
   responseJson: string | null; // assembled full response (null on error / unknown)
+  // The EXACT provider-native body forwarded upstream — AFTER memory injection and
+  // protocol translation (model patched to the resolved upstream id). This is what
+  // the model actually received; the diff vs requestJson is the injected memory +
+  // translation. Null when capture is off, no provider served, or pre-feature rows.
+  // Like requestJson it carries NO plaintext key (the bearer is an HTTP header).
+  upstreamRequestJson?: string | null;
   createdAt: Date;
 }
 
@@ -214,6 +220,7 @@ export interface RequestPayload {
   requestId: string;
   requestJson: string;
   responseJson: string | null;
+  upstreamRequestJson: string | null;
   createdAt: Date;
 }
 

@@ -128,7 +128,9 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // ALTER would fail — pre-mark applied, out of scope for this jobs upgrade.
     // v22 (oauth_usage day→bucket_ms rename): this fixture never creates oauth_usage,
     // so the RENAME would fail — pre-marked, out of scope.
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22]) {
+    // v23 adds request_payloads.upstream_request_json; this memory_jobs fixture
+    // never creates request_payloads → pre-mark applied (out of scope).
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22, 23]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );
@@ -220,8 +222,9 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // v21 (telemetry token columns) is pre-marked too: no telemetry table here, so
     // its ALTER would fail — keep the test scoped to v20. v22 (oauth_usage rename)
     // likewise: no oauth_usage table here, so its RENAME would fail — pre-marked.
+    // v23 adds request_payloads.upstream_request_json (table absent here) → pre-mark.
     for (const version of [
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23,
     ]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),

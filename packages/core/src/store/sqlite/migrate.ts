@@ -544,6 +544,18 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_oauth_usage_bucket_ms ON oauth_usage (bucket_ms);
     `,
   },
+  {
+    // Forwarded-upstream request capture: the EXACT provider-native body sent
+    // upstream (AFTER memory injection + protocol translation), so the admin
+    // request detail shows what the model actually received — not just the
+    // pre-injection client body. Additive + nullable (NULL = pre-feature row,
+    // capture off, or no provider served); forward-only. Verbatim bytes, no
+    // plaintext key (the bearer is an HTTP header, never the chat body).
+    version: 24,
+    sql: `
+      ALTER TABLE request_payloads ADD COLUMN upstream_request_json TEXT;
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

@@ -765,6 +765,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       //    provider model (not the originally-requested alias) — the gateway
       //    picked this model, so the upstream must be told which one to run.
       try {
+        // Capture sink for the EXACT bytes forwarded upstream (AFTER memory injection +
+        // protocol translation). Each provider fires this just before its HTTP POST with
+        // the serialized provider-native body; the value the SERVED attempt captured
+        // becomes ExecuteOutcome.upstreamRequest. Scoped per candidate (reset each loop).
+        let capturedUpstream: string | null = null;
+        const captureUpstream = (wireBody: string): void => {
+          capturedUpstream = wireBody;
+        };
         if (req.stream && passthrough.passthrough_used) {
           // Native STREAMING passthrough (issue #217, Phase 2): forward the client's
           // VERBATIM native body (which ALREADY carries stream:true) to the upstream and
@@ -800,7 +808,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           }
           passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
           const stream = await peekStream(
-            () => passthroughStream(passthroughBody, { signal }),
+            () => passthroughStream(passthroughBody, { signal, captureUpstream }),
             signal,
             alias,
             log,
@@ -814,6 +822,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             body: null,
             stream,
             nativePassthrough: true,
+            upstreamRequest: capturedUpstream,
           };
         }
         if (req.stream) {
@@ -829,7 +838,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             ),
           );
           const stream = await peekStream(
-            () => provider.chatCompletionStream(rendered.body, { signal }),
+            () => provider.chatCompletionStream(rendered.body, { signal, captureUpstream }),
             signal,
             alias,
             log,
@@ -842,6 +851,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             final: { status: "ok", alias, providerModel },
             body: null,
             stream,
+            upstreamRequest: capturedUpstream,
           };
         }
         if (passthrough.passthrough_used) {
@@ -874,7 +884,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
           }
           passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
-          const body = await passthroughInvoke(passthroughBody, { signal });
+          const body = await passthroughInvoke(passthroughBody, { signal, captureUpstream });
           breaker.recordSuccess(alias);
           const usage =
             req.protocol === "openai_responses"
@@ -890,11 +900,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             body,
             stream: null,
             nativePassthrough: true,
+            upstreamRequest: capturedUpstream,
           };
         }
         const bodyReq = stripInternal(req, providerModel, target.targetProviderProtocol);
         attemptTelemetry = withRequestMutations(passthrough, bodyReq.request_mutations);
-        const body = await provider.chatCompletion(bodyReq.body, { signal });
+        const body = await provider.chatCompletion(bodyReq.body, { signal, captureUpstream });
         breaker.recordSuccess(alias);
         attempts.push(okRow(alias, elapsed(), costOf(alias, body), attemptTelemetry));
         return {
@@ -902,6 +913,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           final: { status: "ok", alias, providerModel },
           body,
           stream: null,
+          upstreamRequest: capturedUpstream,
         };
       } catch (err) {
         // Client abort: non-provider fault. Terminate the chain WITHOUT marking a
