@@ -115,20 +115,20 @@ classifier:
       # confirmations (yes/no/sure/got it) intentionally do NOT live here because
       # this dimension scans the whole prompt; short_message handles them as whole
       # short utterances without penalizing "no output" / "no auth check" requests.
+      # Each English negative is paired with its Simplified-Chinese *_intl_kw sibling
+      # (kept adjacent for readability). NOTE: a NEGATIVE contribution does NOT suppress
+      # the language guard (engine.ts requires a POSITIVE hit), and short ZH prompts are
+      # already pinned `simple` by short_message — so the intl negatives mainly add
+      # grip-DOWN for medium-length ZH prompts that also carry a positive hit. Politeness
+      # preambles (你好/您好/请问/谢谢) are DELIBERATELY excluded: they routinely prefix
+      # real tasks, so penalizing them would misroute genuine ZH coding/analysis requests.
       translation_kw: { weight: -0.78, keywords: ["translate", "in french", "in chinese", "to spanish", "translate to", "in german", "in japanese", "localize", "into english"] }
-      lookup_kw: { weight: -1.05, keywords: ["what is", "who is", "define", "meaning of", "when did", "where is", "how many", "capital of", "tell me about", "what are"] }
-      chitchat_kw: { weight: -1.15, keywords: ["how are you", "good morning", "lol", "haha", "thank you", "goodbye", "what's up", "good night", "cheers"] }
-      simple_kw: { weight: -1.35, keywords: ["hi", "thanks", "ok", "ping", "thx"] }
-      # —— international (Simplified Chinese) negatives —— mirror the English negatives.
-      # NOTE: a NEGATIVE contribution does NOT suppress the language guard (engine.ts
-      # requires a POSITIVE hit), and short ZH prompts are already pinned `simple` by
-      # short_message — so these mainly add grip-DOWN for medium-length ZH prompts that
-      # also carry a positive hit. Politeness preambles (你好/您好/请问/谢谢) are
-      # DELIBERATELY excluded: they routinely prefix real tasks, so penalizing them
-      # would misroute genuine ZH coding/analysis requests toward economy.
       translation_intl_kw: { weight: -0.78, keywords: ["翻译", "翻译成", "译成", "翻成", "用英文", "用中文", "用法语", "用日语", "本地化", "译为"] }
+      lookup_kw: { weight: -1.05, keywords: ["what is", "who is", "define", "meaning of", "when did", "where is", "how many", "capital of", "tell me about", "what are"] }
       lookup_intl_kw: { weight: -1.05, keywords: ["什么是", "谁是", "是什么", "什么意思", "的意思", "什么时候", "在哪里", "在哪儿", "有多少", "的首都", "多少钱"] }
+      chitchat_kw: { weight: -1.15, keywords: ["how are you", "good morning", "lol", "haha", "thank you", "goodbye", "what's up", "good night", "cheers"] }
       chitchat_intl_kw: { weight: -1.15, keywords: ["最近怎么样", "早上好", "晚上好", "晚安", "哈哈", "呵呵", "再见", "拜拜", "在吗", "在不在", "吃了吗"] }
+      simple_kw: { weight: -1.35, keywords: ["hi", "thanks", "ok", "ping", "thx"] }
       # —— structural / context dimensions (keywords empty; code feeds the score) ——
       has_code_block: { weight: 0.34 }
       has_url: { weight: 0.06 }
