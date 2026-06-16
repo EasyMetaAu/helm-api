@@ -167,23 +167,25 @@ export const oauthTokens = sqliteTable(
 );
 
 // Per-account OAuth subscription USAGE aggregate (providers page Tier 2). One row
-// per (provider_id, account, day) — day = UTC-midnight epoch ms. Additive counters
-// (requests / tokens) + a nullable summed cost (REAL; flat-rate plans report no
-// cost → stays NULL). first_seen_ms anchors the daily-average RPM derivation. NO
-// key/payload column (principle 7); pure aggregate observability.
+// per (provider_id, account, bucket_ms) — bucket_ms = UTC-HOUR floor epoch ms. Hour
+// granularity (not day) so the providers page can roll usage up by the ADMIN's
+// LOCAL day at read time (the gateway is tz-agnostic at write time). Additive
+// counters (requests / tokens) + a nullable summed cost (REAL; flat-rate plans
+// report no cost → stays NULL). first_seen_ms anchors the daily-average RPM
+// derivation. NO key/payload column (principle 7); pure aggregate observability.
 export const oauthUsage = sqliteTable(
   "oauth_usage",
   {
     providerId: text("provider_id").notNull(),
     account: text("account").notNull(),
-    day: integer("day").notNull(), // UTC-midnight epoch ms
+    bucketMs: integer("bucket_ms").notNull(), // UTC-hour floor epoch ms
     requests: integer("requests").notNull(),
     tokens: integer("tokens").notNull(),
     costUsd: real("cost_usd"), // nullable; summed completion cost
     firstSeenMs: integer("first_seen_ms").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.providerId, t.account, t.day] })],
+  (t) => [primaryKey({ columns: [t.providerId, t.account, t.bucketMs] })],
 );
 
 // Per-account OAuth subscription QUOTA snapshot (providers page Tier 3). One row

@@ -13,14 +13,16 @@ import type { AdminApiDeps } from "./deps.js";
 const DAY_MS = 86_400_000;
 
 export function registerStatsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
-  // GET /stats?start&end&bucket -> TelemetryAggregate. The window defaults to the
-  // last 24h when start/end are omitted (a live dashboard cares about recent
-  // traffic); bucket defaults to "day". The store does the SUM/GROUP BY in SQL.
+  // GET /stats?start&end&bucket&tzOffsetMinutes -> TelemetryAggregate. The window
+  // defaults to the last 24h when start/end are omitted (a live dashboard cares
+  // about recent traffic); bucket defaults to "day". `tzOffsetMinutes` (the admin
+  // browser's UTC offset) floors buckets in the client's LOCAL day/hour — defaults
+  // to 0 (UTC) when absent. The store does the SUM/GROUP BY in SQL.
   app.get("/admin/api/stats", async (c) => {
     const q = StatsQuerySchema.parse(c.req.query());
     const end = q.end ?? Date.now();
     const start = q.start ?? end - DAY_MS;
-    const agg = await deps.telemetry.aggregate(start, end, q.bucket);
+    const agg = await deps.telemetry.aggregate(start, end, q.bucket, q.tzOffsetMinutes);
     return c.json(agg);
   });
 }

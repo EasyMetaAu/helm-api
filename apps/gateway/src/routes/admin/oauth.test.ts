@@ -79,7 +79,7 @@ describe("admin OAuth routes — read endpoints", () => {
       ).usage,
     ).toEqual([]);
     const oauthUsage = {
-      queryDay: vi.fn(async () => [
+      queryRange: vi.fn(async () => [
         {
           providerId: "anthropic",
           account: "default",
@@ -103,6 +103,43 @@ describe("admin OAuth routes — read endpoints", () => {
     // The unbound "ghost" account is filtered out; the bound one keeps a derived rpm.
     expect(body.usage).toHaveLength(1);
     expect(body.usage[0]?.account).toBe("default");
+  });
+
+  it("GET /oauth/usage?tzOffsetMinutes rolls up the viewer's LOCAL day window", async () => {
+    const DAY = 86_400_000;
+    const calls: Array<[number, number]> = [];
+    const oauthUsage = {
+      queryRange: vi.fn(async (start: number, end: number) => {
+        calls.push([start, end]);
+        return [];
+      }),
+    } as unknown as AdminApiDeps["oauthUsage"];
+    const now = Date.now();
+    await app({ oauth: fullSeam(), oauthUsage }).request(
+      "/admin/api/oauth/usage?tzOffsetMinutes=480",
+    );
+    expect(calls).toHaveLength(1);
+    const [start, end] = calls[0] ?? [0, 0];
+    const offsetMs = 480 * 60_000; // UTC+8
+    expect(end - start).toBe(DAY); // exactly one local day
+    expect((start + offsetMs) % DAY).toBe(0); // start floors to LOCAL midnight
+    expect(start).toBeLessThanOrEqual(now); // window contains "now"
+    expect(end).toBeGreaterThan(now);
+  });
+
+  it("GET /oauth/usage fails open to UTC bucketing on a garbage tz offset", async () => {
+    const calls: Array<[number, number]> = [];
+    const oauthUsage = {
+      queryRange: vi.fn(async (start: number, end: number) => {
+        calls.push([start, end]);
+        return [];
+      }),
+    } as unknown as AdminApiDeps["oauthUsage"];
+    await app({ oauth: fullSeam(), oauthUsage }).request(
+      "/admin/api/oauth/usage?tzOffsetMinutes=banana",
+    );
+    const [start] = calls[0] ?? [0];
+    expect((start ?? 0) % 86_400_000).toBe(0); // offset 0 → UTC midnight
   });
 
   it("GET /oauth/quota returns [] with no store and merges PULL windows with one", async () => {

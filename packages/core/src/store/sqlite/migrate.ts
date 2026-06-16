@@ -527,6 +527,23 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE telemetry ADD COLUMN served_model TEXT;
     `,
   },
+  {
+    // Timezone-aware OAuth usage: rebucket from UTC-DAY to UTC-HOUR so the providers
+    // page can roll usage up by the ADMIN's LOCAL day at read time (the gateway is
+    // tz-agnostic at write time, so it can only floor in UTC — the admin's offset is
+    // known only on read). Pure rename: the write path now floors `now` to the hour
+    // and the read path sums the hours inside the viewer's local day. Existing daily
+    // rows (UTC-midnight) stay valid hour-floor values (the 00:00 UTC bucket); their
+    // intra-day distribution is lost — acceptable for an observability artifact.
+    version: 23,
+    sql: `
+      ALTER TABLE oauth_usage RENAME COLUMN day TO bucket_ms;
+
+      DROP INDEX IF EXISTS idx_oauth_usage_day;
+
+      CREATE INDEX IF NOT EXISTS idx_oauth_usage_bucket_ms ON oauth_usage (bucket_ms);
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

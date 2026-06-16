@@ -1,6 +1,11 @@
 import { listRequests, type RequestListItem } from '$lib/api/requests.js';
 import { type DashboardStats, EMPTY_STATS, getStats } from '$lib/api/stats.js';
-import { parseRange, type RangeKey, resolveWindow } from '$lib/requests-filters.js';
+import {
+  clientTzOffsetMinutes,
+  parseRange,
+  type RangeKey,
+  resolveWindow,
+} from '$lib/requests-filters.js';
 import type { PageLoad } from './$types.js';
 
 // Dashboard load (SPA, client-side): read the date-range preset from the URL
@@ -29,11 +34,14 @@ export const load: PageLoad = async ({ url }) => {
   const range = parseRange(url.searchParams.get('range'), '24h');
   const { start, end } = resolveWindow(range, Date.now());
   const bucket = bucketFor(range);
+  // Send the viewer's UTC offset so the SQL series buckets break at local midnight
+  // (not 00:00 UTC) — the fix for the "8am boundary" on UTC+8 dashboards.
+  const tzOffsetMinutes = clientTzOffsetMinutes();
 
   // The aggregate (cards + charts). Fail-soft to an empty aggregate.
   let agg: DashboardStats = EMPTY_STATS;
   try {
-    agg = await getStats({ start, end, bucket });
+    agg = await getStats({ start, end, bucket, tzOffsetMinutes });
   } catch {
     agg = EMPTY_STATS;
   }

@@ -337,7 +337,18 @@ export interface TelemetryStore {
   // day (admin homepage). SQL-level SUM/COUNT/GROUP BY over the denormalized token
   // columns — see TelemetryAggregate. READ-ONLY; never on the request path. Both
   // adapters implement it; the contract test pins sqlite/pg parity.
-  aggregate(startMs: number, endMs: number, bucket: "hour" | "day"): Promise<TelemetryAggregate>;
+  //
+  // `tzOffsetMinutes` (east-positive, e.g. UTC+8 = 480) floors the day/hour buckets
+  // in the CLIENT's local time, not UTC — so a UTC+8 dashboard's daily series breaks
+  // at local midnight instead of 08:00 local. Defaults to 0 (UTC bucketing = legacy
+  // behavior); the bucketStartMs it returns is still a UTC epoch ms (= local midnight
+  // expressed in UTC), which the admin renders back to local with formatTimestamp.
+  aggregate(
+    startMs: number,
+    endMs: number,
+    bucket: "hour" | "day",
+    tzOffsetMinutes?: number,
+  ): Promise<TelemetryAggregate>;
   // Full-payload capture (opt-out via runtime settings capture_payloads). Upsert
   // by request_id (idempotent: the stream path may write the request first, then
   // backfill the assembled response). Stores verbatim bodies — never redacted.
@@ -679,27 +690,30 @@ export interface OAuthTokenRecord {
   updatedAt: number; // ms epoch of the last write (rotation timestamp)
 }
 
-// Per-account OAuth subscription USAGE aggregate (providers-page Tier 2). One row
-// per (provider_id, account, day) — `day` is the UTC-midnight epoch ms. This is an
-// OBSERVABILITY artifact, NOT a quota/security boundary, so both methods are
-// FAIL-OPEN at the call site (a write/read failure is swallowed + logged, never
-// 5xx's a served request nor breaks the admin page — Principle 3). `record` is an
-// additive upsert (requests+1, tokens+=, cost null-aware) fired once per served
-// OAuth call. NEVER a plaintext key / payload — only aggregate counters (principle 7).
+// Per-account OAuth subscription USAGE aggregate (providers-page Tier 2). Stored as
+// one row per (provider_id, account, bucket_ms) where bucket_ms is the UTC-HOUR
+// floor — hour granularity so the read can roll up by the ADMIN's LOCAL day (the
+// gateway is tz-agnostic at write time). This is an OBSERVABILITY artifact, NOT a
+// quota/security boundary, so both methods are FAIL-OPEN at the call site (a
+// write/read failure is swallowed + logged, never 5xx's a served request nor breaks
+// the admin page — Principle 3). `record` is an additive upsert (requests+1,
+// tokens+=, cost null-aware) fired once per served OAuth call. NEVER a plaintext key
+// / payload — only aggregate counters (principle 7).
 export interface OAuthUsageStore {
-  // Fold one served call into today's row: +1 request, +tokens, +costUsd (null
+  // Fold one served call into its hour bucket: +1 request, +tokens, +costUsd (null
   // stays null until a measured cost arrives — flat-rate plans report no cost).
   // `firstSeenMs` is taken as the MIN across calls (anchors daily-average RPM).
   record(input: {
     providerId: string;
     account: string;
-    dayMs: number; // UTC-midnight epoch ms (caller floors `now`)
+    bucketMs: number; // UTC-hour floor epoch ms (caller floors `now` to the hour)
     tokens: number;
     costUsd: number | null;
     nowMs: number; // epoch ms of this call (firstSeenMs / updatedAt source)
   }): Promise<void>;
-  // All accounts' aggregate rows for one UTC day (the providers page reads today).
-  queryDay(dayMs: number): Promise<OAuthUsageRow[]>;
+  // All accounts' usage ROLLED UP over [startMs, endMs) — the providers page passes
+  // the admin's local-day window. Sums the per-hour buckets per (provider, account).
+  queryRange(startMs: number, endMs: number): Promise<OAuthUsageRow[]>;
 }
 
 // Per-account OAuth subscription QUOTA snapshot (providers-page Tier 3). One row

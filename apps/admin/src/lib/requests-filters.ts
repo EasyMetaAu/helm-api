@@ -123,3 +123,14 @@ export function resolveWindow(range: RangeKey, nowMs: number): { start?: number;
       return { start: nowMs - 30 * DAY_MS };
   }
 }
+
+// The viewer's UTC offset in EAST-POSITIVE minutes (UTC+8 → +480), the form the
+// stats/usage endpoints expect for local-day bucketing. `Date.getTimezoneOffset()`
+// is the OPPOSITE sign (minutes to ADD to local to reach UTC, so UTC+8 → −480), so
+// we negate it. Passed to the aggregate endpoints so SQL buckets break at the
+// client's local midnight instead of 00:00 UTC (the "8am boundary" for UTC+8).
+export function clientTzOffsetMinutes(nowMs: number = Date.now()): number {
+  // `|| 0` normalizes negative zero: `-getTimezoneOffset()` is -0 at UTC, which is
+  // surprising to compare against and to serialize.
+  return -new Date(nowMs).getTimezoneOffset() || 0;
+}

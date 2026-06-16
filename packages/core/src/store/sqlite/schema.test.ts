@@ -57,7 +57,9 @@ describe("sqlite schema + migrations", () => {
       // memory_messages CREATE, so its dedup DELETE would fail — out of scope.
       // v22 (telemetry token columns): this fixture never creates telemetry, so the
       // ALTER would fail — pre-mark applied, out of scope for this v14–v16 test.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22])
+      // v23 (oauth_usage day→bucket_ms): v12 is applied without the oauth_usage
+      // CREATE, so the RENAME would fail — pre-mark applied, out of scope.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23])
         rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",

@@ -175,21 +175,26 @@ export class SqliteTelemetryStore implements TelemetryStore {
   // headline totals, a per-bucket time series, a per-served-model breakdown — all
   // SUM/COUNT/GROUP BY over the denormalized token columns (never row-by-row JS).
   // Token sums are COALESCE'd to 0; cost/latency stay nullable (honest "not
-  // measured"). Bucketing is integer division on epoch-ms with the window size
-  // INLINED via sql.raw (so both dialects do INTEGER division — a bound JS number
-  // could be typed float in pg and break the bucket floor). Ordering is done in the
-  // shared shaper (JS) so it can't drift between sqlite and pg. Read-only.
+  // measured"). Bucketing is integer division on epoch-ms with the window size +
+  // tz offset INLINED via sql.raw (so both dialects do INTEGER division — a bound JS
+  // number could be typed float in pg and break the bucket floor). `tzOffsetMinutes`
+  // shifts the floor into the client's LOCAL day/hour (shift-floor-unshift): the
+  // dividend `createdAt + offsetMs` stays positive for every real timestamp, so
+  // sqlite/pg truncation == floor. Ordering is done in the shared shaper (JS) so it
+  // can't drift between sqlite and pg. Read-only.
   async aggregate(
     startMs: number,
     endMs: number,
     bucket: "hour" | "day",
+    tzOffsetMinutes = 0,
   ): Promise<TelemetryAggregate> {
     const where = and(
       gte(telemetry.createdAt, new Date(startMs)),
       lt(telemetry.createdAt, new Date(endMs)),
     );
     const bucketMs = sql.raw(String(bucket === "hour" ? 3_600_000 : 86_400_000));
-    const bucketStart = sql<number>`(${telemetry.createdAt} / ${bucketMs}) * ${bucketMs}`;
+    const offset = sql.raw(`(${tzOffsetMinutes * 60_000})`);
+    const bucketStart = sql<number>`((${telemetry.createdAt} + ${offset}) / ${bucketMs}) * ${bucketMs} - ${offset}`;
 
     const totals = this.db
       .select({

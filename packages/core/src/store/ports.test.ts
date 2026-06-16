@@ -151,9 +151,11 @@ class InMemoryTelemetryStore implements TelemetryStore {
     startMs: number,
     endMs: number,
     bucket: "hour" | "day",
+    tzOffsetMinutes = 0,
   ): Promise<TelemetryAggregate> {
     const inWindow = this.rows.filter((r) => r.at.getTime() >= startMs && r.at.getTime() < endMs);
     const bucketMs = bucket === "hour" ? 3_600_000 : 86_400_000;
+    const offsetMs = tzOffsetMinutes * 60_000; // local-day floor (shift-floor-unshift)
     const num = (n: number | null | undefined) => n ?? 0;
     const totals = {
       requests: inWindow.length,
@@ -171,7 +173,7 @@ class InMemoryTelemetryStore implements TelemetryStore {
     };
     const seriesMap = new Map<number, TelemetryAggregate["series"][number]>();
     for (const r of inWindow) {
-      const k = Math.floor(r.at.getTime() / bucketMs) * bucketMs;
+      const k = Math.floor((r.at.getTime() + offsetMs) / bucketMs) * bucketMs - offsetMs;
       const b = seriesMap.get(k) ?? {
         bucketStartMs: k,
         promptTokens: 0,

@@ -178,8 +178,10 @@ export class PgTelemetryStore implements TelemetryStore {
 
   // Dashboard token-accounting aggregate — pg mirror of the sqlite adapter. Same
   // three SUM/COUNT/GROUP BY queries and the SAME integer-division bucketing (the
-  // window size is inlined via sql.raw so pg does bigint INTEGER division, matching
-  // sqlite exactly — contract-tested). createdAt is epoch-ms bigint (compared as
+  // window size + tz offset are inlined via sql.raw so pg does bigint INTEGER
+  // division, matching sqlite exactly — contract-tested). `tzOffsetMinutes` shifts
+  // the floor into the client's LOCAL day/hour (shift-floor-unshift; dividend stays
+  // positive so truncation == floor). createdAt is epoch-ms bigint (compared as
   // numbers, like queryWindow). avg latency reads the jsonb decision via ->> + cast.
   // pg SUM()/bucket exprs return bigint as STRING; the shared shaper coerces with
   // Number() and owns the (dialect-independent) ordering. Read-only.
@@ -187,10 +189,12 @@ export class PgTelemetryStore implements TelemetryStore {
     startMs: number,
     endMs: number,
     bucket: "hour" | "day",
+    tzOffsetMinutes = 0,
   ): Promise<TelemetryAggregate> {
     const where = and(gte(telemetry.createdAt, startMs), lt(telemetry.createdAt, endMs));
     const bucketMs = sql.raw(String(bucket === "hour" ? 3_600_000 : 86_400_000));
-    const bucketStart = sql<number>`(${telemetry.createdAt} / ${bucketMs}) * ${bucketMs}`;
+    const offset = sql.raw(`(${tzOffsetMinutes * 60_000})`);
+    const bucketStart = sql<number>`((${telemetry.createdAt} + ${offset}) / ${bucketMs}) * ${bucketMs} - ${offset}`;
 
     const totalsRows = await this.db
       .select({

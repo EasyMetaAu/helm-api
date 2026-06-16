@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  clientTzOffsetMinutes,
   DEFAULT_FILTERS,
   filtersToSearch,
   parseFilters,
@@ -112,5 +113,26 @@ describe('parseRange', () => {
     expect(parseRange(null)).toBe('all');
     expect(parseRange('bogus')).toBe('all');
     expect(parseRange('bogus', '24h')).toBe('24h');
+  });
+});
+
+describe('clientTzOffsetMinutes', () => {
+  // Robust against the CI timezone: mock getTimezoneOffset so the sign convention
+  // (east-positive) is asserted regardless of where the suite runs.
+  it('negates getTimezoneOffset to east-positive minutes (UTC+8 → +480)', () => {
+    const spy = vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(-480);
+    try {
+      expect(clientTzOffsetMinutes()).toBe(480);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('handles west-of-UTC and the UTC zero case', () => {
+    const west = vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(300); // UTC-5
+    expect(clientTzOffsetMinutes()).toBe(-300);
+    west.mockReturnValue(0); // UTC
+    expect(clientTzOffsetMinutes()).toBe(0);
+    west.mockRestore();
   });
 });

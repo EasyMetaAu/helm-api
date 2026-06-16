@@ -19,7 +19,7 @@ export interface DashboardTotals {
 }
 
 export interface DashboardSeriesBucket {
-  bucketStartMs: number; // UTC hour/day bucket floor (epoch ms)
+  bucketStartMs: number; // bucket floor in epoch ms (client-local day/hour when a tz offset was sent; UTC otherwise) — rendered back to local in the chart
   promptTokens: number;
   completionTokens: number;
   cachedTokens: number;
@@ -63,18 +63,21 @@ export interface StatsParams {
   start?: number; // epoch ms (inclusive); omitted → backend default (last 24h)
   end?: number; // epoch ms (exclusive); omitted → backend default (now)
   bucket?: 'hour' | 'day';
+  tzOffsetMinutes?: number; // east-positive UTC offset; buckets in client-local day
 }
 
 const BASE = '/admin/api/stats';
 
-// GET /admin/api/stats → TelemetryAggregate. The window + bucket are query params;
-// the backend defaults to the last 24h / day when omitted and fails open on a
-// malformed query, so this never needs to validate them itself.
+// GET /admin/api/stats → TelemetryAggregate. The window + bucket + tzOffsetMinutes
+// are query params; the backend defaults to the last 24h / day / UTC when omitted
+// and fails open on a malformed query, so this never needs to validate them itself.
 export async function getStats(params: StatsParams = {}): Promise<DashboardStats> {
   const qs = new URLSearchParams();
   if (params.start !== undefined) qs.set('start', String(params.start));
   if (params.end !== undefined) qs.set('end', String(params.end));
   if (params.bucket) qs.set('bucket', params.bucket);
+  if (params.tzOffsetMinutes !== undefined)
+    qs.set('tzOffsetMinutes', String(params.tzOffsetMinutes));
   const url = qs.toString() ? `${BASE}?${qs}` : BASE;
   const res = await fetch(url, { headers: { accept: 'application/json' } });
   if (!res.ok) throw new Error(`stats api ${res.status}`);
