@@ -1,5 +1,5 @@
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
-import { detectCodeBlock, detectStackTrace } from "./signals.js";
+import { detectCodeBlock, detectStackTrace, keywordMatcher } from "./signals.js";
 import type { Complexity } from "./tiers.js";
 
 // Layer-1 hard overrides & shortcuts — the deterministic signals that BYPASS the
@@ -130,11 +130,20 @@ function isShortAndSimple(text: string, maxChars: number, cfg: ClassifierRulesCo
   return true;
 }
 
+// The short-message disqualifier must see BOTH the English signal dimensions and
+// their international (*_intl_kw) counterparts — otherwise a short Chinese analysis/
+// security/diagnostic prompt ("分析这个系统的根因") is wrongly force-pinned `simple`
+// because the English lists never match it. The shared keywordMatcher matches CJK as
+// a substring, so these now fire mid-text. task_keywords.security carries its own
+// Simplified entries; the *_intl_kw dimensions cover analysis/security/diagnostic.
 function containsClassifierSignal(text: string, cfg: ClassifierRulesConfig): boolean {
   const signalKeywords = [
     ...keywordsForDimension(cfg, "analysis_kw"),
+    ...keywordsForDimension(cfg, "analysis_intl_kw"),
     ...keywordsForDimension(cfg, "security_kw"),
+    ...keywordsForDimension(cfg, "security_intl_kw"),
     ...keywordsForDimension(cfg, "diagnostic_short_kw"),
+    ...keywordsForDimension(cfg, "diagnostic_short_intl_kw"),
     ...(cfg.task_keywords.security ?? []),
   ];
   return matchesAnyKeyword(text, signalKeywords);
@@ -160,23 +169,6 @@ function normalizeUtterance(text: string): string {
     .toLowerCase()
     .replace(/[.!?]+$/u, "")
     .replace(/\s+/gu, " ");
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-const WORD = /[\p{L}\p{N}_]/u;
-const keywordMatcherCache = new Map<string, RegExp>();
-function keywordMatcher(kw: string): RegExp {
-  let re = keywordMatcherCache.get(kw);
-  if (re === undefined) {
-    const left = WORD.test(kw[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
-    const right = WORD.test(kw[kw.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
-    re = new RegExp(left + escapeRegExp(kw) + right, "iu");
-    keywordMatcherCache.set(kw, re);
-  }
-  return re;
 }
 
 // Text of the LAST user-role message (heartbeat / short-message look at the

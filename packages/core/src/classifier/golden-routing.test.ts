@@ -506,6 +506,66 @@ const CASES: GoldenCase[] = [
     complexity: "medium",
     selected_lane: "balanced",
   },
+
+  // ── INTERNATIONAL (Simplified Chinese) PARITY (2026-06-16) ──────────────────
+  // ZH rows mirror their English golden rows. The analysis/security rows are the
+  // regression guard for the overrides.ts CJK short-circuit fix: a SHORT ZH
+  // analysis/security prompt must NOT be force-pinned simple→economy because the
+  // English signal lists miss it (and the old override matcher could not match CJK).
+  {
+    name: "zh greeting -> economy",
+    request: req("你好"),
+    task_type: "chat",
+    complexity: "simple",
+    selected_lane: "economy",
+  },
+  {
+    name: "zh lookup what-is -> economy",
+    request: req("什么是单子"),
+    task_type: "chat",
+    complexity: "simple",
+    selected_lane: "economy",
+  },
+  {
+    name: "zh translate -> economy",
+    request: req("把这段话翻译成英文"),
+    task_type: "chat",
+    complexity: "simple",
+    selected_lane: "economy",
+  },
+  {
+    name: "zh trivial coding -> economy",
+    request: req("写一个反转字符串的函数"),
+    task_type: "coding",
+    complexity: "simple",
+    selected_lane: "economy",
+  },
+  {
+    // BUG-FIX guard: this short ZH analysis prompt was mis-pinned simple→economy
+    // before the overrides CJK short-circuit fix; now analysis_intl grip routes it up.
+    name: "zh analysis (short) -> up, NOT economy",
+    request: req("分析这个系统的根因和利弊"),
+    task_type: "chat",
+    complexity: "complex",
+    selected_lane: "premium",
+  },
+  {
+    // BUG-FIX guard: short ZH security audit (>=2 security hits) routes up.
+    name: "zh security (short) -> premium",
+    request: req("检查这个接口的命令注入和越权漏洞"),
+    task_type: "security",
+    complexity: "complex",
+    selected_lane: "premium",
+  },
+  {
+    // POLITENESS-PREAMBLE guard: a 你好 preamble must NOT drag a genuine complex ZH
+    // request down (你好 is deliberately excluded from the negative intl dims).
+    name: "zh polite preamble + complex analysis -> premium",
+    request: req("你好，请分析这个复杂分布式系统的架构权衡、性能瓶颈和根因"),
+    task_type: "chat",
+    complexity: "complex",
+    selected_lane: "premium",
+  },
 ];
 
 describe("GOLDEN classify+route baseline (characterizes current behavior)", () => {

@@ -93,6 +93,10 @@ classifier:
       # Short diagnostics/security fragments are meaningful despite being tiny;
       # give them enough positive signal to escape the simple/economy shortcut.
       diagnostic_short_kw: { weight: 3.60, keywords: ["no output", "no stack trace", "no auth check", "no command injection"] }
+      # Chinese diagnostic fragments — POSITIVE signal mirrors diagnostic_short_kw so a
+      # short ZH diagnostic ("没有输出") escapes the simple/economy shortcut AND gives the
+      # language guard real grip. Simplified only (engine.test asserts no Traditional).
+      diagnostic_short_intl_kw: { weight: 3.60, keywords: ["没有输出", "无输出", "没有报错", "无报错", "没有堆栈跟踪", "没有权限检查", "没有命令注入"] }
       extraction_kw: { weight: 0.12, keywords: ["extract", "parse", "json from", "fields", "schema", "pull out", "list all", "structured data", "named entities", "scrape"] }
       extraction_intl_kw: { weight: 0.12, keywords: ["提取", "解析", "从 JSON", "字段", "模式", "抽取", "列出所有", "结构化数据", "命名实体", "抓取", "提取字段", "抽取实体"] }
       data_kw: { weight: 0.20, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot", "group by", "spreadsheet", "histogram", "correlation", "query"] }
@@ -115,6 +119,16 @@ classifier:
       lookup_kw: { weight: -1.05, keywords: ["what is", "who is", "define", "meaning of", "when did", "where is", "how many", "capital of", "tell me about", "what are"] }
       chitchat_kw: { weight: -1.15, keywords: ["how are you", "good morning", "lol", "haha", "thank you", "goodbye", "what's up", "good night", "cheers"] }
       simple_kw: { weight: -1.35, keywords: ["hi", "thanks", "ok", "ping", "thx"] }
+      # —— international (Simplified Chinese) negatives —— mirror the English negatives.
+      # NOTE: a NEGATIVE contribution does NOT suppress the language guard (engine.ts
+      # requires a POSITIVE hit), and short ZH prompts are already pinned `simple` by
+      # short_message — so these mainly add grip-DOWN for medium-length ZH prompts that
+      # also carry a positive hit. Politeness preambles (你好/您好/请问/谢谢) are
+      # DELIBERATELY excluded: they routinely prefix real tasks, so penalizing them
+      # would misroute genuine ZH coding/analysis requests toward economy.
+      translation_intl_kw: { weight: -0.78, keywords: ["翻译", "翻译成", "译成", "翻成", "用英文", "用中文", "用法语", "用日语", "本地化", "译为"] }
+      lookup_intl_kw: { weight: -1.05, keywords: ["什么是", "谁是", "是什么", "什么意思", "的意思", "什么时候", "在哪里", "在哪儿", "有多少", "的首都", "多少钱"] }
+      chitchat_intl_kw: { weight: -1.15, keywords: ["最近怎么样", "早上好", "晚上好", "晚安", "哈哈", "呵呵", "再见", "拜拜", "在吗", "在不在", "吃了吗"] }
       # —— structural / context dimensions (keywords empty; code feeds the score) ——
       has_code_block: { weight: 0.34 }
       has_url: { weight: 0.06 }
@@ -162,7 +176,7 @@ classifier:
     task_activation: { web: 3.0, security: 2.0 }
     overrides:
       heartbeat_tokens: ["HEARTBEAT_OK"]
-      exact_confirmation_tokens: ["yes", "no", "sure", "got it", "ok", "thanks", "是", "否", "可以", "好的", "谢谢"]
+      exact_confirmation_tokens: ["yes", "no", "sure", "got it", "ok", "thanks", "是", "否", "可以", "好的", "谢谢", "对", "嗯", "行", "好", "没问题", "收到", "明白", "知道了"]
       formal_logic_keywords: ["⊢", "∴", "modus ponens", "first-order logic", "充分必要", "反证法", "归纳法"]
       tools_floor: standard
       long_context_token_threshold: 64000  # capability signal (NOT a task_type); bumped 50k->64k to match llm-router lanes.yaml long_context anchor
