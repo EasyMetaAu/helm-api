@@ -475,6 +475,16 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_oauth_usage_bucket_ms ON oauth_usage (bucket_ms);
     `,
   },
+  {
+    // Forwarded-upstream request capture (mirrors sqlite v24): the EXACT provider-
+    // native body sent upstream (AFTER memory injection + protocol translation).
+    // Additive + nullable (NULL = pre-feature row / capture off / no provider
+    // served); forward-only. TEXT to round-trip exact bytes; NO plaintext key.
+    version: 23,
+    sql: `
+      ALTER TABLE request_payloads ADD COLUMN upstream_request_json TEXT;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

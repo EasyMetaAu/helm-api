@@ -357,6 +357,8 @@ describe("sqlite v18 forgetting schema deltas", () => {
       rec.run(22, Date.now());
       // v23 renames oauth_usage.day (also absent here) → pre-mark applied.
       rec.run(23, Date.now());
+      // v24 adds request_payloads.upstream_request_json (table absent here) → pre-mark.
+      rec.run(24, Date.now());
       seed.close();
 
       expect(() => runMigrations(path)).not.toThrow();

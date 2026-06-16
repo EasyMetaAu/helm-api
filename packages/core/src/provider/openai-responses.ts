@@ -446,7 +446,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     return changed ? JSON.parse(value) : raw;
   }
 
-  async function request(input: NativePassthroughInput, external?: AbortSignal): Promise<Response> {
+  async function request(
+    input: NativePassthroughInput,
+    external?: AbortSignal,
+    capture?: (wireBody: string) => void,
+  ): Promise<Response> {
     const providerHeaders = await headers();
     if (isNativePassthroughCarrier(input) && cfg.userAgent === undefined) {
       const hasClientUserAgent = Object.keys(input.headers).some(
@@ -457,6 +461,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     const prepared = prepareNativePassthroughRequest(input, providerHeaders, {
       mergeHeaders: ["openai-beta"],
     });
+    // The exact Responses-native bytes POSTed upstream (translate path: OpenAI→Responses
+    // re-serialization; native passthrough: verbatim, model patched) — surfaced for capture.
+    capture?.(prepared.bodyText);
     // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
     // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
     return withConnectionRetry(
@@ -498,12 +505,13 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   async function requestWithRetry(
     body: NativePassthroughInput,
     external?: AbortSignal,
+    capture?: (wireBody: string) => void,
   ): Promise<Response> {
-    const res = await request(body, external);
+    const res = await request(body, external, capture);
     if (res.status === 401 && cfg.onUnauthorized !== undefined) {
       await res.body?.cancel().catch(() => {});
       cfg.onUnauthorized();
-      const retried = await request(body, external);
+      const retried = await request(body, external, capture);
       fireResponseMeta(retried);
       return retried;
     }
@@ -539,6 +547,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       const res = await requestWithRetry(
         openaiToResponsesRequest(req, { sessionId: cfg.sessionId }),
         opts?.signal,
+        opts?.captureUpstream,
       );
       if (!res.ok) throw await errorFromResponse(res);
       // Codex is stream-only → aggregate the SSE into a single Chat response.
@@ -550,6 +559,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       const res = await requestWithRetry(
         openaiToResponsesRequest(req, { sessionId: cfg.sessionId }),
         opts?.signal,
+        opts?.captureUpstream,
       );
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateResponsesSSE(res, model, timeoutMs);
@@ -565,7 +575,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     // identity headers (Bearer + chatgpt-account-id + originator + OpenAI-Beta) are applied
     // by `headers()` inside the shared core, so they ride on the native body unchanged.
     async nativePassthrough(body, opts) {
-      const res = await requestWithRetry(body, opts?.signal);
+      const res = await requestWithRetry(body, opts?.signal, opts?.captureUpstream);
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as Record<string, unknown>;
     },
@@ -577,7 +587,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     // the upstream Responses SSE is BYTE-RELAYED unchanged via readResponsesSSERaw — no SSE
     // re-mapping state machine to mangle reasoning.encrypted_content / tools (principle 8).
     async *nativePassthroughStream(body, opts) {
-      const res = await requestWithRetry(body, opts?.signal);
+      const res = await requestWithRetry(body, opts?.signal, opts?.captureUpstream);
       if (!res.ok) throw await errorFromResponse(res);
       yield* readResponsesSSERaw(res, timeoutMs);
     },
@@ -684,6 +694,7 @@ export function createGenericOpenAIResponsesClient(
       body?: NativePassthroughInput;
       accept?: string;
       signal?: AbortSignal;
+      captureUpstream?: (wireBody: string) => void;
     },
   ): Promise<Response> {
     const headers = await providerHeaders(init.accept);
@@ -693,6 +704,9 @@ export function createGenericOpenAIResponsesClient(
       const prepared = prepareNativePassthroughRequest(init.body, headers);
       requestHeaders = prepared.headers;
       bodyText = prepared.bodyText;
+      // Exact Responses-native bytes POSTed upstream (post OpenAI→Responses translation
+      // on the translate path) — surfaced for forwarded-upstream capture.
+      init.captureUpstream?.(bodyText);
     }
     const res = await fetchWithTimeout(
       await endpoint(path),
@@ -712,6 +726,7 @@ export function createGenericOpenAIResponsesClient(
         const prepared = prepareNativePassthroughRequest(init.body, refreshedHeaders);
         retryHeaders = prepared.headers;
         retryBodyText = prepared.bodyText;
+        init.captureUpstream?.(retryBodyText);
       }
       return await fetchWithTimeout(
         await endpoint(path),
@@ -735,6 +750,7 @@ export function createGenericOpenAIResponsesClient(
         method: "POST",
         body: openaiToGenericResponsesRequest(req),
         signal: opts?.signal,
+        captureUpstream: opts?.captureUpstream,
       });
       if (!res.ok) throw await errorFromResponse(res);
       return responsesJsonToChatResponse((await res.json()) as Record<string, unknown>, model);
@@ -747,6 +763,7 @@ export function createGenericOpenAIResponsesClient(
         body: { ...openaiToGenericResponsesRequest(req), stream: true },
         accept: "text/event-stream",
         signal: opts?.signal,
+        captureUpstream: opts?.captureUpstream,
       });
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateResponsesSSE(res, model, timeoutMs);
@@ -757,6 +774,7 @@ export function createGenericOpenAIResponsesClient(
         method: "POST",
         body,
         signal: opts?.signal,
+        captureUpstream: opts?.captureUpstream,
       });
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as Record<string, unknown>;
@@ -768,6 +786,7 @@ export function createGenericOpenAIResponsesClient(
         body,
         accept: "text/event-stream",
         signal: opts?.signal,
+        captureUpstream: opts?.captureUpstream,
       });
       if (!res.ok) throw await errorFromResponse(res);
       yield* readResponsesSSERaw(res, timeoutMs);

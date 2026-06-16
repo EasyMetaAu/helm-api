@@ -147,6 +147,18 @@ describe("routeRequest — orchestration", () => {
     expect(rec.final.model_alias).toBe("coder_a");
   });
 
+  it("forwards the executor's upstreamRequest onto the ExecutionResult (ok branch)", async () => {
+    // The EXACT serialized wire body the provider captured (a string), forwarded verbatim.
+    const upstreamRequest = JSON.stringify({
+      model: "coder-a-model",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const d = deps({ execute: vi.fn(async () => ({ ...okExecute(), upstreamRequest })) });
+    const result = await routeRequest(req(), d);
+    expect(result.final.status).toBe("ok");
+    expect(result.upstreamRequest).toBe(upstreamRequest);
+  });
+
   it("ignores a spoofed x-project-id (memory scope) for routing — a project_id policy does NOT match", async () => {
     // A client sets x-project-id to a value a server-side project_id policy targets.
     // The memory header rides metadata.project_id, but routing must NOT trust it

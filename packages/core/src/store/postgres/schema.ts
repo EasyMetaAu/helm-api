@@ -256,6 +256,9 @@ export const requestPayloads = pgTable("request_payloads", {
   requestId: text("request_id").primaryKey(),
   requestJson: text("request_json").notNull(),
   responseJson: text("response_json"),
+  // EXACT body forwarded upstream (post memory-inject + protocol-translation). NULL
+  // when capture off / no provider served / pre-feature row. NO plaintext key.
+  upstreamRequestJson: text("upstream_request_json"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
 

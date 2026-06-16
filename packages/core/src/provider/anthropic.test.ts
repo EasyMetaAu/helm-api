@@ -1116,6 +1116,44 @@ describe("createAnthropicClient", () => {
     expect(client.nativeProtocolProfile).toBe("anthropic_messages");
   });
 
+  it("captureUpstream receives the EXACT Anthropic-native wire body on the TRANSLATE path (not the OpenAI input)", async () => {
+    let wireBody = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      wireBody = String(init?.body);
+      return jsonResponse({
+        id: "msg",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    let captured: string | null = null;
+    // An OpenAI-Chat request routed to Anthropic → the adapter translates it to
+    // Anthropic-native before POSTing. Codex P2: the capture must be the NATIVE body,
+    // not this OpenAI input.
+    await client.chatCompletion(
+      { model: "claude-x", messages: [{ role: "user", content: "hi" }], max_tokens: 64 },
+      {
+        captureUpstream: (b) => {
+          captured = b;
+        },
+      },
+    );
+    // Captured the EXACT bytes that hit the wire …
+    expect(captured).toBe(wireBody);
+    // … and they are Anthropic-native (max_tokens is a required Anthropic field set by
+    // the OpenAI→Anthropic translation), proving we capture post-translation, not the
+    // pre-translation adapter input.
+    const parsed = JSON.parse(captured ?? "null") as Record<string, unknown>;
+    expect(parsed.model).toBe("claude-x");
+    expect(parsed.max_tokens).toBe(64);
+    expect(Array.isArray(parsed.messages)).toBe(true);
+  });
+
   it("sends Bearer + Claude-Code identity headers + system spoof; 401-retries once", async () => {
     let calls = 0;
     const seenAuth: string[] = [];

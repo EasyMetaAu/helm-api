@@ -84,6 +84,10 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       captured: true,
       request: parseMaybeJson(p.requestJson),
       response: p.responseJson === null ? null : parseMaybeJson(p.responseJson),
+      // The EXACT body forwarded upstream (post memory-inject + protocol-translation)
+      // — what the model actually received. Null when no provider served / pre-feature.
+      upstream_request:
+        p.upstreamRequestJson === null ? null : parseMaybeJson(p.upstreamRequestJson),
       created_at: p.createdAt.getTime(),
     });
   });

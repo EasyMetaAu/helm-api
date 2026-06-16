@@ -555,6 +555,10 @@ export interface RequestPayloadView {
   captured: boolean;
   request?: unknown;
   response?: unknown;
+  // The EXACT body forwarded upstream — AFTER memory injection + protocol
+  // translation. This is what the model actually received (the inbound `request`
+  // is what the client sent). Null/absent when no provider served or pre-feature.
+  upstream_request?: unknown;
   created_at?: number;
 }
 

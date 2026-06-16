@@ -143,6 +143,9 @@ export const requestPayloads = sqliteTable("request_payloads", {
   requestId: text("request_id").primaryKey(),
   requestJson: text("request_json").notNull(), // verbatim client request body (JSON text)
   responseJson: text("response_json"), // assembled full response (null on error/unknown)
+  // EXACT body forwarded upstream (post memory-inject + protocol-translation). NULL
+  // when capture off / no provider served / pre-feature row. NO plaintext key.
+  upstreamRequestJson: text("upstream_request_json"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 

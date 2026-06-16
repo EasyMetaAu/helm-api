@@ -545,6 +545,7 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
     operation: "generateContent" | "streamGenerateContent" | "countTokens",
     input: NativePassthroughInput,
     external?: AbortSignal,
+    capture?: (wireBody: string) => void,
   ): Promise<Response> {
     const { model, body } = bodyAndModel(input);
     const t = withTimeout(timeoutMs, external);
@@ -556,10 +557,14 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
         t.signal,
         dnsLookup,
       );
+      // The exact Gemini-native bytes POSTed upstream (after remote-media materialization
+      // + OpenAI→Gemini translation on the translate path) — surfaced for capture.
+      const wireBody = JSON.stringify(materializedBody);
+      capture?.(wireBody);
       return await doFetch(endpoint(cfg.baseUrl, model, operation), {
         method: "POST",
         headers: await headers(),
-        body: JSON.stringify(materializedBody),
+        body: wireBody,
         signal: t.signal,
       });
     } catch (err) {
@@ -576,12 +581,13 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
     operation: "generateContent" | "streamGenerateContent" | "countTokens",
     input: NativePassthroughInput,
     external?: AbortSignal,
+    capture?: (wireBody: string) => void,
   ): Promise<Response> {
-    const res = await request(operation, input, external);
+    const res = await request(operation, input, external, capture);
     if (res.status === 401 && cfg.onUnauthorized !== undefined) {
       await res.body?.cancel().catch(() => {});
       cfg.onUnauthorized();
-      return await request(operation, input, external);
+      return await request(operation, input, external, capture);
     }
     return res;
   }
@@ -636,7 +642,12 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
     // transformers instead of failing — mirrors the anthropic client's translated path.
     async chatCompletion(req, opts) {
       const { model, body } = openAIChatToGeminiBody(req);
-      const res = await requestWithAuthRetry("generateContent", { ...body, model }, opts?.signal);
+      const res = await requestWithAuthRetry(
+        "generateContent",
+        { ...body, model },
+        opts?.signal,
+        opts?.captureUpstream,
+      );
       if (!res.ok) throw await errorFromResponse(res);
       return geminiResponseToOpenAIChat(await res.json());
     },
@@ -647,6 +658,7 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
         "streamGenerateContent",
         { ...body, model },
         opts?.signal,
+        opts?.captureUpstream,
       );
       if (!res.ok) throw await errorFromResponse(res);
       // Gemini native SSE → IR chunks → OpenAI SSE strings. IRChunk IS the OpenAI
@@ -660,13 +672,23 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
     },
 
     async nativePassthrough(input, opts) {
-      const res = await requestWithAuthRetry("generateContent", input, opts?.signal);
+      const res = await requestWithAuthRetry(
+        "generateContent",
+        input,
+        opts?.signal,
+        opts?.captureUpstream,
+      );
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as Record<string, unknown>;
     },
 
     async *nativePassthroughStream(input, opts) {
-      const res = await requestWithAuthRetry("streamGenerateContent", input, opts?.signal);
+      const res = await requestWithAuthRetry(
+        "streamGenerateContent",
+        input,
+        opts?.signal,
+        opts?.captureUpstream,
+      );
       if (!res.ok) throw await errorFromResponse(res);
       yield* readRawSSE(res);
     },

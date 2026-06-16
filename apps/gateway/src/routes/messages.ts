@@ -90,6 +90,11 @@ export interface PipelineRunResult {
    *  response. The route reads this to BYPASS transformResponseOut and hand the
    *  native body back byte-for-byte. Absent/false → today's translate path. */
   readonly nativePassthrough?: boolean;
+  /** The EXACT serialized wire body forwarded upstream for the served attempt (post
+   *  memory-inject + protocol-translation, captured at the provider's HTTP boundary).
+   *  Each face writes it verbatim into the captured payload so the admin sees what the
+   *  model actually received. Null/absent on a routing failure (no served attempt). */
+  readonly upstreamRequest?: string | null;
   /** Drain the full (non-stream) result into ONE IR response object. */
   collect(): Promise<unknown>;
   /** The outbound-protocol event stream: one object per wire event. For Anthropic
@@ -563,6 +568,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                 decision: result.decision,
                 requestJson,
                 responseJson: captureBodies ? captured.join("") : null,
+                upstreamRequestJson: result.upstreamRequest ?? null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
             );
@@ -599,6 +605,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             decision: result.decision,
             requestJson,
             responseJson: null,
+            upstreamRequestJson: result.upstreamRequest ?? null,
           },
           (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
         );
@@ -623,6 +630,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           decision: result.decision,
           requestJson,
           responseJson: captureBodies ? JSON.stringify(body) : null,
+          upstreamRequestJson: result.upstreamRequest ?? null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
       );

@@ -99,10 +99,10 @@
 
     <!-- Request: full captured body when capture_payloads is on, else metadata. -->
     <section class="card text-sm">
-      <h2 class="section-header">{$t('Request')}</h2>
+      <h2 class="section-header">{$t('Request (from client)')}</h2>
       {#if data.payload?.captured}
         <p class="field-help mb-2">
-          {$t('Full request body recorded for this call.')}
+          {$t('The request body as received from the client — before memory injection and translation.')}
         </p>
         <JsonViewer value={data.payload.request} testid="request-body" />
       {:else}
@@ -117,6 +117,21 @@
         </p>
       {/if}
     </section>
+
+    <!-- Forwarded upstream request: the EXACT body sent to the provider, AFTER
+         memory injection + protocol translation. Only present when a provider
+         served and capture was on. This is what the model actually received. -->
+    {#if data.payload?.captured && data.payload?.upstream_request != null}
+      <section class="card text-sm">
+        <h2 class="section-header">{$t('Forwarded to upstream LLM')}</h2>
+        <p class="field-help mb-2">
+          {$t(
+            'The exact request sent to the provider — after memory injection and protocol translation. This is what the model actually received.',
+          )}
+        </p>
+        <JsonViewer value={data.payload.upstream_request} testid="upstream-request-body" />
+      </section>
+    {/if}
 
     <!-- Decision chain (classification -> eval -> policy -> lanes -> attempts) -->
     <DecisionChain detail={d} />

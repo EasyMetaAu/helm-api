@@ -826,6 +826,9 @@ export function createMessagesPipeline(
         // response. The route reads this to BYPASS transformResponseOut and hand the
         // native body back byte-for-byte. Absent/false → today's translate path.
         nativePassthrough: result.nativePassthrough === true,
+        // The exact body forwarded upstream for the served attempt (post inject +
+        // translation). Exposed so the three faces capture it into the payload table.
+        upstreamRequest: result.upstreamRequest,
         async collect(): Promise<unknown> {
           if (failure !== null) throw failure;
           // Native passthrough (#217): the upstream's response is already in the

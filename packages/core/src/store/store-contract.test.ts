@@ -913,17 +913,38 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         messages: [{ role: "user", content: "hi" }],
       });
       const responseJson = JSON.stringify({ choices: [{ message: { content: "yo" } }] });
+      const upstreamRequestJson = JSON.stringify({
+        model: "gpt-resolved",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "user", content: "<system-reminder>memory</system-reminder>" },
+        ],
+      });
       await ctx.stores.telemetry.insertPayload({
         requestId: "req_1",
         requestJson,
         responseJson,
+        upstreamRequestJson,
         createdAt: new Date(5000),
       });
       const got = await ctx.stores.telemetry.getPayload("req_1");
       expect(got?.requestJson).toBe(requestJson);
       expect(got?.responseJson).toBe(responseJson);
+      expect(got?.upstreamRequestJson).toBe(upstreamRequestJson);
       expect(got?.createdAt.getTime()).toBe(5000);
       expect(await ctx.stores.telemetry.getPayload("nope")).toBeNull();
+    });
+
+    it("defaults the forwarded upstream request to null when omitted", async () => {
+      ctx = await make();
+      await ctx.stores.telemetry.insertPayload({
+        requestId: "req_no_upstream",
+        requestJson: "{}",
+        responseJson: null,
+        createdAt: new Date(5000),
+      });
+      const got = await ctx.stores.telemetry.getPayload("req_no_upstream");
+      expect(got?.upstreamRequestJson ?? null).toBeNull();
     });
 
     it("upserts a payload by request_id (request first, response backfilled)", async () => {

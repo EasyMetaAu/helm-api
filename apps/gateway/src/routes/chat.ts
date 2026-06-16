@@ -492,13 +492,17 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // batched when a write queue is wired, else the inline await (today's behavior).
     // Self-gates on capture_payloads exactly like persistPayload. The retention
     // prune rides along as a deferred task so it never blocks the response.
-    const capturePayload = async (responseJson: string | null) => {
+    const capturePayload = async (
+      responseJson: string | null,
+      upstreamRequestJson: string | null,
+    ) => {
       if (deps.writes !== undefined) {
         if (!captureEnabled(deps)) return;
         deps.writes.enqueuePayload({
           requestId: traceId,
           requestJson,
           responseJson,
+          upstreamRequestJson,
           createdAt: new Date(deps.now()),
         });
         const retentionMs = deps.payloadRetentionMs?.();
@@ -510,7 +514,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       }
       await persistPayload(
         deps,
-        { requestId: traceId, requestJson, responseJson, now: deps.now() },
+        { requestId: traceId, requestJson, responseJson, upstreamRequestJson, now: deps.now() },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
       );
     };
@@ -815,7 +819,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           } catch {
             c.get("logger").log("warn", "cost.stream_backfill_failed", { trace_id: traceId });
           }
-          await capturePayload(captureOn ? rawSse : null);
+          await capturePayload(captureOn ? rawSse : null, result.upstreamRequest ?? null);
           await persist(result.decision);
           // Usage-budget settle (streamed): runs HERE — after the usage tail
           // backfilled the streamed cost — so the spend dimension settles the real
@@ -863,7 +867,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         c.get("logger").log("warn", "tokens.backfill_failed", { trace_id: traceId });
       }
     }
-    await capturePayload(result.body !== null ? JSON.stringify(result.body) : null);
+    await capturePayload(
+      result.body !== null ? JSON.stringify(result.body) : null,
+      result.upstreamRequest ?? null,
+    );
     await persist(result.decision);
     if (result.final.status === "error" || result.body === null) {
       const error =

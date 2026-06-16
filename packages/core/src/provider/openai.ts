@@ -60,16 +60,29 @@ export type NativeProtocolProfile =
   | "generic_openai_responses"
   | "gemini";
 
+// Options for a completion / native-passthrough call. `captureUpstream`, when
+// supplied, is invoked with the EXACT serialized request body bytes the client is
+// about to POST upstream — AFTER any OpenAI→native translation, just before the HTTP
+// request. The gateway uses it to record the forwarded-upstream payload (what the
+// model actually received), which differs from the inbound client body for both the
+// translate path (re-serialized to the provider's native shape) and native passthrough
+// (model patched to the resolved upstream id). Fires once per fetch attempt (idempotent
+// across connection / 401 retries — same body). MUST NOT throw (capture is fail-open).
+export interface ProviderCallOptions {
+  signal?: AbortSignal;
+  captureUpstream?: (wireBody: string) => void;
+}
+
 export interface ProviderClient {
   nativeProtocolProfile?: NativeProtocolProfile;
   streamReframed?: boolean;
   chatCompletion(
     req: ChatCompletionRequest,
-    opts?: { signal?: AbortSignal },
+    opts?: ProviderCallOptions,
   ): Promise<ChatCompletionResponse>;
   chatCompletionStream(
     req: ChatCompletionRequest,
-    opts?: { signal?: AbortSignal },
+    opts?: ProviderCallOptions,
   ): AsyncIterable<string>;
   // Native protocol passthrough (issue #217, Phase 1). OPTIONAL so every existing
   // client and test double stays valid without change; the executor feature-detects
@@ -79,7 +92,7 @@ export interface ProviderClient {
   // implement it; the guard (canUseNativePassthrough) gates when it may be used.
   nativePassthrough?(
     request: NativePassthroughInput,
-    opts?: { signal?: AbortSignal },
+    opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>>;
   // Streaming native protocol passthrough (issue #217, Phase 2). The streaming sibling
   // of nativePassthrough: forwards the client's VERBATIM native body (which ALREADY
@@ -89,7 +102,7 @@ export interface ProviderClient {
   // clients implement it, gated by the same guard as nativePassthrough.
   nativePassthroughStream?(
     request: NativePassthroughInput,
-    opts?: { signal?: AbortSignal },
+    opts?: ProviderCallOptions,
   ): AsyncIterable<string>;
   countTokens?(
     req: ChatCompletionRequest,
@@ -312,7 +325,12 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   async function request(
     req: ChatCompletionRequest,
     external: AbortSignal | undefined,
+    capture?: (wireBody: string) => void,
   ): Promise<Response> {
+    // The exact bytes POSTed upstream — deterministic in `req`, so computed once
+    // (outside the retry loop) and surfaced to the capture sink before the first fetch.
+    const bodyText = JSON.stringify(prepareRequest(req));
+    capture?.(bodyText);
     // Retry transient connection blips at the fetch boundary (pre-first-byte, so
     // idempotent). A timeout is rethrown as UpstreamError (non-transient → no retry,
     // the chain falls back); a client abort rethrows as-is. Each attempt gets a fresh
@@ -324,7 +342,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
           return await doFetch(await chatUrl(), {
             method: "POST",
             headers: await headers(),
-            body: JSON.stringify(prepareRequest(req)),
+            body: bodyText,
             signal: t.signal,
           });
         } catch (err) {
@@ -349,13 +367,14 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   async function requestWithAuthRetry(
     req: ChatCompletionRequest,
     external: AbortSignal | undefined,
+    capture?: (wireBody: string) => void,
   ): Promise<Response> {
-    const res = await request(req, external);
+    const res = await request(req, external, capture);
     if (res.status === 401 && cfg.onUnauthorized !== undefined) {
       // Discard the 401 body (it may echo the credential) before refreshing.
       await res.body?.cancel().catch(() => {});
       cfg.onUnauthorized();
-      return await request(req, external); // exactly one retry with the new token
+      return await request(req, external, capture); // exactly one retry with the new token
     }
     return res;
   }
@@ -377,7 +396,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     ...(cfg.normalizeReasoningDeltaAlias ? { streamReframed: true } : {}),
 
     async chatCompletion(req, opts) {
-      const res = await requestWithAuthRetry(req, opts?.signal);
+      const res = await requestWithAuthRetry(req, opts?.signal, opts?.captureUpstream);
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as ChatCompletionResponse;
     },
@@ -386,7 +405,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       // 401-retry happens here, BEFORE getReader() / any chunk is yielded, so the
       // SSE stream is replayed cleanly from the start (principle 8 — no duplicated
       // or half-emitted events).
-      const res = await requestWithAuthRetry(req, opts?.signal);
+      const res = await requestWithAuthRetry(req, opts?.signal, opts?.captureUpstream);
       if (!res.ok) throw await errorFromResponse(res);
       const body = res.body;
       if (!body) return;

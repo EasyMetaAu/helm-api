@@ -59,7 +59,9 @@ describe("sqlite schema + migrations", () => {
       // ALTER would fail — pre-mark applied, out of scope for this v14–v16 test.
       // v23 (oauth_usage day→bucket_ms): v12 is applied without the oauth_usage
       // CREATE, so the RENAME would fail — pre-mark applied, out of scope.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23])
+      // v24 adds request_payloads.upstream_request_json; this memory_jobs fixture
+      // never creates request_payloads → pre-mark applied (out of scope).
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24])
         rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -262,7 +264,9 @@ describe("sqlite schema + migrations", () => {
       // v20 alters memory_threads (absent from this fixture) → pre-mark applied.
       // v21 dedups memory_messages (absent here) → pre-mark applied.
       // v22 alters telemetry (absent from this api_keys-only fixture) → pre-mark applied.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21, 22]) rec.run(v, Date.now());
+      // v24 adds request_payloads.upstream_request_json (table absent from this
+      // api_keys-only fixture) → pre-mark applied.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21, 22, 24]) rec.run(v, Date.now());
       seed
         .prepare(
           `INSERT INTO api_keys (key_id, hash, prefix, account_id, role, max_lane, allowed_lanes, created_at)
