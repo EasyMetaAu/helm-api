@@ -82,3 +82,38 @@ export function nonLatinRatio(text: string): number {
   }
   return letters === 0 ? 0 : nonLatin / letters;
 }
+
+// ── shared keyword matcher ──────────────────────────────────────────────────
+// The SINGLE keyword-matching regex builder used by BOTH the dimension scorer
+// (dimensions.ts) and the override short-circuit (overrides.ts). It lives here for
+// the same reason the detectors do: a divergent second copy DID drift — overrides.ts
+// once carried its own WORD-boundary-only matcher that silently failed on CJK, so
+// short Chinese analysis/security prompts slipped through the short-message shortcut
+// (classifier.multilingual-guard). One implementation, no drift.
+//
+// Case-insensitive. WORD/TOKEN-boundary is enforced ONLY on a keyword edge that is
+// itself a Latin word char — this stops a naive `includes` firing "hi" inside
+// "t·hi·s" or "ok" inside "lo·ok". CJK scripts (Han/Hiragana/Katakana/Hangul) write
+// words WITHOUT spaces, so a CJK edge char can never satisfy the boundary lookaround
+// (its neighbours are also \p{L}); CJK edges therefore match as plain substrings
+// (their "words" are 1–3 meaningful chars, so the naive-substring false-hit risk that
+// boundaries guard against for Latin does not apply). This is what makes config-level
+// CJK keyword lists work at all. Keywords with spaces ("step by step") or ending in
+// punctuation ("cve-") keep matching — the non-word edge gets no boundary.
+const WORD = /[\p{L}\p{N}_]/u;
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const needsBoundary = (ch: string): boolean => WORD.test(ch) && !CJK.test(ch);
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+const keywordMatcherCache = new Map<string, RegExp>();
+export function keywordMatcher(kw: string): RegExp {
+  let re = keywordMatcherCache.get(kw);
+  if (re === undefined) {
+    const left = needsBoundary(kw[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
+    const right = needsBoundary(kw[kw.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
+    re = new RegExp(left + escapeRegExp(kw) + right, "iu");
+    keywordMatcherCache.set(kw, re);
+  }
+  return re;
+}

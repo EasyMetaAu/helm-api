@@ -6,6 +6,7 @@ import {
   detectStackTrace,
   detectTable,
   detectUrl,
+  keywordMatcher,
   lengthSignal,
   normalize,
 } from "./signals.js";
@@ -133,42 +134,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 // ── keyword signal ────────────────────────────────────────────────────────────
 
-// Case-insensitive, WORD/TOKEN-boundary aware match; signal = normalized hit
-// count over keywords. We do NOT lowercase the original text for storage — the
-// `i` flag folds case locally without mutating the source for any other use.
-//
-// Boundaries are enforced ONLY on a keyword edge that is itself a word char
-// (alnum/underscore). This is what stops a naive `includes` from firing "hi"
-// inside "t·hi·s" or "ok" inside "lo·ok"/"bo·ok" (a real regression: those
-// false hits silently poisoned the rawScore of unrelated prompts). Keywords
-// that contain spaces ("step by step") or END in punctuation ("cve-", meant to
-// match "cve-2021") keep matching, because the non-word edge gets NO boundary.
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-const WORD = /[\p{L}\p{N}_]/u; // unicode letter/number/underscore
-// CJK scripts (Han / Hiragana / Katakana / Hangul) write words WITHOUT spaces, so a
-// CJK edge char would NEVER satisfy the word-boundary lookaround below — "分析" inside
-// "请分析这个" is flanked by other \p{L} chars, so both lookarounds fail and the keyword
-// becomes permanently unmatchable. CJK edges therefore match as plain substrings (their
-// "words" are 1–3 meaningful chars, so the naive-substring false-hit risk that boundaries
-// guard against for Latin does not apply). This is what makes config-level CJK keyword
-// lists possible at all (see implementation-notes: classifier.multilingual-guard).
-const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-const needsBoundary = (ch: string): boolean => WORD.test(ch) && !CJK.test(ch);
-const keywordMatcherCache = new Map<string, RegExp>();
-function keywordMatcher(kw: string): RegExp {
-  let re = keywordMatcherCache.get(kw);
-  if (re === undefined) {
-    const left = needsBoundary(kw[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
-    const right = needsBoundary(kw[kw.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
-    re = new RegExp(left + escapeRegExp(kw) + right, "iu");
-    keywordMatcherCache.set(kw, re);
-  }
-  return re;
-}
-
+// `keywordMatcher` (case-insensitive; Latin word-boundary aware, CJK substring) is
+// the SHARED matcher from signals.ts — the same one the override short-circuit uses,
+// so the two paths can never drift (a divergent CJK-broken copy here once did). The
+// signal SATURATES at min(1, hits/ceil(len/2)), so a longer list dilutes each hit.
 function keywordSignal(text: string, keywords: string[]): number {
   if (text.trim().length === 0) return 0;
   let hits = 0;

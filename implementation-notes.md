@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-16 · classifier 中英文关键词对等 + 修复短消息捷径的 CJK 盲区（docs/03；原则 2/4）
+
+- **背景**：用户审查 `classifier.yaml` 发现部分维度只有英文、缺中文。逐 key 审计后定位到**真正的问题在代码不在配置**：短消息捷径（`overrides.ts isShortAndSimple → containsClassifierSignal`）只检查英文 `analysis_kw/security_kw/diagnostic_short_kw`，且 `overrides.ts` 自带的 `keywordMatcher` **没有 CJK 豁免**（与 `dimensions.ts` 的版本漂移）。后果：一条**短中文**分析/安全请求（"分析这个系统的根因"）被强钉 `simple`→economy，**即使开了 eval 也救不回**（set override 在 Layer-1 即决、不进 eval）。
+- **决定（用户选「配置+代码完整修复」而非仅补关键词）**：① 把 CJK-aware `keywordMatcher` 上提到 `signals.ts`（既有「共享 detector 防止两份正则漂移」之处），`dimensions.ts`/`overrides.ts` **同源导入**，删掉 overrides 那份 CJK-broken 副本（根因就是这次漂移）；② `containsClassifierSignal` 同时检查 `*_intl_kw`（analysis/security/diagnostic）；③ `classifier.yaml` 补 4 个缺失 intl 维度。
+- **改动（config）**：新增 `diagnostic_short_intl_kw`（**正**权重 3.60，镜像英文，同时给语言守卫正向 grip）、`translation_intl_kw`/`lookup_intl_kw`/`chitchat_intl_kw`（负权重镜像英文）；`exact_confirmation_tokens` 补简体确认词（对/嗯/行/好/没问题/收到/明白/知道了）。全简体（`engine.test` 钉死 intl 种子无繁体）。
+- **取舍/坑/TODO**：① **负向 intl 维度不抑制语言守卫**（`engine.ts languageGuardTrips` 只认正向 grip），且短中文早被 `short_message`(≤50 字符)钉 simple → 负向 intl 维度主要对「带正向命中的中等长度中文」起 grip-down 作用，价值有限但补齐对等与可解释性。② **礼貌前缀（你好/您好/请问/谢谢）刻意排除出负向维度**——中文里它们常作真实任务开头，惩罚会误降真实编码/分析请求（已加「你好+复杂分析→premium」golden 守卫证明不误路）。③ web 仍只有 `web_intl_kw` 无英文 `web_kw`（英文 web 走 `task_keywords`，刻意保留不对称）。④ matcher 上提对**英文行为零影响**（Latin 边界逻辑不变）——38 条英文 golden 全绿可证。
+- **验证**：TDD 红→绿。`overrides.test` **+4**（短中文 analysis/security 不再钉 simple、CJK 中段匹配、纯问候仍 simple，先红后绿）；`golden-routing` **+7** 中文行（问候/查词/翻译/简单编码→economy；短分析/安全→premium；礼貌前缀+复杂→premium）。classifier+samples 全量 **254** 绿，`@helm/core typecheck` 0、biome lint 0。注：harness 报的 `token-manager.test.ts` 诊断是切分支后的**陈旧 LSP 噪声**（实际 tsc 绿，见 [[workflow-stale-diagnostics]]）。worktree 分支 `tz-aggregation-review`，**仅改本地仓库，未发版/未部署**（线上 classifier 已在 0.14.0 部署时恢复为 repo 完整版+`eval.enabled:true`，此次新增维度待 Lukin 决定再上线）。
+
 ## 2026-06-16 · 数据汇总按客户端时区分桶（修复「8 点边界」）（docs/02/04/10；原则 1/2/3）
 
 - **背景**：用户报仪表盘日/「今日」数据「8 点前后不一致」。三方只读审查（时间戳记录 / 时间显示 / 数据汇总）确认：**时间戳存储全 UTC epoch-ms、显示全走 `formatTimestamp`→浏览器本地，两者都对**；**唯一 bug 在数据汇总按 UTC 日/小时分桶**——`(createdAt / 86_400_000) * 86_400_000` 是 UTC 午夜地板。UTC+8 下 UTC 午夜=本地 08:00，正是那条断点。根因：网关**从不接收客户端时区**，每个 rollup 都按 UTC 钟分区。
@@ -23,19 +31,13 @@
 - **取舍/坑/TODO**：① 删后**策略只能 force（use_lane）**，restrict 仍由 per-key allowed_lanes 承担（policy 编辑器本就没暴露 allowed_lanes）；想要 policy 级 restrict UI 是后续可选项。② 「全局成本上限」从 `max_lane: balanced` 改用 `allowed_lanes: [economy, balanced]`（catch-all 空 match），docs 例子已更。③ per-key max_lane 的退役迁移/测试（DROP COLUMN、key schema 拒收）**保留不动**——那是另一回事。
 - **验证**：TDD——policy-engine/schema(×2)/route-request/admin PolicyRow+policies/crossref 全改绿；`pnpm typecheck`/`lint`/全量 + admin `svelte-check` 待 CI。分支 `feat/drop-policy-max-lane`，开 PR（BREAKING，不发版/不部署）。
 
-## 2026-06-15 · 可配置的「默认兜底车道」系统设置（docs/04；原则 1/2/3/5）
-
-- **背景**：兜底终点写死 `balanced`（`lane-resolver.ts` 的 `BALANCED` 常量 + lanes schema 强制 `"balanced" in m`），运营者无法改。用户要「不想默认到 balanced 的人可定制」。讨论中**否决两个直觉方案**：① policies 加 catch-all 规则——policy 是 resolver **第 1 优先级（最高）**，底部 catch-all 会**盖过** task/complexity 路由（`use_lane` 钉死全部未匹配请求 / `max_lane` 全局封顶 premium 不可达），正是 shipped policies.yaml 注释当年特意避开的；② 靠 lanes map「最后一条」——lanes 是 `z.record` 无序，靠 key 顺序当兜底脆弱且违反原则 4。用户拍板：**系统设置里加一个可选 lane 的兜底项**，且**只改最终兜底**（不动 complexity 档）。
-- **方案**：`default_lane` 做成**热改 RuntimeSettings 字段**（DB `config_kv`，读 fail-open / 写 fail-closed），默认 `"balanced"` → 100% 向后兼容。resolver 仅在**两个 fail-open 终点**（classifier `default`/`fallback` 短路 + 完全未解析）用它，且**仅当该 lane 存在**否则回落字面 `"balanced"`（lanes schema 仍强制 balanced 存在=终极地板）→ **无新增 fail-close 路径**，不会重演 0.13.4 `org_id` 启动崩溃。**不动 `COMPLEXITY_FALLBACK`**（simple→economy/medium→balanced/complex→premium 保持）。
-- **接线**：schema 加 `default_lane`（runtime-settings.schema.ts）；resolver `ResolveLaneInput.defaultLane?`（缺省=balanced，旧 caller/测试不变，终点用 `defaultLane && has(lanes,…) ? : BALANCED`）；route-request `RouteDeps.defaultLane` + plan() 传入；`apps/gateway/.../classify.ts` eval-cascade 包装器加 live getter；server.ts route 闭包 `settings.default_lane`（每请求读=热生效）+ buildClassifyAdapter `() => settings.default_lane`；admin settings PUT **校验 lane 存在**（不存在 400，resolver 另有运行时守卫=纵深防御）；admin 系统设置加 lane 下拉（`+page.ts` listLanes + `+page.svelte` `<select>` 镜像 log_level）+ 5 语言 i18n（en/zh-hans/zh-hant/ja/ko）。
-- **取舍/坑/TODO**：① 因 balanced 恒存在且 medium→balanced 在终点前命中，`default_lane` 主要影响**分类器 fail-open 路径**（这正是「兜底」语义，用户认可只改这层）；② classify 适配器用 live getter 保持 cascade 内部 lane 与真实路由一致（route-request 才权威）；③ i18n 手工补 5 文件，无强制完整性测试覆盖新键，缺则回退英文。
-- **验证**：TDD——lane-resolver +5（配置终点 / 缺失回落 balanced / medium 不受影响 / 缺省 back-compat）、runtime-settings +1、admin 路由 +2（合法 lane 200 / 未知 lane 400 不持久化）、admin settings client round-trip。`pnpm typecheck`/`lint`/全量测试 + admin `svelte-check` 待 CI。分支 `feat/configurable-default-lane`，开 PR（不发版/不部署）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-15 · 可配置的「默认兜底车道」系统设置（docs/04；原则 1/2/3/5）：兜底写死 `balanced` 不可改 → 加**热改** RuntimeSettings `default_lane`（DB config_kv，读 fail-open/写 fail-closed，默认 balanced=向后兼容）。否决 policies catch-all（policy 最高优先级会盖过 task/complexity 路由）与 lanes 末条（z.record 无序）两方案。只在 resolver 两个 fail-open 终点用、且仅当该 lane 存在否则回落字面 balanced（**无新 fail-close 路径**，不重演 0.13.4）；不动 COMPLEXITY_FALLBACK。admin 系统设置加 lane 下拉 + 5 语言 i18n + PUT 校验 lane 存在。分支 feat/configurable-default-lane。
 
 ### 2026-06-15 · 双人 code review 修复：org/user 策略拆除 + Anthropic 空流 + applyCaps + client_abort（docs/02/04/05/07；原则 3/5/7/8）：我+Codex 对抗式 review，确认 2 bug+1 设计+2 小问题全修。#1 org/user 维度策略形同虚设（`auth.ts` 写死 null→永不命中、`budget_org_cap` 死代码）→ 从 PolicyMatch/Context/MATCH_FIELDS/两 builder 拆除（`.strict()` 使遗留策略 fail-closed），admin PolicyRow 同步删 User/Org ID；#2〔Codex〕Anthropic 出站零 chunk 流缺 message_start→收尾前补 `messageStartEvent` 守卫；#3 applyCaps 把不可排序候选顶到 premium→`UNRANKED_CANDIDATE_RANK=balanced` 降级；#4 client abort 误标 upstream_error→新增 `client_abort`(499) ErrorClass；#5 aliasPolicyContext 写死 complexity:medium→改 null；#6 非自定义模型 key 全走 auto（route-request Step 0a 加 `allowCustomModel` 门槛）。TDD 全量 **3737** 绿。分支 fix/review-routing-stream-errors。
 

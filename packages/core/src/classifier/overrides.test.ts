@@ -203,6 +203,55 @@ describe("evaluateOverrides / applyOverrides — no override", () => {
   });
 });
 
+describe("evaluateOverrides — CJK short-message short-circuit (intl parity)", () => {
+  // A config carrying the shipped *_intl_kw signal dimensions so the short-message
+  // disqualifier (containsClassifierSignal) can see Chinese analysis/security/
+  // diagnostic grip. Regression guard: short Chinese complex prompts must NOT be
+  // force-pinned `simple` just because the English signal lists miss them and the
+  // old override matcher could not match CJK mid-text.
+  function intlConfig(): ClassifierRulesConfig {
+    return ClassifierRulesConfigSchema.parse({
+      dimensions: {
+        analysis_kw: { weight: 0.76, keywords: ["analyze", "root cause"] },
+        analysis_intl_kw: { weight: 0.76, keywords: ["分析", "根因", "利弊", "评估"] },
+        security_intl_kw: { weight: 1.4, keywords: ["缓冲区溢出", "命令注入", "越权"] },
+        diagnostic_short_intl_kw: { weight: 3.6, keywords: ["没有输出", "没有报错"] },
+      },
+      task_keywords: {},
+      tool_prefixes: {},
+      tier_boundaries: {},
+      overrides: {},
+      momentum: {},
+    });
+  }
+
+  it("does NOT short-circuit a short Chinese ANALYSIS prompt to simple (intl grip)", () => {
+    const cfg = intlConfig();
+    const hits = evaluateOverrides(req({ content: "分析这个系统的根因和利弊" }), cfg, 8);
+    expect(hits.find((h) => h.rule === "short_message")).toBeUndefined();
+  });
+
+  it("does NOT short-circuit a short Chinese SECURITY prompt to simple", () => {
+    const cfg = intlConfig();
+    const hits = evaluateOverrides(req({ content: "这个接口有命令注入和越权漏洞吗" }), cfg, 9);
+    expect(hits.find((h) => h.rule === "short_message")).toBeUndefined();
+  });
+
+  it("matches a Chinese signal keyword MID-TEXT (CJK boundary carve-out)", () => {
+    // "分析" is flanked by other CJK chars — the old WORD-boundary override matcher
+    // (no CJK exception) silently failed here, so the prompt was mis-pinned simple.
+    const cfg = intlConfig();
+    const hits = evaluateOverrides(req({ content: "请你帮我分析一下这段" }), cfg, 7);
+    expect(hits.find((h) => h.rule === "short_message")).toBeUndefined();
+  });
+
+  it("still short-circuits a short Chinese greeting (no signal) to simple", () => {
+    const cfg = intlConfig();
+    const hits = evaluateOverrides(req({ content: "你好呀在吗" }), cfg, 5);
+    expect(hits).toContainEqual({ rule: "short_message", kind: "set", complexity: "simple" });
+  });
+});
+
 describe("applyOverrides — multiple floors take the highest", () => {
   it("combines tools + long-context floors to the higher tier (edge)", () => {
     const cfg = makeConfig();
