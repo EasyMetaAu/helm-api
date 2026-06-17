@@ -57,8 +57,16 @@
   // Accounts whose "Reset usage" click is in flight (keyed provider/account) — clears
   // the auto-park cooldown (#291).
   let resetting = $state<Record<string, boolean>>({});
-  // Codex accounts whose "Reset limit" consume is in flight (keyed provider/account).
-  let resettingCredit = $state<Record<string, boolean>>({});
+  // The Codex account whose "Reset limit" consume is awaiting confirmation. A reset
+  // spends a scarce, irreversible credit AND restores the WHOLE upstream ChatGPT
+  // account (the grant is keyed by chatgpt_account_id, not the helm label), so it must
+  // be confirmed — never fire on a single click. `credits` is the available count shown
+  // in the dialog. Only one reset dialog is open at a time (mirrors `confirming`).
+  let confirmingReset = $state<{ providerId: string; account: string; credits: number } | null>(
+    null,
+  );
+  // True while the confirmed consume is in flight (disables the dialog's buttons).
+  let resettingLimit = $state<boolean>(false);
   // Transient success line after a credit reset (e.g. "Reset 2 window(s)"); cleared on
   // the next action. Errors continue to use the shared `error` banner.
   let resetNotice = $state<string | null>(null);
@@ -263,16 +271,19 @@
   }
 
   // "Reset limit" (Codex only): consume one rate-limit reset credit to restore the
-  // account's windows. FAIL-CLOSED on the server, so a rejection means the reset did
-  // NOT happen — surface it via `error`. On success, refresh so the quota bars + the
-  // remaining-credit count reflect the consumed credit.
-  async function resetLimit(providerId: string, account: string): Promise<void> {
-    const k = keyOf(providerId, account);
-    resettingCredit = { ...resettingCredit, [k]: true };
+  // account's windows, AFTER explicit confirmation (`confirmingReset` is set by the
+  // row button; this runs from the dialog's confirm). FAIL-CLOSED on the server, so a
+  // rejection means the reset did NOT happen — surface it via `error`. On success,
+  // refresh so the quota bars + the remaining-credit count reflect the consumed credit.
+  async function confirmResetLimit(): Promise<void> {
+    if (!confirmingReset) return;
+    const { providerId, account } = confirmingReset;
+    resettingLimit = true;
     error = null;
     resetNotice = null;
     try {
       const result = await consumeCodexResetCredit(providerId, account);
+      confirmingReset = null;
       await invalidateAll();
       resetNotice =
         result.windowsReset != null
@@ -281,7 +292,7 @@
     } catch (e) {
       error = e instanceof Error ? e.message : $t('Failed to reset limit');
     } finally {
-      resettingCredit = { ...resettingCredit, [k]: false };
+      resettingLimit = false;
     }
   }
 
@@ -577,14 +588,21 @@
                     <button
                       type="button"
                       class="btn-secondary"
-                      disabled={resettingCredit[k] === true || codexCredits == null || codexCredits <= 0}
+                      disabled={codexCredits == null || codexCredits <= 0}
                       title={codexCredits == null
                         ? $t('Reset-credit count unavailable')
                         : codexCredits <= 0
                           ? $t('No reset credits available')
                           : $t('Consume one credit to restore the rate-limit window')}
-                      onclick={() => resetLimit(row.provider.id, row.account.account)}
-                      >{resettingCredit[k] === true ? $t('Resetting…') : $t('Reset limit')}</button
+                      onclick={() =>
+                        (confirmingReset = {
+                          providerId: row.provider.id,
+                          account: row.account.account,
+                          credits: codexCredits ?? 0,
+                        })}
+                      >{codexCredits != null && codexCredits > 0
+                        ? $t('Reset limit ({n})', { n: codexCredits })
+                        : $t('Reset limit')}</button
                     >
                   {/if}
                   <button
@@ -631,6 +649,41 @@
           disabled={disconnecting}
           onclick={confirmDisconnect}
           >{disconnecting ? $t('Disconnecting…') : $t('Disconnect')}</button
+        >
+      </div>
+    </Modal>
+  {/if}
+
+  {#if confirmingReset}
+    <Modal
+      label={$t('Confirm reset limit')}
+      onclose={() => {
+        if (!resettingLimit) confirmingReset = null;
+      }}
+    >
+      <h2 class="section-header">{$t('Confirm reset limit')}</h2>
+      <p class="mt-3 text-sm text-ink-body">
+        {$t('Consume one of {n} reset credits for', { n: confirmingReset.credits })}
+        <code class="font-mono text-ink-strong">{confirmingReset.account}</code>?
+      </p>
+      <p class="mt-2 text-sm text-ink-muted">
+        {$t(
+          'This restores the rate-limit window for the entire ChatGPT account. Any other connected account using the same ChatGPT login will also be reset.',
+        )}
+      </p>
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          type="button"
+          class="btn-secondary"
+          disabled={resettingLimit}
+          onclick={() => (confirmingReset = null)}>{$t('Cancel')}</button
+        >
+        <button
+          type="button"
+          class="btn-primary"
+          disabled={resettingLimit}
+          onclick={confirmResetLimit}
+          >{resettingLimit ? $t('Resetting…') : $t('Reset limit')}</button
         >
       </div>
     </Modal>
