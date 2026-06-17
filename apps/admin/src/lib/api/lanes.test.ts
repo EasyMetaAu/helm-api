@@ -73,4 +73,40 @@ describe('lanes api client', () => {
 
     await expect(saveLane('balanced', lane)).rejects.toThrow();
   });
+
+  it('reads a valid reasoning_effort from GET and ignores an unknown value', async () => {
+    const rows = [
+      laneRow('balanced', { reasoning_effort: 'high' } as Partial<Lane>),
+      laneRow('economy', { reasoning_effort: 'bogus' } as unknown as Partial<Lane>),
+      laneRow('premium'),
+    ];
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify(rows), { status: 200 }),
+    );
+    const lanes = await listLanes();
+    expect(lanes[0].reasoning_effort).toBe('high');
+    expect(lanes[1].reasoning_effort).toBeUndefined(); // unknown value dropped
+    expect(lanes[2].reasoning_effort).toBeUndefined(); // absent stays unforced
+  });
+
+  it('saveLane sends reasoning_effort when set and omits it when unforced', async () => {
+    const ok = () => new Response(JSON.stringify({ primary: 'x' }), { status: 200 });
+    const fetchMock = fetch as ReturnType<typeof vi.fn>;
+    const base: Lane = {
+      name: 'coding',
+      primary: 'x',
+      fallback: [],
+      constraints: { require_tools: false, require_json: false, max_latency_ms: null },
+    };
+    // Fresh Response per call (a Response body can only be read once).
+    fetchMock.mockResolvedValueOnce(ok());
+    await saveLane('coding', { ...base, reasoning_effort: 'xhigh' });
+    const forced = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(forced.reasoning_effort).toBe('xhigh');
+
+    fetchMock.mockResolvedValueOnce(ok());
+    await saveLane('coding', base); // no reasoning_effort
+    const unforced = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    expect(unforced.reasoning_effort).toBeUndefined();
+  });
 });

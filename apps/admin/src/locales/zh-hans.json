@@ -606,5 +606,8 @@
   "Generation time": "生成耗时",
   "Tokens generated per second (output ÷ generation time), averaged over streamed requests.": "每秒生成的 Token 数（输出 ÷ 生成时间），按流式请求平均。",
   "Generation throughput: output tokens per second. Only measured for streamed responses.": "生成吞吐量：每秒输出 Token 数。仅对流式响应测量。",
-  "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.": "响应生成的速度——每秒输出 Token 数、生成窗口时长，以及首 Token 的延迟。仅对流式响应测量。"
+  "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.": "响应生成的速度——每秒输出 Token 数、生成窗口时长，以及首 Token 的延迟。仅对流式响应测量。",
+  "Forced reasoning effort": "强制推理等级",
+  "Unset (client decides)": "未设置（由客户端决定）",
+  "When set, overrides the client reasoning effort for every request on this lane.": "设置后，将覆盖该通道上每个请求的客户端推理等级。"
 }

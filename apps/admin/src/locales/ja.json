@@ -606,5 +606,8 @@
   "Generation time": "生成時間",
   "Tokens generated per second (output ÷ generation time), averaged over streamed requests.": "1秒あたりの生成トークン数（出力 ÷ 生成時間）。ストリーミングリクエストの平均。",
   "Generation throughput: output tokens per second. Only measured for streamed responses.": "生成スループット：1秒あたりの出力トークン数。ストリーミング応答でのみ測定されます。",
-  "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.": "応答が生成された速度——1秒あたりの出力トークン数、生成ウィンドウ、最初のトークンまでの時間。ストリーミング応答でのみ測定されます。"
+  "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.": "応答が生成された速度——1秒あたりの出力トークン数、生成ウィンドウ、最初のトークンまでの時間。ストリーミング応答でのみ測定されます。",
+  "Forced reasoning effort": "推論レベルを強制",
+  "Unset (client decides)": "未設定（クライアントが決定）",
+  "When set, overrides the client reasoning effort for every request on this lane.": "設定すると、このレーンのすべてのリクエストでクライアントの推論レベルを上書きします。"
 }

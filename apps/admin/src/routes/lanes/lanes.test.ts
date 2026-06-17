@@ -9,6 +9,8 @@ import LanesPage from './+page.svelte';
 const saveLane = vi.fn();
 vi.mock('$lib/api/lanes.js', () => ({
   saveLane: (...args: unknown[]) => saveLane(...args),
+  // LaneEditor imports this value from the same module; the mock must expose it.
+  REASONING_EFFORTS: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
 }));
 
 function lane(name: string, overrides: Partial<Lane> = {}): Lane {
@@ -102,5 +104,28 @@ describe('lanes page', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
     // The other lanes' data is untouched; the page did not crash.
     expect(screen.getByText('coding')).toBeInTheDocument();
+  });
+
+  it('selecting a forced reasoning effort and saving sends it to saveLane', async () => {
+    renderPage([lane('coding')]);
+    const card = screen.getByTestId('lane-card');
+    const select = within(card).getByTestId('reasoning-effort') as HTMLSelectElement;
+    await fireEvent.change(select, { target: { value: 'medium' } });
+    await fireEvent.click(within(card).getByRole('button', { name: /save/i }));
+
+    await waitFor(() => expect(saveLane).toHaveBeenCalledTimes(1));
+    expect(saveLane.mock.calls[0][1].reasoning_effort).toBe('medium');
+  });
+
+  it('seeds the dropdown from the lane and omits the field when set back to Unset', async () => {
+    renderPage([lane('coding', { reasoning_effort: 'high' })]);
+    const card = screen.getByTestId('lane-card');
+    const select = within(card).getByTestId('reasoning-effort') as HTMLSelectElement;
+    expect(select.value).toBe('high'); // seeded from the lane's forced value
+    await fireEvent.change(select, { target: { value: '' } }); // Unset
+    await fireEvent.click(within(card).getByRole('button', { name: /save/i }));
+
+    await waitFor(() => expect(saveLane).toHaveBeenCalledTimes(1));
+    expect(saveLane.mock.calls[0][1].reasoning_effort).toBeUndefined();
   });
 });

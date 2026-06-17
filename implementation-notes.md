@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-17 · /admin/lanes 加 reasoning_effort 下拉（admin UI；原则 1）
+
+- **背景**：lane 级强制 reasoning_effort 此前只能改 YAML；用户要在 `/admin/lanes` 页面用下拉选。
+- **关键发现：纯前端**——v0.17.0 后端**已**整条 round-trip `reasoning_effort`：admin lanes 路由 `LaneSchema.safeParse` 已含该可选字段、YAML write-back `deepAssign` 无字段白名单（写存在的键、prune 缺失的键），**gateway/writeback 零改**。唯一漏处是 admin 客户端 DTO（`apps/admin/src/lib/api/lanes.ts` `normalizeLane`/`Lane`）丢弃该字段。
+- **实现**：`lanes.ts` 加 `ReasoningEffort` 类型 + `REASONING_EFFORTS` + `Lane.reasoning_effort`，`normalizeLane` 携带（非法值丢弃）；`LaneEditor.svelte` 加 `<select>`（"Unset（客户端决定）" + 7 档），seed 自 lane，`handleSave` 选中则写、Unset 则 `delete`（让 strictObject + writeback 把键剪掉）；5 语言各补 3 键（zh-hans/hant/ja/ko 手译）。admin 不 import core/shared（原则 1），故 enum 在 admin 侧手写镜像。
+- **坑**：① page 测试 `vi.mock('$lib/api/lanes.js')` 必须补 `REASONING_EFFORTS` 导出，否则 LaneEditor 导入它时整页 mock 崩。② `pnpm i18n:extract` 会顺手把**别处**未提取的串（TPS/auto-park）一起拉进 locale → 改为手动 append 3 键保 PR 干净（代价：键未按工具字母序，下次 extract 会重排，无害）。③ Response body 只能读一次——api 测试两次 saveLane 要各给 `mockResolvedValueOnce`。
+- **验证**：admin lanes api(5)+page(13 含 select→save / Unset→omit / seed) 绿；`svelte-check` 0 err/0 warn；biome lint + prettier 绿。分支 `feat/admin-lane-reasoning-effort-dropdown`（off main v0.17.0），未发版（admin 由 gateway 托管，需新镜像才到 box）。
+
 ## 2026-06-17 · Lane 级强制 reasoning_effort（gateway 侧覆盖客户端；docs/04；原则 1/2/4）
 
 - **背景**：helm 此前 reasoning 等级纯请求级（客户端发，透传/互译）。用户要 operator 在 **lane** 级**强制** reasoning_effort，客户端不可覆盖（"以前 sub2api 支持的"其实是 sub2api 教用户填 Codex CLI `model_reasoning_effort` 的客户端配置，非网关）。范围拍板：**仅 lane 级 + 强制**；保留原生直通；覆盖全 4 协议（含 Anthropic——这是 helm 唯一缺的 `reasoning_effort→thinking` 映射）。
