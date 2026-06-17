@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-17 · Claude Code 互译路径 system 样板去重（docs/05/07；原则 5/7/8）
+
+- **背景**：线上请求 `51067fe1-873b-4dbf-b53d-3adc4b2da19e`（`helm.easymeta.au` / `la.atmy.work` SQLite 复盘）显示 `upstream_request_json.system` 被膨胀到 **81** 个 block：Claude Code sentinel `You are Claude Code, Anthropic's official CLI for Claude.` 出现 **2** 次（位置 1,2），`The task tools haven't been used recently...` 出现 **44** 次，`The user sent a new message while you were working:` 出现 **3** 次。该请求 `passthrough_used=0`，disable reason 是 `provider_requires_compatibility_rewrite`，所以问题发生在**互译/compat rewrite 路径**，不是原生直通。
+- **根因**：Anthropic 入站 transform 会把顶层 `system` hoist 到 IR（只剥 billing header，不剥 sentinel），同时保留 `messages[].role === "system"`。随后 Anthropic subscription provider 的 `openaiToAnthropicRequest → buildSystem` 又无条件插入自己的 Claude Code sentinel，并把所有 IR system/developer 消息折叠回顶层 `system[]`。结果：已有 sentinel 被重复注入，Claude Code 中途系统提醒也被机械堆叠进上游 `system[]`。
+- **决定**：只在**互译到 Anthropic subscription provider** 的 `buildSystem` 做幂等清理：① 跳过已存在的 `x-anthropic-billing-header:`；② 保留单一 Claude Code sentinel 于 `system[1]`，并继承客户端 sentinel 上的 `cache_control`；③ 只对 Claude Code 固定样板提醒做**完整文本精确去重**（task-tools reminder、user-interrupt reminder），不对普通 system 内容做全局去重，避免误删合法重复上下文。原生直通仍保持逐字保真，不做模拟注入。
+- **取舍/坑/TODO**：这次**不放宽** `anthropicNativeBodyRequiresSystemFold`。生产样本证明当前请求被 rewrite 后会重复，但是否让更多 Claude Code `messages[].role=system` 继续走直通，涉及订阅端实际接受矩阵和此前 400 修复，应该独立评估，不和本次重复数据修复混在一起。
+- **验证**：TDD 红→绿。新增 provider 回归：互译 native Anthropic 流量时 sentinel 只出现一次、固定提醒只保留一次、`messages[0]` 仍是真实 user；另加保护测试证明普通重复 system 内容与不同 interrupt 不会被误删。`pnpm exec vitest run packages/core/src/provider/anthropic.test.ts`、`pnpm --filter @helm/core typecheck`、Biome changed files、全量 `pnpm test`（263 files / 3795 tests）均通过。仅本地修复，尚未部署。
+
 ## 2026-06-16 · 修复原生直通对 Claude Code「会话中 system 消息」400（issue #217；原则 3/5/8）
 
 - **背景**：生产请求 `81f3fa9e-...`（`la.atmy.work`，SSH+sqlite3 取 `request_payloads` 正文复盘）：**Claude Code 2.1.175** 的「role-folded transcript」把 MCP server instructions 作为**末尾 `role:"system"` 消息**塞进 `messages[]`（顶层 `system` 仍在），即 `messages=[user, system]`。Anthropic 订阅端 400 `messages.1: role 'system' must precede an 'assistant' message or end the array`，请求 fail-open **回退到 gpt-5.5**（用户问 Claude 却被另一个模型/厂商应答——非仅报错，是错路由+错计费）。见 [[claude-code-billing-header-cache-buster]]。
@@ -23,19 +31,13 @@
 - **取舍/坑/TODO**：① **负向 intl 维度不抑制语言守卫**（`engine.ts languageGuardTrips` 只认正向 grip），且短中文早被 `short_message`(≤50 字符)钉 simple → 负向 intl 维度主要对「带正向命中的中等长度中文」起 grip-down 作用，价值有限但补齐对等与可解释性。② **礼貌前缀（你好/您好/请问/谢谢）刻意排除出负向维度**——中文里它们常作真实任务开头，惩罚会误降真实编码/分析请求（已加「你好+复杂分析→premium」golden 守卫证明不误路）。③ web 仍只有 `web_intl_kw` 无英文 `web_kw`（英文 web 走 `task_keywords`，刻意保留不对称）。④ matcher 上提对**英文行为零影响**（Latin 边界逻辑不变）——38 条英文 golden 全绿可证。
 - **验证**：TDD 红→绿。`overrides.test` **+4**（短中文 analysis/security 不再钉 simple、CJK 中段匹配、纯问候仍 simple，先红后绿）；`golden-routing` **+7** 中文行（问候/查词/翻译/简单编码→economy；短分析/安全→premium；礼貌前缀+复杂→premium）。classifier+samples 全量 **254** 绿，`@helm/core typecheck` 0、biome lint 0。注：harness 报的 `token-manager.test.ts` 诊断是切分支后的**陈旧 LSP 噪声**（实际 tsc 绿，见 [[workflow-stale-diagnostics]]）。worktree 分支 `tz-aggregation-review`，**仅改本地仓库，未发版/未部署**（线上 classifier 已在 0.14.0 部署时恢复为 repo 完整版+`eval.enabled:true`，此次新增维度待 Lukin 决定再上线）。
 
-## 2026-06-16 · 数据汇总按客户端时区分桶（修复「8 点边界」）（docs/02/04/10；原则 1/2/3）
-
-- **背景**：用户报仪表盘日/「今日」数据「8 点前后不一致」。三方只读审查（时间戳记录 / 时间显示 / 数据汇总）确认：**时间戳存储全 UTC epoch-ms、显示全走 `formatTimestamp`→浏览器本地，两者都对**；**唯一 bug 在数据汇总按 UTC 日/小时分桶**——`(createdAt / 86_400_000) * 86_400_000` 是 UTC 午夜地板。UTC+8 下 UTC 午夜=本地 08:00，正是那条断点。根因：网关**从不接收客户端时区**，每个 rollup 都按 UTC 钟分区。
-- **方案（offset 分桶，而非 IANA 时区）**：浏览器传 `tzOffsetMinutes`（东正分钟，UTC+8=+480，来自 `-new Date().getTimezoneOffset()`），SQL 用 **shift-floor-unshift** 在客户端本地落桶：`((createdAt + offsetMs) / bucketMs) * bucketMs - offsetMs`。**为何 offset 而非 `Asia/Shanghai`**：SQLite（默认库）SQL **无 IANA 时区**（`strftime 'localtime'` 用*服务器*时区=错），双适配器须同款整数运算（契约测试钉死 sqlite/pg 一致），整数 offset 是唯一能统一两方言的表示。`createdAt+offsetMs` 对一切真实时间戳恒正 → sqlite/pg 截断==floor。**fail-open（原则 3）**：缺失/非法/越界→0（=UTC 旧行为，向后兼容）。
-- **A · 仪表盘 telemetry stats（只读路径）**：`StatsQuerySchema` 加 `tzOffsetMinutes`（`z.coerce…int().min(-720).max(840).catch(0)`）；`TelemetryStore.aggregate` 加第 4 参 `tzOffsetMinutes?=0`；sqlite+pg 适配器桶表达式按上式改，offset 经 `sql.raw` 内联（与 bucketMs 同款，保整数除法）；in-memory mock 同步；`stats.ts` 路由透传 `q.tzOffsetMinutes`；前端加 `clientTzOffsetMinutes()`（`requests-filters.ts`，`|| 0` 规避 -0）+ `getStats`/loader 传入。`aggregate-shape.ts` 不动（bucketStartMs 直通，前端 `new Date()` 渲染回本地=本就正确）；`resolveWindow('today')` 早已本地午夜 → **不改**。
-- **B · OAuth 每账号日用量（写路径 + schema 变更）**：旧行按 `(provider, account, day=UTC午夜)` **写时聚合**，读时无法按别的时区重分桶。改存 **UTC 小时桶**：`oauth_usage.day`→`bucket_ms` 重命名（迁移 **sqlite v23 / pg v22** `ALTER TABLE … RENAME COLUMN`，PK/索引随之），写路径 `server.ts` 落 `nowMs - nowMs%3_600_000`，`queryDay(dayMs)`→`queryRange(start,end)` 做 SQL `GROUP BY provider,account` 的 `SUM/MIN/MAX` 滚动，读路由 `oauth.ts` 用 admin 本地日窗口 `[本地午夜, +24h)` 查询。前端 `getOAuthUsage` 带 `tzOffsetMinutes`。
-- **取舍/坑/TODO**：① **offset 模型不追 DST**——多日窗口跨 DST 切换日偏 1h（UTC+8 无 DST 故精确）；半小时时区（+5:30）本地日边界落 :30，小时桶无法精确切分（整点时区精确）。两者已文档化。② **OAuth 历史行**：v23 把旧 UTC-午夜日行重解释为 00:00 UTC 小时桶（丢当日内分布，可观测性可接受，迁移注释已说明）；生产 la.atmy.work 有真实 oauth_usage 数据 → 加了**专门「升级保数据」测试**证明重命名不丢行。③ pg `SUM()` 对 bigint 返回**字符串**，`toRow` 用 `Number()` 归一；`SUM(cost_usd)` **本征 null-aware**（全 null 才 null）正合「未计价 ≠ 实测 0」语义。④ **无新增配置旋钮**：offset 浏览器自动探测（零配置，符合原则 2）。
-- **验证**：TDD 红→绿。shared stats-query **+5**、契约测试 **+1**（同数据 offset 0 vs 480 分桶不同，跑双适配器 + mock）、sqlite/pg oauth-usage 重写（小时桶 + queryRange 窗口滚动 + 排除窗外 + pg 字符串 SUM 归一）、oauth_usage **升级保数据 +1**、四处迁移测试预标 v23/v22（fixture 无 oauth_usage 故 RENAME 越界）、oauth 路由 **+2**（本地日窗口数学 + 非法 offset fail-open）、admin stats **+1**（透传 tz + fail-open）、前端 `clientTzOffsetMinutes` **+2**。`pnpm build`/`typecheck`/`lint` 绿，全量 **3761 测试** 绿，admin `svelte-check` 0 错。worktree 分支 `worktree-tz-aggregation-review`（未发版/未部署）。
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-16 · 数据汇总按客户端时区分桶（修复「8 点边界」）（docs/02/04/10；原则 1/2/3）：仪表盘日/今日数据 8 点断层根因是 stats/OAuth usage 按 UTC 分桶；改为浏览器传 `tzOffsetMinutes`，SQL 用 shift-floor-unshift 统一 sqlite/pg，本地日窗口查询 OAuth 小时桶。TDD 覆盖 shared schema、store contract、sqlite/pg oauth usage、routes/admin；build/typecheck/lint/全量测试绿。
 
 ### 2026-06-15 · 移除 policy 级 max_lane 上限（docs/02/04/06；原则 2/6）：admin 策略编辑器「Cap lane (maximum)」(policy `max_lane`) 是已退役机制的最后残留（per-key max_lane 早在 `feat/drop-key-max-lane` 删，sqlite v10/pg v9 DROP COLUMN），`LANE_RANK` 只排 3 条、task/厂商 lane 不可排序故 rank 天花板语义不明。用户拍板硬删 breaking：`PolicySchema.strict()` 拒收 `max_lane`（旧 policies.yaml 启动 fail-close，部署前走 [[config-schema-strict-removal-failclose]] 复核），保留更具表达力的 `allowed_lanes`。改 policy-schema/engine、route-request 3 处 synthetic outcome、admin PolicyRow 降为仅 use_lane、5 语言 i18n、docs。「全局成本上限」改用 `allowed_lanes:[economy,balanced]`。TDD 全绿。分支 `feat/drop-policy-max-lane`（BREAKING，不发版/不部署）。
 

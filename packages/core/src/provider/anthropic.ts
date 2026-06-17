@@ -76,6 +76,9 @@ const ADVISOR_TOOL_BETA = "advisor-tool-2026-03-01";
 const ADVANCED_TOOL_USE_BETA = "advanced-tool-use-2025-11-20";
 const TOKEN_COUNTING_BETA = "token-counting-2024-11-01";
 const SYSTEM_SPOOF = "You are Claude Code, Anthropic's official CLI for Claude.";
+const BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
+const TASK_TOOLS_REMINDER_PREFIX = "The task tools haven't been used recently.";
+const USER_INTERRUPT_PREFIX = "The user sent a new message while you were working:";
 
 // ── request translation: OpenAI-Chat IR -> Anthropic Messages ────────────────
 
@@ -291,6 +294,16 @@ function toolResultContentFromContent(content: unknown): string | AnthropicBlock
   return blocks.length > 0 ? blocks : JSON.stringify(content);
 }
 
+function textOfBlock(block: AnthropicBlock): string {
+  return typeof block.text === "string" ? block.text : "";
+}
+
+function claudeCodeBoilerplateDedupKey(text: string): string | null {
+  if (text.startsWith(TASK_TOOLS_REMINDER_PREFIX)) return `task-tools:${text}`;
+  if (text.startsWith(USER_INTERRUPT_PREFIX)) return `user-interrupt:${text}`;
+  return null;
+}
+
 // Reproduce Claude Code's `x-anthropic-billing-header` attribution block as the FIRST
 // system entry — the exact slot (system[0], ahead of the "You are Claude Code…"
 // preamble) real CC emits it. `clientIdentity` is the inbound CLI's own
@@ -330,10 +343,27 @@ function buildSystem(
   messages: Array<Record<string, unknown>>,
   clientIdentity?: string | null,
 ): AnthropicBlock[] {
-  const sys: AnthropicBlock[] = [{ type: "text", text: SYSTEM_SPOOF }];
+  const spoof: AnthropicBlock = { type: "text", text: SYSTEM_SPOOF };
+  const sys: AnthropicBlock[] = [spoof];
+  const seenClaudeCodeBoilerplate = new Set<string>();
   for (const m of messages) {
     if (m.role !== "system" && m.role !== "developer") continue;
-    for (const b of textBlocksFromContent(m.content, m.cache_control)) sys.push(b);
+    for (const b of textBlocksFromContent(m.content, m.cache_control)) {
+      const text = textOfBlock(b);
+      if (text.startsWith(BILLING_HEADER_PREFIX)) continue;
+      if (text === SYSTEM_SPOOF) {
+        if (spoof.cache_control === undefined && b.cache_control !== undefined) {
+          spoof.cache_control = b.cache_control;
+        }
+        continue;
+      }
+      const dedupKey = claudeCodeBoilerplateDedupKey(text);
+      if (dedupKey !== null) {
+        if (seenClaudeCodeBoilerplate.has(dedupKey)) continue;
+        seenClaudeCodeBoilerplate.add(dedupKey);
+      }
+      sys.push(b);
+    }
   }
   // Derive the billing block from the (stable) text it precedes, then put it first.
   const systemText = sys.map((b) => String(b.text ?? "")).join("\n");
