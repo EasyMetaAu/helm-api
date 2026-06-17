@@ -16,6 +16,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, release as osRelease, type as osType } from "node:os";
 import { type NativePassthroughInput, nativePassthroughBody } from "@helm/shared";
+import {
+  applyForcedAnthropicThinking,
+  reasoningEffortToAnthropicThinking,
+} from "../protocol/reasoning-effort.js";
 import { prepareNativePassthroughRequest } from "./native-passthrough.js";
 import {
   type ChatCompletionRequest,
@@ -959,7 +963,23 @@ export function openaiToAnthropicRequest(
   if (typeof r.temperature === "number") body.temperature = r.temperature;
   if (typeof r.top_p === "number") body.top_p = r.top_p;
   if (typeof r.top_k === "number") body.top_k = r.top_k;
-  if (r.thinking && typeof r.thinking === "object") body.thinking = r.thinking;
+  if (r.thinking && typeof r.thinking === "object") {
+    body.thinking = r.thinking;
+  } else if (
+    typeof r.reasoning_effort === "string" &&
+    reasoningEffortToAnthropicThinking(r.reasoning_effort) !== undefined
+  ) {
+    // Cross-protocol reasoning: Anthropic is the one wire helm lacked a
+    // reasoning_effort mapping for. Derive extended `thinking` + its constraint
+    // fix-ups (max_tokens > budget, temperature=1, no top_p/top_k). A lane-FORCED
+    // effort arrives here as `r.reasoning_effort` (the router overwrote it).
+    const adjusted = applyForcedAnthropicThinking(body, r.reasoning_effort);
+    body.thinking = adjusted.thinking;
+    body.max_tokens = adjusted.max_tokens;
+    body.temperature = adjusted.temperature;
+    delete body.top_p;
+    delete body.top_k;
+  }
   if (r.context_management !== undefined) {
     body.context_management = normalizeAnthropicContextManagement(r.context_management);
   }

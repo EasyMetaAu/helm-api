@@ -371,6 +371,14 @@ export {
   type OpenAIErrorEnvelope,
   transformErrorOut as openaiTransformErrorOut,
 } from "./protocol/openai-error.js";
+// Lane-forced reasoning-effort → wire mapping (native-passthrough body rewrite +
+// the Anthropic thinking bridge). Used by the gateway executor + anthropic provider.
+export {
+  type AnthropicThinking,
+  applyForcedAnthropicThinking,
+  applyForcedReasoningToNativeBody,
+  reasoningEffortToAnthropicThinking,
+} from "./protocol/reasoning-effort.js";
 // Protocol transformer contract + registry + framework-agnostic endpoint mount
 // (docs/05). 5-method contract per protocol; the gateway wires real routes.
 export {

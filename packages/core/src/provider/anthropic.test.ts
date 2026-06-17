@@ -42,6 +42,36 @@ describe("openaiToAnthropicRequest", () => {
     expect(msgs[0]?.content[0]).toMatchObject({ type: "text", text: "Hi" });
   });
 
+  it("derives Anthropic extended thinking from reasoning_effort (no client thinking) with constraint fix-ups", () => {
+    const body = openaiToAnthropicRequest({
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: "solve" }],
+      reasoning_effort: "high",
+      max_tokens: 50,
+      temperature: 0,
+      top_p: 0.9,
+      top_k: 40,
+    } as unknown as Parameters<typeof openaiToAnthropicRequest>[0]);
+    const thinking = body.thinking as { type: string; budget_tokens: number };
+    expect(thinking.type).toBe("enabled");
+    // max_tokens must exceed the thinking budget; temperature must be 1; no top_p/top_k.
+    expect(body.max_tokens as number).toBeGreaterThan(thinking.budget_tokens);
+    expect(body.temperature).toBe(1);
+    expect(body.top_p).toBeUndefined();
+    expect(body.top_k).toBeUndefined();
+  });
+
+  it("keeps an explicit client thinking block over a reasoning_effort-derived one", () => {
+    const clientThinking = { type: "enabled", budget_tokens: 5000 };
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      thinking: clientThinking,
+      reasoning_effort: "high",
+    } as unknown as Parameters<typeof openaiToAnthropicRequest>[0]);
+    expect(body.thinking).toEqual(clientThinking);
+  });
+
   it("dedupes Claude Code system boilerplate when compatibility-rewriting native Anthropic traffic", () => {
     const spoof = "You are Claude Code, Anthropic's official CLI for Claude.";
     const agentPrompt =
