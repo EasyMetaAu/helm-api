@@ -163,6 +163,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     // Codex push captured under an old label) that would show as a phantom account.
     const acctKey = (providerId: string, account: string) => `${providerId}\u0000${account}`;
     let bound: Set<string> | null = null;
+    // Codex reset-credit counts, surfaced LIVE (never persisted — the value drops the
+    // instant a credit is consumed, so a stored snapshot would lie). Keyed by acctKey;
+    // attached onto the matching codex snapshot in the response below.
+    const resetCredits = new Map<string, number | null>();
     if (s) {
       try {
         const status = await s.listStatus();
@@ -171,44 +175,75 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         // seam). Anthropic and Codex both expose one; the Codex `x-codex-*` header
         // PUSH still updates the same store on live traffic — the PULL covers
         // accounts that have served nothing yet (else they render "—" forever).
-        const pulls = [
-          { providerId: "anthropic", source: "anthropic" as const, fetch: s.fetchAnthropicQuota },
-          { providerId: "openai-codex", source: "codex" as const, fetch: s.fetchCodexQuota },
-        ];
-        await Promise.all(
-          pulls.flatMap((p) => {
-            if (!p.fetch) return [];
-            const accounts = status.find((x) => x.id === p.providerId)?.accounts ?? [];
-            return accounts.map(async (a) => {
-              const windows = await p.fetch?.({ account: a.account });
-              if (windows && windows.length > 0) {
-                await store
-                  .upsert({
-                    providerId: p.providerId,
-                    account: a.account,
-                    windows,
-                    capturedAt: Date.now(),
-                    source: p.source,
-                  })
-                  .catch(() => {});
-                // NB: this observability PULL does NOT auto-park. Parking is driven only
-                // by live-traffic evidence (a real 429 in the executor, or a saturated
-                // x-codex header on a real reply) — never by a page-open quota read. That
-                // keeps "Reset usage" effective: clicking it reloads the page (this PULL),
-                // which would otherwise immediately re-derive the same saturated window
-                // and re-park the account before it can serve a single request.
-              }
-            });
-          }),
-        );
+        // NB: this observability PULL refreshes the stored window snapshot (and, for
+        // Codex, the live reset-credit count) but does NOT auto-park. Parking is driven
+        // only by live-traffic evidence (a real 429 in the executor, or a saturated
+        // x-codex header on a real reply) — never by a page-open quota read. That keeps
+        // "Reset usage" effective: clicking it reloads the page (this PULL), which would
+        // otherwise immediately re-derive the same saturated window and re-park the
+        // account before it can serve a single request.
+        const acctsOf = (id: string) => status.find((x) => x.id === id)?.accounts ?? [];
+        const tasks: Array<Promise<void>> = [];
+        // Anthropic: windows only.
+        const fetchAnthropic = s.fetchAnthropicQuota;
+        if (fetchAnthropic) {
+          for (const a of acctsOf("anthropic")) {
+            tasks.push(
+              (async () => {
+                const windows = await fetchAnthropic({ account: a.account });
+                if (windows && windows.length > 0) {
+                  await store
+                    .upsert({
+                      providerId: "anthropic",
+                      account: a.account,
+                      windows,
+                      capturedAt: Date.now(),
+                      source: "anthropic",
+                    })
+                    .catch(() => {});
+                }
+              })(),
+            );
+          }
+        }
+        // Codex: windows (persisted) + reset-credit count (live, attached below).
+        const fetchCodex = s.fetchCodexQuota;
+        if (fetchCodex) {
+          for (const a of acctsOf("openai-codex")) {
+            tasks.push(
+              (async () => {
+                const result = await fetchCodex({ account: a.account });
+                if (!result) return;
+                resetCredits.set(acctKey("openai-codex", a.account), result.resetCredits);
+                if (result.windows.length > 0) {
+                  await store
+                    .upsert({
+                      providerId: "openai-codex",
+                      account: a.account,
+                      windows: result.windows,
+                      capturedAt: Date.now(),
+                      source: "codex",
+                    })
+                    .catch(() => {});
+                }
+              })(),
+            );
+          }
+        }
+        await Promise.all(tasks);
       } catch {
         // fail-open: a refresh/listing failure still returns whatever is stored
       }
     }
+    // Fold the live codex reset-credit count onto its snapshot (no-op for others).
+    const withCredits = <T extends { providerId: string; account: string }>(q: T) => {
+      const credits = resetCredits.get(acctKey(q.providerId, q.account));
+      return credits === undefined ? q : { ...q, resetCredits: credits };
+    };
     try {
       const all = await store.getAll();
       // No binding view (no seam / listStatus failed) → fail-open, return everything.
-      if (!bound) return c.json({ quota: all });
+      if (!bound) return c.json({ quota: all.map(withCredits) });
       const live = all.filter((q) => bound.has(acctKey(q.providerId, q.account)));
       // Best-effort prune so orphans don't accumulate; never block the read on it.
       await Promise.all(
@@ -216,9 +251,34 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
           .filter((q) => !bound.has(acctKey(q.providerId, q.account)))
           .map((o) => store.delete(o.providerId, o.account).catch(() => {})),
       );
-      return c.json({ quota: live });
+      return c.json({ quota: live.map(withCredits) });
     } catch {
       return c.json({ quota: [] });
+    }
+  });
+
+  // POST /oauth/:provider/reset-credit { account? } -> consume one rate-limit reset
+  // credit for the account (the "reset usage limit" action). Codex-only. FAIL-CLOSED:
+  // the seam THROWS on any upstream failure, surfaced here as a 502 so the operator
+  // sees a real error rather than a silent no-op. Returns { code, windowsReset }.
+  app.post("/admin/api/oauth/:provider/reset-credit", async (c) => {
+    const s = seam();
+    if (!s?.consumeCodexResetCredit) {
+      return c.json({ error: "oauth login not configured" }, 503);
+    }
+    const providerId = c.req.param("provider");
+    if (providerId !== "openai-codex") {
+      return c.json({ error: "reset credit is only supported for openai-codex" }, 400);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { account?: unknown };
+    const account =
+      typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
+    try {
+      const result = await s.consumeCodexResetCredit({ account });
+      return c.json(result, 200);
+    } catch (e) {
+      // Upstream said no (no credits, expired token, network) — not a client error.
+      return c.json({ error: errMessage(e) }, 502);
     }
   });
 

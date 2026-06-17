@@ -95,6 +95,10 @@ export interface OAuthQuotaSnapshot {
   // because it hit its usage limit (null = not limited). Drives the "Rate limited —
   // auto-recovers in …" pill + the "Reset usage" button.
   usageLimitedUntilMs: number | null;
+  // Codex only: how many rate-limit reset credits the account can consume right now
+  // (surfaced LIVE off the /quota PULL, never persisted). undefined = not a Codex
+  // account / unknown; a number (incl. 0) gates the "Reset limit" button.
+  resetCredits?: number | null;
 }
 
 // Observability reads block the providers-page load (Promise.all), so they carry a
@@ -206,6 +210,31 @@ export async function resetUsageLimit(provider: string, account = 'default'): Pr
     method: 'POST',
   });
   if (!res.ok && res.status !== 204) await asJson(res);
+}
+
+// ── Codex rate-limit reset credit (the "reset usage limit" action) ───────────
+
+// The consume result surfaced to the operator: the upstream status `code` and how
+// many rate-limit windows were restored. Both null-tolerant (a drifted response
+// body degrades the toast, never the action).
+export interface CodexResetCreditResult {
+  code: string | null;
+  windowsReset: number | null;
+}
+
+// POST /oauth/:provider/reset-credit -> consume one rate-limit reset credit for the
+// account. Codex-only on the server; FAIL-CLOSED (the gateway 502s on any upstream
+// failure), so a rejected promise here means the reset did NOT happen — surface it.
+export async function consumeCodexResetCredit(
+  provider: string,
+  account = 'default',
+): Promise<CodexResetCreditResult> {
+  const res = await fetch(`${BASE}/${encodeURIComponent(provider)}/reset-credit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ account }),
+  });
+  return asJson(res);
 }
 
 // ── per-account connectivity test (providers page "Test" button) ─────────────

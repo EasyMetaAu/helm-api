@@ -256,6 +256,8 @@ export {
   AnthropicOAuthUsageSchema,
   type CodexOAuthUsage,
   CodexOAuthUsageSchema,
+  type CodexResetResult,
+  CodexResetResultSchema,
   type OAuthQuotaSnapshot,
   OAuthQuotaSnapshotSchema,
   type OAuthQuotaWindow,

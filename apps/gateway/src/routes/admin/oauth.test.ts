@@ -53,6 +53,7 @@ describe("admin OAuth routes — 503 when the seam is not configured", () => {
     ["PUT", "/admin/api/oauth/x/proxy"],
     ["GET", "/admin/api/oauth/x/account"],
     ["PUT", "/admin/api/oauth/x/account"],
+    ["POST", "/admin/api/oauth/openai-codex/reset-credit"],
     ["DELETE", "/admin/api/oauth/x"],
     ["POST", "/admin/api/oauth/x/reset"],
   ])("%s %s -> 503 oauth not configured", async (method, path) => {
@@ -164,6 +165,35 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(upsert).toHaveBeenCalled(); // the PULL refreshed the store
   });
 
+  it("GET /oauth/quota folds the live codex reset-credit count onto its snapshot", async () => {
+    const window = { key: "primary", usedPercent: 40, resetsAtMs: null, windowMinutes: 300 };
+    const oauthQuota = {
+      getAll: vi.fn(async () => [
+        {
+          providerId: "openai-codex",
+          account: "default",
+          windows: [window],
+          capturedAt: 1,
+          source: "codex",
+        },
+      ]),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => [
+        { id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] },
+      ]) as never,
+      fetchCodexQuota: vi.fn(async () => ({ windows: [window], resetCredits: 3 })) as never,
+    });
+    const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
+    const body = (await res.json()) as {
+      quota: Array<{ providerId: string; resetCredits?: number }>;
+    };
+    expect(body.quota).toHaveLength(1);
+    expect(body.quota[0]?.resetCredits).toBe(3);
+  });
+
   it("GET /oauth/:provider/models returns available + enabled", async () => {
     const res = await app({ oauth: fullSeam() }).request(
       "/admin/api/oauth/anthropic/models?account=default",
@@ -184,6 +214,67 @@ describe("admin OAuth routes — read endpoints", () => {
       priority: 50,
       schedulable: true,
     });
+  });
+});
+
+describe("admin OAuth routes — reset credit", () => {
+  it("503 when the seam lacks consumeCodexResetCredit", async () => {
+    const res = await app({ oauth: fullSeam() }).request(
+      "/admin/api/oauth/openai-codex/reset-credit",
+      { method: "POST", headers: JSONH, body: "{}" },
+    );
+    expect(res.status).toBe(503);
+  });
+
+  it("400 for a non-codex provider", async () => {
+    const seam = fullSeam({
+      consumeCodexResetCredit: vi.fn(async () => ({ code: "ok", windowsReset: 1 })) as never,
+    });
+    const res = await app({ oauth: seam }).request("/admin/api/oauth/anthropic/reset-credit", {
+      method: "POST",
+      headers: JSONH,
+      body: "{}",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("200 consumes a credit and returns { code, windowsReset } (defaults the account)", async () => {
+    const consume = vi.fn(async () => ({ code: "ok", windowsReset: 2 }));
+    const seam = fullSeam({ consumeCodexResetCredit: consume as never });
+    const res = await app({ oauth: seam }).request("/admin/api/oauth/openai-codex/reset-credit", {
+      method: "POST",
+      headers: JSONH,
+      body: "{}",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ code: "ok", windowsReset: 2 });
+    expect(consume).toHaveBeenCalledWith({ account: "default" });
+  });
+
+  it("passes an explicit account through to the seam", async () => {
+    const consume = vi.fn(async () => ({ code: "ok", windowsReset: 1 }));
+    const seam = fullSeam({ consumeCodexResetCredit: consume as never });
+    await app({ oauth: seam }).request("/admin/api/oauth/openai-codex/reset-credit", {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ account: "work" }),
+    });
+    expect(consume).toHaveBeenCalledWith({ account: "work" });
+  });
+
+  it("502 when the seam throws (fail-closed upstream error)", async () => {
+    const seam = fullSeam({
+      consumeCodexResetCredit: vi.fn(async () => {
+        throw new Error("no credits");
+      }) as never,
+    });
+    const res = await app({ oauth: seam }).request("/admin/api/oauth/openai-codex/reset-credit", {
+      method: "POST",
+      headers: JSONH,
+      body: "{}",
+    });
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toContain("no credits");
   });
 });
 

@@ -185,7 +185,33 @@ export interface OAuthAdminAccess {
   // Same PULL for Codex (chatgpt.com/backend-api/wham/usage — what the Codex CLI
   // /status reads). Complements the `x-codex-*` header PUSH so quota renders even
   // before an account has served any traffic. Same TTL cache + fail-open contract.
-  fetchCodexQuota?(input: { account: string }): Promise<OAuthQuotaWindow[] | null>;
+  // Returns the windows AND the available rate-limit-reset-credit count (both off
+  // the one PULL); null on any failure. `resetCredits` null = no grant / unknown.
+  fetchCodexQuota?(input: { account: string }): Promise<CodexQuotaResult>;
+  // Consume one Codex rate-limit reset credit for the account (the "reset usage
+  // limit" operator action). FAIL-CLOSED, unlike the PULLs: the seam THROWS on any
+  // upstream failure so the route returns an error rather than a false success.
+  // Returns the upstream `code` + how many windows were restored (`windowsReset`).
+  // Optional so unit-test seams can omit it; the route 503s when absent.
+  consumeCodexResetCredit?(input: { account: string }): Promise<CodexResetCreditResult>;
+}
+
+// The Codex quota PULL result: rate-limit windows + the available reset-credit
+// count, both parsed off the single /wham/usage response. null = the whole PULL
+// failed (dead token / network / not configured). `resetCredits` null = the
+// account holds no reset-credit grant (or the value was unparseable).
+export type CodexQuotaResult = {
+  windows: OAuthQuotaWindow[];
+  resetCredits: number | null;
+} | null;
+
+// The Codex reset-credit CONSUME result surfaced to the operator: the upstream
+// status `code` and how many rate-limit windows were restored. Both null-tolerant
+// — the consume already succeeded (HTTP 2xx) by the time this is built, so a
+// drifted response body degrades the toast, never the action.
+export interface CodexResetCreditResult {
+  code: string | null;
+  windowsReset: number | null;
 }
 
 // The effective scheduling for one account: defaults applied (priority 50,

@@ -18,6 +18,8 @@ import {
   type OAuthTokenStore,
   type ProxyConfig,
   parseAnthropicUsageBody,
+  parseCodexResetCredits,
+  parseCodexResetResult,
   parseCodexUsageBody,
   pollCopilotDeviceOnce,
   refreshGitHubCopilotToken,
@@ -28,6 +30,8 @@ import type {
   AccountProxyInput,
   AccountProxyView,
   AccountScheduleView,
+  CodexQuotaResult,
+  CodexResetCreditResult,
   OAuthAdminAccess,
   OAuthAdminStatus,
 } from "../routes/admin/deps.js";
@@ -77,6 +81,11 @@ const CODEX_USAGE_HEADERS = {
   "user-agent": "codex_cli_rs",
   accept: "application/json",
 } as const;
+// Codex "reset usage limit" CONSUME endpoint. Spends one rate-limit reset credit
+// (surfaced as `available_count` on the usage PULL) to immediately restore the
+// account's rate-limit windows. `redeem_request_id` is the upstream idempotency
+// key (a fresh uuid per click). Same auth + identity headers as the usage PULL.
+const CODEX_RESET_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 
 // Manual-paste (authorization-code) providers and their begin/complete step-fns.
 // `complete` takes the egress-proxy fetch so the token exchange leaves through the
@@ -217,7 +226,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   // so a rate-limited/erroring endpoint is NOT retried until the TTL lapses
   // (negative caching). The providers page is the only caller and triggers this on
   // page open / after an account action; there is no background poll.
-  const quotaCache = new Map<string, { at: number; windows: OAuthQuotaWindow[] | null }>();
+  // `resetCredits` (Codex only) rides alongside the windows: both come from the
+  // SAME /wham/usage PULL, so caching them together avoids a second round-trip.
+  // undefined for the Anthropic path (which has no such grant).
+  const quotaCache = new Map<
+    string,
+    { at: number; windows: OAuthQuotaWindow[] | null; resetCredits?: number | null }
+  >();
 
   function prune(): void {
     const cutoff = now() - SESSION_TTL_MS;
@@ -616,17 +631,24 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       return windows;
     },
 
-    async fetchCodexQuota({ account }): Promise<OAuthQuotaWindow[] | null> {
+    async fetchCodexQuota({ account }): Promise<CodexQuotaResult> {
       // Twin of fetchAnthropicQuota above — same 5-min cache (success AND failure),
       // same bounded timeout, same per-account proxy reuse. Codex-specific bits:
       // the endpoint keys on `chatgpt-account-id` (decoded from the access-token
       // JWT, exactly like the execution path in core/provider/openai-responses).
+      // Returns windows AND the available reset-credit count (both parsed off the
+      // one PULL) so the providers page can render quota + enable the reset button.
       const key = `${CODEX} ${account}`;
       const cached = quotaCache.get(key);
-      if (cached && now() - cached.at < QUOTA_TTL_MS) return cached.windows;
+      if (cached && now() - cached.at < QUOTA_TTL_MS) {
+        return cached.windows === null
+          ? null
+          : { windows: cached.windows, resetCredits: cached.resetCredits ?? null };
+      }
       const provider = getOAuthProvider(CODEX);
       if (!provider) return null;
       let windows: OAuthQuotaWindow[] | null = null;
+      let resetCredits: number | null = null;
       try {
         const proxy = getAccountSettings(
           await loadAccountSettings(deps.config, deps.encKey),
@@ -655,6 +677,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         if (res.ok) {
           const body: unknown = await res.json();
           windows = parseCodexUsageBody(body, now());
+          resetCredits = parseCodexResetCredits(body); // null when the grant is absent
           // Same tripwire as the Anthropic PULL: a 200 yielding zero windows would
           // otherwise freeze the stored snapshot silently.
           if (windows.length === 0) {
@@ -670,14 +693,67 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         }
       } catch (e) {
         windows = null; // dead token / network / malformed body → page renders "—"
+        resetCredits = null;
         log("warn", "oauth.quota.pull_failed", {
           provider_id: CODEX,
           account,
           error: e instanceof Error ? e.message : String(e),
         });
       }
-      quotaCache.set(key, { at: now(), windows });
-      return windows;
+      quotaCache.set(key, { at: now(), windows, resetCredits });
+      return windows === null ? null : { windows, resetCredits };
+    },
+
+    async consumeCodexResetCredit({ account }): Promise<CodexResetCreditResult> {
+      // The "reset usage limit" operator action: spend one rate-limit reset credit
+      // to immediately restore the account's windows. Mirrors fetchCodexQuota's
+      // setup (per-account proxy + preset token manager + chatgpt-account-id), but
+      // is FAIL-CLOSED — a mutation must THROW on failure so the route surfaces an
+      // error to the operator (the PULL is fail-open; this is not).
+      const provider = getOAuthProvider(CODEX);
+      if (!provider) throw new Error("openai-codex OAuth is not configured");
+      const proxy = getAccountSettings(
+        await loadAccountSettings(deps.config, deps.encKey),
+        CODEX,
+        account,
+      ).proxy as ProxyConfig | undefined;
+      const doFetch = makeFetch(proxy);
+      const tm = createTokenManager({
+        oauth: { kind: "preset", providerId: CODEX, account },
+        tokenStore: deps.store,
+        encKey: deps.encKey,
+        oauthProvider: provider,
+        fetch: doFetch,
+        now,
+      });
+      const authorization = await tm.getAuthHeader(); // "Bearer <access>"
+      const accountId = codexAccountIdFromToken(authorization.replace(/^Bearer\s+/i, ""));
+      const res = await doFetch(CODEX_RESET_URL, {
+        method: "POST",
+        headers: {
+          ...CODEX_USAGE_HEADERS,
+          authorization,
+          "content-type": "application/json",
+          ...(accountId ? { "chatgpt-account-id": accountId } : {}),
+        },
+        body: JSON.stringify({ redeem_request_id: randomUUID() }),
+        signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {}); // never log/echo the body (principle 7)
+        log("warn", "oauth.reset_credit.failed", {
+          provider_id: CODEX,
+          account,
+          status: res.status,
+        });
+        throw new Error(`codex reset-credit consume failed (status ${res.status})`);
+      }
+      const body: unknown = await res.json().catch(() => null);
+      const result = parseCodexResetResult(body);
+      // The consume restored the windows AND decremented the credit count — bust the
+      // cache so the next /quota PULL reflects both rather than the stale snapshot.
+      quotaCache.delete(`${CODEX} ${account}`);
+      return result;
     },
   };
 }

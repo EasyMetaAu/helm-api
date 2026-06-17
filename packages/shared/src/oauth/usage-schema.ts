@@ -118,6 +118,17 @@ const CodexRateLimitWindowSchema = z
   })
   .loose();
 
+// Rate-limit RESET credits the account holds (the "reset usage limit" grant
+// OpenAI surfaces in Codex). `available_count` is how many credits can be
+// consumed right now; consuming one immediately restores the rate-limit windows.
+// `.loose()` + `.nullish()` like the rest of this file — the field is absent for
+// plans without the grant, and must never break the providers page.
+const CodexRateLimitResetCreditsSchema = z
+  .object({
+    available_count: z.number().optional(),
+  })
+  .loose();
+
 export const CodexOAuthUsageSchema = z
   .object({
     rate_limit: z
@@ -127,7 +138,23 @@ export const CodexOAuthUsageSchema = z
       })
       .loose()
       .nullish(),
+    rate_limit_reset_credits: CodexRateLimitResetCreditsSchema.nullish(),
   })
   .loose();
 
 export type CodexOAuthUsage = z.infer<typeof CodexOAuthUsageSchema>;
+
+// ── Codex reset-credit CONSUME response ──────────────────────────────────────
+// POST chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume returns the
+// redeemed-credit envelope. We only read `code` (status string) and
+// `windows_reset` (how many rate-limit windows were restored) for the operator
+// toast; the nested `credit` metadata is ignored. Untrusted → `.loose()` so a
+// shape drift on the fields we ignore never fails the parse.
+export const CodexResetResultSchema = z
+  .object({
+    code: z.string().optional(),
+    windows_reset: z.number().optional(),
+  })
+  .loose();
+
+export type CodexResetResult = z.infer<typeof CodexResetResultSchema>;

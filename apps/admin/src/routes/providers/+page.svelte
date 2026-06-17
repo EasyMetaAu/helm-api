@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
   import {
+    consumeCodexResetCredit,
     logoutOAuth,
     resetUsageLimit,
     setAccountSchedule,
@@ -53,8 +54,14 @@
   // Accounts whose inline schedule edit is in flight (keyed provider/account) — used
   // to disable the control while saving without blocking the rest of the table.
   let savingSchedule = $state<Record<string, boolean>>({});
-  // Accounts whose "Reset usage" click is in flight (keyed provider/account).
+  // Accounts whose "Reset usage" click is in flight (keyed provider/account) — clears
+  // the auto-park cooldown (#291).
   let resetting = $state<Record<string, boolean>>({});
+  // Codex accounts whose "Reset limit" consume is in flight (keyed provider/account).
+  let resettingCredit = $state<Record<string, boolean>>({});
+  // Transient success line after a credit reset (e.g. "Reset 2 window(s)"); cleared on
+  // the next action. Errors continue to use the shared `error` banner.
+  let resetNotice = $state<string | null>(null);
 
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
 
@@ -255,6 +262,29 @@
     }
   }
 
+  // "Reset limit" (Codex only): consume one rate-limit reset credit to restore the
+  // account's windows. FAIL-CLOSED on the server, so a rejection means the reset did
+  // NOT happen — surface it via `error`. On success, refresh so the quota bars + the
+  // remaining-credit count reflect the consumed credit.
+  async function resetLimit(providerId: string, account: string): Promise<void> {
+    const k = keyOf(providerId, account);
+    resettingCredit = { ...resettingCredit, [k]: true };
+    error = null;
+    resetNotice = null;
+    try {
+      const result = await consumeCodexResetCredit(providerId, account);
+      await invalidateAll();
+      resetNotice =
+        result.windowsReset != null
+          ? $t('Reset {n} window(s)', { n: result.windowsReset })
+          : $t('Reset limit consumed');
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to reset limit');
+    } finally {
+      resettingCredit = { ...resettingCredit, [k]: false };
+    }
+  }
+
   async function confirmDisconnect(): Promise<void> {
     if (!confirming) return;
     error = null;
@@ -296,6 +326,10 @@
 
   {#if error}
     <p class="alert-error" role="alert">{error}</p>
+  {/if}
+
+  {#if resetNotice}
+    <p class="alert-success" role="status">{resetNotice}</p>
   {/if}
 
   {#if !data.configured}
@@ -363,6 +397,8 @@
             {@const usage = usageByKey.get(k)}
             {@const quota = quotaByKey.get(k)}
             {@const saving = savingSchedule[k] === true}
+            {@const isCodex = row.provider.id === 'openai-codex'}
+            {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
             <tr class="align-top" data-testid="provider-account-row">
               <!-- Provider / account + type badge -->
               <td data-label={$t('Provider')} class="px-3 py-3">
@@ -436,7 +472,7 @@
                 {/if}
               </td>
 
-              <!-- Quota / session windows -->
+              <!-- Quota / session windows (+ Codex reset-credit count) -->
               <td data-label={$t('Quota')} class="px-3 py-3">
                 {#if quota && quota.windows.length > 0}
                   <div class="flex w-full flex-col gap-1.5 lg:w-40">
@@ -458,7 +494,13 @@
                       </div>
                     {/each}
                   </div>
-                {:else}
+                {/if}
+                {#if codexCredits != null}
+                  <div class="text-[10px] text-ink-muted" class:mt-1={quota && quota.windows.length > 0}>
+                    {$t('{n} reset credits', { n: codexCredits })}
+                  </div>
+                {/if}
+                {#if !(quota && quota.windows.length > 0) && codexCredits == null}
                   <span class="text-xs text-ink-muted">—</span>
                 {/if}
               </td>
@@ -529,6 +571,20 @@
                       disabled={resetting[k] === true}
                       onclick={() => resetUsage(row.provider.id, row.account.account)}
                       >{resetting[k] === true ? $t('Resetting…') : $t('Reset usage')}</button
+                    >
+                  {/if}
+                  {#if isCodex}
+                    <button
+                      type="button"
+                      class="btn-secondary"
+                      disabled={resettingCredit[k] === true || codexCredits == null || codexCredits <= 0}
+                      title={codexCredits == null
+                        ? $t('Reset-credit count unavailable')
+                        : codexCredits <= 0
+                          ? $t('No reset credits available')
+                          : $t('Consume one credit to restore the rate-limit window')}
+                      onclick={() => resetLimit(row.provider.id, row.account.account)}
+                      >{resettingCredit[k] === true ? $t('Resetting…') : $t('Reset limit')}</button
                     >
                   {/if}
                   <button

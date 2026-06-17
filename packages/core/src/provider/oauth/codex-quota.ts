@@ -1,4 +1,9 @@
-import { type CodexOAuthUsage, CodexOAuthUsageSchema, type OAuthQuotaWindow } from "@helm/shared";
+import {
+  type CodexOAuthUsage,
+  CodexOAuthUsageSchema,
+  CodexResetResultSchema,
+  type OAuthQuotaWindow,
+} from "@helm/shared";
 
 // Codex (ChatGPT) rate-limit window headers (providers page Tier 3). The Codex
 // backend stamps these `x-codex-*` headers on EVERY /responses reply (the same set
@@ -97,4 +102,46 @@ export function parseCodexUsageBody(body: unknown, nowMs: number): OAuthQuotaWin
   const parsed = CodexOAuthUsageSchema.safeParse(body);
   if (!parsed.success) return [];
   return codexUsageToWindows(parsed.data, nowMs);
+}
+
+// ── Rate-limit RESET credits (the "reset usage limit" grant) ─────────────────
+// The same /wham/usage body the windows above come from also carries how many
+// reset credits the account can consume right now. The providers page reads this
+// off the SAME PULL to decide whether the "Reset limit" button is enabled.
+
+// PURE + FAIL-OPEN: returns the available reset-credit count, or null when the
+// account holds no such grant (field absent) or the value is not a finite ≥0
+// number. null = "unknown / no credits" → the UI disables the reset button.
+export function codexResetCreditsFromUsage(usage: CodexOAuthUsage): number | null {
+  const n = usage.rate_limit_reset_credits?.available_count;
+  return typeof n === "number" && Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+}
+
+// Parse the count straight from an untrusted usage body (safeParse → null on any
+// Zod failure, same fail-open contract as parseCodexUsageBody).
+export function parseCodexResetCredits(body: unknown): number | null {
+  const parsed = CodexOAuthUsageSchema.safeParse(body);
+  if (!parsed.success) return null;
+  return codexResetCreditsFromUsage(parsed.data);
+}
+
+// ── Reset-credit CONSUME response ────────────────────────────────────────────
+// POST .../rate-limit-reset-credits/consume returns `{ code, credit, windows_reset }`.
+// We surface only `code` (status) and `windowsReset` (how many windows were
+// restored) for the operator toast. FAIL-OPEN parse: a shape drift yields nulls
+// rather than throwing — the consume already succeeded (HTTP 2xx) by this point.
+export function parseCodexResetResult(body: unknown): {
+  code: string | null;
+  windowsReset: number | null;
+} {
+  const parsed = CodexResetResultSchema.safeParse(body);
+  if (!parsed.success) return { code: null, windowsReset: null };
+  const { code, windows_reset } = parsed.data;
+  return {
+    code: typeof code === "string" ? code : null,
+    windowsReset:
+      typeof windows_reset === "number" && Number.isFinite(windows_reset)
+        ? Math.floor(windows_reset)
+        : null,
+  };
 }

@@ -292,6 +292,9 @@
   .alert-warn {
     @apply rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800;
   }
+  .alert-success {
+    @apply rounded border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-700;
+  }
   .empty-state {
     @apply rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500;
   }

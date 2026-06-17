@@ -8,8 +8,10 @@ const logoutOAuth = vi.fn();
 const resetUsageLimit = vi.fn();
 const setAccountSchedule = vi.fn();
 const streamAccountTest = vi.fn();
+const consumeCodexResetCredit = vi.fn();
 vi.mock('$lib/api/oauth.js', () => ({
   completeManualPaste: vi.fn(),
+  consumeCodexResetCredit: (...args: unknown[]) => consumeCodexResetCredit(...args),
   getAccountModels: vi.fn(),
   getAccountProxy: vi.fn(),
   getAccountSchedule: vi.fn(),
@@ -98,6 +100,7 @@ describe('providers page', () => {
     logoutOAuth.mockReset();
     setAccountSchedule.mockReset();
     streamAccountTest.mockReset();
+    consumeCodexResetCredit.mockReset();
     invalidateAllMock.mockReset();
     logoutOAuth.mockResolvedValue(undefined);
     setAccountSchedule.mockResolvedValue(undefined);
@@ -252,5 +255,78 @@ describe('providers page', () => {
 
     await waitFor(() => expect(logoutOAuth).toHaveBeenCalledWith('anthropic', 'acct-claude'));
     expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Codex "Reset limit" (rate-limit reset credit) ──────────────────────────
+  // One Codex account + a quota snapshot carrying the live reset-credit count.
+  function renderCodex(resetCredits: number | null) {
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'Codex',
+          accounts: [
+            {
+              account: 'acct-codex',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: ['gpt-5.5'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [
+        {
+          providerId: 'openai-codex',
+          account: 'acct-codex',
+          windows: [
+            { key: 'primary', usedPercent: 80, resetsAtMs: Date.now() + 3_600_000, windowMinutes: 300 },
+          ],
+          capturedAt: Date.now(),
+          source: 'codex',
+          usageLimitedUntilMs: null,
+          resetCredits,
+        },
+      ],
+    });
+  }
+
+  it('consumes a Codex reset credit and refreshes when "Reset limit" is clicked', async () => {
+    consumeCodexResetCredit.mockResolvedValue({ code: 'ok', windowsReset: 2 });
+    renderCodex(2);
+    const row = screen.getByTestId('provider-account-row');
+    // The available reset-credit count renders in the Quota cell.
+    expect(within(row).getByText('2 reset credits')).toBeInTheDocument();
+
+    const resetBtn = within(row).getByRole('button', { name: /reset limit/i });
+    expect(resetBtn).toBeEnabled();
+    await fireEvent.click(resetBtn);
+
+    await waitFor(() =>
+      expect(consumeCodexResetCredit).toHaveBeenCalledWith('openai-codex', 'acct-codex'),
+    );
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+    // Success banner reflects how many windows were restored.
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent('Reset 2 window(s)'),
+    );
+  });
+
+  it('disables "Reset limit" for a Codex account with no reset credits', () => {
+    renderCodex(0);
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByRole('button', { name: /reset limit/i })).toBeDisabled();
+    expect(consumeCodexResetCredit).not.toHaveBeenCalled();
+  });
+
+  it('does not render "Reset limit" for non-Codex accounts', () => {
+    renderPage(); // default anthropic account
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).queryByRole('button', { name: /reset limit/i })).not.toBeInTheDocument();
   });
 });

@@ -468,6 +468,8 @@ export {
   openaiCodexOAuthProvider,
   parseAnthropicUsageBody,
   parseCodexQuotaHeaders,
+  parseCodexResetCredits,
+  parseCodexResetResult,
   parseCodexUsageBody,
   parseOAuthAuthorizationInput,
   pollCopilotDeviceOnce,

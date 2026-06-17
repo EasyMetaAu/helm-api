@@ -974,3 +974,136 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
     expect(usageHits()).toBe(1);
   });
 });
+
+// ── Codex rate-limit reset credit (the "reset usage limit" action) ────────────
+describe("createOAuthAdmin > codex reset credit", () => {
+  // A Codex access token is a JWT; carry the account-id claim so login + the
+  // chatgpt-account-id header resolve (same shape the login test seeds).
+  const seg = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const CODEX_JWT = `${seg({ alg: "none" })}.${seg({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_9" } })}.s`;
+
+  type Logs = Array<{ level: string; message: string; fields?: Record<string, unknown> }>;
+
+  // Connect one Codex account and route the usage PULL + reset-credit CONSUME.
+  // `now` is pinned so the stored token stays fresh (no refresh round-trip) and
+  // the 5-min quota cache never elapses between calls.
+  async function connectCodex(opts: {
+    onUsage?: () => Response;
+    onConsume?: () => Response;
+  }): Promise<{
+    admin: ReturnType<typeof createOAuthAdmin>;
+    usageHits: () => number;
+    consumeCalls: () => Array<{ url: string; init?: RequestInit }>;
+    logs: Logs;
+  }> {
+    let usageHits = 0;
+    const consumeCalls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (/auth\.openai\.com\/oauth\/token/.test(u)) {
+        return json({ access_token: CODEX_JWT, refresh_token: "RTC", expires_in: 3600 });
+      }
+      if (/wham\/rate-limit-reset-credits\/consume/.test(u)) {
+        consumeCalls.push({ url: u, init });
+        return (opts.onConsume ?? (() => json({ code: "ok", windows_reset: 2 })))();
+      }
+      if (/wham\/usage/.test(u)) {
+        usageHits++;
+        return (opts.onUsage ?? (() => json({})))();
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    }) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", fetchImpl);
+    let seq = 0;
+    const logs: Logs = [];
+    const admin = createOAuthAdmin({
+      store: makeStore(),
+      encKey: KEY,
+      config: makeConfig(),
+      now: () => 1000,
+      genSessionId: () => `s${++seq}`,
+      log: (level, message, fields) => logs.push({ level, message, fields }),
+    });
+    const { sessionId, authorizeUrl } = await admin.startManualPaste({
+      providerId: "openai-codex",
+    });
+    const state = new URL(authorizeUrl).searchParams.get("state");
+    await admin.completeManualPaste({
+      sessionId,
+      redirectInput: `https://x/cb?code=C&state=${state}`,
+      account: "default",
+    });
+    return { admin, usageHits: () => usageHits, consumeCalls: () => consumeCalls, logs };
+  }
+
+  it("fetchCodexQuota returns windows AND the available reset-credit count from one PULL", async () => {
+    const { admin, usageHits } = await connectCodex({
+      onUsage: () =>
+        json({
+          rate_limit: { primary_window: { used_percent: 6, reset_after_seconds: 120 } },
+          rate_limit_reset_credits: { available_count: 2 },
+        }),
+    });
+    const fetchQuota = admin.fetchCodexQuota;
+    if (!fetchQuota) throw new Error("fetchCodexQuota not wired");
+    const first = await fetchQuota({ account: "default" });
+    expect(first?.windows.map((w) => `${w.key}:${w.usedPercent}`)).toEqual(["primary:6"]);
+    expect(first?.resetCredits).toBe(2);
+    // Second open is served from the warm cache — no second PULL.
+    const second = await fetchQuota({ account: "default" });
+    expect(second).toEqual(first);
+    expect(usageHits()).toBe(1);
+  });
+
+  it("fetchCodexQuota reports resetCredits null when the account holds no grant", async () => {
+    const { admin } = await connectCodex({
+      onUsage: () => json({ rate_limit: { primary_window: { used_percent: 1 } } }),
+    });
+    const result = await admin.fetchCodexQuota?.({ account: "default" });
+    expect(result?.windows).toHaveLength(1);
+    expect(result?.resetCredits).toBeNull();
+  });
+
+  it("consumeCodexResetCredit POSTs a redeem id with the bearer + account-id headers", async () => {
+    const { admin, consumeCalls } = await connectCodex({
+      onConsume: () => json({ code: "ok", credit: { id: "c_1" }, windows_reset: 2 }),
+    });
+    const result = await admin.consumeCodexResetCredit?.({ account: "default" });
+    expect(result).toEqual({ code: "ok", windowsReset: 2 });
+
+    expect(consumeCalls()).toHaveLength(1);
+    const init = consumeCalls()[0]?.init;
+    expect(init?.method).toBe("POST");
+    const headers = init?.headers as Record<string, string>;
+    expect(headers.authorization).toBe(`Bearer ${CODEX_JWT}`);
+    expect(headers["chatgpt-account-id"]).toBe("acc_9");
+    expect(headers["content-type"]).toBe("application/json");
+    const body = JSON.parse(String(init?.body)) as { redeem_request_id?: unknown };
+    expect(typeof body.redeem_request_id).toBe("string");
+  });
+
+  it("consumeCodexResetCredit busts the quota cache so the next PULL re-fetches", async () => {
+    const { admin, usageHits } = await connectCodex({
+      onUsage: () => json({ rate_limit: { primary_window: { used_percent: 1 } } }),
+    });
+    await admin.fetchCodexQuota?.({ account: "default" }); // PULL #1 (cached)
+    expect(usageHits()).toBe(1);
+    await admin.consumeCodexResetCredit?.({ account: "default" }); // busts the cache
+    await admin.fetchCodexQuota?.({ account: "default" }); // PULL #2 (cache was cleared)
+    expect(usageHits()).toBe(2);
+  });
+
+  it("consumeCodexResetCredit THROWS on an upstream failure (fail-closed) + logs it", async () => {
+    const { admin, logs } = await connectCodex({
+      onConsume: () => new Response("nope", { status: 402 }),
+    });
+    await expect(admin.consumeCodexResetCredit?.({ account: "default" })).rejects.toThrow(
+      /status 402/,
+    );
+    expect(logs).toContainEqual({
+      level: "warn",
+      message: "oauth.reset_credit.failed",
+      fields: { provider_id: "openai-codex", account: "default", status: 402 },
+    });
+  });
+});
