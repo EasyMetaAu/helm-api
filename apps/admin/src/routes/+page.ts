@@ -1,5 +1,6 @@
 import { listRequests, type RequestListItem } from '$lib/api/requests.js';
 import { type DashboardStats, EMPTY_STATS, getStats } from '$lib/api/stats.js';
+import { resolveStatsWindow, trendBucketForRange } from '$lib/dashboard-chart.js';
 import {
   clientTzOffsetMinutes,
   parseRange,
@@ -21,19 +22,12 @@ import type { PageLoad } from './$types.js';
 // API hiccup) shows a zeroed dashboard rather than an error page. Re-runs on every
 // navigation (range change / back-button) since it depends on `url`.
 
-// Short windows want an hourly trend (you can see the shape of a day); long
-// windows want a daily trend (a month of hourly points is noise). The boundary is
-// the sub-day presets.
-function bucketFor(range: RangeKey): 'hour' | 'day' {
-  return range === '1h' || range === '6h' || range === '24h' || range === 'today'
-    ? 'hour'
-    : 'day';
-}
-
 export const load: PageLoad = async ({ url }) => {
   const range = parseRange(url.searchParams.get('range'), '24h');
-  const { start, end } = resolveWindow(range, Date.now());
-  const bucket = bucketFor(range);
+  const now = Date.now();
+  const { start, end } = resolveWindow(range, now);
+  const statsWindow = resolveStatsWindow(range, now);
+  const bucket = trendBucketForRange(range);
   // Send the viewer's UTC offset so the SQL series buckets break at local midnight
   // (not 00:00 UTC) — the fix for the "8am boundary" on UTC+8 dashboards.
   const tzOffsetMinutes = clientTzOffsetMinutes();
@@ -41,7 +35,7 @@ export const load: PageLoad = async ({ url }) => {
   // The aggregate (cards + charts). Fail-soft to an empty aggregate.
   let agg: DashboardStats = EMPTY_STATS;
   try {
-    agg = await getStats({ start, end, bucket, tzOffsetMinutes });
+    agg = await getStats({ ...statsWindow, bucket, tzOffsetMinutes });
   } catch {
     agg = EMPTY_STATS;
   }
@@ -63,6 +57,7 @@ export const load: PageLoad = async ({ url }) => {
 
   return {
     range,
+    bucket,
     agg,
     items,
     stats: {
