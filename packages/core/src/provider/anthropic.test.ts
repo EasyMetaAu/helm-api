@@ -36,6 +36,66 @@ describe("openaiToAnthropicRequest", () => {
     expect(msgs[0]?.content[0]).toMatchObject({ type: "text", text: "Hi" });
   });
 
+  it("dedupes Claude Code system boilerplate when compatibility-rewriting native Anthropic traffic", () => {
+    const spoof = "You are Claude Code, Anthropic's official CLI for Claude.";
+    const taskReminder =
+      "The task tools haven't been used recently. Consider whether tool use would help.";
+    const userInterrupt =
+      "The user sent a new message while you were working: please prioritize it.";
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "system",
+          content: [
+            { type: "text", text: spoof, cache_control: { type: "ephemeral" } },
+            { type: "text", text: "base Claude Code prompt" },
+          ],
+        },
+        { role: "system", content: taskReminder },
+        { role: "system", content: taskReminder },
+        { role: "system", content: userInterrupt },
+        { role: "system", content: userInterrupt },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const system = body.system as Array<Record<string, unknown>>;
+    const texts = system.map((block) => String(block.text ?? ""));
+    expect(texts.filter((text) => text === spoof)).toHaveLength(1);
+    expect(texts[1]).toBe(spoof);
+    expect(system[1]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(texts.filter((text) => text === taskReminder)).toHaveLength(1);
+    expect(texts.filter((text) => text === userInterrupt)).toHaveLength(1);
+    const messages = body.messages as Array<Record<string, unknown>>;
+    expect(messages[0]).toMatchObject({ role: "user" });
+    expect(JSON.stringify(messages[0])).not.toContain(spoof);
+  });
+
+  it("keeps repeated non-Claude-Code system content and distinct interrupt notices", () => {
+    const firstInterrupt =
+      "The user sent a new message while you were working: first interruption.";
+    const secondInterrupt =
+      "The user sent a new message while you were working: second interruption.";
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        { role: "system", content: "repeat this normal instruction" },
+        { role: "system", content: "repeat this normal instruction" },
+        { role: "system", content: firstInterrupt },
+        { role: "system", content: secondInterrupt },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const texts = (body.system as Array<Record<string, unknown>>).map((block) =>
+      String(block.text ?? ""),
+    );
+    expect(texts.filter((text) => text === "repeat this normal instruction")).toHaveLength(2);
+    expect(texts).toContain(firstInterrupt);
+    expect(texts).toContain(secondInterrupt);
+  });
+
   it("maps assistant tool_calls -> tool_use and tool results -> tool_result", () => {
     const body = openaiToAnthropicRequest({
       model: "m",
