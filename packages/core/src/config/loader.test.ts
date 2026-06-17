@@ -51,6 +51,31 @@ describe("loadConfig", () => {
     expect(cfg.providers[0]?.map_developer_role_to_system).toBe(true);
   });
 
+  it("loads the provider Claude CLI fingerprint mode and rejects typos", () => {
+    const cfg = loadConfig({
+      configDir: "config",
+      env: {},
+      readFile: fakeReadFile({
+        ...VALID_YAML,
+        "config/providers.yaml":
+          "providers:\n  - alias: anthropic\n    type: anthropic\n    base_url: https://api.anthropic.com\n    api_key_env: ANTHROPIC_API_KEY\n    claude_cli_fingerprint_mode: strict\n",
+      }),
+    });
+    expect(cfg.providers[0]?.claude_cli_fingerprint_mode).toBe("strict");
+
+    expect(() =>
+      loadConfig({
+        configDir: "config",
+        env: {},
+        readFile: fakeReadFile({
+          ...VALID_YAML,
+          "config/providers.yaml":
+            "providers:\n  - alias: anthropic\n    type: anthropic\n    base_url: https://api.anthropic.com\n    api_key_env: ANTHROPIC_API_KEY\n    claude_cli_fingerprint_mode: aggressive\n",
+        }),
+      }),
+    ).toThrow(ConfigError);
+  });
+
   it("lets env override file values (env wins) with coercion", () => {
     const cfg = loadConfig({
       configDir: "config",

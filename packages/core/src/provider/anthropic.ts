@@ -39,6 +39,9 @@ export interface AnthropicClientConfig {
   // the device identity never rotates — the real-client posture Anthropic expects.
   // Undefined → no `metadata` is sent (back-compat; matches openclaw's default).
   metadataUserId?: string;
+  // Wire-image profile for Claude Code emulation. "auto" keeps static API-key
+  // providers conservative while making OAuth subscription traffic strict.
+  claudeCliFingerprintMode?: "auto" | "off" | "conservative" | "strict";
   // Transient-connection retry at the fetch boundary (provider/retry.ts). Optional —
   // omitted falls back to defaults (2 retries, [200,500] ms). Pre-first-byte, so the
   // retry is idempotent. See ProviderConfig for the rationale.
@@ -78,6 +81,9 @@ const ADVANCED_TOOL_USE_BETA = "advanced-tool-use-2025-11-20";
 const TOKEN_COUNTING_BETA = "token-counting-2024-11-01";
 const SYSTEM_SPOOF = "You are Claude Code, Anthropic's official CLI for Claude.";
 const BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
+const CCH_SEED = 0x6e52736ac806831en;
+const CCH_PATTERN = /\bcch=([0-9a-f]{5});/;
+const CCH_PLACEHOLDER = "cch=00000;";
 const TASK_TOOLS_REMINDER_PREFIX = "The task tools haven't been used recently.";
 const USER_INTERRUPT_PREFIX = "The user sent a new message while you were working:";
 const CLAUDE_CODE_AGENT_PROMPT_PREFIX =
@@ -121,6 +127,49 @@ const THIRD_PARTY_OBFUSCATE_WORDS = [
   "avante",
   "codecompanion",
 ];
+const CLAUDE_CLI_BODY_FIELD_ORDER = [
+  "model",
+  "messages",
+  "system",
+  "tools",
+  "tool_choice",
+  "metadata",
+  "max_tokens",
+  "temperature",
+  "thinking",
+  "context_management",
+  "output_config",
+  "stream",
+] as const;
+const CLAUDE_CLI_HEADER_ORDER = [
+  "Accept",
+  "Authorization",
+  "Content-Type",
+  "User-Agent",
+  "X-Claude-Code-Session-Id",
+  "X-Stainless-Arch",
+  "X-Stainless-Lang",
+  "X-Stainless-OS",
+  "X-Stainless-Package-Version",
+  "X-Stainless-Retry-Count",
+  "X-Stainless-Runtime",
+  "X-Stainless-Runtime-Version",
+  "X-Stainless-Timeout",
+  "anthropic-beta",
+  "anthropic-dangerous-direct-browser-access",
+  "anthropic-version",
+  "x-app",
+  "x-client-request-id",
+  "Connection",
+  "Host",
+  "Accept-Encoding",
+  "Content-Length",
+] as const;
+const CLAUDE_CLI_HEADER_CANONICAL = new Map(
+  CLAUDE_CLI_HEADER_ORDER.map((name) => [name.toLowerCase(), name] as const),
+);
+
+type EffectiveClaudeCliFingerprintMode = "off" | "conservative" | "strict";
 
 // ── request translation: OpenAI-Chat IR -> Anthropic Messages ────────────────
 
@@ -262,6 +311,217 @@ function betaHeaderForBody(
   }
   for (const beta of extraBetas) betas.add(beta);
   return [...betas].join(",");
+}
+
+function effectiveClaudeCliFingerprintMode(
+  configured: AnthropicClientConfig["claudeCliFingerprintMode"],
+  hasDynamicAuth: boolean,
+  baseUrl: string,
+): EffectiveClaudeCliFingerprintMode {
+  const mode = configured ?? "auto";
+  if (mode === "auto") {
+    return hasDynamicAuth || !isOfficialAnthropicBaseUrl(baseUrl) ? "strict" : "conservative";
+  }
+  return mode;
+}
+
+function isOfficialAnthropicBaseUrl(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return host === "api.anthropic.com";
+  } catch {
+    return false;
+  }
+}
+
+function orderTopLevelFields(
+  body: Record<string, unknown>,
+  fieldOrder: readonly string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const consumed = new Set<string>();
+  for (const key of fieldOrder) {
+    if (Object.hasOwn(body, key)) {
+      out[key] = body[key];
+      consumed.add(key);
+    }
+  }
+  for (const [key, value] of Object.entries(body)) {
+    if (!consumed.has(key)) out[key] = value;
+  }
+  return out;
+}
+
+function withClaudeCliCchPlaceholder(body: Record<string, unknown>): Record<string, unknown> {
+  const system = body.system;
+  if (!Array.isArray(system)) return body;
+  const first = system[0];
+  if (first === null || typeof first !== "object" || Array.isArray(first)) return body;
+  const text = (first as Record<string, unknown>).text;
+  if (typeof text !== "string" || !CCH_PATTERN.test(text)) return body;
+  return {
+    ...body,
+    system: [
+      { ...(first as Record<string, unknown>), text: text.replace(CCH_PATTERN, CCH_PLACEHOLDER) },
+      ...system.slice(1),
+    ],
+  };
+}
+
+const MASK64 = (1n << 64n) - 1n;
+const PRIME64_1 = 0x9e3779b185ebca87n;
+const PRIME64_2 = 0xc2b2ae3d27d4eb4fn;
+const PRIME64_3 = 0x165667b19e3779f9n;
+const PRIME64_4 = 0x85ebca77c2b2ae63n;
+const PRIME64_5 = 0x27d4eb2f165667c5n;
+
+function u64(value: bigint): bigint {
+  return value & MASK64;
+}
+
+function rotl64(value: bigint, bits: number): bigint {
+  const b = BigInt(bits);
+  return u64((value << b) | (value >> (64n - b)));
+}
+
+function xxh64Round(acc: bigint, input: bigint): bigint {
+  let out = u64(acc + u64(input * PRIME64_2));
+  out = rotl64(out, 31);
+  return u64(out * PRIME64_1);
+}
+
+function xxh64MergeRound(acc: bigint, value: bigint): bigint {
+  let out = acc ^ xxh64Round(0n, value);
+  out = u64(u64(out * PRIME64_1) + PRIME64_4);
+  return out;
+}
+
+function xxh64Avalanche(hash: bigint): bigint {
+  let out = hash ^ (hash >> 33n);
+  out = u64(out * PRIME64_2);
+  out ^= out >> 29n;
+  out = u64(out * PRIME64_3);
+  out ^= out >> 32n;
+  return u64(out);
+}
+
+function xxHash64(bytes: Uint8Array, seed: bigint): bigint {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 0;
+  let hash: bigint;
+  if (bytes.byteLength >= 32) {
+    let v1 = u64(seed + PRIME64_1 + PRIME64_2);
+    let v2 = u64(seed + PRIME64_2);
+    let v3 = u64(seed);
+    let v4 = u64(seed - PRIME64_1);
+    const limit = bytes.byteLength - 32;
+    while (offset <= limit) {
+      v1 = xxh64Round(v1, view.getBigUint64(offset, true));
+      offset += 8;
+      v2 = xxh64Round(v2, view.getBigUint64(offset, true));
+      offset += 8;
+      v3 = xxh64Round(v3, view.getBigUint64(offset, true));
+      offset += 8;
+      v4 = xxh64Round(v4, view.getBigUint64(offset, true));
+      offset += 8;
+    }
+    hash = u64(rotl64(v1, 1) + rotl64(v2, 7) + rotl64(v3, 12) + rotl64(v4, 18));
+    hash = xxh64MergeRound(hash, v1);
+    hash = xxh64MergeRound(hash, v2);
+    hash = xxh64MergeRound(hash, v3);
+    hash = xxh64MergeRound(hash, v4);
+  } else {
+    hash = u64(seed + PRIME64_5);
+  }
+
+  hash = u64(hash + BigInt(bytes.byteLength));
+  while (offset + 8 <= bytes.byteLength) {
+    const k1 = xxh64Round(0n, view.getBigUint64(offset, true));
+    hash ^= k1;
+    hash = u64(u64(rotl64(hash, 27) * PRIME64_1) + PRIME64_4);
+    offset += 8;
+  }
+  if (offset + 4 <= bytes.byteLength) {
+    hash ^= u64(BigInt(view.getUint32(offset, true)) * PRIME64_1);
+    hash = u64(u64(rotl64(hash, 23) * PRIME64_2) + PRIME64_3);
+    offset += 4;
+  }
+  while (offset < bytes.byteLength) {
+    hash ^= u64(BigInt(bytes[offset] ?? 0) * PRIME64_5);
+    hash = u64(rotl64(hash, 11) * PRIME64_1);
+    offset += 1;
+  }
+  return xxh64Avalanche(hash);
+}
+
+function computeClaudeCliCch(bodyTextWithPlaceholder: string): string {
+  const bytes = new TextEncoder().encode(bodyTextWithPlaceholder);
+  const token = xxHash64(bytes, CCH_SEED) & 0xfffffn;
+  return token.toString(16).padStart(5, "0");
+}
+
+function hasSystemBillingCchPlaceholder(body: Record<string, unknown>): boolean {
+  const system = body.system;
+  if (!Array.isArray(system)) return false;
+  const first = system[0];
+  if (first === null || typeof first !== "object" || Array.isArray(first)) return false;
+  const text = (first as Record<string, unknown>).text;
+  return typeof text === "string" && text.includes(CCH_PLACEHOLDER);
+}
+
+function withSignedSystemBillingCch(
+  body: Record<string, unknown>,
+  token: string,
+): Record<string, unknown> {
+  const system = body.system;
+  if (!Array.isArray(system)) return body;
+  const first = system[0];
+  if (first === null || typeof first !== "object" || Array.isArray(first)) return body;
+  const text = (first as Record<string, unknown>).text;
+  if (typeof text !== "string" || !text.includes(CCH_PLACEHOLDER)) return body;
+  return {
+    ...body,
+    system: [
+      {
+        ...(first as Record<string, unknown>),
+        text: text.replace(CCH_PLACEHOLDER, `cch=${token};`),
+      },
+      ...system.slice(1),
+    ],
+  };
+}
+
+function serializeAnthropicBody(
+  body: Record<string, unknown>,
+  options: { strictClaudeCliFingerprint: boolean },
+): string {
+  if (!options.strictClaudeCliFingerprint) return JSON.stringify(body);
+  const placeholderBody = withClaudeCliCchPlaceholder(body);
+  const orderedPlaceholder = orderTopLevelFields(placeholderBody, CLAUDE_CLI_BODY_FIELD_ORDER);
+  const bodyTextWithPlaceholder = JSON.stringify(orderedPlaceholder);
+  if (!hasSystemBillingCchPlaceholder(orderedPlaceholder)) return bodyTextWithPlaceholder;
+  const signedBody = withSignedSystemBillingCch(
+    placeholderBody,
+    computeClaudeCliCch(bodyTextWithPlaceholder),
+  );
+  return JSON.stringify(orderTopLevelFields(signedBody, CLAUDE_CLI_BODY_FIELD_ORDER));
+}
+
+function orderClaudeCliHeaders(headers: Record<string, string>): Record<string, string> {
+  const byLower = new Map<string, { name: string; value: string }>();
+  for (const [key, value] of Object.entries(headers)) {
+    const canonical = CLAUDE_CLI_HEADER_CANONICAL.get(key.toLowerCase()) ?? key;
+    byLower.set(key.toLowerCase(), { name: canonical, value });
+  }
+  const out: Record<string, string> = {};
+  for (const name of CLAUDE_CLI_HEADER_ORDER) {
+    const entry = byLower.get(name.toLowerCase());
+    if (entry === undefined) continue;
+    out[name] = entry.value;
+    byLower.delete(name.toLowerCase());
+  }
+  for (const [_, entry] of byLower) out[entry.name] = entry.value;
+  return out;
 }
 
 function textBlocksFromContent(content: unknown, messageCacheControl?: unknown): AnthropicBlock[] {
@@ -859,28 +1119,40 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
   if (hasStatic === hasDynamic) {
     throw new Error("anthropic client requires exactly one of `apiKey` or `getAuthHeader`");
   }
+  const fingerprintMode = effectiveClaudeCliFingerprintMode(
+    cfg.claudeCliFingerprintMode,
+    hasDynamic,
+    cfg.baseUrl,
+  );
 
   async function headers(
     body: Record<string, unknown>,
     extraBetas: readonly string[] = [],
     options: { includeClaudeCliRuntimeHeaders?: boolean } = {},
   ): Promise<Record<string, string>> {
+    const userAgent = userAgentFromBody(body);
+    const cliVersion = userAgent.match(/^claude-cli\/([^ ]+)/)?.[1] ?? FALLBACK_CLAUDE_CODE_VERSION;
     const h: Record<string, string> = {
       "Content-Type": "application/json",
       // Header parity with openclaw's OAuth recipe — both are load-bearing for the
       // Claude-Code identity the subscription endpoint expects.
-      accept: "application/json",
+      Accept: "application/json",
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-version": ANTHROPIC_VERSION,
       "anthropic-beta": betaHeaderForBody(body, extraBetas),
       // Keep the user-agent coherent with the billing block at system[0]: derive its
       // version + entrypoint from the SAME identity emitted there (the client's real
       // one when present, else the fallback) so the two never disagree.
-      "user-agent": userAgentFromBody(body),
+      "User-Agent": userAgent,
       "x-app": "cli",
     };
-    if (options.includeClaudeCliRuntimeHeaders === true) {
+    if (options.includeClaudeCliRuntimeHeaders === true && fingerprintMode !== "off") {
       h["x-client-request-id"] = randomUUID();
+      if (fingerprintMode === "strict") {
+        h["X-Stainless-Arch"] = process.arch;
+        h["X-Stainless-OS"] = process.platform;
+        h["X-Stainless-Package-Version"] = cliVersion;
+      }
       h["X-Stainless-Lang"] = "js";
       h["X-Stainless-Runtime"] = "node";
       h["X-Stainless-Runtime-Version"] = process.version;
@@ -936,10 +1208,18 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
           : {}),
       },
     );
+    const strictClaudeCliFingerprint =
+      fingerprintMode === "strict" && includeClaudeCliRuntimeHeaders === true;
+    const wireBody = strictClaudeCliFingerprint
+      ? serializeAnthropicBody(prepared.body, { strictClaudeCliFingerprint: true })
+      : prepared.bodyText;
+    const wireHeaders = strictClaudeCliFingerprint
+      ? orderClaudeCliHeaders(prepared.headers)
+      : prepared.headers;
     // The exact Anthropic-native bytes POSTed upstream — for the translate path this is
     // the OpenAI→Anthropic re-serialization, for native passthrough the verbatim body
     // (model patched). Surfaced before the first fetch so the gateway captures it.
-    capture?.(prepared.bodyText);
+    capture?.(wireBody);
     // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
     // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
     return withConnectionRetry(
@@ -948,8 +1228,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         try {
           return await doFetch(endpointUrl, {
             method: "POST",
-            headers: prepared.headers,
-            body: prepared.bodyText,
+            headers: wireHeaders,
+            body: wireBody,
             signal: t.signal,
           });
         } catch (err) {

@@ -682,7 +682,12 @@ function createProviderClient(
   const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
   if (p.type === "anthropic") {
     return createAnthropicClient({
-      config: { ...base, ...cred, metadataUserId: identity?.metadataUserId },
+      config: {
+        ...base,
+        ...cred,
+        metadataUserId: identity?.metadataUserId,
+        claudeCliFingerprintMode: p.claude_cli_fingerprint_mode,
+      },
       fetch: proxyFetch,
     });
   }

@@ -168,6 +168,7 @@ export const ProviderConfigSchema = z
     // Responses and other provider wires must be distinguishable metadata.
     target_provider_protocol: TargetProviderProtocolSchema.optional(),
     map_developer_role_to_system: z.boolean().default(false),
+    claude_cli_fingerprint_mode: z.enum(["auto", "off", "conservative", "strict"]).default("auto"),
     normalize_reasoning_delta_alias: z.boolean().default(false),
     response_model_policy: z.enum(["provider", "requested_alias", "both"]).default("provider"),
     remote_media_fetch: RemoteMediaFetchConfigSchema.optional(),

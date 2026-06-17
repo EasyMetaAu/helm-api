@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-17 · Claude CLI strict fingerprint profile 落地（docs/05/06/07；原则 2/5/7/8）
+
+- **背景**：当前 Helm 已做到保守子集：Anthropic OAuth subscription / Claude subscription 互译或 compatibility rewrite 路径会补 Claude Code billing header、sentinel、agent prompt 与 Claude CLI-like headers；same-protocol native passthrough 不重复注入，尽量保留真实客户端 request。对比 `/Users/lukin/Projects/llm-router-packages/OmniRoute` 与 `la.atmy.work` 线上 request payload 后，决定把更激进的 Claude CLI wire-image profile 放进 provider HTTP 最后一跳，而不是污染协议 transformer。
+- **已实现**：新增 provider 配置 `claude_cli_fingerprint_mode: auto | off | conservative | strict`（Zod fail-closed）。`auto` 规则：Anthropic OAuth subscription / dynamic `getAuthHeader` 默认 `strict`；非官方 `api.anthropic.com` 的 Anthropic-compatible base URL（Claude-Code-compatible relay）默认 `strict`；普通 Anthropic static API key 默认 `conservative`。Gateway wiring 把该字段传入 `createAnthropicClient`，未配置时保持向后兼容。
+- **strict 行为**：只在互译/compat rewrite 发送 Anthropic upstream 时启用；native passthrough 继续传 `includeClaudeCliRuntimeHeaders=false`，不额外注入 runtime header、不重排/重签 raw carrier body。strict 会在最终 POST 前把 `system[0]` billing block 的 `cch` 置为 `00000` 占位，按 top-level body order `model/messages/system/tools/tool_choice/metadata/max_tokens/temperature/thinking/context_management/output_config/stream` 序列化，用 Claude/OmniRoute 对齐的 xxHash64(seed `0x6e52736ac806831e`) 计算 body-level 5-hex CCH，再只替换 `system[0]` 的占位，避免改写 user/tool 文本里看似 `cch=abcde;` 的普通内容；headers 同步按 Claude CLI order/casing 输出，并补 `X-Stainless-Arch/OS/Package-Version`。
+- **取舍/风险**：strict CCH 会随最终 body bytes 变化，牺牲 2026-06-12 “按稳定 system 派生 CCH” 的 prompt-cache 友好性；但只默认作用于 OAuth subscription/CC relay 互译路径，static key 仍默认保守。`off` 是 kill switch，但 subscription endpoint 可能依赖部分 Claude Code identity；关闭前应有 canary。该 fingerprint 只能降低“请求形态不像官方 CLI”的风险，不能保证降低封号风险，也可能触碰上游 ToS。
+- **延后 TODO**：① 建立官方 Claude CLI golden fixtures（只存脱敏结构、header/body order、system skeleton、metadata/session、beta set、CCH 形态）；② TLS/JA3/proxy/HTTP transport fingerprint 仍未做；③ tool name cloak/reverse-map、零参数 schema、thinking/cache_control 约束仍只覆盖现有保守清洗，没有完整 strict tool pipeline；④ admin UI 暂未暴露 per-provider 模式开关，当前靠 YAML；⑤ telemetry 暂未新增 body-free profile/mutation ledger，仍依赖现有 payload capture 与 request metadata。
+- **验证**：TDD 红→绿。新增 provider 回归覆盖 OAuth 默认 strict、body-level CCH 在最终 body mutation 后变化、header/body order、static API key 默认 conservative、用户正文含 `cch=abcde;` 时只签 `system[0]` billing 占位；新增 config loader 回归覆盖合法 mode 与 typo fail-closed。`pnpm exec vitest run packages/core/src/provider/anthropic.test.ts packages/core/src/config/loader.test.ts apps/gateway/src/server.test.ts` 126 绿；额外 focused `protocol/messages/execute/server/samples` 后合计 269 绿；`pnpm typecheck`、`pnpm lint` 绿。
+
 ## 2026-06-17 · Opus 4.8 会话中 system 消息恢复原生直通（issue #217；原则 5/8）
 
 - **背景**：线上请求 `5191ce2b-1d82-4802-a3b7-779f5aa54419`（`helm.easymeta.au` / `la.atmy.work` SQLite 复盘）入站是 Anthropic native 流式请求，`messages=[user, system]`，`tools=63`，模型 `claude-opus-4-8`。记录显示 `passthrough_used=false`，disable reason 是 `provider_requires_compatibility_rewrite`；互译/折叠后的上游请求只返回 `message_start → message_delta(stop_reason=end_turn) → message_stop`，没有 text delta / tool_use，客户端表现为“卡住”。
@@ -24,19 +33,13 @@
 - **取舍/坑/TODO**：① 不照搬 OmniRoute 的 `Claude Agent SDK` sentinel：Helm 目标是模拟官方 Claude Code CLI，真实 sentinel 仍是 `You are Claude Code...`。② 不盲目照搬 OmniRoute 固定版本（其 `2.1.158` 与 Helm 捕获的 `2.1.175` 不一致），避免 billing/user-agent/header 互相矛盾。③ agent prompt 形态完整覆盖真实 Claude Code 的 memory / environment / git-status 段，但其中路径、shell、模型等机器相关值使用 Helm 运行时可得信息；当客户端已带真实 agent prompt 时，优先复用客户端 block。④ 不改用户 message 正文，只清洗 system 与 tool description，降低语义破坏风险。⑤ 这次**不放宽** `anthropicNativeBodyRequiresSystemFold`；是否让更多 `messages[].role=system` 继续走直通，需独立实测订阅端接受矩阵。
 - **验证**：TDD 红→绿。新增 provider 回归：互译 native Anthropic 流量时 sentinel 只出现一次、Claude Code agent prompt 存在且不重复、固定提醒只保留一次、`messages[0]` 仍是真实 user；普通重复 system 内容与不同 interrupt 不会被误删；OmniRoute 指纹清洗不改用户消息；runtime headers 只在互译路径出现，native carrier passthrough 不出现新增模拟头。`pnpm exec vitest run packages/core/src/provider/anthropic.test.ts`、`pnpm --filter @helm/core typecheck`、Biome changed files、全量 `pnpm test`（263 files / 3796 tests）均通过。仅本地修复，尚未部署。
 
-## 2026-06-16 · 修复原生直通对 Claude Code「会话中 system 消息」400（issue #217；原则 3/5/8）
-
-- **背景**：生产请求 `81f3fa9e-...`（`la.atmy.work`，SSH+sqlite3 取 `request_payloads` 正文复盘）：**Claude Code 2.1.175** 的「role-folded transcript」把 MCP server instructions 作为**末尾 `role:"system"` 消息**塞进 `messages[]`（顶层 `system` 仍在），即 `messages=[user, system]`。Anthropic 订阅端 400 `messages.1: role 'system' must precede an 'assistant' message or end the array`，请求 fail-open **回退到 gpt-5.5**（用户问 Claude 却被另一个模型/厂商应答——非仅报错，是错路由+错计费）。见 [[claude-code-billing-header-cache-buster]]。
-- **根因**：`native_protocol_passthrough` schema **默认 `true`**（`runtime-settings.schema.ts:35`，box 无 override 故 ON；`protocol.ts` 注释「default OFF」已陈旧，本次改正），故走**原生直通**（`provider/anthropic.ts nativePassthroughStream`）**逐字转发**客户端 body → `messages[]` 里的 system 消息原样上送被拒。非直通的 IR 翻译路（`openaiToAnthropicRequest`/`transformRequestIn`）本就把 system/developer **折叠进顶层 `system`**（LiteLLM `map_developer_role_to_system` 同款），产出合法请求——所以 bug 只在直通路。
-- **决定（外科式 per-request 关直通，而非全局关）**：新增纯函数 `anthropicNativeBodyRequiresSystemFold(nativeRequest)`（core `protocol.ts`，单测覆盖载体/裸 body/developer/首位 system/缺失各分支），在 `execute.ts decideNativePassthroughForAttempt` 把它（仅 `anthropic_messages` target）**OR 进 `providerRequiresCompatibilityRewrite`**——复用既有 `provider_requires_compatibility_rewrite` 这条 disable reason，让此类请求落回**翻译/折叠路**。否决「全局把默认翻回 false」（会废掉整个直通特性）与「直通内就地折叠 body」（破坏逐字保真且更复杂）。
-- **取舍/坑/TODO**：① 对**带 MCP 的 CC 流量直通保真丢失**（这些请求几乎每条都带 inline system）——但它们当前本就 400→回退，折叠路恰是带正确 Claude-Code 身份头/spoof/相干 billing 的原始 OAuth 路，是**修复**不是退化。② 错误文案「or end the array」具误导性：末位 system（`[user, system]`）按字面应合法，但订阅端实测仍拒——故折叠是稳妥解，不去赌 `mid-conversation-system-2026-04-07` beta（helm 全仓零感知该 beta；即便 merge 透传了客户端 beta，订阅端仍拒）。若日后确认订阅端支持该 beta，可改为「保直通+确保该 beta 上送」。③ 检查刻意宽（任何 system/developer in messages[] 都关直通，含首位 system，Anthropic 同样拒 messages[0] system）——折叠恒合法，宽即安全。
-- **验证**：TDD 红→绿（先临时回退 wiring 证明直通确会对该 body 触发=复现 bug，再恢复）。`protocol.test` **+7**（helper 各分支）、`execute.test` **+1**（inline system → `passthrough_used:false`/reason `provider_requires_compatibility_rewrite`/走 `chatCompletion` 不走 `nativePassthrough`）；focused 4 文件 **231** 绿，`pnpm typecheck`（shared/core/gateway）0、`biome` 0。worktree 分支 `worktree-fix-midconv-system-ordering`，**仅改本地仓库，未发版/未部署**。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-16 · 修复原生直通对 Claude Code「会话中 system 消息」400（issue #217；原则 3/5/8）：生产请求 `81f3fa9e-...` 显示 Claude Code 把 MCP instructions 作为 `messages=[user, system]` 末尾 system 直通上送，被 Anthropic subscription 400 后 fail-open 回退到 gpt-5.5；修为新增 `anthropicNativeBodyRequiresSystemFold(nativeRequest)`，仅对 Anthropic target 且 `messages[].system|developer` 需折叠时关闭 native passthrough，复用 `provider_requires_compatibility_rewrite` 让请求落回合法的翻译/折叠路。取舍：保留全局 native passthrough 默认 ON，不在直通内就地改 body；后续若订阅端支持更多 mid-conversation system，再用实测扩大 allowlist。focused tests/typecheck/biome 绿。
 
 ### 2026-06-16 · classifier 中英文关键词对等 + 修复短消息捷径的 CJK 盲区（docs/03；原则 2/4）：根因是 `overrides.ts` 短消息捷径只看英文 signals 且自带 CJK-broken matcher，短中文 analysis/security 被钉 `simple`→economy；修为 `signals.ts` 共享 CJK-aware `keywordMatcher`，`containsClassifierSignal` 纳入 `*_intl_kw`，补 diagnostic/translation/lookup/chitchat intl 配置与中文确认词。TDD 覆盖短中文不降级、纯问候仍 simple、golden routing 中文样本；focused tests/typecheck/biome 绿。
 
