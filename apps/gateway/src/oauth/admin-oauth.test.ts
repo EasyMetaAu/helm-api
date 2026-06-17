@@ -1093,6 +1093,35 @@ describe("createOAuthAdmin > codex reset credit", () => {
     expect(usageHits()).toBe(2);
   });
 
+  it("consumeCodexResetCredit busts SIBLING codex caches too (one ChatGPT grant, many labels)", async () => {
+    // The reset credit is scoped to the upstream ChatGPT account, which can back
+    // several connected helm accounts — consuming one restores ALL of them. So the
+    // consume must drop every sibling's cached snapshot, not just the clicked account's,
+    // or a sibling would keep showing a stale saturated bar until its TTL lapsed.
+    const { admin, usageHits } = await connectCodex({
+      onUsage: () => json({ rate_limit: { primary_window: { used_percent: 1 } } }),
+    });
+    // Bind a second codex account on the same admin (same upstream ChatGPT login).
+    const { sessionId, authorizeUrl } = await admin.startManualPaste({
+      providerId: "openai-codex",
+    });
+    const state = new URL(authorizeUrl).searchParams.get("state");
+    await admin.completeManualPaste({
+      sessionId,
+      redirectInput: `https://x/cb?code=C&state=${state}`,
+      account: "sibling",
+    });
+    // Warm BOTH accounts' quota caches.
+    await admin.fetchCodexQuota?.({ account: "default" }); // PULL #1
+    await admin.fetchCodexQuota?.({ account: "sibling" }); // PULL #2
+    expect(usageHits()).toBe(2);
+    // Consume for ONE account — the shared grant means BOTH caches must drop.
+    await admin.consumeCodexResetCredit?.({ account: "default" });
+    await admin.fetchCodexQuota?.({ account: "default" }); // PULL #3 (re-fetch)
+    await admin.fetchCodexQuota?.({ account: "sibling" }); // PULL #4 (busted → re-fetch)
+    expect(usageHits()).toBe(4);
+  });
+
   it("consumeCodexResetCredit THROWS on an upstream failure (fail-closed) + logs it", async () => {
     const { admin, logs } = await connectCodex({
       onConsume: () => new Response("nope", { status: 402 }),

@@ -296,16 +296,23 @@ describe('providers page', () => {
     });
   }
 
-  it('consumes a Codex reset credit and refreshes when "Reset limit" is clicked', async () => {
+  it('confirms before consuming a Codex reset credit, then refreshes on success', async () => {
     consumeCodexResetCredit.mockResolvedValue({ code: 'ok', windowsReset: 2 });
     renderCodex(2);
     const row = screen.getByTestId('provider-account-row');
-    // The available reset-credit count renders in the Quota cell.
+    // The available reset-credit count renders in the Quota cell AND on the button.
     expect(within(row).getByText('2 reset credits')).toBeInTheDocument();
 
-    const resetBtn = within(row).getByRole('button', { name: /reset limit/i });
+    // Clicking the row button only OPENS the confirm dialog — no consume yet (the
+    // credit is a scarce, irreversible spend; a single click must never trigger it).
+    const resetBtn = within(row).getByRole('button', { name: /reset limit \(2\)/i });
     expect(resetBtn).toBeEnabled();
     await fireEvent.click(resetBtn);
+    expect(consumeCodexResetCredit).not.toHaveBeenCalled();
+
+    const dialog = screen.getByRole('dialog');
+    // Confirm from WITHIN the dialog (its button reads just "Reset limit").
+    await fireEvent.click(within(dialog).getByRole('button', { name: /^reset limit$/i }));
 
     await waitFor(() =>
       expect(consumeCodexResetCredit).toHaveBeenCalledWith('openai-codex', 'acct-codex'),
@@ -315,6 +322,20 @@ describe('providers page', () => {
     await waitFor(() =>
       expect(screen.getByRole('status')).toHaveTextContent('Reset 2 window(s)'),
     );
+    // Dialog is dismissed after a successful reset.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('does NOT consume when the reset confirmation is cancelled', async () => {
+    renderCodex(2);
+    const row = screen.getByTestId('provider-account-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /reset limit \(2\)/i }));
+
+    const dialog = screen.getByRole('dialog');
+    await fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }));
+
+    expect(consumeCodexResetCredit).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('disables "Reset limit" for a Codex account with no reset credits', () => {

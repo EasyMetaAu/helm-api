@@ -750,9 +750,17 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       }
       const body: unknown = await res.json().catch(() => null);
       const result = parseCodexResetResult(body);
-      // The consume restored the windows AND decremented the credit count — bust the
-      // cache so the next /quota PULL reflects both rather than the stale snapshot.
-      quotaCache.delete(`${CODEX} ${account}`);
+      // The consume restored the windows AND decremented the credit count. The grant is
+      // keyed by the upstream ChatGPT account (chatgpt_account_id), which can back
+      // SEVERAL connected helm accounts — so a single consume resets every sibling that
+      // shares the login. Bust EVERY codex quota entry (not just this account's) so each
+      // sibling re-pulls its now-reset windows + decremented count on the next /quota
+      // read, instead of showing a stale saturated snapshot for up to the cache TTL.
+      // (Anthropic keys use a different prefix and are untouched.) Snapshot the keys
+      // first to avoid mutating the Map mid-iteration.
+      for (const key of [...quotaCache.keys()]) {
+        if (key.startsWith(`${CODEX} `)) quotaCache.delete(key);
+      }
       return result;
     },
   };
