@@ -6,6 +6,7 @@
   import type { DashboardStats } from '$lib/api/stats.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
   import TokensCell from '$lib/components/TokensCell.svelte';
+  import { formatTrendTick, trendAxisTicks, type TrendBucket } from '$lib/dashboard-chart.js';
   import { formatCount, formatTimestamp, formatTokens, formatTps, formatUsd } from '$lib/format.js';
   import { DEFAULT_PAGE_SIZE, filtersToSearch, type RangeKey } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
@@ -26,8 +27,15 @@
 
   let {
     data,
-  }: { data: { items: RequestListItem[]; range: RangeKey; stats: Stats; agg: DashboardStats } } =
-    $props();
+  }: {
+    data: {
+      items: RequestListItem[];
+      range: RangeKey;
+      bucket: TrendBucket;
+      stats: Stats;
+      agg: DashboardStats;
+    };
+  } = $props();
 
   const stats = $derived(data.stats);
   const recent = $derived(data.items.slice(0, 10));
@@ -49,6 +57,7 @@
       cached: b.cachedTokens,
     })),
   );
+  const trendTicks = $derived(trendAxisTicks(trend));
   const TREND_SERIES = $derived([
     {
       key: 'input',
@@ -127,6 +136,11 @@
   // '—' for a legacy row that carried none.
   function formatTs(ts: string): string {
     return formatTimestamp(ts) || '—';
+  }
+
+  function formatTrendAxisValue(value: unknown): string {
+    const date = value instanceof Date ? value : new Date(value as string | number);
+    return Number.isNaN(date.getTime()) ? String(value ?? '') : formatTrendTick(date, data.bucket);
   }
 
   function decidedByClass(d: RequestListItem['decided_by']): string {
@@ -285,6 +299,7 @@
             series={TREND_SERIES}
             legend
             props={{
+              xAxis: { ticks: trendTicks, format: formatTrendAxisValue },
               yAxis: { format: formatTokens },
               tooltip: { item: { format: formatTokens } },
             }}
