@@ -23,16 +23,21 @@
 # —— quality/cost lanes ——
 economy:
   purpose: Cheap and fast for simple tasks
+  reasoning_effort: high
   primary: openai-codex/gpt-5.4-mini
   fallback:
+    - anthropic/claude-haiku-4-5-20251001
     - deepseek/deepseek-v4-flash
     - openrouter/deepseek-v4-flash
     - balanced
 
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
-  primary: deepseek/deepseek-v4-pro
+  reasoning_effort: high
+  primary: openai-codex/gpt-5.5
   fallback:
+    - anthropic/claude-sonnet-4-6
+    - deepseek/deepseek-v4-pro
     - openrouter/deepseek-v4-pro
     - zenmux-anthropic/claude-sonnet-4.6
     - zenmux/auto
@@ -40,9 +45,10 @@ balanced:
 
 premium:
   purpose: Strong reasoning and high quality
+  reasoning_effort: xhigh
   primary: openai-codex/gpt-5.5
   fallback:
-    # Claude via the NATIVE Anthropic wire (ZenMux, issue #217).
+    - anthropic/claude-opus-4-8
     - zenmux-anthropic/claude-opus-4.8
     - zenmux/gpt-5.5
     - balanced
@@ -53,6 +59,7 @@ coding:
   purpose: Coding-capable models for code generation / editing
   # gpt-5.5 is the strongest model the Codex subscription actually exposes; the
   # legacy `*-codex` slugs 400 on the ChatGPT-account backend, so they are NOT used.
+  reasoning_effort: xhigh
   primary: openai-codex/gpt-5.5
   fallback:
     - premium
@@ -80,6 +87,7 @@ vision:
 
 tool_use:
   purpose: Reliable function / tool calling
+  reasoning_effort: high
   primary: openai-codex/gpt-5.5
   fallback:
     - premium

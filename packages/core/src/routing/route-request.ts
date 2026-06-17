@@ -758,6 +758,18 @@ export async function routeRequest(
 
   const { plan: execPlan, classifier, policy, evalUsd } = planned;
 
+  // Lane-FORCED reasoning effort (config-as-code): when the selected lane pins
+  // `reasoning_effort`, overwrite the request so the CLIENT value cannot win. The
+  // translated path forwards `req.reasoning_effort` (stripInternal); the flag tells
+  // execute's native-passthrough path to rewrite the verbatim body's reasoning field
+  // (without it, passthrough stays byte-verbatim). A lane that does not pin it leaves
+  // today's request-driven behavior untouched.
+  const forcedReasoning = deps.lanes[execPlan.selected_lane]?.reasoning_effort;
+  if (forcedReasoning !== undefined) {
+    req.reasoning_effort = forcedReasoning;
+    req.reasoning_effort_forced = true;
+  }
+
   const outcome = await deps.execute(execPlan, req);
 
   const finalRecord: DecisionRecord["final"] =

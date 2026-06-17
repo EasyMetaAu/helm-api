@@ -99,4 +99,22 @@ describe("parseLanesConfig", () => {
     const raw = { balanced: { primary: "x", fallback: [""] } };
     expect(() => parseLanesConfig(raw)).toThrow();
   });
+
+  it("accepts an optional lane reasoning_effort from the strict effort enum", () => {
+    for (const effort of ["none", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+      const raw = { balanced: { primary: "x", reasoning_effort: effort } };
+      const cfg = parseLanesConfig(raw);
+      expect(cfg.balanced?.reasoning_effort).toBe(effort);
+    }
+  });
+
+  it("omits reasoning_effort when absent (default lanes stay unforced)", () => {
+    const cfg = parseLanesConfig(validRaw());
+    expect(cfg.balanced?.reasoning_effort).toBeUndefined();
+  });
+
+  it("rejects an unknown reasoning_effort value (fail-closed, NOT normalized)", () => {
+    const raw = { balanced: { primary: "x", reasoning_effort: "ultra" } };
+    expect(() => parseLanesConfig(raw)).toThrow();
+  });
 });

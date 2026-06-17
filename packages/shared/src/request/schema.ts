@@ -107,6 +107,11 @@ export const InternalRequestSchema = z.object({
   stream_options: StreamOptionsSchema.optional(),
   modalities: z.array(z.string()).optional(),
   reasoning_effort: z.string().optional(),
+  // Internal signal (NOT a client wire field): set by the router when a lane FORCES
+  // reasoning_effort. It tells the native-passthrough path to rewrite the verbatim
+  // body's reasoning field (the translated path already forwards reasoning_effort).
+  // Absent => passthrough stays byte-verbatim, as today.
+  reasoning_effort_forced: z.boolean().optional(),
   user: z.string().optional(),
   service_tier: z.string().optional(),
   tool_choice: z.unknown().optional(),
