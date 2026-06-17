@@ -80,6 +80,7 @@ describe("buildProviderClients provider dispatch", () => {
             models: [{ alias: "claude/sonnet", provider_model: "claude-sonnet" }],
             targetProviderProtocol: "anthropic_messages",
             map_developer_role_to_system: false,
+            claude_cli_fingerprint_mode: "auto",
             normalize_reasoning_delta_alias: false,
             response_model_policy: "provider",
           },
@@ -112,6 +113,7 @@ describe("buildProviderClients provider dispatch", () => {
             models: [{ alias: "gemini/flash", provider_model: "gemini-2.0-flash" }],
             targetProviderProtocol: "gemini",
             map_developer_role_to_system: false,
+            claude_cli_fingerprint_mode: "auto",
             normalize_reasoning_delta_alias: false,
             response_model_policy: "provider",
           },
@@ -206,6 +208,7 @@ describe("buildRegistry backfill metadata through execute", () => {
           models: [],
           targetProviderProtocol: "anthropic_messages",
           map_developer_role_to_system: false,
+          claude_cli_fingerprint_mode: "auto",
           normalize_reasoning_delta_alias: false,
           response_model_policy: "provider",
         },
@@ -270,6 +273,7 @@ describe("buildRegistry backfill metadata through execute", () => {
           // The compatibility shim disables verbatim passthrough — even though the
           // provider implements nativePassthrough and the protocols match.
           map_developer_role_to_system: true,
+          claude_cli_fingerprint_mode: "auto",
           normalize_reasoning_delta_alias: false,
           response_model_policy: "provider",
         },

@@ -1407,6 +1407,195 @@ describe("createAnthropicClient", () => {
     expect(seenRequestIds[0]).not.toBe(seenRequestIds[1]);
   });
 
+  it("defaults OAuth subscription traffic to strict Claude CLI body signing and header/body order", async () => {
+    const uid = '{"device_id":"D","account_uuid":"","session_id":"S"}';
+    const seenBodies: string[] = [];
+    const seenHeaderOrders: string[][] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seenBodies.push(String(init?.body));
+      seenHeaderOrders.push(Object.keys(init?.headers as Record<string, string>));
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => "Bearer T",
+        metadataUserId: uid,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.chatCompletion({
+      model: "m",
+      messages: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: "hi" },
+      ],
+      max_tokens: 64,
+    });
+    await client.chatCompletion({
+      model: "m",
+      messages: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: "hi" },
+      ],
+      max_tokens: 65,
+    });
+
+    const first = JSON.parse(seenBodies[0] ?? "{}") as {
+      system: Array<{ text: string }>;
+    };
+    const second = JSON.parse(seenBodies[1] ?? "{}") as {
+      system: Array<{ text: string }>;
+    };
+    const firstCch = first.system[0]?.text.match(/\bcch=([0-9a-f]{5});/)?.[1];
+    const secondCch = second.system[0]?.text.match(/\bcch=([0-9a-f]{5});/)?.[1];
+    expect(firstCch).toMatch(/^[0-9a-f]{5}$/);
+    expect(firstCch).not.toBe("00000");
+    // Strict mode signs the final serialized body, so a non-system body mutation
+    // changes cch. The pure translator keeps its cache-stable conservative hash.
+    expect(secondCch).not.toBe(firstCch);
+    expect(Object.keys(first)).toEqual(["model", "messages", "system", "metadata", "max_tokens"]);
+    expect(seenHeaderOrders[0]?.slice(0, 14)).toEqual([
+      "Accept",
+      "Authorization",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+    ]);
+  });
+
+  it("strict signing only replaces the billing CCH placeholder, never user text", async () => {
+    let sentBody = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = String(init?.body);
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", getAuthHeader: async () => "Bearer T" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.chatCompletion({
+      model: "m",
+      messages: [
+        {
+          role: "user",
+          content: "Please quote this exactly: x-anthropic-billing-header: cch=abcde;",
+        },
+      ],
+      max_tokens: 64,
+    });
+
+    const parsed = JSON.parse(sentBody) as {
+      messages: Array<{ content: Array<{ text: string }> }>;
+      system: Array<{ text: string }>;
+    };
+    expect(parsed.messages[0]?.content[0]?.text).toContain("cch=abcde;");
+    const billing = parsed.system[0]?.text ?? "";
+    expect(billing).toMatch(/^x-anthropic-billing-header:/);
+    expect(billing).toMatch(/\bcch=[0-9a-f]{5};$/);
+    expect(billing).not.toContain("cch=00000;");
+  });
+
+  it("keeps static-key Anthropic traffic on the conservative cache-stable CCH profile by default", async () => {
+    const seenCch: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { system: Array<{ text: string }> };
+      seenCch.push(body.system[0]?.text.match(/\bcch=([0-9a-f]{5});/)?.[1] ?? "");
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.chatCompletion({
+      model: "m",
+      messages: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: "hi" },
+      ],
+      max_tokens: 64,
+    });
+    await client.chatCompletion({
+      model: "m",
+      messages: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: "hi" },
+      ],
+      max_tokens: 65,
+    });
+
+    expect(seenCch).toHaveLength(2);
+    expect(seenCch[0]).toMatch(/^[0-9a-f]{5}$/);
+    expect(seenCch[1]).toBe(seenCch[0]);
+  });
+
+  it("defaults non-official Anthropic-compatible relays to strict Claude CLI signing", async () => {
+    const seenCch: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { system: Array<{ text: string }> };
+      seenCch.push(body.system[0]?.text.match(/\bcch=([0-9a-f]{5});/)?.[1] ?? "");
+      return jsonResponse({
+        id: "m",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://claude-code-relay.example", apiKey: "relay-key" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.chatCompletion({
+      model: "m",
+      messages: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: "hi" },
+      ],
+      max_tokens: 64,
+    });
+    await client.chatCompletion({
+      model: "m",
+      messages: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: "hi" },
+      ],
+      max_tokens: 65,
+    });
+
+    expect(seenCch).toHaveLength(2);
+    expect(seenCch[0]).toMatch(/^[0-9a-f]{5}$/);
+    expect(seenCch[0]).not.toBe("00000");
+    expect(seenCch[1]).not.toBe(seenCch[0]);
+  });
+
   it("adds feature beta headers for Anthropic context_management and fast mode", async () => {
     let seen: Headers | null = null;
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
