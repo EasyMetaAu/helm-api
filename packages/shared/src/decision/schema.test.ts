@@ -368,6 +368,23 @@ describe("DecisionRecordSchema", () => {
     expect(bad.success).toBe(false);
   });
 
+  it("defaults generation_ms to null when omitted (legacy / non-streaming records)", () => {
+    // The served-stream generation window is gateway-stamped post-stream (like
+    // usage); the routing core emits null and pre-feature records have no field,
+    // so an absent value must parse as null (present, never undefined).
+    const parsed = DecisionRecordSchema.parse(fullRecord());
+    expect(parsed.generation_ms).toBeNull();
+  });
+
+  it("round-trips a stamped generation_ms and rejects a negative span", () => {
+    const parsed = DecisionRecordSchema.parse({ ...fullRecord(), generation_ms: 4200 });
+    expect(parsed.generation_ms).toBe(4200);
+    // A measured zero is valid (single-instant stream); a negative span is fail-closed.
+    expect(DecisionRecordSchema.parse({ ...fullRecord(), generation_ms: 0 }).generation_ms).toBe(0);
+    const bad = DecisionRecordSchema.safeParse({ ...fullRecord(), generation_ms: -1 });
+    expect(bad.success).toBe(false);
+  });
+
   it("defaults protocol to null when omitted (legacy records round-trip)", () => {
     const parsed = DecisionRecordSchema.parse(fullRecord());
     expect(parsed.protocol).toBeNull();

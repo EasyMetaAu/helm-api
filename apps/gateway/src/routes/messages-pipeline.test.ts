@@ -514,6 +514,36 @@ describe("createMessagesPipeline — native passthrough streamIR()", () => {
     });
   });
 
+  it("stamps the served generation window (true-TPS denominator) from the stream clock", async () => {
+    const decisionRef = passthroughStreamResult().decision;
+    // An advancing clock so the first→last yielded-frame span is non-zero. The
+    // timer reuses budget.now (production clock); the exact span depends on the
+    // frame count, so assert it is a real positive window, not a fixed value.
+    let t = 1000;
+    const budget: PipelineBudgetDeps = {
+      gate: { check: async () => ({ overBudget: false }) as never },
+      settle: async () => {},
+      now: () => (t += 10),
+    };
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      caps: { budget: { spend_usd: { day: 1 } } as never },
+    };
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...passthroughStreamResult(), decision: decisionRef }),
+      "anthropic_messages",
+      undefined,
+      budget,
+    );
+    const run = await pipeline.run(irOf({ stream: true }), identity, new AbortController().signal);
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    expect(typeof decisionRef.generation_ms).toBe("number");
+    expect(decisionRef.generation_ms ?? 0).toBeGreaterThan(0);
+  });
+
   it("settles the per-key budget using the native SSE tokens", async () => {
     let settledTokens: number | null = null;
     const budget: PipelineBudgetDeps = {

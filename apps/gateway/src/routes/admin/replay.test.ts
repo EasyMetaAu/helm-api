@@ -106,6 +106,7 @@ function fakeTelemetry(
           cachedTokens: 0,
           cacheCreationTokens: 0,
           avgLatencyMs: null,
+          avgTps: null,
         },
         series: [],
         byModel: [],

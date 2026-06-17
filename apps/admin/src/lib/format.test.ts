@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { durationParts, formatCount, formatTimestamp, formatTokens, formatUsd } from './format.js';
+import {
+  durationParts,
+  formatCount,
+  formatTimestamp,
+  formatTokens,
+  formatTps,
+  formatUsd,
+} from './format.js';
 
 describe('formatTokens — compact token counts for the dashboard', () => {
   it('renders not-measured (null/undefined/NaN) as an em dash', () => {
@@ -131,5 +138,34 @@ describe("formatTimestamp — render recorded UTC in the viewer's local zone", (
 
   it('passes a non-empty but unparseable value through unchanged', () => {
     expect(formatTimestamp('not-a-date')).toBe('not-a-date');
+  });
+});
+
+// formatTps — true generation throughput (tokens/sec) for the dashboard card,
+// request-list column, and detail card. Mirrors formatTokens' sentinels: a
+// not-measured value (null/undefined/NaN — non-streaming or legacy) is an em dash,
+// kept DISTINCT from a measured 0. Precision: one decimal under 100, whole numbers
+// above (LLM generation rates span ~1 to a few hundred tok/s).
+describe('formatTps — tokens per second', () => {
+  it('renders not-measured (null/undefined/NaN) as an em dash', () => {
+    expect(formatTps(null)).toBe('—');
+    expect(formatTps(undefined)).toBe('—');
+    expect(formatTps(Number.NaN)).toBe('—');
+  });
+
+  it('shows a measured zero distinctly from not-measured', () => {
+    expect(formatTps(0)).toBe('0 tok/s');
+  });
+
+  it('keeps one decimal under 100 and rounds to whole numbers at/above', () => {
+    expect(formatTps(48.27)).toBe('48.3 tok/s');
+    expect(formatTps(7)).toBe('7 tok/s');
+    expect(formatTps(200)).toBe('200 tok/s');
+    expect(formatTps(215.6)).toBe('216 tok/s');
+  });
+
+  it('trims a trailing .0 and clamps a negative to 0', () => {
+    expect(formatTps(50.0)).toBe('50 tok/s');
+    expect(formatTps(-3)).toBe('0 tok/s');
   });
 });

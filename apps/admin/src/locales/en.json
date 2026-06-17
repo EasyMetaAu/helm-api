@@ -579,5 +579,13 @@
   "yes": "yes",
   "Your new API key": "Your new API key",
   "Zoom in": "Zoom in",
-  "Zoom out": "Zoom out"
+  "Zoom out": "Zoom out",
+  "Avg TPS": "Avg TPS",
+  "TPS": "TPS",
+  "Throughput": "Throughput",
+  "Time to first token": "Time to first token",
+  "Generation time": "Generation time",
+  "Tokens generated per second (output ÷ generation time), averaged over streamed requests.": "Tokens generated per second (output ÷ generation time), averaged over streamed requests.",
+  "Generation throughput: output tokens per second. Only measured for streamed responses.": "Generation throughput: output tokens per second. Only measured for streamed responses.",
+  "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.": "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses."
 }

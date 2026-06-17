@@ -173,6 +173,7 @@ class InMemoryTelemetryStore implements TelemetryStore {
         0,
       ),
       avgLatencyMs: null as number | null,
+      avgTps: null as number | null,
     };
     const seriesMap = new Map<number, TelemetryAggregate["series"][number]>();
     for (const r of inWindow) {
@@ -263,6 +264,7 @@ describe("Store ports are implementable contracts", () => {
       cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
       memory: null,
       usage: null,
+      generation_ms: null,
     } satisfies DecisionRecord;
     await store.insert({ decision, apiKeyId: "k1", createdAt: new Date() });
     expect(await store.queryRecent(10)).toHaveLength(1);

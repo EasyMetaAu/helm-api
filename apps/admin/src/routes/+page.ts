@@ -71,6 +71,9 @@ export const load: PageLoad = async ({ url }) => {
       errors: t.errorCount,
       successRate,
       avgLatency: t.avgLatencyMs === null ? null : Math.round(t.avgLatencyMs),
+      // True throughput across the window (aggregate Σoutput ÷ Σgeneration time, SQL-
+      // computed); null = no streamed row had a measured window → the card shows '—'.
+      avgTps: t.avgTps,
       totalCost: t.totalCostUsd,
       totalTokens: t.promptTokens + t.completionTokens,
       inputTokens: t.promptTokens,

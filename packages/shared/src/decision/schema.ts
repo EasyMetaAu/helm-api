@@ -234,6 +234,17 @@ export const DecisionRecordSchema = z.object({
   // `.nullable().default(null)` keeps the core builders and all pre-existing
   // records valid without it.
   usage: TokenUsageSchema.nullable().default(null),
+  // Wall-clock generation window of the SERVED stream (ms): the span from the
+  // first to the last forwarded chunk. Stamped by the GATEWAY post-stream (same
+  // place as `usage`, via backfillCompletionCost) — the routing core stays
+  // headless about served-stream timing, so it emits null. Drives true TPS =
+  // completion_tokens / (generation_ms / 1000). null for NON-streaming responses
+  // (the body is buffered upstream, so the generation rate is unobservable) and
+  // for legacy records — kept DISTINCT from a measured 0 (single-instant stream).
+  // The key carries no secret-pattern substring, so it survives the telemetry
+  // redactor verbatim (like latency_total_ms). `.nullable().default(null)` keeps
+  // the core builders + all pre-existing records valid.
+  generation_ms: z.number().nonnegative().nullable().default(null),
 });
 
 export type DecidedBy = z.infer<typeof DecidedBySchema>;

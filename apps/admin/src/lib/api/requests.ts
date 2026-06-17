@@ -51,6 +51,9 @@ export interface RequestListItem {
   // Served-completion token counts (see TokenUsageView). Every leaf is null on a
   // legacy/un-stamped record → the cell renders '—'.
   usage: TokenUsageView;
+  // True generation throughput (tokens/sec) = output ÷ generation window. null =
+  // not measured (non-streaming, or a legacy record) → the cell renders '—'.
+  tps: number | null;
   error_class?: string;
 }
 
@@ -140,6 +143,15 @@ export interface RequestDetail {
   // Served-completion token accounting (see TokenUsageView). Every leaf is null on
   // a legacy/un-stamped record → the card renders '—'.
   usage: TokenUsageView;
+  // True generation throughput (tokens/sec) = output ÷ generation window; null = not
+  // measured (non-streaming / legacy) → '—'.
+  tps: number | null;
+  // Served-stream generation window (ms): first→last forwarded chunk. null for
+  // non-streaming / legacy. Shown alongside TPS so the operator sees the denominator.
+  generation_ms: number | null;
+  // Client-perceived time-to-first-token (ms) for a streamed response; null for
+  // non-streaming / legacy → '—'.
+  ttfb_ms: number | null;
 }
 
 // ── Raw backend shapes (mirror @helm/shared DecisionRecord; admin must not import
@@ -194,6 +206,10 @@ interface RawDecisionRecord {
     cached_tokens?: number | null;
     cache_creation_tokens?: number | null;
   } | null;
+  // Served-stream generation window (ms): first→last forwarded chunk, gateway-timed.
+  // null/absent for non-streaming responses and legacy records. The true-TPS
+  // denominator — paired with usage.completion_tokens to derive tokens/sec.
+  generation_ms?: number | null;
   classifier?: {
     task_type?: string;
     complexity?: string;
@@ -312,6 +328,28 @@ export function toUsage(raw: RawDecisionRecord): TokenUsageView {
   return { input, output, cached, cacheCreation, nonCached, total };
 }
 
+// True generation TPS for one request: output tokens ÷ the served-stream generation
+// window (seconds). DERIVED for the view (Principle 1 — never recomputes upstream
+// figures, only divides two recorded values). null = "not measured" — non-streaming
+// (no window) or a legacy record (no generation_ms / no completion count); a zero/
+// negative window also yields null (no divide-by-zero), kept DISTINCT from a real 0.
+export function computeTps(raw: RawDecisionRecord): number | null {
+  const output = num(raw.usage?.completion_tokens);
+  const generationMs = num(raw.generation_ms);
+  if (output === null || generationMs === null || generationMs <= 0) return null;
+  return output / (generationMs / 1000);
+}
+
+// Client-perceived time-to-first-token (ms) for a STREAMED response: since each
+// attempt's latency is measured at the first-chunk peek and attempts run
+// sequentially, the recorded latency_total_ms IS the wall-clock wait until the first
+// token. Only meaningful when a generation window was measured (streaming); null for
+// non-streaming / legacy → the detail renders '—'.
+export function computeTtfbMs(raw: RawDecisionRecord): number | null {
+  if (num(raw.generation_ms) === null) return null;
+  return typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : null;
+}
+
 // Project the raw DecisionRecord -> the list row (docs/07 list fields). Fields the
 // record does not carry are derived or safely defaulted; NEVER fabricated.
 export function toListItem(raw: RawDecisionRecord): RequestListItem {
@@ -351,6 +389,8 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
       typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : sumLatency(attempts),
     cost_usd: listCost(raw, attempts),
     usage: toUsage(raw),
+    // True throughput (output ÷ generation time); null → '—' for non-streaming/legacy.
+    tps: computeTps(raw),
     error_class: errorClass ?? undefined,
   };
 }
@@ -474,6 +514,11 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     // Served-completion token accounting (same source + derivation as the list
     // row), for the detail "Token usage" card. All-null on a legacy record.
     usage: toUsage(raw),
+    // True throughput + its denominator + the companion TTFB, for the detail card.
+    // All null on a non-streaming / legacy record → each renders '—'.
+    tps: computeTps(raw),
+    generation_ms: typeof raw.generation_ms === 'number' ? raw.generation_ms : null,
+    ttfb_ms: computeTtfbMs(raw),
   };
 }
 

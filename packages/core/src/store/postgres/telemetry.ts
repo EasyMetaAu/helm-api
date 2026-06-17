@@ -51,6 +51,9 @@ export class PgTelemetryStore implements TelemetryStore {
       cachedTokens: usage?.cached_tokens ?? null,
       cacheCreationTokens: usage?.cache_creation_tokens ?? null,
       servedModel: input.decision.final.provider_model ?? null,
+      // Served-stream generation window (pg migration v24, true-TPS denominator).
+      // NULL for non-streaming / un-stamped rows — they never count toward the rate.
+      generationMs: input.decision.generation_ms ?? null,
       createdAt: input.createdAt.getTime(),
     };
   }
@@ -209,6 +212,11 @@ export class PgTelemetryStore implements TelemetryStore {
         avgLatencyMs: sql<
           number | null
         >`AVG((${telemetry.decisionJson} ->> 'latency_total_ms')::double precision)`,
+        // True-TPS aggregate ratio inputs (mirror of the sqlite adapter). The CASE
+        // restricts BOTH sums to streaming rows with a measured window so the rate is
+        // never diluted by a non-streaming completion; the shaper divides them.
+        tpsCompletionTokens: sql<number>`COALESCE(SUM(CASE WHEN ${telemetry.generationMs} > 0 THEN ${telemetry.completionTokens} ELSE 0 END), 0)`,
+        tpsGenerationMs: sql<number>`COALESCE(SUM(CASE WHEN ${telemetry.generationMs} > 0 THEN ${telemetry.generationMs} ELSE 0 END), 0)`,
       })
       .from(telemetry)
       .where(where);

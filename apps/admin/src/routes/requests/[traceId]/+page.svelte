@@ -2,7 +2,7 @@
   import { base } from '$app/paths';
   import type { RequestDetail, RequestPayloadView } from '$lib/api/requests.js';
   import { deepEqual } from '$lib/deep-equal.js';
-  import { formatTimestamp } from '$lib/format.js';
+  import { formatTimestamp, formatTps } from '$lib/format.js';
   import { t } from '$lib/i18n';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
@@ -117,7 +117,9 @@
       {#if data.payload?.captured}
         <p class="field-help mb-2">
           {#if upstreamDiffers}
-            {$t('The request body as received from the client — before memory injection and translation.')}
+            {$t(
+              'The request body as received from the client — before memory injection and translation.',
+            )}
           {:else if hasUpstream}
             {$t(
               'Full request body recorded for this call. The body forwarded upstream was identical (no memory injection or translation).',
@@ -175,6 +177,32 @@
         {$t('How many tokens this single request used — input, output, and how much was cached.')}
       </p>
       <TokenUsage usage={d.usage} />
+    </section>
+
+    <!-- Throughput: true TPS + its denominator (generation window) + the companion
+         time-to-first-token. All '—' for a non-streaming response (no measurable
+         generation window), distinct from a measured 0. -->
+    <section class="card">
+      <h2 class="section-header">{$t('Throughput')}</h2>
+      <p class="field-help mb-2">
+        {$t(
+          'How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.',
+        )}
+      </p>
+      <dl data-testid="throughput" class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm">
+        <dt class="text-ink-muted">{$t('TPS')}</dt>
+        <dd data-testid="tps" class="text-right font-mono text-ink-strong">{formatTps(d.tps)}</dd>
+
+        <dt class="text-ink-muted">{$t('Time to first token')}</dt>
+        <dd data-testid="ttfb" class="text-right font-mono text-ink-strong">
+          {d.ttfb_ms === null ? '—' : `${d.ttfb_ms}ms`}
+        </dd>
+
+        <dt class="text-ink-muted">{$t('Generation time')}</dt>
+        <dd data-testid="generation-ms" class="text-right font-mono text-ink-strong">
+          {d.generation_ms === null ? '—' : `${d.generation_ms}ms`}
+        </dd>
+      </dl>
     </section>
 
     <!-- Final response meta or structured error -->

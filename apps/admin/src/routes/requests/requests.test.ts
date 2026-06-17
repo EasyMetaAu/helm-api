@@ -33,6 +33,7 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     latency_ms: 460,
     cost_usd: 0.0123,
     usage: { input: 1200, output: 340, cached: 800, cacheCreation: 64, nonCached: 400, total: 1540 },
+    tps: 200,
     ...overrides,
   };
 }
@@ -92,6 +93,9 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       total_usd: 0.0103,
     },
     usage: { input: 1200, output: 340, cached: 800, cacheCreation: 64, nonCached: 400, total: 1540 },
+    tps: 200,
+    generation_ms: 1700,
+    ttfb_ms: 460,
     ...overrides,
   };
 }
@@ -119,6 +123,7 @@ describe('requests list page', () => {
     expect(first).toHaveTextContent('premium'); // lane
     expect(first).toHaveTextContent('claude-x'); // final_model
     expect(first).toHaveTextContent('460'); // latency_ms
+    expect(within(first).getByTestId('cell-tps')).toHaveTextContent('200 tok/s'); // true TPS
     expect(first).toHaveTextContent(/0\.0123|0\.012/); // cost
     expect(first).toHaveTextContent('1'); // fallback_count
     // The error row surfaces error_class.
@@ -278,6 +283,30 @@ describe('requests detail page', () => {
     expect(within(cost).getByTestId('cost-total')).toBeInTheDocument();
     // Capture was off → a clear not-recorded notice instead of the full body.
     expect(screen.getByTestId('payload-summary')).toHaveTextContent(/not recorded/i);
+  });
+
+  it('renders the throughput card: true TPS, time-to-first-token, and the generation window', () => {
+    render(DetailPage, {
+      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
+    });
+    const tp = screen.getByTestId('throughput');
+    expect(within(tp).getByTestId('tps')).toHaveTextContent('200 tok/s');
+    expect(within(tp).getByTestId('ttfb')).toHaveTextContent('460ms');
+    expect(within(tp).getByTestId('generation-ms')).toHaveTextContent('1700ms');
+  });
+
+  it('renders the throughput card as not-measured for a non-streaming request', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail({ tps: null, generation_ms: null, ttfb_ms: null }),
+        payload: { captured: false },
+        traceId: 'tr_1',
+      },
+    });
+    const tp = screen.getByTestId('throughput');
+    expect(within(tp).getByTestId('tps')).toHaveTextContent('—');
+    expect(within(tp).getByTestId('ttfb')).toHaveTextContent('—');
+    expect(within(tp).getByTestId('generation-ms')).toHaveTextContent('—');
   });
 
   it('renders the full captured request and response bodies when capture is on', () => {
