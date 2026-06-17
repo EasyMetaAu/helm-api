@@ -61,7 +61,9 @@ describe("sqlite schema + migrations", () => {
       // CREATE, so the RENAME would fail — pre-mark applied, out of scope.
       // v24 adds request_payloads.upstream_request_json; this memory_jobs fixture
       // never creates request_payloads → pre-mark applied (out of scope).
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24])
+      // v25 (telemetry.generation_ms): no telemetry table here → pre-mark applied.
+      // biome-ignore format: keep the version ledger on one readable line
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25])
         rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -266,7 +268,8 @@ describe("sqlite schema + migrations", () => {
       // v22 alters telemetry (absent from this api_keys-only fixture) → pre-mark applied.
       // v24 adds request_payloads.upstream_request_json (table absent from this
       // api_keys-only fixture) → pre-mark applied.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21, 22, 24]) rec.run(v, Date.now());
+      // v25 (telemetry.generation_ms): no telemetry table here → pre-mark applied.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21, 22, 24, 25]) rec.run(v, Date.now());
       seed
         .prepare(
           `INSERT INTO api_keys (key_id, hash, prefix, account_id, role, max_lane, allowed_lanes, created_at)
