@@ -6,7 +6,7 @@
 
 /**
  * Sizing classes for a viewer panel.
- * - default: content-fit height capped at 80vh, draggable taller/shorter via the
+ * - default: content-fit height capped at 40vh, draggable taller/shorter via the
  *   browser's native `resize-y` handle (needs `overflow != visible`, which every
  *   panel already sets). `resize` is clamped to `max-h`, so fullscreen covers the
  *   "show everything" case.
@@ -15,7 +15,7 @@
 export function viewerSizing(fullscreen: boolean): string {
   return fullscreen
     ? 'flex-1 min-h-0 max-h-none resize-none'
-    : 'min-h-32 max-h-[80vh] resize-y';
+    : 'min-h-32 max-h-[40vh] resize-y';
 }
 
 /** Root-container classes that turn a viewer into a full-viewport overlay. */
