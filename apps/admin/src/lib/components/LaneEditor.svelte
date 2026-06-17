@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { Lane } from '$lib/api/lanes.js';
+  import { type Lane, REASONING_EFFORTS, type ReasoningEffort } from '$lib/api/lanes.js';
   import type { ModelOption } from '$lib/api/models.js';
   import { t } from '$lib/i18n';
 
@@ -40,6 +40,8 @@
   let requireTools = $state(initial.constraints.require_tools);
   let requireJson = $state(initial.constraints.require_json);
   let maxLatency = $state<number | null>(initial.constraints.max_latency_ms ?? null);
+  // Lane-forced reasoning effort; '' = unforced (the request-driven default).
+  let reasoningEffort = $state<ReasoningEffort | ''>(initial.reasoning_effort ?? '');
   let newFallback = $state('');
   // Per-card success flag: set when the parent's save resolves without throwing.
   // It is the visible "success notice" the operator (and the e2e) waits for.
@@ -107,6 +109,11 @@
         max_latency_ms: maxLatency,
       },
     };
+    // Forced reasoning effort: set when chosen, OMIT when '' so the server (and the
+    // YAML write-back) treat it as unforced and prune the key (a strictObject would
+    // also reject an explicit invalid value).
+    if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+    else delete body.reasoning_effort;
     saved = false;
     // The parent owns user-facing error handling (page-level alert). It re-throws
     // on failure so the per-card success flag is flipped ONLY on a real success;
@@ -241,6 +248,19 @@
       />
     </label>
   </div>
+
+  <label class="field flex flex-col gap-1">
+    <span class="field-label">{$t('Forced reasoning effort')}</span>
+    <select class="input-sm w-44" data-testid="reasoning-effort" bind:value={reasoningEffort}>
+      <option value="">{$t('Unset (client decides)')}</option>
+      {#each REASONING_EFFORTS as eff (eff)}
+        <option value={eff}>{eff}</option>
+      {/each}
+    </select>
+    <span class="field-help">
+      {$t('When set, overrides the client reasoning effort for every request on this lane.')}
+    </span>
+  </label>
 
   {#if primaryEmpty}
     <p class="alert-error" role="alert">

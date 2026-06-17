@@ -606,5 +606,8 @@
   "Generation time": "생성 시간",
   "Tokens generated per second (output ÷ generation time), averaged over streamed requests.": "초당 생성 토큰 수(출력 ÷ 생성 시간), 스트리밍 요청 평균.",
   "Generation throughput: output tokens per second. Only measured for streamed responses.": "생성 처리량: 초당 출력 토큰 수. 스트리밍 응답에서만 측정됩니다.",
-  "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.": "응답이 생성된 속도 — 초당 출력 토큰 수, 생성 구간, 첫 토큰까지의 시간. 스트리밍 응답에서만 측정됩니다."
+  "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.": "응답이 생성된 속도 — 초당 출력 토큰 수, 생성 구간, 첫 토큰까지의 시간. 스트리밍 응답에서만 측정됩니다.",
+  "Forced reasoning effort": "추론 수준 강제",
+  "Unset (client decides)": "미설정 (클라이언트가 결정)",
+  "When set, overrides the client reasoning effort for every request on this lane.": "설정하면 이 레인의 모든 요청에서 클라이언트 추론 수준을 덮어씁니다."
 }

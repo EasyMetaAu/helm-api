@@ -16,12 +16,34 @@ export interface LaneConstraints {
   [extra: string]: unknown;
 }
 
+// Lane-FORCED reasoning effort (mirrors @helm/shared ReasoningEffortSchema — the
+// admin deliberately re-types shapes rather than importing core/shared). When set
+// on a lane, the gateway overrides the client's reasoning effort for every request
+// on that lane; omitted = unforced (the request-driven default).
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export const REASONING_EFFORTS: ReasoningEffort[] = [
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
+
+function isReasoningEffort(v: unknown): v is ReasoningEffort {
+  return typeof v === 'string' && (REASONING_EFFORTS as string[]).includes(v);
+}
+
 export interface Lane {
   name: string; // economy | balanced | premium | coding | ...
   purpose?: string;
   primary: string;
   fallback: string[];
   constraints: LaneConstraints;
+  // Lane-forced reasoning effort; omitted = unforced. Round-trips to the gateway's
+  // optional LaneSchema.reasoning_effort (strict enum, fail-closed) untouched.
+  reasoning_effort?: ReasoningEffort;
 }
 
 const BASE = '/admin/api/lanes';
@@ -57,6 +79,9 @@ function normalizeLane(raw: Record<string, unknown>): Lane {
     primary: String(raw.primary ?? ''),
     fallback: Array.isArray(raw.fallback) ? raw.fallback.map(String) : [],
     constraints: normalizeConstraints(raw.constraints as Record<string, unknown> | undefined),
+    // Carry a valid forced effort; an absent/unknown value stays unforced. The
+    // PUT body (toServerBody) spreads it through, so no extra wiring there.
+    ...(isReasoningEffort(raw.reasoning_effort) ? { reasoning_effort: raw.reasoning_effort } : {}),
   };
 }
 
