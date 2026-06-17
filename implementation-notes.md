@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-17 · 真实 TPS（生成吞吐量）端到端采集与展示（docs/07/10；原则 1/3/5/6）
+
+- **背景**：用户要每次 LLM 请求的**真实 TPS**（tokens/sec），并在仪表盘显示平均、列表每行、详情每条都显示。探查发现：流式请求记录的 per-attempt `latency_ms` 是在**首 chunk peek** 时测的（`execute.ts:859`），≈ TTFB；真正的**生成窗口**（首 token→末 token）此前无处记录。故"真 TPS"**不是** `latency − ttfb`，而需新采集流式生成窗口。非流式响应整体缓冲于上游，生成速率不可观测。
+- **决定**：在 `DecisionRecord` 新增**网关后置写入**字段 `generation_ms`（served stream 首→末转发 chunk 的墙钟跨度），与 `usage` 同处（`backfillCompletionCost`）落盘；core 对 served-stream 计时无感（builder 恒 emit null，保持 headless，原则 1）。TPS **处处派生** = `completion_tokens / (generation_ms/1000)`，**绝不存比值**（与 `nonCached`/`total` 同模式）。denormalize `generation_ms` 到 telemetry 表（sqlite **v25** / pg **v24**，沿用 v21/v22 token 列先例）供仪表盘 SQL 聚合。
+- **网关采集**：新增共享 `createStreamGenerationTimer(now)`（`mark()` 每个转发 chunk；<2 个不同瞬时 → null 防除零）。`chat.ts`(OpenAI) 行内计时用 `deps.now`；`messages/responses/gemini` 共享 pipeline 在 `streamIR()` 内**一处计时覆盖三面**（native passthrough + 翻译两分支），用 `budget?.now ?? Date.now`；心跳帧不 mark（非生成字节）。
+- **聚合**：`aggregate()` 加两个 CASE 守卫和 `tpsCompletionTokens`/`tpsGenerationMs`（只计 `generation_ms>0` 的行，分子分母对齐，非流式补全永不稀释速率），shaper 暴露 `avgTps`（Σoutput/Σgen×1000，空窗 null）。非流式/legacy 的 TPS/TTFB 渲染 `'—'`，与测得 0 区分（原则 6 null-vs-0）。
+- **TTFB 复用（零采集）**：详情页 TTFB 纯派生 = `generation_ms!=null ? latency_total_ms : null`——流式下 per-attempt latency 即 TTFB 且 attempts 串行，故客户端感知 TTFB == `latency_total_ms`；无新字段/迁移。
+- **取舍/坑/TODO**：① 仅流式可测真 TPS；非流式 → null。② `generation_ms` 仅在有 usage tail 时随 backfill 落盘（真实流量几乎都带 include_usage / Anthropic message_delta usage），无 tail 时 TPS 本就不可算。③ 仪表盘平均用**聚合比值**而非 per-request 比值的均值（小请求不偏置）。④ 仪表盘第 1 行 stat card 由 4 列改 **5 列**容纳 Avg TPS。⑤ pg migrate 既有"部分 fixture 预标已应用"两测需补标 v24（fixture 无 telemetry 表）。
+- **验证**：TDD 红→绿。shared schema 默认 null/round-trip/redaction passthrough；gateway timer 单测 + backfill 戳记 + pipeline **注入时钟**证 `generation_ms` 端到端落盘；store 双适配器 `toRow` denormalize + `aggregate` avgTps 数学 + CASE 对齐 + 空窗 null + pg migrate 幂等；admin `computeTps`/`computeTtfbMs`/`formatTps` 单测 + 列表 `cell-tps`/详情 `throughput` 组件断言；i18n 5 语言补 8 键。`pnpm typecheck`/`lint`/`build`/admin `svelte-check`(0 err) 全绿；全量 `pnpm test` **3817 绿**（13 红仅 PGlite memory 并行超时既有 flake，隔离重跑 15 绿）。分支 `feat/true-tps-generation-window`，未部署。
+
 ## 2026-06-17 · Claude CLI strict fingerprint profile 落地（docs/05/06/07；原则 2/5/7/8）
 
 - **背景**：当前 Helm 已做到保守子集：Anthropic OAuth subscription / Claude subscription 互译或 compatibility rewrite 路径会补 Claude Code billing header、sentinel、agent prompt 与 Claude CLI-like headers；same-protocol native passthrough 不重复注入，尽量保留真实客户端 request。对比 `/Users/lukin/Projects/llm-router-packages/OmniRoute` 与 `la.atmy.work` 线上 request payload 后，决定把更激进的 Claude CLI wire-image profile 放进 provider HTTP 最后一跳，而不是污染协议 transformer。
@@ -24,20 +34,13 @@
 - **取舍/坑/TODO**：这不是全局放开 `messages[].system`。我们只修复 Opus 4.8 的合法形态，保留旧模型的保护；后续若 Anthropic 扩大支持范围，应先用 live/DB/request matrix 验证，再扩大 allowlist。
 - **验证**：新增 core 单测覆盖 Opus 4.8 valid passthrough、provider-prefixed alias、older/unknown fold、developer/invalid placement/non-text system fold；新增 gateway 回归确保 Opus 4.8 `[user, system]` 调 `nativePassthrough` 而非 `chatCompletion`，旧模型仍折叠。focused `protocol.test` + `execute.test` 97 绿；`pnpm lint`、`pnpm build`、全量 `pnpm test`（263 files / 3802 tests）均通过。
 
-## 2026-06-17 · Claude Code 互译路径 OmniRoute 对齐与 system 样板去重（docs/05/07；原则 5/7/8）
-
-- **背景**：线上请求 `51067fe1-873b-4dbf-b53d-3adc4b2da19e`（`helm.easymeta.au` / `la.atmy.work` SQLite 复盘）显示 `upstream_request_json.system` 被膨胀到 **81** 个 block：Claude Code sentinel `You are Claude Code, Anthropic's official CLI for Claude.` 出现 **2** 次（位置 1,2），`The task tools haven't been used recently...` 出现 **44** 次，`The user sent a new message while you were working:` 出现 **3** 次。该请求 `passthrough_used=0`，disable reason 是 `provider_requires_compatibility_rewrite`，所以问题发生在**互译/compat rewrite 路径**，不是原生直通。
-- **根因**：Anthropic 入站 transform 会把顶层 `system` hoist 到 IR（只剥 billing header，不剥 sentinel），同时保留 `messages[].role === "system"`。随后 Anthropic subscription provider 的 `openaiToAnthropicRequest → buildSystem` 又无条件插入自己的 Claude Code sentinel，并把所有 IR system/developer 消息折叠回顶层 `system[]`。结果：已有 sentinel 被重复注入，Claude Code 中途系统提醒也被机械堆叠进上游 `system[]`。
-- **决定**：只在**互译到 Anthropic subscription provider** 的 `buildSystem` 做幂等清理：① 跳过已存在的 `x-anthropic-billing-header:`；② 保留单一 Claude Code sentinel 于 `system[1]`，并继承客户端 sentinel 上的 `cache_control`；③ 只对 Claude Code 固定样板提醒做**完整文本精确去重**（task-tools reminder、user-interrupt reminder），不对普通 system 内容做全局去重，避免误删合法重复上下文。原生直通仍保持逐字保真，不做模拟注入。
-- **OmniRoute/真实 Claude Code 对齐（保守子集）**：参考 `/Users/lukin/Projects/llm-router-packages/OmniRoute` native `claude` OAuth 路径（不是 `anthropic-compatible-cc-*` 的 Claude Agent SDK bridge），并用 `la.atmy.work` 上 `/opt/helm-api/data/helm.db` 里的真实 request payload 校验形态：真实 Claude Code 在 `system` 前缀里是 billing、sentinel、完整 agent prompt，再接 MCP/项目/会话 system。Helm 现在在互译路径补齐 Claude Code agent prompt block；如果客户端已经带了真实 agent prompt，则复用该 block，不重复注入。另移植两类低风险行为：① 清洗 system/tool 文本中的第三方 agent 指纹（OpenCode/Cline/Cursor/Continue/Open WebUI/Pi anchors、identity paragraphs、已知 trigger phrase，并对 tool description 做 ZWJ obfuscation）；② 互译请求加 Claude CLI-like runtime headers（`x-client-request-id`、`X-Claude-Code-Session-Id` 从 `metadata.user_id.session_id` 派生、Stainless lang/runtime/retry/timeout）。这些模拟行为只在 translation path 开启，native passthrough 不添加。
-- **取舍/坑/TODO**：① 不照搬 OmniRoute 的 `Claude Agent SDK` sentinel：Helm 目标是模拟官方 Claude Code CLI，真实 sentinel 仍是 `You are Claude Code...`。② 不盲目照搬 OmniRoute 固定版本（其 `2.1.158` 与 Helm 捕获的 `2.1.175` 不一致），避免 billing/user-agent/header 互相矛盾。③ agent prompt 形态完整覆盖真实 Claude Code 的 memory / environment / git-status 段，但其中路径、shell、模型等机器相关值使用 Helm 运行时可得信息；当客户端已带真实 agent prompt 时，优先复用客户端 block。④ 不改用户 message 正文，只清洗 system 与 tool description，降低语义破坏风险。⑤ 这次**不放宽** `anthropicNativeBodyRequiresSystemFold`；是否让更多 `messages[].role=system` 继续走直通，需独立实测订阅端接受矩阵。
-- **验证**：TDD 红→绿。新增 provider 回归：互译 native Anthropic 流量时 sentinel 只出现一次、Claude Code agent prompt 存在且不重复、固定提醒只保留一次、`messages[0]` 仍是真实 user；普通重复 system 内容与不同 interrupt 不会被误删；OmniRoute 指纹清洗不改用户消息；runtime headers 只在互译路径出现，native carrier passthrough 不出现新增模拟头。`pnpm exec vitest run packages/core/src/provider/anthropic.test.ts`、`pnpm --filter @helm/core typecheck`、Biome changed files、全量 `pnpm test`（263 files / 3796 tests）均通过。仅本地修复，尚未部署。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-17 · Claude Code 互译路径 OmniRoute 对齐与 system 样板去重（docs/05/07；原则 5/7/8）：线上请求 `51067fe1...` 互译路径 `upstream_request_json.system` 膨胀到 81 block（sentinel ×2、task-tools reminder ×44）。根因：Anthropic 入站 hoist 顶层 system 不剥 sentinel + subscription provider `buildSystem` 又无条件插 sentinel 并折叠所有 IR system。修：仅互译到 Anthropic subscription 的 `buildSystem` 幂等清理（跳过已存在 billing header、单一 sentinel 于 `system[1]` 继承 cache_control、仅对 Claude Code 固定样板提醒做完整文本精确去重）；补 Claude Code agent prompt block（客户端已带则复用）；移植 OmniRoute 保守子集（第三方 agent 指纹清洗 + Claude CLI-like runtime headers），只在 translation path，native passthrough 逐字保真。不放宽 `anthropicNativeBodyRequiresSystemFold`。TDD 全绿（263 files/3796 tests），未部署。
 
 ### 2026-06-16 · 修复原生直通对 Claude Code「会话中 system 消息」400（issue #217；原则 3/5/8）：生产请求 `81f3fa9e-...` 显示 Claude Code 把 MCP instructions 作为 `messages=[user, system]` 末尾 system 直通上送，被 Anthropic subscription 400 后 fail-open 回退到 gpt-5.5；修为新增 `anthropicNativeBodyRequiresSystemFold(nativeRequest)`，仅对 Anthropic target 且 `messages[].system|developer` 需折叠时关闭 native passthrough，复用 `provider_requires_compatibility_rewrite` 让请求落回合法的翻译/折叠路。取舍：保留全局 native passthrough 默认 ON，不在直通内就地改 body；后续若订阅端支持更多 mid-conversation system，再用实测扩大 allowlist。focused tests/typecheck/biome 绿。
 

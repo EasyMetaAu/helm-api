@@ -34,6 +34,8 @@ function seedPreV23(): string {
   // v24 adds request_payloads.upstream_request_json; this fixture has no
   // request_payloads table (only oauth_usage) → pre-mark applied (out of scope).
   ins.run(24);
+  // v25 alters telemetry (absent from this oauth_usage-only fixture) → pre-mark applied.
+  ins.run(25);
   raw.exec(`
     CREATE TABLE oauth_usage (
       provider_id TEXT NOT NULL,

@@ -16,6 +16,9 @@ export interface DashboardTotals {
   cachedTokens: number;
   cacheCreationTokens: number;
   avgLatencyMs: number | null;
+  // True throughput across the window: Σ output ÷ Σ generation time × 1000, over
+  // streaming rows with a measured window. null = no such row → the card renders '—'.
+  avgTps: number | null;
 }
 
 export interface DashboardSeriesBucket {
@@ -54,6 +57,7 @@ export const EMPTY_STATS: DashboardStats = {
     cachedTokens: 0,
     cacheCreationTokens: 0,
     avgLatencyMs: null,
+    avgTps: null,
   },
   series: [],
   byModel: [],

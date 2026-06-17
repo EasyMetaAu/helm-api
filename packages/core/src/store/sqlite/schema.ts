@@ -61,6 +61,11 @@ export const telemetry = sqliteTable("telemetry", {
   cachedTokens: integer("cached_tokens"),
   cacheCreationTokens: integer("cache_creation_tokens"),
   servedModel: text("served_model"),
+  // Served-stream generation window in ms (migration v25): the true-TPS denominator,
+  // denormalized from DecisionRecord.generation_ms for cheap SUM aggregation. NULL =
+  // non-streaming / pre-feature row (forward-only, no backfill); a row counts toward
+  // the dashboard avg TPS only when this is > 0.
+  generationMs: integer("generation_ms"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 

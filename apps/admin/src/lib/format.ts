@@ -74,6 +74,24 @@ export function formatTokens(n: number | null | undefined): string {
 // to touch one signature.
 export const formatCount = formatTokens;
 
+// True generation throughput (tokens/sec) for the dashboard "Avg TPS" card, the
+// request-list TPS column, and the detail card. The SINGLE source of truth for
+// rendering a TPS value — never re-divides tokens by time here, only formats the
+// already-derived rate (the gateway times the window; the API client divides).
+//
+// Sentinels mirror formatTokens: null/undefined/NaN → "—" (NOT measured — a
+// non-streaming response has no generation window, or it's a legacy record), kept
+// DISTINCT from a measured 0 ("0 tok/s"). Negative inputs clamp to 0 (a rate is
+// never < 0). Precision: one decimal below 100, whole numbers at/above — LLM
+// generation rates run from ~1 to a few hundred tok/s, so this keeps ~3 sig figs
+// without noise.
+export function formatTps(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—';
+  const v = Math.max(0, n);
+  const s = v >= 100 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, '');
+  return `${s} tok/s`;
+}
+
 // Coarse, magnitude-aware breakdown of a duration (in ms) — the SINGLE source of
 // truth for "anything past 24h rolls up to days". Returns just the numbers +
 // which bucket they fall in; callers map the bucket to their own phrasing/i18n

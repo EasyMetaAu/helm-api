@@ -51,6 +51,9 @@ export class SqliteTelemetryStore implements TelemetryStore {
       cachedTokens: usage?.cached_tokens ?? null,
       cacheCreationTokens: usage?.cache_creation_tokens ?? null,
       servedModel: input.decision.final.provider_model ?? null,
+      // Served-stream generation window (migration v25, true-TPS denominator). NULL
+      // for non-streaming / un-stamped rows — they never count toward the avg rate.
+      generationMs: input.decision.generation_ms ?? null,
       createdAt: input.createdAt,
     };
   }
@@ -209,6 +212,11 @@ export class SqliteTelemetryStore implements TelemetryStore {
         avgLatencyMs: sql<
           number | null
         >`AVG(json_extract(${telemetry.decisionJson}, '$.latency_total_ms'))`,
+        // True-TPS aggregate ratio inputs. The CASE keeps numerator + denominator on
+        // the SAME rows (streaming rows with a measured window, generation_ms > 0), so
+        // a non-streaming completion never inflates the rate. The shaper divides them.
+        tpsCompletionTokens: sql<number>`COALESCE(SUM(CASE WHEN ${telemetry.generationMs} > 0 THEN ${telemetry.completionTokens} ELSE 0 END), 0)`,
+        tpsGenerationMs: sql<number>`COALESCE(SUM(CASE WHEN ${telemetry.generationMs} > 0 THEN ${telemetry.generationMs} ELSE 0 END), 0)`,
       })
       .from(telemetry)
       .where(where)

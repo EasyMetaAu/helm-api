@@ -39,6 +39,7 @@ import {
 } from "./native-memory-inject.js";
 import {
   backfillCompletionCost,
+  createStreamGenerationTimer,
   type StreamUsage,
   tokensFromUsage,
   usageFromAnthropicResponse,
@@ -940,6 +941,15 @@ export function createMessagesPipeline(
           if (failure !== null) throw failure;
           if (result.stream === null) return;
 
+          // True-TPS denominator: time the served generation window (first→last
+          // yielded event) as the pipeline emits IR frames downstream. One timer
+          // serves BOTH the native-passthrough and translated branches; its span is
+          // stamped onto the decision in each branch's finally (next to the usage
+          // backfill). Reuse the budget clock when wired (production), else wall time
+          // — mirrors the sibling faces. Heartbeats are injected by the route, not
+          // here, so they never count.
+          const genTimer = createStreamGenerationTimer(budget?.now ?? (() => Date.now()));
+
           // Native-passthrough stream (#217 Phase 2/3): route() byte-relayed the
           // upstream native SSE into result.stream (raw decoded text). Forward it
           // VERBATIM as {event,data} frames — NO parseOpenAISSE → convertOpenAIStream
@@ -996,6 +1006,7 @@ export function createMessagesPipeline(
                 }
                 // Yield the VERBATIM frame: routes use `raw` when present, so comment
                 // frames / keepalives / CRLF boundaries survive the Hono boundary too.
+                genTimer.mark();
                 yield {
                   event: frame.event,
                   data: frame.data,
@@ -1039,7 +1050,13 @@ export function createMessagesPipeline(
                 try {
                   const cost =
                     finalAlias && budget?.costOf ? budget.costOf(finalAlias, nativeUsage) : null;
-                  backfillCompletionCost(result.decision, finalAlias, cost, nativeUsage);
+                  backfillCompletionCost(
+                    result.decision,
+                    finalAlias,
+                    cost,
+                    nativeUsage,
+                    genTimer.generationMs(),
+                  );
                 } catch {
                   /* fail-open: leave cost/usage null on any mapping miss */
                 }
@@ -1082,6 +1099,7 @@ export function createMessagesPipeline(
               for await (const snapshot of geminiTransformer.transformStreamOut(
                 source as AsyncIterable<IRChunk>,
               )) {
+                genTimer.mark();
                 yield snapshot as Record<string, unknown>;
               }
             } else {
@@ -1112,6 +1130,7 @@ export function createMessagesPipeline(
                             : undefined,
                     });
               for await (const ev of events) {
+                genTimer.mark();
                 yield ev as (AnthropicSSEEvent | ResponsesSSEEvent) & { type: string };
               }
             }
@@ -1150,7 +1169,13 @@ export function createMessagesPipeline(
               try {
                 const cost =
                   finalAlias && budget?.costOf ? budget.costOf(finalAlias, lastUsage) : null;
-                backfillCompletionCost(result.decision, finalAlias, cost, lastUsage);
+                backfillCompletionCost(
+                  result.decision,
+                  finalAlias,
+                  cost,
+                  lastUsage,
+                  genTimer.generationMs(),
+                );
               } catch {
                 /* fail-open: leave cost/usage null on any mapping miss */
               }

@@ -131,6 +131,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
     cost_breakdown: { eval_usd: null, completion_usd: 0.004, total_usd: 0.004 },
     memory: null,
     usage: null,
+    generation_ms: null,
     ...overrides,
   };
 }
@@ -683,6 +684,74 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(gpt?.totalTokens).toBe(195);
       const claude = agg.byModel.find((m) => m.servedModel === "claude-x");
       expect(claude?.totalTokens).toBe(240);
+    });
+
+    // True-TPS dashboard average: an aggregate ratio Σcompletion / Σgeneration_ms ×
+    // 1000, NOT a mean of per-request rates (which tiny requests would skew). The
+    // numerator and denominator count the SAME rows — only streaming rows with a
+    // measured generation window (generation_ms > 0) — so a non-streaming row (no
+    // window) never dilutes the rate. Pinned identical across both adapters.
+    it("aggregate computes avgTps = Σcompletion ÷ Σgeneration_ms (streaming rows only)", async () => {
+      ctx = await make();
+      const DAY = 86_400_000;
+      const day0 = 20 * DAY;
+      const streamed = (id: string, completion: number, generationMs: number | null) =>
+        decision(id, {
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: completion,
+            cached_tokens: null,
+            cache_creation_tokens: null,
+          },
+          generation_ms: generationMs,
+        });
+      // Two streaming rows (windowed) + one non-streaming row (generation_ms null,
+      // must be EXCLUDED) + one degenerate zero-window row (excluded by > 0 guard).
+      await ctx.stores.telemetry.insert({
+        decision: streamed("g0", 100, 2000),
+        apiKeyId: "k1",
+        createdAt: new Date(day0 + 1000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: streamed("g1", 50, 1000),
+        apiKeyId: "k1",
+        createdAt: new Date(day0 + 2000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: streamed("g2", 999, null), // non-streaming — excluded entirely
+        apiKeyId: "k1",
+        createdAt: new Date(day0 + 3000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: streamed("g3", 999, 0), // zero window — excluded by the > 0 guard
+        apiKeyId: "k1",
+        createdAt: new Date(day0 + 4000),
+      });
+
+      const agg = await ctx.stores.telemetry.aggregate(day0, day0 + DAY, "day");
+      // (100 + 50) / (2000 + 1000) ms × 1000 = 150 / 3 s = 50 tok/s.
+      expect(agg.totals.avgTps).toBeCloseTo(50);
+    });
+
+    it("aggregate avgTps is null when no row has a measured generation window", async () => {
+      ctx = await make();
+      const DAY = 86_400_000;
+      const day0 = 30 * DAY;
+      await ctx.stores.telemetry.insert({
+        decision: decision("n0", {
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 40,
+            cached_tokens: null,
+            cache_creation_tokens: null,
+          },
+          generation_ms: null,
+        }),
+        apiKeyId: "k1",
+        createdAt: new Date(day0 + 1000),
+      });
+      const agg = await ctx.stores.telemetry.aggregate(day0, day0 + DAY, "day");
+      expect(agg.totals.avgTps).toBeNull();
     });
 
     it("aggregate reads an empty window as zeros (not nulls), hour buckets honored", async () => {

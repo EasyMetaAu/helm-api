@@ -286,6 +286,11 @@ export interface TelemetryTotals {
   cachedTokens: number;
   cacheCreationTokens: number;
   avgLatencyMs: number | null; // null = empty window
+  // True throughput across the window: Σ(completion_tokens) ÷ Σ(generation_ms) ×
+  // 1000, over STREAMING rows that measured a generation window (generation_ms > 0)
+  // — an aggregate rate, not a mean of per-request rates (which small requests
+  // would skew). null = no streamed row in the window had a measured window.
+  avgTps: number | null;
 }
 
 export interface TelemetrySeriesBucket {

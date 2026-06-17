@@ -6,7 +6,7 @@
   import type { DashboardStats } from '$lib/api/stats.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
   import TokensCell from '$lib/components/TokensCell.svelte';
-  import { formatCount, formatTimestamp, formatTokens, formatUsd } from '$lib/format.js';
+  import { formatCount, formatTimestamp, formatTokens, formatTps, formatUsd } from '$lib/format.js';
   import { DEFAULT_PAGE_SIZE, filtersToSearch, type RangeKey } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
 
@@ -16,6 +16,7 @@
     errors: number;
     successRate: number | null;
     avgLatency: number | null;
+    avgTps: number | null;
     totalCost: number | null;
     totalTokens: number;
     inputTokens: number;
@@ -187,7 +188,7 @@
   </div>
 
   <!-- Stat cards -->
-  <div class="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
+  <div class="grid grid-cols-2 gap-3 lg:grid-cols-5 lg:gap-4">
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Requests')}</div>
       <div class="mt-1 text-2xl font-semibold text-slate-900">{formatCount(stats.total)}</div>
@@ -209,6 +210,19 @@
       </div>
       <div class="mt-1 text-2xl font-semibold text-slate-900">
         {stats.avgLatency === null ? '—' : `${stats.avgLatency}ms`}
+      </div>
+    </div>
+    <div class="card">
+      <div
+        class="text-xs font-medium uppercase tracking-wide text-slate-400"
+        title={$t(
+          'Tokens generated per second (output ÷ generation time), averaged over streamed requests.',
+        )}
+      >
+        {$t('Avg TPS')}
+      </div>
+      <div data-testid="stat-avg-tps" class="mt-1 text-2xl font-semibold text-slate-900">
+        {formatTps(stats.avgTps)}
       </div>
     </div>
     <div class="card">

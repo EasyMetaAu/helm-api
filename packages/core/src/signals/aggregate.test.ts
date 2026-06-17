@@ -53,6 +53,7 @@ function makeRecord(over: {
     cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
     memory: null,
     usage: null,
+    generation_ms: null,
   };
 }
 

@@ -13,6 +13,16 @@ import type { TelemetryAggregate } from "./ports.js";
 const num = (v: unknown): number => (v == null ? 0 : Number(v));
 const numOrNull = (v: unknown): number | null => (v == null ? null : Number(v));
 
+// True-TPS aggregate ratio: completion tokens per second of generated time over the
+// window. Both inputs are SQL sums already restricted to streaming rows with a
+// measured window. null when the denominator is 0/absent (no streamed row) so the
+// dashboard renders "—" rather than NaN/Infinity.
+const tpsFrom = (completionTokens: unknown, generationMs: unknown): number | null => {
+  const tokens = num(completionTokens);
+  const ms = num(generationMs);
+  return ms > 0 ? (tokens / ms) * 1000 : null;
+};
+
 export function shapeTelemetryAggregate(
   totals: Record<string, unknown> | undefined,
   series: ReadonlyArray<Record<string, unknown>>,
@@ -29,6 +39,11 @@ export function shapeTelemetryAggregate(
       cachedTokens: num(totals?.cachedTokens),
       cacheCreationTokens: num(totals?.cacheCreationTokens),
       avgLatencyMs: numOrNull(totals?.avgLatencyMs),
+      // True TPS as an aggregate ratio: Σcompletion ÷ Σgeneration_ms × 1000, both
+      // sums restricted in SQL to streaming rows with a measured window (so the
+      // numerator/denominator stay aligned). null when no such row exists (denom 0)
+      // — kept DISTINCT from a measured rate, mirroring avgLatencyMs/cost nulls.
+      avgTps: tpsFrom(totals?.tpsCompletionTokens, totals?.tpsGenerationMs),
     },
     // Sort in JS (not SQL) so the ordering is IDENTICAL across dialects regardless
     // of GROUP BY emission order — series chronological, byModel by volume desc.

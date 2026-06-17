@@ -556,6 +556,17 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE request_payloads ADD COLUMN upstream_request_json TEXT;
     `,
   },
+  {
+    // True-TPS denominator: denormalize the served-stream generation window
+    // (DecisionRecord.generation_ms — first→last forwarded chunk, gateway-timed) so
+    // the dashboard's aggregate tokens/sec is a plain SUM, not a json_extract scan.
+    // Additive + nullable (NULL = non-streaming / pre-feature row); forward-only —
+    // legacy rows stay NULL and never count toward the rate.
+    version: 25,
+    sql: `
+      ALTER TABLE telemetry ADD COLUMN generation_ms INTEGER;
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

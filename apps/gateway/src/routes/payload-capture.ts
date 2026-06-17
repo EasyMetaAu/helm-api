@@ -528,21 +528,57 @@ function tokenBreakdownFromUsage(u: StreamUsage): TokenUsageBreakdown {
   };
 }
 
+// Wall-clock generation-window timer for a SERVED stream: the true-TPS denominator.
+// The route calls `mark()` once per FORWARDED chunk (first chunk → last chunk); the
+// window is last − first. A single mark (or all marks at one instant) has no span →
+// null, kept DISTINCT from a measured value so TPS renders "—" rather than dividing
+// by zero. The clock is injected for determinism (tests; mirrors recordServed.now).
+// Cheap + allocation-free per chunk: two numbers and a comparison.
+export interface StreamGenerationTimer {
+  /** Record that a chunk was forwarded to the client at `now()`. */
+  mark(): void;
+  /** Span from the first to the last marked chunk (ms); null when < 2 distinct instants. */
+  generationMs(): number | null;
+}
+
+export function createStreamGenerationTimer(now: () => number): StreamGenerationTimer {
+  let first: number | null = null;
+  let last: number | null = null;
+  return {
+    mark(): void {
+      const t = now();
+      if (first === null) first = t;
+      last = t;
+    },
+    generationMs(): number | null {
+      if (first === null || last === null || last <= first) return null;
+      return last - first;
+    },
+  };
+}
+
 // Backfill the streamed completion cost AND the served token counts onto the
 // decision record IN PLACE (#6: streamed usage is unknown at peek time, so
-// execute() recorded cost null). The two stamps are DECOUPLED: the token stamp
+// execute() recorded cost null). The three stamps are DECOUPLED: the token stamp
 // rides `usage` and needs no pricing, so it lands whenever a usage tail is present
 // (dashboard accounting must work even when pricing is unwired); the cost stamp is
 // a no-op when `cost` is null (pricing unknown) — the record keeps its honest
-// "not measured" null rather than a misleading 0. Pass null cost + a usage tail to
-// stamp tokens only (non-stream paths, where execute() already settled the cost).
+// "not measured" null rather than a misleading 0; the generation-window stamp
+// (`generationMs`, true-TPS denominator) lands only on the streaming path that
+// measured one. Pass null cost + a usage tail to stamp tokens only (non-stream
+// paths, where execute() already settled the cost and there is no stream window).
 export function backfillCompletionCost(
   decision: DecisionRecord,
   alias: string | null,
   cost: number | null,
   usage?: StreamUsage | null,
+  generationMs?: number | null,
 ): void {
   if (usage) decision.usage = tokenBreakdownFromUsage(usage);
+  // Streaming generation window (true TPS = completion_tokens / (generation_ms/1000)).
+  // `!= null` skips both undefined (non-stream callers) and null (no measurable span),
+  // leaving the record's honest null.
+  if (generationMs != null) decision.generation_ms = generationMs;
   if (cost === null) return;
   if (alias) {
     for (const a of decision.provider_attempts) {

@@ -4,6 +4,7 @@ import { createWriteQueue } from "../runtime/write-queue.js";
 import {
   backfillCompletionCost,
   createSseCapture,
+  createStreamGenerationTimer,
   type PayloadCaptureDeps,
   persistPayload,
   type RecordServedDeps,
@@ -480,9 +481,45 @@ function decision(): DecisionRecord {
     ],
     cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
     usage: null,
+    generation_ms: null,
     final: { status: "ok", model_alias: "openai/gpt" },
   } as unknown as DecisionRecord;
 }
+
+describe("createStreamGenerationTimer", () => {
+  // A clock that hands out the supplied ticks in order (then sticks on the last).
+  function clockOf(ticks: number[]): () => number {
+    let i = 0;
+    return () => ticks[Math.min(i++, ticks.length - 1)] ?? 0;
+  }
+
+  it("returns null before any chunk is marked (no stream)", () => {
+    const t = createStreamGenerationTimer(clockOf([1000]));
+    expect(t.generationMs()).toBeNull();
+  });
+
+  it("returns null after a single mark (a single instant has no span)", () => {
+    const t = createStreamGenerationTimer(clockOf([1000]));
+    t.mark();
+    expect(t.generationMs()).toBeNull();
+  });
+
+  it("measures the span from the first to the last marked chunk", () => {
+    const t = createStreamGenerationTimer(clockOf([1000, 1200, 1850, 4200]));
+    t.mark(); // first chunk @1000
+    t.mark(); // @1200
+    t.mark(); // @1850
+    t.mark(); // last chunk @4200
+    expect(t.generationMs()).toBe(3200); // 4200 − 1000
+  });
+
+  it("is null when the span is zero (all marks at the same instant)", () => {
+    const t = createStreamGenerationTimer(clockOf([1000, 1000]));
+    t.mark();
+    t.mark();
+    expect(t.generationMs()).toBeNull();
+  });
+});
 
 describe("backfillCompletionCost", () => {
   it("sets the matching ok attempt + completion/total cost", () => {
@@ -555,6 +592,26 @@ describe("backfillCompletionCost", () => {
     const d = decision();
     backfillCompletionCost(d, "openai/gpt", 0.01);
     expect(d.usage).toBeNull();
+  });
+
+  // True-TPS denominator: the 5th arg stamps the served-stream generation window
+  // (gateway-timed). Decoupled from cost + usage, like the other stamps.
+  it("stamps generation_ms from the 5th arg (streaming path)", () => {
+    const d = decision();
+    backfillCompletionCost(d, "openai/gpt", 0.01, { completion_tokens: 340 }, 4200);
+    expect(d.generation_ms).toBe(4200);
+  });
+
+  it("leaves generation_ms null when omitted (non-streaming path)", () => {
+    const d = decision();
+    backfillCompletionCost(d, null, null, { completion_tokens: 340 });
+    expect(d.generation_ms).toBeNull();
+  });
+
+  it("does not stamp generation_ms when the timer yielded null (no measurable span)", () => {
+    const d = decision();
+    backfillCompletionCost(d, "openai/gpt", 0.01, { completion_tokens: 1 }, null);
+    expect(d.generation_ms).toBeNull();
   });
 });
 

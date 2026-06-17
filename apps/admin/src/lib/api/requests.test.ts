@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { listRequests, toDetail, toListItem } from './requests.js';
+import { computeTps, computeTtfbMs, listRequests, toDetail, toListItem } from './requests.js';
 
 // The API client maps the backend DecisionRecord -> the docs/07 UI contract. Since
 // admin.requests-richfields the record carries the real telemetry fields
@@ -244,6 +244,40 @@ describe('toDetail', () => {
     // No created_at on a legacy record → empty (never fabricated), so the detail
     // header degrades to "time not recorded" rather than showing a wrong time.
     expect(toDetail(rawRecord()).ts).toBe('');
+  });
+});
+
+describe('true TPS + TTFB derivation', () => {
+  // The fixture serves 340 completion tokens; with a 1700ms generation window that
+  // is exactly 200 tok/s. latency_total_ms (460) is the streamed-response TTFB.
+  it('derives tps = output ÷ generation window on a streamed record', () => {
+    expect(computeTps(rawRecord({ generation_ms: 1700 }) as never)).toBeCloseTo(200);
+    expect(toListItem(rawRecord({ generation_ms: 1700 })).tps).toBeCloseTo(200);
+    const d = toDetail(rawRecord({ generation_ms: 1700 }));
+    expect(d.tps).toBeCloseTo(200);
+    expect(d.generation_ms).toBe(1700);
+    expect(d.ttfb_ms).toBe(460); // == latency_total_ms (client-perceived TTFB)
+  });
+
+  it('is null (not measured) for a non-streaming record (no generation window)', () => {
+    // The fixture has no generation_ms → non-streaming.
+    expect(computeTps(rawRecord() as never)).toBeNull();
+    expect(toListItem(rawRecord()).tps).toBeNull();
+    const d = toDetail(rawRecord());
+    expect(d.tps).toBeNull();
+    expect(d.generation_ms).toBeNull();
+    expect(d.ttfb_ms).toBeNull(); // TTFB only meaningful when a window was measured
+  });
+
+  it('guards divide-by-zero and missing counts (null, never Infinity/NaN)', () => {
+    expect(computeTps(rawRecord({ generation_ms: 0 }) as never)).toBeNull();
+    expect(computeTps(rawRecord({ generation_ms: -5 }) as never)).toBeNull();
+    // Window present but no completion count → still not measurable.
+    expect(
+      computeTps(rawRecord({ generation_ms: 1000, usage: { prompt_tokens: 10 } }) as never),
+    ).toBeNull();
+    // TTFB needs a window; latency alone (non-streaming) does not qualify.
+    expect(computeTtfbMs(rawRecord() as never)).toBeNull();
   });
 });
 

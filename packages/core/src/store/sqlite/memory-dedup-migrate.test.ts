@@ -37,6 +37,8 @@ function seedPreV21(): string {
   // v24 adds request_payloads.upstream_request_json; this fixture never creates
   // request_payloads (memory_messages only) → pre-mark applied (out of scope).
   ins.run(24);
+  // v25 alters telemetry (absent from this memory_messages-only fixture) → pre-mark applied.
+  ins.run(25);
   raw.exec(`
     CREATE TABLE memory_messages (
       id TEXT PRIMARY KEY,

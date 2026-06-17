@@ -69,6 +69,10 @@ export const telemetry = pgTable("telemetry", {
   cachedTokens: integer("cached_tokens"),
   cacheCreationTokens: integer("cache_creation_tokens"),
   servedModel: text("served_model"),
+  // Served-stream generation window in ms (pg migration v24) — mirror of the sqlite
+  // v25 column. NULL = non-streaming / pre-feature row; counts toward the dashboard
+  // avg TPS only when > 0. Denormalized from DecisionRecord.generation_ms.
+  generationMs: integer("generation_ms"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(), // epoch ms
 });
 

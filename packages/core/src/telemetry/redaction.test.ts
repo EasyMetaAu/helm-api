@@ -49,6 +49,10 @@ describe("redact", () => {
     const input = {
       trace_id: "t1",
       latency_ms: 1200,
+      // Served-stream generation window (true-TPS denominator): a plain scalar
+      // whose key carries no secret substring, so it must survive verbatim — the
+      // admin derives TPS from it and would otherwise see it vanish.
+      generation_ms: 4200,
       cost_usd: 0.004,
       status: "ok",
       error_class: null,

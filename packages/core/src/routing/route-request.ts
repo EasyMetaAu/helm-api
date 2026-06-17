@@ -743,6 +743,8 @@ export async function routeRequest(
       memory: null,
       // Token counts come from the served usage tail (gateway-stamped) — null here.
       usage: null,
+      // Served-stream generation window is gateway-timed/stamped — null here.
+      generation_ms: null,
     };
     deps.log(decision);
     return {
@@ -809,6 +811,8 @@ export async function routeRequest(
     memory: null,
     // Token counts come from the served usage tail (gateway-stamped) — null here.
     usage: null,
+    // Served-stream generation window is gateway-timed/stamped — null here.
+    generation_ms: null,
   };
 
   deps.log(decision);

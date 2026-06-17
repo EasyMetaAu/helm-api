@@ -485,6 +485,16 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE request_payloads ADD COLUMN upstream_request_json TEXT;
     `,
   },
+  {
+    // True-TPS denominator (mirrors sqlite v25): denormalize the served-stream
+    // generation window (DecisionRecord.generation_ms) for a plain SUM in the
+    // dashboard aggregate. Additive + nullable (NULL = non-streaming / pre-feature
+    // row); forward-only — legacy rows stay NULL and never count toward the rate.
+    version: 24,
+    sql: `
+      ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS generation_ms INTEGER;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both
