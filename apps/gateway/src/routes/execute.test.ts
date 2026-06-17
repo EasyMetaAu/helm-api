@@ -1836,11 +1836,10 @@ describe("createExecute — native protocol passthrough (#217)", () => {
   });
 
   it("anthropic native body with an inline system turn DISABLES passthrough (folds via chatCompletion)", async () => {
-    // Regression for request 81f3fa9e...: Claude Code 2.1.175 emits the MCP-server
-    // instructions as a TRAILING system message ([user, system]). Forwarded verbatim,
-    // Anthropic 400s ("messages.1: role 'system' must precede an 'assistant' message or
-    // end the array") and the request fell back to a non-Claude model. Passthrough must
-    // be disabled for this shape so the request folds system into top-level `system`.
+    // Regression for request 81f3fa9e... on older/unknown models: Claude Code 2.1.175
+    // emits the MCP-server instructions as a TRAILING system message ([user, system]).
+    // If the resolved model is not known to support that shape, passthrough must be
+    // disabled so the request folds system into top-level `system`.
     const provider = anthropicProvider(NATIVE_RESP);
     const execute = createExecute({
       defaultProvider: provider,
@@ -1882,6 +1881,54 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(okRow?.passthrough_considered).toBe(true);
     expect(okRow?.passthrough_used).toBe(false);
     expect(okRow?.passthrough_disable_reason).toBe("provider_requires_compatibility_rewrite");
+  });
+
+  it("Opus 4.8 Anthropic native body with a valid trailing system turn stays on passthrough", async () => {
+    // Regression for request 5191ce2b...: disabling passthrough sent the request through
+    // the compatibility rewrite path, which produced an upstream empty-success stream.
+    // Opus 4.8 supports this exact [user, system] mid-conversation system placement, so
+    // the same-protocol request should stay byte-faithful.
+    const provider = anthropicProvider(NATIVE_RESP);
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const nativeWithTrailingSystem = {
+      ...NATIVE,
+      model: "anthropic/claude-opus-4-8",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "system", content: "# MCP Server Instructions\n..." },
+      ],
+    };
+
+    const out = await execute(
+      plan(["a"]),
+      anthropicReq({ native_request: nativeWithTrailingSystem }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(provider.nativePassthrough).toHaveBeenCalledTimes(1);
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(provider.nativePassthrough.mock.calls[0]?.[0]).toEqual({
+      ...nativeWithTrailingSystem,
+      model: "claude-opus-4-8",
+    });
+    expect(out.nativePassthrough).toBe(true);
+    expect(out.attempts[0]?.passthrough_used).toBe(true);
+    expect(out.attempts[0]?.passthrough_disable_reason).toBeNull();
   });
 
   it("Gemini target + native_request sends GenerateContent body to the Gemini client, not OpenAI Chat", async () => {

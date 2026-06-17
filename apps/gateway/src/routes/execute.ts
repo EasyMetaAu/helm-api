@@ -325,15 +325,15 @@ function decideNativePassthroughForAttempt(input: {
 }): PassthroughTelemetry {
   const { req, target } = input;
 
-  // A native Anthropic body with a system/developer turn INSIDE messages[] (the
-  // mid-conversation-system shape Claude Code ≥2.1.x emits) is rejected verbatim by
-  // Anthropic ("messages.N: role 'system' must precede an 'assistant' message or end the
-  // array"). Treat it as needing a compatibility rewrite so passthrough is disabled and
-  // the attempt folds system into the top-level `system` param via the translating path.
+  // A native Anthropic body with a system/developer turn INSIDE messages[] may need a
+  // model-aware compatibility rewrite. Older/unknown Anthropic models still fold; Opus
+  // 4.8 can keep byte-faithful passthrough for its documented valid placement.
   const requiresCompatibilityRewrite =
     target.providerRequiresCompatibilityRewrite ||
     (target.targetProviderProtocol === "anthropic_messages" &&
-      anthropicNativeBodyRequiresSystemFold(req.native_request));
+      anthropicNativeBodyRequiresSystemFold(req.native_request, {
+        providerModel: target.providerModel,
+      }));
 
   const decision = canUseNativePassthrough({
     enabled: input.enabled,

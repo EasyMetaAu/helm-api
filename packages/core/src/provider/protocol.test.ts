@@ -171,14 +171,13 @@ describe("canUseNativePassthrough", () => {
   });
 });
 
-// anthropicNativeBodyRequiresSystemFold — detects the "mid-conversation system" body
-// shape Claude Code ≥2.1.x emits (a system/developer turn INSIDE messages[]), which
-// Anthropic rejects verbatim ("messages.N: role 'system' must precede an 'assistant'
-// message or end the array"). When true, execute disables native passthrough so the
-// attempt folds system/developer into the top-level `system` param instead of 400ing.
+// anthropicNativeBodyRequiresSystemFold — detects the inline system/developer body
+// shapes that still require the compatibility rewrite. Opus 4.8 accepts a valid
+// mid-conversation system turn, while older/unknown models and developer-role turns
+// still fold into top-level `system`.
 describe("anthropicNativeBodyRequiresSystemFold", () => {
-  // The exact production shape that 400'd (request 81f3fa9e...): Claude Code 2.1.175 put
-  // the MCP-server instructions as a TRAILING system message after the only user turn.
+  // The Claude Code 2.1.x shape: MCP-server instructions as a TRAILING system message
+  // after the only user turn.
   const claudeCodeBody = {
     model: "claude-opus-4-8",
     stream: true,
@@ -202,29 +201,95 @@ describe("anthropicNativeBodyRequiresSystemFold", () => {
     expect(anthropicNativeBodyRequiresSystemFold(carrier)).toBe(true);
   });
 
-  it("flags a bare native body (not wrapped in a carrier) with an inline system turn", () => {
+  it("flags a bare native body (not wrapped in a carrier) with an inline system turn when model context is absent", () => {
     expect(anthropicNativeBodyRequiresSystemFold(claudeCodeBody)).toBe(true);
+  });
+
+  it("does NOT flag Opus 4.8's valid trailing system turn after a user message", () => {
+    expect(
+      anthropicNativeBodyRequiresSystemFold(claudeCodeBody, { providerModel: "claude-opus-4-8" }),
+    ).toBe(false);
+  });
+
+  it("accepts provider-prefixed Opus 4.8 aliases as the same upstream model", () => {
+    expect(
+      anthropicNativeBodyRequiresSystemFold(claudeCodeBody, {
+        providerModel: "anthropic/claude-opus-4-8",
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps older or unknown Anthropic models on the fold path", () => {
+    expect(
+      anthropicNativeBodyRequiresSystemFold(claudeCodeBody, {
+        providerModel: "claude-3-5-sonnet-20241022",
+      }),
+    ).toBe(true);
+    expect(anthropicNativeBodyRequiresSystemFold(claudeCodeBody, { providerModel: null })).toBe(
+      true,
+    );
   });
 
   it("flags an inline developer turn too (OpenAI's renamed system tier)", () => {
     expect(
-      anthropicNativeBodyRequiresSystemFold({
-        messages: [
-          { role: "user", content: "hi" },
-          { role: "developer", content: "be terse" },
-        ],
-      }),
+      anthropicNativeBodyRequiresSystemFold(
+        {
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "developer", content: "be terse" },
+          ],
+        },
+        { providerModel: "claude-opus-4-8" },
+      ),
     ).toBe(true);
   });
 
-  it("flags a leading system turn at messages[0] (also rejected by Anthropic)", () => {
+  it("flags a leading system turn at messages[0] even on Opus 4.8", () => {
     expect(
-      anthropicNativeBodyRequiresSystemFold({
-        messages: [
-          { role: "system", content: "sys" },
-          { role: "user", content: "hi" },
-        ],
-      }),
+      anthropicNativeBodyRequiresSystemFold(
+        {
+          messages: [
+            { role: "system", content: "sys" },
+            { role: "user", content: "hi" },
+          ],
+        },
+        { providerModel: "claude-opus-4-8" },
+      ),
+    ).toBe(true);
+  });
+
+  it("flags consecutive inline system turns even on Opus 4.8", () => {
+    expect(
+      anthropicNativeBodyRequiresSystemFold(
+        {
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "system", content: "first" },
+            { role: "system", content: "second" },
+          ],
+        },
+        { providerModel: "claude-opus-4-8" },
+      ),
+    ).toBe(true);
+  });
+
+  it("flags non-text inline system content even on Opus 4.8", () => {
+    expect(
+      anthropicNativeBodyRequiresSystemFold(
+        {
+          messages: [
+            { role: "user", content: "hi" },
+            {
+              role: "system",
+              content: [
+                { type: "text", text: "allowed" },
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "x" } },
+              ],
+            },
+          ],
+        },
+        { providerModel: "claude-opus-4-8" },
+      ),
     ).toBe(true);
   });
 

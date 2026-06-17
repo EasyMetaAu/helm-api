@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-17 · Opus 4.8 会话中 system 消息恢复原生直通（issue #217；原则 5/8）
+
+- **背景**：线上请求 `5191ce2b-1d82-4802-a3b7-779f5aa54419`（`helm.easymeta.au` / `la.atmy.work` SQLite 复盘）入站是 Anthropic native 流式请求，`messages=[user, system]`，`tools=63`，模型 `claude-opus-4-8`。记录显示 `passthrough_used=false`，disable reason 是 `provider_requires_compatibility_rewrite`；互译/折叠后的上游请求只返回 `message_start → message_delta(stop_reason=end_turn) → message_stop`，没有 text delta / tool_use，客户端表现为“卡住”。
+- **根因**：`aa377a1` 为修复旧请求 `81f3fa9e...` 的 400，把任何 Anthropic `messages[].role === "system" | "developer"` 都视为必须折叠，导致 Opus 4.8 的合法会话中 system 消息也被强制走 compatibility rewrite。该假设已过期：Opus 4.8 当前支持特定 placement 的 mid-conversation system；但 older/unknown models 与 `developer` role 仍不能盲目直通。
+- **决定**：`anthropicNativeBodyRequiresSystemFold(nativeRequest, { providerModel })` 改成 model-aware：只有解析到 `claude-opus-4-8`（含 provider 前缀/版本后缀）且 inline `system` 位于已实证/文档支持的 `user → system → assistant|end` 形态、内容为 text-only 时，才不关直通；缺 model、旧模型、`developer`、leading/consecutive system、非文本 system 内容继续 fail-closed 走折叠路。`execute.ts` 用 resolved `target.providerModel` 调用该 helper，避免信任客户端 body 里的 `model`。
+- **取舍/坑/TODO**：这不是全局放开 `messages[].system`。我们只修复 Opus 4.8 的合法形态，保留旧模型的保护；后续若 Anthropic 扩大支持范围，应先用 live/DB/request matrix 验证，再扩大 allowlist。
+- **验证**：新增 core 单测覆盖 Opus 4.8 valid passthrough、provider-prefixed alias、older/unknown fold、developer/invalid placement/non-text system fold；新增 gateway 回归确保 Opus 4.8 `[user, system]` 调 `nativePassthrough` 而非 `chatCompletion`，旧模型仍折叠。focused `protocol.test` + `execute.test` 97 绿；`pnpm lint`、`pnpm build`、全量 `pnpm test`（263 files / 3802 tests）均通过。
+
 ## 2026-06-17 · Claude Code 互译路径 OmniRoute 对齐与 system 样板去重（docs/05/07；原则 5/7/8）
 
 - **背景**：线上请求 `51067fe1-873b-4dbf-b53d-3adc4b2da19e`（`helm.easymeta.au` / `la.atmy.work` SQLite 复盘）显示 `upstream_request_json.system` 被膨胀到 **81** 个 block：Claude Code sentinel `You are Claude Code, Anthropic's official CLI for Claude.` 出现 **2** 次（位置 1,2），`The task tools haven't been used recently...` 出现 **44** 次，`The user sent a new message while you were working:` 出现 **3** 次。该请求 `passthrough_used=0`，disable reason 是 `provider_requires_compatibility_rewrite`，所以问题发生在**互译/compat rewrite 路径**，不是原生直通。
@@ -24,19 +32,13 @@
 - **取舍/坑/TODO**：① 对**带 MCP 的 CC 流量直通保真丢失**（这些请求几乎每条都带 inline system）——但它们当前本就 400→回退，折叠路恰是带正确 Claude-Code 身份头/spoof/相干 billing 的原始 OAuth 路，是**修复**不是退化。② 错误文案「or end the array」具误导性：末位 system（`[user, system]`）按字面应合法，但订阅端实测仍拒——故折叠是稳妥解，不去赌 `mid-conversation-system-2026-04-07` beta（helm 全仓零感知该 beta；即便 merge 透传了客户端 beta，订阅端仍拒）。若日后确认订阅端支持该 beta，可改为「保直通+确保该 beta 上送」。③ 检查刻意宽（任何 system/developer in messages[] 都关直通，含首位 system，Anthropic 同样拒 messages[0] system）——折叠恒合法，宽即安全。
 - **验证**：TDD 红→绿（先临时回退 wiring 证明直通确会对该 body 触发=复现 bug，再恢复）。`protocol.test` **+7**（helper 各分支）、`execute.test` **+1**（inline system → `passthrough_used:false`/reason `provider_requires_compatibility_rewrite`/走 `chatCompletion` 不走 `nativePassthrough`）；focused 4 文件 **231** 绿，`pnpm typecheck`（shared/core/gateway）0、`biome` 0。worktree 分支 `worktree-fix-midconv-system-ordering`，**仅改本地仓库，未发版/未部署**。
 
-## 2026-06-16 · classifier 中英文关键词对等 + 修复短消息捷径的 CJK 盲区（docs/03；原则 2/4）
-
-- **背景**：用户审查 `classifier.yaml` 发现部分维度只有英文、缺中文。逐 key 审计后定位到**真正的问题在代码不在配置**：短消息捷径（`overrides.ts isShortAndSimple → containsClassifierSignal`）只检查英文 `analysis_kw/security_kw/diagnostic_short_kw`，且 `overrides.ts` 自带的 `keywordMatcher` **没有 CJK 豁免**（与 `dimensions.ts` 的版本漂移）。后果：一条**短中文**分析/安全请求（"分析这个系统的根因"）被强钉 `simple`→economy，**即使开了 eval 也救不回**（set override 在 Layer-1 即决、不进 eval）。
-- **决定（用户选「配置+代码完整修复」而非仅补关键词）**：① 把 CJK-aware `keywordMatcher` 上提到 `signals.ts`（既有「共享 detector 防止两份正则漂移」之处），`dimensions.ts`/`overrides.ts` **同源导入**，删掉 overrides 那份 CJK-broken 副本（根因就是这次漂移）；② `containsClassifierSignal` 同时检查 `*_intl_kw`（analysis/security/diagnostic）；③ `classifier.yaml` 补 4 个缺失 intl 维度。
-- **改动（config）**：新增 `diagnostic_short_intl_kw`（**正**权重 3.60，镜像英文，同时给语言守卫正向 grip）、`translation_intl_kw`/`lookup_intl_kw`/`chitchat_intl_kw`（负权重镜像英文）；`exact_confirmation_tokens` 补简体确认词（对/嗯/行/好/没问题/收到/明白/知道了）。全简体（`engine.test` 钉死 intl 种子无繁体）。
-- **取舍/坑/TODO**：① **负向 intl 维度不抑制语言守卫**（`engine.ts languageGuardTrips` 只认正向 grip），且短中文早被 `short_message`(≤50 字符)钉 simple → 负向 intl 维度主要对「带正向命中的中等长度中文」起 grip-down 作用，价值有限但补齐对等与可解释性。② **礼貌前缀（你好/您好/请问/谢谢）刻意排除出负向维度**——中文里它们常作真实任务开头，惩罚会误降真实编码/分析请求（已加「你好+复杂分析→premium」golden 守卫证明不误路）。③ web 仍只有 `web_intl_kw` 无英文 `web_kw`（英文 web 走 `task_keywords`，刻意保留不对称）。④ matcher 上提对**英文行为零影响**（Latin 边界逻辑不变）——38 条英文 golden 全绿可证。
-- **验证**：TDD 红→绿。`overrides.test` **+4**（短中文 analysis/security 不再钉 simple、CJK 中段匹配、纯问候仍 simple，先红后绿）；`golden-routing` **+7** 中文行（问候/查词/翻译/简单编码→economy；短分析/安全→premium；礼貌前缀+复杂→premium）。classifier+samples 全量 **254** 绿，`@helm/core typecheck` 0、biome lint 0。注：harness 报的 `token-manager.test.ts` 诊断是切分支后的**陈旧 LSP 噪声**（实际 tsc 绿，见 [[workflow-stale-diagnostics]]）。worktree 分支 `tz-aggregation-review`，**仅改本地仓库，未发版/未部署**（线上 classifier 已在 0.14.0 部署时恢复为 repo 完整版+`eval.enabled:true`，此次新增维度待 Lukin 决定再上线）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-16 · classifier 中英文关键词对等 + 修复短消息捷径的 CJK 盲区（docs/03；原则 2/4）：根因是 `overrides.ts` 短消息捷径只看英文 signals 且自带 CJK-broken matcher，短中文 analysis/security 被钉 `simple`→economy；修为 `signals.ts` 共享 CJK-aware `keywordMatcher`，`containsClassifierSignal` 纳入 `*_intl_kw`，补 diagnostic/translation/lookup/chitchat intl 配置与中文确认词。TDD 覆盖短中文不降级、纯问候仍 simple、golden routing 中文样本；focused tests/typecheck/biome 绿。
 
 ### 2026-06-16 · 数据汇总按客户端时区分桶（修复「8 点边界」）（docs/02/04/10；原则 1/2/3）：仪表盘日/今日数据 8 点断层根因是 stats/OAuth usage 按 UTC 分桶；改为浏览器传 `tzOffsetMinutes`，SQL 用 shift-floor-unshift 统一 sqlite/pg，本地日窗口查询 OAuth 小时桶。TDD 覆盖 shared schema、store contract、sqlite/pg oauth usage、routes/admin；build/typecheck/lint/全量测试绿。
 
