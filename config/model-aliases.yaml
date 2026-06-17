@@ -22,8 +22,8 @@
 # the gateway refuses to boot. This file is OPTIONAL — delete it for no rewrite.
 #
 # NOTE: only BARE vendor ids are matched here. Internal provider aliases are
-# `provider/model` (e.g. `zenmux/claude-opus-4.8`), which never start with
-# `claude`/`gpt`, so an allow_custom_model key can still address them explicitly.
+# `provider/model` (e.g. `zenmux-anthropic/claude-opus-4.8`), which never start
+# with `claude`/`gpt`, so an allow_custom_model key can still address them directly.
 
 # ── Anthropic / Claude Code ──────────────────────────────────────────────────
 # Claude Code sends two classes: the main model and a small/fast background model

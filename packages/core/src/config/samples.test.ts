@@ -106,12 +106,13 @@ describe("checked-in config samples", () => {
     const aliases = cfg.model_aliases;
     if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
     if (aliases === undefined) throw new Error("config/model-aliases.yaml must load");
-    // Vendor-family lanes lead with the static ZenMux Gemini keys (the only Gemini
-    // upstream wired): pro -> gemini-3.1-pro (latest Pro ZenMux serves), flash ->
-    // gemini-3.5-flash (latest GA Flash).
-    expect(lanes["gemini-pro"]?.primary).toBe("zenmux/gemini-3.1-pro");
+    // Vendor-family lanes LEAD with the NATIVE Gemini wire (`zenmux-vertex/*`,
+    // type: gemini) so a Gemini-CLI request passes through verbatim (issue #217).
+    // The OpenAI-compat `zenmux/gemini-*` aliases were removed as redundant (same
+    // upstream), so the lane degrades straight to the generic quality lane.
+    expect(lanes["gemini-pro"]?.primary).toBe("zenmux-vertex/gemini-3.1-pro");
     expect(lanes["gemini-pro"]?.fallback).toEqual(["premium"]);
-    expect(lanes["gemini-flash"]?.primary).toBe("zenmux/gemini-3.5-flash");
+    expect(lanes["gemini-flash"]?.primary).toBe("zenmux-vertex/gemini-3.5-flash");
     expect(lanes["gemini-flash"]?.fallback).toEqual(["balanced"]);
     // Longest-literal wins: `*pro*` / `*flash*` beat the `gemini-*` catch-all, and
     // the middle `*` absorbs the version + any -preview/-latest suffix.

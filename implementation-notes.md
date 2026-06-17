@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-17 · Gemini 跨协议 response_format 修复 + ZenMux 原生直通接入（issue #217；原则 1/3/6/8）
+
+- **背景（线上事故）**：`helm_live_KOGN` 的 Gemini CLI 结构化输出请求（`responseMimeType:application/json` + `responseJsonSchema`）从 12:15 起全部 `all_providers_failed`。根因两层：① **transformer bug**——`gemini-transformer.ts` 把 Gemini `responseJsonSchema` 映射成 IR `response_format` 时漏了 `{name,schema}` 包裹（直接 `json_schema: <裸schema>`）；IR 是 OpenAI 形状，落到 gemini-flash lane 的 OpenAI 兼容候选时被 helm 自己的 fail-closed `OpenAIResponseFormatSchema` 拒（`json_schema.name expected string`），每候选 0ms 本地抛。② **放大器**——该请求构造级校验错误被当 provider 故障打开熔断器，后续 `circuit_open` 级联。测试 `gemini-transformer.test.ts:1680` 当初把错误形状当预期固化，CI 漏过。
+- **为什么不是直通**：用户预期 Gemini CLI 走原生直通，但 box `gemini-flash` 主候选是 `zenmux/gemini-3.5-flash`(type:openai，OpenAI 兼容卖 Gemini 模型)，`target=openai_chat≠源 gemini` → `protocol_mismatch` → 被迫翻译。box 原本无任何 `type:gemini` provider、无 Google key。
+- **修复**：① **代码**（TDD，对照 litellm `base_utils.py`）transformer 改产 `{type:json_schema,json_schema:{name:"response",schema:responseSchema}}`；修 2 个固化 bug 的测试 + 新增跨协议回归（gemini→IR→`openaiTransformer.transformRequestOut` 不抛，复现线上错）。② **配置原生直通**：ZenMux 有专有原生端点 Vertex(`/api/vertex-ai/v1/publishers/google`，gemini wire，`x-goog-api-key`) + Anthropic(`/api/anthropic`+`/v1/messages`，`x-api-key`)，均复用现有 `ZENMUX_API_KEY`（实测 200）。新增 `zenmux-vertex`(type:gemini)+`zenmux-anthropic`(type:anthropic)；helm `endpoint()` 拼 `{base}/models/{model}:{op}`，故 vertex base_url 钉到 `/publishers/google` 正好出 Vertex 路径，**零代码**。gemini-flash/pro 主候选改原生、zenmux 兼容当首兜底；capabilities（`supportsJsonMode:true` 是命门，缺则 `no_json_support` 跳过）+ pricing 同步。**删除 `zenmux/claude-*`**，claude lane 全改 `zenmux-anthropic/claude-*` 原生兜底。
+- **取舍/坑**：① 反向 `responseFormatToGenerationConfig` 早已容错（`.schema` 在则取、否则裸 schema），故**同协议 Gemini→Gemini 不暴露 bug，唯跨协议→OpenAI 才炸**。② 请求构造级校验错误打熔断器是独立缺陷（违 fail-open），**未修**——本次靠修 transformer 让请求不再失败规避；TODO 单独 PR 把 ZodError 归 `invalid_request` 不 recordFailure。③ flash-lite/haiku 无 zenmux/* 同胞价，按同胞估值占位（cost fail-open），TODO 核对 ZenMux 价目。
+- **部署验证**：box 这 4 配置文件与 repo HEAD **逐字相同**（无 box 定制），故直接应用 repo 改动 + 5 文件 `.bak` 备份。安全流程：一次性 canary 容器（临时端口/数据目录，同镜像同 .env）loadConfig 起 → `/healthz` 200 → 才 `cp 进 live + docker compose restart` → live `/healthz` 200 → 临时 admin key 发真实 Gemini 结构化请求 → **`passthrough_used=true`、`zenmux-vertex/gemini-3.5-flash`、ok**（线上证据 req `c96083e1`）→ 删 key/canary。repo 改动走分支 `fix/gemini-cross-protocol-response-format` + PR；box 已生效。
+
+---
+
 ## 2026-06-17 · Codex「重置限额」额度消费（reset usage limit；docs/06；原则 1/3/6/7）
 
 - **背景**：OpenAI 近期给 Codex 加了「rate-limit reset credit」——账号持有若干额度，手动消费一次即可立即恢复速率限制窗口（sub2api `/Users/lukin/Projects/llm-router-packages/sub2api` 已实现为 admin 动作）。目标是在 Helm 的 Subscription Providers 页对 `openai-codex` OAuth 账号提供同样的「Reset limit」操作。

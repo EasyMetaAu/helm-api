@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { IRRequest, IRResponse } from "../ir.js";
+import { openaiTransformer } from "../openai.js";
+import type { NativeRequest } from "../transformer.js";
 import {
   collectSystemText,
   GEMINI_API_KEY_HEADER,
@@ -1686,9 +1688,16 @@ describe("Gemini transformRequestOut — tools + response_format", () => {
       },
     };
     const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    // The IR is OpenAI-shaped, so json_schema MUST carry { name, schema } (issue
+    // #217): Gemini's schema is anonymous, so a synthetic `name` is supplied and the
+    // schema is nested under `.schema` — the shape the OpenAI response_format
+    // contract (and every OpenAI-compatible upstream) requires.
     expect(ir.response_format).toEqual({
       type: "json_schema",
-      json_schema: { type: "object", properties: { n: { type: "number" } } },
+      json_schema: {
+        name: "response",
+        schema: { type: "object", properties: { n: { type: "number" } } },
+      },
     });
   });
 
@@ -1706,8 +1715,42 @@ describe("Gemini transformRequestOut — tools + response_format", () => {
     const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
     expect(ir.response_format).toEqual({
       type: "json_schema",
-      json_schema: { type: "object", properties: { ok: { type: "boolean" } } },
+      json_schema: {
+        name: "response",
+        schema: { type: "object", properties: { ok: { type: "boolean" } } },
+      },
     });
+  });
+
+  it("cross-protocol regression (issue #217): a Gemini responseJsonSchema request yields an IR response_format that PASSES the OpenAI response_format contract", () => {
+    // Reproduces the la.atmy.work outage: a Gemini-CLI structured-output request
+    // routed to the gemini-flash lane's OpenAI-compatible fallback. The IR is
+    // OpenAI-shaped and fail-closed validated by the OpenAI transformer before the
+    // upstream call; pre-fix the json_schema lacked name/schema, so EVERY candidate
+    // threw `response_format.json_schema.name expected string` and the breaker
+    // cascaded to all_providers_failed.
+    const native = {
+      contents: [{ role: "user", parts: [{ text: "score this" }] }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseJsonSchema: {
+          type: "OBJECT",
+          properties: {
+            complexity_score: { type: "INTEGER" },
+            complexity_reasoning: { type: "STRING" },
+          },
+          required: ["complexity_score", "complexity_reasoning"],
+        },
+      },
+    } as unknown as GeminiGenerateContentRequest;
+    const ir = geminiTransformer.transformRequestOut(native) as IRRequest;
+    expect(() =>
+      openaiTransformer.transformRequestOut({
+        model: "gpt-x",
+        messages: [{ role: "user", content: "score this" }],
+        response_format: ir.response_format,
+      } as unknown as NativeRequest),
+    ).not.toThrow();
   });
 
   it("maps responseMimeType application/json with NO schema to a bare json_object", () => {

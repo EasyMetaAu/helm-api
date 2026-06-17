@@ -99,25 +99,8 @@ openrouter/deepseek-v4-flash:
   supportsStreaming: true
   maxContextTokens: 1048576
   maxOutputTokens: 131072
-zenmux/claude-opus-4.8:
-  supportsTools: true
-  supportsJsonMode: true
-  supportsVision: true
-  supportsStreaming: true
-  # Claude accepts PDF/text documents as input but not audio/video (P7 modality
-  # routing). A document-bearing request only routes here when "document" is listed.
-  modalities: [document]
-  maxContextTokens: 1000000
-  maxOutputTokens: 128000
-zenmux/claude-sonnet-4.6:
-  supportsTools: true
-  supportsJsonMode: true
-  supportsVision: true
-  supportsStreaming: true
-  # Same document-input story as opus-4.8 (PDF/text, no audio/video).
-  modalities: [document]
-  maxContextTokens: 1000000
-  maxOutputTokens: 128000
+# Claude capabilities now live under the native `zenmux-anthropic/claude-*` aliases
+# below (issue #217); the OpenAI-compat `zenmux/claude-*` entries were removed.
 zenmux/gpt-5.5:
   supportsTools: true
   supportsJsonMode: true
@@ -127,26 +110,62 @@ zenmux/gpt-5.5:
   modalities: [document]
   maxContextTokens: 1050000
   maxOutputTokens: 128000
-zenmux/gemini-3.5-flash:
+# NATIVE-protocol passthrough aliases (issue #217). Gemini/Claude are served via
+# ZenMux's native Gemini/Anthropic endpoints (the OpenAI-compat `zenmux/gemini-*` /
+# `zenmux/claude-*` aliases were removed). supportsJsonMode is load-bearing here: a
+# missing entry defaults to false, and a strict-JSON request would skip the
+# candidate (the issue-#217 failure mode).
+zenmux-vertex/gemini-3.5-flash:
   supportsTools: true
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
   supportsCachedContent: true
-  # Gemini is fully multimodal on input: audio, video, and documents (P7).
   modalities: [audio, video, document]
   maxContextTokens: 1048576
   maxOutputTokens: 65536
-zenmux/gemini-3.1-pro:
+zenmux-vertex/gemini-3.1-flash-lite:
   supportsTools: true
   supportsJsonMode: true
   supportsVision: true
   supportsStreaming: true
   supportsCachedContent: true
-  # Same fully-multimodal input as 3.5-flash (audio, video, documents; P7).
   modalities: [audio, video, document]
   maxContextTokens: 1048576
   maxOutputTokens: 65536
+zenmux-vertex/gemini-3.1-pro:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  supportsCachedContent: true
+  modalities: [audio, video, document]
+  maxContextTokens: 1048576
+  maxOutputTokens: 65536
+zenmux-anthropic/claude-opus-4.8:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
+zenmux-anthropic/claude-sonnet-4.6:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
+zenmux-anthropic/claude-haiku-4.5:
+  supportsTools: true
+  supportsJsonMode: true
+  supportsVision: true
+  supportsStreaming: true
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
 # */auto aggregators: JSON-INCAPABLE on purpose — the capability filter prunes
 # them for strict-JSON requests so a json lane lands on a deterministic model.
 zenmux/auto:

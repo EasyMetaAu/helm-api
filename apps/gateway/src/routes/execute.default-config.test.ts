@@ -173,7 +173,9 @@ describe("default config activates capability filter + cost (alias-namespace ali
     expect(catalog.get("deepseek/deepseek-v4-flash")?.capabilities.supportsJsonMode).toBe(true);
     expect(catalog.get("zenmux/auto")?.capabilities.supportsJsonMode).toBe(false);
     expect(catalog.get("openrouter/auto")?.capabilities.supportsJsonMode).toBe(false);
-    expect(catalog.get("zenmux/gemini-3.5-flash")?.capabilities.supportsCachedContent).toBe(true);
+    expect(catalog.get("zenmux-vertex/gemini-3.5-flash")?.capabilities.supportsCachedContent).toBe(
+      true,
+    );
     // pricing is populated (so cost can be computed, not null).
     expect(catalog.get("deepseek/deepseek-v4-flash")?.pricing.inputPerMTokUsd).toBeGreaterThan(0);
   });
