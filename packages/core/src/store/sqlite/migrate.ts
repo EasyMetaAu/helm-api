@@ -567,6 +567,17 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE telemetry ADD COLUMN generation_ms INTEGER;
     `,
   },
+  {
+    // OAuth account auto-park: a per-account cooldown the scheduler honors. When an
+    // account hits its usage/rate limit (saturated quota window or a 429) it is
+    // parked out of the pool until this epoch-ms timestamp, then auto-recovers. The
+    // "Reset usage" admin action sets it back to NULL. Additive + nullable (NULL =
+    // not limited = every pre-feature row); forward-only.
+    version: 26,
+    sql: `
+      ALTER TABLE oauth_quota ADD COLUMN usage_limited_until_ms INTEGER;
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

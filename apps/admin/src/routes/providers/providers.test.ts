@@ -5,6 +5,7 @@ import type { OAuthProviderStatus, OAuthQuotaSnapshot, OAuthUsageRow } from '$li
 import ProvidersPage from './+page.svelte';
 
 const logoutOAuth = vi.fn();
+const resetUsageLimit = vi.fn();
 const setAccountSchedule = vi.fn();
 const streamAccountTest = vi.fn();
 vi.mock('$lib/api/oauth.js', () => ({
@@ -14,6 +15,7 @@ vi.mock('$lib/api/oauth.js', () => ({
   getAccountSchedule: vi.fn(),
   logoutOAuth: (...args: unknown[]) => logoutOAuth(...args),
   pollDeviceCode: vi.fn(),
+  resetUsageLimit: (...args: unknown[]) => resetUsageLimit(...args),
   setAccountModels: vi.fn(),
   setAccountProxy: vi.fn(),
   setAccountSchedule: (...args: unknown[]) => setAccountSchedule(...args),
@@ -67,6 +69,7 @@ const quota: OAuthQuotaSnapshot[] = [
     ],
     capturedAt: Date.now(),
     source: 'anthropic',
+    usageLimitedUntilMs: null,
   },
 ];
 

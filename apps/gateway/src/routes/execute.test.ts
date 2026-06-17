@@ -3178,3 +3178,91 @@ describe("createExecute — OAuth subscription alias guard (fail-closed)", () =>
     ).toHaveBeenCalledTimes(1);
   });
 });
+
+// Auto-park hook (OAuth usage limit): a genuine (non-`:free`) 429 on a SUBSCRIPTION
+// alias signals onOAuthSubscription429 so the gateway parks the served account. A
+// non-429 failure, a `:free` 429, and a non-OAuth alias must NOT fire it.
+describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
+  const rejects = (err: unknown) =>
+    ({
+      chatCompletion: vi.fn().mockRejectedValue(err),
+      chatCompletionStream: vi.fn(),
+    }) as unknown as ProviderClient;
+  const e429 = () => new UpstreamError("upstream_error", "rate limited", null, 429);
+
+  it("fires once with the alias when a subscription attempt hits a genuine 429", async () => {
+    const onOAuthSubscription429 = vi.fn();
+    const execute = createExecute({
+      defaultProvider: rejects(e429()),
+      providers: new Map([["openai-codex", rejects(e429())]]),
+      knownOAuthPrefixes: new Set(["openai-codex"]),
+      oauthAliases: () => new Set(["openai-codex/gpt-5"]),
+      registry: registry({}),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      onOAuthSubscription429,
+    });
+    const out = await execute(plan(["openai-codex/gpt-5"]), req());
+    expect(out.final.status).toBe("error"); // chain exhausted (single parked candidate)
+    expect(onOAuthSubscription429).toHaveBeenCalledTimes(1);
+    expect(onOAuthSubscription429).toHaveBeenCalledWith("openai-codex/gpt-5");
+  });
+
+  it("does NOT fire on a non-429 failure", async () => {
+    const onOAuthSubscription429 = vi.fn();
+    const execute = createExecute({
+      defaultProvider: rejects(new UpstreamError("upstream_error", "boom", null, 500)),
+      providers: new Map([
+        ["openai-codex", rejects(new UpstreamError("upstream_error", "boom", null, 500))],
+      ]),
+      knownOAuthPrefixes: new Set(["openai-codex"]),
+      oauthAliases: () => new Set(["openai-codex/gpt-5"]),
+      registry: registry({}),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      onOAuthSubscription429,
+    });
+    await execute(plan(["openai-codex/gpt-5"]), req());
+    expect(onOAuthSubscription429).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire on a `:free` 429 (free-tier throttle, not an account limit)", async () => {
+    const onOAuthSubscription429 = vi.fn();
+    const execute = createExecute({
+      defaultProvider: rejects(e429()),
+      providers: new Map([["mock", rejects(e429())]]),
+      knownOAuthPrefixes: new Set(["openai-codex"]),
+      oauthAliases: () => new Set(),
+      registry: registry({ "x/m:free": "m" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      onOAuthSubscription429,
+    });
+    await execute(plan(["x/m:free"]), req());
+    expect(onOAuthSubscription429).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire for a non-subscription alias that 429s", async () => {
+    const onOAuthSubscription429 = vi.fn();
+    const execute = createExecute({
+      defaultProvider: rejects(e429()),
+      providers: new Map([["mock", rejects(e429())]]),
+      knownOAuthPrefixes: new Set(["openai-codex"]), // "deepseek" is not a subscription prefix
+      oauthAliases: () => new Set(),
+      registry: registry({ "deepseek/chat": "chat" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      onOAuthSubscription429,
+    });
+    await execute(plan(["deepseek/chat"]), req());
+    expect(onOAuthSubscription429).not.toHaveBeenCalled();
+  });
+});

@@ -25,6 +25,7 @@ import {
   createSignalCollector,
   createStore,
   createTokenManager,
+  DEFAULT_429_COOLDOWN_MS,
   DEFAULT_LANES,
   type DecayDeps,
   discoverOAuthModels,
@@ -49,6 +50,7 @@ import {
   makeProxyFetch,
   maybeEnqueueDecayJobs,
   maybeEnqueueIdleObserverJobs,
+  type OAuthPoolClient,
   type OAuthPoolMember,
   type OAuthTokenStore,
   type ObserveDeps,
@@ -78,6 +80,7 @@ import {
   startSignalScheduler,
   toRegistryProviders,
   validateModelAliasTargets,
+  windowsToUsageLimit,
 } from "@helm/core";
 import type {
   CatalogEntry,
@@ -129,6 +132,7 @@ import {
   markServingAccount,
   type ServingAccount,
   servedByAccount,
+  servingAccountStore,
   withServingAccountCapture,
 } from "./runtime/serving-account.js";
 import { createWriteQueue } from "./runtime/write-queue.js";
@@ -310,7 +314,10 @@ const ROUTABLE_OAUTH_PROTOCOLS = new Map(
 // returns ONE pool client that round-robins across the accounts on every call.
 export interface SynthesizedOAuth {
   providers: ProviderConfigShared[];
-  poolClients: Map<string, ProviderClient>;
+  // OAuthPoolClient (a ProviderClient + the `setUsageLimit` mutator) so the gateway
+  // can park / un-park a single account in place on a usage-limit signal, without a
+  // full pool rebuild.
+  poolClients: Map<string, OAuthPoolClient>;
 }
 
 // Build a FRESH, standalone executor client for ONE oauth account: its token manager
@@ -392,6 +399,11 @@ export async function synthesizeOAuthProviders(
     gate: KeyedSerialGate;
     getConfig: () => { enabled: boolean; delayMs: number; timeoutMs: number };
   },
+  // Persisted auto-park cooldowns keyed `${providerId} ${account}` (from oauth_quota).
+  // Each freshly built member is seeded with its cooldown so a parked account stays
+  // parked across a restart / pool rebuild until its reset time. Optional — absent in
+  // unit tests and when no quota store is wired (every member starts un-parked).
+  usageLimitSeeds?: ReadonlyMap<string, number | null>,
 ): Promise<SynthesizedOAuth> {
   if (!oauthCtx) return { providers: [], poolClients: new Map() };
   const declared = new Set<string>(
@@ -410,7 +422,7 @@ export async function synthesizeOAuthProviders(
   // Loaded once (fail-open to {}).
   const accountSettings = await loadAccountSettings(config, oauthCtx.encKey);
   const providers: ProviderConfigShared[] = [];
-  const poolClients = new Map<string, ProviderClient>();
+  const poolClients = new Map<string, OAuthPoolClient>();
 
   for (const [providerId, accounts] of accountsByProvider) {
     const spec = ROUTABLE_OAUTH[providerId];
@@ -501,6 +513,10 @@ export async function synthesizeOAuthProviders(
         priority: s.priority ?? 50,
         schedulable: true,
         client: serialized,
+        // Seed the auto-park cooldown from the persisted snapshot (survives restart /
+        // rebuild). A past timestamp is harmless — select() treats now>=until as
+        // eligible — so stale seeds self-clear.
+        usageLimitedUntilMs: usageLimitSeeds?.get(`${providerId} ${account}`) ?? null,
       });
     }
 
@@ -1010,6 +1026,63 @@ export async function buildServer(
   // wired with the same base/timeout + its own proxy. The pool clients override any
   // single-name client for the same providerId in providerClients below.
   const synthBaseUrl = baseUrlOverride ?? fallbackBaseUrl;
+
+  // ── OAuth account auto-park (usage limit) ──────────────────────────────────────
+  // Live handle to the CURRENT OAuth pool clients (empty until synthesized below;
+  // reassigned on every rebuild). The park/reset closures read it so a usage-limit
+  // flip targets the live members IN PLACE — no pool rebuild on a single 429.
+  let oauthPoolClients: Map<string, OAuthPoolClient> = new Map();
+
+  // Read the persisted cooldowns (oauth_quota) keyed `${providerId} ${account}` so a
+  // freshly (re)synthesized member is seeded with its cooldown (survives restart /
+  // rebuild). Fail-open to empty — a read error just means every member starts un-parked.
+  const readUsageLimitSeeds = async (): Promise<Map<string, number | null>> => {
+    const seeds = new Map<string, number | null>();
+    try {
+      for (const snap of await store.oauthQuota.getAll()) {
+        seeds.set(`${snap.providerId} ${snap.account}`, snap.usageLimitedUntilMs ?? null);
+      }
+    } catch {
+      /* fail-open: no seeds */
+    }
+    return seeds;
+  };
+
+  // Apply (untilMs) / clear (null) an account's cooldown to BOTH the live pool member
+  // (in place) and the persisted snapshot. Awaitable for the admin reset path.
+  const applyUsageLimit = async (
+    providerId: string,
+    account: string,
+    untilMs: number | null,
+  ): Promise<void> => {
+    oauthPoolClients.get(providerId)?.setUsageLimit(account, untilMs);
+    await store.oauthQuota.setUsageLimit(providerId, account, untilMs);
+  };
+
+  // Fire-and-forget park (detection hot path): never blocks / fails a served request.
+  const parkAccountOnLimit = (providerId: string, account: string, untilMs: number): void => {
+    void applyUsageLimit(providerId, account, untilMs).catch((e) =>
+      logger.log("error", "oauth.usage_limit.park_failed", {
+        provider_id: providerId,
+        line: e instanceof Error ? e.message : String(e),
+      }),
+    );
+  };
+
+  // Executor hook: a genuine 429 on a subscription alias means the SERVED account hit
+  // its limit. Resolve the provider from the alias prefix + the served account from the
+  // ALS holder (set by the pool's onSelect for THIS attempt), then park it for a short
+  // re-probe window. The precise long cooldown for Codex/Anthropic arrives via the
+  // quota-window capture path; this is the backstop (and the ONLY signal for Copilot).
+  const onOAuthSubscription429 = (alias: string): void => {
+    const acct = servingAccountStore.getStore()?.selected;
+    if (!acct) return;
+    const slash = alias.indexOf("/");
+    const providerId = slash > 0 ? alias.slice(0, slash) : alias;
+    if (acct.providerId !== providerId) return; // stale holder guard (different provider)
+    parkAccountOnLimit(providerId, acct.account, Date.now() + DEFAULT_429_COOLDOWN_MS);
+  };
+
   // Codex quota-window scrape (providers page Tier 3): parse the `x-codex-*` headers
   // off each Codex reply and snapshot them per account. FAIL-OPEN — a parse/store
   // failure is swallowed (an observability scrape never breaks a served request).
@@ -1020,6 +1093,10 @@ export async function buildServer(
     void store.oauthQuota
       .upsert({ providerId, account, windows, capturedAt: nowMs, source: "codex-headers" })
       .catch(() => logger.log("error", "oauth.quota.capture_failed", { provider_id: providerId }));
+    // Auto-park when a window is saturated (≥100% with a future reset): the precise
+    // long cooldown the 429 backstop can't know. Fire-and-forget (fail-open).
+    const until = windowsToUsageLimit(windows, nowMs);
+    if (until !== null) parkAccountOnLimit(providerId, account, until);
   };
   // Per-account user-message serial queue (issue #93, feature B). ONE long-lived
   // gate for the whole process: it must survive pool rebuilds so queued requests
@@ -1044,6 +1121,7 @@ export async function buildServer(
     (lvl, msg, f) => logger.log(lvl, msg, f),
     captureCodexQuota,
     userMessageQueue,
+    await readUsageLimitSeeds(),
   );
   const routableProviders: ProviderConfigShared[] = [
     ...config.providers,
@@ -1092,7 +1170,9 @@ export async function buildServer(
   // set + the live pool.
   const aliasSetOf = (synth: SynthesizedOAuth): Set<string> =>
     new Set(synth.providers.flatMap((p) => p.models.map((m) => m.alias)));
-  let oauthPoolClients = synthesizedOAuth.poolClients;
+  // Publish the synthesized pool into the live handle declared above (the park/reset
+  // closures read it). Reassigned, not redeclared — same binding the rebuild swaps.
+  oauthPoolClients = synthesizedOAuth.poolClients;
   let oauthAliasSet = aliasSetOf(synthesizedOAuth);
   let providerClients = new Map<string, ProviderClient>([
     ...configuredClients,
@@ -1118,6 +1198,7 @@ export async function buildServer(
           (lvl, msg, f) => logger.log(lvl, msg, f),
           captureCodexQuota,
           userMessageQueue, // SAME gate instance — queue state survives rebuilds
+          await readUsageLimitSeeds(), // re-seed cooldowns so a rebuild never un-parks
         );
         oauthPoolClients = next.poolClients;
         oauthAliasSet = aliasSetOf(next);
@@ -1445,6 +1526,9 @@ export async function buildServer(
             // route is the SAME `route` closure as chat.ts, so this one wiring edit
             // covers BOTH the OpenAI chat and Anthropic /v1/messages surfaces.
             nativeProtocolPassthroughEnabled: () => settings.native_protocol_passthrough,
+            // Auto-park: a genuine 429 on a subscription alias parks the served account
+            // so the pool routes around it (account read from the serving-account ALS).
+            onOAuthSubscription429,
           }),
           now: () => new Date(),
           log: (record) => logger.log("info", "route.decision", { trace_id: record.request_id }),
@@ -1680,6 +1764,10 @@ export async function buildServer(
       // priority / schedulable / curation / connect / disconnect) so it applies on
       // the next request without a restart.
       onOAuthMutation: rebuildOAuthPool,
+      // Auto-park control: the "Reset usage" route clears a cooldown (null) and the
+      // /quota PULL parks a saturated account — both flip the live member in place +
+      // persist, no rebuild. Never touches schedulable.
+      applyUsageLimit,
     });
 
     // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so

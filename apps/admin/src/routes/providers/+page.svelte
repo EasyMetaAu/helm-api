@@ -3,6 +3,7 @@
   import { invalidateAll } from '$app/navigation';
   import {
     logoutOAuth,
+    resetUsageLimit,
     setAccountSchedule,
     type OAuthAccount,
     type OAuthProviderStatus,
@@ -52,6 +53,8 @@
   // Accounts whose inline schedule edit is in flight (keyed provider/account) — used
   // to disable the control while saving without blocking the rest of the table.
   let savingSchedule = $state<Record<string, boolean>>({});
+  // Accounts whose "Reset usage" click is in flight (keyed provider/account).
+  let resetting = $state<Record<string, boolean>>({});
 
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
 
@@ -150,6 +153,22 @@
     return $t('resets in {m}m', { m: p.m });
   }
 
+  // Is this account auto-parked by a usage limit right now? (cooldown in the future)
+  const isUsageLimited = (q: OAuthQuotaSnapshot | undefined): boolean =>
+    q?.usageLimitedUntilMs != null && q.usageLimitedUntilMs > Date.now();
+
+  // Countdown to auto-recovery for the rate-limited pill — same `durationParts`
+  // coarsening as resetIn so a long cooldown reads "auto-recovers in 4d 16h".
+  function autoRecoverIn(ms: number | null): string {
+    if (ms == null) return '';
+    const left = ms - Date.now();
+    if (left <= 0) return '';
+    const p = durationParts(left);
+    if (p.unit === 'dh') return $t('auto-recovers in {d}d {h}h', { d: p.d, h: p.h });
+    if (p.unit === 'hm') return $t('auto-recovers in {h}h {m}m', { h: p.h, m: p.m });
+    return $t('auto-recovers in {m}m', { m: p.m });
+  }
+
   function onConnected(): void {
     showConnect = false;
     void invalidateAll();
@@ -216,6 +235,23 @@
       error = e instanceof Error ? e.message : $t('Failed to update scheduling');
     } finally {
       savingSchedule = { ...savingSchedule, [k]: false };
+    }
+  }
+
+  // "Reset usage": clear the auto-park cooldown so the account rejoins the pool on the
+  // next request. Cooldown-only — the operator's schedulable park is untouched. On
+  // success invalidateAll re-reads the (now-cleared) snapshot so the pill disappears.
+  async function resetUsage(providerId: string, account: string): Promise<void> {
+    const k = keyOf(providerId, account);
+    resetting = { ...resetting, [k]: true };
+    error = null;
+    try {
+      await resetUsageLimit(providerId, account);
+      await invalidateAll();
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to reset usage limit');
+    } finally {
+      resetting = { ...resetting, [k]: false };
     }
   }
 
@@ -344,6 +380,16 @@
                 {/if}
                 {#if !row.account.schedulable}
                   <div class="mt-1"><span class="badge-neutral">{$t('parked')}</span></div>
+                {/if}
+                {#if isUsageLimited(quota)}
+                  <div class="mt-1">
+                    <span class="badge-error">{$t('Rate limited')}</span>
+                    {#if quota && autoRecoverIn(quota.usageLimitedUntilMs)}
+                      <div class="text-[10px] text-ink-muted">
+                        {autoRecoverIn(quota.usageLimitedUntilMs)}
+                      </div>
+                    {/if}
+                  </div>
                 {/if}
               </td>
 
@@ -476,6 +522,15 @@
                         account: row.account.account,
                       })}>{$t('Manage')}</button
                   >
+                  {#if isUsageLimited(quota)}
+                    <button
+                      type="button"
+                      class="btn-secondary"
+                      disabled={resetting[k] === true}
+                      onclick={() => resetUsage(row.provider.id, row.account.account)}
+                      >{resetting[k] === true ? $t('Resetting…') : $t('Reset usage')}</button
+                    >
+                  {/if}
                   <button
                     type="button"
                     class="btn-danger-outline col-span-2 sm:col-span-1"

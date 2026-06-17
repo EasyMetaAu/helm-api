@@ -495,6 +495,16 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS generation_ms INTEGER;
     `,
   },
+  {
+    // OAuth account auto-park (mirrors sqlite v26): a per-account cooldown the
+    // scheduler honors — an account that hits its usage/rate limit is parked out of
+    // the pool until this epoch-ms timestamp, then auto-recovers. "Reset usage" sets
+    // it back to NULL. Additive + nullable; forward-only.
+    version: 25,
+    sql: `
+      ALTER TABLE oauth_quota ADD COLUMN IF NOT EXISTS usage_limited_until_ms BIGINT;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

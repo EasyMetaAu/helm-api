@@ -131,8 +131,10 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // v23 adds request_payloads.upstream_request_json; this memory_jobs fixture
     // never creates request_payloads → pre-mark applied (out of scope).
     // v24 (telemetry.generation_ms): no telemetry table here → pre-mark applied.
+    // v25 adds oauth_quota.usage_limited_until_ms; this fixture never creates
+    // oauth_quota → pre-mark applied (out of scope).
     // biome-ignore format: keep the version ledger on one readable line
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22, 23, 24]) {
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );
@@ -226,8 +228,9 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // likewise: no oauth_usage table here, so its RENAME would fail — pre-marked.
     // v23 adds request_payloads.upstream_request_json (table absent here) → pre-mark.
     // v24 (telemetry.generation_ms): no telemetry table here → pre-mark applied.
+    // v25 adds oauth_quota.usage_limited_until_ms (oauth_quota absent here) → pre-mark.
     for (const version of [
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25,
     ]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),

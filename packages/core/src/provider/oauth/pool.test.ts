@@ -75,6 +75,104 @@ describe("createOAuthPoolClient — account selection", () => {
     await expect(pool.chatCompletion(REQ)).rejects.toThrow(/no schedulable account/);
   });
 
+  it("skips an account whose usage-limit cooldown is still in the future", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...member("limited", 1, true, calls), usageLimitedUntilMs: 5_000 },
+        member("live", 90, true, calls),
+      ],
+      now: () => 1_000,
+    });
+    await pool.chatCompletion(REQ);
+    await pool.chatCompletion(REQ);
+    // The preferred (priority 1) account is parked by its cooldown; only "live" serves.
+    expect(calls).toEqual(["live", "live"]);
+  });
+
+  it("auto-recovers an account once its cooldown passes (no manual action)", async () => {
+    const calls: string[] = [];
+    let clock = 1_000;
+    const pool = createOAuthPoolClient({
+      members: [{ ...member("a", 1, true, calls), usageLimitedUntilMs: 5_000 }],
+      now: () => clock,
+    });
+    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/no schedulable account/);
+    clock = 5_000; // reset reached → eligible again with zero intervention
+    await pool.chatCompletion(REQ);
+    expect(calls).toEqual(["a"]);
+  });
+
+  it("throws fail-closed when every account is usage-limited", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...member("a", 1, true, calls), usageLimitedUntilMs: 9_000 },
+        { ...member("b", 2, true, calls), usageLimitedUntilMs: 9_000 },
+      ],
+      now: () => 1_000,
+    });
+    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/no schedulable account/);
+  });
+
+  it("setUsageLimit parks a live member; null un-parks it (the reset path)", async () => {
+    const calls: string[] = [];
+    let clock = 1_000;
+    const pool = createOAuthPoolClient({
+      members: [member("a", 1, true, calls), member("b", 2, true, calls)],
+      now: () => clock,
+    });
+    pool.setUsageLimit("a", 5_000); // park the preferred account
+    await pool.chatCompletion(REQ); // → falls to b
+    pool.setUsageLimit("a", null); // reset usage → a eligible again
+    clock = 1_001;
+    await pool.chatCompletion(REQ); // a is preferred (priority 1)
+    expect(calls).toEqual(["b", "a"]);
+  });
+
+  it("setUsageLimit on an unknown account is a no-op", () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({ members: [member("a", 1, true, calls)] });
+    expect(() => pool.setUsageLimit("nope", 5_000)).not.toThrow();
+  });
+
+  it("does not pin a sticky session to a now-limited account", async () => {
+    const pt: string[] = [];
+    const clock = 1_000;
+    const mkPt = (account: string, priority: number): OAuthPoolMember => ({
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          return { served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          yield `data: ${account}\n\n`;
+        },
+        nativePassthrough: async (body: Record<string, unknown>) => {
+          pt.push(account);
+          return { served_by: account, body };
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [mkPt("a", 1), mkPt("b", 2)],
+      now: () => clock,
+      stickyTtlMs: 10_000,
+    });
+    const session = {
+      protocol: "openai_responses" as const,
+      body: { model: "gpt-5-codex", input: "hi" },
+      headers: { session_id: "s1" },
+      mutations: {},
+    };
+    await pool.nativePassthrough?.(session); // → a (preferred), session sticks to a
+    pool.setUsageLimit("a", 50_000); // a hits its limit mid-session
+    await pool.nativePassthrough?.(session); // sticky would pick a, but it's parked → b
+    expect(pt).toEqual(["a", "b"]);
+  });
+
   it("selects per stream call too (rotation + onSelect fire for streaming)", async () => {
     const calls: string[] = [];
     const selected: string[] = [];

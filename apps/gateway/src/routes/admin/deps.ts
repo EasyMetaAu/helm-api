@@ -299,6 +299,13 @@ export interface AdminApiDeps {
   // a false 204, honoring the Save == applied contract. Optional: absent in unit tests
   // (treated as applied).
   onOAuthMutation?: () => Promise<{ applied: boolean }>;
+  // Auto-park control (OAuth usage limit). Sets (untilMs) / clears (null) one
+  // account's usage-limit cooldown on BOTH the live pool member (in place — no
+  // rebuild) and the persisted snapshot. The reset route passes null ("Reset usage");
+  // the /quota PULL passes a saturated window's reset. Touches ONLY the cooldown,
+  // never `schedulable` (operator park stays independent). Optional — absent in unit
+  // tests / when no OAuth pool is wired; the reset route 503s, the PULL park is skipped.
+  applyUsageLimit?: (providerId: string, account: string, untilMs: number | null) => Promise<void>;
 }
 
 // Re-exported for route signatures.

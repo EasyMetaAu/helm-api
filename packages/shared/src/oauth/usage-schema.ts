@@ -50,7 +50,12 @@ export type OAuthQuotaWindow = z.infer<typeof OAuthQuotaWindowSchema>;
 // The latest snapshot for one account: its windows + when/how it was captured.
 // `source` records HOW the snapshot was obtained (anthropic = on-demand usage
 // endpoint PULL; codex-headers = response-header PUSH) so the UI can show honest
-// "as of last request" staleness.
+// "as of last request" staleness. `usageLimitedUntilMs` is the AUTO-PARK cooldown:
+// the epoch ms until which the account is removed from the scheduling pool because
+// it hit its usage/rate limit (null = not limited). It is the runtime twin of the
+// windows — the scheduler gates on it; clearing it (the "Reset usage" action) sets
+// it back to null. OPTIONAL on the wire (`.default(null)`) so legacy rows + pre-field
+// fixtures parse unchanged, exactly like `windowMinutes`.
 export const OAuthQuotaSnapshotSchema = z
   .object({
     providerId: z.string(),
@@ -58,6 +63,7 @@ export const OAuthQuotaSnapshotSchema = z
     windows: z.array(OAuthQuotaWindowSchema),
     capturedAt: z.number().int(), // epoch ms the snapshot was taken
     source: z.enum(["anthropic", "codex-headers", "codex"]),
+    usageLimitedUntilMs: z.number().int().nullable().default(null),
   })
   .strict();
 

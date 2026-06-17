@@ -108,6 +108,13 @@ export interface ExecuteAdapterDeps {
    *  This dep is OPTIONAL: when absent (a caller that never wires it) the executor treats
    *  passthrough as OFF — a defensive fallback, independent of the setting's own default. */
   nativeProtocolPassthroughEnabled?: () => boolean;
+  /** Auto-park hook (OAuth usage limit). Fired when a SUBSCRIPTION alias's attempt
+   *  fails pre-first-chunk with a genuine (non-`:free`) upstream 429 — the served
+   *  account just hit its rate/usage limit. The gateway reads WHICH account served
+   *  (serving-account ALS) and parks it briefly so the pool routes around it. Absent
+   *  → no auto-park (back-compat for tests / non-OAuth callers). The precise long
+   *  cooldown for Codex/Anthropic still arrives via the quota-window capture path. */
+  onOAuthSubscription429?: (alias: string) => void;
 }
 
 interface ResolvedAttemptTarget {
@@ -627,6 +634,15 @@ export function createExecute(deps: ExecuteAdapterDeps) {
   const knownOAuthPrefixes = deps.knownOAuthPrefixes;
   const oauthAliases = deps.oauthAliases;
   const oauthProviderProtocols = deps.oauthProviderProtocols;
+  const onOAuthSubscription429 = deps.onOAuthSubscription429;
+
+  // Is `alias` a subscription alias (`<oauthProviderId>/<model>`)? Used to scope the
+  // 429 auto-park to OAuth pool accounts (never a configured provider).
+  const isOAuthSubscriptionAlias = (alias: string): boolean => {
+    const slash = alias.indexOf("/");
+    const prefix = slash > 0 ? alias.slice(0, slash) : "";
+    return prefix.length > 0 && (knownOAuthPrefixes?.has(prefix) ?? false);
+  };
 
   // Cost of one served attempt = provider usage × catalog pricing (docs/07).
   // Keyed by the candidate ALIAS — the catalog/pricing modelKey is the routing
@@ -1013,6 +1029,13 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // (UpstreamError) lands HERE just like a chatCompletion failure — the trail
         // shows the verbatim-forward was attempted on this candidate before it failed.
         breaker.recordFailure(alias);
+        // Auto-park a subscription account that hit its rate/usage limit. A genuine
+        // (non-`:free`, handled above) 429 on an OAuth alias means the served account
+        // is throttled — signal the gateway to park it so the pool routes around it.
+        // Pure side-channel: the breaker failure + chain advance below are unchanged.
+        if (upstreamStatusOf(err) === 429 && isOAuthSubscriptionAlias(alias)) {
+          onOAuthSubscription429?.(alias);
+        }
         attempts.push({
           alias,
           skipped: false,

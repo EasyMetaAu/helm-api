@@ -14,7 +14,7 @@ type QuotaRow = typeof oauthQuota.$inferSelect;
 export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
   constructor(private readonly db: SqliteDb) {}
 
-  async upsert(snapshot: OAuthQuotaSnapshot): Promise<void> {
+  async upsert(snapshot: Omit<OAuthQuotaSnapshot, "usageLimitedUntilMs">): Promise<void> {
     const row = {
       providerId: snapshot.providerId,
       account: snapshot.account,
@@ -22,12 +22,36 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
       capturedAt: snapshot.capturedAt,
       source: snapshot.source,
     };
+    // Note: usage_limited_until_ms is intentionally absent from BOTH the insert
+    // values (defaults to NULL on a brand-new row) and the conflict SET — an
+    // observability refresh must never overwrite an active cooldown.
     this.db
       .insert(oauthQuota)
       .values(row)
       .onConflictDoUpdate({
         target: [oauthQuota.providerId, oauthQuota.account],
         set: { windows: row.windows, capturedAt: row.capturedAt, source: row.source },
+      })
+      .run();
+  }
+
+  async setUsageLimit(providerId: string, account: string, untilMs: number | null): Promise<void> {
+    // Upsert ONLY the cooldown. On a brand-new (provider, account) — a 429 that
+    // parks an account before any quota PULL — synthesize an empty snapshot so the
+    // row exists; a later upsert overwrites windows/source with the real capture.
+    this.db
+      .insert(oauthQuota)
+      .values({
+        providerId,
+        account,
+        windows: "[]",
+        capturedAt: 0,
+        source: providerId === "anthropic" ? "anthropic" : "codex-headers",
+        usageLimitedUntilMs: untilMs,
+      })
+      .onConflictDoUpdate({
+        target: [oauthQuota.providerId, oauthQuota.account],
+        set: { usageLimitedUntilMs: untilMs },
       })
       .run();
   }
@@ -65,6 +89,7 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
       windows: JSON.parse(row.windows),
       capturedAt: row.capturedAt,
       source: row.source,
+      usageLimitedUntilMs: row.usageLimitedUntilMs ?? null,
     });
   }
 }

@@ -31,6 +31,22 @@ export interface OAuthPoolMember {
   priority: number;
   schedulable: boolean;
   client: ProviderClient;
+  // Auto-park cooldown: epoch ms until which this account is removed from selection
+  // because it hit its usage/rate limit (null/undefined = eligible). Distinct from
+  // `schedulable` (the operator's manual park). MUTABLE soft state — the gateway flips
+  // it in place via `setUsageLimit` on a 429 / saturated-window signal, and re-seeds it
+  // from the persisted quota snapshot on pool (re)synthesis. The gate is re-checked
+  // against `now` on every select(), so recovery is AUTOMATIC once the timestamp passes
+  // — no timer, no sweep.
+  usageLimitedUntilMs?: number | null;
+}
+
+// The pool's ProviderClient plus an out-of-band mutator the gateway uses to park /
+// un-park a single account in O(1) — a single 429 must NOT rebuild the whole pool
+// (which re-refreshes every token). `setUsageLimit` on an unknown account is a no-op
+// (the member may have been dropped by a concurrent rebuild).
+export interface OAuthPoolClient extends ProviderClient {
+  setUsageLimit(account: string, untilMs: number | null): void;
 }
 
 export interface OAuthPoolDeps {
@@ -51,11 +67,19 @@ interface PoolEntry {
   lastUsedAt: number;
 }
 
-export function createOAuthPoolClient(deps: OAuthPoolDeps): ProviderClient {
+export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const now = deps.now ?? (() => Date.now());
   const stickyTtlMs = deps.stickyTtlMs ?? 10 * 60 * 1000;
   const entries: PoolEntry[] = deps.members.map((member) => ({ member, lastUsedAt: 0 }));
   const stickySessions = new Map<string, { account: string; expiresAt: number }>();
+
+  // An account is eligible only when the operator has not parked it (`schedulable`)
+  // AND its auto-park cooldown has elapsed. Re-evaluated on every select() against the
+  // live clock, so a cooldown un-parks itself the instant `now` passes it.
+  function usageLimited(member: OAuthPoolMember, nowMs: number): boolean {
+    const until = member.usageLimitedUntilMs;
+    return until != null && nowMs < until;
+  }
 
   function headerValue(headers: Record<string, string | string[]>, name: string): string | null {
     const lower = name.toLowerCase();
@@ -116,7 +140,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): ProviderClient {
       if (sticky !== undefined && sticky.expiresAt > nowMs) {
         const entry = entries.find(
           (candidate) =>
-            candidate.member.account === sticky.account && candidate.member.schedulable,
+            candidate.member.account === sticky.account &&
+            candidate.member.schedulable &&
+            !usageLimited(candidate.member, nowMs),
         );
         if (entry !== undefined) {
           entry.lastUsedAt = nowMs;
@@ -130,7 +156,8 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): ProviderClient {
 
     let best: PoolEntry | undefined;
     for (const e of entries) {
-      if (!e.member.schedulable) continue;
+      if (!e.member.schedulable) continue; // operator park
+      if (usageLimited(e.member, nowMs)) continue; // auto-park cooldown
       if (
         !best ||
         e.member.priority < best.member.priority ||
@@ -152,6 +179,13 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): ProviderClient {
   }
 
   return {
+    // Park / un-park ONE account's auto-park cooldown in place. The next select()
+    // observes the new value without a pool rebuild; null clears it (the manual
+    // "Reset usage" path). Unknown account = no-op.
+    setUsageLimit(account: string, untilMs: number | null): void {
+      const entry = entries.find((e) => e.member.account === account);
+      if (entry) entry.member.usageLimitedUntilMs = untilMs;
+    },
     async chatCompletion(
       req: ChatCompletionRequest,
       opts?: { signal?: AbortSignal },

@@ -17,6 +17,7 @@ const snap = (over: Partial<OAuthQuotaSnapshot> = {}): OAuthQuotaSnapshot => ({
   ],
   capturedAt: 500,
   source: "anthropic",
+  usageLimitedUntilMs: null,
   ...over,
 });
 
@@ -55,6 +56,42 @@ describe("SqliteOAuthQuotaStore", () => {
       snap({ providerId: "openai-codex", account: "b", source: "codex-headers", windows: [] }),
     );
     expect(await store.getAll()).toHaveLength(2);
+    close();
+  });
+
+  it("defaults usageLimitedUntilMs to null and round-trips a set value", async () => {
+    const { store, close } = freshStore();
+    await store.upsert(snap());
+    expect((await store.get("anthropic", "a"))?.usageLimitedUntilMs).toBeNull();
+    await store.setUsageLimit("anthropic", "a", 7_777);
+    expect((await store.get("anthropic", "a"))?.usageLimitedUntilMs).toBe(7_777);
+    await store.setUsageLimit("anthropic", "a", null); // the reset path
+    expect((await store.get("anthropic", "a"))?.usageLimitedUntilMs).toBeNull();
+    close();
+  });
+
+  it("setUsageLimit upserts a row even when no snapshot exists yet (429 before any PULL)", async () => {
+    const { store, close } = freshStore();
+    await store.setUsageLimit("openai-codex", "fresh", 5_000);
+    const got = await store.get("openai-codex", "fresh");
+    expect(got?.usageLimitedUntilMs).toBe(5_000);
+    expect(got?.windows).toEqual([]); // synthetic empty snapshot
+    close();
+  });
+
+  it("a window-snapshot upsert PRESERVES an active cooldown (does not clobber it)", async () => {
+    const { store, close } = freshStore();
+    await store.setUsageLimit("anthropic", "a", 9_000);
+    // A later observability refresh (new windows) must not wipe the cooldown.
+    await store.upsert(
+      snap({
+        capturedAt: 1_234,
+        windows: [{ key: "5h", usedPercent: 20, resetsAtMs: 3, windowMinutes: null }],
+      }),
+    );
+    const got = await store.get("anthropic", "a");
+    expect(got?.usageLimitedUntilMs).toBe(9_000);
+    expect(got?.capturedAt).toBe(1_234); // windows still refreshed
     close();
   });
 

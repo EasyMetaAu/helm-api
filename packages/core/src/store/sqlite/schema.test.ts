@@ -62,8 +62,10 @@ describe("sqlite schema + migrations", () => {
       // v24 adds request_payloads.upstream_request_json; this memory_jobs fixture
       // never creates request_payloads → pre-mark applied (out of scope).
       // v25 (telemetry.generation_ms): no telemetry table here → pre-mark applied.
+      // v26 alters oauth_quota (created at v12, applied here without the CREATE) →
+      // pre-mark applied, out of scope.
       // biome-ignore format: keep the version ledger on one readable line
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25])
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26])
         rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",

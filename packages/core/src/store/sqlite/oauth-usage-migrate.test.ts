@@ -36,6 +36,9 @@ function seedPreV23(): string {
   ins.run(24);
   // v25 alters telemetry (absent from this oauth_usage-only fixture) → pre-mark applied.
   ins.run(25);
+  // v26 adds oauth_quota.usage_limited_until_ms; this fixture has no oauth_quota
+  // table (only oauth_usage) → pre-mark applied (its own test exercises v26).
+  ins.run(26);
   raw.exec(`
     CREATE TABLE oauth_usage (
       provider_id TEXT NOT NULL,
