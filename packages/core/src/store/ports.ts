@@ -734,7 +734,11 @@ export interface OAuthUsageStore {
 // OBSERVABILITY only — FAIL-OPEN both ways (a stale/missing snapshot renders "—",
 // never an error). `upsert` overwrites the single row (latest wins); no history.
 export interface OAuthQuotaStore {
-  upsert(snapshot: OAuthQuotaSnapshot): Promise<void>;
+  // Persist the latest window snapshot. The param OMITS `usageLimitedUntilMs` by
+  // design: the auto-park cooldown is owned solely by setUsageLimit, so a routine
+  // observability refresh (new windows) can never clobber an active cooldown — and
+  // the type makes that a compile-time guarantee, not a convention.
+  upsert(snapshot: Omit<OAuthQuotaSnapshot, "usageLimitedUntilMs">): Promise<void>;
   // The latest snapshot for one account, or null if none captured yet.
   get(providerId: string, account: string): Promise<OAuthQuotaSnapshot | null>;
   // All accounts' latest snapshots (the providers page reads them in one shot).
@@ -743,6 +747,11 @@ export interface OAuthQuotaStore {
   // renamed / logged-out account otherwise leaves a stale row (e.g. a Codex push
   // under an old label) that would surface as a phantom account on the page.
   delete(providerId: string, account: string): Promise<void>;
+  // Set (untilMs) or clear (null) the AUTO-PARK cooldown for one account WITHOUT
+  // touching its window snapshot. Upserts a synthetic row when none exists yet — a
+  // 429 can park an account before any quota PULL has captured its windows. Passing
+  // null is the manual "Reset usage" path.
+  setUsageLimit(providerId: string, account: string, untilMs: number | null): Promise<void>;
 }
 
 export interface OAuthTokenStore {

@@ -191,6 +191,12 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                     source: p.source,
                   })
                   .catch(() => {});
+                // NB: this observability PULL does NOT auto-park. Parking is driven only
+                // by live-traffic evidence (a real 429 in the executor, or a saturated
+                // x-codex header on a real reply) — never by a page-open quota read. That
+                // keeps "Reset usage" effective: clicking it reloads the page (this PULL),
+                // which would otherwise immediately re-derive the same saturated window
+                // and re-park the account before it can serve a single request.
               }
             });
           }),
@@ -513,5 +519,24 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     // Disconnect removes an account → rebuild so it leaves the pool immediately.
     if (!(await afterMutation())) return c.json(notApplied, 503);
     return c.body(null, 204);
+  });
+
+  // POST /oauth/:provider/reset?account=... -> 204 ("Reset usage")
+  // Clear the AUTO-park usage-limit cooldown so a rate-limited account rejoins the
+  // pool on the next request. Clears ONLY the cooldown (live member + persisted) —
+  // an operator-parked (schedulable=false) account stays parked. No rebuild needed:
+  // applyUsageLimit flips the live member in place. 503 when OAuth is disabled (no
+  // seam) — same as every other /oauth/* route, so a disabled deployment never mutates
+  // quota state. (buildServer always wires applyUsageLimit, so the seam is the real gate.)
+  app.post("/admin/api/oauth/:provider/reset", async (c) => {
+    const s = seam();
+    if (!s || !deps.applyUsageLimit) return c.json({ error: "oauth login not configured" }, 503);
+    const account = c.req.query("account") || DEFAULT_ACCOUNT;
+    try {
+      await deps.applyUsageLimit(c.req.param("provider"), account, null);
+      return c.body(null, 204);
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
   });
 }

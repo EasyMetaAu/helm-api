@@ -34,6 +34,7 @@ export {
 } from "./openai-codex.js";
 export {
   createOAuthPoolClient,
+  type OAuthPoolClient,
   type OAuthPoolDeps,
   type OAuthPoolMember,
 } from "./pool.js";
@@ -63,3 +64,8 @@ export type {
   OAuthProviderId,
   OAuthProviderInterface,
 } from "./types.js";
+export {
+  DEFAULT_429_COOLDOWN_MS,
+  LIMIT_THRESHOLD,
+  windowsToUsageLimit,
+} from "./usage-limit.js";

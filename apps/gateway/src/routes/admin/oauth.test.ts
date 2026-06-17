@@ -54,6 +54,7 @@ describe("admin OAuth routes — 503 when the seam is not configured", () => {
     ["GET", "/admin/api/oauth/x/account"],
     ["PUT", "/admin/api/oauth/x/account"],
     ["DELETE", "/admin/api/oauth/x"],
+    ["POST", "/admin/api/oauth/x/reset"],
   ])("%s %s -> 503 oauth not configured", async (method, path) => {
     const init: RequestInit =
       method === "GET" || method === "DELETE" ? { method } : { method, headers: JSONH, body: "{}" };
@@ -375,5 +376,62 @@ describe("admin OAuth routes — mutations + validation", () => {
     expect((await res.json()) as { error: string }).toMatchObject({
       error: "provider unsupported",
     });
+  });
+});
+
+describe("admin OAuth routes — POST /oauth/:provider/reset (Reset usage)", () => {
+  it("503 when no applyUsageLimit is wired", async () => {
+    const res = await app({ oauth: fullSeam() }).request("/admin/api/oauth/openai-codex/reset", {
+      method: "POST",
+    });
+    expect(res.status).toBe(503);
+  });
+
+  it("503 (no mutation) when OAuth is disabled even though applyUsageLimit is wired", async () => {
+    // buildServer always passes applyUsageLimit, so the SEAM is the real gate: a
+    // disabled deployment (no oauth seam) must 503, never write a synthetic quota row.
+    const applyUsageLimit = vi.fn(async () => {});
+    const res = await app({ applyUsageLimit }).request("/admin/api/oauth/openai-codex/reset", {
+      method: "POST",
+    });
+    expect(res.status).toBe(503);
+    expect(applyUsageLimit).not.toHaveBeenCalled();
+  });
+
+  it("204 and clears the cooldown (untilMs null) for the default account", async () => {
+    const applyUsageLimit = vi.fn(async () => {});
+    const res = await app({ oauth: fullSeam(), applyUsageLimit }).request(
+      "/admin/api/oauth/openai-codex/reset",
+      { method: "POST" },
+    );
+    expect(res.status).toBe(204);
+    expect(applyUsageLimit).toHaveBeenCalledWith("openai-codex", "default", null);
+  });
+
+  it("honors an explicit ?account and never touches schedulable (cooldown only)", async () => {
+    const applyUsageLimit = vi.fn(async () => {});
+    const seam = fullSeam();
+    const res = await app({ oauth: seam, applyUsageLimit }).request(
+      "/admin/api/oauth/anthropic/reset?account=work",
+      { method: "POST" },
+    );
+    expect(res.status).toBe(204);
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "work", null);
+    // Reset is a cooldown-only operation — it must not re-schedule the account.
+    expect(
+      (seam as unknown as { setAccountSchedule: ReturnType<typeof vi.fn> }).setAccountSchedule,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("400 when applyUsageLimit throws", async () => {
+    const applyUsageLimit = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    const res = await app({ oauth: fullSeam(), applyUsageLimit }).request(
+      "/admin/api/oauth/openai-codex/reset",
+      { method: "POST" },
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toMatchObject({ error: "boom" });
   });
 });

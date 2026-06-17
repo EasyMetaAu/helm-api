@@ -12,7 +12,9 @@ type QuotaRow = typeof oauthQuota.$inferSelect;
 export class PgOAuthQuotaStore implements OAuthQuotaStore {
   constructor(private readonly db: PgDb) {}
 
-  async upsert(snapshot: OAuthQuotaSnapshot): Promise<void> {
+  async upsert(snapshot: Omit<OAuthQuotaSnapshot, "usageLimitedUntilMs">): Promise<void> {
+    // usage_limited_until_ms is intentionally absent from BOTH insert values (NULL on
+    // a new row) and the conflict SET — a window refresh must not clobber a cooldown.
     await this.db
       .insert(oauthQuota)
       .values({
@@ -29,6 +31,25 @@ export class PgOAuthQuotaStore implements OAuthQuotaStore {
           capturedAt: snapshot.capturedAt,
           source: snapshot.source,
         },
+      });
+  }
+
+  async setUsageLimit(providerId: string, account: string, untilMs: number | null): Promise<void> {
+    // Upsert ONLY the cooldown; synthesize an empty snapshot on a brand-new row (a
+    // 429 parking an account before any quota PULL).
+    await this.db
+      .insert(oauthQuota)
+      .values({
+        providerId,
+        account,
+        windows: [],
+        capturedAt: 0,
+        source: providerId === "anthropic" ? "anthropic" : "codex-headers",
+        usageLimitedUntilMs: untilMs,
+      })
+      .onConflictDoUpdate({
+        target: [oauthQuota.providerId, oauthQuota.account],
+        set: { usageLimitedUntilMs: untilMs },
       });
   }
 
@@ -60,6 +81,7 @@ export class PgOAuthQuotaStore implements OAuthQuotaStore {
       windows: row.windows,
       capturedAt: row.capturedAt,
       source: row.source,
+      usageLimitedUntilMs: row.usageLimitedUntilMs ?? null,
     });
   }
 }

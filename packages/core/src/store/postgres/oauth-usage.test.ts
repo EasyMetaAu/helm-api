@@ -106,6 +106,7 @@ const snap = (over: Partial<OAuthQuotaSnapshot> = {}): OAuthQuotaSnapshot => ({
   windows: [{ key: "5h", usedPercent: 6, resetsAtMs: 1_000, windowMinutes: null }],
   capturedAt: 500,
   source: "anthropic",
+  usageLimitedUntilMs: null,
   ...over,
 });
 
@@ -118,6 +119,25 @@ describe("PgOAuthQuotaStore (pglite)", () => {
     expect((await store.get("anthropic", "a"))?.capturedAt).toBe(999);
     await store.upsert(snap({ account: "b" }));
     expect(await store.getAll()).toHaveLength(2);
+    await db.$close();
+  });
+
+  it("setUsageLimit upserts a synthetic row; a window upsert preserves the cooldown; null clears it", async () => {
+    const db: PgDb = await createPgliteDb();
+    const store = new PgOAuthQuotaStore(db);
+    // 429 parks an account that has no snapshot yet → synthetic row carries the cooldown.
+    await store.setUsageLimit("openai-codex", "fresh", 9_000);
+    let got = await store.get("openai-codex", "fresh");
+    expect(got?.usageLimitedUntilMs).toBe(9_000);
+    expect(got?.windows).toEqual([]);
+    // A later observability refresh must NOT clobber the active cooldown.
+    await store.upsert(snap({ providerId: "openai-codex", account: "fresh", capturedAt: 1_234 }));
+    got = await store.get("openai-codex", "fresh");
+    expect(got?.usageLimitedUntilMs).toBe(9_000);
+    expect(got?.capturedAt).toBe(1_234);
+    // Reset (null) clears it.
+    await store.setUsageLimit("openai-codex", "fresh", null);
+    expect((await store.get("openai-codex", "fresh"))?.usageLimitedUntilMs).toBeNull();
     await db.$close();
   });
 });

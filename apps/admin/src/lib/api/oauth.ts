@@ -90,7 +90,11 @@ export interface OAuthQuotaSnapshot {
   account: string;
   windows: OAuthQuotaWindow[];
   capturedAt: number;
-  source: 'anthropic' | 'codex-headers';
+  source: 'anthropic' | 'codex-headers' | 'codex';
+  // Auto-park cooldown: epoch ms until which the account is removed from the pool
+  // because it hit its usage limit (null = not limited). Drives the "Rate limited —
+  // auto-recovers in …" pill + the "Reset usage" button.
+  usageLimitedUntilMs: number | null;
 }
 
 // Observability reads block the providers-page load (Promise.all), so they carry a
@@ -190,6 +194,16 @@ export async function pollDeviceCode(
 export async function logoutOAuth(provider: string, account = 'default'): Promise<void> {
   const res = await fetch(`${BASE}/${provider}?account=${encodeURIComponent(account)}`, {
     method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) await asJson(res);
+}
+
+// POST /oauth/:provider/reset?account= -> clear the auto-park usage-limit cooldown so
+// a rate-limited account rejoins the pool on the next request ("Reset usage"). Leaves
+// the operator's schedulable park untouched.
+export async function resetUsageLimit(provider: string, account = 'default'): Promise<void> {
+  const res = await fetch(`${BASE}/${provider}/reset?account=${encodeURIComponent(account)}`, {
+    method: 'POST',
   });
   if (!res.ok && res.status !== 204) await asJson(res);
 }

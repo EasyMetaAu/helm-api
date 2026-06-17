@@ -361,6 +361,8 @@ describe("sqlite v18 forgetting schema deltas", () => {
       rec.run(24, Date.now());
       // v25 alters telemetry (absent from this memory-only fixture) → pre-mark applied.
       rec.run(25, Date.now());
+      // v26 alters oauth_quota (created at v12, pre-marked here so absent) → pre-mark.
+      rec.run(26, Date.now());
       seed.close();
 
       expect(() => runMigrations(path)).not.toThrow();

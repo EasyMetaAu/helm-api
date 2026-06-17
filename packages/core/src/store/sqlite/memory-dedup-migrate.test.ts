@@ -39,6 +39,9 @@ function seedPreV21(): string {
   ins.run(24);
   // v25 alters telemetry (absent from this memory_messages-only fixture) → pre-mark applied.
   ins.run(25);
+  // v26 adds oauth_quota.usage_limited_until_ms; this fixture never creates
+  // oauth_quota → pre-mark applied (out of scope).
+  ins.run(26);
   raw.exec(`
     CREATE TABLE memory_messages (
       id TEXT PRIMARY KEY,
