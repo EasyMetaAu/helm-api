@@ -41,21 +41,33 @@ openrouter/deepseek-v4-pro:
 openrouter/deepseek-v4-flash:
   inputPerMTokUsd: 0.0983
   outputPerMTokUsd: 0.1966
-zenmux/claude-opus-4.8:
-  inputPerMTokUsd: 5.0
-  outputPerMTokUsd: 25.0
-zenmux/claude-sonnet-4.6:
-  inputPerMTokUsd: 3.0
-  outputPerMTokUsd: 15.0
+# Claude pricing now lives under the native `zenmux-anthropic/claude-*` aliases
+# (issue #217); the OpenAI-compat `zenmux/claude-*` entries were removed.
 zenmux/gpt-5.5:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
-zenmux/gemini-3.5-flash:
+# NATIVE-protocol passthrough aliases (issue #217); the OpenAI-compat
+# `zenmux/gemini-*` / `zenmux/claude-*` entries were removed. Cost is fail-open (a
+# missing key only nulls cost_usd, never blocks); the flash-lite/haiku rates have no
+# prior sibling — set to a safe estimate, verify against the ZenMux price sheet.
+zenmux-vertex/gemini-3.5-flash:
   inputPerMTokUsd: 1.5
   outputPerMTokUsd: 9.0
-zenmux/gemini-3.1-pro:
+zenmux-vertex/gemini-3.1-flash-lite:
+  inputPerMTokUsd: 1.5
+  outputPerMTokUsd: 9.0
+zenmux-vertex/gemini-3.1-pro:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 12.0
+zenmux-anthropic/claude-opus-4.8:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 25.0
+zenmux-anthropic/claude-sonnet-4.6:
+  inputPerMTokUsd: 3.0
+  outputPerMTokUsd: 15.0
+zenmux-anthropic/claude-haiku-4.5:
+  inputPerMTokUsd: 1.0
+  outputPerMTokUsd: 5.0
 zenmux/auto:
   inputPerMTokUsd: 2.5
   outputPerMTokUsd: 15.0

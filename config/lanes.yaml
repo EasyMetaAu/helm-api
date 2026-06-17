@@ -23,9 +23,9 @@
 # —— quality/cost lanes ——
 economy:
   purpose: Cheap and fast for simple tasks
-  primary: deepseek/deepseek-v4-flash
+  primary: openai-codex/gpt-5.4-mini
   fallback:
-    - openai-codex/gpt-5.4-mini
+    - deepseek/deepseek-v4-flash
     - openrouter/deepseek-v4-flash
     - balanced
 
@@ -34,7 +34,7 @@ balanced:
   primary: deepseek/deepseek-v4-pro
   fallback:
     - openrouter/deepseek-v4-pro
-    - zenmux/claude-sonnet-4.6
+    - zenmux-anthropic/claude-sonnet-4.6
     - zenmux/auto
     - openrouter/auto
 
@@ -42,7 +42,8 @@ premium:
   purpose: Strong reasoning and high quality
   primary: openai-codex/gpt-5.5
   fallback:
-    - zenmux/claude-opus-4.8
+    # Claude via the NATIVE Anthropic wire (ZenMux, issue #217).
+    - zenmux-anthropic/claude-opus-4.8
     - zenmux/gpt-5.5
     - balanced
 
@@ -71,7 +72,7 @@ json:
 
 vision:
   purpose: Multimodal / image understanding
-  primary: zenmux/gemini-3.5-flash
+  primary: zenmux-vertex/gemini-3.5-flash
   fallback:
     - premium
   constraints:
@@ -104,6 +105,9 @@ claude-opus:
   purpose: Anthropic Claude Opus tier — strongest Claude
   primary: anthropic/claude-opus-4-8
   fallback:
+    # When the native OAuth pool is parked/absent, stay on the NATIVE Anthropic wire
+    # (ZenMux, issue #217) before degrading into the GPT-led premium chain.
+    - zenmux-anthropic/claude-opus-4.8
     - premium
 
 # Claude Fable 5 — the Mythos-class Claude (autonomous knowledge work + coding),
@@ -121,14 +125,17 @@ claude-sonnet:
   purpose: Anthropic Claude Sonnet tier — balanced Claude
   primary: anthropic/claude-sonnet-4-6
   fallback:
+    # NATIVE Anthropic wire (ZenMux, issue #217) before the generic balanced lane.
+    - zenmux-anthropic/claude-sonnet-4.6
     - balanced
 
-# ZenMux exposes no Claude Haiku, so this cheap/fast tier degrades straight to
-# `economy` (deepseek-flash) after the native Anthropic Haiku.
+# ZenMux serves Claude Haiku over its native Anthropic endpoint, so this cheap/fast
+# tier keeps a NATIVE Haiku fallback before degrading to `economy` (deepseek-flash).
 claude-haiku:
   purpose: Anthropic Claude Haiku tier — cheap/fast
   primary: anthropic/claude-haiku-4-5-20251001
   fallback:
+    - zenmux-anthropic/claude-haiku-4.5
     - economy
 
 # Stays on GPT-5.5 ACROSS providers (Codex subscription -> static ZenMux key) before
@@ -161,20 +168,23 @@ claude-haiku:
   fallback:
     - economy
 
-# Google Gemini has NO subscription channel in Helm; both tiers lead with the
-# static ZenMux key (the only Gemini upstream wired here), then degrade to the
-# matching generic quality lane. gemini-3.1-pro is the latest Pro ZenMux serves
-# (3.5 Pro is announced but not yet GA upstream); gemini-3.5-flash is the latest
-# GA Flash. Both are fully multimodal, so a vision/audio/video request that pins a
-# Gemini id stays on Gemini before the capability filter takes over downstream.
+# Google Gemini via ZenMux. Both tiers now LEAD with the NATIVE Gemini wire
+# (`zenmux-vertex/*`, type: gemini) so a Gemini-CLI request (gemini inbound) is
+# forwarded VERBATIM — native passthrough, no OpenAI-Chat IR round-trip (issue
+# #217), so a Gemini-CLI request passes through verbatim. A cross-protocol caller
+# (e.g. an OpenAI-Chat client pinning a gemini id) doesn't match the native target,
+# so the `zenmux-vertex` provider's translated path serves it — the OpenAI-compat
+# `zenmux/gemini-*` aliases (same upstream) were removed as redundant. gemini-3.1-pro
+# is the latest Pro ZenMux serves; gemini-3.5-flash the latest GA Flash; both fully
+# multimodal, degrading to the generic quality lane.
 gemini-pro:
   purpose: Google Gemini Pro tier — strong multimodal reasoning
-  primary: zenmux/gemini-3.1-pro
+  primary: zenmux-vertex/gemini-3.1-pro
   fallback:
     - premium
 
 gemini-flash:
   purpose: Google Gemini Flash tier — fast multimodal
-  primary: zenmux/gemini-3.5-flash
+  primary: zenmux-vertex/gemini-3.5-flash
   fallback:
     - balanced

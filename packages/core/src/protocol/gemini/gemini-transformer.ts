@@ -449,10 +449,16 @@ function transformRequestOut(native: unknown): IRRequest {
 
   const gc = req.generationConfig;
   const responseSchema = gc?.responseJsonSchema ?? gc?.response_json_schema ?? gc?.responseSchema;
+  // The IR is OpenAI-shaped, so a json_schema response_format MUST be
+  // { type, json_schema: { name, schema } } (issue #217). Gemini's schema is
+  // anonymous, so synthesize a `name` and nest the schema under `.schema`; emitting
+  // the bare schema as `json_schema` (the old bug) is rejected fail-closed by every
+  // OpenAI-compatible candidate (`json_schema.name expected string`), which on the
+  // gemini-flash fallback chain failed all candidates and tripped their breakers.
   const responseFormat =
     gc?.responseMimeType === "application/json"
       ? responseSchema !== undefined
-        ? { type: "json_schema", json_schema: responseSchema }
+        ? { type: "json_schema", json_schema: { name: "response", schema: responseSchema } }
         : { type: "json_object" }
       : undefined;
 

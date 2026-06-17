@@ -79,32 +79,72 @@ providers:
     base_url: https://zenmux.ai/api/v1
     api_key_env: ZENMUX_API_KEY
     models:
-      # anthropic/claude-opus-4.8 — premium fallback, vision+json (zenmux real id).
-      - alias: zenmux/claude-opus-4.8
-        provider_model: anthropic/claude-opus-4.8
-      # anthropic/claude-sonnet-4.6 — balanced fallback, vision+json (zenmux real id).
-      - alias: zenmux/claude-sonnet-4.6
-        provider_model: anthropic/claude-sonnet-4.6
+      # Claude is served via the NATIVE Anthropic wire instead — see the
+      # `zenmux-anthropic` provider below (issue #217). The former OpenAI-compat
+      # `zenmux/claude-*` aliases were removed: same upstream, but the native wire
+      # preserves prompt-cache / tool-use and skips the lossy IR translation.
       # openai/gpt-5.5 — premium fallback when no Codex subscription is connected
       # (zenmux real id).
       - alias: zenmux/gpt-5.5
         provider_model: openai/gpt-5.5
-      # google/gemini-3.5-flash — vision lane + gemini-flash lane primary (latest
-      # GA Flash, multimodal; zenmux real id).
-      - alias: zenmux/gemini-3.5-flash
-        provider_model: google/gemini-3.5-flash
-      # gemini-3.1-pro — gemini-pro lane primary. The latest Gemini Pro ZenMux
-      # serves (3.5 Pro is announced but not yet GA upstream). The alias keeps the
-      # clean `gemini-3.1-pro` routing key; the upstream id is still the `-preview`
-      # slug, so only provider_model changes when it graduates to GA.
-      - alias: zenmux/gemini-3.1-pro
-        provider_model: google/gemini-3.1-pro-preview
+      # Gemini is served via the NATIVE Vertex wire instead — see the
+      # `zenmux-vertex` provider below (issue #217). The former OpenAI-compat
+      # `zenmux/gemini-*` aliases were removed: same upstream, but the native wire
+      # passes a Gemini-CLI request through verbatim and skips the IR translation.
       # auto — platform auto-route. JSON-INCAPABLE on purpose (see
       # catalog supports_json_schema:false): the capability filter skips it for
       # strict-JSON requests so the `json` lane prunes to a deterministic model.
       # Tail fallback only.
       - alias: zenmux/auto
         provider_model: auto
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # NATIVE-PROTOCOL passthrough providers (issue #217). ZenMux exposes the SAME
+  # upstreams behind their PROPRIETARY native protocols, so a native-inbound
+  # request (Gemini CLI → gemini, Claude Code → anthropic_messages) can be
+  # forwarded VERBATIM instead of translated through the OpenAI-Chat IR. When the
+  # inbound protocol equals the target's native protocol, `canUseNativePassthrough`
+  # fires and the request skips the 4 lossy translations (and their bugs); a
+  # cross-protocol request still degrades to the OpenAI-compatible `zenmux` aliases
+  # above. Both reuse the SAME ZENMUX_API_KEY (verified live 2026-06-17: Gemini via
+  # x-goog-api-key, Anthropic via x-api-key, both HTTP 200). For these to be ROUTED
+  # (not skipped) the matching aliases need capabilities + pricing entries and a
+  # lane that leads with them (see lanes.yaml gemini-* / the claude lanes).
+
+  # ZenMux Vertex-AI compatible endpoint (Gemini native wire). `type: gemini` →
+  # endpoint() appends `/models/{model}:{op}`, so the base_url ENDS at
+  # `/publishers/google` to produce the Vertex path
+  # `/v1/publishers/google/models/{model}:generateContent`. provider_model is the
+  # BARE Vertex id (no `google/` prefix — the publisher segment carries it).
+  - name: zenmux-vertex
+    type: gemini
+    base_url: https://zenmux.ai/api/vertex-ai/v1/publishers/google
+    api_key_env: ZENMUX_API_KEY
+    models:
+      - alias: zenmux-vertex/gemini-3.5-flash
+        provider_model: gemini-3.5-flash
+      - alias: zenmux-vertex/gemini-3.1-flash-lite
+        provider_model: gemini-3.1-flash-lite
+      - alias: zenmux-vertex/gemini-3.1-pro
+        provider_model: gemini-3.1-pro-preview
+
+  # ZenMux Anthropic-Messages compatible endpoint (Claude native wire). `type:
+  # anthropic` → executor appends `/v1/messages`, so the base_url ENDS at
+  # `/api/anthropic` (NO /v1). Static key → `x-api-key`. provider_model keeps the
+  # ZenMux `anthropic/<id>` real upstream id (same ids the OpenAI-compat zenmux
+  # block sends). Distinct `zenmux-anthropic/*` alias namespace — no clash with the
+  # `zenmux/*` aliases (a duplicate alias is fail-closed at build time).
+  - name: zenmux-anthropic
+    type: anthropic
+    base_url: https://zenmux.ai/api/anthropic
+    api_key_env: ZENMUX_API_KEY
+    models:
+      - alias: zenmux-anthropic/claude-opus-4.8
+        provider_model: anthropic/claude-opus-4.8
+      - alias: zenmux-anthropic/claude-sonnet-4.6
+        provider_model: anthropic/claude-sonnet-4.6
+      - alias: zenmux-anthropic/claude-haiku-4.5
+        provider_model: anthropic/claude-haiku-4.5
 
   # TERTIARY provider — OpenRouter aggregator. Final dual-platform auto-route
   # fallback. Its `*/auto` alias is likewise JSON-INCAPABLE (see catalog).
