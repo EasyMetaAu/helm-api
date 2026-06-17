@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { OAuthQuotaSnapshotSchema } from "./usage-schema.js";
+import {
+  CodexOAuthUsageSchema,
+  CodexResetResultSchema,
+  OAuthQuotaSnapshotSchema,
+} from "./usage-schema.js";
 
 // The auto-park cooldown (`usageLimitedUntilMs`) rides on the quota snapshot. It must
 // be OPTIONAL on the wire: legacy rows + unit fixtures written before the column existed
@@ -31,5 +35,47 @@ describe("OAuthQuotaSnapshotSchema — usageLimitedUntilMs", () => {
 
   it("rejects a non-integer cooldown", () => {
     expect(() => OAuthQuotaSnapshotSchema.parse({ ...base, usageLimitedUntilMs: 1.5 })).toThrow();
+  });
+});
+
+describe("CodexOAuthUsageSchema.rate_limit_reset_credits", () => {
+  it("parses available_count when present", () => {
+    const parsed = CodexOAuthUsageSchema.parse({
+      rate_limit: { primary_window: { used_percent: 1 } },
+      rate_limit_reset_credits: { available_count: 2 },
+    });
+    expect(parsed.rate_limit_reset_credits?.available_count).toBe(2);
+  });
+
+  it("accepts an absent or null reset-credits block (fail-open)", () => {
+    expect(CodexOAuthUsageSchema.parse({}).rate_limit_reset_credits).toBeUndefined();
+    expect(
+      CodexOAuthUsageSchema.parse({ rate_limit_reset_credits: null }).rate_limit_reset_credits,
+    ).toBeNull();
+  });
+
+  it("tolerates extra fields on the reset-credits block", () => {
+    const parsed = CodexOAuthUsageSchema.parse({
+      rate_limit_reset_credits: { available_count: 0, next_grant_at: 123, foo: "bar" },
+    });
+    expect(parsed.rate_limit_reset_credits?.available_count).toBe(0);
+  });
+});
+
+describe("CodexResetResultSchema", () => {
+  it("parses the consume envelope (code + windows_reset)", () => {
+    const parsed = CodexResetResultSchema.parse({
+      code: "ok",
+      credit: { id: "c_1", status: "redeemed" },
+      windows_reset: 2,
+    });
+    expect(parsed.code).toBe("ok");
+    expect(parsed.windows_reset).toBe(2);
+  });
+
+  it("fails open on a body missing the fields we read", () => {
+    const parsed = CodexResetResultSchema.parse({ unexpected: true });
+    expect(parsed.code).toBeUndefined();
+    expect(parsed.windows_reset).toBeUndefined();
   });
 });

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseCodexQuotaHeaders, parseCodexUsageBody } from "./codex-quota.js";
+import {
+  parseCodexQuotaHeaders,
+  parseCodexResetCredits,
+  parseCodexResetResult,
+  parseCodexUsageBody,
+} from "./codex-quota.js";
 
 const NOW = 1_000_000;
 
@@ -116,5 +121,52 @@ describe("parseCodexUsageBody", () => {
     expect(parseCodexUsageBody({}, NOW)).toEqual([]);
     expect(parseCodexUsageBody({ rate_limit: null }, NOW)).toEqual([]);
     expect(parseCodexUsageBody({ rate_limit: { primary_window: null } }, NOW)).toEqual([]);
+  });
+});
+
+describe("parseCodexResetCredits", () => {
+  it("reads available_count from the same /wham/usage body", () => {
+    expect(
+      parseCodexResetCredits({
+        rate_limit: { primary_window: { used_percent: 1 } },
+        rate_limit_reset_credits: { available_count: 3 },
+      }),
+    ).toBe(3);
+  });
+
+  it("returns 0 when the grant exists but is exhausted", () => {
+    expect(parseCodexResetCredits({ rate_limit_reset_credits: { available_count: 0 } })).toBe(0);
+  });
+
+  it("returns null when the grant is absent, null, or not a finite ≥0 number", () => {
+    expect(parseCodexResetCredits({})).toBeNull();
+    expect(parseCodexResetCredits({ rate_limit_reset_credits: null })).toBeNull();
+    expect(
+      parseCodexResetCredits({ rate_limit_reset_credits: { available_count: -1 } }),
+    ).toBeNull();
+    expect(parseCodexResetCredits(null)).toBeNull();
+    expect(parseCodexResetCredits("garbage")).toBeNull();
+  });
+
+  it("floors a fractional count", () => {
+    expect(parseCodexResetCredits({ rate_limit_reset_credits: { available_count: 2.9 } })).toBe(2);
+  });
+});
+
+describe("parseCodexResetResult", () => {
+  it("extracts code + windows_reset from the consume envelope", () => {
+    expect(parseCodexResetResult({ code: "ok", credit: { id: "c_1" }, windows_reset: 2 })).toEqual({
+      code: "ok",
+      windowsReset: 2,
+    });
+  });
+
+  it("fails open to nulls on a drifted / malformed body", () => {
+    expect(parseCodexResetResult({ unexpected: true })).toEqual({ code: null, windowsReset: null });
+    expect(parseCodexResetResult(null)).toEqual({ code: null, windowsReset: null });
+    expect(parseCodexResetResult({ windows_reset: "two" })).toEqual({
+      code: null,
+      windowsReset: null,
+    });
   });
 });

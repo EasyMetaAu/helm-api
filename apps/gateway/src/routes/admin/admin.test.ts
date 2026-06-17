@@ -1321,11 +1321,14 @@ describe("admin.api oauth quota", () => {
           ],
         },
       ],
-      // The PULL twin of the x-codex-* header PUSH: same window keys.
-      fetchCodexQuota: async () => [
-        { key: "primary", usedPercent: 1, resetsAtMs: 9_000, windowMinutes: 300 },
-        { key: "secondary", usedPercent: 14, resetsAtMs: 99_000, windowMinutes: 10_080 },
-      ],
+      // The PULL twin of the x-codex-* header PUSH: windows + reset-credit count.
+      fetchCodexQuota: async () => ({
+        windows: [
+          { key: "primary", usedPercent: 1, resetsAtMs: 9_000, windowMinutes: 300 },
+          { key: "secondary", usedPercent: 14, resetsAtMs: 99_000, windowMinutes: 10_080 },
+        ],
+        resetCredits: 2,
+      }),
     } as unknown as AdminApiDeps["oauth"];
     const app = buildApp(buildDeps({ oauthQuota, oauth }));
     const res = await app.request("/admin/api/oauth/quota");
