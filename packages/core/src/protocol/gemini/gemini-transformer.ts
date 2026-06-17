@@ -160,7 +160,7 @@ const REASONING_EFFORT_BUDGET: Record<IRReasoningEffort, number> = {
   max: 32768,
 };
 
-function reasoningEffortToThinkingConfig(
+export function reasoningEffortToThinkingConfig(
   effort: IRReasoningEffort | undefined,
 ): { thinkingBudget: number; includeThoughts: boolean } | undefined {
   if (effort === undefined) return undefined;

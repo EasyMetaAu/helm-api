@@ -1987,6 +1987,103 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(JSON.stringify(upstreamBodies[0])).not.toContain('"messages"');
   });
 
+  it("lane-FORCED reasoning rewrites the gemini native passthrough body's thinkingConfig (beats the client)", async () => {
+    const upstreamBodies: Array<Record<string, unknown>> = [];
+    const provider = createGeminiClient({
+      config: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", apiKey: "g" },
+      fetch: vi.fn(async (_url, init) => {
+        upstreamBodies.push(JSON.parse(String(init?.body)));
+        return new Response(
+          JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: "x" }] } }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["google", provider]]),
+      registry: protocolRegistry({
+        g: {
+          providerName: "google",
+          providerModel: "gemini-2.0-flash",
+          targetProviderProtocol: "gemini",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["g"]),
+      req({
+        protocol: "gemini",
+        requested_model: "gemini-2.0-flash",
+        messages: [{ role: "user", content: "hi" }],
+        // client asked for a LOW thinking level; the lane forces HIGH.
+        native_request: {
+          contents: [{ role: "user", parts: [{ text: "hi" }] }],
+          generationConfig: { thinkingConfig: { thinkingLevel: "LOW" } },
+        },
+        reasoning_effort: "high",
+        reasoning_effort_forced: true,
+      }),
+    );
+
+    expect(out.nativePassthrough).toBe(true);
+    const gc = upstreamBodies[0]?.generationConfig as Record<string, unknown>;
+    const tc = gc.thinkingConfig as { thinkingBudget: number; thinkingLevel?: string };
+    expect(tc.thinkingBudget).toBeGreaterThan(0); // forced HIGH budget applied
+    expect(tc.thinkingLevel).toBeUndefined(); // client's LOW level replaced
+  });
+
+  it("does NOT touch the native passthrough body when reasoning is not forced", async () => {
+    const upstreamBodies: Array<Record<string, unknown>> = [];
+    const provider = createGeminiClient({
+      config: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", apiKey: "g" },
+      fetch: vi.fn(async (_url, init) => {
+        upstreamBodies.push(JSON.parse(String(init?.body)));
+        return new Response(
+          JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: "x" }] } }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["google", provider]]),
+      registry: protocolRegistry({
+        g: {
+          providerName: "google",
+          providerModel: "gemini-2.0-flash",
+          targetProviderProtocol: "gemini",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const nativeBody = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      generationConfig: { thinkingConfig: { thinkingLevel: "LOW" } },
+    };
+    await execute(
+      plan(["g"]),
+      req({
+        protocol: "gemini",
+        requested_model: "gemini-2.0-flash",
+        messages: [{ role: "user", content: "hi" }],
+        native_request: nativeBody,
+        reasoning_effort: "high", // present but NOT forced → passthrough stays verbatim
+      }),
+    );
+    expect(upstreamBodies[0]).toEqual(nativeBody);
+  });
+
   it("strips empty Anthropic text blocks before native passthrough dispatch", async () => {
     const provider = anthropicProvider(NATIVE_RESP);
     const execute = createExecute({

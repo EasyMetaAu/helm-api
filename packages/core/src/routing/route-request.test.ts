@@ -881,3 +881,38 @@ describe("routeRequest — virtual model aliases", () => {
     expect(plan.selected_lane).toBe("economy");
   });
 });
+
+describe("routeRequest — lane-forced reasoning_effort", () => {
+  function lanesWithForce(): LanesConfig {
+    return {
+      ...LANES,
+      coding: {
+        primary: "coder_a",
+        fallback: ["coder_b", "premium"],
+        constraints: {},
+        reasoning_effort: "high",
+      },
+    } as unknown as LanesConfig;
+  }
+
+  function reqPassedToExecute(d: RouteDeps): InternalRequest {
+    return (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as InternalRequest;
+  }
+
+  it("overwrites the client's reasoning_effort + sets reasoning_effort_forced when the lane pins it", async () => {
+    const d = deps({ lanes: lanesWithForce() });
+    // client asked for LOW; the coding lane forces HIGH — force must win.
+    await routeRequest(req({ reasoning_effort: "low" }), d);
+    const passed = reqPassedToExecute(d);
+    expect(passed.reasoning_effort).toBe("high");
+    expect(passed.reasoning_effort_forced).toBe(true);
+  });
+
+  it("leaves reasoning untouched when the selected lane does not force it", async () => {
+    const d = deps(); // default LANES: coding has no reasoning_effort
+    await routeRequest(req({ reasoning_effort: "low" }), d);
+    const passed = reqPassedToExecute(d);
+    expect(passed.reasoning_effort).toBe("low");
+    expect(passed.reasoning_effort_forced).toBeUndefined();
+  });
+});

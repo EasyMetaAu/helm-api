@@ -19,6 +19,23 @@ import { z } from "zod";
 // `unknown` (YAML->object is the config-loader's job), keeping shared/core
 // framework-free and purely unit-testable (principle 1).
 
+// Reasoning-effort tiers. MIRRORS `IR_REASONING_EFFORTS` in @helm/core
+// (packages/core/src/protocol/ir.ts) — kept as a small literal list here so
+// @helm/shared stays dependency-free of core. Unlike the request-path
+// `IRReasoningEffortSchema` (which preprocesses unknowns to "high"), CONFIG is
+// validated STRICT/fail-closed: an unknown lane reasoning_effort refuses to boot
+// (principle 2) rather than silently normalizing.
+export const ReasoningEffortSchema = z.enum([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+export type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>;
+
 // Lane constraints: the Capability Filter narrows candidates by these. All
 // optional; flags default false so an omitted `constraints` is a no-op filter.
 export const LaneConstraintsSchema = z
@@ -46,6 +63,12 @@ export const LaneSchema = z.strictObject({
   primary: z.string().min(1),
   fallback: z.array(z.string().min(1)).default([]),
   constraints: LaneConstraintsSchema,
+  // Operator-FORCED reasoning effort for this lane (issue: lane-forced-reasoning).
+  // When set, the router overwrites the request's reasoning_effort so the CLIENT
+  // value cannot win, and the value is applied across all 4 protocols (translated
+  // out-mapping + native-passthrough body rewrite). Omitted => unforced (today's
+  // request-driven behavior). Strict enum, fail-closed.
+  reasoning_effort: ReasoningEffortSchema.optional(),
 });
 export type Lane = z.infer<typeof LaneSchema>;
 

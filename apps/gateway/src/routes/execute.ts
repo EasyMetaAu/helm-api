@@ -8,6 +8,7 @@ import type {
 } from "@helm/core";
 import {
   anthropicNativeBodyRequiresSystemFold,
+  applyForcedReasoningToNativeBody,
   canUseNativePassthrough,
   checkCapability,
   type NativePassthroughDisableReason,
@@ -490,6 +491,11 @@ function prepareNativeRequestForUpstream(
   protocol: Protocol,
   streamReframed: boolean,
   nativeProtocolProfile: ProviderClient["nativeProtocolProfile"] | undefined,
+  // Lane-FORCED reasoning effort (issue: lane-forced-reasoning). Set only when the
+  // router forced it; rewrites the verbatim body's protocol-specific reasoning field
+  // so the override beats the client even on the byte-passthrough path. undefined =>
+  // body stays verbatim (default).
+  forcedReasoningEffort: string | undefined,
 ): NativePassthroughCarrier | Record<string, unknown> {
   if (nativeRequest === undefined) {
     throw new Error("native passthrough invoked without a native request");
@@ -533,6 +539,20 @@ function prepareNativeRequestForUpstream(
         ]);
         mutations.empty_anthropic_text_blocks_stripped = sanitized.strippedEmptyTextBlocks;
       }
+    }
+  }
+
+  // Lane-forced reasoning override (issue: lane-forced-reasoning): rewrite the
+  // verbatim body's protocol-specific reasoning field so the forced effort beats the
+  // client's value WITHOUT losing native passthrough (the translated path forwards
+  // req.reasoning_effort separately). openai_chat never passes through → no-op.
+  if (forcedReasoningEffort !== undefined) {
+    const rewritten = applyForcedReasoningToNativeBody(body, protocol, forcedReasoningEffort);
+    if (rewritten.mutated) {
+      body = rewritten.body;
+      bodyChanged = true;
+      if (mutations)
+        appendMutationList(mutations, "body_shims_applied", ["reasoning_effort_forced"]);
     }
   }
 
@@ -828,6 +848,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             req.protocol,
             true,
             provider.nativeProtocolProfile,
+            req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
           );
           if (hasResponsesHistoryGap(req)) {
             const mutations = nativePassthroughMutations(passthroughBody);
@@ -905,6 +926,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             req.protocol,
             false,
             provider.nativeProtocolProfile,
+            req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
           );
           if (hasResponsesHistoryGap(req)) {
             const mutations = nativePassthroughMutations(passthroughBody);

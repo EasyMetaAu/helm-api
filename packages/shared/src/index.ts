@@ -66,6 +66,8 @@ export {
   type LanesConfig,
   LanesConfigSchema,
   parseLanesConfig,
+  type ReasoningEffort,
+  ReasoningEffortSchema,
 } from "./config/lanes-schema.js";
 // Policy model (config/policies.yaml, docs/04) — server-side first-match routing
 // rules; composed into HelmConfigSchema and re-exported by @helm/core.
