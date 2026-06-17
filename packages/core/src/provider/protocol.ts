@@ -91,31 +91,80 @@ export function canUseNativePassthrough(
   return { ok: true };
 }
 
-// Anthropic's Messages API carries `system` at the TOP LEVEL only. A `system`- or
-// `developer`-role entry INSIDE `messages[]` is the "mid-conversation system" shape
-// modern Claude Code emits (role-folded transcripts — e.g. MCP-server instructions as a
-// trailing system turn, CC ≥2.1.x). Anthropic's subscription endpoint REJECTS such a body
-// — `messages.N: role 'system' must precede an 'assistant' message or end the array` — so
-// it cannot be forwarded VERBATIM. It needs the compatibility rewrite that folds
-// system/developer turns into the top-level `system` param (provider/anthropic
-// openaiToAnthropicRequest / protocol/anthropic transformRequestIn), so passthrough must
-// be disabled for the attempt and the request routed through the translating path.
+// Anthropic historically carried `system` at the TOP LEVEL only, so an inline
+// `system`/`developer` turn inside `messages[]` required the compatibility rewrite.
+// Claude Opus 4.8 now accepts carefully-placed mid-conversation `system` turns, so the
+// passthrough guard must be model-aware: keep older/unknown models fail-closed, but do
+// not disable byte-faithful passthrough for the exact valid Opus 4.8 shape Claude Code
+// emits (e.g. `[user, system]` trailing MCP instructions).
 //
 // Scope the CALL to anthropic_messages targets — OpenAI/Gemini accept inline
 // system/developer turns, so they neither need nor want this fold. `nativeRequest` is the
 // `InternalRequest.native_request` carrier (or a bare body); a non-Anthropic / message-less
 // body returns false (passthrough stays eligible). Pure + framework-agnostic
 // (CLAUDE.md principle 1), single-unit-testable (principle 4).
-export function anthropicNativeBodyRequiresSystemFold(nativeRequest: unknown): boolean {
+export interface AnthropicSystemFoldOptions {
+  /** Resolved upstream model for this attempt. Missing/unknown stays conservative. */
+  providerModel?: string | null;
+}
+
+function anthropicModelSupportsMidConversationSystem(providerModel: string | null | undefined) {
+  if (providerModel === null || providerModel === undefined) return false;
+  const model = providerModel.toLowerCase();
+  const slash = model.lastIndexOf("/");
+  const unprefixed = slash >= 0 ? model.slice(slash + 1) : model;
+  return unprefixed === "claude-opus-4-8" || unprefixed.startsWith("claude-opus-4-8-");
+}
+
+function isValidOpus48MidConversationSystemPlacement(
+  messages: Array<unknown>,
+  index: number,
+): boolean {
+  if (index <= 0) return false;
+  const previous = messages[index - 1];
+  if (previous === null || typeof previous !== "object") return false;
+  const previousRole = (previous as { role?: unknown }).role;
+  // Opus 4.8 currently documents mid-conversation system insertion after a user turn.
+  // Other shapes stay on the rewrite path until explicitly proven accepted.
+  if (previousRole !== "user") return false;
+  const next = messages[index + 1];
+  if (next === undefined) return true;
+  if (next === null || typeof next !== "object") return false;
+  return (next as { role?: unknown }).role === "assistant";
+}
+
+function isAnthropicSystemContentTextOnly(content: unknown): boolean {
+  if (typeof content === "string") return true;
+  if (!Array.isArray(content)) return false;
+  return content.every((block) => {
+    if (block === null || typeof block !== "object") return false;
+    const textBlock = block as { type?: unknown; text?: unknown };
+    return textBlock.type === "text" && typeof textBlock.text === "string";
+  });
+}
+
+export function anthropicNativeBodyRequiresSystemFold(
+  nativeRequest: unknown,
+  options: AnthropicSystemFoldOptions = {},
+): boolean {
   if (nativeRequest === null || typeof nativeRequest !== "object") return false;
   const body = isNativePassthroughCarrier(nativeRequest)
     ? nativeRequest.body
     : (nativeRequest as Record<string, unknown>);
   const messages = body.messages;
   if (!Array.isArray(messages)) return false;
-  return messages.some((m) => {
+  const supportsMidConversationSystem = anthropicModelSupportsMidConversationSystem(
+    options.providerModel,
+  );
+  return messages.some((m, index) => {
     if (m === null || typeof m !== "object") return false;
     const role = (m as { role?: unknown }).role;
-    return role === "system" || role === "developer";
+    if (role === "developer") return true;
+    if (role !== "system") return false;
+    return (
+      !supportsMidConversationSystem ||
+      !isAnthropicSystemContentTextOnly((m as { content?: unknown }).content) ||
+      !isValidOpus48MidConversationSystemPlacement(messages, index)
+    );
   });
 }
