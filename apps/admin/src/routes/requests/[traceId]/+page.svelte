@@ -1,6 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { RequestDetail, RequestPayloadView } from '$lib/api/requests.js';
+  import { deepEqual } from '$lib/deep-equal.js';
   import { formatTimestamp } from '$lib/format.js';
   import { t } from '$lib/i18n';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
@@ -48,6 +49,17 @@
   // off, or the payload was pruned).
   const replayBody = $derived(data.payload?.captured === true ? data.payload.request : undefined);
   const canRetry = $derived(!!replayBody && typeof replayBody === 'object');
+
+  // The forwarded-upstream body is worth a SEPARATE panel only when it actually
+  // differs from the inbound client body (memory injection / protocol translation /
+  // model patch). When they are structurally identical — e.g. a no-memory request to
+  // an OpenAI-shaped provider — a second panel is pure noise, so we collapse to one.
+  const hasUpstream = $derived(
+    data.payload?.captured === true && data.payload?.upstream_request != null,
+  );
+  const upstreamDiffers = $derived(
+    hasUpstream && !deepEqual(data.payload.request, data.payload.upstream_request),
+  );
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
@@ -99,10 +111,20 @@
 
     <!-- Request: full captured body when capture_payloads is on, else metadata. -->
     <section class="card text-sm">
-      <h2 class="section-header">{$t('Request (from client)')}</h2>
+      <h2 class="section-header">
+        {upstreamDiffers ? $t('Request (from client)') : $t('Request')}
+      </h2>
       {#if data.payload?.captured}
         <p class="field-help mb-2">
-          {$t('The request body as received from the client — before memory injection and translation.')}
+          {#if upstreamDiffers}
+            {$t('The request body as received from the client — before memory injection and translation.')}
+          {:else if hasUpstream}
+            {$t(
+              'Full request body recorded for this call. The body forwarded upstream was identical (no memory injection or translation).',
+            )}
+          {:else}
+            {$t('Full request body recorded for this call.')}
+          {/if}
         </p>
         <JsonViewer value={data.payload.request} testid="request-body" />
       {:else}
@@ -119,9 +141,10 @@
     </section>
 
     <!-- Forwarded upstream request: the EXACT body sent to the provider, AFTER
-         memory injection + protocol translation. Only present when a provider
-         served and capture was on. This is what the model actually received. -->
-    {#if data.payload?.captured && data.payload?.upstream_request != null}
+         memory injection + protocol translation. Shown as a SEPARATE panel only when
+         it differs from the inbound body; when identical, the single "Request" panel
+         above already covers it (no duplicate). -->
+    {#if upstreamDiffers}
       <section class="card text-sm">
         <h2 class="section-header">{$t('Forwarded to upstream LLM')}</h2>
         <p class="field-help mb-2">
