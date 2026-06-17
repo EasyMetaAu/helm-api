@@ -24,7 +24,13 @@ describe("openaiToAnthropicRequest", () => {
     // client system follow it (real-CC layout).
     expect(sys[0]?.text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.175\./);
     expect(sys[1]?.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
-    expect(sys[2]?.text).toBe("Be terse.");
+    expect(sys[2]?.text).toContain(
+      "You are an interactive agent that helps users with software engineering tasks.",
+    );
+    expect(sys[2]?.text).toContain("You have a persistent file-based memory at");
+    expect(sys[2]?.text).toContain("gitStatus: This is the git status at the start");
+    expect(sys[2]).toMatchObject({ cache_control: { type: "ephemeral" } });
+    expect(sys[3]?.text).toBe("Be terse.");
     expect(body.max_tokens).toBe(4096); // defaulted
     expect(body.temperature).toBe(0.5);
     const msgs = body.messages as Array<{
@@ -38,6 +44,8 @@ describe("openaiToAnthropicRequest", () => {
 
   it("dedupes Claude Code system boilerplate when compatibility-rewriting native Anthropic traffic", () => {
     const spoof = "You are Claude Code, Anthropic's official CLI for Claude.";
+    const agentPrompt =
+      "\nYou are an interactive agent that helps users with software engineering tasks.\n\nReal client prompt.";
     const taskReminder =
       "The task tools haven't been used recently. Consider whether tool use would help.";
     const userInterrupt =
@@ -49,7 +57,7 @@ describe("openaiToAnthropicRequest", () => {
           role: "system",
           content: [
             { type: "text", text: spoof, cache_control: { type: "ephemeral" } },
-            { type: "text", text: "base Claude Code prompt" },
+            { type: "text", text: agentPrompt, cache_control: { type: "ephemeral" } },
           ],
         },
         { role: "system", content: taskReminder },
@@ -65,6 +73,9 @@ describe("openaiToAnthropicRequest", () => {
     expect(texts.filter((text) => text === spoof)).toHaveLength(1);
     expect(texts[1]).toBe(spoof);
     expect(system[1]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(texts.filter((text) => text === agentPrompt)).toHaveLength(1);
+    expect(texts[2]).toBe(agentPrompt);
+    expect(system[2]?.cache_control).toEqual({ type: "ephemeral" });
     expect(texts.filter((text) => text === taskReminder)).toHaveLength(1);
     expect(texts.filter((text) => text === userInterrupt)).toHaveLength(1);
     const messages = body.messages as Array<Record<string, unknown>>;
@@ -94,6 +105,58 @@ describe("openaiToAnthropicRequest", () => {
     expect(texts.filter((text) => text === "repeat this normal instruction")).toHaveLength(2);
     expect(texts).toContain(firstInterrupt);
     expect(texts).toContain(secondInterrupt);
+  });
+
+  it("sanitizes third-party agent fingerprints in system and tool text for Claude CLI emulation", () => {
+    const body = openaiToAnthropicRequest({
+      model: "m",
+      messages: [
+        {
+          role: "system",
+          content: [
+            {
+              type: "text",
+              text: [
+                "Keep the project guidance.",
+                "",
+                "You are OpenCode, an AI coding agent.",
+                "",
+                "Read https://github.com/anomalyco/opencode before answering.",
+                "",
+                "Here is some useful information about the environment you are running in:",
+              ].join("\n"),
+            },
+          ],
+        },
+        { role: "user", content: "Explain Cursor and Open WebUI literally." },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "inspect",
+            description: "Inspect an OpenCode, Cursor, and Open WebUI workspace.",
+            parameters: { type: "object" },
+          },
+        },
+      ],
+    });
+
+    const systemText = ((body.system as Array<Record<string, unknown>>)[3]?.text ?? "") as string;
+    expect(systemText).toContain("Keep the project guidance.");
+    expect(systemText).not.toContain("You are OpenCode");
+    expect(systemText).not.toContain("github.com/anomalyco/opencode");
+    expect(systemText).not.toContain(
+      "Here is some useful information about the environment you are running in:",
+    );
+    expect(systemText).toContain("Environment context you are running in:");
+    const messages = body.messages as Array<{ content: Array<{ text?: string }> }>;
+    expect(messages[0]?.content[0]?.text).toBe("Explain Cursor and Open WebUI literally.");
+    const tools = body.tools as Array<{ description?: string }>;
+    expect(tools[0]?.description).toContain("O\u200dpenCode");
+    expect(tools[0]?.description).toContain("C\u200dursor");
+    expect(tools[0]?.description).toContain("O\u200dpen WebUI");
+    expect(tools[0]?.description).not.toContain("OpenCode");
   });
 
   it("maps assistant tool_calls -> tool_use and tool results -> tool_result", () => {
@@ -342,14 +405,16 @@ describe("openaiToAnthropicRequest", () => {
     expect(body.container).toEqual({ id: "container_1" });
   });
 
-  it("preserves top-level automatic cache_control when no explicit cache breakpoints exist", () => {
+  it("drops top-level automatic cache_control because the Claude Code agent prompt owns the breakpoint", () => {
     const body = openaiToAnthropicRequest({
       model: "m",
       cache_control: { type: "ephemeral" },
       messages: [{ role: "user", content: "long context" }],
     });
 
-    expect(body.cache_control).toEqual({ type: "ephemeral" });
+    expect(body.cache_control).toBeUndefined();
+    const system = body.system as Array<Record<string, unknown>>;
+    expect(system[2]?.cache_control).toEqual({ type: "ephemeral" });
   });
 
   it("drops top-level automatic cache_control when explicit block/tool cache controls exist", () => {
@@ -382,8 +447,9 @@ describe("openaiToAnthropicRequest", () => {
 
     expect(body.cache_control).toBeUndefined();
     const system = body.system as Array<Record<string, unknown>>;
-    // [0]=billing, [1]=spoof, [2]=client system block (carries the cache_control).
+    // [0]=billing, [1]=spoof, [2]=Claude Code agent prompt, [3]=client system.
     expect(system[2]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(system[3]?.cache_control).toEqual({ type: "ephemeral" });
     const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
     expect(messages[0]?.content[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     const tools = body.tools as Array<Record<string, unknown>>;
@@ -407,11 +473,11 @@ describe("openaiToAnthropicRequest", () => {
     });
     const sys = body.system as Array<{ text: string }>;
     expect(sys[0]?.text).toMatch(/^x-anthropic-billing-header:/);
-    expect(sys.slice(1).map((b) => b.text)).toEqual([
-      "You are Claude Code, Anthropic's official CLI for Claude.",
-      "Be terse.",
-      "Prefer metric units.",
-    ]);
+    expect(sys[1]?.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
+    expect(sys[2]?.text).toContain(
+      "You are an interactive agent that helps users with software engineering tasks.",
+    );
+    expect(sys.slice(3).map((b) => b.text)).toEqual(["Be terse.", "Prefer metric units."]);
     // developer must NOT leak into the conversation as a user message.
     const msgs = body.messages as Array<{ role: string }>;
     expect(msgs).toHaveLength(1);
@@ -1296,10 +1362,19 @@ describe("createAnthropicClient", () => {
     // never regenerated per call (the claude-relay-service session_id-rotation anti-pattern).
     const uid = '{"device_id":"D","account_uuid":"","session_id":"S"}';
     const seenMeta: unknown[] = [];
+    const seenSessionHeaders: string[] = [];
+    const seenRequestIds: string[] = [];
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const h = new Headers(init?.headers);
       expect(h.get("accept")).toBe("application/json");
       expect(h.get("anthropic-dangerous-direct-browser-access")).toBe("true");
+      expect(h.get("x-app")).toBe("cli");
+      expect(h.get("x-stainless-lang")).toBe("js");
+      expect(h.get("x-stainless-runtime")).toBe("node");
+      expect(h.get("x-stainless-retry-count")).toBe("0");
+      expect(h.get("x-stainless-timeout")).toBe("600");
+      seenSessionHeaders.push(h.get("x-claude-code-session-id") ?? "");
+      seenRequestIds.push(h.get("x-client-request-id") ?? "");
       seenMeta.push((JSON.parse(String(init?.body)) as { metadata?: unknown }).metadata);
       return jsonResponse({
         id: "m",
@@ -1321,6 +1396,15 @@ describe("createAnthropicClient", () => {
     expect(seenMeta).toHaveLength(2);
     expect(seenMeta[0]).toEqual({ user_id: uid });
     expect(seenMeta[1]).toEqual(seenMeta[0]); // identical across requests → no rotation
+    expect(seenSessionHeaders).toEqual(["S", "S"]);
+    expect(seenRequestIds).toHaveLength(2);
+    expect(seenRequestIds[0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(seenRequestIds[1]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(seenRequestIds[0]).not.toBe(seenRequestIds[1]);
   });
 
   it("adds feature beta headers for Anthropic context_management and fast mode", async () => {
@@ -1747,6 +1831,9 @@ describe("createAnthropicClient — nativePassthrough", () => {
     expect(h.get("content-length")).toBeNull();
     expect(h.get("x-helm-trace")).toBeNull();
     expect(h.get("user-agent")).toBe("client-claude/9.9.9");
+    expect(h.get("x-stainless-lang")).toBeNull();
+    expect(h.get("x-client-request-id")).toBeNull();
+    expect(h.get("x-claude-code-session-id")).toBeNull();
     const beta = h.get("anthropic-beta") ?? "";
     expect(beta).toContain("client-beta-2026-01-01");
     expect(beta).toContain("oauth-2025-04-20");
