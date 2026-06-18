@@ -531,6 +531,14 @@ export {
   type ResolveResult,
   toRegistryProviders,
 } from "./provider/registry.js";
+export {
+  __setWreqCreateSessionForTesting,
+  makeTlsImpersonationFetch,
+  proxyConfigToUrl,
+  type TlsImpersonationFetchOptions,
+  TlsTransportUnavailableError,
+  type TransportProfile,
+} from "./provider/tls-transport.js";
 // OAuth subscription providers (issue #38): non-interactive token manager
 // (refresh_token / client_credentials), single-flight refresh, injected clock.
 // Framework-agnostic; env→secret resolution stays in the composition root.

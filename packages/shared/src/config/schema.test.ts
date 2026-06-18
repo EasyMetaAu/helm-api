@@ -104,6 +104,11 @@ describe("ProviderConfigSchema targetProviderProtocol", () => {
     expect(provider({ response_model_policy: "both" }).response_model_policy).toBe("both");
   });
 
+  it("defaults provider transport to undici and accepts the TLS Chrome spike profile", () => {
+    expect(provider().transport_profile).toBe("default");
+    expect(provider({ transport_profile: "tls_chrome" }).transport_profile).toBe("tls_chrome");
+  });
+
   it("accepts Gemini remote media fetch safety limits", () => {
     expect(
       provider({

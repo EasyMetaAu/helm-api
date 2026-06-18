@@ -234,6 +234,9 @@ providers:
   # - name: claude-pro
   #   type: anthropic
   #   base_url: https://api.anthropic.com
+  #   # Optional spike: route execution through a Chrome-like TLS/JA3 transport.
+  #   # Only supported for Anthropic preset OAuth; default is the normal undici path.
+  #   # transport_profile: tls_chrome
   #   oauth:
   #     provider: anthropic            # built-in preset (manual-paste browser login)
   #     # account: default             # optional; for multi-account installs
