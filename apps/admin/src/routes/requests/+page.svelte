@@ -3,6 +3,7 @@
   import { goto, invalidateAll } from '$app/navigation';
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
+  import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
   import RefreshControl from '$lib/components/RefreshControl.svelte';
   import TokensCell from '$lib/components/TokensCell.svelte';
@@ -382,8 +383,10 @@
               >
               <td class="px-3 py-2"><TokensCell usage={r.usage} /></td>
               <td class="px-3 py-2 font-mono text-ink-body">{formatUsd(r.cost_usd)}</td>
-              <td class="px-3 py-2 {r.error_class ? 'text-red-600' : 'text-ink-muted'}"
-                >{r.error_class ?? '—'}</td
+              <td
+                class="px-3 py-2 {r.error_class ? 'text-red-600' : 'text-ink-muted'}"
+                title={r.error_class ?? undefined}
+                >{r.error_class ? $t(attemptCodeLabel(r.error_class)) : '—'}</td
               >
             </tr>
           {/each}

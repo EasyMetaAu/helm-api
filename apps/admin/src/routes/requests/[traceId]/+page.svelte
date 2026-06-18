@@ -2,6 +2,7 @@
   import { base } from '$app/paths';
   import type { RequestDetail, RequestPayloadView } from '$lib/api/requests.js';
   import { deepEqual } from '$lib/deep-equal.js';
+  import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
   import { formatTimestamp, formatTps } from '$lib/format.js';
   import { t } from '$lib/i18n';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
@@ -214,7 +215,10 @@
             'This request ended in an error after all attempts. Details below are recorded as-is.',
           )}
         </p>
-        <div>{$t('Error type')}: <span class="font-mono">{d.error.error_class}</span></div>
+        <div>
+          {$t('Error type')}:
+          <span title={d.error.error_class}>{$t(attemptCodeLabel(d.error.error_class))}</span>
+        </div>
         <div>{$t('HTTP status')}: <span class="font-mono">{d.error.http_status}</span></div>
         <div>{$t('Message')}: {d.error.message}</div>
         <div class="mt-1 text-xs text-red-500">

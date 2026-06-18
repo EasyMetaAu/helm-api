@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-18 · 请求详情页内部 code 人类可读化（admin i18n；原则 1）
+
+- **背景**：请求详情页的「供应商尝试」链 + 错误类型显示的是内部 snake_case code（`no_response_schema_support` / `circuit_open` / `client_abort` / `upstream_error` …），运维看不懂。
+- **实现**：新增 `apps/admin/src/lib/format/attempt-codes.ts` 的 `ATTEMPT_CODE_LABELS`（code→英文人话，**值即 i18n key**）+ `attemptCodeLabel()`（未知 code 回退裸 code，永不空白）。镜像 core 的 `SkipReason` 联合 + execute 的 error_class（admin 不 import core，原则 1）。渲染处 `DecisionChain.svelte`（outcome badge / error_class / skip_reason）、详情页 error type、列表 error_class 列改 `$t(attemptCodeLabel(code))`，并加 `title={原始code}` 悬浮保留调试用裸码。
+- **i18n**：26 个新 key（3 个如 Error/Success 已存在）加进 5 个 locale（en=自身，zh-hans/hant/ja/ko 手译）；用一次性 additive 合并脚本（保留既有字节、仅追加，避开 i18n:extract 会拉无关串的坑）。
+- **验证**：`attempt-codes.test.ts`（映射 + 回退 + 覆盖全 SkipReason）、`attempt-code-locales.test.ts`（4 非英 locale 每个 label 都翻译、非英文回退，镜像 dashboard-locales 模式）；admin 14 测绿、`svelte-check` 0/0、`biome lint`(475)、`build` 全绿。分支 `feat-readable-attempt-codes`，未提交/未部署。
+
 ## 2026-06-18 · json_schema 能力分级修复（capability tier；docs/02/04；原则 2/3/4）
 
 - **背景（线上事故）**：`helm_live_KOGN` 的 Codex 请求（Responses API，`text.format={type:json_schema,strict:true}`，rollout 压缩）落 `json` lane 主候选官方 `deepseek/deepseek-v4-flash`，上游 400 `"This response_format type is unavailable now"`（809ms + 一次熔断失败记账），再兜底 gpt-5.5 成功。SSH box `sqlite3 helm.db` 取 `telemetry.decision_json`+`request_payloads` 实证。
