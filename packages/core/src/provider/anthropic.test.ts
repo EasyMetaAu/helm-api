@@ -6,6 +6,7 @@ import {
   readAnthropicSSERaw,
   translateAnthropicSSE,
 } from "./anthropic.js";
+import { STRICT_CLAUDE_CLI_TOOL_GOLDEN } from "./fixtures/claude-cli-strict-tool.js";
 import { UpstreamError } from "./openai.js";
 
 describe("openaiToAnthropicRequest", () => {
@@ -1262,6 +1263,25 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function countCacheControlBlocks(body: Record<string, unknown>): number {
+  let count = 0;
+  const countBlocks = (value: unknown) => {
+    if (!Array.isArray(value)) return;
+    for (const block of value as Array<Record<string, unknown>>) {
+      if (block.cache_control !== undefined) count += 1;
+    }
+  };
+
+  countBlocks(body.system);
+  for (const message of Array.isArray(body.messages)
+    ? (body.messages as Array<Record<string, unknown>>)
+    : []) {
+    countBlocks(message.content);
+  }
+  countBlocks(body.tools);
+  return count;
+}
+
 describe("createAnthropicClient", () => {
   it("marks the client as the Anthropic Messages native protocol profile", () => {
     const client = createAnthropicClient({
@@ -1626,6 +1646,107 @@ describe("createAnthropicClient", () => {
     expect(seenCch[1]).not.toBe(seenCch[0]);
   });
 
+  it("strict Claude CLI tool pipeline matches the golden fixture and restores tool names", async () => {
+    let sentBody = "";
+    let sentHeaderOrder: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = String(init?.body);
+      sentHeaderOrder = Object.keys(init?.headers as Record<string, string>);
+      const body = JSON.parse(sentBody) as { tools: Array<{ name: string }> };
+      return jsonResponse({
+        id: "m",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: body.tools[0]?.name,
+            input: { path: "README.md" },
+          },
+        ],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => "Bearer T",
+        metadataUserId: '{"device_id":"D","account_uuid":"","session_id":"S"}',
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const response = await client.chatCompletion({
+      model: "claude-opus-4-8",
+      messages: [
+        {
+          role: "system",
+          content: [{ type: "text", text: "stable system", cache_control: { type: "ephemeral" } }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "read the file",
+              cache_control: { type: "ephemeral", ttl: "1h" },
+            },
+          ],
+        },
+      ],
+      max_tokens: 4096,
+      thinking: { type: "enabled", budget_tokens: 1024 },
+      context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+      tool_choice: { type: "function", function: { name: "read_file" } },
+      tools: [
+        {
+          type: "function",
+          cache_control: { type: "ephemeral" },
+          function: {
+            name: "read_file",
+            description: "Read a file",
+            parameters: { type: "object" },
+          },
+        },
+        {
+          type: "function",
+          cache_control: { type: "ephemeral" },
+          function: {
+            name: "mcp__codegraph__codegraph_context",
+            description: "Load code context",
+            parameters: { type: "object", properties: { query: { type: "string" } } },
+          },
+        },
+      ],
+    });
+
+    const parsed = JSON.parse(sentBody) as Record<string, unknown> & {
+      tools: Array<{ name: string; input_schema: Record<string, unknown> }>;
+      tool_choice: Record<string, unknown>;
+    };
+    expect(Object.keys(parsed)).toEqual(STRICT_CLAUDE_CLI_TOOL_GOLDEN.bodyKeys);
+    expect(sentHeaderOrder.slice(0, STRICT_CLAUDE_CLI_TOOL_GOLDEN.headerPrefix.length)).toEqual(
+      STRICT_CLAUDE_CLI_TOOL_GOLDEN.headerPrefix,
+    );
+    expect(parsed.tools.map((tool) => tool.name)).toEqual([
+      STRICT_CLAUDE_CLI_TOOL_GOLDEN.toolAliases.read_file,
+      STRICT_CLAUDE_CLI_TOOL_GOLDEN.toolAliases.mcp__codegraph__codegraph_context,
+    ]);
+    expect(parsed.tools[0]?.input_schema).toEqual({ type: "object", properties: {} });
+    expect(parsed.tool_choice).toEqual({ type: "tool", name: "Read" });
+    expect(parsed.thinking).toBeUndefined();
+    expect(parsed.context_management).toBeUndefined();
+    expect(countCacheControlBlocks(parsed)).toBeLessThanOrEqual(
+      STRICT_CLAUDE_CLI_TOOL_GOLDEN.maxCacheControlBlocks,
+    );
+    const narrowedResponse = response as {
+      choices: Array<{
+        message: { tool_calls?: Array<{ function: { name: string } }> };
+      }>;
+    };
+    expect(narrowedResponse.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("read_file");
+  });
+
   it("adds feature beta headers for Anthropic context_management and fast mode", async () => {
     let seen: Headers | null = null;
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
@@ -1763,6 +1884,52 @@ describe("createAnthropicClient", () => {
     expect(joined).toContain('"content":"Hi"');
     expect(joined).toContain('"finish_reason":"stop"');
     expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("streams: restores strict-cloaked tool names back to the client names", async () => {
+    let sentToolName = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { tools: Array<{ name: string }> };
+      sentToolName = body.tools[0]?.name ?? "";
+      return sseResponse([
+        { type: "message_start", message: { id: "m", usage: { input_tokens: 4 } } },
+        {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "tool_use", id: "toolu_1", name: sentToolName, input: {} },
+        },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "input_json_delta", partial_json: '{"path":"README.md"}' },
+        },
+        { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 2 } },
+        { type: "message_stop" },
+      ]);
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", getAuthHeader: async () => "Bearer T" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const c of client.chatCompletionStream({
+      model: "claude-x",
+      messages: [{ role: "user", content: "read" }],
+      tools: [
+        {
+          type: "function",
+          function: { name: "read_file", parameters: { type: "object" } },
+        },
+      ],
+    })) {
+      chunks.push(c);
+    }
+
+    expect(sentToolName).toBe(STRICT_CLAUDE_CLI_TOOL_GOLDEN.toolAliases.read_file);
+    const joined = chunks.join("");
+    expect(joined).toContain('"name":"read_file"');
+    expect(joined).not.toContain('"name":"Read"');
   });
 
   it("streams: throws UpstreamError before the first chunk on a non-2xx (no breaker-tripping mid-stream)", async () => {

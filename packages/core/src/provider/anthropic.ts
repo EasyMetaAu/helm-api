@@ -174,6 +174,46 @@ const CLAUDE_CLI_HEADER_CANONICAL = new Map(
 );
 
 type EffectiveClaudeCliFingerprintMode = "off" | "conservative" | "strict";
+type ToolNameReverseMap = {
+  toOriginal(name: string): string | undefined;
+};
+type AnthropicRequestResult = {
+  res: Response;
+  toolNameMap?: ToolNameReverseMap;
+};
+
+const STRICT_TOOL_RENAME_MAP: Record<string, string> = {
+  bash: "Bash",
+  read: "Read",
+  read_file: "Read",
+  write: "Write",
+  write_file: "Write",
+  edit: "Edit",
+  patch: "Edit",
+  apply_patch: "ApplyPatch",
+  multiedit: "MultiEdit",
+  multi_edit: "MultiEdit",
+  glob: "Glob",
+  grep: "Grep",
+  grep_search: "Grep",
+  search_files: "Grep",
+  list_directory: "Glob",
+  run_command: "Bash",
+  terminal: "Bash",
+  task: "Task",
+  webfetch: "WebFetch",
+  websearch: "WebSearch",
+  todowrite: "TodoWrite",
+  todo_write: "TodoWrite",
+  todoread: "TodoRead",
+  todo_read: "TodoRead",
+  question: "Question",
+  skill: "Skill",
+  notebook: "Notebook",
+  lsp: "Lsp",
+};
+const STRICT_BUILTIN_TOOL_NAMES = new Set(Object.values(STRICT_TOOL_RENAME_MAP));
+const MAX_CACHE_CONTROL_BLOCKS = 4;
 
 // ── request translation: OpenAI-Chat IR -> Anthropic Messages ────────────────
 
@@ -336,6 +376,190 @@ function isOfficialAnthropicBaseUrl(baseUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function toPascalCaseToolName(name: string): string {
+  const pascal = name
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join("");
+  return pascal || name;
+}
+
+function needsStrictToolCloak(name: string): boolean {
+  if (name.length === 0) return false;
+  if (STRICT_BUILTIN_TOOL_NAMES.has(name)) return false;
+  return /[a-z]/.test(name.charAt(0)) || name.includes("_") || name.includes("-");
+}
+
+function strictToolHash(name: string): string {
+  return createHash("sha256").update(name).digest("hex").slice(0, 8);
+}
+
+function sanitizeStrictToolAlias(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9_]/g, "_").replace(/^_+|_+$/g, "");
+  return (cleaned === "" ? "Tool" : cleaned).slice(0, 64);
+}
+
+function normalizeStrictToolSchema(schema: unknown): unknown {
+  if (!isRecord(schema)) return { type: "object", properties: {} };
+  if (schema.type === "object" && !isRecord(schema.properties)) {
+    return { ...schema, properties: {} };
+  }
+  return schema;
+}
+
+function createStrictToolCloaker(initialNames: readonly string[]): {
+  aliasFor(name: string): string;
+  toOriginal(name: string): string | undefined;
+  hasMappings(): boolean;
+} {
+  const used = new Set(initialNames.filter((name) => name.length > 0));
+  const assigned = new Map<string, string>();
+  const reverse = new Map<string, string>();
+
+  function uniqueAlias(base: string, original: string): string {
+    let alias = sanitizeStrictToolAlias(base);
+    if (!used.has(alias) || alias === original) return alias;
+    const suffix = `_${strictToolHash(original)}`;
+    const prefix = alias.slice(0, Math.max(1, 64 - suffix.length)).replace(/_+$/g, "");
+    alias = `${prefix}${suffix}`.slice(0, 64);
+    let counter = 1;
+    while (used.has(alias) && alias !== original) {
+      const nextSuffix = `_${strictToolHash(`${original}:${counter}`)}`;
+      const nextPrefix = alias.slice(0, Math.max(1, 64 - nextSuffix.length)).replace(/_+$/g, "");
+      alias = `${nextPrefix}${nextSuffix}`.slice(0, 64);
+      counter += 1;
+    }
+    return alias;
+  }
+
+  return {
+    aliasFor(name) {
+      if (!needsStrictToolCloak(name)) return name;
+      const existing = assigned.get(name);
+      if (existing !== undefined) return existing;
+      const base = STRICT_TOOL_RENAME_MAP[name] ?? toPascalCaseToolName(name);
+      const alias = uniqueAlias(base, name);
+      used.delete(name);
+      used.add(alias);
+      assigned.set(name, alias);
+      if (alias !== name) reverse.set(alias, name);
+      return alias;
+    },
+    toOriginal(name) {
+      return reverse.get(name);
+    },
+    hasMappings() {
+      return reverse.size > 0;
+    },
+  };
+}
+
+function collectToolNames(body: Record<string, unknown>): string[] {
+  const names: string[] = [];
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) {
+      if (isRecord(tool) && typeof tool.name === "string") names.push(tool.name);
+    }
+  }
+  return names;
+}
+
+function applyStrictToolPipeline(body: Record<string, unknown>): ToolNameReverseMap | undefined {
+  const cloaker = createStrictToolCloaker(collectToolNames(body));
+
+  if (Array.isArray(body.tools)) {
+    body.tools = body.tools.map((tool) => {
+      if (!isRecord(tool)) return tool;
+      const next = { ...tool };
+      if (typeof next.name === "string") next.name = cloaker.aliasFor(next.name);
+      next.input_schema = normalizeStrictToolSchema(next.input_schema);
+      return next;
+    });
+  }
+
+  if (Array.isArray(body.messages)) {
+    body.messages = body.messages.map((message) => {
+      if (!isRecord(message) || !Array.isArray(message.content)) return message;
+      let changed = false;
+      const content = message.content.map((block) => {
+        if (isRecord(block) && block.type === "tool_use" && typeof block.name === "string") {
+          const alias = cloaker.aliasFor(block.name);
+          if (alias !== block.name) {
+            changed = true;
+            return { ...block, name: alias };
+          }
+        }
+        return block;
+      });
+      return changed ? { ...message, content } : message;
+    });
+  }
+
+  if (isRecord(body.tool_choice) && body.tool_choice.type === "tool") {
+    const name = body.tool_choice.name;
+    if (typeof name === "string")
+      body.tool_choice = { ...body.tool_choice, name: cloaker.aliasFor(name) };
+  }
+
+  return cloaker.hasMappings() ? cloaker : undefined;
+}
+
+function countAndLimitCacheControl(value: unknown, state: { remaining: number }): void {
+  if (!Array.isArray(value)) return;
+  for (const block of value as Array<Record<string, unknown>>) {
+    if (!isRecord(block) || block.cache_control === undefined) continue;
+    if (state.remaining > 0) {
+      state.remaining -= 1;
+    } else {
+      delete block.cache_control;
+    }
+  }
+}
+
+function enforceStrictCacheControlLimit(body: Record<string, unknown>): void {
+  const state = { remaining: MAX_CACHE_CONTROL_BLOCKS };
+  countAndLimitCacheControl(body.system, state);
+  if (Array.isArray(body.messages)) {
+    for (const message of body.messages) {
+      if (isRecord(message)) countAndLimitCacheControl(message.content, state);
+    }
+  }
+  countAndLimitCacheControl(body.tools, state);
+}
+
+function enforceStrictThinkingConstraints(body: Record<string, unknown>): void {
+  const toolChoice = body.tool_choice;
+  const forcedToolChoice =
+    toolChoice === "any" ||
+    (isRecord(toolChoice) && (toolChoice.type === "any" || toolChoice.type === "tool"));
+  if (forcedToolChoice && body.thinking !== undefined) {
+    delete body.thinking;
+    delete body.context_management;
+    return;
+  }
+  const thinking = body.thinking;
+  if (isRecord(thinking) && (thinking.type === "enabled" || thinking.type === "adaptive")) {
+    body.temperature = 1;
+    delete body.top_p;
+    delete body.top_k;
+  }
+}
+
+function prepareStrictClaudeCliBody(body: Record<string, unknown>): {
+  body: Record<string, unknown>;
+  toolNameMap?: ToolNameReverseMap;
+} {
+  const toolNameMap = applyStrictToolPipeline(body);
+  enforceStrictThinkingConstraints(body);
+  enforceStrictCacheControlLimit(body);
+  return toolNameMap ? { body, toolNameMap } : { body };
 }
 
 function orderTopLevelFields(
@@ -1059,6 +1283,7 @@ const STOP_MAP: Record<string, string> = {
 export function anthropicToOpenAIResponse(
   resp: Record<string, unknown>,
   model: string,
+  toolNameMap?: ToolNameReverseMap,
 ): ChatCompletionResponse {
   const content = Array.isArray(resp.content)
     ? (resp.content as Array<Record<string, unknown>>)
@@ -1068,10 +1293,14 @@ export function anthropicToOpenAIResponse(
   for (const block of content) {
     if (block.type === "text" && typeof block.text === "string") text += block.text;
     if (block.type === "tool_use") {
+      const name =
+        typeof block.name === "string"
+          ? (toolNameMap?.toOriginal(block.name) ?? block.name)
+          : block.name;
       toolCalls.push({
         id: block.id,
         type: "function",
-        function: { name: block.name, arguments: JSON.stringify(block.input ?? {}) },
+        function: { name, arguments: JSON.stringify(block.input ?? {}) },
       });
     }
   }
@@ -1215,7 +1444,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     extraBetas: readonly string[] = [],
     capture?: (wireBody: string) => void,
     includeClaudeCliRuntimeHeaders = true,
-  ): Promise<Response> {
+  ): Promise<AnthropicRequestResult> {
     const body = nativePassthroughBody(input);
     const prepared = prepareNativePassthroughRequest(
       input,
@@ -1230,8 +1459,11 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     );
     const strictClaudeCliFingerprint =
       fingerprintMode === "strict" && includeClaudeCliRuntimeHeaders === true;
+    const strictPrepared = strictClaudeCliFingerprint
+      ? prepareStrictClaudeCliBody(prepared.body)
+      : { body: prepared.body };
     const wireBody = strictClaudeCliFingerprint
-      ? serializeAnthropicBody(prepared.body, { strictClaudeCliFingerprint: true })
+      ? serializeAnthropicBody(strictPrepared.body, { strictClaudeCliFingerprint: true })
       : prepared.bodyText;
     const wireHeaders = strictClaudeCliFingerprint
       ? orderClaudeCliHeaders(prepared.headers)
@@ -1242,7 +1474,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     capture?.(wireBody);
     // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
     // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
-    return withConnectionRetry(
+    const res = await withConnectionRetry(
       async () => {
         const t = withTimeout(timeoutMs, external);
         try {
@@ -1263,6 +1495,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       },
       { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
     );
+    return strictPrepared.toolNameMap ? { res, toolNameMap: strictPrepared.toolNameMap } : { res };
   }
 
   async function requestWithRetry(
@@ -1272,8 +1505,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     extraBetas: readonly string[] = [],
     capture?: (wireBody: string) => void,
     includeClaudeCliRuntimeHeaders = true,
-  ): Promise<Response> {
-    const res = await request(
+  ): Promise<AnthropicRequestResult> {
+    const result = await request(
       body,
       external,
       endpointUrl,
@@ -1281,8 +1514,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       capture,
       includeClaudeCliRuntimeHeaders,
     );
-    if (res.status === 401 && cfg.onUnauthorized !== undefined) {
-      await res.body?.cancel().catch(() => {});
+    if (result.res.status === 401 && cfg.onUnauthorized !== undefined) {
+      await result.res.body?.cancel().catch(() => {});
       cfg.onUnauthorized();
       return await request(
         body,
@@ -1293,7 +1526,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         includeClaudeCliRuntimeHeaders,
       );
     }
-    return res;
+    return result;
   }
 
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
@@ -1314,7 +1547,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
 
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
-      const res = await requestWithRetry(
+      const { res, toolNameMap } = await requestWithRetry(
         openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId }),
         opts?.signal,
         url,
@@ -1323,7 +1556,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       );
       if (!res.ok) throw await errorFromResponse(res);
       const anthResp = (await res.json()) as Record<string, unknown>;
-      return anthropicToOpenAIResponse(anthResp, model);
+      return anthropicToOpenAIResponse(anthResp, model, toolNameMap);
     },
 
     async *chatCompletionStream(req, opts) {
@@ -1332,9 +1565,15 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         ...openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId }),
         stream: true,
       };
-      const res = await requestWithRetry(body, opts?.signal, url, [], opts?.captureUpstream);
+      const { res, toolNameMap } = await requestWithRetry(
+        body,
+        opts?.signal,
+        url,
+        [],
+        opts?.captureUpstream,
+      );
       if (!res.ok) throw await errorFromResponse(res);
-      yield* translateAnthropicSSE(res, model, timeoutMs);
+      yield* translateAnthropicSSE(res, model, timeoutMs, toolNameMap);
     },
 
     // Native protocol passthrough (issue #217, Phase 1): the inbound /v1/messages body
@@ -1346,13 +1585,22 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     // beta/user-agent/auth from the native body's own system[0]/context_management/speed,
     // so the same closure works unchanged on a native body.
     async nativePassthrough(body, opts) {
-      const res = await requestWithRetry(body, opts?.signal, url, [], opts?.captureUpstream, false);
+      const { res } = await requestWithRetry(
+        body,
+        opts?.signal,
+        url,
+        [],
+        opts?.captureUpstream,
+        false,
+      );
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as Record<string, unknown>;
     },
 
     async countTokens(req, opts) {
-      const res = await requestWithRetry(req, opts?.signal, countTokensUrl, [TOKEN_COUNTING_BETA]);
+      const { res } = await requestWithRetry(req, opts?.signal, countTokensUrl, [
+        TOKEN_COUNTING_BETA,
+      ]);
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as Record<string, unknown>;
     },
@@ -1364,7 +1612,14 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     // chatCompletionStream), then the upstream SSE is BYTE-RELAYED unchanged via
     // readAnthropicSSERaw — no SSE re-mapping state machine to mis-translate (principle 8).
     async *nativePassthroughStream(body, opts) {
-      const res = await requestWithRetry(body, opts?.signal, url, [], opts?.captureUpstream, false);
+      const { res } = await requestWithRetry(
+        body,
+        opts?.signal,
+        url,
+        [],
+        opts?.captureUpstream,
+        false,
+      );
       if (!res.ok) throw await errorFromResponse(res);
       yield* readAnthropicSSERaw(res, timeoutMs);
     },
@@ -1460,6 +1715,7 @@ export async function* translateAnthropicSSE(
   // request timeout so a stream that wedges mid-flight is reclaimed rather than
   // hanging forever (the connect/TTFB timeout was already cleared at headers).
   idleMs = 0,
+  toolNameMap?: ToolNameReverseMap,
 ): AsyncGenerator<string> {
   const body = res.body;
   if (!body) return;
@@ -1523,7 +1779,13 @@ export async function* translateAnthropicSSE(
                     index: toolIndex,
                     id: block.id,
                     type: "function",
-                    function: { name: block.name, arguments: "" },
+                    function: {
+                      name:
+                        typeof block.name === "string"
+                          ? (toolNameMap?.toOriginal(block.name) ?? block.name)
+                          : block.name,
+                      arguments: "",
+                    },
                   },
                 ],
               },
