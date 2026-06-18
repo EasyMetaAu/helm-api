@@ -2,12 +2,16 @@ import { createRequire } from "node:module";
 import type { ProxyConfig } from "./proxy.js";
 import { validateProxyConfig } from "./proxy.js";
 
-type WreqSession = {
-  fetch: (url: string, options?: Record<string, unknown>) => Promise<Response>;
+type WreqTransport = {
   close: () => Promise<void> | void;
 };
 
-type CreateWreqSession = (options: Record<string, unknown>) => Promise<WreqSession>;
+type CreateWreqTransport = (options: Record<string, unknown>) => Promise<WreqTransport>;
+type WreqFetch = (url: string, options?: Record<string, unknown>) => Promise<Response>;
+type WreqModule = {
+  createTransport: CreateWreqTransport;
+  fetch: WreqFetch;
+};
 type FetchHeadersInit =
   | Headers
   | Array<readonly [string, string] | readonly string[]>
@@ -24,17 +28,22 @@ export class TlsTransportUnavailableError extends Error {
   }
 }
 
-let createSessionOverride: CreateWreqSession | null | undefined;
+let wreqModuleOverride: WreqModule | null | undefined;
 
-export function __setWreqCreateSessionForTesting(fn: CreateWreqSession | null | undefined): void {
-  createSessionOverride = fn;
+export function __setWreqModuleForTesting(mod: WreqModule | null | undefined): void {
+  wreqModuleOverride = mod;
 }
 
-async function loadCreateSession(): Promise<CreateWreqSession | null> {
-  if (createSessionOverride !== undefined) return createSessionOverride;
+async function loadWreqModule(): Promise<WreqModule | null> {
+  if (wreqModuleOverride !== undefined) return wreqModuleOverride;
   try {
-    const mod = require("wreq-js") as { createSession?: CreateWreqSession };
-    return typeof mod.createSession === "function" ? mod.createSession : null;
+    const mod = require("wreq-js") as {
+      createTransport?: CreateWreqTransport;
+      fetch?: WreqFetch;
+    };
+    return typeof mod.createTransport === "function" && typeof mod.fetch === "function"
+      ? { createTransport: mod.createTransport, fetch: mod.fetch }
+      : null;
   } catch {
     return null;
   }
@@ -79,6 +88,27 @@ function bodyRequestsStreaming(body: unknown): boolean {
   }
 }
 
+function wreqTransientCode(err: unknown): string | null {
+  if (typeof err !== "object" || err === null) return null;
+  const e = err as { name?: unknown; message?: unknown };
+  if (e.name !== "RequestError" || typeof e.message !== "string") return null;
+  const message = e.message.toLowerCase();
+  if (message.includes("connection reset by peer")) return "ECONNRESET";
+  if (message.includes("connection refused")) return "ECONNREFUSED";
+  return null;
+}
+
+function normalizeWreqConnectionError(err: unknown): unknown {
+  const code = wreqTransientCode(err);
+  if (!code) return err;
+  if (typeof err === "object" && err !== null) {
+    const e = err as { code?: unknown };
+    e.code = code;
+    return err;
+  }
+  return err;
+}
+
 export interface TlsImpersonationFetchOptions {
   proxy?: ProxyConfig;
   browser?: string;
@@ -89,48 +119,63 @@ export interface TlsImpersonationFetchOptions {
 export function makeTlsImpersonationFetch(
   options: TlsImpersonationFetchOptions = {},
 ): typeof globalThis.fetch {
-  let sessionPromise: Promise<WreqSession> | null = null;
-  const sessionOptions: Record<string, unknown> = {
+  let transportPromise: Promise<WreqTransport> | null = null;
+  let wreqFetch: WreqFetch | null = null;
+  const transportOptions: Record<string, unknown> = {
     browser: options.browser ?? "chrome_142",
     os: options.os ?? "macos",
   };
-  if (options.proxy) sessionOptions.proxy = proxyConfigToUrl(options.proxy);
+  if (options.proxy) transportOptions.proxy = proxyConfigToUrl(options.proxy);
 
-  async function session(): Promise<WreqSession> {
-    if (sessionPromise) return sessionPromise;
-    sessionPromise = (async () => {
-      const createSession = await loadCreateSession();
-      if (!createSession) {
+  async function transport(): Promise<WreqTransport> {
+    if (transportPromise) return transportPromise;
+    transportPromise = (async () => {
+      const mod = await loadWreqModule();
+      if (!mod) {
         throw new TlsTransportUnavailableError(
           "TLS impersonation transport requested but wreq-js is unavailable",
         );
       }
-      return await createSession(sessionOptions);
+      wreqFetch = mod.fetch;
+      return await mod.createTransport(transportOptions);
     })().catch((err) => {
-      sessionPromise = null;
+      transportPromise = null;
+      wreqFetch = null;
       throw err;
     });
-    return sessionPromise;
+    return transportPromise;
   }
 
   return (async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
     const url =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const s = await session();
+    const t = await transport();
+    const fetch = wreqFetch;
+    if (!fetch) {
+      throw new TlsTransportUnavailableError(
+        "TLS impersonation transport requested but wreq-js is unavailable",
+      );
+    }
     const method = init?.method ?? (input instanceof Request ? input.method : "GET");
     const headers = normalizeHeaders(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
     );
     const body = init?.body ?? (input instanceof Request ? input.body : undefined);
     const timeout = bodyRequestsStreaming(body) ? 0 : (options.timeoutMs ?? 0);
-    return await s.fetch(url, {
-      method,
-      headers,
-      disableDefaultHeaders: true,
-      timeout,
-      ...(body !== undefined && body !== null ? { body } : {}),
-      ...(init?.redirect ? { redirect: init.redirect } : {}),
-      ...(init?.signal ? { signal: init.signal } : {}),
-    });
+    try {
+      return await fetch(url, {
+        method,
+        headers,
+        transport: t,
+        cookieMode: "ephemeral",
+        disableDefaultHeaders: true,
+        timeout,
+        ...(body !== undefined && body !== null ? { body } : {}),
+        ...(init?.redirect ? { redirect: init.redirect } : {}),
+        ...(init?.signal ? { signal: init.signal } : {}),
+      });
+    } catch (err) {
+      throw normalizeWreqConnectionError(err);
+    }
   }) as typeof globalThis.fetch;
 }

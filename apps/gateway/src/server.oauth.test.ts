@@ -1,5 +1,5 @@
 import {
-  __setWreqCreateSessionForTesting,
+  __setWreqModuleForTesting,
   createSqliteDb,
   encryptSecret,
   SqliteConfigStore,
@@ -64,7 +64,7 @@ function setEnv(env: Record<string, string>): string[] {
 const ADDED_KEYS: string[] = [];
 afterEach(() => {
   for (const k of ADDED_KEYS.splice(0)) delete process.env[k];
-  __setWreqCreateSessionForTesting(undefined);
+  __setWreqModuleForTesting(undefined);
   vi.restoreAllMocks();
 });
 
@@ -174,10 +174,15 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
   it("uses TLS impersonation fetch for opted-in Anthropic preset OAuth execution", async () => {
     const { ctx } = oauthStores();
     await seedAnthropic(ctx, "default");
-    const wreqCalls: Array<{ session: unknown; url: string; init: Record<string, unknown> }> = [];
-    __setWreqCreateSessionForTesting(async (sessionOptions) => ({
+    const wreqCalls: Array<{ transport: unknown; url: string; init: Record<string, unknown> }> = [];
+    const transport = { close: vi.fn() };
+    __setWreqModuleForTesting({
+      createTransport: async (transportOptions) => {
+        wreqCalls.push({ transport: transportOptions, url: "createTransport", init: {} });
+        return transport;
+      },
       fetch: async (url, init = {}) => {
-        wreqCalls.push({ session: sessionOptions, url, init });
+        wreqCalls.push({ transport: init.transport, url, init });
         return new Response(
           JSON.stringify({
             id: "msg_1",
@@ -191,8 +196,7 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       },
-      close: vi.fn(),
-    }));
+    });
     const anthropic = provider({
       name: "anthropic",
       type: "anthropic",
@@ -208,10 +212,12 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
       messages: [{ role: "user", content: "hello" }],
     });
 
-    expect(wreqCalls).toHaveLength(1);
-    expect(wreqCalls[0]?.session).toMatchObject({ browser: "chrome_142", os: "macos" });
-    expect(wreqCalls[0]?.url).toBe("https://api.anthropic.com/v1/messages");
-    const headers = wreqCalls[0]?.init.headers as Record<string, string>;
+    expect(wreqCalls).toHaveLength(2);
+    expect(wreqCalls[0]?.transport).toMatchObject({ browser: "chrome_142", os: "macos" });
+    expect(wreqCalls[1]?.transport).toBe(transport);
+    expect(wreqCalls[1]?.url).toBe("https://api.anthropic.com/v1/messages");
+    expect(wreqCalls[1]?.init.cookieMode).toBe("ephemeral");
+    const headers = wreqCalls[1]?.init.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer access-default");
   });
 

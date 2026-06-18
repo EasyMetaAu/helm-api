@@ -532,7 +532,7 @@ export {
   toRegistryProviders,
 } from "./provider/registry.js";
 export {
-  __setWreqCreateSessionForTesting,
+  __setWreqModuleForTesting,
   makeTlsImpersonationFetch,
   proxyConfigToUrl,
   type TlsImpersonationFetchOptions,

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProxyConfig } from "./proxy.js";
+import { isTransientConnectionError } from "./retry.js";
 import {
-  __setWreqCreateSessionForTesting,
+  __setWreqModuleForTesting,
   makeTlsImpersonationFetch,
   proxyConfigToUrl,
   TlsTransportUnavailableError,
@@ -16,7 +17,7 @@ const HTTP_PROXY: ProxyConfig = {
 };
 
 afterEach(() => {
-  __setWreqCreateSessionForTesting(undefined);
+  __setWreqModuleForTesting(undefined);
 });
 
 describe("proxyConfigToUrl", () => {
@@ -32,12 +33,16 @@ describe("proxyConfigToUrl", () => {
 });
 
 describe("makeTlsImpersonationFetch", () => {
-  it("creates a lazy wreq session and forwards fetch options", async () => {
-    const sessionOptions: unknown[] = [];
+  it("creates a lazy wreq transport and forwards fetch options", async () => {
+    const transportOptions: unknown[] = [];
+    const transport = { close: vi.fn() };
     const fetchSpy = vi.fn(async () => new Response("ok", { status: 200 }));
-    __setWreqCreateSessionForTesting(async (options) => {
-      sessionOptions.push(options);
-      return { fetch: fetchSpy, close: vi.fn() };
+    __setWreqModuleForTesting({
+      createTransport: async (options) => {
+        transportOptions.push(options);
+        return transport;
+      },
+      fetch: fetchSpy,
     });
 
     const tlsFetch = makeTlsImpersonationFetch({
@@ -54,7 +59,7 @@ describe("makeTlsImpersonationFetch", () => {
     });
 
     expect(await res.text()).toBe("ok");
-    expect(sessionOptions).toEqual([
+    expect(transportOptions).toEqual([
       {
         browser: "chrome_142",
         os: "linux",
@@ -64,6 +69,8 @@ describe("makeTlsImpersonationFetch", () => {
     expect(fetchSpy).toHaveBeenCalledWith("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "x-test": "yes" },
+      transport,
+      cookieMode: "ephemeral",
       disableDefaultHeaders: true,
       timeout: 1234,
       body: "{}",
@@ -71,8 +78,12 @@ describe("makeTlsImpersonationFetch", () => {
   });
 
   it("disables wreq default browser headers and total timeout for streaming bodies", async () => {
+    const transport = { close: vi.fn() };
     const fetchSpy = vi.fn(async () => new Response("ok", { status: 200 }));
-    __setWreqCreateSessionForTesting(async () => ({ fetch: fetchSpy, close: vi.fn() }));
+    __setWreqModuleForTesting({
+      createTransport: async () => transport,
+      fetch: fetchSpy,
+    });
 
     const tlsFetch = makeTlsImpersonationFetch({ timeoutMs: 1234 });
     const body = JSON.stringify({ model: "claude-opus", stream: true });
@@ -86,6 +97,8 @@ describe("makeTlsImpersonationFetch", () => {
     expect(fetchSpy).toHaveBeenCalledWith("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { Accept: "application/json" },
+      transport,
+      cookieMode: "ephemeral",
       disableDefaultHeaders: true,
       timeout: 0,
       body,
@@ -93,8 +106,12 @@ describe("makeTlsImpersonationFetch", () => {
   });
 
   it("uses no wreq total timeout by default for non-streaming bodies", async () => {
+    const transport = { close: vi.fn() };
     const fetchSpy = vi.fn(async () => new Response("ok", { status: 200 }));
-    __setWreqCreateSessionForTesting(async () => ({ fetch: fetchSpy, close: vi.fn() }));
+    __setWreqModuleForTesting({
+      createTransport: async () => transport,
+      fetch: fetchSpy,
+    });
 
     const tlsFetch = makeTlsImpersonationFetch();
     const body = JSON.stringify({ model: "claude-opus" });
@@ -107,14 +124,64 @@ describe("makeTlsImpersonationFetch", () => {
     expect(fetchSpy).toHaveBeenCalledWith("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: undefined,
+      transport,
+      cookieMode: "ephemeral",
       disableDefaultHeaders: true,
       timeout: 0,
       body,
     });
   });
 
+  it("uses ephemeral cookies on every request instead of a persistent session jar", async () => {
+    const transport = { close: vi.fn() };
+    const fetchSpy = vi.fn(async (_url: string, _init?: Record<string, unknown>) => {
+      return new Response("ok", { status: 200 });
+    });
+    const createTransport = vi.fn(async () => transport);
+    __setWreqModuleForTesting({ createTransport, fetch: fetchSpy });
+
+    const tlsFetch = makeTlsImpersonationFetch();
+
+    await tlsFetch("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" });
+    await tlsFetch("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" });
+
+    expect(createTransport).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    for (const [, init] of fetchSpy.mock.calls) {
+      expect(init).toMatchObject({ transport, cookieMode: "ephemeral" });
+      expect(init).not.toHaveProperty("session");
+      expect(init).not.toHaveProperty("sessionId");
+    }
+  });
+
+  it.each([
+    ["Connection reset by peer", "ECONNRESET"],
+    ["Connection refused", "ECONNREFUSED"],
+  ])("normalizes wreq RequestError '%s' for same-provider retry", async (message, code) => {
+    const err = Object.assign(new TypeError(message), { name: "RequestError" });
+    __setWreqModuleForTesting({
+      createTransport: async () => ({ close: vi.fn() }),
+      fetch: vi.fn(async () => {
+        throw err;
+      }),
+    });
+
+    const tlsFetch = makeTlsImpersonationFetch();
+
+    let caught: unknown;
+    try {
+      await tlsFetch("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBe(err);
+    expect(caught).toMatchObject({ code });
+    expect(isTransientConnectionError(caught)).toBe(true);
+  });
+
   it("throws a named unavailable error when the optional native package is absent", async () => {
-    __setWreqCreateSessionForTesting(null);
+    __setWreqModuleForTesting(null);
     const tlsFetch = makeTlsImpersonationFetch();
 
     await expect(tlsFetch("https://api.anthropic.com/v1/messages")).rejects.toBeInstanceOf(
