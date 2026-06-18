@@ -16,6 +16,7 @@ import {
   type OAuthRuntimeCtx,
   resolveProviderTransportProfile,
   synthesizeOAuthProviders,
+  tlsTransportProviders,
 } from "./server.js";
 
 // Compose a validated shared ProviderConfig (so tests exercise the real schema
@@ -258,6 +259,29 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
     });
 
     expect(() => makeProviderFetch(unsupported)).toThrow(/Anthropic preset OAuth/);
+  });
+
+  it("tlsTransportProviders lists only the providers that resolve to tls_chrome", () => {
+    const anthropicAuto = provider({
+      name: "anthropic",
+      type: "anthropic",
+      base_url: "https://api.anthropic.com",
+      oauth: { provider: "anthropic", account: "default" },
+      models: [{ alias: "anthropic/opus", provider_model: "claude-opus" }],
+    });
+    const anthropicOptedOut = provider({
+      name: "anthropic-undici",
+      type: "anthropic",
+      base_url: "https://api.anthropic.com",
+      oauth: { provider: "anthropic", account: "default" },
+      transport_profile: "default",
+      models: [{ alias: "anthropic-undici/opus", provider_model: "claude-opus" }],
+    });
+
+    expect(
+      tlsTransportProviders([anthropicAuto, anthropicOptedOut, KEY_PROVIDER, OAUTH_PROVIDER]),
+    ).toEqual(["anthropic"]);
+    expect(tlsTransportProviders([KEY_PROVIDER, OAUTH_PROVIDER])).toEqual([]);
   });
 });
 

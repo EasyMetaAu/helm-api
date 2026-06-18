@@ -179,3 +179,38 @@ export function makeTlsImpersonationFetch(
     }
   }) as typeof globalThis.fetch;
 }
+
+export interface TlsTransportProbeResult {
+  /** True when wreq-js loaded AND a throwaway transport could be created + closed. */
+  ok: boolean;
+  /** Human-readable reason when `ok` is false (module missing, native load failure, …). */
+  error?: string;
+}
+
+/**
+ * Startup probe for the optional Chrome-TLS transport. Loads wreq-js and creates
+ * (then closes) a throwaway transport so a missing/incompatible native binary
+ * surfaces at BOOT — not silently on the first Anthropic OAuth request, where the
+ * thrown {@link TlsTransportUnavailableError} would count as a provider failure,
+ * trip the circuit breaker, and degrade the request to the lane fallback chain.
+ * The impersonated `browser`/`os` do not select the native binary (that is picked
+ * from the runtime platform), so any value exercises the same load path.
+ */
+export async function checkTlsTransportAvailable(
+  options: Pick<TlsImpersonationFetchOptions, "browser" | "os"> = {},
+): Promise<TlsTransportProbeResult> {
+  const mod = await loadWreqModule();
+  if (!mod) {
+    return { ok: false, error: "wreq-js native transport is not loadable on this platform" };
+  }
+  try {
+    const transport = await mod.createTransport({
+      browser: options.browser ?? "chrome_142",
+      os: options.os ?? "macos",
+    });
+    await transport.close();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}

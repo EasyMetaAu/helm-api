@@ -3,6 +3,7 @@ import type { ProxyConfig } from "./proxy.js";
 import { isTransientConnectionError } from "./retry.js";
 import {
   __setWreqModuleForTesting,
+  checkTlsTransportAvailable,
   makeTlsImpersonationFetch,
   proxyConfigToUrl,
   TlsTransportUnavailableError,
@@ -187,5 +188,45 @@ describe("makeTlsImpersonationFetch", () => {
     await expect(tlsFetch("https://api.anthropic.com/v1/messages")).rejects.toBeInstanceOf(
       TlsTransportUnavailableError,
     );
+  });
+});
+
+describe("checkTlsTransportAvailable", () => {
+  it("reports ok when wreq-js loads and a transport can be created + closed", async () => {
+    const close = vi.fn(async () => {});
+    const createTransport = vi.fn(async () => ({ close }));
+    __setWreqModuleForTesting({
+      createTransport,
+      fetch: async () => new Response("ok"),
+    });
+
+    const result = await checkTlsTransportAvailable({ browser: "chrome_142", os: "linux" });
+
+    expect(result).toEqual({ ok: true });
+    expect(createTransport).toHaveBeenCalledWith({ browser: "chrome_142", os: "linux" });
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("reports not-ok when the optional native package is absent", async () => {
+    __setWreqModuleForTesting(null);
+
+    const result = await checkTlsTransportAvailable();
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/wreq-js/);
+  });
+
+  it("reports not-ok with the failure reason when createTransport throws", async () => {
+    __setWreqModuleForTesting({
+      createTransport: async () => {
+        throw new Error("native binary load failed");
+      },
+      fetch: async () => new Response("ok"),
+    });
+
+    const result = await checkTlsTransportAvailable();
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("native binary load failed");
   });
 });

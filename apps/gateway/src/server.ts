@@ -7,6 +7,7 @@ import {
   bootstrapRootKey,
   COPILOT_HEADERS,
   type ConfigStore,
+  checkTlsTransportAvailable,
   createAnthropicClient,
   createBudgetGate,
   createCachedKeyStore,
@@ -591,6 +592,15 @@ export function resolveProviderTransportProfile(p: ProviderConfigShared): Transp
   return isAnthropicPresetOAuth(p) ? "tls_chrome" : "default";
 }
 
+// Names of every provider that resolves to the Chrome-TLS transport (Anthropic
+// preset OAuth under transport_profile:auto, or an explicit tls_chrome). Used at
+// startup to probe the optional wreq-js native transport ONCE and warn loudly if
+// it cannot load — so the gap surfaces at deploy time, not silently on the first
+// Anthropic OAuth request (see checkTlsTransportAvailable / buildServer).
+export function tlsTransportProviders(cfgs: readonly ProviderConfigShared[]): string[] {
+  return cfgs.filter((p) => resolveProviderTransportProfile(p) === "tls_chrome").map((p) => p.name);
+}
+
 function optionalPositiveInt(raw: string | undefined): number | undefined {
   if (raw === undefined || raw.trim() === "") return undefined;
   const n = Number(raw);
@@ -906,6 +916,31 @@ export async function buildServer(
   const accountSettings: AccountSettingsMap = oauthCtx
     ? await loadAccountSettings(store.config, oauthCtx.encKey)
     : {};
+
+  // Chrome-TLS transport startup probe (#306). Any provider on transport_profile
+  // tls_chrome (Anthropic preset OAuth under `auto`, or explicit) executes through
+  // the OPTIONAL wreq-js native transport. If that binary cannot load, the first
+  // Anthropic request would throw TlsTransportUnavailableError — counted as a
+  // provider failure that trips the breaker and silently degrades to the lane
+  // fallback chain. Probe it ONCE here so the gap is loud at deploy time. Non-fatal
+  // (principle 3): the gateway still starts; the operator can set
+  // transport_profile:default to force the proven undici path.
+  const tlsProviders = tlsTransportProviders(config.providers);
+  if (tlsProviders.length > 0) {
+    const probe = await checkTlsTransportAvailable({
+      browser: process.env.HELM_TLS_BROWSER_PROFILE,
+      os: process.env.HELM_TLS_OS_PROFILE,
+    });
+    if (probe.ok) {
+      logger.log("info", "tls_transport.ready", { providers: tlsProviders });
+    } else {
+      logger.log("warn", "tls_transport.unavailable", {
+        providers: tlsProviders,
+        error: probe.error,
+        hint: "Anthropic OAuth execution will fail over to the lane fallback chain; set transport_profile:default on these providers to force undici, or install a wreq-js build for this platform",
+      });
+    }
+  }
 
   // Runtime-mutable settings (admin "System Settings"): persisted overrides for
   // the operator-facing subset that can change WITHOUT a restart (capture_payloads,
