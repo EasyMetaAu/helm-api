@@ -157,6 +157,65 @@ function buildInstructions(messages: Array<Record<string, unknown>>): string {
   return joined || DEFAULT_INSTRUCTIONS;
 }
 
+export type ResponsesInstructionsFix = "none" | "hoisted_from_input" | "defaulted";
+
+// Native-passthrough repair for the ChatGPT-account Codex backend, which MANDATES a
+// non-empty top-level `instructions` (the real Codex CLI always sends its base prompt
+// there). Standard-OpenAI Responses clients (e.g. pi-ai / pi-coding-agent) are spec-
+// compliant the OTHER way: they omit `instructions` and put the system prompt as a
+// leading `developer`/`system` item INSIDE `input`. The public OpenAI API treats the
+// two as equivalent, but the Codex subscription backend rejects the input-only shape
+// with HTTP 400 `{"detail":"Instructions are required"}`.
+//
+// The TRANSLATE path never hits this (buildInstructions injects a value), but the
+// VERBATIM passthrough path forwards the client body as-is. This pure shim repairs the
+// body WITHOUT abandoning passthrough (so prompt_cache_key / reasoning.encrypted_content
+// / SSE byte-relay all survive): it HOISTS the system/developer item content into
+// `instructions` and STRIPS those items from `input` — the SAME system→instructions
+// split buildInstructions/toResponsesInput already perform on the translate path, so the
+// forwarded body matches the real Codex CLI shape (instructions = system prompt, input =
+// conversation only). When `instructions` is already non-empty the body is returned
+// VERBATIM (same reference). When there is no system content to hoist, DEFAULT_INSTRUCTIONS
+// guarantees the backend never sees an empty value. Pure + deterministic (CLAUDE.md
+// principle 4); never mutates the input body.
+export function hoistResponsesInstructions(body: Record<string, unknown>): {
+  body: Record<string, unknown>;
+  fix: ResponsesInstructionsFix;
+} {
+  // Already carries instructions → forward byte-for-byte (verbatim passthrough).
+  if (typeof body.instructions === "string" && body.instructions.trim().length > 0) {
+    return { body, fix: "none" };
+  }
+  const input = body.input;
+  if (Array.isArray(input)) {
+    const systemParts: string[] = [];
+    const remaining: unknown[] = [];
+    for (const item of input) {
+      const role =
+        item !== null && typeof item === "object" ? (item as { role?: unknown }).role : undefined;
+      if (role === "system" || role === "developer") {
+        const text = plainText((item as { content?: unknown }).content);
+        if (text.length > 0) {
+          // Hoist this item's text into instructions and drop it from input.
+          systemParts.push(text);
+          continue;
+        }
+      }
+      remaining.push(item);
+    }
+    const joined = systemParts.join("\n\n");
+    if (joined.length > 0) {
+      return {
+        body: { ...body, instructions: joined, input: remaining },
+        fix: "hoisted_from_input",
+      };
+    }
+  }
+  // No system content anywhere (and instructions absent/empty): inject the default so
+  // the Codex backend never receives an empty `instructions`.
+  return { body: { ...body, instructions: DEFAULT_INSTRUCTIONS }, fix: "defaulted" };
+}
+
 function toResponsesInput(messages: Array<Record<string, unknown>>): ResponsesItem[] {
   const out: ResponsesItem[] = [];
   for (const m of messages) {

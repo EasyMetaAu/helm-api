@@ -11,6 +11,7 @@ import {
   applyForcedReasoningToNativeBody,
   canUseNativePassthrough,
   checkCapability,
+  hoistResponsesInstructions,
   type NativePassthroughDisableReason,
   openaiTransformer,
   resolveCostUsd,
@@ -525,6 +526,26 @@ function prepareNativeRequestForUpstream(
     if (mutations) {
       appendMutationList(mutations, "body_shims_applied", ["store_forced_false"]);
       mutations.provider_profile_applied = "codex_official_safe";
+    }
+  }
+
+  // The Codex backend MANDATES a non-empty top-level `instructions`. Standard-OpenAI
+  // Responses clients (pi-ai / pi-coding-agent) carry the system prompt as a leading
+  // developer/system item INSIDE `input` and omit `instructions`, so a verbatim forward
+  // 400s with "Instructions are required". Hoist that content into `instructions` (and
+  // strip it from `input`) so passthrough survives instead of burning a fallback hop.
+  if (needsCodexResponsesShim) {
+    const hoist = hoistResponsesInstructions(body);
+    if (hoist.fix !== "none") {
+      body = hoist.body;
+      bodyChanged = true;
+      if (mutations) {
+        appendMutationList(mutations, "body_shims_applied", [
+          hoist.fix === "hoisted_from_input"
+            ? "instructions_hoisted_from_input"
+            : "instructions_defaulted",
+        ]);
+      }
     }
   }
 

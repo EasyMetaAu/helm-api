@@ -504,7 +504,9 @@ export {
   createCodexResponsesClient,
   createGenericOpenAIResponsesClient,
   type GenericOpenAIResponsesClientDeps,
+  hoistResponsesInstructions,
   openaiToResponsesRequest,
+  type ResponsesInstructionsFix,
   translateResponsesSSE,
 } from "./provider/openai-responses.js";
 export {
