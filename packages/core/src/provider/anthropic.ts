@@ -562,6 +562,10 @@ function prepareStrictClaudeCliBody(body: Record<string, unknown>): {
   return toolNameMap ? { body, toolNameMap } : { body };
 }
 
+function cloneStrictClaudeCliBody(body: Record<string, unknown>): Record<string, unknown> {
+  return structuredClone(body) as Record<string, unknown>;
+}
+
 function orderTopLevelFields(
   body: Record<string, unknown>,
   fieldOrder: readonly string[],
@@ -1460,7 +1464,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     const strictClaudeCliFingerprint =
       fingerprintMode === "strict" && includeClaudeCliRuntimeHeaders === true;
     const strictPrepared = strictClaudeCliFingerprint
-      ? prepareStrictClaudeCliBody(prepared.body)
+      ? prepareStrictClaudeCliBody(cloneStrictClaudeCliBody(prepared.body))
       : { body: prepared.body };
     const wireBody = strictClaudeCliFingerprint
       ? serializeAnthropicBody(strictPrepared.body, { strictClaudeCliFingerprint: true })
