@@ -26,6 +26,9 @@
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
+  "optionalDependencies": {
+    "wreq-js": "^2.3.1"
+  },
   "devDependencies": {
     "@electric-sql/pglite": "^0.4.6",
     "@types/better-sqlite3": "^7.6.13"

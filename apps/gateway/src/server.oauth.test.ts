@@ -1,4 +1,5 @@
 import {
+  __setWreqModuleForTesting,
   createSqliteDb,
   encryptSecret,
   SqliteConfigStore,
@@ -11,7 +12,9 @@ import { setAccountSettings } from "./oauth/account-settings.js";
 import {
   buildCredential,
   buildProviderClients,
+  makeProviderFetch,
   type OAuthRuntimeCtx,
+  resolveProviderTransportProfile,
   synthesizeOAuthProviders,
 } from "./server.js";
 
@@ -61,6 +64,7 @@ function setEnv(env: Record<string, string>): string[] {
 const ADDED_KEYS: string[] = [];
 afterEach(() => {
   for (const k of ADDED_KEYS.splice(0)) delete process.env[k];
+  __setWreqModuleForTesting(undefined);
   vi.restoreAllMocks();
 });
 
@@ -165,6 +169,95 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
     expect(JSON.parse(init.body as string)).toMatchObject({
       messages: [{ role: "system", content: "Be concise." }],
     });
+  });
+
+  it("uses TLS impersonation fetch for opted-in Anthropic preset OAuth execution", async () => {
+    const { ctx } = oauthStores();
+    await seedAnthropic(ctx, "default");
+    const wreqCalls: Array<{ transport: unknown; url: string; init: Record<string, unknown> }> = [];
+    const transport = { close: vi.fn() };
+    __setWreqModuleForTesting({
+      createTransport: async (transportOptions) => {
+        wreqCalls.push({ transport: transportOptions, url: "createTransport", init: {} });
+        return transport;
+      },
+      fetch: async (url, init = {}) => {
+        wreqCalls.push({ transport: init.transport, url, init });
+        return new Response(
+          JSON.stringify({
+            id: "msg_1",
+            type: "message",
+            role: "assistant",
+            model: "claude-opus",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const anthropic = provider({
+      name: "anthropic",
+      type: "anthropic",
+      base_url: "https://api.anthropic.com",
+      oauth: { provider: "anthropic", account: "default" },
+      transport_profile: "tls_chrome",
+      models: [{ alias: "anthropic/opus", provider_model: "claude-opus" }],
+    });
+
+    const clients = buildProviderClients([anthropic], "https://fallback/v1", 60_000, ctx);
+    await clients.get("anthropic")?.chatCompletion({
+      model: "claude-opus",
+      messages: [{ role: "user", content: "hello" }],
+    });
+
+    expect(wreqCalls).toHaveLength(2);
+    expect(wreqCalls[0]?.transport).toMatchObject({ browser: "chrome_142", os: "macos" });
+    expect(wreqCalls[1]?.transport).toBe(transport);
+    expect(wreqCalls[1]?.url).toBe("https://api.anthropic.com/v1/messages");
+    expect(wreqCalls[1]?.init.cookieMode).toBe("ephemeral");
+    const headers = wreqCalls[1]?.init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer access-default");
+  });
+
+  it("auto-enables TLS transport only for Anthropic preset OAuth providers", () => {
+    const anthropic = provider({
+      name: "anthropic",
+      type: "anthropic",
+      base_url: "https://api.anthropic.com",
+      oauth: { provider: "anthropic", account: "default" },
+      models: [{ alias: "anthropic/opus", provider_model: "claude-opus" }],
+    });
+
+    expect(resolveProviderTransportProfile(anthropic)).toBe("tls_chrome");
+    expect(resolveProviderTransportProfile(KEY_PROVIDER)).toBe("default");
+  });
+
+  it("lets explicit default opt Anthropic preset OAuth out of TLS transport", () => {
+    const anthropic = provider({
+      name: "anthropic",
+      type: "anthropic",
+      base_url: "https://api.anthropic.com",
+      oauth: { provider: "anthropic", account: "default" },
+      transport_profile: "default",
+      models: [{ alias: "anthropic/opus", provider_model: "claude-opus" }],
+    });
+
+    expect(resolveProviderTransportProfile(anthropic)).toBe("default");
+  });
+
+  it("rejects explicit TLS transport on unsupported providers", () => {
+    const unsupported = provider({
+      name: "static-anthropic",
+      type: "anthropic",
+      base_url: "https://api.anthropic.com",
+      api_key_env: "ANTHROPIC_API_KEY",
+      transport_profile: "tls_chrome",
+      models: [{ alias: "anthropic/opus", provider_model: "claude-opus" }],
+    });
+
+    expect(() => makeProviderFetch(unsupported)).toThrow(/Anthropic preset OAuth/);
   });
 });
 

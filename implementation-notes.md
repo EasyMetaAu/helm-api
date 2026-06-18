@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-18 · Anthropic OAuth TLS/JA3 transport spike（docs/05/10；原则 2/7/8）
+
+- **背景**：Claude CLI strict body/header/tool shape 已由 PR #304/#305 合并；剩余第三点是 OmniRoute 风格的 transport fingerprint（TLS ClientHello / JA3/JA4 / HTTP2 traits），不能靠当前 undici Agent/ProxyAgent 调参完成。
+- **实现**：新增 provider 配置 `transport_profile: auto|default|tls_chrome`（默认 `auto`，Zod fail-closed）：`auto` 下 Anthropic preset OAuth provider 默认使用 `tls_chrome`，其他 provider 默认 `default`；显式 `default` 可强制回退正常 undici 路径；显式 `tls_chrome` 只允许 Anthropic preset OAuth provider，静态 API key、generic OAuth、其他 provider 会 fail-closed。执行请求通过 `makeTlsImpersonationFetch()` lazy-load optional `wreq-js`，返回标准 `fetch` seam；per-account proxy 仍从 Helm `ProxyConfig` 转成 wreq proxy URL，凭证只进 transport option，不进日志。OAuth token refresh/model discovery 仍走原 `makeProxyFetch`，本 spike 只改最终 provider execution。`wreq-js` request 显式 `disableDefaultHeaders: true`，避免追加浏览器导航头污染 Claude CLI strict headers；streaming body 显式 `timeout: 0`，不引入 wreq total/body timeout，仍由 Anthropic adapter 的 TTFB/idle 语义兜底。执行层使用 `createTransport` + per-request `cookieMode:"ephemeral"`，共享 TLS/proxy transport 但不共享 cookie jar；wreq `RequestError` 的 `Connection reset by peer` / `Connection refused` 会归一到 `ECONNRESET` / `ECONNREFUSED`，继续命中现有 same-provider retry。
+- **取舍/坑/TODO**：选择 `wreq-js` 作为第一版 spike，因为它是 fetch-compatible，避免先移植 OmniRoute `tls-client-node` 的 temp-file SSE tailing。风险仍在：native package/Docker platform、streaming body 行为、wreq proxy 支持矩阵、TLS spoof 是否真能改善 Anthropic API 401/403。Anthropic preset OAuth 默认启用；若 optional 包缺失，请求会 fail-closed 并抛 `TlsTransportUnavailableError`，需要用 `transport_profile: default` 显式回退。
+- **验证**：新增 core adapter 单测（proxy URL、lazy transport、ephemeral cookie、wreq transient error normalization、unavailable error）和 gateway wiring 单测（Anthropic preset OAuth auto 走 fake wreq transport、非 Anthropic preset 仍 default、显式 default opt-out、unsupported provider fail-closed）。Focused vitest/typecheck 已覆盖；真正价值必须后续用同一线上账号/同一 request 做 toggle A/B live smoke。
+
 ## 2026-06-18 · Claude CLI strict tool pipeline 与 golden fixture（docs/05/07；原则 5/7/8）
 
 - **背景**：昨天 Claude CLI strict fingerprint profile 落地后还剩 strict tool pipeline 与 wire-shape fixture 未做；线上目标是 `https://helm.easymeta.au`，用户补充 trace `45963e78-ec44-422a-84fd-3fea7635feb1` 可作为部署后的重试样本。本分支只做代码与测试，未部署。
@@ -22,21 +29,13 @@
 - **i18n**：26 个新 key（3 个如 Error/Success 已存在）加进 5 个 locale（en=自身，zh-hans/hant/ja/ko 手译）；用一次性 additive 合并脚本（保留既有字节、仅追加，避开 i18n:extract 会拉无关串的坑）。
 - **验证**：`attempt-codes.test.ts`（映射 + 回退 + 覆盖全 SkipReason）、`attempt-code-locales.test.ts`（4 非英 locale 每个 label 都翻译、非英文回退，镜像 dashboard-locales 模式）；admin 14 测绿、`svelte-check` 0/0、`biome lint`(475)、`build` 全绿。分支 `feat-readable-attempt-codes`，未提交/未部署。
 
-## 2026-06-18 · json_schema 能力分级修复（capability tier；docs/02/04；原则 2/3/4）
-
-- **背景（线上事故）**：`helm_live_KOGN` 的 Codex 请求（Responses API，`text.format={type:json_schema,strict:true}`，rollout 压缩）落 `json` lane 主候选官方 `deepseek/deepseek-v4-flash`，上游 400 `"This response_format type is unavailable now"`（809ms + 一次熔断失败记账），再兜底 gpt-5.5 成功。SSH box `sqlite3 helm.db` 取 `telemetry.decision_json`+`request_payloads` 实证。
-- **根因**：单布尔 `supportsJsonMode` 把两个不同上游能力压成一个——基础 JSON 模式（`json_object`）与严格结构化输出（`json_schema`）。官方 DeepSeek 支持前者不支持后者（严格 schema 仅走 beta 的 strict tool calling），布尔无法表达"会 object 不会 schema"→ 能力过滤放行 → 必 400。`sync-catalog` 还把 LiteLLM 的 `supports_response_schema`（其实是 schema 标志）填进这个布尔，语义全程错位；`economy`/`balanced` 里的官方 deepseek 同坑。
-- **方案抉择**：用户要求根治并问"能否合并/互译"。研究确认（DeepSeek docs + LiteLLM）`json_schema⊋json_object` 是**有序档位**非二元，且 `openrouter/deepseek-v4-flash` **原生支持 structured outputs 且便宜**。故**不做 json_schema→tool 互译**（触 principle 8 流式头号风险、需 beta 端点、且请求带真实 tools 时与强制输出 tool 冲突，无论如何仍需能力路由兜底），改为：诚实建模 + 能力过滤把 json_schema 确定性落到便宜的原生 schema 后端。
-- **实现**：① `supportsJsonMode: boolean` → `jsonOutput: z.enum(["none","object","schema"])`（有序，必填；override 仍 `.partial()`）。② filter 拆两门：`needsJson && jsonOutput==="none"`→`no_json_support`；`needsResponseSchema && jsonOutput!=="schema"`→新 skip reason `no_response_schema_support`。③ `execute.ts` 新 `isJsonSchema()` 喂 `needsResponseSchema`（`needsJson` 不变）。④ `sync-catalog`：`supports_response_schema ? "schema" : "none"`（重生成 catalog.json，diff 仅字段名）。⑤ `capabilities.yaml`：官方 deepseek=object、openrouter-deepseek/gpt/gemini/claude=schema、`*/auto`=none。⑥ `json` lane 在 balanced 前插 `openrouter/deepseek-v4-flash`（json_schema 落点）；policy/classifier **不改**（filter 已逐请求区分，`skip_reason` 即观测面）。
-- **取舍/坑/TODO**：① 必填枚举让 typecheck 把每个漏改 fixture 标红（完整性网，~15 处）；② `none` 默认与旧"非 schema 即不可 JSON"行为等价 → 零回归；③ **明确弃做**：json_schema→forced-tool 互译；`anthropic/*` OAuth alias 仍无 catalog 条目（fail-open，json_schema 下安全因 Anthropic 原生 output_format）；classifier `needs_response_schema`。**TODO（部署验证）**：带 `OPENROUTER_API_KEY` 发真实 strict json_schema，确认落 openrouter-deepseek 且上游真 enforce schema（若被子 provider 忽略 → 注入 `provider:{require_parameters:true}`）。
-- **Codex review P2 修复（fail-closed override）**：`CapabilitiesOverrideEntrySchema` 由 `.partial()` 改 `.partial().strict()`（对齐已 strict 的 PricingOverrideEntrySchema）。否则 operator 的 `capabilities.yaml` 里残留的旧 `supportsJsonMode` key 会被 Zod 静默剥掉 → 手动配 JSON-capable 的纯 override alias 退化成 `jsonOutput:"none"`，请求静默跳过该模型。**不做自动翻译**（旧布尔 object/schema 语义本就模糊，正是本次修的 bug）→ 强制 fail-closed，operator 改 key。**⚠️ 部署连带**：box 的 `capabilities.yaml`（operator-owned）目前仍是 `supportsJsonMode`，新镜像上线会**拒绝启动**直到把 ~15 个条目改成 `jsonOutput`（见 [[config-schema-strict-removal-failclose]]）；canary loadConfig 会先抓到。
-- **验证**：TDD 红→绿。filter 判别矩阵（json_schema 对 object 层→`no_response_schema_support`，即线上 bug 回归）、`execute.default-config`（真实配置：json_schema 落 openrouter-deepseek、json_object 留官方 deepseek）、`samples` 锁 json lane 链、`sync-catalog` jsonOutput 断言、`load.test` 旧 `supportsJsonMode` key fail-closed。`pnpm typecheck`/`lint`(475)/`build`(admin+core+gateway) 绿；全量 core+gateway **3233 绿**。分支 `fix-json-schema-capability-tier`，未发版/未部署。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-18 · json_schema 能力分级修复（capability tier；docs/02/04；原则 2/3/4）：把 `supportsJsonMode` 拆成有序 `jsonOutput:none|object|schema`，能力过滤区分 `json_object` 与 strict `json_schema`，json_schema 默认落 openrouter-deepseek；旧 `supportsJsonMode` override fail-closed，部署前需改 operator-owned capabilities。
 
 ### 2026-06-17 · /admin/lanes 加 reasoning_effort 下拉（admin UI；原则 1）：后端已支持 lane `reasoning_effort` round-trip，缺口只在 admin DTO/UI；新增 admin 侧 enum 镜像、LaneEditor 下拉、Unset 删除字段、5 语言文案与 tests。坑：mock 必须补 `REASONING_EFFORTS`；i18n 用手动 append 避免无关重排；未部署。
 

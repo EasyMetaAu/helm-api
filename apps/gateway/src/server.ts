@@ -48,6 +48,7 @@ import {
   makeAnthropicError,
   makeGeminiError,
   makeProxyFetch,
+  makeTlsImpersonationFetch,
   maybeEnqueueDecayJobs,
   maybeEnqueueIdleObserverJobs,
   type OAuthPoolClient,
@@ -78,6 +79,7 @@ import {
   settleBudget,
   startMemoryWorker,
   startSignalScheduler,
+  type TransportProfile,
   toRegistryProviders,
   validateModelAliasTargets,
   windowsToUsageLimit,
@@ -574,6 +576,50 @@ export function resolveProviderProxy(
   return proxy ? (proxy as ProxyConfig) : undefined;
 }
 
+function isAnthropicPresetOAuth(p: ProviderConfigShared): boolean {
+  return (
+    p.type === "anthropic" &&
+    p.oauth !== undefined &&
+    isOAuthPreset(p.oauth) &&
+    p.oauth.provider === "anthropic"
+  );
+}
+
+export function resolveProviderTransportProfile(p: ProviderConfigShared): TransportProfile {
+  if (p.transport_profile === "tls_chrome") return "tls_chrome";
+  if (p.transport_profile === "default") return "default";
+  return isAnthropicPresetOAuth(p) ? "tls_chrome" : "default";
+}
+
+function optionalPositiveInt(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+export function makeProviderFetch(
+  p: ProviderConfigShared,
+  proxy?: ProxyConfig,
+  env: Record<string, string | undefined> = process.env,
+): typeof globalThis.fetch | undefined {
+  const profile = resolveProviderTransportProfile(p);
+  if (profile === "default") return proxy ? makeProxyFetch(proxy) : undefined;
+  if (profile === "tls_chrome") {
+    if (!isAnthropicPresetOAuth(p)) {
+      throw new Error(
+        "transport_profile=tls_chrome is only supported for Anthropic preset OAuth providers",
+      );
+    }
+    return makeTlsImpersonationFetch({
+      proxy,
+      browser: env.HELM_TLS_BROWSER_PROFILE,
+      os: env.HELM_TLS_OS_PROFILE,
+      timeoutMs: optionalPositiveInt(env.HELM_TLS_TRANSPORT_TIMEOUT_MS),
+    });
+  }
+  return undefined;
+}
+
 // Resolve a provider's credential from env / store (issue #38). Returns null when
 // a required secret is unset / no credential is stored — the caller decides
 // fail-open (skip a non-primary provider) vs fail-closed (throw for the primary).
@@ -695,7 +741,7 @@ function createProviderClient(
 ): ProviderClient {
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
-  const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
+  const providerFetch = makeProviderFetch(p, proxy);
   if (p.type === "anthropic") {
     return createAnthropicClient({
       config: {
@@ -704,7 +750,7 @@ function createProviderClient(
         metadataUserId: identity?.metadataUserId,
         claudeCliFingerprintMode: p.claude_cli_fingerprint_mode,
       },
-      fetch: proxyFetch,
+      fetch: providerFetch,
     });
   }
   // ChatGPT Codex subscription: the OpenAI *Responses* protocol (stream-only,
@@ -713,7 +759,7 @@ function createProviderClient(
   if (p.type === "openai-responses" && "getAuthHeader" in cred) {
     return createCodexResponsesClient({
       config: { ...base, ...cred, sessionId: identity?.sessionId, onResponseMeta },
-      fetch: proxyFetch,
+      fetch: providerFetch,
     });
   }
   if (
@@ -723,7 +769,7 @@ function createProviderClient(
   ) {
     return createGenericOpenAIResponsesClient({
       config: { ...base, ...cred },
-      fetch: proxyFetch,
+      fetch: providerFetch,
     });
   }
   if (p.type === "gemini") {
@@ -742,7 +788,7 @@ function createProviderClient(
               }
             : undefined,
       },
-      fetch: proxyFetch,
+      fetch: providerFetch,
     });
   }
   // GitHub Copilot is OpenAI-compatible, BUT: (1) it requires editor identity
@@ -768,7 +814,7 @@ function createProviderClient(
         resolveBaseUrl: async () =>
           getGitHubCopilotBaseUrl((await getAuth()).replace(/^Bearer /, "")),
       },
-      fetch: proxyFetch,
+      fetch: providerFetch,
     });
   }
   return createOpenAIClient({
@@ -778,7 +824,7 @@ function createProviderClient(
       mapDeveloperRoleToSystem: p.map_developer_role_to_system,
       normalizeReasoningDeltaAlias: p.normalize_reasoning_delta_alias,
     },
-    fetch: proxyFetch,
+    fetch: providerFetch,
   });
 }
 

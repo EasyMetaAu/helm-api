@@ -166,6 +166,10 @@ importers:
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13
+    optionalDependencies:
+      wreq-js:
+        specifier: ^2.3.1
+        version: 2.3.1
 
   packages/shared:
     dependencies:
@@ -2714,6 +2718,11 @@ packages:
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
 
+  wreq-js@2.3.1:
+    resolution: {integrity: sha512-vaKasaKeskrDKEuuO5Q5uamEG9a6FrF5ZSicH7TCvYS4RxF7/gzaU/vYqwJzcs+uydyJPVWY1KCvfVCgp0tiGA==}
+    cpu: [x64, arm64]
+    os: [darwin, linux, win32]
+
   ws@8.21.0:
     resolution: {integrity: sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==}
     engines: {node: '>=10.0.0'}
@@ -5140,6 +5149,9 @@ snapshots:
       strip-ansi: 7.2.0
 
   wrappy@1.0.2: {}
+
+  wreq-js@2.3.1:
+    optional: true
 
   ws@8.21.0: {}
 
