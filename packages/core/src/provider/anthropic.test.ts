@@ -1747,6 +1747,64 @@ describe("createAnthropicClient", () => {
     expect(narrowedResponse.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("read_file");
   });
 
+  it("strict Claude CLI tool pipeline preserves the reverse map across a 401 retry", async () => {
+    let calls = 0;
+    let token = "AT1";
+    const sentToolNames: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      const body = JSON.parse(String(init?.body)) as { tools: Array<{ name: string }> };
+      sentToolNames.push(body.tools[0]?.name ?? "");
+      if (calls === 1) return jsonResponse({ error: "expired" }, 401);
+      return jsonResponse({
+        id: "m",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: body.tools[0]?.name,
+            input: { path: "README.md" },
+          },
+        ],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => `Bearer ${token}`,
+        onUnauthorized: () => {
+          token = "AT2";
+        },
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const response = await client.chatCompletion({
+      model: "claude-x",
+      messages: [{ role: "user", content: "read" }],
+      tools: [
+        {
+          type: "function",
+          function: { name: "read_file", parameters: { type: "object" } },
+        },
+      ],
+    });
+
+    const narrowedResponse = response as {
+      choices: Array<{
+        message: { tool_calls?: Array<{ function: { name: string } }> };
+      }>;
+    };
+    expect(calls).toBe(2);
+    expect(sentToolNames).toEqual([
+      STRICT_CLAUDE_CLI_TOOL_GOLDEN.toolAliases.read_file,
+      STRICT_CLAUDE_CLI_TOOL_GOLDEN.toolAliases.read_file,
+    ]);
+    expect(narrowedResponse.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("read_file");
+  });
+
   it("adds feature beta headers for Anthropic context_management and fast mode", async () => {
     let seen: Headers | null = null;
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
