@@ -27,9 +27,20 @@ const FactsOutputSchema = z.object({
   facts: z.array(FactOutputSchema).default([]),
 });
 
+// Salient-fact fast path (Change A): facts extracted from RAW turns have no
+// supporting observation to cite, so the output is just {subject_text, fact_text}.
+const RawFactOutputSchema = z.object({
+  subject_text: z.string().trim().min(1),
+  fact_text: z.string().trim().min(1),
+});
+const RawFactsOutputSchema = z.object({
+  facts: z.array(RawFactOutputSchema).default([]),
+});
+
 type ObservationOutput = z.infer<typeof ObservationOutputSchema>;
 type ReflectionOutput = z.infer<typeof ReflectionOutputSchema>;
 type FactsOutput = z.infer<typeof FactsOutputSchema>;
+type RawFactsOutput = z.infer<typeof RawFactsOutputSchema>;
 
 export interface MemoryModelResolution {
   client: ProviderClient;
@@ -47,6 +58,8 @@ export interface MemoryLlmRuntime {
   summarize: ObserverDeps["summarize"];
   merge: ReflectorDeps["merge"];
   extractFacts: NonNullable<ReflectorDeps["extractFacts"]>;
+  // Salient-fact fast path (Change A): raw-turns → atomic facts.
+  extractFactsFromMessages: NonNullable<ObserverDeps["extractFactsFromMessages"]>;
 }
 
 function truncate(text: string, max: number): string {
@@ -279,6 +292,38 @@ function factsPrompt(input: { observations: Observation[]; now: Date }) {
   ];
 }
 
+function factsFromMessagesPrompt(input: { messages: RawMessage[]; now: Date }) {
+  return [
+    {
+      role: "system" as const,
+      content:
+        "Extract durable, atomic facts the USER stated about themselves — preferences, " +
+        "identity, stable instructions — that are worth remembering across future sessions. " +
+        "Ignore transient task details, questions, and assistant text. If nothing durable was " +
+        "stated, return an empty list. Return strict JSON only.",
+    },
+    {
+      role: "user" as const,
+      content: JSON.stringify({
+        now: input.now.toISOString(),
+        schema: {
+          facts: [
+            {
+              subject_text: "stable topic for supersede, e.g. 'favorite number'",
+              fact_text: "the atomic assertion, e.g. \"The user's favorite number is 42.\"",
+            },
+          ],
+        },
+        messages: input.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+          created_at: m.createdAt.toISOString(),
+        })),
+      }),
+    },
+  ];
+}
+
 export function createMemoryLlmRuntime(deps: CreateMemoryLlmRuntimeDeps): MemoryLlmRuntime {
   return {
     summarize: async (input) => {
@@ -359,6 +404,29 @@ export function createMemoryLlmRuntime(deps: CreateMemoryLlmRuntimeDeps): Memory
           sourceObservationRange: [supporting.id, supporting.id],
         };
       });
+    },
+    extractFactsFromMessages: async (input) => {
+      // No deterministic fallback: without an LLM there are no eager facts (the
+      // config gate enforces llm.enabled). callJsonModel returns the fallback ([])
+      // when disabled / model unavailable / parse fails — fail-open.
+      const parsed = await callJsonModel<RawFactsOutput>({
+        deps,
+        task: "facts",
+        maxTokens: deps.config.max_tokens.facts,
+        messages: factsFromMessagesPrompt(input),
+        schema: RawFactsOutputSchema,
+        fallback: () => ({ facts: [] }),
+      });
+      // Raw facts have no supporting observation; validFrom is the processing time
+      // (monotonic across observer runs, so a later restatement supersedes — the
+      // store's `valid_from < new.valid_from` predicate). No sourceObservationRange.
+      return parsed.facts.map(
+        (fact): ExtractedFact => ({
+          subjectText: fact.subject_text,
+          factText: fact.fact_text,
+          validFrom: input.now,
+        }),
+      );
     },
   };
 }

@@ -6,6 +6,7 @@ import {
   chooseAutoCompaction,
   resolveCompactionTunables,
 } from "./compaction-policy.js";
+import type { ExtractedFact } from "./reflector.js";
 
 // Background Observer (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
 // request-path job: the request path only persists raw messages and enqueues an
@@ -48,6 +49,17 @@ export interface ObserverDeps {
   // Observer tokens are a SEPARATE cost bucket (docs/08 "cost accounting"): they must
   // NOT be hidden inside actor/provider execution cost.
   costSink: (bucket: "observer", tokens: number) => void;
+  // Salient-fact fast path (salient-fact-memory-spec Change A). Extract atomic facts
+  // DIRECTLY from raw new turns — decoupled from compaction so a short "remember X"
+  // turn forms a durable fact even when nothing compacts. OPTIONAL + gated (the
+  // composition root wires it only when memory.llm.enabled && eager_facts): absent ⇒
+  // no eager extraction (byte-identical to today). There is NO deterministic
+  // extractor for raw prose, so the LLM-unavailable / parse-fail path returns [] —
+  // fail-open: an empty result (or a throw) never blocks compaction or the request.
+  extractFactsFromMessages?: (input: {
+    messages: RawMessage[];
+    now: Date;
+  }) => Promise<ExtractedFact[]>;
   // Resolve the thread's last served model alias → catalog prices + context
   // window for the auto compaction policy. Injected by the composition root
   // (closure over the runtime catalog); null/unknown alias resolves all-null
