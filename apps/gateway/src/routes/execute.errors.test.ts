@@ -80,7 +80,7 @@ function noToolsEntry(modelKey: string): CatalogEntry {
     modelKey,
     capabilities: {
       supportsTools: false,
-      supportsJsonMode: true,
+      jsonOutput: "schema",
       supportsVision: true,
       supportsStreaming: true,
       maxContextTokens: 100000,

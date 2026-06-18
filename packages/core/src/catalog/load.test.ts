@@ -67,7 +67,7 @@ describe("loadRuntimeCatalog", () => {
           return [
             '"local/llama-3.1-70b":',
             "  supportsTools: true",
-            "  supportsJsonMode: false",
+            "  jsonOutput: none",
             "  supportsVision: false",
             "  supportsStreaming: true",
             "  maxContextTokens: 131072",
@@ -103,6 +103,24 @@ describe("loadRuntimeCatalog", () => {
           if (p.endsWith("capabilities.yaml")) {
             // supportsTools must be a boolean → schema rejects.
             return '"x/y":\n  supportsTools: "yes"\n';
+          }
+          enoent();
+        }),
+      }),
+    ).toThrow(CatalogError);
+  });
+
+  it("fails CLOSED on a stale `supportsJsonMode` override key (jsonOutput migration)", () => {
+    // The capability boolean was replaced by the `jsonOutput` tier. A `.strict()`
+    // override schema must REJECT a leftover `supportsJsonMode` rather than silently
+    // strip it (which would degrade a manually-JSON-capable alias to jsonOutput:"none"
+    // and skip it for JSON requests). Fail-closed → operator migrates the key.
+    expect(() =>
+      loadRuntimeCatalog({
+        configDir: "/cfg",
+        readFile: reader((p) => {
+          if (p.endsWith("capabilities.yaml")) {
+            return '"deepseek/deepseek-v4-flash":\n  supportsJsonMode: true\n';
           }
           enoent();
         }),

@@ -170,9 +170,10 @@ describe("default config activates capability filter + cost (alias-namespace ali
   it("sanity: the shipped catalog is keyed by the SAME provider/model aliases the lanes use", () => {
     // Pre-alignment these were absent (lane aliases like `cheap_model` had no
     // catalog entry). Now every lane candidate alias resolves in the catalog.
-    expect(catalog.get("deepseek/deepseek-v4-flash")?.capabilities.supportsJsonMode).toBe(true);
-    expect(catalog.get("zenmux/auto")?.capabilities.supportsJsonMode).toBe(false);
-    expect(catalog.get("openrouter/auto")?.capabilities.supportsJsonMode).toBe(false);
+    expect(catalog.get("deepseek/deepseek-v4-flash")?.capabilities.jsonOutput).toBe("object");
+    expect(catalog.get("openrouter/deepseek-v4-flash")?.capabilities.jsonOutput).toBe("schema");
+    expect(catalog.get("zenmux/auto")?.capabilities.jsonOutput).toBe("none");
+    expect(catalog.get("openrouter/auto")?.capabilities.jsonOutput).toBe("none");
     expect(catalog.get("zenmux-vertex/gemini-3.5-flash")?.capabilities.supportsCachedContent).toBe(
       true,
     );
@@ -208,6 +209,70 @@ describe("default config activates capability filter + cost (alias-namespace ali
     // The pruned auto must NEVER have been invoked upstream. The upstream `model`
     // is the RESOLVED bare provider_model (`deepseek-v4-pro`), not the alias.
     expect(calls).toEqual(["deepseek-v4-pro"]);
+  });
+
+  // Regression for the prod incident (Codex json_schema → official DeepSeek 400 →
+  // fallback). A strict json_schema request must PRUNE the json_object-only official
+  // deepseek (jsonOutput:object → no_response_schema_support) and land on the cheap,
+  // natively schema-capable openrouter mirror — never burning the 400 attempt.
+  it("json_schema prunes json_object-only official deepseek and lands on the cheap openrouter mirror", async () => {
+    const { client, calls } = stubProvider();
+    const registry = buildRegistry();
+    const execute = createExecute({
+      defaultProvider: client,
+      providers: providerClients(client),
+      registry,
+      breaker: breaker(),
+      catalog,
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    // The json lane's first two candidates (config/lanes.yaml).
+    const chain = ["deepseek/deepseek-v4-flash", "openrouter/deepseek-v4-flash"];
+    const out = await execute(
+      plan(chain),
+      req({
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: "x", schema: { type: "object" }, strict: true },
+        },
+      }),
+    );
+
+    expect(out.attempts[0]?.alias).toBe("deepseek/deepseek-v4-flash");
+    expect(out.attempts[0]?.skipped).toBe(true);
+    expect(out.attempts[0]?.skip_reason).toBe("no_response_schema_support");
+    expect(out.final.status).toBe("ok");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("openrouter/deepseek-v4-flash");
+    // Official deepseek (bare `deepseek-v4-flash`) was NEVER invoked; only the openrouter
+    // mirror ran (its provider_model is `deepseek/deepseek-v4-flash`).
+    expect(calls).toEqual(["deepseek/deepseek-v4-flash"]);
+  });
+
+  // The other side of the tier: a plain json_object request stays on the cheapest
+  // candidate (official deepseek serves json_object natively). No regression.
+  it("json_object still lands cheaply on official deepseek (openrouter mirror not reached)", async () => {
+    const { client, calls } = stubProvider();
+    const registry = buildRegistry();
+    const execute = createExecute({
+      defaultProvider: client,
+      providers: providerClients(client),
+      registry,
+      breaker: breaker(),
+      catalog,
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const chain = ["deepseek/deepseek-v4-flash", "openrouter/deepseek-v4-flash"];
+    const out = await execute(plan(chain), req({ response_format: { type: "json_object" } }));
+
+    expect(out.attempts[0]?.alias).toBe("deepseek/deepseek-v4-flash");
+    expect(out.attempts[0]?.skipped).toBe(false);
+    expect(out.final.status).toBe("ok");
+    if (out.final.status === "ok") expect(out.final.alias).toBe("deepseek/deepseek-v4-flash");
+    expect(calls).toEqual(["deepseek-v4-flash"]);
   });
 
   it("threads a captureUpstream sink to the served provider and surfaces it as outcome.upstreamRequest", async () => {

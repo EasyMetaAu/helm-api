@@ -280,7 +280,7 @@ describe("resolveCompactionPricing — compaction inputs from the catalog", () =
     modelKey: "anthropic/claude-3-5-sonnet",
     capabilities: {
       supportsTools: true,
-      supportsJsonMode: false,
+      jsonOutput: "none",
       supportsVision: true,
       supportsStreaming: true,
       maxContextTokens: 200_000,

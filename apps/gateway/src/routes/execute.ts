@@ -769,6 +769,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         const verdict = checkCapability(caps, {
           needsTools: Array.isArray(req.tools) && req.tools.length > 0,
           needsJson: isJson(req.response_format),
+          needsResponseSchema: isJsonSchema(req.response_format),
           needsVision:
             (Array.isArray(req.attachments) && req.attachments.length > 0) || reqModalities.image,
           needsStreaming: req.stream,
@@ -1328,6 +1329,14 @@ function isJson(rf: InternalRequest["response_format"]): boolean {
   if (!rf || typeof rf !== "object") return false;
   const t = (rf as { type?: unknown }).type;
   return t === "json_object" || t === "json_schema";
+}
+
+// Strict structured output specifically (json_schema, not bare json_object). Gates the
+// `no_response_schema_support` capability filter so a json_schema request prunes
+// json_object-only backends (official DeepSeek) instead of burning an attempt on a 400.
+function isJsonSchema(rf: InternalRequest["response_format"]): boolean {
+  if (!rf || typeof rf !== "object") return false;
+  return (rf as { type?: unknown }).type === "json_schema";
 }
 
 // Inert passthrough telemetry (issue #217): considered:false — for attempt rows that

@@ -17,7 +17,7 @@
 # no subscription is bound: an unconnected `openai-codex/*` candidate fails OPEN
 # (Phase-0 back-fill / skip to the next fallback), never a 5xx. Each lane still ends
 # in a `*/auto` tail fallback; those auto aliases are deliberately JSON-INCAPABLE
-# (catalog supports_json_schema:false), so a strict-JSON request prunes them and
+# (catalog jsonOutput:none), so a strict-JSON request prunes them and
 # lands on a deterministic json-capable model (docs/02: `*/auto` only at the tail).
 
 # —— quality/cost lanes ——
@@ -67,12 +67,15 @@ coding:
 
 json:
   purpose: Strict structured-output (JSON) responses
-  # Primary is json-capable (catalog supports_json_schema:true) so a strict-JSON
-  # request lands deterministically. The chain then drops through balanced, whose
-  # tail `*/auto` aliases are json-INCAPABLE and get PRUNED by the capability
-  # filter — proving the filter fires on the default config.
+  # The capability filter discriminates by request shape against each candidate's
+  # `jsonOutput` tier (none<object<schema): a json_OBJECT request is served cheaply by
+  # the official-DeepSeek primary (jsonOutput:object); a strict json_SCHEMA request
+  # PRUNES that primary (no_response_schema_support) and lands on the cheap, natively
+  # schema-capable openrouter mirror (jsonOutput:schema), only then dropping through
+  # balanced whose `*/auto` tail (jsonOutput:none) is pruned for any JSON request.
   primary: deepseek/deepseek-v4-flash
   fallback:
+    - openrouter/deepseek-v4-flash
     - balanced
   constraints:
     require_json: true

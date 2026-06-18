@@ -64,7 +64,7 @@ function priced(modelKey: string, pricing: CatalogEntry["pricing"]): CatalogEntr
     modelKey,
     capabilities: {
       supportsTools: false,
-      supportsJsonMode: false,
+      jsonOutput: "none",
       supportsVision: false,
       supportsStreaming: false,
       maxContextTokens: 0,

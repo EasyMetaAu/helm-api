@@ -63,6 +63,11 @@ describe("checked-in config samples", () => {
     // task lanes
     expect(lanes.coding?.fallback).toEqual(["premium", "balanced"]);
     expect(lanes.json?.constraints.require_json).toBe(true);
+    // json lane: official deepseek (cheap json_object) → cheap native-schema openrouter
+    // mirror (where a strict json_schema request lands after the filter prunes official
+    // deepseek) → balanced. Locks the json_schema routing fix into the shipped config.
+    expect(lanes.json?.primary).toBe("deepseek/deepseek-v4-flash");
+    expect(lanes.json?.fallback).toEqual(["openrouter/deepseek-v4-flash", "balanced"]);
     expect(lanes.vision?.constraints.require_vision).toBe(true);
     expect(lanes.tool_use?.constraints.require_tools).toBe(true);
   });

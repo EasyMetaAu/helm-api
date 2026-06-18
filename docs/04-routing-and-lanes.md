@@ -233,10 +233,14 @@ backed by a static fallback so the lane **degrades gracefully**: an unconnected
 The `*/auto` aliases (`zenmux/auto`, `openrouter/auto`) sit only at the **tail of
 the `balanced` chain** — every other lane reaches them by falling through to
 `balanced`, not by carrying its own auto tail. Those auto aliases are
-deliberately JSON-incapable in the catalog (`supportsJsonMode: false`), so a
+deliberately JSON-incapable in the catalog (`jsonOutput: none`), so a
 strict-JSON request prunes them via the Capability Filter and lands on a
 deterministic JSON-capable model — proving the filter fires on the default
-config.
+config. The same filter discriminates the two JSON tiers: a strict `json_schema`
+request additionally prunes `object`-only backends (official DeepSeek →
+`no_response_schema_support`) and lands on a `schema`-capable one (e.g. the cheap
+`openrouter/deepseek-v4-flash` mirror), while a bare `json_object` request still
+serves on the `object` tier.
 
 ### Chain expansion
 

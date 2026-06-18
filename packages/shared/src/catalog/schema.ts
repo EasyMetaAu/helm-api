@@ -18,7 +18,17 @@ export type InputModality = z.infer<typeof InputModalitySchema>;
 
 export const CapabilitiesSchema = z.object({
   supportsTools: z.boolean(),
-  supportsJsonMode: z.boolean(),
+  // JSON-output capability as an ORDERED tier (none < object < schema), NOT a boolean:
+  //   none   — no JSON mode at all (e.g. `*/auto` aggregators; pruned for any JSON request).
+  //   object — `response_format:{type:"json_object"}` only (official DeepSeek: json_object
+  //            yes, json_schema 400s "This response_format type is unavailable now").
+  //   schema — native strict structured output (`response_format:{type:"json_schema"}` /
+  //            Anthropic output_format / Gemini responseSchema). Implies `object`.
+  // A boolean cannot express "object but not schema"; that conflation routed a strict
+  // json_schema request onto json_object-only DeepSeek → guaranteed upstream 400. Synced
+  // from LiteLLM's `supports_response_schema` (schema|none); the `object` tier is set via
+  // manual capabilities.yaml overrides.
+  jsonOutput: z.enum(["none", "object", "schema"]),
   supportsVision: z.boolean(),
   supportsStreaming: z.boolean(),
   // Extra input modalities (besides text+image) the backend accepts. See above.
@@ -75,7 +85,15 @@ export const GeneratedCatalogSchema = z.object({
 // Override files (capabilities.yaml / pricing.yaml). Both are maps keyed by
 // modelKey. Every field is optional so a manual entry can override a single
 // field (e.g. just supportsVision) without restating the whole record.
-export const CapabilitiesOverrideEntrySchema = CapabilitiesSchema.partial();
+// `.strict()` (matching PricingOverrideEntrySchema below) makes an UNKNOWN key
+// FAIL-CLOSED (principle 2) instead of being silently stripped. Critical for the
+// `supportsJsonMode` → `jsonOutput` tier migration: a stale `supportsJsonMode`
+// left in an operator's capabilities.yaml would otherwise be dropped by `.partial()`,
+// degrading a manually-JSON-capable alias to `jsonOutput:"none"` so its requests
+// silently skip the model. Refuse to boot instead — the operator migrates the key
+// to `jsonOutput: none|object|schema` (no safe auto-translation: the old boolean
+// conflated object vs schema, which is exactly the bug this migration fixes).
+export const CapabilitiesOverrideEntrySchema = CapabilitiesSchema.partial().strict();
 // NOT `PricingSchema.partial()`: the cache fields carry `.default(null)`, and
 // `.partial()` over a defaulted field still MATERIALIZES the omitted key as null
 // on parse — so an operator overriding only `inputPerMTokUsd` would silently wipe
