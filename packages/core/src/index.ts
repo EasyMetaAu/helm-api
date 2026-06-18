@@ -533,9 +533,11 @@ export {
 } from "./provider/registry.js";
 export {
   __setWreqModuleForTesting,
+  checkTlsTransportAvailable,
   makeTlsImpersonationFetch,
   proxyConfigToUrl,
   type TlsImpersonationFetchOptions,
+  type TlsTransportProbeResult,
   TlsTransportUnavailableError,
   type TransportProfile,
 } from "./provider/tls-transport.js";
