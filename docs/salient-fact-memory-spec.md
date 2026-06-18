@@ -121,15 +121,23 @@ observation is written.
 ```text
 runObserverJob(job):
   load all messages + existing observations            (unchanged)
-  ── NEW: eager fact pass (when memory.llm.enabled && eager_facts) ──
-    newRawTurns = uncovered messages not yet fact-scanned   (track via a
-                  fact_scan_high_watermark on memory_threads, mirroring coverage)
-    facts = await extractFactsFromMessages({ messages: newRawTurns,
-                                             existingFacts, now })   ← mem0-style
-    for f in facts: store.appendFact({ ownerId, projectId, resourceId,
-                                       subjectKey, factText, contentHash, ... })
-        → existing supersede/dedup path settles ADD vs UPDATE vs NOOP
-  ── existing compaction decision + observation write (unchanged) ──
+  newRawTurns = messages after fact_scan_high_watermark        (only new content)
+
+  ── existing compaction decision (unchanged) ──
+  if shouldCompact:
+    # COALESCED: one LLM call emits BOTH the observation summary AND facts
+    { observationText, facts } = await summarizeAndExtract({ messages, now })
+    appendObservation(observationText)                 (unchanged)
+  else:
+    # short thread that never compacts — the only path that adds a NEW call,
+    # and ONLY when there is genuinely new user-authored content to mine
+    facts = hasNewUserTurn(newRawTurns)
+              ? await extractFactsFromMessages({ messages: newRawTurns, existingFacts, now })
+              : []                                     # skip — no LLM call
+
+  ── NEW: persist facts (when memory.llm.enabled && eager_facts) ──
+  insertFactsReconciled(scope, facts)   # existing supersede/dedup; ADD vs UPDATE vs NOOP
+  advance fact_scan_high_watermark
 ```
 
 Key points:
@@ -152,13 +160,41 @@ Key points:
   observation coverage) prevents re-scanning the same turns every writeback;
   `content_hash` dedup is the backstop.
 - **Cost.** Bills the existing Reflector/“facts” cost bucket (`docs/08:398-407`).
-  Bounded: only `memory.llm.enabled`, only new turns, dedup short-circuits repeats.
+  Bounded — see §5.3.
 - **Fail-open.** An extractor throw is swallowed + logged; the observation and the
   request are unaffected (same contract as `extractFacts` today, `reflector.ts:303`).
 
 This means the 8-message "42" thread now yields a fact
 `subject="favorite number" → "42"` under `(default, agentcrew-test)`, even though
 it never compacts.
+
+### 5.3 Cost & LLM-call amplification
+
+The naive form — "extract on every turn" — would roughly **double** background
+memory LLM **calls**. That concern is real; this design keeps it bounded with four
+levers, three of which are *exact* (not heuristic):
+
+| Lever | Kind | Effect |
+|---|---|---|
+| **Job-dedup batching** | exact | The observer job already carries a `uniq_memory_jobs_open_type_scope` lock (`migrate` / `memory_jobs`): bursts of N requests on a thread collapse to **one** worker run. Extraction is per-tick-per-thread, **not per-message**. |
+| **No-new-user-content skip** | exact | If no new **user-authored** turn exists past the fact-scan watermark, skip the call entirely. Tool-result-only / assistant-only batches (the bulk of agent tool roundtrips) cost **zero** extra calls. |
+| **Coalesce on compaction** | exact | When a compaction happens, the summarizer already reads the messages — emit observation **and** facts in **one** JSON call. No second call on the compaction path; this also *replaces* the Reflector's separate observation→fact call. |
+| **Trivial-turn skip** | heuristic (conservative) | Optionally skip sub-N-char acks ("ok", "继续"). Errs toward running when unsure. |
+
+The dollar impact is far smaller than the call-count impact, because the extractor
+is a **nano `facts_model`** with tiny I/O (just the new turns in, ≤~100 tokens of
+facts JSON out) versus the actor's full model on the full conversation:
+
+| Workload | New-user-turn skip rate | Net extra **calls** / actor turn | Net extra **cost** |
+|---|---|---|---|
+| Coding agent (Claude Code / Codex) | ~95% (tool roundtrips) | ≈ 1.05× | negligible |
+| Personal chat (the "42" case) | ~70–85% | ≈ 1.1–1.2× | low single-digit % |
+
+So: a standalone extractor call happens **only** for a short thread that both
+(a) never compacts and (b) contains genuinely new user-authored content — exactly
+the "42" case the feature exists to fix — and it is a cheap nano call. mem0 pays a
+per-`add()` call unconditionally; Helm does strictly less by reusing its existing
+job-dedup + a separate cheap `facts_model`.
 
 ### Change B — Deterministic scope-filtered fact injection
 
@@ -279,6 +315,12 @@ Core, framework-agnostic (Vitest), written red-first per CLAUDE.md:
 7. Fail-open: extractor throws → observation + job status unaffected.
 8. Gating: `eager_facts:false` (or `llm.enabled:false`) → no extraction (byte-identical to today).
 
+**Cost levers (Change A, §5.3):**
+8a. No-new-user-content skip: a batch of only tool-result / assistant turns past the
+    watermark → **no** extraction call is made.
+8b. Coalesce on compaction: when `shouldCompact`, facts come from the **single**
+    summarize-and-extract call (assert the standalone extractor is **not** called).
+
 **Injection (Change B, `inject.test.ts`):**
 9. `loadMemory` loads scope facts and emits a `## Known facts` section.
 10. **Cross-thread**: a fact formed on thread A is injected on thread B (same
@@ -311,9 +353,10 @@ Core, framework-agnostic (Vitest), written red-first per CLAUDE.md:
 
 ## 10. Open questions for review
 
-1. **Extraction cadence.** Per Observer writeback (proposed — natural debounce via
-   the open-job lock) vs. a dedicated lightweight `facts` job type. Proposed: reuse
-   the Observer to avoid a new job type / entity.
+1. ~~**Extraction cadence.**~~ **Resolved (§5.3):** reuse the Observer (no new job
+   type); batched by the existing open-job lock, coalesced into the summarize call on
+   compaction, and skipped when there is no new user-authored content — so the
+   per-turn call amplification is ~1.05–1.2× on real workloads, not 2×.
 2. **Scope of injected facts.** Project (+ resource) only, or also same-thread
    facts? Proposed: mirror reflections (project + resource), since thread facts
    overlap the live window and observations.
