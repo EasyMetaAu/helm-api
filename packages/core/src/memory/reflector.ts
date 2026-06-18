@@ -1,6 +1,6 @@
-import type { MemoryFactInput, Observation, Reflection, ReflectionScope } from "@helm/shared";
+import type { Observation, Reflection, ReflectionScope } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
-import { factContentHash, normalizeSubjectKey } from "./forgetting/facts.js";
+import { buildReconciledFactBatch } from "./forgetting/facts.js";
 
 // Background Reflector (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
 // request-path job: a scheduler triggers it PERIODICALLY to merge a scope's many
@@ -312,62 +312,23 @@ async function tryExtractFacts(args: {
     const extracted = await extractFacts({ observations, previousReflection, now });
     if (extracted.length === 0) return;
 
-    // Normalize + resolve each candidate's validFrom (the supporting observation's
-    // time; falls back to `now` for a stub that omits it). Skip rows whose subject/
-    // fact text strips to nothing (the Zod input min(1) would reject them anyway).
-    const cap = forgetting.consolidate.max_facts_per_subject;
-    const candidates = extracted
-      .map((e, index) => ({
-        subjectKey: normalizeSubjectKey(e.subjectText),
-        factText: e.factText,
-        validFrom: e.validFrom ?? now,
-        sourceObservationRange: e.sourceObservationRange,
-        index, // original order — the stable tiebreak when validFrom ties
-      }))
-      .filter((c) => c.subjectKey.length > 0 && c.factText.trim().length > 0);
-
-    // Group by subject_key and apply the cap to the NEWEST facts (Codex review fix):
-    // the extractor emits in observation order (OLDEST first), so a naive "keep the
-    // first `cap`" dropped the freshest corrections before supersede could run. Sort
-    // each group by validFrom DESC (newest wins the cap), then re-emit OLDEST-first so
-    // the store's supersede (`valid_from < new`) settles to the newest active fact.
-    const bySubject = new Map<string, typeof candidates>();
-    for (const c of candidates) {
-      const group = bySubject.get(c.subjectKey);
-      if (group === undefined) bySubject.set(c.subjectKey, [c]);
-      else group.push(c);
-    }
-    const facts: MemoryFactInput[] = [];
-    // Deterministic subject order (sorted) so the batch is reproducible.
-    for (const subjectKey of [...bySubject.keys()].sort()) {
-      const group = bySubject.get(subjectKey) ?? [];
-      const kept = group
-        .slice()
-        .sort((a, b) => b.validFrom.getTime() - a.validFrom.getTime() || a.index - b.index)
-        .slice(0, cap) // the `cap` NEWEST
-        .sort((a, b) => a.validFrom.getTime() - b.validFrom.getTime() || a.index - b.index); // re-emit oldest-first
-      for (const c of kept) {
-        facts.push({
-          ownerId: target.accountId,
-          subjectKey,
-          factText: c.factText,
-          contentHash: factContentHash(c.factText),
-          validFrom: c.validFrom,
-          ...(c.sourceObservationRange !== undefined
-            ? { sourceObservationRange: c.sourceObservationRange }
-            : {}),
-          ...(target.projectId !== undefined ? { projectId: target.projectId } : {}),
-          ...(target.resourceId !== undefined ? { resourceId: target.resourceId } : {}),
-          ...(target.threadId !== undefined ? { threadId: target.threadId } : {}),
-        });
-      }
-    }
-    if (facts.length === 0) return;
-
+    // Normalize + cap + supersede-order via the shared deterministic builder (also
+    // used by the Observer's raw-message eager path, so both derive subject_key +
+    // content_hash identically). validFrom falls back to `now` for a stub that omits
+    // it; subject/fact text that strips to nothing is dropped.
     const scope: { projectId?: string; resourceId?: string; threadId?: string } = {};
     if (target.projectId !== undefined) scope.projectId = target.projectId;
     if (target.resourceId !== undefined) scope.resourceId = target.resourceId;
     if (target.threadId !== undefined) scope.threadId = target.threadId;
+
+    const facts = buildReconciledFactBatch({
+      extracted,
+      ownerId: target.accountId,
+      scope,
+      cap: forgetting.consolidate.max_facts_per_subject,
+      fallbackNow: now,
+    });
+    if (facts.length === 0) return;
 
     await deps.memoryStore.insertFactsReconciled({
       accountId: target.accountId,

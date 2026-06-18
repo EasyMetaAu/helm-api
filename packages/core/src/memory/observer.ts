@@ -6,7 +6,64 @@ import {
   chooseAutoCompaction,
   resolveCompactionTunables,
 } from "./compaction-policy.js";
+import { buildReconciledFactBatch } from "./forgetting/facts.js";
 import type { ExtractedFact } from "./reflector.js";
+
+// consolidate.max_facts_per_subject schema default — used when the composition root
+// wires the eager extractor without an explicit cap.
+const DEFAULT_MAX_FACTS_PER_SUBJECT = 8;
+
+// Salient-fact fast path (salient-fact-memory-spec Change A). Mine the thread's
+// UNCOVERED raw turns for durable facts and persist them at the thread's
+// cross-thread scope — DECOUPLED from compaction, so a short "remember X" turn
+// forms a fact even when nothing compacts. Called ONLY on the no-compaction exit
+// paths: a run that compacts leaves facts to the Reflector (which extracts from the
+// new observation), avoiding a double extraction. Fully self-contained + FAIL-OPEN:
+// every error is swallowed + logged so the eager pass can never fail the observer
+// job or the request that enqueued it. No-ops unless the extractor + the fact store
+// are both wired (the composition root wires them only when memory.llm.enabled &&
+// forgetting.consolidate.eager_facts).
+async function maybeEagerExtractFacts(
+  job: ObserverJob,
+  all: RawMessage[],
+  covered: Set<string>,
+  deps: ObserverDeps,
+): Promise<void> {
+  const extract = deps.extractFactsFromMessages;
+  const insert = deps.memoryStore.insertFactsReconciled;
+  if (extract === undefined || insert === undefined) return;
+  try {
+    const uncovered = all.filter((m) => !covered.has(m.id));
+    // Skip the LLM call when there is no NEW user-authored content to mine — a
+    // tool-result / assistant-only batch carries no user-stated fact (the cost lever
+    // that keeps eager extraction off agent tool-roundtrip turns).
+    if (!uncovered.some((m) => m.role === "user")) return;
+    const now = deps.now();
+    const extracted = await extract({ messages: uncovered, now });
+    if (extracted.length === 0) return;
+    const scope: { projectId?: string; resourceId?: string } = {};
+    if (job.projectId !== undefined) scope.projectId = job.projectId;
+    if (job.resourceId !== undefined) scope.resourceId = job.resourceId;
+    const facts = buildReconciledFactBatch({
+      extracted,
+      ownerId: job.accountId,
+      scope,
+      cap: deps.maxFactsPerSubject ?? DEFAULT_MAX_FACTS_PER_SUBJECT,
+      fallbackNow: now,
+    });
+    if (facts.length === 0) return;
+    await insert({ accountId: job.accountId, scope, facts, now });
+    deps.log("memory.observer.eager_facts_extracted", {
+      thread_id: job.threadId,
+      fact_count: facts.length,
+    });
+  } catch (err) {
+    deps.log("memory.observer.eager_facts_failed", {
+      thread_id: job.threadId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 // Background Observer (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
 // request-path job: the request path only persists raw messages and enqueues an
@@ -28,6 +85,13 @@ export interface ObserverJob {
   jobId: string;
   accountId: string;
   threadId: string;
+  // Salient-fact fast path (Change A): the thread's cross-thread scope, carried
+  // verbatim from the enqueued job (the worker already has it — observer jobs are
+  // enqueued with the full {accountId, projectId?, resourceId?, threadId} scope).
+  // Eager facts are written at this scope so they are recallable in a NEW thread.
+  // Absent ⇒ thread-only; the eager pass then writes a thread-scoped fact.
+  projectId?: string;
+  resourceId?: string;
 }
 
 export interface ObserverDeps {
@@ -60,6 +124,9 @@ export interface ObserverDeps {
     messages: RawMessage[];
     now: Date;
   }) => Promise<ExtractedFact[]>;
+  // Per-subject cap for the eager fact batch (consolidate.max_facts_per_subject).
+  // Optional: defaults to the schema default (8) when the composition root omits it.
+  maxFactsPerSubject?: number;
   // Resolve the thread's last served model alias → catalog prices + context
   // window for the auto compaction policy. Injected by the composition root
   // (closure over the runtime catalog); null/unknown alias resolves all-null
@@ -259,6 +326,8 @@ export async function runObserverJob(
     }));
     const selected = decisions.find(({ decision }) => decision.shouldCompact);
     if (selected === undefined) {
+      // No compaction this run → mine the uncovered turns for durable facts.
+      await maybeEagerExtractFacts(job, all, covered, deps);
       await deps.memoryStore.updateJobStatus(job.jobId, "done");
       const lastDecision = decisions.at(-1)?.decision;
       deps.log("memory.observer.noop_compaction_skipped", {
@@ -275,7 +344,9 @@ export async function runObserverJob(
     const compressed = candidates.slice(0, decision.compressedCount);
 
     if (compressed.length === 0) {
-      // Idempotent / nothing to do — never write an empty observation.
+      // Idempotent / nothing to do — never write an empty observation. Still a
+      // no-compaction run, so the eager fact pass applies.
+      await maybeEagerExtractFacts(job, all, covered, deps);
       await deps.memoryStore.updateJobStatus(job.jobId, "done");
       deps.log("memory.observer.noop_no_old_messages", { thread_id: job.threadId });
       return { observationId: null, sourceMessageRange: null };

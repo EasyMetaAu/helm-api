@@ -87,6 +87,10 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
       jobId: job.jobId,
       accountId: job.scope.accountId,
       threadId,
+      // Carry the cross-thread scope through so the Observer's salient-fact fast
+      // path can write facts at project/resource level (recallable in a new thread).
+      ...(job.scope.projectId !== undefined ? { projectId: job.scope.projectId } : {}),
+      ...(job.scope.resourceId !== undefined ? { resourceId: job.scope.resourceId } : {}),
     });
     // D5: only promote a reflector when the observer actually wrote a new
     // observation — a noop observer leaves the reflection untouched. The reflector

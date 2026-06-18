@@ -10,6 +10,9 @@ import { type ObserverDeps, type ObserverJob, runObserverJob } from "./observer.
 function makeFakeStore(messages: RawMessage[], existingRanges: Array<[string, string]> = []) {
   const observations: MemoryObservationInput[] = [];
   const jobUpdates: Array<{ jobId: string; status: MemoryJobStatus; error?: string }> = [];
+  // Salient-fact fast path: capture insertFactsReconciled calls so eager-extraction
+  // tests can assert WHAT facts were persisted and at WHICH scope.
+  const factCalls: Array<Parameters<NonNullable<MemoryStore["insertFactsReconciled"]>>[0]> = [];
   const store: MemoryStore = {
     ensureThread: vi.fn(async () => {}),
     appendMessage: vi.fn(async () => "unused"),
@@ -40,8 +43,35 @@ function makeFakeStore(messages: RawMessage[], existingRanges: Array<[string, st
     }),
     enqueueJob: vi.fn(async () => "job"),
     claimPendingJobs: vi.fn(async () => []),
+    insertFactsReconciled: vi.fn(async (input) => {
+      factCalls.push(input);
+    }),
   };
-  return { store, observations, jobUpdates };
+  return { store, observations, jobUpdates, factCalls };
+}
+
+// A short, low-token thread that never crosses the 2048-token compaction trigger
+// and is not idle — so the Observer writes NO observation. The salient-fact fast
+// path must still mine the user turn for a durable fact.
+function makeShortThread(): RawMessage[] {
+  return [
+    {
+      id: "u1",
+      threadId: "thread-1",
+      role: "user",
+      content: "我喜欢的数字是42,你记住",
+      tokenEstimate: 12,
+      createdAt: new Date(NOW.getTime() - 2000),
+    },
+    {
+      id: "a1",
+      threadId: "thread-1",
+      role: "assistant",
+      content: "记下了。",
+      tokenEstimate: 4,
+      createdAt: new Date(NOW.getTime() - 1000),
+    },
+  ];
 }
 
 function makeMessages(count: number, tokenEstimate = 600): RawMessage[] {
@@ -301,5 +331,123 @@ describe("runObserverJob", () => {
     // The job still compacts; pricing resolved with a null alias.
     expect(resolvePricing).toHaveBeenCalledWith(null);
     expect(observations).toHaveLength(1);
+  });
+});
+
+// Salient-fact fast path (salient-fact-memory-spec Change A): the Observer mines
+// raw turns for durable facts DECOUPLED from compaction, so a short "remember X"
+// turn forms a fact even when nothing compacts.
+describe("runObserverJob — eager fact extraction", () => {
+  const eagerFact = {
+    subjectText: "favorite number",
+    factText: "The user's favorite number is 42.",
+    validFrom: NOW,
+  };
+
+  it("forms a fact from a short thread that never compacts (the '42' case)", async () => {
+    const { store, observations, factCalls } = makeFakeStore(makeShortThread());
+    const extractFactsFromMessages = vi.fn(async () => [eagerFact]);
+    const deps = makeDeps(store, { extractFactsFromMessages, maxFactsPerSubject: 8 });
+    const job: ObserverJob = {
+      jobId: "job-1",
+      accountId: "acct-a",
+      threadId: "thread-1",
+      projectId: "proj-x",
+    };
+
+    const out = await runObserverJob(job, deps);
+
+    // No compaction on a tiny thread…
+    expect(out.observationId).toBeNull();
+    expect(observations).toHaveLength(0);
+    // …but the fact is extracted from the raw turns and persisted at PROJECT scope
+    // (cross-thread — what makes it recallable in a new session).
+    expect(extractFactsFromMessages).toHaveBeenCalledOnce();
+    expect(factCalls).toHaveLength(1);
+    expect(factCalls[0]).toMatchObject({ accountId: "acct-a", scope: { projectId: "proj-x" } });
+    expect(factCalls[0]?.facts[0]).toMatchObject({
+      ownerId: "acct-a",
+      projectId: "proj-x",
+      subjectKey: "favorite-number",
+      factText: "The user's favorite number is 42.",
+    });
+  });
+
+  it("skips the LLM call when the uncovered turns contain no user message", async () => {
+    const assistantOnly: RawMessage[] = [
+      {
+        id: "a1",
+        threadId: "thread-1",
+        role: "assistant",
+        content: "Working on it…",
+        tokenEstimate: 4,
+        createdAt: new Date(NOW.getTime() - 2000),
+      },
+      {
+        id: "t1",
+        threadId: "thread-1",
+        role: "tool",
+        content: "tool result",
+        tokenEstimate: 4,
+        createdAt: new Date(NOW.getTime() - 1000),
+      },
+    ];
+    const { store, factCalls } = makeFakeStore(assistantOnly);
+    const extractFactsFromMessages = vi.fn(async () => [eagerFact]);
+    const deps = makeDeps(store, { extractFactsFromMessages });
+
+    await runObserverJob({ ...JOB, projectId: "proj-x" }, deps);
+
+    expect(extractFactsFromMessages).not.toHaveBeenCalled();
+    expect(factCalls).toHaveLength(0);
+  });
+
+  it("does NOT eager-extract on a run that compacts (the Reflector owns facts there)", async () => {
+    const { store, observations, factCalls } = makeFakeStore(makeMessages(8));
+    const extractFactsFromMessages = vi.fn(async () => [eagerFact]);
+    const deps = makeDeps(store, { extractFactsFromMessages });
+
+    const out = await runObserverJob({ ...JOB, projectId: "proj-x" }, deps);
+
+    expect(out.observationId).toBe("obs-1"); // compacted
+    expect(observations).toHaveLength(1);
+    expect(extractFactsFromMessages).not.toHaveBeenCalled();
+    expect(factCalls).toHaveLength(0);
+  });
+
+  it("does nothing when the extractor dep is not wired (byte-identical to today)", async () => {
+    const { store, factCalls } = makeFakeStore(makeShortThread());
+    const deps = makeDeps(store); // no extractFactsFromMessages
+
+    const out = await runObserverJob({ ...JOB, projectId: "proj-x" }, deps);
+
+    expect(out.observationId).toBeNull();
+    expect(factCalls).toHaveLength(0);
+  });
+
+  it("is fail-open: an extractor throw never fails the job", async () => {
+    const { store, jobUpdates, factCalls } = makeFakeStore(makeShortThread());
+    const extractFactsFromMessages = vi.fn(async () => {
+      throw new Error("llm down");
+    });
+    const deps = makeDeps(store, { extractFactsFromMessages });
+
+    const out = await runObserverJob({ ...JOB, projectId: "proj-x" }, deps);
+
+    expect(out.observationId).toBeNull();
+    expect(factCalls).toHaveLength(0);
+    // job still completes (not failed by the eager pass)
+    expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
+  });
+
+  it("skips the insert when the extractor yields no facts", async () => {
+    const { store, factCalls } = makeFakeStore(makeShortThread());
+    const extractFactsFromMessages = vi.fn(async () => []);
+    const deps = makeDeps(store, { extractFactsFromMessages });
+
+    await runObserverJob({ ...JOB, projectId: "proj-x" }, deps);
+
+    expect(extractFactsFromMessages).toHaveBeenCalledOnce();
+    expect(factCalls).toHaveLength(0);
   });
 });
