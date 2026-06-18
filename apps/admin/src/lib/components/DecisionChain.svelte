@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
   import type { RequestDetail } from '$lib/api/requests.js';
   import { t } from '$lib/i18n';
 
@@ -237,10 +238,15 @@
           <div class="flex flex-wrap items-center gap-2">
             <span class="font-mono text-ink-strong">{a.provider}</span>
             <span class="text-ink-muted">{a.model}</span>
-            <span class={outcomeBadge(a.outcome)}>{a.outcome}</span>
+            <span class={outcomeBadge(a.outcome)} title={a.outcome}
+              >{$t(attemptCodeLabel(a.outcome))}</span
+            >
             <span class="text-ink-muted">{a.latency_ms}ms</span>
-            {#if a.error_class}<span class="text-red-600">{a.error_class}</span>{/if}
-            {#if a.skip_reason}<span class="text-ink-muted">{$t('skip:')} {a.skip_reason}</span
+            {#if a.error_class}<span class="text-red-600" title={a.error_class}
+                >{$t(attemptCodeLabel(a.error_class))}</span
+              >{/if}
+            {#if a.skip_reason}<span class="text-ink-muted" title={a.skip_reason}
+                >{$t('skip:')} {$t(attemptCodeLabel(a.skip_reason))}</span
               >{/if}
           </div>
           <!-- Expandable upstream failure detail for THIS attempt — the only

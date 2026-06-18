@@ -126,8 +126,8 @@ describe('requests list page', () => {
     expect(within(first).getByTestId('cell-tps')).toHaveTextContent('200 tok/s'); // true TPS
     expect(first).toHaveTextContent(/0\.0123|0\.012/); // cost
     expect(first).toHaveTextContent('1'); // fallback_count
-    // The error row surfaces error_class.
-    expect(rows[1]).toHaveTextContent('all_providers_failed');
+    // The error row surfaces error_class as a human label (raw code in the title attr).
+    expect(rows[1]).toHaveTextContent('All providers failed');
     // No plaintext-like long secret anywhere.
     expect(document.body.textContent ?? '').not.toMatch(/helm_live_[A-Za-z0-9]{16,}/);
   });
@@ -374,7 +374,7 @@ describe('requests detail page', () => {
       },
     });
     const err = screen.getByTestId('request-error');
-    expect(err).toHaveTextContent('all_providers_failed');
+    expect(err).toHaveTextContent('All providers failed');
     expect(err).toHaveTextContent('502');
     expect(err).toHaveTextContent(/all providers failed/);
     // trace_id is copyable.

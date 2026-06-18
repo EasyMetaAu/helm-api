@@ -231,7 +231,9 @@ describe('DecisionChain', () => {
     expect(rows[0]).toHaveTextContent('120');
     expect(rows[1]).toHaveTextContent(/success/i);
     expect(rows[2]).toHaveTextContent(/skipped/i);
-    expect(rows[2]).toHaveTextContent('capability_unsatisfiable');
+    // Codes render as human labels; the raw code is preserved in the title tooltip.
+    expect(rows[2]).toHaveTextContent('No compatible model');
+    expect(within(rows[2]).getByTitle('capability_unsatisfiable')).toBeInTheDocument();
   });
 
   it('exposes a failed attempt error_detail (upstream status + message + raw body) as an expandable panel', () => {
