@@ -917,31 +917,6 @@ export async function buildServer(
     ? await loadAccountSettings(store.config, oauthCtx.encKey)
     : {};
 
-  // Chrome-TLS transport startup probe (#306). Any provider on transport_profile
-  // tls_chrome (Anthropic preset OAuth under `auto`, or explicit) executes through
-  // the OPTIONAL wreq-js native transport. If that binary cannot load, the first
-  // Anthropic request would throw TlsTransportUnavailableError — counted as a
-  // provider failure that trips the breaker and silently degrades to the lane
-  // fallback chain. Probe it ONCE here so the gap is loud at deploy time. Non-fatal
-  // (principle 3): the gateway still starts; the operator can set
-  // transport_profile:default to force the proven undici path.
-  const tlsProviders = tlsTransportProviders(config.providers);
-  if (tlsProviders.length > 0) {
-    const probe = await checkTlsTransportAvailable({
-      browser: process.env.HELM_TLS_BROWSER_PROFILE,
-      os: process.env.HELM_TLS_OS_PROFILE,
-    });
-    if (probe.ok) {
-      logger.log("info", "tls_transport.ready", { providers: tlsProviders });
-    } else {
-      logger.log("warn", "tls_transport.unavailable", {
-        providers: tlsProviders,
-        error: probe.error,
-        hint: "Anthropic OAuth execution will fail over to the lane fallback chain; set transport_profile:default on these providers to force undici, or install a wreq-js build for this platform",
-      });
-    }
-  }
-
   // Runtime-mutable settings (admin "System Settings"): persisted overrides for
   // the operator-facing subset that can change WITHOUT a restart (capture_payloads,
   // payload_retention_days, rate_limit_enabled, log_level). Loaded from the
@@ -1208,6 +1183,33 @@ export async function buildServer(
     ...config.providers,
     ...synthesizedOAuth.providers,
   ];
+
+  // Chrome-TLS transport startup probe (#306). Any routable provider on
+  // transport_profile:tls_chrome (Anthropic preset OAuth under the `auto` default,
+  // or explicit) executes through the OPTIONAL wreq-js native transport — and the
+  // ones that matter here are usually the SYNTHESIZED OAuth pool providers, not
+  // config.providers, so probe the full routable set. If the native binary cannot
+  // load, the first Anthropic request throws TlsTransportUnavailableError — counted
+  // as a provider failure that trips the breaker and silently degrades to the lane
+  // fallback chain. Probe ONCE so the gap is loud at deploy time. Non-fatal
+  // (principle 3): the gateway still serves; operators can set
+  // transport_profile:default to force the proven undici path.
+  const tlsProviders = tlsTransportProviders(routableProviders);
+  if (tlsProviders.length > 0) {
+    const probe = await checkTlsTransportAvailable({
+      browser: process.env.HELM_TLS_BROWSER_PROFILE,
+      os: process.env.HELM_TLS_OS_PROFILE,
+    });
+    if (probe.ok) {
+      logger.log("info", "tls_transport.ready", { providers: tlsProviders });
+    } else {
+      logger.log("warn", "tls_transport.unavailable", {
+        providers: tlsProviders,
+        error: probe.error,
+        hint: "Anthropic OAuth execution will fail over to the lane fallback chain; set transport_profile:default on these providers to force undici, or install a wreq-js build for this platform",
+      });
+    }
+  }
 
   // The default/primary client (eval + passthrough + back-fill aliases), dispatched
   // by type (anthropic native vs OpenAI-compatible). When the primary is OAuth this
