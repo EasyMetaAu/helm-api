@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-18 · Codex 原生直通缺失 instructions 修复（issue #217；docs/05；原则 1/4/8）
+
+- **背景**：线上请求 `09387e28-...`（pi-coding-agent / AgentCrew，经 `@earendil-works/pi-ai`）由 `/v1/responses` 入站，lane=coding 首选 `openai-codex/gpt-5.5`，`passthrough_used=true` 把正文逐字转发给 ChatGPT 订阅版 Codex 后端 → HTTP 400 `{"detail":"Instructions are required"}`，fail-open 回退 `claude-opus-4-8` 成功。SQLite 实证：入站正文 `input` 为数组、无 `messages`、**无顶层 `instructions`**，系统提示词其实是 `input[0]={role:"developer",content:"You are Mimi..."}`（pi-ai 设计：reasoning 模型用 developer、否则 system，塞进 input，故意不发 instructions——对真·OpenAI Responses 合法，但 Codex 订阅后端强制要 instructions）。
+- **根因**：两路不对称。翻译路 `buildInstructions` 无 system 时回退 `DEFAULT_INSTRUCTIONS`，永不空；**直通路逐字转发，无兜底**。`execute.ts` 的 compat-rewrite guard 只覆盖 `map_developer_role_to_system` 与 Anthropic system-fold，没有 Codex/responses 的 instructions guard。
+- **实现**：core 新增纯函数 `hoistResponsesInstructions(body)`（`openai-responses.ts`，复用 `plainText`/`DEFAULT_INSTRUCTIONS`，从 core index 导出）：已有非空 instructions → 原样返回（verbatim）；否则把 `input` 里 `system`/`developer` 项内容 hoist 进顶层 `instructions` 并从 `input` 摘除（与翻译路 buildInstructions/toResponsesInput 同义）；无 system 内容则注入 `DEFAULT_INSTRUCTIONS`。在 `execute.ts` `prepareNativeRequestForUpstream` 的 `needsCodexResponsesShim` 块（仅 `codex_responses` profile，generic responses 不触发）调用，记 `body_shims_applied` 的 `instructions_hoisted_from_input` / `instructions_defaulted`。**保留 passthrough**（prompt_cache_key / reasoning 加密内容 / SSE 字节转发不丢），优于强制走翻译路方案。
+- **取舍/坑**：选 hoist 而非"注入通用默认"——真实系统提示在 input 里，注入 "You are a helpful assistant." 会冗余/误导；hoist 还原真 Codex CLI 形状（instructions=系统提示、input=纯对话）。`appendMutationList` 对 `body_shims_applied` 会去重+排序，故 ledger 顺序是字母序（`instructions_*` 排在 `store_forced_false` 前）。客户端 pi-ai 是第三方 node_modules、未暴露 instructions 配置，改不动，且 helm 本职就是后端兼容（原则 6），故修在网关侧。
+- **验证**：core 8 个 hoist 单测 + gateway 2 个 execute 直通测试（hoist developer 形状、已有 instructions 保持 verbatim）+ 更新既有 store-shim 测试断言（现含 `instructions_defaulted`）。typecheck（3 项目）/ lint(478) / core+gateway 全量 **3264** 绿。分支 `fix-codex-passthrough-instructions-hoist`，未提交/未部署。
+
 ## 2026-06-18 · Anthropic OAuth TLS/JA3 transport spike（docs/05/10；原则 2/7/8）
 
 - **背景**：Claude CLI strict body/header/tool shape 已由 PR #304/#305 合并；剩余第三点是 OmniRoute 风格的 transport fingerprint（TLS ClientHello / JA3/JA4 / HTTP2 traits），不能靠当前 undici Agent/ProxyAgent 调参完成。
@@ -22,18 +30,13 @@
 - **取舍/坑/TODO**：strict pipeline 只作用于互译出站 Anthropic 请求；`nativePassthrough/nativePassthroughStream` 仍传 `includeClaudeCliRuntimeHeaders=false`，保持逐字直通，不做 body/tool 改写。TLS/JA3/transport fingerprint 属于单独 PR/spike，本次不碰 undici fetch/Agent/ProxyAgent。部署后用上述 request detail 重试同类 payload，看 wire shape 与上游结果是否符合预期。
 - **验证**：新增 golden fixture `packages/core/src/provider/fixtures/claude-cli-strict-tool.ts` 与 TDD 回归（非流式 wire shape + tool name restore、流式 restore、401 retry reverse-map）。`pnpm exec vitest run packages/core/src/provider/anthropic.test.ts -t "preserves the reverse map"` 红→绿；`pnpm exec vitest run packages/core/src/provider/anthropic.test.ts` 94 绿；`pnpm --filter @helm/core typecheck` 绿；`pnpm exec biome check packages/core/src/provider/anthropic.ts packages/core/src/provider/anthropic.test.ts` 绿。
 
-## 2026-06-18 · 请求详情页内部 code 人类可读化（admin i18n；原则 1）
-
-- **背景**：请求详情页的「供应商尝试」链 + 错误类型显示的是内部 snake_case code（`no_response_schema_support` / `circuit_open` / `client_abort` / `upstream_error` …），运维看不懂。
-- **实现**：新增 `apps/admin/src/lib/format/attempt-codes.ts` 的 `ATTEMPT_CODE_LABELS`（code→英文人话，**值即 i18n key**）+ `attemptCodeLabel()`（未知 code 回退裸 code，永不空白）。镜像 core 的 `SkipReason` 联合 + execute 的 error_class（admin 不 import core，原则 1）。渲染处 `DecisionChain.svelte`（outcome badge / error_class / skip_reason）、详情页 error type、列表 error_class 列改 `$t(attemptCodeLabel(code))`，并加 `title={原始code}` 悬浮保留调试用裸码。
-- **i18n**：26 个新 key（3 个如 Error/Success 已存在）加进 5 个 locale（en=自身，zh-hans/hant/ja/ko 手译）；用一次性 additive 合并脚本（保留既有字节、仅追加，避开 i18n:extract 会拉无关串的坑）。
-- **验证**：`attempt-codes.test.ts`（映射 + 回退 + 覆盖全 SkipReason）、`attempt-code-locales.test.ts`（4 非英 locale 每个 label 都翻译、非英文回退，镜像 dashboard-locales 模式）；admin 14 测绿、`svelte-check` 0/0、`biome lint`(475)、`build` 全绿。分支 `feat-readable-attempt-codes`，未提交/未部署。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-18 · 请求详情页内部 code 人类可读化（admin i18n；原则 1）：「供应商尝试」链 + 错误类型显示内部 snake_case code（no_response_schema_support/circuit_open/client_abort/upstream_error…）运维看不懂；新增 admin `attempt-codes.ts` 的 `ATTEMPT_CODE_LABELS`(code→英文人话=i18n key)+`attemptCodeLabel()`（未知回退裸 code），镜像 core SkipReason+error_class（admin 不 import core），渲染处改 `$t(attemptCodeLabel(code))` 并 `title` 留裸码；26 新 key×5 locale 手译、additive 合并；admin 14 测/svelte-check 0/build 绿。分支 feat-readable-attempt-codes，未部署。
 
 ### 2026-06-18 · json_schema 能力分级修复（capability tier；docs/02/04；原则 2/3/4）：把 `supportsJsonMode` 拆成有序 `jsonOutput:none|object|schema`，能力过滤区分 `json_object` 与 strict `json_schema`，json_schema 默认落 openrouter-deepseek；旧 `supportsJsonMode` override fail-closed，部署前需改 operator-owned capabilities。
 

@@ -5,6 +5,7 @@ import {
   codexAccountIdFromToken,
   createCodexResponsesClient,
   createGenericOpenAIResponsesClient,
+  hoistResponsesInstructions,
   openaiToResponsesRequest,
   readResponsesEvents,
   readResponsesSSERaw,
@@ -1877,5 +1878,113 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
         body: { model: "gpt-5.5", input: "count me" },
       },
     ]);
+  });
+});
+
+// hoistResponsesInstructions — the native-passthrough repair for the ChatGPT-account
+// Codex backend, which MANDATES a non-empty top-level `instructions`. Standard-OpenAI
+// Responses clients (e.g. pi-ai / pi-coding-agent) put the system prompt as a leading
+// `developer`/`system` item inside `input` and omit `instructions` — valid for the
+// public API but rejected by the Codex backend ("Instructions are required"). On the
+// verbatim passthrough path this pure shim hoists that content into `instructions` and
+// strips the hoisted items, mirroring the translate path's buildInstructions split.
+describe("hoistResponsesInstructions", () => {
+  it("hoists a leading developer item (pi-ai reasoning shape) into instructions and strips it", () => {
+    const { body, fix } = hoistResponsesInstructions({
+      model: "gpt-5.5",
+      input: [
+        { role: "developer", content: "You are Mimi, an AI employee at AgentCrew." },
+        { role: "user", content: "hi" },
+      ],
+      stream: true,
+    });
+    expect(fix).toBe("hoisted_from_input");
+    expect(body.instructions).toBe("You are Mimi, an AI employee at AgentCrew.");
+    expect(body.input).toEqual([{ role: "user", content: "hi" }]);
+    // top-level siblings preserved
+    expect(body.model).toBe("gpt-5.5");
+    expect(body.stream).toBe(true);
+  });
+
+  it("hoists a leading system item (non-reasoning shape) into instructions", () => {
+    const { body, fix } = hoistResponsesInstructions({
+      input: [
+        { role: "system", content: "You are helpful." },
+        { role: "user", content: "q" },
+      ],
+    });
+    expect(fix).toBe("hoisted_from_input");
+    expect(body.instructions).toBe("You are helpful.");
+    expect(body.input).toEqual([{ role: "user", content: "q" }]);
+  });
+
+  it("joins multiple system/developer items with a blank line, in order", () => {
+    const { body, fix } = hoistResponsesInstructions({
+      input: [
+        { role: "system", content: "A" },
+        { role: "developer", content: "B" },
+        { role: "user", content: "q" },
+      ],
+    });
+    expect(fix).toBe("hoisted_from_input");
+    expect(body.instructions).toBe("A\n\nB");
+    expect(body.input).toEqual([{ role: "user", content: "q" }]);
+  });
+
+  it("extracts text from array (input_text) content", () => {
+    const { body, fix } = hoistResponsesInstructions({
+      input: [
+        { role: "developer", content: [{ type: "input_text", text: "SYS" }] },
+        { role: "user", content: "q" },
+      ],
+    });
+    expect(fix).toBe("hoisted_from_input");
+    expect(body.instructions).toBe("SYS");
+    expect(body.input).toEqual([{ role: "user", content: "q" }]);
+  });
+
+  it("leaves the body verbatim (same reference) when instructions is already present", () => {
+    const original = {
+      instructions: "real codex base prompt",
+      input: [{ role: "user", content: "hi" }],
+    };
+    const { body, fix } = hoistResponsesInstructions(original);
+    expect(fix).toBe("none");
+    expect(body).toBe(original);
+  });
+
+  it("treats whitespace-only instructions as empty and hoists", () => {
+    const { body, fix } = hoistResponsesInstructions({
+      instructions: "   ",
+      input: [
+        { role: "developer", content: "SYS" },
+        { role: "user", content: "q" },
+      ],
+    });
+    expect(fix).toBe("hoisted_from_input");
+    expect(body.instructions).toBe("SYS");
+  });
+
+  it("falls back to the default when instructions is absent and there is no system content", () => {
+    const { body, fix } = hoistResponsesInstructions({
+      input: [{ role: "user", content: "hi" }],
+    });
+    expect(fix).toBe("defaulted");
+    expect(body.instructions).toBe("You are a helpful assistant.");
+    // input is untouched in the defaulted branch
+    expect(body.input).toEqual([{ role: "user", content: "hi" }]);
+  });
+
+  it("does not mutate the input body (returns a new object on repair)", () => {
+    const original: Record<string, unknown> = {
+      input: [
+        { role: "developer", content: "SYS" },
+        { role: "user", content: "q" },
+      ],
+    };
+    const { body } = hoistResponsesInstructions(original);
+    expect(body).not.toBe(original);
+    expect("instructions" in original).toBe(false);
+    expect(original.input).toHaveLength(2);
   });
 });

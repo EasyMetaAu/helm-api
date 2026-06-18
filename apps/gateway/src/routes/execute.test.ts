@@ -2628,11 +2628,19 @@ describe("createExecute — native protocol passthrough (#217)", () => {
 
     expect(out.final.status).toBe("ok");
     const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
-    expect(forwarded.body).toEqual({ model: "gpt-5-codex", input: "hi", store: false });
+    // The Codex backend mandates non-empty `instructions`; a string-input body with no
+    // system content gets the default injected alongside the store shim.
+    expect(forwarded.body).toEqual({
+      model: "gpt-5-codex",
+      input: "hi",
+      store: false,
+      instructions: "You are a helpful assistant.",
+    });
     expect(forwarded.raw_body).toBeUndefined();
     expect(forwarded.mutations).toMatchObject({
       model_rewritten: { from: "codex/gpt-5-codex", to: "gpt-5-codex" },
-      body_shims_applied: ["store_forced_false"],
+      // appendMutationList sorts the ledger → alphabetical order
+      body_shims_applied: ["instructions_defaulted", "store_forced_false"],
     });
     expect(out.attempts[0]?.passthrough_mutations).toMatchObject(forwarded.mutations);
   });
@@ -2689,6 +2697,124 @@ describe("createExecute — native protocol passthrough (#217)", () => {
       input: "hi",
       store: true,
       background: true,
+    });
+    expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toBeUndefined();
+  });
+
+  it("hoists a developer system item into Codex `instructions` on passthrough (pi-ai shape)", async () => {
+    const responsesBody = {
+      id: "resp_hoist",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["codex", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "codex",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: {
+        model: "gpt-5.5",
+        input: [
+          { role: "developer", content: "You are Mimi, an AI employee at AgentCrew." },
+          { role: "user", content: "hi" },
+        ],
+        store: false,
+      },
+      headers: {},
+      mutations: {},
+    };
+
+    const out = await execute(
+      plan(["r"]),
+      req({ protocol: "openai_responses", native_request: carrier }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body).toEqual({
+      model: "gpt-5.5",
+      instructions: "You are Mimi, an AI employee at AgentCrew.",
+      input: [{ role: "user", content: "hi" }],
+      store: false,
+    });
+    expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toEqual([
+      "instructions_hoisted_from_input",
+    ]);
+  });
+
+  it("leaves a Codex passthrough body verbatim when `instructions` is already present", async () => {
+    const responsesBody = {
+      id: "resp_verbatim",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["codex", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "codex",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: {
+        model: "gpt-5.5",
+        instructions: "real codex base prompt",
+        input: [{ role: "user", content: "hi" }],
+        store: false,
+      },
+      headers: {},
+      mutations: {},
+    };
+
+    const out = await execute(
+      plan(["r"]),
+      req({ protocol: "openai_responses", native_request: carrier }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body).toEqual({
+      model: "gpt-5.5",
+      instructions: "real codex base prompt",
+      input: [{ role: "user", content: "hi" }],
+      store: false,
     });
     expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toBeUndefined();
   });
