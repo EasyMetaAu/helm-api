@@ -54,7 +54,10 @@ function normalizeEntry(
     modelKey,
     capabilities: {
       supportsTools: info.supports_function_calling === true,
-      supportsJsonMode: info.supports_response_schema === true,
+      // LiteLLM's `supports_response_schema` IS the strict json_schema flag — map it to
+      // the `schema` tier; absence means no JSON mode at all (`none`). LiteLLM exposes no
+      // json_object-only signal, so the `object` tier comes only from manual overrides.
+      jsonOutput: info.supports_response_schema === true ? "schema" : "none",
       supportsVision: info.supports_vision === true,
       // Chat/completion modes stream; embeddings etc. do not.
       supportsStreaming: info.mode === undefined || info.mode === "chat",

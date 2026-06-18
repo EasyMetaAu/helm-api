@@ -11,11 +11,17 @@
 
 # "local/llama-3.1-70b":
 #   supportsTools: true
-#   supportsJsonMode: false
+#   jsonOutput: object
 #   supportsVision: false
 #   supportsStreaming: true
 #   maxContextTokens: 131072
 #   maxOutputTokens: 4096
+#
+# `jsonOutput` is an ORDERED tier (none < object < schema): `none` = no JSON mode
+# (pruned for any JSON request); `object` = `response_format:{type:"json_object"}`
+# only (official DeepSeek — json_schema 400s); `schema` = native strict structured
+# output (`response_format:{type:"json_schema"}` / Anthropic output_format / Gemini
+# responseSchema). A json_schema request prunes every candidate below `schema`.
 #
 # `modalities` (optional) lists the EXTRA input modalities a backend accepts beyond
 # text + image (image is gated by supportsVision). Allowed values: audio, video,
@@ -49,52 +55,57 @@
 # an operator can pick has a capability + pricing entry here.
 openai-codex/gpt-5.5:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   maxContextTokens: 1050000
   maxOutputTokens: 128000
 openai-codex/gpt-5.4:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   maxContextTokens: 400000
   maxOutputTokens: 128000
 openai-codex/gpt-5.4-mini:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   maxContextTokens: 400000
   maxOutputTokens: 65536
+# Official DeepSeek API: json_object YES, json_schema NO (response_format json_schema
+# 400s "This response_format type is unavailable now"). Hence `object`, not `schema` —
+# a strict json_schema request prunes these and lands on a schema-capable backend
+# (e.g. the openrouter mirrors below), while a json_object request still serves cheaply.
 deepseek/deepseek-v4-pro:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: object
   supportsVision: false
   supportsStreaming: true
   maxContextTokens: 1048576
   maxOutputTokens: 384000
 deepseek/deepseek-v4-flash:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: object
   supportsVision: false
   supportsStreaming: true
   maxContextTokens: 1048576
   maxOutputTokens: 16384
 # OpenRouter-hosted DeepSeek mirrors (lanes fallback f0d0cc6; data from
 # https://openrouter.ai/api/v1/models, 2026-06-04 — tools + structured_outputs
-# supported, text-only input).
+# supported, text-only input). structured_outputs ⇒ jsonOutput: schema, so a strict
+# json_schema request lands here (cheap + native) rather than on official DeepSeek.
 openrouter/deepseek-v4-pro:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: false
   supportsStreaming: true
   maxContextTokens: 1048576
   maxOutputTokens: 384000
 openrouter/deepseek-v4-flash:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: false
   supportsStreaming: true
   maxContextTokens: 1048576
@@ -103,7 +114,7 @@ openrouter/deepseek-v4-flash:
 # below (issue #217); the OpenAI-compat `zenmux/claude-*` entries were removed.
 zenmux/gpt-5.5:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   # OpenRouter lists `file` input for gpt-5.5 (text+image+file->text).
@@ -112,12 +123,12 @@ zenmux/gpt-5.5:
   maxOutputTokens: 128000
 # NATIVE-protocol passthrough aliases (issue #217). Gemini/Claude are served via
 # ZenMux's native Gemini/Anthropic endpoints (the OpenAI-compat `zenmux/gemini-*` /
-# `zenmux/claude-*` aliases were removed). supportsJsonMode is load-bearing here: a
-# missing entry defaults to false, and a strict-JSON request would skip the
-# candidate (the issue-#217 failure mode).
+# `zenmux/claude-*` aliases were removed). jsonOutput is load-bearing here: a missing
+# entry defaults to `none`, and a strict-JSON request would skip the candidate (the
+# issue-#217 failure mode).
 zenmux-vertex/gemini-3.5-flash:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   supportsCachedContent: true
@@ -126,7 +137,7 @@ zenmux-vertex/gemini-3.5-flash:
   maxOutputTokens: 65536
 zenmux-vertex/gemini-3.1-flash-lite:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   supportsCachedContent: true
@@ -135,7 +146,7 @@ zenmux-vertex/gemini-3.1-flash-lite:
   maxOutputTokens: 65536
 zenmux-vertex/gemini-3.1-pro:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   supportsCachedContent: true
@@ -144,7 +155,7 @@ zenmux-vertex/gemini-3.1-pro:
   maxOutputTokens: 65536
 zenmux-anthropic/claude-opus-4.8:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   modalities: [document]
@@ -152,7 +163,7 @@ zenmux-anthropic/claude-opus-4.8:
   maxOutputTokens: 128000
 zenmux-anthropic/claude-sonnet-4.6:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   modalities: [document]
@@ -160,24 +171,24 @@ zenmux-anthropic/claude-sonnet-4.6:
   maxOutputTokens: 128000
 zenmux-anthropic/claude-haiku-4.5:
   supportsTools: true
-  supportsJsonMode: true
+  jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
-# */auto aggregators: JSON-INCAPABLE on purpose — the capability filter prunes
-# them for strict-JSON requests so a json lane lands on a deterministic model.
+# */auto aggregators: JSON-INCAPABLE on purpose (jsonOutput: none) — the capability
+# filter prunes them for any JSON request so a json lane lands on a deterministic model.
 zenmux/auto:
   supportsTools: true
-  supportsJsonMode: false
+  jsonOutput: none
   supportsVision: true
   supportsStreaming: true
   maxContextTokens: 200000
   maxOutputTokens: 8192
 openrouter/auto:
   supportsTools: true
-  supportsJsonMode: false
+  jsonOutput: none
   supportsVision: true
   supportsStreaming: true
   maxContextTokens: 200000

@@ -16,7 +16,7 @@ function entry(modelKey: string, over: Partial<CatalogEntry["capabilities"]> = {
     modelKey,
     capabilities: {
       supportsTools: true,
-      supportsJsonMode: true,
+      jsonOutput: "schema",
       supportsVision: false,
       supportsStreaming: true,
       maxContextTokens: 128_000,

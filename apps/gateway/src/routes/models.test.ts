@@ -17,7 +17,7 @@ const catalog = new Map<string, CatalogEntry>([
       modelKey: "deepseek/pro",
       capabilities: {
         supportsTools: true,
-        supportsJsonMode: true,
+        jsonOutput: "schema",
         supportsVision: false,
         supportsStreaming: true,
         maxContextTokens: 128_000,

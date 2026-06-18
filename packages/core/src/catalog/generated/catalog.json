@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-06-07T09:06:08.020Z",
+  "generatedAt": "2026-06-18T02:22:42.562Z",
   "source": "litellm:model_prices_and_context_window.json",
   "models": [
     {
       "modelKey": "claude-3-5-haiku-20241022",
       "capabilities": {
         "supportsTools": true,
-        "supportsJsonMode": false,
+        "jsonOutput": "none",
         "supportsVision": false,
         "supportsStreaming": true,
         "maxContextTokens": 200000,
@@ -23,7 +23,7 @@
       "modelKey": "claude-3-5-sonnet-20241022",
       "capabilities": {
         "supportsTools": true,
-        "supportsJsonMode": false,
+        "jsonOutput": "none",
         "supportsVision": true,
         "supportsStreaming": true,
         "maxContextTokens": 200000,
@@ -40,7 +40,7 @@
       "modelKey": "gemini-1.5-pro",
       "capabilities": {
         "supportsTools": true,
-        "supportsJsonMode": false,
+        "jsonOutput": "none",
         "supportsVision": true,
         "supportsStreaming": true,
         "maxContextTokens": 2097152,
@@ -57,7 +57,7 @@
       "modelKey": "gpt-4o",
       "capabilities": {
         "supportsTools": true,
-        "supportsJsonMode": true,
+        "jsonOutput": "schema",
         "supportsVision": true,
         "supportsStreaming": true,
         "maxContextTokens": 128000,
@@ -74,7 +74,7 @@
       "modelKey": "gpt-4o-mini",
       "capabilities": {
         "supportsTools": true,
-        "supportsJsonMode": true,
+        "jsonOutput": "schema",
         "supportsVision": true,
         "supportsStreaming": true,
         "maxContextTokens": 128000,

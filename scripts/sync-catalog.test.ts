@@ -73,6 +73,9 @@ describe("syncCatalog", () => {
     expect(gpt?.capabilities.maxOutputTokens).toBe(16384);
     expect(gpt?.capabilities.supportsTools).toBe(true);
     expect(gpt?.capabilities.supportsVision).toBe(true);
+    // supports_response_schema:true → schema tier; absent → none (the json_object-only
+    // tier is set only via manual capabilities.yaml overrides, never from upstream).
+    expect(gpt?.capabilities.jsonOutput).toBe("schema");
     // per-token → per-MTok USD
     expect(gpt?.pricing.inputPerMTokUsd).toBeCloseTo(2.5, 6);
     expect(gpt?.pricing.outputPerMTokUsd).toBeCloseTo(10, 6);
@@ -89,6 +92,8 @@ describe("syncCatalog", () => {
     const deepseek = byKey.get("deepseek-chat");
     expect(deepseek?.pricing.cacheReadPerMTokUsd).toBeCloseTo(0.07, 6);
     expect(deepseek?.pricing.cacheWritePerMTokUsd).toBeNull();
+    // No supports_response_schema flag upstream → none (not silently json-capable).
+    expect(deepseek?.capabilities.jsonOutput).toBe("none");
   });
 
   it("emits models in stable sorted key order (deterministic artifact)", async () => {

@@ -9,7 +9,7 @@ type Caps = CatalogEntry["capabilities"];
 function caps(overrides: Partial<Caps> = {}): Caps {
   return {
     supportsTools: true,
-    supportsJsonMode: true,
+    jsonOutput: "schema",
     supportsVision: true,
     supportsStreaming: true,
     maxContextTokens: 100_000,
@@ -24,6 +24,7 @@ function req(overrides: Partial<CapabilityRequest> = {}): CapabilityRequest {
   return {
     needsTools: false,
     needsJson: false,
+    needsResponseSchema: false,
     needsVision: false,
     needsStreaming: false,
     estimatedPromptTokens: 0,
@@ -43,13 +44,44 @@ describe("checkCapability", () => {
     expect(result).toEqual({ ok: true, skipReason: null });
   });
 
-  it("skips with no_json_support when strict JSON is required but unsupported", () => {
-    const result = checkCapability(caps({ supportsJsonMode: false }), req({ needsJson: true }));
+  it("skips with no_json_support when JSON is required but the tier is none", () => {
+    const result = checkCapability(caps({ jsonOutput: "none" }), req({ needsJson: true }));
     expect(result).toEqual({ ok: false, skipReason: "no_json_support" });
   });
 
-  it("passes the json gate when the candidate supports JSON mode", () => {
-    const result = checkCapability(caps({ supportsJsonMode: true }), req({ needsJson: true }));
+  it("passes the json gate for a json_object request on the object tier", () => {
+    const result = checkCapability(caps({ jsonOutput: "object" }), req({ needsJson: true }));
+    expect(result).toEqual({ ok: true, skipReason: null });
+  });
+
+  it("passes the json gate for a json_object request on the schema tier", () => {
+    const result = checkCapability(caps({ jsonOutput: "schema" }), req({ needsJson: true }));
+    expect(result).toEqual({ ok: true, skipReason: null });
+  });
+
+  // The prod-bug regression: a strict json_schema request must PRUNE a json_object-only
+  // backend (official DeepSeek) with the SPECIFIC reason, not burn an attempt on a 400.
+  it("prunes an object-tier candidate for a json_schema request (no_response_schema_support)", () => {
+    const result = checkCapability(
+      caps({ jsonOutput: "object" }),
+      req({ needsJson: true, needsResponseSchema: true }),
+    );
+    expect(result).toEqual({ ok: false, skipReason: "no_response_schema_support" });
+  });
+
+  it("prunes a none-tier candidate for a json_schema request with no_json_support (gate ordering)", () => {
+    const result = checkCapability(
+      caps({ jsonOutput: "none" }),
+      req({ needsJson: true, needsResponseSchema: true }),
+    );
+    expect(result).toEqual({ ok: false, skipReason: "no_json_support" });
+  });
+
+  it("passes a schema-tier candidate for a json_schema request", () => {
+    const result = checkCapability(
+      caps({ jsonOutput: "schema" }),
+      req({ needsJson: true, needsResponseSchema: true }),
+    );
     expect(result).toEqual({ ok: true, skipReason: null });
   });
 
@@ -60,7 +92,7 @@ describe("checkCapability", () => {
 
   it("returns no_vision_support for json+vision when json passes but vision fails", () => {
     const result = checkCapability(
-      caps({ supportsJsonMode: true, supportsVision: false }),
+      caps({ jsonOutput: "schema", supportsVision: false }),
       req({ needsJson: true, needsVision: true }),
     );
     expect(result).toEqual({ ok: false, skipReason: "no_vision_support" });
@@ -68,7 +100,7 @@ describe("checkCapability", () => {
 
   it("passes when both json and vision are supported and required", () => {
     const result = checkCapability(
-      caps({ supportsJsonMode: true, supportsVision: true }),
+      caps({ jsonOutput: "schema", supportsVision: true }),
       req({ needsJson: true, needsVision: true }),
     );
     expect(result).toEqual({ ok: true, skipReason: null });
@@ -216,7 +248,7 @@ describe("checkCapability", () => {
 
   it("short-circuits on the first failing gate (tools before json)", () => {
     const result = checkCapability(
-      caps({ supportsTools: false, supportsJsonMode: false }),
+      caps({ supportsTools: false, jsonOutput: "none" }),
       req({ needsTools: true, needsJson: true }),
     );
     expect(result).toEqual({ ok: false, skipReason: "no_tool_support" });

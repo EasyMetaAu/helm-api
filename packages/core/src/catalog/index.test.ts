@@ -12,7 +12,7 @@ const generated: GeneratedCatalog = {
       modelKey: "openai/gpt-4o",
       capabilities: {
         supportsTools: true,
-        supportsJsonMode: true,
+        jsonOutput: "schema",
         supportsVision: false,
         supportsStreaming: true,
         maxContextTokens: 128_000,

@@ -14,7 +14,7 @@ import type { z } from "zod";
 // 3 (pricing) can't drift apart and leave a required field undefined.
 const EMPTY_CAPABILITIES: Capabilities = {
   supportsTools: false,
-  supportsJsonMode: false,
+  jsonOutput: "none",
   supportsVision: false,
   supportsStreaming: false,
   maxContextTokens: 0,

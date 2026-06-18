@@ -850,7 +850,7 @@ describe("createExecute — gateway execution adapter", () => {
       modelKey: "a",
       capabilities: {
         supportsTools: false,
-        supportsJsonMode: true,
+        jsonOutput: "schema",
         supportsVision: true,
         supportsStreaming: true,
         maxContextTokens: 100000,
@@ -1335,7 +1335,7 @@ describe("createExecute — gateway execution adapter", () => {
       modelKey,
       capabilities: {
         supportsTools: true,
-        supportsJsonMode: true,
+        jsonOutput: "schema",
         supportsVision: true,
         supportsStreaming: true,
         maxContextTokens: 200000,
@@ -1365,8 +1365,8 @@ describe("createExecute — gateway execution adapter", () => {
       // Catalog is keyed by the candidate ALIAS (the modelKey), not the resolved
       // upstream model id (fix-upstream-model-id 2026-05-31).
       catalog: new Map([
-        ["a", entry("a", { supportsJsonMode: false })],
-        ["b", entry("b", { supportsJsonMode: true })],
+        ["a", entry("a", { jsonOutput: "none" })],
+        ["b", entry("b", { jsonOutput: "schema" })],
       ]),
       now: clock(),
       signal: new AbortController().signal,
@@ -1569,8 +1569,8 @@ describe("createExecute — gateway execution adapter", () => {
       registry: registry({ a: "m-a", b: "m-b" }),
       breaker: breaker(),
       catalog: new Map([
-        ["a", entry("a", { supportsJsonMode: false })],
-        ["b", entry("b", { supportsJsonMode: false })],
+        ["a", entry("a", { jsonOutput: "none" })],
+        ["b", entry("b", { jsonOutput: "none" })],
       ]),
       now: clock(),
       signal: new AbortController().signal,
@@ -1600,7 +1600,7 @@ describe("createExecute — gateway execution adapter", () => {
       providers: new Map([["mock", provider]]),
       registry: registry({ a: "m-a", u: "m-unknown" }),
       breaker: breaker(),
-      catalog: new Map([["a", entry("a", { supportsJsonMode: false })]]),
+      catalog: new Map([["a", entry("a", { jsonOutput: "none" })]]),
       now: clock(),
       signal: new AbortController().signal,
     });
@@ -1647,7 +1647,7 @@ describe("createExecute — gateway execution adapter", () => {
       modelKey,
       capabilities: {
         supportsTools: true,
-        supportsJsonMode: true,
+        jsonOutput: "schema",
         supportsVision: true,
         supportsStreaming: true,
         maxContextTokens: 200000,
@@ -2480,7 +2480,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
             modelKey: "a",
             capabilities: {
               supportsTools: true,
-              supportsJsonMode: true,
+              jsonOutput: "schema",
               supportsVision: true,
               supportsStreaming: true,
               maxContextTokens: 200000,
@@ -2544,7 +2544,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
             modelKey: "r",
             capabilities: {
               supportsTools: true,
-              supportsJsonMode: true,
+              jsonOutput: "schema",
               supportsVision: true,
               supportsStreaming: true,
               maxContextTokens: 200000,

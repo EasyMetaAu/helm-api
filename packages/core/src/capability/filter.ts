@@ -19,7 +19,8 @@ import type { CatalogEntry } from "@helm/shared";
 // reason means updating this enum AND the UI; never slip in a free-form string.
 export type SkipReason =
   | "no_tool_support" // request carries tools, candidate has no tool-call
-  | "no_json_support" // request needs strict JSON, candidate has no JSON mode
+  | "no_json_support" // request needs JSON output, candidate has no JSON mode (jsonOutput:none)
+  | "no_response_schema_support" // request needs strict json_schema, candidate only does json_object (jsonOutput:object)
   | "no_vision_support" // request has images/attachments, candidate is text-only
   | "no_audio_support" // request carries audio input, candidate advertises no audio modality
   | "no_video_support" // request carries video input, candidate advertises no video modality
@@ -31,7 +32,8 @@ export type SkipReason =
 
 export interface CapabilityRequest {
   needsTools: boolean;
-  needsJson: boolean; // response_format = JSON / lane.require_json
+  needsJson: boolean; // response_format is json_object OR json_schema
+  needsResponseSchema: boolean; // response_format.type === "json_schema" (strict structured output)
   needsVision: boolean; // has attachments / images
   needsStreaming: boolean; // request.stream === true
   needsCachedContent?: boolean; // Gemini/LiteLLM cachedContent reference is hard context
@@ -66,9 +68,16 @@ export function checkCapability(
   if (req.needsTools && !caps.supportsTools) {
     return skip("no_tool_support");
   }
-  // 2. strict JSON
-  if (req.needsJson && !caps.supportsJsonMode) {
+  // 2. JSON output. The tier is ordered none < object < schema:
+  //   2a. any JSON request needs at least json_object — a `none` candidate is pruned.
+  //   2b. a strict json_schema request additionally needs the `schema` tier — an
+  //       `object`-only candidate (official DeepSeek) is pruned with the SPECIFIC reason
+  //       so it never burns an attempt on a guaranteed upstream 400.
+  if (req.needsJson && caps.jsonOutput === "none") {
     return skip("no_json_support");
+  }
+  if (req.needsResponseSchema && caps.jsonOutput !== "schema") {
+    return skip("no_response_schema_support");
   }
   // 3. vision
   if (req.needsVision && !caps.supportsVision) {

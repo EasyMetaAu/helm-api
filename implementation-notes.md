@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-18 · json_schema 能力分级修复（capability tier；docs/02/04；原则 2/3/4）
+
+- **背景（线上事故）**：`helm_live_KOGN` 的 Codex 请求（Responses API，`text.format={type:json_schema,strict:true}`，rollout 压缩）落 `json` lane 主候选官方 `deepseek/deepseek-v4-flash`，上游 400 `"This response_format type is unavailable now"`（809ms + 一次熔断失败记账），再兜底 gpt-5.5 成功。SSH box `sqlite3 helm.db` 取 `telemetry.decision_json`+`request_payloads` 实证。
+- **根因**：单布尔 `supportsJsonMode` 把两个不同上游能力压成一个——基础 JSON 模式（`json_object`）与严格结构化输出（`json_schema`）。官方 DeepSeek 支持前者不支持后者（严格 schema 仅走 beta 的 strict tool calling），布尔无法表达"会 object 不会 schema"→ 能力过滤放行 → 必 400。`sync-catalog` 还把 LiteLLM 的 `supports_response_schema`（其实是 schema 标志）填进这个布尔，语义全程错位；`economy`/`balanced` 里的官方 deepseek 同坑。
+- **方案抉择**：用户要求根治并问"能否合并/互译"。研究确认（DeepSeek docs + LiteLLM）`json_schema⊋json_object` 是**有序档位**非二元，且 `openrouter/deepseek-v4-flash` **原生支持 structured outputs 且便宜**。故**不做 json_schema→tool 互译**（触 principle 8 流式头号风险、需 beta 端点、且请求带真实 tools 时与强制输出 tool 冲突，无论如何仍需能力路由兜底），改为：诚实建模 + 能力过滤把 json_schema 确定性落到便宜的原生 schema 后端。
+- **实现**：① `supportsJsonMode: boolean` → `jsonOutput: z.enum(["none","object","schema"])`（有序，必填；override 仍 `.partial()`）。② filter 拆两门：`needsJson && jsonOutput==="none"`→`no_json_support`；`needsResponseSchema && jsonOutput!=="schema"`→新 skip reason `no_response_schema_support`。③ `execute.ts` 新 `isJsonSchema()` 喂 `needsResponseSchema`（`needsJson` 不变）。④ `sync-catalog`：`supports_response_schema ? "schema" : "none"`（重生成 catalog.json，diff 仅字段名）。⑤ `capabilities.yaml`：官方 deepseek=object、openrouter-deepseek/gpt/gemini/claude=schema、`*/auto`=none。⑥ `json` lane 在 balanced 前插 `openrouter/deepseek-v4-flash`（json_schema 落点）；policy/classifier **不改**（filter 已逐请求区分，`skip_reason` 即观测面）。
+- **取舍/坑/TODO**：① 必填枚举让 typecheck 把每个漏改 fixture 标红（完整性网，~15 处）；② `none` 默认与旧"非 schema 即不可 JSON"行为等价 → 零回归；③ **明确弃做**：json_schema→forced-tool 互译；`anthropic/*` OAuth alias 仍无 catalog 条目（fail-open，json_schema 下安全因 Anthropic 原生 output_format）；classifier `needs_response_schema`。**TODO（部署验证）**：带 `OPENROUTER_API_KEY` 发真实 strict json_schema，确认落 openrouter-deepseek 且上游真 enforce schema（若被子 provider 忽略 → 注入 `provider:{require_parameters:true}`）。
+- **Codex review P2 修复（fail-closed override）**：`CapabilitiesOverrideEntrySchema` 由 `.partial()` 改 `.partial().strict()`（对齐已 strict 的 PricingOverrideEntrySchema）。否则 operator 的 `capabilities.yaml` 里残留的旧 `supportsJsonMode` key 会被 Zod 静默剥掉 → 手动配 JSON-capable 的纯 override alias 退化成 `jsonOutput:"none"`，请求静默跳过该模型。**不做自动翻译**（旧布尔 object/schema 语义本就模糊，正是本次修的 bug）→ 强制 fail-closed，operator 改 key。**⚠️ 部署连带**：box 的 `capabilities.yaml`（operator-owned）目前仍是 `supportsJsonMode`，新镜像上线会**拒绝启动**直到把 ~15 个条目改成 `jsonOutput`（见 [[config-schema-strict-removal-failclose]]）；canary loadConfig 会先抓到。
+- **验证**：TDD 红→绿。filter 判别矩阵（json_schema 对 object 层→`no_response_schema_support`，即线上 bug 回归）、`execute.default-config`（真实配置：json_schema 落 openrouter-deepseek、json_object 留官方 deepseek）、`samples` 锁 json lane 链、`sync-catalog` jsonOutput 断言、`load.test` 旧 `supportsJsonMode` key fail-closed。`pnpm typecheck`/`lint`(475)/`build`(admin+core+gateway) 绿；全量 core+gateway **3233 绿**。分支 `fix-json-schema-capability-tier`，未发版/未部署。
+
 ## 2026-06-17 · /admin/lanes 加 reasoning_effort 下拉（admin UI；原则 1）
 
 - **背景**：lane 级强制 reasoning_effort 此前只能改 YAML；用户要在 `/admin/lanes` 页面用下拉选。
