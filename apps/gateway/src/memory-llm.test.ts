@@ -381,6 +381,105 @@ describe("createMemoryLlmRuntime", () => {
     expect(facts[0]?.factText).toBe("Project Alpha invoices require PO #123.");
   });
 
+  // Salient-fact fast path (salient-fact-memory-spec Change A): extract atomic
+  // facts from RAW turns, decoupled from compaction. Unlike the observation-based
+  // extractor, there is NO deterministic fallback — without an LLM there are no
+  // eager facts (the config gate enforces llm.enabled), so the fallback is [].
+  describe("extractFactsFromMessages (raw-message eager extraction)", () => {
+    const NOW = new Date("2026-06-09T00:00:00Z");
+
+    it("returns [] when memory.llm.enabled is false (no LLM ⇒ no eager facts)", async () => {
+      const resolveModel = vi.fn();
+      const runtime = createMemoryLlmRuntime({
+        config: MemoryLlmSchema.parse({}),
+        resolveModel,
+        estimateTokens: (t) => Math.ceil(t.length / 4),
+        log: vi.fn(),
+      });
+      const facts = await runtime.extractFactsFromMessages({
+        messages: [rawMessage("m1", "user", "我喜欢的数字是42,你记住")],
+        now: NOW,
+      });
+      expect(facts).toEqual([]);
+      expect(resolveModel).not.toHaveBeenCalled();
+    });
+
+    it("extracts {subjectText, factText} from raw turns via facts_model, stamped validFrom=now", async () => {
+      const { runtime, client, resolveModel } = runtimeArgs({
+        response: {
+          facts: [
+            { subject_text: "favorite number", fact_text: "The user's favorite number is 42." },
+          ],
+        },
+        resolveAlias: "openai/facts",
+        providerModel: "gpt-facts",
+      });
+
+      const facts = await runtime.extractFactsFromMessages({
+        messages: [
+          rawMessage("m1", "user", "我喜欢的数字是42,你记住"),
+          rawMessage("m2", "assistant", "记下了。"),
+        ],
+        now: NOW,
+      });
+
+      expect(resolveModel).toHaveBeenCalledWith("openai/facts");
+      expect(client.chatCompletion).toHaveBeenCalledWith(
+        expect.objectContaining({ model: "gpt-facts", max_tokens: 987 }),
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      // raw facts carry NO sourceObservationRange (there is no observation)
+      expect(facts).toEqual([
+        {
+          subjectText: "favorite number",
+          factText: "The user's favorite number is 42.",
+          validFrom: NOW,
+        },
+      ]);
+      // the raw user turn is sent to the model (not observations)
+      const body = client.chatCompletion.mock.calls[0]?.[0] as {
+        messages: Array<{ content: string }>;
+      };
+      expect(JSON.stringify(body.messages)).toContain("我喜欢的数字是42");
+    });
+
+    it("returns [] (fail-open) on invalid JSON", async () => {
+      const client: ProviderClient = {
+        chatCompletion: vi.fn(async () => ({ choices: [{ message: { content: "not json" } }] })),
+        async *chatCompletionStream() {},
+      };
+      const logs: Array<{ line: string; meta?: object }> = [];
+      const runtime = createMemoryLlmRuntime({
+        config: MemoryLlmSchema.parse({ enabled: true, model: "deepseek/memory-small" }),
+        resolveModel: () => ({ client, providerModel: "memory-small" }),
+        estimateTokens: (t) => Math.ceil(t.length / 4),
+        log: (line, meta) => logs.push({ line, meta }),
+      });
+      const facts = await runtime.extractFactsFromMessages({
+        messages: [rawMessage("m1", "user", "I prefer dark mode.")],
+        now: NOW,
+      });
+      expect(facts).toEqual([]);
+      expect(logs.some((l) => l.line === "memory.llm.fallback")).toBe(true);
+    });
+
+    it("returns [] when the configured model is unavailable", async () => {
+      const logs: Array<{ line: string; meta?: object }> = [];
+      const runtime = createMemoryLlmRuntime({
+        config: MemoryLlmSchema.parse({ enabled: true, model: "missing/model" }),
+        resolveModel: () => null,
+        estimateTokens: (t) => Math.ceil(t.length / 4),
+        log: (line, meta) => logs.push({ line, meta }),
+      });
+      const facts = await runtime.extractFactsFromMessages({
+        messages: [rawMessage("m1", "user", "I prefer dark mode.")],
+        now: NOW,
+      });
+      expect(facts).toEqual([]);
+      expect(logs.some((l) => l.line === "memory.llm.model_unavailable")).toBe(true);
+    });
+  });
+
   it("falls back to deterministic fact extraction when the configured model is unavailable", async () => {
     const logs: Array<{ line: string; meta?: object }> = [];
     const runtime = createMemoryLlmRuntime({

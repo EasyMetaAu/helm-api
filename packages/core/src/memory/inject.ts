@@ -1,4 +1,4 @@
-import type { Observation, RawMessage, Reflection } from "@helm/shared";
+import type { Fact, Observation, RawMessage, Reflection } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
 import { forgettingScore, type ScoreConfig } from "./forgetting/score.js";
 import { sha256Hex } from "./message-hash.js";
@@ -37,6 +37,17 @@ export interface InjectInput {
   // Upper bound for INJECTED memory tokens (the assembled block). Reflections are
   // kept first; observations get whatever remains and are trimmed under pressure.
   tokenBudget: number;
+  // Salient-fact fast path (salient-fact-memory-spec Change B). When true, inject
+  // ALSO surfaces a `## Known facts` section assembled from the scope's active facts
+  // (listActiveFacts) — a STATIC scope load like reflections, NOT per-query
+  // retrieval. Absent/false ⇒ no facts are loaded or injected (byte-identical to
+  // today), so existing forgetting deployments do not start surfacing
+  // Reflector-produced facts until the operator opts into eager_facts.
+  injectKnownFacts?: boolean;
+  // Optional top-K cap on injected facts (consolidate.max_facts_injected). Absent ⇒
+  // internal prior. The inject token budget is the real bound; this is a safety
+  // valve so a large fact set never crowds out observations.
+  maxFactsInjected?: number;
   // WINDOW-AWARE DEDUP (#217 Phase 4). Occurrence counts of content_hashes in the
   // current request's live messages — the client's live window. Computed the SAME
   // way storage hashes a message (sha256Hex(serializeContent(content))) so they
@@ -98,6 +109,7 @@ export interface InjectResult {
     memory_hydrated: boolean;
     reflection_version: number | null;
     observation_count: number;
+    facts_injected: number;
     memory_tokens_injected: number;
     observer_job_id: string | null;
     memory_writeback_status: "queued" | "skipped" | "failed";
@@ -111,11 +123,18 @@ export interface InjectResult {
 const BLOCK_HEADER = "# Persistent memory (injected by helm)";
 const PROJECT_HEADER = "## Project knowledge";
 const RESOURCE_HEADER = "## Resource knowledge";
+const KNOWN_FACTS_HEADER = "## Known facts";
 const OBSERVATIONS_HEADER = "## Earlier context (summarized)";
+
+// Internal prior for the injected-fact count cap (consolidate.max_facts_injected
+// overrides it). The token budget is the real bound; this caps a pathological fact
+// set so it never crowds out observations.
+const DEFAULT_MAX_FACTS_INJECTED = 16;
 
 function buildMemoryBlock(parts: {
   projectReflectionText: string | null;
   resourceReflectionText: string | null;
+  factTexts: string[];
   observationTexts: string[];
 }): string | null {
   const sections: string[] = [];
@@ -124,6 +143,11 @@ function buildMemoryBlock(parts: {
   }
   if (parts.resourceReflectionText !== null) {
     sections.push(`${RESOURCE_HEADER}\n${parts.resourceReflectionText}`);
+  }
+  // Facts sit between the stable reflections and the time-anchored observations:
+  // they are precise + durable, so under budget pressure they outrank observations.
+  if (parts.factTexts.length > 0) {
+    sections.push(`${KNOWN_FACTS_HEADER}\n${parts.factTexts.join("\n")}`);
   }
   if (parts.observationTexts.length > 0) {
     sections.push(`${OBSERVATIONS_HEADER}\n${parts.observationTexts.join("\n")}`);
@@ -164,9 +188,11 @@ export async function enqueueObserverWriteback(
 async function loadMemory(
   scope: InjectInput["scope"],
   store: MemoryStore,
+  injectKnownFacts: boolean,
 ): Promise<{
   projectReflection: Reflection | null;
   resourceReflection: Reflection | null;
+  facts: Fact[];
   observations: Observation[];
   threadMessages: RawMessage[];
 }> {
@@ -178,6 +204,28 @@ async function loadMemory(
     scope.resourceId !== undefined
       ? await store.getReflection({ accountId: scope.accountId, resourceId: scope.resourceId })
       : null;
+  // Salient-fact fast path (Change B): a STATIC scope load — the same read shape as
+  // reflections, NOT per-query retrieval. Read by the BROADEST cross-thread scope the
+  // request carries (project/resource); with NEITHER, fall back to the thread so a
+  // thread-only request reads only its own facts. NEVER read with `accountId` alone —
+  // omitted scope columns mean "no filter", which would surface every other
+  // project/thread's facts in this prompt (Codex review fix). No usable scope ⇒ skip.
+  const hasBroadFactScope = scope.projectId !== undefined || scope.resourceId !== undefined;
+  const facts =
+    injectKnownFacts &&
+    store.listActiveFacts !== undefined &&
+    (hasBroadFactScope || scope.threadId !== undefined)
+      ? await store.listActiveFacts({
+          accountId: scope.accountId,
+          ...(scope.projectId !== undefined ? { projectId: scope.projectId } : {}),
+          ...(scope.resourceId !== undefined ? { resourceId: scope.resourceId } : {}),
+          // Thread fallback ONLY when there is no broader scope: a project read must
+          // omit threadId (project facts carry threadId=null and would be filtered out).
+          ...(!hasBroadFactScope && scope.threadId !== undefined
+            ? { threadId: scope.threadId }
+            : {}),
+        })
+      : [];
   // The inject layers stay THREAD-ANCHORED: pass threadId alone so this read
   // never crosses threads (the cross-thread project/resource aggregation is the
   // REFLECTOR's read shape, not inject's).
@@ -193,7 +241,7 @@ async function loadMemory(
     scope.threadId !== undefined
       ? await store.listMessages({ accountId: scope.accountId, threadId: scope.threadId })
       : [];
-  return { projectReflection, resourceReflection, observations, threadMessages };
+  return { projectReflection, resourceReflection, facts, observations, threadMessages };
 }
 
 // Pick the latest reflection_version across the project + resource reflections for
@@ -245,7 +293,7 @@ export async function assembleInjectedContext(
   // null) and is recorded — the request continues without memory.
   let loaded: Awaited<ReturnType<typeof loadMemory>>;
   try {
-    loaded = await loadMemory(input.scope, deps.memoryStore);
+    loaded = await loadMemory(input.scope, deps.memoryStore, input.injectKnownFacts === true);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     deps.log("memory.inject.load_failed", { scope: input.scope, error: message });
@@ -258,6 +306,7 @@ export async function assembleInjectedContext(
         memory_hydrated: false,
         reflection_version: null,
         observation_count: 0,
+        facts_injected: 0,
         memory_tokens_injected: 0,
         observer_job_id: writeback.observerJobId,
         // Memory load failed → the whole memory step is a degraded path; mark the
@@ -270,9 +319,46 @@ export async function assembleInjectedContext(
     };
   }
 
-  const { projectReflection, resourceReflection, observations, threadMessages } = loaded;
+  const { projectReflection, resourceReflection, facts, observations, threadMessages } = loaded;
   const forgettingOn = deps.forgetting?.enabled === true;
   const windowContentHashCounts = input.windowContentHashCounts ?? new Map<string, number>();
+
+  // ── Salient-fact selection (Change B) ──────────────────────────────────────
+  // Active facts only (defence in depth — listActiveFacts already filters, but a
+  // forgotten fact must never ride the block). RANK by the forgetting score when
+  // forgetting is on (so decayed facts rank low, consistent with the observation
+  // trim); else by recency (validFrom desc). Keep the top-K (maxFactsInjected ⇒
+  // internal prior), then sort the survivors oldest-first for a STABLE block order
+  // independent of `now` (cache-friendly). The fact tier's score fallback_ts is
+  // createdAt (docs/12). Pure + deterministic for a given (facts, now).
+  const visibleFacts = facts.filter(
+    (f) => (f.status ?? "active") === "active" && (f.expiredAt ?? null) === null,
+  );
+  const factCap = input.maxFactsInjected ?? DEFAULT_MAX_FACTS_INJECTED;
+  const factScoreCfg =
+    forgettingOn && deps.forgetting !== undefined ? deps.forgetting.scoreConfig : null;
+  const factNow = deps.now();
+  const factPriority = (f: Fact): number =>
+    factScoreCfg !== null
+      ? forgettingScore(
+          {
+            referencedAt: f.referencedAt ?? null,
+            fallbackTs: f.createdAt,
+            referenceCount: f.referenceCount ?? 0,
+            importance: f.importance ?? 0.5,
+          },
+          factScoreCfg,
+          factNow,
+        )
+      : f.validFrom.getTime();
+  // Priority order (highest first) for the budget trim — score when forgetting is on,
+  // else recency. Capped to top-K; the kept survivors are sorted oldest-first for the
+  // STABLE block order later (decoupled from `now`).
+  const rankedFacts = [...visibleFacts]
+    .sort(
+      (a, b) => factPriority(b) - factPriority(a) || b.validFrom.getTime() - a.validFrom.getTime(),
+    )
+    .slice(0, Math.max(0, factCap));
 
   // docs/12 (P4/P7) — archived (decay), pruned (retention tombstone), and expired
   // rows are INVISIBLE to injection: a forgotten observation must never ride the
@@ -349,12 +435,33 @@ export async function assembleInjectedContext(
     (keptProjectReflectionText !== null ? tokensOf(keptProjectReflectionText) : 0) +
     (keptResourceReflectionText !== null ? tokensOf(keptResourceReflectionText) : 0);
 
+  // ── facts budget (Change B) ────────────────────────────────────────────────
+  // Facts get whatever the budget has left after the kept reflections, BEFORE
+  // observations (precise + durable ⇒ outrank time-anchored observation summaries).
+  // Trim in priority order (rankedFacts), then sort survivors oldest-first for a
+  // stable block order. Each fact renders as a "- <text>" bullet.
+  const factBudget = Math.max(0, input.tokenBudget - reflectionTokens);
+  let factRemaining = factBudget;
+  const keptFacts: Fact[] = [];
+  for (const f of rankedFacts) {
+    const cost = tokensOf(`- ${f.factText}`);
+    if (cost <= factRemaining) {
+      keptFacts.push(f);
+      factRemaining -= cost;
+    }
+  }
+  keptFacts.sort(
+    (a, b) => a.validFrom.getTime() - b.validFrom.getTime() || a.id.localeCompare(b.id),
+  );
+  const keptFactTexts = keptFacts.map((f) => `- ${f.factText}`);
+  const factTokens = keptFactTexts.reduce((sum, t) => sum + tokensOf(t), 0);
+
   // Observations get whatever the budget has left after the kept reflections. The
   // DROP ORDER is the one hot-path forgetting change (docs/12 "Eviction"): legacy
   // drops OLDEST-first; with forgetting ON and drop_order=score we drop
   // LOWEST-SCORE-first. Only the comparator changes; the surviving rows are always
   // re-sorted oldest-first for the deterministic block order.
-  const observationBudget = Math.max(0, input.tokenBudget - reflectionTokens);
+  const observationBudget = Math.max(0, input.tokenBudget - reflectionTokens - factTokens);
 
   // observationEntries is oldest-first. Legacy keep order = newest-first (reverse)
   // so the oldest is the first sacrificed.
@@ -433,6 +540,7 @@ export async function assembleInjectedContext(
   const memoryBlock = buildMemoryBlock({
     projectReflectionText: keptProjectReflectionText,
     resourceReflectionText: keptResourceReflectionText,
+    factTexts: keptFactTexts,
     observationTexts: keptObservationTexts,
   });
 
@@ -510,6 +618,7 @@ export async function assembleInjectedContext(
       memory_hydrated: memoryHydrated,
       reflection_version: latestReflectionVersion(projectReflection, resourceReflection),
       observation_count: keptObservationTexts.length,
+      facts_injected: keptFactTexts.length,
       memory_tokens_injected: memoryTokensInjected,
       observer_job_id: writeback.observerJobId,
       memory_writeback_status: writeback.status,

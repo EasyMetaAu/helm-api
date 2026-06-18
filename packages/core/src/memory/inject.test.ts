@@ -1,4 +1,4 @@
-import type { Observation, RawMessage, Reflection } from "@helm/shared";
+import type { Fact, Observation, RawMessage, Reflection } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import type { MemoryStore } from "../store/ports.js";
 import { assembleInjectedContext, type InjectDeps, type InjectInput } from "./inject.js";
@@ -61,12 +61,35 @@ function makeRaw(id: string, role: RawMessage["role"], content: string): RawMess
   };
 }
 
+function makeFact(over: Partial<Fact> & { factText: string }): Fact {
+  return {
+    id: `fact-${over.factText.slice(0, 4)}`,
+    ownerId: "acct-a",
+    projectId: "proj-1",
+    resourceId: null,
+    threadId: null,
+    subjectKey: "subject",
+    contentHash: `hash-${over.factText}`,
+    importance: 0.5,
+    referenceCount: 0,
+    referencedAt: null,
+    validFrom: new Date("2026-05-20T00:00:00.000Z"),
+    invalidAt: null,
+    expiredAt: null,
+    status: "active",
+    createdAt: new Date("2026-05-20T00:00:00.000Z"),
+    updatedAt: new Date("2026-05-20T00:00:00.000Z"),
+    ...over,
+  };
+}
+
 interface FakeStoreData {
   projectReflection?: Reflection | null;
   resourceReflection?: Reflection | null;
+  facts?: Fact[];
   observations?: Observation[];
   threadMessages?: RawMessage[];
-  throwOn?: "getReflection" | "listObservations" | "listMessages";
+  throwOn?: "getReflection" | "listObservations" | "listMessages" | "listActiveFacts";
 }
 
 function makeFakeStore(data: FakeStoreData) {
@@ -96,6 +119,10 @@ function makeFakeStore(data: FakeStoreData) {
     updateJobStatus: vi.fn(async () => {}),
     enqueueJob: vi.fn(async () => "job"),
     claimPendingJobs: vi.fn(async () => []),
+    listActiveFacts: vi.fn(async () => {
+      maybeThrow("listActiveFacts");
+      return data.facts ?? [];
+    }),
   };
   return store;
 }
@@ -492,5 +519,142 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
     expect(Object.keys(out).sort()).toEqual(["memoryBlock", "metadata"]);
     expect(out).not.toHaveProperty("lane");
     expect(out.metadata).not.toHaveProperty("lane");
+  });
+});
+
+// Salient-fact fast path (salient-fact-memory-spec Change B): inject surfaces a
+// `## Known facts` section from the scope's active facts — STATIC scope load, not
+// per-query retrieval — gated by injectKnownFacts so existing deployments are
+// byte-identical until the operator opts in.
+describe("assembleInjectedContext — Known facts section", () => {
+  it("injects facts as `## Known facts` between reflections and observations", async () => {
+    const store = makeFakeStore({
+      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "project memory" }),
+      facts: [
+        makeFact({
+          factText: "The user's favorite number is 42.",
+          validFrom: new Date("2026-05-21"),
+        }),
+        makeFact({ factText: "The user prefers dark mode.", validFrom: new Date("2026-05-22") }),
+      ],
+      observations: [makeObservation("o1", "older observation", "2026-05-20T00:00:00.000Z")],
+    });
+    const out = await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true }),
+      makeDeps(store),
+    );
+
+    const block = out.memoryBlock ?? "";
+    expect(block).toContain("## Known facts");
+    expect(block).toContain("- The user's favorite number is 42.");
+    expect(block).toContain("- The user prefers dark mode.");
+    // Order: project reflection → facts → observations.
+    expect(block.indexOf("project memory")).toBeLessThan(block.indexOf("## Known facts"));
+    expect(block.indexOf("## Known facts")).toBeLessThan(block.indexOf("## Earlier context"));
+    // Facts oldest-first (validFrom) for a stable block order.
+    expect(block.indexOf("favorite number")).toBeLessThan(block.indexOf("dark mode"));
+    expect(out.metadata.facts_injected).toBe(2);
+    expect(out.metadata.memory_hydrated).toBe(true);
+  });
+
+  it("does NOT load or inject facts when injectKnownFacts is absent (byte-identical to today)", async () => {
+    const store = makeFakeStore({
+      facts: [makeFact({ factText: "The user's favorite number is 42." })],
+      observations: [makeObservation("o1", "obs", "2026-05-20T00:00:00.000Z")],
+    });
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store));
+
+    expect(store.listActiveFacts).not.toHaveBeenCalled();
+    expect(out.memoryBlock ?? "").not.toContain("## Known facts");
+    expect(out.metadata.facts_injected).toBe(0);
+  });
+
+  it("loads facts at the account+project+resource scope (cross-thread)", async () => {
+    const store = makeFakeStore({
+      facts: [makeFact({ factText: "fact one" })],
+    });
+    await assembleInjectedContext(baseInput({ injectKnownFacts: true }), makeDeps(store));
+    expect(store.listActiveFacts).toHaveBeenCalledWith({
+      accountId: "acct-a",
+      projectId: "proj-1",
+      resourceId: "res-1",
+    });
+  });
+
+  it("scopes a thread-only request's fact read to the thread (never account-wide)", async () => {
+    // No project/resource on the scope (a valid default). listActiveFacts must be
+    // scoped to the thread, NOT called with only accountId — an account-wide read
+    // would surface every other project's/thread's facts in this prompt.
+    const store = makeFakeStore({
+      facts: [makeFact({ factText: "thread fact", threadId: "thread-1" })],
+    });
+    await assembleInjectedContext(
+      baseInput({
+        injectKnownFacts: true,
+        scope: { accountId: "acct-a", threadId: "thread-1" },
+      }),
+      makeDeps(store),
+    );
+    expect(store.listActiveFacts).toHaveBeenCalledWith({
+      accountId: "acct-a",
+      threadId: "thread-1",
+    });
+  });
+
+  it("does NOT read facts account-wide when the scope has no project/resource/thread", async () => {
+    const store = makeFakeStore({ facts: [makeFact({ factText: "x" })] });
+    await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true, scope: { accountId: "acct-a" } }),
+      makeDeps(store),
+    );
+    expect(store.listActiveFacts).not.toHaveBeenCalled();
+  });
+
+  it("caps the injected facts at maxFactsInjected (highest-priority kept)", async () => {
+    const store = makeFakeStore({
+      facts: [
+        makeFact({ factText: "fact A", validFrom: new Date("2026-05-21") }),
+        makeFact({ factText: "fact B", validFrom: new Date("2026-05-22") }),
+        makeFact({ factText: "fact C", validFrom: new Date("2026-05-23") }),
+      ],
+    });
+    const out = await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true, maxFactsInjected: 2 }),
+      makeDeps(store),
+    );
+    expect(out.metadata.facts_injected).toBe(2);
+    // No forgetting → priority is recency: the two NEWEST (B, C) are kept, A dropped.
+    const block = out.memoryBlock ?? "";
+    expect(block).toContain("- fact B");
+    expect(block).toContain("- fact C");
+    expect(block).not.toContain("- fact A");
+  });
+
+  it("emits no facts section when the scope has no active facts", async () => {
+    const store = makeFakeStore({
+      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "project memory" }),
+      facts: [],
+    });
+    const out = await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true }),
+      makeDeps(store),
+    );
+    expect(out.memoryBlock ?? "").not.toContain("## Known facts");
+    expect(out.metadata.facts_injected).toBe(0);
+  });
+
+  it("is fail-open: a listActiveFacts throw degrades to no memory (never a 5xx)", async () => {
+    const store = makeFakeStore({
+      projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "project memory" }),
+      facts: [makeFact({ factText: "fact one" })],
+      throwOn: "listActiveFacts",
+    });
+    const out = await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true }),
+      makeDeps(store),
+    );
+    expect(out.memoryBlock).toBeNull();
+    expect(out.metadata.degraded).toBe(true);
+    expect(out.metadata.facts_injected).toBe(0);
   });
 });

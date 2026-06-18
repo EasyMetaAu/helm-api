@@ -22,6 +22,10 @@ describe("ForgettingSchema", () => {
     expect(f.consolidate.trigger_tokens).toBe(1024);
     expect(f.consolidate.max_facts_per_subject).toBe(8);
     expect(f.consolidate.enable_llm_supersede).toBe(false);
+    // Salient-fact fast path (salient-fact-memory-spec): off by default; the
+    // inject cap is an optional override with NO default (internal prior applies).
+    expect(f.consolidate.eager_facts).toBe(false);
+    expect(f.consolidate.max_facts_injected).toBeUndefined();
     expect(f.retention.archived_days).toBe(30);
     expect(f.retention.facts_expired_days).toBe(90);
     expect(f.sweep.max_iterations).toBe(200);
@@ -51,6 +55,25 @@ describe("ForgettingSchema", () => {
   it("drop_order accepts the legacy `oldest` fallback", () => {
     const f = ForgettingSchema.parse({ inject: { drop_order: "oldest" } });
     expect(f.inject.drop_order).toBe("oldest");
+  });
+
+  // Salient-fact fast path: eager_facts opts the Observer into raw-message fact
+  // extraction + the inject `## Known facts` section; max_facts_injected caps the
+  // injected set (optional, no default → internal prior, like CompactionOverrides).
+  it("eager_facts round-trips and max_facts_injected is an optional override (no default)", () => {
+    const f = ForgettingSchema.parse({
+      consolidate: { eager_facts: true, max_facts_injected: 12 },
+    });
+    expect(f.consolidate.eager_facts).toBe(true);
+    expect(f.consolidate.max_facts_injected).toBe(12);
+    // omitted → NOT materialized (no lying knob)
+    const g = ForgettingSchema.parse({ consolidate: { eager_facts: true } });
+    expect("max_facts_injected" in g.consolidate).toBe(false);
+  });
+
+  it("fails closed on a non-positive max_facts_injected", () => {
+    expect(() => ForgettingSchema.parse({ consolidate: { max_facts_injected: 0 } })).toThrow();
+    expect(() => ForgettingSchema.parse({ consolidate: { max_facts_injected: -3 } })).toThrow();
   });
 
   it("fails closed on an unknown/misspelled top-level key (.strict())", () => {
@@ -165,6 +188,47 @@ describe("MemoryConfigSchema", () => {
     const m = MemoryConfigSchema.parse({ forgetting: { enabled: true } });
     expect(m.forgetting.enabled).toBe(true);
     expect(() => MemoryConfigSchema.parse({ forgettign: {} })).toThrow();
+  });
+
+  // Salient-fact fast path: eager fact extraction REQUIRES the LLM (the
+  // deterministic raw-message extractor is too weak to be the real path), so
+  // `eager_facts:true` with `llm.enabled:false` must REFUSE STARTUP rather than
+  // silently no-op (config-as-code, no lying knobs).
+  it("eager_facts:true requires llm.enabled:true (cross-block gate, fail-closed)", () => {
+    expect(() =>
+      MemoryConfigSchema.parse({
+        forgetting: { enabled: true, consolidate: { eager_facts: true } },
+      }),
+    ).toThrow();
+    // with the LLM enabled (+ a model) it parses
+    const m = MemoryConfigSchema.parse({
+      llm: { enabled: true, model: "deepseek/deepseek-v4-flash" },
+      forgetting: { enabled: true, consolidate: { eager_facts: true } },
+    });
+    expect(m.forgetting.consolidate.eager_facts).toBe(true);
+    // eager_facts:false with the LLM off is fine (the default posture)
+    const off = MemoryConfigSchema.parse({ forgetting: { enabled: true } });
+    expect(off.forgetting.consolidate.eager_facts).toBe(false);
+  });
+
+  // forgetting.enabled is the documented master switch for the whole facts/forgetting
+  // tier. eager_facts:true with forgetting.enabled:false would form + inject facts
+  // while decay/retention/score are all off — NOT byte-identical-to-today — so it
+  // must REFUSE STARTUP (Codex review fix).
+  it("eager_facts:true requires forgetting.enabled:true (master switch, fail-closed)", () => {
+    expect(() =>
+      MemoryConfigSchema.parse({
+        llm: { enabled: true, model: "deepseek/deepseek-v4-flash" },
+        // forgetting.enabled defaults to false here
+        forgetting: { consolidate: { eager_facts: true } },
+      }),
+    ).toThrow();
+    // both master switches on (+ a model) parses
+    const m = MemoryConfigSchema.parse({
+      llm: { enabled: true, model: "deepseek/deepseek-v4-flash" },
+      forgetting: { enabled: true, consolidate: { eager_facts: true } },
+    });
+    expect(m.forgetting.consolidate.eager_facts).toBe(true);
   });
 
   // Compaction is no longer configurable — it is internal auto-adaptive

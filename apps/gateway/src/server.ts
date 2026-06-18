@@ -1021,7 +1021,18 @@ export async function buildServer(
   const injectTokenBudgetRaw = Number(process.env.HELM_MEMORY_INJECT_TOKEN_BUDGET ?? 4000);
   const injectTokenBudget =
     Number.isFinite(injectTokenBudgetRaw) && injectTokenBudgetRaw > 0 ? injectTokenBudgetRaw : 4000;
-  const inject = { deps: injectDeps, tokenBudget: injectTokenBudget };
+  // Salient-fact fast path (salient-fact-memory-spec): the `## Known facts` inject
+  // section + the raw-message eager extractor turn on together via
+  // config.memory.forgetting.consolidate.eager_facts (config-gated to require
+  // llm.enabled). Off ⇒ both halves inert (byte-identical to today).
+  const eagerFactsOn = config.memory.forgetting.consolidate.eager_facts === true;
+  const maxFactsInjected = config.memory.forgetting.consolidate.max_facts_injected;
+  const inject = {
+    deps: injectDeps,
+    tokenBudget: injectTokenBudget,
+    ...(eagerFactsOn ? { injectKnownFacts: true } : {}),
+    ...(eagerFactsOn && maxFactsInjected !== undefined ? { maxFactsInjected } : {}),
+  };
 
   // Decay-sweep deps (docs/12 P5). The whole forgetting config drives the pure score +
   // archive threshold + the bounded-loop limits; gated behind forgetting.enabled so the
@@ -1463,6 +1474,15 @@ export async function buildServer(
     compaction: config.memory.compaction,
     now: () => new Date(),
     log: memoryLog,
+    // Salient-fact fast path (Change A): wire the raw-message eager extractor ONLY
+    // when eager_facts is on (which the config gate ties to llm.enabled). Off ⇒ the
+    // Observer never eager-extracts (byte-identical to today).
+    ...(eagerFactsOn
+      ? {
+          extractFactsFromMessages: memoryLlm.extractFactsFromMessages,
+          maxFactsPerSubject: config.memory.forgetting.consolidate.max_facts_per_subject,
+        }
+      : {}),
   };
   const reflectorDeps: ReflectorDeps = {
     memoryStore: store.memory,

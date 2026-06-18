@@ -83,6 +83,20 @@ export const ForgettingSchema = z
         trigger_tokens: z.number().int().positive().default(1024), // extract facts when active-obs tokens exceed this
         max_facts_per_subject: z.number().int().positive().default(8), // hard cap regardless of LLM output
         enable_llm_supersede: z.literal(false).default(false), // deferred — `true` is rejected until the LLM path exists
+        // Salient-fact fast path (salient-fact-memory-spec). When true, the
+        // Observer ALSO extracts atomic facts from raw turns — decoupled from the
+        // compaction threshold so a short "remember X" turn forms a fact even when
+        // it never compacts — AND inject surfaces a `## Known facts` section.
+        // Default false (byte-identical to today). HARD-gated by llm.enabled at the
+        // MemoryConfigSchema level (the deterministic raw-message extractor is too
+        // weak to be the real path, so eager_facts:true with the LLM off REFUSES
+        // startup rather than silently no-op'ing).
+        eager_facts: z.boolean().default(false),
+        // Top-K cap on facts injected into the `## Known facts` block. Plain
+        // `.optional()` with NO `.default()` (the CompactionOverrides pattern): an
+        // omitted key stays undefined and the runtime applies its internal prior, so
+        // a written value is the only thing that ever takes effect (no lying knob).
+        max_facts_injected: z.number().int().positive().optional(),
       })
       .strict()
       .prefault({}),
@@ -188,7 +202,33 @@ export const MemoryConfigSchema = z
     llm: MemoryLlmSchema.prefault({}),
     forgetting: ForgettingSchema.prefault({}),
   })
-  .strict();
+  .strict()
+  // Cross-block gate (salient-fact-memory-spec §6). `eager_facts:true` requires BOTH:
+  //   - `llm.enabled:true` — the deterministic raw extractor is a stub, so without a
+  //     model eager extraction would silently do nothing (a lying knob); and
+  //   - `forgetting.enabled:true` — forgetting is the documented MASTER switch for the
+  //     whole facts tier (decay / retention / score / Reflector fact extraction all
+  //     gate on it). eager_facts under a disabled master would form + inject facts
+  //     that never decay or get retention-pruned — not byte-identical-to-off.
+  // Either unmet REFUSES STARTUP (fail-closed). This lives here, not on
+  // ForgettingSchema, because the llm check spans the sibling `llm` block.
+  .superRefine((cfg, ctx) => {
+    if (cfg.forgetting.consolidate.eager_facts !== true) return;
+    if (cfg.llm.enabled !== true) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["forgetting", "consolidate", "eager_facts"],
+        message: "forgetting.consolidate.eager_facts:true requires memory.llm.enabled:true",
+      });
+    }
+    if (cfg.forgetting.enabled !== true) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["forgetting", "consolidate", "eager_facts"],
+        message: "forgetting.consolidate.eager_facts:true requires memory.forgetting.enabled:true",
+      });
+    }
+  });
 
 export type ScoreConfig = z.infer<typeof ScoreSchema>;
 export type CompactionOverrides = z.infer<typeof CompactionOverridesSchema>;
