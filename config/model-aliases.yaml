@@ -56,12 +56,15 @@
 "gpt-*": balanced
 
 # ── Google Gemini (Gemini CLI, AI Studio / Vertex SDKs, …) ───────────────────
-# Bare Gemini ids → vendor-family lanes (config/lanes.yaml). Any `*pro*` id leads
-# with the Gemini Pro tier; any `*flash*` (incl. flash-lite) with the cheaper
-# Flash tier; the bare `gemini-*` catch-all degrades to balanced. Longest-literal
-# wins, so `gemini-*flash*` (12 literal chars) and `gemini-*pro*` (10) both beat
-# the `gemini-*` catch-all (7). The middle `*` absorbs the version + any `-preview`
-# / `-latest` / date suffix (gemini-3.1-pro-preview, gemini-3.5-flash, gemini-2.5-pro…).
+# Bare Gemini ids → vendor-family lanes (config/lanes.yaml). The cheap `*flash-lite*`
+# tier routes straight to the `economy` lane (no dedicated model); any other `*flash*`
+# leads with the Gemini Flash tier; any `*pro*` with the Gemini Pro tier; the bare
+# `gemini-*` catch-all degrades to balanced. Longest-literal wins, so `gemini-*flash-lite*`
+# (17 literal chars) beats `gemini-*flash*` (12) beats `gemini-*pro*` (10) beats the
+# `gemini-*` catch-all (7) — declaration order is irrelevant. The middle `*` absorbs the
+# version, so a future 3.2/4 flash-lite needs no edit; the trailing `*` absorbs any
+# `-preview` / `-latest` / date suffix (gemini-3.1-flash-lite, gemini-3.5-flash, …).
+"gemini-*flash-lite*": economy
 "gemini-*flash*": gemini-flash
 "gemini-*pro*": gemini-pro
 "gemini-*": balanced

@@ -114,12 +114,16 @@ describe("checked-in config samples", () => {
     expect(lanes["gemini-pro"]?.fallback).toEqual(["premium"]);
     expect(lanes["gemini-flash"]?.primary).toBe("zenmux-vertex/gemini-3.5-flash");
     expect(lanes["gemini-flash"]?.fallback).toEqual(["balanced"]);
-    // Longest-literal wins: `*pro*` / `*flash*` beat the `gemini-*` catch-all, and
-    // the middle `*` absorbs the version + any -preview/-latest suffix.
+    // Longest-literal wins: `*flash-lite*` (cheap lite tier -> economy) beats `*flash*`,
+    // which beats the `gemini-*` catch-all; the middle `*` absorbs the version + any
+    // -preview/-latest suffix.
     expect(resolveModelAlias("gemini-3.1-pro-preview", aliases)).toBe("gemini-pro");
     expect(resolveModelAlias("gemini-2.5-pro", aliases)).toBe("gemini-pro");
     expect(resolveModelAlias("gemini-3.5-flash", aliases)).toBe("gemini-flash");
-    expect(resolveModelAlias("gemini-3.1-flash-lite", aliases)).toBe("gemini-flash");
+    // flash-lite is the cheap tier: any version routes straight to `economy`, NOT the
+    // full-flash lane — version-resilient, so a future 3.2/4 id needs no config edit.
+    expect(resolveModelAlias("gemini-3.1-flash-lite", aliases)).toBe("economy");
+    expect(resolveModelAlias("gemini-4-flash-lite", aliases)).toBe("economy");
     // An id matching neither tier falls through the catch-all to balanced.
     expect(resolveModelAlias("gemini-embedding-001", aliases)).toBe("balanced");
   });

@@ -52,6 +52,19 @@ describe("resolveModelAlias", () => {
     expect(resolveModelAlias("gpt-5.5", { "gpt-5.5": "premium" })).toBe("premium");
     expect(resolveModelAlias("gpt-5x5", { "gpt-5.5": "premium" })).toBeNull();
   });
+
+  it("a keyword-wrapped glob with more literals wins (flash-lite beats flash), order-independent", () => {
+    // `gemini-*flash-lite*` (17 literals) is more specific than `gemini-*flash*` (12),
+    // so a flash-lite id routes to the cheap tier while full-flash falls to the flash lane.
+    const map = { "gemini-*flash-lite*": "economy", "gemini-*flash*": "gemini-flash" };
+    const reversed = { "gemini-*flash*": "gemini-flash", "gemini-*flash-lite*": "economy" };
+    expect(resolveModelAlias("gemini-3.1-flash-lite", map)).toBe("economy");
+    expect(resolveModelAlias("gemini-3.1-flash-lite", reversed)).toBe("economy");
+    // A future version id matches the same wildcard with no config change.
+    expect(resolveModelAlias("gemini-4-flash-lite-preview", map)).toBe("economy");
+    // Full flash (no "lite") is not captured by the flash-lite glob.
+    expect(resolveModelAlias("gemini-3.5-flash", map)).toBe("gemini-flash");
+  });
 });
 
 describe("validateModelAliasTargets", () => {
