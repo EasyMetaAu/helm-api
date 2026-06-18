@@ -69,6 +69,16 @@ function normalizeHeaders(
   return out;
 }
 
+function bodyRequestsStreaming(body: unknown): boolean {
+  if (typeof body !== "string") return false;
+  try {
+    const parsed = JSON.parse(body) as { stream?: unknown };
+    return parsed.stream === true;
+  } catch {
+    return false;
+  }
+}
+
 export interface TlsImpersonationFetchOptions {
   proxy?: ProxyConfig;
   browser?: string;
@@ -112,13 +122,15 @@ export function makeTlsImpersonationFetch(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
     );
     const body = init?.body ?? (input instanceof Request ? input.body : undefined);
+    const timeout = bodyRequestsStreaming(body) ? 0 : (options.timeoutMs ?? 0);
     return await s.fetch(url, {
       method,
       headers,
+      disableDefaultHeaders: true,
+      timeout,
       ...(body !== undefined && body !== null ? { body } : {}),
       ...(init?.redirect ? { redirect: init.redirect } : {}),
       ...(init?.signal ? { signal: init.signal } : {}),
-      ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}),
     });
   }) as typeof globalThis.fetch;
 }

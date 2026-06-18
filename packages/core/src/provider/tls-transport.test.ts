@@ -64,8 +64,52 @@ describe("makeTlsImpersonationFetch", () => {
     expect(fetchSpy).toHaveBeenCalledWith("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "x-test": "yes" },
-      body: "{}",
+      disableDefaultHeaders: true,
       timeout: 1234,
+      body: "{}",
+    });
+  });
+
+  it("disables wreq default browser headers and total timeout for streaming bodies", async () => {
+    const fetchSpy = vi.fn(async () => new Response("ok", { status: 200 }));
+    __setWreqCreateSessionForTesting(async () => ({ fetch: fetchSpy, close: vi.fn() }));
+
+    const tlsFetch = makeTlsImpersonationFetch({ timeoutMs: 1234 });
+    const body = JSON.stringify({ model: "claude-opus", stream: true });
+
+    await tlsFetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      body,
+    });
+
+    expect(fetchSpy).toHaveBeenCalledWith("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      disableDefaultHeaders: true,
+      timeout: 0,
+      body,
+    });
+  });
+
+  it("uses no wreq total timeout by default for non-streaming bodies", async () => {
+    const fetchSpy = vi.fn(async () => new Response("ok", { status: 200 }));
+    __setWreqCreateSessionForTesting(async () => ({ fetch: fetchSpy, close: vi.fn() }));
+
+    const tlsFetch = makeTlsImpersonationFetch();
+    const body = JSON.stringify({ model: "claude-opus" });
+
+    await tlsFetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body,
+    });
+
+    expect(fetchSpy).toHaveBeenCalledWith("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: undefined,
+      disableDefaultHeaders: true,
+      timeout: 0,
+      body,
     });
   });
 
