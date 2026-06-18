@@ -576,20 +576,6 @@ export function resolveProviderProxy(
   return proxy ? (proxy as ProxyConfig) : undefined;
 }
 
-const TLS_TRANSPORT_ENV_VALUES = new Set([
-  "1",
-  "true",
-  "on",
-  "anthropic",
-  "anthropic-oauth",
-  "tls_chrome",
-]);
-
-function envRequestsAnthropicTlsTransport(env: Record<string, string | undefined>): boolean {
-  const raw = env.HELM_EXPERIMENTAL_TLS_TRANSPORT?.trim().toLowerCase();
-  return raw !== undefined && TLS_TRANSPORT_ENV_VALUES.has(raw);
-}
-
 function isAnthropicPresetOAuth(p: ProviderConfigShared): boolean {
   return (
     p.type === "anthropic" &&
@@ -599,14 +585,10 @@ function isAnthropicPresetOAuth(p: ProviderConfigShared): boolean {
   );
 }
 
-export function resolveProviderTransportProfile(
-  p: ProviderConfigShared,
-  env: Record<string, string | undefined> = process.env,
-): TransportProfile {
+export function resolveProviderTransportProfile(p: ProviderConfigShared): TransportProfile {
   if (p.transport_profile === "tls_chrome") return "tls_chrome";
-  return envRequestsAnthropicTlsTransport(env) && isAnthropicPresetOAuth(p)
-    ? "tls_chrome"
-    : "default";
+  if (p.transport_profile === "default") return "default";
+  return isAnthropicPresetOAuth(p) ? "tls_chrome" : "default";
 }
 
 function optionalPositiveInt(raw: string | undefined): number | undefined {
@@ -620,7 +602,7 @@ export function makeProviderFetch(
   proxy?: ProxyConfig,
   env: Record<string, string | undefined> = process.env,
 ): typeof globalThis.fetch | undefined {
-  const profile = resolveProviderTransportProfile(p, env);
+  const profile = resolveProviderTransportProfile(p);
   if (profile === "default") return proxy ? makeProxyFetch(proxy) : undefined;
   if (profile === "tls_chrome") {
     if (!isAnthropicPresetOAuth(p)) {

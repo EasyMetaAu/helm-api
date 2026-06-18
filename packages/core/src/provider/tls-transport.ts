@@ -19,7 +19,7 @@ type FetchHeadersInit =
 
 const require = createRequire(import.meta.url);
 
-export type TransportProfile = "default" | "tls_chrome";
+export type TransportProfile = "auto" | "default" | "tls_chrome";
 
 export class TlsTransportUnavailableError extends Error {
   constructor(message: string) {

@@ -94,10 +94,11 @@ Configuration comes from **files** and **environment variables**, and env vars
     scheduler and `HELM_MEMORY_WORKER_DISABLED=1` stops the memory worker (both
     run by default); `HELM_MEMORY_WORKER_INTERVAL_MS` tunes the memory worker
     tick (default `60000`).
-  - Experimental transport spike: `HELM_EXPERIMENTAL_TLS_TRANSPORT=anthropic`
-    routes Anthropic preset OAuth execution through the optional Chrome-like
-    TLS/JA3 transport (`wreq-js`) instead of undici. It is off by default and does
-    not affect token refresh/model discovery. Optional tuning:
+  - Anthropic preset OAuth execution uses `transport_profile: auto` by default,
+    which routes final provider execution through the optional Chrome-like
+    TLS/JA3 transport (`wreq-js`) instead of undici. Set
+    `transport_profile: default` on that provider to force the normal undici path.
+    This does not affect token refresh/model discovery. Optional tuning:
     `HELM_TLS_BROWSER_PROFILE`, `HELM_TLS_OS_PROFILE`,
     `HELM_TLS_TRANSPORT_TIMEOUT_MS`.
   - Upstream credentials such as `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`,

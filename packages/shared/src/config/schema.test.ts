@@ -104,8 +104,9 @@ describe("ProviderConfigSchema targetProviderProtocol", () => {
     expect(provider({ response_model_policy: "both" }).response_model_policy).toBe("both");
   });
 
-  it("defaults provider transport to undici and accepts the TLS Chrome spike profile", () => {
-    expect(provider().transport_profile).toBe("default");
+  it("defaults provider transport to auto and accepts explicit transport profiles", () => {
+    expect(provider().transport_profile).toBe("auto");
+    expect(provider({ transport_profile: "default" }).transport_profile).toBe("default");
     expect(provider({ transport_profile: "tls_chrome" }).transport_profile).toBe("tls_chrome");
   });
 

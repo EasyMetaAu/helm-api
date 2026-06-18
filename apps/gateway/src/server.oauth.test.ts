@@ -221,8 +221,7 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
     expect(headers.Authorization).toBe("Bearer access-default");
   });
 
-  it("allows env opt-in only for Anthropic preset OAuth providers", () => {
-    const env = { HELM_EXPERIMENTAL_TLS_TRANSPORT: "anthropic" };
+  it("auto-enables TLS transport only for Anthropic preset OAuth providers", () => {
     const anthropic = provider({
       name: "anthropic",
       type: "anthropic",
@@ -231,8 +230,21 @@ describe("buildProviderClients (issue #38 OAuth wiring)", () => {
       models: [{ alias: "anthropic/opus", provider_model: "claude-opus" }],
     });
 
-    expect(resolveProviderTransportProfile(anthropic, env)).toBe("tls_chrome");
-    expect(resolveProviderTransportProfile(KEY_PROVIDER, env)).toBe("default");
+    expect(resolveProviderTransportProfile(anthropic)).toBe("tls_chrome");
+    expect(resolveProviderTransportProfile(KEY_PROVIDER)).toBe("default");
+  });
+
+  it("lets explicit default opt Anthropic preset OAuth out of TLS transport", () => {
+    const anthropic = provider({
+      name: "anthropic",
+      type: "anthropic",
+      base_url: "https://api.anthropic.com",
+      oauth: { provider: "anthropic", account: "default" },
+      transport_profile: "default",
+      models: [{ alias: "anthropic/opus", provider_model: "claude-opus" }],
+    });
+
+    expect(resolveProviderTransportProfile(anthropic)).toBe("default");
   });
 
   it("rejects explicit TLS transport on unsupported providers", () => {
