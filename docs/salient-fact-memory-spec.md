@@ -161,8 +161,11 @@ Key points:
   real path is `memory.llm` with `facts_model`.
 - **Scope from the job.** `ObserverJob` carries `projectId`/`resourceId`, which the
   worker already holds (observer jobs are enqueued with the full scope) and now
-  passes through (`scheduler.ts`). Facts are written at that cross-thread scope — no
-  extra store read — which is what makes them recallable in a new thread.
+  passes through (`scheduler.ts`). Facts are written at the broadest scope the job
+  carries — no extra store read — which is what makes them recallable in a new thread.
+  A thread-only job (no project/resource) writes at **thread** scope, never the empty
+  scope: an account-wide fact would leak a thread-local statement into unrelated
+  conversations.
 - **Idempotency.** `content_hash` dedup (the account-scoped `UNIQUE(owner_id,
   content_hash)`) makes re-extraction a no-op insert; the persistent fact-scan
   watermark is a deferred follow-up (see §5.3 for why re-extraction stays bounded
@@ -215,8 +218,13 @@ loadMemory(scope):
   resourceReflection  = getReflection(resource)       (unchanged)
   observations        = listObservations(thread)      (unchanged)
   ── NEW ──
-  facts = listActiveFacts({ accountId, projectId, resourceId })   ← already exists
-          (sqlite/postgres memory-store, e.g. sqlite:820)
+  # read by the BROADEST cross-thread scope present; with neither project nor
+  # resource, fall back to thread; with NO usable scope, skip. NEVER read with
+  # accountId alone — omitted scope columns mean "no filter" → an account-wide leak.
+  facts = (projectId || resourceId)
+            ? listActiveFacts({ accountId, projectId, resourceId })   # project facts (threadId=null)
+            : threadId ? listActiveFacts({ accountId, threadId })     # thread-local facts
+                       : []
 ```
 
 Assembled into the existing trailing `<system-reminder>` block as a new section
@@ -287,10 +295,16 @@ Rationale (consistent with CLAUDE.md principle 2, "no lying knobs"):
 - `max_facts_injected` follows the `CompactionOverrides` pattern
   (`memory-schema.ts:120-136`): plain `.optional()`, **no default**, so a written
   value is the only thing that ever takes effect; omitted ⇒ the internal prior.
-- Hard-gated by `memory.llm.enabled` (a `superRefine` like the existing
-  `model`-required check, `memory-schema.ts:168-176`): `eager_facts:true` with
-  `llm.enabled:false` should **refuse startup** rather than silently no-op (the
-  deterministic raw-message extractor is too weak to be the real path).
+- **Dual gate** via a `MemoryConfigSchema` `superRefine` (fail-closed). `eager_facts:true`
+  requires BOTH:
+  - `memory.llm.enabled:true` — the deterministic raw-message extractor is a stub, so
+    without a model eager extraction would silently no-op (a lying knob); and
+  - `memory.forgetting.enabled:true` — forgetting is the documented MASTER switch for the
+    whole facts tier (decay / retention / score / the Reflector's fact extraction all
+    gate on it). Eager facts under a disabled master would form + inject facts that
+    never decay or get retention-pruned — not byte-identical-to-off.
+
+  Either unmet refuses startup, so the operator notices instead of running a degraded mix.
 
 No new top-level `config.memory` block; `MemoryConfigSchema` is unchanged in shape.
 

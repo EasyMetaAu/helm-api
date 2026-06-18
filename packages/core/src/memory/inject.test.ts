@@ -581,6 +581,35 @@ describe("assembleInjectedContext — Known facts section", () => {
     });
   });
 
+  it("scopes a thread-only request's fact read to the thread (never account-wide)", async () => {
+    // No project/resource on the scope (a valid default). listActiveFacts must be
+    // scoped to the thread, NOT called with only accountId — an account-wide read
+    // would surface every other project's/thread's facts in this prompt.
+    const store = makeFakeStore({
+      facts: [makeFact({ factText: "thread fact", threadId: "thread-1" })],
+    });
+    await assembleInjectedContext(
+      baseInput({
+        injectKnownFacts: true,
+        scope: { accountId: "acct-a", threadId: "thread-1" },
+      }),
+      makeDeps(store),
+    );
+    expect(store.listActiveFacts).toHaveBeenCalledWith({
+      accountId: "acct-a",
+      threadId: "thread-1",
+    });
+  });
+
+  it("does NOT read facts account-wide when the scope has no project/resource/thread", async () => {
+    const store = makeFakeStore({ facts: [makeFact({ factText: "x" })] });
+    await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true, scope: { accountId: "acct-a" } }),
+      makeDeps(store),
+    );
+    expect(store.listActiveFacts).not.toHaveBeenCalled();
+  });
+
   it("caps the injected facts at maxFactsInjected (highest-priority kept)", async () => {
     const store = makeFakeStore({
       facts: [

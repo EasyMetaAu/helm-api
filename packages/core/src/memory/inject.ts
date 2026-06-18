@@ -204,16 +204,26 @@ async function loadMemory(
     scope.resourceId !== undefined
       ? await store.getReflection({ accountId: scope.accountId, resourceId: scope.resourceId })
       : null;
-  // Salient-fact fast path (Change B): a STATIC scope load (account + project +
-  // resource) — the same read shape as reflections, NOT per-query retrieval. Only
-  // when the operator opted in (injectKnownFacts) AND the adapter implements the
-  // optional fact read; otherwise byte-identical to today.
+  // Salient-fact fast path (Change B): a STATIC scope load — the same read shape as
+  // reflections, NOT per-query retrieval. Read by the BROADEST cross-thread scope the
+  // request carries (project/resource); with NEITHER, fall back to the thread so a
+  // thread-only request reads only its own facts. NEVER read with `accountId` alone —
+  // omitted scope columns mean "no filter", which would surface every other
+  // project/thread's facts in this prompt (Codex review fix). No usable scope ⇒ skip.
+  const hasBroadFactScope = scope.projectId !== undefined || scope.resourceId !== undefined;
   const facts =
-    injectKnownFacts && store.listActiveFacts !== undefined
+    injectKnownFacts &&
+    store.listActiveFacts !== undefined &&
+    (hasBroadFactScope || scope.threadId !== undefined)
       ? await store.listActiveFacts({
           accountId: scope.accountId,
           ...(scope.projectId !== undefined ? { projectId: scope.projectId } : {}),
           ...(scope.resourceId !== undefined ? { resourceId: scope.resourceId } : {}),
+          // Thread fallback ONLY when there is no broader scope: a project read must
+          // omit threadId (project facts carry threadId=null and would be filtered out).
+          ...(!hasBroadFactScope && scope.threadId !== undefined
+            ? { threadId: scope.threadId }
+            : {}),
         })
       : [];
   // The inject layers stay THREAD-ANCHORED: pass threadId alone so this read

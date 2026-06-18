@@ -41,9 +41,16 @@ async function maybeEagerExtractFacts(
     const now = deps.now();
     const extracted = await extract({ messages: uncovered, now });
     if (extracted.length === 0) return;
-    const scope: { projectId?: string; resourceId?: string } = {};
+    // Scope the fact at the broadest cross-thread level the job carries. With NEITHER
+    // project nor resource (a valid thread-only job), fall back to the THREAD — never
+    // an empty scope, which would persist an account-wide fact and leak a thread-local
+    // statement into unrelated conversations (Codex review fix).
+    const scope: { projectId?: string; resourceId?: string; threadId?: string } = {};
     if (job.projectId !== undefined) scope.projectId = job.projectId;
     if (job.resourceId !== undefined) scope.resourceId = job.resourceId;
+    if (scope.projectId === undefined && scope.resourceId === undefined) {
+      scope.threadId = job.threadId;
+    }
     const facts = buildReconciledFactBatch({
       extracted,
       ownerId: job.accountId,

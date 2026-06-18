@@ -373,6 +373,23 @@ describe("runObserverJob — eager fact extraction", () => {
     });
   });
 
+  it("scopes a thread-only job's fact to the thread (never account-wide)", async () => {
+    // Job with NO project/resource (a valid default when no project header/default
+    // is set). The fact must carry threadId — writing it scopeless would leak a
+    // thread-local statement into every other conversation in the account.
+    const { store, factCalls } = makeFakeStore(makeShortThread());
+    const extractFactsFromMessages = vi.fn(async () => [eagerFact]);
+    const deps = makeDeps(store, { extractFactsFromMessages });
+    const job: ObserverJob = { jobId: "job-1", accountId: "acct-a", threadId: "thread-1" };
+
+    await runObserverJob(job, deps);
+
+    expect(factCalls).toHaveLength(1);
+    expect(factCalls[0]).toMatchObject({ accountId: "acct-a", scope: { threadId: "thread-1" } });
+    expect(factCalls[0]?.scope).not.toHaveProperty("projectId");
+    expect(factCalls[0]?.facts[0]).toMatchObject({ ownerId: "acct-a", threadId: "thread-1" });
+  });
+
   it("skips the LLM call when the uncovered turns contain no user message", async () => {
     const assistantOnly: RawMessage[] = [
       {

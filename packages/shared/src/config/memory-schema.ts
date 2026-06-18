@@ -203,17 +203,29 @@ export const MemoryConfigSchema = z
     forgetting: ForgettingSchema.prefault({}),
   })
   .strict()
-  // Cross-block gate (salient-fact-memory-spec §6): eager fact extraction needs a
-  // real model. `forgetting.consolidate.eager_facts:true` with `llm.enabled:false`
-  // would silently do nothing (the deterministic raw extractor is a stub) — a lying
-  // knob — so it REFUSES STARTUP. This lives here, not on ForgettingSchema, because
-  // it spans the sibling `llm` and `forgetting` blocks.
+  // Cross-block gate (salient-fact-memory-spec §6). `eager_facts:true` requires BOTH:
+  //   - `llm.enabled:true` — the deterministic raw extractor is a stub, so without a
+  //     model eager extraction would silently do nothing (a lying knob); and
+  //   - `forgetting.enabled:true` — forgetting is the documented MASTER switch for the
+  //     whole facts tier (decay / retention / score / Reflector fact extraction all
+  //     gate on it). eager_facts under a disabled master would form + inject facts
+  //     that never decay or get retention-pruned — not byte-identical-to-off.
+  // Either unmet REFUSES STARTUP (fail-closed). This lives here, not on
+  // ForgettingSchema, because the llm check spans the sibling `llm` block.
   .superRefine((cfg, ctx) => {
-    if (cfg.forgetting.consolidate.eager_facts === true && cfg.llm.enabled !== true) {
+    if (cfg.forgetting.consolidate.eager_facts !== true) return;
+    if (cfg.llm.enabled !== true) {
       ctx.addIssue({
         code: "custom",
         path: ["forgetting", "consolidate", "eager_facts"],
         message: "forgetting.consolidate.eager_facts:true requires memory.llm.enabled:true",
+      });
+    }
+    if (cfg.forgetting.enabled !== true) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["forgetting", "consolidate", "eager_facts"],
+        message: "forgetting.consolidate.eager_facts:true requires memory.forgetting.enabled:true",
       });
     }
   });

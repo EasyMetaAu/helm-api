@@ -211,6 +211,26 @@ describe("MemoryConfigSchema", () => {
     expect(off.forgetting.consolidate.eager_facts).toBe(false);
   });
 
+  // forgetting.enabled is the documented master switch for the whole facts/forgetting
+  // tier. eager_facts:true with forgetting.enabled:false would form + inject facts
+  // while decay/retention/score are all off — NOT byte-identical-to-today — so it
+  // must REFUSE STARTUP (Codex review fix).
+  it("eager_facts:true requires forgetting.enabled:true (master switch, fail-closed)", () => {
+    expect(() =>
+      MemoryConfigSchema.parse({
+        llm: { enabled: true, model: "deepseek/deepseek-v4-flash" },
+        // forgetting.enabled defaults to false here
+        forgetting: { consolidate: { eager_facts: true } },
+      }),
+    ).toThrow();
+    // both master switches on (+ a model) parses
+    const m = MemoryConfigSchema.parse({
+      llm: { enabled: true, model: "deepseek/deepseek-v4-flash" },
+      forgetting: { enabled: true, consolidate: { eager_facts: true } },
+    });
+    expect(m.forgetting.consolidate.eager_facts).toBe(true);
+  });
+
   // Compaction is no longer configurable — it is internal auto-adaptive
   // behaviour. A leftover fixed/economy-era `observer:` block must REFUSE
   // startup (fail-closed) so the operator notices the knobs are gone instead
