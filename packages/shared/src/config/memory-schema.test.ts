@@ -61,7 +61,9 @@ describe("ForgettingSchema", () => {
   // extraction + the inject `## Known facts` section; max_facts_injected caps the
   // injected set (optional, no default → internal prior, like CompactionOverrides).
   it("eager_facts round-trips and max_facts_injected is an optional override (no default)", () => {
-    const f = ForgettingSchema.parse({ consolidate: { eager_facts: true, max_facts_injected: 12 } });
+    const f = ForgettingSchema.parse({
+      consolidate: { eager_facts: true, max_facts_injected: 12 },
+    });
     expect(f.consolidate.eager_facts).toBe(true);
     expect(f.consolidate.max_facts_injected).toBe(12);
     // omitted → NOT materialized (no lying knob)

@@ -531,12 +531,18 @@ describe("assembleInjectedContext — Known facts section", () => {
     const store = makeFakeStore({
       projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "project memory" }),
       facts: [
-        makeFact({ factText: "The user's favorite number is 42.", validFrom: new Date("2026-05-21") }),
+        makeFact({
+          factText: "The user's favorite number is 42.",
+          validFrom: new Date("2026-05-21"),
+        }),
         makeFact({ factText: "The user prefers dark mode.", validFrom: new Date("2026-05-22") }),
       ],
       observations: [makeObservation("o1", "older observation", "2026-05-20T00:00:00.000Z")],
     });
-    const out = await assembleInjectedContext(baseInput({ injectKnownFacts: true }), makeDeps(store));
+    const out = await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true }),
+      makeDeps(store),
+    );
 
     const block = out.memoryBlock ?? "";
     expect(block).toContain("## Known facts");
@@ -600,7 +606,10 @@ describe("assembleInjectedContext — Known facts section", () => {
       projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "project memory" }),
       facts: [],
     });
-    const out = await assembleInjectedContext(baseInput({ injectKnownFacts: true }), makeDeps(store));
+    const out = await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true }),
+      makeDeps(store),
+    );
     expect(out.memoryBlock ?? "").not.toContain("## Known facts");
     expect(out.metadata.facts_injected).toBe(0);
   });
@@ -611,7 +620,10 @@ describe("assembleInjectedContext — Known facts section", () => {
       facts: [makeFact({ factText: "fact one" })],
       throwOn: "listActiveFacts",
     });
-    const out = await assembleInjectedContext(baseInput({ injectKnownFacts: true }), makeDeps(store));
+    const out = await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true }),
+      makeDeps(store),
+    );
     expect(out.memoryBlock).toBeNull();
     expect(out.metadata.degraded).toBe(true);
     expect(out.metadata.facts_injected).toBe(0);

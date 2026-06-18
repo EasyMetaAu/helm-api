@@ -310,7 +310,7 @@ function factsFromMessagesPrompt(input: { messages: RawMessage[]; now: Date }) {
           facts: [
             {
               subject_text: "stable topic for supersede, e.g. 'favorite number'",
-              fact_text: "the atomic assertion, e.g. \"The user's favorite number is 42.\"",
+              fact_text: 'the atomic assertion, e.g. "The user\'s favorite number is 42."',
             },
           ],
         },

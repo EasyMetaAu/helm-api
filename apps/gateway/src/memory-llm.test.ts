@@ -407,7 +407,9 @@ describe("createMemoryLlmRuntime", () => {
     it("extracts {subjectText, factText} from raw turns via facts_model, stamped validFrom=now", async () => {
       const { runtime, client, resolveModel } = runtimeArgs({
         response: {
-          facts: [{ subject_text: "favorite number", fact_text: "The user's favorite number is 42." }],
+          facts: [
+            { subject_text: "favorite number", fact_text: "The user's favorite number is 42." },
+          ],
         },
         resolveAlias: "openai/facts",
         providerModel: "gpt-facts",

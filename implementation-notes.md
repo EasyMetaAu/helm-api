@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-18 · Salient-fact 快车道：事实形成与注入解绑压缩（docs/salient-fact-memory-spec；docs/08/12；原则 1/2/3）
+
+- **背景**：线上「我喜欢42」短对话跨 session 召不回。生产 DB 实证根因：事实形成被绑死在历史压缩上——facts 只由 reflector 从 observation 抽，而 observation 只在 `segmentMinTokens=2048` / 1h idle 触发；短对话两者都过不了 → 0 observation → 0 reflector → 0 fact。且 `inject.ts` 从不读 `memory_facts`（P8 逐轮检索因需 embedding 推迟）。
+- **实现**：新增 opt-in `config.memory.forgetting.consolidate.eager_facts`（默认 false，跨块 superRefine 强制 `llm.enabled:true`，否则 fail-closed）+ 可选 `max_facts_injected`（无默认→内部先验 16）。**Change A**：observer 在**不压缩**的退出路径上对 uncovered 原始轮抽事实（`extractFactsFromMessages` raw→`{subjectText,factText}`，nano `facts_model`，无确定性兜底→失败返回 []），经共享 `buildReconciledFactBatch`（从 reflector 抽出，两条事实路径同款 subject_key/content_hash/cap）落库 `insertFactsReconciled`，scope 由 `ObserverJob.projectId/resourceId` 携带（worker 已持有，零额外读）。**Change B**：`inject.loadMemory` 加载 `listActiveFacts(account+project+resource)`（静态 scope 加载，非 per-query），装配 `## Known facts` 段（reflections>facts>observations 预算优先级，forgetting 分数排序取 top-K，oldest-first 稳定展示），新增 `metadata.facts_injected`。
+- **取舍/坑/偏离 spec**：①持久 fact-scan **watermark 推迟**——靠 content_hash 去重幂等 + uncovered-tail + 压缩阀把短对话重抽限制在 ~1–2 次/生命周期；②压缩那一跑**跳过** eager（reflector 负责该路事实），而非 spec 原提的"并进 summarize 一次调用"，避免双抽且不动 summarize 签名；③**fact reinforcement 推迟**（`bumpReferences` 未扩展 fact id）；④`facts_injected` 暂只在 inject 模块 metadata，未进 DecisionRecord schema。成本：每条独立 nano 调用仅发生在"短到不压缩 + 有新 user 内容"，实测放大 ~1.05–1.2×、成本个位数 %。全程 fail-open，off 时与现状逐字一致。**无迁移、无 schema 改动**。
+- **验证**：TDD 红→绿，5 slice 各自单测（config 22 / memory-llm 16 / observer 19+scheduler / inject 27），全量 **3989** 绿、typecheck（3 项目）/ lint(478) 绿。分支 `docs/salient-fact-memory-proposal`（PR #312，spec + 实现同 PR）。默认 off，box 已开 llm+forgetting，置 `eager_facts:true` 即可启用（operator-owned config，部署 pull+up -d 不覆盖）。
+
 ## 2026-06-18 · Codex 原生直通缺失 instructions 修复（issue #217；docs/05；原则 1/4/8）
 
 - **背景**：线上请求 `09387e28-...`（pi-coding-agent / AgentCrew，经 `@earendil-works/pi-ai`）由 `/v1/responses` 入站，lane=coding 首选 `openai-codex/gpt-5.5`，`passthrough_used=true` 把正文逐字转发给 ChatGPT 订阅版 Codex 后端 → HTTP 400 `{"detail":"Instructions are required"}`，fail-open 回退 `claude-opus-4-8` 成功。SQLite 实证：入站正文 `input` 为数组、无 `messages`、**无顶层 `instructions`**，系统提示词其实是 `input[0]={role:"developer",content:"You are Mimi..."}`（pi-ai 设计：reasoning 模型用 developer、否则 system，塞进 input，故意不发 instructions——对真·OpenAI Responses 合法，但 Codex 订阅后端强制要 instructions）。
@@ -22,19 +29,13 @@
 - **取舍/坑/TODO**：选择 `wreq-js` 作为第一版 spike，因为它是 fetch-compatible，避免先移植 OmniRoute `tls-client-node` 的 temp-file SSE tailing。风险仍在：native package/Docker platform、streaming body 行为、wreq proxy 支持矩阵、TLS spoof 是否真能改善 Anthropic API 401/403。Anthropic preset OAuth 默认启用；若 optional 包缺失，请求会 fail-closed 并抛 `TlsTransportUnavailableError`，需要用 `transport_profile: default` 显式回退。
 - **验证**：新增 core adapter 单测（proxy URL、lazy transport、ephemeral cookie、wreq transient error normalization、unavailable error）和 gateway wiring 单测（Anthropic preset OAuth auto 走 fake wreq transport、非 Anthropic preset 仍 default、显式 default opt-out、unsupported provider fail-closed）。Focused vitest/typecheck 已覆盖；真正价值必须后续用同一线上账号/同一 request 做 toggle A/B live smoke。
 
-## 2026-06-18 · Claude CLI strict tool pipeline 与 golden fixture（docs/05/07；原则 5/7/8）
-
-- **背景**：昨天 Claude CLI strict fingerprint profile 落地后还剩 strict tool pipeline 与 wire-shape fixture 未做；线上目标是 `https://helm.easymeta.au`，用户补充 trace `45963e78-ec44-422a-84fd-3fea7635feb1` 可作为部署后的重试样本。本分支只做代码与测试，未部署。
-- **实现**：strict fingerprint 模式下（动态 OAuth / 非官方 Anthropic-compatible relay，且非 native passthrough）在最终 Anthropic body 序列化前执行工具兼容层：工具名 cloaking（如 `read_file→Read`、`mcp__codegraph__codegraph_context→McpCodegraphCodegraphContext`），同步改写 `tools[]`、历史 `tool_use` block、`tool_choice`；零参数工具 schema 从 `{type:"object"}` 归一到 `{type:"object",properties:{}}`；`cache_control` block 限制为最多 4 个；forced tool choice 下删除 `thinking/context_management`，非 forced thinking 仍执行 Anthropic 约束（`temperature=1`、移除 `top_p/top_k`）。请求内部返回 strict tool reverse-map，非流式与流式 translator 都把上游返回的 cloaked 名还原成客户端原名。
-- **401 retry 修复**：PR #304 merge 后 review 发现 strict pipeline 会原地改写请求体；若第一次上游 401，`requestWithRetry` 复用已 cloaked 的 body 重放，第二次无法重建 `Read→read_file` reverse-map，客户端会收到 `Read`。修为 strict 准备阶段只操作每次 attempt 的 clone，原始 body 保持未改写；新增 401 回归测试锁住非流式 tool name restore。
-- **取舍/坑/TODO**：strict pipeline 只作用于互译出站 Anthropic 请求；`nativePassthrough/nativePassthroughStream` 仍传 `includeClaudeCliRuntimeHeaders=false`，保持逐字直通，不做 body/tool 改写。TLS/JA3/transport fingerprint 属于单独 PR/spike，本次不碰 undici fetch/Agent/ProxyAgent。部署后用上述 request detail 重试同类 payload，看 wire shape 与上游结果是否符合预期。
-- **验证**：新增 golden fixture `packages/core/src/provider/fixtures/claude-cli-strict-tool.ts` 与 TDD 回归（非流式 wire shape + tool name restore、流式 restore、401 retry reverse-map）。`pnpm exec vitest run packages/core/src/provider/anthropic.test.ts -t "preserves the reverse map"` 红→绿；`pnpm exec vitest run packages/core/src/provider/anthropic.test.ts` 94 绿；`pnpm --filter @helm/core typecheck` 绿；`pnpm exec biome check packages/core/src/provider/anthropic.ts packages/core/src/provider/anthropic.test.ts` 绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-18 · Claude CLI strict tool pipeline 与 golden fixture（docs/05/07；原则 5/7/8）：strict fingerprint（动态 OAuth/非官方 relay，非 native passthrough）在最终 Anthropic body 序列化前做工具兼容层：工具名 cloaking（read_file→Read、mcp__…→PascalCase）+ 同步改 tools/tool_use/tool_choice、零参 schema 补 `properties:{}`、cache_control≤4、forced choice 删 thinking/context_management；流式+非流式都把上游 cloaked 名还原。坑：strict 原地改 body 致 401 重放丢 reverse-map → 改为每 attempt clone、原始 body 不改，加 401 回归测试。native passthrough 不注入。golden fixture + TDD 全绿。
 
 ### 2026-06-18 · 请求详情页内部 code 人类可读化（admin i18n；原则 1）：「供应商尝试」链 + 错误类型显示内部 snake_case code（no_response_schema_support/circuit_open/client_abort/upstream_error…）运维看不懂；新增 admin `attempt-codes.ts` 的 `ATTEMPT_CODE_LABELS`(code→英文人话=i18n key)+`attemptCodeLabel()`（未知回退裸 code），镜像 core SkipReason+error_class（admin 不 import core），渲染处改 `$t(attemptCodeLabel(code))` 并 `title` 留裸码；26 新 key×5 locale 手译、additive 合并；admin 14 测/svelte-check 0/build 绿。分支 feat-readable-attempt-codes，未部署。
 

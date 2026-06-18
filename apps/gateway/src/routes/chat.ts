@@ -204,6 +204,11 @@ function createOpenAIStreamModelRestamper(requestedModel: string): {
 export interface InjectWiring {
   deps: InjectDeps;
   tokenBudget: number;
+  // Salient-fact fast path (salient-fact-memory-spec Change B). When true, inject
+  // surfaces a `## Known facts` section; absent ⇒ off (byte-identical to today).
+  // Sourced from config.memory.forgetting.consolidate.eager_facts in the root.
+  injectKnownFacts?: boolean;
+  maxFactsInjected?: number;
 }
 
 // Minimal identity shape the adapter reads (subset of middleware/auth's
@@ -646,7 +651,17 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             : {}),
         },
         {
-          assemble: (input) => assembleInjectedContext(input, wiring.deps),
+          assemble: (input) =>
+            assembleInjectedContext(
+              {
+                ...input,
+                ...(wiring.injectKnownFacts === true ? { injectKnownFacts: true } : {}),
+                ...(wiring.maxFactsInjected !== undefined
+                  ? { maxFactsInjected: wiring.maxFactsInjected }
+                  : {}),
+              },
+              wiring.deps,
+            ),
           enqueueObserver: (scope) => enqueueObserverWriteback(scope, wiring.deps),
           tokenBudget: wiring.tokenBudget,
           now: wiring.deps.now,

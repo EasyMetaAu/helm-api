@@ -90,6 +90,9 @@ interface PipelineIR {
 export interface InjectWiring {
   deps: InjectDeps;
   tokenBudget: number;
+  // Salient-fact fast path (Change B) — see chat.ts InjectWiring. Absent ⇒ off.
+  injectKnownFacts?: boolean;
+  maxFactsInjected?: number;
 }
 
 // Anthropic /v1/messages routing pipeline — the framework-agnostic bridge the
@@ -688,7 +691,17 @@ export function createMessagesPipeline(
               : {}),
           },
           {
-            assemble: (input) => assembleInjectedContext(input, wiring.deps),
+            assemble: (input) =>
+              assembleInjectedContext(
+                {
+                  ...input,
+                  ...(wiring.injectKnownFacts === true ? { injectKnownFacts: true } : {}),
+                  ...(wiring.maxFactsInjected !== undefined
+                    ? { maxFactsInjected: wiring.maxFactsInjected }
+                    : {}),
+                },
+                wiring.deps,
+              ),
             enqueueObserver: (scope) => enqueueObserverWriteback(scope, wiring.deps),
             tokenBudget: wiring.tokenBudget,
             now: wiring.deps.now,

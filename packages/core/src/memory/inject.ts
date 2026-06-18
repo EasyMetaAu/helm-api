@@ -345,7 +345,9 @@ export async function assembleInjectedContext(
   // else recency. Capped to top-K; the kept survivors are sorted oldest-first for the
   // STABLE block order later (decoupled from `now`).
   const rankedFacts = [...visibleFacts]
-    .sort((a, b) => factPriority(b) - factPriority(a) || b.validFrom.getTime() - a.validFrom.getTime())
+    .sort(
+      (a, b) => factPriority(b) - factPriority(a) || b.validFrom.getTime() - a.validFrom.getTime(),
+    )
     .slice(0, Math.max(0, factCap));
 
   // docs/12 (P4/P7) — archived (decay), pruned (retention tombstone), and expired
@@ -438,7 +440,9 @@ export async function assembleInjectedContext(
       factRemaining -= cost;
     }
   }
-  keptFacts.sort((a, b) => a.validFrom.getTime() - b.validFrom.getTime() || a.id.localeCompare(b.id));
+  keptFacts.sort(
+    (a, b) => a.validFrom.getTime() - b.validFrom.getTime() || a.id.localeCompare(b.id),
+  );
   const keptFactTexts = keptFacts.map((f) => `- ${f.factText}`);
   const factTokens = keptFactTexts.reduce((sum, t) => sum + tokensOf(t), 0);
 

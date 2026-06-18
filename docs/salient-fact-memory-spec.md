@@ -1,11 +1,19 @@
 # Salient-Fact Memory · Design Proposal
 
-> **Status: PROPOSAL — for review, not yet implemented.** This is a design spec
-> (like `native-passthrough-fidelity-spec.md`), not a description of shipping
-> behaviour. It extends the memory layer ([08 · Memory Middleware](08-memory-middleware.md))
-> and the facts tier ([12 · Memory: Forgetting & Tiering](12-memory-forgetting-and-tiering.md)).
-> It is the formation+injection layer **below** the deferred P8 hybrid retrieval —
-> and, unlike P8, it needs **no embedding infrastructure**.
+> **Status: IMPLEMENTED (opt-in, default off).** Shipped in this PR behind
+> `config.memory.forgetting.consolidate.eager_facts` (config-gated to require
+> `memory.llm.enabled`); off ⇒ byte-identical to before. It extends the memory layer
+> ([08 · Memory Middleware](08-memory-middleware.md)) and the facts tier
+> ([12 · Memory: Forgetting & Tiering](12-memory-forgetting-and-tiering.md)). It is the
+> formation+injection layer **below** the deferred P8 hybrid retrieval — and, unlike
+> P8, it needs **no embedding infrastructure** and **no migration**.
+>
+> **Deferred from the original proposal (follow-ups):** (1) the persistent fact-scan
+> **watermark** — the MVP relies on `content_hash` dedup + the uncovered-tail +
+> compaction valves to bound re-extraction instead (see §5.3); (2) **fact
+> reinforcement** (`bumpReferences` for fact ids); (3) coalescing extraction into the
+> summarize call on a compacting run — the MVP instead **skips** the eager pass on a
+> compacting run and lets the Reflector form facts there.
 
 ## TL;DR
 
@@ -119,26 +127,25 @@ messages**, gated by the LLM runtime. This is independent of whether a compactio
 observation is written.
 
 ```text
-runObserverJob(job):
+runObserverJob(job):                                   # job carries {accountId, projectId?, resourceId?, threadId}
   load all messages + existing observations            (unchanged)
-  newRawTurns = messages after fact_scan_high_watermark        (only new content)
+  uncovered = messages NOT covered by an existing observation
 
   ── existing compaction decision (unchanged) ──
   if shouldCompact:
-    # COALESCED: one LLM call emits BOTH the observation summary AND facts
-    { observationText, facts } = await summarizeAndExtract({ messages, now })
-    appendObservation(observationText)                 (unchanged)
+    appendObservation(...)                             # facts for this run come from the
+                                                       # Reflector (observation→fact) — NO eager call
   else:
-    # short thread that never compacts — the only path that adds a NEW call,
-    # and ONLY when there is genuinely new user-authored content to mine
-    facts = hasNewUserTurn(newRawTurns)
-              ? await extractFactsFromMessages({ messages: newRawTurns, existingFacts, now })
-              : []                                     # skip — no LLM call
-
-  ── NEW: persist facts (when memory.llm.enabled && eager_facts) ──
-  insertFactsReconciled(scope, facts)   # existing supersede/dedup; ADD vs UPDATE vs NOOP
-  advance fact_scan_high_watermark
+    # the only path that adds a NEW call, and ONLY when the uncovered turns
+    # contain genuinely new user-authored content to mine
+    if uncovered.some(role == "user"):
+      facts = await extractFactsFromMessages({ messages: uncovered, now })   # raw → atomic facts
+      insertFactsReconciled(job.scope, facts)          # existing supersede/dedup; ADD vs UPDATE vs NOOP
 ```
+
+(MVP: no persistent watermark — `content_hash` dedup makes re-extraction idempotent
+and the uncovered-tail + compaction valves bound it; see §5.3. The cross-thread scope
+is carried verbatim on the observer job, which the worker already holds — no extra read.)
 
 Key points:
 
@@ -152,13 +159,14 @@ Key points:
   (the ADD/UPDATE-via-supersede reconciliation) with the same key derivation and the
   same `max_facts_per_subject` cap. The deterministic stub stays the fallback; the
   real path is `memory.llm` with `facts_model`.
-- **Scope from the thread.** The Observer job is `{accountId, threadId}`; resolve
-  `project_id` / `resource_id` from the `memory_threads` row so facts are written
-  at the cross-thread scope (project), which is what makes them recallable in a new
-  thread.
-- **Idempotency.** A `fact_scan` high-watermark per thread (analogous to
-  observation coverage) prevents re-scanning the same turns every writeback;
-  `content_hash` dedup is the backstop.
+- **Scope from the job.** `ObserverJob` carries `projectId`/`resourceId`, which the
+  worker already holds (observer jobs are enqueued with the full scope) and now
+  passes through (`scheduler.ts`). Facts are written at that cross-thread scope — no
+  extra store read — which is what makes them recallable in a new thread.
+- **Idempotency.** `content_hash` dedup (the account-scoped `UNIQUE(owner_id,
+  content_hash)`) makes re-extraction a no-op insert; the persistent fact-scan
+  watermark is a deferred follow-up (see §5.3 for why re-extraction stays bounded
+  without it).
 - **Cost.** Bills the existing Reflector/“facts” cost bucket (`docs/08:398-407`).
   Bounded — see §5.3.
 - **Fail-open.** An extractor throw is swallowed + logged; the observation and the
@@ -171,15 +179,15 @@ it never compacts.
 ### 5.3 Cost & LLM-call amplification
 
 The naive form — "extract on every turn" — would roughly **double** background
-memory LLM **calls**. That concern is real; this design keeps it bounded with four
-levers, three of which are *exact* (not heuristic):
+memory LLM **calls**. That concern is real; the shipped design keeps it bounded with
+these levers (all *exact*, not heuristic):
 
-| Lever | Kind | Effect |
-|---|---|---|
-| **Job-dedup batching** | exact | The observer job already carries a `uniq_memory_jobs_open_type_scope` lock (`migrate` / `memory_jobs`): bursts of N requests on a thread collapse to **one** worker run. Extraction is per-tick-per-thread, **not per-message**. |
-| **No-new-user-content skip** | exact | If no new **user-authored** turn exists past the fact-scan watermark, skip the call entirely. Tool-result-only / assistant-only batches (the bulk of agent tool roundtrips) cost **zero** extra calls. |
-| **Coalesce on compaction** | exact | When a compaction happens, the summarizer already reads the messages — emit observation **and** facts in **one** JSON call. No second call on the compaction path; this also *replaces* the Reflector's separate observation→fact call. |
-| **Trivial-turn skip** | heuristic (conservative) | Optionally skip sub-N-char acks ("ok", "继续"). Errs toward running when unsure. |
+| Lever | Effect |
+|---|---|
+| **Job-dedup batching** | The observer job already carries a `uniq_memory_jobs_open_type_scope` lock (`memory_jobs`): bursts of N requests on a thread collapse to **one** worker run. Extraction is per-tick-per-thread, **not per-message**. |
+| **No-user-content skip** | If the uncovered turns contain no **user-authored** message, skip the call entirely. Tool-result-only / assistant-only batches (the bulk of agent tool roundtrips) cost **zero** extra calls. |
+| **Skip-on-compaction** | The eager pass runs ONLY on a no-compaction run. A compacting run leaves facts to the Reflector (observation→fact), so the compaction path adds no new call AND there is no double extraction. |
+| **`content_hash` dedup + uncovered-tail bound** | Re-extraction of an idle short thread is a no-op insert (same hash); the only re-scans are the writeback + the eventual idle-flush run (which also compacts and covers the tail), so re-extraction is ~1–2 calls per short-thread lifetime, not per-tick-forever. A persistent watermark (deferred follow-up) would tighten the active-thread case further. |
 
 The dollar impact is far smaller than the call-count impact, because the extractor
 is a **nano `facts_model`** with tiny I/O (just the new turns in, ≤~100 tokens of
@@ -288,52 +296,53 @@ No new top-level `config.memory` block; `MemoryConfigSchema` is unchanged in sha
 
 ## 7. Schema & storage
 
-**No migration.** `memory_facts` already exists with everything needed
+**No migration, no schema change.** `memory_facts` already has everything needed
 (`docs/08:351-354`): `owner_id`, `project_id`, `resource_id`, `thread_id`,
 `subject_key`, `content_hash`, `fact_text`, `importance`, `reference_count`,
 `referenced_at`, bi-temporal `valid_from` / `invalid_at` / `expired_at`, `status`.
-The only state addition is a per-thread **fact-scan high-watermark** (idempotency
-for Change A); it can ride `memory_threads` as a nullable column (additive,
-defaulted null — pre-feature rows scan from the start once, then advance).
+The MVP adds **no** new column: the persistent fact-scan watermark is deferred (§5.3),
+so the only writes are through the existing `insertFactsReconciled`. (A future
+watermark would ride `memory_threads` as an additive nullable column.)
 
 Tenant isolation is already correct: `memory_facts` carries its own `owner_id` and
 every read/dedup/supersede predicate includes it (`docs/12:361-368`).
 
-## 8. Test plan (TDD red list)
+## 8. Test plan (TDD red→green — as shipped)
 
 Core, framework-agnostic (Vitest), written red-first per CLAUDE.md:
 
-**Formation (Change A, `observer.test.ts` / new `fact-extract.test.ts`):**
+**Formation (Change A, `observer.test.ts`):**
 1. Short thread under `segment_min_tokens` with an explicit preference → extractor
-   called on raw new turns → fact persisted **even though `observationId` is null**.
-2. Extraction runs regardless of the compaction decision (size / idle / none).
-3. Facts written at **project** scope resolved from the thread row (not thread-only).
-4. Dedup: same fact text twice → one row (`content_hash`).
-5. Supersede: contradicting fact ("favorite number is 7") → old `expired`, new
-   `active` (exercise the existing supersede via the raw path).
-6. High-watermark: a second writeback over the same turns does **not** re-extract.
-7. Fail-open: extractor throws → observation + job status unaffected.
-8. Gating: `eager_facts:false` (or `llm.enabled:false`) → no extraction (byte-identical to today).
+   called on the uncovered raw turns → fact persisted **even though `observationId`
+   is null** (the "42" case).
+2. **Skip-on-compaction**: a run that compacts does NOT eager-extract (the standalone
+   extractor is not called — the Reflector owns facts there).
+3. **No-user-content skip**: uncovered turns that are tool-result/assistant-only →
+   **no** extraction call.
+4. Facts written at the **project** scope carried on the job (not thread-only).
+5. Gating: extractor dep absent (`eager_facts`/`llm` off) → no extraction
+   (byte-identical to today).
+6. Fail-open: extractor throws → observation + job status unaffected (job still done).
+7. Empty extractor result → no `insertFactsReconciled` call.
 
-**Cost levers (Change A, §5.3):**
-8a. No-new-user-content skip: a batch of only tool-result / assistant turns past the
-    watermark → **no** extraction call is made.
-8b. Coalesce on compaction: when `shouldCompact`, facts come from the **single**
-    summarize-and-extract call (assert the standalone extractor is **not** called).
+(Dedup/supersede are exercised by the existing `insertFactsReconciled` store contract
+tests + `forgetting/facts.test.ts` for `buildReconciledFactBatch`, shared by both
+fact sources.)
 
 **Injection (Change B, `inject.test.ts`):**
-9. `loadMemory` loads scope facts and emits a `## Known facts` section.
-10. **Cross-thread**: a fact formed on thread A is injected on thread B (same
-    project) — the exact failing scenario from §1.
-11. Ranking: facts under reflections, above observations; trimmed by score under
-    budget pressure.
-12. No facts in scope / feature off → section absent (deterministic, no empty header).
-13. Stable block: identical (scope, fact set) → byte-identical block (cache stability).
-14. Injected fact ids get reinforcement bumped (fire-and-forget, not awaited).
+8. `loadMemory` loads scope facts and emits a `## Known facts` section in the order
+   reflections → facts → observations.
+9. **Cross-thread**: a fact at project scope is injected on a new thread — the §1 case.
+10. Off by default: `injectKnownFacts` absent → `listActiveFacts` not called, no
+    section, `facts_injected:0` (byte-identical to today).
+11. Scope: facts loaded at `account + project + resource`.
+12. Cap: `maxFactsInjected` keeps the top-K (highest priority); the rest dropped.
+13. No facts → no section; fail-open: a `listActiveFacts` throw degrades to no memory.
 
 **Config (`memory-schema.test.ts`):**
-15. `eager_facts:true` + `llm.enabled:false` → config **refuses to load** (fail-closed).
-16. `max_facts_injected` omitted → internal prior; set → takes effect; unknown key → throws.
+14. `eager_facts:true` + `llm.enabled:false` → config **refuses to load** (fail-closed).
+15. `max_facts_injected` omitted → internal prior; set → takes effect; non-positive
+    → throws.
 
 ## 9. Rollout & relation to existing layers
 
@@ -351,19 +360,29 @@ Core, framework-agnostic (Vitest), written red-first per CLAUDE.md:
   injection selector for hybrid retrieval (`forgetting.facts_retrieval.enabled`),
   reusing the facts this proposal forms.
 
-## 10. Open questions for review
+## 10. Decisions & deferred follow-ups
 
-1. ~~**Extraction cadence.**~~ **Resolved (§5.3):** reuse the Observer (no new job
-   type); batched by the existing open-job lock, coalesced into the summarize call on
-   compaction, and skipped when there is no new user-authored content — so the
-   per-turn call amplification is ~1.05–1.2× on real workloads, not 2×.
-2. **Scope of injected facts.** Project (+ resource) only, or also same-thread
-   facts? Proposed: mirror reflections (project + resource), since thread facts
-   overlap the live window and observations.
-3. **`max_facts_injected` prior.** Suggest an internal prior of ~10–15 facts or a
-   token sub-budget fraction; settle empirically after the unit pass.
-4. **Salience filter.** Extract *all* atomic facts (mem0 style) vs. only
+1. ~~**Extraction cadence.**~~ **Decided:** reuse the Observer (no new job type);
+   batched by the existing open-job lock, **skipped on a compacting run** (Reflector
+   owns facts there) and when there is no user-authored content — so amplification is
+   ~1.05–1.2× on real workloads, not 2× (§5.3).
+2. ~~**Scope of injected facts.**~~ **Decided:** project + resource (mirror
+   reflections); thread facts overlap the live window + observations.
+3. ~~**`max_facts_injected` prior.**~~ **Decided:** internal prior 16, overridable;
+   the token budget is the real bound.
+4. **Salience filter (open).** Extract *all* atomic facts (mem0 style) vs. only
    high-importance/preference-like facts? Over-extraction pollutes the block (the
    `lukin-personal` debug-noise pollution observed in production is the cautionary
-   case). Proposed: rely on the `facts_model` prompt to emit `importance`, and let
-   the score-ranked top-K + decay keep low-value facts out of the prompt.
+   case). Current: rely on the `facts_model` prompt ("durable facts the USER stated")
+   + score-ranked top-K. Revisit if the block gets noisy.
+
+**Deferred follow-ups (not in this PR):**
+
+- **Persistent fact-scan watermark** on `memory_threads` — tightens re-extraction on
+  long *active* threads beyond the dedup + uncovered-tail bound (§5.3).
+- **Fact reinforcement** — extend `bumpReferences` to accept fact ids so injected
+  facts reset their recency (facts are long-tier + supersede-managed, so this is less
+  load-bearing than observation reinforcement).
+- **`facts_injected` in `DecisionRecord.memory`** — surface the count in the admin
+  Debug UI (currently only in the inject module's metadata).
+- **P8 hybrid retrieval** — when fact volume outgrows scope+score selection.

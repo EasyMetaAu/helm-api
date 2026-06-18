@@ -1,5 +1,5 @@
-import type { MemoryFactInput } from "@helm/shared";
 import { createHash } from "node:crypto";
+import type { MemoryFactInput } from "@helm/shared";
 
 // docs/12 P6 — the DETERMINISTIC pure helpers behind fact extraction +
 // dedup/supersede. These are leaf functions (no LLM, no network, no clock read),
