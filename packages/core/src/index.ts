@@ -225,6 +225,8 @@ export {
 // Memory forgetting — deterministic fact dedup/supersede helpers (docs/12 P6). Pure
 // leaf: subject_key normalization + sha256 content_hash for idempotent ingest.
 export {
+  buildReconciledFactBatch,
+  type FactBatchCandidate,
   factContentHash,
   normalizeFactText,
   normalizeSubjectKey,
@@ -755,6 +757,9 @@ export type {
   SignalStore,
   TelemetryStore,
 } from "./store/ports.js";
+// docs/13 — thrown by MemoryStore.updateFact on a content_hash collision (value
+// export: it's a class the admin/MCP routes catch to return 409, not just a type).
+export { MemoryFactContentHashConflictError } from "./store/ports.js";
 export {
   buildDecisionRecord,
   type ClassifierOutput,

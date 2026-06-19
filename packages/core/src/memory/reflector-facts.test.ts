@@ -64,6 +64,7 @@ function makeFactStore(observations: Observation[], initial: Reflection | null =
     claimPendingJobs: vi.fn(async () => []),
     insertFactsReconciled: vi.fn(async (input) => {
       factCalls.push(input);
+      return { insertedIds: [], supersededIds: [] };
     }),
   };
   return { store, upserts, factCalls };

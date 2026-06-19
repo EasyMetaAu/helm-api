@@ -3,6 +3,7 @@ import type {
   ExecutionResult,
   KeyStore,
   Lane,
+  MemoryStore,
   OAuthQuotaStore,
   OAuthUsageStore,
   PoliciesConfig,
@@ -309,6 +310,11 @@ export interface AdminApiDeps {
   // Automatic data cleanup / retention / archival (admin "Data cleanup"). Optional —
   // absent in unit tests; the cleanup routes 503 when not wired.
   cleanup?: CleanupAccess;
+  // Memory management surface (docs/13). The admin "Memory" page reads/edits/
+  // deletes facts + reflections through this. Optional so existing partial test
+  // deps stay valid; the /admin/api/memory/* routes 503 when it is absent or when
+  // the adapter lacks the management methods. Wired to store.memory in server.ts.
+  memoryStore?: MemoryStore;
   // Admin "Retry" replay surface. Optional — absent in unit tests; the route 503s.
   replay?: ReplayWiring;
   // Admin OAuth-login seam (issue #38). Optional so existing tests that build a
@@ -343,6 +349,10 @@ export interface AdminApiDeps {
   genKeyId: () => string;
   // The account a newly-created admin key belongs to (MVP: single account).
   accountId: string;
+  // Token estimator (chars/4) the memory admin route uses to recompute a
+  // reflection's token_estimate on an in-place text edit (docs/13). Optional: the
+  // route falls back to the same heuristic when absent. Wired in server.ts.
+  estimateTokens?: (text: string) => number;
   // Runtime-mutable settings access (admin "System Settings"). Read/write seam
   // wired in server.ts; the route validates the body before save (fail-closed).
   settings: SettingsAccess;

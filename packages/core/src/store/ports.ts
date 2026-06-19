@@ -3,10 +3,13 @@ import type {
   DecisionRecord,
   Fact,
   MemoryFactInput,
+  MemoryFactPatch,
   MemoryJobEnqueueInput,
   MemoryJobRow,
   MemoryMessageInput,
   MemoryObservationInput,
+  MemoryScopeSummary,
+  MemoryStatus,
   MemoryThreadInput,
   OAuthQuotaSnapshot,
   OAuthUsageRow,
@@ -488,6 +491,14 @@ export interface SignalStore {
 // Read/inject/compress methods are added by the observe/inject tasks. Memory is
 // a MIDDLEWARE — these methods never touch routing/lane state. Input types come
 // from @helm/shared via z.infer (single source of truth).
+// docs/13 — what insertFactsReconciled returns: the ids freshly inserted this
+// batch + the older same-subject rows it superseded (stamped expired). The MCP
+// `memory_add` tool echoes these so an agent learns the new fact's id.
+export interface MemoryFactReconcileResult {
+  insertedIds: string[];
+  supersededIds: string[];
+}
+
 export interface MemoryStore {
   // Idempotent upsert of a thread; safe to call on every observed request.
   ensureThread(input: MemoryThreadInput): Promise<void>;
@@ -694,12 +705,15 @@ export interface MemoryStore {
   // adapter allows (sqlite synchronous txn; pg statement-by-statement). OPTIONAL
   // (`?`): additive + gated behind forgetting.enabled — pre-phase fixtures stay
   // valid; the Reflector null-checks before calling.
+  // Returns the ids inserted + superseded this batch (docs/13 — so the MCP
+  // `memory_add` tool can echo the created fact). Additive: pre-docs/13 callers
+  // (the Reflector) ignore the return; a deduped (skipped) fact contributes no id.
   insertFactsReconciled?(input: {
     accountId: string;
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
-  }): Promise<void>;
+  }): Promise<MemoryFactReconcileResult>;
   // docs/12 "Supersede within long" — the fact READ half. Return the account's
   // facts that are still alive: owner_id = accountId AND status='active' AND
   // expired_at IS NULL (the single predicate that makes superseded/archived facts
@@ -790,6 +804,117 @@ export interface MemoryStore {
   }): Promise<
     Array<{ accountId: string; threadId: string; projectId?: string; resourceId?: string }>
   >;
+
+  // ===========================================================================
+  // docs/13 — Memory ADMIN + MCP management surface. The forgetting tier (P3–P7)
+  // added the MACHINE-driven fact/reflection lifecycle (insert/supersede/decay);
+  // these add the OPERATOR/agent-driven half: read-by-id, paginated list with an
+  // EXPLICIT status filter, in-place edit, and soft-delete — for facts AND
+  // reflections. All OPTIONAL (`?`): additive, so every existing MemoryStore fake
+  // stays valid; the admin/MCP routes null-check and 503 when an adapter lacks them.
+  //
+  // CRITICAL (docs/13): unlike listActiveFacts (the inject read, which HARD-filters
+  // status='active' AND expired_at IS NULL), these are MANAGEMENT reads — an
+  // operator must SEE superseded/archived/pruned rows to manage them, so the
+  // `status` filter is explicit ('all' imposes no visibility predicate). owner_id =
+  // accountId stays the non-negotiable tenant guard on EVERY method (defence in
+  // depth even for id-addressed reads: a guessed cross-tenant id returns null).
+  // ===========================================================================
+
+  // Enumerate the distinct (account, project, resource, thread) groups that hold
+  // live facts and/or an ACTIVE reflection, with per-tier counts + the newest
+  // updatedAt across both tiers (the admin "By Scope" view). accountId narrows the
+  // scan to one tenant; omitted, it spans the store (single-account admin). facts ⊎
+  // reflections via a UNION of grouped subqueries (SQLite has no FULL OUTER JOIN);
+  // reflections are guarded owner_id IS NOT NULL (nullable column — legacy/global
+  // rows must never surface under an account).
+  listMemoryScopes?(input: { accountId?: string }): Promise<MemoryScopeSummary[]>;
+
+  // Read ONE fact by id, account-guarded (cross-tenant id → null). Any status.
+  getFactById?(input: { accountId: string; id: string }): Promise<Fact | null>;
+
+  // Paginated fact list for an in-account scope. `status` selects visibility: a
+  // specific status filters to it; 'all' imposes no status/expired predicate so
+  // superseded rows are visible. `search` is a case-insensitive LIKE over
+  // fact_text; `subjectKey` an exact filter. Returns the page rows + the total
+  // matching count (for the pager). Ordered updated_at DESC (admin recency).
+  listFacts?(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    status?: MemoryStatus | "all";
+    subjectKey?: string;
+    search?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: Fact[]; total: number }>;
+
+  // Edit a fact in place (partial; docs/13). Editing factText RECOMPUTES
+  // content_hash (the pure helper, identical to ingest) but NEVER subjectKey (the
+  // supersede identity). A recomputed hash colliding with a DIFFERENT row's
+  // (owner_id, content_hash) throws MemoryFactContentHashConflictError (route →
+  // 409) — never a leaked UNIQUE 500. invalidAt is tri-state (absent=leave,
+  // null=clear, date=set). Stamps updated_at; never touches valid_from. Unknown /
+  // cross-tenant id → null.
+  updateFact?(input: {
+    accountId: string;
+    id: string;
+    patch: MemoryFactPatch;
+    now: Date;
+  }): Promise<Fact | null>;
+
+  // Soft-delete a fact: status='pruned' + stamp expired_at (so it leaves every
+  // active read). NEVER a hard DELETE (retention owns that). The (owner_id,
+  // content_hash) tombstone stays, so re-adding identical text dedups against it
+  // (reword to re-add — docs/13). false for unknown/cross-tenant/already-pruned.
+  deleteFact?(input: { accountId: string; id: string; now: Date }): Promise<boolean>;
+
+  // Paginated reflection list for an in-account scope. Default = the latest ACTIVE
+  // version per (account,project,resource,thread) group (one row per scope);
+  // includeAllVersions returns every version row. `status` selects visibility.
+  // owner_id = accountId AND owner_id IS NOT NULL throughout. Ordered updated_at DESC.
+  listReflections?(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    status?: "active" | "archived" | "all";
+    includeAllVersions?: boolean;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: Reflection[]; total: number }>;
+
+  // Read ONE reflection by id, account-guarded. Any status (management read).
+  getReflectionById?(input: { accountId: string; id: string }): Promise<Reflection | null>;
+
+  // Edit a reflection's text IN PLACE (operator correction; docs/13). Does NOT
+  // bump `version` (that stays the Reflector's machine-merge counter); the caller
+  // supplies the recomputed tokenEstimate (same chars/4 estimator the gateway
+  // wires); stamps updated_at. Unknown / cross-tenant id → null.
+  updateReflectionText?(input: {
+    accountId: string;
+    id: string;
+    reflectionText: string;
+    tokenEstimate: number;
+    now: Date;
+  }): Promise<Reflection | null>;
+
+  // Soft-delete a reflection: status='archived' (so getReflection(scope) returns
+  // null and it stops being injected). Never a hard DELETE. false for
+  // unknown/cross-tenant/already-archived.
+  deleteReflection?(input: { accountId: string; id: string }): Promise<boolean>;
+}
+
+// docs/13 — thrown by updateFact when an edited fact_text's recomputed
+// content_hash collides with a DIFFERENT existing row's (owner_id, content_hash).
+// The admin/MCP route maps it to 409 (never a leaked 500 from a raw UNIQUE
+// violation). Carries the conflicting id for the caller's message.
+export class MemoryFactContentHashConflictError extends Error {
+  constructor(readonly conflictingId: string) {
+    super(`a fact with identical text already exists for this account (id=${conflictingId})`);
+    this.name = "MemoryFactContentHashConflictError";
+  }
 }
 
 // Optional config persistence (MVP is yaml-first; reserved for admin write-back).
