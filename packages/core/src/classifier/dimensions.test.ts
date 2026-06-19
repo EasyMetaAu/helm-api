@@ -1,6 +1,7 @@
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
 import { ClassifierRulesConfigSchema } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
+import { wrapMemoryReminder } from "../memory/inject-bridge.js";
 import { scoreDimensions } from "./dimensions.js";
 
 // A minimal but representative classifier rules config mirroring config/classifier
@@ -163,6 +164,122 @@ describe("scoreDimensions", () => {
     const res = scoreDimensions(makeReq("see https://x.com and prove the theorem"), partial);
     expect(res.hits.find((h) => h.dimension === "has_url")).toBeUndefined();
     expect(res.hits.find((h) => h.dimension === "reasoning_kw")).toBeDefined();
+  });
+});
+
+// CURRENT-TURN SCOPING: the TEXT-derived dimensions (keyword dims + content-type
+// structural signals + msg_length) must read ONLY the last user message, not the
+// concatenated history. A constant system/developer prompt describes an agent's
+// standing capabilities, not THIS request's complexity — scoring it pushed a
+// trivial chat over the `complex` boundary (prod 5ee4bf79: a 7599-char Mimi prompt
+// inflated complexity → premium lane). The AMBIENT request-shape dimensions
+// (turn_count / tool_count / has_tools / has_attachment / has_json_format) stay
+// full-request — they measure shape, not intent, and are immune to prompt text.
+// Mirrors taskdetect.ts + the engine §5.5 language guard.
+describe("scoreDimensions scopes text-derived dimensions to the current user turn", () => {
+  const bigSystemPrompt = [
+    "You are Mimi. You can run shell commands and edit files; check git state.",
+    "Team: architecture / Builder (实现 + 自测). Heavy TDD: refactor, fix the stack trace.",
+    "```ts\nfunction add(a: number, b: number) { return a + b; }\n```",
+    "See src/app/main.ts for the entrypoint.",
+  ].join("\n");
+
+  it("ignores coding keywords + code block in an earlier developer message", () => {
+    const cfg = makeConfig();
+    const req: ReqInput = {
+      messages: [
+        { role: "developer", content: bigSystemPrompt },
+        { role: "assistant", content: "我是 Mimi，已上线 🐱" },
+        { role: "user", content: "我喜欢的数字是多少？" },
+      ],
+      tools: null,
+      response_format: null,
+      attachments: null,
+      max_tokens: null,
+    };
+    const res = scoreDimensions(req, cfg);
+    expect(res.hits.find((h) => h.dimension === "coding_kw")).toBeUndefined();
+    expect(res.hits.find((h) => h.dimension === "has_code_block")).toBeUndefined();
+    expect(res.hits.find((h) => h.dimension === "has_file_path")).toBeUndefined();
+    // Nothing in the last user turn crosses the shipped `complex` boundary (0.30).
+    expect(res.rawScore).toBeLessThan(0.3);
+  });
+
+  it("msg_length reflects the last user message, not the whole concatenated history", () => {
+    const cfg = makeConfig();
+    const longPrior = "x".repeat(4000);
+    const req: ReqInput = {
+      messages: [
+        { role: "developer", content: longPrior },
+        { role: "user", content: "ok" },
+      ],
+      tools: null,
+      response_format: null,
+      attachments: null,
+      max_tokens: null,
+    };
+    const res = scoreDimensions(req, cfg);
+    const msgLen = res.hits.find((h) => h.dimension === "msg_length");
+    // Last user "ok" is tiny → signal ~0, NOT the saturated signal of a 4000-char prior.
+    expect(msgLen?.signal ?? 0).toBeLessThan(0.1);
+  });
+
+  it("still scores a code block in the LAST user message (preservation guard)", () => {
+    const cfg = makeConfig();
+    const req: ReqInput = {
+      messages: [
+        { role: "system", content: "you are a helpful assistant" },
+        { role: "user", content: "```ts\nconst x = computeTheUltimateMeaningOfLife(42);\n```" },
+      ],
+      tools: null,
+      response_format: null,
+      attachments: null,
+      max_tokens: null,
+    };
+    const res = scoreDimensions(req, cfg);
+    expect(res.hits.find((h) => h.dimension === "has_code_block")?.signal).toBe(1);
+  });
+
+  it("scores the real user turn, not a trailing memory <system-reminder> turn", () => {
+    // Memory-inject mode appends the block as a trailing role:"user" reminder.
+    // Complexity must still be scored on the genuine coding request before it.
+    const cfg = makeConfig();
+    const req: ReqInput = {
+      messages: [
+        { role: "user", content: "refactor this function and fix the stack trace" },
+        { role: "user", content: wrapMemoryReminder("Known facts:\n- likes 42") },
+      ],
+      tools: null,
+      response_format: null,
+      attachments: null,
+      max_tokens: null,
+    };
+    const res = scoreDimensions(req, cfg);
+    expect(res.hits.find((h) => h.dimension === "coding_kw")).toBeDefined();
+  });
+
+  it("keeps AMBIENT shape dimensions (turn_count / tool_count) on the FULL request", () => {
+    const cfg = makeConfig({
+      turn_count: { weight: 0.08 },
+      tool_count: { weight: 0.1 },
+    });
+    const req: ReqInput = {
+      messages: [
+        { role: "developer", content: bigSystemPrompt },
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi" },
+        { role: "user", content: "ok" },
+      ],
+      tools: [{ function: { name: "read" } }, { function: { name: "bash" } }],
+      response_format: null,
+      attachments: null,
+      max_tokens: null,
+    };
+    const res = scoreDimensions(req, cfg);
+    // 4 messages → normalize(4, 12) = 0.333, NOT normalize(1, 12) ≈ 0.083.
+    expect(res.hits.find((h) => h.dimension === "turn_count")?.signal).toBeCloseTo(4 / 12, 10);
+    // 2 tools → normalize(2, 8) = 0.25 (tools are request-wide, never scoped).
+    expect(res.hits.find((h) => h.dimension === "tool_count")?.signal).toBeCloseTo(2 / 8, 10);
   });
 });
 

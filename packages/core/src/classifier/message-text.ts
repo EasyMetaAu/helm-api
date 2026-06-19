@@ -11,18 +11,37 @@ import type { InternalRequest } from "@helm/shared";
 // agent. Scoring the concatenated history lets a large system prompt's incidental
 // words ("实现", "git state", "人类") dominate a trivial question. taskdetect.ts and
 // engine.ts's language guard both rely on this scoping (see engine.ts §5.5).
+//
+// INJECTED-REMINDER SKIP: in memory-inject mode the bridge APPENDS its memory block
+// as a trailing role:"user" turn wrapped in <system-reminder>…</system-reminder>
+// (memory/inject-bridge.ts wrapMemoryReminder), and the gateway classifies the
+// post-injection messages. By the bridge's own contract that turn is "injected
+// operator context, not the user speaking" — so we skip it and read the real last
+// user turn. Skipping here fixes task + complexity + momentum + the language guard
+// in one place, and keeps the eval cache key stable (the memory block is
+// window-variable, so keying on it would tank the hit rate). The marker literal is
+// duplicated from inject-bridge intentionally (classifier must not import memory);
+// message-text.test.ts pins them together via the real wrapMemoryReminder.
 
 type Messages = InternalRequest["messages"];
 
-// Last role==="user" message object, scanning backwards from the end. null when
-// there is no user message. Robust to the MVP's open message shape (role is a free
-// string; "system"/"developer"/"assistant"/"tool" are skipped).
+// Last role==="user" message object, scanning backwards from the end, SKIPPING
+// injected <system-reminder> turns (see header). null when there is no real user
+// message. Robust to the MVP's open message shape (role is a free string;
+// "system"/"developer"/"assistant"/"tool" are skipped).
 export function lastUserMessage(messages: Messages): Messages[number] | null {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
-    if (msg && msg.role === "user") return msg;
+    if (msg && msg.role === "user" && !isInjectedReminder(msg.content)) return msg;
   }
   return null;
+}
+
+// True when a user turn's content is a memory-injected <system-reminder> envelope
+// (inject-bridge.wrapMemoryReminder). Reads the flattened text so an array-shaped
+// content part is handled too.
+function isInjectedReminder(content: unknown): boolean {
+  return contentToString(content).trimStart().startsWith("<system-reminder>");
 }
 
 // Last user message content flattened to a string (NOT trimmed; callers trim if

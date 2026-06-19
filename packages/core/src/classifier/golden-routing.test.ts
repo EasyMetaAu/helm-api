@@ -580,3 +580,38 @@ describe("GOLDEN classify+route baseline (characterizes current behavior)", () =
     });
   }
 });
+
+// CURRENT-TURN SCOPING regression (prod 5ee4bf79): a trivial chat under a large
+// agent system/developer prompt must NOT inherit the prompt's coding/complexity
+// signal. Before scoping, the 7599-char persona prompt drove task→coding AND
+// tier→complex → the premium/coding lane for "我喜欢的数字是多少？". The full
+// classify+route decision must now land a cheap chat lane, never premium/coding.
+describe("GOLDEN: system-prompt-heavy trivial chat routes cheap, not premium", () => {
+  const personaPrompt = [
+    "你是 Mimi，一个 AI 员工。你的工作目录用于 shell / 文件操作；可 check files, git state。",
+    "团队：架构（技术方案+守门）/ Builder（实现+自测）。重 TDD（先写失败测试再实现）。",
+    "function add(a, b) { return a + b }  // 重构、调试、修复 stack trace、补单元测试、对齐接口。",
+    "公司红线：默认禁止，越线需人类显式授权；不泄露同事（人类和 Bot）隐私。",
+  ].join("\n");
+
+  it("Mimi persona + tools + trivial ZH question -> chat, not complex, not premium/coding", async () => {
+    const request = req("我喜欢的数字是多少？", {
+      messages: [
+        { role: "developer", content: personaPrompt },
+        { role: "assistant", content: "我是 Mimi，参谋长猫已上线 🐱" },
+        { role: "user", content: "我喜欢的数字是多少？" },
+      ],
+      tools: [
+        { function: { name: "read" } },
+        { function: { name: "bash" } },
+        { function: { name: "edit" } },
+        { function: { name: "write" } },
+      ],
+    });
+    const got = await decide(request);
+    expect(got.task_type).toBe("chat");
+    expect(got.complexity).not.toBe("complex");
+    expect(got.selected_lane).not.toBe("premium");
+    expect(got.selected_lane).not.toBe("coding");
+  });
+});

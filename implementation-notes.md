@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-19 · Layer-1 复杂度(tier)评分限定当前 user 轮（docs/03 §Layer-1；原则 4/6）
+
+- **背景**：承接同日 task 检测修复（PR #313）的**孪生 bug**。`dimensions.ts` 的复杂度评分仍用 `extractText(req.messages)` 拼接全部消息，巨型系统提示同样污染 `complexity`。线上 `5ee4bf79` 经 #313 后 task=chat，但 complexity 仍 `complex`（系统提示 `coding_intl_kw`/`实现` + 全文 `msg_length` 把 rawScore 顶过 0.30，实测 ≈0.335）→ 命中 `chat_complex_to_premium` → **仍烧 premium(Opus)**。task 修复挡住"误判 coding"，tier 修复才挡住"闲聊烧 premium"。
+- **实现（用户拍板）**：`dimensions.ts::buildContext` 把全部**文本派生维度**（关键词 `*_kw` + 内容型结构信号 `has_code_block/url/stack/file_path/math/table` + **`msg_length`**）改用 `lastUserMessageText`（复用 #313 的 `message-text.ts`）限定到末条 user；**ambient 请求形态维度**（`turn_count`/`tool_count`/`has_tools`/`has_attachment`/`has_json_format`）保持全请求（度量形状非意图，不受系统提示文字污染）。删 `dimensions.ts` 本地 `extractText`/`collectStrings`。真实多轮体量仍由 `turn_count` 表达。
+- **关键纠正（推翻上一条 entry 的过度谨慎）**：标定/golden 语料 **100% 单条 user 消息**，对单条消息"限定末条 user ≡ 拼全部"，故本改动**对整个标定集行为逐字不变** → **无需重跑标定**，`classifier.yaml` 一字未改。`calibrate-classifier.ts` 诊断 50/50 lanes、0 fallback（与 main 同）。上一条 entry 把它标成"calibration-gated 需重跑标定"是高估了风险。
+- **取舍/坑**：`msg_length` 归入"限定末条 user"而非保留全文——系统提示长度不代表用户请求复杂度，保留全文会给同类污染留 +0.16 小后门。语言守卫 `engine.ts:209` 的单消息再评分变得略冗余但仍正确，未动。`overrides.ts` 仍存最后一份 `lastUserMessageText`/`contentToString` 重复（纯 DRY，非本 bug，留作单独清理）。
+- **Codex review 修复（同时修好已合并的 #313）**：限定末条 user 后暴露一个交互——memory-inject 模式下 `inject-bridge.appendMemoryReminder` 把记忆块作为**末尾 `role:"user"` 的 `<system-reminder>` 轮**追加，而 `chat.ts:671`/`messages-pipeline.ts:713` 把 `internal.messages` 改写为注入后数组再分类，于是 `lastUserMessage` 选中的是**记忆提示而非真实 prompt** → 真·coding/analysis 请求在开记忆时会被当 chat 误判（box memory inject 已开，部署后必现）。按 bridge 自身契约（该轮是"注入的 operator 上下文，非用户发言"）在共享 `message-text.ts::lastUserMessage` **跳过以 `<system-reminder>` 开头的 user 轮**——一处修好 task+tier+momentum+语言守卫+eval cache key（且让 cache key 不再被 window-variable 的记忆块打散）。marker 字面量与 memory 解耦（classifier 不 import memory），靠 `message-text.test.ts` 用真 `wrapMemoryReminder` 锁防漂移。
+- **验证**：TDD 红→绿，dimensions.test.ts 5 用例 + taskdetect/message-text 注入跳过用例（新增 `message-text.test.ts`）+ golden-routing Mimi e2e。**真实正文** `/tmp/req_5ee4.json`：纯净→ task=chat、`complex`→`simple`(economy)；**追加注入提示**后仍 task=chat（读真 prompt 非提示）。classifier 全套+samples **280** 绿（config 未改）、typecheck(4)/lint(480) 清。分支 `fix-classifier-tier-scope-last-user`（PR #315），未部署。
+
 ## 2026-06-19 · Layer-1 task 检测限定当前 user 轮（docs/03 §Layer-1；原则 4/6）
 
 - **背景**：线上请求 `5ee4bf79-...`（AgentCrew/Mimi，`/v1/responses`，model=auto）末条 user 只有 `"我喜欢的数字是多少？"`（在测记忆），却被第一层**纯规则**判成 `coding`/`complex`（confidence 0.979，`decided_by=rules`，未走 eval）→ 命中 `coding_complex_to_coding_lane` → 路由到 coding lane（gpt-5.5）。SQLite 实证：`request_payloads.request_json` 的 `input[]` 含一条 **7599 字符的 developer 系统提示**（Mimi persona）。
@@ -22,19 +31,13 @@
 - **取舍/坑/偏离 spec**：①持久 fact-scan **watermark 推迟**——靠 content_hash 去重幂等 + uncovered-tail + 压缩阀把短对话重抽限制在 ~1–2 次/生命周期；②压缩那一跑**跳过** eager（reflector 负责该路事实），而非 spec 原提的"并进 summarize 一次调用"，避免双抽且不动 summarize 签名；③**fact reinforcement 推迟**（`bumpReferences` 未扩展 fact id）；④`facts_injected` 暂只在 inject 模块 metadata，未进 DecisionRecord schema。成本：每条独立 nano 调用仅发生在"短到不压缩 + 有新 user 内容"，实测放大 ~1.05–1.2×、成本个位数 %。全程 fail-open，off 时与现状逐字一致。**无迁移、无 schema 改动**。
 - **验证**：TDD 红→绿，5 slice 各自单测（config 22 / memory-llm 16 / observer 19+scheduler / inject 27），全量 **3989** 绿、typecheck（3 项目）/ lint(478) 绿。分支 `docs/salient-fact-memory-proposal`（PR #312，spec + 实现同 PR）。默认 off，box 已开 llm+forgetting，置 `eager_facts:true` 即可启用（operator-owned config，部署 pull+up -d 不覆盖）。
 
-## 2026-06-18 · Codex 原生直通缺失 instructions 修复（issue #217；docs/05；原则 1/4/8）
-
-- **背景**：线上请求 `09387e28-...`（pi-coding-agent / AgentCrew，经 `@earendil-works/pi-ai`）由 `/v1/responses` 入站，lane=coding 首选 `openai-codex/gpt-5.5`，`passthrough_used=true` 把正文逐字转发给 ChatGPT 订阅版 Codex 后端 → HTTP 400 `{"detail":"Instructions are required"}`，fail-open 回退 `claude-opus-4-8` 成功。SQLite 实证：入站正文 `input` 为数组、无 `messages`、**无顶层 `instructions`**，系统提示词其实是 `input[0]={role:"developer",content:"You are Mimi..."}`（pi-ai 设计：reasoning 模型用 developer、否则 system，塞进 input，故意不发 instructions——对真·OpenAI Responses 合法，但 Codex 订阅后端强制要 instructions）。
-- **根因**：两路不对称。翻译路 `buildInstructions` 无 system 时回退 `DEFAULT_INSTRUCTIONS`，永不空；**直通路逐字转发，无兜底**。`execute.ts` 的 compat-rewrite guard 只覆盖 `map_developer_role_to_system` 与 Anthropic system-fold，没有 Codex/responses 的 instructions guard。
-- **实现**：core 新增纯函数 `hoistResponsesInstructions(body)`（`openai-responses.ts`，复用 `plainText`/`DEFAULT_INSTRUCTIONS`，从 core index 导出）：已有非空 instructions → 原样返回（verbatim）；否则把 `input` 里 `system`/`developer` 项内容 hoist 进顶层 `instructions` 并从 `input` 摘除（与翻译路 buildInstructions/toResponsesInput 同义）；无 system 内容则注入 `DEFAULT_INSTRUCTIONS`。在 `execute.ts` `prepareNativeRequestForUpstream` 的 `needsCodexResponsesShim` 块（仅 `codex_responses` profile，generic responses 不触发）调用，记 `body_shims_applied` 的 `instructions_hoisted_from_input` / `instructions_defaulted`。**保留 passthrough**（prompt_cache_key / reasoning 加密内容 / SSE 字节转发不丢），优于强制走翻译路方案。
-- **取舍/坑**：选 hoist 而非"注入通用默认"——真实系统提示在 input 里，注入 "You are a helpful assistant." 会冗余/误导；hoist 还原真 Codex CLI 形状（instructions=系统提示、input=纯对话）。`appendMutationList` 对 `body_shims_applied` 会去重+排序，故 ledger 顺序是字母序（`instructions_*` 排在 `store_forced_false` 前）。客户端 pi-ai 是第三方 node_modules、未暴露 instructions 配置，改不动，且 helm 本职就是后端兼容（原则 6），故修在网关侧。
-- **验证**：core 8 个 hoist 单测 + gateway 2 个 execute 直通测试（hoist developer 形状、已有 instructions 保持 verbatim）+ 更新既有 store-shim 测试断言（现含 `instructions_defaulted`）。typecheck（3 项目）/ lint(478) / core+gateway 全量 **3264** 绿。分支 `fix-codex-passthrough-instructions-hoist`，未提交/未部署。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-18 · Codex 原生直通缺失 instructions 修复（issue #217；docs/05；原则 1/4/8）：线上 `09387e28` pi-ai `/v1/responses` 直通 ChatGPT 订阅 Codex 后端 400 `Instructions are required`（入站 `input[]` 无顶层 `instructions`，系统提示在 `input[0]={role:developer}`，pi-ai 故意不发）。core 新增纯函数 `hoistResponsesInstructions`（已有非空 instructions 原样返回；否则把 input 里 system/developer hoist 进顶层 instructions 并摘除；无 system 则注入 `DEFAULT_INSTRUCTIONS`），在 `execute.ts` `needsCodexResponsesShim`（仅 codex_responses profile）调用，记 `instructions_hoisted_from_input`/`instructions_defaulted`，**保留 passthrough**。坑：`body_shims_applied` 去重+排序故 ledger 字母序。core 8 + gateway 2 测、全量 3264 绿，未部署。
 
 ### 2026-06-18 · Anthropic OAuth TLS/JA3 transport spike（docs/05/10；原则 2/7/8）：新增 provider 配置 `transport_profile: auto|default|tls_chrome`（Zod fail-closed）；`auto` 下 Anthropic preset OAuth 默认 `tls_chrome`、其他 `default`，显式 `tls_chrome` 仅限 Anthropic preset OAuth 否则 fail-closed。最终 provider execution 经 `makeTlsImpersonationFetch()` lazy-load optional `wreq-js`（标准 fetch seam，`disableDefaultHeaders:true`、streaming `timeout:0`、per-request ephemeral cookie），OAuth refresh/discovery 仍走 undici；wreq 连接错误归一到 ECONNRESET/ECONNREFUSED 命中既有 retry。坑/TODO：native 包/Docker platform、streaming 行为、proxy 矩阵、TLS spoof 是否真改善 401/403；optional 包缺失则 fail-closed 抛 `TlsTransportUnavailableError`，需 `transport_profile: default` 回退；价值待同账号同 request A/B live smoke。未部署。
 
