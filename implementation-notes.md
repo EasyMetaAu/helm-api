@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-19 · 设置页清理动作确认弹窗 + 五卡布局重组（admin「System Settings」；原则 1）
+
+- **背景/需求**：上一条「自动数据清理」落地的「Clean now / Compact database」两个运行时按钮**单击即执行**（删除/归档数据、VACUUM 锁库），无任何确认；且 settings 页「Operations」卡是杂物抽屉（速率限制 + 日志级别 + 默认 lane 三不相干揉一起）。用户要：两动作加确认弹窗（git worktree 实现）+ 重排各模块布局。
+- **实现（单文件 `apps/admin/src/routes/settings/+page.svelte` + 5 locale，复用既有模式）**：① 复用全站统一的 `Modal` 确认模式（keys 撤销/删除、providers 断连、memory 删除同款）：加 `confirmingClean/confirmingVacuum` $state，触发按钮改为**置位 flag**（不再直呼 handler），真正执行从弹窗确认按钮发起，`handleCleanNow/handleVacuum` 在 finally 清 flag，弹窗 `dismissible={!cleaning}`/`{!vacuuming}` 在执行中不可关；保留 `data-testid`（cleanup-run-now/cleanup-vacuum）故 e2e 不破。② **五卡重组**（用户从 3 选项选「5 focused cards」）：解散「Operations」→ Routing（默认 lane）/ Rate limiting（开关+RPM/TPM）/ Request queueing（原样）/ Logging（日志级别 + 正文捕获+保留）/ Data retention & cleanup（原 Data cleanup 卡 + 确认触发，标题改名）；按请求生命周期 routing→限流→日志→数据 自上而下排序。**所有 binding/testid/min-max/help 文案逐字不变**，仅换所属卡与标题。
+- **取舍/坑**：① 两弹窗都用 `text-amber-800` 警示体（删数据/锁库都需「确认」语气），但用 `btn-primary` 非 `btn-danger`（归档优先、非高危删除）。② 错误仍渲染在 Data 卡内（`cleanupError`）、弹窗执行完即关（故 finally 关弹窗而非「成功才关」，否则错误被弹窗挡住）。③ i18n：7 新 key（Routing 复用既有；Rate limiting/Logging/Data retention & cleanup/Run cleanup now?/Compact database now?/2 段弹窗正文）经 `i18n:sync` 中继译入全 5 locale，zh 意译核对（立即压缩数据库？/数据保留与清理/日志记录/速率限制）。**坑**：`i18n:extract` 首跑赶在文件落盘前 → 0 新 key、git 无变更；重跑即正常（679 串、7 新）。
+- **验证**：svelte-check 0/0、biome lint 清、typecheck（shared/core/gateway 3 项目）清；既有 settings e2e（admin.spec.ts:182，按 testid + Save 角色选择）绿=无回归；**手测 Playwright**（真网关 + 构建后 SPA）：5 卡顺序正确、Clean now→弹窗（不执行）、Cancel→不跑、Confirm→真跑（「Last run … manual ok」报告出现 + 弹窗自闭）。分支 `worktree-settings-confirm-and-layout`，未提交/未部署。
+
 ## 2026-06-19 · 记忆管理后台页 + Memory MCP server（docs/13；原则 1/2/7）
 
 - **背景/需求**：记忆子系统（facts + reflections 长层）只能由网关后台抽取写入，运营者**无法查看/编辑/删除**，外部 agent 也**无程序化读写**。新增两面：admin `/memory` 页（**By Key + By Scope** 两视图管理 facts+reflections）+ `POST /mcp`（API-key 鉴权的 full-CRUD MCP，供 Claude Code/Codex 等 agent 调）。用 git worktree `worktree-memory-admin-mcp` 实现。
@@ -24,25 +31,15 @@
 - **Codex review 修复（同分支，2 项）**：**P1**——旧的请求路 `prunePayloads`（chat.ts/payload-capture.ts，仅按 `payloadRetentionMs`）在 capture 开时仍会删 payload，绕过新归档优先 runner 且无视 `payloads_cleanup_enabled=false`。修法=**彻底移除请求路 prune + `payloadRetentionMs` dep 与全部 wiring**（chat/payload-capture/replay/server.ts 5 处），payload 保留权归调度 runner 独占（archive-first）。**代价**：payload 不再每请求清、改为按调度（默认 24h）+ Clean now；master off 时 payload 永不清（= 用户选择）。**P2**——`buildCleanupPlan` 里 `if(!cleanup_enabled) return []` 让手动 `/cleanup/run` 也变空跑。修法=**plan 不再读 master**（master 只在 scheduler tick 守卫），手动 Clean now 始终按各类 toggle 建计划并执行；per-category 开关才是「清什么」的真相源。测试相应更新（payload-capture「NEVER prune」回归守卫、plan 「忽略 master」断言）。
 - **验证**：TDD 红→绿各 slice 单测（store 合约 sqlite+pg：strict 下界/计数==删除数/keyset 无重不漏/FK 安全；plan 映射 + 忽略 master；**runner 失败 sink⇒该表 prune 永不调用** 不变式；sink gz 往返+sha+disk-full 预检中止；scheduler fail-open/unref/overlap/dispose；cleanup 路由 503/200）。全量 **4037** 绿、typecheck（4 项目）/ lint(493) 清、build 全绿。**手测 e2e**：真实 sqlite + LocalVolumeSink 跑 runCleanupPass→3 条 40 天旧 payload 归档(sha 匹配)+删除、recent 存活、manifest 写出、gunzip 得合法可再摄入 JSONL、config_kv 持久化 last run。分支 `worktree-data-cleanup-archival`，**未提交/未部署**。
 
-## 2026-06-19 · Anthropic 出站工具名规范化（全翻译路径）（issue #303；docs/05；原则 6/7/8）
-
-- **背景**：issue #303 要求所有发往 Claude 的请求 `tools[].name` 合规(charset/长度/非空) + 可逆,响应能还原客户端原名。核实现状=**部分解决**:规范化只在 strict 指纹模式(`applyStrictToolPipeline`)做;非 strict 热路径 `openaiToAnthropicRequest:1228` 逐字发 `fn.name`/`tc.function.name`(`execute.ts:979→chatCompletion`)→静态 key/官方端点的非法字符/点/空格/超长名直达 Claude 致 400 或工具链错位。
-- **实现(复用,不另造)**:复用协议层 `createAnthropicToolNameMap`(charset `[A-Za-z0-9_]`/≤64/`""`→`tool`/FNV-1a 冲突后缀)。新增 `applyAnthropicToolNameSpec(body)` 规范化 `tools[]`/`tool_choice`/历史 `tool_use` 名 + `composeReverseMaps` 串联。在 `request()` 里、strict cloaking **之后**、序列化**之前**、**仅翻译路径**(新 `normalizeToolNames` 标志)跑;`chatCompletion`/`Stream` 传 true,`nativePassthrough`/`Stream` 默认 false(逐字)。组合 map(wire→cloaked/raw→original)经既有 `anthropicToOpenAIResponse`/`translateAnthropicSSE` 还原原名。
-- **取舍/坑(用户拍板)**:规范化在 cloaking **之后**作最终 spec 兜底→对已合规 cloaked 名是**幂等 no-op**,strict golden fixtures 不变(**两路径都兜底**)。在 **CLONE**(`structuredClone`)上改写,原始输入不动→401 重放重建 map 安全(镜像 strict 的 clone 修复)。**native passthrough 逐字**:流式 `readAnthropicSSERaw` byte-faithful 无法回程还原,客户端自负原生合规,加断言测试确认。空名工具被 `openaiToAnthropicRequest`(`if(!fn.name)`)提前丢弃,非法名才是真 bug。
-- **验证**:TDD,`anthropic.test.ts` 6 新用例(非法/空格冲突/超长+响应还原、空名丢弃、tool_choice、流式还原、strict 组合、native 逐字);provider 全套 **493** 绿(strict golden 不变=幂等证明)、typecheck(4)/lint(479)清。分支 `fix-anthropic-tool-name-normalization`(PR #316 `Closes #303`),未部署。box 走 OAuth 订阅=strict 本已覆盖,本次补齐非 strict + native 确认 + 测试 + 文档。
-## 2026-06-19 · 每 API Key 使用量统计：列表 24h 列 + Key 详情页（issue #314；docs/06/07；原则 1/3/7）
-
-- **背景/需求**：`/admin/keys` 每行需展示该 key 用量（默认最近 24h：请求数+费用+token），并新增 `/admin/keys/{id}` 详情页——完整配置 + 可筛选统计（预设区间 + 自定义起止日期）+ 该 key 的请求列表（可下钻单请求详情）。~80% 数据管道已存在（`telemetry.api_key_id` + 反规范化 cost/token 列、`aggregate()` 三段形状、`/admin/api/requests` 分页过滤、RangeFilter/format/LayerChart）。
-- **实现（后端，TDD，sqlite+PGlite 双跑）**：①新增 `TelemetryStore.usageByKey(start,end)`——**单条 `GROUP BY api_key_id`** over 反规范化列（无 N+1、**无 rollup 表**），共享 `shapeTelemetryKeyUsage` 锁方言数值+排序奇偶；②`aggregate()` 加**可选第 5 参 `keyId`**（`and()` 丢弃 undefined 臂，全局路径逐字不变），详情页据此复用 dashboard 聚合；③`RequestsQuerySchema`/`StatsQuerySchema` 加 fail-open `key_id`，`TelemetryPageQuery.apiKeyId` 走**列等值**（非 JSON extract、非子串）；④`GET /admin/api/keys/:id`（复用 `toSummary` 脱敏、`list().find`——KeyStore 无 get-by-id）+ `GET /admin/api/keys/usage`。
-- **实现（前端）**：列表加 "Usage (24h)" 列（fail-soft 到 []，零流量显 —）+ key 名链入详情；详情页 loader——`getKey` **仅 404 返回 null**（真·不存在 →`error(404)`），**其余失败（500/503/网络）照常抛出**、作为真实加载错误冒泡，绝不把后端故障伪装成"key 不存在"（Codex review P2 修复）；stats/requests 各自 fail-soft；新纯函数 `key-detail-filters.ts`（预设 RANGE + 自定义日范围，**自定义优先**；rollover-safe 日期校验拒 `2026-06-31`；end-day **含**=midnight+1d；按跨度选 hour/day bucket）；详情页复用 dashboard 卡片/图表 + 紧凑请求表+分页。
-- **取舍/坑/偏离**：①**Hono 路由顺序**——`/keys/usage` 必须注册在 `/keys/:id` 之前，否则 "usage" 被当 `:id` 捕获（已加路由顺序守卫测试）；②usage 端点窗口解析**复用 `StatsQuerySchema`**（只取 start/end，忽略 bucket/tz/key_id），省一个新 schema；③**cost 全链路保持 nullable**（"未计量"≠ 实测 0）；④`$state(data…)` 触发 svelte state_referenced_locally 警告 → 用 `untrack`（镜像 keys 列表页）；⑤**LayerChart 在 import 时即调 `window.matchMedia`**（jsdom 无），故详情页组件测试必须 `vi.mock('layerchart')`——dashboard 先例是只测 loader 不渲染组件；⑥admin 测试环境 `base=''`，href 断言用 `/keys/:id`；⑦**i18n**：12 个新 key 加到**全部 5 个 locale**（en/zh-hans/zh-hant/ja/ko，意译，术语对齐既有 key——如 Tokens=トークン/토큰、Errors=エラー/오류；Codex review P3 修复）。
-- **验证**：5 分片 TDD 红→绿；全量 **274 文件 / 4028 测试**绿、typecheck(4 项目)/lint(479)/build(gateway+admin static)/admin svelte-check(0/0) 全清。分支 `worktree-feat-key-usage-stats`（git worktree），未提交主干/未部署；e2e(Playwright) 按 CLAUDE.md 本地跑、不在 CI 门禁。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-19 · Anthropic 出站工具名规范化（全翻译路径）（issue #303；docs/05；原则 6/7/8）：非 strict 热路径 `openaiToAnthropicRequest` 逐字发 `fn.name` 致非法/点/空格/超长工具名直达 Claude→400/工具链错位（规范化原仅 strict 指纹模式做）。新增 `applyAnthropicToolNameSpec`（复用 `createAnthropicToolNameMap`：`[A-Za-z0-9_]`/≤64/空→tool/FNV 冲突后缀）+ `composeReverseMaps`，在 `request()` strict cloaking **之后**、序列化**之前**、**仅翻译路径**（`normalizeToolNames` 标志；native passthrough 逐字不改）跑，组合 reverse-map 经既有 translator 还原原名；在 `structuredClone` 上改写保 401 重放安全。anthropic 6 新例（含幂等/native 逐字）+ provider 493 绿。PR #316 `Closes #303`，未部署。
+
+### 2026-06-19 · 每 API Key 使用量统计：列表 24h 列 + Key 详情页（issue #314；docs/06/07；原则 1/3/7）：`/admin/keys` 每行加 24h 用量 + 新 `/admin/keys/{id}` 详情页（配置 + 可筛选统计 + 请求列表下钻）。后端 `TelemetryStore.usageByKey`（单条 `GROUP BY api_key_id`，无 rollup）、`aggregate()` 加可选 keyId、schema fail-open `key_id` 列等值；`GET /admin/api/keys/:id`（**须注册在 `/keys/usage` 之后**防 :id 捕获）+ `/usage`。前端 `getKey` **仅 404→null 其余照抛**（不把后端故障伪装成"不存在"）、`key-detail-filters.ts` 自定义日范围优先且 rollover-safe、LayerChart 组件测试须 `vi.mock`（import 即调 matchMedia）；12 新 key×5 locale。274 文件 4028 测绿。分支 `worktree-feat-key-usage-stats`，未部署。
 
 ### 2026-06-19 · Layer-1 复杂度(tier)评分限定当前 user 轮（PR #315；docs/03 §Layer-1；原则 4/6）：#313 task 修复的孪生 bug——`dimensions.ts` 复杂度评分仍 `extractText` 拼全部消息，巨型系统提示把闲聊抬成 `complex`→`chat_complex_to_premium`→烧 Opus。修：`buildContext` 文本派生维度（`*_kw`+结构信号+`msg_length`）改用 `lastUserMessageText` 限定末条 user，ambient 形态维度（turn/tool/attachment/json）保持全请求；标定语料 100% 单消息故行为逐字不变、无需重跑标定、`classifier.yaml` 未改。Codex review（连带修已合并 #313）：`lastUserMessage` 跳过 `<system-reminder>` 开头的注入 user 轮。dimensions 5 例 + message-text 注入跳过例、classifier+samples 280 绿。PR #315。
 
