@@ -89,6 +89,14 @@
   function gotoPage(page: number): void {
     applyFilters({ ...data.filters, page });
   }
+  // Real href for a page-number link (keeps the active window/range in the URL):
+  // rendering numbers as <a> gives a native pointer cursor + middle-click /
+  // open-in-new-tab; SvelteKit still navigates client-side and
+  // data-sveltekit-noscroll preserves scroll, like the requests list pager.
+  function pageHref(page: number): string {
+    const qs = keyDetailFiltersToSearch({ ...data.filters, page });
+    return qs ? `?${qs}` : '?';
+  }
 
   const customActive = $derived(Boolean(data.filters.startDate && data.filters.endDate));
 
@@ -476,32 +484,57 @@
       </div>
 
       {#if totalPages > 1}
-        <nav class="mt-4 flex items-center justify-center gap-1" aria-label={$t('Pagination')}>
-          <button
-            type="button"
-            class="btn-secondary"
-            disabled={data.filters.page <= 1}
-            onclick={() => gotoPage(data.filters.page - 1)}>{$t('Prev')}</button
-          >
-          {#each pages as p, i (i)}
-            {#if p === 'ellipsis'}
-              <span class="px-2 text-slate-400">…</span>
-            {:else}
-              <button
-                type="button"
-                class={p === data.filters.page ? 'btn-primary' : 'btn-secondary'}
-                aria-current={p === data.filters.page ? 'page' : undefined}
-                onclick={() => gotoPage(p)}>{p}</button
-              >
-            {/if}
-          {/each}
-          <button
-            type="button"
-            class="btn-secondary"
-            disabled={data.filters.page >= totalPages}
-            onclick={() => gotoPage(data.filters.page + 1)}>{$t('Next')}</button
-          >
-        </nav>
+        <!-- Pagination footer — mirrors the requests list pager (numbered <a>
+             links + Prev/Next + "Page X of Y · N requests" status) so the two
+             views read identically. No rows-per-page selector here: the scoped
+             list uses a fixed page size (DETAIL_PAGE_SIZE). Page numbers are real
+             links (native pointer / open-in-new-tab); Prev/Next stay buttons for
+             their disabled states. -->
+        <div
+          class="mt-4 flex flex-col gap-3 text-sm text-ink-muted sm:flex-row sm:items-center sm:justify-between"
+        >
+          <span data-testid="pager-status">
+            {$t('Page {page} of {pages}', { page: data.filters.page, pages: totalPages })} ·
+            {$t('{total} requests', { total: data.requests.total })}
+          </span>
+
+          <nav class="flex items-center gap-1" aria-label={$t('Pagination')}>
+            <button
+              type="button"
+              data-testid="pager-prev"
+              class="btn-secondary"
+              disabled={data.filters.page <= 1}
+              onclick={() => gotoPage(data.filters.page - 1)}>{$t('Previous')}</button
+            >
+            {#each pages as item, i (item === 'ellipsis' ? `e${i}` : item)}
+              {#if item === 'ellipsis'}
+                <span class="px-2 text-ink-muted" aria-hidden="true">…</span>
+              {:else if item === data.filters.page}
+                <span
+                  data-testid="pager-page-current"
+                  aria-current="page"
+                  class="inline-flex h-9 min-w-9 items-center justify-center rounded border border-slate-800 bg-slate-800 px-2 text-sm font-medium text-white"
+                  >{item}</span
+                >
+              {:else}
+                <a
+                  data-testid="pager-page"
+                  data-sveltekit-noscroll
+                  href={pageHref(item)}
+                  class="inline-flex h-9 min-w-9 cursor-pointer items-center justify-center rounded border border-slate-300 px-2 text-sm text-ink-body transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                  >{item}</a
+                >
+              {/if}
+            {/each}
+            <button
+              type="button"
+              data-testid="pager-next"
+              class="btn-secondary"
+              disabled={data.filters.page >= totalPages}
+              onclick={() => gotoPage(data.filters.page + 1)}>{$t('Next')}</button
+            >
+          </nav>
+        </div>
       {/if}
     {/if}
   </section>

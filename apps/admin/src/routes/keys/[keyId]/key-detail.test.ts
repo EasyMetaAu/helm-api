@@ -219,13 +219,38 @@ describe('key detail page', () => {
     expect(screen.queryByRole('link', { name: /manage memory/i })).not.toBeInTheDocument();
   });
 
-  it('shows a pager when the total exceeds one page', () => {
+  it('renders a requests-style pager (numbered links + status) across pages', () => {
     render(KeyDetailPage, {
       data: pageData({
         requests: { items: [requestItem('tr_1')], total: 60, page: 1, pageSize: 25 },
       }),
     });
-    // 60 / 25 → 3 pages: Next button is present.
-    expect(screen.getByRole('button', { name: /next/i })).toBeInTheDocument();
+    // 60 / 25 → 3 pages. Status line mirrors the requests list: "Page X of Y · N requests".
+    const status = screen.getByTestId('pager-status');
+    expect(status.textContent).toMatch(/Page\s*1\s*of\s*3/);
+    expect(status.textContent).toMatch(/60/);
+
+    // Page numbers are real <a> links carrying the page in the querystring (native
+    // pointer / open-in-new-tab), not plain buttons like the old pager.
+    const page2 = screen.getByRole('link', { name: '2' });
+    expect(page2).toHaveAttribute('href', '?page=2');
+
+    // The current page is a marked, non-link cell.
+    const current = screen.getByTestId('pager-page-current');
+    expect(current).toHaveAttribute('aria-current', 'page');
+    expect(current.textContent?.trim()).toBe('1');
+
+    // Prev is disabled on page 1; Next stays available — matching the requests pager.
+    expect(screen.getByTestId('pager-prev')).toBeDisabled();
+    expect(screen.getByTestId('pager-next')).not.toBeDisabled();
+  });
+
+  it('hides the pager when everything fits on one page', () => {
+    render(KeyDetailPage, {
+      data: pageData({
+        requests: { items: [requestItem('tr_1')], total: 1, page: 1, pageSize: 25 },
+      }),
+    });
+    expect(screen.queryByTestId('pager-status')).not.toBeInTheDocument();
   });
 });
