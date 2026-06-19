@@ -161,6 +161,36 @@ describe("memory MCP tools (docs/13)", () => {
     expect((found.facts as unknown[]).length).toBe(0);
   });
 
+  it("memory_add re-adds a DELETED fact by RESURRECTING it (not a silent dedup)", async () => {
+    const { ctxFor } = harness();
+    const ctx = ctxFor("a");
+    const added = parse(
+      await callMemoryTool(
+        "memory_add",
+        { type: "fact", subject: "lang", text: "loves Rust" },
+        ctx,
+      ),
+    );
+    const id = (added.added as string[])[0] as string;
+    await callMemoryTool("memory_delete", { type: "fact", id }, ctx);
+    const gone = parse(await callMemoryTool("memory_search", { type: "fact", query: "rust" }, ctx));
+    expect((gone.facts as unknown[]).length).toBe(0);
+
+    // Re-add the SAME fact text → reactivated in place, reported as resurrected.
+    const re = parse(
+      await callMemoryTool(
+        "memory_add",
+        { type: "fact", subject: "lang", text: "loves Rust" },
+        ctx,
+      ),
+    );
+    expect(re.added).toEqual([]);
+    expect(re.resurrected).toEqual([id]);
+    expect(re.deduped).toBe(false);
+    const back = parse(await callMemoryTool("memory_search", { type: "fact", query: "rust" }, ctx));
+    expect((back.facts as unknown[]).length).toBe(1);
+  });
+
   it("enforces tenant isolation — another account cannot get a fact by id", async () => {
     const { ctxFor } = harness();
     const added = parse(

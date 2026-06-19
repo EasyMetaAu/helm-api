@@ -779,8 +779,8 @@ export class PgMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
-  }): Promise<{ insertedIds: string[]; supersededIds: string[] }> {
-    if (input.facts.length === 0) return { insertedIds: [], supersededIds: [] };
+  }): Promise<{ insertedIds: string[]; supersededIds: string[]; resurrectedIds: string[] }> {
+    if (input.facts.length === 0) return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
     const nowMs = input.now.getTime();
     // docs/12 P6 (Codex review fix #3) — insert + supersede must be ATOMIC. The pg
     // adapter previously ran them as two un-wrapped statements: a crash AFTER the
@@ -794,6 +794,7 @@ export class PgMemoryStore implements MemoryStore {
     return await this.db.transaction(async (tx) => {
       const insertedIds: string[] = [];
       const supersededIds: string[] = [];
+      const resurrectedIds: string[] = [];
       for (const f of input.facts) {
         // The top-level accountId is the authoritative tenant guard; persist it as
         // owner_id so a mismatched input can never write under another tenant.
@@ -821,7 +822,52 @@ export class PgMemoryStore implements MemoryStore {
         RETURNING id
       `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
         const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
-        if (insertedRows[0] === undefined) continue; // deduped → no supersede
+        if (insertedRows[0] === undefined) {
+          // Dedup hit: the (owner_id, content_hash) row already exists. Resurrect it
+          // when NOT live (pruned by a manual delete, or archived) so a re-observed
+          // fact returns rather than being permanently suppressed by the idempotency
+          // index. A live duplicate stays a no-op. Mirrors the sqlite adapter.
+          const existingRes = (await tx.execute(sql`
+          SELECT id, status FROM memory_facts
+           WHERE owner_id = ${ownerId} AND content_hash = ${f.contentHash}
+           LIMIT 1
+        `)) as
+            | { rows?: Array<{ id: string; status: string }> }
+            | Array<{ id: string; status: string }>;
+          const existingRows = Array.isArray(existingRes) ? existingRes : (existingRes.rows ?? []);
+          const existing = existingRows[0];
+          if (
+            existing !== undefined &&
+            (existing.status === "pruned" || existing.status === "archived")
+          ) {
+            await tx.execute(sql`
+            UPDATE memory_facts
+               SET status = 'active', expired_at = NULL, invalid_at = NULL,
+                   valid_from = ${validFromMs}, updated_at = ${nowMs}
+             WHERE id = ${existing.id}
+          `);
+            resurrectedIds.push(existing.id);
+            const reSuperseded = (await tx.execute(sql`
+            UPDATE memory_facts
+               SET expired_at = ${nowMs}, invalid_at = ${validFromMs}, updated_at = ${nowMs}
+             WHERE owner_id = ${ownerId}
+               AND subject_key = ${f.subjectKey}
+               AND status = 'active'
+               AND expired_at IS NULL
+               AND valid_from < ${validFromMs}
+               AND id <> ${existing.id}
+               AND (${projectId}::text IS NULL OR project_id = ${projectId})
+               AND (${resourceId}::text IS NULL OR resource_id = ${resourceId})
+               AND (${threadId}::text IS NULL OR thread_id = ${threadId})
+            RETURNING id
+          `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
+            const reSupersededRows = Array.isArray(reSuperseded)
+              ? reSuperseded
+              : (reSuperseded.rows ?? []);
+            for (const s of reSupersededRows) supersededIds.push(s.id);
+          }
+          continue; // deduped (or resurrected above) → skip the fresh-insert supersede
+        }
         insertedIds.push(id);
 
         // Supersede narrows by the NEW fact's NON-NULL scope columns ONLY — the SAME
@@ -847,7 +893,7 @@ export class PgMemoryStore implements MemoryStore {
         const supersededRows = Array.isArray(superseded) ? superseded : (superseded.rows ?? []);
         for (const s of supersededRows) supersededIds.push(s.id);
       }
-      return { insertedIds, supersededIds };
+      return { insertedIds, supersededIds, resurrectedIds };
     });
   }
 
