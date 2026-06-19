@@ -14,6 +14,7 @@
     type RuntimeSettings,
     saveSettings,
   } from '$lib/api/settings.js';
+  import Modal from '$lib/components/Modal.svelte';
   import { formatTimestamp } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
@@ -95,6 +96,11 @@
   let cleaning = $state(false);
   let vacuuming = $state(false);
   let cleanupError = $state<string | null>(null);
+  // Both maintenance actions are destructive/disruptive, so they run only after an
+  // explicit confirm (mirrors the revoke/disconnect confirm pattern elsewhere). The
+  // flag holds the dialog open; the real work runs from the dialog's confirm button.
+  let confirmingClean = $state(false);
+  let confirmingVacuum = $state(false);
 
   async function refreshCleanupStatus(): Promise<void> {
     try {
@@ -118,6 +124,7 @@
       cleanupError = e instanceof Error ? e.message : $t('Cleanup failed');
     } finally {
       cleaning = false;
+      confirmingClean = false;
     }
   }
 
@@ -130,6 +137,7 @@
       cleanupError = e instanceof Error ? e.message : $t('Compaction failed');
     } finally {
       vacuuming = false;
+      confirmingVacuum = false;
     }
   }
 
@@ -153,49 +161,32 @@
   {/if}
 
   {#if data.settings}
-    <!-- Payload capture -->
+    <!-- Routing -->
     <section class="card flex flex-col gap-3 text-sm">
-      <h2 class="section-header">{$t('Request logging')}</h2>
-
-      <label class="flex items-start gap-3">
-        <input
-          type="checkbox"
-          data-testid="capture-payloads"
-          class="checkbox mt-0.5"
-          bind:checked={form.capture_payloads}
-        />
-        <span>
-          <span class="font-medium">{$t('Record full request and response bodies')}</span>
-          <span class="field-help block"
-            >{$t(
-              'When on, the complete request and response of every call are stored so you can view them here.',
-            )}</span
-          >
-          <span class="field-help mt-1 block text-amber-600"
-            >{$t(
-              'Privacy note: this stores message content in plaintext. Turn it off to keep only routing metadata.',
-            )}</span
-          >
-        </span>
-      </label>
+      <h2 class="section-header">{$t('Routing')}</h2>
 
       <label class="flex flex-col gap-1">
-        <span class="font-medium">{$t('Keep recorded bodies for (days)')}</span>
-        <input
-          type="number"
-          min="1"
-          max="3650"
-          data-testid="retention-days"
-          class="input-sm w-32 min-h-11 md:min-h-0"
-          bind:value={form.payload_retention_days}
-        />
-        <span class="field-help">{$t('Older bodies are deleted automatically.')}</span>
+        <span class="font-medium">{$t('Default fallback lane')}</span>
+        <select
+          data-testid="default-lane"
+          class="select w-40 min-h-11 md:min-h-0"
+          bind:value={form.default_lane}
+        >
+          {#each laneOptions as name (name)}
+            <option value={name}>{name}</option>
+          {/each}
+        </select>
+        <span class="field-help"
+          >{$t(
+            'Where a request lands when the classifier cannot decide or nothing else matches. Complexity tiers (simple/medium/complex) are unaffected. Defaults to balanced.',
+          )}</span
+        >
       </label>
     </section>
 
-    <!-- Operations -->
+    <!-- Rate limiting -->
     <section class="card flex flex-col gap-3 text-sm">
-      <h2 class="section-header">{$t('Operations')}</h2>
+      <h2 class="section-header">{$t('Rate limiting')}</h2>
 
       <label class="flex items-start gap-3">
         <input
@@ -241,34 +232,6 @@
           'The fallback limit for any key without its own per-key value. 0 means unlimited.',
         )}</span
       >
-
-      <label class="flex flex-col gap-1">
-        <span class="font-medium">{$t('Log level')}</span>
-        <select data-testid="log-level" class="select w-40 min-h-11 md:min-h-0" bind:value={form.log_level}>
-          {#each LOG_LEVEL_OPTIONS as level (level)}
-            <option value={level}>{level}</option>
-          {/each}
-        </select>
-        <span class="field-help">{$t('How much detail the gateway writes to its logs.')}</span>
-      </label>
-
-      <label class="flex flex-col gap-1">
-        <span class="font-medium">{$t('Default fallback lane')}</span>
-        <select
-          data-testid="default-lane"
-          class="select w-40 min-h-11 md:min-h-0"
-          bind:value={form.default_lane}
-        >
-          {#each laneOptions as name (name)}
-            <option value={name}>{name}</option>
-          {/each}
-        </select>
-        <span class="field-help"
-          >{$t(
-            'Where a request lands when the classifier cannot decide or nothing else matches. Complexity tiers (simple/medium/complex) are unaffected. Defaults to balanced.',
-          )}</span
-        >
-      </label>
     </section>
 
     <!-- Request queueing (issue #93) -->
@@ -386,9 +349,59 @@
       </div>
     </section>
 
-    <!-- Data cleanup / retention / archival -->
+    <!-- Logging -->
     <section class="card flex flex-col gap-3 text-sm">
-      <h2 class="section-header">{$t('Data cleanup')}</h2>
+      <h2 class="section-header">{$t('Logging')}</h2>
+
+      <label class="flex flex-col gap-1">
+        <span class="font-medium">{$t('Log level')}</span>
+        <select data-testid="log-level" class="select w-40 min-h-11 md:min-h-0" bind:value={form.log_level}>
+          {#each LOG_LEVEL_OPTIONS as level (level)}
+            <option value={level}>{level}</option>
+          {/each}
+        </select>
+        <span class="field-help">{$t('How much detail the gateway writes to its logs.')}</span>
+      </label>
+
+      <label class="flex items-start gap-3">
+        <input
+          type="checkbox"
+          data-testid="capture-payloads"
+          class="checkbox mt-0.5"
+          bind:checked={form.capture_payloads}
+        />
+        <span>
+          <span class="font-medium">{$t('Record full request and response bodies')}</span>
+          <span class="field-help block"
+            >{$t(
+              'When on, the complete request and response of every call are stored so you can view them here.',
+            )}</span
+          >
+          <span class="field-help mt-1 block text-amber-600"
+            >{$t(
+              'Privacy note: this stores message content in plaintext. Turn it off to keep only routing metadata.',
+            )}</span
+          >
+        </span>
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span class="font-medium">{$t('Keep recorded bodies for (days)')}</span>
+        <input
+          type="number"
+          min="1"
+          max="3650"
+          data-testid="retention-days"
+          class="input-sm w-32 min-h-11 md:min-h-0"
+          bind:value={form.payload_retention_days}
+        />
+        <span class="field-help">{$t('Older bodies are deleted automatically.')}</span>
+      </label>
+    </section>
+
+    <!-- Data retention & cleanup / archival -->
+    <section class="card flex flex-col gap-3 text-sm">
+      <h2 class="section-header">{$t('Data retention & cleanup')}</h2>
       <p class="field-help">
         {$t(
           'A scheduled sweep deletes old data per the windows below. Training/audit data is archived to a compressed file before deletion; you can download those archives or clean up immediately.',
@@ -527,12 +540,12 @@
         <p class="alert-error" role="alert">{cleanupError}</p>
       {/if}
 
-      <!-- Runtime actions (independent of Save) -->
+      <!-- Runtime actions (independent of Save) — each confirms before running -->
       <div class="flex flex-wrap items-center gap-3">
         <button
           class="btn-secondary"
           data-testid="cleanup-run-now"
-          onclick={handleCleanNow}
+          onclick={() => (confirmingClean = true)}
           disabled={cleaning}
         >
           {cleaning ? $t('Cleaning…') : $t('Clean now')}
@@ -540,7 +553,7 @@
         <button
           class="btn-secondary"
           data-testid="cleanup-vacuum"
-          onclick={handleVacuum}
+          onclick={() => (confirmingVacuum = true)}
           disabled={vacuuming}
         >
           {vacuuming ? $t('Compacting…') : $t('Compact database')}
@@ -598,5 +611,57 @@
         {$t('Save settings')}
       </button>
     </div>
+
+    {#if confirmingClean}
+      <Modal
+        label={$t('Clean now')}
+        onclose={() => (confirmingClean = false)}
+        dismissible={!cleaning}
+      >
+        <h2 class="section-header">{$t('Run cleanup now?')}</h2>
+        <p class="mt-2 text-sm text-amber-800">
+          {$t(
+            'This deletes old data immediately using the retention windows above. Categories set to archive are saved to a compressed file first, but the deletion itself cannot be undone.',
+          )}
+        </p>
+        <div class="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            class="btn-secondary"
+            disabled={cleaning}
+            onclick={() => (confirmingClean = false)}>{$t('Cancel')}</button
+          >
+          <button type="button" class="btn-primary" disabled={cleaning} onclick={handleCleanNow}>
+            {cleaning ? $t('Cleaning…') : $t('Clean now')}
+          </button>
+        </div>
+      </Modal>
+    {/if}
+
+    {#if confirmingVacuum}
+      <Modal
+        label={$t('Compact database')}
+        onclose={() => (confirmingVacuum = false)}
+        dismissible={!vacuuming}
+      >
+        <h2 class="section-header">{$t('Compact database now?')}</h2>
+        <p class="mt-2 text-sm text-amber-800">
+          {$t(
+            'This runs VACUUM to reclaim disk space. The database is briefly locked while it runs, so in-flight requests may pause until it finishes.',
+          )}
+        </p>
+        <div class="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            class="btn-secondary"
+            disabled={vacuuming}
+            onclick={() => (confirmingVacuum = false)}>{$t('Cancel')}</button
+          >
+          <button type="button" class="btn-primary" disabled={vacuuming} onclick={handleVacuum}>
+            {vacuuming ? $t('Compacting…') : $t('Compact database')}
+          </button>
+        </div>
+      </Modal>
+    {/if}
   {/if}
 </section>
