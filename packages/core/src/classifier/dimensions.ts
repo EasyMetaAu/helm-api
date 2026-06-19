@@ -1,4 +1,5 @@
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
+import { lastUserMessageText } from "./message-text.js";
 import {
   detectCodeBlock,
   detectFilePath,
@@ -16,6 +17,17 @@ import {
 // same input => same output, zero I/O, no clock, no randomness. Keywords and
 // weights are DATA (classifier.yaml); structural-signal regexes are CODE here.
 // This task produces ONLY rawScore + hits — no tiers, no task detection.
+//
+// CURRENT-TURN SCOPING: the TEXT-derived dimensions (keyword dims, content-type
+// structural signals, and msg_length) read ONLY the last user message — a constant
+// system/developer prompt describes an agent's standing capabilities, not THIS
+// request's complexity, so scoring it would inflate the tier on every turn (prod
+// 5ee4bf79: a 7599-char persona prompt pushed a trivial chat over `complex` →
+// premium lane). The AMBIENT request-shape dimensions (turn_count / tool_count /
+// has_tools / has_attachment / has_json_format) stay full-request: they measure
+// shape, not intent, and are immune to prompt text. Mirrors taskdetect.ts and the
+// engine §5.5 language guard ("historical hits are not evidence Layer-1 understood
+// this prompt"). Genuine multi-turn size is still expressed by turn_count.
 
 // Single hit detail. Enters `explanation` for the decision record.
 export interface DimensionHit {
@@ -85,7 +97,9 @@ export function scoreDimensions(req: ScoreInput, cfg: ClassifierRulesConfig): Di
 // ── context assembly ──────────────────────────────────────────────────────────
 
 function buildContext(req: ScoreInput): ReqContext {
-  const text = extractText(req.messages);
+  // TEXT-derived dimensions see only the current user turn (see header). The
+  // ambient counts/flags below are request-wide on purpose.
+  const text = lastUserMessageText(req.messages);
   return {
     text,
     turnCount: req.messages.length,
@@ -93,33 +107,6 @@ function buildContext(req: ScoreInput): ReqContext {
     hasAttachment: Array.isArray(req.attachments) && req.attachments.length > 0,
     hasJsonFormat: isJsonResponseFormat(req.response_format),
   };
-}
-
-// Flatten message content into a single string for keyword/structural matching.
-// Reads only string-shaped content (and string `text` parts of array content);
-// never performs any network/IO. Non-string parts are ignored.
-function extractText(messages: ScoreInput["messages"]): string {
-  const parts: string[] = [];
-  for (const msg of messages) {
-    collectStrings(msg.content, parts);
-  }
-  return parts.join("\n");
-}
-
-function collectStrings(content: unknown, out: string[]): void {
-  if (typeof content === "string") {
-    out.push(content);
-    return;
-  }
-  if (Array.isArray(content)) {
-    for (const part of content) {
-      if (typeof part === "string") {
-        out.push(part);
-      } else if (isRecord(part) && typeof part.text === "string") {
-        out.push(part.text);
-      }
-    }
-  }
 }
 
 function isJsonResponseFormat(rf: ScoreInput["response_format"]): boolean {
