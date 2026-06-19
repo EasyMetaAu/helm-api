@@ -635,5 +635,17 @@
   "Lane unavailable": "레인 사용 불가",
   "Authentication failed": "인증 실패",
   "Timed out": "시간 초과",
-  "Circuit open": "서킷 오픈"
+  "Circuit open": "서킷 오픈",
+  "Usage (24h)": "사용량 (24시간)",
+  "req": "건",
+  "err": "오류",
+  "tok": "토큰",
+  "No traffic in the last 24h": "최근 24시간 동안 트래픽 없음",
+  "Configuration": "구성",
+  "From": "시작",
+  "To": "종료",
+  "Clear": "지우기",
+  "Prev": "이전",
+  "{count} in window": "기간 내 {count}건",
+  "No requests for this key in the selected window.": "선택한 기간 내에 이 키에 대한 요청이 없습니다."
 }

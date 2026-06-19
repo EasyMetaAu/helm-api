@@ -248,12 +248,15 @@ export async function listKeys(): Promise<ApiKeyView[]> {
   return rows.map(normalizeView);
 }
 
-// GET /admin/api/keys/:id -> the single redacted key record (prefix only). Throws
-// on 404 (unknown id) — the detail page loader surfaces that as a not-found state.
-export async function getKey(keyId: string): Promise<ApiKeyView> {
+// GET /admin/api/keys/:id -> the single redacted key record (prefix only), or null
+// when the key genuinely does not exist (404). A 404 is the ONLY "not found"
+// signal — every OTHER non-2xx (500/503, network) THROWS via asJson so the caller
+// can surface a real load error instead of masking an outage as "key not found".
+export async function getKey(keyId: string): Promise<ApiKeyView | null> {
   const res = await fetch(`${BASE}/${encodeURIComponent(keyId)}`, {
     headers: { accept: 'application/json' },
   });
+  if (res.status === 404) return null;
   const raw = await asJson<Record<string, unknown>>(res);
   return normalizeView(raw);
 }

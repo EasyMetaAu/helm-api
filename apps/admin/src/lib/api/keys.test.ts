@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiKeyView } from './keys.js';
-import { createKey, getKeysUsage, listKeys, revokeKey, updateKey } from './keys.js';
+import { createKey, getKey, getKeysUsage, listKeys, revokeKey, updateKey } from './keys.js';
 
 // The admin UI talks to the gateway ONLY over /admin/api/* HTTP (DoD: no core
 // import). These tests pin the client contract against a mocked fetch. The
@@ -75,6 +75,19 @@ describe('keys api client', () => {
       total_tokens: 1500,
     });
     expect(usage[1].cost_usd).toBeNull();
+  });
+
+  it('getKey returns the view on 200, null on a real 404, and throws on other errors', async () => {
+    const fn = fetch as ReturnType<typeof vi.fn>;
+    // 200 → redacted view.
+    fn.mockResolvedValueOnce(new Response(JSON.stringify(summaryRow('k1')), { status: 200 }));
+    expect((await getKey('k1'))?.key_id).toBe('k1');
+    // 404 → null (genuine missing key), never a throw.
+    fn.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'key not found' }), { status: 404 }));
+    expect(await getKey('nope')).toBeNull();
+    // 500 → throws, so the caller surfaces a real load error (not a fake 404).
+    fn.mockResolvedValueOnce(new Response('boom', { status: 500 }));
+    await expect(getKey('k1')).rejects.toThrow();
   });
 
   it('createKey POSTs caps to /admin/api/keys and returns the one-time plaintext', async () => {

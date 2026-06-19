@@ -1,5 +1,5 @@
 import { error } from '@sveltejs/kit';
-import { type ApiKeyView, getKey } from '$lib/api/keys.js';
+import { getKey } from '$lib/api/keys.js';
 import { listRequests, type RequestListItem } from '$lib/api/requests.js';
 import { type DashboardStats, EMPTY_STATS, getStats } from '$lib/api/stats.js';
 import {
@@ -22,12 +22,11 @@ const DETAIL_PAGE_SIZE = 25;
 export const load: PageLoad = async ({ params, url }) => {
   const keyId = params.keyId;
 
-  let key: ApiKeyView;
-  try {
-    key = await getKey(keyId);
-  } catch {
-    throw error(404, 'API key not found');
-  }
+  // getKey returns null ONLY for a genuine 404; every other failure (500/503,
+  // network) throws and propagates as a real load error — we must not mask an
+  // admin-API outage as "key not found".
+  const key = await getKey(keyId);
+  if (!key) throw error(404, 'API key not found');
 
   const filters = parseKeyDetailFilters(url.searchParams);
   const now = Date.now();

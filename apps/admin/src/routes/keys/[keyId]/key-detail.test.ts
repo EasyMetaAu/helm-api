@@ -112,11 +112,19 @@ describe('key detail loader', () => {
     expect(arg.end).toBe(new Date('2026-06-02T00:00:00').getTime());
   });
 
-  it('throws 404 when the key does not exist', async () => {
-    mocks.getKey.mockRejectedValue(new Error('not found'));
+  it('throws 404 only when the key genuinely does not exist (getKey → null)', async () => {
+    mocks.getKey.mockResolvedValue(null);
     await expect(
       load({ params: { keyId: 'nope' }, url: new URL('https://admin.test/keys/nope') } as never),
     ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('propagates a non-404 admin-API failure instead of masking it as 404', async () => {
+    mocks.getKey.mockRejectedValue(new Error('keys api 503'));
+    // The real error must surface (a load error), NOT a misleading "key not found".
+    await expect(
+      load({ params: { keyId: 'k1' }, url: new URL('https://admin.test/keys/k1') } as never),
+    ).rejects.toThrow(/503/);
   });
 
   it('fails soft: a stats/requests error still renders zeroed panels', async () => {
