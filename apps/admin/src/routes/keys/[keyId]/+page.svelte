@@ -139,7 +139,7 @@
 
   // ── Request list (scoped to this key) ────────────────────────────────────────
   const totalPages = $derived(
-    Math.max(1, Math.ceil(data.requests.total / data.requests.pageSize)),
+    Math.max(1, Math.ceil(data.requests.total / Math.max(1, data.requests.pageSize))),
   );
   const pages = $derived(paginationItems(data.filters.page, totalPages));
 
@@ -485,17 +485,18 @@
 
       {#if totalPages > 1}
         <!-- Pagination footer — mirrors the requests list pager (numbered <a>
-             links + Prev/Next + "Page X of Y · N requests" status) so the two
-             views read identically. No rows-per-page selector here: the scoped
-             list uses a fixed page size (DETAIL_PAGE_SIZE). Page numbers are real
-             links (native pointer / open-in-new-tab); Prev/Next stay buttons for
-             their disabled states. -->
+             links + Prev/Next + a "Page X of Y" status). The window's request
+             count is already shown once in the section header above, so it isn't
+             repeated here (the header formats it via formatCount — repeating the
+             raw total would contradict it for >=1000). No rows-per-page selector:
+             the scoped list uses a fixed page size (DETAIL_PAGE_SIZE). Page numbers
+             are real links (native pointer / open-in-new-tab); Prev/Next stay
+             buttons for their disabled states. -->
         <div
           class="mt-4 flex flex-col gap-3 text-sm text-ink-muted sm:flex-row sm:items-center sm:justify-between"
         >
           <span data-testid="pager-status">
-            {$t('Page {page} of {pages}', { page: data.filters.page, pages: totalPages })} ·
-            {$t('{total} requests', { total: data.requests.total })}
+            {$t('Page {page} of {pages}', { page: data.filters.page, pages: totalPages })}
           </span>
 
           <nav class="flex items-center gap-1" aria-label={$t('Pagination')}>
