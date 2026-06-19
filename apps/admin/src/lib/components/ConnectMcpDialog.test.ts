@@ -124,4 +124,14 @@ describe('ConnectMcpDialog', () => {
     expect(screen.getByRole('tab', { name: /codex/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /^curl$/i })).toBeInTheDocument();
   });
+
+  it('does not falsely flip to "Copied" when the Clipboard API is unavailable', async () => {
+    // Insecure context (plain HTTP) / old browser: navigator.clipboard is absent.
+    // The button must NOT claim success when nothing was written.
+    Object.assign(navigator, { clipboard: undefined });
+    setup();
+    await fireEvent.click(screen.getAllByRole('button', { name: /^copy$/i })[0]);
+    expect(screen.queryByRole('button', { name: /copied/i })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /^copy$/i }).length).toBeGreaterThan(0);
+  });
 });
