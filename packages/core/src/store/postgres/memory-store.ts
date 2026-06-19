@@ -15,9 +15,9 @@ import {
   type ReflectionScope,
   type ReflectionUpsertInput,
 } from "@helm/shared";
-import { and, asc, desc, eq, isNull, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, isNull, lt, type SQL, sql } from "drizzle-orm";
 import { sha256Hex } from "../../memory/message-hash.js";
-import type { MemoryJobStatus, MemoryStore } from "../ports.js";
+import type { MemoryJobStatus, MemoryMessageArchiveRow, MemoryStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import {
   memoryFacts,
@@ -819,6 +819,62 @@ export class PgMemoryStore implements MemoryStore {
       Array.isArray(facts) ? facts : ((facts as { rows?: unknown[] }).rows ?? [])
     ) as unknown[];
     return { observationsDeleted: obsRows.length, factsDeleted: factRows.length };
+  }
+
+  // ——— Cleanup/archival (raw transcript + job log) — pg mirror; created_at/
+  // updated_at are epoch-ms bigint here, so no Date conversion. ———
+  async countMessagesOlderThan(olderThanMs: number): Promise<number> {
+    const rows = await this.db
+      .select({ value: count() })
+      .from(memoryMessages)
+      .where(lt(memoryMessages.createdAt, olderThanMs));
+    return rows[0]?.value ?? 0;
+  }
+
+  async selectMessagesOlderThan(
+    olderThanMs: number,
+    limit: number,
+    afterId?: string,
+  ): Promise<MemoryMessageArchiveRow[]> {
+    const conds: SQL[] = [lt(memoryMessages.createdAt, olderThanMs)];
+    if (afterId !== undefined) conds.push(gt(memoryMessages.id, afterId));
+    const rows = await this.db
+      .select()
+      .from(memoryMessages)
+      .where(and(...conds))
+      .orderBy(asc(memoryMessages.id))
+      .limit(limit);
+    return rows.map((r) => ({
+      id: r.id,
+      threadId: r.threadId,
+      role: r.role,
+      content: r.content,
+      tokenEstimate: r.tokenEstimate,
+      messageIndex: r.messageIndex ?? null,
+      contentHash: r.contentHash ?? null,
+      createdAt: r.createdAt,
+    }));
+  }
+
+  async pruneMessagesOlderThan(olderThanMs: number): Promise<number> {
+    const rows = await this.db
+      .delete(memoryMessages)
+      .where(lt(memoryMessages.createdAt, olderThanMs))
+      .returning();
+    return rows.length;
+  }
+
+  async pruneFinishedJobsOlderThan(olderThanMs: number): Promise<number> {
+    const res = (await this.db.execute(sql`
+      DELETE FROM memory_jobs
+       WHERE status IN ('done', 'failed')
+         AND updated_at < ${olderThanMs}
+      RETURNING id
+    `)) as unknown;
+    const rows = (
+      Array.isArray(res) ? res : ((res as { rows?: unknown[] }).rows ?? [])
+    ) as unknown[];
+    return rows.length;
   }
 
   // Auto-compaction model→price resolution — pg mirror of the sqlite adapter

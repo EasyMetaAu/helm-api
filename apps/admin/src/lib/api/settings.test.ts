@@ -21,6 +21,20 @@ const FULL: RuntimeSettings = {
   user_message_queue_enabled: true,
   user_message_queue_delay_ms: 300,
   user_message_queue_wait_timeout_ms: 8000,
+  cleanup_enabled: false,
+  cleanup_interval_hours: 12,
+  cleanup_archive_enabled: false,
+  telemetry_cleanup_enabled: false,
+  telemetry_retention_days: 45,
+  payloads_cleanup_enabled: false,
+  oauth_usage_cleanup_enabled: false,
+  oauth_usage_retention_days: 60,
+  memory_jobs_cleanup_enabled: false,
+  memory_jobs_retention_days: 14,
+  memory_messages_cleanup_enabled: true,
+  memory_messages_retention_days: 200,
+  memory_derived_cleanup_enabled: true,
+  memory_derived_retention_days: 400,
 };
 
 describe('settings api client', () => {
@@ -62,6 +76,22 @@ describe('settings api client', () => {
       user_message_queue_enabled: false,
       user_message_queue_delay_ms: 200,
       user_message_queue_wait_timeout_ms: 5000,
+      // Data-cleanup defaults (master/archive + always-on categories ON; the two
+      // memory categories opt-in OFF).
+      cleanup_enabled: true,
+      cleanup_interval_hours: 24,
+      cleanup_archive_enabled: true,
+      telemetry_cleanup_enabled: true,
+      telemetry_retention_days: 90,
+      payloads_cleanup_enabled: true,
+      oauth_usage_cleanup_enabled: true,
+      oauth_usage_retention_days: 180,
+      memory_jobs_cleanup_enabled: true,
+      memory_jobs_retention_days: 30,
+      memory_messages_cleanup_enabled: false,
+      memory_messages_retention_days: 180,
+      memory_derived_cleanup_enabled: false,
+      memory_derived_retention_days: 365,
     });
   });
 

@@ -18,8 +18,6 @@ export interface PayloadCaptureDeps {
   telemetry: TelemetryStore;
   /** Live getter for the capture_payloads runtime setting. */
   capturePayloads?: () => boolean;
-  /** Live getter for payload_retention_days expressed in ms (drives auto-prune). */
-  payloadRetentionMs?: () => number;
   /** Resolve the served attempt's USD cost from the trailing usage chunk: an
    *  upstream-BILLED cost in it (`cost_usd` / OpenRouter `cost`) OVERRIDES the
    *  catalog estimate, else tokens × `alias`'s pricing; null when neither is
@@ -142,11 +140,8 @@ export async function recordServed(
         upstreamRequestJson: args.upstreamRequestJson ?? null,
         createdAt: new Date(deps.now()),
       });
-      const retentionMs = deps.payloadRetentionMs?.();
-      if (retentionMs !== undefined && retentionMs > 0) {
-        const cutoff = deps.now() - retentionMs;
-        w.enqueueTask(() => deps.telemetry.prunePayloads(cutoff));
-      }
+      // Retention is NOT pruned on the request path — the scheduled cleanup runner
+      // owns payload retention (archive-first), governed by the cleanup settings.
     }
     w.enqueueTelemetry({
       decision: deps.redact(args.decision),
@@ -404,10 +399,8 @@ export async function persistPayload(
       upstreamRequestJson: args.upstreamRequestJson ?? null,
       createdAt: new Date(args.now),
     });
-    const retentionMs = deps.payloadRetentionMs?.();
-    if (retentionMs && retentionMs > 0) {
-      await deps.telemetry.prunePayloads(args.now - retentionMs);
-    }
+    // Retention is owned by the scheduled cleanup runner (archive-first), not the
+    // request path — so capture never deletes bodies behind the cleanup settings.
   } catch {
     log("payload.capture_failed");
   }

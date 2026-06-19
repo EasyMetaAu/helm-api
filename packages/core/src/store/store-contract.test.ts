@@ -1053,6 +1053,87 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(await ctx.stores.telemetry.getPayload("edge")).not.toBeNull();
       expect(await ctx.stores.telemetry.getPayload("new")).not.toBeNull();
     });
+
+    it("pruneTelemetry drops decision rows strictly older than the cutoff and returns the count", async () => {
+      ctx = await make();
+      const t = ctx.stores.telemetry;
+      if (!t.pruneTelemetry) throw new Error("adapter must implement pruneTelemetry");
+      for (const [id, ms] of [
+        ["old", 1000],
+        ["edge", 2000],
+        ["new", 3000],
+      ] as const) {
+        await t.insert({ apiKeyId: "key_1", decision: decision(id), createdAt: new Date(ms) });
+      }
+      const deleted = await t.pruneTelemetry(2000); // strict → only "old"
+      expect(deleted).toBe(1);
+      expect(await ctx.stores.telemetry.getByRequestId("old")).toBeNull();
+      expect(await ctx.stores.telemetry.getByRequestId("edge")).not.toBeNull();
+      expect(await ctx.stores.telemetry.getByRequestId("new")).not.toBeNull();
+    });
+
+    it("count/select telemetry older-than: count matches and keyset paging covers every row once", async () => {
+      ctx = await make();
+      const t = ctx.stores.telemetry;
+      if (!t.countTelemetryOlderThan || !t.selectTelemetryOlderThan)
+        throw new Error("adapter must implement telemetry archive helpers");
+      for (let i = 0; i < 5; i++) {
+        await t.insert({
+          apiKeyId: "key_1",
+          decision: decision(`old_${i}`),
+          createdAt: new Date(1000 + i),
+        });
+      }
+      await t.insert({
+        apiKeyId: "key_1",
+        decision: decision("recent"),
+        createdAt: new Date(9000),
+      });
+      expect(await t.countTelemetryOlderThan(5000)).toBe(5);
+      // Page through in batches of 2 via the id cursor; expect all 5, no dupes.
+      const seen: string[] = [];
+      let after: string | undefined;
+      for (let guard = 0; guard < 10; guard++) {
+        const page = await t.selectTelemetryOlderThan(5000, 2, after);
+        if (page.length === 0) break;
+        for (const r of page) seen.push(r.requestId);
+        after = page[page.length - 1]?.id;
+      }
+      expect(seen.sort()).toEqual(["old_0", "old_1", "old_2", "old_3", "old_4"]);
+      expect(new Set(seen).size).toBe(5);
+    });
+
+    it("count/select payloads older-than: count matches and keyset paging covers every row once", async () => {
+      ctx = await make();
+      const t = ctx.stores.telemetry;
+      if (!t.countPayloadsOlderThan || !t.selectPayloadsOlderThan)
+        throw new Error("adapter must implement payload archive helpers");
+      for (let i = 0; i < 5; i++) {
+        await t.insertPayload({
+          requestId: `p_old_${i}`,
+          requestJson: "{}",
+          responseJson: null,
+          createdAt: new Date(1000 + i),
+        });
+      }
+      await t.insertPayload({
+        requestId: "p_recent",
+        requestJson: "{}",
+        responseJson: null,
+        createdAt: new Date(9000),
+      });
+      expect(await t.countPayloadsOlderThan(5000)).toBe(5);
+      const seen: string[] = [];
+      let after: string | undefined;
+      for (let guard = 0; guard < 10; guard++) {
+        const page = await t.selectPayloadsOlderThan(5000, 2, after);
+        if (page.length === 0) break;
+        for (const r of page) seen.push(r.requestId);
+        after = page[page.length - 1]?.id;
+      }
+      expect(seen.sort()).toEqual(["p_old_0", "p_old_1", "p_old_2", "p_old_3", "p_old_4"]);
+      expect(new Set(seen).size).toBe(5);
+    });
   });
 
   // --- RateLimitStore -----------------------------------------------------

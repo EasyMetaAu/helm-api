@@ -131,7 +131,6 @@ export async function runReplay(
   const captureDeps: PayloadCaptureDeps = {
     telemetry: deps.telemetry,
     capturePayloads: deps.replay.capturePayloads,
-    payloadRetentionMs: deps.replay.payloadRetentionMs,
     costOf: deps.replay.costOf,
   };
   await persistPayload(

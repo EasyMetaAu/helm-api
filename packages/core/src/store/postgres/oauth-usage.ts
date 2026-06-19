@@ -1,5 +1,5 @@
 import { type OAuthUsageRow, OAuthUsageRowSchema } from "@helm/shared";
-import { and, gte, lt, sql } from "drizzle-orm";
+import { and, count, gte, lt, sql } from "drizzle-orm";
 import type { OAuthUsageStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import { oauthUsage } from "./schema.js";
@@ -64,6 +64,23 @@ export class PgOAuthUsageStore implements OAuthUsageStore {
       .where(and(gte(oauthUsage.bucketMs, startMs), lt(oauthUsage.bucketMs, endMs)))
       .groupBy(oauthUsage.providerId, oauthUsage.account);
     return rows.map((r) => this.toRow(r));
+  }
+
+  // Cleanup: count / delete hour buckets strictly older than the cutoff (bucket_ms).
+  async countUsageOlderThan(olderThanMs: number): Promise<number> {
+    const rows = await this.db
+      .select({ value: count() })
+      .from(oauthUsage)
+      .where(lt(oauthUsage.bucketMs, olderThanMs));
+    return rows[0]?.value ?? 0;
+  }
+
+  async pruneUsageOlderThan(olderThanMs: number): Promise<number> {
+    const rows = await this.db
+      .delete(oauthUsage)
+      .where(lt(oauthUsage.bucketMs, olderThanMs))
+      .returning();
+    return rows.length;
   }
 
   // Aggregated row -> OAuthUsageRow. pg marshals SUM()/MIN()/MAX() over bigint as

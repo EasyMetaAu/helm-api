@@ -40,6 +40,21 @@ export interface RuntimeSettings {
   user_message_queue_enabled: boolean;
   user_message_queue_delay_ms: number; // 请求间隔 (0-10000)
   user_message_queue_wait_timeout_ms: number; // 队列超时 (1s-5min)
+  // ——— Automatic data cleanup / retention / archival (admin "Data cleanup") ———
+  cleanup_enabled: boolean; // master switch
+  cleanup_interval_hours: number; // sweep cadence (1-168)
+  cleanup_archive_enabled: boolean; // archive-before-delete for training/audit tables
+  telemetry_cleanup_enabled: boolean;
+  telemetry_retention_days: number;
+  payloads_cleanup_enabled: boolean; // window reuses payload_retention_days
+  oauth_usage_cleanup_enabled: boolean;
+  oauth_usage_retention_days: number;
+  memory_jobs_cleanup_enabled: boolean;
+  memory_jobs_retention_days: number;
+  memory_messages_cleanup_enabled: boolean; // opt-in (highest training value)
+  memory_messages_retention_days: number;
+  memory_derived_cleanup_enabled: boolean; // opt-in (observations + facts)
+  memory_derived_retention_days: number;
 }
 
 export const LOG_LEVEL_OPTIONS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
@@ -99,6 +114,34 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
       typeof raw.user_message_queue_wait_timeout_ms === 'number'
         ? raw.user_message_queue_wait_timeout_ms
         : 5000,
+    // Data-cleanup fields. Booleans default to the schema default (master/archive +
+    // the always-on categories read true on a missing field; the two opt-in memory
+    // categories read false). Every field MUST be named here or normalize() would
+    // drop it and silently reset it on the next Save (the #225 lesson).
+    cleanup_enabled: raw.cleanup_enabled !== false,
+    cleanup_interval_hours:
+      typeof raw.cleanup_interval_hours === 'number' ? raw.cleanup_interval_hours : 24,
+    cleanup_archive_enabled: raw.cleanup_archive_enabled !== false,
+    telemetry_cleanup_enabled: raw.telemetry_cleanup_enabled !== false,
+    telemetry_retention_days:
+      typeof raw.telemetry_retention_days === 'number' ? raw.telemetry_retention_days : 90,
+    payloads_cleanup_enabled: raw.payloads_cleanup_enabled !== false,
+    oauth_usage_cleanup_enabled: raw.oauth_usage_cleanup_enabled !== false,
+    oauth_usage_retention_days:
+      typeof raw.oauth_usage_retention_days === 'number' ? raw.oauth_usage_retention_days : 180,
+    memory_jobs_cleanup_enabled: raw.memory_jobs_cleanup_enabled !== false,
+    memory_jobs_retention_days:
+      typeof raw.memory_jobs_retention_days === 'number' ? raw.memory_jobs_retention_days : 30,
+    memory_messages_cleanup_enabled: raw.memory_messages_cleanup_enabled === true,
+    memory_messages_retention_days:
+      typeof raw.memory_messages_retention_days === 'number'
+        ? raw.memory_messages_retention_days
+        : 180,
+    memory_derived_cleanup_enabled: raw.memory_derived_cleanup_enabled === true,
+    memory_derived_retention_days:
+      typeof raw.memory_derived_retention_days === 'number'
+        ? raw.memory_derived_retention_days
+        : 365,
   };
 }
 

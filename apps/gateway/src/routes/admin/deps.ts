@@ -7,6 +7,7 @@ import type {
   OAuthUsageStore,
   PoliciesConfig,
   RouteOptions,
+  StoredCleanupReport,
   TelemetryStore,
 } from "@helm/core";
 import type {
@@ -262,21 +263,52 @@ export interface ReplayWiring {
   // Redact a DecisionRecord before it is persisted (principle 7) — the same
   // redactor the chat route uses.
   redact: (payload: unknown) => unknown;
-  // Wall clock (epoch ms) for the new record's createdAt + payload prune cutoff.
+  // Wall clock (epoch ms) for the new record's createdAt.
   now: () => number;
   // Mint the NEW request's trace id (the re-run is a distinct request).
   genTraceId: () => string;
-  // LIVE getters for capture_payloads / payload_retention_days (admin settings),
-  // and the streamed-cost pricer — identical to the chat route's wiring.
+  // LIVE getter for capture_payloads (admin settings) + the streamed-cost pricer —
+  // identical to the chat route's wiring. Payload retention is NOT wired here: the
+  // scheduled cleanup runner owns it, so a replay never prunes bodies.
   capturePayloads?: PayloadCaptureDeps["capturePayloads"];
-  payloadRetentionMs?: PayloadCaptureDeps["payloadRetentionMs"];
   costOf?: PayloadCaptureDeps["costOf"];
+}
+
+// One downloadable archive file produced by a cleanup run (the LocalVolumeSink
+// writes <runId>/<table>.jsonl.gz). Surfaced by the cleanup status route so the
+// admin can pull a training/audit archive off the box.
+export interface CleanupArchiveEntry {
+  runId: string;
+  file: string; // e.g. "telemetry.jsonl.gz"
+  bytes: number;
+  modifiedMs: number;
+}
+
+// Read/run seam for the admin "Data cleanup" surface. All orchestration (plan from
+// live settings → archive → delete → persist report, VACUUM, archive listing) is
+// wired in server.ts; the route stays pure HTTP glue.
+export interface CleanupAccess {
+  // Run ONE cleanup pass now (the manual "Clean Now" button). Same code path as the
+  // scheduled tick. Returns the run report.
+  runNow(): Promise<StoredCleanupReport>;
+  // The last persisted run report (null if cleanup has never run).
+  lastReport(): Promise<StoredCleanupReport | null>;
+  // Reclaim on-disk space (sqlite VACUUM; pg no-op). The "Compact database" button.
+  vacuum(): Promise<void>;
+  // List downloadable archive files (newest first).
+  listArchives(): Promise<CleanupArchiveEntry[]>;
+  // Resolve an archive file to an absolute path for download, or null if the
+  // (runId, file) pair is unknown or would escape the archive directory.
+  resolveArchive(runId: string, file: string): Promise<string | null>;
 }
 
 export interface AdminApiDeps {
   rules: RuleStore;
   keyStore: KeyStore;
   telemetry: TelemetryStore;
+  // Automatic data cleanup / retention / archival (admin "Data cleanup"). Optional —
+  // absent in unit tests; the cleanup routes 503 when not wired.
+  cleanup?: CleanupAccess;
   // Admin "Retry" replay surface. Optional — absent in unit tests; the route 503s.
   replay?: ReplayWiring;
   // Admin OAuth-login seam (issue #38). Optional so existing tests that build a

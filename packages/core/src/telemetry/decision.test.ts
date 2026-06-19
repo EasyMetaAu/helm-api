@@ -375,6 +375,11 @@ describe("persistDecision", () => {
       insertPayload: async () => {},
       getPayload: async () => null,
       prunePayloads: async () => {},
+      pruneTelemetry: async () => 0,
+      countTelemetryOlderThan: async () => 0,
+      selectTelemetryOlderThan: async () => [],
+      countPayloadsOlderThan: async () => 0,
+      selectPayloadsOlderThan: async () => [],
     };
   }
 

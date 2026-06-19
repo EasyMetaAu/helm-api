@@ -15,9 +15,9 @@ import {
   type ReflectionScope,
   type ReflectionUpsertInput,
 } from "@helm/shared";
-import { and, asc, desc, eq, isNull, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, isNull, lt, type SQL, sql } from "drizzle-orm";
 import { sha256Hex } from "../../memory/message-hash.js";
-import type { MemoryJobStatus, MemoryStore } from "../ports.js";
+import type { MemoryJobStatus, MemoryMessageArchiveRow, MemoryStore } from "../ports.js";
 import {
   memoryFacts,
   memoryJobs,
@@ -903,6 +903,61 @@ export class SqliteMemoryStore implements MemoryStore {
       )
       .run(input.expiredFactsBeforeMs);
     return { observationsDeleted: obs.changes, factsDeleted: facts.changes };
+  }
+
+  // ——— Cleanup/archival (raw transcript + job log) ———
+  async countMessagesOlderThan(olderThanMs: number): Promise<number> {
+    const row = this.db
+      .select({ value: count() })
+      .from(memoryMessages)
+      .where(lt(memoryMessages.createdAt, new Date(olderThanMs)))
+      .get();
+    return row?.value ?? 0;
+  }
+
+  async selectMessagesOlderThan(
+    olderThanMs: number,
+    limit: number,
+    afterId?: string,
+  ): Promise<MemoryMessageArchiveRow[]> {
+    const conds: SQL[] = [lt(memoryMessages.createdAt, new Date(olderThanMs))];
+    if (afterId !== undefined) conds.push(gt(memoryMessages.id, afterId));
+    return this.db
+      .select()
+      .from(memoryMessages)
+      .where(and(...conds))
+      .orderBy(asc(memoryMessages.id))
+      .limit(limit)
+      .all()
+      .map((r) => ({
+        id: r.id,
+        threadId: r.threadId,
+        role: r.role,
+        content: r.content,
+        tokenEstimate: r.tokenEstimate,
+        messageIndex: r.messageIndex ?? null,
+        contentHash: r.contentHash ?? null,
+        createdAt: r.createdAt.getTime(),
+      }));
+  }
+
+  async pruneMessagesOlderThan(olderThanMs: number): Promise<number> {
+    const res = this.db
+      .delete(memoryMessages)
+      .where(lt(memoryMessages.createdAt, new Date(olderThanMs)))
+      .run();
+    return res.changes;
+  }
+
+  async pruneFinishedJobsOlderThan(olderThanMs: number): Promise<number> {
+    const res = this.db.$sqlite
+      .prepare(
+        `DELETE FROM memory_jobs
+          WHERE status IN ('done', 'failed')
+            AND updated_at < ?`,
+      )
+      .run(olderThanMs);
+    return res.changes;
   }
 
   // Auto-compaction model→price resolution, write half: stamp the served model

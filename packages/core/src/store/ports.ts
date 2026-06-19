@@ -224,6 +224,42 @@ export interface RequestPayload {
   createdAt: Date;
 }
 
+// One telemetry row as exported by the archive scan — engine-neutral and
+// JSON-serializable (createdAt is epoch ms, the decision is the parsed record),
+// so both the sqlite and pg adapters yield byte-identical archive lines. `id` is
+// the keyset cursor for selectTelemetryOlderThan (the table's uuid primary key).
+export interface TelemetryArchiveRow {
+  id: string;
+  requestId: string;
+  apiKeyId: string;
+  createdAt: number;
+  decision: DecisionRecord;
+}
+
+// One request_payloads row as exported by the archive scan. `id` IS the requestId
+// (the table's primary key and the keyset cursor for selectPayloadsOlderThan).
+export interface RequestPayloadArchiveRow {
+  id: string;
+  requestId: string;
+  requestJson: string;
+  responseJson: string | null;
+  upstreamRequestJson: string | null;
+  createdAt: number;
+}
+
+// One memory_messages row as exported by the archive scan (raw conversation
+// transcript — the opt-in, high-training-value tier). `id` is the keyset cursor.
+export interface MemoryMessageArchiveRow {
+  id: string;
+  threadId: string;
+  role: string;
+  content: string;
+  tokenEstimate: number;
+  messageIndex: number | null;
+  contentHash: string | null;
+  createdAt: number;
+}
+
 // A recent decision row paired with the time the gateway recorded it. `createdAt`
 // is STORE metadata (a separate column), deliberately kept OUT of the redacted
 // DecisionRecord schema; the Debug UI list needs it for the "Time" column, so the
@@ -369,6 +405,35 @@ export interface TelemetryStore {
   // Delete payloads with createdAt strictly older than the cutoff (epoch ms).
   // Drives payload_retention_days auto-prune; safe to call opportunistically.
   prunePayloads(olderThanMs: number): Promise<void>;
+  // ——— Cleanup/archival additions (all OPTIONAL `?`, mirroring the codebase's
+  // additive-Store convention — e.g. pruneExpiredMemory?/insertMany?. The real
+  // sqlite + postgres adapters implement them; the cleanup runner null-checks and
+  // skips a table whose adapter lacks support, so older test doubles stay valid). ———
+  //
+  // Delete telemetry decision records with createdAt strictly older than the cutoff
+  // (epoch ms). The decision table grew UNBOUNDED before this — only request_payloads
+  // had a prune (Bug 2). STRICT lower bound like prunePayloads (a row stamped exactly
+  // at the cutoff survives). Returns the number of rows deleted.
+  pruneTelemetry?(olderThanMs: number): Promise<number>;
+  // Count telemetry rows strictly older than the cutoff — the archive pre-flight
+  // (how many rows would be exported/deleted). Read-only.
+  countTelemetryOlderThan?(olderThanMs: number): Promise<number>;
+  // Keyset page of telemetry rows strictly older than the cutoff, id-ordered for a
+  // stable archive scan. `afterId` excludes everything up to and including that id
+  // (the previous page's last). Read-only; never on the request path.
+  selectTelemetryOlderThan?(
+    olderThanMs: number,
+    limit: number,
+    afterId?: string,
+  ): Promise<TelemetryArchiveRow[]>;
+  // Count / keyset-page payloads strictly older than the cutoff — archive of the
+  // request_payloads table (same shape as the telemetry archive helpers).
+  countPayloadsOlderThan?(olderThanMs: number): Promise<number>;
+  selectPayloadsOlderThan?(
+    olderThanMs: number,
+    limit: number,
+    afterId?: string,
+  ): Promise<RequestPayloadArchiveRow[]>;
 }
 
 // SignalStore — persistence for the POST-MVP Agentic Signals feedback layer
@@ -636,6 +701,24 @@ export interface MemoryStore {
     archivedObservationsBeforeMs: number;
     expiredFactsBeforeMs: number;
   }): Promise<{ observationsDeleted: number; factsDeleted: number }>;
+  // ——— Cleanup/archival additions (OPTIONAL, mirroring the additive-Store
+  // convention; the cleanup runner null-checks and skips the table if absent). ———
+  //
+  // Raw-transcript (memory_messages) retention. Deleting messages is FK-safe — they
+  // are the CHILD of memory_threads, so a by-age delete orphans nothing (we never
+  // touch threads). Same count + keyset-select + prune-by-cutoff shape as telemetry.
+  // `id` is the keyset cursor. The cutoff is a STRICT lower bound on created_at.
+  countMessagesOlderThan?(olderThanMs: number): Promise<number>;
+  selectMessagesOlderThan?(
+    olderThanMs: number,
+    limit: number,
+    afterId?: string,
+  ): Promise<MemoryMessageArchiveRow[]>;
+  pruneMessagesOlderThan?(olderThanMs: number): Promise<number>;
+  // memory_jobs housekeeping: delete FINISHED (done|failed) job rows whose
+  // updated_at is strictly older than the cutoff. Never touches pending/running
+  // jobs (the live queue). Delete-only — a job log carries no training value.
+  pruneFinishedJobsOlderThan?(olderThanMs: number): Promise<number>;
   // Auto-compaction (model→price resolution) — the write half. Stamp the alias
   // of the model that ACTUALLY served the thread's latest turn onto the thread
   // row (memory_threads.last_served_model). Called best-effort by observeOutbound
@@ -726,6 +809,11 @@ export interface OAuthUsageStore {
   // All accounts' usage ROLLED UP over [startMs, endMs) — the providers page passes
   // the admin's local-day window. Sums the per-hour buckets per (provider, account).
   queryRange(startMs: number, endMs: number): Promise<OAuthUsageRow[]>;
+  // Cleanup (OPTIONAL): delete hour-bucket rows whose bucket_ms is strictly older
+  // than the cutoff. Delete-only — these are aggregate observability counters, not
+  // training data. Returns the deleted count. The runner null-checks before use.
+  countUsageOlderThan?(olderThanMs: number): Promise<number>;
+  pruneUsageOlderThan?(olderThanMs: number): Promise<number>;
 }
 
 // Per-account OAuth subscription QUOTA snapshot (providers-page Tier 3). One row

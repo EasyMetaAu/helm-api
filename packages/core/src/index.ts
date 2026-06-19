@@ -137,6 +137,39 @@ export {
   type TierResult,
 } from "./classifier/tiers.js";
 export {
+  LocalVolumeSink,
+  type LocalVolumeSinkOptions,
+} from "./cleanup/archive/local-volume-sink.js";
+// Automatic data cleanup / retention / archival (admin "Data cleanup"). The
+// scheduled sweep + manual "Clean Now" both run runCleanupPass; archive-before-delete
+// writes verified gzip-JSONL via the ArchiveSink. Framework-agnostic.
+export {
+  ArchiveDiskFullError,
+  type ArchivedTableResult,
+  type ArchiveManifest,
+  type ArchiveSink,
+} from "./cleanup/archive/types.js";
+export { buildCleanupPlan, type CleanupAction, type CleanupTable } from "./cleanup/cleanup-plan.js";
+export {
+  type CleanupReport,
+  type CleanupRunnerDeps,
+  type CleanupTableReport,
+  runCleanup,
+} from "./cleanup/cleanup-runner.js";
+export {
+  CLEANUP_LAST_RUN_KEY,
+  type CleanupTrigger,
+  type RunCleanupPassDeps,
+  readLastCleanupReport,
+  runCleanupPass,
+  type StoredCleanupReport,
+} from "./cleanup/run-pass.js";
+export {
+  type CleanupSchedulerDeps,
+  type CleanupSchedulerHandle,
+  startCleanupScheduler,
+} from "./cleanup/scheduler.js";
+export {
   type Config,
   ConfigError,
   formatIssues,

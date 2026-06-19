@@ -1,11 +1,20 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import {
+    archiveDownloadUrl,
+    type CleanupArchiveEntry,
+    type CleanupReport,
+    getCleanupStatus,
+    runCleanupNow,
+    vacuumDatabase,
+  } from '$lib/api/cleanup.js';
   import {
     LOG_LEVEL_OPTIONS,
     type LogLevel,
     type RuntimeSettings,
     saveSettings,
   } from '$lib/api/settings.js';
+  import { formatTimestamp } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
   // System Settings — runtime-mutable config that applies WITHOUT a restart
@@ -36,6 +45,20 @@
     user_message_queue_enabled: false,
     user_message_queue_delay_ms: 200,
     user_message_queue_wait_timeout_ms: 5000,
+    cleanup_enabled: true,
+    cleanup_interval_hours: 24,
+    cleanup_archive_enabled: true,
+    telemetry_cleanup_enabled: true,
+    telemetry_retention_days: 90,
+    payloads_cleanup_enabled: true,
+    oauth_usage_cleanup_enabled: true,
+    oauth_usage_retention_days: 180,
+    memory_jobs_cleanup_enabled: true,
+    memory_jobs_retention_days: 30,
+    memory_messages_cleanup_enabled: false,
+    memory_messages_retention_days: 180,
+    memory_derived_cleanup_enabled: false,
+    memory_derived_retention_days: 365,
   };
   // Local working copy (snapshot the loaded settings into a NEW object so the
   // $state initializer doesn't capture the reactive `data` prop reference).
@@ -64,6 +87,56 @@
     } finally {
       saving = false;
     }
+  }
+
+  // ——— Data cleanup runtime actions (independent of the settings form Save) ———
+  let lastRun = $state<CleanupReport | null>(null);
+  let archives = $state<CleanupArchiveEntry[]>([]);
+  let cleaning = $state(false);
+  let vacuuming = $state(false);
+  let cleanupError = $state<string | null>(null);
+
+  async function refreshCleanupStatus(): Promise<void> {
+    try {
+      const status = await getCleanupStatus();
+      lastRun = status.lastRun;
+      archives = status.archives;
+    } catch {
+      // Status is best-effort; the card still renders the form controls.
+    }
+  }
+
+  onMount(refreshCleanupStatus);
+
+  async function handleCleanNow(): Promise<void> {
+    cleanupError = null;
+    cleaning = true;
+    try {
+      lastRun = await runCleanupNow();
+      await refreshCleanupStatus();
+    } catch (e) {
+      cleanupError = e instanceof Error ? e.message : $t('Cleanup failed');
+    } finally {
+      cleaning = false;
+    }
+  }
+
+  async function handleVacuum(): Promise<void> {
+    cleanupError = null;
+    vacuuming = true;
+    try {
+      await vacuumDatabase();
+    } catch (e) {
+      cleanupError = e instanceof Error ? e.message : $t('Compaction failed');
+    } finally {
+      vacuuming = false;
+    }
+  }
+
+  function formatBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   }
 </script>
 
@@ -311,6 +384,210 @@
           <span class="field-help">{$t('Waiting longer than this returns 503.')}</span>
         </label>
       </div>
+    </section>
+
+    <!-- Data cleanup / retention / archival -->
+    <section class="card flex flex-col gap-3 text-sm">
+      <h2 class="section-header">{$t('Data cleanup')}</h2>
+      <p class="field-help">
+        {$t(
+          'A scheduled sweep deletes old data per the windows below. Training/audit data is archived to a compressed file before deletion; you can download those archives or clean up immediately.',
+        )}
+      </p>
+
+      <label class="flex items-start gap-3">
+        <input
+          type="checkbox"
+          data-testid="cleanup-enabled"
+          class="checkbox mt-0.5"
+          bind:checked={form.cleanup_enabled}
+        />
+        <span>
+          <span class="font-medium">{$t('Enable automatic cleanup')}</span>
+          <span class="field-help block"
+            >{$t('Master switch. When off, nothing is deleted automatically.')}</span
+          >
+        </span>
+      </label>
+
+      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 sm:flex-row sm:gap-6">
+        <label class="flex flex-col gap-1">
+          <span class="font-medium">{$t('Run every (hours)')}</span>
+          <input
+            type="number"
+            min="1"
+            max="168"
+            step="1"
+            data-testid="cleanup-interval-hours"
+            class="input-sm w-32 min-h-11 md:min-h-0"
+            bind:value={form.cleanup_interval_hours}
+          />
+          <span class="field-help">{$t('Interval changes take effect on the next restart.')}</span>
+        </label>
+        <label class="flex items-start gap-3 self-end pb-1">
+          <input
+            type="checkbox"
+            data-testid="cleanup-archive-enabled"
+            class="checkbox mt-0.5"
+            bind:checked={form.cleanup_archive_enabled}
+          />
+          <span class="font-medium">{$t('Archive before deleting')}</span>
+        </label>
+      </div>
+
+      <!-- Per-category toggles + windows -->
+      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3">
+        <label class="flex flex-wrap items-center gap-2">
+          <input type="checkbox" class="checkbox" bind:checked={form.telemetry_cleanup_enabled} />
+          <span class="font-medium">{$t('Decision records (routing/cost telemetry)')}</span>
+          <input
+            type="number"
+            min="1"
+            max="3650"
+            class="input-sm w-24 min-h-11 md:min-h-0"
+            bind:value={form.telemetry_retention_days}
+          />
+          <span class="field-help">{$t('days · archived')}</span>
+        </label>
+
+        <label class="flex flex-wrap items-center gap-2">
+          <input type="checkbox" class="checkbox" bind:checked={form.payloads_cleanup_enabled} />
+          <span class="font-medium">{$t('Full request/response bodies')}</span>
+          <span class="field-help"
+            >{$t('uses the “keep bodies for” window above · archived')}</span
+          >
+        </label>
+
+        <label class="flex flex-wrap items-center gap-2">
+          <input
+            type="checkbox"
+            class="checkbox"
+            bind:checked={form.memory_messages_cleanup_enabled}
+          />
+          <span class="font-medium">{$t('Raw conversation messages')}</span>
+          <input
+            type="number"
+            min="1"
+            max="3650"
+            class="input-sm w-24 min-h-11 md:min-h-0"
+            bind:value={form.memory_messages_retention_days}
+          />
+          <span class="field-help">{$t('days · archived · highest training value (opt-in)')}</span>
+        </label>
+
+        <label class="flex flex-wrap items-center gap-2">
+          <input type="checkbox" class="checkbox" bind:checked={form.oauth_usage_cleanup_enabled} />
+          <span class="font-medium">{$t('OAuth usage counters')}</span>
+          <input
+            type="number"
+            min="1"
+            max="3650"
+            class="input-sm w-24 min-h-11 md:min-h-0"
+            bind:value={form.oauth_usage_retention_days}
+          />
+          <span class="field-help">{$t('days · deleted')}</span>
+        </label>
+
+        <label class="flex flex-wrap items-center gap-2">
+          <input type="checkbox" class="checkbox" bind:checked={form.memory_jobs_cleanup_enabled} />
+          <span class="font-medium">{$t('Finished memory jobs')}</span>
+          <input
+            type="number"
+            min="1"
+            max="3650"
+            class="input-sm w-24 min-h-11 md:min-h-0"
+            bind:value={form.memory_jobs_retention_days}
+          />
+          <span class="field-help">{$t('days · deleted')}</span>
+        </label>
+
+        <label class="flex flex-wrap items-center gap-2">
+          <input
+            type="checkbox"
+            class="checkbox"
+            bind:checked={form.memory_derived_cleanup_enabled}
+          />
+          <span class="font-medium">{$t('Derived memory (observations & facts)')}</span>
+          <input
+            type="number"
+            min="1"
+            max="3650"
+            class="input-sm w-24 min-h-11 md:min-h-0"
+            bind:value={form.memory_derived_retention_days}
+          />
+          <span class="field-help">{$t('days · deleted (opt-in)')}</span>
+        </label>
+      </div>
+
+      <p class="field-help">
+        {$t('Cleanup settings are saved with the “Save settings” button below.')}
+      </p>
+
+      {#if cleanupError}
+        <p class="alert-error" role="alert">{cleanupError}</p>
+      {/if}
+
+      <!-- Runtime actions (independent of Save) -->
+      <div class="flex flex-wrap items-center gap-3">
+        <button
+          class="btn-secondary"
+          data-testid="cleanup-run-now"
+          onclick={handleCleanNow}
+          disabled={cleaning}
+        >
+          {cleaning ? $t('Cleaning…') : $t('Clean now')}
+        </button>
+        <button
+          class="btn-secondary"
+          data-testid="cleanup-vacuum"
+          onclick={handleVacuum}
+          disabled={vacuuming}
+        >
+          {vacuuming ? $t('Compacting…') : $t('Compact database')}
+        </button>
+        <span class="field-help"
+          >{$t('“Clean now” runs immediately; “Compact database” reclaims disk (briefly locks).')}</span
+        >
+      </div>
+
+      {#if lastRun}
+        <div class="rounded border border-slate-100 p-3 text-xs">
+          <div class="font-medium">
+            {$t('Last run')}: {formatTimestamp(new Date(lastRun.finishedAtMs).toISOString())}
+            · {lastRun.trigger}
+            · {lastRun.ok ? $t('ok') : $t('with errors')}
+          </div>
+          <ul class="mt-1 flex flex-col gap-0.5">
+            {#each lastRun.tables as row (row.table)}
+              <li>
+                <span class="font-mono">{row.table}</span>:
+                {#if row.skipped}
+                  {$t('skipped')}{row.error ? ` (${row.error})` : ''}
+                {:else}
+                  {row.deletedRows}
+                  {$t('deleted')}{row.archived ? `, ${row.archivedRows} ${$t('archived')}` : ''}
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+
+      {#if archives.length > 0}
+        <div class="flex flex-col gap-1 text-xs">
+          <span class="font-medium">{$t('Archives')}</span>
+          <ul class="flex flex-col gap-0.5">
+            {#each archives as a (a.runId + a.file)}
+              <li class="flex flex-wrap items-center gap-2">
+                <a class="link" href={archiveDownloadUrl(a)} download>{a.runId}/{a.file}</a>
+                <span class="field-help"
+                  >{formatBytes(a.bytes)} · {formatTimestamp(new Date(a.modifiedMs).toISOString())}</span
+                >
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
     </section>
 
     <div class="card-actions border-t-0 pt-0">

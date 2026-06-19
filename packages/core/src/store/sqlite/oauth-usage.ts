@@ -1,5 +1,5 @@
 import { type OAuthUsageRow, OAuthUsageRowSchema } from "@helm/shared";
-import { and, gte, lt, sql } from "drizzle-orm";
+import { and, count, gte, lt, sql } from "drizzle-orm";
 import type { OAuthUsageStore } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
 import { oauthUsage } from "./schema.js";
@@ -71,6 +71,21 @@ export class SqliteOAuthUsageStore implements OAuthUsageStore {
       .groupBy(oauthUsage.providerId, oauthUsage.account)
       .all();
     return rows.map((r) => this.toRow(r));
+  }
+
+  // Cleanup: count / delete hour buckets strictly older than the cutoff (bucket_ms).
+  async countUsageOlderThan(olderThanMs: number): Promise<number> {
+    const row = this.db
+      .select({ value: count() })
+      .from(oauthUsage)
+      .where(lt(oauthUsage.bucketMs, olderThanMs))
+      .get();
+    return row?.value ?? 0;
+  }
+
+  async pruneUsageOlderThan(olderThanMs: number): Promise<number> {
+    const res = this.db.delete(oauthUsage).where(lt(oauthUsage.bucketMs, olderThanMs)).run();
+    return res.changes;
   }
 
   // Aggregated row -> OAuthUsageRow. Re-validates through the shared schema so a

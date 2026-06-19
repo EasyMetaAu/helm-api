@@ -167,7 +167,6 @@ function wiring(
     now: () => 1000,
     genTraceId: () => "new_trace",
     capturePayloads: () => true,
-    payloadRetentionMs: () => 0,
     costOf: () => 0.5,
     ...overrides,
   };
