@@ -466,7 +466,6 @@
   "Point your tool at Helm by setting its base URL and API key, then send model \"auto\" (or a lane name) — the gateway picks the model.": "Point your tool at Helm by setting its base URL and API key, then send model \"auto\" (or a lane name) — the gateway picks the model.",
   "Policies": "Policies",
   "Port": "Port",
-  "Prev": "Prev",
   "Preview": "Preview",
   "Previous": "Previous",
   "Primary": "Primary",

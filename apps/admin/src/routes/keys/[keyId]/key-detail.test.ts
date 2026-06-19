@@ -225,10 +225,9 @@ describe('key detail page', () => {
         requests: { items: [requestItem('tr_1')], total: 60, page: 1, pageSize: 25 },
       }),
     });
-    // 60 / 25 → 3 pages. Status line mirrors the requests list: "Page X of Y · N requests".
+    // 60 / 25 → 3 pages. Status line mirrors the requests list: "Page X of Y".
     const status = screen.getByTestId('pager-status');
     expect(status.textContent).toMatch(/Page\s*1\s*of\s*3/);
-    expect(status.textContent).toMatch(/60/);
 
     // Page numbers are real <a> links carrying the page in the querystring (native
     // pointer / open-in-new-tab), not plain buttons like the old pager.
@@ -252,5 +251,17 @@ describe('key detail page', () => {
       }),
     });
     expect(screen.queryByTestId('pager-status')).not.toBeInTheDocument();
+  });
+
+  it('preserves a non-default range in the page-number links', () => {
+    render(KeyDetailPage, {
+      data: pageData({
+        filters: { range: '7d', page: 1 } as KeyDetailFilters,
+        requests: { items: [requestItem('tr_1')], total: 60, page: 1, pageSize: 25 },
+      }),
+    });
+    // The href must carry the active range so the window survives navigation —
+    // the behaviour unique to this pager vs the requests list pager.
+    expect(screen.getByRole('link', { name: '2' })).toHaveAttribute('href', '?range=7d&page=2');
   });
 });

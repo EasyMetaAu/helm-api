@@ -466,7 +466,6 @@
   "Point your tool at Helm by setting its base URL and API key, then send model \"auto\" (or a lane name) — the gateway picks the model.": "把你的工具指向 Helm：填好 base URL 和 API key，再把 model 设为 “auto”（或某个 lane 名称）——具体用哪个模型交给网关来挑。",
   "Policies": "策略",
   "Port": "端口",
-  "Prev": "上一页",
   "Preview": "预览",
   "Previous": "上一页",
   "Primary": "主用",
