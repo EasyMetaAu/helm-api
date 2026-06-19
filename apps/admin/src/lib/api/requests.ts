@@ -98,6 +98,18 @@ export interface ProviderAttempt {
 export interface RequestDetail {
   trace_id: string;
   ts: string;
+  // Request identity/summary (same source as the list row) for the detail "Request
+  // summary" card — so an operator can read/copy WHO called and WHAT was asked
+  // without bouncing back to the list. key_prefix/key_name are prefix/name only,
+  // never the plaintext key (Principle 7); null when the record carries none.
+  key_prefix: string | null;
+  key_name: string | null;
+  requested_model: string | null; // what the client asked for
+  final_model: string | null; // the served model alias (null = no provider served)
+  lane: string; // selected lane ('' on a legacy record)
+  status: 'ok' | 'error';
+  // Total wall-clock latency (Σ attempt latency, ms); null on a legacy record.
+  latency_ms: number | null;
   request_meta: Record<string, unknown>;
   payload_summary: string; // redacted summary — NOT the full payload
   classifier_output: {
@@ -454,6 +466,17 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     // endpoint). Legacy records without it stay empty → header shows the
     // "time not recorded" placeholder rather than a fabricated time.
     ts: typeof raw.created_at === 'number' ? new Date(raw.created_at).toISOString() : '',
+    // Identity/summary fields, mapped from the same recorded values as the list row
+    // (Principle 1 — read, never recompute). PREFIX/NAME only, never plaintext
+    // (Principle 7); null when the record carries none (legacy / unnamed / deleted).
+    key_prefix:
+      typeof raw.key_prefix === 'string' && raw.key_prefix.length > 0 ? raw.key_prefix : null,
+    key_name: typeof raw.key_name === 'string' && raw.key_name.length > 0 ? raw.key_name : null,
+    requested_model: raw.requested_model ?? null,
+    final_model: raw.final?.model_alias ?? null,
+    lane: raw.lane?.selected_lane ?? '',
+    status,
+    latency_ms: typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : null,
     request_meta: buildRequestMeta(raw),
     // The backend does not persist a payload; we render a redaction placeholder so
     // the operator knows it was intentionally withheld (Principle 7).

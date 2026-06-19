@@ -130,6 +130,29 @@ describe('toListItem', () => {
 });
 
 describe('toDetail', () => {
+  it('surfaces the identity/summary fields (key, requested+served model, lane, status, latency)', () => {
+    const d = toDetail(rawRecord({ key_name: 'Production backend' }));
+    expect(d.key_prefix).toBe('helm_live_ab12'); // prefix only — never plaintext
+    expect(d.key_name).toBe('Production backend');
+    expect(d.requested_model).toBe('gpt-4o');
+    expect(d.final_model).toBe('premium'); // served model alias
+    expect(d.lane).toBe('coding');
+    expect(d.status).toBe('ok');
+    expect(d.latency_ms).toBe(460);
+  });
+
+  it('nulls the identity fields a legacy/unnamed record never carried (never fabricated)', () => {
+    const d = toDetail(rawRecord({ key_prefix: null, key_name: '' }));
+    expect(d.key_prefix).toBeNull();
+    expect(d.key_name).toBeNull();
+    // An error record maps status through (drives the summary badge).
+    const errored = toDetail(
+      rawRecord({ final: { model_alias: null, status: 'error', error_reason: 'all_providers_failed' } }),
+    );
+    expect(errored.status).toBe('error');
+    expect(errored.final_model).toBeNull();
+  });
+
   it('maps the recorded cost_breakdown with eval cost separated from completion', () => {
     const d = toDetail(rawRecord());
     expect(d.cost_breakdown.eval_usd).toBeCloseTo(0.0002);

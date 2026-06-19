@@ -247,6 +247,12 @@
             {#if key.memory_project_id}
               · {key.memory_project_id}
             {/if}
+            <!-- Jump to this key's memory (its account + default project scope) so an
+                 operator can browse/curate the facts & reflections it has learned. -->
+            <a
+              class="link-inline ml-1"
+              href={`${base}/memory?key=${encodeURIComponent(data.keyId)}`}>{$t('Manage memory')} →</a
+            >
           {/if}
         </dd>
       </div>

@@ -307,6 +307,7 @@
               <td data-label={$t('Actions')} class="px-3 py-2 lg:text-right">
                 {#if !key.disabled}
                   <div class="flex justify-end gap-2">
+                    <a class="btn-secondary" href={detailHref(key.key_id)}>{$t('Details')}</a>
                     <button type="button" class="btn-secondary" onclick={() => startEdit(key)}
                       >{$t('Edit')}</button
                     >
@@ -319,6 +320,7 @@
                   </div>
                 {:else}
                   <div class="flex justify-end gap-2">
+                    <a class="btn-secondary" href={detailHref(key.key_id)}>{$t('Details')}</a>
                     <button
                       type="button"
                       class="btn-danger-outline"

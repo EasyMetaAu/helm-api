@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import type { ApiKeyView } from '$lib/api/keys.js';
   import {
     deleteFact,
@@ -28,7 +28,10 @@
   // operator can curate what the gateway remembers. Pure consumer of
   // /admin/api/memory/* (CLAUDE.md Principle 1); the loader seeds scopes + keys,
   // facts/reflections load on selection.
-  let { data }: { data: { scopes: MemoryScope[]; keys: ApiKeyView[] } } = $props();
+  let {
+    data,
+  }: { data: { scopes: MemoryScope[]; keys: ApiKeyView[]; initialKeyId?: string | null } } =
+    $props();
 
   const scopes = untrack(() => data.scopes);
   const keys = untrack(() => data.keys);
@@ -249,6 +252,17 @@
       error = e instanceof Error ? e.message : $t('Failed to delete reflection');
     }
   }
+
+  // Deep link from a key's detail page (/memory?key=<keyId>): open on the By Key tab
+  // pre-selected to that key and load its memory — the same path as picking it from
+  // the dropdown. Ignored when the key isn't in the list (stale link / deleted key).
+  onMount(() => {
+    const id = data.initialKeyId;
+    if (id && keys.some((k) => k.key_id === id)) {
+      tab = 'key';
+      void pickKey(id);
+    }
+  });
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">

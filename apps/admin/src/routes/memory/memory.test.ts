@@ -169,4 +169,28 @@ describe('memory page', () => {
     renderPage([]);
     expect(screen.getByText(/no memory yet/i)).toBeInTheDocument();
   });
+
+  it('deep link (initialKeyId) lands on the By Key tab pre-selected and loads that key', async () => {
+    render(MemoryPage, {
+      data: { scopes: [scope()], keys: [key('k1', { name: 'Prod backend' })], initialKeyId: 'k1' },
+    });
+    // Opens on By Key (not the default By Scope) with the key resolved + facts loaded.
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: /by key/i }).getAttribute('aria-selected')).toBe(
+        'true',
+      ),
+    );
+    await waitFor(() => expect(resolveKey).toHaveBeenCalledWith('k1'));
+    await waitFor(() => expect(listFacts).toHaveBeenCalled());
+  });
+
+  it('ignores an initialKeyId that is not in the key list (no crash, stays on By Scope)', async () => {
+    render(MemoryPage, {
+      data: { scopes: [scope()], keys: [key('k1')], initialKeyId: 'ghost' },
+    });
+    expect(screen.getByRole('tab', { name: /by scope/i }).getAttribute('aria-selected')).toBe(
+      'true',
+    );
+    expect(resolveKey).not.toHaveBeenCalled();
+  });
 });

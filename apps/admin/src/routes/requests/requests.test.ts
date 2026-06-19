@@ -57,6 +57,13 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
   return {
     trace_id: 'tr_1',
     ts: '2026-05-31T10:00:00Z',
+    key_prefix: 'helm_live_ab12',
+    key_name: 'Production backend',
+    requested_model: 'gpt-4o',
+    final_model: 'claude-x',
+    lane: 'premium',
+    status: 'ok',
+    latency_ms: 460,
     request_meta: { requested_model: 'gpt-4o' },
     payload_summary: 'payload withheld (redacted — only routing metadata is stored)',
     classifier_output: {
@@ -283,6 +290,34 @@ describe('requests detail page', () => {
     expect(within(cost).getByTestId('cost-total')).toBeInTheDocument();
     // Capture was off → a clear not-recorded notice instead of the full body.
     expect(screen.getByTestId('payload-summary')).toHaveTextContent(/not recorded/i);
+  });
+
+  it('renders a Request summary card with key (name+prefix), requested+served model, lane, status, latency', () => {
+    render(DetailPage, {
+      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
+    });
+    const summary = screen.getByTestId('request-summary');
+    expect(summary).toHaveTextContent('Production backend'); // key name
+    expect(summary).toHaveTextContent('helm_live_ab12'); // key prefix (traceability)
+    expect(summary).toHaveTextContent('gpt-4o'); // requested model
+    expect(summary).toHaveTextContent('claude-x'); // served model
+    expect(summary).toHaveTextContent('premium'); // lane
+    expect(summary).toHaveTextContent('460ms'); // total latency
+  });
+
+  it('falls back to the prefix (and "—") in the summary for an unnamed/legacy record', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail({ key_name: null, key_prefix: null, final_model: null, latency_ms: null }),
+        payload: { captured: false },
+        traceId: 'tr_1',
+      },
+    });
+    const summary = screen.getByTestId('request-summary');
+    // No key name and no prefix → the key cell degrades to the em-dash, never blank
+    // and never a fabricated value (Principle 7).
+    expect(summary).toHaveTextContent('—');
+    expect(summary).not.toHaveTextContent('Production backend');
   });
 
   it('renders the throughput card: true TPS, time-to-first-token, and the generation window', () => {

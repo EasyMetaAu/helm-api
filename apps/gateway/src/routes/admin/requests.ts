@@ -65,13 +65,27 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   // GET /requests/:traceId -> RequestDetail (full decision trail) | 404. The
   // DecisionRecord has no timestamp field, so we flatten created_at (epoch ms)
   // onto it exactly like the list endpoint above — the SPA header shows the same
-  // request time as the list "Time" column instead of "time not recorded".
+  // request time as the list "Time" column instead of "time not recorded". We also
+  // join the recorded api_key_id -> the key's human NAME (same as the list), so the
+  // detail's "Request summary" card can show a recognizable label, not just the
+  // prefix the record already carries.
   app.get("/admin/api/requests/:traceId", async (c) => {
     const traceId = c.req.param("traceId");
     const rec = await deps.telemetry.getByRequestId(traceId);
     if (!rec) return c.json({ error: "request not found" }, 404);
     const createdAt = await deps.telemetry.getCreatedAt(traceId);
-    return c.json(createdAt ? { ...rec, created_at: createdAt.getTime() } : rec);
+    // Resolve api_key_id -> key name (cosmetic label, no key material — Principle 7).
+    // null when the key is unnamed OR was since deleted; the SPA then falls back to
+    // the key_prefix carried in the record. The route owns keyStore (Principle 1).
+    const apiKeyId = await deps.telemetry.getApiKeyId(traceId);
+    const keyName = apiKeyId
+      ? ((await deps.keyStore.list()).find((k) => k.key_id === apiKeyId)?.name ?? null)
+      : null;
+    return c.json({
+      ...rec,
+      ...(createdAt ? { created_at: createdAt.getTime() } : {}),
+      key_name: keyName,
+    });
   });
 
   // GET /requests/:traceId/payload -> the captured full request/response bodies

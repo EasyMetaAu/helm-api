@@ -110,6 +110,59 @@
       />
     {/if}
 
+    <!-- Request summary: identity + routing at a glance (the same fields as the list
+         row) so an operator can read/copy WHO called and WHAT was asked without
+         bouncing back to the list. Key/prefix only — never the plaintext key
+         (Principle 7); each value degrades to an em-dash, never blank/fabricated. -->
+    <section data-testid="request-summary" class="card text-sm">
+      <h2 class="section-header">{$t('Request summary')}</h2>
+      <dl class="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3 lg:grid-cols-4">
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Key')}</dt>
+          <dd class="mt-0.5 text-ink-body">
+            {#if d.key_name}
+              <span class="text-ink-strong">{d.key_name}</span>
+              {#if d.key_prefix}
+                <code class="ml-1 font-mono text-xs text-ink-muted">{d.key_prefix}</code>
+              {/if}
+            {:else if d.key_prefix}
+              <code class="font-mono text-ink-strong">{d.key_prefix}</code>
+            {:else}
+              —
+            {/if}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Requested model')}</dt>
+          <dd class="mt-0.5 font-mono text-ink-body">{d.requested_model ?? '—'}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Served model')}</dt>
+          <dd class="mt-0.5 font-mono text-ink-body">{d.final_model ?? '—'}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Lane')}</dt>
+          <dd class="mt-0.5 text-ink-body">{d.lane || '—'}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Status')}</dt>
+          <dd class="mt-0.5">
+            {#if d.status === 'error'}
+              <span class="badge-error">{$t('error')}</span>
+            {:else}
+              <span class="badge-ok">{$t('ok')}</span>
+            {/if}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Latency')}</dt>
+          <dd class="mt-0.5 font-mono text-ink-body">
+            {d.latency_ms === null ? '—' : `${d.latency_ms}ms`}
+          </dd>
+        </div>
+      </dl>
+    </section>
+
     <!-- Request: full captured body when capture_payloads is on, else metadata. -->
     <section class="card text-sm">
       <h2 class="section-header">

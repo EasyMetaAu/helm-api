@@ -90,6 +90,19 @@ describe('keys page', () => {
     expect(link.getAttribute('href')).toBe('/keys/k1');
   });
 
+  it('offers a "Details" link on every row (active + disabled) pointing at the detail page', () => {
+    renderPage([key('k1', { name: 'Prod' }), key('k2', { disabled: true })]);
+    const rows = screen.getAllByTestId('key-row');
+    // Active row: an explicit Details action (not only the clickable name).
+    expect(within(rows[0]).getByRole('link', { name: /details/i }).getAttribute('href')).toBe(
+      '/keys/k1',
+    );
+    // Disabled (revoked) row still lets an operator inspect its history.
+    expect(within(rows[1]).getByRole('link', { name: /details/i }).getAttribute('href')).toBe(
+      '/keys/k2',
+    );
+  });
+
   it('renders the 24h usage cell for a key with traffic, "—" for one without', () => {
     renderPage(
       [key('k1'), key('k2')],
