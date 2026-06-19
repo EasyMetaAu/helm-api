@@ -307,6 +307,7 @@ describe('listRequests', () => {
       decidedBy: 'eval',
       lane: 'premium',
       model: 'gpt-4o',
+      keyId: 'key_abc',
       start: 1000,
       end: 2000,
     });
@@ -318,6 +319,8 @@ describe('listRequests', () => {
     expect(url.searchParams.get('decided_by')).toBe('eval');
     expect(url.searchParams.get('lane')).toBe('premium');
     expect(url.searchParams.get('model')).toBe('gpt-4o');
+    // keyId is serialized as key_id to match the backend schema (exact key scope).
+    expect(url.searchParams.get('key_id')).toBe('key_abc');
     expect(url.searchParams.get('start')).toBe('1000');
     expect(url.searchParams.get('end')).toBe('2000');
   });

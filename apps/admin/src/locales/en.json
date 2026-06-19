@@ -635,5 +635,17 @@
   "Lane unavailable": "Lane unavailable",
   "Authentication failed": "Authentication failed",
   "Timed out": "Timed out",
-  "Circuit open": "Circuit open"
+  "Circuit open": "Circuit open",
+  "Usage (24h)": "Usage (24h)",
+  "req": "req",
+  "err": "err",
+  "tok": "tok",
+  "No traffic in the last 24h": "No traffic in the last 24h",
+  "Configuration": "Configuration",
+  "From": "From",
+  "To": "To",
+  "Clear": "Clear",
+  "Prev": "Prev",
+  "{count} in window": "{count} in window",
+  "No requests for this key in the selected window.": "No requests for this key in the selected window."
 }

@@ -68,6 +68,9 @@ export interface StatsParams {
   end?: number; // epoch ms (exclusive); omitted → backend default (now)
   bucket?: 'hour' | 'day';
   tzOffsetMinutes?: number; // east-positive UTC offset; buckets in client-local day
+  // When set, scopes the aggregate to a single API key (the key detail page);
+  // omitted = the global dashboard view.
+  key_id?: string;
 }
 
 const BASE = '/admin/api/stats';
@@ -82,6 +85,7 @@ export async function getStats(params: StatsParams = {}): Promise<DashboardStats
   if (params.bucket) qs.set('bucket', params.bucket);
   if (params.tzOffsetMinutes !== undefined)
     qs.set('tzOffsetMinutes', String(params.tzOffsetMinutes));
+  if (params.key_id) qs.set('key_id', params.key_id);
   const url = qs.toString() ? `${BASE}?${qs}` : BASE;
   const res = await fetch(url, { headers: { accept: 'application/json' } });
   if (!res.ok) throw new Error(`stats api ${res.status}`);

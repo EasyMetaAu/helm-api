@@ -248,6 +248,16 @@ export async function listKeys(): Promise<ApiKeyView[]> {
   return rows.map(normalizeView);
 }
 
+// GET /admin/api/keys/:id -> the single redacted key record (prefix only). Throws
+// on 404 (unknown id) — the detail page loader surfaces that as a not-found state.
+export async function getKey(keyId: string): Promise<ApiKeyView> {
+  const res = await fetch(`${BASE}/${encodeURIComponent(keyId)}`, {
+    headers: { accept: 'application/json' },
+  });
+  const raw = await asJson<Record<string, unknown>>(res);
+  return normalizeView(raw);
+}
+
 // GET /admin/api/keys/usage?start&end -> per-key usage rollup for the list column.
 // The window is resolved client-side (the list defaults to the last 24h); the
 // backend fills its own 24h default when omitted and fails open on a bad window.
