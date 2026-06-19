@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-19 · Anthropic 出站工具名规范化（全翻译路径）（issue #303；docs/05；原则 6/7/8）
+
+- **背景**：issue #303 要求所有发往 Claude 的请求 `tools[].name` 合规(charset/长度/非空) + 可逆,响应能还原客户端原名。核实现状=**部分解决**:规范化只在 strict 指纹模式(`applyStrictToolPipeline`)做;非 strict 热路径 `openaiToAnthropicRequest:1228` 逐字发 `fn.name`/`tc.function.name`(`execute.ts:979→chatCompletion`)→静态 key/官方端点的非法字符/点/空格/超长名直达 Claude 致 400 或工具链错位。
+- **实现(复用,不另造)**:复用协议层 `createAnthropicToolNameMap`(charset `[A-Za-z0-9_]`/≤64/`""`→`tool`/FNV-1a 冲突后缀)。新增 `applyAnthropicToolNameSpec(body)` 规范化 `tools[]`/`tool_choice`/历史 `tool_use` 名 + `composeReverseMaps` 串联。在 `request()` 里、strict cloaking **之后**、序列化**之前**、**仅翻译路径**(新 `normalizeToolNames` 标志)跑;`chatCompletion`/`Stream` 传 true,`nativePassthrough`/`Stream` 默认 false(逐字)。组合 map(wire→cloaked/raw→original)经既有 `anthropicToOpenAIResponse`/`translateAnthropicSSE` 还原原名。
+- **取舍/坑(用户拍板)**:规范化在 cloaking **之后**作最终 spec 兜底→对已合规 cloaked 名是**幂等 no-op**,strict golden fixtures 不变(**两路径都兜底**)。在 **CLONE**(`structuredClone`)上改写,原始输入不动→401 重放重建 map 安全(镜像 strict 的 clone 修复)。**native passthrough 逐字**:流式 `readAnthropicSSERaw` byte-faithful 无法回程还原,客户端自负原生合规,加断言测试确认。空名工具被 `openaiToAnthropicRequest`(`if(!fn.name)`)提前丢弃,非法名才是真 bug。
+- **验证**:TDD,`anthropic.test.ts` 6 新用例(非法/空格冲突/超长+响应还原、空名丢弃、tool_choice、流式还原、strict 组合、native 逐字);provider 全套 **493** 绿(strict golden 不变=幂等证明)、typecheck(4)/lint(479)清。分支 `fix-anthropic-tool-name-normalization`(PR #316 `Closes #303`),未部署。box 走 OAuth 订阅=strict 本已覆盖,本次补齐非 strict + native 确认 + 测试 + 文档。
+
 ## 2026-06-19 · Layer-1 复杂度(tier)评分限定当前 user 轮（docs/03 §Layer-1；原则 4/6）
 
 - **背景**：承接同日 task 检测修复（PR #313）的**孪生 bug**。`dimensions.ts` 的复杂度评分仍用 `extractText(req.messages)` 拼接全部消息，巨型系统提示同样污染 `complexity`。线上 `5ee4bf79` 经 #313 后 task=chat，但 complexity 仍 `complex`（系统提示 `coding_intl_kw`/`实现` + 全文 `msg_length` 把 rawScore 顶过 0.30，实测 ≈0.335）→ 命中 `chat_complex_to_premium` → **仍烧 premium(Opus)**。task 修复挡住"误判 coding"，tier 修复才挡住"闲聊烧 premium"。
@@ -24,18 +31,13 @@
 - **取舍/坑/TODO**：选 B（关键词+结构信号一起限定）而非"只限关键词"——否则 `detectTask` 自身前后不一致（系统提示里的代码块仍会污染成 coding）。**tier 层（`dimensions.ts`）同病**：同一个 `extractText` 喂复杂度评分，`coding_intl_kw` 命中系统提示里的"实现"会把闲聊抬成 `complex`；但 tier 被 golden set / `calibrate-classifier.ts` 标定锁定，动它需重跑标定 → **本次刻意不碰，记为后续标定门控项**（注意保留 ambient `msg_length`/`turn_count`/`tool_count` 的全文体量语义，别误伤）。本请求症状仅靠 task 限定即修复（task→chat，coding 策略不再匹配）。`cache-key.ts` 保留 `.trim()`，内容哈希不变。box 配置 operator-owned，部署是单独后续项。
 - **验证**：TDD 红→绿，taskdetect.test.ts 新增 5 用例（复现 Mimi 大系统提示+末条中文闲聊→chat、早轮代码块被忽略、末条代码块仍触发、前轮关键词不计、工具路径保留）；**真实捕获正文** `/tmp/req_5ee4.json` 经修复后 `detectTask`→`chat`（scores `[]`）。classifier 全套+config samples **266** 绿（含 engine 多轮语言守卫、`cache-key.test.ts` 证哈希不变）、typecheck（4 项目）/ lint(479) 清。分支 `fix-classifier-task-scope-last-user`，未提交/未部署。
 
-## 2026-06-18 · Salient-fact 快车道：事实形成与注入解绑压缩（docs/salient-fact-memory-spec；docs/08/12；原则 1/2/3）
-
-- **背景**：线上「我喜欢42」短对话跨 session 召不回。生产 DB 实证根因：事实形成被绑死在历史压缩上——facts 只由 reflector 从 observation 抽，而 observation 只在 `segmentMinTokens=2048` / 1h idle 触发；短对话两者都过不了 → 0 observation → 0 reflector → 0 fact。且 `inject.ts` 从不读 `memory_facts`（P8 逐轮检索因需 embedding 推迟）。
-- **实现**：新增 opt-in `config.memory.forgetting.consolidate.eager_facts`（默认 false，跨块 superRefine 强制 `llm.enabled:true`，否则 fail-closed）+ 可选 `max_facts_injected`（无默认→内部先验 16）。**Change A**：observer 在**不压缩**的退出路径上对 uncovered 原始轮抽事实（`extractFactsFromMessages` raw→`{subjectText,factText}`，nano `facts_model`，无确定性兜底→失败返回 []），经共享 `buildReconciledFactBatch`（从 reflector 抽出，两条事实路径同款 subject_key/content_hash/cap）落库 `insertFactsReconciled`，scope 由 `ObserverJob.projectId/resourceId` 携带（worker 已持有，零额外读）。**Change B**：`inject.loadMemory` 加载 `listActiveFacts(account+project+resource)`（静态 scope 加载，非 per-query），装配 `## Known facts` 段（reflections>facts>observations 预算优先级，forgetting 分数排序取 top-K，oldest-first 稳定展示），新增 `metadata.facts_injected`。
-- **取舍/坑/偏离 spec**：①持久 fact-scan **watermark 推迟**——靠 content_hash 去重幂等 + uncovered-tail + 压缩阀把短对话重抽限制在 ~1–2 次/生命周期；②压缩那一跑**跳过** eager（reflector 负责该路事实），而非 spec 原提的"并进 summarize 一次调用"，避免双抽且不动 summarize 签名；③**fact reinforcement 推迟**（`bumpReferences` 未扩展 fact id）；④`facts_injected` 暂只在 inject 模块 metadata，未进 DecisionRecord schema。成本：每条独立 nano 调用仅发生在"短到不压缩 + 有新 user 内容"，实测放大 ~1.05–1.2×、成本个位数 %。全程 fail-open，off 时与现状逐字一致。**无迁移、无 schema 改动**。
-- **验证**：TDD 红→绿，5 slice 各自单测（config 22 / memory-llm 16 / observer 19+scheduler / inject 27），全量 **3989** 绿、typecheck（3 项目）/ lint(478) 绿。分支 `docs/salient-fact-memory-proposal`（PR #312，spec + 实现同 PR）。默认 off，box 已开 llm+forgetting，置 `eager_facts:true` 即可启用（operator-owned config，部署 pull+up -d 不覆盖）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-18 · Salient-fact 快车道：事实形成与注入解绑压缩（docs/salient-fact-memory-spec；docs/08/12；原则 1/2/3）：线上「我喜欢42」短对话跨 session 召不回——facts 只由 reflector 从 observation 抽,而 observation 仅 `segmentMinTokens=2048`/1h idle 触发,短对话 0 observation→0 fact;且 `inject.ts` 从不读 `memory_facts`。新增 opt-in `config.memory.forgetting.consolidate.eager_facts`(默认 false,跨块强制 `llm.enabled`)+ `max_facts_injected`(先验 16)。Change A:observer 不压缩退出路径对 uncovered 原始轮抽事实(`extractFactsFromMessages`,nano `facts_model`,失败返空),经共享 `buildReconciledFactBatch` 落库 `insertFactsReconciled`,scope 由 `ObserverJob` 携带。Change B:`inject.loadMemory` 加载 `listActiveFacts` 装配「## Known facts」段(reflections>facts>observations 预算优先,forgetting 排序 top-K)。坑:fact-scan watermark/压缩跳过 eager/fact reinforcement 均推迟;成本放大 ~1.05–1.2×;无迁移无 schema 改。全量 3989 绿。PR #312,默认 off(box 已开 llm+forgetting,置 `eager_facts:true` 启用)。
 
 ### 2026-06-18 · Codex 原生直通缺失 instructions 修复（issue #217；docs/05；原则 1/4/8）：线上 `09387e28` pi-ai `/v1/responses` 直通 ChatGPT 订阅 Codex 后端 400 `Instructions are required`（入站 `input[]` 无顶层 `instructions`，系统提示在 `input[0]={role:developer}`，pi-ai 故意不发）。core 新增纯函数 `hoistResponsesInstructions`（已有非空 instructions 原样返回；否则把 input 里 system/developer hoist 进顶层 instructions 并摘除；无 system 则注入 `DEFAULT_INSTRUCTIONS`），在 `execute.ts` `needsCodexResponsesShim`（仅 codex_responses profile）调用，记 `instructions_hoisted_from_input`/`instructions_defaulted`，**保留 passthrough**。坑：`body_shims_applied` 去重+排序故 ledger 字母序。core 8 + gateway 2 测、全量 3264 绿，未部署。
 

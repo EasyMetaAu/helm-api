@@ -2650,3 +2650,188 @@ describe("createAnthropicClient — nativePassthroughStream", () => {
     expect(chunks.join("")).toContain("message_start");
   });
 });
+
+// Issue #303 — Anthropic outbound tool names must be spec-normalized on ALL translate
+// paths (not just strict fingerprint mode), with a reversible map so responses restore
+// the client's original names. Native passthrough stays verbatim.
+const TOOL_NAME_RE = /^[A-Za-z0-9_]{1,64}$/;
+
+type NarrowedToolResponse = {
+  choices: Array<{ message: { tool_calls?: Array<{ function: { name: string } }> } }>;
+};
+
+describe("issue #303: outbound tool-name normalization (translate path)", () => {
+  function fnTool(name: string) {
+    return { type: "function", function: { name, parameters: { type: "object" } } };
+  }
+
+  // Fetch mock that captures the wire body and replies with a tool_use echoing the
+  // wire name of tools[idx], so the response path must reverse-map it to the original.
+  function echoToolUseFetch(sink: { body?: string }, idx = 0) {
+    return vi.fn(async (_url: string, init?: RequestInit) => {
+      const wire = String(init?.body);
+      sink.body = wire;
+      const tools = (JSON.parse(wire).tools ?? []) as Array<{ name: string }>;
+      return jsonResponse({
+        id: "msg",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t1", name: tools[idx]?.name ?? "tool", input: {} }],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+  }
+
+  function staticClient(fetchMock: unknown) {
+    return createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as typeof fetch,
+    });
+  }
+
+  it("normalizes illegal-char / space-collision / over-length names and restores the original", async () => {
+    const sink: { body?: string } = {};
+    const client = staticClient(echoToolUseFetch(sink, 0));
+    const res = (await client.chatCompletion({
+      model: "claude-x",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "go" }],
+      tools: [
+        fnTool("search-web"), // illegal char (dash)
+        fnTool("search web"), // space + collides with search-web after sanitize
+        fnTool("x".repeat(65)), // over-length
+      ],
+    })) as NarrowedToolResponse;
+
+    const wire = JSON.parse(sink.body ?? "{}") as { tools: Array<{ name: string }> };
+    const names = wire.tools.map((t) => t.name);
+    // Every wire name conforms to the Anthropic spec…
+    for (const n of names) expect(n).toMatch(TOOL_NAME_RE);
+    // …over-length → 64, and the collision is deterministically split.
+    expect(names[0]).toBe("search_web");
+    expect(names[1]).toMatch(/^search_web_[a-z0-9]{8}$/);
+    expect(names[1]).not.toBe(names[0]);
+    expect(names[2]).toHaveLength(64);
+    // …and the response restores the client's ORIGINAL name (reverse map).
+    expect(res.choices[0]?.message?.tool_calls?.[0]?.function.name).toBe("search-web");
+  });
+
+  it("drops an empty-named tool (cannot be called; never reaches the wire malformed)", async () => {
+    const sink: { body?: string } = {};
+    const client = staticClient(echoToolUseFetch(sink, 0));
+    await client.chatCompletion({
+      model: "claude-x",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "go" }],
+      tools: [fnTool("")],
+    });
+    const wire = JSON.parse(sink.body ?? "{}") as { tools?: unknown };
+    expect(wire.tools).toBeUndefined();
+  });
+
+  it("normalizes tool_choice consistently with the tools array", async () => {
+    const sink: { body?: string } = {};
+    const client = staticClient(echoToolUseFetch(sink, 0));
+    await client.chatCompletion({
+      model: "claude-x",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "go" }],
+      tools: [fnTool("db.query")],
+      tool_choice: { type: "function", function: { name: "db.query" } },
+    });
+
+    const wire = JSON.parse(sink.body ?? "{}") as {
+      tools: Array<{ name: string }>;
+      tool_choice: { type: string; name: string };
+    };
+    expect(wire.tools[0]?.name).toBe("db_query");
+    expect(wire.tool_choice).toMatchObject({ type: "tool", name: "db_query" });
+  });
+
+  it("restores the original tool name on the STREAMING path", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const tools = (JSON.parse(String(init?.body)).tools ?? []) as Array<{ name: string }>;
+      const wireName = tools[0]?.name ?? "tool";
+      return sseResponse([
+        { type: "message_start", message: { id: "m" } },
+        {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "tool_use", id: "t1", name: wireName, input: {} },
+        },
+        { type: "content_block_stop", index: 0 },
+        { type: "message_delta", delta: { stop_reason: "tool_use" } },
+        { type: "message_stop" },
+      ]);
+    });
+    const client = staticClient(fetchMock);
+    const chunks: string[] = [];
+    for await (const c of client.chatCompletionStream({
+      model: "claude-x",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "go" }],
+      tools: [fnTool("search-web")],
+    })) {
+      chunks.push(c);
+    }
+    const joined = chunks.join("");
+    expect(joined).toContain('"name":"search-web"'); // restored, not "search_web"
+    expect(joined).not.toContain("search_web");
+  });
+
+  it("composes with strict cloaking: invalid name → spec-valid wire, original restored", async () => {
+    const sink: { body?: string } = {};
+    const fetchMock = echoToolUseFetch(sink, 0);
+    // A non-official base URL puts fingerprint mode into strict (auto), so the strict
+    // cloak pipeline ALSO runs — the spec gate must compose with it, not fight it.
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://relay.example.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const res = (await client.chatCompletion({
+      model: "claude-x",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "go" }],
+      tools: [fnTool("db.query")],
+    })) as NarrowedToolResponse;
+
+    const wire = JSON.parse(sink.body ?? "{}") as { tools: Array<{ name: string }> };
+    expect(wire.tools[0]?.name).toMatch(TOOL_NAME_RE); // spec-valid on the wire
+    // Round-trips back to the client's original through the composed reverse map.
+    expect(res.choices[0]?.message?.tool_calls?.[0]?.function.name).toBe("db.query");
+  });
+});
+
+describe("issue #303: native passthrough forwards tool names verbatim (by design)", () => {
+  it("does NOT normalize tool names on the native passthrough path", async () => {
+    let wireBody = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      wireBody = String(init?.body);
+      return jsonResponse({
+        id: "msg",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    // Client sent an Anthropic-native body; it owns tool-name compliance, and the
+    // streaming relay is byte-faithful — so Helm forwards the name unchanged.
+    const nativeBody: Record<string, unknown> = {
+      model: "claude-x",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "go" }],
+      tools: [{ name: "db.query", input_schema: { type: "object" } }],
+    };
+    await client.nativePassthrough?.(nativeBody);
+
+    const wire = JSON.parse(wireBody) as { tools: Array<{ name: string }> };
+    expect(wire.tools[0]?.name).toBe("db.query"); // verbatim, NOT "db_query"
+  });
+});

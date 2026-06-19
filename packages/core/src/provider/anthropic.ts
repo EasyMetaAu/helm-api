@@ -17,6 +17,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { homedir, release as osRelease, type as osType } from "node:os";
 import { type NativePassthroughInput, nativePassthroughBody } from "@helm/shared";
 import {
+  type AnthropicToolNameMap,
+  createAnthropicToolNameMap,
+} from "../protocol/anthropic/response.js";
+import {
   applyForcedAnthropicThinking,
   reasoningEffortToAnthropicThinking,
 } from "../protocol/reasoning-effort.js";
@@ -560,6 +564,77 @@ function prepareStrictClaudeCliBody(body: Record<string, unknown>): {
   enforceStrictThinkingConstraints(body);
   enforceStrictCacheControlLimit(body);
   return toolNameMap ? { body, toolNameMap } : { body };
+}
+
+// ── tool-name SPEC normalization (issue #303) ───────────────────────────────
+// Anthropic requires every tool name to match the documented constraint (the
+// Messages API rejects others with 400): non-empty, max 64 chars, and only
+// [A-Za-z0-9_]. We REUSE the canonical sanitizer + reversible map from the
+// protocol layer (createAnthropicToolNameMap — charset/length spec, "" → "tool",
+// deterministic FNV-1a suffix for collisions / over-length) rather than inventing
+// a second, possibly-irreversible mapping. Applied as the FINAL spec gate on the
+// TRANSLATE paths only (chatCompletion / chatCompletionStream); native passthrough
+// stays byte-faithful (the client owns native tool-name compliance). When strict
+// fingerprint cloaking also ran, this runs AFTER it — cloaked names are already
+// spec-valid, so this is an idempotent no-op there, and the two reverse maps are
+// composed (wire → cloaked → original) so responses still restore the client's
+// original tool names.
+function applyAnthropicToolNameSpec(
+  body: Record<string, unknown>,
+): AnthropicToolNameMap | undefined {
+  const names = collectToolNames(body);
+  if (names.length === 0) return undefined;
+  const map = createAnthropicToolNameMap(names);
+
+  if (Array.isArray(body.tools)) {
+    body.tools = body.tools.map((tool) => {
+      if (!isRecord(tool) || typeof tool.name !== "string") return tool;
+      return { ...tool, name: map.toAnthropic(tool.name) };
+    });
+  }
+
+  if (Array.isArray(body.messages)) {
+    body.messages = body.messages.map((message) => {
+      if (!isRecord(message) || !Array.isArray(message.content)) return message;
+      let changed = false;
+      const content = message.content.map((block) => {
+        if (isRecord(block) && block.type === "tool_use" && typeof block.name === "string") {
+          const next = map.toAnthropic(block.name);
+          if (next !== block.name) {
+            changed = true;
+            return { ...block, name: next };
+          }
+        }
+        return block;
+      });
+      return changed ? { ...message, content } : message;
+    });
+  }
+
+  if (isRecord(body.tool_choice) && body.tool_choice.type === "tool") {
+    const name = body.tool_choice.name;
+    if (typeof name === "string")
+      body.tool_choice = { ...body.tool_choice, name: map.toAnthropic(name) };
+  }
+
+  return map;
+}
+
+// Chain two reverse maps so a wire name is restored through BOTH transforms:
+// wire → (inner: spec→pre-spec) → (outer: cloaked→original) → original. Either may
+// be undefined. Used to fuse the spec-normalization map with the strict cloak map.
+function composeReverseMaps(
+  inner: ToolNameReverseMap | undefined,
+  outer: ToolNameReverseMap | undefined,
+): ToolNameReverseMap | undefined {
+  if (inner === undefined) return outer;
+  if (outer === undefined) return inner;
+  return {
+    toOriginal(name) {
+      const mid = inner.toOriginal(name) ?? name;
+      return outer.toOriginal(mid) ?? mid;
+    },
+  };
 }
 
 function cloneStrictClaudeCliBody(body: Record<string, unknown>): Record<string, unknown> {
@@ -1448,6 +1523,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     extraBetas: readonly string[] = [],
     capture?: (wireBody: string) => void,
     includeClaudeCliRuntimeHeaders = true,
+    normalizeToolNames = false,
   ): Promise<AnthropicRequestResult> {
     const body = nativePassthroughBody(input);
     const prepared = prepareNativePassthroughRequest(
@@ -1466,9 +1542,26 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     const strictPrepared = strictClaudeCliFingerprint
       ? prepareStrictClaudeCliBody(cloneStrictClaudeCliBody(prepared.body))
       : { body: prepared.body };
+    // Tool-name SPEC normalization (issue #303) — translate paths only, applied as
+    // the FINAL gate AFTER any strict cloaking, composing reverse maps so responses
+    // still restore the client's original names. Operate on a CLONE so a 401 retry
+    // rebuilds the map from the ORIGINAL names (the strict body is already a clone;
+    // the non-strict body is the shared input and must not be mutated in place).
+    let toolNameMap = strictPrepared.toolNameMap;
+    let normalizedBody: Record<string, unknown> | undefined;
+    if (normalizeToolNames) {
+      const target = strictClaudeCliFingerprint
+        ? strictPrepared.body
+        : cloneStrictClaudeCliBody(prepared.body);
+      const specMap = applyAnthropicToolNameSpec(target);
+      toolNameMap = composeReverseMaps(specMap, strictPrepared.toolNameMap);
+      normalizedBody = target;
+    }
     const wireBody = strictClaudeCliFingerprint
       ? serializeAnthropicBody(strictPrepared.body, { strictClaudeCliFingerprint: true })
-      : prepared.bodyText;
+      : normalizedBody !== undefined
+        ? JSON.stringify(normalizedBody)
+        : prepared.bodyText;
     const wireHeaders = strictClaudeCliFingerprint
       ? orderClaudeCliHeaders(prepared.headers)
       : prepared.headers;
@@ -1499,7 +1592,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       },
       { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
     );
-    return strictPrepared.toolNameMap ? { res, toolNameMap: strictPrepared.toolNameMap } : { res };
+    return toolNameMap ? { res, toolNameMap } : { res };
   }
 
   async function requestWithRetry(
@@ -1509,6 +1602,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     extraBetas: readonly string[] = [],
     capture?: (wireBody: string) => void,
     includeClaudeCliRuntimeHeaders = true,
+    normalizeToolNames = false,
   ): Promise<AnthropicRequestResult> {
     const result = await request(
       body,
@@ -1517,6 +1611,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       extraBetas,
       capture,
       includeClaudeCliRuntimeHeaders,
+      normalizeToolNames,
     );
     if (result.res.status === 401 && cfg.onUnauthorized !== undefined) {
       await result.res.body?.cancel().catch(() => {});
@@ -1528,6 +1623,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         extraBetas,
         capture,
         includeClaudeCliRuntimeHeaders,
+        normalizeToolNames,
       );
     }
     return result;
@@ -1557,6 +1653,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         url,
         [],
         opts?.captureUpstream,
+        true,
+        true,
       );
       if (!res.ok) throw await errorFromResponse(res);
       const anthResp = (await res.json()) as Record<string, unknown>;
@@ -1575,6 +1673,8 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         url,
         [],
         opts?.captureUpstream,
+        true,
+        true,
       );
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateAnthropicSSE(res, model, timeoutMs, toolNameMap);
