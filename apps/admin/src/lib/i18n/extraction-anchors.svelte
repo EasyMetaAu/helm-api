@@ -22,7 +22,7 @@
 {#if false}
   <!-- nav + quick-link labels -->
   {$t('Dashboard')}{$t('Requests')}{$t('Lanes')}{$t('Policies')}{$t('Classifier')}{$t('API Keys')}
-  {$t('Providers')}{$t('Settings')}
+  {$t('Memory')}{$t('Providers')}{$t('Settings')}
   <!-- sidebar nav subtitles -->
   {$t('Traffic and health at a glance')}
   {$t('Every request and the lane it took')}
@@ -30,6 +30,7 @@
   {$t('Rules that override or cap the lane')}
   {$t('How a request is matched to a lane')}
   {$t('Client keys and their lane limits')}
+  {$t('Facts and reflections the gateway remembers')}
   {$t('Connect Codex and Claude subscriptions')}
   {$t('System Settings')}
   <!-- dashboard quick-link descriptions -->

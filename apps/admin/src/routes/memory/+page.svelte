@@ -15,6 +15,7 @@
     updateFact,
     updateReflection,
   } from '$lib/api/memory.js';
+  import ConnectMcpDialog from '$lib/components/ConnectMcpDialog.svelte';
   import EditFactDialog from '$lib/components/EditFactDialog.svelte';
   import EditReflectionDialog from '$lib/components/EditReflectionDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
@@ -71,6 +72,9 @@
   // Edit/delete modal state (one fact / reflection at a time).
   let editingFact = $state<Fact | null>(null);
   let editingReflection = $state<Reflection | null>(null);
+  // "Connect via MCP" guide — opened from the header, no minted key (the snippets
+  // carry a copy-and-replace placeholder). Mirrors the API Keys "Connect a client".
+  let showMcp = $state<boolean>(false);
   let confirmingFactDelete = $state<Fact | null>(null);
   let confirmingReflectionDelete = $state<Reflection | null>(null);
 
@@ -266,13 +270,20 @@
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
-  <header class="min-w-0">
-    <h1 class="page-title">{$t('Memory')}</h1>
-    <p class="section-desc">
-      {$t(
-        'Manage the long-term memory the gateway has learned — the discrete facts it remembers and the per-scope reflections it merges. Browse by scope or by key, then edit or remove what it keeps.',
-      )}
-    </p>
+  <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <div class="min-w-0">
+      <h1 class="page-title">{$t('Memory')}</h1>
+      <p class="section-desc">
+        {$t(
+          'Manage the long-term memory the gateway has learned — the discrete facts it remembers and the per-scope reflections it merges. Browse by scope or by key, then edit or remove what it keeps.',
+        )}
+      </p>
+    </div>
+    <div class="flex shrink-0 gap-2">
+      <button type="button" class="btn-secondary" onclick={() => (showMcp = true)}
+        >{$t('Connect via MCP')}</button
+      >
+    </div>
   </header>
 
   {#if error}
@@ -550,6 +561,10 @@
     </div>
   {/if}
 </section>
+
+{#if showMcp}
+  <ConnectMcpDialog onclose={() => (showMcp = false)} />
+{/if}
 
 {#if editingFact}
   <EditFactDialog fact={editingFact} onsaved={onFactSaved} onclose={() => (editingFact = null)} />

@@ -231,6 +231,7 @@
   "Fact status filter": "사실 상태 필터",
   "Fact text": "사실 텍스트",
   "Facts": "사실",
+  "Facts and reflections the gateway remembers": "게이트웨이가 기억하는 사실과 회고",
   "Failed": "실패",
   "Failed to clear proxy": "프록시를 지우지 못했습니다",
   "Failed to create key": "키 생성 실패",
@@ -728,5 +729,14 @@
   "yes": "예",
   "Your new API key": "새 API 키",
   "Zoom in": "확대",
-  "Zoom out": "축소"
+  "Zoom out": "축소",
+  "Connect via MCP": "MCP로 연결",
+  "Give an AI agent persistent memory. Helm's MCP server exposes the facts and reflections on this page as tools (memory_add, memory_search, memory_list, …), scoped to the account behind your API key.": "AI 에이전트에 영속적인 메모리를 제공합니다. Helm의 MCP 서버는 이 페이지의 사실과 회고를 도구(memory_add, memory_search, memory_list…)로 노출하며, API 키에 연결된 계정으로 범위가 한정됩니다.",
+  "The server uses the MCP Streamable HTTP transport at the bare origin + /mcp and authenticates with your API key as a bearer token. Enable it on the gateway with memory.mcp.enabled — until then /mcp returns 404.": "서버는 베이스 오리진 + /mcp에서 MCP Streamable HTTP 전송을 사용하며, API 키를 Bearer 토큰으로 인증합니다. 게이트웨이에서 memory.mcp.enabled로 활성화하세요. 그 전까지 /mcp는 404를 반환합니다.",
+  "Register the server with one command. Claude Code connects over HTTP and sends your key as a bearer token.": "명령 하나로 서버를 등록합니다. Claude Code는 HTTP로 연결하고 키를 Bearer 토큰으로 전송합니다.",
+  "Or add it to a .mcp.json (project or user scope). The same entry works in other MCP-aware editors.": "또는 .mcp.json(프로젝트 또는 사용자 범위)에 추가하세요. 동일한 항목이 다른 MCP 지원 에디터에서도 작동합니다.",
+  "Codex and other stdio-only clients reach the HTTP server through the mcp-remote bridge in ~/.codex/config.toml.": "Codex 및 기타 stdio 전용 클라이언트는 ~/.codex/config.toml의 mcp-remote 브리지를 통해 HTTP 서버에 접근합니다.",
+  "Check connectivity and auth with a raw JSON-RPC call. It lists the memory tools the server exposes.": "원시 JSON-RPC 호출로 연결과 인증을 확인합니다. 서버가 노출하는 메모리 도구 목록을 반환합니다.",
+  "JSON config": "JSON 설정",
+  "curl": "curl"
 }

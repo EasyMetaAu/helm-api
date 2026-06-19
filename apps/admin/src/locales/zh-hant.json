@@ -231,6 +231,7 @@
   "Fact status filter": "事實狀態篩選器",
   "Fact text": "事實文字",
   "Facts": "事實",
+  "Facts and reflections the gateway remembers": "閘道記住的事實與反思",
   "Failed": "測試失敗",
   "Failed to clear proxy": "清除代理失敗",
   "Failed to create key": "建立金鑰失敗",
@@ -728,5 +729,14 @@
   "yes": "是",
   "Your new API key": "你的新 API 金鑰",
   "Zoom in": "放大",
-  "Zoom out": "縮小"
+  "Zoom out": "縮小",
+  "Connect via MCP": "透過 MCP 接入",
+  "Give an AI agent persistent memory. Helm's MCP server exposes the facts and reflections on this page as tools (memory_add, memory_search, memory_list, …), scoped to the account behind your API key.": "為 AI 代理提供持久記憶。Helm 的 MCP 伺服器會將本頁的事實與反思作為工具（memory_add、memory_search、memory_list…）公開，範圍限定為你的 API 金鑰所屬的帳戶。",
+  "The server uses the MCP Streamable HTTP transport at the bare origin + /mcp and authenticates with your API key as a bearer token. Enable it on the gateway with memory.mcp.enabled — until then /mcp returns 404.": "伺服器在裸源位址 + /mcp 上使用 MCP Streamable HTTP 傳輸，並以 Bearer 權杖形式用你的 API 金鑰進行認證。需在閘道上透過 memory.mcp.enabled 啟用——在此之前 /mcp 回傳 404。",
+  "Register the server with one command. Claude Code connects over HTTP and sends your key as a bearer token.": "用一條命令註冊伺服器。Claude Code 透過 HTTP 連線，並以 Bearer 權杖形式傳送你的金鑰。",
+  "Or add it to a .mcp.json (project or user scope). The same entry works in other MCP-aware editors.": "或將其加入 .mcp.json（專案或使用者範圍）。同樣的條目也適用於其他支援 MCP 的編輯器。",
+  "Codex and other stdio-only clients reach the HTTP server through the mcp-remote bridge in ~/.codex/config.toml.": "Codex 及其他僅支援 stdio 的用戶端，透過 ~/.codex/config.toml 中的 mcp-remote 橋接來存取 HTTP 伺服器。",
+  "Check connectivity and auth with a raw JSON-RPC call. It lists the memory tools the server exposes.": "用一次原始 JSON-RPC 呼叫檢查連通性與認證。它會列出伺服器公開的記憶工具。",
+  "JSON config": "JSON 設定",
+  "curl": "curl"
 }
