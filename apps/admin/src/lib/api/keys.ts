@@ -120,6 +120,25 @@ export interface DeleteResult {
   deleted: string;
 }
 
+// Per-key usage rollup for the list "Usage" column (GET /admin/api/keys/usage).
+// One row per key that saw traffic in the window; the list merges it by key_id (a
+// key absent here saw zero traffic). `cost_usd` null = "not measured" (distinct
+// from a measured 0), mirroring the requests list cost convention. No key material.
+export interface KeyUsage {
+  key_id: string;
+  requests: number;
+  error_count: number;
+  cost_usd: number | null;
+  total_tokens: number;
+}
+
+// Half-open window for the usage rollup; both bounds optional (the backend
+// defaults to the last 24h, then now, and fails open on junk).
+export interface KeyUsageWindow {
+  start?: number; // epoch ms (inclusive)
+  end?: number; // epoch ms (exclusive)
+}
+
 const BASE = '/admin/api/keys';
 
 async function asJson<T>(res: Response): Promise<T> {
@@ -209,11 +228,37 @@ function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   return out;
 }
 
+// Defensively coerce a server usage row to the UI shape — counts to finite numbers
+// (junk → 0), cost to number-or-null ("not measured" preserved, never faked to 0).
+function normalizeUsage(raw: Record<string, unknown>): KeyUsage {
+  const numOr0 = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  return {
+    key_id: String(raw.key_id ?? ''),
+    requests: numOr0(raw.requests),
+    error_count: numOr0(raw.error_count),
+    cost_usd: typeof raw.cost_usd === 'number' && Number.isFinite(raw.cost_usd) ? raw.cost_usd : null,
+    total_tokens: numOr0(raw.total_tokens),
+  };
+}
+
 // GET /admin/api/keys -> redacted ApiKeyView[] (prefix only).
 export async function listKeys(): Promise<ApiKeyView[]> {
   const res = await fetch(BASE, { headers: { accept: 'application/json' } });
   const rows = await asJson<Record<string, unknown>[]>(res);
   return rows.map(normalizeView);
+}
+
+// GET /admin/api/keys/usage?start&end -> per-key usage rollup for the list column.
+// The window is resolved client-side (the list defaults to the last 24h); the
+// backend fills its own 24h default when omitted and fails open on a bad window.
+export async function getKeysUsage(window: KeyUsageWindow = {}): Promise<KeyUsage[]> {
+  const qs = new URLSearchParams();
+  if (window.start !== undefined) qs.set('start', String(window.start));
+  if (window.end !== undefined) qs.set('end', String(window.end));
+  const url = qs.toString() ? `${BASE}/usage?${qs}` : `${BASE}/usage`;
+  const res = await fetch(url, { headers: { accept: 'application/json' } });
+  const rows = await asJson<Record<string, unknown>[]>(res);
+  return rows.map(normalizeUsage);
 }
 
 // POST /admin/api/keys -> { key_id, plaintext } (plaintext returned ONCE).

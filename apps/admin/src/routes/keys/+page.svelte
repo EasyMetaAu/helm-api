@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { type ApiKeyView, deleteKey, revokeKey } from '$lib/api/keys.js';
+  import { base } from '$app/paths';
+  import { type ApiKeyView, deleteKey, type KeyUsage, revokeKey } from '$lib/api/keys.js';
   import ConnectClientDialog from '$lib/components/ConnectClientDialog.svelte';
   import CreateKeyDialog from '$lib/components/CreateKeyDialog.svelte';
   import EditKeyDialog from '$lib/components/EditKeyDialog.svelte';
@@ -14,10 +15,18 @@
   // Revocation is a SOFT disable (server flips disabled:true) — the row is kept,
   // never removed or rewritten in place (rotation/revocation stays auditable). This view is a pure
   // consumer of /admin/api/* — it owns no auth logic and persists no credentials.
-  let { data }: { data: { keys: ApiKeyView[]; lanes: string[] } } = $props();
+  let { data }: { data: { keys: ApiKeyView[]; lanes: string[]; usage: KeyUsage[] } } = $props();
 
   let keys = $state<ApiKeyView[]>(untrack(() => data.keys));
   const lanes = untrack(() => data.lanes);
+
+  // Per-key last-24h usage, keyed by key_id for O(1) row lookup. A key absent from
+  // the map saw no traffic in the window → the cell renders "—". Display-only
+  // (refreshed on the next load); never mutated by the local create/revoke edits.
+  const usageById = $derived(new Map(data.usage.map((u) => [u.key_id, u])));
+
+  // Detail-page link for one key — the per-key stats + scoped request list.
+  const detailHref = (keyId: string): string => `${base}/keys/${encodeURIComponent(keyId)}`;
 
   let error = $state<string | null>(null);
   let showCreate = $state<boolean>(false);
@@ -200,6 +209,7 @@
             <th class="px-3 py-2">{$t('Rate limit')}</th>
             <th class="px-3 py-2">{$t('Budget')}</th>
             <th class="px-3 py-2">{$t('Memory')}</th>
+            <th class="px-3 py-2">{$t('Usage (24h)')}</th>
             <th class="px-3 py-2">{$t('Status')}</th>
             <th class="px-3 py-2"></th>
           </tr>
@@ -208,11 +218,13 @@
           {#each keys as key (key.key_id)}
             <tr data-testid="key-row" class="align-top">
               <td data-label={$t('Name')} class="px-3 py-2">
-                {#if key.name}
-                  <span class="text-ink-strong">{key.name}</span>
-                {:else}
-                  <span class="text-ink-muted">{$t('Unnamed')}</span>
-                {/if}
+                <a class="link-inline font-medium" href={detailHref(key.key_id)}>
+                  {#if key.name}
+                    <span class="text-ink-strong">{key.name}</span>
+                  {:else}
+                    <span class="text-ink-muted">{$t('Unnamed')}</span>
+                  {/if}
+                </a>
               </td>
               <td data-label={$t('Key (prefix)')} class="px-3 py-2">
                 <code class="font-mono text-ink-strong">{key.prefix}</code>
@@ -265,6 +277,24 @@
                   {#if key.memory_project_id}
                     <div class="text-xs"><span>{key.memory_project_id}</span></div>
                   {/if}
+                {/if}
+              </td>
+              <td data-label={$t('Usage (24h)')} class="px-3 py-2 text-ink-muted">
+                {#if usageById.get(key.key_id)}
+                  {@const u = usageById.get(key.key_id)}
+                  <div class="text-ink-body">
+                    {formatCount(u?.requests ?? 0)}
+                    {$t('req')}{#if (u?.error_count ?? 0) > 0}
+                      · <span class="text-rose-600">{formatCount(u?.error_count ?? 0)}
+                        {$t('err')}</span
+                      >{/if}
+                  </div>
+                  <div class="text-xs">
+                    {formatUsd(u?.cost_usd)} · {formatTokens(u?.total_tokens ?? 0)}
+                    {$t('tok')}
+                  </div>
+                {:else}
+                  <span title={$t('No traffic in the last 24h')}>—</span>
                 {/if}
               </td>
               <td data-label={$t('Status')} class="px-3 py-2">

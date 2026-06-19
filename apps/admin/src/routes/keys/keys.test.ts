@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ApiKeyView } from '$lib/api/keys.js';
+import type { ApiKeyView, KeyUsage } from '$lib/api/keys.js';
 import KeysPage from './+page.svelte';
 
 // The page consumes data from `load` (mocked via the `data` prop) and writes
@@ -43,8 +43,12 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
   };
 }
 
-function renderPage(keys: ApiKeyView[], lanes: string[] = ['economy', 'balanced', 'premium']) {
-  return render(KeysPage, { data: { keys, lanes } });
+function renderPage(
+  keys: ApiKeyView[],
+  lanes: string[] = ['economy', 'balanced', 'premium'],
+  usage: KeyUsage[] = [],
+) {
+  return render(KeysPage, { data: { keys, lanes, usage } });
 }
 
 describe('keys page', () => {
@@ -76,6 +80,29 @@ describe('keys page', () => {
     const rows = screen.getAllByTestId('key-row');
     expect(within(rows[0]).getByText('Production backend')).toBeInTheDocument();
     expect(within(rows[1]).getByText(/unnamed/i)).toBeInTheDocument();
+  });
+
+  it('links each key name to its detail page (/admin/keys/:id)', () => {
+    renderPage([key('k1', { name: 'Prod' })]);
+    // `base` ('/admin' in prod) resolves to '' in the test env, like the requests
+    // page test — so the rendered href is /keys/:id here.
+    const link = screen.getByRole('link', { name: /prod/i });
+    expect(link.getAttribute('href')).toBe('/keys/k1');
+  });
+
+  it('renders the 24h usage cell for a key with traffic, "—" for one without', () => {
+    renderPage(
+      [key('k1'), key('k2')],
+      undefined,
+      [{ key_id: 'k1', requests: 7, error_count: 1, cost_usd: 0.042, total_tokens: 1500 }],
+    );
+    const rows = screen.getAllByTestId('key-row');
+    // k1 has usage: request count + error count + cost + tokens all render.
+    expect(within(rows[0]).getByText(/7/)).toBeInTheDocument();
+    expect(within(rows[0]).getByText(/1\.5K|1500/)).toBeInTheDocument();
+    // k2 has no usage row → the cell shows the em dash placeholder.
+    const k2Usage = within(rows[1]).getByText('—');
+    expect(k2Usage).toBeInTheDocument();
   });
 
   it('Edit renames a key: PATCHes the new name; blank clears it to null', async () => {
