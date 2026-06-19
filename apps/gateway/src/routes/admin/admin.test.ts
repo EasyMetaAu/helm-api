@@ -952,6 +952,33 @@ describe("admin.api requests", () => {
     expect(unnamed.items[0]?.key_name).toBeNull();
   });
 
+  it("resolves the detail's api_key_id to the key's name (null when unnamed/deleted)", async () => {
+    const deps = buildDeps({ telemetry: makeTelemetry([decision("trace-1", "premium")]) });
+    // The fake telemetry records the row under api_key_id "k1"; name that key so the
+    // detail route surfaces it — the SAME join the list does (the redacted record
+    // carries key_prefix but not the key_id/name; the route owns keyStore, Principle 1).
+    await deps.keyStore.createKey({
+      keyId: "k1",
+      hash: "h_named",
+      prefix: "helm_live_aaaa",
+      accountId: "acct",
+      role: "user",
+      name: "Production backend",
+    });
+    const named = (await (await buildApp(deps).request("/admin/api/requests/trace-1")).json()) as {
+      key_name: string | null;
+    };
+    expect(named.key_name).toBe("Production backend");
+
+    // No matching/named key → key_name null, so the SPA falls back to the prefix.
+    const unnamed = (await (
+      await buildApp(
+        buildDeps({ telemetry: makeTelemetry([decision("trace-2", "premium")]) }),
+      ).request("/admin/api/requests/trace-2")
+    ).json()) as { key_name: string | null };
+    expect(unnamed.key_name).toBeNull();
+  });
+
   it("fails open on a malformed query (never 5xx) and serves page 1", async () => {
     const app = buildApp(buildDeps({ telemetry: makeTelemetry([decision("t", "premium")]) }));
     const res = await app.request("/admin/api/requests?page=abc&pageSize=-9&status=bogus");

@@ -16,6 +16,13 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
   return {
     trace_id: 'tr_1',
     ts: '',
+    key_prefix: 'helm_live_ab12',
+    key_name: null,
+    requested_model: 'gpt-4o',
+    final_model: 'claude-x',
+    lane: 'premium',
+    status: 'ok',
+    latency_ms: 460,
     request_meta: {},
     payload_summary: 'payload withheld (redacted)',
     classifier_output: {

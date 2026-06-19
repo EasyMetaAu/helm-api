@@ -205,6 +205,20 @@ describe('key detail page', () => {
     expect(link.getAttribute('href')).toBe('/requests/tr_1');
   });
 
+  it('links the Memory config to the scoped memory view when memory is on; omits it when off', () => {
+    const { unmount } = render(KeyDetailPage, {
+      data: pageData({ key: keyView({ memory_mode: 'inject', memory_project_id: 'proj-a' }) }),
+    });
+    // `base` resolves to '' in the test env → /memory?key=k1 (the key's own scope).
+    const link = screen.getByRole('link', { name: /manage memory/i });
+    expect(link.getAttribute('href')).toBe('/memory?key=k1');
+    unmount();
+
+    // Memory off → nothing to manage → no link.
+    render(KeyDetailPage, { data: pageData({ key: keyView({ memory_mode: 'off' }) }) });
+    expect(screen.queryByRole('link', { name: /manage memory/i })).not.toBeInTheDocument();
+  });
+
   it('shows a pager when the total exceeds one page', () => {
     render(KeyDetailPage, {
       data: pageData({
