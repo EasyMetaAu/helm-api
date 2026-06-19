@@ -84,10 +84,11 @@ class InMemoryKeyStore implements KeyStore {
 }
 
 class InMemoryTelemetryStore implements TelemetryStore {
-  private readonly rows: Array<{ at: Date; rec: DecisionRecord; keyId: string }> = [];
+  private readonly rows: Array<{ id: string; at: Date; rec: DecisionRecord; keyId: string }> = [];
   async insert(input: InsertTelemetryInput): Promise<{ id: string }> {
-    this.rows.push({ at: input.createdAt, rec: input.decision, keyId: input.apiKeyId });
-    return { id: String(this.rows.length) };
+    const id = String(this.rows.length + 1);
+    this.rows.push({ id, at: input.createdAt, rec: input.decision, keyId: input.apiKeyId });
+    return { id };
   }
   async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
     return [...this.rows]
@@ -147,6 +148,51 @@ class InMemoryTelemetryStore implements TelemetryStore {
     for (const [id, p] of this.payloads) {
       if (p.createdAt.getTime() < olderThanMs) this.payloads.delete(id);
     }
+  }
+  async pruneTelemetry(olderThanMs: number): Promise<number> {
+    const before = this.rows.length;
+    for (let i = this.rows.length - 1; i >= 0; i--) {
+      if ((this.rows[i] as { at: Date }).at.getTime() < olderThanMs) this.rows.splice(i, 1);
+    }
+    return before - this.rows.length;
+  }
+  async countTelemetryOlderThan(olderThanMs: number): Promise<number> {
+    return this.rows.filter((r) => r.at.getTime() < olderThanMs).length;
+  }
+  async selectTelemetryOlderThan(olderThanMs: number, limit: number, afterId?: string) {
+    return this.rows
+      .filter((r) => r.at.getTime() < olderThanMs && (afterId === undefined || r.id > afterId))
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .slice(0, limit)
+      .map((r) => ({
+        id: r.id,
+        requestId: r.rec.request_id,
+        apiKeyId: r.keyId,
+        createdAt: r.at.getTime(),
+        decision: r.rec,
+      }));
+  }
+  async countPayloadsOlderThan(olderThanMs: number): Promise<number> {
+    let n = 0;
+    for (const p of this.payloads.values()) if (p.createdAt.getTime() < olderThanMs) n++;
+    return n;
+  }
+  async selectPayloadsOlderThan(olderThanMs: number, limit: number, afterId?: string) {
+    return [...this.payloads.values()]
+      .filter(
+        (p) =>
+          p.createdAt.getTime() < olderThanMs && (afterId === undefined || p.requestId > afterId),
+      )
+      .sort((a, b) => a.requestId.localeCompare(b.requestId))
+      .slice(0, limit)
+      .map((p) => ({
+        id: p.requestId,
+        requestId: p.requestId,
+        requestJson: p.requestJson,
+        responseJson: p.responseJson,
+        upstreamRequestJson: p.upstreamRequestJson ?? null,
+        createdAt: p.createdAt.getTime(),
+      }));
   }
   // Dashboard token-accounting aggregate — a minimal in-memory roll-up over the
   // half-open window so the in-memory store satisfies the full port contract.

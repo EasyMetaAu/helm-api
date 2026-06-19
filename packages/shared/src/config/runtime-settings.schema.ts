@@ -80,6 +80,58 @@ export const RuntimeSettingsSchema = z.object({
   user_message_queue_delay_ms: z.number().int().min(0).max(10_000).default(200),
   // How long a request may wait for its turn before a 503 (队列超时).
   user_message_queue_wait_timeout_ms: z.number().int().min(1_000).max(300_000).default(5_000),
+
+  // ——— Automatic data cleanup / retention / archival (admin "Data cleanup") ———
+  // A scheduled sweep (+ a manual "Clean Now" button) deletes data older than each
+  // per-category window. The two biggest UNBOUNDED tables (telemetry decisions and
+  // request/response payloads) had a coupling bug — payload pruning only ran while
+  // capture was on AND traffic flowed, and telemetry had NO prune at all. The
+  // scheduled runner fixes both: it owns the prune independent of capture/traffic.
+  //
+  // For training/audit-valuable tables, cleanup_archive_enabled exports the aged
+  // rows to a compressed gzip-JSONL file (under HELM_ARCHIVE_DIR) and VERIFIES the
+  // write before deleting — so "delete" never loses data outright, it relocates it.
+  //
+  // Master switch. Default ON: the sweep runs and bounds storage growth out of the
+  // box. Turn off to freeze ALL automatic deletion (byte-identical to the old
+  // behaviour). The manual buttons still work while off.
+  cleanup_enabled: z.boolean().default(true),
+  // How often the background sweep runs (hours). The sweep is cheap (indexed age
+  // cutoffs) but archiving + reads are heavier than the 60s memory tick, so it runs
+  // on its own slower cadence. 1h–1 week.
+  cleanup_interval_hours: z.number().int().min(1).max(168).default(24),
+  // Archive-before-delete for the training/audit tables (telemetry, payloads,
+  // memory_messages). Default ON: aged rows are written to a verified gzip-JSONL
+  // archive BEFORE deletion. Off = straight delete (no archive file written).
+  cleanup_archive_enabled: z.boolean().default(true),
+
+  // Telemetry decision records (redacted; routing/cost/latency labels). Default ON,
+  // 90-day window — fixes the unbounded-growth gap.
+  telemetry_cleanup_enabled: z.boolean().default(true),
+  telemetry_retention_days: z.number().int().positive().max(3650).default(90),
+  // Full request/response bodies. The retention window REUSES payload_retention_days
+  // (above) so there is a single source of truth. This toggle decouples the prune
+  // from capture: cleanup runs whether or not capture_payloads is on.
+  payloads_cleanup_enabled: z.boolean().default(true),
+  // Per-account OAuth hourly usage counters (observability aggregates — delete-only,
+  // no training value). Default ON, 180-day window.
+  oauth_usage_cleanup_enabled: z.boolean().default(true),
+  oauth_usage_retention_days: z.number().int().positive().max(3650).default(180),
+  // Finished (done/failed) memory background-job rows — a job log; never touches the
+  // live pending/running queue. Default ON, 30-day window.
+  memory_jobs_cleanup_enabled: z.boolean().default(true),
+  memory_jobs_retention_days: z.number().int().positive().max(3650).default(30),
+  // Raw conversation transcript (memory_messages) — HIGHEST training value. Default
+  // OFF (opt-in): deleting raw turns before the observer compacts a thread loses
+  // ungenerated memory. Archive-first when enabled. 180-day window.
+  memory_messages_cleanup_enabled: z.boolean().default(false),
+  memory_messages_retention_days: z.number().int().positive().max(3650).default(180),
+  // Derived memory: hard-delete already-archived observations + already-expired
+  // facts past their window (reuses the forgetting retention sweep, but driven by
+  // THIS switch so it works even when forgetting scoring is off). Reflections are
+  // never hard-deleted. Default OFF, 365-day window.
+  memory_derived_cleanup_enabled: z.boolean().default(false),
+  memory_derived_retention_days: z.number().int().positive().max(3650).default(365),
 });
 
 export type LogLevel = z.infer<typeof LogLevelSchema>;

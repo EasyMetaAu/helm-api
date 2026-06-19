@@ -636,13 +636,12 @@ describe("persistPayload", () => {
           }),
         } as unknown as PayloadCaptureDeps["telemetry"],
         capturePayloads: () => true,
-        payloadRetentionMs: () => 1000,
         ...over,
       },
     };
   }
 
-  it("writes the payload and prunes by the retention cutoff when enabled", async () => {
+  it("writes the payload and NEVER prunes (retention is the scheduled cleanup runner's job)", async () => {
     const { deps: d, inserts, prunes } = deps();
     await persistPayload(
       d,
@@ -651,7 +650,7 @@ describe("persistPayload", () => {
     );
     expect(inserts).toHaveLength(1);
     expect(inserts[0]?.requestId).toBe("req_1");
-    expect(prunes).toEqual([4000]); // now - retentionMs
+    expect(prunes).toEqual([]); // capture path must not delete bodies (P1 regression guard)
   });
 
   it("does nothing when capture is disabled", async () => {
@@ -674,7 +673,6 @@ describe("persistPayload", () => {
         prunePayloads: vi.fn(async () => {}),
       } as unknown as PayloadCaptureDeps["telemetry"],
       capturePayloads: () => true,
-      payloadRetentionMs: () => 1000,
     };
     await expect(
       persistPayload(d, { requestId: "req_1", requestJson: "{}", responseJson: null, now: 1 }, log),
@@ -716,7 +714,6 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
       redact: (x) => x,
       now: () => 5000,
       capturePayloads: () => true,
-      payloadRetentionMs: () => 1000,
     };
     await recordServed(d, args, () => {});
     expect(s.inserted).toHaveLength(0);
@@ -735,7 +732,6 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
       redact: (x) => x,
       now: () => 5000,
       capturePayloads: () => true,
-      payloadRetentionMs: () => 1000,
     };
     await recordServed(d, { ...args, requestId: "req_2" }, () => {});
     expect(s.inserted).toHaveLength(1);

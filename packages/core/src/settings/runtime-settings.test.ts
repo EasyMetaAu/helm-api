@@ -48,6 +48,21 @@ describe("defaultSettingsFromConfig", () => {
       user_message_queue_enabled: false,
       user_message_queue_delay_ms: 200,
       user_message_queue_wait_timeout_ms: 5_000,
+      // Data-cleanup fields come straight from the schema defaults.
+      cleanup_enabled: true,
+      cleanup_interval_hours: 24,
+      cleanup_archive_enabled: true,
+      telemetry_cleanup_enabled: true,
+      telemetry_retention_days: 90,
+      payloads_cleanup_enabled: true,
+      oauth_usage_cleanup_enabled: true,
+      oauth_usage_retention_days: 180,
+      memory_jobs_cleanup_enabled: true,
+      memory_jobs_retention_days: 30,
+      memory_messages_cleanup_enabled: false,
+      memory_messages_retention_days: 180,
+      memory_derived_cleanup_enabled: false,
+      memory_derived_retention_days: 365,
     });
     expect(defaultSettingsFromConfig(cfg(false)).rate_limit_enabled).toBe(false);
   });
@@ -115,21 +130,12 @@ describe("saveRuntimeSettings", () => {
   it("validates then persists the JSON blob and echoes it back", async () => {
     const store = fakeConfigStore();
     const saved = await saveRuntimeSettings(store, {
+      ...defaultSettingsFromConfig(cfg(true)),
       capture_payloads: false,
       native_protocol_passthrough: false,
       payload_retention_days: 7,
       rate_limit_enabled: true,
-      rate_limit_default_rpm: 0,
-      rate_limit_default_tpm: 0,
       log_level: "warn",
-      default_lane: "balanced",
-      concurrency_queue_enabled: false,
-      concurrency_queue_min_size: 5,
-      concurrency_queue_size_multiplier: 0,
-      concurrency_queue_wait_timeout_ms: 10_000,
-      user_message_queue_enabled: false,
-      user_message_queue_delay_ms: 200,
-      user_message_queue_wait_timeout_ms: 5_000,
     });
     expect(saved.payload_retention_days).toBe(7);
     expect(JSON.parse(store.map.get(RUNTIME_SETTINGS_KEY) ?? "{}")).toEqual(saved);

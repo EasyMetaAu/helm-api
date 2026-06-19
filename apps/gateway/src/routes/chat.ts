@@ -98,7 +98,6 @@ export interface ChatRouteDeps {
    *  test deps can omit it; when present, governs payload storage (capture_payloads)
    *  and streamed completion-cost backfill (#6). */
   capturePayloads?: PayloadCaptureDeps["capturePayloads"];
-  payloadRetentionMs?: PayloadCaptureDeps["payloadRetentionMs"];
   costOf?: PayloadCaptureDeps["costOf"];
   /** When true, honor the e2e-only `x-helm-eval` / `x-helm-rules-threshold`
    *  headers to toggle Layer-2 eval and raise the Layer-1 gate per request.
@@ -496,8 +495,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
 
     // Capture the verbatim request/response bodies. Mirrors `persist`: deferred +
     // batched when a write queue is wired, else the inline await (today's behavior).
-    // Self-gates on capture_payloads exactly like persistPayload. The retention
-    // prune rides along as a deferred task so it never blocks the response.
+    // Self-gates on capture_payloads exactly like persistPayload. Retention is NOT
+    // pruned here — the scheduled cleanup runner owns payload retention (archive-
+    // first), so capture never deletes bodies behind the cleanup settings' back.
     const capturePayload = async (
       responseJson: string | null,
       upstreamRequestJson: string | null,
@@ -511,11 +511,6 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           upstreamRequestJson,
           createdAt: new Date(deps.now()),
         });
-        const retentionMs = deps.payloadRetentionMs?.();
-        if (retentionMs !== undefined && retentionMs > 0) {
-          const cutoff = deps.now() - retentionMs;
-          deps.writes.enqueueTask(() => deps.telemetry.prunePayloads(cutoff));
-        }
         return;
       }
       await persistPayload(

@@ -46,7 +46,38 @@ describe("RuntimeSettingsSchema", () => {
       user_message_queue_enabled: false,
       user_message_queue_delay_ms: 200,
       user_message_queue_wait_timeout_ms: 5_000,
+      // Data-cleanup fields backfilled by their schema defaults.
+      cleanup_enabled: true,
+      cleanup_interval_hours: 24,
+      cleanup_archive_enabled: true,
+      telemetry_cleanup_enabled: true,
+      telemetry_retention_days: 90,
+      payloads_cleanup_enabled: true,
+      oauth_usage_cleanup_enabled: true,
+      oauth_usage_retention_days: 180,
+      memory_jobs_cleanup_enabled: true,
+      memory_jobs_retention_days: 30,
+      memory_messages_cleanup_enabled: false,
+      memory_messages_retention_days: 180,
+      memory_derived_cleanup_enabled: false,
+      memory_derived_retention_days: 365,
     });
+  });
+
+  it("backfills cleanup defaults (master on, archive on, raw/derived memory opt-in)", () => {
+    const parsed = RuntimeSettingsSchema.parse({});
+    expect(parsed.cleanup_enabled).toBe(true);
+    expect(parsed.cleanup_archive_enabled).toBe(true);
+    expect(parsed.cleanup_interval_hours).toBe(24);
+    expect(parsed.telemetry_retention_days).toBe(90);
+    expect(parsed.memory_messages_cleanup_enabled).toBe(false);
+    expect(parsed.memory_derived_cleanup_enabled).toBe(false);
+  });
+
+  it("rejects an out-of-range cleanup window / interval (fail-closed)", () => {
+    expect(RuntimeSettingsSchema.safeParse({ telemetry_retention_days: 0 }).success).toBe(false);
+    expect(RuntimeSettingsSchema.safeParse({ cleanup_interval_hours: 0 }).success).toBe(false);
+    expect(RuntimeSettingsSchema.safeParse({ cleanup_interval_hours: 999 }).success).toBe(false);
   });
 
   it("rejects a negative / non-integer default rate limit (fail-closed)", () => {

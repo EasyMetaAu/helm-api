@@ -42,6 +42,7 @@ import {
   type KeyedSerialGate,
   type Lane,
   type LanesConfig,
+  LocalVolumeSink,
   loadConfig,
   loadEncKeyFromEnv,
   loadRuntimeCatalog,
@@ -67,17 +68,20 @@ import {
   type ProviderRegistryConfig as RegistryProviderConfig,
   type ResponsesSSEEvent,
   type RouteOptions,
+  readLastCleanupReport,
   redact,
   resolveCompactionPricing,
   resolveCostUsd,
   responsesTransformer,
   routeRequest,
+  runCleanupPass,
   runDecayJob,
   runObserverJob,
   runReflectorJob,
   type StoreSet,
   saveRuntimeSettings,
   settleBudget,
+  startCleanupScheduler,
   startMemoryWorker,
   startSignalScheduler,
   type TransportProfile,
@@ -113,6 +117,7 @@ import {
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { anthropicMetadataUserId, stableSessionId } from "./oauth/device-identity.js";
 import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
+import { createArchiveFsAccess } from "./routes/admin/cleanup-fs.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createOAuthAccountTester, type OAuthTester } from "./routes/admin/oauth-test.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
@@ -953,6 +958,27 @@ export async function buildServer(
       tpm: next.rate_limit_default_tpm,
     };
   };
+  // Data cleanup / archival composition (admin "Data cleanup" + the scheduled sweep
+  // below). The archive sink writes verified gzip-JSONL under HELM_ARCHIVE_DIR
+  // (default <dataDir>/archive); runCleanupPassNow is the SINGLE pass shared by the
+  // manual "Clean Now" button and the scheduled tick. Defined here (outer scope) so
+  // both the admin route wiring AND the scheduler can reach it.
+  const archiveDir = process.env.HELM_ARCHIVE_DIR ?? `${dataDir}/archive`;
+  const archiveSink = new LocalVolumeSink(archiveDir);
+  const archiveFs = createArchiveFsAccess(archiveDir);
+  const runCleanupPassNow = (trigger: "scheduled" | "manual") =>
+    runCleanupPass({
+      settings,
+      telemetry,
+      memory: store.memory,
+      oauthUsage: store.oauthUsage,
+      config: store.config,
+      archiveSink,
+      runId: randomUUID(),
+      now: () => Date.now(),
+      trigger,
+      log: (line, meta) => logger.log("info", line, meta as Record<string, unknown> | undefined),
+    });
   // Agentic Signals (docs/02). The collector consumes ALREADY-persisted telemetry
   // and writes aggregated, REDACTED signals in the background. The optional
   // routing feedback consumer below reads only those aggregates and remains
@@ -1706,10 +1732,10 @@ export async function buildServer(
     // SSE keep-alive cadence (runtime.sse_heartbeat_ms / HELM_SSE_HEARTBEAT_MS); 0 = off.
     sseHeartbeatMs: () => config.runtime.sse_heartbeat_ms,
     recordOAuthUsage,
-    // Full request/response capture + streamed-cost backfill. The getters read the
-    // LIVE runtime settings so the admin toggle/retention apply without a restart.
+    // Full request/response capture + streamed-cost backfill. The getter reads the
+    // LIVE runtime setting so the admin toggle applies without a restart. Payload
+    // retention is owned by the scheduled cleanup runner, not the capture path.
     capturePayloads: () => settings.capture_payloads,
-    payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
     costOf,
     // Per-key usage budgets (docs/06): the pre-route gate (degrade/reject) + the
     // post-served settle, threaded from the composition root.
@@ -1812,6 +1838,14 @@ export async function buildServer(
       rules: ruleStore,
       keyStore,
       telemetry,
+      // Data cleanup / retention / archival surface (admin "Data cleanup").
+      cleanup: {
+        runNow: () => runCleanupPassNow("manual"),
+        lastReport: () => readLastCleanupReport(store.config),
+        vacuum: () => store.vacuum(),
+        listArchives: archiveFs.listArchives,
+        resolveArchive: archiveFs.resolveArchive,
+      },
       // Admin "Retry" replay (isolated debug re-run). Reuses the SAME core `route`
       // + redactor + streamed-cost pricer + capture getters as the chat route, so a
       // re-issued request routes faithfully; a fresh UUID mints the new trace id.
@@ -1821,7 +1855,6 @@ export async function buildServer(
         now: () => Date.now(),
         genTraceId: () => randomUUID(),
         capturePayloads: () => settings.capture_payloads,
-        payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
         costOf,
       },
       modelAliases,
@@ -2019,7 +2052,6 @@ export async function buildServer(
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
-      payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
     },
   } as Parameters<typeof registerMessagesRoute>[1] & { rateLimiter: RateLimiterPort });
 
@@ -2217,7 +2249,6 @@ export async function buildServer(
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
-      payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
     },
   } as Parameters<typeof registerResponsesRoute>[1] & { rateLimiter: RateLimiterPort });
 
@@ -2319,7 +2350,6 @@ export async function buildServer(
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
-      payloadRetentionMs: () => settings.payload_retention_days * 86_400_000,
     },
   } as Parameters<typeof registerGeminiRoute>[1] & { rateLimiter: RateLimiterPort });
 
@@ -2394,6 +2424,26 @@ export async function buildServer(
     });
   }
 
+  // Data-cleanup scheduler — the OFF-the-request-path retention/archival sweep
+  // (telemetry/payload/memory pruning + archive). DELIBERATELY separate from the 60s
+  // memory worker: cleanup is a heavier hour/day-cadence pass. The interval is read
+  // from settings at boot (a runtime change to cleanup_interval_hours applies on the
+  // next restart); the live cleanup_enabled master switch is checked inside the tick,
+  // so toggling it off freezes deletion without a restart. fail-open + unref'd.
+  // Disabled wholesale by HELM_CLEANUP_DISABLED=1 (tests default to off).
+  let cleanupScheduler: { stop: () => void } | null = null;
+  if (process.env.HELM_CLEANUP_DISABLED !== "1") {
+    const hours = settings.cleanup_interval_hours;
+    cleanupScheduler = startCleanupScheduler({
+      intervalMs: hours * 3_600_000,
+      runTick: async () => {
+        if (!settings.cleanup_enabled) return; // live master switch
+        await runCleanupPassNow("scheduled");
+      },
+      log: (level, msg, fields) => logger.log(level, msg, fields),
+    });
+  }
+
   return {
     app,
     port: config.server.port,
@@ -2401,6 +2451,7 @@ export async function buildServer(
     dispose: async () => {
       signalScheduler?.stop();
       memoryWorker?.stop();
+      cleanupScheduler?.stop();
       // Drain the deferred write queue BEFORE closing the DB so a graceful shutdown
       // persists every buffered telemetry/payload/observe write (no loss on deploy).
       await writeQueue.stop();

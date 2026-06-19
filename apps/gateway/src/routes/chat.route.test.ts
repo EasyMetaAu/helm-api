@@ -845,7 +845,6 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
     const { deps: d, harness } = deps({
       telemetry: cap.telemetry,
       capturePayloads: () => true,
-      payloadRetentionMs: () => 1000,
       // price 100 prompt + 50 completion tokens deterministically.
       costOf: (_alias, u) => (u.prompt_tokens ?? 0) * 1e-6 + (u.completion_tokens ?? 0) * 2e-6,
     });
@@ -1012,7 +1011,6 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
     const { deps: d, harness } = deps({
       telemetry: cap.telemetry,
       capturePayloads: () => true,
-      payloadRetentionMs: () => 1000,
     });
     const upstream = { id: "cmpl-9", choices: [{ message: { content: "hello" } }] };
     harness.execute.mockResolvedValue(nonStreamOutcome(upstream));
@@ -1058,7 +1056,6 @@ describe("POST /v1/chat/completions — deferred write queue", () => {
       telemetry: cap.telemetry,
       writes: q,
       capturePayloads: () => true,
-      payloadRetentionMs: () => 1000,
       costOf: () => 0,
     });
     harness.execute.mockResolvedValue(

@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import { registerClassifierRoutes } from "./classifier.js";
+import { registerCleanupRoutes } from "./cleanup.js";
 import type { AdminApiDeps } from "./deps.js";
 import { registerKeysRoutes } from "./keys.js";
 import { registerLanesRoutes } from "./lanes.js";
@@ -31,6 +32,7 @@ export function registerAdminApi(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   registerReplayRoutes(app, deps);
   registerSettingsRoutes(app, deps);
   registerOAuthRoutes(app, deps);
+  registerCleanupRoutes(app, deps);
 }
 
 export type { AdminApiDeps, RuleStore } from "./deps.js";

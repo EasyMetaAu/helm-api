@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
-import { and, asc, count, desc, eq, gte, lt, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, lt, type SQL, sql } from "drizzle-orm";
 import { shapeTelemetryAggregate } from "../aggregate-shape.js";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
   RecentDecisionRecord,
   RequestPayload,
+  RequestPayloadArchiveRow,
   TelemetryAggregate,
+  TelemetryArchiveRow,
   TelemetryPage,
   TelemetryPageQuery,
   TelemetryStore,
@@ -320,6 +322,80 @@ export class PgTelemetryStore implements TelemetryStore {
   // Retention auto-prune: drop rows strictly older than the cutoff (epoch ms).
   async prunePayloads(olderThanMs: number): Promise<void> {
     await this.db.delete(requestPayloads).where(lt(requestPayloads.createdAt, olderThanMs));
+  }
+
+  // Telemetry retention prune — the decision table's equivalent of prunePayloads
+  // (it had none before). Strict lower bound on created_at (epoch ms).
+  async pruneTelemetry(olderThanMs: number): Promise<number> {
+    const rows = await this.db
+      .delete(telemetry)
+      .where(lt(telemetry.createdAt, olderThanMs))
+      .returning();
+    return rows.length;
+  }
+
+  async countTelemetryOlderThan(olderThanMs: number): Promise<number> {
+    const rows = await this.db
+      .select({ value: count() })
+      .from(telemetry)
+      .where(lt(telemetry.createdAt, olderThanMs));
+    return rows[0]?.value ?? 0;
+  }
+
+  // Keyset page (id-ordered) of to-be-archived telemetry rows. createdAt is
+  // already epoch-ms bigint here, so no Date conversion.
+  async selectTelemetryOlderThan(
+    olderThanMs: number,
+    limit: number,
+    afterId?: string,
+  ): Promise<TelemetryArchiveRow[]> {
+    const conds: SQL[] = [lt(telemetry.createdAt, olderThanMs)];
+    if (afterId !== undefined) conds.push(gt(telemetry.id, afterId));
+    const rows = await this.db
+      .select()
+      .from(telemetry)
+      .where(and(...conds))
+      .orderBy(asc(telemetry.id))
+      .limit(limit);
+    return rows.map((r) => ({
+      id: r.id,
+      requestId: r.requestId,
+      apiKeyId: r.apiKeyId,
+      createdAt: r.createdAt,
+      decision: this.toDecision(r),
+    }));
+  }
+
+  async countPayloadsOlderThan(olderThanMs: number): Promise<number> {
+    const rows = await this.db
+      .select({ value: count() })
+      .from(requestPayloads)
+      .where(lt(requestPayloads.createdAt, olderThanMs));
+    return rows[0]?.value ?? 0;
+  }
+
+  // Keyset page of to-be-archived payloads (requestId is the primary key/cursor).
+  async selectPayloadsOlderThan(
+    olderThanMs: number,
+    limit: number,
+    afterId?: string,
+  ): Promise<RequestPayloadArchiveRow[]> {
+    const conds: SQL[] = [lt(requestPayloads.createdAt, olderThanMs)];
+    if (afterId !== undefined) conds.push(gt(requestPayloads.requestId, afterId));
+    const rows = await this.db
+      .select()
+      .from(requestPayloads)
+      .where(and(...conds))
+      .orderBy(asc(requestPayloads.requestId))
+      .limit(limit);
+    return rows.map((r) => ({
+      id: r.requestId,
+      requestId: r.requestId,
+      requestJson: r.requestJson,
+      responseJson: r.responseJson,
+      upstreamRequestJson: r.upstreamRequestJson ?? null,
+      createdAt: r.createdAt,
+    }));
   }
 
   // Row -> DecisionRecord. Re-validates through the shared schema so a corrupted

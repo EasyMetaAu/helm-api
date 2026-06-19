@@ -52,6 +52,11 @@ export interface StoreSet {
   // served traffic; quota = latest rate-limit window snapshot. Both fail-open.
   readonly oauthUsage: OAuthUsageStore;
   readonly oauthQuota: OAuthQuotaStore;
+  // Reclaim on-disk space after a cleanup sweep. sqlite runs VACUUM (rewrites the
+  // file under an EXCLUSIVE lock — manual/off-hours only); postgres is a no-op (it
+  // autovacuums). Optional + driver-specific; the admin "Compact database" button
+  // calls it, never the scheduled runner.
+  readonly vacuum: () => Promise<void>;
   readonly close: () => Promise<void>;
 }
 
@@ -88,6 +93,11 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         oauthTokens: new SqliteOAuthTokenStore(db),
         oauthUsage: new SqliteOAuthUsageStore(db),
         oauthQuota: new SqliteOAuthQuotaStore(db),
+        // VACUUM cannot run inside a transaction; it takes an exclusive lock and
+        // rewrites the whole file. Manual "Compact database" only — never scheduled.
+        vacuum: async () => {
+          db.$sqlite.exec("VACUUM");
+        },
         close: async () => {
           db.$sqlite.close();
         },
@@ -112,6 +122,9 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         oauthTokens: new PgOAuthTokenStore(db),
         oauthUsage: new PgOAuthUsageStore(db),
         oauthQuota: new PgOAuthQuotaStore(db),
+        // Postgres autovacuums; an explicit VACUUM needs a non-pooled conn and is
+        // unnecessary for managed supabase — no-op keeps the StoreSet contract uniform.
+        vacuum: async () => {},
         close: () => db.$close(),
       };
     }
