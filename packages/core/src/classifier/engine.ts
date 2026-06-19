@@ -1,5 +1,6 @@
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
 import { scoreDimensions } from "./dimensions.js";
+import { lastUserMessage, lastUserMessageChars, lastUserMessageText } from "./message-text.js";
 import { applyMomentum, type MomentumDeps, recordMomentum } from "./momentum.js";
 import { applyOverrides, evaluateOverrides } from "./overrides.js";
 import { nonLatinRatio } from "./signals.js";
@@ -259,38 +260,6 @@ function safe<T>(fn: () => T, fallback: T): T {
 
 function round(n: number): number {
   return Math.round(n * 1000) / 1000;
-}
-
-function lastUserMessage(
-  messages: InternalRequest["messages"],
-): InternalRequest["messages"][number] | null {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i];
-    if (msg && msg.role === "user") return msg;
-  }
-  return null;
-}
-
-function lastUserMessageText(messages: InternalRequest["messages"]): string {
-  const msg = lastUserMessage(messages);
-  return msg ? contentToString(msg.content) : "";
-}
-
-function lastUserMessageChars(messages: InternalRequest["messages"]): number {
-  return lastUserMessageText(messages).trim().length;
-}
-
-function contentToString(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const part of content) {
-      if (typeof part === "string") parts.push(part);
-      else if (isRecord(part) && typeof part.text === "string") parts.push(part.text);
-    }
-    return parts.join("\n");
-  }
-  return "";
 }
 
 function isJsonResponseFormat(rf: InternalRequest["response_format"]): boolean {

@@ -1,4 +1,5 @@
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
+import { lastUserMessageText } from "./message-text.js";
 import { detectCodeBlock, detectFilePath, detectStackTrace, detectUrl } from "./signals.js";
 
 // Task-type detection — orthogonal to complexity tiers (this module produces NO
@@ -13,6 +14,15 @@ import { detectCodeBlock, detectFilePath, detectStackTrace, detectUrl } from "./
 // CLAUDE.md principle 3). The `web` activation is deliberately raised (default
 // 3.0) so a single weak signal (one lone URL) cannot false-trigger it.
 // Pure function (CLAUDE.md principle 4): zero I/O, no clock, no randomness.
+//
+// CURRENT-TURN SCOPING: the text evidence (keyword paths 1 + 3) reads ONLY the
+// last user message, NOT the concatenated history. A constant system/developer
+// prompt describes an agent's standing capabilities ("you can edit files, run
+// bash"), not THIS request's task — scoring it would classify every message to a
+// coding agent (even "thanks") as coding. This mirrors the language guard's
+// "current turn only" rule (engine.ts §5.5: "historical keyword hits … are not
+// evidence that Layer-1 understood this prompt"). Tool names (path 2) stay full —
+// they are a legitimate per-request capability signal, not history.
 
 export type TaskType =
   | "chat"
@@ -63,7 +73,9 @@ export const ALL_TASKS: TaskType[] = [
 ];
 
 export function detectTask(req: DetectInput, cfg: ClassifierRulesConfig): TaskDetectResult {
-  const text = extractText(req.messages);
+  // Text evidence is scoped to the CURRENT user turn (see header). Tool names are
+  // request-wide (a capability signal, not history) and read from req.tools below.
+  const text = lastUserMessageText(req.messages);
   const toolNames = extractToolNames(req.tools);
 
   // Accumulate score + reasons per task. Lazily created on first hit.
@@ -175,28 +187,6 @@ function isTaskType(s: string): s is TaskType {
 }
 
 // ── input extraction (robust to MVP's open message/tool shapes) ─────────────
-
-function extractText(messages: DetectInput["messages"]): string {
-  const parts: string[] = [];
-  for (const msg of messages) collectStrings(msg.content, parts);
-  return parts.join("\n");
-}
-
-function collectStrings(content: unknown, out: string[]): void {
-  if (typeof content === "string") {
-    out.push(content);
-    return;
-  }
-  if (Array.isArray(content)) {
-    for (const part of content) {
-      if (typeof part === "string") {
-        out.push(part);
-      } else if (isRecord(part) && typeof part.text === "string") {
-        out.push(part.text);
-      }
-    }
-  }
-}
 
 // Tool name lives at tools[].function.name (OpenAI shape) or tools[].name. The
 // MVP keeps `tools` an open array, so every access is defensive: malformed /

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { InternalRequest } from "@helm/shared";
+import { lastUserMessageText } from "../message-text.js";
 
 // eval.cache-key — the canonical content-hash that keys the Layer-2 eval cache.
 // PURE function (CLAUDE.md principle 4): zero I/O, no clock, no randomness; same
@@ -48,7 +49,9 @@ export interface CanonicalEvalInput {
 export function toCanonicalInput(input: ClassifierInput): CanonicalEvalInput {
   // Fixed key order — do NOT reorder; it defines the canonical JSON.
   return {
-    last_user_message: lastUserMessage(input.messages),
+    // Trimmed last user message (NOT lowercased) — shared extractor, same scope as
+    // the Layer-1 task/dimension scorers, so the cache key never drifts from them.
+    last_user_message: lastUserMessageText(input.messages).trim(),
     turn_count: userTurnCount(input.messages),
     tool_names: extractToolNames(input.tools).sort(),
     response_format_json: isJsonResponseFormat(input.response_format),
@@ -69,18 +72,6 @@ export function buildEvalCacheKey(input: ClassifierInput): string {
 
 // ── extraction helpers (defensive against open MVP shapes) ──────────────────
 
-// Last user-role message, content flattened to a string and trimmed. NOT
-// lowercased. Returns "" when there is no user message.
-function lastUserMessage(messages: ClassifierInput["messages"]): string {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i];
-    if (msg && msg.role === "user") {
-      return contentToString(msg.content).trim();
-    }
-  }
-  return "";
-}
-
 // turn_count convention (fixed): number of role==="user" messages. This is the
 // classification-relevant turn measure; documented here so eval.cascade and any
 // future consumer use the SAME counting rule and the key never drifts.
@@ -90,19 +81,6 @@ function userTurnCount(messages: ClassifierInput["messages"]): number {
     if (msg && msg.role === "user") count += 1;
   }
   return count;
-}
-
-function contentToString(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const part of content) {
-      if (typeof part === "string") parts.push(part);
-      else if (isRecord(part) && typeof part.text === "string") parts.push(part.text);
-    }
-    return parts.join("\n");
-  }
-  return "";
 }
 
 // Tool name lives at tools[].function.name (OpenAI shape) or tools[].name
