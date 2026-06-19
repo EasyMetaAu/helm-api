@@ -826,8 +826,8 @@ export class SqliteMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
-  }): Promise<{ insertedIds: string[]; supersededIds: string[] }> {
-    if (input.facts.length === 0) return { insertedIds: [], supersededIds: [] };
+  }): Promise<{ insertedIds: string[]; supersededIds: string[]; resurrectedIds: string[] }> {
+    if (input.facts.length === 0) return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
     const nowMs = input.now.getTime();
     const insertOne = this.db.$sqlite.prepare(
       `INSERT OR IGNORE INTO memory_facts
@@ -850,12 +850,25 @@ export class SqliteMemoryStore implements MemoryStore {
           AND (? IS NULL OR thread_id = ?)
         RETURNING id`,
     );
+    // Resurrect-on-re-ingest: a manual delete soft-prunes the fact but keeps its
+    // content_hash, so the UNIQUE(owner_id, content_hash) index would otherwise
+    // suppress every re-extraction of it forever. On a dedup hit we look the row up
+    // and, if it is NOT live (pruned/archived), REACTIVATE it instead of skipping.
+    const selectByHash = this.db.$sqlite.prepare(
+      `SELECT id, status FROM memory_facts WHERE owner_id = ? AND content_hash = ?`,
+    );
+    const reactivate = this.db.$sqlite.prepare(
+      `UPDATE memory_facts
+          SET status = 'active', expired_at = NULL, invalid_at = NULL, valid_from = ?, updated_at = ?
+        WHERE id = ?`,
+    );
     // The whole batch is atomic: a partial ingest must not leave a fact inserted
     // without its supersede applied (or vice versa). Returns the ids inserted +
-    // superseded (docs/13 — the MCP `memory_add` tool echoes the created fact).
+    // superseded + resurrected (docs/13 — the MCP `memory_add` tool echoes them).
     const runBatch = this.db.$sqlite.transaction((facts: MemoryFactInput[]) => {
       const insertedIds: string[] = [];
       const supersededIds: string[] = [];
+      const resurrectedIds: string[] = [];
       for (const f of facts) {
         // The top-level accountId is the authoritative tenant guard; each fact's
         // ownerId must already match it (the Reflector stamps the authenticated
@@ -912,9 +925,43 @@ export class SqliteMemoryStore implements MemoryStore {
             threadId,
           ) as Array<{ id: string }>;
           for (const s of superseded) supersededIds.push(s.id);
+        } else {
+          // Dedup hit (res.changes === 0): the (owner_id, content_hash) row exists.
+          // If it is NOT live (pruned by a manual delete, or archived), reactivate
+          // it — a re-observed fact returns rather than staying permanently
+          // suppressed. A live duplicate (active + expired_at IS NULL) is left as a
+          // true idempotent no-op (status NOT in the resurrect set).
+          const existing = selectByHash.get(ownerId, f.contentHash) as
+            | { id: string; status: string }
+            | undefined;
+          if (
+            existing !== undefined &&
+            (existing.status === "pruned" || existing.status === "archived")
+          ) {
+            reactivate.run(f.validFrom.getTime(), nowMs, existing.id);
+            resurrectedIds.push(existing.id);
+            // The resurrected row is now the subject's live fact — supersede older
+            // same-subject siblings exactly as a fresh insert would (id <> its own).
+            const superseded = supersede.all(
+              nowMs,
+              f.validFrom.getTime(),
+              nowMs,
+              ownerId,
+              f.subjectKey,
+              f.validFrom.getTime(),
+              existing.id,
+              projectId,
+              projectId,
+              resourceId,
+              resourceId,
+              threadId,
+              threadId,
+            ) as Array<{ id: string }>;
+            for (const s of superseded) supersededIds.push(s.id);
+          }
         }
       }
-      return { insertedIds, supersededIds };
+      return { insertedIds, supersededIds, resurrectedIds };
     });
     return runBatch(input.facts);
   }

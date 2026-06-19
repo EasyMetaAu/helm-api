@@ -330,7 +330,7 @@ async function tryExtractFacts(args: {
     });
     if (facts.length === 0) return;
 
-    await deps.memoryStore.insertFactsReconciled({
+    const reconciled = await deps.memoryStore.insertFactsReconciled({
       accountId: target.accountId,
       scope,
       facts,
@@ -339,6 +339,10 @@ async function tryExtractFacts(args: {
     deps.log("memory.reflector.facts_extracted", {
       target_scope: target,
       fact_count: facts.length,
+      inserted: reconciled.insertedIds.length,
+      // A re-observed fact that had been deleted is REACTIVATED, not re-inserted.
+      resurrected: reconciled.resurrectedIds?.length ?? 0,
+      superseded: reconciled.supersededIds.length,
     });
   } catch (err) {
     // FAIL-OPEN: a fact failure must never break the reflection write. Log + swallow.

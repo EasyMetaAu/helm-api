@@ -198,11 +198,15 @@ async function handleAdd(
       scope,
       facts,
       now: ctx.now(),
-    })) ?? { insertedIds: [], supersededIds: [] };
+    })) ?? { insertedIds: [], supersededIds: [], resurrectedIds: [] };
+    // A re-added fact that had been deleted is REACTIVATED (resurrected), not a
+    // fresh insert — report it distinctly and don't mislabel it as a plain dedup.
+    const resurrected = res.resurrectedIds ?? [];
     return ok({
       added: res.insertedIds,
+      resurrected,
       superseded: res.supersededIds,
-      deduped: res.insertedIds.length === 0,
+      deduped: res.insertedIds.length === 0 && resurrected.length === 0,
     });
   }
   const highWater = await ctx.store.getReflectionVersionHighWater({

@@ -494,9 +494,16 @@ export interface SignalStore {
 // docs/13 — what insertFactsReconciled returns: the ids freshly inserted this
 // batch + the older same-subject rows it superseded (stamped expired). The MCP
 // `memory_add` tool echoes these so an agent learns the new fact's id.
+// `resurrectedIds`: rows whose (owner_id, content_hash) ALREADY existed but were
+// NOT live (pruned by a manual delete, or archived) and got REACTIVATED by this
+// re-ingest rather than silently skipped — so a deleted-but-re-observed fact
+// returns instead of being permanently suppressed by the idempotency index.
+// OPTIONAL on the contract so pre-existing store fakes returning only
+// inserted/superseded stay valid; real adapters always populate it (possibly []).
 export interface MemoryFactReconcileResult {
   insertedIds: string[];
   supersededIds: string[];
+  resurrectedIds?: string[];
 }
 
 export interface MemoryStore {
