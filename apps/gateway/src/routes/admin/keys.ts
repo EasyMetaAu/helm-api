@@ -1,7 +1,12 @@
-import { CreateKeyRequestSchema, UpdateKeyRequestSchema } from "@helm/shared";
+import { CreateKeyRequestSchema, StatsQuerySchema, UpdateKeyRequestSchema } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
-import type { AdminApiDeps, KeySummary } from "./deps.js";
+import type { AdminApiDeps, KeySummary, KeyUsageSummary } from "./deps.js";
+
+// Default usage window for the list column when start/end are omitted: last 24h
+// (mirrors the dashboard /stats default). The list view shows "last 24h" by
+// default; the SPA still sends an explicit window, this is just the safe fallback.
+const DAY_MS = 86_400_000;
 
 // /admin/api/keys — manage API keys (KeyStore, NEVER yaml). CLAUDE.md Principle 7: keys
 // are stored as sha256 hash + display prefix ONLY. The plaintext is minted here,
@@ -63,6 +68,40 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
   app.get("/admin/api/keys", async (c) => {
     const rows = await deps.keyStore.list();
     return c.json(rows.map(toSummary));
+  });
+
+  // GET /keys/usage?start&end -> KeyUsageSummary[] — per-key usage rollup for the
+  // list "Usage" column (ONE GROUP BY in the store, never one-per-key). MUST be
+  // registered BEFORE /keys/:id or Hono would match "usage" as an :id. The window
+  // is parsed with the SAME fail-open schema as /stats (start/end only; bucket/tz/
+  // key_id are irrelevant here and ignored) and defaults to the last 24h.
+  app.get("/admin/api/keys/usage", async (c) => {
+    const q = StatsQuerySchema.parse(c.req.query());
+    const end = q.end ?? Date.now();
+    const start = q.start ?? end - DAY_MS;
+    const usage = await deps.telemetry.usageByKey(start, end);
+    return c.json(
+      usage.map(
+        (u): KeyUsageSummary => ({
+          key_id: u.apiKeyId,
+          requests: u.requests,
+          error_count: u.errorCount,
+          cost_usd: u.totalCostUsd,
+          total_tokens: u.totalTokens,
+        }),
+      ),
+    );
+  });
+
+  // GET /keys/:id -> the full redacted record (KeySummary) | 404. The detail page
+  // reads every per-key cap to render its config card; we reuse the list's
+  // redaction (prefix only — NEVER hash/plaintext, principle 7). list().find
+  // mirrors the DELETE purge path (KeyStore has no get-by-id; the admin list is small).
+  app.get("/admin/api/keys/:id", async (c) => {
+    const id = c.req.param("id");
+    const rec = (await deps.keyStore.list()).find((r) => r.key_id === id);
+    if (!rec) return c.json({ error: "key not found" }, 404);
+    return c.json(toSummary(rec));
   });
 
   // POST /keys -> { key_id, plaintext } (plaintext returned ONCE).

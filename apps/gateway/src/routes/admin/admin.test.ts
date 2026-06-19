@@ -797,6 +797,65 @@ describe("admin.api keys", () => {
     const res = await app.request("/admin/api/keys/nope?purge=true", { method: "DELETE" });
     expect(res.status).toBe(404);
   });
+
+  it("GET /keys/:id returns the full redacted record, 404 on unknown", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user", name: "proj-x" }),
+    });
+    const res = await app.request("/admin/api/keys/key_1");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.key_id).toBe("key_1");
+    expect(body.name).toBe("proj-x");
+    expect(body.prefix).toBe("helm_live_PLAI");
+    // Never the plaintext nor the full hash (principle 7).
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("PLAINTEXT_SECRET");
+    expect(serialized).not.toContain("hash_of_plaintext_full");
+
+    expect((await app.request("/admin/api/keys/nope")).status).toBe(404);
+  });
+
+  it("GET /keys/usage returns per-key window rollup (not matched as :id)", async () => {
+    const windows: Array<{ start: number; end: number }> = [];
+    const telemetry: TelemetryStore = {
+      ...makeTelemetry(),
+      async usageByKey(start: number, end: number) {
+        windows.push({ start, end });
+        return [
+          { apiKeyId: "key_1", requests: 7, errorCount: 1, totalCostUsd: 0.042, totalTokens: 1500 },
+          { apiKeyId: "key_2", requests: 2, errorCount: 0, totalCostUsd: null, totalTokens: 30 },
+        ];
+      },
+    };
+    const app = buildApp(buildDeps({ telemetry }));
+    const res = await app.request("/admin/api/keys/usage?start=1000&end=5000");
+    expect(res.status).toBe(200);
+    expect(windows[0]).toEqual({ start: 1000, end: 5000 }); // "usage" is NOT treated as a key id
+    expect(await res.json()).toEqual([
+      { key_id: "key_1", requests: 7, error_count: 1, cost_usd: 0.042, total_tokens: 1500 },
+      { key_id: "key_2", requests: 2, error_count: 0, cost_usd: null, total_tokens: 30 },
+    ]);
+  });
+
+  it("GET /keys/usage defaults to the last 24h when the window is omitted", async () => {
+    const windows: Array<{ start: number; end: number }> = [];
+    const telemetry: TelemetryStore = {
+      ...makeTelemetry(),
+      async usageByKey(start: number, end: number) {
+        windows.push({ start, end });
+        return [];
+      },
+    };
+    const app = buildApp(buildDeps({ telemetry }));
+    const res = await app.request("/admin/api/keys/usage");
+    expect(res.status).toBe(200);
+    expect((windows[0]?.end ?? 0) - (windows[0]?.start ?? 0)).toBe(86_400_000);
+  });
 });
 
 describe("admin.api requests", () => {
