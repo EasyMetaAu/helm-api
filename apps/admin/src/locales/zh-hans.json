@@ -635,5 +635,17 @@
   "Lane unavailable": "通道不可用",
   "Authentication failed": "鉴权失败",
   "Timed out": "请求超时",
-  "Circuit open": "熔断开启"
+  "Circuit open": "熔断开启",
+  "Usage (24h)": "用量（24 小时）",
+  "req": "次",
+  "err": "错误",
+  "tok": "词元",
+  "No traffic in the last 24h": "过去 24 小时无流量",
+  "Configuration": "配置",
+  "From": "起始",
+  "To": "结束",
+  "Clear": "清除",
+  "Prev": "上一页",
+  "{count} in window": "窗口内 {count} 条",
+  "No requests for this key in the selected window.": "所选时间窗口内该密钥没有请求。"
 }

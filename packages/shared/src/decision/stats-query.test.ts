@@ -11,6 +11,12 @@ describe("StatsQuerySchema", () => {
     expect(q.end).toBeUndefined();
     expect(q.bucket).toBe("day");
     expect(q.tzOffsetMinutes).toBe(0);
+    expect(q.key_id).toBeUndefined();
+  });
+
+  it("parses key_id (detail-page key scope) and treats empty as unset", () => {
+    expect(StatsQuerySchema.parse({ key_id: "  key_abc  " }).key_id).toBe("key_abc");
+    expect(StatsQuerySchema.parse({ key_id: "" }).key_id).toBeUndefined();
   });
 
   it("coerces string scalars (querystring values are always strings)", () => {

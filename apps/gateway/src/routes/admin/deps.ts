@@ -416,6 +416,20 @@ export interface CreatedKey {
   plaintext: string;
 }
 
+// Per-key usage rollup for the /admin/keys list "Usage" column (GET
+// /admin/api/keys/usage). One row per key that saw traffic in the window — the
+// SPA merges it into the key list by key_id (a key absent here saw zero traffic,
+// rendered as 0/—). Snake_case wire shape mirroring the rest of the admin API.
+// `cost_usd` stays nullable ("not measured", distinct from a measured 0); the
+// counts are real COALESCE'd 0s. No key material — just the key_id + numbers.
+export interface KeyUsageSummary {
+  key_id: string;
+  requests: number;
+  error_count: number;
+  cost_usd: number | null;
+  total_tokens: number;
+}
+
 // Request-debug detail: the full decision trail (docs/07). BOTH the list and the
 // detail endpoints return the whole DecisionRecord — it already carries
 // the classification stage, matched policy, lane candidate chain, provider attempts,

@@ -206,6 +206,9 @@ function makeTelemetry(seed: DecisionRecord[] = []): TelemetryStore {
         byModel: [],
       };
     },
+    async usageByKey() {
+      return [];
+    },
     async insertPayload() {},
     async getPayload() {
       return null;
@@ -794,6 +797,65 @@ describe("admin.api keys", () => {
     const res = await app.request("/admin/api/keys/nope?purge=true", { method: "DELETE" });
     expect(res.status).toBe(404);
   });
+
+  it("GET /keys/:id returns the full redacted record, 404 on unknown", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user", name: "proj-x" }),
+    });
+    const res = await app.request("/admin/api/keys/key_1");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.key_id).toBe("key_1");
+    expect(body.name).toBe("proj-x");
+    expect(body.prefix).toBe("helm_live_PLAI");
+    // Never the plaintext nor the full hash (principle 7).
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("PLAINTEXT_SECRET");
+    expect(serialized).not.toContain("hash_of_plaintext_full");
+
+    expect((await app.request("/admin/api/keys/nope")).status).toBe(404);
+  });
+
+  it("GET /keys/usage returns per-key window rollup (not matched as :id)", async () => {
+    const windows: Array<{ start: number; end: number }> = [];
+    const telemetry: TelemetryStore = {
+      ...makeTelemetry(),
+      async usageByKey(start: number, end: number) {
+        windows.push({ start, end });
+        return [
+          { apiKeyId: "key_1", requests: 7, errorCount: 1, totalCostUsd: 0.042, totalTokens: 1500 },
+          { apiKeyId: "key_2", requests: 2, errorCount: 0, totalCostUsd: null, totalTokens: 30 },
+        ];
+      },
+    };
+    const app = buildApp(buildDeps({ telemetry }));
+    const res = await app.request("/admin/api/keys/usage?start=1000&end=5000");
+    expect(res.status).toBe(200);
+    expect(windows[0]).toEqual({ start: 1000, end: 5000 }); // "usage" is NOT treated as a key id
+    expect(await res.json()).toEqual([
+      { key_id: "key_1", requests: 7, error_count: 1, cost_usd: 0.042, total_tokens: 1500 },
+      { key_id: "key_2", requests: 2, error_count: 0, cost_usd: null, total_tokens: 30 },
+    ]);
+  });
+
+  it("GET /keys/usage defaults to the last 24h when the window is omitted", async () => {
+    const windows: Array<{ start: number; end: number }> = [];
+    const telemetry: TelemetryStore = {
+      ...makeTelemetry(),
+      async usageByKey(start: number, end: number) {
+        windows.push({ start, end });
+        return [];
+      },
+    };
+    const app = buildApp(buildDeps({ telemetry }));
+    const res = await app.request("/admin/api/keys/usage");
+    expect(res.status).toBe(200);
+    expect((windows[0]?.end ?? 0) - (windows[0]?.start ?? 0)).toBe(86_400_000);
+  });
 });
 
 describe("admin.api requests", () => {
@@ -946,18 +1008,25 @@ describe("admin.api stats (dashboard token accounting)", () => {
   // Telemetry stub that records the aggregate(start,end,bucket,tz) args so the test
   // can assert the route parsed the window + tz offset correctly, and returns AGG.
   function statsTelemetry(
-    calls: Array<{ start: number; end: number; bucket: string; tz: number }>,
+    calls: Array<{ start: number; end: number; bucket: string; tz: number; keyId?: string }>,
   ): TelemetryStore {
     return {
-      async aggregate(start: number, end: number, bucket: "hour" | "day", tzOffsetMinutes = 0) {
-        calls.push({ start, end, bucket, tz: tzOffsetMinutes });
+      async aggregate(
+        start: number,
+        end: number,
+        bucket: "hour" | "day",
+        tzOffsetMinutes = 0,
+        keyId?: string,
+      ) {
+        calls.push({ start, end, bucket, tz: tzOffsetMinutes, keyId });
         return AGG;
       },
     } as unknown as TelemetryStore;
   }
 
   it("returns the aggregate JSON for an explicit window + bucket", async () => {
-    const calls: Array<{ start: number; end: number; bucket: string; tz: number }> = [];
+    const calls: Array<{ start: number; end: number; bucket: string; tz: number; keyId?: string }> =
+      [];
     const app = buildApp(buildDeps({ telemetry: statsTelemetry(calls) }));
     const res = await app.request("/admin/api/stats?start=1000&end=5000&bucket=hour");
     expect(res.status).toBe(200);
@@ -967,7 +1036,8 @@ describe("admin.api stats (dashboard token accounting)", () => {
   });
 
   it("forwards the client tz offset and fails open to 0 on junk", async () => {
-    const calls: Array<{ start: number; end: number; bucket: string; tz: number }> = [];
+    const calls: Array<{ start: number; end: number; bucket: string; tz: number; keyId?: string }> =
+      [];
     const app = buildApp(buildDeps({ telemetry: statsTelemetry(calls) }));
     await app.request("/admin/api/stats?tzOffsetMinutes=480");
     expect(calls[0]?.tz).toBe(480); // UTC+8 reaches the store
@@ -975,8 +1045,19 @@ describe("admin.api stats (dashboard token accounting)", () => {
     expect(calls[1]?.tz).toBe(0); // malformed offset degrades to UTC, never 5xx
   });
 
+  it("forwards key_id to scope the aggregate to one key (omitted = global)", async () => {
+    const calls: Array<{ start: number; end: number; bucket: string; tz: number; keyId?: string }> =
+      [];
+    const app = buildApp(buildDeps({ telemetry: statsTelemetry(calls) }));
+    await app.request("/admin/api/stats?key_id=key_abc");
+    expect(calls[0]?.keyId).toBe("key_abc"); // scopes to the detail page's key
+    await app.request("/admin/api/stats");
+    expect(calls[1]?.keyId).toBeUndefined(); // global dashboard view
+  });
+
   it("defaults to the last 24h / day bucket when the window is omitted", async () => {
-    const calls: Array<{ start: number; end: number; bucket: string; tz: number }> = [];
+    const calls: Array<{ start: number; end: number; bucket: string; tz: number; keyId?: string }> =
+      [];
     const app = buildApp(buildDeps({ telemetry: statsTelemetry(calls) }));
     const res = await app.request("/admin/api/stats");
     expect(res.status).toBe(200);
@@ -987,7 +1068,8 @@ describe("admin.api stats (dashboard token accounting)", () => {
   });
 
   it("fails open on a malformed query (never 5xx): junk bucket → day", async () => {
-    const calls: Array<{ start: number; end: number; bucket: string; tz: number }> = [];
+    const calls: Array<{ start: number; end: number; bucket: string; tz: number; keyId?: string }> =
+      [];
     const app = buildApp(buildDeps({ telemetry: statsTelemetry(calls) }));
     const res = await app.request("/admin/api/stats?bucket=decade&start=-9");
     expect(res.status).toBe(200);

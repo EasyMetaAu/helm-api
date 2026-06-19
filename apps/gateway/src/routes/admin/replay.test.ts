@@ -112,6 +112,9 @@ function fakeTelemetry(
         byModel: [],
       };
     },
+    async usageByKey() {
+      return [];
+    },
     async getPayload() {
       return null;
     },

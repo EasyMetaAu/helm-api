@@ -533,6 +533,9 @@ export interface RequestsQueryParams {
   decidedBy?: RequestListItem['decided_by'];
   lane?: string;
   model?: string;
+  // Exact api_key_id scope (the key detail page's request list). Serialized as
+  // `key_id` to match the backend schema.
+  keyId?: string;
   start?: number;
   end?: number;
 }
@@ -556,6 +559,7 @@ function buildRequestsQuery(params: RequestsQueryParams): string {
   if (params.decidedBy) qs.set('decided_by', params.decidedBy);
   if (params.lane) qs.set('lane', params.lane);
   if (params.model) qs.set('model', params.model);
+  if (params.keyId) qs.set('key_id', params.keyId);
   if (params.start !== undefined) qs.set('start', String(params.start));
   if (params.end !== undefined) qs.set('end', String(params.end));
   return qs.toString();

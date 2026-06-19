@@ -1,4 +1,4 @@
-import type { TelemetryAggregate } from "./ports.js";
+import type { TelemetryAggregate, TelemetryKeyUsage } from "./ports.js";
 
 // Shared shaping for TelemetryStore.aggregate (dashboard token accounting). Both
 // adapters run dialect-specific SQL but funnel the raw rows through HERE so the
@@ -67,4 +67,25 @@ export function shapeTelemetryAggregate(
       }))
       .sort((a, b) => b.totalTokens - a.totalTokens),
   };
+}
+
+// Shared shaping for TelemetryStore.usageByKey (per-key list rollup). Same reason
+// as the aggregate shaper: pg returns COUNT()/SUM() over bigint as STRINGS, sqlite
+// as numbers — Number() normalizes both, and the (dialect-independent) ordering is
+// done HERE so a GROUP BY emission-order difference can never leak through. Cost
+// stays nullable ("not measured"); requests/errors/tokens are real COALESCE'd 0s.
+// Sorted by requests desc (then apiKeyId for a stable tie-break) so the contract
+// test pins one order across both adapters.
+export function shapeTelemetryKeyUsage(
+  rows: ReadonlyArray<Record<string, unknown>>,
+): TelemetryKeyUsage[] {
+  return rows
+    .map((r) => ({
+      apiKeyId: String(r.apiKeyId),
+      requests: num(r.requests),
+      errorCount: num(r.errorCount),
+      totalCostUsd: numOrNull(r.totalCostUsd),
+      totalTokens: num(r.totalTokens),
+    }))
+    .sort((a, b) => b.requests - a.requests || a.apiKeyId.localeCompare(b.apiKeyId));
 }

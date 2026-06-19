@@ -22,7 +22,9 @@ export function registerStatsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const q = StatsQuerySchema.parse(c.req.query());
     const end = q.end ?? Date.now();
     const start = q.start ?? end - DAY_MS;
-    const agg = await deps.telemetry.aggregate(start, end, q.bucket, q.tzOffsetMinutes);
+    // `key_id`, when present, scopes the whole aggregate to one key (the detail
+    // page); omitted = the global dashboard view.
+    const agg = await deps.telemetry.aggregate(start, end, q.bucket, q.tzOffsetMinutes, q.key_id);
     return c.json(agg);
   });
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiKeyView } from './keys.js';
-import { createKey, listKeys, revokeKey, updateKey } from './keys.js';
+import { createKey, getKey, getKeysUsage, listKeys, revokeKey, updateKey } from './keys.js';
 
 // The admin UI talks to the gateway ONLY over /admin/api/* HTTP (DoD: no core
 // import). These tests pin the client contract against a mocked fetch. The
@@ -50,6 +50,44 @@ describe('keys api client', () => {
     // Redacted shape: never carries a hash or plaintext, even if the server slipped one.
     expect(keys[0]).not.toHaveProperty('hash');
     expect(keys[0]).not.toHaveProperty('plaintext');
+  });
+
+  it('getKeysUsage GETs /keys/usage with the window and normalizes rows', async () => {
+    const rows = [
+      { key_id: 'k1', requests: 7, error_count: 1, cost_usd: 0.042, total_tokens: 1500 },
+      // cost_usd null = "not measured" — must survive as null, never coerced to 0.
+      { key_id: 'k2', requests: 2, error_count: 0, cost_usd: null, total_tokens: 30 },
+    ];
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify(rows), { status: 200 }),
+    );
+
+    const usage = await getKeysUsage({ start: 1000 });
+
+    const url = (fetch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(url).toContain('/admin/api/keys/usage');
+    expect(url).toContain('start=1000');
+    expect(usage[0]).toEqual({
+      key_id: 'k1',
+      requests: 7,
+      error_count: 1,
+      cost_usd: 0.042,
+      total_tokens: 1500,
+    });
+    expect(usage[1].cost_usd).toBeNull();
+  });
+
+  it('getKey returns the view on 200, null on a real 404, and throws on other errors', async () => {
+    const fn = fetch as ReturnType<typeof vi.fn>;
+    // 200 → redacted view.
+    fn.mockResolvedValueOnce(new Response(JSON.stringify(summaryRow('k1')), { status: 200 }));
+    expect((await getKey('k1'))?.key_id).toBe('k1');
+    // 404 → null (genuine missing key), never a throw.
+    fn.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'key not found' }), { status: 404 }));
+    expect(await getKey('nope')).toBeNull();
+    // 500 → throws, so the caller surfaces a real load error (not a fake 404).
+    fn.mockResolvedValueOnce(new Response('boom', { status: 500 }));
+    await expect(getKey('k1')).rejects.toThrow();
   });
 
   it('createKey POSTs caps to /admin/api/keys and returns the one-time plaintext', async () => {

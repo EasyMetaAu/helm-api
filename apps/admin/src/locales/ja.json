@@ -635,5 +635,17 @@
   "Lane unavailable": "レーン利用不可",
   "Authentication failed": "認証に失敗",
   "Timed out": "タイムアウト",
-  "Circuit open": "サーキットオープン"
+  "Circuit open": "サーキットオープン",
+  "Usage (24h)": "使用量（24時間）",
+  "req": "件",
+  "err": "エラー",
+  "tok": "トークン",
+  "No traffic in the last 24h": "過去24時間のトラフィックなし",
+  "Configuration": "設定",
+  "From": "開始",
+  "To": "終了",
+  "Clear": "クリア",
+  "Prev": "前へ",
+  "{count} in window": "期間内 {count} 件",
+  "No requests for this key in the selected window.": "選択した期間内にこのキーのリクエストはありません。"
 }
