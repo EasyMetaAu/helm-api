@@ -1121,11 +1121,17 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         apiKeyId: "key_b",
         createdAt: new Date(3000),
       });
-      const scoped = await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, apiKeyId: "key_a" });
+      const scoped = await ctx.stores.telemetry.queryPage({
+        limit: 50,
+        offset: 0,
+        apiKeyId: "key_a",
+      });
       expect(scoped.total).toBe(2);
       expect(scoped.rows.map((r) => r.record.request_id).sort()).toEqual(["ka1", "ka2"]);
       // Unknown key → empty page, not an error.
-      expect((await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, apiKeyId: "nope" })).total).toBe(0);
+      expect(
+        (await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, apiKeyId: "nope" })).total,
+      ).toBe(0);
     });
 
     it("rejects a duplicate request_id (unique constraint)", async () => {
