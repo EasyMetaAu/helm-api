@@ -466,7 +466,6 @@
   "Point your tool at Helm by setting its base URL and API key, then send model \"auto\" (or a lane name) — the gateway picks the model.": "ツールの base URL と API キーを Helm に向け、model に “auto”（またはレーン名）を指定するだけ。どのモデルを使うかはゲートウェイが選びます。",
   "Policies": "ポリシー",
   "Port": "ポート",
-  "Prev": "前へ",
   "Preview": "プレビュー",
   "Previous": "前へ",
   "Primary": "プライマリ",
