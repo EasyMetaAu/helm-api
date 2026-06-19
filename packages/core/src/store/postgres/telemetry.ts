@@ -118,6 +118,7 @@ export class PgTelemetryStore implements TelemetryStore {
     if (query.startMs !== undefined) conds.push(gte(telemetry.createdAt, query.startMs));
     if (query.endMs !== undefined) conds.push(lt(telemetry.createdAt, query.endMs));
     if (query.status !== undefined) conds.push(eq(telemetry.finalStatus, query.status));
+    if (query.apiKeyId !== undefined) conds.push(eq(telemetry.apiKeyId, query.apiKeyId));
     if (query.decidedBy !== undefined) {
       conds.push(
         sql`${telemetry.decisionJson} -> 'classifier' ->> 'decided_by' = ${query.decidedBy}`,

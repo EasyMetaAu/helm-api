@@ -41,6 +41,10 @@ export const RequestsQuerySchema = z.object({
   decided_by: DecidedBySchema.optional().catch(undefined),
   lane: optionalText,
   model: optionalText,
+  // Exact api_key_id scope (the key detail page's request list). Unlike `lane`/
+  // `model` (substring), the store matches this with equality — it is an internal
+  // id, not free text. Same fail-open trim-empty→unset handling.
+  key_id: optionalText,
   start: optionalEpochMs,
   end: optionalEpochMs,
 });

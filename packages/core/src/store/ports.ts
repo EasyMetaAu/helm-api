@@ -285,6 +285,9 @@ export interface TelemetryPageQuery {
   decidedBy?: DecisionRecord["classifier"]["decided_by"];
   lane?: string;
   model?: string;
+  // Exact api_key_id scope (the key detail page's request list). Matched with
+  // EQUALITY on the denormalized column — not a JSON extract, not a substring.
+  apiKeyId?: string;
 }
 
 // One queryPage row: a recent decision record + the recorded api_key_id (key_id).

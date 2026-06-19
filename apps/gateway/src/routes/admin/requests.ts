@@ -37,6 +37,9 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       decidedBy: q.decided_by,
       lane: q.lane,
       model: q.model,
+      // Exact key scope (the key detail page's request list). Omitted in the
+      // global Debug list → no api_key_id filter.
+      apiKeyId: q.key_id,
     });
     // Resolve each row's recorded api_key_id (key_id) to the key's human NAME so the
     // SPA can show a recognizable label instead of the opaque prefix. The redacted

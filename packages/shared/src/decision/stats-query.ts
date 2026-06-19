@@ -23,11 +23,18 @@ import { z } from "zod";
 // Optional epoch-ms bound. Non-numeric / negative → undefined (route default).
 const optionalEpochMs = z.coerce.number().int().nonnegative().optional().catch(undefined);
 
+// Optional exact api_key_id scope (the key detail page reuses the dashboard
+// aggregate for ONE key). Trims; empty → unset. Fail-open like every other field.
+const optionalText = z.string().trim().min(1).optional().catch(undefined);
+
 export const StatsQuerySchema = z.object({
   start: optionalEpochMs,
   end: optionalEpochMs,
   bucket: z.enum(["hour", "day"]).catch("day"),
   tzOffsetMinutes: z.coerce.number().int().min(-720).max(840).catch(0),
+  // When present, scopes totals/series/byModel to this key (the detail page);
+  // omitted = the global dashboard view.
+  key_id: optionalText,
 });
 
 export type StatsQuery = z.infer<typeof StatsQuerySchema>;

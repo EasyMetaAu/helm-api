@@ -115,6 +115,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
     if (query.startMs !== undefined) conds.push(gte(telemetry.createdAt, new Date(query.startMs)));
     if (query.endMs !== undefined) conds.push(lt(telemetry.createdAt, new Date(query.endMs)));
     if (query.status !== undefined) conds.push(eq(telemetry.finalStatus, query.status));
+    if (query.apiKeyId !== undefined) conds.push(eq(telemetry.apiKeyId, query.apiKeyId));
     if (query.decidedBy !== undefined) {
       conds.push(
         sql`json_extract(${telemetry.decisionJson}, '$.classifier.decided_by') = ${query.decidedBy}`,

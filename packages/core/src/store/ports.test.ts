@@ -99,9 +99,10 @@ class InMemoryTelemetryStore implements TelemetryStore {
   }
   async queryPage(query: TelemetryPageQuery): Promise<TelemetryPage> {
     const m = query.model?.toLowerCase();
-    const matched = this.rows.filter(({ at, rec }) => {
+    const matched = this.rows.filter(({ at, rec, keyId }) => {
       if (query.startMs !== undefined && at.getTime() < query.startMs) return false;
       if (query.endMs !== undefined && at.getTime() >= query.endMs) return false;
+      if (query.apiKeyId !== undefined && keyId !== query.apiKeyId) return false;
       if (query.status !== undefined && rec.final.status !== query.status) return false;
       if (query.decidedBy !== undefined && rec.classifier.decided_by !== query.decidedBy)
         return false;

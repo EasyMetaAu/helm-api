@@ -1101,6 +1101,33 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       ).toEqual(["err_eval"]);
     });
 
+    // The key detail page's request list scopes queryPage to one api_key_id —
+    // EXACT equality on the denormalized column (not a JSON extract). Pinned across
+    // both adapters; total reflects the same scope so "Page X of Y" stays right.
+    it("queryPage filters by apiKeyId (exact key scope)", async () => {
+      ctx = await make();
+      await ctx.stores.telemetry.insert({
+        decision: decision("ka1"),
+        apiKeyId: "key_a",
+        createdAt: new Date(1000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: decision("ka2"),
+        apiKeyId: "key_a",
+        createdAt: new Date(2000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: decision("kb1"),
+        apiKeyId: "key_b",
+        createdAt: new Date(3000),
+      });
+      const scoped = await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, apiKeyId: "key_a" });
+      expect(scoped.total).toBe(2);
+      expect(scoped.rows.map((r) => r.record.request_id).sort()).toEqual(["ka1", "ka2"]);
+      // Unknown key → empty page, not an error.
+      expect((await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, apiKeyId: "nope" })).total).toBe(0);
+    });
+
     it("rejects a duplicate request_id (unique constraint)", async () => {
       ctx = await make();
       await ctx.stores.telemetry.insert({

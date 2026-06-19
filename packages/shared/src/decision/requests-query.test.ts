@@ -17,6 +17,7 @@ describe("RequestsQuerySchema", () => {
     expect(q.decided_by).toBeUndefined();
     expect(q.lane).toBeUndefined();
     expect(q.model).toBeUndefined();
+    expect(q.key_id).toBeUndefined();
     expect(q.start).toBeUndefined();
     expect(q.end).toBeUndefined();
   });
@@ -50,5 +51,10 @@ describe("RequestsQuerySchema", () => {
     expect(RequestsQuerySchema.parse({ lane: "  premium  " }).lane).toBe("premium");
     expect(RequestsQuerySchema.parse({ lane: "" }).lane).toBeUndefined();
     expect(RequestsQuerySchema.parse({ model: "gpt" }).model).toBe("gpt");
+  });
+
+  it("parses key_id (exact key scope) and treats empty as unset", () => {
+    expect(RequestsQuerySchema.parse({ key_id: "  key_abc  " }).key_id).toBe("key_abc");
+    expect(RequestsQuerySchema.parse({ key_id: "" }).key_id).toBeUndefined();
   });
 });
