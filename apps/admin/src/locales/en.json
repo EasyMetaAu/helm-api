@@ -231,6 +231,7 @@
   "Fact status filter": "Fact status filter",
   "Fact text": "Fact text",
   "Facts": "Facts",
+  "Facts and reflections the gateway remembers": "Facts and reflections the gateway remembers",
   "Failed": "Failed",
   "Failed to clear proxy": "Failed to clear proxy",
   "Failed to create key": "Failed to create key",
@@ -728,5 +729,14 @@
   "yes": "yes",
   "Your new API key": "Your new API key",
   "Zoom in": "Zoom in",
-  "Zoom out": "Zoom out"
+  "Zoom out": "Zoom out",
+  "Connect via MCP": "Connect via MCP",
+  "Give an AI agent persistent memory. Helm's MCP server exposes the facts and reflections on this page as tools (memory_add, memory_search, memory_list, …), scoped to the account behind your API key.": "Give an AI agent persistent memory. Helm's MCP server exposes the facts and reflections on this page as tools (memory_add, memory_search, memory_list, …), scoped to the account behind your API key.",
+  "The server uses the MCP Streamable HTTP transport at the bare origin + /mcp and authenticates with your API key as a bearer token. Enable it on the gateway with memory.mcp.enabled — until then /mcp returns 404.": "The server uses the MCP Streamable HTTP transport at the bare origin + /mcp and authenticates with your API key as a bearer token. Enable it on the gateway with memory.mcp.enabled — until then /mcp returns 404.",
+  "Register the server with one command. Claude Code connects over HTTP and sends your key as a bearer token.": "Register the server with one command. Claude Code connects over HTTP and sends your key as a bearer token.",
+  "Or add it to a .mcp.json (project or user scope). The same entry works in other MCP-aware editors.": "Or add it to a .mcp.json (project or user scope). The same entry works in other MCP-aware editors.",
+  "Codex and other stdio-only clients reach the HTTP server through the mcp-remote bridge in ~/.codex/config.toml.": "Codex and other stdio-only clients reach the HTTP server through the mcp-remote bridge in ~/.codex/config.toml.",
+  "Check connectivity and auth with a raw JSON-RPC call. It lists the memory tools the server exposes.": "Check connectivity and auth with a raw JSON-RPC call. It lists the memory tools the server exposes.",
+  "JSON config": "JSON config",
+  "curl": "curl"
 }

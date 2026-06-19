@@ -231,6 +231,7 @@
   "Fact status filter": "ファクト状態フィルター",
   "Fact text": "ファクトテキスト",
   "Facts": "ファクト",
+  "Facts and reflections the gateway remembers": "ゲートウェイが記憶するファクトとリフレクション",
   "Failed": "失敗",
   "Failed to clear proxy": "プロキシのクリアに失敗しました",
   "Failed to create key": "キーの作成に失敗しました",
@@ -728,5 +729,14 @@
   "yes": "はい",
   "Your new API key": "新しい API キー",
   "Zoom in": "拡大",
-  "Zoom out": "縮小"
+  "Zoom out": "縮小",
+  "Connect via MCP": "MCP で接続",
+  "Give an AI agent persistent memory. Helm's MCP server exposes the facts and reflections on this page as tools (memory_add, memory_search, memory_list, …), scoped to the account behind your API key.": "AI エージェントに永続的なメモリを与えます。Helm の MCP サーバーは、このページのファクトとリフレクションをツール（memory_add、memory_search、memory_list…）として公開し、API キーに紐づくアカウントにスコープされます。",
+  "The server uses the MCP Streamable HTTP transport at the bare origin + /mcp and authenticates with your API key as a bearer token. Enable it on the gateway with memory.mcp.enabled — until then /mcp returns 404.": "サーバーはベースとなるオリジン + /mcp で MCP Streamable HTTP トランスポートを使用し、API キーを Bearer トークンとして認証します。ゲートウェイで memory.mcp.enabled を有効にしてください。それまで /mcp は 404 を返します。",
+  "Register the server with one command. Claude Code connects over HTTP and sends your key as a bearer token.": "1 つのコマンドでサーバーを登録します。Claude Code は HTTP で接続し、キーを Bearer トークンとして送信します。",
+  "Or add it to a .mcp.json (project or user scope). The same entry works in other MCP-aware editors.": "または .mcp.json（プロジェクトまたはユーザースコープ）に追加します。同じエントリは他の MCP 対応エディタでも機能します。",
+  "Codex and other stdio-only clients reach the HTTP server through the mcp-remote bridge in ~/.codex/config.toml.": "Codex やその他の stdio のみのクライアントは、~/.codex/config.toml の mcp-remote ブリッジ経由で HTTP サーバーに接続します。",
+  "Check connectivity and auth with a raw JSON-RPC call. It lists the memory tools the server exposes.": "素の JSON-RPC 呼び出しで接続性と認証を確認します。サーバーが公開するメモリツールの一覧が返ります。",
+  "JSON config": "JSON 設定",
+  "curl": "curl"
 }
