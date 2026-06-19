@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-19 · Layer-1 task 检测限定当前 user 轮（docs/03 §Layer-1；原则 4/6）
+
+- **背景**：线上请求 `5ee4bf79-...`（AgentCrew/Mimi，`/v1/responses`，model=auto）末条 user 只有 `"我喜欢的数字是多少？"`（在测记忆），却被第一层**纯规则**判成 `coding`/`complex`（confidence 0.979，`decided_by=rules`，未走 eval）→ 命中 `coding_complex_to_coding_lane` → 路由到 coding lane（gpt-5.5）。SQLite 实证：`request_payloads.request_json` 的 `input[]` 含一条 **7599 字符的 developer 系统提示**（Mimi persona）。
+- **根因**：`taskdetect.ts` 的 `extractText(req.messages)` 把**所有**消息 content 拼接，`task_keywords` 用**纯 `includes()` 子串**匹配（无词边界、无饱和，每命中 +1.0）。该巨型系统提示里 `类`(×16，全是"人类/同类/一类")、`实现`(×2，TDD 描述)、`git`("git state" 能力描述) 命中 coding **3.0** 分，淹没了 10 字的真实问题。工具 `read/bash/edit/write` 不匹配 `tool_prefixes.coding=[code_/shell_/fs_]`，故污染**全部**来自子串噪声。
+- **实现（Scope B，三专家共识 + 用户拍板）**：把 `detectTask` 的全部文本证据（关键词路径 + 结构信号 detectCodeBlock/FilePath/StackTrace/Url）限定到**末条 user 消息**；工具名照常全请求扫（合法的逐请求能力信号，非历史）。新增共享纯函数模块 `classifier/message-text.ts`（`lastUserMessage`/`lastUserMessageText`/`lastUserMessageChars`/`contentToString`），把原先在 `engine.ts` 与 `eval/cache-key.ts` **三处重复**的逻辑收敛为单一来源；三者改 import。镜像 `engine.ts §5.5` 语言守卫既有先例（"历史关键词命中不是 Layer-1 读懂本轮的证据"）。
+- **取舍/坑/TODO**：选 B（关键词+结构信号一起限定）而非"只限关键词"——否则 `detectTask` 自身前后不一致（系统提示里的代码块仍会污染成 coding）。**tier 层（`dimensions.ts`）同病**：同一个 `extractText` 喂复杂度评分，`coding_intl_kw` 命中系统提示里的"实现"会把闲聊抬成 `complex`；但 tier 被 golden set / `calibrate-classifier.ts` 标定锁定，动它需重跑标定 → **本次刻意不碰，记为后续标定门控项**（注意保留 ambient `msg_length`/`turn_count`/`tool_count` 的全文体量语义，别误伤）。本请求症状仅靠 task 限定即修复（task→chat，coding 策略不再匹配）。`cache-key.ts` 保留 `.trim()`，内容哈希不变。box 配置 operator-owned，部署是单独后续项。
+- **验证**：TDD 红→绿，taskdetect.test.ts 新增 5 用例（复现 Mimi 大系统提示+末条中文闲聊→chat、早轮代码块被忽略、末条代码块仍触发、前轮关键词不计、工具路径保留）；**真实捕获正文** `/tmp/req_5ee4.json` 经修复后 `detectTask`→`chat`（scores `[]`）。classifier 全套+config samples **266** 绿（含 engine 多轮语言守卫、`cache-key.test.ts` 证哈希不变）、typecheck（4 项目）/ lint(479) 清。分支 `fix-classifier-task-scope-last-user`，未提交/未部署。
+
 ## 2026-06-18 · Salient-fact 快车道：事实形成与注入解绑压缩（docs/salient-fact-memory-spec；docs/08/12；原则 1/2/3）
 
 - **背景**：线上「我喜欢42」短对话跨 session 召不回。生产 DB 实证根因：事实形成被绑死在历史压缩上——facts 只由 reflector 从 observation 抽，而 observation 只在 `segmentMinTokens=2048` / 1h idle 触发；短对话两者都过不了 → 0 observation → 0 reflector → 0 fact。且 `inject.ts` 从不读 `memory_facts`（P8 逐轮检索因需 embedding 推迟）。
@@ -22,20 +30,15 @@
 - **取舍/坑**：选 hoist 而非"注入通用默认"——真实系统提示在 input 里，注入 "You are a helpful assistant." 会冗余/误导；hoist 还原真 Codex CLI 形状（instructions=系统提示、input=纯对话）。`appendMutationList` 对 `body_shims_applied` 会去重+排序，故 ledger 顺序是字母序（`instructions_*` 排在 `store_forced_false` 前）。客户端 pi-ai 是第三方 node_modules、未暴露 instructions 配置，改不动，且 helm 本职就是后端兼容（原则 6），故修在网关侧。
 - **验证**：core 8 个 hoist 单测 + gateway 2 个 execute 直通测试（hoist developer 形状、已有 instructions 保持 verbatim）+ 更新既有 store-shim 测试断言（现含 `instructions_defaulted`）。typecheck（3 项目）/ lint(478) / core+gateway 全量 **3264** 绿。分支 `fix-codex-passthrough-instructions-hoist`，未提交/未部署。
 
-## 2026-06-18 · Anthropic OAuth TLS/JA3 transport spike（docs/05/10；原则 2/7/8）
-
-- **背景**：Claude CLI strict body/header/tool shape 已由 PR #304/#305 合并；剩余第三点是 OmniRoute 风格的 transport fingerprint（TLS ClientHello / JA3/JA4 / HTTP2 traits），不能靠当前 undici Agent/ProxyAgent 调参完成。
-- **实现**：新增 provider 配置 `transport_profile: auto|default|tls_chrome`（默认 `auto`，Zod fail-closed）：`auto` 下 Anthropic preset OAuth provider 默认使用 `tls_chrome`，其他 provider 默认 `default`；显式 `default` 可强制回退正常 undici 路径；显式 `tls_chrome` 只允许 Anthropic preset OAuth provider，静态 API key、generic OAuth、其他 provider 会 fail-closed。执行请求通过 `makeTlsImpersonationFetch()` lazy-load optional `wreq-js`，返回标准 `fetch` seam；per-account proxy 仍从 Helm `ProxyConfig` 转成 wreq proxy URL，凭证只进 transport option，不进日志。OAuth token refresh/model discovery 仍走原 `makeProxyFetch`，本 spike 只改最终 provider execution。`wreq-js` request 显式 `disableDefaultHeaders: true`，避免追加浏览器导航头污染 Claude CLI strict headers；streaming body 显式 `timeout: 0`，不引入 wreq total/body timeout，仍由 Anthropic adapter 的 TTFB/idle 语义兜底。执行层使用 `createTransport` + per-request `cookieMode:"ephemeral"`，共享 TLS/proxy transport 但不共享 cookie jar；wreq `RequestError` 的 `Connection reset by peer` / `Connection refused` 会归一到 `ECONNRESET` / `ECONNREFUSED`，继续命中现有 same-provider retry。
-- **取舍/坑/TODO**：选择 `wreq-js` 作为第一版 spike，因为它是 fetch-compatible，避免先移植 OmniRoute `tls-client-node` 的 temp-file SSE tailing。风险仍在：native package/Docker platform、streaming body 行为、wreq proxy 支持矩阵、TLS spoof 是否真能改善 Anthropic API 401/403。Anthropic preset OAuth 默认启用；若 optional 包缺失，请求会 fail-closed 并抛 `TlsTransportUnavailableError`，需要用 `transport_profile: default` 显式回退。
-- **验证**：新增 core adapter 单测（proxy URL、lazy transport、ephemeral cookie、wreq transient error normalization、unavailable error）和 gateway wiring 单测（Anthropic preset OAuth auto 走 fake wreq transport、非 Anthropic preset 仍 default、显式 default opt-out、unsupported provider fail-closed）。Focused vitest/typecheck 已覆盖；真正价值必须后续用同一线上账号/同一 request 做 toggle A/B live smoke。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
-### 2026-06-18 · Claude CLI strict tool pipeline 与 golden fixture（docs/05/07；原则 5/7/8）：strict fingerprint（动态 OAuth/非官方 relay，非 native passthrough）在最终 Anthropic body 序列化前做工具兼容层：工具名 cloaking（read_file→Read、mcp__…→PascalCase）+ 同步改 tools/tool_use/tool_choice、零参 schema 补 `properties:{}`、cache_control≤4、forced choice 删 thinking/context_management；流式+非流式都把上游 cloaked 名还原。坑：strict 原地改 body 致 401 重放丢 reverse-map → 改为每 attempt clone、原始 body 不改，加 401 回归测试。native passthrough 不注入。golden fixture + TDD 全绿。
+### 2026-06-18 · Anthropic OAuth TLS/JA3 transport spike（docs/05/10；原则 2/7/8）：新增 provider 配置 `transport_profile: auto|default|tls_chrome`（Zod fail-closed）；`auto` 下 Anthropic preset OAuth 默认 `tls_chrome`、其他 `default`，显式 `tls_chrome` 仅限 Anthropic preset OAuth 否则 fail-closed。最终 provider execution 经 `makeTlsImpersonationFetch()` lazy-load optional `wreq-js`（标准 fetch seam，`disableDefaultHeaders:true`、streaming `timeout:0`、per-request ephemeral cookie），OAuth refresh/discovery 仍走 undici；wreq 连接错误归一到 ECONNRESET/ECONNREFUSED 命中既有 retry。坑/TODO：native 包/Docker platform、streaming 行为、proxy 矩阵、TLS spoof 是否真改善 401/403；optional 包缺失则 fail-closed 抛 `TlsTransportUnavailableError`，需 `transport_profile: default` 回退；价值待同账号同 request A/B live smoke。未部署。
+
+### 2026-06-18 · Claude CLI strict tool pipeline 与 golden fixture（docs/05/07；原则 5/7/8）：strict fingerprint 模式（动态 OAuth/非官方 relay，非 native passthrough）在最终 Anthropic body 序列化前做工具兼容层——工具名 cloaking（`read_file→Read`、`mcp__…→McpCodegraphCodegraphContext`，同步改 tools[]/历史 tool_use/tool_choice）、零参 schema 补 `properties:{}`、`cache_control` ≤4、forced choice 删 thinking/context_management、非 forced thinking 仍跑 Anthropic 约束；请求内部返回 reverse-map，流式/非流式 translator 还原 cloaked 名。坑：strict 原地改写 body 会破坏 401 重放的 reverse-map → 改为只操作每 attempt 的 clone，原 body 不改，401 回归测试锁住。native passthrough 仍逐字直通不改写；TLS/JA3 属单独 spike。golden fixture + TDD，anthropic 94 绿/typecheck/lint 绿，未部署。
 
 ### 2026-06-18 · 请求详情页内部 code 人类可读化（admin i18n；原则 1）：「供应商尝试」链 + 错误类型显示内部 snake_case code（no_response_schema_support/circuit_open/client_abort/upstream_error…）运维看不懂；新增 admin `attempt-codes.ts` 的 `ATTEMPT_CODE_LABELS`(code→英文人话=i18n key)+`attemptCodeLabel()`（未知回退裸 code），镜像 core SkipReason+error_class（admin 不 import core），渲染处改 `$t(attemptCodeLabel(code))` 并 `title` 留裸码；26 新 key×5 locale 手译、additive 合并；admin 14 测/svelte-check 0/build 绿。分支 feat-readable-attempt-codes，未部署。
 

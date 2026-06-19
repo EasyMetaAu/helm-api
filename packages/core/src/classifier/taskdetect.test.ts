@@ -325,6 +325,108 @@ describe("detectTask", () => {
     });
   });
 
+  // ── CURRENT-TURN SCOPING ───────────────────────────────────────────────────
+  // Task detection must read ONLY the last user message + tool names, never the
+  // concatenated history. A large system/developer prompt (constant across every
+  // turn of an agent) describes the agent's standing capabilities, not THIS
+  // request's task — letting it score would make every message to a coding agent
+  // (even "thanks") classify as coding. Regression origin: prod request
+  // 5ee4bf79 — a 7599-char Mimi system prompt's incidental "实现"/"人类(类)"/"git"
+  // scored coding 3.0 on a trivial "我喜欢的数字是多少?" chat. Mirrors the
+  // language guard's "current turn only" rule (engine.ts §5.5).
+  describe("scopes task detection to the current user turn", () => {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const repoRoot = resolve(__dirname, "../../../..");
+    const shipped = loadConfig({ configDir: join(repoRoot, "config"), env: {} }).classifier.rules;
+
+    it("repro: a coding-laden system prompt does NOT make a trivial chat 'coding'", () => {
+      const systemPrompt = [
+        "你是 Mimi，一个 AI 员工。",
+        "你的工作目录用于 shell / 文件操作；可以 check files, git state, clocks。",
+        "团队：架构（技术方案+守门）/ Builder（实现+自测）。重 TDD（先写失败测试再实现）。",
+        "公司红线：默认禁止，越线需人类显式授权；不泄露同事（人类和 Bot）隐私。",
+        "function add(a, b) { return a + b }",
+      ].join("\n");
+      const req: ReqInput = {
+        messages: [
+          { role: "developer", content: systemPrompt },
+          { role: "assistant", content: "我是 Mimi，参谋长猫已上线 🐱" },
+          { role: "user", content: "我喜欢的数字是多少?" },
+        ],
+        tools: null,
+        response_format: null,
+        attachments: null,
+      };
+      const res = detectTask(req, shipped);
+      expect(res.task_type).toBe("chat");
+    });
+
+    it("ignores a code block in an EARLIER (system) message", () => {
+      const cfg = makeConfig();
+      const req: ReqInput = {
+        messages: [
+          { role: "system", content: "```ts\nfunction add(a, b) { return a + b; }\n```" },
+          { role: "user", content: "hi there" },
+        ],
+        tools: null,
+        response_format: null,
+        attachments: null,
+      };
+      const res = detectTask(req, cfg);
+      expect(res.task_type).toBe("chat");
+    });
+
+    it("still detects a code block in the LAST user message", () => {
+      const cfg = makeConfig();
+      const req: ReqInput = {
+        messages: [
+          { role: "system", content: "you are a helpful assistant" },
+          {
+            role: "user",
+            content: "```ts\nfunction add(a, b) { return a + b; }\n```\nrefactor this function",
+          },
+        ],
+        tools: null,
+        response_format: null,
+        attachments: null,
+      };
+      const res = detectTask(req, cfg);
+      expect(res.task_type).toBe("coding");
+    });
+
+    it("scores the current turn, not a prior user turn's keywords", () => {
+      const cfg = makeConfig();
+      const req: ReqInput = {
+        messages: [
+          { role: "user", content: "refactor this function please" },
+          { role: "assistant", content: "done" },
+          { role: "user", content: "thanks" },
+        ],
+        tools: null,
+        response_format: null,
+        attachments: null,
+      };
+      const res = detectTask(req, cfg);
+      expect(res.task_type).not.toBe("coding");
+    });
+
+    it("preserves the tool-name path on a trivial last user message", () => {
+      const cfg = makeConfig();
+      const req: ReqInput = {
+        messages: [
+          { role: "developer", content: "you are a chat assistant" },
+          { role: "user", content: "我喜欢的数字是多少?" },
+        ],
+        tools: [{ function: { name: "shell_exec" } }],
+        response_format: null,
+        attachments: null,
+      };
+      const res = detectTask(req, cfg);
+      // tool prefix "shell_" → coding (+2.0), independent of message text.
+      expect(res.task_type).toBe("coding");
+    });
+  });
+
   it("is pure & deterministic with no side effects", () => {
     const cfg = makeConfig();
     const req = makeReq("refactor this function, see https://example.com/page");
