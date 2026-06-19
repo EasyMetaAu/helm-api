@@ -127,6 +127,8 @@ import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
 import { createExecute } from "./routes/execute.js";
 import { registerGeminiRoute } from "./routes/gemini.js";
+import { registerMcpServer } from "./routes/mcp/index.js";
+import { supportsMemoryAdmin } from "./routes/mcp/tools.js";
 import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
@@ -1601,6 +1603,31 @@ export async function buildServer(
     oauthAliases: () => oauthAliasSet,
   });
 
+  // Memory MCP server (docs/13): POST /mcp exposes fact/reflection CRUD to
+  // external agents, authed by the SAME API key as /v1 (so a tool call is scoped
+  // to the key's account + default project — tenant-isolated). Fail-closed: only
+  // mounted when memory.mcp.enabled AND the store implements the management
+  // surface; otherwise /mcp stays 404. Auth runs BEFORE the route so identity is
+  // resolved (mirrors /v1/models).
+  if (config.memory.mcp.enabled) {
+    if (supportsMemoryAdmin(store.memory)) {
+      app.use(
+        "/mcp",
+        authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
+      );
+      registerMcpServer(app, {
+        memoryStore: store.memory,
+        now: () => new Date(),
+        estimateTokens: estimateMemoryTokens,
+        log: (line) => logger.log("warn", "mcp", { line }),
+      });
+    } else {
+      logger.log("warn", "mcp", {
+        line: "memory.mcp.enabled but the store lacks the management surface; /mcp not mounted",
+      });
+    }
+  }
+
   // The per-request `route`: bind a fresh `execute` to the request's abort
   // signal (client disconnect), then run the framework-agnostic orchestrator.
   // `evalEnabled` is the per-request Layer-2 toggle (default OFF); it is bound
@@ -1846,6 +1873,11 @@ export async function buildServer(
         listArchives: archiveFs.listArchives,
         resolveArchive: archiveFs.resolveArchive,
       },
+      // Memory management (docs/13): the admin "Memory" page reads/edits/deletes
+      // facts + reflections through store.memory. estimateTokens recomputes a
+      // reflection's token_estimate on an in-place edit (same chars/4 heuristic).
+      memoryStore: store.memory,
+      estimateTokens: estimateMemoryTokens,
       // Admin "Retry" replay (isolated debug re-run). Reuses the SAME core `route`
       // + redactor + streamed-cost pricer + capture getters as the chat route, so a
       // re-issued request routes faithfully; a fresh UUID mints the new trace id.

@@ -4,10 +4,13 @@ import {
   encodeScopeId,
   type Fact,
   type MemoryFactInput,
+  type MemoryFactPatch,
   type MemoryJobEnqueueInput,
   type MemoryJobRow,
   type MemoryMessageInput,
   type MemoryObservationInput,
+  type MemoryScopeSummary,
+  type MemoryStatus,
   type MemoryThreadInput,
   type Observation,
   type RawMessage,
@@ -15,9 +18,15 @@ import {
   type ReflectionScope,
   type ReflectionUpsertInput,
 } from "@helm/shared";
-import { and, asc, count, desc, eq, gt, isNull, lt, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, isNull, like, lt, ne, type SQL, sql } from "drizzle-orm";
+import { factContentHash } from "../../memory/forgetting/facts.js";
 import { sha256Hex } from "../../memory/message-hash.js";
-import type { MemoryJobStatus, MemoryMessageArchiveRow, MemoryStore } from "../ports.js";
+import {
+  MemoryFactContentHashConflictError,
+  type MemoryJobStatus,
+  type MemoryMessageArchiveRow,
+  type MemoryStore,
+} from "../ports.js";
 import {
   memoryFacts,
   memoryJobs,
@@ -78,6 +87,97 @@ function observationScopeWhere(scope: ReflectionScope): SQL | null {
   return scope.threadId !== undefined
     ? (and(eq(memoryObservations.threadId, scope.threadId), ownerScope) as SQL)
     : ownerScope;
+}
+
+// Drizzle (timestamp_ms mode) already boxes the epoch-ms columns to Date on
+// read, so these mappers are pure field projections shared by the inject read
+// (listActiveFacts) AND the docs/13 management reads (getFactById / listFacts /
+// updateFact) — one mapper, no drift in the Fact/Reflection shape.
+function sqliteRowToFact(row: typeof memoryFacts.$inferSelect): Fact {
+  return {
+    id: row.id,
+    ownerId: row.ownerId,
+    projectId: row.projectId,
+    resourceId: row.resourceId,
+    threadId: row.threadId,
+    subjectKey: row.subjectKey,
+    factText: row.factText,
+    contentHash: row.contentHash,
+    importance: row.importance,
+    referenceCount: row.referenceCount,
+    referencedAt: row.referencedAt,
+    validFrom: row.validFrom,
+    invalidAt: row.invalidAt,
+    expiredAt: row.expiredAt,
+    status: row.status as Fact["status"],
+    ...(row.sourceObservationRange !== null
+      ? { sourceObservationRange: JSON.parse(row.sourceObservationRange) as [string, string] }
+      : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function sqliteRowToReflection(row: typeof memoryReflections.$inferSelect): Reflection {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    resourceId: row.resourceId,
+    threadId: row.threadId,
+    reflectionText: row.reflectionText,
+    version: row.version,
+    tokenEstimate: row.tokenEstimate,
+    updatedAt: row.updatedAt,
+    referencedAt: row.referencedAt,
+    referenceCount: row.referenceCount,
+    status: row.status as Reflection["status"],
+  };
+}
+
+// docs/13 — collapse a version-DESC reflection list to the highest-version row
+// per (project, resource, thread) scope group. upsertReflection appends versions
+// without archiving older ones, so a scope can hold several ACTIVE versions; the
+// admin list shows one row per scope (like getReflection's MAX(version) pick),
+// expandable via includeAllVersions. Dialect-neutral (runs over mapped rows).
+function latestPerScope(rows: Reflection[]): Reflection[] {
+  const seen = new Map<string, Reflection>();
+  for (const r of rows) {
+    const key = JSON.stringify([r.projectId, r.resourceId, r.threadId]);
+    const cur = seen.get(key);
+    if (cur === undefined || r.version > cur.version) seen.set(key, r);
+  }
+  return [...seen.values()];
+}
+
+// docs/13 — shared WHERE for the fact management list (account guard + scope +
+// status visibility + subject/search). 'active' = the live set (status='active'
+// AND expired_at IS NULL — matches inject); 'all' imposes no status/expired
+// predicate so superseded rows are visible. SQLite LIKE is case-insensitive for
+// ASCII (the pg adapter mirrors this with ILIKE).
+function factListClauses(input: {
+  accountId: string;
+  projectId?: string;
+  resourceId?: string;
+  threadId?: string;
+  status?: MemoryStatus | "all";
+  subjectKey?: string;
+  search?: string;
+}): SQL[] {
+  const clauses: SQL[] = [eq(memoryFacts.ownerId, input.accountId)];
+  const status = input.status ?? "active";
+  if (status === "active") {
+    clauses.push(eq(memoryFacts.status, "active"), isNull(memoryFacts.expiredAt));
+  } else if (status !== "all") {
+    clauses.push(eq(memoryFacts.status, status));
+  }
+  if (input.projectId !== undefined) clauses.push(eq(memoryFacts.projectId, input.projectId));
+  if (input.resourceId !== undefined) clauses.push(eq(memoryFacts.resourceId, input.resourceId));
+  if (input.threadId !== undefined) clauses.push(eq(memoryFacts.threadId, input.threadId));
+  if (input.subjectKey !== undefined) clauses.push(eq(memoryFacts.subjectKey, input.subjectKey));
+  if (input.search !== undefined && input.search.length > 0) {
+    clauses.push(like(memoryFacts.factText, `%${input.search}%`));
+  }
+  return clauses;
 }
 
 // SQLite adapter for the MemoryStore port (docs/08). POST-MVP persistence floor:
@@ -726,8 +826,8 @@ export class SqliteMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
-  }): Promise<void> {
-    if (input.facts.length === 0) return;
+  }): Promise<{ insertedIds: string[]; supersededIds: string[] }> {
+    if (input.facts.length === 0) return { insertedIds: [], supersededIds: [] };
     const nowMs = input.now.getTime();
     const insertOne = this.db.$sqlite.prepare(
       `INSERT OR IGNORE INTO memory_facts
@@ -747,11 +847,15 @@ export class SqliteMemoryStore implements MemoryStore {
           AND id <> ?
           AND (? IS NULL OR project_id = ?)
           AND (? IS NULL OR resource_id = ?)
-          AND (? IS NULL OR thread_id = ?)`,
+          AND (? IS NULL OR thread_id = ?)
+        RETURNING id`,
     );
     // The whole batch is atomic: a partial ingest must not leave a fact inserted
-    // without its supersede applied (or vice versa).
+    // without its supersede applied (or vice versa). Returns the ids inserted +
+    // superseded (docs/13 — the MCP `memory_add` tool echoes the created fact).
     const runBatch = this.db.$sqlite.transaction((facts: MemoryFactInput[]) => {
+      const insertedIds: string[] = [];
+      const supersededIds: string[] = [];
       for (const f of facts) {
         // The top-level accountId is the authoritative tenant guard; each fact's
         // ownerId must already match it (the Reflector stamps the authenticated
@@ -784,6 +888,7 @@ export class SqliteMemoryStore implements MemoryStore {
         );
         // Only a fresh insert supersedes; a deduped fact (changes === 0) does not.
         if (res.changes === 1) {
+          insertedIds.push(id);
           // Supersede narrows by the NEW fact's NON-NULL scope columns ONLY — the
           // SAME semantics as the listActiveFacts read path (Codex review fix: a
           // stricter all-columns match here let a stale same-subject fact stay
@@ -791,7 +896,7 @@ export class SqliteMemoryStore implements MemoryStore {
           // on the new fact imposes NO constraint: `(? IS NULL OR col = ?)` is a
           // no-op clause when the bound value is null (docs/12 "optionally narrowed
           // by project/resource/thread").
-          supersede.run(
+          const superseded = supersede.all(
             nowMs,
             f.validFrom.getTime(),
             nowMs,
@@ -805,11 +910,13 @@ export class SqliteMemoryStore implements MemoryStore {
             resourceId,
             threadId,
             threadId,
-          );
+          ) as Array<{ id: string }>;
+          for (const s of superseded) supersededIds.push(s.id);
         }
       }
+      return { insertedIds, supersededIds };
     });
-    runBatch(input.facts);
+    return runBatch(input.facts);
   }
 
   // docs/12 P6 — fact READ half. The account's still-alive facts: owner_id =
@@ -837,28 +944,271 @@ export class SqliteMemoryStore implements MemoryStore {
       .where(and(...clauses) as SQL)
       .orderBy(asc(memoryFacts.createdAt), asc(memoryFacts.id))
       .all();
-    return rows.map((row) => ({
-      id: row.id,
-      ownerId: row.ownerId,
-      projectId: row.projectId,
-      resourceId: row.resourceId,
-      threadId: row.threadId,
-      subjectKey: row.subjectKey,
-      factText: row.factText,
-      contentHash: row.contentHash,
-      importance: row.importance,
-      referenceCount: row.referenceCount,
-      referencedAt: row.referencedAt,
-      validFrom: row.validFrom,
-      invalidAt: row.invalidAt,
-      expiredAt: row.expiredAt,
-      status: row.status as Fact["status"],
-      ...(row.sourceObservationRange !== null
-        ? { sourceObservationRange: JSON.parse(row.sourceObservationRange) as [string, string] }
-        : {}),
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
+    return rows.map(sqliteRowToFact);
+  }
+
+  // =========================================================================
+  // docs/13 — Memory ADMIN + MCP management surface (facts + reflections).
+  // =========================================================================
+
+  // Admin "By Scope" view. Distinct (account, project, resource, thread) groups
+  // holding live facts and/or an active reflection, with per-tier counts + newest
+  // updatedAt. facts ⊎ reflections via a UNION of grouped subqueries (SQLite has
+  // no FULL OUTER JOIN); reflections guarded owner_id IS NOT NULL (nullable
+  // column). An optional accountId narrows to one tenant.
+  async listMemoryScopes(input: { accountId?: string }): Promise<MemoryScopeSummary[]> {
+    const acct = input.accountId ?? null;
+    const rows = this.db.$sqlite
+      .prepare(
+        `SELECT owner_id AS accountId, project_id AS projectId, resource_id AS resourceId,
+                thread_id AS threadId,
+                SUM(fc) AS factCount, SUM(rc) AS reflectionCount, MAX(lu) AS lastUpdated
+           FROM (
+             SELECT owner_id, project_id, resource_id, thread_id,
+                    COUNT(*) AS fc, 0 AS rc, MAX(updated_at) AS lu
+               FROM memory_facts
+              WHERE status = 'active' AND expired_at IS NULL
+                AND (? IS NULL OR owner_id = ?)
+              GROUP BY owner_id, project_id, resource_id, thread_id
+             UNION ALL
+             SELECT owner_id, project_id, resource_id, thread_id,
+                    0 AS fc, COUNT(*) AS rc, MAX(updated_at) AS lu
+               FROM memory_reflections
+              WHERE status = 'active' AND owner_id IS NOT NULL
+                AND (? IS NULL OR owner_id = ?)
+              GROUP BY owner_id, project_id, resource_id, thread_id
+           )
+          GROUP BY owner_id, project_id, resource_id, thread_id
+          ORDER BY lastUpdated DESC`,
+      )
+      .all(acct, acct, acct, acct) as Array<{
+      accountId: string;
+      projectId: string | null;
+      resourceId: string | null;
+      threadId: string | null;
+      factCount: number;
+      reflectionCount: number;
+      lastUpdated: number | null;
+    }>;
+    return rows.map((r) => ({
+      accountId: r.accountId,
+      projectId: r.projectId,
+      resourceId: r.resourceId,
+      threadId: r.threadId,
+      factCount: r.factCount,
+      reflectionCount: r.reflectionCount,
+      lastUpdated: r.lastUpdated !== null ? new Date(r.lastUpdated) : null,
     }));
+  }
+
+  // Read ONE fact by id, account-guarded (cross-tenant id → null), ANY status.
+  async getFactById(input: { accountId: string; id: string }): Promise<Fact | null> {
+    const row = this.db
+      .select()
+      .from(memoryFacts)
+      .where(and(eq(memoryFacts.id, input.id), eq(memoryFacts.ownerId, input.accountId)))
+      .get();
+    return row === undefined ? null : sqliteRowToFact(row);
+  }
+
+  // Paginated fact list with an EXPLICIT status filter. 'active' = the live set
+  // (status='active' AND expired_at IS NULL — matches inject), so an omitted
+  // status defaults to live; 'all' imposes no predicate (superseded rows visible).
+  async listFacts(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    status?: MemoryStatus | "all";
+    subjectKey?: string;
+    search?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: Fact[]; total: number }> {
+    const where = and(...factListClauses(input)) as SQL;
+    const rows = this.db
+      .select()
+      .from(memoryFacts)
+      .where(where)
+      .orderBy(desc(memoryFacts.updatedAt), desc(memoryFacts.id))
+      .limit(input.limit)
+      .offset(input.offset)
+      .all();
+    const totalRow = this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(memoryFacts)
+      .where(where)
+      .get();
+    return { rows: rows.map(sqliteRowToFact), total: totalRow?.n ?? 0 };
+  }
+
+  // Edit a fact in place (partial). factText edit recomputes content_hash (never
+  // subjectKey); a collision with a DIFFERENT row's (owner_id, content_hash)
+  // throws MemoryFactContentHashConflictError (route → 409). invalidAt tri-state
+  // (undefined=leave, null=clear, Date=set). Stamps updated_at, never valid_from.
+  async updateFact(input: {
+    accountId: string;
+    id: string;
+    patch: MemoryFactPatch;
+    now: Date;
+  }): Promise<Fact | null> {
+    const existing = await this.getFactById({ accountId: input.accountId, id: input.id });
+    if (existing === null) return null;
+    const { patch } = input;
+    const set: Partial<typeof memoryFacts.$inferInsert> = { updatedAt: input.now };
+    if (patch.factText !== undefined && patch.factText !== existing.factText) {
+      const newHash = factContentHash(patch.factText);
+      if (newHash !== existing.contentHash) {
+        const conflict = this.db
+          .select({ id: memoryFacts.id })
+          .from(memoryFacts)
+          .where(
+            and(
+              eq(memoryFacts.ownerId, input.accountId),
+              eq(memoryFacts.contentHash, newHash),
+              ne(memoryFacts.id, input.id),
+            ),
+          )
+          .get();
+        if (conflict !== undefined) throw new MemoryFactContentHashConflictError(conflict.id);
+      }
+      set.factText = patch.factText;
+      set.contentHash = newHash;
+    }
+    if (patch.importance !== undefined) set.importance = patch.importance;
+    if (patch.status !== undefined) {
+      set.status = patch.status;
+      // Keep expiry in SYNC with the lifecycle so the live read (status='active'
+      // AND expired_at IS NULL) reflects the edit: reactivating CLEARS the
+      // supersede/prune tombstone (else a reactivated fact stays invisible);
+      // pruning STAMPS it (consistent with deleteFact). 'archived' is invisible via
+      // status alone, so expiry is left untouched.
+      if (patch.status === "active") set.expiredAt = null;
+      else if (patch.status === "pruned") set.expiredAt = input.now;
+    }
+    if (patch.invalidAt !== undefined) set.invalidAt = patch.invalidAt; // Date | null
+    this.db
+      .update(memoryFacts)
+      .set(set)
+      .where(and(eq(memoryFacts.id, input.id), eq(memoryFacts.ownerId, input.accountId)))
+      .run();
+    return this.getFactById({ accountId: input.accountId, id: input.id });
+  }
+
+  // Soft-delete a fact: status='pruned' + stamp expired_at. Never a hard DELETE.
+  // false for unknown/cross-tenant/already-pruned.
+  async deleteFact(input: { accountId: string; id: string; now: Date }): Promise<boolean> {
+    const res = this.db
+      .update(memoryFacts)
+      .set({ status: "pruned", expiredAt: input.now, updatedAt: input.now })
+      .where(
+        and(
+          eq(memoryFacts.id, input.id),
+          eq(memoryFacts.ownerId, input.accountId),
+          ne(memoryFacts.status, "pruned"),
+        ),
+      )
+      .run();
+    return res.changes > 0;
+  }
+
+  // Paginated reflection list. Default = the highest-version ACTIVE row per scope
+  // group (one row per scope); includeAllVersions returns every version. Grouping
+  // is in app code (admin scale is small) so the query stays dialect-portable.
+  async listReflections(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    status?: "active" | "archived" | "all";
+    includeAllVersions?: boolean;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: Reflection[]; total: number }> {
+    const clauses: SQL[] = [eq(memoryReflections.ownerId, input.accountId)];
+    const status = input.status ?? "active";
+    if (status !== "all") clauses.push(eq(memoryReflections.status, status));
+    if (input.projectId !== undefined) {
+      clauses.push(eq(memoryReflections.projectId, input.projectId));
+    }
+    if (input.resourceId !== undefined) {
+      clauses.push(eq(memoryReflections.resourceId, input.resourceId));
+    }
+    if (input.threadId !== undefined) clauses.push(eq(memoryReflections.threadId, input.threadId));
+    const all = this.db
+      .select()
+      .from(memoryReflections)
+      .where(and(...clauses) as SQL)
+      .orderBy(desc(memoryReflections.version), desc(memoryReflections.updatedAt))
+      .all()
+      .map(sqliteRowToReflection);
+    const grouped = input.includeAllVersions === true ? all : latestPerScope(all);
+    grouped.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+    return {
+      rows: grouped.slice(input.offset, input.offset + input.limit),
+      total: grouped.length,
+    };
+  }
+
+  // Read ONE reflection by id, account-guarded. ANY status (management read).
+  async getReflectionById(input: { accountId: string; id: string }): Promise<Reflection | null> {
+    const row = this.db
+      .select()
+      .from(memoryReflections)
+      .where(
+        and(eq(memoryReflections.id, input.id), eq(memoryReflections.ownerId, input.accountId)),
+      )
+      .get();
+    return row === undefined ? null : sqliteRowToReflection(row);
+  }
+
+  // Edit reflection text IN PLACE; does NOT bump version (the Reflector's
+  // machine-merge counter). Caller supplies the recomputed tokenEstimate. Stamps
+  // updated_at. Unknown/cross-tenant id → null.
+  async updateReflectionText(input: {
+    accountId: string;
+    id: string;
+    reflectionText: string;
+    tokenEstimate: number;
+    now: Date;
+  }): Promise<Reflection | null> {
+    const res = this.db
+      .update(memoryReflections)
+      .set({
+        reflectionText: input.reflectionText,
+        tokenEstimate: input.tokenEstimate,
+        updatedAt: input.now,
+      })
+      .where(
+        and(eq(memoryReflections.id, input.id), eq(memoryReflections.ownerId, input.accountId)),
+      )
+      .run();
+    if (res.changes === 0) return null;
+    return this.getReflectionById({ accountId: input.accountId, id: input.id });
+  }
+
+  // Soft-delete a reflection: archive EVERY active version of its scope (not just
+  // the one id). upsertReflection appends versions WITHOUT archiving the old ones,
+  // so a scope can hold several active versions and getReflection returns the
+  // highest; archiving only one id would let injection fall back to the next. Look
+  // the row up to learn its scope, then archive all active versions there →
+  // getReflection(scope) returns null and injection stops. Never a hard DELETE.
+  // false for unknown/cross-tenant id or a scope with no active versions left.
+  async deleteReflection(input: { accountId: string; id: string }): Promise<boolean> {
+    const row = await this.getReflectionById({ accountId: input.accountId, id: input.id });
+    if (row === null) return false;
+    const scope: ReflectionScope = {
+      accountId: input.accountId,
+      ...(row.projectId !== null ? { projectId: row.projectId } : {}),
+      ...(row.resourceId !== null ? { resourceId: row.resourceId } : {}),
+      ...(row.threadId !== null ? { threadId: row.threadId } : {}),
+    };
+    const res = this.db
+      .update(memoryReflections)
+      .set({ status: "archived" })
+      .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")))
+      .run();
+    return res.changes > 0;
   }
 
   // docs/12 "Hard-delete (rare, retention only)" pass 4 (P7) — the ONLY DELETE in the

@@ -4,10 +4,13 @@ import {
   encodeScopeId,
   type Fact,
   type MemoryFactInput,
+  type MemoryFactPatch,
   type MemoryJobEnqueueInput,
   type MemoryJobRow,
   type MemoryMessageInput,
   type MemoryObservationInput,
+  type MemoryScopeSummary,
+  type MemoryStatus,
   type MemoryThreadInput,
   type Observation,
   type RawMessage,
@@ -15,9 +18,15 @@ import {
   type ReflectionScope,
   type ReflectionUpsertInput,
 } from "@helm/shared";
-import { and, asc, count, desc, eq, gt, isNull, lt, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, ilike, isNull, lt, ne, type SQL, sql } from "drizzle-orm";
+import { factContentHash } from "../../memory/forgetting/facts.js";
 import { sha256Hex } from "../../memory/message-hash.js";
-import type { MemoryJobStatus, MemoryMessageArchiveRow, MemoryStore } from "../ports.js";
+import {
+  MemoryFactContentHashConflictError,
+  type MemoryJobStatus,
+  type MemoryMessageArchiveRow,
+  type MemoryStore,
+} from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import {
   memoryFacts,
@@ -73,6 +82,104 @@ function observationScopeWhere(scope: ReflectionScope): SQL | null {
   return scope.threadId !== undefined
     ? (and(eq(memoryObservations.threadId, scope.threadId), ownerScope) as SQL)
     : ownerScope;
+}
+
+// docs/13 — raw shape of the listMemoryScopes UNION aggregate (bigint sums come
+// back as string from the pg driver, so the mapper Number()s them).
+interface ScopeAggRow {
+  accountId: string;
+  projectId: string | null;
+  resourceId: string | null;
+  threadId: string | null;
+  factCount: number | string;
+  reflectionCount: number | string;
+  lastUpdated: number | string | null;
+}
+
+// docs/13 — pg row → domain mappers (bigint epoch-ms → Date; jsonb native).
+// Shared by the inject read (listActiveFacts) and the management reads
+// (getFactById / listFacts / updateFact) so the Fact/Reflection shape can't drift.
+function pgRowToFact(row: typeof memoryFacts.$inferSelect): Fact {
+  return {
+    id: row.id,
+    ownerId: row.ownerId,
+    projectId: row.projectId,
+    resourceId: row.resourceId,
+    threadId: row.threadId,
+    subjectKey: row.subjectKey,
+    factText: row.factText,
+    contentHash: row.contentHash,
+    importance: row.importance,
+    referenceCount: row.referenceCount,
+    referencedAt: row.referencedAt === null ? null : new Date(row.referencedAt),
+    validFrom: new Date(row.validFrom),
+    invalidAt: row.invalidAt === null ? null : new Date(row.invalidAt),
+    expiredAt: row.expiredAt === null ? null : new Date(row.expiredAt),
+    status: row.status as Fact["status"],
+    ...(row.sourceObservationRange !== null
+      ? { sourceObservationRange: row.sourceObservationRange }
+      : {}),
+    createdAt: new Date(row.createdAt),
+    updatedAt: new Date(row.updatedAt),
+  };
+}
+
+function pgRowToReflection(row: typeof memoryReflections.$inferSelect): Reflection {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    resourceId: row.resourceId,
+    threadId: row.threadId,
+    reflectionText: row.reflectionText,
+    version: row.version,
+    tokenEstimate: row.tokenEstimate,
+    updatedAt: new Date(row.updatedAt),
+    referencedAt: row.referencedAt === null ? null : new Date(row.referencedAt),
+    referenceCount: row.referenceCount,
+    status: row.status as Reflection["status"],
+  };
+}
+
+// docs/13 — collapse a version-DESC reflection list to the highest-version row
+// per (project, resource, thread) scope (mirror of the sqlite adapter's helper;
+// pure + dialect-neutral, runs over already-mapped rows).
+function latestPerScope(rows: Reflection[]): Reflection[] {
+  const seen = new Map<string, Reflection>();
+  for (const r of rows) {
+    const key = JSON.stringify([r.projectId, r.resourceId, r.threadId]);
+    const cur = seen.get(key);
+    if (cur === undefined || r.version > cur.version) seen.set(key, r);
+  }
+  return [...seen.values()];
+}
+
+// docs/13 — shared WHERE for the fact management list (pg mirror; ILIKE for the
+// case-insensitive search the sqlite adapter gets from LIKE). 'active' = the live
+// set (status='active' AND expired_at IS NULL); 'all' imposes no predicate.
+function factListClauses(input: {
+  accountId: string;
+  projectId?: string;
+  resourceId?: string;
+  threadId?: string;
+  status?: MemoryStatus | "all";
+  subjectKey?: string;
+  search?: string;
+}): SQL[] {
+  const clauses: SQL[] = [eq(memoryFacts.ownerId, input.accountId)];
+  const status = input.status ?? "active";
+  if (status === "active") {
+    clauses.push(eq(memoryFacts.status, "active"), isNull(memoryFacts.expiredAt));
+  } else if (status !== "all") {
+    clauses.push(eq(memoryFacts.status, status));
+  }
+  if (input.projectId !== undefined) clauses.push(eq(memoryFacts.projectId, input.projectId));
+  if (input.resourceId !== undefined) clauses.push(eq(memoryFacts.resourceId, input.resourceId));
+  if (input.threadId !== undefined) clauses.push(eq(memoryFacts.threadId, input.threadId));
+  if (input.subjectKey !== undefined) clauses.push(eq(memoryFacts.subjectKey, input.subjectKey));
+  if (input.search !== undefined && input.search.length > 0) {
+    clauses.push(ilike(memoryFacts.factText, `%${input.search}%`));
+  }
+  return clauses;
 }
 
 // Postgres adapter for the MemoryStore port — the supabase implementation
@@ -672,8 +779,8 @@ export class PgMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
-  }): Promise<void> {
-    if (input.facts.length === 0) return;
+  }): Promise<{ insertedIds: string[]; supersededIds: string[] }> {
+    if (input.facts.length === 0) return { insertedIds: [], supersededIds: [] };
     const nowMs = input.now.getTime();
     // docs/12 P6 (Codex review fix #3) — insert + supersede must be ATOMIC. The pg
     // adapter previously ran them as two un-wrapped statements: a crash AFTER the
@@ -684,7 +791,9 @@ export class PgMemoryStore implements MemoryStore {
     // partial work back, and the content_hash unique index makes the retry's
     // re-insert idempotent so supersede runs again. Mirrors the sqlite adapter, which
     // already wraps the batch in `$sqlite.transaction`.
-    await this.db.transaction(async (tx) => {
+    return await this.db.transaction(async (tx) => {
+      const insertedIds: string[] = [];
+      const supersededIds: string[] = [];
       for (const f of input.facts) {
         // The top-level accountId is the authoritative tenant guard; persist it as
         // owner_id so a mismatched input can never write under another tenant.
@@ -713,13 +822,15 @@ export class PgMemoryStore implements MemoryStore {
       `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
         const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
         if (insertedRows[0] === undefined) continue; // deduped → no supersede
+        insertedIds.push(id);
 
         // Supersede narrows by the NEW fact's NON-NULL scope columns ONLY — the SAME
         // semantics as the listActiveFacts read path (Codex review fix; pg mirror of
         // the sqlite adapter). A null scope column on the new fact imposes NO
         // constraint: `(${"value"}::text IS NULL OR col = value)` short-circuits to
-        // a no-op clause when the bound value is null.
-        await tx.execute(sql`
+        // a no-op clause when the bound value is null. RETURNING id surfaces the
+        // superseded rows (docs/13 — the MCP add tool echoes them).
+        const superseded = (await tx.execute(sql`
         UPDATE memory_facts
            SET expired_at = ${nowMs}, invalid_at = ${validFromMs}, updated_at = ${nowMs}
          WHERE owner_id = ${ownerId}
@@ -731,8 +842,12 @@ export class PgMemoryStore implements MemoryStore {
            AND (${projectId}::text IS NULL OR project_id = ${projectId})
            AND (${resourceId}::text IS NULL OR resource_id = ${resourceId})
            AND (${threadId}::text IS NULL OR thread_id = ${threadId})
-      `);
+        RETURNING id
+      `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
+        const supersededRows = Array.isArray(superseded) ? superseded : (superseded.rows ?? []);
+        for (const s of supersededRows) supersededIds.push(s.id);
       }
+      return { insertedIds, supersededIds };
     });
   }
 
@@ -759,28 +874,240 @@ export class PgMemoryStore implements MemoryStore {
       .from(memoryFacts)
       .where(and(...clauses) as SQL)
       .orderBy(asc(memoryFacts.createdAt), asc(memoryFacts.id));
-    return rows.map((row) => ({
-      id: row.id,
-      ownerId: row.ownerId,
-      projectId: row.projectId,
-      resourceId: row.resourceId,
-      threadId: row.threadId,
-      subjectKey: row.subjectKey,
-      factText: row.factText,
-      contentHash: row.contentHash,
-      importance: row.importance,
-      referenceCount: row.referenceCount,
-      referencedAt: row.referencedAt === null ? null : new Date(row.referencedAt),
-      validFrom: new Date(row.validFrom),
-      invalidAt: row.invalidAt === null ? null : new Date(row.invalidAt),
-      expiredAt: row.expiredAt === null ? null : new Date(row.expiredAt),
-      status: row.status as Fact["status"],
-      ...(row.sourceObservationRange !== null
-        ? { sourceObservationRange: row.sourceObservationRange }
-        : {}),
-      createdAt: new Date(row.createdAt),
-      updatedAt: new Date(row.updatedAt),
+    return rows.map(pgRowToFact);
+  }
+
+  // =========================================================================
+  // docs/13 — Memory ADMIN + MCP management surface (pg mirror of the sqlite
+  // adapter; identical contract, async + bigint-epoch boxing).
+  // =========================================================================
+
+  // Admin "By Scope" view. facts ⊎ reflections via a UNION of grouped subqueries
+  // (kept for dialect parity with sqlite); reflections guarded owner_id IS NOT NULL.
+  async listMemoryScopes(input: { accountId?: string }): Promise<MemoryScopeSummary[]> {
+    const acct = input.accountId ?? null;
+    const result = (await this.db.execute(sql`
+      SELECT owner_id AS "accountId", project_id AS "projectId", resource_id AS "resourceId",
+             thread_id AS "threadId",
+             SUM(fc)::bigint AS "factCount", SUM(rc)::bigint AS "reflectionCount",
+             MAX(lu)::bigint AS "lastUpdated"
+        FROM (
+          SELECT owner_id, project_id, resource_id, thread_id,
+                 COUNT(*) AS fc, 0 AS rc, MAX(updated_at) AS lu
+            FROM memory_facts
+           WHERE status = 'active' AND expired_at IS NULL
+             AND (${acct}::text IS NULL OR owner_id = ${acct})
+           GROUP BY owner_id, project_id, resource_id, thread_id
+          UNION ALL
+          SELECT owner_id, project_id, resource_id, thread_id,
+                 0 AS fc, COUNT(*) AS rc, MAX(updated_at) AS lu
+            FROM memory_reflections
+           WHERE status = 'active' AND owner_id IS NOT NULL
+             AND (${acct}::text IS NULL OR owner_id = ${acct})
+           GROUP BY owner_id, project_id, resource_id, thread_id
+        ) g
+       GROUP BY owner_id, project_id, resource_id, thread_id
+       ORDER BY "lastUpdated" DESC
+    `)) as { rows?: ScopeAggRow[] } | ScopeAggRow[];
+    const rows = Array.isArray(result) ? result : (result.rows ?? []);
+    return rows.map((r) => ({
+      accountId: r.accountId,
+      projectId: r.projectId,
+      resourceId: r.resourceId,
+      threadId: r.threadId,
+      factCount: Number(r.factCount),
+      reflectionCount: Number(r.reflectionCount),
+      lastUpdated: r.lastUpdated !== null ? new Date(Number(r.lastUpdated)) : null,
     }));
+  }
+
+  async getFactById(input: { accountId: string; id: string }): Promise<Fact | null> {
+    const rows = await this.db
+      .select()
+      .from(memoryFacts)
+      .where(and(eq(memoryFacts.id, input.id), eq(memoryFacts.ownerId, input.accountId)))
+      .limit(1);
+    return rows[0] === undefined ? null : pgRowToFact(rows[0]);
+  }
+
+  async listFacts(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    status?: MemoryStatus | "all";
+    subjectKey?: string;
+    search?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: Fact[]; total: number }> {
+    const where = and(...factListClauses(input)) as SQL;
+    const rows = await this.db
+      .select()
+      .from(memoryFacts)
+      .where(where)
+      .orderBy(desc(memoryFacts.updatedAt), desc(memoryFacts.id))
+      .limit(input.limit)
+      .offset(input.offset);
+    const totalRows = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(memoryFacts)
+      .where(where);
+    return { rows: rows.map(pgRowToFact), total: Number(totalRows[0]?.n ?? 0) };
+  }
+
+  async updateFact(input: {
+    accountId: string;
+    id: string;
+    patch: MemoryFactPatch;
+    now: Date;
+  }): Promise<Fact | null> {
+    const existing = await this.getFactById({ accountId: input.accountId, id: input.id });
+    if (existing === null) return null;
+    const { patch } = input;
+    const set: Partial<typeof memoryFacts.$inferInsert> = { updatedAt: input.now.getTime() };
+    if (patch.factText !== undefined && patch.factText !== existing.factText) {
+      const newHash = factContentHash(patch.factText);
+      if (newHash !== existing.contentHash) {
+        const conflict = await this.db
+          .select({ id: memoryFacts.id })
+          .from(memoryFacts)
+          .where(
+            and(
+              eq(memoryFacts.ownerId, input.accountId),
+              eq(memoryFacts.contentHash, newHash),
+              ne(memoryFacts.id, input.id),
+            ),
+          )
+          .limit(1);
+        if (conflict[0] !== undefined) {
+          throw new MemoryFactContentHashConflictError(conflict[0].id);
+        }
+      }
+      set.factText = patch.factText;
+      set.contentHash = newHash;
+    }
+    if (patch.importance !== undefined) set.importance = patch.importance;
+    if (patch.status !== undefined) {
+      set.status = patch.status;
+      // Keep expiry in SYNC with the lifecycle (pg mirror): reactivating CLEARS the
+      // supersede/prune tombstone (else status='active' AND expired_at IS NULL still
+      // hides it); pruning STAMPS it (consistent with deleteFact). 'archived' is
+      // invisible via status alone, so expiry is left untouched.
+      if (patch.status === "active") set.expiredAt = null;
+      else if (patch.status === "pruned") set.expiredAt = input.now.getTime();
+    }
+    if (patch.invalidAt !== undefined) {
+      set.invalidAt = patch.invalidAt === null ? null : patch.invalidAt.getTime();
+    }
+    await this.db
+      .update(memoryFacts)
+      .set(set)
+      .where(and(eq(memoryFacts.id, input.id), eq(memoryFacts.ownerId, input.accountId)));
+    return this.getFactById({ accountId: input.accountId, id: input.id });
+  }
+
+  async deleteFact(input: { accountId: string; id: string; now: Date }): Promise<boolean> {
+    const deleted = await this.db
+      .update(memoryFacts)
+      .set({ status: "pruned", expiredAt: input.now.getTime(), updatedAt: input.now.getTime() })
+      .where(
+        and(
+          eq(memoryFacts.id, input.id),
+          eq(memoryFacts.ownerId, input.accountId),
+          ne(memoryFacts.status, "pruned"),
+        ),
+      )
+      .returning();
+    return deleted.length > 0;
+  }
+
+  async listReflections(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    status?: "active" | "archived" | "all";
+    includeAllVersions?: boolean;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: Reflection[]; total: number }> {
+    const clauses: SQL[] = [eq(memoryReflections.ownerId, input.accountId)];
+    const status = input.status ?? "active";
+    if (status !== "all") clauses.push(eq(memoryReflections.status, status));
+    if (input.projectId !== undefined) {
+      clauses.push(eq(memoryReflections.projectId, input.projectId));
+    }
+    if (input.resourceId !== undefined) {
+      clauses.push(eq(memoryReflections.resourceId, input.resourceId));
+    }
+    if (input.threadId !== undefined) clauses.push(eq(memoryReflections.threadId, input.threadId));
+    const all = (
+      await this.db
+        .select()
+        .from(memoryReflections)
+        .where(and(...clauses) as SQL)
+        .orderBy(desc(memoryReflections.version), desc(memoryReflections.updatedAt))
+    ).map(pgRowToReflection);
+    const grouped = input.includeAllVersions === true ? all : latestPerScope(all);
+    grouped.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+    return {
+      rows: grouped.slice(input.offset, input.offset + input.limit),
+      total: grouped.length,
+    };
+  }
+
+  async getReflectionById(input: { accountId: string; id: string }): Promise<Reflection | null> {
+    const rows = await this.db
+      .select()
+      .from(memoryReflections)
+      .where(
+        and(eq(memoryReflections.id, input.id), eq(memoryReflections.ownerId, input.accountId)),
+      )
+      .limit(1);
+    return rows[0] === undefined ? null : pgRowToReflection(rows[0]);
+  }
+
+  async updateReflectionText(input: {
+    accountId: string;
+    id: string;
+    reflectionText: string;
+    tokenEstimate: number;
+    now: Date;
+  }): Promise<Reflection | null> {
+    const updated = await this.db
+      .update(memoryReflections)
+      .set({
+        reflectionText: input.reflectionText,
+        tokenEstimate: input.tokenEstimate,
+        updatedAt: input.now.getTime(),
+      })
+      .where(
+        and(eq(memoryReflections.id, input.id), eq(memoryReflections.ownerId, input.accountId)),
+      )
+      .returning();
+    if (updated.length === 0) return null;
+    return this.getReflectionById({ accountId: input.accountId, id: input.id });
+  }
+
+  // Archive EVERY active version of the reflection's scope (pg mirror) — see the
+  // sqlite adapter: archiving one id alone would let getReflection fall back to a
+  // sibling active version, so injection would not actually stop.
+  async deleteReflection(input: { accountId: string; id: string }): Promise<boolean> {
+    const row = await this.getReflectionById({ accountId: input.accountId, id: input.id });
+    if (row === null) return false;
+    const scope: ReflectionScope = {
+      accountId: input.accountId,
+      ...(row.projectId !== null ? { projectId: row.projectId } : {}),
+      ...(row.resourceId !== null ? { resourceId: row.resourceId } : {}),
+      ...(row.threadId !== null ? { threadId: row.threadId } : {}),
+    };
+    const archived = await this.db
+      .update(memoryReflections)
+      .set({ status: "archived" })
+      .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")))
+      .returning();
+    return archived.length > 0;
   }
 
   // docs/12 P7 — the retention HARD-DELETE (pg mirror of the sqlite adapter; same

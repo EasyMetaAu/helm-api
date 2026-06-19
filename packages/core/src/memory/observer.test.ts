@@ -45,6 +45,7 @@ function makeFakeStore(messages: RawMessage[], existingRanges: Array<[string, st
     claimPendingJobs: vi.fn(async () => []),
     insertFactsReconciled: vi.fn(async (input) => {
       factCalls.push(input);
+      return { insertedIds: [], supersededIds: [] };
     }),
   };
   return { store, observations, jobUpdates, factCalls };

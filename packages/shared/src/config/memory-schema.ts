@@ -196,11 +196,22 @@ export const MemoryLlmSchema = z
 // `.strict()` means a leftover `observer:` block from the deleted fixed/economy
 // era REFUSES STARTUP — deliberately fail-closed, so an operator notices the
 // old knobs are gone instead of carrying dead config (the no-lying-knobs rule).
+// docs/13 — Memory MCP server toggle. The MCP endpoint (POST /mcp) exposes
+// fact/reflection CRUD to external agents, authed by the SAME API key as /v1.
+// Default OFF (fail-closed): an operator opts in. `.strict()` rejects unknown
+// keys so a typo'd toggle refuses startup rather than silently leaving it off.
+export const MemoryMcpSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+  })
+  .strict();
+
 export const MemoryConfigSchema = z
   .object({
     compaction: CompactionOverridesSchema.prefault({}),
     llm: MemoryLlmSchema.prefault({}),
     forgetting: ForgettingSchema.prefault({}),
+    mcp: MemoryMcpSchema.prefault({}),
   })
   .strict()
   // Cross-block gate (salient-fact-memory-spec §6). `eager_facts:true` requires BOTH:

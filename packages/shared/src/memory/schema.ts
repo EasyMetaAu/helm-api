@@ -234,6 +234,46 @@ export const MemoryFactInputSchema = z.object({
   sourceObservationRange: z.tuple([z.string().min(1), z.string().min(1)]).optional(),
 });
 
+// docs/13 — Memory admin + MCP surfaces. A scope-group summary for the admin
+// "By Scope" view: one row per distinct (account, project, resource, thread)
+// group that holds active facts and/or an active reflection, with per-tier
+// counts and the most-recent updatedAt across both tiers. lastUpdated is null
+// only defensively (a group with zero live rows is never emitted by the store).
+export const MemoryScopeSummarySchema = z.object({
+  accountId: z.string().min(1),
+  projectId: z.string().min(1).nullable(),
+  resourceId: z.string().min(1).nullable(),
+  threadId: z.string().min(1).nullable(),
+  factCount: z.number().int().nonnegative(),
+  reflectionCount: z.number().int().nonnegative(),
+  lastUpdated: z.date().nullable(),
+});
+
+// docs/13 — admin/MCP fact edit (partial). An ABSENT key leaves the column
+// unchanged; `invalidAt` is tri-state (absent = leave, null = clear, date =
+// set). Editing `factText` recomputes content_hash in the store — a collision
+// with a sibling row's (owner_id, content_hash) surfaces as 409. `subjectKey`
+// is deliberately NOT editable here: it is the supersede identity, independent
+// of free-text wording (docs/13). `status` lets an operator archive/prune or
+// re-activate a row. `.strict()` so an unknown field fails closed.
+export const MemoryFactPatchSchema = z
+  .object({
+    factText: z.string().min(1).optional(),
+    importance: z.number().min(0).max(1).optional(),
+    status: MemoryStatusSchema.optional(),
+    invalidAt: z.coerce.date().nullable().optional(),
+  })
+  .strict();
+
+// docs/13 — admin/MCP reflection edit. Edits the targeted row's text IN PLACE;
+// the store recomputes tokenEstimate + stamps updatedAt but does NOT bump
+// `version` (that stays the Reflector's machine-merge counter, docs/13).
+export const MemoryReflectionPatchSchema = z
+  .object({
+    reflectionText: z.string().min(1),
+  })
+  .strict();
+
 export type MemoryRole = z.infer<typeof MemoryRoleSchema>;
 export type MemoryThreadInput = z.infer<typeof MemoryThreadInputSchema>;
 export type MemoryMessageInput = z.infer<typeof MemoryMessageInputSchema>;
@@ -248,6 +288,9 @@ export type Fact = z.infer<typeof FactSchema>;
 // supplies only scope + text + contentHash + validFrom; the store applies the
 // defaults on write (docs/12 P6). z.infer would make them required on the DTO.
 export type MemoryFactInput = z.input<typeof MemoryFactInputSchema>;
+export type MemoryScopeSummary = z.infer<typeof MemoryScopeSummarySchema>;
+export type MemoryFactPatch = z.infer<typeof MemoryFactPatchSchema>;
+export type MemoryReflectionPatch = z.infer<typeof MemoryReflectionPatchSchema>;
 export type ReflectionScope = z.infer<typeof ReflectionScopeSchema>;
 export type ReflectionUpsertInput = z.infer<typeof ReflectionUpsertInputSchema>;
 export type AssembledMessageSource = z.infer<typeof AssembledMessageSourceSchema>;
