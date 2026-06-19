@@ -4,6 +4,7 @@ import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
 import { ClassifierRulesConfigSchema } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../config/loader.js";
+import { wrapMemoryReminder } from "../memory/inject-bridge.js";
 import { scoreRequest } from "./engine.js";
 import { detectTask } from "./taskdetect.js";
 
@@ -423,6 +424,23 @@ describe("detectTask", () => {
       };
       const res = detectTask(req, cfg);
       // tool prefix "shell_" → coding (+2.0), independent of message text.
+      expect(res.task_type).toBe("coding");
+    });
+
+    it("classifies the real user turn, not a trailing memory <system-reminder>", () => {
+      // Memory-inject mode appends the block as a trailing role:"user" reminder; the
+      // genuine coding request before it must still drive task detection.
+      const cfg = makeConfig();
+      const req: ReqInput = {
+        messages: [
+          { role: "user", content: "refactor this function and fix the bug" },
+          { role: "user", content: wrapMemoryReminder("Known facts:\n- likes 42") },
+        ],
+        tools: null,
+        response_format: null,
+        attachments: null,
+      };
+      const res = detectTask(req, cfg);
       expect(res.task_type).toBe("coding");
     });
   });

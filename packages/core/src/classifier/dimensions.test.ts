@@ -1,6 +1,7 @@
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
 import { ClassifierRulesConfigSchema } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
+import { wrapMemoryReminder } from "../memory/inject-bridge.js";
 import { scoreDimensions } from "./dimensions.js";
 
 // A minimal but representative classifier rules config mirroring config/classifier
@@ -237,6 +238,24 @@ describe("scoreDimensions scopes text-derived dimensions to the current user tur
     };
     const res = scoreDimensions(req, cfg);
     expect(res.hits.find((h) => h.dimension === "has_code_block")?.signal).toBe(1);
+  });
+
+  it("scores the real user turn, not a trailing memory <system-reminder> turn", () => {
+    // Memory-inject mode appends the block as a trailing role:"user" reminder.
+    // Complexity must still be scored on the genuine coding request before it.
+    const cfg = makeConfig();
+    const req: ReqInput = {
+      messages: [
+        { role: "user", content: "refactor this function and fix the stack trace" },
+        { role: "user", content: wrapMemoryReminder("Known facts:\n- likes 42") },
+      ],
+      tools: null,
+      response_format: null,
+      attachments: null,
+      max_tokens: null,
+    };
+    const res = scoreDimensions(req, cfg);
+    expect(res.hits.find((h) => h.dimension === "coding_kw")).toBeDefined();
   });
 
   it("keeps AMBIENT shape dimensions (turn_count / tool_count) on the FULL request", () => {
