@@ -372,6 +372,7 @@ describe("persistDecision", () => {
         series: [],
         byModel: [],
       }),
+      usageByKey: async () => [],
       insertPayload: async () => {},
       getPayload: async () => null,
       prunePayloads: async () => {},

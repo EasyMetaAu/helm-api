@@ -352,6 +352,22 @@ export interface TelemetryAggregate {
   byModel: TelemetryModelUsage[];
 }
 
+// Per-key usage rollup over a half-open window [startMs, endMs), grouped by
+// api_key_id (the recorded key_id). Powers the /admin/keys list "Usage" column in
+// ONE GROUP BY over the denormalized columns — the whole list in a single query,
+// never one-per-key (no N+1). Same accounting honesty as TelemetryTotals:
+// requests/errorCount/totalTokens COALESCE to 0; totalCostUsd stays NULLABLE so an
+// unmeasured window reads "—" rather than a fake $0 (principle 3). A key with NO
+// traffic in the window is simply ABSENT from the result (the route fills a zero
+// row), so the array length is "keys that were used", not "all keys".
+export interface TelemetryKeyUsage {
+  apiKeyId: string; // key_id only — never hash/plaintext (principle 7)
+  requests: number;
+  errorCount: number;
+  totalCostUsd: number | null; // null = no priced attempt for this key in the window
+  totalTokens: number; // Σ(prompt + completion) over the window
+}
+
 export interface TelemetryStore {
   insert(input: InsertTelemetryInput): Promise<{ id: string }>;
   // Optional batch variants (perf): collapse N rows into ONE commit on the
@@ -391,12 +407,24 @@ export interface TelemetryStore {
   // at local midnight instead of 08:00 local. Defaults to 0 (UTC bucketing = legacy
   // behavior); the bucketStartMs it returns is still a UTC epoch ms (= local midnight
   // expressed in UTC), which the admin renders back to local with formatTimestamp.
+  //
+  // `keyId` (optional) scopes the WHOLE aggregate to a single api_key_id — the key
+  // detail page reuses the dashboard's three shapes for one key by passing it (the
+  // dashboard omits it for the global view). It filters every sub-query identically;
+  // an unknown key just reads an empty (all-zero) window.
   aggregate(
     startMs: number,
     endMs: number,
     bucket: "hour" | "day",
     tzOffsetMinutes?: number,
+    keyId?: string,
   ): Promise<TelemetryAggregate>;
+  // Per-key usage rollup over [startMs, endMs), grouped by api_key_id — the
+  // /admin/keys list "Usage" column. ONE GROUP BY over the denormalized columns
+  // (never row-by-row JS); keys with no traffic in the window are absent. READ-ONLY,
+  // never on the request path. Both adapters implement it; the contract test pins
+  // sqlite/pg parity. See TelemetryKeyUsage.
+  usageByKey(startMs: number, endMs: number): Promise<TelemetryKeyUsage[]>;
   // Full-payload capture (opt-out via runtime settings capture_payloads). Upsert
   // by request_id (idempotent: the stream path may write the request first, then
   // backfill the assembled response). Stores verbatim bodies — never redacted.

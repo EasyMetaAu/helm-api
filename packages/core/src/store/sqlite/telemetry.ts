@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
 import { and, asc, count, desc, eq, gt, gte, lt, type SQL, sql } from "drizzle-orm";
-import { shapeTelemetryAggregate } from "../aggregate-shape.js";
+import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
@@ -10,6 +10,7 @@ import type {
   RequestPayloadArchiveRow,
   TelemetryAggregate,
   TelemetryArchiveRow,
+  TelemetryKeyUsage,
   TelemetryPage,
   TelemetryPageQuery,
   TelemetryStore,
@@ -192,10 +193,15 @@ export class SqliteTelemetryStore implements TelemetryStore {
     endMs: number,
     bucket: "hour" | "day",
     tzOffsetMinutes = 0,
+    keyId?: string,
   ): Promise<TelemetryAggregate> {
+    // Optional per-key scope (detail page): the same window WHERE, plus an
+    // api_key_id equality when keyId is given. `and()` drops the undefined arm, so
+    // the global dashboard path is byte-identical to before.
     const where = and(
       gte(telemetry.createdAt, new Date(startMs)),
       lt(telemetry.createdAt, new Date(endMs)),
+      keyId !== undefined ? eq(telemetry.apiKeyId, keyId) : undefined,
     );
     const bucketMs = sql.raw(String(bucket === "hour" ? 3_600_000 : 86_400_000));
     const offset = sql.raw(`(${tzOffsetMinutes * 60_000})`);
@@ -252,6 +258,29 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .all();
 
     return shapeTelemetryAggregate(totals, series, byModel);
+  }
+
+  // Per-key usage rollup (the /admin/keys list "Usage" column). ONE GROUP BY
+  // api_key_id over the denormalized columns — the whole list in a single query, no
+  // N+1. COUNT/SUM with COALESCE'd token sums (empty = real 0); cost stays nullable
+  // (no priced row → "not measured", distinct from a measured 0). The shared shaper
+  // coerces + sorts (requests desc) so the order is identical to the pg adapter.
+  async usageByKey(startMs: number, endMs: number): Promise<TelemetryKeyUsage[]> {
+    const rows = this.db
+      .select({
+        apiKeyId: telemetry.apiKeyId,
+        requests: count(),
+        errorCount: sql<number>`SUM(CASE WHEN ${telemetry.finalStatus} = 'error' THEN 1 ELSE 0 END)`,
+        totalCostUsd: sql<number | null>`SUM(${telemetry.costUsd})`,
+        totalTokens: sql<number>`COALESCE(SUM(${telemetry.promptTokens}), 0) + COALESCE(SUM(${telemetry.completionTokens}), 0)`,
+      })
+      .from(telemetry)
+      .where(
+        and(gte(telemetry.createdAt, new Date(startMs)), lt(telemetry.createdAt, new Date(endMs))),
+      )
+      .groupBy(telemetry.apiKeyId)
+      .all();
+    return shapeTelemetryKeyUsage(rows);
   }
 
   // Full-payload capture. Upsert by request_id so the stream path can write the

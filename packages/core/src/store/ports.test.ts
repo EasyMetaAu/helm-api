@@ -9,6 +9,7 @@ import type {
   RecentDecisionRecord,
   RequestPayload,
   TelemetryAggregate,
+  TelemetryKeyUsage,
   TelemetryPage,
   TelemetryPageQuery,
   TelemetryStore,
@@ -201,8 +202,14 @@ class InMemoryTelemetryStore implements TelemetryStore {
     endMs: number,
     bucket: "hour" | "day",
     tzOffsetMinutes = 0,
+    keyId?: string,
   ): Promise<TelemetryAggregate> {
-    const inWindow = this.rows.filter((r) => r.at.getTime() >= startMs && r.at.getTime() < endMs);
+    const inWindow = this.rows.filter(
+      (r) =>
+        r.at.getTime() >= startMs &&
+        r.at.getTime() < endMs &&
+        (keyId === undefined || r.keyId === keyId),
+    );
     const bucketMs = bucket === "hour" ? 3_600_000 : 86_400_000;
     const offsetMs = tzOffsetMinutes * 60_000; // local-day floor (shift-floor-unshift)
     const num = (n: number | null | undefined) => n ?? 0;
@@ -260,6 +267,30 @@ class InMemoryTelemetryStore implements TelemetryStore {
       series: [...seriesMap.values()].sort((a, b) => a.bucketStartMs - b.bucketStartMs),
       byModel: [...byModelMap.values()].sort((a, b) => b.totalTokens - a.totalTokens),
     };
+  }
+  // Per-key roll-up over the half-open window, grouped by keyId (requests desc).
+  async usageByKey(startMs: number, endMs: number): Promise<TelemetryKeyUsage[]> {
+    const num = (n: number | null | undefined) => n ?? 0;
+    const byKey = new Map<string, TelemetryKeyUsage>();
+    for (const r of this.rows) {
+      if (r.at.getTime() < startMs || r.at.getTime() >= endMs) continue;
+      const u = byKey.get(r.keyId) ?? {
+        apiKeyId: r.keyId,
+        requests: 0,
+        errorCount: 0,
+        totalCostUsd: null as number | null,
+        totalTokens: 0,
+      };
+      u.requests += 1;
+      if (r.rec.final.status === "error") u.errorCount += 1;
+      const cost = r.rec.cost_breakdown.total_usd;
+      if (cost !== null) u.totalCostUsd = (u.totalCostUsd ?? 0) + cost;
+      u.totalTokens += num(r.rec.usage?.prompt_tokens) + num(r.rec.usage?.completion_tokens);
+      byKey.set(r.keyId, u);
+    }
+    return [...byKey.values()].sort(
+      (a, b) => b.requests - a.requests || a.apiKeyId.localeCompare(b.apiKeyId),
+    );
   }
 }
 

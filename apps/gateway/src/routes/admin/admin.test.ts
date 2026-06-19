@@ -206,6 +206,9 @@ function makeTelemetry(seed: DecisionRecord[] = []): TelemetryStore {
         byModel: [],
       };
     },
+    async usageByKey() {
+      return [];
+    },
     async insertPayload() {},
     async getPayload() {
       return null;

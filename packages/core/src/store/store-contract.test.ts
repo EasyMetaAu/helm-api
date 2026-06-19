@@ -858,6 +858,149 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(local.totals.promptTokens).toBe(157);
     });
 
+    // Per-key usage rollup (the /admin/keys list "Usage" column). ONE GROUP BY
+    // api_key_id over the denormalized columns — runs against BOTH adapters so the
+    // COUNT/SUM/COALESCE + nullable-cost semantics stay identical. The fixture mixes
+    // two keys inside the window + one row outside it, so grouping + the half-open
+    // bound are both hand-checkable.
+    it("usageByKey rolls up requests/errors/cost/tokens per key over the window", async () => {
+      ctx = await make();
+      const served = (
+        id: string,
+        usage: { prompt: number; completion: number },
+        status: "ok" | "error",
+        cost: number | null,
+      ) =>
+        decision(id, {
+          usage: {
+            prompt_tokens: usage.prompt,
+            completion_tokens: usage.completion,
+            cached_tokens: null,
+            cache_creation_tokens: null,
+          },
+          provider_attempts: [
+            {
+              alias: "premium",
+              skipped: false,
+              skip_reason: null,
+              status,
+              error_class: status === "error" ? "upstream_error" : null,
+              latency_ms: 100,
+              cost_usd: cost,
+              error_detail: null,
+            },
+          ],
+          final: {
+            model_alias: "premium",
+            provider_model: "claude-x",
+            status,
+            error_reason: status === "error" ? "upstream_error" : null,
+          },
+        });
+      // k1: two rows (one ok, one error) inside [1000, 4000).
+      await ctx.stores.telemetry.insert({
+        decision: served("k1a", { prompt: 100, completion: 20 }, "ok", 0.004),
+        apiKeyId: "k1",
+        createdAt: new Date(1000),
+      });
+      await ctx.stores.telemetry.insert({
+        decision: served("k1b", { prompt: 50, completion: 10 }, "error", null),
+        apiKeyId: "k1",
+        createdAt: new Date(2000),
+      });
+      // k2: one ok row inside the window.
+      await ctx.stores.telemetry.insert({
+        decision: served("k2a", { prompt: 10, completion: 5 }, "ok", 0.001),
+        apiKeyId: "k2",
+        createdAt: new Date(3000),
+      });
+      // k1: one row OUTSIDE the window (at the exclusive end) — must be ignored.
+      await ctx.stores.telemetry.insert({
+        decision: served("k1c", { prompt: 999, completion: 999 }, "ok", 9),
+        apiKeyId: "k1",
+        createdAt: new Date(4000),
+      });
+
+      const usage = await ctx.stores.telemetry.usageByKey(1000, 4000);
+      // Ordered requests desc, then apiKeyId — k1 (2 reqs) before k2 (1 req).
+      expect(usage.map((u) => u.apiKeyId)).toEqual(["k1", "k2"]);
+      const k1 = usage.find((u) => u.apiKeyId === "k1");
+      expect(k1?.requests).toBe(2);
+      expect(k1?.errorCount).toBe(1);
+      expect(k1?.totalCostUsd).toBeCloseTo(0.004, 6); // k1b cost null → only k1a
+      expect(k1?.totalTokens).toBe(180); // (100+20) + (50+10)
+      const k2 = usage.find((u) => u.apiKeyId === "k2");
+      expect(k2?.requests).toBe(1);
+      expect(k2?.errorCount).toBe(0);
+      expect(k2?.totalCostUsd).toBeCloseTo(0.001, 6);
+      expect(k2?.totalTokens).toBe(15);
+    });
+
+    it("usageByKey reports cost null when no priced row exists for a key", async () => {
+      ctx = await make();
+      await ctx.stores.telemetry.insert({
+        decision: decision("np", {
+          usage: {
+            prompt_tokens: 5,
+            completion_tokens: 5,
+            cached_tokens: null,
+            cache_creation_tokens: null,
+          },
+          provider_attempts: [
+            {
+              alias: "premium",
+              skipped: false,
+              skip_reason: null,
+              status: "ok",
+              error_class: null,
+              latency_ms: 10,
+              cost_usd: null, // unpriced model → never measured
+              error_detail: null,
+            },
+          ],
+        }),
+        apiKeyId: "kx",
+        createdAt: new Date(1000),
+      });
+      const usage = await ctx.stores.telemetry.usageByKey(0, 5000);
+      expect(usage[0]?.totalCostUsd).toBeNull(); // honest "not measured", not 0
+      expect(usage[0]?.totalTokens).toBe(10);
+    });
+
+    // The detail page reuses the dashboard aggregate scoped to ONE key. Same three
+    // shapes, filtered to a single api_key_id — pinned across both adapters.
+    it("aggregate scopes every shape to a single key when keyId is given", async () => {
+      ctx = await make();
+      const DAY = 86_400_000;
+      const day0 = 30 * DAY;
+      const served = (id: string, key: string, model: string, prompt: number) =>
+        ctx.stores.telemetry.insert({
+          decision: decision(id, {
+            usage: {
+              prompt_tokens: prompt,
+              completion_tokens: 0,
+              cached_tokens: null,
+              cache_creation_tokens: null,
+            },
+            final: { model_alias: model, provider_model: model, status: "ok", error_reason: null },
+          }),
+          apiKeyId: key,
+          createdAt: new Date(day0 + 1000),
+        });
+      await served("a", "k1", "gpt-4o", 100);
+      await served("b", "k1", "gpt-4o", 50);
+      await served("c", "k2", "claude-x", 999);
+
+      const scoped = await ctx.stores.telemetry.aggregate(day0, day0 + DAY, "day", 0, "k1");
+      expect(scoped.totals.requests).toBe(2); // k2's row excluded
+      expect(scoped.totals.promptTokens).toBe(150);
+      expect(scoped.byModel.map((m) => m.servedModel)).toEqual(["gpt-4o"]);
+
+      // Omitting keyId keeps the global view (all keys).
+      const global = await ctx.stores.telemetry.aggregate(day0, day0 + DAY, "day", 0);
+      expect(global.totals.requests).toBe(3);
+    });
+
     // queryPage drives the admin Debug list: numbered pagination + the error/role
     // filters. This runs against BOTH adapters so the JSON-path filtering (sqlite
     // json_extract vs postgres jsonb ->>) is verified against real engines.
