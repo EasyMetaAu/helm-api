@@ -57,8 +57,15 @@
   // degrade silently and never surface the secret in an error.
   let copiedId = $state<string | null>(null);
   async function copy(id: string, text: string): Promise<void> {
+    // No Clipboard API (insecure context / old browser): bail without claiming
+    // success — `clipboard?.writeText(...)` would resolve to undefined, falsely
+    // flipping the button to "Copied" though nothing was written.
+    if (!navigator.clipboard?.writeText) {
+      copiedId = null;
+      return;
+    }
     try {
-      await navigator.clipboard?.writeText(text);
+      await navigator.clipboard.writeText(text);
       copiedId = id;
     } catch {
       copiedId = null;
