@@ -165,8 +165,19 @@ describe("MemoryLlmSchema", () => {
     expect(llm.max_tokens.facts).toBe(384);
   });
 
-  it("fails closed when enabled without a base model or with misspelled/invalid knobs", () => {
-    expect(() => MemoryLlmSchema.parse({ enabled: true })).toThrow();
+  it("defaults the model to the `economy` lane when enabled without an explicit model", () => {
+    // The internal memory model defaults to the economy lane (routed via self-HTTP
+    // lane-as-model). An explicit value — lane name OR provider/model — is honored.
+    expect(MemoryLlmSchema.parse({ enabled: true }).model).toBe("economy");
+    expect(MemoryLlmSchema.parse({ enabled: true, model: "balanced" }).model).toBe("balanced");
+    expect(
+      MemoryLlmSchema.parse({ enabled: true, model: "deepseek/deepseek-v4-flash" }).model,
+    ).toBe("deepseek/deepseek-v4-flash");
+    // Disabled + unset stays unset (no LLM path, nothing to default).
+    expect(MemoryLlmSchema.parse({ enabled: false }).model).toBeUndefined();
+  });
+
+  it("fails closed on misspelled/invalid knobs", () => {
     expect(() => MemoryLlmSchema.parse({ enabled: true, modle: "x" })).toThrow();
     expect(() => MemoryLlmSchema.parse({ enabled: true, model: "x", timeout_ms: 0 })).toThrow();
     expect(() => MemoryLlmSchema.parse({ enabled: true, model: "x", temperature: 2 })).toThrow();

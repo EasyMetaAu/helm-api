@@ -1500,6 +1500,11 @@ export async function buildServer(
           baseUrl: `http://127.0.0.1:${config.server.port}`,
           apiKey: internalApiKey,
           providerPrefix: first.name,
+          // Live lane lookup: a configured internal model (memory / eval) may be a LANE
+          // name (e.g. "economy") — forward it verbatim so /v1 routes it as an explicit
+          // lane instead of mangling it into "${first.name}/economy". Reads the current
+          // `lanes` binding so an admin lane edit is reflected without a rebuild.
+          isLane: (m) => Object.hasOwn(lanes, m),
         })
       : null;
   const classify = buildClassifyAdapter({
