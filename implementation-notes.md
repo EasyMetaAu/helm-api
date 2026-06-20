@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-20 · eager/reflector 事实抽取被严格 schema 静默吞掉（deepseek 返回裸数组）（docs/salient-fact-memory-spec；docs/08/12；原则 2/3）
+
+- **背景/线上实证**：用户在 Mimi（`/v1/responses`，project `agentcrew-test`）说「记住：我最喜欢的颜色是绿色」后跨 session 召不回。线上探针（手动入队 observer job + tail 日志）抓到 `memory.llm.fallback task:facts error: ZodError: expected object, received array`。根因：`deepseek-v4-flash` 做事实抽取时**输出形状不确定**（temperature:0 仍时而 `{facts:[...]}`、时而**裸数组** `[...]`）；`RawFactsOutputSchema`/`FactsOutputSchema` 只认对象信封 → `callJsonModel` 的 `schema.parse` 抛 → catch **静默回退** `{facts:[]}` → eager（`observer.ts:337`）/reflector（`reflector.ts:206`）拿 0 条、`observer.ts:40/43` 无日志静默退出 → fact **永不落库**。reflection 能工作是因为其回退是非空确定性文本；fact 回退是空数组故全程隐形。直接 curl deepseek 实证：单条消息返 `{facts:[{subject_text,fact_text}]}`（对象、键正确），多消息上下文时返裸数组——故 06-16 偶尔成功、颜色测试偶尔失败。
+- **决定（事实信封容错，tolerant passthrough）**：镜像项目既有原则（codex role/effort 那条「accept+coerce，never reject on shape」）。新增 `coerceFactsEnvelope`：顶层是数组则包成 `{facts:array}` 再校验；`FactsOutputSchema`/`RawFactsOutputSchema` 改 `z.preprocess(coerceFactsEnvelope, z.object{…})`。内层键 `subject_text`/`fact_text` 经 curl 确认匹配，无需键别名。附带 `parseJsonObject` 增**裸数组打捞**（noisy prose 包顶层数组时，择先开的定界符 `{` / `[`）。**无 schema 改/无迁移** → box 配置仍有效。
+- **验证**：TDD 红（裸数组→`[]`）→绿；`memory-llm.test.ts` 2 新例（eager + reflector 裸数组形状）、memory-llm 18 + `packages/core/src/memory` 247 测绿、typecheck（4 项目）/biome lint 清。分支 `worktree-fix-archived-reflection-delete`（与归档删除同分支），未提交/未部署。**部署后**短个人陈述即可 eager 落库为 project fact、下个 session 注入（前提：box 已置 `eager_facts:true` + `memory.llm.enabled:true`，本次已配）。
+- **同 PR 另带两修（同次排查发现）**：① **Gemini 原生直通不注入记忆**——`messages-pipeline.ts` 的 splice 只有 `anthropic_messages`/`openai_responses` 分支，缺 `gemini`，故 Gemini passthrough 算了记忆却丢弃。新增 `appendMemoryToGeminiBody`（尾随 `contents[]` user 轮、`systemInstruction` 逐字）+ gemini 分支；native-memory-inject 3 新例。② **fact 复活不刷新 scope**——`(owner_id,content_hash)` UNIQUE 是账号全局，故跨 project 重述同一 fact 命中旧行后 `reactivate` 只改 status/时间戳、**保留旧 scope**→新 project 的 inject 读不到。sqlite+pg 双适配器 `reactivate` UPDATE 增 `project_id/resource_id/thread_id`（以重述 scope 为准），sqlite+pg 各 1 新例（跨 project 复活后 p2 可见、p1 不可见）。
+
 ## 2026-06-20 · 已归档 reflection 无法删除（两段式 soft→hard delete）（docs/13；原则 1）
 
 - **背景/线上实证**：用户在 admin Memory 页删除一条 reflection 后它变 `已归档`（status='archived'；列表用 `status:'all'` 仍显示该行且带「删除」按钮），**再点删除即 `reflection not found` 报错、永远删不掉**。根因：`deleteReflection` 是纯软删——按 id 查出 scope 后 `UPDATE … SET status='archived' WHERE scope AND status='active'`，对已归档行 0 命中→返回 false→route 404 `reflection not found`。docs/13 原设计 reflection 只有软删（无 hard delete），故一旦归档便无任何途径移除=「卡死的归档行」。
@@ -22,18 +29,13 @@
 - **Codex review 修的 2 个 P2**：①**唤醒早于 outbound observe**：`onTaskDrain` 原对**每个** task 触发——若上游响应 >`coalesceMs`，inbound observe 落库就 wake → drain 把 observer job 按**仅 inbound** 标 done，outbound（助手/工具轮）不再补 job → 该轮要等 60s/idle backstop 才被吸收。改：`enqueueTask(task, {wakeOnSettle})` 仅对**标记**的 task 触发 `onTaskDrain`；`runObserve(task, wake=true)`，**inbound 传 false**（每路由 1 处），outbound 默认 wake → worker 仅在整轮落库后唤醒。②**stop() 后 wake() 仍 arm timer**：优雅关停**先 stop worker 再 drain 写队列**，残留 task 仍回调 onTaskDrain→wake() 可能在 store 关闭后 `claimPendingJobs`。改：scheduler 加 `stopped` 闩，`stop()` 置位、`wake()` 早返回。
 - **验证**：TDD 红→绿，scheduler 8 新测（防抖/突发合并/wake 不跑 onTick/fail-open/stop 取消/interval backstop/**stop 后 wake no-op**）+ write-queue 2 新测（onTaskDrain 仅 wakeOnSettle 触发/抛错不污染链）；memory+gateway runtime+routes **948 测**绿、typecheck（4 项目）/lint(0/0)/build 清。分支 `feat/memory-worker-debounced-wake`，PR #332。
 
-## 2026-06-20 · 删除的 fact 可被重新学习（resurrect-on-re-ingest）（docs/12/13；原则 1/3）
-
-- **背景/线上实证**：用户在 admin Memory 页删除 fact 后发现「再也不会被记录」。根因：`deleteFact` 软删=`status='pruned'`+盖 `expired_at` 但**保留 content_hash**；`insertFactsReconciled` 用 `INSERT OR IGNORE` 撞 `idx_memory_facts_hash = UNIQUE(owner_id, content_hash)`（**无 status 过滤**），故 Reflector `temperature:0` 重抽出**逐字相同**的 fact（同 sha256）→ `changes===0` → 静默跳过、永不复活=**永久压制**。box DB 实证：19 条 pruned 全保留 content_hash、最新一条 254s 前=用户刚删的；更糟——被删的若是 superseded 过旧版的活体，旧版仍盖着 `expired_at`→该 subject 永久空且无法自愈（实证：8 条 active 全 superseded + 19 pruned = 0 真活体）。
-- **决定（用户在 4 选项里选 resurrect-on-re-ingest）**：dedup 命中时查现有行，若 `status IN (pruned, archived)` 则**就地复活**（status=active、清 expired_at/invalid_at、valid_from=新观测时刻、updated_at=now）并跑 supersede（视为该 subject 的新活体）；活体重复（active + expired_at IS NULL）仍是幂等 no-op。保留软删审计（**不**改成 hard delete）。`status='active'+expired_at NOT NULL`（被 supersede）刻意不复活——属正常生命周期非删除。
-- **实现**：`MemoryFactReconcileResult` 加**可选** `resurrectedIds?`（向后兼容旧 fake）；sqlite（`selectByHash`+`reactivate` prepared stmt 走 else 分支）+ pg（`ON CONFLICT DO NOTHING` 后 SELECT/UPDATE）双适配器镜像；reflector 日志加 inserted/resurrected/superseded 计数；MCP `handleAdd` 报 `resurrected` 且复活时 `deduped:false`。**无 schema 改/无迁移**（纯逻辑、复用既有列）→ box 配置仍有效、fail-close gate N/A。
-- **验证**：TDD 红→绿，sqlite 3 + pg 3 + MCP 1 新测（复活/复活再 supersede/活体不复活/MCP 重加复活）；memory+store+mcp+reflector **650 测**绿、typecheck（4 项目）/lint 清。分支 `fix/memory-fact-resurrect-on-reingest`。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-20 · 删除的 fact 可被重新学习（resurrect-on-re-ingest）（docs/12/13；原则 1/3）：`deleteFact` 软删=`status='pruned'`+盖 `expired_at` 但保留 content_hash；`insertFactsReconciled` 的 `INSERT OR IGNORE` 撞 `UNIQUE(owner_id,content_hash)`（无 status 过滤）→ Reflector 重抽逐字相同 fact `changes===0` 静默跳过=永久压制。修：dedup 命中查现有行，`status IN (pruned,archived)` 则就地复活（active、清 expired_at/invalid_at、valid_from=新观测、跑 supersede）；活体重复仍幂等 no-op；保留软删审计。`MemoryFactReconcileResult` 加 optional `resurrectedIds`，sqlite+pg 双适配器，MCP `handleAdd` 报 resurrected。sqlite 3+pg 3+MCP 1 新测、650 绿。PR #329。（本次 2026-06-20 续修在最上方那条：复活时**刷新 scope 列**——账号全局 hash 跨 project 重述会复活旧 scope 行致 inject 读不到。）
 
 ### 2026-06-19 · 设置页清理动作确认弹窗 + 五卡布局重组（admin「System Settings」；原则 1）：上一条「自动数据清理」的 Clean now / Compact database 两按钮单击即执行（删数据/VACUUM 锁库）无确认 → 复用全站 `Modal` 确认模式（confirmingClean/confirmingVacuum $state，触发改置 flag、弹窗确认才真跑、执行中 `dismissible=false`，保留 testid 故 e2e 不破）；并把杂物卡「Operations」拆成**五卡**（Routing/Rate limiting/Request queueing/Logging/Data retention & cleanup，按请求生命周期排序，binding/testid/文案逐字不变）。坑：i18n 7 新 key 经 `i18n:sync` 中继译，`i18n:extract` 首跑赶在落盘前→0 新 key 重跑即正常。svelte-check 0/0、手测 Playwright 五卡顺序+确认流程绿。分支 `worktree-settings-confirm-and-layout`，未部署。
 

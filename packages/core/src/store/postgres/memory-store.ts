@@ -840,10 +840,17 @@ export class PgMemoryStore implements MemoryStore {
             existing !== undefined &&
             (existing.status === "pruned" || existing.status === "archived")
           ) {
+            // Re-scope on resurrect (Codex review fix; sqlite mirror): the
+            // (owner_id, content_hash) index is ACCOUNT-GLOBAL, so a fact re-stated under
+            // a different project/resource/thread dedup-hits the old row. Reactivating
+            // without re-scoping would revive it at the STALE scope and the scoped inject
+            // read would never surface it. The re-ingest's scope is authoritative, so
+            // overwrite the scope columns too (same-scope re-statement = no-op rewrite).
             await tx.execute(sql`
             UPDATE memory_facts
                SET status = 'active', expired_at = NULL, invalid_at = NULL,
-                   valid_from = ${validFromMs}, updated_at = ${nowMs}
+                   valid_from = ${validFromMs}, updated_at = ${nowMs},
+                   project_id = ${projectId}, resource_id = ${resourceId}, thread_id = ${threadId}
              WHERE id = ${existing.id}
           `);
             resurrectedIds.push(existing.id);

@@ -23,9 +23,21 @@ const FactOutputSchema = z.object({
   valid_from_observation_id: z.string().trim().min(1),
 });
 
-const FactsOutputSchema = z.object({
-  facts: z.array(FactOutputSchema).default([]),
-});
+// Some memory models (observed in prod: deepseek-v4-flash) ignore the {facts:[...]}
+// envelope and return a BARE ARRAY of fact objects. Coerce that into the envelope
+// BEFORE validation so a correct-but-unwrapped response is never silently dropped to
+// the empty fallback — the exact failure mode that made eager facts never persist
+// (the schema rejected the array, callJsonModel fell back to {facts:[]}). Mirrors the
+// project's tolerant-passthrough rule: accept + normalize a valid response, never reject
+// on shape alone.
+function coerceFactsEnvelope(value: unknown): unknown {
+  return Array.isArray(value) ? { facts: value } : value;
+}
+
+const FactsOutputSchema = z.preprocess(
+  coerceFactsEnvelope,
+  z.object({ facts: z.array(FactOutputSchema).default([]) }),
+);
 
 // Salient-fact fast path (Change A): facts extracted from RAW turns have no
 // supporting observation to cite, so the output is just {subject_text, fact_text}.
@@ -33,9 +45,10 @@ const RawFactOutputSchema = z.object({
   subject_text: z.string().trim().min(1),
   fact_text: z.string().trim().min(1),
 });
-const RawFactsOutputSchema = z.object({
-  facts: z.array(RawFactOutputSchema).default([]),
-});
+const RawFactsOutputSchema = z.preprocess(
+  coerceFactsEnvelope,
+  z.object({ facts: z.array(RawFactOutputSchema).default([]) }),
+);
 
 type ObservationOutput = z.infer<typeof ObservationOutputSchema>;
 type ReflectionOutput = z.infer<typeof ReflectionOutputSchema>;
@@ -139,9 +152,19 @@ function parseJsonObject(text: string): unknown {
   try {
     return JSON.parse(candidate);
   } catch (err) {
-    const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
-    if (start >= 0 && end > start) return JSON.parse(candidate.slice(start, end + 1));
+    // Salvage the first balanced JSON value out of noisy prose — an object {...} OR a
+    // bare array [...] (some models wrap a top-level array in explanatory text). Prefer
+    // whichever delimiter opens first so "[...] note: {...}" salvages the array.
+    const objStart = candidate.indexOf("{");
+    const objEnd = candidate.lastIndexOf("}");
+    const arrStart = candidate.indexOf("[");
+    const arrEnd = candidate.lastIndexOf("]");
+    const objOk = objStart >= 0 && objEnd > objStart;
+    const arrOk = arrStart >= 0 && arrEnd > arrStart;
+    if (objOk && (!arrOk || objStart < arrStart)) {
+      return JSON.parse(candidate.slice(objStart, objEnd + 1));
+    }
+    if (arrOk) return JSON.parse(candidate.slice(arrStart, arrEnd + 1));
     throw err;
   }
 }

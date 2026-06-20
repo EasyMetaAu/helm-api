@@ -381,6 +381,36 @@ describe("createMemoryLlmRuntime", () => {
     expect(facts[0]?.factText).toBe("Project Alpha invoices require PO #123.");
   });
 
+  it("accepts a BARE ARRAY fact response (deepseek shape, no {facts:[]} envelope)", async () => {
+    const { runtime } = runtimeArgs({
+      // deepseek-v4-flash returns the facts as a top-level array, NOT {facts:[...]}.
+      response: [
+        {
+          subject_text: "Project Alpha",
+          fact_text: "Project Alpha invoices require PO #123.",
+          valid_from_observation_id: "obs-1",
+        },
+      ],
+      resolveAlias: "openai/facts",
+    });
+    const obsAt = new Date("2026-06-01T00:00:00Z");
+
+    const facts = await runtime.extractFacts({
+      observations: [observation("obs-1", "Project Alpha invoices require PO #123.", obsAt)],
+      previousReflection: null,
+      now: new Date("2026-06-09T00:00:00Z"),
+    });
+
+    expect(facts).toEqual([
+      {
+        subjectText: "Project Alpha",
+        factText: "Project Alpha invoices require PO #123.",
+        validFrom: obsAt,
+        sourceObservationRange: ["obs-1", "obs-1"],
+      },
+    ]);
+  });
+
   // Salient-fact fast path (salient-fact-memory-spec Change A): extract atomic
   // facts from RAW turns, decoupled from compaction. Unlike the observation-based
   // extractor, there is NO deterministic fallback — without an LLM there are no
@@ -441,6 +471,30 @@ describe("createMemoryLlmRuntime", () => {
         messages: Array<{ content: string }>;
       };
       expect(JSON.stringify(body.messages)).toContain("我喜欢的数字是42");
+    });
+
+    it("accepts a BARE ARRAY response (deepseek shape) instead of {facts:[...]}", async () => {
+      const { runtime } = runtimeArgs({
+        // The real failure on prod: deepseek-v4-flash returns a top-level array, so the
+        // {facts:[...]} schema rejected it and the empty fallback silently dropped the fact.
+        response: [
+          { subject_text: "favorite color", fact_text: "The user's favorite color is green." },
+        ],
+        resolveAlias: "openai/facts",
+      });
+
+      const facts = await runtime.extractFactsFromMessages({
+        messages: [rawMessage("m1", "user", "记住：我最喜欢的颜色是绿色")],
+        now: NOW,
+      });
+
+      expect(facts).toEqual([
+        {
+          subjectText: "favorite color",
+          factText: "The user's favorite color is green.",
+          validFrom: NOW,
+        },
+      ]);
     });
 
     it("returns [] (fail-open) on invalid JSON", async () => {
