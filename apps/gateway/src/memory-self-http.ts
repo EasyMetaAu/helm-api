@@ -23,6 +23,13 @@ export interface SelfHttpClientDeps {
   // `${providerPrefix}/${model}` so it routes the same way. A model that already carries
   // a "provider/" prefix (e.g. memory's "deepseek/deepseek-v4-flash") is left unchanged.
   providerPrefix?: string;
+  // Optional LANE predicate. A configured internal model may be a LANE name (e.g.
+  // "economy") — the gateway's /v1 lane-as-model routing expands it to the lane's
+  // fallback chain. A lane name is BARE (no "/") just like a model id, so without this
+  // predicate the providerPrefix rewrite would mangle it into "${providerPrefix}/economy"
+  // (a non-existent provider model). When `isLane(model)` is true the model is forwarded
+  // VERBATIM so the router sees the lane. Absent ⇒ no lane awareness (bare = model).
+  isLane?: (model: string) => boolean;
   // Injectable fetch for tests; defaults to the global fetch.
   fetchImpl?: typeof globalThis.fetch;
 }
@@ -32,8 +39,14 @@ export function createSelfHttpClient(deps: SelfHttpClientDeps): ProviderClient {
   return {
     async chatCompletion(req, opts) {
       const rawModel = typeof req.model === "string" ? req.model : "";
+      // Prefix a BARE model id to a routable alias — but NEVER a lane name (forward it
+      // verbatim so /v1 lane-as-model routing expands its chain). A "/"-prefixed alias
+      // is already routable and left untouched.
       const model =
-        deps.providerPrefix && rawModel.length > 0 && !rawModel.includes("/")
+        deps.providerPrefix &&
+        rawModel.length > 0 &&
+        !rawModel.includes("/") &&
+        deps.isLane?.(rawModel) !== true
           ? `${deps.providerPrefix}/${rawModel}`
           : rawModel;
       const body = model === rawModel ? req : { ...req, model };

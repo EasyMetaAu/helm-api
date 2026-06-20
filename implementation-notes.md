@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-20 · 内部 LLM（memory + eval）支持 lane 名 + 默认 economy（docs/03/04/08；原则 4/6）
+
+- **目标（用户）**：所有内部 LLM 调用（memory 的 observation/reflection/facts + Layer-2 eval）都能把 **lane 名**当模型用（走 lane 的 fallback 链），未配置时**默认 economy**。
+- **现状核实**：网关路由**早已支持 lane-as-model**——`allow_custom_model` 的 key 传 `model:"<lane>"` 会路由到该 lane 的展开链且**跳过 classify+eval**（route-request.ts step 1a，无递归）；内部 key `k_internal`（allow_custom_model + 无 allowed_lanes + memory_mode:off）有资格路由任意 lane。**唯一阻塞**：`createSelfHttpClient`（self-http 模式，box 开着 `HELM_INTERNAL_LLM_THROUGH_GATEWAY=1`）把任何无斜杠 model 一律改写成 `${providerPrefix}/${model}`→裸 lane `economy`→`deepseek/economy`→上游无此模型→fail-open 静默降级。默认模式 resolver 同样把 lane 当裸模型直发主 provider。
+- **专家评估（用户要求 3 角色两轮）**：路由架构/可靠性/成本三角色达成共识。**关键发现（成本角色）**：`economy` 的 primary 是 `openai-codex/gpt-5.4-mini`（$0.75/$4.5），是 nano deepseek-v4-flash 的 7.5–22.5×，链尾兜到 balanced 可达 Sonnet/Opus；专家组原推荐另建廉价 `internal` lane。**用户在知情下仍选 economy**，并明确"不要关心成本，只做技术实现"。
+- **决定（技术实现）**：① **P0**——`createSelfHttpClient` 注入 `isLane()`，已知 lane 名**跳过 provider 前缀、原样透传**（`server.ts` 用 live `(m)=>Object.hasOwn(lanes,m)`，admin 改 lane 即时生效）。因 memory + eval 都经同一 selfHttpClient，**一处修复同时覆盖全部内部 LLM**。② **默认 economy**——`MemoryLlmSchema` 把 `superRefine(必填)` 改为 `transform`：enabled 且 model 未配置→`model="economy"`（per-task 字段继承之）；`ClassifierConfigSchema` 的 eval prefault `deepseek-v4-flash`→`economy`。显式值（lane 名 OR `provider/model`）一律原样honored。③ **删除 `HELM_INTERNAL_LLM_THROUGH_GATEWAY` 开关，内部 LLM 走自有网关改为始终开启**（用户：「没必要默认关闭」）——去掉 env 判断 + `if` 门控，`k_internal` 每次启动必 mint，`selfHttpClient` 仅在 mint 失败时为 null（落回直连 provider，与 self-http 前逐字一致，不阻塞启动）。这同时**消除了"非 self-http 就 fail-open"那条尾巴**——lane 路由现在全局生效。
+- **范围/坑**：lane 路由现走始终开启的 self-http 路径，无模式分叉。memory.llm/eval 默认都 OFF，故默认 economy 只影响主动开启者。**box 当前 pin 了 `deepseek/deepseek-v4-flash`** → 默认改动不影响 box，要用 economy 需删 pin 或显式设 `model: economy`；box 旧 env `HELM_INTERNAL_LLM_THROUGH_GATEWAY=1` 部署后变成无害死变量（可删可留）。本 PR**未做**：启动期 JSON-capability 校验、成本可观测（按用户"只做技术实现"裁掉，列为后续）。
+- **验证**：TDD 红→绿；self-http 1 新例（lane 名不被加前缀、裸模型仍加前缀）+ memory-schema 改 2 例（默认 economy / 非法 knob 仍 fail-closed）；gateway+shared+core memory/config **1486 测**绿、typecheck（4 项目）/biome 清。分支 `feat/internal-llm-lane-support`，待发。
+
 ## 2026-06-20 · observer 任务合并竞态致"运行期到达的消息"丢失（docs/08 Phase 2；原则 3）
 
 - **背景/线上实证（box v0.21.9）**："我喜欢的数字是42"仍偶发没记下。铁证：`memory_messages=5` 但 `facts=0/obs=0`，且 `memory.llm.completed task:facts`×2（含 `eager_facts_retry`）**非 fallback**→模型/schema 都正常。**根因不是 prompt 也不是模型，是 observer 任务合并竞态**：observer job 在 claim 时 `listMessages` **一次性快照**；"42"那条在前一个（打招呼请求的）observer job **running 期间**才落库，其 enqueue 被开放任务唯一索引 `(type,scope) WHERE status IN (pending,running)` **合并进那个已拍完快照的 running job**（`inject.assembled` 对两请求返回同一 `observer_job_id` 为证）→ job 完成时从未重读→"42"永不被挖；无后续请求→无新 job。合并只在前一个 job 还 **pending** 时安全；一旦 **running** 新轮即静默丢失，仅 idle-flush（~1h，更有损的 compaction→reflector 路径）兜底。
@@ -24,17 +33,13 @@
 - **验证**：TDD 红→绿；observer 3 新例（user-only / 空重试 / 非空不重试）+ self-http 4 新例（loopback URL/header/x-memory-mode / 裸模型前缀 / 非 2xx 抛）+ memory-llm 整合；typecheck（4 项目）+ biome lint 清、memory+classify+self-http **268 测**绿。PR #339 → v0.21.8 已部署 + box 置 `HELM_INTERNAL_LLM_THROUGH_GATEWAY=1`，端到端实证内部 deepseek 调用挂在 `k_internal` 名下、payload 含记忆提示词。
 - **续修（用户指出的删除 footgun）**：`k_internal` 原是普通 keystore 行——运营者在 admin 删它→自调用鉴权失败→记忆/eval 静默 fail-open 到确定性 stub（到下次重启 re-mint 才恢复）。修：① 抽 `apps/gateway/src/internal-key.ts` 的 `INTERNAL_API_KEY_ID` 常量（server 复用），admin `DELETE /keys/:id` 守卫该 id→403「internal system key cannot be revoked or deleted」（软删+purge 两路都挡；启动 re-mint 走 keyStore 直连不受影响、仍自愈）；② **admin Keys 页对 `k_internal` 行隐藏 Edit/Revoke/Delete，只留 Details**（用户要求直接禁用按钮，不止后端 403）。admin route 2 新测（403 + 行保留）+ admin SPA 1 新测（内部 key 行只剩 Details）。分支 `fix/protect-internal-key`，待发 v0.21.9。
 
-## 2026-06-20 · eager 事实抽取 `insertFactsReconciled` 未绑定 `this`（v0.21.6 暴露的潜伏 bug）（docs/08/12；原则 3）
-
-- **背景/线上实证**：v0.21.6 部署后用户在 Mimi 说「我家猫咪叫可乐，你记下来」仍没记下。线上日志铁证：`memory.observer.eager_facts_failed thread:019ee3dd error:"Cannot read properties of undefined (reading 'db')"`。根因：`observer.ts` 的 `maybeEagerExtractFacts` 把 store 方法解构成变量后**裸调用**——`const insert = deps.memoryStore.insertFactsReconciled; … await insert({…})`——丢了 `this`，于是 sqlite 适配器里的 `this.db.$sqlite` 抛 "reading 'db'"。eager 路径 fail-open，所以表现为**静默不写**。**为何此前没暴露**：上一条裸数组 schema bug 把数组拒了、路径走不到 `insert(...)`；schema 一修通，这个潜伏 bug 立刻顶出来。**为何单测没抓到**：假 store 的 `insertFactsReconciled` 是不依赖 `this` 的 `vi.fn`。
-- **决定**：改为 `insert.call(deps.memoryStore, {…})`，对齐 `idle-flush.ts:52` / `decay-trigger.ts:47` 既有的 `.call(deps.memoryStore, …)` 模式（这两处是仅有的另两个解构-optional-方法点，均已正确绑定；Codex 复核确认 observer 是唯一裸调）。
-- **验证**：TDD 红→绿，新增 `this`-敏感回归测试（store 方法读 `this.__isStore`，裸调时抛错被 fail-open 吞→断言写入未发生）；observer 21 测 + `packages/core/src/memory` 255 测绿、typecheck/biome lint 清。配套产出 `docs/memory-review-2026-06-20.md`（全模块数据流图 + 本轮 6 个 bug 账本 + 过度设计评估）。分支 `fix/eager-facts-unbound-insert`，待发 v0.21.7。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-20 · eager 事实抽取 `insertFactsReconciled` 未绑定 `this`（v0.21.6 潜伏 bug）（docs/08/12；原则 3）：`observer.ts` 的 `maybeEagerExtractFacts` 把 store 方法解构后**裸调用** `const insert=deps.memoryStore.insertFactsReconciled; await insert({…})`→丢 `this`→sqlite 适配器 `this.db.$sqlite` 抛 "reading 'db'"→eager fail-open 静默不写。裸数组 schema bug 一修通它立刻顶出（之前路径走不到 insert）；假 store 的 vi.fn 不依赖 this 故单测没抓到。修：`insert.call(deps.memoryStore, {…})`，对齐 idle-flush/decay-trigger 既有 `.call` 模式（observer 是唯一裸调）。`this`-敏感回归测试 + observer 21/memory 255 测绿。配套 `docs/memory-review-2026-06-20.md`（数据流图 + 6 bug 账本）。PR #337→v0.21.7。
 
 ### 2026-06-20 · eager/reflector 事实抽取被严格 schema 静默吞掉（deepseek 裸数组）（docs/salient-fact-memory-spec；原则 2/3）：`deepseek-v4-flash` 事实抽取 temperature:0 仍非确定性返**裸数组** `[...]` 而非 `{facts:[...]}`，`RawFactsOutputSchema`/`FactsOutputSchema` 只认对象信封→`callJsonModel` 静默回退 `{facts:[]}`→fact 永不落库（reflection 因回退非空才幸存）。修：`coerceFactsEnvelope` 经 `z.preprocess` 把顶层数组包成 `{facts:array}`（tolerant passthrough，镜像 codex role/effort）+ `parseJsonObject` 裸数组打捞；无 schema/无迁移。同 PR 另带 Gemini 原生直通注入记忆 + fact 复活刷新 scope（账号全局 hash 跨 project 重述复活旧 scope 致 inject 读不到）。memory-llm 18 + memory 247 测绿。PR #335→v0.21.6 已部署。
 

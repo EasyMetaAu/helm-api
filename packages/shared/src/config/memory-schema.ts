@@ -179,15 +179,15 @@ export const MemoryLlmSchema = z
     max_tokens: MemoryLlmMaxTokensSchema.prefault({}),
   })
   .strict()
-  .superRefine((cfg, ctx) => {
-    if (cfg.enabled === true && cfg.model === undefined) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["model"],
-        message: "memory.llm.model is required when memory.llm.enabled is true",
-      });
-    }
-  });
+  .transform((cfg) =>
+    // Default the internal memory model to the `economy` LANE when enabled but unset
+    // (per-task observation/reflection/facts inherit it). A configured value is honored
+    // verbatim and may be EITHER a lane name (e.g. "economy"/"balanced", routed through
+    // the gateway's lane-as-model fallback chain) OR a provider/model alias (e.g.
+    // "deepseek/deepseek-v4-flash"). Internal LLM always routes through helm's own /v1
+    // gateway, so a lane name reaches the lane-as-model router and expands its chain.
+    cfg.enabled === true && cfg.model === undefined ? { ...cfg, model: "economy" } : cfg,
+  );
 
 // The `config.memory` subtree root. `compaction` carries OPTIONAL trigger
 // overrides (above); everything else about compaction is the gateway's internal

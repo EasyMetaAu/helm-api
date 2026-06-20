@@ -95,12 +95,12 @@ export const ClassifierConfigSchema = z.object({
     momentum: {},
   }),
   // prefault with the default model: the eval schema requires `model` (an enabled
-  // eval with no model is a lie), so an omitted block must still carry one to
-  // parse through inner defaults. enabled stays false regardless. The eval client
-  // sends this id DIRECTLY on the wire to the primary provider (bypassing the
-  // registry), so it MUST be a bare upstream id the primary accepts — `deepseek-v4-
-  // flash` (official DeepSeek), matching config/classifier.yaml + pricing.yaml.
-  eval: ClassifierEvalConfigSchema.prefault({ model: "deepseek-v4-flash" }),
+  // eval with no model is a lie), so an omitted block must still carry one to parse
+  // through inner defaults. enabled stays false regardless. The default is the
+  // `economy` LANE — internal LLM always routes through helm's own /v1 gateway, so the
+  // lane-as-model router expands its fallback chain. A configured value may be a lane
+  // name OR a bare upstream id (e.g. "deepseek-v4-flash") routed as an explicit model.
+  eval: ClassifierEvalConfigSchema.prefault({ model: "economy" }),
 });
 
 // Strict full-replace variant for the admin PUT /admin/api/classifier endpoint.

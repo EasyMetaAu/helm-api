@@ -62,6 +62,29 @@ describe("createSelfHttpClient", () => {
     );
   });
 
+  it("does NOT prefix a bare LANE name — forwards it verbatim so /v1 routes it as an explicit lane", async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => fakeResponse(true, {}));
+    const client = createSelfHttpClient({
+      baseUrl: "http://127.0.0.1:8080",
+      apiKey: "k",
+      providerPrefix: "deepseek",
+      // A configured value that is a known LANE must reach the router as the lane name,
+      // NOT be mangled into "deepseek/<lane>" (which the primary provider would reject).
+      isLane: (m) => m === "economy" || m === "balanced",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    // bare LANE → verbatim (gateway lane-as-model routing expands its chain)
+    await client.chatCompletion({ model: "economy", messages: [] });
+    expect(JSON.parse((fetchImpl.mock.calls[0]?.[1] as RequestInit).body as string).model).toBe(
+      "economy",
+    );
+    // bare NON-lane model → still prefixed to a routable explicit alias
+    await client.chatCompletion({ model: "deepseek-v4-flash", messages: [] });
+    expect(JSON.parse((fetchImpl.mock.calls[1]?.[1] as RequestInit).body as string).model).toBe(
+      "deepseek/deepseek-v4-flash",
+    );
+  });
+
   it("throws on non-2xx so the caller's fail-open fallback fires", async () => {
     const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) =>
       fakeResponse(false, { error: "boom" }, 500),

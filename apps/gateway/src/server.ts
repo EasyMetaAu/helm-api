@@ -1096,41 +1096,40 @@ export async function buildServer(
     log: (line) => logger.log("warn", "bootstrap.root_key", { line }),
   });
 
-  // Internal LLM observability (opt-in via HELM_INTERNAL_LLM_THROUGH_GATEWAY=1): route
-  // memory + Layer-2 eval LLM calls BACK THROUGH helm's own /v1 gateway so they appear in
-  // /admin/requests with full request/response payloads (otherwise they call the provider
-  // directly and are invisible). Mint a dedicated internal key (fixed id k_internal, re-
-  // minted each boot since the plaintext is unrecoverable) and hold its plaintext ONLY in-
-  // process. role:user + allow_custom_model is the minimal privilege (explicit-model
-  // passthrough); memory_mode:off prevents the self-call from being observed. Fail-open: a
-  // mint failure leaves routing OFF (direct provider calls, byte-identical to today).
-  const routeInternalThroughGateway = process.env.HELM_INTERNAL_LLM_THROUGH_GATEWAY === "1";
+  // Internal LLM routing (ALWAYS ON): route memory + Layer-2 eval LLM calls BACK THROUGH
+  // helm's own /v1 gateway so they (a) appear in /admin/requests with full request/response
+  // payloads and (b) can name a LANE as their model — the /v1 lane-as-model router expands
+  // the lane's fallback chain, which a direct provider call cannot. Mint a dedicated
+  // internal key (fixed id k_internal, re-minted each boot since the plaintext is
+  // unrecoverable) and hold its plaintext ONLY in-process. role:user + allow_custom_model
+  // is the minimal privilege (explicit model/lane passthrough); memory_mode:off prevents
+  // the self-call from being observed. Fail-open: a mint failure leaves selfHttpClient null
+  // → direct provider calls (byte-identical to the pre-self-http path), so a broken key
+  // store degrades internal LLM but never blocks boot.
   let internalApiKey: string | null = null;
-  if (routeInternalThroughGateway) {
-    try {
-      if ((await keyStore.list()).some((k) => k.key_id === INTERNAL_API_KEY_ID)) {
-        await keyStore.disable(INTERNAL_API_KEY_ID);
-        await keyStore.deleteKey(INTERNAL_API_KEY_ID);
-      }
-      const k = generateKey();
-      await keyStore.createKey({
-        keyId: INTERNAL_API_KEY_ID,
-        hash: k.hash,
-        prefix: k.prefix,
-        accountId: "default",
-        role: "user",
-        name: "internal-llm",
-        allowCustomModel: true,
-        memoryMode: "off",
-        memoryThreadSource: "header",
-      });
-      internalApiKey = k.plaintext;
-      logger.log("info", "internal_llm.key_minted", { key_id: INTERNAL_API_KEY_ID });
-    } catch (err) {
-      logger.log("warn", "internal_llm.key_mint_failed", {
-        error: err instanceof Error ? err.message : String(err),
-      });
+  try {
+    if ((await keyStore.list()).some((k) => k.key_id === INTERNAL_API_KEY_ID)) {
+      await keyStore.disable(INTERNAL_API_KEY_ID);
+      await keyStore.deleteKey(INTERNAL_API_KEY_ID);
     }
+    const k = generateKey();
+    await keyStore.createKey({
+      keyId: INTERNAL_API_KEY_ID,
+      hash: k.hash,
+      prefix: k.prefix,
+      accountId: "default",
+      role: "user",
+      name: "internal-llm",
+      allowCustomModel: true,
+      memoryMode: "off",
+      memoryThreadSource: "header",
+    });
+    internalApiKey = k.plaintext;
+    logger.log("info", "internal_llm.key_minted", { key_id: INTERNAL_API_KEY_ID });
+  } catch (err) {
+    logger.log("warn", "internal_llm.key_mint_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   // Provider(s): the configured upstreams (providers-multi). The PRIMARY provider
@@ -1495,11 +1494,16 @@ export async function buildServer(
   // explicit alias ("deepseek/deepseek-v4-flash"); memory's already-prefixed model is
   // left unchanged. Loopback only (never config.server.host, which may be 0.0.0.0).
   const selfHttpClient =
-    routeInternalThroughGateway && internalApiKey !== null
+    internalApiKey !== null
       ? createSelfHttpClient({
           baseUrl: `http://127.0.0.1:${config.server.port}`,
           apiKey: internalApiKey,
           providerPrefix: first.name,
+          // Live lane lookup: a configured internal model (memory / eval) may be a LANE
+          // name (e.g. "economy") — forward it verbatim so /v1 routes it as an explicit
+          // lane instead of mangling it into "${first.name}/economy". Reads the current
+          // `lanes` binding so an admin lane edit is reflected without a rebuild.
+          isLane: (m) => Object.hasOwn(lanes, m),
         })
       : null;
   const classify = buildClassifyAdapter({
