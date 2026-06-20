@@ -56,6 +56,10 @@ function makeDeps(store: MemoryStore, overrides: Partial<MemoryWorkerDeps> = {})
     memoryStore: store,
     batchSize: 10,
     intervalMs: 1000,
+    // Quiet window before a wake-triggered drain (debounce). Default to the
+    // interval so existing interval-only tests never see a wake fire; the wake
+    // tests override it explicitly.
+    coalesceMs: 1000,
     now: () => Date.now(),
     log: vi.fn(),
     runObserver: vi.fn(async () => OBS_OK),
@@ -290,5 +294,112 @@ describe("startMemoryWorker", () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(claimSpy.mock.calls.length).toBe(calls);
+  });
+});
+
+// wake() — the event-driven, debounced off-interval drain. The request path calls
+// it after a memory observe settles so a just-stated fact forms in ~coalesceMs
+// instead of waiting up to a full interval. It is a TRAILING-EDGE debounce: each
+// wake re-arms the window, so a burst of turns coalesces into ONE drain (the open
+// observer job dedupes their messages) — preserving the batching that keeps the
+// observer's LLM-call count down. The interval timer stays the backstop/maxWait.
+describe("startMemoryWorker wake()", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  // A long interval so ONLY wake() can drive a drain in these tests (the interval
+  // backstop is verified separately by the describe above).
+  const WAKE_DEPS = { coalesceMs: 8000, intervalMs: 60_000 } as const;
+
+  it("debounces the drain by coalesceMs (no drain before the window elapses)", async () => {
+    const { store } = makeStore([
+      { jobId: "j1", type: "observer", scope: { accountId: "a", threadId: "t1" } },
+    ]);
+    const claimSpy = store.claimPendingJobs as ReturnType<typeof vi.fn>;
+    const runObserver = vi.fn(async (): Promise<ObserverResult> => OBS_NOOP);
+    const handle = startMemoryWorker(makeDeps(store, { ...WAKE_DEPS, runObserver }));
+
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(5000); // still inside the 8s window
+    expect(claimSpy).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(3000); // window (8s) elapses
+    expect(claimSpy).toHaveBeenCalledTimes(1);
+    expect(runObserver).toHaveBeenCalledWith({ jobId: "j1", accountId: "a", threadId: "t1" });
+    handle.stop();
+  });
+
+  it("coalesces a burst of wakes into a single drain (trailing-edge reset)", async () => {
+    const { store } = makeStore([
+      { jobId: "j1", type: "observer", scope: { accountId: "a", threadId: "t1" } },
+    ]);
+    const claimSpy = store.claimPendingJobs as ReturnType<typeof vi.fn>;
+    const handle = startMemoryWorker(makeDeps(store, WAKE_DEPS));
+
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(5000);
+    handle.wake(); // re-arms — the earlier 8s timer is cancelled
+    await vi.advanceTimersByTimeAsync(5000); // 5s < 8s since the last wake
+    expect(claimSpy).not.toHaveBeenCalled();
+    handle.wake(); // re-arms again
+    await vi.advanceTimersByTimeAsync(8000); // window elapses after the LAST wake
+
+    expect(claimSpy).toHaveBeenCalledTimes(1); // three wakes → ONE drain
+    handle.stop();
+  });
+
+  it("a wake-triggered drain does NOT run the onTick housekeeping (only the interval does)", async () => {
+    const { store } = makeStore([]);
+    const onTick = vi.fn(async () => {});
+    const handle = startMemoryWorker(makeDeps(store, { ...WAKE_DEPS, onTick }));
+
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(8000);
+
+    expect(store.claimPendingJobs).toHaveBeenCalledTimes(1); // it DID drain
+    expect(onTick).not.toHaveBeenCalled(); // but skipped the heavy housekeeping
+    handle.stop();
+  });
+
+  it("a wake-triggered drain is fail-open (a throwing job is marked failed, never an unhandled throw)", async () => {
+    const { store, jobUpdates } = makeStore([
+      { jobId: "j1", type: "observer", scope: { accountId: "a", threadId: "t1" } },
+    ]);
+    const runObserver = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    const handle = startMemoryWorker(makeDeps(store, { ...WAKE_DEPS, runObserver }));
+
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(8000);
+
+    expect(jobUpdates).toContainEqual({ jobId: "j1", status: "failed" });
+    handle.stop();
+  });
+
+  it("stop() cancels a pending wake (no drain fires after stop)", async () => {
+    const { store } = makeStore([]);
+    const claimSpy = store.claimPendingJobs as ReturnType<typeof vi.fn>;
+    const handle = startMemoryWorker(makeDeps(store, WAKE_DEPS));
+
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(3000); // wake armed but window not elapsed
+    handle.stop();
+    await vi.advanceTimersByTimeAsync(60_000); // past both the window and the interval
+
+    expect(claimSpy).not.toHaveBeenCalled();
+  });
+
+  it("the interval still drains even when wake() is never called (backstop intact)", async () => {
+    const { store } = makeStore([
+      { jobId: "j1", type: "observer", scope: { accountId: "a", threadId: "t1" } },
+    ]);
+    const claimSpy = store.claimPendingJobs as ReturnType<typeof vi.fn>;
+    const handle = startMemoryWorker(makeDeps(store, WAKE_DEPS));
+
+    await vi.advanceTimersByTimeAsync(60_000); // no wake — the interval backstop fires
+
+    expect(claimSpy).toHaveBeenCalled();
+    handle.stop();
   });
 });

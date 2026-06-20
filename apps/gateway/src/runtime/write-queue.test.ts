@@ -223,4 +223,47 @@ describe("createWriteQueue", () => {
     await q.stop();
     expect(sink.inserts).toHaveLength(1);
   });
+
+  it("calls onTaskDrain after each task settles (the memory-worker wake trigger)", async () => {
+    // The composition root wires onTaskDrain to memoryWorker.wake(): a memory observe
+    // settling here is what schedules the debounced drain so a just-stated fact forms
+    // in ~coalesceMs instead of waiting a full interval.
+    const sink = fakeSink();
+    let drains = 0;
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      onTaskDrain: () => {
+        drains++;
+      },
+    });
+    q.enqueueTask(async () => {});
+    q.enqueueTask(async () => {});
+    await q.flush();
+    expect(drains).toBe(2); // one per settled task (inbound + outbound observe)
+  });
+
+  it("is fail-open if onTaskDrain throws: the task chain is not poisoned", async () => {
+    const sink = fakeSink();
+    const logs: string[] = [];
+    const ran: string[] = [];
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: (m) => logs.push(m),
+      flushIntervalMs: 10_000,
+      onTaskDrain: () => {
+        throw new Error("wake boom");
+      },
+    });
+    q.enqueueTask(async () => {
+      ran.push("first");
+    });
+    q.enqueueTask(async () => {
+      ran.push("second");
+    });
+    await expect(q.flush()).resolves.toBeUndefined();
+    expect(ran).toEqual(["first", "second"]); // a throwing wake never stalls observe
+    expect(logs.some((l) => l.includes("on_task_drain"))).toBe(true);
+  });
 });

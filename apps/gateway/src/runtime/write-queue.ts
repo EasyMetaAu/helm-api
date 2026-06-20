@@ -19,6 +19,12 @@ export interface WriteQueueDeps {
   // the oldest buffered write is dropped (logged) so a write stall can never grow
   // the heap without bound. Default 10_000.
   maxDepth?: number;
+  // Optional hook fired AFTER each enqueued task settles (success or failure). The
+  // composition root wires this to memoryWorker.wake() so a memory observe landing
+  // here schedules the debounced drain — request-driven memory formation without
+  // putting the worker on the request's critical path. Fail-open: a throw is logged,
+  // never allowed to poison the task chain.
+  onTaskDrain?: () => void;
 }
 
 export interface WriteQueue {
@@ -184,6 +190,15 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
           log("writequeue.task_failed");
         } finally {
           pendingTasks--;
+          // Fire the post-task hook (memory-worker wake). Fail-open: a throwing hook
+          // must never poison the FIFO chain that keeps inbound-before-outbound.
+          if (deps.onTaskDrain !== undefined) {
+            try {
+              deps.onTaskDrain();
+            } catch {
+              log("writequeue.on_task_drain_failed");
+            }
+          }
         }
       });
     },
