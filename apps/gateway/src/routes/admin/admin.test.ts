@@ -798,6 +798,41 @@ describe("admin.api keys", () => {
     expect(res.status).toBe(404);
   });
 
+  it("DELETE refuses to revoke the internal system key (k_internal) with 403", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await deps.keyStore.createKey({
+      keyId: "k_internal",
+      hash: "h_int",
+      prefix: "helm_live_int",
+      accountId: "default",
+      role: "user",
+      name: "internal-llm",
+      allowCustomModel: true,
+    });
+    const res = await app.request("/admin/api/keys/k_internal", { method: "DELETE" });
+    expect(res.status).toBe(403);
+    // untouched — still active so internal LLM calls keep authenticating.
+    expect(keyStore.rows.find((r) => r.key_id === "k_internal")?.disabled).toBe(false);
+  });
+
+  it("DELETE ?purge=true refuses to delete the internal system key (k_internal) with 403", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await deps.keyStore.createKey({
+      keyId: "k_internal",
+      hash: "h_int",
+      prefix: "helm_live_int",
+      accountId: "default",
+      role: "user",
+      name: "internal-llm",
+      allowCustomModel: true,
+    });
+    const res = await app.request("/admin/api/keys/k_internal?purge=true", { method: "DELETE" });
+    expect(res.status).toBe(403);
+    expect(keyStore.rows.find((r) => r.key_id === "k_internal")).toBeDefined();
+  });
+
   it("GET /keys/:id returns the full redacted record, 404 on unknown", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);

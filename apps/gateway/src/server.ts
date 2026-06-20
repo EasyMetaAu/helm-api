@@ -101,6 +101,7 @@ import type {
 import { ErrorClassSchema, isOAuthPreset, makeHelmError } from "@helm/shared";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
+import { INTERNAL_API_KEY_ID } from "./internal-key.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { createMemoryLlmRuntime, type MemoryModelResolution } from "./memory-llm.js";
 import { createSelfHttpClient } from "./memory-self-http.js";
@@ -1107,13 +1108,13 @@ export async function buildServer(
   let internalApiKey: string | null = null;
   if (routeInternalThroughGateway) {
     try {
-      if ((await keyStore.list()).some((k) => k.key_id === "k_internal")) {
-        await keyStore.disable("k_internal");
-        await keyStore.deleteKey("k_internal");
+      if ((await keyStore.list()).some((k) => k.key_id === INTERNAL_API_KEY_ID)) {
+        await keyStore.disable(INTERNAL_API_KEY_ID);
+        await keyStore.deleteKey(INTERNAL_API_KEY_ID);
       }
       const k = generateKey();
       await keyStore.createKey({
-        keyId: "k_internal",
+        keyId: INTERNAL_API_KEY_ID,
         hash: k.hash,
         prefix: k.prefix,
         accountId: "default",
@@ -1124,7 +1125,7 @@ export async function buildServer(
         memoryThreadSource: "header",
       });
       internalApiKey = k.plaintext;
-      logger.log("info", "internal_llm.key_minted", { key_id: "k_internal" });
+      logger.log("info", "internal_llm.key_minted", { key_id: INTERNAL_API_KEY_ID });
     } catch (err) {
       logger.log("warn", "internal_llm.key_mint_failed", {
         error: err instanceof Error ? err.message : String(err),

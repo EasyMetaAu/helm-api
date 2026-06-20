@@ -1,6 +1,7 @@
 import { CreateKeyRequestSchema, StatsQuerySchema, UpdateKeyRequestSchema } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
+import { INTERNAL_API_KEY_ID } from "../../internal-key.js";
 import type { AdminApiDeps, KeySummary, KeyUsageSummary } from "./deps.js";
 
 // Default usage window for the list column when start/end are omitted: last 24h
@@ -206,6 +207,13 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
   // references key_id as an unlinked column (docs/06).
   app.delete("/admin/api/keys/:id", async (c) => {
     const id = c.req.param("id");
+    // The auto-minted internal LLM key is system-managed (re-minted each startup) and
+    // backs the internal memory/eval self-HTTP calls. Revoking or deleting it would
+    // silently break those calls (they fail-open to the deterministic stub) until the
+    // next restart — so refuse both the soft-revoke and the purge paths.
+    if (id === INTERNAL_API_KEY_ID) {
+      return c.json({ error: "internal system key cannot be revoked or deleted" }, 403);
+    }
     if (c.req.query("purge") === "true") {
       // Gate on the current state: must exist AND be revoked first.
       const existing = (await deps.keyStore.list()).find((r) => r.key_id === id);

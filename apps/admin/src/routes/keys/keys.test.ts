@@ -82,6 +82,19 @@ describe('keys page', () => {
     expect(within(rows[1]).getByText(/unnamed/i)).toBeInTheDocument();
   });
 
+  it('hides Edit/Revoke/Delete on the internal system key (k_internal) — only Details', () => {
+    renderPage([key('k_internal', { name: 'internal-llm' }), key('k1', { name: 'Prod' })]);
+    const rows = screen.getAllByTestId('key-row');
+    // Internal system key (row 0): read-only — Details only, no destructive actions.
+    expect(within(rows[0]).getByRole('link', { name: /details/i })).toBeInTheDocument();
+    expect(within(rows[0]).queryByRole('button', { name: /edit/i })).toBeNull();
+    expect(within(rows[0]).queryByRole('button', { name: /revoke/i })).toBeNull();
+    expect(within(rows[0]).queryByRole('button', { name: /delete/i })).toBeNull();
+    // A normal active key (row 1) still has Edit + Revoke.
+    expect(within(rows[1]).getByRole('button', { name: /edit/i })).toBeInTheDocument();
+    expect(within(rows[1]).getByRole('button', { name: /revoke/i })).toBeInTheDocument();
+  });
+
   it('links each key name to its detail page (/admin/keys/:id)', () => {
     renderPage([key('k1', { name: 'Prod' })]);
     // `base` ('/admin' in prod) resolves to '' in the test env, like the requests
