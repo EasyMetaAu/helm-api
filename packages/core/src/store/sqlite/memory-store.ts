@@ -1234,13 +1234,20 @@ export class SqliteMemoryStore implements MemoryStore {
     return this.getReflectionById({ accountId: input.accountId, id: input.id });
   }
 
-  // Soft-delete a reflection: archive EVERY active version of its scope (not just
-  // the one id). upsertReflection appends versions WITHOUT archiving the old ones,
-  // so a scope can hold several active versions and getReflection returns the
-  // highest; archiving only one id would let injection fall back to the next. Look
-  // the row up to learn its scope, then archive all active versions there →
-  // getReflection(scope) returns null and injection stops. Never a hard DELETE.
-  // false for unknown/cross-tenant id or a scope with no active versions left.
+  // Operator delete — TWO-STAGE on the resolved row's status (docs/13):
+  //   • active  → SOFT delete: archive EVERY active version of its scope (not just
+  //     the one id). upsertReflection appends versions WITHOUT archiving the old
+  //     ones, so a scope can hold several active versions and getReflection returns
+  //     the highest; archiving only one id would let injection fall back to the
+  //     next. Archive all active versions → getReflection(scope) returns null and
+  //     injection stops, but the rows SURVIVE so the operator can still see them.
+  //   • archived → HARD delete: a second delete on an already-archived row purges
+  //     EVERY archived version of that scope. (Previously this returned false →
+  //     the admin "Delete" button 404'd "reflection not found" on archived rows,
+  //     leaving them undeletable.) Purging the whole scope — not just the one id —
+  //     keeps latestPerScope from resurfacing an older archived version as a
+  //     "zombie" row right after the operator deletes the visible one.
+  // false only for an unknown/cross-tenant id (genuine not-found).
   async deleteReflection(input: { accountId: string; id: string }): Promise<boolean> {
     const row = await this.getReflectionById({ accountId: input.accountId, id: input.id });
     if (row === null) return false;
@@ -1250,10 +1257,17 @@ export class SqliteMemoryStore implements MemoryStore {
       ...(row.resourceId !== null ? { resourceId: row.resourceId } : {}),
       ...(row.threadId !== null ? { threadId: row.threadId } : {}),
     };
+    if (row.status === "active") {
+      const res = this.db
+        .update(memoryReflections)
+        .set({ status: "archived" })
+        .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")))
+        .run();
+      return res.changes > 0;
+    }
     const res = this.db
-      .update(memoryReflections)
-      .set({ status: "archived" })
-      .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")))
+      .delete(memoryReflections)
+      .where(and(reflectionScopeWhere(scope), ne(memoryReflections.status, "active")))
       .run();
     return res.changes > 0;
   }

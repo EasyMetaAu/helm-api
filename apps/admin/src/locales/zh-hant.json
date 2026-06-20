@@ -523,6 +523,7 @@
   "Remove model": "移除模型",
   "Remove this fact from memory? It is soft-deleted (pruned) — the gateway stops using it.": "要從記憶中移除此事實嗎？它會被軟刪除（修剪）——閘道將停止使用它。",
   "Remove this reflection? It is soft-deleted (archived) — the gateway stops injecting it.": "要移除此反思嗎？它會被軟刪除（封存）——閘道將停止注入它。",
+  "This reflection is already archived. Deleting it now removes it permanently and cannot be undone.": "此反思已封存。現在刪除將永久移除它，且無法復原。",
   "req": "次",
   "Request": "請求",
   "Request (from client)": "請求（來自用戶端）",

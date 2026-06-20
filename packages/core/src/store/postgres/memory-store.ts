@@ -1139,6 +1139,12 @@ export class PgMemoryStore implements MemoryStore {
   // Archive EVERY active version of the reflection's scope (pg mirror) — see the
   // sqlite adapter: archiving one id alone would let getReflection fall back to a
   // sibling active version, so injection would not actually stop.
+  // Two-stage operator delete (pg mirror of the sqlite adapter — same contract):
+  // active row → SOFT archive every active version of the scope (rows survive);
+  // already-archived row → HARD delete every archived version of the scope (a
+  // second delete purges; this is what makes an archived row deletable from the
+  // admin UI instead of 404'ing "reflection not found"). false only for an
+  // unknown/cross-tenant id. See the sqlite comment for the full rationale.
   async deleteReflection(input: { accountId: string; id: string }): Promise<boolean> {
     const row = await this.getReflectionById({ accountId: input.accountId, id: input.id });
     if (row === null) return false;
@@ -1148,12 +1154,19 @@ export class PgMemoryStore implements MemoryStore {
       ...(row.resourceId !== null ? { resourceId: row.resourceId } : {}),
       ...(row.threadId !== null ? { threadId: row.threadId } : {}),
     };
-    const archived = await this.db
-      .update(memoryReflections)
-      .set({ status: "archived" })
-      .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")))
+    if (row.status === "active") {
+      const archived = await this.db
+        .update(memoryReflections)
+        .set({ status: "archived" })
+        .where(and(reflectionScopeWhere(scope), eq(memoryReflections.status, "active")))
+        .returning();
+      return archived.length > 0;
+    }
+    const purged = await this.db
+      .delete(memoryReflections)
+      .where(and(reflectionScopeWhere(scope), ne(memoryReflections.status, "active")))
       .returning();
-    return archived.length > 0;
+    return purged.length > 0;
   }
 
   // docs/12 P7 — the retention HARD-DELETE (pg mirror of the sqlite adapter; same

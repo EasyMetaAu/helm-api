@@ -907,9 +907,13 @@ export interface MemoryStore {
     now: Date;
   }): Promise<Reflection | null>;
 
-  // Soft-delete a reflection: status='archived' (so getReflection(scope) returns
-  // null and it stops being injected). Never a hard DELETE. false for
-  // unknown/cross-tenant/already-archived.
+  // Operator delete, two-stage on the row's status: an ACTIVE row is soft-deleted
+  // (status='archived' for every active version of its scope → getReflection(scope)
+  // returns null and it stops being injected, but the rows survive); a second
+  // delete on an ALREADY-ARCHIVED row hard-purges every archived version of that
+  // scope. The hard delete is operator-initiated only — the automatic forgetting
+  // pipeline still never hard-deletes reflections (docs/12). false only for an
+  // unknown/cross-tenant id.
   deleteReflection?(input: { accountId: string; id: string }): Promise<boolean>;
 }
 

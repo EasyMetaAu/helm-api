@@ -390,7 +390,7 @@ describe("SqliteMemoryStore reflection management (docs/13)", () => {
     ).toBeNull();
   });
 
-  it("deleteReflection archives so getReflection returns null", async () => {
+  it("deleteReflection is two-stage: active→archive (soft), archived→purge (hard)", async () => {
     const { store } = newStore(NOW);
     const id = await addReflection(store, {
       accountId: "a",
@@ -400,9 +400,52 @@ describe("SqliteMemoryStore reflection management (docs/13)", () => {
       updatedAt: NOW,
     });
     expect(await store.getReflection({ accountId: "a", projectId: "p" })).not.toBeNull();
+    // Stage 1 — active row: soft delete. Stops injection but the row SURVIVES
+    // (status='archived') so the operator can still see/restore it.
     expect(await store.deleteReflection({ accountId: "a", id })).toBe(true);
     expect(await store.getReflection({ accountId: "a", projectId: "p" })).toBeNull();
-    expect(await store.deleteReflection({ accountId: "a", id })).toBe(false); // already archived
+    expect(await store.getReflectionById({ accountId: "a", id })).not.toBeNull();
+    expect((await store.getReflectionById({ accountId: "a", id }))?.status).toBe("archived");
+    // Stage 2 — already-archived row: a second delete HARD-purges it (the bug:
+    // it used to 404 "reflection not found", leaving an undeletable archived row).
+    expect(await store.deleteReflection({ accountId: "a", id })).toBe(true);
+    expect(await store.getReflectionById({ accountId: "a", id })).toBeNull();
+    // Stage 3 — genuinely gone now → false (real not-found).
+    expect(await store.deleteReflection({ accountId: "a", id })).toBe(false);
+  });
+
+  it("hard-purge of an archived reflection clears EVERY version of the scope (no zombie resurfaces)", async () => {
+    const { store } = newStore(NOW);
+    // Multiple version rows for ONE scope (upsertReflection always appends a row).
+    const v1 = await addReflection(store, {
+      accountId: "a",
+      projectId: "p",
+      text: "v1",
+      version: 1,
+      updatedAt: new Date("2026-06-01"),
+    });
+    const v2 = await addReflection(store, {
+      accountId: "a",
+      projectId: "p",
+      text: "v2",
+      version: 2,
+      updatedAt: new Date("2026-06-02"),
+    });
+    // Soft delete archives all active versions of the scope.
+    expect(await store.deleteReflection({ accountId: "a", id: v2 })).toBe(true);
+    // Hard purge via the latest archived id must drop EVERY archived version,
+    // else latestPerScope would resurface v1 in the admin list after "delete".
+    expect(await store.deleteReflection({ accountId: "a", id: v2 })).toBe(true);
+    expect(await store.getReflectionById({ accountId: "a", id: v1 })).toBeNull();
+    expect(await store.getReflectionById({ accountId: "a", id: v2 })).toBeNull();
+    const list = await store.listReflections({
+      accountId: "a",
+      status: "all",
+      includeAllVersions: true,
+      limit: 10,
+      offset: 0,
+    });
+    expect(list.total).toBe(0);
   });
 
   it("deleteReflection archives EVERY active version of the scope (not just one id)", async () => {
