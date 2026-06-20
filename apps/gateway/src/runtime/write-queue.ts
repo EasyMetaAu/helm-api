@@ -34,7 +34,10 @@ export interface WriteQueue {
   enqueuePayload(input: InsertPayloadInput): void;
   // Defer a fail-open side-effect (memory observe, retention prune, …). Tasks run
   // sequentially in FIFO order, so callers can rely on inbound-before-outbound.
-  enqueueTask(task: () => Promise<void>): void;
+  // `wakeOnSettle` fires onTaskDrain after THIS task settles — set it only on the
+  // turn's FINAL write (the outbound observe) so the memory worker is woken once the
+  // whole turn is persisted, never mid-turn after the inbound-only write.
+  enqueueTask(task: () => Promise<void>, opts?: { wakeOnSettle?: boolean }): void;
   // Drain everything currently buffered/queued and resolve when the DB has it.
   flush(): Promise<void>;
   // Stop the idle timer and flush once. Idempotent. For graceful shutdown.
@@ -176,12 +179,13 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
       else scheduleTimer();
     },
 
-    enqueueTask(task: () => Promise<void>): void {
+    enqueueTask(task: () => Promise<void>, opts?: { wakeOnSettle?: boolean }): void {
       if (stopped) return;
       if (pendingTasks >= maxDepth) {
         log("writequeue.overflow");
         return;
       }
+      const wakeOnSettle = opts?.wakeOnSettle === true;
       pendingTasks++;
       taskChain = taskChain.then(async () => {
         try {
@@ -190,9 +194,11 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
           log("writequeue.task_failed");
         } finally {
           pendingTasks--;
-          // Fire the post-task hook (memory-worker wake). Fail-open: a throwing hook
-          // must never poison the FIFO chain that keeps inbound-before-outbound.
-          if (deps.onTaskDrain !== undefined) {
+          // Fire the post-task hook (memory-worker wake) ONLY for tasks that opted in
+          // — the turn's final/outbound observe. Waking after the inbound-only write
+          // could drain the observer job before the assistant turn is persisted.
+          // Fail-open: a throwing hook must never poison the FIFO chain.
+          if (wakeOnSettle && deps.onTaskDrain !== undefined) {
             try {
               deps.onTaskDrain();
             } catch {

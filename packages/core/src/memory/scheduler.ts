@@ -243,9 +243,14 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
   // Trailing-edge debounce timer for wake(): re-armed on every wake, fires one
   // jobs-only drain after coalesceMs of quiet.
   let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+  // Latched by stop(): a wake() arriving afterwards (e.g. a write-queue task that
+  // settles while the queue drains on shutdown — stop() runs before that drain) must
+  // not arm a fresh timer that later claims jobs against an already-closed store.
+  let stopped = false;
 
   return {
     stop() {
+      stopped = true;
       clearInterval(timer);
       if (wakeTimer !== null) {
         clearTimeout(wakeTimer);
@@ -253,6 +258,7 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
       }
     },
     wake() {
+      if (stopped) return;
       if (wakeTimer !== null) clearTimeout(wakeTimer);
       wakeTimer = setTimeout(() => {
         wakeTimer = null;

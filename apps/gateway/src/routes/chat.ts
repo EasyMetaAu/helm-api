@@ -524,11 +524,19 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // wired, else inline await (today). observeInbound/observeOutbound are fail-open
     // inside core. FIFO ordering guarantees inbound (enqueued before route) settles
     // before outbound (enqueued in the finally) for the same thread.
-    const runObserve = async (task: () => Promise<unknown>) => {
+    // `wake` (default true) asks the write queue to nudge the memory worker after this
+    // observe settles. The INBOUND observe passes false: the observer job must not be
+    // drained until the OUTBOUND turn is persisted (else the assistant turn is dropped
+    // from this run). Outbound observes use the default → the worker wakes once the
+    // whole turn has landed.
+    const runObserve = async (task: () => Promise<unknown>, wake = true) => {
       if (deps.writes !== undefined) {
-        deps.writes.enqueueTask(async () => {
-          await task();
-        });
+        deps.writes.enqueueTask(
+          async () => {
+            await task();
+          },
+          { wakeOnSettle: wake },
+        );
         return;
       }
       await task();
@@ -672,7 +680,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // same-turn self-pollution while still capturing the turn for future calls.
     if (deps.memory !== undefined) {
       const memoryObserve = deps.memory.observe;
-      await runObserve(() => observeInbound(memoryObserve, memoryScope, originalMessagesForMemory));
+      await runObserve(
+        () => observeInbound(memoryObserve, memoryScope, originalMessagesForMemory),
+        false, // inbound: do NOT wake — wait for the outbound observe to land the turn
+      );
     }
 
     const result = await deps.route(

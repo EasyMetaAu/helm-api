@@ -402,4 +402,21 @@ describe("startMemoryWorker wake()", () => {
     expect(claimSpy).toHaveBeenCalled();
     handle.stop();
   });
+
+  it("wake() after stop() is a no-op (never arms a drain against a closed store)", async () => {
+    // On graceful shutdown the worker is stopped BEFORE the write queue is drained;
+    // a still-pending observe task then fires onTaskDrain → wake(). That late wake
+    // must not arm a timer that later claims jobs against an already-closed store.
+    const { store } = makeStore([
+      { jobId: "j1", type: "observer", scope: { accountId: "a", threadId: "t1" } },
+    ]);
+    const claimSpy = store.claimPendingJobs as ReturnType<typeof vi.fn>;
+    const handle = startMemoryWorker(makeDeps(store, WAKE_DEPS));
+
+    handle.stop();
+    handle.wake(); // arrives after stop — must be ignored
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(claimSpy).not.toHaveBeenCalled();
+  });
 });
