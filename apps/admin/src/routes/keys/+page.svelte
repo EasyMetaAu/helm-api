@@ -17,6 +17,11 @@
   // consumer of /admin/api/* — it owns no auth logic and persists no credentials.
   let { data }: { data: { keys: ApiKeyView[]; lanes: string[]; usage: KeyUsage[] } } = $props();
 
+  // The auto-minted internal LLM key (server-managed, re-minted each startup, backs the
+  // memory/eval self-HTTP calls). It is read-only here: revoking/deleting/editing it would
+  // break internal LLM calls, so the server refuses (403) and this view hides the actions.
+  const INTERNAL_KEY_ID = 'k_internal';
+
   let keys = $state<ApiKeyView[]>(untrack(() => data.keys));
   const lanes = untrack(() => data.lanes);
 
@@ -285,7 +290,8 @@
                   <div class="text-ink-body">
                     {formatCount(u?.requests ?? 0)}
                     {$t('req')}{#if (u?.error_count ?? 0) > 0}
-                      · <span class="text-rose-600">{formatCount(u?.error_count ?? 0)}
+                      · <span class="text-rose-600"
+                        >{formatCount(u?.error_count ?? 0)}
                         {$t('err')}</span
                       >{/if}
                   </div>
@@ -305,9 +311,11 @@
                 {/if}
               </td>
               <td data-label={$t('Actions')} class="px-3 py-2 lg:text-right">
-                {#if !key.disabled}
-                  <div class="flex justify-end gap-2">
-                    <a class="btn-secondary" href={detailHref(key.key_id)}>{$t('Details')}</a>
+                <div class="flex justify-end gap-2">
+                  <a class="btn-secondary" href={detailHref(key.key_id)}>{$t('Details')}</a>
+                  {#if key.key_id === INTERNAL_KEY_ID}
+                    <!-- system-managed internal key: read-only, no edit/revoke/delete -->
+                  {:else if !key.disabled}
                     <button type="button" class="btn-secondary" onclick={() => startEdit(key)}
                       >{$t('Edit')}</button
                     >
@@ -317,18 +325,15 @@
                       disabled={revoking === key.key_id}
                       onclick={() => askRevoke(key.key_id)}>{$t('Revoke')}</button
                     >
-                  </div>
-                {:else}
-                  <div class="flex justify-end gap-2">
-                    <a class="btn-secondary" href={detailHref(key.key_id)}>{$t('Details')}</a>
+                  {:else}
                     <button
                       type="button"
                       class="btn-danger-outline"
                       disabled={deleting === key.key_id}
                       onclick={() => askDelete(key.key_id)}>{$t('Delete')}</button
                     >
-                  </div>
-                {/if}
+                  {/if}
+                </div>
               </td>
             </tr>
           {/each}
