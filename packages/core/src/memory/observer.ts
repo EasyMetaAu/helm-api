@@ -90,6 +90,75 @@ async function maybeEagerExtractFacts(
   }
 }
 
+// Completion-side re-mining — fixes the open-job COALESCING RACE. An observer job
+// snapshots the thread's messages ONCE at claim time; a turn that arrives WHILE it
+// runs is coalesced by the open-job unique index (`status IN (pending,running)`) into
+// this already-snapshotted running job and otherwise lost — no follow-up runs until
+// idle-flush (~1h later, via the lossier compaction→reflector path), defeating the
+// eager fast-path built for exactly "remember X". After the job is marked done, this
+// re-reads the thread and enqueues a FRESH observer job iff a new USER turn appeared
+// SINCE the snapshot (the worker then reads fresh and mines it).
+//
+// COST LEVER — gate on a new USER message, not "any new message": facts come SOLELY
+// from user turns (the eager extractor filters out assistant/tool noise), so an
+// assistant-only late turn would spawn a follow-up that re-runs the (cheap, nano)
+// extractor over the uncovered set for ZERO new facts. Re-enqueuing only on new user
+// content means we pay an extra extraction exactly when the race actually dropped a
+// fact-bearing turn — never for an assistant reply. Compaction of a late assistant-
+// only turn defers to the next user turn / idle-flush; no fact is ever lost.
+//
+// The gate is "new USER message since snapshot", NOT "uncovered history exists": the
+// eager fact path never advances coverage (it writes facts, not observations), so a
+// coverage-based gate would re-enqueue a short thread on EVERY run forever — the same
+// hot-loop that already afflicts idle-flush on some threads. New-since-snapshot is
+// monotonic: each follow-up advances the frontier, so a burst drains and a quiet
+// thread stops — terminating by construction. FAIL-OPEN: any error is swallowed +
+// logged, and the open-job unique index collapses a concurrent enqueue to ONE lock per
+// thread, so a double-fire can never spawn two observers. idle-flush stays as
+// defense-in-depth.
+async function maybeReenqueueForLateMessages(
+  job: ObserverJob,
+  snapshotMessageIds: Set<string>,
+  deps: ObserverDeps,
+): Promise<void> {
+  try {
+    const current = await deps.memoryStore.listMessages({
+      accountId: job.accountId,
+      threadId: job.threadId,
+    });
+    const lateUserCount = current.reduce(
+      (n, m) => (m.role === "user" && !snapshotMessageIds.has(m.id) ? n + 1 : n),
+      0,
+    );
+    if (lateUserCount === 0) {
+      deps.log("memory.observer.recheck_clean", { thread_id: job.threadId });
+      return;
+    }
+    // A PLAIN observer scope (no trigger) — identical to a writeback / idle-flush
+    // enqueue, so the open-job dedupe collapses them to one lock per thread. Carry
+    // project/resource so the eager fast-path of the follow-up writes the fact at the
+    // cross-thread scope (recallable in a new session).
+    await deps.memoryStore.enqueueJob({
+      type: "observer",
+      scope: {
+        accountId: job.accountId,
+        threadId: job.threadId,
+        ...(job.projectId !== undefined ? { projectId: job.projectId } : {}),
+        ...(job.resourceId !== undefined ? { resourceId: job.resourceId } : {}),
+      },
+    });
+    deps.log("memory.observer.recheck_reenqueued", {
+      thread_id: job.threadId,
+      late_user_message_count: lateUserCount,
+    });
+  } catch (err) {
+    deps.log("memory.observer.recheck_failed", {
+      thread_id: job.threadId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 // Background Observer (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
 // request-path job: the request path only persists raw messages and enqueues an
 // observer job; this function runs LATER, in a background worker, compressing a
@@ -282,6 +351,11 @@ export async function runObserverJob(
       accountId: job.accountId,
       threadId: job.threadId,
     });
+    // The snapshot frontier: the message ids THIS run can see. A turn that lands
+    // after this read — coalesced into this still-running job by the open-job unique
+    // index — is invisible here. The completion re-check compares against this set so
+    // the lost turn gets a fresh job (see maybeReenqueueForLateMessages).
+    const snapshotMessageIds = new Set(all.map((m) => m.id));
     const existing = await deps.memoryStore.listObservations({
       accountId: job.accountId,
       threadId: job.threadId,
@@ -354,6 +428,7 @@ export async function runObserverJob(
       // No compaction this run → mine the uncovered turns for durable facts.
       await maybeEagerExtractFacts(job, all, covered, deps);
       await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
       const lastDecision = decisions.at(-1)?.decision;
       deps.log("memory.observer.noop_compaction_skipped", {
         thread_id: job.threadId,
@@ -373,6 +448,7 @@ export async function runObserverJob(
       // no-compaction run, so the eager fact pass applies.
       await maybeEagerExtractFacts(job, all, covered, deps);
       await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
       deps.log("memory.observer.noop_no_old_messages", { thread_id: job.threadId });
       return { observationId: null, sourceMessageRange: null };
     }
@@ -424,6 +500,7 @@ export async function runObserverJob(
     deps.costSink("observer", estimateObserverTokens(compressed, observationText));
 
     await deps.memoryStore.updateJobStatus(job.jobId, "done");
+    await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
     deps.log("memory.observer.compressed", {
       thread_id: job.threadId,
       observation_id: observationId,
