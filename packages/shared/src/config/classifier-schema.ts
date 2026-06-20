@@ -97,11 +97,9 @@ export const ClassifierConfigSchema = z.object({
   // prefault with the default model: the eval schema requires `model` (an enabled
   // eval with no model is a lie), so an omitted block must still carry one to parse
   // through inner defaults. enabled stays false regardless. The default is the
-  // `economy` LANE — routed through the gateway's lane-as-model fallback chain via the
-  // self-HTTP path (HELM_INTERNAL_LLM_THROUGH_GATEWAY=1). A configured value may be a
-  // lane name OR a bare upstream id (e.g. "deepseek-v4-flash"). NOTE: without self-HTTP
-  // the eval client sends this id DIRECTLY to the primary provider, so a lane value
-  // needs self-HTTP; pin a bare model the primary accepts for non-self-http setups.
+  // `economy` LANE — internal LLM always routes through helm's own /v1 gateway, so the
+  // lane-as-model router expands its fallback chain. A configured value may be a lane
+  // name OR a bare upstream id (e.g. "deepseek-v4-flash") routed as an explicit model.
   eval: ClassifierEvalConfigSchema.prefault({ model: "economy" }),
 });
 

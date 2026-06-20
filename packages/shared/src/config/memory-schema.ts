@@ -184,9 +184,8 @@ export const MemoryLlmSchema = z
     // (per-task observation/reflection/facts inherit it). A configured value is honored
     // verbatim and may be EITHER a lane name (e.g. "economy"/"balanced", routed through
     // the gateway's lane-as-model fallback chain) OR a provider/model alias (e.g.
-    // "deepseek/deepseek-v4-flash"). Internal-LLM lane routing requires the self-HTTP
-    // path (HELM_INTERNAL_LLM_THROUGH_GATEWAY=1); without it a lane value fails open to
-    // the deterministic stub, so non-self-http deployments should pin a provider/model.
+    // "deepseek/deepseek-v4-flash"). Internal LLM always routes through helm's own /v1
+    // gateway, so a lane name reaches the lane-as-model router and expands its chain.
     cfg.enabled === true && cfg.model === undefined ? { ...cfg, model: "economy" } : cfg,
   );
 
