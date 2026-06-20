@@ -2,6 +2,7 @@ import { wrapMemoryReminder } from "@helm/core";
 import { describe, expect, it } from "vitest";
 import {
   appendMemoryToAnthropicBody,
+  appendMemoryToGeminiBody,
   appendMemoryToResponsesBody,
 } from "./native-memory-inject.js";
 
@@ -156,5 +157,46 @@ describe("appendMemoryToResponsesBody", () => {
     expect(input[1]).toBe(fnCall);
     expect(input[2]).toBe(fnOut);
     expect(input[3]).toEqual({ role: "user", content: REMINDER });
+  });
+});
+
+describe("appendMemoryToGeminiBody", () => {
+  it("appends a trailing reminder turn on `contents` and keeps `systemInstruction` VERBATIM", () => {
+    const systemInstruction = { parts: [{ text: "be terse" }] };
+    const userTurn = { role: "user", parts: [{ text: "hi" }] };
+    const body = { systemInstruction, contents: [userTurn] };
+    const out = appendMemoryToGeminiBody(body, MEMORY);
+    // systemInstruction (the Gemini system-equivalent) is forwarded UNCHANGED (same ref).
+    expect(out.systemInstruction).toBe(systemInstruction);
+    // Memory rides ONE trailing user turn AFTER the conversation.
+    expect(out.contents).toEqual([
+      { role: "user", parts: [{ text: "hi" }] },
+      { role: "user", parts: [{ text: REMINDER }] },
+    ]);
+    // The existing turn is kept by reference, in order.
+    expect((out.contents as unknown[])[0]).toBe(userTurn);
+    // A NEW body + NEW contents array — the input is never mutated.
+    expect(out).not.toBe(body);
+    expect(out.contents).not.toBe(body.contents);
+    expect(body.contents).toHaveLength(1);
+  });
+
+  it("appends the reminder turn even when `contents` is absent (lone turn)", () => {
+    const body = { systemInstruction: { parts: [{ text: "be terse" }] } };
+    const out = appendMemoryToGeminiBody(body, MEMORY);
+    expect(out.contents).toEqual([{ role: "user", parts: [{ text: REMINDER }] }]);
+    expect(out.systemInstruction).toBe(body.systemInstruction);
+  });
+
+  it("preserves model/function turns VERBATIM (additive trailing turn only)", () => {
+    const modelTurn = {
+      role: "model",
+      parts: [{ functionCall: { name: "search", args: { q: "x" } } }],
+    };
+    const body = { contents: [{ role: "user", parts: [{ text: "hi" }] }, modelTurn] };
+    const out = appendMemoryToGeminiBody(body, MEMORY);
+    const contents = out.contents as unknown[];
+    expect(contents[1]).toBe(modelTurn);
+    expect(contents[2]).toEqual({ role: "user", parts: [{ text: REMINDER }] });
   });
 });

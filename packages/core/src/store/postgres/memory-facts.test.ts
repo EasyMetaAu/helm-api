@@ -300,6 +300,52 @@ describe("PgMemoryStore.insertFactsReconciled (resurrect deleted fact on re-inge
     expect(active[0]?.validFrom).toEqual(v2);
   });
 
+  it("RE-SCOPES the resurrected row to the re-ingest scope (account-global hash, new project wins)", async () => {
+    const now = new Date("2026-06-05T00:00:00.000Z");
+    const { store } = await newStore(now);
+    const v1 = new Date("2026-05-01T00:00:00.000Z");
+    const v2 = new Date("2026-06-04T00:00:00.000Z");
+
+    const first = await store.insertFactsReconciled({
+      accountId: "acct-a",
+      scope: { projectId: "p1" },
+      now,
+      facts: [
+        fact({
+          ownerId: "acct-a",
+          subjectKey: "fav-color",
+          contentHash: "h1",
+          validFrom: v1,
+          projectId: "p1",
+        }),
+      ],
+    });
+    const id = first.insertedIds[0] as string;
+    await store.deleteFact({ accountId: "acct-a", id, now });
+
+    // Re-stated under a DIFFERENT project p2 — same content_hash dedup-hits the old
+    // (account-global) row; without re-scoping it would revive under p1 and a p2 inject
+    // would never see it.
+    const again = await store.insertFactsReconciled({
+      accountId: "acct-a",
+      scope: { projectId: "p2" },
+      now,
+      facts: [
+        fact({
+          ownerId: "acct-a",
+          subjectKey: "fav-color",
+          contentHash: "h1",
+          validFrom: v2,
+          projectId: "p2",
+        }),
+      ],
+    });
+    expect(again.resurrectedIds).toEqual([id]);
+
+    expect(await store.listActiveFacts({ accountId: "acct-a", projectId: "p2" })).toHaveLength(1);
+    expect(await store.listActiveFacts({ accountId: "acct-a", projectId: "p1" })).toHaveLength(0);
+  });
+
   it("a resurrected fact supersedes an older still-active same-subject sibling", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store } = await newStore(now);

@@ -35,6 +35,7 @@ import { copyLiteLLMRequestParams, providerRawFromRequest } from "./internal-req
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import {
   appendMemoryToAnthropicBody,
+  appendMemoryToGeminiBody,
   appendMemoryToResponsesBody,
 } from "./native-memory-inject.js";
 import {
@@ -737,6 +738,11 @@ export function createMessagesPipeline(
               : body;
           } else if (protocol === "openai_responses") {
             const body = appendMemoryToResponsesBody(nativeBody, injected.memoryBlock);
+            internal.native_request = isNativePassthroughCarrier(internal.native_request)
+              ? cloneCarrierWithBody(internal.native_request, body)
+              : body;
+          } else if (protocol === "gemini") {
+            const body = appendMemoryToGeminiBody(nativeBody, injected.memoryBlock);
             internal.native_request = isNativePassthroughCarrier(internal.native_request)
               ? cloneCarrierWithBody(internal.native_request, body)
               : body;

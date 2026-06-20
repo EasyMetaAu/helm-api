@@ -51,3 +51,16 @@ export function appendMemoryToResponsesBody(body: Body, memoryBlock: string): Bo
   }
   return { ...body, input: reminderText };
 }
+
+// Gemini: append the memory reminder as a trailing `{ role:"user", parts:[{text}] }`
+// turn on `contents` (the protocol-native conversation field — sibling of the
+// system-equivalent `systemInstruction`, which is kept VERBATIM). Every existing turn
+// rides through by reference; when `contents` is absent the reminder becomes the lone
+// turn. Returns a NEW body — the input is never mutated. Mirrors the Anthropic helper
+// (trailing user turn, system-level field untouched) so memory rides AFTER the cached
+// prefix on the Gemini native-passthrough path too.
+export function appendMemoryToGeminiBody(body: Body, memoryBlock: string): Body {
+  const reminder = { role: "user", parts: [{ text: wrapMemoryReminder(memoryBlock) }] };
+  const contents = Array.isArray(body.contents) ? body.contents : [];
+  return { ...body, contents: [...contents, reminder] };
+}

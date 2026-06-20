@@ -857,9 +857,17 @@ export class SqliteMemoryStore implements MemoryStore {
     const selectByHash = this.db.$sqlite.prepare(
       `SELECT id, status FROM memory_facts WHERE owner_id = ? AND content_hash = ?`,
     );
+    // Re-scope on resurrect (Codex review fix): the (owner_id, content_hash) unique
+    // index is ACCOUNT-GLOBAL, so a fact re-stated under a DIFFERENT project/resource/
+    // thread dedup-hits the old row. Reactivating without re-scoping would revive it at
+    // the STALE scope, and the inject read (scoped by project/resource/thread) would
+    // never surface it — the fact "comes back" but stays invisible. The re-ingest's
+    // scope is authoritative for where the fact should now live, so overwrite the scope
+    // columns too. Same-scope re-statement (the common case) is a no-op rewrite.
     const reactivate = this.db.$sqlite.prepare(
       `UPDATE memory_facts
-          SET status = 'active', expired_at = NULL, invalid_at = NULL, valid_from = ?, updated_at = ?
+          SET status = 'active', expired_at = NULL, invalid_at = NULL, valid_from = ?, updated_at = ?,
+              project_id = ?, resource_id = ?, thread_id = ?
         WHERE id = ?`,
     );
     // The whole batch is atomic: a partial ingest must not leave a fact inserted
@@ -938,7 +946,14 @@ export class SqliteMemoryStore implements MemoryStore {
             existing !== undefined &&
             (existing.status === "pruned" || existing.status === "archived")
           ) {
-            reactivate.run(f.validFrom.getTime(), nowMs, existing.id);
+            reactivate.run(
+              f.validFrom.getTime(),
+              nowMs,
+              projectId,
+              resourceId,
+              threadId,
+              existing.id,
+            );
             resurrectedIds.push(existing.id);
             // The resurrected row is now the subject's live fact — supersede older
             // same-subject siblings exactly as a fresh insert would (id <> its own).
