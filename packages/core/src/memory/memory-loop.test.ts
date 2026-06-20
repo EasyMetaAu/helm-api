@@ -76,6 +76,7 @@ describe("memory background loop (observer → reflector → inject)", () => {
       memoryStore: store,
       batchSize: 10,
       intervalMs: 100,
+      coalesceMs: 50,
       now: () => Date.now(),
       log,
       runObserver: (job) =>
@@ -171,6 +172,7 @@ describe("memory background loop (observer → reflector → inject)", () => {
       memoryStore: store,
       batchSize: 10,
       intervalMs: 100,
+      coalesceMs: 50,
       now: () => Date.now(),
       log,
       runObserver: (job) =>

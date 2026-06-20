@@ -625,11 +625,19 @@ export function createMessagesPipeline(
 } {
   // Run a fail-open memory observe: deferred (FIFO) when a write queue is wired, else
   // inline await (today). FIFO ordering keeps inbound before outbound per thread.
-  const runObserve = async (task: () => Promise<unknown>): Promise<void> => {
+  // `wake` (default true) asks the write queue to nudge the memory worker after this
+  // observe settles. The INBOUND observe passes false: the observer job must not be
+  // drained until the OUTBOUND turn is persisted (else the assistant turn is dropped
+  // from this run). Outbound observes use the default → the worker wakes once the
+  // whole turn has landed.
+  const runObserve = async (task: () => Promise<unknown>, wake = true): Promise<void> => {
     if (writes !== undefined) {
-      writes.enqueueTask(async () => {
-        await task();
-      });
+      writes.enqueueTask(
+        async () => {
+          await task();
+        },
+        { wakeOnSettle: wake },
+      );
       return;
     }
     await task();
@@ -743,8 +751,9 @@ export function createMessagesPipeline(
       // inject. It is write-only and fail-open; delaying it prevents self-pollution.
       if (memory !== undefined) {
         const memoryObserve = memory.observe;
-        await runObserve(() =>
-          observeInbound(memoryObserve, memoryScope, originalMessagesForMemory),
+        await runObserve(
+          () => observeInbound(memoryObserve, memoryScope, originalMessagesForMemory),
+          false, // inbound: do NOT wake — wait for the outbound observe to land the turn
         );
       }
 

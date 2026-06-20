@@ -19,6 +19,15 @@ export interface MemoryWorkerDeps {
   // How many jobs to claim per tick.
   batchSize: number;
   intervalMs: number;
+  // Quiet-window (ms) for wake() — the event-driven, OFF-interval drain the request
+  // path triggers after a memory observe settles. TRAILING-EDGE debounce: each wake
+  // re-arms the window, so a burst of turns coalesces into ONE drain. Because the
+  // open observer job dedupes a thread's turns while it sits pending (memory-store
+  // enqueueJob), waiting coalesceMs before draining MERGES those turns into a single
+  // observer run = a single LLM call — the latency lever that does NOT inflate the
+  // observer's per-turn cost. The intervalMs timer remains the backstop/maxWait, so
+  // worst-case formation latency is still ≤ intervalMs even under continuous activity.
+  coalesceMs: number;
   now: () => number; // epoch ms; injectable for tests
   log: (line: string, meta?: object) => void;
   // Run one observer job. Wired in the composition root to runObserverJob(job, observerDeps).
@@ -42,6 +51,11 @@ export interface MemoryWorkerDeps {
 
 export interface MemoryWorkerHandle {
   stop(): void;
+  // Request-path trigger: schedule a drain after coalesceMs of quiet (debounced).
+  // Coalesced, non-blocking, fail-open — the caller (a write-queue task settle) is
+  // never blocked and a wake can never throw. Does NOT run the onTick housekeeping
+  // (that stays on the interval cadence).
+  wake(): void;
 }
 
 // Process a single claimed job. Dispatch is EXPLICIT per type (observer / reflector /
@@ -139,19 +153,9 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
 }
 
 export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
-  const tick = async (): Promise<void> => {
-    // Per-tick hook (P5 trigger). Runs BEFORE the claim so a decay job enqueued this
-    // tick can be drained the same tick. Guarded: a throw here must never abort the
-    // drain nor stop the timer (fail-open, principle 3).
-    if (deps.onTick !== undefined) {
-      try {
-        await deps.onTick();
-      } catch (err) {
-        deps.log("memory.worker.on_tick_failed", {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+  // Claim + dispatch one batch. The latency-critical path — NO onTick housekeeping
+  // (that is the interval's job). Shared by the interval tick and the wake drain.
+  const drainJobs = async (): Promise<void> => {
     const jobs = await deps.memoryStore.claimPendingJobs(deps.batchSize);
     for (const job of jobs) {
       // Per-job guard: a single failing job must not abort the rest of the batch
@@ -182,6 +186,47 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
     }
   };
 
+  // Reentrancy guard: the interval tick and a wake drain (or two overlapping wakes)
+  // must never run drainJobs concurrently. A trigger that arrives mid-drain sets
+  // `rerun` so the in-flight loop drains once more — a job enqueued during the drain
+  // is never stranded until the next interval. claimPendingJobs is itself an atomic
+  // UPDATE…RETURNING, so this guard is about avoiding wasted overlap, not correctness.
+  let draining = false;
+  let rerun = false;
+  const drainCoalesced = async (): Promise<void> => {
+    if (draining) {
+      rerun = true;
+      return;
+    }
+    draining = true;
+    try {
+      do {
+        rerun = false;
+        await drainJobs();
+      } while (rerun);
+    } finally {
+      draining = false;
+    }
+  };
+
+  const tick = async (): Promise<void> => {
+    // Per-tick hook (P5 trigger). Runs BEFORE the claim so a decay job enqueued this
+    // tick can be drained the same tick. Guarded: a throw here must never abort the
+    // drain nor stop the timer (fail-open, principle 3). DELIBERATELY only on the
+    // interval — wake() skips it so request-driven drains never accelerate the heavy
+    // decay/retention/idle-flush housekeeping.
+    if (deps.onTick !== undefined) {
+      try {
+        await deps.onTick();
+      } catch (err) {
+        deps.log("memory.worker.on_tick_failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    await drainCoalesced();
+  };
+
   const timer = setInterval(() => {
     // Fire-and-forget; tick is fail-open, but guard the promise so a rejection can
     // never become an unhandled rejection on the timer.
@@ -195,9 +240,37 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
   // Do not keep the event loop alive solely for the memory worker (Node only).
   (timer as { unref?: () => void }).unref?.();
 
+  // Trailing-edge debounce timer for wake(): re-armed on every wake, fires one
+  // jobs-only drain after coalesceMs of quiet.
+  let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+  // Latched by stop(): a wake() arriving afterwards (e.g. a write-queue task that
+  // settles while the queue drains on shutdown — stop() runs before that drain) must
+  // not arm a fresh timer that later claims jobs against an already-closed store.
+  let stopped = false;
+
   return {
     stop() {
+      stopped = true;
       clearInterval(timer);
+      if (wakeTimer !== null) {
+        clearTimeout(wakeTimer);
+        wakeTimer = null;
+      }
+    },
+    wake() {
+      if (stopped) return;
+      if (wakeTimer !== null) clearTimeout(wakeTimer);
+      wakeTimer = setTimeout(() => {
+        wakeTimer = null;
+        // Jobs-only drain (no onTick). Fail-open: a rejection is logged, never an
+        // unhandled rejection on the timer.
+        void drainCoalesced().catch((err: unknown) => {
+          deps.log("memory.worker.wake_drain_failed", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }, deps.coalesceMs);
+      (wakeTimer as { unref?: () => void }).unref?.();
     },
   };
 }

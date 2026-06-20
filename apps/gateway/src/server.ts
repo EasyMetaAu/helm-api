@@ -892,11 +892,20 @@ export async function buildServer(
   // deploy loses nothing. Env knobs are optional (safe code defaults otherwise).
   const flushMsEnv = Number(process.env.HELM_WRITE_QUEUE_FLUSH_MS);
   const maxDepthEnv = Number(process.env.HELM_WRITE_QUEUE_MAX_DEPTH);
+  // Late-bound bridge to the memory worker's wake(): the worker is created far below
+  // (it needs the observer/reflector deps), but the write queue here must hand it the
+  // wake trigger now. A no-op until the worker is wired, so a memory observe settling
+  // before boot completes is harmless (the interval backstop still drains it).
+  let wakeMemoryWorker: () => void = () => {};
   const writeQueue = createWriteQueue({
     telemetry,
     log: (message) => logger.log("warn", "writequeue", { message }),
     flushIntervalMs: Number.isFinite(flushMsEnv) && flushMsEnv > 0 ? flushMsEnv : 25,
     maxDepth: Number.isFinite(maxDepthEnv) && maxDepthEnv > 0 ? maxDepthEnv : 10_000,
+    // After a memory observe task settles, nudge the worker to drain (debounced) so a
+    // just-stated fact forms in ~coalesceMs instead of waiting a full interval. Off
+    // the request's critical path — the response is already sent by the time tasks run.
+    onTaskDrain: () => wakeMemoryWorker(),
   });
 
   // OAuth subscription runtime (issue #38). PRESET providers store their (rotating)
@@ -2409,13 +2418,24 @@ export async function buildServer(
   // outside every route, so no request touches it (zero added latency). Disabled
   // when HELM_MEMORY_WORKER_DISABLED=1 (tests default to OFF); interval is an
   // env tunable (fail-safe default + guard, mirroring the signals scheduler).
-  let memoryWorker: { stop: () => void } | null = null;
+  let memoryWorker: { stop: () => void; wake: () => void } | null = null;
   if (process.env.HELM_MEMORY_WORKER_DISABLED !== "1") {
     const intervalRaw = Number(process.env.HELM_MEMORY_WORKER_INTERVAL_MS ?? 60_000);
+    const intervalMs = Number.isFinite(intervalRaw) && intervalRaw > 0 ? intervalRaw : 60_000;
+    // Debounce window for the request-driven wake() (see scheduler MemoryWorkerDeps).
+    // Default 8s: a paused user's fact forms in ~8s while a burst of turns still
+    // coalesces into one observer run. Clamped below the interval (the backstop must
+    // remain the slower bound) and to a sane floor.
+    const coalesceRaw = Number(process.env.HELM_MEMORY_WORKER_COALESCE_MS ?? 8_000);
+    const coalesceMs =
+      Number.isFinite(coalesceRaw) && coalesceRaw > 0 && coalesceRaw < intervalMs
+        ? coalesceRaw
+        : Math.min(8_000, intervalMs);
     memoryWorker = startMemoryWorker({
       memoryStore: store.memory,
       batchSize: 10,
-      intervalMs: Number.isFinite(intervalRaw) && intervalRaw > 0 ? intervalRaw : 60_000,
+      intervalMs,
+      coalesceMs,
       now: () => Date.now(),
       log: memoryLog,
       runObserver: (job) => runObserverJob(job, observerDeps),
@@ -2454,6 +2474,10 @@ export async function buildServer(
         });
       },
     });
+    // Bind the late-bound bridge: from now on a memory observe settling in the write
+    // queue debounce-wakes this worker (request-driven formation). Before this line it
+    // was a no-op, so any observe during boot is covered by the interval backstop.
+    wakeMemoryWorker = () => memoryWorker?.wake();
   }
 
   // Data-cleanup scheduler — the OFF-the-request-path retention/archival sweep

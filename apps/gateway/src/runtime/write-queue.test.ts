@@ -223,4 +223,50 @@ describe("createWriteQueue", () => {
     await q.stop();
     expect(sink.inserts).toHaveLength(1);
   });
+
+  it("fires onTaskDrain ONLY for tasks flagged wakeOnSettle (inbound observe must not wake)", async () => {
+    // onTaskDrain is wired to memoryWorker.wake(). It must fire only after the
+    // OUTBOUND observe (wakeOnSettle:true) — waking after the inbound observe could
+    // drain the observer job before the assistant turn is persisted, dropping it.
+    const sink = fakeSink();
+    let drains = 0;
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      onTaskDrain: () => {
+        drains++;
+      },
+    });
+    q.enqueueTask(async () => {}); // inbound observe — unflagged, no wake
+    q.enqueueTask(async () => {}, { wakeOnSettle: true }); // outbound observe — wakes
+    await q.flush();
+    expect(drains).toBe(1); // only the flagged (outbound) task woke the worker
+  });
+
+  it("is fail-open if onTaskDrain throws: the task chain is not poisoned", async () => {
+    const sink = fakeSink();
+    const logs: string[] = [];
+    const ran: string[] = [];
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: (m) => logs.push(m),
+      flushIntervalMs: 10_000,
+      onTaskDrain: () => {
+        throw new Error("wake boom");
+      },
+    });
+    q.enqueueTask(async () => {
+      ran.push("first");
+    });
+    q.enqueueTask(
+      async () => {
+        ran.push("second");
+      },
+      { wakeOnSettle: true },
+    );
+    await expect(q.flush()).resolves.toBeUndefined();
+    expect(ran).toEqual(["first", "second"]); // a throwing wake never stalls observe
+    expect(logs.some((l) => l.includes("on_task_drain"))).toBe(true);
+  });
 });
