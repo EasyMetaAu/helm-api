@@ -205,7 +205,7 @@ describe('key detail page', () => {
     expect(link.getAttribute('href')).toBe('/requests/tr_1');
   });
 
-  it('links the Memory config to the scoped memory view when memory is on; omits it when off', () => {
+  it('always links the Memory config to the scoped memory view — even when memory is off', () => {
     const { unmount } = render(KeyDetailPage, {
       data: pageData({ key: keyView({ memory_mode: 'inject', memory_project_id: 'proj-a' }) }),
     });
@@ -214,9 +214,17 @@ describe('key detail page', () => {
     expect(link.getAttribute('href')).toBe('/memory?key=k1');
     unmount();
 
-    // Memory off → nothing to manage → no link.
-    render(KeyDetailPage, { data: pageData({ key: keyView({ memory_mode: 'off' }) }) });
-    expect(screen.queryByRole('link', { name: /manage memory/i })).not.toBeInTheDocument();
+    // Memory off does NOT mean "nothing to manage": switching observe off doesn't
+    // erase what the key already learned, and the memory page resolves the scope
+    // from the key's config (account + memory_project_id) regardless of mode. So
+    // the link MUST stay — otherwise a switched-off key with prior memory has no
+    // path to it. This is the fix.
+    render(KeyDetailPage, {
+      data: pageData({ key: keyView({ memory_mode: 'off', memory_project_id: 'lukin-personal' }) }),
+    });
+    expect(screen.getByRole('link', { name: /manage memory/i }).getAttribute('href')).toBe(
+      '/memory?key=k1',
+    );
   });
 
   it('renders a requests-style pager (numbered links + status) across pages', () => {

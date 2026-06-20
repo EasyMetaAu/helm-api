@@ -255,13 +255,17 @@
             {#if key.memory_project_id}
               · {key.memory_project_id}
             {/if}
-            <!-- Jump to this key's memory (its account + default project scope) so an
-                 operator can browse/curate the facts & reflections it has learned. -->
-            <a
-              class="link-inline ml-1"
-              href={`${base}/memory?key=${encodeURIComponent(data.keyId)}`}>{$t('Manage memory')} →</a
-            >
           {/if}
+          <!-- Jump to this key's memory (its account + default project scope) so an
+               operator can browse/curate the facts & reflections it has learned. Shown
+               even when memory is OFF: switching observe off doesn't erase what the key
+               already learned, and the memory page resolves the scope from the key's
+               config (account + memory_project_id) regardless of mode — without this a
+               switched-off key has no path to its accumulated memory. -->
+          <a
+            class="link-inline ml-1"
+            href={`${base}/memory?key=${encodeURIComponent(data.keyId)}`}>{$t('Manage memory')} →</a
+          >
         </dd>
       </div>
     </dl>
