@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-20 · observer 任务合并竞态致"运行期到达的消息"丢失（docs/08 Phase 2；原则 3）
+
+- **背景/线上实证（box v0.21.9）**："我喜欢的数字是42"仍偶发没记下。铁证：`memory_messages=5` 但 `facts=0/obs=0`，且 `memory.llm.completed task:facts`×2（含 `eager_facts_retry`）**非 fallback**→模型/schema 都正常。**根因不是 prompt 也不是模型，是 observer 任务合并竞态**：observer job 在 claim 时 `listMessages` **一次性快照**；"42"那条在前一个（打招呼请求的）observer job **running 期间**才落库，其 enqueue 被开放任务唯一索引 `(type,scope) WHERE status IN (pending,running)` **合并进那个已拍完快照的 running job**（`inject.assembled` 对两请求返回同一 `observer_job_id` 为证）→ job 完成时从未重读→"42"永不被挖；无后续请求→无新 job。合并只在前一个 job 还 **pending** 时安全；一旦 **running** 新轮即静默丢失，仅 idle-flush（~1h，更有损的 compaction→reflector 路径）兜底。
+- **评估（用户要求 3 专家两轮共识）**：并发/分布式、后端架构、SRE 三角色独立评议后达成一致。**否决**"把消息内容塞进 job"（破坏 job=指针、复制 `memory_messages`、running job 已过读取点）与"唯一索引收窄成仅 pending"（多 worker 下并发双 observer）。
+- **决定（方案 A）**：`runObserverJob` 顶部捕获 `snapshotMessageIds`；三条 `done` 退出路径**标 done 之后**调新 helper `maybeReenqueueForLateMessages`——重读 `listMessages`，存在快照外的**新 user 消息**则 `enqueueJob({type:observer,scope})`（plain scope，靠唯一索引去重，绝不并发双 observer）。**两层门控**：① "快照后的新消息"，不是"存在未覆盖历史"——eager 写 fact 不推进覆盖，按覆盖门控会让短线程每次都重排=device_id 式热循环；new-since-snapshot 单调收敛，终止由构造保证。② **只认新 USER 轮（成本杠杆）**——事实只来自 user 轮（eager 已滤 assistant/tool 噪音），assistant-only 迟到轮若也补发会让 eager 对未覆盖集白跑一次 nano 提取；只在新 user 内容到达才补发=只在竞态真丢了事实轮时才多花一次提取，assistant 轮的 compaction 推迟到下个 user 轮/idle-flush。fail-open（吞错+日志），idle-flush 仍作纵深防御。
+- **对共识的实现期修正**：专家组原议"复用 idle-flush 覆盖判定"，实现时发现那是"未覆盖+idle"、对仅 eager 短线程会热循环，故改为 new-since-snapshot（满足 SRE 的"message_index > frontier_at_claim"终止不变式）。原子水位线列（并发专家的 B 案）暂不加——**done-first 顺序已关掉丢更新窗口**（job 标 done 后并发 enqueue 必新建 pending job，被 done 期间合并丢失的轮由 done 后重读捕获），上迁移待 SLO 证明 idle-flush 真在大量兜底或出现真并发再说。**纯 core observer 改动，无 schema/无迁移，SQLite+Postgres 对称**。新日志 `recheck_reenqueued`/`recheck_clean`/`recheck_failed`。
+- **验证**：TDD 红→绿；observer 3 新例（运行期新 user 轮→恰好补发一个 observer job + `recheck_reenqueued`；assistant-only 迟到轮→0 补发 + `recheck_clean`；无新消息→0 补发 防热循环）。observer 26 测 + core memory/store **653 测**绿（含 PGlite/Postgres 契约，证实双方言对称）、typecheck（4 项目）/biome lint 清。分支 `fix/memory-observer-reenqueue-late-turn`，待发。
+
 ## 2026-06-20 · 事实抽取可靠性 + 内部 LLM 调用走自有网关（可观测）（docs/06/08/12；原则 3/7）
 
 - **背景/线上实证**：v0.21.7 上用户说「我有一辆特斯拉 Model Y」仍偶发没记下。observer 准时跑、`memory.llm.completed task:facts` 但 0 fact。直接 curl deepseek 实证：`deepseek-v4-flash` 即使 temperature:0 也**非确定性**，对一条明确事实偶发返空（输出形状每次都变：裸数组/对象/中英文都有），且 Mimi 对话里它自己的 `MEMORY.md` 工具/文件噪音淹没了信号——线上那次恰好返空。另：调试时**所有内部 LLM 调用（记忆 + eval）都不在 /admin/requests 可见**（直接打 ProviderClient、绕过遥测/payload），只能手动 curl deepseek 排查。
@@ -22,18 +30,13 @@
 - **决定**：改为 `insert.call(deps.memoryStore, {…})`，对齐 `idle-flush.ts:52` / `decay-trigger.ts:47` 既有的 `.call(deps.memoryStore, …)` 模式（这两处是仅有的另两个解构-optional-方法点，均已正确绑定；Codex 复核确认 observer 是唯一裸调）。
 - **验证**：TDD 红→绿，新增 `this`-敏感回归测试（store 方法读 `this.__isStore`，裸调时抛错被 fail-open 吞→断言写入未发生）；observer 21 测 + `packages/core/src/memory` 255 测绿、typecheck/biome lint 清。配套产出 `docs/memory-review-2026-06-20.md`（全模块数据流图 + 本轮 6 个 bug 账本 + 过度设计评估）。分支 `fix/eager-facts-unbound-insert`，待发 v0.21.7。
 
-## 2026-06-20 · eager/reflector 事实抽取被严格 schema 静默吞掉（deepseek 返回裸数组）（docs/salient-fact-memory-spec；docs/08/12；原则 2/3）
-
-- **背景/线上实证**：用户在 Mimi（`/v1/responses`，project `agentcrew-test`）说「记住：我最喜欢的颜色是绿色」后跨 session 召不回。线上探针（手动入队 observer job + tail 日志）抓到 `memory.llm.fallback task:facts error: ZodError: expected object, received array`。根因：`deepseek-v4-flash` 做事实抽取时**输出形状不确定**（temperature:0 仍时而 `{facts:[...]}`、时而**裸数组** `[...]`）；`RawFactsOutputSchema`/`FactsOutputSchema` 只认对象信封 → `callJsonModel` 的 `schema.parse` 抛 → catch **静默回退** `{facts:[]}` → eager（`observer.ts:337`）/reflector（`reflector.ts:206`）拿 0 条、`observer.ts:40/43` 无日志静默退出 → fact **永不落库**。reflection 能工作是因为其回退是非空确定性文本；fact 回退是空数组故全程隐形。直接 curl deepseek 实证：单条消息返 `{facts:[{subject_text,fact_text}]}`（对象、键正确），多消息上下文时返裸数组——故 06-16 偶尔成功、颜色测试偶尔失败。
-- **决定（事实信封容错，tolerant passthrough）**：镜像项目既有原则（codex role/effort 那条「accept+coerce，never reject on shape」）。新增 `coerceFactsEnvelope`：顶层是数组则包成 `{facts:array}` 再校验；`FactsOutputSchema`/`RawFactsOutputSchema` 改 `z.preprocess(coerceFactsEnvelope, z.object{…})`。内层键 `subject_text`/`fact_text` 经 curl 确认匹配，无需键别名。附带 `parseJsonObject` 增**裸数组打捞**（noisy prose 包顶层数组时，择先开的定界符 `{` / `[`）。**无 schema 改/无迁移** → box 配置仍有效。
-- **验证**：TDD 红（裸数组→`[]`）→绿；`memory-llm.test.ts` 2 新例（eager + reflector 裸数组形状）、memory-llm 18 + `packages/core/src/memory` 247 测绿、typecheck（4 项目）/biome lint 清。分支 `worktree-fix-archived-reflection-delete`（与归档删除同分支），未提交/未部署。**部署后**短个人陈述即可 eager 落库为 project fact、下个 session 注入（前提：box 已置 `eager_facts:true` + `memory.llm.enabled:true`，本次已配）。
-- **同 PR 另带两修（同次排查发现）**：① **Gemini 原生直通不注入记忆**——`messages-pipeline.ts` 的 splice 只有 `anthropic_messages`/`openai_responses` 分支，缺 `gemini`，故 Gemini passthrough 算了记忆却丢弃。新增 `appendMemoryToGeminiBody`（尾随 `contents[]` user 轮、`systemInstruction` 逐字）+ gemini 分支；native-memory-inject 3 新例。② **fact 复活不刷新 scope**——`(owner_id,content_hash)` UNIQUE 是账号全局，故跨 project 重述同一 fact 命中旧行后 `reactivate` 只改 status/时间戳、**保留旧 scope**→新 project 的 inject 读不到。sqlite+pg 双适配器 `reactivate` UPDATE 增 `project_id/resource_id/thread_id`（以重述 scope 为准），sqlite+pg 各 1 新例（跨 project 复活后 p2 可见、p1 不可见）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-20 · eager/reflector 事实抽取被严格 schema 静默吞掉（deepseek 裸数组）（docs/salient-fact-memory-spec；原则 2/3）：`deepseek-v4-flash` 事实抽取 temperature:0 仍非确定性返**裸数组** `[...]` 而非 `{facts:[...]}`，`RawFactsOutputSchema`/`FactsOutputSchema` 只认对象信封→`callJsonModel` 静默回退 `{facts:[]}`→fact 永不落库（reflection 因回退非空才幸存）。修：`coerceFactsEnvelope` 经 `z.preprocess` 把顶层数组包成 `{facts:array}`（tolerant passthrough，镜像 codex role/effort）+ `parseJsonObject` 裸数组打捞；无 schema/无迁移。同 PR 另带 Gemini 原生直通注入记忆 + fact 复活刷新 scope（账号全局 hash 跨 project 重述复活旧 scope 致 inject 读不到）。memory-llm 18 + memory 247 测绿。PR #335→v0.21.6 已部署。
 
 ### 2026-06-20 · 已归档 reflection 无法删除（两段式 soft→hard delete）（docs/13；原则 1）：admin 删 reflection→`archived`，再删 0 命中 active→404「reflection not found」永远删不掉。修：`deleteReflection` 按解析行 status 分支——active=软删（归档整 scope 全 active 版）、archived=**硬删该 scope 全 archived 版**（运营者手动二次删才永久清，自动遗忘管线仍永不硬删，docs/12 有意偏离）；硬删整 scope 防旧归档版经 `latestPerScope`「诈尸」。sqlite+pg 双适配器、admin 弹窗文案随 status 切换 + 1 i18n×5、MCP 透明受益。822 测绿。PR #331。
 

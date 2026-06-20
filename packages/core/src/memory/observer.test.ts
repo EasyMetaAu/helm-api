@@ -571,3 +571,95 @@ describe("runObserverJob — eager fact extraction", () => {
     expect(factCalls).toHaveLength(0);
   });
 });
+
+// The coalescing race (the live "我喜欢的数字是42" bug on the box): an observer job
+// snapshots the thread's messages ONCE at claim time. A turn that lands WHILE the job
+// runs is coalesced by the open-job unique index into the already-snapshotted running
+// job and silently lost — no follow-up job, so it is never mined until idle-flush
+// (~1h, lossier path). Fix: at completion, if messages arrived SINCE the snapshot,
+// enqueue a fresh observer job. The gate is "new since snapshot" (NOT "uncovered
+// history exists"): the eager fact path never advances coverage, so a coverage-based
+// gate would hot-loop a short thread forever — new-since-snapshot is monotonic and
+// drains a burst then stops.
+describe("runObserverJob — re-enqueue on a turn that arrives during the run", () => {
+  function userMsg(id: string, content: string, offsetMs: number): RawMessage {
+    return {
+      id,
+      threadId: "thread-1",
+      role: "user",
+      content,
+      tokenEstimate: 10,
+      createdAt: new Date(NOW.getTime() - offsetMs),
+    };
+  }
+
+  it("enqueues a fresh observer job when a new message arrives during the run (the '42' race)", async () => {
+    // Snapshot at claim time: only the '/new' reset notice — carries no durable fact.
+    const snapshot = [userMsg("u-new", "A new session was started via /new.", 3000)];
+    // The fact-bearing turn lands AFTER the snapshot, during the run.
+    const late = userMsg("u-42", "我喜欢的数字是42", 500);
+
+    const { store } = makeFakeStore(snapshot);
+    // Stateful: the run's snapshot read sees only `snapshot`; the completion re-check
+    // re-reads and now sees the late-arriving turn too.
+    let reads = 0;
+    store.listMessages = vi.fn(async () => {
+      reads += 1;
+      return reads === 1 ? snapshot : [...snapshot, late];
+    });
+    const deps = makeDeps(store);
+
+    await runObserverJob({ ...JOB, projectId: "proj-x" }, deps);
+
+    // A fresh observer job is enqueued for the SAME scope so the late turn gets mined.
+    expect(store.enqueueJob).toHaveBeenCalledWith({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "thread-1", projectId: "proj-x" },
+    });
+    expect(deps.log).toHaveBeenCalledWith(
+      "memory.observer.recheck_reenqueued",
+      expect.objectContaining({ thread_id: "thread-1", late_user_message_count: 1 }),
+    );
+  });
+
+  it("does NOT re-enqueue for an assistant-only late turn (cost lever: facts come only from user turns)", async () => {
+    const snapshot = [userMsg("u1", "我有一辆特斯拉 Model Y", 3000)];
+    // Only the assistant's reply lands during the run — no new USER content to mine.
+    const lateAssistant: RawMessage = {
+      id: "a-late",
+      threadId: "thread-1",
+      role: "assistant",
+      content: "记下了。",
+      tokenEstimate: 4,
+      createdAt: new Date(NOW.getTime() - 400),
+    };
+    const { store } = makeFakeStore(snapshot);
+    let reads = 0;
+    store.listMessages = vi.fn(async () => {
+      reads += 1;
+      return reads === 1 ? snapshot : [...snapshot, lateAssistant];
+    });
+    const deps = makeDeps(store);
+
+    await runObserverJob({ ...JOB, projectId: "proj-x" }, deps);
+
+    expect(store.enqueueJob).not.toHaveBeenCalled();
+    expect(deps.log).toHaveBeenCalledWith("memory.observer.recheck_clean", {
+      thread_id: "thread-1",
+    });
+  });
+
+  it("does NOT re-enqueue when no new message arrived during the run (termination guard)", async () => {
+    // listMessages returns the SAME set on every call → nothing new since the snapshot.
+    // A noop/eager run must not self-trigger (the device_id hot-loop failure mode).
+    const { store } = makeFakeStore(makeShortThread());
+    const deps = makeDeps(store);
+
+    await runObserverJob(JOB, deps);
+
+    expect(store.enqueueJob).not.toHaveBeenCalled();
+    expect(deps.log).toHaveBeenCalledWith("memory.observer.recheck_clean", {
+      thread_id: "thread-1",
+    });
+  });
+});
