@@ -602,9 +602,15 @@
   <Modal label={$t('Confirm delete')} onclose={() => (confirmingReflectionDelete = null)}>
     <h2 class="section-header">{$t('Delete reflection')}</h2>
     <p class="mt-2 text-sm text-amber-800">
-      {$t(
-        'Remove this reflection? It is soft-deleted (archived) — the gateway stops injecting it.',
-      )}
+      {#if confirmingReflectionDelete.status === 'active'}
+        {$t(
+          'Remove this reflection? It is soft-deleted (archived) — the gateway stops injecting it.',
+        )}
+      {:else}
+        {$t(
+          'This reflection is already archived. Deleting it now removes it permanently and cannot be undone.',
+        )}
+      {/if}
     </p>
     <div class="mt-4 flex justify-end gap-2">
       <button

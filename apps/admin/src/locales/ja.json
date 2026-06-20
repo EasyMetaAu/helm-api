@@ -523,6 +523,7 @@
   "Remove model": "モデルを削除",
   "Remove this fact from memory? It is soft-deleted (pruned) — the gateway stops using it.": "このファクトをメモリから削除しますか？ ソフト削除（剪定）され、ゲートウェイは使用を停止します。",
   "Remove this reflection? It is soft-deleted (archived) — the gateway stops injecting it.": "このリフレクションを削除しますか？ ソフト削除（アーカイブ）され、ゲートウェイは挿入を停止します。",
+  "This reflection is already archived. Deleting it now removes it permanently and cannot be undone.": "このリフレクションはすでにアーカイブされています。ここで削除すると完全に削除され、元に戻せません。",
   "req": "件",
   "Request": "リクエスト",
   "Request (from client)": "リクエスト（クライアントから）",

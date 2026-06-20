@@ -165,6 +165,32 @@ describe('memory page', () => {
     await waitFor(() => expect(screen.getAllByTestId('fact-row').length).toBeGreaterThan(0));
   });
 
+  it('delete on an ACTIVE reflection warns it is a soft-delete (archive)', async () => {
+    renderPage([scope()]);
+    await fireEvent.click(screen.getAllByTestId('scope-row')[0]);
+    await waitFor(() => expect(screen.getByTestId('reflection-row')).toBeInTheDocument());
+    const row = screen.getByTestId('reflection-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /^delete$/i }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(/soft-deleted \(archived\)/i)).toBeInTheDocument();
+  });
+
+  it('delete on an ARCHIVED reflection warns it is permanent and purges it', async () => {
+    listReflections.mockResolvedValue({ rows: [reflection('r1', { status: 'archived' })], total: 1 });
+    deleteReflection.mockResolvedValue(undefined);
+    renderPage([scope()]);
+    await fireEvent.click(screen.getAllByTestId('scope-row')[0]);
+    await waitFor(() => expect(screen.getByTestId('reflection-row')).toBeInTheDocument());
+    const row = screen.getByTestId('reflection-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /^delete$/i }));
+    const dialog = screen.getByRole('dialog');
+    // Archived rows get the permanent-delete copy, not the soft-delete copy.
+    expect(within(dialog).getByText(/already archived/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/permanently/i)).toBeInTheDocument();
+    await fireEvent.click(within(dialog).getByRole('button', { name: /^delete$/i }));
+    await waitFor(() => expect(deleteReflection).toHaveBeenCalledWith('r1'));
+  });
+
   it('shows an empty state when there are no scopes', () => {
     renderPage([]);
     expect(screen.getByText(/no memory yet/i)).toBeInTheDocument();

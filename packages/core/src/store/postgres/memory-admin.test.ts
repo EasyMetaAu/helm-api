@@ -137,8 +137,14 @@ describe("PgMemoryStore admin/MCP surface (docs/13)", () => {
     });
     expect(edited?.reflectionText).toBe("fixed");
     expect(edited?.version).toBe(5);
+    // Stage 1 — active row: soft delete (archive). Row survives for the operator.
     expect(await store.deleteReflection({ accountId: "a", id: rId })).toBe(true);
     expect(await store.getReflection({ accountId: "a", projectId: "p" })).toBeNull();
+    expect((await store.getReflectionById({ accountId: "a", id: rId }))?.status).toBe("archived");
+    // Stage 2 — already-archived row: a second delete HARD-purges it (was a 404).
+    expect(await store.deleteReflection({ accountId: "a", id: rId })).toBe(true);
+    expect(await store.getReflectionById({ accountId: "a", id: rId })).toBeNull();
+    expect(await store.deleteReflection({ accountId: "a", id: rId })).toBe(false);
   });
 
   it("listReflections returns latest version per scope, all with the flag", async () => {
@@ -191,6 +197,12 @@ describe("PgMemoryStore admin/MCP surface (docs/13)", () => {
     });
     expect(await store.deleteReflection({ accountId: "a", id: v1 })).toBe(true); // via older id
     expect(await store.getReflection({ accountId: "a", projectId: "p" })).toBeNull();
+    // A second delete via the older id HARD-purges every archived version of the
+    // scope — no zombie version resurfaces in the admin list after "delete".
+    expect(await store.deleteReflection({ accountId: "a", id: v1 })).toBe(true);
+    expect(
+      (await store.listReflections({ accountId: "a", status: "all", limit: 10, offset: 0 })).total,
+    ).toBe(0);
 
     // Reactivating a pruned fact clears expired_at so it lists active again.
     const f = await addFact(store, { accountId: "a", factText: "f" });

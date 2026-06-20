@@ -200,7 +200,9 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     return updated === null ? c.json({ error: "reflection not found" }, 404) : c.json(updated);
   });
 
-  // DELETE /memory/reflections/:id — soft delete (status='archived').
+  // DELETE /memory/reflections/:id — two-stage: an active row soft-deletes
+  // (status='archived'); a second delete on an already-archived row hard-purges
+  // it. 404 only when the id is genuinely unknown/cross-tenant.
   app.delete("/admin/api/memory/reflections/:id", async (c) => {
     const store = resolveStore(c, deps);
     if (store instanceof Response) return store;

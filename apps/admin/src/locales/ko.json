@@ -523,6 +523,7 @@
   "Remove model": "모델 제거",
   "Remove this fact from memory? It is soft-deleted (pruned) — the gateway stops using it.": "이 사실을 메모리에서 제거하시겠습니까? 소프트 삭제(가지치기)되며, 게이트웨이는 더 이상 이를 사용하지 않습니다.",
   "Remove this reflection? It is soft-deleted (archived) — the gateway stops injecting it.": "이 회고를 제거하시겠습니까? 소프트 삭제(보관)되며, 게이트웨이는 더 이상 이를 주입하지 않습니다.",
+  "This reflection is already archived. Deleting it now removes it permanently and cannot be undone.": "이 회고는 이미 보관되었습니다. 지금 삭제하면 영구적으로 제거되며 되돌릴 수 없습니다.",
   "req": "건",
   "Request": "요청",
   "Request (from client)": "요청(클라이언트에서)",
