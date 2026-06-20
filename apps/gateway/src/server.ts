@@ -103,6 +103,7 @@ import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { createMemoryLlmRuntime, type MemoryModelResolution } from "./memory-llm.js";
+import { createSelfHttpClient } from "./memory-self-http.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { basicAuth, resolveAdminAuth, warnIfAdminUnconfigured } from "./middleware/basic-auth.js";
 import { concurrencyMiddleware, createConcurrencyGate } from "./middleware/concurrency.js";
@@ -1094,6 +1095,43 @@ export async function buildServer(
     log: (line) => logger.log("warn", "bootstrap.root_key", { line }),
   });
 
+  // Internal LLM observability (opt-in via HELM_INTERNAL_LLM_THROUGH_GATEWAY=1): route
+  // memory + Layer-2 eval LLM calls BACK THROUGH helm's own /v1 gateway so they appear in
+  // /admin/requests with full request/response payloads (otherwise they call the provider
+  // directly and are invisible). Mint a dedicated internal key (fixed id k_internal, re-
+  // minted each boot since the plaintext is unrecoverable) and hold its plaintext ONLY in-
+  // process. role:user + allow_custom_model is the minimal privilege (explicit-model
+  // passthrough); memory_mode:off prevents the self-call from being observed. Fail-open: a
+  // mint failure leaves routing OFF (direct provider calls, byte-identical to today).
+  const routeInternalThroughGateway = process.env.HELM_INTERNAL_LLM_THROUGH_GATEWAY === "1";
+  let internalApiKey: string | null = null;
+  if (routeInternalThroughGateway) {
+    try {
+      if ((await keyStore.list()).some((k) => k.key_id === "k_internal")) {
+        await keyStore.disable("k_internal");
+        await keyStore.deleteKey("k_internal");
+      }
+      const k = generateKey();
+      await keyStore.createKey({
+        keyId: "k_internal",
+        hash: k.hash,
+        prefix: k.prefix,
+        accountId: "default",
+        role: "user",
+        name: "internal-llm",
+        allowCustomModel: true,
+        memoryMode: "off",
+        memoryThreadSource: "header",
+      });
+      internalApiKey = k.plaintext;
+      logger.log("info", "internal_llm.key_minted", { key_id: "k_internal" });
+    } catch (err) {
+      logger.log("warn", "internal_llm.key_mint_failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // Provider(s): the configured upstreams (providers-multi). The PRIMARY provider
   // (providers[0]) backs the default/eval path and the Phase-0 passthrough; its
   // credential is mandatory (fail-closed). Additional providers each get their own
@@ -1450,13 +1488,28 @@ export async function buildServer(
   // balanced fail-open. The eval small-model is invoked via the same provider
   // (eval alias). Reads the CURRENT classifier config per request via the getter.
   // The catalog is injected so the eval call's usage becomes eval_usd (docs/07).
+  // Self-HTTP client for internal LLM calls (memory + Layer-2 eval) — built only when
+  // routing-through-gateway is on AND the internal key minted. providerPrefix = the
+  // primary provider name so a BARE eval model ("deepseek-v4-flash") becomes a routable
+  // explicit alias ("deepseek/deepseek-v4-flash"); memory's already-prefixed model is
+  // left unchanged. Loopback only (never config.server.host, which may be 0.0.0.0).
+  const selfHttpClient =
+    routeInternalThroughGateway && internalApiKey !== null
+      ? createSelfHttpClient({
+          baseUrl: `http://127.0.0.1:${config.server.port}`,
+          apiKey: internalApiKey,
+          providerPrefix: first.name,
+        })
+      : null;
   const classify = buildClassifyAdapter({
     getClassifierConfig: () => classifierConfig,
     lanes,
     // Live getter so an admin change to the terminal fallback lane keeps the eval
     // cascade's internal lane consistent with the real router (read per resolve).
     defaultLane: () => settings.default_lane,
-    provider,
+    // When routing internal LLM calls through the gateway, the eval model goes via the
+    // self-HTTP client (visible in /admin/requests); else straight to the primary provider.
+    provider: selfHttpClient ?? provider,
     now: () => Date.now(),
     log: (level, msg, fields) => logger.log(level as "info", msg, fields),
     momentum: { store: momentumStore },
@@ -1471,6 +1524,13 @@ export async function buildServer(
     fallbackBaseUrl,
   );
   const resolveMemoryLlmModel = (alias: string): MemoryModelResolution | null => {
+    // Observability: route memory LLM calls (summarize/merge/extractFacts) back through
+    // helm's own /v1 gateway so they appear in /admin/requests. The task's model `alias`
+    // (e.g. "deepseek/deepseek-v4-flash") is forwarded as an EXPLICIT model → the internal
+    // key's allow_custom_model passthrough skips classify/eval, so the self-call never nests.
+    if (selfHttpClient) {
+      return { client: selfHttpClient, providerModel: alias };
+    }
     const slash = alias.indexOf("/");
     const prefix = slash > 0 ? alias.slice(0, slash) : "";
     if (prefix && ROUTABLE_OAUTH_IDS.has(prefix)) {
