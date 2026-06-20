@@ -374,6 +374,44 @@ describe("runObserverJob — eager fact extraction", () => {
     });
   });
 
+  it("calls insertFactsReconciled BOUND to the store (regression: unbound `insert(...)` loses `this`)", async () => {
+    // Real adapters implement insertFactsReconciled as a CLASS METHOD that uses `this.db`.
+    // The eager path extracts it to a var; calling it unbound (`insert(...)`) makes `this`
+    // undefined → "Cannot read properties of undefined (reading 'db')" — and the path is
+    // fail-open, so the symptom is a SILENT no-write (the exact prod failure for "可乐").
+    // The plain-vi.fn fake never exercised `this`, so this store mimics that dependency.
+    const { store } = makeFakeStore(makeShortThread());
+    let boundInput: unknown = null;
+    const thisSensitiveStore = {
+      ...store,
+      __isStore: true,
+      insertFactsReconciled(
+        input: Parameters<NonNullable<MemoryStore["insertFactsReconciled"]>>[0],
+      ) {
+        if ((this as { __isStore?: boolean })?.__isStore !== true) {
+          throw new Error("insertFactsReconciled called unbound (this lost)");
+        }
+        boundInput = input;
+        return Promise.resolve({ insertedIds: ["f1"], supersededIds: [] });
+      },
+    } as unknown as MemoryStore;
+    const deps = makeDeps(thisSensitiveStore, {
+      extractFactsFromMessages: vi.fn(async () => [eagerFact]),
+      maxFactsPerSubject: 8,
+    });
+    const job: ObserverJob = {
+      jobId: "job-1",
+      accountId: "acct-a",
+      threadId: "thread-1",
+      projectId: "proj-x",
+    };
+
+    await runObserverJob(job, deps);
+
+    // With the unbound bug the throw is swallowed (fail-open) → boundInput stays null.
+    expect(boundInput).not.toBeNull();
+  });
+
   it("scopes a thread-only job's fact to the thread (never account-wide)", async () => {
     // Job with NO project/resource (a valid default when no project header/default
     // is set). The fact must carry threadId — writing it scopeless would leak a

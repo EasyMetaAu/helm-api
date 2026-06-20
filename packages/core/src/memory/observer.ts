@@ -59,7 +59,11 @@ async function maybeEagerExtractFacts(
       fallbackNow: now,
     });
     if (facts.length === 0) return;
-    await insert({ accountId: job.accountId, scope, facts, now });
+    // BIND to the store: insertFactsReconciled is a class method that uses `this.db`,
+    // so a bare `insert(...)` would lose `this` and throw "reading 'db'" (fail-open ⇒
+    // silent no-write). Mirror the `.call(deps.memoryStore, ...)` pattern used by the
+    // idle-flush / decay-trigger optional-method call sites.
+    await insert.call(deps.memoryStore, { accountId: job.accountId, scope, facts, now });
     deps.log("memory.observer.eager_facts_extracted", {
       thread_id: job.threadId,
       fact_count: facts.length,
