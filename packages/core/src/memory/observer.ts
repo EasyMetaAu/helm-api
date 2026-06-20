@@ -38,8 +38,22 @@ async function maybeEagerExtractFacts(
     // tool-result / assistant-only batch carries no user-stated fact (the cost lever
     // that keeps eager extraction off agent tool-roundtrip turns).
     if (!uncovered.some((m) => m.role === "user")) return;
+    // Feed ONLY user turns to the extractor. Assistant chatter and tool/file output
+    // (e.g. an agent reading/writing its own MEMORY.md) is noise that makes the cheap,
+    // fast extraction model drop the user's stated fact — the prompt already says
+    // "ignore assistant text", but removing it from the wire is what actually keeps the
+    // signal from being buried.
+    const userMessages = uncovered.filter((m) => m.role === "user");
     const now = deps.now();
-    const extracted = await extract({ messages: uncovered, now });
+    // The extraction model is non-deterministic even at temperature:0 and intermittently
+    // returns 0 facts for a clear statement. Retry ONCE on an empty first result before
+    // giving up (bounded at two calls; extractFactsFromMessages is fail-open and never
+    // throws, so an empty list is the only failure signal).
+    let extracted = await extract({ messages: userMessages, now });
+    if (extracted.length === 0) {
+      deps.log("memory.observer.eager_facts_retry", { thread_id: job.threadId });
+      extracted = await extract({ messages: userMessages, now });
+    }
     if (extracted.length === 0) return;
     // Scope the fact at the broadest cross-thread level the job carries. With NEITHER
     // project nor resource (a valid thread-only job), fall back to the THREAD — never

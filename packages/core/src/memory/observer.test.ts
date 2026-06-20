@@ -374,6 +374,69 @@ describe("runObserverJob — eager fact extraction", () => {
     });
   });
 
+  it("feeds ONLY user messages to the extractor (assistant/tool noise excluded)", async () => {
+    // deepseek drops the user's stated fact when the wire body is full of agent
+    // tool/file noise (e.g. Mimi reading/writing its own MEMORY.md). Only user turns
+    // carry user-stated facts, so only they should reach the extractor.
+    const mixed: RawMessage[] = [
+      {
+        id: "u1",
+        threadId: "thread-1",
+        role: "user",
+        content: "我有一辆特斯拉 Model Y，你记下来",
+        tokenEstimate: 10,
+        createdAt: new Date(NOW.getTime() - 4000),
+      },
+      {
+        id: "a1",
+        threadId: "thread-1",
+        role: "assistant",
+        content: "记下了。",
+        tokenEstimate: 3,
+        createdAt: new Date(NOW.getTime() - 3000),
+      },
+      {
+        id: "t1",
+        threadId: "thread-1",
+        role: "tool",
+        content: "# Memory\n用户最喜欢的数字是 42。\nSuccessfully replaced 1 block.",
+        tokenEstimate: 30,
+        createdAt: new Date(NOW.getTime() - 2000),
+      },
+    ];
+    const { store } = makeFakeStore(mixed);
+    const extractFactsFromMessages = vi.fn(
+      async (_input: { messages: RawMessage[]; now: Date }) => [eagerFact],
+    );
+    const deps = makeDeps(store, { extractFactsFromMessages, maxFactsPerSubject: 8 });
+
+    await runObserverJob({ ...JOB, projectId: "proj-x" }, deps);
+
+    expect(extractFactsFromMessages).toHaveBeenCalledOnce();
+    const sent = extractFactsFromMessages.mock.calls[0]?.[0]?.messages as RawMessage[];
+    expect(sent.every((m) => m.role === "user")).toBe(true);
+    expect(sent.map((m) => m.id)).toEqual(["u1"]);
+  });
+
+  it("retries the extraction once when the first result is empty, then succeeds", async () => {
+    // deepseek-v4-flash is non-deterministic even at temperature:0 — it sometimes
+    // returns 0 facts for a clear statement. One retry catches the unlucky empty.
+    const { store, factCalls } = makeFakeStore(makeShortThread());
+    const extractFactsFromMessages = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([eagerFact]);
+    const deps = makeDeps(store, { extractFactsFromMessages, maxFactsPerSubject: 8 });
+
+    await runObserverJob({ ...JOB, projectId: "proj-x" }, deps);
+
+    expect(extractFactsFromMessages).toHaveBeenCalledTimes(2);
+    expect(deps.log).toHaveBeenCalledWith("memory.observer.eager_facts_retry", {
+      thread_id: "thread-1",
+    });
+    expect(factCalls).toHaveLength(1);
+  });
+
   it("calls insertFactsReconciled BOUND to the store (regression: unbound `insert(...)` loses `this`)", async () => {
     // Real adapters implement insertFactsReconciled as a CLASS METHOD that uses `this.db`.
     // The eager path extracts it to a var; calling it unbound (`insert(...)`) makes `this`
@@ -496,14 +559,15 @@ describe("runObserverJob — eager fact extraction", () => {
     expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
   });
 
-  it("skips the insert when the extractor yields no facts", async () => {
+  it("skips the insert when the extractor yields no facts (after one retry)", async () => {
     const { store, factCalls } = makeFakeStore(makeShortThread());
     const extractFactsFromMessages = vi.fn(async () => []);
     const deps = makeDeps(store, { extractFactsFromMessages });
 
     await runObserverJob({ ...JOB, projectId: "proj-x" }, deps);
 
-    expect(extractFactsFromMessages).toHaveBeenCalledOnce();
+    // Empty first result triggers one retry; still empty → give up, no insert.
+    expect(extractFactsFromMessages).toHaveBeenCalledTimes(2);
     expect(factCalls).toHaveLength(0);
   });
 });

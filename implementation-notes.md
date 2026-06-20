@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-20 · 事实抽取可靠性 + 内部 LLM 调用走自有网关（可观测）（docs/06/08/12；原则 3/7）
+
+- **背景/线上实证**：v0.21.7 上用户说「我有一辆特斯拉 Model Y」仍偶发没记下。observer 准时跑、`memory.llm.completed task:facts` 但 0 fact。直接 curl deepseek 实证：`deepseek-v4-flash` 即使 temperature:0 也**非确定性**，对一条明确事实偶发返空（输出形状每次都变：裸数组/对象/中英文都有），且 Mimi 对话里它自己的 `MEMORY.md` 工具/文件噪音淹没了信号——线上那次恰好返空。另：调试时**所有内部 LLM 调用（记忆 + eval）都不在 /admin/requests 可见**（直接打 ProviderClient、绕过遥测/payload），只能手动 curl deepseek 排查。
+- **决定（A 可靠性）**：`maybeEagerExtractFacts` 抽取**只喂 user 消息**（滤掉 assistant/tool/文件噪音）+ **空结果重试一次**（`eager_facts_retry` 日志、至多两次；extractFactsFromMessages fail-open 永不抛，空是唯一失败信号）。reflector 路径不动（从干净 observation 抽，无噪音）。
+- **决定（B 可观测，用户选「自动生成专用内部 key + 记忆和 eval 一起」）**：opt-in `HELM_INTERNAL_LLM_THROUGH_GATEWAY=1`，把内部 LLM 调用改成**自调用** helm 自己的 `/v1/chat/completions`（loopback），自动获得遥测 + payload → 在 /admin/requests 可见。新模块 `memory-self-http.ts` 的 `createSelfHttpClient`（ProviderClient 形：POST /v1 带内部 key + `x-memory-mode:off`，非 2xx 抛→落 callJsonModel/eval 既有 fail-open）。启动后自动 mint 固定 id `k_internal`（role:user + allow_custom_model + memory_mode:off；明文只留进程内、每启动 re-mint）。memory 经 `resolveMemoryLlmModel` 短路返回 self 客户端 + 原 alias；eval 把 classify 的 `provider` 换成 self 客户端。`providerPrefix=first.name` 把**裸** eval 模型 `deepseek-v4-flash`→`deepseek/deepseek-v4-flash` 使其走**显式模型直通**（不再 classify/eval 递归）。`memory-llm.ts` 零改动（seam 在 resolver）。
+- **坑/取舍**：① eval 在请求热路径——self 调用多一跳 loopback + 遥测写（write-queue 异步），但 eval 有缓存故仅 miss 时自调；② 内部 key 继承系统默认限流，量大需单配；③ 启动顺序：loopback 监听在 `serve()` 后、worker 首 tick ≥8s/eval 仅真流量触发→监听已起；race→ECONNREFUSED→fail-open 回退；④ **无 schema 改/无迁移**（env 开关非 config 字段），默认 OFF = 与今天逐字一致。
+- **验证**：TDD 红→绿；observer 3 新例（user-only / 空重试 / 非空不重试）+ self-http 4 新例（loopback URL/header/x-memory-mode / 裸模型前缀 / 非 2xx 抛）+ memory-llm 整合；typecheck（4 项目）+ biome lint 清、memory+classify+self-http **268 测**绿。分支 `feat/internal-llm-through-gateway`，待发 + box 置 `HELM_INTERNAL_LLM_THROUGH_GATEWAY=1`。
+
 ## 2026-06-20 · eager 事实抽取 `insertFactsReconciled` 未绑定 `this`（v0.21.6 暴露的潜伏 bug）（docs/08/12；原则 3）
 
 - **背景/线上实证**：v0.21.6 部署后用户在 Mimi 说「我家猫咪叫可乐，你记下来」仍没记下。线上日志铁证：`memory.observer.eager_facts_failed thread:019ee3dd error:"Cannot read properties of undefined (reading 'db')"`。根因：`observer.ts` 的 `maybeEagerExtractFacts` 把 store 方法解构成变量后**裸调用**——`const insert = deps.memoryStore.insertFactsReconciled; … await insert({…})`——丢了 `this`，于是 sqlite 适配器里的 `this.db.$sqlite` 抛 "reading 'db'"。eager 路径 fail-open，所以表现为**静默不写**。**为何此前没暴露**：上一条裸数组 schema bug 把数组拒了、路径走不到 `insert(...)`；schema 一修通，这个潜伏 bug 立刻顶出来。**为何单测没抓到**：假 store 的 `insertFactsReconciled` 是不依赖 `this` 的 `vi.fn`。
@@ -20,17 +28,13 @@
 - **验证**：TDD 红（裸数组→`[]`）→绿；`memory-llm.test.ts` 2 新例（eager + reflector 裸数组形状）、memory-llm 18 + `packages/core/src/memory` 247 测绿、typecheck（4 项目）/biome lint 清。分支 `worktree-fix-archived-reflection-delete`（与归档删除同分支），未提交/未部署。**部署后**短个人陈述即可 eager 落库为 project fact、下个 session 注入（前提：box 已置 `eager_facts:true` + `memory.llm.enabled:true`，本次已配）。
 - **同 PR 另带两修（同次排查发现）**：① **Gemini 原生直通不注入记忆**——`messages-pipeline.ts` 的 splice 只有 `anthropic_messages`/`openai_responses` 分支，缺 `gemini`，故 Gemini passthrough 算了记忆却丢弃。新增 `appendMemoryToGeminiBody`（尾随 `contents[]` user 轮、`systemInstruction` 逐字）+ gemini 分支；native-memory-inject 3 新例。② **fact 复活不刷新 scope**——`(owner_id,content_hash)` UNIQUE 是账号全局，故跨 project 重述同一 fact 命中旧行后 `reactivate` 只改 status/时间戳、**保留旧 scope**→新 project 的 inject 读不到。sqlite+pg 双适配器 `reactivate` UPDATE 增 `project_id/resource_id/thread_id`（以重述 scope 为准），sqlite+pg 各 1 新例（跨 project 复活后 p2 可见、p1 不可见）。
 
-## 2026-06-20 · 已归档 reflection 无法删除（两段式 soft→hard delete）（docs/13；原则 1）
-
-- **背景/线上实证**：用户在 admin Memory 页删除一条 reflection 后它变 `已归档`（status='archived'；列表用 `status:'all'` 仍显示该行且带「删除」按钮），**再点删除即 `reflection not found` 报错、永远删不掉**。根因：`deleteReflection` 是纯软删——按 id 查出 scope 后 `UPDATE … SET status='archived' WHERE scope AND status='active'`，对已归档行 0 命中→返回 false→route 404 `reflection not found`。docs/13 原设计 reflection 只有软删（无 hard delete），故一旦归档便无任何途径移除=「卡死的归档行」。
-- **决定（两段式删除 soft→hard）**：`deleteReflection` 改为**按解析行的 status 分支**——`active` 行=原软删（归档整 scope 全部 active 版本，行保留可见、停止注入）；**`archived` 行=硬删该 scope 全部 archived 版本**（用户第二次点删除即永久清除）。硬删**仅运营者手动触发**，自动遗忘管线仍永不 hard delete reflection（docs/12 不变，这是对 spec「reflection 永不硬删」的**有意偏离**：只限 admin 显式动作）。硬删整 scope 而非单 id：`upsertReflection` 每版追加独立行 + `listReflections` 走 `latestPerScope` 取最高版，只删可见的最新归档 id 会让更旧归档版**「诈尸」重现列表**。
-- **实现**：sqlite（`.delete().where(scope AND ne(status,'active'))`）+ pg（`.delete().returning()`）双适配器镜像；route 注释 + `MemoryStore` 端口注释更新为两段式语义；admin 删除弹窗文案随行 status 切换（active=软删/归档措辞；archived=「已归档，删除即永久且不可撤销」），1 新 i18n key×5 locale。**无 schema 改/无迁移**（纯逻辑、复用既有列+既有 `.delete()` 用法）→ box 配置仍有效、fail-close gate N/A。MCP `memory_delete` 自动受益（返回 `{deleted}` 不抛，故两段式透明生效）。
-- **验证**：TDD 红→绿，sqlite 2 + pg 2 改/新（两段式 active→archive→purge + 多版本归档全清防诈尸）、admin SPA 2 新（active 软删文案 / archived 永久文案 + 确认调 deleteReflection）；node 项目 **822 测绿**（仅 `admin-static.test.ts` 7 失败 = 本 worktree 未 `pnpm build` admin、缺 `apps/admin/build` 的**环境性**失败，与本改无关，CI 有 build 步骤）、typecheck（4 项目）/ biome lint / svelte-check(0/0) 清。分支 `worktree-fix-archived-reflection-delete`，未提交/未部署。
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-20 · 已归档 reflection 无法删除（两段式 soft→hard delete）（docs/13；原则 1）：admin 删 reflection→`archived`，再删 0 命中 active→404「reflection not found」永远删不掉。修：`deleteReflection` 按解析行 status 分支——active=软删（归档整 scope 全 active 版）、archived=**硬删该 scope 全 archived 版**（运营者手动二次删才永久清，自动遗忘管线仍永不硬删，docs/12 有意偏离）；硬删整 scope 防旧归档版经 `latestPerScope`「诈尸」。sqlite+pg 双适配器、admin 弹窗文案随 status 切换 + 1 i18n×5、MCP 透明受益。822 测绿。PR #331。
 
 ### 2026-06-20 · 记忆形成低延迟：防抖唤醒 memory worker（docs/08 Phase 2；原则 3）：worker 每 60s 轮询排空 `memory_jobs`，请求 inject 阶段立即入队 observer job 但干等下个 tick→最坏 ~55–60s。修：`scheduler.wake()`=trailing-edge 防抖（`coalesceMs` 默认 8s，`HELM_MEMORY_WORKER_COALESCE_MS` 可覆盖），`write-queue.onTaskDrain` 在 observe 落库后唤醒；`enqueueJob` 幂等去重保住合并（pending 期间多回合 dedupe 进同一 job=一次 LLM 调用）；60s timer 留作 backstop。Codex 修 2 P2（唤醒早于 outbound observe→仅 wakeOnSettle 触发；stop 后 wake no-op）。948 测绿。PR #332。
 
