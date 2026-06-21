@@ -325,9 +325,9 @@ Two cap layers apply, in order:
 ## Execution model and the two fallbacks
 
 The selected lane is expanded into an ordered candidate chain (primary →
-fallback[], with lane references expanded recursively). The executor
-(`packages/core/src/executor/fallback.ts`) then walks the chain, recording every
-attempt with its reason and latency:
+fallback[], with lane references expanded recursively). The gateway execution
+adapter (`apps/gateway/src/routes/execute.ts`) then walks the chain, recording
+every attempt with its reason and latency:
 
 1. Try the primary.
 2. Skip a candidate the Capability Filter rejects (with an explicit skip reason).

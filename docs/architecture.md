@@ -289,7 +289,7 @@ battle-tested `llm-router` (re-implemented, not imported).
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Ex as runFallback
+    participant Ex as Execute adapter
     participant Br as Circuit Breaker
     participant Cap as Capability Filter
     participant Up as Provider

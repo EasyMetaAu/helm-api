@@ -66,16 +66,31 @@ export async function bootstrapRootKey(deps: BootstrapDeps): Promise<BootstrapRe
   });
 
   // persist_to: write the plaintext to the operator's configured file (review H1 —
-  // previously a mandatory-but-ignored field). Best-effort: a write failure must not
-  // abort startup (the key is already in the store; the operator can still capture it
-  // from the log unless print_once is also off).
+  // previously a mandatory-but-ignored field). If printing is still enabled, a write
+  // failure is non-fatal because the log remains a recovery channel. If printing is
+  // disabled, a write failure would make the root key unrecoverable; roll the row back
+  // and fail closed so the next boot can mint again after the path is fixed.
   if (deps.persist) {
     try {
       await deps.persist(key.plaintext);
     } catch (err) {
-      deps.log(
-        `failed to persist root key to bootstrap.persist_to: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      deps.log(`failed to persist root key to bootstrap.persist_to: ${message}`);
+      if (deps.printOnce === false) {
+        try {
+          await deps.keyStore.deleteKey(ROOT_KEY_ID);
+          deps.log("rolled back generated root key after bootstrap.persist_to failure");
+        } catch (rollbackErr) {
+          deps.log(
+            `failed to roll back generated root key after bootstrap.persist_to failure: ${
+              rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)
+            }`,
+          );
+        }
+        throw new Error(
+          `failed to persist root key to bootstrap.persist_to and print_once is false: ${message}`,
+        );
+      }
     }
   }
 

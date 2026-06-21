@@ -97,12 +97,13 @@ describe("bootstrapRootKey", () => {
     expect(persisted).toEqual([fixed.plaintext]);
   });
 
-  it("a persist failure is logged but does not abort the mint (review H1)", async () => {
+  it("a persist failure is logged but does not abort the mint when the key is still printed (review H1)", async () => {
     const keyStore = freshKeyStore();
+    const fixed = generateKey();
     const logs: string[] = [];
     const res = await bootstrapRootKey({
       keyStore,
-      generateKey,
+      generateKey: () => fixed,
       now: () => new Date(),
       log: (l) => logs.push(l),
       persist: async () => {
@@ -112,6 +113,26 @@ describe("bootstrapRootKey", () => {
     expect(res.created).toBe(true); // key still minted despite persist failure
     expect(await keyStore.list()).toHaveLength(1);
     expect(logs.some((l) => l.includes("failed to persist"))).toBe(true);
+    expect(logs.some((l) => l.includes(fixed.plaintext))).toBe(true);
+  });
+
+  it("persist failure + print_once:false rolls back the root key and fails closed", async () => {
+    const keyStore = freshKeyStore();
+    const logs: string[] = [];
+    await expect(
+      bootstrapRootKey({
+        keyStore,
+        generateKey,
+        now: () => new Date(),
+        log: (l) => logs.push(l),
+        printOnce: false,
+        persist: async () => {
+          throw new Error("disk full");
+        },
+      }),
+    ).rejects.toThrow("failed to persist root key");
+    expect(await keyStore.list()).toHaveLength(0);
+    expect(logs.some((l) => l.includes("rolled back"))).toBe(true);
   });
 
   it("is idempotent across restarts: existing key -> no-op", async () => {
