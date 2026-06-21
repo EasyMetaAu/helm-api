@@ -22,6 +22,27 @@ function recorder(failOn?: (stmt: string) => boolean) {
 }
 
 describe("runPgMigrations — per-migration atomicity", () => {
+  it("wraps the whole runner in a pg advisory lock", async () => {
+    const rec = recorder();
+    await runPgMigrations(rec);
+
+    const lock = rec.stmts.indexOf("SELECT pg_advisory_lock(1212501069, 1095780608)");
+    const createLedger = rec.stmts.findIndex((s) =>
+      s.startsWith("CREATE TABLE IF NOT EXISTS _migrations"),
+    );
+    const selectLedger = rec.stmts.indexOf("SELECT version FROM _migrations");
+    const firstBegin = rec.stmts.indexOf("BEGIN");
+    const lastCommit = rec.stmts.lastIndexOf("COMMIT");
+    const unlock = rec.stmts.lastIndexOf("SELECT pg_advisory_unlock(1212501069, 1095780608)");
+
+    expect(lock).toBe(0);
+    expect(lock).toBeLessThan(createLedger);
+    expect(createLedger).toBeLessThan(selectLedger);
+    expect(selectLedger).toBeLessThan(firstBegin);
+    expect(lastCommit).toBeLessThan(unlock);
+    expect(unlock).toBe(rec.stmts.length - 1);
+  });
+
   it("wraps each migration's statements + ledger INSERT in a transaction", async () => {
     const rec = recorder();
     await runPgMigrations(rec);
@@ -43,6 +64,10 @@ describe("runPgMigrations — per-migration atomicity", () => {
     const rec = recorder((s) => s.startsWith("CREATE TABLE IF NOT EXISTS api_keys"));
     await expect(runPgMigrations(rec)).rejects.toThrow(/boom/);
     expect(rec.stmts).toContain("ROLLBACK");
+    expect(rec.stmts.indexOf("ROLLBACK")).toBeLessThan(
+      rec.stmts.lastIndexOf("SELECT pg_advisory_unlock(1212501069, 1095780608)"),
+    );
+    expect(rec.stmts.at(-1)).toBe("SELECT pg_advisory_unlock(1212501069, 1095780608)");
     // The version-1 ledger INSERT must NOT have been issued.
     expect(rec.stmts.some((s) => /INSERT INTO _migrations.*VALUES \(1,/.test(s))).toBe(false);
   });
@@ -214,7 +239,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 
-  it("upgrades a real pre-v20 memory_messages table: dedupes + adds the unique index", async () => {
+  it("upgrades a real pre-v20 memory_messages table: preserves repeated turns + adds the unique index", async () => {
     const client = new PGlite();
     const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
     await db.execute(
@@ -261,11 +286,13 @@ describe("runPgMigrations — per-migration atomicity", () => {
 
     await expect(runPgMigrations(db)).resolves.toBeUndefined();
 
-    // dup group collapsed to its earliest row; distinct row kept.
+    // Legacy rows lack occurrence keys, so repeated content must be preserved.
+    // The migration cannot safely distinguish duplicate ingest from a user who
+    // genuinely repeated the same message at different transcript positions.
     const rows = (await db.execute(sql.raw("SELECT id FROM memory_messages ORDER BY id"))) as {
       rows: Array<{ id: string }>;
     };
-    expect(rows.rows.map((r) => r.id)).toEqual(["first", "other"]);
+    expect(rows.rows.map((r) => r.id)).toEqual(["first", "other", "second", "third"]);
 
     // The UNIQUE index rejects a duplicate (thread_id, message_index, role, content_hash).
     await db.execute(

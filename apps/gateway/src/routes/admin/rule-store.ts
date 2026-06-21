@@ -30,24 +30,61 @@ export function createRuntimeRuleStore(init: RuntimeRuleStoreInit): RuleStore {
   let lanes = init.lanes;
   let policies = init.policies;
   let classifier = init.classifier;
+
+  let mutationQueue: Promise<void> = Promise.resolve();
+
+  function serialize<T>(work: () => Promise<T>): Promise<T> {
+    const run = mutationQueue.then(work, work);
+    mutationQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  async function applyLanes(next: Record<string, Lane>): Promise<Record<string, Lane>> {
+    await init.persistLanes?.(next);
+    lanes = next;
+    init.onLanes?.(next);
+    return lanes;
+  }
+
+  async function applyPolicies(next: PoliciesConfig): Promise<PoliciesConfig> {
+    await init.persistPolicies?.(next);
+    policies = next;
+    init.onPolicies?.(next);
+    return policies;
+  }
+
+  async function applyClassifier(next: ClassifierConfig): Promise<ClassifierConfig> {
+    await init.persistClassifier?.(next);
+    classifier = next;
+    init.onClassifier?.(next);
+    return classifier;
+  }
+
   return {
     getLanes: async () => lanes,
     setLanes: async (next) => {
-      await init.persistLanes?.(next);
-      lanes = next;
-      init.onLanes?.(next);
+      await serialize(() => applyLanes(next));
     },
+    updateLanes: async (mutate) =>
+      serialize(async () => {
+        const next = await mutate(structuredClone(lanes) as Record<string, Lane>);
+        return applyLanes(next);
+      }),
     getPolicies: async () => policies,
     setPolicies: async (next) => {
-      await init.persistPolicies?.(next);
-      policies = next;
-      init.onPolicies?.(next);
+      await serialize(() => applyPolicies(next));
     },
+    updatePolicies: async (mutate) =>
+      serialize(async () => {
+        const next = await mutate(structuredClone(policies) as PoliciesConfig);
+        return applyPolicies(next);
+      }),
     getClassifier: async () => classifier,
     setClassifier: async (next) => {
-      await init.persistClassifier?.(next);
-      classifier = next;
-      init.onClassifier?.(next);
+      await serialize(() => applyClassifier(next));
     },
   };
 }

@@ -12,7 +12,8 @@ import { aggregateSignals } from "./aggregate.js";
 //
 // fail-open (principle 3): aggregation/read/write failures only LOG; `collect`
 // never rejects, so a flaky signal store can never 5xx a served request or stall
-// the next request. The worst case is one skipped window plus a warning.
+// the next request. The scheduler can retry ok:false windows without treating a
+// successful empty window as a failure.
 
 export interface SignalCollectorDeps {
   telemetry: TelemetryStore; // read already-persisted decision records (windowed)
@@ -24,8 +25,9 @@ export interface SignalCollectorDeps {
 
 export interface SignalCollector {
   // Aggregate [windowStart, windowEnd) and upsert. Returns how many signals were
-  // written (0 on an empty window OR on any swallowed failure). Never throws.
-  collect(windowStart: number, windowEnd: number): Promise<{ written: number }>;
+  // written. ok=false distinguishes a swallowed failure from a successful empty
+  // window so the scheduler can retry the same range instead of skipping telemetry.
+  collect(windowStart: number, windowEnd: number): Promise<{ written: number; ok: boolean }>;
 }
 
 export function createSignalCollector(deps: SignalCollectorDeps): SignalCollector {
@@ -35,25 +37,25 @@ export function createSignalCollector(deps: SignalCollectorDeps): SignalCollecto
     async collect(windowStart, windowEnd) {
       try {
         const records = await deps.telemetry.queryWindow(windowStart, windowEnd);
-        if (records.length === 0) return { written: 0 };
+        if (records.length === 0) return { written: 0, ok: true };
 
         const signals = aggregateSignals(records, windowStart, windowEnd);
         // Stamp updatedAt with the collector's clock (aggregate uses windowEnd as
         // a deterministic default; the collector owns the real wall-clock).
         const stamped = signals.map((s) => ({ ...s, updatedAt: deps.now() }));
-        if (stamped.length === 0) return { written: 0 };
+        if (stamped.length === 0) return { written: 0, ok: true };
 
         await deps.signals.upsertSignals(stamped);
-        return { written: stamped.length };
+        return { written: stamped.length, ok: true };
       } catch (err) {
         // fail-open: a background signal failure must never propagate to the main
-        // path. Record and move on (the window is simply skipped this cycle).
+        // path. Return ok:false so the scheduler can retry this window.
         log("warn", "signals.collect_failed", {
           windowStart,
           windowEnd,
           error: err instanceof Error ? err.message : String(err),
         });
-        return { written: 0 };
+        return { written: 0, ok: false };
       }
     },
   };

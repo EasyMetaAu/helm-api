@@ -53,4 +53,15 @@ describe("startCleanupScheduler", () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(runTick).not.toHaveBeenCalled();
   });
+
+  it("reschedule() applies a new interval without restarting the process", async () => {
+    const runTick = vi.fn(async () => {});
+    const h = startCleanupScheduler({ intervalMs: 1000, runTick });
+    h.reschedule(5000);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(runTick).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(runTick).toHaveBeenCalledTimes(1);
+    h.stop();
+  });
 });

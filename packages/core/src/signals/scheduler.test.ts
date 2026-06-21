@@ -8,7 +8,7 @@ function fakeCollector(): SignalCollector & { calls: Array<[number, number]> } {
     calls,
     async collect(ws, we) {
       calls.push([ws, we]);
-      return { written: 0 };
+      return { written: 0, ok: true };
     },
   };
 }
@@ -43,6 +43,45 @@ describe("startSignalScheduler", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       // no further collects after stop()
       expect(collector.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries the same window after a swallowed collector failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: Array<[number, number]> = [];
+      const results = [
+        { written: 0, ok: false },
+        { written: 0, ok: true },
+        { written: 0, ok: true },
+      ];
+      let t = 100_000;
+      const handle = startSignalScheduler({
+        collector: {
+          async collect(ws, we) {
+            calls.push([ws, we]);
+            return results.shift() ?? { written: 0, ok: true };
+          },
+        },
+        intervalMs: 1_000,
+        now: () => t,
+      });
+
+      t = 101_000;
+      await vi.advanceTimersByTimeAsync(1_000);
+      t = 102_000;
+      await vi.advanceTimersByTimeAsync(1_000);
+      t = 103_000;
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(calls).toEqual([
+        [100_000, 101_000],
+        [100_000, 101_000],
+        [101_000, 103_000],
+      ]);
+      handle.stop();
     } finally {
       vi.useRealTimers();
     }

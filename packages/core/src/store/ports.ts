@@ -128,9 +128,9 @@ export interface CreateKeyInput {
   degradeLane?: string;
   // Max in-flight requests (issue #93). Omitted => stored NULL => unlimited.
   concurrencyLimit?: number;
-  // Per-key memory defaults (issue #97). Omitted => the keystore mints the NEW-KEY
-  // defaults (mode "inject", project none, thread_source "auto"); pass these
-  // explicitly to opt out. Explicit x-memory-* headers always override.
+  // Per-key memory defaults. Omitted => fail-safe NEW-KEY defaults (mode "off",
+  // project none, thread_source "auto"); pass memoryMode explicitly to opt in.
+  // Explicit x-memory-* headers always override.
   memoryMode?: "off" | "observe" | "inject";
   memoryProjectId?: string;
   memoryThreadSource?: "header" | "auto";

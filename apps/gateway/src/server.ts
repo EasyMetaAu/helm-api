@@ -8,6 +8,7 @@ import {
   bootstrapRootKey,
   COPILOT_HEADERS,
   type ConfigStore,
+  type CreateKeyInput,
   checkTlsTransportAvailable,
   createAnthropicClient,
   createBudgetGate,
@@ -32,6 +33,7 @@ import {
   type DecayDeps,
   discoverOAuthModels,
   type GeminiGenerateContentResponse,
+  type GeneratedKey,
   geminiTransformer,
   generateKey,
   getGitHubCopilotBaseUrl,
@@ -120,6 +122,7 @@ import {
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { anthropicMetadataUserId, stableSessionId } from "./oauth/device-identity.js";
 import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
+import { createResponsesRegistry } from "./responses-registry.js";
 import { createArchiveFsAccess } from "./routes/admin/cleanup-fs.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createOAuthAccountTester, type OAuthTester } from "./routes/admin/oauth-test.js";
@@ -136,11 +139,7 @@ import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
 import { registerModelsRoute } from "./routes/models.js";
-import {
-  type ResponsesRegistryRecord,
-  type ResponsesRouteDeps,
-  registerResponsesRoute,
-} from "./routes/responses.js";
+import { type ResponsesRouteDeps, registerResponsesRoute } from "./routes/responses.js";
 import {
   markServingAccount,
   type ServingAccount,
@@ -240,6 +239,24 @@ export function buildRegistry(
     });
   }
   return createProviderRegistry(cfgs);
+}
+
+export function buildInternalLlmKeyInput(k: GeneratedKey): CreateKeyInput {
+  return {
+    keyId: INTERNAL_API_KEY_ID,
+    hash: k.hash,
+    prefix: k.prefix,
+    accountId: "default",
+    role: "user",
+    name: "internal-llm",
+    allowCustomModel: true,
+    // Internal memory/eval self-calls must not recursively observe themselves.
+    memoryMode: "off",
+    memoryThreadSource: "header",
+    // 0 is the per-key rate-limit sentinel for explicitly unlimited.
+    rateLimitRpm: 0,
+    rateLimitTpm: 0,
+  };
 }
 
 // A resolved provider credential, ready to splice into a ProviderConfig. Either a
@@ -960,9 +977,11 @@ export async function buildServer(
       tpm: settings.rate_limit_default_tpm,
     },
   };
+  let cleanupScheduler: ReturnType<typeof startCleanupScheduler> | null = null;
   // Apply a new settings object live: re-bind `settings`, push the log level into
   // the logger, flip the rate-limit master switch, and retune the system-default
-  // quota. Called by the admin settings route after it validates + persists.
+  // quota. Cleanup cadence is also rescheduled live so the admin setting is not
+  // restart-only. Called by the admin settings route after it validates + persists.
   const applySettings = (next: RuntimeSettings): void => {
     settings = next;
     logger.setLevel?.(next.log_level);
@@ -971,6 +990,7 @@ export async function buildServer(
       rpm: next.rate_limit_default_rpm,
       tpm: next.rate_limit_default_tpm,
     };
+    cleanupScheduler?.reschedule(next.cleanup_interval_hours * 3_600_000);
   };
   // Data cleanup / archival composition (admin "Data cleanup" + the scheduled sweep
   // below). The archive sink writes verified gzip-JSONL under HELM_ARCHIVE_DIR
@@ -1112,9 +1132,10 @@ export async function buildServer(
   // internal key (fixed id k_internal, re-minted each boot since the plaintext is
   // unrecoverable) and hold its plaintext ONLY in-process. role:user + allow_custom_model
   // is the minimal privilege (explicit model/lane passthrough); memory_mode:off prevents
-  // the self-call from being observed. Fail-open: a mint failure leaves selfHttpClient null
-  // → direct provider calls (byte-identical to the pre-self-http path), so a broken key
-  // store degrades internal LLM but never blocks boot.
+  // the self-call from being observed; per-key rate limits are explicitly unlimited so
+  // memory/eval background calls do not consume user-facing RPM/TPM. Fail-open: a mint
+  // failure leaves selfHttpClient null → direct provider calls (byte-identical to the
+  // pre-self-http path), so a broken key store degrades internal LLM but never blocks boot.
   let internalApiKey: string | null = null;
   try {
     if ((await keyStore.list()).some((k) => k.key_id === INTERNAL_API_KEY_ID)) {
@@ -1122,17 +1143,7 @@ export async function buildServer(
       await keyStore.deleteKey(INTERNAL_API_KEY_ID);
     }
     const k = generateKey();
-    await keyStore.createKey({
-      keyId: INTERNAL_API_KEY_ID,
-      hash: k.hash,
-      prefix: k.prefix,
-      accountId: "default",
-      role: "user",
-      name: "internal-llm",
-      allowCustomModel: true,
-      memoryMode: "off",
-      memoryThreadSource: "header",
-    });
+    await keyStore.createKey(buildInternalLlmKeyInput(k));
     internalApiKey = k.plaintext;
     logger.log("info", "internal_llm.key_minted", { key_id: INTERNAL_API_KEY_ID });
   } catch (err) {
@@ -2201,52 +2212,7 @@ export async function buildServer(
     }
     return null;
   };
-  const responsesRegistryStore = new Map<string, ResponsesRegistryRecord>();
-  // Bound the process-local registry: expired/deleted entries are swept periodically
-  // (not only on a same-id get), and a hard cap evicts the oldest insertions so a
-  // long-running gateway that creates many never-retrieved response ids cannot grow
-  // without limit. (Best-effort, single-process; a Store-backed registry would persist.)
-  const REGISTRY_MAX_ENTRIES = 10_000;
-  const REGISTRY_PRUNE_EVERY = 256;
-  let registryPutsSincePrune = 0;
-  const pruneResponsesRegistry = (now: number): void => {
-    for (const [id, record] of responsesRegistryStore) {
-      if (record.expiresAt <= now || record.status === "deleted") {
-        responsesRegistryStore.delete(id);
-      }
-    }
-    if (responsesRegistryStore.size > REGISTRY_MAX_ENTRIES) {
-      let excess = responsesRegistryStore.size - REGISTRY_MAX_ENTRIES;
-      for (const id of responsesRegistryStore.keys()) {
-        if (excess <= 0) break;
-        responsesRegistryStore.delete(id); // Map preserves insertion order → drop oldest
-        excess -= 1;
-      }
-    }
-  };
-  const responsesRegistry: ResponsesRouteDeps["registry"] = {
-    put(record) {
-      responsesRegistryStore.set(record.responseId, record);
-      registryPutsSincePrune += 1;
-      if (
-        registryPutsSincePrune >= REGISTRY_PRUNE_EVERY ||
-        responsesRegistryStore.size > REGISTRY_MAX_ENTRIES
-      ) {
-        registryPutsSincePrune = 0;
-        pruneResponsesRegistry(Date.now());
-      }
-    },
-    get(responseId, identity) {
-      const record = responsesRegistryStore.get(responseId);
-      if (record === undefined) return null;
-      if (record.accountId !== identity.accountId || record.keyId !== identity.keyId) return null;
-      if (record.expiresAt <= Date.now() || record.status === "deleted") {
-        responsesRegistryStore.delete(responseId);
-        return null;
-      }
-      return record;
-    },
-  };
+  const responsesRegistry: ResponsesRouteDeps["registry"] = createResponsesRegistry(store.config);
   const responsesLifecycleUnsupported = (operation: string): HelmHttpError =>
     new HelmHttpError(
       makeHelmError({
@@ -2556,12 +2522,11 @@ export async function buildServer(
 
   // Data-cleanup scheduler — the OFF-the-request-path retention/archival sweep
   // (telemetry/payload/memory pruning + archive). DELIBERATELY separate from the 60s
-  // memory worker: cleanup is a heavier hour/day-cadence pass. The interval is read
-  // from settings at boot (a runtime change to cleanup_interval_hours applies on the
-  // next restart); the live cleanup_enabled master switch is checked inside the tick,
-  // so toggling it off freezes deletion without a restart. fail-open + unref'd.
+  // memory worker: cleanup is a heavier hour/day-cadence pass. The interval is seeded
+  // from settings at boot and rescheduled by applySettings on admin save; the live
+  // cleanup_enabled master switch is checked inside the tick, so toggling it off
+  // freezes deletion without a restart. fail-open + unref'd.
   // Disabled wholesale by HELM_CLEANUP_DISABLED=1 (tests default to off).
-  let cleanupScheduler: { stop: () => void } | null = null;
   if (process.env.HELM_CLEANUP_DISABLED !== "1") {
     const hours = settings.cleanup_interval_hours;
     cleanupScheduler = startCleanupScheduler({

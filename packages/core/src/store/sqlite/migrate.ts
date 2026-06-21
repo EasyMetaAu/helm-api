@@ -479,9 +479,10 @@ const MIGRATIONS: readonly Migration[] = [
     // O(n²) (97% duplicate rows in prod) and starved the observer (re-inserted
     // rows get new ids, never covered by old observations → endless re-compaction).
     // Steps, ORDERED: (a) add nullable message_index/content_hash columns;
-    // (b) collapse legacy exact duplicates keeping the EARLIEST row per
-    // (thread_id, role, content) because old rows have no transcript position;
-    // (c) the UNIQUE boundary the write path targets via ON CONFLICT DO NOTHING.
+    // (b) collapse only complete occurrence-key collisions; legacy rows with no
+    // occurrence key are preserved because duplicate ingest is indistinguishable
+    // from legitimate repeated turns; (c) the UNIQUE boundary the write path
+    // targets via ON CONFLICT DO NOTHING.
     // Historical rows keep NULL hashes/indexes until the ops script backfills them;
     // NULLs are DISTINCT in sqlite unique indexes, so the index still builds.
     version: 21,
@@ -495,10 +496,12 @@ const MIGRATIONS: readonly Migration[] = [
         SELECT rowid FROM (
           SELECT rowid,
                  ROW_NUMBER() OVER (
-                   PARTITION BY thread_id, role, content
+                   PARTITION BY thread_id, message_index, role, content_hash
                    ORDER BY created_at ASC, id ASC
                  ) AS rn
           FROM memory_messages
+          WHERE message_index IS NOT NULL
+            AND content_hash IS NOT NULL
         )
         WHERE rn > 1
       );

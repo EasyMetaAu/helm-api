@@ -26,6 +26,10 @@ export function defaultSettingsFromConfig(config: HelmConfig): RuntimeSettings {
   });
 }
 
+function privacySafeFallback(defaults: RuntimeSettings): RuntimeSettings {
+  return { ...defaults, capture_payloads: false };
+}
+
 // Read the persisted runtime settings, overlaying them on the config-seeded
 // defaults (persisted fields WIN; defaults fill any omitted field). Fail-OPEN on
 // read: a missing row, malformed JSON, or a row that no longer matches the schema
@@ -46,14 +50,14 @@ export async function loadRuntimeSettings(
     parsedJson = JSON.parse(raw);
   } catch {
     log?.("warn", "settings.load_fallback", { reason: "invalid_json" });
-    return defaults;
+    return privacySafeFallback(defaults);
   }
 
   const overlay = parsedJson && typeof parsedJson === "object" ? parsedJson : {};
   const merged = RuntimeSettingsSchema.safeParse({ ...defaults, ...overlay });
   if (!merged.success) {
     log?.("warn", "settings.load_fallback", { reason: "schema_mismatch" });
-    return defaults;
+    return privacySafeFallback(defaults);
   }
   return merged.data;
 }

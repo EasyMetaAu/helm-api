@@ -8,6 +8,7 @@ import {
 } from "@helm/core";
 import type { OAuthQuotaWindow } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getAccountSettings, loadAccountSettings } from "./account-settings.js";
 import { createOAuthAdmin } from "./admin-oauth.js";
 
 const KEY = Buffer.alloc(32, 4);
@@ -211,9 +212,9 @@ describe("createOAuthAdmin", () => {
     expect(decryptSecret(row?.accessEnc ?? "", KEY)).toContain("proxy-ep=");
   });
 
-  it("logout deletes the stored credential", async () => {
-    const store = makeStore();
-    await store.upsert({
+  it("logout deletes the stored credential and clears that account's settings", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
       providerId: "anthropic",
       account: "default",
       accessEnc: "v1:a",
@@ -222,9 +223,28 @@ describe("createOAuthAdmin", () => {
       meta: null,
       updatedAt: 1,
     });
-    const admin = createOAuthAdmin({ store, encKey: KEY, config: makeConfig() });
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+    await admin.setAccountProxy({
+      providerId: "anthropic",
+      account: "default",
+      proxy: { type: "socks5", host: "10.0.0.1", port: 1080, password: "secret" },
+    });
+    await admin.setEnabledModels({
+      providerId: "github-copilot",
+      account: "other",
+      models: ["gpt-4o"],
+    });
+
     await admin.logout({ providerId: "anthropic", account: "default" });
-    expect(await store.get("anthropic", "default")).toBeNull();
+    expect(await tokens.get("anthropic", "default")).toBeNull();
+    const map = await loadAccountSettings(config, KEY);
+    expect(getAccountSettings(map, "anthropic", "default")).toEqual({});
+    expect(getAccountSettings(map, "github-copilot", "other")).toEqual({
+      enabledModels: ["gpt-4o"],
+    });
+    expect(decryptSecret((await config.get("oauth.account_settings")) ?? "", KEY)).not.toContain(
+      "secret",
+    );
   });
 
   it("rejects an unknown/expired session", async () => {

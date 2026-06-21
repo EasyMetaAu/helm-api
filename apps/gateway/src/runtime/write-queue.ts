@@ -155,17 +155,25 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
 
   // Drop the oldest buffered insert to stay under maxDepth. Tasks are never dropped
   // mid-chain (they're already scheduled); only buffered inserts are shed.
-  const shedIfOverflow = (): void => {
-    if (depth() < maxDepth) return;
+  const shedBufferedWrite = (): boolean => {
     if (telemetryBuf.length >= payloadBuf.length && telemetryBuf.length > 0) telemetryBuf.shift();
     else if (payloadBuf.length > 0) payloadBuf.shift();
+    else return false;
     log("writequeue.overflow");
+    return true;
+  };
+
+  const admitBufferedWrite = (): boolean => {
+    if (depth() < maxDepth) return true;
+    if (shedBufferedWrite() && depth() < maxDepth) return true;
+    log("writequeue.overflow");
+    return false;
   };
 
   return {
     enqueueTelemetry(input: InsertTelemetryInput): void {
       if (stopped) return;
-      shedIfOverflow();
+      if (!admitBufferedWrite()) return;
       telemetryBuf.push(input);
       if (telemetryBuf.length >= maxBatch) void doFlush();
       else scheduleTimer();
@@ -173,7 +181,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
 
     enqueuePayload(input: InsertPayloadInput): void {
       if (stopped) return;
-      shedIfOverflow();
+      if (!admitBufferedWrite()) return;
       payloadBuf.push(input);
       if (payloadBuf.length >= maxBatch) void doFlush();
       else scheduleTimer();

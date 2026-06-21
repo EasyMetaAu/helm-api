@@ -40,8 +40,14 @@ import type { OAuthTester } from "./oauth-test.js";
 export interface RuleStore {
   getLanes(): Promise<Record<string, Lane>>;
   setLanes(lanes: Record<string, Lane>): Promise<void>;
+  updateLanes(
+    mutate: (current: Record<string, Lane>) => Record<string, Lane> | Promise<Record<string, Lane>>,
+  ): Promise<Record<string, Lane>>;
   getPolicies(): Promise<PoliciesConfig>;
   setPolicies(policies: PoliciesConfig): Promise<void>;
+  updatePolicies(
+    mutate: (current: PoliciesConfig) => PoliciesConfig | Promise<PoliciesConfig>,
+  ): Promise<PoliciesConfig>;
   getClassifier(): Promise<ClassifierConfig>;
   setClassifier(cfg: ClassifierConfig): Promise<void>;
 }

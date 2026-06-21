@@ -187,6 +187,55 @@ function statusFromResponseBody(body: Record<string, unknown>): string {
   return typeof body.status === "string" && body.status.length > 0 ? body.status : "completed";
 }
 
+function streamStatusFromEventName(eventName: string): string | null {
+  switch (eventName) {
+    case "response.created":
+      return "in_progress";
+    case "response.in_progress":
+      return "in_progress";
+    case "response.completed":
+      return "completed";
+    case "response.incomplete":
+      return "incomplete";
+    case "response.failed":
+      return "failed";
+    case "response.cancelled":
+      return "cancelled";
+    default:
+      return null;
+  }
+}
+
+function responseSnapshotFromStreamFrame(
+  eventName: string,
+  data: string,
+): { responseId: string | null; status: string | null } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return { responseId: null, status: streamStatusFromEventName(eventName) };
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return { responseId: null, status: streamStatusFromEventName(eventName) };
+  }
+  const record = parsed as Record<string, unknown>;
+  const response = record.response;
+  const responseRecord =
+    typeof response === "object" && response !== null
+      ? (response as Record<string, unknown>)
+      : record;
+  const responseId =
+    typeof responseRecord.id === "string" && responseRecord.id.length > 0
+      ? responseRecord.id
+      : null;
+  const status =
+    typeof responseRecord.status === "string" && responseRecord.status.length > 0
+      ? responseRecord.status
+      : streamStatusFromEventName(eventName);
+  return { responseId, status };
+}
+
 function isUsableRegistryRecord(record: ResponsesRegistryRecord): boolean {
   if (record.expiresAt <= Date.now()) return false;
   return record.status !== "deleted";
@@ -528,6 +577,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         // 0 = disabled (today's behavior).
         const heartbeatMs = deps.sseHeartbeatMs?.() ?? 0;
         let lastWrite: string | null = null;
+        let streamResponseId: string | null = null;
+        let streamStatus: string | null = null;
         try {
           result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
           for await (const item of withHeartbeat(result.streamIR(), {
@@ -549,6 +600,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     raw: (event as { raw?: string }).raw,
                   }
                 : { ...deps.transformer.transformStreamOut(event), raw: undefined };
+            const snapshot = responseSnapshotFromStreamFrame(frame.event, frame.data);
+            if (snapshot.responseId !== null) streamResponseId = snapshot.responseId;
+            if (snapshot.status !== null) streamStatus = snapshot.status;
             const raw = frame.raw;
             if (captureBodies)
               captured.push(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
@@ -606,6 +660,29 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
             );
+          }
+          if (deps.registry !== undefined && result !== null && streamResponseId !== null) {
+            const attempt = successfulAttempt(result.decision);
+            await deps.registry.put({
+              responseId: streamResponseId,
+              accountId: identity.accountId,
+              keyId: identity.keyId,
+              providerAlias: typeof attempt?.alias === "string" ? attempt.alias : null,
+              providerName:
+                typeof attempt?.provider_name === "string" ? attempt.provider_name : null,
+              providerModel:
+                typeof attempt?.provider_model === "string" ? attempt.provider_model : null,
+              providerProtocol:
+                attempt?.target_provider_protocol === "openai_chat" ||
+                attempt?.target_provider_protocol === "anthropic_messages" ||
+                attempt?.target_provider_protocol === "openai_responses" ||
+                attempt?.target_provider_protocol === "gemini"
+                  ? attempt.target_provider_protocol
+                  : null,
+              createdAt: Date.now(),
+              expiresAt: Date.now() + 86_400_000,
+              status: streamStatus ?? "completed",
+            });
           }
         }
       });

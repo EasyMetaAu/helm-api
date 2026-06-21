@@ -35,7 +35,12 @@ import type {
   OAuthAdminAccess,
   OAuthAdminStatus,
 } from "../routes/admin/deps.js";
-import { getAccountSettings, loadAccountSettings, setAccountSettings } from "./account-settings.js";
+import {
+  clearAccountSettings,
+  getAccountSettings,
+  loadAccountSettings,
+  setAccountSettings,
+} from "./account-settings.js";
 import { effectiveAccountModels } from "./effective-models.js";
 
 // Admin OAuth-login orchestration (issue #38) — the implementation behind the
@@ -451,6 +456,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
 
     async logout({ providerId, account }) {
       await deps.store.delete(providerId, account);
+      await clearAccountSettings(deps.config, deps.encKey, providerId, account);
     },
 
     async listModels({ providerId, account }) {

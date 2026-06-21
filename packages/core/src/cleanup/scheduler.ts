@@ -20,12 +20,14 @@ export interface CleanupSchedulerDeps {
 }
 
 export interface CleanupSchedulerHandle {
+  reschedule(intervalMs: number): void;
   stop(): void;
 }
 
 export function startCleanupScheduler(deps: CleanupSchedulerDeps): CleanupSchedulerHandle {
   const log = deps.log ?? (() => {});
   let running = false;
+  let timer: ReturnType<typeof setInterval> | null = null;
 
   const tick = () => {
     // Skip if a previous (slow) sweep is still running — never overlap passes.
@@ -46,12 +48,23 @@ export function startCleanupScheduler(deps: CleanupSchedulerDeps): CleanupSchedu
       });
   };
 
-  const timer = setInterval(tick, deps.intervalMs);
-  (timer as { unref?: () => void }).unref?.();
+  const schedule = (intervalMs: number): void => {
+    if (timer !== null) clearInterval(timer);
+    timer = setInterval(tick, intervalMs);
+    (timer as { unref?: () => void }).unref?.();
+  };
+
+  schedule(deps.intervalMs);
 
   return {
+    reschedule(intervalMs: number) {
+      schedule(intervalMs);
+    },
     stop() {
-      clearInterval(timer);
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
     },
   };
 }

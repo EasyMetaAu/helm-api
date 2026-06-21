@@ -51,8 +51,13 @@ const ResponsesOutputTextSchema = z
 const ResponsesInputImageSchema = z
   .object({
     type: z.literal("input_image"),
-    image_url: z.string().optional(),
     // some clients nest { url } — tolerate both
+    image_url: z
+      .union([
+        z.string(),
+        z.object({ url: z.string(), detail: z.string().optional() }).passthrough(),
+      ])
+      .optional(),
     detail: z.string().optional(),
   })
   .passthrough();
@@ -328,10 +333,13 @@ function foldContentPart(part: z.infer<typeof ResponsesContentPartSchema>): IRCo
       return { type: "text", text: (part as { text: string }).text };
     case "input_image": {
       const p = part as z.infer<typeof ResponsesInputImageSchema>;
+      const nested =
+        typeof p.image_url === "object" && p.image_url !== null ? p.image_url : undefined;
+      const detail = p.detail ?? nested?.detail;
       return {
         type: "image",
-        url: p.image_url ?? "",
-        ...(p.detail !== undefined ? { detail: p.detail } : {}),
+        url: typeof p.image_url === "string" ? p.image_url : (nested?.url ?? ""),
+        ...(detail !== undefined ? { detail } : {}),
       };
     }
     case "input_audio": {

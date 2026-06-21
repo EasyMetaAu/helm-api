@@ -1,4 +1,4 @@
-import { createSqliteDb, SqliteConfigStore } from "@helm/core";
+import { type ConfigStore, createSqliteDb, SqliteConfigStore } from "@helm/core";
 import { describe, expect, it } from "vitest";
 import { getAccountSettings, loadAccountSettings, setAccountSettings } from "./account-settings.js";
 
@@ -6,6 +6,30 @@ const KEY = Buffer.alloc(32, 7);
 
 function makeConfig(): SqliteConfigStore {
   return new SqliteConfigStore(createSqliteDb(":memory:"));
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+class DelayedFirstSetConfig implements ConfigStore {
+  private readonly values = new Map<string, string>();
+  private setCalls = 0;
+  readonly firstSet = deferred();
+
+  async get(key: string): Promise<string | null> {
+    return this.values.get(key) ?? null;
+  }
+
+  async set(key: string, value: string): Promise<void> {
+    this.setCalls += 1;
+    if (this.setCalls === 1) await this.firstSet.promise;
+    this.values.set(key, value);
+  }
 }
 
 describe("account-settings", () => {
@@ -58,6 +82,27 @@ describe("account-settings", () => {
       enabledModels: ["claude-opus-4-6"],
     });
     // The unrelated account is untouched.
+    expect(getAccountSettings(map, "github-copilot", "default")).toEqual({
+      enabledModels: ["gpt-4o"],
+    });
+  });
+
+  it("serializes concurrent load-merge-save updates so unrelated accounts are preserved", async () => {
+    const config = new DelayedFirstSetConfig();
+    const first = setAccountSettings(config, KEY, "anthropic", "work", {
+      proxy: { type: "http", host: "proxy-a", port: 8080, password: "secret-a" },
+    });
+    const second = setAccountSettings(config, KEY, "github-copilot", "default", {
+      enabledModels: ["gpt-4o"],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    config.firstSet.resolve();
+    await Promise.all([first, second]);
+
+    const map = await loadAccountSettings(config, KEY);
+    expect(getAccountSettings(map, "anthropic", "work")).toEqual({
+      proxy: { type: "http", host: "proxy-a", port: 8080, password: "secret-a" },
+    });
     expect(getAccountSettings(map, "github-copilot", "default")).toEqual({
       enabledModels: ["gpt-4o"],
     });
