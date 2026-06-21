@@ -28,7 +28,12 @@ export const BootstrapConfigSchema = z.object({
 });
 
 export const AuthConfigSchema = z.object({
-  require_api_key: z.boolean().default(true),
+  // API-key auth is MANDATORY (spec / principle: 强制 API key 鉴权). Modeled as a
+  // literal `true` so a config that tries to disable it FAILS CLOSED at load (review
+  // H2) — previously this was a plain boolean that was never consulted, so
+  // `require_api_key: false` was silently ignored (a knob that lied). Auth is enforced
+  // unconditionally regardless; the field stays for forward-compat + explicit intent.
+  require_api_key: z.literal(true).default(true),
   bootstrap: BootstrapConfigSchema,
 });
 

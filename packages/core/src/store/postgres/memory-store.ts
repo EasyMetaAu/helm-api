@@ -337,6 +337,12 @@ export class PgMemoryStore implements MemoryStore {
         contentHash,
       });
     });
+    // Defensive (review H4): rows is built by a conditional push, and Drizzle's
+    // `.values([])` emits invalid SQL and THROWS. The dedup above always keeps the
+    // FIRST input, so rows is non-empty whenever inputs is — i.e. unreachable today —
+    // but guarding the insert keeps it robust if the dedup ever changes to drop the
+    // first row too. Cheaper than making every future editor re-prove the invariant.
+    if (rows.length === 0) return ids;
     await this.db
       .insert(memoryMessages)
       .values(rows)

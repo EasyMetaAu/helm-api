@@ -1,6 +1,6 @@
 import { DecisionRecordSchema, type InternalRequest } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
-import type { AttemptRecord } from "../executor/fallback.js";
+import type { AttemptRecord } from "../executor/attempt-record.js";
 import type { TelemetryStore } from "../store/ports.js";
 import {
   buildDecisionRecord,

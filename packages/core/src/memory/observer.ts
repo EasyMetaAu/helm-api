@@ -399,19 +399,25 @@ export async function runObserverJob(
       (sum, m) => (covered.has(m.id) ? sum : sum + Math.max(0, m.tokenEstimate)),
       0,
     );
-    const observationTokens = existing.reduce(
-      (sum, o) =>
-        (o.status ?? "active") === "active" && (o.expiredAt ?? null) === null
-          ? sum + Math.ceil(o.observationText.length / 4)
-          : sum,
+    // Pruned/archived observations are tombstones (text replaced with '[pruned]') and
+    // must NOT skew the compaction economics: counting them inflates priorCompactionCount
+    // (the distortion brake) forever and feeds 8-char '[pruned]' text into
+    // measuredRetention, distorting the kept/source ratio (review M5). The economics use
+    // ONLY active, unexpired observations; `covered` keeps the full set (it legitimately
+    // needs pruned ranges to know which raw messages are represented).
+    const activeObservations = existing.filter(
+      (o) => (o.status ?? "active") === "active" && (o.expiredAt ?? null) === null,
+    );
+    const observationTokens = activeObservations.reduce(
+      (sum, o) => sum + Math.ceil(o.observationText.length / 4),
       0,
     );
     const inputs: AutoCompactionInputs = {
       idle,
       tunables,
       pricing,
-      priorCompactionCount: existing.length,
-      measuredRetention: measuredRetention(all, existing),
+      priorCompactionCount: activeObservations.length,
+      measuredRetention: measuredRetention(all, activeObservations),
       threadTotalTokens: uncoveredTokens + observationTokens,
     };
 

@@ -27,6 +27,9 @@ function seedPreV26(): string {
   raw.exec("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);");
   const ins = raw.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, 1)");
   for (let v = 1; v <= 25; v += 1) ins.run(v);
+  // v26 is this test's target (runs); v27 indexes memory_jobs, absent from this
+  // oauth_quota-only fixture → pre-mark applied so only v26 runs.
+  ins.run(27);
   raw.exec(`
     CREATE TABLE oauth_quota (
       provider_id TEXT NOT NULL,

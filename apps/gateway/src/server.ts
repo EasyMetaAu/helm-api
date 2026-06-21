@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import {
   type AnthropicSSEEvent,
   anthropicTransformer,
@@ -1094,6 +1095,14 @@ export async function buildServer(
     generateKey,
     now: () => new Date(),
     log: (line) => logger.log("warn", "bootstrap.root_key", { line }),
+    // Honor the bootstrap knobs (review H1 — previously ignored): generate_if_missing
+    // gates auto-minting, print_once gates the log line, persist_to writes the freshly
+    // minted plaintext to the operator's file (0600, plaintext is the whole point).
+    generateIfMissing: config.auth.bootstrap.generate_if_missing,
+    printOnce: config.auth.bootstrap.print_once,
+    persist: async (plaintext) => {
+      await writeFile(config.auth.bootstrap.persist_to, `${plaintext}\n`, { mode: 0o600 });
+    },
   });
 
   // Internal LLM routing (ALWAYS ON): route memory + Layer-2 eval LLM calls BACK THROUGH

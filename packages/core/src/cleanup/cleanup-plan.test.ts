@@ -51,7 +51,10 @@ describe("buildCleanupPlan", () => {
   });
 
   it("only the training/audit tables carry archive=true, and only when the archive switch is on", () => {
-    const on = buildCleanupPlan(settings({ memory_messages_cleanup_enabled: true }), NOW);
+    const on = buildCleanupPlan(
+      settings({ memory_messages_cleanup_enabled: true, cleanup_archive_enabled: true }),
+      NOW,
+    );
     const archived = new Set(on.filter((a) => a.archive).map((a) => a.table));
     expect(archived).toEqual(
       new Set<CleanupTable>(["telemetry", "request_payloads", "memory_messages"]),
@@ -62,6 +65,24 @@ describe("buildCleanupPlan", () => {
 
     const off = buildCleanupPlan(settings({ cleanup_archive_enabled: false }), NOW);
     expect(off.every((a) => a.archive === false)).toBe(true);
+  });
+
+  it("archive actions carry a 2× safety horizon; delete-only / archive-off actions do not (H3)", () => {
+    const plan = buildCleanupPlan(
+      settings({ cleanup_archive_enabled: true, memory_messages_cleanup_enabled: true }),
+      NOW,
+    );
+    const byTable = new Map(plan.map((a) => [a.table, a] as const));
+    // window × 2: telemetry 90d→180d, payloads 30d→60d, memory_messages 180d→360d.
+    expect(byTable.get("telemetry")?.safetyCutoffMs).toBe(NOW - 180 * DAY);
+    expect(byTable.get("request_payloads")?.safetyCutoffMs).toBe(NOW - 60 * DAY);
+    expect(byTable.get("memory_messages")?.safetyCutoffMs).toBe(NOW - 360 * DAY);
+    // delete-only tables prune at cutoffMs already → no safety horizon.
+    expect(byTable.get("oauth_usage")?.safetyCutoffMs).toBeUndefined();
+    expect(byTable.get("memory_jobs")?.safetyCutoffMs).toBeUndefined();
+    // archive OFF → straight delete at the window is bounded → no horizon either.
+    const off = buildCleanupPlan(settings({ cleanup_archive_enabled: false }), NOW);
+    expect(off.every((a) => a.safetyCutoffMs === undefined)).toBe(true);
   });
 
   it("a disabled category contributes no action", () => {

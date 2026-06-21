@@ -42,6 +42,8 @@ function seedPreV21(): string {
   // v26 adds oauth_quota.usage_limited_until_ms; this fixture never creates
   // oauth_quota → pre-mark applied (out of scope).
   ins.run(26);
+  // v27 indexes memory_jobs; this memory_messages-only fixture never creates it → pre-mark.
+  ins.run(27);
   raw.exec(`
     CREATE TABLE memory_messages (
       id TEXT PRIMARY KEY,

@@ -141,12 +141,19 @@ export function createCircuitBreaker(deps: BreakerDeps): CircuitBreaker {
     recordFailure(model) {
       try {
         const e = get(model);
+        if (e.state === "OPEN") {
+          // Already tripped. A stray pre-first-chunk failure here (reachable only via
+          // the documented concurrent-probe window) must NOT re-run trip(): that resets
+          // openedAt and refreshes the cooldown indefinitely, so a sick provider would
+          // never reach a HALF_OPEN probe (review H7). No-op.
+          return;
+        }
         if (e.state === "HALF_OPEN") {
           // Probe failed: re-OPEN, refresh cooldown origin, release the lock.
           trip(e);
           return;
         }
-        // CLOSED (or OPEN): bump the consecutive-failure counter.
+        // CLOSED: bump the consecutive-failure counter.
         e.failures += 1;
         if (e.failures >= config.failureThreshold) trip(e);
       } catch {
@@ -165,10 +172,13 @@ export function createCircuitBreaker(deps: BreakerDeps): CircuitBreaker {
 
     recordAbort(model) {
       try {
-        // Non-provider fault: record neither failure nor success. But release
-        // any held probe lock so HALF_OPEN never deadlocks into a phantom OPEN.
+        // Non-provider fault: record neither failure nor success. Release the probe
+        // lock so HALF_OPEN never deadlocks into a phantom OPEN — but ONLY when actually
+        // HALF_OPEN (the only state that holds a lock). Clearing it in CLOSED/OPEN is a
+        // no-op today (trip/reset already cleared it); gating keeps a stray abort from
+        // ever releasing a lock it doesn't own if the state model grows (review M4).
         const e = get(model);
-        e.inFlightProbe = false;
+        if (e.state === "HALF_OPEN") e.inFlightProbe = false;
       } catch {
         // fail-open.
       }

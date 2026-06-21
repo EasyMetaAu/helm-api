@@ -229,8 +229,9 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // v23 adds request_payloads.upstream_request_json (table absent here) → pre-mark.
     // v24 (telemetry.generation_ms): no telemetry table here → pre-mark applied.
     // v25 adds oauth_quota.usage_limited_until_ms (oauth_quota absent here) → pre-mark.
+    // v26 (idx_memory_jobs_claim): no memory_jobs table in this messages fixture → pre-mark.
     for (const version of [
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26,
     ]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),

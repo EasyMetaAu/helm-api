@@ -212,7 +212,7 @@ export function detectRequestModalities(req: InternalRequest): {
 }
 
 function isAbort(err: unknown, signal: AbortSignal): boolean {
-  // Mirror executor/fallback isAbort: rely ONLY on signal.aborted and the raw
+  // Canonical isAbort: rely ONLY on signal.aborted and the raw
   // AbortError name. A message merely containing "aborted" is NOT an abort (an
   // upstream error string can say "aborted upstream"); openai.ts rethrows the
   // raw AbortError on a real client disconnect, so the name check is sufficient.
@@ -1007,7 +1007,11 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             final: {
               status: "error",
               error: makeHelmError({
-                error_class: "upstream_error",
+                // C2: client disconnect is a NON-provider fault — surface the
+                // dedicated client_abort class (499), never upstream_error (502),
+                // so telemetry/dashboards don't count a disconnect as a provider
+                // failure. Matches the per-attempt row above (docs/02, docs/07).
+                error_class: "client_abort",
                 message: "client aborted request",
                 trace_id: req.request_id,
               }),
@@ -1145,8 +1149,16 @@ async function peekStream(
   const iterator = iterable[Symbol.asyncIterator]();
   const first = await iterator.next(); // may throw (pre-first-chunk failure)
 
+  // Empty stream: a 200 SSE body that closed with NO chunk at all is NOT a valid first
+  // chunk. Without this, the caller would recordSuccess — HEALING an OPEN breaker and
+  // returning an empty body as ok, masking a sick upstream (review H8). Treat it as a
+  // pre-first-chunk failure so the caller records a breaker FAILURE and advances the chain.
+  if (first.done) {
+    throw new UpstreamError("upstream_error", "upstream returned an empty stream");
+  }
+
   return (async function* relay(): AsyncGenerator<string> {
-    if (!first.done && first.value !== undefined) yield first.value;
+    if (first.value !== undefined) yield first.value;
     try {
       while (true) {
         const next = await iterator.next();

@@ -52,10 +52,13 @@ interface TableOps {
 const DEFAULT_PAGE = 500;
 
 // Execute a cleanup plan: per action, (optionally) archive the aged rows to a
-// verified file, then delete them. The CORE INVARIANT: a table's prune is reached
-// ONLY after its archive resolves successfully — if the sink throws (disk full,
-// write error) the delete is skipped and the rows survive. Per-table fail-open: one
-// table's failure never aborts the rest. Returns a structured report for the ledger.
+// verified file, then delete them. CORE INVARIANT: a table's prune at the NORMAL
+// window is reached only after its archive resolves successfully — if the sink throws
+// (disk full, write error) the window delete is skipped and the rows survive. The ONE
+// exception (review H3): rows older than action.safetyCutoffMs are pruned even when
+// archive is unavailable/fails, so a persistently-broken sink can't grow the table
+// without bound. Per-table fail-open: one table's failure never aborts the rest.
+// Returns a structured report for the ledger.
 export async function runCleanup(deps: CleanupRunnerDeps): Promise<CleanupReport> {
   const pageSize = deps.pageSize ?? DEFAULT_PAGE;
   const log = deps.log ?? (() => {});
@@ -87,12 +90,17 @@ export async function runCleanup(deps: CleanupRunnerDeps): Promise<CleanupReport
         // Archive-first table. If the sink or the archive read-helpers are missing,
         // do NOT delete (over-retain rather than lose unarchived training data).
         if (!deps.archiveSink || !ops.archivable || !ops.select || !ops.countOlderThan) {
-          log("cleanup.archive.unavailable_skip_delete", { table: action.table });
+          // Archive unavailable: over-retain within the window (don't lose unarchived
+          // training data), but STILL prune past the hard safety horizon so growth is
+          // bounded (H3). No horizon configured ⇒ legacy skip-delete behavior.
+          const deletedRows =
+            action.safetyCutoffMs !== undefined ? await ops.prune(action.safetyCutoffMs) : 0;
+          log("cleanup.archive.unavailable_skip_delete", { table: action.table, deletedRows });
           tables.push({
             table: action.table,
             archived: false,
             archivedRows: 0,
-            deletedRows: 0,
+            deletedRows,
             skipped: true,
             error: "archive unavailable",
           });
@@ -126,18 +134,33 @@ export async function runCleanup(deps: CleanupRunnerDeps): Promise<CleanupReport
       log("cleanup.table.done", { table: action.table, archivedRows, deletedRows });
     } catch (err) {
       // Fail-open: record the error, NEVER let it abort the other tables. Because we
-      // throw before reaching prune, the rows for THIS table are left intact.
+      // throw before reaching prune, the rows for THIS table are left intact at the
+      // normal window. Still attempt a best-effort safety-horizon prune (H3) so a
+      // persistently-failing sink can't grow the table without bound — fail-open
+      // within fail-open (a failing safety prune is swallowed, not re-raised).
       ok = false;
       const message = err instanceof Error ? err.message : String(err);
+      let deletedRows = 0;
+      if (action.safetyCutoffMs !== undefined && ops.prune) {
+        try {
+          deletedRows = await ops.prune(action.safetyCutoffMs);
+        } catch {
+          /* safety prune is best-effort; keep the original archive error as the report */
+        }
+      }
       tables.push({
         table: action.table,
         archived: false,
         archivedRows: 0,
-        deletedRows: 0,
+        deletedRows,
         skipped: true,
         error: message,
       });
-      log("cleanup.table.failed", { table: action.table, error: message });
+      log("cleanup.table.failed", {
+        table: action.table,
+        error: message,
+        safetyDeleted: deletedRows,
+      });
     }
   }
 

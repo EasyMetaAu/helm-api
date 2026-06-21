@@ -58,7 +58,7 @@ const clock = () => {
 };
 
 describe("runCleanup", () => {
-  it("INVARIANT: a failing archive sink means that table's prune is NEVER called", async () => {
+  it("a failing archive sink with NO safety horizon leaves the table's prune uncalled (legacy over-retain)", async () => {
     const telemetry = telemetryFake();
     const sink = sinkFake({
       archiveTable: vi.fn(async () => {
@@ -80,6 +80,72 @@ describe("runCleanup", () => {
     expect(telemetry.pruneTelemetry).not.toHaveBeenCalled(); // the whole point
     expect(report.ok).toBe(false);
     expect(report.tables[0]?.error).toContain("disk full");
+    expect(report.tables[0]?.deletedRows).toBe(0);
+  });
+
+  it("a failing archive sink WITH a safety horizon still prunes past the horizon (H3)", async () => {
+    const telemetry = telemetryFake();
+    const sink = sinkFake({
+      archiveTable: vi.fn(async () => {
+        throw new ArchiveDiskFullError("disk full");
+      }),
+    });
+    const report = await runCleanup({
+      actions: [{ table: "telemetry", cutoffMs: 500, archive: true, safetyCutoffMs: 100 }],
+      telemetry,
+      memory: memoryFake(),
+      oauthUsage: usageFake(),
+      archiveSink: sink,
+      runId: "run1",
+      now: clock(),
+    });
+    // Bounded growth: prune runs at the SAFETY cutoff (100), never the window cutoff (500).
+    expect(telemetry.pruneTelemetry).toHaveBeenCalledWith(100);
+    expect(telemetry.pruneTelemetry).not.toHaveBeenCalledWith(500);
+    expect(report.ok).toBe(false); // the archive error is still surfaced
+    expect(report.tables[0]?.error).toContain("disk full");
+    expect(report.tables[0]?.deletedRows).toBe(3);
+  });
+
+  it("archive unavailable (no sink) WITH a safety horizon still prunes past the horizon (H3)", async () => {
+    const telemetry = telemetryFake();
+    const report = await runCleanup({
+      actions: [{ table: "telemetry", cutoffMs: 500, archive: true, safetyCutoffMs: 100 }],
+      telemetry,
+      memory: memoryFake(),
+      oauthUsage: usageFake(),
+      // archiveSink omitted
+      runId: "run1",
+      now: clock(),
+    });
+    expect(telemetry.pruneTelemetry).toHaveBeenCalledWith(100);
+    expect(telemetry.pruneTelemetry).not.toHaveBeenCalledWith(500);
+    expect(report.tables[0]?.skipped).toBe(true);
+    expect(report.tables[0]?.deletedRows).toBe(3);
+  });
+
+  it("a safety prune that itself throws is swallowed; the archive error is still reported (H3)", async () => {
+    const telemetry = telemetryFake({
+      pruneTelemetry: vi.fn(async () => {
+        throw new Error("prune boom");
+      }),
+    });
+    const sink = sinkFake({
+      archiveTable: vi.fn(async () => {
+        throw new ArchiveDiskFullError("disk full");
+      }),
+    });
+    const report = await runCleanup({
+      actions: [{ table: "telemetry", cutoffMs: 500, archive: true, safetyCutoffMs: 100 }],
+      telemetry,
+      memory: memoryFake(),
+      oauthUsage: usageFake(),
+      archiveSink: sink,
+      runId: "run1",
+      now: clock(),
+    });
+    expect(report.ok).toBe(false);
+    expect(report.tables[0]?.error).toContain("disk full"); // original error, not "prune boom"
     expect(report.tables[0]?.deletedRows).toBe(0);
   });
 

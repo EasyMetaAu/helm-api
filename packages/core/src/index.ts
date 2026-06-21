@@ -176,17 +176,11 @@ export {
   type LoadConfigOptions,
   loadConfig,
 } from "./config/loader.js";
-export {
-  type AttemptRecord,
-  type Candidate,
-  type CapabilityVerdict,
-  type FallbackDeps,
-  type FallbackOutcome,
-  InvokeFailure,
-  type InvokeFailureInit,
-  type ProviderResult,
-  runFallback,
-} from "./executor/fallback.js";
+// The execution-fallback loop lives in apps/gateway/src/routes/execute.ts (the
+// production path, covered by execute.test.ts). The former executor/fallback.ts
+// re-implementation was unused and had diverged — removed (review finding C1).
+// Only the shared attempt-record type survives here.
+export type { AttemptRecord } from "./executor/attempt-record.js";
 export {
   DEFAULT_LANES,
   type Lane,

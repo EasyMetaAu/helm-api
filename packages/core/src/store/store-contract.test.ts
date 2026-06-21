@@ -1429,6 +1429,27 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       );
     });
 
+    it("appendMessages where every input is an intra-batch duplicate collapses to one row, never throws (H4 parity)", async () => {
+      // Same (threadId, messageIndex, role, content) repeated 3× in ONE batch. The pg
+      // adapter dedupes in-memory before a single multi-row INSERT (Drizzle .values([])
+      // would throw); sqlite inserts per-row with ON CONFLICT. BOTH must persist exactly
+      // one row and must not throw — a cross-adapter parity guard.
+      ctx = await make();
+      const store = ctx.stores.memory;
+      await store.ensureThread({ id: "dupbatch-t", ownerId: "acct-a" });
+      const dup = {
+        threadId: "dupbatch-t",
+        role: "user" as const,
+        content: "same",
+        tokenEstimate: 1,
+        messageIndex: 0,
+      };
+      const ids = await store.appendMessages?.([dup, { ...dup }, { ...dup }]);
+      expect(ids).toHaveLength(3); // one id per input (caller contract), even when collapsed
+      const msgs = await store.listMessages({ threadId: "dupbatch-t", accountId: "acct-a" });
+      expect(msgs.map((m) => m.content)).toEqual(["same"]); // exactly one row persisted
+    });
+
     it("appendMessage is idempotent on re-ingest of the same (thread, role, content)", async () => {
       // The re-ingestion fix: the client re-sends the whole transcript each turn.
       // Persisting the same message twice must collapse to ONE row, not two.

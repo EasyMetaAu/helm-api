@@ -924,6 +924,14 @@ function hasExplicitCacheControl(value: unknown): boolean {
   return Object.values(obj).some(hasExplicitCacheControl);
 }
 
+// POLICY (review H10): Anthropic has no system message role, so EVERY system/developer
+// turn — regardless of its position in the conversation — is folded, IN ORDER, into the
+// top-level `system` param. A mid-conversation system turn (e.g. a Claude Code injected
+// <system-reminder>) therefore joins the global system prompt rather than staying inline.
+// This is intentional and matches LiteLLM. If position-sensitive system content ever
+// needs to remain in place, fold it into the adjacent user turn instead — a deliberate
+// future change, not today's contract. The message loop (role check above) drops these
+// turns so they never reach messages[] as user/assistant turns.
 function systemFromMessages(
   messages: readonly IRMessage[],
 ): string | AnthropicTextBlockOut[] | undefined {

@@ -39,6 +39,8 @@ function seedPreV23(): string {
   // v26 adds oauth_quota.usage_limited_until_ms; this fixture has no oauth_quota
   // table (only oauth_usage) → pre-mark applied (its own test exercises v26).
   ins.run(26);
+  // v27 indexes memory_jobs; this oauth_usage-only fixture never creates it → pre-mark.
+  ins.run(27);
   raw.exec(`
     CREATE TABLE oauth_usage (
       provider_id TEXT NOT NULL,

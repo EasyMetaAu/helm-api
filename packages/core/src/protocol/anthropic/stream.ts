@@ -91,6 +91,7 @@ const OpenAIChunkUsageSchema = z
   .object({
     prompt_tokens: z.number().int().nonnegative().optional(),
     completion_tokens: z.number().int().nonnegative().optional(),
+    total_tokens: z.number().int().nonnegative().optional(),
     // Some upstreams flatten cached here; real OpenAI nests it under
     // prompt_tokens_details.cached_tokens (matching the non-stream openai.ts shape).
     cached_tokens: z.number().int().nonnegative().optional(),
@@ -292,9 +293,20 @@ function allocBlock(state: StreamState): number {
 }
 
 // A monotonically-unique temporary id for a tool block whose real id has not yet
-// arrived on the wire. It is replaced before the START event is emitted.
+// arrived on the wire. Normally replaced by the real id before START — but when an
+// upstream announces a tool by name/args yet NEVER sends an id, clientToolUseId
+// synthesizes a real-looking id at emit time so the placeholder never reaches a client.
 function tempId(blockIndex: number): string {
   return `tmp_tool_${blockIndex}`;
+}
+
+// The id a client echoes back as tool_result.tool_use_id next turn, so it must look
+// like a real Anthropic id. If the slot still holds a tmp_tool_* placeholder when its
+// content_block_start must be emitted (upstream never supplied an id), emit a stable,
+// deterministic toolu_ id instead of leaking the placeholder (review H11). Deterministic
+// (no clock/random) so a cache-hit replay produces the identical id.
+function clientToolUseId(slot: { id: string; blockIndex: number }): string {
+  return slot.id.startsWith("tmp_tool_") ? `toolu_synthetic_${slot.blockIndex}` : slot.id;
 }
 
 // —— Event constructors ————————————————————————————————————————————————————————
@@ -470,7 +482,12 @@ export async function* convertOpenAIStreamToAnthropic(
           yield {
             type: "content_block_start",
             index: slot.blockIndex,
-            content_block: { type: "tool_use", id: slot.id, name: slot.name, input: {} },
+            content_block: {
+              type: "tool_use",
+              id: clientToolUseId(slot),
+              name: slot.name,
+              input: {},
+            },
           };
         }
         slot.argBuffer += args;
@@ -533,7 +550,7 @@ export async function* convertOpenAIStreamToAnthropic(
     yield {
       type: "content_block_start",
       index: slot.blockIndex,
-      content_block: { type: "tool_use", id: slot.id, name: slot.name, input: {} },
+      content_block: { type: "tool_use", id: clientToolUseId(slot), name: slot.name, input: {} },
     };
   }
 

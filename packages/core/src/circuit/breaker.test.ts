@@ -170,6 +170,20 @@ describe("createCircuitBreaker", () => {
     expect(breaker.canAttempt("b")).toEqual({ allow: true, probe: false });
   });
 
+  it("H7: a failure recorded while OPEN does NOT refresh the cooldown window", () => {
+    const { breaker, clock } = makeBreaker();
+    fail(breaker, "m", config.failureThreshold); // -> OPEN, openedAt = 0
+    expect(breaker.getState("m")).toBe("OPEN");
+    // A stray pre-first-chunk failure lands partway through the cooldown (reachable via
+    // the documented concurrent-probe window). It must NOT re-trip / reset openedAt.
+    clock.advance(config.cooldownMs - 1);
+    breaker.recordFailure("m");
+    // 1ms later the ORIGINAL cooldown elapses → a probe is allowed. If the stray failure
+    // had reset openedAt, this would still be SKIP and the breaker would never recover.
+    clock.advance(1);
+    expect(breaker.canAttempt("m")).toEqual({ allow: true, probe: true });
+  });
+
   it("fail-open: an internal fault degrades to allow:true (treated as CLOSED)", () => {
     // Inject a now() that throws to simulate an internal read fault; the breaker
     // must NOT propagate — it degrades to allowing the request (principle 3).

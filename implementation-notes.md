@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-06-21 · 全仓评审修复 Tiers 1–5（review C1–C4/H1–H11/M4–M7；分支 `fix/review-fixes`，未部署）
+
+全仓 review 后按严重度分 5 批修复。下面只记**不得不自己做的决定、偏离 review 建议处、坑**；机械改动看 git diff。每批走 TDD + 全 CI 门（typecheck 4 项目 / biome 0 警告 / build / vitest）。
+
+- **Tier 1（C1/C2，原则 1/5）**：execution-fallback 循环有**两份**——生产内联在 `execute.ts`（execute.test.ts ~3300 行覆盖），而 `executor/fallback.ts` 的 `runFallback` 只被 `index.ts` 导出、**从不被网关调用**，且已漂移。用户在 3 选项中选「删重复」（抽进 core 的"对但大"重构一次性 agent 跑 946k token 卡死→证明太大）。删 `fallback.ts` + 测试 + 8 个死导出，唯一活类型 `AttemptRecord` 抽到 `executor/attempt-record.ts`。**破坏性**：移除 `@helm/core` 的 `runFallback`/`InvokeFailure` 等公共导出（本仓无消费者）。C2：客户端断连最终错误 `upstream_error`→`client_abort`(499)。
+- **Tier 2（C3/H3，原则 7/2/3）**：**C3 偏离 review 建议**——review 说"从 prompt_tokens 减去 cached"，但 `cost.ts:computeCostUsd` 自己做 `regularPrompt=prompt-cached-cacheCreation`，故 prompt_tokens 必须保持 input_tokens **全量**；真 bug 是 responses-stream 反向腿**丢了 cached/reasoning/total 明细**→缓存折扣丢失=多计费。修：补明细（不减）；给 `OpenAIChunkUsageSchema` 加 `total_tokens`。**H3**：`cleanup_archive_enabled` 默认 `true`→**false**（归档失败跳删→无界增长=线上事故；off=按窗口直删有界）+ 归档失败/不可用时仍按**2× 窗口硬安全线**剪枝（plan 给 archive action 加 `safetyCutoffMs`，runner 两条 skip 路都用）。**跳过 auto_vacuum**（不配 `incremental_vacuum` 近乎 no-op，且已有手动 Compact/VACUUM）。
+- **Tier 3（H1/H2，原则 2/6）**：死配置项。**H1 选「实现」而非「删除」**（删要动签入 config + 6 测；实现 churn 更小且让字段不再撒谎）：`bootstrapRootKey` 现 honored `generate_if_missing`（false→不铸+告警）/`print_once`/`persist_to`（注入 persist 回调，server 用 `fs.writeFile(...,{mode:0o600})` 写明文 key——**仅空 keystore 的全新部署触发**，符合字段本意）。**H2 选 `z.literal(true)`**：真正接线"匿名访问"既违反 spec 强制鉴权、又因 self-auth 路由在路由内鉴权而是大改；改为 `require_api_key:false` 在配置加载即 **fail-closed**（而非静默忽略）。
+- **Tier 4（H9/H10/H11，原则 8）**：**H9 纯补测**（`readSSE` 的 `TextDecoder{stream:true}` 已正确处理跨 chunk 多字节，review 说"缺测试本身即缺陷"——补 `你好👋` 按字节中段切分用例）。**H10 选「文档+钉测试」不改行为**：Anthropic 无 system 角色，现有把**所有** system 轮（含会话中段）按序折进顶层 `system`，是 LiteLLM 兼容的有意策略——补注释定策 + 钉 mid-conv 折叠顺序的测试（改成"折进相邻 user 轮"是有意的未来变更，非本次）。**H11**：name-only 零参数工具在流末刷出时会泄露 `tmp_tool_*` 客户端 id；加 `clientToolUseId` 在两个 emit 点合成确定性 `toolu_synthetic_<idx>`。
+- **Tier 5（breaker + memory，原则 3）**：**H7** OPEN 态 `recordFailure` 改 no-op（原会 `trip()` 重置 openedAt→冷却永刷新）。**M4** `recordAbort` 仅 HALF_OPEN 释放探针锁（防误放他人锁；现状下其他态 lock 已为 false，属防御性）。**H8** `peekStream` 空流（首 next `done`）抛 `UpstreamError` → 记 breaker 失败 + 进链，而非 `recordSuccess` 治愈 breaker 并回空体。**H4 = 误报**：pg `appendMessages` dedup 循环**永远保留首条**输入→`rows` 对非空输入不可能为空→`.values([])` 不可达；保留一行防御性 `if(rows.length===0)return ids`（注释标明"今日不可达"）+ 跨适配器全重复批次 parity 测。**M5** compaction 经济学（`priorCompactionCount`/`measuredRetention`）排除 pruned 墓碑（`[pruned]` 8 字符会污染留存比），用 `activeObservations` 过滤。**M7** 加 `idx_memory_jobs_claim (status, created_at, id)`（sqlite v27 / pg v26；claimPendingJobs 每 tick+wake 跑），4 个 scoped 迁移 fixture 预标 v27 applied。
+- **本批主动延后（记账，未做）**：**M6**（decay 候选查询去重 + 给 `memory_jobs` 加可索引的 accountId 生成列）——是 forgetting 关键查询的**两方言 SQL 重写**，误改即影响"哪些记忆被遗忘"，刚因 H4 误报更应谨慎；值单开 PR 做前后结果对比。**C4**（observer 重入队锚定原始 frontier）——v0.21.10 现机制工作正常（debounce 合并 + user 门控 + ~1h idle-flush 兜底），review 担心的"持续负载下无界"实为"每个 user 轮都观测"=按设计；强行锚定 frontier 有**重新引入漏轮 bug**（即"42 永不持久化"）的风险，故只做风险评估不改码。
+
 ## 2026-06-20 · 内部 LLM（memory + eval）支持 lane 名 + 默认 economy（docs/03/04/08；原则 4/6）
 
 - **目标（用户）**：所有内部 LLM 调用（memory 的 observation/reflection/facts + Layer-2 eval）都能把 **lane 名**当模型用（走 lane 的 fallback 链），未配置时**默认 economy**。
@@ -24,20 +35,13 @@
 - **对共识的实现期修正**：专家组原议"复用 idle-flush 覆盖判定"，实现时发现那是"未覆盖+idle"、对仅 eager 短线程会热循环，故改为 new-since-snapshot（满足 SRE 的"message_index > frontier_at_claim"终止不变式）。原子水位线列（并发专家的 B 案）暂不加——**done-first 顺序已关掉丢更新窗口**（job 标 done 后并发 enqueue 必新建 pending job，被 done 期间合并丢失的轮由 done 后重读捕获），上迁移待 SLO 证明 idle-flush 真在大量兜底或出现真并发再说。**纯 core observer 改动，无 schema/无迁移，SQLite+Postgres 对称**。新日志 `recheck_reenqueued`/`recheck_clean`/`recheck_failed`。
 - **验证**：TDD 红→绿；observer 3 新例（运行期新 user 轮→恰好补发一个 observer job + `recheck_reenqueued`；assistant-only 迟到轮→0 补发 + `recheck_clean`；无新消息→0 补发 防热循环）。observer 26 测 + core memory/store **653 测**绿（含 PGlite/Postgres 契约，证实双方言对称）、typecheck（4 项目）/biome lint 清。分支 `fix/memory-observer-reenqueue-late-turn`，待发。
 
-## 2026-06-20 · 事实抽取可靠性 + 内部 LLM 调用走自有网关（可观测）（docs/06/08/12；原则 3/7）
-
-- **背景/线上实证**：v0.21.7 上用户说「我有一辆特斯拉 Model Y」仍偶发没记下。observer 准时跑、`memory.llm.completed task:facts` 但 0 fact。直接 curl deepseek 实证：`deepseek-v4-flash` 即使 temperature:0 也**非确定性**，对一条明确事实偶发返空（输出形状每次都变：裸数组/对象/中英文都有），且 Mimi 对话里它自己的 `MEMORY.md` 工具/文件噪音淹没了信号——线上那次恰好返空。另：调试时**所有内部 LLM 调用（记忆 + eval）都不在 /admin/requests 可见**（直接打 ProviderClient、绕过遥测/payload），只能手动 curl deepseek 排查。
-- **决定（A 可靠性）**：`maybeEagerExtractFacts` 抽取**只喂 user 消息**（滤掉 assistant/tool/文件噪音）+ **空结果重试一次**（`eager_facts_retry` 日志、至多两次；extractFactsFromMessages fail-open 永不抛，空是唯一失败信号）。reflector 路径不动（从干净 observation 抽，无噪音）。
-- **决定（B 可观测，用户选「自动生成专用内部 key + 记忆和 eval 一起」）**：opt-in `HELM_INTERNAL_LLM_THROUGH_GATEWAY=1`，把内部 LLM 调用改成**自调用** helm 自己的 `/v1/chat/completions`（loopback），自动获得遥测 + payload → 在 /admin/requests 可见。新模块 `memory-self-http.ts` 的 `createSelfHttpClient`（ProviderClient 形：POST /v1 带内部 key + `x-memory-mode:off`，非 2xx 抛→落 callJsonModel/eval 既有 fail-open）。启动后自动 mint 固定 id `k_internal`（role:user + allow_custom_model + memory_mode:off；明文只留进程内、每启动 re-mint）。memory 经 `resolveMemoryLlmModel` 短路返回 self 客户端 + 原 alias；eval 把 classify 的 `provider` 换成 self 客户端。`providerPrefix=first.name` 把**裸** eval 模型 `deepseek-v4-flash`→`deepseek/deepseek-v4-flash` 使其走**显式模型直通**（不再 classify/eval 递归）。`memory-llm.ts` 零改动（seam 在 resolver）。
-- **坑/取舍**：① eval 在请求热路径——self 调用多一跳 loopback + 遥测写（write-queue 异步），但 eval 有缓存故仅 miss 时自调；② 内部 key 继承系统默认限流，量大需单配；③ 启动顺序：loopback 监听在 `serve()` 后、worker 首 tick ≥8s/eval 仅真流量触发→监听已起；race→ECONNREFUSED→fail-open 回退；④ **无 schema 改/无迁移**（env 开关非 config 字段），默认 OFF = 与今天逐字一致。
-- **验证**：TDD 红→绿；observer 3 新例（user-only / 空重试 / 非空不重试）+ self-http 4 新例（loopback URL/header/x-memory-mode / 裸模型前缀 / 非 2xx 抛）+ memory-llm 整合；typecheck（4 项目）+ biome lint 清、memory+classify+self-http **268 测**绿。PR #339 → v0.21.8 已部署 + box 置 `HELM_INTERNAL_LLM_THROUGH_GATEWAY=1`，端到端实证内部 deepseek 调用挂在 `k_internal` 名下、payload 含记忆提示词。
-- **续修（用户指出的删除 footgun）**：`k_internal` 原是普通 keystore 行——运营者在 admin 删它→自调用鉴权失败→记忆/eval 静默 fail-open 到确定性 stub（到下次重启 re-mint 才恢复）。修：① 抽 `apps/gateway/src/internal-key.ts` 的 `INTERNAL_API_KEY_ID` 常量（server 复用），admin `DELETE /keys/:id` 守卫该 id→403「internal system key cannot be revoked or deleted」（软删+purge 两路都挡；启动 re-mint 走 keyStore 直连不受影响、仍自愈）；② **admin Keys 页对 `k_internal` 行隐藏 Edit/Revoke/Delete，只留 Details**（用户要求直接禁用按钮，不止后端 403）。admin route 2 新测（403 + 行保留）+ admin SPA 1 新测（内部 key 行只剩 Details）。分支 `fix/protect-internal-key`，待发 v0.21.9。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-20 · 事实抽取可靠性 + 内部 LLM 调用走自有网关（可观测）（docs/06/08/12；原则 3/7）：`deepseek-v4-flash` 抽事实 temperature:0 仍非确定性、对明确事实偶发返空（输出形状每次变）→ `maybeEagerExtractFacts` **只喂 user 消息**（滤 assistant/tool/文件噪音）+ **空结果重试一次**（`eager_facts_retry`）。另：内部 LLM（记忆+eval）原绕过遥测不可观测 → 改**自调用** helm 自己的 `/v1/chat/completions`（loopback，`createSelfHttpClient`）获遥测+payload，启动自动 mint 固定 `k_internal`（allow_custom_model+memory_mode:off）。续修：保护 `k_internal` 不被 admin 删（DELETE 守卫 403 + 前端只留 Details）。PR #339→v0.21.8；保护续修→v0.21.9。
 
 ### 2026-06-20 · eager 事实抽取 `insertFactsReconciled` 未绑定 `this`（v0.21.6 潜伏 bug）（docs/08/12；原则 3）：`observer.ts` 的 `maybeEagerExtractFacts` 把 store 方法解构后**裸调用** `const insert=deps.memoryStore.insertFactsReconciled; await insert({…})`→丢 `this`→sqlite 适配器 `this.db.$sqlite` 抛 "reading 'db'"→eager fail-open 静默不写。裸数组 schema bug 一修通它立刻顶出（之前路径走不到 insert）；假 store 的 vi.fn 不依赖 this 故单测没抓到。修：`insert.call(deps.memoryStore, {…})`，对齐 idle-flush/decay-trigger 既有 `.call` 模式（observer 是唯一裸调）。`this`-敏感回归测试 + observer 21/memory 255 测绿。配套 `docs/memory-review-2026-06-20.md`（数据流图 + 6 bug 账本）。PR #337→v0.21.7。
 

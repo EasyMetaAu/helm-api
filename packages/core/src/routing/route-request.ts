@@ -84,7 +84,7 @@ export interface ExecutionPlan {
 }
 
 // One provider attempt row — field-for-field aligned with @helm/shared
-// ProviderAttemptSchema and executor.fallback's AttemptRecord so it threads
+// ProviderAttemptSchema and executor/attempt-record's AttemptRecord so it threads
 // straight into the decision record.
 export interface ProviderAttempt {
   alias: string;
