@@ -282,7 +282,8 @@ export function openaiToResponsesRequest(
     // encrypted reasoning back (omitting `include` is rejected by the ChatGPT-account
     // backend, surfaced misleadingly as "model not supported"). `text.verbosity` is
     // part of the Codex request contract too. NOTE: we deliberately send NO
-    // `max_output_tokens` — openclaw omits it and the ChatGPT-account backend dislikes it.
+    // `max_output_tokens` or `temperature` — openclaw omits them and the
+    // ChatGPT-account backend rejects them.
     store: false,
     stream: true,
     instructions: buildInstructions(messages),
@@ -299,7 +300,6 @@ export function openaiToResponsesRequest(
   else if (opts?.sessionId) body.prompt_cache_key = opts.sessionId;
   if (typeof r.prompt_cache_retention === "string")
     body.prompt_cache_retention = r.prompt_cache_retention;
-  if (typeof r.temperature === "number") body.temperature = r.temperature;
   // Forward the client's reasoning effort to the Codex backend (Responses speaks
   // `reasoning.effort`). Without this the subscription always ran at its DEFAULT —
   // a real Codex `model_reasoning_effort` (incl. high/xhigh/max) was silently

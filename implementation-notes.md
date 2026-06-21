@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-06-21 · Codex Chat→Responses 兼容层移除 `temperature`（docs/05/07；原则 3/7/8）
+
+- **线上实证**：`la.atmy.work` 请求 `49f1eb18-7430-48b2-97d4-b97169d425cf` 的第一候选 `openai-codex/gpt-5.4-mini` 351ms 返回 HTTP 400：`Unsupported parameter: temperature`；执行 fallback 随后命中 `anthropic/claude-haiku-4-5-20251001` 成功，整体 `final_status=ok`、`fallback_count=1`。该请求是 `model:"economy"` + `temperature:0` + 非流式 Chat Completions；因 `source_protocol=openai_chat`、`target_provider_protocol=openai_responses`、`passthrough_disable_reason=missing_native_request`，Helm 走 `openaiToResponsesRequest` 互译路径，而不是原生 Responses 直通。
+- **决定**：Codex/ChatGPT-account Responses 后端采用 openclaw 的最小可用 body：`store:false`、`stream:true`、`include:["reasoning.encrypted_content"]`、`text.verbosity:"low"`，并且**不发送** `max_output_tokens` 或 `temperature`。generic OpenAI Responses client 不变；只修订 subscription Codex 互译层，避免把 OpenAI Chat 客户端的采样字段原样带到不支持的后端。
+- **验证**：TDD 红→绿；`packages/core/src/provider/openai-responses.test.ts` 钉住 `temperature` 被省略，保留 generic Responses 的采样参数行为。
+
 ## 2026-06-21 · 全仓评审修复 Tiers 1–5（review C1–C4/H1–H11/M4–M7；分支 `fix/review-fixes`，未部署）
 
 全仓 review 后按严重度分 5 批修复。下面只记**不得不自己做的决定、偏离 review 建议处、坑**；机械改动看 git diff。每批走 TDD + 全 CI 门（typecheck 4 项目 / biome 0 警告 / build / vitest）。
@@ -27,19 +33,13 @@
 - **范围/坑**：lane 路由现走始终开启的 self-http 路径，无模式分叉。memory.llm/eval 默认都 OFF，故默认 economy 只影响主动开启者。**box 当前 pin 了 `deepseek/deepseek-v4-flash`** → 默认改动不影响 box，要用 economy 需删 pin 或显式设 `model: economy`；box 旧 env `HELM_INTERNAL_LLM_THROUGH_GATEWAY=1` 部署后变成无害死变量（可删可留）。本 PR**未做**：启动期 JSON-capability 校验、成本可观测（按用户"只做技术实现"裁掉，列为后续）。
 - **验证**：TDD 红→绿；self-http 1 新例（lane 名不被加前缀、裸模型仍加前缀）+ memory-schema 改 2 例（默认 economy / 非法 knob 仍 fail-closed）；gateway+shared+core memory/config **1486 测**绿、typecheck（4 项目）/biome 清。分支 `feat/internal-llm-lane-support`，待发。
 
-## 2026-06-20 · observer 任务合并竞态致"运行期到达的消息"丢失（docs/08 Phase 2；原则 3）
-
-- **背景/线上实证（box v0.21.9）**："我喜欢的数字是42"仍偶发没记下。铁证：`memory_messages=5` 但 `facts=0/obs=0`，且 `memory.llm.completed task:facts`×2（含 `eager_facts_retry`）**非 fallback**→模型/schema 都正常。**根因不是 prompt 也不是模型，是 observer 任务合并竞态**：observer job 在 claim 时 `listMessages` **一次性快照**；"42"那条在前一个（打招呼请求的）observer job **running 期间**才落库，其 enqueue 被开放任务唯一索引 `(type,scope) WHERE status IN (pending,running)` **合并进那个已拍完快照的 running job**（`inject.assembled` 对两请求返回同一 `observer_job_id` 为证）→ job 完成时从未重读→"42"永不被挖；无后续请求→无新 job。合并只在前一个 job 还 **pending** 时安全；一旦 **running** 新轮即静默丢失，仅 idle-flush（~1h，更有损的 compaction→reflector 路径）兜底。
-- **评估（用户要求 3 专家两轮共识）**：并发/分布式、后端架构、SRE 三角色独立评议后达成一致。**否决**"把消息内容塞进 job"（破坏 job=指针、复制 `memory_messages`、running job 已过读取点）与"唯一索引收窄成仅 pending"（多 worker 下并发双 observer）。
-- **决定（方案 A）**：`runObserverJob` 顶部捕获 `snapshotMessageIds`；三条 `done` 退出路径**标 done 之后**调新 helper `maybeReenqueueForLateMessages`——重读 `listMessages`，存在快照外的**新 user 消息**则 `enqueueJob({type:observer,scope})`（plain scope，靠唯一索引去重，绝不并发双 observer）。**两层门控**：① "快照后的新消息"，不是"存在未覆盖历史"——eager 写 fact 不推进覆盖，按覆盖门控会让短线程每次都重排=device_id 式热循环；new-since-snapshot 单调收敛，终止由构造保证。② **只认新 USER 轮（成本杠杆）**——事实只来自 user 轮（eager 已滤 assistant/tool 噪音），assistant-only 迟到轮若也补发会让 eager 对未覆盖集白跑一次 nano 提取；只在新 user 内容到达才补发=只在竞态真丢了事实轮时才多花一次提取，assistant 轮的 compaction 推迟到下个 user 轮/idle-flush。fail-open（吞错+日志），idle-flush 仍作纵深防御。
-- **对共识的实现期修正**：专家组原议"复用 idle-flush 覆盖判定"，实现时发现那是"未覆盖+idle"、对仅 eager 短线程会热循环，故改为 new-since-snapshot（满足 SRE 的"message_index > frontier_at_claim"终止不变式）。原子水位线列（并发专家的 B 案）暂不加——**done-first 顺序已关掉丢更新窗口**（job 标 done 后并发 enqueue 必新建 pending job，被 done 期间合并丢失的轮由 done 后重读捕获），上迁移待 SLO 证明 idle-flush 真在大量兜底或出现真并发再说。**纯 core observer 改动，无 schema/无迁移，SQLite+Postgres 对称**。新日志 `recheck_reenqueued`/`recheck_clean`/`recheck_failed`。
-- **验证**：TDD 红→绿；observer 3 新例（运行期新 user 轮→恰好补发一个 observer job + `recheck_reenqueued`；assistant-only 迟到轮→0 补发 + `recheck_clean`；无新消息→0 补发 防热循环）。observer 26 测 + core memory/store **653 测**绿（含 PGlite/Postgres 契约，证实双方言对称）、typecheck（4 项目）/biome lint 清。分支 `fix/memory-observer-reenqueue-late-turn`，待发。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-20 · observer 任务合并竞态致"运行期到达的消息"丢失（docs/08 Phase 2；原则 3）：observer job claim 时一次性快照，运行期间新 user 轮被开放任务唯一索引合并进已过读取点的 running job，导致短线程 fact 轮永不被挖；修为 `runObserverJob` 记录 `snapshotMessageIds`，done 后重读并仅对快照外新 user 消息补发 observer job，避免 assistant-only 热循环；无 schema/迁移，SQLite+Postgres 对称，observer 26 + core memory/store 653 绿。
 
 ### 2026-06-20 · 事实抽取可靠性 + 内部 LLM 调用走自有网关（可观测）（docs/06/08/12；原则 3/7）：`deepseek-v4-flash` 抽事实 temperature:0 仍非确定性、对明确事实偶发返空（输出形状每次变）→ `maybeEagerExtractFacts` **只喂 user 消息**（滤 assistant/tool/文件噪音）+ **空结果重试一次**（`eager_facts_retry`）。另：内部 LLM（记忆+eval）原绕过遥测不可观测 → 改**自调用** helm 自己的 `/v1/chat/completions`（loopback，`createSelfHttpClient`）获遥测+payload，启动自动 mint 固定 `k_internal`（allow_custom_model+memory_mode:off）。续修：保护 `k_internal` 不被 admin 删（DELETE 守卫 403 + 前端只留 Details）。PR #339→v0.21.8；保护续修→v0.21.9。
 

@@ -62,7 +62,7 @@ describe("codexAccountIdFromToken", () => {
 });
 
 describe("openaiToResponsesRequest", () => {
-  it("maps system -> instructions, user/assistant -> input, sets store=false stream=true", () => {
+  it("maps system -> instructions, user/assistant -> input, sets Codex request defaults", () => {
     const body = openaiToResponsesRequest({
       model: "gpt-5.5",
       messages: [
@@ -77,9 +77,10 @@ describe("openaiToResponsesRequest", () => {
     expect(body.store).toBe(false);
     expect(body.stream).toBe(true);
     expect(body.instructions).toBe("Be terse.");
-    expect(body.temperature).toBe(0.3);
-    // Codex/ChatGPT-account contract (ported from openclaw): NO max_output_tokens,
-    // and a store:false request MUST request encrypted reasoning back + set verbosity.
+    expect(body.temperature).toBeUndefined();
+    // Codex/ChatGPT-account contract (ported from openclaw): NO max_output_tokens
+    // or temperature, and a store:false request MUST request encrypted reasoning
+    // back + set verbosity.
     expect(body.max_output_tokens).toBeUndefined();
     expect(body.include).toEqual(["reasoning.encrypted_content"]);
     expect(body.text).toEqual({ verbosity: "low" });
