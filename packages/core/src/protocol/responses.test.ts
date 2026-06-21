@@ -420,6 +420,28 @@ describe("responsesTransformer — Tier D request/response fidelity (orders 17-2
     expect(image).toMatchObject({ type: "input_image", detail: "high" });
   });
 
+  it("accepts Chat-style nested input_image.image_url objects", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_image", image_url: { url: "https://x/nested.png", detail: "low" } },
+          ],
+        },
+      ],
+    });
+    const parts = ir.messages.at(-1)?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    expect(parts[0]).toMatchObject({
+      type: "image",
+      url: "https://x/nested.png",
+      detail: "low",
+    });
+  });
+
   it("folds an inbound input_file (file_data PDF) into an IR document with base64 data", async () => {
     const ir = await responsesTransformer.transformRequestOut({
       model: "gpt-4o",

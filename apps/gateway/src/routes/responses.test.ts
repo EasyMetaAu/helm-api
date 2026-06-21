@@ -1156,6 +1156,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
   it("stream passthrough: preserves upstream response.id without a synthetic prelude", async () => {
     // Native passthrough keeps the upstream Responses stream authoritative: no route
     // prelude and no response.id rewrite.
+    const put = vi.fn();
     const completedData = JSON.stringify({
       type: "response.completed",
       response: {
@@ -1176,6 +1177,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
         metadata: {},
       }),
       streamIR: events,
+      registry: { put, get: vi.fn() },
     });
     const app = buildApp(deps);
 
@@ -1193,6 +1195,14 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     ).response?.id;
     expect(frames.some((f) => f.event === "response.created")).toBe(false);
     expect(completedId).toBe("resp_upstream_xyz");
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responseId: "resp_upstream_xyz",
+        accountId: "acct",
+        keyId: "k1",
+        status: "completed",
+      }),
+    );
   });
 
   it("stream NON-passthrough (default): still maps via transformStreamOut as today", async () => {

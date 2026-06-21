@@ -5,7 +5,12 @@ import { RuntimeSettingsSchema } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import { createExecute } from "./routes/execute.js";
-import { buildProviderClients, buildRegistry, estimateRequestTokens } from "./server.js";
+import {
+  buildInternalLlmKeyInput,
+  buildProviderClients,
+  buildRegistry,
+  estimateRequestTokens,
+} from "./server.js";
 
 // A minimal Hono context whose request carries the given content-length header.
 // We never read the body here — the estimator must derive its estimate WITHOUT
@@ -61,6 +66,21 @@ describe("native_protocol_passthrough runtime flag", () => {
     // and openai_chat traffic still falls back to translation inside the guard.
     const parsed = RuntimeSettingsSchema.parse({});
     expect(parsed.native_protocol_passthrough).toBe(true);
+  });
+});
+
+describe("buildInternalLlmKeyInput", () => {
+  it("mints an internal key that cannot self-observe or inherit user rate limits", () => {
+    const input = buildInternalLlmKeyInput({
+      plaintext: "helm_live_internal",
+      hash: "hash",
+      prefix: "helm_live_in",
+    });
+
+    expect(input.memoryMode).toBe("off");
+    expect(input.memoryThreadSource).toBe("header");
+    expect(input.rateLimitRpm).toBe(0);
+    expect(input.rateLimitTpm).toBe(0);
   });
 });
 

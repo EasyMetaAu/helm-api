@@ -25,6 +25,11 @@ interface Migration {
   readonly sql: string;
 }
 
+// Session-level pg advisory lock for startup migrations. Two 32-bit keys spell
+// "HELM" and "API\0"; using the two-key form keeps the constants inside pg int4.
+const PG_MIGRATION_LOCK_SQL = "SELECT pg_advisory_lock(1212501069, 1095780608)";
+const PG_MIGRATION_UNLOCK_SQL = "SELECT pg_advisory_unlock(1212501069, 1095780608)";
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -415,11 +420,12 @@ const MIGRATIONS: readonly Migration[] = [
   },
   {
     // Idempotent memory-message ingest — pg mirror of the sqlite v21 fix.
-    // Historical rows lack transcript positions, so the migration keeps only the
-    // earliest legacy duplicate per (thread_id, role, content), adds nullable
-    // message_index/content_hash columns, and creates the occurrence-aware UNIQUE
-    // index the write path targets. The pg ops script backfills message_index +
-    // content_hash and wipes stale observations.
+    // Historical rows lack transcript positions, so repeated content is preserved:
+    // without an occurrence key, duplicate ingest is indistinguishable from a user
+    // legitimately repeating the same turn later in the transcript. Only rows that
+    // already have a complete occurrence key are deduped before the unique index
+    // is created. The pg ops script backfills message_index + content_hash and
+    // wipes stale observations.
     version: 20,
     sql: `
       ALTER TABLE memory_messages ADD COLUMN IF NOT EXISTS message_index INTEGER;
@@ -429,10 +435,12 @@ const MIGRATIONS: readonly Migration[] = [
       WITH ranked AS (
         SELECT id,
                ROW_NUMBER() OVER (
-                 PARTITION BY thread_id, role, content
+                 PARTITION BY thread_id, message_index, role, content_hash
                  ORDER BY created_at ASC, id ASC
                ) AS rn
         FROM memory_messages
+        WHERE message_index IS NOT NULL
+          AND content_hash IS NOT NULL
       )
       DELETE FROM memory_messages
       USING ranked
@@ -546,33 +554,40 @@ function splitStatements(block: string): string[] {
 // db.transaction — so a partial failure can never leave the ledger lying about a
 // half-applied version.
 export async function runPgMigrations(db: RawExecutor): Promise<void> {
-  await db.execute(
-    sql.raw(
-      "CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)",
-    ),
-  );
-  const applied = (await db.execute(sql.raw("SELECT version FROM _migrations"))) as
-    | { rows?: Array<{ version: number }> }
-    | Array<{ version: number }>;
-  const rows = Array.isArray(applied) ? applied : (applied.rows ?? []);
-  const have = new Set(rows.map((r) => Number(r.version)));
-  for (const m of MIGRATIONS) {
-    if (have.has(m.version)) continue;
-    await db.execute(sql.raw("BEGIN"));
-    try {
-      for (const stmt of splitStatements(m.sql)) {
-        await db.execute(sql.raw(stmt));
+  let locked = false;
+  await db.execute(sql.raw(PG_MIGRATION_LOCK_SQL));
+  locked = true;
+  try {
+    await db.execute(
+      sql.raw(
+        "CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)",
+      ),
+    );
+    const applied = (await db.execute(sql.raw("SELECT version FROM _migrations"))) as
+      | { rows?: Array<{ version: number }> }
+      | Array<{ version: number }>;
+    const rows = Array.isArray(applied) ? applied : (applied.rows ?? []);
+    const have = new Set(rows.map((r) => Number(r.version)));
+    for (const m of MIGRATIONS) {
+      if (have.has(m.version)) continue;
+      await db.execute(sql.raw("BEGIN"));
+      try {
+        for (const stmt of splitStatements(m.sql)) {
+          await db.execute(sql.raw(stmt));
+        }
+        await db.execute(
+          sql.raw(
+            `INSERT INTO _migrations (version, applied_at) VALUES (${m.version}, ${Date.now()})`,
+          ),
+        );
+        await db.execute(sql.raw("COMMIT"));
+      } catch (err) {
+        await db.execute(sql.raw("ROLLBACK"));
+        throw err;
       }
-      await db.execute(
-        sql.raw(
-          `INSERT INTO _migrations (version, applied_at) VALUES (${m.version}, ${Date.now()})`,
-        ),
-      );
-      await db.execute(sql.raw("COMMIT"));
-    } catch (err) {
-      await db.execute(sql.raw("ROLLBACK"));
-      throw err;
     }
+  } finally {
+    if (locked) await db.execute(sql.raw(PG_MIGRATION_UNLOCK_SQL));
   }
 }
 

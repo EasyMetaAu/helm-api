@@ -9,6 +9,7 @@ import { basicAuth } from "../../middleware/basic-auth.js";
 import { handleError } from "../../middleware/error-handler.js";
 import type { AdminApiDeps, RuleStore, SettingsAccess } from "./deps.js";
 import { registerAdminApi } from "./index.js";
+import { createRuntimeRuleStore } from "./rule-store.js";
 
 // admin.api — the gateway management API. These tests pin the CONTRACT (DoD
 // scenarios 1-8): CRUD lanes/policies/classifier persist to config; keys/requests
@@ -43,15 +44,31 @@ function makeRuleStore(): RuleStore {
     setLanes: async (l) => {
       lanes = l;
     },
+    updateLanes: async (mutate) => {
+      lanes = await mutate(lanes);
+      return lanes;
+    },
     getPolicies: async () => policies,
     setPolicies: async (p) => {
       policies = p;
+    },
+    updatePolicies: async (mutate) => {
+      policies = await mutate(policies);
+      return policies;
     },
     getClassifier: async () => classifier,
     setClassifier: async (c) => {
       classifier = c;
     },
   };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
 }
 
 function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
@@ -80,7 +97,7 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         concurrency_limit: input.concurrencyLimit ?? null,
         memory_mode: input.memoryMode ?? "off",
         memory_project_id: input.memoryProjectId ?? null,
-        memory_thread_source: input.memoryThreadSource ?? "header",
+        memory_thread_source: input.memoryThreadSource ?? "auto",
       };
       rows.push(rec);
       return rec;
@@ -361,6 +378,52 @@ describe("admin.api lanes", () => {
     expect((await rules.getLanes()).balanced).toEqual(before);
   });
 
+  it("serializes concurrent PUTs to different lanes so both edits survive", async () => {
+    const firstPersist = deferred();
+    let persistCalls = 0;
+    const runtimeRules = createRuntimeRuleStore({
+      lanes: structuredClone(parseLanesConfig(DEFAULT_LANES)) as Record<string, Lane>,
+      policies: { policies: [] },
+      classifier: ClassifierConfigSchema.parse({}),
+      persistLanes: async () => {
+        persistCalls += 1;
+        if (persistCalls === 1) await firstPersist.promise;
+      },
+    });
+    const app = buildApp(buildDeps({ rules: runtimeRules }));
+    const initialLanes = await runtimeRules.getLanes();
+    const balancedBase = initialLanes.balanced;
+    const economyBase = initialLanes.economy;
+    if (!balancedBase || !economyBase) throw new Error("default lanes missing test baseline");
+    const balanced: Lane = {
+      ...structuredClone(balancedBase),
+      primary: "model-from-balanced-put",
+    };
+    const economy: Lane = {
+      ...structuredClone(economyBase),
+      primary: "model-from-economy-put",
+    };
+
+    const putBalanced = app.request("/admin/api/lanes/balanced", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify(balanced),
+    });
+    const putEconomy = app.request("/admin/api/lanes/economy", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify(economy),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    firstPersist.resolve();
+
+    const [balancedRes, economyRes] = await Promise.all([putBalanced, putEconomy]);
+    expect([balancedRes.status, economyRes.status]).toEqual([200, 200]);
+    const lanes = await runtimeRules.getLanes();
+    expect(lanes.balanced?.primary).toBe("model-from-balanced-put");
+    expect(lanes.economy?.primary).toBe("model-from-economy-put");
+  });
+
   it("DELETE removes a lane", async () => {
     const app = buildApp(buildDeps());
     const res = await app.request("/admin/api/lanes/economy", { method: "DELETE" });
@@ -537,6 +600,8 @@ describe("admin.api keys", () => {
     // Stored as hash + prefix only — never the plaintext.
     expect(keyStore.rows[0]?.hash).toBe("hash_of_plaintext_full");
     expect(JSON.stringify(keyStore.rows[0])).not.toContain("PLAINTEXT_SECRET");
+    expect(keyStore.rows[0]?.memory_mode).toBe("off");
+    expect(keyStore.rows[0]?.memory_thread_source).toBe("auto");
 
     const list = (await (await app.request("/admin/api/keys")).json()) as Array<
       Record<string, unknown>
@@ -1552,7 +1617,13 @@ describe("admin.api rule persist failures", () => {
       setLanes: async () => {
         throw err;
       },
+      updateLanes: async () => {
+        throw err;
+      },
       setPolicies: async () => {
+        throw err;
+      },
+      updatePolicies: async () => {
         throw err;
       },
       setClassifier: async () => {

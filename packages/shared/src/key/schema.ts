@@ -15,11 +15,10 @@ export const OverBudgetBehaviorSchema = z.enum(["degrade", "reject"]);
 // Where the memory THREAD anchor comes from when x-thread-id is absent (issue #97).
 // `auto`: derive from signals the client already sends (body metadata.thread_id /
 // conversation_id → x-session-key → OpenAI prompt_cache_key → Anthropic
-// metadata.user_id) so static-header-only clients (Claude Code / Codex) and
-// zero-config clients still get per-conversation memory. `header`: only the explicit
-// x-thread-id header (opt out of derivation — the pre-#97 behavior). NEW keys are
-// minted with `auto` (set in the keystores, mirroring memory_mode minting `inject`)
-// so a key works out of the box the moment memory is on; moot while memory is off.
+// metadata.user_id) so static-header-only clients (Claude Code / Codex) can get
+// per-conversation memory once memory is explicitly enabled. `header`: only the
+// explicit x-thread-id header (opt out of derivation — the pre-#97 behavior). NEW
+// keys are minted with `auto` in the keystores; moot while memory is off.
 export const MemoryThreadSourceSchema = z.enum(["header", "auto"]);
 
 // Human-readable key label (docs/06) — cosmetic only, never an auth/routing input.
@@ -74,12 +73,11 @@ export const ApiKeyRecordSchema = z.object({
   // concurrency_queue_enabled is ON; overflow waits in a FIFO queue (429 on
   // queue-full / wait-timeout). `.default()`ed so legacy rows still parse.
   concurrency_limit: z.number().int().positive().nullable().default(null),
-  // Per-key MEMORY DEFAULTS (issue #97): server-side defaults so clients limited
-  // to static headers (Claude Code / Codex) — or none at all — still get memory.
-  // Explicit x-memory-* request headers always override. memory_mode is a
-  // BEHAVIOR-level default (inject rewrites requests), so it is never set
-  // globally — only per key, explicitly (fail-safe). `.default()`ed so legacy
-  // rows predating the migration still parse with memory off.
+  // Per-key MEMORY DEFAULTS: server-side settings for clients limited to static
+  // headers (Claude Code / Codex). Explicit x-memory-* request headers always
+  // override. memory_mode is a BEHAVIOR-level default (inject rewrites requests),
+  // so omitted/new records stay off unless a key explicitly opts in. `.default()`ed
+  // so legacy rows predating the migration still parse with memory off.
   memory_mode: MemoryModeSchema.default("off"),
   memory_project_id: z.string().min(1).nullable().default(null),
   // Zod parse-default is the conservative `header` (legacy rows / record fixtures
@@ -122,9 +120,9 @@ export const CreateKeyRequestSchema = z
     // Optional max in-flight requests at mint time. Omitted => unlimited (null);
     // must be strictly positive (0 rejected — null already means unlimited).
     concurrency_limit: z.number().int().positive().optional(),
-    // Optional per-key memory defaults at mint time (issue #97). Omitted => the
-    // keystore mints the NEW-KEY defaults (mode "inject", thread_source "auto"); pass
-    // these explicitly to opt out. Explicit x-memory-* headers always override.
+    // Optional per-key memory defaults at mint time. Omitted => the keystore mints
+    // fail-safe NEW-KEY defaults (mode "off", thread_source "auto"); pass
+    // memory_mode explicitly to opt in. Explicit x-memory-* headers always override.
     memory_mode: MemoryModeSchema.optional(),
     memory_project_id: z.string().min(1).optional(),
     memory_thread_source: MemoryThreadSourceSchema.optional(),

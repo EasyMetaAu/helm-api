@@ -7,9 +7,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createSqliteDb } from "./migrate.js";
 
 // Migration v21 upgrade path: a real pre-v21 memory_messages table (no
-// content_hash/message_index, no unique index) carrying duplicate rows must, on
-// upgrade, (a) collapse exact legacy duplicates keeping the EARLIEST row, (b)
-// gain the content_hash/message_index columns, (c) gain the occurrence-aware
+// content_hash/message_index, no unique index) carrying repeated content must,
+// on upgrade, (a) preserve legacy rows that have no occurrence key, (b) gain the
+// content_hash/message_index columns, (c) gain the occurrence-aware
 // UNIQUE(thread_id, message_index, role, content_hash) index.
 // Mirrors the postgres migrate.test.ts pre-unique-index upgrade test.
 
@@ -58,7 +58,8 @@ function seedPreV21(): string {
     "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at) VALUES (?, ?, ?, ?, ?, ?)",
   );
   // Three copies of the SAME (thread, role, content) at increasing created_at,
-  // plus one distinct message. Earliest of the dup group is "first".
+  // plus one distinct message. Without occurrence keys these may be legitimate
+  // repeated turns, so the migration must preserve them.
   insMsg.run("first", "t1", "user", "dup", 1, 100);
   insMsg.run("second", "t1", "user", "dup", 1, 200);
   insMsg.run("third", "t1", "user", "dup", 1, 300);
@@ -68,14 +69,13 @@ function seedPreV21(): string {
 }
 
 describe("memory_messages dedup migration (v21)", () => {
-  it("collapses duplicates to the earliest row and adds the dedup columns", () => {
+  it("preserves legacy repeated turns and adds the dedup columns", () => {
     const db = createSqliteDb(seedPreV21());
     try {
       const rows = db.$sqlite
         .prepare("SELECT id, content FROM memory_messages ORDER BY created_at")
         .all() as Array<{ id: string; content: string }>;
-      // dup group collapsed to its earliest ("first"); distinct row kept.
-      expect(rows.map((r) => r.id).sort()).toEqual(["first", "other"]);
+      expect(rows.map((r) => r.id)).toEqual(["first", "other", "second", "third"]);
 
       const cols = (
         db.$sqlite.prepare("PRAGMA table_info(memory_messages)").all() as Array<{ name: string }>

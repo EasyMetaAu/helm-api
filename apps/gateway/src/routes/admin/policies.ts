@@ -10,6 +10,15 @@ import { rulePersistErrorResponse } from "./persist-error.js";
 // validate the whole set with the shared PoliciesConfigSchema. An unknown `match`
 // field (strict schema) -> 400, config unchanged (fail-closed, Principle 2).
 
+class PolicyMutationHttpError extends Error {
+  constructor(
+    readonly status: 404 | 422,
+    readonly body: Record<string, unknown>,
+  ) {
+    super(String(body.error ?? "policy mutation rejected"));
+  }
+}
+
 export function registerPoliciesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   // GET /policies -> Policy[]
   app.get("/admin/api/policies", async (c) => {
@@ -41,26 +50,25 @@ export function registerPoliciesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   // target merely doesn't exist.
   app.delete("/admin/api/policies/:id", async (c) => {
     const id = c.req.param("id");
-    const cfg = await deps.rules.getPolicies();
-    const remaining = cfg.policies.filter((p) => p.id !== id);
-    if (remaining.length === cfg.policies.length) {
-      // Distinguish "no policy has any explicit id" (DELETE-by-id is unusable;
-      // 422) from "ids exist but none match" (genuine 404).
-      const anyHasId = cfg.policies.some((p) => p.id !== undefined);
-      if (!anyHasId) {
-        return c.json(
-          {
-            error:
-              "DELETE requires an explicit policy id; no policy carries one — edit the set via PUT /admin/api/policies instead",
-          },
-          422,
-        );
-      }
-      return c.json({ error: "policy not found" }, 404);
-    }
     try {
-      await deps.rules.setPolicies({ policies: remaining });
+      await deps.rules.updatePolicies((cfg) => {
+        const remaining = cfg.policies.filter((p) => p.id !== id);
+        if (remaining.length === cfg.policies.length) {
+          // Distinguish "no policy has any explicit id" (DELETE-by-id is unusable;
+          // 422) from "ids exist but none match" (genuine 404).
+          const anyHasId = cfg.policies.some((p) => p.id !== undefined);
+          if (!anyHasId) {
+            throw new PolicyMutationHttpError(422, {
+              error:
+                "DELETE requires an explicit policy id; no policy carries one — edit the set via PUT /admin/api/policies instead",
+            });
+          }
+          throw new PolicyMutationHttpError(404, { error: "policy not found" });
+        }
+        return { policies: remaining };
+      });
     } catch (err) {
+      if (err instanceof PolicyMutationHttpError) return c.json(err.body, err.status);
       return rulePersistErrorResponse(c, err);
     }
     return c.json({ deleted: id });

@@ -215,6 +215,34 @@ describe("createWriteQueue", () => {
     expect(logs.some((l) => l.includes("overflow"))).toBe(true);
   });
 
+  it("drops new buffered writes when pending tasks already fill maxDepth", async () => {
+    const sink = fakeSink();
+    const logs: string[] = [];
+    let release!: () => void;
+    const blocker = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: (m) => logs.push(m),
+      flushIntervalMs: 10_000,
+      maxDepth: 1,
+    });
+
+    q.enqueueTask(async () => {
+      await blocker;
+    });
+    q.enqueueTelemetry(tele("dropped-telemetry"));
+    q.enqueuePayload(payload("dropped-payload"));
+
+    release();
+    await q.flush();
+
+    expect(sink.inserts).toHaveLength(0);
+    expect(sink.payloadCalls).toHaveLength(0);
+    expect(logs.filter((l) => l.includes("overflow"))).toHaveLength(2);
+  });
+
   it("stop() flushes pending writes and stops the timer", async () => {
     const sink = fakeSink();
     const q = createWriteQueue({ telemetry: sink, log: () => {}, flushIntervalMs: 10_000 });

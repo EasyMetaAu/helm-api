@@ -27,18 +27,38 @@ export interface SignalSchedulerHandle {
 export function startSignalScheduler(deps: SignalSchedulerDeps): SignalSchedulerHandle {
   const log = deps.log ?? (() => {});
   let prevTick = deps.now();
+  let retryWindow: [number, number] | null = null;
+  let inFlight = false;
 
   const timer = setInterval(() => {
-    const windowStart = prevTick;
-    const windowEnd = deps.now();
-    prevTick = windowEnd;
-    // Fire-and-forget; collect() is itself fail-open, but guard the promise too
-    // so a rejection can never become an unhandled rejection on the timer.
-    void deps.collector.collect(windowStart, windowEnd).catch((err: unknown) => {
-      log("warn", "signals.scheduler_tick_failed", {
-        error: err instanceof Error ? err.message : String(err),
+    if (inFlight) return;
+    const [windowStart, windowEnd] = retryWindow ?? [prevTick, deps.now()];
+    inFlight = true;
+    // Fire-and-forget; collect() is fail-open in normal operation, but the scheduler
+    // still treats ok:false or a rejection as a non-advanced window so telemetry is
+    // retried instead of skipped permanently.
+    void deps.collector
+      .collect(windowStart, windowEnd)
+      .then((res) => {
+        if (res.ok) {
+          retryWindow = null;
+          prevTick = windowEnd;
+          return;
+        }
+        retryWindow = [windowStart, windowEnd];
+        log("warn", "signals.scheduler_tick_failed", { windowStart, windowEnd });
+      })
+      .catch((err: unknown) => {
+        retryWindow = [windowStart, windowEnd];
+        log("warn", "signals.scheduler_tick_failed", {
+          windowStart,
+          windowEnd,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        inFlight = false;
       });
-    });
   }, deps.intervalMs);
 
   // Do not keep the event loop alive solely for signal collection (Node only).

@@ -10,6 +10,15 @@ import { rulePersistErrorResponse } from "./persist-error.js";
 // shared LaneSchema and translates to HTTP. Invalid body -> 400, nothing written
 // (fail-closed). LaneSchema is the single type source (z.infer); no duplicate shape.
 
+class LaneMutationHttpError extends Error {
+  constructor(
+    readonly status: 400 | 404 | 409,
+    readonly body: Record<string, unknown>,
+  ) {
+    super(String(body.error ?? "lane mutation rejected"));
+  }
+}
+
 export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   // GET /lanes -> [{ name, ...Lane }]
   app.get("/admin/api/lanes", async (c) => {
@@ -33,18 +42,24 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     if (!parsed.success) {
       return c.json({ error: "invalid lane", issues: parsed.error.issues }, 400);
     }
-    const lanes = { ...(await deps.rules.getLanes()), [name]: parsed.data };
-    // Re-validate the WHOLE map before writing: a single-lane edit can still break
-    // the map-level invariant (LanesConfigSchema requires `balanced`, the
-    // classification-fallback terminal — Principle 5). Fail-closed: nothing written on a
-    // violation (Principle 2).
-    const map = LanesConfigSchema.safeParse(lanes);
-    if (!map.success) {
-      return c.json({ error: "invalid lanes config", issues: map.error.issues }, 400);
-    }
     try {
-      await deps.rules.setLanes(lanes);
+      await deps.rules.updateLanes((current) => {
+        const lanes = { ...current, [name]: parsed.data };
+        // Re-validate the WHOLE map before writing: a single-lane edit can still break
+        // the map-level invariant (LanesConfigSchema requires `balanced`, the
+        // classification-fallback terminal — Principle 5). Fail-closed: nothing written on a
+        // violation (Principle 2).
+        const map = LanesConfigSchema.safeParse(lanes);
+        if (!map.success) {
+          throw new LaneMutationHttpError(400, {
+            error: "invalid lanes config",
+            issues: map.error.issues,
+          });
+        }
+        return map.data;
+      });
     } catch (err) {
+      if (err instanceof LaneMutationHttpError) return c.json(err.body, err.status);
       // Persist failure (e.g. unwritable config mount) is a local 500, not a 502.
       return rulePersistErrorResponse(c, err);
     }
@@ -54,19 +69,25 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   // DELETE /lanes/:name
   app.delete("/admin/api/lanes/:name", async (c) => {
     const name = c.req.param("name");
-    const lanes = { ...(await deps.rules.getLanes()) };
-    if (!(name in lanes)) return c.json({ error: "lane not found" }, 404);
-    delete lanes[name];
-    // Re-validate the mutated map BEFORE writing. Deleting `balanced` (or any edit
-    // that breaks the map-level invariant) must be rejected with nothing written —
-    // it is the classification-fallback terminal (Principle 5, fail-closed Principle 2).
-    const map = LanesConfigSchema.safeParse(lanes);
-    if (!map.success) {
-      return c.json({ error: "invalid lanes config", issues: map.error.issues }, 409);
-    }
     try {
-      await deps.rules.setLanes(lanes);
+      await deps.rules.updateLanes((current) => {
+        const lanes = { ...current };
+        if (!(name in lanes)) throw new LaneMutationHttpError(404, { error: "lane not found" });
+        delete lanes[name];
+        // Re-validate the mutated map BEFORE writing. Deleting `balanced` (or any edit
+        // that breaks the map-level invariant) must be rejected with nothing written —
+        // it is the classification-fallback terminal (Principle 5, fail-closed Principle 2).
+        const map = LanesConfigSchema.safeParse(lanes);
+        if (!map.success) {
+          throw new LaneMutationHttpError(409, {
+            error: "invalid lanes config",
+            issues: map.error.issues,
+          });
+        }
+        return map.data;
+      });
     } catch (err) {
+      if (err instanceof LaneMutationHttpError) return c.json(err.body, err.status);
       return rulePersistErrorResponse(c, err);
     }
     return c.json({ deleted: name });

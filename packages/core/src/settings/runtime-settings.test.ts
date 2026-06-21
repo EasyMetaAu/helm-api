@@ -109,17 +109,17 @@ describe("loadRuntimeSettings", () => {
     const store = fakeConfigStore({ [RUNTIME_SETTINGS_KEY]: "{not json" });
     const log = vi.fn();
     const out = await loadRuntimeSettings(store, cfg(false), log);
-    expect(out).toEqual(defaultSettingsFromConfig(cfg(false)));
+    expect(out).toEqual({ ...defaultSettingsFromConfig(cfg(false)), capture_payloads: false });
     expect(log).toHaveBeenCalledWith("warn", "settings.load_fallback", { reason: "invalid_json" });
   });
 
-  it("fails OPEN on a schema-mismatched row (returns defaults + logs warn)", async () => {
+  it("fails OPEN on a schema-mismatched row with capture disabled (returns defaults + logs warn)", async () => {
     const store = fakeConfigStore({
       [RUNTIME_SETTINGS_KEY]: JSON.stringify({ log_level: "verbose" }),
     });
     const log = vi.fn();
     const out = await loadRuntimeSettings(store, cfg(true), log);
-    expect(out).toEqual(defaultSettingsFromConfig(cfg(true)));
+    expect(out).toEqual({ ...defaultSettingsFromConfig(cfg(true)), capture_payloads: false });
     expect(log).toHaveBeenCalledWith("warn", "settings.load_fallback", {
       reason: "schema_mismatch",
     });
