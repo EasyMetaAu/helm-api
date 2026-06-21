@@ -257,6 +257,38 @@ describe("convertOpenAIStreamToAnthropic — temp id upgrade", () => {
       expect(start.content_block.id).toBe("call_real");
     }
   });
+
+  it("synthesizes a toolu_ id when a tool is announced by name with NO id and NO args (H11)", async () => {
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([
+          // Name only — no id, no argument fragment ever; the block is flushed at
+          // stream end. It must NOT leak the tmp_tool_* placeholder as the client id.
+          {
+            id: "c",
+            model: "m",
+            choices: [
+              {
+                index: 0,
+                delta: { tool_calls: [{ index: 0, function: { name: "ping" } }] },
+                finish_reason: null,
+              },
+            ],
+          },
+          { id: "c", model: "m", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+        ]),
+      ),
+    );
+    const start = events.find(
+      (e) => e.type === "content_block_start" && e.content_block.type === "tool_use",
+    );
+    expect(start?.type).toBe("content_block_start");
+    if (start?.type === "content_block_start" && start.content_block.type === "tool_use") {
+      expect(start.content_block.id).not.toMatch(/^tmp_tool_/);
+      expect(start.content_block.id).toMatch(/^toolu_/);
+      expect(start.content_block.name).toBe("ping");
+    }
+  });
 });
 
 // —— 4. idempotent close guard ————————————————————————————————————————————————

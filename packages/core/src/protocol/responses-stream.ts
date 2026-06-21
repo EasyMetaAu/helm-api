@@ -1088,13 +1088,38 @@ export async function* convertResponsesEventStreamToOpenAI(
           : ev.response.incomplete_details?.reason === "content_filter"
             ? "content_filter"
             : "length";
+        // C3: carry the FULL usage split, not just prompt+completion. prompt_tokens
+        // stays = input_tokens (the full input, cache INCLUSIVE — cost.ts subtracts
+        // the cached/creation slices itself); cached/cache-creation ride
+        // prompt_tokens_details and reasoning rides completion_tokens_details so the
+        // cache discount and reasoning telemetry survive the Responses→OpenAI leg.
+        let usage: OpenAIChunk["usage"];
+        if (u !== undefined) {
+          const cached = u.input_tokens_details?.cached_tokens ?? 0;
+          const cacheCreation = u.input_tokens_details?.cache_creation_input_tokens ?? 0;
+          const reasoning = u.output_tokens_details?.reasoning_tokens;
+          usage = {
+            prompt_tokens: u.input_tokens,
+            completion_tokens: u.output_tokens,
+            total_tokens: u.total_tokens ?? u.input_tokens + u.output_tokens,
+            ...(cached > 0 || cacheCreation > 0
+              ? {
+                  prompt_tokens_details: {
+                    ...(cached > 0 ? { cached_tokens: cached } : {}),
+                    ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+                  },
+                }
+              : {}),
+            ...(reasoning !== undefined
+              ? { completion_tokens_details: { reasoning_tokens: reasoning } }
+              : {}),
+          };
+        }
         yield {
           ...(ev.response.id !== "" ? { id: ev.response.id } : {}),
           ...(ev.response.model !== "" ? { model: ev.response.model } : {}),
           choices: [{ index: 0, delta: {}, finish_reason: finish }],
-          ...(u !== undefined
-            ? { usage: { prompt_tokens: u.input_tokens, completion_tokens: u.output_tokens } }
-            : {}),
+          ...(usage !== undefined ? { usage } : {}),
         };
         break;
       }

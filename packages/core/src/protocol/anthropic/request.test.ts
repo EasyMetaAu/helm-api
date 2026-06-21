@@ -494,6 +494,34 @@ describe("anthropic transformRequestOut", () => {
     expect(sys).toContain("# MCP Server Instructions");
   });
 
+  // H10: a system turn appearing BETWEEN user turns is folded into the global system
+  // param IN ORDER (not left inline) — the documented policy (systemFromMessages).
+  // Pins ordering + stripping so a refactor can't silently reorder/drop a mid-conv
+  // system turn or leak it into messages[] as a user turn.
+  it("folds a mid-conversation system turn into system[] in order, stripping it from messages (H10)", () => {
+    const req = {
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      system: "A-first",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "system", content: "B-midconv" },
+        { role: "user", content: "u2" },
+      ],
+    };
+    const out = transformRequestIn(transformRequestOut(req));
+    // No system/developer turn leaks into messages[] (Anthropic only allows
+    // user/assistant there). The two user turns, now adjacent, may merge — that's fine.
+    expect(out.messages.every((m) => m.role === "user" || m.role === "assistant")).toBe(true);
+    expect(out.messages.some((m) => m.role === "user")).toBe(true);
+    // Both system turns folded, A before B (conversation order preserved).
+    const sys = typeof out.system === "string" ? out.system : JSON.stringify(out.system);
+    const aAt = sys.indexOf("A-first");
+    const bAt = sys.indexOf("B-midconv");
+    expect(aAt).toBeGreaterThanOrEqual(0);
+    expect(bAt).toBeGreaterThan(aAt);
+  });
+
   // Block-array content on a system message must also map to a system IR message,
   // not silently become a user turn (the block path used to hardcode role:"user").
   it('maps a block-array role:"system" message to a system IR message', () => {

@@ -1,5 +1,5 @@
 import type { DecidedBy, DecisionRecord, InternalRequest } from "@helm/shared";
-import type { AttemptRecord } from "../executor/fallback.js";
+import type { AttemptRecord } from "../executor/attempt-record.js";
 import type { InsertTelemetryInput, TelemetryStore } from "../store/ports.js";
 import { redact } from "./redaction.js";
 

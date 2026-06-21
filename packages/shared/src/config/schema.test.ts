@@ -230,6 +230,16 @@ describe("HelmConfigSchema", () => {
     }
   });
 
+  it("rejects require_api_key:false — auth is mandatory, fail closed (review H2)", () => {
+    const bad = fullConfig();
+    (bad.auth as Record<string, unknown>).require_api_key = false;
+    const res = HelmConfigSchema.safeParse(bad);
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues[0]?.path).toEqual(["auth", "require_api_key"]);
+    }
+  });
+
   it("stores only a credential reference (api_key_env), never a plaintext key", () => {
     const parsed = HelmConfigSchema.parse(fullConfig());
     const provider = parsed.providers[0];

@@ -505,6 +505,18 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE oauth_quota ADD COLUMN IF NOT EXISTS usage_limited_until_ms BIGINT;
     `,
   },
+  {
+    // Memory-job claim index (mirrors sqlite v27; review M7): claimPendingJobs runs on
+    // every worker tick + debounced wake — WHERE status='pending' OR (status='running'
+    // AND updated_at<=staleBefore) ORDER BY created_at, id. (status, created_at, id)
+    // serves the hot pending branch's filter + order so it isn't a scan+sort of a
+    // memory_jobs table that grows until the cleanup cadence prunes it. Additive +
+    // idempotent; forward-only.
+    version: 26,
+    sql: `
+      CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim ON memory_jobs (status, created_at, id);
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

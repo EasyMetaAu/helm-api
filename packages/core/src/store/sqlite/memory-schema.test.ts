@@ -363,6 +363,8 @@ describe("sqlite v18 forgetting schema deltas", () => {
       rec.run(25, Date.now());
       // v26 alters oauth_quota (created at v12, pre-marked here so absent) → pre-mark.
       rec.run(26, Date.now());
+      // v27 indexes memory_jobs; this memory-only fixture never creates it → pre-mark.
+      rec.run(27, Date.now());
       seed.close();
 
       expect(() => runMigrations(path)).not.toThrow();

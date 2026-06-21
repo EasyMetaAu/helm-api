@@ -21,9 +21,18 @@ export interface CleanupAction {
   table: CleanupTable;
   cutoffMs: number;
   archive: boolean;
+  // Hard safety horizon (epoch ms, OLDER than cutoffMs), set only for archive
+  // actions. If archiving is unavailable or the sink fails, the runner still prunes
+  // rows older than THIS so a persistently-failing sink can't grow the table without
+  // bound (review H3). Absent ⇒ the legacy over-retain-on-archive-failure behavior.
+  safetyCutoffMs?: number;
 }
 
 const DAY_MS = 86_400_000;
+
+// Multiplier on the retention window for the hard safety-horizon prune (H3): when
+// archive-before-delete can't run, rows older than window × this are deleted anyway.
+const SAFETY_MULTIPLE = 2;
 
 // Pure: (settings, now) -> the ordered list of cleanup actions. No I/O, no clock —
 // the caller injects nowMs so this is fully deterministic and unit-testable. Each
@@ -40,27 +49,25 @@ export function buildCleanupPlan(settings: RuntimeSettings, nowMs: number): Clea
   const cutoff = (days: number) => nowMs - days * DAY_MS;
   const actions: CleanupAction[] = [];
 
+  // Archive actions also carry a safety horizon (2× window) so a failing/absent sink
+  // can't grow the table without bound (H3); non-archive paths prune at cutoffMs and
+  // are already bounded, so they omit it.
+  const archiveAction = (table: CleanupTable, days: number): CleanupAction => ({
+    table,
+    cutoffMs: cutoff(days),
+    archive,
+    ...(archive ? { safetyCutoffMs: cutoff(days * SAFETY_MULTIPLE) } : {}),
+  });
+
   if (settings.telemetry_cleanup_enabled) {
-    actions.push({
-      table: "telemetry",
-      cutoffMs: cutoff(settings.telemetry_retention_days),
-      archive,
-    });
+    actions.push(archiveAction("telemetry", settings.telemetry_retention_days));
   }
   if (settings.payloads_cleanup_enabled) {
     // Window REUSES payload_retention_days (single source of truth with the legacy knob).
-    actions.push({
-      table: "request_payloads",
-      cutoffMs: cutoff(settings.payload_retention_days),
-      archive,
-    });
+    actions.push(archiveAction("request_payloads", settings.payload_retention_days));
   }
   if (settings.memory_messages_cleanup_enabled) {
-    actions.push({
-      table: "memory_messages",
-      cutoffMs: cutoff(settings.memory_messages_retention_days),
-      archive,
-    });
+    actions.push(archiveAction("memory_messages", settings.memory_messages_retention_days));
   }
   if (settings.oauth_usage_cleanup_enabled) {
     // Delete-only (observability counters, no training value).

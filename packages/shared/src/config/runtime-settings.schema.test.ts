@@ -49,7 +49,7 @@ describe("RuntimeSettingsSchema", () => {
       // Data-cleanup fields backfilled by their schema defaults.
       cleanup_enabled: true,
       cleanup_interval_hours: 24,
-      cleanup_archive_enabled: true,
+      cleanup_archive_enabled: false,
       telemetry_cleanup_enabled: true,
       telemetry_retention_days: 90,
       payloads_cleanup_enabled: true,
@@ -64,10 +64,11 @@ describe("RuntimeSettingsSchema", () => {
     });
   });
 
-  it("backfills cleanup defaults (master on, archive on, raw/derived memory opt-in)", () => {
+  it("backfills cleanup defaults (master on, archive OFF, raw/derived memory opt-in)", () => {
     const parsed = RuntimeSettingsSchema.parse({});
     expect(parsed.cleanup_enabled).toBe(true);
-    expect(parsed.cleanup_archive_enabled).toBe(true);
+    // H3: archive-before-delete defaults OFF so a failing sink can't cause unbounded growth.
+    expect(parsed.cleanup_archive_enabled).toBe(false);
     expect(parsed.cleanup_interval_hours).toBe(24);
     expect(parsed.telemetry_retention_days).toBe(90);
     expect(parsed.memory_messages_cleanup_enabled).toBe(false);

@@ -578,6 +578,18 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE oauth_quota ADD COLUMN usage_limited_until_ms INTEGER;
     `,
   },
+  {
+    // Memory-job claim index (review M7): the worker's claimPendingJobs runs on every
+    // tick + every debounced wake — WHERE status='pending' OR (status='running' AND
+    // updated_at<=staleBefore) ORDER BY created_at, id. With no leading-status index it
+    // was a full scan + sort of memory_jobs, which grows until the cleanup cadence
+    // prunes finished rows. (status, created_at, id) serves the hot pending branch's
+    // filter + order directly. Additive + idempotent; forward-only.
+    version: 27,
+    sql: `
+      CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim ON memory_jobs (status, created_at, id);
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

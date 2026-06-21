@@ -116,6 +116,55 @@ describe("convertOpenAIStreamToResponses — refusal + annotation streaming (ord
     };
     expect(first.choices?.[0]?.delta?.annotations?.[0]?.url).toBe("https://x");
   });
+
+  // C3: the reverse leg (a native-Responses upstream feeding the IR) must carry the
+  // full usage split — cached/cache-creation/reasoning/total — not just prompt+
+  // completion. Dropping cached_tokens makes cost.ts price the cached slice at full
+  // rate (lost cache discount → over-billing); dropping reasoning loses telemetry.
+  it("reverse: response.completed preserves cached/reasoning/total usage (C3)", async () => {
+    const chunks = await collect(
+      convertResponsesEventStreamToOpenAI(
+        (async function* () {
+          yield {
+            type: "response.completed",
+            sequence_number: 0,
+            response: {
+              id: "resp_1",
+              object: "response",
+              model: "gpt-5",
+              status: "completed",
+              output: [],
+              usage: {
+                input_tokens: 100,
+                output_tokens: 20,
+                total_tokens: 120,
+                input_tokens_details: { cached_tokens: 30, cache_creation_input_tokens: 10 },
+                output_tokens_details: { reasoning_tokens: 8 },
+              },
+            },
+          } as unknown as ResponsesSSEEvent;
+        })(),
+      ),
+    );
+    const usage = (
+      chunks.at(-1) as {
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+          prompt_tokens_details?: { cached_tokens?: number; cache_creation_tokens?: number };
+          completion_tokens_details?: { reasoning_tokens?: number };
+        };
+      }
+    ).usage;
+    // prompt_tokens stays FULL (input_tokens) — cost.ts subtracts cached/creation itself.
+    expect(usage?.prompt_tokens).toBe(100);
+    expect(usage?.completion_tokens).toBe(20);
+    expect(usage?.total_tokens).toBe(120);
+    expect(usage?.prompt_tokens_details?.cached_tokens).toBe(30);
+    expect(usage?.prompt_tokens_details?.cache_creation_tokens).toBe(10);
+    expect(usage?.completion_tokens_details?.reasoning_tokens).toBe(8);
+  });
 });
 
 // —— 1. event sequence: pure text ————————————————————————————————————————————
@@ -1044,7 +1093,8 @@ describe("convertResponsesEventStreamToOpenAI — forward-projection cases (reve
     expect(last?.choices?.[0]?.finish_reason).toBe("stop");
     expect(last?.id).toBe("resp_c");
     expect(last?.model).toBe("gpt-x");
-    expect(last?.usage).toEqual({ prompt_tokens: 12, completion_tokens: 5 });
+    // C3: total_tokens now propagates through the reverse leg (was previously dropped).
+    expect(last?.usage).toEqual({ prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 });
   });
 
   it("a completed response with status=incomplete maps to finish_reason=length", async () => {

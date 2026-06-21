@@ -2,8 +2,8 @@
 // provider's fetch boundary — BEFORE any response byte has reached the client, so
 // re-issuing the request is safe (no duplicated/half-emitted output, principle 8).
 //
-// This is NOT the execution fallback (executor/fallback.ts swaps to the NEXT model
-// in the chain): this retries the SAME upstream a couple of times to absorb a
+// This is NOT the execution fallback (the chain loop in apps/gateway execute.ts
+// swaps to the NEXT model): this retries the SAME upstream a couple of times to absorb a
 // transient blip — a keepalive connection-reuse race, an ECONNRESET, a peer that
 // closed the socket — which otherwise burns a candidate (or 502s a single-candidate
 // chain) for a hiccup that a 200 ms retry would have survived.

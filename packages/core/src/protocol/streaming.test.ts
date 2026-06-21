@@ -105,6 +105,20 @@ describe("readSSE — generic SSE splitter", () => {
     const events = await collect(readSSE(streamOf([enc.encode(wire)])));
     expect(events).toEqual([{ data: "line1\nline2" }]);
   });
+
+  // H9 (stated #1 risk): a multibyte UTF-8 codepoint split across two reads must
+  // reassemble intact — never mojibake / U+FFFD. The decoder uses { stream: true };
+  // this pins that contract so a refactor that drops the flag fails loudly.
+  it("reassembles a multibyte codepoint (CJK + emoji) split mid-byte across chunks", async () => {
+    const frame = 'data: {"text":"你好👋"}\n\n';
+    const bytes = enc.encode(frame);
+    // Cut INSIDE the 4-byte emoji 👋: prefix bytes up to 你好, then +2 into the emoji.
+    const cut = enc.encode('data: {"text":"你好').length + 2;
+    const events = await collect(readSSE(streamOf([bytes.slice(0, cut), bytes.slice(cut)])));
+    expect(events).toEqual([{ data: '{"text":"你好👋"}' }]);
+    // Round-trips through JSON with no replacement-char corruption.
+    expect(JSON.parse(nth(events, 0).data).text).toBe("你好👋");
+  });
 });
 
 // —— 2. parseSSEData tolerance ————————————————————————————————————————————————

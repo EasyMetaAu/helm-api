@@ -904,6 +904,38 @@ describe("createExecute — gateway execution adapter", () => {
     expect(seen).toEqual(chunks);
   });
 
+  it("H8: an empty stream (zero chunks) is a pre-first-chunk failure → advances the chain, never recordSuccess", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi
+        .fn()
+        .mockReturnValueOnce(gen([])) // candidate a: 200 body that closes with NO chunk
+        .mockReturnValueOnce(gen(['data: {"ok":1}\n\n', "data: [DONE]\n\n"])), // b: healthy
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordSuccess = vi.spyOn(cb, "recordSuccess");
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ a: "m-a", b: "m-b" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["a", "b"]), req({ stream: true }));
+    // 'a' must be recorded a FAILURE (not a success that heals the breaker), and the
+    // chain must advance to the healthy 'b'.
+    expect(recordFailure).toHaveBeenCalledWith("a");
+    expect(recordSuccess).not.toHaveBeenCalledWith("a");
+    expect(recordSuccess).toHaveBeenCalledWith("b");
+    expect(out.attempts[0]?.alias).toBe("a");
+    expect(out.attempts[0]?.status).toBe("error");
+    expect(out.final.status).toBe("ok");
+  });
+
   it("records stream_reframed when an OpenAI-compatible provider applies a stream shim", async () => {
     const provider = {
       streamReframed: true,
@@ -1195,8 +1227,12 @@ describe("createExecute — gateway execution adapter", () => {
     const out = await execute(plan(["a"]), req());
     expect(out.attempts[0]?.error_class).toBe("client_abort");
     expect(recordFailure).not.toHaveBeenCalled();
+    // C2: the FINAL surfaced error must be client_abort (499), not a 502 provider
+    // fault — a disconnect is a non-provider fault and must not be counted as one.
+    expect(out.final.status).toBe("error");
     if (out.final.status === "error") {
-      expect(out.final.error.error_class).not.toBe("all_providers_failed");
+      expect(out.final.error.error_class).toBe("client_abort");
+      expect(out.final.error.http_status).toBe(499);
     }
   });
 
@@ -2403,8 +2439,11 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(provider.nativePassthrough).toHaveBeenCalledTimes(1);
     expect(out.attempts[0]?.error_class).toBe("client_abort");
     expect(recordFailure).not.toHaveBeenCalled();
+    // C2: a disconnect during native passthrough surfaces client_abort (499), not 502.
+    expect(out.final.status).toBe("error");
     if (out.final.status === "error") {
-      expect(out.final.error.error_class).not.toBe("all_providers_failed");
+      expect(out.final.error.error_class).toBe("client_abort");
+      expect(out.final.error.http_status).toBe(499);
     }
   });
 
@@ -3290,8 +3329,11 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(provider.nativePassthroughStream).toHaveBeenCalledTimes(1);
     expect(out.attempts[0]?.error_class).toBe("client_abort");
     expect(recordFailure).not.toHaveBeenCalled();
+    // C2: a disconnect during the stream peek surfaces client_abort (499), not 502.
+    expect(out.final.status).toBe("error");
     if (out.final.status === "error") {
-      expect(out.final.error.error_class).not.toBe("all_providers_failed");
+      expect(out.final.error.error_class).toBe("client_abort");
+      expect(out.final.error.http_status).toBe(499);
     }
   });
 });

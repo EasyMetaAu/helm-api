@@ -101,9 +101,13 @@ export const RuntimeSettingsSchema = z.object({
   // on its own slower cadence. 1h–1 week.
   cleanup_interval_hours: z.number().int().min(1).max(168).default(24),
   // Archive-before-delete for the training/audit tables (telemetry, payloads,
-  // memory_messages). Default ON: aged rows are written to a verified gzip-JSONL
-  // archive BEFORE deletion. Off = straight delete (no archive file written).
-  cleanup_archive_enabled: z.boolean().default(true),
+  // memory_messages). Default OFF (review H3): archive-before-delete means a sink
+  // failure (disk full) skips the delete entirely → unbounded table growth (the
+  // production payload-bloat incident). Off = straight delete at the retention
+  // window (always bounded). Operators who want archived history opt in explicitly;
+  // even then a hard safety-horizon prune (2× the window) bounds growth if the sink
+  // keeps failing — see buildCleanupPlan / runCleanup.
+  cleanup_archive_enabled: z.boolean().default(false),
 
   // Telemetry decision records (redacted; routing/cost/latency labels). Default ON,
   // 90-day window — fixes the unbounded-growth gap.

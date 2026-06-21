@@ -51,7 +51,7 @@ describe("defaultSettingsFromConfig", () => {
       // Data-cleanup fields come straight from the schema defaults.
       cleanup_enabled: true,
       cleanup_interval_hours: 24,
-      cleanup_archive_enabled: true,
+      cleanup_archive_enabled: false,
       telemetry_cleanup_enabled: true,
       telemetry_retention_days: 90,
       payloads_cleanup_enabled: true,
