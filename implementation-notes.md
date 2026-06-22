@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-22 · Claude 订阅（OAuth）token 成本折算（docs/04/07；约定「能力与定价数据源」；原则 6）
+
+- **问题**：admin 对 Claude Pro/Max 订阅（`anthropic/*` OAuth 池）流量只显示 token **数量**，花费恒为 `—`（null）。token 计数链路（解析→落库→聚合→渲染）对所有 provider 早已就绪，唯一缺口是 `config/pricing.yaml` 无 `anthropic/*` 行；`costOf(alias)` 以路由 alias 查 catalog 落空 → `resolveCostUsd` 返回 `null`（fail-open「未计量」）。`openai-codex/*` 早有定价故 ChatGPT 订阅花费一直能显示——Claude 是唯一漏配的订阅渠道；`github-copilot/*` 无 lane 引用，不在范围。
+- **关键坑（务必同时改两个文件）**：这些 alias 现**无 catalog 条目**→能力过滤被跳过、fail-open 直接尝试（`execute.ts:887` `if (caps)`）。一旦**只加 pricing**，`loadCatalog`（`catalog/index.ts:107`）会用 `EMPTY_CAPABILITIES`（`maxContextTokens:0`/`supportsStreaming:false`/`jsonOutput:none`）造条目 → 能力过滤第 4 关 `context_too_small` 把**每个** Claude 请求剪掉。故必须**同时**在 `capabilities.yaml` 加条目（照搬 `zenmux-anthropic/claude-*` 既有先例，二者都加），用真实上限：Opus/Sonnet/Fable `maxContextTokens:1000000`、Haiku `200000`。
+- **定价来源（按用户规则「API 价优先，否则官方」）**：核对生成 catalog（`catalog/generated/catalog.json`）只有旧 `claude-3-5-{sonnet,haiku}-20241022`，四个目标模型均不在 → 全部用**官方 Anthropic 价**（`claude-api` skill 即官方价表）。Opus 5/25、Sonnet 3/15、Haiku 1/5、Fable 10/50（USD/MTok）。**含 cache 读写价**（读 0.1×、写 1.25×输入）——载入项：Claude Code 大量用缓存，缺省会让 `computeCostUsd` 按全价计缓存 token，严重高估。
+- **取舍/限制**：是**折算价非实付**（订阅月度统付，与 `openai-codex/*` 既有语义一致），未在 UI 区分名义/实付；仅 4 个 lane alias 被定价，自定义 key 发来的其它/带日期 `anthropic/<id>` 仍 `null`（fail-open 照样尝试，只是不计价，需要时运维补一行）。纯配置无代码改动。
+- **验证**：`samples.test.ts`（Claude lane 路由不回归）、`catalog/{index,load,models-list}.test.ts`（4 条新条目的计数/快照）、`capability/filter.test.ts` 均绿；typecheck+lint 绿。
+
 ## 2026-06-22 · Codex 原生 Responses 直通兼容清洗 + fallback reasoning 泄漏修复（docs/05/07；原则 3/7/8）
 
 - **线上实证**：`la.atmy.work` 请求 `e3ead05d-3433-4464-aca2-47d7640ee97f` 的第一候选 `openai-codex/gpt-5.5` 295ms 返回 HTTP 400：`Unsupported parameter: max_output_tokens`；入站是 `/v1/responses` 原生直通，客户端带 `max_output_tokens:512`。请求 `39f175e4-2ff8-4ede-849c-d8dc9542adb0` 第一候选 `openai-codex/gpt-5.4-mini` 404：`Item with id ... not found. Items are not persisted when store is set to false`；同一 fallback 链随后 Anthropic/DeepSeek 因 Responses reasoning history 被当作 provider `thinking` 配置而 400，OpenRouter 最终成功。
@@ -24,18 +32,13 @@
 - **仍未做**：all-failed chain 的 per-attempt upstream body capture 还没补；当前只继续保存 served attempt 的 `upstream_request_json`。这需要扩展 payload 表或决策 attempt 附属表，单独做更稳。
 - **验证**：TDD 红→绿；`execute.test.ts` 覆盖 exact count_tokens skip、Sonnet effort skip、request-shape 400 不触发 breaker；`messages.test.ts` 覆盖 stream error 落库；`openai-responses.test.ts` 覆盖 `response.failed.providerRaw`。focused 212 测、typecheck、Biome lint 均绿。
 
-## 2026-06-21 · Codex Chat→Responses 兼容层移除 `temperature`（docs/05/07；原则 3/7/8）
-
-- **线上实证**：`la.atmy.work` 请求 `49f1eb18-7430-48b2-97d4-b97169d425cf` 的第一候选 `openai-codex/gpt-5.4-mini` 351ms 返回 HTTP 400：`Unsupported parameter: temperature`；执行 fallback 随后命中 `anthropic/claude-haiku-4-5-20251001` 成功，整体 `final_status=ok`、`fallback_count=1`。该请求是 `model:"economy"` + `temperature:0` + 非流式 Chat Completions；因 `source_protocol=openai_chat`、`target_provider_protocol=openai_responses`、`passthrough_disable_reason=missing_native_request`，Helm 走 `openaiToResponsesRequest` 互译路径，而不是原生 Responses 直通。
-- **决定**：Codex/ChatGPT-account Responses 后端采用 openclaw 的最小可用 body：`store:false`、`stream:true`、`include:["reasoning.encrypted_content"]`、`text.verbosity:"low"`，并且**不发送** `max_output_tokens` 或 `temperature`。generic OpenAI Responses client 不变；只修订 subscription Codex 互译层，避免把 OpenAI Chat 客户端的采样字段原样带到不支持的后端。
-- **验证**：TDD 红→绿；`packages/core/src/provider/openai-responses.test.ts` 钉住 `temperature` 被省略，保留 generic Responses 的采样参数行为。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-21 · Codex Chat→Responses 兼容层移除 `temperature`**：economy+temperature:0 非流式 Chat 经 `openaiToResponsesRequest` 互译到 ChatGPT-account Codex Responses 后端 400 `Unsupported parameter: temperature`；改为 Codex Responses 用 openclaw 最小 body（`store:false`/`stream:true`/`include:[reasoning.encrypted_content]`/`text.verbosity:low`，不发 `max_output_tokens`/`temperature`），generic Responses 不变。
 - **2026-06-21 · 全仓评审修复 Tiers 1–5**：按 review C1/C2、C3/H3、H1/H2、H9/H10/H11、breaker+memory 分批修复；关键取舍包括删除未被网关调用且漂移的 `executor/fallback.ts`、不从 `prompt_tokens` 预减 cached、`cleanup_archive_enabled` 默认关并加 2× 安全线、`require_api_key:false` fail-closed、Anthropic mid-conv system 折叠保持现行为、OPEN 态 `recordFailure` no-op；M6/C4 延后单做。
 
 ### 2026-06-20 · 内部 LLM（memory + eval）支持 lane 名 + 默认 economy（docs/03/04/08；原则 4/6）：self-http 内部 LLM 原把裸 lane `economy` 改写成 `deepseek/economy` 导致 lane-as-model 失效；修为 `createSelfHttpClient` 注入 live `isLane()`，已知 lane 原样透传，memory/eval 默认 model 改为 `economy`，并删除 `HELM_INTERNAL_LLM_THROUGH_GATEWAY` 开关使内部调用始终经自有网关（mint `k_internal`，失败才落回直连）。用户知情接受 economy 成本较高；未做启动期 capability 校验/成本可观测。
