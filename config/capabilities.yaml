@@ -177,6 +177,47 @@ zenmux-anthropic/claude-haiku-4.5:
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
+# `anthropic/*` are the NATIVE Claude Pro/Max SUBSCRIPTION models (synthesized at
+# runtime when the Anthropic OAuth pool is connected — alias prefix == the OAuth
+# provider id `anthropic`; see oauth/models.ts + lanes.yaml claude-* lanes). They
+# must be declared HERE even though they're OAuth-synthesized: an alias with NO
+# catalog entry is attempted fail-open WITHOUT capability filtering, but the moment
+# pricing.yaml adds a row the merge synthesizes an entry with EMPTY_CAPABILITIES
+# (maxContextTokens: 0) and the filter would prune EVERY request as context_too_small
+# (catalog/index.ts). So caps + pricing must be added together. Limits are the real
+# per-model Anthropic figures (Opus/Sonnet/Fable 1M; Haiku 200K).
+anthropic/claude-opus-4-8:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
+anthropic/claude-sonnet-4-6:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
+anthropic/claude-fable-5:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
+anthropic/claude-haiku-4-5-20251001:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  modalities: [document]
+  maxContextTokens: 200000
+  maxOutputTokens: 65536
 # */auto aggregators: JSON-INCAPABLE on purpose (jsonOutput: none) — the capability
 # filter prunes them for any JSON request so a json lane lands on a deterministic model.
 zenmux/auto:
