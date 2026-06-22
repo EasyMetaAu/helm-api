@@ -15,6 +15,7 @@ import {
   type NativePassthroughDisableReason,
   openaiTransformer,
   resolveCostUsd,
+  sanitizeCodexResponsesNativeBody,
   UpstreamError,
 } from "@helm/core";
 import type {
@@ -546,6 +547,12 @@ function prepareNativeRequestForUpstream(
             : "instructions_defaulted",
         ]);
       }
+    }
+    const sanitized = sanitizeCodexResponsesNativeBody(body);
+    if (sanitized.fixes.length > 0) {
+      body = sanitized.body;
+      bodyChanged = true;
+      if (mutations) appendMutationList(mutations, "body_shims_applied", sanitized.fixes);
     }
   }
 
@@ -1464,6 +1471,10 @@ function stripInternal(
   if (req.max_tokens !== null) body.max_tokens = req.max_tokens;
   for (const key of FORWARDED_REQUEST_PARAM_KEYS) {
     const value = req[key];
+    if (key === "thinking" && Array.isArray(value)) {
+      requestMutations.thinking_history_stripped_for_target = true;
+      continue;
+    }
     if (value !== undefined && value !== null) body[key] = value;
   }
   if (targetProviderProtocol === "anthropic_messages" && req.cache_control !== undefined) {

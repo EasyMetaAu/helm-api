@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-22 · Codex 原生 Responses 直通兼容清洗 + fallback reasoning 泄漏修复（docs/05/07；原则 3/7/8）
+
+- **线上实证**：`la.atmy.work` 请求 `e3ead05d-3433-4464-aca2-47d7640ee97f` 的第一候选 `openai-codex/gpt-5.5` 295ms 返回 HTTP 400：`Unsupported parameter: max_output_tokens`；入站是 `/v1/responses` 原生直通，客户端带 `max_output_tokens:512`。请求 `39f175e4-2ff8-4ede-849c-d8dc9542adb0` 第一候选 `openai-codex/gpt-5.4-mini` 404：`Item with id ... not found. Items are not persisted when store is set to false`；同一 fallback 链随后 Anthropic/DeepSeek 因 Responses reasoning history 被当作 provider `thinking` 配置而 400，OpenRouter 最终成功。
+- **决定 1（Codex 直通）**：仅对 ChatGPT-account Codex Responses profile 增加 native body 清洗：移除 `max_output_tokens` / `temperature`；`store:false` 时删除 input item 的 `id/status/phase` 引用元数据，并丢弃空 reasoning item（保留有 `encrypted_content`/summary/content 的 reasoning）。generic OpenAI Responses passthrough 保持原样，避免破坏标准 API 语义。
+- **决定 2（跨协议 fallback）**：`InternalRequest.thinking` 若是 Responses reasoning history 数组，不再作为 provider `thinking` 请求配置转发到 OpenAI-compatible / Anthropic target；attempt 记录 `thinking_history_stripped_for_target`。provider_raw.reasoning 继续按目标协议 allowlist 剥离并记录。
+- **验证**：TDD 红→绿；`openai-responses.test.ts` 覆盖 Codex native 清洗；`execute.test.ts` 覆盖 Codex 直通清洗与 fallback `thinking` 剥离；focused 237 测、core/gateway typecheck、Biome touched-file check 均绿。
+
 ## 2026-06-22 · Opus 1M 上下文溢出预检 + 流式失败落库修正（docs/04/05/07；原则 3/5/7/8）
 
 - **线上实证**：`la.atmy.work` SQLite 显示 `claude-opus-4-8` 原生 Anthropic 请求在 `2026-06-22 01:28:23–01:33:50 UTC` 连续失败，核心错误为 `prompt is too long: 1001854 tokens > 1000000 maximum`；稍后同模型 `prompt_tokens=924300` 成功，说明客户端压缩/清理尚未把活动上下文降到硬上限以下。`decision_json.memory` 为空，Helm memory middleware 未参与。
@@ -23,22 +30,13 @@
 - **决定**：Codex/ChatGPT-account Responses 后端采用 openclaw 的最小可用 body：`store:false`、`stream:true`、`include:["reasoning.encrypted_content"]`、`text.verbosity:"low"`，并且**不发送** `max_output_tokens` 或 `temperature`。generic OpenAI Responses client 不变；只修订 subscription Codex 互译层，避免把 OpenAI Chat 客户端的采样字段原样带到不支持的后端。
 - **验证**：TDD 红→绿；`packages/core/src/provider/openai-responses.test.ts` 钉住 `temperature` 被省略，保留 generic Responses 的采样参数行为。
 
-## 2026-06-21 · 全仓评审修复 Tiers 1–5（review C1–C4/H1–H11/M4–M7；分支 `fix/review-fixes`，未部署）
-
-全仓 review 后按严重度分 5 批修复。下面只记**不得不自己做的决定、偏离 review 建议处、坑**；机械改动看 git diff。每批走 TDD + 全 CI 门（typecheck 4 项目 / biome 0 警告 / build / vitest）。
-
-- **Tier 1（C1/C2，原则 1/5）**：execution-fallback 循环有**两份**——生产内联在 `execute.ts`（execute.test.ts ~3300 行覆盖），而 `executor/fallback.ts` 的 `runFallback` 只被 `index.ts` 导出、**从不被网关调用**，且已漂移。用户在 3 选项中选「删重复」（抽进 core 的"对但大"重构一次性 agent 跑 946k token 卡死→证明太大）。删 `fallback.ts` + 测试 + 8 个死导出，唯一活类型 `AttemptRecord` 抽到 `executor/attempt-record.ts`。**破坏性**：移除 `@helm/core` 的 `runFallback`/`InvokeFailure` 等公共导出（本仓无消费者）。C2：客户端断连最终错误 `upstream_error`→`client_abort`(499)。
-- **Tier 2（C3/H3，原则 7/2/3）**：**C3 偏离 review 建议**——review 说"从 prompt_tokens 减去 cached"，但 `cost.ts:computeCostUsd` 自己做 `regularPrompt=prompt-cached-cacheCreation`，故 prompt_tokens 必须保持 input_tokens **全量**；真 bug 是 responses-stream 反向腿**丢了 cached/reasoning/total 明细**→缓存折扣丢失=多计费。修：补明细（不减）；给 `OpenAIChunkUsageSchema` 加 `total_tokens`。**H3**：`cleanup_archive_enabled` 默认 `true`→**false**（归档失败跳删→无界增长=线上事故；off=按窗口直删有界）+ 归档失败/不可用时仍按**2× 窗口硬安全线**剪枝（plan 给 archive action 加 `safetyCutoffMs`，runner 两条 skip 路都用）。**跳过 auto_vacuum**（不配 `incremental_vacuum` 近乎 no-op，且已有手动 Compact/VACUUM）。
-- **Tier 3（H1/H2，原则 2/6）**：死配置项。**H1 选「实现」而非「删除」**（删要动签入 config + 6 测；实现 churn 更小且让字段不再撒谎）：`bootstrapRootKey` 现 honored `generate_if_missing`（false→不铸+告警）/`print_once`/`persist_to`（注入 persist 回调，server 用 `fs.writeFile(...,{mode:0o600})` 写明文 key——**仅空 keystore 的全新部署触发**，符合字段本意）。后续 review 修正：若 `persist_to` 失败且 `print_once:false`，明文 key 已无交付渠道，必须回滚刚铸的 root key 并 fail-closed，避免下次启动因已有 hash 行而永不再打印/持久化。**H2 选 `z.literal(true)`**：真正接线"匿名访问"既违反 spec 强制鉴权、又因 self-auth 路由在路由内鉴权而是大改；改为 `require_api_key:false` 在配置加载即 **fail-closed**（而非静默忽略）。
-- **Tier 4（H9/H10/H11，原则 8）**：**H9 纯补测**（`readSSE` 的 `TextDecoder{stream:true}` 已正确处理跨 chunk 多字节，review 说"缺测试本身即缺陷"——补 `你好👋` 按字节中段切分用例）。**H10 选「文档+钉测试」不改行为**：Anthropic 无 system 角色，现有把**所有** system 轮（含会话中段）按序折进顶层 `system`，是 LiteLLM 兼容的有意策略——补注释定策 + 钉 mid-conv 折叠顺序的测试（改成"折进相邻 user 轮"是有意的未来变更，非本次）。**H11**：name-only 零参数工具在流末刷出时会泄露 `tmp_tool_*` 客户端 id；加 `clientToolUseId` 在两个 emit 点合成确定性 `toolu_synthetic_<idx>`。
-- **Tier 5（breaker + memory，原则 3）**：**H7** OPEN 态 `recordFailure` 改 no-op（原会 `trip()` 重置 openedAt→冷却永刷新）。**M4** `recordAbort` 仅 HALF_OPEN 释放探针锁（防误放他人锁；现状下其他态 lock 已为 false，属防御性）。**H8** `peekStream` 空流（首 next `done`）抛 `UpstreamError` → 记 breaker 失败 + 进链，而非 `recordSuccess` 治愈 breaker 并回空体。**H4 = 误报**：pg `appendMessages` dedup 循环**永远保留首条**输入→`rows` 对非空输入不可能为空→`.values([])` 不可达；保留一行防御性 `if(rows.length===0)return ids`（注释标明"今日不可达"）+ 跨适配器全重复批次 parity 测。**M5** compaction 经济学（`priorCompactionCount`/`measuredRetention`）排除 pruned 墓碑（`[pruned]` 8 字符会污染留存比），用 `activeObservations` 过滤。**M7** 加 `idx_memory_jobs_claim (status, created_at, id)`（sqlite v27 / pg v26；claimPendingJobs 每 tick+wake 跑），4 个 scoped 迁移 fixture 预标 v27 applied。
-- **本批主动延后（记账，未做）**：**M6**（decay 候选查询去重 + 给 `memory_jobs` 加可索引的 accountId 生成列）——是 forgetting 关键查询的**两方言 SQL 重写**，误改即影响"哪些记忆被遗忘"，刚因 H4 误报更应谨慎；值单开 PR 做前后结果对比。**C4**（observer 重入队锚定原始 frontier）——v0.21.10 现机制工作正常（debounce 合并 + user 门控 + ~1h idle-flush 兜底），review 担心的"持续负载下无界"实为"每个 user 轮都观测"=按设计；强行锚定 frontier 有**重新引入漏轮 bug**（即"42 永不持久化"）的风险，故只做风险评估不改码。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-21 · 全仓评审修复 Tiers 1–5**：按 review C1/C2、C3/H3、H1/H2、H9/H10/H11、breaker+memory 分批修复；关键取舍包括删除未被网关调用且漂移的 `executor/fallback.ts`、不从 `prompt_tokens` 预减 cached、`cleanup_archive_enabled` 默认关并加 2× 安全线、`require_api_key:false` fail-closed、Anthropic mid-conv system 折叠保持现行为、OPEN 态 `recordFailure` no-op；M6/C4 延后单做。
 
 ### 2026-06-20 · 内部 LLM（memory + eval）支持 lane 名 + 默认 economy（docs/03/04/08；原则 4/6）：self-http 内部 LLM 原把裸 lane `economy` 改写成 `deepseek/economy` 导致 lane-as-model 失效；修为 `createSelfHttpClient` 注入 live `isLane()`，已知 lane 原样透传，memory/eval 默认 model 改为 `economy`，并删除 `HELM_INTERNAL_LLM_THROUGH_GATEWAY` 开关使内部调用始终经自有网关（mint `k_internal`，失败才落回直连）。用户知情接受 economy 成本较高；未做启动期 capability 校验/成本可观测。
 

@@ -216,6 +216,97 @@ export function hoistResponsesInstructions(body: Record<string, unknown>): {
   return { body: { ...body, instructions: DEFAULT_INSTRUCTIONS }, fix: "defaulted" };
 }
 
+export type CodexResponsesNativeBodyFix =
+  | "empty_reasoning_items_dropped"
+  | "input_item_references_stripped"
+  | "max_output_tokens_removed"
+  | "temperature_removed";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasNonEmptyArray(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
+function hasUsefulReasoningPayload(item: Record<string, unknown>): boolean {
+  if (hasNonEmptyArray(item.summary)) return true;
+  if (hasNonEmptyArray(item.content)) return true;
+  const encrypted = item.encrypted_content;
+  if (typeof encrypted === "string") return encrypted.length > 0;
+  return encrypted !== undefined && encrypted !== null;
+}
+
+function sanitizeStoreFalseInputItems(input: unknown): {
+  input: unknown;
+  referencesStripped: boolean;
+  emptyReasoningDropped: boolean;
+} {
+  if (!Array.isArray(input)) {
+    return { input, referencesStripped: false, emptyReasoningDropped: false };
+  }
+
+  let referencesStripped = false;
+  let emptyReasoningDropped = false;
+  const next: unknown[] = [];
+  for (const item of input) {
+    if (!isRecord(item)) {
+      next.push(item);
+      continue;
+    }
+    const sanitized = { ...item };
+    for (const key of ["id", "status", "phase"]) {
+      if (key in sanitized) {
+        delete sanitized[key];
+        referencesStripped = true;
+      }
+    }
+    if (sanitized.type === "reasoning" && !hasUsefulReasoningPayload(sanitized)) {
+      emptyReasoningDropped = true;
+      continue;
+    }
+    next.push(sanitized);
+  }
+
+  return { input: next, referencesStripped, emptyReasoningDropped };
+}
+
+// ChatGPT-account Codex Responses is stricter than the public OpenAI Responses API.
+// It rejects max_output_tokens/temperature and store:false item IDs from prior
+// responses. Keep this shim Codex-only; generic OpenAI Responses passthrough must
+// remain byte-faithful.
+export function sanitizeCodexResponsesNativeBody(body: Record<string, unknown>): {
+  body: Record<string, unknown>;
+  fixes: CodexResponsesNativeBodyFix[];
+} {
+  let next = body;
+  const fixes = new Set<CodexResponsesNativeBodyFix>();
+  const ensureCopy = (): Record<string, unknown> => {
+    if (next === body) next = { ...body };
+    return next;
+  };
+
+  if ("max_output_tokens" in next) {
+    delete ensureCopy().max_output_tokens;
+    fixes.add("max_output_tokens_removed");
+  }
+  if ("temperature" in next) {
+    delete ensureCopy().temperature;
+    fixes.add("temperature_removed");
+  }
+  if (next.store === false) {
+    const sanitized = sanitizeStoreFalseInputItems(next.input);
+    if (sanitized.referencesStripped || sanitized.emptyReasoningDropped) {
+      ensureCopy().input = sanitized.input;
+      if (sanitized.referencesStripped) fixes.add("input_item_references_stripped");
+      if (sanitized.emptyReasoningDropped) fixes.add("empty_reasoning_items_dropped");
+    }
+  }
+
+  return { body: next, fixes: [...fixes].sort() };
+}
+
 function toResponsesInput(messages: Array<Record<string, unknown>>): ResponsesItem[] {
   const out: ResponsesItem[] = [];
   for (const m of messages) {

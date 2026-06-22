@@ -9,6 +9,7 @@ import {
   openaiToResponsesRequest,
   readResponsesEvents,
   readResponsesSSERaw,
+  sanitizeCodexResponsesNativeBody,
   translateResponsesSSE,
 } from "./openai-responses.js";
 
@@ -1995,5 +1996,70 @@ describe("hoistResponsesInstructions", () => {
     expect(body).not.toBe(original);
     expect("instructions" in original).toBe(false);
     expect(original.input).toHaveLength(2);
+  });
+});
+
+describe("sanitizeCodexResponsesNativeBody", () => {
+  it("removes Codex-unsupported caps and store:false persisted item references", () => {
+    const { body, fixes } = sanitizeCodexResponsesNativeBody({
+      model: "gpt-5.5",
+      store: false,
+      max_output_tokens: 512,
+      temperature: 0.2,
+      input: [
+        {
+          type: "reasoning",
+          id: "rs_missing",
+          status: "completed",
+          content: [],
+          summary: [],
+        },
+        {
+          type: "message",
+          role: "assistant",
+          id: "msg_missing",
+          status: "completed",
+          phase: "final_answer",
+          content: [{ type: "output_text", text: "NO_REPLY" }],
+        },
+        { role: "user", content: [{ type: "input_text", text: "next" }] },
+      ],
+    });
+
+    expect(fixes).toEqual([
+      "empty_reasoning_items_dropped",
+      "input_item_references_stripped",
+      "max_output_tokens_removed",
+      "temperature_removed",
+    ]);
+    expect(body).toEqual({
+      model: "gpt-5.5",
+      store: false,
+      input: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "NO_REPLY" }],
+        },
+        { role: "user", content: [{ type: "input_text", text: "next" }] },
+      ],
+    });
+  });
+
+  it("preserves useful encrypted reasoning while stripping its volatile item metadata", () => {
+    const { body } = sanitizeCodexResponsesNativeBody({
+      model: "gpt-5.5",
+      store: false,
+      input: [
+        {
+          type: "reasoning",
+          id: "rs_1",
+          encrypted_content: "enc",
+          summary: [],
+        },
+      ],
+    });
+
+    expect(body.input).toEqual([{ type: "reasoning", encrypted_content: "enc", summary: [] }]);
   });
 });

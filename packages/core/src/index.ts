@@ -529,6 +529,7 @@ export {
   aggregateResponsesStream,
   type CodexResponsesClientConfig,
   type CodexResponsesClientDeps,
+  type CodexResponsesNativeBodyFix,
   codexAccountIdFromToken,
   createCodexResponsesClient,
   createGenericOpenAIResponsesClient,
@@ -536,6 +537,7 @@ export {
   hoistResponsesInstructions,
   openaiToResponsesRequest,
   type ResponsesInstructionsFix,
+  sanitizeCodexResponsesNativeBody,
   translateResponsesSSE,
 } from "./provider/openai-responses.js";
 export {
