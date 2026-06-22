@@ -310,6 +310,51 @@ describe("createExecute — gateway execution adapter", () => {
     expect(body.store).toBe(false);
   });
 
+  it.each([
+    "openai_chat",
+    "anthropic_messages",
+  ] as const)("does not forward Responses reasoning history as %s provider thinking config", async (targetProviderProtocol) => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        default_good_model: {
+          providerName: "mock",
+          providerModel: "gpt-x",
+          targetProviderProtocol,
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["default_good_model"]),
+      req({
+        protocol: "openai_responses",
+        thinking: [{ type: "thinking", text: "" }],
+        provider_raw: {
+          reasoning: [{ type: "reasoning", id: "rs_missing", summary: [] }],
+        },
+      }),
+    );
+
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.thinking).toBeUndefined();
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      thinking_history_stripped_for_target: true,
+    });
+  });
+
   it("does not forward Anthropic-only provider_raw keys to OpenAI-compatible upstreams", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
@@ -2969,6 +3014,95 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     });
     expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toEqual([
       "instructions_hoisted_from_input",
+    ]);
+  });
+
+  it("sanitizes Codex passthrough bodies that came from stored Responses output items", async () => {
+    const responsesBody = {
+      id: "resp_sanitized",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const provider = {
+      nativeProtocolProfile: "codex_responses",
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["codex", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "codex",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: {
+        model: "auto",
+        instructions: "real codex base prompt",
+        store: false,
+        max_output_tokens: 512,
+        temperature: 0.2,
+        input: [
+          {
+            type: "reasoning",
+            id: "rs_missing",
+            status: "completed",
+            content: [],
+            summary: [],
+          },
+          {
+            type: "message",
+            role: "assistant",
+            id: "msg_missing",
+            status: "completed",
+            phase: "final_answer",
+            content: [{ type: "output_text", text: "NO_REPLY" }],
+          },
+          { role: "user", content: [{ type: "input_text", text: "next" }] },
+        ],
+      },
+      headers: {},
+      mutations: {},
+    };
+
+    const out = await execute(
+      plan(["r"]),
+      req({ protocol: "openai_responses", native_request: carrier }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body).toEqual({
+      model: "gpt-5.5",
+      instructions: "real codex base prompt",
+      store: false,
+      input: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "NO_REPLY" }],
+        },
+        { role: "user", content: [{ type: "input_text", text: "next" }] },
+      ],
+    });
+    expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toEqual([
+      "empty_reasoning_items_dropped",
+      "input_item_references_stripped",
+      "max_output_tokens_removed",
+      "temperature_removed",
     ]);
   });
 
