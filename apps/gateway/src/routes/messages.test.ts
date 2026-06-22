@@ -19,7 +19,16 @@ const IDENTITY: MessagesIdentity = { keyId: "k1", accountId: "acct" };
 
 // A fake DecisionRecord stand-in the route hands opaquely to recordServed →
 // redact → telemetry.insert (it never inspects fields).
-const FAKE_DECISION = { final: { status: "ok", model_alias: "claude-3-5-sonnet" } } as never;
+function fakeDecision() {
+  return {
+    final: {
+      status: "ok",
+      model_alias: "claude-3-5-sonnet",
+      provider_model: "claude",
+      error_reason: null,
+    },
+  } as never;
+}
 
 // A minimal IR-ish object the stub transformer returns; the route must thread it
 // to the pipeline untouched (save trace_id) and never inspect its internals.
@@ -150,7 +159,7 @@ function makeDeps(
           });
         }
         return {
-          decision: FAKE_DECISION,
+          decision: fakeDecision(),
           collect: over.collect ?? (async () => ({ id: "ir-resp" })),
           streamIR:
             over.streamEvents ??
@@ -949,5 +958,29 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     const arg = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
     expect(arg.responseJson).toContain("event: error");
     expect(arg.responseJson).toContain("error");
+  });
+
+  it("stream error frame marks the persisted decision as error", async () => {
+    async function* events(): AsyncIterable<{ type: string }> {
+      yield { type: "message_start" };
+      throw new Error("upstream blew up mid-stream");
+    }
+    const { record, insert } = makeRecord({ capturePayloads: true });
+    const { deps } = makeDeps({ record, isStream: true, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+    await res.text();
+
+    expect(insert).toHaveBeenCalledOnce();
+    const arg = insert.mock.calls[0]?.[0] as {
+      decision: { final: { status: string; error_reason: string | null } };
+    };
+    expect(arg.decision.final.status).toBe("error");
+    expect(arg.decision.final.error_reason).toBe("upstream_error");
   });
 });

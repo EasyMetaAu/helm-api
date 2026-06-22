@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-22 · Opus 1M 上下文溢出预检 + 流式失败落库修正（docs/04/05/07；原则 3/5/7/8）
+
+- **线上实证**：`la.atmy.work` SQLite 显示 `claude-opus-4-8` 原生 Anthropic 请求在 `2026-06-22 01:28:23–01:33:50 UTC` 连续失败，核心错误为 `prompt is too long: 1001854 tokens > 1000000 maximum`；稍后同模型 `prompt_tokens=924300` 成功，说明客户端压缩/清理尚未把活动上下文降到硬上限以下。`decision_json.memory` 为空，Helm memory middleware 未参与。
+- **决定 1（上下文）**：对 Anthropic native target 在真正 provider invoke 前增加 exact `count_tokens` 预检；`claude-opus-4-8` / `claude-sonnet-4-6` / `claude-haiku-4-5` 采用保守硬上限 `1_000_000`，并与 catalog 值取较小者。`count_tokens` 失败时 fail-open 继续原尝试（避免 token helper 自身成为 5xx），但一旦精确 `input_tokens` 超限，记录 `skip_reason:"context_too_small"` 并进入 fallback，**不记 breaker failure**。
+- **决定 2（请求形状 400）**：上游 400 中的 `prompt is too long`、`does not support effort level`、`output_config.effort` 等判为请求形状错误，attempt 记 `invalid_request`，但不污染 circuit breaker。`:free` 429、OAuth 429 auto-park 等 provider-health 路径保持原语义。
+- **决定 3（effort）**：`claude-sonnet-4-6` 只允许 `low|medium|high|max` 的 `output_config.effort`；`xhigh` 等不兼容值在执行前以 `unsupported_reasoning_effort` 跳过该候选，而不是发给上游再 400。没有把 `xhigh` 自动 clamp 到 `max`，因为 clamp 会悄悄改变用户请求语义；fallback skip 更可观测。
+- **决定 4（流式可观测）**：`/v1/messages` 已写出 Anthropic `event:error` 时，同步把 `DecisionRecord.final.status` 改为 `error` 并写入 `error_reason`，避免 admin 显示 ok 但 payload 里是错误帧。Codex Responses `response.failed` / `error` 抛出的 `UpstreamError` 现在带原始 SSE event 到 `providerRaw`，让 `error_detail.provider_raw` 能保留故障字段（仍经 telemetry redaction）。
+- **仍未做**：all-failed chain 的 per-attempt upstream body capture 还没补；当前只继续保存 served attempt 的 `upstream_request_json`。这需要扩展 payload 表或决策 attempt 附属表，单独做更稳。
+- **验证**：TDD 红→绿；`execute.test.ts` 覆盖 exact count_tokens skip、Sonnet effort skip、request-shape 400 不触发 breaker；`messages.test.ts` 覆盖 stream error 落库；`openai-responses.test.ts` 覆盖 `response.failed.providerRaw`。focused 212 测、typecheck、Biome lint 均绿。
+
 ## 2026-06-21 · Codex Chat→Responses 兼容层移除 `temperature`（docs/05/07；原则 3/7/8）
 
 - **线上实证**：`la.atmy.work` 请求 `49f1eb18-7430-48b2-97d4-b97169d425cf` 的第一候选 `openai-codex/gpt-5.4-mini` 351ms 返回 HTTP 400：`Unsupported parameter: temperature`；执行 fallback 随后命中 `anthropic/claude-haiku-4-5-20251001` 成功，整体 `final_status=ok`、`fallback_count=1`。该请求是 `model:"economy"` + `temperature:0` + 非流式 Chat Completions；因 `source_protocol=openai_chat`、`target_provider_protocol=openai_responses`、`passthrough_disable_reason=missing_native_request`，Helm 走 `openaiToResponsesRequest` 互译路径，而不是原生 Responses 直通。
@@ -24,20 +34,13 @@
 - **Tier 5（breaker + memory，原则 3）**：**H7** OPEN 态 `recordFailure` 改 no-op（原会 `trip()` 重置 openedAt→冷却永刷新）。**M4** `recordAbort` 仅 HALF_OPEN 释放探针锁（防误放他人锁；现状下其他态 lock 已为 false，属防御性）。**H8** `peekStream` 空流（首 next `done`）抛 `UpstreamError` → 记 breaker 失败 + 进链，而非 `recordSuccess` 治愈 breaker 并回空体。**H4 = 误报**：pg `appendMessages` dedup 循环**永远保留首条**输入→`rows` 对非空输入不可能为空→`.values([])` 不可达；保留一行防御性 `if(rows.length===0)return ids`（注释标明"今日不可达"）+ 跨适配器全重复批次 parity 测。**M5** compaction 经济学（`priorCompactionCount`/`measuredRetention`）排除 pruned 墓碑（`[pruned]` 8 字符会污染留存比），用 `activeObservations` 过滤。**M7** 加 `idx_memory_jobs_claim (status, created_at, id)`（sqlite v27 / pg v26；claimPendingJobs 每 tick+wake 跑），4 个 scoped 迁移 fixture 预标 v27 applied。
 - **本批主动延后（记账，未做）**：**M6**（decay 候选查询去重 + 给 `memory_jobs` 加可索引的 accountId 生成列）——是 forgetting 关键查询的**两方言 SQL 重写**，误改即影响"哪些记忆被遗忘"，刚因 H4 误报更应谨慎；值单开 PR 做前后结果对比。**C4**（observer 重入队锚定原始 frontier）——v0.21.10 现机制工作正常（debounce 合并 + user 门控 + ~1h idle-flush 兜底），review 担心的"持续负载下无界"实为"每个 user 轮都观测"=按设计；强行锚定 frontier 有**重新引入漏轮 bug**（即"42 永不持久化"）的风险，故只做风险评估不改码。
 
-## 2026-06-20 · 内部 LLM（memory + eval）支持 lane 名 + 默认 economy（docs/03/04/08；原则 4/6）
-
-- **目标（用户）**：所有内部 LLM 调用（memory 的 observation/reflection/facts + Layer-2 eval）都能把 **lane 名**当模型用（走 lane 的 fallback 链），未配置时**默认 economy**。
-- **现状核实**：网关路由**早已支持 lane-as-model**——`allow_custom_model` 的 key 传 `model:"<lane>"` 会路由到该 lane 的展开链且**跳过 classify+eval**（route-request.ts step 1a，无递归）；内部 key `k_internal`（allow_custom_model + 无 allowed_lanes + memory_mode:off）有资格路由任意 lane。**唯一阻塞**：`createSelfHttpClient`（self-http 模式，box 开着 `HELM_INTERNAL_LLM_THROUGH_GATEWAY=1`）把任何无斜杠 model 一律改写成 `${providerPrefix}/${model}`→裸 lane `economy`→`deepseek/economy`→上游无此模型→fail-open 静默降级。默认模式 resolver 同样把 lane 当裸模型直发主 provider。
-- **专家评估（用户要求 3 角色两轮）**：路由架构/可靠性/成本三角色达成共识。**关键发现（成本角色）**：`economy` 的 primary 是 `openai-codex/gpt-5.4-mini`（$0.75/$4.5），是 nano deepseek-v4-flash 的 7.5–22.5×，链尾兜到 balanced 可达 Sonnet/Opus；专家组原推荐另建廉价 `internal` lane。**用户在知情下仍选 economy**，并明确"不要关心成本，只做技术实现"。
-- **决定（技术实现）**：① **P0**——`createSelfHttpClient` 注入 `isLane()`，已知 lane 名**跳过 provider 前缀、原样透传**（`server.ts` 用 live `(m)=>Object.hasOwn(lanes,m)`，admin 改 lane 即时生效）。因 memory + eval 都经同一 selfHttpClient，**一处修复同时覆盖全部内部 LLM**。② **默认 economy**——`MemoryLlmSchema` 把 `superRefine(必填)` 改为 `transform`：enabled 且 model 未配置→`model="economy"`（per-task 字段继承之）；`ClassifierConfigSchema` 的 eval prefault `deepseek-v4-flash`→`economy`。显式值（lane 名 OR `provider/model`）一律原样honored。③ **删除 `HELM_INTERNAL_LLM_THROUGH_GATEWAY` 开关，内部 LLM 走自有网关改为始终开启**（用户：「没必要默认关闭」）——去掉 env 判断 + `if` 门控，`k_internal` 每次启动必 mint，`selfHttpClient` 仅在 mint 失败时为 null（落回直连 provider，与 self-http 前逐字一致，不阻塞启动）。这同时**消除了"非 self-http 就 fail-open"那条尾巴**——lane 路由现在全局生效。
-- **范围/坑**：lane 路由现走始终开启的 self-http 路径，无模式分叉。memory.llm/eval 默认都 OFF，故默认 economy 只影响主动开启者。**box 当前 pin 了 `deepseek/deepseek-v4-flash`** → 默认改动不影响 box，要用 economy 需删 pin 或显式设 `model: economy`；box 旧 env `HELM_INTERNAL_LLM_THROUGH_GATEWAY=1` 部署后变成无害死变量（可删可留）。本 PR**未做**：启动期 JSON-capability 校验、成本可观测（按用户"只做技术实现"裁掉，列为后续）。
-- **验证**：TDD 红→绿；self-http 1 新例（lane 名不被加前缀、裸模型仍加前缀）+ memory-schema 改 2 例（默认 economy / 非法 knob 仍 fail-closed）；gateway+shared+core memory/config **1486 测**绿、typecheck（4 项目）/biome 清。分支 `feat/internal-llm-lane-support`，待发。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+### 2026-06-20 · 内部 LLM（memory + eval）支持 lane 名 + 默认 economy（docs/03/04/08；原则 4/6）：self-http 内部 LLM 原把裸 lane `economy` 改写成 `deepseek/economy` 导致 lane-as-model 失效；修为 `createSelfHttpClient` 注入 live `isLane()`，已知 lane 原样透传，memory/eval 默认 model 改为 `economy`，并删除 `HELM_INTERNAL_LLM_THROUGH_GATEWAY` 开关使内部调用始终经自有网关（mint `k_internal`，失败才落回直连）。用户知情接受 economy 成本较高；未做启动期 capability 校验/成本可观测。
 
 ### 2026-06-20 · observer 任务合并竞态致"运行期到达的消息"丢失（docs/08 Phase 2；原则 3）：observer job claim 时一次性快照，运行期间新 user 轮被开放任务唯一索引合并进已过读取点的 running job，导致短线程 fact 轮永不被挖；修为 `runObserverJob` 记录 `snapshotMessageIds`，done 后重读并仅对快照外新 user 消息补发 observer job，避免 assistant-only 热循环；无 schema/迁移，SQLite+Postgres 对称，observer 26 + core memory/store 653 绿。
 

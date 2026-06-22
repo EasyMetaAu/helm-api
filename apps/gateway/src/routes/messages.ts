@@ -209,6 +209,14 @@ function isAbort(err: unknown, signal: AbortSignal): boolean {
   return err instanceof Error && (err.name === "AbortError" || err.message.includes("aborted"));
 }
 
+function markStreamDecisionError(decision: DecisionRecord, errorClass: string): void {
+  decision.final = {
+    ...decision.final,
+    status: "error",
+    error_reason: errorClass,
+  };
+}
+
 export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps): void {
   const { anthropic } = deps.transformers;
 
@@ -539,15 +547,22 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           // providers failed before the stream started — emits a TERMINAL Anthropic
           // error event so the client never sees a silently truncated stream.
           if (!isAbort(err, c.req.raw.signal)) {
+            const errorClass =
+              err instanceof PipelineError
+                ? err.error_class
+                : isUpstreamTimeout(err)
+                  ? "timeout"
+                  : "upstream_error";
             const re: RouteError =
               err instanceof PipelineError
                 ? { error_class: err.error_class, message: err.message, trace_id: traceId }
                 : {
                     // Preserve a mid-stream idle timeout instead of upstream_error.
-                    error_class: isUpstreamTimeout(err) ? "timeout" : "upstream_error",
+                    error_class: errorClass,
                     message: isUpstreamTimeout(err) ? "upstream timed out" : "upstream error",
                     trace_id: traceId,
                   };
+            markStreamDecisionError(result.decision, errorClass);
             const out = anthropic.transformErrorOut(re);
             const data = JSON.stringify(out.body);
             if (captureBodies) captured.push(`event: error\ndata: ${data}\n\n`);
