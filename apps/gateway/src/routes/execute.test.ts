@@ -1,6 +1,11 @@
 import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } from "@helm/core";
 import { createCircuitBreaker, createGeminiClient, UpstreamError } from "@helm/core";
-import type { CatalogEntry, InternalRequest, TargetProviderProtocol } from "@helm/shared";
+import {
+  type CatalogEntry,
+  createNativePassthroughCarrier,
+  type InternalRequest,
+  type TargetProviderProtocol,
+} from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createExecute, detectRequestModalities } from "./execute.js";
 
@@ -794,6 +799,172 @@ describe("createExecute — gateway execution adapter", () => {
     });
     // ok / skipped rows must NOT carry a detail.
     expect(out.attempts[1]?.error_detail ?? null).toBeNull();
+  });
+
+  it("uses exact Anthropic count_tokens to skip an over-context native attempt without tripping the breaker", async () => {
+    const provider = {
+      countTokens: vi.fn().mockResolvedValue({ input_tokens: 1_001_854 }),
+      chatCompletion: vi.fn().mockResolvedValue({ id: "second" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        opus: {
+          providerName: "mock",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        codex: {
+          providerName: "mock",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["opus", "codex"]),
+      req({
+        protocol: "anthropic_messages",
+        requested_model: "claude-opus-4-8",
+        native_request: createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          body: {
+            model: "claude-opus-4-8",
+            messages: [{ role: "user", content: "huge" }],
+            max_tokens: 64,
+          },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(provider.countTokens).toHaveBeenCalledOnce();
+    expect(provider.chatCompletion).toHaveBeenCalledOnce();
+    expect(out.attempts[0]).toMatchObject({
+      alias: "opus",
+      skipped: true,
+      skip_reason: "context_too_small",
+      status: "error",
+    });
+    expect(out.attempts[1]?.status).toBe("ok");
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("skips Anthropic candidates whose output_config.effort is unsupported by the target model", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "second" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        sonnet: {
+          providerName: "mock",
+          providerModel: "claude-sonnet-4-6",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        codex: {
+          providerName: "mock",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["sonnet", "codex"]),
+      req({
+        protocol: "anthropic_messages",
+        requested_model: "claude-sonnet-4-6",
+        provider_raw: { output_config: { effort: "xhigh" } },
+        native_request: createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          body: {
+            model: "claude-sonnet-4-6",
+            messages: [{ role: "user", content: "hello" }],
+            output_config: { effort: "xhigh" },
+            max_tokens: 64,
+          },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(provider.chatCompletion).toHaveBeenCalledOnce();
+    expect(out.attempts[0]).toMatchObject({
+      alias: "sonnet",
+      skipped: true,
+      skip_reason: "unsupported_reasoning_effort",
+      status: "error",
+    });
+    expect(out.attempts[1]?.status).toBe("ok");
+  });
+
+  it("does not trip the breaker for Anthropic request-shape 400s", async () => {
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError(
+            "upstream_error",
+            "prompt is too long: 1001854 tokens > 1000000 maximum",
+            { error: { message: "prompt is too long" } },
+            400,
+          ),
+        )
+        .mockResolvedValueOnce({ id: "second" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        opus: {
+          providerName: "mock",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        codex: {
+          providerName: "mock",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["opus", "codex"]), req());
+
+    expect(out.final.status).toBe("ok");
+    expect(out.attempts[0]).toMatchObject({
+      alias: "opus",
+      skipped: false,
+      status: "error",
+      error_class: "invalid_request",
+    });
+    expect(out.attempts[1]?.status).toBe("ok");
+    expect(recordFailure).not.toHaveBeenCalled();
   });
 
   it("captures error_detail for a non-UpstreamError failure (null status, null raw)", async () => {

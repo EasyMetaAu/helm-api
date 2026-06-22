@@ -630,6 +630,96 @@ function errorClassOf(err: unknown): string {
   return "upstream_error";
 }
 
+const ANTHROPIC_NATIVE_CONTEXT_LIMITS = [
+  { pattern: /^claude-opus-4[-.]8(?:-|$)/, maxContextTokens: 1_000_000 },
+  { pattern: /^claude-sonnet-4[-.]6(?:-|$)/, maxContextTokens: 1_000_000 },
+  { pattern: /^claude-haiku-4[-.]5(?:-|$)/, maxContextTokens: 1_000_000 },
+] as const;
+
+const ANTHROPIC_OUTPUT_EFFORTS = {
+  sonnet_4_6: new Set(["low", "medium", "high", "max"]),
+} as const;
+
+function bareAnthropicModelId(model: string): string {
+  const slash = model.lastIndexOf("/");
+  return (slash >= 0 ? model.slice(slash + 1) : model).toLowerCase();
+}
+
+function hardAnthropicContextLimit(providerModel: string): number | null {
+  const bare = bareAnthropicModelId(providerModel);
+  for (const row of ANTHROPIC_NATIVE_CONTEXT_LIMITS) {
+    if (row.pattern.test(bare)) return row.maxContextTokens;
+  }
+  return null;
+}
+
+function effectiveContextLimit(catalogEntry: CatalogEntry | undefined, providerModel: string) {
+  const catalogLimit = catalogEntry?.capabilities.maxContextTokens;
+  const normalizedCatalogLimit =
+    typeof catalogLimit === "number" && catalogLimit > 0 ? catalogLimit : null;
+  const hardLimit = hardAnthropicContextLimit(providerModel);
+  if (normalizedCatalogLimit !== null && hardLimit !== null) {
+    return Math.min(normalizedCatalogLimit, hardLimit);
+  }
+  return normalizedCatalogLimit ?? hardLimit;
+}
+
+function outputConfigEffort(value: unknown): string | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const effort = (value as Record<string, unknown>).effort;
+  return typeof effort === "string" && effort.length > 0 ? effort : null;
+}
+
+function anthropicOutputEffortSkipReason(
+  req: InternalRequest,
+  targetProviderProtocol: TargetProviderProtocol,
+  providerModel: string,
+): string | null {
+  if (targetProviderProtocol !== "anthropic_messages") return null;
+  const nativeBody = req.native_request ? nativePassthroughBody(req.native_request) : null;
+  const effort =
+    outputConfigEffort(nativeBody?.output_config) ??
+    outputConfigEffort(req.provider_raw?.output_config);
+  if (effort === null) return null;
+
+  const bare = bareAnthropicModelId(providerModel);
+  if (/^claude-sonnet-4[-.]6(?:-|$)/.test(bare)) {
+    return ANTHROPIC_OUTPUT_EFFORTS.sonnet_4_6.has(effort) ? null : "unsupported_reasoning_effort";
+  }
+  return null;
+}
+
+function countTokensInputTokens(raw: unknown): number | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const inputTokens = (raw as Record<string, unknown>).input_tokens;
+  return typeof inputTokens === "number" && Number.isFinite(inputTokens) ? inputTokens : null;
+}
+
+function rawErrorText(raw: unknown): string {
+  if (raw === null || raw === undefined) return "";
+  if (typeof raw === "string") return raw;
+  try {
+    return JSON.stringify(raw);
+  } catch {
+    return "";
+  }
+}
+
+function isAnthropicRequestShapeError(err: unknown): boolean {
+  if (!(err instanceof UpstreamError) || err.upstreamStatus !== 400) return false;
+  const text = `${err.message} ${rawErrorText(err.providerRaw)}`.toLowerCase();
+  return (
+    text.includes("prompt is too long") ||
+    text.includes("does not support effort level") ||
+    (text.includes("unsupported") && text.includes("effort")) ||
+    (text.includes("output_config") && text.includes("effort"))
+  );
+}
+
+function attemptErrorClassOf(err: unknown): string {
+  return isAnthropicRequestShapeError(err) ? "invalid_request" : errorClassOf(err);
+}
+
 // Coerce an already-scrubbed upstream error body into the schema's record|null
 // shape. A plain object passes through; a primitive/array (e.g. an HTML or text
 // error page) is wrapped so the detail is preserved, not silently dropped.
@@ -780,7 +870,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // 2) Capability filter. Missing catalog data remains fail-open for generic
       // requests, but not for cached_content: that field is a required Gemini/LiteLLM
       // cached context handle, not an optional affinity hint.
-      const caps = catalog.get(alias)?.capabilities;
+      const catalogEntry = catalog.get(alias);
+      const caps = catalogEntry?.capabilities;
       if (!caps && needsCachedContent) {
         capabilityPruned = true;
         attempts.push(skipRow(alias, "no_cached_content_support", elapsed()));
@@ -813,6 +904,51 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         capabilityPruned = true;
         attempts.push(skipRow(alias, protocolSkip, elapsed()));
         continue;
+      }
+
+      const effortSkip = anthropicOutputEffortSkipReason(
+        req,
+        target.targetProviderProtocol,
+        providerModel,
+      );
+      if (effortSkip !== null) {
+        capabilityPruned = true;
+        attempts.push(skipRow(alias, effortSkip, elapsed()));
+        continue;
+      }
+
+      const exactContextLimit = effectiveContextLimit(catalogEntry, providerModel);
+      if (
+        target.targetProviderProtocol === "anthropic_messages" &&
+        req.native_request !== undefined &&
+        provider.countTokens !== undefined &&
+        exactContextLimit !== null
+      ) {
+        try {
+          const countInput = prepareNativeRequestForUpstream(
+            { ...nativePassthroughBody(req.native_request) },
+            providerModel,
+            req.protocol,
+            false,
+            provider.nativeProtocolProfile,
+            req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
+          );
+          const countBody = { ...nativePassthroughBody(countInput) };
+          delete countBody.stream;
+          const tokenCount = await provider.countTokens(countBody, { signal });
+          const inputTokens = countTokensInputTokens(tokenCount);
+          if (inputTokens !== null && inputTokens > exactContextLimit) {
+            capabilityPruned = true;
+            attempts.push(skipRow(alias, "context_too_small", elapsed()));
+            continue;
+          }
+        } catch (err) {
+          log?.("warn", "anthropic.count_tokens_preflight_failed", {
+            alias,
+            error_class: errorClassOf(err),
+            upstream_status: upstreamStatusOf(err),
+          });
+        }
       }
       // Past the gates → this candidate is attempted against the upstream. A
       // failure from here on is a PROVIDER fault, not a capability gap.
@@ -1072,24 +1208,27 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           continue;
         }
 
-        // Genuine pre-first-chunk failure: record on the breaker, try next. This row
-        // carries the REAL passthrough telemetry: a failure during nativePassthrough
-        // (UpstreamError) lands HERE just like a chatCompletion failure — the trail
-        // shows the verbatim-forward was attempted on this candidate before it failed.
-        breaker.recordFailure(alias);
-        // Auto-park a subscription account that hit its rate/usage limit. A genuine
-        // (non-`:free`, handled above) 429 on an OAuth alias means the served account
-        // is throttled — signal the gateway to park it so the pool routes around it.
-        // Pure side-channel: the breaker failure + chain advance below are unchanged.
-        if (upstreamStatusOf(err) === 429 && isOAuthSubscriptionAlias(alias)) {
-          onOAuthSubscription429?.(alias);
+        const requestShapeError = isAnthropicRequestShapeError(err);
+        if (!requestShapeError) {
+          // Genuine pre-first-chunk failure: record on the breaker, try next. This row
+          // carries the REAL passthrough telemetry: a failure during nativePassthrough
+          // (UpstreamError) lands HERE just like a chatCompletion failure — the trail
+          // shows the verbatim-forward was attempted on this candidate before it failed.
+          breaker.recordFailure(alias);
+          // Auto-park a subscription account that hit its rate/usage limit. A genuine
+          // (non-`:free`, handled above) 429 on an OAuth alias means the served account
+          // is throttled — signal the gateway to park it so the pool routes around it.
+          // Pure side-channel: the breaker failure + chain advance below are unchanged.
+          if (upstreamStatusOf(err) === 429 && isOAuthSubscriptionAlias(alias)) {
+            onOAuthSubscription429?.(alias);
+          }
         }
         attempts.push({
           alias,
           skipped: false,
           skip_reason: null,
           status: "error",
-          error_class: errorClassOf(err),
+          error_class: attemptErrorClassOf(err),
           latency_ms: elapsed(),
           cost_usd: null,
           error_detail: errorDetailOf(err),

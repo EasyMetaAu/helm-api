@@ -513,6 +513,10 @@ describe("translateResponsesSSE", () => {
     }
     expect(caught).toBeInstanceOf(UpstreamError);
     expect((caught as UpstreamError).message).toBe("model exploded");
+    expect((caught as UpstreamError).providerRaw).toMatchObject({
+      type: "response.failed",
+      response: { error: { message: "model exploded" } },
+    });
   });
 
   it("falls back to a generic message when response.failed carries no error message", async () => {
@@ -526,6 +530,10 @@ describe("translateResponsesSSE", () => {
       caught = e;
     }
     expect((caught as UpstreamError).message).toBe("codex responses stream error");
+    expect((caught as UpstreamError).providerRaw).toMatchObject({
+      type: "response.failed",
+      response: {},
+    });
   });
 
   it("closes cleanly with finish + [DONE] when the stream ends without response.completed (EOF path)", async () => {

@@ -1149,7 +1149,7 @@ export async function* translateResponsesSSE(
                 message?: string;
               }
             ).message;
-      throw new UpstreamError("upstream_error", msg || "codex responses stream error");
+      throw new UpstreamError("upstream_error", msg || "codex responses stream error", evt);
     }
   }
   // Stream ended without an explicit response.completed → close cleanly.
@@ -1231,7 +1231,7 @@ export async function aggregateResponsesStream(
                 message?: string;
               }
             ).message;
-      throw new UpstreamError("upstream_error", msg || "codex responses stream error");
+      throw new UpstreamError("upstream_error", msg || "codex responses stream error", evt);
     }
   }
 
