@@ -31,8 +31,8 @@ describe("ForgettingSchema", () => {
     expect(f.sweep.max_iterations).toBe(200);
     expect(f.sweep.max_wallclock_s).toBe(900);
     expect(f.sweep.max_consecutive_errors).toBe(5);
-    // docs/14 / P8 — hybrid fact retrieval gate: off by default, top_k prior 10.
-    expect(f.facts_retrieval.enabled).toBe(false);
+    // docs/14 / P8 — hybrid fact retrieval gate: ON by default (FTS+score), top_k prior 10.
+    expect(f.facts_retrieval.enabled).toBe(true);
     expect(f.facts_retrieval.top_k).toBe(10);
   });
 

@@ -343,8 +343,10 @@ retrieval over `memory_facts`, aligned with where the field has converged
 - **Same invariants**: account-scoped reads (`owner_id = :accountId AND
   expired_at IS NULL`), fail-open (empty or failed recall → request proceeds with
   the v1 prefix), and retrieval results get the same reinforcement bump.
-- Gated behind its own flag (`forgetting.facts_retrieval.enabled`, default off);
-  schema impact is one nullable `embedding` column on `memory_facts`.
+- Gated behind its own flag (`forgetting.facts_retrieval.enabled`, **default on** —
+  FTS+score needs no embedding; the vector leg lights up only when
+  `memory.llm.embedding_model` is set). Schema impact is one nullable `embedding`
+  column on `memory_facts`. The flag gates ONLY the `memory_recall` MCP tool (fail-open).
 
 ## Schema deltas
 

@@ -118,16 +118,17 @@ export const ForgettingSchema = z
       })
       .strict()
       .prefault({}),
-    // docs/14 / P8 — hybrid fact retrieval (the `memory_recall` engine). enabled:false
-    // ⇒ memory_recall degrades to substring LIKE (today's behaviour). enabled:true runs
-    // query-driven recall over memory_facts fusing FTS5(trigram)+forgetting-score via
-    // RRF; the VECTOR leg additionally lights up only when memory.llm.embedding_model is
-    // set — so this flag alone is a usable, cross-lingual-blind on-ramp. top_k caps the
-    // fused result set. The RRF k and per-signal weights are code constants (no lying
-    // knobs); the only operational levers are the gate and the result cap.
+    // docs/14 / P8 — hybrid fact retrieval (the `memory_recall` engine). DEFAULT ON:
+    // memory_recall runs query-driven recall over memory_facts fusing FTS5(trigram) +
+    // forgetting-score via RRF — keyword + recency, CJK-capable, NO embedding required.
+    // The VECTOR leg additionally lights up only when memory.llm.embedding_model is set
+    // (cross-lingual). Blast radius is tiny: this flag ONLY affects the memory_recall
+    // MCP tool (the inject path is untouched), and the tool is fully fail-open — set
+    // enabled:false to force the legacy substring-LIKE behaviour. top_k caps the fused
+    // result set. RRF k + per-signal weights are code constants (no lying knobs).
     facts_retrieval: z
       .object({
-        enabled: z.boolean().default(false),
+        enabled: z.boolean().default(true),
         top_k: z.number().int().positive().default(10),
       })
       .strict()
