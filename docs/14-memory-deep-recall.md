@@ -184,7 +184,7 @@ Reuse `docs/12`'s gate name; add the embedding fields to the existing `llm` bloc
 ```ts
 // memory.forgetting.facts_retrieval (docs/12 P8) — master gate for hybrid recall.
 facts_retrieval: z.object({
-  enabled: z.boolean().default(false),          // off ⇒ memory_recall degrades to LIKE
+  enabled: z.boolean().default(true),           // ON: FTS+score; false ⇒ memory_recall = LIKE
   top_k: z.number().int().positive().default(10),
 }).strict().prefault({}),
 
@@ -193,9 +193,11 @@ embedding_model: z.string().min(1).optional(),        // absent ⇒ vector leg o
 embedding_dimensions: z.number().int().positive().optional(),
 ```
 
-- `facts_retrieval.enabled` independent of embeddings: with it on but no `embedding_model`, recall runs
-  **FTS+score** (no vector leg) — a usable, cross-lingual-blind mode. Configuring `embedding_model`
-  lights up the vector leg → full hybrid. This is the staged on-ramp inside one flag.
+- `facts_retrieval.enabled` is **ON by default** (FTS+score, no embedding required) — keyword + recency
+  recall, CJK-capable via trigram. Its blast radius is tiny: it ONLY gates the `memory_recall` MCP tool
+  (the inject path is untouched) and the tool is fully fail-open, so on-by-default is safe. Configuring
+  `embedding_model` additionally lights up the vector leg → full cross-lingual hybrid. Set `enabled:false`
+  to force the legacy substring-LIKE behaviour.
 - No exposed RRF `k`, no per-signal weights, no tokenizer knob — code constants (no lying knobs).
 - `.strict()` ⇒ a typo'd key refuses startup; add the unknown-key tests per `memory-schema.test.ts`.
 
