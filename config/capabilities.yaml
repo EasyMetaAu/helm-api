@@ -53,26 +53,35 @@
 # (packages/core/src/provider/oauth/models.ts — the ChatGPT-account Codex backend
 # 400s on legacy `*-codex`/`*-pro` slugs, verified live), so every exposed alias
 # an operator can pick has a capability + pricing entry here.
+#
+# CONTEXT WINDOW = 272000 for ALL THREE. The ChatGPT/Codex SUBSCRIPTION caps the
+# effective window at 272K regardless of the underlying model's API window (the
+# API `gpt-5.5` is 1.05M — see zenmux/gpt-5.5 below — but the subscription is NOT).
+# Empirically the codex backend 400s `context_length_exceeded` above ~272K: on
+# la.atmy.work the max input it ever served was 271,529 over 5,919 calls, and every
+# request ≳272K (e.g. a 597K Claude Code passthrough) was rejected. The wrong 1.05M
+# value let the capability filter route oversized requests here, burning a guaranteed
+# upstream 400 before failing over (the whole point of the context_too_small gate).
 openai-codex/gpt-5.5:
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
-  maxContextTokens: 1050000
+  maxContextTokens: 272000
   maxOutputTokens: 128000
 openai-codex/gpt-5.4:
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
-  maxContextTokens: 400000
+  maxContextTokens: 272000
   maxOutputTokens: 128000
 openai-codex/gpt-5.4-mini:
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
-  maxContextTokens: 400000
+  maxContextTokens: 272000
   maxOutputTokens: 65536
 # Official DeepSeek API: json_object YES, json_schema NO (response_format json_schema
 # 400s "This response_format type is unavailable now"). Hence `object`, not `schema` —
@@ -109,7 +118,7 @@ openrouter/deepseek-v4-flash:
   supportsVision: false
   supportsStreaming: true
   maxContextTokens: 1048576
-  maxOutputTokens: 131072
+  maxOutputTokens: 65536 # OpenRouter /v1/models: deepseek-v4-flash max_completion_tokens=65536
 # Claude capabilities now live under the native `zenmux-anthropic/claude-*` aliases
 # below (issue #217); the OpenAI-compat `zenmux/claude-*` entries were removed.
 zenmux/gpt-5.5:
@@ -169,13 +178,17 @@ zenmux-anthropic/claude-sonnet-4.6:
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
+# Haiku is a 200K-window model — the 1M context beta is Opus/Sonnet ONLY (confirmed
+# by ZenMux /v1/models: claude-haiku-4.5 ctx=200000). Mirrors native anthropic/claude-haiku
+# below. A 1M value here would let the context_too_small gate route >200K requests in and
+# burn a guaranteed upstream 400 (same class as the openai-codex window bug above).
 zenmux-anthropic/claude-haiku-4.5:
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   modalities: [document]
-  maxContextTokens: 1000000
+  maxContextTokens: 200000
   maxOutputTokens: 128000
 # `anthropic/*` are the NATIVE Claude Pro/Max SUBSCRIPTION models (synthesized at
 # runtime when the Anthropic OAuth pool is connected — alias prefix == the OAuth
