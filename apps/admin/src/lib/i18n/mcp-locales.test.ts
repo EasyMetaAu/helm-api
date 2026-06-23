@@ -21,6 +21,16 @@ const mcpKeys = [
   'Codex and other stdio-only clients reach the HTTP server through the mcp-remote bridge in ~/.codex/config.toml.',
   'Check connectivity and auth with a raw JSON-RPC call. It lists the memory tools the server exposes.',
   'JSON config',
+  // ChatGPT OAuth walkthrough prose ('ChatGPT' itself is a proper noun, identical
+  // across locales by design, so — like 'curl' — it is not asserted to differ).
+  "ChatGPT connects over OAuth, not a bearer key — you won't paste your key into ChatGPT. Instead, ChatGPT opens a Helm login page where you paste it to authorize.",
+  'In ChatGPT, open Settings → Connectors and add a custom connector / MCP server (you may need to turn on developer mode).',
+  'Server URL: paste the URL above (it must end in /mcp).',
+  'Authentication: choose OAuth.',
+  'Client registration: choose a predefined / custom OAuth client. Enter any Client ID (e.g. helm-mcp), leave the client secret empty, and set the token endpoint auth method to none.',
+  'Leave the OAuth endpoints, Registration URL, and OIDC fields blank — Helm advertises them automatically via discovery.',
+  'Save and connect. ChatGPT opens a Helm login page — paste a Helm API key to authorize; the connection is scoped to the account behind that key.',
+  'This requires memory.mcp.oauth.enabled on the gateway, in addition to memory.mcp.enabled.',
 ] as const;
 
 const translatedLocales = {

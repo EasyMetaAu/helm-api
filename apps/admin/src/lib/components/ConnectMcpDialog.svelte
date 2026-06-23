@@ -21,8 +21,10 @@
   // dialog, but the Memory page opens this without one.
   let { plaintextKey, onclose }: { plaintextKey?: string; onclose: () => void } = $props();
 
-  type Tab = 'claude' | 'json' | 'codex' | 'curl';
-  let tab = $state<Tab>('claude');
+  type Tab = 'chatgpt' | 'claude' | 'json' | 'codex' | 'curl';
+  // ChatGPT first + default: it's the one users can't figure out alone (it goes
+  // through the OAuth flow, not a copy-paste bearer config like the CLI tabs).
+  let tab = $state<Tab>('chatgpt');
 
   // Admin is same-origin with the gateway (Hono serves it at /admin), so
   // window.location.origin IS the public base URL. SSR-safe default; resolved on
@@ -121,6 +123,13 @@
         type="button"
         role="tab"
         class="tab-btn shrink-0 whitespace-nowrap"
+        aria-selected={tab === 'chatgpt'}
+        onclick={() => (tab = 'chatgpt')}>{$t('ChatGPT')}</button
+      >
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn shrink-0 whitespace-nowrap"
         aria-selected={tab === 'claude'}
         onclick={() => (tab = 'claude')}>{$t('Claude Code')}</button
       >
@@ -148,7 +157,43 @@
     </div>
 
     <div class="mt-4 min-h-0 flex-1 overflow-auto">
-      {#if tab === 'claude'}
+      {#if tab === 'chatgpt'}
+        <p class="mb-2 text-sm text-ink-body">
+          {$t(
+            "ChatGPT connects over OAuth, not a bearer key — you won't paste your key into ChatGPT. Instead, ChatGPT opens a Helm login page where you paste it to authorize.",
+          )}
+        </p>
+        {@render codeBlock('mcp-chatgpt', mcpUrl, 'snippet-mcp-chatgpt')}
+        <ol class="mt-3 list-decimal space-y-1.5 pl-5 text-sm text-ink-body">
+          <li>
+            {$t(
+              'In ChatGPT, open Settings → Connectors and add a custom connector / MCP server (you may need to turn on developer mode).',
+            )}
+          </li>
+          <li>{$t('Server URL: paste the URL above (it must end in /mcp).')}</li>
+          <li>{$t('Authentication: choose OAuth.')}</li>
+          <li>
+            {$t(
+              'Client registration: choose a predefined / custom OAuth client. Enter any Client ID (e.g. helm-mcp), leave the client secret empty, and set the token endpoint auth method to none.',
+            )}
+          </li>
+          <li>
+            {$t(
+              'Leave the OAuth endpoints, Registration URL, and OIDC fields blank — Helm advertises them automatically via discovery.',
+            )}
+          </li>
+          <li>
+            {$t(
+              'Save and connect. ChatGPT opens a Helm login page — paste a Helm API key to authorize; the connection is scoped to the account behind that key.',
+            )}
+          </li>
+        </ol>
+        <p class="mt-3 text-sm text-ink-muted">
+          {$t(
+            'This requires memory.mcp.oauth.enabled on the gateway, in addition to memory.mcp.enabled.',
+          )}
+        </p>
+      {:else if tab === 'claude'}
         <p class="mb-2 text-sm text-ink-body">
           {$t(
             'Register the server with one command. Claude Code connects over HTTP and sends your key as a bearer token.',
