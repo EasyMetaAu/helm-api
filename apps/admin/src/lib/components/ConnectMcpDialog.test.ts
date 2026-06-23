@@ -44,10 +44,21 @@ describe('ConnectMcpDialog', () => {
     expect(onclose).toHaveBeenCalledTimes(1);
   });
 
-  it('defaults to the Claude Code tab and registers /mcp on the BARE origin (no /v1)', () => {
+  it('defaults to the ChatGPT tab: server URL on the bare origin + the OAuth walkthrough', () => {
     setup();
-    const claudeTab = screen.getByRole('tab', { name: /claude code/i });
-    expect(claudeTab).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: /chatgpt/i })).toHaveAttribute('aria-selected', 'true');
+    const url = screen.getByTestId('snippet-mcp-chatgpt').textContent ?? '';
+    expect(url).toContain(MCP_URL);
+    expect(url).not.toContain(`${ORIGIN}/v1`);
+    // ChatGPT uses OAuth, not a bearer key — the copy block is the bare URL, and
+    // the prose explains the login flow rather than a header.
+    expect(url).not.toContain('Bearer');
+    expect(screen.getByText(/Authentication: choose OAuth/i)).toBeInTheDocument();
+  });
+
+  it('registers /mcp on the BARE origin via the Claude Code tab (no /v1)', async () => {
+    setup();
+    await fireEvent.click(screen.getByRole('tab', { name: /claude code/i }));
     const snippet = screen.getByTestId('snippet-mcp-claude').textContent ?? '';
     expect(snippet).toContain(`claude mcp add --transport http helm-memory ${MCP_URL}`);
     expect(snippet).toContain('--header "Authorization: Bearer <your-helm-key>"');
@@ -86,8 +97,9 @@ describe('ConnectMcpDialog', () => {
     expect(snippet).toContain('"method":"tools/list"');
   });
 
-  it('shows a placeholder key when no plaintext is supplied (opened from the header)', () => {
+  it('shows a placeholder key when no plaintext is supplied (opened from the header)', async () => {
     setup();
+    await fireEvent.click(screen.getByRole('tab', { name: /claude code/i }));
     expect(screen.getByTestId('snippet-mcp-claude').textContent ?? '').toContain('<your-helm-key>');
     expect(screen.queryByTestId('connect-secret-note')).not.toBeInTheDocument();
   });
@@ -95,6 +107,7 @@ describe('ConnectMcpDialog', () => {
   it('injects the freshly-minted plaintext into every tab when supplied', async () => {
     const KEY = 'helm_live_FRESH_ONE_TIME';
     setup({ plaintextKey: KEY });
+    await fireEvent.click(screen.getByRole('tab', { name: /claude code/i }));
     expect(screen.getByTestId('snippet-mcp-claude').textContent ?? '').toContain(KEY);
     expect(screen.getByTestId('snippet-mcp-claude').textContent ?? '').not.toContain(
       '<your-helm-key>',
@@ -108,6 +121,7 @@ describe('ConnectMcpDialog', () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
     setup();
+    await fireEvent.click(screen.getByRole('tab', { name: /claude code/i }));
     const copyBtn = screen.getAllByRole('button', { name: /^copy$/i })[0];
     await fireEvent.click(copyBtn);
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
@@ -117,8 +131,9 @@ describe('ConnectMcpDialog', () => {
     );
   });
 
-  it('exposes Claude Code, JSON config, Codex and curl tabs', () => {
+  it('exposes ChatGPT, Claude Code, JSON config, Codex and curl tabs', () => {
     setup();
+    expect(screen.getByRole('tab', { name: /chatgpt/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /claude code/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /json config/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /codex/i })).toBeInTheDocument();
