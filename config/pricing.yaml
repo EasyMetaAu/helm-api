@@ -39,8 +39,8 @@ openrouter/deepseek-v4-pro:
   inputPerMTokUsd: 0.435
   outputPerMTokUsd: 0.87
 openrouter/deepseek-v4-flash:
-  inputPerMTokUsd: 0.0983
-  outputPerMTokUsd: 0.1966
+  inputPerMTokUsd: 0.09 # OpenRouter /v1/models 2026-06-23
+  outputPerMTokUsd: 0.18
 # Claude pricing now lives under the native `zenmux-anthropic/claude-*` aliases
 # (issue #217); the OpenAI-compat `zenmux/claude-*` entries were removed.
 zenmux/gpt-5.5:
@@ -54,8 +54,8 @@ zenmux-vertex/gemini-3.5-flash:
   inputPerMTokUsd: 1.5
   outputPerMTokUsd: 9.0
 zenmux-vertex/gemini-3.1-flash-lite:
-  inputPerMTokUsd: 1.5
-  outputPerMTokUsd: 9.0
+  inputPerMTokUsd: 0.25 # ZenMux /v1/models pricings: flash-lite is ~6x cheaper than flash, NOT equal
+  outputPerMTokUsd: 1.5
 zenmux-vertex/gemini-3.1-pro:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 12.0
