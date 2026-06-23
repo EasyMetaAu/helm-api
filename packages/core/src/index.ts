@@ -285,6 +285,16 @@ export {
   type ObserverResult,
   runObserverJob,
 } from "./memory/observer.js";
+// docs/14 — hybrid fact retrieval: the embedding port (gateway injects the impl) +
+// the RRF fusion used inside the adapters and re-exported for tests + the background
+// embedding job that fills the vector index.
+export type { Embedder } from "./memory/recall/embedder.js";
+export {
+  type EmbeddingJob,
+  type EmbeddingJobDeps,
+  runEmbeddingJob,
+} from "./memory/recall/embedding-job.js";
+export { type FusedRank, RRF_K, reciprocalRankFusion } from "./memory/recall/rrf.js";
 // Memory middleware — background Reflector (docs/08 Phase 2). Periodically merges a
 // scope's observations into a stable, versioned reflection; off the main request
 // path, fail-open. Framework-agnostic; never touches routing/lane state.

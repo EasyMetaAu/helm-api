@@ -118,6 +118,20 @@ export const ForgettingSchema = z
       })
       .strict()
       .prefault({}),
+    // docs/14 / P8 — hybrid fact retrieval (the `memory_recall` engine). enabled:false
+    // ⇒ memory_recall degrades to substring LIKE (today's behaviour). enabled:true runs
+    // query-driven recall over memory_facts fusing FTS5(trigram)+forgetting-score via
+    // RRF; the VECTOR leg additionally lights up only when memory.llm.embedding_model is
+    // set — so this flag alone is a usable, cross-lingual-blind on-ramp. top_k caps the
+    // fused result set. The RRF k and per-signal weights are code constants (no lying
+    // knobs); the only operational levers are the gate and the result cap.
+    facts_retrieval: z
+      .object({
+        enabled: z.boolean().default(false),
+        top_k: z.number().int().positive().default(10),
+      })
+      .strict()
+      .prefault({}),
   })
   .strict();
 
@@ -174,6 +188,13 @@ export const MemoryLlmSchema = z
     observation_model: z.string().min(1).optional(),
     reflection_model: z.string().min(1).optional(),
     facts_model: z.string().min(1).optional(),
+    // docs/14 — embedding model for the VECTOR leg of hybrid recall (an OpenAI-
+    // compatible /v1/embeddings model id or lane). Optional: absent ⇒ the vector leg
+    // is disabled and recall runs FTS+forgetting-score only. embedding_dimensions pins
+    // the stored vector width and MUST match the model's output dim (the migration
+    // sizes the sqlite-vec / pgvector column from it; changing it requires a re-embed).
+    embedding_model: z.string().min(1).optional(),
+    embedding_dimensions: z.number().int().positive().optional(),
     timeout_ms: z.number().int().positive().default(30_000),
     temperature: z.number().min(0).max(1).default(0),
     max_tokens: MemoryLlmMaxTokensSchema.prefault({}),

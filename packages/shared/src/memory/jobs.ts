@@ -10,11 +10,13 @@ import { ReflectionScopeSchema } from "./schema.js";
 // The background job kinds. observer = compress a thread's older raw messages into
 // one observation; reflector = merge a scope's observations into a stable, versioned
 // reflection; decay (docs/12 P5) = the OFF-hot-path forgetting SWEEP that soft-
-// archives sub-threshold observations for one account. All three run OFF the request
-// path. Additive: 'decay' is a NEW member, so an old observer/reflector row still
-// parses unchanged — the gating lever (forgetting.enabled:false ⇒ no decay jobs are
-// ever enqueued) keeps the enum widening inert until the flag is on.
-export const MemoryJobTypeSchema = z.enum(["observer", "reflector", "decay"]);
+// archives sub-threshold observations for one account. embedding (docs/14 P8) =
+// backfill `memory_facts.embedding` for newly inserted facts so hybrid recall gets a
+// vector leg. All run OFF the request path. Additive: each new member leaves older
+// rows parsing unchanged — the gating levers (forgetting.enabled / facts_retrieval.
+// enabled / llm.embedding_model off ⇒ those jobs are never enqueued) keep the enum
+// widening inert until the flag is on.
+export const MemoryJobTypeSchema = z.enum(["observer", "reflector", "decay", "embedding"]);
 
 // Input to enqueue a background job. The scope is the full ReflectionScope so a
 // reflector job can land at the highest available level (project/resource/thread);

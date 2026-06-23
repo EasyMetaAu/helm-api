@@ -1,7 +1,8 @@
-import type { MemoryJobRow } from "@helm/shared";
+import type { MemoryJobRow, ReflectionScope } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
 import type { DecayJob } from "./forgetting/decay.js";
 import type { ObserverJob, ObserverResult } from "./observer.js";
+import type { EmbeddingJob } from "./recall/embedding-job.js";
 import { type ReflectorJob, type ReflectorResult, reflectionTargetScope } from "./reflector.js";
 
 // Background memory worker (docs/08 Phase 2). The OFF-the-request-path drainer for
@@ -41,6 +42,10 @@ export interface MemoryWorkerDeps {
   // fall-through). Keeping it optional also means existing worker fixtures that predate
   // this phase stay valid unmodified (the gating lever applies to the type surface too).
   runDecay?: (job: DecayJob) => Promise<void>;
+  // docs/14 — run one embedding job (fill the vector index for an account's facts).
+  // Wired to runEmbeddingJob when memory.llm.embedding_model is set; absent ⇒ no
+  // 'embedding' rows are enqueued, and a stray one is failed cleanly (like decay).
+  runEmbedding?: (job: EmbeddingJob) => Promise<void>;
   // OPTIONAL per-tick hook run BEFORE claiming jobs (docs/12 P5 trigger). The
   // composition root wires maybeEnqueueDecayJobs here so the buffer-flush gate is
   // evaluated on the worker interval (OFF the request path — decay never triggers per
@@ -64,10 +69,24 @@ export interface MemoryWorkerHandle {
 // fail-open (the runners never throw), but we still guard so a thrown promotion/enqueue
 // can't escape the tick. An UNKNOWN type (a corrupt row, or a future kind this worker
 // build predates) is marked failed rather than run by the wrong worker.
+// docs/14 — best-effort: after a fact-writing job (observer/reflector), enqueue ONE
+// embedding job for the account so newly written facts get vectors. Gated on
+// runEmbedding (no embedder ⇒ no embedding rows enqueued). The open-job unique index
+// coalesces repeats; a failure just defers embedding to the next write (fail-open).
+async function maybeEnqueueEmbedding(scope: ReflectionScope, deps: MemoryWorkerDeps): Promise<void> {
+  if (deps.runEmbedding === undefined) return;
+  try {
+    await deps.memoryStore.enqueueJob({ type: "embedding", scope: { accountId: scope.accountId } });
+  } catch {
+    // best-effort — the next fact write re-enqueues.
+  }
+}
+
 async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<void> {
   if (job.type === "reflector") {
     // reflector: the whole scope drives the merge.
     await deps.runReflector({ jobId: job.jobId, scope: job.scope });
+    await maybeEnqueueEmbedding(job.scope, deps);
     return;
   }
   if (job.type === "decay") {
@@ -85,6 +104,22 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
       return;
     }
     await deps.runDecay({ jobId: job.jobId, scope: job.scope });
+    return;
+  }
+  if (job.type === "embedding") {
+    // docs/14 — fill the vector index for the account's facts. Like decay: only
+    // enqueued when the embedder is wired (runEmbedding set); a stray row on a worker
+    // without it is failed cleanly, never mis-routed.
+    if (deps.runEmbedding === undefined) {
+      await deps.memoryStore.updateJobStatus(
+        job.jobId,
+        "failed",
+        "embedding job but worker has no runEmbedding",
+      );
+      deps.log("memory.worker.embedding_unsupported", { job_id: job.jobId });
+      return;
+    }
+    await deps.runEmbedding({ jobId: job.jobId, scope: job.scope });
     return;
   }
   if (job.type === "observer") {
@@ -134,6 +169,7 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
         });
       }
     }
+    await maybeEnqueueEmbedding(job.scope, deps);
     return;
   }
   // Unknown type: a corrupt scope_id row, or a job kind this worker build predates.

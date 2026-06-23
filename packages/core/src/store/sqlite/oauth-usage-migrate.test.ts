@@ -41,6 +41,8 @@ function seedPreV23(): string {
   ins.run(26);
   // v27 indexes memory_jobs; this oauth_usage-only fixture never creates it → pre-mark.
   ins.run(27);
+  // v28 alters memory_facts (+ FTS), absent from this oauth_usage-only fixture → pre-mark.
+  ins.run(28);
   raw.exec(`
     CREATE TABLE oauth_usage (
       provider_id TEXT NOT NULL,

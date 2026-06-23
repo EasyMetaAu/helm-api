@@ -32,6 +32,7 @@ import {
   DEFAULT_LANES,
   type DecayDeps,
   discoverOAuthModels,
+  type EmbeddingJob,
   type GeminiGenerateContentResponse,
   type GeneratedKey,
   geminiTransformer,
@@ -79,6 +80,7 @@ import {
   routeRequest,
   runCleanupPass,
   runDecayJob,
+  runEmbeddingJob,
   runObserverJob,
   runReflectorJob,
   type StoreSet,
@@ -106,6 +108,7 @@ import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { INTERNAL_API_KEY_ID } from "./internal-key.js";
 import { createJsonLogger, type Logger } from "./logging.js";
+import { createMemoryEmbedder } from "./memory-embedder.js";
 import { createMemoryLlmRuntime, type MemoryModelResolution } from "./memory-llm.js";
 import { createSelfHttpClient } from "./memory-self-http.js";
 import { authMiddleware } from "./middleware/auth.js";
@@ -1582,6 +1585,16 @@ export async function buildServer(
     estimateTokens: estimateMemoryTokens,
     log: memoryLog,
   });
+  // docs/14 — embedder for hybrid recall's vector leg, built from
+  // memory.llm.embedding_model (absent ⇒ undefined ⇒ FTS+score). Used by memory_recall
+  // (query embedding) and the background embedding job (fact embedding).
+  const memoryEmbedder = createMemoryEmbedder({
+    embeddingModel: config.memory.llm.embedding_model,
+    providers: config.providers,
+    timeoutMs: config.memory.llm.timeout_ms,
+  });
+  const embeddingModel = config.memory.llm.embedding_model;
+  const embeddingDim = config.memory.llm.embedding_dimensions;
 
   // Observer/Reflector deps (docs/08 Phase 2). The LLM path is opt-in via
   // config.memory.llm and runs ONLY in these background jobs; disabled or failed
@@ -1740,6 +1753,14 @@ export async function buildServer(
         now: () => new Date(),
         estimateTokens: estimateMemoryTokens,
         log: (line) => logger.log("warn", "mcp", { line }),
+        // docs/14 — hybrid recall config for memory_recall. The embedder (vector leg)
+        // is wired just below from memory.llm.embedding_model; absent ⇒ FTS+score only.
+        scoreConfig: config.memory.forgetting.score,
+        recall: {
+          enabled: config.memory.forgetting.facts_retrieval.enabled,
+          topK: config.memory.forgetting.facts_retrieval.top_k,
+        },
+        ...(memoryEmbedder !== undefined ? { embedder: memoryEmbedder } : {}),
       });
     } else {
       logger.log("warn", "mcp", {
@@ -2511,6 +2532,23 @@ export async function buildServer(
       // forgetting.enabled is false, so with the flag off no decay job is ever enqueued
       // and the worker behaves byte-identically to today.
       runDecay: (job) => runDecayJob(job, decayDeps),
+      // docs/14 — dispatch embedding rows to fill the vector index. Wired ONLY when an
+      // embedder + dimension are configured (memory.llm.embedding_model/_dimensions);
+      // absent ⇒ no embedding rows are enqueued and the vector leg stays empty (recall
+      // = FTS+score). Fail-open like every memory job.
+      ...(memoryEmbedder !== undefined && embeddingModel !== undefined && embeddingDim !== undefined
+        ? {
+            runEmbedding: (job: EmbeddingJob) =>
+              runEmbeddingJob(job, {
+                memoryStore: store.memory,
+                embedder: memoryEmbedder,
+                model: embeddingModel,
+                dim: embeddingDim,
+                batchSize: 64,
+                log: memoryLog,
+              }),
+          }
+        : {}),
       onTick: async () => {
         await maybeEnqueueDecayJobs({
           memoryStore: store.memory,

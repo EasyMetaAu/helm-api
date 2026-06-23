@@ -1,7 +1,9 @@
 import {
   buildReconciledFactBatch,
+  type Embedder,
   MemoryFactContentHashConflictError,
   type MemoryStore,
+  type ScoreConfig,
 } from "@helm/core";
 import type { Fact, Reflection } from "@helm/shared";
 import { z } from "zod";
@@ -67,6 +69,12 @@ export interface MemoryToolContext {
   store: MemoryAdminStore;
   now: () => Date;
   estimateTokens: (text: string) => number;
+  // docs/14 — hybrid recall (memory_recall). embedder is OPTIONAL: absent ⇒ the vector
+  // leg is skipped (FTS+score). scoreConfig is the forgetting curve for the score
+  // signal. recall carries the gate + top-K (memory.forgetting.facts_retrieval).
+  embedder?: Embedder;
+  scoreConfig: ScoreConfig;
+  recall: { enabled: boolean; topK: number };
 }
 
 // MCP tool result envelope (the subset we emit). isError marks a tool-level
@@ -260,6 +268,82 @@ async function handleSearch(
   return ok(out);
 }
 
+const recallSchema = z.object({
+  query: z.string().min(1),
+  limit: z.number().int().min(1).max(50).optional(),
+  ...scopeFields,
+});
+
+// docs/14 — DEEP RECALL. Hybrid relevance search over facts (vector + FTS5 trigram +
+// forgetting score, RRF-fused), distinct from memory_search's substring LIKE. Gated by
+// memory.forgetting.facts_retrieval.enabled; FAIL-OPEN — a disabled gate, an absent
+// searchFacts adapter, OR a search/embed error all degrade to the LIKE path so the tool
+// never errors. Recalled facts get a fire-and-forget reinforcement bump.
+async function handleRecall(
+  args: z.infer<typeof recallSchema>,
+  ctx: MemoryToolContext,
+): Promise<McpToolResult> {
+  const scope = scopeInput(ctx, args);
+  const limit = args.limit ?? ctx.recall.topK;
+  const searchFacts = ctx.store.searchFacts?.bind(ctx.store);
+
+  const degradeToLike = async (): Promise<McpToolResult> => {
+    const { rows } = await ctx.store.listFacts({
+      accountId: ctx.accountId,
+      ...scope,
+      status: "active",
+      search: args.query,
+      limit,
+      offset: 0,
+    });
+    return ok({ facts: rows.map(factView), degraded: true });
+  };
+
+  if (!ctx.recall.enabled || searchFacts === undefined) return degradeToLike();
+
+  // Embed the query for the vector leg; fail-open drops the leg (FTS+score still run).
+  let queryEmbedding: Float32Array | undefined;
+  if (ctx.embedder !== undefined) {
+    try {
+      const [vec] = await ctx.embedder.embed([args.query]);
+      queryEmbedding = vec;
+    } catch {
+      queryEmbedding = undefined;
+    }
+  }
+
+  let facts: Fact[];
+  try {
+    facts = await searchFacts({
+      accountId: ctx.accountId,
+      ...scope,
+      queryText: args.query,
+      ...(queryEmbedding !== undefined ? { queryEmbedding } : {}),
+      limit,
+      now: ctx.now(),
+      scoreConfig: ctx.scoreConfig,
+    });
+  } catch {
+    return degradeToLike();
+  }
+
+  // Reinforcement bump — recalled facts are "used". Fire-and-forget: never awaited,
+  // never blocks or throws the tool response.
+  if (facts.length > 0 && ctx.store.bumpReferences !== undefined) {
+    void ctx.store
+      .bumpReferences({
+        accountId: ctx.accountId,
+        observationIds: [],
+        reflectionIds: [],
+        factIds: facts.map((f) => f.id),
+        now: ctx.now(),
+      })
+      .catch(() => {});
+  }
+
+  return ok({ facts: facts.map(factView) });
+}
+
 async function handleList(
   args: z.infer<typeof listSchema>,
   ctx: MemoryToolContext,
@@ -379,6 +463,11 @@ const TOOLS: Record<string, ToolDef> = {
     "Search memories by text. Omit `type` to search both facts and reflections. Returns active memories unless includeInactive=true.",
     searchSchema,
     handleSearch,
+  ),
+  memory_recall: defineTool(
+    "Deep relevance search over remembered facts — recall what was discussed or decided about a topic, across sessions. Ranks by meaning (cross-lingual when embeddings are configured) + keywords + recency. Use this for recall; memory_search is exact substring; memory_list browses.",
+    recallSchema,
+    handleRecall,
   ),
   memory_list: defineTool(
     "List memories of a `type` (paginated). Returns active memories unless includeInactive=true.",

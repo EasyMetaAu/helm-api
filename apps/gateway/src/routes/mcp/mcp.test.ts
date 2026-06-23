@@ -54,12 +54,21 @@ function harness() {
   const ctxFor = (
     accountId: string,
     defaultProjectId: string | null = null,
+    extra: Partial<MemoryToolContext> = {},
   ): MemoryToolContext => ({
     accountId,
     defaultProjectId,
     store,
     now: () => NOW,
     estimateTokens: (t) => Math.ceil(t.length / 4),
+    scoreConfig: {
+      half_life_s: 86400,
+      importance_floor: 0.1,
+      importance_ceil: 1.0,
+      access_weight: 0.15,
+    },
+    recall: { enabled: true, topK: 10 },
+    ...extra,
   });
   return { store, ctxFor };
 }
@@ -69,13 +78,14 @@ function parse(result: { content: Array<{ text: string }>; isError?: boolean }) 
 }
 
 describe("memory MCP tools (docs/13)", () => {
-  it("lists the six CRUD tools with input schemas", () => {
+  it("lists the seven tools with input schemas", () => {
     const tools = listMemoryTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "memory_add",
       "memory_delete",
       "memory_get",
       "memory_list",
+      "memory_recall",
       "memory_search",
       "memory_update",
     ]);
@@ -106,6 +116,78 @@ describe("memory MCP tools (docs/13)", () => {
       await callMemoryTool("memory_search", { type: "fact", query: "typescript" }, ctx),
     );
     expect((found.facts as unknown[]).length).toBe(1);
+  });
+
+  it("memory_recall hybrid-recalls a fact (CJK trigram), account-scoped", async () => {
+    const { ctxFor } = harness();
+    const ctxA = ctxFor("acct-a");
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "用户最喜欢的编程语言是 TypeScript", subject: "lang" },
+      ctxA,
+    );
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "项目部署在 la.atmy.work", subject: "deploy" },
+      ctxA,
+    );
+    // another account's matching fact must NOT surface for acct-a
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "编程语言机密信息", subject: "x" },
+      ctxFor("acct-b"),
+    );
+    const res = parse(await callMemoryTool("memory_recall", { query: "编程语言" }, ctxA));
+    const texts = (res.facts as Array<{ text: string }>).map((f) => f.text);
+    expect(texts).toContain("用户最喜欢的编程语言是 TypeScript");
+    expect(texts).not.toContain("编程语言机密信息");
+  });
+
+  it("memory_recall degrades to substring LIKE when facts_retrieval is disabled", async () => {
+    const { ctxFor } = harness();
+    const ctx = ctxFor("a", null, { recall: { enabled: false, topK: 10 } });
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "loves TypeScript", subject: "lang" },
+      ctx,
+    );
+    const res = parse(await callMemoryTool("memory_recall", { query: "TypeScript" }, ctx));
+    expect(res.degraded).toBe(true);
+    expect((res.facts as unknown[]).length).toBe(1);
+  });
+
+  it("memory_recall is fail-open: an embedder error still returns FTS+score results", async () => {
+    const { ctxFor } = harness();
+    const throwingEmbedder = { embed: vi.fn().mockRejectedValue(new Error("embed down")) };
+    const ctx = ctxFor("a", null, { embedder: throwingEmbedder });
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "deploy target is la.atmy.work", subject: "deploy" },
+      ctx,
+    );
+    const result = await callMemoryTool("memory_recall", { query: "deploy target" }, ctx);
+    expect(result.isError).toBeFalsy();
+    const res = parse(result);
+    expect((res.facts as Array<{ text: string }>).map((f) => f.text)).toContain(
+      "deploy target is la.atmy.work",
+    );
+  });
+
+  it("memory_recall reinforces recalled facts (reference bump)", async () => {
+    const { ctxFor, store } = harness();
+    const ctx = ctxFor("a");
+    const added = parse(
+      await callMemoryTool(
+        "memory_add",
+        { type: "fact", text: "prefers dark mode theme", subject: "ui" },
+        ctx,
+      ),
+    );
+    const id = (added.added as string[])[0] as string;
+    await callMemoryTool("memory_recall", { query: "dark mode" }, ctx);
+    // better-sqlite3 is synchronous, so the fire-and-forget bump has already run.
+    const got = await store.getFactById?.({ accountId: "a", id });
+    expect(got?.referenceCount).toBe(1);
   });
 
   it("memory_add(reflection) returns id + version", async () => {
@@ -229,6 +311,13 @@ function mcpApp(rec: ApiKeyRecord | null) {
     memoryStore: store,
     now: () => NOW,
     estimateTokens: (t) => Math.ceil(t.length / 4),
+    scoreConfig: {
+      half_life_s: 86400,
+      importance_floor: 0.1,
+      importance_ceil: 1.0,
+      access_weight: 0.15,
+    },
+    recall: { enabled: true, topK: 10 },
   });
   return app;
 }
@@ -280,7 +369,7 @@ describe("POST /mcp JSON-RPC route (docs/13)", () => {
     const list = (await (await app.request("/mcp", rpc("tools/list"))).json()) as {
       result: { tools: Array<{ name: string }> };
     };
-    expect(list.result.tools).toHaveLength(6);
+    expect(list.result.tools).toHaveLength(7);
 
     const add = (await (
       await app.request(

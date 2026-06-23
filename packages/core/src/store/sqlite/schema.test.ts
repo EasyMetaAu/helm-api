@@ -64,8 +64,10 @@ describe("sqlite schema + migrations", () => {
       // v25 (telemetry.generation_ms): no telemetry table here → pre-mark applied.
       // v26 alters oauth_quota (created at v12, applied here without the CREATE) →
       // pre-mark applied, out of scope.
+      // v28 alters memory_facts (+ FTS); this memory_jobs-only fixture never creates
+      // memory_facts → pre-mark applied (out of scope for this v14–v16 test).
       // biome-ignore format: keep the version ledger on one readable line
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26])
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28])
         rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -205,7 +207,8 @@ describe("sqlite schema + migrations", () => {
       // v20 alters memory_threads (absent from this fixture) → pre-mark applied.
       // v21 dedups memory_messages (absent: v2 marked applied without the CREATE)
       // → pre-mark applied.
-      for (const v of [1, 2, 3, 4, 5, 18, 20, 21]) rec.run(v, Date.now());
+      // v28 alters memory_facts (absent from this fixture) → pre-mark applied.
+      for (const v of [1, 2, 3, 4, 5, 18, 20, 21, 28]) rec.run(v, Date.now());
       seed
         .prepare(
           "INSERT INTO telemetry (id, request_id, api_key_id, decision_json, cost_usd, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -271,7 +274,9 @@ describe("sqlite schema + migrations", () => {
       // v24 adds request_payloads.upstream_request_json (table absent from this
       // api_keys-only fixture) → pre-mark applied.
       // v25 (telemetry.generation_ms): no telemetry table here → pre-mark applied.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21, 22, 24, 25]) rec.run(v, Date.now());
+      // v28 alters memory_facts (absent from this api_keys-only fixture) → pre-mark.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21, 22, 24, 25, 28])
+        rec.run(v, Date.now());
       seed
         .prepare(
           `INSERT INTO api_keys (key_id, hash, prefix, account_id, role, max_lane, allowed_lanes, created_at)

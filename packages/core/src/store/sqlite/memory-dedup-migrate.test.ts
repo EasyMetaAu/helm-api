@@ -44,6 +44,9 @@ function seedPreV21(): string {
   ins.run(26);
   // v27 indexes memory_jobs; this memory_messages-only fixture never creates it → pre-mark.
   ins.run(27);
+  // v28 alters memory_facts (+ FTS); this memory_messages-only fixture never creates
+  // memory_facts → pre-mark applied (out of scope for the v21 dedup test).
+  ins.run(28);
   raw.exec(`
     CREATE TABLE memory_messages (
       id TEXT PRIMARY KEY,

@@ -20,7 +20,7 @@ import type {
   ReflectionUpsertInput,
   RoutingSignal,
 } from "@helm/shared";
-
+import type { ScoreConfig } from "../memory/forgetting/score.js";
 import type { BucketState } from "../ratelimit/token-bucket.js";
 
 // Lifecycle status of a background memory job (docs/08 memory_jobs.status).
@@ -600,6 +600,11 @@ export interface MemoryStore {
     accountId: string;
     observationIds: string[];
     reflectionIds: string[];
+    // docs/14 — recalled facts get the SAME reinforcement bump (reference_count += 1,
+    // referenced_at = now) so a fact surfaced by memory_recall counts as "used".
+    // Optional + defaults to none ⇒ existing inject callers stay byte-identical.
+    // memory_facts carry owner_id directly (no thread join needed).
+    factIds?: string[];
     now: Date;
   }): Promise<void>;
   // docs/12 "Eviction, demotion, promotion" (P5 decay sweep, pass 1) — the read half.
@@ -856,6 +861,55 @@ export interface MemoryStore {
     limit: number;
     offset: number;
   }): Promise<{ rows: Fact[]; total: number }>;
+
+  // docs/14 / docs/12 P8 — HYBRID relevance retrieval over memory_facts (the
+  // `memory_recall` engine). Fuses up to three deterministic ranked lists with
+  // RRF(k=60): full-text (FTS5 trigram / tsvector), vector similarity (sqlite-vec /
+  // pgvector — ONLY when queryEmbedding is given AND the row has an embedding), and
+  // the forgetting score. Account-scoped + active-only (owner_id = :accountId AND
+  // status='active' AND expired_at IS NULL — a superseded/archived fact never
+  // surfaces). Returns RRF-ranked facts, best first, capped at `limit`. Order is the
+  // contract; per-engine scores (bm25 vs ts_rank vs cosine) are NOT comparable across
+  // dialects and stay internal. An adapter that can't run the vector leg (extension
+  // absent / no query embedding) returns FTS+score results — never throws for that.
+  //
+  // OPTIONAL (`?`) and DELIBERATELY NOT in MemoryAdminStore/REQUIRED_METHODS: that
+  // gate is shared by the admin route and would fail-close the whole /mcp mount for
+  // any adapter lacking this method. The memory_recall handler null-checks and
+  // degrades to listFacts({ search }) LIKE instead (fail-open).
+  searchFacts?(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    queryText: string;
+    queryEmbedding?: Float32Array;
+    limit: number;
+    now: Date;
+    scoreConfig: ScoreConfig;
+  }): Promise<Fact[]>;
+
+  // docs/14 — write embeddings for facts (the background `embedding` job's sink).
+  // Account-guarded: only the caller's own facts are touched (a foreign factId is a
+  // no-op, never a cross-tenant write). Persists the vector + the model id + dim it
+  // was produced with onto memory_facts, and (sqlite) syncs the vec0 KNN index.
+  // Idempotent — re-embedding overwrites. OPTIONAL `?`: additive; the job null-checks.
+  setFactEmbeddings?(input: {
+    accountId: string;
+    items: Array<{ factId: string; embedding: Float32Array; model: string; dim: number }>;
+  }): Promise<void>;
+
+  // docs/14 — the embedding job's READ half: ACTIVE facts that still need a (re-)
+  // embedding for the vector leg — NULL embedding, OR one from a DIFFERENT model, OR
+  // one at a DIFFERENT dim (re-embed on a model/dimension change; never mix vectors
+  // across models/dims). Account-scoped, capped, oldest-first. Returns only
+  // {id, factText} (the embed inputs).
+  listFactsNeedingEmbedding?(input: {
+    accountId: string;
+    model: string;
+    dim: number;
+    limit: number;
+  }): Promise<Array<{ id: string; factText: string }>>;
 
   // Edit a fact in place (partial; docs/13). Editing factText RECOMPUTES
   // content_hash (the pure helper, identical to ingest) but NEVER subjectKey (the

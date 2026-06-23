@@ -30,6 +30,8 @@ function seedPreV26(): string {
   // v26 is this test's target (runs); v27 indexes memory_jobs, absent from this
   // oauth_quota-only fixture → pre-mark applied so only v26 runs.
   ins.run(27);
+  // v28 alters memory_facts (+ FTS), absent from this oauth_quota-only fixture → pre-mark.
+  ins.run(28);
   raw.exec(`
     CREATE TABLE oauth_quota (
       provider_id TEXT NOT NULL,

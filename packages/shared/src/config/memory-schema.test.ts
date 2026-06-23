@@ -31,6 +31,9 @@ describe("ForgettingSchema", () => {
     expect(f.sweep.max_iterations).toBe(200);
     expect(f.sweep.max_wallclock_s).toBe(900);
     expect(f.sweep.max_consecutive_errors).toBe(5);
+    // docs/14 / P8 — hybrid fact retrieval gate: off by default, top_k prior 10.
+    expect(f.facts_retrieval.enabled).toBe(false);
+    expect(f.facts_retrieval.top_k).toBe(10);
   });
 
   it("a non-default half_life_s round-trips and takes effect", () => {
@@ -101,6 +104,17 @@ describe("ForgettingSchema", () => {
 
   it("fails closed on a non-positive half_life_s", () => {
     expect(() => ForgettingSchema.parse({ score: { half_life_s: 0 } })).toThrow();
+  });
+
+  // docs/14 / P8 — hybrid fact retrieval gate. Off by default; enabling it (FTS+score)
+  // is independent of embeddings (the vector leg lights up only when memory.llm.
+  // embedding_model is set). Unknown keys / bad ranges fail closed like every block.
+  it("facts_retrieval round-trips and fails closed on unknown keys (.strict())", () => {
+    const f = ForgettingSchema.parse({ facts_retrieval: { enabled: true, top_k: 25 } });
+    expect(f.facts_retrieval.enabled).toBe(true);
+    expect(f.facts_retrieval.top_k).toBe(25);
+    expect(() => ForgettingSchema.parse({ facts_retrieval: { top_k: 0 } })).toThrow();
+    expect(() => ForgettingSchema.parse({ facts_retrieval: { enabledd: true } })).toThrow();
   });
 });
 
@@ -183,6 +197,24 @@ describe("MemoryLlmSchema", () => {
     expect(() => MemoryLlmSchema.parse({ enabled: true, model: "x", temperature: 2 })).toThrow();
     expect(() =>
       MemoryLlmSchema.parse({ enabled: true, model: "x", max_tokens: { observation: 0 } }),
+    ).toThrow();
+  });
+
+  // docs/14 — the embedding model powers the vector leg of hybrid recall. Optional:
+  // absent ⇒ the vector leg is disabled (recall degrades to FTS+score). When set,
+  // embedding_dimensions pins the stored vector width (must match the model).
+  it("accepts an optional embedding_model + embedding_dimensions (absent ⇒ undefined)", () => {
+    const off = MemoryLlmSchema.parse({});
+    expect(off.embedding_model).toBeUndefined();
+    expect(off.embedding_dimensions).toBeUndefined();
+    const on = MemoryLlmSchema.parse({ embedding_model: "bge-m3", embedding_dimensions: 1024 });
+    expect(on.embedding_model).toBe("bge-m3");
+    expect(on.embedding_dimensions).toBe(1024);
+  });
+
+  it("fails closed on a non-positive embedding_dimensions", () => {
+    expect(() =>
+      MemoryLlmSchema.parse({ embedding_model: "bge-m3", embedding_dimensions: 0 }),
     ).toThrow();
   });
 });

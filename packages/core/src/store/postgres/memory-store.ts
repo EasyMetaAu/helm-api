@@ -18,9 +18,25 @@ import {
   type ReflectionScope,
   type ReflectionUpsertInput,
 } from "@helm/shared";
-import { and, asc, count, desc, eq, gt, ilike, isNull, lt, ne, type SQL, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gt,
+  ilike,
+  inArray,
+  isNull,
+  lt,
+  ne,
+  type SQL,
+  sql,
+} from "drizzle-orm";
 import { factContentHash } from "../../memory/forgetting/facts.js";
+import { forgettingScore, type ScoreConfig } from "../../memory/forgetting/score.js";
 import { sha256Hex } from "../../memory/message-hash.js";
+import { reciprocalRankFusion } from "../../memory/recall/rrf.js";
 import {
   MemoryFactContentHashConflictError,
   type MemoryJobStatus,
@@ -599,6 +615,7 @@ export class PgMemoryStore implements MemoryStore {
     accountId: string;
     observationIds: string[];
     reflectionIds: string[];
+    factIds?: string[];
     now: Date;
   }): Promise<void> {
     const nowMs = input.now.getTime();
@@ -628,6 +645,174 @@ export class PgMemoryStore implements MemoryStore {
            AND owner_id = ${input.accountId}
       `);
     }
+    // docs/14 — recalled facts get the same reinforcement bump (memory_facts carry
+    // owner_id directly, no thread join).
+    if (input.factIds !== undefined && input.factIds.length > 0) {
+      const ids = sql.join(
+        input.factIds.map((id) => sql`${id}`),
+        sql`, `,
+      );
+      await this.db.execute(sql`
+        UPDATE memory_facts
+           SET reference_count = reference_count + 1, referenced_at = ${nowMs}
+         WHERE id IN (${ids})
+           AND owner_id = ${input.accountId}
+      `);
+    }
+  }
+
+  // docs/14 / docs/12 P8 — HYBRID relevance retrieval over memory_facts (pg mirror of
+  // the sqlite adapter). Three RRF-fused signals: tsvector('simple') full-text +
+  // pgvector cosine (<=>, sequential scan; ONLY when a query embedding is given) + the
+  // forgetting score over the candidate union. Account-scoped + active-only. The vector
+  // leg is wrapped so a missing column/extension degrades to FTS+score (fail-open).
+  async searchFacts(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    queryText: string;
+    queryEmbedding?: Float32Array;
+    limit: number;
+    now: Date;
+    scoreConfig: ScoreConfig;
+  }): Promise<Fact[]> {
+    const candidateLimit = Math.max(input.limit * 5, 50);
+    const scope: SQL[] = [
+      eq(memoryFacts.ownerId, input.accountId),
+      eq(memoryFacts.status, "active"),
+      isNull(memoryFacts.expiredAt),
+    ];
+    if (input.projectId !== undefined) scope.push(eq(memoryFacts.projectId, input.projectId));
+    if (input.resourceId !== undefined) scope.push(eq(memoryFacts.resourceId, input.resourceId));
+    if (input.threadId !== undefined) scope.push(eq(memoryFacts.threadId, input.threadId));
+    const scopeWhere = and(...scope) as SQL;
+
+    // ── FTS leg (tsvector simple + websearch_to_tsquery — tolerates arbitrary input) ──
+    const ftsIds: string[] = [];
+    const cleaned = input.queryText.replace(/\s+/g, " ").trim();
+    if (cleaned.length > 0) {
+      const rows = await this.execRows(sql`
+        SELECT id FROM ${memoryFacts}
+         WHERE ${scopeWhere}
+           AND to_tsvector('simple', fact_text) @@ websearch_to_tsquery('simple', ${cleaned})
+         ORDER BY ts_rank(to_tsvector('simple', fact_text), websearch_to_tsquery('simple', ${cleaned})) DESC
+         LIMIT ${candidateLimit}
+      `);
+      for (const r of rows) ftsIds.push(r.id as string);
+    }
+
+    // ── ILIKE fallback ── when the tsquery leg yields NO candidates — CJK that
+    // tsvector('simple') can't segment, or a short literal — a substring scan restores
+    // exact recall (parity with memory_search), so such queries never regress to empty.
+    if (ftsIds.length === 0 && cleaned.length > 0) {
+      const rows = await this.execRows(sql`
+        SELECT id FROM ${memoryFacts}
+         WHERE ${scopeWhere} AND fact_text ILIKE ${`%${cleaned}%`}
+         ORDER BY updated_at DESC
+         LIMIT ${candidateLimit}
+      `);
+      for (const r of rows) ftsIds.push(r.id as string);
+    }
+
+    // ── vector leg (pgvector cosine, sequential scan) ──
+    const vecIds: string[] = [];
+    if (input.queryEmbedding !== undefined) {
+      const vecLiteral = `[${Array.from(input.queryEmbedding).join(",")}]`;
+      try {
+        const rows = await this.execRows(sql`
+          SELECT id FROM ${memoryFacts}
+           WHERE ${scopeWhere} AND embedding IS NOT NULL
+           ORDER BY embedding <=> ${vecLiteral}::vector
+           LIMIT ${candidateLimit}
+        `);
+        for (const r of rows) vecIds.push(r.id as string);
+      } catch {
+        // embedding column / pgvector absent → skip the vector leg (fail-open).
+      }
+    }
+
+    const candidateIds = [...new Set([...ftsIds, ...vecIds])];
+    if (candidateIds.length === 0) return [];
+
+    const factById = new Map<string, Fact>();
+    for (const row of await this.db
+      .select()
+      .from(memoryFacts)
+      .where(inArray(memoryFacts.id, candidateIds))) {
+      factById.set(row.id, pgRowToFact(row));
+    }
+
+    const scoreIds = [...factById.values()]
+      .map((f) => ({
+        id: f.id,
+        score: forgettingScore(
+          {
+            referencedAt: f.referencedAt ?? null,
+            fallbackTs: f.createdAt,
+            referenceCount: f.referenceCount ?? 0,
+            importance: f.importance ?? 0.5,
+          },
+          input.scoreConfig,
+          input.now,
+        ),
+      }))
+      .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+      .map((x) => x.id);
+
+    return reciprocalRankFusion([ftsIds, vecIds, scoreIds])
+      .map((r) => factById.get(r.id))
+      .filter((f): f is Fact => f !== undefined)
+      .slice(0, input.limit);
+  }
+
+  // docs/14 — embedding write sink (pg). Account-guarded; idempotent UPDATE per fact.
+  async setFactEmbeddings(input: {
+    accountId: string;
+    items: Array<{ factId: string; embedding: Float32Array; model: string; dim: number }>;
+  }): Promise<void> {
+    if (input.items.length === 0) return;
+    for (const it of input.items) {
+      const vecLiteral = `[${Array.from(it.embedding).join(",")}]`;
+      await this.db.execute(sql`
+        UPDATE memory_facts
+           SET embedding = ${vecLiteral}::vector, embedding_model = ${it.model}, embedding_dim = ${it.dim}
+         WHERE id = ${it.factId} AND owner_id = ${input.accountId}
+      `);
+    }
+  }
+
+  // docs/14 — embedding job READ half (pg). ACTIVE facts with no embedding, one from a
+  // DIFFERENT model, or a DIFFERENT dim (IS DISTINCT FROM is NULL-safe). Oldest-first.
+  async listFactsNeedingEmbedding(input: {
+    accountId: string;
+    model: string;
+    dim: number;
+    limit: number;
+  }): Promise<Array<{ id: string; factText: string }>> {
+    const rows = await this.execRows(sql`
+      SELECT id, fact_text AS "factText" FROM ${memoryFacts}
+       WHERE owner_id = ${input.accountId}
+         AND status = 'active'
+         AND expired_at IS NULL
+         AND (
+           embedding IS NULL
+           OR embedding_model IS DISTINCT FROM ${input.model}
+           OR embedding_dim IS DISTINCT FROM ${input.dim}
+         )
+       ORDER BY created_at ASC
+       LIMIT ${input.limit}
+    `);
+    return rows.map((r) => ({ id: r.id as string, factText: r.factText as string }));
+  }
+
+  // Normalize a raw drizzle-pg execute() result to plain rows (pglite returns
+  // { rows }, postgres-js returns an array) — mirrors the migration runner.
+  private async execRows(query: SQL): Promise<Array<Record<string, unknown>>> {
+    const res = (await this.db.execute(query)) as
+      | { rows?: Array<Record<string, unknown>> }
+      | Array<Record<string, unknown>>;
+    return Array.isArray(res) ? res : (res.rows ?? []);
   }
 
   // docs/12 P5 decay sweep — READ half (pg mirror of the sqlite adapter). Every
@@ -1063,6 +1248,17 @@ export class PgMemoryStore implements MemoryStore {
       .update(memoryFacts)
       .set(set)
       .where(and(eq(memoryFacts.id, input.id), eq(memoryFacts.ownerId, input.accountId)));
+    // docs/14 — a TEXT edit invalidates the stored vector (pg mirror): clear the
+    // embedding columns so the fact re-embeds on the next embedding job and is NEVER
+    // ranked by a stale vector (Codex review). Columns live outside the Drizzle schema
+    // (raw migration v27). `set.factText` is set only when the text actually changed.
+    if (set.factText !== undefined) {
+      await this.db.execute(sql`
+        UPDATE memory_facts
+           SET embedding = NULL, embedding_model = NULL, embedding_dim = NULL
+         WHERE id = ${input.id} AND owner_id = ${input.accountId}
+      `);
+    }
     return this.getFactById({ accountId: input.accountId, id: input.id });
   }
 

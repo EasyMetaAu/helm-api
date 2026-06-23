@@ -8,6 +8,12 @@ describe("MemoryJobTypeSchema", () => {
     expect(MemoryJobTypeSchema.parse("decay")).toBe("decay");
   });
 
+  // docs/14 — hybrid fact retrieval (P8) needs facts embedded off the hot path; the
+  // 'embedding' job kind backfills `memory_facts.embedding` for newly inserted facts.
+  it("parses 'embedding' (docs/14 fact-embedding job kind)", () => {
+    expect(MemoryJobTypeSchema.parse("embedding")).toBe("embedding");
+  });
+
   it("still parses the pre-existing observer / reflector kinds", () => {
     expect(MemoryJobTypeSchema.parse("observer")).toBe("observer");
     expect(MemoryJobTypeSchema.parse("reflector")).toBe("reflector");
