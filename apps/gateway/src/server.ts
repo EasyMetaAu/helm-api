@@ -134,6 +134,7 @@ import { buildClassifyAdapter } from "./routes/classify.js";
 import { createExecute } from "./routes/execute.js";
 import { registerGeminiRoute } from "./routes/gemini.js";
 import { registerMcpServer } from "./routes/mcp/index.js";
+import { deriveMcpSigningKey, mcpAuth, registerMcpOAuth } from "./routes/mcp/oauth.js";
 import { supportsMemoryAdmin } from "./routes/mcp/tools.js";
 import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
@@ -1705,10 +1706,35 @@ export async function buildServer(
   // resolved (mirrors /v1/models).
   if (config.memory.mcp.enabled) {
     if (supportsMemoryAdmin(store.memory)) {
-      app.use(
-        "/mcp",
-        authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
-      );
+      const mcpOAuth = config.memory.mcp.oauth;
+      if (mcpOAuth.enabled) {
+        // ChatGPT-style connectors can't send a raw key — front /mcp with an
+        // OAuth 2.1 shim (authorize/token + RFC 9728 discovery). Tokens are
+        // signed HS256 JWTs keyed off the existing at-rest OAuth secret, so the
+        // feature adds NO new secret but REQUIRES one to exist (fail-closed).
+        if (!oauthEncKey) {
+          throw new Error(
+            "memory.mcp.oauth.enabled requires HELM_OAUTH_ENC_KEY (used to sign MCP OAuth tokens): set a 32-byte key (base64 or 64 hex chars)",
+          );
+        }
+        const oauthDeps = {
+          keyStore,
+          signingKey: deriveMcpSigningKey(oauthEncKey),
+          accessTtlSeconds: mcpOAuth.access_token_ttl_seconds,
+          issuer: mcpOAuth.issuer,
+          allowedRedirectPrefixes: mcpOAuth.allowed_redirect_prefixes,
+          now: () => Date.now(),
+          log: (line: string) => logger.log("warn", "mcp.oauth", { line }),
+        };
+        registerMcpOAuth(app, oauthDeps);
+        // Accepts EITHER an issued access token OR a raw API key (back-compat).
+        app.use("/mcp", mcpAuth(oauthDeps));
+      } else {
+        app.use(
+          "/mcp",
+          authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
+        );
+      }
       registerMcpServer(app, {
         memoryStore: store.memory,
         now: () => new Date(),

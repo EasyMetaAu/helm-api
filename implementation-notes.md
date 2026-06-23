@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-23 · MCP OAuth 2.1 shim（ChatGPT 连接器接入；docs/13；原则 1/2/7）
+
+- **目标**：ChatGPT 自定义连接器（Apps SDK）**不接受裸 API key**，只走 OAuth 2.1 authorize-code + PKCE（RFC 9728 发现）。现 `/mcp` 仅 API-key 中间件 → 无法被 ChatGPT 接入。
+- **决定**：在 `/mcp` 前加**薄 OAuth 授权服务器**（`apps/gateway/src/routes/mcp/oauth.ts`），把 OAuth token 映射回既有 API key 的 account——不引入新身份系统。端点：`/.well-known/oauth-protected-resource`(+`/mcp` 后缀)、`/.well-known/oauth-authorization-server`(+后缀)、`GET/POST /authorize`（登录页粘贴 helm key→`keyStore.getByHash` 校验）、`POST /token`（PKCE S256→发 access token）。`mcpAuth` 中间件接受 **JWT 或裸 API key**（向后兼容直连客户端）。
+- **ponytail 取舍**：**无状态 JWT，无 token/code 表、无迁移**。授权码本身是 60s 签名 JWT（PKCE 绑定）；access token 默认 30 天、**无 refresh**（到期重新登录）。签名密钥从既有 `HELM_OAUTH_ENC_KEY` 派生（HMAC 域分隔 `helm-mcp-oauth/v1`）——**不新增任何密钥**，但要求其存在（`memory.mcp.oauth.enabled` 且无 enc key → **fail-closed 拒启动**）。
+- **天花板（已在代码注释）**：授权码在 60s 窗口内可重放；access token 到期前不可撤销（撤销手段=轮换 enc key，会一次性失效全部 token）。升级路径：一次性码存储 + token 黑名单（届时本文件需加 store 依赖）。redirect_uri 前缀白名单（仅 https，默认 ChatGPT 连接器回调）防开放重定向；登录页 hidden 字段做 HTML 属性转义防反射 XSS（authorize 参数全可控）。
+- **配置**：`memory.mcp.oauth { enabled(默认 false), issuer?(缺省从 X-Forwarded-Proto/Host 推导), access_token_ttl_seconds(默认 2592000), allowed_redirect_prefixes }`。token 写入 audience（RFC 8707），但 `/mcp` 端只验签名+exp，aud 当 best-effort（单资源网关，aud 仅纵深防御）。
+- **验证**：TDD 红→绿；`oauth.test.ts` 16 例（密钥派生/JWT 篡改、PKCE 正误、过期码、发现元数据、authorize 校验+XSS 转义、e2e authorize→token→/mcp、裸 key 兼容、无凭据 401）；typecheck + lint + config samples 均绿。**未部署**；启用需 box 配置 `memory.mcp.oauth.enabled:true`（box 已有 `HELM_OAUTH_ENC_KEY`，因用了 Anthropic 订阅 OAuth）。
+
 ## 2026-06-22 · Claude 订阅（OAuth）token 成本折算（docs/04/07；约定「能力与定价数据源」；原则 6）
 
 - **问题**：admin 对 Claude Pro/Max 订阅（`anthropic/*` OAuth 池）流量只显示 token **数量**，花费恒为 `—`（null）。token 计数链路（解析→落库→聚合→渲染）对所有 provider 早已就绪，唯一缺口是 `config/pricing.yaml` 无 `anthropic/*` 行；`costOf(alias)` 以路由 alias 查 catalog 落空 → `resolveCostUsd` 返回 `null`（fail-open「未计量」）。`openai-codex/*` 早有定价故 ChatGPT 订阅花费一直能显示——Claude 是唯一漏配的订阅渠道；`github-copilot/*` 无 lane 引用，不在范围。
@@ -22,22 +31,13 @@
 - **决定 2（跨协议 fallback）**：`InternalRequest.thinking` 若是 Responses reasoning history 数组，不再作为 provider `thinking` 请求配置转发到 OpenAI-compatible / Anthropic target；attempt 记录 `thinking_history_stripped_for_target`。provider_raw.reasoning 继续按目标协议 allowlist 剥离并记录。
 - **验证**：TDD 红→绿；`openai-responses.test.ts` 覆盖 Codex native 清洗；`execute.test.ts` 覆盖 Codex 直通清洗与 fallback `thinking` 剥离；focused 237 测、core/gateway typecheck、Biome touched-file check 均绿。
 
-## 2026-06-22 · Opus 1M 上下文溢出预检 + 流式失败落库修正（docs/04/05/07；原则 3/5/7/8）
-
-- **线上实证**：`la.atmy.work` SQLite 显示 `claude-opus-4-8` 原生 Anthropic 请求在 `2026-06-22 01:28:23–01:33:50 UTC` 连续失败，核心错误为 `prompt is too long: 1001854 tokens > 1000000 maximum`；稍后同模型 `prompt_tokens=924300` 成功，说明客户端压缩/清理尚未把活动上下文降到硬上限以下。`decision_json.memory` 为空，Helm memory middleware 未参与。
-- **决定 1（上下文）**：对 Anthropic native target 在真正 provider invoke 前增加 exact `count_tokens` 预检；`claude-opus-4-8` / `claude-sonnet-4-6` / `claude-haiku-4-5` 采用保守硬上限 `1_000_000`，并与 catalog 值取较小者。`count_tokens` 失败时 fail-open 继续原尝试（避免 token helper 自身成为 5xx），但一旦精确 `input_tokens` 超限，记录 `skip_reason:"context_too_small"` 并进入 fallback，**不记 breaker failure**。
-- **决定 2（请求形状 400）**：上游 400 中的 `prompt is too long`、`does not support effort level`、`output_config.effort` 等判为请求形状错误，attempt 记 `invalid_request`，但不污染 circuit breaker。`:free` 429、OAuth 429 auto-park 等 provider-health 路径保持原语义。
-- **决定 3（effort）**：`claude-sonnet-4-6` 只允许 `low|medium|high|max` 的 `output_config.effort`；`xhigh` 等不兼容值在执行前以 `unsupported_reasoning_effort` 跳过该候选，而不是发给上游再 400。没有把 `xhigh` 自动 clamp 到 `max`，因为 clamp 会悄悄改变用户请求语义；fallback skip 更可观测。
-- **决定 4（流式可观测）**：`/v1/messages` 已写出 Anthropic `event:error` 时，同步把 `DecisionRecord.final.status` 改为 `error` 并写入 `error_reason`，避免 admin 显示 ok 但 payload 里是错误帧。Codex Responses `response.failed` / `error` 抛出的 `UpstreamError` 现在带原始 SSE event 到 `providerRaw`，让 `error_detail.provider_raw` 能保留故障字段（仍经 telemetry redaction）。
-- **仍未做**：all-failed chain 的 per-attempt upstream body capture 还没补；当前只继续保存 served attempt 的 `upstream_request_json`。这需要扩展 payload 表或决策 attempt 附属表，单独做更稳。
-- **验证**：TDD 红→绿；`execute.test.ts` 覆盖 exact count_tokens skip、Sonnet effort skip、request-shape 400 不触发 breaker；`messages.test.ts` 覆盖 stream error 落库；`openai-responses.test.ts` 覆盖 `response.failed.providerRaw`。focused 212 测、typecheck、Biome lint 均绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-22 · Opus 1M 上下文溢出预检 + 流式失败落库**：Anthropic native 在 invoke 前加 exact `count_tokens` 预检（opus/sonnet/haiku 硬上限 1e6 与 catalog 取较小者，count 失败 fail-open），超限记 `context_too_small` 进 fallback **不记 breaker**；上游 400 的 prompt-too-long/effort 形状错记 `invalid_request` 不污染 breaker；sonnet 仅允 low|medium|high|max effort（xhigh 执行前 skip 不 clamp，更可观测）；`/v1/messages` 已写 error 帧则同步改 `DecisionRecord.final.status=error`，Codex Responses 故障帧带 `providerRaw`。TODO：all-failed chain 的 per-attempt upstream body capture 未补。
 - **2026-06-21 · Codex Chat→Responses 兼容层移除 `temperature`**：economy+temperature:0 非流式 Chat 经 `openaiToResponsesRequest` 互译到 ChatGPT-account Codex Responses 后端 400 `Unsupported parameter: temperature`；改为 Codex Responses 用 openclaw 最小 body（`store:false`/`stream:true`/`include:[reasoning.encrypted_content]`/`text.verbosity:low`，不发 `max_output_tokens`/`temperature`），generic Responses 不变。
 - **2026-06-21 · 全仓评审修复 Tiers 1–5**：按 review C1/C2、C3/H3、H1/H2、H9/H10/H11、breaker+memory 分批修复；关键取舍包括删除未被网关调用且漂移的 `executor/fallback.ts`、不从 `prompt_tokens` 预减 cached、`cleanup_archive_enabled` 默认关并加 2× 安全线、`require_api_key:false` fail-closed、Anthropic mid-conv system 折叠保持现行为、OPEN 态 `recordFailure` no-op；M6/C4 延后单做。
 
