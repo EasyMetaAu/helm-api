@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { type BetterSQLite3Database, drizzle } from "drizzle-orm/better-sqlite3";
+import * as sqliteVec from "sqlite-vec";
 import * as schema from "./schema.js";
 
 type Schema = typeof schema;
@@ -9,6 +10,10 @@ type Schema = typeof schema;
 // return type can be referenced across module boundaries (avoids TS4058).
 export type SqliteDb = BetterSQLite3Database<Schema> & {
   readonly $sqlite: Database.Database;
+  // docs/14 — whether the sqlite-vec extension loaded on this connection. The hybrid
+  // recall vector leg (vec0 KNN) is used only when true; on false the store degrades
+  // to FTS+score (fail-open — a missing/unloadable extension never crashes startup).
+  readonly $vecLoaded: boolean;
 };
 
 // Checked-in, ordered migrations. Each runs exactly once per database; the
@@ -593,6 +598,50 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim ON memory_jobs (status, created_at, id);
     `,
   },
+  {
+    // docs/14 / docs/12 P8 — hybrid fact retrieval. Three additions to memory_facts,
+    // none depend on the sqlite-vec extension (so this migration ALWAYS applies, even
+    // where the extension is absent — fail-open):
+    //   1. embedding columns: the vector (BLOB of a Float32Array) + the model id +
+    //      dim it was produced with (for lazy re-embed on a model change; never mix
+    //      vectors from two models in one index).
+    //   2. an FTS5 EXTERNAL-CONTENT table over fact_text with the `trigram` tokenizer
+    //      — trigram indexes 3-char windows so it matches BOTH CJK (unicode61 collapses
+    //      a Chinese run to one token) and Latin substrings without a segmenter.
+    //      external-content stores ONLY the inverted index, not a copy of the text
+    //      (lean — the request_payloads bloat lesson). Triggers keep it in sync;
+    //      'rebuild' backfills existing rows.
+    // The vec0 virtual table is NOT created here (its FLOAT[dim] width needs the
+    // runtime embedding_dimensions); the store creates it lazily once the extension is
+    // loaded and a dimension is known.
+    version: 28,
+    sql: `
+      ALTER TABLE memory_facts ADD COLUMN embedding BLOB;
+      ALTER TABLE memory_facts ADD COLUMN embedding_model TEXT;
+      ALTER TABLE memory_facts ADD COLUMN embedding_dim INTEGER;
+
+      CREATE VIRTUAL TABLE memory_facts_fts USING fts5(
+        fact_text,
+        content='memory_facts',
+        content_rowid='rowid',
+        tokenize='trigram'
+      );
+      INSERT INTO memory_facts_fts(memory_facts_fts) VALUES('rebuild');
+
+      CREATE TRIGGER memory_facts_fts_ai AFTER INSERT ON memory_facts BEGIN
+        INSERT INTO memory_facts_fts(rowid, fact_text) VALUES (new.rowid, new.fact_text);
+      END;
+      CREATE TRIGGER memory_facts_fts_ad AFTER DELETE ON memory_facts BEGIN
+        INSERT INTO memory_facts_fts(memory_facts_fts, rowid, fact_text)
+          VALUES('delete', old.rowid, old.fact_text);
+      END;
+      CREATE TRIGGER memory_facts_fts_au AFTER UPDATE ON memory_facts BEGIN
+        INSERT INTO memory_facts_fts(memory_facts_fts, rowid, fact_text)
+          VALUES('delete', old.rowid, old.fact_text);
+        INSERT INTO memory_facts_fts(rowid, fact_text) VALUES (new.rowid, new.fact_text);
+      END;
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {
@@ -643,6 +692,21 @@ function applyPragmas(sqlite: Database.Database): void {
   sqlite.pragma("cache_size = -16000");
 }
 
+// docs/14 — load the sqlite-vec extension on a connection so the vec0 virtual table
+// (vector KNN) is available for hybrid recall's vector leg. FAIL-OPEN: if the
+// extension can't load (no prebuilt binary for the platform, a sandbox blocking
+// loadExtension), return false and the store runs FTS+score only — an optional
+// accelerator must NEVER crash startup. sqliteVec.load() calls db.loadExtension(),
+// which better-sqlite3 permits by default.
+function loadVecExtension(sqlite: Database.Database): boolean {
+  try {
+    sqliteVec.load(sqlite);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Apply migrations to a fresh or existing sqlite file (or ":memory:"). Idempotent.
 // Throws on failure so the caller can fail-closed at startup.
 export function runMigrations(dbPath: string): void {
@@ -660,7 +724,10 @@ export function runMigrations(dbPath: string): void {
 export function createSqliteDb(dbPath: string): SqliteDb {
   const sqlite = new Database(dbPath);
   applyPragmas(sqlite);
+  // Load sqlite-vec BEFORE migrations (harmless if a later migration ever needs it);
+  // the result is surfaced on the db so the store knows whether the vector leg exists.
+  const vecLoaded = loadVecExtension(sqlite);
   applyMigrations(sqlite);
   const db = drizzle(sqlite, { schema });
-  return Object.assign(db, { $sqlite: sqlite });
+  return Object.assign(db, { $sqlite: sqlite, $vecLoaded: vecLoaded });
 }

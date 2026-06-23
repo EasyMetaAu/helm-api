@@ -18,9 +18,25 @@ import {
   type ReflectionScope,
   type ReflectionUpsertInput,
 } from "@helm/shared";
-import { and, asc, count, desc, eq, gt, isNull, like, lt, ne, type SQL, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  like,
+  lt,
+  ne,
+  type SQL,
+  sql,
+} from "drizzle-orm";
 import { factContentHash } from "../../memory/forgetting/facts.js";
+import { forgettingScore, type ScoreConfig } from "../../memory/forgetting/score.js";
 import { sha256Hex } from "../../memory/message-hash.js";
+import { reciprocalRankFusion } from "../../memory/recall/rrf.js";
 import {
   MemoryFactContentHashConflictError,
   type MemoryJobStatus,
@@ -178,6 +194,17 @@ function factListClauses(input: {
     clauses.push(like(memoryFacts.factText, `%${input.search}%`));
   }
   return clauses;
+}
+
+// docs/14 — build a safe FTS5 MATCH expression from raw user text for the trigram
+// index. Wrap the whole query as ONE phrase (escaping `"`→`""`) so FTS5 operators in
+// user text (AND/OR/NOT/NEAR/quotes/column filters) can never cause a syntax error or
+// unintended boolean logic. trigram needs ≥3 chars to match anything, so a shorter
+// query returns null ⇒ the FTS leg is skipped (a vector leg, if any, still runs).
+function toFtsMatch(queryText: string): string | null {
+  const cleaned = queryText.replace(/\s+/g, " ").trim();
+  if ([...cleaned].length < 3) return null;
+  return `"${cleaned.replace(/"/g, '""')}"`;
 }
 
 // SQLite adapter for the MemoryStore port (docs/08). POST-MVP persistence floor:
@@ -624,6 +651,7 @@ export class SqliteMemoryStore implements MemoryStore {
     accountId: string;
     observationIds: string[];
     reflectionIds: string[];
+    factIds?: string[];
     now: Date;
   }): Promise<void> {
     const nowMs = input.now.getTime();
@@ -650,6 +678,19 @@ export class SqliteMemoryStore implements MemoryStore {
               AND owner_id = ?`,
         )
         .run(nowMs, ...input.reflectionIds, input.accountId);
+    }
+    // docs/14 — recalled facts get the same reinforcement bump. memory_facts carry
+    // owner_id directly (no thread join), so guard on owner_id like reflections.
+    if (input.factIds !== undefined && input.factIds.length > 0) {
+      const placeholders = input.factIds.map(() => "?").join(", ");
+      this.db.$sqlite
+        .prepare(
+          `UPDATE memory_facts
+              SET reference_count = reference_count + 1, referenced_at = ?
+            WHERE id IN (${placeholders})
+              AND owner_id = ?`,
+        )
+        .run(nowMs, ...input.factIds, input.accountId);
     }
   }
 
@@ -1104,6 +1145,239 @@ export class SqliteMemoryStore implements MemoryStore {
     return { rows: rows.map(sqliteRowToFact), total: totalRow?.n ?? 0 };
   }
 
+  // docs/14 / docs/12 P8 — HYBRID relevance retrieval over memory_facts. Up to three
+  // ranked lists fused with RRF: FTS5(trigram) full-text, sqlite-vec KNN (only when a
+  // query embedding is given AND the extension loaded AND the vec table matches — else
+  // skipped, fail-open), and the forgetting score over the candidate union. Account-
+  // scoped + active-only; a superseded/archived/expired fact never surfaces.
+  async searchFacts(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    queryText: string;
+    queryEmbedding?: Float32Array;
+    limit: number;
+    now: Date;
+    scoreConfig: ScoreConfig;
+  }): Promise<Fact[]> {
+    // Over-fetch per signal so RRF has room to find consensus; final cap is input.limit.
+    const candidateLimit = Math.max(input.limit * 5, 50);
+
+    // Account + active + scope guard, shared by both raw legs (mf = memory_facts).
+    const scopeSql = ["mf.owner_id = ?", "mf.status = 'active'", "mf.expired_at IS NULL"];
+    const scopeArgs: unknown[] = [input.accountId];
+    if (input.projectId !== undefined) {
+      scopeSql.push("mf.project_id = ?");
+      scopeArgs.push(input.projectId);
+    }
+    if (input.resourceId !== undefined) {
+      scopeSql.push("mf.resource_id = ?");
+      scopeArgs.push(input.resourceId);
+    }
+    if (input.threadId !== undefined) {
+      scopeSql.push("mf.thread_id = ?");
+      scopeArgs.push(input.threadId);
+    }
+    const scopeWhere = scopeSql.join(" AND ");
+
+    // ── FTS leg (trigram) ──
+    const ftsIds: string[] = [];
+    const match = toFtsMatch(input.queryText);
+    if (match !== null) {
+      const rows = this.db.$sqlite
+        .prepare(
+          `SELECT mf.id AS id
+             FROM memory_facts_fts ff
+             JOIN memory_facts mf ON mf.rowid = ff.rowid
+            WHERE memory_facts_fts MATCH ?
+              AND ${scopeWhere}
+            ORDER BY bm25(memory_facts_fts)
+            LIMIT ?`,
+        )
+        .all(match, ...scopeArgs, candidateLimit) as Array<{ id: string }>;
+      for (const r of rows) ftsIds.push(r.id);
+    }
+
+    // ── LIKE fallback ── when the FTS leg yields NO candidates — a sub-trigram query
+    // (the 2-char CJK "成本" that trigram can't index, so toFtsMatch returned null) or a
+    // genuine FTS miss — a substring scan restores exact short-literal recall (parity
+    // with memory_search), so short queries never regress to empty. Same scope guard.
+    if (ftsIds.length === 0) {
+      const cleaned = input.queryText.replace(/\s+/g, " ").trim();
+      if (cleaned.length > 0) {
+        const rows = this.db.$sqlite
+          .prepare(
+            `SELECT mf.id AS id
+               FROM memory_facts mf
+              WHERE ${scopeWhere}
+                AND mf.fact_text LIKE ?
+              ORDER BY mf.updated_at DESC
+              LIMIT ?`,
+          )
+          .all(...scopeArgs, `%${cleaned}%`, candidateLimit) as Array<{ id: string }>;
+        for (const r of rows) ftsIds.push(r.id);
+      }
+    }
+
+    // ── vector leg (sqlite-vec KNN) ── only with an embedding AND the extension
+    // loaded. The KNN lives in a subquery (pure vec0 form), then joins memory_facts
+    // for the scope/active guard. Wrapped in try/catch: a missing vec table or a dim
+    // mismatch degrades to FTS+score (fail-open), never throws.
+    const vecIds: string[] = [];
+    if (input.queryEmbedding !== undefined && this.db.$vecLoaded) {
+      try {
+        const qbuf = new Uint8Array(
+          input.queryEmbedding.buffer,
+          input.queryEmbedding.byteOffset,
+          input.queryEmbedding.byteLength,
+        );
+        const rows = this.db.$sqlite
+          .prepare(
+            `SELECT mf.id AS id
+               FROM (
+                 SELECT fact_rowid, distance FROM memory_facts_vec
+                  WHERE embedding MATCH ? AND k = ?
+               ) v
+               JOIN memory_facts mf ON mf.rowid = v.fact_rowid
+              WHERE ${scopeWhere}
+              ORDER BY v.distance`,
+          )
+          .all(qbuf, candidateLimit, ...scopeArgs) as Array<{ id: string }>;
+        for (const r of rows) vecIds.push(r.id);
+      } catch {
+        // vec table absent / dim mismatch → skip the vector leg (fail-open).
+      }
+    }
+
+    // Candidate union; nothing matched ⇒ empty (the tool reports "no hits").
+    const candidateIds = [...new Set([...ftsIds, ...vecIds])];
+    if (candidateIds.length === 0) return [];
+
+    // Materialize via Drizzle (camelCase rows → Fact); only candidates, so cheap.
+    const factById = new Map<string, Fact>();
+    for (const row of this.db
+      .select()
+      .from(memoryFacts)
+      .where(inArray(memoryFacts.id, candidateIds))
+      .all()) {
+      factById.set(row.id, sqliteRowToFact(row));
+    }
+
+    // Forgetting-score ranked list over the candidate union (fact-tier fallback_ts =
+    // created_at, docs/12). A decayed fact ranks low in retrieval too.
+    const scoreIds = [...factById.values()]
+      .map((f) => ({
+        id: f.id,
+        score: forgettingScore(
+          {
+            referencedAt: f.referencedAt ?? null,
+            fallbackTs: f.createdAt,
+            referenceCount: f.referenceCount ?? 0,
+            importance: f.importance ?? 0.5,
+          },
+          input.scoreConfig,
+          input.now,
+        ),
+      }))
+      .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+      .map((x) => x.id);
+
+    // RRF-fuse the three ranked lists, take top-K, return full facts in fused order.
+    return reciprocalRankFusion([ftsIds, vecIds, scoreIds])
+      .map((r) => factById.get(r.id))
+      .filter((f): f is Fact => f !== undefined)
+      .slice(0, input.limit);
+  }
+
+  // docs/14 — embedding write sink (the background embedding job). Account-guarded: a
+  // fact not owned by accountId is skipped (never a cross-tenant write). Persists the
+  // vector + model + dim onto memory_facts, and when sqlite-vec is loaded mirrors it
+  // into the vec0 KNN table (lazily created at the right dim). Idempotent.
+  async setFactEmbeddings(input: {
+    accountId: string;
+    items: Array<{ factId: string; embedding: Float32Array; model: string; dim: number }>;
+  }): Promise<void> {
+    if (input.items.length === 0) return;
+    const selectRowid = this.db.$sqlite.prepare(
+      "SELECT rowid AS rowid FROM memory_facts WHERE id = ? AND owner_id = ?",
+    );
+    const updateEmbedding = this.db.$sqlite.prepare(
+      "UPDATE memory_facts SET embedding = ?, embedding_model = ?, embedding_dim = ? WHERE rowid = ?",
+    );
+    const run = this.db.$sqlite.transaction(() => {
+      for (const it of input.items) {
+        const row = selectRowid.get(it.factId, input.accountId) as { rowid: number } | undefined;
+        if (row === undefined) continue;
+        const buf = new Uint8Array(
+          it.embedding.buffer,
+          it.embedding.byteOffset,
+          it.embedding.byteLength,
+        );
+        updateEmbedding.run(buf, it.model, it.dim, row.rowid);
+        if (this.db.$vecLoaded && this.ensureVecTable(it.dim)) {
+          // vec0 sync is BEST-EFFORT: a failure here must not roll back the BLOB write
+          // above (the fact stays FTS+score findable and re-embed retries).
+          try {
+            const rid = BigInt(row.rowid);
+            this.db.$sqlite.prepare("DELETE FROM memory_facts_vec WHERE fact_rowid = ?").run(rid);
+            this.db.$sqlite
+              .prepare("INSERT INTO memory_facts_vec(fact_rowid, embedding) VALUES (?, ?)")
+              .run(rid, buf);
+          } catch {
+            // skip vec sync for this row
+          }
+        }
+      }
+    });
+    run();
+  }
+
+  // docs/14 — the embedding job's read half. ACTIVE facts with no embedding, or one
+  // from a different model OR a different dim (IS NOT is NULL-safe: an unembedded row
+  // has model/dim NULL, which IS NOT <model>/<dim> → included). Oldest-first, capped.
+  async listFactsNeedingEmbedding(input: {
+    accountId: string;
+    model: string;
+    dim: number;
+    limit: number;
+  }): Promise<Array<{ id: string; factText: string }>> {
+    return this.db.$sqlite
+      .prepare(
+        `SELECT id AS id, fact_text AS factText
+           FROM memory_facts
+          WHERE owner_id = ?
+            AND status = 'active'
+            AND expired_at IS NULL
+            AND (embedding IS NULL OR embedding_model IS NOT ? OR embedding_dim IS NOT ?)
+          ORDER BY created_at ASC
+          LIMIT ?`,
+      )
+      .all(input.accountId, input.model, input.dim, input.limit) as Array<{
+      id: string;
+      factText: string;
+    }>;
+  }
+
+  // Lazily create the vec0 KNN table at the embedding dimension (the migration can't —
+  // FLOAT[dim] needs the runtime dim). Returns false when the extension isn't loaded or
+  // dim is invalid. A changed dim (model swap) rebuilds the table; the embedding job
+  // re-embeds the rest. dim is a trusted integer (config-validated); guarded anyway.
+  private vecDim: number | null = null;
+  private ensureVecTable(dim: number): boolean {
+    if (!this.db.$vecLoaded) return false;
+    if (!Number.isInteger(dim) || dim <= 0) return false;
+    if (this.vecDim === dim) return true;
+    if (this.vecDim !== null && this.vecDim !== dim) {
+      this.db.$sqlite.exec("DROP TABLE IF EXISTS memory_facts_vec");
+    }
+    this.db.$sqlite.exec(
+      `CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_vec USING vec0(fact_rowid INTEGER PRIMARY KEY, embedding FLOAT[${dim}])`,
+    );
+    this.vecDim = dim;
+    return true;
+  }
+
   // Edit a fact in place (partial). factText edit recomputes content_hash (never
   // subjectKey); a collision with a DIFFERENT row's (owner_id, content_hash)
   // throws MemoryFactContentHashConflictError (route → 409). invalidAt tri-state
@@ -1154,6 +1428,32 @@ export class SqliteMemoryStore implements MemoryStore {
       .set(set)
       .where(and(eq(memoryFacts.id, input.id), eq(memoryFacts.ownerId, input.accountId)))
       .run();
+    // docs/14 — a TEXT edit invalidates the stored vector. Clear the embedding columns
+    // + drop the vec0 row so the fact re-embeds on the next embedding job and is NEVER
+    // ranked by a stale vector (Codex review). The embedding columns live outside the
+    // Drizzle schema (raw migration v28), so this is a raw clear. `set.factText` is set
+    // only when the text actually changed.
+    if (set.factText !== undefined) {
+      const rowidRow = this.db.$sqlite
+        .prepare("SELECT rowid AS rowid FROM memory_facts WHERE id = ? AND owner_id = ?")
+        .get(input.id, input.accountId) as { rowid: number } | undefined;
+      if (rowidRow !== undefined) {
+        this.db.$sqlite
+          .prepare(
+            "UPDATE memory_facts SET embedding = NULL, embedding_model = NULL, embedding_dim = NULL WHERE rowid = ?",
+          )
+          .run(rowidRow.rowid);
+        if (this.db.$vecLoaded) {
+          try {
+            this.db.$sqlite
+              .prepare("DELETE FROM memory_facts_vec WHERE fact_rowid = ?")
+              .run(BigInt(rowidRow.rowid));
+          } catch {
+            // vec table absent → nothing to drop.
+          }
+        }
+      }
+    }
     return this.getFactById({ accountId: input.accountId, id: input.id });
   }
 

@@ -7,6 +7,23 @@
 
 ---
 
+## 2026-06-23 · 记忆深度召回 = 混合检索（落地 docs/12 P8）+ `memory_recall` MCP 工具（docs/14；原则 1/3/4）
+
+- **背景/范围**：用户要 MCP 上「深度历史召回」（"我们讨论过什么"）。现 `memory_search` 是对蒸馏 `fact_text` 的 `LIKE`——无相关性排序、**无跨语言**（`成本`≠`cost`）。决定**落地 docs/12 已 spec 但 deferred 的 P8**，并新增第 7 个 MCP 工具 `memory_recall` 暴露之。**检索单元 = `memory_facts`**（有 owner_id+scope，跨会话；对齐 docs/12 P8 与 docs/13「raw/observation 不入管理面」）；observations/reflections **不入索引**（完整原始历史靠 fact 的 `sourceObservationRange` 溯源链，非主搜索面，留作后续）。
+- **架构**：三确定性信号各出一个 ranked list，**RRF(k=60) 融合**：① 向量（sqlite-vec / pgvector，方言封在适配器）② 全文（FTS5 **trigram** / tsvector）③ forgetting-score（衰减的 fact 检索也排后）。**双语**：多语言 embedding 跨 zh↔en，trigram 抓 CJK+拉丁字面（unicode61 不切中文），RRF 融合两者短板。不变量同 P8：account-scoped + `expired_at IS NULL`、**fail-open**（embed/向量失败→退 FTS+score；全失败→空结果不 5xx）、召回结果走 reinforcement bump。
+- **embedding 接入**：core 框架无关 → 注入 `Embedder` 端口；gateway 实现调 OpenAI 兼容 `/v1/embeddings`；**后台**（新 `embedding` job，复用 worker；`insertFactsReconciled` 返回的 `insertedIds` 即待嵌入行）；唯一同步嵌入是 `memory_recall` 的一次 query 向量。config `memory.llm.embedding_model`+`embedding_dimensions`（**缺省→向量腿关、退 FTS+score**）；默认多语言选型 bge-m3(1024d) 自托管。
+- **配置**：`memory.forgetting.facts_retrieval{ enabled(默认 false), top_k(10) }`（沿用 docs/12 命名）；RRF k、各信号权重、tokenizer 皆**代码常量**（无撒谎旋钮）。`.strict()` fail-closed。
+- **关键坑（sqlite-vec 已实证可用：v0.1.9 darwin-arm64 prebuilt；本机 Node 25.8.2 / better-sqlite3 12.10.0 / SQLite 3.53.1）**：
+  1. **vec0 主键须 BigInt 绑定**——better-sqlite3 把 JS `number` 当 float 传给 vec0 → `Only integers are allowed for primary key`。存 `fact_rowid` 用 `BigInt`。
+  2. **KNN 语法** `WHERE emb MATCH ? AND k = N ORDER BY distance`；向量绑定 `new Uint8Array(Float32Array.buffer)`。
+  3. **`loadExtension` 今天全仓未调用**——需在 `runMigrations` + `createSqliteDb` **两处**连接开启时加 sqlite-vec 加载 hook；加载失败 **fail-open**（FTS+score 仍工作）绝不崩启动。`sqlite-vec` 已加进 `packages/core` deps（预编译二进制，无需进 root `onlyBuiltDependencies`）。
+  4. FTS5 **external-content** 表（`content='memory_facts'`）只存倒排不复制文本 + AI/AD/AU 触发器同步 + `'rebuild'` 回填。
+  5. **pg `splitStatements` 按 `;` 切**——DDL 仅终止符用 `;`；pgvector 需 `CREATE EXTENSION vector`，PGlite 0.4.6 自带（`@electric-sql/pglite/vector`，测试可覆盖 pg 向量路径）。
+- **迁移版本**：sqlite 当前 max=27 → 新 **v28**；postgres 当前 max=26 → 新 **v27**（pg ledger 比 sqlite 偏移 1）。
+- **`searchFacts?` 挂载**：端口加**可选** `?` 方法；**不**进 `REQUIRED_METHODS`/`MemoryAdminStore`（该 gate 被 admin 路由共用，会 fail-close 整个 `/mcp` 挂载）——`memory_recall` handler **null-check** 降级到 `listFacts({search})`。`bumpReferences` 加可选 `factIds`（向后兼容）。
+- **T6/T7 关键坑（实现中实证）**：① **PGlite vector 扩展须 `PGlite.create({extensions:{vector}})`，不能 `new PGlite()`**（后者不注册 extension bundle → `CREATE EXTENSION vector` 报 `vector.control` not found）；② postgres 向量列用**无维度 `vector`**（顺序 `<=>` 扫描，免运行时 dim），但 v27 `CREATE EXTENSION vector` **要求部署装了 pgvector**（supabase 默认有；自建 PG 无则 boot 失败——诚实信号去装）；③ gateway **无 `/v1/embeddings` 路由、`ProviderClient` 无 embeddings 方法** → embedder（`apps/gateway/src/memory-embedder.ts`）直连 `{provider.base_url}/embeddings`（OpenAI 兼容），按 `embedding_model` 的 provider 前缀从 `config.providers` 解析 base_url + api_key_env；④ 迁移 fixture 测试须预标记新版本（sqlite **v28** / pg **v27**）——不含 memory_facts 的最小 fixture 否则 ALTER 失败（sqlite 3 处、pg 2 处已补）。
+- **进度：全部完成（阶段2 端到端）**。docs/14；config（`facts_retrieval`/`embedding_*`/`embedding` job）；RRF 核心；sqlite 适配器（v28：FTS5-trigram + sqlite-vec vec0 + `searchFacts`/`setFactEmbeddings`/`listFactsNeedingEmbedding` + `bumpReferences.factIds`）；postgres 适配器（v27：tsvector GIN + pgvector + 同方法）；embedder + embedding job + scheduler dispatch/enqueue；`memory_recall` MCP 工具 + 接线 + fail-open。**验证**：`typecheck -r` 全绿；core **2568** 测试绿（含 sqlite/pg searchFacts CJK+向量+RRF、embedding-job、mcp fail-open/bump、迁移 fixture）；gateway mcp 17 + embedder 5 绿；lint 我方文件绿（`oauth.ts:312` pre-existing）。分支 `helm-memory-deep-recall`，**未提交**（待用户）。运行时：`memory.forgetting.facts_retrieval.enabled:true` 开 FTS+score；再配 `memory.llm.embedding_model`+`embedding_dimensions` 点亮向量腿。
+
 ## 2026-06-23 · MCP OAuth 2.1 shim（ChatGPT 连接器接入；docs/13；原则 1/2/7）
 
 - **目标**：ChatGPT 自定义连接器（Apps SDK）**不接受裸 API key**，只走 OAuth 2.1 authorize-code + PKCE（RFC 9728 发现）。现 `/mcp` 仅 API-key 中间件 → 无法被 ChatGPT 接入。
@@ -24,19 +41,13 @@
 - **取舍/限制**：是**折算价非实付**（订阅月度统付，与 `openai-codex/*` 既有语义一致），未在 UI 区分名义/实付；仅 4 个 lane alias 被定价，自定义 key 发来的其它/带日期 `anthropic/<id>` 仍 `null`（fail-open 照样尝试，只是不计价，需要时运维补一行）。纯配置无代码改动。
 - **验证**：`samples.test.ts`（Claude lane 路由不回归）、`catalog/{index,load,models-list}.test.ts`（4 条新条目的计数/快照）、`capability/filter.test.ts` 均绿；typecheck+lint 绿。
 
-## 2026-06-22 · Codex 原生 Responses 直通兼容清洗 + fallback reasoning 泄漏修复（docs/05/07；原则 3/7/8）
-
-- **线上实证**：`la.atmy.work` 请求 `e3ead05d-3433-4464-aca2-47d7640ee97f` 的第一候选 `openai-codex/gpt-5.5` 295ms 返回 HTTP 400：`Unsupported parameter: max_output_tokens`；入站是 `/v1/responses` 原生直通，客户端带 `max_output_tokens:512`。请求 `39f175e4-2ff8-4ede-849c-d8dc9542adb0` 第一候选 `openai-codex/gpt-5.4-mini` 404：`Item with id ... not found. Items are not persisted when store is set to false`；同一 fallback 链随后 Anthropic/DeepSeek 因 Responses reasoning history 被当作 provider `thinking` 配置而 400，OpenRouter 最终成功。
-- **决定 1（Codex 直通）**：仅对 ChatGPT-account Codex Responses profile 增加 native body 清洗：移除 `max_output_tokens` / `temperature`；`store:false` 时删除 input item 的 `id/status/phase` 引用元数据，并丢弃空 reasoning item（保留有 `encrypted_content`/summary/content 的 reasoning）。generic OpenAI Responses passthrough 保持原样，避免破坏标准 API 语义。
-- **决定 2（跨协议 fallback）**：`InternalRequest.thinking` 若是 Responses reasoning history 数组，不再作为 provider `thinking` 请求配置转发到 OpenAI-compatible / Anthropic target；attempt 记录 `thinking_history_stripped_for_target`。provider_raw.reasoning 继续按目标协议 allowlist 剥离并记录。
-- **验证**：TDD 红→绿；`openai-responses.test.ts` 覆盖 Codex native 清洗；`execute.test.ts` 覆盖 Codex 直通清洗与 fallback `thinking` 剥离；focused 237 测、core/gateway typecheck、Biome touched-file check 均绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-22 · Codex 原生 Responses 直通清洗 + fallback reasoning 泄漏修复**：仅对 ChatGPT-account Codex Responses profile 清洗 native body（移除 `max_output_tokens`/`temperature`；`store:false` 删 input item `id/status/phase` + 丢空 reasoning item，保留有 encrypted_content/summary 的）；跨协议 fallback 时 `InternalRequest.thinking` 若为 Responses reasoning history 数组不再作为 provider `thinking` 转发（记 `thinking_history_stripped_for_target`）。`openai-responses.test.ts`/`execute.test.ts` 覆盖。
 - **2026-06-22 · Opus 1M 上下文溢出预检 + 流式失败落库**：Anthropic native 在 invoke 前加 exact `count_tokens` 预检（opus/sonnet/haiku 硬上限 1e6 与 catalog 取较小者，count 失败 fail-open），超限记 `context_too_small` 进 fallback **不记 breaker**；上游 400 的 prompt-too-long/effort 形状错记 `invalid_request` 不污染 breaker；sonnet 仅允 low|medium|high|max effort（xhigh 执行前 skip 不 clamp，更可观测）；`/v1/messages` 已写 error 帧则同步改 `DecisionRecord.final.status=error`，Codex Responses 故障帧带 `providerRaw`。TODO：all-failed chain 的 per-attempt upstream body capture 未补。
 - **2026-06-21 · Codex Chat→Responses 兼容层移除 `temperature`**：economy+temperature:0 非流式 Chat 经 `openaiToResponsesRequest` 互译到 ChatGPT-account Codex Responses 后端 400 `Unsupported parameter: temperature`；改为 Codex Responses 用 openclaw 最小 body（`store:false`/`stream:true`/`include:[reasoning.encrypted_content]`/`text.verbosity:low`，不发 `max_output_tokens`/`temperature`），generic Responses 不变。
 - **2026-06-21 · 全仓评审修复 Tiers 1–5**：按 review C1/C2、C3/H3、H1/H2、H9/H10/H11、breaker+memory 分批修复；关键取舍包括删除未被网关调用且漂移的 `executor/fallback.ts`、不从 `prompt_tokens` 预减 cached、`cleanup_archive_enabled` 默认关并加 2× 安全线、`require_api_key:false` fail-closed、Anthropic mid-conv system 折叠保持现行为、OPEN 态 `recordFailure` no-op；M6/C4 延后单做。

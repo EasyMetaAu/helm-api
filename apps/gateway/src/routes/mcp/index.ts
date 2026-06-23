@@ -106,6 +106,9 @@ export function registerMcpServer(app: Hono<AppEnv>, deps: McpDeps): void {
       store,
       now: deps.now,
       estimateTokens: deps.estimateTokens,
+      scoreConfig: deps.scoreConfig,
+      recall: deps.recall,
+      ...(deps.embedder !== undefined ? { embedder: deps.embedder } : {}),
     };
 
     let body: unknown;

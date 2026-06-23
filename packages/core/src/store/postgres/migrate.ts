@@ -525,6 +525,25 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim ON memory_jobs (status, created_at, id);
     `,
   },
+  {
+    // docs/14 / docs/12 P8 — hybrid fact retrieval (pg mirror of sqlite v28). pgvector
+    // for the vector leg + a GIN tsvector('simple') index for full-text. 'simple' (not
+    // 'english') so CJK isn't English-stemmed; queried via websearch_to_tsquery (which
+    // tolerates arbitrary user input). The `vector` column is left UN-dimensioned (a
+    // sequential <=> scan, the pg analogue of sqlite-vec brute force) so the migration
+    // needs no runtime embedding dim. NOTE: requires the pgvector extension — present by
+    // default on Supabase (helm's hosted-pg target); a self-hosted PG without it fails
+    // this migration at boot (CREATE EXTENSION), which is the honest signal to install
+    // it. Each statement is `;`-terminated only (the splitStatements contract).
+    version: 27,
+    sql: `
+      CREATE EXTENSION IF NOT EXISTS vector;
+      ALTER TABLE memory_facts ADD COLUMN embedding vector;
+      ALTER TABLE memory_facts ADD COLUMN embedding_model text;
+      ALTER TABLE memory_facts ADD COLUMN embedding_dim integer;
+      CREATE INDEX IF NOT EXISTS idx_memory_facts_fts ON memory_facts USING gin (to_tsvector('simple', fact_text));
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both
@@ -597,7 +616,15 @@ export async function runPgMigrations(db: RawExecutor): Promise<void> {
 // path WITHOUT a running server. `dataDir` omitted => a fresh in-memory database.
 export async function createPgliteDb(dataDir?: string): Promise<PgDb> {
   const { PGlite } = await import("@electric-sql/pglite");
-  const client = dataDir ? new PGlite(dataDir) : new PGlite();
+  // docs/14 — load the pgvector extension so the v27 migration's `vector` column +
+  // the hybrid-recall vector leg work in-process (the contract tests cover the pg
+  // vector path without a server). Hosted Postgres (supabase) ships pgvector too.
+  // PGlite.create() (NOT `new PGlite`) is required so the extension's bundle is
+  // registered before any query — otherwise CREATE EXTENSION can't find vector.control.
+  const { vector } = await import("@electric-sql/pglite/vector");
+  const client = dataDir
+    ? await PGlite.create(dataDir, { extensions: { vector } })
+    : await PGlite.create({ extensions: { vector } });
   const db = drizzlePglite(client, { schema });
   await runPgMigrations(db);
   return Object.assign(db, { $close: () => client.close() });
