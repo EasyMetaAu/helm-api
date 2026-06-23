@@ -200,9 +200,38 @@ export const MemoryLlmSchema = z
 // fact/reflection CRUD to external agents, authed by the SAME API key as /v1.
 // Default OFF (fail-closed): an operator opts in. `.strict()` rejects unknown
 // keys so a typo'd toggle refuses startup rather than silently leaving it off.
+// OAuth 2.1 shim for the MCP endpoint (docs/13). ChatGPT connectors cannot send
+// a raw API key — they require an OAuth authorize/token handshake — so this block
+// turns on a thin authorization server in front of /mcp that maps an OAuth token
+// back to an existing API key's account. Default OFF: it adds a public
+// authorize/token surface, so an operator opts in. The access token is a stateless
+// HS256 JWT signed with a key derived from HELM_OAUTH_ENC_KEY (startup fails if
+// enabled without it). `.strict()` rejects typos.
+export const McpOAuthSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    // Override the public base URL advertised in discovery metadata + token
+    // audience. Leave unset to derive it from X-Forwarded-Proto/Host (or Host).
+    issuer: z.url().optional(),
+    // Access-token lifetime. No refresh grant: ChatGPT re-runs the login when it
+    // expires. Default 30 days. Revocation before expiry = rotate HELM_OAUTH_ENC_KEY.
+    access_token_ttl_seconds: z.number().int().positive().default(2_592_000),
+    // redirect_uri allowlist (prefix match, https only) — guards against the
+    // authorize endpoint being abused as an open redirector. Defaults cover the
+    // ChatGPT connector callback; add localhost for MCP Inspector testing.
+    allowed_redirect_prefixes: z
+      .array(z.url())
+      .default([
+        "https://chatgpt.com/connector/oauth/",
+        "https://chat.openai.com/connector/oauth/",
+      ]),
+  })
+  .strict();
+
 export const MemoryMcpSchema = z
   .object({
     enabled: z.boolean().default(false),
+    oauth: McpOAuthSchema.prefault({}),
   })
   .strict();
 
