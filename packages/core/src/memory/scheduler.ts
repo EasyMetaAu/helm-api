@@ -73,7 +73,10 @@ export interface MemoryWorkerHandle {
 // embedding job for the account so newly written facts get vectors. Gated on
 // runEmbedding (no embedder ⇒ no embedding rows enqueued). The open-job unique index
 // coalesces repeats; a failure just defers embedding to the next write (fail-open).
-async function maybeEnqueueEmbedding(scope: ReflectionScope, deps: MemoryWorkerDeps): Promise<void> {
+async function maybeEnqueueEmbedding(
+  scope: ReflectionScope,
+  deps: MemoryWorkerDeps,
+): Promise<void> {
   if (deps.runEmbedding === undefined) return;
   try {
     await deps.memoryStore.enqueueJob({ type: "embedding", scope: { accountId: scope.accountId } });
