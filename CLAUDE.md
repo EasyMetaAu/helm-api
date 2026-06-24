@@ -107,7 +107,7 @@ pnpm build          # 构建网关 + admin 静态资源
 
 ## Git 工作流
 
-- 在分支上开发，开 PR，**CI 全绿（typecheck + lint + build + 单测 + Docker smoke）方可合并**；e2e（Playwright）在本地跑，不在 CI 门禁内；不直接推 `main`。
+- 在分支上开发，开 PR，**CI 全绿（typecheck + lint + build + 单测 + e2e + Docker smoke）方可合并**；e2e（Playwright）作为独立 CI job 在 PR check 跑（mock 离线确定性，hermetic）；不直接推 `main`。
 - Commit message 结尾带：
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 - 只有用户明确要求时才提交/推送。

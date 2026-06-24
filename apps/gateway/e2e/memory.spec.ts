@@ -59,22 +59,44 @@ test.describe("memory inject + worker", () => {
     expect(body).toContain("[DONE]");
   });
 
-  test("the assembled memory prefix reaches the upstream request", async ({ request }) => {
+  test("a compacted observation of dropped turns reaches the upstream request", async ({
+    request,
+  }) => {
     const threadId = `t-prefix-${Date.now()}`;
 
-    await request.post("/v1/chat/completions", {
-      headers: { ...OPENAI_AUTH, "x-memory-mode": "observe", "x-thread-id": threadId },
-      data: { model: "auto", messages: [{ role: "user", content: "fact: the sky is teal today" }] },
-    });
+    // #230 trailing-reminder model: inject NO LONGER re-injects verbatim recent
+    // turns (the client owns the live window). It injects DISTILLED memory —
+    // facts / observations / reflections — as a trailing <system-reminder>. So to
+    // prove the inject seam end-to-end we must first make the deterministic
+    // observer FORM an observation: cross the size trigger (segment_min_tokens =
+    // 2048), which ALWAYS compacts — memory formation is not economically gated
+    // (compaction-policy.ts). Seed with INJECT-mode turns: compaction is enqueued
+    // on the INJECT path (observe is write-only and never enqueues an observer
+    // job — pure-observe threads defer compaction to idle-flush). Large turns
+    // clear the size threshold.
+    const filler = "lorem ipsum dolor sit amet consectetur ".repeat(90); // ~3.5 KB/turn
+    for (let i = 0; i < 5; i++) {
+      const res = await request.post("/v1/chat/completions", {
+        headers: memHeaders(threadId),
+        data: {
+          model: "auto",
+          messages: [{ role: "user", content: `marker-turn-${i}: ${filler}` }],
+        },
+      });
+      expect(res.status()).toBe(200);
+    }
+    // Worker (250ms interval) drains the observer job + compacts the oldest segment.
+    await new Promise((r) => setTimeout(r, 1500));
 
+    // A fresh single-turn inject request: the observation covers dropped turns that
+    // are NOT in this window, so it is non-redundant and rides upstream as a
+    // trailing <system-reminder>, alongside the verbatim current turn.
     const res = await request.post("/v1/chat/completions", {
       headers: memHeaders(threadId),
-      data: { model: "auto", messages: [{ role: "user", content: "what color is the sky?" }] },
+      data: { model: "auto", messages: [{ role: "user", content: "what did we discuss?" }] },
     });
     expect(res.status()).toBe(200);
 
-    // The gateway forwarded the ASSEMBLED context upstream — the earlier raw turn
-    // is now part of the request (recent-raw layer), ahead of the current turn.
     const upstream = await lastUpstreamRequest(request);
     const contents = (upstream.body.messages ?? [])
       .map((m) => {
@@ -82,8 +104,10 @@ test.describe("memory inject + worker", () => {
         return typeof c === "string" ? c : "";
       })
       .join("\n");
-    expect(contents).toContain("the sky is teal today");
-    expect(contents).toContain("what color is the sky?");
+    // The current turn rides through verbatim; the distilled observation of the
+    // oldest (now dropped) turns is injected alongside it.
+    expect(contents).toContain("what did we discuss?");
+    expect(contents).toContain("marker-turn-0");
   });
 
   test("the background worker drains the enqueued observer job off the request path", async ({
@@ -91,21 +115,26 @@ test.describe("memory inject + worker", () => {
   }) => {
     const threadId = `t-drain-${Date.now()}`;
 
-    // Several inject/observe turns so the observer has >RECENT_KEEP old messages to
-    // compress. Each inject request enqueues an observer job (deduped to one pending).
-    for (let i = 0; i < 4; i++) {
+    // Each turn enqueues an observer job (deduped to one pending) and returns
+    // immediately — compaction happens LATER on the worker, never on the request
+    // path. Seed enough large turns to clear the size trigger so the worker has a
+    // compactable segment.
+    const filler = "the quick brown fox jumps over the lazy dog ".repeat(80); // ~3.5 KB/turn
+    for (let i = 0; i < 5; i++) {
       const res = await request.post("/v1/chat/completions", {
         headers: memHeaders(threadId),
-        data: { model: "auto", messages: [{ role: "user", content: `turn number ${i}` }] },
+        data: {
+          model: "auto",
+          messages: [{ role: "user", content: `drain-turn-${i}: ${filler}` }],
+        },
       });
       expect(res.status()).toBe(200);
     }
 
     // The worker runs on a 250ms interval; give it a few ticks to claim + compress.
-    // We assert indirectly via a fresh inject request: once an observation exists,
-    // the assembled prefix carries the compressed observation text upstream. The
-    // observer's deterministic summary is a role-tagged concatenation of old turns,
-    // so the upstream request should contain an earlier turn's text.
+    // Proof the drain happened OFF the request path: the deterministic observation
+    // exists ONLY after the worker ran, and a later inject request surfaces it (the
+    // enqueuing requests above all returned 200 before any compaction).
     await new Promise((r) => setTimeout(r, 1500));
 
     const res = await request.post("/v1/chat/completions", {
@@ -120,8 +149,8 @@ test.describe("memory inject + worker", () => {
         return typeof c === "string" ? c : "";
       })
       .join("\n");
-    // Earlier turns survived end-to-end (either as recent-raw or compressed obs).
-    expect(contents).toContain("turn number");
+    // The worker-produced observation of the dropped turns reached upstream.
+    expect(contents).toContain("drain-turn-0");
     expect(contents).toContain("final question");
   });
 
