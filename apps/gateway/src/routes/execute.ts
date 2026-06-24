@@ -712,19 +712,51 @@ function rawErrorText(raw: unknown): string {
   }
 }
 
-function isAnthropicRequestShapeError(err: unknown): boolean {
-  if (!(err instanceof UpstreamError) || err.upstreamStatus !== 400) return false;
-  const text = `${err.message} ${rawErrorText(err.providerRaw)}`.toLowerCase();
-  return (
-    text.includes("prompt is too long") ||
-    text.includes("does not support effort level") ||
-    (text.includes("unsupported") && text.includes("effort")) ||
-    (text.includes("output_config") && text.includes("effort"))
-  );
+// Extract the upstream error discriminator. Anthropic nests it as
+// `{type:"error", error:{type, message}}`; OpenAI as `{error:{type, code, message}}`.
+// The wrapper `type:"error"` is ignored — we want the inner classification.
+function upstreamErrorType(raw: unknown): string | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const inner = (raw as { error?: unknown }).error;
+  if (inner !== null && typeof inner === "object") {
+    const t = (inner as { type?: unknown }).type;
+    if (typeof t === "string") return t;
+  }
+  const top = (raw as { type?: unknown }).type;
+  return typeof top === "string" && top !== "error" ? top : null;
 }
 
-function attemptErrorClassOf(err: unknown): string {
-  return isAnthropicRequestShapeError(err) ? "invalid_request" : errorClassOf(err);
+// Human-readable upstream error message (for surfacing to the client verbatim), if
+// the provider nested one under `error.message`.
+function upstreamErrorMessage(raw: unknown): string | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const inner = (raw as { error?: unknown }).error;
+  if (inner !== null && typeof inner === "object") {
+    const m = (inner as { message?: unknown }).message;
+    if (typeof m === "string" && m.length > 0) return m;
+  }
+  return null;
+}
+
+// A DETERMINISTIC request-shape rejection from the upstream: the request body is
+// itself invalid (oversized image, prompt too long, bad param). Re-sending the
+// IDENTICAL body to another candidate is futile — every provider rejects it — and
+// the client owns the fix. Claude Code in particular relies on receiving this 4xx
+// to trigger its own context compaction; burying it behind the fallback chain
+// (synthetic all_providers_failed 502) is exactly what stopped compaction from
+// firing through the gateway. So the executor short-circuits and surfaces it
+// verbatim (see the catch block below). 429 is intentionally NOT here: that is
+// genuine rate-limiting, legitimately retryable on another candidate.
+function isUpstreamRequestRejection(err: unknown): boolean {
+  if (!(err instanceof UpstreamError)) return false;
+  const status = err.upstreamStatus;
+  if (status !== 400 && status !== 413 && status !== 422) return false;
+  if (upstreamErrorType(err.providerRaw) === "invalid_request_error") return true;
+  // 413 is "payload too large" by definition; some providers omit a typed body, so
+  // also honor the unambiguous phrasings real upstreams use for shape errors.
+  if (status === 413) return true;
+  const text = `${err.message} ${rawErrorText(err.providerRaw)}`.toLowerCase();
+  return text.includes("prompt is too long") || text.includes("max allowed size");
 }
 
 // Coerce an already-scrubbed upstream error body into the schema's record|null
@@ -1215,27 +1247,60 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           continue;
         }
 
-        const requestShapeError = isAnthropicRequestShapeError(err);
-        if (!requestShapeError) {
-          // Genuine pre-first-chunk failure: record on the breaker, try next. This row
-          // carries the REAL passthrough telemetry: a failure during nativePassthrough
-          // (UpstreamError) lands HERE just like a chatCompletion failure — the trail
-          // shows the verbatim-forward was attempted on this candidate before it failed.
-          breaker.recordFailure(alias);
-          // Auto-park a subscription account that hit its rate/usage limit. A genuine
-          // (non-`:free`, handled above) 429 on an OAuth alias means the served account
-          // is throttled — signal the gateway to park it so the pool routes around it.
-          // Pure side-channel: the breaker failure + chain advance below are unchanged.
-          if (upstreamStatusOf(err) === 429 && isOAuthSubscriptionAlias(alias)) {
-            onOAuthSubscription429?.(alias);
-          }
+        // Deterministic request-shape rejection (oversized image, prompt too long,
+        // bad param): the body is invalid for EVERY candidate, so do NOT advance the
+        // chain and do NOT fault the breaker (the upstream is healthy — the request is
+        // what's wrong). Surface the upstream's structured error VERBATIM as a 400
+        // invalid_request: Claude Code needs this 4xx to drive its own context
+        // compaction, and burying it behind a fallback (all_providers_failed 502) is
+        // what prevented compaction from firing through the gateway.
+        if (isUpstreamRequestRejection(err)) {
+          const detail = errorDetailOf(err);
+          attempts.push({
+            alias,
+            skipped: false,
+            skip_reason: null,
+            status: "error",
+            error_class: "invalid_request",
+            latency_ms: elapsed(),
+            cost_usd: null,
+            error_detail: detail,
+            ...attemptTelemetry,
+          });
+          return {
+            attempts,
+            final: {
+              status: "error",
+              error: makeHelmError({
+                error_class: "invalid_request",
+                message: upstreamErrorMessage(detail.provider_raw) ?? detail.message,
+                trace_id: req.request_id,
+                provider_raw: detail.provider_raw,
+              }),
+            },
+            body: null,
+            stream: null,
+          };
+        }
+
+        // Genuine pre-first-chunk failure: record on the breaker, try next. This row
+        // carries the REAL passthrough telemetry: a failure during nativePassthrough
+        // (UpstreamError) lands HERE just like a chatCompletion failure — the trail
+        // shows the verbatim-forward was attempted on this candidate before it failed.
+        breaker.recordFailure(alias);
+        // Auto-park a subscription account that hit its rate/usage limit. A genuine
+        // (non-`:free`, handled above) 429 on an OAuth alias means the served account
+        // is throttled — signal the gateway to park it so the pool routes around it.
+        // Pure side-channel: the breaker failure + chain advance below are unchanged.
+        if (upstreamStatusOf(err) === 429 && isOAuthSubscriptionAlias(alias)) {
+          onOAuthSubscription429?.(alias);
         }
         attempts.push({
           alias,
           skipped: false,
           skip_reason: null,
           status: "error",
-          error_class: attemptErrorClassOf(err),
+          error_class: errorClassOf(err),
           latency_ms: elapsed(),
           cost_usd: null,
           error_detail: errorDetailOf(err),
