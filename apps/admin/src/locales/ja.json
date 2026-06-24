@@ -693,6 +693,8 @@
   "Timeout (ms)": "タイムアウト（ミリ秒）",
   "To": "終了",
   "Today": "今日",
+  "Yesterday": "昨日",
+  "vs yesterday": "前日比",
   "tok": "トークン",
   "Token usage": "トークン使用量",
   "Token usage over time": "トークン使用量の推移",

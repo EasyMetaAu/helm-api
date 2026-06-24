@@ -82,7 +82,7 @@ describe('key detail loader', () => {
       .mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 25 });
   });
 
-  it('scopes getStats + listRequests to the key id and the resolved 24h window', async () => {
+  it('scopes getStats + listRequests to the key id and the resolved today window', async () => {
     const now = Date.UTC(2026, 5, 17, 12);
     vi.spyOn(Date, 'now').mockReturnValue(now);
 
@@ -94,12 +94,14 @@ describe('key detail loader', () => {
     // Both reads are scoped to the key.
     expect(mocks.getStats.mock.calls[0]?.[0]).toMatchObject({ key_id: 'k1' });
     expect(mocks.listRequests.mock.calls[0]?.[0]).toMatchObject({ keyId: 'k1', page: 1 });
-    // Default 24h window: start = now - 24h, end = now.
+    // Default 'today' window: start = local midnight (TZ-independent recompute), end = now.
+    const midnight = new Date(now);
+    midnight.setHours(0, 0, 0, 0);
     expect(mocks.getStats.mock.calls[0]?.[0]).toMatchObject({
-      start: now - 86_400_000,
+      start: midnight.getTime(),
       end: now,
     });
-    expect((result as { filters: KeyDetailFilters }).filters.range).toBe('24h');
+    expect((result as { filters: KeyDetailFilters }).filters.range).toBe('today');
   });
 
   it('resolves a custom date range to [midnight(start), midnight(end)+1day)', async () => {
@@ -160,15 +162,17 @@ function requestItem(traceId: string): RequestListItem {
   };
 }
 
-function pageData(over: {
-  key?: ApiKeyView;
-  requests?: RequestsPage;
-  filters?: KeyDetailFilters;
-} = {}) {
+function pageData(
+  over: {
+    key?: ApiKeyView;
+    requests?: RequestsPage;
+    filters?: KeyDetailFilters;
+  } = {},
+) {
   return {
     key: over.key ?? keyView(),
     keyId: 'k1',
-    filters: over.filters ?? ({ range: '24h', page: 1 } as KeyDetailFilters),
+    filters: over.filters ?? ({ range: 'today', page: 1 } as KeyDetailFilters),
     bucket: 'hour' as const,
     // Empty aggregate → charts render their empty-state, LayerChart never mounts.
     agg: mocks.emptyStats,

@@ -693,6 +693,8 @@
   "Timeout (ms)": "Timeout (ms)",
   "To": "To",
   "Today": "Today",
+  "Yesterday": "Yesterday",
+  "vs yesterday": "vs yesterday",
   "tok": "tok",
   "Token usage": "Token usage",
   "Token usage over time": "Token usage over time",

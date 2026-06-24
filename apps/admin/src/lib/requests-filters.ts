@@ -6,9 +6,11 @@
 
 import type { RequestListItem } from '$lib/api/requests.js';
 
-// Date-range presets exposed in the UI. The window is resolved to absolute epoch
-// ms in the loader (client-local time) so the gateway stays timezone-agnostic.
-export const RANGE_KEYS = ['all', 'today', '1h', '6h', '24h', '7d', '30d'] as const;
+// Date-range presets. The window is resolved to absolute epoch ms in the loader
+// (client-local time) so the gateway stays timezone-agnostic. The UI offers only
+// the calendar-day presets (today/yesterday/7d/30d/all — see RangeFilter.svelte);
+// the rolling 1h/6h/24h keys are retained so old bookmarks still resolve.
+export const RANGE_KEYS = ['all', 'today', 'yesterday', '7d', '30d', '1h', '6h', '24h'] as const;
 export type RangeKey = (typeof RANGE_KEYS)[number];
 
 // Rows-per-page choices offered by the list pager. The backend clamps to [1, 200]
@@ -26,10 +28,10 @@ export interface RequestsFilters {
   pageSize: number;
 }
 
-// The list defaults to the last 24 hours (a live ops view cares about recent
-// traffic) — NOT 'all'. So '24h' is the "clean URL" range (omitted from the query),
-// and 'all' must be requested explicitly (?range=all).
-export const DEFAULT_RANGE: RangeKey = '24h';
+// The list defaults to TODAY (since local midnight) — the calendar-day view the
+// dashboard is built around, NOT 'all'. So 'today' is the "clean URL" range
+// (omitted from the query), and anything else (incl. 'all') is written explicitly.
+export const DEFAULT_RANGE: RangeKey = 'today';
 
 export const DEFAULT_FILTERS: RequestsFilters = {
   range: DEFAULT_RANGE,
@@ -110,6 +112,16 @@ export function resolveWindow(range: RangeKey, nowMs: number): { start?: number;
       const d = new Date(nowMs);
       d.setHours(0, 0, 0, 0);
       return { start: d.getTime() };
+    }
+    case 'yesterday': {
+      // The full previous local day: [yesterday midnight, today midnight). The
+      // only preset with a CLOSED end — it must not bleed into today. setDate
+      // steps the day (DST-correct), not a flat −DAY_MS.
+      const d = new Date(nowMs);
+      d.setHours(0, 0, 0, 0);
+      const end = d.getTime();
+      d.setDate(d.getDate() - 1);
+      return { start: d.getTime(), end };
     }
     case '1h':
       return { start: nowMs - HOUR_MS };

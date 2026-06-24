@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-24 · 仪表板时间筛选改自然日预设 + 「对比昨天」增量（admin UI；对应 docs/04 遥测展示）
+
+- **背景**：用户（Lukin）要把共享 `RangeFilter` 从滚动窗口（1h/6h/24h/7d/30d/全部）改成**自然日语义**——今天 / 昨天 / 近7天 / 近30天 / 全部，默认今天。1h/6h 对其无意义，核心诉求是**逐日汇总与逐日对比**。三处共用此组件：dashboard 概览、requests 列表筛选栏、key-detail 用量。
+- **决定**：① UI 砍掉 1h/6h/24h 三个滚动按钮，但 `RANGE_KEYS` 仍保留它们（旧书签 `?range=24h` 仍能解析，只是不再渲染成按钮——零破坏迁移）；② 默认值三页统一 `24h`→`today`（`DEFAULT_RANGE`/`KEY_DETAIL_DEFAULT_RANGE`/dashboard `parseRange` 兜底/`HOME_DEFAULT_RANGE`）；③ **逐日对比复用既有按天趋势图**（`trendBucketForRange` 对 7d/30d/all 已 day-bucket，每天一个点即对比），**不另造对比面板**（YAGNI）。
+- **`yesterday` 是首个「闭合窗口」预设**（`[昨天0点, 今天0点)`，不能漏进今天）。由此抓出 key-detail 的潜伏 bug：`resolveKeyDetailWindow` 预设分支**硬把 end 覆盖成 now**，会让"昨天"含进今天数据 → 改 `end: w.end ?? nowMs`（滚动/today 仍开口到 now，仅 yesterday 守闭口）。
+- **「对比昨天」delta**：仅 `range=today` 显示，基准用**诚实的"昨天同一时刻"窗**（`resolveTodayComparisonWindow`：昨天午夜 + 今天已过时长）——今天半天 vs 昨天整天必然显示为暴跌，故把昨天截到同一时点做 pace-vs-pace。`pctDelta` 基准为 0 → 返回 `null`（不显假 +100%）。dashboard 在 Requests/Spend/Total/Input/Output/Cached **六张量级卡片**下挂 `↑/↓N%` **中性灰**标（**不对成本上涨着红色**，避免道德化歧义）；loader 多拉一次 `getStats(昨天窗)`，**fail-soft**（出错则无 delta，卡片照常）。
+- **i18n**：`Today`/`All`/`Date range` 五语早已有；仅补 `Yesterday`（昨天/昨日/어제）+ `vs yesterday`（对比昨天/前日比/어제 대비）五语，并纳入 `dashboard-locales.test` 守卫（非英语 locale 必须 ≠ 英文源）。
+- **TDD + 验证**：红→绿；改/加 `requests-filters`/`key-detail-filters`/`dashboard-chart`/`RangeFilter` 四组单测 + key-detail loader/page 默认值。**admin 466 单测全绿、svelte-check 0/0、prettier 已格式化**。改动全在 `apps/admin`（不碰 core/gateway，符合原则 1 网关与 UI 解耦）。工作树未提交（待用户）。
+
 ## 2026-06-24 · 测试覆盖率补强至「边际收益 0」+ 诚实化单测指标（CLAUDE.md 开发流程「覆盖率到边际效应为止」）
 
 - **背景**：`main`(v0.21.20) 实测单测覆盖率**低于仓库自配阈值**（stmts/lines 89.11% < 90、branches 84.35% < 85、functions 93.01% < 93）——CI「单测」门禁未带 `--coverage` 故长期带债。4520 未覆盖行里 ~50% 是 **e2e 已覆盖的启动胶水 + admin UI 路由**，逐行单测边际收益≈0。
@@ -31,29 +40,13 @@
 - **类型涟漪**：`RuntimeSettings` 加必填字段 → admin 客户端 `settings.ts`（与 schema **有意分叉**，如 archive 默认 true）+ svelte `DEFAULTS` + 三语言 i18n（en/zh-hans/ja）+ 两处全量等值断言测试（core `runtime-settings.test`、admin `settings.test`）同步加 `vacuum_enabled/vacuum_hour`。
 - **验证**：typecheck（shared/core/gateway）+ lint（仅 pre-existing `oauth.ts` warning）+ 单测（schema/auto-vacuum/local-volume-sink/settings/cleanup/gateway 共 146 例绿）+ `pnpm build`（admin 静态含 settings 页 + 三语言 chunk）全绿。分支 `worktree-vacuum-and-archive-fixes`，**未提交**（待用户）。**该功能未部署**——box 仍可用既有手动「压缩数据库」按钮一次性回收那 1.77GB（部署新版后才有定时 VACUUM）。
 
-## 2026-06-23 · 记忆深度召回 = 混合检索（落地 docs/12 P8）+ `memory_recall` MCP 工具（docs/14；原则 1/3/4）
-
-- **背景/范围**：用户要 MCP 上「深度历史召回」（"我们讨论过什么"）。现 `memory_search` 是对蒸馏 `fact_text` 的 `LIKE`——无相关性排序、**无跨语言**（`成本`≠`cost`）。决定**落地 docs/12 已 spec 但 deferred 的 P8**，并新增第 7 个 MCP 工具 `memory_recall` 暴露之。**检索单元 = `memory_facts`**（有 owner_id+scope，跨会话；对齐 docs/12 P8 与 docs/13「raw/observation 不入管理面」）；observations/reflections **不入索引**（完整原始历史靠 fact 的 `sourceObservationRange` 溯源链，非主搜索面，留作后续）。
-- **架构**：三确定性信号各出一个 ranked list，**RRF(k=60) 融合**：① 向量（sqlite-vec / pgvector，方言封在适配器）② 全文（FTS5 **trigram** / tsvector）③ forgetting-score（衰减的 fact 检索也排后）。**双语**：多语言 embedding 跨 zh↔en，trigram 抓 CJK+拉丁字面（unicode61 不切中文），RRF 融合两者短板。不变量同 P8：account-scoped + `expired_at IS NULL`、**fail-open**（embed/向量失败→退 FTS+score；全失败→空结果不 5xx）、召回结果走 reinforcement bump。
-- **embedding 接入**：core 框架无关 → 注入 `Embedder` 端口；gateway 实现调 OpenAI 兼容 `/v1/embeddings`；**后台**（新 `embedding` job，复用 worker；`insertFactsReconciled` 返回的 `insertedIds` 即待嵌入行）；唯一同步嵌入是 `memory_recall` 的一次 query 向量。config `memory.llm.embedding_model`+`embedding_dimensions`（**缺省→向量腿关、退 FTS+score**）；默认多语言选型 bge-m3(1024d) 自托管。
-- **配置**：`memory.forgetting.facts_retrieval{ enabled(默认 false), top_k(10) }`（沿用 docs/12 命名）；RRF k、各信号权重、tokenizer 皆**代码常量**（无撒谎旋钮）。`.strict()` fail-closed。
-- **关键坑（sqlite-vec 已实证可用：v0.1.9 darwin-arm64 prebuilt；本机 Node 25.8.2 / better-sqlite3 12.10.0 / SQLite 3.53.1）**：
-  1. **vec0 主键须 BigInt 绑定**——better-sqlite3 把 JS `number` 当 float 传给 vec0 → `Only integers are allowed for primary key`。存 `fact_rowid` 用 `BigInt`。
-  2. **KNN 语法** `WHERE emb MATCH ? AND k = N ORDER BY distance`；向量绑定 `new Uint8Array(Float32Array.buffer)`。
-  3. **`loadExtension` 今天全仓未调用**——需在 `runMigrations` + `createSqliteDb` **两处**连接开启时加 sqlite-vec 加载 hook；加载失败 **fail-open**（FTS+score 仍工作）绝不崩启动。`sqlite-vec` 已加进 `packages/core` deps（预编译二进制，无需进 root `onlyBuiltDependencies`）。
-  4. FTS5 **external-content** 表（`content='memory_facts'`）只存倒排不复制文本 + AI/AD/AU 触发器同步 + `'rebuild'` 回填。
-  5. **pg `splitStatements` 按 `;` 切**——DDL 仅终止符用 `;`；pgvector 需 `CREATE EXTENSION vector`，PGlite 0.4.6 自带（`@electric-sql/pglite/vector`，测试可覆盖 pg 向量路径）。
-- **迁移版本**：sqlite 当前 max=27 → 新 **v28**；postgres 当前 max=26 → 新 **v27**（pg ledger 比 sqlite 偏移 1）。
-- **`searchFacts?` 挂载**：端口加**可选** `?` 方法；**不**进 `REQUIRED_METHODS`/`MemoryAdminStore`（该 gate 被 admin 路由共用，会 fail-close 整个 `/mcp` 挂载）——`memory_recall` handler **null-check** 降级到 `listFacts({search})`。`bumpReferences` 加可选 `factIds`（向后兼容）。
-- **T6/T7 关键坑（实现中实证）**：① **PGlite vector 扩展须 `PGlite.create({extensions:{vector}})`，不能 `new PGlite()`**（后者不注册 extension bundle → `CREATE EXTENSION vector` 报 `vector.control` not found）；② postgres 向量列用**无维度 `vector`**（顺序 `<=>` 扫描，免运行时 dim），但 v27 `CREATE EXTENSION vector` **要求部署装了 pgvector**（supabase 默认有；自建 PG 无则 boot 失败——诚实信号去装）；③ gateway **无 `/v1/embeddings` 路由、`ProviderClient` 无 embeddings 方法** → embedder（`apps/gateway/src/memory-embedder.ts`）直连 `{provider.base_url}/embeddings`（OpenAI 兼容），按 `embedding_model` 的 provider 前缀从 `config.providers` 解析 base_url + api_key_env；④ 迁移 fixture 测试须预标记新版本（sqlite **v28** / pg **v27**）——不含 memory_facts 的最小 fixture 否则 ALTER 失败（sqlite 3 处、pg 2 处已补）。
-- **进度：全部完成（阶段2 端到端）**。docs/14；config（`facts_retrieval`/`embedding_*`/`embedding` job）；RRF 核心；sqlite 适配器（v28：FTS5-trigram + sqlite-vec vec0 + `searchFacts`/`setFactEmbeddings`/`listFactsNeedingEmbedding` + `bumpReferences.factIds`）；postgres 适配器（v27：tsvector GIN + pgvector + 同方法）；embedder + embedding job + scheduler dispatch/enqueue；`memory_recall` MCP 工具 + 接线 + fail-open。**验证**：`typecheck -r` 全绿；core **2568** 测试绿（含 sqlite/pg searchFacts CJK+向量+RRF、embedding-job、mcp fail-open/bump、迁移 fixture）；gateway mcp 17 + embedder 5 绿；lint 我方文件绿（`oauth.ts:312` pre-existing）。分支 `helm-memory-deep-recall`，**未提交**（待用户）。运行时：`memory.forgetting.facts_retrieval.enabled:true` 开 FTS+score；再配 `memory.llm.embedding_model`+`embedding_dimensions` 点亮向量腿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-23 · 记忆深度召回 = 混合检索（docs/12 P8）+ `memory_recall` MCP 工具（docs/14）**：检索单元=`memory_facts`（account-scoped 跨会话）；三信号 **RRF(k=60)** 融合——向量（sqlite-vec/pgvector）+ 全文（FTS5 trigram/tsvector）+ forgetting-score；双语跨 zh↔en；**fail-open**（全失败空结果不 5xx）。迁移 sqlite **v28**/pg **v27**。坑：vec0 主键须 `BigInt`；`loadExtension` 须在 migrations+createDb 两处 hook 且失败 fail-open；PGlite 须 `PGlite.create({extensions:{vector}})`；gateway 无 `/v1/embeddings` 故 embedder 直连 provider base_url。config `memory.forgetting.facts_retrieval.enabled` 开 FTS+score，再配 `memory.llm.embedding_model` 点亮向量腿。core 2568 测试绿；分支 `helm-memory-deep-recall`。**已上线 v0.21.19**（见记忆 deep-recall-shipped）。
 - **2026-06-23 · MCP OAuth 2.1 shim（ChatGPT 连接器接入；docs/13）**：`/mcp` 前加薄 OAuth 授权服务器（`routes/mcp/oauth.ts`）把 OAuth token 映射回既有 API key 的 account——**无状态 JWT、无 token/code 表、无迁移**；授权码=60s 签名 JWT（PKCE S256 绑定），access token 默认 30 天无 refresh，签名密钥从既有 `HELM_OAUTH_ENC_KEY` 派生（`memory.mcp.oauth.enabled` 且无 enc key → fail-closed 拒启动）；`mcpAuth` 接受 JWT 或裸 key。天花板：授权码 60s 窗口可重放、token 到期前不可撤销（轮换 enc key 全失效）。`oauth.test.ts` 16 例绿，未部署。
 - **2026-06-22 · Claude 订阅（OAuth）token 成本折算**：admin 对 `anthropic/*` OAuth 池只显 token 数、花费恒 null，因 `pricing.yaml` 无 `anthropic/*` 行（`costOf` 查 catalog 落空→`resolveCostUsd` null）。坑：必须**同时**改 `capabilities.yaml`，否则 `loadCatalog` 用 `EMPTY_CAPABILITIES` 造条目→`context_too_small` 剪掉每个 Claude 请求。用官方 Anthropic 价**含 cache 读写价**；4 个 lane alias 折算价非实付，纯配置无代码改动。
 - **2026-06-22 · Codex 原生 Responses 直通清洗 + fallback reasoning 泄漏修复**：仅对 ChatGPT-account Codex Responses profile 清洗 native body（移除 `max_output_tokens`/`temperature`；`store:false` 删 input item `id/status/phase` + 丢空 reasoning item，保留有 encrypted_content/summary 的）；跨协议 fallback 时 `InternalRequest.thinking` 若为 Responses reasoning history 数组不再作为 provider `thinking` 转发（记 `thinking_history_stripped_for_target`）。`openai-responses.test.ts`/`execute.test.ts` 覆盖。

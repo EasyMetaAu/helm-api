@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   formatTrendTick,
+  pctDelta,
   resolveStatsWindow,
+  resolveTodayComparisonWindow,
   trendAxisTicks,
   trendBucketForRange,
 } from './dashboard-chart.js';
@@ -54,6 +56,27 @@ describe('dashboard chart helpers', () => {
     expect(trendBucketForRange('6h')).toBe('hour');
     expect(trendBucketForRange('24h')).toBe('hour');
     expect(trendBucketForRange('today')).toBe('hour');
+    expect(trendBucketForRange('yesterday')).toBe('hour');
     expect(trendAxisTicks([point(0), point(HOUR)]).map((d) => d.getTime())).toEqual([0, HOUR]);
+  });
+});
+
+describe('today vs yesterday comparison', () => {
+  it('baselines against yesterday up to the same elapsed time (not the full day)', () => {
+    const now = new Date('2026-06-01T15:30:00').getTime();
+    const yMidnight = new Date('2026-05-31T00:00:00').getTime();
+    // Today is 15h30m old; the baseline window is yesterday over the same span.
+    const elapsed = now - new Date('2026-06-01T00:00:00').getTime();
+    expect(resolveTodayComparisonWindow(now)).toEqual({
+      start: yMidnight,
+      end: yMidnight + elapsed,
+    });
+  });
+
+  it('pctDelta rounds the percentage change; null when there is no baseline', () => {
+    expect(pctDelta(120, 100)).toBe(20);
+    expect(pctDelta(80, 100)).toBe(-20);
+    expect(pctDelta(5, 0)).toBeNull(); // no traffic yesterday → no honest delta
+    expect(pctDelta(0, 0)).toBeNull();
   });
 });

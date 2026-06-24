@@ -9,7 +9,7 @@
 
 import { RANGE_KEYS, type RangeKey, resolveWindow } from './requests-filters.js';
 
-export const KEY_DETAIL_DEFAULT_RANGE: RangeKey = '24h';
+export const KEY_DETAIL_DEFAULT_RANGE: RangeKey = 'today';
 
 const DAY_MS = 86_400_000;
 // A 2-day window or shorter reads better hour-bucketed; longer → day buckets.
@@ -101,7 +101,9 @@ export function resolveKeyDetailWindow(
   }
   if (f.range === 'all') return { start: 0, end: nowMs };
   const w = resolveWindow(f.range, nowMs);
-  return { start: w.start ?? 0, end: nowMs };
+  // Honor a CLOSED preset end (yesterday) so it doesn't bleed into today; the
+  // rolling/today presets leave end open → now.
+  return { start: w.start ?? 0, end: w.end ?? nowMs };
 }
 
 // Trend bucket granularity for a resolved window: hourly for short spans, daily

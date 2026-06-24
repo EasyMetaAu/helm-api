@@ -16,11 +16,12 @@
     label?: string;
   } = $props();
 
-  // The numeric labels are language-neutral literals; only "All" is translated.
+  // Calendar-day presets: aggregate by natural day, not a rolling now−N window.
+  // The numeric spans (7d/30d) stay language-neutral literals; the word labels
+  // (Today/Yesterday/All) are translated via their English key.
   const OPTIONS: { key: RangeKey; label: string }[] = [
-    { key: '1h', label: '1h' },
-    { key: '6h', label: '6h' },
-    { key: '24h', label: '24h' },
+    { key: 'today', label: 'Today' },
+    { key: 'yesterday', label: 'Yesterday' },
     { key: '7d', label: '7d' },
     { key: '30d', label: '30d' },
     { key: 'all', label: 'All' },
@@ -36,7 +37,7 @@
       aria-pressed={value === opt.key}
       onclick={() => onChange(opt.key)}
     >
-      {opt.key === 'all' ? $t('All') : opt.label}
+      {opt.key === '7d' || opt.key === '30d' ? opt.label : $t(opt.label)}
     </button>
   {/each}
 </div>

@@ -13,11 +13,37 @@ export function resolveStatsWindow(
 }
 
 // Short windows want hourly shape; longer/all-time windows should be summarized by
-// day so the x-axis answers "which date did this aggregate come from?"
+// day so the x-axis answers "which date did this aggregate come from?" A single
+// calendar day (today/yesterday) reads best hour-bucketed.
 export function trendBucketForRange(range: RangeKey): TrendBucket {
-  return range === '1h' || range === '6h' || range === '24h' || range === 'today'
+  return range === '1h' ||
+    range === '6h' ||
+    range === '24h' ||
+    range === 'today' ||
+    range === 'yesterday'
     ? 'hour'
     : 'day';
+}
+
+// Same-time-yesterday baseline for the "today" delta: yesterday from local
+// midnight up to the SAME elapsed offset as today-so-far. Comparing a partial day
+// against a full one would always read as a drop, so we cut yesterday at the same
+// point in the day. DST: yesterday midnight via setDate; the elapsed offset is
+// added as flat ms (a DST jump shifts the cutoff by ≤1h — fine for a glance).
+export function resolveTodayComparisonWindow(nowMs: number): { start: number; end: number } {
+  const d = new Date(nowMs);
+  d.setHours(0, 0, 0, 0);
+  const elapsed = nowMs - d.getTime();
+  d.setDate(d.getDate() - 1);
+  const start = d.getTime();
+  return { start, end: start + elapsed };
+}
+
+// Percentage change current-vs-baseline, rounded. null when there is no baseline
+// (yesterday had zero) — an honest "no comparison" instead of a fake +∞/+100%.
+export function pctDelta(current: number, baseline: number): number | null {
+  if (!(baseline > 0)) return null;
+  return Math.round(((current - baseline) / baseline) * 100);
 }
 
 export function trendAxisTicks<T extends TrendPointLike>(

@@ -693,6 +693,8 @@
   "Timeout (ms)": "超时（毫秒）",
   "To": "结束",
   "Today": "今天",
+  "Yesterday": "昨天",
+  "vs yesterday": "对比昨天",
   "tok": "词元",
   "Token usage": "Token 用量",
   "Token usage over time": "Token 用量趋势",

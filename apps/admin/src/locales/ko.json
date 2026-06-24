@@ -690,6 +690,8 @@
   "Timeout (ms)": "타임아웃 (ms)",
   "To": "종료",
   "Today": "오늘",
+  "Yesterday": "어제",
+  "vs yesterday": "어제 대비",
   "tok": "토큰",
   "Token usage": "토큰 사용량",
   "Token usage over time": "토큰 사용량 추이",

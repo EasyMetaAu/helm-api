@@ -34,6 +34,9 @@
       bucket: TrendBucket;
       stats: Stats;
       agg: DashboardStats;
+      // "vs yesterday" % deltas, keyed by card; null entry = no baseline. Whole
+      // object null unless the TODAY view is active (set by the loader).
+      compare: Record<string, number | null> | null;
     };
   } = $props();
 
@@ -101,10 +104,10 @@
   ];
 
   // The dashboard window lives in the URL (?range=…) so the loader re-fetches and
-  // the view is shareable / back-button friendly — '24h' is the default, written
+  // the view is shareable / back-button friendly — 'today' is the default, written
   // as a clean URL (no query) to match the loader's fallback. The button row is the
   // shared RangeFilter (same control as the request-list filter bar).
-  const HOME_DEFAULT_RANGE: RangeKey = '24h';
+  const HOME_DEFAULT_RANGE: RangeKey = 'today';
 
   function selectRange(next: RangeKey): void {
     const search = next === HOME_DEFAULT_RANGE ? '' : `range=${next}`;
@@ -201,11 +204,22 @@
     <RangeFilter value={data.range} onChange={selectRange} />
   </div>
 
+  <!-- "vs yesterday" delta, shown under a volume card on the TODAY view. null pct
+       (no baseline) or no comparison loaded → renders nothing. -->
+  {#snippet deltaBadge(pct: number | null)}
+    {#if pct !== null}
+      <div class="mt-0.5 text-xs text-slate-400">
+        {pct >= 0 ? '↑' : '↓'}{Math.abs(pct)}% {$t('vs yesterday')}
+      </div>
+    {/if}
+  {/snippet}
+
   <!-- Stat cards -->
   <div class="grid grid-cols-2 gap-3 lg:grid-cols-5 lg:gap-4">
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Requests')}</div>
       <div class="mt-1 text-2xl font-semibold text-slate-900">{formatCount(stats.total)}</div>
+      {@render deltaBadge(data.compare?.requests ?? null)}
     </div>
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
@@ -242,6 +256,7 @@
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">{$t('Spend')}</div>
       <div class="mt-1 text-2xl font-semibold text-slate-900">{formatUsd(stats.totalCost)}</div>
+      {@render deltaBadge(data.compare?.totalCost ?? null)}
     </div>
   </div>
 
@@ -255,6 +270,7 @@
       <div class="mt-1 text-2xl font-semibold text-slate-900">
         {formatTokens(stats.totalTokens)}
       </div>
+      {@render deltaBadge(data.compare?.totalTokens ?? null)}
     </div>
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
@@ -263,6 +279,7 @@
       <div class="mt-1 text-2xl font-semibold text-slate-900">
         {formatTokens(stats.inputTokens)}
       </div>
+      {@render deltaBadge(data.compare?.inputTokens ?? null)}
     </div>
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
@@ -271,6 +288,7 @@
       <div class="mt-1 text-2xl font-semibold text-slate-900">
         {formatTokens(stats.outputTokens)}
       </div>
+      {@render deltaBadge(data.compare?.outputTokens ?? null)}
     </div>
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
@@ -279,6 +297,7 @@
       <div class="mt-1 text-2xl font-semibold text-slate-900">
         {formatTokens(stats.cachedTokens)}
       </div>
+      {@render deltaBadge(data.compare?.cachedTokens ?? null)}
     </div>
   </div>
 

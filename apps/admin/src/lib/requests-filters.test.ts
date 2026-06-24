@@ -34,8 +34,8 @@ describe('parseFilters', () => {
     expect(parseFilters(new URLSearchParams('page=-4')).page).toBe(1);
   });
 
-  it('defaults the range to 24h (not all) for a clean URL', () => {
-    expect(parseFilters(new URLSearchParams()).range).toBe('24h');
+  it('defaults the range to today (not all) for a clean URL', () => {
+    expect(parseFilters(new URLSearchParams()).range).toBe('today');
     // 'all' is only reached when asked for explicitly.
     expect(parseFilters(new URLSearchParams('range=all')).range).toBe('all');
   });
@@ -54,15 +54,16 @@ describe('parseFilters', () => {
 describe('filtersToSearch', () => {
   it('omits defaults so clean URLs stay clean', () => {
     expect(filtersToSearch(DEFAULT_FILTERS)).toBe('');
-    expect(filtersToSearch({ range: '24h', page: 1, pageSize: 50, lane: '   ' })).toBe('');
+    expect(filtersToSearch({ range: 'today', page: 1, pageSize: 50, lane: '   ' })).toBe('');
   });
 
-  it('writes range=all explicitly since 24h is now the default', () => {
+  it('writes a non-default range explicitly since today is now the default', () => {
     expect(filtersToSearch({ range: 'all', page: 1, pageSize: 50 })).toBe('range=all');
+    expect(filtersToSearch({ range: 'yesterday', page: 1, pageSize: 50 })).toBe('range=yesterday');
   });
 
   it('writes a non-default page size', () => {
-    expect(filtersToSearch({ range: '24h', page: 1, pageSize: 100 })).toBe('pageSize=100');
+    expect(filtersToSearch({ range: 'today', page: 1, pageSize: 100 })).toBe('pageSize=100');
   });
 
   it('round-trips through parseFilters', () => {
@@ -89,6 +90,12 @@ describe('resolveWindow', () => {
   it('today → since local midnight, open end', () => {
     const midnight = new Date('2026-06-01T00:00:00').getTime();
     expect(resolveWindow('today', now)).toEqual({ start: midnight });
+  });
+
+  it('yesterday → the full previous local day, closed end', () => {
+    const start = new Date('2026-05-31T00:00:00').getTime();
+    const end = new Date('2026-06-01T00:00:00').getTime();
+    expect(resolveWindow('yesterday', now)).toEqual({ start, end });
   });
 
   it('rolling windows are now − N days', () => {
