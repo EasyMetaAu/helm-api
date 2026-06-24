@@ -31,6 +31,14 @@ client.chat.completions.create(model="auto", messages=[...])   # Helm classifies
 
 Change the model behind a lane? Edit one YAML line — or click in the dashboard. Your apps never notice.
 
+<div align="center">
+
+[![Helm dashboard — live traffic, token usage by model, spend, and recent routing decisions](docs/assets/screenshots/01-dashboard.png)](docs/assets/screenshots/01-dashboard.png)
+
+<sub>The dashboard — live traffic, token usage by model, spend, and the most recent routing decisions.</sub>
+
+</div>
+
 ## Quickstart
 
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/), or **Node ≥ 22** + **pnpm 10** to build from source.
@@ -69,11 +77,33 @@ docker compose logs helm | grep -i "root API key"
 | 🔐 | **OAuth subscriptions** | Route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, all hot-reloaded. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
 | 🔑 | **Keys with teeth** | Mandatory auth; keys stored as SHA-256 hashes only. Per key: lane whitelist, custom-model permission, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, memory mode. Revoke softly, then delete permanently. |
 | 🧠 | **Memory middleware** | On by default: remembered context is injected before routing as a trailing turn; a background worker compresses and consolidates — compaction is **auto-adaptive and zero-config** (prices and context windows resolve from the model catalog; size / idle / context-pressure triggers). Summarize/merge default to deterministic local logic, with an **opt-in LLM path** (`config.memory.llm`, off by default). A forgetting/tiering layer (decay, reinforcement, retention) keeps it honest. Opt out per key or per request (`x-memory-mode: off`). |
-| 📊 | **Total observability** | A redacted decision record per request — classifier, policy, lane, every provider attempt, latency, fallbacks, cost. Verbatim payload capture to a separate table (on by default, 30-day retention). An editable **Retry** button replays any captured request in its own protocol. |
+| 📊 | **Total observability** | A redacted decision record per request — classifier, policy, lane, every provider attempt, latency, fallbacks, cost. Verbatim payload capture to a separate table (on by default, 30-day retention). A payload inspector reads long fields fullscreen, previews inline images, and an editable **Retry** button replays any captured request in its own protocol. |
 | 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic: overview, key CRUD, lane/policy/classifier editors, system settings, drill-down request log. Edits **write back to `config/*.yaml`** (comment-preserving, atomic) and rebind live — no restart, and they survive one. Five languages. |
 | 💾 | **Storage** | SQLite by default (one local file). Postgres / Supabase behind the same Store-port abstraction — switch with one env var. |
 
 **Roadmap:** Account/customer billing is intentionally out of scope. See [09 Roadmap](docs/09-roadmap.md).
+
+## Inside the dashboard
+
+The gateway ships a SvelteKit console at `/admin` (HTTP Basic, five languages). Everything here is live — edits write back to `config/*.yaml` and rebind on the next request, no restart.
+
+**Every request, fully explained.** Open any request to follow the whole trail: which layer classified it, the policy that applied, the lane's full candidate chain, each provider actually tried, and the cost split down to cached tokens.
+
+[![Request trail — classifier verdict, lane candidate chain, provider attempts, and cost breakdown](docs/assets/screenshots/03-request-trail.png)](docs/assets/screenshots/03-request-trail.png)
+
+**A payload inspector built for debugging.** With verbatim capture on, the same page loads the full request and response bodies as a collapsible tree (or Formatted / Raw):
+
+- **Read anything.** Pop any oversized field — a giant system prompt, a tool schema, a continued-session summary — into a fullscreen, copyable reader instead of scrolling a wrapped cell.
+- **See the multimedia.** Inline base64 or remote images render in place, with zoom, fit-to-window, and open-in-new-tab.
+- **Edit and replay.** Hit **Retry**, tweak the body, and re-send it in its original protocol (OpenAI Chat, Anthropic, Responses, or Gemini) as an isolated, newly-traced debug run.
+
+**Pool your subscriptions.** Route Claude Pro/Max, ChatGPT Codex, and GitHub Copilot logins as backends — several accounts per provider, each with its own model curation, egress proxy, priority, and live quota.
+
+[![Subscription providers — pooled OAuth accounts with per-account quota, proxy, schedule, and status](docs/assets/screenshots/06-providers.png)](docs/assets/screenshots/06-providers.png)
+
+**Routing is just config.** Each lane is a primary model plus an ordered fallback chain — reorder, swap, or constrain it from the UI or the YAML.
+
+[![Lanes editor — primary model and ordered fallback chain per lane](docs/assets/screenshots/04-lanes.png)](docs/assets/screenshots/04-lanes.png)
 
 ## Two failure disciplines
 
@@ -264,6 +294,8 @@ Start at [`docs/README.md`](docs/README.md). For a visual tour of the pipeline, 
 [10 Deployment](docs/10-deployment.md) ·
 [11 Admin UI](docs/11-admin-ui.md) ·
 [12 Memory Forgetting & Tiering](docs/12-memory-forgetting-and-tiering.md) ·
+[13 Memory Admin & MCP](docs/13-memory-admin-and-mcp.md) ·
+[14 Memory Deep Recall](docs/14-memory-deep-recall.md) ·
 [Protocol Compatibility](docs/protocol-compatibility.md)
 
 ## Status

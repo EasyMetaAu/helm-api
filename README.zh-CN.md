@@ -31,6 +31,14 @@ client.chat.completions.create(model="auto", messages=[...])   # Helm 负责分�
 
 要换 lane 背后的模型？改一行 YAML，或在面板里点一下。应用毫无感知。
 
+<div align="center">
+
+[![Helm 管理面板 —— 实时流量、按模型的 token 用量、花费与最近的路由决策](docs/assets/screenshots/01-dashboard.png)](docs/assets/screenshots/01-dashboard.png)
+
+<sub>管理面板 —— 实时流量、按模型的 token 用量、花费，以及最近的路由决策。</sub>
+
+</div>
+
 ## 快速上手
 
 **前置条件：** [Docker](https://docs.docker.com/get-docker/)；或 **Node ≥ 22** + **pnpm 10** 从源码构建。
@@ -69,11 +77,33 @@ docker compose logs helm | grep -i "root API key"
 | 🔐 | **OAuth 订阅** | 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的**订阅**当后端来路由——多账号组池，逐账号做模型策展 / 出口代理 / 调度，全部热重载。*（可选功能，先读 [ToS 警告](#oauth-订阅类供应商claude-promaxchatgpt-codexgithub-copilot)。）* |
 | 🔑 | **带约束力的 key** | 强制鉴权；key 只存 SHA-256 哈希。每把 key 可设：lane 白名单、自定义模型权限、RPM/TPM 限流、用量预算（降级或拒绝）、并发上限、记忆模式。先软吊销，再永久删除。 |
 | 🧠 | **Memory 中间件** | 默认开启：路由前把记忆作为一轮追加消息注入上下文；后台 worker 负责压缩与归并——压缩**全自动、零配置**（价格与上下文窗口取自模型目录；按体量 / 空闲 / 上下文压力三种时机触发）。摘要与归并默认走确定性的本地逻辑，另有**可选的 LLM 路径**（`config.memory.llm`，默认关闭）；遗忘/分层机制（衰减、强化、保留期）防止记忆膨胀。可按 key 或按请求关闭（`x-memory-mode: off`）。 |
-| 📊 | **全程可观测** | 每个请求一条脱敏决策记录——分类、策略、lane、每次供应商尝试、延迟、兜底、成本。正文逐字捕获单独存表（默认开，保留 30 天）。可编辑的 **Retry** 按钮能按原协议重放任何已捕获的请求。 |
+| 📊 | **全程可观测** | 每个请求一条脱敏决策记录——分类、策略、lane、每次供应商尝试、延迟、兜底、成本。正文逐字捕获单独存表（默认开，保留 30 天）。正文检查器支持长字段全屏阅读、内联图片预览，可编辑的 **Retry** 按钮能按原协议重放任何已捕获的请求。 |
 | 🖥️ | **管理面板** | `/admin` 上的 SvelteKit SPA，HTTP Basic 把守：概览、key 增删改、lane / 策略 / 分类器编辑器、系统设置、可下钻的请求日志。编辑会**写回 `config/*.yaml`**（保留注释、原子写入）并实时重绑——无需重启，重启也不丢。支持 5 种语言。 |
 | 💾 | **存储** | 默认 SQLite（一个本地文件）。Postgres / Supabase 走同一套 Store 端口抽象——改一个环境变量即可切换。 |
 
 **路线图：** 账户 / 客户级计费明确不在范围内。详见 [09 路线图](docs/09-roadmap.md)。
+
+## 面板里都有什么
+
+网关自带一个 SvelteKit 控制台，挂在 `/admin`（HTTP Basic，5 种语言）。这里的一切都是实时的——改动写回 `config/*.yaml`，下一个请求即生效，无需重启。
+
+**每一个请求，都讲得清。** 点开任意请求，跟着完整链路走一遍：哪一层做的分类、命中了哪条策略、这条 lane 的完整候选链、实际尝试了哪些供应商，以及细到缓存 token 的成本拆分。
+
+[![请求链路 —— 分类裁决、lane 候选链、供应商尝试与成本拆分](docs/assets/screenshots/03-request-trail.png)](docs/assets/screenshots/03-request-trail.png)
+
+**一个为调试而生的正文检查器。** 开启逐字捕获后，同一页还会加载完整的请求 / 响应正文，以可折叠的树形（也可切「格式化」或「原始」）呈现：
+
+- **再长的内容，一眼看全。** 把任意超长字段——庞大的 system prompt、工具 schema、跨会话续传的摘要——弹成全屏、可一键复制的阅读窗，不必在换行挤压的小格子里翻找。
+- **多媒体直接看。** 内联的 base64 或远程图片就地渲染，支持缩放、适应窗口、在新标签页打开。
+- **改完即重放。** 点 **重试**、编辑正文，按它原本的协议（OpenAI Chat / Anthropic / Responses / Gemini）作为一次隔离、全新追踪的调试调用重新发出。
+
+**把订阅组成池。** 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的登录当后端来路由——同一供应商接多个账号，每个账号各有模型策展、出口代理、优先级和实时配额。
+
+[![订阅类供应商 —— 组池的 OAuth 账号，逐账号配额 / 代理 / 调度 / 状态](docs/assets/screenshots/06-providers.png)](docs/assets/screenshots/06-providers.png)
+
+**路由就是配置。** 每条 lane 就是「一个主模型 + 一条有序兜底链」——在界面或 YAML 里随手重排、替换、收口。
+
+[![Lane 编辑器 —— 每条 lane 的主模型与有序兜底链](docs/assets/screenshots/04-lanes.png)](docs/assets/screenshots/04-lanes.png)
 
 ## 两套失败纪律
 
@@ -266,6 +296,8 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
 [10 部署](docs/10-deployment.md) ·
 [11 管理界面](docs/11-admin-ui.md) ·
 [12 记忆的遗忘与分层](docs/12-memory-forgetting-and-tiering.md) ·
+[13 记忆管理与 MCP](docs/13-memory-admin-and-mcp.md) ·
+[14 记忆深度召回](docs/14-memory-deep-recall.md) ·
 [协议兼容性](docs/protocol-compatibility.md)
 
 ## 项目状态
