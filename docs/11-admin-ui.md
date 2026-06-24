@@ -64,7 +64,11 @@ The SPA pages (`apps/admin/src/routes/`) are pure consumers of the gateway's
 
 ### Dashboard
 
-The landing page (`/`) gives an at-a-glance overview.
+The landing page (`/`) gives an at-a-glance overview: request volume, success
+rate, latency, throughput, and spend over a selectable window; token usage over
+time and by model; and the most recent routing decisions.
+
+![Dashboard — KPIs, token usage over time, tokens by model, and recent requests](assets/screenshots/01-dashboard.png)
 
 ### Rule management
 
@@ -97,6 +101,14 @@ applied on the very next request, no restart, and durable across restarts. A
 failed write rejects the edit with the live config unchanged, so file and memory
 never diverge.
 
+![API Keys — per-key role, caps, rate limit, budget, memory mode, and 24h usage](assets/screenshots/09-keys.png)
+
+![Lanes — primary model plus an ordered, reorderable fallback chain per lane](assets/screenshots/04-lanes.png)
+
+![Policies — first-match rules that pin or cap the lane for matching requests](assets/screenshots/08-policies.png)
+
+![Classifier — Layer-2 eval toggle, confidence threshold, rule dimensions, and eval limits](assets/screenshots/05-classifier.png)
+
 ### Providers (OAuth subscriptions)
 
 - **Providers** (`/providers`) — connect and manage **OAuth subscription** backends
@@ -119,6 +131,8 @@ never diverge.
   See [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md) and the
   README's OAuth subscription section.
 
+![Providers — pooled OAuth accounts with status, proxy, curated models, live quota, priority, and schedule](assets/screenshots/06-providers.png)
+
 ### System settings
 
 - **Settings** (`/settings`) — the runtime-mutable settings the operator can
@@ -133,6 +147,19 @@ never diverge.
   Observability](07-observability.md) and [06 · Auth, API Keys & Rate
   Limits](06-auth-and-rate-limits.md).
 
+![System settings — payload capture & retention, rate-limit defaults, concurrency queue, and database maintenance](assets/screenshots/10-settings.png)
+
+### Memory
+
+- **Memory** (`/memory`) — browse the long-term memory the gateway has learned,
+  by **scope** (project / resource / thread) or by **key**, then drill in to view,
+  edit, or remove individual facts and per-scope reflections
+  (`/admin/api/memory`). Read-only counts up front; content opens on demand. The
+  same store is also reachable over MCP at `/mcp`. See [13 · Memory Admin &
+  MCP](13-memory-admin-and-mcp.md) and [14 · Memory: Deep Recall](14-memory-deep-recall.md).
+
+![Memory — facts and reflections grouped by scope, with counts and last-updated](assets/screenshots/07-memory.png)
+
 ### Request debugging
 
 - **Requests** (`/requests`) — the request list, plus a per-request detail page
@@ -141,18 +168,27 @@ never diverge.
   Observability](07-observability.md): classification stage, matched policy, lane
   candidate chain, provider attempts, cost, error, and `trace_id`. When
   `capture_payloads` is on, the detail can load the full captured request/response
-  bodies (`/admin/api/requests/:traceId/payload`). When the full request body was
+  bodies (`/admin/api/requests/:traceId/payload`). The body viewer renders the
+  payload as a collapsible tree (or Formatted / Raw), pops any oversized field — a
+  system prompt, a tool schema, a continued-session summary — into a fullscreen,
+  copyable reader, and previews inline base64/remote images with zoom,
+  fit-to-window, and open-in-new-tab. When the full request body was
   captured, the detail page offers an editable **Retry** button. The server
   recovers the original protocol (OpenAI chat, Anthropic messages, OpenAI
   Responses, or Gemini) and re-sends the (optionally edited) body in its native
   shape as an isolated, newly-traced debug re-run via the server replay endpoint;
   a body that cannot be replayed returns a precise 400.
 
+![Requests — filter by decided-by, lane, and status; every row links to its trail](assets/screenshots/02-requests.png)
+
+![Request trail — classification, eval, matched policy, lane candidate chain, provider attempts, and cost](assets/screenshots/03-request-trail.png)
+
 ## Boundaries
 
 - Basic rule management and request inspection only — no multi-tenancy and no
   fine-grained RBAC.
-- No memory-content browsing or agent orchestration in the admin UI (the per-key
-  memory **mode** is configurable on the Keys page).
+- No agent orchestration in the admin UI. Memory **content** is browsable and
+  editable on the Memory page (by scope or key); the per-key memory **mode** is
+  configured on the Keys page.
 - Complex configuration can still be edited directly in `config/*.yaml` and
   reloaded — the admin UI is a convenience layer, not the only entry point.
