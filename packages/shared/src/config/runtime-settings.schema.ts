@@ -136,6 +136,19 @@ export const RuntimeSettingsSchema = z.object({
   // never hard-deleted. Default OFF, 365-day window.
   memory_derived_cleanup_enabled: z.boolean().default(false),
   memory_derived_retention_days: z.number().int().positive().max(3650).default(365),
+
+  // ——— Automatic database compaction (sqlite VACUUM) ———
+  // Deleting rows frees pages to SQLite's freelist but NEVER shrinks the file
+  // (auto_vacuum is off) — so a high-churn table (e.g. captured payloads) leaves the
+  // .db bloated with dead pages long after cleanup deletes the rows. VACUUM rewrites
+  // the file and returns the space to the OS, but it holds an EXCLUSIVE lock for the
+  // whole rewrite (in-flight requests pause), so it must run at a low-traffic hour.
+  // This pair schedules it: vacuum_enabled gates it (default OFF — opt in, like the
+  // manual "Compact database" button); vacuum_hour picks the SERVER-LOCAL hour (0–23)
+  // to run, at most once per day. Postgres autovacuums, so the scheduler is a no-op
+  // there (StoreSet.vacuum is empty for supabase).
+  vacuum_enabled: z.boolean().default(false),
+  vacuum_hour: z.number().int().min(0).max(23).default(4),
 });
 
 export type LogLevel = z.infer<typeof LogLevelSchema>;

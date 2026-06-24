@@ -56,6 +56,43 @@ describe("LocalVolumeSink", () => {
     expect(entries).toEqual([]);
   });
 
+  it("removes the run dir when archiving fails mid-stream (no orphan empty folder)", async () => {
+    base = join(tmpdir(), `helm-archive-${randomUUID()}`);
+    const sink = new LocalVolumeSink(base);
+    async function* boom(): AsyncIterable<unknown> {
+      yield { id: "a" };
+      throw new Error("stream blew up");
+    }
+    await expect(sink.archiveTable("run1", "telemetry", boom())).rejects.toThrow("stream blew up");
+    // Bug A: the failed archive must leave NO empty <runId>/ folder behind.
+    const entries = await readdir(base).catch(() => []);
+    expect(entries).toEqual([]);
+  });
+
+  it("removes the run dir when the pre-flight space check fails (no orphan folder)", async () => {
+    base = join(tmpdir(), `helm-archive-${randomUUID()}`);
+    const sink = new LocalVolumeSink(base, { minFreeBytes: Number.MAX_SAFE_INTEGER });
+    await expect(
+      sink.archiveTable("run1", "telemetry", rowsOf([{ id: "a" }])),
+    ).rejects.toBeInstanceOf(ArchiveDiskFullError);
+    const entries = await readdir(base).catch(() => []);
+    expect(entries).toEqual([]);
+  });
+
+  it("keeps a sibling table's archive when a later table in the same run fails", async () => {
+    base = join(tmpdir(), `helm-archive-${randomUUID()}`);
+    const sink = new LocalVolumeSink(base);
+    await sink.archiveTable("run1", "telemetry", rowsOf([{ id: "a" }]));
+    // A second table in the SAME run fails its pre-flight: the run dir must survive
+    // (non-recursive rmdir won't delete it because telemetry.jsonl.gz is present).
+    const tightSink = new LocalVolumeSink(base, { minFreeBytes: Number.MAX_SAFE_INTEGER });
+    await expect(
+      tightSink.archiveTable("run1", "payloads", rowsOf([{ id: "b" }])),
+    ).rejects.toBeInstanceOf(ArchiveDiskFullError);
+    const entries = await readdir(join(base, "run1"));
+    expect(entries).toEqual(["telemetry.jsonl.gz"]);
+  });
+
   it("writes a run manifest as readable JSON", async () => {
     base = join(tmpdir(), `helm-archive-${randomUUID()}`);
     const sink = new LocalVolumeSink(base);

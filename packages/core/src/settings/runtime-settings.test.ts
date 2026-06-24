@@ -63,6 +63,8 @@ describe("defaultSettingsFromConfig", () => {
       memory_messages_retention_days: 180,
       memory_derived_cleanup_enabled: false,
       memory_derived_retention_days: 365,
+      vacuum_enabled: false,
+      vacuum_hour: 4,
     });
     expect(defaultSettingsFromConfig(cfg(false)).rate_limit_enabled).toBe(false);
   });
