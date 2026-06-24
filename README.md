@@ -105,6 +105,23 @@ The gateway ships a SvelteKit console at `/admin` (HTTP Basic, five languages). 
 
 [![Lanes editor — primary model and ordered fallback chain per lane](docs/assets/screenshots/04-lanes.png)](docs/assets/screenshots/04-lanes.png)
 
+<details>
+<summary><b>See every admin screen</b> — all 10 screenshots (click to expand)</summary>
+
+<br>
+
+| | |
+|:--:|:--:|
+| [<img src="docs/assets/screenshots/01-dashboard.png" width="420">](docs/assets/screenshots/01-dashboard.png)<br>**Dashboard** — traffic, spend, token usage, recent decisions | [<img src="docs/assets/screenshots/02-requests.png" width="420">](docs/assets/screenshots/02-requests.png)<br>**Requests** — the filterable request log |
+| [<img src="docs/assets/screenshots/03-request-trail.png" width="420">](docs/assets/screenshots/03-request-trail.png)<br>**Request trail** — the full per-request decision trail | [<img src="docs/assets/screenshots/04-lanes.png" width="420">](docs/assets/screenshots/04-lanes.png)<br>**Lanes** — primary + ordered fallback chain per lane |
+| [<img src="docs/assets/screenshots/05-classifier.png" width="420">](docs/assets/screenshots/05-classifier.png)<br>**Classifier** — eval toggle, threshold, rule weights | [<img src="docs/assets/screenshots/06-providers.png" width="420">](docs/assets/screenshots/06-providers.png)<br>**Providers** — pooled OAuth subscription accounts |
+| [<img src="docs/assets/screenshots/07-memory.png" width="420">](docs/assets/screenshots/07-memory.png)<br>**Memory** — facts & reflections by scope or key | [<img src="docs/assets/screenshots/08-policies.png" width="420">](docs/assets/screenshots/08-policies.png)<br>**Policies** — first-match rules that pick or cap the lane |
+| [<img src="docs/assets/screenshots/09-keys.png" width="420">](docs/assets/screenshots/09-keys.png)<br>**API Keys** — per-key caps, limits, budgets, memory mode | [<img src="docs/assets/screenshots/10-settings.png" width="420">](docs/assets/screenshots/10-settings.png)<br>**Settings** — payload capture, rate limits, queue, DB maintenance |
+
+Each screen is annotated in **[11 · Admin UI](docs/11-admin-ui.md)**.
+
+</details>
+
 ## Two failure disciplines
 
 This is the design rule everything else hangs off:

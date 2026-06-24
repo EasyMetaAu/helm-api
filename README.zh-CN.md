@@ -105,6 +105,23 @@ docker compose logs helm | grep -i "root API key"
 
 [![Lane 编辑器 —— 每条 lane 的主模型与有序兜底链](docs/assets/screenshots/04-lanes.png)](docs/assets/screenshots/04-lanes.png)
 
+<details>
+<summary><b>查看全部管理界面</b> —— 共 10 张截图（点击展开）</summary>
+
+<br>
+
+| | |
+|:--:|:--:|
+| [<img src="docs/assets/screenshots/01-dashboard.png" width="420">](docs/assets/screenshots/01-dashboard.png)<br>**仪表板** —— 流量、花费、token 用量、最近决策 | [<img src="docs/assets/screenshots/02-requests.png" width="420">](docs/assets/screenshots/02-requests.png)<br>**请求** —— 可筛选的请求日志 |
+| [<img src="docs/assets/screenshots/03-request-trail.png" width="420">](docs/assets/screenshots/03-request-trail.png)<br>**请求链路** —— 单个请求的完整决策链 | [<img src="docs/assets/screenshots/04-lanes.png" width="420">](docs/assets/screenshots/04-lanes.png)<br>**Lane** —— 每条 lane 的主模型 + 有序兜底链 |
+| [<img src="docs/assets/screenshots/05-classifier.png" width="420">](docs/assets/screenshots/05-classifier.png)<br>**分类器** —— eval 开关、置信阈值、规则权重 | [<img src="docs/assets/screenshots/06-providers.png" width="420">](docs/assets/screenshots/06-providers.png)<br>**提供商** —— 组池的 OAuth 订阅账号 |
+| [<img src="docs/assets/screenshots/07-memory.png" width="420">](docs/assets/screenshots/07-memory.png)<br>**记忆** —— 按 scope 或 key 浏览事实与反思 | [<img src="docs/assets/screenshots/08-policies.png" width="420">](docs/assets/screenshots/08-policies.png)<br>**策略** —— 首条命中、挑选或封顶 lane 的规则 |
+| [<img src="docs/assets/screenshots/09-keys.png" width="420">](docs/assets/screenshots/09-keys.png)<br>**API 密钥** —— 逐 key 的上限、限流、预算、记忆模式 | [<img src="docs/assets/screenshots/10-settings.png" width="420">](docs/assets/screenshots/10-settings.png)<br>**系统设置** —— 正文捕获、限流、排队、数据库维护 |
+
+每个界面的逐项说明见 **[11 管理界面](docs/11-admin-ui.md)**。
+
+</details>
+
 ## 两套失败纪律
 
 整个设计都挂在这条规则上：
