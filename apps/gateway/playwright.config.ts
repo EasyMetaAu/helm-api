@@ -47,6 +47,11 @@ export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
   workers: 1,
+  // Default expect timeout (5s) is tight for a real gateway (SQLite + SSR) driven by
+  // a real browser: the admin request-list filter occasionally re-renders in >5s,
+  // flaking `seededRow.toBeVisible()`. 10s covers the slow tail; the happy path is
+  // unaffected (assertions resolve the moment they pass).
+  expect: { timeout: 10_000 },
   use: {
     baseURL: `http://127.0.0.1:${GATEWAY_PORT}`,
   },

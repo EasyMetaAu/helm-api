@@ -23,6 +23,13 @@ const SEED_MODEL_FILTER = "best_reasoning_model";
 async function filterToSeededRequest(page: Page) {
   await page.getByTestId("filter-model").fill(SEED_MODEL_FILTER);
   await page.getByTestId("filter-model").press("Enter");
+  // The model filter applies via a client navigation (?model=…) + loader refetch.
+  // Wait for it to commit so callers assert against the *filtered* list, never one
+  // still settling from a previous filter/reset — that overlap was the flake: a
+  // reset's goto('?') and this goto('?model=…') raced, and whichever loader landed
+  // last won (the `$effect` then re-synced the input from its data), so the filter
+  // silently didn't stick and the seeded row never appeared.
+  await expect(page).toHaveURL(/[?&]model=best_reasoning_model\b/);
   return page
     .getByTestId("request-row")
     .filter({ has: page.locator(`a[href$="/requests/${SEED_TRACE_ID}"]`) });
@@ -144,8 +151,11 @@ test.describe("admin request list filtering + pagination", () => {
     await expect(seededRow).toHaveCount(0);
 
     // Reset clears every filter; re-apply the seed filter so the assertion stays
-    // independent of request rows created by earlier e2e specs.
+    // independent of request rows created by earlier e2e specs. Wait for the reset
+    // navigation to land (status param gone) BEFORE re-filtering, so the two gotos
+    // never overlap.
     await page.getByTestId("filter-reset").click();
+    await expect(page).not.toHaveURL(/status=error/);
     await filterToSeededRequest(page);
     await expect(seededRow).toBeVisible();
 
@@ -153,6 +163,7 @@ test.describe("admin request list filtering + pagination", () => {
     await page.getByTestId("filter-decided-by").selectOption("eval");
     await expect(page.getByTestId("requests-empty")).toBeVisible();
     await page.getByTestId("filter-reset").click();
+    await expect(page).not.toHaveURL(/decided_by=eval/); // reset navigation committed
     await filterToSeededRequest(page);
     await expect(seededRow).toBeVisible();
 
