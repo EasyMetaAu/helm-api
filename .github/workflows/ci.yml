@@ -50,6 +50,10 @@ jobs:
       - name: Use persistent pnpm store on runner
         run: pnpm config set store-dir /home/runner/_work/.pnpm-store
       - run: pnpm install --frozen-lockfile
+      # The e2e webServer runs the gateway via tsx, which resolves @helm/core and
+      # @helm/shared to their built dist (not src) — a fresh checkout has none, so
+      # build first. admin.spec also serves apps/admin/build.
+      - run: pnpm build
       - name: Install Playwright Chromium (admin.spec drives a real browser)
         run: pnpm --filter @helm/gateway exec playwright install --with-deps chromium
       - run: pnpm test:e2e
