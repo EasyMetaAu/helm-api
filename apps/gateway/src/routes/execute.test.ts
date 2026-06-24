@@ -961,15 +961,27 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[1]?.status).toBe("ok");
   });
 
-  it("does not trip the breaker for Anthropic request-shape 400s", async () => {
+  it("short-circuits the chain on an upstream request-shape 400 and surfaces it verbatim", async () => {
+    // A 400 invalid_request_error (oversized image / prompt too long / bad param) is
+    // DETERMINISTIC: the identical body fails on every candidate, and Claude Code
+    // relies on receiving this 4xx to drive its own context compaction. So the chain
+    // must NOT advance to `codex`, the breaker must NOT fault, and the upstream error
+    // is returned to the client verbatim (not buried as all_providers_failed 502).
     const provider = {
       chatCompletion: vi
         .fn()
         .mockRejectedValueOnce(
           new UpstreamError(
             "upstream_error",
-            "prompt is too long: 1001854 tokens > 1000000 maximum",
-            { error: { message: "prompt is too long" } },
+            "upstream returned 400",
+            {
+              type: "error",
+              error: {
+                type: "invalid_request_error",
+                message:
+                  "messages.7.content.14.image.source.base64.data: At least one of the image dimensions exceed max allowed size for many-image requests: 2000 pixels",
+              },
+            },
             400,
           ),
         )
@@ -1001,15 +1013,72 @@ describe("createExecute — gateway execution adapter", () => {
 
     const out = await execute(plan(["opus", "codex"]), req());
 
-    expect(out.final.status).toBe("ok");
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error.error_class).toBe("invalid_request");
+    expect(out.final.error.http_status).toBe(400);
+    expect(out.final.error.message).toContain("many-image requests");
+    expect(out.final.error.provider_raw).toMatchObject({
+      error: { type: "invalid_request_error" },
+    });
+    // Only the head candidate was attempted — no fallback to codex.
+    expect(out.attempts).toHaveLength(1);
     expect(out.attempts[0]).toMatchObject({
       alias: "opus",
       skipped: false,
       status: "error",
       error_class: "invalid_request",
     });
-    expect(out.attempts[1]?.status).toBe("ok");
+    expect(provider.chatCompletion).toHaveBeenCalledOnce();
     expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("still falls back and faults the breaker on a non-request upstream 5xx", async () => {
+    // Control: a 5xx is a provider-HEALTH failure (not a request-shape rejection),
+    // so the chain advances to the next candidate and the breaker records a fault.
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError(
+            "upstream_error",
+            "upstream returned 500",
+            { type: "error", error: { type: "api_error", message: "overloaded" } },
+            500,
+          ),
+        )
+        .mockResolvedValueOnce({ id: "second" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        opus: {
+          providerName: "mock",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        codex: {
+          providerName: "mock",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["opus", "codex"]), req());
+
+    expect(out.final.status).toBe("ok");
+    expect(out.attempts).toHaveLength(2);
+    expect(out.attempts[1]?.status).toBe("ok");
+    expect(recordFailure).toHaveBeenCalledWith("opus");
   });
 
   it("captures error_detail for a non-UpstreamError failure (null status, null raw)", async () => {
