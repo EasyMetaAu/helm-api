@@ -1,12 +1,12 @@
 import { listRequests, type RequestListItem } from '$lib/api/requests.js';
 import { type DashboardStats, EMPTY_STATS, getStats } from '$lib/api/stats.js';
-import { resolveStatsWindow, trendBucketForRange } from '$lib/dashboard-chart.js';
 import {
-  clientTzOffsetMinutes,
-  parseRange,
-  type RangeKey,
-  resolveWindow,
-} from '$lib/requests-filters.js';
+  pctDelta,
+  resolveStatsWindow,
+  resolveTodayComparisonWindow,
+  trendBucketForRange,
+} from '$lib/dashboard-chart.js';
+import { clientTzOffsetMinutes, parseRange, resolveWindow } from '$lib/requests-filters.js';
 import type { PageLoad } from './$types.js';
 
 // Dashboard load (SPA, client-side): read the date-range preset from the URL
@@ -23,7 +23,7 @@ import type { PageLoad } from './$types.js';
 // navigation (range change / back-button) since it depends on `url`.
 
 export const load: PageLoad = async ({ url }) => {
-  const range = parseRange(url.searchParams.get('range'), '24h');
+  const range = parseRange(url.searchParams.get('range'), 'today');
   const now = Date.now();
   const { start, end } = resolveWindow(range, now);
   const statsWindow = resolveStatsWindow(range, now);
@@ -55,11 +55,36 @@ export const load: PageLoad = async ({ url }) => {
   const t = agg.totals;
   const successRate = t.requests === 0 ? null : Math.round((t.okCount / t.requests) * 100);
 
+  // "vs yesterday" deltas — only for the TODAY view, baselined against yesterday up
+  // to the same time of day (resolveTodayComparisonWindow) so it's pace-vs-pace,
+  // not partial-vs-full. Fail-soft: a hiccup → no deltas, cards just omit them.
+  let compare: Record<string, number | null> | null = null;
+  if (range === 'today') {
+    try {
+      const cmp = resolveTodayComparisonWindow(now);
+      const y = (await getStats({ ...cmp, bucket, tzOffsetMinutes })).totals;
+      compare = {
+        requests: pctDelta(t.requests, y.requests),
+        totalTokens: pctDelta(
+          t.promptTokens + t.completionTokens,
+          y.promptTokens + y.completionTokens,
+        ),
+        inputTokens: pctDelta(t.promptTokens, y.promptTokens),
+        outputTokens: pctDelta(t.completionTokens, y.completionTokens),
+        cachedTokens: pctDelta(t.cachedTokens, y.cachedTokens),
+        totalCost: pctDelta(t.totalCostUsd ?? 0, y.totalCostUsd ?? 0),
+      };
+    } catch {
+      compare = null;
+    }
+  }
+
   return {
     range,
     bucket,
     agg,
     items,
+    compare,
     stats: {
       total: t.requests,
       ok: t.okCount,

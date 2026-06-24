@@ -690,6 +690,8 @@
   "Timeout (ms)": "逾時（毫秒）",
   "To": "結束",
   "Today": "今天",
+  "Yesterday": "昨天",
+  "vs yesterday": "對比昨天",
   "tok": "詞元",
   "Token usage": "權杖用量",
   "Token usage over time": "權杖用量趨勢",

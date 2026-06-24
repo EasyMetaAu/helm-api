@@ -11,7 +11,7 @@ import {
 const sp = (q: string) => new URLSearchParams(q);
 
 describe('key-detail-filters', () => {
-  it('defaults to the 24h preset, page 1, no custom dates', () => {
+  it('defaults to the today preset, page 1, no custom dates', () => {
     const f = parseKeyDetailFilters(sp(''));
     expect(f.range).toBe(KEY_DETAIL_DEFAULT_RANGE);
     expect(f.page).toBe(1);
@@ -34,12 +34,14 @@ describe('key-detail-filters', () => {
   });
 
   it('treats an inverted / half-filled custom range as not-custom', () => {
-    expect(hasCustomRange(parseKeyDetailFilters(sp('start=2026-06-10&end=2026-06-01')))).toBe(false);
+    expect(hasCustomRange(parseKeyDetailFilters(sp('start=2026-06-10&end=2026-06-01')))).toBe(
+      false,
+    );
     expect(hasCustomRange(parseKeyDetailFilters(sp('start=2026-06-01')))).toBe(false);
   });
 
   it('serializes clean URLs: custom dates win over the preset; defaults omitted', () => {
-    expect(keyDetailFiltersToSearch({ range: '24h', page: 1 })).toBe('');
+    expect(keyDetailFiltersToSearch({ range: 'today', page: 1 })).toBe('');
     expect(keyDetailFiltersToSearch({ range: '7d', page: 2 })).toBe('range=7d&page=2');
     // Custom range present → preset dropped, dates serialized.
     expect(
@@ -70,6 +72,13 @@ describe('key-detail-filters', () => {
       end: now,
     });
     expect(resolveKeyDetailWindow({ range: 'all', page: 1 }, now)).toEqual({ start: 0, end: now });
+  });
+
+  it('honors a closed preset end so yesterday does not bleed into today', () => {
+    const now = new Date('2026-06-01T15:30:00').getTime();
+    const start = new Date('2026-05-31T00:00:00').getTime();
+    const end = new Date('2026-06-01T00:00:00').getTime();
+    expect(resolveKeyDetailWindow({ range: 'yesterday', page: 1 }, now)).toEqual({ start, end });
   });
 
   it('buckets short windows hourly, long windows daily', () => {
