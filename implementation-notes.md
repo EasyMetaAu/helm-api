@@ -22,6 +22,15 @@
 - **验证**：`pnpm typecheck` 三包全绿；`pnpm lint` 0 error（唯一 warning `mcp/oauth.ts:312` pre-existing，未碰源码）；`pnpm test --coverage` 4592 绿、阈值达标；逐文件 lcov 抽查确认命中原未覆盖行（非凑行）。分支 `test/coverage-marginal-zero`，**未提交**（待用户）。
 - **明确不做（边际收益 0）**：`buildServer` 逐行集成测试、admin `+page.svelte`/`+layout.svelte` UI、`lib/api/*` 薄 fetch 封装、dedup 维护脚本、`logging.ts`、凑 100%。
 
+## 2026-06-24 · 定时自动 VACUUM + 归档失败残留空目录修复（运维诊断；原则 2/3）
+
+- **背景**：la.atmy.work helm.db 反弹到 6.4G。诊断：行数不多（request_payloads 3783 行/**4.37GB**，均 1.18MB——Claude Code 满上下文 body，最大单条 4.9MB；telemetry 仅 0.04GB），真问题是 ① payload 体量大（`capture_payloads` + 7 天 retention，用户已改 3）② **空闲页不回收**——`auto_vacuum=0`，cleanup 只 `DELETE` 从不 VACUUM，463530 空闲页 = **1.77GB 死空间**永不还盘。另：archive/ 下两个 06-20 的空 runId 目录 = 归档卡死残骸（已 `rmdir` 清掉）。
+- **Bug A（`local-volume-sink.ts`）**：`archiveTable` 先 `mkdir(<runId>)` 再写，失败（`assertFreeSpace` 抛 / gzip 中断）只删 `.tmp`、**不删目录** → 每次失败归档留一个孤儿空目录（06-20 gzip 4GB 卡死即此源）。修：`assertFreeSpace` 移进 try，catch 里加 `rmdir(dir)`（**非递归，空才删**——兄弟表已归档的 `.gz` 会让 rmdir 报 ENOTEMPTY 而保留目录）。
+- **新功能：定时自动 VACUUM**。`store.vacuum()` 原语 + 手动「压缩数据库」按钮/路由 **main 早已具备**，唯缺定时。决定：纯函数 `shouldAutoVacuum`（enabled + 本地小时匹配 + 当日未跑）+ **复用 `startCleanupScheduler`** 跑每小时 tick，server 持 in-memory `lastVacuumDayKey`。新设置 `vacuum_enabled`（默认 **false**，opt-in——与 `cleanup_archive_enabled` 一致，VACUUM 持**排他锁重写整库**，默认开会惊到运维）+ `vacuum_hour`（0–23 **服务器本地时区**，默认 4）。Postgres 自带 autovacuum → `store.vacuum()` 为 no-op，调度器在 pg 上 inert。一并受 `HELM_CLEANUP_DISABLED=1` 关闭（测试默认）。
+- **ponytail 取舍**：① **不加「空闲页阈值守卫」**（YAGNI——opt-in + 低峰，开了就想跑；高 churn 的 box 每天都有可回收空间，低流量自托管者本就不会开）；② `lastVacuumDayKey` 仅内存（重启恰逢 vacuum_hour 至多多跑一次 VACUUM，无害）；③ 标记 `lastVacuumDayKey` 在 `await store.vacuum()` **之前**，防 interval 抖动同一小时内双跑。
+- **类型涟漪**：`RuntimeSettings` 加必填字段 → admin 客户端 `settings.ts`（与 schema **有意分叉**，如 archive 默认 true）+ svelte `DEFAULTS` + 三语言 i18n（en/zh-hans/ja）+ 两处全量等值断言测试（core `runtime-settings.test`、admin `settings.test`）同步加 `vacuum_enabled/vacuum_hour`。
+- **验证**：typecheck（shared/core/gateway）+ lint（仅 pre-existing `oauth.ts` warning）+ 单测（schema/auto-vacuum/local-volume-sink/settings/cleanup/gateway 共 146 例绿）+ `pnpm build`（admin 静态含 settings 页 + 三语言 chunk）全绿。分支 `worktree-vacuum-and-archive-fixes`，**未提交**（待用户）。**该功能未部署**——box 仍可用既有手动「压缩数据库」按钮一次性回收那 1.77GB（部署新版后才有定时 VACUUM）。
+
 ## 2026-06-23 · 记忆深度召回 = 混合检索（落地 docs/12 P8）+ `memory_recall` MCP 工具（docs/14；原则 1/3/4）
 
 - **背景/范围**：用户要 MCP 上「深度历史召回」（"我们讨论过什么"）。现 `memory_search` 是对蒸馏 `fact_text` 的 `LIKE`——无相关性排序、**无跨语言**（`成本`≠`cost`）。决定**落地 docs/12 已 spec 但 deferred 的 P8**，并新增第 7 个 MCP 工具 `memory_recall` 暴露之。**检索单元 = `memory_facts`**（有 owner_id+scope，跨会话；对齐 docs/12 P8 与 docs/13「raw/observation 不入管理面」）；observations/reflections **不入索引**（完整原始历史靠 fact 的 `sourceObservationRange` 溯源链，非主搜索面，留作后续）。
@@ -39,21 +48,13 @@
 - **T6/T7 关键坑（实现中实证）**：① **PGlite vector 扩展须 `PGlite.create({extensions:{vector}})`，不能 `new PGlite()`**（后者不注册 extension bundle → `CREATE EXTENSION vector` 报 `vector.control` not found）；② postgres 向量列用**无维度 `vector`**（顺序 `<=>` 扫描，免运行时 dim），但 v27 `CREATE EXTENSION vector` **要求部署装了 pgvector**（supabase 默认有；自建 PG 无则 boot 失败——诚实信号去装）；③ gateway **无 `/v1/embeddings` 路由、`ProviderClient` 无 embeddings 方法** → embedder（`apps/gateway/src/memory-embedder.ts`）直连 `{provider.base_url}/embeddings`（OpenAI 兼容），按 `embedding_model` 的 provider 前缀从 `config.providers` 解析 base_url + api_key_env；④ 迁移 fixture 测试须预标记新版本（sqlite **v28** / pg **v27**）——不含 memory_facts 的最小 fixture 否则 ALTER 失败（sqlite 3 处、pg 2 处已补）。
 - **进度：全部完成（阶段2 端到端）**。docs/14；config（`facts_retrieval`/`embedding_*`/`embedding` job）；RRF 核心；sqlite 适配器（v28：FTS5-trigram + sqlite-vec vec0 + `searchFacts`/`setFactEmbeddings`/`listFactsNeedingEmbedding` + `bumpReferences.factIds`）；postgres 适配器（v27：tsvector GIN + pgvector + 同方法）；embedder + embedding job + scheduler dispatch/enqueue；`memory_recall` MCP 工具 + 接线 + fail-open。**验证**：`typecheck -r` 全绿；core **2568** 测试绿（含 sqlite/pg searchFacts CJK+向量+RRF、embedding-job、mcp fail-open/bump、迁移 fixture）；gateway mcp 17 + embedder 5 绿；lint 我方文件绿（`oauth.ts:312` pre-existing）。分支 `helm-memory-deep-recall`，**未提交**（待用户）。运行时：`memory.forgetting.facts_retrieval.enabled:true` 开 FTS+score；再配 `memory.llm.embedding_model`+`embedding_dimensions` 点亮向量腿。
 
-## 2026-06-23 · MCP OAuth 2.1 shim（ChatGPT 连接器接入；docs/13；原则 1/2/7）
-
-- **目标**：ChatGPT 自定义连接器（Apps SDK）**不接受裸 API key**，只走 OAuth 2.1 authorize-code + PKCE（RFC 9728 发现）。现 `/mcp` 仅 API-key 中间件 → 无法被 ChatGPT 接入。
-- **决定**：在 `/mcp` 前加**薄 OAuth 授权服务器**（`apps/gateway/src/routes/mcp/oauth.ts`），把 OAuth token 映射回既有 API key 的 account——不引入新身份系统。端点：`/.well-known/oauth-protected-resource`(+`/mcp` 后缀)、`/.well-known/oauth-authorization-server`(+后缀)、`GET/POST /authorize`（登录页粘贴 helm key→`keyStore.getByHash` 校验）、`POST /token`（PKCE S256→发 access token）。`mcpAuth` 中间件接受 **JWT 或裸 API key**（向后兼容直连客户端）。
-- **ponytail 取舍**：**无状态 JWT，无 token/code 表、无迁移**。授权码本身是 60s 签名 JWT（PKCE 绑定）；access token 默认 30 天、**无 refresh**（到期重新登录）。签名密钥从既有 `HELM_OAUTH_ENC_KEY` 派生（HMAC 域分隔 `helm-mcp-oauth/v1`）——**不新增任何密钥**，但要求其存在（`memory.mcp.oauth.enabled` 且无 enc key → **fail-closed 拒启动**）。
-- **天花板（已在代码注释）**：授权码在 60s 窗口内可重放；access token 到期前不可撤销（撤销手段=轮换 enc key，会一次性失效全部 token）。升级路径：一次性码存储 + token 黑名单（届时本文件需加 store 依赖）。redirect_uri 前缀白名单（仅 https，默认 ChatGPT 连接器回调）防开放重定向；登录页 hidden 字段做 HTML 属性转义防反射 XSS（authorize 参数全可控）。
-- **配置**：`memory.mcp.oauth { enabled(默认 false), issuer?(缺省从 X-Forwarded-Proto/Host 推导), access_token_ttl_seconds(默认 2592000), allowed_redirect_prefixes }`。token 写入 audience（RFC 8707），但 `/mcp` 端只验签名+exp，aud 当 best-effort（单资源网关，aud 仅纵深防御）。
-- **验证**：TDD 红→绿；`oauth.test.ts` 16 例（密钥派生/JWT 篡改、PKCE 正误、过期码、发现元数据、authorize 校验+XSS 转义、e2e authorize→token→/mcp、裸 key 兼容、无凭据 401）；typecheck + lint + config samples 均绿。**未部署**；启用需 box 配置 `memory.mcp.oauth.enabled:true`（box 已有 `HELM_OAUTH_ENC_KEY`，因用了 Anthropic 订阅 OAuth）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-23 · MCP OAuth 2.1 shim（ChatGPT 连接器接入；docs/13）**：`/mcp` 前加薄 OAuth 授权服务器（`routes/mcp/oauth.ts`）把 OAuth token 映射回既有 API key 的 account——**无状态 JWT、无 token/code 表、无迁移**；授权码=60s 签名 JWT（PKCE S256 绑定），access token 默认 30 天无 refresh，签名密钥从既有 `HELM_OAUTH_ENC_KEY` 派生（`memory.mcp.oauth.enabled` 且无 enc key → fail-closed 拒启动）；`mcpAuth` 接受 JWT 或裸 key。天花板：授权码 60s 窗口可重放、token 到期前不可撤销（轮换 enc key 全失效）。`oauth.test.ts` 16 例绿，未部署。
 - **2026-06-22 · Claude 订阅（OAuth）token 成本折算**：admin 对 `anthropic/*` OAuth 池只显 token 数、花费恒 null，因 `pricing.yaml` 无 `anthropic/*` 行（`costOf` 查 catalog 落空→`resolveCostUsd` null）。坑：必须**同时**改 `capabilities.yaml`，否则 `loadCatalog` 用 `EMPTY_CAPABILITIES` 造条目→`context_too_small` 剪掉每个 Claude 请求。用官方 Anthropic 价**含 cache 读写价**；4 个 lane alias 折算价非实付，纯配置无代码改动。
 - **2026-06-22 · Codex 原生 Responses 直通清洗 + fallback reasoning 泄漏修复**：仅对 ChatGPT-account Codex Responses profile 清洗 native body（移除 `max_output_tokens`/`temperature`；`store:false` 删 input item `id/status/phase` + 丢空 reasoning item，保留有 encrypted_content/summary 的）；跨协议 fallback 时 `InternalRequest.thinking` 若为 Responses reasoning history 数组不再作为 provider `thinking` 转发（记 `thinking_history_stripped_for_target`）。`openai-responses.test.ts`/`execute.test.ts` 覆盖。
 - **2026-06-22 · Opus 1M 上下文溢出预检 + 流式失败落库**：Anthropic native 在 invoke 前加 exact `count_tokens` 预检（opus/sonnet/haiku 硬上限 1e6 与 catalog 取较小者，count 失败 fail-open），超限记 `context_too_small` 进 fallback **不记 breaker**；上游 400 的 prompt-too-long/effort 形状错记 `invalid_request` 不污染 breaker；sonnet 仅允 low|medium|high|max effort（xhigh 执行前 skip 不 clamp，更可观测）；`/v1/messages` 已写 error 帧则同步改 `DecisionRecord.final.status=error`，Codex Responses 故障帧带 `providerRaw`。TODO：all-failed chain 的 per-attempt upstream body capture 未补。

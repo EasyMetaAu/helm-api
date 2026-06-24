@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { createWriteStream } from "node:fs";
-import { mkdir, open, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { mkdir, open, rename, rm, rmdir, stat, statfs, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createGzip } from "node:zlib";
 import {
@@ -42,22 +42,26 @@ export class LocalVolumeSink implements ArchiveSink {
     rows: AsyncIterable<unknown>,
   ): Promise<ArchivedTableResult> {
     const dir = join(this.baseDir, runId);
-    await mkdir(dir, { recursive: true });
-    await this.assertFreeSpace(dir);
-
     const finalPath = join(dir, `${table}.jsonl.gz`);
     const tmpPath = `${finalPath}.tmp`;
+    await mkdir(dir, { recursive: true });
 
-    const gz = createGzip();
-    const out = createWriteStream(tmpPath);
     const hash = createHash("sha256");
-    // EventEmitter broadcasts each chunk to BOTH listeners: pipe feeds the file,
-    // our listener feeds the hash — so the digest covers exactly the bytes on disk.
-    gz.on("data", (chunk: Buffer) => hash.update(chunk));
-    gz.pipe(out);
-
+    let gz: ReturnType<typeof createGzip> | undefined;
+    let out: ReturnType<typeof createWriteStream> | undefined;
     let rowCount = 0;
     try {
+      // Pre-flight BEFORE opening any stream, so a disk-full archive never even
+      // creates a .tmp; its throw is caught below (dir cleanup) like any other.
+      await this.assertFreeSpace(dir);
+
+      gz = createGzip();
+      out = createWriteStream(tmpPath);
+      // EventEmitter broadcasts each chunk to BOTH listeners: pipe feeds the file,
+      // our listener feeds the hash — so the digest covers exactly the bytes on disk.
+      gz.on("data", (chunk: Buffer) => hash.update(chunk));
+      gz.pipe(out);
+
       for await (const row of rows) {
         if (!gz.write(`${JSON.stringify(row)}\n`)) await once(gz, "drain");
         rowCount++;
@@ -73,11 +77,15 @@ export class LocalVolumeSink implements ArchiveSink {
       }
       await rename(tmpPath, finalPath);
     } catch (err) {
-      // Leave NO partial final artifact: drop the temp file, re-throw so the runner
-      // skips the delete for this table.
-      gz.destroy();
-      out.destroy();
+      // Leave NO residue: drop the temp file, AND remove the run dir if THIS failure
+      // left it empty — a non-recursive rmdir only deletes an empty dir, so a sibling
+      // table's already-archived .gz keeps it. Without this, every failed/aborted
+      // archive (the gzip-choke incident) orphaned an empty <runId>/ folder. Re-throw
+      // so the runner skips the delete for this table (rows survive).
+      gz?.destroy();
+      out?.destroy();
       await rm(tmpPath, { force: true }).catch(() => {});
+      await rmdir(dir).catch(() => {});
       throw err;
     }
 
