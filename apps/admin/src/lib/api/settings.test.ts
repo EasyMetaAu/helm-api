@@ -35,6 +35,8 @@ const FULL: RuntimeSettings = {
   memory_messages_retention_days: 200,
   memory_derived_cleanup_enabled: true,
   memory_derived_retention_days: 400,
+  vacuum_enabled: true,
+  vacuum_hour: 2,
 };
 
 describe('settings api client', () => {
@@ -92,6 +94,9 @@ describe('settings api client', () => {
       memory_messages_retention_days: 180,
       memory_derived_cleanup_enabled: false,
       memory_derived_retention_days: 365,
+      // Auto-VACUUM defaults: OFF (opt-in), 4am server-local.
+      vacuum_enabled: false,
+      vacuum_hour: 4,
     });
   });
 

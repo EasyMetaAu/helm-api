@@ -86,6 +86,7 @@ import {
   type StoreSet,
   saveRuntimeSettings,
   settleBudget,
+  shouldAutoVacuum,
   startCleanupScheduler,
   startMemoryWorker,
   startSignalScheduler,
@@ -982,6 +983,7 @@ export async function buildServer(
     },
   };
   let cleanupScheduler: ReturnType<typeof startCleanupScheduler> | null = null;
+  let vacuumScheduler: ReturnType<typeof startCleanupScheduler> | null = null;
   // Apply a new settings object live: re-bind `settings`, push the log level into
   // the logger, flip the rate-limit master switch, and retune the system-default
   // quota. Cleanup cadence is also rescheduled live so the admin setting is not
@@ -2601,6 +2603,40 @@ export async function buildServer(
       },
       log: (level, msg, fields) => logger.log(level, msg, fields),
     });
+
+    // Auto-VACUUM scheduler — reclaims the on-disk space cleanup's deletes leave on
+    // SQLite's freelist (the file never shrinks on its own; auto_vacuum is off). A
+    // plain HOURLY tick; the shouldAutoVacuum gate runs it at most once a day, only
+    // at the operator's chosen low-traffic local hour, and only when vacuum_enabled
+    // is on (default off — VACUUM holds an exclusive lock for the whole rewrite). The
+    // live `settings` closure means a toggle/hour change takes effect without a
+    // restart. store.vacuum() is a no-op on postgres (autovacuum), so this is inert
+    // there. lastRunDayKey is in-memory: a restart at the vacuum hour may run one
+    // extra VACUUM (harmless — it just reclaims nothing the second time).
+    let lastVacuumDayKey: string | null = null;
+    vacuumScheduler = startCleanupScheduler({
+      intervalMs: 3_600_000,
+      runTick: async () => {
+        const now = new Date();
+        const todayKey = now.toDateString();
+        if (
+          !shouldAutoVacuum({
+            enabled: settings.vacuum_enabled,
+            vacuumHour: settings.vacuum_hour,
+            currentHour: now.getHours(),
+            lastRunDayKey: lastVacuumDayKey,
+            todayKey,
+          })
+        ) {
+          return;
+        }
+        lastVacuumDayKey = todayKey; // mark BEFORE the slow rewrite so a retry can't double-run
+        logger.log("info", "vacuum.auto_start", { hour: settings.vacuum_hour });
+        await store.vacuum();
+        logger.log("info", "vacuum.auto_done", {});
+      },
+      log: (level, msg, fields) => logger.log(level, msg, fields),
+    });
   }
 
   return {
@@ -2611,6 +2647,7 @@ export async function buildServer(
       signalScheduler?.stop();
       memoryWorker?.stop();
       cleanupScheduler?.stop();
+      vacuumScheduler?.stop();
       // Drain the deferred write queue BEFORE closing the DB so a graceful shutdown
       // persists every buffered telemetry/payload/observe write (no loss on deploy).
       await writeQueue.stop();

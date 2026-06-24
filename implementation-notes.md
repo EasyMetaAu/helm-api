@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-24 · 定时自动 VACUUM + 归档失败残留空目录修复（运维诊断；原则 2/3）
+
+- **背景**：la.atmy.work helm.db 反弹到 6.4G。诊断：行数不多（request_payloads 3783 行/**4.37GB**，均 1.18MB——Claude Code 满上下文 body，最大单条 4.9MB；telemetry 仅 0.04GB），真问题是 ① payload 体量大（`capture_payloads` + 7 天 retention，用户已改 3）② **空闲页不回收**——`auto_vacuum=0`，cleanup 只 `DELETE` 从不 VACUUM，463530 空闲页 = **1.77GB 死空间**永不还盘。另：archive/ 下两个 06-20 的空 runId 目录 = 归档卡死残骸（已 `rmdir` 清掉）。
+- **Bug A（`local-volume-sink.ts`）**：`archiveTable` 先 `mkdir(<runId>)` 再写，失败（`assertFreeSpace` 抛 / gzip 中断）只删 `.tmp`、**不删目录** → 每次失败归档留一个孤儿空目录（06-20 gzip 4GB 卡死即此源）。修：`assertFreeSpace` 移进 try，catch 里加 `rmdir(dir)`（**非递归，空才删**——兄弟表已归档的 `.gz` 会让 rmdir 报 ENOTEMPTY 而保留目录）。
+- **新功能：定时自动 VACUUM**。`store.vacuum()` 原语 + 手动「压缩数据库」按钮/路由 **main 早已具备**，唯缺定时。决定：纯函数 `shouldAutoVacuum`（enabled + 本地小时匹配 + 当日未跑）+ **复用 `startCleanupScheduler`** 跑每小时 tick，server 持 in-memory `lastVacuumDayKey`。新设置 `vacuum_enabled`（默认 **false**，opt-in——与 `cleanup_archive_enabled` 一致，VACUUM 持**排他锁重写整库**，默认开会惊到运维）+ `vacuum_hour`（0–23 **服务器本地时区**，默认 4）。Postgres 自带 autovacuum → `store.vacuum()` 为 no-op，调度器在 pg 上 inert。一并受 `HELM_CLEANUP_DISABLED=1` 关闭（测试默认）。
+- **ponytail 取舍**：① **不加「空闲页阈值守卫」**（YAGNI——opt-in + 低峰，开了就想跑；高 churn 的 box 每天都有可回收空间，低流量自托管者本就不会开）；② `lastVacuumDayKey` 仅内存（重启恰逢 vacuum_hour 至多多跑一次 VACUUM，无害）；③ 标记 `lastVacuumDayKey` 在 `await store.vacuum()` **之前**，防 interval 抖动同一小时内双跑。
+- **类型涟漪**：`RuntimeSettings` 加必填字段 → admin 客户端 `settings.ts`（与 schema **有意分叉**，如 archive 默认 true）+ svelte `DEFAULTS` + 三语言 i18n（en/zh-hans/ja）+ 两处全量等值断言测试（core `runtime-settings.test`、admin `settings.test`）同步加 `vacuum_enabled/vacuum_hour`。
+- **验证**：typecheck（shared/core/gateway）+ lint（仅 pre-existing `oauth.ts` warning）+ 单测（schema/auto-vacuum/local-volume-sink/settings/cleanup/gateway 共 146 例绿）+ `pnpm build`（admin 静态含 settings 页 + 三语言 chunk）全绿。分支 `worktree-vacuum-and-archive-fixes`，**未提交**（待用户）。**该功能未部署**——box 仍可用既有手动「压缩数据库」按钮一次性回收那 1.77GB（部署新版后才有定时 VACUUM）。
+
 ## 2026-06-23 · 记忆深度召回 = 混合检索（落地 docs/12 P8）+ `memory_recall` MCP 工具（docs/14；原则 1/3/4）
 
 - **背景/范围**：用户要 MCP 上「深度历史召回」（"我们讨论过什么"）。现 `memory_search` 是对蒸馏 `fact_text` 的 `LIKE`——无相关性排序、**无跨语言**（`成本`≠`cost`）。决定**落地 docs/12 已 spec 但 deferred 的 P8**，并新增第 7 个 MCP 工具 `memory_recall` 暴露之。**检索单元 = `memory_facts`**（有 owner_id+scope，跨会话；对齐 docs/12 P8 与 docs/13「raw/observation 不入管理面」）；observations/reflections **不入索引**（完整原始历史靠 fact 的 `sourceObservationRange` 溯源链，非主搜索面，留作后续）。
@@ -33,20 +42,13 @@
 - **配置**：`memory.mcp.oauth { enabled(默认 false), issuer?(缺省从 X-Forwarded-Proto/Host 推导), access_token_ttl_seconds(默认 2592000), allowed_redirect_prefixes }`。token 写入 audience（RFC 8707），但 `/mcp` 端只验签名+exp，aud 当 best-effort（单资源网关，aud 仅纵深防御）。
 - **验证**：TDD 红→绿；`oauth.test.ts` 16 例（密钥派生/JWT 篡改、PKCE 正误、过期码、发现元数据、authorize 校验+XSS 转义、e2e authorize→token→/mcp、裸 key 兼容、无凭据 401）；typecheck + lint + config samples 均绿。**未部署**；启用需 box 配置 `memory.mcp.oauth.enabled:true`（box 已有 `HELM_OAUTH_ENC_KEY`，因用了 Anthropic 订阅 OAuth）。
 
-## 2026-06-22 · Claude 订阅（OAuth）token 成本折算（docs/04/07；约定「能力与定价数据源」；原则 6）
-
-- **问题**：admin 对 Claude Pro/Max 订阅（`anthropic/*` OAuth 池）流量只显示 token **数量**，花费恒为 `—`（null）。token 计数链路（解析→落库→聚合→渲染）对所有 provider 早已就绪，唯一缺口是 `config/pricing.yaml` 无 `anthropic/*` 行；`costOf(alias)` 以路由 alias 查 catalog 落空 → `resolveCostUsd` 返回 `null`（fail-open「未计量」）。`openai-codex/*` 早有定价故 ChatGPT 订阅花费一直能显示——Claude 是唯一漏配的订阅渠道；`github-copilot/*` 无 lane 引用，不在范围。
-- **关键坑（务必同时改两个文件）**：这些 alias 现**无 catalog 条目**→能力过滤被跳过、fail-open 直接尝试（`execute.ts:887` `if (caps)`）。一旦**只加 pricing**，`loadCatalog`（`catalog/index.ts:107`）会用 `EMPTY_CAPABILITIES`（`maxContextTokens:0`/`supportsStreaming:false`/`jsonOutput:none`）造条目 → 能力过滤第 4 关 `context_too_small` 把**每个** Claude 请求剪掉。故必须**同时**在 `capabilities.yaml` 加条目（照搬 `zenmux-anthropic/claude-*` 既有先例，二者都加），用真实上限：Opus/Sonnet/Fable `maxContextTokens:1000000`、Haiku `200000`。
-- **定价来源（按用户规则「API 价优先，否则官方」）**：核对生成 catalog（`catalog/generated/catalog.json`）只有旧 `claude-3-5-{sonnet,haiku}-20241022`，四个目标模型均不在 → 全部用**官方 Anthropic 价**（`claude-api` skill 即官方价表）。Opus 5/25、Sonnet 3/15、Haiku 1/5、Fable 10/50（USD/MTok）。**含 cache 读写价**（读 0.1×、写 1.25×输入）——载入项：Claude Code 大量用缓存，缺省会让 `computeCostUsd` 按全价计缓存 token，严重高估。
-- **取舍/限制**：是**折算价非实付**（订阅月度统付，与 `openai-codex/*` 既有语义一致），未在 UI 区分名义/实付；仅 4 个 lane alias 被定价，自定义 key 发来的其它/带日期 `anthropic/<id>` 仍 `null`（fail-open 照样尝试，只是不计价，需要时运维补一行）。纯配置无代码改动。
-- **验证**：`samples.test.ts`（Claude lane 路由不回归）、`catalog/{index,load,models-list}.test.ts`（4 条新条目的计数/快照）、`capability/filter.test.ts` 均绿；typecheck+lint 绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-22 · Claude 订阅 token 成本折算**：admin 对 `anthropic/*` OAuth 池流量花费恒 `—`，因 `pricing.yaml` 缺 `anthropic/*` 行。修：`pricing.yaml`+`capabilities.yaml` **同时**补 4 个 lane alias（只加 pricing 会让 `EMPTY_CAPABILITIES` 的 `maxContextTokens:0` 触发 `context_too_small` 剪掉每个 Claude 请求；Opus/Sonnet/Fable 1e6、Haiku 2e5）。用官方 Anthropic 价（含 cache 读 0.1×/写 1.25×，否则高估）。折算价非实付；带日期 `anthropic/<id>` 仍 null（fail-open）。纯配置。
 - **2026-06-22 · Codex 原生 Responses 直通清洗 + fallback reasoning 泄漏修复**：仅对 ChatGPT-account Codex Responses profile 清洗 native body（移除 `max_output_tokens`/`temperature`；`store:false` 删 input item `id/status/phase` + 丢空 reasoning item，保留有 encrypted_content/summary 的）；跨协议 fallback 时 `InternalRequest.thinking` 若为 Responses reasoning history 数组不再作为 provider `thinking` 转发（记 `thinking_history_stripped_for_target`）。`openai-responses.test.ts`/`execute.test.ts` 覆盖。
 - **2026-06-22 · Opus 1M 上下文溢出预检 + 流式失败落库**：Anthropic native 在 invoke 前加 exact `count_tokens` 预检（opus/sonnet/haiku 硬上限 1e6 与 catalog 取较小者，count 失败 fail-open），超限记 `context_too_small` 进 fallback **不记 breaker**；上游 400 的 prompt-too-long/effort 形状错记 `invalid_request` 不污染 breaker；sonnet 仅允 low|medium|high|max effort（xhigh 执行前 skip 不 clamp，更可观测）；`/v1/messages` 已写 error 帧则同步改 `DecisionRecord.final.status=error`，Codex Responses 故障帧带 `providerRaw`。TODO：all-failed chain 的 per-attempt upstream body capture 未补。
 - **2026-06-21 · Codex Chat→Responses 兼容层移除 `temperature`**：economy+temperature:0 非流式 Chat 经 `openaiToResponsesRequest` 互译到 ChatGPT-account Codex Responses 后端 400 `Unsupported parameter: temperature`；改为 Codex Responses 用 openclaw 最小 body（`store:false`/`stream:true`/`include:[reasoning.encrypted_content]`/`text.verbosity:low`，不发 `max_output_tokens`/`temperature`），generic Responses 不变。

@@ -61,6 +61,9 @@ describe("RuntimeSettingsSchema", () => {
       memory_messages_retention_days: 180,
       memory_derived_cleanup_enabled: false,
       memory_derived_retention_days: 365,
+      // Auto-VACUUM backfilled by its schema defaults (OFF, 4am local).
+      vacuum_enabled: false,
+      vacuum_hour: 4,
     });
   });
 
@@ -73,6 +76,17 @@ describe("RuntimeSettingsSchema", () => {
     expect(parsed.telemetry_retention_days).toBe(90);
     expect(parsed.memory_messages_cleanup_enabled).toBe(false);
     expect(parsed.memory_derived_cleanup_enabled).toBe(false);
+  });
+
+  it("backfills auto-VACUUM defaults (OFF, 4am local) and bounds the hour 0–23", () => {
+    const parsed = RuntimeSettingsSchema.parse({});
+    expect(parsed.vacuum_enabled).toBe(false);
+    expect(parsed.vacuum_hour).toBe(4);
+    expect(RuntimeSettingsSchema.safeParse({ vacuum_hour: 0 }).success).toBe(true);
+    expect(RuntimeSettingsSchema.safeParse({ vacuum_hour: 23 }).success).toBe(true);
+    expect(RuntimeSettingsSchema.safeParse({ vacuum_hour: 24 }).success).toBe(false);
+    expect(RuntimeSettingsSchema.safeParse({ vacuum_hour: -1 }).success).toBe(false);
+    expect(RuntimeSettingsSchema.safeParse({ vacuum_hour: 4.5 }).success).toBe(false);
   });
 
   it("rejects an out-of-range cleanup window / interval (fail-closed)", () => {

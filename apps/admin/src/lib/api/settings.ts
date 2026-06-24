@@ -55,6 +55,10 @@ export interface RuntimeSettings {
   memory_messages_retention_days: number;
   memory_derived_cleanup_enabled: boolean; // opt-in (observations + facts)
   memory_derived_retention_days: number;
+  // Auto-VACUUM (sqlite). Reclaims the disk space cleanup's deletes leave on the
+  // freelist; runs once a day at vacuum_hour (server-local). Default OFF (opt-in).
+  vacuum_enabled: boolean;
+  vacuum_hour: number; // 0-23, server local time
 }
 
 export const LOG_LEVEL_OPTIONS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
@@ -142,6 +146,9 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
       typeof raw.memory_derived_retention_days === 'number'
         ? raw.memory_derived_retention_days
         : 365,
+    // Auto-VACUUM: default OFF (opt-in, like the schema), 4am local when unset.
+    vacuum_enabled: raw.vacuum_enabled === true,
+    vacuum_hour: typeof raw.vacuum_hour === 'number' ? raw.vacuum_hour : 4,
   };
 }
 

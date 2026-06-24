@@ -60,6 +60,8 @@
     memory_messages_retention_days: 180,
     memory_derived_cleanup_enabled: false,
     memory_derived_retention_days: 365,
+    vacuum_enabled: false,
+    vacuum_hour: 4,
   };
   // Local working copy (snapshot the loaded settings into a NEW object so the
   // $state initializer doesn't capture the reactive `data` prop reference).
@@ -445,6 +447,40 @@
             bind:checked={form.cleanup_archive_enabled}
           />
           <span class="font-medium">{$t('Archive before deleting')}</span>
+        </label>
+      </div>
+
+      <!-- Auto-compaction (sqlite VACUUM) — reclaims the disk space cleanup's deletes
+           leave on the freelist; runs at most once a day at a low-traffic hour. -->
+      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 sm:flex-row sm:gap-6">
+        <label class="flex items-start gap-3">
+          <input
+            type="checkbox"
+            data-testid="vacuum-enabled"
+            class="checkbox mt-0.5"
+            bind:checked={form.vacuum_enabled}
+          />
+          <span>
+            <span class="font-medium">{$t('Compact database automatically')}</span>
+            <span class="field-help block"
+              >{$t(
+                'Runs VACUUM once a day to reclaim deleted disk space. The database is briefly locked while it runs.',
+              )}</span
+            >
+          </span>
+        </label>
+        <label class="flex flex-col gap-1 self-end">
+          <span class="font-medium">{$t('Run at hour (0-23, server local time)')}</span>
+          <input
+            type="number"
+            min="0"
+            max="23"
+            step="1"
+            data-testid="vacuum-hour"
+            class="input-sm w-32 min-h-11 md:min-h-0"
+            bind:value={form.vacuum_hour}
+            disabled={!form.vacuum_enabled}
+          />
         </label>
       </div>
 

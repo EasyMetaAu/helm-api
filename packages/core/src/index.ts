@@ -149,6 +149,7 @@ export {
   type ArchiveManifest,
   type ArchiveSink,
 } from "./cleanup/archive/types.js";
+export { shouldAutoVacuum } from "./cleanup/auto-vacuum.js";
 export { buildCleanupPlan, type CleanupAction, type CleanupTable } from "./cleanup/cleanup-plan.js";
 export {
   type CleanupReport,
