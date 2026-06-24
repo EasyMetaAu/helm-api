@@ -219,4 +219,263 @@ describe("/admin/api/memory routes (docs/13)", () => {
     expect(ok).toMatchObject({ accountId: "acct", projectId: "proj-x" });
     expect((await app.request("/admin/api/memory/by-key/missing")).status).toBe(404);
   });
+
+  it("GET /memory/facts/:id returns the fact or 404", async () => {
+    const { store } = seededStore();
+    const res = await addFact(store, "s", "hello");
+    const id = res.insertedIds[0] as string;
+    const app = buildApp(store);
+    const fact = (await (await app.request(`/admin/api/memory/facts/${id}`)).json()) as {
+      factText: string;
+    };
+    expect(fact.factText).toBe("hello");
+    expect((await app.request("/admin/api/memory/facts/no-such-id")).status).toBe(404);
+  });
+
+  it("GET /memory/reflections lists with status filter and invalid status → 400", async () => {
+    const { store } = seededStore();
+    await store.upsertReflection({
+      accountId: "acct",
+      projectId: "p",
+      reflectionText: "r1",
+      version: 1,
+      tokenEstimate: 1,
+      updatedAt: NOW,
+    });
+    const app = buildApp(store);
+    const page = (await (await app.request("/admin/api/memory/reflections")).json()) as {
+      rows: unknown[];
+      total: number;
+    };
+    expect(page.total).toBe(1);
+    const active = (await (
+      await app.request("/admin/api/memory/reflections?status=active")
+    ).json()) as { total: number };
+    expect(active.total).toBe(1);
+    expect((await app.request("/admin/api/memory/reflections?status=bad")).status).toBe(400);
+  });
+
+  it("GET /memory/reflections/:id returns the reflection or 404", async () => {
+    const { store } = seededStore();
+    const id = await store.upsertReflection({
+      accountId: "acct",
+      projectId: "p",
+      reflectionText: "hello",
+      version: 1,
+      tokenEstimate: 1,
+      updatedAt: NOW,
+    });
+    const app = buildApp(store);
+    const r = (await (await app.request(`/admin/api/memory/reflections/${id}`)).json()) as {
+      reflectionText: string;
+    };
+    expect(r.reflectionText).toBe("hello");
+    expect((await app.request("/admin/api/memory/reflections/no-such-id")).status).toBe(404);
+  });
+
+  it("PATCH reflection: invalid body → 400 (line 191-192)", async () => {
+    const { store } = seededStore();
+    const id = await store.upsertReflection({
+      accountId: "acct",
+      projectId: "p",
+      reflectionText: "orig",
+      version: 1,
+      tokenEstimate: 1,
+      updatedAt: NOW,
+    });
+    const app = buildApp(store);
+    // Empty body is not a valid MemoryReflectionPatchSchema
+    const res = await app.request(`/admin/api/memory/reflections/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("intParam: NaN value falls back to default; negative falls back to default; clamps to max (lines 41-44)", async () => {
+    const { store } = seededStore();
+    // Add several facts to make pagination visible
+    await addFact(store, "a", "f1");
+    await addFact(store, "b", "f2");
+    await addFact(store, "c", "f3");
+    const app = buildApp(store);
+    // NaN limit → default (50)
+    const nan = (await (await app.request("/admin/api/memory/facts?limit=abc")).json()) as {
+      total: number;
+    };
+    expect(nan.total).toBe(3);
+    // Negative limit → default
+    const neg = (await (await app.request("/admin/api/memory/facts?limit=-5")).json()) as {
+      total: number;
+    };
+    expect(neg.total).toBe(3);
+    // Limit > MAX_LIMIT (200) → clamped to 200 (still returns all 3)
+    const big = (await (await app.request("/admin/api/memory/facts?limit=999")).json()) as {
+      total: number;
+    };
+    expect(big.total).toBe(3);
+  });
+
+  it("scopeFromQuery: empty-string resourceId/threadId are excluded; non-empty are included", async () => {
+    // Covers the `r !== ""` and `t !== ""` branches in scopeFromQuery (lines 56-58)
+    const { store } = seededStore();
+    await addFact(store, "s", "resourced", "p1");
+    await store.insertFactsReconciled({
+      accountId: "acct",
+      scope: { projectId: "p1", resourceId: "res1", threadId: "thr1" },
+      now: NOW,
+      facts: [
+        {
+          ownerId: "acct",
+          subjectKey: "s2",
+          factText: "scoped",
+          contentHash: factContentHash("scoped"),
+          validFrom: NOW,
+          projectId: "p1",
+          resourceId: "res1",
+          threadId: "thr1",
+        },
+      ],
+    });
+    const app = buildApp(store);
+    // Empty string params → ignored (no scope filter)
+    const noScope = (await (
+      await app.request("/admin/api/memory/facts?resourceId=&threadId=")
+    ).json()) as { total: number };
+    expect(noScope.total).toBe(2);
+    // Non-empty resourceId → filters to the scoped fact only
+    const scoped = (await (
+      await app.request("/admin/api/memory/facts?resourceId=res1")
+    ).json()) as { total: number };
+    expect(scoped.total).toBe(1);
+    // Non-empty threadId → filters to the scoped fact only
+    const threaded = (await (
+      await app.request("/admin/api/memory/facts?threadId=thr1")
+    ).json()) as { total: number };
+    expect(threaded.total).toBe(1);
+  });
+
+  it("listScopes: accountId query param scopes to that account; without it lists all", async () => {
+    // Covers the `accountId !== undefined ? {accountId} : {}` ternary in listScopes (line 71)
+    const { store } = seededStore();
+    await addFact(store, "s", "f1", "p1");
+    const app = buildApp(store);
+    // With accountId param → lists for that account
+    const scoped = (await (
+      await app.request("/admin/api/memory/scopes?accountId=acct")
+    ).json()) as unknown[];
+    expect(scoped.length).toBeGreaterThan(0);
+    // Without accountId param → lists all (same store, same result)
+    const all = (await (await app.request("/admin/api/memory/scopes")).json()) as unknown[];
+    expect(all.length).toBeGreaterThan(0);
+  });
+
+  it("PATCH fact: non-collision error is re-thrown (line 141-142)", async () => {
+    // Simulate updateFact throwing a non-MemoryFactContentHashConflictError
+    const { store } = seededStore();
+    const f = await addFact(store, "s", "x");
+    const id = f.insertedIds[0] as string;
+    // Override updateFact to throw a generic Error
+    const origUpdate = store.updateFact?.bind(store);
+    store.updateFact = async () => {
+      throw new Error("db crashed");
+    };
+    const app = buildApp(store);
+    // This should propagate as a 500 (re-thrown error)
+    const res = await app.request(`/admin/api/memory/facts/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ importance: 0.5 }),
+    });
+    // Hono's onError returns 500 for unhandled errors
+    expect(res.status).toBe(500);
+    // Restore
+    if (origUpdate) store.updateFact = origUpdate;
+  });
+
+  it("scopeFromQuery: projectId non-empty covers the line-56 true branch", async () => {
+    // Previous scopeFromQuery test only used resourceId/threadId; add projectId coverage
+    const { store } = seededStore();
+    await addFact(store, "s", "p1-fact", "p1");
+    await addFact(store, "s2", "no-project-fact");
+    const app = buildApp(store);
+    // projectId=p1 → filters to 1 fact
+    const byProject = (await (
+      await app.request("/admin/api/memory/facts?projectId=p1")
+    ).json()) as { total: number };
+    expect(byProject.total).toBe(1);
+    // projectId= (empty) → ignored → both facts
+    const emptyProject = (await (
+      await app.request("/admin/api/memory/facts?projectId=")
+    ).json()) as { total: number };
+    expect(emptyProject.total).toBe(2);
+  });
+
+  it("listFacts: subjectKey and search filters (lines 104-105 true branches)", async () => {
+    const { store } = seededStore();
+    await addFact(store, "target-key", "fact about target");
+    await addFact(store, "other-key", "unrelated fact");
+    const app = buildApp(store);
+    // subjectKey filter → only matching fact
+    const byKey = (await (
+      await app.request("/admin/api/memory/facts?subjectKey=target-key")
+    ).json()) as { total: number };
+    expect(byKey.total).toBe(1);
+    // search filter → only matching fact
+    const bySearch = (await (
+      await app.request("/admin/api/memory/facts?search=unrelated")
+    ).json()) as { total: number };
+    expect(bySearch.total).toBe(1);
+  });
+
+  it("503 for GET/PATCH/DELETE routes when no store is wired", async () => {
+    // Cover resolveStore instanceof Response branches for all routes that haven't had 503 tests
+    const app = buildApp(undefined);
+    expect((await app.request("/admin/api/memory/facts/any-id")).status).toBe(503);
+    expect(
+      (
+        await app.request("/admin/api/memory/facts/any-id", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(503);
+    expect((await app.request("/admin/api/memory/facts/any-id", { method: "DELETE" })).status).toBe(
+      503,
+    );
+    expect((await app.request("/admin/api/memory/reflections")).status).toBe(503);
+    expect((await app.request("/admin/api/memory/reflections/any-id")).status).toBe(503);
+    expect(
+      (
+        await app.request("/admin/api/memory/reflections/any-id", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(503);
+    expect(
+      (await app.request("/admin/api/memory/reflections/any-id", { method: "DELETE" })).status,
+    ).toBe(503);
+  });
+
+  it("PATCH reflection with unknown id → 404 (line 200 null branch)", async () => {
+    const { store } = seededStore();
+    const app = buildApp(store);
+    const res = await app.request("/admin/api/memory/reflections/no-such-id", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reflectionText: "updated" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("DELETE reflection with unknown id → 404 (lines 208-211 false branch)", async () => {
+    const { store } = seededStore();
+    const app = buildApp(store);
+    const res = await app.request("/admin/api/memory/reflections/no-such-id", { method: "DELETE" });
+    expect(res.status).toBe(404);
+  });
 });

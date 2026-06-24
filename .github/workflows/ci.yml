@@ -30,6 +30,34 @@ jobs:
       - run: pnpm build
       - run: pnpm test
 
+  # End-to-end (Playwright) gate. Independent of `verify`/`docker` (no `needs`) so
+  # the jobs run in parallel and don't block one another. The e2e webServers run
+  # the gateway via tsx against SOURCE + a fully offline deterministic mock
+  # upstream (no network, fixed worker interval), so the suite is hermetic. Only
+  # admin.spec drives a real browser; the rest use Playwright's HTTP request
+  # context. NOTE: `--with-deps` apt-installs Chromium's system libs and needs
+  # passwordless sudo on the self-hosted runner — if that's unavailable, drop
+  # `--with-deps` and pre-bake the libs into the runner image.
+  e2e:
+    runs-on: [self-hosted, Linux, X64, docker]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Use persistent pnpm store on runner
+        run: pnpm config set store-dir /home/runner/_work/.pnpm-store
+      - run: pnpm install --frozen-lockfile
+      # The e2e webServer runs the gateway via tsx, which resolves @helm/core and
+      # @helm/shared to their built dist (not src) — a fresh checkout has none, so
+      # build first. admin.spec also serves apps/admin/build.
+      - run: pnpm build
+      - name: Install Playwright Chromium (admin.spec drives a real browser)
+        run: pnpm --filter @helm/gateway exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+
   # Builds and smoke-tests the real gateway Docker image (docs/10). Kept fully
   # independent of `verify` (no `needs`) so the unit gates run on their own and
   # neither job blocks the other.

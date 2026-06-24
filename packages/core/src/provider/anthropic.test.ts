@@ -2835,3 +2835,44 @@ describe("issue #303: native passthrough forwards tool names verbatim (by design
     expect(wire.tools[0]?.name).toBe("db.query"); // verbatim, NOT "db_query"
   });
 });
+
+// ── coverage completions ──────────────────────────────────────────────────────
+
+describe("anthropicToOpenAIResponse — tool_use block with non-string name (line 1378)", () => {
+  it("passes the name through unchanged when block.name is not a string", () => {
+    // Line 1378: the ternary else-branch fires when `typeof block.name !== "string"`.
+    const out = anthropicToOpenAIResponse(
+      {
+        content: [{ type: "tool_use", id: "t1", name: 42, input: {} }],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      "claude-x",
+    );
+    const choices = out.choices as Array<{
+      message?: { tool_calls?: Array<{ function?: { name?: unknown } }> };
+    }>;
+    expect(choices[0]?.message?.tool_calls?.[0]?.function?.name).toBe(42);
+  });
+});
+
+describe("translateAnthropicSSE — content_block_start tool_use with non-string name (line 1890)", () => {
+  it("passes non-string block.name through unchanged in the streaming path", async () => {
+    // Line 1890: the ternary else-branch in the streaming content_block_start handler.
+    const res = sseResponse([
+      { type: "message_start", message: { id: "m", usage: { input_tokens: 1 } } },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "tu1", name: 99 },
+      },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ]);
+    const chunks: string[] = [];
+    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    // The name field should be emitted as 99 (number), not coerced
+    const joined = chunks.join("");
+    expect(joined).toContain('"name":99');
+  });
+});

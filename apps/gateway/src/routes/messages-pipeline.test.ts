@@ -1471,3 +1471,571 @@ describe("createMessagesPipeline — memory inject additive trailing reminder", 
     expect(native.system).toBe("be terse");
   });
 });
+
+// ── Additional coverage: uncovered branches / lines ────────────────────────
+
+describe("createMessagesPipeline — toInternalRequest metadata branches", () => {
+  it("forwards conversation_id when it is a non-empty string (line 172 truthy branch)", async () => {
+    let seen: Record<string, unknown> | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req as unknown as Record<string, unknown>;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route);
+    await pipeline.run(
+      irOf({
+        metadata: { trace_id: "t1", conversation_id: "sess-abc" },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    expect(
+      (seen as { metadata?: { conversation_id?: string } } | null)?.metadata?.conversation_id,
+    ).toBe("sess-abc");
+  });
+
+  it("threads client_billing_header ≤128 chars (lines 224-226 truthy branch)", async () => {
+    let seen: Record<string, unknown> | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req as unknown as Record<string, unknown>;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route);
+    await pipeline.run(
+      irOf({
+        metadata: { trace_id: "t1", client_billing_header: "cch=user1" },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    expect(
+      (seen as { metadata?: { client_billing_header?: string } } | null)?.metadata
+        ?.client_billing_header,
+    ).toBe("cch=user1");
+  });
+
+  it("omits client_billing_header when it exceeds 128 chars (line 224-226 falsy branch)", async () => {
+    let seen: Record<string, unknown> | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req as unknown as Record<string, unknown>;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route);
+    await pipeline.run(
+      irOf({
+        metadata: { trace_id: "t1", client_billing_header: "x".repeat(129) },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    expect(
+      (seen as { metadata?: Record<string, unknown> } | null)?.metadata?.client_billing_header,
+    ).toBeUndefined();
+  });
+
+  it("forwards response_format as an object (line 206-208 truthy branch)", async () => {
+    let seen: Record<string, unknown> | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req as unknown as Record<string, unknown>;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route);
+    await pipeline.run(
+      irOf({ response_format: { type: "json_object" } }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    expect((seen as { response_format?: unknown } | null)?.response_format).toEqual({
+      type: "json_object",
+    });
+  });
+
+  it("threads userId and orgId from identity (line 200-201 truthy branches)", async () => {
+    let seen: Record<string, unknown> | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req as unknown as Record<string, unknown>;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route);
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      userId: "u-1",
+      orgId: "org-1",
+    };
+    await pipeline.run(irOf(), identity, new AbortController().signal);
+    expect((seen as { user_id?: string; org_id?: string } | null)?.user_id).toBe("u-1");
+    expect((seen as { user_id?: string; org_id?: string } | null)?.org_id).toBe("org-1");
+  });
+
+  it("stamps keyPrefix from identity when present (line 793 truthy branch)", async () => {
+    let sawOpts: unknown = null;
+    const route: RouteFn = async (_req, opts) => {
+      sawOpts = opts;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route);
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      keyPrefix: "helm_live_ab",
+    };
+    await pipeline.run(irOf(), identity, new AbortController().signal);
+    expect((sawOpts as { keyPrefix?: string } | null)?.keyPrefix).toBe("helm_live_ab");
+  });
+});
+
+describe("createMessagesPipeline — budget over-budget paths (lines 784-789)", () => {
+  it("throws rate_limited PipelineError when budget behavior is reject (line 785-786)", async () => {
+    const budget: PipelineBudgetDeps = {
+      gate: {
+        check: async () => ({ overBudget: true, behavior: "reject", degradeLane: null }) as never,
+      },
+      settle: async () => {},
+      now: () => 0,
+    };
+    const route: RouteFn = async () => okResult({ id: "x" });
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      caps: { budget: { spend_usd: { day: 1 } } as never },
+    };
+    const pipeline = createMessagesPipeline(route, "anthropic_messages", undefined, budget);
+    await expect(
+      pipeline.run(irOf(), identity, new AbortController().signal),
+    ).rejects.toMatchObject({ error_class: "rate_limited" });
+  });
+
+  it("degrades lane when budget behavior is degrade (line 787-788)", async () => {
+    let sawKeyCaps: { degradeLane: string | null } | null = null;
+    const budget: PipelineBudgetDeps = {
+      gate: {
+        check: async () =>
+          ({ overBudget: true, behavior: "degrade", degradeLane: "economy" }) as never,
+      },
+      settle: async () => {},
+      now: () => 0,
+    };
+    const route: RouteFn = async (_req, opts) => {
+      sawKeyCaps = opts.keyCaps as { degradeLane: string | null };
+      return okResult({ id: "x" });
+    };
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      caps: { budget: { spend_usd: { day: 1 } } as never },
+    };
+    const pipeline = createMessagesPipeline(route, "anthropic_messages", undefined, budget);
+    await pipeline.run(irOf(), identity, new AbortController().signal);
+    // Cast on read: TS narrows a let assigned only inside the route closure back to
+    // its `null` initializer, so the optional chain would otherwise resolve to never.
+    expect((sawKeyCaps as { degradeLane: string | null } | null)?.degradeLane).toBe("economy");
+  });
+});
+
+describe("createMessagesPipeline — recordOAuthUsage (lines 960-963, 917-920)", () => {
+  it("calls recordOAuthUsage on non-stream collect (line 960-963)", async () => {
+    const calls: Array<{ alias: string | null; tokens: number }> = [];
+    const recordOAuthUsage = (
+      _account: unknown,
+      alias: string | null,
+      usage: { tokens: number; costUsd: number | null },
+    ) => {
+      calls.push({ alias, tokens: usage.tokens });
+    };
+    const route: RouteFn = async () => {
+      const r = okResult({
+        id: "x",
+        choices: [{ index: 0, message: { role: "assistant", content: "hi" } }],
+        usage: { prompt_tokens: 5, completion_tokens: 3 },
+      });
+      r.decision = {
+        lane: { selected_lane: "balanced" },
+        final: { status: "ok", model_alias: "gpt-4o" },
+        cost_breakdown: { total_usd: 0.01, completion_usd: 0.005, eval_usd: null },
+      } as never;
+      return r;
+    };
+    const pipeline = createMessagesPipeline(
+      route,
+      "anthropic_messages",
+      undefined,
+      undefined,
+      recordOAuthUsage,
+    );
+    const run = await pipeline.run(irOf(), IDENTITY, new AbortController().signal);
+    await run.collect();
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.tokens).toBeGreaterThanOrEqual(0);
+  });
+
+  it("calls recordOAuthUsage on passthrough collect (line 917-920)", async () => {
+    const calls: Array<{ alias: string | null; tokens: number }> = [];
+    const recordOAuthUsage = (
+      _account: unknown,
+      alias: string | null,
+      usage: { tokens: number; costUsd: number | null },
+    ) => {
+      calls.push({ alias, tokens: usage.tokens });
+    };
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(passthroughOkResult()),
+      "anthropic_messages",
+      undefined,
+      undefined,
+      recordOAuthUsage,
+    );
+    const run = await pipeline.run(irOf(), IDENTITY, new AbortController().signal);
+    await run.collect();
+    expect(calls.length).toBe(1);
+  });
+});
+
+describe("createMessagesPipeline — writes queue (line 635-641)", () => {
+  it("enqueues memory tasks onto the write queue instead of inline-awaiting", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const writes = {
+      enqueueTask: (task: () => Promise<void>, _opts?: { wakeOnSettle?: boolean }) => {
+        tasks.push(task);
+      },
+      depth: 0,
+    } as never;
+    const { observe } = makeObserveSpy();
+    const route: RouteFn = async () =>
+      okResult({
+        id: "x",
+        choices: [{ index: 0, message: { role: "assistant", content: "hi" } }],
+      });
+    const pipeline = createMessagesPipeline(
+      route,
+      "anthropic_messages",
+      { observe },
+      undefined,
+      undefined,
+      writes,
+    );
+    const run = await pipeline.run(
+      irOf({ metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" } }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    await run.collect();
+    // With write queue wired, tasks are enqueued (not awaited inline)
+    expect(tasks.length).toBeGreaterThan(0);
+  });
+});
+
+describe("createMessagesPipeline — accumulateAssistantText via streamIR (lines 257-263)", () => {
+  it("reconstructs assistant text from streamed content deltas for memory observe", async () => {
+    const { observe, persisted } = makeObserveSpy();
+    const route: RouteFn = async () => streamOkResult(sseTextStream());
+    const pipeline = createMessagesPipeline(route, "anthropic_messages", { observe });
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    const assistant = persisted.find((m) => m.role === "assistant");
+    expect(assistant).toBeDefined();
+    expect(assistant?.content).toBe("hi");
+  });
+
+  it("openai_responses stream also accumulates assistant text via memory observe (line 1112)", async () => {
+    const { observe, persisted } = makeObserveSpy();
+    const route: RouteFn = async () => streamOkResult(sseTextStream());
+    const pipeline = createMessagesPipeline(route, "openai_responses", { observe });
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    const assistant = persisted.find((m) => m.role === "assistant");
+    expect(assistant).toBeDefined();
+    expect(assistant?.content).toBe("hi");
+  });
+});
+
+describe("createMessagesPipeline — accumulateAnthropicAssistantText edge cases (lines 499-508)", () => {
+  // We test these via the native passthrough stream path — the accumulator is called per frame.
+  it("passthrough stream with empty-text content_block_delta does not grow assistant text (line 499)", async () => {
+    // A stream where the text_delta carries empty string → assistant text stays empty
+    const frames = [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"m","usage":{"input_tokens":1}}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":0}}\n\n',
+    ];
+    const stream = (async function* (): AsyncIterable<string> {
+      for (const f of frames) yield f;
+    })();
+    const { observe, persisted } = makeObserveSpy();
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...passthroughStreamResult(stream) }),
+      "anthropic_messages",
+      { observe },
+    );
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    // Empty text_delta → no assistant turn persisted (the accumulator returns without appending)
+    const assistant = persisted.find((m) => m.role === "assistant");
+    expect(assistant).toBeUndefined();
+  });
+
+  it("passthrough stream: non-text_delta content_block_delta is ignored by accumulator (line 506-507)", async () => {
+    const frames = [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"m","usage":{"input_tokens":1}}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":1}}\n\n',
+    ];
+    const stream = (async function* (): AsyncIterable<string> {
+      for (const f of frames) yield f;
+    })();
+    const { observe, persisted } = makeObserveSpy();
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...passthroughStreamResult(stream) }),
+      "anthropic_messages",
+      { observe },
+    );
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    // Non-text-delta → tool call accumulator ignores it → no assistant turn
+    const assistant = persisted.find((m) => m.role === "assistant");
+    expect(assistant).toBeUndefined();
+  });
+});
+
+describe("createMessagesPipeline — Anthropic stream model ID fallbacks (lines 1151-1158)", () => {
+  it("uses ir.model when decision.final.status is not 'ok' (line 1156-1157 fallback)", async () => {
+    // The model-id branch at line 1151 reads result.decision.final?.status (NOT result.final).
+    // We keep result.final.status = "ok" (so no PipelineError is thrown) but set
+    // decision.final to a non-"ok" status so the else branch (line 1156-1157) is taken.
+    const streamResult = streamOkResult(sseTextStream());
+    Object.assign(streamResult, {
+      decision: {
+        ...streamResult.decision,
+        final: { status: "fallback" },
+        cost_breakdown: { total_usd: 0, completion_usd: null, eval_usd: null },
+        request_id: "req-1",
+      },
+    });
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(streamResult),
+      "anthropic_messages",
+    );
+    const run = await pipeline.run(
+      irOf({ stream: true, model: "claude-3-5-sonnet" }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    // Should still yield events (model comes from ir.model fallback at line 1157)
+    const types: string[] = [];
+    for await (const ev of run.streamIR()) {
+      types.push(String(ev.type));
+    }
+    expect(types.length).toBeGreaterThan(0);
+  });
+
+  it("uses provider_model when final.status is ok with provider_model defined (line 1153)", async () => {
+    const streamResult = streamOkResult(sseTextStream());
+    Object.assign(streamResult, {
+      decision: {
+        ...streamResult.decision,
+        final: {
+          status: "ok",
+          model_alias: "anthropic/claude-3-5-sonnet",
+          provider_model: "claude-3-5-sonnet-20241022",
+        },
+        cost_breakdown: { total_usd: 0, completion_usd: null, eval_usd: null },
+        request_id: "req-1",
+      },
+    });
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve(streamResult),
+      "anthropic_messages",
+    );
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const types: string[] = [];
+    for await (const ev of run.streamIR()) {
+      types.push(String(ev.type));
+    }
+    expect(types.length).toBeGreaterThan(0);
+  });
+});
+
+describe("createMessagesPipeline — normalizeOpenAIStreamUsageForIR via gemini stream (lines 551-593)", () => {
+  it("gemini streamIR path normalizes OpenAI usage chunk (usage with prompt_tokens_details)", async () => {
+    // A special SSE stream that carries an OpenAI usage block with prompt_tokens_details
+    const usageChunk = JSON.stringify({
+      id: "cg-1",
+      model: "gemini-2.0-flash",
+      choices: [{ index: 0, delta: { content: "hi" } }],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        prompt_tokens_details: { cached_tokens: 3, cache_creation_input_tokens: 1 },
+      },
+    });
+    const stream = (async function* (): AsyncIterable<string> {
+      yield `data: ${usageChunk}\n\n`;
+      yield `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`;
+      yield "data: [DONE]\n\n";
+    })();
+    const decisionRef = streamOkResult(stream).decision;
+    // Override the decision's final to have a valid model_alias
+    Object.assign(decisionRef, {
+      final: { status: "ok", model_alias: "gemini/gemini-2.0-flash" },
+      cost_breakdown: { total_usd: 0, completion_usd: null, eval_usd: null },
+    });
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...streamOkResult(stream), decision: decisionRef }),
+      "gemini",
+    );
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    const events: Array<Record<string, unknown>> = [];
+    for await (const ev of run.streamIR()) events.push(ev);
+    // The stream emitted at least one chunk (gemini path)
+    expect(events.length).toBeGreaterThan(0);
+  });
+});
+
+describe("createMessagesPipeline — streamIR with usage tracking + costOf (lines 1196-1218)", () => {
+  it("invokes costOf + backfillCompletionCost in stream finally when lastUsage is present", async () => {
+    const usageFrame = JSON.stringify({
+      choices: [{ index: 0, delta: { content: "hello" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+    const stream = (async function* (): AsyncIterable<string> {
+      yield `data: ${usageFrame}\n\n`;
+      yield `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`;
+      yield "data: [DONE]\n\n";
+    })();
+    const decisionRef = streamOkResult(stream).decision;
+    Object.assign(decisionRef, {
+      final: { status: "ok", model_alias: "gpt-4o" },
+      cost_breakdown: { total_usd: 0, completion_usd: null, eval_usd: null },
+    });
+    const costOf = vi.fn().mockReturnValue(0.01);
+    const budget: PipelineBudgetDeps = {
+      gate: { check: async () => ({ overBudget: false }) as never },
+      settle: async () => {},
+      now: () => 0,
+      costOf,
+    };
+    const identity: MessagesIdentity = {
+      keyId: "k1",
+      accountId: "acct",
+      caps: { budget: { spend_usd: { day: 1 } } as never },
+    };
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...streamOkResult(stream), decision: decisionRef }),
+      "anthropic_messages",
+      undefined,
+      budget,
+    );
+    const run = await pipeline.run(irOf({ stream: true }), identity, new AbortController().signal);
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    // costOf should have been called during the stream finally block
+    expect(costOf).toHaveBeenCalledWith("gpt-4o", expect.objectContaining({ prompt_tokens: 10 }));
+    // Usage should be backfilled onto the decision
+    expect(decisionRef.usage).toMatchObject({ prompt_tokens: 10, completion_tokens: 5 });
+  });
+
+  it("calls recordOAuthUsage in passthrough stream finally (lines 1093-1096)", async () => {
+    const oauthCalls: Array<{ alias: string | null; tokens: number }> = [];
+    const recordOAuthUsage = (
+      _account: unknown,
+      alias: string | null,
+      usage: { tokens: number; costUsd: number | null },
+    ) => {
+      oauthCalls.push({ alias, tokens: usage.tokens });
+    };
+    const decisionRef = passthroughStreamResult().decision;
+    Object.assign(decisionRef, {
+      final: { status: "ok", model_alias: "anthropic/claude-3-5-sonnet" },
+      cost_breakdown: { total_usd: 0, completion_usd: 0.003, eval_usd: null },
+    });
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...passthroughStreamResult(), decision: decisionRef }),
+      "anthropic_messages",
+      undefined,
+      undefined,
+      recordOAuthUsage,
+    );
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    expect(oauthCalls.length).toBe(1);
+    // input(7)+cache_read(3)+cache_creation(2)+output(11) = 23 tokens
+    expect(oauthCalls[0]?.tokens).toBe(23);
+  });
+
+  it("calls recordOAuthUsage in stream finally after draining (lines 1216-1218)", async () => {
+    const oauthCalls: Array<{ alias: string | null; tokens: number }> = [];
+    const recordOAuthUsage = (
+      _account: unknown,
+      alias: string | null,
+      usage: { tokens: number; costUsd: number | null },
+    ) => {
+      oauthCalls.push({ alias, tokens: usage.tokens });
+    };
+    const usageFrame = JSON.stringify({
+      choices: [{ index: 0, delta: { content: "yo" } }],
+      usage: { prompt_tokens: 8, completion_tokens: 4 },
+    });
+    const stream = (async function* (): AsyncIterable<string> {
+      yield `data: ${usageFrame}\n\n`;
+      yield `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`;
+      yield "data: [DONE]\n\n";
+    })();
+    const decisionRef = streamOkResult(stream).decision;
+    Object.assign(decisionRef, {
+      final: { status: "ok", model_alias: "gpt-4o" },
+      cost_breakdown: { total_usd: 0, completion_usd: 0.002, eval_usd: null },
+    });
+    const pipeline = createMessagesPipeline(
+      () => Promise.resolve({ ...streamOkResult(stream), decision: decisionRef }),
+      "anthropic_messages",
+      undefined,
+      undefined,
+      recordOAuthUsage,
+    );
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    for await (const _ of run.streamIR()) {
+      // drain
+    }
+    expect(oauthCalls.length).toBe(1);
+    expect(oauthCalls[0]?.tokens).toBe(12); // 8 + 4
+  });
+});

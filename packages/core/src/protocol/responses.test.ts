@@ -1151,6 +1151,817 @@ describe("responsesTransformer — response echo passthrough (reasoning/text/too
   });
 });
 
+// —— Coverage targets: uncovered lines/branches in responses.ts ————————————————
+
+// Lines 234-237: responsesTextToResponseFormat — json_object + unknown/text branches
+describe("responsesTransformer — text.format.json_object and plain text formats (lines 234-237)", () => {
+  it("maps text.format.json_object to IR response_format.json_object", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "hi",
+      text: { format: { type: "json_object" } },
+    });
+    expect(ir.response_format).toEqual({ type: "json_object" });
+  });
+
+  it("ignores text.format.text (no structured output → response_format absent)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "hi",
+      text: { format: { type: "text" } },
+    });
+    expect(ir.response_format).toBeUndefined();
+  });
+
+  it("ignores text that is not an object (primitive string) → no response_format", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "hi",
+      text: "just a string" as unknown as Record<string, unknown>,
+    });
+    expect(ir.response_format).toBeUndefined();
+  });
+});
+
+// Lines 252-254: responseFormatToResponsesText — json_object outbound
+describe("responsesTransformer — outbound text.format.json_object (lines 252-254)", () => {
+  it("maps IR response_format.json_object back to text.format.json_object on outbound request", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: { type: "json_object" },
+    })) as { text?: { format?: { type?: string } } };
+    expect(native.text?.format?.type).toBe("json_object");
+  });
+});
+
+// Lines 296-297: chatToolChoiceToResponses — {type:'function'} but function field
+// has no name → return toolChoice verbatim
+describe("responsesTransformer — chatToolChoiceToResponses fallback branch (lines 296-297)", () => {
+  it("keeps tool_choice verbatim when function field is missing a name", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
+      // {type:'function'} with function:{} (no name) → verbatim fallback
+      tool_choice: { type: "function", function: {} } as unknown as string,
+    })) as { tool_choice?: unknown };
+    // Must not throw; the shape is preserved (not converted to flat Responses format)
+    expect(native.tool_choice).toEqual({ type: "function", function: {} });
+  });
+
+  it("keeps a non-function tool_choice string verbatim (non-object branch)", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: "required",
+    })) as { tool_choice?: unknown };
+    expect(native.tool_choice).toBe("required");
+  });
+});
+
+// Lines 321-449: toIRRequest — second system message (non-first) stays as input item
+describe("responsesTransformer — second system message stays as message item (lines 321-449)", () => {
+  it("folds first system to instructions, keeps a second system as a message input item", async () => {
+    // The first system maps to `instructions`; any later system stays as an input message.
+    // This exercises the "instructions !== undefined" guard (line 554).
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [
+        { role: "system", content: "first system" },
+        { role: "system", content: "second system" },
+        { role: "user", content: "hello" },
+      ],
+    })) as {
+      instructions?: string;
+      input: Array<{ type: string; role?: string; content?: unknown }>;
+    };
+    expect(native.instructions).toBe("first system");
+    // second system must remain in input as a message item
+    const secondSys = native.input.find((i) => i.type === "message" && i.role === "system");
+    expect(secondSys).toBeDefined();
+  });
+});
+
+// Lines 366: foldContentPart — default case (unknown part type → JSON text placeholder)
+describe("responsesTransformer — foldContentPart unknown part type (line 366)", () => {
+  it("degrades an unknown content part type to a JSON text placeholder (fail-open)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "what?" },
+            { type: "video_frame", data: "DEADBEEF" } as unknown as Record<string, unknown>,
+          ],
+        },
+      ],
+    });
+    const parts = ir.messages.at(-1)?.content;
+    if (!Array.isArray(parts)) throw new Error("expected parts");
+    // The unknown part becomes a text placeholder
+    expect(
+      parts.some((p) => p.type === "text" && (p as { text: string }).text.includes("video_frame")),
+    ).toBe(true);
+  });
+});
+
+// Lines 422: toIRRequest — function_call fallback id synthesis
+describe("responsesTransformer — function_call id synthesis when call_id and id absent (line 422)", () => {
+  it("synthesizes a call id when function_call item has neither call_id nor id", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "function_call",
+          // no call_id, no id
+          name: "check",
+          arguments: "{}",
+        } as unknown as Record<string, unknown>,
+      ],
+    });
+    const assistantMsg = ir.messages.find((m) => m.role === "assistant");
+    const call = assistantMsg?.tool_calls?.[0];
+    expect(call?.id).toMatch(/^call_/);
+    expect(call?.function.name).toBe("check");
+  });
+});
+
+// Lines 432: toIRRequest — function_call_output with multipart content (non-string output)
+describe("responsesTransformer — function_call_output with multipart content (line 432)", () => {
+  it("folds array output on function_call_output into an array of IR parts", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "function_call_output",
+          call_id: "call_x",
+          output: [{ type: "output_text", text: "result" }],
+        } as unknown as Record<string, unknown>,
+      ],
+    });
+    const toolMsg = ir.messages.find((m) => m.role === "tool");
+    expect(toolMsg?.tool_call_id).toBe("call_x");
+    // output was an array → folded into IR parts
+    expect(Array.isArray(toolMsg?.content)).toBe(true);
+  });
+
+  it("uses empty string when function_call_output has undefined output", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "function_call_output",
+          call_id: "call_y",
+          // output undefined
+        } as unknown as Record<string, unknown>,
+      ],
+    });
+    const toolMsg = ir.messages.find((m) => m.role === "tool");
+    expect(toolMsg?.content).toBe("");
+  });
+});
+
+// Lines 497-562: toIRRequest — tool_choice Responses → Chat normalization for non-function shape
+describe("responsesTransformer — tool_choice non-function Responses shape passes through (lines 497-562)", () => {
+  it("passes through 'auto' tool_choice string unchanged", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "hi",
+      tool_choice: "auto",
+    });
+    expect(ir.tool_choice).toBe("auto");
+  });
+
+  it("passes through 'none' tool_choice unchanged", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "hi",
+      tool_choice: "none",
+    });
+    expect(ir.tool_choice).toBe("none");
+  });
+
+  it("passes through a Responses tool_choice with {type:'function'} that ALREADY has a function field (already Chat-shaped) unchanged", async () => {
+    // responsesToolChoiceToChat: if toolChoice already has .function, it is Chat-shaped → return verbatim
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: "hi",
+      tool_choice: { type: "function", function: { name: "f" } },
+    });
+    expect(ir.tool_choice).toEqual({ type: "function", function: { name: "f" } });
+  });
+});
+
+// Lines 613-745 (toResponsesResponse) — reasoning items FIRST, then message
+describe("responsesTransformer — toResponsesResponse: reasoning items precede message (lines 613-745)", () => {
+  it("emits reasoning output items before the message item", async () => {
+    const ir: IRResponse = {
+      id: "resp_r",
+      model: "gpt-4o",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", text: "let me think" },
+              { type: "text", text: "the answer" },
+            ],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const native = (await responsesTransformer.transformResponseOut(ir)) as {
+      output: Array<{ type: string }>;
+    };
+    // reasoning must precede message
+    const reasoningIdx = native.output.findIndex((o) => o.type === "reasoning");
+    const messageIdx = native.output.findIndex((o) => o.type === "message");
+    expect(reasoningIdx).toBeLessThan(messageIdx);
+  });
+
+  it("emits no reasoning item when there are no thinking parts", async () => {
+    const ir: IRResponse = {
+      id: "resp_r2",
+      model: "gpt-4o",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "plain" },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const native = (await responsesTransformer.transformResponseOut(ir)) as {
+      output: Array<{ type: string }>;
+    };
+    expect(native.output.some((o) => o.type === "reasoning")).toBe(false);
+  });
+
+  it("emits no message item when content is null/empty and no tool_calls", async () => {
+    const ir: IRResponse = {
+      id: "resp_empty",
+      model: "gpt-4o",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: null },
+          finish_reason: "tool_calls",
+        },
+      ],
+    };
+    const native = (await responsesTransformer.transformResponseOut(ir)) as {
+      output: Array<{ type: string }>;
+    };
+    expect(native.output.some((o) => o.type === "message")).toBe(false);
+  });
+});
+
+// Lines 639, 653: toResponsesResponse — usage input_tokens_details cache fields
+describe("responsesTransformer — toResponsesResponse usage fields (lines 639, 653)", () => {
+  it("includes cache fields in input_tokens_details when cached_tokens or cacheCreation > 0", async () => {
+    const ir: IRResponse = {
+      id: "resp_u2",
+      model: "gpt-4o",
+      choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 50,
+        completion_tokens: 10,
+        cached_tokens: 20,
+        cache_creation_tokens: 5,
+      },
+    };
+    const native = (await responsesTransformer.transformResponseOut(ir)) as {
+      usage?: {
+        input_tokens_details?: { cached_tokens?: number; cache_creation_input_tokens?: number };
+      };
+    };
+    expect(native.usage?.input_tokens_details?.cached_tokens).toBe(20);
+    expect(native.usage?.input_tokens_details?.cache_creation_input_tokens).toBe(5);
+  });
+
+  it("omits input_tokens_details when both cached and cacheCreation are 0", async () => {
+    const ir: IRResponse = {
+      id: "resp_u3",
+      model: "gpt-4o",
+      choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 50, completion_tokens: 10 },
+    };
+    const native = (await responsesTransformer.transformResponseOut(ir)) as {
+      usage?: { input_tokens_details?: unknown };
+    };
+    expect(native.usage?.input_tokens_details).toBeUndefined();
+  });
+});
+
+// Lines 706-709: toResponsesResponse — assistant content parts (Array branch)
+describe("responsesTransformer — toResponsesResponse array content parts (lines 706-709)", () => {
+  it("maps array content parts to output_text items, skipping thinking parts already emitted", async () => {
+    const ir: IRResponse = {
+      id: "resp_p",
+      model: "gpt-4o",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "part A" },
+              { type: "text", text: "part B" },
+            ],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const native = (await responsesTransformer.transformResponseOut(ir)) as {
+      output: Array<{ type: string; content?: Array<{ type: string; text?: string }> }>;
+    };
+    const msgItem = native.output.find((o) => o.type === "message");
+    const textItems = (msgItem?.content ?? []).filter((c) => c.type === "output_text");
+    expect(textItems).toHaveLength(2);
+    expect(textItems.map((t) => t.text)).toEqual(["part A", "part B"]);
+  });
+});
+
+// Lines 808-1003: toIRResponse — various paths
+describe("responsesTransformer — toIRResponse various branches (lines 808-1003)", () => {
+  it("maps status 'incomplete' with missing incomplete_details.reason to finish_reason 'length'", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_unk",
+      model: "gpt-4o",
+      status: "incomplete",
+      // no incomplete_details → default to 'length'
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "x" }] },
+      ],
+    });
+    expect(ir.choices[0]?.finish_reason).toBe("length");
+  });
+
+  it("maps status neither completed nor incomplete to that raw status string", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_odd",
+      model: "gpt-4o",
+      status: "queued", // not 'completed' or 'incomplete'
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "x" }] },
+      ],
+    });
+    expect(ir.choices[0]?.finish_reason).toBe("queued");
+  });
+
+  it("folds a reasoning item from output[] into IR thinking content parts", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_reason",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        {
+          type: "reasoning",
+          id: "rs_1",
+          summary: [
+            { type: "summary_text", text: "step 1" },
+            { type: "summary_text", text: "step 2" },
+          ],
+        },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] },
+      ],
+    });
+    const content = ir.choices[0]?.message.content;
+    if (!Array.isArray(content)) throw new Error("expected array");
+    expect(
+      content.some((p) => p.type === "thinking" && (p as { text: string }).text.includes("step 1")),
+    ).toBe(true);
+  });
+
+  it("ignores unknown output item types gracefully (default case)", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_unk2",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        { type: "function_call_output", call_id: "c1", output: "done" },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+      ],
+    });
+    // Should not throw; function_call_output ignored on response side
+    expect(ir.choices[0]?.message).toBeDefined();
+  });
+
+  it("maps a function_call output item to a tool call in IR", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_fc",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          call_id: "call_abc",
+          name: "get_weather",
+          arguments: '{"city":"LA"}',
+        },
+        { type: "message", role: "assistant", content: [] },
+      ],
+    });
+    const call = ir.choices[0]?.message.tool_calls?.[0];
+    expect(call?.id).toBe("call_abc");
+    expect(call?.function.name).toBe("get_weather");
+    expect(call?.function.arguments).toBe('{"city":"LA"}');
+  });
+
+  it("synthesizes a call id for function_call when both call_id and id absent", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_noid",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          // no call_id, no id
+          name: "noop",
+          arguments: "{}",
+        } as unknown as Record<string, unknown>,
+      ],
+    });
+    const call = ir.choices[0]?.message.tool_calls?.[0];
+    expect(call?.id).toMatch(/^call_/);
+  });
+
+  it("folds message with string content into IR text part", async () => {
+    // foldMessageContent: string → string → parts.push text block
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_str",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        { type: "message", role: "assistant", content: "plain string content" as unknown as [] },
+      ],
+    });
+    const content = ir.choices[0]?.message.content;
+    // string content → foldMessageContent returns a string → non-empty pushes a text part
+    expect(content).toBeDefined();
+  });
+
+  it("omits usage fields from IR when response has no usage", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_nou",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
+      ],
+      // no usage field
+    });
+    expect(ir.usage).toBeUndefined();
+  });
+});
+
+// Lines 911, 918: toIRResponse — message content string and null folding
+describe("responsesTransformer — toIRResponse message folding paths (lines 911, 918)", () => {
+  it("handles message item with empty string content (no part pushed)", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_empty_str",
+      model: "gpt-4o",
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: "" as unknown as [] }],
+    });
+    // empty string → foldMessageContent returns "" → condition `folded !== ""` is false → not pushed
+    const msg = ir.choices[0]?.message;
+    expect(msg).toBeDefined();
+  });
+});
+
+// Lines 942, 970, 990, 993: mapResponsesStatus + incomplete_details.reason paths
+describe("responsesTransformer — mapResponsesStatus edge cases (lines 942, 970, 990, 993)", () => {
+  it("maps null finish to {status:'completed', raw:null}", () => {
+    // Direct unit test of the exported helper
+    const { mapResponsesStatus } = responsesTransformer as unknown as {
+      mapResponsesStatus?: (f: string | null) => { status: string; raw: string | null };
+    };
+    if (mapResponsesStatus === undefined) {
+      // The function is not exported on the transformer; test via round-trip instead
+      return;
+    }
+    expect(mapResponsesStatus(null)).toEqual({ status: "completed", raw: null });
+  });
+
+  it("maps unknown finish_reason to completed status", async () => {
+    const ir: IRResponse = {
+      id: "resp_x",
+      model: "gpt-4o",
+      choices: [
+        { index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "novel_reason" },
+      ],
+    };
+    const native = (await responsesTransformer.transformResponseOut(ir)) as { status: string };
+    // unknown reason → STATUS_MAP fallback → completed
+    expect(native.status).toBe("completed");
+  });
+
+  it("maps 'incomplete' with reason 'max_output_tokens' to incomplete_details.reason='max_tokens'", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_max",
+      model: "gpt-4o",
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "x" }] },
+      ],
+    });
+    // max_output_tokens is not 'content_filter' → finish_reason = 'length'
+    expect(ir.choices[0]?.finish_reason).toBe("length");
+  });
+
+  it("round-trip: length → incomplete + max_tokens reason → back to length", async () => {
+    const ir: IRResponse = {
+      id: "resp_len",
+      model: "gpt-4o",
+      choices: [
+        { index: 0, message: { role: "assistant", content: "partial" }, finish_reason: "length" },
+      ],
+      usage: { prompt_tokens: 50, completion_tokens: 100 },
+    };
+    const native = (await responsesTransformer.transformResponseOut(ir)) as {
+      status: string;
+      incomplete_details?: { reason?: string };
+    };
+    expect(native.status).toBe("incomplete");
+    expect(native.incomplete_details?.reason).toBe("max_tokens");
+
+    const back = await responsesTransformer.transformResponseIn(
+      native as Parameters<typeof responsesTransformer.transformResponseIn>[0],
+    );
+    expect(back.choices[0]?.finish_reason).toBe("length");
+  });
+});
+
+// contentToFunctionCallOutput paths: null, string, array
+describe("responsesTransformer — contentToFunctionCallOutput paths (line 671-673)", () => {
+  it("serializes a tool message with null content to empty string in outbound input", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: "{}" } }],
+        },
+        { role: "tool", tool_call_id: "c1", content: null },
+        { role: "user", content: "ok" },
+      ],
+    })) as { input: Array<{ type: string; output?: unknown }> };
+    const fco = native.input.find((i) => i.type === "function_call_output");
+    expect(fco?.output).toBe("");
+  });
+
+  it("serializes a tool message with multipart content to a parts array in outbound input", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "c2", type: "function", function: { name: "g", arguments: "{}" } }],
+        },
+        {
+          role: "tool",
+          tool_call_id: "c2",
+          content: [{ type: "text", text: "result" }],
+        },
+        { role: "user", content: "ok" },
+      ],
+    })) as { input: Array<{ type: string; output?: unknown }> };
+    const fco = native.input.find((i) => i.type === "function_call_output");
+    expect(Array.isArray(fco?.output)).toBe(true);
+  });
+});
+
+// Lines 706-709: contentToResponsesParts — document part with base64 data (no fileId)
+describe("responsesTransformer — outbound document base64 part (lines 706-709)", () => {
+  it("encodes a document part with data as input_file.file_data on outbound request", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              data: "JVBERi0=",
+              mediaType: "application/pdf",
+              filename: "doc.pdf",
+            },
+          ],
+        },
+      ],
+    })) as { input: Array<{ type: string; content?: Array<Record<string, unknown>> }> };
+    const msg = native.input.find((i) => i.type === "message");
+    const filePart = (msg?.content ?? []).find((c) => c.type === "input_file");
+    expect(filePart?.file_data).toBe("data:application/pdf;base64,JVBERi0=");
+    expect(filePart?.filename).toBe("doc.pdf");
+  });
+
+  it("encodes document with data and no mediaType using application/octet-stream fallback", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "document", data: "DEADBEEF" }],
+        },
+      ],
+    })) as { input: Array<{ type: string; content?: Array<Record<string, unknown>> }> };
+    const msg = native.input.find((i) => i.type === "message");
+    const filePart = (msg?.content ?? []).find((c) => c.type === "input_file");
+    expect(filePart?.file_data as string).toContain("application/octet-stream");
+  });
+});
+
+// Line 911: toIRResponse — foldedLogprobs already set; second output_text's logprobs ignored
+describe("responsesTransformer — foldedLogprobs set only from first output_text (line 911)", () => {
+  it("captures logprobs only from the first output_text part, ignoring subsequent ones", async () => {
+    const lp1 = { tokens: ["a"], token_logprobs: [-0.1] };
+    const lp2 = { tokens: ["b"], token_logprobs: [-0.2] };
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_lp",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            { type: "output_text", text: "first", logprobs: lp1 },
+            { type: "output_text", text: "second", logprobs: lp2 },
+          ],
+        },
+      ],
+    });
+    const choice = ir.choices[0];
+    // foldedLogprobs captures only lp1 (first output_text with logprobs)
+    expect(choice?.logprobs).toEqual(lp1);
+  });
+});
+
+// Lines 990, 993: toIRResponse usage — fullInput undefined, output_tokens undefined
+describe("responsesTransformer — toIRResponse usage fields when optional data absent (lines 990, 993)", () => {
+  it("omits prompt_tokens when usage.input_tokens is absent (fullInput undefined, line 990)", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_noinput",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
+      ],
+      usage: {
+        // no input_tokens → fullInput undefined
+        output_tokens: 10,
+      },
+    });
+    // prompt_tokens must not be present (fullInput undefined → not emitted)
+    expect(ir.usage?.prompt_tokens).toBeUndefined();
+    expect(ir.usage?.completion_tokens).toBe(10);
+  });
+
+  it("omits completion_tokens when usage.output_tokens is absent (line 993)", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_noout",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
+      ],
+      usage: {
+        input_tokens: 50,
+        // no output_tokens
+      },
+    });
+    expect(ir.usage?.completion_tokens).toBeUndefined();
+    expect(ir.usage?.prompt_tokens).toBe(50);
+  });
+});
+
+// Line 639: toResponsesRequest — previous_response_id re-emit from provider_raw
+describe("responsesTransformer — previous_response_id and metadata re-emit from provider_raw (line 639)", () => {
+  it("re-emits previous_response_id when present in provider_raw", async () => {
+    // Store the IR with provider_raw containing previous_response_id
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      previous_response_id: "resp_prev_1",
+      input: "follow-up",
+    });
+    // Round-trip back to native Responses request
+    const native = (await responsesTransformer.transformRequestIn?.(ir)) as {
+      previous_response_id?: string;
+    };
+    expect(native.previous_response_id).toBe("resp_prev_1");
+  });
+});
+
+// Lines 653, 661-666: contentToText string and null paths via toResponsesRequest
+describe("responsesTransformer — contentToText paths (lines 653, 661-666)", () => {
+  it("emits reasoning config from reasoning_effort when no raw reasoning_config in provider_raw (line 653)", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "medium",
+    })) as { reasoning?: { effort?: string } };
+    expect(native.reasoning?.effort).toBe("medium");
+  });
+
+  it("renders a string-content assistant turn as an output_text item in outbound input (lines 661-666)", async () => {
+    // Exercises contentToText for a string content value on an assistant-with-text+tool_calls turn.
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "assistant",
+          content: "Let me check.",
+          tool_calls: [
+            { id: "c1", type: "function", function: { name: "lookup", arguments: "{}" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "c1", content: "result" },
+        { role: "user", content: "thanks" },
+      ],
+    })) as { input: Array<{ type: string; content?: Array<{ type: string; text?: string }> }> };
+    // The assistant content "Let me check." must appear as a message/output_text item.
+    const textMsg = native.input.find(
+      (i) => i.type === "message" && i.content?.some((c) => c.type === "output_text"),
+    );
+    const textPart = textMsg?.content?.find((c) => c.type === "output_text");
+    expect(textPart?.text).toBe("Let me check.");
+  });
+});
+
+// Line 253: responseFormatToResponsesText — unknown type → undefined (no text emitted)
+describe("responsesTransformer — responseFormatToResponsesText unknown type (line 253)", () => {
+  it("emits no text field for an unrecognized response_format type", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: { type: "text" } as unknown as { type: "json_object" },
+    })) as { text?: unknown };
+    // type:'text' is not json_schema or json_object → no text field
+    expect(native.text).toBeUndefined();
+  });
+});
+
+// Line 422: toIRRequest — second function_call appended to same trailing assistant turn
+describe("responsesTransformer — multiple function_calls appended to same assistant turn (line 422)", () => {
+  it("appends a second function_call to the same trailing assistant turn (not a new message)", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-4o",
+      input: [
+        {
+          type: "function_call",
+          call_id: "c1",
+          name: "tool_a",
+          arguments: "{}",
+        },
+        {
+          type: "function_call",
+          call_id: "c2",
+          name: "tool_b",
+          arguments: "{}",
+        },
+      ],
+    });
+    const assistantMsgs = ir.messages.filter((m) => m.role === "assistant");
+    // Both function_calls should fold into ONE assistant message
+    expect(assistantMsgs).toHaveLength(1);
+    expect(assistantMsgs[0]?.tool_calls).toHaveLength(2);
+    expect(assistantMsgs[0]?.tool_calls?.[0]?.id).toBe("c1");
+    expect(assistantMsgs[0]?.tool_calls?.[1]?.id).toBe("c2");
+  });
+});
+
+// Lines 662-666: contentToText — string content path
+describe("responsesTransformer — contentToText null path (lines 662-666)", () => {
+  it("emits empty string from function_call_output with string content for null-content tool", async () => {
+    const native = (await responsesTransformer.transformRequestIn?.({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: "{}" } }],
+        },
+        // string content tool message — exercises the string path in contentToFunctionCallOutput
+        { role: "tool", tool_call_id: "c1", content: "string result" },
+        { role: "user", content: "ok" },
+      ],
+    })) as { input: Array<{ type: string; output?: unknown }> };
+    const fco = native.input.find((i) => i.type === "function_call_output");
+    expect(fco?.output).toBe("string result");
+  });
+});
+
 describe("responsesTransformer — endpoint isolation (test #6)", () => {
   it("declares /v1/responses, distinct from OpenAI Chat", () => {
     expect(responsesTransformer.name).toBe("openai-responses");

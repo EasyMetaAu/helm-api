@@ -6,6 +6,7 @@ import {
   createCodexResponsesClient,
   createGenericOpenAIResponsesClient,
   hoistResponsesInstructions,
+  openaiToGenericResponsesRequest,
   openaiToResponsesRequest,
   readResponsesEvents,
   readResponsesSSERaw,
@@ -2061,5 +2062,249 @@ describe("sanitizeCodexResponsesNativeBody", () => {
     });
 
     expect(body.input).toEqual([{ type: "reasoning", encrypted_content: "enc", summary: [] }]);
+  });
+
+  it("handles non-array input: passes through unchanged when store:false but input is not an array", () => {
+    // Lines 247-248: sanitizeStoreFalseInputItems returns early when input is not an array
+    const { body, fixes } = sanitizeCodexResponsesNativeBody({
+      model: "gpt-5.5",
+      store: false,
+      input: "a plain string input",
+    });
+    // No mutation, no fixes related to input items
+    expect(body.input).toBe("a plain string input");
+    expect(fixes).not.toContain("input_item_references_stripped");
+    expect(fixes).not.toContain("empty_reasoning_items_dropped");
+  });
+
+  it("passes through non-record items (primitives) in the input array unchanged", () => {
+    // Lines 255-257: non-record items (e.g. strings/numbers) in the array are passed through
+    const { body } = sanitizeCodexResponsesNativeBody({
+      model: "gpt-5.5",
+      store: false,
+      input: ["a string item", 42, { role: "user", content: "normal item" }],
+    });
+    // The string and number primitives must survive unchanged
+    const input = body.input as unknown[];
+    expect(input[0]).toBe("a string item");
+    expect(input[1]).toBe(42);
+  });
+});
+
+describe("openaiToGenericResponsesRequest — tools and reasoning_effort", () => {
+  it("maps reasoning_effort to body.reasoning.effort", () => {
+    const body = openaiToGenericResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "high",
+    } as unknown as Parameters<typeof openaiToGenericResponsesRequest>[0]);
+    expect(body.reasoning).toEqual({ effort: "high" });
+  });
+
+  it("maps tools array to Responses function format", () => {
+    const body = openaiToGenericResponsesRequest({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "go" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "search",
+            description: "Web search",
+            parameters: { type: "object", properties: { q: { type: "string" } } },
+          },
+        },
+      ],
+    } as unknown as Parameters<typeof openaiToGenericResponsesRequest>[0]);
+    expect(body.tools).toEqual([
+      {
+        type: "function",
+        name: "search",
+        description: "Web search",
+        parameters: { type: "object", properties: { q: { type: "string" } } },
+        strict: false,
+      },
+    ]);
+  });
+
+  it("drops tools with no function.name", () => {
+    const body = openaiToGenericResponsesRequest({
+      model: "gpt-5.5",
+      messages: [],
+      tools: [{ type: "function", function: { description: "no name" } }],
+    } as unknown as Parameters<typeof openaiToGenericResponsesRequest>[0]);
+    expect(body.tools).toBeUndefined();
+  });
+
+  it("sets stream:true when req.stream is true", () => {
+    const body = openaiToGenericResponsesRequest({
+      model: "gpt-5.5",
+      messages: [],
+      stream: true,
+    } as unknown as Parameters<typeof openaiToGenericResponsesRequest>[0]);
+    expect(body.stream).toBe(true);
+  });
+});
+
+describe("createGenericOpenAIResponsesClient — chatCompletionStream", () => {
+  it("translates an OpenAI chat request to generic Responses and yields SSE chunks", async () => {
+    const fetchMock = vi.fn(async () =>
+      sseResponse([
+        { type: "response.created", response: { id: "r1", status: "in_progress" } },
+        { type: "response.output_item.added", item: { type: "message", content: [] } },
+        { type: "response.output_text.delta", delta: "Hello", output_index: 0, content_index: 0 },
+        { type: "response.output_text.done", text: "Hello", output_index: 0, content_index: 0 },
+        { type: "response.completed", response: { id: "r1", status: "completed" } },
+      ]),
+    );
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const c of client.chatCompletionStream({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      chunks.push(c);
+    }
+    const joined = chunks.join("");
+    expect(joined).toContain('"content":"Hello"');
+    expect(chunks.length).toBeGreaterThan(0);
+  });
+
+  it("throws UpstreamError before first chunk on non-2xx", async () => {
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: (async () => jsonResponse({ error: "rate limited" }, 429)) as unknown as typeof fetch,
+    });
+    let caught: unknown;
+    try {
+      for await (const _ of client.chatCompletionStream({
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "hi" }],
+      })) {
+        // must not yield
+      }
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect((caught as UpstreamError).upstreamStatus).toBe(429);
+  });
+});
+
+describe("createGenericOpenAIResponsesClient — nativePassthroughStream", () => {
+  it("byte-relays native Responses SSE without re-framing or [DONE]", async () => {
+    const writes = [
+      'data: {"type":"response.created","response":{"id":"r1"}}\n\n',
+      'data: {"type":"response.completed","response":{"id":"r1"}}\n\n',
+    ];
+    const enc = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const w of writes) controller.enqueue(enc.encode(w));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    );
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const c of client.nativePassthroughStream?.({
+      model: "gpt-5.5",
+      input: "hi",
+      stream: true,
+    }) ?? []) {
+      chunks.push(c);
+    }
+    expect(chunks).toEqual(writes);
+    expect(chunks.join("")).not.toContain("[DONE]");
+    expect(chunks.join("")).not.toContain("chat.completion.chunk");
+  });
+
+  it("throws UpstreamError before first chunk on non-2xx", async () => {
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: (async () => jsonResponse({ error: "server error" }, 503)) as unknown as typeof fetch,
+    });
+    let caught: unknown;
+    try {
+      for await (const _ of client.nativePassthroughStream?.({ model: "gpt-5.5", input: "hi" }) ??
+        []) {
+        // must not yield
+      }
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect((caught as UpstreamError).upstreamStatus).toBe(503);
+  });
+});
+
+describe("createGenericOpenAIResponsesClient — resolveBaseUrl", () => {
+  it("calls resolveBaseUrl() to get the dynamic endpoint at request time", async () => {
+    let seenUrl = "";
+    const fetchMock = vi.fn(async (url: string) => {
+      seenUrl = url;
+      return jsonResponse({ id: "resp_dyn", object: "response", status: "completed" });
+    });
+    const client = createGenericOpenAIResponsesClient({
+      config: {
+        baseUrl: "https://static.base/v1",
+        resolveBaseUrl: async () => "https://dynamic.base/v1",
+        apiKey: "sk-test",
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await client.nativePassthrough?.({ model: "gpt-5.5", input: "hi" });
+    expect(seenUrl).toBe("https://dynamic.base/v1/responses");
+  });
+});
+
+describe("createGenericOpenAIResponsesClient — providerHeaders: no-auth path", () => {
+  it("sends no Authorization header when neither apiKey nor getAuthHeader is configured", async () => {
+    let seen: Headers | null = null;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen = new Headers(init?.headers);
+      return jsonResponse({ id: "resp", object: "response" });
+    });
+    // Deliberately no apiKey, no getAuthHeader — the empty-string authorization branch
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1" } as never,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    await client.nativePassthrough?.({ model: "gpt-5.5", input: "hi" });
+    expect((seen as unknown as Headers).get("Authorization")).toBeNull();
+  });
+});
+
+describe("createGenericOpenAIResponsesClient — scrub via currentSecrets", () => {
+  it("redacts currentSecrets from upstream error body", async () => {
+    const client = createGenericOpenAIResponsesClient({
+      config: {
+        baseUrl: "https://api.openai.test/v1",
+        apiKey: "sk-visible",
+        currentSecrets: () => ["super-secret"],
+      },
+      fetch: (async () =>
+        jsonResponse({ error: "denied: super-secret token" }, 403)) as unknown as typeof fetch,
+    });
+    let caught: unknown;
+    try {
+      await client.nativePassthrough?.({ model: "gpt-5.5", input: "hi" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect(JSON.stringify((caught as UpstreamError).providerRaw)).not.toContain("super-secret");
+    expect(JSON.stringify((caught as UpstreamError).providerRaw)).toContain("[redacted]");
   });
 });
