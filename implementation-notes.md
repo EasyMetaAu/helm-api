@@ -7,6 +7,20 @@
 
 ---
 
+## 2026-06-24 · 测试覆盖率补强至「边际收益 0」+ 诚实化单测指标（CLAUDE.md 开发流程「覆盖率到边际效应为止」）
+
+- **背景**：`main`(v0.21.20) 实测单测覆盖率**低于仓库自配阈值**（stmts/lines 89.11% < 90、branches 84.35% < 85、functions 93.01% < 93）——CI「单测」门禁未带 `--coverage` 故长期带债。4520 未覆盖行里 ~50% 是 **e2e 已覆盖的启动胶水 + admin UI 路由**，逐行单测边际收益≈0。
+- **用户拍板的两个边界**：① 把纯 e2e 胶水/UI 脚手架**移出单测覆盖范围**（改 config 而非写无意义测试）；② e2e **测量 + 只补真实缺口**，不为数字硬凑 spec。
+- **Part A（诚实化指标）**：`vitest.config.ts` coverage.exclude 追加 `apps/gateway/src/server.ts`（`buildServer` 877–2622 启动装配，e2e 覆盖）、`apps/gateway/src/index.ts`、`apps/admin/src/routes/**`（SvelteKit UI 路由，admin e2e 覆盖）、`i18n/extraction-anchors.svelte`（构建期锚点）。**排除不删测试**——`server.test.ts`/`server.oauth.test.ts` 仍跑保回归。
+- **Part B（补高价值单测，5 组并行子代理，~440 例）**：provider 执行（gemini 行 76→92%/分支 66→89%、openai-responses、anthropic）；protocol transformer（anthropic request/response、responses，docs/05 流式/tool-call）；cleanup（**run-pass 8→100%**、cleanup-runner 82→98%）+ memory scheduler 78→97%；网关路由（**mcp/tools 分支 59→96%**、admin/memory 59→100%、execute/responses/chat/messages-pipeline 分支补强）；server 纯函数回归（`coerceErrorClass`/`resolveProviderProxy`，新 `server.helpers.test.ts`）。
+- **结果**：**4592 单测全绿**；覆盖率 89.11/84.35/93.01/89.11 → **95.10 / 86.52 / 95.85 / 95.10**，四项全过阈值（退出码 0）。
+- **坑（子代理写的测试，`typecheck -r` 含 *.test.ts 抓出，已修）**：mock 返回类型过窄（archive 行 `{id}` vs 完整行→cast）、`.find` 谓词 `Record<string,unknown>` vs IR union（去标注让其推断）、fetch mock 参数 `string` 窄于 `string|URL|Request`、捏造非法 `reason:"wait_timeout"`（合法仅 timeout/aborted/queue_full）、**closure-narrowing**（`let x=null` 仅在回调内赋值→读处被收窄成 `never`，读处 cast）。vitest（esbuild）不做类型检查，故运行期绿但 tsc 红——**子代理委派写测试后必须跑 typecheck，不能只信 vitest 绿**。
+- **死代码已删（深挖后确认）**：`anthropic.ts` 的 `openaiToAnthropicRequest` 顶层 `cache_control` 转发分支 + 仅它使用的本地 `hasExplicitCacheControl`，连同那条"标注死代码"的测试，**已删除**。考证：该分支 #155(6/10) 引入时是活的；#281(6/17，Claude Code CLI 仿真)让 `buildSystem()` **无条件**在 agentPrompt 块注入 ephemeral 断点 → `!hasExplicitCacheControl(body.system)` 恒假 → 分支被**意外杀死**。判定可删依据：① 顶层 `cache_control` **非 Anthropic Messages 字段**（API 只认块级）；② 全仓无任何处读取顶层 `body.cache_control`；③ 真实客户端 **AgentCrew 用块级 cache_control**（稳定 system 块 + 末条 user），不发顶层；④ 该功能的**活版本仍在两处**——`execute.ts:1480`（通用路径无条件转发）与 `protocol/anthropic/request.ts:1119`（native，system 无强制断点故 guard 可真）。删后 `anthropic.test.ts` 439/451「drops top-level cache_control」两条行为契约测试仍绿，作回归护栏。
+- **Part C（e2e 测量）**：手动 c8 remap（playwright 跑完即采 V8，`set -e` 在 c8 前中止故手动出报告）→ e2e 行覆盖 **60.93%**、分支 55.93%（集成级，gateway 经 dist 全链路；印证 server.ts 确由 e2e 覆盖）。9 spec 已覆盖全部 4 协议 + 路由 + 流式 SSE + oauth/memory/gemini/budget/eval **线级链路**，无遗漏链路 → 新增 spec **边际收益 0，不补**。
+- **⚠️ 需用户关注（非本次回归）**：`e2e/memory.spec.ts` 两个时序测试（memory inject 抵达 upstream / 后台 worker 排空）在本机 dist 上**稳定失败**（断言 upstream contents 含 "turn number" 失败，只见 "final question"）。本次 diff 仅单测 *.test.ts + vitest.config（**都不进 gateway dist**），逻辑上不可能影响 e2e 运行时 → **预存在问题**（疑早期 turn 未进 memory 注入/压缩，或 worker 时序），独立于覆盖率任务，留待排查。
+- **验证**：`pnpm typecheck` 三包全绿；`pnpm lint` 0 error（唯一 warning `mcp/oauth.ts:312` pre-existing，未碰源码）；`pnpm test --coverage` 4592 绿、阈值达标；逐文件 lcov 抽查确认命中原未覆盖行（非凑行）。分支 `test/coverage-marginal-zero`，**未提交**（待用户）。
+- **明确不做（边际收益 0）**：`buildServer` 逐行集成测试、admin `+page.svelte`/`+layout.svelte` UI、`lib/api/*` 薄 fetch 封装、dedup 维护脚本、`logging.ts`、凑 100%。
+
 ## 2026-06-23 · 记忆深度召回 = 混合检索（落地 docs/12 P8）+ `memory_recall` MCP 工具（docs/14；原则 1/3/4）
 
 - **背景/范围**：用户要 MCP 上「深度历史召回」（"我们讨论过什么"）。现 `memory_search` 是对蒸馏 `fact_text` 的 `LIKE`——无相关性排序、**无跨语言**（`成本`≠`cost`）。决定**落地 docs/12 已 spec 但 deferred 的 P8**，并新增第 7 个 MCP 工具 `memory_recall` 暴露之。**检索单元 = `memory_facts`**（有 owner_id+scope，跨会话；对齐 docs/12 P8 与 docs/13「raw/observation 不入管理面」）；observations/reflections **不入索引**（完整原始历史靠 fact 的 `sourceObservationRange` 溯源链，非主搜索面，留作后续）。
@@ -33,20 +47,13 @@
 - **配置**：`memory.mcp.oauth { enabled(默认 false), issuer?(缺省从 X-Forwarded-Proto/Host 推导), access_token_ttl_seconds(默认 2592000), allowed_redirect_prefixes }`。token 写入 audience（RFC 8707），但 `/mcp` 端只验签名+exp，aud 当 best-effort（单资源网关，aud 仅纵深防御）。
 - **验证**：TDD 红→绿；`oauth.test.ts` 16 例（密钥派生/JWT 篡改、PKCE 正误、过期码、发现元数据、authorize 校验+XSS 转义、e2e authorize→token→/mcp、裸 key 兼容、无凭据 401）；typecheck + lint + config samples 均绿。**未部署**；启用需 box 配置 `memory.mcp.oauth.enabled:true`（box 已有 `HELM_OAUTH_ENC_KEY`，因用了 Anthropic 订阅 OAuth）。
 
-## 2026-06-22 · Claude 订阅（OAuth）token 成本折算（docs/04/07；约定「能力与定价数据源」；原则 6）
-
-- **问题**：admin 对 Claude Pro/Max 订阅（`anthropic/*` OAuth 池）流量只显示 token **数量**，花费恒为 `—`（null）。token 计数链路（解析→落库→聚合→渲染）对所有 provider 早已就绪，唯一缺口是 `config/pricing.yaml` 无 `anthropic/*` 行；`costOf(alias)` 以路由 alias 查 catalog 落空 → `resolveCostUsd` 返回 `null`（fail-open「未计量」）。`openai-codex/*` 早有定价故 ChatGPT 订阅花费一直能显示——Claude 是唯一漏配的订阅渠道；`github-copilot/*` 无 lane 引用，不在范围。
-- **关键坑（务必同时改两个文件）**：这些 alias 现**无 catalog 条目**→能力过滤被跳过、fail-open 直接尝试（`execute.ts:887` `if (caps)`）。一旦**只加 pricing**，`loadCatalog`（`catalog/index.ts:107`）会用 `EMPTY_CAPABILITIES`（`maxContextTokens:0`/`supportsStreaming:false`/`jsonOutput:none`）造条目 → 能力过滤第 4 关 `context_too_small` 把**每个** Claude 请求剪掉。故必须**同时**在 `capabilities.yaml` 加条目（照搬 `zenmux-anthropic/claude-*` 既有先例，二者都加），用真实上限：Opus/Sonnet/Fable `maxContextTokens:1000000`、Haiku `200000`。
-- **定价来源（按用户规则「API 价优先，否则官方」）**：核对生成 catalog（`catalog/generated/catalog.json`）只有旧 `claude-3-5-{sonnet,haiku}-20241022`，四个目标模型均不在 → 全部用**官方 Anthropic 价**（`claude-api` skill 即官方价表）。Opus 5/25、Sonnet 3/15、Haiku 1/5、Fable 10/50（USD/MTok）。**含 cache 读写价**（读 0.1×、写 1.25×输入）——载入项：Claude Code 大量用缓存，缺省会让 `computeCostUsd` 按全价计缓存 token，严重高估。
-- **取舍/限制**：是**折算价非实付**（订阅月度统付，与 `openai-codex/*` 既有语义一致），未在 UI 区分名义/实付；仅 4 个 lane alias 被定价，自定义 key 发来的其它/带日期 `anthropic/<id>` 仍 `null`（fail-open 照样尝试，只是不计价，需要时运维补一行）。纯配置无代码改动。
-- **验证**：`samples.test.ts`（Claude lane 路由不回归）、`catalog/{index,load,models-list}.test.ts`（4 条新条目的计数/快照）、`capability/filter.test.ts` 均绿；typecheck+lint 绿。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-22 · Claude 订阅（OAuth）token 成本折算**：admin 对 `anthropic/*` OAuth 池只显 token 数、花费恒 null，因 `pricing.yaml` 无 `anthropic/*` 行（`costOf` 查 catalog 落空→`resolveCostUsd` null）。坑：必须**同时**改 `capabilities.yaml`，否则 `loadCatalog` 用 `EMPTY_CAPABILITIES` 造条目→`context_too_small` 剪掉每个 Claude 请求。用官方 Anthropic 价**含 cache 读写价**；4 个 lane alias 折算价非实付，纯配置无代码改动。
 - **2026-06-22 · Codex 原生 Responses 直通清洗 + fallback reasoning 泄漏修复**：仅对 ChatGPT-account Codex Responses profile 清洗 native body（移除 `max_output_tokens`/`temperature`；`store:false` 删 input item `id/status/phase` + 丢空 reasoning item，保留有 encrypted_content/summary 的）；跨协议 fallback 时 `InternalRequest.thinking` 若为 Responses reasoning history 数组不再作为 provider `thinking` 转发（记 `thinking_history_stripped_for_target`）。`openai-responses.test.ts`/`execute.test.ts` 覆盖。
 - **2026-06-22 · Opus 1M 上下文溢出预检 + 流式失败落库**：Anthropic native 在 invoke 前加 exact `count_tokens` 预检（opus/sonnet/haiku 硬上限 1e6 与 catalog 取较小者，count 失败 fail-open），超限记 `context_too_small` 进 fallback **不记 breaker**；上游 400 的 prompt-too-long/effort 形状错记 `invalid_request` 不污染 breaker；sonnet 仅允 low|medium|high|max effort（xhigh 执行前 skip 不 clamp，更可观测）；`/v1/messages` 已写 error 帧则同步改 `DecisionRecord.final.status=error`，Codex Responses 故障帧带 `providerRaw`。TODO：all-failed chain 的 per-attempt upstream body capture 未补。
 - **2026-06-21 · Codex Chat→Responses 兼容层移除 `temperature`**：economy+temperature:0 非流式 Chat 经 `openaiToResponsesRequest` 互译到 ChatGPT-account Codex Responses 后端 400 `Unsupported parameter: temperature`；改为 Codex Responses 用 openclaw 最小 body（`store:false`/`stream:true`/`include:[reasoning.encrypted_content]`/`text.verbosity:low`，不发 `max_output_tokens`/`temperature`），generic Responses 不变。

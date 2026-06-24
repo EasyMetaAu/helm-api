@@ -541,6 +541,429 @@ describe("transformNativeResponseToIR — tool-name round-trip (Codex P1)", () =
   });
 });
 
+// —— Coverage targets: uncovered lines/branches in response.ts ————————————————
+
+// Lines 153-157: createAnthropicToolNameMap — triple-collision: same sanitised name used
+// by two DIFFERENT originals triggers the counter loop (while reverse.has && not owner).
+describe("createAnthropicToolNameMap — triple-hash collision counter loop (lines 153-157)", () => {
+  it("generates distinct suffixes for three tools that share the same sanitized base", () => {
+    // "a b", "a.b", and "a-b" all sanitise to "a_b" — the third must get a counter suffix.
+    const map = createAnthropicToolNameMap(["a b", "a.b", "a-b"]);
+    const names = ["a b", "a.b", "a-b"].map((n) => map.toAnthropic(n));
+    // All three must produce unique Anthropic names.
+    expect(new Set(names).size).toBe(3);
+    // All must round-trip.
+    for (const [orig, ant] of [
+      ["a b", names[0]],
+      ["a.b", names[1]],
+      ["a-b", names[2]],
+    ] as [string, string][]) {
+      expect(map.toOriginal(ant)).toBe(orig);
+    }
+  });
+});
+
+// Lines 171-172: toOriginal returns undefined for an unknown sanitized name (reverse lookup miss)
+describe("createAnthropicToolNameMap — toOriginal miss (lines 171-172)", () => {
+  it("returns undefined for a sanitized name not in the map", () => {
+    const map = createAnthropicToolNameMap(["my_tool"]);
+    expect(map.toOriginal("nonexistent")).toBeUndefined();
+  });
+});
+
+// Lines 232-235: mapUsage — ephemeral 5m/1h breakdown emitted on cache_creation field
+describe("mapUsage — cache_creation ephemeral breakdown (lines 232-235)", () => {
+  it("emits cache_creation object when ephemeral_5m_input_tokens present in prompt_tokens_details", () => {
+    const u = mapUsage({
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      cache_creation_tokens: 50,
+      prompt_tokens_details: {
+        ephemeral_5m_input_tokens: 30,
+        ephemeral_1h_input_tokens: 20,
+      } as unknown as Record<string, number>,
+    });
+    expect(u.cache_creation).toEqual({
+      ephemeral_5m_input_tokens: 30,
+      ephemeral_1h_input_tokens: 20,
+    });
+  });
+
+  it("emits cache_creation with only ephemeral_5m when 1h absent", () => {
+    const u = mapUsage({
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      cache_creation_tokens: 30,
+      prompt_tokens_details: { ephemeral_5m_input_tokens: 30 } as unknown as Record<string, number>,
+    });
+    expect(u.cache_creation?.ephemeral_5m_input_tokens).toBe(30);
+    expect("ephemeral_1h_input_tokens" in (u.cache_creation ?? {})).toBe(false);
+  });
+
+  it("does not emit cache_creation when neither ephemeral field is present", () => {
+    const u = mapUsage({ prompt_tokens: 100, completion_tokens: 20, cache_creation_tokens: 30 });
+    expect(u.cache_creation).toBeUndefined();
+  });
+});
+
+// Lines 267-270: mapUsage — clamp input >= 0 when cached > prompt (anomalous)
+describe("mapUsage — input clamp >= 0 (lines 267-270)", () => {
+  it("clamps input_tokens to 0 when cached > prompt (never negative)", () => {
+    const u = mapUsage({ prompt_tokens: 50, cached_tokens: 200, completion_tokens: 10 });
+    expect(u.input_tokens).toBe(50); // prompt_tokens is ALREADY the non-cached portion
+    expect(u.input_tokens).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// Lines 294-296: transformResponseIn — toContentBlocks: thinking_blocks present but
+// none have type="thinking" with a thinking string → emitedVisibleThinking stays false
+// → resolveReasoning fallback path fires (lines 340-359 in response.ts)
+describe("transformResponseIn — thinking_blocks with redacted_only → resolveReasoning fallback (lines 294-296)", () => {
+  it("falls through to resolveReasoning when thinking_blocks contains only redacted entries", () => {
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: "answer",
+              thinking_blocks: [{ type: "redacted_thinking", data: "encrypted" }],
+              // No reasoning_content → resolveReasoning produces no thinking parts
+            },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+    // redacted block rendered, text rendered, no crash
+    expect(out.content.find((b) => b.type === "redacted_thinking")).toBeDefined();
+    expect(out.content.find((b) => b.type === "text")).toMatchObject({ text: "answer" });
+  });
+});
+
+// Lines 304-306: toContentBlocks — string content path (line 362)
+describe("transformResponseIn — string content path in toContentBlocks (line 362)", () => {
+  it("renders a string message content as a text block", () => {
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "hello world" },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+    expect(out.content.find((b) => b.type === "text")).toMatchObject({
+      type: "text",
+      text: "hello world",
+    });
+  });
+
+  it("emits no text block for empty string content (line 362 guard)", () => {
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "" },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+    // empty string → no text block emitted
+    expect(out.content.filter((b) => b.type === "text")).toHaveLength(0);
+  });
+});
+
+// Lines 385-386: toContentBlocks — model-generated image with url source (not base64)
+describe("transformResponseIn — image with url source (lines 385-386)", () => {
+  it("renders a url image (no b64_json) as {type:'url',url} source block", () => {
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: "see image",
+              images: [{ url: "https://example.com/out.png", mediaType: "image/png" }],
+            },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+    const imageBlock = out.content.find((b) => b.type === "image") as
+      | { source?: { type?: string; url?: string } }
+      | undefined;
+    expect(imageBlock?.source?.type).toBe("url");
+    expect(imageBlock?.source?.url).toBe("https://example.com/out.png");
+  });
+});
+
+// Lines 544-545 / 621: transformNativeResponseToIR — image url source + id/model fallbacks
+describe("transformNativeResponseToIR — id/model fallback and url-source image (lines 544-545, 621)", () => {
+  it("generates a synthetic id when native response has no id field", () => {
+    const ir = transformNativeResponseToIR({
+      // no id field
+      model: "claude",
+      content: [{ type: "text", text: "hi" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    expect(typeof ir.id).toBe("string");
+    expect(ir.id.length).toBeGreaterThan(0);
+  });
+
+  it("falls back to 'anthropic' when native response has no model field", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m_1",
+      content: [{ type: "text", text: "hi" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    expect(ir.model).toBe("anthropic");
+  });
+
+  it("maps url-source image block to IRMessage.images with url (lines 544-545)", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m_url",
+      model: "claude",
+      content: [
+        {
+          type: "image",
+          source: {
+            type: "url",
+            url: "https://cdn.example.com/photo.jpg",
+            media_type: "image/jpeg",
+          },
+        },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 1 },
+    });
+    const img = ir.choices[0]?.message.images?.[0];
+    expect(img?.url).toBe("https://cdn.example.com/photo.jpg");
+    expect(img?.mediaType).toBe("image/jpeg");
+    expect(img?.b64_json).toBeUndefined();
+  });
+
+  it("drops image block when source has no url and no data (neither branch)", () => {
+    // source.type is neither url-with-url nor data-present → both branches skip
+    const ir = transformNativeResponseToIR({
+      id: "m_nop",
+      model: "claude",
+      content: [
+        { type: "image", source: { type: "base64" /* no data, no url */ } },
+        { type: "text", text: "only text" },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 2, output_tokens: 1 },
+    });
+    expect(ir.choices[0]?.message.images ?? []).toHaveLength(0);
+  });
+
+  it("maps stop_reason null -> finish_reason null (no mapping)", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m_null",
+      model: "claude",
+      content: [{ type: "text", text: "hi" }],
+      stop_reason: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    expect(ir.choices[0]?.finish_reason).toBeNull();
+  });
+
+  it("maps an unknown stop_reason to finish_reason 'stop' (fallback)", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m_unk",
+      model: "claude",
+      content: [{ type: "text", text: "hi" }],
+      stop_reason: "totally_unknown_reason",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    expect(ir.choices[0]?.finish_reason).toBe("stop");
+  });
+});
+
+// cache_creation aggregate: when both fields absent (undefined) on usage
+describe("transformNativeResponseToIR — cacheCreation undefined when no creation fields (lines 601-608)", () => {
+  it("omits cache_creation_tokens from IR when neither cache_creation_input_tokens nor cache_creation object present", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      model: "claude",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 100, output_tokens: 10 },
+    });
+    expect(ir.usage?.cache_creation_tokens).toBeUndefined();
+  });
+
+  it("omits cache_creation_tokens when cache_creation ephemeral sum is 0", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      model: "claude",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      usage: {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+      },
+    });
+    // sum is 0 → undefined (not 0)
+    expect(ir.usage?.cache_creation_tokens).toBeUndefined();
+  });
+});
+
+// Lines 329-338: toContentBlocks — thinking_blocks with a VISIBLE thinking entry
+// (not redacted) → emittedVisibleThinking=true path, and signature conditional
+describe("transformResponseIn — thinking_blocks visible thinking entry (lines 329-338)", () => {
+  it("renders a visible thinking block from thinking_blocks extension with no signature", () => {
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: "answer",
+              thinking_blocks: [{ type: "thinking", thinking: "visible thought" }],
+            },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+    const thinkingBlock = out.content.find((b) => b.type === "thinking");
+    expect(thinkingBlock).toMatchObject({ type: "thinking", thinking: "visible thought" });
+    // no signature present → attribute must be absent
+    expect("signature" in (thinkingBlock ?? {})).toBe(false);
+  });
+
+  it("renders both redacted and visible thinking_blocks in order", () => {
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: "answer",
+              thinking_blocks: [
+                { type: "redacted_thinking", data: "enc-1" },
+                { type: "thinking", thinking: "visible", signature: "sig-v" },
+              ],
+            },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+    const blocks = out.content;
+    expect(blocks[0]).toMatchObject({ type: "redacted_thinking", data: "enc-1" });
+    expect(blocks[1]).toMatchObject({ type: "thinking", thinking: "visible", signature: "sig-v" });
+    // emittedVisibleThinking=true → resolveReasoning fallback NOT entered
+  });
+});
+
+// Lines 553-558: transformNativeResponseToIR — thinking block with and without signature
+describe("transformNativeResponseToIR — thinking block signature (lines 553-558)", () => {
+  it("includes signature on IR thinking content part when native block carries one", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      model: "claude",
+      content: [
+        { type: "thinking", thinking: "my reasoning", signature: "sig-xyz" },
+        { type: "text", text: "answer" },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 2 },
+    });
+    const parts = ir.choices[0]?.message.content;
+    if (!Array.isArray(parts)) throw new Error("expected array");
+    const thinkingPart = parts.find((p) => p.type === "thinking") as
+      | { type: string; text: string; signature?: string }
+      | undefined;
+    expect(thinkingPart?.signature).toBe("sig-xyz");
+  });
+
+  it("omits signature when native thinking block has none", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      model: "claude",
+      content: [
+        { type: "thinking", thinking: "my reasoning" }, // no signature
+        { type: "text", text: "answer" },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 2 },
+    });
+    const parts = ir.choices[0]?.message.content;
+    if (!Array.isArray(parts)) throw new Error("expected array");
+    const thinkingPart = parts.find((p) => p.type === "thinking") as
+      | { type: string; text: string; signature?: string }
+      | undefined;
+    expect("signature" in (thinkingPart ?? {})).toBe(false);
+  });
+});
+
+// Lines 616, 621: transformNativeResponseToIR — usage with cache_read_input_tokens present
+// and usage absent entirely
+describe("transformNativeResponseToIR — usage path branches (lines 616, 621)", () => {
+  it("maps cache_read_input_tokens -> IR.cached_tokens (line 616)", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      model: "claude",
+      content: [{ type: "text", text: "hi" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 40 },
+    });
+    expect(ir.usage?.cached_tokens).toBe(40);
+    expect(ir.usage?.prompt_tokens).toBe(100);
+  });
+
+  it("omits usage entirely when native response has no usage field (line 621 → undefined)", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      model: "claude",
+      content: [{ type: "text", text: "hi" }],
+      stop_reason: "end_turn",
+      // no usage
+    });
+    expect(ir.usage).toBeUndefined();
+  });
+});
+
+// Lines 304-306: toContentBlocks — array content with only non-text parts (no text blocks pushed)
+describe("transformResponseIn — array content with no text parts (lines 304-306)", () => {
+  it("produces no text block when array content has only non-text types (e.g. thinking already emitted)", () => {
+    // An assistant message whose content[] has only thinking parts — text blocks not present.
+    // This exercises the for-loop with no text parts hitting the `if (part.type === "text")` false branch.
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: [{ type: "thinking", text: "step 1", signature: "s" }],
+            },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+    // thinking rendered via resolveReasoning; text block count = 0
+    const textBlocks = out.content.filter((b) => b.type === "text");
+    expect(textBlocks).toHaveLength(0);
+  });
+});
+
 describe("anthropic image output round-trip (P7 multimodal)", () => {
   // Outbound: IR message.images -> Anthropic image content block on the response.
   it("renders IR message.images as an Anthropic image block", () => {

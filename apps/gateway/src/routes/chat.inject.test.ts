@@ -622,4 +622,48 @@ describe("gateway.chat.inject — per-key defaults + signal fallback (issue #97)
     expect(seen[0]?.messages).toEqual(BODY.messages);
     expect(store.ensureThread).not.toHaveBeenCalled();
   });
+
+  it("covers threadId=null branch (x-memory-mode=inject, no thread header → scope.threadId is null)", async () => {
+    // Without x-thread-id header, memoryScope.threadId is null →
+    // the ternary at line 652-654 takes the {} arm (covers line 654).
+    const { store } = makeFakeStore({ reflection: { project: "R" } });
+    const { deps, seen } = captureRouteDeps({
+      body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
+      memory: { observe: observeDeps(store), inject: injectWiring(store) },
+    });
+    const app = buildApp(deps, [keyRecord({ memory_mode: "inject" as never })]);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      // No x-thread-id → threadId is null
+      headers: { ...AUTH, "x-memory-mode": "inject", "x-project-id": "p1" },
+      body: JSON.stringify({ ...BODY }),
+    });
+
+    expect(res.status).toBe(200);
+    // messages are injected (memory mode is on) even without a threadId
+    expect(seen[0]?.messages).toBeDefined();
+  });
+
+  it("covers maxFactsInjected branch by passing it in wiring (line 662-663)", async () => {
+    // injectWiring with maxFactsInjected set → the ternary at line 662 takes the true arm.
+    const { store } = makeFakeStore({ reflection: { project: "R" } });
+    const { deps, seen } = captureRouteDeps({
+      body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
+      memory: {
+        observe: observeDeps(store),
+        inject: { ...injectWiring(store), maxFactsInjected: 5 },
+      },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { ...AUTH, ...INJECT_HEADERS },
+      body: JSON.stringify({ ...BODY }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(seen[0]?.messages).toBeDefined();
+  });
 });

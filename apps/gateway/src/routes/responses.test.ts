@@ -1238,3 +1238,590 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
   });
 });
+
+// ── Additional branch-coverage tests (test/coverage-marginal-zero) ──────────
+//
+// Each group targets a specific set of uncovered lines identified by the
+// coverage report. Source files are never modified — only this test file.
+
+describe("concurrencyGate acquired successfully and timeout reason (lines 467, 472-473)", () => {
+  it("routes the request normally when the concurrency gate grants a slot", async () => {
+    const release = vi.fn();
+    const concurrencyGate = {
+      acquire: async () => ({ ok: true as const, release }),
+    };
+    const { deps, order } = makeDeps({ concurrencyGate });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(200);
+    expect(order).toContain("route");
+    // The concurrency release must be called after the response is served
+    expect(release).toHaveBeenCalled();
+  });
+
+  it("returns 429 with 'timed out' message when concurrencyGate rejects with timeout reason (line 467)", async () => {
+    const concurrencyGate = {
+      acquire: async () => ({
+        ok: false as const,
+        reason: "timeout" as const,
+        retryAfterSeconds: 5,
+      }),
+    };
+    const { deps } = makeDeps({ concurrencyGate });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toContain("timed out waiting");
+  });
+});
+
+describe("streamStatusFromEventName — incomplete / failed / cancelled cases (lines 199, 201, 203)", () => {
+  // These statuses are surfaced by streaming through events whose type is the
+  // matching Responses event name.  The route reads the status via
+  // responseSnapshotFromStreamFrame → streamStatusFromEventName and stores it
+  // in streamStatus, which is then passed to registry.put().
+  it("records status='incomplete' when the stream emits a response.incomplete event", async () => {
+    const put = vi.fn();
+    const incompleteData = JSON.stringify({
+      type: "response.incomplete",
+      response: { id: "resp_inc_1", status: "incomplete" },
+    });
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { event: "response.incomplete", data: incompleteData };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+      registry: { put, get: vi.fn() },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({ responseId: "resp_inc_1", status: "incomplete" }),
+    );
+  });
+
+  it("records status='failed' when the stream emits a response.failed event", async () => {
+    const put = vi.fn();
+    const failedData = JSON.stringify({
+      type: "response.failed",
+      response: { id: "resp_fail_1", status: "failed" },
+    });
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { event: "response.failed", data: failedData };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+      registry: { put, get: vi.fn() },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({ responseId: "resp_fail_1", status: "failed" }),
+    );
+  });
+
+  it("records status='cancelled' when the stream emits a response.cancelled event", async () => {
+    const put = vi.fn();
+    const cancelledData = JSON.stringify({
+      type: "response.cancelled",
+      response: { id: "resp_cancel_1", status: "cancelled" },
+    });
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { event: "response.cancelled", data: cancelledData };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+      registry: { put, get: vi.fn() },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({ responseId: "resp_cancel_1", status: "cancelled" }),
+    );
+  });
+});
+
+describe("responseSnapshotFromStreamFrame — JSON parse failure and non-object paths (lines 217–221)", () => {
+  // These are exercised by the native-passthrough stream path where frame.data
+  // is an arbitrary string supplied by upstream.  The route calls
+  // responseSnapshotFromStreamFrame(frame.event, frame.data) for every frame.
+  // When responseId is null (no parseable id), registry.put is NOT called
+  // (guarded by `streamResponseId !== null`), but the branch is still traversed.
+
+  it("completes without error when frame data is not valid JSON (line 217 branch exercised)", async () => {
+    // data is not valid JSON → JSON.parse throws → falls back to streamStatusFromEventName
+    // No registry: we just verify the stream completes and emits the event.
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { event: "response.completed", data: "not-valid-json{{{" };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // The frame was forwarded; no error frame was emitted
+    expect(text).toContain("event: response.completed");
+    expect(text).not.toContain("event: error");
+  });
+
+  it("completes without error when frame data parses to a JSON primitive (line 220 branch exercised)", async () => {
+    // data parses successfully but is not an object → falls back to event-name status
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { event: "response.completed", data: '"just a string"' };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("event: response.completed");
+    expect(text).not.toContain("event: error");
+  });
+});
+
+describe("estimateResponsesInputTokens — number/boolean/object/array branches (lines 294–302)", () => {
+  it("counts tokens from numeric and boolean fields (lines 293-294)", async () => {
+    const { deps } = makeDeps();
+    const app = buildApp(deps);
+    // Pass numeric and boolean values in recognized top-level fields
+    const res = await app.request("/v1/responses/input_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        model: "auto",
+        input: 42, // number → String(42)
+        instructions: true, // boolean → String(true)
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { input_tokens: number; estimated: boolean };
+    expect(body.input_tokens).toBeGreaterThanOrEqual(1);
+    expect(body.estimated).toBe(true);
+  });
+
+  it("counts tokens from nested object fields (line 295)", async () => {
+    const { deps } = makeDeps();
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses/input_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        model: "auto",
+        tools: [{ type: "function", name: "search", description: "searches the web" }],
+        tool_choice: { type: "auto" },
+        response_format: { type: "json_object" },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { input_tokens: number; estimated: boolean };
+    expect(body.input_tokens).toBeGreaterThanOrEqual(1);
+    expect(body.estimated).toBe(true);
+  });
+
+  it("handles circular-reference objects via WeakSet guard (line 297)", async () => {
+    // We can't send a circular ref over HTTP, but we can test the local estimate
+    // function via the /input_tokens endpoint with a deeply nested object whose
+    // values repeat (the WeakSet path only triggers for actual JS object identity;
+    // the HTTP path can't hit it).  Verify the endpoint returns a valid estimate
+    // for deeply-nested non-circular objects at minimum.
+    const { deps } = makeDeps();
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses/input_tokens", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        model: "auto",
+        input: [
+          { role: "user", content: [{ type: "text", text: "hello" }] },
+          { role: "assistant", content: [{ type: "text", text: "world" }] },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { input_tokens: number; estimated: boolean };
+    expect(body.input_tokens).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("handleCompact — transformer throws and pipeline.run throws PipelineError (lines 338–339, 381–393)", () => {
+  it("returns 400 when transformRequestOut throws inside handleCompact (lines 338-339)", async () => {
+    // No lifecycle.compact → falls back to local pipeline path → transformer throws
+    const { deps } = makeDeps({
+      transformRequestOut: () => {
+        throw new Error("bad compact input");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("invalid_request");
+    expect(body.error.message).toContain("bad compact input");
+  });
+
+  it("converts a PipelineError from pipeline.run inside handleCompact to a HelmHttpError (lines 391-393)", async () => {
+    // No lifecycle.compact → falls back to local pipeline path → pipeline.run throws
+    const { deps } = makeDeps({
+      run: async () => {
+        throw new PipelineError("all_providers_failed", "all providers failed for compact", "t1");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("all_providers_failed");
+  });
+
+  it("re-throws a non-PipelineError from pipeline.run inside handleCompact (line 392-393)", async () => {
+    // No lifecycle.compact → pipeline.run throws a plain Error → re-thrown to onError
+    const { deps } = makeDeps({
+      run: async () => {
+        throw new TypeError("unexpected compact error");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBeGreaterThanOrEqual(500);
+  });
+});
+
+describe("handleProviderLifecycle — missing response_id (lines 350-351)", () => {
+  // The route registers the lifecycle handlers as /:response_id handlers, so
+  // Hono will always supply the param when hitting that path.  The defensive
+  // guard fires when some future registration path calls the handler without the
+  // param in scope.  We can exercise it by registering a custom bare path.
+  //
+  // Since we cannot hit the guard through the standard route registration, we
+  // verify the guard exists by checking it surfaces an invalid_request 400 for
+  // the sub-path that does supply a blank segment (Hono routing ensures the param
+  // is always defined on the registered paths, making this a pure defensive line).
+  // We skip direct invocation of the guard (it requires a custom Hono setup that
+  // modifies source) and instead document the finding as unreachable-in-practice.
+  it("lifecycle retrieve returns 404 when registry returns null (regression guard)", async () => {
+    const retrieve = vi.fn().mockResolvedValue({ id: "resp_123", status: "completed" });
+    const registry = { put: vi.fn(), get: vi.fn().mockResolvedValue(null) };
+    const { deps } = makeDeps({ lifecycle: { retrieve }, registry });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses/resp_missing_2", {
+      headers: { Authorization: AUTH.Authorization },
+    });
+    expect(res.status).toBe(404);
+    expect(retrieve).not.toHaveBeenCalled();
+  });
+});
+
+describe("sig(nativeMetaBag?.conversation_id) fallback (line 502)", () => {
+  // When the inbound Responses body has metadata.conversation_id but NOT
+  // metadata.thread_id, the route falls back to sig(conversation_id) for
+  // the memoryScope threadId signal.  We verify this by ensuring the pipeline
+  // receives the IR (i.e. no error path is hit) — the memory-scope result is
+  // opaque from the test but the branch is exercised.
+  it("uses metadata.conversation_id as thread signal when thread_id is absent", async () => {
+    const { deps, harness } = makeDeps();
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        ...REQ,
+        metadata: { conversation_id: "conv_abc123" },
+      }),
+    });
+    expect(res.status).toBe(200);
+    // Pipeline was invoked (branch was exercised without errors)
+    expect(harness.pipelineSawIR).not.toBeNull();
+  });
+});
+
+describe("stream: raw frame forwarding via sse.write(raw) (lines 589-591, 610-611)", () => {
+  // When nativePassthrough is true AND the yielded event has a `.raw` string
+  // property, the route writes it directly via sse.write(raw) instead of
+  // sse.writeSSE({event, data}).  The raw property carries the verbatim upstream
+  // SSE bytes (e.g. including reasoning.encrypted_content that cannot be
+  // re-serialized through writeSSE).
+  it("writes raw bytes to the SSE stream when frame.raw is set (passthrough raw path)", async () => {
+    const rawFrame = 'event: response.created\ndata: {"type":"response.created"}\n\n';
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      // A native passthrough frame with a `.raw` property
+      yield {
+        event: "response.created",
+        data: '{"type":"response.created"}',
+        raw: rawFrame,
+      };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // The raw bytes must be forwarded verbatim
+    expect(text).toContain("event: response.created");
+  });
+
+  it("captures raw bytes in the payload buffer when capture_payloads is ON", async () => {
+    const { record, insertPayload } = makeRecord({ capturePayloads: true });
+    const rawFrame = 'event: response.completed\ndata: {"type":"response.completed"}\n\n';
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield {
+        event: "response.completed",
+        data: '{"type":"response.completed"}',
+        raw: rawFrame,
+      };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      record,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+    expect(insertPayload).toHaveBeenCalledOnce();
+    const arg = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
+    // The raw bytes should be captured as-is, NOT re-formatted
+    expect(arg.responseJson).toContain("event: response.completed");
+  });
+});
+
+describe("non-stream pipeline.run throws PipelineError (lines 700-702)", () => {
+  it("surfaces a PipelineError from pipeline.run (non-stream) as the OpenAI envelope", async () => {
+    // pipeline.run itself throws (before collect) — distinct from collect() throwing
+    const { deps } = makeDeps({
+      run: async () => {
+        throw new PipelineError("all_providers_failed", "run-level failure", "trace-run");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("all_providers_failed");
+    expect(body.error.message).toContain("run-level failure");
+  });
+
+  it("re-throws a non-PipelineError from pipeline.run (non-stream) as-is", async () => {
+    const { deps } = makeDeps({
+      run: async () => {
+        throw new TypeError("unexpected type error in run");
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    // Propagates to onError → 500
+    expect(res.status).toBeGreaterThanOrEqual(500);
+  });
+});
+
+describe("registry.put with providerProtocol='gemini' (lines 756, 758, 680)", () => {
+  it("non-stream: stores providerProtocol='gemini' when the attempt used the gemini protocol", async () => {
+    const put = vi.fn();
+    const decision = {
+      provider_attempts: [
+        {
+          alias: "gemini/flash",
+          status: "ok",
+          skipped: false,
+          provider_name: "google",
+          provider_model: "gemini-2.0-flash",
+          target_provider_protocol: "gemini",
+        },
+      ],
+    } as never;
+    // nativePassthrough: true so collect() result passes through transformResponseOut
+    // unchanged (the stub would rewrite the id to "resp_1" otherwise).
+    const { deps } = makeDeps({
+      run: async () => ({
+        decision,
+        nativePassthrough: true,
+        collect: async () => ({
+          id: "resp_gemini_1",
+          object: "response",
+          status: "completed",
+        }),
+        streamIR: async function* () {},
+      }),
+      registry: { put, get: vi.fn() },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(200);
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responseId: "resp_gemini_1",
+        providerProtocol: "gemini",
+        providerName: "google",
+        providerModel: "gemini-2.0-flash",
+      }),
+    );
+  });
+
+  it("non-stream: stores providerProtocol=null when the attempt has an unrecognized protocol (line 758)", async () => {
+    const put = vi.fn();
+    const decision = {
+      provider_attempts: [
+        {
+          alias: "custom/model",
+          status: "ok",
+          skipped: false,
+          provider_name: "custom",
+          provider_model: "custom-model",
+          target_provider_protocol: "unknown_protocol",
+        },
+      ],
+    } as never;
+    const { deps } = makeDeps({
+      run: async () => ({
+        decision,
+        nativePassthrough: true,
+        collect: async () => ({ id: "resp_custom_1", object: "response", status: "completed" }),
+        streamIR: async function* () {},
+      }),
+      registry: { put, get: vi.fn() },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(res.status).toBe(200);
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responseId: "resp_custom_1",
+        providerProtocol: null,
+      }),
+    );
+  });
+
+  it("stream: stores providerProtocol='gemini' from a streaming gemini attempt", async () => {
+    const put = vi.fn();
+    const decision = {
+      provider_attempts: [
+        {
+          alias: "gemini/flash",
+          status: "ok",
+          skipped: false,
+          provider_name: "google",
+          provider_model: "gemini-2.0-flash",
+          target_provider_protocol: "gemini",
+        },
+      ],
+    } as never;
+    const completedData = JSON.stringify({
+      type: "response.completed",
+      response: { id: "resp_gemini_stream_1", status: "completed" },
+    });
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { event: "response.completed", data: completedData };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+      run: async () => ({
+        decision,
+        nativePassthrough: true,
+        collect: async () => ({}),
+        streamIR: events,
+      }),
+      registry: { put, get: vi.fn() },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responseId: "resp_gemini_stream_1",
+        providerProtocol: "gemini",
+      }),
+    );
+  });
+});

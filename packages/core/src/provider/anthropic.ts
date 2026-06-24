@@ -235,14 +235,6 @@ function withCacheControl<T extends AnthropicBlock>(block: T, cacheControl: unkn
   return block;
 }
 
-function hasExplicitCacheControl(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(hasExplicitCacheControl);
-  if (value === null || typeof value !== "object") return false;
-  const obj = value as Record<string, unknown>;
-  if (Object.hasOwn(obj, "cache_control")) return true;
-  return Object.values(obj).some(hasExplicitCacheControl);
-}
-
 function normalizeAnthropicContextManagement(value: unknown): unknown {
   return Array.isArray(value) ? { edits: value } : value;
 }
@@ -1316,14 +1308,10 @@ export function openaiToAnthropicRequest(
   }
   const toolChoice = anthropicToolChoice(r.tool_choice, r.parallel_tool_calls);
   if (toolChoice !== undefined) body.tool_choice = toolChoice;
-  if (
-    r.cache_control !== undefined &&
-    typeof r.cache_control === "object" &&
-    r.cache_control !== null &&
-    !hasExplicitCacheControl([body.system, body.messages, body.tools])
-  ) {
-    body.cache_control = r.cache_control;
-  }
+  // A request-level top-level `cache_control` is intentionally not forwarded here: the emulated
+  // Claude Code body always owns the cache breakpoint (ephemeral on the agent-prompt block) and
+  // top-level `cache_control` is not an Anthropic Messages field. Genuine passthrough for
+  // non-emulated targets lives in execute.ts (generic) and protocol/anthropic/request.ts (native).
   return body;
 }
 

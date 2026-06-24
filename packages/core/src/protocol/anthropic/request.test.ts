@@ -107,7 +107,7 @@ describe("anthropic transformRequestOut", () => {
     const userMsg = ir.messages[1];
     expect(userMsg?.role).toBe("user");
     expect(Array.isArray(userMsg?.content)).toBe(true);
-    const parts = userMsg?.content as Array<Record<string, unknown>>;
+    const parts = userMsg?.content as unknown as Array<Record<string, unknown>>;
     expect(parts[0]).toEqual({ type: "text", text: "what is in this image?" });
     expect(parts[1]).toMatchObject({
       type: "image",
@@ -150,7 +150,7 @@ describe("anthropic transformRequestOut", () => {
     // Two adjacent user turns collapse into one.
     const userMsgs = ir.messages.filter((m) => m.role === "user");
     expect(userMsgs).toHaveLength(1);
-    const parts = userMsgs[0]?.content as Array<Record<string, unknown>>;
+    const parts = userMsgs[0]?.content as unknown as Array<Record<string, unknown>>;
     expect(parts).toEqual([
       { type: "text", text: "hello" },
       { type: "text", text: "world" },
@@ -325,7 +325,7 @@ describe("anthropic transformRequestOut", () => {
 
     // thinking must NOT appear in the assistant's normal content parts.
     const assistantMsg = ir.messages.find((m) => m.role === "assistant");
-    const parts = assistantMsg?.content as Array<Record<string, unknown>>;
+    const parts = assistantMsg?.content as unknown as Array<Record<string, unknown>>;
     expect(parts).toEqual([{ type: "text", text: "the answer is 42" }]);
 
     // It is retained on the assistant message (distinct from the request-level
@@ -454,7 +454,7 @@ describe("anthropic transformRequestOut", () => {
 
     const ir = transformRequestOut(req);
     expect(() => IRRequestSchema.parse(ir)).not.toThrow();
-    const parts = ir.messages[0]?.content as Array<Record<string, unknown>>;
+    const parts = ir.messages[0]?.content as unknown as Array<Record<string, unknown>>;
     expect(parts[0]?.type).toBe("text");
   });
 
@@ -678,7 +678,7 @@ describe("anthropic transformRequestOut", () => {
       system: [{ type: "text", text: "big system prompt", cache_control: { type: "ephemeral" } }],
       messages: [{ role: "user", content: "hi" }],
     });
-    const sysContent = ir.messages[0]?.content as Array<Record<string, unknown>>;
+    const sysContent = ir.messages[0]?.content as unknown as Array<Record<string, unknown>>;
     expect(sysContent[0]).toMatchObject({ cache_control: { type: "ephemeral" } });
 
     const out = transformRequestIn(ir);
@@ -702,7 +702,7 @@ describe("anthropic transformRequestOut", () => {
       ],
     });
     expect(() => IRRequestSchema.parse(ir)).not.toThrow();
-    const parts = ir.messages[0]?.content as Array<Record<string, unknown>>;
+    const parts = ir.messages[0]?.content as unknown as Array<Record<string, unknown>>;
     expect(parts[0]).toMatchObject({
       type: "text",
       text: "long context",
@@ -1158,6 +1158,410 @@ describe("anthropic billing-header strip (inbound)", () => {
       messages: [{ role: "user", content: BILLING }],
     });
     expect(ir.messages).toEqual([{ role: "user", content: BILLING }]);
+  });
+});
+
+// —— Coverage targets: uncovered lines/branches in request.ts ————————————————
+
+// Lines 270-275: imagePartFromSource url branch (url source with media_type)
+describe("transformRequestOut — image source url branch (lines 270-275)", () => {
+  it("maps a url-source image block to IR image part with url + mediaType", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: { type: "url", url: "https://example.com/img.png", media_type: "image/png" },
+            },
+          ],
+        },
+      ],
+    };
+    const ir = transformRequestOut(req);
+    const parts = ir.messages[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(parts[0]).toMatchObject({
+      type: "image",
+      url: "https://example.com/img.png",
+      mediaType: "image/png",
+    });
+  });
+
+  it("maps a url-source image block without media_type (no mediaType on part)", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image", source: { type: "url", url: "https://example.com/img.png" } }],
+        },
+      ],
+    };
+    const ir = transformRequestOut(req);
+    const parts = ir.messages[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(parts[0]).toMatchObject({ type: "image", url: "https://example.com/img.png" });
+    expect("mediaType" in (parts[0] as object)).toBe(false);
+  });
+});
+
+// Lines 369-374: normalizeToolResultContent — unknown block type falls through to JSON placeholder
+describe("transformRequestOut — tool_result unknown block type (lines 369-374)", () => {
+  it("degrades an unknown tool_result sub-block to a JSON text placeholder (fail-open)", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "tu_1", name: "check", input: {} }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tu_1",
+              content: [
+                { type: "text", text: "ok" },
+                { type: "audio_transcript", transcript: "hello" }, // unknown type
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const ir = transformRequestOut(req);
+    const toolMsg = ir.messages.find((m) => m.role === "tool");
+    const parts = Array.isArray(toolMsg?.content) ? toolMsg.content : [];
+    expect(parts[0]).toEqual({ type: "text", text: "ok" });
+    // Unknown block must not be silently dropped — it becomes a JSON text placeholder.
+    expect(parts[1]).toMatchObject({ type: "text" });
+    expect(typeof (parts[1] as { text: string }).text).toBe("string");
+  });
+
+  it("normalizeToolResultContent: non-array non-string object falls back to JSON.stringify", () => {
+    // The last branch in normalizeToolResultContent: content is neither null/undefined,
+    // string, nor array — it is a plain object. Falls back to JSON.stringify.
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "tu_2", name: "check", input: {} }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tu_2",
+              // content is an object — exercises the JSON.stringify fallback
+              content: { key: "value" } as unknown as string,
+            },
+          ],
+        },
+      ],
+    };
+    // The schema accepts unknown content; verify no throw and content is a string.
+    const ir = transformRequestOut(req);
+    const toolMsg = ir.messages.find((m) => m.role === "tool");
+    expect(typeof toolMsg?.content).toBe("string");
+  });
+});
+
+// Lines 455-456: anthropicToolChoiceToIR — {type:"tool"} with empty/missing name falls to verbatim
+describe("transformRequestOut — anthropicToolChoiceToIR edge cases (lines 455-456)", () => {
+  const base = {
+    model: "claude-3-5-sonnet",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ name: "go", input_schema: { type: "object" } }],
+  };
+
+  it("keeps {type:'tool', name:''} verbatim (empty name is not a valid tool choice)", () => {
+    const ir = transformRequestOut({ ...base, tool_choice: { type: "tool", name: "" } });
+    // Should be kept verbatim, NOT mapped to {type:"function",...}
+    expect(ir.tool_choice).toEqual({ type: "tool", name: "" });
+  });
+
+  it("keeps an unknown-shape tool_choice object verbatim (fail-open)", () => {
+    const ir = transformRequestOut({ ...base, tool_choice: { type: "unknown_future" } });
+    expect(ir.tool_choice).toEqual({ type: "unknown_future" });
+  });
+
+  it("keeps a primitive (non-object) tool_choice string verbatim", () => {
+    // Exercises the 'not object or null' branch
+    const ir = transformRequestOut({ ...base, tool_choice: "auto" });
+    expect(ir.tool_choice).toBe("auto");
+  });
+});
+
+// Lines 500-518: image + document blocks with cache_control preserved in message content
+describe("transformRequestOut — cache_control on image/document content blocks (lines 500-518)", () => {
+  it("preserves cache_control on an image content block", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: "abc" },
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    };
+    const ir = transformRequestOut(req);
+    const parts = ir.messages[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(parts[0]).toMatchObject({ type: "image", cache_control: { type: "ephemeral" } });
+  });
+
+  it("preserves cache_control on a document content block", () => {
+    const req = {
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    };
+    const ir = transformRequestOut(req);
+    const parts = ir.messages[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(parts[0]).toMatchObject({ type: "document", cache_control: { type: "ephemeral" } });
+  });
+});
+
+// Lines 807-808, 820-821: parseToolInput (outbound) — empty / non-parseable args
+describe("transformRequestIn — parseToolInput edge cases (lines 807-808, 820-821)", () => {
+  it("maps empty arguments string to an empty object input (not a parse error)", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_1", type: "function", function: { name: "noop", arguments: "" } },
+          ],
+        },
+        { role: "user", content: "ok" },
+      ],
+    });
+    const toolUse = out.messages[0]?.content.find((b) => b.type === "tool_use") as
+      | { input?: unknown }
+      | undefined;
+    expect(toolUse?.input).toEqual({});
+  });
+
+  it("maps unparseable arguments to an empty object (not a throw)", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_2", type: "function", function: { name: "noop", arguments: "NOT JSON" } },
+          ],
+        },
+        { role: "user", content: "ok" },
+      ],
+    });
+    const toolUse = out.messages[0]?.content.find((b) => b.type === "tool_use") as
+      | { input?: unknown }
+      | undefined;
+    expect(toolUse?.input).toEqual({});
+  });
+});
+
+// Lines 888-916: thinkingBlocksFromMessage — two code paths:
+//   (1) thinking_blocks extension present  →  renders blocks
+//   (2) no thinking_blocks but content has thinking parts  →  reads from content array
+describe("transformRequestIn — thinkingBlocksFromMessage (lines 888-916)", () => {
+  it("renders thinking_blocks from the extension field (redacted + visible)", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "done" }],
+          thinking_blocks: [
+            { type: "thinking", thinking: "step A", signature: "sig-A" },
+            { type: "redacted_thinking", data: "enc-blob" },
+          ],
+        },
+        { role: "user", content: "next" },
+      ],
+    });
+    const blocks = out.messages[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(blocks.find((b) => b.type === "thinking")).toMatchObject({
+      type: "thinking",
+      thinking: "step A",
+      signature: "sig-A",
+    });
+    expect(blocks.find((b) => b.type === "redacted_thinking")).toMatchObject({
+      type: "redacted_thinking",
+      data: "enc-blob",
+    });
+  });
+
+  it("emits no thinking blocks when thinking_blocks extension is absent (line 906)", () => {
+    // An assistant message with only text and no thinking_blocks → nothing rendered.
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [
+        { role: "assistant", content: [{ type: "text", text: "answer" }] },
+        { role: "user", content: "next" },
+      ],
+    });
+    const blocks = out.messages[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(blocks.every((b) => b.type !== "thinking" && b.type !== "redacted_thinking")).toBe(true);
+  });
+
+  it("emits no thinking blocks when thinking_blocks is an empty array (line 889 guard)", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "hi" }],
+          thinking_blocks: [],
+        },
+        { role: "user", content: "ok" },
+      ],
+    });
+    const blocks = out.messages[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(blocks.every((b) => b.type !== "thinking" && b.type !== "redacted_thinking")).toBe(true);
+  });
+});
+
+// Lines 903, 909-912: thinkingBlocksFromMessage — block without valid thinking string (return [])
+// + fallback from content array thinking parts
+describe("transformRequestIn — thinking parts read from content array (lines 903, 909-912)", () => {
+  it("renders thinking part from message.content when thinking_blocks is absent", () => {
+    // Path: thinking_blocks undefined → falls into content.flatMap path
+    // This exercises the content array path (line 906-916).
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [
+        {
+          role: "assistant",
+          // IR content array with a thinking part (e.g. from Gemini origin)
+          content: [
+            { type: "thinking", text: "my reasoning", signature: "sig-B" },
+            { type: "text", text: "final answer" },
+          ],
+        },
+        { role: "user", content: "ok" },
+      ],
+    });
+    const blocks = out.messages[0]?.content as unknown as Array<Record<string, unknown>>;
+    const thinkingBlock = blocks.find((b) => b.type === "thinking");
+    expect(thinkingBlock).toMatchObject({
+      type: "thinking",
+      thinking: "my reasoning",
+      signature: "sig-B",
+    });
+  });
+});
+
+// Lines 967-972: mapToolChoice — {type:"function"} with explicit name
+describe("transformRequestIn — mapToolChoice function branch (lines 967-972)", () => {
+  it("maps IR {type:'function',function:{name}} to Anthropic {type:'tool',name}", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        { type: "function", function: { name: "get_weather", parameters: { type: "object" } } },
+      ],
+      tool_choice: { type: "function", function: { name: "get_weather" } },
+    });
+    expect(out.tool_choice).toMatchObject({ type: "tool", name: "get_weather" });
+  });
+
+  it("synthesizes {type:'auto',disable_parallel:true} when no tool_choice but parallel disabled", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
+      parallel_tool_calls: false,
+    });
+    expect(out.tool_choice).toMatchObject({ type: "auto", disable_parallel_tool_use: true });
+  });
+});
+
+// Lines 1081: tool cache_control from function.cache_control fallback
+describe("transformRequestIn — tool cache_control from function.cache_control (line 1081)", () => {
+  it("picks up cache_control from function.cache_control when top-level cache_control absent", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            parameters: { type: "object" },
+            cache_control: { type: "ephemeral" },
+          },
+        },
+      ],
+    });
+    const tool = out.tools?.[0] as { cache_control?: unknown } | undefined;
+    expect(tool?.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("picks up cache_control from top-level tool cache_control (takes precedence)", () => {
+    const out = transformRequestIn({
+      model: "claude-3-5-sonnet",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          type: "function",
+          cache_control: { type: "ephemeral" },
+          function: {
+            name: "lookup",
+            parameters: { type: "object" },
+          },
+        },
+      ],
+    });
+    const tool = out.tools?.[0] as { cache_control?: unknown } | undefined;
+    expect(tool?.cache_control).toEqual({ type: "ephemeral" });
+  });
+});
+
+// Lines 578-581: transformRequestOut — output_format inbound round-trip
+describe("transformRequestOut — Anthropic output_format inbound (lines 578-581)", () => {
+  it("maps output_format.json_schema to IR.response_format", () => {
+    const schema = { type: "object", properties: { name: { type: "string" } } };
+    const ir = transformRequestOut({
+      model: "claude-3-5-sonnet",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hi" }],
+      output_format: { type: "json_schema", schema },
+    });
+    expect(ir.response_format).toMatchObject({
+      type: "json_schema",
+      json_schema: { name: "output", schema },
+    });
   });
 });
 

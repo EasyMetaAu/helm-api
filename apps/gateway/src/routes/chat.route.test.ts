@@ -1102,4 +1102,51 @@ describe("POST /v1/chat/completions — deferred write queue", () => {
   });
 });
 
+describe("POST /v1/chat/completions — restamp model flush + malformed JSON branch", () => {
+  it("restamp flush() outputs the tail when a stream ends mid-frame (no trailing \\n\\n)", async () => {
+    // The model restamper buffers chunks split by \n\n. A chunk without a trailing \n\n
+    // lands in `pending`; `flush()` outputs it (lines 191-193, 808-813).
+    const tailChunk =
+      'data: {"id":"c","model":"provider-model","object":"chat.completion.chunk","choices":[]}\n';
+    // No trailing \n\n → this stays in `pending` until flush()
+    const { deps: d, harness } = deps({ responseModelPolicy: "requested_alias" });
+    harness.execute.mockResolvedValue({
+      ...nonStreamOutcome(null),
+      body: null,
+      stream: sse([tailChunk]),
+    });
+    const app = buildApp(d);
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...STREAM_BODY, model: "client-alias" }),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // The flush should have output the tail with the model rewritten
+    expect(text).toContain('"model":"client-alias"');
+  });
+
+  it("restamp skips malformed JSON in a data line (catch branch, lines 157-158)", async () => {
+    // A chunk whose data field is not valid JSON → JSON.parse throws → return line verbatim
+    const chunks = ["data: {not valid json}\n\n", "data: [DONE]\n\n"];
+    const { deps: d, harness } = deps({ responseModelPolicy: "requested_alias" });
+    harness.execute.mockResolvedValue({
+      ...nonStreamOutcome(null),
+      body: null,
+      stream: sse(chunks),
+    });
+    const app = buildApp(d);
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...STREAM_BODY, model: "client-alias" }),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // Malformed JSON line is passed through verbatim (not crashing the stream)
+    expect(text).toContain("{not valid json}");
+  });
+});
+
 export type { ExecutionResult };
