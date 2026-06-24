@@ -136,9 +136,10 @@ test.describe("admin request list filtering + pagination", () => {
     await expect(seededRow).toBeVisible();
 
     // Filter controls + numbered pager are present. The date range is the shared
-    // RangeFilter preset-button row (testid range-<key>), not a select.
+    // RangeFilter calendar-day preset row (testid range-<key>), not a select;
+    // 'today' is the default-active preset.
     await expect(page.getByTestId("filter-status")).toBeVisible();
-    await expect(page.getByTestId("range-24h")).toBeVisible();
+    await expect(page.getByTestId("range-today")).toBeVisible();
     // Only the one seeded row exists → single page, Next disabled.
     await expect(page.getByTestId("pager-status")).toContainText("1 requests");
     await expect(page.getByTestId("pager-next")).toBeDisabled();
