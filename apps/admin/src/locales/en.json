@@ -312,6 +312,7 @@
   "Give an AI agent persistent memory. Helm's MCP server exposes the facts and reflections on this page as tools (memory_add, memory_search, memory_list, …), scoped to the account behind your API key.": "Give an AI agent persistent memory. Helm's MCP server exposes the facts and reflections on this page as tools (memory_add, memory_search, memory_list, …), scoped to the account behind your API key.",
   "Header only (x-thread-id)": "Header only (x-thread-id)",
   "hit": "hit",
+  "Hit rate: {rate}": "Hit rate: {rate}",
   "Host": "Host",
   "How a request is matched to a lane": "How a request is matched to a lane",
   "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.": "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.",

@@ -13,6 +13,7 @@ const dashboardTokenKeys = [
   'Input tokens',
   'Output tokens',
   'Cached tokens',
+  'Hit rate: {rate}',
   'No token usage recorded in this window yet.',
   // Per-request token usage (list column + detail card): every locale must
   // translate these instead of falling back to the English source.

@@ -54,6 +54,11 @@ export const load: PageLoad = async ({ url }) => {
   // completion, Total = the two summed, Cached = cached prompt tokens.
   const t = agg.totals;
   const successRate = t.requests === 0 ? null : Math.round((t.okCount / t.requests) * 100);
+  // Cache hit rate: the share of input (prompt) tokens served from cache. Cached
+  // tokens are a subset of prompt tokens, so this is cached ÷ prompt; null when the
+  // window has no input tokens (→ the card hides the line rather than dividing by 0).
+  const cacheHitRate =
+    t.promptTokens === 0 ? null : Math.round((t.cachedTokens / t.promptTokens) * 100);
 
   // "vs yesterday" deltas — only for the TODAY view, baselined against yesterday's
   // WHOLE calendar day (resolveTodayComparisonWindow): a plain day-over-day read of
@@ -112,6 +117,7 @@ export const load: PageLoad = async ({ url }) => {
       inputTokens: t.promptTokens,
       outputTokens: t.completionTokens,
       cachedTokens: t.cachedTokens,
+      cacheHitRate,
     },
   };
 };

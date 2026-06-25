@@ -65,6 +65,11 @@ export const load: PageLoad = async ({ params, url }) => {
   // sample) — same derivation as the dashboard so the numbers read identically.
   const t = agg.totals;
   const successRate = t.requests === 0 ? null : Math.round((t.okCount / t.requests) * 100);
+  // Cache hit rate: share of input (prompt) tokens served from cache (cached ⊆
+  // prompt). null when the window has no input tokens — same derivation as the
+  // dashboard so the per-key number reads identically.
+  const cacheHitRate =
+    t.promptTokens === 0 ? null : Math.round((t.cachedTokens / t.promptTokens) * 100);
 
   return {
     key,
@@ -85,6 +90,7 @@ export const load: PageLoad = async ({ params, url }) => {
       inputTokens: t.promptTokens,
       outputTokens: t.completionTokens,
       cachedTokens: t.cachedTokens,
+      cacheHitRate,
     },
   };
 };

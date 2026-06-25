@@ -309,6 +309,7 @@
   "Give an AI agent persistent memory. Helm's MCP server exposes the facts and reflections on this page as tools (memory_add, memory_search, memory_list, …), scoped to the account behind your API key.": "AI 에이전트에 영속적인 메모리를 제공합니다. Helm의 MCP 서버는 이 페이지의 사실과 회고를 도구(memory_add, memory_search, memory_list…)로 노출하며, API 키에 연결된 계정으로 범위가 한정됩니다.",
   "Header only (x-thread-id)": "헤더만(x-thread-id)",
   "hit": "적중",
+  "Hit rate: {rate}": "적중률: {rate}",
   "Host": "호스트",
   "How a request is matched to a lane": "요청이 레인에 매칭되는 방식",
   "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.": "응답이 생성된 속도 — 초당 출력 토큰 수, 생성 구간, 첫 토큰까지의 시간. 스트리밍 응답에서만 측정됩니다.",

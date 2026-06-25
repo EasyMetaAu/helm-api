@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { AreaChart, PieChart } from 'layerchart';
+  import { AreaChart, PieChart, Tooltip } from 'layerchart';
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import type { ApiKeyView } from '$lib/api/keys.js';
@@ -38,6 +38,7 @@
     inputTokens: number;
     outputTokens: number;
     cachedTokens: number;
+    cacheHitRate: number | null;
   };
 
   let {
@@ -101,8 +102,14 @@
   const customActive = $derived(Boolean(data.filters.startDate && data.filters.endDate));
 
   // ── Charts (derived from the key-scoped SQL aggregate) ───────────────────────
-  type TrendPoint = { date: Date; input: number; output: number; cached: number };
-  type ModelSlice = { model: string; tokens: number };
+  type TrendPoint = {
+    date: Date;
+    input: number;
+    output: number;
+    cached: number;
+    cost: number | null;
+  };
+  type ModelSlice = { model: string; tokens: number; cost: number | null };
 
   const trend = $derived<TrendPoint[]>(
     data.agg.series.map((b) => ({
@@ -110,6 +117,7 @@
       input: b.promptTokens,
       output: b.completionTokens,
       cached: b.cachedTokens,
+      cost: b.costUsd,
     })),
   );
   const trendTicks = $derived(trendAxisTicks(trend));
@@ -121,7 +129,7 @@
   const byModel = $derived<ModelSlice[]>(
     data.agg.byModel
       .filter((m) => m.totalTokens > 0)
-      .map((m) => ({ model: m.servedModel ?? $t('unknown'), tokens: m.totalTokens })),
+      .map((m) => ({ model: m.servedModel ?? $t('unknown'), tokens: m.totalTokens, cost: m.costUsd })),
   );
   const SLICE_COLORS = [
     'hsl(var(--color-primary))',
@@ -365,6 +373,13 @@
       <div class="mt-1 text-2xl font-semibold text-slate-900">
         {formatTokens(stats.cachedTokens)}
       </div>
+      <!-- Cache hit rate: cached ÷ input tokens (matches the dashboard card).
+           Hidden when the window had no input tokens (rate is null). -->
+      {#if stats.cacheHitRate !== null}
+        <div class="mt-0.5 text-xs text-slate-400">
+          {$t('Hit rate: {rate}', { rate: `${stats.cacheHitRate}%` })}
+        </div>
+      {/if}
     </div>
   </div>
 
@@ -374,6 +389,8 @@
       <h2 class="section-header mb-3">{$t('Token usage over time')}</h2>
       {#if trend.length > 0}
         <div class="h-64">
+          <!-- Same rich tooltip as the dashboard: each token series plus the
+               bucket's total spend (the default tooltip is tokens-only). -->
           <AreaChart
             data={trend}
             x={(d) => d.date}
@@ -382,9 +399,29 @@
             props={{
               xAxis: { ticks: trendTicks, format: formatTrendAxisValue },
               yAxis: { format: formatTokens },
-              tooltip: { item: { format: formatTokens } },
             }}
-          />
+          >
+            <svelte:fragment slot="tooltip" let:x>
+              <Tooltip.Root let:data>
+                <Tooltip.Header value={x(data)} format={formatTrendAxisValue} />
+                <Tooltip.List>
+                  {#each TREND_SERIES as s (s.key)}
+                    <Tooltip.Item
+                      label={s.label}
+                      value={s.value(data)}
+                      color={s.color}
+                      format={formatTokens}
+                      valueAlign="right"
+                    />
+                  {/each}
+                  <Tooltip.Separator />
+                  <Tooltip.Item label={$t('Total cost')} valueAlign="right">
+                    {formatUsd(data.cost)}
+                  </Tooltip.Item>
+                </Tooltip.List>
+              </Tooltip.Root>
+            </svelte:fragment>
+          </AreaChart>
         </div>
       {:else}
         <div class="empty-state">{$t('No token usage recorded in this window yet.')}</div>
@@ -395,14 +432,32 @@
       <h2 class="section-header mb-3">{$t('Tokens by model')}</h2>
       {#if byModel.length > 0}
         <div class="h-56">
+          <!-- Slice-hover tooltip shows the model's token total plus its spend —
+               same as the dashboard donut (the default tooltip is tokens-only). -->
           <PieChart
             data={byModel}
             key={(d: ModelSlice) => d.model}
             value={(d: ModelSlice) => d.tokens}
             innerRadius={-40}
             cRange={SLICE_COLORS}
-            props={{ tooltip: { item: { format: formatTokens } } }}
-          />
+          >
+            <svelte:fragment slot="tooltip" let:c let:cScale>
+              <Tooltip.Root let:data>
+                <Tooltip.List>
+                  <Tooltip.Item
+                    label={data.model}
+                    value={data.tokens}
+                    color={cScale?.(c(data))}
+                    format={formatTokens}
+                    valueAlign="right"
+                  />
+                  <Tooltip.Item label={$t('Cost')} valueAlign="right">
+                    {formatUsd(data.cost)}
+                  </Tooltip.Item>
+                </Tooltip.List>
+              </Tooltip.Root>
+            </svelte:fragment>
+          </PieChart>
         </div>
         <ul class="mt-3 flex flex-wrap justify-center gap-x-4 gap-y-1.5">
           {#each byModel as slice, i (slice.model)}

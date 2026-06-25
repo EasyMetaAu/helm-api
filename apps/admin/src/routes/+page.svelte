@@ -23,6 +23,7 @@
     inputTokens: number;
     outputTokens: number;
     cachedTokens: number;
+    cacheHitRate: number | null;
   };
 
   let {
@@ -318,6 +319,13 @@
       <div class="mt-1 text-2xl font-semibold text-slate-900">
         {formatTokens(stats.cachedTokens)}
       </div>
+      <!-- Cache hit rate: cached ÷ input tokens. Hidden when the window had no input
+           tokens (rate is null) so the card never shows a meaningless "—%". -->
+      {#if stats.cacheHitRate !== null}
+        <div class="mt-0.5 text-xs text-slate-400">
+          {$t('Hit rate: {rate}', { rate: `${stats.cacheHitRate}%` })}
+        </div>
+      {/if}
       {@render deltaBadge(data.compare?.cachedTokens, formatTokens)}
     </div>
   </div>

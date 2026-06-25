@@ -188,6 +188,7 @@ function pageData(
       inputTokens: 1200,
       outputTokens: 300,
       cachedTokens: 100,
+      cacheHitRate: 8,
     },
     requests: over.requests ?? { items: [requestItem('tr_1')], total: 1, page: 1, pageSize: 25 },
   };

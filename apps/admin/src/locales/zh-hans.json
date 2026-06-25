@@ -312,6 +312,7 @@
   "Give an AI agent persistent memory. Helm's MCP server exposes the facts and reflections on this page as tools (memory_add, memory_search, memory_list, …), scoped to the account behind your API key.": "为 AI 智能体提供持久记忆。Helm 的 MCP 服务器将本页的事实与反思作为工具（memory_add、memory_search、memory_list…）暴露出来，范围限定为你的 API 密钥所属的账户。",
   "Header only (x-thread-id)": "仅请求头（x-thread-id）",
   "hit": "命中",
+  "Hit rate: {rate}": "命中率：{rate}",
   "Host": "主机",
   "How a request is matched to a lane": "请求如何匹配到通道",
   "How fast the response was generated — output tokens per second, the generation window, and the time to the first token. Measured only for streamed responses.": "响应生成的速度——每秒输出 Token 数、生成窗口时长，以及首 Token 的延迟。仅对流式响应测量。",
