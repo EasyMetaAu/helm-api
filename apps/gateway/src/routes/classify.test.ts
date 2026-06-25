@@ -198,4 +198,54 @@ describe("classify adapter — admin classifier hot-apply", () => {
     expect(body.temperature).toBe(0);
     expect(body.stream).toBe(false);
   });
+
+  it("classifies the REAL user turn, skipping the appended memory <system-reminder>", async () => {
+    const cfg = baseClassifier();
+    cfg.eval.enabled = true;
+    cfg.rules.confidence_threshold = 1; // always cascade to eval
+
+    let captured: Record<string, unknown> | null = null;
+    const provider: ProviderForEval = {
+      chatCompletion: async (body) => {
+        captured = body;
+        return {
+          choices: [
+            { message: { content: '{"complexity":"simple","task_type":"chat","confidence":0.9}' } },
+          ],
+        };
+      },
+    };
+
+    const classify = buildClassifyAdapter({
+      getClassifierConfig: () => cfg,
+      lanes: LANES,
+      provider,
+      now: () => Date.now(),
+      log: () => {},
+    });
+
+    // inject-bridge appends the memory block as a trailing role:"user" turn.
+    const reqWithMemory = {
+      messages: [
+        { role: "user", content: "what is 2+2?" },
+        {
+          role: "user",
+          content:
+            "<system-reminder>\n# Persistent memory\nfavorite number is 42\n</system-reminder>",
+        },
+      ],
+      tools: null,
+      response_format: null,
+      attachments: null,
+      metadata: { conversation_id: null },
+    } as unknown as InternalRequest;
+
+    await classify(reqWithMemory);
+
+    const messages = (captured as unknown as { messages: Array<{ role: string; content: string }> })
+      .messages;
+    const userTurn = messages.find((m) => m.role === "user");
+    expect(userTurn?.content).toBe("what is 2+2?");
+    expect(userTurn?.content).not.toContain("system-reminder");
+  });
 });

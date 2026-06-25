@@ -150,9 +150,12 @@ export const TOOL_CALL_STREAM_CHUNKS = [
 // discriminate eval calls without coupling to the model id.
 export const EVAL_PROMPT_MARKER = "Classify the request.";
 export const EVAL_SLOW_SENTINEL = "__HELM_EVAL_SLOW__";
-// Delay (ms) the slow judge sleeps before answering — comfortably past the e2e
-// eval timeout_ms / outer_timeout_ms so the fail-open path is deterministic.
-const EVAL_SLOW_DELAY_MS = 2_000;
+// Delay (ms) the slow judge sleeps before answering — comfortably past BOTH e2e
+// eval timeouts (inner timeout_ms 3000 / outer outer_timeout_ms 4000) so the
+// fail-open path is deterministic regardless of which timeout fires. The eval
+// returns at the inner timeout (~3000ms); this delay only keeps the mock from
+// answering first, so raising it does NOT slow the test wall-clock.
+const EVAL_SLOW_DELAY_MS = 5_000;
 // Strict EvalOutput the NORMAL judge returns → complexity:reasoning → premium.
 const EVAL_OUTPUT_JSON = JSON.stringify({
   complexity: "reasoning",

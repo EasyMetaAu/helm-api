@@ -9,6 +9,7 @@ import {
   type EvalModelRequest,
   type EvalModelResponse,
   type LanesConfig,
+  lastUserMessageText,
   type MomentumStore,
   resolveCostUsd,
   resolveLane as resolveLaneCore,
@@ -96,18 +97,15 @@ function toClassifierInput(req: InternalRequest): ClassifierInput {
 }
 
 // The Layer-2 eval prompt: a single deterministic instruction asking the small
-// model to judge complexity/task_type/confidence as strict JSON. The user's last
-// message is the only content; no system payload is logged (principle 7).
+// model to judge complexity/task_type/confidence as strict JSON. The REAL last
+// user message is the only content; no system payload is logged (principle 7).
+// MUST use the shared `lastUserMessageText` so it SKIPS the trailing memory
+// `<system-reminder>` turn the inject bridge appends — otherwise the model
+// classifies the injected memory block, not the user's actual question (and the
+// prompt drifts from the eval cache key, which already skips it via the same
+// helper). See classifier/message-text.ts.
 function buildEvalPrompt(req: InternalRequest): EvalModelRequest["messages"] {
-  let lastUser = "";
-  for (let i = req.messages.length - 1; i >= 0; i -= 1) {
-    const m = req.messages[i];
-    if (m && m.role === "user") {
-      const content = (m as { content?: unknown }).content;
-      if (typeof content === "string") lastUser = content;
-      break;
-    }
-  }
+  const lastUser = lastUserMessageText(req.messages);
   return [
     {
       role: "system",
