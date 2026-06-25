@@ -66,13 +66,13 @@ describe('home dashboard loader', () => {
     });
   });
 
-  // The today view also fetches yesterday's SAME-PERIOD aggregate and reports a
+  // The today view also fetches yesterday's FULL-DAY aggregate and reports a
   // {pct, base} per card (base = the yesterday value, surfaced in the tooltip).
   function statsWith(totals: Partial<DashboardStats['totals']>): DashboardStats {
     return { ...EMPTY_STATS, totals: { ...EMPTY_STATS.totals, ...totals } };
   }
 
-  it('computes vs-same-period-yesterday deltas (pct + baseline) on the today view', async () => {
+  it('computes vs-yesterday deltas (pct + baseline) on the today view', async () => {
     const now = Date.UTC(2026, 5, 17, 12);
     vi.spyOn(Date, 'now').mockReturnValue(now);
     mocks.getStats
@@ -94,7 +94,7 @@ describe('home dashboard loader', () => {
           cachedTokens: 10,
           totalCostUsd: 10,
         }),
-      ); // yesterday, same period
+      ); // yesterday, full day
 
     const result = (await load({ url: new URL('https://admin.test/') } as never)) as {
       range: string;
@@ -102,7 +102,7 @@ describe('home dashboard loader', () => {
     };
 
     expect(result.range).toBe('today');
-    expect(mocks.getStats).toHaveBeenCalledTimes(2); // today + yesterday-same-period
+    expect(mocks.getStats).toHaveBeenCalledTimes(2); // today + yesterday-full-day
     expect(result.compare).toEqual({
       requests: { pct: 200, base: 30 }, // (90-30)/30
       totalTokens: { pct: 300, base: 75 }, // today 300 vs y 75
@@ -113,13 +113,13 @@ describe('home dashboard loader', () => {
     });
   });
 
-  it('suppresses the whole delta set when yesterday same-period traffic is too thin', async () => {
+  it('suppresses the whole delta set when yesterday had too little traffic', async () => {
     const now = Date.UTC(2026, 5, 17, 12);
     vi.spyOn(Date, 'now').mockReturnValue(now);
     mocks.getStats
       .mockReset()
       .mockResolvedValueOnce(statsWith({ requests: 90, promptTokens: 200 })) // today
-      .mockResolvedValueOnce(statsWith({ requests: 9, promptTokens: 5 })); // yesterday: < 10 requests → noise
+      .mockResolvedValueOnce(statsWith({ requests: 9, promptTokens: 5 })); // yesterday: < 10 requests → too thin
 
     const result = (await load({ url: new URL('https://admin.test/') } as never)) as {
       compare: unknown;

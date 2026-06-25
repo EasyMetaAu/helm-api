@@ -62,14 +62,14 @@ describe('dashboard chart helpers', () => {
 });
 
 describe('today vs yesterday comparison', () => {
-  it('baselines against yesterday up to the same elapsed time (not the full day)', () => {
+  it("baselines against yesterday's whole calendar day (local midnight to midnight)", () => {
     const now = new Date('2026-06-01T15:30:00').getTime();
     const yMidnight = new Date('2026-05-31T00:00:00').getTime();
-    // Today is 15h30m old; the baseline window is yesterday over the same span.
-    const elapsed = now - new Date('2026-06-01T00:00:00').getTime();
+    const todayMidnight = new Date('2026-06-01T00:00:00').getTime();
+    // Day-over-day: the baseline is all of yesterday, regardless of time-of-day.
     expect(resolveTodayComparisonWindow(now)).toEqual({
       start: yMidnight,
-      end: yMidnight + elapsed,
+      end: todayMidnight,
     });
   });
 

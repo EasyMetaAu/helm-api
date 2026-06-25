@@ -55,13 +55,12 @@ export const load: PageLoad = async ({ url }) => {
   const t = agg.totals;
   const successRate = t.requests === 0 ? null : Math.round((t.okCount / t.requests) * 100);
 
-  // "vs same period yesterday" deltas — only for the TODAY view, baselined against
-  // yesterday up to the SAME time of day (resolveTodayComparisonWindow) so it's
-  // pace-vs-pace, not partial-vs-full. Each entry carries {pct, base}: base is the
-  // yesterday value, surfaced in the card tooltip so the comparison is transparent.
-  // Suppressed entirely when yesterday's same-period traffic is too thin to compare
-  // against — early in the day a handful of requests makes every % wild noise.
-  // Fail-soft: a hiccup → no deltas, cards just omit them.
+  // "vs yesterday" deltas — only for the TODAY view, baselined against yesterday's
+  // WHOLE calendar day (resolveTodayComparisonWindow): a plain day-over-day read of
+  // today-so-far against yesterday's full-day total. Each entry carries {pct, base}:
+  // base is the yesterday value, surfaced in the card tooltip so the comparison is
+  // transparent. Suppressed entirely when yesterday had too little traffic to
+  // compare against. Fail-soft: a hiccup → no deltas, cards just omit them.
   const MIN_COMPARISON_BASELINE_REQUESTS = 10;
   let compare: Record<string, { pct: number | null; base: number }> | null = null;
   if (range === 'today') {

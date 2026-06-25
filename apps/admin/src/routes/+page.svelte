@@ -34,9 +34,9 @@
       bucket: TrendBucket;
       stats: Stats;
       agg: DashboardStats;
-      // Per-card vs-same-period-yesterday delta: pct (null = no baseline) + base
-      // (the yesterday value, shown in the tooltip). Whole object null unless the
-      // TODAY view is active and yesterday's same-period sample is large enough.
+      // Per-card vs-yesterday delta: pct (null = no baseline) + base (yesterday's
+      // full-day value, shown in the tooltip). Whole object null unless the TODAY
+      // view is active and yesterday had enough traffic to compare against.
       compare: Record<string, { pct: number | null; base: number }> | null;
     };
   } = $props();
@@ -217,10 +217,10 @@
     <RangeFilter value={data.range} onChange={selectRange} />
   </div>
 
-  <!-- Same-period-yesterday delta, shown under a volume card on the TODAY view. The
-       tooltip surfaces the baseline (yesterday's value) so the % is transparent.
-       null pct / no comparison loaded → renders nothing. `fmt` formats the baseline
-       the same way the card formats its headline number. -->
+  <!-- Day-over-day delta, shown under a volume card on the TODAY view: today-so-far
+       vs yesterday's full day. The tooltip surfaces the baseline (yesterday's value)
+       so the % is transparent. null pct / no comparison loaded → renders nothing.
+       `fmt` formats the baseline the same way the card formats its headline number. -->
   {#snippet deltaBadge(
     d: { pct: number | null; base: number } | undefined,
     fmt: (n: number) => string,
@@ -228,9 +228,9 @@
     {#if d && d.pct !== null}
       <div
         class="mt-0.5 text-xs text-slate-400"
-        title={$t('Same period yesterday: {value}', { value: fmt(d.base) })}
+        title={$t('Yesterday: {value}', { value: fmt(d.base) })}
       >
-        {d.pct >= 0 ? '↑' : '↓'}{Math.abs(d.pct)}% {$t('vs same period yesterday')}
+        {d.pct >= 0 ? '↑' : '↓'}{Math.abs(d.pct)}% {$t('vs yesterday')}
       </div>
     {/if}
   {/snippet}

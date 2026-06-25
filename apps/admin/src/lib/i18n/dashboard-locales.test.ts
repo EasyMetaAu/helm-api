@@ -22,11 +22,11 @@ const dashboardTokenKeys = [
   'Cache write tokens',
   'cached',
   'input {input} · output {output} · cached {cached} · non-cached {nonCached}',
-  // Calendar-day range picker + the same-period-yesterday card delta: every locale
+  // Calendar-day range picker + the day-over-day card delta: every locale
   // must translate these instead of falling back to the English source.
   'Yesterday',
-  'vs same period yesterday',
-  'Same period yesterday: {value}',
+  'vs yesterday',
+  'Yesterday: {value}',
 ] as const;
 
 const translatedLocales = {
