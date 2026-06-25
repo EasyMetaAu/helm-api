@@ -20,7 +20,31 @@ import {
   type NativePassthroughInput,
   nativePassthroughBody,
 } from "@helm/shared";
-import type { ChatCompletionRequest, ChatCompletionResponse, ProviderClient } from "../openai.js";
+import {
+  type ChatCompletionRequest,
+  type ChatCompletionResponse,
+  type ProviderClient,
+  UpstreamError,
+} from "../openai.js";
+
+// Which PRE-FIRST-CHUNK failure justifies trying a SIBLING account in the same pool
+// before the executor advances to the next alias. A Codex (openai_responses + native
+// tools) request has NO valid cross-protocol fallback — every non-Responses alias is
+// skipped — so the only real fallback is another account of the SAME subscription. We
+// retry only TRANSIENT, account-agnostic server faults (a 5xx / overload / connect
+// timeout on one account says nothing about its siblings) and DELIBERATELY exclude:
+//   • 429 — a usage/rate limit is per-account; the executor must SEE it to park that
+//     account (retrying here would hide the 429 and leave it un-parked / mis-attributed);
+//   • other 4xx (400/401/403/413/422) — deterministic request/auth faults a sibling
+//     would hit identically; surface immediately so the executor classifies + advances.
+// Non-UpstreamError (client abort, programmer error) is never retried.
+function isRetryableTransientError(err: unknown): boolean {
+  if (!(err instanceof UpstreamError)) return false;
+  if (err.errorClass === "timeout") return true; // connect/TTFB timeout (pre-first-chunk)
+  const status = err.upstreamStatus;
+  if (status === null) return true; // network / overload with no HTTP status
+  return status >= 500; // 5xx incl. 529 (overloaded); excludes 429 + every other 4xx
+}
 
 // One account in the pool: its scheduling knobs plus the fully-wired client that
 // carries that account's credential + proxy. `lastUsedAt` is MUTABLE soft state
@@ -133,7 +157,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   // robin within equal priority). Bumps the winner's cursor and notifies onSelect.
   // Throws when no member is schedulable (fail-closed — the caller treats it as a
   // provider failure and advances the fallback chain).
-  function select(stickyKey?: string | null): PoolEntry {
+  // `exclude` holds accounts already TRIED-and-transiently-failed this request (in-pool
+  // retry): they are skipped — both as the sticky target and in the LRU scan — so each
+  // retry advances to a fresh sibling and the loop terminates (bounded by member count).
+  function select(stickyKey?: string | null, exclude?: ReadonlySet<string>): PoolEntry {
     const nowMs = now();
     if (stickyKey) {
       const sticky = stickySessions.get(stickyKey);
@@ -142,7 +169,8 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           (candidate) =>
             candidate.member.account === sticky.account &&
             candidate.member.schedulable &&
-            !usageLimited(candidate.member, nowMs),
+            !usageLimited(candidate.member, nowMs) &&
+            !exclude?.has(candidate.member.account),
         );
         if (entry !== undefined) {
           entry.lastUsedAt = nowMs;
@@ -158,6 +186,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     for (const e of entries) {
       if (!e.member.schedulable) continue; // operator park
       if (usageLimited(e.member, nowMs)) continue; // auto-park cooldown
+      if (exclude?.has(e.member.account)) continue; // already tried this request (retry)
       if (
         !best ||
         e.member.priority < best.member.priority ||
@@ -178,6 +207,80 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return best;
   }
 
+  // Non-stream in-pool retry: try the selected account; on a transient pre-result fault
+  // advance to the next eligible sibling, until one succeeds or none remain. When the
+  // pool is exhausted we surface the LAST upstream fault (the real cause), not the
+  // internal "no schedulable account" — the executor records THAT and advances the chain.
+  async function completeWithRetry<R>(
+    stickyKey: string | null,
+    call: (client: ProviderClient) => Promise<R>,
+  ): Promise<R> {
+    const tried = new Set<string>();
+    let lastErr: unknown;
+    for (;;) {
+      let entry: PoolEntry;
+      try {
+        entry = select(stickyKey, tried);
+      } catch (selErr) {
+        throw lastErr ?? selErr;
+      }
+      tried.add(entry.member.account);
+      try {
+        return await call(entry.member.client);
+      } catch (err) {
+        if (!isRetryableTransientError(err)) throw err;
+        lastErr = err;
+      }
+    }
+  }
+
+  // Streaming in-pool retry. The FIRST account is picked SYNCHRONOUSLY on the call turn
+  // (preserving rotation + onSelect timing — a lazy iterable that deferred select() would
+  // skip rotation until drained); `firstEntry` is that pick. Retry only happens BEFORE the
+  // first chunk: once a chunk is yielded the account is committed (its bytes are already on
+  // the wire), so a mid-stream fault propagates and is NEVER retried.
+  async function* streamWithRetry(
+    firstEntry: PoolEntry,
+    stickyKey: string | null,
+    open: (client: ProviderClient) => AsyncIterable<string>,
+  ): AsyncIterable<string> {
+    const tried = new Set<string>([firstEntry.member.account]);
+    let entry = firstEntry;
+    let lastErr: unknown;
+    for (;;) {
+      let iterator: AsyncIterator<string> | undefined;
+      let first: IteratorResult<string>;
+      try {
+        iterator = open(entry.member.client)[Symbol.asyncIterator]();
+        first = await iterator.next(); // pre-first-chunk fault surfaces HERE
+      } catch (err) {
+        if (iterator) await iterator.return?.().catch(() => {});
+        if (!isRetryableTransientError(err)) throw err;
+        lastErr = err;
+        let next: PoolEntry;
+        try {
+          next = select(stickyKey, tried);
+        } catch {
+          throw lastErr; // no sibling left → surface the real upstream cause
+        }
+        tried.add(next.member.account);
+        entry = next;
+        continue;
+      }
+      // First chunk obtained (or a clean empty stream) → COMMIT to this account.
+      try {
+        if (!first.done) yield first.value;
+        while (true) {
+          const chunk = await iterator.next();
+          if (chunk.done) return;
+          yield chunk.value;
+        }
+      } finally {
+        await iterator.return?.().catch(() => {});
+      }
+    }
+  }
+
   return {
     // Park / un-park ONE account's auto-park cooldown in place. The next select()
     // observes the new value without a pool rebuild; null clears it (the manual
@@ -190,15 +293,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       req: ChatCompletionRequest,
       opts?: { signal?: AbortSignal },
     ): Promise<ChatCompletionResponse> {
-      return select().member.client.chatCompletion(req, opts);
+      return completeWithRetry(null, (client) => client.chatCompletion(req, opts));
     },
     chatCompletionStream(
       req: ChatCompletionRequest,
       opts?: { signal?: AbortSignal },
     ): AsyncIterable<string> {
-      // Select SYNCHRONOUSLY (one pick per call) before opening the stream so the
-      // rotation + onSelect fire even though the body is a lazy async iterable.
-      return select().member.client.chatCompletionStream(req, opts);
+      // Pick SYNCHRONOUSLY (one pick per call) before opening the stream so rotation +
+      // onSelect fire on the call turn; streamWithRetry only adds sibling fallbacks.
+      const first = select();
+      return streamWithRetry(first, null, (client) => client.chatCompletionStream(req, opts));
     },
     // Native protocol passthrough (issue #217, Phase 1): forward it like the other
     // methods so the executor's feature-detect (`provider.nativePassthrough`) sees a
@@ -213,13 +317,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       body: NativePassthroughInput,
       opts?: { signal?: AbortSignal },
     ): Promise<ChatCompletionResponse> {
-      // select() runs SYNCHRONOUSLY at the top of the async body (before any await),
-      // so rotation + onSelect fire on the call turn, exactly like the other methods.
-      const { client } = select(stickyKeyFromNative(body)).member;
-      if (!client.nativePassthrough) {
-        throw new Error("oauth pool member does not support native passthrough");
-      }
-      return client.nativePassthrough(body, opts);
+      // completeWithRetry's first select() runs SYNCHRONOUSLY before its first await, so
+      // rotation + onSelect fire on the call turn exactly like the other methods. A member
+      // missing the method throws a NON-transient error → surfaced at once (fail-closed,
+      // never silently routed to a translating sibling), not retried.
+      return completeWithRetry(stickyKeyFromNative(body), (client) => {
+        if (!client.nativePassthrough) {
+          throw new Error("oauth pool member does not support native passthrough");
+        }
+        return client.nativePassthrough(body, opts);
+      });
     },
     // Streaming native passthrough (issue #217, Phase 2). A SYNCHRONOUS method (NOT an
     // async fn) so select() — and thus rotation + onSelect — fires on the CALL turn,
@@ -230,11 +337,19 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       body: NativePassthroughInput,
       opts?: { signal?: AbortSignal },
     ): AsyncIterable<string> {
-      const { client } = select(stickyKeyFromNative(body)).member;
-      if (!client.nativePassthroughStream) {
+      const stickyKey = stickyKeyFromNative(body);
+      // Pick + fail-closed check SYNCHRONOUSLY on the call turn (rotation + onSelect, and a
+      // synchronous throw if the picked member can't passthrough-stream), exactly as before.
+      const first = select(stickyKey);
+      if (!first.member.client.nativePassthroughStream) {
         throw new Error("oauth pool member does not support native passthrough streaming");
       }
-      return client.nativePassthroughStream(body, opts);
+      return streamWithRetry(first, stickyKey, (client) => {
+        if (!client.nativePassthroughStream) {
+          throw new Error("oauth pool member does not support native passthrough streaming");
+        }
+        return client.nativePassthroughStream(body, opts);
+      });
     },
   };
 }

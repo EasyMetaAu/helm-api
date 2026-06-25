@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ChatCompletionRequest, ProviderClient } from "../openai.js";
+import { type ChatCompletionRequest, type ProviderClient, UpstreamError } from "../openai.js";
 import { createOAuthPoolClient, type OAuthPoolMember } from "./pool.js";
 
 // A stub account client that records every call it served (so a test can assert
@@ -376,5 +376,155 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     expect(() => pool.nativePassthroughStream?.(NATIVE)).toThrow();
     // The sibling that CAN passthrough-stream was never reached.
     expect(pt).toEqual([]);
+  });
+});
+
+// In-pool retry (the real fix for the Codex `all_providers_failed` on a single OpenAI
+// overload): when the picked account fails with a TRANSIENT, account-agnostic upstream
+// fault BEFORE the first chunk, try the next eligible sibling in the SAME pool before the
+// executor advances to the (cross-protocol-incompatible) next alias. A 429 / 4xx is NOT
+// retried (the executor parks the account / the request is deterministically bad).
+describe("createOAuthPoolClient — in-pool retry on transient upstream fault", () => {
+  // Member whose complete/stream throws a chosen error (or serves) — `served` records
+  // which account actually produced a result, so a test asserts who served vs was skipped.
+  function faultMember(
+    account: string,
+    priority: number,
+    served: string[],
+    fault: UpstreamError | null,
+    opts?: { failMidStream?: boolean },
+  ): OAuthPoolMember {
+    return {
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          if (fault) throw fault;
+          served.push(account);
+          return { served_by: account };
+        },
+        chatCompletionStream(_req: ChatCompletionRequest): AsyncIterable<string> {
+          return (async function* () {
+            // Pre-first-chunk fault: throw BEFORE yielding (the breaker/retry boundary).
+            if (fault && !opts?.failMidStream) throw fault;
+            served.push(account);
+            yield `data: ${account}\n\n`;
+            // Mid-stream fault: already committed — must NOT trigger a sibling retry.
+            if (fault && opts?.failMidStream) throw fault;
+          })();
+        },
+      },
+    };
+  }
+
+  const OVERLOAD = new UpstreamError("upstream_error", "overloaded", null, null);
+  const FIVE_XX = new UpstreamError("upstream_error", "bad gateway", null, 502);
+  const RATE = new UpstreamError("upstream_error", "usage limit", null, 429);
+  const BAD = new UpstreamError("upstream_error", "bad request", null, 400);
+
+  it("retries the next account on a transient fault (non-stream)", async () => {
+    const served: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("a", 10, served, OVERLOAD), // preferred, but overloaded
+        faultMember("b", 50, served, null),
+      ],
+    });
+    const res = await pool.chatCompletion(REQ);
+    expect(res).toEqual({ served_by: "b" });
+    expect(served).toEqual(["b"]); // a never served; b rescued the request
+  });
+
+  it("does NOT retry on a 429 — left for the executor's per-account park", async () => {
+    const served: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [faultMember("a", 10, served, RATE), faultMember("b", 50, served, null)],
+    });
+    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/usage limit/);
+    expect(served).toEqual([]); // stopped at a's 429; b (healthy) was never tried
+  });
+
+  it("does NOT retry on a deterministic 4xx", async () => {
+    const served: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [faultMember("a", 10, served, BAD), faultMember("b", 50, served, null)],
+    });
+    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/bad request/);
+    expect(served).toEqual([]);
+  });
+
+  it("surfaces the upstream fault (not pool-empty) when every account fails transiently", async () => {
+    const served: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [faultMember("a", 10, served, OVERLOAD), faultMember("b", 50, served, FIVE_XX)],
+    });
+    // The LAST transient error is surfaced — NOT the internal "no schedulable account".
+    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/bad gateway/);
+  });
+
+  it("retries the next account when a stream fails before its first chunk", async () => {
+    const served: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [faultMember("a", 10, served, OVERLOAD), faultMember("b", 50, served, null)],
+    });
+    const chunks: string[] = [];
+    for await (const c of pool.chatCompletionStream(REQ)) chunks.push(c);
+    expect(chunks).toEqual(["data: b\n\n"]);
+    expect(served).toEqual(["b"]); // a threw pre-first-chunk → fell over to b
+  });
+
+  it("does NOT retry once a stream has emitted its first chunk (mid-stream fault)", async () => {
+    const served: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("a", 10, served, FIVE_XX, { failMidStream: true }),
+        faultMember("b", 50, served, null),
+      ],
+    });
+    const chunks: string[] = [];
+    await expect(
+      (async () => {
+        for await (const c of pool.chatCompletionStream(REQ)) chunks.push(c);
+      })(),
+    ).rejects.toThrow(/bad gateway/);
+    expect(chunks).toEqual(["data: a\n\n"]); // committed to a after its first chunk
+    expect(served).toEqual(["a"]); // never fell over to b — the bytes were already out
+  });
+
+  it("retries native passthrough streaming across accounts (the Codex case)", async () => {
+    const served: string[] = [];
+    const NATIVE: Record<string, unknown> = { model: "gpt-5.5", stream: true, messages: [] };
+    const mk = (
+      account: string,
+      priority: number,
+      fault: UpstreamError | null,
+    ): OAuthPoolMember => ({
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          return { served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          yield `data: ${account}\n\n`;
+        },
+        nativePassthroughStream(_body: Record<string, unknown>): AsyncIterable<string> {
+          return (async function* () {
+            if (fault) throw fault;
+            served.push(account);
+            yield `data: ${account}\n\n`;
+          })();
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [mk("a", 10, OVERLOAD), mk("b", 50, null)],
+    });
+    const chunks: string[] = [];
+    for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
+    expect(chunks).toEqual(["data: b\n\n"]);
+    expect(served).toEqual(["b"]);
   });
 });
