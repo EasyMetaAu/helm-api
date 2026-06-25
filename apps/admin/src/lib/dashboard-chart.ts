@@ -25,18 +25,19 @@ export function trendBucketForRange(range: RangeKey): TrendBucket {
     : 'day';
 }
 
-// Same-time-yesterday baseline for the "today" delta: yesterday from local
-// midnight up to the SAME elapsed offset as today-so-far. Comparing a partial day
-// against a full one would always read as a drop, so we cut yesterday at the same
-// point in the day. DST: yesterday midnight via setDate; the elapsed offset is
-// added as flat ms (a DST jump shifts the cutoff by ≤1h — fine for a glance).
+// Day-level baseline for the "today" delta: yesterday's WHOLE calendar day
+// (local midnight to local midnight). Today-so-far is compared against
+// yesterday's full-day total — a plain day-over-day pace read, no hour-of-day
+// alignment. A full-day baseline is large and stable, so early-morning deltas
+// read low-and-climbing ("we're at 10% of yesterday") instead of noisy.
+// DST: both midnights via local Date math.
 export function resolveTodayComparisonWindow(nowMs: number): { start: number; end: number } {
-  const d = new Date(nowMs);
-  d.setHours(0, 0, 0, 0);
-  const elapsed = nowMs - d.getTime();
-  d.setDate(d.getDate() - 1);
-  const start = d.getTime();
-  return { start, end: start + elapsed };
+  const todayMidnight = new Date(nowMs);
+  todayMidnight.setHours(0, 0, 0, 0);
+  const end = todayMidnight.getTime();
+  const yMidnight = new Date(end);
+  yMidnight.setDate(yMidnight.getDate() - 1);
+  return { start: yMidnight.getTime(), end };
 }
 
 // Percentage change current-vs-baseline, rounded. null when there is no baseline
