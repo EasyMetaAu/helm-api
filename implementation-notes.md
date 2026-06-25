@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-25 · OAuth 池内换账号重试瞬时故障（provider 执行；docs/04 执行兜底，原则 5）
+
+- **背景（Lukin 报，box req `0348f222`）**：Codex（`protocol:openai_responses` + native tools）请求 `gpt-5.5`，链头 `openai-codex/gpt-5.5` 被某账号返回 `Our servers are currently overloaded`（`upstream_error`，`upstreamStatus:null`，pre-first-chunk），随后**全部 9 个 fallback 被 `responses_native_tools_cross_protocol_blocked` 跳过** → `all_providers_failed`，`fallback_count:0`。**非熔断、非 429**。
+- **诊断（拍证）**：抓 `request_payloads` 证实该请求 14 个工具含 `web_search`(OpenAI 服务端托管)/`tool_search`/`apply_patch`(custom 语法)——这些是 Responses-原生工具，Chat Completions 无等价物，故跨协议跳过**是正确拒绝**（`protocolGuardSkipReason`，execute.ts:642：`type!=="function"` 全进 `nativeTools`）。真正的洞：一个带 Responses 原生工具的 Codex 请求**唯一合法 fallback 就是另一个 Responses-原生 gpt-5.5 端点 = 同订阅的其它账号**。可 `OAuthPoolClient.select()` **每请求只挑 1 个账号**，失败即交回执行器走链（→ 全被跨协议挡），**从不在请求内试其它账号**。4 个 codex 订阅一个忙没帮上。
+- **决定（Lukin 选「池内重试」）**：在 `pool.ts` 加请求内换账号重试。`isRetryableTransientError`：仅 `UpstreamError` 的 **timeout / `upstreamStatus===null`(过载无状态) / 5xx(含 529)** 可重试；**排除 429**（执行器要看见它去 park 该账号 + 配额窗归因，池内吞掉会留它不 park）与**其它 4xx**（确定性请求/鉴权错，换账号同样失败）；非 UpstreamError（client abort）永不重试。`select(stickyKey, exclude)` 加 `exclude` 跳过本请求已试账号（单调收敛，上界=成员数）。
+- **关键权衡（流式的 select 时机）**：现有测试**硬断言流式方法在调用回合同步 `select`**（不 drain 即查 onSelect；缺方法**同步 throw**）。故用**混合**：首个 `select()` 仍同步发生在调用回合（保 rotation+onSelect+fail-closed），只把**重试**放进 async generator——`streamWithRetry(firstEntry,…)`。**仅 pre-first-chunk 可重试**：一旦 yield 过任何 chunk 即提交该账号（字节已上线），mid-stream 故障原样抛出**绝不重试**（对齐 breaker「首个有效 chunk 后记成功」语义 + 原则 8）。非流式 `completeWithRetry` 直接循环。耗尽全部账号时**抛最后一个 upstream 故障**（非内部 "no schedulable account"），让执行器据此 recordFailure+走链。延迟有界：执行器的 per-attempt 超时（见下条）会 abort 整个 alias attempt，天然封顶池内重试总时长。
+- **TDD+验证**：`pool.test.ts` 加 7 例（非流式重试/429 不重试/4xx 不重试/全失败 surface 最后错/流式 pre-first-chunk 重试/mid-stream 不重试/native-passthrough-stream Codex 场景）；红→绿。全量 **core+gateway 228 文件 3852 单测绿**、typecheck+biome 干净。**纯 `packages/core` 改动**（原则 1，不碰框架）。分支 `feat-oauth-pool-inretry-transient`，**未提交/未部署**（待用户）。
+- **关联 TODO**：跨协议跳过本身正确，但「Codex 请求的 fallback 链全废」仍是产品级隐患——可选另一路：若 ZenMux 支持 `/v1/responses`，配 Responses-原生 `zenmux` gpt-5.5 当跨账号兜底（但 web_search 是 OpenAI 托管，ZenMux 未必能代理，**不确定**，本次未做）。
+
 ## 2026-06-25 · per-attempt 超时 → fallback → 熔断（执行器；docs/04 执行兜底，原则 5）
 
 - **背景（Lukin）**：eval 回环到 `openai-codex/gpt-5.4-mini` 反复超时（`d49c6b67` client_abort、fallback_count:0）。查 box telemetry：该"mini"模型 eval 调用 **p50≈5s、p95≈14s，仅 25% 在 3s 内完成**（订阅端点被节流）。Lukin 拍板正解（比"换模型"更通用）：**慢 attempt 应超时→fallback 下一个候选；总超时就熔断跳过**——对所有路由生效。
@@ -26,14 +35,6 @@
 - **逐协议分类器**（按 `req.protocol` 选；翻译路径恒用 chat）：responses 前导=`response.created`/`in_progress`、错误=`error`/`response.failed`；anthropic 前导=`message_start`/`ping`、错误=`error`；**chat 保守**——只有 delta 是"role 公告"(`{role}`/`{role,content:""}`,翻译路径前导)才算前导,裸 `{}`/无 choices/usage-only/finish_reason 一律 commit（非回归默认，避免误杀健康流，对齐既有 `data: {}` mock 契约）；**gemini=null 跳过守卫**（其 SSE 无独立前导，守它有风险无收益，维持 commit-on-first）。SSE 缓冲按 `\n\n` 切完整事件,容忍跨 chunk 拆分/单 chunk 多事件;解析失败默认 output（非回归）。
 - **TDD+验证**：`failover-guard.test.ts` 15 例覆盖三协议×{前导→错误→抛、前导→输出→提交 byte-for-byte、错误打头、跨 chunk 拆分、单 chunk 多事件、输出后错误=提交、前导后净结束=抛、`data:{}` 提交}。execute.test 原两条翻译流测试（`data:{}\n\n` mock）一度变红→坐实"chat 别把无 role 的空帧当前导"→收紧分类器后**自动转绿不必改测试**。全量 **301 文件/4623 单测绿**、**e2e 47 绿**（含真实流式 passthrough）、lint+typecheck 干净。
 - **box 现状关联**：该请求 `requested_model:auto`→balanced 链头 `openai-codex/gpt-5.5`（订阅端点,易被上游过载),正是触发此 bug 的场景;修复后这类 200-then-overloaded 会落到链内下一个 `anthropic/claude-sonnet-4-6`。分支 `fix/...`,**待提交+部署**。
-
-## 2026-06-25 · 仪表板 Token 趋势图/饼图 tooltip 增加花费（admin UI；docs/04 遥测展示）
-
-- **背景**：用户（Lukin）要「Token 用量趋势」浮层与「各模型 Token 用量」饼图除 token 外**显示花费**——趋势浮层加该时间桶**总花费**、饼图悬停显示**该模型花费**；并确认时间轴今天/昨天按小时、其余按日期（`trendBucketForRange`/`formatTrendTick` **早已实现**，本次未改，浮层 header 复用 `formatTrendAxisValue` 随桶切换）。
-- **后端**：`TelemetrySeriesBucket`/`TelemetryModelUsage` 各加 `costUsd: number|null`；sqlite+pg 两适配器 series/byModel 查询加 `SUM(cost_usd)`（别名 `totalCostUsd`），`aggregate-shape` 用 `numOrNull` 映射（**SUM 全 null→null**，区别于实测 0，符合原则 3/7 成本可空语义）。`/admin/api/stats` 路由 `c.json(agg)` 逐字透传，无需改。
-- **决定（「各种花费」的范围）**：telemetry 只存**单列 `cost_usd`（每行=非空 attempt 成本之和）**，故只做**逐桶/逐模型总花费**；**不**按 token 类型（输入/输出/缓存）拆分成本——拆分须运行时按 `pricing.yaml` 重算，未存储，超本次范围（YAGNI）。趋势浮层=三条 token 行 + 分隔线 +「总花费」；饼图=模型名+token+「花费」。
-- **前端**：`+page.svelte` `TrendPoint`/`ModelSlice` 带 `cost`；用 LayerChart 的 `slot="tooltip"`（legacy slot，Svelte 5 互操作，非 snippet）自定义两图浮层，`formatUsd`（null→「—」，自适应精度）渲染；新增 i18n key `Total cost` 五语（`Cost` 早已有）。
-- **TDD+验证**：红→绿，`store-contract.test` 加 series/byModel `costUsd` 断言（两适配器，0.004×N，`toBeCloseTo` 避 FP）；`ports.test` 内存假 store 补 `costUsd:null`（与其 `totalCostUsd:null` 同保真度）。typecheck 三包绿、admin svelte-check 0/0、build 绿、相关单测绿；**Playwright 实测**桩 stats 数据悬停截图确认趋势浮层「总花费 $9.63」、饼图「claude-opus-4-8 / Cost $31.50」。分支 `worktree-dashboard-cost-tooltips`，未提交（待用户）。
 
 ## 2026-06-24 · 仪表板时间筛选改自然日预设 + 「对比昨天」增量（admin UI；对应 docs/04 遥测展示）
 
@@ -66,6 +67,7 @@
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-25 · 仪表板 Token 趋势/饼图 tooltip 加花费（admin UI）**：`TelemetrySeriesBucket`/`TelemetryModelUsage` 加 `costUsd:number|null`，sqlite+pg 查询加 `SUM(cost_usd)`（全 null→null，原则 3/7）；趋势浮层显逐桶总花费、饼图显逐模型花费。决定：只做逐桶/逐模型**总**花费，不按 token 类型拆成本（须运行时按 pricing 重算，YAGNI）。LayerChart legacy `slot="tooltip"` 自定义浮层 + `formatUsd`；i18n `Total cost` 五语。store-contract 加 costUsd 断言。分支 `worktree-dashboard-cost-tooltips`，未提交。
 - **2026-06-24 · 定时自动 VACUUM + 归档残留空目录修复（运维；原则 2/3）**：helm.db 反弹 6.4G 真因=`auto_vacuum=0` + cleanup 只 DELETE 不 VACUUM（1.77G 死空间永不还盘）。新增纯函数 `shouldAutoVacuum` + 复用 `startCleanupScheduler` 每小时 tick（`vacuum_enabled` 默认 false opt-in / `vacuum_hour` 默认 4 服务器本地时区；pg 自带 autovacuum 故 `store.vacuum()` no-op）；Bug A `local-volume-sink.ts` 归档失败 catch 里 `rmdir`（非递归）清孤儿空目录。`RuntimeSettings` 加两必填字段涟漪到 admin settings/i18n/全量断言测试。146 测绿，分支 `worktree-vacuum-and-archive-fixes`，**未部署**（box 可用手动「压缩数据库」按钮一次性回收 1.77G）。
 - **2026-06-23 · 记忆深度召回 = 混合检索（docs/12 P8）+ `memory_recall` MCP 工具（docs/14）**：检索单元=`memory_facts`（account-scoped 跨会话）；三信号 **RRF(k=60)** 融合——向量（sqlite-vec/pgvector）+ 全文（FTS5 trigram/tsvector）+ forgetting-score；双语跨 zh↔en；**fail-open**（全失败空结果不 5xx）。迁移 sqlite **v28**/pg **v27**。坑：vec0 主键须 `BigInt`；`loadExtension` 须在 migrations+createDb 两处 hook 且失败 fail-open；PGlite 须 `PGlite.create({extensions:{vector}})`；gateway 无 `/v1/embeddings` 故 embedder 直连 provider base_url。config `memory.forgetting.facts_retrieval.enabled` 开 FTS+score，再配 `memory.llm.embedding_model` 点亮向量腿。core 2568 测试绿；分支 `helm-memory-deep-recall`。**已上线 v0.21.19**（见记忆 deep-recall-shipped）。
 - **2026-06-23 · MCP OAuth 2.1 shim（ChatGPT 连接器接入；docs/13）**：`/mcp` 前加薄 OAuth 授权服务器（`routes/mcp/oauth.ts`）把 OAuth token 映射回既有 API key 的 account——**无状态 JWT、无 token/code 表、无迁移**；授权码=60s 签名 JWT（PKCE S256 绑定），access token 默认 30 天无 refresh，签名密钥从既有 `HELM_OAUTH_ENC_KEY` 派生（`memory.mcp.oauth.enabled` 且无 enc key → fail-closed 拒启动）；`mcpAuth` 接受 JWT 或裸 key。天花板：授权码 60s 窗口可重放、token 到期前不可撤销（轮换 enc key 全失效）。`oauth.test.ts` 16 例绿，未部署。
