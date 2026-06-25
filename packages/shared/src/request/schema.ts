@@ -112,6 +112,14 @@ export const InternalRequestSchema = z.object({
   // body's reasoning field (the translated path already forwards reasoning_effort).
   // Absent => passthrough stays byte-verbatim, as today.
   reasoning_effort_forced: z.boolean().optional(),
+  // Internal signal (NOT a client wire field): a per-CANDIDATE timeout (ms) for the
+  // execution-fallback loop. When set, each candidate's attempt is bounded to this
+  // many ms to first output; exceeding it is treated as a provider `timeout` fault
+  // (breaker failure + advance to the next candidate), NOT a client abort. Set only
+  // by trusted internal callers (the classifier eval loopback, gated to the internal
+  // key in the chat route). Absent => only the global connect/idle timeouts apply, as
+  // today.
+  attempt_timeout_ms: z.number().int().positive().optional(),
   user: z.string().optional(),
   service_tier: z.string().optional(),
   tool_choice: z.unknown().optional(),

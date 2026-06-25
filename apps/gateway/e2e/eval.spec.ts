@@ -171,18 +171,23 @@ test.describe("eval cascade e2e", () => {
   });
 
   // ── Scenario 5: eval timeout → balanced (fail-open, HTTP 200) ──────────────
-  test("eval timeout -> request still 200, falls open to balanced", async ({ request }) => {
+  test("eval too slow -> request still 200, falls open to balanced", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
-      // the slow sentinel makes the eval stand-in delay past timeout_ms.
+      // The slow sentinel makes the eval stand-in delay past the PER-CANDIDATE deadline
+      // (eval.timeout_ms). The eval loopback's executor times the candidate out and, with
+      // only one eval candidate in the hermetic e2e, the chain exhausts → the eval call
+      // fails → fail-open to balanced. (In production eval.model is a LANE, so the
+      // per-candidate timeout instead falls back to the next candidate and the eval
+      // SUCCEEDS — see execute.test withAttemptDeadline + classifier-samples.) Either
+      // way the contract guarded here holds: the main path is NEVER dragged to a 5xx.
       data: chat(`${ambiguous("s5")} ${EVAL_SLOW_SENTINEL}`),
       headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
-    // fail-open: the main path is NEVER dragged down to a 5xx.
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("balanced");
     expect(res.headers()["x-helm-final-model"]).toBe(BALANCED_HEAD);
     expect(res.headers()["x-helm-decided-by"]).toBe("fallback");
-    expect(res.headers()["x-helm-fallback-reason"]).toBe("eval_timeout");
+    expect(res.headers()["x-helm-fallback-reason"]).toBe("eval_provider_error");
   });
 
   // ── Scenario 6: rules high-confidence → hit-stop, eval never consulted ─────
@@ -267,7 +272,7 @@ test.describe("eval cascade e2e", () => {
       headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(first.status()).toBe(200);
-    expect(first.headers()["x-helm-fallback-reason"]).toBe("eval_timeout");
+    expect(first.headers()["x-helm-fallback-reason"]).toBe("eval_provider_error");
     const afterFirst = await evalCalls(request);
     expect(afterFirst).toBeGreaterThanOrEqual(1);
 
@@ -276,7 +281,7 @@ test.describe("eval cascade e2e", () => {
       headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(second.status()).toBe(200);
-    expect(second.headers()["x-helm-fallback-reason"]).toBe("eval_timeout");
+    expect(second.headers()["x-helm-fallback-reason"]).toBe("eval_provider_error");
     // the failed result was NOT cached → the endpoint is hit again (no permanent
     // wedge on a transient blip, CLAUDE.md principle 3).
     expect(await evalCalls(request)).toBeGreaterThan(afterFirst);

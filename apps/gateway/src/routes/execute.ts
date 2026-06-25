@@ -223,6 +223,40 @@ function isAbort(err: unknown, signal: AbortSignal): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
 
+// Run one candidate's provider call under an optional PER-ATTEMPT deadline
+// (`req.attempt_timeout_ms`). The bounded window is time-to-first-output: for a
+// non-stream call it covers the whole completion; for a stream it covers the peek
+// (first chunk), after which the timer is cleared so long generation stays uncapped.
+//
+// When the deadline fires (and the CLIENT did not disconnect), the thrown error is
+// reclassified as `UpstreamError("timeout")` so the executor's generic failure path
+// records a breaker fault and advances to the next candidate — a too-slow upstream
+// becomes a normal fallback, exactly like a non-2xx. A genuine client abort still
+// wins (clientSignal.aborted) and rethrows verbatim so `isAbort` routes it to
+// `recordAbort` (no breaker fault, terminal). Mirrors the provider clients' own
+// `withTimeout` discriminator (openai.ts). Absent `attemptMs` => the client signal is
+// passed straight through (zero behavior change for normal traffic).
+async function withAttemptDeadline<T>(
+  attemptMs: number | undefined,
+  clientSignal: AbortSignal,
+  op: (attemptSignal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  if (!attemptMs) return op(clientSignal);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), attemptMs);
+  const merged = AbortSignal.any([clientSignal, ctrl.signal]);
+  try {
+    return await op(merged);
+  } catch (err) {
+    if (ctrl.signal.aborted && !clientSignal.aborted) {
+      throw new UpstreamError("timeout", `attempt exceeded per-attempt timeout (${attemptMs}ms)`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Per-account user-message queue timeout (issue #93, feature B). Detected by the
 // `queueTimeout` flag (not instanceof) so the check survives any package-boundary
 // duplication of the QueueTimeoutError class.
@@ -1062,16 +1096,24 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // throw → peekStream records a breaker failure and advances the chain. null
           // classifier (gemini) → unchanged commit-on-first behavior.
           const passthroughClassifier = preOutputClassifierFor(req.protocol);
-          const stream = await peekStream(
-            () => {
-              const raw = passthroughStream(passthroughBody, { signal, captureUpstream });
-              return passthroughClassifier
-                ? guardPreOutputFailure(raw, passthroughClassifier)
-                : raw;
-            },
+          const stream = await withAttemptDeadline(
+            req.attempt_timeout_ms,
             signal,
-            alias,
-            log,
+            (attemptSignal) =>
+              peekStream(
+                () => {
+                  const raw = passthroughStream(passthroughBody, {
+                    signal: attemptSignal,
+                    captureUpstream,
+                  });
+                  return passthroughClassifier
+                    ? guardPreOutputFailure(raw, passthroughClassifier)
+                    : raw;
+                },
+                attemptSignal,
+                alias,
+                log,
+              ),
           );
           breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null, backfilled later.
@@ -1105,14 +1147,24 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // frame) stays a pre-first-chunk failure → fallback. Translate output is
           // always OpenAI-Chat framed, so the chat classifier is always correct.
           const translateClassifier = preOutputClassifierFor("openai_chat");
-          const stream = await peekStream(
-            () => {
-              const raw = provider.chatCompletionStream(rendered.body, { signal, captureUpstream });
-              return translateClassifier ? guardPreOutputFailure(raw, translateClassifier) : raw;
-            },
+          const stream = await withAttemptDeadline(
+            req.attempt_timeout_ms,
             signal,
-            alias,
-            log,
+            (attemptSignal) =>
+              peekStream(
+                () => {
+                  const raw = provider.chatCompletionStream(rendered.body, {
+                    signal: attemptSignal,
+                    captureUpstream,
+                  });
+                  return translateClassifier
+                    ? guardPreOutputFailure(raw, translateClassifier)
+                    : raw;
+                },
+                attemptSignal,
+                alias,
+                log,
+              ),
           );
           breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null (not measured).
@@ -1156,7 +1208,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
           }
           passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
-          const body = await passthroughInvoke(passthroughBody, { signal, captureUpstream });
+          const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
+            passthroughInvoke(passthroughBody, { signal: attemptSignal, captureUpstream }),
+          );
           breaker.recordSuccess(alias);
           const usage =
             req.protocol === "openai_responses"
@@ -1177,7 +1231,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         }
         const bodyReq = stripInternal(req, providerModel, target.targetProviderProtocol);
         attemptTelemetry = withRequestMutations(passthrough, bodyReq.request_mutations);
-        const body = await provider.chatCompletion(bodyReq.body, { signal, captureUpstream });
+        const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
+          provider.chatCompletion(bodyReq.body, { signal: attemptSignal, captureUpstream }),
+        );
         breaker.recordSuccess(alias);
         attempts.push(okRow(alias, elapsed(), costOf(alias, body), attemptTelemetry));
         return {

@@ -42,6 +42,28 @@ describe("createSelfHttpClient", () => {
     expect(res).toEqual({ choices: [{ message: { content: '{"facts":[]}' } }] });
   });
 
+  it("forwards opts.attemptTimeoutMs as the x-helm-attempt-timeout-ms header (eval per-candidate budget)", async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => fakeResponse(true, {}));
+    const client = createSelfHttpClient({
+      baseUrl: "http://127.0.0.1:8080",
+      apiKey: "k",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await client.chatCompletion({ model: "economy", messages: [] }, { attemptTimeoutMs: 3000 });
+    const withTimeout = (fetchImpl.mock.calls[0]?.[1] as RequestInit).headers as Record<
+      string,
+      string
+    >;
+    expect(withTimeout["x-helm-attempt-timeout-ms"]).toBe("3000");
+    // Absent ⇒ no header (normal memory self-calls are unaffected).
+    await client.chatCompletion({ model: "economy", messages: [] });
+    const noTimeout = (fetchImpl.mock.calls[1]?.[1] as RequestInit).headers as Record<
+      string,
+      string
+    >;
+    expect(noTimeout["x-helm-attempt-timeout-ms"]).toBeUndefined();
+  });
+
   it("prefixes a BARE model with providerPrefix (eval), leaves a prefixed model unchanged", async () => {
     const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => fakeResponse(true, {}));
     const client = createSelfHttpClient({

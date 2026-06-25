@@ -232,11 +232,14 @@ classifier:
     # max_tokens always win over extra_body; see classify.ts invokeModel.)
     extra_body:
       thinking: { type: disabled }
-    timeout_ms: 3000               # inner (runner) timeout — covers a real cross-region eval
-                                    # round-trip with margin, incl. subscription models
-                                    # (codex/zenmux) that queue. Was 1500ms → eval_timeout
-                                    # whenever the small model queued; fail-open to balanced.
-    outer_timeout_ms: 4000         # outer (consumer) timeout — strictly-later backstop (> inner)
+    timeout_ms: 3000               # PER-CANDIDATE deadline (ms): forwarded to the loopback
+                                    # executor so a slow head model (e.g. codex gpt-5.4-mini,
+                                    # p50≈5s) TIMES OUT and FALLS BACK to the next candidate
+                                    # (breaker fault + advance), instead of aborting the whole
+                                    # eval as a client_abort. Repeated timeouts open its breaker.
+    outer_timeout_ms: 8000         # TOTAL eval budget (ms) across fallback hops — strictly > the
+                                    # per-candidate deadline. The final consumer guard: if the
+                                    # chain can't decide within this, abort + fail open to balanced.
     on_failure: balanced
     cache:
       enabled: true

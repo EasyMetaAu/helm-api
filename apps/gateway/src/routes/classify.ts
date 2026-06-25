@@ -122,7 +122,7 @@ function buildEvalPrompt(req: InternalRequest): EvalModelRequest["messages"] {
 export interface ProviderForEval {
   chatCompletion(
     req: Record<string, unknown>,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; attemptTimeoutMs?: number },
   ): Promise<Record<string, unknown>>;
 }
 
@@ -232,6 +232,7 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
   const invokeModel = async (
     modelReq: EvalModelRequest,
     signal: AbortSignal,
+    attemptTimeoutMs: number,
   ): Promise<EvalModelResponse> => {
     const res = await provider.chatCompletion(
       {
@@ -245,7 +246,12 @@ export function buildClassifyAdapter(deps: ClassifyAdapterDeps): ClassifyFn {
         stream: modelReq.stream,
         max_tokens: modelReq.max_tokens,
       },
-      { signal },
+      // attemptTimeoutMs is the eval's PER-CANDIDATE budget: the self-HTTP loopback
+      // forwards it as `x-helm-attempt-timeout-ms` so the executor times out a slow
+      // head model and falls back to the next candidate (instead of the eval aborting
+      // the whole loopback as a client_abort). A direct provider (no self-HTTP) ignores
+      // it and relies on the outer guard, byte-identical to before.
+      { signal, attemptTimeoutMs },
     );
     // Extract the assistant text from an OpenAI-shaped completion (defensive).
     const choices = (res as { choices?: unknown }).choices;

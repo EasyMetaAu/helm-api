@@ -58,6 +58,12 @@ export function createSelfHttpClient(deps: SelfHttpClientDeps): ProviderClient {
           // The self-call IS the memory machinery — it must never be observed or have
           // memory injected, else it would recursively form/inject memory about itself.
           "x-memory-mode": "off",
+          // Forward the caller's PER-CANDIDATE timeout to the nested executor (gated to
+          // the internal key in the chat route): a slow head model times out and the
+          // loopback falls back to the next candidate instead of failing the whole call.
+          ...(opts?.attemptTimeoutMs
+            ? { "x-helm-attempt-timeout-ms": String(opts.attemptTimeoutMs) }
+            : {}),
         },
         body: JSON.stringify(body),
         ...(opts?.signal ? { signal: opts.signal } : {}),
