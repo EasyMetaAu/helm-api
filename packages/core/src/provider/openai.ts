@@ -71,6 +71,13 @@ export type NativeProtocolProfile =
 export interface ProviderCallOptions {
   signal?: AbortSignal;
   captureUpstream?: (wireBody: string) => void;
+  // PER-CANDIDATE timeout hint (ms) for an internal LOOPBACK call. Consumed ONLY by the
+  // self-HTTP client (memory-self-http.ts), which forwards it to the nested gateway as
+  // `x-helm-attempt-timeout-ms` so that request's executor bounds each candidate (a slow
+  // head model then falls back instead of the caller aborting the whole loopback). Real
+  // provider clients IGNORE it — the executor enforces the deadline itself (execute.ts
+  // withAttemptDeadline); this is purely the loopback's way to propagate it inward.
+  attemptTimeoutMs?: number;
 }
 
 export interface ProviderClient {

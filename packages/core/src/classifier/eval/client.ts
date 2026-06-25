@@ -5,16 +5,20 @@ import { parseEvalOutput } from "./contract.js";
 // to judge a request's lane. It composes: buildPrompt → non-streaming,
 // temperature:0, max_tokens-capped invokeModel (supplied by provider.registry —
 // the internal small-model alias, NOT one of the three public lanes) →
-// parseEvalOutput (eval.contract). The whole chain is wrapped in a DOUBLE timeout
-// per docs/research-notes (llm-router probe hardening):
-//   • inner runner timeout (config.timeout_ms): a Promise.race that, on expiry,
-//     aborts the upstream request so the connection/billing is reclaimed;
-//   • outer consumer timeout (config.outer_timeout_ms): an INDEPENDENT second
-//     Promise.race that protects the main path even if the inner race wedges
-//     (event-loop stalls, an invokeModel that ignores its AbortSignal, etc).
-// Helm's three improvements over the llm-router probe land here: a max_tokens cap
-// (cost bound), the outer timeout is REALLY wired (not dead config), and the
-// output is decisive (parsed → decision), not advisory.
+// parseEvalOutput (eval.contract). Two timeouts, with DISTINCT roles:
+//   • config.timeout_ms = the PER-CANDIDATE deadline. It is NOT a local race here —
+//     it is forwarded to invokeModel, which hands it to the executor as the loopback's
+//     per-attempt budget. A slow head model (e.g. codex gpt-5.4-mini, p50≈5s) then
+//     TIMES OUT and FALLS BACK to the next candidate inside the loopback (breaker
+//     fault + advance), instead of aborting the whole eval as a client_abort;
+//   • config.outer_timeout_ms = the TOTAL consumer guard. A `Promise.race` that, on
+//     expiry, aborts the loopback so a chain that can't decide within the total budget
+//     never hangs the main request path (event-loop stalls, an invokeModel that
+//     ignores its AbortSignal, etc) — it fails open to balanced.
+// Helm's improvements over the llm-router probe land here: a max_tokens cap (cost
+// bound), the outer guard is REALLY wired (not dead config), the per-candidate timeout
+// drives real execution fallback (not a single abort), and the output is decisive
+// (parsed → decision), not advisory.
 //
 // `runEval` NEVER throws (CLAUDE.md principle 3). Every failure path — timeout,
 // provider error, circuit-open, dirty output — collapses to
@@ -79,9 +83,18 @@ export interface EvalLogEvent {
 
 export interface EvalClientDeps<TInput> {
   config: EvalConfig;
-  /** Internal small-model call (provider.registry); non-streaming. Must honor
-   *  the AbortSignal so a timeout reclaims the upstream connection. */
-  invokeModel: (req: EvalModelRequest, signal: AbortSignal) => Promise<EvalModelResponse>;
+  /** Internal small-model call (provider.registry); non-streaming. Must honor the
+   *  AbortSignal so the outer-budget timeout reclaims the upstream connection.
+   *  `attemptTimeoutMs` is the PER-CANDIDATE deadline (config.timeout_ms): the loopback
+   *  forwards it to the executor so a slow head model FALLS BACK to the next candidate
+   *  instead of failing the whole eval (issue: codex gpt-5.4-mini p50≈5s on the eval
+   *  hot path). The executor records a breaker fault + advances on each per-candidate
+   *  timeout; the eval still fails open only if the TOTAL outer budget is exceeded. */
+  invokeModel: (
+    req: EvalModelRequest,
+    signal: AbortSignal,
+    attemptTimeoutMs: number,
+  ) => Promise<EvalModelResponse>;
   /** Pure prompt builder; runEval never inspects TInput itself. */
   buildPrompt: (input: TInput) => EvalModelRequest["messages"];
   /** Injected clock for deterministic latency / timeout assertions. */
@@ -135,17 +148,18 @@ export async function runEval<TInput>(
     ...(config.extra_body ? { extra_body: config.extra_body } : {}),
   };
 
-  // Inner runner: the upstream call raced against its own runner timeout. On
-  // inner timeout we abort so the connection is reclaimed and stops billing.
-  const inner = (async (): Promise<EvalModelResponse | typeof TIMEOUT> => {
-    return Promise.race([invokeModel(request, controller.signal), timeoutAfter(config.timeout_ms)]);
-  })();
-
   let raced: EvalModelResponse | typeof TIMEOUT;
   try {
-    // Outer consumer guard: independent second race so a wedged inner race can
-    // never hold up the main request path.
-    raced = await Promise.race([inner, timeoutAfter(config.outer_timeout_ms)]);
+    // The loopback call races the TOTAL outer budget. config.timeout_ms is NOT an
+    // inner race here — it is forwarded to invokeModel as the PER-CANDIDATE deadline
+    // the executor enforces, so a slow head model (e.g. codex gpt-5.4-mini) falls back
+    // to the next candidate inside the loopback instead of aborting the whole eval.
+    // outer_timeout_ms is the final consumer guard: if the chain can't decide within
+    // the total budget we abort and fail open (balanced), never hanging the hot path.
+    raced = await Promise.race([
+      invokeModel(request, controller.signal, config.timeout_ms),
+      timeoutAfter(config.outer_timeout_ms),
+    ]);
   } catch (err) {
     // The upstream call rejected. Abort (defensive) and classify the failure.
     controller.abort();

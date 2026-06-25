@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-25 · per-attempt 超时 → fallback → 熔断（执行器；docs/04 执行兜底，原则 5）
+
+- **背景（Lukin）**：eval 回环到 `openai-codex/gpt-5.4-mini` 反复超时（`d49c6b67` client_abort、fallback_count:0）。查 box telemetry：该"mini"模型 eval 调用 **p50≈5s、p95≈14s，仅 25% 在 3s 内完成**（订阅端点被节流）。Lukin 拍板正解（比"换模型"更通用）：**慢 attempt 应超时→fallback 下一个候选；总超时就熔断跳过**——对所有路由生效。
+- **诊断**：超时→fallback→熔断的机器**早已存在**（`execute.ts` 通用失败路径 `recordFailure`+走链；breaker 连续 5 次 OPEN）。两个缺口：① 唯一 per-attempt 截止是 90s connect 超时（太长，5-6s 的慢模型碰不到→当"成功"）；② eval 的外层 `controller.abort()` → 执行器判 **client_abort → recordAbort**（不记熔断、不走链）那条死路。
+- **方案（per-request 作用域，避免全局 tight 超时误杀推理模型）**：新增 `InternalRequest.attempt_timeout_ms`（内部信号）。执行器加 `withAttemptDeadline`：把每个候选的 provider 调用（非流式 + 流式 peek）包进可选 per-attempt 截止；到点 abort **per-attempt controller**（非 client signal）→ 抛 `UpstreamError("timeout")` → 落到既有 recordFailure+走链；客户端真断连仍 `clientSignal.aborted` 胜出→recordAbort（保留 client-abort-beats-timeout 不变式，镜像 provider `withTimeout`）。零 `attemptMs` = 直通 client signal（普通流量零变化）。
+- **接线到 eval 回环**：`ProviderCallOptions.attemptTimeoutMs`（仅 self-HTTP 消费，转成 `x-helm-attempt-timeout-ms` 头）→ chat 路由读该头（**仅 internal key 放行**，防恶意客户端用 1ms 触发共享 breaker 跨租户误熔断）→ `req.attempt_timeout_ms` → 嵌套执行器。eval `runEval` 重构：**去掉 inner abort race**，把 `config.timeout_ms` 作为**每候选预算**传给 invokeModel；`outer_timeout_ms` 保留为**总预算**最终兜底。`config.classifier.eval`：timeout_ms=3000（每候选）/ outer_timeout_ms 4000→**8000**（总，容 ~2 跳）。
+- **效果**：eval 回环 gpt-5.4-mini 超 3s → timeout fault → 走链到 haiku（~1.9s）→ **eval 成功**（原 client_abort→fail-open balanced）；连续 5 次 → breaker OPEN（30s）→ 跳过。**共享 breaker 细节**：90s 默认下真实流量 success 会 reset 计数，但 gpt-5.4-mini 流量 eval 占绝大多数（DB 194 internal vs 5 real/2d），故实际仍会 OPEN（符合意图，note 非 blocker）。
+- **TDD+验证**：execute.test 加 2 例（超 attempt_timeout_ms → recordFailure+走链 error_class:timeout，**非** client_abort；真 client abort 仍 recordAbort 终止）；eval client.test「test 3」从"inner timeout"重构为"forwards timeout_ms as per-candidate deadline"；memory-self-http.test 加头转发例；classifier-samples 改 outer 8000。**e2e eval.spec**:单候选 e2e 下慢 eval 现 fail-open 理由 `eval_timeout`→`eval_provider_error`（per-candidate 超时耗尽单候选链→502→provider_error；prod 多候选 lane 则真 fallback 成功，注释说明）。全量 **4626 单测 + 66 e2e 绿**、typecheck+biome 干净。
+- **box**：仅改 operator config `outer_timeout_ms`→8000（timeout_ms 3000 不变）；`eval.model=economy` **不必改**（fallback 自行处理）。分支 `fix/per-attempt-timeout-fallback`。
+
 ## 2026-06-25 · 流式 pre-output 失败 → fallback（执行器；docs/04 执行兜底 + docs/05 流式正确性，原则 5/8）
 
 - **背景（Lukin 报）**：codex `gpt-5.5` 经 native passthrough 返回 HTTP 200 开了 SSE 流，先发无条件前导帧 `response.created`/`response.in_progress`，**随后** `error`/`response.failed`（`server_is_overloaded`）。helm 却记 `final.status:ok`、`fallback_count:0`，把错误帧原样透传给客户端——既不熔断也不 fallback。

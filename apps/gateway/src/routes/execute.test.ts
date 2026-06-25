@@ -1372,6 +1372,89 @@ describe("createExecute — gateway execution adapter", () => {
     if (out.final.status === "ok") expect(out.final.providerModel).toBe("model-b");
   });
 
+  it("a candidate that exceeds attempt_timeout_ms is a TIMEOUT fault → breaker failure + advance", async () => {
+    // The head hangs until its signal aborts (a too-slow upstream); the per-attempt
+    // deadline must abort it, classify it as a `timeout` provider fault (NOT a client
+    // abort), record a breaker failure, and fall back to the next candidate.
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const recordAbort = vi.spyOn(cb, "recordAbort");
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockImplementationOnce(
+          (_b: unknown, opts: { signal: AbortSignal }) =>
+            new Promise((_res, rej) => {
+              opts.signal.addEventListener("abort", () =>
+                rej(Object.assign(new Error("aborted"), { name: "AbortError" })),
+              );
+            }),
+        )
+        .mockResolvedValueOnce({ id: "from-fallback" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ slow: "m-slow", fast: "m-fast" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["slow", "fast"]), req({ attempt_timeout_ms: 20 }));
+
+    expect(out.final.status).toBe("ok");
+    expect(out.body).toEqual({ id: "from-fallback" });
+    // Slow head = timeout fault: breaker failure + chain advance, NOT a client abort.
+    expect(recordFailure).toHaveBeenCalledWith("slow");
+    expect(recordAbort).not.toHaveBeenCalled();
+    expect(out.attempts[0]?.status).toBe("error");
+    expect(out.attempts[0]?.error_class).toBe("timeout");
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(2);
+  });
+
+  it("a genuine client abort still records client_abort even when attempt_timeout_ms is set", async () => {
+    // The per-attempt deadline must NOT swallow a real client disconnect: a client
+    // abort wins over the (much longer) deadline, stays a non-provider fault
+    // (recordAbort, no breaker failure), and terminates the chain (no advance).
+    const cb = breaker();
+    const recordAbort = vi.spyOn(cb, "recordAbort");
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const ac = new AbortController();
+    const provider = {
+      chatCompletion: vi.fn().mockImplementation(
+        (_b: unknown, opts: { signal: AbortSignal }) =>
+          new Promise((_res, rej) => {
+            opts.signal.addEventListener("abort", () =>
+              rej(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            );
+          }),
+      ),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ slow: "m-slow", fast: "m-fast" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: ac.signal,
+    });
+    // Client disconnects well before the 5s attempt deadline.
+    setTimeout(() => ac.abort(), 10);
+
+    const out = await execute(plan(["slow", "fast"]), req({ attempt_timeout_ms: 5000 }));
+
+    expect(out.final.status).toBe("error");
+    expect(recordAbort).toHaveBeenCalledWith("slow");
+    expect(recordFailure).not.toHaveBeenCalled();
+    // Terminal: did NOT advance to the fallback candidate.
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+  });
+
   it("structurally routes a provider/model alias the registry never enumerated to that provider's pool client", async () => {
     // Live OAuth curation: the operator added a model AFTER startup, so the live
     // catalog offers `openai-codex/gpt-5.5` but the startup registry has no entry.

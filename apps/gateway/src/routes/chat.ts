@@ -32,6 +32,7 @@ import {
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
+import { INTERNAL_API_KEY_ID } from "../internal-key.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import type { ServingAccount } from "../runtime/serving-account.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
@@ -469,6 +470,16 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     });
 
     const internal = toInternalRequest(body, traceId, identity, sessionKey, memoryScope);
+    // Per-candidate attempt timeout: a slow head model times out and the executor falls
+    // back to the next candidate (instead of waiting out the global 90s connect timeout).
+    // Honored ONLY from the trusted INTERNAL key — the classifier eval / memory self-HTTP
+    // loopback set it; an untrusted client could otherwise pick a tiny value to force-fail
+    // attempts and trip the SHARED breaker for other tenants. Absent ⇒ today's behavior.
+    if (identity.keyId === INTERNAL_API_KEY_ID) {
+      const raw = c.req.header("x-helm-attempt-timeout-ms");
+      const ms = raw === undefined ? Number.NaN : Number(raw);
+      if (Number.isFinite(ms) && ms > 0) internal.attempt_timeout_ms = Math.floor(ms);
+    }
     const originalMessagesForMemory = [...(internal.messages as IRMessage[])];
 
     // Persist a (redacted) telemetry record. Fail-open: a telemetry failure must

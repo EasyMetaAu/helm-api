@@ -11,8 +11,9 @@ import {
 
 // eval.client — `runEval` actually calls the internal small model to judge a
 // request's lane. It MUST: send a non-streaming, temperature:0, max_tokens-capped
-// request; wrap the whole chain in a DOUBLE timeout (inner runner abort + outer
-// consumer guard); and NEVER throw — any timeout / provider error / circuit-open /
+// request; forward config.timeout_ms to invokeModel as the PER-CANDIDATE deadline
+// (executor-enforced fallback) and guard the whole call with the outer_timeout_ms
+// consumer race; and NEVER throw — any timeout / provider error / circuit-open /
 // parse failure collapses to `{ decided:false, reason }` so eval.cascade fails
 // open to balanced (CLAUDE.md principles 3, 4, 7). Logs/telemetry must never carry
 // plaintext prompt, user messages, or raw model output (principle 7).
@@ -145,28 +146,32 @@ describe("runEval", () => {
     expect(req.extra_body).toBeUndefined();
   });
 
-  it("inner timeout fails open and aborts the upstream request (test 3)", async () => {
-    let captured: AbortSignal | undefined;
+  it("forwards config.timeout_ms to invokeModel as the per-candidate attempt deadline (test 3)", async () => {
+    // timeout_ms is no longer a local inner race; it is the PER-CANDIDATE budget the
+    // loopback hands to the executor so a slow head model falls back to the next
+    // candidate (breaker fault + advance) instead of aborting the whole eval.
+    let capturedAttemptMs: number | undefined;
     const deps = makeDeps({
-      config: makeConfig({ timeout_ms: 300, outer_timeout_ms: 10_000 }),
-      // Never resolves; only an abort can stop it.
-      invokeModel: vi.fn((_req: EvalModelRequest, signal: AbortSignal) => {
-        captured = signal;
-        return new Promise<EvalModelResponse>(() => {});
-      }),
+      config: makeConfig({ timeout_ms: 3000, outer_timeout_ms: 10_000 }),
+      invokeModel: vi.fn(
+        async (
+          _req: EvalModelRequest,
+          _signal: AbortSignal,
+          attemptTimeoutMs: number,
+        ): Promise<EvalModelResponse> => {
+          capturedAttemptMs = attemptTimeoutMs;
+          return { text: SECRET_MODEL_TEXT };
+        },
+      ),
     });
-    const p = runEval(INPUT, deps);
-    await vi.advanceTimersByTimeAsync(301);
-    const result = await p;
-    expect(result.decided).toBe(false);
-    if (!result.decided) {
-      expect(result.reason).toBe("timeout");
-    }
-    expect(captured?.aborted).toBe(true);
+    const result = await runEval(INPUT, deps);
+    expect(capturedAttemptMs).toBe(3000);
+    expect(result.decided).toBe(true);
   });
 
-  it("outer timeout fires independently of the inner race (test 4)", async () => {
-    // Inner timeout is set absurdly high so ONLY the outer guard can win.
+  it("outer timeout guards the total budget (test 4)", async () => {
+    // A loopback that never resolves (e.g. every candidate wedged) must still fail open
+    // when the TOTAL outer budget elapses, never hanging the hot path.
     const deps = makeDeps({
       config: makeConfig({ timeout_ms: 10_000, outer_timeout_ms: 250 }),
       invokeModel: vi.fn(() => new Promise<EvalModelResponse>(() => {})),
