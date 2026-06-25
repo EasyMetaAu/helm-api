@@ -55,25 +55,39 @@ export const load: PageLoad = async ({ url }) => {
   const t = agg.totals;
   const successRate = t.requests === 0 ? null : Math.round((t.okCount / t.requests) * 100);
 
-  // "vs yesterday" deltas — only for the TODAY view, baselined against yesterday up
-  // to the same time of day (resolveTodayComparisonWindow) so it's pace-vs-pace,
-  // not partial-vs-full. Fail-soft: a hiccup → no deltas, cards just omit them.
-  let compare: Record<string, number | null> | null = null;
+  // "vs same period yesterday" deltas — only for the TODAY view, baselined against
+  // yesterday up to the SAME time of day (resolveTodayComparisonWindow) so it's
+  // pace-vs-pace, not partial-vs-full. Each entry carries {pct, base}: base is the
+  // yesterday value, surfaced in the card tooltip so the comparison is transparent.
+  // Suppressed entirely when yesterday's same-period traffic is too thin to compare
+  // against — early in the day a handful of requests makes every % wild noise.
+  // Fail-soft: a hiccup → no deltas, cards just omit them.
+  const MIN_COMPARISON_BASELINE_REQUESTS = 10;
+  let compare: Record<string, { pct: number | null; base: number }> | null = null;
   if (range === 'today') {
     try {
       const cmp = resolveTodayComparisonWindow(now);
       const y = (await getStats({ ...cmp, bucket, tzOffsetMinutes })).totals;
-      compare = {
-        requests: pctDelta(t.requests, y.requests),
-        totalTokens: pctDelta(
-          t.promptTokens + t.completionTokens,
-          y.promptTokens + y.completionTokens,
-        ),
-        inputTokens: pctDelta(t.promptTokens, y.promptTokens),
-        outputTokens: pctDelta(t.completionTokens, y.completionTokens),
-        cachedTokens: pctDelta(t.cachedTokens, y.cachedTokens),
-        totalCost: pctDelta(t.totalCostUsd ?? 0, y.totalCostUsd ?? 0),
-      };
+      if (y.requests >= MIN_COMPARISON_BASELINE_REQUESTS) {
+        const yTotalTokens = y.promptTokens + y.completionTokens;
+        compare = {
+          requests: { pct: pctDelta(t.requests, y.requests), base: y.requests },
+          totalTokens: {
+            pct: pctDelta(t.promptTokens + t.completionTokens, yTotalTokens),
+            base: yTotalTokens,
+          },
+          inputTokens: { pct: pctDelta(t.promptTokens, y.promptTokens), base: y.promptTokens },
+          outputTokens: {
+            pct: pctDelta(t.completionTokens, y.completionTokens),
+            base: y.completionTokens,
+          },
+          cachedTokens: { pct: pctDelta(t.cachedTokens, y.cachedTokens), base: y.cachedTokens },
+          totalCost: {
+            pct: pctDelta(t.totalCostUsd ?? 0, y.totalCostUsd ?? 0),
+            base: y.totalCostUsd ?? 0,
+          },
+        };
+      }
     } catch {
       compare = null;
     }

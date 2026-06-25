@@ -14,7 +14,8 @@
 - **`yesterday` 是首个「闭合窗口」预设**（`[昨天0点, 今天0点)`，不能漏进今天）。由此抓出 key-detail 的潜伏 bug：`resolveKeyDetailWindow` 预设分支**硬把 end 覆盖成 now**，会让"昨天"含进今天数据 → 改 `end: w.end ?? nowMs`（滚动/today 仍开口到 now，仅 yesterday 守闭口）。
 - **「对比昨天」delta**：仅 `range=today` 显示，基准用**诚实的"昨天同一时刻"窗**（`resolveTodayComparisonWindow`：昨天午夜 + 今天已过时长）——今天半天 vs 昨天整天必然显示为暴跌，故把昨天截到同一时点做 pace-vs-pace。`pctDelta` 基准为 0 → 返回 `null`（不显假 +100%）。dashboard 在 Requests/Spend/Total/Input/Output/Cached **六张量级卡片**下挂 `↑/↓N%` **中性灰**标（**不对成本上涨着红色**，避免道德化歧义）；loader 多拉一次 `getStats(昨天窗)`，**fail-soft**（出错则无 delta，卡片照常）。
 - **i18n**：`Today`/`All`/`Date range` 五语早已有；仅补 `Yesterday`（昨天/昨日/어제）+ `vs yesterday`（对比昨天/前日比/어제 대비）五语，并纳入 `dashboard-locales.test` 守卫（非英语 locale 必须 ≠ 英文源）。
-- **TDD + 验证**：红→绿；改/加 `requests-filters`/`key-detail-filters`/`dashboard-chart`/`RangeFilter` 四组单测 + key-detail loader/page 默认值。**admin 466 单测全绿、svelte-check 0/0、prettier 已格式化**。改动全在 `apps/admin`（不碰 core/gateway，符合原则 1 网关与 UI 解耦）。工作树未提交（待用户）。
+- **TDD + 验证**：红→绿；改/加 `requests-filters`/`key-detail-filters`/`dashboard-chart`/`RangeFilter` 四组单测 + key-detail loader/page 默认值。**admin 466 单测全绿、svelte-check 0/0、prettier 已格式化**。改动全在 `apps/admin`（不碰 core/gateway，符合原则 1 网关与 UI 解耦）。已发布 **v0.21.23** 并部署 la.atmy.work。
+- **2026-06-25 修订（delta 透明化，v0.21.24）**：上线后用户报「对比昨天数字都不对」。在 box telemetry DB 上用同窗口复算证实**非计算 bug**——`%` 确为 `今天累计 ÷ 昨日同一时段累计`（如 07:45 时今天 91 req vs 昨日同期 33 req = +176%）。**真问题=基准不透明+清晨噪声**：① 基准是"昨日前 N 小时"，UI 任何地方看不到（用户只见「昨天」全天 1973 req），于是拿今天 56 对昨天全天 1973 觉得该降却显 ↑273%；② 清晨基准仅十几请求，分母一抖 % 飞到 +800% 且各卡步调不一。**用户拍板「同时段+透明化」**：保留同时段口径，但 (a) 标签 `vs yesterday`→`vs same period yesterday`（对比昨日同期），(b) `compare` 每项改 `{pct, base}`，卡片 `title` 用各自 formatter 显示基准（如「昨日同期：33」），(c) loader 加 `MIN_COMPARISON_BASELINE_REQUESTS=10` 闸门——昨日同期请求 < 10 则**整组 delta 不显**（杀清晨噪声，单闸控六卡）。i18n 五语换键。home.test 加两例（{pct,base} + 闸门）。**468 单测绿、svelte-check 0/0**。
 
 ## 2026-06-24 · 测试覆盖率补强至「边际收益 0」+ 诚实化单测指标（CLAUDE.md 开发流程「覆盖率到边际效应为止」）
 
