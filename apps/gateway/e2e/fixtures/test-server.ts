@@ -83,10 +83,12 @@ await keyStore.createKey({
 const telemetry = new SqliteTelemetryStore(seedDb);
 await telemetry.insert({
   apiKeyId: "k_e2e",
-  // One hour ago, NOT a fixed date: the requests list defaults to a 24h window,
-  // so a hard-coded timestamp silently ages out of view and the admin specs
-  // start failing (time bomb — happened with the original 2026-05-31 seed).
-  createdAt: new Date(Date.now() - 3_600_000),
+  // NOW, not a fixed date and not now−1h: the requests list defaults to TODAY
+  // (since local midnight). `now` is within "today" in every timezone, whereas a
+  // past offset (the old now−1h) falls into YESTERDAY when the suite runs within
+  // that offset after local midnight — a deterministic midnight-boundary failure.
+  // A hard-coded date silently ages out entirely (time bomb — the 2026-05-31 seed).
+  createdAt: new Date(),
   decision: {
     request_id: SEED_TRACE_ID,
     trace_id: SEED_TRACE_ID,
