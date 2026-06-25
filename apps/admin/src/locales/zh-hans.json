@@ -705,6 +705,7 @@
   "Tokens per minute (TPM)": "每分钟令牌数 (TPM)",
   "tool call": "工具调用",
   "Total": "合计",
+  "Total cost": "总花费",
   "Total tokens": "总 Token",
   "TPM": "TPM",
   "TPS": "TPS",

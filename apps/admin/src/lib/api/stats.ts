@@ -28,6 +28,7 @@ export interface DashboardSeriesBucket {
   cachedTokens: number;
   cacheCreationTokens: number;
   requests: number;
+  costUsd: number | null; // Σ cost over the bucket; null = no priced attempt
 }
 
 export interface DashboardModelUsage {
@@ -36,6 +37,7 @@ export interface DashboardModelUsage {
   completionTokens: number;
   totalTokens: number;
   requests: number;
+  costUsd: number | null; // Σ cost for this model; null = no priced attempt
 }
 
 export interface DashboardStats {

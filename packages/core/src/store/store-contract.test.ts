@@ -673,6 +673,9 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(agg.series[1]?.bucketStartMs).toBe(day1);
       expect(agg.series[1]?.requests).toBe(1);
       expect(agg.series[1]?.promptTokens).toBe(10);
+      // Cost per bucket: each served row carries the default decision's $0.004 attempt.
+      expect(agg.series[0]?.costUsd).toBeCloseTo(0.012, 10); // 3 rows × 0.004
+      expect(agg.series[1]?.costUsd).toBeCloseTo(0.004, 10);
 
       // By-model: ordered by total tokens desc — gpt-4o (185) before claude-x (240)?
       // claude-x total = 200+40 = 240 > gpt-4o 100+20+50+10+10+5 = 195. claude first.
@@ -682,8 +685,10 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(gpt?.promptTokens).toBe(160); // 100+50+10
       expect(gpt?.completionTokens).toBe(35); // 20+10+5
       expect(gpt?.totalTokens).toBe(195);
+      expect(gpt?.costUsd).toBeCloseTo(0.012, 10); // d0a + d0b + d1a, each 0.004
       const claude = agg.byModel.find((m) => m.servedModel === "claude-x");
       expect(claude?.totalTokens).toBe(240);
+      expect(claude?.costUsd).toBeCloseTo(0.004, 10); // d0c only
     });
 
     // True-TPS dashboard average: an aggregate ratio Σcompletion / Σgeneration_ms ×
