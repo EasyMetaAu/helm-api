@@ -726,6 +726,7 @@
   "Use a proxy (optional)": "프록시 사용(선택 사항)",
   "use lane": "사용 레인",
   "User ID": "사용자 ID",
+  "User message queue timed out": "사용자 메시지 대기열 시간 초과",
   "user keys authenticate normal client traffic. root keys are for the management plane only.": "user 키는 일반 클라이언트 트래픽을 인증합니다. root 키는 관리 플레인 전용입니다.",
   "Username (optional)": "사용자 이름 (선택 사항)",
   "uses the “keep bodies for” window above · archived": "위의 “본문 보관 기간” 기간 사용 · 보관됨",

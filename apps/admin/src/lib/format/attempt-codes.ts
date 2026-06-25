@@ -47,6 +47,7 @@ export const ATTEMPT_CODE_LABELS: Record<string, string> = {
   aborted: 'Client disconnected',
   invalid_request: 'Invalid request',
   lane_unavailable: 'Lane unavailable',
+  user_message_queue_timeout: 'User message queue timed out', // skip_reason (per-account serial-queue backpressure)
   auth_error: 'Authentication failed',
   rate_limited: 'Rate limited', // outcome + error_class
   timeout: 'Timed out', // outcome + error_class

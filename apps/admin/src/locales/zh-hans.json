@@ -729,6 +729,7 @@
   "Use a proxy (optional)": "使用代理（可选）",
   "use lane": "使用通道",
   "User ID": "用户 ID",
+  "User message queue timed out": "用户消息队列等待超时",
   "user keys authenticate normal client traffic. root keys are for the management plane only.": "user 密钥用于验证普通客户端流量；root 密钥仅用于管理平面。",
   "Username (optional)": "用户名（可选）",
   "uses the “keep bodies for” window above · archived": "使用上方“保留正文时间”窗口 · 已归档",

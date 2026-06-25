@@ -726,6 +726,7 @@
   "Use a proxy (optional)": "使用代理（可選）",
   "use lane": "使用通道",
   "User ID": "使用者 ID",
+  "User message queue timed out": "使用者訊息佇列等待逾時",
   "user keys authenticate normal client traffic. root keys are for the management plane only.": "user 金鑰用於驗證一般用戶端流量；root 金鑰僅用於管理平面。",
   "Username (optional)": "使用者名稱（選填）",
   "uses the “keep bodies for” window above · archived": "使用上方「保留本文時間」窗口 · 已封存",
