@@ -101,6 +101,7 @@ export {
   type EvalModelResponse,
   runEval,
 } from "./classifier/eval/client.js";
+export { lastUserMessageText } from "./classifier/message-text.js";
 export {
   applyMomentum,
   type MomentumDeps,

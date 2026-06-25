@@ -232,11 +232,11 @@ classifier:
     # max_tokens always win over extra_body; see classify.ts invokeModel.)
     extra_body:
       thinking: { type: disabled }
-    timeout_ms: 1500               # inner (runner) timeout — covers a real cross-region eval
-                                    # round-trip (~1s with reasoning disabled) with margin.
-                                    # 250ms lost every race in production → eval_timeout on
-                                    # every cache-miss prompt; balanced was the only outcome.
-    outer_timeout_ms: 2000         # outer (consumer) timeout — strictly-later backstop (> inner)
+    timeout_ms: 3000               # inner (runner) timeout — covers a real cross-region eval
+                                    # round-trip with margin, incl. subscription models
+                                    # (codex/zenmux) that queue. Was 1500ms → eval_timeout
+                                    # whenever the small model queued; fail-open to balanced.
+    outer_timeout_ms: 4000         # outer (consumer) timeout — strictly-later backstop (> inner)
     on_failure: balanced
     cache:
       enabled: true
