@@ -239,6 +239,7 @@ class InMemoryTelemetryStore implements TelemetryStore {
         cachedTokens: 0,
         cacheCreationTokens: 0,
         requests: 0,
+        costUsd: null as number | null, // this fake punts on cost (like totalCostUsd above)
       };
       b.promptTokens += num(r.rec.usage?.prompt_tokens);
       b.completionTokens += num(r.rec.usage?.completion_tokens);
@@ -256,6 +257,7 @@ class InMemoryTelemetryStore implements TelemetryStore {
         completionTokens: 0,
         totalTokens: 0,
         requests: 0,
+        costUsd: null as number | null, // this fake punts on cost (like totalCostUsd above)
       };
       b.promptTokens += num(r.rec.usage?.prompt_tokens);
       b.completionTokens += num(r.rec.usage?.completion_tokens);

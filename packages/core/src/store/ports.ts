@@ -342,6 +342,7 @@ export interface TelemetrySeriesBucket {
   cachedTokens: number;
   cacheCreationTokens: number;
   requests: number;
+  costUsd: number | null; // Σ cost over the bucket; null = no priced attempt (same honesty as totals)
 }
 
 export interface TelemetryModelUsage {
@@ -350,6 +351,7 @@ export interface TelemetryModelUsage {
   completionTokens: number;
   totalTokens: number; // prompt + completion — the doughnut value, ordered desc
   requests: number;
+  costUsd: number | null; // Σ cost for this model; null = no priced attempt
 }
 
 export interface TelemetryAggregate {

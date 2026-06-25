@@ -241,6 +241,7 @@ export class PgTelemetryStore implements TelemetryStore {
         completionTokens: sql<number>`COALESCE(SUM(${telemetry.completionTokens}), 0)`,
         cachedTokens: sql<number>`COALESCE(SUM(${telemetry.cachedTokens}), 0)`,
         cacheCreationTokens: sql<number>`COALESCE(SUM(${telemetry.cacheCreationTokens}), 0)`,
+        totalCostUsd: sql<number | null>`SUM(${telemetry.costUsd})`,
       })
       .from(telemetry)
       .where(where)
@@ -253,6 +254,7 @@ export class PgTelemetryStore implements TelemetryStore {
         promptTokens: sql<number>`COALESCE(SUM(${telemetry.promptTokens}), 0)`,
         completionTokens: sql<number>`COALESCE(SUM(${telemetry.completionTokens}), 0)`,
         totalTokens: sql<number>`COALESCE(SUM(${telemetry.promptTokens}), 0) + COALESCE(SUM(${telemetry.completionTokens}), 0)`,
+        totalCostUsd: sql<number | null>`SUM(${telemetry.costUsd})`,
       })
       .from(telemetry)
       .where(where)

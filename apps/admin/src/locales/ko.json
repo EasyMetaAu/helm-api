@@ -703,6 +703,7 @@
   "Tokens per minute (TPM)": "분당 토큰 수 (TPM)",
   "tool call": "도구 호출",
   "Total": "합계",
+  "Total cost": "총비용",
   "Total tokens": "총 토큰",
   "TPM": "TPM",
   "TPS": "TPS",

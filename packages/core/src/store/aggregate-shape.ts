@@ -55,6 +55,7 @@ export function shapeTelemetryAggregate(
         cachedTokens: num(r.cachedTokens),
         cacheCreationTokens: num(r.cacheCreationTokens),
         requests: num(r.requests),
+        costUsd: numOrNull(r.totalCostUsd),
       }))
       .sort((a, b) => a.bucketStartMs - b.bucketStartMs),
     byModel: byModel
@@ -64,6 +65,7 @@ export function shapeTelemetryAggregate(
         completionTokens: num(r.completionTokens),
         totalTokens: num(r.totalTokens),
         requests: num(r.requests),
+        costUsd: numOrNull(r.totalCostUsd),
       }))
       .sort((a, b) => b.totalTokens - a.totalTokens),
   };

@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-25 · 仪表板 Token 趋势图/饼图 tooltip 增加花费（admin UI；docs/04 遥测展示）
+
+- **背景**：用户（Lukin）要「Token 用量趋势」浮层与「各模型 Token 用量」饼图除 token 外**显示花费**——趋势浮层加该时间桶**总花费**、饼图悬停显示**该模型花费**；并确认时间轴今天/昨天按小时、其余按日期（`trendBucketForRange`/`formatTrendTick` **早已实现**，本次未改，浮层 header 复用 `formatTrendAxisValue` 随桶切换）。
+- **后端**：`TelemetrySeriesBucket`/`TelemetryModelUsage` 各加 `costUsd: number|null`；sqlite+pg 两适配器 series/byModel 查询加 `SUM(cost_usd)`（别名 `totalCostUsd`），`aggregate-shape` 用 `numOrNull` 映射（**SUM 全 null→null**，区别于实测 0，符合原则 3/7 成本可空语义）。`/admin/api/stats` 路由 `c.json(agg)` 逐字透传，无需改。
+- **决定（「各种花费」的范围）**：telemetry 只存**单列 `cost_usd`（每行=非空 attempt 成本之和）**，故只做**逐桶/逐模型总花费**；**不**按 token 类型（输入/输出/缓存）拆分成本——拆分须运行时按 `pricing.yaml` 重算，未存储，超本次范围（YAGNI）。趋势浮层=三条 token 行 + 分隔线 +「总花费」；饼图=模型名+token+「花费」。
+- **前端**：`+page.svelte` `TrendPoint`/`ModelSlice` 带 `cost`；用 LayerChart 的 `slot="tooltip"`（legacy slot，Svelte 5 互操作，非 snippet）自定义两图浮层，`formatUsd`（null→「—」，自适应精度）渲染；新增 i18n key `Total cost` 五语（`Cost` 早已有）。
+- **TDD+验证**：红→绿，`store-contract.test` 加 series/byModel `costUsd` 断言（两适配器，0.004×N，`toBeCloseTo` 避 FP）；`ports.test` 内存假 store 补 `costUsd:null`（与其 `totalCostUsd:null` 同保真度）。typecheck 三包绿、admin svelte-check 0/0、build 绿、相关单测绿；**Playwright 实测**桩 stats 数据悬停截图确认趋势浮层「总花费 $9.63」、饼图「claude-opus-4-8 / Cost $31.50」。分支 `worktree-dashboard-cost-tooltips`，未提交（待用户）。
+
 ## 2026-06-24 · 仪表板时间筛选改自然日预设 + 「对比昨天」增量（admin UI；对应 docs/04 遥测展示）
 
 - **背景**：用户（Lukin）要把共享 `RangeFilter` 从滚动窗口（1h/6h/24h/7d/30d/全部）改成**自然日语义**——今天 / 昨天 / 近7天 / 近30天 / 全部，默认今天。1h/6h 对其无意义，核心诉求是**逐日汇总与逐日对比**。三处共用此组件：dashboard 概览、requests 列表筛选栏、key-detail 用量。
@@ -32,21 +40,13 @@
 - **验证**：`pnpm typecheck` 三包全绿；`pnpm lint` 0 error（唯一 warning `mcp/oauth.ts:312` pre-existing，未碰源码）；`pnpm test --coverage` 4592 绿、阈值达标；逐文件 lcov 抽查确认命中原未覆盖行（非凑行）。分支 `test/coverage-marginal-zero`，**未提交**（待用户）。
 - **明确不做（边际收益 0）**：`buildServer` 逐行集成测试、admin `+page.svelte`/`+layout.svelte` UI、`lib/api/*` 薄 fetch 封装、dedup 维护脚本、`logging.ts`、凑 100%。
 
-## 2026-06-24 · 定时自动 VACUUM + 归档失败残留空目录修复（运维诊断；原则 2/3）
-
-- **背景**：la.atmy.work helm.db 反弹到 6.4G。诊断：行数不多（request_payloads 3783 行/**4.37GB**，均 1.18MB——Claude Code 满上下文 body，最大单条 4.9MB；telemetry 仅 0.04GB），真问题是 ① payload 体量大（`capture_payloads` + 7 天 retention，用户已改 3）② **空闲页不回收**——`auto_vacuum=0`，cleanup 只 `DELETE` 从不 VACUUM，463530 空闲页 = **1.77GB 死空间**永不还盘。另：archive/ 下两个 06-20 的空 runId 目录 = 归档卡死残骸（已 `rmdir` 清掉）。
-- **Bug A（`local-volume-sink.ts`）**：`archiveTable` 先 `mkdir(<runId>)` 再写，失败（`assertFreeSpace` 抛 / gzip 中断）只删 `.tmp`、**不删目录** → 每次失败归档留一个孤儿空目录（06-20 gzip 4GB 卡死即此源）。修：`assertFreeSpace` 移进 try，catch 里加 `rmdir(dir)`（**非递归，空才删**——兄弟表已归档的 `.gz` 会让 rmdir 报 ENOTEMPTY 而保留目录）。
-- **新功能：定时自动 VACUUM**。`store.vacuum()` 原语 + 手动「压缩数据库」按钮/路由 **main 早已具备**，唯缺定时。决定：纯函数 `shouldAutoVacuum`（enabled + 本地小时匹配 + 当日未跑）+ **复用 `startCleanupScheduler`** 跑每小时 tick，server 持 in-memory `lastVacuumDayKey`。新设置 `vacuum_enabled`（默认 **false**，opt-in——与 `cleanup_archive_enabled` 一致，VACUUM 持**排他锁重写整库**，默认开会惊到运维）+ `vacuum_hour`（0–23 **服务器本地时区**，默认 4）。Postgres 自带 autovacuum → `store.vacuum()` 为 no-op，调度器在 pg 上 inert。一并受 `HELM_CLEANUP_DISABLED=1` 关闭（测试默认）。
-- **ponytail 取舍**：① **不加「空闲页阈值守卫」**（YAGNI——opt-in + 低峰，开了就想跑；高 churn 的 box 每天都有可回收空间，低流量自托管者本就不会开）；② `lastVacuumDayKey` 仅内存（重启恰逢 vacuum_hour 至多多跑一次 VACUUM，无害）；③ 标记 `lastVacuumDayKey` 在 `await store.vacuum()` **之前**，防 interval 抖动同一小时内双跑。
-- **类型涟漪**：`RuntimeSettings` 加必填字段 → admin 客户端 `settings.ts`（与 schema **有意分叉**，如 archive 默认 true）+ svelte `DEFAULTS` + 三语言 i18n（en/zh-hans/ja）+ 两处全量等值断言测试（core `runtime-settings.test`、admin `settings.test`）同步加 `vacuum_enabled/vacuum_hour`。
-- **验证**：typecheck（shared/core/gateway）+ lint（仅 pre-existing `oauth.ts` warning）+ 单测（schema/auto-vacuum/local-volume-sink/settings/cleanup/gateway 共 146 例绿）+ `pnpm build`（admin 静态含 settings 页 + 三语言 chunk）全绿。分支 `worktree-vacuum-and-archive-fixes`，**未提交**（待用户）。**该功能未部署**——box 仍可用既有手动「压缩数据库」按钮一次性回收那 1.77GB（部署新版后才有定时 VACUUM）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-24 · 定时自动 VACUUM + 归档残留空目录修复（运维；原则 2/3）**：helm.db 反弹 6.4G 真因=`auto_vacuum=0` + cleanup 只 DELETE 不 VACUUM（1.77G 死空间永不还盘）。新增纯函数 `shouldAutoVacuum` + 复用 `startCleanupScheduler` 每小时 tick（`vacuum_enabled` 默认 false opt-in / `vacuum_hour` 默认 4 服务器本地时区；pg 自带 autovacuum 故 `store.vacuum()` no-op）；Bug A `local-volume-sink.ts` 归档失败 catch 里 `rmdir`（非递归）清孤儿空目录。`RuntimeSettings` 加两必填字段涟漪到 admin settings/i18n/全量断言测试。146 测绿，分支 `worktree-vacuum-and-archive-fixes`，**未部署**（box 可用手动「压缩数据库」按钮一次性回收 1.77G）。
 - **2026-06-23 · 记忆深度召回 = 混合检索（docs/12 P8）+ `memory_recall` MCP 工具（docs/14）**：检索单元=`memory_facts`（account-scoped 跨会话）；三信号 **RRF(k=60)** 融合——向量（sqlite-vec/pgvector）+ 全文（FTS5 trigram/tsvector）+ forgetting-score；双语跨 zh↔en；**fail-open**（全失败空结果不 5xx）。迁移 sqlite **v28**/pg **v27**。坑：vec0 主键须 `BigInt`；`loadExtension` 须在 migrations+createDb 两处 hook 且失败 fail-open；PGlite 须 `PGlite.create({extensions:{vector}})`；gateway 无 `/v1/embeddings` 故 embedder 直连 provider base_url。config `memory.forgetting.facts_retrieval.enabled` 开 FTS+score，再配 `memory.llm.embedding_model` 点亮向量腿。core 2568 测试绿；分支 `helm-memory-deep-recall`。**已上线 v0.21.19**（见记忆 deep-recall-shipped）。
 - **2026-06-23 · MCP OAuth 2.1 shim（ChatGPT 连接器接入；docs/13）**：`/mcp` 前加薄 OAuth 授权服务器（`routes/mcp/oauth.ts`）把 OAuth token 映射回既有 API key 的 account——**无状态 JWT、无 token/code 表、无迁移**；授权码=60s 签名 JWT（PKCE S256 绑定），access token 默认 30 天无 refresh，签名密钥从既有 `HELM_OAUTH_ENC_KEY` 派生（`memory.mcp.oauth.enabled` 且无 enc key → fail-closed 拒启动）；`mcpAuth` 接受 JWT 或裸 key。天花板：授权码 60s 窗口可重放、token 到期前不可撤销（轮换 enc key 全失效）。`oauth.test.ts` 16 例绿，未部署。
 - **2026-06-22 · Claude 订阅（OAuth）token 成本折算**：admin 对 `anthropic/*` OAuth 池只显 token 数、花费恒 null，因 `pricing.yaml` 无 `anthropic/*` 行（`costOf` 查 catalog 落空→`resolveCostUsd` null）。坑：必须**同时**改 `capabilities.yaml`，否则 `loadCatalog` 用 `EMPTY_CAPABILITIES` 造条目→`context_too_small` 剪掉每个 Claude 请求。用官方 Anthropic 价**含 cache 读写价**；4 个 lane alias 折算价非实付，纯配置无代码改动。

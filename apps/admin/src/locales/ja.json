@@ -706,6 +706,7 @@
   "Tokens per minute (TPM)": "1分あたりのトークン数 (TPM)",
   "tool call": "ツール呼び出し",
   "Total": "合計",
+  "Total cost": "合計コスト",
   "Total tokens": "総トークン数",
   "TPM": "TPM",
   "TPS": "TPS",

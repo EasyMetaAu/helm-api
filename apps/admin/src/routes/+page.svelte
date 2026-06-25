@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { AreaChart, PieChart } from 'layerchart';
+  import { AreaChart, PieChart, Tooltip } from 'layerchart';
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
@@ -48,17 +48,25 @@
   // Explicit point types so EVERY series/accessor shares one TData — without them
   // each inline `(d: {input})` lambda narrows TData to a different shape and the
   // LayerChart generic can't unify them.
-  type TrendPoint = { date: Date; input: number; output: number; cached: number };
-  type ModelSlice = { model: string; tokens: number };
+  type TrendPoint = {
+    date: Date;
+    input: number;
+    output: number;
+    cached: number;
+    cost: number | null;
+  };
+  type ModelSlice = { model: string; tokens: number; cost: number | null };
 
-  // Trend: each bucket carries a real Date (x axis) + the three token series. The
-  // chart plots input/output/cached as overlaid areas over time.
+  // Trend: each bucket carries a real Date (x axis) + the three token series + the
+  // bucket's total spend (tooltip only — not a plotted area). The chart plots
+  // input/output/cached as overlaid areas over time.
   const trend = $derived<TrendPoint[]>(
     data.agg.series.map((b) => ({
       date: new Date(b.bucketStartMs),
       input: b.promptTokens,
       output: b.completionTokens,
       cached: b.cachedTokens,
+      cost: b.costUsd,
     })),
   );
   const trendTicks = $derived(trendAxisTicks(trend));
@@ -88,7 +96,11 @@
   const byModel = $derived<ModelSlice[]>(
     data.agg.byModel
       .filter((m) => m.totalTokens > 0)
-      .map((m) => ({ model: m.servedModel ?? $t('unknown'), tokens: m.totalTokens })),
+      .map((m) => ({
+        model: m.servedModel ?? $t('unknown'),
+        tokens: m.totalTokens,
+        cost: m.costUsd,
+      })),
   );
 
   // Donut palette — these are LayerChart's own default slice colors, pinned here so
@@ -318,9 +330,10 @@
       <h2 class="section-header mb-3">{$t('Token usage over time')}</h2>
       {#if trend.length > 0}
         <div class="h-64">
-          <!-- Compact the Y-axis ticks (15M, not 15,000,000) and the per-series
-               tooltip values via the shared formatTokens; LayerChart formats
-               both itself unless we override props.yAxis / props.tooltip.item. -->
+          <!-- Compact the Y-axis ticks (15M, not 15,000,000) via the shared
+               formatTokens; the x-axis already switches hour↔day by bucket
+               (formatTrendTick). The tooltip is overridden below to append the
+               bucket's total spend, which the default (tokens-only) tooltip omits. -->
           <AreaChart
             data={trend}
             x={(d) => d.date}
@@ -329,9 +342,29 @@
             props={{
               xAxis: { ticks: trendTicks, format: formatTrendAxisValue },
               yAxis: { format: formatTokens },
-              tooltip: { item: { format: formatTokens } },
             }}
-          />
+          >
+            <svelte:fragment slot="tooltip" let:x>
+              <Tooltip.Root let:data>
+                <Tooltip.Header value={x(data)} format={formatTrendAxisValue} />
+                <Tooltip.List>
+                  {#each TREND_SERIES as s (s.key)}
+                    <Tooltip.Item
+                      label={s.label}
+                      value={s.value(data)}
+                      color={s.color}
+                      format={formatTokens}
+                      valueAlign="right"
+                    />
+                  {/each}
+                  <Tooltip.Separator />
+                  <Tooltip.Item label={$t('Total cost')} valueAlign="right">
+                    {formatUsd(data.cost)}
+                  </Tooltip.Item>
+                </Tooltip.List>
+              </Tooltip.Root>
+            </svelte:fragment>
+          </AreaChart>
         </div>
       {:else}
         <div class="empty-state">{$t('No token usage recorded in this window yet.')}</div>
@@ -345,16 +378,32 @@
              unpredictably, so we drive the slices with an explicit palette and
              render our own in-flow legend below (see SLICE_COLORS). -->
         <div class="h-56">
-          <!-- Slice-hover tooltip shows the model's token total — compact it
-               (1.2M) through the same formatter as everything else. -->
+          <!-- Slice-hover tooltip shows the model's token total (compacted, 1.2M)
+               plus its spend — the default tooltip is tokens-only. -->
           <PieChart
             data={byModel}
             key={(d: ModelSlice) => d.model}
             value={(d: ModelSlice) => d.tokens}
             innerRadius={-40}
             cRange={SLICE_COLORS}
-            props={{ tooltip: { item: { format: formatTokens } } }}
-          />
+          >
+            <svelte:fragment slot="tooltip" let:c let:cScale>
+              <Tooltip.Root let:data>
+                <Tooltip.List>
+                  <Tooltip.Item
+                    label={data.model}
+                    value={data.tokens}
+                    color={cScale?.(c(data))}
+                    format={formatTokens}
+                    valueAlign="right"
+                  />
+                  <Tooltip.Item label={$t('Cost')} valueAlign="right">
+                    {formatUsd(data.cost)}
+                  </Tooltip.Item>
+                </Tooltip.List>
+              </Tooltip.Root>
+            </svelte:fragment>
+          </PieChart>
         </div>
         <!-- In-flow legend: normal-flow flex-wrap has correct line boxes, so a long
              model name wraps at a hyphen without the dot/label colliding with the
