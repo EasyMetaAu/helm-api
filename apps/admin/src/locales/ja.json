@@ -729,6 +729,7 @@
   "Use a proxy (optional)": "プロキシを使用（任意）",
   "use lane": "使用レーン",
   "User ID": "ユーザーID",
+  "User message queue timed out": "ユーザーメッセージキューの待機がタイムアウトしました",
   "user keys authenticate normal client traffic. root keys are for the management plane only.": "userキーは通常のクライアントトラフィックを認証します。rootキーは管理プレーン専用です。",
   "Username (optional)": "ユーザー名（任意）",
   "uses the “keep bodies for” window above · archived": "上記の本文保持期間を使用 · アーカイブ済み",
