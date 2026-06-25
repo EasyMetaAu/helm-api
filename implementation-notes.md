@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-26 · 仪表板「昨天」视图加同比（昨天 vs 前天，整天对整天；admin UI，对应 docs/04 遥测展示）
+
+- **背景（Lukin）**：今天视图的「对比昨日」因今天未过完意义不大；「昨天」是完整一天，**昨天 vs 前天（整天对整天）才有意义**，要求给昨天视图也加同比。
+- **决定**：复用既有 today-delta 机制，只把基准窗按视图分流——`dashboard-chart.ts` 加 `resolveYesterdayComparisonWindow`（前天整日 `[前天0点, 昨天0点)`，DST 用本地 Date 数学）；loader 的 compare 门从 `range==='today'` 放宽到 `today|yesterday`，今天→`resolveTodayComparisonWindow`(昨天整日)、昨天→前天整日，其余逻辑/`MIN_COMPARISON_BASELINE_REQUESTS=10` 门/`{pct,base}` 不变。
+- **labels**：badge 与 tooltip 基准按 `data.range` 分流——昨天视图用 `vs day before yesterday`(对比前天)/`Day before yesterday: {value}`(前天：…)，否则沿用 `vs yesterday`/`Yesterday: {value}`。五语补两键，纳入 `dashboard-locales.test` 守卫。
+- **TDD+验证**：`dashboard-chart.test` 加前天窗口断言、`home.test` 加昨天视图 compare（整日对整日，2 次 getStats）；红→绿。**admin svelte-check 0/0、30 相关单测绿**。改动全在 `apps/admin`（原则 1）。随 **v0.21.33** 发布并部署 la.atmy.work。
+
 ## 2026-06-26 · key 详情图表对齐 dashboard + 缓存命中率卡片（admin UI；对应 docs/04 遥测展示）
 
 - **背景（Lukin）**：① dashboard「缓存 Token」卡片要显缓存命中率；② key 详情页 `keys/[id]` 的两张图表要和 dashboard 一致（数据已按 key 维度，只差浮层）。
@@ -23,22 +30,13 @@
 - **双层 guard 幂等无害**：池的 guard 输出对成功流是 byte-identical 前导+输出，执行器的 guard 再包一次结果相同；池全失败则抛最后 upstream 错，执行器 peek 到即走链。**保留执行器层 guard 作纵深(非 OAuth provider 仍需要)**。
 - **TDD+验证**：`pool.test.ts` 加 4 例（preamble→error 换账号、preamble-only 关流换账号、单账号 preamble→output 正常提交且按序、全账号 pre-output 失败 surface 最后错）；红→绿。**core+gateway 228 文件 3856 单测绿**、typecheck+biome 干净。改 `pool.ts`+`server.ts`+test。分支 `fix-pool-preoutput-inpool-failover`。
 
-## 2026-06-25 · OAuth 池内换账号重试瞬时故障（provider 执行；docs/04 执行兜底，原则 5）
-
-- **背景（Lukin 报，box req `0348f222`）**：Codex（`protocol:openai_responses` + native tools）请求 `gpt-5.5`，链头 `openai-codex/gpt-5.5` 被某账号返回 `Our servers are currently overloaded`（`upstream_error`，`upstreamStatus:null`，pre-first-chunk），随后**全部 9 个 fallback 被 `responses_native_tools_cross_protocol_blocked` 跳过** → `all_providers_failed`，`fallback_count:0`。**非熔断、非 429**。
-- **诊断（拍证）**：抓 `request_payloads` 证实该请求 14 个工具含 `web_search`(OpenAI 服务端托管)/`tool_search`/`apply_patch`(custom 语法)——这些是 Responses-原生工具，Chat Completions 无等价物，故跨协议跳过**是正确拒绝**（`protocolGuardSkipReason`，execute.ts:642：`type!=="function"` 全进 `nativeTools`）。真正的洞：一个带 Responses 原生工具的 Codex 请求**唯一合法 fallback 就是另一个 Responses-原生 gpt-5.5 端点 = 同订阅的其它账号**。可 `OAuthPoolClient.select()` **每请求只挑 1 个账号**，失败即交回执行器走链（→ 全被跨协议挡），**从不在请求内试其它账号**。4 个 codex 订阅一个忙没帮上。
-- **决定（Lukin 选「池内重试」）**：在 `pool.ts` 加请求内换账号重试。`isRetryableTransientError`：仅 `UpstreamError` 的 **timeout / `upstreamStatus===null`(过载无状态) / 5xx(含 529)** 可重试；**排除 429**（执行器要看见它去 park 该账号 + 配额窗归因，池内吞掉会留它不 park）与**其它 4xx**（确定性请求/鉴权错，换账号同样失败）；非 UpstreamError（client abort）永不重试。`select(stickyKey, exclude)` 加 `exclude` 跳过本请求已试账号（单调收敛，上界=成员数）。
-- **关键权衡（流式的 select 时机）**：现有测试**硬断言流式方法在调用回合同步 `select`**（不 drain 即查 onSelect；缺方法**同步 throw**）。故用**混合**：首个 `select()` 仍同步发生在调用回合（保 rotation+onSelect+fail-closed），只把**重试**放进 async generator——`streamWithRetry(firstEntry,…)`。**仅 pre-first-chunk 可重试**：一旦 yield 过任何 chunk 即提交该账号（字节已上线），mid-stream 故障原样抛出**绝不重试**（对齐 breaker「首个有效 chunk 后记成功」语义 + 原则 8）。非流式 `completeWithRetry` 直接循环。耗尽全部账号时**抛最后一个 upstream 故障**（非内部 "no schedulable account"），让执行器据此 recordFailure+走链。延迟有界：执行器的 per-attempt 超时（见下条）会 abort 整个 alias attempt，天然封顶池内重试总时长。
-- **TDD+验证**：`pool.test.ts` 加 7 例（非流式重试/429 不重试/4xx 不重试/全失败 surface 最后错/流式 pre-first-chunk 重试/mid-stream 不重试/native-passthrough-stream Codex 场景）；红→绿。全量 **core+gateway 228 文件 3852 单测绿**、typecheck+biome 干净。**纯 `packages/core` 改动**（原则 1，不碰框架）。分支 `feat-oauth-pool-inretry-transient`，**未提交/未部署**（待用户）。
-- **关联 TODO**：跨协议跳过本身正确，但「Codex 请求的 fallback 链全废」仍是产品级隐患——可选另一路：若 ZenMux 支持 `/v1/responses`，配 Responses-原生 `zenmux` gpt-5.5 当跨账号兜底（但 web_search 是 OpenAI 托管，ZenMux 未必能代理，**不确定**，本次未做）。
-
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-25 · OAuth 池内换账号重试瞬时故障（provider 执行；docs/04 执行兜底，原则 5）**：带 Responses 原生工具(web_search/apply_patch/tool_search)的 Codex 请求，链头账号过载(`upstreamStatus:null`)后 9 个 fallback 全被 `responses_native_tools_cross_protocol_blocked` 正确跳过 → `all_providers_failed`，因 `OAuthPoolClient.select()` 每请求只挑 1 个账号、失败即交回执行器（→全跨协议挡），从不在请求内试同订阅其它账号。修：`pool.ts` 加请求内换账号重试，`isRetryableTransientError` 仅 timeout/`upstreamStatus===null`/5xx 可重试（排除 429 留执行器 park + 其它 4xx），`select(stickyKey, exclude)` 跳已试账号（单调收敛）；流式仅 pre-first-chunk 可重试（yield 过 chunk 即提交，对齐原则 8），非流式直接循环；耗尽抛最后 upstream 错让执行器走链。pool.test +7 例，core+gateway 228 文件 3852 单测绿。并入 v0.21.29。分支 `feat-oauth-pool-inretry-transient`。
 - **2026-06-25 · per-attempt 超时 → fallback → 熔断（执行器；docs/04，原则 5）**：eval 回环到被节流的 codex gpt-5.4-mini（p95≈14s）反复超时→client_abort 死路（不熔断不走链）。新增 `InternalRequest.attempt_timeout_ms`（每候选截止，仅 internal key 经 `x-helm-attempt-timeout-ms` 头放行，防客户端用 1ms 触发跨租户误熔断）+ `withAttemptDeadline`：到点 abort per-attempt controller→`UpstreamError("timeout")`→既有 recordFailure+走链；client 真断连仍胜出→recordAbort。eval `runEval` 去 inner-abort race，`timeout_ms` 当每候选预算、`outer_timeout_ms` 4000→8000 总兜底。4626 单测+66 e2e 绿。已并入 v0.21.x。分支 `fix/per-attempt-timeout-fallback`。
 - **2026-06-24 · 仪表板时间筛选改自然日 + 「对比昨天」增量（admin UI）**：共享 `RangeFilter` 由滚动窗口改自然日（今天/昨天/近7天/近30天/全部，默认今天；旧 `?range=24h` 仍解析只是不渲染）。`yesterday` 是首个闭合窗，借此修 `resolveKeyDetailWindow` 预设硬覆盖 `end=now` 的潜伏 bug。delta 仅 today 显示，基准用「昨天同期」(pace-vs-pace)，`{pct,base}` 在卡片 title 透明化基准，`MIN_COMPARISON_BASELINE_REQUESTS=10` 闸门杀清晨噪声。i18n 补 `Yesterday`/`vs same period yesterday`。已发 v0.21.23/24 并部署。
 - **2026-06-24 · 测试覆盖率补强至「边际收益 0」+ 诚实化指标（CLAUDE.md 覆盖率约定）**：main 实测低于自配阈值（CI「单测」门禁未带 `--coverage`）。Part A：`vitest.config` coverage.exclude 把纯 e2e 胶水/admin UI 路由移出范围（不删测试）。Part B：5 组并行子代理补 ~440 高价值单测 → 89.11/84.35/93.01 → 95.10/86.52/95.85 四项过阈。**坑**：子代理写的测试 vitest 绿但 tsc 红（mock 类型过窄/closure-narrowing），委派写测后必须跑 typecheck。删 anthropic 顶层 `cache_control` 死分支。**e2e 纳入 CI**（独立 job，推翻旧约定）+ 修 memory.spec 设计漂移。4592 单测绿。分支 `test/coverage-marginal-zero`。

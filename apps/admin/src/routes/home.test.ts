@@ -113,6 +113,49 @@ describe('home dashboard loader', () => {
     });
   });
 
+  it('computes vs-day-before deltas on the yesterday view (full day vs full day)', async () => {
+    const now = Date.UTC(2026, 5, 17, 12);
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    mocks.getStats
+      .mockReset()
+      .mockResolvedValueOnce(
+        statsWith({
+          requests: 120,
+          promptTokens: 400,
+          completionTokens: 100,
+          cachedTokens: 80,
+          totalCostUsd: 40,
+        }),
+      ) // yesterday, full day (the headline aggregate)
+      .mockResolvedValueOnce(
+        statsWith({
+          requests: 60,
+          promptTokens: 200,
+          completionTokens: 50,
+          cachedTokens: 20,
+          totalCostUsd: 20,
+        }),
+      ); // day before yesterday, full day (the baseline)
+
+    const result = (await load({
+      url: new URL('https://admin.test/?range=yesterday'),
+    } as never)) as {
+      range: string;
+      compare: Record<string, { pct: number | null; base: number }> | null;
+    };
+
+    expect(result.range).toBe('yesterday');
+    expect(mocks.getStats).toHaveBeenCalledTimes(2); // yesterday + day-before-yesterday
+    expect(result.compare).toEqual({
+      requests: { pct: 100, base: 60 }, // (120-60)/60
+      totalTokens: { pct: 100, base: 250 }, // 500 vs 250
+      inputTokens: { pct: 100, base: 200 },
+      outputTokens: { pct: 100, base: 50 },
+      cachedTokens: { pct: 300, base: 20 }, // (80-20)/20
+      totalCost: { pct: 100, base: 20 },
+    });
+  });
+
   it('suppresses the whole delta set when yesterday had too little traffic', async () => {
     const now = Date.UTC(2026, 5, 17, 12);
     vi.spyOn(Date, 'now').mockReturnValue(now);

@@ -45,6 +45,13 @@
   const stats = $derived(data.stats);
   const recent = $derived(data.items.slice(0, 10));
 
+  // The delta baseline differs by view: the TODAY view compares against yesterday,
+  // the YESTERDAY view against the day before. Pick the matching badge label (the
+  // tooltip baseline label is chosen inline in the snippet below).
+  const comparisonLabel = $derived(
+    data.range === 'yesterday' ? $t('vs day before yesterday') : $t('vs yesterday'),
+  );
+
   // ── Chart data (derived from the SQL aggregate) ──────────────────────────────
   // Explicit point types so EVERY series/accessor shares one TData — without them
   // each inline `(d: {input})` lambda narrows TData to a different shape and the
@@ -229,9 +236,11 @@
     {#if d && d.pct !== null}
       <div
         class="mt-0.5 text-xs text-slate-400"
-        title={$t('Yesterday: {value}', { value: fmt(d.base) })}
+        title={data.range === 'yesterday'
+          ? $t('Day before yesterday: {value}', { value: fmt(d.base) })
+          : $t('Yesterday: {value}', { value: fmt(d.base) })}
       >
-        {d.pct >= 0 ? '↑' : '↓'}{Math.abs(d.pct)}% {$t('vs yesterday')}
+        {d.pct >= 0 ? '↑' : '↓'}{Math.abs(d.pct)}% {comparisonLabel}
       </div>
     {/if}
   {/snippet}

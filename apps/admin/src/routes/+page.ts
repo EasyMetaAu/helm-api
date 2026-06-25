@@ -4,6 +4,7 @@ import {
   pctDelta,
   resolveStatsWindow,
   resolveTodayComparisonWindow,
+  resolveYesterdayComparisonWindow,
   trendBucketForRange,
 } from '$lib/dashboard-chart.js';
 import { clientTzOffsetMinutes, parseRange, resolveWindow } from '$lib/requests-filters.js';
@@ -60,17 +61,22 @@ export const load: PageLoad = async ({ url }) => {
   const cacheHitRate =
     t.promptTokens === 0 ? null : Math.round((t.cachedTokens / t.promptTokens) * 100);
 
-  // "vs yesterday" deltas — only for the TODAY view, baselined against yesterday's
-  // WHOLE calendar day (resolveTodayComparisonWindow): a plain day-over-day read of
-  // today-so-far against yesterday's full-day total. Each entry carries {pct, base}:
-  // base is the yesterday value, surfaced in the card tooltip so the comparison is
-  // transparent. Suppressed entirely when yesterday had too little traffic to
-  // compare against. Fail-soft: a hiccup → no deltas, cards just omit them.
+  // Prior-day deltas — shown on the TODAY and YESTERDAY views, each baselined
+  // against the WHOLE prior calendar day. TODAY: today-so-far vs yesterday's full
+  // day (a pace read). YESTERDAY: yesterday's full day vs the day before — a
+  // complete-day-vs-complete-day read, which is the MORE meaningful comparison
+  // (today isn't over yet, so today-vs-yesterday under-reads mid-day). Each entry
+  // carries {pct, base}: base is the baseline value, surfaced in the card tooltip
+  // so the comparison is transparent. Suppressed entirely when the baseline had too
+  // little traffic. Fail-soft: a hiccup → no deltas, cards just omit them.
   const MIN_COMPARISON_BASELINE_REQUESTS = 10;
   let compare: Record<string, { pct: number | null; base: number }> | null = null;
-  if (range === 'today') {
+  if (range === 'today' || range === 'yesterday') {
     try {
-      const cmp = resolveTodayComparisonWindow(now);
+      const cmp =
+        range === 'today'
+          ? resolveTodayComparisonWindow(now)
+          : resolveYesterdayComparisonWindow(now);
       const y = (await getStats({ ...cmp, bucket, tzOffsetMinutes })).totals;
       if (y.requests >= MIN_COMPARISON_BASELINE_REQUESTS) {
         const yTotalTokens = y.promptTokens + y.completionTokens;

@@ -28,6 +28,9 @@ const dashboardTokenKeys = [
   'Yesterday',
   'vs yesterday',
   'Yesterday: {value}',
+  // Yesterday-view delta (yesterday vs the day before — a full-day-vs-full-day read).
+  'vs day before yesterday',
+  'Day before yesterday: {value}',
 ] as const;
 
 const translatedLocales = {
