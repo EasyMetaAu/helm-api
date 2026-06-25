@@ -4,6 +4,7 @@ import {
   pctDelta,
   resolveStatsWindow,
   resolveTodayComparisonWindow,
+  resolveYesterdayComparisonWindow,
   trendAxisTicks,
   trendBucketForRange,
 } from './dashboard-chart.js';
@@ -70,6 +71,17 @@ describe('today vs yesterday comparison', () => {
     expect(resolveTodayComparisonWindow(now)).toEqual({
       start: yMidnight,
       end: todayMidnight,
+    });
+  });
+
+  it("baselines the yesterday view against the day BEFORE yesterday's full calendar day", () => {
+    const now = new Date('2026-06-01T15:30:00').getTime();
+    const dayBeforeMidnight = new Date('2026-05-30T00:00:00').getTime();
+    const yesterdayMidnight = new Date('2026-05-31T00:00:00').getTime();
+    // Yesterday (05-31) is complete, so it's a full-day-vs-full-day read against 05-30.
+    expect(resolveYesterdayComparisonWindow(now)).toEqual({
+      start: dayBeforeMidnight,
+      end: yesterdayMidnight,
     });
   });
 

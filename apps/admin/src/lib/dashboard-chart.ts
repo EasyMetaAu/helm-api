@@ -40,6 +40,22 @@ export function resolveTodayComparisonWindow(nowMs: number): { start: number; en
   return { start: yMidnight.getTime(), end };
 }
 
+// Day-level baseline for the "yesterday" delta: the WHOLE calendar day BEFORE
+// yesterday (local midnight to local midnight). Unlike the today view (today-
+// so-far vs yesterday-full-day, a pace read), yesterday is already a COMPLETE
+// day, so this is an honest full-day-vs-full-day comparison — the reason it's
+// more meaningful than today-vs-yesterday mid-day (today isn't over yet).
+// DST: both midnights via local Date math.
+export function resolveYesterdayComparisonWindow(nowMs: number): { start: number; end: number } {
+  const yesterdayMidnight = new Date(nowMs);
+  yesterdayMidnight.setHours(0, 0, 0, 0);
+  yesterdayMidnight.setDate(yesterdayMidnight.getDate() - 1); // yesterday 00:00 — window end
+  const end = yesterdayMidnight.getTime();
+  const dayBeforeMidnight = new Date(end);
+  dayBeforeMidnight.setDate(dayBeforeMidnight.getDate() - 1); // day-before-yesterday 00:00
+  return { start: dayBeforeMidnight.getTime(), end };
+}
+
 // Percentage change current-vs-baseline, rounded. null when there is no baseline
 // (yesterday had zero) — an honest "no comparison" instead of a fake +∞/+100%.
 export function pctDelta(current: number, baseline: number): number | null {
