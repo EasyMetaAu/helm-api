@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-25 · 流式 pre-output 失败 → fallback（执行器；docs/04 执行兜底 + docs/05 流式正确性，原则 5/8）
+
+- **背景（Lukin 报）**：codex `gpt-5.5` 经 native passthrough 返回 HTTP 200 开了 SSE 流，先发无条件前导帧 `response.created`/`response.in_progress`，**随后** `error`/`response.failed`（`server_is_overloaded`）。helm 却记 `final.status:ok`、`fallback_count:0`，把错误帧原样透传给客户端——既不熔断也不 fallback。
+- **根因**：`execute.ts:peekStream` 把"**peek 到的第一个 chunk**"当成功提交点（`breaker.recordSuccess` 后不再 fallback）。passthrough 是字节中继，第一个 chunk 是 `response.created` 前导字节（非空）→ 误判 healthy → 提交。翻译路径同病：生成器在看到 `response.failed`(会 throw) 前先 yield 了空 role 前导 chunk，peek 同样在前导上提交，错误退化成 mid-stream truncation（`stream.truncated` 日志），照样不 fallback。**前导帧不是有效输出**，模型一个 token 没吐就被判成功。
+- **决定（Lukin 选「全覆盖」）**：新增 `packages/core/src/provider/failover-guard.ts` —— 协议感知的 pre-output 守卫，夹在 provider 流与 peekStream 之间：**缓冲前导帧不下发**；首个**真实输出**才提交（按序原样补发缓冲字节，byte-for-byte）；输出前遇**终止错误帧**则 `throw UpstreamError` → peek 当 pre-first-chunk failure → 现有熔断+走链 fallback（与非流式 non-2xx 完全对称）。**已提交后零解析**：真实输出之后的错误是 truncation（客户端已拿字节，回退会重发），原样中继不变。
+- **关键不变量**：客户端尚未收到任何真实字节前失败 = 可安全 fallback，retryable 与否不影响安全性 → 守卫不区分错误码，一律回退。
+- **逐协议分类器**（按 `req.protocol` 选；翻译路径恒用 chat）：responses 前导=`response.created`/`in_progress`、错误=`error`/`response.failed`；anthropic 前导=`message_start`/`ping`、错误=`error`；**chat 保守**——只有 delta 是"role 公告"(`{role}`/`{role,content:""}`,翻译路径前导)才算前导,裸 `{}`/无 choices/usage-only/finish_reason 一律 commit（非回归默认，避免误杀健康流，对齐既有 `data: {}` mock 契约）；**gemini=null 跳过守卫**（其 SSE 无独立前导，守它有风险无收益，维持 commit-on-first）。SSE 缓冲按 `\n\n` 切完整事件,容忍跨 chunk 拆分/单 chunk 多事件;解析失败默认 output（非回归）。
+- **TDD+验证**：`failover-guard.test.ts` 15 例覆盖三协议×{前导→错误→抛、前导→输出→提交 byte-for-byte、错误打头、跨 chunk 拆分、单 chunk 多事件、输出后错误=提交、前导后净结束=抛、`data:{}` 提交}。execute.test 原两条翻译流测试（`data:{}\n\n` mock）一度变红→坐实"chat 别把无 role 的空帧当前导"→收紧分类器后**自动转绿不必改测试**。全量 **301 文件/4623 单测绿**、**e2e 47 绿**（含真实流式 passthrough）、lint+typecheck 干净。
+- **box 现状关联**：该请求 `requested_model:auto`→balanced 链头 `openai-codex/gpt-5.5`（订阅端点,易被上游过载),正是触发此 bug 的场景;修复后这类 200-then-overloaded 会落到链内下一个 `anthropic/claude-sonnet-4-6`。分支 `fix/...`,**待提交+部署**。
+
 ## 2026-06-25 · 仪表板 Token 趋势图/饼图 tooltip 增加花费（admin UI；docs/04 遥测展示）
 
 - **背景**：用户（Lukin）要「Token 用量趋势」浮层与「各模型 Token 用量」饼图除 token 外**显示花费**——趋势浮层加该时间桶**总花费**、饼图悬停显示**该模型花费**；并确认时间轴今天/昨天按小时、其余按日期（`trendBucketForRange`/`formatTrendTick` **早已实现**，本次未改，浮层 header 复用 `formatTrendAxisValue` 随桶切换）。
