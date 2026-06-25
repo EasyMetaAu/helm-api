@@ -11,9 +11,11 @@ import {
   applyForcedReasoningToNativeBody,
   canUseNativePassthrough,
   checkCapability,
+  guardPreOutputFailure,
   hoistResponsesInstructions,
   type NativePassthroughDisableReason,
   openaiTransformer,
+  preOutputClassifierFor,
   resolveCostUsd,
   sanitizeCodexResponsesNativeBody,
   UpstreamError,
@@ -1052,8 +1054,21 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
           }
           passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
+          // Pre-output failover guard (principle 5 + 8): a same-protocol byte-relay
+          // that 200s then fails IN-BAND before any output (e.g. Responses
+          // `response.failed`/server_is_overloaded after only the `response.created`
+          // preamble) must fall back, not stream the error as success. The guard
+          // buffers preamble and turns a pre-output error frame into a pre-first-chunk
+          // throw → peekStream records a breaker failure and advances the chain. null
+          // classifier (gemini) → unchanged commit-on-first behavior.
+          const passthroughClassifier = preOutputClassifierFor(req.protocol);
           const stream = await peekStream(
-            () => passthroughStream(passthroughBody, { signal, captureUpstream }),
+            () => {
+              const raw = passthroughStream(passthroughBody, { signal, captureUpstream });
+              return passthroughClassifier
+                ? guardPreOutputFailure(raw, passthroughClassifier)
+                : raw;
+            },
             signal,
             alias,
             log,
@@ -1082,8 +1097,19 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               provider.streamReframed === true ? { stream_reframed: true } : undefined,
             ),
           );
+          // Pre-output failover guard (principle 5 + 8): the translate generators
+          // ALREADY throw on a terminal error frame, but they yield an empty role
+          // preamble chunk first, so peekStream would commit success before the throw.
+          // The guard buffers that preamble so the commit lands on the first REAL
+          // output; a pre-output error (thrown by the generator, or an in-band error
+          // frame) stays a pre-first-chunk failure → fallback. Translate output is
+          // always OpenAI-Chat framed, so the chat classifier is always correct.
+          const translateClassifier = preOutputClassifierFor("openai_chat");
           const stream = await peekStream(
-            () => provider.chatCompletionStream(rendered.body, { signal, captureUpstream }),
+            () => {
+              const raw = provider.chatCompletionStream(rendered.body, { signal, captureUpstream });
+              return translateClassifier ? guardPreOutputFailure(raw, translateClassifier) : raw;
+            },
             signal,
             alias,
             log,

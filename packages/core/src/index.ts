@@ -472,6 +472,12 @@ export {
   translateAnthropicSSE,
 } from "./provider/anthropic.js";
 export {
+  type ChunkClass,
+  guardPreOutputFailure,
+  type PreOutputClassifier,
+  preOutputClassifierFor,
+} from "./provider/failover-guard.js";
+export {
   createGeminiClient,
   type GeminiClientConfig,
   type GeminiClientDeps,
