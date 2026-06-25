@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { preOutputClassifierFor } from "../failover-guard.js";
 import { type ChatCompletionRequest, type ProviderClient, UpstreamError } from "../openai.js";
 import { createOAuthPoolClient, type OAuthPoolMember } from "./pool.js";
 
@@ -526,5 +527,104 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
     expect(chunks).toEqual(["data: b\n\n"]);
     expect(served).toEqual(["b"]);
+  });
+});
+
+// In-band pre-output failover (the real Codex `all_providers_failed`-on-one-overload
+// case): a native passthrough that 200s, streams a content-free preamble
+// (`response.created`), THEN fails (`response.failed`/server_is_overloaded) must NOT
+// commit the account on the preamble — it must fail over to a sibling. The pool wraps
+// each member's SSE with the protocol's pre-output guard so "commit on first raw chunk"
+// becomes "commit on first REAL output".
+describe("createOAuthPoolClient — in-band pre-output failover (preamble then error)", () => {
+  const NATIVE: Record<string, unknown> = { model: "gpt-5.5", stream: true, messages: [] };
+  const PREAMBLE = 'data: {"type":"response.created"}\n\n';
+  const ERROR =
+    'data: {"type":"response.failed","response":{"error":{"message":"overloaded"}}}\n\n';
+  const OUTPUT = 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n';
+
+  type Mode = "preamble_then_error" | "preamble_then_output" | "preamble_only";
+  function nativeStreamMember(account: string, priority: number, mode: Mode): OAuthPoolMember {
+    return {
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          return { served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          yield `data: ${account}\n\n`;
+        },
+        nativePassthroughStream(_body: Record<string, unknown>): AsyncIterable<string> {
+          return (async function* () {
+            yield PREAMBLE; // content-free preamble — must NOT be a commit point
+            if (mode === "preamble_only") return; // abnormal close, no output
+            if (mode === "preamble_then_error") {
+              yield ERROR;
+              return;
+            }
+            yield OUTPUT;
+          })();
+        },
+      },
+    };
+  }
+
+  const responses = preOutputClassifierFor("openai_responses");
+
+  it("fails over to the next account when the FIRST emits preamble-then-error", async () => {
+    const pool = createOAuthPoolClient({
+      members: [
+        nativeStreamMember("a", 10, "preamble_then_error"),
+        nativeStreamMember("b", 50, "preamble_then_output"),
+      ],
+      nativeStreamPreambleClassifier: responses,
+    });
+    const chunks: string[] = [];
+    for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
+    // b's real output arrived (with its replayed preamble); a's doomed stream never committed.
+    expect(chunks).toContain(OUTPUT);
+    expect(chunks.filter((c) => c === ERROR)).toEqual([]); // the error frame was never relayed
+  });
+
+  it("also fails over when the first account closes after only a preamble", async () => {
+    const pool = createOAuthPoolClient({
+      members: [
+        nativeStreamMember("a", 10, "preamble_only"),
+        nativeStreamMember("b", 50, "preamble_then_output"),
+      ],
+      nativeStreamPreambleClassifier: responses,
+    });
+    const chunks: string[] = [];
+    for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
+    expect(chunks).toContain(OUTPUT);
+  });
+
+  it("commits (no spurious retry) when the only account reaches real output", async () => {
+    const pool = createOAuthPoolClient({
+      members: [nativeStreamMember("solo", 10, "preamble_then_output")],
+      nativeStreamPreambleClassifier: responses,
+    });
+    const chunks: string[] = [];
+    for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
+    expect(chunks).toEqual([PREAMBLE, OUTPUT]); // preamble replayed in order, then output
+  });
+
+  it("surfaces the upstream error when EVERY account fails pre-output (no sibling left)", async () => {
+    const pool = createOAuthPoolClient({
+      members: [
+        nativeStreamMember("a", 10, "preamble_then_error"),
+        nativeStreamMember("b", 50, "preamble_then_error"),
+      ],
+      nativeStreamPreambleClassifier: responses,
+    });
+    await expect(
+      (async () => {
+        for await (const _ of pool.nativePassthroughStream?.(NATIVE) ?? []) {
+          /* drain */
+        }
+      })(),
+    ).rejects.toThrow(/overloaded/);
   });
 });

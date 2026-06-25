@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-25 · 池内重试补洞：前导帧不再误提交，in-band 失败也能换账号（provider 执行；docs/04+05，原则 5/8）
+
+- **背景（Lukin 报，box req `bca58c02`，跑在 0.21.29 上）**：上一条池内重试上线后**仍** `all_providers_failed`，4 个 codex 账号只试了 1 个（latency 1196ms 单次）。同样的 `Our servers are currently overloaded`。
+- **根因**：codex gpt-5.5 的过载是 **HTTP 200 开流后 in-band 失败**——先发 `response.created` 前导帧、再发 `response.failed`。`streamWithRetry` 在**第一个原始 chunk(前导帧)**就提交账号；真正识别错误的 `guardPreOutputFailure` 在**执行器层(高一层)**，等它把错误帧转成 throw 时，池已提交，执行器只能换 alias(全被跨协议挡)。即「commit on first **raw** chunk」对 native passthrough 是错的——前导帧不是真输出。**与 v0.21.27 failover-guard 同一洞，只是低一层没复用。**
+- **决定**：把 `guardPreOutputFailure` **下沉进池**。`OAuthPoolDeps` 加 `nativeStreamPreambleClassifier` / `chatStreamPreambleClassifier`（server.ts 用 `preOutputClassifierFor(spec.targetProviderProtocol)` 与 `("openai_chat")` 注入，gemini→null 跳过）；`streamWithRetry` 在 `open()` 外包一层 guard → 首个 yield 的 chunk 必然代表"真实输出已确定"，pre-output 错误帧变成首 chunk 前的 `UpstreamError(upstreamStatus:null)`——**正好命中已有的 `isRetryableTransientError`(null→可重试)** → 池自动换下一个账号。空流(只前导就关)同样 throw→换账号。
+- **双层 guard 幂等无害**：池的 guard 输出对成功流是 byte-identical 前导+输出，执行器的 guard 再包一次结果相同；池全失败则抛最后 upstream 错，执行器 peek 到即走链。**保留执行器层 guard 作纵深(非 OAuth provider 仍需要)**。
+- **TDD+验证**：`pool.test.ts` 加 4 例（preamble→error 换账号、preamble-only 关流换账号、单账号 preamble→output 正常提交且按序、全账号 pre-output 失败 surface 最后错）；红→绿。**core+gateway 228 文件 3856 单测绿**、typecheck+biome 干净。改 `pool.ts`+`server.ts`+test。分支 `fix-pool-preoutput-inpool-failover`。
+
 ## 2026-06-25 · OAuth 池内换账号重试瞬时故障（provider 执行；docs/04 执行兜底，原则 5）
 
 - **背景（Lukin 报，box req `0348f222`）**：Codex（`protocol:openai_responses` + native tools）请求 `gpt-5.5`，链头 `openai-codex/gpt-5.5` 被某账号返回 `Our servers are currently overloaded`（`upstream_error`，`upstreamStatus:null`，pre-first-chunk），随后**全部 9 个 fallback 被 `responses_native_tools_cross_protocol_blocked` 跳过** → `all_providers_failed`，`fallback_count:0`。**非熔断、非 429**。
@@ -25,16 +33,6 @@
 - **效果**：eval 回环 gpt-5.4-mini 超 3s → timeout fault → 走链到 haiku（~1.9s）→ **eval 成功**（原 client_abort→fail-open balanced）；连续 5 次 → breaker OPEN（30s）→ 跳过。**共享 breaker 细节**：90s 默认下真实流量 success 会 reset 计数，但 gpt-5.4-mini 流量 eval 占绝大多数（DB 194 internal vs 5 real/2d），故实际仍会 OPEN（符合意图，note 非 blocker）。
 - **TDD+验证**：execute.test 加 2 例（超 attempt_timeout_ms → recordFailure+走链 error_class:timeout，**非** client_abort；真 client abort 仍 recordAbort 终止）；eval client.test「test 3」从"inner timeout"重构为"forwards timeout_ms as per-candidate deadline"；memory-self-http.test 加头转发例；classifier-samples 改 outer 8000。**e2e eval.spec**:单候选 e2e 下慢 eval 现 fail-open 理由 `eval_timeout`→`eval_provider_error`（per-candidate 超时耗尽单候选链→502→provider_error；prod 多候选 lane 则真 fallback 成功，注释说明）。全量 **4626 单测 + 66 e2e 绿**、typecheck+biome 干净。
 - **box**：仅改 operator config `outer_timeout_ms`→8000（timeout_ms 3000 不变）；`eval.model=economy` **不必改**（fallback 自行处理）。分支 `fix/per-attempt-timeout-fallback`。
-
-## 2026-06-25 · 流式 pre-output 失败 → fallback（执行器；docs/04 执行兜底 + docs/05 流式正确性，原则 5/8）
-
-- **背景（Lukin 报）**：codex `gpt-5.5` 经 native passthrough 返回 HTTP 200 开了 SSE 流，先发无条件前导帧 `response.created`/`response.in_progress`，**随后** `error`/`response.failed`（`server_is_overloaded`）。helm 却记 `final.status:ok`、`fallback_count:0`，把错误帧原样透传给客户端——既不熔断也不 fallback。
-- **根因**：`execute.ts:peekStream` 把"**peek 到的第一个 chunk**"当成功提交点（`breaker.recordSuccess` 后不再 fallback）。passthrough 是字节中继，第一个 chunk 是 `response.created` 前导字节（非空）→ 误判 healthy → 提交。翻译路径同病：生成器在看到 `response.failed`(会 throw) 前先 yield 了空 role 前导 chunk，peek 同样在前导上提交，错误退化成 mid-stream truncation（`stream.truncated` 日志），照样不 fallback。**前导帧不是有效输出**，模型一个 token 没吐就被判成功。
-- **决定（Lukin 选「全覆盖」）**：新增 `packages/core/src/provider/failover-guard.ts` —— 协议感知的 pre-output 守卫，夹在 provider 流与 peekStream 之间：**缓冲前导帧不下发**；首个**真实输出**才提交（按序原样补发缓冲字节，byte-for-byte）；输出前遇**终止错误帧**则 `throw UpstreamError` → peek 当 pre-first-chunk failure → 现有熔断+走链 fallback（与非流式 non-2xx 完全对称）。**已提交后零解析**：真实输出之后的错误是 truncation（客户端已拿字节，回退会重发），原样中继不变。
-- **关键不变量**：客户端尚未收到任何真实字节前失败 = 可安全 fallback，retryable 与否不影响安全性 → 守卫不区分错误码，一律回退。
-- **逐协议分类器**（按 `req.protocol` 选；翻译路径恒用 chat）：responses 前导=`response.created`/`in_progress`、错误=`error`/`response.failed`；anthropic 前导=`message_start`/`ping`、错误=`error`；**chat 保守**——只有 delta 是"role 公告"(`{role}`/`{role,content:""}`,翻译路径前导)才算前导,裸 `{}`/无 choices/usage-only/finish_reason 一律 commit（非回归默认，避免误杀健康流，对齐既有 `data: {}` mock 契约）；**gemini=null 跳过守卫**（其 SSE 无独立前导，守它有风险无收益，维持 commit-on-first）。SSE 缓冲按 `\n\n` 切完整事件,容忍跨 chunk 拆分/单 chunk 多事件;解析失败默认 output（非回归）。
-- **TDD+验证**：`failover-guard.test.ts` 15 例覆盖三协议×{前导→错误→抛、前导→输出→提交 byte-for-byte、错误打头、跨 chunk 拆分、单 chunk 多事件、输出后错误=提交、前导后净结束=抛、`data:{}` 提交}。execute.test 原两条翻译流测试（`data:{}\n\n` mock）一度变红→坐实"chat 别把无 role 的空帧当前导"→收紧分类器后**自动转绿不必改测试**。全量 **301 文件/4623 单测绿**、**e2e 47 绿**（含真实流式 passthrough）、lint+typecheck 干净。
-- **box 现状关联**：该请求 `requested_model:auto`→balanced 链头 `openai-codex/gpt-5.5`（订阅端点,易被上游过载),正是触发此 bug 的场景;修复后这类 200-then-overloaded 会落到链内下一个 `anthropic/claude-sonnet-4-6`。分支 `fix/...`,**待提交+部署**。
 
 ## 2026-06-24 · 仪表板时间筛选改自然日预设 + 「对比昨天」增量（admin UI；对应 docs/04 遥测展示）
 
@@ -67,6 +65,7 @@
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-25 · 流式 pre-output 失败 → fallback（执行器；docs/04+05，原则 5/8）**：codex gpt-5.5 native passthrough 200 后先发 `response.created` 前导帧再 `response.failed`(overloaded)，`peekStream` 把前导帧当成功提交点 → 既不熔断也不 fallback，错误帧原样透传。新增 `failover-guard.ts` 协议感知守卫：缓冲前导、首个真实输出才提交(byte-for-byte 补发)、输出前遇错误帧 throw→现有熔断+走链。逐协议分类器(responses/anthropic/chat；gemini=null 跳过)，chat 保守只认 role 公告为前导。failover-guard.test 15 例 + 全量 4623 单测/47 e2e 绿。已并入 v0.21.27。**后续(见顶部 2026-06-25 池内补洞)：此 guard 还需下沉进 OAuth 池才能让 in-band 失败换账号。**
 - **2026-06-25 · 仪表板 Token 趋势/饼图 tooltip 加花费（admin UI）**：`TelemetrySeriesBucket`/`TelemetryModelUsage` 加 `costUsd:number|null`，sqlite+pg 查询加 `SUM(cost_usd)`（全 null→null，原则 3/7）；趋势浮层显逐桶总花费、饼图显逐模型花费。决定：只做逐桶/逐模型**总**花费，不按 token 类型拆成本（须运行时按 pricing 重算，YAGNI）。LayerChart legacy `slot="tooltip"` 自定义浮层 + `formatUsd`；i18n `Total cost` 五语。store-contract 加 costUsd 断言。分支 `worktree-dashboard-cost-tooltips`，未提交。
 - **2026-06-24 · 定时自动 VACUUM + 归档残留空目录修复（运维；原则 2/3）**：helm.db 反弹 6.4G 真因=`auto_vacuum=0` + cleanup 只 DELETE 不 VACUUM（1.77G 死空间永不还盘）。新增纯函数 `shouldAutoVacuum` + 复用 `startCleanupScheduler` 每小时 tick（`vacuum_enabled` 默认 false opt-in / `vacuum_hour` 默认 4 服务器本地时区；pg 自带 autovacuum 故 `store.vacuum()` no-op）；Bug A `local-volume-sink.ts` 归档失败 catch 里 `rmdir`（非递归）清孤儿空目录。`RuntimeSettings` 加两必填字段涟漪到 admin settings/i18n/全量断言测试。146 测绿，分支 `worktree-vacuum-and-archive-fixes`，**未部署**（box 可用手动「压缩数据库」按钮一次性回收 1.77G）。
 - **2026-06-23 · 记忆深度召回 = 混合检索（docs/12 P8）+ `memory_recall` MCP 工具（docs/14）**：检索单元=`memory_facts`（account-scoped 跨会话）；三信号 **RRF(k=60)** 融合——向量（sqlite-vec/pgvector）+ 全文（FTS5 trigram/tsvector）+ forgetting-score；双语跨 zh↔en；**fail-open**（全失败空结果不 5xx）。迁移 sqlite **v28**/pg **v27**。坑：vec0 主键须 `BigInt`；`loadExtension` 须在 migrations+createDb 两处 hook 且失败 fail-open；PGlite 须 `PGlite.create({extensions:{vector}})`；gateway 无 `/v1/embeddings` 故 embedder 直连 provider base_url。config `memory.forgetting.facts_retrieval.enabled` 开 FTS+score，再配 `memory.llm.embedding_model` 点亮向量腿。core 2568 测试绿；分支 `helm-memory-deep-recall`。**已上线 v0.21.19**（见记忆 deep-recall-shipped）。

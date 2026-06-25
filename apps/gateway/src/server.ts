@@ -67,6 +67,7 @@ import {
   type ProxyConfig,
   parseCodexQuotaHeaders,
   parseLanesConfig,
+  preOutputClassifierFor,
   pruneRetainedMemory,
   type ReflectorDeps,
   type ProviderRegistryConfig as RegistryProviderConfig,
@@ -571,6 +572,13 @@ export async function synthesizeOAuthProviders(
         // not inside a capture scope (fail-open; never throws).
         markServingAccount(providerId, account);
       },
+      // Let the in-pool retry fail over across accounts on an IN-BAND pre-output failure
+      // (200-then-`response.failed`/overloaded after only the preamble): wrap each member's
+      // SSE with the protocol's pre-output guard so the doomed stream rotates to a sibling
+      // instead of committing on the preamble. Native = the provider's own wire protocol;
+      // translated requests always emit openai_chat frames.
+      nativeStreamPreambleClassifier: preOutputClassifierFor(spec.targetProviderProtocol),
+      chatStreamPreambleClassifier: preOutputClassifierFor("openai_chat"),
     });
     poolClients.set(providerId, pool);
     providers.push({

@@ -20,6 +20,7 @@ import {
   type NativePassthroughInput,
   nativePassthroughBody,
 } from "@helm/shared";
+import { guardPreOutputFailure, type PreOutputClassifier } from "../failover-guard.js";
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
@@ -83,6 +84,18 @@ export interface OAuthPoolDeps {
   // Fires with the selected account on each served call — the seam the gateway
   // uses to record the serving subscription in telemetry / logs (no secrets).
   onSelect?: (account: string) => void;
+  // Pre-output failover classifiers for the in-pool retry (issue: a native byte-relay
+  // that 200s then fails IN-BAND after only a content-free preamble — e.g. a Responses
+  // `response.created` before `response.failed`/server_is_overloaded). WITHOUT this, the
+  // pool commits the account on its first RAW chunk (the preamble), so the later error
+  // frame can no longer fail over to a sibling — exactly the executor-level guard's blind
+  // spot, one layer too high to rotate accounts. WITH it, each member's SSE is wrapped so
+  // the first yielded chunk means real output is guaranteed; a pre-output error frame
+  // becomes a pre-first-chunk `UpstreamError` (null upstreamStatus → retryable), so the
+  // pool tries the NEXT account instead of committing the doomed stream. Null/absent →
+  // legacy commit-on-first-raw-chunk (gemini has no separate preamble, so it stays null).
+  nativeStreamPreambleClassifier?: PreOutputClassifier | null; // nativePassthroughStream
+  chatStreamPreambleClassifier?: PreOutputClassifier | null; // chatCompletionStream (translated)
 }
 
 // Internal mutable scheduling record (the member + its rotating cursor).
@@ -243,6 +256,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     firstEntry: PoolEntry,
     stickyKey: string | null,
     open: (client: ProviderClient) => AsyncIterable<string>,
+    // When set, each member's SSE is wrapped so a pre-output error frame (after only a
+    // content-free preamble) throws BEFORE the first yielded chunk — turning "commit on
+    // first raw chunk" into "commit on first real output", so the in-band failure fails
+    // over to a sibling account instead of committing the doomed stream.
+    preambleClassifier?: PreOutputClassifier | null,
   ): AsyncIterable<string> {
     const tried = new Set<string>([firstEntry.member.account]);
     let entry = firstEntry;
@@ -251,8 +269,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       let iterator: AsyncIterator<string> | undefined;
       let first: IteratorResult<string>;
       try {
-        iterator = open(entry.member.client)[Symbol.asyncIterator]();
-        first = await iterator.next(); // pre-first-chunk fault surfaces HERE
+        const raw = open(entry.member.client);
+        iterator = (preambleClassifier ? guardPreOutputFailure(raw, preambleClassifier) : raw)[
+          Symbol.asyncIterator
+        ]();
+        first = await iterator.next(); // pre-first-(real-)chunk fault surfaces HERE
       } catch (err) {
         if (iterator) await iterator.return?.().catch(() => {});
         if (!isRetryableTransientError(err)) throw err;
@@ -302,7 +323,12 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       // Pick SYNCHRONOUSLY (one pick per call) before opening the stream so rotation +
       // onSelect fire on the call turn; streamWithRetry only adds sibling fallbacks.
       const first = select();
-      return streamWithRetry(first, null, (client) => client.chatCompletionStream(req, opts));
+      return streamWithRetry(
+        first,
+        null,
+        (client) => client.chatCompletionStream(req, opts),
+        deps.chatStreamPreambleClassifier,
+      );
     },
     // Native protocol passthrough (issue #217, Phase 1): forward it like the other
     // methods so the executor's feature-detect (`provider.nativePassthrough`) sees a
@@ -344,12 +370,17 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       if (!first.member.client.nativePassthroughStream) {
         throw new Error("oauth pool member does not support native passthrough streaming");
       }
-      return streamWithRetry(first, stickyKey, (client) => {
-        if (!client.nativePassthroughStream) {
-          throw new Error("oauth pool member does not support native passthrough streaming");
-        }
-        return client.nativePassthroughStream(body, opts);
-      });
+      return streamWithRetry(
+        first,
+        stickyKey,
+        (client) => {
+          if (!client.nativePassthroughStream) {
+            throw new Error("oauth pool member does not support native passthrough streaming");
+          }
+          return client.nativePassthroughStream(body, opts);
+        },
+        deps.nativeStreamPreambleClassifier,
+      );
     },
   };
 }
