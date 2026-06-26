@@ -72,7 +72,9 @@ describe("buildReconciledFactBatch blob guard (no base64/image facts)", () => {
   it("keeps a normal sentence fact (has whitespace)", () => {
     const facts = buildReconciledFactBatch({
       ...base,
-      extracted: [{ subjectText: "favorite number", factText: "The user's favorite number is 42." }],
+      extracted: [
+        { subjectText: "favorite number", factText: "The user's favorite number is 42." },
+      ],
     });
     expect(facts).toHaveLength(1);
     expect(facts[0]?.subjectKey).toBe("favorite-number");
