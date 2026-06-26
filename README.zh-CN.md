@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/logo.svg" width="84" height="84" alt="Helm logo">
+
 # Helm API
 
 [English](README.md) · **简体中文**
