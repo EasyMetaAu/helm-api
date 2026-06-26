@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
-import { and, asc, count, desc, eq, gt, gte, lt, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, lt, type SQL, sql } from "drizzle-orm";
 import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
+import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
@@ -17,7 +18,18 @@ import type {
 } from "../ports.js";
 import { likeContains } from "../sql-like.js";
 import type { PgDb } from "./migrate.js";
-import { requestPayloads, telemetry } from "./schema.js";
+import { payloadBlobs, requestPayloads, telemetry } from "./schema.js";
+
+// Sentinel left in the slimmed text by externalizeImages; we scan for these to
+// know which blobs a stored payload references, so we can pre-fetch them before
+// the SYNCHRONOUS rehydrateImages walk (pg reads are async — rehydrate is not).
+const BLOB_SHA_RE = /helm-blob:sha256:([0-9a-f]{64})/g;
+
+// The write surface shared by the top-level PgDb handle and a transaction handle:
+// both expose `insert(...)`. Typing writePayloadTx against this (not PgDb) lets it
+// accept the `tx` drizzle hands the transaction callback (a PgTransaction, which
+// lacks the PgDb `$close` lifecycle hook) without an unsound cast.
+type PgWriter = Pick<PgDb, "insert">;
 
 type TelemetryRow = typeof telemetry.$inferSelect;
 
@@ -119,14 +131,10 @@ export class PgTelemetryStore implements TelemetryStore {
     if (query.endMs !== undefined) conds.push(lt(telemetry.createdAt, query.endMs));
     if (query.status !== undefined) conds.push(eq(telemetry.finalStatus, query.status));
     if (query.apiKeyId !== undefined) conds.push(eq(telemetry.apiKeyId, query.apiKeyId));
-    if (query.decidedBy !== undefined) {
-      conds.push(
-        sql`${telemetry.decisionJson} -> 'classifier' ->> 'decided_by' = ${query.decidedBy}`,
-      );
-    }
-    if (query.lane !== undefined) {
-      conds.push(sql`${telemetry.decisionJson} -> 'lane' ->> 'selected_lane' = ${query.lane}`);
-    }
+    // lane + decided_by hit the migration-v29 STORED generated columns (indexed)
+    // instead of a jsonb extract — an index seek, no per-row jsonb scan.
+    if (query.decidedBy !== undefined) conds.push(sql`decided_by = ${query.decidedBy}`);
+    if (query.lane !== undefined) conds.push(sql`lane = ${query.lane}`);
     if (query.model !== undefined) {
       const pat = likeContains(query.model);
       conds.push(
@@ -282,27 +290,71 @@ export class PgTelemetryStore implements TelemetryStore {
     return shapeTelemetryKeyUsage(rows);
   }
 
-  // Full-payload capture. Upsert by request_id; verbatim bytes (TEXT), no
-  // redaction. createdAt stored as epoch-ms bigint to match the sqlite adapter.
-  async insertPayload(input: InsertPayloadInput): Promise<void> {
-    await this.db
+  // ── Full-payload capture (verbatim client request + assembled response) ──────
+  //
+  // The base64 images Claude Code re-sends every turn were the bulk of the prod DB.
+  // externalizeImages pulls each one into a content-addressed payload_blobs row
+  // (deduped by sha256, deduped AGAIN across the three columns of a single row),
+  // leaving only a sentinel in the stored text. getPayload reverses it, so the
+  // admin view and the replay path (both read through getPayload) see the exact
+  // original body. UNLIKE the sqlite adapter we do NOT gzip the slimmed text — pg's
+  // TOAST auto-compresses large text values, so a manual gzip would be redundant
+  // (and would defeat TOAST's own compression). The payload row + its blobs commit
+  // atomically (a half-written row would fail to rehydrate). createdAt is epoch-ms
+  // bigint to match the sqlite value space.
+
+  // Externalize images out of one column, accumulating blobs (deduped across all
+  // three columns of the row). NULL stays NULL. Returns the slimmed text.
+  private externalizeColumn(s: string | null, blobs: Map<string, PayloadBlob>): string | null {
+    if (s === null) return null;
+    const ext = externalizeImages(s);
+    for (const b of ext.blobs) if (!blobs.has(b.sha256)) blobs.set(b.sha256, b);
+    return ext.json;
+  }
+
+  // Write one payload row + its blobs inside the given transaction handle. blobs
+  // upsert by sha256, TOUCHING created_at on every reference so an in-use image
+  // always outlives the same-cutoff prune that drops its referencing payload rows.
+  private async writePayloadTx(tx: PgWriter, input: InsertPayloadInput): Promise<void> {
+    const blobs = new Map<string, PayloadBlob>();
+    const req = this.externalizeColumn(input.requestJson, blobs) ?? input.requestJson;
+    const resp = this.externalizeColumn(input.responseJson, blobs);
+    const up = this.externalizeColumn(input.upstreamRequestJson ?? null, blobs);
+    const ts = input.createdAt.getTime();
+    await tx
       .insert(requestPayloads)
       .values({
         requestId: input.requestId,
-        requestJson: input.requestJson,
-        responseJson: input.responseJson,
-        upstreamRequestJson: input.upstreamRequestJson ?? null,
-        createdAt: input.createdAt.getTime(),
+        requestJson: req,
+        responseJson: resp,
+        upstreamRequestJson: up,
+        createdAt: ts,
       })
       .onConflictDoUpdate({
         target: requestPayloads.requestId,
         set: {
-          requestJson: input.requestJson,
-          responseJson: input.responseJson,
-          upstreamRequestJson: input.upstreamRequestJson ?? null,
-          createdAt: input.createdAt.getTime(),
+          requestJson: req,
+          responseJson: resp,
+          upstreamRequestJson: up,
+          createdAt: ts,
         },
       });
+    for (const b of blobs.values()) {
+      await tx
+        .insert(payloadBlobs)
+        .values({
+          sha256: b.sha256,
+          bytes: Buffer.from(b.bytes),
+          mime: b.mime,
+          size: b.bytes.length,
+          createdAt: ts,
+        })
+        .onConflictDoUpdate({ target: payloadBlobs.sha256, set: { createdAt: ts } });
+    }
+  }
+
+  async insertPayload(input: InsertPayloadInput): Promise<void> {
+    await this.db.transaction(async (tx) => this.writePayloadTx(tx, input));
   }
 
   // Batch payload upsert (perf): all rows in ONE transaction. Per-row upsert keeps
@@ -310,27 +362,33 @@ export class PgTelemetryStore implements TelemetryStore {
   async insertPayloads(inputs: InsertPayloadInput[]): Promise<void> {
     if (inputs.length === 0) return;
     await this.db.transaction(async (tx) => {
-      for (const input of inputs) {
-        await tx
-          .insert(requestPayloads)
-          .values({
-            requestId: input.requestId,
-            requestJson: input.requestJson,
-            responseJson: input.responseJson,
-            upstreamRequestJson: input.upstreamRequestJson ?? null,
-            createdAt: input.createdAt.getTime(),
-          })
-          .onConflictDoUpdate({
-            target: requestPayloads.requestId,
-            set: {
-              requestJson: input.requestJson,
-              responseJson: input.responseJson,
-              upstreamRequestJson: input.upstreamRequestJson ?? null,
-              createdAt: input.createdAt.getTime(),
-            },
-          });
-      }
+      for (const input of inputs) await this.writePayloadTx(tx, input);
     });
+  }
+
+  // Restore the externalized images: scan the stored columns for blob sentinels,
+  // pre-fetch the referenced bytes (one async query), then run the SYNCHRONOUS
+  // rehydrate walk against that in-memory map. fail-open: a missing blob leaves the
+  // sentinel in place (rehydrateImages keeps it) rather than throwing.
+  private async rehydrateColumns(
+    cols: Array<string | null>,
+  ): Promise<(text: string | null) => string | null> {
+    const shas = new Set<string>();
+    for (const c of cols) {
+      if (c === null) continue;
+      for (const m of c.matchAll(BLOB_SHA_RE)) shas.add(m[1] as string);
+    }
+    const byteMap = new Map<string, Uint8Array>();
+    if (shas.size > 0) {
+      const rows = await this.db
+        .select({ sha256: payloadBlobs.sha256, bytes: payloadBlobs.bytes })
+        .from(payloadBlobs)
+        .where(inArray(payloadBlobs.sha256, [...shas]));
+      // pg/pglite return BYTEA as a Buffer (already a Uint8Array).
+      for (const r of rows) byteMap.set(r.sha256, r.bytes);
+    }
+    const fetchBlob = (sha: string): Uint8Array | null => byteMap.get(sha) ?? null;
+    return (text) => (text === null ? null : rehydrateImages(text, fetchBlob));
   }
 
   async getPayload(requestId: string): Promise<RequestPayload | null> {
@@ -341,18 +399,27 @@ export class PgTelemetryStore implements TelemetryStore {
       .limit(1);
     const row = rows[0];
     if (!row) return null;
+    const decode = await this.rehydrateColumns([
+      row.requestJson,
+      row.responseJson,
+      row.upstreamRequestJson,
+    ]);
     return {
       requestId: row.requestId,
-      requestJson: row.requestJson,
-      responseJson: row.responseJson,
-      upstreamRequestJson: row.upstreamRequestJson ?? null,
+      requestJson: decode(row.requestJson) ?? "",
+      responseJson: decode(row.responseJson),
+      upstreamRequestJson: decode(row.upstreamRequestJson) ?? null,
       createdAt: new Date(row.createdAt), // epoch-ms bigint → Date
     };
   }
 
-  // Retention auto-prune: drop rows strictly older than the cutoff (epoch ms).
+  // Retention auto-prune: drop rows strictly older than the cutoff (epoch ms), then
+  // the same-cutoff blob prune. Safe because an in-use image's created_at is touched
+  // on every referencing write, so blob.created_at >= every surviving payload's
+  // created_at → a kept payload never references a pruned blob.
   async prunePayloads(olderThanMs: number): Promise<void> {
     await this.db.delete(requestPayloads).where(lt(requestPayloads.createdAt, olderThanMs));
+    await this.db.delete(payloadBlobs).where(lt(payloadBlobs.createdAt, olderThanMs));
   }
 
   // Telemetry retention prune — the decision table's equivalent of prunePayloads
@@ -419,14 +486,25 @@ export class PgTelemetryStore implements TelemetryStore {
       .where(and(...conds))
       .orderBy(asc(requestPayloads.requestId))
       .limit(limit);
-    return rows.map((r) => ({
-      id: r.requestId,
-      requestId: r.requestId,
-      requestJson: r.requestJson,
-      responseJson: r.responseJson,
-      upstreamRequestJson: r.upstreamRequestJson ?? null,
-      createdAt: r.createdAt,
-    }));
+    // Columns hold sentinels for externalized images — rehydrate each row back to
+    // the verbatim original body for the archive (same as getPayload).
+    const out: RequestPayloadArchiveRow[] = [];
+    for (const r of rows) {
+      const decode = await this.rehydrateColumns([
+        r.requestJson,
+        r.responseJson,
+        r.upstreamRequestJson,
+      ]);
+      out.push({
+        id: r.requestId,
+        requestId: r.requestId,
+        requestJson: decode(r.requestJson) ?? "",
+        responseJson: decode(r.responseJson),
+        upstreamRequestJson: decode(r.upstreamRequestJson) ?? null,
+        createdAt: r.createdAt,
+      });
+    }
+    return out;
   }
 
   // Row -> DecisionRecord. Re-validates through the shared schema so a corrupted

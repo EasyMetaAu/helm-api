@@ -60,6 +60,17 @@ function tele(id: string): InsertTelemetryInput {
 function payload(id: string): InsertPayloadInput {
   return { requestId: id, requestJson: "{}", responseJson: null, createdAt: new Date(0) };
 }
+// A payload whose serialized JSON fields sum to roughly `bytes` (cheap length
+// approximation the queue uses for its byte budget). The id stays distinct so we
+// can tell which rows survive a shed.
+function bigPayload(id: string, bytes: number): InsertPayloadInput {
+  return {
+    requestId: id,
+    requestJson: "x".repeat(bytes),
+    responseJson: null,
+    createdAt: new Date(0),
+  };
+}
 
 describe("createWriteQueue", () => {
   it("defers telemetry until flush, then writes them in ONE batch", async () => {
@@ -241,6 +252,136 @@ describe("createWriteQueue", () => {
     expect(sink.inserts).toHaveLength(0);
     expect(sink.payloadCalls).toHaveLength(0);
     expect(logs.filter((l) => l.includes("overflow"))).toHaveLength(2);
+  });
+
+  it("sheds on the BYTE budget even when row depth is nowhere near maxDepth", async () => {
+    // Production payloads are 6-7MB each. A handful of them blows the heap long
+    // before the 10k-row maxDepth. The byte budget must trip on size, not count.
+    const sink = fakeSink();
+    const logs: string[] = [];
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: (m) => logs.push(m),
+      flushIntervalMs: 10_000,
+      maxDepth: 10_000, // far out of reach
+      maxBytes: 1_000, // ~1KB budget: two 600B payloads must not both fit
+      flushBytes: 10_000_000, // park eager byte-flush so we observe shedding, not flushing
+    });
+
+    q.enqueuePayload(bigPayload("p1", 600));
+    q.enqueuePayload(bigPayload("p2", 600)); // total would be 1200B > 1000 → shed oldest
+
+    await q.flush();
+    // Only the newest fits under budget; the older one was shed (not a row-count drop).
+    expect(sink.payloadCalls.map((p) => p.requestId)).toEqual(["p2"]);
+    expect(logs.some((l) => l.includes("overflow"))).toBe(true);
+  });
+
+  it("on byte overflow, sheds PAYLOAD (debug) first and keeps TELEMETRY (audit)", async () => {
+    const sink = fakeSink();
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      maxDepth: 10_000,
+      maxBytes: 1_000,
+      flushBytes: 10_000_000,
+    });
+
+    q.enqueueTelemetry(tele("audit")); // cheap, must survive
+    q.enqueuePayload(bigPayload("debug-1", 600));
+    q.enqueuePayload(bigPayload("debug-2", 600)); // overflow → drop a payload, not the telemetry
+
+    await q.flush();
+    // Telemetry (audit) is preserved; a payload (debug料) was the one shed.
+    expect(sink.inserts.map((i) => (i.decision as { request_id: string }).request_id)).toEqual([
+      "audit",
+    ]);
+    expect(sink.payloadCalls.map((p) => p.requestId)).toEqual(["debug-2"]);
+  });
+
+  it("keeps the byte count accurate across push/shed: a stream of big payloads stays bounded", async () => {
+    // If the byte accounting under-counted on shed, the buffer would creep up and
+    // eventually exceed the budget without ever flushing — the OOM we're fixing.
+    const sink = fakeSink();
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      maxDepth: 10_000,
+      maxBytes: 1_000,
+      flushBytes: 10_000_000, // never byte-flush; force the budget to hold via shedding alone
+    });
+
+    // 50 payloads of ~600B each: only ~one fits at a time under a 1KB budget.
+    for (let i = 0; i < 50; i++) q.enqueuePayload(bigPayload(`p${i}`, 600));
+
+    // depth never ran away (a single 600B row + headroom; certainly not 50).
+    expect(q.depth).toBeLessThanOrEqual(2);
+  });
+
+  it("byte threshold (flushBytes) flushes early before a few rows balloon into a huge txn", async () => {
+    // maxBatch=256 rows × 7MB ≈ 1.8GB single commit. flushBytes caps the txn size:
+    // a couple of big payloads must flush long before the row threshold.
+    const sink = fakeSink();
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      maxBatch: 256, // row threshold out of reach
+      maxBytes: 100_000_000, // budget out of reach
+      flushBytes: 1_000, // ~1KB → flush after the first big payload
+    });
+
+    q.enqueuePayload(bigPayload("p1", 1_500)); // exceeds flushBytes alone → eager flush
+    // Drain the in-flight threshold flush.
+    await q.flush();
+    expect(sink.payloadsManyCalls).toBeGreaterThanOrEqual(1);
+    expect(sink.payloadCalls.map((p) => p.requestId)).toContain("p1");
+  });
+
+  it("counts IN-FLIGHT batches toward the byte budget so a stalled writer can't pile up unbounded memory", async () => {
+    // The OOM scenario this whole change exists to fix: the DB writer is blocked (4am
+    // VACUUM holds the write lock). doFlush hands batches to the write chain, but they
+    // still occupy the heap until the commit lands. Counting only the live buffer would
+    // let repeated flushBytes triggers queue unbounded 6-7MB batches behind the first
+    // blocked write. In-flight bytes must count toward maxBytes so admit() rejects once
+    // the cap is reached — otherwise the byte budget doesn't actually bound the heap.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const received: string[] = [];
+    const stalled: WriteQueueTelemetry = {
+      insert: async () => ({ id: "x" }),
+      insertMany: async () => {},
+      insertPayload: async (i) => {
+        received.push(i.requestId);
+      },
+      insertPayloads: async (xs) => {
+        received.push(...xs.map((x) => x.requestId));
+        await gate; // writer is stalled until released
+      },
+    };
+    const logs: string[] = [];
+    const q = createWriteQueue({
+      telemetry: stalled,
+      log: (m) => logs.push(m),
+      flushIntervalMs: 10_000,
+      maxDepth: 10_000, // row backstop far out of reach — only bytes can gate
+      maxBytes: 2_000,
+      flushBytes: 500, // eager-flush each big payload into the (stalled) chain
+    });
+
+    // 100 × 600B payloads at a stalled writer. With in-flight accounting the budget
+    // trips and most are rejected; without it every one would flush and the heap balloon.
+    for (let i = 0; i < 100; i++) q.enqueuePayload(bigPayload(`p${i}`, 600));
+    expect(logs.filter((l) => l.includes("overflow")).length).toBeGreaterThan(0);
+
+    release();
+    await q.flush();
+    // Only a bounded prefix (~maxBytes worth) ever reached the writer — not all 100.
+    expect(received.length).toBeLessThanOrEqual(5);
   });
 
   it("stop() flushes pending writes and stops the timer", async () => {

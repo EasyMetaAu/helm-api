@@ -1,6 +1,7 @@
 import {
   bigint,
   boolean,
+  customType,
   doublePrecision,
   integer,
   jsonb,
@@ -9,6 +10,15 @@ import {
   text,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+
+// Postgres BYTEA — drizzle 0.45 has no built-in `bytea`, so define it once here.
+// Maps to the JS Buffer the pg/pglite driver returns for a bytea column; the
+// adapter writes Buffer.from(bytes) and reads a Buffer straight back.
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
 
 // Postgres (Drizzle pg-core) table definitions for the supabase Store adapter.
 // Same LOGICAL schema as the sqlite adapter (packages/core/src/store/sqlite/
@@ -266,6 +276,23 @@ export const requestPayloads = pgTable("request_payloads", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
 
+// Content-addressed store for base64 images pulled OUT of request_payloads
+// (store/payload-blobs.ts) — pg mirror of the sqlite payload_blobs table. Claude
+// Code re-sends every image on every turn, so the same bytes recur across many
+// rows (and twice within one row: client + upstream); keying by sha256 of the
+// DECODED bytes stores each image ONCE. bytes is BYTEA (the only binary column in
+// the pg schema). created_at is TOUCHED on every re-reference, so a still-in-use
+// image is never pruned out from under a live payload row (prune uses the same
+// retention cutoff as the payloads). Unlike sqlite, the slimmed request_payloads
+// text is NOT gzipped — pg's TOAST auto-compresses large text values.
+export const payloadBlobs = pgTable("payload_blobs", {
+  sha256: text("sha256").primaryKey(),
+  bytes: bytea("bytes").notNull(), // decoded binary (NOT base64)
+  mime: text("mime"),
+  size: integer("size").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(), // epoch ms
+});
+
 // Persisted OAuth subscription credentials (issue #38) — the pg mirror of the
 // sqlite oauth_tokens table. access_enc/refresh_enc are AES-256-GCM CIPHERTEXT
 // (TEXT, not jsonb — opaque bytes), the only reversibly-stored secrets in Helm.
@@ -340,4 +367,5 @@ export type MemoryFactsTable = typeof memoryFacts;
 export type MemoryJobsTable = typeof memoryJobs;
 export type ConfigKvTable = typeof configKv;
 export type RequestPayloadsTable = typeof requestPayloads;
+export type PayloadBlobsTable = typeof payloadBlobs;
 export type OAuthTokensTable = typeof oauthTokens;

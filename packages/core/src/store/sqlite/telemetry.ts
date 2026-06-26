@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
 import { and, asc, count, desc, eq, gt, gte, lt, type SQL, sql } from "drizzle-orm";
 import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
+import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
+import { decodePayloadValue, encodePayloadText } from "../payload-codec.js";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
@@ -17,7 +19,7 @@ import type {
 } from "../ports.js";
 import { likeContains } from "../sql-like.js";
 import type { SqliteDb } from "./migrate.js";
-import { requestPayloads, telemetry } from "./schema.js";
+import { payloadBlobs, requestPayloads, telemetry } from "./schema.js";
 
 type TelemetryRow = typeof telemetry.$inferSelect;
 
@@ -116,16 +118,10 @@ export class SqliteTelemetryStore implements TelemetryStore {
     if (query.endMs !== undefined) conds.push(lt(telemetry.createdAt, new Date(query.endMs)));
     if (query.status !== undefined) conds.push(eq(telemetry.finalStatus, query.status));
     if (query.apiKeyId !== undefined) conds.push(eq(telemetry.apiKeyId, query.apiKeyId));
-    if (query.decidedBy !== undefined) {
-      conds.push(
-        sql`json_extract(${telemetry.decisionJson}, '$.classifier.decided_by') = ${query.decidedBy}`,
-      );
-    }
-    if (query.lane !== undefined) {
-      conds.push(
-        sql`json_extract(${telemetry.decisionJson}, '$.lane.selected_lane') = ${query.lane}`,
-      );
-    }
+    // lane + decided_by hit the migration-v30 generated columns (indexed) instead
+    // of json_extract — an index seek, no per-row JSON parse.
+    if (query.decidedBy !== undefined) conds.push(sql`decided_by = ${query.decidedBy}`);
+    if (query.lane !== undefined) conds.push(sql`lane = ${query.lane}`);
     if (query.model !== undefined) {
       const pat = likeContains(query.model);
       conds.push(
@@ -286,59 +282,114 @@ export class SqliteTelemetryStore implements TelemetryStore {
     return shapeTelemetryKeyUsage(rows);
   }
 
-  // Full-payload capture. Upsert by request_id so the stream path can write the
-  // request first then backfill the assembled response. Verbatim bytes — no
-  // redaction (the table holds no plaintext key; see schema/ports comments).
-  // Upsert one payload row (request first, then response backfill — same key).
-  private upsertPayload(input: InsertPayloadInput): void {
-    this.db
-      .insert(requestPayloads)
-      .values({
-        requestId: input.requestId,
-        requestJson: input.requestJson,
-        responseJson: input.responseJson,
-        upstreamRequestJson: input.upstreamRequestJson ?? null,
-        createdAt: input.createdAt,
-      })
-      .onConflictDoUpdate({
-        target: requestPayloads.requestId,
-        set: {
-          requestJson: input.requestJson,
-          responseJson: input.responseJson,
-          upstreamRequestJson: input.upstreamRequestJson ?? null,
-          createdAt: input.createdAt,
-        },
-      })
-      .run();
+  // ── Full-payload capture (verbatim client request + assembled response) ──────
+  //
+  // Two transforms keep what was 6-7 MB/row (the prod 14 GB) small WITHOUT losing
+  // any fidelity — getPayload reverses both, so the admin view and the replay path
+  // (which both read through getPayload) see the exact original body:
+  //   1. externalizeImages → base64 images become content-addressed payload_blobs
+  //      rows, deduped by sha256 (Claude Code re-sends the same image every turn).
+  //      Each blob's created_at is TOUCHED on every write so an in-use image always
+  //      outlives the same-cutoff prune that drops its referencing payload rows.
+  //   2. encodePayloadText → gzip the remaining (image-stripped) JSON text.
+  // Stored via raw SQL because the gzip bytes are a BLOB in a TEXT-affinity column
+  // (legacy rows stay TEXT and read back verbatim — see payload-codec.ts). Upsert
+  // by request_id: the stream path writes the request first, then backfills.
+  private preparedStmts: ReturnType<SqliteTelemetryStore["buildPayloadStmts"]> | undefined;
+  private buildPayloadStmts() {
+    const db = this.db.$sqlite;
+    return {
+      put: db.prepare(
+        `INSERT INTO request_payloads (request_id, request_json, response_json, upstream_request_json, created_at)
+         VALUES (@id, @req, @resp, @up, @ts)
+         ON CONFLICT(request_id) DO UPDATE SET
+           request_json = excluded.request_json,
+           response_json = excluded.response_json,
+           upstream_request_json = excluded.upstream_request_json,
+           created_at = excluded.created_at`,
+      ),
+      putBlob: db.prepare(
+        `INSERT INTO payload_blobs (sha256, bytes, mime, size, created_at)
+         VALUES (@sha, @bytes, @mime, @size, @ts)
+         ON CONFLICT(sha256) DO UPDATE SET created_at = excluded.created_at`,
+      ),
+      get: db.prepare(
+        `SELECT request_json AS req, response_json AS resp, upstream_request_json AS up, created_at AS ts
+         FROM request_payloads WHERE request_id = ?`,
+      ),
+      getBlob: db.prepare("SELECT bytes FROM payload_blobs WHERE sha256 = ?"),
+    };
+  }
+  private stmts() {
+    if (!this.preparedStmts) this.preparedStmts = this.buildPayloadStmts();
+    return this.preparedStmts;
+  }
+
+  // Externalize images out of one column, accumulating blobs (deduped across all
+  // three columns of the row), then gzip the slimmed text. NULL stays NULL.
+  private encodeColumn(s: string | null, blobs: Map<string, PayloadBlob>): Buffer | null {
+    if (s === null) return null;
+    const ext = externalizeImages(s);
+    for (const b of ext.blobs) if (!blobs.has(b.sha256)) blobs.set(b.sha256, b);
+    return encodePayloadText(ext.json);
+  }
+
+  // gunzip (if gzipped) then restore externalized images. Reused by getPayload and
+  // the archive scan so both yield the verbatim original body.
+  private decodeColumn = (v: unknown): string | null => {
+    const text = decodePayloadValue(v);
+    return text === null ? null : rehydrateImages(text, this.fetchBlob);
+  };
+
+  private fetchBlob = (sha: string): Uint8Array | null => {
+    const r = this.stmts().getBlob.get(sha) as { bytes: Buffer } | undefined;
+    return r?.bytes ?? null;
+  };
+
+  private writePayloadRaw(input: InsertPayloadInput): void {
+    const blobs = new Map<string, PayloadBlob>();
+    const req = this.encodeColumn(input.requestJson, blobs);
+    const resp = this.encodeColumn(input.responseJson, blobs);
+    const up = this.encodeColumn(input.upstreamRequestJson ?? null, blobs);
+    const ts = input.createdAt.getTime();
+    this.stmts().put.run({ id: input.requestId, req, resp, up, ts });
+    for (const b of blobs.values()) {
+      this.stmts().putBlob.run({
+        sha: b.sha256,
+        bytes: Buffer.from(b.bytes),
+        mime: b.mime,
+        size: b.bytes.length,
+        ts,
+      });
+    }
   }
 
   async insertPayload(input: InsertPayloadInput): Promise<void> {
-    this.upsertPayload(input);
+    // Payload row + its blobs commit atomically (a half-written row would fail to
+    // rehydrate). better-sqlite3 nests via savepoints, so this is safe inside the
+    // batch transaction below too.
+    this.db.$sqlite.transaction(() => this.writePayloadRaw(input))();
   }
 
-  // Batch payload upsert (perf): all rows in ONE transaction = ONE commit. Reuses
-  // the single-row upsert so the per-row conflict semantics are identical.
+  // Batch payload upsert (perf): all rows in ONE transaction = ONE commit.
   async insertPayloads(inputs: InsertPayloadInput[]): Promise<void> {
     if (inputs.length === 0) return;
-    const run = this.db.$sqlite.transaction(() => {
-      for (const input of inputs) this.upsertPayload(input);
-    });
-    run();
+    this.db.$sqlite.transaction(() => {
+      for (const input of inputs) this.writePayloadRaw(input);
+    })();
   }
 
   async getPayload(requestId: string): Promise<RequestPayload | null> {
-    const row = this.db
-      .select()
-      .from(requestPayloads)
-      .where(eq(requestPayloads.requestId, requestId))
-      .get();
+    const row = this.stmts().get.get(requestId) as
+      | { req: unknown; resp: unknown; up: unknown; ts: number }
+      | undefined;
     if (!row) return null;
     return {
-      requestId: row.requestId,
-      requestJson: row.requestJson,
-      responseJson: row.responseJson,
-      upstreamRequestJson: row.upstreamRequestJson ?? null,
-      createdAt: row.createdAt, // timestamp_ms mode → Date
+      requestId,
+      requestJson: this.decodeColumn(row.req) ?? "",
+      responseJson: this.decodeColumn(row.resp),
+      upstreamRequestJson: this.decodeColumn(row.up),
+      createdAt: new Date(row.ts),
     };
   }
 
@@ -348,6 +399,13 @@ export class SqliteTelemetryStore implements TelemetryStore {
     this.db
       .delete(requestPayloads)
       .where(lt(requestPayloads.createdAt, new Date(olderThanMs)))
+      .run();
+    // Same-cutoff blob prune. Safe because an in-use image's created_at is touched
+    // on every referencing write, so blob.created_at >= every surviving payload's
+    // created_at → a kept payload never references a pruned blob.
+    this.db
+      .delete(payloadBlobs)
+      .where(lt(payloadBlobs.createdAt, new Date(olderThanMs)))
       .run();
   }
 
@@ -423,9 +481,11 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .map((r) => ({
         id: r.requestId,
         requestId: r.requestId,
-        requestJson: r.requestJson,
-        responseJson: r.responseJson,
-        upstreamRequestJson: r.upstreamRequestJson ?? null,
+        // Columns may be gzip BLOBs with externalized images (new rows) or verbatim
+        // TEXT (legacy) — decode both back to the original body for the archive.
+        requestJson: this.decodeColumn(r.requestJson) ?? "",
+        responseJson: this.decodeColumn(r.responseJson),
+        upstreamRequestJson: this.decodeColumn(r.upstreamRequestJson ?? null),
         createdAt: r.createdAt.getTime(),
       }));
   }
