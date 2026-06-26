@@ -29,6 +29,12 @@ import type { MemoryFactInput } from "@helm/shared";
 // extractions of the same topic land on the same (owner_id, subject_key) and the
 // newer one supersedes the older (pure datetime UPDATE, no LLM). Input that
 // strips to nothing yields "".
+// A subject is a short TOPIC ("favorite-number"), never a blob. Cap the key length
+// as a backstop: a deterministic-fallback fact built from a base64 image dump (one
+// giant whitespace-free "word") otherwise produced a ~2000-char subject_key. The cap
+// only ever truncates pathological input — real topics are well under it.
+const MAX_SUBJECT_KEY_LEN = 80;
+
 export function normalizeSubjectKey(subject: string): string {
   return (
     subject
@@ -42,7 +48,20 @@ export function normalizeSubjectKey(subject: string): string {
       // Fold any dash runs that survived + trim leading/trailing dashes.
       .replace(/-+/g, "-")
       .replace(/^-+|-+$/g, "")
+      // Backstop length cap; re-trim a dash a mid-key cut may have exposed.
+      .slice(0, MAX_SUBJECT_KEY_LEN)
+      .replace(/-+$/, "")
   );
+}
+
+// A real fact is a sentence — it has whitespace. A long run with NO whitespace is a
+// BLOB (a base64 image / data-URL the deterministic fallback dumped verbatim), not
+// durable memory. Drop it before it becomes a fact: both its subject and its text
+// would be junk. The 200-char floor keeps short single-token facts (a bare URL, an
+// id) while catching base64 payloads, which run to thousands of unbroken chars.
+function isBlobText(text: string): boolean {
+  const t = text.trim();
+  return t.length > 200 && !/\s/.test(t);
 }
 
 // Canonicalize fact text into the hash PRE-IMAGE (docs/12 P6). UNLIKE the subject
@@ -100,7 +119,9 @@ export function buildReconciledFactBatch(input: {
       sourceObservationRange: e.sourceObservationRange,
       index, // original order — the stable tiebreak when validFrom ties
     }))
-    .filter((c) => c.subjectKey.length > 0 && c.factText.trim().length > 0);
+    .filter(
+      (c) => c.subjectKey.length > 0 && c.factText.trim().length > 0 && !isBlobText(c.factText),
+    );
 
   const bySubject = new Map<string, typeof candidates>();
   for (const c of candidates) {
