@@ -4,7 +4,7 @@ import { goto } from '$app/navigation';
 import type { RequestDetail, RequestListItem } from '$lib/api/requests.js';
 import { DEFAULT_FILTERS, type RequestsFilters } from '$lib/requests-filters.js';
 import DetailPage from './[traceId]/+page.svelte';
-import { safeBackTo } from './[traceId]/+page.js';
+import { load as loadDetail, safeBackTo } from './[traceId]/+page.js';
 import ListPage from './+page.svelte';
 
 // The Debug UI is a READ-ONLY consumer of /admin/api/* — it renders the trail the
@@ -13,8 +13,10 @@ import ListPage from './+page.svelte';
 // classification-stage vs execution-stage fallback, and Principle 7 redaction.
 
 const getRequest = vi.fn();
+const getRequestPayload = vi.fn();
 vi.mock('$lib/api/requests.js', () => ({
   getRequest: (...args: unknown[]) => getRequest(...args),
+  getRequestPayload: (...args: unknown[]) => getRequestPayload(...args),
 }));
 
 function item(traceId: string, overrides: Partial<RequestListItem> = {}): RequestListItem {
@@ -485,6 +487,41 @@ describe('requests detail page', () => {
       },
     });
     expect(screen.getByTestId('detail-error')).toBeInTheDocument();
+  });
+});
+
+describe('requests detail loader (payload fails open, detail is fatal)', () => {
+  // The loader only reads params.traceId + url.searchParams — a minimal stub is enough.
+  // `PageLoad` widens the return to `void | …`; narrow it back to the real object shape.
+  async function runLoad(traceId: string): Promise<Exclude<Awaited<ReturnType<typeof loadDetail>>, void>> {
+    const event = {
+      params: { traceId },
+      url: new URL(`http://localhost/requests/${traceId}`),
+    } as unknown as Parameters<typeof loadDetail>[0];
+    return (await loadDetail(event)) as Exclude<Awaited<ReturnType<typeof loadDetail>>, void>;
+  }
+
+  beforeEach(() => {
+    getRequest.mockReset();
+    getRequestPayload.mockReset();
+  });
+
+  it('still returns the detail when the payload fetch fails — a body error must not sink the page', async () => {
+    getRequest.mockResolvedValue(detail());
+    getRequestPayload.mockRejectedValue(new Error('payload timeout'));
+    const data = await runLoad('tr_1');
+    // The decision trail renders; the payload merely fails open to "not captured".
+    expect(data.detail).not.toBeNull();
+    expect(data.payload).toEqual({ captured: false });
+    expect(data.loadError).toBeUndefined();
+  });
+
+  it('surfaces a retryable error state only when the detail itself fails', async () => {
+    getRequest.mockRejectedValue(new Error('not found'));
+    getRequestPayload.mockResolvedValue({ captured: false });
+    const data = await runLoad('missing');
+    expect(data.detail).toBeNull();
+    expect(data.loadError).toBe('not found');
   });
 });
 
