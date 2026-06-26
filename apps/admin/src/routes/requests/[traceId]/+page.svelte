@@ -25,9 +25,14 @@
       detail: RequestDetail | null;
       payload: RequestPayloadView;
       traceId: string;
+      backTo?: string;
       loadError?: string;
     };
   } = $props();
+
+  // Return to the originating list (carries its filters/page via the loader's
+  // `from`); falls back to the bare list when opened directly / via a stale link.
+  const backTo = $derived(data.backTo ?? `${base}/requests`);
 
   let copied = $state(false);
   let showRetry = $state(false);
@@ -64,7 +69,9 @@
 </script>
 
 <section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
-  <a href={`${base}/requests`} class="link-inline text-sm">&larr; {$t('Back to requests')}</a>
+  <a href={backTo} data-testid="back-to-requests" class="link-inline text-sm"
+    >&larr; {$t('Back to requests')}</a
+  >
 
   {#if !data.detail}
     <div data-testid="detail-error" role="alert" class="alert-error text-center">

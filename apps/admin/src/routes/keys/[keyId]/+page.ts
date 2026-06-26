@@ -42,11 +42,14 @@ export const load: PageLoad = async ({ params, url }) => {
     agg = EMPTY_STATS;
   }
 
-  // The key's own request list (scoped + paginated). Fail-soft to an empty page.
+  // The key's own request list — only the most-recent page (no in-page pager; the
+  // "view all" link hands the full history off to the global requests list). Total
+  // is still the full filtered count, so the page knows whether there's more.
+  // Fail-soft to an empty page.
   let requests = {
     items: [] as RequestListItem[],
     total: 0,
-    page: filters.page,
+    page: 1,
     pageSize: DETAIL_PAGE_SIZE,
   };
   try {
@@ -54,7 +57,7 @@ export const load: PageLoad = async ({ params, url }) => {
       keyId,
       start,
       end,
-      page: filters.page,
+      page: 1,
       pageSize: DETAIL_PAGE_SIZE,
     });
   } catch {

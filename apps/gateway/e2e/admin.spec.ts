@@ -30,9 +30,11 @@ async function filterToSeededRequest(page: Page) {
   // last won (the `$effect` then re-synced the input from its data), so the filter
   // silently didn't stick and the seeded row never appeared.
   await expect(page).toHaveURL(/[?&]model=best_reasoning_model\b/);
+  // The id cell's href is `/requests/<trace>?from=<list-url>` (the Back-link carries
+  // the originating list), so match by substring, not exact suffix.
   return page
     .getByTestId("request-row")
-    .filter({ has: page.locator(`a[href$="/requests/${SEED_TRACE_ID}"]`) });
+    .filter({ has: page.locator(`a[href*="/requests/${SEED_TRACE_ID}"]`) });
 }
 
 // ── 1. Basic Auth gate: none / wrong / correct (@noauth project) ─────────────

@@ -205,9 +205,10 @@ describe('key detail page', () => {
     expect(screen.getAllByText('balanced').length).toBeGreaterThan(0);
     // Headline request count from stats.
     expect(screen.getByText('42')).toBeInTheDocument();
-    // The scoped request row links to the shared request detail page.
+    // The scoped request row links to the shared request detail page, carrying THIS
+    // key page as `from` so the detail's Back link returns here (not the global list).
     const link = screen.getByRole('link', { name: 'tr_1' });
-    expect(link.getAttribute('href')).toBe('/requests/tr_1');
+    expect(link.getAttribute('href')).toBe('/requests/tr_1?from=%2Fkeys%2Fk1');
   });
 
   it('always links the Memory config to the scoped memory view — even when memory is off', () => {
@@ -232,49 +233,27 @@ describe('key detail page', () => {
     );
   });
 
-  it('renders a requests-style pager (numbered links + status) across pages', () => {
+  it('shows a "view all" link to the global requests list (filtered by key) when there is more', () => {
     render(KeyDetailPage, {
       data: pageData({
+        // 60 in the window, only the most-recent 25 shown → there IS more.
         requests: { items: [requestItem('tr_1')], total: 60, page: 1, pageSize: 25 },
       }),
     });
-    // 60 / 25 → 3 pages. Status line mirrors the requests list: "Page X of Y".
-    const status = screen.getByTestId('pager-status');
-    expect(status.textContent).toMatch(/Page\s*1\s*of\s*3/);
-
-    // Page numbers are real <a> links carrying the page in the querystring (native
-    // pointer / open-in-new-tab), not plain buttons like the old pager.
-    const page2 = screen.getByRole('link', { name: '2' });
-    expect(page2).toHaveAttribute('href', '?page=2');
-
-    // The current page is a marked, non-link cell.
-    const current = screen.getByTestId('pager-page-current');
-    expect(current).toHaveAttribute('aria-current', 'page');
-    expect(current.textContent?.trim()).toBe('1');
-
-    // Prev is disabled on page 1; Next stays available — matching the requests pager.
-    expect(screen.getByTestId('pager-prev')).toBeDisabled();
-    expect(screen.getByTestId('pager-next')).not.toBeDisabled();
+    // No in-page pager any more — the key page only shows the recent slice.
+    expect(screen.queryByTestId('pager-status')).not.toBeInTheDocument();
+    // "View all" hands the full history off to the global list, scoped to this key
+    // and range=all (the key's whole history, not just the selected window).
+    const link = screen.getByTestId('view-all-requests');
+    expect(link).toHaveAttribute('href', '/requests?key_id=k1&range=all');
   });
 
-  it('hides the pager when everything fits on one page', () => {
+  it('hides the "view all" link when the window\'s requests all fit on the page', () => {
     render(KeyDetailPage, {
       data: pageData({
         requests: { items: [requestItem('tr_1')], total: 1, page: 1, pageSize: 25 },
       }),
     });
-    expect(screen.queryByTestId('pager-status')).not.toBeInTheDocument();
-  });
-
-  it('preserves a non-default range in the page-number links', () => {
-    render(KeyDetailPage, {
-      data: pageData({
-        filters: { range: '7d', page: 1 } as KeyDetailFilters,
-        requests: { items: [requestItem('tr_1')], total: 60, page: 1, pageSize: 25 },
-      }),
-    });
-    // The href must carry the active range so the window survives navigation —
-    // the behaviour unique to this pager vs the requests list pager.
-    expect(screen.getByRole('link', { name: '2' })).toHaveAttribute('href', '?range=7d&page=2');
+    expect(screen.queryByTestId('view-all-requests')).not.toBeInTheDocument();
   });
 });

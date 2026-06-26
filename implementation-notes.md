@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-26 · 请求列表按 API key 筛选 + 详情页返回来源页（admin UI；docs/07）
+
+- **背景（Lukin）三件事**：① `/admin/requests` 筛选加按 API key；② key 详情请求列表只留最近几十条 + 「查看更多」直跳列表页并带 key 筛选；③ 详情页返回按钮丢筛选/页码、且从 key 详情进来时回错页。
+- **Feature 1（按 key 筛）**：后端**早已端到端支持** `key_id`（`RequestsQuerySchema`→`queryPage({apiKeyId})`→SQL `eq`），前端没暴露。补：① 列表行回传 `key_id`（gateway `routes/admin/requests.ts` 行映射 + `RequestListItem` **可选**字段；内部 UUID 非明文，原则 7 安全）；② `requests-filters` 加 `keyId` parse/serialize（`key_id`）；③ 列表页可清除 **chip**（label 取首行 `key_name||key_prefix` 兜底截断 id）+ **行内 key 单元格点击即筛选**（Svelte snippet `keyLabel` 复用 name/prefix 标记；`onRowClick` 守卫从 `closest('a')` 扩到 `closest('a, button')`）。
+- **决定：放弃 `api_key_id` 索引**（计划曾列为决策 #3）。纯性能优化、用户没要、key 详情早以全扫跑同查询故行为不变；且会把 v0.21.35 刚加的 lane/decided_by 索引模式牵连改 6+ 个 migrate 测试的 version-ledger。延后为聚焦 follow-up（telemetry 真涨再加一条 `CREATE INDEX idx_telemetry_api_key_id`）。
+- **Feature 2（key 详情轻量化）**：`+page.ts` 固定取 page 1（`DETAIL_PAGE_SIZE=25`），删页内 pager footer + 专属 helpers（`gotoPage`/`pageHref`/`pages`/`totalPages`）+ `paginationItems` import；表下加「查看更多 →」（`hasMore=total>items.length`），href=`/requests?key_id=<id>&range=all`（**range=all**：看该 key 全部历史，避免落进列表默认 today 空窗）。
+- **Feature 3（返回体验）**：死链 `<a href=/requests>` 既丢筛选又只认列表。改 **`from` 参数**：两来源页 `detailHref` 追加 `?from=<encode(当前 path+search)>`（列表用 `filtersToSearch(data.filters)`、key 详情用 `keyDetailFiltersToSearch`）；详情 loader `safeBackTo` 校验同源相对路径（首字符 `/` 且次字符非 `/`、非 `\`，防开放重定向）→ `backTo`，非法/缺省兜底 `/requests`；返回链 `<a href={backTo}>`。比 `history.back()` 稳（抗刷新/新标签/可分享、真 `<a>`），且能区分「从列表来」vs「从 key 详情来」。
+- **坑**：行 id 链现带 `?from=`，gateway e2e `admin.spec.ts` 的 `a[href$="/requests/<id>"]`（ends-with）失配 → 改 `href*=`（contains）。请求列表 pager（含 e2e :144 的 `pager-status`/`pager-next`）原样保留、不受影响。
+- **TDD+验证**：`requests-filters`（+keyId round-trip）、`requests.test`（chip/点击筛选/detailHref 带 from/back link/`safeBackTo` 开放重定向守卫）、`key-detail.test`（view-all 链接替换旧多页 pager 断言）、gateway `admin.test`（行 `key_id`）。**admin 488 单测 + 6 admin e2e + gateway admin 69 测全绿；typecheck/lint/svelte-check 0**。i18n 三键五语（translate relay 离线→手填 zh-hans/zh-hant/ja/ko）。改动全在 `apps/admin` + 1 处 gateway route（原则 1）。分支 `worktree-feat+requests-key-filter-and-back-nav`，**未提交未部署**。
+
 ## 2026-06-26 · 仪表板 + 请求列表加自定义日期范围（admin UI；对应 docs/04 遥测展示）
 
 - **背景（Lukin）**：仪表板「今天/昨天/7d/30d/全部」预设不够灵活，要能选任意日期范围。
@@ -27,19 +37,13 @@
 - **TDD+验证**：新增 payload-blobs(12)/payload-codec(5)/sqlite payload-cas(4)/postgres payload-cas(5)/write-queue(+5) 测试；contract 既有 lane/decided_by 过滤用例双适配器覆盖生成列。**305 文件/4670 单测全绿**，typecheck+lint 干净。分支 `worktree-payload-cas-gzip-perf`。
 - **Codex review 三处修复**：① **写队列 in-flight 字节漏算**(P1，致命)——`doFlush` 把批次交给 writeChain 后 `bufferedBytes` 清零,写入卡住时反复 flush 会把无界批次堆在闭包里、字节上限测不到 → 加 `inFlightBytes`(flush 时计入、commit settle 时释放),`overBudget` 计 buffered+in-flight+incoming,**stalled writer 现在会触发 shed/拒绝**(原本根本没防住 OOM)。② **OpenAI Responses `input_image` 漏剥**(P2)——`image_url` 是字符串(非嵌套 `{url}`),externalize 只认 Chat 的嵌套形 → codex 的图没外置;改为同时认 `image_url`/`input_image` × 字符串/对象两种形,按原形回填。③ **rehydrate 不 fail-open**(P2)——正文是裸 SSE 又含 `helm-blob:` 字面量时 `JSON.parse` 抛 → 拖垮 getPayload;加 try/catch 原样返回。
 - **运维 TODO（Lukin）**：① `vacuum_enabled` 今晚已手动关（止血，已做）；② 部署后 **3 天保留期自动清空旧胖行**，再手动点一次「Compact database」(VACUUM) 收回 14GB，然后开回 auto-vacuum（届时库已 GB 级，VACUUM 秒级安全）；③ 要立刻收回不等 3 天才需流式回填脚本（**未做**，碰 14GB 文件风险高，能等就别做）。
-## 2026-06-26 · 仪表板「昨天」视图加同比（昨天 vs 前天，整天对整天；admin UI，对应 docs/04 遥测展示）
-
-- **背景（Lukin）**：今天视图的「对比昨日」因今天未过完意义不大；「昨天」是完整一天，**昨天 vs 前天（整天对整天）才有意义**，要求给昨天视图也加同比。
-- **决定**：复用既有 today-delta 机制，只把基准窗按视图分流——`dashboard-chart.ts` 加 `resolveYesterdayComparisonWindow`（前天整日 `[前天0点, 昨天0点)`，DST 用本地 Date 数学）；loader 的 compare 门从 `range==='today'` 放宽到 `today|yesterday`，今天→`resolveTodayComparisonWindow`(昨天整日)、昨天→前天整日，其余逻辑/`MIN_COMPARISON_BASELINE_REQUESTS=10` 门/`{pct,base}` 不变。
-- **labels**：badge 与 tooltip 基准按 `data.range` 分流——昨天视图用 `vs day before yesterday`(对比前天)/`Day before yesterday: {value}`(前天：…)，否则沿用 `vs yesterday`/`Yesterday: {value}`。五语补两键，纳入 `dashboard-locales.test` 守卫。
-- **TDD+验证**：`dashboard-chart.test` 加前天窗口断言、`home.test` 加昨天视图 compare（整日对整日，2 次 getStats）；红→绿。**admin svelte-check 0/0、30 相关单测绿**。改动全在 `apps/admin`（原则 1）。随 **v0.21.33** 发布并部署 la.atmy.work。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-26 · 仪表板「昨天」视图加同比（admin UI；docs/04）**：复用 today-delta 机制，基准窗按视图分流——`dashboard-chart.ts` 加 `resolveYesterdayComparisonWindow`（前天整日 `[前天0点,昨天0点)`），compare 门 `today`→放宽 `today|yesterday`；昨天视图用 `vs day before yesterday`/`Day before yesterday:{value}` 五语两键纳入 `dashboard-locales` 守卫，`MIN_COMPARISON_BASELINE_REQUESTS=10` 不变。发 v0.21.33 并部署。
 - **2026-06-26 · key 详情图表对齐 dashboard + 缓存命中率卡片（admin UI；docs/04）**：dashboard「缓存 Token」卡片加命中率 subline + key 详情 `keys/[id]` 两图对齐 dashboard。命中率 = cached÷prompt（`promptTokens===0→null` 整行隐藏），两 loader 同算；key 详情富 tooltip（趋势「总花费」/环「花费」）逐字搬自 dashboard，`TrendPoint`/`ModelSlice` 补 `cost`。i18n 加 `Hit rate`。全在 `apps/admin`（原则 1）。发 v0.21.32。
 - **2026-06-25 · 池内重试补洞：前导帧不再误提交，in-band 失败也能换账号（provider 执行；docs/04+05，原则 5/8）**：codex gpt-5.5 过载是 HTTP 200 开流后 in-band 失败（先 `response.created` 前导帧再 `response.failed`），`streamWithRetry` 在首个**原始** chunk(前导帧)就提交账号，而识别错误的 `guardPreOutputFailure` 在执行器层(高一层)→池已提交只能换 alias(被跨协议挡)。修：把 guard **下沉进池**（`OAuthPoolDeps` 注入 native/chat preamble 分类器，gemini→null），`open()` 外包 guard→首 yield 必代表真实输出，pre-output 错误帧变首 chunk 前 `UpstreamError(upstreamStatus:null)`→命中 `isRetryableTransientError`→池自动换号；空流同理。双层 guard 幂等无害，保留执行器层作纵深。pool.test +4 例，core+gateway 228 文件 3856 单测绿。并入 v0.21.31。分支 `fix-pool-preoutput-inpool-failover`。
 

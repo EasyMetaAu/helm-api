@@ -28,6 +28,12 @@
 export interface RequestListItem {
   trace_id: string;
   ts: string; // timestamp
+  // The internal api_key_id (keys-table UUID) this request authenticated with —
+  // NOT key material (the plaintext key is only ever stored as a sha256 hash;
+  // Principle 7). It is the same id that appears in the /keys/<id> URL, surfaced
+  // here only so the list can offer "filter by this key". undefined on a legacy
+  // row that predates the field → the key cell stays non-clickable.
+  key_id?: string;
   key_prefix: string; // display prefix only — NEVER plaintext
   // Operator-assigned key NAME, resolved by the backend (api_key_id -> keystore).
   // null when the key is unnamed (or was since deleted) — the view then falls back
@@ -197,6 +203,10 @@ interface RawDecisionRecord {
   // Display prefix only (helm_live_ab12) — the record NEVER carries the plaintext
   // key (Principle 7). Null/absent on legacy (pre-enrichment) records.
   key_prefix?: string | null;
+  // The recorded api_key_id, surfaced per row by GET /admin/api/requests (the
+  // redacted record itself omits it — Principle 7 — so the route adds it). The
+  // internal key UUID, not key material; used by the SPA to filter by key.
+  key_id?: string | null;
   // Operator-assigned key name, joined onto the row by GET /admin/api/requests
   // (api_key_id -> keystore). Absent/null when the key is unnamed or was deleted.
   key_name?: string | null;
@@ -379,6 +389,9 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     // ISO string so the row is deterministic/sortable; the view formats it for
     // display. '' when the record carries none (legacy) — never fabricated.
     ts: typeof raw.created_at === 'number' ? new Date(raw.created_at).toISOString() : '',
+    // The recorded api_key_id (internal UUID, not key material — Principle 7), for
+    // "filter by this key". undefined on a legacy row → the key cell isn't clickable.
+    key_id: typeof raw.key_id === 'string' && raw.key_id.length > 0 ? raw.key_id : undefined,
     // Real display prefix from the recorded auth identity — PREFIX ONLY, never the
     // plaintext key (Principle 7). '—' when the record carries none (legacy / unknown).
     key_prefix:

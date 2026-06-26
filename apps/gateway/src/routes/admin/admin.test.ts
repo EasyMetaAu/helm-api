@@ -1040,9 +1040,12 @@ describe("admin.api requests", () => {
     });
     const app = buildApp(deps);
     const named = (await (await app.request("/admin/api/requests")).json()) as {
-      items: Array<{ key_name: string | null }>;
+      items: Array<{ key_name: string | null; key_id: string }>;
     };
     expect(named.items[0]?.key_name).toBe("Production backend");
+    // The row also carries the recorded api_key_id (internal UUID, not key material)
+    // so the SPA can offer "filter by this key".
+    expect(named.items[0]?.key_id).toBe("k1");
 
     // An UNNAMED key (or one since deleted) → key_name null, so the SPA shows the prefix.
     const depsUnnamed = buildDeps({ telemetry: makeTelemetry([decision("trace-2", "premium")]) });
