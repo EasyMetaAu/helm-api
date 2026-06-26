@@ -274,12 +274,28 @@ export const MemoryReflectionPatchSchema = z
   })
   .strict();
 
+// docs/13 — admin "add fact". The operator supplies a free-text SUBJECT (normalized
+// to the supersede key in the store, like every machine-extracted fact) + the fact
+// text + an optional importance. No status: a hand-added fact is always `active`.
+// `.strict()` so an unknown field fails closed.
+export const MemoryFactCreateSchema = z
+  .object({
+    subjectText: z.string().min(1),
+    factText: z.string().min(1),
+    importance: z.number().min(0).max(1).optional(),
+  })
+  .strict();
+
 export type MemoryRole = z.infer<typeof MemoryRoleSchema>;
 export type MemoryThreadInput = z.infer<typeof MemoryThreadInputSchema>;
 export type MemoryMessageInput = z.infer<typeof MemoryMessageInputSchema>;
 export type RawMessage = z.infer<typeof RawMessageSchema>;
 export type MemoryObservationInput = z.infer<typeof MemoryObservationInputSchema>;
 export type MemoryStatus = z.infer<typeof MemoryStatusSchema>;
+// The status VALUES the management fact-list filter accepts. `superseded` is NOT a
+// stored status — it is the derived view `status='active' AND expired_at IS NOT NULL`
+// (a live fact replaced by a newer same-subject one). `all` drops the status predicate.
+export type FactListStatus = MemoryStatus | "all" | "superseded";
 export type Observation = z.infer<typeof ObservationSchema>;
 export type Reflection = z.infer<typeof ReflectionSchema>;
 export type Fact = z.infer<typeof FactSchema>;
@@ -290,6 +306,7 @@ export type Fact = z.infer<typeof FactSchema>;
 export type MemoryFactInput = z.input<typeof MemoryFactInputSchema>;
 export type MemoryScopeSummary = z.infer<typeof MemoryScopeSummarySchema>;
 export type MemoryFactPatch = z.infer<typeof MemoryFactPatchSchema>;
+export type MemoryFactCreate = z.infer<typeof MemoryFactCreateSchema>;
 export type MemoryReflectionPatch = z.infer<typeof MemoryReflectionPatchSchema>;
 export type ReflectionScope = z.infer<typeof ReflectionScopeSchema>;
 export type ReflectionUpsertInput = z.infer<typeof ReflectionUpsertInputSchema>;

@@ -12,6 +12,7 @@ import MemoryPage from './+page.svelte';
 const listFacts = vi.fn();
 const listReflections = vi.fn();
 const resolveKey = vi.fn();
+const createFact = vi.fn();
 const updateFact = vi.fn();
 const updateReflection = vi.fn();
 const deleteFact = vi.fn();
@@ -20,6 +21,7 @@ vi.mock('$lib/api/memory.js', () => ({
   listFacts: (...args: unknown[]) => listFacts(...args),
   listReflections: (...args: unknown[]) => listReflections(...args),
   resolveKey: (...args: unknown[]) => resolveKey(...args),
+  createFact: (...args: unknown[]) => createFact(...args),
   updateFact: (...args: unknown[]) => updateFact(...args),
   updateReflection: (...args: unknown[]) => updateReflection(...args),
   deleteFact: (...args: unknown[]) => deleteFact(...args),
@@ -113,6 +115,7 @@ describe('memory page', () => {
     listFacts.mockReset();
     listReflections.mockReset();
     resolveKey.mockReset();
+    createFact.mockReset();
     updateFact.mockReset();
     updateReflection.mockReset();
     deleteFact.mockReset();
@@ -218,5 +221,89 @@ describe('memory page', () => {
       'true',
     );
     expect(resolveKey).not.toHaveBeenCalled();
+  });
+
+  it('renders Reflections ABOVE Facts (the overview comes first)', async () => {
+    renderPage([scope()]);
+    await fireEvent.click(screen.getAllByTestId('scope-row')[0]);
+    await waitFor(() => expect(screen.getByTestId('reflection-row')).toBeInTheDocument());
+    // The reflection card must appear earlier in the DOM than the first fact row.
+    const reflectionEl = screen.getByText('The user is a backend engineer working on a gateway.');
+    const factEl = screen.getAllByText('User prefers blue')[0];
+    expect(reflectionEl.compareDocumentPosition(factEl)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it('exposes a Superseded status option that filters facts to status=superseded', async () => {
+    renderPage([scope()]);
+    await fireEvent.click(screen.getAllByTestId('scope-row')[0]);
+    await waitFor(() => expect(screen.getAllByTestId('fact-row').length).toBe(2));
+    const statusSelect = screen.getByLabelText(/fact status filter/i);
+    expect(within(statusSelect).getByRole('option', { name: /superseded/i })).toBeInTheDocument();
+    listFacts.mockClear();
+    await fireEvent.change(statusSelect, { target: { value: 'superseded' } });
+    await waitFor(() =>
+      expect(listFacts).toHaveBeenCalledWith(expect.objectContaining({ status: 'superseded' })),
+    );
+  });
+
+  it('paginates facts: Next requests the next page offset', async () => {
+    // 30 facts total over a page size of 25 → a second page exists.
+    listFacts.mockResolvedValue({ rows: [fact('f1'), fact('f2')], total: 30 });
+    renderPage([scope()]);
+    await fireEvent.click(screen.getAllByTestId('scope-row')[0]);
+    await waitFor(() => expect(screen.getByTestId('pager-status')).toBeInTheDocument());
+    listFacts.mockClear();
+    await fireEvent.click(screen.getByTestId('pager-next'));
+    await waitFor(() =>
+      expect(listFacts).toHaveBeenCalledWith(expect.objectContaining({ offset: 25, limit: 25 })),
+    );
+  });
+
+  it('searching facts re-queries with the search term from page 1', async () => {
+    renderPage([scope()]);
+    await fireEvent.click(screen.getAllByTestId('scope-row')[0]);
+    await waitFor(() => expect(screen.getAllByTestId('fact-row').length).toBe(2));
+    listFacts.mockClear();
+    await fireEvent.input(screen.getByLabelText(/search facts/i), { target: { value: 'blue' } });
+    await fireEvent.click(screen.getByRole('button', { name: /^search$/i }));
+    await waitFor(() =>
+      expect(listFacts).toHaveBeenCalledWith(
+        expect.objectContaining({ search: 'blue', offset: 0 }),
+      ),
+    );
+  });
+
+  it('Add fact opens the dialog and creates a fact in the selected scope', async () => {
+    createFact.mockResolvedValue({
+      fact: fact('new'),
+      added: ['new'],
+      resurrected: [],
+      superseded: [],
+      deduped: false,
+    });
+    renderPage([scope()]);
+    await fireEvent.click(screen.getAllByTestId('scope-row')[0]);
+    await waitFor(() => expect(screen.getByTestId('add-fact')).toBeInTheDocument());
+    await fireEvent.click(screen.getByTestId('add-fact'));
+    const dialog = screen.getByRole('dialog');
+    await fireEvent.input(within(dialog).getByLabelText(/^subject$/i), {
+      target: { value: 'pet' },
+    });
+    await fireEvent.input(within(dialog).getByLabelText(/^fact text$/i), {
+      target: { value: 'Has a cat named Cola.' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /^add fact$/i }));
+    await waitFor(() =>
+      expect(createFact).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accountId: 'acct',
+          projectId: 'proj-a',
+          subjectText: 'pet',
+          factText: 'Has a cat named Cola.',
+        }),
+      ),
+    );
   });
 });

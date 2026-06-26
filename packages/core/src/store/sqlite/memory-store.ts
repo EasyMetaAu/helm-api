@@ -3,6 +3,7 @@ import {
   decodeScopeId,
   encodeScopeId,
   type Fact,
+  type FactListStatus,
   type MemoryFactInput,
   type MemoryFactPatch,
   type MemoryJobEnqueueInput,
@@ -10,7 +11,6 @@ import {
   type MemoryMessageInput,
   type MemoryObservationInput,
   type MemoryScopeSummary,
-  type MemoryStatus,
   type MemoryThreadInput,
   type Observation,
   type RawMessage,
@@ -26,6 +26,7 @@ import {
   eq,
   gt,
   inArray,
+  isNotNull,
   isNull,
   like,
   lt,
@@ -175,14 +176,18 @@ function factListClauses(input: {
   projectId?: string;
   resourceId?: string;
   threadId?: string;
-  status?: MemoryStatus | "all";
+  status?: FactListStatus;
   subjectKey?: string;
   search?: string;
 }): SQL[] {
   const clauses: SQL[] = [eq(memoryFacts.ownerId, input.accountId)];
   const status = input.status ?? "active";
   if (status === "active") {
+    // Live: active AND not yet superseded.
     clauses.push(eq(memoryFacts.status, "active"), isNull(memoryFacts.expiredAt));
+  } else if (status === "superseded") {
+    // Replaced by a newer same-subject fact: still 'active' status, but expired_at stamped.
+    clauses.push(eq(memoryFacts.status, "active"), isNotNull(memoryFacts.expiredAt));
   } else if (status !== "all") {
     clauses.push(eq(memoryFacts.status, status));
   }
@@ -1122,7 +1127,7 @@ export class SqliteMemoryStore implements MemoryStore {
     projectId?: string;
     resourceId?: string;
     threadId?: string;
-    status?: MemoryStatus | "all";
+    status?: FactListStatus;
     subjectKey?: string;
     search?: string;
     limit: number;

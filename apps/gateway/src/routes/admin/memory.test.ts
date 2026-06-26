@@ -122,6 +122,104 @@ describe("/admin/api/memory routes (docs/13)", () => {
     expect((await app.request("/admin/api/memory/facts?status=bogus")).status).toBe(400);
   });
 
+  it("status=superseded lists only the replaced rows (active + expired), and is a valid status", async () => {
+    const { store } = seededStore();
+    await addFact(store, "fav", "old", undefined);
+    await store.insertFactsReconciled({
+      accountId: "acct",
+      scope: {},
+      now: NOW,
+      facts: [
+        {
+          ownerId: "acct",
+          subjectKey: "fav",
+          factText: "new",
+          contentHash: factContentHash("new"),
+          validFrom: new Date("2026-07-01"),
+        },
+      ],
+    });
+    const app = buildApp(store);
+    // status=superseded is accepted (not 400) and returns ONLY the old, replaced row.
+    const res = await app.request("/admin/api/memory/facts?status=superseded");
+    expect(res.status).toBe(200);
+    const sup = (await res.json()) as { rows: Fact[]; total: number };
+    expect(sup.total).toBe(1);
+    expect(sup.rows[0]?.factText).toBe("old");
+    expect(sup.rows[0]?.expiredAt).not.toBeNull();
+  });
+
+  it("POST creates a fact, dedups an identical re-add, and supersedes a same-subject add", async () => {
+    const { store } = seededStore();
+    const app = buildApp(store);
+    const post = (body: unknown, qs = "") =>
+      app.request(`/admin/api/memory/facts${qs}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    // Create.
+    const created = await post({ subjectText: "favorite number", factText: "The number is 42." });
+    expect(created.status).toBe(201);
+    const cj = (await created.json()) as {
+      fact: Fact | null;
+      added: string[];
+      superseded: string[];
+      deduped: boolean;
+    };
+    expect(cj.added).toHaveLength(1);
+    expect(cj.deduped).toBe(false);
+    expect(cj.fact?.factText).toBe("The number is 42.");
+    expect(cj.fact?.subjectKey).toBe("favorite-number"); // normalized
+
+    // Identical text again → dedup (no new row).
+    const dup = (await (
+      await post({ subjectText: "favorite number", factText: "The number is 42." })
+    ).json()) as { added: string[]; deduped: boolean };
+    expect(dup.added).toHaveLength(0);
+    expect(dup.deduped).toBe(true);
+
+    // Same subject, new text → supersedes the older one.
+    const sup = (await (
+      await post({ subjectText: "favorite number", factText: "The number is 7." })
+    ).json()) as { added: string[]; superseded: string[] };
+    expect(sup.added).toHaveLength(1);
+    expect(sup.superseded.length).toBeGreaterThan(0);
+  });
+
+  it("POST routes the fact into the scope from the query params", async () => {
+    const { store } = seededStore();
+    const app = buildApp(store);
+    const res = await app.request("/admin/api/memory/facts?projectId=p9", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ subjectText: "pet", factText: "Has a cat named Cola." }),
+    });
+    expect(res.status).toBe(201);
+    const j = (await res.json()) as { fact: Fact | null };
+    expect(j.fact?.projectId).toBe("p9");
+  });
+
+  it("POST rejects an invalid body (400) and 503s without a store", async () => {
+    const { store } = seededStore();
+    const bad = await buildApp(store).request("/admin/api/memory/facts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ subjectText: "x" }), // missing factText
+    });
+    expect(bad.status).toBe(400);
+    expect(
+      (
+        await buildApp(undefined).request("/admin/api/memory/facts", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(503);
+  });
+
   it("PATCH fact: edits, 409 on collision, 404 on unknown", async () => {
     const { store } = seededStore();
     await addFact(store, "s1", "alpha");

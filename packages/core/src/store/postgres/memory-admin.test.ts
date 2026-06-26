@@ -88,6 +88,15 @@ describe("PgMemoryStore admin/MCP surface (docs/13)", () => {
     expect(active.rows.map((f) => f.factText)).toEqual(["NEW value"]);
     const all = await store.listFacts({ accountId: "a", status: "all", limit: 50, offset: 0 });
     expect(all.total).toBe(2);
+    // 'superseded' is the inverse of 'active': only the replaced row (active + expired).
+    const superseded = await store.listFacts({
+      accountId: "a",
+      status: "superseded",
+      limit: 50,
+      offset: 0,
+    });
+    expect(superseded.rows.map((f) => f.factText)).toEqual(["old"]);
+    expect(superseded.rows[0]?.expiredAt).not.toBeNull();
     const search = await store.listFacts({ accountId: "a", search: "new", limit: 50, offset: 0 }); // case-insensitive
     expect(search.rows.map((f) => f.factText)).toEqual(["NEW value"]);
   });

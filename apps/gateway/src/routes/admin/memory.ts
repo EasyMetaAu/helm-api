@@ -1,9 +1,10 @@
-import { MemoryFactContentHashConflictError } from "@helm/core";
+import { buildReconciledFactBatch, MemoryFactContentHashConflictError } from "@helm/core";
 import {
   effectiveMemoryProjectId,
+  type FactListStatus,
+  MemoryFactCreateSchema,
   MemoryFactPatchSchema,
   MemoryReflectionPatchSchema,
-  type MemoryStatus,
 } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { AppEnv } from "../../app.js";
@@ -20,7 +21,7 @@ import type { AdminApiDeps } from "./deps.js";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
-const FACT_STATUSES = new Set(["active", "archived", "pruned", "all"]);
+const FACT_STATUSES = new Set(["active", "superseded", "archived", "pruned", "all"]);
 const REFLECTION_STATUSES = new Set(["active", "archived", "all"]);
 
 // Resolve the capable store or send a 503. Hono pattern: returns the store, or a
@@ -104,13 +105,67 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     const page = await store.listFacts({
       accountId: accountOf(c, deps),
       ...scopeFromQuery(c),
-      status: statusRaw as MemoryStatus | "all",
+      status: statusRaw as FactListStatus,
       ...(subjectKey !== undefined && subjectKey !== "" ? { subjectKey } : {}),
       ...(search !== undefined && search !== "" ? { search } : {}),
       limit: intParam(c.req.query("limit"), DEFAULT_LIMIT, MAX_LIMIT),
       offset: intParam(c.req.query("offset"), 0, Number.MAX_SAFE_INTEGER),
     });
     return c.json(page);
+  });
+
+  // POST /memory/facts — hand-add a fact (the operator authoring memory directly,
+  // not the gateway learning it). Scope comes from the SAME query params as the GET
+  // (project/resource/thread + accountId), the fact fields from the body. Mirrors the
+  // MCP memory_add path: buildReconciledFactBatch derives subject_key + content_hash,
+  // insertFactsReconciled dedups by (owner,content_hash) and supersedes the older
+  // same-subject row. Returns the created Fact + the reconcile summary so the UI can
+  // tell the operator whether it was new / deduped / superseded an older one.
+  app.post("/admin/api/memory/facts", async (c) => {
+    const store = resolveStore(c, deps);
+    if (store instanceof Response) return store;
+    const parsed = MemoryFactCreateSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: "invalid fact", issues: parsed.error.issues }, 400);
+    }
+    const accountId = accountOf(c, deps);
+    const scope = scopeFromQuery(c);
+    const now = new Date();
+    const facts = buildReconciledFactBatch({
+      extracted: [
+        { subjectText: parsed.data.subjectText, factText: parsed.data.factText, validFrom: now },
+      ],
+      ownerId: accountId,
+      scope,
+      cap: 1,
+      fallbackNow: now,
+    });
+    if (facts.length === 0) {
+      return c.json({ error: "fact text/subject is empty after normalization" }, 400);
+    }
+    if (parsed.data.importance !== undefined && facts[0] !== undefined) {
+      facts[0].importance = parsed.data.importance;
+    }
+    const res = (await store.insertFactsReconciled({ accountId, scope, facts, now })) ?? {
+      insertedIds: [],
+      supersededIds: [],
+      resurrectedIds: [],
+    };
+    const resurrected = res.resurrectedIds ?? [];
+    // The row we just wrote (a fresh insert OR a resurrected one) — return it so the UI
+    // can show it without a second round-trip; null only on a pure dedup (no new row).
+    const createdId = res.insertedIds[0] ?? resurrected[0] ?? null;
+    const fact = createdId !== null ? await store.getFactById({ accountId, id: createdId }) : null;
+    return c.json(
+      {
+        fact,
+        added: res.insertedIds,
+        resurrected,
+        superseded: res.supersededIds,
+        deduped: res.insertedIds.length === 0 && resurrected.length === 0,
+      },
+      201,
+    );
   });
 
   // GET /memory/facts/:id
