@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-26 · 仪表板 + 请求列表加自定义日期范围（admin UI；对应 docs/04 遥测展示）
+
+- **背景（Lukin）**：仪表板「今天/昨天/7d/30d/全部」预设不够灵活，要能选任意日期范围。
+- **决定（范围）**：Lukin 选「**仪表板 + 请求列表都加**」。`keys/[id]` 早有「预设 或 自定义日期」实现 → 把其通用窗口原语**下沉到共享 `requests-filters.ts`**（`localMidnightMs`/`isValidDateParam`/`resolveCustomDayWindow`/`bucketForWindow`），`key-detail-filters` 改为消费它（删私有副本、重导出 `bucketForWindow` 使其 import 与测试**完全不动**），三页同源。
+- **UX**：**不动共享 `RangeFilter` 组件**（零 e2e testid 风险）——自定义 From/To 用原生 `<input type="date">` 摆控件旁（仿 key 详情），有效区间时预设 `opacity-50` 变灰并被覆盖。窗口走 URL `?start=YYYY-MM-DD&end=YYYY-MM-DD`，**custom 胜过 preset**；半填/反序/非法日期 fail-soft 回落预设。`end` = endDate 次日 0 点（含尾日，DST 用 `setDate`）。
+- **关键点**：① 自定义模式无同比 delta（门 `!custom && today|yesterday`）、bucket 按实际跨度 `bucketForWindow`（≤2 天 hour 否则 day）。② **后端零改动**（getStats/listRequests 早收任意 epoch ms）。③ **i18n 零成本**（From/To/Apply/Clear 五语已被 key 详情用过）。④「查看全部」用 `filtersToSearch` 串 start/end 忠实带窗口跳转。
+- **TDD+验证**：`requests-filters.test` +18 例（4 个新原语 + parse/serialize round-trip + custom 胜出 + 半填回落）；`key-detail-filters.test` 8 例重构后不变绿。**admin 481 单测全绿、svelte-check 929/0/0、prettier 干净**。全在 `apps/admin`（原则 1）。分支 `worktree-dashboard-date-range`，**未提交未部署**。
+
 ## 2026-06-26 · 仪表板「昨天」视图加同比（昨天 vs 前天，整天对整天；admin UI，对应 docs/04 遥测展示）
 
 - **背景（Lukin）**：今天视图的「对比昨日」因今天未过完意义不大；「昨天」是完整一天，**昨天 vs 前天（整天对整天）才有意义**，要求给昨天视图也加同比。
@@ -22,19 +30,13 @@
 - **i18n**：仅新增 `Hit rate: {rate}` 一个 key（图表用的 `Total cost`/`Cost` 五语已存在），五语补全（命中率/命中率/ヒット率/적중률，对齐各 locale 既有 `hit` 译法），纳入 `dashboard-locales.test` 守卫防 `i18n:sync` 漂移。
 - **验证**：`key-detail.test` fixture 补 `cacheHitRate`（Stats 新增必填字段 → 6 处 render 同源一改即修）；**admin svelte-check 0/0、103 路由单测 + 17 i18n locale 单测全绿**。改动全在 `apps/admin`（不碰 core/gateway，符合原则 1 网关与 UI 解耦）。发布 **v0.21.32** 并部署 la.atmy.work。
 
-## 2026-06-25 · 池内重试补洞：前导帧不再误提交，in-band 失败也能换账号（provider 执行；docs/04+05，原则 5/8）
-
-- **背景（Lukin 报，box req `bca58c02`，跑在 0.21.29 上）**：上一条池内重试上线后**仍** `all_providers_failed`，4 个 codex 账号只试了 1 个（latency 1196ms 单次）。同样的 `Our servers are currently overloaded`。
-- **根因**：codex gpt-5.5 的过载是 **HTTP 200 开流后 in-band 失败**——先发 `response.created` 前导帧、再发 `response.failed`。`streamWithRetry` 在**第一个原始 chunk(前导帧)**就提交账号；真正识别错误的 `guardPreOutputFailure` 在**执行器层(高一层)**，等它把错误帧转成 throw 时，池已提交，执行器只能换 alias(全被跨协议挡)。即「commit on first **raw** chunk」对 native passthrough 是错的——前导帧不是真输出。**与 v0.21.27 failover-guard 同一洞，只是低一层没复用。**
-- **决定**：把 `guardPreOutputFailure` **下沉进池**。`OAuthPoolDeps` 加 `nativeStreamPreambleClassifier` / `chatStreamPreambleClassifier`（server.ts 用 `preOutputClassifierFor(spec.targetProviderProtocol)` 与 `("openai_chat")` 注入，gemini→null 跳过）；`streamWithRetry` 在 `open()` 外包一层 guard → 首个 yield 的 chunk 必然代表"真实输出已确定"，pre-output 错误帧变成首 chunk 前的 `UpstreamError(upstreamStatus:null)`——**正好命中已有的 `isRetryableTransientError`(null→可重试)** → 池自动换下一个账号。空流(只前导就关)同样 throw→换账号。
-- **双层 guard 幂等无害**：池的 guard 输出对成功流是 byte-identical 前导+输出，执行器的 guard 再包一次结果相同；池全失败则抛最后 upstream 错，执行器 peek 到即走链。**保留执行器层 guard 作纵深(非 OAuth provider 仍需要)**。
-- **TDD+验证**：`pool.test.ts` 加 4 例（preamble→error 换账号、preamble-only 关流换账号、单账号 preamble→output 正常提交且按序、全账号 pre-output 失败 surface 最后错）；红→绿。**core+gateway 228 文件 3856 单测绿**、typecheck+biome 干净。改 `pool.ts`+`server.ts`+test。分支 `fix-pool-preoutput-inpool-failover`。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-25 · 池内重试补洞：前导帧不再误提交，in-band 失败也能换账号（provider 执行；docs/04+05，原则 5/8）**：codex gpt-5.5 过载是 HTTP 200 开流后 in-band 失败（先 `response.created` 前导帧再 `response.failed`），`streamWithRetry` 在首个**原始** chunk(前导帧)就提交账号，而识别错误的 `guardPreOutputFailure` 在执行器层(高一层)→池已提交只能换 alias(被跨协议挡)。修：把 guard **下沉进池**（`OAuthPoolDeps` 注入 native/chat preamble 分类器，gemini→null），`open()` 外包 guard→首 yield 必代表真实输出，pre-output 错误帧变首 chunk 前 `UpstreamError(upstreamStatus:null)`→命中 `isRetryableTransientError`→池自动换号；空流同理。双层 guard 幂等无害，保留执行器层作纵深。pool.test +4 例，core+gateway 228 文件 3856 单测绿。并入 v0.21.31。分支 `fix-pool-preoutput-inpool-failover`。
 
 - **2026-06-25 · OAuth 池内换账号重试瞬时故障（provider 执行；docs/04 执行兜底，原则 5）**：带 Responses 原生工具(web_search/apply_patch/tool_search)的 Codex 请求，链头账号过载(`upstreamStatus:null`)后 9 个 fallback 全被 `responses_native_tools_cross_protocol_blocked` 正确跳过 → `all_providers_failed`，因 `OAuthPoolClient.select()` 每请求只挑 1 个账号、失败即交回执行器（→全跨协议挡），从不在请求内试同订阅其它账号。修：`pool.ts` 加请求内换账号重试，`isRetryableTransientError` 仅 timeout/`upstreamStatus===null`/5xx 可重试（排除 429 留执行器 park + 其它 4xx），`select(stickyKey, exclude)` 跳已试账号（单调收敛）；流式仅 pre-first-chunk 可重试（yield 过 chunk 即提交，对齐原则 8），非流式直接循环；耗尽抛最后 upstream 错让执行器走链。pool.test +7 例，core+gateway 228 文件 3852 单测绿。并入 v0.21.29。分支 `feat-oauth-pool-inretry-transient`。
 - **2026-06-25 · per-attempt 超时 → fallback → 熔断（执行器；docs/04，原则 5）**：eval 回环到被节流的 codex gpt-5.4-mini（p95≈14s）反复超时→client_abort 死路（不熔断不走链）。新增 `InternalRequest.attempt_timeout_ms`（每候选截止，仅 internal key 经 `x-helm-attempt-timeout-ms` 头放行，防客户端用 1ms 触发跨租户误熔断）+ `withAttemptDeadline`：到点 abort per-attempt controller→`UpstreamError("timeout")`→既有 recordFailure+走链；client 真断连仍胜出→recordAbort。eval `runEval` 去 inner-abort race，`timeout_ms` 当每候选预算、`outer_timeout_ms` 4000→8000 总兜底。4626 单测+66 e2e 绿。已并入 v0.21.x。分支 `fix/per-attempt-timeout-fallback`。

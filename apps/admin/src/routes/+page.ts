@@ -7,7 +7,14 @@ import {
   resolveYesterdayComparisonWindow,
   trendBucketForRange,
 } from '$lib/dashboard-chart.js';
-import { clientTzOffsetMinutes, parseRange, resolveWindow } from '$lib/requests-filters.js';
+import {
+  bucketForWindow,
+  clientTzOffsetMinutes,
+  isValidDateParam,
+  parseRange,
+  resolveCustomDayWindow,
+  resolveWindow,
+} from '$lib/requests-filters.js';
 import type { PageLoad } from './$types.js';
 
 // Dashboard load (SPA, client-side): read the date-range preset from the URL
@@ -25,10 +32,19 @@ import type { PageLoad } from './$types.js';
 
 export const load: PageLoad = async ({ url }) => {
   const range = parseRange(url.searchParams.get('range'), 'today');
+  const startRaw = url.searchParams.get('start')?.trim();
+  const endRaw = url.searchParams.get('end')?.trim();
+  const startDate = isValidDateParam(startRaw) ? startRaw : undefined;
+  const endDate = isValidDateParam(endRaw) ? endRaw : undefined;
   const now = Date.now();
-  const { start, end } = resolveWindow(range, now);
-  const statsWindow = resolveStatsWindow(range, now);
-  const bucket = trendBucketForRange(range);
+
+  // A valid custom calendar-day range (start/end) OVERRIDES the preset; a
+  // half-filled or inverted range falls back to it. Custom mode buckets by the
+  // resolved span (hour for ≤2 days, else day) and has no day-over-day comparison.
+  const custom = startDate && endDate ? resolveCustomDayWindow(startDate, endDate) : null;
+  const { start, end } = custom ?? resolveWindow(range, now);
+  const statsWindow = custom ?? resolveStatsWindow(range, now);
+  const bucket = custom ? bucketForWindow(custom.start, custom.end) : trendBucketForRange(range);
   // Send the viewer's UTC offset so the SQL series buckets break at local midnight
   // (not 00:00 UTC) — the fix for the "8am boundary" on UTC+8 dashboards.
   const tzOffsetMinutes = clientTzOffsetMinutes();
@@ -71,7 +87,7 @@ export const load: PageLoad = async ({ url }) => {
   // little traffic. Fail-soft: a hiccup → no deltas, cards just omit them.
   const MIN_COMPARISON_BASELINE_REQUESTS = 10;
   let compare: Record<string, { pct: number | null; base: number }> | null = null;
-  if (range === 'today' || range === 'yesterday') {
+  if (!custom && (range === 'today' || range === 'yesterday')) {
     try {
       const cmp =
         range === 'today'
@@ -105,6 +121,10 @@ export const load: PageLoad = async ({ url }) => {
 
   return {
     range,
+    // Echo the custom window only when it is the ACTIVE one (valid + ordered), so
+    // the From/To inputs mirror the real state and a preset view shows them empty.
+    startDate: custom ? startDate : undefined,
+    endDate: custom ? endDate : undefined,
     bucket,
     agg,
     items,

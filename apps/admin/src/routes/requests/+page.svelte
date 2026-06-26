@@ -47,6 +47,10 @@
   let lane = $state(untrack(() => data.filters.lane ?? ''));
   let model = $state(untrack(() => data.filters.model ?? ''));
   let pageSize = $state(untrack(() => data.filters.pageSize));
+  // Custom calendar-day window (From/To). The active window lives in the URL
+  // (?start=&end=) and OVERRIDES the preset; these mirror it, re-synced below.
+  let customStart = $state(untrack(() => data.filters.startDate) ?? '');
+  let customEnd = $state(untrack(() => data.filters.endDate) ?? '');
 
   $effect(() => {
     const f = data.filters;
@@ -56,7 +60,11 @@
     lane = f.lane ?? '';
     model = f.model ?? '';
     pageSize = f.pageSize;
+    customStart = f.startDate ?? '';
+    customEnd = f.endDate ?? '';
   });
+
+  const customActive = $derived(Boolean(data.filters.startDate && data.filters.endDate));
 
   const totalPages = $derived(Math.max(1, Math.ceil(data.total / Math.max(1, data.pageSize))));
   // The number/ellipsis row for the pager (first + last + a window around current).
@@ -68,6 +76,8 @@
   function go(next: Partial<RequestsFilters> = {}): void {
     const f: RequestsFilters = {
       range,
+      startDate: customStart || undefined,
+      endDate: customEnd || undefined,
       status: status || undefined,
       decidedBy: decidedBy || undefined,
       lane: lane.trim() || undefined,
@@ -80,6 +90,24 @@
     void goto(search ? `?${search}` : '?', { keepFocus: true, noScroll: true });
   }
 
+  // Picking a preset clears any custom range (the preset wins). Applying a custom
+  // range needs both ends; clearing drops back to the preset. All reset to page 1.
+  function selectRange(next: RangeKey): void {
+    range = next;
+    customStart = '';
+    customEnd = '';
+    go();
+  }
+  function applyCustom(): void {
+    if (!customStart || !customEnd) return;
+    go();
+  }
+  function clearCustom(): void {
+    customStart = '';
+    customEnd = '';
+    go();
+  }
+
   // Real href for a page-number link: the current filter set with the target page.
   // Rendering the numbers as <a> (not buttons) gives a native pointer cursor +
   // middle-click / open-in-new-tab; SvelteKit still navigates client-side, and
@@ -87,6 +115,8 @@
   function pageHref(n: number): string {
     const search = filtersToSearch({
       range,
+      startDate: customStart || undefined,
+      endDate: customEnd || undefined,
       status: status || undefined,
       decidedBy: decidedBy || undefined,
       lane: lane.trim() || undefined,
@@ -103,6 +133,8 @@
     decidedBy = '';
     lane = '';
     model = '';
+    customStart = '';
+    customEnd = '';
     go();
   }
 
@@ -161,16 +193,44 @@
     </div>
   </header>
 
-  <!-- Date-range presets, pulled out as a standalone button row (the shared
-       RangeFilter — identical to the dashboard window picker). Changing it applies
-       immediately and resets to page 1 via go(). -->
-  <RangeFilter
-    value={range}
-    onChange={(next) => {
-      range = next;
-      go();
-    }}
-  />
+  <!-- Date-range window: presets (the shared RangeFilter — identical to the
+       dashboard) OR a custom From/To day range. The active control applies
+       immediately and resets to page 1; a valid custom range dims + overrides the
+       presets. -->
+  <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+    <div class:opacity-50={customActive}>
+      <RangeFilter value={range} onChange={selectRange} />
+    </div>
+    <div class="flex flex-wrap items-end gap-2">
+      <label class="flex flex-col text-xs text-ink-muted">
+        {$t('From')}
+        <input
+          type="date"
+          class="input mt-0.5"
+          bind:value={customStart}
+          max={customEnd || undefined}
+        />
+      </label>
+      <label class="flex flex-col text-xs text-ink-muted">
+        {$t('To')}
+        <input
+          type="date"
+          class="input mt-0.5"
+          bind:value={customEnd}
+          min={customStart || undefined}
+        />
+      </label>
+      <button
+        type="button"
+        class="btn-secondary"
+        disabled={!customStart || !customEnd}
+        onclick={applyCustom}>{$t('Apply')}</button
+      >
+      {#if customActive}
+        <button type="button" class="btn-secondary" onclick={clearCustom}>{$t('Clear')}</button>
+      {/if}
+    </div>
+  </div>
 
   <!-- Filter bar. Selects apply immediately; the lane/model text inputs apply on
        Enter (form submit). Changing any filter resets to page 1. -->
