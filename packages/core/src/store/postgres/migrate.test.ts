@@ -160,8 +160,10 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // oauth_quota → pre-mark applied (out of scope).
     // v27 (pgvector + tsvector over memory_facts): this fixture never creates
     // memory_facts (+ no pgvector here) → pre-mark applied, out of scope.
+    // v29 (telemetry lane/decided_by generated columns): no telemetry table here →
+    // pre-mark applied; v28 (payload_blobs CREATE) pre-marked too (out of scope).
     // biome-ignore format: keep the version ledger on one readable line
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27]) {
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );
@@ -259,8 +261,10 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // v26 (idx_memory_jobs_claim): no memory_jobs table in this messages fixture → pre-mark.
     // v27 (pgvector + tsvector over memory_facts): this messages fixture never creates
     // memory_facts (+ no pgvector here) → pre-mark applied, out of scope.
+    // v28 (payload_blobs) + v29 (telemetry generated columns): out of scope here too.
     for (const version of [
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27,
+      28, 29,
     ]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),

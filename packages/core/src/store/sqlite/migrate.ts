@@ -642,6 +642,44 @@ const MIGRATIONS: readonly Migration[] = [
       END;
     `,
   },
+  {
+    // Content-addressed image blob store (store/payload-blobs.ts). The base64
+    // images Claude Code re-sends every turn were the entire 14 GB of the prod DB;
+    // they now live ONCE here keyed by sha256 of the decoded bytes, and the
+    // request_payloads columns hold only sentinels (+ gzipped remaining text). The
+    // created_at index drives the same-cutoff retention prune as the payloads.
+    version: 29,
+    sql: `
+      CREATE TABLE IF NOT EXISTS payload_blobs (
+        sha256 TEXT PRIMARY KEY,
+        bytes BLOB NOT NULL,
+        mime TEXT,
+        size INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_payload_blobs_created_at ON payload_blobs (created_at);
+    `,
+  },
+  {
+    // Admin /requests list filters (docs/06): lane + decided_by were filtered via
+    // json_extract(decision_json, …) — a full scan + per-row JSON parse. Promote
+    // them to VIRTUAL generated columns + indexes so the filter is an index seek.
+    // VIRTUAL (not STORED) adds NO per-row storage write-amplification — only the
+    // index is materialized; the column is computed on read/index-build. `model`
+    // stays json_extract on purpose: it's a LIKE-contains match, which no B-tree
+    // index can serve anyway.
+    version: 30,
+    sql: `
+      ALTER TABLE telemetry ADD COLUMN lane TEXT
+        GENERATED ALWAYS AS (json_extract(decision_json, '$.lane.selected_lane')) VIRTUAL;
+      ALTER TABLE telemetry ADD COLUMN decided_by TEXT
+        GENERATED ALWAYS AS (json_extract(decision_json, '$.classifier.decided_by')) VIRTUAL;
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_lane ON telemetry (lane);
+      CREATE INDEX IF NOT EXISTS idx_telemetry_decided_by ON telemetry (decided_by);
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

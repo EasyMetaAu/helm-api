@@ -1,4 +1,4 @@
-import { integer, primaryKey, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { blob, integer, primaryKey, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 // SQLite (Drizzle) table definitions for the sqlite Store adapter. Columns align
 // with docs/06 (api_keys) and docs/02 (telemetry / decision record). Dialect
@@ -151,6 +151,20 @@ export const requestPayloads = sqliteTable("request_payloads", {
   // EXACT body forwarded upstream (post memory-inject + protocol-translation). NULL
   // when capture off / no provider served / pre-feature row. NO plaintext key.
   upstreamRequestJson: text("upstream_request_json"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+// Content-addressed store for base64 images pulled OUT of request_payloads
+// (store/payload-blobs.ts). Claude Code re-sends every image on every turn, so the
+// same bytes recur across many rows (and twice within one row: client + upstream);
+// keying by sha256 of the DECODED bytes stores each image ONCE. created_at is
+// TOUCHED on every re-reference, so a still-in-use image is never pruned out from
+// under a live payload row (prune uses the same retention cutoff as the payloads).
+export const payloadBlobs = sqliteTable("payload_blobs", {
+  sha256: text("sha256").primaryKey(),
+  bytes: blob("bytes").notNull(), // decoded binary (NOT base64)
+  mime: text("mime"),
+  size: integer("size").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 

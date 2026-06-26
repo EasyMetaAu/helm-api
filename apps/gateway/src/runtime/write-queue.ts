@@ -19,6 +19,18 @@ export interface WriteQueueDeps {
   // the oldest buffered write is dropped (logged) so a write stall can never grow
   // the heap without bound. Default 10_000.
   maxDepth?: number;
+  // Hard cap on the in-memory BYTE footprint of the buffered inserts. The real OOM
+  // risk isn't row count — a single payload is 6-7MB, so 10_000 rows × 7MB ≈ 70GB.
+  // Past this budget the queue sheds buffered writes (payload first — see
+  // shedBufferedWrite) so a downstream stall (e.g. the 4am VACUUM holding the write
+  // lock) can never balloon the heap. maxDepth stays as a row-count backstop; EITHER
+  // limit tripping triggers a shed/reject. Default 256MiB.
+  maxBytes?: number;
+  // Flush a buffer eagerly once its accumulated bytes reach this, so a few giant
+  // payloads can't coalesce into a multi-hundred-MB single transaction (maxBatch=256
+  // rows × 7MB). Independent of maxBatch (the row-count eager-flush). Default
+  // maxBytes/4.
+  flushBytes?: number;
   // Optional hook fired AFTER each enqueued task settles (success or failure). The
   // composition root wires this to memoryWorker.wake() so a memory observe landing
   // here schedules the debounced drain — request-driven memory formation without
@@ -60,9 +72,26 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   const flushIntervalMs = deps.flushIntervalMs ?? 25;
   const maxBatch = deps.maxBatch ?? 256;
   const maxDepth = deps.maxDepth ?? 10_000;
+  const maxBytes = deps.maxBytes ?? 256 * 1024 * 1024;
+  const flushBytes = deps.flushBytes ?? Math.floor(maxBytes / 4);
 
   let telemetryBuf: InsertTelemetryInput[] = [];
   let payloadBuf: InsertPayloadInput[] = [];
+  // Parallel byte-cost arrays kept in lock-step with the buffers above (same index =
+  // same row). We never re-stringify a buffered entry to weigh it: the cost is
+  // computed ONCE at enqueue (a cheap .length sum of the already-serialized JSON
+  // fields) and the running total is adjusted by +cost on push / -cost on
+  // shed|flush. That keeps backpressure O(1) amortized instead of turning the admit
+  // check into an O(buffer) CPU hotspot.
+  let telemetryBytes: number[] = [];
+  let payloadBytes: number[] = [];
+  let bufferedBytes = 0;
+  // Bytes that have been flushed into the write chain but whose commit hasn't landed
+  // yet — they still occupy the heap (the batch closures retain them). Counted toward
+  // the byte budget so a STALLED writer (the 4am VACUUM holding the write lock) can't
+  // let repeated flushes pile up unbounded batches behind the first blocked write.
+  // Incremented at flush, released when each commit settles.
+  let inFlightBytes = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   // All DB writes (batch flushes) run on this serial chain so two flushes can never
@@ -73,6 +102,27 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   let pendingTasks = 0;
 
   const depth = (): number => telemetryBuf.length + payloadBuf.length + pendingTasks;
+
+  // Cheap, allocation-free byte estimate of a payload row: the serialized fields are
+  // already strings, so summing their .length is O(1)-per-row and dominates the
+  // footprint (the payload IS the request/response/upstream JSON). UTF-16 .length
+  // slightly under-counts multi-byte chars, but we only need a consistent proxy to
+  // bound the heap, not an exact byte tally.
+  const payloadCost = (input: InsertPayloadInput): number =>
+    input.requestJson.length +
+    (input.responseJson?.length ?? 0) +
+    (input.upstreamRequestJson?.length ?? 0);
+
+  // Telemetry rows are tiny vs payloads, but a redacted decision can still be a few KB.
+  // Approximate it once at enqueue with a single stringify of the decision (the bulk
+  // of the row) — never recomputed afterward; the cached cost rides the byte arrays.
+  const telemetryCost = (input: InsertTelemetryInput): number => {
+    try {
+      return JSON.stringify(input.decision).length;
+    } catch {
+      return 0; // a non-serializable decision can't bloat the heap as a string anyway
+    }
+  };
 
   const clearTimer = (): void => {
     if (timer !== null) {
@@ -146,26 +196,65 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
     const pBatch = payloadBuf;
     telemetryBuf = [];
     payloadBuf = [];
-    writeChain = writeChain.then(async () => {
-      await writeTelemetry(tBatch);
-      await writePayloads(pBatch);
-    });
+    telemetryBytes = [];
+    payloadBytes = [];
+    // The bytes don't leave memory at flush — they move into the batch closures the
+    // write chain retains until the commit lands. Move them from buffered → in-flight
+    // (NOT zeroed) so admit() keeps counting them against maxBytes while the writer is
+    // stalled; released when this batch's commit settles (success or failure).
+    const flushedBytes = bufferedBytes;
+    bufferedBytes = 0;
+    inFlightBytes += flushedBytes;
+    writeChain = writeChain
+      .then(async () => {
+        await writeTelemetry(tBatch);
+        await writePayloads(pBatch);
+      })
+      .finally(() => {
+        inFlightBytes -= flushedBytes;
+      });
     return writeChain;
   };
 
-  // Drop the oldest buffered insert to stay under maxDepth. Tasks are never dropped
-  // mid-chain (they're already scheduled); only buffered inserts are shed.
+  // Would admitting a row costing `incomingBytes` breach either limit? The row budget
+  // is checked LAGGING (depth already at the cap) to preserve the original row-shed
+  // behaviour; the byte budget is checked LOOKING-AHEAD over buffered + IN-FLIGHT +
+  // incoming, so a single oversized payload is shed against BEFORE it lands AND a
+  // stalled writer's queued-but-uncommitted batches still count — one 7MB row must not
+  // overshoot the budget, and a write stall must not pile up batches past the cap.
+  const overBudget = (incomingBytes: number): boolean =>
+    depth() >= maxDepth || bufferedBytes + inFlightBytes + incomingBytes > maxBytes;
+
+  // Drop the oldest buffered insert to relieve a depth/byte overflow. Tasks are never
+  // dropped mid-chain (they're already scheduled); only buffered inserts are shed.
+  // Priority: shed PAYLOAD (debug capture) before TELEMETRY (audit-critical). When a
+  // stall forces a choice we keep the decision record and sacrifice the verbatim body
+  // — and payloads are also where the bytes are (6-7MB each), so dropping them first
+  // reclaims the most heap per shed. Byte counts are decremented in lock-step so the
+  // running total never drifts.
   const shedBufferedWrite = (): boolean => {
-    if (telemetryBuf.length >= payloadBuf.length && telemetryBuf.length > 0) telemetryBuf.shift();
-    else if (payloadBuf.length > 0) payloadBuf.shift();
-    else return false;
+    if (payloadBuf.length > 0) {
+      payloadBuf.shift();
+      bufferedBytes -= payloadBytes.shift() ?? 0;
+    } else if (telemetryBuf.length > 0) {
+      telemetryBuf.shift();
+      bufferedBytes -= telemetryBytes.shift() ?? 0;
+    } else {
+      return false;
+    }
     log("writequeue.overflow");
     return true;
   };
 
-  const admitBufferedWrite = (): boolean => {
-    if (depth() < maxDepth) return true;
-    if (shedBufferedWrite() && depth() < maxDepth) return true;
+  const admitBufferedWrite = (incomingBytes: number): boolean => {
+    if (!overBudget(incomingBytes)) return true;
+    // Keep shedding until BOTH limits clear (a single 7MB payload can blow the byte
+    // budget while many tiny rows blow the row budget). Stop if nothing is left to drop
+    // (the incoming write alone is larger than the whole budget).
+    while (overBudget(incomingBytes) && shedBufferedWrite()) {
+      /* shed until under budget or empty */
+    }
+    if (!overBudget(incomingBytes)) return true;
     log("writequeue.overflow");
     return false;
   };
@@ -173,17 +262,25 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   return {
     enqueueTelemetry(input: InsertTelemetryInput): void {
       if (stopped) return;
-      if (!admitBufferedWrite()) return;
+      const cost = telemetryCost(input);
+      if (!admitBufferedWrite(cost)) return;
       telemetryBuf.push(input);
-      if (telemetryBuf.length >= maxBatch) void doFlush();
+      telemetryBytes.push(cost);
+      bufferedBytes += cost;
+      // Eager flush on EITHER the row threshold or the byte threshold, so neither a
+      // burst of rows nor a few giant rows can grow an oversized single transaction.
+      if (telemetryBuf.length >= maxBatch || bufferedBytes >= flushBytes) void doFlush();
       else scheduleTimer();
     },
 
     enqueuePayload(input: InsertPayloadInput): void {
       if (stopped) return;
-      if (!admitBufferedWrite()) return;
+      const cost = payloadCost(input);
+      if (!admitBufferedWrite(cost)) return;
       payloadBuf.push(input);
-      if (payloadBuf.length >= maxBatch) void doFlush();
+      payloadBytes.push(cost);
+      bufferedBytes += cost;
+      if (payloadBuf.length >= maxBatch || bufferedBytes >= flushBytes) void doFlush();
       else scheduleTimer();
     },
 

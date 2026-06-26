@@ -544,6 +544,44 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_memory_facts_fts ON memory_facts USING gin (to_tsvector('simple', fact_text));
     `,
   },
+  {
+    // Content-addressed image blob store (store/payload-blobs.ts) — pg mirror of
+    // the sqlite v29 migration (different ledger, same logical change). The base64
+    // images Claude Code re-sends every turn were the bulk of the prod DB; they now
+    // live ONCE here keyed by sha256 of the decoded bytes, and the request_payloads
+    // text columns hold only sentinels. bytes is BYTEA; the slimmed text is NOT
+    // gzipped here (unlike sqlite) — pg's TOAST auto-compresses large text values.
+    // The created_at index drives the same-cutoff retention prune as the payloads.
+    version: 28,
+    sql: `
+      CREATE TABLE IF NOT EXISTS payload_blobs (
+        sha256 TEXT PRIMARY KEY,
+        bytes BYTEA NOT NULL,
+        mime TEXT,
+        size INTEGER NOT NULL,
+        created_at BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_payload_blobs_created_at ON payload_blobs (created_at);
+    `,
+  },
+  {
+    // Mirror of sqlite v30: index the admin /requests lane + decided_by filters so
+    // they're an index seek, not a jsonb scan. Postgres generated columns are STORED
+    // only (no VIRTUAL), but the expression is a cheap immutable jsonb extract and
+    // telemetry rows are tiny, so the per-insert cost is negligible. `model` stays a
+    // jsonb ILIKE-contains (no index can serve it).
+    version: 29,
+    sql: `
+      ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS lane TEXT
+        GENERATED ALWAYS AS (decision_json -> 'lane' ->> 'selected_lane') STORED;
+      ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS decided_by TEXT
+        GENERATED ALWAYS AS (decision_json -> 'classifier' ->> 'decided_by') STORED;
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_lane ON telemetry (lane);
+      CREATE INDEX IF NOT EXISTS idx_telemetry_decided_by ON telemetry (decided_by);
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

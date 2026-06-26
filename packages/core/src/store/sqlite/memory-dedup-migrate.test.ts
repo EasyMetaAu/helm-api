@@ -47,6 +47,9 @@ function seedPreV21(): string {
   // v28 alters memory_facts (+ FTS); this memory_messages-only fixture never creates
   // memory_facts → pre-mark applied (out of scope for the v21 dedup test).
   ins.run(28);
+  // v30 alters telemetry (absent here) → pre-mark; v29 (payload_blobs) out of scope too.
+  ins.run(29);
+  ins.run(30);
   raw.exec(`
     CREATE TABLE memory_messages (
       id TEXT PRIMARY KEY,
