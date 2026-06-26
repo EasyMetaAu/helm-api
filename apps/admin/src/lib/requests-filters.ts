@@ -20,6 +20,11 @@ export const DEFAULT_PAGE_SIZE = 50;
 
 export interface RequestsFilters {
   range: RangeKey;
+  // Custom calendar-day window (YYYY-MM-DD, inclusive). When BOTH are set and form
+  // a valid range they OVERRIDE `range` — the same "custom wins" model the key-detail
+  // page uses. Half-filled / inverted / invalid falls back to the preset.
+  startDate?: string;
+  endDate?: string;
   status?: RequestListItem['status'];
   decidedBy?: RequestListItem['decided_by'];
   lane?: string;
@@ -41,6 +46,9 @@ export const DEFAULT_FILTERS: RequestsFilters = {
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// A 2-day window or shorter reads better hour-bucketed; longer → day buckets.
+const HOURLY_MAX_SPAN_MS = 2 * DAY_MS;
 const STATUSES = new Set<RequestListItem['status']>(['ok', 'error']);
 const DECIDED_BY = new Set<RequestListItem['decided_by']>(['rules', 'eval', 'default', 'fallback']);
 
@@ -59,6 +67,8 @@ export function parseRange(value: string | null, fallback: RangeKey = 'all'): Ra
 // the default (the list must always render — never throw on a stale bookmark).
 export function parseFilters(sp: URLSearchParams): RequestsFilters {
   const rangeRaw = sp.get('range');
+  const startDate = sp.get('start')?.trim();
+  const endDate = sp.get('end')?.trim();
   const status = sp.get('status');
   const decidedBy = sp.get('decided_by');
   const lane = sp.get('lane')?.trim();
@@ -67,6 +77,10 @@ export function parseFilters(sp: URLSearchParams): RequestsFilters {
   const pageSizeRaw = Number(sp.get('pageSize'));
   return {
     range: isRange(rangeRaw) ? rangeRaw : DEFAULT_RANGE,
+    // Kept only if they are REAL calendar days; the "both valid + ordered" check
+    // that makes them WIN over the preset happens in resolveCustomDayWindow.
+    startDate: isValidDateParam(startDate) ? startDate : undefined,
+    endDate: isValidDateParam(endDate) ? endDate : undefined,
     status:
       status && STATUSES.has(status as RequestListItem['status'])
         ? (status as RequestListItem['status'])
@@ -90,7 +104,15 @@ export function parseFilters(sp: URLSearchParams): RequestsFilters {
 // clean (range=all, page=1, and empty filters are not written).
 export function filtersToSearch(f: RequestsFilters): string {
   const qs = new URLSearchParams();
-  if (f.range !== DEFAULT_RANGE) qs.set('range', f.range);
+  // A valid custom range wins: write start/end and drop the preset. A half-filled
+  // or inverted range is ignored, so the preset is written instead.
+  const custom = f.startDate && f.endDate ? resolveCustomDayWindow(f.startDate, f.endDate) : null;
+  if (custom) {
+    qs.set('start', f.startDate as string);
+    qs.set('end', f.endDate as string);
+  } else if (f.range !== DEFAULT_RANGE) {
+    qs.set('range', f.range);
+  }
   if (f.status) qs.set('status', f.status);
   if (f.decidedBy) qs.set('decided_by', f.decidedBy);
   if (f.lane?.trim()) qs.set('lane', f.lane.trim());
@@ -134,6 +156,48 @@ export function resolveWindow(range: RangeKey, nowMs: number): { start?: number;
     case '30d':
       return { start: nowMs - 30 * DAY_MS };
   }
+}
+
+// Local-midnight epoch ms for a 'YYYY-MM-DD' (parsed in the viewer's zone, like the
+// rest of the admin). null when the shape is wrong OR the value is not a real
+// calendar day — rollover junk like 2026-06-31 / 2026-13-99 is rejected (the parsed
+// Y-M-D must match the input), never silently rolled into the next month.
+export function localMidnightMs(date: string): number | null {
+  if (!DATE_RE.test(date)) return null;
+  const d = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return null;
+  const [y, m, day] = date.split('-').map(Number);
+  if (d.getFullYear() !== y || d.getMonth() + 1 !== m || d.getDate() !== day) return null;
+  return d.getTime();
+}
+
+// A querystring date param is kept only if it is a REAL calendar day (not just digits).
+export function isValidDateParam(date: string | undefined): date is string {
+  return date !== undefined && localMidnightMs(date) !== null;
+}
+
+// Resolve a custom calendar-day range to a half-open window [start, end) in epoch ms
+// (viewer-local). `end` is midnight of the day AFTER endDate so the end day is
+// INCLUDED. null when either date isn't a real day or start > end — the caller then
+// falls back to its preset (never throws).
+export function resolveCustomDayWindow(
+  startDate: string,
+  endDate: string,
+): { start: number; end: number } | null {
+  const start = localMidnightMs(startDate);
+  const endMidnight = localMidnightMs(endDate);
+  if (start === null || endMidnight === null || start > endMidnight) return null;
+  // End-of-day exclusive: midnight of the day AFTER endDate (DST-correct via setDate,
+  // not a flat +DAY_MS).
+  const endDay = new Date(endMidnight);
+  endDay.setDate(endDay.getDate() + 1);
+  return { start, end: endDay.getTime() };
+}
+
+// Trend bucket granularity for a resolved window: hourly for short spans, daily for
+// longer ones — so the x-axis stays legible at every range.
+export function bucketForWindow(start: number, end: number): 'hour' | 'day' {
+  return end - start <= HOURLY_MAX_SPAN_MS ? 'hour' : 'day';
 }
 
 // The viewer's UTC offset in EAST-POSITIVE minutes (UTC+8 → +480), the form the

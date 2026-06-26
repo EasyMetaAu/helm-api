@@ -1,5 +1,6 @@
 <script lang="ts">
   import { AreaChart, PieChart, Tooltip } from 'layerchart';
+  import { untrack } from 'svelte';
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
@@ -32,6 +33,10 @@
     data: {
       items: RequestListItem[];
       range: RangeKey;
+      // Active custom calendar-day window (YYYY-MM-DD). Present only when a valid
+      // start/end pair is in the URL — it overrides `range`.
+      startDate?: string;
+      endDate?: string;
       bucket: TrendBucket;
       stats: Stats;
       agg: DashboardStats;
@@ -131,16 +136,45 @@
   const HOME_DEFAULT_RANGE: RangeKey = 'today';
 
   function selectRange(next: RangeKey): void {
+    // A fresh querystring (no start/end) — picking a preset clears any custom range.
     const search = next === HOME_DEFAULT_RANGE ? '' : `range=${next}`;
     void goto(search ? `?${search}` : '?', { keepFocus: true, noScroll: true });
   }
 
+  // Custom calendar-day window (From/To inputs). The active window lives in the URL
+  // (?start=&end=) and OVERRIDES the preset; these inputs mirror it, re-synced on
+  // navigation so a shared link / back button repopulates them.
+  let customStart = $state(untrack(() => data.startDate) ?? '');
+  let customEnd = $state(untrack(() => data.endDate) ?? '');
+  $effect(() => {
+    customStart = data.startDate ?? '';
+    customEnd = data.endDate ?? '';
+  });
+  const customActive = $derived(Boolean(data.startDate && data.endDate));
+
+  // Apply the custom day range (only when both ends are set); the loader re-reads
+  // ?start=&end= and a valid range wins over the preset. Resets to the clean URL.
+  function applyCustom(): void {
+    if (!customStart || !customEnd) return;
+    const qs = new URLSearchParams({ start: customStart, end: customEnd });
+    void goto(`?${qs}`, { keepFocus: true, noScroll: true });
+  }
+  // Drop the custom range and fall back to the default window.
+  function clearCustom(): void {
+    void goto('?', { keepFocus: true, noScroll: true });
+  }
+
   // Carry the active window into the full request list so "View all" opens in the
   // same range. Built with the list's own serializer so it matches exactly what the
-  // list treats as "clean" (the list defaults to 24h, so 24h → no query, all →
-  // ?range=all).
+  // list treats as "clean" — a custom range serializes to ?start=&end= (custom wins).
   const viewAllHref = $derived.by(() => {
-    const qs = filtersToSearch({ range: data.range, page: 1, pageSize: DEFAULT_PAGE_SIZE });
+    const qs = filtersToSearch({
+      range: data.range,
+      startDate: data.startDate,
+      endDate: data.endDate,
+      page: 1,
+      pageSize: DEFAULT_PAGE_SIZE,
+    });
     return `${base}/requests${qs ? `?${qs}` : ''}`;
   });
 
@@ -219,10 +253,43 @@
     </p>
   </header>
 
-  <!-- Date-range filter: scopes the stat cards + recent-request preview to a
-       rolling window. Selecting a preset re-runs the loader via the URL. -->
-  <div class="mb-5">
-    <RangeFilter value={data.range} onChange={selectRange} />
+  <!-- Date-range filter: scopes the stat cards + recent-request preview to a window.
+       A preset (RangeFilter) OR a custom From/To day range — the active control
+       re-runs the loader via the URL; a valid custom range dims + overrides the
+       presets. -->
+  <div class="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+    <div class:opacity-50={customActive}>
+      <RangeFilter value={data.range} onChange={selectRange} />
+    </div>
+    <div class="flex flex-wrap items-end gap-2">
+      <label class="flex flex-col text-xs text-slate-500">
+        {$t('From')}
+        <input
+          type="date"
+          class="input mt-0.5"
+          bind:value={customStart}
+          max={customEnd || undefined}
+        />
+      </label>
+      <label class="flex flex-col text-xs text-slate-500">
+        {$t('To')}
+        <input
+          type="date"
+          class="input mt-0.5"
+          bind:value={customEnd}
+          min={customStart || undefined}
+        />
+      </label>
+      <button
+        type="button"
+        class="btn-secondary"
+        disabled={!customStart || !customEnd}
+        onclick={applyCustom}>{$t('Apply')}</button
+      >
+      {#if customActive}
+        <button type="button" class="btn-secondary" onclick={clearCustom}>{$t('Clear')}</button>
+      {/if}
+    </div>
   </div>
 
   <!-- Day-over-day delta, shown under a volume card on the TODAY view: today-so-far

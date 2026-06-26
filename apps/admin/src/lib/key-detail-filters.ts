@@ -7,14 +7,20 @@
 // framework, no Date.now in the resolvers) so the window math + parse/serialize
 // round-trip are unit-testable.
 
-import { RANGE_KEYS, type RangeKey, resolveWindow } from './requests-filters.js';
+import {
+  isValidDateParam,
+  RANGE_KEYS,
+  type RangeKey,
+  resolveCustomDayWindow,
+  resolveWindow,
+} from './requests-filters.js';
+
+// The preset↔custom window math now lives in requests-filters (shared with the
+// dashboard + request list). Re-exported here so this module stays the one import
+// for the key-detail page's filter API.
+export { bucketForWindow } from './requests-filters.js';
 
 export const KEY_DETAIL_DEFAULT_RANGE: RangeKey = 'today';
-
-const DAY_MS = 86_400_000;
-// A 2-day window or shorter reads better hour-bucketed; longer → day buckets.
-const HOURLY_MAX_SPAN_MS = 2 * DAY_MS;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface KeyDetailFilters {
   range: RangeKey; // preset; ignored while a valid custom range is set
@@ -27,32 +33,10 @@ function isRange(v: string | null): v is RangeKey {
   return v !== null && (RANGE_KEYS as readonly string[]).includes(v);
 }
 
-// Local-midnight epoch ms for a 'YYYY-MM-DD' (parsed in the viewer's zone, like
-// the rest of the admin). Returns null when the shape is wrong OR the value is not
-// a real calendar day — including rollover junk like 2026-06-31 / 2026-13-99 (the
-// parsed Y-M-D must match the input, so an out-of-range component is rejected, not
-// silently rolled into the next month).
-function localMidnightMs(date: string): number | null {
-  if (!DATE_RE.test(date)) return null;
-  const d = new Date(`${date}T00:00:00`);
-  if (Number.isNaN(d.getTime())) return null;
-  const [y, m, day] = date.split('-').map(Number);
-  if (d.getFullYear() !== y || d.getMonth() + 1 !== m || d.getDate() !== day) return null;
-  return d.getTime();
-}
-
-// A querystring date is kept only if it is a REAL calendar day (not just digits).
-function validDate(date: string | undefined): date is string {
-  return date !== undefined && localMidnightMs(date) !== null;
-}
-
-// A custom range is active only when BOTH dates are valid AND start ≤ end. An
+// A custom range is active only when BOTH dates form a valid, ordered window. An
 // inverted / half-filled range falls back to the preset (never throws).
 export function hasCustomRange(f: KeyDetailFilters): boolean {
-  if (!f.startDate || !f.endDate) return false;
-  const s = localMidnightMs(f.startDate);
-  const e = localMidnightMs(f.endDate);
-  return s !== null && e !== null && s <= e;
+  return Boolean(f.startDate && f.endDate && resolveCustomDayWindow(f.startDate, f.endDate));
 }
 
 export function parseKeyDetailFilters(sp: URLSearchParams): KeyDetailFilters {
@@ -62,8 +46,8 @@ export function parseKeyDetailFilters(sp: URLSearchParams): KeyDetailFilters {
   const pageRaw = Number(sp.get('page'));
   return {
     range: isRange(rangeRaw) ? rangeRaw : KEY_DETAIL_DEFAULT_RANGE,
-    startDate: validDate(startDate) ? startDate : undefined,
-    endDate: validDate(endDate) ? endDate : undefined,
+    startDate: isValidDateParam(startDate) ? startDate : undefined,
+    endDate: isValidDateParam(endDate) ? endDate : undefined,
     page: Number.isInteger(pageRaw) && pageRaw > 1 ? pageRaw : 1,
   };
 }
@@ -91,23 +75,13 @@ export function resolveKeyDetailWindow(
   f: KeyDetailFilters,
   nowMs: number,
 ): { start: number; end: number } {
-  if (hasCustomRange(f)) {
-    const start = localMidnightMs(f.startDate as string) as number;
-    // End-of-day exclusive: midnight of the day AFTER endDate (DST-correct via
-    // setDate, not a flat +DAY_MS).
-    const endDay = new Date(`${f.endDate}T00:00:00`);
-    endDay.setDate(endDay.getDate() + 1);
-    return { start, end: endDay.getTime() };
+  if (f.startDate && f.endDate) {
+    const custom = resolveCustomDayWindow(f.startDate, f.endDate);
+    if (custom) return custom;
   }
   if (f.range === 'all') return { start: 0, end: nowMs };
   const w = resolveWindow(f.range, nowMs);
   // Honor a CLOSED preset end (yesterday) so it doesn't bleed into today; the
   // rolling/today presets leave end open → now.
   return { start: w.start ?? 0, end: w.end ?? nowMs };
-}
-
-// Trend bucket granularity for a resolved window: hourly for short spans, daily
-// for longer ones — so the x-axis stays legible at every range.
-export function bucketForWindow(start: number, end: number): 'hour' | 'day' {
-  return end - start <= HOURLY_MAX_SPAN_MS ? 'hour' : 'day';
 }

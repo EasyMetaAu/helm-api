@@ -1,5 +1,5 @@
 import { listRequests } from '$lib/api/requests.js';
-import { parseFilters, resolveWindow } from '$lib/requests-filters.js';
+import { parseFilters, resolveCustomDayWindow, resolveWindow } from '$lib/requests-filters.js';
 import type { PageLoad } from './$types.js';
 
 // SPA load: read the filter + page state from the URL, resolve the date-range
@@ -9,7 +9,14 @@ import type { PageLoad } from './$types.js';
 // the UI renders the recorded trail and recomputes nothing (docs/07).
 export const load: PageLoad = async ({ url }) => {
   const filters = parseFilters(url.searchParams);
-  const { start, end } = resolveWindow(filters.range, Date.now());
+  const now = Date.now();
+  // A valid custom day range (start/end) OVERRIDES the preset for the fetch window;
+  // a half-filled / inverted range falls back to it.
+  const custom =
+    filters.startDate && filters.endDate
+      ? resolveCustomDayWindow(filters.startDate, filters.endDate)
+      : null;
+  const { start, end } = custom ?? resolveWindow(filters.range, now);
   const page = await listRequests({
     page: filters.page,
     pageSize: filters.pageSize,

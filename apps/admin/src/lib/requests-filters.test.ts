@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  bucketForWindow,
   clientTzOffsetMinutes,
   DEFAULT_FILTERS,
   filtersToSearch,
+  localMidnightMs,
   parseFilters,
   parseRange,
+  resolveCustomDayWindow,
   resolveWindow,
 } from './requests-filters.js';
 
@@ -77,6 +80,98 @@ describe('filtersToSearch', () => {
       pageSize: 200,
     } as const;
     expect(parseFilters(new URLSearchParams(filtersToSearch(f)))).toEqual(f);
+  });
+});
+
+describe('custom calendar-day range', () => {
+  it('parses valid start/end date params', () => {
+    const f = parseFilters(new URLSearchParams('start=2026-06-01&end=2026-06-03'));
+    expect(f.startDate).toBe('2026-06-01');
+    expect(f.endDate).toBe('2026-06-03');
+  });
+
+  it('drops malformed / non-real date params', () => {
+    const f = parseFilters(new URLSearchParams('start=2026-06-31&end=nope'));
+    expect(f.startDate).toBeUndefined();
+    expect(f.endDate).toBeUndefined();
+  });
+
+  it('serializes a custom range and drops the preset (custom wins)', () => {
+    expect(
+      filtersToSearch({
+        range: '7d',
+        startDate: '2026-06-01',
+        endDate: '2026-06-03',
+        page: 1,
+        pageSize: 50,
+      }),
+    ).toBe('start=2026-06-01&end=2026-06-03');
+  });
+
+  it('ignores a half-filled / inverted custom range (keeps the preset)', () => {
+    expect(filtersToSearch({ range: '7d', startDate: '2026-06-01', page: 1, pageSize: 50 })).toBe(
+      'range=7d',
+    );
+    expect(
+      filtersToSearch({
+        range: '7d',
+        startDate: '2026-06-03',
+        endDate: '2026-06-01',
+        page: 1,
+        pageSize: 50,
+      }),
+    ).toBe('range=7d');
+  });
+
+  it('round-trips a custom range (page preserved)', () => {
+    const f = {
+      range: 'today',
+      startDate: '2026-06-01',
+      endDate: '2026-06-03',
+      page: 2,
+      pageSize: 50,
+    } as const;
+    expect(parseFilters(new URLSearchParams(filtersToSearch(f)))).toEqual(f);
+  });
+});
+
+describe('localMidnightMs', () => {
+  it('parses a real calendar day to local midnight', () => {
+    expect(localMidnightMs('2026-06-01')).toBe(new Date('2026-06-01T00:00:00').getTime());
+  });
+
+  it('rejects malformed shapes and rollover junk (never throws)', () => {
+    expect(localMidnightMs('2026-6-1')).toBeNull();
+    expect(localMidnightMs('2026-06-31')).toBeNull(); // June has 30 days
+    expect(localMidnightMs('2026-13-01')).toBeNull();
+    expect(localMidnightMs('nope')).toBeNull();
+  });
+});
+
+describe('resolveCustomDayWindow', () => {
+  it('spans midnight(start) .. midnight(end)+1day so the end day is included', () => {
+    const start = new Date('2026-06-01T00:00:00').getTime();
+    const end = new Date('2026-06-04T00:00:00').getTime(); // 06-03 inclusive
+    expect(resolveCustomDayWindow('2026-06-01', '2026-06-03')).toEqual({ start, end });
+  });
+
+  it('a single day resolves to exactly that local day', () => {
+    const start = new Date('2026-06-01T00:00:00').getTime();
+    const end = new Date('2026-06-02T00:00:00').getTime();
+    expect(resolveCustomDayWindow('2026-06-01', '2026-06-01')).toEqual({ start, end });
+  });
+
+  it('null on an inverted or invalid range', () => {
+    expect(resolveCustomDayWindow('2026-06-03', '2026-06-01')).toBeNull();
+    expect(resolveCustomDayWindow('2026-06-01', 'nope')).toBeNull();
+  });
+});
+
+describe('bucketForWindow', () => {
+  it('is hourly for spans ≤ 2 days, daily beyond', () => {
+    const day = 86_400_000;
+    expect(bucketForWindow(0, 2 * day)).toBe('hour');
+    expect(bucketForWindow(0, 2 * day + 1)).toBe('day');
   });
 });
 
