@@ -5,6 +5,14 @@ import { z } from "zod";
 const MEMORY_SUMMARY_MAX_CHARS = 2000;
 const MEMORY_REFLECTION_MAX_CHARS = 4000;
 
+// Coverage tombstone for a compaction slice that holds NO user-authored content (a
+// pure tool/assistant agent round-trip). Memory observes user content only, but the
+// store requires observationText.min(1) AND the slice must still be marked covered so
+// compaction can't poison-block on it — so we emit this fixed marker and skip it in
+// fact extraction (it carries no durable fact). Exported so the extractor + tests
+// share one definition.
+export const OBSERVATION_EMPTY_SENTINEL = "[no user content]";
+
 const ObservationOutputSchema = z.object({
   observation_text: z.string().trim().min(1),
   // Matches runObserverJob's priority/10 salience derivation.
@@ -80,8 +88,16 @@ function truncate(text: string, max: number): string {
 }
 
 export function summarizeMessagesDeterministic(messages: readonly RawMessage[]): string {
-  const body = messages.map((m) => `${m.role}: ${m.content}`).join("\n");
-  return truncate(body || "(no messages)", MEMORY_SUMMARY_MAX_CHARS);
+  // Memory captures USER-authored content only (mirrors observer.ts's eager fact
+  // path). Drop assistant chatter and tool/file output: on this deterministic
+  // fallback they would otherwise be dumped VERBATIM ("tool: (Bash completed with no
+  // output)") and slugged straight into a junk fact. No role prefix — the body is the
+  // user's own words.
+  const body = messages
+    .filter((m) => m.role === "user")
+    .map((m) => m.content)
+    .join("\n");
+  return body.length > 0 ? truncate(body, MEMORY_SUMMARY_MAX_CHARS) : OBSERVATION_EMPTY_SENTINEL;
 }
 
 export function mergeObservationsDeterministic(
@@ -96,7 +112,7 @@ export function extractFactsDeterministic(observations: readonly Observation[]):
   const facts: ExtractedFact[] = [];
   for (const o of observations) {
     const text = o.observationText.trim();
-    if (text.length === 0 || text === "[pruned]") continue;
+    if (text.length === 0 || text === "[pruned]" || text === OBSERVATION_EMPTY_SENTINEL) continue;
     const subjectText = o.tags?.[0]?.trim() || text.split(/\s+/).slice(0, 6).join(" ") || "general";
     facts.push({
       subjectText,
@@ -350,13 +366,23 @@ function factsFromMessagesPrompt(input: { messages: RawMessage[]; now: Date }) {
 export function createMemoryLlmRuntime(deps: CreateMemoryLlmRuntimeDeps): MemoryLlmRuntime {
   return {
     summarize: async (input) => {
+      // Memory observes USER-authored content only (mirrors observer.ts's eager fact
+      // path): assistant chatter and tool/file output are not durable memory and, on
+      // the deterministic fallback, would be dumped verbatim and slugged into a junk
+      // fact. Filter here so BOTH the LLM prompt and the fallback see user turns only.
+      const userMessages = input.messages.filter((m) => m.role === "user");
+      // A slice with no user turn (a pure tool/assistant agent round-trip) carries no
+      // durable memory — emit the coverage tombstone (satisfies observationText.min(1)
+      // so the segment is still marked covered and compaction can't poison-block) and
+      // skip the model entirely; the fact extractors skip OBSERVATION_EMPTY_SENTINEL.
+      if (userMessages.length === 0) return { observationText: OBSERVATION_EMPTY_SENTINEL };
       const parsed = await callJsonModel<ObservationOutput>({
         deps,
         task: "observation",
         maxTokens: deps.config.max_tokens.observation,
-        messages: observationPrompt(input),
+        messages: observationPrompt({ messages: userMessages, now: input.now }),
         schema: ObservationOutputSchema,
-        fallback: () => ({ observation_text: summarizeMessagesDeterministic(input.messages) }),
+        fallback: () => ({ observation_text: summarizeMessagesDeterministic(userMessages) }),
       });
       const tags = cleanTags(parsed.tags);
       return {

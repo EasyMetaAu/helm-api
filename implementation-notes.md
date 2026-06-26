@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-26 · 记忆 observer 收紧为仅观察 user 内容（gateway 记忆；docs/08，原则 1/7）
+
+- **背景（Lukin，box 实查）**：la.atmy.work `memory_facts` 项目 `luke` 出现 `subject_key=tool-bash-completed-with-no-output`、`fact_text="tool: (Bash completed with no output)"` 等**工具输出原文**当事实，外加 `dev-server: ready`/`file-update: …success`/空 assistant 等瞬时噪音。Lukin 质疑：记忆不该只来自 user？
+- **根因（双重确定性兜底）**：① observer 入库 `toMemoryRole` 收 user/assistant/tool 全角色（docs/08 原始审计存储，**有意为之**，不动）。② 该轮 deepseek 观察模型失败 → 回落 `summarizeMessagesDeterministic`（`apps/gateway/src/memory-llm.ts`）逐字 `${role}: ${content}` dump，**含 tool**。③ 事实抽取也回落 `extractFactsDeterministic`：subject=前 6 词 → slug `tool-bash-completed-with-no-output`（与 box 逐字符吻合）。**eager 快路径早已只取 user（`observer.ts:40-46`），是 compaction→summarize 这条没对齐**。
+- **决定（Lukin 选「仅 user」）**：在 **summarize 唯一卡点**过滤 `role==="user"`（同时作用于 LLM `observationPrompt` 与确定性兜底），并硬化 `summarizeMessagesDeterministic`（去角色前缀、仅 user）。**不在入库层删 assistant/tool**——docs/08 要原始审计存储；只让「成为观察/事实」的内容是 user。改动**全在 `memory-llm.ts` 一个文件**，core observer/compaction 零改 → blast 半径小。
+- **边角（纯 tool/assistant 切片）**：store `observationText.min(1)` 不许空观察，但切片仍须被「covered」否则 compaction **poison-block**（`find(shouldCompact)` 卡在最旧未覆盖段）。故无 user 内容时 summarize 返回 `OBSERVATION_EMPTY_SENTINEL="[no user content]"`（满足 min(1)、推进覆盖、跳过模型），并在 `extractFactsDeterministic` skip 之（同 `[pruned]`）。代价：极罕见情况 inject 会带这条 sentinel（诚实墓碑、非 user 数据泄漏），YAGNI 不过滤。
+- **TDD+验证**：改写 2 个旧测（确定性摘要不再含 `assistant:`/`role:` 前缀）+ 新增 tool 排除、纯 tool 切片→sentinel→0 fact。gateway memory-llm 19 测、core+gateway memory **294 测全绿**，`pnpm typecheck` 四包 Done、biome 0。
+- **历史污染清理**：见任务——box 上 `tool:` 那条 + 瞬时噪音（dev-server/file-update/空 assistant/no-context/task）需删（Lukin 明确要清）；删前备份 + 预览，清 facts/FTS/observations 一致。
+
 ## 2026-06-26 · 三处请求列表统一为共享 RequestsTable 组件（admin UI；docs/07）
 
 - **背景（Lukin）**：dashboard「最近请求」与 key 详情的请求列表字段太少（各 **10 列**），要参考 `/admin/requests`（最全 **16 列**）补齐。
@@ -24,22 +33,13 @@
 - **坑/Lukin 须知**:① box 现有 key 多为显式 `lukin-personal`(共享)→ 仍共享,要隔离就在 admin 把该 key 的 project **清空**(留空即按 key 隔离,无需填 keyId)。② 显式填值 = 共享,清空 = 隔离——二选一,无暗兜底。
 - **TDD+验证**:**B 不破任何现有测试**(A 当初破了 contract)。仅 `chat.memory.test` 一处真实-auth+null-key 断言从 `project_id:null` 更新为 `"k1"`(正确新行为)。新增 `effectiveMemoryProjectId` 单测(null→key_id / 显式→该值)+ by-key 路由 null→key_id 例。schema/admin-memory/mcp-oauth/auth/chat.memory/messages/execute/server/memory-scope **全绿**(单跑合计 300+ 测),`pnpm typecheck` 四包 Done、biome 0 错。改动全在 core+gateway 接线(原则 1)。分支 `feat-memory-per-key-isolation`,**未部署**。
 
-## 2026-06-26 · 请求列表按 API key 筛选 + 详情页返回来源页（admin UI；docs/07）
-
-- **背景（Lukin）三件事**：① `/admin/requests` 筛选加按 API key；② key 详情请求列表只留最近几十条 + 「查看更多」直跳列表页并带 key 筛选；③ 详情页返回按钮丢筛选/页码、且从 key 详情进来时回错页。
-- **Feature 1（按 key 筛）**：后端**早已端到端支持** `key_id`（`RequestsQuerySchema`→`queryPage({apiKeyId})`→SQL `eq`），前端没暴露。补：① 列表行回传 `key_id`（gateway `routes/admin/requests.ts` 行映射 + `RequestListItem` **可选**字段；内部 UUID 非明文，原则 7 安全）；② `requests-filters` 加 `keyId` parse/serialize（`key_id`）；③ 列表页可清除 **chip**（label 取首行 `key_name||key_prefix` 兜底截断 id）+ **行内 key 单元格点击即筛选**（Svelte snippet `keyLabel` 复用 name/prefix 标记；`onRowClick` 守卫从 `closest('a')` 扩到 `closest('a, button')`）。
-- **决定：放弃 `api_key_id` 索引**（计划曾列为决策 #3）。纯性能优化、用户没要、key 详情早以全扫跑同查询故行为不变；且会把 v0.21.35 刚加的 lane/decided_by 索引模式牵连改 6+ 个 migrate 测试的 version-ledger。延后为聚焦 follow-up（telemetry 真涨再加一条 `CREATE INDEX idx_telemetry_api_key_id`）。
-- **Feature 2（key 详情轻量化）**：`+page.ts` 固定取 page 1（`DETAIL_PAGE_SIZE=25`），删页内 pager footer + 专属 helpers（`gotoPage`/`pageHref`/`pages`/`totalPages`）+ `paginationItems` import；表下加「查看更多 →」（`hasMore=total>items.length`），href=`/requests?key_id=<id>&range=all`（**range=all**：看该 key 全部历史，避免落进列表默认 today 空窗）。
-- **Feature 3（返回体验）**：死链 `<a href=/requests>` 既丢筛选又只认列表。改 **`from` 参数**：两来源页 `detailHref` 追加 `?from=<encode(当前 path+search)>`（列表用 `filtersToSearch(data.filters)`、key 详情用 `keyDetailFiltersToSearch`）；详情 loader `safeBackTo` 校验同源相对路径（首字符 `/` 且次字符非 `/`、非 `\`，防开放重定向）→ `backTo`，非法/缺省兜底 `/requests`；返回链 `<a href={backTo}>`。比 `history.back()` 稳（抗刷新/新标签/可分享、真 `<a>`），且能区分「从列表来」vs「从 key 详情来」。
-- **坑**：行 id 链现带 `?from=`，gateway e2e `admin.spec.ts` 的 `a[href$="/requests/<id>"]`（ends-with）失配 → 改 `href*=`（contains）。请求列表 pager（含 e2e :144 的 `pager-status`/`pager-next`）原样保留、不受影响。
-- **TDD+验证**：`requests-filters`（+keyId round-trip）、`requests.test`（chip/点击筛选/detailHref 带 from/back link/`safeBackTo` 开放重定向守卫）、`key-detail.test`（view-all 链接替换旧多页 pager 断言）、gateway `admin.test`（行 `key_id`）。**admin 488 单测 + 6 admin e2e + gateway admin 69 测全绿；typecheck/lint/svelte-check 0**。i18n 三键五语（translate relay 离线→手填 zh-hans/zh-hant/ja/ko）。改动全在 `apps/admin` + 1 处 gateway route（原则 1）。分支 `worktree-feat+requests-key-filter-and-back-nav`，**未提交未部署**。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-26 · 请求列表按 API key 筛选 + 详情页返回来源页（admin UI；docs/07）**：后端早支持 `key_id`（前端没暴露）→ 列表行回传 `key_id`（可选字段）+ `requests-filters` 加 keyId parse/serialize + 可清除 chip + 行内 key 点击即筛选（`onRowClick` 守卫扩到 `closest('a, button')`）。key 详情固定取 page 1（删页内 pager）+「查看更多」跳 `/requests?key_id=<id>&range=all`。详情返回改 `?from=<encode(path+search)>`，loader `safeBackTo` 防开放重定向（首 `/` 次非 `/`/`\`）。**放弃 `api_key_id` 索引**（纯性能、会牵连 6+ migrate 测试 version-ledger，延后）。坑：行 id 链带 `?from=` → e2e `a[href$=]` 改 `href*=`。admin 488 单测+6 e2e+gateway 69 绿。已并入 v0.22.1 部署。
 - **2026-06-26 · 仪表板+请求列表加自定义日期范围（admin UI；docs/04）**：把 key 详情早有的「预设 或 自定义日期」窗口原语下沉到共享 `requests-filters.ts`（localMidnightMs/isValidDateParam/resolveCustomDayWindow/bucketForWindow），三页同源（key-detail-filters 改消费它、重导出 bucketForWindow 保 import/测试不变）。不动共享 `RangeFilter`（零 e2e testid 风险），自定义 From/To 用原生 `<input type=date>`，窗口走 URL `?start=&end=` **custom 胜 preset**、半填/反序/非法 fail-soft 回落；自定义模式无同比 delta；后端零改动、i18n 零成本。requests-filters.test +18 例，admin 481 测绿、svelte-check 929/0/0。分支 `worktree-dashboard-date-range`，**未部署**。
 - **2026-06-26 · payload 体积治理：图片 CAS 外置 + gzip + 写队列字节背压 + 分页生成列（存储层；原则 7，docs/02）**：线上 helm.db 14GB 根因=native passthrough 把 CC 每轮重发的 base64 图+大 transcript 逐字落 `request_payloads`。治理:① 图片 CAS——`payload-blobs.ts` 按 sha256(字节) 外置到 `payload_blobs`、正文留 `helm-blob:` sentinel、INSERT OR IGNORE 跨轮去重(10–30×),`getPayload` 读时 rehydrate(UI/replay 零改动);blob 续命=`ON CONFLICT DO UPDATE created_at`、prune 同 cutoff(不变式 blob.created_at≥payload)。② gzip 仅 SQLite(PG 靠 TOAST)。③ 写队列背压改按字节 maxBytes=256MB+inFlightBytes 防 stalled-writer OOM、溢出优先丢 payload 保 telemetry。④ telemetry lane/decided_by 生成列(SQLite VIRTUAL/PG STORED)+索引。迁移 SQLite v29/v30、PG v28/v29。Codex 修 3 处(in-flight 字节漏算致命/Responses input_image 漏剥/rehydrate fail-open)。4670 单测绿。分支 `worktree-payload-cas-gzip-perf`。**运维 TODO**：部署后等 3 天保留期清旧胖行→手动「Compact database」VACUUM 收回 14GB→开回 auto-vacuum。
 - **2026-06-26 · 仪表板「昨天」视图加同比（admin UI；docs/04）**：复用 today-delta 机制，基准窗按视图分流——`dashboard-chart.ts` 加 `resolveYesterdayComparisonWindow`（前天整日 `[前天0点,昨天0点)`），compare 门 `today`→放宽 `today|yesterday`；昨天视图用 `vs day before yesterday`/`Day before yesterday:{value}` 五语两键纳入 `dashboard-locales` 守卫，`MIN_COMPARISON_BASELINE_REQUESTS=10` 不变。发 v0.21.33 并部署。
