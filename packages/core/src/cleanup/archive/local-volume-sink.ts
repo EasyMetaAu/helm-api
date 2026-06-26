@@ -3,13 +3,29 @@ import { once } from "node:events";
 import { createWriteStream } from "node:fs";
 import { mkdir, open, rename, rm, rmdir, stat, statfs, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { Writable } from "node:stream";
 import { createGzip } from "node:zlib";
+
 import {
   ArchiveDiskFullError,
   type ArchivedTableResult,
   type ArchiveManifest,
   type ArchiveSink,
 } from "./types.js";
+
+// Destroy a stream and AWAIT its 'close' so the underlying file handle is released
+// before we touch the filesystem. destroy() is async — without awaiting close, a
+// still-in-flight createWriteStream open() can land AFTER we rm the temp file,
+// recreating it, so the non-recursive rmdir then finds a non-empty dir and orphans
+// an empty <runId>/ folder (the flaky-under-load failure). Idempotent: a stream
+// already destroyed resolves immediately.
+async function closeStream(s: Writable | undefined): Promise<void> {
+  if (!s || s.destroyed) return;
+  await new Promise<void>((resolve) => {
+    s.once("close", () => resolve());
+    s.destroy();
+  });
+}
 
 export interface LocalVolumeSinkOptions {
   // Refuse to start a table archive when the volume's free space is below this many
@@ -77,13 +93,15 @@ export class LocalVolumeSink implements ArchiveSink {
       }
       await rename(tmpPath, finalPath);
     } catch (err) {
-      // Leave NO residue: drop the temp file, AND remove the run dir if THIS failure
-      // left it empty — a non-recursive rmdir only deletes an empty dir, so a sibling
-      // table's already-archived .gz keeps it. Without this, every failed/aborted
-      // archive (the gzip-choke incident) orphaned an empty <runId>/ folder. Re-throw
-      // so the runner skips the delete for this table (rows survive).
-      gz?.destroy();
-      out?.destroy();
+      // Leave NO residue. FIRST fully close the streams (await — destroy() is async;
+      // an in-flight open/write can otherwise recreate the .tmp after we delete it).
+      // THEN drop the temp file, AND remove the run dir if THIS failure left it empty
+      // — a non-recursive rmdir only deletes an empty dir, so a sibling table's
+      // already-archived .gz keeps it. Without the await, the open raced the rm and
+      // orphaned an empty <runId>/ folder under load. Re-throw so the runner skips the
+      // delete for this table (rows survive).
+      await closeStream(gz);
+      await closeStream(out);
       await rm(tmpPath, { force: true }).catch(() => {});
       await rmdir(dir).catch(() => {});
       throw err;

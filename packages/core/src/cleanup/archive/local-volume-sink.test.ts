@@ -69,6 +69,26 @@ describe("LocalVolumeSink", () => {
     expect(entries).toEqual([]);
   });
 
+  it("never orphans a run dir across repeated mid-stream failures (close-before-rm race guard)", async () => {
+    // The cleanup destroys the write stream then rm's the temp file + rmdir's the run
+    // dir. If destroy() isn't awaited, an in-flight open() can recreate the .tmp after
+    // the rm, so rmdir finds a non-empty dir → orphan folder (flaky under load). Run
+    // many failed archives; with the fix EVERY one cleans up after itself.
+    base = join(tmpdir(), `helm-archive-${randomUUID()}`);
+    const sink = new LocalVolumeSink(base);
+    async function* boom(): AsyncIterable<unknown> {
+      yield { id: "a" };
+      throw new Error("stream blew up");
+    }
+    for (let i = 0; i < 30; i++) {
+      await expect(sink.archiveTable(`run${i}`, "telemetry", boom())).rejects.toThrow(
+        "stream blew up",
+      );
+    }
+    const entries = await readdir(base).catch(() => []);
+    expect(entries).toEqual([]); // no orphan run dirs from any iteration
+  });
+
   it("removes the run dir when the pre-flight space check fails (no orphan folder)", async () => {
     base = join(tmpdir(), `helm-archive-${randomUUID()}`);
     const sink = new LocalVolumeSink(base, { minFreeBytes: Number.MAX_SAFE_INTEGER });
