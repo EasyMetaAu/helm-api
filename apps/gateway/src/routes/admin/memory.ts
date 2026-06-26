@@ -1,5 +1,6 @@
 import { MemoryFactContentHashConflictError } from "@helm/core";
 import {
+  effectiveMemoryProjectId,
   MemoryFactPatchSchema,
   MemoryReflectionPatchSchema,
   type MemoryStatus,
@@ -73,8 +74,11 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
   });
 
   // GET /memory/by-key/:keyId — resolve a key to its memory scope (account +
-  // default project) for the "By Key" tab. Admin surface is already privileged,
-  // so exposing the account here is fine. 404 on unknown key.
+  // EFFECTIVE project) for the "By Key" tab. The effective project mirrors the
+  // request path: an explicit memory_project_id (shared pool) else the key's own
+  // id (isolated by key), so this view lists exactly the facts that key reaches.
+  // Admin surface is already privileged, so exposing the account here is fine.
+  // 404 on unknown key.
   app.get("/admin/api/memory/by-key/:keyId", async (c) => {
     const keyId = c.req.param("keyId");
     const key = (await deps.keyStore.list()).find((r) => r.key_id === keyId);
@@ -82,7 +86,7 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     return c.json({
       key_id: key.key_id,
       accountId: key.account_id,
-      projectId: key.memory_project_id,
+      projectId: effectiveMemoryProjectId(key),
     });
   });
 

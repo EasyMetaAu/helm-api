@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-26 · 记忆按 API key 隔离：用时回落 project_id ??= key_id（存储层；docs/08 + 原则 1/7）
+
+- **背景（Lukin）**：admin「记忆 · 按密钥」选某 key 仍列出全部事实。实为**记忆作用域是 account+project,不是单 key**:`account_id` 恒为常量 `"default"`(单租户),真正区分靠 `project_id`,缺省则 thread-locked(换会话即丢,见 [[memory-cross-session-needs-project-scope]])。需求:**默认按 API key 隔离**——key A 的记忆永不进 key B,同 key 跨会话仍记得。
+- **拍板模型(Lukin 提出,采纳)**：**填 `memory_project_id` = 按该 project 共享(跨 key);留空(null) = 用时回落到 key 自身 id = 按 key 隔离**。`account_id` 不删——它是 `owner_id` 租户边界(502 处引用/31 个 store WHERE 守卫/18 列),与 project(池选择器、用户可调)是两根轴;删它换零运行时收益却拔掉多租户接缝、还让可改字段变安全边界。
+- **决定:用时回落(Approach B),不在 createKey 烤值、不回填迁移**。先试过 A(createKey 默认 `?? keyId` + 迁移把列写成 keyId),但那样**列空=thread-locked 而非隔离**,且清空不会隔离、列里全是噪声 id。改 B:列保持 null,在**读取处**算「有效 project」。新增纯 helper `effectiveMemoryProjectId(rec)=memory_project_id ?? key_id`(`packages/shared/src/key/schema.ts`),在 **6 处** per-key 默认构造点调用:`auth.ts`(主 /v1)、`server.ts`×3(native passthrough deps)、`mcp/oauth.ts`(签 token 的 pid)、`admin/memory.ts` by-key 路由。`resolveMemoryScope` **零改动**(读 `defaults.projectId`,已是有效值);Anthropic/Responses 的 `memoryScopeFromMeta` 也零改动(`ir.metadata.project_id` 由 resolveMemoryScope 的有效值写入)。MCP 全链:index.ts 读 auth 的 effective、token 60s 短寿无陈旧。
+- **好处**:无迁移、对存量 key 立即生效、清空即隔离、列保持空(干净)、admin by-key 与实际 recall 一致(都走 helper)。`observer.ts:65`/`inject.ts:213` 的 broad-scope gate 看的是**解析后** scope(projectId=keyId,非空)→ 跨会话长记忆照常点亮。
+- **坑/Lukin 须知**:① box 现有 key 多为显式 `lukin-personal`(共享)→ 仍共享,要隔离就在 admin 把该 key 的 project **清空**(留空即按 key 隔离,无需填 keyId)。② 显式填值 = 共享,清空 = 隔离——二选一,无暗兜底。
+- **TDD+验证**:**B 不破任何现有测试**(A 当初破了 contract)。仅 `chat.memory.test` 一处真实-auth+null-key 断言从 `project_id:null` 更新为 `"k1"`(正确新行为)。新增 `effectiveMemoryProjectId` 单测(null→key_id / 显式→该值)+ by-key 路由 null→key_id 例。schema/admin-memory/mcp-oauth/auth/chat.memory/messages/execute/server/memory-scope **全绿**(单跑合计 300+ 测),`pnpm typecheck` 四包 Done、biome 0 错。改动全在 core+gateway 接线(原则 1)。分支 `feat-memory-per-key-isolation`,**未部署**。
+
 ## 2026-06-26 · 请求列表按 API key 筛选 + 详情页返回来源页（admin UI；docs/07）
 
 - **背景（Lukin）三件事**：① `/admin/requests` 筛选加按 API key；② key 详情请求列表只留最近几十条 + 「查看更多」直跳列表页并带 key 筛选；③ 详情页返回按钮丢筛选/页码、且从 key 详情进来时回错页。
@@ -24,25 +33,13 @@
 - **UX**：**不动共享 `RangeFilter` 组件**（零 e2e testid 风险）——自定义 From/To 用原生 `<input type="date">` 摆控件旁（仿 key 详情），有效区间时预设 `opacity-50` 变灰并被覆盖。窗口走 URL `?start=YYYY-MM-DD&end=YYYY-MM-DD`，**custom 胜过 preset**；半填/反序/非法日期 fail-soft 回落预设。`end` = endDate 次日 0 点（含尾日，DST 用 `setDate`）。
 - **关键点**：① 自定义模式无同比 delta（门 `!custom && today|yesterday`）、bucket 按实际跨度 `bucketForWindow`（≤2 天 hour 否则 day）。② **后端零改动**（getStats/listRequests 早收任意 epoch ms）。③ **i18n 零成本**（From/To/Apply/Clear 五语已被 key 详情用过）。④「查看全部」用 `filtersToSearch` 串 start/end 忠实带窗口跳转。
 - **TDD+验证**：`requests-filters.test` +18 例（4 个新原语 + parse/serialize round-trip + custom 胜出 + 半填回落）；`key-detail-filters.test` 8 例重构后不变绿。**admin 481 单测全绿、svelte-check 929/0/0、prettier 干净**。全在 `apps/admin`（原则 1）。分支 `worktree-dashboard-date-range`，**未提交未部署**。
-## 2026-06-26 · payload 体积治理：图片内容寻址外置 + gzip + 写队列字节背压 + 分页生成列（存储层性能；原则 7，docs/02）
-
-- **背景（Lukin）**：线上 helm.db **14GB**，实测 `freelist=0`（全 live 数据，非死页膨胀）、`request_payloads` 8090 行 ≈ 13.8GB、大量行 **6–7MB**——根因是 native passthrough 把 Claude Code 每轮重发的完整正文（base64 图 + 大 transcript）逐字落库，`insertPayload` 无上限/压缩/去重。三专家（SRE/DB/交付）评估：先写队列防 OOM(B) + 图片瘦身(A)；分页(P2)最低优先（telemetry 仅 3 万行、不在热路径）。
-- **图片 CAS（治本核心）**：新增 `store/payload-blobs.ts` 纯变换 `externalizeImages`/`rehydrateImages`——按 **sha256(解码字节)** 把 base64 图外置到新表 `payload_blobs`，正文留 `helm-blob:sha256:…` sentinel。识别 Anthropic `image.source` / OpenAI `image_url` data-URL / Gemini `inlineData` 三种 shape，>4KB 才剥。**CC 每轮重发同图 → INSERT OR IGNORE 按 sha 去重只存一份**（跨 request+upstream 列、跨行、跨轮全合一），是 10–30× 的来源。
-- **Lukin 硬约束：查看 + 重试不能坏** → `getPayload` 读时 rehydrate 还原原图。实测 admin 详情（`requests.ts:98`）与重放（`replay.ts` 用前端从 getPayload 拿到再 POST 回的体）**都走 getPayload**，故还原放在 getPayload 一处即同时满足两者，**UI/replay 零改动**。
-- **blob 保留（无引用计数表）**：写入时 sha 命中则 `ON CONFLICT DO UPDATE created_at`（在用图每轮"续命"）；prune 用与 payload **同一 cutoff** 删 blob。不变式：blob.created_at ≥ 每个引用它的 payload.created_at → 存活 payload 永不指向已删 blob（payload-cas.test 覆盖续命存活 + 孤儿回收两面）。
-- **gzip（P1-a，仅 SQLite）**：图外置后剩余文本 gzip 存 BLOB，`payload-codec.ts` 按 gzip 魔数/值类型判编码——**老明文 TEXT 行照读，新 gzip BLOB 行 gunzip**，零迁移向后兼容。**Postgres 不 gzip**（TOAST 自动压缩大 text，手动 gzip 反抵消）——有意的适配器差异。payload 列存 gzip Buffer 走原始 better-sqlite3 prepared 语句（绕开 Drizzle text 列对二进制的强转）。
-- **写队列字节背压（B，防 OOM）**：`write-queue.ts` 背压从按行（`maxDepth=10000` 行）改按字节（`maxBytes=256MB`，行数保留兜底），O(1) 维护（入队算一次字节、shed/flush 增减，不重算）；溢出**优先丢 payload 保 telemetry**；`flushBytes` 字节阈值也触发提前 flush 防 256×7MB 巨事务。根治"VACUUM 写停摆 → 行背压对 7MB 行失效 → 70GB 堆 OOM"。
-- **分页生成列（P2）**：telemetry 加 `lane`/`decided_by` 生成列 + 索引（SQLite **VIRTUAL** 无存储写放大、PG **STORED**），`pageWhere` 改用列消除 json_extract 全扫；**`model` 留 json_extract**（LIKE-contains 无法走索引，加索引无益）。**坑**：加 telemetry 列的迁移会让"部分建表"迁移 fixture（无 telemetry 表）的 ALTER 失败 → 在 `sqlite/schema.test.ts`(2 处) + `postgres/migrate.test.ts`(2 处) 的 applied-version 数组预标记新版本号（既有同模式）。
-- **迁移**：SQLite **v29**(payload_blobs)+**v30**(生成列)；Postgres **v28**(payload_blobs，bytea via customType)+**v29**(生成列)。Store 端口/类型不变；core 共享纯模块（payload-blobs/codec），两适配器各自持久化。
-- **TDD+验证**：新增 payload-blobs(12)/payload-codec(5)/sqlite payload-cas(4)/postgres payload-cas(5)/write-queue(+5) 测试；contract 既有 lane/decided_by 过滤用例双适配器覆盖生成列。**305 文件/4670 单测全绿**，typecheck+lint 干净。分支 `worktree-payload-cas-gzip-perf`。
-- **Codex review 三处修复**：① **写队列 in-flight 字节漏算**(P1，致命)——`doFlush` 把批次交给 writeChain 后 `bufferedBytes` 清零,写入卡住时反复 flush 会把无界批次堆在闭包里、字节上限测不到 → 加 `inFlightBytes`(flush 时计入、commit settle 时释放),`overBudget` 计 buffered+in-flight+incoming,**stalled writer 现在会触发 shed/拒绝**(原本根本没防住 OOM)。② **OpenAI Responses `input_image` 漏剥**(P2)——`image_url` 是字符串(非嵌套 `{url}`),externalize 只认 Chat 的嵌套形 → codex 的图没外置;改为同时认 `image_url`/`input_image` × 字符串/对象两种形,按原形回填。③ **rehydrate 不 fail-open**(P2)——正文是裸 SSE 又含 `helm-blob:` 字面量时 `JSON.parse` 抛 → 拖垮 getPayload;加 try/catch 原样返回。
-- **运维 TODO（Lukin）**：① `vacuum_enabled` 今晚已手动关（止血，已做）；② 部署后 **3 天保留期自动清空旧胖行**，再手动点一次「Compact database」(VACUUM) 收回 14GB，然后开回 auto-vacuum（届时库已 GB 级，VACUUM 秒级安全）；③ 要立刻收回不等 3 天才需流式回填脚本（**未做**，碰 14GB 文件风险高，能等就别做）。
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-26 · payload 体积治理：图片 CAS 外置 + gzip + 写队列字节背压 + 分页生成列（存储层；原则 7，docs/02）**：线上 helm.db 14GB 根因=native passthrough 把 CC 每轮重发的 base64 图+大 transcript 逐字落 `request_payloads`。治理:① 图片 CAS——`payload-blobs.ts` 按 sha256(字节) 外置到 `payload_blobs`、正文留 `helm-blob:` sentinel、INSERT OR IGNORE 跨轮去重(10–30×),`getPayload` 读时 rehydrate(UI/replay 零改动);blob 续命=`ON CONFLICT DO UPDATE created_at`、prune 同 cutoff(不变式 blob.created_at≥payload)。② gzip 仅 SQLite(PG 靠 TOAST)。③ 写队列背压改按字节 maxBytes=256MB+inFlightBytes 防 stalled-writer OOM、溢出优先丢 payload 保 telemetry。④ telemetry lane/decided_by 生成列(SQLite VIRTUAL/PG STORED)+索引。迁移 SQLite v29/v30、PG v28/v29。Codex 修 3 处(in-flight 字节漏算致命/Responses input_image 漏剥/rehydrate fail-open)。4670 单测绿。分支 `worktree-payload-cas-gzip-perf`。**运维 TODO**：部署后等 3 天保留期清旧胖行→手动「Compact database」VACUUM 收回 14GB→开回 auto-vacuum。
 - **2026-06-26 · 仪表板「昨天」视图加同比（admin UI；docs/04）**：复用 today-delta 机制，基准窗按视图分流——`dashboard-chart.ts` 加 `resolveYesterdayComparisonWindow`（前天整日 `[前天0点,昨天0点)`），compare 门 `today`→放宽 `today|yesterday`；昨天视图用 `vs day before yesterday`/`Day before yesterday:{value}` 五语两键纳入 `dashboard-locales` 守卫，`MIN_COMPARISON_BASELINE_REQUESTS=10` 不变。发 v0.21.33 并部署。
 - **2026-06-26 · key 详情图表对齐 dashboard + 缓存命中率卡片（admin UI；docs/04）**：dashboard「缓存 Token」卡片加命中率 subline + key 详情 `keys/[id]` 两图对齐 dashboard。命中率 = cached÷prompt（`promptTokens===0→null` 整行隐藏），两 loader 同算；key 详情富 tooltip（趋势「总花费」/环「花费」）逐字搬自 dashboard，`TrendPoint`/`ModelSlice` 补 `cost`。i18n 加 `Hit rate`。全在 `apps/admin`（原则 1）。发 v0.21.32。
 - **2026-06-25 · 池内重试补洞：前导帧不再误提交，in-band 失败也能换账号（provider 执行；docs/04+05，原则 5/8）**：codex gpt-5.5 过载是 HTTP 200 开流后 in-band 失败（先 `response.created` 前导帧再 `response.failed`），`streamWithRetry` 在首个**原始** chunk(前导帧)就提交账号，而识别错误的 `guardPreOutputFailure` 在执行器层(高一层)→池已提交只能换 alias(被跨协议挡)。修：把 guard **下沉进池**（`OAuthPoolDeps` 注入 native/chat preamble 分类器，gemini→null），`open()` 外包 guard→首 yield 必代表真实输出，pre-output 错误帧变首 chunk 前 `UpstreamError(upstreamStatus:null)`→命中 `isRetryableTransientError`→池自动换号；空流同理。双层 guard 幂等无害，保留执行器层作纵深。pool.test +4 例，core+gateway 228 文件 3856 单测绿。并入 v0.21.31。分支 `fix-pool-preoutput-inpool-failover`。

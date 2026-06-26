@@ -105,7 +105,12 @@ import type {
   RuntimeSettings,
   TargetProviderProtocol,
 } from "@helm/shared";
-import { ErrorClassSchema, isOAuthPreset, makeHelmError } from "@helm/shared";
+import {
+  ErrorClassSchema,
+  effectiveMemoryProjectId,
+  isOAuthPreset,
+  makeHelmError,
+} from "@helm/shared";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
 import { INTERNAL_API_KEY_ID } from "./internal-key.js";
@@ -2189,7 +2194,9 @@ export async function buildServer(
             // scope resolver; explicit x-memory-* headers always override.
             memory: {
               mode: record.memory_mode,
-              projectId: record.memory_project_id,
+              // null project => isolate by the key's own id; explicit value SHARES
+              // a pool across keys (effectiveMemoryProjectId). Mirrors auth.ts.
+              projectId: effectiveMemoryProjectId(record),
               threadSource: record.memory_thread_source,
             },
           },
@@ -2357,7 +2364,9 @@ export async function buildServer(
             // scope resolver; explicit x-memory-* headers always override.
             memory: {
               mode: record.memory_mode,
-              projectId: record.memory_project_id,
+              // null project => isolate by the key's own id; explicit value SHARES
+              // a pool across keys (effectiveMemoryProjectId). Mirrors auth.ts.
+              projectId: effectiveMemoryProjectId(record),
               threadSource: record.memory_thread_source,
             },
           },
@@ -2455,7 +2464,9 @@ export async function buildServer(
             // scope resolver; explicit x-memory-* headers always override.
             memory: {
               mode: record.memory_mode,
-              projectId: record.memory_project_id,
+              // null project => isolate by the key's own id; explicit value SHARES
+              // a pool across keys (effectiveMemoryProjectId). Mirrors auth.ts.
+              projectId: effectiveMemoryProjectId(record),
               threadSource: record.memory_thread_source,
             },
           },

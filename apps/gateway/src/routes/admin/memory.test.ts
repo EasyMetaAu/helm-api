@@ -204,19 +204,29 @@ describe("/admin/api/memory routes (docs/13)", () => {
     ).toBe(200);
   });
 
-  it("by-key resolves to account + default project, 404 when unknown", async () => {
+  it("by-key resolves to account + EFFECTIVE project (explicit shares, null isolates by key), 404 when unknown", async () => {
     const { store } = seededStore();
-    const keyRow = {
+    const sharedKey = {
       key_id: "k1",
       account_id: "acct",
       memory_project_id: "proj-x",
     } as unknown as ApiKeyRecord;
-    const app = buildApp(store, [keyRow]);
+    // No explicit project => isolated by the key's own id (effectiveMemoryProjectId).
+    const isolatedKey = {
+      key_id: "k2",
+      account_id: "acct",
+      memory_project_id: null,
+    } as unknown as ApiKeyRecord;
+    const app = buildApp(store, [sharedKey, isolatedKey]);
     const ok = (await (await app.request("/admin/api/memory/by-key/k1")).json()) as {
       accountId: string;
       projectId: string | null;
     };
     expect(ok).toMatchObject({ accountId: "acct", projectId: "proj-x" });
+    const isolated = (await (await app.request("/admin/api/memory/by-key/k2")).json()) as {
+      projectId: string | null;
+    };
+    expect(isolated.projectId).toBe("k2");
     expect((await app.request("/admin/api/memory/by-key/missing")).status).toBe(404);
   });
 

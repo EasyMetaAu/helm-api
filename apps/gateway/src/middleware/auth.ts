@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type ApiKeyRecord, type BudgetCaps, hashKey, type KeyStore } from "@helm/core";
-import { makeHelmError } from "@helm/shared";
+import { effectiveMemoryProjectId, makeHelmError } from "@helm/shared";
 import type { MiddlewareHandler } from "hono";
 
 // Resolved request identity, attached to the Hono context for downstream
@@ -114,7 +114,10 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler {
         },
         memory: {
           mode: record.memory_mode,
-          projectId: record.memory_project_id,
+          // null project => isolate by the key's own id; an explicit value SHARES
+          // a pool across keys (effectiveMemoryProjectId). Resolved per request so
+          // clearing the column reverts to isolated-by-self with no migration.
+          projectId: effectiveMemoryProjectId(record),
           threadSource: record.memory_thread_source,
         },
       },
