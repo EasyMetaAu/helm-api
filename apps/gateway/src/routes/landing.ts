@@ -19,7 +19,7 @@ const PAGE = `<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Helm API</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M11 9v14M21 9v14M11 16h10' stroke='%23fff' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Cg fill='%23fff'%3E%3Crect x='15' y='16' width='7' height='32' rx='3.5'/%3E%3Crect x='42' y='16' width='7' height='32' rx='3.5'/%3E%3C/g%3E%3Cg fill='none' stroke='%23fff' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M22 32H38'/%3E%3Cpath d='M34 27l6 5-6 5'/%3E%3C/g%3E%3C/svg%3E" />
 <style>
   /* Admin design tokens (apps/admin/src/app.css), inlined. */
   :root {
@@ -103,7 +103,7 @@ const PAGE = `<!doctype html>
 <body>
   <main>
     <div class="mark">
-      <span class="tile"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M11 9v14M21 9v14M11 16h10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></span>
+      <span class="tile"><svg viewBox="0 0 64 64" aria-hidden="true"><g fill="currentColor"><rect x="15" y="16" width="7" height="32" rx="3.5"/><rect x="42" y="16" width="7" height="32" rx="3.5"/></g><g fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 32H38"/><path d="M34 27l6 5-6 5"/></g></svg></span>
       <span>
         <span class="name">Helm&nbsp;API</span>
         <br /><span class="sub">LLM Gateway</span>

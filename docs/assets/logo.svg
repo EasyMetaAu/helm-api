@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="96" height="96" role="img" aria-label="Helm">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#4338ca"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#g)"/>
+  <g fill="#fff">
+    <rect x="15" y="16" width="7" height="32" rx="3.5"/>
+    <rect x="42" y="16" width="7" height="32" rx="3.5"/>
+  </g>
+  <g fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M22 32H38"/>
+    <path d="M34 27l6 5-6 5"/>
+  </g>
+</svg>

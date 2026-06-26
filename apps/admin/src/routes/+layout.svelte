@@ -146,9 +146,25 @@
   >
     <div class="flex h-16 items-center gap-2.5 px-5">
       <span
-        class="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold text-white"
-        >H</span
+        class="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white"
       >
+        <svg viewBox="0 0 64 64" class="h-5 w-5" fill="none" aria-hidden="true">
+          <g fill="currentColor">
+            <rect x="15" y="16" width="7" height="32" rx="3.5" />
+            <rect x="42" y="16" width="7" height="32" rx="3.5" />
+          </g>
+          <g
+            fill="none"
+            stroke="currentColor"
+            stroke-width="5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M22 32H38" />
+            <path d="M34 27l6 5-6 5" />
+          </g>
+        </svg>
+      </span>
       <div class="leading-tight">
         <div class="text-sm font-semibold tracking-tight">Helm</div>
         <div class="text-xs text-slate-400">{$t('LLM Gateway')}</div>
