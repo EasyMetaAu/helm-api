@@ -2,6 +2,7 @@ import type {
   ApiKeyRecord,
   DecisionRecord,
   Fact,
+  FactListStatus,
   MemoryFactInput,
   MemoryFactPatch,
   MemoryJobEnqueueInput,
@@ -9,7 +10,6 @@ import type {
   MemoryMessageInput,
   MemoryObservationInput,
   MemoryScopeSummary,
-  MemoryStatus,
   MemoryThreadInput,
   OAuthQuotaSnapshot,
   OAuthUsageRow,
@@ -857,7 +857,7 @@ export interface MemoryStore {
     projectId?: string;
     resourceId?: string;
     threadId?: string;
-    status?: MemoryStatus | "all";
+    status?: FactListStatus;
     subjectKey?: string;
     search?: string;
     limit: number;

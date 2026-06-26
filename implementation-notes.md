@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-26 · 记忆管理页重做：分页 + Superseded 过滤 + 反思置顶 + 新增事实（admin UI；docs/13）
+
+- **背景（Lukin 五诉求）**：`/admin/memory` ① 事实显示不全、无分页；② 状态下拉缺 **Superseded**；③ 反思应置顶（与事实换位）；④ 整体乱、重做；⑤ 只能编辑不能新增 → 加「新增事实」。
+- **关键发现（少写代码）**：后端 `listFacts` **早支持** `limit/offset/search` 返回 `{rows,total}`，前端从没传分页/搜索；`status='active'` 在 `factListClauses` **早已 = active AND expiredAt IS NULL**（即排除 superseded，与徽章一致）——所以「Superseded」只差一个**派生过滤值**，非新存储状态。新增事实直接复刻 MCP `memory_add`（`buildReconciledFactBatch`+`insertFactsReconciled`+`getFactById`，三者已在 `REQUIRED_METHODS`）。
+- **后端**：① 新 `FactListStatus = MemoryStatus|"all"|"superseded"`（`@helm/shared`，**不动** `MemoryStatusSchema`——superseded 是视图非存储态）；sqlite+pg `factListClauses` 各加一支 `superseded → eq(status,'active') AND isNotNull(expiredAt)`；`ports.ts`/route `FACT_STATUSES` 同步。② 新 `POST /admin/api/memory/facts`（scope 走 query 同 GET、字段走 body；`MemoryFactCreateSchema` strict），返回 `{fact,added,resurrected,superseded,deduped}`。
+- **前端**（`+page.svelte` 重排，保留 `scope-row`/`fact-row`/`reflection-row` testid）：反思置顶且改**卡片**（长文全显，`whitespace-pre-wrap`，不再 `truncate`）；事实工具栏 = 搜索框 + 全状态下拉（Active/Superseded/Archived/Pruned/All）+「新增事实」；事实正文去 `max-w-md` 全显；**客户端分页器**（`FACT_PAGE_SIZE=25`，复用 `paginationItems`，复用 `pager-*` testid，按钮非链接因本页靠 `$state` 非 loader 驱动）。新组件 `AddFactDialog.svelte`（可编辑 Subject、无 status 字段；低风险，不重载假定 `fact` 非空的 `EditFactDialog`）。中性绿色 `notice` 条提示 added/deduped/superseded。
+- **坑**：① `AddFactDialog.test` 的 reject 测试在 `beforeEach` 只 `mockReset()`（无默认实现）时，后续 `mockRejectedValue` 会被 vitest 当**未处理拒绝**判失败——须 reset 后补一个默认 `mockResolvedValue`（照抄 `CreateKeyDialog.test`，组件本身正确，纯测试基架问题）。② `onsearch` 不是 Svelte 识别的 prop（svelte-check 报错）→ 改 form `onsubmit` + Search 按钮。③ `i18n:update` 把新键以**英文值**填入各 locale（非空），故"空键扫描"查不到——须按 git diff 的 13 个新键手填 zh/ja/ko。
+- **验证**：新增 store superseded 测（pg）、route superseded+POST 测、page 重排/分页/搜索/新增测、`AddFactDialog.test`。**admin 502 单测 + core/shared 471 + 4 memory 文件 48 全绿**；typecheck 四包 Done、svelte-check 933/0/0、biome+prettier 干净。分支 `feat-memory-admin-redesign`。
+
 ## 2026-06-26 · 记忆 observer 收紧为仅观察 user 内容（gateway 记忆；docs/08，原则 1/7）
 
 - **背景（Lukin，box 实查）**：la.atmy.work `memory_facts` 项目 `luke` 出现 `subject_key=tool-bash-completed-with-no-output`、`fact_text="tool: (Bash completed with no output)"` 等**工具输出原文**当事实，外加 `dev-server: ready`/`file-update: …success`/空 assistant 等瞬时噪音。Lukin 质疑：记忆不该只来自 user？
@@ -24,20 +33,13 @@
 - **取舍**：① dashboard 的 key 单元格是**链接**（Lukin 要求）：`keyHref` 渲染真 `<a>`（可中键新开标签页），跳 `/requests?key_id=<id>&<当前窗口>`（带 dashboard 当前 range/custom，落到同窗口）。**不复用 /requests 的 button 机制**——那是页内 `go()` 更新 querystring、被 `requests.test` 的 click→goto 契约锁死，改 `<a>` 既破测试又丢「保留其它 filter + chip」语义；故新增独立 `keyHref` 旁路，参考页零改动。② key 详情**隐藏 Key 列**（非 100% 照搬参考页），因每行都是该 key。③ **零新增 i18n 串**——组件全用 /requests 既有 superset（含各列 `title` 长句），无需 i18n:sync。④ decided-by 单元格统一为参考页纯 badge（dashboard 旧逐层 title tooltip 去掉，但其表上方本就有图例，信息不丢）。
 - **验证**：关键 testid（`request-row`/`decided-by`/`cell-tps`/`key-filter`/`key-filter-chip`）原样保留；新增 `RequestsTable.test`（key 单元格三分支：keyHref→`<a>`+href / onKeyFilter→`<button>`+回调 / `showKey=false`→无列）。**admin 493 单测全绿**（含 `requests.test`/`key-detail.test`/`home.test`）；**svelte-check 931/0/0**；prettier 干净。全在 `apps/admin`（原则 1）。
 
-## 2026-06-26 · 记忆按 API key 隔离：用时回落 project_id ??= key_id（存储层；docs/08 + 原则 1/7）
-
-- **背景（Lukin）**：admin「记忆 · 按密钥」选某 key 仍列出全部事实。实为**记忆作用域是 account+project,不是单 key**:`account_id` 恒为常量 `"default"`(单租户),真正区分靠 `project_id`,缺省则 thread-locked(换会话即丢,见 [[memory-cross-session-needs-project-scope]])。需求:**默认按 API key 隔离**——key A 的记忆永不进 key B,同 key 跨会话仍记得。
-- **拍板模型(Lukin 提出,采纳)**：**填 `memory_project_id` = 按该 project 共享(跨 key);留空(null) = 用时回落到 key 自身 id = 按 key 隔离**。`account_id` 不删——它是 `owner_id` 租户边界(502 处引用/31 个 store WHERE 守卫/18 列),与 project(池选择器、用户可调)是两根轴;删它换零运行时收益却拔掉多租户接缝、还让可改字段变安全边界。
-- **决定:用时回落(Approach B),不在 createKey 烤值、不回填迁移**。先试过 A(createKey 默认 `?? keyId` + 迁移把列写成 keyId),但那样**列空=thread-locked 而非隔离**,且清空不会隔离、列里全是噪声 id。改 B:列保持 null,在**读取处**算「有效 project」。新增纯 helper `effectiveMemoryProjectId(rec)=memory_project_id ?? key_id`(`packages/shared/src/key/schema.ts`),在 **6 处** per-key 默认构造点调用:`auth.ts`(主 /v1)、`server.ts`×3(native passthrough deps)、`mcp/oauth.ts`(签 token 的 pid)、`admin/memory.ts` by-key 路由。`resolveMemoryScope` **零改动**(读 `defaults.projectId`,已是有效值);Anthropic/Responses 的 `memoryScopeFromMeta` 也零改动(`ir.metadata.project_id` 由 resolveMemoryScope 的有效值写入)。MCP 全链:index.ts 读 auth 的 effective、token 60s 短寿无陈旧。
-- **好处**:无迁移、对存量 key 立即生效、清空即隔离、列保持空(干净)、admin by-key 与实际 recall 一致(都走 helper)。`observer.ts:65`/`inject.ts:213` 的 broad-scope gate 看的是**解析后** scope(projectId=keyId,非空)→ 跨会话长记忆照常点亮。
-- **坑/Lukin 须知**:① box 现有 key 多为显式 `lukin-personal`(共享)→ 仍共享,要隔离就在 admin 把该 key 的 project **清空**(留空即按 key 隔离,无需填 keyId)。② 显式填值 = 共享,清空 = 隔离——二选一,无暗兜底。
-- **TDD+验证**:**B 不破任何现有测试**(A 当初破了 contract)。仅 `chat.memory.test` 一处真实-auth+null-key 断言从 `project_id:null` 更新为 `"k1"`(正确新行为)。新增 `effectiveMemoryProjectId` 单测(null→key_id / 显式→该值)+ by-key 路由 null→key_id 例。schema/admin-memory/mcp-oauth/auth/chat.memory/messages/execute/server/memory-scope **全绿**(单跑合计 300+ 测),`pnpm typecheck` 四包 Done、biome 0 错。改动全在 core+gateway 接线(原则 1)。分支 `feat-memory-per-key-isolation`,**未部署**。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-26 · 记忆按 API key 隔离：用时回落 project_id ??= key_id（存储层；docs/08，原则 1/7）**：记忆作用域是 account+project 非单 key（`account_id` 恒 `default`，靠 `project_id` 区分，缺省 thread-locked）。拍板：填 `memory_project_id`=按 project 共享，留空(null)=**用时回落到 key 自身 id=按 key 隔离**。Approach B（读取处算有效 project，不在 createKey 烤值/不迁移）：新增纯 helper `effectiveMemoryProjectId(rec)=memory_project_id ?? key_id`，在 6 处 per-key 构造点调用（auth/server×3/mcp-oauth/admin-memory），`resolveMemoryScope` 零改。好处：无迁移、存量即生效、清空即隔离。坑：box 现有 key 多显式 `lukin-personal`（仍共享），要隔离须在 admin 清空其 project。已发 v0.22.2 部署（见 [[per-key-memory-isolation-shipped]]）。
 
 - **2026-06-26 · 请求列表按 API key 筛选 + 详情页返回来源页（admin UI；docs/07）**：后端早支持 `key_id`（前端没暴露）→ 列表行回传 `key_id`（可选字段）+ `requests-filters` 加 keyId parse/serialize + 可清除 chip + 行内 key 点击即筛选（`onRowClick` 守卫扩到 `closest('a, button')`）。key 详情固定取 page 1（删页内 pager）+「查看更多」跳 `/requests?key_id=<id>&range=all`。详情返回改 `?from=<encode(path+search)>`，loader `safeBackTo` 防开放重定向（首 `/` 次非 `/`/`\`）。**放弃 `api_key_id` 索引**（纯性能、会牵连 6+ migrate 测试 version-ledger，延后）。坑：行 id 链带 `?from=` → e2e `a[href$=]` 改 `href*=`。admin 488 单测+6 e2e+gateway 69 绿。已并入 v0.22.1 部署。
 - **2026-06-26 · 仪表板+请求列表加自定义日期范围（admin UI；docs/04）**：把 key 详情早有的「预设 或 自定义日期」窗口原语下沉到共享 `requests-filters.ts`（localMidnightMs/isValidDateParam/resolveCustomDayWindow/bucketForWindow），三页同源（key-detail-filters 改消费它、重导出 bucketForWindow 保 import/测试不变）。不动共享 `RangeFilter`（零 e2e testid 风险），自定义 From/To 用原生 `<input type=date>`，窗口走 URL `?start=&end=` **custom 胜 preset**、半填/反序/非法 fail-soft 回落；自定义模式无同比 delta；后端零改动、i18n 零成本。requests-filters.test +18 例，admin 481 测绿、svelte-check 929/0/0。分支 `worktree-dashboard-date-range`，**未部署**。

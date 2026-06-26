@@ -5,21 +5,22 @@
     deleteFact,
     deleteReflection,
     type Fact,
+    type FactCreateResult,
     type FactQuery,
+    type FactStatusFilter,
     listFacts,
     listReflections,
     type MemoryScope,
-    type MemoryStatus,
     type Reflection,
     resolveKey,
-    updateFact,
-    updateReflection,
   } from '$lib/api/memory.js';
+  import AddFactDialog from '$lib/components/AddFactDialog.svelte';
   import ConnectMcpDialog from '$lib/components/ConnectMcpDialog.svelte';
   import EditFactDialog from '$lib/components/EditFactDialog.svelte';
   import EditReflectionDialog from '$lib/components/EditReflectionDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import { formatTimestamp } from '$lib/format.js';
+  import { paginationItems } from '$lib/pagination.js';
   import { t } from '$lib/i18n';
 
   // Memory management view (docs/13). Manages the gateway's long-tier memory: the
@@ -57,12 +58,21 @@
   let selectedKeyId = $state<string>('');
 
   let error = $state<string | null>(null);
+  // Neutral (non-error) feedback line — e.g. "fact added" / "already existed". Cleared
+  // whenever an error is raised or a new selection is made.
+  let notice = $state<string | null>(null);
 
-  // Facts table state.
+  // Facts table state. The list is paginated + searchable client-side (facts load on
+  // selection, not via the loader), so page/search live here and drive loadFacts.
+  const FACT_PAGE_SIZE = 25;
   let facts = $state<Fact[]>([]);
   let factsTotal = $state<number>(0);
-  let factStatus = $state<MemoryStatus | 'all'>('active');
+  let factStatus = $state<FactStatusFilter>('active');
+  let factSearch = $state<string>('');
+  let factPage = $state<number>(1);
   let loadingFacts = $state<boolean>(false);
+  // "Add fact" dialog — opened from the Facts toolbar, scoped to the current selection.
+  let showAddFact = $state<boolean>(false);
 
   // Reflections table state.
   let reflections = $state<Reflection[]>([]);
@@ -113,7 +123,13 @@
     if (selected === null) return;
     loadingFacts = true;
     try {
-      const page = await listFacts({ ...scopeQuery(selected), status: factStatus });
+      const page = await listFacts({
+        ...scopeQuery(selected),
+        status: factStatus,
+        ...(factSearch.trim() ? { search: factSearch.trim() } : {}),
+        limit: FACT_PAGE_SIZE,
+        offset: (factPage - 1) * FACT_PAGE_SIZE,
+      });
       facts = page.rows;
       factsTotal = page.total;
     } catch (e) {
@@ -121,6 +137,21 @@
     } finally {
       loadingFacts = false;
     }
+  }
+
+  // Pager: total pages from the server count, plus the number/ellipsis row.
+  const factTotalPages = $derived(Math.max(1, Math.ceil(factsTotal / FACT_PAGE_SIZE)));
+  const factPageItems = $derived(paginationItems(factPage, factTotalPages));
+
+  // Any change that alters the result set resets to page 1 before reloading.
+  function reloadFactsFromFirstPage(): void {
+    factPage = 1;
+    void loadFacts();
+  }
+  function goFactPage(n: number): void {
+    if (n < 1 || n > factTotalPages || n === factPage) return;
+    factPage = n;
+    void loadFacts();
   }
 
   async function loadReflections(): Promise<void> {
@@ -141,9 +172,12 @@
   // filter to "active" keeps a fresh selection focused on live facts.
   async function selectScope(s: SelectedScope, label: string): Promise<void> {
     error = null;
+    notice = null;
     selected = s;
     selectionLabel = label;
     factStatus = 'active';
+    factSearch = '';
+    factPage = 1;
     await Promise.all([loadFacts(), loadReflections()]);
   }
 
@@ -209,6 +243,22 @@
     editingFact = null;
     // The status filter may now exclude the edited row — re-fetch to reflect it.
     void loadFacts();
+  }
+
+  // After adding a fact: close, jump to the live (Active) view's first page so the new
+  // row is visible, and surface what reconciliation did — a re-added identical fact is
+  // a no-op (deduped), and a same-subject add replaces the older one (superseded).
+  function onFactCreated(result: FactCreateResult): void {
+    showAddFact = false;
+    error = null;
+    notice = result.deduped
+      ? $t('That fact already exists — no duplicate was created.')
+      : result.superseded.length > 0
+        ? $t('Fact added — it replaced an older fact on the same subject.')
+        : $t('Fact added.');
+    factStatus = 'active';
+    factSearch = '';
+    reloadFactsFromFirstPage();
   }
 
   function startEditReflection(r: Reflection): void {
@@ -288,6 +338,14 @@
 
   {#if error}
     <p class="alert-error" role="alert">{error}</p>
+  {/if}
+  {#if notice}
+    <p
+      class="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800"
+      role="status"
+    >
+      {notice}
+    </p>
   {/if}
 
   <!-- Tab switcher: By Scope / By Key. aria-selected drives both a11y + style. -->
@@ -395,33 +453,117 @@
   {/if}
 
   {#if selected !== null}
-    <div class="flex flex-col gap-6">
-      <!-- Facts section -->
+    <div class="flex flex-col gap-8">
+      <!-- Selected scope header: what the sections below are scoped to. -->
+      <div class="border-b border-slate-200 pb-2">
+        <p class="text-xs uppercase tracking-wide text-ink-muted">{$t('Scope')}</p>
+        <p class="font-mono text-sm text-ink-strong">{selectionLabel}</p>
+      </div>
+
+      <!-- Reflections (the merged, slow-changing overview) come FIRST. Rendered as
+           cards because the text is long free-form prose — a table cell clips it. -->
       <div class="flex flex-col gap-3">
-        <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div class="min-w-0">
-            <h2 class="section-header">{$t('Facts')}</h2>
-            <p class="section-desc">
-              {$t('Scope')}: <span class="font-mono">{selectionLabel}</span>
-            </p>
+        <h2 class="section-header">{$t('Reflections')}</h2>
+        {#if loadingReflections}
+          <p class="section-desc">{$t('Loading…')}</p>
+        {:else if reflections.length === 0}
+          <div class="empty-state">
+            <p>{$t('No reflections for this scope.')}</p>
           </div>
-          <label class="flex items-center gap-2 text-sm">
-            <span class="field-label">{$t('Status')}</span>
-            <select
-              class="select w-40"
-              aria-label={$t('Fact status filter')}
-              value={factStatus}
-              onchange={(e) => {
-                factStatus = (e.currentTarget as HTMLSelectElement).value as MemoryStatus | 'all';
-                void loadFacts();
+        {:else}
+          <div class="flex flex-col gap-3">
+            {#each reflections as reflection (reflection.id)}
+              <div data-testid="reflection-row" class="card flex flex-col gap-2">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
+                    {#if reflection.status === 'active'}
+                      <span class="badge-ok">{$t('active')}</span>
+                    {:else}
+                      <span class="badge-neutral">{$t('archived')}</span>
+                    {/if}
+                    <span>{$t('Version')} {reflection.version}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{formatTimestamp(reflection.updatedAt)}</span>
+                  </div>
+                  <div class="flex shrink-0 gap-2">
+                    <button
+                      type="button"
+                      class="btn-secondary"
+                      onclick={() => startEditReflection(reflection)}>{$t('Edit')}</button
+                    >
+                    <button
+                      type="button"
+                      class="btn-danger-outline"
+                      onclick={() => askDeleteReflection(reflection)}>{$t('Delete')}</button
+                    >
+                  </div>
+                </div>
+                <p class="whitespace-pre-wrap break-words text-sm text-ink-body">
+                  {reflection.reflectionText}
+                </p>
+              </div>
+            {/each}
+          </div>
+          {#if reflectionsTotal > reflections.length}
+            <p class="section-desc">
+              {$t('Showing {count} of {total} reflections.', {
+                count: reflections.length,
+                total: reflectionsTotal,
+              })}
+            </p>
+          {/if}
+        {/if}
+      </div>
+
+      <!-- Facts (the atomic detail) below, with a toolbar: search + status + add. -->
+      <div class="flex flex-col gap-3">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <h2 class="section-header">{$t('Facts')}</h2>
+          <div class="flex flex-wrap items-end gap-2">
+            <form
+              class="flex items-end gap-2"
+              onsubmit={(e) => {
+                e.preventDefault();
+                reloadFactsFromFirstPage();
               }}
             >
-              <option value="active">{$t('Active')}</option>
-              <option value="all">{$t('All')}</option>
-              <option value="archived">{$t('Archived')}</option>
-              <option value="pruned">{$t('Pruned')}</option>
-            </select>
-          </label>
+              <input
+                type="search"
+                class="input w-44"
+                aria-label={$t('Search facts')}
+                placeholder={$t('Search fact text…')}
+                bind:value={factSearch}
+              />
+              <button type="submit" class="btn-secondary">{$t('Search')}</button>
+            </form>
+            <label class="flex items-center gap-2 text-sm">
+              <span class="field-label">{$t('Status')}</span>
+              <select
+                class="select w-40"
+                aria-label={$t('Fact status filter')}
+                value={factStatus}
+                onchange={(e) => {
+                  factStatus = (e.currentTarget as HTMLSelectElement).value as FactStatusFilter;
+                  reloadFactsFromFirstPage();
+                }}
+              >
+                <option value="active">{$t('Active')}</option>
+                <option value="superseded">{$t('Superseded')}</option>
+                <option value="archived">{$t('Archived')}</option>
+                <option value="pruned">{$t('Pruned')}</option>
+                <option value="all">{$t('All')}</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              data-testid="add-fact"
+              class="btn-primary-sm"
+              onclick={() => {
+                notice = null;
+                showAddFact = true;
+              }}>{$t('Add fact')}</button
+            >
+          </div>
         </div>
 
         {#if loadingFacts}
@@ -451,7 +593,7 @@
                       <span class="font-mono text-ink-strong">{fact.subjectKey}</span>
                     </td>
                     <td data-label={$t('Fact')} class="px-3 py-2 text-ink-body">
-                      <span class="block max-w-md whitespace-normal">{fact.factText}</span>
+                      <span class="block whitespace-pre-wrap break-words">{fact.factText}</span>
                     </td>
                     <td data-label={$t('Status')} class="px-3 py-2">
                       <span class={badge.cls}>{badge.text}</span>
@@ -481,80 +623,53 @@
               </tbody>
             </table>
           </div>
-          {#if factsTotal > facts.length}
-            <p class="section-desc">
-              {$t('Showing {count} of {total} facts.', { count: facts.length, total: factsTotal })}
-            </p>
-          {/if}
-        {/if}
-      </div>
-
-      <!-- Reflections section -->
-      <div class="flex flex-col gap-3">
-        <h2 class="section-header">{$t('Reflections')}</h2>
-        {#if loadingReflections}
-          <p class="section-desc">{$t('Loading…')}</p>
-        {:else if reflections.length === 0}
-          <div class="empty-state">
-            <p>{$t('No reflections for this scope.')}</p>
-          </div>
-        {:else}
-          <div class="cards-table-frame">
-            <table class="cards-table">
-              <thead class="table-head">
-                <tr>
-                  <th class="px-3 py-2">{$t('Text')}</th>
-                  <th class="px-3 py-2">{$t('Version')}</th>
-                  <th class="px-3 py-2">{$t('Status')}</th>
-                  <th class="px-3 py-2">{$t('Updated')}</th>
-                  <th class="px-3 py-2"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each reflections as reflection (reflection.id)}
-                  <tr data-testid="reflection-row" class="align-top">
-                    <td data-label={$t('Text')} class="px-3 py-2 text-ink-body">
-                      <span class="block max-w-lg truncate">{reflection.reflectionText}</span>
-                    </td>
-                    <td data-label={$t('Version')} class="px-3 py-2 text-ink-muted"
-                      >{reflection.version}</td
+          {#if factsTotal > 0}
+            <!-- Pager footer (client-side; facts load via $state, not the loader).
+                 Mirrors the requests-list pager but with buttons since there is no URL
+                 to link to. Shown even on a single page so the total count is visible. -->
+            <div
+              class="flex flex-col gap-3 text-sm text-ink-muted sm:flex-row sm:items-center sm:justify-between"
+            >
+              <span data-testid="pager-status">
+                {$t('Page {page} of {pages}', { page: factPage, pages: factTotalPages })} ·
+                {$t('{total} facts', { total: factsTotal })}
+              </span>
+              <nav class="flex items-center gap-1" aria-label={$t('Pagination')}>
+                <button
+                  type="button"
+                  data-testid="pager-prev"
+                  class="btn-secondary"
+                  disabled={factPage <= 1}
+                  onclick={() => goFactPage(factPage - 1)}>{$t('Previous')}</button
+                >
+                {#each factPageItems as item, i (item === 'ellipsis' ? `e${i}` : item)}
+                  {#if item === 'ellipsis'}
+                    <span class="px-2 text-ink-muted" aria-hidden="true">…</span>
+                  {:else if item === factPage}
+                    <span
+                      data-testid="pager-page-current"
+                      aria-current="page"
+                      class="inline-flex h-9 min-w-9 items-center justify-center rounded border border-slate-800 bg-slate-800 px-2 text-sm font-medium text-white"
+                      >{item}</span
                     >
-                    <td data-label={$t('Status')} class="px-3 py-2">
-                      {#if reflection.status === 'active'}
-                        <span class="badge-ok">{$t('active')}</span>
-                      {:else}
-                        <span class="badge-neutral">{$t('archived')}</span>
-                      {/if}
-                    </td>
-                    <td data-label={$t('Updated')} class="px-3 py-2 text-ink-muted">
-                      {formatTimestamp(reflection.updatedAt)}
-                    </td>
-                    <td class="px-3 py-2 lg:text-right">
-                      <div class="flex justify-end gap-2">
-                        <button
-                          type="button"
-                          class="btn-secondary"
-                          onclick={() => startEditReflection(reflection)}>{$t('Edit')}</button
-                        >
-                        <button
-                          type="button"
-                          class="btn-danger-outline"
-                          onclick={() => askDeleteReflection(reflection)}>{$t('Delete')}</button
-                        >
-                      </div>
-                    </td>
-                  </tr>
+                  {:else}
+                    <button
+                      type="button"
+                      data-testid="pager-page"
+                      class="inline-flex h-9 min-w-9 cursor-pointer items-center justify-center rounded border border-slate-300 px-2 text-sm text-ink-body transition-colors hover:bg-slate-50"
+                      onclick={() => goFactPage(item)}>{item}</button
+                    >
+                  {/if}
                 {/each}
-              </tbody>
-            </table>
-          </div>
-          {#if reflectionsTotal > reflections.length}
-            <p class="section-desc">
-              {$t('Showing {count} of {total} reflections.', {
-                count: reflections.length,
-                total: reflectionsTotal,
-              })}
-            </p>
+                <button
+                  type="button"
+                  data-testid="pager-next"
+                  class="btn-secondary"
+                  disabled={factPage >= factTotalPages}
+                  onclick={() => goFactPage(factPage + 1)}>{$t('Next')}</button
+                >
+              </nav>
+            </div>
           {/if}
         {/if}
       </div>
@@ -564,6 +679,10 @@
 
 {#if showMcp}
   <ConnectMcpDialog onclose={() => (showMcp = false)} />
+{/if}
+
+{#if showAddFact && selected !== null}
+  <AddFactDialog scope={selected} onsaved={onFactCreated} onclose={() => (showAddFact = false)} />
 {/if}
 
 {#if editingFact}

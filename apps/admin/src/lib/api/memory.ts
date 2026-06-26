@@ -23,6 +23,12 @@ export interface MemoryScope {
 // (active|archived). 'pruned' never appears on a reflection.
 export type MemoryStatus = 'active' | 'archived' | 'pruned';
 
+// The status VALUES the fact-list filter accepts. 'superseded' is NOT a stored
+// status — it is the derived view "status='active' AND expiredAt IS NOT NULL" (a
+// live fact replaced by a newer same-subject one, shown with the "superseded" badge).
+// 'all' drops the status predicate. A fact can only be PATCHed to a real MemoryStatus.
+export type FactStatusFilter = MemoryStatus | 'all' | 'superseded';
+
 // A persisted fact row read back from the store. ownerId = the account tenant
 // boundary; project/resource/thread are in-account scopes (any may be null).
 // expiredAt non-null on an ACTIVE row = the fact was superseded by a newer one.
@@ -75,11 +81,34 @@ export interface FactQuery {
   projectId?: string;
   resourceId?: string;
   threadId?: string;
-  status?: MemoryStatus | 'all';
+  status?: FactStatusFilter;
   subjectKey?: string;
   search?: string;
   limit?: number;
   offset?: number;
+}
+
+// Hand-add a fact (POST /admin/api/memory/facts). Scope addresses where the fact
+// lives (account + nullable project/resource/thread); `subjectText` is normalized to
+// the supersede key server-side. importance defaults to 0.5 when omitted.
+export interface FactCreate {
+  accountId?: string;
+  projectId?: string;
+  resourceId?: string;
+  threadId?: string;
+  subjectText: string;
+  factText: string;
+  importance?: number;
+}
+
+// POST result: the created/resurrected row (null on a pure dedup) plus the reconcile
+// summary so the UI can say "added" / "already existed" / "replaced an older fact".
+export interface FactCreateResult {
+  fact: Fact | null;
+  added: string[];
+  resurrected: string[];
+  superseded: string[];
+  deduped: boolean;
 }
 
 // Reflection list query. `includeAllVersions` returns every version row (default
@@ -171,6 +200,22 @@ export async function listFacts(params: FactQuery): Promise<{ rows: Fact[]; tota
     headers: { accept: 'application/json' },
   });
   return asJson<{ rows: Fact[]; total: number }>(res);
+}
+
+// POST /admin/api/memory/facts -> create a fact. Scope rides the querystring (same
+// shape as the GET); the fact fields go in the body. 400 on empty/invalid input.
+export async function createFact(params: FactCreate): Promise<FactCreateResult> {
+  const { subjectText, factText, importance, ...scope } = params;
+  const res = await fetch(`${BASE}/facts${queryString({ ...scope })}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      subjectText,
+      factText,
+      ...(importance !== undefined ? { importance } : {}),
+    }),
+  });
+  return asJson<FactCreateResult>(res);
 }
 
 // PATCH /admin/api/memory/facts/:id -> the updated fact. 409 on a content_hash
