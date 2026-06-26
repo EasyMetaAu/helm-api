@@ -15,6 +15,7 @@
     PAGE_SIZE_OPTIONS,
     type RangeKey,
     type RequestsFilters,
+    todayLocalDate,
   } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
 
@@ -51,6 +52,8 @@
   // (?start=&end=) and OVERRIDES the preset; these mirror it, re-synced below.
   let customStart = $state(untrack(() => data.filters.startDate) ?? '');
   let customEnd = $state(untrack(() => data.filters.endDate) ?? '');
+  // Future days have no data → cap both pickers at the viewer's local today.
+  const today = todayLocalDate();
 
   $effect(() => {
     const f = data.filters;
@@ -208,7 +211,7 @@
           type="date"
           class="input mt-0.5"
           bind:value={customStart}
-          max={customEnd || undefined}
+          max={customEnd && customEnd < today ? customEnd : today}
         />
       </label>
       <label class="flex flex-col text-xs text-ink-muted">
@@ -218,6 +221,7 @@
           class="input mt-0.5"
           bind:value={customEnd}
           min={customStart || undefined}
+          max={today}
         />
       </label>
       <button

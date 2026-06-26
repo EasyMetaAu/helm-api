@@ -23,7 +23,7 @@
     keyDetailFiltersToSearch,
   } from '$lib/key-detail-filters.js';
   import { paginationItems } from '$lib/pagination.js';
-  import type { RangeKey } from '$lib/requests-filters.js';
+  import { type RangeKey, todayLocalDate } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
 
   type Stats = {
@@ -69,6 +69,8 @@
     customStart = data.filters.startDate ?? '';
     customEnd = data.filters.endDate ?? '';
   });
+  // Future days have no data → cap both pickers at the viewer's local today.
+  const today = todayLocalDate();
 
   function applyFilters(next: KeyDetailFilters): void {
     const qs = keyDetailFiltersToSearch(next);
@@ -81,7 +83,12 @@
   // Apply the custom day range (only when both ends are set); resets to page 1.
   function applyCustom(): void {
     if (!customStart || !customEnd) return;
-    applyFilters({ range: data.filters.range, startDate: customStart, endDate: customEnd, page: 1 });
+    applyFilters({
+      range: data.filters.range,
+      startDate: customStart,
+      endDate: customEnd,
+      page: 1,
+    });
   }
   // Drop back to the default preset.
   function clearCustom(): void {
@@ -122,14 +129,33 @@
   );
   const trendTicks = $derived(trendAxisTicks(trend));
   const TREND_SERIES = $derived([
-    { key: 'input', label: $t('Input tokens'), value: (d: TrendPoint) => d.input, color: 'hsl(217 91% 60%)' },
-    { key: 'output', label: $t('Output tokens'), value: (d: TrendPoint) => d.output, color: 'hsl(160 84% 39%)' },
-    { key: 'cached', label: $t('Cached tokens'), value: (d: TrendPoint) => d.cached, color: 'hsl(38 92% 50%)' },
+    {
+      key: 'input',
+      label: $t('Input tokens'),
+      value: (d: TrendPoint) => d.input,
+      color: 'hsl(217 91% 60%)',
+    },
+    {
+      key: 'output',
+      label: $t('Output tokens'),
+      value: (d: TrendPoint) => d.output,
+      color: 'hsl(160 84% 39%)',
+    },
+    {
+      key: 'cached',
+      label: $t('Cached tokens'),
+      value: (d: TrendPoint) => d.cached,
+      color: 'hsl(38 92% 50%)',
+    },
   ]);
   const byModel = $derived<ModelSlice[]>(
     data.agg.byModel
       .filter((m) => m.totalTokens > 0)
-      .map((m) => ({ model: m.servedModel ?? $t('unknown'), tokens: m.totalTokens, cost: m.costUsd })),
+      .map((m) => ({
+        model: m.servedModel ?? $t('unknown'),
+        tokens: m.totalTokens,
+        cost: m.costUsd,
+      })),
   );
   const SLICE_COLORS = [
     'hsl(var(--color-primary))',
@@ -270,9 +296,8 @@
                already learned, and the memory page resolves the scope from the key's
                config (account + memory_project_id) regardless of mode — without this a
                switched-off key has no path to its accumulated memory. -->
-          <a
-            class="link-inline ml-1"
-            href={`${base}/memory?key=${encodeURIComponent(data.keyId)}`}>{$t('Manage memory')} →</a
+          <a class="link-inline ml-1" href={`${base}/memory?key=${encodeURIComponent(data.keyId)}`}
+            >{$t('Manage memory')} →</a
           >
         </dd>
       </div>
@@ -290,11 +315,22 @@
       <div class="flex flex-wrap items-end gap-2">
         <label class="flex flex-col text-xs text-slate-500">
           {$t('From')}
-          <input type="date" class="input mt-0.5" bind:value={customStart} max={customEnd || undefined} />
+          <input
+            type="date"
+            class="input mt-0.5"
+            bind:value={customStart}
+            max={customEnd && customEnd < today ? customEnd : today}
+          />
         </label>
         <label class="flex flex-col text-xs text-slate-500">
           {$t('To')}
-          <input type="date" class="input mt-0.5" bind:value={customEnd} min={customStart || undefined} />
+          <input
+            type="date"
+            class="input mt-0.5"
+            bind:value={customEnd}
+            min={customStart || undefined}
+            max={today}
+          />
         </label>
         <button
           type="button"
@@ -350,13 +386,17 @@
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
         {$t('Total tokens')}
       </div>
-      <div class="mt-1 text-2xl font-semibold text-slate-900">{formatTokens(stats.totalTokens)}</div>
+      <div class="mt-1 text-2xl font-semibold text-slate-900">
+        {formatTokens(stats.totalTokens)}
+      </div>
     </div>
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">
         {$t('Input tokens')}
       </div>
-      <div class="mt-1 text-2xl font-semibold text-slate-900">{formatTokens(stats.inputTokens)}</div>
+      <div class="mt-1 text-2xl font-semibold text-slate-900">
+        {formatTokens(stats.inputTokens)}
+      </div>
     </div>
     <div class="card">
       <div class="text-xs font-medium uppercase tracking-wide text-slate-400">

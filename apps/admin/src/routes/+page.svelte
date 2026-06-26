@@ -9,7 +9,12 @@
   import TokensCell from '$lib/components/TokensCell.svelte';
   import { formatTrendTick, trendAxisTicks, type TrendBucket } from '$lib/dashboard-chart.js';
   import { formatCount, formatTimestamp, formatTokens, formatTps, formatUsd } from '$lib/format.js';
-  import { DEFAULT_PAGE_SIZE, filtersToSearch, type RangeKey } from '$lib/requests-filters.js';
+  import {
+    DEFAULT_PAGE_SIZE,
+    filtersToSearch,
+    type RangeKey,
+    todayLocalDate,
+  } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
 
   type Stats = {
@@ -150,6 +155,8 @@
     customStart = data.startDate ?? '';
     customEnd = data.endDate ?? '';
   });
+  // Future days have no data → cap both pickers at the viewer's local today.
+  const today = todayLocalDate();
   const customActive = $derived(Boolean(data.startDate && data.endDate));
 
   // Apply the custom day range (only when both ends are set); the loader re-reads
@@ -268,7 +275,7 @@
           type="date"
           class="input mt-0.5"
           bind:value={customStart}
-          max={customEnd || undefined}
+          max={customEnd && customEnd < today ? customEnd : today}
         />
       </label>
       <label class="flex flex-col text-xs text-slate-500">
@@ -278,6 +285,7 @@
           class="input mt-0.5"
           bind:value={customEnd}
           min={customStart || undefined}
+          max={today}
         />
       </label>
       <button

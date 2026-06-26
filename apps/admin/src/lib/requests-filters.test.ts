@@ -9,6 +9,7 @@ import {
   parseRange,
   resolveCustomDayWindow,
   resolveWindow,
+  todayLocalDate,
 } from './requests-filters.js';
 
 describe('parseFilters', () => {
@@ -145,6 +146,18 @@ describe('localMidnightMs', () => {
     expect(localMidnightMs('2026-06-31')).toBeNull(); // June has 30 days
     expect(localMidnightMs('2026-13-01')).toBeNull();
     expect(localMidnightMs('nope')).toBeNull();
+  });
+});
+
+describe('todayLocalDate', () => {
+  it("formats the viewer's local day as zero-padded YYYY-MM-DD", () => {
+    // Local constructor (not UTC) so the assertion is timezone-independent.
+    expect(todayLocalDate(new Date(2026, 5, 26, 14, 30).getTime())).toBe('2026-06-26');
+    expect(todayLocalDate(new Date(2026, 0, 5, 0, 0).getTime())).toBe('2026-01-05'); // padding
+  });
+
+  it('is round-trippable through localMidnightMs (a real calendar day)', () => {
+    expect(localMidnightMs(todayLocalDate(new Date(2026, 11, 1).getTime()))).not.toBeNull();
   });
 });
 

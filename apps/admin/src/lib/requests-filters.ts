@@ -176,6 +176,17 @@ export function isValidDateParam(date: string | undefined): date is string {
   return date !== undefined && localMidnightMs(date) !== null;
 }
 
+// The viewer's local calendar 'today' as 'YYYY-MM-DD' — the latest day a custom range
+// may select, since future days have no data yet (used as the date inputs' `max`).
+// Built from local Y/M/D, NOT toISOString() (which is UTC and would jump a day near
+// midnight for non-UTC viewers).
+export function todayLocalDate(nowMs: number = Date.now()): string {
+  const d = new Date(nowMs);
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
 // Resolve a custom calendar-day range to a half-open window [start, end) in epoch ms
 // (viewer-local). `end` is midnight of the day AFTER endDate so the end day is
 // INCLUDED. null when either date isn't a real day or start > end — the caller then
