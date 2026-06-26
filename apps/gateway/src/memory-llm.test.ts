@@ -2,7 +2,11 @@ import type { ProviderClient } from "@helm/core";
 import type { Observation, RawMessage, Reflection } from "@helm/shared";
 import { MemoryLlmSchema } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
-import { createMemoryLlmRuntime } from "./memory-llm.js";
+import {
+  createMemoryLlmRuntime,
+  extractFactsDeterministic,
+  OBSERVATION_EMPTY_SENTINEL,
+} from "./memory-llm.js";
 
 function rawMessage(id: string, role: RawMessage["role"], content: string): RawMessage {
   return {
@@ -93,7 +97,7 @@ function runtimeArgs(overrides: {
 }
 
 describe("createMemoryLlmRuntime", () => {
-  it("keeps deterministic summarization when memory.llm.enabled is false", async () => {
+  it("summarizes USER content only — assistant + tool turns never enter the observation", async () => {
     const resolveModel = vi.fn();
     const runtime = createMemoryLlmRuntime({
       config: MemoryLlmSchema.parse({}),
@@ -106,13 +110,43 @@ describe("createMemoryLlmRuntime", () => {
       messages: [
         rawMessage("m1", "user", "Remember that invoices must use PO #123."),
         rawMessage("m2", "assistant", "Got it."),
+        // The exact shape that leaked into a fact in prod (la.atmy.work, project luke).
+        rawMessage("m3", "tool", "(Bash completed with no output)"),
       ],
       now: new Date("2026-06-09T00:00:00Z"),
     });
 
-    expect(result.observationText).toContain("user: Remember that invoices must use PO #123.");
-    expect(result.observationText).toContain("assistant: Got it.");
+    // User's own words, no `role:` prefix, no assistant/tool text.
+    expect(result.observationText).toBe("Remember that invoices must use PO #123.");
+    expect(result.observationText).not.toContain("Got it.");
+    expect(result.observationText).not.toContain("Bash completed");
     expect(resolveModel).not.toHaveBeenCalled();
+  });
+
+  it("emits a skip-listed tombstone for a slice with no user content (pure tool/assistant turn)", async () => {
+    const resolveModel = vi.fn();
+    const runtime = createMemoryLlmRuntime({
+      config: MemoryLlmSchema.parse({}),
+      resolveModel,
+      estimateTokens: (text) => Math.ceil(text.length / 4),
+      log: vi.fn(),
+    });
+
+    const result = await runtime.summarize({
+      messages: [
+        rawMessage("m1", "assistant", "Running the build."),
+        rawMessage("m2", "tool", '{"message":"Successfully stopped task"}'),
+      ],
+      now: new Date("2026-06-09T00:00:00Z"),
+    });
+
+    // Non-empty (satisfies observationText.min(1) so coverage advances) but a marker
+    // the fact extractor drops — never the model, never a fact.
+    expect(result.observationText).toBe(OBSERVATION_EMPTY_SENTINEL);
+    expect(resolveModel).not.toHaveBeenCalled();
+    expect(
+      extractFactsDeterministic([observation("o1", OBSERVATION_EMPTY_SENTINEL, new Date())]),
+    ).toEqual([]);
   });
 
   it("uses the configured observation_model for observer compaction and parses JSON", async () => {
@@ -181,7 +215,7 @@ describe("createMemoryLlmRuntime", () => {
       now: new Date("2026-06-09T00:00:00Z"),
     });
 
-    expect(result.observationText).toBe("user: Project Alpha invoices require PO #123.");
+    expect(result.observationText).toBe("Project Alpha invoices require PO #123.");
     expect(logs.some((l) => l.line === "memory.llm.fallback")).toBe(true);
   });
 
