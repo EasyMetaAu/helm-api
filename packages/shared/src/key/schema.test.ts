@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ApiKeyRecordSchema,
   CreateKeyRequestSchema,
+  effectiveMemoryProjectId,
   KeyRoleSchema,
   UpdateKeyRequestSchema,
 } from "./schema.js";
@@ -362,5 +363,17 @@ describe("per-key memory defaults (issue #97)", () => {
     });
     expect(res.success).toBe(true);
     expect(UpdateKeyRequestSchema.safeParse({ memory_mode: "loud" }).success).toBe(false);
+  });
+});
+
+describe("effectiveMemoryProjectId", () => {
+  it("falls back to the key's own id when memory_project_id is null (isolate by key)", () => {
+    expect(effectiveMemoryProjectId({ memory_project_id: null, key_id: "k-abc" })).toBe("k-abc");
+  });
+
+  it("uses the explicit memory_project_id when set (shared pool across keys)", () => {
+    expect(effectiveMemoryProjectId({ memory_project_id: "team-pool", key_id: "k-abc" })).toBe(
+      "team-pool",
+    );
   });
 });

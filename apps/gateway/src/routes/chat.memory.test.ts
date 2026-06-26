@@ -170,7 +170,7 @@ describe("gateway.chat.memory — request headers map onto metadata", () => {
     });
   });
 
-  it("defaults to off + null memory ids when no memory headers are present", async () => {
+  it("defaults to off + null thread/resource, project falls back to the key id (isolate by key) when no memory headers are present", async () => {
     const { deps, seen } = captureRouteDeps({});
     const app = buildApp(deps);
 
@@ -183,7 +183,9 @@ describe("gateway.chat.memory — request headers map onto metadata", () => {
     expect(seen[0]?.metadata).toMatchObject({
       thread_id: null,
       resource_id: null,
-      project_id: null,
+      // No explicit memory_project_id on the key => effective project is the key's
+      // own id (k1): memory is isolated per API key (effectiveMemoryProjectId).
+      project_id: "k1",
       memory_mode: "off",
     });
   });

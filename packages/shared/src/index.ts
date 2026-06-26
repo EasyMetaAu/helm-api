@@ -181,6 +181,7 @@ export {
   ApiKeyRecordSchema,
   type CreateKeyRequest,
   CreateKeyRequestSchema,
+  effectiveMemoryProjectId,
   type KeyRole,
   KeyRoleSchema,
   type MemoryThreadSource,

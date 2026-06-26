@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { hashKey, type KeyStore } from "@helm/core";
+import { effectiveMemoryProjectId } from "@helm/shared";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import type { AppEnv } from "../../app.js";
 import { type AuthIdentity, authMiddleware } from "../../middleware/auth.js";
@@ -280,7 +281,7 @@ export function registerMcpOAuth(app: Hono<AppEnv>, deps: McpOAuthDeps): void {
         kid: rec.key_id,
         pfx: rec.prefix,
         role: rec.role,
-        pid: rec.memory_project_id,
+        pid: effectiveMemoryProjectId(rec),
         mode: rec.memory_mode,
         cc: q.code_challenge,
         ru: q.redirect_uri,

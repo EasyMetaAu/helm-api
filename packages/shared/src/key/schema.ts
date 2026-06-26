@@ -92,6 +92,18 @@ export type OverBudgetBehavior = z.infer<typeof OverBudgetBehaviorSchema>;
 export type MemoryThreadSource = z.infer<typeof MemoryThreadSourceSchema>;
 export type ApiKeyRecord = z.infer<typeof ApiKeyRecordSchema>;
 
+// A key's EFFECTIVE memory project scope. `memory_project_id` is the explicit
+// opt-in to SHARE a memory pool across several keys; absent (null) it falls back
+// to the key's OWN id, so each API key isolates its memory by default — key A's
+// facts never leak to key B, while a single key keeps cross-session recall.
+// `account_id` stays the tenant boundary ABOVE this project sub-scope. Clearing
+// memory_project_id back to null therefore reverts a key to isolated-by-self.
+export function effectiveMemoryProjectId(
+  rec: Pick<ApiKeyRecord, "memory_project_id" | "key_id">,
+): string {
+  return rec.memory_project_id ?? rec.key_id;
+}
+
 // Admin-facing create-key request (docs/06 Key management). The plaintext is minted
 // server-side; the operator only specifies role + per-key caps. `.strict()` so an
 // unknown field fails closed (Principle 2). role defaults to "user" — root keys are not
