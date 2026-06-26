@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-26 · 三处请求列表统一为共享 RequestsTable 组件（admin UI；docs/07）
+
+- **背景（Lukin）**：dashboard「最近请求」与 key 详情的请求列表字段太少（各 **10 列**），要参考 `/admin/requests`（最全 **16 列**）补齐。
+- **根因**：三页各自**内联**一份 `<table>`（零组件复用，仅共用 `TokensCell`），故 dashboard/key 详情漏了 **Key/Task/Complexity/Fallbacks/TPS/Error** 六列；且任何「加列」只改 /requests 必再次漂移（这次需求本身就是漂移的症状）。
+- **决定**：抽共享 `lib/components/RequestsTable.svelte`（= 参考页完整列），三页复用，删两份重复表格（~140 行内联标记 + 各页 `onRowClick`/`formatTs`/`decidedByClass` 副本）。Per-caller 旋钮：`detailHref`（行链接，各页 from/返回目标不同）、`showKey`（key 详情传 `false`：每行同一 key、列冗余 → 整列隐藏）；key 单元格**两种筛选机制二选一**——`onKeyFilter?`（仅 /requests 传 → 页内筛选 `<button>`，更新自身 querystring）vs `keyHref?`（dashboard 传 → `<a>` 跳到按 key 预筛的列表，因 dashboard 无页内筛选），两者皆挂 `data-testid=key-filter`。
+- **取舍**：① dashboard 的 key 单元格是**链接**（Lukin 要求）：`keyHref` 渲染真 `<a>`（可中键新开标签页），跳 `/requests?key_id=<id>&<当前窗口>`（带 dashboard 当前 range/custom，落到同窗口）。**不复用 /requests 的 button 机制**——那是页内 `go()` 更新 querystring、被 `requests.test` 的 click→goto 契约锁死，改 `<a>` 既破测试又丢「保留其它 filter + chip」语义；故新增独立 `keyHref` 旁路，参考页零改动。② key 详情**隐藏 Key 列**（非 100% 照搬参考页），因每行都是该 key。③ **零新增 i18n 串**——组件全用 /requests 既有 superset（含各列 `title` 长句），无需 i18n:sync。④ decided-by 单元格统一为参考页纯 badge（dashboard 旧逐层 title tooltip 去掉，但其表上方本就有图例，信息不丢）。
+- **验证**：关键 testid（`request-row`/`decided-by`/`cell-tps`/`key-filter`/`key-filter-chip`）原样保留；新增 `RequestsTable.test`（key 单元格三分支：keyHref→`<a>`+href / onKeyFilter→`<button>`+回调 / `showKey=false`→无列）。**admin 493 单测全绿**（含 `requests.test`/`key-detail.test`/`home.test`）；**svelte-check 931/0/0**；prettier 干净。全在 `apps/admin`（原则 1）。
+
 ## 2026-06-26 · 记忆按 API key 隔离：用时回落 project_id ??= key_id（存储层；docs/08 + 原则 1/7）
 
 - **背景（Lukin）**：admin「记忆 · 按密钥」选某 key 仍列出全部事实。实为**记忆作用域是 account+project,不是单 key**:`account_id` 恒为常量 `"default"`(单租户),真正区分靠 `project_id`,缺省则 thread-locked(换会话即丢,见 [[memory-cross-session-needs-project-scope]])。需求:**默认按 API key 隔离**——key A 的记忆永不进 key B,同 key 跨会话仍记得。
@@ -26,19 +34,13 @@
 - **坑**：行 id 链现带 `?from=`，gateway e2e `admin.spec.ts` 的 `a[href$="/requests/<id>"]`（ends-with）失配 → 改 `href*=`（contains）。请求列表 pager（含 e2e :144 的 `pager-status`/`pager-next`）原样保留、不受影响。
 - **TDD+验证**：`requests-filters`（+keyId round-trip）、`requests.test`（chip/点击筛选/detailHref 带 from/back link/`safeBackTo` 开放重定向守卫）、`key-detail.test`（view-all 链接替换旧多页 pager 断言）、gateway `admin.test`（行 `key_id`）。**admin 488 单测 + 6 admin e2e + gateway admin 69 测全绿；typecheck/lint/svelte-check 0**。i18n 三键五语（translate relay 离线→手填 zh-hans/zh-hant/ja/ko）。改动全在 `apps/admin` + 1 处 gateway route（原则 1）。分支 `worktree-feat+requests-key-filter-and-back-nav`，**未提交未部署**。
 
-## 2026-06-26 · 仪表板 + 请求列表加自定义日期范围（admin UI；对应 docs/04 遥测展示）
-
-- **背景（Lukin）**：仪表板「今天/昨天/7d/30d/全部」预设不够灵活，要能选任意日期范围。
-- **决定（范围）**：Lukin 选「**仪表板 + 请求列表都加**」。`keys/[id]` 早有「预设 或 自定义日期」实现 → 把其通用窗口原语**下沉到共享 `requests-filters.ts`**（`localMidnightMs`/`isValidDateParam`/`resolveCustomDayWindow`/`bucketForWindow`），`key-detail-filters` 改为消费它（删私有副本、重导出 `bucketForWindow` 使其 import 与测试**完全不动**），三页同源。
-- **UX**：**不动共享 `RangeFilter` 组件**（零 e2e testid 风险）——自定义 From/To 用原生 `<input type="date">` 摆控件旁（仿 key 详情），有效区间时预设 `opacity-50` 变灰并被覆盖。窗口走 URL `?start=YYYY-MM-DD&end=YYYY-MM-DD`，**custom 胜过 preset**；半填/反序/非法日期 fail-soft 回落预设。`end` = endDate 次日 0 点（含尾日，DST 用 `setDate`）。
-- **关键点**：① 自定义模式无同比 delta（门 `!custom && today|yesterday`）、bucket 按实际跨度 `bucketForWindow`（≤2 天 hour 否则 day）。② **后端零改动**（getStats/listRequests 早收任意 epoch ms）。③ **i18n 零成本**（From/To/Apply/Clear 五语已被 key 详情用过）。④「查看全部」用 `filtersToSearch` 串 start/end 忠实带窗口跳转。
-- **TDD+验证**：`requests-filters.test` +18 例（4 个新原语 + parse/serialize round-trip + custom 胜出 + 半填回落）；`key-detail-filters.test` 8 例重构后不变绿。**admin 481 单测全绿、svelte-check 929/0/0、prettier 干净**。全在 `apps/admin`（原则 1）。分支 `worktree-dashboard-date-range`，**未提交未部署**。
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
 
+- **2026-06-26 · 仪表板+请求列表加自定义日期范围（admin UI；docs/04）**：把 key 详情早有的「预设 或 自定义日期」窗口原语下沉到共享 `requests-filters.ts`（localMidnightMs/isValidDateParam/resolveCustomDayWindow/bucketForWindow），三页同源（key-detail-filters 改消费它、重导出 bucketForWindow 保 import/测试不变）。不动共享 `RangeFilter`（零 e2e testid 风险），自定义 From/To 用原生 `<input type=date>`，窗口走 URL `?start=&end=` **custom 胜 preset**、半填/反序/非法 fail-soft 回落；自定义模式无同比 delta；后端零改动、i18n 零成本。requests-filters.test +18 例，admin 481 测绿、svelte-check 929/0/0。分支 `worktree-dashboard-date-range`，**未部署**。
 - **2026-06-26 · payload 体积治理：图片 CAS 外置 + gzip + 写队列字节背压 + 分页生成列（存储层；原则 7，docs/02）**：线上 helm.db 14GB 根因=native passthrough 把 CC 每轮重发的 base64 图+大 transcript 逐字落 `request_payloads`。治理:① 图片 CAS——`payload-blobs.ts` 按 sha256(字节) 外置到 `payload_blobs`、正文留 `helm-blob:` sentinel、INSERT OR IGNORE 跨轮去重(10–30×),`getPayload` 读时 rehydrate(UI/replay 零改动);blob 续命=`ON CONFLICT DO UPDATE created_at`、prune 同 cutoff(不变式 blob.created_at≥payload)。② gzip 仅 SQLite(PG 靠 TOAST)。③ 写队列背压改按字节 maxBytes=256MB+inFlightBytes 防 stalled-writer OOM、溢出优先丢 payload 保 telemetry。④ telemetry lane/decided_by 生成列(SQLite VIRTUAL/PG STORED)+索引。迁移 SQLite v29/v30、PG v28/v29。Codex 修 3 处(in-flight 字节漏算致命/Responses input_image 漏剥/rehydrate fail-open)。4670 单测绿。分支 `worktree-payload-cas-gzip-perf`。**运维 TODO**：部署后等 3 天保留期清旧胖行→手动「Compact database」VACUUM 收回 14GB→开回 auto-vacuum。
 - **2026-06-26 · 仪表板「昨天」视图加同比（admin UI；docs/04）**：复用 today-delta 机制，基准窗按视图分流——`dashboard-chart.ts` 加 `resolveYesterdayComparisonWindow`（前天整日 `[前天0点,昨天0点)`），compare 门 `today`→放宽 `today|yesterday`；昨天视图用 `vs day before yesterday`/`Day before yesterday:{value}` 五语两键纳入 `dashboard-locales` 守卫，`MIN_COMPARISON_BASELINE_REQUESTS=10` 不变。发 v0.21.33 并部署。
 - **2026-06-26 · key 详情图表对齐 dashboard + 缓存命中率卡片（admin UI；docs/04）**：dashboard「缓存 Token」卡片加命中率 subline + key 详情 `keys/[id]` 两图对齐 dashboard。命中率 = cached÷prompt（`promptTokens===0→null` 整行隐藏），两 loader 同算；key 详情富 tooltip（趋势「总花费」/环「花费」）逐字搬自 dashboard，`TrendPoint`/`ModelSlice` 补 `cost`。i18n 加 `Hit rate`。全在 `apps/admin`（原则 1）。发 v0.21.32。

@@ -4,19 +4,12 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import type { ApiKeyView } from '$lib/api/keys.js';
-  import type { RequestListItem, RequestsPage } from '$lib/api/requests.js';
+  import type { RequestsPage } from '$lib/api/requests.js';
   import type { DashboardStats } from '$lib/api/stats.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
-  import TokensCell from '$lib/components/TokensCell.svelte';
+  import RequestsTable from '$lib/components/RequestsTable.svelte';
   import { formatTrendTick, trendAxisTicks, type TrendBucket } from '$lib/dashboard-chart.js';
-  import {
-    durationParts,
-    formatCount,
-    formatTimestamp,
-    formatTokens,
-    formatTps,
-    formatUsd,
-  } from '$lib/format.js';
+  import { durationParts, formatCount, formatTokens, formatTps, formatUsd } from '$lib/format.js';
   import {
     KEY_DETAIL_DEFAULT_RANGE,
     type KeyDetailFilters,
@@ -171,26 +164,6 @@
     const from = `${base}/keys/${encodeURIComponent(data.keyId)}${qs ? `?${qs}` : ''}`;
     return `${base}/requests/${encodeURIComponent(traceId)}?from=${encodeURIComponent(from)}`;
   }
-  function onRowClick(event: MouseEvent, traceId: string): void {
-    if ((event.target as HTMLElement).closest('a')) return;
-    void goto(detailHref(traceId));
-  }
-  function formatTs(ts: string): string {
-    return formatTimestamp(ts) || '—';
-  }
-  function decidedByClass(d: RequestListItem['decided_by']): string {
-    switch (d) {
-      case 'rules':
-        return 'badge-rules';
-      case 'eval':
-        return 'badge-eval';
-      case 'fallback':
-        return 'badge-fallback';
-      default:
-        return 'badge-neutral';
-    }
-  }
-
   // ── Config card helpers (mirror the list view's labels) ──────────────────────
   function limitLabel(v: number | null): string {
     if (v === null) return $t('Default');
@@ -519,59 +492,7 @@
     {#if data.requests.items.length === 0}
       <div class="empty-state">{$t('No requests for this key in the selected window.')}</div>
     {:else}
-      <div class="table-wrap">
-        <table class="table-base">
-          <thead class="table-head">
-            <tr>
-              <th class="px-3 py-2 font-medium">{$t('Request ID')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Time')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Requested model')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Decided by')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Lane')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Served model')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Status')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Latency')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Tokens')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Cost')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each data.requests.items as r (r.trace_id)}
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-              <tr
-                data-testid="request-row"
-                class="table-row cursor-pointer"
-                onclick={(e) => onRowClick(e, r.trace_id)}
-              >
-                <td class="px-3 py-2">
-                  <a
-                    class="link-inline block max-w-[7rem] truncate font-mono text-ink-strong lg:max-w-none"
-                    href={detailHref(r.trace_id)}
-                    title={r.trace_id}>{r.trace_id}</a
-                  >
-                </td>
-                <td class="px-3 py-2 text-ink-body">{formatTs(r.ts)}</td>
-                <td class="px-3 py-2 text-ink-body">{r.requested_model ?? '—'}</td>
-                <td class="px-3 py-2">
-                  <span class={decidedByClass(r.decided_by)}>{r.decided_by}</span>
-                </td>
-                <td class="px-3 py-2 text-ink-body">{r.lane || '—'}</td>
-                <td class="px-3 py-2 font-mono text-xs text-ink-body">{r.final_model ?? '—'}</td>
-                <td class="px-3 py-2">
-                  {#if r.status === 'error'}
-                    <span class="badge-error">{$t('error')}</span>
-                  {:else}
-                    <span class="badge-ok">{$t('ok')}</span>
-                  {/if}
-                </td>
-                <td class="px-3 py-2 font-mono text-ink-body">{r.latency_ms}ms</td>
-                <td class="px-3 py-2"><TokensCell usage={r.usage} /></td>
-                <td class="px-3 py-2 font-mono text-ink-body">{formatUsd(r.cost_usd)}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+      <RequestsTable items={data.requests.items} {detailHref} showKey={false} />
 
       {#if hasMore}
         <!-- Only the most-recent page is shown here. The full history lives in the
