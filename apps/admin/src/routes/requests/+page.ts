@@ -24,6 +24,7 @@ export const load: PageLoad = async ({ url }) => {
     decidedBy: filters.decidedBy,
     lane: filters.lane,
     model: filters.model,
+    keyId: filters.keyId,
     start,
     end,
   });

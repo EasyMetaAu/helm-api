@@ -82,6 +82,12 @@ describe('filtersToSearch', () => {
     } as const;
     expect(parseFilters(new URLSearchParams(filtersToSearch(f)))).toEqual(f);
   });
+
+  it('round-trips the api-key scope as key_id', () => {
+    const f = { range: 'all', keyId: 'k_abc123', page: 1, pageSize: 50 } as const;
+    expect(filtersToSearch(f)).toBe('range=all&key_id=k_abc123');
+    expect(parseFilters(new URLSearchParams(filtersToSearch(f)))).toEqual(f);
+  });
 });
 
 describe('custom calendar-day range', () => {

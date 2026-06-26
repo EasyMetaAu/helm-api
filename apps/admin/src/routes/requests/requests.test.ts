@@ -4,6 +4,7 @@ import { goto } from '$app/navigation';
 import type { RequestDetail, RequestListItem } from '$lib/api/requests.js';
 import { DEFAULT_FILTERS, type RequestsFilters } from '$lib/requests-filters.js';
 import DetailPage from './[traceId]/+page.svelte';
+import { safeBackTo } from './[traceId]/+page.js';
 import ListPage from './+page.svelte';
 
 // The Debug UI is a READ-ONLY consumer of /admin/api/* — it renders the trail the
@@ -169,10 +170,24 @@ describe('requests list page', () => {
     expect(within(rows[2]).getByTestId('decided-by')).toHaveTextContent('default');
   });
 
-  it('links each row to its detail route /requests/<trace_id>', () => {
+  it('links each row to its detail route, carrying the current list URL as `from`', () => {
     render(ListPage, { data: listData([item('tr_link')]) });
     const link = screen.getByTestId('request-row').querySelector('a');
-    expect(link).toHaveAttribute('href', '/requests/tr_link');
+    // Default (clean) list URL → from is the bare /requests, so Back returns here.
+    expect(link).toHaveAttribute('href', '/requests/tr_link?from=%2Frequests');
+  });
+
+  it('carries the active filters into the detail `from` so Back restores them', () => {
+    render(ListPage, {
+      data: listData([item('tr_link')], {
+        filters: { range: 'all', status: 'error', page: 2, pageSize: 50 },
+      }),
+    });
+    const link = screen.getByTestId('request-row').querySelector('a');
+    expect(link).toHaveAttribute(
+      'href',
+      `/requests/tr_link?from=${encodeURIComponent('/requests?range=all&status=error&page=2')}`,
+    );
   });
 
   it('shows the request ID as the first column and the recorded time, with no separate "view" action', () => {
@@ -192,7 +207,29 @@ describe('requests list page', () => {
     vi.mocked(goto).mockClear();
     render(ListPage, { data: listData([item('tr_go')]) });
     await fireEvent.click(screen.getByTestId('request-row'));
-    expect(goto).toHaveBeenCalledWith('/requests/tr_go');
+    expect(goto).toHaveBeenCalledWith('/requests/tr_go?from=%2Frequests');
+  });
+
+  it('clicking a row key scopes the list to that key (key_id filter)', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, { data: listData([item('tr_k', { key_id: 'k_42' })]) });
+    // The key cell is a filter button (so the row click does NOT open the detail).
+    await fireEvent.click(screen.getByTestId('key-filter'));
+    expect(goto).toHaveBeenCalledWith('?key_id=k_42', expect.anything());
+  });
+
+  it('shows a removable chip for the active key filter and clears it', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, {
+      data: listData([item('tr_k', { key_name: 'Prod', key_id: 'k_42' })], {
+        filters: { ...DEFAULT_FILTERS, keyId: 'k_42' },
+      }),
+    });
+    // The chip labels itself from the matching row (name preferred over prefix).
+    expect(screen.getByTestId('key-filter-chip')).toHaveTextContent('Prod');
+    // Clearing drops key_id → back to the clean default URL.
+    await fireEvent.click(screen.getByTestId('key-filter-clear'));
+    expect(goto).toHaveBeenCalledWith('?', expect.anything());
   });
 
   it('shows an empty state when there are no requests', () => {
@@ -272,6 +309,28 @@ describe('requests list page', () => {
 describe('requests detail page', () => {
   beforeEach(() => {
     getRequest.mockReset();
+  });
+
+  it('Back link returns to the originating page passed via the loader (backTo)', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: { captured: false },
+        traceId: 'tr_1',
+        backTo: '/requests?status=error&page=2',
+      },
+    });
+    expect(screen.getByTestId('back-to-requests')).toHaveAttribute(
+      'href',
+      '/requests?status=error&page=2',
+    );
+  });
+
+  it('Back link falls back to the bare list when no backTo was provided', () => {
+    render(DetailPage, {
+      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
+    });
+    expect(screen.getByTestId('back-to-requests')).toHaveAttribute('href', '/requests');
   });
 
   it('renders the decision chain, cost breakdown (incl. eval) and a not-recorded notice when capture is off', () => {
@@ -426,5 +485,20 @@ describe('requests detail page', () => {
       },
     });
     expect(screen.getByTestId('detail-error')).toBeInTheDocument();
+  });
+});
+
+describe('safeBackTo (Back-link open-redirect guard)', () => {
+  it('keeps a same-app relative path verbatim (filters survive)', () => {
+    expect(safeBackTo('/requests?status=error&page=2', '/requests')).toBe(
+      '/requests?status=error&page=2',
+    );
+    expect(safeBackTo('/keys/k1?range=7d', '/requests')).toBe('/keys/k1?range=7d');
+  });
+
+  it('falls back for missing / scheme / protocol-relative / backslash targets', () => {
+    for (const bad of [null, '', '//evil.com', '/\\evil.com', 'https://evil.com', 'javascript:1']) {
+      expect(safeBackTo(bad, '/requests')).toBe('/requests');
+    }
   });
 });

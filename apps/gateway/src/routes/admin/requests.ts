@@ -55,6 +55,10 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
         ...r.record,
         created_at: r.createdAt.getTime(),
         key_name: nameById.get(r.apiKeyId) ?? null,
+        // The recorded api_key_id (internal UUID), so the SPA can offer "filter by
+        // this key". NOT key material — the plaintext key is only ever a sha256
+        // hash (Principle 7); this is the same id used in the /keys/<id> URL.
+        key_id: r.apiKeyId,
       })),
       total,
       page: q.page,

@@ -29,6 +29,10 @@ export interface RequestsFilters {
   decidedBy?: RequestListItem['decided_by'];
   lane?: string;
   model?: string;
+  // Exact api_key_id scope. Not a typed control — it's set by clicking a row's key
+  // (or arriving via the key detail page's "view more" link) and shown as a
+  // removable chip. Serialized as `key_id` to match the backend schema.
+  keyId?: string;
   page: number;
   pageSize: number;
 }
@@ -73,6 +77,7 @@ export function parseFilters(sp: URLSearchParams): RequestsFilters {
   const decidedBy = sp.get('decided_by');
   const lane = sp.get('lane')?.trim();
   const model = sp.get('model')?.trim();
+  const keyId = sp.get('key_id')?.trim();
   const pageRaw = Number(sp.get('page'));
   const pageSizeRaw = Number(sp.get('pageSize'));
   return {
@@ -91,6 +96,7 @@ export function parseFilters(sp: URLSearchParams): RequestsFilters {
         : undefined,
     lane: lane || undefined,
     model: model || undefined,
+    keyId: keyId || undefined,
     page: Number.isInteger(pageRaw) && pageRaw > 1 ? pageRaw : 1,
     // Only the offered sizes are accepted; anything else (junk, a hand-typed value)
     // degrades to the default so a stale bookmark always renders.
@@ -117,6 +123,7 @@ export function filtersToSearch(f: RequestsFilters): string {
   if (f.decidedBy) qs.set('decided_by', f.decidedBy);
   if (f.lane?.trim()) qs.set('lane', f.lane.trim());
   if (f.model?.trim()) qs.set('model', f.model.trim());
+  if (f.keyId?.trim()) qs.set('key_id', f.keyId.trim());
   if (f.page > 1) qs.set('page', String(f.page));
   if (f.pageSize && f.pageSize !== DEFAULT_PAGE_SIZE) qs.set('pageSize', String(f.pageSize));
   return qs.toString();

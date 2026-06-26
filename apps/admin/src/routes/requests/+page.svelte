@@ -85,6 +85,10 @@
       decidedBy: decidedBy || undefined,
       lane: lane.trim() || undefined,
       model: model.trim() || undefined,
+      // The key scope has no input control — it persists across other filter
+      // changes and is only changed by clicking a row's key or clearing the chip
+      // (`next` overrides). Reset passes `keyId: undefined` to drop it.
+      keyId: data.filters.keyId,
       pageSize,
       page: 1,
       ...next,
@@ -124,6 +128,7 @@
       decidedBy: decidedBy || undefined,
       lane: lane.trim() || undefined,
       model: model.trim() || undefined,
+      keyId: data.filters.keyId,
       pageSize,
       page: n,
     });
@@ -138,20 +143,35 @@
     model = '';
     customStart = '';
     customEnd = '';
-    go();
+    go({ keyId: undefined });
   }
+
+  // Label for the active key-filter chip: the recognizable key name/prefix from
+  // the first matching row, falling back to a truncated id when the filtered
+  // window has no rows to read it from.
+  const keyFilterLabel = $derived(
+    data.items[0]?.key_name ||
+      data.items[0]?.key_prefix ||
+      (data.filters.keyId ? `${data.filters.keyId.slice(0, 12)}…` : ''),
+  );
 
   // Detail route for a row. The whole row is clickable (below); we also keep a
   // real <a> on the request-id cell so middle-click / open-in-new-tab / keyboard
-  // still work, and the row click is a mouse convenience on top.
+  // still work, and the row click is a mouse convenience on top. We carry the
+  // CURRENT list URL (filters + page) as `from` so the detail page's Back link
+  // returns here exactly as it was — survives reload / new-tab (the state is in
+  // the URL, not history).
   function detailHref(traceId: string): string {
-    return `${base}/requests/${traceId}`;
+    const search = filtersToSearch(data.filters);
+    const from = `${base}/requests${search ? `?${search}` : ''}`;
+    return `${base}/requests/${traceId}?from=${encodeURIComponent(from)}`;
   }
 
-  // Navigate when the row is clicked, EXCEPT when the click originates on the
-  // inner request-id link — there the anchor handles its own navigation.
+  // Navigate when the row is clicked, EXCEPT when the click originates on an
+  // inner control (the request-id link handles its own navigation; the key cell
+  // is a filter button) — closest('a, button') lets those handle the click.
   function onRowClick(event: MouseEvent, traceId: string): void {
-    if ((event.target as HTMLElement).closest('a')) return;
+    if ((event.target as HTMLElement).closest('a, button')) return;
     void goto(detailHref(traceId));
   }
 
@@ -300,6 +320,26 @@
     </div>
   </form>
 
+  <!-- Active API-key scope (set by clicking a row's key, or arriving from a key's
+       "view more" link). Shown as a removable chip since it has no input control. -->
+  {#if data.filters.keyId}
+    <div data-testid="key-filter-chip" class="flex items-center gap-2 text-sm">
+      <span class="text-ink-muted">{$t('Filtered by key')}:</span>
+      <span
+        class="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-slate-50 px-2.5 py-0.5 font-medium text-ink-strong"
+      >
+        {keyFilterLabel}
+        <button
+          type="button"
+          data-testid="key-filter-clear"
+          class="text-ink-muted hover:text-ink-strong"
+          aria-label={$t('Clear')}
+          onclick={() => go({ keyId: undefined })}>&times;</button
+        >
+      </span>
+    </div>
+  {/if}
+
   <div class="card flex flex-col gap-2 lg:flex-row lg:items-center lg:gap-6">
     <span class="text-xs font-medium uppercase tracking-wide text-ink-muted"
       >{$t('Decided by')}</span
@@ -317,6 +357,17 @@
       {$t('Classification failed safely and fell back to balanced.')}
     </span>
   </div>
+
+  <!-- Key cell contents (name + prefix subtitle, or bare prefix). Shared between
+       the clickable filter button and the non-clickable legacy fallback. -->
+  {#snippet keyLabel(r: RequestListItem)}
+    {#if r.key_name}
+      <span class="text-ink-strong" title={r.key_prefix}>{r.key_name}</span>
+      <code class="block font-mono text-xs text-ink-muted">{r.key_prefix}</code>
+    {:else}
+      <code class="font-mono text-ink-strong">{r.key_prefix}</code>
+    {/if}
+  {/snippet}
 
   {#if data.items.length === 0}
     <div data-testid="requests-empty" class="empty-state">
@@ -412,15 +463,21 @@
               </td>
               <td class="px-3 py-2 text-ink-body">{formatTs(r.ts)}</td>
               <td class="px-3 py-2">
-                {#if r.key_name}
-                  <!-- Operator-assigned NAME when the key has one — far more
-                       recognizable than the opaque prefix. The prefix follows as
-                       a muted subtitle so the row is still traceable to the key. -->
-                  <span class="text-ink-strong" title={r.key_prefix}>{r.key_name}</span>
-                  <code class="block font-mono text-xs text-ink-muted">{r.key_prefix}</code>
+                {#if r.key_id}
+                  <!-- Click the key to scope the list to it (sets the ?key_id
+                       filter). A <button>, so onRowClick lets it handle the click
+                       instead of opening the detail page. -->
+                  <button
+                    type="button"
+                    data-testid="key-filter"
+                    class="block text-left hover:underline"
+                    title={$t('Filter by this key')}
+                    onclick={() => go({ keyId: r.key_id })}
+                  >
+                    {@render keyLabel(r)}
+                  </button>
                 {:else}
-                  <!-- Unnamed (or deleted) key — fall back to the prefix as before. -->
-                  <code class="font-mono text-ink-strong">{r.key_prefix}</code>
+                  {@render keyLabel(r)}
                 {/if}
               </td>
               <td class="px-3 py-2 text-ink-body">{r.requested_model ?? '—'}</td>
