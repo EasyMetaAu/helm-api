@@ -35,13 +35,21 @@ export const load: PageLoad = async ({
 }> => {
   const traceId = params.traceId;
   const backTo = safeBackTo(url.searchParams.get('from'), `${base}/requests`);
+  // Payload fails open INDEPENDENTLY: a slow / failed body capture must not sink the
+  // whole page — its own `.catch` keeps `Promise.all` from rejecting on a payload
+  // error, so the decision trail still renders. Only a failure of the detail itself
+  // is fatal, and even then we surface a friendly, retryable state (never
+  // white-screen, DoD).
+  const payloadP = getRequestPayload(traceId).catch(
+    (): RequestPayloadView => ({ captured: false }),
+  );
   try {
-    const [detail, payload] = await Promise.all([getRequest(traceId), getRequestPayload(traceId)]);
+    const [detail, payload] = await Promise.all([getRequest(traceId), payloadP]);
     return { detail, payload, traceId, backTo };
   } catch (e) {
     return {
       detail: null,
-      payload: { captured: false },
+      payload: await payloadP,
       traceId,
       backTo,
       loadError: e instanceof Error ? e.message : 'Failed to load request',

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
+  import { invalidateAll } from '$app/navigation';
   import type { RequestDetail, RequestPayloadView } from '$lib/api/requests.js';
   import { deepEqual } from '$lib/deep-equal.js';
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
@@ -77,6 +78,12 @@
     <div data-testid="detail-error" role="alert" class="alert-error text-center">
       <p class="font-medium">{$t('Could not load this request.')}</p>
       <p class="mt-1">{data.loadError ?? $t('The trace may not exist or has expired.')}</p>
+      <button
+        type="button"
+        data-testid="detail-retry"
+        class="btn-secondary mt-3"
+        onclick={() => invalidateAll()}>{$t('Retry')}</button
+      >
     </div>
   {:else}
     {@const d = data.detail}

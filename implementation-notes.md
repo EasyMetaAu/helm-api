@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-26 · admin 导航骨架屏 + 详情页 payload 独立 fail-open（admin UI；docs/07，框架体感）
+
+- **背景（Lukin，线上体感）**：la.atmy.work admin 点请求列表/详情，进度条走完却不出内容、再点一次才出——「不像正常 HTML 页面」。调研定性：**非 SvelteKit bug**，是 SPA 阻塞式 `load` + 冷查询慢叠加，外加详情页静默吞错。后端冷查询已修（v0.21.35 indexed admin filters），剩前端体感 + 一个真 bug。
+- **决定（不走 SSR / 不逐页 await）**：SSR 违反原则 1（网关与 UI 解耦、admin headless 静态托管）且后端已快收益微；逐页 `{#await}` 要改 11 个 load + 9 个组件 churn 大。选 **全局延迟骨架**：`+layout.svelte` 监听 `$navigating`，仅「不同路由」且超 `SKELETON_DELAY_MS=150ms` 才显示 `PageSkeleton`（dashboard/detail/list 三形态、按 `route.id` 选）——热查询直接秒换不闪、同路由换筛选/翻页保留旧数据。一处改动覆盖所有页。
+- **详情页 fail-open（真 bug）**：`[traceId]/+page.ts` 原 `Promise.all([getRequest, getRequestPayload])` 注释说 payload「fails open」但代码里 payload 一失败**连累整页** → 改 payload 独立 `.catch(()=>{captured:false})`，只有 detail 本身失败才进错误态；错误态加 **Retry 按钮**（`invalidateAll`）。
+- **验证**：新 `PageSkeleton.svelte`（无文案、`aria-hidden`、零 i18n）；`requests.test` +2（payload 失败仍出 detail / detail 失败才报错，`PageLoad` 返回类型须 `Exclude<…,void>` 收窄）。admin **504 单测全绿**、svelte-check 934/0/0、build 通过。保留所有 testid（e2e 安全）。分支 `fix-admin-nav-skeleton`。
+
 ## 2026-06-26 · 记忆事实 subject_key 长度上限 + base64/图片 blob 不入库（gateway 记忆；docs/12 P6）
 
 - **背景（Lukin，box 实查）**：`memory_facts` 项目 `luke` 出现一条 `subject_key` 长 **1920 字符**（一张 jpeg base64 data-URL），真实 subject 都 ≤31。根因：用户消息里的图片，deepseek 观察失败回落确定性兜底 → `serializeContent` 把 multipart 内容 JSON 化（含 base64）→ `extractFactsDeterministic` 取「前 6 词」，而 base64 无空格 = 一个巨型「词」→ 巨型 slug。即上一轮 user-only 修复（v0.22.4）只挡了 tool 角色，**图片是合法 user 内容仍会漏过兜底**。
@@ -24,20 +31,13 @@
 - **坑**：① `AddFactDialog.test` 的 reject 测试在 `beforeEach` 只 `mockReset()`（无默认实现）时，后续 `mockRejectedValue` 会被 vitest 当**未处理拒绝**判失败——须 reset 后补一个默认 `mockResolvedValue`（照抄 `CreateKeyDialog.test`，组件本身正确，纯测试基架问题）。② `onsearch` 不是 Svelte 识别的 prop（svelte-check 报错）→ 改 form `onsubmit` + Search 按钮。③ `i18n:update` 把新键以**英文值**填入各 locale（非空），故"空键扫描"查不到——须按 git diff 的 13 个新键手填 zh/ja/ko。
 - **验证**：新增 store superseded 测（pg）、route superseded+POST 测、page 重排/分页/搜索/新增测、`AddFactDialog.test`。**admin 502 单测 + core/shared 471 + 4 memory 文件 48 全绿**；typecheck 四包 Done、svelte-check 933/0/0、biome+prettier 干净。分支 `feat-memory-admin-redesign`。
 
-## 2026-06-26 · 记忆 observer 收紧为仅观察 user 内容（gateway 记忆；docs/08，原则 1/7）
-
-- **背景（Lukin，box 实查）**：la.atmy.work `memory_facts` 项目 `luke` 出现 `subject_key=tool-bash-completed-with-no-output`、`fact_text="tool: (Bash completed with no output)"` 等**工具输出原文**当事实，外加 `dev-server: ready`/`file-update: …success`/空 assistant 等瞬时噪音。Lukin 质疑：记忆不该只来自 user？
-- **根因（双重确定性兜底）**：① observer 入库 `toMemoryRole` 收 user/assistant/tool 全角色（docs/08 原始审计存储，**有意为之**，不动）。② 该轮 deepseek 观察模型失败 → 回落 `summarizeMessagesDeterministic`（`apps/gateway/src/memory-llm.ts`）逐字 `${role}: ${content}` dump，**含 tool**。③ 事实抽取也回落 `extractFactsDeterministic`：subject=前 6 词 → slug `tool-bash-completed-with-no-output`（与 box 逐字符吻合）。**eager 快路径早已只取 user（`observer.ts:40-46`），是 compaction→summarize 这条没对齐**。
-- **决定（Lukin 选「仅 user」）**：在 **summarize 唯一卡点**过滤 `role==="user"`（同时作用于 LLM `observationPrompt` 与确定性兜底），并硬化 `summarizeMessagesDeterministic`（去角色前缀、仅 user）。**不在入库层删 assistant/tool**——docs/08 要原始审计存储；只让「成为观察/事实」的内容是 user。改动**全在 `memory-llm.ts` 一个文件**，core observer/compaction 零改 → blast 半径小。
-- **边角（纯 tool/assistant 切片）**：store `observationText.min(1)` 不许空观察，但切片仍须被「covered」否则 compaction **poison-block**（`find(shouldCompact)` 卡在最旧未覆盖段）。故无 user 内容时 summarize 返回 `OBSERVATION_EMPTY_SENTINEL="[no user content]"`（满足 min(1)、推进覆盖、跳过模型），并在 `extractFactsDeterministic` skip 之（同 `[pruned]`）。代价：极罕见情况 inject 会带这条 sentinel（诚实墓碑、非 user 数据泄漏），YAGNI 不过滤。
-- **TDD+验证**：改写 2 个旧测（确定性摘要不再含 `assistant:`/`role:` 前缀）+ 新增 tool 排除、纯 tool 切片→sentinel→0 fact。gateway memory-llm 19 测、core+gateway memory **294 测全绿**，`pnpm typecheck` 四包 Done、biome 0。
-- **历史污染清理**：见任务——box 上 `tool:` 那条 + 瞬时噪音（dev-server/file-update/空 assistant/no-context/task）需删（Lukin 明确要清）；删前备份 + 预览，清 facts/FTS/observations 一致。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-26 · 记忆 observer 收紧为仅观察 user 内容（docs/08，原则 1/7）**：box 出现 tool 输出当事实（`tool: (Bash completed...)`）+ 瞬时噪音，根因 compaction→`summarizeMessagesDeterministic` 逐字 dump 含 tool（eager 快路径早已只取 user，是这条没对齐）。修：在 summarize 唯一卡点过滤 `role==='user'`（LLM prompt + 确定性兜底都作用），不在入库层删（docs/08 要原始审计存储）。纯 tool/assistant 切片返回 `[no user content]` sentinel 满足 min(1)+推进 compaction 覆盖。gateway+core memory 294 测绿。并入 v0.22.4 部署（见 [[memory-observer-user-only-fix]]）。
 
 - **2026-06-26 · 三处请求列表统一为共享 RequestsTable 组件（admin UI；docs/07）**：dashboard「最近请求」+ key 详情请求列表只 10 列、漏 Key/Task/Complexity/Fallbacks/TPS/Error，因三页各自内联 `<table>`。抽共享 `lib/components/RequestsTable.svelte`（= /requests 完整 16 列），三页复用删两份重复。Per-caller 旋钮：`detailHref`、`showKey`（key 详情传 false 隐藏冗余 Key 列）、key 单元格二选一 `onKeyFilter?`（/requests 页内筛选 button）vs `keyHref?`（dashboard 真 `<a>` 跳预筛列表）。保留 `request-row`/`decided-by`/`cell-tps`/`key-filter` testid，零新增 i18n。admin 493 测绿。并入 v0.22.3 部署。
 

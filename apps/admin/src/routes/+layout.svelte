@@ -1,9 +1,10 @@
 <script lang="ts">
   import '../app.css';
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
-  import { page } from '$app/stores';
+  import { navigating, page } from '$app/stores';
   import NavProgress from '$lib/components/NavProgress.svelte';
+  import PageSkeleton from '$lib/components/PageSkeleton.svelte';
   import StatusCluster from '$lib/components/StatusCluster.svelte';
   import { initI18n, t } from '$lib/i18n';
 
@@ -16,6 +17,37 @@
 
   // Mobile slide-over state. Desktop (md+) keeps the sidebar pinned.
   let navOpen = $state(false);
+
+  // Page-to-page skeleton. While a navigation to a DIFFERENT route is in flight we
+  // show a content skeleton instead of the frozen previous page — but only after a
+  // short grace period, so warm (fast) navigations swap straight to the real page
+  // with no skeleton flash. Same-route changes (filters/pager) keep their data
+  // visible; the top NavProgress bar is feedback enough there.
+  const SKELETON_DELAY_MS = 150;
+  let pendingRouteId = $state<string | null>(null);
+  let skeletonTimer: ReturnType<typeof setTimeout> | undefined;
+
+  $effect(() => {
+    const nav = $navigating;
+    untrack(() => {
+      clearTimeout(skeletonTimer);
+      if (nav?.to && nav.to.route.id !== nav.from?.route.id) {
+        const id = nav.to.route.id;
+        skeletonTimer = setTimeout(() => {
+          pendingRouteId = id;
+        }, SKELETON_DELAY_MS);
+      } else {
+        pendingRouteId = null;
+      }
+    });
+  });
+  $effect(() => () => clearTimeout(skeletonTimer));
+
+  function skeletonVariant(routeId: string | null): 'list' | 'detail' | 'dashboard' {
+    if (routeId === '/') return 'dashboard';
+    if (routeId === '/requests/[traceId]' || routeId === '/keys/[keyId]') return 'detail';
+    return 'list';
+  }
 
   type Item = { seg: string; label: string; desc: string; icon: string };
   // Single-path outline icons (Heroicons) — no icon dependency, stays lean.
@@ -189,7 +221,11 @@
     </header>
 
     <main class="flex-1 overflow-y-auto">
-      {@render children()}
+      {#if pendingRouteId !== null}
+        <PageSkeleton variant={skeletonVariant(pendingRouteId)} />
+      {:else}
+        {@render children()}
+      {/if}
     </main>
   </div>
 </div>
