@@ -6,9 +6,9 @@
   import type { RequestListItem } from '$lib/api/requests.js';
   import type { DashboardStats } from '$lib/api/stats.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
-  import TokensCell from '$lib/components/TokensCell.svelte';
+  import RequestsTable from '$lib/components/RequestsTable.svelte';
   import { formatTrendTick, trendAxisTicks, type TrendBucket } from '$lib/dashboard-chart.js';
-  import { formatCount, formatTimestamp, formatTokens, formatTps, formatUsd } from '$lib/format.js';
+  import { formatCount, formatTokens, formatTps, formatUsd } from '$lib/format.js';
   import {
     DEFAULT_PAGE_SIZE,
     filtersToSearch,
@@ -192,33 +192,24 @@
     return `${base}/requests/${traceId}`;
   }
 
-  function onRowClick(event: MouseEvent, traceId: string): void {
-    if ((event.target as HTMLElement).closest('a')) return;
-    void goto(detailHref(traceId));
-  }
-
-  // Format the recorded ISO timestamp in the viewer's local zone (shared helper);
-  // '—' for a legacy row that carried none.
-  function formatTs(ts: string): string {
-    return formatTimestamp(ts) || '—';
+  // The dashboard has no in-page filter, so a row's Key cell links to the full
+  // requests list pre-filtered to that key, carrying the current window so it opens
+  // on the same range the dashboard is showing.
+  function keyFilterHref(keyId: string): string {
+    const qs = filtersToSearch({
+      range: data.range,
+      startDate: data.startDate,
+      endDate: data.endDate,
+      keyId,
+      page: 1,
+      pageSize: DEFAULT_PAGE_SIZE,
+    });
+    return `${base}/requests${qs ? `?${qs}` : ''}`;
   }
 
   function formatTrendAxisValue(value: unknown): string {
     const date = value instanceof Date ? value : new Date(value as string | number);
     return Number.isNaN(date.getTime()) ? String(value ?? '') : formatTrendTick(date, data.bucket);
-  }
-
-  function decidedByClass(d: RequestListItem['decided_by']): string {
-    switch (d) {
-      case 'rules':
-        return 'badge-rules';
-      case 'eval':
-        return 'badge-eval';
-      case 'fallback':
-        return 'badge-fallback';
-      default:
-        return 'badge-neutral';
-    }
   }
 
   const cards = [
@@ -553,70 +544,7 @@
         )}
       </div>
     {:else}
-      <div class="table-wrap">
-        <table class="table-base">
-          <thead class="table-head">
-            <tr>
-              <th class="px-3 py-2 font-medium">{$t('Request ID')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Time')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Requested model')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Decided by')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Lane')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Served model')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Status')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Latency')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Tokens')}</th>
-              <th class="px-3 py-2 font-medium">{$t('Cost')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each recent as r (r.trace_id)}
-              <!-- The whole row links to the detail page; the request-id cell keeps a
-                   real <a> for keyboard / open-in-new-tab. (Mirrors /requests.) -->
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-              <tr
-                data-testid="request-row"
-                class="table-row cursor-pointer"
-                onclick={(e) => onRowClick(e, r.trace_id)}
-              >
-                <td class="px-3 py-2">
-                  <a
-                    class="link-inline block max-w-[7rem] truncate font-mono text-ink-strong lg:max-w-none"
-                    href={detailHref(r.trace_id)}
-                    title={r.trace_id}>{r.trace_id}</a
-                  >
-                </td>
-                <td class="px-3 py-2 text-ink-body">{formatTs(r.ts)}</td>
-                <td class="px-3 py-2 text-ink-body">{r.requested_model ?? '—'}</td>
-                <td class="px-3 py-2">
-                  <span
-                    class={decidedByClass(r.decided_by)}
-                    title={r.decided_by === 'rules'
-                      ? $t('Chosen by deterministic Layer-1 rules.')
-                      : r.decided_by === 'eval'
-                        ? $t('Chosen by the Layer-2 small-model evaluator.')
-                        : r.decided_by === 'fallback'
-                          ? $t('No rule matched, so it defaulted to the balanced lane.')
-                          : ''}>{r.decided_by}</span
-                  >
-                </td>
-                <td class="px-3 py-2 text-ink-body">{r.lane || '—'}</td>
-                <td class="px-3 py-2 font-mono text-xs text-ink-body">{r.final_model ?? '—'}</td>
-                <td class="px-3 py-2">
-                  {#if r.status === 'error'}
-                    <span class="badge-error">{$t('error')}</span>
-                  {:else}
-                    <span class="badge-ok">{$t('ok')}</span>
-                  {/if}
-                </td>
-                <td class="px-3 py-2 font-mono text-ink-body">{r.latency_ms}ms</td>
-                <td class="px-3 py-2"><TokensCell usage={r.usage} /></td>
-                <td class="px-3 py-2 font-mono text-ink-body">{formatUsd(r.cost_usd)}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+      <RequestsTable items={recent} {detailHref} keyHref={keyFilterHref} />
     {/if}
   </section>
 
