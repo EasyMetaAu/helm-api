@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { factContentHash, normalizeFactText, normalizeSubjectKey } from "./facts.js";
+import {
+  buildReconciledFactBatch,
+  factContentHash,
+  normalizeFactText,
+  normalizeSubjectKey,
+} from "./facts.js";
 
 // docs/12 P6 — the two DETERMINISTIC pure helpers behind fact extraction +
 // dedup/supersede. subject_key derivation and content_hash are the "fuzzy bit"
@@ -38,6 +43,41 @@ describe("normalizeSubjectKey (deterministic subject derivation, docs/12 P6)", (
 
   it("preserves existing dashes and digits", () => {
     expect(normalizeSubjectKey("gpt-5.4 model")).toBe("gpt-54-model");
+  });
+
+  it("caps the key length so a base64 blob can't become a ~2000-char subject", () => {
+    // A whitespace-free blob (e.g. a base64 image the deterministic fallback dumped)
+    // collapses to one giant "word"; the cap bounds it and leaves no trailing dash.
+    const blob = "a".repeat(500) + "b".repeat(500);
+    const key = normalizeSubjectKey(blob);
+    expect(key.length).toBeLessThanOrEqual(80);
+    expect(key.endsWith("-")).toBe(false);
+    // Real topics are well under the cap and untouched.
+    expect(normalizeSubjectKey("favorite number")).toBe("favorite-number");
+  });
+});
+
+describe("buildReconciledFactBatch blob guard (no base64/image facts)", () => {
+  const base = { ownerId: "acct", scope: {}, cap: 8, fallbackNow: new Date("2026-06-26") };
+
+  it("drops a candidate whose text is a long whitespace-free blob", () => {
+    const blob = "data:image/jpeg;base64," + "ABCD".repeat(300); // no spaces, ~1200 chars
+    const facts = buildReconciledFactBatch({
+      ...base,
+      extracted: [{ subjectText: "img", factText: blob }],
+    });
+    expect(facts).toEqual([]);
+  });
+
+  it("keeps a normal sentence fact (has whitespace)", () => {
+    const facts = buildReconciledFactBatch({
+      ...base,
+      extracted: [
+        { subjectText: "favorite number", factText: "The user's favorite number is 42." },
+      ],
+    });
+    expect(facts).toHaveLength(1);
+    expect(facts[0]?.subjectKey).toBe("favorite-number");
   });
 });
 

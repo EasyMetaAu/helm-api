@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-26 · 记忆事实 subject_key 长度上限 + base64/图片 blob 不入库（gateway 记忆；docs/12 P6）
+
+- **背景（Lukin，box 实查）**：`memory_facts` 项目 `luke` 出现一条 `subject_key` 长 **1920 字符**（一张 jpeg base64 data-URL），真实 subject 都 ≤31。根因：用户消息里的图片，deepseek 观察失败回落确定性兜底 → `serializeContent` 把 multipart 内容 JSON 化（含 base64）→ `extractFactsDeterministic` 取「前 6 词」，而 base64 无空格 = 一个巨型「词」→ 巨型 slug。即上一轮 user-only 修复（v0.22.4）只挡了 tool 角色，**图片是合法 user 内容仍会漏过兜底**。
+- **决定（两道防线，都在 `forgetting/facts.ts` 叶子）**：① **subject_key 上限 80 字符**（`normalizeSubjectKey` 末尾 `.slice(0,80)` + 再去尾 dash）——Lukin 直接要求的"限制名字长度"，只截断病态输入。② **blob 不入库**：`buildReconciledFactBatch` 过滤掉 `isBlobText`（trim 后 >200 字符且**全无空白**）的候选——真事实是句子（有空格），base64/data-URL 是数千字符无断点 = 不是记忆。光截名字不够（base64 正文仍是垃圾），blob 守卫才是根治；名字上限是纵深防御。两者对所有 fact 创建生效（机器 + admin 手动新增同走 `buildReconciledFactBatch`）。
+- **未做（flag）**：没在 `serializeContent` 入库层剥离图片 part——那会改 content_hash dedup 指纹、动 docs/08 原始审计存储，blast 大；blob 守卫在抽取层拦截已足够。若图片噪声继续，再考虑入库层只存 text part。
+- **验证**：`facts.test` 新增 cap（1000 字符 blob → ≤80、无尾 dash、真 topic 不变）+ blob 守卫（data-URL → 0 fact、正常句子 → 1 fact）。**core memory 353 测全绿**，typecheck/biome 干净。
+- **box 清理**：删 `length(subject_key)>80` 的那 1 条（备份 `memory-backup-20260626-213811.sql`），max 长度回到 31，FTS integrity OK。分支 `fix-memory-subject-key-cap`。
+
 ## 2026-06-26 · 记忆管理页重做：分页 + Superseded 过滤 + 反思置顶 + 新增事实（admin UI；docs/13）
 
 - **背景（Lukin 五诉求）**：`/admin/memory` ① 事实显示不全、无分页；② 状态下拉缺 **Superseded**；③ 反思应置顶（与事实换位）；④ 整体乱、重做；⑤ 只能编辑不能新增 → 加「新增事实」。
@@ -25,19 +33,13 @@
 - **TDD+验证**：改写 2 个旧测（确定性摘要不再含 `assistant:`/`role:` 前缀）+ 新增 tool 排除、纯 tool 切片→sentinel→0 fact。gateway memory-llm 19 测、core+gateway memory **294 测全绿**，`pnpm typecheck` 四包 Done、biome 0。
 - **历史污染清理**：见任务——box 上 `tool:` 那条 + 瞬时噪音（dev-server/file-update/空 assistant/no-context/task）需删（Lukin 明确要清）；删前备份 + 预览，清 facts/FTS/observations 一致。
 
-## 2026-06-26 · 三处请求列表统一为共享 RequestsTable 组件（admin UI；docs/07）
-
-- **背景（Lukin）**：dashboard「最近请求」与 key 详情的请求列表字段太少（各 **10 列**），要参考 `/admin/requests`（最全 **16 列**）补齐。
-- **根因**：三页各自**内联**一份 `<table>`（零组件复用，仅共用 `TokensCell`），故 dashboard/key 详情漏了 **Key/Task/Complexity/Fallbacks/TPS/Error** 六列；且任何「加列」只改 /requests 必再次漂移（这次需求本身就是漂移的症状）。
-- **决定**：抽共享 `lib/components/RequestsTable.svelte`（= 参考页完整列），三页复用，删两份重复表格（~140 行内联标记 + 各页 `onRowClick`/`formatTs`/`decidedByClass` 副本）。Per-caller 旋钮：`detailHref`（行链接，各页 from/返回目标不同）、`showKey`（key 详情传 `false`：每行同一 key、列冗余 → 整列隐藏）；key 单元格**两种筛选机制二选一**——`onKeyFilter?`（仅 /requests 传 → 页内筛选 `<button>`，更新自身 querystring）vs `keyHref?`（dashboard 传 → `<a>` 跳到按 key 预筛的列表，因 dashboard 无页内筛选），两者皆挂 `data-testid=key-filter`。
-- **取舍**：① dashboard 的 key 单元格是**链接**（Lukin 要求）：`keyHref` 渲染真 `<a>`（可中键新开标签页），跳 `/requests?key_id=<id>&<当前窗口>`（带 dashboard 当前 range/custom，落到同窗口）。**不复用 /requests 的 button 机制**——那是页内 `go()` 更新 querystring、被 `requests.test` 的 click→goto 契约锁死，改 `<a>` 既破测试又丢「保留其它 filter + chip」语义；故新增独立 `keyHref` 旁路，参考页零改动。② key 详情**隐藏 Key 列**（非 100% 照搬参考页），因每行都是该 key。③ **零新增 i18n 串**——组件全用 /requests 既有 superset（含各列 `title` 长句），无需 i18n:sync。④ decided-by 单元格统一为参考页纯 badge（dashboard 旧逐层 title tooltip 去掉，但其表上方本就有图例，信息不丢）。
-- **验证**：关键 testid（`request-row`/`decided-by`/`cell-tps`/`key-filter`/`key-filter-chip`）原样保留；新增 `RequestsTable.test`（key 单元格三分支：keyHref→`<a>`+href / onKeyFilter→`<button>`+回调 / `showKey=false`→无列）。**admin 493 单测全绿**（含 `requests.test`/`key-detail.test`/`home.test`）；**svelte-check 931/0/0**；prettier 干净。全在 `apps/admin`（原则 1）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-26 · 三处请求列表统一为共享 RequestsTable 组件（admin UI；docs/07）**：dashboard「最近请求」+ key 详情请求列表只 10 列、漏 Key/Task/Complexity/Fallbacks/TPS/Error，因三页各自内联 `<table>`。抽共享 `lib/components/RequestsTable.svelte`（= /requests 完整 16 列），三页复用删两份重复。Per-caller 旋钮：`detailHref`、`showKey`（key 详情传 false 隐藏冗余 Key 列）、key 单元格二选一 `onKeyFilter?`（/requests 页内筛选 button）vs `keyHref?`（dashboard 真 `<a>` 跳预筛列表）。保留 `request-row`/`decided-by`/`cell-tps`/`key-filter` testid，零新增 i18n。admin 493 测绿。并入 v0.22.3 部署。
 
 - **2026-06-26 · 记忆按 API key 隔离：用时回落 project_id ??= key_id（存储层；docs/08，原则 1/7）**：记忆作用域是 account+project 非单 key（`account_id` 恒 `default`，靠 `project_id` 区分，缺省 thread-locked）。拍板：填 `memory_project_id`=按 project 共享，留空(null)=**用时回落到 key 自身 id=按 key 隔离**。Approach B（读取处算有效 project，不在 createKey 烤值/不迁移）：新增纯 helper `effectiveMemoryProjectId(rec)=memory_project_id ?? key_id`，在 6 处 per-key 构造点调用（auth/server×3/mcp-oauth/admin-memory），`resolveMemoryScope` 零改。好处：无迁移、存量即生效、清空即隔离。坑：box 现有 key 多显式 `lukin-personal`（仍共享），要隔离须在 admin 清空其 project。已发 v0.22.2 部署（见 [[per-key-memory-isolation-shipped]]）。
 
