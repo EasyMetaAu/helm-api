@@ -484,7 +484,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
   });
 
-  // PUT /oauth/:provider/account { account?, priority?, schedulable? } -> 204
+  // PUT /oauth/:provider/account { account?, priority?, schedulable?, autoReset? } -> 204
   // Persist the account's pool scheduling. priority must be a finite integer; either
   // field may be omitted to leave it unchanged (fail-closed on a malformed value).
   app.put("/admin/api/oauth/:provider/account", async (c) => {
@@ -494,6 +494,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       account?: unknown;
       priority?: unknown;
       schedulable?: unknown;
+      autoReset?: unknown;
     };
     const account =
       typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
@@ -518,12 +519,20 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       }
       schedulable = body.schedulable;
     }
+    let autoReset: boolean | undefined;
+    if (body.autoReset !== undefined) {
+      if (typeof body.autoReset !== "boolean") {
+        return c.json({ error: "autoReset must be a boolean" }, 400);
+      }
+      autoReset = body.autoReset;
+    }
     try {
       await s.setAccountSchedule({
         providerId: c.req.param("provider"),
         account,
         priority,
         schedulable,
+        autoReset,
       });
       // Rebuild so the new priority / schedulable reorders (or parks) this account now.
       if (!(await afterMutation())) return c.json(notApplied, 503);

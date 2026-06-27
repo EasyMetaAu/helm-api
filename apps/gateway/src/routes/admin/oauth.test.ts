@@ -25,7 +25,7 @@ function fullSeam(over: Partial<OAuthAdminAccess> = {}): OAuthAdminAccess {
     setEnabledModels: vi.fn(async () => {}),
     getAccountProxy: vi.fn(async () => null),
     setAccountProxy: vi.fn(async () => {}),
-    getAccountSchedule: vi.fn(async () => ({ priority: 50, schedulable: true })),
+    getAccountSchedule: vi.fn(async () => ({ priority: 50, schedulable: true, autoReset: false })),
     setAccountSchedule: vi.fn(async () => {}),
     ...over,
   } as unknown as OAuthAdminAccess;
@@ -404,7 +404,7 @@ describe("admin OAuth routes — mutations + validation", () => {
     expect(bad.status).toBe(400);
   });
 
-  it("PUT account validates priority (non-negative int) and schedulable (boolean)", async () => {
+  it("PUT account validates priority (non-negative int), schedulable + autoReset (boolean)", async () => {
     const negPriority = await app({ oauth: fullSeam() }).request(
       "/admin/api/oauth/anthropic/account",
       {
@@ -423,18 +423,28 @@ describe("admin OAuth routes — mutations + validation", () => {
       },
     );
     expect(badSched.status).toBe(400);
+    const badAutoReset = await app({ oauth: fullSeam() }).request(
+      "/admin/api/oauth/openai-codex/account",
+      {
+        method: "PUT",
+        headers: JSONH,
+        body: JSON.stringify({ autoReset: "yes" }),
+      },
+    );
+    expect(badAutoReset.status).toBe(400);
     const seam = fullSeam();
-    const ok = await app({ oauth: seam }).request("/admin/api/oauth/anthropic/account", {
+    const ok = await app({ oauth: seam }).request("/admin/api/oauth/openai-codex/account", {
       method: "PUT",
       headers: JSONH,
-      body: JSON.stringify({ priority: 10, schedulable: false }),
+      body: JSON.stringify({ priority: 10, schedulable: false, autoReset: true }),
     });
     expect(ok.status).toBe(204);
     expect(seam.setAccountSchedule).toHaveBeenCalledWith({
-      providerId: "anthropic",
+      providerId: "openai-codex",
       account: "default",
       priority: 10,
       schedulable: false,
+      autoReset: true,
     });
   });
 

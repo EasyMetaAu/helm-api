@@ -87,6 +87,25 @@ describe("account-settings", () => {
     });
   });
 
+  it("round-trips the Codex autoReset flag and merges it independently", async () => {
+    const config = makeConfig();
+    await setAccountSettings(config, KEY, "openai-codex", "default", { autoReset: true });
+    expect(
+      getAccountSettings(await loadAccountSettings(config, KEY), "openai-codex", "default"),
+    ).toEqual({
+      autoReset: true,
+    });
+    // Toggling autoReset preserves an existing priority.
+    await setAccountSettings(config, KEY, "openai-codex", "default", { priority: 7 });
+    await setAccountSettings(config, KEY, "openai-codex", "default", { autoReset: false });
+    expect(
+      getAccountSettings(await loadAccountSettings(config, KEY), "openai-codex", "default"),
+    ).toEqual({
+      priority: 7,
+      autoReset: false,
+    });
+  });
+
   it("serializes concurrent load-merge-save updates so unrelated accounts are preserved", async () => {
     const config = new DelayedFirstSetConfig();
     const first = setAccountSettings(config, KEY, "anthropic", "work", {

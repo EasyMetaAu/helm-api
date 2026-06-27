@@ -62,9 +62,14 @@
   // account (the grant is keyed by chatgpt_account_id, not the helm label), so it must
   // be confirmed — never fire on a single click. `credits` is the available count shown
   // in the dialog. Only one reset dialog is open at a time (mirrors `confirming`).
-  let confirmingReset = $state<{ providerId: string; account: string; credits: number } | null>(
-    null,
-  );
+  // `autoReset` is the account's current opt-in (pre-filled), editable via the dialog's
+  // checkbox so the operator can turn on future auto-reset right as they reset manually.
+  let confirmingReset = $state<{
+    providerId: string;
+    account: string;
+    credits: number;
+    autoReset: boolean;
+  } | null>(null);
   // True while the confirmed consume is in flight (disables the dialog's buttons).
   let resettingLimit = $state<boolean>(false);
   // Transient success line after a credit reset (e.g. "Reset 2 window(s)"); cleared on
@@ -277,11 +282,20 @@
   // refresh so the quota bars + the remaining-credit count reflect the consumed credit.
   async function confirmResetLimit(): Promise<void> {
     if (!confirmingReset) return;
-    const { providerId, account } = confirmingReset;
+    const { providerId, account, autoReset } = confirmingReset;
     resettingLimit = true;
     error = null;
     resetNotice = null;
     try {
+      // Persist the auto-reset opt-in first, decoupled from the consume below: even if
+      // the reset fails (no credit / network), the operator's "do this automatically
+      // from now on" choice still sticks. Best-effort — a save failure never blocks the
+      // reset (they can still toggle it in the Manage dialog).
+      try {
+        await setAccountSchedule(providerId, account, { autoReset });
+      } catch {
+        /* non-fatal: the manual reset is the primary action */
+      }
       const result = await consumeCodexResetCredit(providerId, account);
       confirmingReset = null;
       await invalidateAll();
@@ -599,6 +613,7 @@
                           providerId: row.provider.id,
                           account: row.account.account,
                           credits: codexCredits ?? 0,
+                          autoReset: row.account.autoReset ?? false,
                         })}
                       >{codexCredits != null && codexCredits > 0
                         ? $t('Reset limit ({n})', { n: codexCredits })
@@ -671,6 +686,12 @@
           'This restores the rate-limit window for the entire ChatGPT account. Any other connected account using the same ChatGPT login will also be reset.',
         )}
       </p>
+      <label class="checkbox-field mt-4" data-testid="reset-auto-reset-toggle">
+        <input type="checkbox" class="checkbox" bind:checked={confirmingReset.autoReset} />
+        <span class="text-sm text-ink-body"
+          >{$t('Also auto-reset this account in the future (at most once per hour)')}</span
+        >
+      </label>
       <div class="mt-4 flex justify-end gap-2">
         <button
           type="button"

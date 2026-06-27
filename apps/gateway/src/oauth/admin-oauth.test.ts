@@ -650,18 +650,19 @@ describe("createOAuthAdmin", () => {
   });
 
   // ── per-account pool scheduling (Stage 3) ──────────────────────────────────
-  it("getAccountSchedule returns the defaults (priority 50, schedulable true)", async () => {
+  it("getAccountSchedule returns the defaults (priority 50, schedulable true, autoReset false)", async () => {
     const { tokens, config } = makeStores();
     const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
     expect(await admin.getAccountSchedule({ providerId: "anthropic", account: "default" })).toEqual(
       {
         priority: 50,
         schedulable: true,
+        autoReset: false,
       },
     );
   });
 
-  it("setAccountSchedule persists priority + schedulable; round-trips", async () => {
+  it("setAccountSchedule persists priority + schedulable + autoReset; round-trips", async () => {
     const { tokens, config } = makeStores();
     const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
     await admin.setAccountSchedule({
@@ -669,10 +670,12 @@ describe("createOAuthAdmin", () => {
       account: "a1",
       priority: 10,
       schedulable: false,
+      autoReset: true,
     });
     expect(await admin.getAccountSchedule({ providerId: "anthropic", account: "a1" })).toEqual({
       priority: 10,
       schedulable: false,
+      autoReset: true,
     });
   });
 
@@ -685,11 +688,12 @@ describe("createOAuthAdmin", () => {
       proxy: { type: "http", host: "p", port: 8080, password: "keep" },
     });
     await admin.setAccountSchedule({ providerId: "anthropic", account: "default", priority: 5 });
-    // schedulable omitted → default; priority set; proxy untouched.
+    // schedulable + autoReset omitted → defaults; priority set; proxy untouched.
     expect(await admin.getAccountSchedule({ providerId: "anthropic", account: "default" })).toEqual(
       {
         priority: 5,
         schedulable: true,
+        autoReset: false,
       },
     );
     await admin.setAccountSchedule({
@@ -701,6 +705,7 @@ describe("createOAuthAdmin", () => {
       {
         priority: 5,
         schedulable: false,
+        autoReset: false,
       },
     );
     expect(decryptSecret((await config.get("oauth.account_settings")) ?? "", KEY)).toContain(

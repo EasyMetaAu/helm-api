@@ -98,6 +98,9 @@ export interface OAuthAdminStatus {
     // the account (kept connected, never routed).
     priority: number;
     schedulable: boolean;
+    // Codex only: auto-consume a reset credit when the weekly window saturates
+    // (default false). Folded in so the providers page can pre-fill the reset dialog.
+    autoReset: boolean;
     // The account's egress proxy, REDACTED (principle 7: never the password, only
     // `hasPassword`) — or null for a direct connection. Folded into the list from the
     // SAME already-loaded settings blob as priority/schedulable, so the providers page
@@ -183,6 +186,7 @@ export interface OAuthAdminAccess {
     account: string;
     priority?: number;
     schedulable?: boolean;
+    autoReset?: boolean;
   }): Promise<void>;
   // Pull the Anthropic OAuth usage endpoint for one account → quota windows
   // (providers page Tier 3). Claude exposes a dedicated usage endpoint, so this is
@@ -227,6 +231,8 @@ export interface CodexResetCreditResult {
 export interface AccountScheduleView {
   priority: number;
   schedulable: boolean;
+  // Codex only: auto-consume a reset credit when the weekly window saturates.
+  autoReset: boolean;
 }
 
 // Redacted proxy projection for the admin read path: the password is NEVER echoed,

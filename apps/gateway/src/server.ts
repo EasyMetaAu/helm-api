@@ -10,6 +10,7 @@ import {
   type ConfigStore,
   type CreateKeyInput,
   checkTlsTransportAvailable,
+  codexAccountIdFromToken,
   createAnthropicClient,
   createBudgetGate,
   createCachedKeyStore,
@@ -31,6 +32,7 @@ import {
   DEFAULT_429_COOLDOWN_MS,
   DEFAULT_LANES,
   type DecayDeps,
+  decryptSecret,
   discoverOAuthModels,
   type EmbeddingJob,
   type GeminiGenerateContentResponse,
@@ -130,6 +132,7 @@ import {
   loadAccountSettings,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
+import { cooldownPassed, weeklySaturated } from "./oauth/auto-reset.js";
 import { anthropicMetadataUserId, stableSessionId } from "./oauth/device-identity.js";
 import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
 import { createResponsesRegistry } from "./responses-registry.js";
@@ -963,6 +966,18 @@ export async function buildServer(
     ? { store: store.oauthTokens, encKey: oauthEncKey }
     : undefined;
 
+  // The admin OAuth-login surface, built ONCE here (was inlined into AdminApiDeps
+  // below) so the execution-path quota hook can reuse its `consumeCodexResetCredit`
+  // for weekly-limit auto-reset. Present only when an enc key is wired (oauthCtx).
+  const oauthAdmin = oauthCtx
+    ? createOAuthAdmin({
+        store: oauthCtx.store,
+        encKey: oauthCtx.encKey,
+        config: store.config,
+        log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
+      })
+    : undefined;
+
   // Per-account settings blob (issue #38 follow-up): proxy / curation / pool state,
   // loaded ONCE here (fail-open to {}) and threaded into client building so each
   // preset OAuth account egresses through its pinned proxy (if any). Empty when no
@@ -1264,6 +1279,93 @@ export async function buildServer(
     parkAccountOnLimit(providerId, acct.account, Date.now() + DEFAULT_429_COOLDOWN_MS);
   };
 
+  // Weekly-limit auto-reset (Codex): when an account opted in (per-account `autoReset`)
+  // and its WEEKLY window just saturated, spend ONE rate-limit reset credit to restore
+  // it, then unpark.
+  //
+  // Reset credits are SCARCE and the grant is keyed by the upstream ChatGPT account
+  // (chatgpt_account_id), which can back SEVERAL connected helm labels — so the spend
+  // guard MUST key on that shared id, not the helm label, or two sibling labels both
+  // saturating would each spend a credit for the one shared window. `autoResetLast`
+  // (the ≥1h cooldown, keyed by the shared id) is the correctness guard: the check +
+  // commit are adjacent and synchronous, so concurrent siblings serialize on it.
+  // `autoResetInFlight` (keyed by the cheap helm label) only collapses a same-label
+  // burst before the async work, to avoid a token-read stampede. Fire-and-forget +
+  // fail-open: any failure (no credit, network, opted-out) leaves the account parked.
+  const autoResetLast = new Map<string, number>(); // sharedKey -> last consume epoch-ms
+  const autoResetInFlight = new Set<string>(); // helm label -> a reset is being evaluated
+  // ponytail: cooldown is process memory — a restart clears it, but a just-reset weekly
+  // window cannot re-saturate within an hour, so a second spend is physically impossible
+  // before the cooldown would have expired anyway. No persistence needed.
+
+  // Resolve the SHARED reset-credit key for a Codex helm account: its chatgpt_account_id
+  // (`codex:<id>`), decoded from the STORED access token — no network/refresh, and the
+  // claim is stable even on an expired token. Falls back to the helm label when it can't
+  // be resolved (degrades to per-label guarding, never worse). Not memoized: a reconnect
+  // could re-point a label at a different login, and this only runs on the rare
+  // saturated-and-opted-in path.
+  const resolveCodexAccountKey = async (providerId: string, account: string): Promise<string> => {
+    const helmKey = `${providerId} ${account}`;
+    if (!oauthEncKey) return helmKey;
+    try {
+      const rec = await store.oauthTokens.get(providerId, account);
+      if (rec?.accessEnc) {
+        const id = codexAccountIdFromToken(decryptSecret(rec.accessEnc, oauthEncKey));
+        if (id) return `codex:${id}`;
+      }
+    } catch {
+      /* fail-safe: per-label key */
+    }
+    return helmKey;
+  };
+
+  const maybeAutoReset = (providerId: string, account: string, nowMs: number): void => {
+    if (!oauthAdmin?.consumeCodexResetCredit || !oauthEncKey) return;
+    const helmKey = `${providerId} ${account}`;
+    if (autoResetInFlight.has(helmKey)) return; // collapse a same-label burst (cheap, sync)
+    autoResetInFlight.add(helmKey);
+    void (async () => {
+      try {
+        const s = getAccountSettings(
+          await loadAccountSettings(store.config, oauthEncKey),
+          providerId,
+          account,
+        );
+        if (!s.autoReset) return; // opted out → never spend a credit
+        // Guard on the SHARED ChatGPT account: check + commit are adjacent (no await
+        // between), so concurrent sibling labels serialize here and only one spends.
+        const sharedKey = await resolveCodexAccountKey(providerId, account);
+        if (!cooldownPassed(autoResetLast.get(sharedKey), nowMs)) return;
+        autoResetLast.set(sharedKey, nowMs);
+        const r = await oauthAdmin.consumeCodexResetCredit?.({ account });
+        // The consume restored the shared window for EVERY sibling on this login — unpark
+        // them all (the trigger account included), or a sibling parked by its own
+        // saturated reply would stay out of rotation until its window's natural reset.
+        const codexAccounts = (await store.oauthTokens.list()).filter(
+          (t) => t.providerId === providerId,
+        );
+        await Promise.all(
+          codexAccounts.map(async (t) => {
+            if ((await resolveCodexAccountKey(t.providerId, t.account)) === sharedKey) {
+              await applyUsageLimit(t.providerId, t.account, null);
+            }
+          }),
+        );
+        logger.log("info", "oauth.auto_reset.consumed", {
+          provider_id: providerId,
+          windows_reset: r?.windowsReset ?? null,
+        });
+      } catch (e) {
+        logger.log("error", "oauth.auto_reset.failed", {
+          provider_id: providerId,
+          line: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        autoResetInFlight.delete(helmKey);
+      }
+    })();
+  };
+
   // Codex quota-window scrape (providers page Tier 3): parse the `x-codex-*` headers
   // off each Codex reply and snapshot them per account. FAIL-OPEN — a parse/store
   // failure is swallowed (an observability scrape never breaks a served request).
@@ -1278,6 +1380,9 @@ export async function buildServer(
     // long cooldown the 429 backstop can't know. Fire-and-forget (fail-open).
     const until = windowsToUsageLimit(windows, nowMs);
     if (until !== null) parkAccountOnLimit(providerId, account, until);
+    // Then, if the WEEKLY window is the one that saturated and the account opted in,
+    // auto-consume a reset credit to restore it (guarded by a ≥1h per-account cooldown).
+    if (weeklySaturated(windows)) maybeAutoReset(providerId, account, nowMs);
   };
   // Per-account user-message serial queue (issue #93, feature B). ONE long-lived
   // gate for the whole process: it must survive pool rebuilds so queued requests
@@ -2066,17 +2171,10 @@ export async function buildServer(
       // Admin OAuth-login surface (issue #38). Present only when an enc key is
       // configured (oauthCtx); otherwise the /admin/api/oauth routes 503 — login
       // is disabled rather than storing tokens in plaintext (principle 7).
-      oauth: oauthCtx
-        ? createOAuthAdmin({
-            store: oauthCtx.store,
-            encKey: oauthCtx.encKey,
-            config: store.config,
-            // Surface the (fail-open) quota PULL failures in the JSON log — a
-            // silently-swallowed parse failure once froze a providers-page
-            // snapshot for ~a day with zero log evidence.
-            log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
-          })
-        : undefined,
+      // Built once near oauthCtx above (shared with the auto-reset quota hook). The
+      // (fail-open) quota PULL failures surface in the JSON log — a silently-swallowed
+      // parse failure once froze a providers-page snapshot for ~a day with no evidence.
+      oauth: oauthAdmin,
       // Per-account OAuth subscription observability stores (providers page): today's
       // usage aggregate (Tier 2) + latest quota window snapshot (Tier 3). Read by the
       // /oauth/usage + /oauth/quota admin routes (fail-open to empty when absent).
