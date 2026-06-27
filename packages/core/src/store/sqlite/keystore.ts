@@ -1,5 +1,5 @@
 import type { ApiKeyRecord } from "@helm/shared";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import type { CreateKeyInput, KeyPatch, KeyStore } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
 import { apiKeys } from "./schema.js";
@@ -60,9 +60,13 @@ export class SqliteKeyStore implements KeyStore {
   }
 
   async list(): Promise<ApiKeyRecord[]> {
+    // Deterministic order: creation time, key_id as the unique tiebreaker. Without an
+    // explicit ORDER BY the engine returns rows in an unspecified order that shifts as
+    // rows are updated/deleted, so the admin list appeared to reshuffle between loads.
     return this.db
       .select()
       .from(apiKeys)
+      .orderBy(asc(apiKeys.createdAt), asc(apiKeys.keyId))
       .all()
       .map((r) => this.toRecord(r));
   }

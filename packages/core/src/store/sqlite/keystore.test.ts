@@ -101,6 +101,30 @@ describe("SqliteKeyStore", () => {
     }
   });
 
+  it("list() orders by createdAt then key_id, regardless of insertion order or updates", async () => {
+    const db = createSqliteDb(":memory:");
+    let t = 0;
+    const store = new SqliteKeyStore(db, () => new Date(t));
+    // Insert OUT of order; two share a createdAt to exercise the key_id tiebreaker.
+    t = 300;
+    await store.createKey({
+      keyId: "zeta",
+      hash: "h0",
+      prefix: "p0",
+      accountId: "a",
+      role: "user",
+    });
+    t = 100;
+    await store.createKey({ keyId: "kb", hash: "h1", prefix: "p1", accountId: "a", role: "user" });
+    t = 100;
+    await store.createKey({ keyId: "ka", hash: "h2", prefix: "p2", accountId: "a", role: "user" });
+    // createdAt asc (ka/kb=100 before zeta=300); key_id asc within the tie (ka before kb).
+    expect((await store.list()).map((k) => k.key_id)).toEqual(["ka", "kb", "zeta"]);
+    // Stable after an unrelated mutation — disabling a row must not reshuffle the list.
+    await store.disable("ka");
+    expect((await store.list()).map((k) => k.key_id)).toEqual(["ka", "kb", "zeta"]);
+  });
+
   it("getByHash returns null on a miss (no throw)", async () => {
     const store = freshStore();
     expect(await store.getByHash("unknown")).toBeNull();
