@@ -113,8 +113,23 @@ function str(value: unknown): string | null {
 
 interface Accumulator {
   assembled: AssembledStream;
-  // OpenAI tool_calls arrive fragmented and keyed by index.
+  // OpenAI chat.completion tool_calls arrive fragmented and keyed by index.
   toolsByIndex: Map<number, AssembledToolCall>;
+  // OpenAI Responses tool items are keyed by their `item_id`: a stream can open
+  // several tool calls, and their *.delta events interleave — routing by item_id
+  // (not "the last opened call") keeps each body with its own call.
+  responseToolsById: Map<string, AssembledToolCall>;
+}
+
+/** The Responses tool call a `*.delta`/`*.done` event belongs to: by `item_id`
+ * when present, else the last-opened call (handles captures lacking item_id). */
+function responseTool(
+  acc: Accumulator,
+  payload: Record<string, unknown>,
+): AssembledToolCall | undefined {
+  const id = str(payload.item_id);
+  const byId = id ? acc.responseToolsById.get(id) : undefined;
+  return byId ?? acc.assembled.toolCalls[acc.assembled.toolCalls.length - 1];
 }
 
 function mergeUsage(acc: Accumulator, usage: unknown): void {
@@ -162,7 +177,13 @@ function consumeOpenAiChunk(
   const finish = str(choice?.finish_reason);
   const reasoning = str(delta.reasoning_content) ?? str(delta.reasoning);
   const content = str(delta.content);
+  const refusal = str(delta.refusal);
   const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : null;
+
+  // Some providers attach finish_reason to the SAME chunk that carries the final
+  // content/refusal/tool token (not a trailing empty chunk). Record it up front so
+  // the content-first early returns below never drop the terminal status.
+  if (finish) acc.assembled.finishReason = finish;
 
   if (toolCalls) {
     let label = '';
@@ -191,6 +212,11 @@ function consumeOpenAiChunk(
   if (content) {
     acc.assembled.content += content;
     return { kind: 'content', text: content };
+  }
+  if (refusal) {
+    // Safety refusal — visible output in place of an answer (mirrors content).
+    acc.assembled.content += refusal;
+    return { kind: 'content', text: refusal };
   }
   if (finish) {
     acc.assembled.finishReason = finish;
@@ -235,27 +261,65 @@ function consumeOpenAiResponseEvent(
       if (text && !acc.assembled.reasoning) acc.assembled.reasoning = text;
       return { kind: 'reasoning', text };
     }
-    case 'response.function_call_arguments.delta': {
+    // Refusals are visible output shown in place of an answer — without these a
+    // safety-refused turn assembles empty and renders "No visible output".
+    case 'response.refusal.delta': {
       const delta = str(payload.delta) ?? '';
-      const last = acc.assembled.toolCalls[acc.assembled.toolCalls.length - 1];
-      if (last) last.arguments += delta;
+      acc.assembled.content += delta;
+      return { kind: 'content', text: delta };
+    }
+    case 'response.refusal.done': {
+      const text = str(payload.refusal) ?? '';
+      if (text && !acc.assembled.content) acc.assembled.content = text;
+      return { kind: 'content', text };
+    }
+    // Tool-input deltas across ALL Responses tool flavors stream the same way:
+    // append the delta to the open tool call. function_call = JSON args;
+    // custom_tool_call (Codex apply_patch) = freeform text; mcp_call = JSON args;
+    // code_interpreter = generated code. Miss any flavor and a 16K tool body is
+    // lost as `meta` (the apply_patch bug). output_item.added opened the call.
+    case 'response.function_call_arguments.delta':
+    case 'response.custom_tool_call_input.delta':
+    case 'response.mcp_call_arguments.delta':
+    case 'response.code_interpreter_call_code.delta': {
+      const delta = str(payload.delta) ?? '';
+      const call = responseTool(acc, payload);
+      if (call) call.arguments += delta;
       return { kind: 'tool_call', text: delta };
     }
-    case 'response.function_call_arguments.done': {
-      const args = str(payload.arguments) ?? '';
-      const last = acc.assembled.toolCalls[acc.assembled.toolCalls.length - 1];
-      if (last && args && !last.arguments) last.arguments = args;
-      return { kind: 'tool_call', text: args };
+    // Authoritative full-body snapshot — the field name varies per tool flavor.
+    case 'response.function_call_arguments.done':
+    case 'response.custom_tool_call_input.done':
+    case 'response.mcp_call_arguments.done':
+    case 'response.code_interpreter_call_code.done': {
+      const full = str(payload.arguments) ?? str(payload.input) ?? str(payload.code) ?? '';
+      const call = responseTool(acc, payload);
+      if (call && full && !call.arguments) call.arguments = full;
+      return { kind: 'tool_call', text: full };
     }
     case 'response.output_item.added': {
       const item = asRecord(payload.item);
-      if (str(item?.type) === 'function_call') {
-        acc.assembled.toolCalls.push({
+      const itemType = str(item?.type);
+      // Every tool-call item type opens a tool call; its body arrives via the
+      // *.delta events above. code_interpreter_call carries no `name` → label it.
+      if (
+        itemType === 'function_call' ||
+        itemType === 'custom_tool_call' ||
+        itemType === 'mcp_call' ||
+        itemType === 'code_interpreter_call'
+      ) {
+        const call: AssembledToolCall = {
           id: str(item?.call_id) ?? str(item?.id),
-          name: str(item?.name) ?? '',
-          arguments: str(item?.arguments) ?? '',
-        });
-        return { kind: 'tool_call', text: str(item?.name) ?? '' };
+          name: str(item?.name) ?? (itemType === 'code_interpreter_call' ? 'code_interpreter' : ''),
+          // function_call → `arguments`; custom_tool_call → `input`;
+          // code_interpreter_call → `code` (usually empty here, filled by deltas).
+          arguments: str(item?.arguments) ?? str(item?.input) ?? str(item?.code) ?? '',
+        };
+        acc.assembled.toolCalls.push(call);
+        // Key by item_id so interleaved *.delta events route to the right call.
+        const itemId = str(item?.id);
+        if (itemId) acc.responseToolsById.set(itemId, call);
+        return { kind: 'tool_call', text: str(item?.name) ?? itemType };
       }
       return { kind: 'meta', text: type };
     }
@@ -317,7 +381,12 @@ function consumeAnthropicEvent(
     }
     case 'content_block_start': {
       const block = asRecord(payload.content_block);
-      if (str(block?.type) === 'tool_use') {
+      const blockType = str(block?.type);
+      // `tool_use` = client tool; `server_tool_use` = Anthropic-run tool (native
+      // web_search/code-execution). Both stream args via input_json_delta below,
+      // which appends to the last tool call — so both must open one here or the
+      // args vanish.
+      if (blockType === 'tool_use' || blockType === 'server_tool_use') {
         acc.assembled.toolCalls.push({
           id: str(block?.id),
           name: str(block?.name) ?? '',
@@ -373,6 +442,10 @@ function consumeGeminiEvent(
     const part = asRecord(rawPart);
     if (!part) continue;
     const fnCall = asRecord(part.functionCall);
+    // Gemini code execution: the model-written code and its run output ride as
+    // dedicated parts (not `text`) — without these a code-exec turn loses them.
+    const execCode = asRecord(part.executableCode);
+    const execResult = asRecord(part.codeExecutionResult);
     const text = str(part.text);
     if (fnCall) {
       const args = fnCall.args;
@@ -384,6 +457,11 @@ function consumeGeminiEvent(
       acc.assembled.toolCalls.push(call);
       kind = 'tool_call';
       label = call.name;
+    } else if (execCode || execResult) {
+      const code = str(execCode?.code) ?? str(execResult?.output) ?? '';
+      acc.assembled.content += code;
+      if (kind === null) kind = 'content';
+      if (kind === 'content') label = code;
     } else if (part.thought === true && text !== null) {
       acc.assembled.reasoning += text;
       if (kind !== 'tool_call') kind = 'reasoning';
@@ -417,6 +495,7 @@ export function parseSseStream(raw: string): ParsedSseStream {
       model: null,
     },
     toolsByIndex: new Map(),
+    responseToolsById: new Map(),
   };
 
   const events: SseEvent[] = [];
