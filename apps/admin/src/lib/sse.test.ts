@@ -155,6 +155,44 @@ const RESPONSES_STREAM = [
   })}\n\n`,
 ].join('');
 
+// Codex apply_patch: a short preamble message, then a *custom* (freeform) tool
+// call whose body streams as raw text via `custom_tool_call_input.delta` — NOT
+// `function_call_arguments`. The 16K document lives in those deltas.
+const RESPONSES_CUSTOM_TOOL_STREAM = [
+  `event: response.output_text.delta\ndata: ${JSON.stringify({
+    type: 'response.output_text.delta',
+    output_index: 0,
+    delta: 'Writing the doc now.',
+  })}\n\n`,
+  `event: response.output_item.added\ndata: ${JSON.stringify({
+    type: 'response.output_item.added',
+    output_index: 1,
+    item: { type: 'custom_tool_call', id: 'ctc_1', call_id: 'call_1', name: 'apply_patch', input: '' },
+  })}\n\n`,
+  `event: response.custom_tool_call_input.delta\ndata: ${JSON.stringify({
+    type: 'response.custom_tool_call_input.delta',
+    item_id: 'ctc_1',
+    output_index: 1,
+    delta: '*** Begin Patch\n',
+  })}\n\n`,
+  `event: response.custom_tool_call_input.delta\ndata: ${JSON.stringify({
+    type: 'response.custom_tool_call_input.delta',
+    item_id: 'ctc_1',
+    output_index: 1,
+    delta: '+the whole document\n',
+  })}\n\n`,
+  `event: response.custom_tool_call_input.done\ndata: ${JSON.stringify({
+    type: 'response.custom_tool_call_input.done',
+    item_id: 'ctc_1',
+    output_index: 1,
+    input: '*** Begin Patch\n+the whole document\n',
+  })}\n\n`,
+  `event: response.completed\ndata: ${JSON.stringify({
+    type: 'response.completed',
+    response: { id: 'resp_2', model: 'gpt-5.5', status: 'completed' },
+  })}\n\n`,
+].join('');
+
 // Gemini native streaming: bare `data:` lines (no `event:`, no top-level `type`)
 // whose payload carries `candidates[].content.parts[]`. Reasoning parts are
 // flagged `thought: true`; tool calls are `functionCall` with an *object* `args`;
@@ -265,6 +303,37 @@ describe('parseSseStream — OpenAI chat.completion.chunk', () => {
     expect(tools.assembled.finishReason).toBe('tool_calls');
     expect(tools.events[0]?.kind).toBe('tool_call');
   });
+
+  it('assembles a streamed refusal as visible content', () => {
+    const stream = [
+      `data: ${JSON.stringify({
+        choices: [{ index: 0, delta: { refusal: 'I cannot ' } }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        choices: [{ index: 0, delta: { refusal: 'do that.' }, finish_reason: 'stop' }],
+      })}\n\n`,
+      'data: [DONE]\n\n',
+    ].join('');
+    const parsed = parseSseStream(stream);
+    expect(parsed.assembled.content).toBe('I cannot do that.');
+    expect(parsed.assembled.finishReason).toBe('stop'); // finish on the refusal chunk is kept
+    expect(parsed.events.map((e) => e.kind)).toEqual(['content', 'content', 'done']);
+  });
+
+  it('keeps finish_reason when it rides the same chunk as the final content token', () => {
+    const stream = [
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'Hi' } }] })}\n\n`,
+      `data: ${JSON.stringify({
+        choices: [{ index: 0, delta: { content: '!' }, finish_reason: 'stop' }],
+      })}\n\n`,
+      'data: [DONE]\n\n',
+    ].join('');
+    const parsed = parseSseStream(stream);
+    expect(parsed.assembled.content).toBe('Hi!');
+    expect(parsed.assembled.finishReason).toBe('stop');
+    // The combined chunk still reports as content (content-first), not finish.
+    expect(parsed.events.map((e) => e.kind)).toEqual(['content', 'content', 'done']);
+  });
 });
 
 describe('parseSseStream — Anthropic events', () => {
@@ -287,6 +356,25 @@ describe('parseSseStream — Anthropic events', () => {
     expect(kinds).toContain('content');
     expect(kinds[kinds.length - 2]).toBe('finish'); // message_delta w/ stop_reason
   });
+
+  it('opens a tool call for server_tool_use blocks so input_json_delta is kept', () => {
+    const stream = [
+      `event: content_block_start\ndata: ${JSON.stringify({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search' },
+      })}\n\n`,
+      `event: content_block_delta\ndata: ${JSON.stringify({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{"query":"helm"}' },
+      })}\n\n`,
+    ].join('');
+    const parsed2 = parseSseStream(stream);
+    expect(parsed2.assembled.toolCalls).toEqual([
+      { id: 'srvtoolu_1', name: 'web_search', arguments: '{"query":"helm"}' },
+    ]);
+  });
 });
 
 describe('parseSseStream — OpenAI Responses API events', () => {
@@ -308,6 +396,113 @@ describe('parseSseStream — OpenAI Responses API events', () => {
       'content',
       'content',
       'finish',
+    ]);
+  });
+});
+
+describe('parseSseStream — OpenAI Responses custom tool (apply_patch)', () => {
+  const parsed = parseSseStream(RESPONSES_CUSTOM_TOOL_STREAM);
+
+  it('keeps the preamble as content and captures the full custom-tool body', () => {
+    expect(parsed.assembled.content).toBe('Writing the doc now.');
+    expect(parsed.assembled.toolCalls).toEqual([
+      {
+        id: 'call_1',
+        name: 'apply_patch',
+        arguments: '*** Begin Patch\n+the whole document\n',
+      },
+    ]);
+    expect(parsed.assembled.finishReason).toBe('completed');
+  });
+
+  it('classifies the input deltas as tool_call, not meta', () => {
+    expect(parsed.events.map((e) => e.kind)).toEqual([
+      'content', // preamble
+      'tool_call', // output_item.added(custom_tool_call)
+      'tool_call', // input.delta
+      'tool_call', // input.delta
+      'tool_call', // input.done
+      'finish',
+    ]);
+  });
+});
+
+describe('parseSseStream — OpenAI Responses refusal + mcp/code tools', () => {
+  it('assembles a streamed refusal as visible content (not "No visible output")', () => {
+    const stream = [
+      `event: response.refusal.delta\ndata: ${JSON.stringify({
+        type: 'response.refusal.delta',
+        delta: "I can't help ",
+      })}\n\n`,
+      `event: response.refusal.delta\ndata: ${JSON.stringify({
+        type: 'response.refusal.delta',
+        delta: 'with that.',
+      })}\n\n`,
+      `event: response.refusal.done\ndata: ${JSON.stringify({
+        type: 'response.refusal.done',
+        refusal: "I can't help with that.",
+      })}\n\n`,
+    ].join('');
+    const parsed = parseSseStream(stream);
+    expect(parsed.assembled.content).toBe("I can't help with that.");
+    expect(parsed.events.map((e) => e.kind)).toEqual(['content', 'content', 'content']);
+  });
+
+  it('captures mcp_call and code_interpreter tool bodies', () => {
+    const stream = [
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'mcp_call', id: 'mcp_1', name: 'search', server_label: 'docs' },
+      })}\n\n`,
+      `event: response.mcp_call_arguments.delta\ndata: ${JSON.stringify({
+        type: 'response.mcp_call_arguments.delta',
+        item_id: 'mcp_1',
+        delta: '{"q":"helm"}',
+      })}\n\n`,
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'code_interpreter_call', id: 'ci_1' },
+      })}\n\n`,
+      `event: response.code_interpreter_call_code.delta\ndata: ${JSON.stringify({
+        type: 'response.code_interpreter_call_code.delta',
+        item_id: 'ci_1',
+        delta: 'print(1)',
+      })}\n\n`,
+    ].join('');
+    const parsed = parseSseStream(stream);
+    expect(parsed.assembled.toolCalls).toEqual([
+      { id: 'mcp_1', name: 'search', arguments: '{"q":"helm"}' },
+      { id: 'ci_1', name: 'code_interpreter', arguments: 'print(1)' },
+    ]);
+  });
+
+  it('routes interleaved tool-arg deltas to the right call by item_id', () => {
+    // Two function_call items opened back-to-back, THEN their deltas interleave —
+    // "append to the last call" would corrupt call A with call B's args.
+    const stream = [
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'fc_a', call_id: 'call_a', name: 'a' },
+      })}\n\n`,
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'fc_b', call_id: 'call_b', name: 'b' },
+      })}\n\n`,
+      `event: response.function_call_arguments.delta\ndata: ${JSON.stringify({
+        type: 'response.function_call_arguments.delta',
+        item_id: 'fc_a',
+        delta: '{"x":1}',
+      })}\n\n`,
+      `event: response.function_call_arguments.delta\ndata: ${JSON.stringify({
+        type: 'response.function_call_arguments.delta',
+        item_id: 'fc_b',
+        delta: '{"y":2}',
+      })}\n\n`,
+    ].join('');
+    const parsed = parseSseStream(stream);
+    expect(parsed.assembled.toolCalls).toEqual([
+      { id: 'call_a', name: 'a', arguments: '{"x":1}' },
+      { id: 'call_b', name: 'b', arguments: '{"y":2}' },
     ]);
   });
 });
@@ -342,6 +537,34 @@ describe('parseSseStream — Gemini native events', () => {
     ]);
     expect(tools.assembled.finishReason).toBe('STOP');
     expect(tools.events.map((e) => e.kind)).toEqual(['reasoning', 'tool_call']);
+  });
+
+  it('captures executableCode and codeExecutionResult parts as content', () => {
+    const stream = [
+      `data: ${JSON.stringify({
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [{ executableCode: { language: 'PYTHON', code: 'print(2+2)' } }],
+            },
+            index: 0,
+          },
+        ],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ codeExecutionResult: { outcome: 'OUTCOME_OK', output: '4' } }] },
+            finishReason: 'STOP',
+            index: 0,
+          },
+        ],
+      })}\n\n`,
+    ].join('');
+    const parsed = parseSseStream(stream);
+    expect(parsed.assembled.content).toBe('print(2+2)4');
+    expect(parsed.events.map((e) => e.kind)).toEqual(['content', 'content']);
   });
 });
 
