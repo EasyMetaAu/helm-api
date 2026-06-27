@@ -212,16 +212,21 @@
   let scheduleError = $state<string | null>(null);
   let priority = $state<string>('50');
   let schedulable = $state<boolean>(true);
+  // Codex only: auto-consume a reset credit the moment the weekly window saturates.
+  const isCodex = $derived(providerId === 'openai-codex');
+  let autoReset = $state<boolean>(false);
 
   async function loadSchedule(): Promise<void> {
     scheduleError = null;
     scheduleLoading = true;
     priority = '50';
     schedulable = true;
+    autoReset = false;
     try {
       const s = await getAccountSchedule(providerId, account);
       priority = String(s.priority);
       schedulable = s.schedulable;
+      autoReset = s.autoReset;
     } catch (e) {
       scheduleError = e instanceof Error ? e.message : $t('Failed to load schedule');
     } finally {
@@ -238,7 +243,7 @@
     }
     scheduleSaving = true;
     try {
-      await setAccountSchedule(providerId, account, { priority: p, schedulable });
+      await setAccountSchedule(providerId, account, { priority: p, schedulable, autoReset });
       dirty = true;
     } catch (e) {
       scheduleError = e instanceof Error ? e.message : $t('Failed to save schedule');
@@ -486,6 +491,19 @@
               <span class="text-sm text-ink-body">{$t('Schedulable (in rotation)')}</span>
             </label>
           </div>
+          {#if isCodex}
+            <label class="checkbox-field" data-testid="auto-reset-toggle">
+              <input type="checkbox" class="checkbox" bind:checked={autoReset} />
+              <span class="text-sm text-ink-body"
+                >{$t('Auto-reset the weekly limit when it hits 100%')}</span
+              >
+            </label>
+            <p class="field-help">
+              {$t(
+                'When the weekly limit saturates, Helm automatically spends one reset credit to restore it (at most once per hour). Reset credits are limited, so leave this off if you want to spend them manually.',
+              )}
+            </p>
+          {/if}
           <div class="card-actions">
             <button
               type="button"

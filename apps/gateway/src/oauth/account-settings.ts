@@ -31,6 +31,9 @@ export interface AccountSettings {
   priority?: number;
   // When false the account is skipped by the scheduler (kept connected, parked).
   schedulable?: boolean;
+  // Codex only: when true, auto-consume one rate-limit reset credit the moment the
+  // weekly window saturates (≥100%). Unset/false = never auto-reset (manual only).
+  autoReset?: boolean;
   // Optional upstream proxy for this account's provider traffic.
   proxy?: {
     type: "http" | "https" | "socks5";

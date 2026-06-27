@@ -330,6 +330,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
             )),
             priority: sch.priority ?? 50,
             schedulable: sch.schedulable ?? true,
+            autoReset: sch.autoReset ?? false,
             // Both folded from the SAME settings blob (zero extra network): the
             // redacted egress proxy (principle 7) and the effective routable models
             // — the SAME network-free set synthesizeOAuthProviders exposes to Lanes
@@ -554,16 +555,27 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         account,
       );
       // Apply the scheduler defaults so the UI always shows a concrete value
-      // (priority 50, schedulable true) even for a never-tuned account.
-      return { priority: s.priority ?? 50, schedulable: s.schedulable ?? true };
+      // (priority 50, schedulable true, autoReset false) even for a never-tuned account.
+      return {
+        priority: s.priority ?? 50,
+        schedulable: s.schedulable ?? true,
+        autoReset: s.autoReset ?? false,
+      };
     },
 
-    async setAccountSchedule({ providerId, account, priority, schedulable }): Promise<void> {
+    async setAccountSchedule({
+      providerId,
+      account,
+      priority,
+      schedulable,
+      autoReset,
+    }): Promise<void> {
       // Top-level merge (setAccountSettings) preserves curation/proxy. Only patch
       // the fields the caller supplied — an omitted field stays unchanged.
-      const patch: { priority?: number; schedulable?: boolean } = {};
+      const patch: { priority?: number; schedulable?: boolean; autoReset?: boolean } = {};
       if (priority !== undefined) patch.priority = priority;
       if (schedulable !== undefined) patch.schedulable = schedulable;
+      if (autoReset !== undefined) patch.autoReset = autoReset;
       await setAccountSettings(deps.config, deps.encKey, providerId, account, patch);
     },
 

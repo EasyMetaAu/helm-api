@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-27 · Codex 周限额自动重置（gateway 执行 + admin UI；docs/04，原则 3/5）
+
+- **背景（Lukin）**：ChatGPT/Codex 订阅账号每周限额窗口（`secondary`，7d）打满即被限流，但 ChatGPT 给了几次「重置额度」机会（`consumeCodexResetCredit`）。原先只能在 providers 页手动点「重置限额」。诉求：每个 Codex 账号加开关——开了之后周限打满自动调一次重置；两处可设（管理弹窗常驻 + 重置确认弹层顺手勾「以后自动重置」）。**硬约束**：reset credits 极少，并发请求涌入**绝不能一次烧光**——每账号 **≥1h** 只许调一次。
+- **触发点（与 Lukin 确认走方案 A，不走纯 429 hook）**：挂在 `server.ts` 既有 `captureCodexQuota`——它每个 Codex 回包（**含 429**，状态码判断前就解析头）都跑，本就是窗口饱和→自动 park 处，手里有解析好的窗口。`weeklySaturated(windows)`（只认 `secondary`≥100%，**5h 的 primary 自愈、绝不烧 credit**）真则 `maybeAutoReset`。比纯 `onOAuthSubscription429` 强：那里没窗口数据、要额外读快照才能分周限/5h。
+- **防并发烧 credit（Codex review P1 修正）**：reset credit 的 grant 按**上游 ChatGPT 账号**（`chatgpt_account_id`）发放，一个 login 可挂多个 helm label——故 cooldown **必须按共享 id keying**，否则两个 sibling label 同时打满会各扣一次。`resolveCodexAccountKey` 从**存储的 access token** 解 `chatgpt_account_id`（`codexAccountIdFromToken`+`decryptSecret`，纯解码无网络、过期 token 也能解，失败回落 helm label）。`autoResetLast: Map<sharedKey,ms>`（≥1h cooldown，check+set 相邻同步→并发 sibling 串行只扣一次）是正确性闸；`autoResetInFlight: Set<helmKey>` 只廉价折叠同 label burst 防 token-read 风暴。成功后**unpark 所有 sibling**（列 codex token、解析 key 匹配则 `applyUsageLimit(...,null)`），否则被各自饱和回包 park 的 sibling 要等窗口自然重置才回轮换。`cooldownPassed`/`weeklySaturated` 抽纯函数 `oauth/auto-reset.ts` 单测。**ponytail**：cooldown 进程内存不持久化——刚重置的周窗口 1h 内物理上不可能再满，重启清空也不会二次扣。
+- **零迁移**：per-account 设置就是 `config_kv` 加密 blob，`AccountSettings` 加 `autoReset?: boolean`，全程**镜像 `schedulable`**（getAccountSchedule/setAccountSchedule/listStatus/route 校验/admin client/dialog）。失败一律 fail-open（opted-out/无 credit/网络错只是留 park，正常降级），成功后 `applyUsageLimit(...,null)` unpark。
+- **createOAuthAdmin 上移**：原本 ~2069 行才构造（晚于 captureCodexQuota），提到 oauthCtx 处存 `oauthAdmin`，供执行路径复用其 `consumeCodexResetCredit`；原 `oauth:` 处复用同实例。
+- **两处 UI**（均 Codex-only）：管理弹窗 Schedule tab 加 `auto-reset-toggle` checkbox；重置确认弹层加 `reset-auto-reset-toggle`（预填账号当前值，确认时**解耦**先 best-effort 存设置再 consume——重置失败设置也留住）。新 testid 不动旧的（e2e 安全，见 [[e2e-admin-specs-live-in-gateway]]）。
+- **验证**：`auto-reset.test`(7) + account-settings/admin-oauth/oauth-route 各补 autoReset 例；gateway admin+oauth 180 测、admin i18n 17 测、四包 typecheck、svelte-check 934/0/0、biome、**build 全绿**。i18n 走 extract+update 后手填 zh-hans/zh-hant/ja/ko 全四非英语 locale（Codex review P3：`i18n:update` 用英文占位会漏译，须手填，[[i18n-sync-incremental-empty-only]]）。分支 `feat-codex-auto-reset`，**未部署**。
+
 ## 2026-06-26 · admin 导航骨架屏 + 详情页 payload 独立 fail-open（admin UI；docs/07，框架体感）
 
 - **背景（Lukin，线上体感）**：la.atmy.work admin 点请求列表/详情，进度条走完却不出内容、再点一次才出——「不像正常 HTML 页面」。调研定性：**非 SvelteKit bug**，是 SPA 阻塞式 `load` + 冷查询慢叠加，外加详情页静默吞错。后端冷查询已修（v0.21.35 indexed admin filters），剩前端体感 + 一个真 bug。
@@ -22,20 +32,13 @@
 - **验证**：`facts.test` 新增 cap（1000 字符 blob → ≤80、无尾 dash、真 topic 不变）+ blob 守卫（data-URL → 0 fact、正常句子 → 1 fact）。**core memory 353 测全绿**，typecheck/biome 干净。
 - **box 清理**：删 `length(subject_key)>80` 的那 1 条（备份 `memory-backup-20260626-213811.sql`），max 长度回到 31，FTS integrity OK。分支 `fix-memory-subject-key-cap`。
 
-## 2026-06-26 · 记忆管理页重做：分页 + Superseded 过滤 + 反思置顶 + 新增事实（admin UI；docs/13）
-
-- **背景（Lukin 五诉求）**：`/admin/memory` ① 事实显示不全、无分页；② 状态下拉缺 **Superseded**；③ 反思应置顶（与事实换位）；④ 整体乱、重做；⑤ 只能编辑不能新增 → 加「新增事实」。
-- **关键发现（少写代码）**：后端 `listFacts` **早支持** `limit/offset/search` 返回 `{rows,total}`，前端从没传分页/搜索；`status='active'` 在 `factListClauses` **早已 = active AND expiredAt IS NULL**（即排除 superseded，与徽章一致）——所以「Superseded」只差一个**派生过滤值**，非新存储状态。新增事实直接复刻 MCP `memory_add`（`buildReconciledFactBatch`+`insertFactsReconciled`+`getFactById`，三者已在 `REQUIRED_METHODS`）。
-- **后端**：① 新 `FactListStatus = MemoryStatus|"all"|"superseded"`（`@helm/shared`，**不动** `MemoryStatusSchema`——superseded 是视图非存储态）；sqlite+pg `factListClauses` 各加一支 `superseded → eq(status,'active') AND isNotNull(expiredAt)`；`ports.ts`/route `FACT_STATUSES` 同步。② 新 `POST /admin/api/memory/facts`（scope 走 query 同 GET、字段走 body；`MemoryFactCreateSchema` strict），返回 `{fact,added,resurrected,superseded,deduped}`。
-- **前端**（`+page.svelte` 重排，保留 `scope-row`/`fact-row`/`reflection-row` testid）：反思置顶且改**卡片**（长文全显，`whitespace-pre-wrap`，不再 `truncate`）；事实工具栏 = 搜索框 + 全状态下拉（Active/Superseded/Archived/Pruned/All）+「新增事实」；事实正文去 `max-w-md` 全显；**客户端分页器**（`FACT_PAGE_SIZE=25`，复用 `paginationItems`，复用 `pager-*` testid，按钮非链接因本页靠 `$state` 非 loader 驱动）。新组件 `AddFactDialog.svelte`（可编辑 Subject、无 status 字段；低风险，不重载假定 `fact` 非空的 `EditFactDialog`）。中性绿色 `notice` 条提示 added/deduped/superseded。
-- **坑**：① `AddFactDialog.test` 的 reject 测试在 `beforeEach` 只 `mockReset()`（无默认实现）时，后续 `mockRejectedValue` 会被 vitest 当**未处理拒绝**判失败——须 reset 后补一个默认 `mockResolvedValue`（照抄 `CreateKeyDialog.test`，组件本身正确，纯测试基架问题）。② `onsearch` 不是 Svelte 识别的 prop（svelte-check 报错）→ 改 form `onsubmit` + Search 按钮。③ `i18n:update` 把新键以**英文值**填入各 locale（非空），故"空键扫描"查不到——须按 git diff 的 13 个新键手填 zh/ja/ko。
-- **验证**：新增 store superseded 测（pg）、route superseded+POST 测、page 重排/分页/搜索/新增测、`AddFactDialog.test`。**admin 502 单测 + core/shared 471 + 4 memory 文件 48 全绿**；typecheck 四包 Done、svelte-check 933/0/0、biome+prettier 干净。分支 `feat-memory-admin-redesign`。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-26 · 记忆管理页重做：分页 + Superseded 过滤 + 反思置顶 + 新增事实（admin UI；docs/13）**：`/admin/memory` 五诉求。少写代码：`listFacts` 早支持 `limit/offset/search`+`{rows,total}`、`status='active'` 早已=排除 superseded，故「Superseded」只是**派生过滤值**（新 `FactListStatus=MemoryStatus|"all"|"superseded"`，不动 `MemoryStatusSchema`；sqlite+pg `factListClauses` 加 `superseded→active AND expiredAt IS NOT NULL`）；新增事实复刻 MCP `memory_add`（新 `POST /admin/api/memory/facts`，`MemoryFactCreateSchema` strict）。前端反思置顶改卡片全显、客户端分页器（`FACT_PAGE_SIZE=25` 复用 `pager-*` testid）、新 `AddFactDialog`。坑：`AddFactDialog.test` reject 须先补默认 `mockResolvedValue`（见 [[admin-test-i18n-gotchas]]）；`onsearch` 非法 prop 改 `onsubmit`；`i18n:update` 用英文填新键须手填 zh/ja/ko。admin 502+core/shared 471+memory 48 绿。发 v0.22.5 部署。
 
 - **2026-06-26 · 记忆 observer 收紧为仅观察 user 内容（docs/08，原则 1/7）**：box 出现 tool 输出当事实（`tool: (Bash completed...)`）+ 瞬时噪音，根因 compaction→`summarizeMessagesDeterministic` 逐字 dump 含 tool（eager 快路径早已只取 user，是这条没对齐）。修：在 summarize 唯一卡点过滤 `role==='user'`（LLM prompt + 确定性兜底都作用），不在入库层删（docs/08 要原始审计存储）。纯 tool/assistant 切片返回 `[no user content]` sentinel 满足 min(1)+推进 compaction 覆盖。gateway+core memory 294 测绿。并入 v0.22.4 部署（见 [[memory-observer-user-only-fix]]）。
 

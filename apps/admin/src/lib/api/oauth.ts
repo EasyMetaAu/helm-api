@@ -18,6 +18,9 @@ export interface OAuthAccount {
   // priority = served first; schedulable false parks the account out of rotation.
   priority: number;
   schedulable: boolean;
+  // Codex only: auto-consume a reset credit when the weekly window saturates
+  // (default false). Lets the providers page pre-fill the reset-confirm checkbox.
+  autoReset?: boolean;
   // The account's egress proxy, REDACTED (never the password — only `hasPassword`),
   // or null for a direct connection. Folded onto the row by the gateway so the list
   // shows which proxy each account tunnels through without the per-account GET the
@@ -417,9 +420,11 @@ export async function setAccountProxy(
 export interface AccountSchedule {
   priority: number;
   schedulable: boolean;
+  // Codex only: auto-consume a reset credit when the weekly window saturates.
+  autoReset: boolean;
 }
 
-// GET /oauth/:provider/account?account= -> { priority, schedulable } (defaults applied).
+// GET /oauth/:provider/account?account= -> { priority, schedulable, autoReset } (defaults applied).
 export async function getAccountSchedule(
   provider: string,
   account = 'default',
@@ -430,12 +435,12 @@ export async function getAccountSchedule(
   return asJson(res);
 }
 
-// PUT /oauth/:provider/account { account, priority?, schedulable? } -> 204. Either
-// field may be omitted to leave it unchanged.
+// PUT /oauth/:provider/account { account, priority?, schedulable?, autoReset? } -> 204.
+// Any field may be omitted to leave it unchanged.
 export async function setAccountSchedule(
   provider: string,
   account: string,
-  patch: { priority?: number; schedulable?: boolean },
+  patch: { priority?: number; schedulable?: boolean; autoReset?: boolean },
 ): Promise<void> {
   const res = await fetch(`${BASE}/${provider}/account`, {
     method: 'PUT',
