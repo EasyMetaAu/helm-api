@@ -6,14 +6,18 @@ on:
     branches: [main]
 
 jobs:
+  # NOTE: actions/checkout + actions/setup-node are pinned to @v4 (node20 runtime).
+  # Some self-hosted runners (e.g. machine 199-4, runner v2.321.0) are too old to
+  # run v5's node24 runtime — they fail at "Set up job" with "'using: node24' is
+  # not supported". Bump back to @v5 once every runner in the pool is updated.
   verify:
     # Self-hosted runners (EasyMetaAu org, docker-runner-*); GitHub-hosted minutes
     # are not used. All 9 runners carry these labels.
     runs-on: [self-hosted, Linux, X64, docker]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           # The self-hosted Docker runners keep /home/runner/_work on a host
@@ -41,9 +45,9 @@ jobs:
   e2e:
     runs-on: [self-hosted, Linux, X64, docker]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           package-manager-cache: false
@@ -64,7 +68,7 @@ jobs:
   docker:
     runs-on: [self-hosted, Linux, X64, docker]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - name: Build gateway image
         # Inject build info (docs/10) so GET /version reports real values instead
         # of "unknown": app version from package.json, the commit, and a UTC stamp.
