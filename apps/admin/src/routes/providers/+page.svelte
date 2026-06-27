@@ -429,7 +429,17 @@
               <td data-label={$t('Provider')} class="px-3 py-3">
                 <div class="font-medium text-ink-body">{row.provider.name}</div>
                 <code class="font-mono text-xs text-ink-strong">{row.account.account}</code>
-                <div class="mt-1"><span class="badge-neutral">{typeBadge(row.provider)}</span></div>
+                <div class="mt-1 flex flex-wrap items-center gap-1">
+                  <span class="badge-neutral">{typeBadge(row.provider)}</span>
+                  {#if isCodex && row.account.autoReset}
+                    <span
+                      class="badge-ok"
+                      data-testid="auto-reset-badge"
+                      title={$t('Auto-resets the weekly limit once it saturates (at most once per hour)')}
+                      >{$t('Auto-reset')}</span
+                    >
+                  {/if}
+                </div>
               </td>
 
               <!-- Status (+ parked pill) -->

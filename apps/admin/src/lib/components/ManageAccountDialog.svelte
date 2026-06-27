@@ -52,6 +52,7 @@
   // catalogs), edit, or remove. "Pull from provider" merges in current suggestions.
   let modelsLoading = $state<boolean>(true);
   let modelsSaving = $state<boolean>(false);
+  let modelsSaved = $state<boolean>(false); // transient "Saved" confirmation next to Save
   let modelsError = $state<string | null>(null);
   let suggestions = $state<string[]>([]); // discovered — offered via "Pull"
   let models = $state<string[]>([]); // the authoritative, editable list
@@ -62,6 +63,7 @@
 
   async function loadModels(): Promise<void> {
     modelsError = null;
+    modelsSaved = false;
     modelsLoading = true;
     suggestions = [];
     models = [];
@@ -98,12 +100,14 @@
 
   async function saveModels(): Promise<void> {
     modelsError = null;
+    modelsSaved = false;
     modelsSaving = true;
     try {
       const clean = [...new Set(models.map((m) => m.trim()).filter((m) => m.length > 0))];
       await setAccountModels(providerId, account, clean);
       models = clean;
       dirty = true;
+      modelsSaved = true;
     } catch (e) {
       modelsError = e instanceof Error ? e.message : $t('Failed to save models');
     } finally {
@@ -118,6 +122,7 @@
   // the field blank on save preserves it.
   let proxyLoading = $state<boolean>(true);
   let proxySaving = $state<boolean>(false);
+  let proxySaved = $state<boolean>(false); // transient "Saved" confirmation next to Save
   let proxyError = $state<string | null>(null);
   let proxyType = $state<ProxyType>('http');
   let proxyHost = $state<string>('');
@@ -129,6 +134,7 @@
 
   async function loadProxy(): Promise<void> {
     proxyError = null;
+    proxySaved = false;
     proxyLoading = true;
     proxyType = 'http';
     proxyHost = '';
@@ -156,6 +162,7 @@
 
   async function saveProxy(): Promise<void> {
     proxyError = null;
+    proxySaved = false;
     const port = Number(proxyPort);
     if (!proxyHost.trim() || !Number.isInteger(port) || port < 1 || port > 65535) {
       proxyError = $t('Enter a host and a port between 1 and 65535.');
@@ -177,6 +184,7 @@
       proxyHasStored = proxyHasStored || proxyPass.length > 0;
       proxyPass = '';
       dirty = true;
+      proxySaved = true;
     } catch (e) {
       proxyError = e instanceof Error ? e.message : $t('Failed to save proxy');
     } finally {
@@ -209,6 +217,7 @@
   // account is parked (kept connected, never routed).
   let scheduleLoading = $state<boolean>(true);
   let scheduleSaving = $state<boolean>(false);
+  let scheduleSaved = $state<boolean>(false); // transient "Saved" confirmation next to Save
   let scheduleError = $state<string | null>(null);
   let priority = $state<string>('50');
   let schedulable = $state<boolean>(true);
@@ -218,6 +227,7 @@
 
   async function loadSchedule(): Promise<void> {
     scheduleError = null;
+    scheduleSaved = false;
     scheduleLoading = true;
     priority = '50';
     schedulable = true;
@@ -236,6 +246,7 @@
 
   async function saveSchedule(): Promise<void> {
     scheduleError = null;
+    scheduleSaved = false;
     const p = Number(priority);
     if (!Number.isInteger(p) || p < 0) {
       scheduleError = $t('Priority must be a whole number ≥ 0.');
@@ -245,6 +256,7 @@
     try {
       await setAccountSchedule(providerId, account, { priority: p, schedulable, autoReset });
       dirty = true;
+      scheduleSaved = true;
     } catch (e) {
       scheduleError = e instanceof Error ? e.message : $t('Failed to save schedule');
     } finally {
@@ -386,6 +398,9 @@
                 >{$t('Pull from provider ({n})', { n: suggestions.length })}</button
               >
             {/if}
+            {#if modelsSaved}
+              <span class="badge-ok" role="status">{$t('Saved')}</span>
+            {/if}
             <button
               type="button"
               class="btn-primary-sm"
@@ -455,6 +470,9 @@
                 onclick={clearProxy}>{$t('Clear proxy')}</button
               >
             {/if}
+            {#if proxySaved}
+              <span class="badge-ok" role="status">{$t('Saved')}</span>
+            {/if}
             <button type="button" class="btn-primary-sm" disabled={proxySaving} onclick={saveProxy}
               >{proxySaving ? $t('Saving…') : $t('Save')}</button
             >
@@ -505,6 +523,9 @@
             </p>
           {/if}
           <div class="card-actions">
+            {#if scheduleSaved}
+              <span class="badge-ok" role="status">{$t('Saved')}</span>
+            {/if}
             <button
               type="button"
               class="btn-primary-sm"
