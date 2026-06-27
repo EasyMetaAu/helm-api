@@ -259,7 +259,7 @@ describe('providers page', () => {
 
   // ── Codex "Reset limit" (rate-limit reset credit) ──────────────────────────
   // One Codex account + a quota snapshot carrying the live reset-credit count.
-  function renderCodex(resetCredits: number | null) {
+  function renderCodex(resetCredits: number | null, autoReset = false) {
     renderPage({
       providers: [
         provider({
@@ -273,6 +273,7 @@ describe('providers page', () => {
               healthy: true,
               priority: 50,
               schedulable: true,
+              autoReset,
               proxy: null,
               models: ['gpt-5.5'],
             },
@@ -295,6 +296,18 @@ describe('providers page', () => {
       ],
     });
   }
+
+  it('shows the Auto-reset badge on the list only when the account opted in', async () => {
+    renderCodex(2, true);
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByTestId('auto-reset-badge')).toBeInTheDocument();
+  });
+
+  it('hides the Auto-reset badge when the account has not opted in', async () => {
+    renderCodex(2, false);
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).queryByTestId('auto-reset-badge')).not.toBeInTheDocument();
+  });
 
   it('confirms before consuming a Codex reset credit, then refreshes on success', async () => {
     consumeCodexResetCredit.mockResolvedValue({ code: 'ok', windowsReset: 2 });
