@@ -173,6 +173,7 @@ gemini-3.1-flash-image:
   supportsVision: true
   supportsStreaming: true
   supportsCachedContent: false
+  outputImage: true
   maxContextTokens: 32768
   maxOutputTokens: 32768
 gemini-3-pro-image:
@@ -181,6 +182,7 @@ gemini-3-pro-image:
   supportsVision: true
   supportsStreaming: true
   supportsCachedContent: false
+  outputImage: true
   maxContextTokens: 32768
   maxOutputTokens: 32768
 # OpenAI Images API model (POST /v1/images/generations, NOT chat). The catalog
@@ -192,6 +194,7 @@ gpt-image-2:
   supportsVision: true
   supportsStreaming: false
   supportsCachedContent: false
+  outputImage: true
   maxContextTokens: 32768
   maxOutputTokens: 32768
 zenmux-anthropic/claude-opus-4.8:

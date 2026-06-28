@@ -284,6 +284,16 @@ export {
   ImageGenerationResponseSchema,
   ImageUsageSchema,
 } from "./request/images-schema.js";
+export {
+  type InteractionInputBlock,
+  InteractionInputBlockSchema,
+  InteractionInputSchema,
+  InteractionResponseFormatSchema,
+  type InteractionsRequest,
+  InteractionsRequestSchema,
+  type InteractionsResponse,
+  InteractionsResponseSchema,
+} from "./request/interactions-schema.js";
 // Internal request structure (docs/02).
 export {
   type InternalRequest,

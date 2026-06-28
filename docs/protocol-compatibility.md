@@ -26,11 +26,18 @@ all four streaming-capable:
 | OpenAI Responses | `POST /v1/responses` | `openai-responses` | `Authorization: Bearer` |
 | Google Gemini | `POST /v1beta/models/{model}:generateContent` (+ `:streamGenerateContent?alt=sse`) | `gemini` | `x-goog-api-key` |
 | OpenAI Images | `POST /v1/images/generations` | (none — model-pinned, no transformer) | `Authorization: Bearer` |
+| Gemini Interactions | `POST /v1beta/interactions` | (none — model-pinned, translated to `generateContent`) | `x-goog-api-key` |
 
-The Images row is an **additional model-pinned surface**, not a fifth inbound
-protocol: it has no `nativeIn`/`nativeOut` transformer pair and does not
-participate in cross-protocol translation, so the **four inbound protocols**
-framing (and the 4×4 matrix) above covers only the translated ones.
+The Images and Interactions rows are **additional model-pinned surfaces**, not
+fifth/sixth inbound protocols: neither has a `nativeIn`/`nativeOut` transformer
+pair, so the **four inbound protocols** framing (and the 4×4 matrix) above covers
+only the translated ones. The Interactions request (`{model, input,
+response_format}`) is translated internally to a Gemini `generateContent` call —
+upstream speaks `generateContent`, not interactions — and the response is mapped
+back to `{id, steps:[…]}`. The native `:generateContent` endpoint likewise now
+serves image models (`gemini-3.1-flash-image`, `gemini-3-pro-image`), model-pinned
+via `capabilities.outputImage` ahead of the `gemini-*flash*` glob so
+`responseModalities` → `inlineData` survives.
 
 Gemini is mounted as catch-alls under both `POST /v1beta/models/:rest{.+}` and
 `POST /models/:rest{.+}`. `generateContent` / `streamGenerateContent` run the

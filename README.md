@@ -204,6 +204,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/responses` | OpenAI Responses | ✅ |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅ (via `:streamGenerateContent`; auth via `x-goog-api-key`) |
 | `POST /v1/images/generations` | OpenAI Images API ([image generation](#image-generation)) | — (model-pinned, any key) |
+| `POST /v1beta/interactions` | Gemini Interactions API ([image generation](#image-generation)) | — (model-pinned, any key) |
 
 **What to put in `model`:**
 
@@ -218,20 +219,35 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### Image generation
 
-`POST /v1/images/generations` is a **dedicated, OpenAI-Images-compatible** endpoint for image models. It is **model-pinned** — you name the exact image model (no `auto`, no lanes, no classification) — and works with **any valid key** (no `allow_custom_model` needed; cost is bounded by the key's budget / rate limit). Bearer auth only.
+Image models are **model-pinned**: you name the exact model (no `auto`, no lanes, no classification), and **any valid key** works (no `allow_custom_model` needed; cost is bounded by the key's budget / rate limit). Operator-configured models: `gpt-image-2` (OpenAI), `gemini-3.1-flash-image` / `gemini-3-pro-image` (Google "Nano Banana"). Every call is metered per image (output tokens × the model's image rate) and appears in the dashboard like any other request. Three entrypoints — match the one your SDK speaks:
+
+**1. OpenAI Images API** — `POST /v1/images/generations` (Bearer auth), `{ "created", "data": [{ "b64_json" }], "usage" }`:
 
 ```bash
 curl http://localhost:8080/v1/images/generations \
-  -H "Authorization: Bearer $HELM_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-image-2",
-    "prompt": "a single red apple on a plain white background",
-    "size": "1024x1024"
-  }'
+  -H "Authorization: Bearer $HELM_KEY" -H "Content-Type: application/json" \
+  -d '{ "model": "gpt-image-2", "prompt": "a single red apple on a plain white background", "size": "1024x1024" }'
 ```
 
-The response follows the OpenAI Images shape — `{ "created": …, "data": [{ "b64_json": "…" }], "usage": … }`. Operator-configured image models include `gpt-image-2` (OpenAI) and `gemini-3.1-flash-image` / `gemini-3-pro-image` (Google — Helm translates these to/from Gemini's native `generateContent`, so the request/response stay OpenAI-shaped). Each call is metered per image (output tokens × the model's image rate) and shows up in the dashboard like any other request.
+**2. Gemini `generateContent`** — the Gemini SDK's `generate_content` path. Name an image model and ask for image output; Helm routes it natively, so the response carries `candidates[].content.parts[].inlineData`:
+
+```bash
+curl "http://localhost:8080/v1beta/models/gemini-3.1-flash-image:generateContent" \
+  -H "x-goog-api-key: $HELM_KEY" -H "Content-Type: application/json" \
+  -d '{ "contents": [{ "parts": [{ "text": "a single red apple on a plain white background" }] }],
+        "generationConfig": { "responseModalities": ["TEXT", "IMAGE"] } }'
+```
+
+**3. Gemini Interactions API** — `POST /v1beta/interactions` (the SDK's `client.interactions.create`). Response is the `steps[]` shape, with the image at `steps[].content[]` (`{ "type": "image", "data": … }`); the SDK's `interaction.output_image.data` reads it:
+
+```bash
+curl http://localhost:8080/v1beta/interactions \
+  -H "x-goog-api-key: $HELM_KEY" -H "Content-Type: application/json" \
+  -d '{ "model": "gemini-3.1-flash-image", "input": "a single red apple on a plain white background",
+        "response_format": { "type": "image", "aspect_ratio": "1:1" } }'
+```
+
+> The OpenAI Images endpoint serves both OpenAI and Gemini image models (Helm translates Gemini to/from `generateContent`). The two Gemini-native entrypoints serve only Gemini image models. `gpt-image-2` on `/v1beta/interactions` is a 400 → use `/v1/images/generations`.
 
 **Other endpoints** (full interactive docs at `/docs`, raw spec at `/openapi.json`):
 

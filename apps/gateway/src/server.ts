@@ -147,6 +147,7 @@ import { buildClassifyAdapter } from "./routes/classify.js";
 import { createExecute } from "./routes/execute.js";
 import { registerGeminiRoute } from "./routes/gemini.js";
 import { registerImagesRoute } from "./routes/images.js";
+import { registerInteractionsRoute } from "./routes/interactions.js";
 import { registerMcpServer } from "./routes/mcp/index.js";
 import { deriveMcpSigningKey, mcpAuth, registerMcpOAuth } from "./routes/mcp/oauth.js";
 import { supportsMemoryAdmin } from "./routes/mcp/tools.js";
@@ -1965,6 +1966,14 @@ export async function buildServer(
             if (prefix && providerClients.has(prefix)) return true;
             return false; // bare unknown name: rejected (no Phase-0 silent fallback)
           },
+          // Image-generation models (catalog capabilities.outputImage) are model-pinned
+          // for ANY key (route-request §0pre), so a native-Gemini image request reaches
+          // its provider via native passthrough instead of a `gemini-*flash*` glob.
+          isImageModel: (model) => {
+            const r = registry.resolve(model);
+            if (!r.ok) return false;
+            return catalog.get(r.value.alias)?.capabilities.outputImage === true;
+          },
           signalFeedback: {
             enabled: config.runtime.signal_feedback.enabled,
             minSamples: config.runtime.signal_feedback.min_samples,
@@ -2607,32 +2616,55 @@ export async function buildServer(
   // model-pinned endpoint that resolves the requested model to a provider whose
   // client implements imageGeneration (OpenAI-compat), forwards verbatim, and
   // records one telemetry row with cost. Bypasses the lane/classify pipeline.
+  // Resolve a client-facing model id → provider client + wire model + alias + KIND.
+  // SHARED by the OpenAI Images route and the Gemini Interactions route (both
+  // model-pinned image surfaces). gemini-protocol providers serve images via
+  // generateContent (nativePassthrough); everyone else via the OpenAI Images API.
+  const resolveImageTarget = (model: string) => {
+    const r = registry.resolve(model);
+    if (!r.ok) return null; // unknown alias → 404
+    const kind: "openai" | "gemini" =
+      r.value.targetProviderProtocol === "gemini" ? "gemini" : "openai";
+    const client = providerClients.get(r.value.providerName);
+    // Configured image model but credential/client missing → 503 (server config),
+    // distinct from an unknown model id (404). An OAuth provider has no api_key_env.
+    if (r.value.apiKeyEnv && process.env[r.value.apiKeyEnv] === undefined) {
+      return { kind: "unavailable" as const };
+    }
+    if (client === undefined) return { kind: "unavailable" as const };
+    // A provider that implements neither image method isn't an image model → 404.
+    const method = kind === "gemini" ? client.nativePassthrough : client.imageGeneration;
+    if (typeof method !== "function") return null;
+    return { client, providerModel: r.value.providerModel, alias: r.value.alias, kind };
+  };
   registerImagesRoute(app, {
     rateLimiter,
     concurrencyGate,
     auth: { resolve: resolveIdentity },
-    resolveImageTarget: (model) => {
-      const r = registry.resolve(model);
-      if (!r.ok) return null; // unknown alias → 404
-      // gemini-protocol providers serve images via generateContent (nativePassthrough);
-      // everyone else via the OpenAI Images API (imageGeneration).
-      const kind: "openai" | "gemini" =
-        r.value.targetProviderProtocol === "gemini" ? "gemini" : "openai";
-      const client = providerClients.get(r.value.providerName);
-      // Configured image model but credential/client missing → 503 (server config),
-      // distinct from an unknown model id (404). An OAuth provider has no api_key_env.
-      if (r.value.apiKeyEnv && process.env[r.value.apiKeyEnv] === undefined) {
-        return { kind: "unavailable" };
-      }
-      if (client === undefined) return { kind: "unavailable" };
-      // A provider that implements neither image method isn't an image model → 404.
-      const method = kind === "gemini" ? client.nativePassthrough : client.imageGeneration;
-      if (typeof method !== "function") return null;
-      return { client, providerModel: r.value.providerModel, alias: r.value.alias, kind };
-    },
+    resolveImageTarget,
     costOf: (alias, body) => resolveCostUsd(catalog.get(alias)?.pricing, body),
     // Per-key usage-budget enforcement — the SAME gate + settle the chat face uses, so
     // image spend is capped (reject) and counted (settle) like every other request.
+    budgetGate,
+    settleBudget: settleKeyBudget,
+    record: {
+      telemetry,
+      writes: writeQueue,
+      redact: (payload) => redact(payload),
+      now: () => Date.now(),
+      capturePayloads: () => settings.capture_payloads,
+    },
+  });
+
+  // POST /v1beta/interactions — Gemini Interactions API image gen (the SDK's
+  // client.interactions.create). Same model-pinned resolver + budget + telemetry as
+  // the images route; translates the interactions request ↔ generateContent.
+  registerInteractionsRoute(app, {
+    rateLimiter,
+    concurrencyGate,
+    auth: { resolve: resolveIdentity },
+    resolveImageTarget,
+    costOf: (alias, body) => resolveCostUsd(catalog.get(alias)?.pricing, body),
     budgetGate,
     settleBudget: settleKeyBudget,
     record: {

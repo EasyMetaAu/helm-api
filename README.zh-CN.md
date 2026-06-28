@@ -204,6 +204,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/responses` | OpenAI Responses | ✅ |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅（走 `:streamGenerateContent`；用 `x-goog-api-key` 鉴权） |
 | `POST /v1/images/generations` | OpenAI Images API（[图片生成](#图片生成)） | —（钉死模型，任意 key 可用） |
+| `POST /v1beta/interactions` | Gemini Interactions API（[图片生成](#图片生成)） | —（钉死模型，任意 key 可用） |
 
 **`model` 字段填什么：**
 
@@ -218,20 +219,35 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### 图片生成
 
-`POST /v1/images/generations` 是一个**专用、兼容 OpenAI Images** 的图片模型端点。它**钉死模型**——你直接写出具体的图片模型 id（没有 `auto`、没有 lane、不经分类）——且**任意有效 key 都能用**（无需 `allow_custom_model`；成本由该 key 的预算 / 限流约束）。仅支持 Bearer 鉴权。
+图片模型一律**钉死模型**：直接写出具体模型 id（没有 `auto`、没有 lane、不经分类），且**任意有效 key 都能用**（无需 `allow_custom_model`；成本由该 key 的预算 / 限流约束）。可配置的模型：`gpt-image-2`（OpenAI）、`gemini-3.1-flash-image` / `gemini-3-pro-image`（Google「Nano Banana」）。每次调用按图片计量（output tokens × 该模型的图片费率），并和其他请求一样进入面板。三个入口——按你的 SDK 说哪种协议来选：
+
+**1. OpenAI Images API** —— `POST /v1/images/generations`（Bearer 鉴权），响应 `{ "created", "data": [{ "b64_json" }], "usage" }`：
 
 ```bash
 curl http://localhost:8080/v1/images/generations \
-  -H "Authorization: Bearer $HELM_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-image-2",
-    "prompt": "纯白背景上的一颗红苹果",
-    "size": "1024x1024"
-  }'
+  -H "Authorization: Bearer $HELM_KEY" -H "Content-Type: application/json" \
+  -d '{ "model": "gpt-image-2", "prompt": "纯白背景上的一颗红苹果", "size": "1024x1024" }'
 ```
 
-响应遵循 OpenAI Images 形状——`{ "created": …, "data": [{ "b64_json": "…" }], "usage": … }`。运维方可配置的图片模型包括 `gpt-image-2`（OpenAI）以及 `gemini-3.1-flash-image` / `gemini-3-pro-image`（Google——Helm 会把它们与 Gemini 原生的 `generateContent` 双向互译，因此请求 / 响应始终保持 OpenAI 形状）。每次调用按图片计量（output tokens × 该模型的图片费率），并和其他请求一样进入面板。
+**2. Gemini `generateContent`** —— Gemini SDK 的 `generate_content` 路径。写一个图片模型并要求图片输出；Helm 原生路由，响应携带 `candidates[].content.parts[].inlineData`：
+
+```bash
+curl "http://localhost:8080/v1beta/models/gemini-3.1-flash-image:generateContent" \
+  -H "x-goog-api-key: $HELM_KEY" -H "Content-Type: application/json" \
+  -d '{ "contents": [{ "parts": [{ "text": "纯白背景上的一颗红苹果" }] }],
+        "generationConfig": { "responseModalities": ["TEXT", "IMAGE"] } }'
+```
+
+**3. Gemini Interactions API** —— `POST /v1beta/interactions`（SDK 的 `client.interactions.create`）。响应是 `steps[]` 形状，图片在 `steps[].content[]`（`{ "type": "image", "data": … }`）；SDK 的 `interaction.output_image.data` 即从此读取：
+
+```bash
+curl http://localhost:8080/v1beta/interactions \
+  -H "x-goog-api-key: $HELM_KEY" -H "Content-Type: application/json" \
+  -d '{ "model": "gemini-3.1-flash-image", "input": "纯白背景上的一颗红苹果",
+        "response_format": { "type": "image", "aspect_ratio": "1:1" } }'
+```
+
+> OpenAI Images 端点同时服务 OpenAI 和 Gemini 图片模型（Helm 把 Gemini 与 `generateContent` 双向互译）；两个 Gemini 原生入口只服务 Gemini 图片模型。在 `/v1beta/interactions` 上发 `gpt-image-2` 会返回 400 → 请改用 `/v1/images/generations`。
 
 **其余端点**（交互式文档在 `/docs`，原始规格在 `/openapi.json`）：
 
