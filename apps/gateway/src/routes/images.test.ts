@@ -1,4 +1,4 @@
-import type { ProviderClient } from "@helm/core";
+import type { CircuitBreaker, ProviderClient } from "@helm/core";
 import { UpstreamError } from "@helm/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,17 @@ import type { AppEnv } from "../app.js";
 import { type ImagesRouteDeps, registerImagesRoute } from "./images.js";
 import type { MessagesIdentity } from "./messages.js";
 import type { RecordServedDeps } from "./payload-capture.js";
+
+// A breaker that always allows (CLOSED) — image fallback control flow is unit-tested
+// in image-chain.test.ts; these tests exercise the route's HTTP/telemetry glue.
+function closedBreaker(): CircuitBreaker {
+  return {
+    canAttempt: () => ({ allow: true, probe: false }),
+    recordSuccess: vi.fn(),
+    recordFailure: vi.fn(),
+    recordAbort: vi.fn(),
+  } as unknown as CircuitBreaker;
+}
 
 const UPSTREAM = {
   created: 0,
@@ -49,10 +60,18 @@ function setup(over: Partial<ImagesRouteDeps> = {}) {
             } as MessagesIdentity)
           : null,
     },
-    resolveImageTarget: (model) =>
+    resolveImageChain: (model) =>
       model === "gpt-image-2"
-        ? { client, providerModel: "openai/gpt-image-2", alias: "gpt-image-2", kind: "openai" }
-        : null,
+        ? {
+            ok: true,
+            laneName: "image",
+            candidateChain: ["gpt-image-2"],
+            targets: [
+              { client, providerModel: "openai/gpt-image-2", alias: "gpt-image-2", kind: "openai" },
+            ],
+          }
+        : { ok: false, status: 404 },
+    breaker: closedBreaker(),
     costOf: () => 0.006,
     record,
     ...over,
@@ -170,7 +189,9 @@ describe("registerImagesRoute", () => {
   });
 
   it("returns 503 when a configured image provider is unavailable (missing credential)", async () => {
-    const { app, imageGeneration } = setup({ resolveImageTarget: () => ({ kind: "unavailable" }) });
+    const { app, imageGeneration } = setup({
+      resolveImageChain: () => ({ ok: false, status: 503 }),
+    });
     const res = await post(app, { model: "gpt-image-2", prompt: "x" });
     expect(res.status).toBe(503);
     expect(imageGeneration).not.toHaveBeenCalled();
@@ -199,12 +220,20 @@ describe("registerImagesRoute", () => {
         resolve: async (cred) =>
           cred === "k" ? ({ keyId: "k1", accountId: "a" } as MessagesIdentity) : null,
       },
-      resolveImageTarget: () => ({
-        client,
-        providerModel: "gemini-3.1-flash-image",
-        alias: "gemini-3.1-flash-image",
-        kind: "gemini",
+      resolveImageChain: () => ({
+        ok: true,
+        laneName: "image",
+        candidateChain: ["gemini-3.1-flash-image"],
+        targets: [
+          {
+            client,
+            providerModel: "gemini-3.1-flash-image",
+            alias: "gemini-3.1-flash-image",
+            kind: "gemini",
+          },
+        ],
       }),
+      breaker: closedBreaker(),
       costOf: () => 0.0672,
       record,
     });

@@ -39,6 +39,19 @@ Four client protocols are wired and routed:
 >   content:[{type:"image", mime_type, data}]}]}`. Upstream speaks `generateContent`,
 >   not interactions, so Helm **translates** the request to a `generateContent` call
 >   and maps the response back. Non-streaming.
+>
+> **Failover (image lanes).** The `model` may name a single image alias OR an image
+> **lane** (a `config/lanes.yaml` lane whose members are image aliases across
+> providers). On the two dedicated endpoints, `resolveImageChain` (server.ts) expands
+> the lane via `expandLaneChain` and `runImageChain`
+> (`apps/gateway/src/routes/image-chain.ts`) runs the chain with the **same circuit
+> breaker + terminal/fallback rules as the chat executor** — breaker-open → skip;
+> 5xx/timeout/network → record fault + advance; a 4xx `invalid_request` (or client
+> abort) → terminal, returned verbatim, no fallback. One image is one billable unit
+> (budget gated once, settled on the *served* alias's cost). Members must be a single
+> kind (all OpenAI-Images **or** all Gemini) so the verbatim params stay uniform.
+> Lanes are ungated on the dedicated endpoints (any key); selecting a lane *by name*
+> on `:generateContent` follows the normal lane rule (needs `allow_custom_model`).
 
 **OpenAI Responses** streaming returns a native Responses SSE stream of
 `response.*` events terminated by a `response.completed` event. There is **no**

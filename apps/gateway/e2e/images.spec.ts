@@ -47,6 +47,32 @@ test.describe("images e2e", () => {
     expect(res.headers()["x-helm-final-model"]).toBe("gemini-3.1-flash-image");
   });
 
+  test("an image LANE serves its primary, and fails over to the fallback provider when the primary is down", async ({
+    request,
+  }) => {
+    // `gemini-image` is a lane (primary gemini-3.1-flash-image → fallback
+    // gemini-3-pro-image). A normal request serves the primary…
+    const ok = await request.post("/v1/images/generations", {
+      headers: AUTH,
+      data: { model: "gemini-image", prompt: "a kite" },
+    });
+    expect(ok.status()).toBe(200);
+    expect(ok.headers()["x-helm-lane"]).toBe("gemini-image");
+    expect(ok.headers()["x-helm-final-model"]).toBe("gemini-3.1-flash-image");
+
+    // …and when the primary is failing (mock steered by the sentinel prompt), the
+    // chain falls over to the fallback provider/model — still a 200 with an image.
+    const failover = await request.post("/v1/images/generations", {
+      headers: AUTH,
+      data: { model: "gemini-image", prompt: "__HELM_FAIL_IMAGE_PRIMARY__ a kite" },
+    });
+    expect(failover.status()).toBe(200);
+    const body = (await failover.json()) as { data: Array<{ b64_json?: string }> };
+    expect((body.data[0]?.b64_json ?? "").length).toBeGreaterThan(0);
+    expect(failover.headers()["x-helm-final-model"]).toBe("gemini-3-pro-image"); // fell over
+    expect(failover.headers()["x-helm-lane"]).toBe("gemini-image");
+  });
+
   test("an unknown image model is a 404 (not a 5xx)", async ({ request }) => {
     const res = await request.post("/v1/images/generations", {
       headers: AUTH,

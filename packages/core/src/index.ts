@@ -183,6 +183,10 @@ export {
 // re-implementation was unused and had diverged — removed (review finding C1).
 // Only the shared attempt-record type survives here.
 export type { AttemptRecord } from "./executor/attempt-record.js";
+// Pure lane-graph flattener (primary→fallback, recursive, dedup, cycle-guarded) →
+// ordered leaf aliases. Shared by routing + the public model listing; also used by
+// the gateway's image-lane chain resolver so an image lane fails over like a text lane.
+export { expandLaneChain } from "./lanes/expand-chain.js";
 export {
   DEFAULT_LANES,
   type Lane,

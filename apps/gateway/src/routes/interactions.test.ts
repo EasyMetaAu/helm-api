@@ -1,4 +1,4 @@
-import type { ProviderClient } from "@helm/core";
+import type { CircuitBreaker, ProviderClient } from "@helm/core";
 import { UpstreamError } from "@helm/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,16 @@ import type { AppEnv } from "../app.js";
 import { type InteractionsRouteDeps, registerInteractionsRoute } from "./interactions.js";
 import type { MessagesIdentity } from "./messages.js";
 import type { RecordServedDeps } from "./payload-capture.js";
+
+// Always-CLOSED breaker — fallback control flow is covered in image-chain.test.ts.
+function closedBreaker(): CircuitBreaker {
+  return {
+    canAttempt: () => ({ allow: true, probe: false }),
+    recordSuccess: vi.fn(),
+    recordFailure: vi.fn(),
+    recordAbort: vi.fn(),
+  } as unknown as CircuitBreaker;
+}
 
 // A generateContent native response: text + image parts + image-token usage.
 const NATIVE = {
@@ -56,23 +66,33 @@ function setup(over: Partial<InteractionsRouteDeps> = {}) {
             } as MessagesIdentity)
           : null,
     },
-    resolveImageTarget: (model) => {
+    resolveImageChain: (model) => {
       if (model === "gemini-3.1-flash-image")
         return {
-          client,
-          providerModel: "gemini-3.1-flash-image",
-          alias: "gemini-3.1-flash-image",
-          kind: "gemini",
+          ok: true,
+          laneName: "image",
+          candidateChain: ["gemini-3.1-flash-image"],
+          targets: [
+            {
+              client,
+              providerModel: "gemini-3.1-flash-image",
+              alias: "gemini-3.1-flash-image",
+              kind: "gemini",
+            },
+          ],
         };
       if (model === "gpt-image-2")
         return {
-          client,
-          providerModel: "openai/gpt-image-2",
-          alias: "gpt-image-2",
-          kind: "openai",
+          ok: true,
+          laneName: "image",
+          candidateChain: ["gpt-image-2"],
+          targets: [
+            { client, providerModel: "openai/gpt-image-2", alias: "gpt-image-2", kind: "openai" },
+          ],
         };
-      return null;
+      return { ok: false, status: 404 };
     },
+    breaker: closedBreaker(),
     costOf: () => 0.0672,
     record,
     ...over,
@@ -257,7 +277,7 @@ describe("registerInteractionsRoute", () => {
 
   it("returns 503 when a configured image provider is unavailable (missing credential)", async () => {
     const { app, nativePassthrough } = setup({
-      resolveImageTarget: () => ({ kind: "unavailable" }),
+      resolveImageChain: () => ({ ok: false, status: 503 }),
     });
     const res = await post(app, { model: "gemini-3.1-flash-image", input: "x" });
     expect(res.status).toBe(503);

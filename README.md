@@ -219,7 +219,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### Image generation
 
-Image models are **model-pinned**: you name the exact model (no `auto`, no lanes, no classification), and **any valid key** works (no `allow_custom_model` needed; cost is bounded by the key's budget / rate limit). Operator-configured models: `gpt-image-2` (OpenAI), `gemini-3.1-flash-image` / `gemini-3-pro-image` (Google "Nano Banana"). Every call is metered per image (output tokens × the model's image rate) and appears in the dashboard like any other request. Three entrypoints — match the one your SDK speaks:
+Image models are **model-pinned**: you name the exact model (or an image **lane** — see [Failover](#image-failover-across-providers) below), with no classification, and **any valid key** works (no `allow_custom_model` needed; cost is bounded by the key's budget / rate limit). Operator-configured models: `gpt-image-2` (OpenAI), `gemini-3.1-flash-image` / `gemini-3-pro-image` (Google "Nano Banana"). Every call is metered per image (output tokens × the model's image rate) and appears in the dashboard like any other request. Three entrypoints — match the one your SDK speaks:
 
 **1. OpenAI Images API** — `POST /v1/images/generations` (Bearer auth), `{ "created", "data": [{ "b64_json" }], "usage" }`:
 
@@ -248,6 +248,22 @@ curl http://localhost:8080/v1beta/interactions \
 ```
 
 > The OpenAI Images endpoint serves both OpenAI and Gemini image models (Helm translates Gemini to/from `generateContent`). The two Gemini-native entrypoints serve only Gemini image models. `gpt-image-2` on `/v1beta/interactions` is a 400 → use `/v1/images/generations`.
+
+#### Image failover across providers
+
+The same image model is often available from several providers (OpenAI direct, ZenMux, OpenRouter…). Group those per-provider aliases into an **image lane** in `config/lanes.yaml` and name the **lane** as your `model` — Helm tries the primary, and on a provider fault (timeout, 5xx, circuit-open) falls over to the next, using the **same circuit breaker** as the chat router. A deterministic client error (a 4xx invalid request — bad size, oversized image) is returned verbatim and does **not** trigger failover.
+
+```yaml
+# config/lanes.yaml — members must be image models (capabilities.outputImage) and a
+# single kind (all gpt-image-* OR all gemini-*-image). Request `model: "gpt-image"`.
+gpt-image:
+  primary: gpt-image-2          # OpenAI direct
+  fallback:
+    - zenmux/gpt-image-2        # add the alias under each provider in providers.yaml
+    - openrouter/gpt-image-2
+```
+
+Image lanes work for **any key** on the two dedicated endpoints (`/v1/images/generations`, `/v1beta/interactions`). On the Gemini `:generateContent` path, naming a lane follows the normal lane rule — it requires an `allow_custom_model` key — so for the broadest reach, point image SDKs at the dedicated endpoints.
 
 **Other endpoints** (full interactive docs at `/docs`, raw spec at `/openapi.json`):
 

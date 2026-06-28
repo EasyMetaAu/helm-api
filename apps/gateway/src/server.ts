@@ -35,6 +35,7 @@ import {
   decryptSecret,
   discoverOAuthModels,
   type EmbeddingJob,
+  expandLaneChain,
   type GeminiGenerateContentResponse,
   type GeneratedKey,
   geminiTransformer,
@@ -146,6 +147,7 @@ import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
 import { createExecute } from "./routes/execute.js";
 import { registerGeminiRoute } from "./routes/gemini.js";
+import type { ImageChainTarget, ResolveImageChain } from "./routes/image-chain.js";
 import { registerImagesRoute } from "./routes/images.js";
 import { registerInteractionsRoute } from "./routes/interactions.js";
 import { registerMcpServer } from "./routes/mcp/index.js";
@@ -2620,33 +2622,64 @@ export async function buildServer(
   // SHARED by the OpenAI Images route and the Gemini Interactions route (both
   // model-pinned image surfaces). gemini-protocol providers serve images via
   // generateContent (nativePassthrough); everyone else via the OpenAI Images API.
-  const resolveImageTarget = (model: string) => {
+  // Resolve ONE alias → an image target | {kind:"unavailable"} | null. gemini-protocol
+  // providers serve images via generateContent (nativePassthrough); everyone else via
+  // the OpenAI Images API. Only catalog `capabilities.outputImage` models qualify (a
+  // TEXT gemini alias that merely has nativePassthrough is NOT an image model → null).
+  const resolveImageTarget = (model: string): ImageChainTarget | { kind: "unavailable" } | null => {
     const r = registry.resolve(model);
     if (!r.ok) return null; // unknown alias → 404
-    // Must be an IMAGE-GENERATION model (catalog capabilities.outputImage). Without
-    // this gate any gemini-protocol alias that merely has nativePassthrough — e.g. a
-    // TEXT model like zenmux-vertex/gemini-3.5-flash — would be accepted and sent to
-    // image generation instead of the documented 404.
     if (catalog.get(r.value.alias)?.capabilities.outputImage !== true) return null;
     const kind: "openai" | "gemini" =
       r.value.targetProviderProtocol === "gemini" ? "gemini" : "openai";
     const client = providerClients.get(r.value.providerName);
-    // Configured image model but credential/client missing → 503 (server config),
+    // Configured image model but credential/client missing → "unavailable" (503),
     // distinct from an unknown model id (404). An OAuth provider has no api_key_env.
     if (r.value.apiKeyEnv && process.env[r.value.apiKeyEnv] === undefined) {
       return { kind: "unavailable" as const };
     }
     if (client === undefined) return { kind: "unavailable" as const };
-    // A provider that implements neither image method isn't an image model → 404.
+    // A provider that implements neither image method isn't an image model → null.
     const method = kind === "gemini" ? client.nativePassthrough : client.imageGeneration;
     if (typeof method !== "function") return null;
     return { client, providerModel: r.value.providerModel, alias: r.value.alias, kind };
   };
+
+  // Resolve a client id (bare image model OR image LANE) → the ordered provider chain.
+  // A lane expands via expandLaneChain (the SAME flattener routing uses); each member
+  // resolves through resolveImageTarget, with non-image / wrong-credential members
+  // DROPPED (fallback semantics — the chain tries the next provider). All-unavailable
+  // → 503; nothing resolvable → 404. Shared by both model-pinned image routes; this is
+  // what makes image gen fail over across providers like a text lane (any key).
+  const resolveImageChain: ResolveImageChain = (model) => {
+    const isLane = Object.hasOwn(lanes, model);
+    const aliases = isLane ? expandLaneChain(model, lanes) : [model];
+    const targets: ImageChainTarget[] = [];
+    let sawUnavailable = false;
+    for (const alias of aliases) {
+      const t = resolveImageTarget(alias);
+      if (t === null) continue; // not an image model → drop (lane hygiene)
+      if (!("client" in t)) {
+        sawUnavailable = true; // {kind:"unavailable"} → skip, try the next provider
+        continue;
+      }
+      targets.push(t);
+    }
+    if (targets.length === 0) return { ok: false, status: sawUnavailable ? 503 : 404 };
+    return {
+      ok: true,
+      laneName: isLane ? model : "image",
+      candidateChain: targets.map((t) => t.alias),
+      targets,
+    };
+  };
+
   registerImagesRoute(app, {
     rateLimiter,
     concurrencyGate,
     auth: { resolve: resolveIdentity },
-    resolveImageTarget,
+    resolveImageChain,
+    breaker,
     costOf: (alias, body) => resolveCostUsd(catalog.get(alias)?.pricing, body),
     // Per-key usage-budget enforcement — the SAME gate + settle the chat face uses, so
     // image spend is capped (reject) and counted (settle) like every other request.
@@ -2662,13 +2695,14 @@ export async function buildServer(
   });
 
   // POST /v1beta/interactions — Gemini Interactions API image gen (the SDK's
-  // client.interactions.create). Same model-pinned resolver + budget + telemetry as
+  // client.interactions.create). Same chain resolver + breaker + budget + telemetry as
   // the images route; translates the interactions request ↔ generateContent.
   registerInteractionsRoute(app, {
     rateLimiter,
     concurrencyGate,
     auth: { resolve: resolveIdentity },
-    resolveImageTarget,
+    resolveImageChain,
+    breaker,
     costOf: (alias, body) => resolveCostUsd(catalog.get(alias)?.pricing, body),
     budgetGate,
     settleBudget: settleKeyBudget,

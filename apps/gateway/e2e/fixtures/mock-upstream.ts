@@ -51,6 +51,29 @@ export function echoResponse(model: string) {
 export const FAIL_PRIMARY_SENTINEL = "__HELM_FAIL_PRIMARY__";
 export const FAIL_PRIMARY_MODEL = "deepseek-v4-flash";
 
+// Image-lane fallback steering: a sentinel in the image prompt fails ONLY the
+// `gemini-image` lane's PRIMARY (gemini-3.1-flash-image) on the generateContent
+// endpoint, so the image chain falls forward to the fallback (gemini-3-pro-image).
+// Steered (not a hard fail) so the direct-flash image tests still return 200.
+export const FAIL_IMAGE_PRIMARY_SENTINEL = "__HELM_FAIL_IMAGE_PRIMARY__";
+export const FAIL_IMAGE_PRIMARY_MODEL = "gemini-3.1-flash-image";
+
+// Extract the joined text of a Gemini generateContent body's contents[].parts[].text
+// (the images/interactions routes put the prompt there) — for prompt-steered injection.
+function geminiPromptText(body: { contents?: unknown }): string {
+  if (!Array.isArray(body.contents)) return "";
+  let out = "";
+  for (const c of body.contents) {
+    const parts = (c as { parts?: unknown }).parts;
+    if (!Array.isArray(parts)) continue;
+    for (const p of parts) {
+      const t = (p as { text?: unknown }).text;
+      if (typeof t === "string") out += t;
+    }
+  }
+  return out;
+}
+
 function messagesText(body: { messages?: unknown }): string {
   if (!Array.isArray(body.messages)) return "";
   let text = "";
@@ -338,8 +361,24 @@ export function createMockUpstream() {
   // asserts the Gemini→Images translation (inlineData→b64_json) + cost mapping
   // (candidatesTokenCount = 1120 image output tokens).
   app.post("/models/:spec", async (c) => {
-    if (!c.req.param("spec").endsWith(":generateContent")) {
+    const spec = c.req.param("spec");
+    if (!spec.endsWith(":generateContent")) {
       return c.json({ error: { message: "unsupported gemini operation" } }, 404);
+    }
+    const model = spec.slice(0, -":generateContent".length);
+    const body = (await c.req.json().catch(() => ({}))) as { contents?: unknown };
+    // Image-lane fallback injection: fail ONLY the lane's primary image model so the
+    // gateway's image chain advances to the fallback (which serves the image below).
+    if (
+      geminiPromptText(body).includes(FAIL_IMAGE_PRIMARY_SENTINEL) &&
+      model === FAIL_IMAGE_PRIMARY_MODEL
+    ) {
+      return c.json(
+        {
+          error: { code: 500, message: "mock injected image primary failure", status: "INTERNAL" },
+        },
+        500,
+      );
     }
     return c.json({
       candidates: [
