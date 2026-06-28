@@ -23,6 +23,10 @@ const e2eEnv = {
   // without it. A dummy value is enough: HELM_PROVIDER_BASE_URL points every
   // provider at the offline mock, so no real key is ever used.
   DEEPSEEK_API_KEY: "sk-upstream-mock-key",
+  // OpenRouter is a real production fallback provider (the economy/balanced tails
+  // route through it). Keyed so its mock-backed candidates serve — without it the
+  // economy execution-fallback (scenario 4) has no serving candidate after the head.
+  OPENROUTER_API_KEY: "sk-upstream-mock-key",
   HELM_PROVIDER_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`,
   // e2e-only: lets the `x-helm-eval` request header toggle Layer-2 eval per
   // request so e2e.eval can black-box the cascade without a config reload.
