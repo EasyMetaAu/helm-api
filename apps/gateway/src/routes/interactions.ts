@@ -177,29 +177,6 @@ function usageBodyFromNative(native: Record<string, unknown>): { usage: Record<s
   };
 }
 
-// Capture-only clone with the base64 image stripped — the megabyte payload must never
-// hit request_payloads (DB-bloat guard). The CLIENT still gets the full image.
-function stripInteractionData(body: Record<string, unknown>): Record<string, unknown> {
-  const steps = body.steps;
-  if (!Array.isArray(steps)) return body;
-  return {
-    ...body,
-    steps: steps.map((s) => {
-      const step = s as { content?: unknown };
-      if (!Array.isArray(step.content)) return s;
-      return {
-        ...step,
-        content: step.content.map((blk) => {
-          const b = blk as Record<string, unknown>;
-          return b.type === "image" && typeof b.data === "string"
-            ? { ...b, data: "[image omitted]" }
-            : blk;
-        }),
-      };
-    }),
-  };
-}
-
 export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsRouteDeps): void {
   app.use("/v1beta/interactions", concurrencyReleaseGuard());
 
@@ -340,7 +317,6 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       const usageBody = usageBodyFromNative(native);
       return {
         clientBody: interactionsBody,
-        captureBody: stripInteractionData(interactionsBody),
         usage: usageBody.usage,
         cost: deps.costOf(target.alias, usageBody),
         upstreamRequestJson,
@@ -399,7 +375,10 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
         finalErrorClass: null,
         usage: result.usage,
       });
-      const responseJson = captureEnabled(deps.record) ? JSON.stringify(result.captureBody) : null;
+      // Capture the FULL body — the store's externalizeImages content-addresses the
+      // base64 image into payload_blobs (deduped + retention-pruned) and rehydrates it
+      // for the admin detail view; request_payloads keeps only a sentinel.
+      const responseJson = captureEnabled(deps.record) ? JSON.stringify(result.clientBody) : null;
       await recordServed(
         deps.record,
         {

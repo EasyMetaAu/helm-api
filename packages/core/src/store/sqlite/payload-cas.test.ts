@@ -62,6 +62,29 @@ describe("SqliteTelemetryStore — image CAS + gzip", () => {
     expect(got?.responseJson).toBe('{"ok":true}');
   });
 
+  it("externalizes an image-GEN RESPONSE (data[].b64_json) off-row + rehydrates it for the admin view", async () => {
+    const { store, blobCount } = setup();
+    const data = bigImageB64(9);
+    // The /v1/images/generations response shape — the generated image as b64_json.
+    const responseJson = JSON.stringify({
+      created: 0,
+      data: [{ b64_json: data }],
+      usage: { output_tokens: 196 },
+    });
+    await store.insertPayload({
+      requestId: "img1",
+      requestJson: '{"model":"gpt-image","prompt":"a cat"}',
+      responseJson,
+      createdAt: new Date(2000),
+    });
+
+    expect(blobCount()).toBe(1); // the megabyte image is off-row in payload_blobs
+    // getPayload rehydrates the full image so collectImages() can render it in the admin.
+    const got = await store.getPayload("img1");
+    const resp = JSON.parse(got?.responseJson ?? "") as { data: Array<{ b64_json: string }> };
+    expect(resp.data[0]?.b64_json).toBe(data); // byte-exact image restored
+  });
+
   it("dedups the SAME image across request + upstream into ONE blob", async () => {
     const { store, blobCount } = setup();
     const data = bigImageB64();

@@ -161,6 +161,42 @@ describe("externalizeImages / rehydrateImages", () => {
     expect(JSON.parse(rehydrateImages(json, store(blobs)))).toEqual(JSON.parse(original));
   });
 
+  it("OpenAI Images output (data[].b64_json): externalizes + round-trips byte-exact", () => {
+    const data = bigB64(20);
+    const original = JSON.stringify({
+      created: 0,
+      data: [{ b64_json: data }],
+      usage: { output_tokens: 196 },
+    });
+    const { json, blobs } = externalizeImages(original);
+    expect(json).not.toContain(data); // the megabyte image is out of the payload text
+    expect(json).toContain("helm-blob:sha256:");
+    expect(blobs).toHaveLength(1);
+    expect(JSON.parse(rehydrateImages(json, store(blobs)))).toEqual(JSON.parse(original));
+  });
+
+  it("Gemini Interactions image block ({type:image,data}): externalizes + round-trips", () => {
+    const data = bigB64(21);
+    const original = JSON.stringify({
+      id: "int_1",
+      steps: [
+        {
+          type: "model_output",
+          status: "done",
+          content: [
+            { type: "text", text: "here you go" },
+            { type: "image", mime_type: "image/png", data },
+          ],
+        },
+      ],
+    });
+    const { json, blobs } = externalizeImages(original);
+    expect(json).not.toContain(data);
+    expect(blobs).toHaveLength(1);
+    expect(blobs[0]?.mime).toBe("image/png");
+    expect(JSON.parse(rehydrateImages(json, store(blobs)))).toEqual(JSON.parse(original));
+  });
+
   it("rehydrate fails open on non-JSON text containing the sentinel literal", () => {
     // Raw SSE (not a JSON document) whose model text happens to include the literal.
     const sse = 'event: delta\ndata: {"t":"helm-blob:sha256:dead"}\n\n';

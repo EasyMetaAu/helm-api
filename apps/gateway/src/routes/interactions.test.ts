@@ -200,7 +200,9 @@ describe("registerInteractionsRoute", () => {
     });
   });
 
-  it("strips the base64 image from the captured payload (DB-bloat guard)", async () => {
+  it("captures the FULL image verbatim (the store externalizes it to payload_blobs)", async () => {
+    // No route-level strip: the store's externalizeImages content-addresses the image
+    // into payload_blobs (lean request_payloads) AND makes it viewable in the admin.
     const { app, enqueuePayload } = setup();
     await post(app, { model: "gemini-3.1-flash-image", input: "a cat" });
     const payload = enqueuePayload.mock.calls[0]?.[0];
@@ -208,7 +210,7 @@ describe("registerInteractionsRoute", () => {
       steps: Array<{ content: Array<{ type: string; data?: string }> }>;
     };
     const img = stored.steps[0]?.content.find((b) => b.type === "image");
-    expect(img?.data).toBe("[image omitted]");
+    expect(img?.data).toBe("GEMIMG"); // full image handed to capture
   });
 
   it("returns 401 without a valid key", async () => {

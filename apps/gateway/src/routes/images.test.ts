@@ -119,13 +119,16 @@ describe("registerImagesRoute", () => {
     expect(decision.usage.prompt_tokens).toBe(15);
   });
 
-  it("strips the base64 image from the captured payload (DB-bloat guard)", async () => {
+  it("captures the FULL image verbatim (the store externalizes it to payload_blobs)", async () => {
+    // The route no longer strips: it captures the full body. The DB-bloat guard moved
+    // to the store layer (externalizeImages → content-addressed payload_blobs), which
+    // ALSO makes the image rehydratable + viewable in the admin detail page.
     const { app, enqueuePayload } = setup();
     await post(app, { model: "gpt-image-2", prompt: "a cat" });
 
     const payload = enqueuePayload.mock.calls[0]?.[0];
     const stored = JSON.parse(payload.responseJson) as typeof UPSTREAM;
-    expect(stored.data[0]?.b64_json).toBe("[image omitted]"); // megabyte never persisted
+    expect(stored.data[0]?.b64_json).toBe("REALIMAGEBYTES"); // full image handed to capture
     expect(stored.usage.output_tokens).toBe(196); // metadata/usage preserved
   });
 
