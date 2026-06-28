@@ -197,6 +197,34 @@ gpt-image-2:
   outputImage: true
   maxContextTokens: 32768
   maxOutputTokens: 32768
+# ─── OFFICIAL image providers (cross-provider failover; mirror the relay entries) ───
+openai/gpt-image-2:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  supportsCachedContent: false
+  outputImage: true
+  maxContextTokens: 32768
+  maxOutputTokens: 32768
+google/gemini-3.1-flash-image:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: true
+  supportsCachedContent: false
+  outputImage: true
+  maxContextTokens: 32768
+  maxOutputTokens: 32768
+google/gemini-3-pro-image:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: true
+  supportsCachedContent: false
+  outputImage: true
+  maxContextTokens: 32768
+  maxOutputTokens: 32768
 zenmux-anthropic/claude-opus-4.8:
   supportsTools: true
   jsonOutput: schema

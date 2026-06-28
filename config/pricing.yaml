@@ -78,6 +78,17 @@ gemini-3-pro-image:
 gpt-image-2:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
+# OFFICIAL image providers (cross-provider failover). Same model = same rates as the
+# relay entries; OpenAI-direct gpt-image-2 verified live 196 out tok ≈ $0.006.
+openai/gpt-image-2:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 30.0
+google/gemini-3.1-flash-image:
+  inputPerMTokUsd: 0.5
+  outputPerMTokUsd: 60.0
+google/gemini-3-pro-image:
+  inputPerMTokUsd: 2.0
+  outputPerMTokUsd: 120.0
 zenmux-anthropic/claude-opus-4.8:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 25.0
