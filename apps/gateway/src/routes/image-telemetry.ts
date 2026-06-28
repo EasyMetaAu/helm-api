@@ -1,4 +1,4 @@
-import type { DecisionRecord } from "@helm/shared";
+import type { DecisionRecord, ProviderAttempt } from "@helm/shared";
 
 // Shared telemetry helpers for the model-pinned image-generation routes
 // (POST /v1/images/generations and POST /v1beta/interactions). Both bypass the
@@ -31,21 +31,29 @@ export function numField(o: Record<string, unknown> | null, ...keys: string[]): 
   return null;
 }
 
-// Minimal DecisionRecord for a model-pinned image request (no classify/lane/fallback).
+// DecisionRecord for a model-pinned image request, chain-aware: a single bare-model
+// request produces a one-row chain; an image LANE produces one row per attempted /
+// skipped provider, with `final` bound to the alias that actually SERVED (cost
+// attribution in /admin/requests keys on the served leaf, not the requested lane).
+// All derived fields (latency total, fallback count, cost) are computed FROM the
+// attempts array, mirroring how the chat executor's attempts become a DecisionRecord.
 export function buildImageDecision(p: {
   traceId: string;
   keyPrefix: string | null;
-  requested: string;
-  alias: string;
-  providerModel: string;
-  status: "ok" | "error";
-  errorClass: string | null;
-  cost: number | null;
-  latency: number;
-  usage: Record<string, unknown> | null;
+  requested: string; // the client-sent id (lane name OR bare model)
+  selectedLane: string; // the lane name, or "image" for a bare model
+  candidateChain: string[]; // the full expanded chain (alias order)
+  attempts: ProviderAttempt[]; // ALL rows: skipped / failed / served
+  served: { alias: string; providerModel: string } | null; // null on terminal error
+  finalErrorClass: string | null; // the terminal error class (error case)
+  usage: Record<string, unknown> | null; // the SERVED upstream body's usage
 }): DecisionRecord {
   const promptTokens = numField(p.usage, "input_tokens", "prompt_tokens");
   const completionTokens = numField(p.usage, "output_tokens", "completion_tokens");
+  const attempted = p.attempts.filter((a) => !a.skipped);
+  const costed = p.attempts.filter((a) => a.cost_usd !== null);
+  const completionUsd =
+    costed.length > 0 ? costed.reduce((sum, a) => sum + (a.cost_usd ?? 0), 0) : null;
   return {
     request_id: p.traceId,
     trace_id: p.traceId,
@@ -54,33 +62,27 @@ export function buildImageDecision(p: {
     key_prefix: p.keyPrefix,
     classifier: PASSTHROUGH_CLASSIFIER,
     policy: { matched_policy_id: null, reason: "image_generation" },
-    lane: { selected_lane: "image", candidate_chain: [p.alias] },
-    provider_attempts: [
-      {
-        alias: p.alias,
-        skipped: false,
-        skip_reason: null,
-        status: p.status,
-        error_class: p.errorClass,
-        latency_ms: p.latency,
-        cost_usd: p.status === "ok" ? p.cost : null,
-        error_detail: null,
-      },
-    ],
+    lane: { selected_lane: p.selectedLane, candidate_chain: p.candidateChain },
+    provider_attempts: p.attempts,
     final:
-      p.status === "ok"
+      p.served !== null
         ? {
-            model_alias: p.alias,
-            provider_model: p.providerModel,
+            model_alias: p.served.alias,
+            provider_model: p.served.providerModel,
             status: "ok",
             error_reason: null,
           }
-        : { model_alias: null, provider_model: null, status: "error", error_reason: p.errorClass },
-    latency_total_ms: p.latency,
-    fallback_count: 0,
+        : {
+            model_alias: null,
+            provider_model: null,
+            status: "error",
+            error_reason: p.finalErrorClass,
+          },
+    latency_total_ms: p.attempts.reduce((sum, a) => sum + a.latency_ms, 0),
+    fallback_count: Math.max(0, attempted.length - 1),
     cost_breakdown:
-      p.status === "ok"
-        ? { eval_usd: null, completion_usd: p.cost, total_usd: p.cost }
+      p.served !== null
+        ? { eval_usd: null, completion_usd: completionUsd, total_usd: completionUsd }
         : { eval_usd: null, completion_usd: null, total_usd: null },
     memory: null,
     usage:

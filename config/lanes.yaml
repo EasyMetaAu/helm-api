@@ -196,3 +196,23 @@ gemini-flash:
   primary: zenmux-vertex/gemini-3.5-flash
   fallback:
     - balanced
+
+# —— image-generation lane (failover across image providers) ——
+# Image gen (POST /v1/images/generations, POST /v1beta/interactions, and Gemini
+# :generateContent on image models) is model-pinned per provider; group those
+# per-provider aliases into a LANE and the dedicated image endpoints fail over across
+# them exactly like a text lane (same circuit breaker + primary→fallback chain), for
+# ANY key. Members MUST be image models (capabilities.outputImage) and SHOULD be a
+# single kind — all OpenAI-Images (gpt-image-*) OR all Gemini (gemini-*-image) — so
+# the verbatim request params are uniform across providers (a 4xx param-shape error is
+# terminal and would mask a healthy fallback). Request the LANE NAME as `model`.
+#
+# This default only wires one image provider (zenmux-vertex), so the example below
+# fails over flash→pro on that provider. For true multi-provider failover, add the
+# same image model under more providers (e.g. an `openrouter/gpt-image-2` alias) and
+# list them here. See docs/05 (image generation) + README.
+gemini-image:
+  purpose: Gemini image generation — flash primary, pro fallback
+  primary: gemini-3.1-flash-image
+  fallback:
+    - gemini-3-pro-image

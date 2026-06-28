@@ -219,7 +219,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### 图片生成
 
-图片模型一律**钉死模型**：直接写出具体模型 id（没有 `auto`、没有 lane、不经分类），且**任意有效 key 都能用**（无需 `allow_custom_model`；成本由该 key 的预算 / 限流约束）。可配置的模型：`gpt-image-2`（OpenAI）、`gemini-3.1-flash-image` / `gemini-3-pro-image`（Google「Nano Banana」）。每次调用按图片计量（output tokens × 该模型的图片费率），并和其他请求一样进入面板。三个入口——按你的 SDK 说哪种协议来选：
+图片模型一律**钉死到具体 provider**：直接写出模型 id，或写一个图片 **lane**（见下方[跨 provider 故障转移](#图片跨-provider-故障转移)），不经分类，且**任意有效 key 都能用**（无需 `allow_custom_model`；成本由该 key 的预算 / 限流约束）。可配置的模型：`gpt-image-2`（OpenAI）、`gemini-3.1-flash-image` / `gemini-3-pro-image`（Google「Nano Banana」）。每次调用按图片计量（output tokens × 该模型的图片费率），并和其他请求一样进入面板。三个入口——按你的 SDK 说哪种协议来选：
 
 **1. OpenAI Images API** —— `POST /v1/images/generations`（Bearer 鉴权），响应 `{ "created", "data": [{ "b64_json" }], "usage" }`：
 
@@ -248,6 +248,22 @@ curl http://localhost:8080/v1beta/interactions \
 ```
 
 > OpenAI Images 端点同时服务 OpenAI 和 Gemini 图片模型（Helm 把 Gemini 与 `generateContent` 双向互译）；两个 Gemini 原生入口只服务 Gemini 图片模型。在 `/v1beta/interactions` 上发 `gpt-image-2` 会返回 400 → 请改用 `/v1/images/generations`。
+
+#### 图片跨 provider 故障转移
+
+同一个图片模型常常有多个 provider 可选（OpenAI 直连、ZenMux、OpenRouter……）。把这些「同模型、不同 provider」的别名组成一个图片 **lane** 写进 `config/lanes.yaml`，然后把 **lane 名**当作 `model` 来请求——Helm 先打 primary，遇到 provider 故障（超时、5xx、熔断打开）就自动 fallback 到下一个，用的是和聊天路由**同一套熔断器**。而确定性的客户端错误（4xx invalid request，比如尺寸非法、图片过大）会原样返回，**不**触发 fallback。
+
+```yaml
+# config/lanes.yaml —— 成员必须是图片模型（capabilities.outputImage）且类型单一
+# （要么全 gpt-image-*，要么全 gemini-*-image）。请求时填 `model: "gpt-image"`。
+gpt-image:
+  primary: gpt-image-2          # OpenAI 直连
+  fallback:
+    - zenmux/gpt-image-2        # 先在 providers.yaml 给每个 provider 加上对应别名
+    - openrouter/gpt-image-2
+```
+
+图片 lane 在两个专用端点（`/v1/images/generations`、`/v1beta/interactions`）上对**任意 key** 都生效。在 Gemini `:generateContent` 路径上按名字选 lane 遵循普通 lane 规则——需要 `allow_custom_model` key——所以想覆盖面最广，就让图片 SDK 指向这两个专用端点。
 
 **其余端点**（交互式文档在 `/docs`，原始规格在 `/openapi.json`）：
 

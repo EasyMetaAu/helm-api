@@ -1,10 +1,4 @@
-import {
-  type BudgetCaps,
-  type BudgetCheckResult,
-  type BudgetProbe,
-  type ProviderClient,
-  UpstreamError,
-} from "@helm/core";
+import type { BudgetCaps, BudgetCheckResult, BudgetProbe, CircuitBreaker } from "@helm/core";
 import { ImageGenerationRequestSchema } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -12,36 +6,37 @@ import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
+import {
+  type ImageAttempt,
+  type ImageChainTarget,
+  type ResolveImageChain,
+  runImageChain,
+} from "./image-chain.js";
 import { buildImageDecision, numField } from "./image-telemetry.js";
 import type { MessagesIdentity } from "./messages.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 
 // POST /v1/images/generations — OpenAI Images API (the gpt-image-* / DALL·E surface).
-// A dedicated, model-pinned endpoint distinct from the chat/messages/responses/gemini
-// pipeline (those are classify→lane→fallback; image gen has none of that). The route
-// resolves the requested model to a provider, forwards the verbatim body to the
-// provider's /images/generations, and records ONE telemetry row (so it shows in
-// /admin/requests with cost). PURE HTTP glue (principle 1): the upstream call + cost
-// live in core (the OpenAI provider's imageGeneration + resolveCostUsd).
+// A model-pinned endpoint distinct from the chat/messages/responses/gemini pipeline,
+// but it DOES fall over across providers: the requested id may be a bare image model
+// (a one-element chain) or an image LANE (one target per provider alias), and the
+// route runs the resolved chain through runImageChain — same circuit-breaker +
+// terminal/fallback rules as the chat executor, specialized to a single non-stream
+// image call. PURE HTTP glue (principle 1): the upstream call + cost live in core.
 
 export interface ImagesRouteDeps {
   rateLimiter?: GeminiRateLimiterPort;
   concurrencyGate?: ConcurrencyGatePort;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
-  /** Resolve a client-facing model id → the provider client + wire model id + the
-   *  routing alias (for pricing/telemetry) + the upstream KIND. null when the model
-   *  is not a configured image model OR its provider lacks the needed method / credential.
-   *  `openai`  → OpenAI Images API (client.imageGeneration → /images/generations).
-   *  `gemini`  → Gemini generateContent (client.nativePassthrough; the route translates
-   *              the images request ↔ generateContent and maps inlineData ↔ b64_json). */
-  resolveImageTarget(model: string):
-    | { client: ProviderClient; providerModel: string; alias: string; kind: "openai" | "gemini" }
-    // Configured image model, but the provider client/credential is missing → 503
-    // (a server-config problem, NOT a nonexistent-model client error).
-    | { kind: "unavailable" }
-    // Unknown model / not an image-capable provider → 404.
-    | null;
-  /** Price the served upstream body at the alias's catalog pricing (resolveCostUsd). */
+  /** Resolve the client id (bare model OR image lane) → the ordered provider chain.
+   *  Both upstream KINDS ride through: `openai` → OpenAI Images API
+   *  (client.imageGeneration); `gemini` → generateContent (client.nativePassthrough;
+   *  the route translates the images request ↔ generateContent, inlineData ↔ b64_json). */
+  resolveImageChain: ResolveImageChain;
+  /** Per-alias circuit breaker — the SAME instance the chat executor uses, so an image
+   *  provider's health is one shared view across the chat + image faces. */
+  breaker: CircuitBreaker;
+  /** Price the served upstream body at the SERVED alias's catalog pricing (resolveCostUsd). */
   costOf(alias: string, body: unknown): number | null;
   /** Per-key usage-budget gate + settle (docs/06) — the SAME instances the chat face
    *  uses. Omitted = no budget enforcement (test doubles). */
@@ -74,8 +69,7 @@ function extractBearer(auth: string | undefined): string | null {
 
 // Capture-only clone with the ~1MB base64 image stripped — the request/response are
 // captured for audit, but the megabyte payload must never hit request_payloads
-// (operator DB-bloat guard). The CLIENT still receives the full image (the route
-// responds with the verbatim upstream body, not this clone).
+// (operator DB-bloat guard). The CLIENT still receives the full image.
 function stripImageData(body: Record<string, unknown>): Record<string, unknown> {
   const data = body.data;
   if (!Array.isArray(data)) return body;
@@ -208,33 +202,28 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       );
     }
 
-    // 5) Resolve the model → provider + upstream kind.
-    const target = deps.resolveImageTarget(parsed.data.model);
-    if (target === null) {
-      return errorJson(
-        c,
-        404,
-        "invalid_request_error",
-        `model '${parsed.data.model}' is not a configured image model`,
-        "model_not_found",
-      );
-    }
-    if (target.kind === "unavailable") {
-      // Configured image model but the provider credential/client is missing — a
-      // server-side config problem (e.g. ZENMUX_API_KEY unset), NOT a bad model id.
-      return errorJson(
-        c,
-        503,
-        "api_error",
-        `image provider for '${parsed.data.model}' is unavailable (missing credential)`,
-        "provider_unavailable",
-      );
+    // 5) Resolve the model/lane → the ordered provider chain.
+    const chain = deps.resolveImageChain(parsed.data.model);
+    if (!chain.ok) {
+      return chain.status === 404
+        ? errorJson(
+            c,
+            404,
+            "invalid_request_error",
+            `model '${parsed.data.model}' is not a configured image model`,
+            "model_not_found",
+          )
+        : errorJson(
+            c,
+            503,
+            "api_error",
+            `image provider for '${parsed.data.model}' is unavailable (missing credential)`,
+            "provider_unavailable",
+          );
     }
 
-    // 5b) Per-key usage-budget gate (docs/06), mirroring the chat face. Over budget +
-    //     reject → 429. `degrade` has no meaning for a model-pinned image request (no
-    //     cheaper image lane to fall to), so a degrade key still SERVES — its cost is
-    //     settled below either way (so image spend still counts toward the budget).
+    // 5b) Per-key usage-budget gate (docs/06), mirroring the chat face — ONCE, before
+    //     the chain runs (a fallback within one request is still one billable image).
     if (deps.budgetGate !== undefined && identity.caps?.budget !== undefined) {
       const check = await deps.budgetGate.check({
         keyId: identity.keyId,
@@ -246,55 +235,55 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       }
     }
 
-    // 6) Forward — provider-kind specific — producing an OpenAI-Images-shaped `upstream`.
-    let upstreamRequestJson: string | null = null;
-    const started = Date.now();
-    let upstream: Record<string, unknown>;
-    const capture = (b: string) => {
-      upstreamRequestJson = b;
-    };
-    try {
+    // 6) Run the provider chain. Each attempt forwards verbatim (openai-kind) or
+    //    translates to generateContent (gemini-kind), producing an OpenAI-Images body.
+    const attempt: ImageAttempt = async (target: ImageChainTarget) => {
+      let upstreamRequestJson: string | null = null;
+      const captureUpstream = (b: string) => {
+        upstreamRequestJson = b;
+      };
+      let upstream: Record<string, unknown>;
       if (target.kind === "gemini") {
-        // Translate the images request → a Gemini generateContent call (responseModalities
-        // IMAGE) via nativePassthrough, then map the inlineData response back to b64_json.
-        if (typeof target.client.nativePassthrough !== "function") {
-          return errorJson(c, 503, "api_error", "image provider has no native passthrough");
-        }
-        const native = await target.client.nativePassthrough(
+        const native = await target.client.nativePassthrough?.(
           {
             model: target.providerModel,
             contents: [{ role: "user", parts: [{ text: parsed.data.prompt }] }],
             generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
           },
-          { signal: c.req.raw.signal, captureUpstream: capture },
+          { signal: c.req.raw.signal, captureUpstream },
         );
-        upstream = mapGeminiToImages(native);
+        upstream = mapGeminiToImages((native ?? {}) as Record<string, unknown>);
       } else {
-        if (typeof target.client.imageGeneration !== "function") {
-          return errorJson(c, 503, "api_error", "image provider has no image generation");
-        }
-        upstream = await target.client.imageGeneration(
+        upstream = (await target.client.imageGeneration?.(
           { ...parsed.data, model: target.providerModel },
-          { signal: c.req.raw.signal, captureUpstream: capture },
-        );
+          { signal: c.req.raw.signal, captureUpstream },
+        )) as Record<string, unknown>;
       }
-    } catch (err) {
-      const aborted =
-        c.req.raw.signal.aborted || (err instanceof Error && err.name === "AbortError");
-      const latency = Date.now() - started;
-      const errorClass = err instanceof UpstreamError ? err.errorClass : "upstream_error";
-      // A client disconnect is NOT a provider fault → don't record, don't 5xx-as-provider.
-      if (!aborted && deps.record !== undefined) {
+      const usage = (upstream as { usage?: Record<string, unknown> }).usage ?? null;
+      return {
+        clientBody: upstream,
+        captureBody: stripImageData(upstream),
+        usage,
+        cost: deps.costOf(target.alias, upstream),
+        upstreamRequestJson,
+      };
+    };
+
+    const outcome = await runImageChain(chain.targets, deps.breaker, attempt, c.req.raw.signal);
+
+    // 6b) Terminal failure. A client abort is a NON-provider fault → no record, no 5xx.
+    if (!outcome.ok) {
+      if (outcome.aborted) return errorJson(c, 400, "invalid_request_error", "client disconnected");
+      if (deps.record !== undefined) {
         const decision = buildImageDecision({
           traceId,
           keyPrefix,
           requested: parsed.data.model,
-          alias: target.alias,
-          providerModel: target.providerModel,
-          status: "error",
-          errorClass,
-          cost: null,
-          latency,
+          selectedLane: chain.laneName,
+          candidateChain: chain.candidateChain,
+          attempts: outcome.attempts,
+          served: null,
+          finalErrorClass: outcome.errorClass,
           usage: null,
         });
         await recordServed(
@@ -305,42 +294,34 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
             decision,
             requestJson,
             responseJson: null,
-            upstreamRequestJson,
+            upstreamRequestJson: null,
           },
           log,
         );
       }
-      if (aborted) return errorJson(c, 400, "invalid_request_error", "client disconnected");
-      const status = (err instanceof UpstreamError ? err.httpStatus : 500) as ContentfulStatusCode;
       return errorJson(
         c,
-        status,
+        outcome.httpStatus as ContentfulStatusCode,
         "upstream_error",
-        err instanceof Error ? err.message : "upstream error",
+        outcome.message,
       );
     }
 
-    // 7) Cost + telemetry. Always write the telemetry row; capture the response body
-    //    only when capture is on, with the base64 image stripped to a placeholder.
-    const latency = Date.now() - started;
-    const cost = deps.costOf(target.alias, upstream);
-    const usage = (upstream as { usage?: Record<string, unknown> }).usage ?? null;
+    // 7) Cost + telemetry. Capture the response body (image stripped) only when on.
+    const { served, result } = outcome;
     if (deps.record !== undefined) {
       const decision = buildImageDecision({
         traceId,
         keyPrefix,
         requested: parsed.data.model,
-        alias: target.alias,
-        providerModel: target.providerModel,
-        status: "ok",
-        errorClass: null,
-        cost,
-        latency,
-        usage,
+        selectedLane: chain.laneName,
+        candidateChain: chain.candidateChain,
+        attempts: outcome.attempts,
+        served: { alias: served.alias, providerModel: served.providerModel },
+        finalErrorClass: null,
+        usage: result.usage,
       });
-      const responseJson = captureEnabled(deps.record)
-        ? JSON.stringify(stripImageData(upstream))
-        : null;
+      const responseJson = captureEnabled(deps.record) ? JSON.stringify(result.captureBody) : null;
       await recordServed(
         deps.record,
         {
@@ -349,24 +330,23 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
           decision,
           requestJson,
           responseJson,
-          upstreamRequestJson,
+          upstreamRequestJson: result.upstreamRequestJson,
         },
         log,
       );
     }
 
-    // 7b) Settle the served usage against the per-key budget (docs/06). Fail-open: a
-    //     settle failure is logged, never 5xx's a served image. Counts the image cost +
-    //     tokens + 1 request so image spend depletes the budget like the chat face.
+    // 7b) Settle the served usage against the per-key budget (docs/06) — ONCE, on the
+    //     SERVED target's cost. Fail-open: a settle failure is logged, never 5xx's.
     if (deps.settleBudget !== undefined && identity.caps?.budget !== undefined) {
       const tokens =
-        (numField(usage, "input_tokens", "prompt_tokens") ?? 0) +
-        (numField(usage, "output_tokens", "completion_tokens") ?? 0);
+        (numField(result.usage, "input_tokens", "prompt_tokens") ?? 0) +
+        (numField(result.usage, "output_tokens", "completion_tokens") ?? 0);
       try {
         await deps.settleBudget(
           identity.keyId,
           identity.caps.budget,
-          { requests: 1, tokens, costUsd: cost },
+          { requests: 1, tokens, costUsd: result.cost },
           Date.now(),
         );
       } catch {
@@ -375,9 +355,9 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
     }
 
     // 8) Observability headers + the VERBATIM upstream body (full image) to the client.
-    c.header("x-helm-lane", "image");
-    c.header("x-helm-final-model", target.alias);
-    c.header("x-helm-provider-model", target.providerModel);
-    return c.json(upstream);
+    c.header("x-helm-lane", chain.laneName);
+    c.header("x-helm-final-model", served.alias);
+    c.header("x-helm-provider-model", served.providerModel);
+    return c.json(result.clientBody);
   });
 }

@@ -1,10 +1,4 @@
-import {
-  type BudgetCaps,
-  type BudgetCheckResult,
-  type BudgetProbe,
-  type ProviderClient,
-  UpstreamError,
-} from "@helm/core";
+import type { BudgetCaps, BudgetCheckResult, BudgetProbe, CircuitBreaker } from "@helm/core";
 import { type InteractionInputBlock, InteractionsRequestSchema } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -12,38 +6,39 @@ import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
+import {
+  type ImageAttempt,
+  type ImageChainTarget,
+  type ResolveImageChain,
+  runImageChain,
+} from "./image-chain.js";
 import { buildImageDecision, numField } from "./image-telemetry.js";
 import type { MessagesIdentity } from "./messages.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 
 // POST /v1beta/interactions — Google Gemini Interactions API (the modern image-gen
 // surface for the gemini-*-image "Nano Banana" models; the SDK's
-// `client.interactions.create(...)`). A dedicated, model-pinned endpoint.
+// `client.interactions.create(...)`). A model-pinned endpoint that ALSO fails over
+// across providers: the requested id may be a bare gemini image model (one-element
+// chain) or an image LANE, and the route runs the resolved gemini-kind chain through
+// runImageChain (same breaker + terminal/fallback rules as the chat executor).
 //
 // Helm's upstream (ZenMux Vertex) speaks `generateContent`, NOT `/v1beta/interactions`,
 // so this route TRANSLATES: the interactions request → a generateContent call
-// (responseModalities IMAGE) forwarded verbatim via the provider's nativePassthrough,
-// then the generateContent `inlineData` response → the interactions `steps` shape the
-// Gemini SDK expects (`interaction.output_image.data` reads the image content block).
-//
-// PURE HTTP glue (principle 1): the upstream call + cost live in core; this route only
-// does the protocol shape mapping + records ONE telemetry row (lane `image`).
+// (responseModalities IMAGE) forwarded verbatim via nativePassthrough, then the
+// generateContent `inlineData` response → the interactions `steps` shape. Only
+// gemini-kind targets are served here; an openai-kind model (gpt-image-2) → 400.
 
 export interface InteractionsRouteDeps {
   rateLimiter?: GeminiRateLimiterPort;
   concurrencyGate?: ConcurrencyGatePort;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
-  /** SAME resolver the /v1/images/generations route uses. Returns the provider client +
-   *  wire model + alias + KIND. This route only serves `gemini`-kind targets (it
-   *  translates to generateContent); an `openai`-kind model (gpt-image-2) is rejected
-   *  with 400 → use /v1/images/generations. */
-  resolveImageTarget(
-    model: string,
-  ):
-    | { client: ProviderClient; providerModel: string; alias: string; kind: "openai" | "gemini" }
-    | { kind: "unavailable" }
-    | null;
-  /** Price the served body at the alias's catalog pricing (resolveCostUsd). */
+  /** SAME resolver the /v1/images/generations route uses. Returns the ordered image
+   *  chain (both kinds); this route filters to gemini-kind and 400s an openai-only id. */
+  resolveImageChain: ResolveImageChain;
+  /** Per-alias circuit breaker — the SAME instance the chat executor uses. */
+  breaker: CircuitBreaker;
+  /** Price the served body at the SERVED alias's catalog pricing (resolveCostUsd). */
   costOf(alias: string, body: unknown): number | null;
   /** Per-key usage-budget gate + settle (docs/06) — the SAME instances the chat face uses. */
   budgetGate?: { check(probe: BudgetProbe): Promise<BudgetCheckResult> };
@@ -64,6 +59,20 @@ function errorJson(
   geminiStatus: string,
 ): Response {
   return c.json({ error: { code: status, message, status: geminiStatus } }, status);
+}
+
+// Map a terminal chain error class → the Gemini canonical status string.
+function geminiStatusFor(errorClass: string): string {
+  switch (errorClass) {
+    case "invalid_request":
+      return "INVALID_ARGUMENT";
+    case "lane_unavailable":
+      return "UNAVAILABLE";
+    case "client_abort":
+      return "CANCELLED";
+    default:
+      return "INTERNAL";
+  }
 }
 
 // x-goog-api-key (Gemini SDK default) or Authorization: Bearer (own clients). Never
@@ -269,25 +278,26 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       );
     }
 
-    // 5) Resolve the model → provider. Only gemini-kind is served here.
-    const target = deps.resolveImageTarget(parsed.data.model);
-    if (target === null) {
-      return errorJson(
-        c,
-        404,
-        `model '${parsed.data.model}' is not a configured image model`,
-        "NOT_FOUND",
-      );
+    // 5) Resolve the model/lane → the chain, then keep only gemini-kind targets (this
+    //    endpoint translates to generateContent). An openai-only id → 400 (→ images).
+    const chain = deps.resolveImageChain(parsed.data.model);
+    if (!chain.ok) {
+      return chain.status === 404
+        ? errorJson(
+            c,
+            404,
+            `model '${parsed.data.model}' is not a configured image model`,
+            "NOT_FOUND",
+          )
+        : errorJson(
+            c,
+            503,
+            `image provider for '${parsed.data.model}' is unavailable (missing credential)`,
+            "UNAVAILABLE",
+          );
     }
-    if (target.kind === "unavailable") {
-      return errorJson(
-        c,
-        503,
-        `image provider for '${parsed.data.model}' is unavailable (missing credential)`,
-        "UNAVAILABLE",
-      );
-    }
-    if (target.kind !== "gemini") {
+    const geminiTargets = chain.targets.filter((t) => t.kind === "gemini");
+    if (geminiTargets.length === 0) {
       return errorJson(
         c,
         400,
@@ -296,8 +306,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       );
     }
 
-    // 5b) Per-key usage-budget gate (docs/06), mirroring the chat face. A `degrade` key
-    //     still SERVES (no cheaper image lane to fall to); cost is settled below either way.
+    // 5b) Per-key usage-budget gate (docs/06) — ONCE, before the chain runs.
     if (deps.budgetGate !== undefined && identity.caps?.budget !== undefined) {
       const check = await deps.budgetGate.check({
         keyId: identity.keyId,
@@ -309,18 +318,14 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       }
     }
 
-    // 6) Translate → generateContent, forward via nativePassthrough, map back.
-    let upstreamRequestJson: string | null = null;
-    const started = Date.now();
-    let native: Record<string, unknown>;
-    const capture = (b: string) => {
-      upstreamRequestJson = b;
-    };
-    try {
-      if (typeof target.client.nativePassthrough !== "function") {
-        return errorJson(c, 503, "image provider has no native passthrough", "UNAVAILABLE");
-      }
-      native = await target.client.nativePassthrough(
+    // 6) Run the gemini chain. Each attempt translates → generateContent, forwards via
+    //    nativePassthrough, and maps the inlineData response → the interactions shape.
+    const attempt: ImageAttempt = async (target: ImageChainTarget) => {
+      let upstreamRequestJson: string | null = null;
+      const captureUpstream = (b: string) => {
+        upstreamRequestJson = b;
+      };
+      const native = (await target.client.nativePassthrough?.(
         {
           model: target.providerModel,
           contents: inputToContents(parsed.data.input),
@@ -329,24 +334,34 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
             parsed.data.generation_config ?? null,
           ),
         },
-        { signal: c.req.raw.signal, captureUpstream: capture },
-      );
-    } catch (err) {
-      const aborted =
-        c.req.raw.signal.aborted || (err instanceof Error && err.name === "AbortError");
-      const latency = Date.now() - started;
-      const errorClass = err instanceof UpstreamError ? err.errorClass : "upstream_error";
-      if (!aborted && deps.record !== undefined) {
+        { signal: c.req.raw.signal, captureUpstream },
+      )) as Record<string, unknown>;
+      const interactionsBody = nativeToInteractions(native, `int_${traceId}`);
+      const usageBody = usageBodyFromNative(native);
+      return {
+        clientBody: interactionsBody,
+        captureBody: stripInteractionData(interactionsBody),
+        usage: usageBody.usage,
+        cost: deps.costOf(target.alias, usageBody),
+        upstreamRequestJson,
+      };
+    };
+
+    const outcome = await runImageChain(geminiTargets, deps.breaker, attempt, c.req.raw.signal);
+
+    // 6b) Terminal failure. A client abort is a NON-provider fault → no record.
+    if (!outcome.ok) {
+      if (outcome.aborted) return errorJson(c, 400, "client disconnected", "CANCELLED");
+      if (deps.record !== undefined) {
         const decision = buildImageDecision({
           traceId,
           keyPrefix,
           requested: parsed.data.model,
-          alias: target.alias,
-          providerModel: target.providerModel,
-          status: "error",
-          errorClass,
-          cost: null,
-          latency,
+          selectedLane: chain.laneName,
+          candidateChain: chain.candidateChain,
+          attempts: outcome.attempts,
+          served: null,
+          finalErrorClass: outcome.errorClass,
           usage: null,
         });
         await recordServed(
@@ -357,43 +372,34 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
             decision,
             requestJson,
             responseJson: null,
-            upstreamRequestJson,
+            upstreamRequestJson: null,
           },
           log,
         );
       }
-      if (aborted) return errorJson(c, 400, "client disconnected", "CANCELLED");
-      const status = (err instanceof UpstreamError ? err.httpStatus : 500) as ContentfulStatusCode;
       return errorJson(
         c,
-        status,
-        err instanceof Error ? err.message : "upstream error",
-        "INTERNAL",
+        outcome.httpStatus as ContentfulStatusCode,
+        outcome.message,
+        geminiStatusFor(outcome.errorClass),
       );
     }
 
-    // 7) Cost + telemetry. Build the interactions response; capture a copy with the
-    //    base64 image stripped to a placeholder.
-    const latency = Date.now() - started;
-    const interactionsBody = nativeToInteractions(native, `int_${traceId}`);
-    const usageBody = usageBodyFromNative(native);
-    const cost = deps.costOf(target.alias, usageBody);
+    // 7) Cost + telemetry. Capture a copy with the base64 image stripped.
+    const { served, result } = outcome;
     if (deps.record !== undefined) {
       const decision = buildImageDecision({
         traceId,
         keyPrefix,
         requested: parsed.data.model,
-        alias: target.alias,
-        providerModel: target.providerModel,
-        status: "ok",
-        errorClass: null,
-        cost,
-        latency,
-        usage: usageBody.usage,
+        selectedLane: chain.laneName,
+        candidateChain: chain.candidateChain,
+        attempts: outcome.attempts,
+        served: { alias: served.alias, providerModel: served.providerModel },
+        finalErrorClass: null,
+        usage: result.usage,
       });
-      const responseJson = captureEnabled(deps.record)
-        ? JSON.stringify(stripInteractionData(interactionsBody))
-        : null;
+      const responseJson = captureEnabled(deps.record) ? JSON.stringify(result.captureBody) : null;
       await recordServed(
         deps.record,
         {
@@ -402,7 +408,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
           decision,
           requestJson,
           responseJson,
-          upstreamRequestJson,
+          upstreamRequestJson: result.upstreamRequestJson,
         },
         log,
       );
@@ -411,13 +417,13 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
     // 7b) Settle the served usage against the per-key budget (docs/06). Fail-open.
     if (deps.settleBudget !== undefined && identity.caps?.budget !== undefined) {
       const tokens =
-        (numField(usageBody.usage, "input_tokens", "prompt_tokens") ?? 0) +
-        (numField(usageBody.usage, "output_tokens", "completion_tokens") ?? 0);
+        (numField(result.usage, "input_tokens", "prompt_tokens") ?? 0) +
+        (numField(result.usage, "output_tokens", "completion_tokens") ?? 0);
       try {
         await deps.settleBudget(
           identity.keyId,
           identity.caps.budget,
-          { requests: 1, tokens, costUsd: cost },
+          { requests: 1, tokens, costUsd: result.cost },
           Date.now(),
         );
       } catch {
@@ -426,9 +432,9 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
     }
 
     // 8) Observability headers + the interactions JSON (full image) to the client.
-    c.header("x-helm-lane", "image");
-    c.header("x-helm-final-model", target.alias);
-    c.header("x-helm-provider-model", target.providerModel);
-    return c.json(interactionsBody);
+    c.header("x-helm-lane", chain.laneName);
+    c.header("x-helm-final-model", served.alias);
+    c.header("x-helm-provider-model", served.providerModel);
+    return c.json(result.clientBody);
   });
 }

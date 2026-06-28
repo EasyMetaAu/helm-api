@@ -214,7 +214,7 @@ export function detectRequestModalities(req: InternalRequest): {
   return { image, audio, video, document };
 }
 
-function isAbort(err: unknown, signal: AbortSignal): boolean {
+export function isAbort(err: unknown, signal: AbortSignal): boolean {
   // Canonical isAbort: rely ONLY on signal.aborted and the raw
   // AbortError name. A message merely containing "aborted" is NOT an abort (an
   // upstream error string can say "aborted upstream"); openai.ts rethrows the
@@ -655,11 +655,11 @@ function protocolGuardSkipReason(
   return null;
 }
 
-function upstreamStatusOf(err: unknown): number | null {
+export function upstreamStatusOf(err: unknown): number | null {
   return err instanceof UpstreamError ? err.upstreamStatus : null;
 }
 
-function errorClassOf(err: unknown): string {
+export function errorClassOf(err: unknown): string {
   if (err instanceof UpstreamError) {
     // OAuth (issue #38, D5): a persistent upstream 401 — the client already
     // refreshed + retried once — is an authentication failure, not a generic
@@ -783,7 +783,7 @@ function upstreamErrorMessage(raw: unknown): string | null {
 // firing through the gateway. So the executor short-circuits and surfaces it
 // verbatim (see the catch block below). 429 is intentionally NOT here: that is
 // genuine rate-limiting, legitimately retryable on another candidate.
-function isUpstreamRequestRejection(err: unknown): boolean {
+export function isUpstreamRequestRejection(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
   const status = err.upstreamStatus;
   if (status !== 400 && status !== 413 && status !== 422) return false;
@@ -809,7 +809,7 @@ function toRawRecord(raw: unknown): Record<string, unknown> | null {
 // a message, and the key-scrubbed body; any other error degrades to its message
 // with no status/body. The telemetry redact gate scrubs this again before it is
 // persisted (principle 7), so a key echoed in the body never survives.
-function errorDetailOf(err: unknown): AttemptErrorDetail {
+export function errorDetailOf(err: unknown): AttemptErrorDetail {
   if (err instanceof UpstreamError) {
     return {
       upstream_status: err.upstreamStatus,
