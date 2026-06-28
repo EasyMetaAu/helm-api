@@ -17,12 +17,28 @@ Four client protocols are wired and routed:
 | `POST /v1/responses` | OpenAI Responses | Yes (SSE) and non-stream |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | Yes (SSE via `:streamGenerateContent`) and non-stream |
 | `POST /v1/images/generations` | OpenAI Images API | No (non-stream) |
+| `POST /v1beta/interactions` | Gemini Interactions API | No (non-stream) |
 
-> The Images surface is **model-pinned** — the client names the exact image model —
-> and does **not** participate in cross-protocol translation. It has no `nativeIn`/
-> `nativeOut` transformer pair, so the count of wired *translated* protocols stays
-> four. (For Google image models the route translates Images ⇄ Gemini `generateContent`
-> internally; the client request/response stay OpenAI-Images-shaped.)
+> The image-generation surfaces are **model-pinned** — the client names the exact
+> image model (`gemini-3.1-flash-image`, `gemini-3-pro-image`, …) — and do **not**
+> participate in cross-protocol translation. None has a `nativeIn`/`nativeOut`
+> transformer pair, so the count of wired *translated* protocols stays four. There
+> are three such entrypoints:
+> - **OpenAI Images** (`/v1/images/generations`). For Google image models the route
+>   translates Images ⇄ Gemini `generateContent` internally; the client
+>   request/response stay OpenAI-Images-shaped.
+> - **Native `:generateContent`** — the existing Gemini endpoint now serves image
+>   models too. Because the model is flagged `capabilities.outputImage: true` it is
+>   **model-pinned** ahead of the `gemini-*flash*` model-alias glob and
+>   classification, so it reaches its native-Gemini provider via native passthrough
+>   and `generationConfig.responseModalities: ["TEXT","IMAGE"]` → response
+>   `candidates[].content.parts[].inlineData` survives intact instead of being
+>   swallowed onto a text lane.
+> - **Gemini Interactions** (`/v1beta/interactions`) — request `{model, input,
+>   response_format}`, response `{id, steps:[{type:"model_output",
+>   content:[{type:"image", mime_type, data}]}]}`. Upstream speaks `generateContent`,
+>   not interactions, so Helm **translates** the request to a `generateContent` call
+>   and maps the response back. Non-streaming.
 
 **OpenAI Responses** streaming returns a native Responses SSE stream of
 `response.*` events terminated by a `response.completed` event. There is **no**

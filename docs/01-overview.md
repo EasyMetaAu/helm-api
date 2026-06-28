@@ -62,11 +62,15 @@ today; all four normalize into one OpenAI-Chat-shaped internal representation
   and `:streamGenerateContent` (streaming via `?alt=sse`, emitted as nameless `data:`
   delta frames).
 
-Alongside those four translated protocols, Helm exposes a separate
-**OpenAI-Images-compatible** surface — `POST /v1/images/generations` (non-streaming).
-It is **model-pinned**: the client names the exact image model, so this surface does
-**not** normalize into the IR and does **not** share the `routeRequest`
-classification/lane core. See
+Alongside those four translated protocols, Helm exposes separate **image-generation**
+surfaces. The first is **OpenAI-Images-compatible** — `POST /v1/images/generations`
+(non-streaming). Image generation is also available natively to **Gemini SDK
+clients**: the existing `:generateContent` endpoint now serves image models
+(`gemini-3.1-flash-image`, `gemini-3-pro-image`), and a dedicated
+**`POST /v1beta/interactions`** endpoint (the Gemini Interactions API) is translated
+to `generateContent` internally. All three are **model-pinned**: the client names the
+exact image model, so these surfaces do **not** normalize into the IR and do **not**
+share the `routeRequest` classification/lane core. See
 [05 · Protocol Translation](05-protocol-translation.md).
 
 Clients should only need to change their `base_url` and API key. A client never

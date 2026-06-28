@@ -5,8 +5,8 @@
 
 Helm never allows anonymous access. Every request to the API surface
 (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`,
-`/v1beta/models/...:generateContent`, `/v1/images/generations`) must carry a
-valid API key. The admin UI is a separate surface with its own HTTP Basic
+`/v1beta/models/...:generateContent`, `/v1/images/generations`,
+`/v1beta/interactions`) must carry a valid API key. The admin UI is a separate surface with its own HTTP Basic
 credentials (see [11 · Admin UI](11-admin-ui.md)).
 
 ## Authentication
@@ -38,6 +38,12 @@ their native protocol shape. The Anthropic face accepts either `x-api-key` or
 same key lookup using `Authorization: Bearer` (like the OpenAI Chat face). It
 does **not** require `allow_custom_model` — a standard key can call it even
 though it names the exact image model.
+
+`/v1beta/interactions` (the Gemini Interactions image-generation surface)
+self-authenticates the same way, but using `x-goog-api-key` (the Gemini SDK
+default) with `Authorization: Bearer` as a fallback. Like the other image
+surfaces it is **model-pinned** and does **not** require `allow_custom_model` —
+any key can call it.
 
 Per **Principle 7**, the plaintext key lives only in the `Authorization` header.
 It is never logged, never echoed in a response, and never written to telemetry
@@ -248,10 +254,11 @@ Budgets are enforced on **all four protocol faces** (OpenAI `/v1/chat`, Anthropi
 `/v1/messages`, OpenAI `/v1/responses`, Gemini `:generateContent`). The
 self-authenticating faces share one routing pipeline, so the check + settle (and
 the streamed-cost backfill that makes the spend dimension correct on the streaming
-path) live there once. Budgets and rate limits **also** apply to
-`/v1/images/generations`; image cost is metered per image (output tokens × the
-model's image rate). All budget config is editable per key in the admin API
-Keys page and applies on the next request (no restart).
+path) live there once. Budgets and rate limits **also** apply to the
+image-generation surfaces — `/v1/images/generations`, the Gemini
+`:generateContent` image models, and `/v1beta/interactions`; image cost is metered
+per image (output tokens × the model's image rate). All budget config is editable
+per key in the admin API Keys page and applies on the next request (no restart).
 
 ## Admin authentication is separate
 

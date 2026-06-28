@@ -45,6 +45,14 @@ export const CapabilitiesSchema = z.object({
   // a harmless passthrough. Absent ⇒ false so mixed fallback chains never run a
   // cached-content request on a provider that would ignore or reject the reference.
   supportsCachedContent: z.boolean().optional(),
+  // IMAGE-GENERATION model: the model OUTPUTS images (gpt-image-2, gemini-*-image
+  // "Nano Banana"), not just understands them (that is supportsVision). Absent ⇒ false.
+  // An image model is ALWAYS model-pinned — it has no "auto"/classify semantics: the
+  // client names it exactly. The router pins it to its exact alias ahead of the
+  // model-alias glob shim (route-request §0) so a native-Gemini image request reaches
+  // its provider via native passthrough (preserving responseModalities → inlineData)
+  // instead of being swallowed by a `gemini-*flash*` glob onto a text lane.
+  outputImage: z.boolean().optional(),
   maxContextTokens: z.number().int().nonnegative(),
   maxOutputTokens: z.number().int().nonnegative().nullable(),
 });

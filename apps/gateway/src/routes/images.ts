@@ -5,13 +5,14 @@ import {
   type ProviderClient,
   UpstreamError,
 } from "@helm/core";
-import { type DecisionRecord, ImageGenerationRequestSchema } from "@helm/shared";
+import { ImageGenerationRequestSchema } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
+import { buildImageDecision, numField } from "./image-telemetry.js";
 import type { MessagesIdentity } from "./messages.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 
@@ -55,22 +56,6 @@ export interface ImagesRouteDeps {
   record?: RecordServedDeps;
 }
 
-// Image generation has no classification — a fixed passthrough classifier, mirroring
-// route-request.ts's explicit-passthrough records.
-const PASSTHROUGH_CLASSIFIER: DecisionRecord["classifier"] = {
-  task_type: "passthrough",
-  complexity: "passthrough",
-  confidence: 1,
-  decided_by: "default",
-  rules_confidence: null,
-  eval_cache_hit: null,
-  eval_model: null,
-  eval_latency_ms: null,
-  fallback_reason: null,
-  constraints: {},
-  explanation: [],
-};
-
 function errorJson(
   c: Context<AppEnv>,
   status: ContentfulStatusCode,
@@ -85,15 +70,6 @@ function extractBearer(auth: string | undefined): string | null {
   if (!auth) return null;
   const m = /^Bearer\s+(.+)$/.exec(auth);
   return m?.[1] ?? null;
-}
-
-function numField(o: Record<string, unknown> | null, ...keys: string[]): number | null {
-  if (o === null) return null;
-  for (const k of keys) {
-    const v = o[k];
-    if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
-  }
-  return null;
 }
 
 // Capture-only clone with the ~1MB base64 image stripped — the request/response are
@@ -146,70 +122,6 @@ function mapGeminiToImages(native: Record<string, unknown>): Record<string, unkn
         ? { output_tokens: outputTokens, output_tokens_details: { image_tokens: outputTokens } }
         : {}),
     },
-  };
-}
-
-function buildDecision(p: {
-  traceId: string;
-  keyPrefix: string | null;
-  requested: string;
-  alias: string;
-  providerModel: string;
-  status: "ok" | "error";
-  errorClass: string | null;
-  cost: number | null;
-  latency: number;
-  usage: Record<string, unknown> | null;
-}): DecisionRecord {
-  const promptTokens = numField(p.usage, "input_tokens", "prompt_tokens");
-  const completionTokens = numField(p.usage, "output_tokens", "completion_tokens");
-  return {
-    request_id: p.traceId,
-    trace_id: p.traceId,
-    requested_model: p.requested,
-    protocol: null,
-    key_prefix: p.keyPrefix,
-    classifier: PASSTHROUGH_CLASSIFIER,
-    policy: { matched_policy_id: null, reason: "image_generation" },
-    lane: { selected_lane: "image", candidate_chain: [p.alias] },
-    provider_attempts: [
-      {
-        alias: p.alias,
-        skipped: false,
-        skip_reason: null,
-        status: p.status,
-        error_class: p.errorClass,
-        latency_ms: p.latency,
-        cost_usd: p.status === "ok" ? p.cost : null,
-        error_detail: null,
-      },
-    ],
-    final:
-      p.status === "ok"
-        ? {
-            model_alias: p.alias,
-            provider_model: p.providerModel,
-            status: "ok",
-            error_reason: null,
-          }
-        : { model_alias: null, provider_model: null, status: "error", error_reason: p.errorClass },
-    latency_total_ms: p.latency,
-    fallback_count: 0,
-    cost_breakdown:
-      p.status === "ok"
-        ? { eval_usd: null, completion_usd: p.cost, total_usd: p.cost }
-        : { eval_usd: null, completion_usd: null, total_usd: null },
-    memory: null,
-    usage:
-      promptTokens === null && completionTokens === null
-        ? null
-        : {
-            prompt_tokens: promptTokens,
-            completion_tokens: completionTokens,
-            cached_tokens: null,
-            cache_creation_tokens: null,
-          },
-    generation_ms: null,
   };
 }
 
@@ -373,7 +285,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       const errorClass = err instanceof UpstreamError ? err.errorClass : "upstream_error";
       // A client disconnect is NOT a provider fault → don't record, don't 5xx-as-provider.
       if (!aborted && deps.record !== undefined) {
-        const decision = buildDecision({
+        const decision = buildImageDecision({
           traceId,
           keyPrefix,
           requested: parsed.data.model,
@@ -414,7 +326,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
     const cost = deps.costOf(target.alias, upstream);
     const usage = (upstream as { usage?: Record<string, unknown> }).usage ?? null;
     if (deps.record !== undefined) {
-      const decision = buildDecision({
+      const decision = buildImageDecision({
         traceId,
         keyPrefix,
         requested: parsed.data.model,

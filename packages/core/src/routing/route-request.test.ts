@@ -264,6 +264,62 @@ describe("routeRequest — orchestration", () => {
     expect(plan.selected_lane).toBe("coding");
   });
 
+  // ── image-generation model pinning (Part 1) ───────────────────────────────
+  // An image model is ALWAYS model-pinned to its exact alias, for ANY key, ahead
+  // of the alias-glob shim + classification — so a native-Gemini image request
+  // reaches its provider via native passthrough (responseModalities → inlineData)
+  // instead of a `gemini-*flash*` glob swallowing it onto a text lane.
+  const imageDeps = (over: Partial<RouteDeps> = {}): RouteDeps =>
+    deps({ isImageModel: (m) => m === "gemini-3.1-flash-image", ...over });
+
+  it("pins an image model to explicit passthrough for a STANDARD key (no allow_custom_model)", async () => {
+    const d = imageDeps();
+    const result = await routeRequest(
+      req({ requested_model: "gemini-3.1-flash-image", protocol: "gemini" }),
+      d,
+    );
+
+    // No classification: an image model has no auto/classify semantics.
+    expect(d.classify).not.toHaveBeenCalled();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.explicit_model).toBe("gemini-3.1-flash-image");
+    expect(plan.candidate_chain).toEqual(["gemini-3.1-flash-image"]);
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.lane.selected_lane).toBe("image");
+    expect(result.final.status).toBe("ok");
+  });
+
+  it("pins an image model for a custom-model key too (same result)", async () => {
+    const d = imageDeps();
+    await routeRequest(req({ requested_model: "gemini-3.1-flash-image" }), d, {
+      allowCustomModel: true,
+    });
+    expect(d.classify).not.toHaveBeenCalled();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.explicit_model).toBe("gemini-3.1-flash-image");
+  });
+
+  it("does NOT pin a non-image model — routes normally through classification", async () => {
+    const d = imageDeps();
+    await routeRequest(req({ requested_model: "gemini-3.5-flash" }), d, { allowCustomModel: true });
+    // gemini-3.5-flash is not an image model → falls through to explicit passthrough/classify.
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).not.toBe("image");
+  });
+
+  it("over-budget degrade suppresses the image pin (cannot dodge the forced degrade lane)", async () => {
+    const d = imageDeps();
+    await routeRequest(req({ requested_model: "gemini-3.1-flash-image" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: null, degradeLane: "economy" },
+    });
+    // Pin suppressed while degrading → classify runs, request forced onto economy.
+    expect(d.classify).toHaveBeenCalledOnce();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.explicit_model).toBeNull();
+    expect(plan.selected_lane).toBe("economy");
+  });
+
   it("fail-open: a classify throw degrades to balanced with decided_by=default", async () => {
     const d = deps({
       classify: vi.fn(async () => {

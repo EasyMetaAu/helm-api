@@ -226,6 +226,35 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           },
         },
       },
+      "/v1beta/interactions": {
+        post: {
+          tags: ["Inference"],
+          summary: "Gemini Interactions API image generation",
+          description:
+            "Generate images via the Google Gemini Interactions API (the SDK's " +
+            "`client.interactions.create`). Model-pinned to a Gemini image model " +
+            "(`gemini-3.1-flash-image`, `gemini-3-pro-image`) — `allow_custom_model` is " +
+            "not required (any key). Auth via `x-goog-api-key` (Bearer fallback). Helm " +
+            "translates the request to a `generateContent` call and maps the response " +
+            "back to the interactions `steps[]` shape. An OpenAI image model (gpt-image-2) " +
+            "is a 400 → use /v1/images/generations. Non-streaming; budget + rate limits apply.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { type: "object" } } },
+          },
+          responses: {
+            "200": {
+              description:
+                "Interactions response (`{ id, steps: [{ content: [{ type, data }] }] }`)",
+            },
+            "400": errorResponse("Invalid request, or an OpenAI image model"),
+            "401": errorResponse("Missing or invalid API key"),
+            "404": errorResponse("Model is not a configured image model"),
+            "503": errorResponse("Image provider unavailable (missing credential)"),
+          },
+        },
+      },
     },
   };
 }

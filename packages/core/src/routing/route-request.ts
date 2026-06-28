@@ -183,6 +183,15 @@ export interface RouteDeps {
    *  absent (headless core / tests) → validation is skipped. Lane names are
    *  checked FIRST and never reach this. */
   isKnownModel?: (alias: string) => boolean;
+  /** Is this an IMAGE-GENERATION model (catalog `capabilities.outputImage`)? An
+   *  image model is ALWAYS model-pinned to its exact alias — for ANY key, ahead of
+   *  the model-alias glob shim and classification (plan() §0) — because it has no
+   *  "auto"/classify semantics (the client names it exactly, like the
+   *  /v1/images/generations endpoint). Pinning routes a native-Gemini image request
+   *  to its provider via native passthrough (responseModalities → inlineData) instead
+   *  of a `gemini-*flash*` glob swallowing it onto a text lane. The gateway wires it
+   *  from the catalog; absent (headless core / tests) → no image pinning. */
+  isImageModel?: (model: string) => boolean;
   /** Operator-configured virtual model-name map (docs/04 compatibility shim).
    *  Rewrites an inbound VENDOR model id (e.g. Claude Code's "claude-opus-4-8",
    *  which is neither a lane nor an internal alias) onto a LANE name or "auto"
@@ -505,6 +514,32 @@ async function plan(
   deps: RouteDeps,
   opts: RouteOptions,
 ): Promise<PlanDecision | PlanRejection> {
+  // 0pre) IMAGE-GENERATION models are ALWAYS model-pinned to their exact alias —
+  //    for ANY key, regardless of allow_custom_model, and AHEAD of the alias-glob
+  //    shim (§0a) and classification (§2). An image model has no "auto"/classify
+  //    semantics: the client names it exactly (like POST /v1/images/generations).
+  //    Pinning routes it to its native provider where native passthrough preserves
+  //    the image output (responseModalities → inlineData), instead of a
+  //    `gemini-*flash*` glob swallowing it onto a text lane. Telemetry uses the
+  //    `image` lane label (mirrors the images route). SUPPRESSED while over-budget
+  //    degrading (docs/06) — an image request still cannot dodge the forced degrade
+  //    lane — so it falls through to the degrade path below.
+  if (
+    deps.isImageModel?.(req.requested_model) === true &&
+    (opts.keyCaps?.degradeLane === undefined || opts.keyCaps.degradeLane === null)
+  ) {
+    return {
+      plan: {
+        selected_lane: "image",
+        candidate_chain: [req.requested_model],
+        explicit_model: req.requested_model,
+      },
+      classifier: passthroughClassifier(),
+      policy: { matched_policy_id: null, reason: "image generation (model-pinned)" },
+      evalUsd: null,
+    };
+  }
+
   // 0) Virtual model-alias resolution (docs/04 compatibility shim). An operator
   //    map rewrites an inbound vendor model id (e.g. Claude Code's "claude-opus-4-8")
   //    onto a LANE name or the "auto" sentinel so a fixed-model client routes
