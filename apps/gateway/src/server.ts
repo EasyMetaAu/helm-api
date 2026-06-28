@@ -2623,6 +2623,11 @@ export async function buildServer(
   const resolveImageTarget = (model: string) => {
     const r = registry.resolve(model);
     if (!r.ok) return null; // unknown alias → 404
+    // Must be an IMAGE-GENERATION model (catalog capabilities.outputImage). Without
+    // this gate any gemini-protocol alias that merely has nativePassthrough — e.g. a
+    // TEXT model like zenmux-vertex/gemini-3.5-flash — would be accepted and sent to
+    // image generation instead of the documented 404.
+    if (catalog.get(r.value.alias)?.capabilities.outputImage !== true) return null;
     const kind: "openai" | "gemini" =
       r.value.targetProviderProtocol === "gemini" ? "gemini" : "openai";
     const client = providerClients.get(r.value.providerName);

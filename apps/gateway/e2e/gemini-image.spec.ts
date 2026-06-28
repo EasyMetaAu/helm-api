@@ -65,6 +65,18 @@ test.describe("gemini image generation e2e", () => {
     expect(res.status()).toBe(400);
   });
 
+  test("interactions rejects a TEXT Gemini model with 404 (only outputImage models)", async ({
+    request,
+  }) => {
+    // zenmux-vertex/gemini-3.5-flash is a gemini-protocol alias WITH nativePassthrough
+    // but it is NOT an image model (no capabilities.outputImage) → 404, not accepted.
+    const res = await request.post("/v1beta/interactions", {
+      headers: GOOG,
+      data: { model: "zenmux-vertex/gemini-3.5-flash", input: "x" },
+    });
+    expect(res.status()).toBe(404);
+  });
+
   test("interactions without a key is 401", async ({ request }) => {
     const res = await request.post("/v1beta/interactions", {
       headers: { "Content-Type": "application/json" },

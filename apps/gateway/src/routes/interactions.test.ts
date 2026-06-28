@@ -163,6 +163,23 @@ describe("registerInteractionsRoute", () => {
     );
   });
 
+  it("forwards generation_config (thinking_level → thinkingConfig) while forcing IMAGE output", async () => {
+    const { app, nativePassthrough } = setup();
+    await post(app, {
+      model: "gemini-3.1-flash-image",
+      input: "a cat",
+      generation_config: { thinking_level: "high", temperature: 0.5 },
+    });
+    const [body] = nativePassthrough.mock.calls[0] as [
+      { generationConfig: Record<string, unknown> },
+    ];
+    expect(body.generationConfig).toMatchObject({
+      responseModalities: ["TEXT", "IMAGE"], // forced, always present
+      thinkingConfig: { thinkingLevel: "high" }, // snake input → camel generateContent
+      temperature: 0.5, // other fields ride through
+    });
+  });
+
   it("strips the base64 image from the captured payload (DB-bloat guard)", async () => {
     const { app, enqueuePayload } = setup();
     await post(app, { model: "gemini-3.1-flash-image", input: "a cat" });

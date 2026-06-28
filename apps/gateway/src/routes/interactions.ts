@@ -96,11 +96,23 @@ function inputToContents(input: unknown): Array<Record<string, unknown>> {
   return [{ role: "user", parts }];
 }
 
-// interactions `response_format` → generateContent `generationConfig`. Always request
-// IMAGE output; map aspect_ratio / image_size to imageConfig (best-effort — passed
-// through for the upstream to honour; absent keys are simply omitted).
-function buildGenerationConfig(responseFormat: unknown): Record<string, unknown> {
-  const cfg: Record<string, unknown> = { responseModalities: ["TEXT", "IMAGE"] };
+// interactions `response_format` + `generation_config` → generateContent
+// `generationConfig`. The client's accepted `generation_config` is forwarded (helm
+// never silently drops a field it accepted) — the one documented Interactions knob
+// `thinking_level` is mapped to generateContent's `thinkingConfig.thinkingLevel`;
+// other fields (temperature, seed, …) ride through. IMAGE output + imageConfig
+// (aspect_ratio / image_size) are then FORCED on top, always winning over the client.
+function buildGenerationConfig(
+  responseFormat: unknown,
+  generationConfig: unknown,
+): Record<string, unknown> {
+  const cfg: Record<string, unknown> = {};
+  if (generationConfig !== null && typeof generationConfig === "object") {
+    const { thinking_level, ...rest } = generationConfig as Record<string, unknown>;
+    Object.assign(cfg, rest);
+    if (typeof thinking_level === "string") cfg.thinkingConfig = { thinkingLevel: thinking_level };
+  }
+  cfg.responseModalities = ["TEXT", "IMAGE"];
   if (responseFormat !== null && typeof responseFormat === "object") {
     const rf = responseFormat as Record<string, unknown>;
     const imageConfig: Record<string, unknown> = {};
@@ -312,7 +324,10 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
         {
           model: target.providerModel,
           contents: inputToContents(parsed.data.input),
-          generationConfig: buildGenerationConfig(parsed.data.response_format ?? null),
+          generationConfig: buildGenerationConfig(
+            parsed.data.response_format ?? null,
+            parsed.data.generation_config ?? null,
+          ),
         },
         { signal: c.req.raw.signal, captureUpstream: capture },
       );
