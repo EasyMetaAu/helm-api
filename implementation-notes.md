@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-28 · 请求详情页置顶「全部媒体」总览（请求图 + 响应图，一处看全）（admin UI；docs/07，原则 1）
+
+- **背景（Lukin，box 实查 req `99394953`）**：Gemini 图片生成响应在详情页**只显示一坨 JSON**，生成图没渲染——根因不是缺能力（`imageData.imageDataUrl` base64-magic 嗅探 + `ImagePreview` 缩放 modal + JsonTree 内既有深层「View image」按钮全早已存在），是图片埋在 `candidates[0].…inlineData.data`=**depth 7**、JSON tree 默认只展 2 层翻不到。诉求两段递进：先要请求面板也能看图，最终拍板要一个**独立置顶总览**——把这次调用**发送的图(request)+ 生成的图(response)** 一次性列出、点缩略图弹大图，不用展开 JSON 翻。
+- **决定（两轮：先把带塞进 JsonViewer，再上移为独立总览）**：① `imageData.ts` 纯函数 `collectImages(value)`（递归走 parsed payload，每 string 跑 `imageDataUrl`，按 URL 去重、封顶 24、depth≤24 防爆栈，返 `{url,path}[]`）；② `ImagePreview.svelte` 加 `variant:'link'|'thumb'`——`thumb` 触发器是缩略图 `<img>`，**复用同一个缩放 modal**，`link` 默认不变（JsonTree 旧按钮照旧）；③ **详情页 `[traceId]/+page.svelte`** 在 Request summary 之后插独立 `media-overview` section：`collectImages` 分别扫 request(+upstreamDiffers 时并 upstream，按 URL 去重) 与 response，分「Request」「Response」两组渲缩略图，仅有图才显。**关键决定（与 Lukin 确认）：去掉上一轮加在 `JsonViewer` 里的内嵌缩略图带**（`JsonViewer` 只此页消费，总览接管后内嵌带=同图显示两遍）——JsonViewer 回纯 JSON，「翻」逻辑(tree+深层按钮)原样保留。
+- **坑（验证踩到）**：真实 2.1MB payload 端到端验证不能用 `pnpm dev`——SvelteKit dev 默认 SSR，`load()` 跑服务端、`page.route` 拦不到（页面 500）。须 `pnpm build`+`pnpm preview`（adapter-static SPA，`load` 仅浏览器端）才能 Playwright `page.route` 注入 box 拉来的 detail/payload。Playwright 沙箱无 `require`/`import()`/`fetch`——读本地大文件改 `python3 -m http.server` + `page.request.get`。验证：真实图生成 req→仅 Response 组真图 1408×768；合成「请求带 Anthropic `source.data` 输入图」→ Request+Response 两组都显；点缩略图弹 modal，标题=`组名·字段路径`。
+- **范围/TODO**：跨协议请求图都命中（OpenAI `image_url` data:、Anthropic `source.data`、Gemini `inlineData.data`）；**http(s) 图片 URL 不渲染**（只认 data:/base64）。**已知限制**：流式响应走 `StreamViewer`(拼 SSE) 不扫图，若以后有 Gemini 流式出图再补。i18n 复用既有 `Images`/`Request`/`Response`，仅新增 1 条 help 文案键手填五 locale。
+- **验证**：`imageData.test`+collectImages(4) / `requests.test` 详情页 +3（仅响应图→Response 组、请求+响应→两组、无图→不渲）；admin **522 单测绿**、svelte-check 934/0/0、prettier 干净。分支 `worktree-response-image-render`，**未提交未部署**。
+
 ## 2026-06-28 · ZenMux Gemini 图片生成模型 + box→repo 路由配置合并（config；docs/02/04，原则 2/6）
 
 - **背景（Lukin）**：接入 `zenmux-vertex/gemini-3.1-flash-image`（Nano Banana 2）+ `gemini-3-pro-image`（Nano Banana Pro）做图片生成，要**准确计费**；并把 box 上 admin 改过的路由 config 拉回 repo 一起 PR。
@@ -24,21 +32,13 @@
 - **治理 guard（Codex review 修，Lukin 拍板修 1+3 留 2）**：promotion 只在路由大脑**没有主动否决**客户模型选择时生效。分类路径（681）加 `honorRequestedModel = !aliasToAuto && keyCaps?.degradeLane == null`：① **over-budget 降级**时不提升——否则 `economy` 展开经 `balanced` 透传含 `openai-codex/gpt-5.5`，点名即把它拽到链首、降级形同虚设（与 0a/1 已有的 degrade-透传抑制对齐，docs/06）；② **alias→auto** 时不提升——operator 说"忽略固定 id 去分类"，promotion 不得把它钉回。**Issue 2（allowed_lanes 封顶）保持现状**：被点名模型本就在被允许 lane 的链内（深层 fallback 可达），属 Lukin 已接受的"无条件提升/成本被 lane 成员约束"权衡；reviewer 建议的 `clamped` 糙修会反噬（封到 balanced、点名更便宜的 sonnet 时反让客户拿到更贵的 gpt-5.5），要精确治理只能上成本护栏（option B，已否）。**主场景不受影响**：CC 普通分类键无 cap/无降级/无 auto，三 guard 全不触发，sonnet 照常提升。
 - **验证**：`promote-requested-model.test`(14) + `route-request.test` 加 7 集成例（分类提升/auto no-op/alias→lane 提升/explicit model 不动/explicit lane 不动/**降级不提升**/**alias→auto 不提升**）；**全量 4756 单测绿**、四包 typecheck、biome 干净（`promote-requested-model.ts` 避非空断言用 `undefined` 收窄）；e2e 安全（`k_e2e` 分类键发的 `gpt-4o-mini`/`claude-3-5-sonnet` 不在 shipped config 链内→无匹配；`k_custom` 走 explicit passthrough→no-op）。分支 `feat/promote-requested-model`，**未提交未部署**。
 
-## 2026-06-27 · Codex 周限额自动重置（gateway 执行 + admin UI；docs/04，原则 3/5）
-
-- **背景（Lukin）**：ChatGPT/Codex 订阅账号每周限额窗口（`secondary`，7d）打满即被限流，但 ChatGPT 给了几次「重置额度」机会（`consumeCodexResetCredit`）。原先只能在 providers 页手动点「重置限额」。诉求：每个 Codex 账号加开关——开了之后周限打满自动调一次重置；两处可设（管理弹窗常驻 + 重置确认弹层顺手勾「以后自动重置」）。**硬约束**：reset credits 极少，并发请求涌入**绝不能一次烧光**——每账号 **≥1h** 只许调一次。
-- **触发点（与 Lukin 确认走方案 A，不走纯 429 hook）**：挂在 `server.ts` 既有 `captureCodexQuota`——它每个 Codex 回包（**含 429**，状态码判断前就解析头）都跑，本就是窗口饱和→自动 park 处，手里有解析好的窗口。`weeklySaturated(windows)`（只认 `secondary`≥100%，**5h 的 primary 自愈、绝不烧 credit**）真则 `maybeAutoReset`。比纯 `onOAuthSubscription429` 强：那里没窗口数据、要额外读快照才能分周限/5h。
-- **防并发烧 credit（Codex review P1 修正）**：reset credit 的 grant 按**上游 ChatGPT 账号**（`chatgpt_account_id`）发放，一个 login 可挂多个 helm label——故 cooldown **必须按共享 id keying**，否则两个 sibling label 同时打满会各扣一次。`resolveCodexAccountKey` 从**存储的 access token** 解 `chatgpt_account_id`（`codexAccountIdFromToken`+`decryptSecret`，纯解码无网络、过期 token 也能解，失败回落 helm label）。`autoResetLast: Map<sharedKey,ms>`（≥1h cooldown，check+set 相邻同步→并发 sibling 串行只扣一次）是正确性闸；`autoResetInFlight: Set<helmKey>` 只廉价折叠同 label burst 防 token-read 风暴。成功后**unpark 所有 sibling**（列 codex token、解析 key 匹配则 `applyUsageLimit(...,null)`），否则被各自饱和回包 park 的 sibling 要等窗口自然重置才回轮换。`cooldownPassed`/`weeklySaturated` 抽纯函数 `oauth/auto-reset.ts` 单测。**ponytail**：cooldown 进程内存不持久化——刚重置的周窗口 1h 内物理上不可能再满，重启清空也不会二次扣。
-- **零迁移**：per-account 设置就是 `config_kv` 加密 blob，`AccountSettings` 加 `autoReset?: boolean`，全程**镜像 `schedulable`**（getAccountSchedule/setAccountSchedule/listStatus/route 校验/admin client/dialog）。失败一律 fail-open（opted-out/无 credit/网络错只是留 park，正常降级），成功后 `applyUsageLimit(...,null)` unpark。
-- **createOAuthAdmin 上移**：原本 ~2069 行才构造（晚于 captureCodexQuota），提到 oauthCtx 处存 `oauthAdmin`，供执行路径复用其 `consumeCodexResetCredit`；原 `oauth:` 处复用同实例。
-- **两处 UI**（均 Codex-only）：管理弹窗 Schedule tab 加 `auto-reset-toggle` checkbox；重置确认弹层加 `reset-auto-reset-toggle`（预填账号当前值，确认时**解耦**先 best-effort 存设置再 consume——重置失败设置也留住）。新 testid 不动旧的（e2e 安全，见 [[e2e-admin-specs-live-in-gateway]]）。
-- **验证**：`auto-reset.test`(7) + account-settings/admin-oauth/oauth-route 各补 autoReset 例；gateway admin+oauth 180 测、admin i18n 17 测、四包 typecheck、svelte-check 934/0/0、biome、**build 全绿**。i18n 走 extract+update 后手填 zh-hans/zh-hant/ja/ko 全四非英语 locale（Codex review P3：`i18n:update` 用英文占位会漏译，须手填，[[i18n-sync-incremental-empty-only]]）。分支 `feat-codex-auto-reset`，**未部署**。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-27 · Codex 周限额自动重置（gateway 执行 + admin UI；docs/04）**：每 Codex 账号开关，周限(`secondary`≥100%，5h primary 不烧 credit)打满自动调一次 `consumeCodexResetCredit`；触发挂在 `captureCodexQuota`(每回包含 429 跑)。防烧 credit 关键：cooldown 按**上游 `chatgpt_account_id`**(从存储 access token 解，无网络)keying ≥1h、check+set 相邻同步→并发 sibling 串行只扣一次(`autoResetLast` Map)，成功 `applyUsageLimit(...,null)` unpark 所有 sibling。纯函数 `oauth/auto-reset.ts`；零迁移(`AccountSettings.autoReset` 镜像 schedulable，fail-open)；两处 UI(管理弹窗 `auto-reset-toggle` + 重置确认弹层 `reset-auto-reset-toggle`，先存设置再 consume)；i18n 手填四非英语 locale。`auto-reset.test`(7)，gateway 180+admin 17 绿。分支 `feat-codex-auto-reset`，未部署。
 
 - **2026-06-26 · admin 导航骨架屏 + 详情页 payload 独立 fail-open（admin UI；docs/07）**：admin 点列表/详情进度条走完却不出内容、再点才出——非 SvelteKit bug，是 SPA 阻塞 `load`+冷查询慢+详情页静默吞错。不走 SSR（违原则 1）/不逐页 await（churn 大），选**全局延迟骨架**：`+layout.svelte` 监听 `$navigating`，仅「不同路由」且超 `SKELETON_DELAY_MS=150ms` 才显 `PageSkeleton`（dashboard/detail/list 三态按 `route.id` 选），热查询秒换不闪、同路由换筛选保留旧数据。真 bug：详情页 `Promise.all([getRequest,getRequestPayload])` 里 payload 失败连累整页 → 改 payload 独立 `.catch` + 错误态加 Retry。`requests.test` +2，admin 504 绿、svelte-check 934/0/0。分支 `fix-admin-nav-skeleton`。
 

@@ -39,3 +39,60 @@ export function imageDataUrl(value: unknown): string | null {
   }
   return null;
 }
+
+export interface CollectedImage {
+  /** Renderable `data:` URL. */
+  url: string;
+  /** Dotted path to the field it was found at, e.g. `candidates.0…inlineData.data`. */
+  path: string;
+}
+
+// A response with more inline images than this is pathological (or an attack); the
+// gallery caps here so one body can never spawn thousands of <img> decodes.
+const MAX_IMAGES = 24;
+// Mirror JsonTree's render-depth guard so a very deep value can't blow the stack.
+const MAX_WALK_DEPTH = 24;
+
+/**
+ * Walk a parsed payload (object/array/scalar) and collect every renderable image,
+ * de-duplicated by URL and capped. Pure + framework-free → unit-testable. This is
+ * what lets the body viewer surface generated images up front instead of leaving
+ * them buried as a base64 wall deep in the JSON tree.
+ */
+export function collectImages(value: unknown): CollectedImage[] {
+  const out: CollectedImage[] = [];
+  const seen = new Set<string>();
+  walk(value, '', out, seen, 0);
+  return out;
+}
+
+function walk(
+  value: unknown,
+  path: string,
+  out: CollectedImage[],
+  seen: Set<string>,
+  depth: number,
+): void {
+  if (out.length >= MAX_IMAGES || depth > MAX_WALK_DEPTH) return;
+
+  if (typeof value === 'string') {
+    const url = imageDataUrl(value);
+    if (url && !seen.has(url)) {
+      seen.add(url);
+      out.push({ url, path: path || 'image' });
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length && out.length < MAX_IMAGES; i++) {
+      walk(value[i], path ? `${path}.${i}` : String(i), out, seen, depth + 1);
+    }
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      if (out.length >= MAX_IMAGES) return;
+      walk(v, path ? `${path}.${k}` : k, out, seen, depth + 1);
+    }
+  }
+}

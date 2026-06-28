@@ -9,6 +9,8 @@
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
   import TokenUsage from '$lib/components/TokenUsage.svelte';
+  import ImagePreview from '$lib/components/ImagePreview.svelte';
+  import { type CollectedImage, collectImages } from '$lib/components/imageData';
   import JsonViewer from '$lib/components/JsonViewer.svelte';
   import RetryDialog from '$lib/components/RetryDialog.svelte';
   import StreamViewer from '$lib/components/StreamViewer.svelte';
@@ -66,6 +68,42 @@
   );
   const upstreamDiffers = $derived(
     hasUpstream && !deepEqual(data.payload.request, data.payload.upstream_request),
+  );
+
+  // Media overview: every image in this call surfaced up front, so an operator sees
+  // the pictures SENT and GENERATED without expanding a JSON tree to a deep base64
+  // leaf. `collectImages` walks the parsed body (handles OpenAI `image_url` data:
+  // URLs, Anthropic `source.data`, Gemini `inlineData.data`); a streamed SSE response
+  // is a raw string and yields nothing (still shown by StreamViewer below). De-duped
+  // by URL so the upstream copy of an inbound image never doubles it. The JSON tree
+  // and its in-tree "View image" button are untouched — this is the separate,
+  // scan-at-a-glance overview the panels themselves no longer carry.
+  function dedupeByUrl(imgs: CollectedImage[]): CollectedImage[] {
+    const seen = new Set<string>();
+    const out: CollectedImage[] = [];
+    for (const img of imgs) {
+      if (seen.has(img.url)) continue;
+      seen.add(img.url);
+      out.push(img);
+    }
+    return out;
+  }
+  const requestImages = $derived(
+    data.payload?.captured === true
+      ? dedupeByUrl([
+          ...collectImages(data.payload.request),
+          ...(upstreamDiffers ? collectImages(data.payload.upstream_request) : []),
+        ])
+      : [],
+  );
+  const responseImages = $derived(
+    data.payload?.captured === true ? collectImages(data.payload.response) : [],
+  );
+  const mediaGroups = $derived(
+    [
+      { label: $t('Request'), images: requestImages },
+      { label: $t('Response'), images: responseImages },
+    ].filter((g) => g.images.length > 0),
   );
 </script>
 
@@ -176,6 +214,38 @@
         </div>
       </dl>
     </section>
+
+    <!-- Media overview: one scan-at-a-glance gallery of every image in this call —
+         sent (request) and generated (response) — so the operator never has to expand
+         a JSON tree to find a picture. Rendered only when at least one image exists. -->
+    {#if mediaGroups.length > 0}
+      <section data-testid="media-overview" class="card text-sm">
+        <h2 class="section-header">{$t('Images')}</h2>
+        <p class="field-help mb-3">
+          {$t(
+            'All images sent in the request and returned in the response — click any to view full size.',
+          )}
+        </p>
+        <div class="flex flex-col gap-4">
+          {#each mediaGroups as group (group.label)}
+            <div data-testid="media-group">
+              <p class="mb-2 text-xs font-medium uppercase tracking-wide text-ink-muted">
+                {group.label}
+              </p>
+              <div class="flex flex-wrap gap-3">
+                {#each group.images as img (img.url)}
+                  <ImagePreview
+                    src={img.url}
+                    label={`${group.label} · ${img.path}`}
+                    variant="thumb"
+                  />
+                {/each}
+              </div>
+            </div>
+          {/each}
+        </div>
+      </section>
+    {/if}
 
     <!-- Request: full captured body when capture_payloads is on, else metadata. -->
     <section class="card text-sm">
