@@ -65,12 +65,19 @@ zenmux-vertex/gemini-3.1-pro:
 # per-image cost (a 1K–2K image = 1120 tokens → flash $0.067, pro $0.134). Rates verified
 # live on the ZenMux model pages 2026-06-28. outputPerMTokUsd is the IMAGE-output rate
 # (these are image models; the marginal text-output rate — flash $3, pro $12 — is unused).
-zenmux-vertex/gemini-3.1-flash-image:
+gemini-3.1-flash-image:
   inputPerMTokUsd: 0.5
   outputPerMTokUsd: 60.0
-zenmux-vertex/gemini-3-pro-image:
+gemini-3-pro-image:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 120.0
+# OpenAI gpt-image-2 (ZenMux, verified live 2026-06-28): text input $5/M, image
+# output $30/M. The generated image is billed as usage.output_tokens (image_tokens)
+# → outputPerMTokUsd is the image rate. Worked example: a 1024 image = 196 output
+# tokens → 196 × $30/M + 15 × $5/M ≈ $0.006.
+gpt-image-2:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 30.0
 zenmux-anthropic/claude-opus-4.8:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 25.0

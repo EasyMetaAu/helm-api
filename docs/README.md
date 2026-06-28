@@ -8,7 +8,9 @@ numbered documents below describe the system **as it ships** — read them in or
 Helm API is an **open-source, self-hosted** LLM routing gateway (MIT license,
 deployed with Docker) — think of it as "**nginx for the LLM world**". It accepts
 standard AI API requests on four inbound protocols (OpenAI Chat Completions,
-Anthropic Messages, OpenAI Responses, and Google Gemini), uses deterministic
+Anthropic Messages, OpenAI Responses, and Google Gemini) — plus a dedicated
+OpenAI-Images-compatible image-generation endpoint (`/v1/images/generations`) —
+uses deterministic
 rules (optionally aided by a small-model evaluation that is **off by default**)
 to classify each request by task type and complexity, and routes it to a
 configurable **lane** rather than to a bare provider alias. It executes the lane

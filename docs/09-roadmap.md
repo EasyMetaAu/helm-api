@@ -39,6 +39,10 @@ The Protocol Adapter accepts **four inbound protocols, all with streaming**:
   `:streamGenerateContent?alt=sse` — auth via `x-goog-api-key`, native incremental
   delta frames.
 
+Image generation is served by a dedicated `/v1/images/generations` surface
+**outside** the Protocol Adapter — it is model-pinned (the client names the exact
+image model) and does not go through cross-protocol translation or the IR.
+
 Clients can mix SDKs; cross-protocol SSE conversion is covered per direction. See
 [05 · Protocol Translation](05-protocol-translation.md).
 

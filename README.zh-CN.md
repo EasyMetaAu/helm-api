@@ -203,6 +203,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ✅ |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅（走 `:streamGenerateContent`；用 `x-goog-api-key` 鉴权） |
+| `POST /v1/images/generations` | OpenAI Images API（[图片生成](#图片生成)） | —（钉死模型，任意 key 可用） |
 
 **`model` 字段填什么：**
 
@@ -214,6 +215,23 @@ curl http://localhost:8080/v1/chat/completions \
 | lane 名（`premium`）或具体别名（`deepseek/deepseek-v4-pro`）——**自定义模型 key** | 直接进入该 lane / 模型，跳过分类。 |
 
 > 标准 key 永远只需 `auto`——Helm 全部分类路由，model 字段被忽略。要钉某条 lane、某个厂商家族或某个具体模型，需要**自定义模型** key（`allow_custom_model`）。Lane 由运维方配置（`lanes.yaml` + 面板）。
+
+### 图片生成
+
+`POST /v1/images/generations` 是一个**专用、兼容 OpenAI Images** 的图片模型端点。它**钉死模型**——你直接写出具体的图片模型 id（没有 `auto`、没有 lane、不经分类）——且**任意有效 key 都能用**（无需 `allow_custom_model`；成本由该 key 的预算 / 限流约束）。仅支持 Bearer 鉴权。
+
+```bash
+curl http://localhost:8080/v1/images/generations \
+  -H "Authorization: Bearer $HELM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-image-2",
+    "prompt": "纯白背景上的一颗红苹果",
+    "size": "1024x1024"
+  }'
+```
+
+响应遵循 OpenAI Images 形状——`{ "created": …, "data": [{ "b64_json": "…" }], "usage": … }`。运维方可配置的图片模型包括 `gpt-image-2`（OpenAI）以及 `gemini-3.1-flash-image` / `gemini-3-pro-image`（Google——Helm 会把它们与 Gemini 原生的 `generateContent` 双向互译，因此请求 / 响应始终保持 OpenAI 形状）。每次调用按图片计量（output tokens × 该模型的图片费率），并和其他请求一样进入面板。
 
 **其余端点**（交互式文档在 `/docs`，原始规格在 `/openapi.json`）：
 

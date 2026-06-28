@@ -203,6 +203,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ✅ |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅ (via `:streamGenerateContent`; auth via `x-goog-api-key`) |
+| `POST /v1/images/generations` | OpenAI Images API ([image generation](#image-generation)) | — (model-pinned, any key) |
 
 **What to put in `model`:**
 
@@ -214,6 +215,23 @@ curl http://localhost:8080/v1/chat/completions \
 | a lane name (`premium`) or exact alias (`deepseek/deepseek-v4-pro`) — **custom-model key** | Routes straight into that lane / model, skipping classification. |
 
 > A standard key only ever needs `auto` — Helm classifies everything and the `model` field is ignored. Pinning a lane, a vendor family, or an exact model requires a **custom-model** key (`allow_custom_model`). Lanes are operator config (`lanes.yaml` + dashboard).
+
+### Image generation
+
+`POST /v1/images/generations` is a **dedicated, OpenAI-Images-compatible** endpoint for image models. It is **model-pinned** — you name the exact image model (no `auto`, no lanes, no classification) — and works with **any valid key** (no `allow_custom_model` needed; cost is bounded by the key's budget / rate limit). Bearer auth only.
+
+```bash
+curl http://localhost:8080/v1/images/generations \
+  -H "Authorization: Bearer $HELM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-image-2",
+    "prompt": "a single red apple on a plain white background",
+    "size": "1024x1024"
+  }'
+```
+
+The response follows the OpenAI Images shape — `{ "created": …, "data": [{ "b64_json": "…" }], "usage": … }`. Operator-configured image models include `gpt-image-2` (OpenAI) and `gemini-3.1-flash-image` / `gemini-3-pro-image` (Google — Helm translates these to/from Gemini's native `generateContent`, so the request/response stay OpenAI-shaped). Each call is metered per image (output tokens × the model's image rate) and shows up in the dashboard like any other request.
 
 **Other endpoints** (full interactive docs at `/docs`, raw spec at `/openapi.json`):
 

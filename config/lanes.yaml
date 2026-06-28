@@ -196,21 +196,3 @@ gemini-flash:
   primary: zenmux-vertex/gemini-3.5-flash
   fallback:
     - balanced
-
-# —— image-generation lanes ——
-# Native-Gemini image models (responseModalities:[TEXT,IMAGE]). These lanes are
-# image-ONLY — the fallback is the OTHER image model, NEVER a text lane / `*/auto`
-# tail (a text model can't draw, so degrading there would return no image). Reached
-# by pinning a `gemini-*-image` id on an allow_custom_model key (the model-aliases
-# glob rewrites it onto the lane); a Gemini-CLI request passes through verbatim.
-gemini-flash-image:
-  purpose: Google Gemini Flash image generation (Nano Banana)
-  primary: zenmux-vertex/gemini-3.1-flash-image
-  fallback:
-    - zenmux-vertex/gemini-3-pro-image
-
-gemini-pro-image:
-  purpose: Google Gemini Pro image generation (Nano Banana Pro)
-  primary: zenmux-vertex/gemini-3-pro-image
-  fallback:
-    - zenmux-vertex/gemini-3.1-flash-image

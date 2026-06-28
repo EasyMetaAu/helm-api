@@ -202,6 +202,30 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           },
         },
       },
+      "/v1/images/generations": {
+        post: {
+          tags: ["Inference"],
+          summary: "OpenAI-compatible image generation",
+          description:
+            "Generate images from a text prompt. Model-pinned: `model` is the exact " +
+            "image model id (e.g. `gpt-image-2`, `gemini-3.1-flash-image`) — NOT a lane " +
+            "or `auto`, and `allow_custom_model` is not required. No classification, " +
+            "lanes, or cross-protocol translation; the request is forwarded to the " +
+            "named model's provider. Non-streaming. Per-key budget and rate limits apply.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { type: "object" } } },
+          },
+          responses: {
+            "200": { description: "Images response (`{ created, data: [{ b64_json }], usage }`)" },
+            "400": errorResponse("Invalid image generation request"),
+            "401": errorResponse("Missing or invalid API key"),
+            "404": errorResponse("Model is not a configured image model"),
+            "503": errorResponse("Image provider unavailable (missing credential)"),
+          },
+        },
+      },
     },
   };
 }

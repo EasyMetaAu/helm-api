@@ -146,6 +146,7 @@ import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
 import { createExecute } from "./routes/execute.js";
 import { registerGeminiRoute } from "./routes/gemini.js";
+import { registerImagesRoute } from "./routes/images.js";
 import { registerMcpServer } from "./routes/mcp/index.js";
 import { deriveMcpSigningKey, mcpAuth, registerMcpOAuth } from "./routes/mcp/oauth.js";
 import { supportsMemoryAdmin } from "./routes/mcp/tools.js";
@@ -2520,6 +2521,46 @@ export async function buildServer(
     return null;
   };
   const geminiCountProvider = geminiCountClient();
+  // Shared identity resolver for the self-authenticating routes (gemini + images):
+  // plaintext credential → full MessagesIdentity, or null when missing/invalid.
+  const resolveIdentity = async (credential: string | null): Promise<MessagesIdentity | null> => {
+    if (credential === null) return null;
+    const record = await keyStore.getByHash(hashKey(credential));
+    if (record === null || record.disabled) return null;
+    return {
+      keyId: record.key_id,
+      keyPrefix: record.prefix,
+      accountId: record.account_id,
+      orgId: null,
+      userId: null,
+      role: record.role,
+      caps: {
+        allowedLanes: record.allowed_lanes,
+        allowCustomModel: record.allow_custom_model,
+        rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+        // Per-key max in-flight (issue #93): read by the concurrency gate.
+        concurrencyLimit: record.concurrency_limit,
+        budget: {
+          requests: record.budget_requests,
+          tokens: record.budget_tokens,
+          spendUsd: record.budget_spend_usd,
+          windowSeconds: record.budget_window_seconds,
+          behavior: record.over_budget_behavior,
+          degradeLane: record.degrade_lane,
+        },
+        // Per-key memory defaults (issue #97): read by the route's memory
+        // scope resolver; explicit x-memory-* headers always override.
+        memory: {
+          mode: record.memory_mode,
+          // null project => isolate by the key's own id; explicit value SHARES
+          // a pool across keys (effectiveMemoryProjectId). Mirrors auth.ts.
+          projectId: effectiveMemoryProjectId(record),
+          threadSource: record.memory_thread_source,
+        },
+      },
+    };
+  };
+
   registerGeminiRoute(app, {
     rateLimiter,
     concurrencyGate,
@@ -2532,45 +2573,7 @@ export async function buildServer(
           },
         }
       : {}),
-    auth: {
-      resolve: async (credential): Promise<MessagesIdentity | null> => {
-        if (credential === null) return null;
-        const record = await keyStore.getByHash(hashKey(credential));
-        if (record === null || record.disabled) return null;
-        return {
-          keyId: record.key_id,
-          keyPrefix: record.prefix,
-          accountId: record.account_id,
-          orgId: null,
-          userId: null,
-          role: record.role,
-          caps: {
-            allowedLanes: record.allowed_lanes,
-            allowCustomModel: record.allow_custom_model,
-            rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
-            // Per-key max in-flight (issue #93): read by the concurrency gate.
-            concurrencyLimit: record.concurrency_limit,
-            budget: {
-              requests: record.budget_requests,
-              tokens: record.budget_tokens,
-              spendUsd: record.budget_spend_usd,
-              windowSeconds: record.budget_window_seconds,
-              behavior: record.over_budget_behavior,
-              degradeLane: record.degrade_lane,
-            },
-            // Per-key memory defaults (issue #97): read by the route's memory
-            // scope resolver; explicit x-memory-* headers always override.
-            memory: {
-              mode: record.memory_mode,
-              // null project => isolate by the key's own id; explicit value SHARES
-              // a pool across keys (effectiveMemoryProjectId). Mirrors auth.ts.
-              projectId: effectiveMemoryProjectId(record),
-              threadSource: record.memory_thread_source,
-            },
-          },
-        };
-      },
-    },
+    auth: { resolve: resolveIdentity },
     transformer: {
       transformRequestOut: (native) => geminiTransformer.transformRequestOut(native),
       transformResponseOut: (ir) =>
@@ -2599,6 +2602,47 @@ export async function buildServer(
       capturePayloads: () => settings.capture_payloads,
     },
   } as Parameters<typeof registerGeminiRoute>[1] & { rateLimiter: RateLimiterPort });
+
+  // POST /v1/images/generations — the OpenAI Images API surface (gpt-image-*). A
+  // model-pinned endpoint that resolves the requested model to a provider whose
+  // client implements imageGeneration (OpenAI-compat), forwards verbatim, and
+  // records one telemetry row with cost. Bypasses the lane/classify pipeline.
+  registerImagesRoute(app, {
+    rateLimiter,
+    concurrencyGate,
+    auth: { resolve: resolveIdentity },
+    resolveImageTarget: (model) => {
+      const r = registry.resolve(model);
+      if (!r.ok) return null; // unknown alias → 404
+      // gemini-protocol providers serve images via generateContent (nativePassthrough);
+      // everyone else via the OpenAI Images API (imageGeneration).
+      const kind: "openai" | "gemini" =
+        r.value.targetProviderProtocol === "gemini" ? "gemini" : "openai";
+      const client = providerClients.get(r.value.providerName);
+      // Configured image model but credential/client missing → 503 (server config),
+      // distinct from an unknown model id (404). An OAuth provider has no api_key_env.
+      if (r.value.apiKeyEnv && process.env[r.value.apiKeyEnv] === undefined) {
+        return { kind: "unavailable" };
+      }
+      if (client === undefined) return { kind: "unavailable" };
+      // A provider that implements neither image method isn't an image model → 404.
+      const method = kind === "gemini" ? client.nativePassthrough : client.imageGeneration;
+      if (typeof method !== "function") return null;
+      return { client, providerModel: r.value.providerModel, alias: r.value.alias, kind };
+    },
+    costOf: (alias, body) => resolveCostUsd(catalog.get(alias)?.pricing, body),
+    // Per-key usage-budget enforcement — the SAME gate + settle the chat face uses, so
+    // image spend is capped (reject) and counted (settle) like every other request.
+    budgetGate,
+    settleBudget: settleKeyBudget,
+    record: {
+      telemetry,
+      writes: writeQueue,
+      redact: (payload) => redact(payload),
+      now: () => Date.now(),
+      capturePayloads: () => settings.capture_payloads,
+    },
+  });
 
   // Start the Agentic Signals background scheduler — the OFF-the-request-path
   // trigger. It periodically asks the collector to aggregate the just-elapsed

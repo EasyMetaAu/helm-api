@@ -277,6 +277,13 @@ export {
   type OAuthUsageRow,
   OAuthUsageRowSchema,
 } from "./oauth/usage-schema.js";
+export {
+  type ImageGenerationRequest,
+  ImageGenerationRequestSchema,
+  type ImageGenerationResponse,
+  ImageGenerationResponseSchema,
+  ImageUsageSchema,
+} from "./request/images-schema.js";
 // Internal request structure (docs/02).
 export {
   type InternalRequest,
