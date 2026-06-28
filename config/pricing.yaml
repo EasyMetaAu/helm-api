@@ -59,6 +59,18 @@ zenmux-vertex/gemini-3.1-flash-lite:
 zenmux-vertex/gemini-3.1-pro:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 12.0
+# IMAGE models: Gemini bills the generated image as OUTPUT TOKENS (candidatesTokenCount,
+# modality IMAGE) at a per-Mtok IMAGE rate, and helm sets completion_tokens =
+# candidatesTokenCount — so outputPerMTokUsd = the ZenMux image rate yields the EXACT
+# per-image cost (a 1K–2K image = 1120 tokens → flash $0.067, pro $0.134). Rates verified
+# live on the ZenMux model pages 2026-06-28. outputPerMTokUsd is the IMAGE-output rate
+# (these are image models; the marginal text-output rate — flash $3, pro $12 — is unused).
+zenmux-vertex/gemini-3.1-flash-image:
+  inputPerMTokUsd: 0.5
+  outputPerMTokUsd: 60.0
+zenmux-vertex/gemini-3-pro-image:
+  inputPerMTokUsd: 2.0
+  outputPerMTokUsd: 120.0
 zenmux-anthropic/claude-opus-4.8:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 25.0

@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-28 · ZenMux Gemini 图片生成模型 + box→repo 路由配置合并（config；docs/02/04，原则 2/6）
+
+- **背景（Lukin）**：接入 `zenmux-vertex/gemini-3.1-flash-image`（Nano Banana 2）+ `gemini-3-pro-image`（Nano Banana Pro）做图片生成，要**准确计费**；并把 box 上 admin 改过的路由 config 拉回 repo 一起 PR。
+- **纯 config（无新代码）**：图片 I/O 早已铺好——IR 有 `IRMessage.images`，gemini-transformer 映射 `responseModalities:[TEXT,IMAGE]` ↔ `inlineData` part，Gemini→Gemini native passthrough 逐字转发。四文件：`providers.yaml`（两个 zenmux-vertex 别名，provider_model 用裸 `gemini-3.1-flash-image`/`gemini-3-pro-image`，live 验证）、`capabilities.yaml`（**manual-only 必列全字段**否则 maxContextTokens 默认 0 被剪；`jsonOutput:none`/`supportsVision:true`/32768）、`lanes.yaml`（`gemini-flash-image`/`gemini-pro-image` 两条**纯图片** lane，互为 fallback 不接文本/auto 尾）、`model-aliases.yaml`（`gemini-*flash-image*`(18 字面)胜文本 `*flash*`(12)）。
+- **准确计费（关键）**：Gemini 把生成图按 **OUTPUT TOKEN** 计（`candidatesTokenCount`，modality IMAGE，1K–2K 图=1120 token），而 helm `completion_tokens = candidatesTokenCount`——故 `outputPerMTokUsd =` ZenMux 图片费率即**精确每图成本**。ZenMux 页面实测：flash `$0.5 in / $60 image-out`、pro `$2 in / $120 image-out` per M。e2e 实测记录 `total_usd=0.0672055` = 1120×$60/M + 11×$0.5/M，**分毫不差**。text-out 费率（flash $3/pro $12）不用（图片模型）。
+- **路由 config 合并（box→repo，Lukin 选「路由+图片」不含部署开关）**：语义对比（parse YAML 比 primary/fallback/reasoning_effort，**忽略 admin 写回的 cosmetic `constraints:{all false}` 物化**）后并入 box 真实路由改动：economy `…balanced`→`…openrouter/auto,zenmux/auto`（Lukin 修的降级尾）、economy/balanced reasoning_effort high→medium、premium/coding xhigh→high、claude-opus/sonnet/haiku 去掉 `zenmux-anthropic/*` 原生兜底（同步改 stale #217 注释）。**不并** classifier `eval.enabled:true`/memory `llm/forgetting/mcp.oauth issuer=helm.easymeta.au`（部署专属、含 box 域名，保持 repo 开源默认 OFF）。capabilities/pricing 的 box 差异纯属 reorder+注释 strip，无值变更。
+- **验证**：`samples.test` 加图片 lane 路由断言（最长字面量胜、不被文本 lane 吞）；**全量 4757 单测绿**、typecheck/biome 干净；本地 docker 构建 0.22.14 跑 Gemini 原生请求→`gemini-flash-image` lane→native passthrough→**真 PNG 1408×768（视觉确认香蕉/苹果）**、决策记录 final=`zenmux-vertex/gemini-3.1-flash-image`。**约束**：图片生成需 allow_custom_model key（pin 模型）；OpenAI-chat 出图会被丢（协议无图片字段），走 Gemini-native/Anthropic。分支 `feat/gemini-image-generation`。
+
 ## 2026-06-28 · 客户端点名的模型若在候选链内则提到链首（路由；docs/04，原则 5/6）
 
 - **背景（Lukin，box 实查 req `1a4adea9`）**：Claude Code 请求 `claude-sonnet-4-6`（key **非 allow_custom_model**）→ 分类落 `coding` lane，链首 `openai-codex/gpt-5.5`，实际服务 gpt-5.5；而点名的 sonnet-4-6 本就在链第 5 位（`anthropic/claude-sonnet-4-6`，OAuth 订阅别名）且更便宜。诉求：只要分类后的链里含客户点名的模型就用它（提到链首），失败再回退——**不管 key 是否 allow_custom_model**。
@@ -26,18 +34,13 @@
 - **两处 UI**（均 Codex-only）：管理弹窗 Schedule tab 加 `auto-reset-toggle` checkbox；重置确认弹层加 `reset-auto-reset-toggle`（预填账号当前值，确认时**解耦**先 best-effort 存设置再 consume——重置失败设置也留住）。新 testid 不动旧的（e2e 安全，见 [[e2e-admin-specs-live-in-gateway]]）。
 - **验证**：`auto-reset.test`(7) + account-settings/admin-oauth/oauth-route 各补 autoReset 例；gateway admin+oauth 180 测、admin i18n 17 测、四包 typecheck、svelte-check 934/0/0、biome、**build 全绿**。i18n 走 extract+update 后手填 zh-hans/zh-hant/ja/ko 全四非英语 locale（Codex review P3：`i18n:update` 用英文占位会漏译，须手填，[[i18n-sync-incremental-empty-only]]）。分支 `feat-codex-auto-reset`，**未部署**。
 
-## 2026-06-26 · admin 导航骨架屏 + 详情页 payload 独立 fail-open（admin UI；docs/07，框架体感）
-
-- **背景（Lukin，线上体感）**：la.atmy.work admin 点请求列表/详情，进度条走完却不出内容、再点一次才出——「不像正常 HTML 页面」。调研定性：**非 SvelteKit bug**，是 SPA 阻塞式 `load` + 冷查询慢叠加，外加详情页静默吞错。后端冷查询已修（v0.21.35 indexed admin filters），剩前端体感 + 一个真 bug。
-- **决定（不走 SSR / 不逐页 await）**：SSR 违反原则 1（网关与 UI 解耦、admin headless 静态托管）且后端已快收益微；逐页 `{#await}` 要改 11 个 load + 9 个组件 churn 大。选 **全局延迟骨架**：`+layout.svelte` 监听 `$navigating`，仅「不同路由」且超 `SKELETON_DELAY_MS=150ms` 才显示 `PageSkeleton`（dashboard/detail/list 三形态、按 `route.id` 选）——热查询直接秒换不闪、同路由换筛选/翻页保留旧数据。一处改动覆盖所有页。
-- **详情页 fail-open（真 bug）**：`[traceId]/+page.ts` 原 `Promise.all([getRequest, getRequestPayload])` 注释说 payload「fails open」但代码里 payload 一失败**连累整页** → 改 payload 独立 `.catch(()=>{captured:false})`，只有 detail 本身失败才进错误态；错误态加 **Retry 按钮**（`invalidateAll`）。
-- **验证**：新 `PageSkeleton.svelte`（无文案、`aria-hidden`、零 i18n）；`requests.test` +2（payload 失败仍出 detail / detail 失败才报错，`PageLoad` 返回类型须 `Exclude<…,void>` 收窄）。admin **504 单测全绿**、svelte-check 934/0/0、build 通过。保留所有 testid（e2e 安全）。分支 `fix-admin-nav-skeleton`。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-26 · admin 导航骨架屏 + 详情页 payload 独立 fail-open（admin UI；docs/07）**：admin 点列表/详情进度条走完却不出内容、再点才出——非 SvelteKit bug，是 SPA 阻塞 `load`+冷查询慢+详情页静默吞错。不走 SSR（违原则 1）/不逐页 await（churn 大），选**全局延迟骨架**：`+layout.svelte` 监听 `$navigating`，仅「不同路由」且超 `SKELETON_DELAY_MS=150ms` 才显 `PageSkeleton`（dashboard/detail/list 三态按 `route.id` 选），热查询秒换不闪、同路由换筛选保留旧数据。真 bug：详情页 `Promise.all([getRequest,getRequestPayload])` 里 payload 失败连累整页 → 改 payload 独立 `.catch` + 错误态加 Retry。`requests.test` +2，admin 504 绿、svelte-check 934/0/0。分支 `fix-admin-nav-skeleton`。
 
 - **2026-06-26 · 记忆事实 subject_key 上限 + base64/图片 blob 不入库（gateway 记忆；docs/12 P6）**：box `memory_facts` 现 1920 字符 subject_key（jpeg base64 data-URL），根因图片合法 user 内容经确定性兜底 `extractFactsDeterministic` 取前 6 词、base64 无空格=巨型词。两道防线（`forgetting/facts.ts` 叶子）：① subject_key ≤80 字符截断；② `buildReconciledFactBatch` 过滤 `isBlobText`（>200 字符且全无空白）blob 候选——真事实有空格、base64 无断点。未在 `serializeContent` 入库层剥图片 part（动 content_hash dedup 指纹+docs/08 审计存储 blast 大）。facts.test +cap/blob 例，core memory 353 绿。box 删该 1 条（备份 `memory-backup-20260626-213811.sql`）。分支 `fix-memory-subject-key-cap`。
 

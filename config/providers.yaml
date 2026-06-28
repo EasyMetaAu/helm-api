@@ -127,6 +127,14 @@ providers:
         provider_model: gemini-3.1-flash-lite
       - alias: zenmux-vertex/gemini-3.1-pro
         provider_model: gemini-3.1-pro-preview
+      # Native-Gemini IMAGE GENERATION models (responseModalities:[TEXT,IMAGE] →
+      # inlineData PNG parts; helm's gemini transformer maps these to IRMessage.images,
+      # and Gemini→Gemini native passthrough forwards them verbatim). Verified live
+      # 2026-06-28 against the ZenMux vertex-ai endpoint.
+      - alias: zenmux-vertex/gemini-3.1-flash-image
+        provider_model: gemini-3.1-flash-image
+      - alias: zenmux-vertex/gemini-3-pro-image
+        provider_model: gemini-3-pro-image
 
   # ZenMux Anthropic-Messages compatible endpoint (Claude native wire). `type:
   # anthropic` → executor appends `/v1/messages`, so the base_url ENDS at
