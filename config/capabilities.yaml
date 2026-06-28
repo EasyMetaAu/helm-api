@@ -162,6 +162,27 @@ zenmux-vertex/gemini-3.1-pro:
   modalities: [audio, video, document]
   maxContextTokens: 1048576
   maxOutputTokens: 65536
+# IMAGE GENERATION models. Manual-only (not in the LiteLLM catalog), so the FULL
+# field set is listed — an omitted maxContextTokens would default to 0 and the
+# capability filter would prune every request (context_too_small). jsonOutput:none
+# (no structured output) so a strict-JSON request prunes them; supportsVision:true
+# (they accept image INPUT for editing). Prompts are tiny, so 32k context never prunes.
+zenmux-vertex/gemini-3.1-flash-image:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: true
+  supportsCachedContent: false
+  maxContextTokens: 32768
+  maxOutputTokens: 32768
+zenmux-vertex/gemini-3-pro-image:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: true
+  supportsCachedContent: false
+  maxContextTokens: 32768
+  maxOutputTokens: 32768
 zenmux-anthropic/claude-opus-4.8:
   supportsTools: true
   jsonOutput: schema

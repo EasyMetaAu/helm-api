@@ -133,6 +133,29 @@ describe("checked-in config samples", () => {
     expect(resolveModelAlias("gemini-embedding-001", aliases)).toBe("balanced");
   });
 
+  it("routes Gemini image ids onto dedicated image-generation lanes (flash-image vs pro-image)", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const lanes = cfg.lanes;
+    const aliases = cfg.model_aliases;
+    if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
+    if (aliases === undefined) throw new Error("config/model-aliases.yaml must load");
+    // Image-generation lanes are image-ONLY (no text/auto tail): if one image model
+    // fails, fall back to the OTHER image model — never to a text lane that can't draw.
+    expect(lanes["gemini-flash-image"]?.primary).toBe("zenmux-vertex/gemini-3.1-flash-image");
+    expect(lanes["gemini-flash-image"]?.fallback).toEqual(["zenmux-vertex/gemini-3-pro-image"]);
+    expect(lanes["gemini-pro-image"]?.primary).toBe("zenmux-vertex/gemini-3-pro-image");
+    expect(lanes["gemini-pro-image"]?.fallback).toEqual(["zenmux-vertex/gemini-3.1-flash-image"]);
+    // Longest-literal wins: `*flash-image*` (18) beats the text `*flash*` (12), so an
+    // image id is NEVER swallowed by the text flash lane; `*pro-image*` (16) beats `*pro*`.
+    expect(resolveModelAlias("gemini-3.1-flash-image", aliases)).toBe("gemini-flash-image");
+    expect(resolveModelAlias("gemini-3-pro-image", aliases)).toBe("gemini-pro-image");
+    // The text flash/pro ids are unaffected by the new image globs.
+    expect(resolveModelAlias("gemini-3.5-flash", aliases)).toBe("gemini-flash");
+    expect(resolveModelAlias("gemini-2.5-pro", aliases)).toBe("gemini-pro");
+    // No drift: the new aliases still validate against the shipped lanes.
+    expect(validateModelAliasTargets(aliases, Object.keys(lanes))).toEqual([]);
+  });
+
   it("loads the shipped claude-fable vendor-family lane (native anthropic primary, premium fallback)", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const lanes = cfg.lanes;

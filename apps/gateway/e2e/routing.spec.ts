@@ -32,11 +32,13 @@ const ECONOMY_HEAD = "deepseek/deepseek-v4-flash"; // economy static primary ser
 // so premium serves its first static fallback, deepseek/deepseek-v4-pro.
 const PREMIUM_HEAD = "deepseek/deepseek-v4-pro";
 const BALANCED_HEAD = "deepseek/deepseek-v4-pro"; // balanced static primary serves
-// economy chain = [deepseek/deepseek-v4-flash, openai-codex/gpt-5.4, balanced...].
-// On fault injection (scenario 4) the economy head 5xxs, the next candidate
-// openai-codex/gpt-5.4 is SKIPPED (no subscription), so the in-chain model that
-// actually serves is balanced's primary, deepseek/deepseek-v4-pro.
-const ECONOMY_NEXT = "deepseek/deepseek-v4-pro";
+// economy chain = [openai-codex/gpt-5.4-mini, anthropic/claude-haiku, deepseek/
+// deepseek-v4-flash, openrouter/deepseek-v4-flash, openrouter/auto, zenmux/auto].
+// On fault injection (scenario 4) the economy head 5xxs and the codex/anthropic
+// candidates before it are skipped, so the next in-chain model that serves is
+// openrouter/deepseek-v4-flash (wire id deepseek/deepseek-v4-flash != the failed
+// bare deepseek-v4-flash, so the mock serves it).
+const ECONOMY_NEXT = "openrouter/deepseek-v4-flash";
 
 // The upstream WIRE model ids the gateway sends (config/providers.yaml
 // `provider_model`), echoed back by the mock as `model`. All served candidates
@@ -44,7 +46,7 @@ const ECONOMY_NEXT = "deepseek/deepseek-v4-pro";
 // The routing ALIAS is surfaced separately via `x-helm-final-model`.
 const ECONOMY_HEAD_WIRE = "deepseek-v4-flash";
 const PREMIUM_HEAD_WIRE = "deepseek-v4-pro";
-const ECONOMY_NEXT_WIRE = "deepseek-v4-pro";
+const ECONOMY_NEXT_WIRE = "deepseek/deepseek-v4-flash";
 
 function chat(content: string, extra: Record<string, unknown> = {}) {
   return {
@@ -121,9 +123,9 @@ test.describe("routing e2e", () => {
 
   // ── Scenario 4: primary provider error → EXECUTION fallback serves ──────────
   // Mock injects a one-shot 5xx for the economy head (`deepseek/deepseek-v4-flash`);
-  // the next candidate `openai-codex/gpt-5.4` is skipped (no subscription), so the
-  // first STATIC in-chain candidate that serves is `deepseek/deepseek-v4-pro`. Lane
-  // stays `economy` (execution fallback ≠ classification fallback, principle 5).
+  // the skipped codex/anthropic candidates never serve, so the first in-chain
+  // candidate that serves is `openrouter/deepseek-v4-flash`. Lane stays `economy`
+  // (execution fallback ≠ classification fallback, principle 5).
   test("primary provider error -> fallback model serves (execution fallback)", async ({
     request,
   }) => {

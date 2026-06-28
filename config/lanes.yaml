@@ -23,17 +23,18 @@
 # —— quality/cost lanes ——
 economy:
   purpose: Cheap and fast for simple tasks
-  reasoning_effort: high
+  reasoning_effort: medium
   primary: openai-codex/gpt-5.4-mini
   fallback:
     - anthropic/claude-haiku-4-5-20251001
     - deepseek/deepseek-v4-flash
     - openrouter/deepseek-v4-flash
-    - balanced
+    - openrouter/auto
+    - zenmux/auto
 
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
-  reasoning_effort: high
+  reasoning_effort: medium
   primary: openai-codex/gpt-5.5
   fallback:
     - anthropic/claude-sonnet-4-6
@@ -45,7 +46,7 @@ balanced:
 
 premium:
   purpose: Strong reasoning and high quality
-  reasoning_effort: xhigh
+  reasoning_effort: high
   primary: openai-codex/gpt-5.5
   fallback:
     - anthropic/claude-opus-4-8
@@ -59,7 +60,7 @@ coding:
   purpose: Coding-capable models for code generation / editing
   # gpt-5.5 is the strongest model the Codex subscription actually exposes; the
   # legacy `*-codex` slugs 400 on the ChatGPT-account backend, so they are NOT used.
-  reasoning_effort: xhigh
+  reasoning_effort: high
   primary: openai-codex/gpt-5.5
   fallback:
     - premium
@@ -116,9 +117,7 @@ claude-opus:
   purpose: Anthropic Claude Opus tier — strongest Claude
   primary: anthropic/claude-opus-4-8
   fallback:
-    # When the native OAuth pool is parked/absent, stay on the NATIVE Anthropic wire
-    # (ZenMux, issue #217) before degrading into the GPT-led premium chain.
-    - zenmux-anthropic/claude-opus-4.8
+    # When the native OAuth pool is parked/absent, degrade into the GPT-led premium chain.
     - premium
 
 # Claude Fable 5 — the Mythos-class Claude (autonomous knowledge work + coding),
@@ -136,17 +135,15 @@ claude-sonnet:
   purpose: Anthropic Claude Sonnet tier — balanced Claude
   primary: anthropic/claude-sonnet-4-6
   fallback:
-    # NATIVE Anthropic wire (ZenMux, issue #217) before the generic balanced lane.
-    - zenmux-anthropic/claude-sonnet-4.6
+    # Native Anthropic OAuth pool, degrading to the generic balanced lane when parked.
     - balanced
 
-# ZenMux serves Claude Haiku over its native Anthropic endpoint, so this cheap/fast
-# tier keeps a NATIVE Haiku fallback before degrading to `economy` (deepseek-flash).
+# Native Anthropic Haiku via the OAuth pool; degrades straight to `economy`
+# (deepseek-flash) when the subscription is parked.
 claude-haiku:
   purpose: Anthropic Claude Haiku tier — cheap/fast
   primary: anthropic/claude-haiku-4-5-20251001
   fallback:
-    - zenmux-anthropic/claude-haiku-4.5
     - economy
 
 # Stays on GPT-5.5 ACROSS providers (Codex subscription -> static ZenMux key) before
@@ -199,3 +196,21 @@ gemini-flash:
   primary: zenmux-vertex/gemini-3.5-flash
   fallback:
     - balanced
+
+# —— image-generation lanes ——
+# Native-Gemini image models (responseModalities:[TEXT,IMAGE]). These lanes are
+# image-ONLY — the fallback is the OTHER image model, NEVER a text lane / `*/auto`
+# tail (a text model can't draw, so degrading there would return no image). Reached
+# by pinning a `gemini-*-image` id on an allow_custom_model key (the model-aliases
+# glob rewrites it onto the lane); a Gemini-CLI request passes through verbatim.
+gemini-flash-image:
+  purpose: Google Gemini Flash image generation (Nano Banana)
+  primary: zenmux-vertex/gemini-3.1-flash-image
+  fallback:
+    - zenmux-vertex/gemini-3-pro-image
+
+gemini-pro-image:
+  purpose: Google Gemini Pro image generation (Nano Banana Pro)
+  primary: zenmux-vertex/gemini-3-pro-image
+  fallback:
+    - zenmux-vertex/gemini-3.1-flash-image
