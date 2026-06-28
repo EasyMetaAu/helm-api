@@ -96,7 +96,7 @@ docker compose logs helm | grep -i "root API key"
 **一个为调试而生的正文检查器。** 开启逐字捕获后，同一页还会加载完整的请求 / 响应正文，以可折叠的树形（也可切「格式化」或「原始」）呈现：
 
 - **再长的内容，一眼看全。** 把任意超长字段——庞大的 system prompt、工具 schema、跨会话续传的摘要——弹成全屏、可一键复制的阅读窗，不必在换行挤压的小格子里翻找。
-- **多媒体直接看。** 内联的 base64 或远程图片就地渲染，支持缩放、适应窗口、在新标签页打开。
+- **多媒体直接看。** 页面顶部有一块媒体总览，把每张**发送**（请求）和**生成**（响应）的图片汇集成可点击的缩略图——无需在 JSON 树里翻找；内联的 base64 或远程图片仍会就地渲染，支持缩放、适应窗口、在新标签页打开。
 - **改完即重放。** 点 **重试**、编辑正文，按它原本的协议（OpenAI Chat / Anthropic / Responses / Gemini）作为一次隔离、全新追踪的调试调用重新发出。
 
 **把订阅组成池。** 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的登录当后端来路由——同一供应商接多个账号，每个账号各有模型策展、出口代理、优先级和实时配额。
@@ -211,11 +211,11 @@ curl http://localhost:8080/v1/chat/completions \
 | 取值 | Helm 的行为 |
 |---|---|
 | `auto`（推荐） | 对请求做分类，路由到最合适的 lane。 |
-| 标准 key 传任何 model/lane | **model 字段被忽略**——和传 `auto` 完全一样做分类路由（绝不 400）。 |
+| 标准 key 传任何 model/lane | 仍按 `auto` 做分类路由（绝不 400）——model 字段**不决定走哪条 lane**。但如果你写的这个模型恰好在选中 lane 的候选链里，Helm 会**优先服务它**。 |
 | 写死的厂商 id，如 `claude-opus-4-8`——**自定义模型 key** | 兼容垫片把它映射到一条 lane（`config/model-aliases.yaml`），并受 key 的 lane 白名单收口。 |
 | lane 名（`premium`）或具体别名（`deepseek/deepseek-v4-pro`）——**自定义模型 key** | 直接进入该 lane / 模型，跳过分类。 |
 
-> 标准 key 永远只需 `auto`——Helm 全部分类路由，model 字段被忽略。要钉某条 lane、某个厂商家族或某个具体模型，需要**自定义模型** key（`allow_custom_model`）。Lane 由运维方配置（`lanes.yaml` + 面板）。
+> 标准 key 永远只需 `auto`。model 字段不会改变选中的 lane——但当你写的模型已经在那条 lane 的候选链里时，Helm 会把它提到链首（于是 Claude Code 钉 `claude-sonnet-4-6` 拿到的就是 Sonnet，而非该 lane 的 primary；失败再沿链回退）。要钉某条 lane、某个厂商家族或链外的具体模型，需要**自定义模型** key（`allow_custom_model`）。Lane 由运维方配置（`lanes.yaml` + 面板）。
 
 ### 图片生成
 
@@ -251,16 +251,17 @@ curl http://localhost:8080/v1beta/interactions \
 
 #### 图片跨 provider 故障转移
 
-同一个图片模型常常有多个 provider 可选（OpenAI 直连、ZenMux、OpenRouter……）。把这些「同模型、不同 provider」的别名组成一个图片 **lane** 写进 `config/lanes.yaml`，然后把 **lane 名**当作 `model` 来请求——Helm 先打 primary，遇到 provider 故障（超时、5xx、熔断打开）就自动 fallback 到下一个，用的是和聊天路由**同一套熔断器**。而确定性的客户端错误（4xx invalid request，比如尺寸非法、图片过大）会原样返回，**不**触发 fallback。
+同一个图片模型常常有多个 provider 可选（官方直连、ZenMux、OpenRouter……）。内置配置已经把它们组成了图片 **lane**——把 **lane 名**当作 `model` 来请求，Helm 先打 primary，遇到 provider 故障（超时、5xx、熔断打开）就自动 fallback 到下一个，用的是和聊天路由**同一套熔断器**。而确定性的客户端错误（4xx invalid request，比如尺寸非法、图片过大）会原样返回，**不**触发 fallback。
 
 ```yaml
-# config/lanes.yaml —— 成员必须是图片模型（capabilities.outputImage）且类型单一
-# （要么全 gpt-image-*，要么全 gemini-*-image）。请求时填 `model: "gpt-image"`。
-gpt-image:
-  primary: gpt-image-2          # OpenAI 直连
-  fallback:
-    - zenmux/gpt-image-2        # 先在 providers.yaml 给每个 provider 加上对应别名
-    - openrouter/gpt-image-2
+# config/lanes.yaml —— 内置的两条图片 lane 以官方上游为 primary，再回退到 ZenMux 中转。
+# 成员必须是图片模型（capabilities.outputImage）且类型单一（要么全 gpt-image-*，要么全 gemini-*-image）。
+gpt-image:                          # 请求填 `model: "gpt-image"`
+  primary: openai/gpt-image-2       # OpenAI 官方 → ZenMux 中转
+  fallback: [gpt-image-2]
+gemini-image:                       # 请求填 `model: "gemini-image"`
+  primary: google/gemini-3.1-flash-image   # Google 官方 → ZenMux flash → pro
+  fallback: [gemini-3.1-flash-image, gemini-3-pro-image]
 ```
 
 图片 lane 在两个专用端点（`/v1/images/generations`、`/v1beta/interactions`）上对**任意 key** 都生效。在 Gemini `:generateContent` 路径上按名字选 lane 遵循普通 lane 规则——需要 `allow_custom_model` key——所以想覆盖面最广，就让图片 SDK 指向这两个专用端点。
@@ -296,6 +297,7 @@ gpt-image:
 |---|---|
 | `DEEPSEEK_API_KEY` | 主供应商凭证（**必填**） |
 | `ZENMUX_API_KEY`、`OPENROUTER_API_KEY` | 可选供应商凭证（缺失则跳过该供应商） |
+| `OPENAI_API_KEY`、`GEMINI_API_KEY` | 可选——官方 OpenAI / Google **图片**供应商；内置的 `gpt-image` / `gemini-image` lane 以它们为 primary，再回退到 ZenMux |
 | `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | 面板登录（Basic auth） |
 | `HELM_HOST` / `HELM_PORT` | 服务绑定（默认 `0.0.0.0:8080`） |
 | `HELM_STORE_DRIVER` | `sqlite`（默认）或 `supabase` |

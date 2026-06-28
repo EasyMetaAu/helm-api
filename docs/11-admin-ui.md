@@ -172,7 +172,10 @@ never diverge.
   payload as a collapsible tree (or Formatted / Raw), pops any oversized field — a
   system prompt, a tool schema, a continued-session summary — into a fullscreen,
   copyable reader, and previews inline base64/remote images with zoom,
-  fit-to-window, and open-in-new-tab. When the full request body was
+  fit-to-window, and open-in-new-tab. A consolidated **media overview** at the top
+  of the page collects every image **sent** (request) and **generated** (response,
+  incl. image-generation output) as clickable thumbnails, so pictures buried at a
+  deep base64 leaf are visible without tree-digging. When the full request body was
   captured, the detail page offers an editable **Retry** button. The server
   recovers the original protocol (OpenAI chat, Anthropic messages, OpenAI
   Responses, or Gemini) and re-sends the (optionally edited) body in its native

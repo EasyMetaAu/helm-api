@@ -125,9 +125,35 @@ For an `allow_custom_model` key the `model` field resolves in this order:
 3. Over-budget `degrade` (docs/06) suppresses BOTH forms of explicit passthrough
    — the request is forced onto the degrade lane.
 
-Keys **without** `allow_custom_model` ignore the `model` field entirely (any
-value behaves like `auto` and routes via classification); it is recorded in
-telemetry as `requested_model` only.
+Keys **without** `allow_custom_model` never let the `model` field steer the lane
+(any value classifies like `auto`); it is recorded in telemetry as
+`requested_model`. It is not wholly inert, though — see
+[In-chain model promotion](#in-chain-model-promotion) below.
+
+### In-chain model promotion
+
+When a request is **classified** into a lane (any path that is *not* explicit
+passthrough — standard keys, and custom-model keys whose `model` mapped to
+`auto`), the router checks whether the client's requested model already appears
+in that lane's expanded candidate chain. If it does, that candidate is
+**promoted to the front**, so the client gets the exact model it asked for, with
+the rest of the chain still behind it as fallback.
+
+This is **reorder-only** (route-request.ts, `promoteRequestedModel`): it never
+introduces a new candidate, so cost stays bounded by the operator-declared lane
+set, and the per-candidate Capability Filter + circuit breaker still gate every
+attempt (a promoted head that cannot serve is skipped and the chain falls through
+— never worse than the un-promoted order). Matching normalizes both sides to the
+official form (lowercase, `.`→`-` version separators), so `claude-sonnet-4.6` and
+`claude-sonnet-4-6` are the same model; the **earliest** in-chain match wins
+(preserving operator provider preference). The payoff: Claude Code pinning
+`claude-sonnet-4-6` on a **standard** key now serves the requested (cheaper)
+Sonnet instead of the lane's primary.
+
+Promotion is **suppressed** wherever the routing brain deliberately overrode the
+client's choice: an over-budget `degrade` (the downgrade must not be bypassable by
+naming an in-chain expensive model) and an alias→`auto` rewrite. It does not run on
+explicit passthrough, where the named model already leads its own chain.
 
 ## Lanes
 
